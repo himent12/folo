@@ -489,3 +489,75 @@ fn a_batch_mixing_overflow_and_fit_matches_dense_per_image() {
     }
     ctx.set_tensor_cores(true);
 }
+
+/// Fused single-pass `dfl_stats.wgsl` matches CPU `softmax_moments_and_entropy` across `F32`/`F16`, all three
+/// flag modes (moments-only, ent-only, both), and NaN/+Inf/-Inf edge cases, and is registered for precompile.
+#[test]
+fn gpu_dfl_stats_matches_cpu_reference() {
+    let Some((dev, ctx, _g)) = gpu() else { return };
+    let _g = no_grad();
+    let (b, rm, a) = (2usize, 16usize, 137usize);
+    let mut raw =
+        Tensor::rand_uniform([b, 4 * rm, a], -6.0, 6.0, &mut Rng::seed(91)).to_vec::<f32>().unwrap();
+    // Inject NaN at (b=0, side=1, a=3) and +Inf at (b=1, side=2, a=5) and -Inf on one bin at (b=0, side=0, a=7).
+    let idx = |img: usize, side: usize, bin: usize, anc: usize| ((img * 4 + side) * rm + bin) * a + anc;
+    raw[idx(0, 1, 4, 3)] = f32::NAN;
+    raw[idx(1, 2, 2, 5)] = f32::INFINITY;
+    raw[idx(0, 0, 0, 7)] = f32::NEG_INFINITY;
+    let raw_cpu = Tensor::from_vec(raw, [b, 4 * rm, a]).unwrap();
+    let mut dtypes = vec![DType::F32];
+    if ctx.caps().shader_f16 {
+        dtypes.push(DType::F16);
+    }
+    for dt in dtypes {
+        let raw_dt = raw_cpu.to_dtype(dt).unwrap();
+        let ref_f32 = raw_dt.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap();
+        let raw_gpu = raw_dt.to_device(dev).unwrap();
+        for (want_m, want_e) in [(true, false), (false, true), (true, true)] {
+            let out = folo_gpu::detect::dfl_stats(&raw_gpu, rm, want_m, want_e)
+                .unwrap()
+                .expect("fused GPU dfl_stats");
+            let ch = (if want_m { 8 } else { 0 }) + usize::from(want_e);
+            assert_eq!(out.dims(), &[b, ch, a]);
+            let got = out.to_vec::<f32>().unwrap();
+            for img in 0..b {
+                for anc in 0..a {
+                    let mut ent_sum = 0.0f32;
+                    let mut ent_nan = false;
+                    for side in 0..4 {
+                        let logits: Vec<f32> =
+                            (0..rm).map(|k| ref_f32[((img * 4 + side) * rm + k) * a + anc]).collect();
+                        let (mean, var, ent) = folo_vision::decode::softmax_moments_and_entropy(&logits);
+                        if want_m {
+                            let gm = got[(img * ch + side) * a + anc];
+                            let gm2 = got[(img * ch + 4 + side) * a + anc];
+                            let gv = (gm2 - gm * gm).max(0.0);
+                            if mean.is_nan() {
+                                assert!(gm.is_nan(), "{dt:?} img={img} a={anc} s={side}: want NaN, got {gm}");
+                            } else {
+                                assert!((gm - mean).abs() <= 2e-5, "{dt:?} mean {gm} vs {mean}");
+                                assert!((gv - var).abs() <= 1e-4, "{dt:?} var {gv} vs {var}");
+                            }
+                        }
+                        if ent.is_nan() {
+                            ent_nan = true;
+                        } else {
+                            ent_sum += ent;
+                        }
+                    }
+                    if want_e {
+                        let ech = if want_m { 8 } else { 0 };
+                        let ge = got[(img * ch + ech) * a + anc];
+                        if ent_nan {
+                            assert!(ge.is_nan(), "{dt:?} img={img} a={anc}: want NaN ent, got {ge}");
+                        } else {
+                            let we = 0.25 * ent_sum;
+                            assert!((ge - we).abs() <= 3e-5, "{dt:?} ent {ge} vs {we}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
+}

@@ -70,6 +70,10 @@ pub struct MuonSettings {
     pub nesterov: bool,
     /// Per-step odd-quintic coefficients `(a_k, b_k, c_k)` for `k < steps`.
     pub step_coeffs: [(f32, f32, f32); MAX_STEPS],
+    /// Per-step Completed-Square degree-9 coefficients `(gamma, delta, eta, xi, c4)` for `k < steps`.
+    pub cs9_coeffs: [(f32, f32, f32, f32, f32); MAX_STEPS],
+    /// Use Completed-Square degree-9 polynomial + step-0 Schatten-8 (`Polar3-CS9`).
+    pub cs9: bool,
     /// Polynomial steps (`<= MAX_STEPS`).
     pub steps: usize,
     /// Zero-extra-GEMM step-0 Schatten-4 spectral rescaling (`α = ‖A₀‖_F^(1/2) + eps / (‖U‖_F + eps)`).
@@ -94,6 +98,8 @@ impl MuonSettings {
             momentum,
             nesterov,
             step_coeffs: [coeffs; MAX_STEPS],
+            cs9_coeffs: [(0.0, 0.0, 0.0, 0.0, 0.0); MAX_STEPS],
+            cs9: false,
             steps,
             schatten4: false,
             eps,
@@ -156,7 +162,23 @@ pub(crate) fn gemm_fits(spec: &Spec) -> bool {
         tn: spec.get_u32("TN", 4),
         depth: spec.get_u32("DEPTH", 16),
     };
-    tile.valid(mode)
+    if !tile.valid(mode) {
+        return false;
+    }
+    let s4 = spec.get_bool("S4");
+    let s8 = spec.get_bool("S8");
+    let diag_bias = spec.get_bool("DIAG_BIAS");
+    let inplace_sr = spec.get_bool("INPLACE_SR");
+    if mode == 0 && (s4 || s8 || diag_bias || inplace_sr) {
+        return false;
+    }
+    if mode == 2 && (s8 || diag_bias || inplace_sr) {
+        return false;
+    }
+    if s4 && s8 {
+        return false;
+    }
+    true
 }
 
 /// Picks `(square_tile, update_tile)` for one group of matrices.
@@ -357,8 +379,12 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
     for (ci, chunk) in items.chunks(j_gather).enumerate() {
         let spec = Spec::new().u32("J", chunk.len() as u32).bool("NESTEROV", s.nesterov);
         let k = ctx.kernel(shader::many_def("muon_gather", chunk.len()), spec)?;
-        let (p, groups) =
-            chunk_params(Params::new().uz(ci * j_gather)?.f(mu).f(omu), chunk, true, u32::from(s.schatten4))?;
+        let (p, groups) = chunk_params(
+            Params::new().uz(ci * j_gather)?.f(mu).f(omu),
+            chunk,
+            true,
+            u32::from(s.schatten4 || s.cs9),
+        )?;
         let mut bufs: Vec<&wgpu::Buffer> = Vec::with_capacity(2 * chunk.len() + 3);
         for it in chunk {
             bufs.push(it.g);
@@ -379,50 +405,109 @@ fn run_group(ctx: &GpuContext, items: &[&MuonMatrix<'_>], s: &MuonSettings, bind
         ctx.grid_1d(wg * 256, 256)?,
     )?;
     // 3. The odd-quintic polynomial steps, ping-ponging between `x0` and `x1`.
-    let spec_of = |mode: u32, t: MuonTile, dbuf: bool, s4: bool| {
-        Spec::new()
-            .u32("MODE", mode)
-            .u32("BM", t.bm)
-            .u32("BN", t.bn)
-            .u32("TM", t.tm)
-            .u32("TN", t.tn)
-            .u32("DEPTH", t.depth)
-            .bool("DBUF", dbuf)
-            .bool("S4", s4)
-    };
-    let gram = ctx.kernel(&shader::GROUPED, spec_of(0, tile_sq, dbuf_sq, false))?;
-    let poly = ctx.kernel(&shader::GROUPED, spec_of(1, tile_sq, dbuf_sq, false))?;
-    let update = ctx.kernel(&shader::GROUPED, spec_of(2, tile_up, dbuf_up, false))?;
+    let spec_of =
+        |mode: u32, t: MuonTile, dbuf: bool, s4: bool, s8: bool, diag_bias: bool, inplace_sr: bool| {
+            let mut sp = Spec::new()
+                .u32("MODE", mode)
+                .u32("BM", t.bm)
+                .u32("BN", t.bn)
+                .u32("TM", t.tm)
+                .u32("TN", t.tn)
+                .u32("DEPTH", t.depth)
+                .bool("DBUF", dbuf)
+                .bool("S4", s4);
+            if s8 {
+                sp = sp.bool("S8", true);
+            }
+            if diag_bias {
+                sp = sp.bool("DIAG_BIAS", true);
+            }
+            if inplace_sr {
+                sp = sp.bool("INPLACE_SR", true);
+            }
+            sp
+        };
+    let gram = ctx.kernel(&shader::GROUPED, spec_of(0, tile_sq, dbuf_sq, false, false, false, false))?;
+    let poly = ctx.kernel(&shader::GROUPED, spec_of(1, tile_sq, dbuf_sq, false, false, false, false))?;
+    let update = ctx.kernel(&shader::GROUPED, spec_of(2, tile_up, dbuf_up, false, false, false, false))?;
     let sq_threads = tile_sq.threads();
     let up_threads = tile_up.threads();
     let sq_grid = ctx.grid_1d(t_sq * u64::from(sq_threads), sq_threads)?;
     let up_grid = ctx.grid_1d(t_up * u64::from(up_threads), up_threads)?;
     let (mut cur, mut next) = (x0, x1);
-    for step in 0..s.steps {
-        let (a, b, c) = s.step_coeffs[step];
-        let p_sq = Params::new().uz(count)?.f(a).f(b).f(c).u(t_sq as u32);
-        let p_up = Params::new().uz(count)?.f(a).f(b).f(c).u(t_up as u32);
-        ctx.dispatch(&gram, &[cur, cur, cur, am.raw(), tbuf.raw()], &p_sq, sq_grid)?;
-        if step == 0 && s.schatten4 {
-            let s4_k = ctx.kernel(&shader::S4_NORM, Spec::new())?;
-            let ps4 = Params::new().uz(count)?.f(s.eps);
-            ctx.dispatch(
-                &s4_k,
-                &[am.raw(), den.raw(), tbuf.raw()],
-                &ps4,
-                ctx.grid_1d(count as u64 * 256, 256)?,
-            )?;
-            let poly_s4 = ctx.kernel(&shader::GROUPED, spec_of(1, tile_sq, dbuf_sq, true))?;
-            let update_s4 = ctx.kernel(&shader::GROUPED, spec_of(2, tile_up, dbuf_up, true))?;
-            let sq = [am.raw(), am.raw(), am.raw(), bm.raw(), tbuf.raw()];
-            ctx.dispatch(&poly_s4, &sq, &p_sq, sq_grid)?;
-            ctx.dispatch(&update_s4, &[bm.raw(), cur, cur, next, tbuf.raw()], &p_up, up_grid)?;
-        } else {
-            let sq = [am.raw(), am.raw(), am.raw(), bm.raw(), tbuf.raw()];
-            ctx.dispatch(&poly, &sq, &p_sq, sq_grid)?;
-            ctx.dispatch(&update, &[bm.raw(), cur, cur, next, tbuf.raw()], &p_up, up_grid)?;
+    if s.cs9 {
+        let poly_s = ctx.kernel(&shader::GROUPED, spec_of(1, tile_sq, dbuf_sq, false, false, true, false))?;
+        let poly_q_s8 =
+            ctx.kernel(&shader::GROUPED, spec_of(1, tile_sq, dbuf_sq, false, true, false, true))?;
+        let poly_q = ctx.kernel(&shader::GROUPED, spec_of(1, tile_sq, dbuf_sq, false, false, false, true))?;
+        let update_s4 =
+            ctx.kernel(&shader::GROUPED, spec_of(2, tile_up, dbuf_up, true, false, false, false))?;
+        let s8_k = ctx.kernel(&shader::S8_FORM_S0, Spec::new())?;
+        let dummy = ctx.dummy();
+        for step in 0..s.steps {
+            let (gamma, delta, eta, xi, c4) = s.cs9_coeffs[step];
+            let p_gram = Params::new().uz(count)?.f(0.0).f(0.0).f(0.0).u(t_sq as u32);
+            ctx.dispatch(&gram, &[cur, cur, cur, am.raw(), tbuf.raw()], &p_gram, sq_grid)?;
+            if step == 0 {
+                // bm = A_0^2
+                let p_a2 = Params::new().uz(count)?.f(0.0).f(0.0).f(1.0).u(t_sq as u32);
+                ctx.dispatch(&poly, &[am.raw(), am.raw(), am.raw(), bm.raw(), tbuf.raw()], &p_a2, sq_grid)?;
+                // Schatten-8 inv_a -> TBL[count*9+i], and bm = S_0 = delta*I + (gamma*ia^2)*A_0 + ia^4*A_2
+                let p_s8 = Params::new().uz(count)?.f(s.eps).f(gamma).f(delta);
+                ctx.dispatch(
+                    &s8_k,
+                    &[am.raw(), bm.raw(), den.raw(), tbuf.raw()],
+                    &p_s8,
+                    ctx.grid_1d(count as u64 * 256, 256)?,
+                )?;
+                // am = (eta*ia^2)*A_0 + c4*S_0^2 (in place into am, reading SC)
+                let p_q = Params::new().uz(count)?.f(0.0).f(eta).f(c4).u(t_sq as u32);
+                ctx.dispatch(&poly_q_s8, &[bm.raw(), bm.raw(), dummy, am.raw(), tbuf.raw()], &p_q, sq_grid)?;
+                // next = (xi*ia)*X_0 + ia*(am*X_0)
+                let p_up = Params::new().uz(count)?.f(xi).f(0.0).f(0.0).u(t_up as u32);
+                ctx.dispatch(&update_s4, &[am.raw(), cur, cur, next, tbuf.raw()], &p_up, up_grid)?;
+            } else {
+                // bm = delta*I + gamma*A + A^2
+                let p_s = Params::new().uz(count)?.f(delta).f(gamma).f(1.0).u(t_sq as u32);
+                ctx.dispatch(&poly_s, &[am.raw(), am.raw(), am.raw(), bm.raw(), tbuf.raw()], &p_s, sq_grid)?;
+                // am = eta*A + c4*S^2 (in place into am)
+                let p_q = Params::new().uz(count)?.f(0.0).f(eta).f(c4).u(t_sq as u32);
+                ctx.dispatch(&poly_q, &[bm.raw(), bm.raw(), dummy, am.raw(), tbuf.raw()], &p_q, sq_grid)?;
+                // next = xi*X + am*X
+                let p_up = Params::new().uz(count)?.f(xi).f(0.0).f(0.0).u(t_up as u32);
+                ctx.dispatch(&update, &[am.raw(), cur, cur, next, tbuf.raw()], &p_up, up_grid)?;
+            }
+            std::mem::swap(&mut cur, &mut next);
         }
-        std::mem::swap(&mut cur, &mut next);
+    } else {
+        for step in 0..s.steps {
+            let (a, b, c) = s.step_coeffs[step];
+            let p_sq = Params::new().uz(count)?.f(a).f(b).f(c).u(t_sq as u32);
+            let p_up = Params::new().uz(count)?.f(a).f(b).f(c).u(t_up as u32);
+            ctx.dispatch(&gram, &[cur, cur, cur, am.raw(), tbuf.raw()], &p_sq, sq_grid)?;
+            if step == 0 && s.schatten4 {
+                let s4_k = ctx.kernel(&shader::S4_NORM, Spec::new())?;
+                let ps4 = Params::new().uz(count)?.f(s.eps);
+                ctx.dispatch(
+                    &s4_k,
+                    &[am.raw(), den.raw(), tbuf.raw()],
+                    &ps4,
+                    ctx.grid_1d(count as u64 * 256, 256)?,
+                )?;
+                let poly_s4 =
+                    ctx.kernel(&shader::GROUPED, spec_of(1, tile_sq, dbuf_sq, true, false, false, false))?;
+                let update_s4 =
+                    ctx.kernel(&shader::GROUPED, spec_of(2, tile_up, dbuf_up, true, false, false, false))?;
+                let sq = [am.raw(), am.raw(), am.raw(), bm.raw(), tbuf.raw()];
+                ctx.dispatch(&poly_s4, &sq, &p_sq, sq_grid)?;
+                ctx.dispatch(&update_s4, &[bm.raw(), cur, cur, next, tbuf.raw()], &p_up, up_grid)?;
+            } else {
+                let sq = [am.raw(), am.raw(), am.raw(), bm.raw(), tbuf.raw()];
+                ctx.dispatch(&poly, &sq, &p_sq, sq_grid)?;
+                ctx.dispatch(&update, &[bm.raw(), cur, cur, next, tbuf.raw()], &p_up, up_grid)?;
+            }
+            std::mem::swap(&mut cur, &mut next);
+        }
     }
     // 4. `p = p · 1 + (X · scale) · (−lr)`, read back in each parameter's own layout.
     for (ci, chunk) in items.chunks(j_apply).enumerate() {

@@ -396,12 +396,15 @@ pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) 
     })
 }
 
-/// Weighted `R-PIoU` scalar `(box_gain / tss) * Σ_i t_i * (1 - lam_i) * L_rpiou_i` directly from DFL
+type BoxLossF64Fn = fn([f64; 4], [f64; 4], f64, f64, f64) -> (f64, [f64; 4]);
+
+/// Weighted `R-PIoU` or `S-AEIoU` scalar `(box_gain / tss) * Σ_i t_i * (1 - lam_i) * L_box_i` directly from DFL
 /// `logits: [N, 4, R]`, reusing the tensor-decoded `pd` so focal-IoU and edge terms evaluate the exact same
 /// predicted box, and computing the DFL softmax Jacobian centered on the dominant bin `k*` in `f64` alongside
 /// batch scaling, `box_gain`, `tss`, `t`, and `(1 - lam)` before rounding the final logit gradient to `f32`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn rpiou_from_logits(
+fn algebraic_box_from_logits(
+    op_name: &'static str,
     logits: &Tensor,
     pd_t: &Tensor,
     tbox: &[f32],
@@ -412,6 +415,7 @@ pub(super) fn rpiou_from_logits(
     beta: f32,
     kappa: f32,
     delta0: f32,
+    box_fn: BoxLossF64Fn,
 ) -> Result<Tensor> {
     let (n, sides, r) = logits.dims3()?;
     debug_assert_eq!(sides, 4);
@@ -428,7 +432,7 @@ pub(super) fn rpiou_from_logits(
     for i in 0..n {
         let ai = [pds[4 * i] as f64, pds[4 * i + 1] as f64, pds[4 * i + 2] as f64, pds[4 * i + 3] as f64];
         let bi = [tbox[4 * i] as f64, tbox[4 * i + 1] as f64, tbox[4 * i + 2] as f64, tbox[4 * i + 3] as f64];
-        let (lv, g_xyxy) = rpiou_box_f64(ai, bi, b64, k64, d64);
+        let (lv, g_xyxy) = box_fn(ai, bi, b64, k64, d64);
         let wi = (t_scores[i] as f64) * lams.map_or(1.0, |v| 1.0 - v[i] as f64);
         weights[i] = wi;
         sum_w += wi * lv;
@@ -439,7 +443,7 @@ pub(super) fn rpiou_from_logits(
     }
     let out_val = ((sum_w / tss as f64) * box_gain as f64) as f32;
     let out_t = Tensor::scalar(out_val).to_device(dev)?;
-    Tensor::custom_op("rpiou_from_logits", &[logits], out_t, move |g| {
+    Tensor::custom_op(op_name, &[logits], out_t, move |g| {
         let gv = g.item::<f32>()? as f64;
         let scale = gv * (box_gain as f64 / tss as f64);
         let mut grad = vec![0.0f32; n * 4 * r];
@@ -487,4 +491,209 @@ pub(super) fn rpiou_from_logits(
         }
         Ok(vec![Some(Tensor::from_vec(grad, [n, 4, r])?.to_device(dev)?)])
     })
+}
+
+/// Weighted `R-PIoU` scalar directly from DFL `logits: [N, 4, R]`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn rpiou_from_logits(
+    logits: &Tensor,
+    pd_t: &Tensor,
+    tbox: &[f32],
+    t_scores: &[f32],
+    lams: Option<&[f32]>,
+    tss: f32,
+    box_gain: f32,
+    beta: f32,
+    kappa: f32,
+    delta0: f32,
+) -> Result<Tensor> {
+    algebraic_box_from_logits(
+        "rpiou_from_logits",
+        logits,
+        pd_t,
+        tbox,
+        t_scores,
+        lams,
+        tss,
+        box_gain,
+        beta,
+        kappa,
+        delta0,
+        rpiou_box_f64,
+    )
+}
+
+/// Single-box `S-AEIoU` forward `(loss, dL/d(ax1, ay1, ax2, ay2))` in `f64`, matching `det_box.wgsl`.
+pub(crate) fn saeiou_box_f64(
+    a: [f64; 4],
+    b: [f64; 4],
+    beta: f64,
+    kappa: f64,
+    delta0: f64,
+) -> (f64, [f64; 4]) {
+    if !a.iter().chain(&b).all(|v| v.is_finite()) {
+        return (f64::NAN, [f64::NAN; 4]);
+    }
+    const EPS_S: f64 = 1e-7;
+    let w_min = |x: f64, y: f64| {
+        if x < y {
+            1.0
+        } else if x == y {
+            0.5
+        } else {
+            0.0
+        }
+    };
+    let w_max = |x: f64, y: f64| {
+        if x > y {
+            1.0
+        } else if x == y {
+            0.5
+        } else {
+            0.0
+        }
+    };
+    let (ax1, ay1, ax2, ay2) = (a[0], a[1], a[2], a[3]);
+    let (bx1, by1, bx2, by2) = (b[0], b[1], b[2], b[3]);
+    let w1 = (ax2 - ax1).max(0.0);
+    let h1 = (ay2 - ay1).max(0.0);
+    let w2 = (bx2 - bx1).max(0.0);
+    let h2 = (by2 - by1).max(0.0);
+    let m_dim = w1.max(h1).max(w2.max(h2));
+    let inv_s = if m_dim > 1e6 { 1.0 / m_dim } else { 1.0 };
+    let (w1s, h1s, w2s, h2s) = (w1 * inv_s, h1 * inv_s, w2 * inv_s, h2 * inv_s);
+    let ix = ax2.min(bx2) - ax1.max(bx1);
+    let iy = ay2.min(by2) - ay1.max(by1);
+    let (iws, ihs) = (ix.max(0.0) * inv_s, iy.max(0.0) * inv_s);
+    let area1 = w1s * h1s;
+    let area2 = w2s * h2s;
+    let inter = iws * ihs;
+    let uni = area1 + area2 - inter + EPS_S;
+    let iou = inter / uni;
+    let deficit = (area1 - inter).max(0.0) + (area2 - inter).max(0.0) + EPS_S;
+    let focal = (deficit / uni) * (1.0 + beta * iou);
+    let g_u = -(1.0 - beta + 2.0 * beta * iou);
+    let g_scale = (g_u * inv_s) / uni;
+    let h1s_act = if ax2 > ax1 { h1s } else { 0.0 };
+    let w1s_act = if ay2 > ay1 { w1s } else { 0.0 };
+    let c_x1 = if ix > 0.0 { w_max(ax1, bx1) } else { 0.0 };
+    let c_x2 = if ix > 0.0 { w_min(ax2, bx2) } else { 0.0 };
+    let c_y1 = if iy > 0.0 { w_max(ay1, by1) } else { 0.0 };
+    let c_y2 = if iy > 0.0 { w_min(ay2, by2) } else { 0.0 };
+    let mut g = [
+        -g_scale * ((inter * (2.0 * c_x1 * ihs - h1s_act) + deficit * (c_x1 * ihs)) / uni),
+        -g_scale * ((inter * (2.0 * c_y1 * iws - w1s_act) + deficit * (c_y1 * iws)) / uni),
+        g_scale * ((inter * (2.0 * c_x2 * ihs - h1s_act) + deficit * (c_x2 * ihs)) / uni),
+        g_scale * ((inter * (2.0 * c_y2 * iws - w1s_act) + deficit * (c_y2 * iws)) / uni),
+    ];
+    let sx = w2 + delta0;
+    let sy = h2 + delta0;
+    let inv_sum = 1.0 / (sx + sy);
+    let wx = 2.0 * sx * inv_sum;
+    let wy = 2.0 * sy * inv_sum;
+    let rk = kappa.sqrt();
+    let qt = |u: f64| -> (f64, f64) {
+        let au = u.abs();
+        if au > 1e8 {
+            (1.0 / au, if u >= 0.0 { 1.0 } else { -1.0 })
+        } else {
+            let q = 1.0 / (1.0 + u * u).sqrt();
+            (q, u * q)
+        }
+    };
+    let (qx1, tx1) = qt(rk * (ax1 - bx1) / sx);
+    let (qx2, tx2) = qt(rk * (ax2 - bx2) / sx);
+    let (qy1, ty1) = qt(rk * (ay1 - by1) / sy);
+    let (qy2, ty2) = qt(rk * (ay2 - by2) / sy);
+    let phi = |q: f64, t: f64| (t * t) / (1.0 + q);
+    let edge = 0.25 * (wx * (phi(qx1, tx1) + phi(qx2, tx2)) + wy * (phi(qy1, ty1) + phi(qy2, ty2)));
+    let c = 0.5 * rk * inv_sum;
+    g[0] += c * tx1 * (qx1 * qx1);
+    g[1] += c * ty1 * (qy1 * qy1);
+    g[2] += c * tx2 * (qx2 * qx2);
+    g[3] += c * ty2 * (qy2 * qy2);
+    (focal + edge, g)
+}
+
+/// Differentiable Scale-normalized Algebraic Edge IoU loss (`S-AEIoU`) between rows of `b1` (predicted) and
+/// `b2` (ground truth), both `[N, 4]` `xyxy` in grid units, returning `[N]`:
+///
+/// `L = (1 - u)(1 + beta * u) + 0.25 * (wx * (phi(u_x1) + phi(u_x2)) + wy * (phi(u_y1) + phi(u_y2)))`
+///
+/// where `u` is scale-normalized IoU, `sx = w_g + delta0`, `sy = h_g + delta0`, `wx = 2*sx/(sx+sy)`,
+/// `wy = 2*sy/(sx+sy)`, `q(u) = (1 + u^2)^(-1/2)`, `t(u) = u * q(u)`, and `phi(u) = t(u)^2 / (1 + q(u))`.
+/// Purely algebraic (no `atan`, `exp`, or `norm_f32`), with shared edge gradient prefactor
+/// `C = sqrt(kappa) / (2 * (sx + sy))`.
+pub fn saeiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) -> Result<Tensor> {
+    if !(beta.is_finite() && (0.0..=1.0).contains(&beta)) {
+        return Err(invalid(format!("saeiou_loss: beta must be finite and in 0..=1, got {beta}")));
+    }
+    if !(kappa.is_finite() && kappa > 0.0) {
+        return Err(invalid(format!("saeiou_loss: kappa must be finite and > 0, got {kappa}")));
+    }
+    if !(delta0.is_finite() && delta0 > 0.0) {
+        return Err(invalid(format!("saeiou_loss: delta0 must be finite and > 0, got {delta0}")));
+    }
+    let n = check_box_pair(b1, b2, "saeiou_loss")?;
+    let dev = b1.device();
+    if n == 0 {
+        return Tensor::zeros_with([0], DType::F32, dev);
+    }
+    let a = b1.to_vec::<f32>()?;
+    let b = b2.to_vec::<f32>()?;
+    let (b64, k64, d64) = (beta as f64, kappa as f64, delta0 as f64);
+    let mut out = vec![0.0f32; n];
+    let mut g_box = vec![[0.0f64; 4]; n];
+    for i in 0..n {
+        let ai = [a[4 * i] as f64, a[4 * i + 1] as f64, a[4 * i + 2] as f64, a[4 * i + 3] as f64];
+        let bi = [b[4 * i] as f64, b[4 * i + 1] as f64, b[4 * i + 2] as f64, b[4 * i + 3] as f64];
+        let (lv, gv) = saeiou_box_f64(ai, bi, b64, k64, d64);
+        out[i] = lv as f32;
+        g_box[i] = gv;
+    }
+    let out_t = Tensor::from_vec(out, [n])?.to_device(dev)?;
+    Tensor::custom_op("saeiou_loss", &[b1], out_t, move |g| {
+        let gv = g.to_vec::<f32>()?;
+        let mut grad = vec![0.0f32; 4 * n];
+        for i in 0..n {
+            let gi = gv[i] as f64;
+            if gi == 0.0 && g_box[i].iter().all(|v| v.is_finite()) {
+                continue;
+            }
+            for s in 0..4 {
+                grad[4 * i + s] = (gi * g_box[i][s]) as f32;
+            }
+        }
+        Ok(vec![Some(Tensor::from_vec(grad, [n, 4])?.to_device(dev)?)])
+    })
+}
+
+/// Weighted `S-AEIoU` scalar directly from DFL `logits: [N, 4, R]`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn saeiou_from_logits(
+    logits: &Tensor,
+    pd_t: &Tensor,
+    tbox: &[f32],
+    t_scores: &[f32],
+    lams: Option<&[f32]>,
+    tss: f32,
+    box_gain: f32,
+    beta: f32,
+    kappa: f32,
+    delta0: f32,
+) -> Result<Tensor> {
+    algebraic_box_from_logits(
+        "saeiou_from_logits",
+        logits,
+        pd_t,
+        tbox,
+        t_scores,
+        lams,
+        tss,
+        box_gain,
+        beta,
+        kappa,
+        delta0,
+        saeiou_box_f64,
+    )
 }

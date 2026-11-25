@@ -25,6 +25,74 @@ pub const EMA_TAU: f64 = 2000.0;
 /// docs/MODEL.md §8.5: the nominal window `1 / (1 − decay)` of the default EMA, in updates: the cap of
 /// [`ema_for_run`].
 pub const EMA_MAX_WINDOW: f64 = 10_000.0;
+/// `PC-PEMA` base power-law exponent `γ₀ = 6.94` (relative width `σ_rel = [(γ₀ + 1)(γ₀ + 3)]^(-1/2) ≈ 0.113`).
+pub const PEMA_GAMMA_0: f64 = 6.94;
+/// `PC-PEMA` LR-phase coupling exponent `ρ = 0.25`.
+pub const PEMA_RHO: f64 = 0.25;
+/// `PC-PEMA` minimum clamped LR factor `lf_min = 0.01`.
+pub const PEMA_LF_MIN: f64 = 0.01;
+
+/// EMA decay schedule mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmaMode {
+    /// Legacy exponential ramp EMA (`d = decay · (1 − exp(−u / tau))`).
+    #[default]
+    Legacy,
+    /// Prior-Shifted LR-Phase-Coupled Power-Law EMA (`PC-PEMA`).
+    Power,
+}
+
+/// Configuration for [`EmaMode::Power`] (`PC-PEMA`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmaPowerConfig {
+    /// Base power-law exponent `γ₀` (default [`PEMA_GAMMA_0`]).
+    #[serde(deserialize_with = "exact_f64")]
+    pub gamma_0: f64,
+    /// LR-phase coupling exponent `ρ` (default [`PEMA_RHO`]).
+    #[serde(deserialize_with = "exact_f64")]
+    pub rho: f64,
+    /// Lower clamp on `lf_u` (default [`PEMA_LF_MIN`]).
+    #[serde(deserialize_with = "exact_f64")]
+    pub lf_min: f64,
+    /// Prior shift `t₀` (`0.0` from scratch; `warmup_iters` or `round(0.03 * total).max(1)` for transfer).
+    #[serde(deserialize_with = "exact_f64")]
+    pub t_0: f64,
+}
+
+impl EmaPowerConfig {
+    /// Default `PC-PEMA` parameters (`γ₀ = 6.94`, `ρ = 0.25`, `lf_min = 0.01`) with prior shift `t_0`.
+    pub fn new(t_0: f64) -> Self {
+        EmaPowerConfig { gamma_0: PEMA_GAMMA_0, rho: PEMA_RHO, lf_min: PEMA_LF_MIN, t_0 }
+    }
+
+    /// Validate all fields are finite and in range.
+    pub fn validate(&self) -> Result<()> {
+        let ok = self.gamma_0.is_finite()
+            && self.gamma_0 >= 0.0
+            && self.rho.is_finite()
+            && self.rho >= 0.0
+            && self.lf_min.is_finite()
+            && self.lf_min > 0.0
+            && self.lf_min <= 1.0
+            && self.t_0.is_finite()
+            && self.t_0 >= 0.0;
+        if ok { Ok(()) } else { Err(Error::Invalid(format!("ModelEma: invalid PC-PEMA config {self:?}"))) }
+    }
+
+    /// Compute `PC-PEMA` decay `β_u` at update `u >= 1` with LR factor `lf`.
+    #[inline]
+    pub fn decay_at(&self, u: u64, lf: f64) -> f64 {
+        let denom = u as f64 + self.t_0;
+        if denom <= 1.0 {
+            return 0.0;
+        }
+        let lf_c = lf.clamp(self.lf_min, 1.0);
+        let gamma_eff = self.gamma_0 * lf_c.powf(-self.rho);
+        ((gamma_eff + 1.0) * (-1.0 / denom).ln_1p()).exp()
+    }
+}
 
 /// docs/MODEL.md §8.5: `(decay, tau)` of an EMA whose nominal window is `fraction` of a run of `total_updates`
 /// optimizer steps, `w = max(fraction · total_updates, 1)`: `decay = 1 − 1 / w`, `tau = max(w / 5, 1)` (the default's
@@ -56,6 +124,9 @@ pub struct EmaContract {
     /// Ramp time constant, in updates.
     #[serde(deserialize_with = "exact_f64")]
     pub tau: f64,
+    /// Optional `PC-PEMA` power-law configuration (omitted in legacy mode for byte-identical compat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power: Option<EmaPowerConfig>,
 }
 
 /// A JSON number parsed by `f64::from_str` (correctly rounded), not by serde_json's fast path, which can land one ulp
@@ -103,6 +174,7 @@ pub struct ModelEma<M: Module> {
     pair_scratch: Vec<(usize, Tensor)>,
     decay: f64,
     tau: f64,
+    power: Option<EmaPowerConfig>,
     updates: u64,
 }
 
@@ -127,6 +199,22 @@ impl<M: Module> ModelEma<M> {
 
     /// [`ModelEma::new`] with an explicit decay and tau.
     pub fn with_params(module: M, source: &dyn Module, decay: f64, tau: f64) -> Result<Self> {
+        Self::build_inner(module, source, decay, tau, None)
+    }
+
+    /// [`ModelEma::new`] configured for `PC-PEMA` (Prior-Shifted LR-Phase-Coupled Power-Law EMA).
+    pub fn with_power(module: M, source: &dyn Module, power: EmaPowerConfig) -> Result<Self> {
+        power.validate()?;
+        Self::build_inner(module, source, EMA_DECAY, EMA_TAU, Some(power))
+    }
+
+    fn build_inner(
+        module: M,
+        source: &dyn Module,
+        decay: f64,
+        tau: f64,
+        power: Option<EmaPowerConfig>,
+    ) -> Result<Self> {
         if !(0.0..=1.0).contains(&decay) || !(tau.is_finite() && tau > 0.0) {
             return Err(Error::Invalid(format!("ModelEma: invalid decay {decay} / tau {tau}")));
         }
@@ -139,6 +227,7 @@ impl<M: Module> ModelEma<M> {
             pair_scratch: Vec::new(),
             decay,
             tau,
+            power,
             updates: 0,
         };
         if let Some(dev) = first_device(source) {
@@ -199,19 +288,35 @@ impl<M: Module> ModelEma<M> {
         self.updates
     }
 
-    /// `(decay, tau)`.
+    /// `(decay, tau)` and optional `PC-PEMA` settings.
     pub fn contract(&self) -> EmaContract {
-        EmaContract { decay: self.decay, tau: self.tau }
+        EmaContract { decay: self.decay, tau: self.tau, power: self.power }
     }
 
-    /// The effective decay after `updates` updates: `decay · (1 − exp(−updates / tau))`.
+    /// The effective decay after `updates` updates: `decay · (1 − exp(−updates / tau))` (legacy) or `PC-PEMA`
+    /// at `lf = 1.0`.
     pub fn decay_at(&self, updates: u64) -> f64 {
-        self.decay * (1.0 - (-(updates as f64) / self.tau).exp())
+        self.decay_at_with_lf(updates, 1.0)
     }
 
-    /// Fold the current `source` weights into the average.
+    /// The effective decay after `updates` updates given the current schedule LR factor `lf`.
+    pub fn decay_at_with_lf(&self, updates: u64, lf: f64) -> f64 {
+        if let Some(p) = self.power {
+            p.decay_at(updates, lf)
+        } else {
+            self.decay * (1.0 - (-(updates as f64) / self.tau).exp())
+        }
+    }
+
+    /// Fold the current `source` weights into the average (using `lf = 1.0` for `PC-PEMA`).
     pub fn update(&mut self, source: &dyn Module) -> Result<()> {
-        let d = self.decay_at(self.updates + 1);
+        self.update_with_lf(source, 1.0)
+    }
+
+    /// Fold the current `source` weights into the average with schedule LR factor `lf` (used by `PC-PEMA`;
+    /// identical to [`ModelEma::update`] in legacy mode).
+    pub fn update_with_lf(&mut self, source: &dyn Module, lf: f64) -> Result<()> {
+        let d = self.decay_at_with_lf(self.updates + 1, lf);
         let (d32, w) = (d as f32, (1.0 - d) as f32);
         let Self { cached, cached_keys, cached_disjoint, prefix, pair_scratch, updates, .. } = self;
         let guard = ClearGuard(pair_scratch);
@@ -548,7 +653,7 @@ impl<M: Module> EmaState for ModelEma<M> {
     }
 
     fn contract(&self) -> EmaContract {
-        EmaContract { decay: self.decay, tau: self.tau }
+        EmaContract { decay: self.decay, tau: self.tau, power: self.power }
     }
 
     fn restore(
@@ -589,12 +694,16 @@ impl<M: Module> EmaState for ModelEma<M> {
                 contract.decay, contract.tau
             )));
         }
+        if let Some(p) = contract.power {
+            p.validate().map_err(|e| Error::Load(format!("folo.ema: {e}")))?;
+        }
         let _g = no_grad();
         for &(n, t) in &mine {
             t.copy_from(&tensors[n].to_dtype(DType::F32)?.to_device(t.device())?)?;
         }
         self.decay = contract.decay;
         self.tau = contract.tau;
+        self.power = contract.power;
         self.updates = updates;
         Ok(())
     }
@@ -651,6 +760,61 @@ mod tests {
             let ab: Vec<u32> = a.into_iter().map(f32::to_bits).collect();
             let bb: Vec<u32> = b.into_iter().map(f32::to_bits).collect();
             assert_eq!(ab, bb, "AVX2 vs scalar mismatch on special IEEE-754 values");
+        }
+    }
+
+    #[test]
+    fn pc_pema_formula_prior_shift_and_contract_round_trip() {
+        let scratch = EmaPowerConfig::new(0.0);
+        scratch.validate().unwrap();
+        assert_eq!(scratch.decay_at(1, 1.0), 0.0);
+        let d10 = scratch.decay_at(10, 1.0);
+        let want10 = ((PEMA_GAMMA_0 + 1.0) * (-1.0f64 / 10.0).ln_1p()).exp();
+        assert!((d10 - want10).abs() < 1e-14);
+        // Lower lr factor increases gamma_eff -> smaller decay (faster adaptation during tail/warmup).
+        let d10_low = scratch.decay_at(10, 0.04);
+        assert!(d10_low < d10, "lower lf should shorten effective EMA window: {d10_low} vs {d10}");
+        // Clamped below lf_min = 0.01 and above 1.0.
+        assert_eq!(scratch.decay_at(50, 0.0001).to_bits(), scratch.decay_at(50, PEMA_LF_MIN).to_bits());
+        assert_eq!(scratch.decay_at(50, 1.5).to_bits(), scratch.decay_at(50, 1.0).to_bits());
+
+        // Transfer prior shift t_0 > 0 keeps beta_1 > 0 so pretrained shadow is not overwritten at u=1.
+        let xfer = EmaPowerConfig::new(39.0);
+        let d1_xfer = xfer.decay_at(1, 1.0);
+        let want1_xfer = ((PEMA_GAMMA_0 + 1.0) * (-1.0f64 / 40.0).ln_1p()).exp();
+        assert!((d1_xfer - want1_xfer).abs() < 1e-14 && d1_xfer > 0.8);
+
+        // Contract serde: legacy omits `power` byte-identically; PC-PEMA round-trips exact f64.
+        let leg = EmaContract { decay: EMA_DECAY, tau: EMA_TAU, power: None };
+        let leg_s = serde_json::to_string(&leg).unwrap();
+        assert_eq!(leg_s, r#"{"decay":0.9999,"tau":2000.0}"#);
+        assert_eq!(serde_json::from_str::<EmaContract>(&leg_s).unwrap(), leg);
+
+        let pwr = EmaContract { decay: EMA_DECAY, tau: EMA_TAU, power: Some(xfer) };
+        let pwr_s = serde_json::to_string(&pwr).unwrap();
+        assert!(pwr_s.contains("power"), "{pwr_s}");
+        assert_eq!(serde_json::from_str::<EmaContract>(&pwr_s).unwrap(), pwr);
+
+        // Unknown fields on both EmaContract and EmaPowerConfig are rejected (`deny_unknown_fields`).
+        assert!(serde_json::from_str::<EmaContract>(r#"{"decay":0.9999,"tau":2000.0,"extra":1}"#).is_err());
+        assert!(
+            serde_json::from_str::<EmaPowerConfig>(
+                r#"{"gamma_0":6.94,"rho":0.25,"lf_min":0.01,"t_0":0.0,"extra":1}"#
+            )
+            .is_err()
+        );
+
+        // Invalid PC-PEMA configs are rejected by `validate()`.
+        for bad in [
+            EmaPowerConfig { gamma_0: -0.1, ..scratch },
+            EmaPowerConfig { gamma_0: f64::NAN, ..scratch },
+            EmaPowerConfig { rho: -0.1, ..scratch },
+            EmaPowerConfig { lf_min: 0.0, ..scratch },
+            EmaPowerConfig { lf_min: 1.1, ..scratch },
+            EmaPowerConfig { t_0: -1.0, ..scratch },
+            EmaPowerConfig { t_0: f64::INFINITY, ..scratch },
+        ] {
+            assert!(bad.validate().is_err(), "{bad:?} must fail validate()");
         }
     }
 }

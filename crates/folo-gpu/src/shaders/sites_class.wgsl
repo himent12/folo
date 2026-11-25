@@ -11,10 +11,6 @@
 @group(0) @binding(4) var<storage, read_write> FIELD: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read_write> MARK: array<atomic<u32>>;
 
-fn sig(x: f32) -> f32 {
-    return 1.0 / (1.0 + exp(-x));
-}
-
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
         @builtin(local_invocation_index) lid: u32) {
@@ -28,7 +24,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     var best = 0u;
     var bx = f32(CLS[cb]);
     // Bit-test c = 0 for NaN: compilers may lower `if (x > bx)` to `maxNum` (which drops a NaN in `bx`,
-    // notably for f16), whereas evaluating `sig(c = 0)` keeps `bs = NaN` and drops the pixel.
+    // notably for f16), whereas evaluating `sigmoid_f(c = 0)` keeps `bs = NaN` and drops the pixel.
     if ((bitcast<u32>(bx) & 0x7fffffffu) > 0x7f800000u) { return; }
     var prev_bx = bx;
     for (var c = 1u; c < nc; c++) {
@@ -39,13 +35,13 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             bx = x;
         }
     }
-    let bs = sig(bx);
+    let bs = sigmoid_f(bx);
     if (!(bs > pf(3u))) { return; }
     // Sigmoid is non-decreasing but can tie in f32 (saturation to 1.0 / 0.0 or rounding); `prev_bx` is the
     // max non-NaN logit in `0..best`, so rescan `0..best` only if an earlier class could tie `bs`.
-    if (best > 0u && sig(prev_bx) >= bs) {
+    if (best > 0u && sigmoid_f(prev_bx) >= bs) {
         for (var c = 0u; c < best; c++) {
-            if (sig(f32(CLS[cb + c * hw])) >= bs) {
+            if (sigmoid_f(f32(CLS[cb + c * hw])) >= bs) {
                 best = c;
                 break;
             }

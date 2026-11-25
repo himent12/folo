@@ -832,6 +832,8 @@ impl Backend for GpuBackend {
             momentum: s.momentum,
             nesterov: s.nesterov,
             step_coeffs: s.step_coeffs,
+            cs9_coeffs: s.cs9_coeffs,
+            cs9: s.cs9,
             steps: s.steps,
             schatten4: s.schatten4,
             eps: s.eps,

@@ -29,20 +29,42 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     if (s >= min(n, cap)) { return; }
     let j = SITES[row + 1u + s];
     var d = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
-    for (var side = 0u; side < 4u; side++) {
-        let base = (b * 4u + side) * rm * cap + s;
-        var m = f32(RAW[base]);
-        for (var k = 1u; k < rm; k++) {
-            m = max(m, f32(RAW[base + k * cap]));
+    if (R > 0u) {
+        var v: array<f32, R_CAP>;
+        for (var side = 0u; side < 4u; side++) {
+            let base = (b * 4u + side) * R * cap + s;
+            var m = f32(RAW[base]);
+            v[0] = m;
+            for (var k = 1u; k < R; k++) {
+                let x = f32(RAW[base + k * cap]);
+                v[k] = x;
+                m = max(m, x);
+            }
+            var z = 0.0;
+            var e = 0.0;
+            for (var k = 0u; k < R; k++) {
+                let p = fexp(v[k] - m);
+                z += p;
+                e = fma(p, f32(k), e);
+            }
+            d[side] = e / z;
         }
-        var z = 0.0;
-        var e = 0.0;
-        for (var k = 0u; k < rm; k++) {
-            let p = exp(f32(RAW[base + k * cap]) - m);
-            z += p;
-            e += p * f32(k);
+    } else {
+        for (var side = 0u; side < 4u; side++) {
+            let base = (b * 4u + side) * rm * cap + s;
+            var m = f32(RAW[base]);
+            for (var k = 1u; k < rm; k++) {
+                m = max(m, f32(RAW[base + k * cap]));
+            }
+            var z = 0.0;
+            var e = 0.0;
+            for (var k = 0u; k < rm; k++) {
+                let p = fexp(f32(RAW[base + k * cap]) - m);
+                z += p;
+                e = fma(p, f32(k), e);
+            }
+            d[side] = e / z;
         }
-        d[side] = e / z;
     }
     let w = pu(3u);
     let ax = f32(j % w) + 0.5;

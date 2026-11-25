@@ -384,7 +384,8 @@ impl Trainer {
         }
         self.opt.step(&self.acc)?;
         if let Some(ema) = &mut self.ema {
-            ema.update(&self.model)?;
+            let lf = self.sched.lf(self.sched.step());
+            ema.update_with_lf(&self.model, lf)?;
         }
         self.sched.advance();
         Ok(())

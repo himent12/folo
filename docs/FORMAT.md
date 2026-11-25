@@ -62,10 +62,10 @@ All values are strings; structured values are JSON encoded into a string.
 | `folo.imgsz` | yes | training image size, e.g. `"640"` |
 | `folo.fused` | no | `"true"` if Conv+BN are fused (an inference-only tensor set) |
 | `folo.dtype` | no | `"F32"` (default) or `"F16"`: the floating dtype of parameters and buffers |
-| `folo.train` | checkpoint | JSON: the resolved TrainConfig (docs/API.md) with every default filled in (informational; the contracts below are authoritative for resuming; `LossConfig` uses `#[serde(default)]`, so checkpoints trained with opt-in loss fields such as `box_loss: "rpiou"`, `dfl_ot_weight > 0`, `mal_gamma > 0`, or `nwd_weight > 0` must be resumed with a binary that supports those fields) |
+| `folo.train` | checkpoint | JSON: the resolved TrainConfig (docs/API.md) with every default filled in (informational; the contracts below are authoritative for resuming; `LossConfig` and `TrainConfig` use `#[serde(default)]`, so older checkpoints deserialize cleanly to legacy defaults while checkpoints trained with opt-in fields such as `box_loss: "rpiou" \| "saeiou"`, `dfl_ot_weight > 0`, `dfl_crps_weight > 0`, `mal_gamma > 0`, `nwd_weight > 0`, `musgd.ortho: "polar3_cs9"`, or `ema_mode: "power"` must be resumed with a binary that supports those fields) |
 | `folo.optim` | checkpoint | JSON: optimizer contract, see below |
 | `folo.sched` | checkpoint | JSON: LR / momentum schedule contract, see below |
-| `folo.ema` | checkpoint, if EMA | JSON: `{ "decay": 0.9999, "tau": 2000 }` (a fine-tune's shorter window has a smaller pair: docs/MODEL.md §8.5). The effective decay at update `u` is `decay × (1 − exp(−u / tau))`, and `u` is `ema.__updates` |
+| `folo.ema` | checkpoint, if EMA | JSON: `{ "decay": 0.9999, "tau": 2000 }` in legacy mode (a fine-tune's shorter window has a smaller pair: docs/MODEL.md §8.5), or with an optional `"power": { "gamma_0": 6.94, "rho": 0.25, "lf_min": 0.01, "t_0": <f64> }` object for `PC-PEMA` (`EmaPowerConfig`, docs/MODEL.md §8.5). `power` uses `#[serde(default, skip_serializing_if = "Option::is_none")]`, so legacy checkpoints omit it and stay byte-identical while older checkpoints without `power` deserialize cleanly to legacy exponential ramp EMA (`decay × (1 − exp(−u / tau))`, `u = ema.__updates`). Both `EmaContract` and `EmaPowerConfig` reject unknown fields and validate all `power` parameters on open and resume |
 | `folo.rng` | checkpoint | JSON: `{ "algo": "<generator name from folo_core::rng, e.g. xoshiro256pp>", "seed": <u64>, "streams": { "<stream name>": "<state as lowercase hex of the generator's state words, little-endian>" } }`. Stream names are defined by the trainer (e.g. `data`, `augment`, `init`) |
 | `folo.epoch` | checkpoint | number of completed epochs. In v1, checkpoints are written only at epoch boundaries, so no within-epoch loader position is stored |
 | `folo.metrics` | no | JSON: best validation metrics `{ "map50", "map50_95", "precision", "recall", "best_f1_conf"? }` (`best_f1_conf`: the confidence precision and recall are taken at, docs/METRICS.md; absent in files written before it) |
@@ -105,7 +105,7 @@ separately.
                 "betas": [0.9, 0.999], "eps": 1e-8 } ],   // the fields that apply to `type`
   "step": 1234,                                            // number of optimizer.step() calls; equals optim.__step
   "musgd": { "muon": 0.5, "sgd": 0.5 },                    // MuSGD step weights; only when not the defaults
-  "muon_ortho": "polar4" | "polar5",                       // MuSGD ortho schedule; omitted for legacy "ns5"
+  "muon_ortho": "polar4" | "polar5" | "polar3_cs9",        // MuSGD ortho schedule; omitted for legacy "ns5"
   "muon_geo": "geo",                                       // MuSGD Conv-GeoMuon mode; omitted for legacy
   "muon_depthwise": ["..."] }                              // Muon-group depthwise convs under "geo"; omitted when empty
 ```
@@ -114,7 +114,7 @@ separately.
 checkpoint with the default weights is byte-for-byte what it was before the key existed. Resuming adopts the file's
 weights when it has them, like the group hyperparameters; without the key the optimizer keeps the weights it was
 built with (the trainer builds it from `folo.train`'s `musgd`, so a file that recorded custom weights only there
-resumes with them; `MuSgd::new` means 0.2 / 1.0). `muon_ortho` holds MuSGD's orthogonalisation schedule (`"polar4"`, the default for new runs, or `"polar5"`; only on a
+resumes with them; `MuSgd::new` means 0.2 / 1.0). `muon_ortho` holds MuSGD's orthogonalisation schedule (`"polar4"`, the default for new runs, `"polar5"`, or `"polar3_cs9"`; only on a
 `"musgd"` contract) and is omitted for legacy `"ns5"`, so the `folo.optim` contract of `"ns5"` runs stays byte-for-byte
 compatible with pre-Polar checkpoints (note that trainer checkpoints' informational `folo.train` adds `musgd.ortho`).
 `muon_geo` holds MuSGD's optional geometric conditioning mode (`"geo"` for Conv-GeoMuon, docs/MODEL.md §8.2; only on a

@@ -35,7 +35,7 @@ There is no `tests/` folder at the crate root and no `build.rs`.
 A kernel is a `KernelDef { name, storage, source }` in a `src/kernels/` module, listed in that module's `DEFS`.
 Its `source` is either `Source::Static(include_str!("../shaders/<file>.wgsl"))` or `Source::Generated(fn)`, a Rust
 function that returns WGSL for a `Spec`. Generators either concatenate files with shared snippets
-(`unary_fn.wgsl`, `bn_common.wgsl`, `bn_welford.wgsl`, `detect_common.wgsl`, `kd_common.wgsl`, the `E` / `V4` / `OUT` aliases of
+(`unary_fn.wgsl`, `bn_common.wgsl`, `bn_welford.wgsl`, `detect_common.wgsl` — shared across `tal_*`, `det_*`, `dfl_stats.wgsl`, `detect.wgsl`, `sites_class.wgsl`, `sites_decode.wgsl`, and `kd_*.wgsl`, `kd_common.wgsl`, the `E` / `V4` / `OUT` aliases of
 `kernels::vec_prelude`) or write the whole source in Rust: the GEMM and implicit-GEMM convs (`kernels/gemm/`,
 `kernels/conv/`), tensor cores (`kernels/coop/shader.rs`), `kernels/ew.rs`, `kernels/strided/`,
 `kernels/pool_grad.rs`, Muon and the multi-tensor optimizer kernels. There is no include mechanism inside WGSL.
@@ -78,11 +78,11 @@ kernels (`kd_*.wgsl`). Tests are grouped by area, not by op.
 | copies, casts, fills | `copy_strided`, `copy_into`, `cast`, `full` | `kernels::strided::*` | generated in `strided/` | `src/tests/backend/transfer.rs` |
 | train-mode BatchNorm + activation | `batch_norm_act`, `batch_norm_act_backward` | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | `bn_*.wgsl` | `src/tests/amp.rs`; folo-nn `tests/gpu/main.rs` |
 | optimizer updates, clipping, loss-scaler unscale | `optimizer_step(_many)`, `norm_partials_many`, `scale_many`, `unscale_check(_many)` | `kernels::optim::*` | `optim.wgsl`; generated `_many` kernels | folo-nn `tests/gpu/main.rs` |
-| Muon (MuSGD) | `muon_step_many` | `kernels::muon::muon_step_many` | generated in `muon/shader.rs` | `src/tests/muon.rs`; folo-nn `tests/gpu/muon.rs` |
+| Muon (MuSGD) | `muon_step_many` | `kernels::muon::muon_step_many` (Polar-FOLO + `Polar3-CS9` / `muon_s8`) | generated in `muon/shader.rs` | `src/tests/muon.rs`; folo-nn `tests/gpu/muon.rs` |
 | letterbox, packed `u8` upload/normalize | `letterbox_rgb8` | `kernels::vision::{letterbox_rgb8, u8_to_float_scale, rgb8_hwc_to_chw_norm, upload_u8_scaled, upload_rgb8_hwc_to_chw_norm}` | `letterbox.wgsl`; generated in `vision.rs` | `src/tests/vision.rs`; folo-vision `tests/gpu.rs` |
-| detection candidates | `detect_candidates` | `kernels::vision::detect_candidates` | `detect.wgsl` | `src/tests/sites.rs` |
-| candidate-first detection | `conv2d_act_sites`, `detect_class_sites`, `detect_decode_sites` (in `backend/sites.rs`) | `kernels::conv::conv2d_sites`, `kernels::detect_sites::*` | `sites_*.wgsl`; generated | `src/tests/sites.rs` |
-| assigner and detection loss (not `Backend` methods) | `folo_gpu::detect::{assign, detection_loss}` (device-cached static anchors) | `kernels::detect::*` (32-wide subgroup `det_bce_fwd` & `det_combine`) | `tal_*.wgsl`, `det_*.wgsl`, `detect_common.wgsl` | `src/tests/reduce.rs`; folo-vision `tests/gpu_loss/` |
+| detection candidates | `detect_candidates` | `kernels::vision::detect_candidates` | `detect.wgsl` (after `detect_common.wgsl`, register-cached DFL for `R <= 32`) | `src/tests/sites.rs` |
+| candidate-first detection | `conv2d_act_sites`, `detect_class_sites`, `detect_decode_sites` (in `backend/sites.rs`) | `kernels::conv::conv2d_sites`, `kernels::detect_sites::*` | `sites_*.wgsl` (`sites_class` / `sites_decode` after `detect_common.wgsl`); generated | `src/tests/sites.rs` |
+| assigner, detection loss & DFL stats (not `Backend` methods) | `folo_gpu::detect::{assign, detection_loss, multi_label_candidates, dfl_stats}` (device-cached static anchors) | `kernels::detect::*` (32-wide subgroup `det_bce_fwd` & `det_combine`, fused VFL/QFL/S-AEIoU/CRPS-DFL, 128-bit `det_candidates`, single-pass `det_dfl_stats`) | `tal_*.wgsl`, `det_*.wgsl`, `dfl_stats.wgsl`, `detect_common.wgsl` | `src/tests/reduce.rs`; folo-vision `tests/gpu_loss/`, `tests/gpu_lazy_head.rs` |
 | distillation term (not a `Backend` method) | `folo_gpu::distill::{distill_loss, distill_loss_with_context}` | `kernels::distill::*` | `kd_*.wgsl` (after `detect_common.wgsl`) | folo-vision `tests/gpu_distill.rs` |
 
 `GpuTensor` (`src/tensor.rs`) has one kernel module of its own that the backend does not use: `kernels::elementwise`

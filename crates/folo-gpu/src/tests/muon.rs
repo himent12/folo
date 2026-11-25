@@ -62,6 +62,8 @@ fn muon_polar_groups_match_one_group() {
         momentum: 0.9,
         nesterov: true,
         step_coeffs,
+        cs9_coeffs: [(0.0, 0.0, 0.0, 0.0, 0.0); crate::kernels::muon::MAX_STEPS],
+        cs9: false,
         steps: 4,
         schatten4: true,
         eps: 1e-7,
@@ -77,6 +79,37 @@ fn muon_polar_groups_match_one_group() {
     for (i, (g, w)) in grouped.iter().zip(&whole).enumerate() {
         assert!(g.iter().zip(w).all(|(a, b)| a.to_bits() == b.to_bits()), "matrix {i} {:?}", SHAPES[i]);
     }
+}
+
+#[test]
+fn muon_cs9_groups_match_one_group() {
+    let ctx = gpu!();
+    let mut cs9_coeffs = [(0.0, 0.0, 0.0, 0.0, 0.0); crate::kernels::muon::MAX_STEPS];
+    cs9_coeffs[0] = (-1.149_836, 0.234_306_05, -0.042_710_006, 0.069_763_21, 135.661_48);
+    cs9_coeffs[1] = (-1.158_462, 0.242_525_31, -0.298_174_05, 0.491_120_82, 113.502_03);
+    cs9_coeffs[2] = (-1.261_140_8, 0.343_998, -1.070_805_2, 1.935_225_4, 29.709_389);
+    let s = MuonSettings {
+        momentum: 0.9,
+        nesterov: true,
+        step_coeffs: [(0.0, 0.0, 0.0); crate::kernels::muon::MAX_STEPS],
+        cs9_coeffs,
+        cs9: true,
+        steps: 3,
+        schatten4: true,
+        eps: 1e-7,
+        lr: 0.5,
+    };
+    let (ran, before, whole) = run_with(&ctx, 1 << 30, ctx.caps().max_storage_buffers as usize, &s);
+    assert!(ran);
+    for (i, (b, w)) in before.iter().zip(&whole).enumerate() {
+        assert_ne!(b, w, "cs9 matrix {i} updated");
+    }
+    let (ran, _, grouped) = run_with(&ctx, LARGEST, 5, &s);
+    assert!(ran);
+    for (i, (g, w)) in grouped.iter().zip(&whole).enumerate() {
+        assert!(g.iter().zip(w).all(|(a, b)| a.to_bits() == b.to_bits()), "cs9 matrix {i} {:?}", SHAPES[i]);
+    }
+    assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
 }
 
 #[test]

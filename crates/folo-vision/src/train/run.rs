@@ -117,8 +117,11 @@ impl Trainer {
                 c.steps_per_epoch,
                 c.warmup_iters,
                 match &self.ema {
-                    // The nominal window 1 / (1 − decay) of §8.5.
-                    Some(e) => format!(", EMA window {:.0} steps", 1.0 / (1.0 - e.contract().decay)),
+                    // The nominal window 1 / (1 − decay) of §8.5, or PC-PEMA parameters.
+                    Some(e) => match e.contract().power {
+                        Some(p) => format!(", EMA PC-PEMA (γ₀ {}, ρ {}, t₀ {})", p.gamma_0, p.rho, p.t_0),
+                        None => format!(", EMA window {:.0} steps", 1.0 / (1.0 - e.contract().decay)),
+                    },
                     None => String::new(),
                 }
             ),

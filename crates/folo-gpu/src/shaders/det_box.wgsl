@@ -9,8 +9,8 @@
 // most one positive, so writes do not collide): g = GRAD[0], with tss = STATS[7], S_box = STATS[8], S_dfl = STATS[10],
 // and B = STATS[11] from the combine kernel. α of the CIoU is a constant, as in the CPU loss.
 // Spec: R, K, MODE. Params: 0 = slots, 1 = A, 2 = G, 3 = gt box word offset, 4 = top clamp (R − 1 − 0.01),
-// 5 = nwd_weight (0 = pure CIoU), 6 = box_loss_kind (0 = CIoU, 1 = R-PIoU), 7 = rpiou_beta, 8 = rpiou_kappa,
-// 9 = rpiou_delta, 10 = dfl_ot_weight, 11 = box_gain, 12 = dfl_gain.
+// 5 = nwd_weight (0 = pure CIoU), 6 = box_loss_kind (0 = CIoU, 1 = R-PIoU, 2 = S-AEIoU), 7 = rpiou_beta,
+// 8 = rpiou_kappa, 9 = rpiou_delta, 10 = dfl_ot_weight, 11 = box_gain, 12 = dfl_gain, 13 = dfl_crps_weight.
 @group(0) @binding(1) var<storage, read> BOX: array<f32>;
 @group(0) @binding(2) var<storage, read> META: array<u32>;
 @group(0) @binding(3) var<storage, read> PICK: array<u32>;
@@ -129,8 +129,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let dfl_ot_w = pf(10u);
     let box_gain = pf(11u);
     let dfl_gain = pf(12u);
+    let dfl_crps_w = pf(13u);
 
-    // Raw logits cached once per anchor (`x_raw`) and softmax per side (`p`), kept for OT and backward.
+    // Raw logits cached once per anchor (`x_raw`) and softmax per side (`p`), kept for OT, CRPS and backward.
     var x_raw: array<f32, 4u * R>;
     var p: array<f32, 4u * R>;
     var side_m: vec4<f32>;
@@ -140,6 +141,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     var dfl = 0.0;
     var ot_sum = vec2<f32>(0.0, 0.0);
     var jl: array<u32, 4>;
+    var l_raw: vec4<f32>;
     var wl: vec4<f32>;
     var wr: vec4<f32>;
     for (var side = 0u; side < 4u; side++) {
@@ -179,11 +181,34 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let l = j + 1.0 - dt;
         let ju = u32(j);
         jl[side] = ju;
+        l_raw[side] = l;
         wl[side] = l * wt;
         wr[side] = (1.0 - l) * wt;
         let lp_l = (x_raw[sb + ju] - m) - lz;
         let lp_r = (x_raw[sb + ju + 1u] - m) - lz;
         dfl = dfl + lp_l * wl[side] + lp_r * wr[side];
+        if (MODE == 0u && dfl_crps_w > 0.0) {
+            var f_mass = 0.0;
+            var crps_side = 0.0;
+            for (var k = 0u; k <= ju; k++) {
+                f_mass = f_mass + p[sb + k];
+                if (k < ju) {
+                    crps_side = crps_side + f_mass * f_mass;
+                }
+            }
+            var s_mass = 0.0;
+            var k_rev = R - 1u;
+            while (k_rev > ju) {
+                s_mass = s_mass + p[sb + k_rev];
+                k_rev = k_rev - 1u;
+                if (k_rev > ju) {
+                    crps_side = crps_side + s_mass * s_mass;
+                }
+            }
+            let e_j = select(f_mass - l, (1.0 - l) - s_mass, l > 0.5);
+            crps_side = crps_side + e_j * e_j;
+            dfl = dfl - dfl_crps_w * wt * crps_side;
+        }
         if (MODE == 0u && dfl_ot_w > 0.0 && R > 2u) {
             var pref_m: array<f32, R>;
             var pref_a: array<f32, R>;
@@ -234,6 +259,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         var l_base = 0.0;
         if (box_kind == 1u) {
             l_base = rpiou_loss_f(pd, tb, rpiou_beta, rpiou_kappa, rpiou_delta);
+        } else if (box_kind == 2u) {
+            l_base = saeiou_loss_f(pd, tb, rpiou_beta, rpiou_kappa, rpiou_delta);
         } else {
             l_base = 1.0 - ciou_eps(pd, tb);
         }
@@ -328,6 +355,53 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             edge_m = vec4<f32>(s0.x, s1.x, s2.x, s3.x);
             edge_e = vec4<f32>(s0.y, s1.y, s2.y, s3.y);
         }
+    } else if (box_kind == 2u) {
+        let eps_s = 1e-7;
+        let w1 = max(pd.z - pd.x, 0.0);
+        let h1 = max(pd.w - pd.y, 0.0);
+        let w2 = max(tb.z - tb.x, 0.0);
+        let h2 = max(tb.w - tb.y, 0.0);
+        let m_dim = max(max(w1, h1), max(w2, h2));
+        let inv_s = select(1.0, 1.0 / m_dim, m_dim > 1e6);
+        let w1s = w1 * inv_s;
+        let h1s = h1 * inv_s;
+        let w2s = w2 * inv_s;
+        let h2s = h2 * inv_s;
+        let ix = min(pd.z, tb.z) - max(pd.x, tb.x);
+        let iy = min(pd.w, tb.w) - max(pd.y, tb.y);
+        let iws = max(ix, 0.0) * inv_s;
+        let ihs = max(iy, 0.0) * inv_s;
+        let area1 = w1s * h1s;
+        let area2 = w2s * h2s;
+        let inter = iws * ihs;
+        let uni = area1 + area2 - inter + eps_s;
+        let inv_uni = 1.0 / uni;
+        let iou = inter * inv_uni;
+        let deficit = max(area1 - inter, 0.0) + max(area2 - inter, 0.0) + eps_s;
+        let g_u = -(1.0 - rpiou_beta + 2.0 * rpiou_beta * iou);
+        let g_scale = g_base * g_u * inv_s * inv_uni;
+        let h1s_act = select(0.0, h1s, pd.z > pd.x);
+        let w1s_act = select(0.0, w1s, pd.w > pd.y);
+        let c_x1 = select(0.0, w_max(pd.x, tb.x), ix > 0.0);
+        let c_x2 = select(0.0, w_min(pd.z, tb.z), ix > 0.0);
+        let c_y1 = select(0.0, w_max(pd.y, tb.y), iy > 0.0);
+        let c_y2 = select(0.0, w_min(pd.w, tb.w), iy > 0.0);
+        let sx = w2 + rpiou_delta;
+        let sy = h2 + rpiou_delta;
+        let rk = sqrt(rpiou_kappa);
+        let c_edge = g_base * (0.5 * rk / (sx + sy));
+        let qt_x1 = inv_sqrt_1p_sq(rk * (pd.x - tb.x) / sx);
+        let qt_x2 = inv_sqrt_1p_sq(rk * (pd.z - tb.z) / sx);
+        let qt_y1 = inv_sqrt_1p_sq(rk * (pd.y - tb.y) / sy);
+        let qt_y2 = inv_sqrt_1p_sq(rk * (pd.w - tb.w) / sy);
+        gx1 = -g_scale * ((inter * (2.0 * c_x1 * ihs - h1s_act) + deficit * (c_x1 * ihs)) * inv_uni)
+              + c_edge * qt_x1.y * (qt_x1.x * qt_x1.x);
+        gy1 = -g_scale * ((inter * (2.0 * c_y1 * iws - w1s_act) + deficit * (c_y1 * iws)) * inv_uni)
+              + c_edge * qt_y1.y * (qt_y1.x * qt_y1.x);
+        gx2 =  g_scale * ((inter * (2.0 * c_x2 * ihs - h1s_act) + deficit * (c_x2 * ihs)) * inv_uni)
+              + c_edge * qt_x2.y * (qt_x2.x * qt_x2.x);
+        gy2 =  g_scale * ((inter * (2.0 * c_y2 * iws - w1s_act) + deficit * (c_y2 * iws)) * inv_uni)
+              + c_edge * qt_y2.y * (qt_y2.x * qt_y2.x);
     } else {
         let eps = 1e-7;
         let w1 = pd.z - pd.x;
@@ -406,6 +480,39 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         var ret_sp: array<vec2<f32>, R>;
         var m_exc: array<f32, R>;
         var exc_sp: array<vec2<f32>, R>;
+        var crps_g: array<f32, R>;
+        var crps_gbar = 0.0;
+        let use_crps = dfl_crps_w > 0.0;
+        if (use_crps) {
+            var crps_e: array<f32, R>;
+            var f_mass = 0.0;
+            for (var k = 0u; k <= ju; k++) {
+                f_mass = f_mass + p[sb + k];
+                if (k < ju) {
+                    crps_e[k] = f_mass;
+                }
+            }
+            var s_mass = 0.0;
+            var k_rev = R - 1u;
+            while (k_rev > ju) {
+                s_mass = s_mass + p[sb + k_rev];
+                k_rev = k_rev - 1u;
+                if (k_rev > ju) {
+                    crps_e[k_rev] = -s_mass;
+                }
+            }
+            let l_s = l_raw[side];
+            crps_e[ju] = select(f_mass - l_s, (1.0 - l_s) - s_mass, l_s > 0.5);
+            crps_g[R - 1u] = 0.0;
+            var g_acc = 0.0;
+            var cm = R - 1u;
+            while (cm > 0u) {
+                cm = cm - 1u;
+                g_acc = g_acc + 2.0 * crps_e[cm];
+                crps_g[cm] = g_acc;
+                crps_gbar = crps_gbar + p[sb + cm] * g_acc;
+            }
+        }
         if (use_ot) {
             // Prefix `0..=k` in `pref_m/pref_a` (left-tail excluded for k < ju, right-tail retained for k > ju).
             var pref_m: array<f32, R>;
@@ -532,6 +639,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             }
             if (k == ju) { gk = gk - sd * wl[side]; }
             if (k == ju + 1u) { gk = gk - sd * wr[side]; }
+            if (use_crps) {
+                gk = gk + sd * dfl_crps_w * wt * q * (crps_g[k] - crps_gbar);
+            }
             if (use_ot) {
                 let xk = x_raw[sb + k];
                 var d_ot = vec2<f32>(0.0, 0.0);

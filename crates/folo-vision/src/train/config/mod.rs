@@ -81,6 +81,8 @@ pub struct TrainConfig {
     pub nbs: usize,
     /// Keep an EMA of the weights for validation, checkpoints and export (§8.5).
     pub ema: bool,
+    /// EMA decay schedule (`legacy` exponential ramp or `power` for `PC-PEMA`).
+    pub ema_mode: folo_nn::EmaMode,
     /// A fine-tune's EMA window as a fraction of its optimizer steps (§8.5): a run from pretrained weights
     /// (`transfer`) averages over `ema_run_fraction · T` steps, at most the default window of 10,000, which runs of
     /// `10000 / ema_run_fraction` steps or more and every run from scratch keep; `0`: the default window for every
@@ -160,8 +162,8 @@ pub struct TrainConfig {
 
 /// `musgd.*` (docs/MODEL.md §8.2): `p −= muon · lr · O`, the SGD half of a conv weight at `sgd · lr`, the
 /// head's class branches at `cls_lr · lr0`, and the orthogonalisation schedule `ortho` (`polar4` default for new
-/// runs, `polar5`, or legacy `ns5`). Missing `ortho` in configs written before the key reads as `ns5` so older
-/// runs resume with legacy `ns5`.
+/// runs, `polar5`, `polar3_cs9`, or legacy `ns5`). Missing `ortho` in configs written before the key reads as `ns5`
+/// so older runs resume with legacy `ns5`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MuSgdConfig {
@@ -216,6 +218,7 @@ impl Default for TrainConfig {
             cos_lr: false,
             nbs: 64,
             ema: true,
+            ema_mode: folo_nn::EmaMode::Legacy,
             ema_run_fraction: 0.25,
             clip_grad_norm: 10.0,
             amp: false,

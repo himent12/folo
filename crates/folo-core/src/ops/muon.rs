@@ -26,7 +26,7 @@ pub struct MuonItem<'a> {
     pub depthwise: bool,
 }
 
-/// Maximum odd-quintic orthogonalisation steps a single [`MuonSettings`] holds.
+/// Maximum orthogonalisation steps a single [`MuonSettings`] holds.
 pub const MAX_MUON_STEPS: usize = 8;
 
 /// The settings of [`crate::backend::Backend::muon_step_many`].
@@ -36,11 +36,15 @@ pub struct MuonSettings {
     pub momentum: f32,
     /// Nesterov: `u = (g · (1 − μ)) · 1 + m · μ`; else `u = m`.
     pub nesterov: bool,
-    /// Per-step odd-quintic coefficients `(a_k, b_k, c_k)` for `k < steps`.
+    /// Per-step odd-quintic coefficients `(a_k, b_k, c_k)` for `k < steps` (when `!cs9`).
     pub step_coeffs: [(f32, f32, f32); MAX_MUON_STEPS],
+    /// Per-step Completed-Square degree-9 coefficients `(gamma, delta, eta, xi, c4)` for `k < steps` (when `cs9`).
+    pub cs9_coeffs: [(f32, f32, f32, f32, f32); MAX_MUON_STEPS],
+    /// Use Completed-Square Paterson-Stockmeyer degree-9 polynomial + step-0 Schatten-8 rescaling (`Polar3-CS9`).
+    pub cs9: bool,
     /// Number of polynomial steps (`<= MAX_MUON_STEPS`).
     pub steps: usize,
-    /// Step-0 Schatten-4 spectral rescaling.
+    /// Step-0 Schatten-4 spectral rescaling (or overflow-safe step-0 Schatten-8 when `cs9`).
     pub schatten4: bool,
     /// Added to Frobenius / row norm before division.
     pub eps: f32,
@@ -49,7 +53,7 @@ pub struct MuonSettings {
 }
 
 impl MuonSettings {
-    /// Per-step schedule `schedule` (`len <= MAX_MUON_STEPS`) with optional step-0 Schatten-4 rescaling.
+    /// Per-step odd-quintic schedule `schedule` (`len <= MAX_MUON_STEPS`) with optional step-0 Schatten-4 rescaling.
     pub fn from_schedule(
         mu: f32,
         nesterov: bool,
@@ -61,7 +65,41 @@ impl MuonSettings {
         let mut step_coeffs = [(0.0, 0.0, 0.0); MAX_MUON_STEPS];
         let n = schedule.len().min(MAX_MUON_STEPS);
         step_coeffs[..n].copy_from_slice(&schedule[..n]);
-        MuonSettings { momentum: mu, nesterov, step_coeffs, steps: schedule.len(), schatten4, eps, lr }
+        MuonSettings {
+            momentum: mu,
+            nesterov,
+            step_coeffs,
+            cs9_coeffs: [(0.0, 0.0, 0.0, 0.0, 0.0); MAX_MUON_STEPS],
+            cs9: false,
+            steps: schedule.len(),
+            schatten4,
+            eps,
+            lr,
+        }
+    }
+
+    /// Per-step Completed-Square degree-9 schedule (`Polar3-CS9` + step-0 Schatten-8 spectral rescaling).
+    pub fn from_cs9(
+        mu: f32,
+        nesterov: bool,
+        schedule: &[(f32, f32, f32, f32, f32)],
+        eps: f32,
+        lr: f32,
+    ) -> Self {
+        let mut cs9_coeffs = [(0.0, 0.0, 0.0, 0.0, 0.0); MAX_MUON_STEPS];
+        let n = schedule.len().min(MAX_MUON_STEPS);
+        cs9_coeffs[..n].copy_from_slice(&schedule[..n]);
+        MuonSettings {
+            momentum: mu,
+            nesterov,
+            step_coeffs: [(0.0, 0.0, 0.0); MAX_MUON_STEPS],
+            cs9_coeffs,
+            cs9: true,
+            steps: schedule.len(),
+            schatten4: true,
+            eps,
+            lr,
+        }
     }
 }
 

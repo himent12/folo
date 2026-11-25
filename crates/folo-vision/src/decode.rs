@@ -96,11 +96,172 @@ pub fn make_anchors(imgsz_h: u32, imgsz_w: u32, strides: &[u32], offset: f32) ->
     a
 }
 
+/// 2×8 AVX2 fast path for `reg_max == 16` DFL softmax statistics (degree-5 minimax `exp`, no libm calls).
+#[cfg(target_arch = "x86_64")]
+mod avx2_16 {
+    use std::arch::x86_64::*;
+
+    const LOG2E: f32 = std::f32::consts::LOG2_E;
+    const LN2_HI: f32 = 0.693_359_4;
+    const LN2_LO: f32 = -2.121_944_4e-4;
+    const EXP5_C5: f32 = 8.290_312e-3;
+    const EXP5_C4: f32 = 4.189_795_3e-2;
+    const EXP5_C3: f32 = 1.666_763_6e-1;
+    const EXP5_C2: f32 = 4.999_915e-1;
+    const EXP5_C1: f32 = 9.999_997e-1;
+    const EXP_MAGIC: f32 = 12_582_912.0;
+    const EXP_MAGIC_BITS: i32 = 0x4B40_0000;
+
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn hmax8(v: __m256) -> f32 {
+        let hi = _mm256_extractf128_ps::<1>(v);
+        let lo = _mm256_castps256_ps128(v);
+        let m4 = _mm_max_ps(lo, hi);
+        let m2 = _mm_max_ps(m4, _mm_movehl_ps(m4, m4));
+        let m1 = _mm_max_ss(m2, _mm_shuffle_ps::<1>(m2, m2));
+        _mm_cvtss_f32(m1)
+    }
+
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn hsum8(v: __m256) -> f32 {
+        let hi = _mm256_extractf128_ps::<1>(v);
+        let lo = _mm256_castps256_ps128(v);
+        let s4 = _mm_add_ps(lo, hi);
+        let s2 = _mm_add_ps(s4, _mm_movehl_ps(s4, s4));
+        let s1 = _mm_add_ss(s2, _mm_shuffle_ps::<1>(s2, s2));
+        _mm_cvtss_f32(s1)
+    }
+
+    /// Vectorised `exp(u)` for `u <= 0` already clamped to `>= -104.0` (degree-5 minimax, max rel err `9.5e-8`).
+    #[target_feature(enable = "avx2")]
+    #[inline]
+    unsafe fn exp_neg8(uc: __m256) -> __m256 {
+        let magic = _mm256_set1_ps(EXP_MAGIC);
+        let z = _mm256_add_ps(_mm256_mul_ps(uc, _mm256_set1_ps(LOG2E)), magic);
+        let n = _mm256_sub_ps(z, magic);
+        let r = _mm256_sub_ps(
+            _mm256_sub_ps(uc, _mm256_mul_ps(n, _mm256_set1_ps(LN2_HI))),
+            _mm256_mul_ps(n, _mm256_set1_ps(LN2_LO)),
+        );
+        let mut p = _mm256_set1_ps(EXP5_C5);
+        p = _mm256_add_ps(_mm256_mul_ps(p, r), _mm256_set1_ps(EXP5_C4));
+        p = _mm256_add_ps(_mm256_mul_ps(p, r), _mm256_set1_ps(EXP5_C3));
+        p = _mm256_add_ps(_mm256_mul_ps(p, r), _mm256_set1_ps(EXP5_C2));
+        p = _mm256_add_ps(_mm256_mul_ps(p, r), _mm256_set1_ps(EXP5_C1));
+        let y = _mm256_add_ps(_mm256_mul_ps(p, r), _mm256_set1_ps(1.0));
+        let ni = _mm256_sub_epi32(_mm256_castps_si256(z), _mm256_set1_epi32(EXP_MAGIC_BITS));
+        let n1 = _mm256_srai_epi32::<1>(ni);
+        let n2 = _mm256_sub_epi32(ni, n1);
+        let bias = _mm256_set1_epi32(127);
+        let s1 = _mm256_castsi256_ps(_mm256_slli_epi32::<23>(_mm256_add_epi32(n1, bias)));
+        let s2 = _mm256_castsi256_ps(_mm256_slli_epi32::<23>(_mm256_add_epi32(n2, bias)));
+        _mm256_mul_ps(_mm256_mul_ps(y, s1), s2)
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn expectation(logits: &[f32; 16]) -> Option<f32> {
+        let ptr = logits.as_ptr();
+        let v0 = unsafe { _mm256_loadu_ps(ptr) };
+        let v1 = unsafe { _mm256_loadu_ps(ptr.add(8)) };
+        if _mm256_movemask_ps(_mm256_cmp_ps::<_CMP_UNORD_Q>(v0, v1)) != 0 {
+            return None;
+        }
+        let m = unsafe { hmax8(_mm256_max_ps(v0, v1)) };
+        if !m.is_finite() {
+            return None;
+        }
+        let vm = _mm256_set1_ps(m);
+        let floor = _mm256_set1_ps(-104.0);
+        let uc0 = _mm256_max_ps(_mm256_sub_ps(v0, vm), floor);
+        let uc1 = _mm256_max_ps(_mm256_sub_ps(v1, vm), floor);
+        let p0 = unsafe { exp_neg8(uc0) };
+        let p1 = unsafe { exp_neg8(uc1) };
+        let k0 = _mm256_setr_ps(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0);
+        let k1 = _mm256_setr_ps(8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0);
+        let z = unsafe { hsum8(_mm256_add_ps(p0, p1)) };
+        let e = unsafe { hsum8(_mm256_add_ps(_mm256_mul_ps(p0, k0), _mm256_mul_ps(p1, k1))) };
+        Some(e / z)
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn moments(logits: &[f32; 16]) -> Option<(f32, f32)> {
+        let ptr = logits.as_ptr();
+        let v0 = unsafe { _mm256_loadu_ps(ptr) };
+        let v1 = unsafe { _mm256_loadu_ps(ptr.add(8)) };
+        if _mm256_movemask_ps(_mm256_cmp_ps::<_CMP_UNORD_Q>(v0, v1)) != 0 {
+            return None;
+        }
+        let m = unsafe { hmax8(_mm256_max_ps(v0, v1)) };
+        if !m.is_finite() {
+            return None;
+        }
+        let vm = _mm256_set1_ps(m);
+        let floor = _mm256_set1_ps(-104.0);
+        let uc0 = _mm256_max_ps(_mm256_sub_ps(v0, vm), floor);
+        let uc1 = _mm256_max_ps(_mm256_sub_ps(v1, vm), floor);
+        let p0 = unsafe { exp_neg8(uc0) };
+        let p1 = unsafe { exp_neg8(uc1) };
+        let k0 = _mm256_setr_ps(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0);
+        let k1 = _mm256_setr_ps(8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0);
+        let k0_sq = _mm256_setr_ps(0.0, 1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0);
+        let k1_sq = _mm256_setr_ps(64.0, 81.0, 100.0, 121.0, 144.0, 169.0, 196.0, 225.0);
+        let z = unsafe { hsum8(_mm256_add_ps(p0, p1)) };
+        let e = unsafe { hsum8(_mm256_add_ps(_mm256_mul_ps(p0, k0), _mm256_mul_ps(p1, k1))) };
+        let e2 = unsafe { hsum8(_mm256_add_ps(_mm256_mul_ps(p0, k0_sq), _mm256_mul_ps(p1, k1_sq))) };
+        let mean = e / z;
+        Some((mean, (e2 / z - mean * mean).max(0.0)))
+    }
+
+    #[target_feature(enable = "avx2")]
+    pub(super) unsafe fn moments_and_entropy(logits: &[f32; 16]) -> Option<(f32, f32, f32)> {
+        let ptr = logits.as_ptr();
+        let v0 = unsafe { _mm256_loadu_ps(ptr) };
+        let v1 = unsafe { _mm256_loadu_ps(ptr.add(8)) };
+        if _mm256_movemask_ps(_mm256_cmp_ps::<_CMP_UNORD_Q>(v0, v1)) != 0 {
+            return None;
+        }
+        let m = unsafe { hmax8(_mm256_max_ps(v0, v1)) };
+        if !m.is_finite() {
+            return None;
+        }
+        let vm = _mm256_set1_ps(m);
+        let floor = _mm256_set1_ps(-104.0);
+        let uc0 = _mm256_max_ps(_mm256_sub_ps(v0, vm), floor);
+        let uc1 = _mm256_max_ps(_mm256_sub_ps(v1, vm), floor);
+        let p0 = unsafe { exp_neg8(uc0) };
+        let p1 = unsafe { exp_neg8(uc1) };
+        let k0 = _mm256_setr_ps(0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0);
+        let k1 = _mm256_setr_ps(8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0);
+        let k0_sq = _mm256_setr_ps(0.0, 1.0, 4.0, 9.0, 16.0, 25.0, 36.0, 49.0);
+        let k1_sq = _mm256_setr_ps(64.0, 81.0, 100.0, 121.0, 144.0, 169.0, 196.0, 225.0);
+        let z = unsafe { hsum8(_mm256_add_ps(p0, p1)) };
+        let e = unsafe { hsum8(_mm256_add_ps(_mm256_mul_ps(p0, k0), _mm256_mul_ps(p1, k1))) };
+        let e2 = unsafe { hsum8(_mm256_add_ps(_mm256_mul_ps(p0, k0_sq), _mm256_mul_ps(p1, k1_sq))) };
+        let su = unsafe { hsum8(_mm256_add_ps(_mm256_mul_ps(p0, uc0), _mm256_mul_ps(p1, uc1))) };
+        let mean = e / z;
+        let var = (e2 / z - mean * mean).max(0.0);
+        let raw_ent = z.ln() - su / z;
+        let ent = if raw_ent.is_finite() { raw_ent.max(0.0) } else { f32::NAN };
+        Some((mean, var, ent))
+    }
+}
+
 /// `sum_i i * softmax(logits)_i`, computed stably (max-subtracted). `0` for an empty slice.
 #[inline]
 pub fn softmax_expectation(logits: &[f32]) -> f32 {
     if logits.is_empty() {
         return 0.0;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if let Ok(arr) = <&[f32; 16]>::try_from(logits)
+        && std::is_x86_feature_detected!("avx2")
+    {
+        // SAFETY: AVX2 support checked above; `arr` has 16 elements.
+        if let Some(v) = unsafe { avx2_16::expectation(arr) } {
+            return v;
+        }
     }
     let m = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let (mut z, mut e) = (0.0f32, 0.0f32);
@@ -118,6 +279,15 @@ pub fn softmax_expectation(logits: &[f32]) -> f32 {
 pub fn softmax_moments(logits: &[f32]) -> (f32, f32) {
     if logits.is_empty() {
         return (0.0, 0.0);
+    }
+    #[cfg(target_arch = "x86_64")]
+    if let Ok(arr) = <&[f32; 16]>::try_from(logits)
+        && std::is_x86_feature_detected!("avx2")
+    {
+        // SAFETY: AVX2 support checked above; `arr` has 16 elements.
+        if let Some(v) = unsafe { avx2_16::moments(arr) } {
+            return v;
+        }
     }
     let m = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let (mut z, mut e, mut e2) = (0.0f32, 0.0f32, 0.0f32);
@@ -140,6 +310,15 @@ pub fn softmax_moments(logits: &[f32]) -> (f32, f32) {
 pub fn softmax_moments_and_entropy(logits: &[f32]) -> (f32, f32, f32) {
     if logits.is_empty() {
         return (0.0, 0.0, 0.0);
+    }
+    #[cfg(target_arch = "x86_64")]
+    if let Ok(arr) = <&[f32; 16]>::try_from(logits)
+        && std::is_x86_feature_detected!("avx2")
+    {
+        // SAFETY: AVX2 support checked above; `arr` has 16 elements.
+        if let Some(v) = unsafe { avx2_16::moments_and_entropy(arr) } {
+            return v;
+        }
     }
     let m = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let (mut z, mut e, mut e2, mut su) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
@@ -401,5 +580,58 @@ mod tests {
         let (bx, sc) = decode_head(&reg, &vec![0.0; a.len() * 3], &a, reg_max, 3);
         assert_eq!(bx, boxes);
         assert!(sc.iter().all(|&s| s == 0.5));
+    }
+
+    #[test]
+    fn softmax_16_avx2_matches_scalar_reference() {
+        fn ref_moments_ent(logits: &[f32]) -> (f32, f32, f32) {
+            let m = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let (mut z, mut e, mut e2, mut su) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            for (i, &l) in logits.iter().enumerate() {
+                let u = l - m;
+                let p = u.exp();
+                let k = i as f32;
+                z += p;
+                e += p * k;
+                e2 += p * k * k;
+                if p > 0.0 {
+                    su += p * u;
+                }
+            }
+            let mean = e / z;
+            let var = (e2 / z - mean * mean).max(0.0);
+            let raw_ent = z.ln() - su / z;
+            let ent = if raw_ent.is_finite() { raw_ent.max(0.0) } else { f32::NAN };
+            (mean, var, ent)
+        }
+        let mut s = 0x1234_5678u64;
+        for case in 0..200 {
+            let mut logits = [0.0f32; 16];
+            for x in &mut logits {
+                s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let u = ((s >> 40) as f32) / ((1u32 << 24) as f32);
+                *x = (u * 2.0 - 1.0) * if case % 5 == 0 { 80.0 } else { 8.0 };
+            }
+            if case == 10 {
+                logits[0] = f32::NEG_INFINITY;
+                logits[15] = f32::NEG_INFINITY;
+            }
+            let (rm, rv, rh) = ref_moments_ent(&logits);
+            let gm = softmax_expectation(&logits);
+            let (gm2, gv2) = softmax_moments(&logits);
+            let (gm3, gv3, gh3) = softmax_moments_and_entropy(&logits);
+            assert_eq!(gm2.to_bits(), gm3.to_bits(), "moments vs moments_and_entropy mean");
+            assert_eq!(gv2.to_bits(), gv3.to_bits(), "moments vs moments_and_entropy var");
+            assert!((gm - rm).abs() <= 1e-5, "case {case} exp: {gm} vs {rm}");
+            assert!((gm2 - rm).abs() <= 1e-5, "case {case} mean: {gm2} vs {rm}");
+            assert!((gv2 - rv).abs() <= 1e-4, "case {case} var: {gv2} vs {rv}");
+            assert!((gh3 - rh).abs() <= 2e-5, "case {case} ent: {gh3} vs {rh}");
+        }
+        // Non-finite 16-bin edge cases fall back cleanly.
+        assert!(softmax_moments_and_entropy(&[f32::NAN; 16]).2.is_nan());
+        let mut inf16 = [0.0f32; 16];
+        inf16[7] = f32::INFINITY;
+        assert!(softmax_moments_and_entropy(&inf16).2.is_nan());
+        assert!(softmax_moments_and_entropy(&[f32::NEG_INFINITY; 16]).2.is_nan());
     }
 }

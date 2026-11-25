@@ -19,7 +19,15 @@ static LETTERBOX: KernelDef = KernelDef {
 static DETECT: KernelDef = KernelDef {
     name: "detect",
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/detect.wgsl")),
+    source: Source::Generated(|spec| {
+        let vk = super::detect::v_k();
+        let r_cap = spec.get_u32("R", 0).max(1);
+        format!(
+            "const V_K: f32 = {vk:?}f;\nconst R_CAP: u32 = {r_cap}u;\n{}{}",
+            include_str!("../shaders/detect_common.wgsl"),
+            include_str!("../shaders/detect.wgsl")
+        )
+    }),
 };
 static U8_SCALE: KernelDef = KernelDef {
     name: "u8_to_float_scale",
@@ -323,7 +331,8 @@ pub fn detect_candidates(
         return Ok(());
     }
     ctx.clear(out, 4 * words as u64);
-    let k = ctx.kernel(&DETECT, Spec::new().f16(dtype == DType::F16))?;
+    let r_spec = if rm <= super::detect::MAX_REG_MAX { rm as u32 } else { 0 };
+    let k = ctx.kernel(&DETECT, Spec::new().f16(dtype == DType::F16).u32("R", r_spec))?;
     let p = Params::new().uz(ba)?.uz(anchors_n)?.uz(nc)?.uz(rm)?.f(conf);
     ctx.dispatch(&k, &[box_raw, cls_raw, anchors, out], &p, ctx.grid_1d(ba as u64, 256)?)
 }

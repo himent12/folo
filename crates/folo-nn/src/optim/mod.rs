@@ -52,8 +52,8 @@ pub(crate) use dispatch::{
 pub use grads::{GradAccumulator, global_grad_norm};
 pub use musgd::{MUON_SCALE, MuSgd, MuSgdWeights, is_muon_group};
 pub use ortho::{
-    MuonGeoMode, MuonOrtho, NS_COEFFS, NS_EPS, NS_STEPS, NS5_SCHEDULE, POLAR4_COEFFS, POLAR5_COEFFS,
-    muon_scale, muon_scale_geo, orthogonalize, orthogonalize_many, orthogonalize_many_with,
+    MuonGeoMode, MuonOrtho, NS_COEFFS, NS_EPS, NS_STEPS, NS5_SCHEDULE, POLAR3_CS9_COEFFS, POLAR4_COEFFS,
+    POLAR5_COEFFS, muon_scale, muon_scale_geo, orthogonalize, orthogonalize_many, orthogonalize_many_with,
     orthogonalize_with,
 };
 pub use sgd::Sgd;

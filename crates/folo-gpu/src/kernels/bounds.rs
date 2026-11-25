@@ -61,6 +61,8 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
         "tal_topk" => {
             (1..=MAX_TOPK).contains(&u("K", 0)) && [1, 2, 4, 8, 16, 32, 64, 128].contains(&u("WG", 0))
         }
+        "det_dfl_stats" => (1..=MAX_REG_MAX).contains(&u("R", 0)),
+        "detect" | "sites_decode" => u("R", 0) <= MAX_REG_MAX,
         _ if name.starts_with("tal_") || name.starts_with("det_") => {
             u("K", 0) <= MAX_TOPK && u("K2", 0) <= MAX_TOPK && u("R", 0) <= MAX_REG_MAX
         }
@@ -122,9 +124,36 @@ mod tests {
             ("letterbox", Spec::new().bool("PREFILTER", false)),
             ("tal_topk", Spec::new().u32("K", 64).u32("WG", 16)),
             ("det_box", Spec::new().u32("R", 16).u32("K", 10)),
+            ("det_dfl_stats", Spec::new().f16(true).u32("R", 16).bool("MOMENTS", true).bool("ENT", true)),
+            ("detect", Spec::new().f16(true).u32("R", 16)),
+            ("sites_decode", Spec::new().f16(false).u32("R", 16)),
             ("det_bce_fwd", Spec::new().subgroups(true)),
             ("det_combine", Spec::new().subgroups(true)),
             ("reduce_rows", Spec::new().u32("OP", 0).bool("VEC4", true).subgroups(true)),
+            ("muon_s8", Spec::new()),
+            (
+                "muon_gemm",
+                Spec::new()
+                    .u32("MODE", 1)
+                    .u32("BM", 32)
+                    .u32("BN", 32)
+                    .u32("TM", 4)
+                    .u32("TN", 4)
+                    .u32("DEPTH", 32)
+                    .bool("DIAG_BIAS", true),
+            ),
+            (
+                "muon_gemm",
+                Spec::new()
+                    .u32("MODE", 1)
+                    .u32("BM", 32)
+                    .u32("BN", 32)
+                    .u32("TM", 4)
+                    .u32("TN", 4)
+                    .u32("DEPTH", 32)
+                    .bool("S8", true)
+                    .bool("INPLACE_SR", true),
+            ),
             (
                 "muon_gemm",
                 Spec::new()
@@ -210,7 +239,45 @@ mod tests {
             ("tal_topk", Spec::new().u32("K", 65)),
             ("tal_targets", Spec::new().u32("K", 10).u32("K2", 65536)),
             ("det_box", Spec::new().u32("R", 33)),
+            ("det_dfl_stats", Spec::new().u32("R", 0)),
+            ("det_dfl_stats", Spec::new().u32("R", 33)),
+            ("detect", Spec::new().u32("R", 33)),
+            ("sites_decode", Spec::new().u32("R", 33)),
             ("muon_gemm", Spec::new().u32("MODE", 3)),
+            (
+                "muon_gemm",
+                Spec::new()
+                    .u32("MODE", 0)
+                    .u32("BM", 32)
+                    .u32("BN", 32)
+                    .u32("TM", 4)
+                    .u32("TN", 4)
+                    .u32("DEPTH", 32)
+                    .bool("S8", true),
+            ),
+            (
+                "muon_gemm",
+                Spec::new()
+                    .u32("MODE", 1)
+                    .u32("BM", 32)
+                    .u32("BN", 32)
+                    .u32("TM", 4)
+                    .u32("TN", 4)
+                    .u32("DEPTH", 32)
+                    .bool("S4", true)
+                    .bool("S8", true),
+            ),
+            (
+                "muon_gemm",
+                Spec::new()
+                    .u32("MODE", 2)
+                    .u32("BM", 64)
+                    .u32("BN", 64)
+                    .u32("TM", 4)
+                    .u32("TN", 4)
+                    .u32("DEPTH", 16)
+                    .bool("DIAG_BIAS", true),
+            ),
             ("muon_gemm", Spec::new().u32("MODE", 0).u32("BM", 64).u32("BN", 128).u32("TM", 4).u32("TN", 8)),
             (
                 "muon_gemm",

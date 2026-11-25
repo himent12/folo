@@ -35,13 +35,16 @@ Conventions used throughout:
 
 | extension | switch / default | what it changes | spec |
 |---|---|---|---|
-| **Polar-FOLO** | `musgd.ortho = polar4` (default for new MuSGD runs; `polar5`, legacy `ns5`) | 4-step minimax Remez orthogonalisation + step-0 Schatten-4 spectral rescaling (12 GEMMs vs 15 for `ns5`) | §8.2 |
+| **Polar-FOLO / Polar3-CS9** | `musgd.ortho = polar4` (default for new MuSGD runs; `polar5`, `polar3_cs9`, legacy `ns5`) | 4-step minimax Remez orthogonalisation + step-0 Schatten-4 rescaling (12 GEMMs vs 15 for `ns5`); opt-in `polar3_cs9` runs 3-step Completed-Square degree-9 + step-0 Schatten-8 (6 wide `r×c` GEMMs, total degree 729) | §8.2 |
 | **Conv-GeoMuon** | `musgd.geo = geo` (opt-in; default `legacy`) | flattened 2-D conv aspect scaling `sqrt(max(1, c_out / (c_in · k_h · k_w)))` + zero-GEMM per-channel Polar LMO on depthwise convs | §8.2 |
 | **R-PIoU** | `loss.box_loss = rpiou` (opt-in; default `ciou`) | purely algebraic Rational-Focal Edge-Decoupled IoU (`rpiou_beta = 0.5`, `rpiou_kappa = 2.0`, `rpiou_delta = 0.5`) | §7.2 |
+| **S-AEIoU** | `loss.box_loss = saeiou` (opt-in; default `ciou`) | Scale-Normalized Algebraic Edge IoU: scale-normalized focal-IoU `(1 − u)(1 + β·u)` + shape-weighted per-edge inverse-sqrt penalty (`rpiou_beta = 0.5`, `rpiou_kappa = 2.0`, `rpiou_delta = 0.5`; zero `atan`/`exp`/exponent-split) | §7.2 |
 | **Inner-CIoU / WIoU v3** | `loss.box_loss = inner_ciou \| wiou_v3` (opt-in; default `ciou`) | auxiliary-box Inner-CIoU (`inner_ratio = 0.7`) or dynamic non-monotonic Wise-IoU v3 (`wiou_alpha = 1.9`, `wiou_delta = 3.0`, `wiou_momentum = 0.01`, EMA in `folo.wiou_iou_mean`) | §7.2 |
-| **VFL / QFL** | `loss.cls_loss = vfl \| qfl` (opt-in; default `bce`) | Varifocal Loss (`vfl_alpha = 0.75`, `vfl_gamma = 2.0`) or Quality Focal Loss (`qfl_beta = 2.0`) | §7.4 |
+| **VFL / QFL** | `loss.cls_loss = vfl \| qfl` (opt-in; default `bce`) | Varifocal Loss (`vfl_alpha = 0.75`, `vfl_gamma = 2.0`) or Quality Focal Loss (`qfl_beta = 2.0`); fused on CPU and GPU | §7.4 |
 | **Backbone LR / freeze** | `backbone_lr_scale` (`1.0`), `freeze_backbone_epochs` (`0`) | differential LR multiplier on `<group>.backbone` groups and initial backbone weight/BN freezing for transfer fine-tuning | §8.1 |
 | **OT-DFL** | `loss.dfl_ot_weight > 0` (opt-in; default `0.0`) | exact `O(R)` log-space 1-D optimal-transport cumulative tail barrier added to DFL (active when `reg_max > 2`) | §7.4 |
+| **CRPS-DFL** | `loss.dfl_crps_weight > 0` (opt-in; default `0.0`) | closed-form `O(R)` 1-D excess CRPS / squared Energy Distance over dual-ended CDF masses `F_k` and `S_k` (`reg_max >= 2`, tails never cancel) | §7.4 |
+| **PC-PEMA** | `ema_mode = power` (opt-in; default `legacy`) | Prior-Shifted LR-Phase-Coupled Power-Law EMA (`γ₀ = 6.94`, `ρ = 0.25`, `lf_min = 0.01`, prior shift `t₀`) | §8.5 |
 | **SEBF / DFL-CGR** | `--fusion sebf --score dfl-cgr` (opt-in; default `none`) | 1-step Student-t (`ν = 3`) IRLS exclusive-ownership box fusion (`IoU^4 · score · side_precision`) + confidence-gated greedy repulsion (`p_m^0.25`, `γ = 3.0`) | §9.4 |
 | **DIoU-NMS / Soft-NMS** | `NmsConfig.nms_kind` (`{"kind": "diou" \| "soft_linear" \| "soft_gaussian"}`; default `standard`) | center-distance-aware DIoU-NMS (`IoU − ρ²/c² > iou`) or score-decaying Linear / Gaussian Soft-NMS (`sigma = 0.5`) | §9.3 |
 | **int8 CPU** | `folo quantize`, `--precision int8` (opt-in; default `f32`) | post-training CPU int8 backbone/neck (`version: 2` per-channel C4 grids, per-part concat decoupling, direct `u8` stem `q8::stem_u8`, P5-tail `neck.out5.*` in `f32`; head stays `f32`) | §9.6 |
@@ -574,6 +577,25 @@ corners where boxes touch or edges coincide, requires no `atan` host round-trip 
 while the CPU / `reg_max > 32` fallback evaluates R-PIoU in host `f64`), and couples with `loss.nwd_weight`
 identically to CIoU.
 
+**S-AEIoU (opt-in box loss, `loss.box_loss = saeiou`).** Scale-Normalized Algebraic Edge IoU (`loss::saeiou_loss` /
+`saeiou_from_logits` on CPU in `f64`, fused inside `det_box.wgsl` as `box_loss_kind = 2` on GPU) keeps R-PIoU's
+high-IoU focal slope and reuses its hyperparameters (`loss.rpiou_beta = 0.5`, `loss.rpiou_kappa = 2.0`,
+`loss.rpiou_delta = 0.5`), while normalizing box areas when `m_dim = max(w1, h1, w2, h2) > 1e6` (`inv_s = 1 / m_dim`,
+else `1`) and replacing the coupled `E²` rational term with a shape-weighted per-edge algebraic inverse-sqrt penalty:
+```
+deficit = max(area1 − inter, 0) + max(area2 − inter, 0) + 1e-7,  u = inter / uni
+s_x     = w_gt + δ₀,   s_y = h_gt + δ₀,   w_x = 2·s_x / (s_x + s_y),   w_y = 2·s_y / (s_x + s_y)
+q(t)    = (1 + t²)^(-1/2),   r(t) = t · q(t),   φ(t) = r(t)² / (1 + q(t)) = 1 − (1 + t²)^(-1/2)
+L_sae   = (deficit / uni) · (1 + β · u)
+        + 0.25 · ( w_x · (φ(√κ·(x1−x1_gt)/s_x) + φ(√κ·(x2−x2_gt)/s_x))
+                 + w_y · (φ(√κ·(y1−y1_gt)/s_y) + φ(√κ·(y2−y2_gt)/s_y)) )
+```
+On valid boxes `deficit / uni` equals `1 − u` without catastrophic cancellation near `u → 1`, and `φ(t)` is
+$C^\infty$-smooth and bounded in `[0, 1)` with shared edge gradient prefactor `C = √κ / (2 · (s_x + s_y))` and
+per-edge derivative `C · r(t_e) · q(t_e)²` (overflow-guarded in `inv_sqrt_1p_sq` for large `|t|`). Because the entire
+forward and backward use only algebraic arithmetic and `sqrt`, S-AEIoU eliminates `atan`, `exp`, and exponent-split
+(`norm_f32`) overhead on the fused GPU path and couples with `loss.nwd_weight` identically to CIoU and R-PIoU.
+
 **Inner-CIoU (`loss.box_loss = inner_ciou`) and Wise-IoU v3 (`loss.box_loss = wiou_v3`, opt-in).**
 - *Inner-CIoU* (Zhang et al. 2023; `loss::inner_ciou_loss`, `loss.inner_ratio` in `[0.5, 1.5]`, default `0.7`): keeps
   CIoU's full-box center-distance (`ρ²/c²`) and aspect-ratio (`α·v`) penalties while replacing `1 − IoU` with
@@ -653,16 +675,18 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
   reproducible.
 - If any head output is NaN or infinite, `detection_loss` skips the assigner and returns a non-finite loss
   (`LossOutput::is_finite() == false`, `total` a detached NaN), which the trainer skips (§8.3).
-- **On a GPU** (head outputs on a folo-gpu device, `cls_loss = bce`, `box_loss ∈ {ciou, rpiou}`, `topk ∈ 1..=64`,
+- **On a GPU** (head outputs on a folo-gpu device, `cls_loss ∈ {bce, vfl, qfl}`, `box_loss ∈ {ciou, rpiou, saeiou}`, `topk ∈ 1..=64`,
   `topk2 != Some(0)`, `reg_max ∈ 2..=32`) `detection_loss` runs all of the above as kernels
   (`folo_gpu::detect`, docs/GPU.md) and downloads nothing but the reported items: the decode, §7.3 step by step (each
   gt's candidates scored and ranked in one workgroup, conflicts by atomics, then the soft targets and a dense
-  per-anchor target map), the BCE over every logit (each element formed whole), CIoU + DFL per positive with the
+  per-anchor target map), the classification loss (`det_bce_fwd.wgsl` / `det_bce_bwd.wgsl`: BCE/MAL, VFL, or QFL over
+  every logit, each element formed whole), CIoU / R-PIoU / S-AEIoU + DFL / OT-DFL / CRPS-DFL per positive with the
   backward written out by hand (α constant, min / max ties split as folo-core's autograd does), and a fixed-order
   reduction. `detection_loss_host` keeps the host assigner on any device (on this GPU fallback path, `inner_ciou` reads
-  foreground aspect ratios back for `atan`, `rpiou` reads foreground boxes back for host `f64` evaluation, `wiou_v3`
-  reads back the foreground mean IoU loss scalar, and `dfl_ot_weight > 0` with foreground anchors and `reg_max > 2`
-  reads gathered foreground logits back for host `f64` evaluation). `crates/folo-vision/tests/gpu_loss/`
+  foreground aspect ratios back for `atan`, `rpiou` and `saeiou` read foreground boxes back for host `f64` evaluation,
+  `wiou_v3` reads back the foreground mean IoU loss scalar, and `dfl_ot_weight > 0` (`reg_max > 2`) or
+  `dfl_crps_weight > 0` with foreground anchors reads gathered foreground logits back for host `f64` evaluation).
+  `crates/folo-vision/tests/gpu_loss/`
   checks the device assignment against the host one (the same positives, gts and labels; `t` to 1e-5) on several
   sizes, class counts and settings, and the items and both gradients against the host loss. The positives are
   listed per gt slot rather than per anchor and the sums run in another (fixed) order, so values agree to float
@@ -672,7 +696,8 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
     (`t = 0`) use `α · p^γ · softplus(x)` (`loss.vfl_alpha > 0` default `0.75`, `loss.vfl_gamma >= 0` default `2.0`).
   - `qfl` (Quality Focal Loss, Li et al. 2020): `|t − p|^β · BCE(x, t)` across both positives and negatives
     (`loss.qfl_beta` `0` or `>= 1`, default `2.0`).
-  Both run through `loss_with_assignment` (fused CPU custom ops on CPU, device-generic tensor composites on GPU).
+  Both run fused on GPU (`det_bce_fwd.wgsl` / `det_bce_bwd.wgsl` when `device_loss_supported` holds) and as fused CPU
+  custom ops through `loss_with_assignment` (device-generic tensor composites on other fallback devices).
 - **OT-DFL (opt-in DFL tail barrier, `loss.dfl_ot_weight > 0`).** Standard DFL applies cross-entropy only to the two
   adjacent target bins `j` and `j + 1`, giving identical gradient to misplaced mass 1 bin away or 10 bins away. When
   `λ_ot = loss.dfl_ot_weight > 0` (recommended `0.25`) and `reg_max > 2`, each foreground side adds an exact $O(R)$
@@ -684,6 +709,17 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
   (`f64` on CPU, exponent-split in `det_box.wgsl` / `det_combine.wgsl` on GPU to preserve tiny excluded tails without
   cancellation), with exact analytical backward verified by finite differences (`reg_max = 16` and `reg_max = 2`) and
   GPU-CPU parity.
+- **CRPS-DFL (opt-in DFL loss, `loss.dfl_crps_weight > 0`).** When `λ_crps = loss.dfl_crps_weight > 0` (works for any
+  `reg_max >= 2`, default `0.0`), each foreground side adds the closed-form 1-D excess Continuous Ranked Probability
+  Score (squared Energy Distance) between `p = softmax(z)` and the two-bin target `(j, w_l, w_r = 1 − w_l)`:
+  ```
+  F_k = Σ_{i=0..k} p_i  (k ≤ j),     S_k = Σ_{i=k+1..R−1} p_i  (k ≥ j)
+  e_k = F_k  (k < j),   −S_k  (k > j),   select(F_j − w_l, w_r − S_j, w_l > 0.5)  (k = j)
+  DFL_crps(a) = DFL(a) + λ_crps · (1/4) Σ_{side} Σ_{k=0..R−2} e_k²
+  ```
+  Computing cumulative masses from both ends (`F_k` left-to-right, `S_k` right-to-left) ensures small tails never
+  cancel against `1 − F_k`, runs in exact $O(R)$ time without logs or exponent-split arithmetic (`crps_dfl` in `f64` on
+  CPU and fused in `det_box.wgsl` on GPU), and can be used standalone or alongside `dfl_ot_weight`.
 - `crates/folo-vision/tests/loss_cases.rs` checks the terms against an `f64` reference, the loss cases of §10.3, a
   finite-difference gradient check of the whole loss, CIoU against `ciou_eps`, and determinism.
 
@@ -708,6 +744,7 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `cos_lr` | false | linear decay by default |
 | `close_mosaic` | 10 | epochs at the end with mosaic off, at most half of the run (§8.6) |
 | `ema` | true | `false`: no EMA (§8.5) |
+| `ema_mode` | `legacy` | EMA decay schedule (§8.5): `legacy` exponential ramp (default) or opt-in `power` (`PC-PEMA`, Prior-Shifted LR-Phase-Coupled Power-Law EMA); missing in older configs reads as `legacy` |
 | `ema_run_fraction` | 0.25 | a fine-tune's EMA window as a fraction of its optimizer steps, at most 10,000 (§8.5); `0`: the default window for every run, as in configs written before the key |
 | `clip_grad_norm` | 10.0 | max global gradient L2 norm; `0` disables clipping |
 | `o2o_keeps_tal` | true | `head = "o2o"`: its one-to-one assigner takes `loss.tal`'s `alpha`, `beta`, `eps`, `min_box_size` (§6.6); `false` in a config without the key (written before it, or a partial JSON decoded straight into `TrainConfig`) |
@@ -724,11 +761,12 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `gauge_norm` | false | opt-in exact function-preserving Floor Conv+BN Gauge Normalization applied on `--weights` transfer load (raises small-norm filters to the target norm floor while rescaling BN `running_mean` by `α` and `running_var + ε` by `α²`, leaving BN `γ`/`β` fixed) |
 | `bn_freeze_close_mosaic` | false | opt-in eval-mode BatchNorm (frozen running stats) during closed-mosaic annealing epochs (intended for mature Stage-2 runs) |
 | `cls_lr_close_scale` | 1.0 | opt-in multiplier applied to MuSGD `.cls` parameter groups' LR during closed-mosaic epochs (`> 0`, e.g. `0.3333` decays `3× → 1×`); refused for non-MuSGD optimizers |
-| `musgd.ortho` | `polar4` | Muon orthogonalisation schedule (§8.2): `polar4` (4-step Polar-FOLO minimax Remez + step-0 Schatten-4 spectral rescaling, 12 GEMMs), `polar5` (5-step Polar-FOLO, 15 GEMMs), or legacy `ns5` (fixed 5-step Newton–Schulz, 15 GEMMs); missing in older configs reads as `ns5` |
+| `musgd.ortho` | `polar4` | Muon orthogonalisation schedule (§8.2): `polar4` (4-step Polar-FOLO minimax Remez + step-0 Schatten-4 spectral rescaling, 12 GEMMs), `polar5` (5-step Polar-FOLO, 15 GEMMs), `polar3_cs9` (3-step Completed-Square degree-9 + step-0 Schatten-8, 6 wide `r×c` GEMMs, total degree 729), or legacy `ns5` (fixed 5-step Newton–Schulz, 15 GEMMs); missing in older configs reads as `ns5` |
 | `musgd.geo` | `legacy` | opt-in Conv-GeoMuon geometric conditioning (§8.2): `geo` fixes flattened 2-D conv aspect scaling (`sqrt(max(1, c_out / (c_in·k_h·k_w)))`) and uses exact zero-GEMM per-channel Polar LMO on depthwise convs; `legacy` keeps `sqrt(max(1, d_{-2} / d_{-1}))` |
-| `loss.box_loss` | `ciou` | box regression geometry loss (§7.2): `ciou` (default), `rpiou` (Rational-Focal Edge-Decoupled IoU; `loss.rpiou_beta = 0.5`, `loss.rpiou_kappa = 2.0`, `loss.rpiou_delta = 0.5`), `inner_ciou` (`loss.inner_ratio = 0.7`, in `[0.5, 1.5]`), or `wiou_v3` (`loss.wiou_alpha = 1.9`, `loss.wiou_delta = 3.0`, `loss.wiou_momentum = 0.01`) |
+| `loss.box_loss` | `ciou` | box regression geometry loss (§7.2): `ciou` (default), `rpiou` (Rational-Focal Edge-Decoupled IoU; `loss.rpiou_beta = 0.5`, `loss.rpiou_kappa = 2.0`, `loss.rpiou_delta = 0.5`), `saeiou` (Scale-Normalized Algebraic Edge IoU, reusing `rpiou_beta` / `rpiou_kappa` / `rpiou_delta`), `inner_ciou` (`loss.inner_ratio = 0.7`, in `[0.5, 1.5]`), or `wiou_v3` (`loss.wiou_alpha = 1.9`, `loss.wiou_delta = 3.0`, `loss.wiou_momentum = 0.01`) |
 | `loss.cls_loss` | `bce` | classification loss family (§7.4): `bce` (default, or MAL when `loss.mal_gamma > 0`), `vfl` (`loss.vfl_alpha = 0.75`, `loss.vfl_gamma = 2.0`), or `qfl` (`loss.qfl_beta = 2.0`, `0` or `>= 1`); `vfl`/`qfl` require `loss.mal_gamma == 0` |
 | `loss.dfl_ot_weight` | 0.0 | opt-in weight `λ_ot >= 0` of the 1-D optimal-transport cumulative tail-barrier term added to DFL (§7.4; recommended `0.25`) |
+| `loss.dfl_crps_weight` | 0.0 | opt-in weight `λ_crps >= 0` of the closed-form 1-D excess CRPS / squared Energy Distance term added to DFL (§7.4; any `reg_max >= 2`) |
 | `backbone_lr_scale` | 1.0 | opt-in differential LR multiplier (`> 0`) on `backbone.*` parameters (splits any optimizer group containing `backbone.*` parameters into `<group>.backbone` — leaving head-only `.cls` groups intact — and scales `bias.backbone`'s warmup start; default `1.0` keeps standard groups unchanged) |
 | `freeze_backbone_epochs` | 0 | opt-in count of initial epochs (`0..freeze_backbone_epochs`) during which `backbone.*` parameters have `requires_grad = false` and backbone BatchNorms stay in eval mode |
 
@@ -821,6 +859,16 @@ scratch (best mAP50-95 `0.9416` vs `0.9376`, `+0.0040`; final `0.9416` vs `0.937
 mAP50-95 on BCCD fine-tuning (`0.6254` vs `0.6216`, `+0.0038`, matching best `0.6312` vs `0.6313`) with zero non-finite
 batches and 20% fewer orthogonalisation GEMMs.
 
+**Polar3-CS9 + Step-0 Schatten-8 (`musgd.ortho = polar3_cs9`, opt-in).** Replaces the 4-step odd-quintic schedule with
+a 3-step Completed-Square Paterson–Stockmeyer degree-9 odd polynomial (`folo_nn::optim::POLAR3_CS9_COEFFS`,
+`l₀ = 4e-3`, `1.005` f32 safety cushion, total polynomial degree `9³ = 729 > 625 = 5⁴`). Each step takes
+`(γ, δ, η, ξ, c₄)` and computes `A = X·Xᵀ`, `S = δ·I + γ·A + A²`, `q₄(A) = ξ·I + η·A + c₄·S²`, `X' = q₄(A)·X`,
+cutting the wider `r × c` GEMMs from 8 (`polar4`) to 6 while keeping 12 total GEMMs. On step 0, after `A₀ = X₀·X₀ᵀ`
+and `A₂ = A₀²`, zero-extra-GEMM Schatten-8 spectral rescaling computes `α₈ = ‖A₂‖_F^(1/4) + eps / (‖u‖_F + eps)`
+(`muon_s8` on GPU) and folds `inv_a = 1 / α₈` directly into `S₀ = δ₀·I + (γ₀·inv_a²)·A₀ + inv_a⁴·A₂`,
+`B₀ = (η₀·inv_a²)·A₀ + c₄₀·S₀²`, and `X₁ = (ξ₀·inv_a)·X₀ + inv_a·(B₀·X₀)`. Serialized as `"muon_ortho": "polar3_cs9"`
+in `folo.optim`.
+
 **Conv-GeoMuon (`musgd.geo = geo`, opt-in).** Legacy `muon_scale` reads the last two dimensions `d₋₂ / d₋₁` of a 4-D
 conv weight `[c_out, c_in, k_h, k_w]`, which evaluates to `k_h / k_w = 1` for every square kernel — even on tall `1×1`
 expansions (`[256, 32, 1, 1]`) whose flattened matrix is `[256, 32]` — and passes depthwise convs (`[c, 1, k, k]`,
@@ -834,6 +882,14 @@ improves mean test best AP by `+0.0080` (`0.6344` vs `0.6264`, 3/3 seeds) while 
 `76.3 s`), and combines with `loss.box_loss = rpiou` for `+0.0129` mean test best AP (`0.6393`, 3/3 seeds) and
 `+0.0078` mean test last AP (`0.6336`, 3/3 seeds, `70.5 s`).
 
+*Empirical 3-seed tradeoff:* across 3-seed evaluations, `polar4 + geo + rpiou` remains the highest peak AP recipe on
+Shapes (`0.9534`), BCCD `test_best` (`0.6369`), and Brain-Tumor (`0.4266`). The opt-in additions (`polar3_cs9`,
+`saeiou`, `dfl_crps_weight`, `ema_mode = power`) trade peak AP on small validation splits (`Brain-Tumor` `0.4014` vs
+`0.4190` `T0_main` / `0.4266` `T1_strong`) in exchange for faster optimization/loss kernels, faster early from-scratch
+convergence (`PC-PEMA`, §8.5), and higher `BCCD test_last` (`0.6319` vs `0.6291` / `0.6265`). All existing `.folo`
+checkpoint and config defaults remain unchanged (`musgd.ortho = "polar4"`, `musgd.geo = "legacy"`,
+`loss.box_loss = "ciou"`, `loss.dfl_crps_weight = 0.0`, `ema_mode = "legacy"`).
+
 Then the SGD step reads the updated `p` (weight decay included), as the reference's in-place updates do. The two
 weights, class-branch factor and schedule are `TrainConfig.musgd` (`muon = 0.2`, `sgd = 1.0`: the SGD half of a Muon
 parameter runs at `sgd · lr`; `cls_lr = 3.0`; `ortho = polar4`), with `auto` rule 5 using 0.5 / 0.5 for a run from
@@ -846,12 +902,12 @@ reference: `bfloat16`); on the CPU matrices are batched by column count with zer
 (including `‖A₀‖_F`). On a GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels,
 and the rest of the Muon step fuses `decay` and `decay.cls` under Polar-FOLO (when they share `(μ, nesterov)` and
 folded scales stay finite; legacy `ns5` keeps per-group calls for per-group rounding and aliasing semantics) into one call for all
-matrices (`Tensor::muon_step_many_`, `kernels::muon`: the Nesterov mix, `2^-80` overflow-safe normalisation under Polar-FOLO and unscaled normalisation for legacy `ns5`, optional `muon_s4`, each
-polynomial step as three grouped symmetric/rectangular `vec4` GEMMs over every matrix at once, and `p −= lr · scale · O`);
-only the summation order of the products and of the norm differs from the tensor ops. Tests: `crates/folo-nn/tests/optim.rs`
-(two steps against an `f64` reference for `Polar4`, `Ns5`, and `Polar5`, orthogonality and `f64` checks), `tests/gpu/`
+matrices (`Tensor::muon_step_many_`, `kernels::muon`: the Nesterov mix, `2^-80` overflow-safe normalisation under Polar-FOLO / Polar3-CS9 and unscaled normalisation for legacy `ns5`, optional `muon_s4` or `muon_s8`, each
+polynomial step as grouped symmetric/rectangular `vec4` GEMMs over every matrix at once, and `p −= lr · scale · O`);
+only the summation order of the products and of the norm differs from the tensor ops. Tests: `crates/folo-nn/tests/optim/`
+(two steps against an `f64` reference for `Polar4`, `Ns5`, `Polar5`, and `Polar3Cs9`, orthogonality and `f64` checks), `tests/gpu/`
 (GPU against CPU; the fused kernels against the tensor ops on wide, tall, multi-tile, `r > 256` and single-row
-matrices, zero, near-zero, huge-norm and empty ones), `tests/folo_io.rs` (bit-exact CPU resume across all schedules).
+matrices, zero, near-zero, huge-norm and empty ones), `tests/folo_io/` (bit-exact CPU resume across all schedules).
 
 ### 8.3 Batches, accumulation and the step loop
 **Batches.** At the start of epoch `e` (0-based), the training indices `0 .. N_train` are shuffled with a permutation
@@ -986,6 +1042,25 @@ own protocol, which picks `best.folo` on the split it then scores for three of t
 scored split swings about 18 times as much from epoch to epoch, so its maximum there is higher; but the hold-out runs
 also train on 80% of the images and fewer steps, so the two results differ in more than the selection.
 Not tried: other windows than `h = 0.25` with the selection-free protocol (0.1 and 0.5 lost to it on the hold-outs).
+
+**PC-PEMA (opt-in power-law EMA, `ema_mode = power`).** Prior-Shifted LR-Phase-Coupled Power-Law EMA
+(`folo_nn::EmaMode::Power`, `EmaPowerConfig`) replaces the exponential ramp with a power-law decay whose effective
+exponent couples to the current LR schedule factor `lf_u = sched.lf(t)`:
+```
+denom     = u + t₀                                       (u = 1, 2, … after increment)
+β_u       = 0                                            if denom ≤ 1
+          = (1 − 1 / denom)^(γ_eff + 1)
+          = exp((γ_eff + 1) · ln(1 − 1 / denom))         otherwise
+γ_eff     = γ₀ · clamp(lf_u, lf_min, 1.0)^(−ρ)
+```
+with constants `γ₀ = 6.94` (`PEMA_GAMMA_0`, relative width `σ_rel = [(γ₀ + 1)(γ₀ + 3)]^(−1/2) ≈ 0.113`), `ρ = 0.25`
+(`PEMA_RHO`), and `lf_min = 0.01` (`PEMA_LF_MIN`). When `ema_mode = power`, the trainer sets the prior shift to
+`t₀ = 0.0` for from-scratch runs and `t₀ = warmup_iters` (or `max(round(0.03 · T), 1)` when `warmup_iters == 0`) for
+transfer runs (`--weights`), so step 1 does not overwrite pretrained shadow weights. The `EmaPowerConfig` is stored in
+`folo.ema.power` (FORMAT.md; omitted in legacy mode so existing checkpoints stay byte-identical), and the trainer logs
+`EMA PC-PEMA (γ₀ …, ρ …, t₀ …)` on its configuration line. `PC-PEMA` is opt-in and best suited for from-scratch
+training (on 30-epoch synthetic Shapes, early convergence improves by `+0.0335` mAP at epoch 10 and `+0.0264` at
+epoch 15 vs an identical run with legacy EMA); short fine-tunes should keep `ema_mode = legacy` or use a tuned `t₀`.
 
 ### 8.6 Data and augmentation (folo-data implements; the trainer configures)
 `s = imgsz`. Gray means 114 in every channel. Boxes are `xyxy` pixels throughout, and every geometric step below

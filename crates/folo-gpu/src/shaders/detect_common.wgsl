@@ -14,36 +14,33 @@ fn is_finite_f(x: f32) -> bool {
 
 fn fexp(x: f32) -> f32 {
     let xc = clamp(x, -104.0, 89.0);
-    let n = round(xc * 1.442695041);
-    let r = xc - n * 0.6933594 - n * -2.1219444e-4;
-    var p = 1.9875691e-4;
-    p = p * r + 1.3981999e-3;
-    p = p * r + 8.333452e-3;
-    p = p * r + 4.1665796e-2;
-    p = p * r + 1.6666665e-1;
-    p = p * r + 0.5;
-    let y = p * r * r + r + 1.0;
-    let ni = i32(n);
+    let z = fma(xc, 1.442695041, 12582912.0);
+    let n = z - 12582912.0;
+    let r = fma(n, 2.1219444e-4, fma(n, -0.6933594, xc));
+    var p = 8.290312e-3;
+    p = fma(p, r, 4.1897953e-2);
+    p = fma(p, r, 1.6667636e-1);
+    p = fma(p, r, 4.999915e-1);
+    p = fma(p, r, 9.999997e-1);
+    let y = fma(p, r, 1.0);
+    let ni = bitcast<i32>(z) - 0x4b400000;
     let n1 = ni >> 1u;
     let n2 = ni - n1;
     let s1 = bitcast<f32>(u32(n1 + 127) << 23u);
     let s2 = bitcast<f32>(u32(n2 + 127) << 23u);
-    return y * s1 * s2;
+    return (y * s1) * s2;
 }
 
-// ln(1 + e) for e in [0, 1]: 2 atanh(z) with z = e / (2 + e) <= 1/3, eight terms of the odd series.
+// ln(1 + e) for e in [0, 1]: 4-term Remez minimax on z^2 with z = e / (2 + e) <= 1/3 (max rel err 1.03e-8).
 fn log1p_unit(e: f32) -> f32 {
     let z = e / (2.0 + e);
     let z2 = z * z;
-    var s = 1.0 / 15.0;
-    s = s * z2 + 1.0 / 13.0;
-    s = s * z2 + 1.0 / 11.0;
-    s = s * z2 + 1.0 / 9.0;
-    s = s * z2 + 1.0 / 7.0;
-    s = s * z2 + 1.0 / 5.0;
-    s = s * z2 + 1.0 / 3.0;
-    s = s * z2 + 1.0;
-    return 2.0 * z * s;
+    var s = 1.3893566e-1;
+    s = fma(s, z2, 1.402164e-1);
+    s = fma(s, z2, 2.0009655e-1);
+    s = fma(s, z2, 3.3333224e-1);
+    let u = 2.0 * z;
+    return fma(u * z2, s, u);
 }
 
 // softplus(x) = max(x, 0) + ln(1 + e^-|x|), as folo-core computes it.
@@ -58,25 +55,23 @@ fn sigmoid_f(x: f32) -> f32 {
     return select(e * r, r, x >= 0.0);
 }
 
-fn atan_f(xx: f32) -> f32 {
-    var x = abs(xx);
-    var y = 0.0;
-    if (x > 2.414213562373095) {
-        y = 1.5707963267948966;
-        x = -1.0 / x;
-    } else if (x > 0.4142135623730950) {
-        y = 0.7853981633974483;
-        x = (x - 1.0) / (x + 1.0);
-    }
-    let z = x * x;
-    y = y + (((8.05374449538e-2 * z - 1.38776856032e-1) * z + 1.99777106478e-1) * z - 3.33329491539e-1) * z * x + x;
-    return select(y, -y, xx < 0.0);
-}
-
-// atan(w / h), kept finite if a malformed box makes h exactly 0 (as boxes::ciou_eps).
+// Branch-free 1-division 3-region Remez atan(w / h), kept finite if a malformed box makes h == 0.
 fn atan_wh(w: f32, h: f32) -> f32 {
-    if (h != 0.0) { return atan_f(w / h); }
-    return atan2(w, h);
+    let aw = abs(w);
+    let ah = abs(h);
+    let gt_hi = aw > 2.414213562 * ah;
+    let gt_lo = aw > 0.414213562 * ah;
+    let y0 = select(select(0.0, 0.785398163, gt_lo), 1.570796327, gt_hi);
+    let num = select(select(aw, aw - ah, gt_lo), -ah, gt_hi);
+    let den = select(select(ah, aw + ah, gt_lo), aw, gt_hi);
+    let x = select(num / den, 0.0, den == 0.0);
+    let z = x * x;
+    var p = 8.05374449538e-2;
+    p = fma(p, z, -1.38776856032e-1);
+    p = fma(p, z, 1.99777106478e-1);
+    p = fma(p, z, -3.33329491539e-1);
+    let y = y0 + fma(p * z, x, x);
+    return select(y, -y, (w < 0.0) != (h < 0.0));
 }
 
 // docs/MODEL.md §7.2 CIoU of xyxy boxes a and b, in the evaluation order of folo-vision's boxes::ciou_eps.
@@ -278,5 +273,56 @@ fn rpiou_loss_f(a: vec4<f32>, b: vec4<f32>, beta: f32, kappa: f32, delta0: f32) 
     let ke2 = select(1e16, min(ke2_raw, 1e16), is_finite_f(ke2_raw));
     let inv1 = 1.0 / (1.0 + ke2);
     let edge_pen = select(1.0, ke2 * inv1, is_finite_f(ke2_raw));
+    return focal_iou + edge_pen;
+}
+
+// Overflow-safe `(q(u), t(u))` where `q(u) = (1 + u^2)^(-1/2)` and `t(u) = u * q(u)`.
+fn inv_sqrt_1p_sq(u: f32) -> vec2<f32> {
+    let au = abs(u);
+    if (au > 1e4) {
+        return vec2<f32>(1.0 / au, select(-1.0, 1.0, u >= 0.0));
+    }
+    let q = 1.0 / sqrt(1.0 + u * u);
+    return vec2<f32>(q, u * q);
+}
+
+// Scale-normalized Algebraic Edge IoU loss (S-AEIoU) between predicted xyxy `a` and GT xyxy `b` (grid units).
+// Purely algebraic: zero `atan`, zero `exp`, zero `norm_f32`.
+fn saeiou_loss_f(a: vec4<f32>, b: vec4<f32>, beta: f32, kappa: f32, delta0: f32) -> f32 {
+    let eps_s = 1e-7;
+    let w1 = max(a.z - a.x, 0.0);
+    let h1 = max(a.w - a.y, 0.0);
+    let w2 = max(b.z - b.x, 0.0);
+    let h2 = max(b.w - b.y, 0.0);
+    let m_dim = max(max(w1, h1), max(w2, h2));
+    let inv_s = select(1.0, 1.0 / m_dim, m_dim > 1e6);
+    let w1s = w1 * inv_s;
+    let h1s = h1 * inv_s;
+    let w2s = w2 * inv_s;
+    let h2s = h2 * inv_s;
+    let iws = max(min(a.z, b.z) - max(a.x, b.x), 0.0) * inv_s;
+    let ihs = max(min(a.w, b.w) - max(a.y, b.y), 0.0) * inv_s;
+    let area1 = w1s * h1s;
+    let area2 = w2s * h2s;
+    let inter = iws * ihs;
+    let uni = area1 + area2 - inter + eps_s;
+    let iou = inter / uni;
+    let deficit = max(area1 - inter, 0.0) + max(area2 - inter, 0.0) + eps_s;
+    let focal_iou = (deficit / uni) * (1.0 + beta * iou);
+    let sx = w2 + delta0;
+    let sy = h2 + delta0;
+    let inv_sum = 1.0 / (sx + sy);
+    let wx = 2.0 * sx * inv_sum;
+    let wy = 2.0 * sy * inv_sum;
+    let rk = sqrt(kappa);
+    let qt_x1 = inv_sqrt_1p_sq(rk * (a.x - b.x) / sx);
+    let qt_x2 = inv_sqrt_1p_sq(rk * (a.z - b.z) / sx);
+    let qt_y1 = inv_sqrt_1p_sq(rk * (a.y - b.y) / sy);
+    let qt_y2 = inv_sqrt_1p_sq(rk * (a.w - b.w) / sy);
+    let phi_x1 = (qt_x1.y * qt_x1.y) / (1.0 + qt_x1.x);
+    let phi_x2 = (qt_x2.y * qt_x2.y) / (1.0 + qt_x2.x);
+    let phi_y1 = (qt_y1.y * qt_y1.y) / (1.0 + qt_y1.x);
+    let phi_y2 = (qt_y2.y * qt_y2.y) / (1.0 + qt_y2.x);
+    let edge_pen = 0.25 * (wx * (phi_x1 + phi_x2) + wy * (phi_y1 + phi_y2));
     return focal_iou + edge_pen;
 }

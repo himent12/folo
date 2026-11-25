@@ -58,6 +58,18 @@ pub const POLAR5_COEFFS: [(f32, f32, f32); 5] = [
     (3.940_082_3, -10.145_948, 7.158_359_5),
     (3.537_624_1, -6.125_873_6, 3.688_620_8),
 ];
+/// Completed-Square degree-9 coefficients `(gamma, delta, eta, xi, c4)` for one `Polar3-CS9` step.
+pub type Cs9StepCoeffs = (f32, f32, f32, f32, f32);
+
+/// Polar3-CS9 3-step Completed-Square Paterson–Stockmeyer degree-9 odd polynomial schedule
+/// (`l₀ = 4e-3`, safety cushion `1.005`, paired with step-0 Schatten-8 spectral rescaling):
+/// `(gamma, delta, eta, xi, c4)` with `S = delta·I + gamma·A + A²`, `q4(A) = xi·I + eta·A + c4·S²`, `X' = q4(A)·X`.
+/// Uses 6 wide `r × c` GEMMs (vs 8 in `Polar4`) for total degree `729 > 625`.
+pub const POLAR3_CS9_COEFFS: [Cs9StepCoeffs; 3] = [
+    (-1.149_836, 0.234_306_05, -0.042_710_006, 0.069_763_21, 135.661_48),
+    (-1.158_462, 0.242_525_31, -0.298_174_05, 0.491_120_82, 113.502_03),
+    (-1.261_140_8, 0.343_998, -1.070_805_2, 1.935_225_4, 29.709_389),
+];
 /// Added to the Frobenius norm before [`orthogonalize`] divides by it.
 pub const NS_EPS: f32 = 1e-7;
 /// A bucket of [`orthogonalize_many`] keeps its row counts within this factor (bounds the zero padding).
@@ -75,6 +87,10 @@ pub enum MuonOrtho {
     Polar4,
     /// Polar-FOLO 5-step minimax Remez odd-quintic schedule with step-0 Schatten-4 spectral rescaling (15 GEMMs).
     Polar5,
+    /// Polar3-CS9 3-step Completed-Square Paterson–Stockmeyer degree-9 odd polynomial with step-0 Schatten-8
+    /// spectral rescaling (6 wide `r × c` GEMMs, total degree 729).
+    #[serde(rename = "polar3_cs9")]
+    Polar3Cs9,
 }
 
 impl MuonOrtho {
@@ -83,27 +99,41 @@ impl MuonOrtho {
         *self == MuonOrtho::Polar4
     }
 
-    /// Per-step odd-quintic coefficients `(a_k, b_k, c_k)`.
+    /// Per-step odd-quintic coefficients `(a_k, b_k, c_k)` (empty for `Polar3Cs9`; use [`Self::cs9_schedule`]).
     pub fn schedule(self) -> &'static [(f32, f32, f32)] {
         match self {
             MuonOrtho::Ns5 => &NS5_SCHEDULE,
             MuonOrtho::Polar4 => &POLAR4_COEFFS,
             MuonOrtho::Polar5 => &POLAR5_COEFFS,
+            MuonOrtho::Polar3Cs9 => &[],
         }
     }
 
-    /// Whether step 0 applies zero-extra-GEMM Schatten-4 spectral rescaling
-    /// `α = ‖X₀·X₀ᵀ‖_F^(1/2) + eps / (‖U‖_F + eps)`.
+    /// Per-step Completed-Square degree-9 coefficients `(gamma, delta, eta, xi, c4)` when `Polar3Cs9`.
+    pub fn cs9_schedule(self) -> Option<&'static [Cs9StepCoeffs]> {
+        match self {
+            MuonOrtho::Polar3Cs9 => Some(&POLAR3_CS9_COEFFS),
+            _ => None,
+        }
+    }
+
+    /// True when this schedule uses the Completed-Square degree-9 polynomial (`Polar3Cs9`).
+    pub fn is_cs9(self) -> bool {
+        self == MuonOrtho::Polar3Cs9
+    }
+
+    /// Whether step 0 applies zero-extra-GEMM Schatten-4 (or Schatten-8 for `Polar3Cs9`) spectral rescaling.
     pub fn schatten4(self) -> bool {
         !matches!(self, MuonOrtho::Ns5)
     }
 
-    /// Canonical lowercase name (`"ns5"`, `"polar4"`, `"polar5"`).
+    /// Canonical lowercase name (`"ns5"`, `"polar4"`, `"polar5"`, `"polar3_cs9"`).
     pub fn as_str(self) -> &'static str {
         match self {
             MuonOrtho::Ns5 => "ns5",
             MuonOrtho::Polar4 => "polar4",
             MuonOrtho::Polar5 => "polar5",
+            MuonOrtho::Polar3Cs9 => "polar3_cs9",
         }
     }
 }
@@ -189,6 +219,7 @@ pub(super) fn orthogonalize_many_geo(
     }
     let mut out: Vec<Option<Tensor>> = vec![None; us.len()];
     let schedule = ortho.schedule();
+    let cs9_schedule = ortho.cs9_schedule();
     let use_s4 = ortho.schatten4();
     for (_, ks) in by_cols {
         let rmax = mats[ks[0]].1.dims()[0];
@@ -218,42 +249,109 @@ pub(super) fn orthogonalize_many_geo(
             let stride = x.numel() / batch;
             let (norms, eps_ss) =
                 x.update_f32(|xs| ortho_normalize_batch(xs, batch, stride, use_s4, NS_EPS))?;
-            for (step, &(a, b, c)) in schedule.iter().enumerate() {
-                let xt = x.transpose(1, 2)?.contiguous()?;
-                let am = x.matmul(&xt)?;
-                let aa = am.matmul(&am)?;
-                if step == 0 && use_s4 {
+            if let Some(cs9) = cs9_schedule {
+                for (step, &(gamma, delta, eta, xi, c4)) in cs9.iter().enumerate() {
+                    let xt = x.transpose(1, 2)?.contiguous()?;
+                    let am = x.matmul(&xt)?;
+                    let aa = am.matmul(&am)?;
                     let am_stride = am.numel() / batch;
-                    let mut inv_as = Vec::with_capacity(batch);
-                    am.with_f32_slice(|am_s| {
-                        aa.update_f32(|aa_s| {
-                            for bi in 0..batch {
-                                let am_b = &am_s[bi * am_stride..(bi + 1) * am_stride];
-                                let aa_b = &mut aa_s[bi * am_stride..(bi + 1) * am_stride];
-                                let a_frob = sum_sq_f32_slice(am_b, 1.0).sqrt();
-                                let alpha = a_frob.sqrt() + eps_ss[bi] / norms[bi];
-                                let inv_a = if alpha == 0.0 { 0.0 } else { 1.0 / alpha };
-                                let inv_a2 = inv_a * inv_a;
-                                let inv_a4 = inv_a2 * inv_a2;
-                                axpby_slice(aa_b, am_b, c * inv_a4, b * inv_a2);
-                                inv_as.push(inv_a);
-                            }
-                        })
-                    })??;
-                    let bx = aa.matmul(&x)?;
-                    bx.with_f32_slice(|bx_s| {
-                        x.update_f32(|x_s| {
-                            for (bi, &inv_a) in inv_as.iter().enumerate() {
-                                let x_b = &mut x_s[bi * stride..(bi + 1) * stride];
-                                let bx_b = &bx_s[bi * stride..(bi + 1) * stride];
-                                axpby_slice(x_b, bx_b, a * inv_a, inv_a);
-                            }
-                        })
-                    })??;
-                } else {
-                    am.with_f32_slice(|am_s| aa.update_f32(|aa_s| axpby_slice(aa_s, am_s, c, b)))??;
-                    let bx = aa.matmul(&x)?;
-                    bx.with_f32_slice(|bx_s| x.update_f32(|x_s| axpby_slice(x_s, bx_s, a, 1.0)))??;
+                    if step == 0 {
+                        let mut inv_as = Vec::with_capacity(batch);
+                        am.with_f32_slice(|am_s| {
+                            aa.update_f32(|aa_s| {
+                                for bi in 0..batch {
+                                    let am_b = &am_s[bi * am_stride..(bi + 1) * am_stride];
+                                    let aa_b = &mut aa_s[bi * am_stride..(bi + 1) * am_stride];
+                                    // Schatten-8 norm: ||A_2||_F^(1/4) = (sum(A_2^2))^(1/8).
+                                    let alpha8 = sum_sq_f32_slice(aa_b, 1.0).sqrt().sqrt().sqrt()
+                                        + eps_ss[bi] / norms[bi];
+                                    let inv_a = if alpha8 == 0.0 { 0.0 } else { 1.0 / alpha8 };
+                                    let ia2 = inv_a * inv_a;
+                                    let ia4 = ia2 * ia2;
+                                    axpby_slice(aa_b, am_b, ia4, gamma * ia2);
+                                    for r in 0..rmax {
+                                        aa_b[r * rmax + r] += delta;
+                                    }
+                                    inv_as.push(inv_a);
+                                }
+                            })
+                        })??;
+                        let s2 = aa.matmul(&aa)?;
+                        am.with_f32_slice(|am_s| {
+                            s2.update_f32(|s2_s| {
+                                for (bi, &inv_a) in inv_as.iter().enumerate() {
+                                    let am_b = &am_s[bi * am_stride..(bi + 1) * am_stride];
+                                    let s2_b = &mut s2_s[bi * am_stride..(bi + 1) * am_stride];
+                                    axpby_slice(s2_b, am_b, c4, eta * inv_a * inv_a);
+                                }
+                            })
+                        })??;
+                        let bx = s2.matmul(&x)?;
+                        bx.with_f32_slice(|bx_s| {
+                            x.update_f32(|x_s| {
+                                for (bi, &inv_a) in inv_as.iter().enumerate() {
+                                    let x_b = &mut x_s[bi * stride..(bi + 1) * stride];
+                                    let bx_b = &bx_s[bi * stride..(bi + 1) * stride];
+                                    axpby_slice(x_b, bx_b, xi * inv_a, inv_a);
+                                }
+                            })
+                        })??;
+                    } else {
+                        am.with_f32_slice(|am_s| {
+                            aa.update_f32(|aa_s| {
+                                axpby_slice(aa_s, am_s, 1.0, gamma);
+                                for bi in 0..batch {
+                                    let aa_b = &mut aa_s[bi * am_stride..(bi + 1) * am_stride];
+                                    for r in 0..rmax {
+                                        aa_b[r * rmax + r] += delta;
+                                    }
+                                }
+                            })
+                        })??;
+                        let s2 = aa.matmul(&aa)?;
+                        am.with_f32_slice(|am_s| s2.update_f32(|s2_s| axpby_slice(s2_s, am_s, c4, eta)))??;
+                        let bx = s2.matmul(&x)?;
+                        bx.with_f32_slice(|bx_s| x.update_f32(|x_s| axpby_slice(x_s, bx_s, xi, 1.0)))??;
+                    }
+                }
+            } else {
+                for (step, &(a, b, c)) in schedule.iter().enumerate() {
+                    let xt = x.transpose(1, 2)?.contiguous()?;
+                    let am = x.matmul(&xt)?;
+                    let aa = am.matmul(&am)?;
+                    if step == 0 && use_s4 {
+                        let am_stride = am.numel() / batch;
+                        let mut inv_as = Vec::with_capacity(batch);
+                        am.with_f32_slice(|am_s| {
+                            aa.update_f32(|aa_s| {
+                                for bi in 0..batch {
+                                    let am_b = &am_s[bi * am_stride..(bi + 1) * am_stride];
+                                    let aa_b = &mut aa_s[bi * am_stride..(bi + 1) * am_stride];
+                                    let a_frob = sum_sq_f32_slice(am_b, 1.0).sqrt();
+                                    let alpha = a_frob.sqrt() + eps_ss[bi] / norms[bi];
+                                    let inv_a = if alpha == 0.0 { 0.0 } else { 1.0 / alpha };
+                                    let inv_a2 = inv_a * inv_a;
+                                    let inv_a4 = inv_a2 * inv_a2;
+                                    axpby_slice(aa_b, am_b, c * inv_a4, b * inv_a2);
+                                    inv_as.push(inv_a);
+                                }
+                            })
+                        })??;
+                        let bx = aa.matmul(&x)?;
+                        bx.with_f32_slice(|bx_s| {
+                            x.update_f32(|x_s| {
+                                for (bi, &inv_a) in inv_as.iter().enumerate() {
+                                    let x_b = &mut x_s[bi * stride..(bi + 1) * stride];
+                                    let bx_b = &bx_s[bi * stride..(bi + 1) * stride];
+                                    axpby_slice(x_b, bx_b, a * inv_a, inv_a);
+                                }
+                            })
+                        })??;
+                    } else {
+                        am.with_f32_slice(|am_s| aa.update_f32(|aa_s| axpby_slice(aa_s, am_s, c, b)))??;
+                        let bx = aa.matmul(&x)?;
+                        bx.with_f32_slice(|bx_s| x.update_f32(|x_s| axpby_slice(x_s, bx_s, a, 1.0)))??;
+                    }
                 }
             }
         } else if x.numel() > 0 {
@@ -274,23 +372,58 @@ pub(super) fn orthogonalize_many_geo(
                 x = x.div(&norm)?;
                 (norm, None)
             };
-            for (step, &(a, b, c)) in schedule.iter().enumerate() {
-                let xt = x.transpose(1, 2)?.contiguous()?;
-                let am = x.matmul(&xt)?;
-                if step == 0 && use_s4 {
-                    let a_frob = am.square()?.sum([1, 2], true)?.sqrt()?;
-                    let eps_s = eps_s.as_ref().expect("set when use_s4");
-                    let alpha = a_frob.sqrt()?.add(&eps_s.div(&norm)?)?;
-                    let zeros = Tensor::zeros_with(alpha.shape(), DType::F32, alpha.device())?;
-                    let inv_a = alpha.eq_scalar(0.0)?.where_cond(&zeros, &alpha.recip()?)?;
-                    let inv_a2 = inv_a.square()?;
-                    let inv_a4 = inv_a2.square()?;
-                    let bm =
-                        am.mul(&inv_a2.mul_scalar(b)?)?.add(&am.matmul(&am)?.mul(&inv_a4.mul_scalar(c)?)?)?;
-                    x = x.mul(&inv_a.mul_scalar(a)?)?.add(&bm.matmul(&x)?.mul(&inv_a)?)?;
-                } else {
-                    let bm = am.mul_scalar(b)?.add(&am.matmul(&am)?.mul_scalar(c)?)?;
-                    x = x.mul_scalar(a)?.add(&bm.matmul(&x)?)?;
+            if let Some(cs9) = cs9_schedule {
+                let mut eye_v = vec![0.0f32; rmax * rmax];
+                for r in 0..rmax {
+                    eye_v[r * rmax + r] = 1.0;
+                }
+                let eye = Tensor::from_vec(eye_v, [1, rmax, rmax])?.to_device(x.device())?;
+                for (step, &(gamma, delta, eta, xi, c4)) in cs9.iter().enumerate() {
+                    let xt = x.transpose(1, 2)?.contiguous()?;
+                    let am = x.matmul(&xt)?;
+                    let a2 = am.matmul(&am)?;
+                    if step == 0 {
+                        let a2_frob = a2.square()?.sum([1, 2], true)?.sqrt()?;
+                        let eps_s = eps_s.as_ref().expect("set when cs9");
+                        let alpha = a2_frob.sqrt()?.sqrt()?.add(&eps_s.div(&norm)?)?;
+                        let zeros = Tensor::zeros_with(alpha.shape(), DType::F32, alpha.device())?;
+                        let inv_a = alpha.eq_scalar(0.0)?.where_cond(&zeros, &alpha.recip()?)?;
+                        let ia2 = inv_a.square()?;
+                        let ia4 = ia2.square()?;
+                        let s0 = eye
+                            .mul_scalar(delta)?
+                            .add(&am.mul(&ia2.mul_scalar(gamma)?)?)?
+                            .add(&a2.mul(&ia4)?)?;
+                        let s2 = s0.matmul(&s0)?;
+                        let bm = am.mul(&ia2.mul_scalar(eta)?)?.add(&s2.mul_scalar(c4)?)?;
+                        x = x.mul(&inv_a.mul_scalar(xi)?)?.add(&bm.matmul(&x)?.mul(&inv_a)?)?;
+                    } else {
+                        let sm = eye.mul_scalar(delta)?.add(&am.mul_scalar(gamma)?)?.add(&a2)?;
+                        let s2 = sm.matmul(&sm)?;
+                        let bm = am.mul_scalar(eta)?.add(&s2.mul_scalar(c4)?)?;
+                        x = x.mul_scalar(xi)?.add(&bm.matmul(&x)?)?;
+                    }
+                }
+            } else {
+                for (step, &(a, b, c)) in schedule.iter().enumerate() {
+                    let xt = x.transpose(1, 2)?.contiguous()?;
+                    let am = x.matmul(&xt)?;
+                    if step == 0 && use_s4 {
+                        let a_frob = am.square()?.sum([1, 2], true)?.sqrt()?;
+                        let eps_s = eps_s.as_ref().expect("set when use_s4");
+                        let alpha = a_frob.sqrt()?.add(&eps_s.div(&norm)?)?;
+                        let zeros = Tensor::zeros_with(alpha.shape(), DType::F32, alpha.device())?;
+                        let inv_a = alpha.eq_scalar(0.0)?.where_cond(&zeros, &alpha.recip()?)?;
+                        let inv_a2 = inv_a.square()?;
+                        let inv_a4 = inv_a2.square()?;
+                        let bm = am
+                            .mul(&inv_a2.mul_scalar(b)?)?
+                            .add(&am.matmul(&am)?.mul(&inv_a4.mul_scalar(c)?)?)?;
+                        x = x.mul(&inv_a.mul_scalar(a)?)?.add(&bm.matmul(&x)?.mul(&inv_a)?)?;
+                    } else {
+                        let bm = am.mul_scalar(b)?.add(&am.matmul(&am)?.mul_scalar(c)?)?;
+                        x = x.mul_scalar(a)?.add(&bm.matmul(&x)?)?;
+                    }
                 }
             }
         }

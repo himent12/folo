@@ -219,18 +219,26 @@ pub struct DetectDesc {
     pub tal_nwd_weight: f32,
     /// Matchability-Aware Loss exponent on background (`0.0` = plain BCE).
     pub mal_gamma: f32,
+    /// Classification loss kind (`0` = BCE/MAL, `1` = VFL, `2` = QFL).
+    pub cls_loss_kind: u32,
+    /// Primary classification loss parameter (`vfl_alpha` or `qfl_beta`).
+    pub cls_param0: f32,
+    /// Secondary classification loss parameter (`vfl_gamma`).
+    pub cls_param1: f32,
     /// Scale-adaptive NWD blending weight in box loss (`0.0` = pure CIoU).
     pub box_nwd_weight: f32,
-    /// Box geometry loss kind (`0` = CIoU, `1` = R-PIoU).
+    /// Box geometry loss kind (`0` = CIoU, `1` = R-PIoU, `2` = S-AEIoU).
     pub box_loss_kind: u32,
-    /// High-IoU focusing slope `β` in `[0, 1]` for R-PIoU.
+    /// High-IoU focusing slope `β` in `[0, 1]` for R-PIoU / S-AEIoU.
     pub rpiou_beta: f32,
-    /// Rational edge-penalty sharpness `κ > 0` for R-PIoU.
+    /// Edge-penalty sharpness `κ > 0` for R-PIoU / S-AEIoU.
     pub rpiou_kappa: f32,
-    /// Grid-unit GT-size floor `δ₀ > 0` for R-PIoU.
+    /// Grid-unit GT-size floor `δ₀ > 0` for R-PIoU / S-AEIoU.
     pub rpiou_delta: f32,
     /// Weight `λ_ot >= 0` of the 1D optimal-transport cumulative tail-barrier DFL term.
     pub dfl_ot_weight: f32,
+    /// Weight `λ_crps >= 0` of the closed-form 1D excess CRPS DFL term.
+    pub dfl_crps_weight: f32,
     /// Box loss gain (passed into `det_box` backward for exponent-split scaling).
     pub box_gain: f32,
     /// DFL loss gain (passed into `det_box` backward for exponent-split OT-DFL scaling).
@@ -389,7 +397,7 @@ pub fn assign(
     ctx.dispatch(&k, &[pick, own, meta, slot, dense], &p, [d.g as u32, d.b as u32, 1])
 }
 
-/// Σ BCE partial sums of the classification term into `part` ([`DetectDesc::bce_partials`] floats).
+/// Σ classification partial sums into `part` ([`DetectDesc::bce_partials`] floats).
 pub fn bce_forward(
     ctx: &GpuContext,
     d: &DetectDesc,
@@ -400,7 +408,15 @@ pub fn bce_forward(
 ) -> Result<()> {
     let chunks = d.a.div_ceil(BCE_CHUNK);
     let k = ctx.kernel(&BCE_FWD, Spec::new().subgroups(use_subgroups(ctx)))?;
-    let p = Params::new().uz(d.a)?.uz(d.nc)?.uz(chunks)?.uz(d.b * d.a)?.f(d.mal_gamma);
+    let p = Params::new()
+        .uz(d.a)?
+        .uz(d.nc)?
+        .uz(chunks)?
+        .uz(d.b * d.a)?
+        .f(d.mal_gamma)
+        .u(d.cls_loss_kind)
+        .f(d.cls_param0)
+        .f(d.cls_param1);
     ctx.dispatch(&k, &[cls_raw, dense, part, misc], &p, [chunks as u32, (d.b * d.nc) as u32, 1])
 }
 
@@ -417,7 +433,15 @@ pub fn bce_backward(
 ) -> Result<()> {
     let n = d.b * d.nc * d.a;
     let k = ctx.kernel(&BCE_BWD, Spec::new())?;
-    let p = Params::new().uz(d.a)?.uz(d.nc)?.uz(n)?.uz(d.b * d.a)?.f(d.mal_gamma);
+    let p = Params::new()
+        .uz(d.a)?
+        .uz(d.nc)?
+        .uz(n)?
+        .uz(d.b * d.a)?
+        .f(d.mal_gamma)
+        .u(d.cls_loss_kind)
+        .f(d.cls_param0)
+        .f(d.cls_param1);
     ctx.dispatch(&k, &[cls_raw, dense, stats, grad, dcls], &p, ctx.grid_1d(n as u64, 256)?)
 }
 
@@ -456,7 +480,8 @@ pub fn box_terms(
         .f(d.rpiou_delta)
         .f(d.dfl_ot_weight)
         .f(d.box_gain)
-        .f(d.dfl_gain);
+        .f(d.dfl_gain)
+        .f(d.dfl_crps_weight);
     ctx.dispatch(&k, &[box_raw, meta, pick, slot, out, stats, grad], &p, ctx.grid_1d(d.slots() as u64, 64)?)
 }
 
@@ -490,6 +515,48 @@ static CANDIDATES: KernelDef = KernelDef {
     storage: &[Access::Read, Access::ReadWrite],
     source: Source::Static(include_str!("../shaders/det_candidates.wgsl")),
 };
+detect_kernel!(DFL_STATS, "det_dfl_stats", "dfl_stats.wgsl", [Read, ReadWrite]);
+
+/// Fused single-pass per-anchor DFL statistics: `box_raw [B, 4·rm, A]` (`f32` or `f16`) → `out [B, ch, A]`
+/// (`f32`, `ch = (want_moments ? 8 : 0) + (want_ent ? 1 : 0)`).
+#[allow(clippy::too_many_arguments)]
+pub fn dfl_stats(
+    ctx: &GpuContext,
+    box_raw: &wgpu::Buffer,
+    out: &wgpu::Buffer,
+    batch: usize,
+    anchors: usize,
+    rm: usize,
+    want_moments: bool,
+    want_ent: bool,
+    dtype: crate::DType,
+) -> Result<()> {
+    crate::kernels::gemm::check_dtype(ctx, dtype, "dfl_stats")?;
+    if anchors == 0 || rm == 0 || rm > MAX_REG_MAX || !(want_moments || want_ent) {
+        return Err(shape_err("dfl_stats: invalid reg_max, anchors, or flags"));
+    }
+    let ch = (if want_moments { 8 } else { 0 }) + usize::from(want_ent);
+    let overflow = || shape_err("dfl_stats: too large");
+    let ba = batch.checked_mul(anchors).ok_or_else(overflow)?;
+    let in_elems = ba.checked_mul(4 * rm).ok_or_else(overflow)?;
+    let out_elems = ba.checked_mul(ch).ok_or_else(overflow)?;
+    if in_elems.max(out_elems) > u32::MAX as usize {
+        return Err(overflow());
+    }
+    super::check_buf(box_raw, in_elems, dtype, "dfl_stats box_raw")?;
+    super::check_buf(out, out_elems, crate::DType::F32, "dfl_stats output")?;
+    if batch == 0 {
+        return Ok(());
+    }
+    let spec = Spec::new()
+        .f16(dtype == crate::DType::F16)
+        .u32("R", rm as u32)
+        .bool("MOMENTS", want_moments)
+        .bool("ENT", want_ent);
+    let k = ctx.kernel(&DFL_STATS, spec)?;
+    let p = Params::new().uz(ba)?.uz(anchors)?;
+    ctx.dispatch(&k, &[box_raw, out], &p, ctx.grid_1d(ba as u64, 256)?)
+}
 
 /// Words of one image's region in the output of [`multi_label_candidates`]: a count, then `cap` records.
 pub fn candidate_region_words(cap: usize) -> usize {
@@ -539,7 +606,7 @@ pub fn multi_label_candidates(
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
 pub(crate) static DEFS: &[&KernelDef] =
-    &[&DECODE, &TOPK, &OWNER, &TARGETS, &BCE_FWD, &BCE_BWD, &BOX, &COMBINE, &CANDIDATES];
+    &[&DECODE, &TOPK, &OWNER, &TARGETS, &BCE_FWD, &BCE_BWD, &BOX, &COMBINE, &CANDIDATES, &DFL_STATS];
 
 #[cfg(test)]
 mod tests {
@@ -561,12 +628,16 @@ mod tests {
             eps_free: false,
             tal_nwd_weight: 0.0,
             mal_gamma: 0.0,
+            cls_loss_kind: 0,
+            cls_param0: 1.0,
+            cls_param1: 1.0,
             box_nwd_weight: 0.0,
             box_loss_kind: 0,
             rpiou_beta: 0.5,
             rpiou_kappa: 2.0,
             rpiou_delta: 0.5,
             dfl_ot_weight: 0.0,
+            dfl_crps_weight: 0.0,
             box_gain: 7.5,
             dfl_gain: 1.5,
         }

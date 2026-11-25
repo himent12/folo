@@ -539,7 +539,11 @@ fn muon_fused_with_scales(
     if ps.iter().all(|p| p.device().is_cpu()) {
         return Ok(false);
     }
-    let settings = MuonSettings::from_schedule(mu, nesterov, ortho.schedule(), ortho.schatten4(), NS_EPS, lr);
+    let settings = if let Some(cs9) = ortho.cs9_schedule() {
+        MuonSettings::from_cs9(mu, nesterov, cs9, NS_EPS, lr)
+    } else {
+        MuonSettings::from_schedule(mu, nesterov, ortho.schedule(), ortho.schatten4(), NS_EPS, lr)
+    };
     Ok(Tensor::muon_step_many_geo_(ps, bs, gs, scales, dws, &settings)?)
 }
 

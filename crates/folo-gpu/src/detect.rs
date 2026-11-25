@@ -46,6 +46,18 @@ pub struct TalSettings {
     pub nwd_weight: f32,
 }
 
+/// Which classification loss [`detection_loss`] uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClsLossKind {
+    /// Standard BCE-with-logits (or MAL when `mal_gamma > 0`, default).
+    #[default]
+    Bce,
+    /// Varifocal Loss (`VFL`).
+    Vfl,
+    /// Quality Focal Loss (`QFL`).
+    Qfl,
+}
+
 /// Which box regression geometry loss [`detection_loss`] uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum BoxLossKind {
@@ -54,6 +66,8 @@ pub enum BoxLossKind {
     Ciou,
     /// Rational-Focal Edge-Decoupled IoU (`R-PIoU`).
     Rpiou,
+    /// Scale-normalized Algebraic Edge IoU (`S-AEIoU`).
+    Saeiou,
 }
 
 /// Loss settings (folo-vision's `LossConfig`).
@@ -67,18 +81,28 @@ pub struct LossSettings {
     pub tal: TalSettings,
     /// Matchability-Aware Loss exponent on background (`0.0` = plain BCE).
     pub mal_gamma: f32,
+    /// Classification loss family (`Bce`, `Vfl`, or `Qfl`).
+    pub cls_loss: ClsLossKind,
+    /// Negative weight `α > 0` for `Vfl`.
+    pub vfl_alpha: f32,
+    /// Negative focal exponent `γ >= 0` for `Vfl`.
+    pub vfl_gamma: f32,
+    /// Focal exponent `β` (`0` or `>= 1`) for `Qfl`.
+    pub qfl_beta: f32,
     /// Scale-adaptive NWD blending weight in box loss (`0.0` = pure CIoU).
     pub nwd_weight: f32,
-    /// Box regression geometry loss (`Ciou` or `Rpiou`).
+    /// Box regression geometry loss (`Ciou`, `Rpiou`, or `Saeiou`).
     pub box_loss: BoxLossKind,
-    /// High-IoU focusing slope `β` in `[0, 1]` for [`BoxLossKind::Rpiou`].
+    /// High-IoU focusing slope `β` in `[0, 1]` for `Rpiou` / `Saeiou`.
     pub rpiou_beta: f32,
-    /// Rational edge-penalty sharpness `κ > 0` for [`BoxLossKind::Rpiou`].
+    /// Edge-penalty sharpness `κ > 0` for `Rpiou` / `Saeiou`.
     pub rpiou_kappa: f32,
-    /// Grid-unit GT-size floor `δ₀ > 0` for [`BoxLossKind::Rpiou`].
+    /// Grid-unit GT-size floor `δ₀ > 0` for `Rpiou` / `Saeiou`.
     pub rpiou_delta: f32,
     /// Weight `λ_ot >= 0` of the 1D optimal-transport cumulative tail-barrier DFL term.
     pub dfl_ot_weight: f32,
+    /// Weight `λ_crps >= 0` of the closed-form 1D excess CRPS DFL term.
+    pub dfl_crps_weight: f32,
 }
 
 /// The anchors: points in grid units and the stride of each.
@@ -252,12 +276,16 @@ fn check(
         eps_free: tal.eps_free,
         tal_nwd_weight: tal.nwd_weight,
         mal_gamma: 0.0,
+        cls_loss_kind: 0,
+        cls_param0: 1.0,
+        cls_param1: 1.0,
         box_nwd_weight: 0.0,
         box_loss_kind: 0,
         rpiou_beta: 0.5,
         rpiou_kappa: 2.0,
         rpiou_delta: 0.5,
         dfl_ot_weight: 0.0,
+        dfl_crps_weight: 0.0,
         box_gain: 0.0,
         dfl_gain: 0.0,
     })
@@ -423,19 +451,41 @@ pub fn detection_loss_with_assignment(
     if !(s.dfl_ot_weight.is_finite() && s.dfl_ot_weight >= 0.0) {
         return Err(err(format!("dfl_ot_weight {} must be finite and >= 0", s.dfl_ot_weight)));
     }
+    if !(s.dfl_crps_weight.is_finite() && s.dfl_crps_weight >= 0.0) {
+        return Err(err(format!("dfl_crps_weight {} must be finite and >= 0", s.dfl_crps_weight)));
+    }
+    if !(s.vfl_alpha.is_finite() && s.vfl_alpha > 0.0) {
+        return Err(err(format!("vfl_alpha {} must be finite and > 0", s.vfl_alpha)));
+    }
+    if !(s.vfl_gamma.is_finite() && s.vfl_gamma >= 0.0) {
+        return Err(err(format!("vfl_gamma {} must be finite and >= 0", s.vfl_gamma)));
+    }
+    if !(s.qfl_beta.is_finite() && (s.qfl_beta == 0.0 || s.qfl_beta >= 1.0)) {
+        return Err(err(format!("qfl_beta {} must be finite and 0 or >= 1", s.qfl_beta)));
+    }
     let (bufs, asg, (box_t, box_buf), (cls_t, cls_buf)) =
         assign_impl(box_raw, cls_raw, anchors, gts, s.reg_max, &s.tal)?;
     let mut d = asg.desc;
     d.mal_gamma = s.mal_gamma;
+    let (cls_kind, cls_p0, cls_p1) = match s.cls_loss {
+        ClsLossKind::Bce => (0u32, 0.0, 0.0),
+        ClsLossKind::Vfl => (1u32, s.vfl_alpha, s.vfl_gamma),
+        ClsLossKind::Qfl => (2u32, s.qfl_beta, 0.0),
+    };
+    d.cls_loss_kind = cls_kind;
+    d.cls_param0 = cls_p0;
+    d.cls_param1 = cls_p1;
     d.box_nwd_weight = s.nwd_weight;
     d.box_loss_kind = match s.box_loss {
         BoxLossKind::Ciou => 0,
         BoxLossKind::Rpiou => 1,
+        BoxLossKind::Saeiou => 2,
     };
     d.rpiou_beta = s.rpiou_beta;
     d.rpiou_kappa = s.rpiou_kappa;
     d.rpiou_delta = s.rpiou_delta;
     d.dfl_ot_weight = s.dfl_ot_weight;
+    d.dfl_crps_weight = s.dfl_crps_weight;
     d.box_gain = s.gains[0];
     d.dfl_gain = s.gains[2];
     let ctx = &bufs.ctx;
@@ -495,4 +545,34 @@ pub fn multi_label_candidates(decoded: &Tensor, conf: f32, cap: usize) -> Result
     let (out, out_b) = bufs.alloc(DType::U32, &[b, candidate_region_words(cap)], false)?;
     k::multi_label_candidates(&bufs.ctx, &dec, &out_b, b, a, rows - 4, cap, conf).map_err(gpu)?;
     Ok(out)
+}
+
+/// Fused single-pass per-anchor DFL statistics on a folo-gpu device: `box_raw [B, 4·rm, A]` (`F32` or `F16`)
+/// → `F32 [B, ch, A]` (`ch = (want_moments ? 8 : 0) + (want_ent ? 1 : 0)`). Returns `Ok(None)` when `box_raw`
+/// is not on a folo-gpu device or `rm > MAX_REG_MAX`.
+pub fn dfl_stats(box_raw: &Tensor, rm: usize, want_moments: bool, want_ent: bool) -> Result<Option<Tensor>> {
+    if rm == 0 || rm > MAX_REG_MAX || !(want_moments || want_ent) {
+        return Ok(None);
+    }
+    let device = box_raw.device();
+    let Some(ctx) = context_for(device) else {
+        return Ok(None);
+    };
+    let [b, rows, a] = *box_raw.dims() else {
+        return Err(err(format!("dfl_stats: box_raw must be [B, 4*rm, A], got {:?}", box_raw.dims())));
+    };
+    if rows != 4 * rm || a == 0 {
+        return Err(err(format!("dfl_stats: box_raw {:?} does not match reg_max={rm}", box_raw.dims())));
+    }
+    let kdt = match box_raw.dtype() {
+        DType::F32 => crate::DType::F32,
+        DType::F16 => crate::DType::F16,
+        dt => return Err(err(format!("dfl_stats: unsupported dtype {dt}"))),
+    };
+    let ch = (if want_moments { 8 } else { 0 }) + usize::from(want_ent);
+    let bufs = Buffers { ctx, device };
+    let (_keep, raw_b) = dense(box_raw)?;
+    let (out, out_b) = bufs.alloc(DType::F32, &[b, ch, a], false)?;
+    k::dfl_stats(&bufs.ctx, &raw_b, &out_b, b, a, rm, want_moments, want_ent, kdt).map_err(gpu)?;
+    Ok(Some(out))
 }

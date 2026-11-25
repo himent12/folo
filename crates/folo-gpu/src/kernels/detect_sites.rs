@@ -16,7 +16,14 @@ use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 static CLASS: KernelDef = KernelDef {
     name: "sites_class",
     storage: &[Access::Read, Access::ReadWrite, Access::ReadWrite, Access::ReadWrite, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/sites_class.wgsl")),
+    source: Source::Generated(|_| {
+        let vk = super::detect::v_k();
+        format!(
+            "const V_K: f32 = {vk:?}f;\n{}{}",
+            include_str!("../shaders/detect_common.wgsl"),
+            include_str!("../shaders/sites_class.wgsl")
+        )
+    }),
 };
 static SCATTER: KernelDef = KernelDef {
     name: "sites_scatter",
@@ -26,7 +33,15 @@ static SCATTER: KernelDef = KernelDef {
 static DECODE: KernelDef = KernelDef {
     name: "sites_decode",
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/sites_decode.wgsl")),
+    source: Source::Generated(|spec| {
+        let vk = super::detect::v_k();
+        let r_cap = spec.get_u32("R", 0).max(1);
+        format!(
+            "const V_K: f32 = {vk:?}f;\nconst R_CAP: u32 = {r_cap}u;\n{}{}",
+            include_str!("../shaders/detect_common.wgsl"),
+            include_str!("../shaders/sites_decode.wgsl")
+        )
+    }),
 };
 
 /// Words per record of [`decode_sites`] (as [`super::vision::RECORD_WORDS`]).
@@ -173,7 +188,8 @@ pub fn decode_sites(
         return Ok(());
     }
     ctx.clear(out, 4 * total as u64);
-    let k = ctx.kernel(&DECODE, Spec::new().f16(dtype == DType::F16))?;
+    let r_spec = if rm <= super::detect::MAX_REG_MAX { rm as u32 } else { 0 };
+    let k = ctx.kernel(&DECODE, Spec::new().f16(dtype == DType::F16).u32("R", r_spec))?;
     for (i, l) in levels.iter().enumerate() {
         let n = b * l.cap;
         let p =

@@ -32,14 +32,18 @@ fn fused(
     let up = |ts: &[Tensor]| ts.iter().map(|t| t.to_device(dev).unwrap()).collect::<Vec<_>>();
     let (pg, mg, gg) = (up(ps), up(ms), up(gs));
     let scales: Vec<f32> = ms.iter().map(|m| muon_scale(m.dims())).collect();
-    let settings = folo_core::backend::MuonSettings::from_schedule(
-        0.9,
-        nesterov,
-        ortho.schedule(),
-        ortho.schatten4(),
-        NS_EPS,
-        1.0,
-    );
+    let settings = if let Some(cs9) = ortho.cs9_schedule() {
+        folo_core::backend::MuonSettings::from_cs9(0.9, nesterov, cs9, NS_EPS, 1.0)
+    } else {
+        folo_core::backend::MuonSettings::from_schedule(
+            0.9,
+            nesterov,
+            ortho.schedule(),
+            ortho.schatten4(),
+            NS_EPS,
+            1.0,
+        )
+    };
     let _g = no_grad();
     assert!(
         Tensor::muon_step_many_(&refs(&pg), &refs(&mg), &refs(&gg), &scales, &settings).unwrap(),
@@ -98,7 +102,7 @@ fn fused_muon_matches_tensor_ops() {
         ms.push(Tensor::rand_uniform(s, -1.0, 1.0, rng));
         gs.push(Tensor::rand_uniform(s, -0.5, 0.5, rng));
     }
-    for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar5] {
+    for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar5, MuonOrtho::Polar3Cs9] {
         for nesterov in [false, true] {
             let got = fused(dev, &ps, &ms, &gs, nesterov, ortho);
             let want = reference(&ps, &ms, &gs, nesterov, ortho);
@@ -130,7 +134,7 @@ fn fused_muon_edge_cases() {
     let mut g3 = gs[3].to_vec::<f32>().unwrap();
     g3[77] = f32::NAN;
     gs[3] = Tensor::from_vec(g3, shapes[3]).unwrap();
-    for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4] {
+    for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar3Cs9] {
         for nesterov in [false, true] {
             let got = fused(dev, &ps, &ms, &gs, nesterov, ortho);
             let want = reference(&ps, &ms, &gs, nesterov, ortho);
@@ -152,7 +156,7 @@ fn fused_muon_edge_cases() {
 #[test]
 fn musgd_multi_group_gpu_matches_cpu() {
     let dev = gpu!();
-    for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar5] {
+    for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar5, MuonOrtho::Polar3Cs9] {
         let mut rng = Rng::seed(31);
         let mk = |rng: &mut Rng| {
             let w0 = Tensor::rand_uniform([32, 16, 3, 3], -0.5, 0.5, rng).requires_grad_();
@@ -228,7 +232,7 @@ fn fused_muon_frobenius_overflow_finite() {
     let m3 = Tensor::from_vec(mixed.clone(), [16, 64]).unwrap();
     let g3 = Tensor::from_vec(mixed, [16, 64]).unwrap();
     let (ps, ms, gs) = ([p0, p1, p2, p3], [m0, m1, m2, m3], [g0, g1, g2, g3]);
-    for ortho in [MuonOrtho::Polar4, MuonOrtho::Polar5] {
+    for ortho in [MuonOrtho::Polar4, MuonOrtho::Polar5, MuonOrtho::Polar3Cs9] {
         for nesterov in [false, true] {
             let got = fused(dev, &ps, &ms, &gs, nesterov, ortho);
             let want = reference(&ps, &ms, &gs, nesterov, ortho);

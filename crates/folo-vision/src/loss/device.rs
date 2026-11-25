@@ -6,7 +6,8 @@
 use folo_core::{Result, Tensor};
 
 use super::{
-    BatchAssignment, BoxLossKind, ImageTargets, LossConfig, LossItems, LossOutput, check_inputs, nan_loss,
+    BatchAssignment, BoxLossKind, ClsLossKind, ImageTargets, LossConfig, LossItems, LossOutput, check_inputs,
+    nan_loss,
 };
 use crate::boxes::Xyxy;
 use crate::decode::Anchors;
@@ -54,9 +55,15 @@ pub(super) fn detection_loss_device_with_assignment(
     let tables = gpu_targets(targets);
     let gts: Vec<_> = tables.iter().map(|(b, l)| folo_gpu::detect::ImageGt { boxes: b, labels: l }).collect();
     let at = folo_gpu::detect::AnchorTable { points: &anchors.points, strides: &anchors.strides };
+    let cls_loss = match cfg.cls_loss {
+        ClsLossKind::Bce => folo_gpu::detect::ClsLossKind::Bce,
+        ClsLossKind::Vfl => folo_gpu::detect::ClsLossKind::Vfl,
+        ClsLossKind::Qfl => folo_gpu::detect::ClsLossKind::Qfl,
+    };
     let box_loss = match cfg.box_loss {
         BoxLossKind::Ciou => folo_gpu::detect::BoxLossKind::Ciou,
         BoxLossKind::Rpiou => folo_gpu::detect::BoxLossKind::Rpiou,
+        BoxLossKind::Saeiou => folo_gpu::detect::BoxLossKind::Saeiou,
         other => unreachable!("device_loss_supported excludes {other:?}"),
     };
     let s = folo_gpu::detect::LossSettings {
@@ -64,12 +71,17 @@ pub(super) fn detection_loss_device_with_assignment(
         gains: [cfg.box_gain, cfg.cls_gain, cfg.dfl_gain],
         tal: gpu_tal(cfg),
         mal_gamma: cfg.mal_gamma,
+        cls_loss,
+        vfl_alpha: cfg.vfl_alpha,
+        vfl_gamma: cfg.vfl_gamma,
+        qfl_beta: cfg.qfl_beta,
         nwd_weight: cfg.nwd_weight,
         box_loss,
         rpiou_beta: cfg.rpiou_beta,
         rpiou_kappa: cfg.rpiou_kappa,
         rpiou_delta: cfg.rpiou_delta,
         dfl_ot_weight: cfg.dfl_ot_weight,
+        dfl_crps_weight: cfg.dfl_crps_weight,
     };
     let (out, asg) = folo_gpu::detect::detection_loss_with_assignment(box_raw, cls_raw, &at, &gts, &s)?;
     // The loss's one readback: the reported items, the positives and the target score sum.
