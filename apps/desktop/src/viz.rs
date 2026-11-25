@@ -4,7 +4,7 @@
 //! reads on any photo, square corners (boxes are measurements), and a label chip on the box's
 //! top-left corner outside the box, moved inside when it would leave the image.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use folo_ui::{
     App, BorderStyle, Bounds, Corners, Edges, FontWeight, Hsla, Pixels, Point, RenderImage, SharedString,
@@ -84,14 +84,13 @@ pub fn image_rect(b: Bounds<Pixels>, w: f32, h: f32, fit: Fit, zoom: f32, pan: (
     Bounds::new(point(px(x), px(y)), size(px(dw), px(dh)))
 }
 
+static TNUM_FEATURES: LazyLock<folo_ui::FontFeatures> =
+    LazyLock::new(|| folo_ui::FontFeatures(Arc::new(vec![("tnum".into(), 1)])));
+
 fn run(text: &str, family: &'static str, weight: FontWeight, color: Hsla) -> TextRun {
     TextRun {
         len: text.len(),
-        font: folo_ui::Font {
-            weight,
-            features: folo_ui::FontFeatures(Arc::new(vec![("tnum".into(), 1)])),
-            ..folo_ui::font(family)
-        },
+        font: folo_ui::Font { weight, features: TNUM_FEATURES.clone(), ..folo_ui::font(family) },
         color,
         background_color: None,
         underline: None,

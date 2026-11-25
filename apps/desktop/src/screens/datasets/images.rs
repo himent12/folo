@@ -2,6 +2,7 @@
 //! and straight under it the virtualised grid of a dataset's images.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
@@ -51,6 +52,7 @@ impl FoloApp {
             cx,
             Rc::new(move |this, i, _, _| {
                 this.ds_split = splits[i];
+                this.ds_hover_tile = None;
                 this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
             }),
         );
@@ -107,6 +109,7 @@ impl FoloApp {
                             }
                             None => {}
                         }
+                        this.ds_hover_tile = None;
                         this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
                         cx.notify();
                     }
@@ -134,6 +137,7 @@ impl FoloApp {
                 cx,
                 Rc::new(|this, i, _, cx| {
                     this.ds_tile = TILE_SIZES[i.min(2)];
+                    this.ds_hover_tile = None;
                     cx.notify();
                 }),
             )
@@ -250,6 +254,7 @@ impl FoloApp {
                     cx,
                     act(|this, _, cx| {
                         this.ds_empty_of = None;
+                        this.ds_hover_tile = None;
                         cx.notify();
                     }),
                 ))
@@ -328,9 +333,8 @@ impl FoloApp {
         let row_h = cell_w * 0.75 + GAP + 1.;
         let width_cell = self.grid_width.clone();
         let ds_id: SharedString = id.clone().into();
-        // Class names, so a tile can say what it holds, not only how many boxes.
-        let class_names: Vec<String> =
-            self.store.dataset_summary(&id).map(|d| d.classes.clone()).unwrap_or_default();
+        // Pre-interned class names, shared across visible tiles and box chips without per-box allocs.
+        let class_names: Arc<[SharedString]> = ds.classes.iter().cloned().map(SharedString::from).collect();
         let fit = if self.ds_fill { crate::viz::Fit::Cover } else { crate::viz::Fit::Contain };
         // A focused image tile names its keys (decided here: the list's rows render after the
         // page has handed its hint to the strip).
@@ -338,71 +342,102 @@ impl FoloApp {
         {
             self.hint_keys("Arrows move between images · Enter opens one in the inspector");
         }
+        let wheel_ds = ds_id.clone();
         let grid = uniform_list(
             "ds-grid",
             rows,
             cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 let t = theme(cx);
-                // Clone only the visible rows' metadata.
-                let visible: Vec<Option<ImageInfo>> = (range.start * cols..range.end * cols)
-                    .map(|i| this.filtered_image(&ds_id, i).cloned())
-                    .collect();
+                let app = cx.entity().downgrade();
+                let (grid_bounds, scroll_y, item_h) = {
+                    let state = this.grid_scroll.0.borrow();
+                    let handle = &state.base_handle;
+                    (handle.bounds(), handle.offset().y, state.last_item_height.unwrap_or(px(row_h)))
+                };
+                let mouse_pos = window.mouse_position();
+                // Look up the filtered index slice and image vec once per visible range rather than
+                // per tile, and clone only the visible rows' metadata.
                 let first = range.start * cols;
-                let mut out = Vec::new();
+                let visible: Vec<Option<(usize, ImageInfo)>> = {
+                    let indices = this.filtered_indices(&ds_id);
+                    let all_images = this.store.images.get(ds_id.as_ref()).and_then(|l| l.ready());
+                    (first..range.end * cols)
+                        .map(|i| {
+                            let raw_idx = *indices.get(i)?;
+                            let meta = all_images?.get(raw_idx)?.clone();
+                            Some((raw_idx, meta))
+                        })
+                        .collect()
+                };
+                let mut out = Vec::with_capacity(range.len());
                 for r in range {
                     let mut row = div().flex().gap(px(GAP)).h(px(row_h)).pb(px(GAP));
                     for c in 0..cols {
                         let idx = r * cols + c;
-                        let Some(meta) = visible.get(idx - first).and_then(|m| m.as_ref()) else {
+                        let Some((raw_idx, meta)) = visible.get(idx - first).and_then(|m| m.as_ref()) else {
                             row = row.child(div().w(px(cell_w)).flex_none());
                             continue;
                         };
+                        let raw_idx = *raw_idx;
                         let key = format!("tile-{}", meta.id);
-                        let reveal = this.fh(key.clone(), cx).is_focused(window)
-                            || this.ds_hover_tile.as_deref() == Some(meta.id.as_str());
-                        // Filtered, each tile at rest names its largest match (see `tile`).
-                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, true, fit, reveal, cx);
-                        // "2 square · 1 triangle · +2": the two commonest classes, then the rest as a
-                        // count, so the box colours aren't the only way to tell what a tile holds.
-                        let (what, all) = {
-                            let mut counts: Vec<(u32, usize)> = Vec::new();
-                            for b in &meta.boxes {
-                                match counts.iter_mut().find(|(c, _)| *c == b.class) {
-                                    Some((_, k)) => *k += 1,
-                                    None => counts.push((b.class, 1)),
-                                }
-                            }
-                            counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
-                            let name = |c: u32| {
-                                class_names.get(c as usize).cloned().unwrap_or_else(|| format!("class {c}"))
-                            };
-                            let named: Vec<String> =
-                                counts.iter().map(|(c, k)| format!("{k} {}", name(*c))).collect();
-                            let mut parts: Vec<String> = named.iter().take(2).cloned().collect();
-                            let rest: usize = counts.iter().skip(2).map(|(_, k)| k).sum();
-                            if rest > 0 {
-                                parts.push(format!("+{rest}"));
-                            }
-                            // The strip keeps two; the tile's tip lists every class it holds.
-                            let all = format!(
-                                "{} · {}",
-                                file_name(&meta.file),
-                                if named.is_empty() { "no boxes".into() } else { named.join(" · ") }
-                            );
-                            (if parts.is_empty() { "no boxes".to_string() } else { parts.join(" · ") }, all)
-                        };
-                        let dsid = ds_id.to_string();
+                        let key_shared = SharedString::from(key.clone());
+                        let img_id = SharedString::from(meta.id.clone());
                         let focused = this.fh(key.clone(), cx).is_focused(window);
+                        let hovered = this.ds_hover_tile.as_deref().and_then(parse_hover_tile).is_some_and(
+                            |(h_ds, _, h_id)| h_ds == ds_id.as_ref() && h_id == meta.id.as_str(),
+                        ) && tile_contains_point(
+                            grid_bounds,
+                            scroll_y,
+                            idx,
+                            cols,
+                            cell_w,
+                            item_h,
+                            mouse_pos,
+                        );
+                        let reveal = focused || hovered;
+                        // Filtered, each tile at rest names its largest match (see `tile`).
+                        let tile_el = this.tile_with_classes(
+                            &ds_id,
+                            meta,
+                            Some(&class_names),
+                            this.ds_boxes,
+                            true,
+                            fit,
+                            reveal,
+                            cx,
+                        );
+                        let dsid = ds_id.clone();
                         let el = div()
-                            .id(SharedString::from(key.clone()))
+                            .id(key_shared)
                             // Everything it holds, by class, on hover and keyboard focus (labels a
-                            // tile can't fit, a tiny box's class included). The focus tip is the
+                            // tile can't fit, a tiny box's class included). Built lazily on hover so
+                            // idle tiles allocate no class-count strings. The focus tip is the
                             // keyboard's: not after a click, and gone once the pointer moves on.
-                            .tooltip(crate::controls::tip(all.clone(), Some("Enter opens")))
-                            .when(focused && this.kb && !this.pointer_moved, |d| {
-                                d.child(crate::controls::focus_tip(&t, all.clone(), row_h - GAP))
+                            .tooltip({
+                                let app = app.clone();
+                                let ds_id = ds_id.clone();
+                                let img_id = img_id.clone();
+                                let class_names = class_names.clone();
+                                move |w, cx| {
+                                    let text: SharedString = app
+                                        .upgrade()
+                                        .and_then(|entity| {
+                                            let this = entity.read(cx);
+                                            let imgs = this.store.images.get(ds_id.as_ref())?.ready()?;
+                                            let meta = imgs
+                                                .get(raw_idx)
+                                                .filter(|m| m.id == img_id.as_ref())
+                                                .or_else(|| imgs.iter().find(|m| m.id == img_id.as_ref()))?;
+                                            Some(SharedString::from(tile_tip(meta, &class_names)))
+                                        })
+                                        .unwrap_or_default();
+                                    crate::controls::tip(text, Some("Enter opens"))(w, cx)
+                                }
                             })
-                            .group(SharedString::from(key.clone()))
+                            .when(focused && this.kb && !this.pointer_moved, |d| {
+                                let all = tile_tip(meta, &class_names);
+                                d.child(crate::controls::focus_tip(&t, all, row_h - GAP))
+                            })
                             .w(px(cell_w))
                             .h_full()
                             .flex_none()
@@ -414,11 +449,21 @@ impl FoloApp {
                             .hover(|s| s.border_color(t.line_strong))
                             .active(|s| s.border_color(t.text_tertiary))
                             .on_hover({
-                                let mid = meta.id.clone();
+                                let ds_id = ds_id.clone();
+                                let mid = img_id;
                                 cx.listener(move |this, h: &bool, _, cx| {
-                                    let next = h.then(|| mid.clone());
-                                    if *h || this.ds_hover_tile.as_deref() == Some(mid.as_str()) {
-                                        this.ds_hover_tile = next;
+                                    if *h {
+                                        this.ds_hover_tile = Some(format!("{ds_id}\0{idx}\0{mid}"));
+                                        cx.notify();
+                                    } else if this
+                                        .ds_hover_tile
+                                        .as_deref()
+                                        .and_then(parse_hover_tile)
+                                        .is_some_and(|(h_ds, _, h_id)| {
+                                            h_ds == ds_id.as_ref() && h_id == mid.as_ref()
+                                        })
+                                    {
+                                        this.ds_hover_tile = None;
                                         cx.notify();
                                     }
                                 })
@@ -435,44 +480,51 @@ impl FoloApp {
                                         crate::theme::over(t.bg_panel, t.bg_active)
                                     })
                                     .child(tile_el)
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .bottom_0()
-                                            .left_0()
-                                            .right_0()
-                                            .h(px(28.))
-                                            .px(px(8.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .bg(folo_ui::linear_gradient(
-                                                180.,
-                                                folo_ui::linear_color_stop(folo_ui::hsla(0., 0., 0., 0.), 0.),
-                                                folo_ui::linear_color_stop(
-                                                    folo_ui::hsla(0., 0., 0., 0.7),
-                                                    1.,
+                                    // Build the caption strip only while the tile is hovered or
+                                    // focused (skipping hidden overlay divs + text layout on every
+                                    // idle tile).
+                                    .when(reveal, |d| {
+                                        let what = tile_caption(meta, &class_names);
+                                        d.child(
+                                            div()
+                                                .absolute()
+                                                .bottom_0()
+                                                .left_0()
+                                                .right_0()
+                                                .h(px(28.))
+                                                .px(px(8.))
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .bg(folo_ui::linear_gradient(
+                                                    180.,
+                                                    folo_ui::linear_color_stop(
+                                                        folo_ui::hsla(0., 0., 0., 0.),
+                                                        0.,
+                                                    ),
+                                                    folo_ui::linear_color_stop(
+                                                        folo_ui::hsla(0., 0., 0., 0.7),
+                                                        1.,
+                                                    ),
+                                                ))
+                                                .gap(px(8.))
+                                                // The file's name, as Studio's grid shows it (a real
+                                                // server's ids are list positions, "6", not names).
+                                                .child(
+                                                    text(ty::SM, folo_ui::white())
+                                                        .font_family(crate::theme::MONO)
+                                                        .min_w_0()
+                                                        .ellipsis()
+                                                        .child(file_name(&meta.file).to_string()),
+                                                )
+                                                .child(
+                                                    text(ty::SM, folo_ui::hsla(0., 0., 1., 0.75))
+                                                        .tnum()
+                                                        .ellipsis()
+                                                        .child(what),
                                                 ),
-                                            ))
-                                            .when(!focused, |d| d.invisible())
-                                            .group_hover(SharedString::from(key.clone()), |s| s.visible())
-                                            .gap(px(8.))
-                                            // The file's name, as Studio's grid shows it (a real
-                                            // server's ids are list positions, "6", not names).
-                                            .child(
-                                                text(ty::SM, folo_ui::white())
-                                                    .font_family(crate::theme::MONO)
-                                                    .min_w_0()
-                                                    .ellipsis()
-                                                    .child(file_name(&meta.file).to_string()),
-                                            )
-                                            .child(
-                                                text(ty::SM, folo_ui::hsla(0., 0., 1., 0.75))
-                                                    .tnum()
-                                                    .ellipsis()
-                                                    .child(what),
-                                            ),
-                                    ),
+                                        )
+                                    }),
                             );
                         // Arrow keys walk the grid; the list scrolls the target row into view.
                         let nav_ds = ds_id.clone();
@@ -506,7 +558,7 @@ impl FoloApp {
                             radius::MD,
                             window,
                             cx,
-                            act(move |this, w, cx| this.open_inspector(dsid.clone(), idx, w, cx)),
+                            act(move |this, w, cx| this.open_inspector(dsid.to_string(), idx, w, cx)),
                         );
                         row = row.child(el);
                     }
@@ -516,10 +568,55 @@ impl FoloApp {
             }),
         )
         .track_scroll(self.grid_scroll.clone())
-        // A scroll moves tiles under a still pointer (and recycles the hovered one away), which
-        // `on_hover` never hears: drop the hovered tile, so the next pointer move sets it afresh.
-        .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-            if this.ds_hover_tile.take().is_some() {
+        // A scroll moves tiles under a still pointer (and can recycle the hovered one away), which
+        // `on_hover` never hears. Keep `ds_hover_tile` in lockstep with `folo-ui`'s mounted
+        // `hover_state`: clear it only once the hovered tile's row scrolls out of the visible range
+        // (unmounting its element state), and otherwise notify so `tile_contains_point` hides or
+        // restores the caption as the tile scrolls off or back under the pointer.
+        .on_scroll_wheel(cx.listener({
+            let ds_id = wheel_ds;
+            move |this, _, _, cx| {
+                let Some(hovered) = this.ds_hover_tile.as_deref() else { return };
+                let Some((hover_ds, cached_idx, hover_img)) = parse_hover_tile(hovered) else {
+                    this.ds_hover_tile = None;
+                    cx.notify();
+                    return;
+                };
+                if hover_ds != ds_id.as_ref() {
+                    this.ds_hover_tile = None;
+                    cx.notify();
+                    return;
+                }
+                let (grid_bounds, new_y, item_h) = {
+                    let state = this.grid_scroll.0.borrow();
+                    let handle = &state.base_handle;
+                    let max_y = handle.max_offset().height;
+                    (
+                        handle.bounds(),
+                        handle.offset().y.clamp(-max_y, px(0.)),
+                        state.last_item_height.unwrap_or(px(row_h)),
+                    )
+                };
+                let stays_mounted = {
+                    let indices = this.filtered_indices(&ds_id);
+                    let all_images = this.store.images.get(ds_id.as_ref()).and_then(|l| l.ready());
+                    all_images
+                        .and_then(|imgs| {
+                            indices
+                                .get(cached_idx)
+                                .filter(|&&raw| imgs.get(raw).is_some_and(|m| m.id == hover_img))
+                                .map(|_| cached_idx)
+                                .or_else(|| {
+                                    indices
+                                        .iter()
+                                        .position(|&raw| imgs.get(raw).is_some_and(|m| m.id == hover_img))
+                                })
+                        })
+                        .is_some_and(|idx| row_in_viewport(grid_bounds, new_y, idx / cols, item_h))
+                };
+                if !stays_mounted {
+                    this.ds_hover_tile = None;
+                }
                 cx.notify();
             }
         }))
@@ -560,6 +657,102 @@ impl FoloApp {
     }
 }
 
+/// Box counts per class, sorted most-frequent first with ties broken by class index.
+fn tile_class_counts(meta: &ImageInfo) -> Vec<(u32, usize)> {
+    let mut counts: Vec<(u32, usize)> = Vec::new();
+    for b in &meta.boxes {
+        match counts.iter_mut().find(|(c, _)| *c == b.class) {
+            Some((_, k)) => *k += 1,
+            None => counts.push((b.class, 1)),
+        }
+    }
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    counts
+}
+
+fn format_class_count(class: u32, count: usize, class_names: &[SharedString]) -> String {
+    match class_names.get(class as usize) {
+        Some(name) => format!("{count} {name}"),
+        None => format!("{count} class {class}"),
+    }
+}
+
+/// "2 square · 1 triangle · +2": the two commonest classes, then the rest as a count, so the box
+/// colours aren't the only way to tell what a hovered or focused tile holds.
+fn tile_caption(meta: &ImageInfo, class_names: &[SharedString]) -> String {
+    let counts = tile_class_counts(meta);
+    if counts.is_empty() {
+        return "no boxes".to_string();
+    }
+    let mut parts: Vec<String> =
+        counts.iter().take(2).map(|&(c, k)| format_class_count(c, k, class_names)).collect();
+    let rest: usize = counts.iter().skip(2).map(|(_, k)| k).sum();
+    if rest > 0 {
+        parts.push(format!("+{rest}"));
+    }
+    parts.join(" · ")
+}
+
+/// Full tooltip text for a tile: file name plus every class count it holds.
+fn tile_tip(meta: &ImageInfo, class_names: &[SharedString]) -> String {
+    let counts = tile_class_counts(meta);
+    let summary = if counts.is_empty() {
+        "no boxes".to_string()
+    } else {
+        counts.iter().map(|&(c, k)| format_class_count(c, k, class_names)).collect::<Vec<_>>().join(" · ")
+    };
+    format!("{} · {summary}", file_name(&meta.file))
+}
+
+/// Parses a dataset-scoped hover key `"{ds_id}\0{filtered_idx}\0{img_id}"`.
+fn parse_hover_tile(value: &str) -> Option<(&str, usize, &str)> {
+    let (ds_id, rest) = value.split_once('\0')?;
+    let (idx, img_id) = rest.split_once('\0')?;
+    Some((ds_id, idx.parse().ok()?, img_id))
+}
+
+/// Whether `row` falls in `UniformList`'s mounted visible range at `scroll_y` with measured `item_h`.
+fn row_in_viewport(
+    grid_bounds: folo_ui::Bounds<folo_ui::Pixels>,
+    scroll_y: folo_ui::Pixels,
+    row: usize,
+    item_h: folo_ui::Pixels,
+) -> bool {
+    if grid_bounds.is_empty() || item_h <= px(0.) {
+        return false;
+    }
+    let first = (-scroll_y / item_h).floor().max(0.) as usize;
+    let last = ((-scroll_y + grid_bounds.size.height) / item_h).ceil().max(0.) as usize;
+    (first..last).contains(&row)
+}
+
+/// Whether `pos` lies inside tile `idx`'s on-screen rect within the scrolled grid viewport, using
+/// `UniformList`'s measured `item_h` so deep rows never drift from rounded device-pixel layout.
+fn tile_contains_point(
+    grid_bounds: folo_ui::Bounds<folo_ui::Pixels>,
+    scroll_y: folo_ui::Pixels,
+    idx: usize,
+    cols: usize,
+    cell_w: f32,
+    item_h: folo_ui::Pixels,
+    pos: folo_ui::Point<folo_ui::Pixels>,
+) -> bool {
+    if cols == 0 || grid_bounds.is_empty() || item_h <= px(0.) || !grid_bounds.contains(&pos) {
+        return false;
+    }
+    let r = idx / cols;
+    let c = idx % cols;
+    let tile_h = (item_h - px(GAP)).max(px(0.));
+    let tile_bounds = folo_ui::Bounds::new(
+        folo_ui::point(
+            grid_bounds.origin.x + px(c as f32 * (cell_w + GAP)),
+            grid_bounds.origin.y + scroll_y + item_h * r as f32,
+        ),
+        folo_ui::size(px(cell_w), tile_h),
+    );
+    tile_bounds.contains(&pos)
+}
+
 /// An image's file name without its folders ("images/train/000001.jpg" -> "000001.jpg"), as Studio's
 /// grid names a tile; either slash, since a server on Windows may answer with backslashes.
 pub(crate) fn file_name(file: &str) -> &str {
@@ -568,11 +761,89 @@ pub(crate) fn file_name(file: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::api::BBox;
+
+    fn sample_image(file: &str, classes: &[u32]) -> ImageInfo {
+        ImageInfo {
+            id: "0".into(),
+            file: file.into(),
+            split: Split::Train,
+            width: 640,
+            height: 480,
+            boxes: classes.iter().map(|&c| BBox { class: c, x1: 0., y1: 0., x2: 10., y2: 10. }).collect(),
+        }
+    }
+
     #[test]
     fn a_tile_is_named_by_its_file_not_its_id() {
         assert_eq!(super::file_name("images/train/000000014007.jpg"), "000000014007.jpg");
         assert_eq!(super::file_name(r"images\val\a b.png"), "a b.png");
         assert_eq!(super::file_name("one.jpg"), "one.jpg");
         assert_eq!(super::file_name(""), "");
+    }
+
+    #[test]
+    fn tile_caption_and_tip_format_counts_and_unknown_classes() {
+        let names: Vec<SharedString> = vec!["circle".into(), "square".into(), "triangle".into()];
+        let empty = sample_image("images/train/empty.jpg", &[]);
+        assert_eq!(tile_caption(&empty, &names), "no boxes");
+        assert_eq!(tile_tip(&empty, &names), "empty.jpg · no boxes");
+
+        let single = sample_image("images/train/one.jpg", &[0, 0]);
+        assert_eq!(tile_caption(&single, &names), "2 circle");
+        assert_eq!(tile_tip(&single, &names), "one.jpg · 2 circle");
+
+        let pair = sample_image("images/train/two.jpg", &[2, 0, 2]);
+        assert_eq!(tile_caption(&pair, &names), "2 triangle · 1 circle");
+        assert_eq!(tile_tip(&pair, &names), "two.jpg · 2 triangle · 1 circle");
+
+        let mixed = sample_image("images/val/mix.jpg", &[2, 1, 1, 0, 5]);
+        // square: 2, circle: 1, triangle: 1, class 5: 1 (ties broken by class id).
+        assert_eq!(tile_caption(&mixed, &names), "2 square · 1 circle · +2");
+        assert_eq!(tile_tip(&mixed, &names), "mix.jpg · 2 square · 1 circle · 1 triangle · 1 class 5");
+    }
+
+    #[test]
+    fn tile_contains_point_tracks_boundary_small_and_large_scrolls() {
+        let grid = folo_ui::Bounds::new(folo_ui::point(px(20.), px(100.)), folo_ui::size(px(400.), px(300.)));
+        let (cols, cell_w, item_h) = (2, 196., px(156.));
+        // Tile 0 occupies x in [20, 216), y in [100, 248) at scroll_y = 0.
+        let cursor = folo_ui::point(px(100.), px(180.));
+        // Boundary scroll (scroll_y stays 0): still inside tile 0.
+        assert!(tile_contains_point(grid, px(0.), 0, cols, cell_w, item_h, cursor));
+        // Small scroll (-30 px): tile 0 spans y in [70, 218), cursor at 180 is still inside.
+        assert!(tile_contains_point(grid, px(-30.), 0, cols, cell_w, item_h, cursor));
+        // Larger scroll (-100 px): tile 0 spans y in [0, 148), cursor at 180 is now below it,
+        // while row 0 remains mounted in the viewport so scrolling back restores it.
+        assert!(!tile_contains_point(grid, px(-100.), 0, cols, cell_w, item_h, cursor));
+        assert!(row_in_viewport(grid, px(-100.), 0, item_h));
+        // Scrolling past row 0 unmounts it.
+        assert!(!row_in_viewport(grid, px(-200.), 0, item_h));
+        // Cursor outside the grid viewport never matches.
+        assert!(!tile_contains_point(
+            grid,
+            px(-30.),
+            0,
+            cols,
+            cell_w,
+            item_h,
+            folo_ui::point(px(100.), px(80.))
+        ));
+    }
+
+    #[test]
+    fn deep_rows_use_measured_item_height_without_rounding_drift() {
+        let grid =
+            folo_ui::Bounds::new(folo_ui::point(px(20.), px(100.)), folo_ui::size(px(1000.), px(400.)));
+        let (cols, cell_w, measured_h) = (5, 193.6, px(154.));
+        let row = 750;
+        let idx = row * cols + 2;
+        // UniformList places row 750 at y = grid_top + scroll_y + measured_h * 750.
+        let scroll_y = -(measured_h * row as f32);
+        let cursor = folo_ui::point(px(20. + 2. * (cell_w + GAP) + 50.), px(150.));
+        assert!(tile_contains_point(grid, scroll_y, idx, cols, cell_w, measured_h, cursor));
+        assert!(row_in_viewport(grid, scroll_y, row, measured_h));
+        assert_eq!(parse_hover_tile(&format!("ds1\0{idx}\0img-42")), Some(("ds1", idx, "img-42")));
     }
 }
