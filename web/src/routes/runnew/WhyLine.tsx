@@ -11,7 +11,7 @@ export interface WhyLineProps {
   id: string;
   cls?: string;
   /** The first problem, or null while Start is on (or the form is still filling in). */
-  why: { text: string; key: Jump } | null;
+  why: { text: string; key: Jump; more?: number } | null;
   jump: (key: Jump) => void;
 }
 
@@ -30,6 +30,7 @@ export default function WhyLine(p: WhyLineProps) {
             }}
           >
             {p.why?.text}
+            {p.why && p.why.more ? <span class="why-more"> (+{p.why.more} more)</span> : null}
             <ArrowRight size={12} strokeWidth={2} aria-hidden="true" />
           </button>
         </p>
@@ -71,6 +72,9 @@ css`
     display: inline;
     margin-left: var(--space-1);
     vertical-align: -1px;
+    color: var(--text-tertiary);
+  }
+  .why-more {
     color: var(--text-tertiary);
   }
   @media (pointer: coarse) {

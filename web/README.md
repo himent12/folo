@@ -106,7 +106,7 @@ Screens (`src/routes/`):
 | Overview | `#/` | `Overview.tsx` | `overview/` |
 | Datasets | `#/datasets`, `#/datasets/<id>` | `Datasets.tsx`, `Dataset.tsx` | `datasets/`, `dataset/` |
 | Labeling | `#/datasets/label`, `#/datasets/label/<id>` | `LabelJobs.tsx`, `LabelJob.tsx` | `label/` |
-| Runs | `#/runs`, `#/runs/new`, `#/runs/compare`, `#/runs/<id>` | `Runs.tsx`, `RunNew.tsx`, `RunCompare.tsx`, `Run.tsx` | `runs/`, `runnew/`, `compare/` (`config.ts`, `state.ts`, `ComparePlot.tsx`, `RunChips.tsx`, `AddRun.tsx`, `ManageSheet.tsx`, `CompareTable.tsx`), `run/` |
+| Runs | `#/runs`, `#/runs/new`, `#/runs/compare`, `#/runs/<id>` | `Runs.tsx`, `RunNew.tsx`, `RunCompare.tsx`, `Run.tsx` | `runs/`, `runnew/` (`state.ts`, `SummaryRail.tsx`, sections, estimation & validation), `compare/` (`config.ts`, `state.ts`, `ComparePlot.tsx`, `RunChips.tsx`, `AddRun.tsx`, `ManageSheet.tsx`, `CompareTable.tsx`), `run/` |
 | Models | `#/models`, `#/models/<id>` | `Models.tsx`, `Model.tsx` | `models/`, `model/` |
 | Benchmarks | `#/benchmarks`, `#/benchmarks/<id>`, `…/<id>/entries/<entryId>`, `…/<id>/compare`, `…/<id>/loops/<loopId>` | `Benchmarks.tsx`, `Benchmark.tsx`, `BenchEntry.tsx`, `BenchCompare.tsx`, `BenchLoop.tsx` | `bench/` |
 | Playground | `#/playground` | `Playground.tsx` | `playground/` |

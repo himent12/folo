@@ -124,9 +124,9 @@ export function reviewRows(
     { key: 'imgsz', label: 'Image size', value: `${imgszN} px` },
     // A cloud run says where it runs ("RunPod · RTX 4090") in the device's place.
     onCloud
-      ? { key: 'runon' as const, label: 'Runs on', value: cloudPick.offer ? `${cloudPick.provider} · ${deviceName(cloudPick.offer.gpu)}` : cloudPick.provider, warn: !!errors.runon || !!errors.offer }
+      ? { key: 'runon' as const, label: 'Runs on', value: cloudPick.offer ? `${cloudPick.provider} · ${deviceName(cloudPick.offer.gpu)}` : cloudPick.provider, warn: !!errors.runon || !!errors.offer || !!errors.hours }
       : { key: 'device' as const, label: 'Device', value: deviceLabel, warn: !!deviceMsg },
-    ...(caps || onCloud ? [{ key: 'amp' as const, label: 'Mixed precision', value: ampOn ? 'On' : 'Off' }] : []),
+    ...(caps || onCloud ? [{ key: 'amp' as const, label: 'Mixed precision', value: ampOn ? 'On' : 'Off', warn: !!errors.amp }] : []),
     {
       key: 'weights',
       label: 'Start from',
@@ -135,6 +135,9 @@ export function reviewRows(
       warn: !!errors.weights,
     },
     ...(optimizer !== 'auto' ? [{ key: 'opt' as const, label: 'Optimizer', value: optimizerLabel(optimizer) }] : []),
+    ...(errors.lr0 ? [{ key: 'lr0' as const, label: 'Learning rate', value: 'Invalid', warn: true }] : []),
+    ...(errors.seed ? [{ key: 'seed' as const, label: 'Seed', value: 'Invalid', warn: true }] : []),
+    ...(errors.close ? [{ key: 'close' as const, label: 'Close mosaic', value: 'Invalid', warn: true }] : []),
     ...(e2e ? [{ key: 'head' as const, label: 'Head', value: HEAD_LABEL.o2o }] : []),
   ];
 }
