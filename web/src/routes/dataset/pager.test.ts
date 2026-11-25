@@ -1,4 +1,4 @@
-import { createRoot, effect, flush } from 'fw';
+import { computed, createRoot, effect, flush } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Api } from '$lib/api/client';
 import { hub } from '$lib/api/index';
@@ -379,6 +379,67 @@ describe('ImagePager', () => {
       expect(pager.get(500)?.id).toBe('img_500');
     } finally {
       stop();
+    }
+  });
+
+  it('re-subscribes a retained computed after its consumer detaches and reattaches across a load and reload', async () => {
+    let tag = 'v1';
+    const api: Partial<Api> = {
+      datasetImages: async (_id, q) => {
+        const off = q.offset ?? 0;
+        const lim = q.limit ?? PAGE;
+        return {
+          total: 200,
+          images: Array.from({ length: lim }, (_, k) => ({
+            id: `img_${off + k}`,
+            file: `${tag}_${off + k}.jpg`,
+            split: 'train' as const,
+            width: 640,
+            height: 480,
+            boxes: [],
+          })),
+        };
+      },
+    };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_detach', undefined, undefined);
+    const first = computed(() => pager.get(0));
+    const seen: (string | undefined)[] = [];
+
+    // 1. Observe while page 0 is unloaded, then detach.
+    const stop1 = createRoot((dispose) => {
+      effect(() => {
+        seen.push(first.get()?.file);
+      });
+      return dispose;
+    });
+    flush();
+    expect(seen).toEqual([undefined]);
+    stop1();
+
+    // 2. Load page 0 while detached.
+    await pager.at(0);
+    flush();
+
+    // 3. Reattach: must see the loaded image immediately and keep tracking future reloads.
+    const stop2 = createRoot((dispose) => {
+      effect(() => {
+        seen.push(first.get()?.file);
+      });
+      return dispose;
+    });
+    try {
+      flush();
+      expect(seen.at(-1)).toBe('v1_0.jpg');
+      tag = 'v2';
+      pager.reload();
+      flush();
+      await Promise.resolve();
+      await Promise.resolve();
+      flush();
+      expect(seen.at(-1)).toBe('v2_0.jpg');
+    } finally {
+      stop2();
     }
   });
 });

@@ -3,7 +3,7 @@
 // per page, so landing page N never wakes tiles on page M) and are bounded by an LRU cap (`MAX_CACHED_PAGES`), until
 // `reload()` says the dataset changed on disk.
 
-import { batch, createSubscriber, isTracking, signal, type Signal } from 'fw';
+import { batch, createSubscriber, isTracking, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { DatasetImage, Split } from '$lib/api/types';
 
@@ -12,11 +12,6 @@ export const PAGE = 100;
 const SCAN = 500;
 /** Maximum pages kept cached (LRU): caps memory on large datasets while keeping nearby pages warm. */
 export const MAX_CACHED_PAGES = 50;
-
-interface PageSlot {
-  sig: Signal<number>;
-  watch: () => void;
-}
 
 export class ImagePager {
   #total = signal<number | null>(null);
@@ -34,10 +29,12 @@ export class ImagePager {
   set error(v: unknown) {
     this.#error.set(v);
   }
-  /** Per-page version signals: `get(i)` and `revisionOf(i)` wake only when their own page updates; auto-pruned on detach. */
-  #pageSlots = new Map<number, PageSlot>();
-  /** Pages currently observed by a mounted reactive reader (protected from eviction when possible and refetched on reload). */
-  #observed = new Set<number>();
+  /** Per-page subscriber functions: `get(i)` and `revisionOf(i)` wake only when their own page updates; auto-pruned on detach. */
+  #pageSlots = new Map<number, () => void>();
+  /** Active `createSubscriber` update callbacks per observed page (protected from eviction when possible and refetched on reload). */
+  #pageUpdaters = new Map<number, Set<() => void>>();
+  /** Monotonic counter bumped on every `#bumpPage`, so a detached computed reattaching after a load invalidates immediately. */
+  #bumpSeq = 0;
   /** Bumps when `#index` changes, for `indexOf(id)` readers. */
   #indexVersion = signal(0);
   /** Insertion-ordered LRU cache of loaded pages (oldest first, most-recently-used last). */
@@ -205,26 +202,34 @@ export class ImagePager {
 
   #trackPage(p: number): void {
     if (!isTracking()) return;
-    let slot = this.#pageSlots.get(p);
-    if (!slot) {
-      const sig = signal(0);
-      const watch = createSubscriber(() => {
-        this.#observed.add(p);
+    let watch = this.#pageSlots.get(p);
+    if (!watch) {
+      let seenSeq = this.#bumpSeq;
+      const sub = createSubscriber((update) => {
+        let set = this.#pageUpdaters.get(p);
+        if (!set) this.#pageUpdaters.set(p, (set = new Set()));
+        set.add(update);
+        if (!this.#pageSlots.has(p)) this.#pageSlots.set(p, sub);
+        if (seenSeq !== this.#bumpSeq) {
+          seenSeq = this.#bumpSeq;
+          update();
+        }
         return () => {
-          this.#observed.delete(p);
-          if (this.#pageSlots.get(p) === slot) this.#pageSlots.delete(p);
+          seenSeq = this.#bumpSeq;
+          set!.delete(update);
+          if (set!.size === 0) this.#pageUpdaters.delete(p);
+          if (this.#pageSlots.get(p) === sub) this.#pageSlots.delete(p);
         };
       });
-      slot = { sig, watch };
-      this.#pageSlots.set(p, slot);
+      watch = sub;
     }
-    slot.watch();
-    void slot.sig.get();
+    watch();
   }
 
   #bumpPage(p: number): void {
-    const slot = this.#pageSlots.get(p);
-    if (slot) slot.sig.set((v) => v + 1);
+    this.#bumpSeq++;
+    const set = this.#pageUpdaters.get(p);
+    if (set) for (const update of [...set]) update();
   }
 
   #touch(p: number, images: DatasetImage[]): void {
@@ -236,7 +241,7 @@ export class ImagePager {
     while (this.#pages.size > this.maxPages) {
       let oldest: number | undefined;
       for (const p of this.#pages.keys()) {
-        if (p !== keep && !this.#observed.has(p)) {
+        if (p !== keep && !this.#pageUpdaters.has(p)) {
           oldest = p;
           break;
         }
@@ -260,7 +265,7 @@ export class ImagePager {
           if (this.#index.get(im.id) === oldest * PAGE + k) this.#index.delete(im.id);
         }
       }
-      if (this.#observed.has(oldest)) this.#bumpPage(oldest);
+      if (this.#pageUpdaters.has(oldest)) this.#bumpPage(oldest);
     }
   }
 
@@ -340,7 +345,7 @@ export class ImagePager {
     this.#inflight.clear();
     for (const p of this.#pages.keys()) this.#stale.add(p);
     for (const p of this.#failed) this.#stale.add(p);
-    for (const p of this.#observed) this.#stale.add(p);
+    for (const p of this.#pageUpdaters.keys()) this.#stale.add(p);
     this.#failed.clear();
     // Readers run again and ask for their pages (`get`); with no row shown (an empty filter), nothing would ask.
     if (!this.total) void this.#load(0);
