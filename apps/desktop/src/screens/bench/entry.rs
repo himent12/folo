@@ -1,7 +1,10 @@
 //! An entry's page: its header and its result on the five axes.
 
 use folo_ui::prelude::FluentBuilder;
-use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px, relative};
+use folo_ui::{
+    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, px, relative,
+};
 
 use super::cells::{bar_row, partial_badge};
 use super::format::{
@@ -422,14 +425,30 @@ impl FoloApp {
         };
         let loc = &r.localization;
         let peak = loc.histogram.iter().copied().max().unwrap_or(0).max(1);
-        let hist = div().h(px(64.)).flex().items_end().gap(px(3.)).children(loc.histogram.iter().map(|n| {
-            div()
-                .flex_1()
-                .h(relative(*n as f32 / peak as f32))
-                .min_h(px(1.))
-                .rounded_t(px(2.))
-                .bg(t.accent_fill())
-        }));
+        let bins = loc.histogram.len().max(1);
+        let hist = div().h(px(64.)).flex().items_end().gap(px(3.)).children(
+            loc.histogram.iter().enumerate().map(|(i, &n)| {
+                let tip = iou_bin_tooltip(i, bins, n, loc.matches);
+                div()
+                    .id(SharedString::from(format!("loc-bin-{i}")))
+                    .flex_1()
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .justify_end()
+                    .rounded_t(px(2.))
+                    .hover(|s| s.bg(t.bg_hover))
+                    .tooltip(crate::controls::tip(tip, None))
+                    .child(
+                        div()
+                            .w_full()
+                            .h(relative(n as f32 / peak as f32))
+                            .min_h(px(1.))
+                            .rounded_t(px(2.))
+                            .bg(if n > 0 { t.accent_fill() } else { t.line_subtle }),
+                    )
+            }),
+        );
         let localization = panel(&t)
             .flex_1()
             .min_w(px(320.))
@@ -468,5 +487,30 @@ impl FoloApp {
                 ),
             )
             .into_any_element()
+    }
+}
+
+/// Tooltip label for one IoU localization histogram bin spanning `0.50..=1.00`.
+pub(crate) fn iou_bin_tooltip(index: usize, bins: usize, count: u64, total_matches: u64) -> String {
+    let bins = bins.max(1);
+    let lo = 0.5 + 0.5 * (index as f32 / bins as f32);
+    let hi = 0.5 + 0.5 * ((index + 1) as f32 / bins as f32);
+    if total_matches > 0 {
+        let share = (count as f64 / total_matches as f64) * 100.;
+        format!("IoU {lo:.2}–{hi:.2} · {} ({share:.0}%)", counted(count, "match", "matches"))
+    } else {
+        format!("IoU {lo:.2}–{hi:.2} · 0 matches")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::iou_bin_tooltip;
+
+    #[test]
+    fn iou_bin_tooltip_formats_range_count_and_share() {
+        assert_eq!(iou_bin_tooltip(0, 10, 5, 20), "IoU 0.50–0.55 · 5 matches (25%)");
+        assert_eq!(iou_bin_tooltip(9, 10, 1, 20), "IoU 0.95–1.00 · 1 match (5%)");
+        assert_eq!(iou_bin_tooltip(3, 10, 0, 0), "IoU 0.65–0.70 · 0 matches");
     }
 }

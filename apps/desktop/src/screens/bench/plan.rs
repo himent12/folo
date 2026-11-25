@@ -208,31 +208,83 @@ impl FoloApp {
             let what =
                 c.why.clone().or_else(|| info.as_ref().map(|i| i.description.clone())).unwrap_or_default();
             let group = info.as_ref().map_or("", |i| i.group.label());
-            let shown = preview_severity(&c.severities);
+            let shown = self
+                .bench
+                .plan_preview_sev
+                .get(&(b.id.clone(), c.condition.clone()))
+                .copied()
+                .filter(|s| c.severities.contains(s))
+                .unwrap_or_else(|| preview_severity(&c.severities));
             let thumb = self.condition_thumb(&t, b, Some((&c.condition, shown)), window, cx);
-            let sev = div().flex().gap(px(4.)).children((1..=crate::api::BENCH_SEVERITIES).map(|s| {
-                let on = c.severities.contains(&s);
-                div()
-                    .size(px(20.))
-                    .rounded(px(radius::XS))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(if on { t.accent_muted } else { t.bg_inset })
-                    .when(s == shown && on, |d| d.border_1().border_color(t.accent_line))
-                    .child(
-                        text(ty::SM, if on { t.accent_text } else { t.text_disabled })
+            let chips: Vec<AnyElement> = (1..=crate::api::BENCH_SEVERITIES)
+                .map(|s| {
+                    let on = c.severities.contains(&s);
+                    let active = s == shown && on;
+                    let key = format!("plan-sev-{}-{s}", c.condition);
+                    let base = div()
+                        .id(folo_ui::SharedString::from(key.clone()))
+                        .size(px(22.))
+                        .rounded(px(radius::XS))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(if active {
+                            t.accent_muted
+                        } else if on {
+                            t.bg_raised
+                        } else {
+                            t.bg_inset
+                        })
+                        .when(active, |d| d.border_1().border_color(t.accent_line))
+                        .when(on && !active, |d| d.border_1().border_color(t.line_subtle))
+                        .child(
+                            text(
+                                ty::SM,
+                                if active {
+                                    t.accent_text
+                                } else if on {
+                                    t.text_secondary
+                                } else {
+                                    t.text_disabled
+                                },
+                            )
                             .tnum()
                             .child(s.to_string()),
-                    )
-            }));
+                        );
+                    if on {
+                        let bid = b.id.clone();
+                        let cond_id = c.condition.clone();
+                        let el = base
+                            .cursor_pointer()
+                            .hover(|st| st.bg(t.bg_hover))
+                            .active(|st| st.bg(t.bg_active))
+                            .tooltip(crate::controls::tip(format!("Preview {name} at severity {s}"), None));
+                        self.bind(
+                            el,
+                            &key,
+                            radius::XS,
+                            window,
+                            cx,
+                            act(move |this, _, cx| {
+                                this.bench.plan_preview_sev.insert((bid.clone(), cond_id.clone()), s);
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element()
+                    } else {
+                        base.tooltip(crate::controls::tip(format!("Severity {s} is not in this plan"), None))
+                            .into_any_element()
+                    }
+                })
+                .collect();
+            let sev = div().flex().items_center().gap(px(4.)).children(chips);
             rows.push(row(thumb, name, what, group, sev, pct(c.weight / total)));
         }
         let plan = panel(&t).overflow_hidden().child(header).child(intro).child(head).children(rows).child(
-            div().px(px(16.)).py(px(10.)).child(
-                text(ty::SM, t.text_tertiary)
-                    .child("Previews show the first image at the outlined severity."),
-            ),
+            div().px(px(16.)).py(px(10.)).child(text(ty::SM, t.text_tertiary).child(format!(
+                "Click a severity (1–{}) to preview the first image under it.",
+                crate::api::BENCH_SEVERITIES
+            ))),
         );
         div().flex().flex_col().gap(px(16.)).children(design).child(plan).into_any_element()
     }

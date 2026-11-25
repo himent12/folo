@@ -9,6 +9,15 @@ use crate::api::*;
 use crate::input::TextInput;
 use crate::store::Load;
 
+/// Status filter on the Benchmarks list page.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BenchListFilter {
+    #[default]
+    All,
+    Running,
+    Scored,
+}
+
 /// The tabs of a benchmark's page.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum BenchTab {
@@ -188,4 +197,16 @@ pub struct BenchState {
     pub pinned_entry: Option<(String, String)>,
     /// Failed entries whose full error details are expanded: `(benchmark_id, entry_id)`.
     pub expanded_errors: HashSet<(String, String)>,
+    /// Status filter on the Benchmarks list.
+    pub list_filter: BenchListFilter,
+    /// Active sort on the Benchmarks list `(column_key, descending)`.
+    pub list_sort: Option<(&'static str, bool)>,
+    /// Per `(benchmark_id, condition_id)`: selected severity (`1..=BENCH_SEVERITIES`) previewed on the Plan tab.
+    pub plan_preview_sev: HashMap<(String, String), u8>,
+    /// Entry image currently expanded in the Entry Images detail panel: `(bench_id, entry_id, image_id)`.
+    pub selected_entry_image: Option<(String, String, String)>,
+    /// Hide dashed ground-truth boxes in the expanded Entry Image inspector.
+    pub entry_inspect_hide_truth: bool,
+    /// Hide solid prediction boxes in the expanded Entry Image inspector.
+    pub entry_inspect_hide_preds: bool,
 }
