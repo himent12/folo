@@ -25,7 +25,7 @@ it.
 | `src/engine.rs` | Device selection, GPU info, `engine_error` (engine errors to API errors), the single-flight predictor cache of `/api/predict` |
 | `src/index.rs` | A dataset's `Index` of images and boxes, its `Fingerprint`, thumbnails (tests in `src/index/tests.rs`) |
 | `src/models.rs` | The real store's models: run weights, `<data dir>/models`, published weights, single-flight `/eval` cache, `/export` publishing, and cached derived `/weights?format=...` builds with per-`(model, variant)` locks (tests in `src/models/tests.rs`) |
-| `src/uploads.rs` | Upload sessions (`/api/uploads`): streams in parts into `<data dir>/uploads/<id>/`, cached `uploads.json` fingerprints, and a condvar-gated expiry sweeper |
+| `src/uploads/` | Upload sessions (`/api/uploads`): `mod.rs` (sessions into `<data dir>/uploads/<id>/`, condvar-gated expiry sweeper), `fingerprints.rs` (cached `uploads.json` fingerprints), `pipe.rs` (streaming part bridge), `unpack.rs` (tar extraction and path validation), `tests.rs` |
 | `src/error.rs` | `Error` (status + `{ "error": { code, message, hint } }`), `ApiJson`, `ApiPath`, `ApiQuery`, `ApiBytes` |
 | `src/web.rs` | The Studio compiled in by the `embed-web` feature and how it is served |
 | `src/probe.rs` | `POST /api/system/benchmark`: a short training and inference probe |
