@@ -5,13 +5,16 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
 use std::time::SystemTime;
 
-use folo_api::{BestEpoch, Epoch, LogLevel, LogLine, RunLogs, RunMetrics, Step};
+use folo_api::{BestEpoch, Epoch, LogLevel, LogLine, RunEvent, RunLogs, RunMetrics, Step};
 use serde::Deserialize;
 
 use crate::error::Result;
-use crate::store::{LogsQuery, MetricsQuery, Subscription};
+use crate::store::{
+    LogsQuery, MetricsQuery, RunSseStream, RunSseSubscription, RunStatusResync, SseFrame, Subscription,
+};
 use crate::util::{fnv1a, parse_rfc3339, rfc3339, unix_now};
 
 use super::entry::{model_metrics, status_event};
@@ -315,6 +318,27 @@ impl Runs {
         let st = e.state.lock().unwrap();
         let events = e.tx.subscribe();
         Ok(Subscription { initial: status_event(&st.file.run), events })
+    }
+
+    /// Subscribes to a run's pre-serialized SSE frames with a weak resync callback for lag recovery (holding
+    /// `Weak<RunEntry>` so deleting the run drops the channel and closes open streams).
+    pub fn subscribe_sse(&self, id: &str) -> Result<RunSseSubscription> {
+        let e = self.get(id)?;
+        let (initial, frames) = {
+            let st = e.state.lock().unwrap();
+            (status_event(&st.file.run), e.sse_tx.subscribe())
+        };
+        let weak = Arc::downgrade(&e);
+        let current: RunStatusResync = Arc::new(move || {
+            let entry = weak.upgrade()?;
+            let st = entry.state.lock().unwrap_or_else(|p| p.into_inner());
+            (!st.deleted).then(|| status_event(&st.file.run))
+        });
+        Ok(RunSseSubscription {
+            initial: SseFrame::run(&RunEvent::Status(initial)),
+            stream: RunSseStream::Frames(frames),
+            current: Some(current),
+        })
     }
 
     /// The run's metric history as `q` selects it: `metrics.jsonl` (resumed epochs replace the steps and epochs

@@ -19,6 +19,8 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::AppState;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
+use crate::label::Labeler;
+use crate::store::SseFrame;
 
 use super::datasets::serve_image;
 use super::inference::{field_err, is_multipart};
@@ -198,25 +200,46 @@ pub(super) async fn label_logs(
     Ok(Json(RunLogs { lines, total: 0 }))
 }
 
-/// `GET /api/label/jobs/{id}/events`: a `job` event, then live events until the client disconnects, the job is
-/// deleted or the server shuts down. A subscriber that falls behind is told to `reload`.
+fn label_sse_frames<F>(
+    initial: SseFrame,
+    rx: tokio::sync::broadcast::Receiver<SseFrame>,
+    current: F,
+) -> impl Stream<Item = SseFrame>
+where
+    F: Fn() -> Option<LabelJob> + Send + 'static,
+{
+    let first = stream::once(std::future::ready(initial));
+    let rest = BroadcastStream::new(rx).flat_map(move |r| {
+        let frames = match r {
+            Ok(frame) => vec![frame],
+            Err(BroadcastStreamRecvError::Lagged(_)) => {
+                let mut resync = Vec::with_capacity(2);
+                resync.push(SseFrame::label(&LabelEvent::Reload));
+                if let Some(job) = current() {
+                    resync.push(SseFrame::label(&LabelEvent::Job(Box::new(job))));
+                }
+                resync
+            }
+        };
+        stream::iter(frames)
+    });
+    first.chain(rest)
+}
+
+/// `GET /api/label/jobs/{id}/events`: a `job` event, then live pre-serialized events until the client disconnects,
+/// the job is deleted or the server shuts down. A subscriber that falls behind receives a `reload` event followed
+/// by a fresh `job` snapshot.
 pub(super) async fn label_events(
     State(st): State<AppState>,
     ApiPath(id): ApiPath<String>,
 ) -> Result<Sse<impl Stream<Item = std::result::Result<Event, Infallible>>>> {
-    let (job, events) = st.store.labeler()?.subscribe(&id)?;
+    let (initial, rx, job) = st.store.labeler()?.subscribe_sse(&id)?;
     let mut shutdown = st.shutdown.subscribe();
-    let first = stream::once(std::future::ready(LabelEvent::Job(Box::new(job))));
-    let rest = BroadcastStream::new(events).map(|r| match r {
-        Ok(ev) => ev,
-        Err(BroadcastStreamRecvError::Lagged(_)) => LabelEvent::Reload,
-    });
     let stopped = async move {
         let _ = shutdown.wait_for(|v| *v).await;
     };
-    let events = first
-        .chain(rest)
-        .map(|ev| Ok(Event::default().event(ev.name()).data(ev.data_json())))
+    let events = label_sse_frames(initial, rx, move || Labeler::current_job(&job))
+        .map(|frame| Ok(frame.to_sse()))
         .take_until(stopped);
     Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(KEEP_ALIVE).text("keep-alive")))
 }
@@ -228,4 +251,94 @@ pub(super) async fn label_dataset(
 ) -> Result<Response> {
     let ds = blocking(&st, move |s| s.label_dataset(&id, req)).await?;
     Ok((StatusCode::CREATED, Json(ds)).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use folo_api::{LabelCounts, LabelJobStatus, LabelUsage, LogLevel, LogLine};
+    use tokio::sync::broadcast;
+
+    use super::*;
+
+    fn sample_job(name: &str, labeled: u64) -> LabelJob {
+        LabelJob {
+            id: "lb_1".into(),
+            name: name.into(),
+            classes: vec!["cat".into()],
+            instructions: String::new(),
+            created: "2026-01-01T00:00:00Z".into(),
+            status: LabelJobStatus::Idle,
+            counts: LabelCounts { images: 2, pending: 2 - labeled, labeled, failed: 0, boxes: labeled },
+            run: None,
+            usage: LabelUsage::default(),
+            dataset_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn label_sse_lag_emits_reload_and_job_snapshot_and_shares_payloads() {
+        let (tx, rx1) = broadcast::channel::<SseFrame>(2);
+        let rx2 = tx.subscribe();
+        let initial = SseFrame::label(&LabelEvent::Job(Box::new(sample_job("before", 0))));
+        for i in 0..4 {
+            let _ = tx.send(SseFrame::label(&LabelEvent::Log(LogLine {
+                t: "2026-01-01T00:00:00Z".into(),
+                level: LogLevel::Info,
+                message: format!("line-{i}"),
+            })));
+        }
+        drop(tx);
+
+        let frames1: Vec<SseFrame> =
+            label_sse_frames(initial.clone(), rx1, || Some(sample_job("after", 2))).collect().await;
+        let frames2: Vec<SseFrame> =
+            label_sse_frames(initial, rx2, || Some(sample_job("after", 2))).collect().await;
+
+        assert_eq!(
+            frames1.iter().map(|f| f.event).collect::<Vec<_>>(),
+            ["job", "reload", "job", "log", "log"]
+        );
+        let resync: LabelJob = serde_json::from_str(&frames1[2].data).unwrap();
+        assert_eq!((resync.name.as_str(), resync.counts.labeled), ("after", 2));
+        assert!(Arc::ptr_eq(&frames1[3].data, &frames2[3].data));
+        assert!(Arc::ptr_eq(&frames1[4].data, &frames2[4].data));
+    }
+
+    #[tokio::test]
+    async fn labeler_subscribe_sse_shares_frames_and_closes_on_delete() {
+        let dir = folo_test_support::TestDir::new("label-sse-shared");
+        let labeler = Labeler::open(dir.path());
+        let job = labeler
+            .create(CreateLabelJob {
+                name: "cats".into(),
+                classes: vec!["cat".into()],
+                instructions: String::new(),
+                path: None,
+            })
+            .unwrap();
+
+        let (init1, mut rx1, weak) = labeler.subscribe_sse(&job.id).unwrap();
+        let (_, mut rx2, _) = labeler.subscribe_sse(&job.id).unwrap();
+        assert_eq!(init1.event, "job");
+        assert!(Labeler::current_job(&weak).is_some());
+
+        labeler
+            .update(
+                &job.id,
+                UpdateLabelJob { name: Some("cats-v2".into()), classes: None, instructions: None },
+            )
+            .unwrap();
+        let f1 = rx1.recv().await.unwrap();
+        let f2 = rx2.recv().await.unwrap();
+        assert_eq!(f1.event, "job");
+        assert!(f1.data.contains("cats-v2"));
+        assert!(Arc::ptr_eq(&f1.data, &f2.data), "concurrent subscribers share one Arc<str>");
+
+        labeler.delete(&job.id).unwrap();
+        assert!(Labeler::current_job(&weak).is_none());
+        assert!(matches!(rx1.recv().await, Err(broadcast::error::RecvError::Closed)));
+        assert!(matches!(rx2.recv().await, Err(broadcast::error::RecvError::Closed)));
+    }
 }

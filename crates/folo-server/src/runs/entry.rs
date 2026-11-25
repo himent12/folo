@@ -11,6 +11,7 @@ use folo_api::{
 use tokio::sync::broadcast;
 
 use crate::index::write_atomic;
+use crate::store::SseFrame;
 use crate::util::{parse_rfc3339, unix_now};
 
 use super::{
@@ -21,6 +22,7 @@ use super::{
 impl RunEntry {
     pub(super) fn new(id: String, dir: PathBuf, mut file: RunFile) -> RunEntry {
         let (tx, _) = broadcast::channel(EVENT_BUFFER);
+        let (sse_tx, _) = broadcast::channel(EVENT_BUFFER);
         // The dataset it was created on names it in the API, also once that dataset is removed (older run.json files
         // have its name but no classes).
         let d = &file.dataset;
@@ -42,6 +44,7 @@ impl RunEntry {
             }),
             metrics_cache: Mutex::default(),
             tx,
+            sse_tx,
             stop: Arc::new(AtomicBool::new(false)),
             measure: Mutex::new(None),
         }
@@ -86,8 +89,14 @@ impl RunEntry {
     }
 
     pub(super) fn send(&self, ev: RunEvent) {
-        // No receivers is fine: nobody is watching.
-        let _ = self.tx.send(ev);
+        // Pre-serialize once for all HTTP SSE subscribers when at least one is listening.
+        if self.sse_tx.receiver_count() > 0 {
+            let _ = self.sse_tx.send(SseFrame::run(&ev));
+        }
+        // Typed subscribers (e.g. MCP / Rust callers).
+        if self.tx.receiver_count() > 0 {
+            let _ = self.tx.send(ev);
+        }
     }
 
     fn write_log(&self, line: &LogLine) {

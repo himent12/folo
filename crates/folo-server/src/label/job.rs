@@ -15,6 +15,7 @@ use tokio::sync::broadcast;
 
 use crate::error::{Error, Result};
 use crate::index::write_atomic;
+use crate::store::SseFrame;
 use crate::util::{rfc3339, unix_now};
 
 /// Version of `job.json`'s layout.
@@ -255,6 +256,8 @@ pub struct Job {
     pub dir: PathBuf,
     state: Mutex<State>,
     events: broadcast::Sender<LabelEvent>,
+    /// Pre-serialized SSE frames shared across concurrent HTTP subscribers.
+    sse: broadcast::Sender<SseFrame>,
 }
 
 impl Job {
@@ -269,6 +272,7 @@ impl Job {
             dir,
             state: Mutex::new(State { file, active: None, logs: lines, exporting: false, deleted: false }),
             events: broadcast::channel(EVENT_BUFFER).0,
+            sse: broadcast::channel(EVENT_BUFFER).0,
         }
     }
 
@@ -356,19 +360,31 @@ impl Job {
         write_atomic(&path, &bytes).map_err(|e| Error::internal(format!("writing {}: {e}", path.display())))
     }
 
-    /// Sends `event` to the subscribers there are.
+    /// Sends `event` to the subscribers there are (pre-serializing once for all HTTP SSE subscribers).
     pub fn emit(&self, event: LabelEvent) {
-        let _ = self.events.send(event);
+        if self.sse.receiver_count() > 0 {
+            let _ = self.sse.send(SseFrame::label(&event));
+        }
+        if self.events.receiver_count() > 0 {
+            let _ = self.events.send(event);
+        }
     }
 
-    /// Sends the job as it is now.
+    /// Sends the job as it is now when at least one subscriber is listening.
     pub fn emit_job(&self, state: &State) {
-        self.emit(LabelEvent::Job(Box::new(state.job())));
+        if self.sse.receiver_count() > 0 || self.events.receiver_count() > 0 {
+            self.emit(LabelEvent::Job(Box::new(state.job())));
+        }
     }
 
-    /// A subscription to the job's events.
+    /// A subscription to the job's typed events.
     pub fn subscribe(&self) -> broadcast::Receiver<LabelEvent> {
         self.events.subscribe()
+    }
+
+    /// A subscription to the job's pre-serialized SSE frames.
+    pub fn subscribe_sse(&self) -> broadcast::Receiver<SseFrame> {
+        self.sse.subscribe()
     }
 
     /// Adds a line to the job's log: memory, `log.jsonl` and the subscribers.

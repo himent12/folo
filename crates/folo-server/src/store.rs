@@ -7,6 +7,7 @@
 //! `folo serve` (its `subscribe` answers `not_implemented`).
 
 use std::path::Path;
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use folo_api::{
@@ -389,6 +390,66 @@ pub struct Subscription {
     pub events: broadcast::Receiver<RunEvent>,
 }
 
+/// A pre-serialized SSE frame shared across concurrent subscribers so fan-out serializes each event once (`O(1)`
+/// across subscribers instead of `O(N)`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SseFrame {
+    /// SSE `event:` name (e.g. `"status"`, `"step"`, `"job"`, `"bench"`).
+    pub event: &'static str,
+    /// Pre-serialized JSON payload for `data:`.
+    pub data: Arc<str>,
+}
+
+impl SseFrame {
+    /// Builds a shared frame from an event name and its JSON payload.
+    pub fn new(event: &'static str, data: impl Into<Arc<str>>) -> Self {
+        Self { event, data: data.into() }
+    }
+
+    /// Encodes a [`RunEvent`] once for SSE broadcast.
+    pub fn run(ev: &RunEvent) -> Self {
+        Self::new(ev.name(), ev.data_json())
+    }
+
+    /// Encodes a [`folo_api::LabelEvent`] once for SSE broadcast.
+    pub fn label(ev: &folo_api::LabelEvent) -> Self {
+        Self::new(ev.name(), ev.data_json())
+    }
+
+    /// Encodes a [`folo_api::BenchEvent`] once for SSE broadcast.
+    pub fn bench(ev: &folo_api::BenchEvent) -> Self {
+        Self::new(ev.name(), ev.data_json())
+    }
+
+    /// Turns this shared frame into an axum SSE [`Event`](axum::response::sse::Event).
+    pub(crate) fn to_sse(&self) -> axum::response::sse::Event {
+        axum::response::sse::Event::default().event(self.event).data(self.data.as_ref())
+    }
+}
+
+/// Live stream backing `GET /api/runs/{id}/events`: either shared pre-serialized frames or typed events for custom
+/// [`Store`] implementations that only implement [`Store::subscribe`].
+pub enum RunSseStream {
+    /// Pre-serialized frames shared across concurrent HTTP subscribers.
+    Frames(broadcast::Receiver<SseFrame>),
+    /// Typed events fallback.
+    Events(broadcast::Receiver<RunEvent>),
+}
+
+/// Callback returning a run's current [`StatusEvent`] for lag recovery (`None` once the run is deleted).
+pub type RunStatusResync = Arc<dyn Fn() -> Option<StatusEvent> + Send + Sync>;
+
+/// A live SSE subscription to a run's events, sharing pre-serialized payloads across concurrent clients and
+/// carrying a weak resync callback for lag recovery.
+pub struct RunSseSubscription {
+    /// The run's initial `status` frame (sent first).
+    pub initial: SseFrame,
+    /// Subsequent live events.
+    pub stream: RunSseStream,
+    /// Current status snapshot for lag recovery (`None` when the store does not provide one).
+    pub current: Option<RunStatusResync>,
+}
+
 /// The data behind the API. See the module docs.
 pub trait Store: Send + Sync + 'static {
     /// True for the mock store.
@@ -523,6 +584,16 @@ pub trait Store: Send + Sync + 'static {
     fn run_logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs>;
     /// Subscribes to a run's live events. Must be called inside a tokio runtime.
     fn subscribe(&self, id: &str) -> Result<Subscription>;
+    /// Subscribes to a run's live events as pre-serialized [`SseFrame`]s for HTTP SSE fan-out, with an optional
+    /// weak resync callback for lag recovery. The default delegates to [`Store::subscribe`].
+    fn subscribe_sse(&self, id: &str) -> Result<RunSseSubscription> {
+        let sub = self.subscribe(id)?;
+        Ok(RunSseSubscription {
+            initial: SseFrame::run(&RunEvent::Status(sub.initial)),
+            stream: RunSseStream::Events(sub.events),
+            current: None,
+        })
+    }
 
     /// Runs inference on one image.
     fn predict(&self, input: PredictInput) -> Result<PredictResponse>;

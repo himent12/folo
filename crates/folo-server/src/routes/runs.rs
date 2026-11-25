@@ -17,7 +17,9 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::AppState;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
-use crate::store::{LogsQuery, MetricsQuery, QueueMove};
+use crate::store::{
+    LogsQuery, MetricsQuery, QueueMove, RunSseStream, RunSseSubscription, RunStatusResync, SseFrame,
+};
 use crate::util::{rfc3339, unix_now};
 
 use super::{DEFAULT_LOG_LINES, KEEP_ALIVE, LogsParams, MAX_LOG_LINES, blocking};
@@ -189,31 +191,173 @@ pub(super) async fn run_logs(
     Ok(Json(blocking(&st, move |s| s.run_logs(&id, &q)).await?))
 }
 
-fn sse_event(ev: &RunEvent) -> Event {
-    Event::default().event(ev.name()).data(ev.data_json())
+fn lagged_run_frames(dropped: u64, current: Option<&RunStatusResync>) -> Vec<SseFrame> {
+    let mut out = Vec::with_capacity(2);
+    out.push(SseFrame::run(&RunEvent::Log(LogLine {
+        t: rfc3339(unix_now()),
+        level: LogLevel::Warn,
+        message: format!(
+            "client fell behind; {dropped} events dropped (reload /metrics for the full history)"
+        ),
+    })));
+    if let Some(status) = current.and_then(|f| f()) {
+        out.push(SseFrame::run(&RunEvent::Status(status)));
+    }
+    out
 }
 
-/// `GET /api/runs/{id}/events`: a `status` event, then live events until the client disconnects, the run is
-/// deleted or the server shuts down. Each client owns only a broadcast receiver; dropping the response stream drops
-/// it, and the run's event pump stops by itself once no receivers are left.
+fn run_sse_frames(sub: RunSseSubscription) -> impl Stream<Item = SseFrame> {
+    let first = stream::once(std::future::ready(sub.initial));
+    let current = sub.current;
+    let rest: std::pin::Pin<Box<dyn Stream<Item = SseFrame> + Send>> = match sub.stream {
+        RunSseStream::Frames(rx) => Box::pin(BroadcastStream::new(rx).flat_map(move |r| {
+            let frames = match r {
+                Ok(frame) => vec![frame],
+                Err(BroadcastStreamRecvError::Lagged(n)) => lagged_run_frames(n, current.as_ref()),
+            };
+            stream::iter(frames)
+        })),
+        RunSseStream::Events(rx) => Box::pin(BroadcastStream::new(rx).flat_map(move |r| {
+            let frames = match r {
+                Ok(ev) => vec![SseFrame::run(&ev)],
+                Err(BroadcastStreamRecvError::Lagged(n)) => lagged_run_frames(n, current.as_ref()),
+            };
+            stream::iter(frames)
+        })),
+    };
+    first.chain(rest)
+}
+
+/// `GET /api/runs/{id}/events`: a `status` event, then live pre-serialized events until the client disconnects,
+/// the run is deleted or the server shuts down. A subscriber that falls behind receives a warning `log` event
+/// followed by a fresh `status` snapshot so missed state transitions are recovered cleanly.
 pub(super) async fn run_events(
     State(st): State<AppState>,
     ApiPath(id): ApiPath<String>,
 ) -> Result<Sse<impl Stream<Item = std::result::Result<Event, Infallible>>>> {
-    let sub = st.store.subscribe(&id)?;
+    let sub = st.store.subscribe_sse(&id)?;
     let mut shutdown = st.shutdown.subscribe();
-    let first = stream::once(std::future::ready(RunEvent::Status(sub.initial)));
-    let rest = BroadcastStream::new(sub.events).map(|r| match r {
-        Ok(ev) => ev,
-        Err(BroadcastStreamRecvError::Lagged(n)) => RunEvent::Log(LogLine {
-            t: rfc3339(unix_now()),
-            level: LogLevel::Warn,
-            message: format!("client fell behind; {n} events dropped (reload /metrics for the full history)"),
-        }),
-    });
     let stopped = async move {
         let _ = shutdown.wait_for(|v| *v).await;
     };
-    let events = first.chain(rest).map(|ev| Ok(sse_event(&ev))).take_until(stopped);
+    let events = run_sse_frames(sub).map(|frame| Ok(frame.to_sse())).take_until(stopped);
     Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(KEEP_ALIVE).text("keep-alive")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use folo_api::{RunStatus, StatusEvent};
+    use tokio::sync::broadcast;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn run_sse_lag_emits_warning_and_current_status_then_resumes() {
+        let (tx, rx1) = broadcast::channel::<SseFrame>(2);
+        let rx2 = tx.subscribe();
+        let initial = SseFrame::run(&RunEvent::Status(StatusEvent::new(RunStatus::Running, None)));
+        let alive = Arc::new(AtomicBool::new(true));
+        let alive_ref = alive.clone();
+        let current: RunStatusResync = Arc::new(move || {
+            alive_ref.load(Ordering::SeqCst).then(|| StatusEvent::new(RunStatus::Completed, None))
+        });
+
+        // Overflow the capacity-2 buffer with 4 frames so both subscribers lag by 2.
+        for i in 0..4 {
+            let frame = SseFrame::run(&RunEvent::Log(LogLine {
+                t: "2026-01-01T00:00:00Z".into(),
+                level: LogLevel::Info,
+                message: format!("msg-{i}"),
+            }));
+            let _ = tx.send(frame);
+        }
+        drop(tx);
+
+        let frames1: Vec<SseFrame> = run_sse_frames(RunSseSubscription {
+            initial: initial.clone(),
+            stream: RunSseStream::Frames(rx1),
+            current: Some(current.clone()),
+        })
+        .collect()
+        .await;
+        let frames2: Vec<SseFrame> = run_sse_frames(RunSseSubscription {
+            initial,
+            stream: RunSseStream::Frames(rx2),
+            current: Some(current),
+        })
+        .collect()
+        .await;
+
+        assert_eq!(frames1[0].event, "status");
+        assert_eq!(frames1[1].event, "log");
+        assert!(frames1[1].data.contains("2 events dropped"), "{}", frames1[1].data);
+        assert_eq!(frames1[2].event, "status");
+        let resync: StatusEvent = serde_json::from_str(&frames1[2].data).unwrap();
+        assert_eq!(resync.status, RunStatus::Completed);
+        assert_eq!(frames1[3].event, "log");
+        assert!(frames1[3].data.contains("msg-2"));
+        assert_eq!(frames1[4].event, "log");
+        assert!(frames1[4].data.contains("msg-3"));
+        // Concurrent subscribers share the exact same pre-serialized Arc<str> payload.
+        assert!(Arc::ptr_eq(&frames1[3].data, &frames2[3].data));
+        assert!(Arc::ptr_eq(&frames1[4].data, &frames2[4].data));
+
+        // When the run is deleted while lagged, resync omits status and stream terminates cleanly.
+        alive.store(false, Ordering::SeqCst);
+        let (tx2, rx_del) = broadcast::channel::<SseFrame>(1);
+        let _ = tx2.send(SseFrame::new("log", "{}"));
+        let _ = tx2.send(SseFrame::new("log", "{}"));
+        drop(tx2);
+        let del_frames: Vec<SseFrame> = run_sse_frames(RunSseSubscription {
+            initial: SseFrame::run(&RunEvent::Status(StatusEvent::new(RunStatus::Running, None))),
+            stream: RunSseStream::Frames(rx_del),
+            current: Some(Arc::new(move || None)),
+        })
+        .collect()
+        .await;
+        assert_eq!(del_frames.iter().map(|f| f.event).collect::<Vec<_>>(), ["status", "log", "log"]);
+    }
+
+    #[tokio::test]
+    async fn real_runs_subscribe_sse_shares_frames_and_closes_on_delete() {
+        let dir = folo_test_support::TestDir::new("runs-sse-shared");
+        let runs = crate::runs::Runs::open(
+            dir.to_path_buf(),
+            Arc::new(crate::throughput::Throughput::in_memory(Default::default())),
+        );
+        let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"s"}"#).unwrap();
+        let dataset = crate::runs::DatasetRef {
+            id: "ds_1".into(),
+            name: "d".into(),
+            path: "nowhere".into(),
+            format: folo_api::DatasetFormat::Yolo,
+            classes: vec![],
+        };
+        let entry = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
+        let id = entry.id().to_string();
+
+        let sub1 = runs.subscribe_sse(&id).unwrap();
+        let sub2 = runs.subscribe_sse(&id).unwrap();
+        let RunSseStream::Frames(mut rx1) = sub1.stream else { panic!("expected Frames stream") };
+        let RunSseStream::Frames(mut rx2) = sub2.stream else { panic!("expected Frames stream") };
+        let current = sub1.current.expect("real store provides lag resync callback");
+        assert!(current().is_some());
+
+        entry.log(LogLevel::Info, "shared payload");
+        let f1 = rx1.recv().await.unwrap();
+        let f2 = rx2.recv().await.unwrap();
+        assert_eq!(f1.event, "log");
+        assert!(Arc::ptr_eq(&f1.data, &f2.data), "concurrent subscribers share one Arc<str>");
+
+        // Dropping our local `Arc<RunEntry>` and deleting the run drops `sse_tx` so open streams close immediately.
+        drop(entry);
+        runs.delete(&id).unwrap();
+        assert!(current().is_none(), "weak resync handle returns None once deleted");
+        assert!(matches!(rx1.recv().await, Err(broadcast::error::RecvError::Closed)));
+        assert!(matches!(rx2.recv().await, Err(broadcast::error::RecvError::Closed)));
+        runs.shutdown(None);
+    }
 }

@@ -208,16 +208,13 @@ pub(super) async fn ticker(run: Arc<SimRun>, mut last: Snap) {
         last = now;
         let mut hub = run.hub.lock().unwrap();
         let alive = !run.deleted.load(Ordering::SeqCst);
-        match &hub.tx {
-            Some(tx) if alive && tx.receiver_count() > 0 => {
-                for ev in events {
-                    let _ = tx.send(ev);
-                }
+        if alive && hub.receiver_count() > 0 {
+            for ev in events {
+                hub.broadcast(ev);
             }
-            _ => {
-                hub.ticking = false;
-                return;
-            }
+        } else {
+            hub.ticking = false;
+            return;
         }
     }
 }
