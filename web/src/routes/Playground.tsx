@@ -512,7 +512,7 @@ export default function Playground() {
   }
 
   function onwindowdown(e: PointerEvent) {
-    if (picked.peek() && !(e.target as Element | null)?.closest?.('[data-det], [data-box]')) picked.set(null);
+    if (picked.peek() && !(e.target as Element | null)?.closest?.('[data-det], [data-box], .zoom-hud')) picked.set(null);
   }
 
   onWindow('paste', onpaste);

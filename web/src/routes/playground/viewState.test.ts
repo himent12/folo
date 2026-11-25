@@ -4,6 +4,7 @@ import { DEFAULTS } from './predict';
 import {
   areDefaultThresholds,
   classCounts,
+  confidenceSummary,
   detectionIndex,
   deviceLabel,
   nextRowIndex,
@@ -93,5 +94,39 @@ describe('playground/viewState', () => {
 
     const o2mJson = predictionJson(samplePred, true, samplePred.boxes, { conf: 0.25, iou: 0.7, maxDet: 300, o2o: false });
     expect(o2mJson?.filter).toEqual({ conf: 0.25, iou: 0.7, max_det: 300 });
+  });
+
+  it('summarizes live confidence distribution across high, medium, and low buckets', () => {
+    expect(confidenceSummary([])).toBeNull();
+
+    const odd = confidenceSummary([
+      { b: { score: 0.92 } },
+      { b: { score: 0.61 } },
+      { b: { score: 0.33 } },
+    ]);
+    expect(odd).toEqual({
+      count: 3,
+      min: 0.33,
+      median: 0.61,
+      max: 0.92,
+      mean: (0.92 + 0.61 + 0.33) / 3,
+      high: 1,
+      mid: 1,
+      low: 1,
+    });
+
+    const even = confidenceSummary([
+      { b: { score: 0.5 } },
+      { b: { score: 0.75 } },
+      { b: { score: 0.9 } },
+      { b: { score: 0.49 } },
+    ]);
+    expect(even?.count).toBe(4);
+    expect(even?.min).toBe(0.49);
+    expect(even?.max).toBe(0.9);
+    expect(even?.median).toBeCloseTo(0.625);
+    expect(even?.high).toBe(2);
+    expect(even?.mid).toBe(1);
+    expect(even?.low).toBe(1);
   });
 });

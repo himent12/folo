@@ -28,8 +28,9 @@ import Segmented from '$lib/ui/Segmented';
 import Slider from '$lib/ui/Slider';
 import DropZone from './DropZone';
 import { BACKEND_NAME, DEFAULTS, px, score } from './predict';
-import type { Source } from './source';
+import { sourceImageKey, type Source } from './source';
 import Swatch from './Swatch';
+import ZoomStage from './ZoomStage';
 
 type Det = Prediction['boxes'][number];
 type Seg = 'file' | 'dataset' | 'webcam';
@@ -290,22 +291,24 @@ export default function ImagePanel(props: ImagePanelProps) {
             />
           ) : props.dims ? (
             <>
-              <DetectionView
-                src={props.src}
-                width={props.dims.width}
-                height={props.dims.height}
-                boxes={props.pred ? props.kept : []}
-                truth={props.truthBoxes}
-                classes={props.classes}
-                labels={props.labels}
-                scores={props.scores}
-                only={props.only}
-                active={props.activeIdx}
-                selected={props.selectedIdx}
-                onhover={(i) => hover.set(i === null ? null : (props.kept[i] ?? null))}
-                onselect={props.pickFromImage}
-                alt={props.sourceName}
-              />
+              <ZoomStage resetKey={sourceImageKey(props.source)}>
+                <DetectionView
+                  src={props.src}
+                  width={props.dims.width}
+                  height={props.dims.height}
+                  boxes={props.pred ? props.kept : []}
+                  truth={props.truthBoxes}
+                  classes={props.classes}
+                  labels={props.labels}
+                  scores={props.scores}
+                  only={props.only}
+                  active={props.activeIdx}
+                  selected={props.selectedIdx}
+                  onhover={(i) => hover.set(i === null ? null : (props.kept[i] ?? null))}
+                  onselect={props.pickFromImage}
+                  alt={props.sourceName}
+                />
+              </ZoomStage>
               {/* A failed prediction: the image steps back and says, in its own frame, why it has no boxes (the notice
                   above has the cause and the ways out), so it never reads as "nothing found". */}
               {props.notice === 'error' ? (
