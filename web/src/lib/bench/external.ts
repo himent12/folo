@@ -80,6 +80,13 @@ export function parsePredictions(text: string): { records: unknown[] } | { error
   return { error: 'Expected an object with a "predictions" array, or an array of records.' };
 }
 
+/** Parses a predictions JSON string and checks every record against the benchmark. */
+export function parseAndCheckPredictions(text: string, ctx: PredictionContext): PredictionCheck {
+  const parsed = parsePredictions(text);
+  if ('error' in parsed) return { ok: false, error: parsed.error };
+  return checkPredictions(parsed.records, ctx);
+}
+
 /**
  * Checks the records against the benchmark; the first problem found, or what they hold. The records that pass are
  * handed back as they are (no copy: a 200 MB file's records are held once). With `part`, they are one part of an open
