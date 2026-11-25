@@ -175,3 +175,70 @@ fn export_strips_amp_and_keeps_nonfinite_streak() {
     assert!(has(b"folo.nonfinite_streak"), "onnx dropped unknown folo.nonfinite_streak");
     assert!(has(b"folo.custom"), "onnx dropped unknown folo.custom");
 }
+
+/// Invalid thresholds, sizes, `--max-det 0`, `--batch 0`, and non-directory `--save` paths fail immediately with
+/// exit code 2 before any model or dataset is opened.
+#[test]
+fn predict_val_and_export_reject_invalid_args_before_opening_model() {
+    let predict_cases: &[(&[&str], &str)] = &[
+        (&["predict", "--json", "--model", "none.folo", "a.jpg", "--conf=-0.1"], "--conf"),
+        (&["predict", "--json", "--model", "none.folo", "a.jpg", "--conf", "1.5"], "--conf"),
+        (&["predict", "--json", "--model", "none.folo", "a.jpg", "--conf", "NaN"], "--conf"),
+        (&["predict", "--json", "--model", "none.folo", "a.jpg", "--iou=-0.1"], "--iou"),
+        (&["predict", "--json", "--model", "none.folo", "a.jpg", "--iou", "1.5"], "--iou"),
+        (&["predict", "--json", "--model", "none.folo", "a.jpg", "--iou", "NaN"], "--iou"),
+        (&["predict", "--json", "--model", "none.folo", "a.jpg", "--max-det", "0"], "--max-det"),
+        (&["predict", "--json", "--model", "none.folo", "a.jpg", "--imgsz", "33"], "--imgsz"),
+        (&["predict", "--json", "--model", "none.folo", "a.jpg", "--imgsz", "0"], "--imgsz"),
+    ];
+    for (args, flag) in predict_cases {
+        let (code, lines, stderr) = folo(args);
+        let e = &lines.last().unwrap_or_else(|| panic!("{args:?}: {stderr}"))["error"];
+        assert_eq!((code, e["code"].as_str()), (2, Some("invalid_config")), "{args:?}: {e}");
+        assert!(e["message"].as_str().unwrap().contains(flag), "{args:?}: {e}");
+        assert!(e["hint"].as_str().unwrap().contains("folo describe predict --json"), "{e}");
+    }
+
+    let val_cases: &[(&[&str], &str)] = &[
+        (&["val", "--json", "--model", "none.folo", "--data", "none", "--conf=-0.1"], "--conf"),
+        (&["val", "--json", "--model", "none.folo", "--data", "none", "--conf", "2"], "--conf"),
+        (&["val", "--json", "--model", "none.folo", "--data", "none", "--iou", "1.5"], "--iou"),
+        (&["val", "--json", "--model", "none.folo", "--data", "none", "--max-det", "0"], "--max-det"),
+        (&["val", "--json", "--model", "none.folo", "--data", "none", "--batch", "0"], "--batch"),
+        (&["val", "--json", "--model", "none.folo", "--data", "none", "--imgsz", "33"], "--imgsz"),
+    ];
+    for (args, flag) in val_cases {
+        let (code, lines, stderr) = folo(args);
+        let e = &lines.last().unwrap_or_else(|| panic!("{args:?}: {stderr}"))["error"];
+        assert_eq!((code, e["code"].as_str()), (2, Some("invalid_config")), "{args:?}: {e}");
+        assert!(e["message"].as_str().unwrap().contains(flag), "{args:?}: {e}");
+        assert!(e["hint"].as_str().unwrap().contains("folo describe val --json"), "{e}");
+    }
+
+    // `--save` pointing to an existing regular file or empty string is a usage error before opening the model.
+    let root = TestDir::new("cli-predict-save-file");
+    let file = root.join("existing.png");
+    std::fs::write(&file, b"x").unwrap();
+    for save in [s(&file), ""] {
+        let (code, lines, stderr) =
+            folo(&["predict", "--json", "--model", "none.folo", "a.jpg", "--save", save]);
+        let e = &lines.last().unwrap_or_else(|| panic!("--save {save:?}: {stderr}"))["error"];
+        assert_eq!((code, e["code"].as_str()), (2, Some("usage")), "--save {save:?}: {e}");
+        assert!(e["message"].as_str().unwrap().contains("--save"), "{e}");
+    }
+
+    // `export` rejects `--max-det 0`, `--batch 0`, and bad `--imgsz` before opening the model.
+    for (args, flag) in [
+        (
+            &["export", "--json", "--model", "none.folo", "--format", "onnx", "--max-det", "0"][..],
+            "--max-det",
+        ),
+        (&["export", "--json", "--model", "none.folo", "--format", "onnx", "--batch", "0"], "--batch"),
+        (&["export", "--json", "--model", "none.folo", "--format", "onnx", "--imgsz", "33"], "--imgsz"),
+    ] {
+        let (code, lines, stderr) = folo(args);
+        let e = &lines.last().unwrap_or_else(|| panic!("{args:?}: {stderr}"))["error"];
+        assert_eq!((code, e["code"].as_str()), (2, Some("usage")), "{args:?}: {e}");
+        assert!(e["message"].as_str().unwrap().contains(flag), "{args:?}: {e}");
+    }
+}
