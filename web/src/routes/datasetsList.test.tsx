@@ -38,6 +38,8 @@ afterEach(() => {
 });
 
 function open(page: Component<Record<string, never>>, path: string) {
+  // The list writes its state to the URL: each mount starts from the path it asks for.
+  history.replaceState(history.state, '', `#${path}`);
   router.route = parse(`#${path}`);
   target = document.createElement('div');
   document.body.appendChild(target);

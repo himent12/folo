@@ -4,7 +4,7 @@
  * text.tertiary. A page's sections are underline tabs (ui/Tabs), not this. Arrow keys move the selection, as in native
  * radio groups.
  */
-import { bindable, createUniqueId, css, defaults, Dynamic, For } from 'fw';
+import { bindable, computed, createUniqueId, css, defaults, Dynamic, For } from 'fw';
 import { describedBy, getField } from './field';
 import { tooltip } from './tooltip';
 import type { IconType } from './types';
@@ -47,6 +47,14 @@ export default function Segmented<T extends string>(props: SegmentedProps<T>) {
   const uid = createUniqueId();
   let root!: HTMLDivElement;
 
+  // WAI-ARIA radiogroup roving tabindex: the active enabled option is tabbable, or the first enabled option when the
+  // current value matches no enabled option so the group never drops out of the Tab order.
+  const tabTarget = computed(() => {
+    const opts = p.options;
+    const cur = opts.findIndex((o) => o.value === value.get() && !o.disabled);
+    return cur >= 0 ? cur : opts.findIndex((o) => !o.disabled);
+  });
+
   function select(v: T) {
     value.set(v);
     p.onchange?.(v);
@@ -54,8 +62,9 @@ export default function Segmented<T extends string>(props: SegmentedProps<T>) {
 
   function onkeydown(e: KeyboardEvent) {
     const options = p.options;
-    const i = options.findIndex((o) => o.value === value.get());
     const n = options.length;
+    if (n === 0) return;
+    const i = options.findIndex((o) => o.value === value.get());
     // Step over disabled options in the direction of travel.
     const step = (from: number, d: number) => {
       for (let k = 1; k <= n; k++) {
@@ -66,7 +75,7 @@ export default function Segmented<T extends string>(props: SegmentedProps<T>) {
     };
     let j = i;
     if (e.key === 'ArrowRight' || e.key === 'ArrowDown') j = step(i, 1);
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') j = step(i, -1);
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') j = step(i < 0 ? n : i, -1);
     else if (e.key === 'Home') j = step(-1, 1);
     else if (e.key === 'End') j = step(n, -1);
     else return;
@@ -77,12 +86,12 @@ export default function Segmented<T extends string>(props: SegmentedProps<T>) {
     root.querySelectorAll<HTMLButtonElement>('button')[j]?.focus();
   }
 
-  const option = (o: () => SegmentedOption<T>, on: () => boolean) => (
+  const option = (o: () => SegmentedOption<T>, on: () => boolean, idx: () => number) => (
     <button
       type="button"
       role="radio"
       aria-checked={on()}
-      tabindex={on() ? 0 : -1}
+      tabindex={idx() === tabTarget.get() ? 0 : -1}
       class:on={on()}
       class:icon-only={p.iconOnly && !!o().icon}
       disabled={p.disabled || o().disabled}
@@ -111,7 +120,7 @@ export default function Segmented<T extends string>(props: SegmentedProps<T>) {
       tabindex={-1}
     >
       <For each={p.options} key={(o) => o.value}>
-        {(o) => {
+        {(o, idx) => {
           const on = () => o().value === value.get();
           // A disabled button takes no pointer events in some browsers: the wrapper takes the hover, as ui/Gate does.
           // The reason is also the option's description, for assistive technology (a tooltip is a pointer's alone).
@@ -120,14 +129,14 @@ export default function Segmented<T extends string>(props: SegmentedProps<T>) {
               {o().disabled && o().tip ? (
                 <>
                   <span class="tip" use:tooltip={o().tip}>
-                    {option(o, on)}
+                    {option(o, on, idx)}
                   </span>
                   <span class="sr-only" id={`${uid}-${o().value}-why`}>
                     {o().tip}
                   </span>
                 </>
               ) : (
-                option(o, on)
+                option(o, on, idx)
               )}
             </>
           );

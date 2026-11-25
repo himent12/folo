@@ -43,6 +43,8 @@ async function open(page: Component<Record<string, never>>, path: string, api: M
   target?.remove();
   hub.api = api;
   hub.mode = 'mock';
+  // The lists write filter/sort state to the URL: each test starts from its own path.
+  history.replaceState(history.state, '', `#${path}`);
   router.route = parse(`#${path}`);
   target = document.createElement('div');
   document.body.appendChild(target);

@@ -5,7 +5,7 @@ import Box from '$icons/box';
 import Download from '$icons/download';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
-import { computed, css, effect, For, MediaQuery, signal } from 'fw';
+import { computed, css, effect, For, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { bestMark, bestWord } from '$lib/bestMark';
 import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
@@ -27,6 +27,7 @@ import Input from '$lib/ui/Input';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Panel from '$lib/ui/Panel';
 import { modelsExport } from './models/export';
+import { emptyFilterSummary, leftForModel, readState, returnQuery, writeState, type ModelSortKey as Key } from './models/listState';
 import Versus from './models/Versus';
 import { isLast } from './model/weightsEpoch';
 import Segmented from '$lib/ui/Segmented';
@@ -42,7 +43,6 @@ import { filterLabel, groupKey, groupLabel, rankKey, scoreContext, splitLabel, t
 import { loadThroughput, measuredLatency, measuredTraining } from '$lib/throughput';
 import FirstStepAction, { noDatasetsYet, refreshOnDatasetChange } from "./firstStep";
 
-type Key = 'name' | 'arch' | 'classes' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'created';
 interface Col {
   key: Key;
   label: string;
@@ -145,11 +145,37 @@ export default function Models() {
     { key: 'created', label: 'Created', num: true, get: (m) => finite(Date.parse(m.created)), w: '112px' },
   ]);
 
-  // Default: best first within each dataset.
-  const sortKey = signal<Key>('map50_95');
-  const sortDir = signal<'asc' | 'desc'>('desc');
-  const query = signal('');
-  const dsFilter = signal('all');
+  // Filter, sort and search live in the URL query (./models/listState), replaced as they change so typing never
+  // pollutes browser history while Back, reload and shared links restore the list as it was left.
+  const back = untrack(() => returnQuery(router.entry, router.route.query));
+  if (back !== null) router.go(`/models?${back}`, { replace: true });
+  const startQuery = back !== null ? new URLSearchParams(back) : untrack(() => router.route.query);
+  const start = readState(startQuery);
+  const sortKey = signal<Key>(start.sort);
+  const sortDir = signal<'asc' | 'desc'>(start.dir);
+  const query = signal(start.q);
+  const dsFilter = signal(start.group);
+  const norm = (q: URLSearchParams) => writeState(readState(q));
+  let written = norm(startQuery);
+  onCleanup(() => {
+    if (router.location.name === 'model') leftForModel(router.entry, written);
+  });
+  effect(() => {
+    const next = writeState({ group: dsFilter.get(), sort: sortKey.get(), dir: sortDir.get(), q: query.get() });
+    if (next === written || untrack(() => router.route.name) !== 'models' || untrack(() => router.location.name) !== 'models') return;
+    written = next;
+    router.go(`/models${next ? `?${next}` : ''}`, { replace: true });
+  });
+  effect(() => {
+    const r = router.route;
+    if (r.name !== 'models' || norm(r.query) === written) return;
+    const st = readState(r.query);
+    written = norm(r.query);
+    dsFilter.set(st.group);
+    sortKey.set(st.sort);
+    sortDir.set(st.dir);
+    query.set(st.q);
+  });
 
   function sortBy(c: Col) {
     if (sortKey.peek() === c.key) sortDir.set(sortDir.peek() === 'asc' ? 'desc' : 'asc');
@@ -190,8 +216,14 @@ export default function Models() {
     return out;
   });
   const shownCount = computed(() => groups.get().reduce((a, g) => a + g.rows.length, 0));
+  // When filtering by a dataset/split group, wait for runs & datasets metadata before treating an unclassified group as empty/unknown.
+  const groupPending = computed(() => {
+    const cur = dsFilter.get();
+    if (cur === 'all' || cur === '~published' || cur === '~imported') return false;
+    return (!runs.data && !runs.error) || (!datasets.data && !datasets.error);
+  });
   /** Rows to sort, or their skeleton: the sort mark shows only then. */
-  const hasRows = computed(() => (models.data ? shownCount.get() > 0 : !models.error));
+  const hasRows = computed(() => (models.data && !groupPending.get() ? shownCount.get() > 0 : !models.error));
   /** Models to filter, or on their way: the toolbar is live (else it stays in place, disabled). */
   const hasData = computed(() => (models.data ? models.data.length > 0 : !models.error));
   const phone = new MediaQuery(media.phone, false);
@@ -234,7 +266,20 @@ export default function Models() {
       ...[...keys.values()].sort(groupOrder).map((k) => ({ value: k.key, label: k.filter, meta: String(k.n) })),
     ];
   });
-  const pickOptions = computed(() => dsOptions.get().map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` })));
+  const segOptions = computed(() => {
+    const base = dsOptions.get();
+    const cur = dsFilter.get();
+    return cur !== 'all' && !groupPending.get() && !base.some((o) => o.value === cur)
+      ? [...base, { value: cur, label: 'Unknown group', meta: '0' }]
+      : base;
+  });
+  const pickOptions = computed(() => segOptions.get().map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` })));
+  const activeGroupLabel = computed(() => {
+    const cur = dsFilter.get();
+    if (cur === 'all') return null;
+    return dsOptions.get().find((o) => o.value === cur)?.label ?? null;
+  });
+  const emptySummary = computed(() => emptyFilterSummary({ group: dsFilter.get(), q: query.get() }, activeGroupLabel.get()));
   // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds, "7 models · 2 datasets ·
   // 52.4 MiB", whatever the filter; a narrowed list says what it shows under it.
   const facts = computed(() => {
@@ -292,7 +337,7 @@ export default function Models() {
   });
   const filterStatus = computed(() => {
     const all = models.data;
-    if (!all || !hasFiltered.get()) return '';
+    if (!all?.length || !hasFiltered.get() || groupPending.get()) return '';
     const n = shownCount.get();
     return n < all.length
       ? `Showing ${n} of ${all.length} ${all.length === 1 ? 'model' : 'models'}.`
@@ -317,7 +362,10 @@ export default function Models() {
     dsFilter.set('all');
     query.set('');
     announce('Cleared model filters.');
-    queueMicrotask(() => searchEl.peek()?.focus());
+    queueMicrotask(() => {
+      const input = searchEl.peek();
+      if (input && input.isConnected && !input.disabled) input.focus();
+    });
   }
 
   return (
@@ -349,7 +397,7 @@ export default function Models() {
               </div>
             ) : (
               <div class="seg" data-scrolls>
-                <Segmented label={GROUP_NAME} bind:value={dsFilter} options={dsOptions.get()} />
+                <Segmented label={GROUP_NAME} bind:value={dsFilter} options={segOptions.get()} />
               </div>
             )
           ) : models.data || models.error ? (
@@ -385,7 +433,7 @@ export default function Models() {
             the table otherwise (and the single .state frame for empty/error/no-match at every width). */}
         {phone.current && hasRows.get() ? (
           <div class="rows">
-            {!models.data && !models.error ? (
+            {(!models.data || groupPending.get()) && !models.error ? (
               <For each={SK_GROUPS.map((n, gi) => ({ n, gi }))} key={(g) => g.gi}>
                 {(g) => (
                   <section aria-hidden="true">
@@ -419,7 +467,7 @@ export default function Models() {
                 )}
               </For>
             ) : null}
-            <For each={groups.get()} key={(g) => g.key}>
+            <For each={groupPending.get() ? [] : groups.get()} key={(g) => g.key}>
               {(g, gi) => (
                 <section aria-label={g().label}>
                   {/* The value column is named once, on the first group's header, not under every value. */}
@@ -461,7 +509,7 @@ export default function Models() {
           </div>
         ) : (
           <div class="scroll" class:state={!hasRows.get()}>
-          <table class="table models" aria-busy={!models.data} aria-label="Models by evaluation dataset" use:rowNav>
+          <table class="table models" aria-busy={!models.data || groupPending.get()} aria-label="Models by evaluation dataset" use:rowNav>
             {hasRows.get() ? (
               <thead>
                 <tr>
@@ -473,7 +521,7 @@ export default function Models() {
                         align={c().num ? 'right' : 'left'}
                         width={c().w}
                         dir={sortKey.get() === c().key ? sortDir.get() : null}
-                        disabled={!models.data}
+                        disabled={!models.data || groupPending.get()}
                         onsort={() => sortBy(c())}
                       />
                     )}
@@ -499,13 +547,13 @@ export default function Models() {
                   />
                 </TableState>
               </tbody>
-            ) : models.data && shownCount.get() === 0 ? (
+            ) : models.data && !groupPending.get() && shownCount.get() === 0 ? (
               <tbody>
                 <TableState cols={cols.get().length}>
                   <EmptyState
                     icon={Search}
                     title="No models match"
-                    description="Try another dataset or search term."
+                    description={emptySummary.get()}
                     actions={() => (
                       <Button size="sm" onclick={clearFilters}>
                         Clear filters
@@ -514,7 +562,7 @@ export default function Models() {
                   />
                 </TableState>
               </tbody>
-            ) : !models.data ? (
+            ) : !models.data || groupPending.get() ? (
               // The loaded rhythm: dataset groups (a header row, then their models), with placeholder content.
               <For each={SK_GROUPS.map((n, gi) => ({ n, gi }))} key={(g) => g.gi}>
                 {(g) => (
@@ -541,7 +589,7 @@ export default function Models() {
                 )}
               </For>
             ) : (
-              <For each={groups.get()} key={(g) => g.key}>
+              <For each={groupPending.get() ? [] : groups.get()} key={(g) => g.key}>
                 {(g) => (
                   <tbody>
                     <tr class="group">
@@ -600,7 +648,7 @@ export default function Models() {
         )}
       </Panel>{' '}
       {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
-      {models.data && shownCount.get() < models.data.length ? (
+      {models.data && !groupPending.get() && shownCount.get() < models.data.length ? (
         <p class="list-foot num">
           {shownCount.get()} of {models.data.length} {models.data.length === 1 ? 'model' : 'models'}
         </p>
