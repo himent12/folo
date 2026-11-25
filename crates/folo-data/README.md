@@ -13,7 +13,7 @@ the determinism rules.
 | Path | What it holds |
 |---|---|
 | `src/lib.rs` | Crate docs with an example, and the re-exports |
-| `src/dataset/` | `mod.rs` (the `Dataset` trait, `Split`, `Format`, `open` / `open_with`, format detection, `LoadReport`), `yolo.rs` and `labels.rs` (YOLO), `coco/` (`mod.rs`, `parse.rs`: single-pass streaming COCO instances JSON reader), `cache/` (the on-disk scan cache: `mod.rs`, `probe.rs`, `coco.rs`, `listing.rs`, `tests.rs`) |
+| `src/dataset/` | `mod.rs` (the `Dataset` trait, `Split`, `Format`, `open` / `open_with`, format detection, `LoadReport`), `yolo.rs` and `labels.rs` (YOLO), `coco/` (`mod.rs`, `parse.rs`, `fields.rs`: single-pass streaming COCO instances JSON reader), `cache/` (the on-disk scan cache: `mod.rs`, `probe.rs`, `coco.rs`, `listing.rs`, `tests.rs`) |
 | `src/image.rs` | `Image`, decoding with EXIF orientation, encoding, `Sample` |
 | `src/bbox.rs` | `BBox`, normalised centre format |
 | `src/letterbox.rs` | Letterbox resize with exact box mapping both ways |

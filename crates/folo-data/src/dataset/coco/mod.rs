@@ -1,12 +1,14 @@
 //! COCO instances JSON.
 
+mod fields;
 mod parse;
 
 use super::{
     Candidate, FileDataset, Format, IssueKind, LabelSource, LoadReport, LoadedDataset, OpenOptions, Split,
 };
 use crate::error::{DataError, Result};
-use parse::{IdKey, ParsedBbox, ParsedImage, Sections, whole_number_value};
+use fields::{IdKey, ParsedBbox, whole_number_value};
+use parse::{ParsedImage, Sections};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -679,5 +681,26 @@ mod tests {
         assert_ne!(IdKey::from_str_id("-0"), IdKey::Int(0));
         assert_eq!(IdKey::from_u64(u64::MAX).to_string(), u64::MAX.to_string());
         assert_eq!(IdKey::from_str_id(&u64::MAX.to_string()), IdKey::from_u64(u64::MAX));
+    }
+
+    #[test]
+    fn overflowing_number_in_one_row_retains_valid_rows_and_rejects_invalid_utf8_in_skipped_fields() {
+        // An overflowing float in one annotation's bbox isolates only that row instead of discarding the split.
+        let json = br#"{"images":[{"id":1,"file_name":"a.jpg","width":100,"height":100},{"id":2,"file_name":"b.jpg","width":100,"height":100}],"annotations":[{"id":1,"image_id":1,"category_id":0,"bbox":[0,0,1e400,2]},{"id":2,"image_id":2,"category_id":0,"bbox":[1,2,10,10]}],"categories":[{"id":0,"name":"c"}]}"#;
+        let parsed = Sections::parse(json).expect("split should survive one overflowing annotation");
+        let imgs = parsed.images.expect("images array retained");
+        assert_eq!(imgs.len(), 2);
+        assert_eq!(parsed.annotations.len(), 2);
+        assert!(parsed.annotations[0].image_id.is_none());
+        assert!(!parsed.annotations[0].text.is_empty());
+        assert_eq!(parsed.annotations[1].image_id, Some(IdKey::Int(2)));
+        assert_eq!(parsed.annotations[1].bbox, ParsedBbox::Valid([1.0, 2.0, 10.0, 10.0]));
+
+        // Invalid UTF-8 inside a skipped field (such as `segmentation`) must still fail parsing.
+        let mut bad_utf8 = br#"{"images":[{"id":1,"file_name":"a.jpg"}],"annotations":[{"id":1,"image_id":1,"category_id":0,"bbox":[1,2,3,4],"segmentation":""#.to_vec();
+        bad_utf8.push(0xFF);
+        bad_utf8.extend_from_slice(br#""}]}"#);
+        assert!(Sections::parse(&bad_utf8).is_err());
+        assert!(Sections::parse_categories(&bad_utf8).is_err());
     }
 }
