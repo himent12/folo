@@ -218,3 +218,126 @@ describe('Logs: a log longer than the box shows', () => {
     expect(head()).toBeUndefined();
   });
 });
+
+describe('Logs: search, copy visible, static tokens, and single-reflow pin', () => {
+  it('filters visible lines by keyword alongside level filter and shows match counts and empty state', () => {
+    const log = new AppendLog<LogLine>();
+    log.push(
+      { t: '2026-11-12T10:00:01Z', level: 'info', message: 'epoch 1 loss=0.42' },
+      { t: '2026-11-12T10:00:02Z', level: 'warn', message: 'NaN gradient skipped' },
+      { t: '2026-11-12T10:00:03Z', level: 'error', message: 'CUDA out of memory' },
+      { t: '2026-11-12T10:00:04Z', level: 'info', message: 'checkpoint saved to /very/long/path/that/exceeds/thirty/six/characters/checkpoint.folo' },
+    );
+    c = render(() => <Logs log={log} version={0} live={false} />, target);
+    flushSync();
+
+    // Long tokens render statically with .w.long and short tokens with .w.
+    const words = [...target.querySelectorAll<HTMLElement>('.line .w')];
+    expect(words.some((w) => w.classList.contains('long') && w.textContent?.includes('checkpoint.folo'))).toBe(true);
+    expect(words.some((w) => !w.classList.contains('long') && w.textContent === 'saved')).toBe(true);
+
+    const search = target.querySelector<HTMLInputElement>('input[aria-label="Search logs"]')!;
+    expect(search).not.toBeNull();
+    search.value = 'MEMORY';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    expect([...target.querySelectorAll('.line .m')].map((el) => el.textContent)).toEqual(['CUDA out of memory']);
+    expect(target.querySelector('.matches')?.textContent?.trim()).toBe('1 line');
+
+    // Empty search result shows clear message and disables Copy visible.
+    search.value = 'nonexistent-token';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.empty')?.textContent).toContain('No log lines match "nonexistent-token"');
+    const copyBtn = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Copy visible'))!;
+    expect(copyBtn.disabled).toBe(true);
+
+    // Clearing search restores all lines.
+    search.value = '';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelectorAll('.line')).toHaveLength(4);
+    expect(copyBtn.disabled).toBe(false);
+  });
+
+  it('copies only the currently visible filtered lines via Copy visible', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    const log = new AppendLog<LogLine>();
+    log.push(
+      { t: '2026-11-12T10:00:01Z', level: 'info', message: 'epoch 1 done' },
+      { t: '2026-11-12T10:00:02Z', level: 'warn', message: 'slow loader' },
+      { t: '2026-11-12T10:00:03Z', level: 'error', message: 'loader failed' },
+    );
+    c = render(() => <Logs log={log} version={0} live={false} />, target);
+    flushSync();
+
+    const search = target.querySelector<HTMLInputElement>('input[aria-label="Search logs"]')!;
+    search.value = 'loader';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    const copyBtn = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Copy visible'))!;
+    copyBtn.click();
+    await Promise.resolve();
+    expect(writeText).toHaveBeenCalledTimes(1);
+    const copied = writeText.mock.calls[0]![0] as string;
+    const lines = copied.split('\n');
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('warn slow loader');
+    expect(lines[1]).toContain('error loader failed');
+  });
+
+  it('pins to whole top line using inner.children without reading scrollHeight twice or calling querySelectorAll', () => {
+    const log = new AppendLog<LogLine>();
+    for (let i = 0; i < 20; i++) log.push(line(i));
+    const version = signal(0);
+    c = render(() => <Logs log={log} version={version.get()} live />, target);
+    flushSync();
+
+    const boxEl = target.querySelector<HTMLDivElement>('.log')!;
+    const rows = [...boxEl.querySelectorAll<HTMLElement>('.line')];
+    rows.forEach((row, idx) => {
+      Object.defineProperty(row, 'offsetTop', { value: 8 + idx * 20, configurable: true });
+    });
+
+    let scrollHeightReads = 0;
+    let tail = 0;
+    Object.defineProperty(boxEl, 'clientHeight', { value: 110, configurable: true });
+    Object.defineProperty(boxEl, 'scrollHeight', {
+      get: () => {
+        scrollHeightReads++;
+        return 8 + rows.length * 20 + 8 + tail;
+      },
+      configurable: true,
+    });
+    const origSetProp = boxEl.style.setProperty.bind(boxEl.style);
+    vi.spyOn(boxEl.style, 'setProperty').mockImplementation((prop, val) => {
+      if (prop === '--tail') tail = parseFloat(val ?? '0') || 0;
+      origSetProp(prop, val);
+    });
+    const qsaSpy = vi.spyOn(boxEl, 'querySelectorAll');
+
+    // Trigger a re-pin via appending a line.
+    log.push(line(20));
+    version.set(1);
+    flushSync();
+    const newRow = boxEl.querySelectorAll<HTMLElement>('.line')[20]!;
+    Object.defineProperty(newRow, 'offsetTop', { value: 8 + 20 * 20, configurable: true });
+    qsaSpy.mockClear();
+    scrollHeightReads = 0;
+
+    // Trigger follow-pin via another append (all rows now have mock offsetTop).
+    log.push(line(21));
+    version.set(2);
+    flushSync();
+
+    expect(qsaSpy).not.toHaveBeenCalled();
+    expect(scrollHeightReads).toBe(1);
+    // Base height = 8 + 20*20 + 8 = 416, clientHeight = 110 -> end = 306.
+    // First row with offsetTop - 8 >= 305.5 is row 16 (offsetTop = 328 -> 320 >= 305.5), next = 14px, scrollTop = 320.
+    expect(tail).toBe(14);
+    expect(boxEl.scrollTop).toBe(320);
+  });
+});
