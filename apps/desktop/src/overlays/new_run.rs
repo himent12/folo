@@ -44,8 +44,33 @@ impl FoloApp {
         let gone_name = self.nr_gone_name();
         let f = self.new_run.as_ref().unwrap();
         let ds_i = datasets.iter().position(|d| d.id == f.dataset);
-        let (arch, epochs, batch, imgsz, device, opt, lr0, mosaic, mixup, fliplr) =
-            (f.arch, f.epochs, f.batch, f.imgsz, f.device, f.optimizer, f.lr0, f.mosaic, f.mixup, f.fliplr);
+        let (
+            arch,
+            epochs,
+            batch_val,
+            imgsz_val,
+            custom_batch,
+            custom_imgsz,
+            device,
+            opt,
+            lr0,
+            mosaic,
+            mixup,
+            fliplr,
+        ) = (
+            f.arch,
+            f.epochs,
+            f.batch_value(),
+            f.imgsz_value(),
+            f.custom_batch,
+            f.custom_imgsz,
+            f.device,
+            f.optimizer,
+            f.lr0,
+            f.mosaic,
+            f.mixup,
+            f.fliplr,
+        );
         let name_input = f.name.clone();
         let error = f.error.clone();
         let submitting = f.submitting;
@@ -185,12 +210,36 @@ impl FoloApp {
         let no_train = self.dataset_blocked();
         // Not over a removed dataset's own line.
         let no_val = self.dataset_val_note().filter(|_| !ds_gone);
-        let batch_labels: Vec<String> = BATCHES.iter().map(|b| b.to_string()).collect();
-        let batch_refs: Vec<&str> = batch_labels.iter().map(String::as_str).collect();
-        let batch_seg = seg(self, "nr-batch", &batch_refs, batch, window, cx, |f, i| f.batch = i);
-        let size_labels: Vec<String> = IMGSZ.iter().map(|b| b.to_string()).collect();
-        let size_refs: Vec<&str> = size_labels.iter().map(String::as_str).collect();
-        let size_seg = seg(self, "nr-imgsz", &size_refs, imgsz, window, cx, |f, i| f.imgsz = i);
+        let batch_seg = self.nr_preset_seg(
+            "nr-batch",
+            &BATCHES,
+            batch_val,
+            custom_batch,
+            window,
+            cx,
+            |f, pi, v| match pi {
+                Some(i) => {
+                    f.batch = i;
+                    f.custom_batch = None;
+                }
+                None => f.custom_batch = Some(v),
+            },
+        );
+        let size_seg = self.nr_preset_seg(
+            "nr-imgsz",
+            &IMGSZ,
+            imgsz_val,
+            custom_imgsz,
+            window,
+            cx,
+            |f, pi, v| match pi {
+                Some(i) => {
+                    f.imgsz = i;
+                    f.custom_imgsz = None;
+                }
+                None => f.custom_imgsz = Some(v),
+            },
+        );
         // A server without a GPU refuses gpu:0 at Start: not offered (arrow keys skip it).
         let gpu_off = [None, self.nr_no_gpu().map(SharedString::from), None];
         // GPU 0 still picked on such a server (prefilled from a run that had it, or picked before
@@ -270,7 +319,7 @@ impl FoloApp {
         let auto_pick = ds.as_ref().filter(|_| opt == 0).map(|d| {
             let a = folo_nn::optim::auto_optimizer(
                 d.splits.train as usize,
-                BATCHES[batch] as usize,
+                batch_val as usize,
                 64,
                 epochs.round().max(1.) as usize,
                 d.classes.len(),
@@ -907,8 +956,8 @@ impl FoloApp {
             cloud_offer,
             arch,
             epochs,
-            batch,
-            imgsz,
+            batch: batch_val,
+            imgsz: imgsz_val,
             device,
             amp,
             amp_why,

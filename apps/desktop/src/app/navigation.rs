@@ -53,6 +53,8 @@ impl FoloApp {
         // toast set, say) doesn't wait there to make the list look empty later.
         if self.route == Route::Runs && !matches!(prev, Route::Run(_)) {
             self.run_filter = super::RunFilter::All;
+            self.run_arch_filter = None;
+            self.run_search.update(cx, |i, cx| i.set_text("", cx));
         }
         self.history.push(prev);
         if self.history.len() > 50 {

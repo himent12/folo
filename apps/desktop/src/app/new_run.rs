@@ -77,8 +77,25 @@ impl FoloApp {
         if let Some(f) = self.new_run.as_mut() {
             f.arch = ARCHS.iter().position(|a| *a == config.arch).unwrap_or(f.arch);
             f.epochs = config.epochs as f32;
-            f.batch = batch_index(config.batch);
-            f.imgsz = idx(&IMGSZ, config.imgsz).unwrap_or(f.imgsz);
+            match idx(&BATCHES, config.batch) {
+                Some(i) => {
+                    f.batch = i;
+                    f.custom_batch = None;
+                }
+                None => {
+                    f.batch = batch_index(config.batch);
+                    f.custom_batch = Some(config.batch);
+                }
+            }
+            match idx(&IMGSZ, config.imgsz) {
+                Some(i) => {
+                    f.imgsz = i;
+                    f.custom_imgsz = None;
+                }
+                None => {
+                    f.custom_imgsz = Some(config.imgsz);
+                }
+            }
             f.device = DEVICES.iter().position(|d| *d == config.device).unwrap_or(0);
             f.prefill_optimizer(config.optimizer);
             f.lr0 = config.lr0;
@@ -294,7 +311,9 @@ impl FoloApp {
             arch,
             epochs,
             batch: batch_index(16),
+            custom_batch: None,
             imgsz,
+            custom_imgsz: None,
             device: 0,
             optimizer: 0,
             optimizer_unknown: false,
@@ -368,8 +387,8 @@ impl FoloApp {
                 dataset_id: ds.id.clone(),
                 arch: ARCHS[form.arch],
                 epochs: form.epochs.round() as u32,
-                batch: BATCHES[form.batch],
-                imgsz: IMGSZ[form.imgsz],
+                batch: form.batch_value(),
+                imgsz: form.imgsz_value(),
                 // The worker picks its GPU.
                 device: if compute.is_some() { "auto".into() } else { DEVICES[form.device].into() },
                 optimizer: OPTIMIZERS[form.optimizer],
@@ -604,6 +623,8 @@ impl FoloApp {
                                         move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
                                             this.navigate(Route::Runs, w, cx);
                                             this.run_filter = RunFilter::Active;
+                                            this.run_arch_filter = None;
+                                            this.run_search.update(cx, |i, cx| i.set_text("", cx));
                                         },
                                     ),
                                 )),

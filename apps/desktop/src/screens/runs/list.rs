@@ -4,17 +4,41 @@ use std::rc::Rc;
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
+    AnyElement, Context, Focusable, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
     SharedString, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use super::duration_of;
-use crate::api::{Run, RunStatus, time};
+use crate::api::{Arch, Label, Run, RunStatus, time};
 use crate::app::{FoloApp, Route, RunFilter, act};
 use crate::controls::Btn;
 use crate::screens::{FirstStep, loading_rows, page_header, th};
 use crate::theme::{theme, ty};
 use crate::ui::*;
+
+/// Filters `runs` by status, optional architecture, and case-insensitive substring query across
+/// run name, id, dataset name, architecture, and status label.
+pub fn filter_runs<'a>(
+    runs: &'a [Run],
+    status: RunFilter,
+    arch: Option<Arch>,
+    query: &str,
+    dataset_name: impl Fn(&Run) -> String,
+) -> Vec<&'a Run> {
+    let q = query.trim().to_lowercase();
+    runs.iter()
+        .filter(|r| matches_filter(r, status))
+        .filter(|r| arch.is_none_or(|a| r.config.arch == a))
+        .filter(|r| {
+            q.is_empty()
+                || r.name.to_lowercase().contains(&q)
+                || r.id.to_lowercase().contains(&q)
+                || r.config.arch.as_str().to_lowercase().contains(&q)
+                || r.status.label().to_lowercase().contains(&q)
+                || dataset_name(r).to_lowercase().contains(&q)
+        })
+        .collect()
+}
 
 impl FoloApp {
     pub fn runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -88,8 +112,29 @@ impl FoloApp {
             cx,
             Rc::new(move |this, i, _, _| this.run_filter = filters[i]),
         );
+        let archs = [None, Some(Arch::N), Some(Arch::S), Some(Arch::M), Some(Arch::L), Some(Arch::X)];
+        let arch_sel = archs.iter().position(|a| *a == self.run_arch_filter).unwrap_or(0);
+        let arch_seg = self.segmented(
+            "runs-arch-filter",
+            &["All", "n", "s", "m", "l", "x"],
+            arch_sel,
+            window,
+            cx,
+            Rc::new(move |this, i, _, cx| {
+                this.run_arch_filter = archs[i];
+                cx.notify();
+            }),
+        );
+        let query = self.run_search.read(cx).text().to_string();
+        let search = self.search_field("runs-search", self.run_search.clone(), 220., window, cx);
+        let extra_filter = self.run_arch_filter.is_some() || !query.trim().is_empty();
         let now = self.store.api.now();
-        let mut visible: Vec<Run> = runs.into_iter().filter(|r| matches_filter(r, self.run_filter)).collect();
+        let mut visible: Vec<Run> = filter_runs(&runs, self.run_filter, self.run_arch_filter, &query, |r| {
+            self.store.run_dataset_name(r)
+        })
+        .into_iter()
+        .cloned()
+        .collect();
         // Sorted like Models (stable, so ties keep the server's newest-first order).
         if let Some((k, desc)) = self.runs_sort {
             let score = |r: &Run| -> f64 {
@@ -323,15 +368,25 @@ impl FoloApp {
         let mut first = self.first_step_button("runs-first", step, window, cx);
         // A filter that hides every run says how to see them again.
         let show_all = (rows.is_empty() && total > 0).then(|| {
+            let label = if extra_filter {
+                "Clear filters".to_string()
+            } else if total == 1 {
+                "Show the 1 run".to_string()
+            } else {
+                format!("Show all {total} runs")
+            };
             self.button(
                 "runs-show-all",
-                if total == 1 { "Show the 1 run".to_string() } else { format!("Show all {total} runs") },
+                label,
                 Btn::Secondary,
                 None,
                 window,
                 cx,
-                act(|this, _, cx| {
+                act(|this, w, cx| {
                     this.run_filter = RunFilter::All;
+                    this.run_arch_filter = None;
+                    this.run_search.update(cx, |i, cx| i.set_text("", cx));
+                    w.focus(&this.run_search.read(cx).focus_handle(cx));
                     cx.notify();
                 }),
             )
@@ -370,13 +425,16 @@ impl FoloApp {
         // otherwise).
         let narrowed = shown_line(ids.len(), total)
             .map(|line| text(ty::SM, t.text_tertiary).tnum().px(px(16.)).child(line));
-        let body = div()
+        let toolbar = div()
             .flex()
-            .flex_col()
+            .flex_wrap()
+            .items_center()
             .gap(px(12.))
-            .child(div().flex().child(seg))
-            .child(table)
-            .children(narrowed);
+            .child(seg)
+            .child(arch_seg)
+            .child(div().flex_1().min_w(px(8.)))
+            .child(search);
+        let body = div().flex().flex_col().gap(px(12.)).child(toolbar).child(table).children(narrowed);
         self.page_frame(&t, header, body, cx)
     }
 }

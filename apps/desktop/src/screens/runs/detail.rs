@@ -146,6 +146,23 @@ impl FoloApp {
                 if r.status == RunStatus::Stopped {
                     actions.push(self.resume_button(&r, window, cx));
                 }
+                let cfg = r.config.clone();
+                actions.push(
+                    self.button(
+                        "run-clone-cfg",
+                        "Clone config",
+                        Btn::Secondary,
+                        Some("icons/copy.svg"),
+                        window,
+                        cx,
+                        act(move |this, w, cx| this.open_new_run_from(&cfg, None, w, cx)),
+                    )
+                    .tooltip(crate::controls::tip(
+                        "Open New run prefilled with this run's configuration",
+                        None,
+                    ))
+                    .into_any_element(),
+                );
                 if let Some(mid) = r.model_id.clone() {
                     let m2 = mid.clone();
                     actions.push(
@@ -248,8 +265,9 @@ impl FoloApp {
         let title = div()
             .flex()
             .items_center()
+            .min_w_0()
             .gap(px(12.))
-            .child(text(ty::XL, t.text_primary).child(r.name.clone()))
+            .child(text(ty::XL, t.text_primary).min_w_0().ellipsis().child(r.name.clone()))
             .child(status_badge(&t, &r, &format!("hdr-{}", r.id)))
             // The worker is silent: the numbers stand still for that, not because training does
             // (the Cloud panel says more).

@@ -64,6 +64,16 @@ impl NewRunForm {
         self.optimizer_unknown
             .then_some("Pick an optimizer first: the run this was made from used an unknown one")
     }
+
+    /// The selected batch size: a preserved non-preset value from a cloned run, else the preset.
+    pub fn batch_value(&self) -> u32 {
+        self.custom_batch.unwrap_or(BATCHES[self.batch])
+    }
+
+    /// The selected image size: a preserved non-preset value from a cloned run, else the preset.
+    pub fn imgsz_value(&self) -> u32 {
+        self.custom_imgsz.unwrap_or(IMGSZ[self.imgsz])
+    }
 }
 
 /// The index of `o` in [`OPTIMIZERS`], `None` for one the picker does not offer (`Optimizer::Unknown`).
@@ -182,7 +192,11 @@ pub struct NewRunForm {
     pub arch: usize,
     pub epochs: f32,
     pub batch: usize,
+    /// Non-preset batch size carried over from a cloned/retried run until another choice is picked.
+    pub custom_batch: Option<u32>,
     pub imgsz: usize,
+    /// Non-preset image size carried over from a cloned/retried run until another choice is picked.
+    pub custom_imgsz: Option<u32>,
     pub device: usize,
     pub optimizer: usize,
     /// Prefilled from a run whose optimizer this build does not know: no optimizer is selected, and the form
