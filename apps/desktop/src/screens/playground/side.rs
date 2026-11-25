@@ -250,8 +250,156 @@ impl FoloApp {
         let mut timing: Option<AnyElement> = None;
         let detections = match &self.play_pred {
             Load::Ready(p) => {
-                let vis: Vec<crate::api::ScoredBox> =
+                let above_conf: Vec<crate::api::ScoredBox> =
                     p.boxes.iter().filter(|b| b.score >= self.play_conf).cloned().collect();
+                let below_conf = p.boxes.len() - above_conf.len();
+                let vis: Vec<crate::api::ScoredBox> =
+                    super::page::filter_detections(&p.boxes, self.play_conf, self.play_class)
+                        .into_iter()
+                        .cloned()
+                        .collect();
+                let mut class_counts: std::collections::BTreeMap<u32, (String, u64)> =
+                    std::collections::BTreeMap::new();
+                for b in &above_conf {
+                    class_counts
+                        .entry(b.class)
+                        .and_modify(|(_, c)| *c += 1)
+                        .or_insert_with(|| (b.name.clone(), 1));
+                }
+                if let Some(cid) = self.play_class
+                    && !class_counts.contains_key(&cid)
+                {
+                    let name = self
+                        .play_shown_model()
+                        .and_then(|m| m.classes.get(cid as usize).cloned())
+                        .or_else(|| p.boxes.iter().find(|b| b.class == cid).map(|b| b.name.clone()))
+                        .unwrap_or_else(|| format!("class {cid}"));
+                    class_counts.insert(cid, (name, 0));
+                }
+                let show_class_chips = class_counts.len() >= 2 || self.play_class.is_some();
+                let boxes_chip = self.chip(
+                    "play-boxes",
+                    "Boxes",
+                    self.play_boxes,
+                    None,
+                    None,
+                    window,
+                    cx,
+                    act(|this, _, cx| {
+                        this.play_boxes = !this.play_boxes;
+                        if !this.play_boxes {
+                            this.play_hover = None;
+                        }
+                        cx.notify();
+                    }),
+                );
+                let labels_chip = self.chip(
+                    "play-labels",
+                    "Labels",
+                    self.play_boxes && self.play_labels,
+                    None,
+                    None,
+                    window,
+                    cx,
+                    act(|this, _, cx| {
+                        if !this.play_boxes {
+                            this.play_boxes = true;
+                            this.play_labels = true;
+                        } else {
+                            this.play_labels = !this.play_labels;
+                        }
+                        cx.notify();
+                    }),
+                );
+                let copy_json = self
+                    .button(
+                        "play-copy-json",
+                        "Copy JSON",
+                        Btn::Secondary,
+                        Some("icons/copy.svg"),
+                        window,
+                        cx,
+                        act(|this, _, cx| this.copy_play_json(cx)),
+                    )
+                    .tooltip(crate::controls::tip("Copy visible detections as JSON", None));
+                let toolbar = div()
+                    .px(px(12.))
+                    .py(px(6.))
+                    .border_b_1()
+                    .border_color(t.line_subtle)
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(6.))
+                    .child(div().flex().items_center().gap(px(6.)).child(boxes_chip).child(labels_chip))
+                    .child(copy_json);
+                let class_bar = show_class_chips.then(|| {
+                    let mut chips: Vec<AnyElement> = Vec::with_capacity(class_counts.len() + 1);
+                    chips.push(
+                        self.chip(
+                            "play-class-all",
+                            "All",
+                            self.play_class.is_none(),
+                            None,
+                            Some(above_conf.len() as u64),
+                            window,
+                            cx,
+                            act(|this, _, cx| {
+                                this.play_class = None;
+                                this.play_hover = None;
+                                cx.notify();
+                            }),
+                        )
+                        .into_any_element(),
+                    );
+                    for (cid, (cname, cnt)) in class_counts {
+                        let on = self.play_class == Some(cid);
+                        chips.push(
+                            self.chip(
+                                &format!("play-class-{cid}"),
+                                cname,
+                                on,
+                                Some(cid),
+                                Some(cnt),
+                                window,
+                                cx,
+                                act(move |this, _, cx| {
+                                    this.play_class =
+                                        if this.play_class == Some(cid) { None } else { Some(cid) };
+                                    this.play_hover = None;
+                                    cx.notify();
+                                }),
+                            )
+                            .into_any_element(),
+                        );
+                    }
+                    div()
+                        .px(px(12.))
+                        .py(px(6.))
+                        .border_b_1()
+                        .border_color(t.line_subtle)
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.))
+                        .children(chips)
+                });
+                let clear_class = (self.play_class.is_some() && vis.is_empty()).then(|| {
+                    self.button(
+                        "play-class-clear",
+                        "Show all classes",
+                        Btn::Secondary,
+                        None,
+                        window,
+                        cx,
+                        act(|this, _, cx| {
+                            this.play_class = None;
+                            this.play_hover = None;
+                            cx.notify();
+                        }),
+                    )
+                });
                 let rows: Vec<AnyElement> = vis
                     .iter()
                     .enumerate()
@@ -331,7 +479,6 @@ impl FoloApp {
                         .into_any_element()
                     })
                     .collect();
-                let hidden = p.boxes.len() - vis.len();
                 let total = p.timing.total_ms.max(0.001);
                 let seg = |v: f64, c| div().h_full().w(relative((v / total) as f32)).bg(c);
                 // One neutral ramp: Inference (the bulk) in secondary ink, Preprocess tertiary a step
@@ -450,12 +597,20 @@ impl FoloApp {
                         text(ty::SM, t.text_tertiary).tnum().child(if self.play_pred_pending {
                             "Updating…".to_string()
                         // The total latency reads in the toolbar at every size; the count stays a count.
-                        } else if hidden > 0 {
-                            format!("{} shown · {hidden} below threshold", vis.len())
+                        } else if self.play_class.is_some() {
+                            if below_conf > 0 {
+                                format!("{} of {} · {below_conf} below threshold", vis.len(), above_conf.len())
+                            } else {
+                                format!("{} of {}", vis.len(), above_conf.len())
+                            }
+                        } else if below_conf > 0 {
+                            format!("{} shown · {below_conf} below threshold", vis.len())
                         } else {
                             vis.len().to_string()
                         }),
                     ))
+                    .child(toolbar)
+                    .children(class_bar)
                     .child(
                         div()
                             // Another device's boxes while the picked one runs: dimmed.
@@ -481,9 +636,21 @@ impl FoloApp {
                             })
                             .children(rows)
                             .when(vis.is_empty(), |d| {
-                                d.child(div().p(px(10.)).child(text(ty::SM, t.text_tertiary).child(
-                                "Nothing above the threshold. Lower the confidence to see weaker detections.",
-                            )))
+                                let msg = if self.play_class.is_some() {
+                                    "No detections of this class above the threshold."
+                                } else {
+                                    "Nothing above the threshold. Lower the confidence to see weaker detections."
+                                };
+                                d.child(
+                                    div()
+                                        .p(px(10.))
+                                        .flex()
+                                        .flex_col()
+                                        .items_start()
+                                        .gap(px(8.))
+                                        .child(text(ty::SM, t.text_tertiary).whitespace_normal().child(msg))
+                                        .children(clear_class),
+                                )
                             }),
                     )
                     .into_any_element()
@@ -549,23 +716,19 @@ impl FoloApp {
                 .images
                 .get(&ds_id)
                 .and_then(|l| l.ready())
-                .map(|v| {
-                    v.iter()
-                        .filter(|m| m.split == Split::Val && !m.boxes.is_empty())
-                        .take(4)
-                        .cloned()
-                        .collect()
-                })
+                .map(|v| pick_val_samples(v, 4))
                 .unwrap_or_default();
             for m in &samples {
                 let img = self.image(&ds_id, &m.id, ImgKind::Thumb, cx);
                 // Failed, not loading: marked (a 48 px thumb has room for the glyph only).
                 let failed = img.is_none() && self.thumb_unavailable(&ds_id, &m.id);
                 let key = format!("play-sample-{}", m.id);
+                let tip_text = sample_tile_tip(m);
                 let (d, i) = (ds_id.clone(), m.id.clone());
                 // The image clips inside; the control itself doesn't, so its focus ring shows whole.
                 let el = div()
                     .id(SharedString::from(key.clone()))
+                    .tooltip(crate::controls::tip(tip_text, None))
                     .flex_1()
                     .h(px(48.))
                     .rounded(px(radius::SM))
@@ -709,6 +872,30 @@ impl FoloApp {
     }
 }
 
+/// Picks up to `cap` validation images for the Playground sample strip: annotated images first, then
+/// background (0-box) validation images so false-positive checks and background-only val splits still
+/// offer clickable samples.
+pub(crate) fn pick_val_samples(images: &[crate::api::ImageInfo], cap: usize) -> Vec<crate::api::ImageInfo> {
+    let mut out: Vec<crate::api::ImageInfo> =
+        images.iter().filter(|m| m.split == Split::Val && !m.boxes.is_empty()).take(cap).cloned().collect();
+    if out.len() < cap {
+        let need = cap - out.len();
+        out.extend(images.iter().filter(|m| m.split == Split::Val && m.boxes.is_empty()).take(need).cloned());
+    }
+    out
+}
+
+/// Tooltip copy for a validation sample tile, calling out background (0-box) images explicitly.
+pub(crate) fn sample_tile_tip(m: &crate::api::ImageInfo) -> String {
+    let file = crate::screens::datasets::file_name(&m.file);
+    let name = if file.is_empty() { m.id.as_str() } else { file };
+    if m.boxes.is_empty() {
+        format!("{name} · background · 0 boxes")
+    } else {
+        format!("{name} · {}", counted(m.boxes.len() as u64, "box", "boxes"))
+    }
+}
+
 /// The confidence Playground offers as "Use … (best F1)": the model's best-F1 threshold, unless the
 /// model found nothing (precision and recall 0), where that threshold is only the end of the search
 /// grid and using it would hide every detection.
@@ -719,6 +906,19 @@ fn offered_conf(m: &crate::api::ModelMetrics) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn val_img(id: &str, file: &str, split: Split, n_boxes: usize) -> crate::api::ImageInfo {
+        crate::api::ImageInfo {
+            id: id.into(),
+            file: file.into(),
+            split,
+            width: 640,
+            height: 480,
+            boxes: (0..n_boxes)
+                .map(|_| crate::api::BBox { class: 0, x1: 10., y1: 10., x2: 50., y2: 50. })
+                .collect(),
+        }
+    }
 
     #[test]
     fn best_f1_conf_is_offered_only_when_the_model_found_something() {
@@ -734,5 +934,35 @@ mod tests {
         assert_eq!(offered_conf(&m(0.4, 0.)), Some(1.0));
         assert_eq!(offered_conf(&m(0.8, 0.6)), Some(1.0));
         assert_eq!(offered_conf(&crate::api::ModelMetrics { best_f1_conf: None, ..m(0.8, 0.6) }), None);
+    }
+
+    #[test]
+    fn pick_val_samples_prefers_annotated_then_fills_with_background_val_images() {
+        let images = vec![
+            val_img("t1", "train/a.jpg", Split::Train, 2),
+            val_img("bg1", "val/bg_1.jpg", Split::Val, 0),
+            val_img("ann1", "val/ann_1.jpg", Split::Val, 3),
+            val_img("bg2", "val/bg_2.jpg", Split::Val, 0),
+            val_img("ann2", "val/ann_2.jpg", Split::Val, 1),
+            val_img("bg3", "val/bg_3.jpg", Split::Val, 0),
+        ];
+        let picked = pick_val_samples(&images, 4);
+        let ids: Vec<&str> = picked.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["ann1", "ann2", "bg1", "bg2"]);
+        assert_eq!(sample_tile_tip(&picked[0]), "ann_1.jpg · 3 boxes");
+        assert_eq!(sample_tile_tip(&picked[1]), "ann_2.jpg · 1 box");
+        assert_eq!(sample_tile_tip(&picked[2]), "bg_1.jpg · background · 0 boxes");
+    }
+
+    #[test]
+    fn pick_val_samples_handles_background_only_val_split() {
+        let images = vec![
+            val_img("t1", "train/a.jpg", Split::Train, 4),
+            val_img("bg1", "val/empty_a.jpg", Split::Val, 0),
+            val_img("bg2", "val/empty_b.jpg", Split::Val, 0),
+        ];
+        let picked = pick_val_samples(&images, 4);
+        let ids: Vec<&str> = picked.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["bg1", "bg2"]);
     }
 }

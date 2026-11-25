@@ -233,6 +233,10 @@ impl FoloApp {
     /// it is dropped when it answers, image and page model together (the newest action wins whole).
     pub fn pick_play_model(&mut self, id: String, cx: &mut Context<Self>) {
         self.play_open_seq += 1;
+        if self.play_model.as_deref() != Some(id.as_str()) {
+            self.play_class = None;
+            self.play_hover = None;
+        }
         self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
         self.play_model = Some(id);
         self.run_predict(cx);
@@ -296,6 +300,7 @@ impl FoloApp {
         self.play_pred_pending = false;
         self.play_pred_dim = false;
         self.play_hover = None;
+        self.play_class = None;
     }
 
     /// Predict again from scratch, showing "Detecting…" meanwhile (Retry, or another device). A plain
@@ -524,6 +529,9 @@ impl FoloApp {
         }
         self.navigate(Route::Playground, window, cx);
         if let Some((id, _)) = req.model {
+            if self.play_model.as_deref() != Some(id.as_str()) {
+                self.play_class = None;
+            }
             self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
             self.play_model = Some(id);
         }

@@ -4,19 +4,47 @@ use folo_ui::{
     AnyElement, Context, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use crate::api::PredictResponse;
+use crate::api::{PredictResponse, ScoredBox};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
 use crate::screens::page_header;
 use crate::theme::theme;
+use crate::ui::{Tone, plural};
 use crate::viz::DrawBox;
 
+/// Filters `boxes` by confidence threshold and optional class index.
+pub(crate) fn filter_detections(boxes: &[ScoredBox], conf: f32, class: Option<u32>) -> Vec<&ScoredBox> {
+    boxes.iter().filter(|b| b.score >= conf && class.is_none_or(|c| b.class == c)).collect()
+}
+
+/// Formats the currently visible Playground detections as pretty-printed JSON for clipboard export.
+pub(crate) fn detections_json(
+    model: &str,
+    image: &str,
+    conf: f32,
+    iou: f32,
+    class_filter: Option<u32>,
+    boxes: &[&ScoredBox],
+) -> String {
+    #[derive(serde::Serialize)]
+    struct Export<'a> {
+        model: &'a str,
+        image: &'a str,
+        conf: f32,
+        iou: f32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        class_filter: Option<u32>,
+        detections: &'a [&'a ScoredBox],
+    }
+    serde_json::to_string_pretty(&Export { model, image, conf, iou, class_filter, detections: boxes })
+        .unwrap_or_else(|_| "{}".to_string())
+}
+
 impl FoloApp {
-    /// Boxes of the current prediction that pass the confidence threshold.
-    pub(super) fn visible_boxes(&self, p: &PredictResponse, active: Option<usize>) -> Vec<DrawBox> {
-        p.boxes
-            .iter()
-            .filter(|b| b.score >= self.play_conf)
+    /// Boxes of the current prediction that pass the confidence threshold and active class filter.
+    pub(crate) fn visible_boxes(&self, p: &PredictResponse, active: Option<usize>) -> Vec<DrawBox> {
+        filter_detections(&p.boxes, self.play_conf, self.play_class)
+            .into_iter()
             .enumerate()
             .map(|(i, b)| DrawBox {
                 label: Some(b.name.clone().into()),
@@ -26,6 +54,19 @@ impl FoloApp {
                 ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
             })
             .collect()
+    }
+
+    /// Copies the currently filtered Playground detections as formatted JSON and shows a toast.
+    pub(crate) fn copy_play_json(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.play_pred.ready() else { return };
+        let vis = filter_detections(&p.boxes, self.play_conf, self.play_class);
+        let model =
+            self.play_shown_model().map(|m| m.name.as_str()).or(self.play_model.as_deref()).unwrap_or("");
+        let image = self.play_image.as_ref().map(|i| i.name.as_ref()).unwrap_or("");
+        let json = detections_json(model, image, self.play_conf, self.play_iou, self.play_class, &vis);
+        let body = plural(vis.len(), "detection");
+        cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(json));
+        self.toast(Tone::Success, "Copied detection JSON", Some(body.into()), cx);
     }
 
     pub fn playground(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -91,7 +132,7 @@ impl FoloApp {
         let n = self
             .play_pred
             .ready()
-            .map_or(0, |p| p.boxes.iter().filter(|b| b.score >= self.play_conf).count());
+            .map_or(0, |p| filter_detections(&p.boxes, self.play_conf, self.play_class).len());
         let focused = (0..n).find(|i| self.fh(format!("det-{i}"), cx).is_focused(window));
         if self.kb { focused.or(self.play_hover) } else { self.play_hover.or(focused) }
     }

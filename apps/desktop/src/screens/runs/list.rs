@@ -55,7 +55,48 @@ impl FoloApp {
         } else {
             format!("{} · {} active · {} failed", plural(runs.len(), "run"), active, count(RunFilter::Failed))
         };
-        let new = if self.store.datasets.ready().is_none_or(|d| d.is_empty()) {
+        let ds_err = self.store.datasets.error().cloned();
+        let mut header_actions = Vec::new();
+        if let Some(err) = ds_err.as_ref()
+            && self.store.runs.error().is_none()
+        {
+            header_actions.push(
+                self.button(
+                    "runs-retry-ds",
+                    "Retry datasets",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.retry_datasets(cx)),
+                )
+                .tooltip(crate::controls::tip(format!("Datasets didn't load: {}", err.message), None))
+                .into_any_element(),
+            );
+        }
+        let new = if self.store.runs.error().is_some() {
+            self.button_disabled(
+                "runs-new",
+                "New run",
+                Btn::Primary,
+                Some("icons/plus.svg"),
+                "Connect to folo serve first",
+                window,
+                cx,
+            )
+            .into_any_element()
+        } else if ds_err.is_some() {
+            self.button_disabled(
+                "runs-new",
+                "New run",
+                Btn::Primary,
+                Some("icons/plus.svg"),
+                "Datasets didn't load · retry to start a run",
+                window,
+                cx,
+            )
+            .into_any_element()
+        } else if self.store.datasets.ready().is_none_or(|d| d.is_empty()) {
             self.button_disabled(
                 "runs-new",
                 "New run",
@@ -83,7 +124,8 @@ impl FoloApp {
             .tooltip(crate::controls::tip("Start training", Some("Ctrl N")))
             .into_any_element()
         };
-        let header = page_header(&t, "Runs", subtitle, vec![new]);
+        header_actions.push(new);
+        let header = page_header(&t, "Runs", subtitle, header_actions);
         if let Some(e) = self.store.runs.error().cloned() {
             let err = self.error_panel(&e, "runs-retry", window, cx);
             return self.page_frame(&t, header, err, cx);

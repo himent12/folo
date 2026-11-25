@@ -172,8 +172,10 @@ impl FoloApp {
             // 2: 265 px) and 10 px of margin.
             let sim = self.play_target.is_none() && !self.store.api.local_inference();
             let latency = self.play_pred.ready().map(|p| latency_text(p.timing.total_ms, sim));
-            let shown =
-                self.play_pred.ready().map(|p| p.boxes.iter().filter(|b| b.score >= self.play_conf).count());
+            let shown = self
+                .play_pred
+                .ready()
+                .map(|p| super::page::filter_detections(&p.boxes, self.play_conf, self.play_class).len());
             let count = shown.map(|n| {
                 format!(
                     "{n} {} ≥ {}",
@@ -270,8 +272,10 @@ impl FoloApp {
                 cx,
                 act(|this, _, cx| this.play_zoom_by(1.4, cx)),
             ));
-        let hover_boxes = boxes.clone();
-        let paint_boxes = boxes;
+        let draw_boxes = if self.play_boxes { boxes } else { Vec::new() };
+        let hover_boxes = draw_boxes.clone();
+        let paint_boxes = draw_boxes;
+        let show_labels = self.play_labels;
         let tt = t;
         div()
             .id("stage")
@@ -466,7 +470,7 @@ impl FoloApp {
                                             Fit::Contain,
                                             zoom,
                                             pan,
-                                            true,
+                                            show_labels,
                                             false,
                                             0.,
                                         );

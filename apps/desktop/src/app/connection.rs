@@ -157,6 +157,9 @@ impl FoloApp {
         self.play_model = None;
         self.play_model_run = None;
         self.play_model_gone = None;
+        self.play_boxes = true;
+        self.play_labels = true;
+        self.play_class = None;
         self.retry_all(cx);
     }
 

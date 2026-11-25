@@ -50,9 +50,11 @@ impl Render for FoloApp {
             REVEAL.with(|r| *r.borrow_mut() = Some(vec![self.page_scroll.clone()]));
             window.request_animation_frame();
         }
-        // Not under the close question: it waits until the window stays open. Once the datasets are
-        // in, also none (`open_new_run` says what's missing then; d2-runs-4's `--open new-run`).
-        if self.open_new_run_pending && self.confirm_close.is_none() && self.store.datasets.ready().is_some()
+        // Not under the close question: it waits until the window stays open. Once the datasets settle
+        // (ready or failed), `open_new_run` opens or says what's missing (d2-runs-4's `--open new-run`).
+        if self.open_new_run_pending
+            && self.confirm_close.is_none()
+            && (self.store.datasets.ready().is_some() || self.store.datasets.error().is_some())
         {
             self.open_new_run_pending = false;
             self.open_new_run(None, window, cx);

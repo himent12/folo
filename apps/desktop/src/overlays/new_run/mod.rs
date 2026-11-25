@@ -1,5 +1,7 @@
 //! The New run dialog: name and dataset, where it trains (`new_run_compute`), the model, the
-//! schedule and the Advanced group. Its footer and frame are `new_run_footer`'s.
+//! schedule and the Advanced group (`advanced`). Its footer and frame are `new_run_footer`'s.
+
+mod advanced;
 
 use std::rc::Rc;
 
@@ -7,19 +9,57 @@ use crate::api::SplitsExt;
 use folo_ui::Focusable;
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, px,
+    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    Styled, Window, div, px,
 };
 
 use crate::app::{ARCHS, BATCHES, DEVICES, FoloApp, IMGSZ, act};
-use crate::theme::{radius, theme, ty};
+use crate::theme::{Theme, radius, theme, ty};
 use crate::ui::*;
 
 use super::error_note;
 use super::new_run_footer::NewRunSummary;
 
 /// The optimizer segments' labels (the helper under them repeats the chosen one).
-const OPT_LABELS: [&str; 4] = ["Auto", "SGD", "AdamW", "MuSGD"];
+pub(super) const OPT_LABELS: [&str; 4] = ["Auto", "SGD", "AdamW", "MuSGD"];
+
+pub(super) fn nr_label(t: &Theme, s: &str) -> Div {
+    text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child(s.to_string())
+}
+
+pub(super) fn nr_field(t: &Theme, name: &str, control: AnyElement, help: Option<String>) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(nr_label(t, name))
+        .child(control)
+        .when_some(help, |d, h| d.child(text(ty::SM, t.text_tertiary).tnum().child(h)))
+}
+
+pub(super) fn nr_typed(
+    t: &Theme,
+    name: &str,
+    field_el: AnyElement,
+    control: AnyElement,
+    bad: Option<&str>,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .child(nr_label(t, name))
+        // Slider and exact value on one row.
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(div().flex_1().min_w_0().child(control))
+                .child(field_el),
+        )
+        .when_some(bad, |d, msg| d.child(text(ty::SM, t.danger_text).child(msg.to_string())))
+}
 
 impl FoloApp {
     pub(super) fn new_run_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -110,17 +150,6 @@ impl FoloApp {
             let prev = if opt == 0 { self.fh("nr-opt", cx) } else { f.lr_input.read(cx).focus_handle(cx) };
             window.focus(&prev);
         }
-        let label =
-            |s: &str| text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child(s.to_string());
-        let field = |name: &str, control: AnyElement, help: Option<String>| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(label(name))
-                .child(control)
-                .when_some(help, |d, h| d.child(text(ty::SM, t.text_tertiary).tnum().child(h)))
-        };
         let name_fh = name_input.read(cx).focus_handle(cx);
         let name_ring = self.ring(&name_fh, window);
         let name_focused = name_fh.is_focused(window);
@@ -169,27 +198,6 @@ impl FoloApp {
                 }
             }),
         );
-        let seg = |this: &mut Self,
-                   key: &str,
-                   opts: &[&str],
-                   sel: usize,
-                   window: &mut Window,
-                   cx: &mut Context<Self>,
-                   set: fn(&mut crate::app::NewRunForm, usize)| {
-            this.segmented_fill(
-                key,
-                opts,
-                sel,
-                window,
-                cx,
-                Rc::new(move |this, i, _, _| {
-                    if let Some(f) = this.new_run.as_mut() {
-                        set(f, i);
-                    }
-                }),
-            )
-            .into_any_element()
-        };
         // Geist Mono, so "l" can't read as "1" or "|".
         let arch_seg = div()
             .w_full()
@@ -266,7 +274,20 @@ impl FoloApp {
             .into_any_element();
         // An unknown prefilled optimizer selects no segment.
         let opt_sel = if opt_unknown { OPT_LABELS.len() } else { opt };
-        let opt_seg = seg(self, "nr-opt", &OPT_LABELS, opt_sel, window, cx, |f, i| f.pick_optimizer(i));
+        let opt_seg = self
+            .segmented_fill(
+                "nr-opt",
+                &OPT_LABELS,
+                opt_sel,
+                window,
+                cx,
+                Rc::new(|this, i, _, _| {
+                    if let Some(f) = this.new_run.as_mut() {
+                        f.pick_optimizer(i);
+                    }
+                }),
+            )
+            .into_any_element();
         // A typed value outside a slider's preset range widens it (rather than pinning the thumb at
         // an end, where one arrow press would jump to the end value).
         let epochs_slider = self
@@ -293,23 +314,6 @@ impl FoloApp {
             "43.7 M params · 104 GFLOPs",
             "68.2 M params · 165 GFLOPs",
         ];
-        // A slider row as the Playground rail writes one: name · slider · value, on one line.
-        let valued = |name: &str, value: String, control: AnyElement| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(10.))
-                .child(div().w(px(100.)).flex_none().child(label(name)))
-                .child(div().flex_1().min_w_0().child(control))
-                .child(
-                    div()
-                        .w(px(44.))
-                        .flex_none()
-                        .flex()
-                        .justify_end()
-                        .child(text(ty::SM, t.text_primary).tnum().child(value)),
-                )
-        };
         // Short windows (the 620 px minimum): tighter rhythm and no restating helpers in the Model
         // rows, so the Schedule's controls are in view without scrolling.
         let short = window.viewport_size().height < px(700.);
@@ -389,23 +393,6 @@ impl FoloApp {
         let epochs_box = number_box(self, epochs_input, epochs_bad, window, cx);
         let lr_box = number_box(self, lr_input, lr_bad, window, cx);
         let close_box = number_box(self, close_input, close_bad, window, cx);
-        let typed = |name: &str, field: AnyElement, control: AnyElement, bad: Option<&str>| {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(label(name))
-                // Slider and exact value on one row.
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(12.))
-                        .child(div().flex_1().min_w_0().child(control))
-                        .child(field),
-                )
-                .when_some(bad, |d, msg| d.child(text(ty::SM, t.danger_text).child(msg.to_string())))
-        };
         // Short windows drop the helper rows; the two that explain a choice stay one hover or
         // focus away.
         let batch_help =
@@ -428,7 +415,9 @@ impl FoloApp {
                 .gap(px(8.))
                 // As tall as a plain label row (the icon overhangs), so a field with help lines up with
                 // its neighbour without.
-                .child(div().h(px(16.)).flex().items_center().gap(px(4.)).child(label(name)).child(help))
+                .child(
+                    div().h(px(16.)).flex().items_center().gap(px(4.)).child(nr_label(&t, name)).child(help),
+                )
                 .child(control)
                 .into_any_element()
         };
@@ -454,8 +443,36 @@ impl FoloApp {
                     "The server's device"
                 }))
                 .into_any_element();
-            field("Device", fact, (!short).then(|| "The worker picks it (sent as auto)".to_string()))
+            nr_field(&t, "Device", fact, (!short).then(|| "The worker picks it (sent as auto)".to_string()))
                 .into_any_element()
+        });
+        let adv_section = adv_open.then(|| {
+            self.nr_advanced_section(
+                t,
+                advanced::AdvancedInputs {
+                    short,
+                    opt,
+                    opt_unknown,
+                    auto_pick,
+                    opt_seg,
+                    lr_box,
+                    lr_slider,
+                    lr_bad,
+                    amp,
+                    amp_why: amp_why.clone(),
+                    is_cloud: cloud.is_some(),
+                    mosaic,
+                    mixup,
+                    fliplr,
+                    scale,
+                    mosaic_slider,
+                    mixup_slider,
+                    flip_slider,
+                    scale_slider,
+                },
+                window,
+                cx,
+            )
         });
         let body = div()
             .flex()
@@ -470,8 +487,11 @@ impl FoloApp {
             // are; gpu_out_of_memory names batch, imgsz and arch).
             .when_some(error.clone(), |d, e| d.child(error_note(&t, e.message, e.hint)))
             .child(
-                div().flex().gap(px(16.)).child(div().flex_1().child(field("Name", name_box, None))).child(
-                    div().flex_1().child({
+                div()
+                    .flex()
+                    .gap(px(16.))
+                    .child(div().flex_1().child(nr_field(&t, "Name", name_box, None)))
+                    .child(div().flex_1().child({
                         let summary = ds.as_ref().map(|d| {
                             format!(
                                 "{} · train {} · val {}",
@@ -492,7 +512,7 @@ impl FoloApp {
                                     .items_baseline()
                                     .justify_between()
                                     .gap(px(8.))
-                                    .child(label("Dataset"))
+                                    .child(nr_label(&t, "Dataset"))
                                     .children(
                                         summary.map(|s| {
                                             text(ty::SM, t.text_tertiary).tnum().ellipsis().child(s)
@@ -514,12 +534,21 @@ impl FoloApp {
                                         .flex()
                                         .items_start()
                                         .gap(px(6.))
-                                        .child(div().pt(px(3.)).child(icon("icons/info.svg", 14., t.text_tertiary)))
-                                        .child(text(ty::SM, t.text_secondary).flex_1().min_w_0().whitespace_normal().child(note)),
+                                        .child(div().pt(px(3.)).child(icon(
+                                            "icons/info.svg",
+                                            14.,
+                                            t.text_tertiary,
+                                        )))
+                                        .child(
+                                            text(ty::SM, t.text_secondary)
+                                                .flex_1()
+                                                .min_w_0()
+                                                .whitespace_normal()
+                                                .child(note),
+                                        ),
                                 )
                             })
-                    }),
-                ),
+                    })),
             )
             // Where it trains, before what (the Device below follows from it).
             .when_some(compute_rows, |d, rows| d.child(section("Compute")).child(rows))
@@ -528,7 +557,8 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex_1().child(field(
+                    .child(div().flex_1().child(nr_field(
+                        &t,
                         "Architecture",
                         arch_seg,
                         // The letter's size named, so the five choices read without knowing FOLO.
@@ -542,7 +572,8 @@ impl FoloApp {
                     .child(
                         div().flex_1().child(match size_help {
                             Some(h) => labelled("Image size", h, size_seg),
-                            None => field(
+                            None => nr_field(
+                                &t,
                                 "Image size",
                                 size_seg,
                                 Some("Pixels; images are letterboxed to a square".into()),
@@ -555,17 +586,19 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex_1().child(match batch_help {
-                        Some(h) => labelled("Batch size", h, batch_seg),
-                        None => {
-                            field("Batch size", batch_seg, Some("Images per step".into())).into_any_element()
-                        }
-                    }))
+                    .child(
+                        div().flex_1().child(match batch_help {
+                            Some(h) => labelled("Batch size", h, batch_seg),
+                            None => nr_field(&t, "Batch size", batch_seg, Some("Images per step".into()))
+                                .into_any_element(),
+                        }),
+                    )
                     .child(
                         div().flex_1().child(match (device_fact, device_help) {
                             (Some(fact), _) => fact,
                             (None, Some(h)) => labelled("Device", h, device_seg),
-                            (None, None) => field(
+                            (None, None) => nr_field(
+                                &t,
                                 "Device",
                                 device_seg,
                                 Some(match (DEVICES[device], &gpu_name) {
@@ -585,19 +618,24 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex_1().min_w_0().child(field(
-                        "Start from",
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_col()
-                            .gap(px(8.))
-                            .child(start_select)
-                            .when_some(weights_gone, |d, why| d.child(text(ty::SM, t.danger_text).child(why)))
-                            .into_any_element(),
-                        // Not the picked weights' description when they are gone (said above).
-                        self.nr_weights_gone().is_none().then_some(start_hint),
-                    )))
+                    .child(
+                        div().flex_1().min_w_0().child(nr_field(
+                            &t,
+                            "Start from",
+                            div()
+                                .w_full()
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                .child(start_select)
+                                .when_some(weights_gone, |d, why| {
+                                    d.child(text(ty::SM, t.danger_text).child(why))
+                                })
+                                .into_any_element(),
+                            // Not the picked weights' description when they are gone (said above).
+                            self.nr_weights_gone().is_none().then_some(start_hint),
+                        )),
+                    )
                     .child(div().flex_1()),
             )
             // Basic first: how long it trains. Everything a first run can leave alone sits under
@@ -615,16 +653,18 @@ impl FoloApp {
                             .flex()
                             .flex_col()
                             .gap(px(8.))
-                            .child(typed(
+                            .child(nr_typed(
+                                &t,
                                 "Epochs",
                                 epochs_box,
                                 epochs_slider,
                                 epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
                             ))
                             .child(text(ty::SM, t.text_tertiary).child(match ds.as_ref() {
-                                Some(d) => {
-                    format!("One epoch = one pass over {}", counted(d.splits.train, "training image", "training images"))
-                }
+                                Some(d) => format!(
+                                    "One epoch = one pass over {}",
+                                    counted(d.splits.train, "training image", "training images")
+                                ),
                                 None => "One epoch = one pass over the training images".to_string(),
                             })),
                     )
@@ -634,7 +674,8 @@ impl FoloApp {
                                 .flex()
                                 .flex_col()
                                 .gap(px(8.))
-                                .child(typed(
+                                .child(nr_typed(
+                                    &t,
                                     "Final epochs without mosaic",
                                     close_box,
                                     close_slider,
@@ -643,21 +684,29 @@ impl FoloApp {
                                 // Which epochs those are (the label already says what they do);
                                 // none while either count is invalid (it would describe the last
                                 // good one).
-                                .when(!epochs_bad && !close_bad, |d| d.child(text(ty::SM, t.text_tertiary).child({
-                                    // As the engine runs it: capped at half the run.
-                                    let last = epochs.round().max(1.) as u32;
-                                    let asked = close_mosaic.round() as u32;
-                                    let n = crate::api::capped_close_mosaic(asked, last);
-                                    let capped = if n < asked { " (capped at half the run)" } else { "" };
-                                    match n {
-                                        // Mosaic off (Advanced): every epoch is on whole images.
-                                        _ if mosaic <= 0. => "Mosaic is off: every epoch trains on whole images".to_string(),
-                                        0 if asked == 0 => "Off: mosaic all the way through".to_string(),
-                                        0 => "Too short a run: mosaic all the way through".to_string(),
-                                        1 => format!("Epoch {last} trains on whole images{capped}"),
-                                        _ => format!("Epochs {}–{last} train on whole images{capped}", last - n + 1),
-                                    }
-                                }))),
+                                .when(!epochs_bad && !close_bad, |d| {
+                                    d.child(text(ty::SM, t.text_tertiary).child({
+                                        // As the engine runs it: capped at half the run.
+                                        let last = epochs.round().max(1.) as u32;
+                                        let asked = close_mosaic.round() as u32;
+                                        let n = crate::api::capped_close_mosaic(asked, last);
+                                        let capped = if n < asked { " (capped at half the run)" } else { "" };
+                                        match n {
+                                            // Mosaic off (Advanced): every epoch is on whole images.
+                                            _ if mosaic <= 0. => {
+                                                "Mosaic is off: every epoch trains on whole images"
+                                                    .to_string()
+                                            }
+                                            0 if asked == 0 => "Off: mosaic all the way through".to_string(),
+                                            0 => "Too short a run: mosaic all the way through".to_string(),
+                                            1 => format!("Epoch {last} trains on whole images{capped}"),
+                                            _ => format!(
+                                                "Epochs {}–{last} train on whole images{capped}",
+                                                last - n + 1
+                                            ),
+                                        }
+                                    }))
+                                }),
                         ),
                     ),
             )
@@ -698,245 +747,7 @@ impl FoloApp {
                     }),
                 )
             })
-            .when(adv_open, |d| {
-                d.child(
-                    // Advanced's body: indented under the header's chevron, a rule down its left, so
-                    // what the disclosure encloses is visible; its parts are sub-heads, not sections.
-                    div()
-                        .ml(px(6.))
-                        .pl(px(18.))
-                        .border_l_1()
-                        .border_color(t.line_subtle)
-                        .flex()
-                        .flex_col()
-                        .gap(px(if short { 8. } else { 14. }))
-                // The head: one-to-many with NMS (the default), or the end-to-end head that predicts
-                // without it. It leads Advanced, as the model property among them.
-                .child({
-                    let e2e = self.new_run.as_ref().is_some_and(|f| f.e2e);
-                    let switch = self
-                        .switch(
-                            "nr-e2e",
-                            e2e,
-                            window,
-                            cx,
-                            act(|this, _, cx| {
-                                if let Some(f) = this.new_run.as_mut() {
-                                    f.e2e = !f.e2e;
-                                    cx.notify();
-                                }
-                            }),
-                        )
-                        .into_any_element();
-                    div()
-                        // The left column's width (the 16 px gap halved off), so the switch sits by its
-                        // label, not across a two-column dialog.
-                        .w(folo_ui::relative(0.5))
-                        .pr(px(8.))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(16.))
-                        .child(
-                            // The label toggles too (the switch keeps the one Tab stop).
-                            div()
-                                .id("nr-e2e-label")
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(f) = this.new_run.as_mut() {
-                                        f.e2e = !f.e2e;
-                                        cx.notify();
-                                    }
-                                }))
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.))
-                                .child(label("End-to-end (no NMS)"))
-                                .child(
-                                    text(ty::SM, t.text_tertiary)
-                                        .whitespace_normal()
-                                        .child("Predicts boxes directly, with no NMS step"),
-                                ),
-                        )
-                        .child(switch)
-                })
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(16.))
-                        .child(div().flex_1().child(field(
-                            "Optimizer",
-                            opt_seg,
-                            Some(match (opt, &auto_pick) {
-                                _ if opt_unknown => "Unknown optimizer (from a newer FOLO): pick one".to_string(),
-                                (0, Some((kind, _))) => {
-                                    format!("Auto: {kind} for this run, at its own learning rate")
-                                }
-                                (0, None) => "Auto: MuSGD for every run, at its own learning rate".to_string(),
-                                (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
-                                (2, _) => "AdamW with weight decay".to_string(),
-                                _ => "MuSGD: SGD plus a Muon update on conv weights".to_string(),
-                            }),
-                        )))
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_col()
-                                .gap(px(8.))
-                                // Under Auto the engine sets the rate itself: the field shows that rate,
-                                // read-only, instead of an editable value it would ignore.
-                                .child(if opt == 0 {
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .gap(px(8.))
-                                        .child(label("Initial learning rate"))
-                                        .child(
-                                            div()
-                                                .h(px(crate::theme::size::CONTROL_MD))
-                                                .px(px(8.))
-                                                .flex()
-                                                .items_center()
-                                                .rounded(px(radius::MD))
-                                                // A value, not an input: an outline, no well.
-                                                .border_1()
-                                                .border_color(t.line_subtle)
-                                                .child(crate::ui::sci(
-                                                    ty::SM,
-                                                    t.text_tertiary,
-                                                    match &auto_pick {
-                                                        Some((_, lr)) => format!("Auto · {lr}"),
-                                                        None => "Auto".to_string(),
-                                                    },
-                                                )),
-                                        )
-                                        .into_any_element()
-                                } else {
-                                    typed(
-                                        "Initial learning rate",
-                                        lr_box,
-                                        lr_slider,
-                                        lr_bad
-                                            .then_some("Enter a number above 0 and below 10, e.g. 0.01 or 1e-3"),
-                                    )
-                                    .into_any_element()
-                                })
-                                // The schedule (short windows keep the Schedule above the footer).
-                                .when(!short && !lr_bad, |d| {
-                                    d.child(text(ty::SM, t.text_tertiary).child(if opt == 0 {
-                                        "Set by Auto; pick SGD or AdamW to choose your own"
-                                    } else {
-                                        "3-epoch warmup, then linear decay to 1%"
-                                    }))
-                                }),
-                        ),
-                )
-                // Mixed precision: f16 on tensor cores. The server says whether its GPU can
-                // (`capabilities.amp`); when it can't, the switch is off and inert with its reason. An older
-                // server can't say, so the requirement is stated and a run's failure tells.
-                .child({
-                    let blocked = amp_why.clone();
-                    let off = blocked.is_some();
-                    let amp_on = amp && !off;
-                    // Blocked: a disabled switch (no hover, press or focus stop); the reason is beside it.
-                    let switch = if off {
-                        self.switch_disabled("nr-amp", cx).into_any_element()
-                    } else {
-                        self.switch(
-                            "nr-amp",
-                            amp_on,
-                            window,
-                            cx,
-                            act(move |this, _, cx| {
-                                if let Some(f) = this.new_run.as_mut() {
-                                    f.amp = !f.amp;
-                                    cx.notify();
-                                }
-                            }),
-                        )
-                        .into_any_element()
-                    };
-                    div()
-                        // The left column's width (the 16 px gap halved off), so the switch sits by its
-                        // label, not across a two-column dialog.
-                        .w(folo_ui::relative(0.5))
-                        .pr(px(8.))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(16.))
-                        .child(
-                            // The label toggles too when the switch can (it keeps the one Tab stop).
-                            div()
-                                .id("nr-amp-label")
-                                .when(!off, |d| {
-                                    d.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
-                                        if let Some(f) = this.new_run.as_mut() {
-                                            f.amp = !f.amp;
-                                            cx.notify();
-                                        }
-                                    }))
-                                })
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.))
-                                .child(label("Mixed precision"))
-                                .child(
-                                    // The server's reason is plain text (a backtick in it is literal); only
-                                    // the stated need carries a code chip.
-                                    match blocked {
-                                        Some(why) => text(ty::SM, t.text_tertiary).whitespace_normal().child(why),
-                                        None if cloud.is_some() => text(ty::SM, t.text_tertiary)
-                                            .whitespace_normal()
-                                            .child("Checked on the instance when it boots."),
-                                        // The server confirmed it can; an older one can't say, so the need is stated.
-                                        None if self.store.capabilities.is_some() => {
-                                            text(ty::SM, t.text_tertiary).whitespace_normal().child(
-                                                "f16 on this server's tensor cores: about 40% less GPU memory at 640 px. Not faster.",
-                                            )
-                                        }
-                                        None => rich(
-                                            &t,
-                                            ty::SM,
-                                            t.text_tertiary,
-                                            "Trains in f16 on tensor cores; needs `folo serve --tensor-cores`",
-                                        )
-                                        .text_left(),
-                                    },
-                                ),
-                        )
-                        .child(switch)
-                })
-                .child(text(ty::BASE, t.text_secondary).font_weight(FontWeight::MEDIUM).child("Augmentation"))
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(16.))
-                        .child(div().flex_1().child(valued("Mosaic", crate::ui::fmt_aug(mosaic), mosaic_slider)))
-                        .child(div().flex_1().child(valued("Mixup", crate::ui::fmt_aug(mixup), mixup_slider))),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(16.))
-                        .child(div().flex_1().child(valued(
-                            "Horizontal flip",
-                            crate::ui::fmt_aug(fliplr),
-                            flip_slider,
-                        )))
-                        .child(div().flex_1().child(valued(
-                            "Scale jitter",
-                            crate::ui::fmt_scale(scale),
-                            scale_slider,
-                        ))),
-                )
-                )
-            })
+            .children(adv_section)
             .when_some(note, |d, n| {
                 d.child(
                     div()

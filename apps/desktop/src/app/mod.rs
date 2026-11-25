@@ -486,6 +486,12 @@ pub struct FoloApp {
     pub play_conf: f32,
     /// The confidence the current predictions were fetched down to: a threshold below it refetches.
     pub play_fetched_floor: f32,
+    /// Show detection boxes on the Playground stage canvas.
+    pub play_boxes: bool,
+    /// Show class + score label chips on Playground stage boxes (effective while `play_boxes` is on).
+    pub play_labels: bool,
+    /// Optional class filter on the Playground detections (`None` = All classes).
+    pub play_class: Option<u32>,
     /// Short windows fold the validation-image picker to one line; this opens it.
     pub play_picker_open: bool,
     pub play_iou: f32,
@@ -796,6 +802,9 @@ impl FoloApp {
             play_model_gone: None,
             play_conf: 0.25,
             play_fetched_floor: PLAY_CONF_FLOOR,
+            play_boxes: true,
+            play_labels: true,
+            play_class: None,
             play_picker_open: false,
             play_iou: 0.7,
             play_target: None,

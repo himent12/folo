@@ -139,6 +139,20 @@ impl FoloApp {
     pub fn open_new_run(&mut self, dataset: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         // Nothing to train on until the dataset list is in (Ctrl+N included).
         if self.store.datasets.ready().is_none_or(|d| d.is_empty()) {
+            // A failed dataset load is not "still loading": tell the user why and offer Retry.
+            if let Some(err) = self.store.datasets.error().cloned() {
+                const DS_FAILED: &str = "Datasets didn't load";
+                if !self.toasts.iter().any(|t| &*t.title == DS_FAILED) {
+                    self.toast_with(
+                        Tone::Danger,
+                        DS_FAILED,
+                        Some(err.message.into()),
+                        Some(("Retry".into(), super::act(|this, _, cx| this.retry_datasets(cx)))),
+                        cx,
+                    );
+                }
+                return;
+            }
             // An empty server: Ctrl+N and the palette's New run say what's missing instead of
             // doing nothing (once, however often they're pressed).
             const NO_DATASET: &str = "Add a dataset first";

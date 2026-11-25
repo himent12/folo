@@ -578,3 +578,88 @@ fn try_in_playground_after_a_drop_still_decoding_keeps_its_model() {
         assert!(this.play_loading.is_none());
     });
 }
+
+#[test]
+fn playground_boxes_labels_class_filter_and_copy_json() {
+    use crate::api::ScoredBox;
+    let (mut app, window) = open();
+    let (_current, other) = stage_an_image(&mut app, window);
+    let pred = drive(&mut app, window, |this, _, cx| {
+        let mut pred = this.play_pred.ready().expect("staged prediction").clone();
+        pred.boxes = vec![
+            ScoredBox { class: 0, name: "rbc".into(), score: 0.92, x1: 10., y1: 10., x2: 50., y2: 50. },
+            ScoredBox { class: 1, name: "wbc".into(), score: 0.78, x1: 60., y1: 60., x2: 120., y2: 120. },
+            ScoredBox { class: 0, name: "rbc".into(), score: 0.12, x1: 2., y1: 2., x2: 8., y2: 8. },
+        ];
+        this.play_conf = 0.25;
+        this.play_pred = Load::Ready(pred.clone());
+        cx.notify();
+        pred
+    });
+    app.frame(window.into());
+    // Default: boxes + labels on, All classes, 2 detections above 0.25.
+    drive(&mut app, window, |this, _, cx| {
+        assert!(this.play_boxes && this.play_labels && this.play_class.is_none());
+        let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+        for expected in
+            ["play-boxes", "play-labels", "play-copy-json", "play-class-all", "play-class-0", "play-class-1"]
+        {
+            assert!(keys.iter().any(|k| k == expected), "missing {expected} in {keys:?}");
+        }
+        assert_eq!(this.visible_boxes(&pred, None).len(), 2);
+        // Filter to class 1 ("wbc") and copy JSON.
+        this.play_class = Some(1);
+        assert_eq!(this.visible_boxes(&pred, None).len(), 1);
+        this.copy_play_json(cx);
+        let (title, body) = last_toast(this);
+        assert_eq!(title, "Copied detection JSON");
+        assert_eq!(body, "1 detection");
+    });
+    let clip = app.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default());
+    let parsed: serde_json::Value = serde_json::from_str(&clip).expect("valid JSON");
+    assert_eq!(parsed["class_filter"], 1);
+    assert_eq!(parsed["detections"].as_array().unwrap().len(), 1);
+    assert_eq!(parsed["detections"][0]["name"], "wbc");
+    // Toggling boxes off keeps detection list intact while hiding overlay; switching models resets class filter.
+    drive(&mut app, window, |this, _, cx| {
+        this.play_boxes = false;
+        this.play_labels = false;
+        this.pick_play_model(other.clone(), cx);
+        assert_eq!(this.play_class, None, "switching model clears stale class filter");
+        // Switching backend resets boxes/labels/class to defaults.
+        this.set_backend(
+            Arc::new(crate::api::mock::MockBackend::new(4200, true)),
+            super::ServerMode::Local,
+            cx,
+        );
+        assert!(this.play_boxes && this.play_labels && this.play_class.is_none());
+    });
+}
+
+#[test]
+fn failed_dataset_load_shows_retry_on_runs_and_toast_on_new_run() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(super::Route::Runs, w, cx);
+        this.store.datasets = Load::Failed(ApiError::new("io_error", "dataset catalog unreadable"));
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+        assert!(keys.iter().any(|k| k == "runs-retry-ds"), "Runs should offer Retry datasets: {keys:?}");
+        // Ctrl+N / open_new_run explains the failure with an inline Retry action rather than saying "Loading…".
+        this.open_new_run(None, w, cx);
+        assert!(this.new_run.is_none());
+        let t = this.toasts.last().expect("error toast");
+        assert_eq!(t.title.as_ref(), "Datasets didn't load");
+        assert_eq!(t.body.as_deref(), Some("dataset catalog unreadable"));
+        let (label, retry) = t.action.as_ref().expect("Retry action");
+        assert_eq!(label.as_ref(), "Retry");
+        let retry = retry.clone();
+        retry(this, w, cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.datasets.ready().is_some(), "Retry action reloads datasets");
+    });
+}
