@@ -14,7 +14,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 |---|---|
 | `src/main.rs` | `main`: parses the command line, dispatches each subcommand (`run`), turns on the caches, resolves `--data-dir` |
 | `src/lib.rs` | `VERSION` (`folo --version`), `WEIGHTS_REPO` (default of `weights pull --repo`), `pub mod cli` |
-| `src/cli.rs` | The clap tree: `Cli`, `Command` and every `*Args` struct (`src/cli/label.rs`: `folo label`'s; `src/cli/bench.rs`: `folo bench`'s). Help strings and defaults here are what `folo describe` prints |
+| `src/cli.rs` | The clap tree: `Cli`, `Command` and every `*Args` struct (`src/cli/label.rs`: `folo label`'s; `src/cli/bench.rs`: `folo bench`'s; `src/cli/bounds.rs`: shared numeric validation bounds). Help strings, bounds and defaults here are what `folo describe` prints |
 | `src/output.rs` | `Out` (human text vs `--json` records), `CliError` and its JSON envelope, `ExitCode` |
 | `src/describe.rs` | `folo describe`: the clap tree as JSON, plus the MCP tool schemas from folo-mcp |
 | `src/engine.rs` | Opening datasets, registering the GPU backend for `--device`, engine errors as `CliError` |

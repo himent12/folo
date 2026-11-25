@@ -216,7 +216,7 @@ pub struct LabelViewArgs {
     /// Long side of the view in pixels (256 to 1568; never more than the image's own).
     #[arg(long, default_value_t = 1024)]
     pub size: u32,
-    /// The first box to list (a dense image lists 300 at a time).
+    /// The first box to list [>= 1] (a dense image lists 300 at a time).
     #[arg(long, default_value_t = 1)]
     pub from: u32,
     #[command(flatten)]

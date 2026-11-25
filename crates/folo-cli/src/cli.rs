@@ -8,6 +8,7 @@ use clap::builder::NonEmptyStringValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 mod bench;
+pub mod bounds;
 mod label;
 pub use bench::*;
 pub use label::*;
@@ -215,13 +216,13 @@ pub struct TrainArgs {
     /// Run name [default: <dataset>-<arch suffix>]; an existing run folder gets a numeric suffix.
     #[arg(long)]
     pub name: Option<String>,
-    /// Number of epochs.
+    /// Number of epochs [1..=10000].
     #[arg(long, default_value_t = 100)]
     pub epochs: u32,
-    /// Batch size.
+    /// Batch size [1..=1024].
     #[arg(long, default_value_t = 16)]
     pub batch: u32,
-    /// Square input size in pixels (multiple of 32).
+    /// Square input size in pixels [64..=4096, multiple of 32].
     #[arg(long, default_value_t = 640)]
     pub imgsz: u32,
     /// Device: auto, cpu or gpu:<n>.
@@ -237,10 +238,10 @@ pub struct TrainArgs {
     /// Optimizer.
     #[arg(long, value_enum, default_value_t = OptimizerArg::Auto)]
     pub optimizer: OptimizerArg,
-    /// Initial learning rate (ignored by --optimizer auto).
+    /// Initial learning rate in (0, 10) (ignored by --optimizer auto).
     #[arg(long, default_value_t = 0.01)]
     pub lr0: f32,
-    /// Final learning rate as a fraction of lr0.
+    /// Final learning rate as a fraction of lr0 in (0, 1].
     #[arg(long, default_value_t = 0.01)]
     pub lrf: f64,
     /// Cosine instead of linear learning-rate decay.
@@ -256,7 +257,7 @@ pub struct TrainArgs {
     /// [default: the --weights file's head, else o2m].
     #[arg(long, value_enum)]
     pub head: Option<HeadArg>,
-    /// Warmup length in epochs.
+    /// Warmup length in epochs [>= 0].
     #[arg(long, default_value_t = 3.0)]
     pub warmup_epochs: f64,
     /// Stop after this many epochs without a mAP@0.5:0.95 gain.
@@ -265,22 +266,22 @@ pub struct TrainArgs {
     /// RNG seed.
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
-    /// Mosaic augmentation probability.
+    /// Mosaic augmentation probability [0..=1].
     #[arg(long, default_value_t = 1.0)]
     pub mosaic: f32,
-    /// Mixup augmentation probability.
+    /// Mixup augmentation probability [0..=1].
     #[arg(long, default_value_t = 0.0)]
     pub mixup: f32,
-    /// HSV jitter gains h,s,v (`--hsv 0.015,0.7,0.4` or `--hsv 0.015 0.7 0.4`).
+    /// HSV jitter gains h,s,v [>= 0] (`--hsv 0.015,0.7,0.4` or `--hsv 0.015 0.7 0.4`).
     #[arg(long, value_delimiter = ',', num_args = 1..=3, default_values_t = [0.015, 0.7, 0.4])]
     pub hsv: Vec<f32>,
-    /// Horizontal flip probability.
+    /// Horizontal flip probability [0..=1].
     #[arg(long, default_value_t = 0.5)]
     pub fliplr: f32,
-    /// Scale jitter (± fraction).
+    /// Scale jitter (± fraction) in [0, 1).
     #[arg(long, default_value_t = 0.5)]
     pub scale: f32,
-    /// Translation jitter (fraction of the image).
+    /// Translation jitter (fraction of the image) [>= 0].
     #[arg(long, default_value_t = 0.1)]
     pub translate: f32,
     /// Disable mosaic for the last N epochs.
@@ -432,7 +433,7 @@ pub struct QuantizeArgs {
     /// Split the images come from.
     #[arg(long, value_enum, default_value_t = SplitArg::Train)]
     pub split: SplitArg,
-    /// Calibration images, drawn at random (by --seed) from the split; all of them when it has fewer.
+    /// Calibration images [>= 1], drawn at random (by --seed) from the split; all of them when it has fewer.
     #[arg(long, default_value_t = 512)]
     pub images: usize,
     /// Seed of the draw.
@@ -441,13 +442,13 @@ pub struct QuantizeArgs {
     /// How each range is picked.
     #[arg(long, value_enum, default_value_t = QuantMethodArg::Percentile)]
     pub method: QuantMethodArg,
-    /// With --method percentile: the mass cut from each tail.
+    /// With --method percentile: the mass cut from each tail in (0, 0.5).
     #[arg(long, default_value_t = 1e-4)]
     pub tail: f64,
-    /// Square input size of the calibration images [default: the model's training size].
+    /// Square input size of the calibration images [32..=8192, multiple of 32] [default: the model's training size].
     #[arg(long)]
     pub imgsz: Option<u32>,
-    /// Batch size.
+    /// Batch size [>= 1].
     #[arg(long, default_value_t = 8)]
     pub batch: u32,
     /// Data loader worker threads [default: min(cores, 16)].
@@ -471,19 +472,19 @@ pub struct ValArgs {
     /// Split to evaluate.
     #[arg(long, value_enum, default_value_t = SplitArg::Val)]
     pub split: SplitArg,
-    /// Batch size.
+    /// Batch size [>= 1].
     #[arg(long, default_value_t = 32)]
     pub batch: u32,
-    /// Square input size in pixels [default: the model's training size].
+    /// Square input size in pixels [>= 32, multiple of 32] [default: the model's training size].
     #[arg(long)]
     pub imgsz: Option<u32>,
-    /// Confidence threshold (low for mAP).
+    /// Confidence threshold [0..=1] (low for mAP).
     #[arg(long, default_value_t = 0.001)]
     pub conf: f32,
-    /// NMS IoU threshold.
+    /// NMS IoU threshold [0..=1].
     #[arg(long, default_value_t = 0.7)]
     pub iou: f32,
-    /// Maximum detections per image (COCO's AP reads the best 100 of them).
+    /// Maximum detections per image [>= 1] (COCO's AP reads the best 100 of them).
     #[arg(long, default_value_t = 300)]
     pub max_det: u32,
     /// Refine each kept box from its NMS cluster (docs/MODEL.md §9.4): `vote` moves each side to the
@@ -492,7 +493,7 @@ pub struct ValArgs {
     /// `IoU⁴` affinity and 1-step Student-t (`ν = 3`) IRLS outlier rejection. Off by default.
     #[arg(long, value_enum, default_value_t = FusionArg::None)]
     pub fusion: FusionArg,
-    /// With --fusion: a kept box's cluster is the candidates of its class whose IoU with it is at least this.
+    /// With --fusion: a kept box's cluster is the candidates of its class whose IoU with it is at least this [0..=1].
     #[arg(long, default_value_t = folo_vision::fusion::FUSION_IOU)]
     pub fusion_iou: f32,
     /// Score of each kept box (docs/MODEL.md §9.4): `elc` updates log-odds from exclusive NMS suppressor mass,
@@ -544,13 +545,13 @@ pub struct PredictArgs {
     /// Images or folders of images (searched recursively).
     #[arg(required = true)]
     pub sources: Vec<PathBuf>,
-    /// Confidence threshold.
+    /// Confidence threshold [0..=1].
     #[arg(long, default_value_t = 0.25)]
     pub conf: f32,
-    /// NMS IoU threshold.
+    /// NMS IoU threshold [0..=1].
     #[arg(long, default_value_t = 0.7)]
     pub iou: f32,
-    /// Maximum detections per image.
+    /// Maximum detections per image [>= 1].
     #[arg(long, default_value_t = 300)]
     pub max_det: u32,
     /// Refine each kept box from its NMS cluster (docs/MODEL.md §9.4): `vote` moves each side to the
@@ -559,7 +560,7 @@ pub struct PredictArgs {
     /// `IoU⁴` affinity and 1-step Student-t (`ν = 3`) IRLS outlier rejection. Off by default.
     #[arg(long, value_enum, default_value_t = FusionArg::None)]
     pub fusion: FusionArg,
-    /// With --fusion: a kept box's cluster is the candidates of its class whose IoU with it is at least this.
+    /// With --fusion: a kept box's cluster is the candidates of its class whose IoU with it is at least this [0..=1].
     #[arg(long, default_value_t = folo_vision::fusion::FUSION_IOU)]
     pub fusion_iou: f32,
     /// Score of each kept box (docs/MODEL.md §9.4): `elc`, `dfl-consensus`, `dfl-repulse` and `dfl-cgr` update
@@ -573,7 +574,7 @@ pub struct PredictArgs {
     /// uses such a model's one-to-many branch with NMS.
     #[arg(long, value_enum)]
     pub head: Option<HeadArg>,
-    /// Letterbox size in pixels [default: the model's training size].
+    /// Letterbox size in pixels [32..=8192, multiple of 32] [default: the model's training size].
     #[arg(long)]
     pub imgsz: Option<u32>,
     /// Device: auto, cpu or gpu:<n>.
@@ -625,11 +626,11 @@ pub struct ExportArgs {
     /// when taken].
     #[arg(long)]
     pub output: Option<PathBuf>,
-    /// Square input size baked into the graph, a multiple of 32 (ONNX only; `.folo` files are size-independent)
-    /// [default: the model's training imgsz].
+    /// Square input size baked into the graph [32..=8192, multiple of 32] (ONNX only; `.folo` files are
+    /// size-independent) [default: the model's training imgsz].
     #[arg(long)]
     pub imgsz: Option<u32>,
-    /// Fixed batch size of the graph (ONNX only) [default: 1].
+    /// Fixed batch size of the graph [>= 1] (ONNX only) [default: 1].
     #[arg(long)]
     pub batch: Option<usize>,
     /// Symbolic batch, height and width (ONNX only): any batch, any H and W that are multiples of 32.
@@ -644,7 +645,7 @@ pub struct ExportArgs {
     /// score, no NMS needed), K = min(--max-det, anchors).
     #[arg(long)]
     pub decode: bool,
-    /// With --decode on an o2o model (ONNX only): detections per image.
+    /// With --decode on an o2o model (ONNX only): detections per image [>= 1].
     #[arg(long, default_value_t = 300)]
     pub max_det: usize,
     /// Head to export (ONNX only) [default: the model's]; `o2m` exports an o2o model's one-to-many branch
@@ -837,20 +838,20 @@ pub enum SynthImageFormat {
 pub struct SynthArgs {
     /// Output folder (created; must be empty if it exists).
     pub out_dir: PathBuf,
-    /// Number of images (train + val).
+    /// Number of images (train + val) [1..=1000000].
     #[arg(long, default_value_t = 1000)]
     pub images: u64,
     /// Class names (at most 8). circle, square, triangle, star, ring, cross, hexagon and heart get those shapes;
     /// other names take the next unused shape.
     #[arg(long, value_delimiter = ',', default_values_t = ["circle".to_string(), "square".to_string(), "triangle".to_string()])]
     pub classes: Vec<String>,
-    /// Image side in pixels (the long side with --vary-aspect).
+    /// Image side in pixels [32..=8192] (the long side with --vary-aspect).
     #[arg(long, default_value_t = 640)]
     pub imgsz: u32,
     /// RNG seed; the same seed gives the same dataset.
     #[arg(long, default_value_t = 0)]
     pub seed: u64,
-    /// Fraction of images in the validation split.
+    /// Fraction of images in the validation split [0..=1].
     #[arg(long, default_value_t = 0.2)]
     pub val_frac: f32,
     /// Image encoding.

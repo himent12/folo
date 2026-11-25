@@ -132,7 +132,7 @@ pub struct BenchRunArgs {
     /// The entry's name on the leaderboard [default: the model's]; required with --predictions.
     #[arg(long)]
     pub name: Option<String>,
-    /// --model: run only the first this many images of the benchmark [default: all].
+    /// --model: run only the first this many images of the benchmark [>= 1] [default: all].
     #[arg(long)]
     pub max_images: Option<u32>,
     /// --model: run the unchanged images only, not the plan's conditions.

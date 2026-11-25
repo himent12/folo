@@ -850,6 +850,66 @@ fn folo_server_env_fallback_and_precedence() {
     }
 }
 
+/// `folo describe <cmd> --json` and `<cmd> --help` expose the validated numeric bounds referenced by
+/// `invalid_config` error hints on `predict`, `val`, and `export`.
+#[test]
+fn describe_and_help_expose_validated_numeric_bounds() {
+    let (code, stdout, _) = folo(&["predict", "--model", "absent.folo", "x.png", "--conf", "1.1", "--json"]);
+    assert_eq!(code, 2);
+    let err = &json_lines(&stdout)[0]["error"];
+    assert_eq!(err["code"], "invalid_config");
+    assert!(err["hint"].as_str().unwrap().contains("folo describe predict --json"), "{err}");
+
+    let describe_cmd = |cmd: &str| {
+        let (code, stdout, stderr) = folo(&["describe", cmd, "--json"]);
+        assert_eq!(code, 0, "{cmd}: {stderr}");
+        json_lines(&stdout).remove(0)
+    };
+    let arg_of = |doc: &Value, name: &str| {
+        doc["args"].as_array().unwrap().iter().find(|a| a["name"] == name).unwrap().clone()
+    };
+
+    let predict = describe_cmd("predict");
+    assert_eq!(arg_of(&predict, "conf")["bounds"], serde_json::json!({ "minimum": 0.0, "maximum": 1.0 }));
+    assert_eq!(arg_of(&predict, "iou")["bounds"], serde_json::json!({ "minimum": 0.0, "maximum": 1.0 }));
+    assert_eq!(
+        arg_of(&predict, "fusion_iou")["bounds"],
+        serde_json::json!({ "minimum": 0.0, "maximum": 1.0 })
+    );
+    assert_eq!(arg_of(&predict, "max_det")["bounds"], serde_json::json!({ "minimum": 1 }));
+    assert_eq!(
+        arg_of(&predict, "imgsz")["bounds"],
+        serde_json::json!({ "minimum": 32, "maximum": 8192, "multiple_of": 32 })
+    );
+
+    let val = describe_cmd("val");
+    assert_eq!(arg_of(&val, "conf")["bounds"], serde_json::json!({ "minimum": 0.0, "maximum": 1.0 }));
+    assert_eq!(arg_of(&val, "iou")["bounds"], serde_json::json!({ "minimum": 0.0, "maximum": 1.0 }));
+    assert_eq!(arg_of(&val, "max_det")["bounds"], serde_json::json!({ "minimum": 1 }));
+    assert_eq!(arg_of(&val, "batch")["bounds"], serde_json::json!({ "minimum": 1 }));
+    assert_eq!(arg_of(&val, "imgsz")["bounds"], serde_json::json!({ "minimum": 32, "multiple_of": 32 }));
+
+    let export = describe_cmd("export");
+    assert_eq!(
+        arg_of(&export, "imgsz")["bounds"],
+        serde_json::json!({ "minimum": 32, "maximum": 8192, "multiple_of": 32 })
+    );
+    assert_eq!(arg_of(&export, "batch")["bounds"], serde_json::json!({ "minimum": 1 }));
+    assert_eq!(arg_of(&export, "max_det")["bounds"], serde_json::json!({ "minimum": 1 }));
+
+    for (cmd, snippets) in [
+        ("predict", &["[0..=1]", "[>= 1]", "[32..=8192, multiple of 32]"][..]),
+        ("val", &["[0..=1]", "[>= 1]", "[>= 32, multiple of 32]"]),
+        ("export", &["[>= 1]", "[32..=8192, multiple of 32]"]),
+    ] {
+        let (code, stdout, stderr) = folo(&[cmd, "--help"]);
+        assert_eq!(code, 0, "{cmd} --help: {stderr}");
+        for s in snippets {
+            assert!(stdout.contains(s), "{cmd} --help missing `{s}`:\n{stdout}");
+        }
+    }
+}
+
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
 fn folo_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));

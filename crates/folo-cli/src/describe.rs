@@ -110,7 +110,7 @@ fn describe_group(cmd: &Command, group: &ArgGroup) -> Value {
     })
 }
 
-fn describe_arg(cmd: &Command, arg: &Arg) -> Value {
+fn describe_arg(cmd: &Command, cmd_path: &str, arg: &Arg) -> Value {
     let takes_values = arg.get_action().takes_values();
     let multiple = matches!(arg.get_action(), ArgAction::Append)
         || arg.get_num_args().is_some_and(|r| r.max_values() > 1);
@@ -135,6 +135,8 @@ fn describe_arg(cmd: &Command, arg: &Arg) -> Value {
     let mut aliases: Vec<String> =
         arg.get_visible_aliases().unwrap_or_default().into_iter().map(|a| format!("--{a}")).collect();
     aliases.extend(arg.get_visible_short_aliases().unwrap_or_default().into_iter().map(|s| format!("-{s}")));
+    let bounds = crate::cli::bounds::for_arg(cmd_path, arg.get_id().as_str())
+        .map_or(Value::Null, crate::cli::bounds::NumericBounds::to_json);
     json!({
         "name": arg.get_id().as_str(),
         "long": arg.get_long().map(|l| format!("--{l}")),
@@ -147,6 +149,7 @@ fn describe_arg(cmd: &Command, arg: &Arg) -> Value {
         "multiple": multiple,
         "default": default,
         "possible_values": possible,
+        "bounds": bounds,
         "env": arg.get_env().map(|e| e.to_string_lossy().into_owned()),
         "conflicts_with": arg_conflicts(cmd, arg),
         "help": styled(arg.get_help()),
@@ -156,20 +159,21 @@ fn describe_arg(cmd: &Command, arg: &Arg) -> Value {
 fn describe_command(cmd: &Command, path: &[&str]) -> Value {
     let mut path: Vec<&str> = path.to_vec();
     path.push(cmd.get_name());
+    let cmd_path = path.join(" ");
     let aliases: Vec<&str> = cmd.get_visible_aliases().collect();
     let groups: Vec<Value> =
         cmd.get_groups().filter(|g| is_constraint_group(g)).map(|g| describe_group(cmd, g)).collect();
     let args: Vec<Value> = cmd
         .get_arguments()
         .filter(|a| !a.is_global_set() && !a.is_hide_set())
-        .map(|a| describe_arg(cmd, a))
+        .map(|a| describe_arg(cmd, &cmd_path, a))
         .collect();
     let subs: Vec<Value> =
         cmd.get_subcommands().filter(|c| !c.is_hide_set()).map(|c| describe_command(c, &path)).collect();
     json!({
         "name": cmd.get_name(),
         "aliases": aliases,
-        "path": path.join(" "),
+        "path": cmd_path,
         "about": styled(cmd.get_about()),
         "groups": groups,
         "args": args,
@@ -213,8 +217,11 @@ pub fn describe(root: &Command, path: &[String], mcp_tools: bool) -> Result<Valu
 
 /// The whole CLI surface, without the MCP tools.
 fn describe_all(root: &Command) -> Value {
-    let globals: Vec<Value> =
-        root.get_arguments().filter(|a| a.is_global_set()).map(|a| describe_arg(root, a)).collect();
+    let globals: Vec<Value> = root
+        .get_arguments()
+        .filter(|a| a.is_global_set())
+        .map(|a| describe_arg(root, root.get_name(), a))
+        .collect();
     let commands: Vec<Value> = root
         .get_subcommands()
         .filter(|c| !c.is_hide_set())

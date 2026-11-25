@@ -12,7 +12,7 @@ use folo_vision::train::resolve_device;
 use folo_vision::{FoloModel, Precision};
 use serde_json::json;
 
-use crate::cli::{QuantMethodArg, QuantizeArgs, SplitArg};
+use crate::cli::{QuantMethodArg, QuantizeArgs, SplitArg, bounds};
 use crate::engine::{engine_error, open_dataset_splits};
 use crate::output::{CliError, ExitCode, Out};
 use crate::output_file::OutputFile;
@@ -27,14 +27,16 @@ fn usage(message: String) -> CliError {
 
 pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     let method = match args.method {
-        QuantMethodArg::Percentile if !(args.tail > 0.0 && args.tail < 0.5) => {
+        QuantMethodArg::Percentile if !bounds::QUANTIZE_TAIL.contains_f64(args.tail) => {
             return Err(usage(format!("--tail must be in (0, 0.5), got {}", args.tail)));
         }
         QuantMethodArg::Percentile => Method::Percentile { p: args.tail },
         QuantMethodArg::Minmax => Method::MinMax,
         QuantMethodArg::Mse => Method::Mse,
     };
-    if args.images == 0 || args.batch == 0 {
+    if !bounds::POSITIVE_INT.contains_u64(args.images as u64)
+        || !bounds::POSITIVE_INT.contains_u64(u64::from(args.batch))
+    {
         return Err(usage("--images and --batch must be at least 1".into()));
     }
     let path = crate::weights::resolve(&args.model)?;
@@ -56,9 +58,12 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     }
     let n = args.images.min(part.len());
     let imgsz = args.imgsz.unwrap_or(model.imgsz());
-    if imgsz == 0 || !imgsz.is_multiple_of(32) || imgsz > 8192 {
+    if !bounds::INFER_IMGSZ.contains_u64(u64::from(imgsz)) {
         let from = if args.imgsz.is_some() { "--imgsz" } else { "the weights' imgsz (pass --imgsz)" };
-        return Err(usage(format!("{from} {imgsz} must be a multiple of 32 in 32..=8192")));
+        return Err(usage(format!(
+            "{from} {imgsz} must be a multiple of 32 in 32..={}",
+            bounds::INFER_IMGSZ_MAX
+        )));
     }
     let workers = args.workers.unwrap_or_else(folo_vision::train::default_workers);
     // Claimed first, so a taken --output fails before the calibration, not after it.
