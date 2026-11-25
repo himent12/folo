@@ -100,12 +100,14 @@ impl FoloApp {
         let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return Rc::new(Vec::new()) };
         let class = self.class_filter(id);
         let empty_only = self.empty_only(id);
-        let key = (id.to_string(), self.ds_split, class, empty_only, all.len(), all.as_ptr() as usize);
+        let len = all.len();
+        let ptr = all.as_ptr() as usize;
         if let Some((k, v)) = self.ds_filter_cache.borrow().as_ref()
-            && *k == key
+            && (k.0.as_str(), k.1, k.2, k.3, k.4, k.5) == (id, self.ds_split, class, empty_only, len, ptr)
         {
             return v.clone();
         }
+        let key = (id.to_string(), self.ds_split, class, empty_only, len, ptr);
         let v: Rc<Vec<usize>> = Rc::new(
             all.iter()
                 .enumerate()
@@ -122,12 +124,14 @@ impl FoloApp {
     /// Boxes per class among a split's images (cached per dataset and split).
     pub fn split_class_counts(&self, id: &str, split: Split, classes: usize) -> Vec<u64> {
         let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return vec![0; classes] };
-        let key = (id.to_string(), split, all.len(), all.as_ptr() as usize, classes);
+        let len = all.len();
+        let ptr = all.as_ptr() as usize;
         if let Some((k, v)) = self.ds_split_counts.borrow().as_ref()
-            && *k == key
+            && (k.0.as_str(), k.1, k.2, k.3, k.4) == (id, split, len, ptr, classes)
         {
             return v.clone();
         }
+        let key = (id.to_string(), split, len, ptr, classes);
         let mut v = vec![0u64; classes];
         for m in all.iter().filter(|m| m.split == split) {
             for b in &m.boxes {
@@ -320,7 +324,10 @@ impl FoloApp {
             usize::from(self.ds_tab == DsTab::Statistics),
             window,
             cx,
-            Rc::new(|this, i, _, _| this.ds_tab = if i == 0 { DsTab::Images } else { DsTab::Statistics }),
+            Rc::new(|this, i, _, _| {
+                this.ds_tab = if i == 0 { DsTab::Images } else { DsTab::Statistics };
+                this.ds_hover_tile = None;
+            }),
         );
         let content = match self.ds_tab {
             DsTab::Images => self.image_browser(&ds, window, cx),

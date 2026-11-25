@@ -82,6 +82,23 @@ impl FoloApp {
         reveal: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.tile_with_classes(dataset, meta, None, boxes, labels, fit, reveal, cx)
+    }
+
+    /// Same as [`Self::tile`], reusing a pre-interned slice of class names when provided so visible
+    /// grid tiles clone `SharedString` handles instead of allocating per box.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn tile_with_classes(
+        &mut self,
+        dataset: &str,
+        meta: &ImageInfo,
+        shared_classes: Option<&[SharedString]>,
+        boxes: bool,
+        labels: bool,
+        fit: Fit,
+        reveal: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = theme(cx);
         let img = self.image(dataset, &meta.id, ImgKind::Thumb, cx);
         let dims = (meta.width as f32, meta.height as f32);
@@ -91,18 +108,27 @@ impl FoloApp {
             .class_filter(dataset)
             .filter(|_| matches!(&self.route, crate::app::Route::Dataset(d) if d == dataset));
         let draw: Vec<DrawBox> = if boxes {
-            let classes =
-                self.store.dataset_summary(dataset).map(|d| d.classes.as_slice()).unwrap_or_default();
+            let fallback = if shared_classes.is_none() {
+                self.store.dataset_summary(dataset).map(|d| d.classes.as_slice()).unwrap_or_default()
+            } else {
+                &[]
+            };
             // Filtered, a tile at rest names one match: the largest the painter can label (it tries
             // them largest first), so every tile reads the same way; hovered or focused, all of them.
             let one = !reveal;
             meta.boxes
                 .iter()
-                .map(|b| DrawBox {
-                    dim: focus.is_some_and(|c| c != b.class),
-                    one_of: one && focus == Some(b.class),
-                    label: classes.get(b.class as usize).map(|n| SharedString::from(n.clone())),
-                    ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
+                .map(|b| {
+                    let label = match shared_classes {
+                        Some(classes) => classes.get(b.class as usize).cloned(),
+                        None => fallback.get(b.class as usize).map(|n| SharedString::from(n.clone())),
+                    };
+                    DrawBox {
+                        dim: focus.is_some_and(|c| c != b.class),
+                        one_of: one && focus == Some(b.class),
+                        label,
+                        ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
+                    }
                 })
                 .collect()
         } else {
