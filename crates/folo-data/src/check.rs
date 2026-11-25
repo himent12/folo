@@ -484,7 +484,7 @@ fn lint_label_file(image: &Path, label: &Path, nc: Option<usize>) -> Vec<CheckIs
             return out;
         }
     };
-    let Ok(text) = String::from_utf8(bytes) else {
+    let Ok(text) = std::str::from_utf8(&bytes) else {
         out.push(CheckIssue::new(
             CheckKind::BrokenLabel,
             label,
@@ -494,7 +494,7 @@ fn lint_label_file(image: &Path, label: &Path, nc: Option<usize>) -> Vec<CheckIs
         ));
         return out;
     };
-    let (lint, boxes) = lint_labels(&text, nc);
+    let (lint, boxes) = lint_labels(text, nc);
     out.extend(
         lint.into_iter()
             .map(|(kind, line, message, fix)| CheckIssue::new(kind, label, Some(line), message, Some(fix))),
@@ -516,10 +516,16 @@ type LineIssue = (CheckKind, usize, String, String);
 
 /// Line-level issues of YOLO label text, and the number of distinct usable boxes.
 fn lint_labels(text: &str, nc: Option<usize>) -> (Vec<LineIssue>, usize) {
+    use crate::dataset::labels::{BoxKey, DEDUP_HASH_THRESHOLD, box_key};
     let text = crate::dataset::labels::strip_bom(text);
+    let est = if text.is_empty() {
+        0
+    } else {
+        (text.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1).min(text.len() / 9 + 1)
+    };
     let mut out = Vec::new();
-    let mut vals = Vec::with_capacity(16);
-    let mut kept: Vec<(crate::BBox, usize)> = Vec::new();
+    let mut kept: Vec<(crate::BBox, usize)> = Vec::with_capacity(est);
+    let mut kept_map: Option<HashMap<BoxKey, usize>> = None;
     let broken = " (the loader skips this image)";
     for (i, raw) in text.lines().enumerate() {
         let ln = i + 1;
@@ -527,7 +533,7 @@ fn lint_labels(text: &str, nc: Option<usize>) -> (Vec<LineIssue>, usize) {
         if line.is_empty() {
             continue;
         }
-        match parse_line(line, nc, &mut vals) {
+        match parse_line(line, nc) {
             Err((e, msg)) => {
                 let kind = match e {
                     LineError::Malformed => CheckKind::BrokenLabel,
@@ -551,15 +557,35 @@ fn lint_labels(text: &str, nc: Option<usize>) -> (Vec<LineIssue>, usize) {
                         format!("clip the box on line {ln} to the image"),
                     ));
                 }
-                if let Some((_, first)) = kept.iter().find(|(k, _)| *k == b) {
+                let first_line = if let Some(map) = kept_map.as_mut() {
+                    match map.entry(box_key(&b)) {
+                        std::collections::hash_map::Entry::Occupied(e) => Some(*e.get()),
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(ln);
+                            kept.push((b, ln));
+                            None
+                        }
+                    }
+                } else if let Some((_, first)) = kept.iter().find(|(k, _)| *k == b) {
+                    Some(*first)
+                } else {
+                    kept.push((b, ln));
+                    if kept.len() >= DEDUP_HASH_THRESHOLD {
+                        let mut map = HashMap::with_capacity(est.max(DEDUP_HASH_THRESHOLD * 2));
+                        for &(kb, kln) in &kept {
+                            map.insert(box_key(&kb), kln);
+                        }
+                        kept_map = Some(map);
+                    }
+                    None
+                };
+                if let Some(first) = first_line {
                     out.push((
                         CheckKind::DuplicateLabel,
                         ln,
                         format!("same box as line {first}"),
                         format!("delete line {ln}"),
                     ));
-                } else {
-                    kept.push((b, ln));
                 }
             }
         }
