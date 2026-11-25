@@ -37,6 +37,10 @@ pub(crate) struct Shared {
     drop_helper: OnceCell<Option<IDropTargetHelper>>,
     /// `first-present` has been printed (or tracing is off).
     pub(crate) traced: Cell<bool>,
+    /// Test-only client-space cursor override (device pixels) so tests can exercise pointer-dependent
+    /// cancellation paths without moving a window onto a display or touching the real cursor.
+    #[cfg(test)]
+    pub(crate) test_client_cursor: Cell<Option<POINT>>,
 }
 
 impl Shared {
@@ -106,6 +110,8 @@ impl WindowsPlatform {
             icon: load_icon(),
             drop_helper: OnceCell::new(),
             traced: Cell::new(false),
+            #[cfg(test)]
+            test_client_cursor: Cell::new(None),
         });
         let _parker = if offscreen() { offscreen::Parker::install() } else { None };
         let services = Services::new(offscreen(), Box::new(Win32Launcher(shared.clone())));
@@ -140,6 +146,13 @@ impl WindowsPlatform {
     #[cfg(test)]
     pub(crate) fn window_handles(&self) -> Vec<HWND> {
         self.shared.windows.borrow().iter().map(|&h| HWND(h as _)).collect()
+    }
+
+    /// Overrides the client-space cursor position (device pixels) read by `cancel_presses` and
+    /// `mouse_position`, so tests stay deterministic and off screen without touching the real cursor.
+    #[cfg(test)]
+    pub(crate) fn set_test_client_cursor(&self, point: Option<POINT>) {
+        self.shared.test_client_cursor.set(point);
     }
 }
 
