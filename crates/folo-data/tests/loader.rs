@@ -306,3 +306,45 @@ fn ram_cache_refuses_what_does_not_fit() {
     let e = DataLoader::new(ds, c).err().expect("refused");
     assert!(e.to_string().contains("--cache ram needs"), "{e}");
 }
+
+/// Multi-epoch reseeding is bit-for-bit identical across worker counts, prefetch depths, `u8`/`f32` outputs,
+/// `drop_last`, and out-of-order epoch replays, and `drop_last` with fewer samples than `batch_size` yields
+/// zero batches cleanly.
+#[test]
+fn multi_epoch_reseeding_is_deterministic_across_workers_and_formats() {
+    let ds = rect_dataset(19);
+    for (u8_images, drop_last, prefetch_batches) in
+        [(false, false, 1), (true, false, 0), (true, true, 3), (false, true, 2)]
+    {
+        let base = LoaderConfig { u8_images, drop_last, prefetch_batches, batch_size: 4, ..cfg(0) };
+        let sync_loader = DataLoader::new(ds.clone(), base.clone()).unwrap();
+        let ref_epochs: Vec<Vec<Batch>> = (0..4).map(|e| collect(&sync_loader, e)).collect();
+        // Distinct epochs must differ when shuffling + augmenting.
+        for e in 1..4 {
+            assert_ne!(ref_epochs[e], ref_epochs[0], "epoch {e} matched epoch 0");
+        }
+        // Out-of-order replays across worker counts must match the sync reference bit for bit.
+        for workers in [1, 2, 4, 8] {
+            let loader = DataLoader::new(ds.clone(), LoaderConfig { workers, ..base.clone() }).unwrap();
+            for &e in &[3u32, 1, 0, 2, 1] {
+                assert_eq!(
+                    collect(&loader, e),
+                    ref_epochs[e as usize],
+                    "workers={workers} epoch={e} u8={u8_images} drop_last={drop_last} prefetch={prefetch_batches}"
+                );
+            }
+        }
+    }
+    // `drop_last: true` with fewer samples than `batch_size` yields an empty epoch without hanging or
+    // over-allocating batch scratch (even for a very large `batch_size`).
+    let tiny = rect_dataset(2);
+    for (workers, batch_size) in [(0, 4), (1, 4), (4, 4), (1, 10_000_000)] {
+        let loader = DataLoader::new(
+            tiny.clone(),
+            LoaderConfig { batch_size, imgsz: 8, u8_images: true, drop_last: true, workers, ..cfg(workers) },
+        )
+        .unwrap();
+        assert_eq!(loader.batches_per_epoch(), 0);
+        assert!(collect(&loader, 0).is_empty());
+    }
+}
