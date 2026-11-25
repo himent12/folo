@@ -110,9 +110,59 @@ pub(crate) fn fill_span(span: &mut [u32], src: &Src) {
             }
             return;
         }
+        #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+        if span.len() >= 4
+            && src.inv < ONE
+            && src.r.max(src.g).max(src.b).saturating_add(255 * src.inv).saturating_add(ONE / 2) < (256 << 16)
+        {
+            let (chunks, tail) = span.as_chunks_mut::<4>();
+            // SAFETY: NEON is guaranteed on all aarch64 targets; the guard above guarantees
+            // `src.inv <= u16::MAX` and every blended channel stays in `0..=255` so narrowing matches
+            // `Src::over` bit-for-bit.
+            unsafe { fill_span_neon(chunks, src) };
+            for p in tail {
+                *p = src.over(*p);
+            }
+            return;
+        }
         for p in span {
             *p = src.over(*p);
         }
+    }
+}
+
+/// Blends `src` over 4 `0x00RRGGBB` pixels per iteration using baseline little-endian aarch64 NEON.
+///
+/// Caller must ensure `1 <= src.inv < ONE` and `max(r, g, b) + 255 * inv + ONE / 2 < 256 << 16`.
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+unsafe fn fill_span_neon(chunks: &mut [[u32; 4]], src: &Src) {
+    use std::arch::aarch64::*;
+
+    let h = ONE / 2;
+    let bias_arr = [src.b + h, src.g + h, src.r + h, 0u32];
+    // SAFETY: `bias_arr` holds 4 contiguous `u32` lanes.
+    let src_bias = unsafe { vld1q_u32(bias_arr.as_ptr()) };
+    let inv16 = vdup_n_u16(src.inv as u16);
+    let rgb_mask = vreinterpretq_u8_u32(vdupq_n_u32(0x00ff_ffff));
+
+    for chunk in chunks {
+        let ptr = chunk.as_mut_ptr().cast::<u8>();
+        // SAFETY: `chunk` is `&mut [u32; 4]` (16 bytes), valid for 128-bit load/store.
+        let px = vandq_u8(unsafe { vld1q_u8(ptr) }, rgb_mask);
+
+        let d01 = vmovl_u8(vget_low_u8(px));
+        let p0 = vshrn_n_u32::<16>(vmlal_u16(src_bias, vget_low_u16(d01), inv16));
+        let p1 = vshrn_n_u32::<16>(vmlal_u16(src_bias, vget_high_u16(d01), inv16));
+        let out01 = vmovn_u16(vcombine_u16(p0, p1));
+
+        let d23 = vmovl_u8(vget_high_u8(px));
+        let p2 = vshrn_n_u32::<16>(vmlal_u16(src_bias, vget_low_u16(d23), inv16));
+        let p3 = vshrn_n_u32::<16>(vmlal_u16(src_bias, vget_high_u16(d23), inv16));
+        let out23 = vmovn_u16(vcombine_u16(p2, p3));
+
+        // SAFETY: `ptr` points to 16 writable bytes of `chunk`.
+        unsafe { vst1q_u8(ptr, vcombine_u8(out01, out23)) };
     }
 }
 

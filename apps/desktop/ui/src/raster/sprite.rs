@@ -162,6 +162,7 @@ impl Axis {
 }
 
 /// Bilinear sample of an 8-bit mask; returns `value * 65536` (`0..=255 * 65536`).
+#[cfg(test)]
 #[inline(always)]
 fn sample(mask: &[u8], w: usize, ax: (usize, usize, u32), ay: (usize, usize, u32)) -> u32 {
     let (x0, x1, fx) = ax;
@@ -187,14 +188,51 @@ pub(crate) fn draw_svg(
     r: IRect,
 ) {
     let w = mask.size.width.0 as usize;
-    if w == 0 || mask.size.height.0 <= 0 || !holds(mask.data.len(), mask.size, 1) {
+    if r.is_empty() || w == 0 || mask.size.height.0 <= 0 || !holds(mask.data.len(), mask.size, 1) {
+        return;
+    }
+    let n = (r.x1 - r.x0) as usize;
+    // Tile rendering clips `r` to a 64x64 tile, so `n <= 64`: precompute `ax.at(x)` once into a
+    // stack array instead of repeating the axis multiplies and clamps on every row.
+    if n <= 64 {
+        let mut xs = [(0usize, 0usize, 0u32); 64];
+        for (slot, x) in xs[..n].iter_mut().zip(r.x0..r.x1) {
+            *slot = ax.at(x);
+        }
+        let xs = &xs[..n];
+        for y in r.y0..r.y1 {
+            let (y0, y1, fy) = ay.at(y);
+            let r0 = &mask.data[y0 * w..];
+            let r1 = &mask.data[y1 * w..];
+            let inv_fy = 256 - fy;
+            let row = t.row(y, r.x0, r.x1);
+            for (&(x0, x1, fx), p) in xs.iter().zip(row.iter_mut()) {
+                let inv_fx = 256 - fx;
+                let top = r0[x0] as u32 * inv_fx + r0[x1] as u32 * fx;
+                let bot = r1[x0] as u32 * inv_fx + r1[x1] as u32 * fx;
+                let s = top * inv_fy + bot * fy;
+                if s != 0 {
+                    let a = svg_alpha(lut, s);
+                    if a != 0 {
+                        *p = tint.over(*p, a);
+                    }
+                }
+            }
+        }
         return;
     }
     for y in r.y0..r.y1 {
-        let sy = ay.at(y);
+        let (y0, y1, fy) = ay.at(y);
+        let r0 = &mask.data[y0 * w..];
+        let r1 = &mask.data[y1 * w..];
+        let inv_fy = 256 - fy;
         let row = t.row(y, r.x0, r.x1);
         for (x, p) in (r.x0..r.x1).zip(row.iter_mut()) {
-            let s = sample(&mask.data, w, ax.at(x), sy);
+            let (x0, x1, fx) = ax.at(x);
+            let inv_fx = 256 - fx;
+            let top = r0[x0] as u32 * inv_fx + r0[x1] as u32 * fx;
+            let bot = r1[x0] as u32 * inv_fx + r1[x1] as u32 * fx;
+            let s = top * inv_fy + bot * fy;
             if s != 0 {
                 let a = svg_alpha(lut, s);
                 if a != 0 {
@@ -363,5 +401,51 @@ mod tests {
         let b = Axis::new(5., 4., 4);
         assert_eq!(b.at(5), (0, 1, 0));
         assert_eq!(b.at(8), (3, 3, 0));
+    }
+
+    #[test]
+    fn draw_svg_precomputed_and_wide_paths_match_reference_sample() {
+        let blend = GlyphBlend::new([0.149_355_4, -0.226_006_7, 0.026_559_83, -0.034_591_47], 1.0);
+        let color = [0.72, 0.84, 0.96, 0.85];
+        let lut = AlphaLut::glyph(color, &blend);
+        let tint = Tint::new(color);
+        let (mw, mh) = (32, 24);
+        let data: Vec<u8> = (0..mw * mh).map(|i| ((i * 53 + 17) % 256) as u8).collect();
+        let mask = AlphaMask {
+            id: 1,
+            size: size(DevicePixels(mw as i32), DevicePixels(mh as i32)),
+            data: data.into(),
+        };
+
+        for (fw, fh, r) in [
+            (64u32, 32u32, IRect::new(4, 3, 52, 27)), // tile path (n <= 64)
+            (96u32, 20u32, IRect::new(2, 1, 90, 17)), // wide fallback path (n > 64)
+        ] {
+            let ax = Axis::new(r.x0 as f32 - 1.25, (r.x1 - r.x0) as f32 + 2.5, mw as i32);
+            let ay = Axis::new(r.y0 as f32 - 0.5, (r.y1 - r.y0) as f32 + 1.0, mh as i32);
+            let initial: Vec<u32> =
+                (0..(fw * fh) as usize).map(|i| (i as u32 * 0x0007_0305) & 0x00ff_ffff).collect();
+            let mut got = initial.clone();
+            let fm = super::super::target::FrameMut::new(&mut got, fw);
+            // SAFETY: single target covering the frame.
+            let mut t = unsafe { fm.target(IRect::new(0, 0, fw as i32, fh as i32)) };
+            draw_svg(&mut t, &mask, &ax, &ay, &lut, &tint, r);
+
+            let mut want = initial;
+            for y in r.y0..r.y1 {
+                let sy = ay.at(y);
+                for x in r.x0..r.x1 {
+                    let s = sample(&mask.data, mw, ax.at(x), sy);
+                    if s != 0 {
+                        let a = svg_alpha(&lut, s);
+                        if a != 0 {
+                            let idx = y as usize * fw as usize + x as usize;
+                            want[idx] = tint.over(want[idx], a);
+                        }
+                    }
+                }
+            }
+            assert_eq!(got, want, "mismatch for rect {r:?}");
+        }
     }
 }
