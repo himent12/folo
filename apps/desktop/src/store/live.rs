@@ -31,12 +31,15 @@ pub struct LogHistory {
 pub struct Derived {
     pub loss: [Pts; 4],
     pub lr: Pts,
+    pub ips: Pts,
     pub map50: Pts,
     pub map50_95: Pts,
     pub precision: Pts,
     pub recall: Pts,
     /// Highest learning rate in the history (for the LR chart's scale).
     pub lr_max: f32,
+    /// Highest finite throughput (imgs/s) in the history (for the Throughput chart's scale).
+    pub ips_max: f32,
     /// Highest value of each loss part (box, cls, dfl, total), for the loss axis.
     pub loss_max: [f32; 4],
     /// Smallest positive, finite value per loss series (infinite when there is none): the floor of
@@ -103,11 +106,13 @@ impl RunData {
         let d = Derived {
             loss: [pts(&|s| s.loss.box_), pts(&|s| s.loss.cls), pts(&|s| s.loss.dfl), pts(&|s| s.loss.total)],
             lr: pts(&|s| s.lr),
+            ips: pts(&|s| s.imgs_per_s),
             map50: epts(&|e| e.val.map50),
             map50_95: epts(&|e| e.val.map50_95),
             precision: epts(&|e| e.val.precision),
             recall: epts(&|e| e.val.recall),
-            lr_max: steps.iter().map(|s| s.lr).fold(0f32, f32::max),
+            lr_max: steps.iter().map(|s| s.lr).filter(|v| v.is_finite()).fold(0f32, f32::max),
+            ips_max: steps.iter().map(|s| s.imgs_per_s).filter(|v| v.is_finite()).fold(0f32, f32::max),
             loss_max: [
                 steps.iter().map(|s| s.loss.box_).fold(0f32, f32::max),
                 steps.iter().map(|s| s.loss.cls).fold(0f32, f32::max),

@@ -72,21 +72,49 @@ fn the_keys_cursor_reaches_every_chart_with_up_and_down() {
     let (cursor, on) = at(&mut app);
     assert!(cursor.is_some(), "← shows the cursor");
     assert_eq!(on, None, "on the first chart");
-    // ↓ takes it to Training loss, Precision / Recall, Learning rate, and holds there.
-    for want in ["run-loss", "run-pr", "run-lr", "run-lr"] {
+    // ↓ takes it to Training loss, Precision / Recall, Learning rate, Throughput, and holds there.
+    for want in ["run-loss", "run-pr", "run-lr", "run-ips", "run-ips"] {
         press(&mut app, window, "down");
         assert_eq!(at(&mut app), (cursor, Some(want)), "the same epoch, on {want}");
     }
     // ← / → step the epochs there; ↑ takes it back a chart.
     press(&mut app, window, "left");
     let (stepped, on) = at(&mut app);
-    assert!(stepped < cursor, "← steps back an epoch on Learning rate: {stepped:?} {cursor:?}");
-    assert_eq!(on, Some("run-lr"));
+    assert!(stepped < cursor, "← steps back an epoch on Throughput: {stepped:?} {cursor:?}");
+    assert_eq!(on, Some("run-ips"));
     press(&mut app, window, "up");
-    assert_eq!(at(&mut app), (stepped, Some("run-pr")));
+    assert_eq!(at(&mut app), (stepped, Some("run-lr")));
     // Esc clears it.
     press(&mut app, window, "escape");
     assert_eq!(at(&mut app).0, None);
+}
+
+#[test]
+fn loss_chart_toggles_switch_smoothing_and_log_scale() {
+    let (mut app, window) = run_page();
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.run_chart_opts.loss_smooth, "smoothed by default");
+        assert!(this.run_chart_opts.loss_log_y, "log scale by default");
+    });
+    // Switch Training loss from Smooth to Raw via the segmented control.
+    drive(&mut app, window, |this, w, cx| this.focus_key("run-loss-smooth", w, cx));
+    app.frame(window.into());
+    press(&mut app, window, "right");
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.run_chart_opts.loss_smooth, "right arrow switches to Raw");
+    });
+    // Switch Training loss from Log to Lin via the segmented control.
+    drive(&mut app, window, |this, w, cx| this.focus_key("run-loss-scale", w, cx));
+    app.frame(window.into());
+    press(&mut app, window, "right");
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.run_chart_opts.loss_log_y, "right arrow switches to Linear scale");
+    });
+    // Back to Smooth + Log.
+    press(&mut app, window, "left");
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.run_chart_opts.loss_log_y, "left arrow switches back to Log scale");
+    });
 }
 
 #[test]

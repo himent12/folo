@@ -9,6 +9,7 @@ mod logs;
 mod per_class;
 mod samples;
 
+pub(crate) use charts::RunChartOpts;
 #[cfg(test)]
 pub(crate) use list::filter_runs;
 pub(crate) use logs::LogFilterCache;

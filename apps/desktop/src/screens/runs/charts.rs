@@ -1,4 +1,4 @@
-//! A run's training charts: losses, metrics, precision / recall and the learning rate.
+//! A run's training charts: losses, metrics, precision / recall, learning rate and throughput.
 
 use std::rc::Rc;
 
@@ -15,7 +15,7 @@ use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
 /// The run charts in reading order: ↑ / ↓ move the keys' cursor through them.
-const CHARTS: [&str; 4] = ["run-map", "run-loss", "run-pr", "run-lr"];
+const CHARTS: [&str; 5] = ["run-map", "run-loss", "run-pr", "run-lr", "run-ips"];
 
 /// The run chart a cursor stepped with the keys shows on until ↑ / ↓ pick another.
 const FIRST_CHART: &str = CHARTS[0];
@@ -23,6 +23,21 @@ const FIRST_CHART: &str = CHARTS[0];
 /// The loss lines' smoothing: Studio's default (`DEFAULT_SMOOTHING`, the same debiased EMA), so the
 /// two front ends show the same smoothed loss.
 const LOSS_EMA: f32 = 0.98;
+
+/// User display toggles for the run charts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunChartOpts {
+    /// Smooth the training loss curves with EMA (`LOSS_EMA`); `false` plots raw per-step loss.
+    pub loss_smooth: bool,
+    /// Use a logarithmic y-axis on Training loss; `false` uses a linear y-axis from 0.
+    pub loss_log_y: bool,
+}
+
+impl Default for RunChartOpts {
+    fn default() -> Self {
+        Self { loss_smooth: true, loss_log_y: true }
+    }
+}
 
 impl FoloApp {
     pub(super) fn run_charts(
@@ -146,6 +161,9 @@ impl FoloApp {
         // Short windows keep both primary charts on screen.
         let short = window.viewport_size().height < px(700.);
         let (primary_h, secondary_h) = if short { (140., 110.) } else { (220., 140.) };
+        let smooth_on = self.run_chart_opts.loss_smooth;
+        let log_on = self.run_chart_opts.loss_log_y;
+        let ema = if smooth_on { LOSS_EMA } else { 0.0 };
         let names = ["box", "cls", "dfl", "total"];
         let colors = t.loss_colors();
         // Total leads the loss chart (its lime end while live); without it, the first part shown.
@@ -156,7 +174,7 @@ impl FoloApp {
             .filter(|&i| self.loss_parts[i])
             .map(|i| {
                 let s = Series::new(names[i], colors[i], d.loss[i].clone())
-                    .smooth(LOSS_EMA)
+                    .smooth(ema)
                     .end(if i == lead { end } else { trail })
                     .end_label(label_inks[i]);
                 match i {
@@ -167,12 +185,21 @@ impl FoloApp {
                 }
             })
             .collect();
-        let loss_max = (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_max[i]).fold(0f32, f32::max);
+        let loss_max = (0..4)
+            .filter(|&i| self.loss_parts[i])
+            .map(|i| d.loss_max[i])
+            .filter(|v| v.is_finite())
+            .fold(0f32, f32::max);
         let mut loss = base("run-loss", loss_series, primary_h);
         let loss_min =
             (0..4).filter(|&i| self.loss_parts[i]).map(|i| d.loss_min[i]).fold(f32::INFINITY, f32::min);
-        loss.log_y = true;
-        loss.y_range = Some(log_range(loss_min, loss_max));
+        if log_on {
+            loss.log_y = true;
+            loss.y_range = Some(log_range(loss_min, loss_max));
+        } else {
+            loss.log_y = false;
+            loss.y_range = Some((0., linear_top(loss_max)));
+        }
         loss.end_labels = true;
         let mut map = base(
             "run-map",
@@ -228,6 +255,13 @@ impl FoloApp {
         // Its "× 10⁻ⁿ" goes in the panel caption, once, beside the legend that uses it.
         lr.pow_caption = false;
         lr.y_ticks = 3;
+        let mut ips = base(
+            "run-ips",
+            vec![Series::new("imgs/s", t.chart_series[4], d.ips.clone()).area().end(end)],
+            secondary_h,
+        );
+        ips.y_range = Some((0., linear_top(d.ips_max)));
+        ips.y_ticks = 3;
 
         // Legend values: at the cursor on their own chart, else the latest point.
         let v = |id: &str, pts: &[(f32, f32)], fmt: &dyn Fn(f32) -> String| {
@@ -237,15 +271,23 @@ impl FoloApp {
         // Scores at the decimals their axis's fitted top needs (#338).
         let mpv = &|x: f32| fmt_score_on(x, crate::charts::domain::unit_top(map_max));
         let prv = &|x: f32| fmt_score_on(x, crate::charts::domain::unit_top(pr_max));
-        // Loss parts are toggles; their values are the smoothed curve's, like the lines.
+        let ipsv = &|x: f32| if x >= 100. { format!("{x:.0} imgs/s") } else { format!("{x:.1} imgs/s") };
+        // Loss parts are toggles; their values match the active smoothing mode.
         let mut legend = Vec::new();
         let shown = self.loss_parts.iter().filter(|b| **b).count();
         for (i, name) in names.iter().enumerate() {
             let on = self.loss_parts[i];
             let key = format!("loss-part-{name}");
             let color = colors[i];
-            let value =
-                on.then(|| v("run-loss", &crate::charts::smoothed(&d.loss[i], LOSS_EMA), f3v)).flatten();
+            let value = on
+                .then(|| {
+                    if smooth_on {
+                        v("run-loss", &crate::charts::smoothed(&d.loss[i], LOSS_EMA), f3v)
+                    } else {
+                        v("run-loss", &d.loss[i], f3v)
+                    }
+                })
+                .flatten();
             let el = div()
                 .id(SharedString::from(key.clone()))
                 .h(px(20.))
@@ -306,7 +348,11 @@ impl FoloApp {
         // The smoothing explanation, on hover and on keyboard focus.
         let loss_help = self.help_icon(
             "loss-ema-help",
-            "Lines and their values are an exponential moving average (0.98, about the last 50 steps) of per-step loss, as in Studio; the faint trace is raw",
+            if smooth_on {
+                "Lines and their values are an exponential moving average (0.98, about the last 50 steps) of per-step loss, as in Studio; the faint trace is raw"
+            } else {
+                "Showing raw per-step loss without smoothing"
+            },
             window,
             cx,
         );
@@ -358,6 +404,9 @@ impl FoloApp {
             crate::charts::value_at(&d.lr, hover_of("run-lr"), 0., total).map(|x| lr_sci(x as f64));
         let lr_legend =
             crate::ui::legend_value(&t, "lr", t.text_tertiary, false, lr_value).into_any_element();
+        let ips_legend =
+            crate::ui::legend_value(&t, "throughput", t.chart_series[4], false, v("run-ips", &d.ips, ipsv))
+                .into_any_element();
         // What the run actually trains with (Run.resolved, once the trainer is built): the
         // optimizer Auto picked and the decay, so the curve's shape has its reason beside it.
         let resolved = r.resolved.as_ref().map(|s| {
@@ -382,12 +431,20 @@ impl FoloApp {
         };
         // The total as Studio's Loss tab says it: the step's raw reading and the smoothed line's
         // value, at the cursor or the latest step, so the two numbers never seem to disagree.
-        let loss_caption = match (
-            v("run-loss", &d.loss[3], f3v),
-            v("run-loss", &crate::charts::smoothed(&d.loss[3], LOSS_EMA), f3v),
-        ) {
-            (Some(raw), Some(smooth)) => format!("raw {raw} · smoothed {smooth} · log scale"),
-            _ => "log scale · EMA 0.98".to_string(),
+        let scale_label = if log_on { "log scale" } else { "linear scale" };
+        let loss_caption = if smooth_on {
+            match (
+                v("run-loss", &d.loss[3], f3v),
+                v("run-loss", &crate::charts::smoothed(&d.loss[3], LOSS_EMA), f3v),
+            ) {
+                (Some(raw), Some(smooth)) => format!("raw {raw} · smoothed {smooth} · {scale_label}"),
+                _ => format!("{scale_label} · EMA 0.98"),
+            }
+        } else {
+            match v("run-loss", &d.loss[3], f3v) {
+                Some(raw) => format!("raw {raw} · {scale_label}"),
+                None => format!("per step · {scale_label}"),
+            }
         };
         // The mAP chart is the focal point: wider and first. Narrow windows stack each row.
         let stack = window.viewport_size().width < px(1120.);
@@ -467,13 +524,76 @@ impl FoloApp {
                 )
                 .child(div().px(px(12.)).pb(px(6.)).child(line_chart(&t, map))),
         );
+        let loss_smooth_seg = self
+            .segmented(
+                "run-loss-smooth",
+                &["Smooth", "Raw"],
+                if smooth_on { 0 } else { 1 },
+                window,
+                cx,
+                Rc::new(|this, i, _, cx| {
+                    this.run_chart_opts.loss_smooth = i == 0;
+                    cx.notify();
+                }),
+            )
+            .tooltip(crate::controls::tip("EMA 0.98 smoothed curves or raw per-step loss", None));
+        let loss_scale_seg = self
+            .segmented(
+                "run-loss-scale",
+                &["Log", "Lin"],
+                if log_on { 0 } else { 1 },
+                window,
+                cx,
+                Rc::new(|this, i, _, cx| {
+                    this.run_chart_opts.loss_log_y = i == 0;
+                    cx.notify();
+                }),
+            )
+            .tooltip(crate::controls::tip("Logarithmic or linear y axis for Training loss", None));
+        let loss_card = panel(&t).flex_1().min_w_0().child(
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .min_w_0()
+                .child(
+                    panel_header(&t, "Training loss")
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(loss_smooth_seg)
+                                .child(loss_scale_seg),
+                        )
+                        .when(short, |d| d.h(px(32.))),
+                )
+                .child(
+                    div()
+                        .h(px(if short { 24. } else { 28. }))
+                        .px(px(16.))
+                        .pt(px(if short { 4. } else { 6. }))
+                        .flex()
+                        .items_center()
+                        .child(loss_legend),
+                )
+                .child(div().px(px(12.)).pb(px(4.)).child(line_chart(&t, loss)))
+                .child(
+                    div()
+                        .px(px(16.))
+                        .pb(px(8.))
+                        .child(text(ty::SM, t.text_tertiary).tnum().ellipsis().child(loss_caption)),
+                ),
+        );
+        let ips_card =
+            card("Throughput", "per step · images / sec", ips_legend, line_chart(&t, ips)).into_any_element();
         let grid = div()
             .flex()
             .flex_col()
             .gap(px(16.))
             .child(row(
                 map_card.into_any_element(),
-                card("Training loss", &loss_caption, loss_legend, line_chart(&t, loss)).into_any_element(),
+                loss_card.into_any_element(),
                 if pair_a { -0.5 } else { -0.6 },
                 if pair_a { 0.5 } else { 0.4 },
             ))
@@ -488,11 +608,16 @@ impl FoloApp {
                 card("Learning rate", &lr_caption, lr_legend, line_chart(&t, lr)).into_any_element(),
                 0.6,
                 0.4,
-            ));
+            ))
+            .child(ips_card);
         // One Tab stop for the charts: ← / → walk the epochs on one chart, ↑ / ↓ take the cursor
         // to the chart before or after it (the first press shows it at the latest point).
         // Recorded data ends at the latest step or epoch; the rest of the x range is the schedule.
-        let recorded = d.loss[3].last().map_or(0., |p| p.0).max(d.map50_95.last().map_or(0., |p| p.0));
+        let recorded = d.loss[3]
+            .last()
+            .map_or(0., |p| p.0)
+            .max(d.map50_95.last().map_or(0., |p| p.0))
+            .max(d.ips.last().map_or(0., |p| p.0));
         let end = (recorded / total.max(1.0)).clamp(0., 1.);
         let grid = grid.on_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
             let by = match ev.keystroke.key.as_str() {
@@ -562,6 +687,20 @@ fn log_range(lo: f32, hi: f32) -> (f32, f32) {
     let y0 = 2f32.powi(lo.log2().floor() as i32);
     let y1 = 2f32.powi((hi.max(lo) * 1.05).log2().ceil() as i32).max(y0 * 2.);
     (y0, y1)
+}
+
+/// A linear y-axis ceiling for non-negative values: a nice tick at least 5% above `hi`, or `1.0`
+/// when there is no positive finite data.
+fn linear_top(hi: f32) -> f32 {
+    if !hi.is_finite() || hi <= 0. {
+        return 1.0;
+    }
+    let top = hi * 1.05;
+    let step = crate::charts::nice_step(top, 4);
+    if !step.is_finite() || step <= 0. {
+        return top;
+    }
+    (top / step).ceil() * step
 }
 
 /// The highest finite value of some series (0 without data): what a fitted 0–1 axis is fitted to.
@@ -637,7 +776,7 @@ mod tests {
         // The pointer on Training loss: only that chart draws the cursor.
         let (cursor, on) = hovered(None, "run-loss", Some(0.4)).unwrap();
         assert_eq!(cursor_on(cursor, on, "run-loss"), Some(0.4));
-        for other in ["run-map", "run-pr", "run-lr"] {
+        for other in ["run-map", "run-pr", "run-lr", "run-ips"] {
             assert_eq!(cursor_on(cursor, on, other), None, "{other}");
         }
         // Moving to Validation mAP takes the cursor there; Training loss's late leave keeps it.
@@ -658,8 +797,9 @@ mod tests {
         assert_eq!(step_chart(None, 1), "run-loss");
         assert_eq!(step_chart(Some("run-loss"), 1), "run-pr");
         assert_eq!(step_chart(Some("run-pr"), 1), "run-lr");
-        assert_eq!(step_chart(Some("run-lr"), 1), "run-lr", "held at the last");
-        assert_eq!(step_chart(Some("run-lr"), -1), "run-pr");
+        assert_eq!(step_chart(Some("run-lr"), 1), "run-ips");
+        assert_eq!(step_chart(Some("run-ips"), 1), "run-ips", "held at the last");
+        assert_eq!(step_chart(Some("run-ips"), -1), "run-lr");
         assert_eq!(step_chart(None, -1), "run-map", "held at the first");
     }
 
@@ -744,7 +884,7 @@ mod tests {
         assert_eq!(epoch_tick(0.1 * 30.), "3");
     }
 
-    use super::log_range;
+    use super::{linear_top, log_range};
 
     #[test]
     fn the_log_loss_axis_holds_every_positive_value() {
@@ -754,5 +894,15 @@ mod tests {
         let (a, b) = log_range(0.3, 6.);
         assert_eq!((a, b), (0.25, 8.));
         assert_eq!(log_range(f32::INFINITY, 0.), (0.5, 4.));
+    }
+
+    #[test]
+    fn linear_top_picks_nice_ceiling_and_handles_empty() {
+        assert_eq!(linear_top(0.), 1.0);
+        assert_eq!(linear_top(-2.), 1.0);
+        assert_eq!(linear_top(f32::NAN), 1.0);
+        assert_eq!(linear_top(f32::INFINITY), 1.0);
+        let top = linear_top(115.);
+        assert!((115. * 1.05..=160.).contains(&top), "got {top}");
     }
 }
