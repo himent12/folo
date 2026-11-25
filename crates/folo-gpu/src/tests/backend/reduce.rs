@@ -201,6 +201,74 @@ fn topk_orders_nan_and_infinities_by_total_cmp() {
 }
 
 #[test]
+fn topk_bitonic_and_parallel_select_match_cpu() {
+    struct ForceGuard(bool);
+    impl ForceGuard {
+        fn set(v: bool) -> Self {
+            Self(crate::kernels::FORCE_NO_SUBGROUPS.replace(v))
+        }
+    }
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            crate::kernels::FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
+
+    let dev = dev!();
+    // Bitonic path (`d <= 512`): non-power-of-two, exact power-of-two, `d = 1`, `k = d`, ties, and special floats.
+    for &(rows, d, k) in &[(3usize, 1usize, 1usize), (4, 17, 7), (2, 256, 256), (2, 300, 15), (2, 512, 32)] {
+        let mut vals = randn(&[rows, d], 101 + d as u64).to_vec::<f32>().unwrap();
+        if d >= 6 {
+            // Inject ties, -0/+0, ±inf, and ±NaN with distinct payloads.
+            vals[0] = -0.0;
+            vals[1] = 0.0;
+            vals[2] = f32::from_bits(0x7fc0_0456);
+            vals[3] = f32::INFINITY;
+            vals[4] = f32::NEG_INFINITY;
+            vals[5] = f32::from_bits(0xffc0_0789);
+        }
+        let t = Tensor::from_vec(vals, [rows, d]).unwrap();
+        for largest in [true, false] {
+            let (cv, ci) = t.topk(k, largest).unwrap();
+            let (gv, gi) = t.to_device(dev).unwrap().topk(k, largest).unwrap();
+            assert_same(&gv, &cv, &format!("bitonic vals {rows}x{d} k={k} largest={largest}"));
+            assert_same(&gi, &ci, &format!("bitonic idx {rows}x{d} k={k} largest={largest}"));
+        }
+    }
+    // Parallel selection path (`d > 512`): test both subgroup and portable fallback, including ties, -0/+0, ±inf, ±NaN.
+    for &(rows, d, k) in &[(2usize, 513usize, 12usize), (3, 2051, 20)] {
+        let mut vals = randn(&[rows, d], 201 + d as u64).to_vec::<f32>().unwrap();
+        // Put ties and edge values across multiple workgroup strides (including the final tail element).
+        vals[0] = 5.0;
+        vals[256] = 5.0;
+        vals[d - 1] = 5.0;
+        vals[d + 1] = -0.0;
+        vals[d + 257] = 0.0;
+        vals[d + 300] = f32::from_bits(0x7fc0_0abc);
+        vals[d + 512] = f32::NEG_INFINITY;
+        vals[2 * d - 1] = f32::from_bits(0xffc0_0def);
+        let t = Tensor::from_vec(vals, [rows, d]).unwrap();
+        for largest in [true, false] {
+            let (cv, ci) = t.topk(k, largest).unwrap();
+            for portable in [false, true] {
+                let _g = ForceGuard::set(portable);
+                let (gv, gi) = t.to_device(dev).unwrap().topk(k, largest).unwrap();
+                assert_same(
+                    &gv,
+                    &cv,
+                    &format!("select vals {rows}x{d} k={k} largest={largest} fb={portable}"),
+                );
+                assert_same(
+                    &gi,
+                    &ci,
+                    &format!("select idx {rows}x{d} k={k} largest={largest} fb={portable}"),
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn subgroup_vs_portable_row_reductions_and_softmax() {
     use super::fixtures::assert_close_t;
     struct ForceGuard(bool);

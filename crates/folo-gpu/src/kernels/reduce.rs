@@ -332,10 +332,200 @@ static SOFTMAX_COLS: KernelDef = KernelDef {
     storage: &[Access::Read, Access::ReadWrite],
     source: Source::Generated(gen_softmax_cols),
 };
+/// Maximum row length sorted in-place in shared memory with a single-read bitonic sort for [`TOPK`].
+const TOPK_BITONIC_MAX: usize = 512;
+
+const TOPK_MAIN_BITONIC: &str = r#"
+var<workgroup> sh_k: array<u32, 512>;
+var<workgroup> sh_i: array<u32, 512>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let row = wid.y * nwg.x + wid.x;
+    let rows = pu(0u);
+    let d = pu(1u);
+    let k = pu(2u);
+    let valid = row < rows;
+    let base = row * d;
+    var n_pad = 2u;
+    while (n_pad < d) { n_pad = n_pad << 1u; }
+    let i0 = lid;
+    if (i0 < n_pad) {
+        if (valid && i0 < d) {
+            sh_k[i0] = key(X[base + i0]);
+            sh_i[i0] = i0;
+        } else {
+            sh_k[i0] = 0u;
+            sh_i[i0] = TOPK_EMPTY;
+        }
+    }
+    let i1 = lid + 256u;
+    if (i1 < n_pad) {
+        if (valid && i1 < d) {
+            sh_k[i1] = key(X[base + i1]);
+            sh_i[i1] = i1;
+        } else {
+            sh_k[i1] = 0u;
+            sh_i[i1] = TOPK_EMPTY;
+        }
+    }
+    workgroupBarrier();
+    let half = n_pad >> 1u;
+    for (var size = 2u; size <= n_pad; size = size << 1u) {
+        for (var stride = size >> 1u; stride > 0u; stride = stride >> 1u) {
+            if (lid < half) {
+                let lo = lid & (stride - 1u);
+                let p = ((lid - lo) << 1u) | lo;
+                let q = p | stride;
+                let kp = sh_k[p];
+                let ip = sh_i[p];
+                let kq = sh_k[q];
+                let iq = sh_i[q];
+                let best_first = (p & size) == 0u;
+                let swap = select(better_slot(kp, ip, kq, iq), better_slot(kq, iq, kp, ip), best_first);
+                if (swap) {
+                    sh_k[p] = kq;
+                    sh_i[p] = iq;
+                    sh_k[q] = kp;
+                    sh_i[q] = ip;
+                }
+            }
+            workgroupBarrier();
+        }
+    }
+    if (!valid) { return; }
+    for (var j = lid; j < k; j += 256u) {
+        let idx = sh_i[j];
+        V[row * k + j] = X[base + idx];
+        I[2u * (row * k + j)] = idx;
+        I[2u * (row * k + j) + 1u] = 0u;
+    }
+}
+"#;
+
+const TOPK_MAIN_SELECT_SUBGROUPS: &str = r#"
+var<workgroup> sh_k: array<u32, 8>;
+var<workgroup> sh_i: array<u32, 8>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32,
+        @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {
+    let row = wid.y * nwg.x + wid.x;
+    let rows = pu(0u);
+    let d = pu(1u);
+    let k = pu(2u);
+    let valid = row < rows;
+    let base = row * d;
+    let sg = min(sgid, 7u);
+    var pk = 0u;
+    var pi = TOPK_EMPTY;
+    for (var j = 0u; j < k; j++) {
+        var bk = 0u;
+        var bi = TOPK_EMPTY;
+        if (valid) {
+            for (var i = lid; i < d; i += 256u) {
+                let ki = key(X[base + i]);
+                if (j > 0u && !before(pk, pi, ki, i)) { continue; }
+                if (bi == TOPK_EMPTY || before(ki, i, bk, bi)) { bk = ki; bi = i; }
+            }
+        }
+        for (var off = 16u; off > 0u; off = off >> 1u) {
+            let ok = subgroupShuffleDown(bk, off);
+            let oi = subgroupShuffleDown(bi, off);
+            if (lane < off && better_slot(ok, oi, bk, bi)) { bk = ok; bi = oi; }
+        }
+        if (lane == 0u) {
+            sh_k[sg] = bk;
+            sh_i[sg] = bi;
+        }
+        workgroupBarrier();
+        var rk = sh_k[lane & 7u];
+        var ri = sh_i[lane & 7u];
+        for (var off = 4u; off > 0u; off = off >> 1u) {
+            let ok = subgroupShuffleXor(rk, off);
+            let oi = subgroupShuffleXor(ri, off);
+            if (better_slot(ok, oi, rk, ri)) { rk = ok; ri = oi; }
+        }
+        pk = rk;
+        pi = ri;
+        if (lid == 0u && valid) {
+            V[row * k + j] = X[base + pi];
+            I[2u * (row * k + j)] = pi;
+            I[2u * (row * k + j) + 1u] = 0u;
+        }
+        if (j + 1u < k) { workgroupBarrier(); }
+    }
+}
+"#;
+
+const TOPK_MAIN_SELECT_PORTABLE: &str = r#"
+var<workgroup> sh_k: array<u32, 256>;
+var<workgroup> sh_i: array<u32, 256>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let row = wid.y * nwg.x + wid.x;
+    let rows = pu(0u);
+    let d = pu(1u);
+    let k = pu(2u);
+    let valid = row < rows;
+    let base = row * d;
+    var pk = 0u;
+    var pi = TOPK_EMPTY;
+    for (var j = 0u; j < k; j++) {
+        var bk = 0u;
+        var bi = TOPK_EMPTY;
+        if (valid) {
+            for (var i = lid; i < d; i += 256u) {
+                let ki = key(X[base + i]);
+                if (j > 0u && !before(pk, pi, ki, i)) { continue; }
+                if (bi == TOPK_EMPTY || before(ki, i, bk, bi)) { bk = ki; bi = i; }
+            }
+        }
+        sh_k[lid] = bk;
+        sh_i[lid] = bi;
+        workgroupBarrier();
+        for (var s = 128u; s > 0u; s = s >> 1u) {
+            if (lid < s) {
+                let ok = sh_k[lid + s];
+                let oi = sh_i[lid + s];
+                if (better_slot(ok, oi, sh_k[lid], sh_i[lid])) {
+                    sh_k[lid] = ok;
+                    sh_i[lid] = oi;
+                }
+            }
+            workgroupBarrier();
+        }
+        pk = sh_k[0];
+        pi = sh_i[0];
+        if (lid == 0u && valid) {
+            V[row * k + j] = X[base + pi];
+            I[2u * (row * k + j)] = pi;
+            I[2u * (row * k + j) + 1u] = 0u;
+        }
+        if (j + 1u < k) { workgroupBarrier(); }
+    }
+}
+"#;
+
+fn gen_topk(s: &Spec) -> String {
+    let main = if s.get_bool("BITONIC") {
+        TOPK_MAIN_BITONIC
+    } else if s.is_subgroups() {
+        TOPK_MAIN_SELECT_SUBGROUPS
+    } else {
+        TOPK_MAIN_SELECT_PORTABLE
+    };
+    format!("{}{main}", include_str!("../shaders/topk.wgsl"))
+}
+
 static TOPK: KernelDef = KernelDef {
     name: "topk",
     storage: &[Access::Read, Access::ReadWrite, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/topk.wgsl")),
+    source: Source::Generated(gen_topk),
 };
 
 /// Ceiling-division split plan `(splits, chunk_len)` for a reduction over `[outer, r, inner]`.
@@ -467,8 +657,9 @@ pub fn softmax_dim(
 
 /// The `k` largest (`largest`) or smallest entries of each of `rows` dense f32 rows of length `d`, sorted,
 /// ties broken by lower index (total order: `-NaN < -inf < .. < -0 < +0 < .. < inf < NaN`, as
-/// `f32::total_cmp`). Values go to `values` (`[rows, k]`), `i64` indices to `indices`. One thread per row and
-/// `O(k · d)` work: sized for assigner-style problems (`k` up to a few dozen).
+/// `f32::total_cmp`). Values go to `values` (`[rows, k]`), `i64` indices to `indices`. One 256-thread workgroup
+/// per row: rows up to [`TOPK_BITONIC_MAX`] run a single-read shared-memory bitonic sort; longer rows run `k`
+/// coalesced workgroup-parallel selection passes (with 32-wide subgroup reduction when available).
 #[allow(clippy::too_many_arguments)]
 pub fn topk(
     ctx: &GpuContext,
@@ -489,9 +680,14 @@ pub fn topk(
     if rows * k == 0 {
         return Ok(());
     }
-    let kern = ctx.kernel(&TOPK, Spec::new().bool("LARGEST", largest))?;
+    let bitonic = d <= TOPK_BITONIC_MAX;
+    let spec = Spec::new()
+        .bool("LARGEST", largest)
+        .bool("BITONIC", bitonic)
+        .subgroups(!bitonic && use_subgroups(ctx));
+    let kern = ctx.kernel(&TOPK, spec)?;
     let p = Params::new().uz(rows)?.uz(d)?.uz(k)?;
-    ctx.dispatch(&kern, &[x, values, indices], &p, ctx.grid_1d(rows as u64, 64)?)
+    ctx.dispatch(&kern, &[x, values, indices], &p, ctx.grid_1d(rows as u64 * 256, 256)?)
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
