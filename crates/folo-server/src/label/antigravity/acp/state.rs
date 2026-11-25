@@ -11,6 +11,7 @@ use super::super::protocol::{
     ConfigOption, UsageTracker, find_effort_option, find_mode_option, find_model_option, is_restricted_mode,
     parse_config_options, reject_permission,
 };
+use super::StdoutLine;
 use crate::label::agent::{AgentError, Failure};
 
 /// Maximum queued lines drained before dispatching an RPC; bounds work if a noisy child/helper floods stdout.
@@ -240,8 +241,8 @@ pub(super) fn handle_incoming_line(
 /// Drains already-queued notifications before dispatching the next RPC (e.g. `session/prompt`), while checking
 /// cancellation, call deadline, parent exit, and a strict line/time budget so sustained stdout can never starve Stop.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn drain_pending(
-    recv: &mpsc::Receiver<String>,
+pub(super) fn drain_pending<T: Into<StdoutLine>>(
+    recv: &mpsc::Receiver<T>,
     state: &mut SessionState,
     send: &mut dyn FnMut(&Value) -> bool,
     stderr_text: &dyn Fn() -> String,
@@ -266,29 +267,38 @@ pub(super) fn drain_pending(
             return Err(unexpected_exit(&state.usage, stderr_text));
         }
         match recv.try_recv() {
-            Ok(line) => {
-                if drained >= MAX_DRAIN_LINES || now >= drain_deadline {
+            Ok(item) => match item.into() {
+                StdoutLine::Error(why) => {
                     state.kill_immediately = true;
                     return Err(AgentError::Failed(Failure {
                         used: state.usage.to_usage(0),
-                        ..Failure::new("`agy acp` flooded stdout before the next request")
+                        ..Failure::new(why)
                     }));
                 }
-                drained += 1;
-                let _ = handle_incoming_line(&line, None, false, false, state, send)?;
-                let after = Instant::now();
-                if after >= deadline {
-                    state.kill_immediately = true;
-                    return Err(AgentError::Timeout(state.usage.to_usage(0)));
+                StdoutLine::Line(line) => {
+                    if drained >= MAX_DRAIN_LINES || now >= drain_deadline {
+                        state.kill_immediately = true;
+                        return Err(AgentError::Failed(Failure {
+                            used: state.usage.to_usage(0),
+                            ..Failure::new("`agy acp` flooded stdout before the next request")
+                        }));
+                    }
+                    drained += 1;
+                    let _ = handle_incoming_line(&line, None, false, false, state, send)?;
+                    let after = Instant::now();
+                    if after >= deadline {
+                        state.kill_immediately = true;
+                        return Err(AgentError::Timeout(state.usage.to_usage(0)));
+                    }
+                    if after >= drain_deadline {
+                        state.kill_immediately = true;
+                        return Err(AgentError::Failed(Failure {
+                            used: state.usage.to_usage(0),
+                            ..Failure::new("`agy acp` flooded stdout before the next request")
+                        }));
+                    }
                 }
-                if after >= drain_deadline {
-                    state.kill_immediately = true;
-                    return Err(AgentError::Failed(Failure {
-                        used: state.usage.to_usage(0),
-                        ..Failure::new("`agy acp` flooded stdout before the next request")
-                    }));
-                }
-            }
+            },
             Err(mpsc::TryRecvError::Empty) => return Ok(()),
             Err(mpsc::TryRecvError::Disconnected) => return Err(unexpected_exit(&state.usage, stderr_text)),
         }

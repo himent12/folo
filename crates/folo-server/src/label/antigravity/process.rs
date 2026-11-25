@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use folo_api::LabelUsage;
 use serde_json::Value;
 
-use super::acp::{CANCEL_GRACE, EXIT_DRAIN, drive_acp_inner};
+use super::acp::{CANCEL_GRACE, EXIT_DRAIN, StdoutLine, drive_acp_inner};
 use super::protocol::{
     Isolation, LABEL_AGENT_NAME, LABEL_CLI_DIR, UsageTracker, prepare_isolation, resolve_executable,
 };
@@ -177,6 +177,41 @@ pub(super) fn read_bounded_line<R: BufRead>(
     String::from_utf8(buf).map(Some).map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))
 }
 
+/// Streams bounded UTF-8 lines from `reader` into `out_tx`, forwarding framing or I/O errors in stream order so the
+/// ACP driver reports the actual cause and kills the child immediately instead of misclassifying EOF.
+pub(super) fn read_stdout_loop<R: BufRead>(
+    mut reader: R,
+    max_bytes: usize,
+    marker: Option<&str>,
+    saw_marker: &AtomicBool,
+    out_tx: &mpsc::Sender<StdoutLine>,
+) {
+    loop {
+        match read_bounded_line(&mut reader, max_bytes) {
+            Ok(Some(line)) => {
+                if let Some(m) = marker
+                    && line.contains(m)
+                {
+                    saw_marker.store(true, Ordering::Release);
+                }
+                if out_tx.send(StdoutLine::Line(line)).is_err() {
+                    break;
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                let msg = if e.kind() == ErrorKind::InvalidData {
+                    format!("`agy acp` stdout framing error: {e}")
+                } else {
+                    format!("reading `agy acp` stdout failed: {e}")
+                };
+                let _ = out_tx.send(StdoutLine::Error(msg));
+                break;
+            }
+        }
+    }
+}
+
 /// Process-tree guard for `agy acp`: tracks child exit separately from process-group termination so descendants on
 /// Unix (and Windows job members, required via [`Tree::start_strict`]) are always killed even when the immediate
 /// child exits cleanly.
@@ -320,26 +355,16 @@ pub(super) fn run_acp_checked(
     });
 
     // Dedicated bounded stdout line reader thread.
-    let (out_tx, out_rx) = mpsc::channel::<String>();
+    let (out_tx, out_rx) = mpsc::channel::<StdoutLine>();
     let stdout_done = Arc::new(DoneSignal::new());
     let stdout_done_out = stdout_done.clone();
     let saw_marker = Arc::new(AtomicBool::new(false));
     let saw_marker_out = saw_marker.clone();
     let marker = stdout_marker.map(str::to_string);
     let out_thread = std::thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        while let Ok(Some(line)) = read_bounded_line(&mut reader, MAX_STDOUT_LINE_BYTES) {
-            if let Some(m) = marker.as_deref()
-                && line.contains(m)
-            {
-                saw_marker_out.store(true, Ordering::Release);
-            }
-            if out_tx.send(line).is_err() {
-                break;
-            }
-        }
+        let reader = BufReader::new(stdout);
+        read_stdout_loop(reader, MAX_STDOUT_LINE_BYTES, marker.as_deref(), &saw_marker_out, &out_tx);
         drop(out_tx);
-        drop(reader);
         stdout_done_out.mark();
     });
 

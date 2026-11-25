@@ -8,23 +8,23 @@ use serde_json::{Value, json};
 
 use super::super::process::unexpected_exit;
 use super::super::protocol::rpc_failure;
-use super::EXIT_DRAIN;
 use super::state::{SessionState, drain_pending, handle_incoming_line};
+use super::{EXIT_DRAIN, StdoutLine};
 use crate::label::agent::{AgentError, AgentRequest, Failure, POLL};
 
 /// Stateful JSON-RPC transport driver so `drain` and `call` share `send`, `recv`, and `parent_exited` cleanly.
-pub(super) struct RpcDriver<'a> {
+pub(super) struct RpcDriver<'a, T> {
     pub(super) req: &'a AgentRequest<'a>,
     pub(super) deadline: Instant,
     pub(super) cancel_grace: Duration,
     pub(super) next_id: u64,
     pub(super) send: &'a mut dyn FnMut(&Value) -> bool,
-    pub(super) recv: &'a mpsc::Receiver<String>,
+    pub(super) recv: &'a mpsc::Receiver<T>,
     pub(super) stderr_text: &'a dyn Fn() -> String,
     pub(super) parent_exited: &'a mut dyn FnMut() -> bool,
 }
 
-impl RpcDriver<'_> {
+impl<T: Into<StdoutLine>> RpcDriver<'_, T> {
     pub(super) fn drain(&mut self, state: &mut SessionState) -> Result<(), AgentError> {
         drain_pending(
             self.recv,
@@ -143,29 +143,41 @@ impl RpcDriver<'_> {
                 remaining.min(POLL)
             };
             match self.recv.recv_timeout(poll_wait) {
-                Ok(line) => {
-                    if let Some(resp) = handle_incoming_line(
-                        &line,
-                        Some(id),
-                        collect_reply,
-                        cancel_deadline.is_some(),
-                        state,
-                        self.send,
-                    )? {
-                        if let Some(res) = resp.get("result")
-                            && collect_reply
-                        {
-                            state.usage.observe_prompt_result(res);
-                        }
+                Ok(item) => match item.into() {
+                    StdoutLine::Error(why) => {
+                        state.kill_immediately = true;
                         if cancel_deadline.is_some() {
                             return Err(AgentError::Cancelled(state.usage.to_usage(0)));
                         }
-                        if let Some(err) = resp.get("error") {
-                            return Err(AgentError::Failed(rpc_failure(err, state.usage.to_usage(0))));
-                        }
-                        return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
+                        return Err(AgentError::Failed(Failure {
+                            used: state.usage.to_usage(0),
+                            ..Failure::new(why)
+                        }));
                     }
-                }
+                    StdoutLine::Line(line) => {
+                        if let Some(resp) = handle_incoming_line(
+                            &line,
+                            Some(id),
+                            collect_reply,
+                            cancel_deadline.is_some(),
+                            state,
+                            self.send,
+                        )? {
+                            if let Some(res) = resp.get("result")
+                                && collect_reply
+                            {
+                                state.usage.observe_prompt_result(res);
+                            }
+                            if cancel_deadline.is_some() {
+                                return Err(AgentError::Cancelled(state.usage.to_usage(0)));
+                            }
+                            if let Some(err) = resp.get("error") {
+                                return Err(AgentError::Failed(rpc_failure(err, state.usage.to_usage(0))));
+                            }
+                            return Ok(resp.get("result").cloned().unwrap_or(Value::Null));
+                        }
+                    }
+                },
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     if cancel_deadline.is_some() {

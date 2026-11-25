@@ -36,6 +36,18 @@ pub(super) struct DriveOutcome {
     pub kill_immediately: bool,
 }
 
+/// One item delivered by the stdout reader thread to the ACP driver, preserving framing/read errors in stream order.
+pub(super) enum StdoutLine {
+    Line(String),
+    Error(String),
+}
+
+impl From<String> for StdoutLine {
+    fn from(line: String) -> Self {
+        StdoutLine::Line(line)
+    }
+}
+
 /// The ACP v1 JSON-RPC conversation for one labeling call, decoupled from OS processes so unit tests can drive it
 /// directly over in-memory channels.
 #[cfg(test)]
@@ -80,13 +92,13 @@ pub(super) fn drive_acp_with_exit(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn drive_acp_inner(
+pub(super) fn drive_acp_inner<T: Into<StdoutLine>>(
     req: &AgentRequest<'_>,
     work: &Path,
     timeout: Duration,
     cancel_grace: Duration,
     send: &mut dyn FnMut(&Value) -> bool,
-    recv: &mpsc::Receiver<String>,
+    recv: &mpsc::Receiver<T>,
     stderr_text: &dyn Fn() -> String,
     parent_exited: &mut dyn FnMut() -> bool,
 ) -> DriveOutcome {
