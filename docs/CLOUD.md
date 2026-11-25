@@ -129,7 +129,8 @@ transfer, while keeping client memory around one part:
 
 - **Chunked uploads (`POST /api/uploads`, `PUT /api/uploads/{id}/parts/{n}`, `POST /api/uploads/{id}/complete`).**
   The stream is cut into parts of at most `min(Upload.max_part_bytes, 8 MiB)` sent in order. Transient errors retry
-  up to 6 attempts with exponential backoff (`500 ms` doubling up to `8 s`). After a failed part `PUT`, the client
+  up to 6 attempts with exponential backoff (`500 ms` doubling up to `8 s`, polling cancellation every `50 ms` so stops
+  take effect promptly). After a failed part `PUT`, the client
   queries `GET /api/uploads/{id}` to see the server's next expected part index: if the part actually landed and only
   its response was lost (`part == n + 1`), the client advances without resending; if still at `n`, it resends; any
   other mismatch fails with `upload_conflict`. On `complete`, if a transient error lost the response and the retry
@@ -139,13 +140,17 @@ transfer, while keeping client memory around one part:
 - **ETag-validated ranged downloads (`GET /api/models/{id}/weights`).** Downloads use `Range` requests with
   `If-Match` pinned to the first part's `ETag`, so a checkpoint overwritten mid-download (`412 Precondition Failed`)
   restarts cleanly from byte 0 rather than mixing two epochs (up to 3 restarts — 4 attempts in all — before failing).
-  The first request fetches `8 MiB` and measures link speed: if the remaining bytes are at most `192 MiB` and fit
-  within `30 s` at that rate, the rest is fetched in one request (falling back to `8 MiB` parts on transient error).
+  Each range response streams directly into the hidden temporary file (`*.download`) next to the destination rather
+  than buffering the part in memory, checking cancellation while streaming; on a transient error, the temporary file is
+  truncated and rewound back to the last completed byte offset before retrying (with the same stop-checked backoff) so
+  partial bytes from a dropped connection never corrupt the file. The first request fetches `8 MiB` and measures link
+  speed: if the remaining bytes are at most `192 MiB` and fit within `30 s` at that rate, the rest is fetched in one
+  streamed request (rewinding and falling back to `8 MiB` parts on transient error).
   Because a single request streams one open file version, a file rewritten between the first and second request (a
   small model finishing epochs every second) is retried whole in one request when the full file fits those same
-  bounds. Bytes stream to a hidden temporary file (`*.download`) next to the destination, are flushed with
-  `sync_all`, and are atomically renamed into place (retrying briefly if another process holds the local file open,
-  e.g. on Windows); leftover `.download` files from a crash are swept up when the run is next followed.
+  bounds. Once complete, the temporary file is flushed with `sync_all` and atomically renamed into place (retrying
+  briefly if another process holds the local file open, e.g. on Windows); leftover `.download` files from a crash are
+  swept up when the run is next followed.
 
 ## Instances are never left behind
 Rented GPUs cost money by the hour, so the ledger is written before the provider is called and survives crashes:
@@ -198,9 +203,14 @@ again (as Cloudflare's `52x` are).
 - **Credentials**: an API key (`api_key`; RunPod console → Settings → API Keys, with write access to pods).
   Checking it reads the account's email and balance (GraphQL `myself`).
 - **Offers**: every NVIDIA GPU type of the catalog once per cloud it is available in (`<gpu type id>@secure`,
-  `<gpu type id>@community`), with the on-demand price and RunPod's stock level as availability. Spot
+  `<gpu type id>@community`), with the on-demand price and RunPod's stock level as availability. The Secure Cloud and
+  Community Cloud catalogs are fetched concurrently (falling back inline if a helper thread cannot be spawned,
+  preserving Secure-first error precedence and deterministic sorting). Spot
   (interruptible) pods are not offered, and neither are other vendors' GPUs (the worker finds its GPU through the
-  NVIDIA container runtime).
+  NVIDIA container runtime). Provider API calls retry `429 Too Many Requests` for all methods and transient
+  `502`/`503`/`504` responses for idempotent methods (`GET`, `DELETE`, `HEAD`, `PUT` — never `POST`, so a launch is
+  never duplicated) up to 3 attempts, honoring `Retry-After` up to `10 s` per wait (`20 s` cumulative; default `2 s`).
+  Pre-launch worker URL probes share a pooled HTTP client draining up to 16 KiB to reuse keep-alive connections.
 - **Instance**: an on-demand pod of the offer's GPU type with one GPU, a container disk sized for the dataset
   (`compute.disk_gb`, `10..=4096`, default: twice the packed dataset plus 20 GB), port `7878/http`, and the
   bootstrap script as its command. The script arms a watchdog before anything else: 10 minutes after the run's time

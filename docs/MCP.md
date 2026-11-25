@@ -148,20 +148,26 @@ nested objects included, has `additionalProperties: false`: **an argument the to
   that fail the `inputSchema`, unknown ones included, or a documented range, e.g. a run name over 64 characters,
   as `POST /api/runs` refuses it, or other names over 128),
   `read_only`, `path_outside_data_dir`, `path_not_found`, `too_many_inputs`, `payload_too_large` (images over 64
-  MiB), `result_too_large` (see below) and `server_unreachable` (proxy mode, `folo serve` not answering). A
+  MiB, or a `predict_batch` payload exceeding the 32 MiB prediction cache budget), `result_too_large` (see below) and `server_unreachable` (proxy mode, `folo serve` not answering). A
   `TrainConfig` value the trainer cannot use (`arch: "folo-q"`, out of range) is `invalid_config` as in the CLI;
   an empty split for `val` is `invalid_dataset`; a `device: "gpu:7"` this machine lacks is `device_not_found`
   (the hint lists the devices it has); a GPU out of memory is `gpu_out_of_memory` (hint: lower `batch` or
   `imgsz`, or a smaller `arch`). Messages are cut to 1000 characters and hints to 500; engine errors (also a
   failed run's `error`) are already cut to 500, so a driver report never floods the context. The `*_not_found`
-  codes of listed things hint at the list tool (`list_datasets`, `list_models`, `list_runs`, ...).
+  codes of listed things hint at the list tool (`list_datasets`, `list_models`, `list_runs`, ...), and
+  `dataset_not_found`, `model_not_found` and `run_not_found` errors also append a fuzzy `did you mean ...?`
+  suggestion against existing IDs and names (under `--confine`, datasets are revalidated fresh so out-of-bounds
+  datasets are never suggested).
 - **Protocol errors** (malformed JSON-RPC, a malformed `tools/call` envelope, unknown tool or method, unsupported
-  protocol version): JSON-RPC errors per the spec, never `isError` results: unknown tool `-32602`, unknown method
-  `-32601`, unsupported version `-32022`, a prompt without its required argument `-32602`. Well-formed JSON that is
+  protocol version): JSON-RPC errors per the spec, never `isError` results: unknown tool `-32602` (with a fuzzy
+  `did you mean ...?` suggestion against the tools visible in the current mode), unknown method
+  `-32601`, unsupported version `-32022`, unknown prompt `-32602` (with a fuzzy suggestion against visible prompts),
+  a prompt without its required argument `-32602`. Well-formed JSON that is
   not a JSON-RPC message gets `-32600` (with `id: null`). A line that is not JSON at all is ignored and logged, as by
   every official MCP SDK (answering unparsable input can start an error loop between two peers).
 - Resource reads for unknown URIs (or ids) return the spec's resource-not-found error: `-32002` on 2025-11-25,
-  `-32602` on 2026-07-28.
+  `-32602` on 2026-07-28, including fuzzy `did you mean ...?` suggestions for missing dataset/run IDs and unknown
+  `folo://docs/{name}` names.
 
 ## Paging and size limits
 - Every list tool takes `{ cursor?: string, limit?: integer (default 50, max 200) }` (cursors are opaque; a bad
@@ -328,7 +334,10 @@ Each resource read returns a JSON snapshot, unless stated otherwise.
   white, predictions in class colours), for quick visual checks: 4 cells per row of 160 px (640 px across for the 16
   samples; about 110 KB for 1080p frames, against 250 KB at the old 256 px); `?tile=<px>` picks the cell size
   (clamped to 64..512).
-- `folo://predictions/{batch_id}`: per-image boxes of a `predict_batch` call (kept for the server's lifetime).
+- `folo://predictions/{batch_id}`: per-image boxes of a `predict_batch` call, kept in a bounded LRU cache of at most
+  64 recent batches and an approximate 32 MiB serialized-JSON byte budget (a single batch exceeding 32 MiB fails with
+  `payload_too_large` without evicting earlier entries; reading an evicted `pb_<n>` ID returns resource-not-found
+  with `"evicted": true` in error `data`).
 - `folo://system/throughput`: the measured-speed table of `GET /api/system/throughput` (docs/API.md, *Throughput
   and estimates*): training `imgs_per_s` per (device, arch, imgsz, batch, amp) with mosaic / close-mosaic /
   validation rates, startup and `peak_vram_bytes`, and predict latency per (device, arch, imgsz, precision); every
@@ -340,8 +349,10 @@ Each resource read returns a JSON snapshot, unless stated otherwise.
   `est_total_s` with `est_total_s_low` / `est_total_s_high`, `est_peak_vram_bytes`, the mosaic and close-mosaic
   `phases`, and where the numbers come from: `source`, `confidence` and `basis`. A resource rather than a tool: a
   tool taking a whole `TrainConfig` would add about 7 KB to every session's `tools/list`.
-- `folo://docs/{name}`: repository docs (`ARCHITECTURE`, `API`, `CLI`, `MODEL`, `FORMAT`, `METRICS`, `MCP`, `AGENT_COOKBOOK`) as text/markdown
-  (compiled into the binary).
+- `folo://docs/{name}`: repository docs (`ARCHITECTURE`, `API`, `CLI`, `MODEL`, `FORMAT`, `METRICS`, `MCP`,
+  `AGENT_COOKBOOK`) as `text/markdown`, compiled into the binary and served strictly from that allowlist (names must
+  contain only ASCII letters, digits, `_`, or `-`, never path separators, dots, null bytes, or traversal segments;
+  the filesystem is never touched). Unknown valid names return resource-not-found with a fuzzy suggestion.
 
 `resources/list` lists datasets, runs (with their metrics and epochs), the throughput table and docs, 100 per page; images,
 samples, predictions and estimates are reached through `resources/templates/list`.
@@ -442,6 +453,9 @@ In read-only mode, `train_on_folder` and `label_folder` are not listed.
   `https://` (a server behind a TLS proxy or tunnel). A server started with `--token` needs `--token` here too (env
   `FOLO_TOKEN`), sent as `Authorization: Bearer` on every request and never logged; without it every tool is the
   `unauthorized` tool error. The transport is the `folo-client` crate, the same one a cloud control plane uses.
+  Capability and mock-mode probes (`/api/health`, falling back to `/api/system` only when `/api/health` predates
+  `features`) are cached and shared across `HttpStore` and its deadline-bounded `until` clones with single-flight
+  coordination so concurrent calls never duplicate probes.
 
 ## Example agent session
 
