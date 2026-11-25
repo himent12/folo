@@ -38,6 +38,9 @@ fn full_reductions_are_bitwise_reproducible() {
             x4.sum([0, 2, 3], false).unwrap(),
             x4.mean([0, 2], true).unwrap(),
             x4.var([0, 2, 3], false, false).unwrap(),
+            x4.var(3, false, false).unwrap(),
+            x4.var(1, true, false).unwrap(),
+            x4.var(AllDims, false, false).unwrap(),
             x4.sum(1, false).unwrap(),
             x4.transpose(1, 3).unwrap().sum_all().unwrap(),
         ]
@@ -198,5 +201,43 @@ fn cast_minmax_and_topk_are_bitwise_reproducible() {
         let mx_row = x.max(1, false).unwrap();
         let mn_col = x3.min(1, false).unwrap();
         vec![h, tv, sv, mx_row, mn_col]
+    });
+}
+
+#[test]
+fn layer_norm_and_rms_norm_are_bitwise_reproducible() {
+    let mut rng = Rng::seed(18);
+    // Multi-row parallel (outer > 1), single long row (outer == 1, d > REDUCE_BLOCK), and var backward.
+    let x = Tensor::randn([128, 389], 0.0, 1.5, &mut rng).requires_grad_();
+    let w = Tensor::randn([389], 1.0, 0.3, &mut rng).requires_grad_();
+    let b = Tensor::randn([389], 0.0, 0.2, &mut rng).requires_grad_();
+    let g = Tensor::randn([128, 389], 0.0, 1.0, &mut rng);
+    let x_long = Tensor::randn([1, 40_003], 0.0, 1.5, &mut rng).requires_grad_();
+    let w_long = Tensor::randn([40_003], 1.0, 0.2, &mut rng).requires_grad_();
+    let g_long = Tensor::randn([1, 40_003], 0.0, 1.0, &mut rng);
+    assert_reproducible("norm_and_var", &|| {
+        let ln = x.layer_norm(Some(&w), Some(&b), 1e-5).unwrap();
+        let gln = ln.backward_with(&g).unwrap();
+        let rn = x.rms_norm(Some(&w), 1e-5).unwrap();
+        let grn = rn.backward_with(&g).unwrap();
+        let ln_l = x_long.layer_norm(Some(&w_long), None, 1e-5).unwrap();
+        let gln_l = ln_l.backward_with(&g_long).unwrap();
+        let rn_l = x_long.rms_norm(Some(&w_long), 1e-5).unwrap();
+        let grn_l = rn_l.backward_with(&g_long).unwrap();
+        vec![
+            ln,
+            gln.get(&x).unwrap().clone(),
+            gln.get(&w).unwrap().clone(),
+            gln.get(&b).unwrap().clone(),
+            rn,
+            grn.get(&x).unwrap().clone(),
+            grn.get(&w).unwrap().clone(),
+            ln_l,
+            gln_l.get(&x_long).unwrap().clone(),
+            gln_l.get(&w_long).unwrap().clone(),
+            rn_l,
+            grn_l.get(&x_long).unwrap().clone(),
+            grn_l.get(&w_long).unwrap().clone(),
+        ]
     });
 }

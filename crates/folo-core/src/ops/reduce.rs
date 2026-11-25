@@ -106,8 +106,57 @@ impl Tensor {
             self.check_float("var")?;
             return self.to_dtype(DType::F32)?.var(d.to_vec(), unbiased, keepdim)?.to_dtype(DType::F16);
         }
+        self.check_float("var")?;
         let n: usize = d.iter().map(|&i| self.dims()[i]).product();
         let denom = if unbiased { n.saturating_sub(1) } else { n };
+        if !d.is_empty() && denom > 0 {
+            let src = self.dims();
+            let mut keep_shape: DimVec = src.iter().copied().collect();
+            for &ax in &d {
+                keep_shape[ax] = 1;
+            }
+            let mut merged: DimVec = DimVec::new();
+            let mut reduced: DimVec = DimVec::new();
+            let mut i = 0;
+            while i < src.len() {
+                let red = d.contains(&i);
+                let mut size = 1;
+                while i < src.len() && d.contains(&i) == red {
+                    size *= src[i];
+                    i += 1;
+                }
+                if red {
+                    reduced.push(merged.len());
+                }
+                merged.push(size);
+            }
+            if reduced.len() == 1 {
+                let b = self.backend()?;
+                let x_c = if self.is_contiguous() { self.detach() } else { self.copy_contiguous()? };
+                let merged_shape = Shape::from(merged);
+                let strides = merged_shape.contiguous_strides();
+                let cur = x_c.with_layout(Layout::new(merged_shape, strides, x_c.layout().offset()));
+                match cur.with_view(|v| b.reduce_var(v, reduced[0], unbiased)) {
+                    Ok(s) => {
+                        let keep_shape = Shape::from(keep_shape);
+                        let kept = Tensor::wrap(s, keep_shape.clone(), "var")?;
+                        let out = Self::finish_reduce(kept, &d, keepdim)?;
+                        let x_saved = self.detach();
+                        let d_vec = d.to_vec();
+                        let scale = 2.0 / denom as f32;
+                        return Ok(out.track("var", &[self], move |g| {
+                            let mean = x_saved.mean(d_vec.clone(), true)?;
+                            let diff = x_saved.sub(&mean)?;
+                            let raw = diff.mul(&g.reshape(&keep_shape)?.mul_scalar(scale)?)?;
+                            let gx = raw.sub(&raw.mean(d_vec.clone(), true)?)?;
+                            Ok(grads![Some(gx)])
+                        }));
+                    }
+                    Err(Error::NotSupported { .. }) => {}
+                    Err(e) => return Err(e),
+                }
+            }
+        }
         let mean = self.mean(d.to_vec(), true)?;
         let diff = self.sub(&mean)?;
         diff.square()?.sum(d.to_vec(), keepdim)?.mul_scalar(1.0 / denom as f32)

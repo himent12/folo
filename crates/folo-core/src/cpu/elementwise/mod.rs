@@ -294,6 +294,13 @@ fn strided_update<T: Copy + Send + Sync>(
 /// A raw pointer that may be shared across rayon tasks writing disjoint regions.
 #[derive(Clone, Copy)]
 pub(crate) struct SendPtr<T>(pub *mut T);
+impl<T> SendPtr<T> {
+    /// Extract the raw pointer without triggering disjoint field capture of `*mut T` inside `Sync` closures.
+    #[inline(always)]
+    pub(crate) fn ptr(self) -> *mut T {
+        self.0
+    }
+}
 // SAFETY: users guarantee disjoint access.
 unsafe impl<T> Send for SendPtr<T> {}
 // SAFETY: users guarantee disjoint access.

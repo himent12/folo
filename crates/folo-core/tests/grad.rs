@@ -159,6 +159,9 @@ fn reductions_and_softmax() {
     check1(|x| x.mean([1, 2], false), x.clone());
     check1(|x| x.var(2, true, false), x.clone());
     check1(|x| x.var([0, 1], false, true), x.clone());
+    check1(|x| x.var(1, true, false), x.clone());
+    check1(|x| x.var(folo_core::AllDims, false, false), x.clone());
+    check1(|x| x.transpose(0, 2)?.var(1, false, false), x.clone());
     let gx = grid(&[3, 4, 5], 41);
     check1(|x| x.max(2, false), gx.clone());
     check1(|x| x.min([0, 1], true), gx.clone());
@@ -170,6 +173,35 @@ fn reductions_and_softmax() {
     check1(|x| x.logsumexp(2, false), x.clone());
     check1(|x| x.logsumexp([0, 1], true), x.clone());
     check1(|x| x.transpose(0, 2)?.softmax(-1), x.clone());
+}
+
+#[test]
+fn layer_norm_and_rms_norm_grads() {
+    let x = randn(&[3, 4, 9], 42);
+    let w = randn(&[9], 43);
+    let b = randn(&[9], 44);
+    let eps = 1e-4;
+    // LayerNorm with all (weight, bias) combinations, rank-1, and non-contiguous input.
+    grad_check(|v| v[0].layer_norm(Some(&v[1]), Some(&v[2]), eps), &[x.clone(), w.clone(), b.clone()])
+        .unwrap();
+    grad_check(|v| v[0].layer_norm(Some(&v[1]), None, eps), &[x.clone(), w.clone()]).unwrap();
+    grad_check(|v| v[0].layer_norm(None, Some(&v[1]), eps), &[x.clone(), b.clone()]).unwrap();
+    check1(|t| t.layer_norm(None, None, eps), x.clone());
+    grad_check(
+        |v| v[0].transpose(0, 1)?.layer_norm(Some(&v[1]), Some(&v[2]), eps),
+        &[x.clone(), w.clone(), b.clone()],
+    )
+    .unwrap();
+    // Single row (outer == 1) and partial requires_grad (only x, or only weight/bias).
+    let x1 = randn(&[11], 45);
+    let w1 = randn(&[11], 46);
+    let b1 = randn(&[11], 47);
+    grad_check(|v| v[0].layer_norm(Some(&v[1]), Some(&v[2]), eps), &[x1.clone(), w1.clone(), b1]).unwrap();
+    // RmsNorm with/without weight, rank-1, and non-contiguous input.
+    grad_check(|v| v[0].rms_norm(Some(&v[1]), eps), &[x.clone(), w.clone()]).unwrap();
+    check1(|t| t.rms_norm(None, eps), x.clone());
+    grad_check(|v| v[0].transpose(0, 1)?.rms_norm(Some(&v[1]), eps), &[x, w]).unwrap();
+    grad_check(|v| v[0].rms_norm(Some(&v[1]), eps), &[x1, w1]).unwrap();
 }
 
 #[test]

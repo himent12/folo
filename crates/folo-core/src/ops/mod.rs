@@ -7,6 +7,7 @@
 //! - `mod.rs`: shared helpers: read views of several tensors, the `grads!` macro, dtype and device checks.
 //! - `elementwise.rs`: unary and broadcasting binary ops, and comparisons.
 //! - `reduce.rs`: reductions, the softmax family and top-k.
+//! - `norm.rs`: layer normalisation (`layer_norm`) and RMS normalisation (`rms_norm`).
 //! - `nn.rs`: matrix products, convolution, pooling and upsampling.
 //! - `view.rs`: views that only change the layout, and `contiguous`.
 //! - `copy.rs`: ops that build new storage: concatenation, splitting, indexing, selection (`where_cond`),
@@ -24,6 +25,7 @@ mod fused;
 mod inplace;
 pub(crate) mod muon;
 mod nn;
+mod norm;
 mod overload;
 mod reduce;
 mod view;
