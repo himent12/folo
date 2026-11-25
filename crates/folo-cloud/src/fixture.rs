@@ -78,6 +78,38 @@ impl Fixture {
         Fixture::start(Some(answers))
     }
 
+    /// Serves requests concurrently (one thread per connection), routing each [`Request`] through `handler`.
+    pub fn serve_concurrent(handler: impl Fn(&Request) -> Answer + Send + Sync + 'static) -> Fixture {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let handler = Arc::new(handler);
+        let thread = {
+            let (requests, stop) = (requests.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut workers = Vec::new();
+                for stream in listener.incoming() {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let Ok(mut stream) = stream else { continue };
+                    let (requests, handler) = (requests.clone(), handler.clone());
+                    workers.push(std::thread::spawn(move || {
+                        let Some(request) = read_request(&stream) else { return };
+                        let answer = handler(&request);
+                        requests.lock().unwrap().push(request);
+                        write_answer(&mut stream, &answer);
+                    }));
+                }
+                for worker in workers {
+                    let _ = worker.join();
+                }
+            })
+        };
+        Fixture { addr, requests, stop, thread: Some(thread) }
+    }
+
     /// Reads each request and closes the connection without an answer. (A loopback port nothing listens on would
     /// do too, but Windows takes 2 s to refuse a connection to one.)
     pub fn hang_up() -> Fixture {

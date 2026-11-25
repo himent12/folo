@@ -186,12 +186,24 @@ mod tests {
         }
     }
 
+    /// Generous upper bound for coordination waits under heavy CI load.
+    const WAIT_LIMIT: Duration = Duration::from_secs(60);
+
     /// Waits (polling, up to a generous limit for a loaded machine) until `st`'s preparations started `n`
     /// warm-ups of the CPU counters.
     async fn warm_ups_reach(st: &AppState, n: usize) {
         let t = std::time::Instant::now();
         while st.probe.warm_ups.load(Ordering::SeqCst) < n {
-            assert!(t.elapsed() < Duration::from_secs(30), "no warm-up started");
+            assert!(t.elapsed() < WAIT_LIMIT, "no warm-up started");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }
+
+    /// Waits until `n` `/api/system` calls have attached to the running preparation's watch channel.
+    async fn waiters_reach(st: &AppState, n: usize) {
+        let t = std::time::Instant::now();
+        while st.system_ready.waiters.load(Ordering::SeqCst) < n {
+            assert!(t.elapsed() < WAIT_LIMIT, "waiters did not reach {n}");
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
@@ -214,17 +226,13 @@ mod tests {
             let burst: Vec<_> = (0..16).map(|_| tokio::spawn(system(State(st.clone())))).collect();
             warm_ups_reach(&st, 1).await;
             // Every call has entered the wait for the preparation's result.
-            let t = std::time::Instant::now();
-            while st.system_ready.waiters.load(Ordering::SeqCst) < 16 {
-                assert!(t.elapsed() < Duration::from_secs(30), "not every call is waiting");
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
+            waiters_reach(&st, 16).await;
             assert!(
                 burst.iter().all(|call| !call.is_finished()),
                 "a call answered before the preparation ended"
             );
             drop(gate);
-            let answers = tokio::time::timeout(Duration::from_secs(30), async {
+            let answers = tokio::time::timeout(WAIT_LIMIT, async {
                 let mut answers = Vec::new();
                 for call in burst {
                     answers.push(call.await.unwrap());
@@ -253,18 +261,20 @@ mod tests {
         let gate = st.probe.gate.close();
         let first = tokio::spawn(system(State(st.clone())));
         warm_ups_reach(&st, 1).await;
+        waiters_reach(&st, 1).await;
         first.abort();
         assert!(first.await.unwrap_err().is_cancelled());
         let second = tokio::spawn(system(State(st.clone())));
-        // Time for a second preparation to start, were there one.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Deterministically confirm `second` attached to the running preparation without starting another.
+        waiters_reach(&st, 2).await;
         assert_eq!(st.probe.warm_ups.load(Ordering::SeqCst), 1, "a second preparation started");
         drop(gate);
-        let Json(r) = second.await.unwrap().unwrap_or_else(|e| panic!("{e:?}"));
+        let Json(r) = tokio::time::timeout(WAIT_LIMIT, second)
+            .await
+            .expect("second call answered")
+            .unwrap()
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(r.system.cpu.threads >= 1 && r.capabilities.is_some());
-        // This one settles it: the sleep above can miss a second preparation that starts late, but the second
-        // request answers only once the preparation it waits for has ended, and one of its own would have counted
-        // its warm-up by then.
         assert_eq!(st.probe.warm_ups.load(Ordering::SeqCst), 1, "prepared once");
     }
 

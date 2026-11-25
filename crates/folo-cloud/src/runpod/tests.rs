@@ -186,7 +186,15 @@ fn offers_merge_both_clouds_cheapest_first() {
          "community":true,"price":{"secure":2.49,"community":1.99},"availability":"HIGH"},
         {"id":"NVIDIA L4","name":"L4","manufacturer":"NVIDIA","memory":24,"secure":false,"community":true,
          "price":{"secure":0.5,"community":0.29},"availability":"NONE"}]}"#;
-    let f = Fixture::serve(vec![Answer::json(200, secure), Answer::json(200, community)]);
+    let f = Fixture::serve_concurrent(move |r| {
+        if r.path.contains("cloud=SECURE") {
+            Answer::json(200, secure)
+        } else if r.path.contains("cloud=COMMUNITY") {
+            Answer::json(200, community)
+        } else {
+            Answer::json(599, r#"{"detail":"unexpected catalog path"}"#)
+        }
+    });
     let offers = runpod(&f).offers(&values()).unwrap();
     let shown: Vec<(&str, &str, f64, CloudAvailability)> = offers
         .iter()
@@ -205,26 +213,100 @@ fn offers_merge_both_clouds_cheapest_first() {
     let rtx = &offers[2];
     assert_eq!((rtx.gpu.as_str(), rtx.gpu_count, rtx.vram_bytes), ("RTX 4090", 1, 24 << 30));
     assert_eq!(offers[3].vram_bytes, 80 << 30);
-    let paths: Vec<String> = f.requests().into_iter().map(|r| r.path).collect();
+    let mut paths: Vec<String> = f.requests().into_iter().map(|r| r.path).collect();
+    paths.sort();
     assert_eq!(
         paths,
         [
-            "/v2/catalog/gpus?include=AVAILABILITY&product=POD&cloud=SECURE&count=1",
             "/v2/catalog/gpus?include=AVAILABILITY&product=POD&cloud=COMMUNITY&count=1",
+            "/v2/catalog/gpus?include=AVAILABILITY&product=POD&cloud=SECURE&count=1",
         ]
     );
     assert_key_only_in_headers(&f);
 }
 
 #[test]
+fn offers_fetch_secure_and_community_catalogs_concurrently() {
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct Rendezvous {
+        in_flight: usize,
+        overlapped: bool,
+        timed_out: bool,
+    }
+
+    let sync = Arc::new((Mutex::new(Rendezvous::default()), Condvar::new()));
+    let sync_srv = sync.clone();
+    let f = Fixture::serve_concurrent(move |r| {
+        let (lock, cv) = &*sync_srv;
+        let mut state = lock.lock().unwrap();
+        state.in_flight += 1;
+        if state.in_flight >= 2 {
+            state.overlapped = true;
+            cv.notify_all();
+        }
+        let (mut state, wait) =
+            cv.wait_timeout_while(state, Duration::from_secs(5), |s| !s.overlapped && !s.timed_out).unwrap();
+        if wait.timed_out() {
+            state.timed_out = true;
+            cv.notify_all();
+        }
+        state.in_flight -= 1;
+        drop(state);
+        if r.path.contains("cloud=SECURE") {
+            Answer::json(
+                200,
+                r#"{"gpus":[{"id":"NVIDIA L4","name":"L4","manufacturer":"NVIDIA","memory":24,"secure":true,"community":false,"price":{"secure":0.5,"community":null},"availability":"HIGH"}]}"#,
+            )
+        } else {
+            Answer::json(
+                200,
+                r#"{"gpus":[{"id":"NVIDIA L4","name":"L4","manufacturer":"NVIDIA","memory":24,"secure":false,"community":true,"price":{"secure":null,"community":0.29},"availability":"MEDIUM"}]}"#,
+            )
+        }
+    });
+    let offers = runpod(&f).offers(&values()).unwrap();
+    let state = sync.0.lock().unwrap();
+    assert!(
+        state.overlapped && !state.timed_out,
+        "Secure and Community catalog requests did not overlap in flight"
+    );
+    drop(state);
+    let ids: Vec<&str> = offers.iter().map(|o| o.id.as_str()).collect();
+    assert_eq!(ids, ["NVIDIA L4@community", "NVIDIA L4@secure"]);
+}
+
+#[test]
 fn offers_fail_as_their_requests_do() {
-    let f = Fixture::serve(vec![problem(401, "nope")]);
+    let f = Fixture::serve_concurrent(|_| problem(401, "nope"));
     assert_error(&runpod(&f).offers(&values()).unwrap_err(), ErrorKind::Auth, "rejected");
-    let f = Fixture::serve(vec![Answer::json(200, r#"{"gpus":[]}"#), problem(500, "boom")]);
+
+    let f = Fixture::serve_concurrent(|r| {
+        if r.path.contains("cloud=SECURE") {
+            Answer::json(200, r#"{"gpus":[]}"#)
+        } else {
+            problem(500, "boom")
+        }
+    });
     assert_error(
         &runpod(&f).offers(&values()).unwrap_err(),
         ErrorKind::Unavailable,
         "RunPod answered 500: boom",
+    );
+
+    let f = Fixture::serve_concurrent(|r| {
+        if r.path.contains("cloud=SECURE") {
+            problem(500, "secure boom")
+        } else {
+            Answer::json(200, r#"{"gpus":[]}"#)
+        }
+    });
+    assert_error(
+        &runpod(&f).offers(&values()).unwrap_err(),
+        ErrorKind::Unavailable,
+        "RunPod answered 500: secure boom",
     );
 }
 
@@ -477,12 +559,24 @@ fn identifiers_are_used_as_the_provider_sent_them() {
                 "community":false,"price":{{"secure":0.5}},"availability":"HIGH"}}]}}"#
         );
         let created = Answer::json(201, r#"{"id":"abc999","status":"PROVISIONING"}"#);
-        let f = Fixture::serve(vec![Answer::json(200, gpus), Answer::json(200, r#"{"gpus":[]}"#), created]);
+        let f = Fixture::serve_concurrent(move |r| {
+            if r.path.contains("cloud=SECURE") {
+                Answer::json(200, gpus.clone())
+            } else if r.path.contains("cloud=COMMUNITY") {
+                Answer::json(200, r#"{"gpus":[]}"#)
+            } else if r.method == "POST" && r.path == "/v2/pods" {
+                created.clone()
+            } else {
+                Answer::json(599, r#"{"detail":"unexpected request"}"#)
+            }
+        });
         let p = runpod(&f);
         let offer = p.offers(&values).unwrap().remove(0);
         assert_eq!(offer.id, format!("{gpu}@secure"));
         p.launch(&values, &LaunchSpec { token: token.clone(), ..spec(&offer.id) }).unwrap();
-        assert_eq!(f.requests()[2].json()["gpu"]["id"], gpu.as_str());
+        let launch_req =
+            f.requests().into_iter().find(|r| r.method == "POST" && r.path == "/v2/pods").unwrap();
+        assert_eq!(launch_req.json()["gpu"]["id"], gpu.as_str());
     }
 }
 
@@ -499,7 +593,15 @@ fn fields_of_successful_answers_never_carry_the_key_into_a_message_or_an_offer()
         r#"{{"gpus":[{{"id":"NVIDIA {key}","name":"{key}","manufacturer":"NVIDIA","memory":24,"secure":true,
             "community":false,"price":{{"secure":0.5}},"availability":"HIGH"}}]}}"#
     );
-    let f = Fixture::serve(vec![Answer::json(200, gpus), Answer::json(200, r#"{"gpus":[]}"#)]);
+    let f = Fixture::serve_concurrent(move |r| {
+        if r.path.contains("cloud=SECURE") {
+            Answer::json(200, gpus.clone())
+        } else if r.path.contains("cloud=COMMUNITY") {
+            Answer::json(200, r#"{"gpus":[]}"#)
+        } else {
+            Answer::json(599, r#"{"detail":"unexpected request"}"#)
+        }
+    });
     let offers = runpod(&f).offers(&values()).unwrap();
     assert!(offers.len() == 1 && !shows(&offers[0].gpu), "{offers:?}");
     // The account's email.
