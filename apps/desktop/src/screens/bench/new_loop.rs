@@ -132,7 +132,10 @@ impl FoloApp {
                 "No model can teach yet: a teacher is trained on this benchmark's classes, in its order."
                     .to_string()
             }
-            (_, None) => "Add a dataset first: the teacher labels its images.".to_string(),
+            (_, None) => {
+                "Add a dataset or label images in a labeling job first: the teacher labels its images."
+                    .to_string()
+            }
             (_, Some(0)) => "That pool has no images: pick another.".to_string(),
             (Some(m), Some(n)) => format!(
                 "{} labels {} {} by itself; a {} student trains {} epochs on those labels alone and runs here. {}{}",

@@ -98,7 +98,7 @@ impl FoloApp {
         let pool = match choice {
             SourceChoice::At(i) => &sources[i],
             SourceChoice::Missing => {
-                return refuse(f, "Add a dataset first: the teacher labels its images", cx);
+                return refuse(f, "Add a dataset or labeling job first: the teacher labels its images", cx);
             }
             SourceChoice::Deleted => return refuse(f, "Its pool was deleted: pick another", cx),
         };

@@ -53,6 +53,7 @@ impl FoloApp {
                 // focus before); the action may still move focus on, as dialogs do.
                 window.focus(&click_fh);
                 on_click(this, window, cx);
+                cx.stop_propagation();
                 cx.notify();
             }))
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {

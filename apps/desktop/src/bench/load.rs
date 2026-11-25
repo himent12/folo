@@ -260,5 +260,16 @@ impl FoloApp {
             // A benchmark opens on its leaderboard, whatever tab the last one was on.
             self.bench.tab = BenchTab::Leaderboard;
         }
+        match route_bench(&self.route) {
+            Some(id) if self.bench.sort_bench.as_deref() != Some(id) => {
+                self.bench.leaderboard_sort = None;
+                self.bench.sort_bench = Some(id.to_string());
+            }
+            None => {
+                self.bench.leaderboard_sort = None;
+                self.bench.sort_bench = None;
+            }
+            _ => {}
+        }
     }
 }
