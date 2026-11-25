@@ -635,7 +635,8 @@ pub fn conv2d_backward_input(
     if d.is_depthwise() {
         let vx4 = d.win.stride == (1, 1)
             && d.win.dilation == (1, 1)
-            && khkw <= super::weight_grad::MAX_DEPTHWISE_TAPS;
+            && khkw <= super::weight_grad::MAX_DEPTHWISE_TAPS
+            && total <= u32::MAX as usize;
         let spec = d
             .win
             .spec()

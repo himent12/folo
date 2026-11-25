@@ -345,4 +345,18 @@ fn adapter_without_f16_falls_back_to_f32_errors() {
     assert!(matches!(x.silu(), Err(Error::DTypeMismatch { .. })));
     // Storage, casts and copies need no shader-f16.
     assert_eq!(x.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap(), vec![1.0; 8]);
+    // Direct Backend::avg_pool2d keeps its f32 fallback without shader-f16, while backward refuses F16 cleanly.
+    use folo_core::backend::{Backend, Pool2dParams, View};
+    use folo_core::{Layout, Shape};
+    let backend = crate::GpuBackend::new(crate::context_for(d).unwrap(), d);
+    let shape = Shape::new(&[1, 1, 4, 4]);
+    let p = Pool2dParams { kernel: [2, 2], stride: [2, 2], padding: [0, 0] };
+    let buf = backend.full(d, DType::F16, shape.numel(), 2.0).unwrap();
+    let pooled = backend.avg_pool2d(View::new(&buf, &Layout::contiguous(shape.clone())), &p).unwrap();
+    assert_eq!((pooled.dtype(), pooled.len()), (DType::F16, 4));
+    let out_shape = Shape::new(&[1, 1, 2, 2]);
+    let err = backend
+        .avg_pool2d_backward(View::new(&pooled, &Layout::contiguous(out_shape)), &shape, &p)
+        .unwrap_err();
+    assert!(matches!(err, Error::UnsupportedDType { dtype: DType::F16, .. }), "{err}");
 }

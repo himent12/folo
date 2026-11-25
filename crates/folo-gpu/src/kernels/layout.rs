@@ -206,7 +206,11 @@ pub fn upsample_nearest2d(
     if h == 0 || w == 0 {
         return Err(shape_err("upsample: empty input plane"));
     }
-    if h.checked_mul(2) == Some(oh) && w.checked_mul(2) == Some(ow) && w.is_multiple_of(2) {
+    if h.checked_mul(2) == Some(oh)
+        && w.checked_mul(2) == Some(ow)
+        && w.is_multiple_of(2)
+        && n <= u32::MAX as usize
+    {
         let w2 = w / 2;
         let units = planes * h * w2;
         let k = ctx.kernel(&UPSAMPLE_2X_VEC4, Spec::new().f16(dtype == DType::F16))?;

@@ -127,16 +127,17 @@ fn gen_depthwise_grad(spec: &Spec) -> String {
                     "    {{ let oy = i32(iy) + PH - {ky}; if (oy >= 0 && oy < i32(oh)) {{ let row = gbase + u32(oy) * ow;"
                 );
                 for j in 0..span {
-                    let _ = writeln!(s, "      let g{j} = ld_g(row, ox_base + {j}, i32(ow));");
+                    let _ = writeln!(
+                        s,
+                        "      let ox{j} = ox_base + {j}; let vg{j} = ox{j} >= 0 && ox{j} < i32(ow); let g{j} = ld_g(row, ox{j}, i32(ow));"
+                    );
                 }
                 for v in 0..DW_VX {
                     for kx in 0..kw {
-                        let _ = writeln!(
-                            s,
-                            "      acc{v} = fma(g{}, w{}, acc{v});",
-                            v + kw - 1 - kx,
-                            ky * kw + kx
-                        );
+                        let gi = v + kw - 1 - kx;
+                        let wt = ky * kw + kx;
+                        let _ =
+                            writeln!(s, "      acc{v} = select(acc{v}, fma(g{gi}, w{wt}, acc{v}), vg{gi});");
                     }
                 }
                 s.push_str("    } }\n");
@@ -235,9 +236,9 @@ fn gen_depthwise_grad(spec: &Spec) -> String {
     }
     // Uniform loop bounds so Tint/WebGPU uniformity holds at the subgroup/workgroup reduction below.
     s.push_str(
-        "  let p0 = sidx * ps; let p1 = min(p0 + ps, np);\n\
-         \x20 if (valid && p0 < p1) {\n\
-         \x20   let rem = p1 - p0;\n\
+        "  let p0 = sidx * ps;\n\
+         \x20 if (valid && p0 < np) {\n\
+         \x20   let rem = min(ps, np - p0);\n\
          \x20   let n_iter = rem / 256u + select(0u, 1u, (rem % 256u) != 0u);\n\
          \x20   let cin = cout / MULT; let ci = co / MULT;\n\
          \x20   for (var it = 0u; it < n_iter; it += 1u) {\n\
@@ -260,16 +261,22 @@ fn gen_depthwise_grad(spec: &Spec) -> String {
                 ky as i64 * spec.get_u32("DH", 1) as i64
             );
             for j in 0..span {
-                let _ = writeln!(s, "          let x{j} = ld_x(row, ix0 + {j}, i32(w));");
+                let _ = writeln!(
+                    s,
+                    "          let ix{j} = ix0 + {j}; let vx{j} = ix{j} >= 0 && ix{j} < i32(w); let x{j} = ld_x(row, ix{j}, i32(w));"
+                );
             }
             for kx in 0..kw {
                 let t = ky * kw + kx;
                 let _ = writeln!(
                     s,
-                    "          acc{t} = fma(gv.x, x{kx}, fma(gv.y, x{}, fma(gv.z, x{}, fma(gv.w, x{}, acc{t}))));",
-                    kx + 1,
-                    kx + 2,
-                    kx + 3
+                    "          acc{t} = select(acc{t}, fma(gv.x, x{kx}, acc{t}), vx{kx});\n\
+                     \x20         acc{t} = select(acc{t}, fma(gv.y, x{k1}, acc{t}), vx{k1});\n\
+                     \x20         acc{t} = select(acc{t}, fma(gv.z, x{k2}, acc{t}), vx{k2});\n\
+                     \x20         acc{t} = select(acc{t}, fma(gv.w, x{k3}, acc{t}), vx{k3});",
+                    k1 = kx + 1,
+                    k2 = kx + 2,
+                    k3 = kx + 3
                 );
             }
             s.push_str("        } }\n");
@@ -298,10 +305,11 @@ fn gen_depthwise_grad(spec: &Spec) -> String {
     }
     s.push_str("      }\n    }\n  }\n");
     if sg {
+        s.push_str("  let sg = min(sg_id, 7u);\n");
         for t in 0..taps {
             let _ = writeln!(
                 s,
-                "  let sg{t} = subgroupAdd(acc{t}); if (s_lane == 0u) {{ red[{base}u + sg_id] = sg{t}; }}",
+                "  let sg{t} = subgroupAdd(acc{t}); if (s_lane == 0u) {{ red[{base}u + sg] = sg{t}; }}",
                 base = t * 8
             );
         }
@@ -381,3 +389,15 @@ pub(super) static DEPTHWISE_GRAD: KernelDef = KernelDef {
     storage: &[Access::Read, Access::Read, Access::ReadWrite],
     source: Source::Generated(gen_depthwise_grad),
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn depthwise_dw_portable_emits_no_subgroup_tokens() {
+        let spec = Spec::new().u32("KH", 3).u32("KW", 3).u32("MODE", 1).bool("VEC4", true).subgroups(false);
+        let wgsl = crate::pipeline::render(&DEPTHWISE_GRAD, &spec);
+        assert!(!wgsl.contains("subgroup"), "portable depthwise dW emitted subgroup token:\n{wgsl}");
+    }
+}

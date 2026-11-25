@@ -1,5 +1,5 @@
 //! The ops mixed-precision training adds, through the folo-core backend: the fused BatchNorm on f16 data with f32
-//! parameters and statistics, the f16 max-pooling and upsampling gradients, and folo-core's `autocast` conv and
+//! parameters and statistics, the f16 max/avg pooling and upsampling gradients, and folo-core's `autocast` conv and
 //! matmul (f16 compute, gradients back into f32 leaves, the weight gradient written as f32), each against the same
 //! computation in f32 on the f16-rounded inputs. These run with the shared context's kernels (tensor cores only if
 //! `FOLO_GPU_TENSOR_CORES` is set); `tests/coop.rs` covers the tensor-core gradient kernels themselves.

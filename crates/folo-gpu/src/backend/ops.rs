@@ -399,6 +399,9 @@ impl Backend for GpuBackend {
 
     fn avg_pool2d(&self, x: View<'_>, p: &Pool2dParams) -> Result<Storage> {
         let dtype = x.storage.dtype();
+        if dtype == CoreDType::F16 && !self.ctx.caps().shader_f16 {
+            return self.via_f32(x, |x| self.avg_pool2d(x, p));
+        }
         let _p = profile::scope(|| format!("avg_pool {:?}", x.shape().dims()));
         let (n, c, h, w) = nchw(x.shape());
         let win = pool2d(p);
@@ -412,6 +415,9 @@ impl Backend for GpuBackend {
 
     fn avg_pool2d_backward(&self, grad: View<'_>, input_shape: &Shape, p: &Pool2dParams) -> Result<Storage> {
         let dtype = grad.storage.dtype();
+        if dtype == CoreDType::F16 && !self.ctx.caps().shader_f16 {
+            f32_only(&grad, "avg_pool2d_backward")?;
+        }
         let _p = profile::scope(|| format!("avg_pool_bwd {:?}", input_shape.dims()));
         let (n, c, h, w) = nchw(input_shape);
         let len = input_shape.numel();

@@ -14,11 +14,11 @@
 //! **Half precision.** With `shader-f16` (and without `FOLO_GPU_NO_F16`) the backend computes in f16
 //! ([`Backend::computes_f16`]): every forward op folo-core lets `F16` through takes f16 operands and returns
 //! f16 results. Storage is f16, the arithmetic f32: GEMM and conv accumulate in f32, reductions and softmax
-//! accumulate in f32, elementwise ops widen on load and round once on the store. Average pooling and the
+//! accumulate in f32, elementwise ops widen on load and round once on the store. Adaptive average pooling and the
 //! arg-reductions run on an f32 copy. The gradients a mixed-precision training step needs take f16 too: conv2d
 //! input and weight gradients (on tensor cores when the context has them on; the weight gradient can be written as
 //! f32, [`Backend::conv2d_backward_weight_as`]), the fused BatchNorm on f16 data with f32 parameters and statistics,
-//! and the max-pooling and nearest-upsampling gradients. The other gradient kernels refuse f16 data.
+//! and the max-pooling, average-pooling, and nearest-upsampling gradients. The other gradient kernels refuse f16 data.
 //!
 //! Differences from the CPU backend: index ops cannot report out-of-range indices without a host round trip,
 //! so `index_select` / `gather` produce zeros and `index_add` / `scatter_add` skip such entries; the
