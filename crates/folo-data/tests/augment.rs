@@ -228,3 +228,78 @@ fn an_empty_mosaic_is_empty() {
     let m = folo_data::augment::mosaic_affine(parts, 0, &AugmentConfig::default(), &mut Rng::new(1));
     assert_eq!((m.image.width, m.image.height, m.image.data.len()), (0, 0, 0));
 }
+
+/// Fused mixup + HSV + flip + planar DataLoader path matches `TrainTransform::apply` bit-for-bit
+/// across both mosaic+mixup and non-mosaic+mixup (and both `u8` and `f32` batches).
+#[test]
+fn loader_mixup_fused_matches_apply_bit_exact() {
+    use folo_data::{DataLoader, LoaderConfig};
+    use std::sync::Arc;
+
+    let samples: Vec<_> = (0..6).map(|k| random_rect_sample(200 + k, 150 + 17 * k as u32, 110, 4)).collect();
+    let ds = Arc::new(InMemoryDataset { samples, classes: vec!["a".into(); 4], split: Split::Train });
+    for &(mosaic_p, degrees) in &[(1.0f32, 0.0f32), (0.0, 0.0), (1.0, 12.0), (0.0, 12.0)] {
+        let aug = AugmentConfig {
+            mosaic: mosaic_p,
+            mixup: 1.0,
+            degrees,
+            shear: if degrees > 0.0 { 3.0 } else { 0.0 },
+            flipud: 0.5,
+            fliplr: 0.5,
+            ..AugmentConfig::default()
+        };
+        let t = TrainTransform::train(96, aug, 0, 0);
+        for &u8_images in &[true, false] {
+            let cfg = LoaderConfig {
+                batch_size: 3,
+                imgsz: 96,
+                workers: 2,
+                shuffle: true,
+                seed: 77,
+                augment: Some(aug),
+                u8_images,
+                ..LoaderConfig::default()
+            };
+            let loader = DataLoader::new(ds.clone(), cfg).unwrap();
+            let order = loader.order(0);
+            let mut pos = 0usize;
+            for batch in loader.epoch(0) {
+                let batch = batch.unwrap();
+                let plane = 96 * 96;
+                for k in 0..batch.len() {
+                    let mut rng = Rng::derive(&[77, 0, pos as u64]);
+                    let want = t.apply_dataset(ds.as_ref(), order[pos], &mut rng).unwrap();
+                    let off = k * 3 * plane;
+                    if u8_images {
+                        let mut ref_u8 = vec![0u8; 3 * plane];
+                        for (i, px) in want.sample.image.data.as_chunks::<3>().0.iter().enumerate() {
+                            ref_u8[i] = px[0];
+                            ref_u8[plane + i] = px[1];
+                            ref_u8[2 * plane + i] = px[2];
+                        }
+                        assert_eq!(
+                            &batch.images_u8[off..off + 3 * plane],
+                            &ref_u8[..],
+                            "u8 mixup parity mosaic={mosaic_p} deg={degrees} pos={pos}"
+                        );
+                    } else {
+                        let mut ref_f32 = vec![0f32; 3 * plane];
+                        for (i, px) in want.sample.image.data.as_chunks::<3>().0.iter().enumerate() {
+                            ref_f32[i] = px[0] as f32 / 255.0;
+                            ref_f32[plane + i] = px[1] as f32 / 255.0;
+                            ref_f32[2 * plane + i] = px[2] as f32 / 255.0;
+                        }
+                        assert!(
+                            batch.images[off..off + 3 * plane]
+                                .iter()
+                                .zip(&ref_f32)
+                                .all(|(a, b)| a.to_bits() == b.to_bits()),
+                            "f32 mixup parity mosaic={mosaic_p} deg={degrees} pos={pos}"
+                        );
+                    }
+                    pos += 1;
+                }
+            }
+        }
+    }
+}
