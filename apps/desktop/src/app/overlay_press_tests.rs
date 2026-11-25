@@ -119,16 +119,21 @@ fn a_double_click_that_opens_a_confirmation_cannot_confirm_it() {
         .filter_map(|p| match p {
             folo_ui::Primitive::Quad(q)
                 if q.background.solid == raised
-                    && sp(q.bounds.origin.y) >= 48.
-                    && sp(q.bounds.origin.y) <= 104.
-                    && sp(q.bounds.origin.x) >= 500.
-                    && sp(q.bounds.size.height) >= 24. =>
+                    && sp(q.bounds.origin.y) >= 40.
+                    && sp(q.bounds.origin.y) <= 140.
+                    && sp(q.bounds.origin.x) >= 240.
+                    && sp(q.bounds.size.height) >= 24.
+                    && sp(q.bounds.size.height) <= 36. =>
             {
                 Some(q.bounds)
             }
             _ => None,
         })
-        .min_by(|a, b| sp(a.origin.x).total_cmp(&sp(b.origin.x)))
+        .min_by(|a, b| {
+            (sp(a.origin.y).round() as i32)
+                .cmp(&(sp(b.origin.y).round() as i32))
+                .then_with(|| sp(a.origin.x).total_cmp(&sp(b.origin.x)))
+        })
         .map(|b| (sp(b.origin.x) + sp(b.size.width) / 2., sp(b.origin.y) + sp(b.size.height) / 2.))
         .expect("Delete button painted in run header");
     click(&mut app, window, delete_btn, 1);

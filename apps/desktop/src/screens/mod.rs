@@ -52,11 +52,9 @@ pub fn detail_header(
 ) -> Div {
     div()
         .flex()
-        .flex_wrap()
         .items_start()
         .justify_between()
-        .gap_x(px(16.))
-        .gap_y(px(8.))
+        .gap(px(16.))
         .pb(px(4.))
         .child(
             div()
@@ -70,6 +68,7 @@ pub fn detail_header(
         .child(
             div()
                 .min_h(px(ty::XL.line))
+                .min_w_0()
                 .flex()
                 .flex_wrap()
                 .items_center()
