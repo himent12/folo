@@ -360,16 +360,6 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
     } else {
         sum.chunks_mut(n).enumerate().for_each(add);
     }
-    let sum = &*sum;
-    let transpose = |(j, row): (usize, &mut [f32])| {
-        for (i, v) in row.iter_mut().enumerate() {
-            *v = sum[i * n + j];
-        }
-    };
-    if m * n >= crate::cpu::PAR_MIN {
-        par_chunks(gw, m, &|i, c| transpose((i, c)));
-    } else {
-        gw.chunks_mut(m).enumerate().for_each(transpose);
-    }
+    crate::cpu::elementwise::transpose_f32_2d(sum, n, gw, m, m, n);
     crate::cpu::recycle(partial);
 }

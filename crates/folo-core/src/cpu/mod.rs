@@ -135,9 +135,12 @@ fn f32s<'a>(v: &View<'a>, op: &'static str) -> Result<&'a [f32]> {
 /// The elements of an `F32` view as a contiguous slice (borrowed when already contiguous).
 pub(crate) fn contiguous_f32<'a>(v: &View<'a>, op: &'static str) -> Result<Cow<'a, [f32]>> {
     let data = f32s(v, op)?;
+    if v.layout.numel() == 0 {
+        return Ok(Cow::Borrowed(&[]));
+    }
     Ok(match v.layout.contiguous_range() {
         Some(r) => Cow::Borrowed(&data[r]),
-        None => Cow::Owned(elementwise::copy_strided(data, v.layout)),
+        None => Cow::Owned(elementwise::copy_strided_f32(data, v.layout)),
     })
 }
 
@@ -237,7 +240,7 @@ impl Backend for CpuBackend {
         let s = cpu(&src, "download")?;
         if let CpuStorage::F32(v) = s {
             let out = alloc_uninit(src.layout.numel());
-            return Ok(CpuStorage::F32(elementwise::copy_strided_into(v, src.layout, out)));
+            return Ok(CpuStorage::F32(elementwise::copy_strided_f32_into(v, src.layout, out)));
         }
         Ok(with_cpu_storage!(s, v => Element::into_storage(elementwise::copy_strided(v, src.layout))))
     }
@@ -269,6 +272,13 @@ impl Backend for CpuBackend {
                 dst_layout.shape(),
                 "destination layout overlaps itself",
             ));
+        }
+        if let (CpuStorage::F32(d), CpuStorage::F32(s)) = (&mut *d, s)
+            && dst_layout.numel() > 0
+            && let Some(rd) = dst_layout.contiguous_range()
+        {
+            elementwise::copy_strided_f32_into_slice(s, src.layout, &mut d[rd]);
+            return Ok(());
         }
         macro_rules! go {
             ($($v:ident),*) => {

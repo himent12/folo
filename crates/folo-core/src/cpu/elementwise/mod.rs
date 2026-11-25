@@ -4,6 +4,7 @@ mod simd;
 mod simd_log_tanh;
 #[cfg(test)]
 mod tests;
+mod transpose;
 
 use super::pool_alloc::alloc_uninit;
 use super::{CHUNK, PAR_MIN};
@@ -16,6 +17,9 @@ pub use simd::SILU_MAX_REL_ERR;
 pub(crate) use simd::{exp_scalar, silu_bias_inplace};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use simd::{exp8, silu8};
+pub(crate) use transpose::{
+    copy_strided_f32, copy_strided_f32_into, copy_strided_f32_into_slice, transpose_f32_2d,
+};
 
 /// Fill `out` (contiguous, `plan.rows * plan.len` long) row by row, in parallel when large.
 #[inline]
@@ -51,6 +55,9 @@ pub(crate) fn fill_rows<T: Send, const K: usize>(
 
 /// A contiguous copy of the elements of `src` selected by `layout`.
 pub(crate) fn copy_strided<T: Copy + Send + Sync + Default>(src: &[T], layout: &Layout) -> Vec<T> {
+    if layout.numel() == 0 {
+        return Vec::new();
+    }
     if let Some(r) = layout.contiguous_range() {
         return src[r].to_vec();
     }
@@ -63,9 +70,20 @@ pub(crate) fn copy_strided_into<T: Copy + Send + Sync>(
     layout: &Layout,
     mut out: Vec<T>,
 ) -> Vec<T> {
-    debug_assert_eq!(out.len(), layout.numel());
+    assert_eq!(out.len(), layout.numel(), "copy_strided_into: length mismatch");
+    if out.is_empty() {
+        return out;
+    }
     if let Some(r) = layout.contiguous_range() {
-        out.copy_from_slice(&src[r]);
+        let s = &src[r];
+        if out.len() >= PAR_MIN {
+            par_chunks(&mut out, CHUNK, &|c, chunk| {
+                let start = c * CHUNK;
+                chunk.copy_from_slice(&s[start..start + chunk.len()]);
+            });
+        } else {
+            out.copy_from_slice(s);
+        }
         return out;
     }
     let plan = RowPlan::<1>::new(layout.dims(), [layout.strides()], [layout.offset()]);
@@ -73,6 +91,8 @@ pub(crate) fn copy_strided_into<T: Copy + Send + Sync>(
     fill_rows(&mut out, &plan, |row, [o]| {
         if s == 1 {
             row.copy_from_slice(&src[o..o + row.len()]);
+        } else if s == 0 {
+            row.fill(src[o]);
         } else {
             for (i, v) in row.iter_mut().enumerate() {
                 *v = src[o + i * s];
@@ -80,6 +100,28 @@ pub(crate) fn copy_strided_into<T: Copy + Send + Sync>(
         }
     });
     out
+}
+
+/// Dispatch a two-operand row kernel over `plan` serially or via rayon, guaranteeing `from < to` on every call.
+#[inline]
+fn run_strided_rows(plan: &RowPlan<2>, row: impl Fn([usize; 2], usize, usize) + Sync) {
+    let len = plan.len;
+    if plan.rows == 0 || len == 0 {
+        return;
+    }
+    let run = |start: usize, end: usize| plan.for_rows(start..end, |_, o| row(o, 0, len));
+    if plan.rows * len < PAR_MIN {
+        run(0, plan.rows);
+    } else if plan.rows == 1 {
+        let o = plan.base;
+        par_for(len.div_ceil(CHUNK), &|t| row(o, t * CHUNK, ((t + 1) * CHUNK).min(len)));
+    } else {
+        let rows_per_task = (CHUNK / len).max(1);
+        par_for(plan.rows.div_ceil(rows_per_task), &|t| {
+            let start = t * rows_per_task;
+            run(start, (start + rows_per_task).min(plan.rows));
+        });
+    }
 }
 
 /// Write `src` (read through `src_layout`) into `dst` through `dst_layout`.
@@ -93,7 +135,63 @@ pub(crate) fn copy_into<T: Copy + Send + Sync>(
     src: &[T],
     src_layout: &Layout,
 ) {
-    strided_update(dst, dst_layout, src, src_layout, |_, s| s);
+    assert_eq!(dst_layout.shape(), src_layout.shape(), "strided write: shape mismatch");
+    assert!(dst_layout.fits(dst.len()), "strided write: destination layout out of bounds");
+    assert!(src_layout.fits(src.len()), "strided write: source layout out of bounds");
+    assert!(dst_layout.is_non_overlapping(), "strided write: destination layout overlaps itself");
+    let n = dst_layout.numel();
+    if n == 0 {
+        return;
+    }
+    if let (Some(rd), Some(rs)) = (dst_layout.contiguous_range(), src_layout.contiguous_range()) {
+        let (d, s) = (&mut dst[rd], &src[rs]);
+        if n >= PAR_MIN {
+            par_chunks(d, CHUNK, &|c, chunk| {
+                let start = c * CHUNK;
+                chunk.copy_from_slice(&s[start..start + chunk.len()]);
+            });
+        } else {
+            d.copy_from_slice(s);
+        }
+        return;
+    }
+    let plan = RowPlan::<2>::new(
+        dst_layout.dims(),
+        [dst_layout.strides(), src_layout.strides()],
+        [dst_layout.offset(), src_layout.offset()],
+    );
+    let [ds, ss] = plan.inner;
+    let base = SendPtr(dst.as_mut_ptr());
+    run_strided_rows(&plan, |o, from, to| {
+        let p = &base;
+        match (ds, ss) {
+            (1, 1) => {
+                // SAFETY: `dst_layout` lies inside `dst` and is injective (asserted above), `ds == 1`, and
+                // every task owns disjoint `(row, from..to)` elements.
+                let d = unsafe { std::slice::from_raw_parts_mut(p.0.add(o[0] + from), to - from) };
+                d.copy_from_slice(&src[o[1] + from..o[1] + to]);
+            }
+            (1, 0) => {
+                // SAFETY: same disjointness and bounds guarantee as `(1, 1)`.
+                let d = unsafe { std::slice::from_raw_parts_mut(p.0.add(o[0] + from), to - from) };
+                d.fill(src[o[1]]);
+            }
+            (_, 0) => {
+                let sv = src[o[1]];
+                for i in from..to {
+                    // SAFETY: `dst_layout` lies inside `dst` and is injective; each `(row, i)` is unique.
+                    unsafe { *p.0.add(o[0] + i * ds) = sv };
+                }
+            }
+            _ => {
+                for i in from..to {
+                    let sv = src[o[1] + i * ss];
+                    // SAFETY: `dst_layout` lies inside `dst` and is injective; each `(row, i)` is unique.
+                    unsafe { *p.0.add(o[0] + i * ds) = sv };
+                }
+            }
+        }
+    });
 }
 
 /// `dst[i] = f(dst[i], src[i])` through two layouts of the same shape. Same panics as [`copy_into`].
@@ -118,42 +216,74 @@ fn strided_update<T: Copy + Send + Sync>(
     assert!(dst_layout.fits(dst.len()), "strided write: destination layout out of bounds");
     assert!(src_layout.fits(src.len()), "strided write: source layout out of bounds");
     assert!(dst_layout.is_non_overlapping(), "strided write: destination layout overlaps itself");
+    let n = dst_layout.numel();
+    if n == 0 {
+        return;
+    }
+    if let (Some(rd), Some(rs)) = (dst_layout.contiguous_range(), src_layout.contiguous_range()) {
+        let (d, s) = (&mut dst[rd], &src[rs]);
+        let piece = |c: usize, chunk: &mut [T]| {
+            let start = c * CHUNK;
+            let len = chunk.len();
+            for (dv, &sv) in chunk.iter_mut().zip(&s[start..start + len]) {
+                *dv = f(*dv, sv);
+            }
+        };
+        if n >= PAR_MIN {
+            par_chunks(d, CHUNK, &piece);
+        } else {
+            piece(0, d);
+        }
+        return;
+    }
     let plan = RowPlan::<2>::new(
         dst_layout.dims(),
         [dst_layout.strides(), src_layout.strides()],
         [dst_layout.offset(), src_layout.offset()],
     );
     let [ds, ss] = plan.inner;
-    let len = plan.len;
     let base = SendPtr(dst.as_mut_ptr());
-    // Writes `len` elements of one destination row starting at `o[0]`, elements `from..to` of the row.
-    let row = |o: [usize; 2], from: usize, to: usize| {
+    run_strided_rows(&plan, |o, from, to| {
         let p = &base;
-        for i in from..to {
-            let s = src[o[1] + i * ss];
-            // SAFETY: the destination layout lies inside `dst` (asserted above) and is injective, so every
-            // (row, i) pair addresses a distinct element; rows and row chunks are handed to exactly one task,
-            // so no two tasks write the same element and no reference to `dst` exists meanwhile.
-            unsafe {
-                let d = p.0.add(o[0] + i * ds);
-                *d = f(*d, s);
+        match (ds, ss) {
+            (1, 1) => {
+                // SAFETY: `dst_layout` lies inside `dst` and is injective (asserted above), `ds == 1`, and
+                // every task owns disjoint `(row, from..to)` elements.
+                let d = unsafe { std::slice::from_raw_parts_mut(p.0.add(o[0] + from), to - from) };
+                for (dv, &sv) in d.iter_mut().zip(&src[o[1] + from..o[1] + to]) {
+                    *dv = f(*dv, sv);
+                }
+            }
+            (1, 0) => {
+                // SAFETY: same disjointness and bounds guarantee as `(1, 1)`.
+                let d = unsafe { std::slice::from_raw_parts_mut(p.0.add(o[0] + from), to - from) };
+                let sv = src[o[1]];
+                for dv in d.iter_mut() {
+                    *dv = f(*dv, sv);
+                }
+            }
+            (_, 0) => {
+                let sv = src[o[1]];
+                for i in from..to {
+                    // SAFETY: `dst_layout` lies inside `dst` and is injective; each `(row, i)` is unique.
+                    unsafe {
+                        let d = p.0.add(o[0] + i * ds);
+                        *d = f(*d, sv);
+                    }
+                }
+            }
+            _ => {
+                for i in from..to {
+                    let sv = src[o[1] + i * ss];
+                    // SAFETY: `dst_layout` lies inside `dst` and is injective; each `(row, i)` is unique.
+                    unsafe {
+                        let d = p.0.add(o[0] + i * ds);
+                        *d = f(*d, sv);
+                    }
+                }
             }
         }
-    };
-    // Rows `start..end`, serially: the one walk over the rows every path below shares.
-    let run = |start: usize, end: usize| plan.for_rows(start..end, |_, o| row(o, 0, len));
-    if plan.rows * len < PAR_MIN {
-        run(0, plan.rows);
-    } else if plan.rows == 1 {
-        let o = plan.base;
-        par_for(len.div_ceil(CHUNK), &|t| row(o, t * CHUNK, ((t + 1) * CHUNK).min(len)));
-    } else {
-        let rows_per_task = (CHUNK / len.max(1)).max(1);
-        par_for(plan.rows.div_ceil(rows_per_task), &|t| {
-            let start = t * rows_per_task;
-            run(start, (start + rows_per_task).min(plan.rows));
-        });
-    }
+    });
 }
 
 /// A raw pointer that may be shared across rayon tasks writing disjoint regions.
@@ -407,7 +537,28 @@ pub(crate) fn where3<C: Copy + Send + Sync>(
     lb: &Layout,
     truthy: impl Fn(C) -> bool + Sync,
 ) -> Vec<f32> {
-    let mut out = alloc_uninit(la.numel());
+    let n = la.numel();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut out = alloc_uninit(n);
+    if let (Some(rc), Some(ra), Some(rb)) =
+        (lc.contiguous_range(), la.contiguous_range(), lb.contiguous_range())
+    {
+        let (c, a, b) = (&c[rc], &a[ra], &b[rb]);
+        let piece = |k: usize, o: &mut [f32]| {
+            let r = k * CHUNK..k * CHUNK + o.len();
+            for (((o, &cv), &av), &bv) in o.iter_mut().zip(&c[r.clone()]).zip(&a[r.clone()]).zip(&b[r]) {
+                *o = if truthy(cv) { av } else { bv };
+            }
+        };
+        if n >= PAR_MIN {
+            par_chunks(&mut out, CHUNK, &piece);
+        } else {
+            piece(0, &mut out);
+        }
+        return out;
+    }
     let plan = RowPlan::<3>::new(
         la.dims(),
         [lc.strides(), la.strides(), lb.strides()],
@@ -415,8 +566,62 @@ pub(crate) fn where3<C: Copy + Send + Sync>(
     );
     let [sc, sa, sb] = plan.inner;
     fill_rows(&mut out, &plan, |row, [oc, oa, ob]| {
-        for (i, r) in row.iter_mut().enumerate() {
-            *r = if truthy(c[oc + i * sc]) { a[oa + i * sa] } else { b[ob + i * sb] };
+        let len = row.len();
+        match (sc, sa, sb) {
+            (1, 1, 1) => {
+                for (((r, &cv), &av), &bv) in
+                    row.iter_mut().zip(&c[oc..oc + len]).zip(&a[oa..oa + len]).zip(&b[ob..ob + len])
+                {
+                    *r = if truthy(cv) { av } else { bv };
+                }
+            }
+            (1, 1, 0) => {
+                let bv = b[ob];
+                for ((r, &cv), &av) in row.iter_mut().zip(&c[oc..oc + len]).zip(&a[oa..oa + len]) {
+                    *r = if truthy(cv) { av } else { bv };
+                }
+            }
+            (1, 0, 1) => {
+                let av = a[oa];
+                for ((r, &cv), &bv) in row.iter_mut().zip(&c[oc..oc + len]).zip(&b[ob..ob + len]) {
+                    *r = if truthy(cv) { av } else { bv };
+                }
+            }
+            (1, 0, 0) => {
+                let (av, bv) = (a[oa], b[ob]);
+                for (r, &cv) in row.iter_mut().zip(&c[oc..oc + len]) {
+                    *r = if truthy(cv) { av } else { bv };
+                }
+            }
+            (0, 1, 1) => {
+                if truthy(c[oc]) {
+                    row.copy_from_slice(&a[oa..oa + len]);
+                } else {
+                    row.copy_from_slice(&b[ob..ob + len]);
+                }
+            }
+            (0, 1, 0) => {
+                if truthy(c[oc]) {
+                    row.copy_from_slice(&a[oa..oa + len]);
+                } else {
+                    row.fill(b[ob]);
+                }
+            }
+            (0, 0, 1) => {
+                if truthy(c[oc]) {
+                    row.fill(a[oa]);
+                } else {
+                    row.copy_from_slice(&b[ob..ob + len]);
+                }
+            }
+            (0, 0, 0) => {
+                row.fill(if truthy(c[oc]) { a[oa] } else { b[ob] });
+            }
+            _ => {
+                for (i, r) in row.iter_mut().enumerate() {
+                    *r = if truthy(c[oc + i * sc]) { a[oa + i * sa] } else { b[ob + i * sb] };
+                }
+            }
         }
     });
     out

@@ -306,6 +306,11 @@ impl<const K: usize> RowPlan<K> {
         (idx, offs)
     }
 
+    /// Starting element offsets for `row`.
+    pub(crate) fn start_offset(&self, row: usize) -> [usize; K] {
+        self.row_start(row).1
+    }
+
     /// Calls `f(row, offsets)` for rows in `range`, where `offsets[k]` is where row `row` starts in operand `k`.
     #[inline]
     pub fn for_rows(&self, range: std::ops::Range<usize>, mut f: impl FnMut(usize, [usize; K])) {
@@ -333,6 +338,17 @@ impl<const K: usize> RowPlan<K> {
                 idx[d] = 0;
             }
         }
+    }
+}
+
+impl RowPlan<1> {
+    /// If the last outer dimension has unit stride while the inner dimension has stride `> 1`, each outer batch
+    /// is a 2D transpose of `self.len × cols` (row stride `self.inner[0]`) into `cols × self.len` contiguous
+    /// output. Returns `Some((batches, cols))`.
+    pub(crate) fn transpose_plane(&self) -> Option<(usize, usize)> {
+        let &cols = self.outer.last()?;
+        let &s = self.outer_strides[0].last()?;
+        (cols > 1 && s == 1 && self.len > 1 && self.inner[0] > 1).then_some((self.rows / cols, cols))
     }
 }
 
