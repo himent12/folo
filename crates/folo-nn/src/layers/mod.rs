@@ -1,7 +1,8 @@
 //! Layers: convolution, BatchNorm, linear, activations, pooling, upsampling, containers and the `Conv` block.
 //!
 //! - `conv.rs`: [`Conv2d`] and [`Conv2dConfig`].
-//! - `batchnorm.rs`: [`BatchNorm2d`], and [`RunningStats`], the running-statistics guard for non-finite batches.
+//! - `batchnorm/`: [`BatchNorm2d`], its fused CPU training kernel, and [`RunningStats`], the running-statistics
+//!   guard for non-finite batches.
 //! - `conv_bn_act.rs`: [`ConvBnAct`] (docs/MODEL.md's `Conv`) and [`fuse_conv_bn`].
 //! - `simple.rs`: [`Linear`], [`Activation`], [`MaxPool2d`], [`Upsample`], [`Concat`] and [`Identity`].
 //! - `container.rs`: [`Sequential`] and [`ModuleList`].

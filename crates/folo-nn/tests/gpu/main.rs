@@ -684,14 +684,25 @@ fn grad_accumulator_on_gpu_matches_cpu() {
     }
 }
 
-/// The device check of `RunningStats::all_finite` sees a NaN or an infinity in any BatchNorm buffer.
+/// The device check of `RunningStats::all_finite`, `all_finite_live`, and `recapture` sees a NaN or an
+/// infinity in any BatchNorm buffer and restores cleanly.
 #[test]
 fn running_stats_all_finite_on_gpu() {
     let dev = gpu!();
     let mut m = Sequential::new().push(BatchNorm2d::new(3)).push(BatchNorm2d::new(4));
     m.to_device(dev).unwrap();
     assert!(RunningStats::all_finite(&m).unwrap());
-    let snap = RunningStats::capture(&m).unwrap();
+    let mut snap = RunningStats::capture_training(&m).unwrap();
+    assert_eq!(snap.len(), 4);
+    assert!(snap.all_finite_live().unwrap());
+    // Update a buffer with finite values and recapture in place.
+    {
+        let (_, buf) = m.named_buffers().into_iter().nth(3).unwrap();
+        let _g = no_grad();
+        buf.copy_from(&Tensor::from_slice(&[1.5f32, 2.5, 3.5, 4.5], [4]).unwrap().to_device(dev).unwrap())
+            .unwrap();
+    }
+    snap.recapture().unwrap();
     for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         let (_, buf) = m.named_buffers().into_iter().nth(3).unwrap();
         let mut v = buf.to_vec::<f32>().unwrap();
@@ -699,9 +710,21 @@ fn running_stats_all_finite_on_gpu() {
         let _g = no_grad();
         buf.copy_from(&Tensor::from_vec(v, buf.shape()).unwrap().to_device(dev).unwrap()).unwrap();
         assert!(!RunningStats::all_finite(&m).unwrap(), "{bad}");
+        assert!(!snap.all_finite_live().unwrap(), "{bad}");
         snap.restore().unwrap();
         assert!(RunningStats::all_finite(&m).unwrap());
+        assert!(snap.all_finite_live().unwrap());
+        assert_eq!(buf.to_vec::<f32>().unwrap(), [1.5, 2.5, 3.5, 4.5]);
     }
+    // Frozen/eval BN buffers are checked by `all_finite_eval` on GPU too.
+    m.eval();
+    assert!(RunningStats::all_finite_eval(&m).unwrap());
+    {
+        let (_, buf) = m.named_buffers().into_iter().nth(3).unwrap();
+        let _g = no_grad();
+        buf.fill_assign(f32::INFINITY).unwrap();
+    }
+    assert!(!RunningStats::all_finite_eval(&m).unwrap());
 }
 
 /// Global-norm clipping's multi-tensor kernels (`Tensor::norm_partials_many`, `scale_many_`) against the tensor ops
