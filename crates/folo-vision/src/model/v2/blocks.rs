@@ -488,8 +488,9 @@ impl FullPadGate {
 
     /// Modulate `feat [B, C_tgt, H, W]` with `g_scene [B, C_g]`.
     ///
-    /// Computes `1 + tanh(proj(g_scene))` in `F32` before casting to `feat.dtype()` so small gate updates near
-    /// zero initialisation are never quantized away under `F16` AMP or half-precision inference.
+    /// Computes `feat * (1 + tanh(proj(g_scene)))` in `F32` before casting the modulated result back to
+    /// `feat.dtype()`, so small gate updates near zero initialisation are not rounded away before multiplication
+    /// under `F16` AMP or half-precision inference.
     pub fn forward(&self, feat: &Tensor, g_scene: &Tensor) -> Result<Tensor> {
         let (b, c, _, _) = feat.dims4()?;
         let g_in = if g_scene.dtype() != self.proj.weight.dtype() && folo_core::autocast_dtype().is_none() {
@@ -501,8 +502,11 @@ impl FullPadGate {
         let raw_f32 =
             if raw.dtype() == folo_core::DType::F32 { raw } else { raw.to_dtype(folo_core::DType::F32)? };
         let gate = raw_f32.tanh()?.add_scalar(1.0)?.reshape([b, c, 1, 1])?;
-        let gate = if gate.dtype() != feat.dtype() { gate.to_dtype(feat.dtype())? } else { gate };
-        Ok(feat.mul(&gate)?)
+        if feat.dtype() == folo_core::DType::F32 {
+            Ok(feat.mul(&gate)?)
+        } else {
+            Ok(feat.to_dtype(folo_core::DType::F32)?.mul(&gate)?.to_dtype(feat.dtype())?)
+        }
     }
 }
 

@@ -59,8 +59,12 @@ pub fn iou_quality_loss(
             box_raw.dims()
         )));
     }
-    if anchors.len() != a {
-        return Err(invalid(format!("anchors length {} does not match A = {a}", anchors.len())));
+    if anchors.points.len() != a || anchors.strides.len() != a {
+        return Err(invalid(format!(
+            "anchors (points {}, strides {}) do not match A = {a}",
+            anchors.points.len(),
+            anchors.strides.len()
+        )));
     }
     if asg.batch != b || asg.num_anchors != a {
         return Err(invalid(format!(
@@ -76,11 +80,16 @@ pub fn iou_quality_loss(
     let iou_f32 =
         if iou_raw.dtype() == DType::F32 { iou_raw.clone() } else { iou_raw.to_dtype(DType::F32)? };
     let n_fg = asg.num_fg();
-    if asg.anchor.len() != n_fg || asg.target.len() != n_fg || asg.score.len() != n_fg {
+    if asg.image.len() != n_fg || asg.target.len() != n_fg || asg.score.len() != n_fg {
         return Err(invalid("assignment foreground arrays have inconsistent lengths"));
     }
     if n_fg == 0 || gain == 0.0 {
-        return iou_f32.sum_all()?.mul_scalar(0.0);
+        // Graph-connected zero without reducing `iou_f32` values so NaN/Inf logits cannot poison a disabled loss.
+        let out = Tensor::zeros_with([], DType::F32, dev)?;
+        let shape = iou_f32.shape().clone();
+        return Tensor::custom_op("iou_quality_zero", &[&iou_f32], out, move |_| {
+            Ok(vec![Some(Tensor::zeros_with(&shape, DType::F32, dev)?)])
+        });
     }
 
     let mut fg_idx = Vec::with_capacity(n_fg);
@@ -94,9 +103,12 @@ pub fn iou_quality_loss(
                 "assignment entry {k}: (image {img}, anchor {an}) out of bounds ({b}, {a})"
             )));
         }
+        let s = anchors.strides[an];
+        if !s.is_finite() || s <= 0.0 {
+            return Err(invalid(format!("anchor {an} has invalid stride {s} (must be finite and > 0)")));
+        }
         fg_idx.push((img * a + an) as u32);
         let [px, py] = anchors.points[an];
-        let s = anchors.strides[an];
         let gt = asg.target[k];
         anc_xy.extend_from_slice(&[px, py]);
         gt_grid.extend_from_slice(&[gt.x1 / s, gt.y1 / s, gt.x2 / s, gt.y2 / s]);

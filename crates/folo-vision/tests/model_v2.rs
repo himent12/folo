@@ -848,20 +848,35 @@ fn lazyalign_iou_quality_loss_grad_check_and_zero_fg() {
     });
     assert!(any_iou_grad, "iou_quality_loss must produce non-zero gradients on iou_out weights");
 
-    // 3. Zero foreground anchors and gain == 0 return finite scalar zero with zero gradient.
+    // 3. Zero foreground anchors and gain == 0 return exact finite scalar zero with zero gradient,
+    //    even when `iou_raw` contains NaN or Inf logits.
     let empty_targets = vec![ImageTargets::default(), ImageTargets::default()];
     let empty_asg =
         assign_batch(&out.box_raw, &out.cls_raw, &out.anchors, &empty_targets, &loss_cfg).unwrap();
     assert_eq!(empty_asg.num_fg(), 0);
-    let iou_z = iou_raw.detach().requires_grad_();
-    let lz = iou_quality_loss(&iou_z, &out.box_raw, &out.anchors, &empty_asg, out.reg_max, 1.0).unwrap();
-    assert_eq!(lz.item::<f32>().unwrap(), 0.0);
-    let gz = lz.backward().unwrap().get(&iou_z).unwrap().to_vec::<f32>().unwrap();
-    assert!(gz.iter().all(|&v| v == 0.0));
+    let mut poison = vec![0.0f32; iou_raw.numel()];
+    poison[0] = f32::NAN;
+    poison[1] = f32::INFINITY;
+    let iou_z = Tensor::from_vec(poison, iou_raw.shape().clone()).unwrap().requires_grad_();
+    for (a_ref, gain) in [(&empty_asg, 1.0f32), (&asg, 0.0f32)] {
+        let lz = iou_quality_loss(&iou_z, &out.box_raw, &out.anchors, a_ref, out.reg_max, gain).unwrap();
+        assert_eq!(lz.item::<f32>().unwrap(), 0.0);
+        let gz = lz.backward().unwrap().get(&iou_z).unwrap().to_vec::<f32>().unwrap();
+        assert!(gz.iter().all(|&v| v == 0.0));
+    }
 
-    // 4. Invalid gain rejected.
+    // 4. Malformed metadata and invalid gain/strides rejected with Err (never panic).
     assert!(iou_quality_loss(&iou_raw, &out.box_raw, &out.anchors, &asg, out.reg_max, -0.5).is_err());
     assert!(iou_quality_loss(&iou_raw, &out.box_raw, &out.anchors, &asg, out.reg_max, f32::NAN).is_err());
+    let mut bad_img = asg.clone();
+    bad_img.image.pop();
+    assert!(iou_quality_loss(&iou_raw, &out.box_raw, &out.anchors, &bad_img, out.reg_max, 1.0).is_err());
+    let mut bad_strides = out.anchors.clone();
+    bad_strides.strides.pop();
+    assert!(iou_quality_loss(&iou_raw, &out.box_raw, &bad_strides, &asg, out.reg_max, 1.0).is_err());
+    let mut zero_stride = out.anchors.clone();
+    zero_stride.strides[asg.anchor[0] as usize] = 0.0;
+    assert!(iou_quality_loss(&iou_raw, &out.box_raw, &zero_stride, &asg, out.reg_max, 1.0).is_err());
 }
 
 #[test]
@@ -920,8 +935,20 @@ fn lazyalign_iou_score_fusion_and_detections() {
     assert_ne!(dets_raw[0][0].bbox, dets_fused[0][0].bbox, "IoU fusion should promote higher-IoU anchor");
     assert!(dets_fused[0][0].score > dets_fused[0][1].score);
 
-    // Invalid iou_alpha rejected.
+    // Invalid iou_alpha rejected, and zero anchors return empty per-image outputs cleanly without panicking.
     assert!(out.decode_images(-0.1).is_err());
     assert!(out.decode_images(1.5).is_err());
     assert!(out.detections(&nms, f32::NAN).is_err());
+    let empty_out = folo_vision::model::v2::HeadOutputV2 {
+        box_raw: Tensor::zeros([2, 64, 0]),
+        cls_raw: Tensor::zeros([2, 3, 0]),
+        iou_raw: Some(Tensor::zeros([2, 1, 0])),
+        mode: HeadMode::O2m,
+        o2o: None,
+        anchors: folo_vision::decode::Anchors { points: Vec::new(), strides: Vec::new(), levels: Vec::new() },
+        reg_max: 16,
+        num_classes: 3,
+    };
+    assert_eq!(empty_out.decode_images(0.5).unwrap(), vec![(Vec::new(), Vec::new()); 2]);
+    assert_eq!(empty_out.detections(&nms, 0.5).unwrap(), vec![Vec::new(); 2]);
 }

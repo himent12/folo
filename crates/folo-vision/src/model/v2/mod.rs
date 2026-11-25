@@ -191,6 +191,34 @@ impl HeadOutputV2 {
         }
     }
 
+    /// Validate `box_raw`, `cls_raw`, `anchors`, and optional `iou_raw` shapes before decoding.
+    fn check_decode_shapes(&self, check_iou: bool) -> Result<(usize, usize, usize)> {
+        let (b, a, nc, rm) = (self.batch(), self.num_anchors(), self.num_classes, self.reg_max);
+        if nc == 0 || rm < 2 {
+            return Err(Error::Invalid(format!("HeadOutputV2: invalid num_classes={nc} or reg_max={rm}")));
+        }
+        if self.anchors.strides.len() != a
+            || self.box_raw.dims() != [b, 4 * rm, a]
+            || self.cls_raw.dims() != [b, nc, a]
+        {
+            return Err(Error::Invalid(format!(
+                "HeadOutputV2: box_raw {:?} / cls_raw {:?} do not match {a} anchors (nc={nc}, reg_max={rm})",
+                self.box_raw.dims(),
+                self.cls_raw.dims()
+            )));
+        }
+        if check_iou
+            && let Some(iou_raw) = &self.iou_raw
+            && iou_raw.dims() != [b, 1, a]
+        {
+            return Err(Error::Invalid(format!(
+                "HeadOutputV2: iou_raw {:?} does not match [{b}, 1, {a}]",
+                iou_raw.dims()
+            )));
+        }
+        Ok((b, a, nc))
+    }
+
     /// Decode every image's `(boxes [A], scores [A, nc])` in input pixels, fusing `iou_raw` with exponent
     /// `iou_alpha` in `0..=1` (`p_cls^(1 - alpha) * sigmoid(iou_raw)^alpha`) when `iou_raw` is present and
     /// `iou_alpha > 0`.
@@ -200,6 +228,10 @@ impl HeadOutputV2 {
                 "HeadOutputV2::decode_images: iou_alpha must be in 0..=1, got {iou_alpha}"
             )));
         }
+        let (b, a, nc) = self.check_decode_shapes(iou_alpha > 0.0)?;
+        if a == 0 {
+            return Ok(vec![(Vec::new(), Vec::new()); b]);
+        }
         let head = self.clone().into_head_output();
         let mut decoded = head.decode_images()?;
         if iou_alpha == 0.0 {
@@ -208,13 +240,6 @@ impl HeadOutputV2 {
         let Some(iou_raw) = &self.iou_raw else {
             return Ok(decoded);
         };
-        let (b, a, nc) = (self.batch(), self.num_anchors(), self.num_classes);
-        if iou_raw.dims() != [b, 1, a] {
-            return Err(Error::Invalid(format!(
-                "HeadOutputV2: iou_raw {:?} does not match [{b}, 1, {a}]",
-                iou_raw.dims()
-            )));
-        }
         let _g = no_grad();
         let iou_host = if iou_raw.device().is_cpu() {
             iou_raw.to_dtype(DType::F32)?
@@ -237,11 +262,15 @@ impl HeadOutputV2 {
                 "HeadOutputV2::detections: iou_alpha must be in 0..=1, got {iou_alpha}"
             )));
         }
+        let (b, a, nc) = self.check_decode_shapes(iou_alpha > 0.0)?;
+        if a == 0 {
+            return Ok(vec![Vec::new(); b]);
+        }
         let head = self.clone().into_head_output();
         if self.iou_raw.is_none() || iou_alpha == 0.0 {
             return head.detections(nms);
         }
-        let (nc, mode) = (self.num_classes, self.mode);
+        let mode = self.mode;
         let aux = head.dfl_aux_for(nms)?;
         let decoded = self.decode_images(iou_alpha)?;
         Ok(decoded
