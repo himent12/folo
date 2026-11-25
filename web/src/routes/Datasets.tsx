@@ -11,6 +11,7 @@ import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import ClassStrip from '$lib/detect/ClassStrip';
 import { ago, count } from '$lib/format';
+import { LABEL_FEATURE } from '$lib/label';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
@@ -21,6 +22,7 @@ import ErrorState from '$lib/ui/ErrorState';
 import Input from '$lib/ui/Input';
 import Panel from '$lib/ui/Panel';
 import Segmented from '$lib/ui/Segmented';
+import Select from '$lib/ui/Select';
 import Skeleton from '$lib/ui/Skeleton';
 import Gate from '$lib/ui/Gate';
 import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
@@ -32,6 +34,15 @@ import { datasetChanges, generationEnded, landed, pendingGeneration } from './da
 import { datasetProblem, PROBLEM_LABEL, readDataset, type ListedDataset } from './datasets/problem';
 
 type Format = 'all' | 'yolo' | 'coco';
+type SortKey = 'name' | 'images' | 'boxes' | 'classes';
+const SORT_OPTIONS: { value: SortKey; label: string }[] = [
+  { value: 'name', label: 'Name' },
+  { value: 'images', label: 'Most images' },
+  { value: 'boxes', label: 'Most boxes' },
+  { value: 'classes', label: 'Most classes' },
+];
+const cmpName = (a: ListedDataset, b: ListedDataset) =>
+  a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.id.localeCompare(b.id);
 /** How often the list reads itself again while a sample set this tab asked for still generates. */
 const GENERATION_POLL_MS = 3000;
 
@@ -131,11 +142,20 @@ export default function Datasets() {
   const query = signal('');
   // The toolbar's filter, at its left as on Runs and Models (one shape for the three list toolbars): by format.
   const format = signal<Format>('all');
+  const sort = signal<SortKey>('name');
   const formatCount = (f: Format) => (datasets.data ?? []).filter((d) => f === 'all' || d.format === f).length;
   const shown = computed(() => {
     const q = query.get().trim().toLowerCase();
     const f = format.get();
-    return (datasets.data ?? []).filter((d) => (f === 'all' || d.format === f) && (!q || `${d.name} ${d.path} ${d.format} ${d.id}`.toLowerCase().includes(q)));
+    const s = sort.get();
+    return (datasets.data ?? [])
+      .filter((d) => (f === 'all' || d.format === f) && (!q || `${d.name} ${d.path} ${d.format} ${d.id}`.toLowerCase().includes(q)))
+      .sort((a, b) => {
+        if (s === 'images') return (b.problem ? -1 : imageCount(b)) - (a.problem ? -1 : imageCount(a)) || cmpName(a, b);
+        if (s === 'boxes') return (b.problem ? -1 : (b.stats?.boxes ?? -1)) - (a.problem ? -1 : (a.stats?.boxes ?? -1)) || cmpName(a, b);
+        if (s === 'classes') return b.classes.length - a.classes.length || cmpName(a, b);
+        return cmpName(a, b);
+      });
   });
   // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds, "5 datasets · 9,400 images ·
   // 64,086 boxes", whatever the filter; a narrowed list says what it shows under it. A dataset that cannot be read
@@ -154,13 +174,15 @@ export default function Datasets() {
   const hasData = computed(() => (datasets.data ? datasets.data.length > 0 : !datasets.error));
   /** Cards to show (or their skeleton); with none a panel holds the state alone, where the grid would be. */
   const hasRows = computed(() => (datasets.data ? shown.get().length > 0 : !datasets.error));
+  /** Agent labeling is hidden when the server's health explicitly reports it is unavailable (e.g. `folo serve --mock`). */
+  const canLabel = computed(() => !hub.lacks(LABEL_FEATURE));
 
   // Labeling images (agent labeling) lives under Datasets: a secondary action beside Add dataset (the ⋯ on phones).
   return (
     <>
       <Page
         title="Datasets"
-        more={[{ label: 'Label images', icon: Tags, href: href('/datasets/label') }]}
+        more={canLabel.get() ? [{ label: 'Label images', icon: Tags, href: href('/datasets/label') }] : []}
         moreLabel="More dataset actions"
         // What the page holds (what a dataset is, YOLO or COCO folders, is the empty state's).
         sub={facts.get() ? () => <span class="num">{facts.get()!.join(' · ')}</span> : undefined}
@@ -190,6 +212,10 @@ export default function Datasets() {
                 { value: 'coco', label: 'COCO', meta: datasets.data?.length ? String(formatCount('coco')) : undefined },
               ]}
             />
+          </div>{' '}
+          <div class="lt-sort">
+            <label for="datasets-sort">Sort</label>
+            <Select id="datasets-sort" label="Sort datasets" bind:value={sort} disabled={!hasData.get()} options={SORT_OPTIONS} />
           </div>{' '}
           <div class="lt-search">
             <Input bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" disabled={!hasData.get()} />
@@ -280,7 +306,11 @@ export default function Datasets() {
                 <EmptyState
                   icon={Images}
                   title="No datasets yet"
-                  description="Register a folder of images you have labeled (YOLO or COCO), try FOLO in a minute with a generated set of shapes, or have an agent label your images."
+                  description={
+                    canLabel.get()
+                      ? 'Register a folder of images you have labeled (YOLO or COCO), try FOLO in a minute with a generated set of shapes, or have an agent label your images.'
+                      : 'Register a folder of images you have labeled (YOLO or COCO), or try FOLO in a minute with a generated set of shapes.'
+                  }
                   actions={() => (
                     <>
                       <Button icon={FolderOpen} onclick={() => add('folder')}>
@@ -289,9 +319,11 @@ export default function Datasets() {
                       <Button icon={Sparkles} onclick={() => add('synthetic')}>
                         Generate sample set
                       </Button>
-                      <Button icon={Tags} href={href('/datasets/label')}>
-                        Label images
-                      </Button>
+                      {canLabel.get() ? (
+                        <Button icon={Tags} href={href('/datasets/label')}>
+                          Label images
+                        </Button>
+                      ) : null}
                     </>
                   )}
                 />
@@ -342,6 +374,37 @@ export default function Datasets() {
 }
 
 css`
+  .lt-sort {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-left: auto;
+  }
+  .lt-sort label {
+    flex-shrink: 0;
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
+  .lt-sort :global(.select) {
+    width: 160px;
+  }
+  .list-toolbar .lt-search {
+    margin-left: 0;
+  }
+  @media (max-width: 1023px) {
+    .lt-sort {
+      margin-left: 0;
+    }
+  }
+  @media (max-width: 767px) {
+    .lt-sort {
+      flex-basis: 100%;
+    }
+    .lt-sort :global(.select) {
+      flex: 1;
+      width: auto;
+    }
+  }
   .cards {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
