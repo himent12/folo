@@ -1,12 +1,55 @@
-//! Depthwise convs (groups = channels): a direct kernel per output plane, with AVX2 at stride 1 (the plane
-//! copied once with its padding, every output vector its taps' FMAs in registers), and their gradients.
+//! Depthwise convs (groups = channels): direct kernels per output plane, with AVX2+FMA fast paths for
+//! stride-1 (ring-buffered 3×3 and general stride-1), stride-2 (even/odd AVX2 deinterleave), and stride-1/2
+//! backward kernels, Wasm SIMD128 at stride 1, and TLS scratch reuse.
+
+#[cfg(target_arch = "x86_64")]
+mod avx2;
+
+use std::cell::RefCell;
+
+use smallvec::SmallVec;
 
 use super::{ChannelEpilogue, ConvGeom, ConvInput, valid_cols};
-#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use crate::backend::UnaryOp;
-#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use crate::cpu::gemm::BiasAct;
 use crate::cpu::par_chunks;
+
+/// Maximum per-thread TLS scratch retained across depthwise calls (256K floats = 1 MiB).
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
+const DW_TLS_CAP: usize = 1 << 18;
+
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
+thread_local! {
+    /// Reusable padded-plane scratch per worker thread, avoiding per-task heap allocations on every depthwise call.
+    static DW_PAD_TLS: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Borrow the thread-local depthwise scratch buffer, shrinking oversized buffers before releasing; falls back to
+/// a local `Vec` on re-entrant use or TLS teardown.
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
+fn with_dw_pad<R>(f: impl FnOnce(&mut Vec<f32>) -> R) -> R {
+    let mut f = Some(f);
+    let res = DW_PAD_TLS.try_with(|cell| {
+        if let Ok(mut buf) = cell.try_borrow_mut() {
+            let out = (f.take().unwrap())(&mut buf);
+            if buf.capacity() > DW_TLS_CAP {
+                *buf = Vec::new();
+            }
+            Some(out)
+        } else {
+            None
+        }
+    });
+    match res {
+        Ok(Some(out)) => out,
+        _ => {
+            let mut local = Vec::new();
+            (f.take().unwrap())(&mut local)
+        }
+    }
+}
 
 /// Dot product with independent accumulators so it vectorises.
 #[inline]
@@ -24,73 +67,6 @@ fn dot_scalar(a: &[f32], b: &[f32]) -> f32 {
         s += v;
     }
     s
-}
-
-/// 8-wide AVX2 dot product, bitwise identical to [`dot_scalar`] (non-FMA `mul` + `add`, 8 lanes, remainder
-/// summed first).
-///
-/// # Safety
-/// The CPU supports AVX2.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
-    use std::arch::x86_64::*;
-    assert_eq!(a.len(), b.len());
-    let (ca, ra) = a.as_chunks::<8>();
-    let (cb, rb) = b.as_chunks::<8>();
-    let mut acc = [0f32; 8];
-    // SAFETY: `as_chunks::<8>()` guarantees 8-float chunks, `acc` is `[f32; 8]`, and AVX2 is enabled.
-    unsafe {
-        let mut s0 = _mm256_setzero_ps();
-        for (x, y) in ca.iter().zip(cb) {
-            let prod = _mm256_mul_ps(_mm256_loadu_ps(x.as_ptr()), _mm256_loadu_ps(y.as_ptr()));
-            s0 = _mm256_add_ps(s0, prod);
-        }
-        _mm256_storeu_ps(acc.as_mut_ptr(), s0);
-    }
-    let mut s: f32 = ra.iter().zip(rb).map(|(x, y)| x * y).sum();
-    for v in acc {
-        s += v;
-    }
-    s
-}
-
-/// 16-wide AVX2 row update `dst[i] += wv * src[i]`, bitwise identical to scalar `*d += wv * s` (non-FMA).
-///
-/// # Safety
-/// The CPU supports AVX2.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn mul_add_row_avx2(dst: &mut [f32], src: &[f32], wv: f32) {
-    use std::arch::x86_64::*;
-    assert_eq!(dst.len(), src.len());
-    let w = _mm256_set1_ps(wv);
-    let (d16, d_rem) = dst.as_chunks_mut::<16>();
-    let (s16, s_rem) = src.as_chunks::<16>();
-    for (dc, sc) in d16.iter_mut().zip(s16) {
-        // SAFETY: `dc` and `sc` are `[f32; 16]` (64 bytes) and AVX2 is enabled.
-        unsafe {
-            let d0 = _mm256_loadu_ps(dc.as_ptr());
-            let d1 = _mm256_loadu_ps(dc.as_ptr().add(8));
-            let s0 = _mm256_loadu_ps(sc.as_ptr());
-            let s1 = _mm256_loadu_ps(sc.as_ptr().add(8));
-            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_add_ps(d0, _mm256_mul_ps(w, s0)));
-            _mm256_storeu_ps(dc.as_mut_ptr().add(8), _mm256_add_ps(d1, _mm256_mul_ps(w, s1)));
-        }
-    }
-    let (d8, d_tail) = d_rem.as_chunks_mut::<8>();
-    let (s8, s_tail) = s_rem.as_chunks::<8>();
-    for (dc, sc) in d8.iter_mut().zip(s8) {
-        // SAFETY: `dc` and `sc` are `[f32; 8]` (32 bytes) and AVX2 is enabled.
-        unsafe {
-            let d0 = _mm256_loadu_ps(dc.as_ptr());
-            let s0 = _mm256_loadu_ps(sc.as_ptr());
-            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_add_ps(d0, _mm256_mul_ps(w, s0)));
-        }
-    }
-    for (d, &s) in d_tail.iter_mut().zip(s_tail) {
-        *d += wv * s;
-    }
 }
 
 /// 8-lane Wasm SIMD128 dot product (2x4 accumulators), bitwise identical to [`dot_scalar`].
@@ -160,8 +136,8 @@ fn mul_add_row_wasm(dst: &mut [f32], src: &[f32], wv: f32) {
     }
 }
 
-/// Precompute `(kx * dw - pw, valid_cols)` once per kernel column.
-fn precompute_kx_cols(g: &ConvGeom) -> Vec<(isize, std::ops::Range<usize>)> {
+/// Precompute `(kx * dw - pw, valid_cols)` once per kernel column (stack-backed for `kw <= 8`).
+fn precompute_kx_cols(g: &ConvGeom) -> SmallVec<[(isize, std::ops::Range<usize>); 8]> {
     let (sw, pw, dw) = (g.p.stride[1] as isize, g.p.padding[1] as isize, g.p.dilation[1] as isize);
     (0..g.kw)
         .map(|kx| {
@@ -173,7 +149,7 @@ fn precompute_kx_cols(g: &ConvGeom) -> Vec<(isize, std::ops::Range<usize>)> {
 
 /// One output plane of a depthwise conv: `op += conv(xp, wk)` (`op` is `oh x ow`, `xp` one `h x w` input plane).
 #[inline(always)]
-fn depthwise_plane(xp: &[f32], wk: &[f32], op: &mut [f32], g: &ConvGeom) {
+pub(super) fn depthwise_plane(xp: &[f32], wk: &[f32], op: &mut [f32], g: &ConvGeom) {
     let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
     let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
     let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
@@ -208,21 +184,24 @@ fn depthwise_plane(xp: &[f32], wk: &[f32], op: &mut [f32], g: &ConvGeom) {
     }
 }
 
-/// [`depthwise_plane`] compiled for AVX2 (8-wide rows).
-///
-/// # Safety
-/// The CPU supports AVX2 and FMA.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn depthwise_plane_avx2(xp: &[f32], wk: &[f32], op: &mut [f32], g: &ConvGeom) {
-    depthwise_plane(xp, wk, op, g)
-}
-
 /// Output elements per [`depthwise_forward`] task (whole planes, at least one): small planes are grouped so a
 /// task is not dominated by scheduling.
 const DW_TASK_OUTPUTS: usize = 1 << 14;
 
-pub(super) fn depthwise_forward(
+/// Look up input channel `ic` of image `img` directly from `x.parts` without building a `Vec<Vec<&[f32]>>`.
+#[inline]
+fn input_plane<'a>(x: ConvInput<'a>, img: usize, mut ic: usize, hw: usize) -> &'a [f32] {
+    for p in x.parts {
+        if ic < p.c {
+            let start = p.offset + img * p.img_stride + ic * hw;
+            return &p.data[start..start + hw];
+        }
+        ic -= p.c;
+    }
+    unreachable!("depthwise: input channel out of bounds")
+}
+
+pub(in super::super) fn depthwise_forward(
     x: ConvInput<'_>,
     wt: &[f32],
     out: &mut [f32],
@@ -232,54 +211,73 @@ pub(super) fn depthwise_forward(
 ) {
     let mult = g.o / g.c;
     let (hw, ohw, khw) = (g.h * g.w, g.ohw(), g.kh * g.kw);
-    let planes: Vec<Vec<&[f32]>> = (0..g.n).map(|img| x.planes(img, hw)).collect();
+    if g.n == 0 || g.o == 0 || ohw == 0 {
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     let avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
     #[cfg(target_arch = "x86_64")]
-    let fast = avx2 && g.p.stride == [1, 1];
+    let avx2_plan = if avx2 { avx2::plan_avx2(g) } else { avx2::Avx2Plan::Fallback };
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     let wasm_pad = if !accumulate && g.p.stride == [1, 1] { wasm_pad_dims(g) } else { None };
     let total = g.n * g.o;
     let per_task = DW_TASK_OUTPUTS.div_ceil(ohw).min(total.div_ceil(4 * rayon::current_num_threads())).max(1);
     par_chunks(out, per_task * ohw, &|t, ops| {
-        #[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
-        let mut pad = Vec::new();
-        for (p, op) in ops.chunks_mut(ohw).enumerate() {
-            let plane = t * per_task + p;
-            let (img, oc) = (plane / g.o, plane % g.o);
-            let xp = planes[img][oc / mult];
-            let wk = &wt[oc * khw..(oc + 1) * khw];
-            #[cfg(target_arch = "x86_64")]
-            if fast {
-                // SAFETY: AVX2 and FMA were detected above.
-                unsafe {
-                    depthwise_s1_avx2(xp, wk, op, g, accumulate, epi.map(|e| e.rows_from(oc)), &mut pad)
-                };
-                continue;
-            }
-            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-            if let Some((owp, wpd, pad_len)) = wasm_pad
-                && wk.iter().all(|v| v.is_finite())
-            {
-                depthwise_s1_wasm(xp, wk, op, g, (owp, wpd, pad_len), epi.map(|e| e.rows_from(oc)), &mut pad);
-                continue;
-            }
-            if !accumulate {
-                op.fill(0.0);
-            }
-            #[cfg(target_arch = "x86_64")]
-            if avx2 {
-                // SAFETY: AVX2 and FMA were detected above.
-                unsafe { depthwise_plane_avx2(xp, wk, op, g) };
-            } else {
+        let run_ops = |#[cfg(any(
+            target_arch = "x86_64",
+            all(target_arch = "wasm32", target_feature = "simd128")
+        ))]
+                       pad: &mut Vec<f32>| {
+            for (p, op) in ops.chunks_mut(ohw).enumerate() {
+                let plane = t * per_task + p;
+                let (img, oc) = (plane / g.o, plane % g.o);
+                let xp = input_plane(x, img, oc / mult, hw);
+                let wk = &wt[oc * khw..(oc + 1) * khw];
+                #[cfg(target_arch = "x86_64")]
+                if !matches!(avx2_plan, avx2::Avx2Plan::Fallback) && wk.iter().all(|v| v.is_finite()) {
+                    // SAFETY: AVX2 and FMA were detected above and `avx2_plan` checked all padded dimensions.
+                    unsafe {
+                        avx2::run_avx2_plan(
+                            avx2_plan,
+                            xp,
+                            wk,
+                            op,
+                            g,
+                            accumulate,
+                            epi.map(|e| e.rows_from(oc)),
+                            pad,
+                        );
+                    }
+                    continue;
+                }
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                if let Some((owp, wpd, pad_len)) = wasm_pad
+                    && wk.iter().all(|v| v.is_finite())
+                {
+                    depthwise_s1_wasm(xp, wk, op, g, (owp, wpd, pad_len), epi.map(|e| e.rows_from(oc)), pad);
+                    continue;
+                }
+                if !accumulate {
+                    op.fill(0.0);
+                }
+                #[cfg(target_arch = "x86_64")]
+                if avx2 {
+                    // SAFETY: AVX2 and FMA were detected above.
+                    unsafe { avx2::depthwise_plane_avx2(xp, wk, op, g) };
+                } else {
+                    depthwise_plane(xp, wk, op, g);
+                }
+                #[cfg(not(target_arch = "x86_64"))]
                 depthwise_plane(xp, wk, op, g);
+                if let Some(e) = epi {
+                    e.apply(oc, op);
+                }
             }
-            #[cfg(not(target_arch = "x86_64"))]
-            depthwise_plane(xp, wk, op, g);
-            if let Some(e) = epi {
-                e.apply(oc, op);
-            }
-        }
+        };
+        #[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
+        with_dw_pad(run_ops);
+        #[cfg(not(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128"))))]
+        run_ops();
     });
 }
 
@@ -305,10 +303,6 @@ fn wasm_pad_dims(g: &ConvGeom) -> Option<(usize, usize, usize)> {
 /// One output plane of a stride-1 overwriting depthwise conv with Wasm SIMD128 (`f32x4` × 4 register
 /// accumulators): pads the input plane once, computes taps in `(ky, kx)` order, and fuses `bias`,
 /// `bias + SiLU`, and `bias + ReLU` directly in `v128` registers.
-///
-/// Caller ensures `!accumulate` and every weight in `wk` is finite, so starting accumulators at `+0.0`
-/// guarantees `acc` never becomes `-0.0` and padded `wv * 0.0` taps leave every accumulator bitwise
-/// identical to [`depthwise_plane`].
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 fn depthwise_s1_wasm(
     xp: &[f32],
@@ -375,7 +369,6 @@ fn depthwise_s1_wasm(
                     match act {
                         None => x,
                         Some(UnaryOp::Silu) => crate::cpu::elementwise::silu4_wasm(x),
-                        // `f32x4_pmax(zero, x)` = `0.0 < x ? x : +0.0`, matching `x.max(0.0)` on `-0.0` and NaN.
                         Some(UnaryOp::Relu) => f32x4_pmax(zero, x),
                         _ => unreachable!(),
                     }
@@ -400,7 +393,7 @@ fn depthwise_s1_wasm(
 
 /// Scalar-only depthwise forward for direct SIMD vs scalar parity tests.
 #[cfg(test)]
-pub(super) fn depthwise_forward_scalar(
+pub(in super::super) fn depthwise_forward_scalar(
     x: ConvInput<'_>,
     wt: &[f32],
     out: &mut [f32],
@@ -410,10 +403,9 @@ pub(super) fn depthwise_forward_scalar(
 ) {
     let mult = g.o / g.c;
     let (hw, ohw, khw) = (g.h * g.w, g.ohw(), g.kh * g.kw);
-    let planes: Vec<Vec<&[f32]>> = (0..g.n).map(|img| x.planes(img, hw)).collect();
     for (plane, op) in out.chunks_mut(ohw).enumerate() {
         let (img, oc) = (plane / g.o, plane % g.o);
-        let xp = planes[img][oc / mult];
+        let xp = input_plane(x, img, oc / mult, hw);
         let wk = &wt[oc * khw..(oc + 1) * khw];
         if !accumulate {
             op.fill(0.0);
@@ -425,116 +417,7 @@ pub(super) fn depthwise_forward_scalar(
     }
 }
 
-/// One output plane of a stride-1 depthwise conv with AVX2: `op = conv(xp, wk)` (plus the previous `op` if
-/// `accumulate`), then `epi` (its row 0 is this channel). The input plane is first copied into `pad` with its
-/// zero padding (and slack up to a whole number of vectors), so every output vector is the `kh·kw` taps'
-/// fused multiply-adds, in `(ky, kx)` order, of plain unaligned loads, held in registers four vectors at a
-/// time; the identity and SiLU epilogues are applied there too (the lanes of `silu_bias_inplace`), others as a
-/// pass over the finished plane.
-///
-/// # Safety
-/// The CPU supports AVX2 and FMA.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-#[allow(clippy::too_many_arguments)]
-unsafe fn depthwise_s1_avx2(
-    xp: &[f32],
-    wk: &[f32],
-    op: &mut [f32],
-    g: &ConvGeom,
-    accumulate: bool,
-    epi: Option<BiasAct<'_>>,
-    pad: &mut Vec<f32>,
-) {
-    use std::arch::x86_64::*;
-    let (ph, pw) = (g.p.padding[0], g.p.padding[1]);
-    let (dh, dw) = (g.p.dilation[0], g.p.dilation[1]);
-    let (h, w, ow) = (g.h, g.w, g.ow);
-    let owp = ow.div_ceil(8) * 8;
-    // Padded row: `prow[X] = x[X - pw]`, for every column a tap of a computed output column reads.
-    let wpd = (owp + dw * (g.kw - 1)).max(pw + w);
-    pad.clear();
-    pad.resize(h * wpd, 0.0);
-    // A zero-width input (all padding) has nothing to copy.
-    if w > 0 {
-        for (prow, xrow) in pad.chunks_exact_mut(wpd).zip(xp.chunks_exact(w)) {
-            prow[pw..pw + w].copy_from_slice(xrow);
-        }
-    }
-    // In registers: bias + SiLU / bias; otherwise a pass after the plane.
-    let (reg, bias) = match epi {
-        Some(e) if matches!(e.act, None | Some(UnaryOp::Silu)) => (true, e.bias.map_or(0.0, |b| b[0])),
-        _ => (false, 0.0),
-    };
-    let silu = epi.is_some_and(|e| e.act == Some(UnaryOp::Silu));
-    // Without an activation `bias_act_inplace` skips a zero bias; `x + -0.0` is `x` bit for bit.
-    let bv = _mm256_set1_ps(if !silu && bias == 0.0 { -0.0 } else { bias });
-    for oy in 0..g.oh {
-        let orow = &mut op[oy * ow..(oy + 1) * ow];
-        let mut x0 = 0;
-        while x0 < owp {
-            let nv = ((owp - x0) / 8).min(4);
-            let mut acc = [_mm256_setzero_ps(); 4];
-            if accumulate {
-                for (v, a) in acc.iter_mut().enumerate().take(nv) {
-                    let c = x0 + 8 * v;
-                    let mut tmp = [0f32; 8];
-                    let len = ow.saturating_sub(c).min(8);
-                    tmp[..len].copy_from_slice(&orow[c..c + len]);
-                    // SAFETY: `tmp` holds 8 floats.
-                    *a = unsafe { _mm256_loadu_ps(tmp.as_ptr()) };
-                }
-            }
-            for ky in 0..g.kh {
-                let Some(iy) =
-                    ky.checked_mul(dh).and_then(|v| oy.checked_add(v)).and_then(|v| v.checked_sub(ph))
-                else {
-                    continue;
-                };
-                if iy >= h {
-                    continue;
-                }
-                let prow = &pad[iy * wpd..(iy + 1) * wpd];
-                for kx in 0..g.kw {
-                    let wv = _mm256_set1_ps(wk[ky * g.kw + kx]);
-                    let base = x0 + kx * dw;
-                    assert!(base + 8 * nv <= wpd);
-                    for (v, a) in acc.iter_mut().enumerate().take(nv) {
-                        // SAFETY: `base + 8 * nv <= wpd` (asserted), inside this padded row.
-                        *a = _mm256_fmadd_ps(
-                            wv,
-                            unsafe { _mm256_loadu_ps(prow.as_ptr().add(base + 8 * v)) },
-                            *a,
-                        );
-                    }
-                }
-            }
-            for (v, a) in acc.iter().enumerate().take(nv) {
-                let c = x0 + 8 * v;
-                let r = match (reg, silu) {
-                    (false, _) => *a,
-                    (true, false) => _mm256_add_ps(*a, bv),
-                    (true, true) => crate::cpu::elementwise::silu8(_mm256_add_ps(*a, bv)),
-                };
-                if c + 8 <= ow {
-                    // SAFETY: columns c..c + 8 are inside `orow`.
-                    unsafe { _mm256_storeu_ps(orow.as_mut_ptr().add(c), r) };
-                } else if c < ow {
-                    let mut tmp = [0f32; 8];
-                    // SAFETY: `tmp` holds 8 floats.
-                    unsafe { _mm256_storeu_ps(tmp.as_mut_ptr(), r) };
-                    orow[c..].copy_from_slice(&tmp[..ow - c]);
-                }
-            }
-            x0 += 8 * nv;
-        }
-    }
-    if let (false, Some(e)) = (reg, epi) {
-        e.apply(0, op);
-    }
-}
-
-pub(super) fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom) {
+pub(in super::super) fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom) {
     let mult = g.o / g.c;
     let (hw, ohw, khw) = (g.h * g.w, g.ohw(), g.kh * g.kw);
     if g.n == 0 || g.c == 0 || hw == 0 || ohw == 0 {
@@ -575,7 +458,7 @@ pub(super) fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g
                                 #[cfg(target_arch = "x86_64")]
                                 if avx2 && len >= 8 {
                                     // SAFETY: AVX2 was detected above.
-                                    unsafe { mul_add_row_avx2(dst, src, wv) };
+                                    unsafe { avx2::mul_add_row_avx2(dst, src, wv) };
                                     continue;
                                 }
                                 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -585,6 +468,18 @@ pub(super) fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g
                                 }
                                 for (xv, &gv) in dst.iter_mut().zip(src) {
                                     *xv += wv * gv;
+                                }
+                            } else if sw == 2 {
+                                let base = (r.start as isize * 2 + *d) as usize;
+                                let src = &grow[r.clone()];
+                                #[cfg(target_arch = "x86_64")]
+                                if avx2 && src.len() >= 8 {
+                                    // SAFETY: AVX2 was detected above.
+                                    unsafe { avx2::mul_add_stride2_avx2(&mut xrow[base..], src, wv) };
+                                    continue;
+                                }
+                                for (k, &gv) in src.iter().enumerate() {
+                                    xrow[base + k * 2] += wv * gv;
                                 }
                             } else {
                                 let base = (r.start as isize * sw + *d) as usize;
@@ -601,7 +496,7 @@ pub(super) fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g
     });
 }
 
-pub(super) fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom) {
+pub(in super::super) fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom) {
     let mult = g.o / g.c;
     let (hw, ohw, khw) = (g.h * g.w, g.ohw(), g.kh * g.kw);
     if g.n == 0 || g.o == 0 || khw == 0 || ohw == 0 || hw == 0 {
@@ -641,7 +536,7 @@ pub(super) fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mut [f32], g
                                 #[cfg(target_arch = "x86_64")]
                                 if avx2 && gs.len() >= 8 {
                                     // SAFETY: AVX2 was detected above.
-                                    acc += unsafe { dot_avx2(gs, xs) };
+                                    acc += unsafe { avx2::dot_avx2(gs, xs) };
                                     continue;
                                 }
                                 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -650,6 +545,28 @@ pub(super) fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mut [f32], g
                                     continue;
                                 }
                                 acc += dot_scalar(gs, xs);
+                            } else if sw == 2 {
+                                let base = (cols.start as isize * 2 + *d) as usize;
+                                let gs = &grow[cols.clone()];
+                                #[cfg(target_arch = "x86_64")]
+                                if avx2 && gs.len() >= 8 {
+                                    // SAFETY: AVX2 was detected above.
+                                    acc += unsafe { avx2::dot_stride2_avx2(gs, &xrow[base..]) };
+                                    continue;
+                                }
+                                let mut sub = [0f32; 8];
+                                let mut k = 0;
+                                while k + 8 <= gs.len() {
+                                    for lane in 0..8 {
+                                        sub[lane] += gs[k + lane] * xrow[base + (k + lane) * 2];
+                                    }
+                                    k += 8;
+                                }
+                                let mut s: f32 = (k..gs.len()).map(|j| gs[j] * xrow[base + j * 2]).sum();
+                                for v in sub {
+                                    s += v;
+                                }
+                                acc += s;
                             } else {
                                 let base = (cols.start as isize * sw + *d) as usize;
                                 let step = sw as usize;
@@ -664,4 +581,85 @@ pub(super) fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mut [f32], g
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Tensor;
+    use crate::backend::{Conv2dParams, UnaryOp};
+    use crate::cpu::conv::ConvPart;
+    use crate::cpu::gemm::BiasAct;
+    use crate::rng::Rng;
+
+    #[test]
+    fn depthwise_k3s1_s2_and_relu_silu_match_scalar() {
+        let mut rng = Rng::seed(77);
+        let cases = [
+            // (n, c, h, w, kh, kw, stride, pad, dil)
+            (1, 8, 17, 19, 3, 3, 1, 1, 1),
+            (2, 16, 40, 40, 3, 3, 1, 1, 1),
+            (1, 8, 3, 5, 3, 3, 1, 0, 1),
+            (1, 8, 33, 35, 3, 3, 2, 1, 1),
+            (2, 12, 41, 39, 5, 5, 2, 2, 1),
+            (1, 6, 17, 21, 3, 3, 2, 2, 2),
+            (1, 8, 25, 27, 5, 5, 1, 2, 1),
+        ];
+        for (n, c, h, w, kh, kw, s, pad, dil) in cases {
+            let p = Conv2dParams { stride: [s, s], padding: [pad, pad], dilation: [dil, dil], groups: c };
+            let [oh, ow] = p.output_hw(h, w, kh, kw).unwrap();
+            let g = ConvGeom { n, c, h, w, o: c, kh, kw, oh, ow, p };
+            let x: Vec<f32> = (0..n * c * h * w).map(|_| rng.normal()).collect();
+            let wt: Vec<f32> = (0..c * kh * kw).map(|_| rng.normal() * 0.3).collect();
+            let bias: Vec<f32> = (0..c).map(|_| rng.normal() * 0.2).collect();
+            let part = [ConvPart::contiguous(&x, c, h * w)];
+            let input = ConvInput { parts: &part };
+
+            for act in [None, Some(UnaryOp::Relu), Some(UnaryOp::Silu)] {
+                for &acc in &[false, true] {
+                    let init: Vec<f32> = (0..n * c * oh * ow).map(|_| rng.normal() * 0.5).collect();
+                    let mut got = init.clone();
+                    let mut want = init;
+                    let epi = Some(BiasAct { bias: Some(&bias), act });
+                    depthwise_forward(input, &wt, &mut got, &g, acc, epi);
+                    depthwise_forward_scalar(input, &wt, &mut want, &g, acc, epi);
+                    for (i, (&a, &b)) in got.iter().zip(&want).enumerate() {
+                        assert!(
+                            (a - b).abs() <= 1e-4 * b.abs().max(1.0),
+                            "dw fwd mismatch ({n},{c},{h},{w}) k={kh} s={s} act={act:?} acc={acc} at {i}: {a} vs {b}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn depthwise_s2_backward_grad_check_and_nonfinite_weight() {
+        let mut rng = Rng::seed(88);
+        let x = Tensor::randn([2, 8, 19, 21], 0.0, 1.0, &mut rng).requires_grad_();
+        let w = Tensor::randn([8, 1, 3, 3], 0.0, 0.4, &mut rng).requires_grad_();
+        let b = Tensor::randn([8], 0.0, 0.2, &mut rng).requires_grad_();
+        crate::testing::grad_check(|xs| xs[0].conv2d(&xs[1], Some(&xs[2]), 2, 1, 1, 8), &[x.clone(), w, b])
+            .unwrap();
+
+        let w5 = Tensor::randn([8, 1, 5, 5], 0.0, 0.3, &mut rng).requires_grad_();
+        crate::testing::grad_check(|xs| xs[0].conv2d(&xs[1], None, 2, 2, 1, 8), &[x, w5]).unwrap();
+
+        // Non-finite weight must fall back cleanly instead of producing 0.0 * Inf = NaN on padded columns.
+        let p = Conv2dParams { stride: [2, 2], padding: [1, 1], dilation: [1, 1], groups: 2 };
+        let [oh, ow] = p.output_hw(6, 6, 3, 3).unwrap();
+        let g = ConvGeom { n: 1, c: 2, h: 6, w: 6, o: 2, kh: 3, kw: 3, oh, ow, p };
+        let xdata = vec![1.0f32; 2 * 6 * 6];
+        let mut wt = vec![0.5f32; 2 * 9];
+        wt[0] = f32::INFINITY;
+        let part = [ConvPart::contiguous(&xdata, 2, 36)];
+        let mut got = vec![0.0; 2 * oh * ow];
+        let mut want = vec![0.0; 2 * oh * ow];
+        depthwise_forward(ConvInput { parts: &part }, &wt, &mut got, &g, false, None);
+        depthwise_forward_scalar(ConvInput { parts: &part }, &wt, &mut want, &g, false, None);
+        for (a, b) in got.iter().zip(&want) {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
+    }
 }

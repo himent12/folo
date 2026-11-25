@@ -148,6 +148,38 @@ unsafe fn add_row_avx2(dst: &mut [f32], src: &[f32]) {
     }
 }
 
+/// 8-wide AVX2 stride-2 scatter accumulation `dst[2 * k] += src[k]`, leaving odd elements of `dst` untouched.
+///
+/// # Safety
+/// The CPU supports AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn add_stride2_avx2(dst: &mut [f32], src: &[f32]) {
+    use std::arch::x86_64::*;
+    let n = src.len();
+    assert!(n == 0 || (n - 1) * 2 < dst.len(), "add_stride2_avx2: dst slice too short");
+    let vec_n = n.min(dst.len() / 2) / 8 * 8;
+    let zero = _mm256_setzero_ps();
+    // SAFETY: `k + 8 <= vec_n <= n` and `2 * (k + 8) <= dst.len()`.
+    unsafe {
+        for k in (0..vec_n).step_by(8) {
+            let s = _mm256_loadu_ps(src.as_ptr().add(k));
+            let u_lo = _mm256_unpacklo_ps(s, zero);
+            let u_hi = _mm256_unpackhi_ps(s, zero);
+            let add_lo = _mm256_permute2f128_ps::<0x20>(u_lo, u_hi);
+            let add_hi = _mm256_permute2f128_ps::<0x31>(u_lo, u_hi);
+            let dptr = dst.as_mut_ptr().add(2 * k);
+            let d0 = _mm256_loadu_ps(dptr);
+            let d1 = _mm256_loadu_ps(dptr.add(8));
+            _mm256_storeu_ps(dptr, _mm256_blend_ps::<0xAA>(_mm256_add_ps(d0, add_lo), d0));
+            _mm256_storeu_ps(dptr.add(8), _mm256_blend_ps::<0xAA>(_mm256_add_ps(d1, add_hi), d1));
+        }
+    }
+    for (k, &v) in src.iter().enumerate().skip(vec_n) {
+        dst[2 * k] += v;
+    }
+}
+
 /// Accumulate the unfolded gradient `col` (`[cg*kh*kw, ohw]`) into the input planes of one group.
 fn col2im(col: &[f32], gx: &mut [f32], g: &ConvGeom, parallel: bool) {
     let (khw, ohw, hw) = (g.kh * g.kw, g.ohw(), g.h * g.w);
@@ -158,7 +190,7 @@ fn col2im(col: &[f32], gx: &mut [f32], g: &ConvGeom, parallel: bool) {
     let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
     let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
     let (hi, wi) = (g.h as isize, g.w as isize);
-    let kx_cols: Vec<(isize, std::ops::Range<usize>)> = (0..g.kw)
+    let kx_cols: smallvec::SmallVec<[(isize, std::ops::Range<usize>); 8]> = (0..g.kw)
         .map(|kx| {
             let d = kx as isize * dw - pw;
             (d, valid_cols(g.ow, sw, d, wi))
@@ -194,6 +226,18 @@ fn col2im(col: &[f32], gx: &mut [f32], g: &ConvGeom, parallel: bool) {
                     }
                     for (dv, &sv) in dslice.iter_mut().zip(sslice) {
                         *dv += sv;
+                    }
+                } else if sw == 2 {
+                    let base = (cols.start as isize * 2 + *d) as usize;
+                    let sslice = &src[cols.clone()];
+                    #[cfg(target_arch = "x86_64")]
+                    if avx2 && sslice.len() >= 8 {
+                        // SAFETY: AVX2 was detected above.
+                        unsafe { add_stride2_avx2(&mut dst[base..], sslice) };
+                        continue;
+                    }
+                    for (k, &v) in sslice.iter().enumerate() {
+                        dst[base + k * 2] += v;
                     }
                 } else {
                     let base = (cols.start as isize * sw + *d) as usize;
