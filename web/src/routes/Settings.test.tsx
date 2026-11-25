@@ -104,7 +104,17 @@ describe('Settings', () => {
     c = mount(Settings, { target });
     const jump = target.querySelector<HTMLElement>('nav.jump')!;
     await until(() => jump.textContent?.includes('System'), 'the System section');
-    expect([...jump.querySelectorAll('a')].map((a) => a.textContent)).toEqual(['Connection', 'Cloud', 'Appearance', 'Units', 'Keyboard shortcuts', 'System', 'Throughput', 'About']);
+    expect([...jump.querySelectorAll('a')].map((a) => a.textContent)).toEqual([
+      'Connection',
+      'Cloud',
+      'Appearance',
+      'Units',
+      'Keyboard shortcuts',
+      'System',
+      'Throughput',
+      'Diagnostics',
+      'About',
+    ]);
     const scroll = vi.fn();
     const system = target.querySelector<HTMLElement>('#system')!;
     system.scrollIntoView = scroll;

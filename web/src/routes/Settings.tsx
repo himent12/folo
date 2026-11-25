@@ -38,6 +38,7 @@ import { href, router } from '$lib/router';
 import { SCROLL_KEYS, sectionAt } from './settings/spy';
 import ConnectionPanel from './settings/ConnectionPanel';
 import Appearance from './settings/Appearance';
+import DiagnosticsPanel from './settings/DiagnosticsPanel';
 
 const capMarks: Record<CapState, IconType> = { on: CircleCheck, off: CircleMinus, none: CircleSlash };
 /** "Ctrl K" or "⌘ K": the one this platform uses. */
@@ -55,7 +56,25 @@ export default function Settings() {
 
   // What the server can use (f16, tensor cores, mixed precision); servers older than `capabilities` show no panel. It
   // sits low on the page: a real server answers once its GPU is up, and the panel must not push the forms down.
-  const sys = new Resource((s) => hub.api.system(s));
+  const initialPingMs = signal<number | null>(null);
+  const initialPingSeq = signal(0);
+  const sys = new Resource(async (s) => {
+    const t0 = performance.now();
+    try {
+      const data = await hub.api.system(s);
+      if (!s.aborted) {
+        initialPingMs.set(performance.now() - t0);
+        initialPingSeq.set(initialPingSeq.peek() + 1);
+      }
+      return data;
+    } catch (e) {
+      if (!s.aborted) {
+        initialPingMs.set(null);
+        initialPingSeq.set(initialPingSeq.peek() + 1);
+      }
+      throw e;
+    }
+  });
   const caps = computed(() => sys.data?.capabilities);
   /** `/api/system` failed with nothing loaded: System says so (with Retry) instead of being missing (shell F11c). */
   const sysFailed = computed(() => sys.error !== undefined && !sys.data);
@@ -76,6 +95,7 @@ export default function Settings() {
     { id: 'shortcuts', label: 'Keyboard shortcuts' },
     ...(caps.get() || sysFailed.get() ? [{ id: 'system', label: 'System' }] : []),
     ...(hasFeature(sys.data, 'throughput') ? [{ id: 'throughput', label: 'Throughput' }] : []),
+    { id: 'diagnostics', label: 'Diagnostics' },
     { id: 'about', label: 'About' },
   ]);
   /** The server's own reasons as plain text, for an issue or a terminal. */
@@ -392,6 +412,14 @@ export default function Settings() {
           /* What this server has measured of its own speed (servers before #130 list no such feature). */
           <Throughput benchmark={hasFeature(sys.data, 'benchmark')} />
         ) : null}
+
+        <DiagnosticsPanel
+          system={sys.data}
+          systemError={sys.error}
+          initialPingMs={initialPingMs.get()}
+          initialPingSeq={initialPingSeq.get()}
+          studioVersion={pkg.version}
+        />
 
         <Panel title="About" id="about" divided pad="none">
           <dl class="about">
