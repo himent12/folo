@@ -3,12 +3,12 @@
 import { computed, effect, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
-import { pollTogether } from '$lib/api/share';
-import type { Run, RunMetrics } from '$lib/api/types';
+import { pollTogether, reuse } from '$lib/api/share';
+import type { Epoch, Run, RunMetrics } from '$lib/api/types';
 import { fitFloorNote, niceDomain, unitDomain, unitFitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
-import { nearest } from '$lib/charts/downsample';
+import { nearest, type Pt } from '$lib/charts/downsample';
 import type { Series } from '$lib/charts/LineChart';
-import { axisReason, AXIS_REASON, runEnd, runX } from '$lib/charts/runAxis';
+import { axisReason, AXIS_REASON, runEnd, runLength, runX } from '$lib/charts/runAxis';
 import { media } from '$lib/design/tokens';
 import { router } from '$lib/router';
 import { watched } from '$lib/shell/runList';
@@ -50,7 +50,16 @@ export function compareState() {
   const datasets = new Resource((s) => hub.api.datasets(s));
   // Names for runs fine-tuned from a model ("Start from").
   const models = new Resource((s) => hub.api.models(s));
-  const chosen = computed(() => ids.get().map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
+  const runById = computed(() => new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r])));
+  const chosen = computed(() => {
+    const map = runById.get();
+    const out: Run[] = [];
+    for (const id of ids.get()) {
+      const r = map.get(id);
+      if (r) out.push(r);
+    }
+    return out;
+  });
   /** Where the compared runs are: each one's status and epoch ("run_a:running:3,run_b:completed:30"). */
   const moved = computed(() => chosen.get().map((r) => `${r.id}:${r.status}:${r.epoch}`).join(','));
   const runStamp = (r: Run) => `${r.status}:${r.epoch}`;
@@ -63,6 +72,8 @@ export function compareState() {
   /** Set when a confirmed 404 run_not_found arrives while a runs list refresh is already in flight. */
   const needRunsRefresh = signal(false);
   const retryCtrls = new Map<string, AbortController>();
+  const seriesCache = new Map<string, { epochs: readonly Epoch[]; axis: Axis; metric: MetricId; denom: number; points: Pt[]; rev: number }>();
+  let seriesRev = 0;
   let metricsGen = 0;
   let alive = true;
   onCleanup(() => {
@@ -82,6 +93,7 @@ export function compareState() {
     confirmSeq++;
     for (const c of retryCtrls.values()) c.abort();
     retryCtrls.clear();
+    seriesCache.clear();
     untrack(() => {
       dropped.set([]);
       metricErrors.set({});
@@ -196,7 +208,8 @@ export function compareState() {
       const id = list[i]!;
       const res = settled[i]!;
       if (res.status === 'fulfilled') {
-        read.set(id, res.value);
+        const cached = prev?.get(id);
+        read.set(id, cached ? reuse(cached, res.value) : res.value);
         byRun.set(id, snapByRun ? (snapByRun.get(id) ?? null) : null);
       } else {
         const err = res.reason;
@@ -253,7 +266,8 @@ export function compareState() {
       const prev = metrics.data;
       const prevByRun = prev ? readAt.get(prev)?.byRun : undefined;
       const next = new Map(prev ?? []);
-      next.set(id, m);
+      const cached = prev?.get(id);
+      next.set(id, cached ? reuse(cached, m) : m);
       const nextByRun = new Map(prevByRun ?? []);
       nextByRun.set(id, stamp);
       const curErrs = metricErrors.peek();
@@ -425,11 +439,31 @@ export function compareState() {
   // One chart, one metric at a time: four small charts repeated the same legend four times.
   const metricId = signal<MetricId>('m95');
   const metricDef = computed(() => METRICS.find((m) => m.id === metricId.get())!);
+  const emptyEpochs: readonly Epoch[] = [];
+  const samePts = (a: readonly Pt[], b: readonly Pt[]) =>
+    a.length === b.length && a.every((p, i) => Object.is(p.x, b[i]!.x) && Object.is(p.y, b[i]!.y));
   const series = computed(() => {
-    const f = metricDef.get().f;
+    const def = metricDef.get();
+    const f = def.f;
+    const mId = def.id;
     const axis = x.get();
-    return chosen.get().map((r): Series => {
-      const eps = metrics.data?.get(r.id)?.epochs ?? [];
+    const list = chosen.get();
+    const data = metrics.data;
+    const activeIds = new Set<string>();
+    const out = list.map((r): Series => {
+      activeIds.add(r.id);
+      const eps = data?.get(r.id)?.epochs ?? emptyEpochs;
+      const denom = axis === 'progress' ? runLength(r) : 0;
+      let cached = seriesCache.get(r.id);
+      if (!cached || cached.epochs !== eps || cached.axis !== axis || cached.metric !== mId || cached.denom !== denom) {
+        const points = eps.map((e) => ({ x: runX(e.epoch, r, axis), y: f(e) }));
+        if (cached && samePts(cached.points, points)) {
+          cached = { epochs: eps, axis, metric: mId, denom, points: cached.points, rev: cached.rev };
+        } else {
+          cached = { epochs: eps, axis, metric: mId, denom, points, rev: ++seriesRev };
+        }
+        seriesCache.set(r.id, cached);
+      }
       return {
         id: r.id,
         label: r.name,
@@ -437,21 +471,28 @@ export function compareState() {
         pattern: SLOT_PATTERN[slotOf(r.id)],
         // Each line ends in its run's status mark (live, stopped, failed), so a line that stops short says why.
         end: runEnd(r.status) ?? undefined,
-        points: eps.map((e) => ({ x: runX(e.epoch, r, axis), y: f(e) })),
+        points: cached.points,
+        rev: cached.rev,
       };
     });
+    for (const id of seriesCache.keys()) if (!activeIds.has(id)) seriesCache.delete(id);
+    return out;
   });
-  const extent = computed((): [number, number] | null => {
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const s of series.get())
-      for (const p of s.points) {
-        if (!Number.isFinite(p.y)) continue;
-        if (p.y < lo) lo = p.y;
-        if (p.y > hi) hi = p.y;
-      }
-    return Number.isFinite(lo) ? [lo, hi] : null;
-  });
+  const seriesById = computed(() => new Map<string, Series>(series.get().map((s) => [s.id, s])));
+  const extent = computed(
+    (): [number, number] | null => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const s of series.get())
+        for (const p of s.points) {
+          if (!Number.isFinite(p.y)) continue;
+          if (p.y < lo) lo = p.y;
+          if (p.y > hi) hi = p.y;
+        }
+      return Number.isFinite(lo) ? [lo, hi] : null;
+    },
+    { equals: (a, b) => a === b || (!!a && !!b && a[0] === b[0] && a[1] === b[1]) },
+  );
   // Runs that all scored low get a zoomed axis whose caption names the full 0–1 scale (./domain UNIT_ZOOM_BELOW).
   const zoomed = computed(() => !!metricDef.get().unit && !!extent.get() && unitTop(extent.get()![1]) < UNIT_ZOOM_BELOW);
   // The plot itself is at least 360 px tall from 768 px up, so four curves that climb together still separate; phones
@@ -462,7 +503,11 @@ export function compareState() {
   const yChoice = signal<YAxis | null>(null);
   const yAxis = computed<YAxis>(() => yChoice.get() ?? (narrow() && x.get() === 'progress' ? 'zero' : 'fit'));
   const setY = (v: YAxis) => yChoice.set(v);
-  const ys = computed(() => series.get().flatMap((s) => s.points.map((p) => p.y)));
+  const ys = computed(() => {
+    const out: number[] = [];
+    for (const s of series.get()) for (const p of s.points) out.push(p.y);
+    return out;
+  });
   const lastYs = computed(() => series.get().map((s) => s.points.at(-1)?.y ?? NaN));
   // Where the lines carry direct labels (768 px up) the top leaves a label row over the highest end (`withLabelRow`;
   // `unitFitDomain`'s on the fitted span).
@@ -482,7 +527,7 @@ export function compareState() {
 
   // The chips are the legend: each shows its run's value under the cursor, or its latest value at rest.
   function valueOf(id: string): number | null {
-    const pts = series.get().find((s) => s.id === id)?.points ?? [];
+    const pts = seriesById.get().get(id)?.points ?? [];
     const first = pts[0];
     const last = pts[pts.length - 1];
     if (!first || !last) return null;

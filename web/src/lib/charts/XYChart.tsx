@@ -52,42 +52,73 @@ export interface XYChartProps {
 const STRIP_H = 28;
 const DASH = { dash: '6 3', dot: '0.01 4.5' } as const;
 const fmt = (v: number) => String(v);
+const samePair = (a: readonly [number, number], b: readonly [number, number]) => a[0] === b[0] && a[1] === b[1];
+const sameNums = (a: readonly number[], b: readonly number[]) => a.length === b.length && a.every((v, i) => v === b[i]);
+const sameMargin = (a: { top: number; right: number; bottom: number; left: number }, b: { top: number; right: number; bottom: number; left: number }) =>
+  a.top === b.top && a.right === b.right && a.bottom === b.bottom && a.left === b.left;
 
 export default function XYChart(props: XYChartProps) {
   const p = defaults(props, { xFormat: fmt, yFormat: fmt, height: 240, refs: [] as XYRef[], band: null, marks: [] as XYMark[], strip: null, highlight: null });
   const cursor = bindable(props, 'cursor', null);
 
   const width = signal(0);
-  const stops = computed(() =>
-    (p.stops ? p.stops.slice() : [...new Set(p.series.flatMap((s) => s.points.filter((q) => q.y !== null).map((q) => q.x)))]).sort((a, b) => a - b),
+  const xDom = computed(() => p.xDomain, { equals: samePair });
+  const yDom = computed(() => p.yDomain, { equals: samePair });
+  const stops = computed(
+    () => (p.stops ? p.stops.slice() : [...new Set(p.series.flatMap((s) => s.points.filter((q) => q.y !== null).map((q) => q.x)))]).sort((a, b) => a - b),
+    { equals: sameNums },
   );
-  const m = computed(() => {
-    const strip = p.strip;
-    const longest = Math.max(1, ...p.yTicks.map((t) => p.yFormat(t).length), strip ? String(Math.max(0, ...strip.items.map((i) => i.v))).length : 0);
-    return {
-      top: p.yLabel ? 24 : 10,
-      right: 14,
-      bottom: 22 + (p.xLabel ? 16 : 0) + (strip ? STRIP_H + 12 : 0),
-      left: Math.ceil(longest * 7) + 14,
-    };
-  });
+  const m = computed(
+    () => {
+      const strip = p.strip;
+      const longest = Math.max(1, ...p.yTicks.map((t) => p.yFormat(t).length), strip ? String(Math.max(0, ...strip.items.map((i) => i.v))).length : 0);
+      return {
+        top: p.yLabel ? 24 : 10,
+        right: 14,
+        bottom: 22 + (p.xLabel ? 16 : 0) + (strip ? STRIP_H + 12 : 0),
+        left: Math.ceil(longest * 7) + 14,
+      };
+    },
+    { equals: sameMargin },
+  );
   const plotBottom = computed(() => p.height - m.get().bottom);
   const x = computed(() =>
     scaleLinear()
-      .domain(p.xDomain)
+      .domain(xDom.get())
       .range([m.get().left, Math.max(m.get().left + 1, width.get() - m.get().right)]),
   );
-  const y = computed(() => scaleLinear().domain(p.yDomain).range([plotBottom.get(), m.get().top]));
-  const clampY = (v: number) => Math.max(p.yDomain[0], Math.min(p.yDomain[1], v));
+  const y = computed(() => scaleLinear().domain(yDom.get()).range([plotBottom.get(), m.get().top]));
+  const clampY = (v: number) => {
+    const [lo, hi] = yDom.get();
+    return Math.max(lo, Math.min(hi, v));
+  };
   const inkOf = (s: XYSeries) => (s.pattern ? seriesText(s.color) : s.color);
-  const receded = (s: XYSeries) => p.highlight !== null && s.id !== p.highlight && p.series.some((t) => t.id === p.highlight);
+  const activeHighlight = computed(() => (p.highlight !== null && p.series.some((t) => t.id === p.highlight) ? p.highlight : null));
+  const receded = (s: XYSeries) => activeHighlight.get() !== null && s.id !== activeHighlight.get();
 
-  /** Each series' line as an SVG path, broken where a point has no value: once per change of data or scale. */
+  /** Each series' line as an SVG path, broken where a point has no value: memoized per series & scale. */
+  const pathCache = new Map<string, { points: readonly XYPoint[]; d: string }>();
+  let pathScaleKey = '';
   const paths = computed(() => {
     const xx = x.get();
     const yy = y.get();
+    const [yLo, yHi] = yDom.get();
+    const [xLo, xHi] = xDom.get();
+    const mg = m.get();
+    const key = `${xLo},${xHi}|${yLo},${yHi}|${width.get()}|${p.height}|${mg.left},${mg.right},${mg.top},${mg.bottom}`;
+    if (key !== pathScaleKey) {
+      pathScaleKey = key;
+      pathCache.clear();
+    }
     const out = new Map<string, string>();
+    const seen = new Set<string>();
     for (const s of p.series) {
+      seen.add(s.id);
+      const cached = pathCache.get(s.id);
+      if (cached && cached.points === s.points) {
+        out.set(s.id, cached.d);
+        continue;
+      }
       let d = '';
       let pen = false;
       for (const q of s.points) {
@@ -95,11 +126,13 @@ export default function XYChart(props: XYChartProps) {
           pen = false;
           continue;
         }
-        d += `${pen ? 'L' : 'M'}${xx(q.x).toFixed(1)} ${yy(clampY(q.y)).toFixed(1)}`;
+        d += `${pen ? 'L' : 'M'}${xx(q.x).toFixed(1)} ${yy(Math.max(yLo, Math.min(yHi, q.y))).toFixed(1)}`;
         pen = true;
       }
+      pathCache.set(s.id, { points: s.points, d });
       out.set(s.id, d);
     }
+    for (const id of pathCache.keys()) if (!seen.has(id)) pathCache.delete(id);
     return out;
   });
   /** Painted last: the highlighted series, then patterned ones over solid ones. */
@@ -253,8 +286,8 @@ export default function XYChart(props: XYChartProps) {
   };
 
   const ref = (r: () => XYRef) => {
-    const lo = () => Math.max(p.xDomain[0], p.yDomain[0]);
-    const hi = () => Math.min(p.xDomain[1], p.yDomain[1]);
+    const lo = () => Math.max(xDom.get()[0], yDom.get()[0]);
+    const hi = () => Math.min(xDom.get()[1], yDom.get()[1]);
     return (
       <>
         {r().axis === 'diagonal' ? (

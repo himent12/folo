@@ -250,20 +250,39 @@ export default function Runs() {
     if (input && !input.disabled) input.focus();
   }
 
-  const count = (f: Filter) => (runs.data ?? []).filter((r) => groups[f].includes(r.status)).length;
-  const shown = computed(() =>
-    sortRuns(
-      (runs.data ?? []).filter((r) => {
-        if (!groups[filter.get()].includes(r.status)) return false;
-        const q = query.get().trim().toLowerCase();
-        if (!q) return true;
-        return `${r.name} ${r.config.arch} ${datasetName(r)} ${r.id}`.toLowerCase().includes(q);
-      }),
-      sortKey.get(),
-      sortDir.get(),
-      now.get(),
-    ),
+  const counts = computed(
+    () => {
+      let all = 0;
+      let active = 0;
+      let completed = 0;
+      let failed = 0;
+      for (const r of runs.data ?? []) {
+        all++;
+        if (r.status === 'queued' || r.status === 'running' || r.status === 'stopping') active++;
+        else if (r.status === 'completed' || r.status === 'stopped') completed++;
+        else if (r.status === 'failed') failed++;
+      }
+      return { all, active, completed, failed };
+    },
+    { equals: (a, b) => a.all === b.all && a.active === b.active && a.completed === b.completed && a.failed === b.failed },
   );
+  const count = (f: Filter) => counts.get()[f];
+  /** Runs whose elapsed duration grows with the clock (`started` set, `finished` null). */
+  const liveDurationRuns = computed(() => (runs.data ?? []).filter((r) => !!r.started && !r.finished));
+  const filtered = computed(() => {
+    const list = runs.data ?? [];
+    const allowed = groups[filter.get()];
+    const q = query.get().trim().toLowerCase();
+    return list.filter((r) => allowed.includes(r.status) && (!q || `${r.name} ${r.config.arch} ${datasetName(r)} ${r.id}`.toLowerCase().includes(q)));
+  });
+  const shown = computed(() => {
+    const list = filtered.get();
+    const key = sortKey.get();
+    const dir = sortDir.get();
+    // Subscribe to the ticking clock only when sorting by duration AND at least one visible row's duration is live.
+    const t = key === 'duration' && list.some((r) => !!r.started && !r.finished) ? now.get() : 0;
+    return sortRuns(list, key, dir, t);
+  });
 
   const emptySummary = computed(() => emptyFilterSummary({ filter: filter.get(), q: query.get() }));
   const filterStatus = computed(() => {
@@ -281,7 +300,21 @@ export default function Runs() {
   const menuSlot = computed(() => shown.get().some((r) => rowItems(r).length > 0));
   // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds right now, "10 runs · 3 active ·
   // 1 failed · 2h 15m of training", over every run whatever the filter; a filtered list says what it shows under it.
-  const trained = computed(() => (runs.data ?? []).reduce((a, r) => a + (trainingSeconds(r, now.get()) ?? 0), 0));
+  // Split finished runs' static sum from live runs so clock ticks never re-sum finished history.
+  const staticTrained = computed(() => {
+    let total = 0;
+    for (const r of runs.data ?? []) if (r.started && r.finished) total += trainingSeconds(r, 0) ?? 0;
+    return total;
+  });
+  const trained = computed(() => {
+    const base = staticTrained.get();
+    const live = liveDurationRuns.get();
+    if (!live.length) return base;
+    const t = now.get();
+    let total = base;
+    for (const r of live) total += trainingSeconds(r, t) ?? 0;
+    return total;
+  });
   const facts = computed<string[] | null>(() => {
     const all = runs.data;
     if (!all?.length) return null;
