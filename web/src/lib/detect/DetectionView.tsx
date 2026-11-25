@@ -164,9 +164,9 @@ export default function DetectionView(props: DetectionViewProps) {
       loaded.set(true);
       p.onload?.(true);
     };
-    // Real browsers populate `naturalWidth > 0` once bytes arrive; await off-main-thread `decode()` before revealing
-    // the tile/boxes so rapid scroll/filter changes can cancel stale decodes cleanly. Synthetic test DOMs leave
-    // `naturalWidth === 0`, completing synchronously.
+    // Real raster images populate `naturalWidth > 0` once bytes arrive; await off-main-thread `decode()` before
+    // revealing the tile/boxes so rapid scroll/filter changes can cancel stale decodes cleanly. Intrinsic-width-less
+    // SVGs and synthetic test DOMs have `naturalWidth === 0` and finish immediately.
     if (el.naturalWidth > 0 && typeof el.decode === 'function') {
       void el.decode().then(finish, () => {
         if (seq !== loadSeq || !el.hasAttribute('src')) return;
@@ -180,6 +180,8 @@ export default function DetectionView(props: DetectionViewProps) {
   function onImgError(e: Event) {
     const el = e.currentTarget as HTMLImageElement;
     if (!el.hasAttribute('src')) return;
+    loadSeq++;
+    loaded.set(false);
     p.onload?.(false);
   }
 
@@ -217,10 +219,10 @@ export default function DetectionView(props: DetectionViewProps) {
       {p.src ? (
         <img
           ref={cancelOnRemove}
+          fetchpriority={p.priority}
           src={p.src}
           alt={p.alt}
           decoding="async"
-          fetchpriority={p.priority}
           class:loaded={loaded.get()}
           style:object-fit={p.fit}
           draggable="false"

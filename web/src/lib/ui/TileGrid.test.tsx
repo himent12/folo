@@ -178,14 +178,34 @@ describe('TileGrid scroll scheduling and tabindex stability', () => {
       // Cached toolbar avoids querying DOM again during scroll frames.
       expect(qsSpy).not.toHaveBeenCalled();
 
-      // Scroll back up to row 10: 3 rows leading overscan above, 1 row trailing overscan below.
-      gridTop = -10 * 154;
+      // Scroll back up into row 10 (40 px past its top edge): 3 rows leading overscan above, 1 row trailing overscan below.
+      gridTop = -10 * 154 - 40;
       window.dispatchEvent(new Event('scroll'));
       await vi.advanceTimersByTimeAsync(20);
       flush();
       const up = ranges.at(-1)!;
       expect(up[2] - up[0]).toBe(12); // 3 rows above
       expect(up[1] - up[3]).toBe(4); // 1 row below
+
+      // Sub-row scroll within the same direction and visible rows must not emit a duplicate onrange call.
+      const beforeSubRow = ranges.length;
+      gridTop = -10 * 154 - 36;
+      window.dispatchEvent(new Event('scroll'));
+      await vi.advanceTimersByTimeAsync(20);
+      flush();
+      expect(ranges.length).toBe(beforeSubRow);
+
+      // Replacing a disconnected toolbar invalidates the toolbar cache and picks up the new element.
+      tb.remove();
+      const tb2 = document.createElement('div');
+      tb2.className = 'toolbar';
+      document.body.appendChild(tb2);
+      qsSpy.mockClear();
+      window.dispatchEvent(new Event('resize'));
+      await vi.advanceTimersByTimeAsync(20);
+      flush();
+      expect(qsSpy).toHaveBeenCalledWith('.toolbar');
+      tb2.remove();
 
       // Invalid aspect (0 / NaN) must fall back cleanly without NaN heights or empty grid collapse.
       aspect.set(0);

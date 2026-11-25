@@ -75,9 +75,10 @@ export default function ImageGrid(props: ImageGridProps) {
       // Track scroll movement only for unready overscan tiles so continuous rapid scrolling cancels & reschedules
       // their warm-up rAF until scrolling pauses, without waking already-mounted or visible tiles.
       if (readyKey === key && ready.peek()) return;
-      void scrollSeq();
+      const seq = scrollSeq();
       ready.set(false);
       const id = requestAnimationFrame(() => {
+        if (untrack(scrollSeq) !== seq) return;
         readyKey = key;
         ready.set(true);
       });

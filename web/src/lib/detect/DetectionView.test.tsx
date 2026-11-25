@@ -89,18 +89,17 @@ describe('DetectionView', () => {
     }
   });
 
-  it('awaits async img.decode() for real bitmaps, cancels stale decodes on src swap/unmount, and forwards fetchpriority', async () => {
-    let resolveA!: () => void;
-    let rejectB!: (e: Error) => void;
-    let calls = 0;
+  it('awaits async img.decode() for real bitmaps, cancels stale decodes on src swap/error/unmount, and forwards fetchpriority', async () => {
+    const resolvers: Array<{ res: () => void; rej: (e: Error) => void }> = [];
     vi.spyOn(HTMLImageElement.prototype, 'naturalWidth', 'get').mockReturnValue(640);
-    vi.spyOn(HTMLImageElement.prototype, 'decode').mockImplementation(() => {
-      calls++;
-      if (calls === 1) return new Promise<void>((r) => (resolveA = r));
-      return new Promise<void>((_, rej) => (rejectB = rej));
-    });
+    vi.spyOn(HTMLImageElement.prototype, 'decode').mockImplementation(
+      () =>
+        new Promise<void>((res, rej) => {
+          resolvers.push({ res, rej });
+        }),
+    );
 
-    const src = signal<string | null>('data:image/png;base64,A');
+    const src = signal<string | null>('/img/a.png');
     const outcomes: boolean[] = [];
     const { container, unmount } = render(() => (
       <DetectionView
@@ -113,35 +112,73 @@ describe('DetectionView', () => {
         onload={(ok) => outcomes.push(ok)}
       />
     ));
+    let unmounted = false;
     try {
       flush();
       const img = container.querySelector<HTMLImageElement>('img')!;
       expect(img.getAttribute('fetchpriority')).toBe('low');
+      expect(resolvers.length).toBe(0);
 
-      // Image A loads bytes, starts decoding asynchronously — not revealed yet.
+      // 1. Active decode succeeds -> reveals .loaded and reports onload(true).
       img.dispatchEvent(new Event('load'));
       flush();
+      expect(resolvers.length).toBe(1);
       expect(img.classList.contains('loaded')).toBe(false);
       expect(outcomes).toEqual([]);
-
-      // Rapid filter/scroll swaps src to B before A finishes decoding.
-      src.set('data:image/png;base64,B');
+      resolvers[0]!.res();
+      await Promise.resolve();
       flush();
-      // A's stale decode resolves late: must be ignored!
-      resolveA();
+      expect(img.classList.contains('loaded')).toBe(true);
+      expect(outcomes).toEqual([true]);
+
+      // 2. Rapid src swap cancels an in-flight decode from the previous image.
+      src.set('/img/b.png');
+      flush();
+      img.dispatchEvent(new Event('load'));
+      expect(resolvers.length).toBe(2);
+      src.set('/img/c.png');
+      flush();
+      resolvers[1]!.res();
       await Promise.resolve();
       flush();
       expect(img.classList.contains('loaded')).toBe(false);
-      expect(outcomes).toEqual([]);
+      expect(outcomes).toEqual([true]);
 
-      // B loads bytes and fails decode while active: reports onload(false).
+      // 3. An active error invalidates any pending decode so it cannot settle as success later.
       img.dispatchEvent(new Event('load'));
-      rejectB(new Error('corrupt'));
+      expect(resolvers.length).toBe(3);
+      img.dispatchEvent(new Event('error'));
+      flush();
+      expect(outcomes).toEqual([true, false]);
+      resolvers[2]!.res();
       await Promise.resolve();
       flush();
-      expect(outcomes).toEqual([false]);
-    } finally {
+      expect(img.classList.contains('loaded')).toBe(false);
+      expect(outcomes).toEqual([true, false]);
+
+      // 4. An active decode rejection reports onload(false).
+      src.set('/img/d.png');
+      flush();
+      img.dispatchEvent(new Event('load'));
+      expect(resolvers.length).toBe(4);
+      resolvers[3]!.rej(new Error('corrupt'));
+      await Promise.resolve();
+      flush();
+      expect(outcomes).toEqual([true, false, false]);
+
+      // 5. Unmounting while a decode is pending cancels it so late settlement is ignored.
+      src.set('/img/e.png');
+      flush();
+      img.dispatchEvent(new Event('load'));
+      expect(resolvers.length).toBe(5);
       unmount();
+      unmounted = true;
+      resolvers[4]!.res();
+      await Promise.resolve();
+      flush();
+      expect(outcomes).toEqual([true, false, false]);
+    } finally {
+      if (!unmounted) unmount();
     }
   });
 });

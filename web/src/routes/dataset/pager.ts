@@ -117,7 +117,7 @@ export class ImagePager {
   sampleFirstPage(limit = 64): readonly DatasetImage[] | undefined {
     this.#trackPage(0);
     const page = this.#pages.get(0);
-    if (!page || page.length === 0) return undefined;
+    if (!page || page.length === 0 || limit <= 0) return undefined;
     return page.length <= limit ? page : page.slice(0, limit);
   }
 

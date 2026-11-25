@@ -222,15 +222,20 @@ describe('ImageGrid visible-over-overscan thumbnail priority', () => {
       flush();
       requested.length = 0;
 
-      // Continuous rapid scroll across rows 20 -> 26 -> 32 (one jump every 16ms frame):
-      // overscan rows should cancel their pending rAFs until scrolling settles.
+      // Continuous rapid scroll across rows 20 -> 26 -> 32 (next scroll arrives 8 ms after each frame, BEFORE
+      // the previous frame's overscan warm-up rAF fires): ONLY visible rows of each frame may request thumbnails;
+      // zero intermediate or trailing/leading overscan tiles (e.g. 76..79, 92..103, 116..127, 140..151) may mount
+      // until scrolling pauses.
+      const visibleOf = (row: number) => new Set(Array.from({ length: 12 }, (_, k) => row * 4 + k));
+      const allowedDuringFling = new Set([...visibleOf(20), ...visibleOf(26), ...visibleOf(32)]);
       for (const row of [20, 26, 32]) {
         gridTop = -row * 154;
         window.dispatchEvent(new Event('scroll'));
         await vi.advanceTimersByTimeAsync(16);
         flush();
       }
-      // At row 32 (items 128..139 visible; leading overscan 140..151): none of the final leading overscan rows mounted yet.
+      expect(requested.length).toBeGreaterThan(0);
+      expect(requested.every((id) => allowedDuringFling.has(Number(id.replace('img_', ''))))).toBe(true);
       expect(requested.some((id) => Number(id.replace('img_', '')) >= 140)).toBe(false);
       // Visible tiles carry fetchpriority="high".
       await vi.advanceTimersByTimeAsync(0);

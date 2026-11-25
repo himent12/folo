@@ -57,6 +57,7 @@ export default function TileGrid(props: TileGridProps) {
   let el: HTMLDivElement | undefined;
   let toolbarEl: Element | null = null;
   let toolbarSel = '';
+  let lastScrollY = typeof window !== 'undefined' ? window.scrollY : 0;
   const width = signal(0);
   /** Viewport-relative top of the grid, sticky toolbar bottom, and window height, updated on scroll / resize. */
   const top = signal(0);
@@ -103,16 +104,21 @@ export default function TileGrid(props: TileGridProps) {
   function measure(fromScroll = false) {
     if (!el) return;
     const nextTop = el.getBoundingClientRect().top;
+    const nextScrollY = window.scrollY;
     if (fromScroll) {
+      // Prefer `window.scrollY` delta so layout shifts above the grid don't skew scroll direction; fall back to
+      // grid-top delta for environments where scroll position is simulated via element geometry.
+      const dy = nextScrollY - lastScrollY;
       const prevTop = top.peek();
-      if (nextTop < prevTop) {
+      if (dy > 0 || (dy === 0 && nextTop < prevTop)) {
         scrollDir.set(1);
         scrollSeq.set((n) => n + 1);
-      } else if (nextTop > prevTop) {
+      } else if (dy < 0 || (dy === 0 && nextTop > prevTop)) {
         scrollDir.set(-1);
         scrollSeq.set((n) => n + 1);
       }
     }
+    lastScrollY = nextScrollY;
     top.set(nextTop);
     const tb = resolveToolbar();
     head.set(tb ? Math.max(0, tb.getBoundingClientRect().bottom) : 0);
@@ -123,14 +129,19 @@ export default function TileGrid(props: TileGridProps) {
     let raf = 0;
     let sawScroll = false;
     const scheduleMeasure = (isScroll: boolean) => {
+      const firstScrollInFrame = isScroll && !sawScroll;
       if (isScroll) sawScroll = true;
-      if (raf) return;
-      raf = requestAnimationFrame(() => {
-        const scrolled = sawScroll;
-        raf = 0;
-        sawScroll = false;
-        measure(scrolled);
-      });
+      if (!raf) {
+        raf = requestAnimationFrame(() => {
+          const scrolled = sawScroll;
+          raf = 0;
+          sawScroll = false;
+          measure(scrolled);
+        });
+      }
+      // Signal scroll activity before frame N+1's rAF callbacks run (after queueing TileGrid's own measurement rAF)
+      // so pending overscan warm-ups cancel instead of racing ahead of `measure()`.
+      if (firstScrollInFrame) scrollSeq.set((n) => n + 1);
     };
     const onScroll = () => scheduleMeasure(true);
     const onResize = () => scheduleMeasure(false);
@@ -184,9 +195,15 @@ export default function TileGrid(props: TileGridProps) {
     const rowTop = docTop + r * rowH.peek();
     const head = stickyTop() + 8;
     const foot = window.innerHeight - (window.innerWidth < 768 ? 72 : 8);
-    if (rowTop - window.scrollY < head) window.scrollTo({ top: rowTop - head });
-    else if (rowTop + cellH.peek() - window.scrollY > foot) window.scrollTo({ top: rowTop + cellH.peek() - foot });
-    measure();
+    let scrolled = false;
+    if (rowTop - window.scrollY < head) {
+      window.scrollTo({ top: rowTop - head });
+      scrolled = true;
+    } else if (rowTop + cellH.peek() - window.scrollY > foot) {
+      window.scrollTo({ top: rowTop + cellH.peek() - foot });
+      scrolled = true;
+    }
+    measure(scrolled);
     await tick();
     el.querySelector<HTMLElement>(`[data-i="${j}"]`)?.focus({ preventScroll: true });
   }
