@@ -1,6 +1,7 @@
 //! The real store's link to the engine: device selection, GPU info from folo-gpu, error mapping and the predictor
 //! cache of `POST /api/predict`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
@@ -14,6 +15,7 @@ use folo_vision::train::{can_place, place_model, resolve_device};
 use folo_vision::{FoloModel, Precision, PredictConfig, Predictor};
 
 use crate::error::{Error, Result};
+use crate::util::Flight;
 
 /// Loaded models kept by [`Predictors`] (least recently used first out).
 pub const PREDICTOR_CACHE: usize = 4;
@@ -341,62 +343,320 @@ pub struct Loaded {
     pub warm: bool,
 }
 
+type PredictorKey = (FileKey, Device, Precision);
 type Cached = (FileKey, Device, Precision, Arc<Mutex<Loaded>>);
+type PredictorFlight = Arc<Flight<Result<Arc<Mutex<Loaded>>>>>;
+
+#[derive(Default)]
+struct PredictorCache {
+    entries: Vec<Cached>,
+    in_flight: HashMap<PredictorKey, PredictorFlight>,
+}
 
 /// An LRU cache of loaded predictors keyed by weights file, device and precision, so repeated predictions skip
-/// loading and fusing. A predictor serves one request at a time (its thresholds are set per call).
+/// loading and fusing. Concurrent cache misses for the same key share one load (single-flight), while distinct
+/// keys load in parallel. A predictor serves one request at a time (its thresholds are set per call).
 #[derive(Default)]
 pub struct Predictors {
-    entries: Mutex<Vec<Cached>>,
+    cache: Mutex<PredictorCache>,
 }
 
 impl Predictors {
     /// The predictor of `path` on `device` at `precision`, loaded on a miss (evicting the least recently used
-    /// beyond [`PREDICTOR_CACHE`]).
+    /// beyond [`PREDICTOR_CACHE`]). Concurrent misses for the same `(FileKey, Device, Precision)` share one load.
     pub fn get(&self, path: &Path, device: Device, precision: Precision) -> Result<Arc<Mutex<Loaded>>> {
         let key =
             FileKey::of(path).map_err(|e| Error::internal(format!("reading {}: {e}", path.display())))?;
-        {
-            let mut entries = self.entries.lock().unwrap();
-            if let Some(i) =
-                entries.iter().position(|(k, d, q, _)| *k == key && *d == device && *q == precision)
-            {
-                let hit = entries.remove(i);
-                let p = hit.3.clone();
-                entries.push(hit);
-                return Ok(p);
+        self.get_or_load(key, device, precision, || {
+            let model = open_model(path, device, precision)?;
+            let cfg = PredictConfig { imgsz: model.imgsz(), ..PredictConfig::default() };
+            let predictor = Predictor::new(model, cfg).map_err(engine_error)?;
+            Ok(Arc::new(Mutex::new(Loaded { predictor, warm: false })))
+        })
+    }
+
+    fn get_or_load(
+        &self,
+        key: FileKey,
+        device: Device,
+        precision: Precision,
+        mut load: impl FnMut() -> Result<Arc<Mutex<Loaded>>>,
+    ) -> Result<Arc<Mutex<Loaded>>> {
+        let fkey = (key.clone(), device, precision);
+        loop {
+            let role = {
+                let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(i) =
+                    cache.entries.iter().position(|(k, d, q, _)| *k == key && *d == device && *q == precision)
+                {
+                    let hit = cache.entries.remove(i);
+                    let p = hit.3.clone();
+                    cache.entries.push(hit);
+                    return Ok(p);
+                }
+                if let Some(existing) = cache.in_flight.get(&fkey).cloned() {
+                    Err(existing)
+                } else {
+                    let created = Flight::new();
+                    cache.in_flight.insert(fkey.clone(), created.clone());
+                    Ok(created)
+                }
+            };
+            match role {
+                Err(existing) => {
+                    if let Some(res) = existing.wait() {
+                        return res;
+                    }
+                    // Leader aborted (panicked); retry so another caller can take over.
+                }
+                Ok(mine) => {
+                    struct Cleanup<'a> {
+                        cache: &'a Mutex<PredictorCache>,
+                        key: PredictorKey,
+                        flight: PredictorFlight,
+                        done: bool,
+                    }
+                    impl Drop for Cleanup<'_> {
+                        fn drop(&mut self) {
+                            if !self.done {
+                                let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+                                if cache
+                                    .in_flight
+                                    .get(&self.key)
+                                    .is_some_and(|f| Arc::ptr_eq(f, &self.flight))
+                                {
+                                    cache.in_flight.remove(&self.key);
+                                }
+                                drop(cache);
+                                self.flight.abort();
+                            }
+                        }
+                    }
+                    let mut guard =
+                        Cleanup { cache: &self.cache, key: fkey.clone(), flight: mine.clone(), done: false };
+                    let outcome = load();
+                    {
+                        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+                        let still_current = cache.in_flight.get(&fkey).is_some_and(|f| Arc::ptr_eq(f, &mine));
+                        if still_current {
+                            cache.in_flight.remove(&fkey);
+                            if let Ok(p) = &outcome {
+                                cache.entries.retain(|(k, d, q, _)| {
+                                    !(k.path == key.path && *d == device && *q == precision)
+                                });
+                                cache.entries.push((key.clone(), device, precision, p.clone()));
+                                while cache.entries.len() > PREDICTOR_CACHE {
+                                    cache.entries.remove(0);
+                                }
+                            }
+                        }
+                    }
+                    mine.finish(outcome.clone());
+                    guard.done = true;
+                    return outcome;
+                }
             }
         }
-        // Loaded outside the lock: other models keep serving meanwhile (two misses on one file both load it).
-        let model = open_model(path, device, precision)?;
-        let cfg = PredictConfig { imgsz: model.imgsz(), ..PredictConfig::default() };
-        let predictor = Predictor::new(model, cfg).map_err(engine_error)?;
-        let p = Arc::new(Mutex::new(Loaded { predictor, warm: false }));
-        let mut entries = self.entries.lock().unwrap();
-        entries.retain(|(k, d, q, _)| !(k.path == key.path && *d == device && *q == precision));
-        entries.push((key, device, precision, p.clone()));
-        while entries.len() > PREDICTOR_CACHE {
-            entries.remove(0);
-        }
-        Ok(p)
     }
 
     /// Drops every cached predictor (inference has been idle; [`crate::real::PREDICTOR_IDLE`]). Returns whether one
-    /// of them was on a GPU.
+    /// of them was on a GPU. Any load currently in flight will not be inserted into the cache when it finishes.
     pub fn clear(&self) -> bool {
-        let dropped = std::mem::take(&mut *self.entries.lock().unwrap());
-        dropped.iter().any(|(_, d, _, _)| !d.is_cpu())
+        let (dropped, in_flight_gpu) = {
+            let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+            let dropped = std::mem::take(&mut cache.entries);
+            let in_flight_gpu = cache.in_flight.keys().any(|(_, d, _)| !d.is_cpu());
+            cache.in_flight.clear();
+            (dropped, in_flight_gpu)
+        };
+        dropped.iter().any(|(_, d, _, _)| !d.is_cpu()) || in_flight_gpu
     }
 
-    /// Drops every cached predictor of `path` (its file was replaced or deleted).
+    /// Drops every cached predictor of `path` (its file was replaced or deleted). Any load of `path` currently in
+    /// flight will not be inserted into the cache when it finishes.
     pub fn forget(&self, path: &Path) {
-        self.entries.lock().unwrap().retain(|(k, _, _, _)| k.path != path);
+        let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
+        cache.entries.retain(|(k, _, _, _)| k.path != path);
+        cache.in_flight.retain(|(k, _, _), _| k.path != path);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
     use super::*;
+
+    fn tiny_loaded() -> Arc<Mutex<Loaded>> {
+        let mut m = FoloModel::with_rng(
+            folo_nn::io::ModelConfig::new("n", 1).unwrap(),
+            &mut folo_core::rng::Rng::seed(1),
+        )
+        .unwrap();
+        m.set_classes(vec!["cat".into()]).unwrap();
+        m.set_imgsz(64);
+        let cfg = PredictConfig { imgsz: 64, ..PredictConfig::default() };
+        let predictor = Predictor::new(m, cfg).unwrap();
+        Arc::new(Mutex::new(Loaded { predictor, warm: false }))
+    }
+
+    fn key(name: &str) -> FileKey {
+        FileKey { path: PathBuf::from(name), len: 1, modified: None }
+    }
+
+    /// Concurrent misses for the same `(FileKey, Device, Precision)` run one load and share the same predictor;
+    /// distinct keys load in parallel without blocking each other.
+    #[test]
+    fn predictors_singleflight_deduplicates_same_key_and_runs_distinct_keys_in_parallel() {
+        let predictors = Predictors::default();
+        let loads = AtomicUsize::new(0);
+        let entered = Barrier::new(2);
+        let release = Barrier::new(2);
+
+        let loaded = tiny_loaded();
+        let (p1, p2) = std::thread::scope(|s| {
+            let h1 = s.spawn(|| {
+                predictors
+                    .get_or_load(key("a.folo"), Device::Cpu, Precision::F32, || {
+                        loads.fetch_add(1, Ordering::SeqCst);
+                        entered.wait();
+                        release.wait();
+                        Ok(loaded.clone())
+                    })
+                    .unwrap()
+            });
+            // Wait until thread 1 is inside `load`, then launch a second caller for the same key.
+            entered.wait();
+            let h2 = s.spawn(|| {
+                predictors
+                    .get_or_load(key("a.folo"), Device::Cpu, Precision::F32, || {
+                        loads.fetch_add(1, Ordering::SeqCst);
+                        Ok(loaded.clone())
+                    })
+                    .unwrap()
+            });
+            // Wait until thread 2 is parked in `Flight::wait` before releasing thread 1. Always release the
+            // leader before asserting so a timeout never strands the scoped thread.
+            let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let fk = (key("a.folo"), Device::Cpu, Precision::F32);
+            let mut parked = false;
+            while std::time::Instant::now() < wait_deadline {
+                if predictors.cache.lock().unwrap().in_flight[&fk].waiters() >= 1 {
+                    parked = true;
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            release.wait();
+            let res = (h1.join().unwrap(), h2.join().unwrap());
+            assert!(parked, "waiter did not park in Flight::wait");
+            res
+        });
+        assert_eq!(loads.load(Ordering::SeqCst), 1, "same key loads once");
+        assert!(Arc::ptr_eq(&p1, &p2), "both callers receive the same predictor");
+
+        // Distinct keys run in parallel (proved by a bounded 2-thread rendezvous inside both loaders).
+        let both = crate::util::Rendezvous::new();
+        std::thread::scope(|s| {
+            let handles: Vec<_> = ["b.folo", "c.folo"]
+                .into_iter()
+                .map(|name| {
+                    let (preds, both, loaded) = (&predictors, &both, &loaded);
+                    s.spawn(move || {
+                        let mut met = false;
+                        preds
+                            .get_or_load(key(name), Device::Cpu, Precision::F32, || {
+                                met = both.arrive(std::time::Duration::from_secs(5));
+                                Ok(loaded.clone())
+                            })
+                            .unwrap();
+                        assert!(met, "distinct predictor keys did not load concurrently");
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
+    }
+
+    /// If a leader panics while loading, waiting callers recover and retry cleanly; if `forget` runs during a
+    /// load, the stale predictor is not cached afterwards.
+    #[test]
+    fn predictors_singleflight_recovers_from_panic_and_respects_forget() {
+        let predictors = Predictors::default();
+        let entered = Barrier::new(2);
+        let release = Barrier::new(2);
+        let loaded = tiny_loaded();
+
+        // 1. Leader panics: waiter wakes and succeeds on retry.
+        let panicking = AtomicBool::new(true);
+        std::thread::scope(|s| {
+            let leader = s.spawn(|| {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = predictors.get_or_load(key("panic.folo"), Device::Cpu, Precision::F32, || {
+                        entered.wait();
+                        release.wait();
+                        if panicking.swap(false, Ordering::SeqCst) {
+                            panic!("boom");
+                        }
+                        unreachable!()
+                    });
+                }));
+            });
+            entered.wait();
+            let waiter = s.spawn(|| {
+                predictors
+                    .get_or_load(key("panic.folo"), Device::Cpu, Precision::F32, || Ok(loaded.clone()))
+                    .unwrap()
+            });
+            let wait_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let fk = (key("panic.folo"), Device::Cpu, Precision::F32);
+            let mut parked = false;
+            while std::time::Instant::now() < wait_deadline {
+                if predictors.cache.lock().unwrap().in_flight[&fk].waiters() >= 1 {
+                    parked = true;
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            release.wait();
+            leader.join().unwrap();
+            let got = waiter.join().unwrap();
+            assert!(parked, "waiter did not park in Flight::wait");
+            assert!(Arc::ptr_eq(&got, &loaded));
+        });
+
+        // 2. `forget(path)` while loading prevents the stale result from populating the cache.
+        let entered = Barrier::new(2);
+        let release = Barrier::new(2);
+        std::thread::scope(|s| {
+            let h = s.spawn(|| {
+                predictors
+                    .get_or_load(key("stale.folo"), Device::Cpu, Precision::F32, || {
+                        entered.wait();
+                        release.wait();
+                        Ok(loaded.clone())
+                    })
+                    .unwrap()
+            });
+            entered.wait();
+            predictors.forget(Path::new("stale.folo"));
+            release.wait();
+            h.join().unwrap();
+        });
+        assert!(
+            predictors
+                .cache
+                .lock()
+                .unwrap()
+                .entries
+                .iter()
+                .all(|(k, _, _, _)| k.path != Path::new("stale.folo")),
+            "forgotten in-flight load must not repopulate the cache"
+        );
+    }
 
     /// Every engine error keeps its stable code over HTTP; `not_supported` (an `amp` run without tensor cores) is
     /// 501 with a hint, not a 500.

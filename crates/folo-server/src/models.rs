@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use axum::http::StatusCode;
 use folo_api::{
@@ -25,7 +25,7 @@ use crate::error::{Error, Result};
 use crate::index::write_atomic;
 use crate::runs::{DatasetRef, data_format};
 use crate::store::{WeightsFormat, weights_io};
-use crate::util::{fnv1a, rfc3339};
+use crate::util::{Flight, fnv1a, rfc3339};
 
 /// Validation batch of `/eval`.
 pub const EVAL_BATCH: usize = 16;
@@ -239,17 +239,64 @@ struct CachedEval {
     eval: ModelEval,
 }
 
-/// Metadata, eval and f16 weights caches.
+type EvalFlight = Arc<Flight<Result<ModelEval>>>;
+
+#[derive(Default)]
+struct EvalCache {
+    done: HashMap<String, (String, ModelEval)>,
+    in_flight: HashMap<(String, String), EvalFlight>,
+}
+
+/// Per-model and per-`(model, variant)` locks for `cache/weights/`:
+/// - Different models never block each other.
+/// - Different variants of one model (e.g. `f16.folo` vs `onnx`) export concurrently under a shared model read
+///   lock, while duplicate requests for the same `(model, variant)` serialize on its variant mutex.
+/// - [`Models::forget_weights`] takes that model's write lock so it waits for every in-flight export of that
+///   model without blocking exports of other models.
+#[derive(Default)]
+struct DerivedLocks {
+    models: HashMap<String, Weak<RwLock<()>>>,
+    variants: HashMap<(String, String), Weak<Mutex<()>>>,
+}
+
+impl DerivedLocks {
+    fn model(&mut self, id: &str) -> Arc<RwLock<()>> {
+        if let Some(lock) = self.models.get(id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        self.models.retain(|_, w| w.strong_count() > 0);
+        let lock = Arc::new(RwLock::new(()));
+        self.models.insert(id.to_string(), Arc::downgrade(&lock));
+        lock
+    }
+
+    fn pair(&mut self, id: &str, variant: &str) -> (Arc<RwLock<()>>, Arc<Mutex<()>>) {
+        let model = self.model(id);
+        let key = (id.to_string(), variant.to_string());
+        let var = if let Some(lock) = self.variants.get(&key).and_then(Weak::upgrade) {
+            lock
+        } else {
+            self.variants.retain(|_, w| w.strong_count() > 0);
+            let lock = Arc::new(Mutex::new(()));
+            self.variants.insert(key, Arc::downgrade(&lock));
+            lock
+        };
+        (model, var)
+    }
+}
+
+/// Metadata, eval and derived-weights caches.
 pub struct Models {
     data_dir: PathBuf,
     /// The `folo weights` cache whose downloaded files list as published models (`None`: none are listed).
     published_dir: Option<PathBuf>,
     meta: Mutex<HashMap<PathBuf, (FileKey, Arc<FileMeta>)>>,
-    evals: Mutex<HashMap<String, (String, ModelEval)>>,
+    evals: Mutex<EvalCache>,
     /// The weights files listed as skipped (unreadable), each with the version that was: warned about once.
     skipped: Mutex<HashMap<PathBuf, FileKey>>,
-    /// Held while a derived weights file (f16, ONNX) is written, so concurrent first requests export once.
-    derived: Mutex<()>,
+    /// Per-`(model, variant)` locks for derived weights (f16, ONNX), so concurrent exports of distinct models or
+    /// variants run in parallel while duplicate first requests export once.
+    derived: Mutex<DerivedLocks>,
 }
 
 impl Models {
@@ -332,58 +379,98 @@ impl Models {
     /// [`WeightsFormat::Onnx`].
     pub fn derived_weights(&self, m: &ModelRef, format: WeightsFormat) -> Result<(PathBuf, std::fs::File)> {
         let id = m.model.id.as_str();
-        let fk = FileKey::of(&m.path).map_err(|e| weights_io(e, &m.path, id))?;
-        let mtime = fk
-            .modified
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or(0, |d| d.as_nanos());
-        let key = fnv1a(format!("{}|{}|{mtime}", fk.path.display(), fk.len).as_bytes());
+        let variant = cache_variant(format);
         let dir = self.weights_cache();
-        // Model ids have no dots, so `<id>.` never prefixes another model's files.
-        let version = format!("{id}.{key:016x}.");
-        let out = dir.join(format!("{version}{}", cache_variant(format)));
-        let open = || match std::fs::File::open(&out) {
-            Ok(f) => Ok(Some(f)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(Error::internal(format!("{}: {e}", out.display()))),
-        };
-        if let Some(f) = open()? {
-            return Ok((out, f));
-        }
-        let _guard = self.derived.lock().unwrap();
-        if let Some(f) = open()? {
-            return Ok((out, f));
-        }
-        // Its run may have been deleted (and its cache cleared, under this lock) since the lookup.
-        if !m.path.is_file() {
-            return Err(Error::not_found("model", id));
-        }
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| Error::internal(format!("creating {}: {e}", dir.display())))?;
-        let file = engine::read_model_file(&m.path)
-            .map_err(|e| if m.path.exists() { e } else { Error::not_found("model", id) })?;
-        // Written to a temporary file and renamed into place, so a reader never sees a partial export.
-        match format {
-            WeightsFormat::Onnx(switches) => {
-                onnx_export(&file, switches)?.write_to(&out).map_err(engine_error)?
+        for attempt in 0..3 {
+            let fk = FileKey::of(&m.path).map_err(|e| weights_io(e, &m.path, id))?;
+            let mtime = fk
+                .modified
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            let key = fnv1a(format!("{}|{}|{mtime}", fk.path.display(), fk.len).as_bytes());
+            // Model ids have no dots, so `<id>.` never prefixes another model's files.
+            let version = format!("{id}.{key:016x}.");
+            let out = dir.join(format!("{version}{variant}"));
+            let open = || match std::fs::File::open(&out) {
+                Ok(f) => Ok(Some(f)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(Error::internal(format!("{}: {e}", out.display()))),
+            };
+            if let Some(f) = open()? {
+                return Ok((out, f));
             }
-            _ => file.export(&out, FloatDType::F16).map_err(nn_error)?,
+            let (model_lock, variant_lock) =
+                self.derived.lock().unwrap_or_else(|p| p.into_inner()).pair(id, &variant);
+            let _model_guard = model_lock.read().unwrap_or_else(|p| p.into_inner());
+            let _variant_guard = variant_lock.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(f) = open()? {
+                return Ok((out, f));
+            }
+            // Its run may have been deleted (and its cache cleared, under the model's write lock) since the lookup.
+            if !m.path.is_file() {
+                return Err(Error::not_found("model", id));
+            }
+            // If the source file changed while we waited on the variant lock, retry against its new version.
+            if attempt < 2 && FileKey::of(&m.path).ok().as_ref() != Some(&fk) {
+                continue;
+            }
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| Error::internal(format!("creating {}: {e}", dir.display())))?;
+            let file = engine::read_model_file(&m.path)
+                .map_err(|e| if m.path.exists() { e } else { Error::not_found("model", id) })?;
+            // Written to a temporary file and renamed into place, so a reader never sees a partial export.
+            match format {
+                WeightsFormat::Onnx(switches) => {
+                    onnx_export(&file, switches)?.write_to(&out).map_err(engine_error)?
+                }
+                _ => file.export(&out, FloatDType::F16).map_err(nn_error)?,
+            }
+            // Opened before releasing the locks; if a concurrent export for a newer file version pruned this
+            // stale output between rename and open, retry against the newer version.
+            let Some(f) = open()? else {
+                if attempt < 2 {
+                    continue;
+                }
+                return Err(Error::internal(format!("{} vanished", out.display())));
+            };
+            drop(_variant_guard);
+            drop(_model_guard);
+            // Prune stale exports of older versions only when any exist, and under `id`'s exclusive model write
+            // lock after re-checking `FileKey`: while the write lock is held no other variant of `id` is writing
+            // `.tmp` or publishing a newer version, so a late v1 export can never delete v2's files.
+            if self.has_stale_weights(id, &version) {
+                let _write_guard = model_lock.write().unwrap_or_else(|p| p.into_inner());
+                if FileKey::of(&m.path).ok().as_ref() == Some(&fk) {
+                    self.remove_weights(id, Some(&version));
+                }
+            }
+            return Ok((out, f));
         }
-        // Opened before the lock is released: a newer export's cleanup may remove the file, not this handle.
-        let f = open()?.ok_or_else(|| Error::internal(format!("{} vanished", out.display())))?;
-        self.remove_weights(id, Some(&version));
-        Ok((out, f))
+        unreachable!()
     }
 
-    /// Removes the cached derived weights of model `id` (when its run is deleted). Waits for an export in
-    /// progress, so none is left behind.
+    /// Removes the cached derived weights of model `id` (when its run is deleted). Waits for any export of `id` in
+    /// progress, so none is left behind, without blocking exports of other models.
     pub fn forget_weights(&self, id: &str) {
-        let _guard = self.derived.lock().unwrap();
+        let model_lock = self.derived.lock().unwrap_or_else(|p| p.into_inner()).model(id);
+        let _guard = model_lock.write().unwrap_or_else(|p| p.into_inner());
         self.remove_weights(id, None);
     }
 
+    /// True when the weights cache holds any file for model `id` that is not part of `keep_version`.
+    fn has_stale_weights(&self, id: &str, keep_version: &str) -> bool {
+        let prefix = format!("{id}.");
+        let Ok(entries) = std::fs::read_dir(self.weights_cache()) else { return false };
+        entries.flatten().any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with(&prefix) && !name.starts_with(keep_version)
+        })
+    }
+
     /// Removes the cached derived weights of model `id` except those named `keep…` (the current version of its
-    /// file); the caller holds the export lock.
+    /// file). Always called under `id`'s exclusive model write lock, so no concurrent export of `id` is writing a
+    /// `.tmp` file or publishing a newer version.
     fn remove_weights(&self, id: &str, keep: Option<&str>) {
         let prefix = format!("{id}.");
         let Ok(entries) = std::fs::read_dir(self.weights_cache()) else { return };
@@ -481,26 +568,103 @@ impl Models {
         // `EVAL_CACHE_VERSION` first: results cached before `best_f1_conf` or `split` existed are computed again.
         let key =
             format!("{EVAL_CACHE_VERSION}|{}|{}|{mtime}|{}|{ds_key}", fk.path.display(), fk.len, dataset.id);
-        if let Some((k, e)) = self.evals.lock().unwrap().get(&m.model.id)
-            && *k == key
-        {
-            return Ok(e.clone());
+        self.eval_cached_with(&m.model.id, &key, || evaluate(&m.path, dataset, device))
+    }
+
+    /// Single-flight cached evaluation lookup/compute for `(model_id, key)`: concurrent callers for the same key
+    /// share one disk check / evaluation while distinct keys run in parallel.
+    fn eval_cached_with(
+        &self,
+        model_id: &str,
+        key: &str,
+        mut run: impl FnMut() -> Result<ModelEval>,
+    ) -> Result<ModelEval> {
+        let fkey = (model_id.to_string(), key.to_string());
+        loop {
+            let role = {
+                let mut cache = self.evals.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some((k, e)) = cache.done.get(model_id)
+                    && k == key
+                {
+                    return Ok(e.clone());
+                }
+                if let Some(existing) = cache.in_flight.get(&fkey).cloned() {
+                    Err(existing)
+                } else {
+                    let created = Flight::new();
+                    cache.in_flight.insert(fkey.clone(), created.clone());
+                    Ok(created)
+                }
+            };
+            match role {
+                Err(existing) => {
+                    if let Some(res) = existing.wait() {
+                        return res;
+                    }
+                    // Leader panicked/aborted; retry.
+                }
+                Ok(mine) => {
+                    struct Cleanup<'a> {
+                        evals: &'a Mutex<EvalCache>,
+                        key: (String, String),
+                        flight: EvalFlight,
+                        done: bool,
+                    }
+                    impl Drop for Cleanup<'_> {
+                        fn drop(&mut self) {
+                            if !self.done {
+                                let mut cache = self.evals.lock().unwrap_or_else(|p| p.into_inner());
+                                if cache
+                                    .in_flight
+                                    .get(&self.key)
+                                    .is_some_and(|f| Arc::ptr_eq(f, &self.flight))
+                                {
+                                    cache.in_flight.remove(&self.key);
+                                }
+                                drop(cache);
+                                self.flight.abort();
+                            }
+                        }
+                    }
+                    let mut guard =
+                        Cleanup { evals: &self.evals, key: fkey.clone(), flight: mine.clone(), done: false };
+                    let disk = self.data_dir.join("cache").join("eval").join(format!("{model_id}.json"));
+                    let outcome = if let Some(c) =
+                        std::fs::read(&disk).ok().and_then(|b| serde_json::from_slice::<CachedEval>(&b).ok())
+                        && c.key == key
+                    {
+                        Ok(c.eval)
+                    } else {
+                        match run() {
+                            Ok(eval) => {
+                                let bytes = serde_json::to_vec(&CachedEval {
+                                    key: key.to_string(),
+                                    eval: eval.clone(),
+                                })
+                                .expect("evals serialize");
+                                if let Err(e) = write_atomic(&disk, &bytes) {
+                                    tracing::warn!("caching {}: {e}", disk.display());
+                                }
+                                Ok(eval)
+                            }
+                            Err(e) => Err(e),
+                        }
+                    };
+                    {
+                        let mut cache = self.evals.lock().unwrap_or_else(|p| p.into_inner());
+                        if cache.in_flight.get(&fkey).is_some_and(|f| Arc::ptr_eq(f, &mine)) {
+                            cache.in_flight.remove(&fkey);
+                        }
+                        if let Ok(eval) = &outcome {
+                            cache.done.insert(model_id.to_string(), (key.to_string(), eval.clone()));
+                        }
+                    }
+                    mine.finish(outcome.clone());
+                    guard.done = true;
+                    return outcome;
+                }
+            }
         }
-        let disk = self.data_dir.join("cache").join("eval").join(format!("{}.json", m.model.id));
-        if let Some(c) = std::fs::read(&disk).ok().and_then(|b| serde_json::from_slice::<CachedEval>(&b).ok())
-            && c.key == key
-        {
-            self.evals.lock().unwrap().insert(m.model.id.clone(), (key, c.eval.clone()));
-            return Ok(c.eval);
-        }
-        let eval = evaluate(&m.path, dataset, device)?;
-        let bytes = serde_json::to_vec(&CachedEval { key: key.clone(), eval: eval.clone() })
-            .expect("evals serialize");
-        if let Err(e) = write_atomic(&disk, &bytes) {
-            tracing::warn!("caching {}: {e}", disk.display());
-        }
-        self.evals.lock().unwrap().insert(m.model.id.clone(), (key, eval.clone()));
-        Ok(eval)
     }
 
     /// Exports `m` to `<data dir>/exports/`: `folo-f16` as `<name>-f16.folo`, `onnx` as `<name>.onnx` (the
@@ -743,107 +907,4 @@ pub fn eval_of(r: &folo_vision::EvalReport) -> ModelEval {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn trained_with_reads_folo_train_leniently() {
-        let t = |s: &str| trained_with(Some(&s.to_string()));
-        // The trainer's resolved config: the three fields, other keys ignored.
-        let full = r#"{"name":"a","epochs":80,"imgsz":512,"amp":true,"head":"o2o","augment":{"mosaic":1.0}}"#;
-        assert_eq!(t(full), Some(TrainedWith { amp: true, imgsz: 512, epochs: 80 }));
-        // Written before mixed precision: no `amp`.
-        assert_eq!(t(r#"{"epochs":3,"imgsz":64}"#), Some(TrainedWith { amp: false, imgsz: 64, epochs: 3 }));
-        // Missing, unparsable or without the fields: none, never an error.
-        assert_eq!(trained_with(None), None);
-        for bad in [
-            "",
-            "not json",
-            "[]",
-            r#"{"epochs":3}"#,
-            r#"{"epochs":-1,"imgsz":64}"#,
-            r#"{"amp":"yes","epochs":3,"imgsz":64}"#,
-        ] {
-            assert_eq!(t(bad), None, "{bad}");
-        }
-    }
-
-    #[test]
-    fn precision_and_fused_read_their_keys_leniently() {
-        assert_eq!(precision(Some("F32")), Some(ModelPrecision::F32));
-        assert_eq!(precision(Some("F16")), Some(ModelPrecision::F16));
-        for unknown in [None, Some("BF16"), Some("f16"), Some("")] {
-            assert_eq!(precision(unknown), None, "{unknown:?}");
-        }
-        assert_eq!(
-            (fused(None), fused(Some("false")), fused(Some("true"))),
-            (Some(false), Some(false), Some(true))
-        );
-        assert_eq!((fused(Some("yes")), fused(Some("TRUE"))), (None, None));
-    }
-
-    /// A run model is named after its run, and a run's name is any text: the export still gets a file.
-    #[test]
-    fn models_with_any_name_export() {
-        let dir = folo_test_support::TestDir::new("models-export-names");
-        let path = dir.join("w.folo");
-        let mut m = folo_vision::FoloModel::with_rng(
-            folo_nn::io::ModelConfig::new("n", 1).unwrap(),
-            &mut folo_core::rng::Rng::seed(1),
-        )
-        .unwrap();
-        m.set_classes(vec!["cat".into()]).unwrap();
-        m.set_imgsz(64);
-        m.save(&path).unwrap();
-        let models = Models::new(dir.join("home"));
-        let meta = read_meta(&path).unwrap();
-        let spec = ExportSpec { format: ExportFormat::FoloF16, onnx: Default::default() };
-        for name in ["cats <v2>? \"best\" | *-best", "tab\there-best", &"long".repeat(80)] {
-            let m = ModelRef::new(model_of("m_1".into(), name.into(), &meta, None, None), path.clone(), None);
-            let out = models.export(&m, spec).unwrap_or_else(|e| panic!("{name:?}: {e}"));
-            let file = Path::new(&out.path).file_name().unwrap().to_string_lossy().into_owned();
-            assert!(file.ends_with("-f16.folo") && file.len() <= 255, "{file}");
-            assert!(!file.contains(['<', '>', '?', '"', '|', '*', '\t']), "{file}");
-        }
-    }
-
-    /// A damaged weights file is said once per version of the file, not on every listing (x3-server-8).
-    #[test]
-    fn a_damaged_weights_file_is_warned_about_once() {
-        let dir = folo_test_support::TestDir::new("models-skipped");
-        let models = Models::new(dir.join("home"));
-        std::fs::create_dir_all(models.models_dir()).unwrap();
-        let path = models.models_dir().join("broken.folo");
-        std::fs::write(&path, b"not weights").unwrap();
-        // What the listings log, caught on this thread.
-        #[derive(Clone, Default)]
-        struct Captured(Arc<Mutex<Vec<u8>>>);
-        impl std::io::Write for Captured {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let log = Captured::default();
-        let sink = log.clone();
-        let subscriber =
-            tracing_subscriber::fmt().with_ansi(false).with_writer(move || sink.clone()).finish();
-        let warnings = || String::from_utf8_lossy(&log.0.lock().unwrap()).matches("skipping").count();
-        tracing::subscriber::with_default(subscriber, || {
-            for _ in 0..3 {
-                assert!(models.scan().is_empty());
-            }
-            assert_eq!(warnings(), 1, "three listings say it once");
-            // Another version of the file (another size) is said again.
-            std::fs::write(&path, b"still not weights").unwrap();
-            assert!(models.scan().is_empty());
-            assert!(models.scan().is_empty());
-            assert_eq!(warnings(), 2, "a changed file is said again, once");
-        });
-        let err = models.meta(&path).unwrap_err();
-        assert!(!models.warn_skipped(dir.join("gone.folo").as_path(), &err), "a missing file is not said");
-    }
-}
+mod tests;
