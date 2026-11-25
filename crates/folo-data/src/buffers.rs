@@ -126,6 +126,9 @@ pub(crate) fn recycle(buf: Vec<u8>) {
 }
 
 #[cfg(test)]
+pub(crate) static TEST_POOL_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -142,6 +145,7 @@ mod tests {
 
     #[test]
     fn buffers_are_reused_only_inside_pooled() {
+        let _guard = TEST_POOL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let len = 300_000;
         // Outside: plain allocations, nothing kept.
         let a = scratch(len);

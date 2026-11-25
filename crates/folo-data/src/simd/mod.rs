@@ -5,6 +5,7 @@
 //! the AVX2 path; everywhere else (ARM, WASM, older x86) the scalar fallback runs.
 
 pub(crate) mod bilinear;
+pub(crate) mod box_filter;
 pub(crate) mod hsv_fused;
 pub(crate) mod planar;
 #[cfg(test)]
@@ -153,3 +154,22 @@ pub(crate) fn has_avx2() -> bool {
     static AVX2: OnceLock<bool> = OnceLock::new();
     *AVX2.get_or_init(|| std::is_x86_feature_detected!("avx2"))
 }
+
+/// Whether this CPU supports both AVX2 and FMA (cached once per process).
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub(crate) fn has_avx2_fma() -> bool {
+    use std::sync::OnceLock;
+    static AVX2_FMA: OnceLock<bool> = OnceLock::new();
+    *AVX2_FMA.get_or_init(|| std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma"))
+}
+
+/// Exact two-term FMA reciprocal of `255.0` (`INV255_HI + INV255_LO ≈ 1/255` to ~48 bits, both positive).
+///
+/// Since `8421504 * 255 = 2^31 - 128`, `INV255_HI = 8421504 / 2^31` and the exact residual is
+/// `128 / (255 * 2^31) = 1 / (255 * 2^24)`. For every `x in 0..=255`,
+/// `fma(x as f32, INV255_HI, (x as f32) * INV255_LO)` matches `x as f32 / 255.0` bit-for-bit in IEEE-754 `f32`.
+#[cfg(target_arch = "x86_64")]
+pub(crate) const INV255_HI: f32 = f32::from_bits(0x3b80_8080);
+#[cfg(target_arch = "x86_64")]
+pub(crate) const INV255_LO: f32 = (1.0f64 / (255.0f64 * 16_777_216.0f64)) as f32;

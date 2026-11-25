@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::mem::ManuallyDrop;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -395,13 +395,7 @@ impl Slot {
     }
 }
 
-struct BatchEntry {
-    alloc: Arc<BatchAlloc>,
-    next_slot: usize,
-    len: usize,
-}
-
-impl BatchEntry {
+impl BatchAlloc {
     fn new(len: usize, imgsz: usize, u8_images: bool) -> Self {
         let plane = imgsz.checked_mul(imgsz).expect("imgsz overflow");
         let slot_elems = plane.checked_mul(3).expect("slot size overflow");
@@ -412,14 +406,28 @@ impl BatchEntry {
             "batch buffer exceeds isize::MAX bytes"
         );
         let buf = RawBatchBuf::new(total_elems, u8_images);
-        BatchEntry { alloc: Arc::new(BatchAlloc { buf, slot_elems, plane }), next_slot: 0, len }
+        BatchAlloc { buf, slot_elems, plane }
+    }
+}
+
+struct BatchEntry {
+    /// Lazily initialized outside the [`Gate`] mutex so allocating/zero-faulting a multi-megabyte batch buffer
+    /// never blocks other batches, workers, or the collator's [`Gate::advance`].
+    alloc: Arc<OnceLock<Arc<BatchAlloc>>>,
+    next_slot: usize,
+    len: usize,
+}
+
+impl BatchEntry {
+    fn new(len: usize) -> Self {
+        BatchEntry { alloc: Arc::new(OnceLock::new()), next_slot: 0, len }
     }
 
-    fn take_slot(&mut self) -> (Slot, bool) {
+    fn take_slot(&mut self) -> (Arc<OnceLock<Arc<BatchAlloc>>>, usize, bool) {
         let idx = self.next_slot;
         assert!(idx < self.len, "batch slot issued past batch length");
         self.next_slot += 1;
-        (Slot { alloc: self.alloc.clone(), slot_idx: idx }, self.next_slot == self.len)
+        (self.alloc.clone(), idx, self.next_slot == self.len)
     }
 }
 
@@ -442,29 +450,38 @@ struct GateState {
 
 impl Gate {
     fn claim(&self, total: usize, window: usize) -> Option<(usize, Slot)> {
-        let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        loop {
-            if self.stop.load(Ordering::Acquire) || st.next >= total {
-                return None;
-            }
-            if st.next < st.done + window {
-                let pos = st.next;
-                st.next += 1;
-                let b = pos / self.batch_size;
-                let lo = b * self.batch_size;
-                let batch_len = (lo + self.batch_size).min(total) - lo;
-                let entry = st
-                    .batches
-                    .entry(b)
-                    .or_insert_with(|| BatchEntry::new(batch_len, self.imgsz, self.u8_images));
-                let (slot, last) = entry.take_slot();
-                if last {
-                    st.batches.remove(&b);
+        let (pos, batch_len, cell, slot_idx) = {
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            loop {
+                if self.stop.load(Ordering::Acquire) || st.next >= total {
+                    return None;
                 }
-                return Some((pos, slot));
+                if st.next < st.done + window {
+                    let pos = st.next;
+                    st.next += 1;
+                    let b = pos / self.batch_size;
+                    let lo = b * self.batch_size;
+                    let batch_len = (lo + self.batch_size).min(total) - lo;
+                    let entry = st.batches.entry(b).or_insert_with(|| BatchEntry::new(batch_len));
+                    let (cell, slot_idx, last) = entry.take_slot();
+                    if last {
+                        st.batches.remove(&b);
+                    }
+                    break (pos, batch_len, cell, slot_idx);
+                }
+                st = self.cv.wait(st).unwrap_or_else(|p| p.into_inner());
             }
-            st = self.cv.wait(st).unwrap_or_else(|p| p.into_inner());
+        };
+        if self.stop.load(Ordering::Acquire) {
+            return None;
         }
+        // Allocate and zero-fault the batch buffer outside `self.state` so unrelated batches and `advance` proceed
+        // concurrently. Dropping `cell` before returning guarantees `OnceLock` holds no extra `Arc<BatchAlloc>` ref
+        // once all slots of the batch have been returned and finished.
+        let alloc =
+            cell.get_or_init(|| Arc::new(BatchAlloc::new(batch_len, self.imgsz, self.u8_images))).clone();
+        drop(cell);
+        Some((pos, Slot { alloc, slot_idx }))
     }
 
     fn advance(&self, done: usize) {
