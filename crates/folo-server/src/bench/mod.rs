@@ -159,6 +159,7 @@ impl Benches {
     /// How long an open external entry waits for its next part before it expires (default 30 minutes).
     pub fn set_open_timeout(&self, timeout: Duration) {
         self.engine.open_timeout_ms.store(timeout.as_millis() as u64, Ordering::SeqCst);
+        self.engine.wake_sweeper();
     }
 
     /// Test support: one look of the sweeper of open external entries as if the clock read `now`, so a test decides
@@ -310,6 +311,7 @@ impl Benches {
     pub fn shutdown(&self) {
         self.engine.closing.store(true, Ordering::SeqCst);
         self.engine.wake();
+        self.engine.wake_sweeper();
         let slots = self.benches.read().unwrap().clone();
         for slot in &slots {
             // Open external entries had their predictions in memory: they fail as the others do.
@@ -350,30 +352,34 @@ impl Benches {
         }
         let engine_threads = std::mem::take(&mut *self.worker.lock().unwrap());
         for t in engine_threads.into_iter().filter(|t| t.thread().id() != me) {
-            // The sweeper parks between looks: woken, it sees `closing` at once.
-            t.thread().unpark();
             let _ = t.join();
         }
     }
 }
 
 /// The sweeper's thread: every so often, open external entries that got no part for the engine's timeout are
-/// failed ([`external::expire`]). Ends when the server shuts down (it looks every 50 ms, and [`Benches::shutdown`]
-/// unparks it).
+/// failed ([`external::expire`]). Sleeps on `engine.sweep_wake` for the full tick interval and wakes immediately
+/// when `open_timeout_ms` changes or [`Benches::shutdown`] sets `closing`.
 fn sweep(engine: &Engine, benches: &RwLock<Vec<Arc<Slot>>>) {
     let mut last = Instant::now();
-    while !engine.closing.load(Ordering::SeqCst) {
-        std::thread::park_timeout(Duration::from_millis(50));
+    let mut state = engine.sweep_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    loop {
         if engine.closing.load(Ordering::SeqCst) {
             break;
         }
         let timeout = Duration::from_millis(engine.open_timeout_ms.load(Ordering::SeqCst));
         // A tenth of the timeout between looks: an entry expires at most 10% late.
-        if last.elapsed() < (timeout / 10).clamp(Duration::from_millis(50), Duration::from_secs(60)) {
+        let tick = (timeout / 10).clamp(Duration::from_millis(50), Duration::from_secs(60));
+        let left = tick.saturating_sub(last.elapsed());
+        if left.is_zero() {
+            drop(state);
+            last = Instant::now();
+            expire(engine, benches, last);
+            state = engine.sweep_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             continue;
         }
-        last = Instant::now();
-        expire(engine, benches, last);
+        state =
+            engine.sweep_wake.wait_timeout(state, left).unwrap_or_else(std::sync::PoisonError::into_inner).0;
     }
 }
 
@@ -383,5 +389,22 @@ fn expire(engine: &Engine, benches: &RwLock<Vec<Arc<Slot>>>, now: Instant) {
     let slots = benches.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     for slot in slots {
         external::expire(&slot, timeout, now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use folo_test_support::TestDir;
+
+    /// `Benches::shutdown` wakes the condvar sweeper immediately even when the default 60 s sweep tick is active.
+    #[test]
+    fn bench_sweeper_shuts_down_promptly() {
+        let dir = TestDir::new("bench-sweeper-shutdown");
+        let benches = Benches::open(dir.path(), None);
+        let t0 = Instant::now();
+        benches.shutdown();
+        assert!(t0.elapsed() < Duration::from_secs(2), "shutdown stalled: {:?}", t0.elapsed());
+        assert!(benches.worker.lock().unwrap().is_empty());
     }
 }

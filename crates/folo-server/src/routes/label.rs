@@ -194,7 +194,8 @@ pub(super) async fn label_logs(
 ) -> Result<Json<RunLogs>> {
     let limit = p.limit.unwrap_or(DEFAULT_LOG_LINES).clamp(1, MAX_LOG_LINES);
     // A labeling job's log has no cursor: `total` stays 0, which is left out of the answer.
-    Ok(Json(RunLogs { lines: st.store.labeler()?.logs(&id, limit)?, total: 0 }))
+    let lines = blocking(&st, move |s| s.labeler()?.logs(&id, limit)).await?;
+    Ok(Json(RunLogs { lines, total: 0 }))
 }
 
 /// `GET /api/label/jobs/{id}/events`: a `job` event, then live events until the client disconnects, the job is
