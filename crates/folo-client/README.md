@@ -5,14 +5,16 @@ top of it. It depends only on folo-api among the workspace crates. Four crates d
 
 | crate | what it uses it for |
 |---|---|
-| folo-mcp | `folo mcp --server`: `HttpStore` (`crates/folo-mcp/src/proxy.rs`) sends every tool's store call through a `Client`, the labeling tools too (`crates/folo-mcp/src/label/`) |
+| folo-mcp | `folo mcp --server`: `HttpStore` (`crates/folo-mcp/src/proxy.rs`) sends every tool's store call through a `Client`, the labeling tools (`crates/folo-mcp/src/label/`) and benchmark tools (`crates/folo-mcp/src/bench/`) too |
 | folo-server | The cloud control plane (`crates/folo-server/src/cloud/`) talks to a worker, uploads its dataset and checkpoint and downloads the weights (`transfer`) |
 | folo-cloud | The `remote` provider asks the server for its health and system info (`crates/folo-cloud/src/remote.rs`); `Endpoint::client` builds a client of a worker |
-| folo-cli | `serve_lock::serves` asks a server at a data dir's recorded address which data dir it serves; `folo label` goes through folo-mcp's `HttpStore` when a `folo serve` owns the data dir |
+| folo-cli | `serve_lock::serves` asks a server at a data dir's recorded address which data dir it serves; `folo label` and `folo bench` go through folo-mcp's `HttpStore` when a `folo serve` owns the data dir (or `--server` is set) |
 
 `Client` knows the API's conventions and nothing about its routes (only `src/transfer.rs` names routes, the
-upload protocol's `/uploads` family): paths are relative to `/api`, bodies are
-JSON, a non-2xx answer is the error envelope `{ "error": { code, message, hint } }`, and a token is sent as
+upload protocol's `/uploads` family): paths are relative to `/api`, most request/response bodies are
+JSON (with binary byte methods for uploads, downloads, and multipart payloads), non-2xx error answers decode the JSON
+error envelope `{ "error": { code, message, hint } }` (while `get_range` also handles bodyless RFC 9110 statuses such
+as `412` / `416` on `/weights`), and a token is sent as
 `Authorization: Bearer`. `http://` and `https://` (rustls) both work.
 
 ## Where things are

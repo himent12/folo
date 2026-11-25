@@ -1,6 +1,7 @@
 # folo-cli
 
-The `folo` binary: training, evaluation, inference, export, dataset tools, published weights, cloud compute, agent
+The `folo` binary: training, evaluation, inference, export, int8 calibration (`folo quantize`), dataset tools,
+published weights, cloud compute, agent
 labeling, vision benchmarks, the Studio server (`folo serve`) and the MCP server (`folo mcp`). It sits on top of the stack and depends on folo-api,
 folo-client, folo-data, folo-gpu, folo-nn, folo-server, folo-mcp and folo-vision; no workspace crate depends on it.
 Its contract is [docs/CLI.md](../../docs/CLI.md). The library target (`src/lib.rs`) holds only the clap command tree
@@ -23,6 +24,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 | `src/doctor.rs` | `folo doctor`: host, GPU adapters, the adapter FOLO picks, the Studio build |
 | `src/train/` | `folo train` and `folo stop`: `mod.rs` (flags, run folder, trainer), `config.rs` (`--set`), `resume.rs` (`--resume`), `progress.rs` (live view, JSON lines, summary), `stop.rs` (stop file, the run folder's marker and lock, Ctrl+C), `tests.rs` |
 | `src/infer.rs` | `folo val`, `folo predict` and `folo export` |
+| `src/quantize.rs` | `folo quantize`: int8 calibration on sample dataset images, writing fused `f32` weights with `folo.quant` metadata |
 | `src/output_file.rs` | The file `export` and `quantize` write: a temporary name, then one move to a free name (`folo_nn::io::publish_new`) |
 | `src/coco.rs` | `val --coco` / `--save-json`: pycocotools-exact evaluation and COCO results files |
 | `src/draw.rs` | Annotated images for `predict --save` (class colours, a built-in digit font) |
@@ -46,6 +48,7 @@ From the `Command` enum in `src/cli.rs` and the `run` match in `src/main.rs`.
 | `train` | `src/train/mod.rs` |
 | `stop` | `src/train/stop.rs` (`request_stop`) |
 | `val`, `predict`, `export` | `src/infer.rs` |
+| `quantize` | `src/quantize.rs` |
 | `bench catalog \| list \| create \| show \| delete \| run \| status \| stop` | `src/bench/`, on folo-mcp's `bench` module |
 | `dataset check \| stats \| synth \| convert` | `src/dataset.rs` |
 | `weights list \| pull` | `src/weights/mod.rs`, `src/weights/download.rs` |
@@ -104,7 +107,7 @@ bash tools/test-tmp.sh cargo test -p folo-cli   # as CI runs them: fails if a te
 | `tests/cli.rs` | Global conventions: JSON lines on stdout, stable exit codes |
 | `tests/cli_values.rs` | Multi-value flags in every documented form |
 | `tests/studio_cli.rs` | Studio's "CLI command" strings (`web/src/lib/trainCli.fixtures.json`) parse with the real tree |
-| `tests/engine.rs` | `train`, `val`, `predict`, `export` and the weights plumbing end to end on a tiny synthetic dataset |
+| `tests/engine.rs` (+ `engine/infer.rs`, `engine/score.rs`) | `train`, `val`, `predict`, `export`, `quantize`, `--score consensus`, and the weights plumbing end to end on a tiny synthetic dataset |
 | `tests/dataset.rs` | `dataset synth \| stats \| check \| convert` end to end |
 | `tests/weights.rs` | `weights pull` against a release server on loopback, and the `gh` fallback |
 | `tests/cloud.rs` | `folo cloud` against a `folo serve --token` child as a `remote` connection |
@@ -113,7 +116,7 @@ bash tools/test-tmp.sh cargo test -p folo-cli   # as CI runs them: fails if a te
 | `tests/codes.rs` | Every error code the CLI, server and MCP sources construct is in `folo_api::codes` |
 | `tests/version.rs` | Every version in the repository matches the workspace version |
 | `tests/onnx.rs` | ONNX export parity against onnxruntime (see below) |
-| `tests/mcp/` | `folo mcp` over raw JSON-RPC: `main.rs` (the binary), `harness.rs` (client, schema checks, `ALL_TOOLS`), `protocol.rs`, `real_store.rs`, `proxy.rs`, `confine.rs` |
+| `tests/mcp/` | `folo mcp` over raw JSON-RPC: `main.rs` (the binary), `harness.rs` (client, schema checks, `ALL_TOOLS`), `protocol.rs`, `real_store.rs`, `bench.rs`, `proxy.rs`, `confine.rs` |
 
 - No test needs a GPU: `tests/engine.rs` passes `--device cpu` to the engine commands.
 - `tests/onnx.rs` needs a Python with `onnx`, `onnxruntime` and `numpy` (`FOLO_ONNX_PYTHON`, else the venv at

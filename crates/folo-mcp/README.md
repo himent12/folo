@@ -14,7 +14,7 @@ server from the `folo mcp` flags, `folo describe` includes the tool schemas, `fo
 | path | what it holds |
 |---|---|
 | `src/lib.rs` | `Options` (the flags), `Backend` (`Real`, `Mock`, `Proxy`), `build`, `serve_stdio`, `describe_tools` |
-| `src/server.rs` | `FoloMcp`, the rmcp `ServerHandler`: `tools/list` and `tools/call`, resources and subscriptions, prompts, logging, stopping the session's runs on exit |
+| `src/server.rs` | `FoloMcp`, the rmcp `ServerHandler`: initialization `instructions` (tailored to `--read-only`), `tools/list` and `tools/call`, resources and subscriptions, prompts, logging, stopping the session's runs on exit |
 | `src/tools/` | The tools; see below |
 | `src/types.rs` | Argument and result types only MCP has (paging, summaries, `run_status` extras); everything else is a folo-api type. `src/types/label.rs`: those of the labeling tools (`PxBox`, compact jobs, images and views); `src/types/bench.rs`: the compact benchmark results (catalog, summaries, a benchmark with its leaderboard, an entry's state and score) |
 | `src/label/` | Agent labeling for the tools and `folo label`: `Labels` (`mod.rs`, a store's or a bare labeler in this process, or `/api/label` of a `folo serve`, with fallbacks for servers without `label_image_filters` or `label_revisions`), the operations (`ops.rs`: status, review queue, views, box edits on a revision, review, export; errors without hints), the hints in each front end's words (`hints.rs`), the compact forms and the boxes in pixels of a view (`compact.rs`), and the view drawn on the image (`view.rs`: outlines, numbered tags, pixel ticks) |
@@ -33,13 +33,13 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
 
 | file | what it holds |
 |---|---|
-| `mod.rs` | `TOOLS` (name, description, `mutating`, input and output schema) in docs/MCP.md order; `listed`, `find`, `describe` |
+| `mod.rs` | `TOOLS` (name, description, `mutating`, `OnceLock`-memoized compacted input and output schemas, and MCP `ToolAnnotations`) in docs/MCP.md order; `listed`, `find`, `describe` |
 | `dispatch.rs` | `Inner::call`: the `--read-only` refusal, unknown-argument check, the match onto handlers, progress notifications, error-code mapping |
 | `schemas.rs` | Input and output schemas generated with schemars, then shrunk for `tools/list` |
 | `arguments.rs` | Unknown argument names (with a suggestion), parsing, names and `0..=1` values |
 | `results.rs` | Size limits, one-line summaries and pages of a result |
 | `info.rs` | `folo_info` |
-| `datasets.rs` | `list_datasets`, `get_dataset`, `list_dataset_issues`, `list_dataset_images`, `register_dataset`, `create_synthetic_dataset` |
+| `datasets.rs` | `list_datasets`, `get_dataset` (error-bucket-first issue collection), `list_dataset_issues`, `list_dataset_images`, `register_dataset`, `create_synthetic_dataset`; all three paged list handlers validate paging upfront before store access |
 | `models.rs` | `list_models`, `val`, `predict`, `predict_batch`, `export` |
 | `runs.rs` | `train` (and resume), `run_status`, `list_runs`, `stop_run`, `reorder_run`, `compare_runs` |
 | `cloud.rs` | `cloud_connections`, `cloud_offers`, `cloud_instances`, `cloud_terminate` |
@@ -56,7 +56,8 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
   `https://` URL). folo-cli picks the backend, and switches an embedded server to `Proxy` when a `folo serve`
   already owns the data dir and `--confine` is off (`crates/folo-cli/src/mcp.rs`).
 - **`--read-only`.** `tools::listed` leaves the `mutating` tools out of `tools/list`, `Inner::call` refuses them
-  with the `read_only` error, and `prompts::list` leaves out `train_on_folder` and `label_folder`.
+  with the `read_only` error, `prompts::list` leaves out `train_on_folder` and `label_folder`, and
+  `FoloMcp::get_info` returns read-only initialization `instructions` naming only read-only tools and `diagnose_run`.
 - **`--confine`.** `build` installs the dataset read guard (`confine::install_read_guard`) unless the backend is
   `Proxy`, where `folo serve` reads the datasets; `PathPolicy` checks every input path, label paths included,
   and the labeling tools that read a job's images check them all first (`confine_job`). The benchmark tools are

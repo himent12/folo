@@ -23,8 +23,8 @@ Every module but `codes`, `json` and `weights` is private and re-exported at the
 | `src/label.rs` | Labeling jobs, their images, agents and events | Agent labeling |
 | `src/bench/` | Benchmarks (`benchmarks.rs`), `catalog.rs`, `entries.rs`, `results.rs`, `loops.rs`, `events.rs` | Vision benchmarks |
 | `src/cloud.rs` | Providers, connections, offers, instances, a run's `compute` and `cloud`, upload sessions | Cloud compute, Uploads |
-| `src/errors.rs` | `ErrorBody` and `ApiError`: the body of every non-2xx response | Errors |
-| `src/codes.rs` | `CODES`: every error code with its HTTP status, CLI exit code and meaning | Errors |
+| `src/errors.rs` | `ErrorBody` and `ApiError`: the JSON error body of non-2xx responses (except bodyless RFC 9110 conditional/range statuses `304`, `412`, `416`) | Errors |
+| `src/codes.rs` | `CODES` and `Code::find`: every error code with its HTTP status, CLI exit code and meaning | Errors |
 | `src/json.rs` | JSON presentation helpers of the CLI's `--json` records and the MCP results; `cli_command`, a command with paths FOLO prints for the user to paste: it pastes into PowerShell, cmd or a POSIX shell when no path holds `"`, `$`, `` ` ``, `%`, `!`, `\`, a typographic double quote or a control character; for a path that does, it shows the path and leaves the quoting to the person; `quote_path`, the same rule for one path already written (a server's path, verbatim) | |
 | `src/weights.rs` | The published weights `folo weights pull` downloads, their cache folder, `home_dir` | |
 | `src/tests.rs`, `src/bench/tests.rs` | Unit tests of defaults, round trips and compatibility | |

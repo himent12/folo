@@ -13,24 +13,24 @@ it.
 | Path | What it holds |
 |---|---|
 | `src/lib.rs` | `Server` (the router and its middleware: token, origin, `Host`, CORS, compression, logging), `Options`, `WebSource` |
-| `src/routes/` | The `/api` router (`mod.rs`: `api()`, `blocking()`) and one handler file per `docs/API.md` section: `system.rs`, `datasets.rs`, `models.rs`, `runs.rs`, `inference.rs`, `uploads.rs`, `cloud.rs`, `label.rs`, `bench.rs` |
+| `src/routes/` | The `/api` router (`mod.rs`: `api()`, `blocking()`, `OriginalUri` in `404`/`405` fallbacks) and handler files grouped by area: `system.rs` (health, system, throughput, benchmark probes), `datasets.rs` (datasets + shared `serve_image` with strong `ETag` / `304` / `412`), `models.rs` (models + `POST /api/val`), `runs.rs` (runs + `/runs/estimate`), `inference.rs`, `uploads.rs`, `cloud.rs`, `label.rs`, `bench.rs` |
 | `src/store.rs` | The `Store` trait: everything a handler can ask, with `501 not_implemented` defaults for optional parts |
-| `src/real/` | `RealStore`: `mod.rs` (the struct, `open_with_cloud`, the data dir layout), `store.rs` (its `Store` impl), `datasets.rs`, `registry.rs`, `deletion.rs`, `training.rs`, `models.rs`, `uploads.rs`, `gpu_idle.rs` |
+| `src/real/` | `RealStore`: `mod.rs` (the struct, `open_with_cloud`, parallel startup indexing, the data dir layout), `store.rs` (its `Store` impl), `datasets.rs`, `registry.rs`, `deletion.rs`, `training.rs`, `models.rs`, `uploads.rs`, `gpu_idle.rs`, `tests.rs` |
 | `src/mock/` | `MockStore`: `store.rs` (its `Store` impl), `catalog.rs` (the seeded data), `runs/` (simulated runs), `scene.rs`, `datasets.rs`, `models.rs`, `val.rs`, `weights.rs`, `throughput.rs`, `cloud.rs` |
-| `src/runs/` | The real store's training runs: `queue.rs` (FIFO queue, worker thread), `train.rs` (one run on the trainer), `entry.rs` (a run's record and event sink), `history.rs`, `registry.rs`, `resume.rs` |
+| `src/runs/` | The real store's training runs: `mod.rs`, `queue.rs` (FIFO queue, worker thread), `train.rs` (one run on the trainer), `entry.rs` (a run's record and event sink), `history.rs` (typed incremental `metrics.jsonl` cache and line-by-line `/logs` disk reader), `registry.rs`, `resume.rs`, `tests.rs` |
 | `src/cloud/` | The cloud control plane (docs/CLOUD.md): `Cloud` in `mod.rs`, `connections.rs`, `ledger.rs`, `reaper.rs`, `worker.rs`, `state.rs`, `files.rs`, and `executor/` (a cloud run's thread: `launch.rs`, `sync.rs`, `train.rs`, `mirror.rs`) |
 | `src/label/` | Agent labeling: `Labeler` in `mod.rs`, the `Agent` trait (`agent.rs`), `ask.rs` (one batch's calls: two at most, usage kept whatever the outcome), `faults.rs` (passing faults and limits in a CLI's failure), `claude.rs`, `codex.rs`, `antigravity/` (`mod.rs`, `protocol.rs`, `process.rs`, `acp.rs`, `tests/`), `labeling.rs` (starting and stopping a run), `run.rs`, `prompt.rs`, `job.rs`, `images.rs`, `export.rs`, `dataset.rs`, `tree.rs`, `validate.rs` |
-| `src/bench/` | Vision benchmarks: `Benches` in `mod.rs`, `state.rs`, `benchmarks.rs`, `entries.rs`, `model.rs`, `agent.rs`, `external.rs`, `results.rs`, `images.rs`, `source.rs`, `design.rs`, `loops.rs` |
-| `src/throughput/` | The measured throughput table and run-time estimates: `recording.rs`, `api_table.rs`, `reference.rs`, `run_estimate.rs` |
-| `src/engine.rs` | Device selection, GPU info, `engine_error` (engine errors to API errors), the predictor cache of `/api/predict` |
+| `src/bench/` | Vision benchmarks: `Benches` in `mod.rs`, `state.rs`, `benchmarks.rs`, `entries.rs`, `model.rs`, `agent.rs`, `external.rs`, `results.rs`, `images.rs` (single-flight rendered-variant and decoded-base-image LRU caches), `source.rs`, `design.rs`, `loops.rs` |
+| `src/throughput/` | The measured throughput table and run-time estimates: `mod.rs`, `recording.rs`, `api_table.rs`, `reference.rs`, `run_estimate.rs`, `tests.rs` |
+| `src/engine.rs` | Device selection, GPU info, `engine_error` (engine errors to API errors), the single-flight predictor cache of `/api/predict` |
 | `src/index.rs` | A dataset's `Index` of images and boxes, its `Fingerprint`, thumbnails (tests in `src/index/tests.rs`) |
-| `src/models.rs` | The real store's models: run weights, `<data dir>/models`, published weights, `/eval`, exports (tests in `src/models/tests.rs`) |
-| `src/uploads.rs` | Upload sessions (`/api/uploads`): streams in parts into `<data dir>/uploads/<id>/` |
+| `src/models.rs` | The real store's models: run weights, `<data dir>/models`, published weights, single-flight `/eval` cache, `/export` publishing, and cached derived `/weights?format=...` builds with per-`(model, variant)` locks (tests in `src/models/tests.rs`) |
+| `src/uploads.rs` | Upload sessions (`/api/uploads`): streams in parts into `<data dir>/uploads/<id>/`, cached `uploads.json` fingerprints, and a condvar-gated expiry sweeper |
 | `src/error.rs` | `Error` (status + `{ "error": { code, message, hint } }`), `ApiJson`, `ApiPath`, `ApiQuery`, `ApiBytes` |
 | `src/web.rs` | The Studio compiled in by the `embed-web` feature and how it is served |
 | `src/probe.rs` | `POST /api/system/benchmark`: a short training and inference probe |
 | `src/cli.rs` | The `folo train` command of a run (`GET /api/runs/{id}/cli`) |
-| `src/system.rs`, `src/stats.rs`, `src/raster.rs`, `src/util.rs` | Host CPU and memory (the CPU counters are set up on a thread of their own, so `serve` listens without waiting ~150 ms for them; the first `/api/system` starts a preparation of its slow parts, side by side, that the server owns and every request waits for, so a request that goes away cancels nothing; no CPU reading is measured over less than sysinfo's minimum interval: one asked sooner gives the last again), dataset statistics, the mock's rasteriser, small helpers |
+| `src/system.rs`, `src/stats.rs`, `src/raster.rs`, `src/util.rs` | Host CPU and memory (the CPU counters are set up on a thread of their own, so `serve` listens without waiting ~150 ms for them; the first `/api/system` starts a preparation of its slow parts, side by side, that the server owns and every request waits for, so a request that goes away cancels nothing; no CPU reading is measured over less than sysinfo's minimum interval: one asked sooner gives the last again), dataset statistics, the mock's rasteriser, small helpers (`Flight` single-flight deduplication, FNV-1a, RFC 3339 timestamps) |
 | `build.rs` | With `embed-web`: writes the table of the built Studio's files (`web/dist` or `$FOLO_WEB_DIST`) |
 | `tests/` | Integration tests (see below) |
 
@@ -102,7 +102,7 @@ live next to the code (`src/**/tests.rs` and `mod tests` blocks). Each folder un
 |---|---|
 | `api` | Every endpoint in mock mode through `tower::ServiceExt::oneshot`, plus SSE, the real store, static files, CORS and compression |
 | `real_runs` | The real store's runs, models and inference on a tiny synthetic dataset (CPU, 64 px); `hardware.rs` trains on a GPU and skips without one |
-| `real_datasets`, `issues` | The real store's datasets, index cache and re-indexing; `GET /api/datasets/{id}/issues` |
+| `real_datasets`, `issues`, `confined_diagnostics` | The real store's datasets, index cache and re-indexing; `GET /api/datasets/{id}/issues`; failed dataset registration hints honouring the `folo mcp --confine` process-wide read guard (separate binary) |
 | `uploads`, `transfer`, `weights` | `/api/uploads`; `folo_client::transfer` against a real server; `GET /api/models/{id}/weights` |
 | `cloud`, `mock_cloud`, `worker` | The cloud control plane against in-process workers; the mock's cloud; what a cloud worker serves |
 | `label`, `label_live` | Agent labeling with scripted agents; the real Claude Code, Codex and Antigravity CLIs |
