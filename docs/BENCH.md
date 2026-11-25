@@ -62,10 +62,12 @@ is severe, and a person can still do the job.
 
 The image a contestant gets under a condition is a JPEG at quality 95 of the changed pixels, the same bytes for
 every contestant of a server: `GET /api/bench/benchmarks/{id}/images/{image_id}?condition=haze&severity=3`.
-Unchanged images are served as their original files. The conditions' pixels and the JPEG are pinned by golden
-tests (`crates/folo-bench/tests/golden.rs`, a digest of every condition and of two canonical JPEGs) that CI runs
-on Linux and Windows, so they are the same bytes on both and for every thread count; a change to them is a new
-version of the engine and a new fingerprint.
+Unchanged images are served as their original files. Under the hood, `crates/folo-bench` runs register-tiled `u8`
+separable/sparse convolution and vertical resampling kernels (with a fused haze epilogue) in `src/pixels.rs` and
+256-entry linear-gain and noise-σ lookup tables for `low_light` in `src/conditions/transform.rs`. The conditions'
+pixels and the JPEG are pinned by golden tests (`crates/folo-bench/tests/golden.rs`, a digest of every condition and of
+two canonical JPEGs) that CI runs on Linux and Windows, so they are the same bytes on both and for every thread count;
+a change to them is a new version of the engine and a new fingerprint.
 
 ## The score
 An entry gets one number from 0 to 100, the weighted mean of five axes, each between 0 and 1:
@@ -88,7 +90,11 @@ Speed is reported for FOLO models (milliseconds per image on the server's device
 it depends on the machine, and an external model's cannot be measured here.
 
 ### Definitions
-All of this is computed in `crates/folo-bench`; every number is tested against a hand-worked case.
+All of this is computed in `crates/folo-bench` (`src/score.rs` computes headline AP with chunked parallel
+`folo_vision::Evaluator`, `map75` and size buckets with chunked parallel `CocoEval`, and calibration, localization,
+self-labeling and per-image outcomes with class-indexed per-image matching; `src/score/bootstrap.rs` precomputes
+per-image greedy matching once in parallel so the 200-resample bootstrap reproduces `Evaluator`'s `mAP@0.5:0.95`
+bit-identically); every number is tested against a hand-worked case.
 
 **Matching.** Wherever "right" is used below: on the unchanged images, per image and class, detections in
 descending confidence are matched one by one to the still unmatched true box of that class with the highest IoU,
@@ -265,15 +271,19 @@ from"). It can still be run with a confidence set by hand; the entry's label cha
 2. **Conditions.** Switch conditions on and off, pick their severities and weights, and look at any image of the
    benchmark under any condition next to the unchanged one. **Design with an agent** proposes a plan from the
    description. The plan is yours to change until the first entry.
-3. **Add entry.** A model of the server, an agent, or a file of predictions from anywhere else. The
-   **leaderboard** ranks the entries by score, with the five axes and each entry's mAP interval on one scale, so
-   an overlap is visible as an overlap.
+3. **Add entry.** A model of the server, an agent, or a file of predictions from anywhere else (Studio parses and
+   validates external prediction files off the UI thread in a Web Worker, transferring bounded upload parts on demand
+   so large files stay responsive, falling back to UI-thread parsing when a worker is unavailable or its transport
+   fails). The **leaderboard** ranks the entries by score, with the five axes and each entry's mAP interval on one
+   scale, so an overlap is visible as an overlap. The Benchmarks list, leaderboard, and Compare views each export to
+   CSV and JSON (with RFC-4180 quoting and spreadsheet formula neutralization).
 4. **Open an entry** for the whole result: where the score comes from, accuracy per class and object size, the
    accuracy kept under each condition and severity (and what that condition looks like), the reliability of its
    confidence, what its own labels would be worth, how tight its boxes are, and the images it gets most wrong
    with every missed and wrong box drawn.
 5. **Compare** two to four entries side by side: who wins under which condition and on which class, and whether
-   the difference is larger than the intervals.
+   the difference is larger than the intervals (`B` cycles the baseline, `1`–`4` pin or unpin an entry, and `Escape`
+   unpins).
 6. **Loops → New loop** runs a self-improvement loop from a model of the server and shows each generation
    against the first teacher's interval.
 
@@ -284,6 +294,7 @@ from"). It can still be run with a confidence set by hand; the entry's label cha
 - From the command line, `folo bench` ([CLI.md](CLI.md#vision-benchmarks)), and from an agent the MCP benchmark
   tools ([MCP.md](MCP.md#benchmarks)), make benchmarks, run models and files of predictions on them and read their
   scores; agent contestants, agent-designed plans and loops are Studio's, FOLO
-  Desktop's and the HTTP API's. FOLO Desktop has the list,
-  the leaderboard (models and agents), the plan with previews and agent design, loops and every entry's result
+  Desktop's and the HTTP API's. FOLO Desktop has the searchable/filterable/sortable benchmarks list,
+  the sortable leaderboard with baseline pinning and expandable error details with error copy (models and agents), the
+  plan with severity preview chips and agent design, loops, and every entry's result with an entry image inspector
   (apps/desktop/README.md, Benchmarks); external predictions and Compare are Studio's.

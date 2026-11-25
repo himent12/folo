@@ -307,16 +307,19 @@ builds on.
   change at severities 1 to 5, with pixel sizes given at a 640 px long side and scaled with the image; `apply` makes a
   variant (only `distance` moves the true boxes), `render` goes from an image file (decoded as datasets are,
   `folo_data::decode`) to the canonical quality-95 JPEG.
-- Pixels touch only IEEE basic operations (the sRGB curve and Gaussian weights come from tables built without libm)
-  and noise is seeded per row, so a variant has the same bytes on every machine and thread count: `tests/golden.rs`
-  pins a digest of every condition, two canonical JPEGs and a score, on the Linux and Windows CI runners.
-  `ENGINE_VERSION` names what the crate computes and goes into every benchmark's fingerprint; a change the golden
-  tests catch is a bump.
+- Pixels touch only IEEE basic operations (the sRGB curve and Gaussian weights come from tables built without libm;
+  `pixels.rs` runs register-tiled `u8` separable/sparse convolution and vertical resampling passes with a fused haze
+  epilogue, and `low_light` uses 256-entry linear-gain and noise-σ lookup tables) and noise is seeded per row, so a
+  variant has the same bytes on every machine and thread count: `tests/golden.rs` pins a digest of every condition,
+  two canonical JPEGs and a score, on the Linux and Windows CI runners. `ENGINE_VERSION` names what the crate computes
+  and goes into every benchmark's fingerprint; a change the golden tests catch is a bump.
 - `plan`: the catalog, the default plan, `check_plan` (docs/API.md's rules) and `variants`. `score`: every number of
   BENCH.md's *Definitions* from plain per-image truths and detections, returned as the `folo_api` wire types. Headline
-  AP uses folo-vision's `Evaluator` (and chunked parallel `CocoEval` for the size buckets); the 200-resample bootstrap
-  interval (`score/bootstrap.rs`) precomputes per-image greedy matching once in parallel and accumulates
-  weighted/unweighted AP per seeded resample to reproduce `Evaluator`'s `mAP@0.5:0.95` bit-identically.
+  AP uses chunked parallel `folo-vision` `Evaluator` (with chunked parallel `CocoEval` for `map75` and the size
+  buckets), while calibration, localization, self-labeling and per-image outcomes use class-indexed per-image matching
+  in `score.rs`; the 200-resample bootstrap interval (`score/bootstrap.rs`) precomputes per-image greedy matching once
+  in parallel and accumulates weighted/unweighted AP per seeded resample to reproduce `Evaluator`'s `mAP@0.5:0.95`
+  bit-identically.
 
 ### folo-wasm
 FOLO in the browser ([WASM.md](WASM.md): JS API, build and limits). `crates/folo-wasm` (wasm-bindgen) loads a `.folo`
@@ -377,21 +380,34 @@ under `FOLO_TEST_TMP` and remove them, also when a test fails ([CI.md](CI.md#tes
 ## Front ends
 
 ### FOLO Studio
-`web/`: TypeScript + Vite on fw, FOLO's own UI framework (`web/framework/`: JSX compiled to cloned DOM templates with
-fine-grained signals, scoped CSS; it replaced Svelte 5), a custom design system (tokens, components) and no UI kit.
+`web/`: TypeScript + Vite on fw, FOLO's own UI framework (`web/framework/`: JSX compiled at build time into
+deduplicated cloned DOM templates with fine-grained signals, keyed list reconciliation, tree-order effect flushing
+without per-job path allocations, and scoped CSS; it replaced Svelte 5), a custom design system (tokens, components)
+and no UI kit.
 It talks only to [API.md](API.md); `web/src/lib/api/` holds the typed client and a dev mock, `web/src/routes/` the
-screens. See [web/README.md](../web/README.md).
+screens (each route split into its own chunk, with a single responsive DOM tree on list screens and a lazy-loaded
+`CommandPalette`). Key UX and performance features include `G`-chord navigation and `?` keyboard shortcuts (plus `1`–`4`/`B`
+in Compare, `1`–`9` quick classes and 200-step undo/redo in Labeling, and modal/popover focus return with ARIA live
+regions), URL-synced list/section filters, interactive Dataset class-balance chips with windowed grid preloading and
+decode cancellation, persisted Run chart smoothing/log-Y with synced crosshair, CSV/JSON table exports for Models and
+Benchmarks, Web Worker external benchmark prediction parsing, Playground zoom/pan with quick JSON copy, and a Settings
+diagnostics panel with live ping latency and sanitized report copy. See [web/README.md](../web/README.md).
 
 ### FOLO Desktop
 `apps/desktop/`: a native Rust app on folo-ui, its own UI framework (below), with the same design language and main
 screens as Studio (Overview, Datasets, Runs, Models, Benchmarks, Playground and Settings; agent labeling, run compare,
 benchmark compare and importing external predictions stay in Studio). It talks to a local `folo serve` over the same API
-(it can spawn one), so the engine and the UI stay
-decoupled. Its Playground can also run a model in process ("Run on: Local GPU / Local CPU"): it fetches the f16
-weights from `GET /api/models/{id}/weights` (revalidated by ETag) and runs folo-vision's `Predictor` on folo-gpu or
-the CPU. Its Benchmarks screens use `folo-bench` only in the built-in demo, to grade its fixtures as the server would.
-It is a separate cargo workspace (the app and folo-ui) so the main workspace does not build the UI. See
-[apps/desktop/README.md](../apps/desktop/README.md).
+(it can spawn one), so the engine and the UI stay decoupled, and Settings provides a direct Studio handoff alongside a
+themes-folder shortcut and saved server URL. Keyboard navigation covers `Ctrl+K` palette, `Ctrl+1–6` screens (`Ctrl+5`
+Benchmarks, `Ctrl+6` Playground), `Ctrl+,` Settings, `Ctrl+B` manual sidebar collapse, and `Alt+←/→` back/forward.
+Screen capabilities include dataset sorting, image search and clickable class bars, the image inspector (`B`/`L` box
+and label toggles, click-to-zoom, and Try in Playground), run throughput charts with loss smooth/log-y toggles,
+sortable per-class model metrics with export progress guards, and searchable/filterable Benchmarks with plan severity
+chips, leaderboard sorting/baseline pinning, and an entry image inspector. Its Playground can also run a model in
+process ("Run on: Local GPU / Local CPU"): it fetches the f16 weights from `GET /api/models/{id}/weights` (revalidated
+by ETag) and runs folo-vision's `Predictor` on folo-gpu or the CPU. Its Benchmarks screens use `folo-bench` only in the
+built-in demo, to grade its fixtures as the server would. It is a separate cargo workspace (the app and folo-ui) so the
+main workspace does not build the UI. See [apps/desktop/README.md](../apps/desktop/README.md).
 
 ### folo-ui — FOLO Desktop's UI framework
 `apps/desktop/ui` (crate `folo-ui`, a member of the desktop workspace; design record
@@ -403,19 +419,28 @@ platform, raster (the renderer), text, the app runtime, the window, the elements
   queue, flushed after every platform callback. Tasks are `async-task` runnables on the platform's dispatcher, so an
   idle app has no timer and no thread awake.
 - Window (`window/`): a frame renders the root view, lays the elements out with taffy (pinned to the version and the
-  style mapping GPUI used, so every box lands where it did), prepaints (bounds, hitboxes, scroll offsets, deferred
-  draws, the tooltip), paints a `Scene` and dispatches input through the hitboxes and the key-context tree. A window
-  draws only when something made it dirty, at most once per display refresh; while nothing changes nothing runs.
+  style mapping GPUI used, so every box lands where it did, reusing unchanged subtrees from a compact `SmallVec`-backed
+  `LayoutTree`), prepaints (bounds, precomputed hitbox bounds, scroll offsets, deferred draws, the tooltip), paints a
+  `Scene` and dispatches input through the hitboxes and the key-context tree. Steady frames intern `GlobalElementId`
+  `Arc`s across two generations, reuse resolved `Interactivity` styles across layout/prepaint/paint, cull off-screen
+  quads/text/hitboxes early, pool `UniformList` scratch buffers, re-fade `with_opacity_animation` opacity groups
+  without re-running layout/paint, and skip redraws on clamped wheel input. A window draws only when something made it
+  dirty, at most once per display refresh; while nothing changes nothing runs.
 - Renderer (`raster/`): the scene (quads, shadows, glyph and SVG sprites, images, paths, underlines, each with its
   clip) is binned into 64 px tiles; each tile's ordered primitives are hashed, cut at the topmost opaque cover, and
-  only tiles whose hash changed are rasterized, on the calling thread or on the renderer's own small pool (not
-  rayon's, which belongs to the engine). Coverage formulas are GPUI's; blending is 8-bit source-over in gamma space as
-  GPUI's DX11 renderer did. Rendering frame A then B into one buffer gives the same bytes as B into a fresh one, for
-  every thread count (tested on random scenes). Caches (shadows, paths, resampled images, glyph masks) are bounded in
-  bytes. No GPU device, swap chain or shader: the GPU stays with training and inference.
-- Text (`text/`): line layout, wrapping and truncation with GPUI's rules, a per-window line layout cache; glyphs from
-  DirectWrite on Windows (as GPUI used it: same masks, subpixel variants, contrast and gamma) and from cosmic-text
-  elsewhere and in deterministic tests (feature `portable-text`).
+  only tiles whose hash changed are rasterized (with unboxed dirty-tile prep, single-thread tile fast paths, stepped
+  MSAA edges, vectorized `fill_span` including NEON, fast opaque image resampling, SIMD RGB blit, and precomputed SVG
+  axis transforms), on the calling thread or on the renderer's own small pool (not rayon's, which belongs to the
+  engine). Coverage formulas are GPUI's; blending is 8-bit source-over in gamma space as GPUI's DX11 renderer did.
+  Rendering frame A then B into one buffer gives the same bytes as B into a fresh one, for every thread count (tested
+  on random scenes). Caches (shadows, paths, resampled images, glyph masks) use borrowed lookup keys, throttled idle
+  sweeps, and byte bounds. Frame and raster benchmarks report warm-up-excluded p50/p95 timings. No GPU device, swap
+  chain or shader: the GPU stays with training and inference.
+- Text (`text/`): line layout, wrapping, truncation and glyph mask lookup with GPUI's rules (using borrowed cache keys
+  and steady-state fast paths that avoid per-call allocations), a per-window line layout cache, pre-resolved text-style
+  stacks, and shared static default `FontFeatures`; glyphs from DirectWrite on Windows (as GPUI used it: same masks,
+  subpixel variants, contrast and gamma) and from cosmic-text elsewhere and in deterministic tests (feature
+  `portable-text`).
 - Platforms (`platform/`): Win32 (own window class and message loop, custom title bar through `WM_NCCALCSIZE` /
   `WM_NCHITTEST`, IME, clipboard, file dialogs, per-monitor DPI, presenting damage rectangles with GDI); winit +
   softbuffer on Linux and macOS (also built on Windows with feature `winit`); headless, driven by `HeadlessApp` (fake
