@@ -449,6 +449,62 @@ impl FoloModel {
         Ok(())
     }
 
+    /// Return an independent eval-mode clone of `self` with every `ConvBnAct` BatchNorm pre-folded into its
+    /// convolution (MODEL.md §9.1), leaving `self` (its weights, fused state and train/eval mode) untouched.
+    ///
+    /// Used by the trainer to pre-fold EMA or live weights once per validation pass instead of re-folding on
+    /// every validation batch, and to enable fused kernels / GPU [`folo_gpu::ForwardPlans`] during validation.
+    pub fn fused_eval_clone(&self) -> Result<Self> {
+        let mut clone = Self::new(self.config.clone())?;
+        clone.set_classes(self.classes.clone())?;
+        clone.set_imgsz(self.imgsz);
+        clone.set_head_mode(self.head_mode)?;
+        if self.fused {
+            clone.fuse()?;
+        }
+        let dev = self.device();
+        if dev != clone.device() {
+            clone.to_device(dev)?;
+        }
+        let dtype = self.dtype();
+        if dtype != clone.dtype() {
+            Module::to_dtype(&mut clone, dtype)?;
+        }
+        {
+            let _g = folo_core::no_grad();
+            let src = self.named_tensors();
+            let dst = clone.named_tensors();
+            if src.len() != dst.len() {
+                return Err(Error::Invalid(format!(
+                    "fused_eval_clone: tensor count mismatch ({} vs {})",
+                    src.len(),
+                    dst.len()
+                )));
+            }
+            for (s, d) in src.iter().zip(&dst) {
+                if s.name != d.name {
+                    return Err(Error::Invalid(format!(
+                        "fused_eval_clone: tensor name mismatch (`{}` vs `{}`)",
+                        s.name, d.name
+                    )));
+                }
+                if d.tensor.device() != s.tensor.device() {
+                    d.tensor.copy_from(&s.tensor.to_device(d.tensor.device())?)?;
+                } else {
+                    d.tensor.copy_from(&s.tensor)?;
+                }
+            }
+        }
+        if !self.fused {
+            clone.fuse()?;
+        }
+        clone.eval();
+        for p in clone.parameters() {
+            p.set_requires_grad(false);
+        }
+        Ok(clone)
+    }
+
     /// Run the backbone and neck (layers 0–22) in int8 on the CPU with the ranges of `cal` (docs/MODEL.md §9.6),
     /// or in `f32` again with `None`. Needs a fused `f32` model, the one `cal` was measured on when it records
     /// its [`quant::fingerprint`], on the CPU (where every range is checked); the head stays `f32`. Applies to
@@ -778,5 +834,54 @@ mod tests {
         assert!(m.c3k(false));
         let x = row("x");
         assert_eq!([x.ch(64), x.ch(1024), x.rep(2)], [96, 768, 2]);
+    }
+
+    #[test]
+    fn fused_eval_clone_matches_unfused_and_leaves_source_untouched() {
+        let model = FoloModel::new(ModelConfig::new("n", 3).unwrap()).unwrap();
+        model.train();
+        let x = Tensor::rand_uniform([1, 3, 64, 64], 0.0, 1.0, &mut Rng::seed(17));
+        // Run one train step so BN running stats are non-trivial, then compare eval outputs.
+        let _ = model.forward(&x).unwrap();
+        model.eval();
+        let ref_out = {
+            let _g = folo_core::no_grad();
+            model.forward(&x).unwrap()
+        };
+        model.train();
+        assert!(!model.is_fused());
+        assert!(model.is_training());
+
+        let fused = model.fused_eval_clone().unwrap();
+        assert!(fused.is_fused());
+        assert!(!fused.is_training());
+        // Source model remains unfused and in training mode.
+        assert!(!model.is_fused());
+        assert!(model.is_training());
+
+        let fused_out = {
+            let _g = folo_core::no_grad();
+            fused.forward(&x).unwrap()
+        };
+        for (a, b) in
+            ref_out.box_raw.to_vec::<f32>().unwrap().iter().zip(fused_out.box_raw.to_vec::<f32>().unwrap())
+        {
+            assert!((a - b).abs() < 1e-4, "box_raw mismatch: {a} vs {b}");
+        }
+        for (a, b) in
+            ref_out.cls_raw.to_vec::<f32>().unwrap().iter().zip(fused_out.cls_raw.to_vec::<f32>().unwrap())
+        {
+            assert!((a - b).abs() < 1e-4, "cls_raw mismatch: {a} vs {b}");
+        }
+
+        // Cloning an already-fused model also produces matching outputs.
+        let fused2 = fused.fused_eval_clone().unwrap();
+        assert!(fused2.is_fused());
+        let fused2_out = {
+            let _g = folo_core::no_grad();
+            fused2.forward(&x).unwrap()
+        };
+        assert_eq!(fused_out.box_raw.to_vec::<f32>().unwrap(), fused2_out.box_raw.to_vec::<f32>().unwrap());
+        assert_eq!(fused_out.cls_raw.to_vec::<f32>().unwrap(), fused2_out.cls_raw.to_vec::<f32>().unwrap());
     }
 }

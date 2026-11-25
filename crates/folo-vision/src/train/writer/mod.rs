@@ -92,9 +92,7 @@ impl EpochFiles {
         let (map, tensors) = &self.contents;
         folo_nn::io::safetensors::write_file(&self.last, Some(map), tensors)?;
         if let Some(best) = &self.best {
-            write_atomic(best, |f| {
-                std::fs::File::open(&self.last).and_then(|mut src| std::io::copy(&mut src, f).map(drop))
-            })?;
+            promote_best(&self.last, best)?;
         }
         let (p, text) = &self.samples;
         if let Some(sdir) = p.parent() {
@@ -102,6 +100,45 @@ impl EpochFiles {
         }
         write_atomic(p, |f| std::io::Write::write_all(f, text.as_bytes()))
     }
+}
+
+/// Promotes `last` to `best` atomically, preferring an O(1) same-filesystem hardlink (`hard_link` to a
+/// sibling temporary path followed by [`folo_nn::io::rename_over`]) and falling back to an atomic byte copy
+/// when hardlinks are unavailable (cross-device, unsupported filesystem, etc.).
+///
+/// Safe because [`folo_nn::io::safetensors::write_file`] always writes `last` to a fresh temporary file and
+/// atomically renames it over `last`, leaving any previous inode linked by `best` immutable.
+fn promote_best(last: &Path, best: &Path) -> Result<()> {
+    match try_hardlink_temp(last, best) {
+        Ok(tmp) => folo_nn::io::rename_over(&tmp, best).map_err(|err| {
+            let _ = std::fs::remove_file(&tmp);
+            Error::io(best, err)
+        }),
+        Err(_) => write_atomic(best, |f| {
+            std::fs::File::open(last).and_then(|mut src| std::io::copy(&mut src, f).map(drop))
+        }),
+    }
+}
+
+fn try_hardlink_temp(src: &Path, dst: &Path) -> std::io::Result<PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = dst.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let name = dst.file_name().and_then(|n| n.to_str()).unwrap_or("best.folo");
+    let pid = std::process::id();
+    for _ in 0..8 {
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = dir.join(format!(".{name}.link-{pid}-{seq}.tmp"));
+        match std::fs::hard_link(src, &tmp) {
+            Ok(()) => return Ok(tmp),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate unique hardlink temp path",
+    ))
 }
 
 /// Writes `path` through `fill` to a temporary file beside it, synced, then renamed over it.

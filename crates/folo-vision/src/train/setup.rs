@@ -352,29 +352,33 @@ impl Trainer {
             }
             gs
         };
-        let opt: Box<dyn Optimizer> = match resolved.kind {
-            OptimKind::Sgd => Box::new(Sgd::new(apply_wd_mode(std_groups.into_groups(
-                resolved.lr0,
-                resolved.momentum,
-                wd,
-            )))?),
-            OptimKind::AdamW => {
-                Box::new(AdamW::new(std_groups.into_groups(resolved.lr0, resolved.momentum, wd))?)
-            }
-            // MODEL.md §8.2: the head's class branches (o2m and o2o) train at 3x the LR.
-            OptimKind::MuSgd => Box::new(MuSgd::with_ortho_and_geo(
-                apply_wd_mode(std_groups.into_boosted_groups(
+        let apply_backbone_lr = |gs: Vec<folo_nn::optim::ParamGroup>| {
+            if cfg.backbone_lr_scale == 1.0 { gs } else { split_backbone_groups(gs, cfg.backbone_lr_scale) }
+        };
+        let opt: Box<dyn Optimizer> =
+            match resolved.kind {
+                OptimKind::Sgd => Box::new(Sgd::new(apply_backbone_lr(apply_wd_mode(
+                    std_groups.into_groups(resolved.lr0, resolved.momentum, wd),
+                )))?),
+                OptimKind::AdamW => Box::new(AdamW::new(apply_backbone_lr(std_groups.into_groups(
                     resolved.lr0,
                     resolved.momentum,
                     wd,
-                    |n| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls."),
-                    cfg.musgd.cls_lr,
-                )),
-                resolved.musgd,
-                cfg.musgd.ortho,
-                cfg.musgd.geo,
-            )?),
-        };
+                )))?),
+                // MODEL.md §8.2: the head's class branches (o2m and o2o) train at 3x the LR.
+                OptimKind::MuSgd => Box::new(MuSgd::with_ortho_and_geo(
+                    apply_backbone_lr(apply_wd_mode(std_groups.into_boosted_groups(
+                        resolved.lr0,
+                        resolved.momentum,
+                        wd,
+                        |n| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls."),
+                        cfg.musgd.cls_lr,
+                    ))),
+                    resolved.musgd,
+                    cfg.musgd.ortho,
+                    cfg.musgd.geo,
+                )?),
+            };
         let nb = n_train.div_ceil(cfg.batch);
         let spe = nb.div_ceil(accumulate);
         let sched = LrSchedule::with_warmup_iters(
@@ -455,4 +459,50 @@ impl Trainer {
             after_epoch: opts.after_epoch,
         })
     }
+}
+
+/// Split `backbone.*` parameters out of each optimizer group into `<group>.backbone` with
+/// `base_lr * backbone_lr_scale` (preserving `depthwise` masks and all other hyperparameters).
+fn split_backbone_groups(
+    groups: Vec<folo_nn::optim::ParamGroup>,
+    backbone_lr_scale: f64,
+) -> Vec<folo_nn::optim::ParamGroup> {
+    let mut out = Vec::with_capacity(groups.len() * 2);
+    for mut g in groups {
+        let params = std::mem::take(&mut g.params);
+        let dw_all = std::mem::take(&mut g.depthwise);
+        let mut rest_params = Vec::new();
+        let mut rest_dw = Vec::new();
+        let mut bb_params = Vec::new();
+        let mut bb_dw = Vec::new();
+        for (i, (name, tensor)) in params.into_iter().enumerate() {
+            let dw = dw_all.get(i).copied().unwrap_or(false);
+            if name.starts_with("backbone.") {
+                bb_params.push((name, tensor));
+                bb_dw.push(dw);
+            } else {
+                rest_params.push((name, tensor));
+                rest_dw.push(dw);
+            }
+        }
+        if !rest_params.is_empty() || bb_params.is_empty() {
+            out.push(folo_nn::optim::ParamGroup {
+                params: rest_params,
+                depthwise: if rest_dw.iter().any(|&d| d) { rest_dw } else { Vec::new() },
+                ..g.clone()
+            });
+        }
+        if !bb_params.is_empty() {
+            let scaled = g.base_lr * backbone_lr_scale;
+            out.push(folo_nn::optim::ParamGroup {
+                name: format!("{}.backbone", g.name),
+                params: bb_params,
+                base_lr: scaled,
+                lr: scaled,
+                depthwise: if bb_dw.iter().any(|&d| d) { bb_dw } else { Vec::new() },
+                ..g
+            });
+        }
+    }
+    out
 }

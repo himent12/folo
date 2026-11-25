@@ -15,11 +15,33 @@ use crate::loss::{
 };
 use crate::val::batch_tensor;
 
+/// RAII guard that re-enables `requires_grad` on frozen backbone parameters when `train_epoch` exits
+/// (on completion, stop, or error).
+struct RestoreGrad(Vec<folo_core::Tensor>);
+
+impl Drop for RestoreGrad {
+    fn drop(&mut self) {
+        for p in &self.0 {
+            p.set_requires_grad(true);
+        }
+    }
+}
+
 impl Trainer {
     /// One epoch of §8.3. Returns the mean reported loss over its finite batches, or `None` if the stop flag
     /// interrupted it.
     pub(super) fn train_epoch(&mut self, e: u32, clock: &mut Clock) -> Result<Option<folo_api::Loss>> {
         self.model.train();
+        let _backbone_grad_guard = if e < self.cfg.freeze_backbone_epochs {
+            self.model.backbone.eval();
+            let params = self.model.backbone.parameters();
+            for p in &params {
+                p.set_requires_grad(false);
+            }
+            Some(RestoreGrad(params))
+        } else {
+            None
+        };
         // Stage-2 Mosaic-Off BN-Freeze safeguard (P3): keep BN in eval mode when mosaic is closed.
         let mosaic_closed = self.is_mosaic_closed(e);
         if self.cfg.bn_freeze_close_mosaic && mosaic_closed {
@@ -290,6 +312,21 @@ impl Trainer {
 
     fn optimizer_step(&mut self, e: u32, k: usize) -> Result<()> {
         self.sched.apply(self.opt.as_mut());
+        // Scale `bias.backbone`'s warmup start by `backbone_lr_scale` so backbone biases do not start at the
+        // unscaled `warmup_bias_lr` while `decay.backbone` and `bn.backbone` are scaled.
+        if self.cfg.backbone_lr_scale != 1.0 {
+            let c = self.sched.contract();
+            let t = self.sched.step();
+            if t < c.warmup_iters && c.warmup_bias_lr != 0.0 {
+                let frac = t as f64 / c.warmup_iters as f64;
+                let shift = (1.0 - frac) * c.warmup_bias_lr * (1.0 - self.cfg.backbone_lr_scale);
+                for g in self.opt.groups_mut() {
+                    if g.name == "bias.backbone" {
+                        g.lr = (g.lr - shift).max(0.0);
+                    }
+                }
+            }
+        }
         if self.cfg.cls_lr_close_scale != 1.0 && self.is_mosaic_closed(e) {
             for g in self.opt.groups_mut() {
                 if g.name.ends_with(".cls") {
