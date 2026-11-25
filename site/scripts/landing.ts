@@ -5,7 +5,7 @@ import type { MarkdownIt, Token } from 'markdown-it';
 import { NAV, REPO_URL, slugFor } from './config.ts';
 import { ICONS } from './layout.ts';
 import { relUrl } from './links.ts';
-import { attr, escapeHtml, inlineText, type ParsedPage } from './markdown.ts';
+import { attr, escapeHtml, inlineText, sections as extractSections, type ParsedPage, type Section as SearchSection } from './markdown.ts';
 
 interface Section {
   id: string;
@@ -67,6 +67,21 @@ export interface Landing {
   main: string;
   anchors: Set<string>;
   description: string;
+  sections: SearchSection[];
+}
+
+function plainText(tokens: Token[]): string {
+  return extractSections(tokens, '')
+    .map((s) => (s.title ? `${s.title} ${s.text}` : s.text))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function sectionEntries(s: Section, anchors: Set<string>): SearchSection[] {
+  const parts = extractSections(s.tokens, s.title);
+  parts[0].id = s.id;
+  return parts.filter((p) => p.id === s.id || anchors.has(p.id));
 }
 
 export function renderLanding(md: MarkdownIt, page: ParsedPage, slug: string): Landing {
@@ -151,6 +166,7 @@ export function renderLanding(md: MarkdownIt, page: ParsedPage, slug: string): L
   const quickHtml = section(quick, 'l-quick', `<div class="l-prose prose">${render(quick.tokens)}</div>`, 'Get started');
 
   // Studio and Desktop: the first paragraph and a screenshot each (Studio's second one; the first is the hero's).
+  const appSections: SearchSection[] = [];
   const app = (s: Section, name: string, href: string, shotIndex: number) => {
     const bs = blocks(s.tokens);
     const shots = bs.map(imageOf).filter((x): x is Token => !!x);
@@ -160,6 +176,7 @@ export function renderLanding(md: MarkdownIt, page: ParsedPage, slug: string): L
     // A paragraph that introduces a list ("It has these screens:") keeps its list.
     const para = [...bs[at], ...(/:\s*$/.test(inlineText(bs[at][1])) && bs[at + 1] && isType(bs[at + 1], 'bullet_list_open') ? bs[at + 1] : [])];
     anchors.add(s.id);
+    appSections.push({ id: s.id, title: s.title, text: plainText(para) });
     return `<article class="app-card" id="${s.id}" aria-labelledby="${s.id}-h">
   <img src="${attr(shot, 'src')}" alt="${escapeHtml(inlineText(shot))}"${dims(shot)} loading="lazy" decoding="async">
   <div class="app-card-body">
@@ -178,6 +195,7 @@ export function renderLanding(md: MarkdownIt, page: ParsedPage, slug: string): L
   const ab = blocks(agent.tokens);
   const agentPara = ab.find((b) => isType(b, 'paragraph_open'));
   const agentCode = ab.find((b) => isType(b, 'fence'));
+  const agentRenderedTokens = [...(agentPara ?? []), ...(agentCode ?? [])];
   const agentHtml = section(
     agent,
     'l-agent',
@@ -200,21 +218,37 @@ export function renderLanding(md: MarkdownIt, page: ParsedPage, slug: string): L
     const href = link && attr(link, 'href');
     if (href && cells[1]) blurbs.set(href, inlineText(cells[1]));
   }
+  const docsTextParts: string[] = [];
   const docsHtml = `<section class="l-section l-docs" id="${docsTable.id}" aria-labelledby="${docsTable.id}-h">
   <div class="l-section-head"><p class="eyebrow">Documentation</p><h2 id="${docsTable.id}-h">Explore the docs</h2></div>
   <div class="doc-groups">${NAV.map(
-    (g) => `<div class="doc-group"><h3>${escapeHtml(g.title)}</h3><ul>${g.pages
-      .map((p) => {
-        const href = relUrl(slug, slugFor(p.src));
-        const blurb = blurbs.get(href);
-        return `<li><a href="${href}"><span class="doc-link-label">${escapeHtml(p.label)}</span>${blurb ? `<span class="doc-link-blurb">${escapeHtml(blurb)}</span>` : ''}</a></li>`;
-      })
-      .join('')}</ul></div>`,
+    (g) => {
+      docsTextParts.push(g.title);
+      return `<div class="doc-group"><h3>${escapeHtml(g.title)}</h3><ul>${g.pages
+        .map((p) => {
+          const href = relUrl(slug, slugFor(p.src));
+          const blurb = blurbs.get(href);
+          docsTextParts.push(blurb ? `${p.label} ${blurb}` : p.label);
+          return `<li><a href="${href}"><span class="doc-link-label">${escapeHtml(p.label)}</span>${blurb ? `<span class="doc-link-blurb">${escapeHtml(blurb)}</span>` : ''}</a></li>`;
+        })
+        .join('')}</ul></div>`;
+    },
   ).join('')}</div>
 </section>`;
   anchors.add(docsTable.id);
 
   const statusHtml = section(projectStatus, 'l-status', `<div class="l-prose prose">${render(projectStatus.tokens)}</div>`, 'Status');
+
+  const introRenderedTokens = [...lead, ...(features ?? []), ...(status ?? [])];
+  const indexedSections: SearchSection[] = [
+    { id: '', title: page.title, text: plainText(introRenderedTokens) },
+    ...sectionEntries(numbers, anchors),
+    ...sectionEntries(quick, anchors),
+    ...appSections,
+    { id: agent.id, title: agent.title, text: plainText(agentRenderedTokens) },
+    { id: docsTable.id, title: 'Explore the docs', text: docsTextParts.join(' ').replace(/\s+/g, ' ').trim() },
+    { id: projectStatus.id, title: projectStatus.title, text: plainText(projectStatus.tokens) },
+  ];
 
   const main = `<div class="landing">
 ${hero}
@@ -226,5 +260,5 @@ ${agentHtml}
 ${docsHtml}
 ${statusHtml}
 </div>`;
-  return { main, anchors, description };
+  return { main, anchors, description, sections: indexedSections };
 }

@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { deep, field, flush as flushSync, tick } from 'fw';
 import { describe, expect, it } from 'vitest';
 import { render } from '../../../framework/testing';
@@ -267,6 +269,26 @@ describe('LineChart end labels and marks', () => {
     flushSync();
     expect(target.querySelector('.marker .pulse')).toBeTruthy();
     expect(target.querySelector('.marker .focus')).toBeTruthy();
+    unmount(c);
+  });
+
+  it('positions the live heartbeat ring via a translated wrapper group without transform-box fill-box bbox queries', () => {
+    const series = [{ id: 'live', label: 'mAP50-95', color: 'ink', end: 'live' as const, points: pts((x) => x / 30) }];
+    const { target, c } = mountAt({ series, label: 'live', endDots: true });
+    const wrap = target.querySelector('g.end-beat-wrap');
+    const beat = wrap?.querySelector('circle.end-beat');
+    const dot = target.querySelector('circle.end-dot.end-live');
+    expect(wrap?.getAttribute('transform')).toMatch(/^translate\([^,]+,[^)]+\)$/);
+    expect(beat).toBeTruthy();
+    expect(beat?.getAttribute('cx')).toBeNull();
+    expect(beat?.getAttribute('cy')).toBeNull();
+    expect(dot).toBeTruthy();
+    expect(wrap?.getAttribute('transform')).toBe(`translate(${dot?.getAttribute('cx')},${dot?.getAttribute('cy')})`);
+
+    const cssText = readFileSync(resolve(import.meta.dirname, 'LineEnds.tsx'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(cssText).not.toContain('transform-box: fill-box');
+    expect(cssText).toContain('transform-origin: 0 0;');
+    expect(cssText).toContain('will-change: transform, opacity;');
     unmount(c);
   });
 });

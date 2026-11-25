@@ -119,6 +119,16 @@ function fontFaces(t: Json, cssDir: string): string {
 const block = (sel: string, vars: [string, string][], indent = '') =>
   `${indent}${sel} {\n${vars.map(([k, v]) => `${indent}  ${k}: ${v};`).join('\n')}\n${indent}}\n`;
 
+/** The dark and light surface colours (`--bg-panel`) from design/tokens.json, for `<meta name="theme-color">`. */
+export function themeColors(): { dark: string; light: string } {
+  const t = JSON.parse(readFileSync(resolve(DESIGN_DIR, 'tokens.json'), 'utf8')) as Json;
+  const color = t.color as Record<string, { bg: { panel: string } }>;
+  return {
+    dark: hex(color.dark.bg.panel, 'color.dark.bg.panel'),
+    light: hex(color.light.bg.panel, 'color.light.bg.panel'),
+  };
+}
+
 /** The tokens stylesheet, with font URLs relative to `cssDir` (where the file is written). */
 export function tokensCss(cssDir: string): string {
   const t = JSON.parse(readFileSync(resolve(DESIGN_DIR, 'tokens.json'), 'utf8')) as Json;
@@ -134,5 +144,6 @@ export function tokensCss(cssDir: string): string {
     `@media (prefers-color-scheme: light) {\n${block(':root:not([data-theme="dark"])', light, '  ')}}\n`,
     block(':root[data-theme="light"]', light),
     `@media (prefers-reduced-motion: reduce) {\n${block(':root', reduced, '  ')}}\n`,
+    `@media print {\n${block(':root,\n  :root[data-theme="dark"],\n  :root[data-theme="light"]', light, '  ')}}\n`,
   ].join('\n');
 }

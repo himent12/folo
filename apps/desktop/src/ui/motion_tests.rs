@@ -104,6 +104,7 @@ fn open(old: bool) -> (HeadlessApp, AnyWindowHandle) {
 
 #[test]
 fn the_app_s_opacity_animations_look_as_they_did() {
+    let _reduce_motion = super::motion::override_reduce_motion_for_test(false);
     let (mut old, old_window) = open(true);
     let (mut new, new_window) = open(false);
     let mut shown = old.frame(old_window).clone();

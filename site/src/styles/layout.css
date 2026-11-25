@@ -107,27 +107,23 @@
   display: block;
 }
 
-/* The theme button shows what it switches to. */
+/* The theme button shows the active mode: system (monitor), light (sun) or dark (moon). */
+.theme-toggle .i-sun,
 .theme-toggle .i-moon {
   display: none;
 }
 
-:root[data-theme='light'] .theme-toggle .i-sun {
+:root[data-theme='light'] .theme-toggle .i-system,
+:root[data-theme='dark'] .theme-toggle .i-system {
   display: none;
 }
 
-:root[data-theme='light'] .theme-toggle .i-moon {
+:root[data-theme='light'] .theme-toggle .i-sun {
   display: block;
 }
 
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme='dark']) .theme-toggle .i-sun {
-    display: none;
-  }
-
-  :root:not([data-theme='dark']) .theme-toggle .i-moon {
-    display: block;
-  }
+:root[data-theme='dark'] .theme-toggle .i-moon {
+  display: block;
 }
 
 /* Shell */
@@ -398,6 +394,10 @@
 }
 
 .doc-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-5);
   margin-top: var(--space-6);
   color: var(--text-tertiary);
   font-size: var(--type-sm-size);
@@ -419,6 +419,7 @@
   inset: 0;
   z-index: var(--z-overlay);
   background: var(--bg-scrim);
+  touch-action: pinch-zoom;
 }
 
 /* Landing: no sidebar beside the content, only the drawer on small screens. */
@@ -442,7 +443,7 @@
   }
 }
 
-@media (max-width: 959px) {
+@media (width < 960px) {
   :root {
     --gutter: var(--space-8);
   }
@@ -455,6 +456,10 @@
   /* The drawer opens below the top bar, whose menu button turns into its close button. */
   .nav-open .topbar {
     z-index: var(--z-dialog);
+  }
+
+  .nav-open .topbar > :not(.nav-toggle) {
+    opacity: 0.45;
   }
 
   .sidebar {
@@ -484,8 +489,9 @@
       visibility 0s;
   }
 
-  .nav-open {
+  html.nav-open {
     overflow: hidden;
+    overscroll-behavior: none;
   }
 }
 
@@ -525,5 +531,37 @@
 
   .pager {
     grid-template-columns: 1fr;
+  }
+}
+
+@media print {
+  html.nav-open {
+    overflow: visible;
+  }
+
+  .skip,
+  .topbar,
+  .scrim,
+  .sidebar,
+  .toc,
+  .toc-inline,
+  .pager,
+  .doc-raw,
+  .search {
+    display: none !important;
+  }
+
+  .shell {
+    display: block;
+    max-width: none;
+  }
+
+  .doc-layout {
+    display: block;
+    padding: 0;
+  }
+
+  .doc-foot {
+    margin-top: var(--space-8);
   }
 }

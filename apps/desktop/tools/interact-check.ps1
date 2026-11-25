@@ -365,12 +365,18 @@ try {
         Click 814 154; Settle 400
         Key 0x28; Key 0x0D; Settle 400; Away
         Pass "the Dataset select picks with the keyboard" (-not (Same $d0 (Snap) $ds)) ""
-        $epochs = @(548, 648, 84, 28)
-        $e0 = Snap
+        # Scroll Schedule (and the Epochs slider) into view before interacting with it, and assert the
+        # Epochs value itself rather than a broad region that scrolling alone would change.
+        $beforeScroll = Snap
+        Wheel 600 500 -5; Away
+        $scrolled = Snap
+        Pass "wheel scrolls the New run dialog to Schedule" (-not (Same $beforeScroll $scrolled)) ""
+        $epochs = @(548, 565, 84, 30)
+        $e0 = $scrolled
         # A press on the track sets the value there. (Dragging a slider inside the dialog does not move
         # it, on GPUI too: the root view tracks slider drags with on_mouse_move, which the dialog's
         # occluding scrim hides. The playground step above drags one on a page.)
-        Click 506.7 662; Away
+        Click 506.7 580; Away
         $moved = -not (Same $e0 (Snap) $epochs)
         Pass "a click on the Epochs track sets it" $moved $(if (-not $moved) { Why "epochs" })
         Key 0x1B; Away
