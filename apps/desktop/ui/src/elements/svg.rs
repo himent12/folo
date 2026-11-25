@@ -101,7 +101,7 @@ impl Element for Svg {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let path = self.path.clone();
+        let path = self.path.as_ref();
         self.interactivity.paint(
             global_id,
             inspector_id,
@@ -111,7 +111,7 @@ impl Element for Svg {
             cx,
             |style, window, cx| {
                 if let Some((path, color)) = path.zip(style.text.color)
-                    && let Err(error) = window.paint_svg(bounds, path.clone(), color, cx)
+                    && let Err(error) = window.paint_svg_ref(bounds, path, color, cx)
                 {
                     eprintln!("folo-ui: svg {path}: {error:#}");
                 }

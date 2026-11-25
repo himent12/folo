@@ -4,9 +4,15 @@
 use super::hash::FastBuild;
 use crate::{AlphaMask, Bounds, ColorMask, DevicePixels};
 use anyhow::Result;
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
+
+/// How often long-TTL caches (`max_idle >= IDLE_SWEEP_INTERVAL`) scan for idle entries when under
+/// their byte budget. Sweeping every 64 frames (~1 s at 60 Hz) avoids scanning 7 hash maps on every
+/// steady frame while still dropping stale entries within `max_idle + 64` frames.
+const IDLE_SWEEP_INTERVAL: u64 = 64;
 
 struct Entry<V> {
     value: V,
@@ -15,8 +21,9 @@ struct Entry<V> {
 }
 
 /// A map whose entries cost bytes. `end_frame` evicts the least recently used entries that the
-/// current frame did not use while the total is over the budget, and always drops entries unused for
-/// more than `max_idle` frames.
+/// current frame did not use while the total is over the budget, and drops entries unused for more
+/// than `max_idle` frames (checked every frame for short limits `< 64`, every 64 frames or when
+/// over budget for longer limits).
 pub(crate) struct ByteCache<K, V> {
     map: HashMap<K, Entry<V>, FastBuild>,
     bytes: usize,
@@ -32,6 +39,14 @@ impl<K: Hash + Eq + Clone, V: Clone> ByteCache<K, V> {
 
     /// The value for `key`, marking it used this frame.
     pub fn get(&mut self, key: &K) -> Option<V> {
+        self.get_by(key)
+    }
+
+    /// The value for a borrowed `key`, marking it used this frame.
+    pub fn get_by<Q: Hash + Eq + ?Sized>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+    {
         let frame = self.frame;
         self.map.get_mut(key).map(|e| {
             e.used = frame;
@@ -60,7 +75,14 @@ impl<K: Hash + Eq + Clone, V: Clone> ByteCache<K, V> {
     /// Ends a frame: evicts as described on the type, then starts the next frame.
     pub fn end_frame(&mut self) {
         let frame = self.frame;
-        if self.max_idle != u64::MAX {
+        let over_budget = self.bytes > self.budget;
+        let sweep_idle = self.max_idle != u64::MAX
+            && !self.map.is_empty()
+            && frame > self.max_idle
+            && (over_budget
+                || self.max_idle < IDLE_SWEEP_INTERVAL
+                || (frame & (IDLE_SWEEP_INTERVAL - 1)) == 0);
+        if sweep_idle {
             let max_idle = self.max_idle;
             let mut freed = 0;
             self.map.retain(|_, e| {
@@ -210,7 +232,8 @@ impl From<Arc<ColorMask>> for Mask {
 ///
 /// Call `begin_frame` before a frame's paint and `end_frame` after it. While the cache holds more
 /// than its byte budget, `end_frame` drops the least recently used masks the frame did not use;
-/// masks unused for `max_idle_frames` frames are dropped regardless.
+/// masks unused for more than `max_idle_frames` frames are dropped regardless (checked every frame
+/// when `max_idle_frames < 64`, and every 64 frames or when over budget for longer limits).
 pub struct MaskCache<K, V = Mask> {
     inner: ByteCache<K, V>,
 }
@@ -238,14 +261,29 @@ impl<K: Hash + Eq + Clone, V: CachedMask> MaskCache<K, V> {
         key: &K,
         make: impl FnOnce() -> Result<Option<V>>,
     ) -> Result<Option<V>> {
-        if let Some(m) = self.inner.get(key) {
+        self.get_or_insert_with_by(key, || key.clone(), make)
+    }
+
+    /// Like [`Self::get_or_insert_with`], looking up by a borrowed key `Q` so cache hits do not
+    /// have to construct or clone an owned `K`. On a miss, `make_key` builds the owned key only if
+    /// `make` produces `Some(mask)`.
+    pub fn get_or_insert_with_by<Q: Hash + Eq + ?Sized>(
+        &mut self,
+        key: &Q,
+        make_key: impl FnOnce() -> K,
+        make: impl FnOnce() -> Result<Option<V>>,
+    ) -> Result<Option<V>>
+    where
+        K: Borrow<Q>,
+    {
+        if let Some(m) = self.inner.get_by(key) {
             return Ok(Some(m));
         }
         let Some(mask) = make()? else {
             return Ok(None);
         };
         let bytes = mask.byte_size() + std::mem::size_of::<K>() + 64;
-        self.inner.insert(key.clone(), mask.clone(), bytes);
+        self.inner.insert(make_key(), mask.clone(), bytes);
         Ok(Some(mask))
     }
 

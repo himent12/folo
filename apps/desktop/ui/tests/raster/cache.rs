@@ -149,3 +149,92 @@ fn png_round_trip() {
     let back = folo_ui::raster::debug::read_png(file.path()).unwrap();
     assert_eq!(back, fb);
 }
+
+#[test]
+fn mask_cache_throttles_long_idle_sweeps_and_reclaims_under_budget() {
+    // 1. Long idle limit (>= 64 frames): entry survives through max_idle and is evicted by the
+    //    next periodic 64-frame sweep.
+    let mut cache: MaskCache<u32> = MaskCache::with_budget(1 << 30, 64);
+    cache
+        .get_or_insert_with(&1, || {
+            Ok(Some(Mask::Alpha(Arc::new(AlphaMask::new(dsize(4, 4), vec![1u8; 16])))))
+        })
+        .unwrap();
+    for _ in 0..=64 {
+        cache.end_frame();
+    }
+    assert_eq!(cache.len(), 1, "entry should still be live at frame == max_idle");
+    for _ in 65..=128 {
+        cache.end_frame();
+    }
+    assert!(cache.is_empty(), "idle entry must be evicted once the periodic sweep runs");
+
+    // 2. Under budget pressure on a non-sweep frame, expired idle entries are reclaimed immediately.
+    let mut tight: MaskCache<u32> = MaskCache::with_budget(200, 64);
+    tight
+        .get_or_insert_with(&1, || {
+            Ok(Some(Mask::Alpha(Arc::new(AlphaMask::new(dsize(8, 8), vec![1u8; 64])))))
+        })
+        .unwrap();
+    // Advance to frame 66 (past max_idle=64, not a multiple of 64).
+    for _ in 0..66 {
+        tight.end_frame();
+    }
+    assert_eq!(tight.len(), 1);
+    tight
+        .get_or_insert_with(&2, || {
+            Ok(Some(Mask::Alpha(Arc::new(AlphaMask::new(dsize(10, 10), vec![2u8; 100])))))
+        })
+        .unwrap();
+    // Total bytes now exceed the 200-byte budget; end_frame on frame 66 drops idle key 1 immediately.
+    tight.end_frame();
+    assert_eq!(tight.len(), 1);
+    let mut rebuilt = false;
+    tight
+        .get_or_insert_with(&2, || {
+            rebuilt = true;
+            Ok(None)
+        })
+        .unwrap();
+    assert!(!rebuilt, "fresh key 2 should remain cached after idle key 1 is reclaimed");
+}
+
+#[test]
+fn mask_cache_get_or_insert_with_by_avoids_key_construction_on_hit() {
+    let mut cache: MaskCache<String> = MaskCache::with_budget(1 << 20, 64);
+    let mut key_builds = 0;
+    let mut val_builds = 0;
+    for _ in 0..4 {
+        let mask = cache
+            .get_or_insert_with_by(
+                "icons/check.svg",
+                || {
+                    key_builds += 1;
+                    String::from("icons/check.svg")
+                },
+                || {
+                    val_builds += 1;
+                    Ok(Some(Mask::Alpha(Arc::new(AlphaMask::new(dsize(4, 4), vec![9u8; 16])))))
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(mask.into_alpha().unwrap().size, dsize(4, 4));
+    }
+    assert_eq!(key_builds, 1);
+    assert_eq!(val_builds, 1);
+
+    // `Ok(None)` never constructs an owned key.
+    let res = cache
+        .get_or_insert_with_by(
+            "icons/missing.svg",
+            || {
+                key_builds += 1;
+                String::from("icons/missing.svg")
+            },
+            || Ok(None),
+        )
+        .unwrap();
+    assert!(res.is_none());
+    assert_eq!(key_builds, 1);
+}
