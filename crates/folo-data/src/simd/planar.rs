@@ -1,7 +1,7 @@
 //! Bit-exact AVX2 RGB deinterleaving (`RGB u8` → planar `u8`, planar `f32`, packed `RGB0 u32`) and horizontal row flip.
 
 #[cfg(target_arch = "x86_64")]
-use super::has_avx2;
+use super::{INV255_HI, INV255_LO, has_avx2, has_avx2_fma};
 
 /// Converts interleaved RGB `src` (`width * 3` bytes) into planar `r`, `g`, `b` (`width` bytes each), optionally
 /// mirrored left-to-right (`flip_lr`).
@@ -78,6 +78,12 @@ pub(crate) fn rgb_to_planar_f32_div255(
 ) {
     let w = r.len();
     assert!(src.len() == w * 3 && g.len() == w && b.len() == w);
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() && w >= 16 {
+        // SAFETY: CPU supports AVX2+FMA and slice lengths are asserted to match `w`.
+        unsafe { rgb_to_planar_f32_div255_avx2_fma(src, r, g, b, flip_lr) };
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && w >= 16 {
         // SAFETY: CPU supports AVX2 and slice lengths are asserted to match `w`.
@@ -289,8 +295,56 @@ unsafe fn rgb_to_planar_f32_scale_avx2(src: &[u8], r: &mut [f32], g: &mut [f32],
 }
 
 #[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2", enable = "fma")]
+unsafe fn rgb_to_planar_f32_div255_avx2_fma(
+    src: &[u8],
+    r: &mut [f32],
+    g: &mut [f32],
+    b: &mut [f32],
+    flip_lr: bool,
+) {
+    let w = r.len();
+    let sp = src.as_ptr();
+    let (rp, gp, bp) = (r.as_mut_ptr(), g.as_mut_ptr(), b.as_mut_ptr());
+    let vhi = _mm256_set1_ps(INV255_HI);
+    let vlo = _mm256_set1_ps(INV255_LO);
+    let rev16 = _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    let mut x = 0usize;
+    while x + 16 <= w {
+        // SAFETY: `x + 16 <= w`, so 48 bytes are readable from `sp` and 16 `f32`s are writable at `dst_x`.
+        let (mut vr, mut vg, mut vb) = unsafe { deinterleave_rgb16_avx2(sp.add(x * 3)) };
+        let dst_x = if flip_lr {
+            vr = _mm_shuffle_epi8(vr, rev16);
+            vg = _mm_shuffle_epi8(vg, rev16);
+            vb = _mm_shuffle_epi8(vb, rev16);
+            w - x - 16
+        } else {
+            x
+        };
+        for (v, dp) in [(vr, rp), (vg, gp), (vb, bp)] {
+            let flo = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v));
+            let fhi = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128::<8>(v)));
+            let lo = _mm256_fmadd_ps(flo, vhi, _mm256_mul_ps(flo, vlo));
+            let hi = _mm256_fmadd_ps(fhi, vhi, _mm256_mul_ps(fhi, vlo));
+            unsafe {
+                _mm256_storeu_ps(dp.add(dst_x), lo);
+                _mm256_storeu_ps(dp.add(dst_x + 8), hi);
+            }
+        }
+        x += 16;
+    }
+    while x < w {
+        let d = if flip_lr { w - 1 - x } else { x };
+        r[d] = src[x * 3] as f32 / 255.0;
+        g[d] = src[x * 3 + 1] as f32 / 255.0;
+        b[d] = src[x * 3 + 2] as f32 / 255.0;
+        x += 1;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn rgb_to_planar_f32_div255_avx2(
+pub(crate) unsafe fn rgb_to_planar_f32_div255_avx2(
     src: &[u8],
     r: &mut [f32],
     g: &mut [f32],

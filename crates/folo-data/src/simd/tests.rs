@@ -5,6 +5,7 @@ use super::bilinear::{
     hinterp_taps_to_rgb, hinterp_taps_to_rgb_scalar, hinterp_taps_to_rgb0_u32, vblend_rgb_to_rgba32,
     vblend_rgb_to_rgba32_scalar, warp_hinterp_interior_to_rgb, warp_hinterp_interior_to_rgb_scalar,
 };
+use super::box_filter::{box_hreduce_u32_to_u8, box_hreduce_u32_to_u8_scalar, sum_rows_u8_to_u32};
 use super::hsv_fused::{HsvTables, warp_interior_to_planar_fused, warp_interior_to_planar_fused_scalar};
 use super::planar::{
     flip_lr_row, flip_lr_row_scalar, rgb_to_planar_f32_div255, rgb_to_planar_f32_div255_scalar,
@@ -511,4 +512,111 @@ fn malformed_short_image_panics_safely_in_public_apis() {
         })
         .is_err()
     );
+}
+
+#[test]
+fn fma_div255_is_bit_exact_for_all_u8_values() {
+    let mut src = Vec::with_capacity(256 * 3);
+    for v in 0..=255u8 {
+        src.extend_from_slice(&[v, 255 - v, v.wrapping_mul(37)]);
+    }
+    for flip in [false, true] {
+        let (mut r0, mut g0, mut b0) = (vec![0f32; 256], vec![0f32; 256], vec![0f32; 256]);
+        let (mut r1, mut g1, mut b1) = (vec![0f32; 256], vec![0f32; 256], vec![0f32; 256]);
+        rgb_to_planar_f32_div255_scalar(&src, &mut r0, &mut g0, &mut b0, flip);
+        rgb_to_planar_f32_div255(&src, &mut r1, &mut g1, &mut b1, flip);
+        for i in 0..256 {
+            assert_eq!(r1[i].to_bits(), r0[i].to_bits(), "r[{i}] flip={flip}");
+            assert_eq!(g1[i].to_bits(), g0[i].to_bits(), "g[{i}] flip={flip}");
+            assert_eq!(b1[i].to_bits(), b0[i].to_bits(), "b[{i}] flip={flip}");
+        }
+    }
+    // Also exercise the pure-AVX2 fallback directly on x86_64.
+    #[cfg(target_arch = "x86_64")]
+    if super::has_avx2() {
+        let (mut r0, mut g0, mut b0) = (vec![0f32; 256], vec![0f32; 256], vec![0f32; 256]);
+        let (mut r1, mut g1, mut b1) = (vec![0f32; 256], vec![0f32; 256], vec![0f32; 256]);
+        rgb_to_planar_f32_div255_scalar(&src, &mut r0, &mut g0, &mut b0, false);
+        // SAFETY: `has_avx2()` checked above and lengths match 256.
+        unsafe { super::planar::rgb_to_planar_f32_div255_avx2(&src, &mut r1, &mut g1, &mut b1, false) };
+        for i in 0..256 {
+            assert_eq!(r1[i].to_bits(), r0[i].to_bits(), "avx2 r[{i}]");
+            assert_eq!(g1[i].to_bits(), g0[i].to_bits(), "avx2 g[{i}]");
+            assert_eq!(b1[i].to_bits(), b0[i].to_bits(), "avx2 b[{i}]");
+        }
+    }
+    // Check `hinterp_taps_to_planar_f32_div255` over all 256 byte values.
+    let mut v = vec![0u32; 257 * 4];
+    vblend_rgb_to_rgba32(&src, &src, 0, &mut v);
+    v.copy_within(255 * 4..256 * 4, 256 * 4);
+    let x0: Vec<u32> = (0..256).collect();
+    let wx = vec![0u32; 256];
+    let (mut fr0, mut fg0, mut fb0) = (vec![0f32; 256], vec![0f32; 256], vec![0f32; 256]);
+    let (mut fr1, mut fg1, mut fb1) = (vec![0f32; 256], vec![0f32; 256], vec![0f32; 256]);
+    rgb_to_planar_f32_div255_scalar(&src, &mut fr0, &mut fg0, &mut fb0, false);
+    // SAFETY: `v` has 257 columns and every `x0[i] < 256`.
+    unsafe { hinterp_taps_to_planar_f32_div255(&v, &x0, &wx, &mut fr1, &mut fg1, &mut fb1) };
+    for i in 0..256 {
+        assert_eq!(fr1[i].to_bits(), fr0[i].to_bits(), "hinterp r[{i}]");
+        assert_eq!(fg1[i].to_bits(), fg0[i].to_bits(), "hinterp g[{i}]");
+        assert_eq!(fb1[i].to_bits(), fb0[i].to_bits(), "hinterp b[{i}]");
+    }
+}
+
+#[test]
+fn box_filter_simd_matches_scalar_bit_exact() {
+    // 1. Vertical row summation for ny = 0, 1, 2, 3, 5 across odd/edge strides.
+    for &stride in &[3usize, 15, 16, 17, 48, 63, 99] {
+        for &ny in &[0usize, 1, 2, 3, 5] {
+            let band = noisy_bytes(500 + stride as u64 * 13 + ny as u64, ny * stride);
+            let mut got = vec![0xDEADBEEFu32; stride];
+            sum_rows_u8_to_u32(&mut got, &band, stride);
+            let mut want = vec![0u32; stride];
+            for row in band.chunks_exact(stride) {
+                for (a, &b) in want.iter_mut().zip(row) {
+                    *a += b as u32;
+                }
+            }
+            assert_eq!(got, want, "sum_rows stride={stride} ny={ny}");
+        }
+    }
+
+    // 2. Horizontal reduction across fx = 1, 2, 3, 4, 5, 7, power-of-two and non-power-of-two `full_n`, and edge widths.
+    let mut rng = Rng::new(1337);
+    for &fx in &[1usize, 2, 3, 4, 5, 7] {
+        for &ny in &[1usize, 2, 3, 4, 7] {
+            let full_n = (fx * ny) as u32;
+            for &n_out in &[1usize, 5, 6, 7, 8, 9, 15, 16, 17, 33, 64] {
+                let mut body = vec![0u32; n_out * fx * 3];
+                for v in &mut body {
+                    *v = rng.below(255 * ny + 1) as u32;
+                }
+                let mut want = vec![0u8; n_out * 3];
+                box_hreduce_u32_to_u8_scalar(&body, &mut want, fx, full_n);
+                let mut got = vec![0xAAu8; n_out * 3];
+                if box_hreduce_u32_to_u8(&body, &mut got, fx, full_n) {
+                    assert_eq!(got, want, "box_hreduce fx={fx} ny={ny} n_out={n_out}");
+                }
+            }
+        }
+    }
+
+    // 3. Exhaustive boundary check of AVX2 rounded division for every `n in 1..=4096`.
+    let mut body = vec![0u32; 24 * 3];
+    let mut got = vec![0u8; 24 * 3];
+    let mut want = vec![0u8; 24 * 3];
+    for n in 1..=4096u32 {
+        for (i, slot) in body.iter_mut().enumerate() {
+            let k = ((i * 11) % 256) as u32;
+            *slot = match i % 3 {
+                0 => k * n,
+                1 => (k * n + n / 2).min(255 * n),
+                _ => (k * n + n - 1).min(255 * n),
+            };
+        }
+        box_hreduce_u32_to_u8_scalar(&body, &mut want, 1, n);
+        if box_hreduce_u32_to_u8(&body, &mut got, 1, n) {
+            assert_eq!(got, want, "exact round div failed at n={n}");
+        }
+    }
 }

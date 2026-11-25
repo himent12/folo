@@ -8,10 +8,10 @@ use crate::image::Image;
 use crate::par::{for_bands, for_rows};
 use crate::simd::assert_image_data;
 use crate::simd::bilinear::{
-    add_u8_to_u32, hinterp_taps_to_planar_f32_div255, hinterp_taps_to_planar_f32_scale,
-    hinterp_taps_to_planar_u8, hinterp_taps_to_rgb, hinterp_taps_to_rgb0_u32, vblend_rgb_to_rgba32,
-    vshift_rgb_to_rgba32,
+    hinterp_taps_to_planar_f32_div255, hinterp_taps_to_planar_f32_scale, hinterp_taps_to_planar_u8,
+    hinterp_taps_to_rgb, hinterp_taps_to_rgb0_u32, vblend_rgb_to_rgba32, vshift_rgb_to_rgba32,
 };
+use crate::simd::box_filter::{box_hreduce_u32_to_u8, sum_rows_u8_to_u32};
 use crate::simd::planar::{
     rgb_to_planar_f32_div255, rgb_to_planar_f32_scale, rgb_to_planar_u8, rgb_to_rgb0_u32,
 };
@@ -287,11 +287,19 @@ impl<'a> RowResizer<'a> {
     }
 }
 
+impl Drop for RowResizer<'_> {
+    fn drop(&mut self) {
+        if let Some(img) = self.filtered.take() {
+            crate::buffers::recycle(img.data);
+        }
+    }
+}
+
 /// Averages `fx x fy` blocks. The last block in each direction may be partial; it averages what is there.
 ///
-/// Each output band reuses one `u32` row accumulator (summed with AVX2), then each pixel adds up its `fx` columns
-/// and divides with rounding, `(sum + n / 2) / n`, by a multiply-shift ([`RoundDiv`]). Blocks too large for `u32`
-/// sums take the `u64` path.
+/// Each output band reuses one `u32` row accumulator (summed with AVX2), then reduces each pixel's `fx` columns
+/// and divides with rounding, `(sum + n / 2) / n`, using AVX2 horizontal reduction (or a scalar multiply-shift
+/// [`RoundDiv`]). Blocks too large for `u32` sums take the `u64` path.
 fn box_downsample(src: &Image, fx: u32, fy: u32) -> Image {
     assert_image_data(src);
     if 255 * fx as u64 * fy as u64 > u32::MAX as u64 / 2 {
@@ -301,7 +309,7 @@ fn box_downsample(src: &Image, fx: u32, fy: u32) -> Image {
     let (fx, fy) = (fx as usize, fy as usize);
     let ow = w.div_ceil(fx);
     let oh = h.div_ceil(fy);
-    let mut out = vec![0u8; ow * oh * 3];
+    let mut out = crate::buffers::scratch(ow * oh * 3);
     let stride = w * 3;
     // Columns in the last (maybe partial) block.
     let last_w = w - (ow - 1) * fx;
@@ -311,46 +319,51 @@ fn box_downsample(src: &Image, fx: u32, fy: u32) -> Image {
             let oy = oy0 + bi;
             let y0 = oy * fy;
             let y1 = (y0 + fy).min(h);
-            col.fill(0);
-            for y in y0..y1 {
-                add_u8_to_u32(&mut col, &src.data[y * stride..(y + 1) * stride]);
-            }
+            sum_rows_u8_to_u32(&mut col, &src.data[y0 * stride..y1 * stride], stride);
             let ny = y1 - y0;
             let full_n = (fx * ny) as u32;
-            let (full, last) = (RoundDiv::new(full_n), RoundDiv::new((last_w * ny) as u32));
+            let last = RoundDiv::new((last_w * ny) as u32);
             let (body, tail) = col.split_at((ow - 1) * fx * 3);
             let (row_body, row_tail) = row.split_at_mut((ow - 1) * 3);
-            if fx == 2 && full_n.is_power_of_two() {
-                let shift = full_n.trailing_zeros();
-                let half = full_n >> 1;
-                for (px, block) in row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.as_chunks::<6>().0) {
-                    px[0] = ((block[0] + block[3] + half) >> shift) as u8;
-                    px[1] = ((block[1] + block[4] + half) >> shift) as u8;
-                    px[2] = ((block[2] + block[5] + half) >> shift) as u8;
-                }
-            } else if fx == 2 {
-                for (px, block) in row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.as_chunks::<6>().0) {
-                    px[0] = full.div(block[0] + block[3]) as u8;
-                    px[1] = full.div(block[1] + block[4]) as u8;
-                    px[2] = full.div(block[2] + block[5]) as u8;
-                }
-            } else if fx == 3 {
-                for (px, block) in row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.as_chunks::<9>().0) {
-                    px[0] = full.div(block[0] + block[3] + block[6]) as u8;
-                    px[1] = full.div(block[1] + block[4] + block[7]) as u8;
-                    px[2] = full.div(block[2] + block[5] + block[8]) as u8;
-                }
-            } else {
-                for (px, block) in row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.chunks_exact(fx * 3)) {
-                    let mut s = [0u32; 3];
-                    for p in block.as_chunks::<3>().0 {
-                        s[0] += p[0];
-                        s[1] += p[1];
-                        s[2] += p[2];
+            if !row_body.is_empty() && !box_hreduce_u32_to_u8(body, row_body, fx, full_n) {
+                let full = RoundDiv::new(full_n);
+                if fx == 2 && full_n.is_power_of_two() {
+                    let shift = full_n.trailing_zeros();
+                    let half = full_n >> 1;
+                    for (px, block) in row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.as_chunks::<6>().0)
+                    {
+                        px[0] = ((block[0] + block[3] + half) >> shift) as u8;
+                        px[1] = ((block[1] + block[4] + half) >> shift) as u8;
+                        px[2] = ((block[2] + block[5] + half) >> shift) as u8;
                     }
-                    px[0] = full.div(s[0]) as u8;
-                    px[1] = full.div(s[1]) as u8;
-                    px[2] = full.div(s[2]) as u8;
+                } else if fx == 2 {
+                    for (px, block) in row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.as_chunks::<6>().0)
+                    {
+                        px[0] = full.div(block[0] + block[3]) as u8;
+                        px[1] = full.div(block[1] + block[4]) as u8;
+                        px[2] = full.div(block[2] + block[5]) as u8;
+                    }
+                } else if fx == 3 {
+                    for (px, block) in row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.as_chunks::<9>().0)
+                    {
+                        px[0] = full.div(block[0] + block[3] + block[6]) as u8;
+                        px[1] = full.div(block[1] + block[4] + block[7]) as u8;
+                        px[2] = full.div(block[2] + block[5] + block[8]) as u8;
+                    }
+                } else {
+                    for (px, block) in
+                        row_body.as_chunks_mut::<3>().0.iter_mut().zip(body.chunks_exact(fx * 3))
+                    {
+                        let mut s = [0u32; 3];
+                        for p in block.as_chunks::<3>().0 {
+                            s[0] += p[0];
+                            s[1] += p[1];
+                            s[2] += p[2];
+                        }
+                        px[0] = full.div(s[0]) as u8;
+                        px[1] = full.div(s[1]) as u8;
+                        px[2] = full.div(s[2]) as u8;
+                    }
                 }
             }
             let mut s = [0u32; 3];
@@ -399,7 +412,7 @@ fn box_downsample_wide(src: &Image, fx: u32, fy: u32) -> Image {
     let (fx, fy) = (fx as usize, fy as usize);
     let ow = w.div_ceil(fx);
     let oh = h.div_ceil(fy);
-    let mut out = vec![0u8; ow * oh * 3];
+    let mut out = crate::buffers::scratch(ow * oh * 3);
     let stride = w * 3;
     for_rows(&mut out, ow * 3, |oy, row| {
         let y0 = oy * fy;
@@ -525,5 +538,20 @@ mod tests {
         let a = resize(&img, 640, 480);
         let b = crate::par::serial(|| resize(&img, 640, 480));
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn prefilter_buffer_is_recycled_in_pool() {
+        let _guard = crate::buffers::TEST_POOL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let img = Image::new(640, 480, [42, 84, 126]);
+        crate::buffers::pooled(|| {
+            let p1 = {
+                let r = RowResizer::new(&img, 200, 150);
+                r.filtered.as_ref().expect("2x+ downscale uses prefilter").data.as_ptr()
+            };
+            let r2 = RowResizer::new(&img, 200, 150);
+            let p2 = r2.filtered.as_ref().expect("2x+ downscale uses prefilter").data.as_ptr();
+            assert_eq!(p1, p2, "RowResizer drop should recycle the prefilter buffer into the pool");
+        });
     }
 }
