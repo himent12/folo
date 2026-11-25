@@ -17,7 +17,8 @@ second implementation). folo-server depends on it: `src/bench/` stores and sched
 | `src/pixels.rs` | Pixel kernels: sRGB tables, seeded noise, separable and sparse convolution, resampling |
 | `src/plan.rs` | `catalog` (`GET /api/bench/catalog`), `default_plan`, `check_plan`, `variants`, and their unit tests |
 | `src/score.rs` | `evaluate`, `map`, `robustness`, `score`, `outcome`, `labels`: docs/BENCH.md's *Definitions* |
-| `src/score/tests.rs` | Hand-worked cases for every number of the definitions |
+| `src/score/bootstrap.rs` | Pre-matched, bit-exact bootstrap CI resampling for `mAP@0.5:0.95` |
+| `src/score/tests.rs` | Hand-worked cases and numerical parity tests for every number of the definitions |
 | `tests/golden.rs` | Golden digests of every condition's pixels, the canonical JPEG, and one score |
 | `tests/determinism.rs` | Variants and scores are identical for 1, 2, 3 and 8 rayon threads |
 | `benches/conditions.rs` | Every condition at severity 3 on a 1280 x 720 image (`FOLO_BENCH_IMAGE=<file>` for a real one) |

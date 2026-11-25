@@ -30,13 +30,14 @@ use folo_api::{
     BenchClassAccuracy, BenchConditionResult, BenchDetection, BenchLabelPoint, BenchLocalization, BenchPlan,
     BenchReadiness, BenchRobustness, BenchScore, BenchSelfLabeling, BenchSeverityPoint,
 };
-use folo_core::rng::Rng;
-use folo_vision::cocoeval::{CocoEval, CocoTruth};
+use folo_vision::cocoeval::{CocoEval, CocoStats, CocoTruth};
 use folo_vision::{Detection, EvalReport, Evaluator, Truth, Xyxy};
 use rayon::prelude::*;
 
 use crate::conditions::Condition;
-use crate::pixels::mix;
+
+mod bootstrap;
+use bootstrap::bootstrap;
 
 /// The precision a contestant's labels must reach on the self-labeling axis.
 pub const TARGET_PRECISION: f32 = 0.9;
@@ -58,6 +59,32 @@ pub const BOOTSTRAP_RESAMPLES: usize = 200;
 const GRID: usize = 101;
 /// Calibration bins `[0, 0.1)` to `[0.9, 1]`, and localization bins `[0.5, 0.55)` to `[0.95, 1]`.
 const BINS: usize = 10;
+/// Precomputed confidence bin edges (`k as f32 / BINS as f32`) for O(1) bin lookup.
+const CONF_EDGES: [f32; BINS] = [
+    0.0 / BINS as f32,
+    1.0 / BINS as f32,
+    2.0 / BINS as f32,
+    3.0 / BINS as f32,
+    4.0 / BINS as f32,
+    5.0 / BINS as f32,
+    6.0 / BINS as f32,
+    7.0 / BINS as f32,
+    8.0 / BINS as f32,
+    9.0 / BINS as f32,
+];
+/// Precomputed IoU bin edges (`(50 + 5 * k) as f64 / 100.0`) for O(1) bin lookup.
+const IOU_EDGES: [f64; BINS] = [
+    50.0 / 100.0,
+    55.0 / 100.0,
+    60.0 / 100.0,
+    65.0 / 100.0,
+    70.0 / 100.0,
+    75.0 / 100.0,
+    80.0 / 100.0,
+    85.0 / 100.0,
+    90.0 / 100.0,
+    95.0 / 100.0,
+];
 /// Images per evaluator when the images are evaluated in parallel (fixed, so the result is thread-count free).
 const CHUNK: usize = 64;
 /// The stream of the benchmark's seed the bootstrap draws from.
@@ -151,43 +178,80 @@ fn prepare_all(samples: &[Sample], num_classes: usize, scored: bool) -> Vec<Prep
     samples.par_iter().map(|s| prepare(s, num_classes, scored)).collect()
 }
 
-/// IoU in f64, as AP's matching computes it.
-fn iou(a: &Xyxy, b: &Xyxy) -> f64 {
+/// IoU in f64 with precomputed truth area `b_area = (b.x2 - b.x1) * (b.y2 - b.y1)`, bit-exact with `iou`.
+#[inline]
+fn iou_with_areas(a: &Xyxy, a_area: f64, b: &Xyxy, b_area: f64) -> f64 {
     let w = (a.x2 as f64).min(b.x2 as f64) - (a.x1 as f64).max(b.x1 as f64);
+    if w <= 0.0 {
+        return 0.0;
+    }
     let h = (a.y2 as f64).min(b.y2 as f64) - (a.y1 as f64).max(b.y1 as f64);
-    if w <= 0.0 || h <= 0.0 {
+    if h <= 0.0 {
         return 0.0;
     }
     let inter = w * h;
-    let area = |b: &Xyxy| (b.x2 as f64 - b.x1 as f64) * (b.y2 as f64 - b.y1 as f64);
-    inter / (area(a) + area(b) - inter)
+    inter / (a_area + b_area - inter)
+}
+
+#[inline]
+fn box_area_f64(b: &Xyxy) -> f64 {
+    (b.x2 as f64 - b.x1 as f64) * (b.y2 as f64 - b.y1 as f64)
 }
 
 /// The matching of one image: for each detection (input order) the IoU of the true box it matches, if any; and
-/// how many true boxes were matched.
+/// how many true boxes were matched. Class-indexed so each detection only checks truths of its own class.
 fn match_image(dets: &[Detection], truths: &[Truth]) -> (Vec<Option<f64>>, usize) {
-    let mut order: Vec<usize> = (0..dets.len()).collect();
-    order.sort_by(|&a, &b| dets[a].class.cmp(&dets[b].class).then(dets[b].score.total_cmp(&dets[a].score)));
-    let mut taken = vec![false; truths.len()];
     let mut out = vec![None; dets.len()];
+    if dets.is_empty() || truths.is_empty() {
+        return (out, 0);
+    }
+    let mut det_order: Vec<usize> = (0..dets.len()).collect();
+    det_order
+        .sort_by(|&a, &b| dets[a].class.cmp(&dets[b].class).then(dets[b].score.total_cmp(&dets[a].score)));
+    let mut gt_order: Vec<usize> = (0..truths.len()).collect();
+    gt_order.sort_by_key(|&g| truths[g].class);
+
+    let mut taken: Vec<bool> = Vec::new();
+    let mut gt_areas: Vec<f64> = Vec::new();
     let mut matched = 0;
-    for &d in &order {
-        let (mut best, mut m) = (MATCH_IOU, None);
-        for (g, t) in truths.iter().enumerate() {
-            if taken[g] || t.class != dets[d].class {
-                continue;
-            }
-            let v = iou(&dets[d].bbox, &t.bbox);
-            if v >= best {
-                best = v;
-                m = Some(g);
+    let (mut di, mut gi) = (0, 0);
+    while di < det_order.len() {
+        let class = dets[det_order[di]].class;
+        let d_end = di + det_order[di..].partition_point(|&i| dets[i].class == class);
+        while gi < gt_order.len() && truths[gt_order[gi]].class < class {
+            gi += 1;
+        }
+        let g_end = gi + gt_order[gi..].partition_point(|&i| truths[i].class == class);
+        let ng = g_end - gi;
+        if ng > 0 {
+            taken.clear();
+            taken.resize(ng, false);
+            gt_areas.clear();
+            gt_areas.extend(gt_order[gi..g_end].iter().map(|&g| box_area_f64(&truths[g].bbox)));
+            for &d in &det_order[di..d_end] {
+                let db = &dets[d].bbox;
+                let d_area = box_area_f64(db);
+                let (mut best, mut m) = (MATCH_IOU, None);
+                for local_g in 0..ng {
+                    if taken[local_g] {
+                        continue;
+                    }
+                    let v =
+                        iou_with_areas(db, d_area, &truths[gt_order[gi + local_g]].bbox, gt_areas[local_g]);
+                    if v >= best {
+                        best = v;
+                        m = Some(local_g);
+                    }
+                }
+                if let Some(local_g) = m {
+                    taken[local_g] = true;
+                    matched += 1;
+                    out[d] = Some(best);
+                }
             }
         }
-        if let Some(g) = m {
-            taken[g] = true;
-            matched += 1;
-            out[d] = Some(best);
-        }
+        di = d_end;
+        gi = g_end;
     }
     (out, matched)
 }
@@ -219,6 +283,30 @@ fn report<'a>(images: impl IndexedParallelIterator<Item = &'a Prepared>, num_cla
     ev.compute()
 }
 
+/// Parallel `CocoEval` by fixed chunks merged in order (deterministic for any thread count).
+fn coco_report(images: &[Prepared], num_classes: usize) -> CocoStats {
+    let parts: Vec<CocoEval> = images
+        .par_chunks(CHUNK)
+        .enumerate()
+        .map(|(chunk_idx, chunk)| {
+            let base = chunk_idx * CHUNK;
+            let mut coco = CocoEval::new(num_classes);
+            let mut truths = Vec::new();
+            for (k, p) in chunk.iter().enumerate() {
+                truths.clear();
+                truths.extend(p.truths.iter().map(|t| CocoTruth::from_box(t.bbox, t.class)));
+                coco.add_image((base + k) as u64, &p.dets, &truths);
+            }
+            coco
+        })
+        .collect();
+    let mut coco = CocoEval::new(num_classes);
+    for p in parts {
+        coco.merge(p);
+    }
+    coco.compute()
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // The unchanged images
 // ---------------------------------------------------------------------------------------------------------------
@@ -230,13 +318,7 @@ pub fn evaluate(samples: &[Sample], num_classes: usize, scored: bool, seed: u64)
     let images = prepare_all(samples, num_classes, scored);
     let rep = report(images.par_iter(), num_classes);
     let ci95 = bootstrap(&images, num_classes, seed, rep.map50_95);
-
-    let mut coco = CocoEval::new(num_classes);
-    for (i, p) in images.iter().enumerate() {
-        let truths: Vec<CocoTruth> = p.truths.iter().map(|t| CocoTruth::from_box(t.bbox, t.class)).collect();
-        coco.add_image(i as u64, &p.dets, &truths);
-    }
-    let coco = coco.compute();
+    let coco = coco_report(&images, num_classes);
     // pycocotools' -1 (nothing qualifies) is `None`.
     let measured = |v: f64| (v >= 0.0).then_some(v as f32);
 
@@ -282,37 +364,6 @@ pub fn evaluate(samples: &[Sample], num_classes: usize, scored: bool, seed: u64)
     }
 }
 
-/// mAP@0.5:0.95's 95% interval around `measured`: [`BOOTSTRAP_RESAMPLES`] resamples of the images with
-/// replacement, their 2.5th and 97.5th percentile (linear interpolation between order statistics, numpy's
-/// default), shifted by the difference between `measured` and the resamples' mean. The shift matters when classes
-/// are rare: a resample that happens to hold none of a hard class leaves it out of the class mean, so resamples
-/// run higher than the measured value and their plain percentiles would sit beside it instead of around it. The
-/// interval is clamped to `[0, 1]` and always holds `measured`. `[0, 0]` without images.
-fn bootstrap(images: &[Prepared], num_classes: usize, seed: u64, measured: f32) -> [f32; 2] {
-    let n = images.len();
-    if n == 0 {
-        return [0.0; 2];
-    }
-    let mut maps: Vec<f32> = (0..BOOTSTRAP_RESAMPLES)
-        .into_par_iter()
-        .map(|r| {
-            let mut rng = Rng::seed(mix(seed ^ BOOTSTRAP_STREAM, r as u64));
-            let mut ev = Evaluator::new(num_classes);
-            for _ in 0..n {
-                let p = &images[rng.below(n as u64) as usize];
-                ev.add_image(&p.dets, &p.truths);
-            }
-            ev.compute().map50_95
-        })
-        .collect();
-    maps.sort_by(f32::total_cmp);
-    // Summed in sorted order, in f64: the same for every thread count.
-    let mean = maps.iter().map(|&m| m as f64).sum::<f64>() / maps.len() as f64;
-    let shift = measured as f64 - mean;
-    let at = |q: f64| (percentile(&maps, q) as f64 + shift).clamp(0.0, 1.0) as f32;
-    [at(0.025).min(measured), at(0.975).max(measured)]
-}
-
 /// The `q` quantile of sorted values, interpolating linearly between neighbours (numpy's `linear`).
 fn percentile(sorted: &[f32], q: f64) -> f32 {
     let pos = q * (sorted.len() - 1) as f64;
@@ -322,8 +373,16 @@ fn percentile(sorted: &[f32], q: f64) -> f32 {
 }
 
 /// The bin of a confidence: `k` for `k / 10 <= score < (k + 1) / 10` (edges as f32), 9 up to 1.
+#[inline]
 fn conf_bin(score: f32) -> usize {
-    (1..BINS).filter(|&k| score >= k as f32 / BINS as f32).count()
+    let mut b = ((score * BINS as f32) as usize).min(BINS - 1);
+    while b + 1 < BINS && score >= CONF_EDGES[b + 1] {
+        b += 1;
+    }
+    while b > 0 && score < CONF_EDGES[b] {
+        b -= 1;
+    }
+    b
 }
 
 /// ECE over the detections from [`CALIBRATION_FLOOR`] up; `None` when there are none.
@@ -362,8 +421,16 @@ fn calibration(recs: &[Rec]) -> Option<BenchCalibration> {
 }
 
 /// The IoU bin of a right detection: `k` for `0.5 + 0.05 k <= iou < 0.5 + 0.05 (k + 1)`, 9 up to 1.
+#[inline]
 fn iou_bin(iou: f64) -> usize {
-    (1..BINS).filter(|&k| iou >= (50 + 5 * k) as f64 / 100.0).count()
+    let mut b = (((iou - 0.5) * 20.0) as usize).min(BINS - 1);
+    while b + 1 < BINS && iou >= IOU_EDGES[b + 1] {
+        b += 1;
+    }
+    while b > 0 && iou < IOU_EDGES[b] {
+        b -= 1;
+    }
+    b
 }
 
 /// Mean IoU and histogram of the right detections with a confidence of at least `conf`.
