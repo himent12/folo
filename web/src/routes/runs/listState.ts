@@ -56,18 +56,24 @@ export function writeState(s: ListState): string {
   return q.toString().replaceAll('%2C', ',');
 }
 
-/** The value a run sorts by; null sorts last in either direction (a run with no score yet, one that never started). */
+/** The value a run sorts by; null (or non-finite) sorts last in either direction. */
 function key(r: Run, by: SortKey, now: number): number | null {
+  let v: number | null;
   switch (by) {
     case 'created':
-      return Date.parse(r.created);
+      v = Date.parse(r.created);
+      break;
     case 'map':
-      return r.best ? r.best.map50_95 : null;
+      v = r.best ? r.best.map50_95 : null;
+      break;
     case 'progress':
-      return runProgress(r);
+      v = runProgress(r);
+      break;
     case 'duration':
-      return trainingSeconds(r, now);
+      v = trainingSeconds(r, now);
+      break;
   }
+  return v !== null && Number.isFinite(v) ? v : null;
 }
 
 /** `runs` sorted by `by` (a stable sort: ties keep the server's order, newest first). */

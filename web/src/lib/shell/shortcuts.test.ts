@@ -216,12 +216,12 @@ describe('G-chord navigation state and guards', () => {
 });
 
 describe('shortcutList reference', () => {
-  it('documents BenchCompare 1–4 pin, Escape unpin, and updated B baseline wording', () => {
+  it('documents Compare 1–4 pin, Escape unpin, and updated B baseline wording', () => {
     expect(shortcutList).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ keys: 'B', group: 'Charts', label: 'Make the next run or entry the baseline (Compare)', single: true }),
-        expect.objectContaining({ keys: '1–4', group: 'Charts', label: 'Pin or unpin an entry across charts (Benchmark compare)', single: true }),
-        expect.objectContaining({ keys: 'Escape', group: 'Charts', label: 'Unpin the highlighted entry (Benchmark compare)', single: true }),
+        expect.objectContaining({ keys: '1–4', group: 'Charts', label: 'Pin or unpin a run or entry (Compare)', single: true }),
+        expect.objectContaining({ keys: 'Escape', group: 'Charts', label: 'Unpin the highlighted run or entry (Compare)', single: true }),
       ]),
     );
   });

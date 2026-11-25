@@ -207,6 +207,62 @@ describe('Compare: the keyboard', () => {
     press();
     expect(baseline()).toBe(runs[0]!.name);
   });
+
+  it('1–4 pin and unpin run chips, Escape unpins, and open menus suppress 1–4 / B', async () => {
+    const runs = (await hub.api.runs()).filter((r) => r.status !== 'queued').slice(0, 3);
+    setWidth(1440);
+    router.route = parse(`#/runs/compare?ids=${runs.map((r) => r.id).join(',')}`);
+    c = mount(RunCompare, { target });
+    const table = await until(() => target.querySelector('#cmp-table table'), 'the table');
+    const chips = () => [...target.querySelectorAll<HTMLButtonElement>('.chip button.key')];
+    const baseline = () => table.querySelector('thead .base-tag')?.closest('th')?.querySelector('.th-name')?.textContent;
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(chips()[1]!.getAttribute('aria-pressed')).toBe('true');
+
+    // Escape unpins the active chip and prevents global Escape back-navigation.
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    document.dispatchEvent(esc);
+    flushSync();
+    expect(esc.defaultPrevented).toBe(true);
+    expect(chips()[1]!.getAttribute('aria-pressed')).toBe('false');
+
+    // Pressing the same digit toggles pin on and off.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(chips()[0]!.getAttribute('aria-pressed')).toBe('true');
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '1', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(chips()[0]!.getAttribute('aria-pressed')).toBe('false');
+
+    // An open menu suppresses both 1–4 and B.
+    const menu = document.createElement('div');
+    menu.setAttribute('role', 'menu');
+    document.body.appendChild(menu);
+    try {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true, cancelable: true }));
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true, cancelable: true }));
+      flushSync();
+      expect(chips()[1]!.getAttribute('aria-pressed')).toBe('false');
+      expect(baseline()).toBe(runs[0]!.name);
+    } finally {
+      menu.remove();
+    }
+  });
+
+  it('AddRun resets its native select back to placeholder after adding a run', async () => {
+    const runs = (await hub.api.runs()).filter((r) => r.status !== 'queued').slice(0, 3);
+    setWidth(1440);
+    router.route = parse(`#/runs/compare?ids=${runs[0]!.id}`);
+    c = mount(RunCompare, { target });
+    const select = await until(() => target.querySelector<HTMLSelectElement>('select[aria-label="Add a run to the comparison"]'), 'Add run select');
+    select.value = runs[1]!.id;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(select.value).toBe('');
+    expect(router.route.query.get('ids')).toBe(`${runs[0]!.id},${runs[1]!.id}`);
+  });
 });
 
 describe('Compare runs from a deep link', () => {

@@ -19,8 +19,10 @@ export default function AddRun(props: AddRunProps) {
       <select
         aria-label="Add a run to the comparison"
         onchange={(e) => {
-          const v = (e.currentTarget as HTMLSelectElement).value;
+          const el = e.currentTarget as HTMLSelectElement;
+          const v = el.value;
           if (v) props.setIds([...props.ids, v]);
+          el.value = '';
         }}
       >
         <option value="">Add run…</option>

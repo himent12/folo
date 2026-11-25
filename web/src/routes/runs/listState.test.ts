@@ -30,6 +30,17 @@ describe('sortRuns', () => {
     expect(sortRuns(runs, 'map', 'asc').map((r) => r.id)).toEqual(['a', 'c', 'b']);
     expect(sortRuns(runs, 'created', 'asc').map((r) => r.id)).toEqual(['c', 'b', 'a']);
   });
+
+  it('sorts non-finite dates and scores last in both directions', () => {
+    const withBad = [
+      run('bad-date', { created: 'not-a-date', best: { epoch: 1, map50_95: Number.NaN } }),
+      ...runs,
+    ];
+    expect(sortRuns(withBad, 'created', 'asc').map((r) => r.id)).toEqual(['c', 'b', 'a', 'bad-date']);
+    expect(sortRuns(withBad, 'created', 'desc').map((r) => r.id)).toEqual(['a', 'b', 'c', 'bad-date']);
+    expect(sortRuns(withBad, 'map', 'asc').map((r) => r.id)).toEqual(['a', 'c', 'bad-date', 'b']);
+    expect(sortRuns(withBad, 'map', 'desc').map((r) => r.id)).toEqual(['c', 'a', 'bad-date', 'b']);
+  });
 });
 
 describe('returning from a run', () => {

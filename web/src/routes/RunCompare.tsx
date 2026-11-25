@@ -1,750 +1,155 @@
 // Compare runs (`#/runs/compare?ids=a,b`): up to four runs' curves on one plot, and a table of the runs side by side.
 // The parts are in ./compare/.
 import GitCompare from '$icons/git-compare-arrows';
-import ChevronRight from '$icons/chevron-right';
-import { computed, css, effect, fade, For, Key, MediaQuery, onCleanup, signal, untrack } from 'fw';
-import { origin } from '$lib/lineage';
-import { motion } from '$lib/ui/motion';
-import ChartSkeleton from '$lib/charts/ChartSkeleton';
-import { ApiError, hub } from '$lib/api/index';
-import { Resource } from '$lib/api/resource';
-import type { Epoch, Run, RunMetrics } from '$lib/api/types';
-import LineChart, { type Series } from '$lib/charts/LineChart';
-import { fitFloor, fitFloorNote, niceDomain, unitDomain, unitFitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
-import { nearest } from '$lib/charts/downsample';
-import { axisReason, AXIS_REASON, runEnd, runX } from '$lib/charts/runAxis';
-import { metric } from '$lib/format';
-import { href, router } from '$lib/router';
+import { css, onDocument } from 'fw';
+import { isTyping } from '$lib/keys';
+import { href } from '$lib/router';
 import { setCrumbs } from '$lib/shell/crumbs';
 import Page from '$lib/shell/Page';
-import { watched } from '$lib/shell/runList';
+import { pageKeys } from '$lib/shell/pageCommands';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
-import Ident from '$lib/ui/Ident';
 import InfoButton from '$lib/ui/InfoButton';
 import InfoRegion from '$lib/ui/InfoRegion';
 import { provideInfoSlot } from '$lib/ui/infoSlot';
+import { keyPrefs } from '$lib/ui/keyPrefs';
 import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
-import { media } from '$lib/design/tokens';
 import AddRun from './compare/AddRun';
-import RunChips from './compare/RunChips';
-import ManageSheet from './compare/ManageSheet';
+import ComparePlot, { MissingRunsNotice, PhoneAbout } from './compare/ComparePlot';
 import CompareTable from './compare/CompareTable';
-import { pollTogether } from '$lib/api/share';
-import { epochsDone } from './run/readings';
+import { DATA_CAVEAT, MAX, METRIC_OPTIONS, PROGRESS_HOW, SLOT_PATTERN, X_OPTIONS, X_PHONE, Y_OPTIONS } from './compare/config';
+import ManageSheet from './compare/ManageSheet';
+import RunChips from './compare/RunChips';
+import { compareState } from './compare/state';
 
-/** How often the compared runs are read again (and a metrics read that failed is tried again). */
-export const COMPARE_POLL_MS = 3000;
-
-/**
- * The weights a run started from, by name: a model id resolves through the models list, a path shows its file name,
- * none is null ("From scratch"). Fine-tuned vs from scratch often explains most of a gap between two runs.
- */
-export function startFrom(weights: string | null, models: readonly { id: string; name: string }[] | undefined): string | null {
-  const o = origin(weights, models ?? []);
-  return o.kind === 'scratch' ? null : o.label;
-}
-
-type Axis = 'epoch' | 'progress';
-type MetricId = 'm95' | 'm50' | 'loss' | 'prec' | 'rec';
-type YAxis = 'fit' | 'zero';
-
-const isActiveStatus = (s: Run['status']) => s === 'running' || s === 'stopping' || s === 'queued';
-
-const MAX = 4;
-const X_OPTIONS: { value: Axis; label: string }[] = [
-  { value: 'epoch', label: 'By epoch' },
-  { value: 'progress', label: 'By progress' },
-];
-/** Phones: the x axis as a compact select ("X axis": Epoch, Progress), so the metric's select keeps its whole name. */
-const X_PHONE: { value: Axis; label: string }[] = [
-  { value: 'epoch', label: 'Epoch' },
-  { value: 'progress', label: 'Progress' },
-];
-const PROGRESS_HOW = 'Each run is drawn over its own planned epochs, so a short plan and a long one compare by the shape of their curves.';
-// Run slots: sky and amber first (the most distinct pair, for the common two-run comparison), then magenta and teal.
-// No four hues stay apart for every colour-vision type, so slots 3 and 4 also get a line pattern.
-const RUN_SLOTS = [1, 2, 3, 4];
-const SLOT_PATTERN = [undefined, undefined, 'dash', 'dot'] as const;
-/** The one caveat that changes how to read the plot: one wording on every screen. */
-const DATA_CAVEAT = 'Different datasets: compare the shape of the curves, not their values.';
-const METRICS: { id: MetricId; label: string; f: (e: Epoch) => number; unit?: boolean }[] = [
-  { id: 'm95', label: 'mAP50-95', f: (e) => e.val.map50_95, unit: true },
-  { id: 'm50', label: 'mAP50', f: (e) => e.val.map50, unit: true },
-  { id: 'loss', label: 'Train loss', f: (e) => e.train_loss.total },
-  { id: 'prec', label: 'Precision', f: (e) => e.val.precision, unit: true },
-  { id: 'rec', label: 'Recall', f: (e) => e.val.recall, unit: true },
-];
-const METRIC_OPTIONS = METRICS.map((m) => ({ value: m.id, label: m.label }));
-const Y_OPTIONS: { value: YAxis; label: string }[] = [
-  { value: 'fit', label: 'Axis: Fit' },
-  { value: 'zero', label: 'Axis: From 0' },
-];
+export { COMPARE_POLL_MS, startFrom } from './compare/config';
 
 export default function RunCompare() {
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'Compare' });
 
-  // Each run once: a link naming one twice (`?ids=a,a`) would key two rows alike.
-  const ids = computed(() => [...new Set((router.route.query.get('ids') ?? '').split(',').filter(Boolean))].slice(0, MAX), {
-    equals: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]),
-  });
-  let borrowed = false;
-  let confirming = false;
-  let confirmSeq = 0;
-  const confirmed = signal(0);
-  const runs = new Resource((s) => hub.api.runs(s), {
-    startFrom: () => {
-      const src = watched.source;
-      if (src) borrowed = true;
-      return src;
-    },
-  });
-  const datasets = new Resource((s) => hub.api.datasets(s));
-  // Names for runs fine-tuned from a model ("Start from").
-  const models = new Resource((s) => hub.api.models(s));
-  const chosen = computed(() => ids.get().map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
-  /** Where the compared runs are: each one's status and epoch ("run_a:running:3,run_b:completed:30"). */
-  const moved = computed(() => chosen.get().map((r) => `${r.id}:${r.status}:${r.epoch}`).join(','));
-  const runStamp = (r: Run) => `${r.status}:${r.epoch}`;
-
-  /** Missing run IDs removed from `?ids=` after the run list loaded, announced to the user. */
-  const dropped = signal<string[]>([]);
-  /** Per-run metrics fetch errors so one failed read never hides healthy runs' curves. */
-  const metricErrors = signal<Record<string, unknown>>({});
-  const retryingMetric = signal<Record<string, boolean>>({});
-  /** Set when a confirmed 404 run_not_found arrives while a runs list refresh is already in flight. */
-  const needRunsRefresh = signal(false);
-  const retryCtrls = new Map<string, AbortController>();
-  let metricsGen = 0;
-  let alive = true;
-  onCleanup(() => {
-    alive = false;
-    for (const c of retryCtrls.values()) c.abort();
-    retryCtrls.clear();
-  });
-
-  // Reset per-comparison transient notices/errors and abort in-flight per-run retries when switching servers.
-  let prevEpoch = untrack(() => hub.epoch);
-  effect(() => {
-    const epoch = hub.epoch;
-    if (epoch === prevEpoch) return;
-    prevEpoch = epoch;
-    borrowed = false;
-    confirming = false;
-    confirmSeq++;
-    for (const c of retryCtrls.values()) c.abort();
-    retryCtrls.clear();
-    untrack(() => {
-      dropped.set([]);
-      metricErrors.set({});
-      retryingMetric.set({});
-      needRunsRefresh.set(false);
-    });
-  });
-
-  // Reconcile `?ids=` against the loaded run list so deleted run IDs never hold slots or trap the page in an empty dead-end.
-  // When the initial list came from `watched.source`, confirm missing IDs with a fresh read before rewriting `?ids=`.
-  effect(() => {
-    const list = runs.data;
-    void confirmed.get();
-    if (!list) return;
-    const cur = ids.get();
-    if (!cur.length) return;
-    const known = new Set(list.map((r) => r.id));
-    const missing = cur.filter((id) => !known.has(id));
-    if (!missing.length) return;
-    if (borrowed) {
-      if (runs.refreshing || runs.error || runs.stale || confirming) return;
-      confirming = true;
-      const seq = ++confirmSeq;
-      const epoch = untrack(() => hub.epoch);
-      void runs.refresh().then(() => {
-        if (seq !== confirmSeq) return;
-        confirming = false;
-        if (!alive || untrack(() => hub.epoch) !== epoch || runs.refreshing || runs.error || runs.stale) return;
-        borrowed = false;
-        confirmed.set((n) => n + 1);
-      });
-      return;
-    }
-    untrack(() => {
-      if (router.route.path !== '/runs/compare') return;
-      const keep = cur.filter((id) => known.has(id));
-      dropped.set([...new Set([...dropped.peek(), ...missing])]);
-      setIds(keep);
-    });
-  });
-
-  // Drop stale per-run error/retry state and abort retries for runs removed from the comparison.
-  effect(() => {
-    const cur = new Set(ids.get());
-    for (const [id, ctrl] of retryCtrls) {
-      if (!cur.has(id)) {
-        ctrl.abort();
-        retryCtrls.delete(id);
-      }
-    }
-    untrack(() => {
-      const errs = metricErrors.peek();
-      const errKeys = Object.keys(errs);
-      if (errKeys.some((id) => !cur.has(id))) {
-        const next: Record<string, unknown> = {};
-        for (const id of errKeys) if (cur.has(id)) next[id] = errs[id];
-        metricErrors.set(next);
-      }
-      const retrying = retryingMetric.peek();
-      const retryKeys = Object.keys(retrying);
-      if (retryKeys.some((id) => !cur.has(id))) {
-        const next: Record<string, boolean> = {};
-        for (const id of retryKeys) if (cur.has(id)) next[id] = retrying[id]!;
-        retryingMetric.set(next);
-      }
-    });
-  });
-
-  /** Schedules a fresh runs list read after a confirmed 404 run_not_found, even if one is already in flight. */
-  function refreshRunsAfter404() {
-    if (!alive) return;
-    if (runs.loading || runs.refreshing) needRunsRefresh.set(true);
-    else void runs.refresh();
-  }
-  effect(() => {
-    if (!needRunsRefresh.get() || hub.mode === 'connecting' || runs.loading || runs.refreshing) return;
-    untrack(() => {
-      needRunsRefresh.set(false);
-      void runs.refresh();
-    });
-  });
-
-  /**
-   * Each metrics map's `ids` (joined) and per-run `status:epoch` stamp captured when that run's metrics were asked for
-   * (`null` when asked before the runs list came).
-   */
-  const readAt = new WeakMap<object, { ids: string; byRun: Map<string, string | null> }>();
-  const metrics = new Resource(async (s) => {
-    const list = ids.get();
-    const gen = ++metricsGen;
-    for (const c of retryCtrls.values()) c.abort();
-    retryCtrls.clear();
-    untrack(() => retryingMetric.set({}));
-    const snapByRun = untrack(() => (runs.data ? new Map(chosen.get().map((r) => [r.id, runStamp(r)])) : null));
-    const prev = untrack(() => metrics.data);
-    const prevByRun = prev ? readAt.get(prev)?.byRun : undefined;
-    if (!list.length) {
-      if (!s.aborted) untrack(() => metricErrors.set({}));
-      const empty = new Map<string, RunMetrics>();
-      readAt.set(empty, { ids: '', byRun: new Map() });
-      return empty;
-    }
-    const settled = await Promise.allSettled(list.map((id) => hub.api.runMetrics(id, s)));
-    if (s.aborted) throw new DOMException('Aborted', 'AbortError');
-    const read = new Map<string, RunMetrics>();
-    const byRun = new Map<string, string | null>();
-    const errs: Record<string, unknown> = {};
-    let firstErr: unknown = undefined;
-    let failedCount = 0;
-    let saw404 = false;
-    for (let i = 0; i < list.length; i++) {
-      const id = list[i]!;
-      const res = settled[i]!;
-      if (res.status === 'fulfilled') {
-        read.set(id, res.value);
-        byRun.set(id, snapByRun ? (snapByRun.get(id) ?? null) : null);
-      } else {
-        const err = res.reason;
-        // A run deleted since the link was made has no metrics (and no chip): it leaves the others' alone.
-        if (err instanceof ApiError && err.code === 'run_not_found') {
-          if (snapByRun?.has(id)) {
-            byRun.set(id, snapByRun.get(id)!);
-            saw404 = true;
-          }
-          continue;
-        }
-        failedCount++;
-        if (firstErr === undefined) firstErr = err;
-        errs[id] = err;
-        const cached = prev?.get(id);
-        if (cached) {
-          read.set(id, cached);
-          byRun.set(id, prevByRun?.get(id) ?? null);
-        }
-      }
-    }
-    if (gen !== metricsGen) throw new DOMException('Aborted', 'AbortError');
-    if (saw404) untrack(() => refreshRunsAfter404());
-    // If every non-deleted run failed and no cached curve can be shown, hand off cleanly to `metrics.error` / ErrorState.
-    if (failedCount > 0 && read.size === 0) {
-      untrack(() => metricErrors.set({}));
-      throw firstErr;
-    }
-    untrack(() => metricErrors.set(errs));
-    readAt.set(read, { ids: list.join(','), byRun });
-    return read;
-  });
-
-  const failedRuns = computed(() => chosen.get().filter((r) => metricErrors.get()[r.id] !== undefined));
-  const hasMetricErrors = computed(() => failedRuns.get().length > 0);
-  const failedWithCache = computed(() => failedRuns.get().some((r) => !!metrics.data?.has(r.id)));
-
-  /** Fetches a single run's metrics without disturbing other runs' curves or read stamps. */
-  async function fetchRunMetrics(id: string) {
-    if (!alive || retryingMetric.peek()[id] || metrics.loading || metrics.refreshing) return;
-    const epoch = hub.epoch;
-    const gen = metricsGen;
-    const stamp = untrack(() => {
-      const r = runs.data?.find((x) => x.id === id);
-      return r ? runStamp(r) : null;
-    });
-    retryCtrls.get(id)?.abort();
-    const ctrl = new AbortController();
-    retryCtrls.set(id, ctrl);
-    retryingMetric.set({ ...retryingMetric.peek(), [id]: true });
-    try {
-      const m = await hub.api.runMetrics(id, ctrl.signal);
-      if (!alive || ctrl.signal.aborted || hub.epoch !== epoch || gen !== metricsGen || !ids.peek().includes(id)) return;
-      const prev = metrics.data;
-      const prevByRun = prev ? readAt.get(prev)?.byRun : undefined;
-      const next = new Map(prev ?? []);
-      next.set(id, m);
-      const nextByRun = new Map(prevByRun ?? []);
-      nextByRun.set(id, stamp);
-      const nextErrs = { ...metricErrors.peek() };
-      delete nextErrs[id];
-      const curIds = ids.peek().join(',');
-      readAt.set(next, { ids: curIds, byRun: nextByRun });
-      metricErrors.set(nextErrs);
-      metrics.error = undefined;
-      if (Object.keys(nextErrs).length === 0) metrics.stale = undefined;
-      metrics.set(next);
-    } catch (err) {
-      if (!alive || ctrl.signal.aborted || hub.epoch !== epoch || gen !== metricsGen || !ids.peek().includes(id)) return;
-      if (err instanceof ApiError && err.code === 'run_not_found') {
-        if (stamp !== null && metrics.data) readAt.get(metrics.data)?.byRun.set(id, stamp);
-        const curErrs = metricErrors.peek();
-        if (id in curErrs) {
-          const nextErrs = { ...curErrs };
-          delete nextErrs[id];
-          metricErrors.set(nextErrs);
-        }
-        refreshRunsAfter404();
-        return;
-      }
-      metricErrors.set({ ...metricErrors.peek(), [id]: err });
-    } finally {
-      if (retryCtrls.get(id) === ctrl) {
-        retryCtrls.delete(id);
-        if (alive) {
-          const nextRetrying = { ...retryingMetric.peek() };
-          delete nextRetrying[id];
-          retryingMetric.set(nextRetrying);
-        }
-      }
-    }
-  }
-
-  const phoneQuery = new MediaQuery(media.phone, false);
-  const narrow = () => phoneQuery.current;
-  const cursor = signal<number | null>(null);
-
-  /**
-   * Whether `r`'s metrics hold every epoch its list entry may have finished. A failed run's `epoch` is the one it
-   * failed in, or its last finished one when it failed before the next epoch's first step (docs/API.md `Run.epoch`):
-   * the list cannot tell them apart, so a pre-list read (`stamp === null`) counts as caught up only through `epoch`,
-   * while a read started after observing `failed:<epoch>` counts as synced once it finishes.
-   */
-  const runCaughtUp = (r: Run, read: Map<string, RunMetrics>) =>
-    (read.get(r.id)?.epochs.at(-1)?.epoch ?? 0) >= (r.status === 'failed' ? r.epoch : epochsDone(r.status, r.epoch));
-  const runSynced = (r: Run, read: Map<string, RunMetrics>, byRun: Map<string, string | null> | undefined) => {
-    if (metricErrors.get()[r.id] !== undefined || isActiveStatus(r.status)) return false;
-    const stamp = byRun?.get(r.id);
-    if (stamp === runStamp(r)) return true;
-    return stamp === null && runCaughtUp(r, read);
-  };
-
-  // Poll runs every COMPARE_POLL_MS only while at least one compared run is active or not yet synced;
-  // once every compared run is terminal and synced, stop the timer to avoid idle background polling.
-  const needsPoll = computed(() => {
-    if (!runs.data) return false;
-    if (runs.stale !== undefined) return true;
-    const cur = chosen.get();
-    if (!cur.length) return false;
-    if (cur.some((r) => isActiveStatus(r.status))) return true;
-    if (metrics.loading || metrics.error !== undefined) return false;
-    if (metrics.stale !== undefined || hasMetricErrors.get()) return true;
-    const read = metrics.data;
-    const asked = read ? readAt.get(read) : undefined;
-    if (!read || !asked || asked.ids !== ids.get().join(',')) return false;
-    return !cur.every((r) => runSynced(r, read, asked.byRun));
-  });
-
-  // A compared run changes under the page: it trains, ends, is resumed or deleted in another tab. While any compared run
-  // is active (or metrics are catching up), runs are read again every COMPARE_POLL_MS; once all runs are terminal and
-  // synced, polling stops and a single refresh runs if the user returns to this tab.
-  effect(() => {
-    if (!needsPoll.get()) return;
-    return pollTogether(COMPARE_POLL_MS, () => {
-      if (document.visibilityState === 'visible' && hub.mode !== 'connecting' && !untrack(() => runs.loading || runs.refreshing)) void runs.refresh();
-    });
-  });
-  effect(() => {
-    const onVisible = () => {
-      if (document.visibilityState !== 'visible') return;
-      if (hub.mode === 'connecting' || !ids.peek().length || untrack(() => !runs.data || runs.loading || runs.refreshing || needsPoll.peek())) return;
-      void runs.refresh();
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-  });
-
-  // A failed refresh or per-run metrics read is tried again COMPARE_POLL_MS after it failed (its own effect: the runs
-  // polled meanwhile never put it off).
-  effect(() => {
-    const stale = metrics.stale !== undefined;
-    const failed = Object.keys(metricErrors.get());
-    if ((!stale && !failed.length) || hub.mode === 'connecting' || metrics.loading || metrics.refreshing || metrics.error !== undefined) return;
-    const t = setTimeout(() => {
-      if (stale) void metrics.refresh();
-      else for (const id of Object.keys(metricErrors.peek())) void fetchRunMetrics(id);
-    }, COMPARE_POLL_MS);
-    return () => clearTimeout(t);
-  });
-  effect(() => {
-    const read = metrics.data;
-    if (!read || !runs.data || metrics.loading || metrics.refreshing || metrics.stale !== undefined || metrics.error !== undefined) return;
-    const asked = readAt.get(read);
-    // The link names other runs: the metrics follow `ids` by themselves.
-    if (!asked || asked.ids !== ids.get().join(',')) return;
-    // Track per-run movement independently of any other run's failure, so healthy runs keep advancing while a broken one retries.
-    const errs = metricErrors.get();
-    const cur = chosen.get();
-    void moved.get();
-    const behind: string[] = [];
-    for (const r of cur) {
-      if (errs[r.id] !== undefined) continue;
-      const stamp = asked.byRun.get(r.id);
-      const nowStamp = runStamp(r);
-      if (stamp === nowStamp) continue;
-      if (stamp === null && runCaughtUp(r, read)) continue;
-      behind.push(r.id);
-    }
-    if (!behind.length) return;
-    untrack(() => {
-      if (!Object.keys(errs).length && behind.length === cur.length) void metrics.refresh();
-      else for (const id of behind) void fetchRunMetrics(id);
-    });
-  });
-  // Runs planned for very different lengths (30 vs 150 epochs), or one run that trained over twice as long as every
-  // other, would crush the short ones into the start of an epoch axis: then the axis defaults to "By progress" (each run
-  // over its planned epochs, ../lib/charts/runAxis), and the header says why.
-  const xChoice = signal<Axis | null>(null);
-  const reason = computed(() => axisReason(chosen.get()));
-  const x = computed<Axis>(() => xChoice.get() ?? (reason.get() ? 'progress' : 'epoch'));
-  const xAuto = computed(() => xChoice.get() === null && x.get() === 'progress');
+  const s = compareState();
   // Phones: the axis ⓘ opens in place under the control row (ui/infoSlot).
   const axisInfo = provideInfoSlot('cmp-axis-info');
-  /** Phones: the progress axis explained in the ⓘ beside its control, with why it was chosen when it was. */
-  const progressWhy = computed(() => `Each run over % of its plan${xAuto.get() && reason.get() ? `; chosen because ${AXIS_REASON[reason.get()!]}` : ''}.`);
-  // The x axis is named in the chart's header, as on every chart (DESIGN_DIRECTION §2.4), never under the plot.
-  const xQual = computed(() =>
-    x.get() === 'progress' ? `by progress, % of planned epochs${xAuto.get() && reason.get() ? ` · ${AXIS_REASON[reason.get()!]}` : ''}` : 'by epoch',
-  );
-  const hint = signal<string | null>(null);
-  // Colours follow the run, not its position: removing one run never repaints the others. Each run keeps the slot it
-  // had; a new run takes the lowest free one (the Svelte original synced this from an effect; a computed with memory
-  // gives the same slots without a second render).
-  let slotMemo: Record<string, number> = {};
-  const slots = computed(() => {
-    const cur = ids.get();
-    const next: Record<string, number> = {};
-    for (const id of cur) if (slotMemo[id] !== undefined) next[id] = slotMemo[id];
-    for (const id of cur) {
-      if (next[id] !== undefined) continue;
-      let k = 0;
-      while (Object.values(next).includes(k)) k++;
-      next[id] = k;
+
+  // 1–4 pin or unpin a run chip across the plot (matching BenchCompare); B rotates baseline in CompareTable.
+  pageKeys((k) => {
+    if (document.querySelector('[aria-expanded="true"][aria-haspopup], [role="menu"]')) return false;
+    const list = s.chosen.peek();
+    if (list.length < 2) return false;
+    if (k >= '1' && k <= '4') {
+      const target = list[Number(k) - 1];
+      if (!target) return false;
+      s.pinned.set((p) => (p === target.id ? null : target.id));
+      return true;
     }
-    slotMemo = next;
-    return next;
-  });
-  const slotOf = (id: string) => slots.get()[id] ?? Math.max(0, ids.get().indexOf(id));
-  const color = (id: string) => `var(--chart-${RUN_SLOTS[slotOf(id)] ?? 1})`;
-  // Keys (chips, table header) are fills: the exact palette hue with the swatch edge, never the light theme's darker
-  // line ink, so a light amber run reads amber, not brown (design/README.md, chart.fill).
-  const fill = (id: string) => `var(--chart-fill-${RUN_SLOTS[slotOf(id)] ?? 1})`;
-
-  function setIds(next: string[]) {
-    router.go(`/runs/compare${next.length ? `?ids=${next.join(',')}` : ''}`, { replace: true });
-  }
-
-  // One chart, one metric at a time: four small charts repeated the same legend four times.
-  const metricId = signal<MetricId>('m95');
-  const metricDef = computed(() => METRICS.find((m) => m.id === metricId.get())!);
-  const series = computed(() => {
-    const f = metricDef.get().f;
-    const axis = x.get();
-    return chosen.get().map((r): Series => {
-      const eps = metrics.data?.get(r.id)?.epochs ?? [];
-      return {
-        id: r.id,
-        label: r.name,
-        color: color(r.id),
-        pattern: SLOT_PATTERN[slotOf(r.id)],
-        // Each line ends in its run's status mark (live, stopped, failed), so a line that stops short says why.
-        end: runEnd(r.status) ?? undefined,
-        points: eps.map((e) => ({ x: runX(e.epoch, r, axis), y: f(e) })),
-      };
-    });
-  });
-  const extent = computed((): [number, number] | null => {
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const s of series.get())
-      for (const p of s.points) {
-        if (!Number.isFinite(p.y)) continue;
-        if (p.y < lo) lo = p.y;
-        if (p.y > hi) hi = p.y;
-      }
-    return Number.isFinite(lo) ? [lo, hi] : null;
-  });
-  // Runs that all scored low get a zoomed axis whose caption names the full 0–1 scale (./domain UNIT_ZOOM_BELOW).
-  const zoomed = computed(() => !!metricDef.get().unit && !!extent.get() && unitTop(extent.get()![1]) < UNIT_ZOOM_BELOW);
-  // The plot itself is at least 360 px tall from 768 px up, so four curves that climb together still separate; phones
-  // a 210 px plot. LineChart's margins add 8 px on top (24 under a y caption) and 22 px below.
-  const plotPx = computed(() => (narrow() ? 210 : 360));
-  // The y axis: "Fit" (the default) starts under the values the runs spend most of their length in; "From 0" shows the
-  // whole climb. On a phone, by progress, the default is From 0. A choice made by hand holds at every width.
-  const yChoice = signal<YAxis | null>(null);
-  const yAxis = computed<YAxis>(() => yChoice.get() ?? (narrow() && x.get() === 'progress' ? 'zero' : 'fit'));
-  const setY = (v: YAxis) => yChoice.set(v);
-  const ys = computed(() => series.get().flatMap((s) => s.points.map((p) => p.y)));
-  const lastYs = computed(() => series.get().map((s) => s.points.at(-1)?.y ?? NaN));
-  // Where the lines carry direct labels (768 px up) the top leaves a label row over the highest end (`withLabelRow`;
-  // `unitFitDomain`'s on the fitted span).
-  const fit = computed(() => {
-    const e = extent.get();
-    if (!e) return undefined;
-    const def = metricDef.get();
-    if (!def.unit) return niceDomain(yAxis.get() === 'zero' ? Math.min(0, e[0]) : e[0], e[1]);
-    if (yAxis.get() === 'fit') return unitFitDomain(ys.get(), lastYs.get(), e[1], plotPx.get(), !narrow());
-    return unitDomain(narrow() ? e[1] : withLabelRow(e[1], plotPx.get()), plotPx.get());
-  });
-  /** A fitted axis's floor, said where the axis is named ("y from 0.40"), as a zoomed axis says its full scale. */
-  const floorNote = computed(() => fitFloorNote(fit.get(), metricDef.get().unit ? 2 : 0));
-  // Phones have no header qualifier: the floor goes in the y caption, after the zoom note.
-  const yCaption = computed(() => [zoomed.get() ? UNIT_ZOOM_NOTE : '', narrow() && floorNote.get() ? floorNote.get() : ''].filter(Boolean).join(' · ') || undefined);
-  const height = computed(() => plotPx.get() + (yCaption.get() ? 24 : 8) + 22);
-  // The chips are the legend: each shows its run's value under the cursor, or its latest value at rest.
-  function valueOf(id: string): number | null {
-    const pts = series.get().find((s) => s.id === id)?.points ?? [];
-    const first = pts[0];
-    const last = pts[pts.length - 1];
-    if (!first || !last) return null;
-    const c = cursor.get();
-    if (c === null) return last.y;
-    if (c < first.x - 0.5 || c > last.x + 0.5) return null;
-    return pts[nearest(pts, c)]?.y ?? null;
-  }
-  // Hover, focus or tap a run chip to bring its line forward; unpinning restores every hue.
-  const hovered = signal<string | null>(null);
-  const pinned = signal<string | null>(null);
-  // Only runs still in the comparison count (a removed run must not leave every line faded).
-  const highlight = computed(() => [hovered.get(), pinned.get()].find((v) => v !== null && ids.get().includes(v)) ?? null);
-  // At rest the chips read each run's latest value: "Latest · ep 37" when the runs share that epoch, else per run.
-  const lastEps = computed(() => new Set(chosen.get().map((r) => metrics.data?.get(r.id)?.epochs.at(-1)?.epoch ?? null)));
-  const latestNote = computed(() => {
-    const [only] = lastEps.get();
-    return lastEps.get().size === 1 && only !== null && only !== undefined ? `Latest · ep ${only}` : "Latest · each run's last epoch";
-  });
-  // Precision and recall are read at each epoch's own best-F1 confidence (docs/API.md, Operating point): the readout says so.
-  const readoutAt = computed(() => {
-    const c = cursor.get();
-    const m = metricId.get();
-    return (c === null ? latestNote.get() : x.get() === 'epoch' ? `Epoch ${Math.round(c)}` : `${Math.round(c)}% through`) + (m === 'prec' || m === 'rec' ? ' · at best-F1 conf' : '');
-  });
-  const xDomain = computed<[number, number]>(() => (x.get() === 'epoch' ? [0, Math.max(1, ...chosen.get().map((r) => r.epochs))] : [0, 100]), {
-    equals: (a, b) => a[0] === b[0] && a[1] === b[1],
+    return false;
   });
 
-  // mAP is only comparable on the same data: no winner across datasets.
-  const sameData = computed(() => new Set(chosen.get().map((r) => r.config.dataset_id)).size <= 1);
-
-  const startOf = (r: Run) => startFrom(r.config.weights, models.data);
-  const setX = (v: Axis) => xChoice.set(v);
-  const xBind = { get: () => x.get(), set: setX };
-
-  const showSame = signal(false);
-  const managing = signal(false);
-  // Phones compare two runs at a time: a baseline and one other, fully in view and paged with ‹ ›. The baseline is its
-  // own choice (the first run until Swap in the table's header), never the legend's emphasis.
-  const allRuns = signal(false);
-  const otherAt = signal(0);
-  const baselineId = signal<string | null>(null);
-  // A baseline removed from the comparison is forgotten, not latent: the table falls back to the first run, and adding
-  // that run again later must not quietly make it the baseline once more.
-  effect(() => {
-    const cur = ids.get();
-    untrack(() => {
-      const b = baselineId.get();
-      if (b !== null && !cur.includes(b)) baselineId.set(null);
-    });
+  // Escape unpins an active chip before global Escape returns to Runs.
+  onDocument('keydown', (e) => {
+    if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isTyping(e)) return;
+    if (!keyPrefs.singleKeys || document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"], #folo-tooltip[data-show], .info-pop.open')) return;
+    const p = s.pinned.peek();
+    if (p !== null && s.chosen.peek().some((x) => x.id === p)) {
+      e.preventDefault();
+      s.pinned.set(null);
+    }
   });
-
-  const candidates = computed(() => (runs.data ?? []).filter((r) => !ids.get().includes(r.id) && r.status !== 'queued'));
 
   const lede = () => <span>Overlay the curves of up to four runs. Colours follow the run, not its rank.</span>;
 
-  const adder = () => <AddRun candidates={candidates.get()} ids={ids.get()} setIds={setIds} />;
+  const adder = () => <AddRun candidates={s.candidates.get()} ids={s.ids.get()} setIds={s.setIds} />;
 
   const chips = () => (
     <RunChips
-      hint={hint.get()}
-      readoutAt={readoutAt.get()}
-      bind:managing={managing}
-      chosen={chosen.get()}
-      valueOf={valueOf}
-      startOf={startOf}
-      bind:pinned={pinned}
-      bind:hovered={hovered}
-      fill={fill}
+      hint={s.hint.get()}
+      readoutAt={s.readoutAt.get()}
+      bind:managing={s.managing}
+      chosen={s.chosen.get()}
+      valueOf={s.valueOf}
+      startOf={s.startOf}
+      bind:pinned={s.pinned}
+      bind:hovered={s.hovered}
+      fill={s.fill}
       SLOT_PATTERN={SLOT_PATTERN}
-      slotOf={slotOf}
-      ids={ids.get()}
-      setIds={setIds}
-      narrow={narrow()}
+      slotOf={s.slotOf}
+      ids={s.ids.get()}
+      setIds={s.setIds}
+      narrow={s.narrow()}
       MAX={MAX}
-      candidates={candidates.get()}
+      candidates={s.candidates.get()}
       adder={adder}
-      metricErrorOf={(id) => metricErrors.get()[id]}
-      retryingOf={(id) => !!retryingMetric.get()[id]}
-      onRetryMetric={(id) => void fetchRunMetrics(id)}
+      metricErrorOf={(id) => s.metricErrors.get()[id]}
+      retryingOf={(id) => !!s.retryingMetric.get()[id]}
+      onRetryMetric={(id) => void s.fetchRunMetrics(id)}
     />
   );
 
-  const missingNotice = () =>
-    dropped.get().length ? (
-      <p class="caveat stale-note" role="status" data-missing-runs>
-        <span>
-          {dropped.get().length === 1 ? 'Removed missing run from this comparison: ' : `Removed ${dropped.get().length} missing runs from this comparison: `}
-          <For each={dropped.get()} key={(id) => id}>
-            {(id, i) => (
-              <>
-                {i() > 0 ? ', ' : null}
-                <Ident value={id()} />
-              </>
-            )}
-          </For>
-          .
-        </span>{' '}
-        <Button size="sm" variant="ghost" onclick={() => dropped.set([])}>
-          Dismiss
-        </Button>
-      </p>
-    ) : null;
-
   const plot = () => (
-    <>
-      {metrics.stale !== undefined && metrics.data ? (
-        <p class="caveat stale-note" role="status">
-          Could not refresh these runs' metrics: the curves may be behind. Trying again…{' '}
-          <Button size="sm" variant="ghost" onclick={() => void metrics.refresh()}>
-            Retry
-          </Button>
-        </p>
-      ) : failedRuns.get().length && metrics.data ? (
-        <p class="caveat stale-note" role="status">
-          <span>
-            {failedWithCache.get()
-              ? `Could not refresh these runs' metrics (${failedRuns.get().map((r) => r.name).join(', ')}): the curves may be behind. Trying again…`
-              : `Could not load metrics for ${failedRuns.get().map((r) => r.name).join(', ')}. Other runs are shown.`}
-          </span>{' '}
-          <For each={failedRuns.get()} key={(r) => r.id}>
-            {(r) => (
-              <Button size="sm" variant="ghost" loading={!!retryingMetric.get()[r().id]} onclick={() => void fetchRunMetrics(r().id)}>
-                {failedRuns.get().length === 1 ? 'Retry' : `Retry ${r().name}`}
-              </Button>
-            )}
-          </For>
-        </p>
-      ) : null}
-      {metrics.error ? (
-        <ErrorState error={metrics.error} compact retry={() => metrics.refresh()} title="Could not load these runs' metrics" />
-      ) : !metrics.data || !runs.data ? (
-        <ChartSkeleton height={height.get()} legend={false} />
-      ) : (
-        // A metric swap fades the new chart in over 160 ms (0 under reduced motion); within a metric the domain eases.
-        <Key when={metricId.get()}>
-          <div class="swap" in:fade={{ duration: motion(160) }}>
-            <LineChart
-              series={series.get()}
-              height={height.get()}
-              xDomain={xDomain.get()}
-              xInteger={x.get() === 'epoch'}
-              yDomain={fit.get()?.domain}
-              yTickValues={fit.get()?.ticks}
-              yDecimals={fit.get()?.decimals}
-              curve="monotone"
-              valueFormat={(v) => metric(v)}
-              xFormat={(v) => (x.get() === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
-              xTitle={(v) => (x.get() === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
-              yLabel={yCaption.get()}
-              bind:cursor={cursor}
-              bind:hint={hint}
-              legend={false}
-              highlight={highlight.get()}
-              recede
-              endDots
-              endLabels
-              label={`${metricDef.get().label} for the compared runs`}
-            />
-          </div>
-        </Key>
-      )}
-    </>
+    <ComparePlot
+      runs={s.runs}
+      metrics={s.metrics}
+      failedRuns={s.failedRuns.get()}
+      failedWithCache={s.failedWithCache.get()}
+      retryingMetric={s.retryingMetric.get()}
+      onRetryMetric={(id) => void s.fetchRunMetrics(id)}
+      metricId={s.metricId.get()}
+      metricDef={s.metricDef.get()}
+      series={s.series.get()}
+      height={s.height.get()}
+      x={s.x.get()}
+      xDomain={s.xDomain.get()}
+      fit={s.fit.get()}
+      yCaption={s.yCaption.get()}
+      bind:cursor={s.cursor}
+      bind:hint={s.hint}
+      highlight={s.highlight.get()}
+    />
   );
 
   // Phones lead with the plot: the explanation sits in the disclosure under the legend.
   return (
-    <Page title="Compare runs" sub={narrow() ? undefined : lede}>
-      {runs.error && !runs.data ? (
+    <Page title="Compare runs" sub={s.narrow() ? undefined : lede}>
+      {s.runs.error && !s.runs.data ? (
         // The page's states sit in the chart's frame at the chart's height (DESIGN_DIRECTION 8), the shape the page
         // will have, never a frameless block in the corner of an empty canvas.
-        <section class="compare c-state" aria-label="Curves" style:min-height={`${height.get()}px`}>
-          <ErrorState error={runs.error} retry={() => runs.refresh()} compact />
+        <section class="compare c-state" aria-label="Curves" style:min-height={`${s.height.get()}px`}>
+          <ErrorState error={s.runs.error} retry={() => s.runs.refresh()} compact />
         </section>
-      ) : ids.get().length === 0 ? (
-        <section class="compare c-state" aria-label="Curves" style:min-height={`${height.get()}px`}>
-          {missingNotice()}
+      ) : s.ids.get().length === 0 ? (
+        <section class="compare c-state" aria-label="Curves" style:min-height={`${s.height.get()}px`}>
+          <MissingRunsNotice dropped={s.dropped.get()} onDismiss={() => s.dropped.set([])} />
           <EmptyState
             icon={GitCompare}
             title="Pick runs to compare"
             description="Add two to four runs, or select them on the Runs page."
             // One action: pick runs here when there are any, else go and make some.
-            actions={() => <>{candidates.get().length ? adder() : <Button href={href('/runs')}>Go to Runs</Button>}</>}
+            actions={() => <>{s.candidates.get().length ? adder() : <Button href={href('/runs')}>Go to Runs</Button>}</>}
           />
         </section>
       ) : (
         <>
           <section class="compare" aria-label="Curves">
-            {missingNotice()}
-            {narrow() ? (
+            <MissingRunsNotice dropped={s.dropped.get()} onDismiss={() => s.dropped.set([])} />
+            {s.narrow() ? (
               // Phones: one control row, the runs, the one caveat that changes how to read it right above the plot,
               // then the plot. Opening, removing and adding runs sit in a sheet (Edit); the longer explanation sits in
               // the disclosure.
               <>
                 <header class="c-row">
                   <span class="c-metric">
-                    <Select label="Metric" bind:value={metricId} options={METRIC_OPTIONS} />
+                    <Select label="Metric" bind:value={s.metricId} options={METRIC_OPTIONS} />
                   </span>
                   {/* The x axis and its ⓘ move together: on the narrowest phones both wrap under the metric. */}
                   <span class="c-xi">
                     <span class="c-x">
-                      <Select label="X axis" bind:value={xBind} options={X_PHONE} />
+                      <Select label="X axis" bind:value={s.xBind} options={X_PHONE} />
                     </span>
-                    {x.get() === 'progress' ? (
+                    {s.x.get() === 'progress' ? (
                       <span class="i-slot">
-                        <InfoButton chart label="About the progress axis" text={progressWhy.get()} how={PROGRESS_HOW} />
+                        <InfoButton chart label="About the progress axis" text={s.progressWhy.get()} how={PROGRESS_HOW} />
                       </span>
                     ) : null}
                   </span>
@@ -752,51 +157,20 @@ export default function RunCompare() {
                 {/* The ⓘ opens here, under the controls, never as a popover over the legend and plot (ui/infoSlot). */}
                 <InfoRegion slot={axisInfo} />
                 {chips()}
-                {!sameData.get() && chosen.get().length > 1 ? <p class="caveat">{DATA_CAVEAT}</p> : null}
+                {!s.sameData.get() && s.chosen.get().length > 1 ? <p class="caveat">{DATA_CAVEAT}</p> : null}
                 {plot()}
-                <details class="about">
-                  <summary>
-                    <ChevronRight size={14} aria-hidden="true" />{' '}
-                    <span>How to read this</span>
-                  </summary>
-                  <div class="about-body">
-                    {/* The y axis's choice: the control row has no room for it on a phone. */}
-                    <div class="about-axis">
-                      <p>{floorNote.get() ? `The y axis starts at ${fitFloor(fit.get())}, under where the runs spend most of their length.` : 'The y axis starts at 0.'}</p>
-                      <Segmented
-                        size="sm"
-                        label="Y axis"
-                        value={yAxis.get()}
-                        onchange={setY}
-                        options={[
-                          { value: 'fit', label: 'Fit' },
-                          { value: 'zero', label: 'From 0' },
-                        ]}
-                      />
-                    </div>
-                    {x.get() === 'progress' ? <p>By progress puts each run over its planned epochs, so a short plan and a long one compare by shape.</p> : null}
-                    <p>
-                      Each line ends in its run's status: a lime dot while it trains, a square where it was stopped, a cross
-                      where it failed.
-                    </p>
-                    <p>
-                      Colours follow the run, not its rank. Tap a run to keep its line in front; Edit shows how each run
-                      started (fine-tuned, or from scratch). The table's baseline stays until you make another run the baseline.
-                    </p>
-                    <p>Tap or drag across the chart to read every run at one point; tap it again or anywhere else to let go.</p>
-                  </div>
-                </details>
+                <PhoneAbout floorNote={s.floorNote.get()} fit={s.fit.get()} yAxis={s.yAxis.get()} setY={s.setY} x={s.x.get()} />
                 <ManageSheet
-                  bind:managing={managing}
-                  chosen={chosen.get()}
-                  startOf={startOf}
-                  fill={fill}
+                  bind:managing={s.managing}
+                  chosen={s.chosen.get()}
+                  startOf={s.startOf}
+                  fill={s.fill}
                   SLOT_PATTERN={SLOT_PATTERN}
-                  slotOf={slotOf}
-                  ids={ids.get()}
-                  setIds={setIds}
+                  slotOf={s.slotOf}
+                  ids={s.ids.get()}
+                  setIds={s.setIds}
                   MAX={MAX}
-                  candidates={candidates.get()}
+                  candidates={s.candidates.get()}
                   adder={adder}
                 />
               </>
@@ -804,35 +178,35 @@ export default function RunCompare() {
               <>
                 {chips()}
                 {/* One line, and only when it changes how to read the plot; the axis names itself (and why). */}
-                {!sameData.get() && chosen.get().length > 1 ? <p class="caveat">{DATA_CAVEAT}</p> : null}
+                {!s.sameData.get() && s.chosen.get().length > 1 ? <p class="caveat">{DATA_CAVEAT}</p> : null}
                 <header class="c-head">
                   <span class="c-what">
-                    <Segmented label="Metric" bind:value={metricId} options={METRIC_OPTIONS} />
+                    <Segmented label="Metric" bind:value={s.metricId} options={METRIC_OPTIONS} />
                     {/* The header qualifier: what the x axis is, and where a fitted y axis starts ("y from 0.40"). */}
-                    <span class="qual">{floorNote.get() ? `${xQual.get()} · ${floorNote.get()}` : xQual.get()}</span>
+                    <span class="qual">{s.floorNote.get() ? `${s.xQual.get()} · ${s.floorNote.get()}` : s.xQual.get()}</span>
                   </span>
                   <span class="c-ctl">
-                    <Select size="sm" label="Y axis" value={yAxis.get()} onchange={setY} options={Y_OPTIONS} />
-                    <Segmented size="sm" label="X axis" value={x.get()} onchange={setX} options={X_OPTIONS} />
+                    <Select size="sm" label="Y axis" value={s.yAxis.get()} onchange={s.setY} options={Y_OPTIONS} />
+                    <Segmented size="sm" label="X axis" value={s.x.get()} onchange={s.setX} options={X_OPTIONS} />
                   </span>
                 </header>
                 {plot()}
               </>
             )}
           </section>
-          {chosen.get().length ? (
+          {s.chosen.get().length ? (
             <CompareTable
-              chosen={chosen.get()}
-              ids={ids.get()}
-              narrow={narrow()}
-              datasets={datasets}
-              metrics={metrics}
-              sameData={sameData.get()}
-              startOf={startOf}
-              bind:showSame={showSame}
-              bind:allRuns={allRuns}
-              bind:otherAt={otherAt}
-              bind:baselineId={baselineId}
+              chosen={s.chosen.get()}
+              ids={s.ids.get()}
+              narrow={s.narrow()}
+              datasets={s.datasets}
+              metrics={s.metrics}
+              sameData={s.sameData.get()}
+              startOf={s.startOf}
+              bind:showSame={s.showSame}
+              bind:allRuns={s.allRuns}
+              bind:otherAt={s.otherAt}
+              bind:baselineId={s.baselineId}
             />
           ) : null}
         </>
@@ -862,13 +236,6 @@ css`
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
-  }
-  /* A metrics refresh failed: the curves stay, this line says they may be behind, its Retry beside it. */
-  .stale-note {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-2);
   }
   @media (max-width: 767px) {
     /* Compact groups 8 px apart (controls, legend, caveat, plot), so the plot starts within ~200 px of the controls. */
@@ -915,41 +282,6 @@ css`
     place-items: center;
     height: 44px;
   }
-  .about {
-    border-top: 1px solid var(--line-subtle);
-  }
-  .about summary {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-height: 44px;
-    list-style: none;
-    cursor: pointer;
-    font-size: var(--type-sm-size);
-    color: var(--text-secondary);
-  }
-  .about summary::-webkit-details-marker {
-    display: none;
-  }
-  .about summary :global(svg) {
-    flex-shrink: 0;
-    color: var(--text-tertiary);
-    transition: transform var(--dur-fast) var(--ease-standard);
-  }
-  .about[open] summary :global(svg) {
-    transform: rotate(90deg);
-  }
-  .about summary:focus-visible {
-    outline-offset: -2px;
-  }
-  .about-body {
-    display: grid;
-    gap: var(--space-2);
-    padding-bottom: var(--space-1);
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
-  }
   /* From 768 px up one layout whatever the qualifier's length: the metric tabs left, the x-axis control right on the
      tabs' row; a long qualifier ("by progress, % of planned epochs · plans differ in length") wraps under the tabs,
      never pushing the control onto a row of its own. Phones have their own control row (.c-row). */
@@ -966,11 +298,6 @@ css`
     display: flex;
     align-items: center;
     gap: var(--space-2);
-  }
-  .about-axis {
-    display: grid;
-    gap: var(--space-2);
-    justify-items: start;
   }
   .c-what {
     display: flex;
@@ -989,9 +316,5 @@ css`
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-  }
-  /* The fading wrapper of a swapped chart: it takes the chart's place in the layout. */
-  .swap {
-    min-width: 0;
   }
 `;

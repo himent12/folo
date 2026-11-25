@@ -60,10 +60,10 @@ export const shortcutList: { keys: string; also?: string; label: string; group: 
   { keys: 'Enter', label: 'Open the row', group: 'Lists' },
   { keys: 'X', label: 'Select the run to compare (Runs)', group: 'Lists', single: true },
   { keys: 'ArrowLeft ArrowRight', label: 'Move the chart cursor (focused chart)', group: 'Charts' },
-  // Compare's side by side: B moves the baseline to the next run or benchmark entry; 1–4 pin an entry on benchmark compare, Escape unpins.
+  // Compare's side by side: B moves the baseline to the next run or benchmark entry; 1–4 pin a run or entry, Escape unpins.
   { keys: 'B', label: 'Make the next run or entry the baseline (Compare)', group: 'Charts', single: true },
-  { keys: '1–4', label: 'Pin or unpin an entry across charts (Benchmark compare)', group: 'Charts', single: true },
-  { keys: 'Escape', label: 'Unpin the highlighted entry (Benchmark compare)', group: 'Charts', single: true },
+  { keys: '1–4', label: 'Pin or unpin a run or entry (Compare)', group: 'Charts', single: true },
+  { keys: 'Escape', label: 'Unpin the highlighted run or entry (Compare)', group: 'Charts', single: true },
   // The confusion matrix's cells: arrows move the focused cell and the columns page with it, as its ‹ › do.
   { keys: 'ArrowLeft ArrowRight', label: "Move through the confusion matrix's cells, paging its columns (focused matrix)", group: 'Charts' },
   { keys: 'Home End', label: "First / last column of the confusion matrix (focused matrix)", group: 'Charts' },
