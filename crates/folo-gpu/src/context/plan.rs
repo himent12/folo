@@ -126,6 +126,44 @@ struct DynamicBind {
     buffers: Vec<Buf>,
 }
 
+fn resolve_buf<'a>(
+    buf: &'a Buf,
+    input: Option<&'a wgpu::Buffer>,
+    results: &[&'a wgpu::Buffer],
+) -> &'a wgpu::Buffer {
+    match buf {
+        Buf::Fixed(b) => b,
+        Buf::Input => input.expect("a replay of a plan has its input"),
+        Buf::Output(k) => results[*k],
+    }
+}
+
+/// Creates a dynamic replay bind group without allocating a temporary `Vec` for up to 24 storage buffers.
+fn create_dynamic_bind(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    uniform: &wgpu::Buffer,
+    buffers: &[Buf],
+    input: Option<&wgpu::Buffer>,
+    results: &[&wgpu::Buffer],
+) -> wgpu::BindGroup {
+    const INLINE_REFS: usize = 24;
+    if buffers.is_empty() {
+        return super::binds::create(device, layout, uniform, &[]);
+    }
+    if buffers.len() <= INLINE_REFS {
+        let first = resolve_buf(&buffers[0], input, results);
+        let mut refs = [first; INLINE_REFS];
+        for (slot, buf) in refs.iter_mut().zip(buffers.iter()).skip(1) {
+            *slot = resolve_buf(buf, input, results);
+        }
+        super::binds::create(device, layout, uniform, &refs[..buffers.len()])
+    } else {
+        let refs: Vec<&wgpu::Buffer> = buffers.iter().map(|buf| resolve_buf(buf, input, results)).collect();
+        super::binds::create(device, layout, uniform, &refs)
+    }
+}
+
 /// Traced operations made ready to encode again without the tensor-op layer, the pool or the bind-group cache
 /// ([`GpuContext::freeze`]), on the buffers they ran on.
 pub struct Frozen {
@@ -452,32 +490,41 @@ impl GpuContext {
         results: &[&wgpu::Buffer],
         last: &mut [Option<(Vec<wgpu::Buffer>, wgpu::BindGroup)>],
     ) {
-        let get = |buf: &Buf| -> wgpu::Buffer {
-            match buf {
-                Buf::Fixed(b) => b.clone(),
-                Buf::Input => input.expect("a replay of a plan has its input").clone(),
-                Buf::Output(k) => results[*k].clone(),
-            }
-        };
         for step in &f.steps {
             match step {
                 Step::Dispatch { pipeline_id, pipeline, bind, offset, groups } => {
-                    let bind = match bind {
-                        Bind::Static(g) => g.clone(),
+                    let bind: &wgpu::BindGroup = match bind {
+                        Bind::Static(g) => g,
                         Bind::Dynamic(i) => {
                             let d = &f.dynamic[*i];
-                            let bufs: Vec<wgpu::Buffer> = d.buffers.iter().map(get).collect();
-                            match &last[*i] {
-                                Some((held, g)) if *held == bufs => g.clone(),
-                                _ => {
-                                    let refs: Vec<&wgpu::Buffer> = bufs.iter().collect();
-                                    let u = f.uniform.as_ref().expect("a dispatch makes the buffer");
-                                    let g = super::binds::create(&self.inner.device, &d.layout, u, &refs);
-                                    self.inner.bind_groups.fetch_add(1, Ordering::Relaxed);
-                                    last[*i] = Some((bufs, g.clone()));
-                                    g
-                                }
+                            let hit = matches!(
+                                &last[*i],
+                                Some((held, _))
+                                    if held.len() == d.buffers.len()
+                                        && held
+                                            .iter()
+                                            .zip(&d.buffers)
+                                            .all(|(h, buf)| h == resolve_buf(buf, input, results))
+                            );
+                            if !hit {
+                                let u = f.uniform.as_ref().expect("a dispatch makes the buffer");
+                                let g = create_dynamic_bind(
+                                    &self.inner.device,
+                                    &d.layout,
+                                    u,
+                                    &d.buffers,
+                                    input,
+                                    results,
+                                );
+                                self.inner.bind_groups.fetch_add(1, Ordering::Relaxed);
+                                let bufs: Vec<wgpu::Buffer> = d
+                                    .buffers
+                                    .iter()
+                                    .map(|buf| resolve_buf(buf, input, results).clone())
+                                    .collect();
+                                last[*i] = Some((bufs, g));
                             }
+                            &last[*i].as_ref().expect("dynamic bind populated").1
                         }
                     };
                     if b.pass.is_none() {
@@ -497,17 +544,19 @@ impl GpuContext {
                         #[cfg(test)]
                         self.inner.pipeline_sets.fetch_add(1, Ordering::Relaxed);
                     }
-                    pass.set_bind_group(0, &bind, &[*offset]);
+                    pass.set_bind_group(0, bind, &[*offset]);
                     pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
                     self.inner.dispatches.fetch_add(1, Ordering::Relaxed);
                 }
-                Step::Copy { src, src_off, dst, dst_off, len } => {
-                    let (src, dst) = (get(src), get(dst));
-                    self.encoder(b).copy_buffer_to_buffer(&src, *src_off, &dst, *dst_off, *len)
-                }
+                Step::Copy { src, src_off, dst, dst_off, len } => self.encoder(b).copy_buffer_to_buffer(
+                    resolve_buf(src, input, results),
+                    *src_off,
+                    resolve_buf(dst, input, results),
+                    *dst_off,
+                    *len,
+                ),
                 Step::Clear { buf, bytes } => {
-                    let buf = get(buf);
-                    self.encoder(b).clear_buffer(&buf, 0, Some(*bytes))
+                    self.encoder(b).clear_buffer(resolve_buf(buf, input, results), 0, Some(*bytes))
                 }
             }
             self.bump(b);

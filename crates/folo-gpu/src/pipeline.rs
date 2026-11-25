@@ -62,10 +62,67 @@ pub(crate) enum SpecVal {
     F32(u32),
 }
 
+/// Inline capacity for specialisation constants (covers every built-in kernel without a heap allocation).
+const INLINE_SPECS: usize = 24;
+
+#[derive(Clone, Debug)]
+#[allow(clippy::large_enum_variant)] // Inline is the common path for every built-in kernel; Heap is only a spill fallback.
+enum SpecVals {
+    Inline { buf: [(&'static str, SpecVal); INLINE_SPECS], len: u8 },
+    Heap(Vec<(&'static str, SpecVal)>),
+}
+
+impl Default for SpecVals {
+    fn default() -> Self {
+        Self::Inline { buf: [("", SpecVal::U32(0)); INLINE_SPECS], len: 0 }
+    }
+}
+
+impl SpecVals {
+    fn as_slice(&self) -> &[(&'static str, SpecVal)] {
+        match self {
+            Self::Inline { buf, len } => &buf[..*len as usize],
+            Self::Heap(v) => v.as_slice(),
+        }
+    }
+
+    fn push(&mut self, item: (&'static str, SpecVal)) {
+        match self {
+            Self::Inline { buf, len } => {
+                let n = *len as usize;
+                if n < INLINE_SPECS {
+                    buf[n] = item;
+                    *len = (n + 1) as u8;
+                } else {
+                    let mut v = Vec::with_capacity(INLINE_SPECS + 8);
+                    v.extend_from_slice(&buf[..n]);
+                    v.push(item);
+                    *self = Self::Heap(v);
+                }
+            }
+            Self::Heap(v) => v.push(item),
+        }
+    }
+}
+
+impl PartialEq for SpecVals {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for SpecVals {}
+
+impl std::hash::Hash for SpecVals {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
+
 /// Specialisation constants plus the f16 (`enable f16;`), cooperative-matrix and subgroup switches.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Spec {
-    vals: Vec<(&'static str, SpecVal)>,
+    vals: SpecVals,
     f16: bool,
     coop: bool,
     subgroups: bool,
@@ -120,7 +177,7 @@ impl Spec {
 
     /// Looks up a constant (for generators).
     pub fn get(&self, name: &str) -> Option<SpecVal> {
-        self.vals.iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
+        self.vals.as_slice().iter().find(|(n, _)| *n == name).map(|(_, v)| *v)
     }
 
     /// Integer constant or `default`.
@@ -146,6 +203,7 @@ impl Spec {
     pub fn describe(&self) -> String {
         let mut parts: Vec<String> = self
             .vals
+            .as_slice()
             .iter()
             .map(|(name, v)| match v {
                 SpecVal::U32(x) => format!("{name}={x}"),
@@ -184,7 +242,7 @@ impl Spec {
                 out.push('s');
             }
         }
-        for (name, v) in &self.vals {
+        for (name, v) in self.vals.as_slice() {
             let _ = match v {
                 SpecVal::U32(x) => write!(out, " {name}=u{x}"),
                 SpecVal::I32(x) => write!(out, " {name}=i{x}"),
@@ -218,7 +276,7 @@ impl Spec {
                 }
             }
         }
-        let mut vals = Vec::new();
+        let mut vals = SpecVals::default();
         for f in fields {
             let (name, v) = f.split_once('=')?;
             let ident = name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
@@ -268,7 +326,7 @@ impl Spec {
         } else {
             s.push_str("alias T = f32;\n");
         }
-        for (name, v) in &self.vals {
+        for (name, v) in self.vals.as_slice() {
             let line = match v {
                 SpecVal::U32(x) => format!("const {name}: u32 = {x}u;\n"),
                 SpecVal::I32(x) => format!("const {name}: i32 = {x}i;\n"),
@@ -541,5 +599,49 @@ impl Params {
 
     pub fn bytes(&self) -> &[u8] {
         bytemuck::cast_slice(&self.words)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{INLINE_SPECS, Spec, SpecVal, SpecVals};
+    use crate::context::binds::id_of;
+
+    #[test]
+    fn spec_inline_and_heap_storage_compare_and_hash_identically() {
+        let mut inline = Spec::new().f16(true).subgroups(true);
+        for i in 0..INLINE_SPECS as u32 {
+            inline = inline.u32("C", i);
+        }
+        assert!(matches!(inline.vals, SpecVals::Inline { len, .. } if len as usize == INLINE_SPECS));
+
+        // Manually construct an equivalent Heap variant with the exact same entries.
+        let heap = Spec {
+            vals: SpecVals::Heap(inline.vals.as_slice().to_vec()),
+            f16: true,
+            coop: false,
+            subgroups: true,
+        };
+        assert_eq!(inline, heap);
+        assert_eq!(id_of(&inline), id_of(&heap));
+        assert_eq!(inline.header(), heap.header());
+        assert_eq!(inline.describe(), heap.describe());
+
+        // Pushing past INLINE_SPECS spills cleanly to Heap and preserves every prior constant.
+        let spilled = inline.clone().bool("TAIL", true).i32("NEG", -7);
+        assert!(matches!(spilled.vals, SpecVals::Heap(ref v) if v.len() == INLINE_SPECS + 2));
+        assert_eq!(spilled.get("C"), Some(SpecVal::U32(0)));
+        assert!(spilled.get_bool("TAIL"));
+        assert_eq!(spilled.get("NEG"), Some(SpecVal::I32(-7)));
+        let mut encoded = String::new();
+        spilled.encode_fields(&mut encoded);
+        let decoded = Spec::decode_fields(encoded.split_whitespace(), 1024, |n| match n {
+            "C" => Some("C"),
+            "TAIL" => Some("TAIL"),
+            "NEG" => Some("NEG"),
+            _ => None,
+        })
+        .expect("round trip spilled spec");
+        assert_eq!(decoded, spilled);
     }
 }

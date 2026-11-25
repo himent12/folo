@@ -62,6 +62,58 @@ impl Drop for ForwardPlans {
     }
 }
 
+/// Inline capacity for a forward-plan lookup signature (key length + up to 8 key words + 3 metadata words
+/// + up to 4 tensor dims = 16 words; larger keys or higher-rank inputs spill to a `Vec`).
+const INLINE_SIG: usize = 16;
+
+enum PlanSignature {
+    Inline { buf: [u64; INLINE_SIG], len: usize },
+    Heap(Vec<u64>),
+}
+
+impl PlanSignature {
+    fn new() -> Self {
+        Self::Inline { buf: [0; INLINE_SIG], len: 0 }
+    }
+
+    fn push(&mut self, v: u64) {
+        match self {
+            Self::Inline { buf, len } => {
+                if *len < INLINE_SIG {
+                    buf[*len] = v;
+                    *len += 1;
+                } else {
+                    let mut vec = Vec::with_capacity(INLINE_SIG + 8);
+                    vec.extend_from_slice(&buf[..*len]);
+                    vec.push(v);
+                    *self = Self::Heap(vec);
+                }
+            }
+            Self::Heap(vec) => vec.push(v),
+        }
+    }
+
+    fn extend_from_slice(&mut self, items: &[u64]) {
+        for &v in items {
+            self.push(v);
+        }
+    }
+
+    fn as_slice(&self) -> &[u64] {
+        match self {
+            Self::Inline { buf, len } => &buf[..*len],
+            Self::Heap(vec) => vec.as_slice(),
+        }
+    }
+
+    fn into_vec(self) -> Vec<u64> {
+        match self {
+            Self::Inline { buf, len } => buf[..len].to_vec(),
+            Self::Heap(vec) => vec,
+        }
+    }
+}
+
 /// The buffer behind a dense GPU tensor that is its whole storage (what a planned result is rebuilt as).
 fn whole_buffer(t: &Tensor) -> Option<wgpu::Buffer> {
     dense_buffer(t).filter(|_| t.with_view(|v| v.storage.len()) == t.numel())
@@ -138,14 +190,18 @@ impl ForwardPlans {
             // Inside another call's recording: run, so the outer recording sees this call's work.
             return f(x);
         }
-        let mut signature = vec![key.len() as u64];
-        signature.extend(key);
-        signature.extend([x.dtype() as u64, input.size(), ctx.tensor_cores() as u64]);
-        signature.extend(x.dims().iter().map(|&d| d as u64));
-        let key = crate::context::binds::id_of(&signature);
+        let mut signature = PlanSignature::new();
+        signature.push(key.len() as u64);
+        signature.extend_from_slice(key);
+        signature.extend_from_slice(&[x.dtype() as u64, input.size(), ctx.tensor_cores() as u64]);
+        for &d in x.dims() {
+            signature.push(d as u64);
+        }
+        let sig_slice = signature.as_slice();
+        let key = crate::context::binds::id_of(&sig_slice);
         let found = ctx.plans().get(self.id, key);
         if let Some(plan) = found {
-            if plan.signature == signature
+            if plan.signature.as_slice() == sig_slice
                 && plan.epoch == ctx.plan_epoch()
                 && unchanged(&plan.state, tensors)
             {
@@ -182,7 +238,7 @@ impl ForwardPlans {
             plan.results =
                 out.iter().map(|t| PlanOutput { dtype: t.dtype(), shape: t.shape().clone() }).collect();
             plan.state = state;
-            plan.signature = signature;
+            plan.signature = signature.into_vec();
             Ok::<Plan, String>(plan)
         })();
         let refusal = match plan {
@@ -235,8 +291,19 @@ fn unchanged(state: &[(folo_core::TensorId, u64)], tensors: &Tensors<'_>) -> boo
 fn replay(ctx: &GpuContext, plan: &Plan, x: &Tensor, input: &wgpu::Buffer) -> Result<Vec<Tensor>> {
     let bufs =
         plan.output_sizes.iter().map(|&n| ctx.alloc(n)).collect::<std::result::Result<Vec<_>, _>>().core()?;
-    let refs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| b.raw()).collect();
-    ctx.replay_plan(plan, input, &refs);
+    const INLINE_OUTS: usize = 8;
+    if bufs.is_empty() {
+        ctx.replay_plan(plan, input, &[]);
+    } else if bufs.len() <= INLINE_OUTS {
+        let mut refs = [bufs[0].raw(); INLINE_OUTS];
+        for (slot, b) in refs.iter_mut().zip(&bufs).skip(1) {
+            *slot = b.raw();
+        }
+        ctx.replay_plan(plan, input, &refs[..bufs.len()]);
+    } else {
+        let refs: Vec<&wgpu::Buffer> = bufs.iter().map(|b| b.raw()).collect();
+        ctx.replay_plan(plan, input, &refs);
+    }
     plan.results
         .iter()
         .zip(bufs)
