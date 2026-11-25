@@ -38,6 +38,7 @@ export const shellScenes = [
     viewports: ['desktop', 'laptop'],
     setup: async (page) => {
       await page.keyboard.press('Shift+?');
+      await page.locator('dialog[open]').waitFor();
     },
   },
   { name: 'not-found', path: '/nope', viewports: ['desktop', 'mobile'] },

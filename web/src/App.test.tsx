@@ -1,12 +1,16 @@
 // @vitest-environment happy-dom
 // The screen of `main` while the next screen's chunk loads, and when it fails to load.
-import { flush, onMount } from 'fw';
+import { bindable, flush, onMount } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, type Rendered } from '../framework/testing';
+
+// happy-dom's Web Animations reject when an intro/outro is cancelled mid-flight (see Toaster.test.tsx).
+vi.mock('fw', async (orig) => ({ ...(await orig<typeof import('fw')>()), fly: () => ({}) }));
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
 import { restoringScroll } from '$lib/shell/entryMemory';
+import { toast } from '$lib/ui/toast';
 import App from './App';
 import * as RunScreen from './routes/Run';
 import { Screens, type ScreenModule, type ScreenName } from './routes';
@@ -53,6 +57,7 @@ afterEach(() => {
   c?.unmount();
   c = undefined;
   target.remove();
+  for (const t of toast.items) toast.dismiss(t.id);
   vi.restoreAllMocks();
   router.route = parse('#/');
 });
@@ -300,5 +305,233 @@ describe('a screen that throws while it is created', () => {
     await until(() => main().textContent?.includes('the sibling broke'), 'the crash');
     await settle();
     expect(started - stopped).toBe(0);
+  });
+});
+
+describe('G-chord indicator, guarded/staggered route preloading, and lazy ShortcutsDialog', () => {
+  it('guards G-key preloadAll and shows the G-chord indicator only on valid G chords', async () => {
+    const screens = new Screens((name) => (name === 'overview' ? () => Promise.resolve(screen('the overview')) : name === 'runs' ? () => Promise.resolve(screen('the runs')) : undefined));
+    const preloadAll = vi.spyOn(screens, 'preloadAll');
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    router.route = parse('#/');
+    c = render(() => <App screens={screens} />, target);
+    await until(() => main().querySelector('.fake'), 'the overview');
+
+    // Typing 'g' in an input or pressing Ctrl+G does not trigger preloadAll or show the indicator.
+    const input = target.appendChild(document.createElement('input'));
+    input.focus();
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true, cancelable: true }));
+    flush();
+    expect(preloadAll).not.toHaveBeenCalled();
+    expect(target.querySelector('.g-chord')).toBeNull();
+    input.remove();
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', ctrlKey: true, bubbles: true, cancelable: true }));
+    flush();
+    expect(preloadAll).not.toHaveBeenCalled();
+    expect(target.querySelector('.g-chord')).toBeNull();
+
+    // Bare 'g' at rest shows the subtle indicator and calls preloadAll; 'r' clears it and navigates.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true, cancelable: true }));
+    flush();
+    expect(preloadAll).toHaveBeenCalledTimes(1);
+    expect(target.querySelector('.g-chord')).not.toBeNull();
+    expect(target.querySelector('.g-chord')?.textContent).toContain('Runs');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'r', bubbles: true, cancelable: true }));
+    flush();
+    await until(() => !target.querySelector('.g-chord'), 'g-chord outro');
+    expect(go).toHaveBeenCalledWith('/runs');
+  });
+
+  it('staggers idle route preloading (nav before detail screens) and cancels cleanly on unmount', async () => {
+    vi.useFakeTimers();
+    const origIdle = (globalThis as { requestIdleCallback?: unknown }).requestIdleCallback;
+    delete (globalThis as { requestIdleCallback?: unknown }).requestIdleCallback;
+    try {
+      const loaded: ScreenName[] = [];
+      const make = (name: ScreenName) => () => {
+        loaded.push(name);
+        return Promise.resolve(screen(name));
+      };
+      const screens = new Screens((name) =>
+        (['overview', 'run', 'datasets', 'runs', 'models', 'benchmarks', 'playground'] as ScreenName[]).includes(name) ? make(name) : undefined,
+      );
+      router.route = parse('#/');
+      c = render(() => <App screens={screens} />, target);
+      await vi.advanceTimersByTimeAsync(0);
+      flush();
+      expect(loaded).toEqual(['overview']);
+
+      // After IDLE_PRELOAD_MS (1000ms), only the first nav batch (2 routes) starts — detail screen 'run' waits behind nav.
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(loaded).toEqual(['overview', 'datasets', 'runs']);
+
+      // After the inter-batch pause (250ms), the second nav batch loads while the rest wait.
+      await vi.advanceTimersByTimeAsync(250);
+      expect(loaded).toEqual(['overview', 'datasets', 'runs', 'models', 'benchmarks']);
+
+      // Unmounting cancels the remaining batches (including detail screen 'run') so nothing else loads after teardown.
+      c.unmount();
+      c = undefined;
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(loaded).toEqual(['overview', 'datasets', 'runs', 'models', 'benchmarks']);
+    } finally {
+      if (origIdle !== undefined) (globalThis as { requestIdleCallback?: unknown }).requestIdleCallback = origIdle;
+      vi.useRealTimers();
+    }
+  });
+
+  it('uses requestIdleCallback for staggered preloading and cancels pending idle callbacks on unmount', async () => {
+    vi.useFakeTimers();
+    const origIdle = (globalThis as { requestIdleCallback?: unknown }).requestIdleCallback;
+    const origCancel = (globalThis as { cancelIdleCallback?: unknown }).cancelIdleCallback;
+    const idleCallbacks = new Map<number, () => void>();
+    let nextId = 0;
+    const cancelSpy = vi.fn((id: number) => {
+      idleCallbacks.delete(id);
+    });
+    (globalThis as { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback = (cb) => {
+      const id = ++nextId;
+      idleCallbacks.set(id, cb);
+      return id;
+    };
+    (globalThis as { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback = cancelSpy;
+    try {
+      const loaded: ScreenName[] = [];
+      const make = (name: ScreenName) => () => {
+        loaded.push(name);
+        return Promise.resolve(screen(name));
+      };
+      const screens = new Screens((name) =>
+        (['overview', 'datasets', 'runs', 'models'] as ScreenName[]).includes(name) ? make(name) : undefined,
+      );
+      router.route = parse('#/');
+      c = render(() => <App screens={screens} />, target);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(loaded).toEqual(['overview']);
+      expect(idleCallbacks.size).toBe(1);
+
+      // Firing the first idle callback loads only the first batch.
+      const [id1, cb1] = [...idleCallbacks.entries()][0]!;
+      idleCallbacks.delete(id1);
+      cb1();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(loaded).toEqual(['overview', 'datasets', 'runs']);
+      expect(idleCallbacks.size).toBe(1);
+
+      // Unmounting cancels the queued second idle callback.
+      c.unmount();
+      c = undefined;
+      expect(cancelSpy).toHaveBeenCalledTimes(1);
+      expect(idleCallbacks.size).toBe(0);
+    } finally {
+      if (origIdle !== undefined) (globalThis as { requestIdleCallback?: unknown }).requestIdleCallback = origIdle;
+      else delete (globalThis as { requestIdleCallback?: unknown }).requestIdleCallback;
+      if (origCancel !== undefined) (globalThis as { cancelIdleCallback?: unknown }).cancelIdleCallback = origCancel;
+      else delete (globalThis as { cancelIdleCallback?: unknown }).cancelIdleCallback;
+      vi.useRealTimers();
+    }
+  });
+
+  it('skips idle staggered preloading when Save-Data is enabled', async () => {
+    vi.useFakeTimers();
+    const origConn = Object.getOwnPropertyDescriptor(navigator, 'connection');
+    Object.defineProperty(navigator, 'connection', { configurable: true, value: { saveData: true } });
+    try {
+      const loaded: ScreenName[] = [];
+      const make = (name: ScreenName) => () => {
+        loaded.push(name);
+        return Promise.resolve(screen(name));
+      };
+      const screens = new Screens((name) =>
+        (['overview', 'datasets', 'runs'] as ScreenName[]).includes(name) ? make(name) : undefined,
+      );
+      router.route = parse('#/');
+      c = render(() => <App screens={screens} />, target);
+      await vi.advanceTimersByTimeAsync(5000);
+      flush();
+      expect(loaded).toEqual(['overview']);
+    } finally {
+      if (origConn) Object.defineProperty(navigator, 'connection', origConn);
+      else delete (navigator as { connection?: unknown }).connection;
+      vi.useRealTimers();
+    }
+  });
+
+  it('lazy-loads ShortcutsDialog on first open, caches it across close/reopen, and retries after failure', async () => {
+    let attempts = 0;
+    const loadShortcuts = vi.fn(async () => {
+      attempts++;
+      if (attempts === 1) throw new TypeError('offline');
+      return {
+        default: (p: { open?: boolean }) => {
+          const open = bindable(p, 'open', false);
+          return (
+            <div class="lazy-shortcuts" data-open={String(open.get())}>
+              <button class="close-shortcuts" onclick={() => open.set(false)}>
+                Close
+              </button>
+            </div>
+          );
+        },
+      };
+    });
+    const screens = new Screens((name) => (name === 'overview' ? () => Promise.resolve(screen('the overview')) : undefined));
+    router.route = parse('#/');
+    c = render(() => <App screens={screens} loadShortcuts={loadShortcuts} />, target);
+    await until(() => main().querySelector('.fake'), 'the overview');
+
+    // Never fetched until the user actually asks for shortcuts.
+    expect(loadShortcuts).not.toHaveBeenCalled();
+    expect(target.querySelector('.lazy-shortcuts')).toBeNull();
+
+    // First attempt fails cleanly with an error toast and resets so a retry works.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+    await settle();
+    expect(loadShortcuts).toHaveBeenCalledTimes(1);
+    expect(target.querySelector('.lazy-shortcuts')).toBeNull();
+    expect(toast.items.some((t) => t.tone === 'error' && t.title === 'Could not load keyboard shortcuts')).toBe(true);
+
+    // Second attempt loads, clears the error toast, and opens the dialog; closing and reopening reuses the cached chunk.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+    await until(() => target.querySelector('.lazy-shortcuts[data-open="true"]'), 'lazy shortcuts dialog');
+    expect(loadShortcuts).toHaveBeenCalledTimes(2);
+    expect(toast.items.some((t) => t.key === 'shortcuts')).toBe(false);
+
+    target.querySelector<HTMLButtonElement>('.close-shortcuts')!.click();
+    flush();
+    expect(target.querySelector('.lazy-shortcuts')?.getAttribute('data-open')).toBe('false');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+    flush();
+    expect(target.querySelector('.lazy-shortcuts')?.getAttribute('data-open')).toBe('true');
+    expect(loadShortcuts).toHaveBeenCalledTimes(2);
+  });
+
+  it('Escape cancels a pending lazy ShortcutsDialog open without navigating back on a detail page', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    const pending = deferred<{ default: (p: { open?: boolean }) => JSX.Element }>();
+    const loadShortcuts = vi.fn(() => pending.promise);
+    const screens = new Screens((name) => (name === 'run' ? () => Promise.resolve(screen('the run detail')) : undefined));
+    router.route = parse('#/runs/run_7d1e');
+    c = render(() => <App screens={screens} loadShortcuts={loadShortcuts} />, target);
+    await until(() => main().querySelector('.fake'), 'the run detail');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+    flush();
+    expect(loadShortcuts).toHaveBeenCalledTimes(1);
+
+    // Pressing Escape while the chunk is still loading cancels the open instead of leaving the detail page.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    flush();
+    expect(go).not.toHaveBeenCalled();
+
+    // Resolving the import caches the component closed instead of popping it open after Escape.
+    pending.resolve({
+      default: (p: { open?: boolean }) => <div class="lazy-shortcuts" data-open={String(!!p.open)} />,
+    });
+    await until(() => target.querySelector('.lazy-shortcuts'), 'cached shortcuts component');
+    expect(target.querySelector('.lazy-shortcuts')?.getAttribute('data-open')).toBe('false');
   });
 });

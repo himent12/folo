@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { router } from '$lib/router';
 import { keyPrefs } from '$lib/ui/keyPrefs';
 import { rowNav } from '$lib/ui/rowNav';
-import { backPath, installShortcuts, showShortcuts } from './shortcuts';
+import { backPath, G_CHORD_MS, gChord, installShortcuts, showShortcuts } from './shortcuts';
 
 const key = (k: string, init: KeyboardEventInit = {}, el: EventTarget = window) =>
   el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }));
@@ -13,16 +13,19 @@ const key = (k: string, init: KeyboardEventInit = {}, el: EventTarget = window) 
 let uninstall: () => void;
 const palette = vi.fn();
 const shortcuts = vi.fn();
+const onGChord = vi.fn();
 
 beforeEach(() => {
   palette.mockReset();
   shortcuts.mockReset();
-  uninstall = installShortcuts({ palette, shortcuts });
+  onGChord.mockReset();
+  uninstall = installShortcuts({ palette, shortcuts, gChord: onGChord });
 });
 afterEach(() => {
   uninstall();
   keyPrefs.singleKeys = true;
   document.body.innerHTML = '';
+  vi.useRealTimers();
 });
 
 describe('single-key shortcuts preference', () => {
@@ -121,5 +124,93 @@ describe('Escape on a detail page', () => {
       null,
       null,
     ]);
+  });
+});
+
+describe('G-chord navigation state and guards', () => {
+  it('arms gChord and calls onGChord on bare g, ignores Shift, navigates on target, and clears', () => {
+    vi.useFakeTimers();
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    expect(gChord.get()).toBe(false);
+
+    key('g');
+    expect(gChord.get()).toBe(true);
+    expect(onGChord).toHaveBeenCalledTimes(1);
+    // Holding g (repeat) does not re-fire onGChord.
+    key('g', { repeat: true });
+    expect(onGChord).toHaveBeenCalledTimes(1);
+    // Modifier press before second key does not cancel the chord.
+    key('Shift', { shiftKey: true });
+    expect(gChord.get()).toBe(true);
+
+    key('R', { shiftKey: true });
+    expect(gChord.get()).toBe(false);
+    expect(go).toHaveBeenCalledWith('/runs');
+    go.mockRestore();
+  });
+
+  it('cancels gChord on timeout, Escape (without navigating back), blur, and uninstall', () => {
+    vi.useFakeTimers();
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    const route = vi.spyOn(router, 'route', 'get').mockReturnValue({ name: 'run', params: { id: 'r' }, query: new URLSearchParams(), path: '/runs/r' });
+
+    // Timeout
+    key('g');
+    expect(gChord.get()).toBe(true);
+    vi.advanceTimersByTime(G_CHORD_MS);
+    expect(gChord.get()).toBe(false);
+
+    // Escape cancels chord without triggering detail-page back navigation.
+    key('g');
+    expect(gChord.get()).toBe(true);
+    key('Escape');
+    expect(gChord.get()).toBe(false);
+    expect(go).not.toHaveBeenCalled();
+
+    // Window blur cancels chord.
+    key('g');
+    expect(gChord.get()).toBe(true);
+    window.dispatchEvent(new Event('blur'));
+    expect(gChord.get()).toBe(false);
+
+    // Uninstall while armed clears chord cleanly.
+    key('g');
+    expect(gChord.get()).toBe(true);
+    uninstall();
+    expect(gChord.get()).toBe(false);
+    // Re-install so afterEach uninstall stays a clean teardown.
+    uninstall = installShortcuts({ palette, shortcuts, gChord: onGChord });
+
+    route.mockRestore();
+    go.mockRestore();
+  });
+
+  it('never arms gChord or invokes onGChord while typing, modified (including Shift+G), in an open dialog, or with singleKeys off', () => {
+    const input = document.body.appendChild(document.createElement('input'));
+    input.focus();
+    key('g', {}, input);
+    expect(gChord.get()).toBe(false);
+    expect(onGChord).not.toHaveBeenCalled();
+    input.remove();
+
+    key('g', { ctrlKey: true });
+    expect(gChord.get()).toBe(false);
+    expect(onGChord).not.toHaveBeenCalled();
+
+    key('G', { shiftKey: true });
+    expect(gChord.get()).toBe(false);
+    expect(onGChord).not.toHaveBeenCalled();
+
+    const dlg = document.body.appendChild(document.createElement('dialog'));
+    dlg.setAttribute('open', '');
+    key('g');
+    expect(gChord.get()).toBe(false);
+    expect(onGChord).not.toHaveBeenCalled();
+    dlg.remove();
+
+    keyPrefs.singleKeys = false;
+    key('g');
+    expect(gChord.get()).toBe(false);
+    expect(onGChord).not.toHaveBeenCalled();
   });
 });

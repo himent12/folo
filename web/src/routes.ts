@@ -47,6 +47,23 @@ interface ScreenState {
   failed?: { error: unknown };
 }
 
+/** Top-level navigation routes preloaded ahead of detail screens during idle staggered preloading. */
+const NAV_ORDER: readonly ScreenName[] = ['overview', 'datasets', 'runs', 'models', 'benchmarks', 'playground', 'settings'];
+
+const STAGGER_ORDER: readonly ScreenName[] = [
+  ...NAV_ORDER,
+  ...(Object.keys(ROUTES) as ScreenName[]).filter((name) => !NAV_ORDER.includes(name)),
+];
+
+export interface StaggerOptions {
+  /** Routes to fetch per idle step (default 2). */
+  batch?: number;
+  /** Pause between batches in milliseconds (default 250) so active API calls and interactions take priority. */
+  delayMs?: number;
+  /** Explicit route order (default: top-level nav screens first, then detail screens). */
+  order?: readonly ScreenName[];
+}
+
 /**
  * The screens' chunks, each loaded once on demand. Whether a chunk has loaded or failed is reactive: App (and the
  * router's hold on the displayed route) read it, so whichever request brings a chunk in (App's own, a link hovered, a
@@ -117,9 +134,68 @@ export class Screens {
     if (name !== 'not-found') void this.preload(name).catch(() => {});
   }
 
-  /** Preloads every screen (a keyboard jump or the palette may lead anywhere; idle time after startup). */
+  /** Preloads every screen (a keyboard jump or the palette may lead anywhere). */
   preloadAll(): void {
     for (const name of Object.keys(ROUTES) as ScreenName[]) void this.preload(name).catch(() => {});
+  }
+
+  /**
+   * Preloads remaining screens gently in small idle batches (top-level nav screens first) so startup idle preloading
+   * never floods HTTP connections or competes with the active screen's API calls. Returns a cancel function.
+   */
+  preloadStaggered(opts: StaggerOptions = {}): () => void {
+    const batch = Math.max(1, opts.batch ?? 2);
+    const delayMs = opts.delayMs ?? 250;
+    const queue = (opts.order ?? STAGGER_ORDER).filter((name) => !!this.#loaderOf(name));
+    let i = 0;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let idleId: number | undefined;
+    const g = globalThis as {
+      requestIdleCallback?: (f: () => void, o?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+
+    const nextIdle = () => {
+      if (cancelled || i >= queue.length) return;
+      if (g.requestIdleCallback) {
+        idleId = g.requestIdleCallback(
+          () => {
+            idleId = undefined;
+            step();
+          },
+          { timeout: 2000 },
+        );
+      } else {
+        step();
+      }
+    };
+
+    const step = () => {
+      if (cancelled) return;
+      const pending: Promise<unknown>[] = [];
+      while (i < queue.length && pending.length < batch) {
+        const name = queue[i++]!;
+        if (this.#loading.has(name) || untrack(() => this.#state(name).get().comp) !== undefined) continue;
+        pending.push(this.preload(name).catch(() => {}));
+      }
+      if (i >= queue.length) return;
+      void Promise.allSettled(pending).then(() => {
+        if (cancelled) return;
+        // Brief pause between batches so user interactions and API requests always win the connection pool.
+        timer = setTimeout(() => {
+          timer = undefined;
+          nextIdle();
+        }, delayMs);
+      });
+    };
+
+    nextIdle();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      if (idleId !== undefined) g.cancelIdleCallback?.(idleId);
+    };
   }
 }
 
