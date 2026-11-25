@@ -184,3 +184,19 @@ fn avg_pool_and_upsample2x2_are_bitwise_reproducible() {
         vec![a2, a3, u2, ga2, gu2]
     });
 }
+
+#[test]
+fn cast_minmax_and_topk_are_bitwise_reproducible() {
+    use folo_core::DType;
+    let mut rng = Rng::seed(17);
+    let x = Tensor::randn([64, 600], 0.0, 2.0, &mut rng);
+    let x3 = Tensor::randn([4, 37, 257], 0.0, 2.0, &mut rng);
+    assert_reproducible("cast_minmax_topk", &|| {
+        let h = x.to_dtype(DType::F16).unwrap().to_dtype(DType::F32).unwrap();
+        let (tv, _) = x.topk(10, true).unwrap();
+        let (sv, _) = x.topk(1, false).unwrap();
+        let mx_row = x.max(1, false).unwrap();
+        let mn_col = x3.min(1, false).unwrap();
+        vec![h, tv, sv, mx_row, mn_col]
+    });
+}
