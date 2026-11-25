@@ -36,7 +36,7 @@ pub use run::{AGENT_IMAGE_SIDE, AgentImage, TRANSIENT_BACKOFF, agent_jpeg, agent
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -331,6 +331,32 @@ impl Labeler {
         // Subscribed under the lock every change is made under, so no event falls between the two.
         let state = job.live()?;
         Ok((state.job(), job.subscribe()))
+    }
+
+    /// Subscribes to a labeling job's pre-serialized SSE frames plus a weak handle for lag recovery (without
+    /// keeping the stream open after the job is deleted).
+    pub(crate) fn subscribe_sse(
+        &self,
+        id: &str,
+    ) -> Result<(crate::store::SseFrame, broadcast::Receiver<crate::store::SseFrame>, Weak<Job>)> {
+        let job = self.job(id)?;
+        let (initial, rx) = {
+            let state = job.live()?;
+            (state.job(), job.subscribe_sse())
+        };
+        Ok((crate::store::SseFrame::label(&LabelEvent::Job(Box::new(initial))), rx, Arc::downgrade(&job)))
+    }
+
+    /// Atomically snapshots the labeling job behind a [`Labeler::subscribe_sse`] handle and returns a fresh
+    /// tail-positioned frame receiver for lag recovery (`None` once deleted).
+    pub(crate) fn resync_sse(
+        job: &Weak<Job>,
+    ) -> Option<(crate::store::SseFrame, broadcast::Receiver<crate::store::SseFrame>)> {
+        let job = job.upgrade()?;
+        let state = job.lock();
+        (!state.deleted).then(|| {
+            (crate::store::SseFrame::label(&LabelEvent::Job(Box::new(state.job()))), job.subscribe_sse())
+        })
     }
 
     /// `GET /api/label/jobs/{id}/logs`: the last `limit` lines, oldest first.

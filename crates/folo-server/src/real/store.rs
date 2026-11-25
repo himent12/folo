@@ -388,6 +388,10 @@ impl Store for RealStore {
         self.runs.subscribe(id)
     }
 
+    fn subscribe_sse(&self, id: &str) -> Result<crate::store::RunSseSubscription> {
+        self.runs.subscribe_sse(id)
+    }
+
     fn predict(&self, input: PredictInput) -> Result<PredictResponse> {
         let _gpu = self.idle.using();
         let path = match &input.source {

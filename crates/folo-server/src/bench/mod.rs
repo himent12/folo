@@ -42,7 +42,7 @@ pub use external::MAX_BOXES;
 pub use model::InferenceGuard;
 
 use crate::error::{Error, Result};
-use crate::store::Store;
+use crate::store::{SseFrame, Store};
 use crate::util::{parse_rfc3339_millis, rfc3339, unix_now};
 use entries::{add_entry, enqueue_model, new_entry, status_name, stop_entry_in};
 use model::Engine;
@@ -290,20 +290,28 @@ impl Benches {
         Ok(())
     }
 
-    /// `GET /api/bench/benchmarks/{id}/events`: the benchmark now, its events from now on, and a weak handle that
-    /// gives the benchmark again to a subscriber that fell behind (without keeping the stream open after the
-    /// benchmark is deleted).
-    pub(crate) fn subscribe(&self, id: &str) -> Result<(Bench, broadcast::Receiver<BenchEvent>, Weak<Slot>)> {
+    /// `GET /api/bench/benchmarks/{id}/events`: the benchmark now, its pre-serialized SSE frames from now on, and
+    /// a weak handle that gives the benchmark again to a subscriber that fell behind (without keeping the stream
+    /// open after the benchmark is deleted).
+    pub(crate) fn subscribe(
+        &self,
+        id: &str,
+    ) -> Result<(SseFrame, broadcast::Receiver<SseFrame>, Weak<Slot>)> {
         let slot = self.slot(id)?;
-        let state = slot.live()?;
-        Ok((state.bench(), slot.subscribe(), Arc::downgrade(&slot)))
+        let (bench, rx) = {
+            let state = slot.live()?;
+            (state.bench(), slot.subscribe())
+        };
+        Ok((SseFrame::bench(&BenchEvent::Bench(Box::new(bench))), rx, Arc::downgrade(&slot)))
     }
 
-    /// The benchmark behind a [`Benches::subscribe`] handle, while it exists.
-    pub(crate) fn current(slot: &Weak<Slot>) -> Option<Bench> {
+    /// Atomically snapshots the benchmark behind a [`Benches::subscribe`] handle and returns a fresh
+    /// tail-positioned frame receiver for lag recovery (`None` once deleted).
+    pub(crate) fn resync(slot: &Weak<Slot>) -> Option<(SseFrame, broadcast::Receiver<SseFrame>)> {
         let slot = slot.upgrade()?;
         let state = slot.lock();
-        (!state.deleted).then(|| state.bench())
+        (!state.deleted)
+            .then(|| (SseFrame::bench(&BenchEvent::Bench(Box::new(state.bench()))), slot.subscribe()))
     }
 
     /// Ends every entry and loop (they become `failed`, "the server stopped"; the agent calls in flight are

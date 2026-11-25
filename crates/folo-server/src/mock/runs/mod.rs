@@ -25,7 +25,7 @@ use folo_api::{
 use tokio::sync::broadcast;
 
 use super::cloud::SimCloud;
-use crate::store::Subscription;
+use crate::store::{RunSseResync, RunSseStream, RunSseSubscription, SseFrame, Subscription};
 use crate::util::{noise, rfc3339, unix_now};
 
 use events::ticker;
@@ -142,7 +142,28 @@ pub enum Timeline {
 #[derive(Default)]
 struct Hub {
     tx: Option<broadcast::Sender<RunEvent>>,
+    sse_tx: Option<broadcast::Sender<SseFrame>>,
     ticking: bool,
+}
+
+impl Hub {
+    fn receiver_count(&self) -> usize {
+        self.tx.as_ref().map_or(0, broadcast::Sender::receiver_count)
+            + self.sse_tx.as_ref().map_or(0, broadcast::Sender::receiver_count)
+    }
+
+    fn broadcast(&self, ev: RunEvent) {
+        if let Some(sse) = &self.sse_tx
+            && sse.receiver_count() > 0
+        {
+            let _ = sse.send(SseFrame::run(&ev));
+        }
+        if let Some(tx) = &self.tx
+            && tx.receiver_count() > 0
+        {
+            let _ = tx.send(ev);
+        }
+    }
 }
 
 /// A simulated run.
@@ -257,9 +278,7 @@ impl SimRun {
         self.notes.lock().unwrap().push(line.clone());
         // Under the hub lock, as the ticker sends, so the line is ordered with the run's other events.
         let hub = self.hub.lock().unwrap();
-        if let Some(tx) = &hub.tx {
-            let _ = tx.send(RunEvent::Log(line));
-        }
+        hub.broadcast(RunEvent::Log(line));
     }
 
     /// Sets `Run.resolved` to what the real trainer resolves this run's config to on `train_images` training images.
@@ -422,6 +441,7 @@ impl SimRun {
         self.deleted.store(true, Ordering::SeqCst);
         let mut hub = self.hub.lock().unwrap();
         hub.tx = None;
+        hub.sse_tx = None;
     }
 
     /// Subscribes to events, starting the ticker if this is the first subscriber of a live run.
@@ -443,9 +463,39 @@ impl SimRun {
         Subscription { initial: self.status_event(snap.status), events }
     }
 
+    /// Subscribes to pre-serialized SSE frames, sharing one JSON serialization per event across concurrent HTTP
+    /// clients and holding a weak resync callback for lag recovery.
+    pub fn subscribe_sse(self: &Arc<Self>) -> RunSseSubscription {
+        let mut hub = self.hub.lock().unwrap();
+        let sse_tx = hub.sse_tx.get_or_insert_with(|| broadcast::channel(256).0);
+        let rx = sse_tx.subscribe();
+        let snap = self.snap();
+        if !hub.ticking && matches!(self.timeline, Timeline::Live(_)) && !self.deleted.load(Ordering::SeqCst)
+        {
+            hub.ticking = true;
+            tokio::spawn(ticker(Arc::clone(self), snap));
+        }
+        drop(hub);
+        let weak = Arc::downgrade(self);
+        let resync: RunSseResync = Arc::new(move || {
+            let run = weak.upgrade()?;
+            let hub = run.hub.lock().unwrap_or_else(|p| p.into_inner());
+            if run.deleted.load(Ordering::SeqCst) {
+                return None;
+            }
+            let rx = hub.sse_tx.as_ref()?.subscribe();
+            Some((run.status_event(run.snap().status), rx))
+        });
+        RunSseSubscription {
+            initial: SseFrame::run(&RunEvent::Status(self.status_event(snap.status))),
+            stream: RunSseStream::Frames(rx),
+            resync: Some(resync),
+        }
+    }
+
     /// Number of live subscribers (for tests).
     pub fn subscribers(&self) -> usize {
-        self.hub.lock().unwrap().tx.as_ref().map_or(0, |t| t.receiver_count())
+        self.hub.lock().unwrap().receiver_count()
     }
 
     /// True while a ticker task runs (for tests).

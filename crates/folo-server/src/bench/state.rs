@@ -17,6 +17,7 @@ use tokio::sync::broadcast;
 
 use crate::error::{Error, Result};
 use crate::index::write_atomic;
+use crate::store::SseFrame;
 use crate::util::{parse_rfc3339_millis, rfc3339, unix_now};
 
 /// Version of the layout of a benchmark's files.
@@ -347,7 +348,8 @@ pub struct Slot {
     /// `<data dir>/bench/<id>`.
     pub dir: PathBuf,
     state: Mutex<State>,
-    events: broadcast::Sender<BenchEvent>,
+    /// Pre-serialized SSE frames shared across concurrent HTTP subscribers.
+    events: broadcast::Sender<SseFrame>,
 }
 
 impl Slot {
@@ -543,18 +545,22 @@ impl Slot {
         remove(&self.loop_path(id))
     }
 
-    /// Sends `event` to the subscribers there are.
+    /// Sends `event` to the subscribers there are (pre-serialized once for all subscribers).
     pub fn emit(&self, event: BenchEvent) {
-        let _ = self.events.send(event);
+        if self.events.receiver_count() > 0 {
+            let _ = self.events.send(SseFrame::bench(&event));
+        }
     }
 
-    /// Sends the benchmark as it is now.
+    /// Sends the benchmark as it is now when at least one subscriber is listening.
     pub fn emit_bench(&self, state: &State) {
-        self.emit(BenchEvent::Bench(Box::new(state.bench())));
+        if self.events.receiver_count() > 0 {
+            self.emit(BenchEvent::Bench(Box::new(state.bench())));
+        }
     }
 
-    /// A subscription to the benchmark's events.
-    pub fn subscribe(&self) -> broadcast::Receiver<BenchEvent> {
+    /// A subscription to the benchmark's pre-serialized SSE frames.
+    pub fn subscribe(&self) -> broadcast::Receiver<SseFrame> {
         self.events.subscribe()
     }
 

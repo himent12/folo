@@ -581,6 +581,10 @@ impl Store for MockStore {
         Ok(self.run(id)?.0.subscribe())
     }
 
+    fn subscribe_sse(&self, id: &str) -> Result<crate::store::RunSseSubscription> {
+        Ok(self.run(id)?.0.subscribe_sse())
+    }
+
     fn predict(&self, input: PredictInput) -> Result<PredictResponse> {
         let model = self.get_model(&input.model_id)?;
         let (w, h, truth, seed) = match &input.source {

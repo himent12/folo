@@ -157,6 +157,8 @@ pub struct RunEntry {
     /// Incremental parser cache of `metrics.jsonl` (never locked while holding `state`).
     metrics_cache: Mutex<history::MetricsCache>,
     tx: broadcast::Sender<RunEvent>,
+    /// Pre-serialized SSE frames shared across concurrent HTTP subscribers.
+    sse_tx: broadcast::Sender<crate::store::SseFrame>,
     stop: Arc<AtomicBool>,
     /// What the throughput table learns while the run trains (set by the worker).
     measure: Mutex<Option<Measure>>,

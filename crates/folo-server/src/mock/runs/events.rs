@@ -203,21 +203,20 @@ pub(super) async fn ticker(run: Arc<SimRun>, mut last: Snap) {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
-        let now = run.snap();
-        let events = run.diff(&last, &now);
-        last = now;
+        // Hold `hub` across `snap`, `diff`, and `broadcast` (matching `subscribe`'s `hub -> clock` order) so
+        // lag-resync snapshots and fresh tail subscriptions never observe events out of order.
         let mut hub = run.hub.lock().unwrap();
         let alive = !run.deleted.load(Ordering::SeqCst);
-        match &hub.tx {
-            Some(tx) if alive && tx.receiver_count() > 0 => {
-                for ev in events {
-                    let _ = tx.send(ev);
-                }
+        if alive && hub.receiver_count() > 0 {
+            let now = run.snap();
+            let events = run.diff(&last, &now);
+            last = now;
+            for ev in events {
+                hub.broadcast(ev);
             }
-            _ => {
-                hub.ticking = false;
-                return;
-            }
+        } else {
+            hub.ticking = false;
+            return;
         }
     }
 }

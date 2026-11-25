@@ -14,7 +14,7 @@ it.
 |---|---|
 | `src/lib.rs` | `Server` (the router and its middleware: token, origin, `Host`, CORS, compression, logging), `Options`, `WebSource` |
 | `src/routes/` | The `/api` router (`mod.rs`: `api()`, `blocking()`, `OriginalUri` in `404`/`405` fallbacks) and handler files grouped by area: `system.rs` (health, system, throughput, benchmark probes), `datasets.rs` (datasets + shared `serve_image` with strong `ETag` / `304` / `412`), `models.rs` (models with conditional `ETag` / `304`, weights downloads, and `POST /api/val`), `runs.rs` (runs + `/runs/estimate`), `inference.rs`, `uploads.rs`, `cloud.rs`, `label.rs`, `bench.rs` |
-| `src/store.rs` | The `Store` trait: everything a handler can ask, with `501 not_implemented` defaults for optional parts |
+| `src/store.rs` | The `Store` trait (everything a handler can ask, with `501 not_implemented` defaults for optional parts) and pre-serialized `SseFrame` payloads |
 | `src/real/` | `RealStore`: `mod.rs` (the struct, `open_with_cloud`, parallel startup indexing, the data dir layout), `store.rs` (its `Store` impl), `datasets.rs`, `registry.rs`, `deletion.rs`, `training.rs`, `models.rs`, `uploads.rs`, `gpu_idle.rs`, `tests.rs` |
 | `src/mock/` | `MockStore`: `store.rs` (its `Store` impl), `catalog.rs` (the seeded data), `runs/` (simulated runs), `scene.rs`, `datasets.rs`, `models.rs`, `val.rs`, `weights.rs`, `throughput.rs`, `cloud.rs` |
 | `src/runs/` | The real store's training runs: `mod.rs`, `queue.rs` (FIFO queue, worker thread), `train.rs` (one run on the trainer), `entry.rs` (a run's record and event sink), `history.rs` (typed incremental `metrics.jsonl` cache and line-by-line `/logs` disk reader), `registry.rs`, `resume.rs`, `tests.rs` |
@@ -59,8 +59,9 @@ Every folder's `mod.rs` starts with a doc comment that lists its files.
    builds a folo-vision `Trainer` (or resumes one from `weights/last.folo`) with the run folder and an event sink.
 5. The sink is `RunEntry::on_event` (`src/runs/entry.rs`): it updates the run, persists it and sends each event on
    the run's broadcast channel.
-6. `GET /api/runs/{id}/events` (`run_events` in `src/routes/runs.rs`) subscribes through `Store::subscribe`
-   (`Runs::subscribe`, `src/runs/history.rs`) and streams a `status` event, then the live events, as SSE.
+6. `GET /api/runs/{id}/events` (`run_events` in `src/routes/runs.rs`) subscribes through `Store::subscribe_sse`
+   (`Runs::subscribe_sse`, `src/runs/history.rs`) and streams a `status` event, then shared pre-serialized live frames,
+   as SSE (recovering broadcast lag with a warning log and fresh `status` snapshot).
 7. The run folder ends up with `run.json`, `log.jsonl`, `config.json`, `metrics.jsonl`, `weights/{last,best}.folo`
    and `samples/epoch_NNN.json`.
 
