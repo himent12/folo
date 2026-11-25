@@ -414,3 +414,117 @@ fn waits_spin_then_block() {
     ctx.destroy_device();
     assert!(matches!(ctx.sync(), Err(crate::GpuError::DeviceLost(_))), "a lost device ends the spin");
 }
+
+/// `letterbox.wgsl` single-pass `vec3<u32>` RGB prefilter matches the exact integer CPU formula across all
+/// 4 byte-alignment phases (`src_offset` 0..=3, including the final pixel of the buffer) and `fx > 1, fy > 1`.
+#[test]
+fn letterbox_rgb8_vec3_prefilter_matches_cpu_exact() {
+    use crate::kernels::vision::{LetterboxDesc, letterbox_rgb8};
+
+    let ctx = gpu!();
+    let cpu_ref = |src: &[u8], d: &LetterboxDesc, tx: &[u32], ty: &[u32]| -> Vec<f32> {
+        let [ow, oh] = d.out;
+        let [sw, sh] = d.src;
+        let [px, py] = d.pad;
+        let [rw, rh] = d.resized;
+        let [fx, fy] = d.prefilter;
+        let src_px = |qx: usize, qy: usize, c: usize| -> u32 {
+            if fx == 1 && fy == 1 {
+                return u32::from(src[d.src_offset + (qy * sw + qx) * 3 + c]);
+            }
+            let (x0, x1) = (qx * fx, (qx * fx + fx).min(sw));
+            let (y0, y1) = (qy * fy, (qy * fy + fy).min(sh));
+            let mut s = 0u32;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    s += u32::from(src[d.src_offset + (y * sw + x) * 3 + c]);
+                }
+            }
+            let n = ((x1 - x0) * (y1 - y0)) as u32;
+            (s + n / 2) / n
+        };
+        let plane = ow * oh;
+        let mut out = vec![0.0f32; 3 * plane];
+        for y in 0..oh {
+            for x in 0..ow {
+                let idx = y * ow + x;
+                if x < px || x >= px + rw || y < py || y >= py + rh {
+                    let v = f32::from(d.pad_value) * d.scale;
+                    out[idx] = v;
+                    out[plane + idx] = v;
+                    out[2 * plane + idx] = v;
+                    continue;
+                }
+                let (dx, dy) = (x - px, y - py);
+                let (a, b, wx) = (tx[dx] as usize, tx[rw + dx] as usize, tx[2 * rw + dx]);
+                let (ya, yb, wy) = (ty[dy] as usize, ty[rh + dy] as usize, ty[2 * rh + dy]);
+                let (iwx, iwy) = (2048 - wx, 2048 - wy);
+                for c in 0..3 {
+                    let t = src_px(a, ya, c) * iwx + src_px(b, ya, c) * wx;
+                    let u = src_px(a, yb, c) * iwx + src_px(b, yb, c) * wx;
+                    let v = (t * iwy + u * wy + (1 << 21)) >> 22;
+                    out[c * plane + idx] = v as f32 * d.scale;
+                }
+            }
+        }
+        out
+    };
+
+    // Case 1: fx = 1, fy = 1 across all 4 source byte alignments (src_offset = 0, 1, 2, 3), exact tight buffer
+    // size so `rgb_at` is proven never to read past the final word even on the last pixel.
+    // Case 2: fx = 3, fy = 2 box prefilter with non-multiple source dims (11 x 9) and padding.
+    let configs = [
+        ([5usize, 3], [8usize, 6], [1usize, 1], [6usize, 4], [1usize, 1], 0usize),
+        ([5, 3], [8, 6], [1, 1], [6, 4], [1, 1], 1),
+        ([5, 3], [8, 6], [1, 1], [6, 4], [1, 1], 2),
+        ([5, 3], [8, 6], [1, 1], [6, 4], [1, 1], 3),
+        ([11, 9], [8, 8], [1, 2], [6, 5], [3, 2], 2),
+    ];
+    for (ci, &(src_wh, out_wh, pad, resized, prefilter, src_offset)) in configs.iter().enumerate() {
+        let [sw, sh] = src_wh;
+        let [rw, rh] = resized;
+        let [fx, fy] = prefilter;
+        let pw = sw.div_ceil(fx);
+        let ph = sh.div_ceil(fy);
+        let raw_bytes = src_offset + sw * sh * 3;
+        let padded_bytes = raw_bytes.next_multiple_of(4);
+        let src_bytes: Vec<u8> = (0..padded_bytes).map(|i| ((i * 37 + ci * 53 + 11) % 256) as u8).collect();
+        let make_taps = |n: usize, lim: usize| -> Vec<u32> {
+            let mut a = Vec::with_capacity(n);
+            let mut b = Vec::with_capacity(n);
+            let mut w = Vec::with_capacity(n);
+            for i in 0..n {
+                let p0 = (i * (lim - 1)) / n.max(1);
+                let p1 = (p0 + 1).min(lim - 1);
+                a.push(p0 as u32);
+                b.push(p1 as u32);
+                w.push(((i * 571 + 123) % 2049) as u32);
+            }
+            [a, b, w].concat()
+        };
+        let tx = make_taps(rw, pw);
+        let ty = make_taps(rh, ph);
+        let taps: Vec<u32> = [&tx[..], &ty[..]].concat();
+        let desc = LetterboxDesc {
+            out: out_wh,
+            src: src_wh,
+            src_offset,
+            pad,
+            resized,
+            prefilter,
+            pad_value: 114,
+            scale: 1.0 / 255.0,
+            out_offset: 0,
+            taps: 0,
+        };
+        let src_buf = ctx.upload(&src_bytes).unwrap();
+        let taps_buf = ctx.upload(bytemuck::cast_slice(&taps)).unwrap();
+        let out_elems = 3 * out_wh[0] * out_wh[1];
+        let out_buf = ctx.alloc((out_elems * 4) as u64).unwrap();
+        letterbox_rgb8(&ctx, src_buf.raw(), taps_buf.raw(), out_buf.raw(), &desc, DType::F32).unwrap();
+        let got: Vec<f32> =
+            bytemuck::cast_slice(&ctx.read(out_buf.raw(), 0, (out_elems * 4) as u64).unwrap()).to_vec();
+        let want = cpu_ref(&src_bytes, &desc, &tx, &ty);
+        assert_eq!(got, want, "letterbox case {ci} ({src_wh:?} prefilter {prefilter:?} off {src_offset})");
+    }
+}

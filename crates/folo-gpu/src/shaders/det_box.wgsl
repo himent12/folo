@@ -113,7 +113,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let a = PICK[3u * s];
     let ax = bitcast<f32>(META[3u * a]);
     let ay = bitcast<f32>(META[3u * a + 1u]);
-    let inv = 1.0 / bitcast<f32>(META[3u * a + 2u]);
+    let stride = bitcast<f32>(META[3u * a + 2u]);
+    let inv = 1.0 / stride;
     let o = pu(3u) + 4u * gi;
     let tb = vec4<f32>(bitcast<f32>(META[o]), bitcast<f32>(META[o + 1u]), bitcast<f32>(META[o + 2u]),
                        bitcast<f32>(META[o + 3u])) * inv;
@@ -129,9 +130,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let box_gain = pf(11u);
     let dfl_gain = pf(12u);
 
-    // Softmax per side (p) and log-softmax (lp), kept for the backward.
+    // Raw logits cached once per anchor (`x_raw`) and softmax per side (`p`), kept for OT and backward.
+    var x_raw: array<f32, 4u * R>;
     var p: array<f32, 4u * R>;
-    var lp: array<f32, 4u * R>;
     var side_m: vec4<f32>;
     var side_z: vec4<f32>;
     var side_kstar: array<u32, 4>;
@@ -142,33 +143,33 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     var wl: vec4<f32>;
     var wr: vec4<f32>;
     for (var side = 0u; side < 4u; side++) {
-        var m = BOX[base + (side * R) * na];
+        let sb = side * R;
+        var m = BOX[base + sb * na];
+        x_raw[sb] = m;
         var ks = 0u;
-        for (var k = 0u; k < R; k++) {
-            let x = BOX[base + (side * R + k) * na];
-            p[side * R + k] = x;
-            if (k > 0u && x > m) {
+        for (var k = 1u; k < R; k++) {
+            let x = BOX[base + (sb + k) * na];
+            x_raw[sb + k] = x;
+            if (x > m) {
                 m = x;
                 ks = k;
             }
         }
         var z = 0.0;
         for (var k = 0u; k < R; k++) {
-            let x = p[side * R + k] - m;
-            lp[side * R + k] = x;
-            let e = fexp(x);
-            p[side * R + k] = e;
+            let e = fexp(x_raw[sb + k] - m);
+            p[sb + k] = e;
             z = z + e;
         }
         side_m[side] = m;
         side_z[side] = z;
         side_kstar[side] = ks;
         let lz = log_ge1(z);
+        let inv_z = 1.0 / z;
         var dist = 0.0;
         for (var k = 0u; k < R; k++) {
-            let q = p[side * R + k] / z;
-            p[side * R + k] = q;
-            lp[side * R + k] = lp[side * R + k] - lz;
+            let q = p[sb + k] * inv_z;
+            p[sb + k] = q;
             dist = dist + q * f32(k);
         }
         d[side] = dist;
@@ -180,16 +181,18 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         jl[side] = ju;
         wl[side] = l * wt;
         wr[side] = (1.0 - l) * wt;
-        dfl = dfl + lp[side * R + ju] * wl[side] + lp[side * R + ju + 1u] * wr[side];
+        let lp_l = (x_raw[sb + ju] - m) - lz;
+        let lp_r = (x_raw[sb + ju + 1u] - m) - lz;
+        dfl = dfl + lp_l * wl[side] + lp_r * wr[side];
         if (MODE == 0u && dfl_ot_w > 0.0 && R > 2u) {
             var pref_m: array<f32, R>;
             var pref_a: array<f32, R>;
-            var pm = BOX[base + (side * R) * na];
+            var pm = x_raw[sb];
             var pa = 1.0;
             pref_m[0] = pm;
             pref_a[0] = pa;
             for (var k = 1u; k + 1u < R; k++) {
-                let x = BOX[base + (side * R + k) * na];
+                let x = x_raw[sb + k];
                 if (x > pm) {
                     pa = pa * safe_exp_diff(pm, x) + 1.0;
                     pm = x;
@@ -200,12 +203,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                 pref_a[k] = pa;
             }
             var l_tail = vec2<f32>(0.0, 0.0);
-            var sm = BOX[base + (side * R + (R - 1u)) * na];
+            var sm = x_raw[sb + (R - 1u)];
             var sa = 1.0;
             for (var step = 0u; step + 1u < R; step++) {
                 let k = (R - 2u) - step;
                 if (step > 0u) {
-                    let x = BOX[base + (side * R + k + 1u) * na];
+                    let x = x_raw[sb + k + 1u];
                     if (x > sm) {
                         sa = sa * safe_exp_diff(sm, x) + 1.0;
                         sm = x;
@@ -225,7 +228,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let pd = vec4<f32>(ax - d[0], ay - d[1], ax + d[2], ay + d[3]);
     let nwd_w = pf(5u);
     // tb is in stride units (inv = 1 / stride); convert GT size to pixels for lambda and C = 12.8px to stride units.
-    let lam = nwd_lambda((tb.z - tb.x) / inv, (tb.w - tb.y) / inv, nwd_w);
+    let lam = nwd_lambda((tb.z - tb.x) * stride, (tb.w - tb.y) * stride, nwd_w);
     let c_s = 12.8 * inv;
     if (MODE == 0u) {
         var l_base = 0.0;
@@ -278,12 +281,13 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let area2 = w2 * h2;
         let inter = iw * ih;
         let uni = area1 + area2 - inter + eps;
-        let iou = inter / uni;
+        let inv_uni = 1.0 / uni;
+        let iou = inter * inv_uni;
         let deficit = max(area1 - inter, 0.0) + max(area2 - inter, 0.0) + eps;
         // Keep focal-IoU derivatives unscaled by `g_base_sp` until multiplied by the DFL softmax Jacobian, and
         // preserve `uni - inter = deficit` explicitly so exact-match boxes retain the `eps`-driven focal gradient.
         let g_u = -(1.0 - rpiou_beta + 2.0 * rpiou_beta * iou);
-        let g_scale = g_u / uni;
+        let g_scale = g_u * inv_uni;
         let h1_act = select(0.0, h1, pd.z > pd.x);
         let w1_act = select(0.0, w1, pd.w > pd.y);
         let c_x1 = select(0.0, w_max(pd.x, tb.x), ix > 0.0);
@@ -291,21 +295,23 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let c_y1 = select(0.0, w_max(pd.y, tb.y), iy > 0.0);
         let c_y2 = select(0.0, w_min(pd.w, tb.w), iy > 0.0);
         fiou_d = vec4<f32>(
-            g_scale * ((inter * (2.0 * c_x1 * ih - h1_act) + deficit * (c_x1 * ih)) / uni),
-            g_scale * ((inter * (2.0 * c_y1 * iw - w1_act) + deficit * (c_y1 * iw)) / uni),
-            g_scale * ((inter * (2.0 * c_x2 * ih - h1_act) + deficit * (c_x2 * ih)) / uni),
-            g_scale * ((inter * (2.0 * c_y2 * iw - w1_act) + deficit * (c_y2 * iw)) / uni),
+            g_scale * ((inter * (2.0 * c_x1 * ih - h1_act) + deficit * (c_x1 * ih)) * inv_uni),
+            g_scale * ((inter * (2.0 * c_y1 * iw - w1_act) + deficit * (c_y1 * iw)) * inv_uni),
+            g_scale * ((inter * (2.0 * c_x2 * ih - h1_act) + deficit * (c_x2 * ih)) * inv_uni),
+            g_scale * ((inter * (2.0 * c_y2 * iw - w1_act) + deficit * (c_y2 * iw)) * inv_uni),
         );
         let rkn = norm_f32(sqrt(rpiou_kappa));
         let sx = max(w2, rpiou_delta);
         let sy = max(h2, rpiou_delta);
+        let inv_sx = 1.0 / sx;
+        let inv_sy = 1.0 / sy;
         let sxn = norm_f32(sx);
         let syn = norm_f32(sy);
-        let wx = w2 / sx;
-        let dx_f = rpiou_delta / sx;
+        let wx = w2 * inv_sx;
+        let dx_f = rpiou_delta * inv_sx;
         let denom_x = wx * wx + dx_f * dx_f;
-        let hy = h2 / sy;
-        let dy_f = rpiou_delta / sy;
+        let hy = h2 * inv_sy;
+        let dy_f = rpiou_delta * inv_sy;
         let denom_y = hy * hy + dy_f * dy_f;
         let q_xm = rkn.x / sxn.x;
         let e_qx = i32(rkn.y) - i32(sxn.y);
@@ -338,27 +344,31 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         let ih = max(iy, 0.0);
         let inter = iw * ih;
         let uni = w1 * h1 + w2 * h2 - inter + eps;
-        let iou = inter / uni;
+        let inv_uni = 1.0 / uni;
+        let inv_uni2 = inv_uni * inv_uni;
+        let iou = inter * inv_uni;
         let cw = max(pd.z, tb.z) - min(pd.x, tb.x);
         let ch = max(pd.w, tb.w) - min(pd.y, tb.y);
         let c2 = cw * cw + ch * ch + eps;
+        let inv_c2 = 1.0 / c2;
         let dx = tb.x + tb.z - pd.x - pd.z;
         let dy = tb.y + tb.w - pd.y - pd.w;
         let rho2 = (dx * dx + dy * dy) * 0.25;
-        let r1 = w1 / h1;
+        let inv_h1 = 1.0 / h1;
+        let r1 = w1 * inv_h1;
         let dd = atan_wh(w2, h2) - atan_wh(w1, h1);
         let v = dd * dd * V_K;
         let alpha = v / (v - iou + (1.0 + eps));
 
         let gc = -g_base;
-        let g_rho2 = -gc / c2;
-        let g_c2 = gc * rho2 / (c2 * c2);
+        let g_rho2 = -gc * inv_c2;
+        let g_c2 = gc * rho2 * (inv_c2 * inv_c2);
         let g_v = -gc * alpha;
-        let g_inter = gc * (1.0 / uni + inter / (uni * uni));
-        let g_uni = -gc * inter / (uni * uni);
+        let g_inter = gc * (inv_uni + inter * inv_uni2);
+        let g_uni = -gc * inter * inv_uni2;
         let g_r1 = -g_v * V_K * 2.0 * dd / (1.0 + r1 * r1);
-        let g_w1 = g_uni * h1 + g_r1 / h1;
-        let g_h1 = g_uni * w1 - g_r1 * r1 / h1;
+        let g_w1 = g_uni * h1 + g_r1 * inv_h1;
+        let g_h1 = g_uni * w1 - g_r1 * r1 * inv_h1;
         let g_ix = select(0.0, g_inter * ih, ix > 0.0);
         let g_iy = select(0.0, g_inter * iw, iy > 0.0);
         let g_cw = g_c2 * 2.0 * cw;
@@ -393,6 +403,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     );
     let ot_scale = mul_split(mul_split(sd_sp, norm_f32(dfl_ot_w)), norm_f32(wt));
     for (var side = 0u; side < 4u; side++) {
+        let sb = side * R;
         let wsum = wl[side] + wr[side];
         let ju = jl[side];
         var m_ret: array<f32, R>;
@@ -403,12 +414,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             // Prefix `0..=k` in `pref_m/pref_a` (left-tail excluded for k < ju, right-tail retained for k > ju).
             var pref_m: array<f32, R>;
             var pref_a: array<f32, R>;
-            var pm = BOX[base + (side * R) * na];
+            var pm = x_raw[sb];
             var pa = 1.0;
             pref_m[0] = pm;
             pref_a[0] = pa;
             for (var k = 1u; k + 1u < R; k++) {
-                let x = BOX[base + (side * R + k) * na];
+                let x = x_raw[sb + k];
                 if (x > pm) {
                     pa = pa * safe_exp_diff(pm, x) + 1.0;
                     pm = x;
@@ -419,12 +430,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                 pref_a[k] = pa;
             }
             // Suffix `(k+1)..R` (left-tail retained for k < ju, right-tail excluded for k > ju).
-            var sm = BOX[base + (side * R + (R - 1u)) * na];
+            var sm = x_raw[sb + (R - 1u)];
             var sa = 1.0;
             for (var step = 0u; step + 1u < R; step++) {
                 let k = (R - 2u) - step;
                 if (step > 0u) {
-                    let x = BOX[base + (side * R + k + 1u) * na];
+                    let x = x_raw[sb + k + 1u];
                     if (x > sm) {
                         sa = sa * safe_exp_diff(sm, x) + 1.0;
                         sm = x;
@@ -472,31 +483,26 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         // Dominant-bin-centered offset `delta = d - k* = Σ_{m >= 1} m · (p_{k*+m} - p_{k*-m})` in exponent-split
         // form: pairing equal-distance offsets cancels symmetric neighbors first so tiny outer tails survive.
         let k_star = side_kstar[side];
+        let z_sp = norm_f32(side_z[side]);
         var delta_sp = vec2<f32>(0.0, 0.0);
         if (box_kind == 1u) {
             for (var m = 1u; m < R; m++) {
                 var pr = vec2<f32>(0.0, 0.0);
                 if (k_star + m < R) {
                     let jr = k_star + m;
-                    let qr = p[side * R + jr];
+                    let qr = p[sb + jr];
                     pr = norm_f32(qr);
                     if (qr < 1e-30) {
-                        pr = div_split(
-                            exp_diff_split(BOX[base + (side * R + jr) * na], side_m[side]),
-                            norm_f32(side_z[side]),
-                        );
+                        pr = div_split(exp_diff_split(x_raw[sb + jr], side_m[side]), z_sp);
                     }
                 }
                 var pl = vec2<f32>(0.0, 0.0);
                 if (m <= k_star) {
                     let jl_m = k_star - m;
-                    let ql = p[side * R + jl_m];
+                    let ql = p[sb + jl_m];
                     pl = norm_f32(ql);
                     if (ql < 1e-30) {
-                        pl = div_split(
-                            exp_diff_split(BOX[base + (side * R + jl_m) * na], side_m[side]),
-                            norm_f32(side_z[side]),
-                        );
+                        pl = div_split(exp_diff_split(x_raw[sb + jl_m], side_m[side]), z_sp);
                     }
                 }
                 let diff = add_split(pr, vec2<f32>(-pl.x, pl.y));
@@ -504,14 +510,13 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             }
         }
         for (var k = 0u; k < R; k++) {
-            let q = p[side * R + k];
+            let q = p[sb + k];
             let jac = q * (f32(k) - d[side]);
             var gk = g_d[side] * jac + sd * wsum * q;
             if (box_kind == 1u) {
                 var q_sp = norm_f32(q);
                 if (q < 1e-30) {
-                    let xk = BOX[base + (side * R + k) * na];
-                    q_sp = div_split(exp_diff_split(xk, side_m[side]), norm_f32(side_z[side]));
+                    q_sp = div_split(exp_diff_split(x_raw[sb + k], side_m[side]), z_sp);
                 }
                 let neg_delta = vec2<f32>(-delta_sp.x, delta_sp.y);
                 let k_minus_d_sp = select(
@@ -532,7 +537,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             if (k == ju) { gk = gk - sd * wl[side]; }
             if (k == ju + 1u) { gk = gk - sd * wr[side]; }
             if (use_ot) {
-                let xk = BOX[base + (side * R + k) * na];
+                let xk = x_raw[sb + k];
                 var d_ot = vec2<f32>(0.0, 0.0);
                 if (ju > 0u) {
                     if (k < ju) {
@@ -557,7 +562,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                 }
                 gk = gk + split_to_f32(mul_split(d_ot, ot_scale));
             }
-            OUT[base + (side * R + k) * na] = gk;
+            OUT[base + (sb + k) * na] = gk;
         }
     }
 }

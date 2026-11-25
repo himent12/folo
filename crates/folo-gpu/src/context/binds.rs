@@ -49,6 +49,10 @@ impl Hasher for Fx {
         }
     }
 
+    fn write_u32(&mut self, n: u32) {
+        self.add(n as u64);
+    }
+
     fn write_u64(&mut self, n: u64) {
         self.add(n);
     }
@@ -64,8 +68,9 @@ impl Hasher for Fx {
     }
 }
 
-/// A hash map or set keyed by ids already mixed by [`Fx`].
-pub(crate) type FxMap<V> = HashMap<u64, V, BuildHasherDefault<Fx>>;
+/// A hash map or set using [`Fx`].
+pub(crate) type FxHashMap<K, V> = HashMap<K, V, BuildHasherDefault<Fx>>;
+pub(crate) type FxMap<V> = FxHashMap<u64, V>;
 pub(crate) type FxSet = HashSet<u64, BuildHasherDefault<Fx>>;
 
 /// A stable id of a wgpu handle (its hash; handles hash by identity). Two live handles collide only by chance,
@@ -207,7 +212,7 @@ impl BindCache {
     }
 
     /// Drops every entry that binds one of the buffers with these [`id_of`] ids.
-    pub(crate) fn retire(&mut self, ids: &HashSet<u64>) {
+    pub(crate) fn retire(&mut self, ids: &FxSet) {
         for id in ids {
             let Some(keys) = self.users.remove(id) else { continue };
             for k in keys {
