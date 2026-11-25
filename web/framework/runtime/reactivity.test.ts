@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
-import { describe, expect, it } from 'vitest';
-import { computed, createRoot, deep, effect, flush, MediaQuery, ReactiveMap, ReactiveSet, snapshot, Tween } from 'fw';
+import { describe, expect, it, vi } from 'vitest';
+import { computed, createRoot, deep, effect, flush, MediaQuery, ReactiveMap, ReactiveSet, signal, snapshot, Tween } from 'fw';
 
 const track = <T>(fn: () => T) => {
   const seen: T[] = [];
@@ -92,6 +92,238 @@ describe('Tween', () => {
     expect(t.current).toBe(10);
     await t.set(20, { duration: 0 });
     expect(t.current).toBe(20);
+  });
+
+  it('skips scheduling rAF on no-op target updates and duplicate in-flight targets, and handles zero dynamic duration', async () => {
+    const rafSpy = vi.spyOn(globalThis, 'requestAnimationFrame');
+    const cancelSpy = vi.spyOn(globalThis, 'cancelAnimationFrame');
+    try {
+      const t = new Tween(5, { duration: 50 });
+      rafSpy.mockClear();
+      await t.set(5);
+      expect(rafSpy).not.toHaveBeenCalled();
+
+      // Duplicate in-flight set with no options reuses the running promise without restarting.
+      const p1 = t.set(20);
+      const p2 = t.set(20);
+      expect(p2).toBe(p1);
+      // Explicit options override (duration: 0) snaps immediately and cancels the pending frame.
+      await t.set(20, { duration: 0 });
+      expect(t.current).toBe(20);
+      expect(cancelSpy).toHaveBeenCalled();
+      rafSpy.mockClear();
+      await t.set(20);
+      expect(rafSpy).not.toHaveBeenCalled();
+
+      // Dynamic duration returning 0 snaps cleanly without NaN.
+      const zeroDur = new Tween(1, { duration: () => 0 });
+      await zeroDur.set(9);
+      expect(zeroDur.current).toBe(9);
+    } finally {
+      rafSpy.mockRestore();
+      cancelSpy.mockRestore();
+    }
+  });
+
+  it('aborts active and chained delayed tasks on owner cleanup, and Tween.of skips initial mount rAF', () => {
+    const rafQueue = new Map<number, FrameRequestCallback>();
+    let nextRaf = 1;
+    const origRaf = globalThis.requestAnimationFrame;
+    const origCancel = globalThis.cancelAnimationFrame;
+    globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+      const id = nextRaf++;
+      rafQueue.set(id, cb);
+      return id;
+    }) as typeof requestAnimationFrame;
+    globalThis.cancelAnimationFrame = ((id: number) => {
+      rafQueue.delete(id);
+    }) as typeof cancelAnimationFrame;
+
+    try {
+      const src = signal(10);
+      const reads = vi.fn(() => src.get());
+      let tw!: Tween<number>;
+      const dispose = createRoot((d) => {
+        tw = Tween.of(reads, { duration: 100 });
+        return d;
+      });
+      // Initial mount reads once and schedules zero frames.
+      expect(reads).toHaveBeenCalledTimes(1);
+      expect(tw.current).toBe(10);
+      expect(rafQueue.size).toBe(0);
+
+      // Start an animation, then queue a delayed animation on top, then dispose owner.
+      src.set(50);
+      flush();
+      expect(rafQueue.size).toBe(1);
+      void tw.set(100, { delay: 50, duration: 100 });
+      expect(rafQueue.size).toBe(1);
+
+      dispose();
+      // Both tasks are aborted and the pending rAF is cancelled.
+      expect(rafQueue.size).toBe(0);
+    } finally {
+      globalThis.requestAnimationFrame = origRaf;
+      globalThis.cancelAnimationFrame = origCancel;
+    }
+  });
+
+  it('handles zero dynamic duration at elapsed 0, re-entrant Tween.of init, mid-frame disposal, and nested snap without extra rAF', async () => {
+    const rafQueue = new Map<number, FrameRequestCallback>();
+    let nextRaf = 1;
+    let fakeNow = 1000;
+    const origRaf = globalThis.requestAnimationFrame;
+    const origCancel = globalThis.cancelAnimationFrame;
+    const nowSpy = vi.spyOn(performance, 'now').mockImplementation(() => fakeNow);
+    globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+      const id = nextRaf++;
+      rafQueue.set(id, cb);
+      return id;
+    }) as typeof requestAnimationFrame;
+    globalThis.cancelAnimationFrame = ((id: number) => {
+      rafQueue.delete(id);
+    }) as typeof cancelAnimationFrame;
+    const step = (ms: number) => {
+      fakeNow += ms;
+      const batch = [...rafQueue.values()];
+      rafQueue.clear();
+      for (const cb of batch) cb(fakeNow);
+    };
+
+    try {
+      // 1. Dynamic duration returning 0 at elapsed === 0 skips interpolator and does not leave a frame queued.
+      const interp = vi.fn(() => () => 0);
+      const other = new Tween(0, { duration: 100 });
+      const zeroDur = new Tween<number>(1, {
+        interpolate: interp,
+        duration: () => {
+          // Spawning and immediately snapping another tween mid-tick must not leave an extra rAF queued.
+          void other.set(5);
+          void other.set(5, { duration: 0 });
+          return 0;
+        },
+      });
+      const done = zeroDur.set(9);
+      step(0);
+      await done;
+      expect(zeroDur.current).toBe(9);
+      expect(interp).not.toHaveBeenCalled();
+      expect(rafQueue.size).toBe(0);
+      // Identical set after natural completion (standard interpolator) schedules no frame.
+      const std = new Tween(1, { duration: 50 });
+      const stdDone = std.set(9);
+      step(50);
+      await stdDone;
+      expect(std.current).toBe(9);
+      expect(rafQueue.size).toBe(0);
+      await std.set(9);
+      expect(rafQueue.size).toBe(0);
+
+      // 2. Easing callback synchronously disposing owner must not invoke interpolator fn or write after cleanup.
+      const interpStep = vi.fn((t: number) => t * 100);
+      let tw!: Tween<number>;
+      let dispose!: () => void;
+      dispose = createRoot((d) => {
+        tw = new Tween(0, {
+          duration: 100,
+          interpolate: () => interpStep,
+          easing: (t) => {
+            dispose();
+            return t;
+          },
+        });
+        return d;
+      });
+      void tw.set(100);
+      step(50);
+      expect(interpStep).not.toHaveBeenCalled();
+      expect(tw.current).toBe(0);
+      expect(rafQueue.size).toBe(0);
+
+      // 3. Tween.of survives re-entrant flush during initial fn() evaluation.
+      const s = signal(1);
+      let bumped = false;
+      let reentrant!: Tween<number>;
+      const dispose2 = createRoot((d) => {
+        reentrant = Tween.of(
+          () => {
+            const v = s.get();
+            if (!bumped) {
+              bumped = true;
+              s.set(2);
+              flush();
+            }
+            return v;
+          },
+          { duration: 50 },
+        );
+        return d;
+      });
+      expect(reentrant.current).toBe(2);
+      expect(rafQueue.size).toBe(0);
+      dispose2();
+
+      // 4. Tween.of does not start a fresh animation if fn() disposes its own owner.
+      const src3 = signal(1);
+      let tw3!: Tween<number>;
+      let dispose3!: () => void;
+      dispose3 = createRoot((d) => {
+        tw3 = Tween.of(
+          () => {
+            const v = src3.get();
+            if (v === 2) dispose3();
+            return v;
+          },
+          { duration: 50 },
+        );
+        return d;
+      });
+      src3.set(2);
+      flush();
+      expect(rafQueue.size).toBe(0);
+      expect(tw3.current).toBe(1);
+
+      // 5. Throwing duration callback removes broken task, lets sibling tweens advance, and stops scheduling.
+      const throwing = new Tween(0, {
+        duration: () => {
+          throw new Error('boom');
+        },
+      });
+      const sibling = new Tween(0, { duration: 100 });
+      void throwing.set(10);
+      void sibling.set(100);
+      expect(() => step(50)).toThrow('boom');
+      expect(sibling.current).toBe(50);
+      step(50);
+      expect(sibling.current).toBe(100);
+      expect(rafQueue.size).toBe(0);
+
+      // 6. NaN duration snaps cleanly without an infinite rAF loop.
+      const nanStatic = new Tween(0, { duration: Number.NaN });
+      await nanStatic.set(7);
+      expect(nanStatic.current).toBe(7);
+      expect(rafQueue.size).toBe(0);
+      const nanDyn = new Tween(0, { duration: () => Number.NaN });
+      const nanDone = nanDyn.set(8);
+      step(0);
+      await nanDone;
+      expect(nanDyn.current).toBe(8);
+      expect(rafQueue.size).toBe(0);
+
+      // 7. Custom interpolator still runs even when target matches current.
+      const custom = new Tween(0, { duration: 100 });
+      const bump = custom.set(0, { interpolate: () => (t) => (t < 1 ? 42 : 0) });
+      step(50);
+      expect(custom.current).toBe(42);
+      step(50);
+      await bump;
+      expect(custom.current).toBe(0);
+      expect(rafQueue.size).toBe(0);
+    } finally {
+      nowSpy.mockRestore();
+      globalThis.requestAnimationFrame = origRaf;
+      globalThis.cancelAnimationFrame = origCancel;
+    }
   });
 });
 
