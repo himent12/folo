@@ -60,6 +60,17 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     let doc = c.result("resources/read", json!({ "uri": "folo://docs/API" }));
     assert_eq!(doc["contents"][0]["mimeType"], "text/markdown");
     assert!(doc["contents"][0]["text"].as_str().unwrap().contains("/api/datasets"));
+    let cookbook = c.result("resources/read", json!({ "uri": "folo://docs/AGENT_COOKBOOK" }));
+    assert_eq!(cookbook["contents"][0]["mimeType"], "text/markdown");
+    assert!(
+        templates
+            .iter()
+            .find(|t| t["uriTemplate"] == "folo://docs/{name}")
+            .and_then(|t| t["description"].as_str())
+            .is_some_and(|d| d.contains("AGENT_COOKBOOK"))
+    );
+    let traversal = c.request("resources/read", json!({ "uri": "folo://docs/..%2F..%2FCargo.toml" }));
+    assert!(traversal["error"]["code"].is_i64(), "{traversal}");
     let page = checked(
         c,
         &schemas,

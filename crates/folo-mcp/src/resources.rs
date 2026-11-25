@@ -166,7 +166,10 @@ impl FoloUri {
             ["runs", id, "metrics"] => FoloUri::Metrics(decode(id)?),
             ["runs", id, "epochs"] => FoloUri::Epochs(decode(id)?),
             ["predictions", id] => FoloUri::Predictions(decode(id)?),
-            ["docs", name] => FoloUri::Doc(decode(name)?),
+            ["docs", name] => {
+                let name = decode(name)?;
+                is_valid_doc_name(&name).then_some(FoloUri::Doc(name))?
+            }
             ["system", "throughput"] => FoloUri::Throughput,
             _ => return None,
         })
@@ -211,9 +214,33 @@ impl fmt::Display for FoloUri {
     }
 }
 
-/// A repository doc by name (`API`, `MCP`, ...).
+/// Doc names are strictly ASCII letters, digits, underscores, or hyphens — never path separators, dots,
+/// null bytes, or traversal segments (`..`).
+fn is_valid_doc_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Allowlisted repository doc names served at `folo://docs/{name}`.
+pub fn doc_names() -> impl Iterator<Item = &'static str> {
+    DOCS.iter().map(|(n, _)| *n)
+}
+
+/// A repository doc by allowlisted name (`ARCHITECTURE`, `API`, `CLI`, `MODEL`, `FORMAT`, `METRICS`, `MCP`,
+/// `AGENT_COOKBOOK`). Only compile-time embedded allowlisted docs are served; never touches the filesystem.
 pub fn doc(name: &str) -> Option<&'static str> {
+    if !is_valid_doc_name(name) {
+        return None;
+    }
     DOCS.iter().find(|(n, _)| *n == name).map(|(_, t)| *t)
+}
+
+fn doc_names_description() -> String {
+    let names: Vec<&str> = doc_names().collect();
+    match names.as_slice() {
+        [] => String::new(),
+        [only] => format!("{only}."),
+        [init @ .., last] => format!("{} or {last}.", init.join(", ")),
+    }
 }
 
 /// Every concrete resource: datasets, runs with their metrics, and docs. (Images, samples and predictions are
@@ -322,12 +349,7 @@ pub fn templates() -> Vec<ResourceTemplate> {
              out): est_epoch_s, est_total_s with a range, est_peak_vram_bytes, source and confidence.",
             "application/json",
         ),
-        t(
-            "folo://docs/{name}",
-            "docs",
-            "ARCHITECTURE, API, CLI, MODEL, FORMAT, METRICS or MCP.",
-            "text/markdown",
-        ),
+        t("folo://docs/{name}", "docs", &doc_names_description(), "text/markdown"),
     ]
 }
 
@@ -419,5 +441,41 @@ mod tests {
         assert_eq!((c.dataset_id.as_str(), c.epochs, c.amp, c.batch), ("ds_1", 5, true, 16));
         assert!(estimate_config("ds_1", &[("epochs".into(), "many".into())]).is_err());
         assert!(estimate_config("ds_1", &[("arch".into(), "folo-q".into())]).is_err());
+    }
+
+    #[test]
+    fn docs_resource_serves_allowlist_syncs_template_and_rejects_traversal() {
+        let docs_template =
+            templates().into_iter().find(|t| t.uri_template == "folo://docs/{name}").expect("docs template");
+        let desc = docs_template.description.as_deref().unwrap_or("");
+        for name in doc_names() {
+            assert!(doc(name).is_some_and(|text| !text.is_empty()), "doc {name} should be embedded");
+            assert_eq!(FoloUri::parse(&format!("folo://docs/{name}")), Some(FoloUri::Doc(name.into())));
+            assert!(desc.contains(name), "docs template description missing {name}: {desc}");
+        }
+        assert!(doc("AGENT_COOKBOOK").is_some());
+
+        // Safe-looking unknown doc names parse as Doc URIs but are absent from the allowlist.
+        assert_eq!(FoloUri::parse("folo://docs/NO_SUCH_DOC"), Some(FoloUri::Doc("NO_SUCH_DOC".into())));
+        assert_eq!(doc("NO_SUCH_DOC"), None);
+
+        // Path traversal, separators, dots, NUL bytes, and query strings are rejected at both layers.
+        for bad_uri in [
+            "folo://docs/..",
+            "folo://docs/.",
+            "folo://docs/..%2FAGENTS",
+            "folo://docs/..%2F..%2FCargo.toml",
+            "folo://docs/..%5CCargo.toml",
+            "folo://docs/API%2F..",
+            "folo://docs/API%00",
+            "folo://docs/a/b",
+            "folo://docs/API.md",
+            "folo://docs/API?raw=1",
+        ] {
+            assert_eq!(FoloUri::parse(bad_uri), None, "{bad_uri} must be rejected");
+        }
+        for bad_name in ["..", ".", "../Cargo.toml", "..\\Cargo.toml", "API.md", "API\0", "a/b", ""] {
+            assert_eq!(doc(bad_name), None, "{bad_name:?} must be rejected");
+        }
     }
 }
