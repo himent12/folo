@@ -24,6 +24,10 @@ use serde::de::DeserializeOwned;
 
 /// Largest response body read into memory (images, metric histories, one part of a download).
 pub const MAX_BODY: u64 = 256 * 1024 * 1024;
+/// Largest error response body read into memory on a non-2xx streamed range request.
+const MAX_ERROR_BODY: u64 = 1024 * 1024;
+/// Chunk size used when streaming a `Range` response directly to a writer.
+const STREAM_CHUNK: usize = 64 * 1024;
 
 /// The code of an [`Error`] that never reached the server (refused, timed out, TLS failure, a cut connection).
 pub const UNREACHABLE: &str = "server_unreachable";
@@ -83,6 +87,28 @@ pub struct Part {
     pub total: u64,
     /// The file's ETag, quoted as the server sent it.
     pub etag: String,
+}
+
+/// Metadata of one part streamed with a `Range` request ([`Client::get_range_to`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamedPart {
+    /// Number of bytes written to the destination sink.
+    pub written: u64,
+    /// Length of the whole file.
+    pub total: u64,
+    /// The file's ETag, quoted as the server sent it.
+    pub etag: String,
+}
+
+/// Why [`Client::get_range_to`] did not finish streaming a range.
+#[derive(Debug)]
+pub enum StreamError {
+    /// The caller's stop callback returned `true` while streaming.
+    Stopped,
+    /// An HTTP error answer or transport failure.
+    Http(Error),
+    /// Writing to the destination sink failed.
+    Io(std::io::Error),
 }
 
 /// A client of one FOLO server. Cheap to clone (the connection pool is shared).
@@ -293,33 +319,144 @@ impl Client {
     /// was replaced since answers `412 Precondition Failed` (an [`Error`] with that status) instead of bytes of
     /// another version. A range starting at or past the end of the file is `416`.
     pub fn get_range(&self, path: &str, range: Range<u64>, etag: Option<&str>) -> Result<Part> {
+        let mut bytes = Vec::new();
+        let meta = self.get_range_to(path, range, etag, &mut bytes, || false).map_err(|e| match e {
+            StreamError::Http(e) => e,
+            StreamError::Io(e) => self.unreachable(e),
+            StreamError::Stopped => unreachable!("stop closure always returns false"),
+        })?;
+        Ok(Part { bytes, total: meta.total, etag: meta.etag })
+    }
+
+    /// `GET /api{path}` for the bytes `range` of a file, streaming the body directly into `out` in small chunks
+    /// instead of buffering the whole part in memory. Checks `stop` between chunks so a large range stops promptly.
+    ///
+    /// On a mid-stream transport failure (`StreamError::Http`) or stop (`StreamError::Stopped`), some prefix of the
+    /// range may already have been written to `out`; callers that retry must rewind or discard those bytes first.
+    pub fn get_range_to<W: std::io::Write>(
+        &self,
+        path: &str,
+        range: Range<u64>,
+        etag: Option<&str>,
+        out: &mut W,
+        stop: impl Fn() -> bool,
+    ) -> std::result::Result<StreamedPart, StreamError> {
+        if stop() {
+            return Err(StreamError::Stopped);
+        }
         let mut req = self
             .auth(self.agent.get(self.url(path)))
             .header(RANGE, format!("bytes={}-{}", range.start, range.end.saturating_sub(1)));
         if let Some(etag) = etag {
             req = req.header(IF_MATCH, etag);
         }
-        let (status, headers, bytes) = self.read(req.call())?;
+        let res = req.call().map_err(|e| StreamError::Http(self.unreachable(e)))?;
+        let status = res.status();
+        let headers = res.headers().clone();
         if !status.is_success() {
-            return Err(self.failure(status, &bytes));
+            // Read only a bounded diagnostic prefix so a huge non-2xx proxy body cannot exhaust memory or hide
+            // the HTTP status code behind a transport error.
+            let mut bytes = Vec::new();
+            let mut limited = std::io::Read::take(res.into_body().into_reader(), MAX_ERROR_BODY);
+            let _ = std::io::Read::read_to_end(&mut limited, &mut bytes);
+            return Err(StreamError::Http(self.failure(status, &bytes)));
         }
         let etag = headers.get(ETAG).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
-        // `206` names the file's length after the slash of `Content-Range: bytes a-b/total`; a server that ignores
-        // `Range` answers `200` with the whole file.
-        let total = match status {
-            StatusCode::PARTIAL_CONTENT => headers
-                .get(CONTENT_RANGE)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.rsplit('/').next())
-                .and_then(|t| t.trim().parse().ok())
-                .ok_or_else(|| {
-                    self.failure(StatusCode::BAD_GATEWAY, b"a 206 answer without Content-Range")
-                })?,
-            _ if range.start == 0 => bytes.len() as u64,
-            _ => return Err(self.failure(StatusCode::BAD_GATEWAY, b"the server ignored the Range header")),
+        // `206` must advertise `Content-Range: bytes <start>-<end>/<total>` starting at `range.start`; a server
+        // that ignores `Range` answers `200` with the whole file (only valid when `range.start == 0`). Validate
+        // headers before writing any bytes to `out`.
+        let declared = match status {
+            StatusCode::PARTIAL_CONTENT => Some(
+                headers
+                    .get(CONTENT_RANGE)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| parse_content_range(v, range.start))
+                    .ok_or_else(|| {
+                        StreamError::Http(
+                            self.failure(StatusCode::BAD_GATEWAY, b"a 206 answer with invalid Content-Range"),
+                        )
+                    })?,
+            ),
+            _ if range.start == 0 => None,
+            _ => {
+                return Err(StreamError::Http(
+                    self.failure(StatusCode::BAD_GATEWAY, b"the server ignored the Range header"),
+                ));
+            }
         };
-        Ok(Part { bytes, total, etag })
+        if let Some((expected_len, _)) = declared
+            && expected_len > MAX_BODY
+        {
+            return Err(StreamError::Http(
+                self.unreachable(format!("response body exceeded {MAX_BODY} bytes")),
+            ));
+        }
+
+        let mut reader = res.into_body().into_reader();
+        let mut buf = vec![0u8; STREAM_CHUNK];
+        let mut written = 0u64;
+        loop {
+            if stop() {
+                return Err(StreamError::Stopped);
+            }
+            let n = match std::io::Read::read(&mut reader, &mut buf) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(StreamError::Http(self.unreachable(e))),
+            };
+            written = written.saturating_add(n as u64);
+            if written > MAX_BODY {
+                return Err(StreamError::Http(
+                    self.unreachable(format!("response body exceeded {MAX_BODY} bytes")),
+                ));
+            }
+            if let Some((expected_len, _)) = declared
+                && written > expected_len
+            {
+                return Err(StreamError::Http(
+                    self.failure(StatusCode::BAD_GATEWAY, b"206 body exceeded Content-Range length"),
+                ));
+            }
+            out.write_all(&buf[..n]).map_err(StreamError::Io)?;
+        }
+        let total = match declared {
+            Some((expected_len, total)) => {
+                if written != expected_len {
+                    return Err(StreamError::Http(
+                        self.failure(StatusCode::BAD_GATEWAY, b"206 body length did not match Content-Range"),
+                    ));
+                }
+                total
+            }
+            None => written,
+        };
+        Ok(StreamedPart { written, total, etag })
     }
+}
+
+/// Parses `Content-Range: bytes <start>-<end>/<total>`, requiring `<start> == expected_start` and
+/// `start <= end < total`. Returns `(expected_len, total)`.
+fn parse_content_range(header: &str, expected_start: u64) -> Option<(u64, u64)> {
+    let rest = header.trim();
+    let (unit, spec) = rest.split_once(char::is_whitespace)?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return None;
+    }
+    let (range_part, total_part) = spec.trim().split_once('/')?;
+    let (start_part, end_part) = range_part.trim().split_once('-')?;
+    let parse_u64 = |s: &str| {
+        let s = s.trim();
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<u64>().ok()).flatten()
+    };
+    let start = parse_u64(start_part)?;
+    let end = parse_u64(end_part)?;
+    let total = parse_u64(total_part)?;
+    if start != expected_start || start > end || end >= total {
+        return None;
+    }
+    let expected_len = end.checked_sub(start)?.checked_add(1)?;
+    Some((expected_len, total))
 }
 
 #[cfg(test)]
@@ -391,5 +528,139 @@ mod tests {
             let e = c.failure(StatusCode::from_u16(status).unwrap(), b"");
             assert_eq!(e.is_transient(), transient, "{status}");
         }
+    }
+
+    #[test]
+    fn get_range_to_streams_validates_headers_and_checks_stop() {
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        fn serve_raw(responses: Vec<Vec<u8>>) -> (String, std::thread::JoinHandle<()>) {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let handle = std::thread::spawn(move || {
+                for resp in responses {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    let mut req_buf = [0u8; 1024];
+                    let _ = stream.read(&mut req_buf);
+                    let _ = stream.write_all(&resp);
+                    let _ = stream.flush();
+                }
+            });
+            (format!("http://{addr}"), handle)
+        }
+
+        let payload: Vec<u8> = (0..(STREAM_CHUNK * 2 + 17)).map(|i| (i % 251) as u8).collect();
+        let total = payload.len();
+
+        let mut ok_206 = format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-{}/{total}\r\nETag: \"v1\"\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n",
+            total - 1
+        )
+        .into_bytes();
+        ok_206.extend_from_slice(&payload);
+
+        let missing_cr =
+            b"HTTP/1.1 206 Partial Content\r\nETag: \"v1\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd"
+                .to_vec();
+        let mismatched_offset =
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-7/8\r\nETag: \"v1\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd"
+                .to_vec();
+        let mismatched_len =
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-5/8\r\nETag: \"v1\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd"
+                .to_vec();
+        let ignored_range =
+            b"HTTP/1.1 200 OK\r\nETag: \"v1\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\nabcd".to_vec();
+        let huge_403_len = (MAX_ERROR_BODY as usize) + 64 * 1024;
+        let mut huge_403 =
+            format!("HTTP/1.1 403 Forbidden\r\nContent-Length: {huge_403_len}\r\nConnection: close\r\n\r\n")
+                .into_bytes();
+        huge_403.resize(huge_403.len() + huge_403_len, b'e');
+        let truncated = format!(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-99/100\r\nETag: \"v1\"\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}",
+            "x".repeat(20)
+        )
+        .into_bytes();
+        let stop_body = ok_206.clone();
+
+        let (base, handle) = serve_raw(vec![
+            ok_206,
+            missing_cr,
+            mismatched_offset,
+            mismatched_len,
+            ignored_range,
+            huge_403,
+            truncated,
+            stop_body,
+        ]);
+        let client = Client::new(&base);
+
+        // 1. Streams full multi-chunk 206 response directly to writer.
+        let mut out = Vec::new();
+        let meta = client.get_range_to("/m/weights", 0..total as u64, None, &mut out, || false).unwrap();
+        assert_eq!(meta, StreamedPart { written: total as u64, total: total as u64, etag: "\"v1\"".into() });
+        assert_eq!(out, payload);
+
+        // 2. Rejects 206 without Content-Range before writing anything to `out`.
+        let mut out = Vec::new();
+        let err = client.get_range_to("/m/weights", 0..4, None, &mut out, || false).unwrap_err();
+        assert!(matches!(err, StreamError::Http(e) if e.status == Some(StatusCode::BAD_GATEWAY)));
+        assert!(out.is_empty());
+
+        // 3. Rejects 206 whose Content-Range start offset does not match requested start.
+        let mut out = Vec::new();
+        let err = client.get_range_to("/m/weights", 0..4, None, &mut out, || false).unwrap_err();
+        assert!(matches!(err, StreamError::Http(e) if e.status == Some(StatusCode::BAD_GATEWAY)));
+        assert!(out.is_empty());
+
+        // 4. Rejects 206 whose body length does not match the advertised Content-Range span.
+        let mut out = Vec::new();
+        let err = client.get_range_to("/m/weights", 0..6, None, &mut out, || false).unwrap_err();
+        assert!(matches!(err, StreamError::Http(e) if e.status == Some(StatusCode::BAD_GATEWAY)));
+
+        // 5. Rejects 200 for non-zero start before writing anything to `out`.
+        let mut out = Vec::new();
+        let err = client.get_range_to("/m/weights", 10..14, None, &mut out, || false).unwrap_err();
+        assert!(matches!(err, StreamError::Http(e) if e.status == Some(StatusCode::BAD_GATEWAY)));
+        assert!(out.is_empty());
+
+        // 6. Preserves HTTP status (and non-transient classification) even when an error body exceeds MAX_ERROR_BODY.
+        let mut out = Vec::new();
+        let err = client.get_range_to("/m/weights", 0..4, None, &mut out, || false).unwrap_err();
+        assert!(
+            matches!(err, StreamError::Http(e) if e.status == Some(StatusCode::FORBIDDEN) && !e.is_transient())
+        );
+        assert!(out.is_empty());
+
+        // 7. Mid-stream truncated TCP body returns a transient transport error.
+        let mut out = Vec::new();
+        let err = client.get_range_to("/m/weights", 0..100, None, &mut out, || false).unwrap_err();
+        assert!(matches!(err, StreamError::Http(e) if e.is_transient()));
+
+        // 8. Stopping mid-stream aborts between chunks without reading the entire body.
+        let stopped = Arc::new(AtomicBool::new(false));
+        struct StopAfterFirstChunk {
+            stopped: Arc<AtomicBool>,
+            bytes: usize,
+        }
+        impl std::io::Write for StopAfterFirstChunk {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.bytes += buf.len();
+                self.stopped.store(true, Ordering::SeqCst);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut sink = StopAfterFirstChunk { stopped: stopped.clone(), bytes: 0 };
+        let err = client
+            .get_range_to("/m/weights", 0..total as u64, None, &mut sink, || stopped.load(Ordering::SeqCst))
+            .unwrap_err();
+        assert!(matches!(err, StreamError::Stopped));
+        assert!(sink.bytes > 0 && sink.bytes < total, "stopped mid-stream at {} / {total}", sink.bytes);
+
+        handle.join().unwrap();
     }
 }

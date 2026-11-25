@@ -296,3 +296,58 @@ fn downloads_in_parts_start_over_when_the_file_is_replaced() {
     assert!(!other.exists());
     assert_eq!(leftovers(), 1);
 }
+
+#[test]
+fn streaming_download_rewinds_partial_bytes_before_retrying() {
+    use std::io::Read;
+
+    let t = TestDir::new("transfer-stream-rewind");
+    let part = folo_client::transfer::PART_BYTES as usize;
+    let payload: Vec<u8> = (0..(part + 128 * 1024)).map(|i| ((i * 31 + 7) % 251) as u8).collect();
+    let total = payload.len();
+
+    // Scripted range server:
+    // 1. First request (0..part): succeeds with bytes 0..part.
+    // 2. Second request (rest = part..total): sends half the remaining bytes then drops the connection mid-body.
+    // 3. Third request (retry fallback part..): drops again after a short prefix to exercise `fetch_part` rewind.
+    // 4. Fourth request (retry part..): succeeds with the exact remaining bytes.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = payload.clone();
+    let server_thread = std::thread::spawn(move || {
+        for attempt in 0..4 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut req_buf = [0u8; 2048];
+            let _ = stream.read(&mut req_buf);
+            let (start, end, truncate_to) = match attempt {
+                0 => (0, part, None),
+                1 => (part, total, Some(64 * 1024)),
+                2 => (part, total, Some(16 * 1024)),
+                _ => (part, total, None),
+            };
+            let slice = &body[start..end];
+            let head = format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{}/{total}\r\nETag: \"v-stream\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                end - 1,
+                slice.len(),
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let send = match truncate_to {
+                Some(n) => &slice[..n],
+                None => slice,
+            };
+            let _ = stream.write_all(send);
+            let _ = stream.flush();
+        }
+    });
+
+    let client = Client::new(&format!("http://{addr}"));
+    let dest = t.join("weights.folo");
+    let mut ctl = Control { progress: &mut |_| {}, stop: &never, backoff: BACKOFF };
+    let got = download(&client, "/models/m_1/weights", &dest, &mut ctl).unwrap();
+    server_thread.join().unwrap();
+
+    assert_eq!(got.bytes, total as u64);
+    assert_eq!(got.etag, "\"v-stream\"");
+    assert_eq!(std::fs::read(&dest).unwrap(), payload);
+}
