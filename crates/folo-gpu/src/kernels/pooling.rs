@@ -3,7 +3,7 @@
 use super::{check_buf, prod};
 use crate::DType;
 use crate::context::GpuContext;
-use crate::error::{Result, shape_err};
+use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::gemm::check_dtype;
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 
@@ -82,7 +82,8 @@ static MAXPOOL: KernelDef = KernelDef {
     source: Source::Static(include_str!("../shaders/maxpool.wgsl")),
 };
 
-/// `max_pool2d` over `planes = N·C` planes of `h × w`; padded positions are ignored (−∞).
+/// `max_pool2d` over `planes = N·C` planes of `h × w`; padded positions are ignored (−∞) and NaN wins
+/// (matching the CPU reference and [`super::pool_grad::max_pool2d_indices`]).
 #[allow(clippy::too_many_arguments)]
 pub fn max_pool2d(
     ctx: &GpuContext,
@@ -100,11 +101,18 @@ pub fn max_pool2d(
         return Err(shape_err(format!("max_pool2d: padding must be at most half the kernel, got {win:?}")));
     }
     let (oh, ow) = win.output(h, w)?;
-    check_buf(x, prod(&[planes, h, w])?, dtype, "max_pool2d input")?;
-    check_buf(y, prod(&[planes, oh, ow])?, dtype, "max_pool2d output")?;
-    let n = planes * oh * ow;
+    let in_elems = prod(&[planes, h, w])?;
+    let n = prod(&[planes, oh, ow])?;
+    check_buf(x, in_elems, dtype, "max_pool2d input")?;
+    check_buf(y, n, dtype, "max_pool2d output")?;
     if n == 0 {
         return Ok((oh, ow));
+    }
+    if in_elems > u32::MAX as usize || n > u32::MAX as usize {
+        return Err(GpuError::Limit("max_pool2d: tensor exceeds u32 indexing".into()));
+    }
+    if h > i32::MAX as usize - 2 * win.padding.0 || w > i32::MAX as usize - 2 * win.padding.1 {
+        return Err(GpuError::Limit("max_pool2d: plane dimensions exceed i32 indexing".into()));
     }
     let k = ctx.kernel(&MAXPOOL, win.spec().f16(dtype == DType::F16))?;
     let p = Params::new().uz(n)?.uz(h)?.uz(w)?.uz(oh)?.uz(ow)?.f(f32::NEG_INFINITY);
