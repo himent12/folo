@@ -126,12 +126,23 @@ export default function XYChart(props: XYChartProps) {
   const rectCache = createRectCache();
   effect(() => {
     void width.get();
+    void p.height;
     void readoutH.get();
     rectCache.clear();
   });
   const local = (e: PointerEvent) => {
-    const r = rectCache.get(e.currentTarget as SVGElement);
-    return { px: e.clientX - r.left, py: e.clientY - r.top };
+    const el = e.currentTarget as SVGElement;
+    let r = rectCache.get(el);
+    let px = e.clientX - r.left;
+    let py = e.clientY - r.top;
+    // If an external banner shifted the plot while hovered, an in-SVG pointer event can appear outside the stale rect.
+    if (py < 0 || py > p.height || px < 0 || px > width.peek()) {
+      rectCache.clear();
+      r = rectCache.get(el);
+      px = e.clientX - r.left;
+      py = e.clientY - r.top;
+    }
+    return { px, py };
   };
   const touchy = (e: PointerEvent) => e.pointerType === 'touch' || e.pointerType === 'pen';
   const inPlot = (px: number) => px >= m.peek().left - 8 && px <= width.peek() - m.peek().right + 8;

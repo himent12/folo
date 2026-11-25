@@ -95,6 +95,7 @@ export default function Histogram(props: HistogramProps) {
   const rectCache = createRectCache();
   effect(() => {
     void width.get();
+    void p.height;
     rectCache.clear();
   });
   const local = (e: PointerEvent) => {

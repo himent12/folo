@@ -230,10 +230,6 @@ export default function LineChart(props: LineChartProps) {
   const hover = computed(() => hoverOf(cursor.get(), hasData.get(), xExtent.get(), keyed.get(), p.xTitle, xFormat.get(), x.get()));
 
   const rectCache = createRectCache();
-  effect(() => {
-    void width.get();
-    rectCache.clear();
-  });
   const local = (e: PointerEvent) => {
     const rect = rectCache.get(e.currentTarget as SVGElement);
     return { px: e.clientX - rect.left, py: e.clientY - rect.top };
@@ -275,6 +271,16 @@ export default function LineChart(props: LineChartProps) {
   );
   effect(() => {
     hint.set(hintText.get());
+  });
+  // Invalidate cached SVG rect when plot size or legend/readout state changes (e.g. a legend above the plot wrapping).
+  const hasHover = computed(() => hover.get() !== null);
+  effect(() => {
+    void width.get();
+    void p.height;
+    void picked.get();
+    void hasHover.get();
+    void hintText.get();
+    rectCache.clear();
   });
   function onfocus() {
     try {

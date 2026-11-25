@@ -104,6 +104,14 @@ describe('XYChart', () => {
       svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 120, clientY: 80, bubbles: true }));
       flush();
       expect(rectSpy).toHaveBeenCalledTimes(3);
+
+      // External banner inserted above the chart shifts SVG top down without scroll/resize: lower-plot moves re-measure.
+      let top = 80;
+      rectSpy.mockImplementation(() => ({ left: 0, top, right: 480, bottom: top + 240, width: 480, height: 240, x: 0, y: top, toJSON: () => ({}) }) as DOMRect);
+      svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 200, clientY: 260, bubbles: true }));
+      flush();
+      expect(target.querySelector('.out')!.textContent).toContain('x=');
+      expect(rectSpy).toHaveBeenCalledTimes(4);
       expect(OrigRO).toBeDefined();
     } finally {
       c.unmount();

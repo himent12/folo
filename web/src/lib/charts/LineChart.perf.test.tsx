@@ -94,7 +94,11 @@ describe('LineChart on a live page', () => {
     await Promise.resolve();
     const rectSpy = vi.spyOn(svg, 'getBoundingClientRect');
     svg.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true }));
-    for (let px = 60; px < 300; px += 20) {
+    // First move activates hover (invalidating once in case a legend above the plot wrapped); subsequent moves hit cache.
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 60, clientY: 50, bubbles: true }));
+    flush();
+    rectSpy.mockClear();
+    for (let px = 80; px < 300; px += 20) {
       svg.dispatchEvent(new PointerEvent('pointermove', { clientX: px, clientY: 50, bubbles: true }));
       flush();
     }
@@ -104,6 +108,7 @@ describe('LineChart on a live page', () => {
     flush();
     expect(rectSpy).toHaveBeenCalledTimes(2);
     svg.dispatchEvent(new PointerEvent('pointerleave', { bubbles: true }));
+    flush();
     svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 140, clientY: 50, bubbles: true }));
     flush();
     expect(rectSpy).toHaveBeenCalledTimes(3);

@@ -16,6 +16,8 @@ export interface RectCache {
 }
 
 const active = new Set<() => void>();
+/** Maximum age of a cached `DOMRect` (ms): keeps rapid pointer/wheel bursts layout-free while self-healing after external shifts. */
+const TTL_MS = 200;
 
 function invalidateAll() {
   for (const clear of active) clear();
@@ -40,10 +42,12 @@ function detachGlobal() {
 export function createRectCache(): RectCache {
   let cachedEl: Element | null = null;
   let cachedRect: DOMRect | null = null;
+  let cachedAt = 0;
 
   const clear = () => {
     cachedEl = null;
     cachedRect = null;
+    cachedAt = 0;
   };
 
   if (active.size === 0) attachGlobal();
@@ -56,9 +60,11 @@ export function createRectCache(): RectCache {
 
   return {
     get(el: Element): DOMRect {
-      if (cachedRect && cachedEl === el) return cachedRect;
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      if (cachedRect && cachedEl === el && now - cachedAt < TTL_MS) return cachedRect;
       cachedEl = el;
       cachedRect = el.getBoundingClientRect();
+      cachedAt = now;
       return cachedRect;
     },
     clear,
