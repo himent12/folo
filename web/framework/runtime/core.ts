@@ -15,14 +15,24 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { sortJobs } from './flushOrder';
+import {
+  cleanupSources,
+  linkDependency,
+  needsToRecompute,
+  prepareSources,
+  subscribeLink,
+  TRACKING,
+  unsubscribeLink,
+  type Link,
+  type Source,
+  type Target,
+} from './links';
 
 const NOTIFIED = 1;
 const OUTDATED = 2;
 const RUNNING = 4;
 const DISPOSED = 8;
 const HAS_ERROR = 16;
-/** A computed with subscribers (it is linked into its sources), or any effect. */
-const TRACKING = 32;
 /** A user effect (`effect`, `onMount`): runs after the render effects of the same flush; a returned function is its cleanup. */
 const USER = 64;
 /** An effect that has not run yet. */
@@ -35,33 +45,6 @@ const ATTACHED = 256;
  * comes after it, not when the effect that reads it gets to it.
  */
 const OWNING = 512;
-
-interface Link {
-  _s: Source;
-  _ps: Link | undefined;
-  _ns: Link | undefined;
-  _t: Target;
-  _pt: Link | undefined;
-  _nt: Link | undefined;
-  _v: number;
-  _rb: Link | undefined;
-}
-
-interface Source {
-  _value: unknown;
-  _version: number;
-  _node: Link | undefined;
-  _targets: Link | undefined;
-  _refresh(): boolean;
-  _subscribe(link: Link): void;
-  _unsubscribe(link: Link): void;
-}
-
-interface Target {
-  _sources: Link | undefined;
-  _flags: number;
-  _notify(): void;
-}
 
 export type Equals<T> = false | ((a: T, b: T) => boolean);
 export interface SignalOptions<T> {
@@ -91,64 +74,7 @@ let nextId = 0;
 // Dependency links
 
 function addDependency(source: Source): Link | undefined {
-  const target = listener;
-  if (target === undefined) return undefined;
-  let node = source._node;
-  if (node === undefined || node._t !== target) {
-    // A new dependency: append it to the target's source list (its tail is `_sources` while evaluating).
-    node = { _v: 0, _s: source, _ps: target._sources, _ns: undefined, _t: target, _pt: undefined, _nt: undefined, _rb: node };
-    if (target._sources !== undefined) target._sources._ns = node;
-    target._sources = node;
-    source._node = node;
-    if (target._flags & TRACKING) source._subscribe(node);
-    return node;
-  }
-  if (node._v === -1) {
-    // Read again in this evaluation: reuse the link, moved to the tail so the list stays in read order.
-    node._v = 0;
-    if (node._ns !== undefined) {
-      node._ns._ps = node._ps;
-      if (node._ps !== undefined) node._ps._ns = node._ns;
-      node._ps = target._sources;
-      node._ns = undefined;
-      target._sources!._ns = node;
-      target._sources = node;
-    }
-    return node;
-  }
-  return undefined;
-}
-
-/** Before an evaluation: mark every current link unread (-1) and point `_sources` at the tail. */
-function prepareSources(target: Target): void {
-  for (let node = target._sources; node !== undefined; node = node._ns) {
-    const rb = node._s._node;
-    if (rb !== undefined) node._rb = rb;
-    node._s._node = node;
-    node._v = -1;
-    if (node._ns === undefined) {
-      target._sources = node;
-      break;
-    }
-  }
-}
-
-/** After an evaluation: drop links that were not read, restore the sources' outer links, point `_sources` at the head. */
-function cleanupSources(target: Target): void {
-  let node = target._sources;
-  let head: Link | undefined;
-  while (node !== undefined) {
-    const prev = node._ps;
-    if (node._v === -1) {
-      node._s._unsubscribe(node);
-      if (prev !== undefined) prev._ns = node._ns;
-      if (node._ns !== undefined) node._ns._ps = prev;
-    } else head = node;
-    node._s._node = node._rb;
-    if (node._rb !== undefined) node._rb = undefined;
-    node = prev;
-  }
-  target._sources = head;
+  return listener === undefined ? undefined : linkDependency(source, listener);
 }
 
 /**
@@ -167,37 +93,6 @@ export function sourceMark(): unknown {
  */
 export function dropSourcesThrough(mark: unknown): void {
   for (let node = mark as Link | undefined; node !== undefined; node = node._ps) node._v = -1;
-}
-
-/** Whether any source of `target` changed since it last ran (pulls computeds up to date on the way). */
-function needsToRecompute(target: Target): boolean {
-  for (let node = target._sources; node !== undefined; node = node._ns) {
-    if (node._s._version !== node._v || !node._s._refresh() || node._s._version !== node._v) return true;
-  }
-  return false;
-}
-
-function subscribeLink(source: Source, node: Link): void {
-  if (source._targets !== node && node._pt === undefined) {
-    node._nt = source._targets;
-    if (source._targets !== undefined) source._targets._pt = node;
-    source._targets = node;
-  }
-}
-
-function unsubscribeLink(source: Source, node: Link): void {
-  if (source._targets === undefined) return;
-  const prev = node._pt;
-  const next = node._nt;
-  if (prev !== undefined) {
-    prev._nt = next;
-    node._pt = undefined;
-  }
-  if (next !== undefined) {
-    next._pt = prev;
-    node._nt = undefined;
-  }
-  if (node === source._targets) source._targets = next;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -472,40 +367,45 @@ function addCleanup(node: Owner, fn: Cleanup): void {
 
 /** Disposes `node`'s children (in order), then runs its cleanups (in the order registered). */
 function cleanOwner(node: Owner): void {
-  let child = node._first;
-  node._first = node._last = null;
+  const prevListener = listener;
+  const prevOwner = owner;
+  listener = undefined;
+  owner = null;
   let error: unknown;
-  while (child !== null) {
-    const next = child._next;
-    child._prev = child._next = null;
-    child._flags &= ~ATTACHED;
-    try {
-      disposeTree(child);
-    } catch (e) {
-      error ??= e;
+  try {
+    let child = node._first;
+    node._first = node._last = null;
+    while (child !== null) {
+      const next = child._next;
+      child._prev = child._next = null;
+      child._flags &= ~ATTACHED;
+      try {
+        disposeTree(child);
+      } catch (e) {
+        error ??= e;
+      }
+      child = next;
     }
-    child = next;
-  }
-  const c = node._cleanups;
-  if (c !== null) {
-    node._cleanups = null;
-    const prevListener = listener;
-    listener = undefined;
-    try {
-      if (typeof c === 'function') c();
-      else
-        for (const fn of c) {
-          try {
-            fn();
-          } catch (e) {
-            error ??= e;
+    const c = node._cleanups;
+    if (c !== null) {
+      node._cleanups = null;
+      try {
+        if (typeof c === 'function') c();
+        else
+          for (const fn of c) {
+            try {
+              fn();
+            } catch (e) {
+              error ??= e;
+            }
           }
-        }
-    } catch (e) {
-      error ??= e;
-    } finally {
-      listener = prevListener;
+      } catch (e) {
+        error ??= e;
+      }
     }
+  } finally {
+    listener = prevListener;
+    owner = prevOwner;
   }
   if (error !== undefined) throw error;
 }
@@ -516,7 +416,9 @@ function disposeTree(node: Owner): void {
   try {
     cleanOwner(node);
   } finally {
-    if (node instanceof EffectNode) {
+    // A currently running effect still has `_sources` pointing at its tail with active `_node`/`_rb` save slots;
+    // `EffectNode._run`'s `finally` will restore those links via `cleanupSources` and unsubscribe every source.
+    if (node instanceof EffectNode && !(node._flags & RUNNING)) {
       for (let n = node._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
       node._sources = undefined;
     }
@@ -564,7 +466,9 @@ export function createRoot<T>(fn: (dispose: () => void) => T, parent?: Owner | n
 
 /** Registers `fn` to run when the current owner (component, effect run, root) is disposed or re-runs. */
 export function onCleanup(fn: Cleanup): void {
-  if (owner !== null) addCleanup(owner, fn);
+  if (owner === null) return;
+  if (owner._flags & DISPOSED) runWithOwner(null, fn);
+  else addCleanup(owner, fn);
 }
 
 /**
@@ -594,14 +498,34 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
   const parent = owner;
   let root: Owner | null = null;
   const c = new ComputedNode<T>(() => {
-    if (root !== null) dispose(root);
-    const r = (root = new Owner());
+    if (root !== null) {
+      dispose(root);
+      root = null;
+    }
+    const r = new Owner();
     // The branch stands where the memo was written, not where it was (re)created.
     r._id = c._id;
-    attach(parent, r);
+    const dead = parent !== null && (parent._flags & DISPOSED) !== 0;
+    if (dead) r._flags |= DISPOSED;
+    else {
+      root = r;
+      attach(parent, r);
+    }
     owner = r;
-    const v = fn();
-    return (typeof v === 'function' && !isReader(v) ? memo(v as () => unknown) : v) as T;
+    try {
+      const v = fn();
+      return (typeof v === 'function' && !isReader(v) ? memo(v as () => unknown) : v) as T;
+    } catch (e) {
+      if (!dead) {
+        try {
+          dispose(r);
+        } catch {
+          // Keep the original branch error.
+        }
+        root = null;
+      }
+      throw e;
+    }
   }, options?.equals);
   c._flags |= OWNING;
   c._parent = parent;
@@ -641,50 +565,9 @@ export function componentOwner(): Owner {
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Context
+// Context (extracted to ./context.ts, re-exported here for callers importing from ./core)
 
-/** Sets a context value for the current component and everything it renders (port of `setContext`). */
-export function setContext<T>(key: unknown, value: T): T {
-  if (owner === null) throw new Error('fw: setContext outside a component');
-  (owner._ctx ??= new Map()).set(key, value);
-  return value;
-}
-
-/** The nearest context value for `key` above the current owner (port of `getContext`). Call it at component init. */
-export function getContext<T>(key: unknown): T | undefined {
-  for (let o = owner; o !== null; o = o._parent) {
-    if (o._ctx !== null && o._ctx.has(key)) return o._ctx.get(key) as T;
-  }
-  return undefined;
-}
-
-/** Whether a context value for `key` is set above the current owner. */
-export function hasContext(key: unknown): boolean {
-  for (let o = owner; o !== null; o = o._parent) if (o._ctx !== null && o._ctx.has(key)) return true;
-  return false;
-}
-
-export interface Context<T> {
-  readonly key: symbol;
-  readonly defaultValue: T;
-  /** Sets this context for the current component's subtree. */
-  set(value: T): T;
-  /** The nearest value, else the default. */
-  get(): T;
-}
-
-/** A typed context (port of Svelte's `createContext`): `const Theme = createContext('dark'); Theme.set(x); Theme.get()`. */
-export function createContext<T>(defaultValue: T): Context<T>;
-export function createContext<T>(): Context<T | undefined>;
-export function createContext<T>(defaultValue?: T): Context<T | undefined> {
-  const key = Symbol('context');
-  return {
-    key,
-    defaultValue,
-    set: (v) => setContext(key, v),
-    get: () => (hasContext(key) ? getContext<T>(key) : defaultValue),
-  };
-}
+export { createContext, getContext, hasContext, setContext, type Context } from './context';
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Effects and the scheduler
@@ -704,6 +587,8 @@ let userQueue: EffectNode[] = [];
 let userSpare: EffectNode[] = [];
 let scheduled = false;
 let flushing = false;
+let batchDepth = 0;
+let batchFlush = false;
 const MAX_SPARE_QUEUE = 256;
 
 class EffectNode extends Owner implements Target {
@@ -731,22 +616,40 @@ class EffectNode extends Owner implements Target {
   }
   _run(): void {
     cleanOwner(this);
+    if (this._flags & DISPOSED) return;
     const prevListener = listener;
     const prevOwner = owner;
     prepareSources(this);
     listener = this;
     owner = this;
     this._flags = (this._flags | RUNNING) & ~FRESH;
+    let threw = false;
     try {
       if (this._flags & USER) {
         const r = this._fn(undefined);
-        if (typeof r === 'function') addCleanup(this, r);
+        if (typeof r === 'function') {
+          if (this._flags & DISPOSED) runWithOwner(null, r);
+          else addCleanup(this, r);
+        }
       } else this._value = this._fn(this._value);
+    } catch (e) {
+      threw = true;
+      throw e;
     } finally {
       listener = prevListener;
       owner = prevOwner;
       cleanupSources(this);
       this._flags &= ~RUNNING;
+      if (this._flags & DISPOSED) {
+        try {
+          cleanOwner(this);
+        } catch (e) {
+          if (!threw) throw e;
+        } finally {
+          for (let n = this._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
+          this._sources = undefined;
+        }
+      }
     }
   }
 }
@@ -786,6 +689,10 @@ function run(q: Job[], error: unknown): unknown {
  */
 export function flush(): void {
   if (flushing) return;
+  if (batchDepth > 0) {
+    batchFlush = true;
+    return;
+  }
   flushing = true;
   let error: unknown;
   let rounds = 0;
@@ -847,11 +754,24 @@ export async function tick(): Promise<void> {
 }
 
 /**
- * Groups writes. Effects already wait for a microtask, so this only matters for readability; computeds read inside
- * `fn` see every write made so far (they are pulled, never stale).
+ * Groups writes. Any `flush()` called inside `fn` (including nested batches) is deferred until the outermost batch
+ * finishes so observers never see torn intermediate state; computeds read inside `fn` still pull every write made so far.
  */
 export function batch<T>(fn: () => T): T {
-  return fn();
+  batchDepth++;
+  let threw = false;
+  try {
+    return fn();
+  } catch (e) {
+    threw = true;
+    throw e;
+  } finally {
+    batchDepth--;
+    if (batchDepth === 0 && batchFlush) {
+      batchFlush = false;
+      if (!threw) flush();
+    }
+  }
 }
 
 /** Runs `fn` without tracking what it reads (port of `untrack`). */
@@ -876,6 +796,7 @@ export function isTracking(): boolean {
  * changed. `fn` gets the value it returned last time (initially `init`).
  */
 export function renderEffect<T>(fn: (prev: T) => T, init?: T): void {
+  if (owner !== null && (owner._flags & DISPOSED) !== 0) return;
   const e = new EffectNode(fn, init, 0);
   attach(owner, e);
   e._run();
@@ -898,6 +819,7 @@ export function effect(fn: () => void | Cleanup): void {
 
 /** Internal: a user effect created now, never deferred (actions and bindings, which Svelte creates in place). */
 export function effectNow(fn: () => void | Cleanup): void {
+  if (owner !== null && (owner._flags & DISPOSED) !== 0) return;
   const e = new EffectNode(fn, undefined, USER);
   attach(owner, e);
   userQueue.push(e);
@@ -955,6 +877,13 @@ export function runComponent<P>(Comp: (props: P) => JSX.Element, props: P): JSX.
     }
     if (fns !== null) for (let i = 0; i < fns.length; i++) effectNow(fns[i]!);
     return out;
+  } catch (e) {
+    try {
+      dispose(o);
+    } catch {
+      // Keep the component's own error.
+    }
+    throw e;
   } finally {
     owner = prevOwner;
     listener = prevListener;

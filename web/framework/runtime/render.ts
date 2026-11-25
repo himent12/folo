@@ -15,6 +15,14 @@ export function render(code: () => JSX.Element, container: Element | DocumentFra
   const end = document.createTextNode('');
   container.appendChild(start);
   container.appendChild(end);
+  const removeNodes = () => {
+    let n: Node | null = start;
+    while (n !== null) {
+      const next: Node | null = n === end ? null : n.nextSibling;
+      n.parentNode?.removeChild(n);
+      n = next;
+    }
+  };
   let dispose!: () => void;
   try {
     createRoot((d) => {
@@ -22,21 +30,23 @@ export function render(code: () => JSX.Element, container: Element | DocumentFra
       insert(container, untrack(code), end);
     });
   } catch (e) {
-    dispose?.();
-    undo();
+    try {
+      dispose?.();
+    } finally {
+      undo();
+      removeNodes();
+    }
     throw e;
   }
+  let unmounted = false;
   return () => {
+    if (unmounted) return;
+    unmounted = true;
     try {
       dispose();
     } finally {
       undo();
-      let n: Node | null = start;
-      while (n !== null) {
-        const next: Node | null = n === end ? null : n.nextSibling;
-        n.parentNode?.removeChild(n);
-        n = next;
-      }
+      removeNodes();
     }
   };
 }

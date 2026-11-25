@@ -64,20 +64,33 @@ function unlisten(node: EventTarget, type: string): void {
   } else counts.set(type, n - 1);
 }
 
-/** The roots that handle delegated events, each with the types it listens to. */
-const rootTypes = new Map<EventTarget, Set<string>>();
+/** The roots that handle delegated events, ref-counted per EventTarget with the types currently attached. */
+const rootEntries = new Map<EventTarget, { refs: number; types: Set<string> }>();
 
-/** Internal: makes `root` (a render target) handle delegated events; returns the undo. */
+/** Internal: makes `root` (a render target) handle delegated events; returns an idempotent undo. */
 export function delegateRoot(root: EventTarget): () => void {
-  const types = new Set<string>();
-  rootTypes.set(root, types);
-  for (const t of registered) addRootType(root, types, t);
+  let entry = rootEntries.get(root);
+  if (entry === undefined) {
+    entry = { refs: 0, types: new Set<string>() };
+    rootEntries.set(root, entry);
+  }
+  entry.refs++;
+  if (entry.refs === 1) {
+    for (const t of registered) addRootType(root, entry.types, t);
+  }
+  let undone = false;
   return () => {
-    for (const t of types) {
-      unlisten(root, t);
-      unlisten(document, t);
+    if (undone) return;
+    undone = true;
+    entry.refs--;
+    if (entry.refs === 0) {
+      for (const t of entry.types) {
+        unlisten(root, t);
+        unlisten(document, t);
+      }
+      entry.types.clear();
+      rootEntries.delete(root);
     }
-    rootTypes.delete(root);
   };
 }
 
@@ -93,7 +106,7 @@ export function delegateEvents(types: string[]): void {
   for (const t of types) {
     if (registered.has(t)) continue;
     registered.add(t);
-    for (const [root, set] of rootTypes) addRootType(root, set, t);
+    for (const [root, entry] of rootEntries) addRootType(root, entry.types, t);
   }
 }
 

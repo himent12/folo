@@ -98,9 +98,9 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
     }
     if (typeof current === 'string' && current !== '' && parent.firstChild !== null && parent.firstChild.nodeType === 3) {
       (parent.firstChild as Text).data = text;
-    } else if (leaving === 0 || !Array.isArray(current)) parent.textContent = text;
+    } else if (leaving === 0 || (!Array.isArray(current) && !(current instanceof Node))) parent.textContent = text;
     else {
-      cleanChildren(parent, current as Node[], null, document.createTextNode(text));
+      return cleanChildren(parent, current, undefined, document.createTextNode(text));
     }
     return text;
   }
@@ -165,6 +165,10 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
     cleanChildren(parent, current, null, node);
   } else if (current == null || current === '' || parent.firstChild === null) {
     parent.appendChild(node);
+  } else if (current instanceof Node && (current as Leaving).$$leave !== undefined) {
+    if (current.parentNode === parent) parent.insertBefore(node, current);
+    else parent.appendChild(node);
+    removeNode(current);
   } else parent.replaceChild(node, parent.firstChild);
   return node;
 }
