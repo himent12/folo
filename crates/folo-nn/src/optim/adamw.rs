@@ -7,8 +7,8 @@ use folo_core::{DType, Tensor};
 
 use super::simd::adamw_slice;
 use super::{
-    GradSource, OptimKind, Optimizer, ParamGroup, cpu_fast, for_each_param, step_many, take_state,
-    validate_groups,
+    GradSource, OptimKind, Optimizer, ParamGroup, ParamPlan, cpu_fast, for_each_param_planned, step_many,
+    take_state, validate_groups,
 };
 use crate::{Error, Result};
 
@@ -24,6 +24,8 @@ pub struct AdamW {
     groups: Vec<ParamGroup>,
     /// `(exp_avg, exp_avg_sq)` per parameter.
     state: Vec<Vec<(Tensor, Tensor)>>,
+    plan: ParamPlan,
+    coefs: Vec<Coef>,
     step: u64,
 }
 
@@ -32,7 +34,9 @@ impl AdamW {
     pub fn new(groups: Vec<ParamGroup>) -> Result<Self> {
         validate_groups(&groups)?;
         let state = zero_state(&groups)?;
-        Ok(AdamW { groups, state, step: 0 })
+        let plan = ParamPlan::from_groups(&groups);
+        let coefs = Vec::with_capacity(groups.len());
+        Ok(AdamW { groups, state, plan, coefs, step: 0 })
     }
 
     /// `(exp_avg, exp_avg_sq)` of a parameter.
@@ -147,24 +151,22 @@ impl Optimizer for AdamW {
 
     fn step(&mut self, grads: &dyn GradSource) -> Result<()> {
         let t = (self.step + 1) as i32;
-        let coefs: Vec<Coef> = self
-            .groups
-            .iter()
-            .map(|g| {
-                let (b1, b2) = (g.momentum, g.beta2);
-                Coef {
-                    decay: (g.weight_decay != 0.0).then_some((1.0 - g.lr * g.weight_decay) as f32),
-                    b1: b1 as f32,
-                    one_minus_b1: (1.0 - b1) as f32,
-                    b2: b2 as f32,
-                    one_minus_b2: (1.0 - b2) as f32,
-                    step_size: (g.lr / (1.0 - b1.powi(t))) as f32,
-                    bc2_sqrt: (1.0 - b2.powi(t)).sqrt() as f32,
-                    eps: g.eps as f32,
-                }
-            })
-            .collect();
-        let (groups, state) = (&self.groups, &self.state);
+        self.plan.sync(&self.groups);
+        self.coefs.clear();
+        self.coefs.extend(self.groups.iter().map(|g| {
+            let (b1, b2) = (g.momentum, g.beta2);
+            Coef {
+                decay: (g.weight_decay != 0.0).then_some((1.0 - g.lr * g.weight_decay) as f32),
+                b1: b1 as f32,
+                one_minus_b1: (1.0 - b1) as f32,
+                b2: b2 as f32,
+                one_minus_b2: (1.0 - b2) as f32,
+                step_size: (g.lr / (1.0 - b1.powi(t))) as f32,
+                bc2_sqrt: (1.0 - b2.powi(t)).sqrt() as f32,
+                eps: g.eps as f32,
+            }
+        }));
+        let (groups, state, plan, coefs) = (&self.groups, &self.state, &self.plan, &self.coefs);
         let adamw = |gi: usize| {
             let c = &coefs[gi];
             OptimStep::AdamW {
@@ -180,22 +182,24 @@ impl Optimizer for AdamW {
         };
         let done =
             step_many("adamw", groups, grads, adamw, |gi, pi| vec![&state[gi][pi].0, &state[gi][pi].1])?;
-        for_each_param(groups, |gi, pi| {
-            if done[gi] {
-                return Ok(());
-            }
-            let (name, p) = &groups[gi].params[pi];
-            let Some(g) = grads.grad(p) else { return Ok(()) };
-            if g.shape() != p.shape() {
-                return Err(Error::Invalid(format!(
-                    "adamw: gradient of `{name}` is {:?}, parameter is {:?}",
-                    g.dims(),
-                    p.dims()
-                )));
-            }
-            let (m, v) = &state[gi][pi];
-            update(p, g, m, v, &coefs[gi])
-        })?;
+        if done.as_ref().is_none_or(|d| d.iter().any(|&v| !v)) {
+            for_each_param_planned(plan, groups, |gi, pi| {
+                if done.as_ref().is_some_and(|d| d[gi]) {
+                    return Ok(());
+                }
+                let (name, p) = &groups[gi].params[pi];
+                let Some(g) = grads.grad(p) else { return Ok(()) };
+                if g.shape() != p.shape() {
+                    return Err(Error::Invalid(format!(
+                        "adamw: gradient of `{name}` is {:?}, parameter is {:?}",
+                        g.dims(),
+                        p.dims()
+                    )));
+                }
+                let (m, v) = &state[gi][pi];
+                update(p, g, m, v, &coefs[gi])
+            })?;
+        }
         self.step += 1;
         Ok(())
     }

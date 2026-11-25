@@ -38,6 +38,8 @@ macro_rules! gpu {
     };
 }
 
+mod optim;
+
 #[track_caller]
 fn close(got: &Tensor, want: &Tensor, atol: f32, rtol: f32, what: &str) {
     assert_eq!(got.dims(), want.dims(), "{what}: shape");

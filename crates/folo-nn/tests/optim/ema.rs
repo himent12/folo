@@ -309,3 +309,52 @@ fn ema_mismatches_non_contiguous_aliasing_and_thread_determinism() {
     assert_eq!(ema_b.ema_tensors().len(), 1);
     ema_b.update(&live_b).unwrap();
 }
+
+#[test]
+fn ema_over_1024_tensors_parallel_and_cross_alias_safe() {
+    struct Many {
+        ts: Vec<(String, Tensor)>,
+    }
+    impl Module for Many {
+        fn visit_tensors(&self, f: &mut dyn FnMut(&str, &Tensor, TensorKind)) {
+            for (name, t) in &self.ts {
+                f(name, t, TensorKind::Parameter);
+            }
+        }
+    }
+    let count = 1050usize;
+    let make = |val: f32| Many {
+        ts: (0..count)
+            .map(|i| {
+                let len = if i == 0 { 40_000 } else { 4 };
+                (format!("p{i}"), Tensor::full([len], val + (i as f32) * 1e-3))
+            })
+            .collect(),
+    };
+    let live = make(1.0);
+    let mut ema = ModelEma::with_params(make(0.0), &live, 0.9, 10.0).unwrap();
+    let updated_live = make(3.0);
+    ema.update(&updated_live).unwrap();
+    let d = ema.decay_at(1);
+    let (d32, w) = (d as f32, (1.0 - d) as f32);
+    for i in [0, 1, 512, count - 1] {
+        let init = 1.0 + (i as f32) * 1e-3;
+        let next = 3.0 + (i as f32) * 1e-3;
+        let want = init * d32 + next * w;
+        assert_eq!(ema.module().ts[i].1.to_vec::<f32>().unwrap()[0].to_bits(), want.to_bits());
+    }
+    // Cross-alias above 1024 tensors: p0 receives EMA's p1 storage and p1 receives EMA's p0 storage
+    // (same length tensors at indices 1 and 2). Must fall back cleanly without RwLock deadlock.
+    let mut crossed_ts = updated_live.ts.clone();
+    crossed_ts[1].1 = ema.module().ts[2].1.clone();
+    crossed_ts[2].1 = ema.module().ts[1].1.clone();
+    let prev1 = ema.module().ts[1].1.to_vec::<f32>().unwrap()[0];
+    let prev2 = ema.module().ts[2].1.to_vec::<f32>().unwrap()[0];
+    ema.update(&Many { ts: crossed_ts }).unwrap();
+    let d2 = ema.decay_at(2);
+    let (d2_32, w2) = (d2 as f32, (1.0 - d2) as f32);
+    let want1 = prev1 * d2_32 + prev2 * w2;
+    let want2 = prev2 * d2_32 + want1 * w2;
+    assert_eq!(ema.module().ts[1].1.to_vec::<f32>().unwrap()[0].to_bits(), want1.to_bits());
+    assert_eq!(ema.module().ts[2].1.to_vec::<f32>().unwrap()[0].to_bits(), want2.to_bits());
+}

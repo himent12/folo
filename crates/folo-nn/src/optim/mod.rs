@@ -33,6 +33,7 @@
 //! ```
 
 mod adamw;
+mod dispatch;
 mod grads;
 mod musgd;
 mod ortho;
@@ -45,6 +46,9 @@ use folo_core::{Device, Grads, Tensor};
 use serde::{Deserialize, Serialize};
 
 pub use adamw::AdamW;
+pub(crate) use dispatch::{
+    GradRef, PAR_THRESHOLD, ParamPlan, cpu_fast, for_each_param_planned, step_many, storage_key,
+};
 pub use grads::{GradAccumulator, global_grad_norm};
 pub use musgd::{MUON_SCALE, MuSgd, MuSgdWeights, is_muon_group};
 pub use ortho::{
@@ -777,80 +781,6 @@ pub fn auto_optimizer_rule(
         let lr0 = if rule == 1 { fit } else { fit.max(AUTO_ADAMW_MIN_LR0) };
         AutoChoice { kind: OptimKind::AdamW, lr0, momentum: 0.9, warmup_bias_lr: 0.0 }
     }
-}
-
-/// Above this many parameter elements in one step, parameters are updated in parallel.
-const PAR_THRESHOLD: usize = 1 << 16;
-
-/// Run `f` for every `(group index, param index)`, in parallel when the step is large. `f` runs under
-/// `no_grad` on whichever thread executes it.
-fn for_each_param<F>(groups: &[ParamGroup], f: F) -> Result<()>
-where
-    F: Fn(usize, usize) -> Result<()> + Sync,
-{
-    use rayon::prelude::*;
-    let total: usize = groups.iter().flat_map(|g| &g.params).map(|(_, t)| t.numel()).sum();
-    if total < PAR_THRESHOLD {
-        let _g = folo_core::no_grad();
-        for (gi, g) in groups.iter().enumerate() {
-            for pi in 0..g.params.len() {
-                f(gi, pi)?;
-            }
-        }
-        return Ok(());
-    }
-    let items: Vec<(usize, usize)> =
-        groups.iter().enumerate().flat_map(|(gi, g)| (0..g.params.len()).map(move |pi| (gi, pi))).collect();
-    folo_core::cpu::in_pool(|| {
-        items.par_iter().try_for_each(|&(gi, pi)| {
-            let _g = folo_core::no_grad();
-            f(gi, pi)
-        })
-    })
-}
-
-/// The multi-tensor device path of an optimizer step: per group with parameters off the CPU, every parameter that
-/// has a gradient is updated by one [`Tensor::optimizer_step_many_`] call with `step(group)` and the state
-/// tensors `state(group, param)` (the GPU updates 16 parameters per dispatch, against one each). Returns, per
-/// group, whether it was updated; the caller updates the other groups one parameter at a time, as before. `what`
-/// names the optimizer in errors.
-fn step_many<'a>(
-    what: &str,
-    groups: &'a [ParamGroup],
-    grads: &'a dyn GradSource,
-    step: impl Fn(usize) -> folo_core::backend::OptimStep,
-    state: impl Fn(usize, usize) -> Vec<&'a Tensor>,
-) -> Result<Vec<bool>> {
-    let _g = folo_core::no_grad();
-    let mut done = Vec::with_capacity(groups.len());
-    for (gi, grp) in groups.iter().enumerate() {
-        if grp.params.iter().all(|(_, p)| p.device().is_cpu()) {
-            done.push(false);
-            continue;
-        }
-        let (mut ps, mut gs, mut ss) = (Vec::new(), Vec::new(), Vec::new());
-        for (pi, (name, p)) in grp.params.iter().enumerate() {
-            let Some(g) = grads.grad(p) else { continue };
-            if g.shape() != p.shape() {
-                return Err(crate::Error::Invalid(format!(
-                    "{what}: gradient of `{name}` is {:?}, parameter is {:?}",
-                    g.dims(),
-                    p.dims()
-                )));
-            }
-            ps.push(p);
-            gs.push(g.to_dtype(folo_core::DType::F32)?);
-            ss.push(state(gi, pi));
-        }
-        let gr: Vec<&Tensor> = gs.iter().collect();
-        done.push(Tensor::optimizer_step_many_(&ps, &gr, &ss, &step(gi))?);
-    }
-    Ok(done)
-}
-
-/// True if every tensor is a contiguous CPU `F32` tensor (the fused-kernel fast path applies).
-fn cpu_fast(ts: &[&Tensor]) -> bool {
-    ts.iter().all(|t| t.device().is_cpu() && t.dtype() == folo_core::DType::F32 && t.is_contiguous())
 }
 
 #[cfg(test)]
