@@ -569,8 +569,9 @@ fn spawn(
                     let s = shared.cfg.imgsz as usize;
                     // Every in-flight sample satisfies `lo <= p < lo + window` and `ring_cap >= window`, so
                     // `p & ring_mask` gives each active position a unique O(1) slot with zero hashing.
-                    let mut pending: Vec<Option<Result<DoneSample>>> = (0..ring_cap).map(|_| None).collect();
-                    let mut batch_buf: Vec<DoneSample> = Vec::with_capacity(bs);
+                    let mut pending: Vec<Option<Result<DoneSample>>> =
+                        if num_batches == 0 { Vec::new() } else { (0..ring_cap).map(|_| None).collect() };
+                    let mut batch_buf: Vec<DoneSample> = Vec::with_capacity(bs.min(total));
                     for b in 0..num_batches {
                         let (lo, hi) = (b * bs, ((b + 1) * bs).min(total));
                         let need = hi - lo;

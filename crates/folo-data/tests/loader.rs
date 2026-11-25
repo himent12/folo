@@ -335,12 +335,13 @@ fn multi_epoch_reseeding_is_deterministic_across_workers_and_formats() {
             }
         }
     }
-    // `drop_last: true` with fewer samples than `batch_size` yields an empty epoch without hanging.
+    // `drop_last: true` with fewer samples than `batch_size` yields an empty epoch without hanging or
+    // over-allocating batch scratch (even for a very large `batch_size`).
     let tiny = rect_dataset(2);
-    for workers in [0, 1, 4] {
+    for (workers, batch_size) in [(0, 4), (1, 4), (4, 4), (1, 10_000_000)] {
         let loader = DataLoader::new(
             tiny.clone(),
-            LoaderConfig { batch_size: 4, drop_last: true, workers, ..cfg(workers) },
+            LoaderConfig { batch_size, imgsz: 8, u8_images: true, drop_last: true, workers, ..cfg(workers) },
         )
         .unwrap();
         assert_eq!(loader.batches_per_epoch(), 0);
