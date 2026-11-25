@@ -4,12 +4,13 @@
 import Box from '$icons/box';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
-import { computed, css, For, signal } from 'fw';
+import { computed, css, For, MediaQuery, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { bestMark, bestWord } from '$lib/bestMark';
 import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Model, Run } from '$lib/api/types';
+import { media } from '$lib/design/tokens';
 import { ago, bytes, compact, date, metric, sizeParts } from '$lib/format';
 import { prefs } from '$lib/prefs';
 import { href, router } from '$lib/router';
@@ -183,6 +184,7 @@ export default function Models() {
   const hasRows = computed(() => (models.data ? shownCount.get() > 0 : !models.error));
   /** Models to filter, or on their way: the toolbar is live (else it stays in place, disabled). */
   const hasData = computed(() => (models.data ? models.data.length > 0 : !models.error));
+  const phone = new MediaQuery(media.phone, false);
 
   /**
    * Each comparable group's best model (highest mAP50-95), marked with tertiary "best" text whatever the sort, "joint
@@ -283,39 +285,38 @@ export default function Models() {
       <div class="list-toolbar">
         <div class="lt-filter">
           {models.data?.length ? (
-            <>
-              <div class="seg" data-scrolls>
-                <Segmented label={GROUP_NAME} bind:value={dsFilter} options={dsOptions.get()} />
-              </div>{' '}
-              {/* Phones: every dataset in a native picker; a strip that scrolls sideways hides the last ones. */}
+            phone.current ? (
               <div class="ds-pick">
                 <label for="models-ds">Group</label>{' '}
                 <Select id="models-ds" label={GROUP_LABEL} bind:value={dsFilter} options={pickOptions.get()} />
               </div>
-            </>
+            ) : (
+              <div class="seg" data-scrolls>
+                <Segmented label={GROUP_NAME} bind:value={dsFilter} options={dsOptions.get()} />
+              </div>
+            )
           ) : models.data || models.error ? (
-            <>
-              <div class="seg">
-                <Segmented label={GROUP_NAME} value="all" disabled options={[{ value: 'all', label: 'All' }]} />
-              </div>{' '}
+            phone.current ? (
               <div class="ds-pick">
                 <label for="models-ds">Group</label>{' '}
                 <Select id="models-ds" label={GROUP_LABEL} value="all" disabled options={[{ value: 'all', label: 'All' }]} />
               </div>
-            </>
-          ) : (
-            // The same two controls at their loaded size: the dataset strip (a picker on phones).
-            <>
-              <div class="seg ctl-sk" style:width="320px">
-                <Skeleton h="100%" r="var(--radius-md)" />
-              </div>{' '}
-              <div class="ds-pick" aria-hidden="true">
-                <span class="ds-label">Group</span>{' '}
-                <span class="ctl-sk">
-                  <Skeleton h="100%" r="var(--radius-md)" />
-                </span>
+            ) : (
+              <div class="seg">
+                <Segmented label={GROUP_NAME} value="all" disabled options={[{ value: 'all', label: 'All' }]} />
               </div>
-            </>
+            )
+          ) : phone.current ? (
+            <div class="ds-pick" aria-hidden="true">
+              <span class="ds-label">Group</span>{' '}
+              <span class="ctl-sk">
+                <Skeleton h="100%" r="var(--radius-md)" />
+              </span>
+            </div>
+          ) : (
+            <div class="seg ctl-sk" style:width="320px">
+              <Skeleton h="100%" r="var(--radius-md)" />
+            </div>
           )}
         </div>{' '}
         <div class="lt-search">
@@ -323,8 +324,86 @@ export default function Models() {
         </div>
       </div>{' '}
       <Panel pad="none">
-        {/* With no rows (empty, no match, an error) the frame drops its column heads and holds the state alone. */}
-        <div class="scroll" class:state={!hasRows.get()}>
+        {/* Mount only the active responsive list tree: grouped phone rows below 768 px while loaded/loading;
+            the table otherwise (and the single .state frame for empty/error/no-match at every width). */}
+        {phone.current && hasRows.get() ? (
+          <div class="rows">
+            {!models.data && !models.error ? (
+              <For each={SK_GROUPS.map((n, gi) => ({ n, gi }))} key={(g) => g.gi}>
+                {(g) => (
+                  <section aria-hidden="true">
+                    <h2 class="m-group">
+                      <Skeleton h="10px" w="96px" />
+                    </h2>{' '}
+                    <ul>
+                      <For each={range(g().n)} key={(i) => i}>
+                        {() => (
+                          <li>
+                            <span class="row-sk">
+                              <span class="m-main">
+                                <span class="l-name">
+                                  <Skeleton w="55%" h="14px" />
+                                </span>
+                                <span class="l-meta">
+                                  <Skeleton w="75%" h="10px" />
+                                </span>
+                              </span>{' '}
+                              <span class="m-side">
+                                <span class="l-name">
+                                  <Skeleton w="40px" h="14px" />
+                                </span>
+                              </span>
+                            </span>
+                          </li>
+                        )}
+                      </For>
+                    </ul>
+                  </section>
+                )}
+              </For>
+            ) : null}
+            <For each={groups.get()} key={(g) => g.key}>
+              {(g, gi) => (
+                <section aria-label={g().label}>
+                  {/* The value column is named once, on the first group's header, not under every value. */}
+                  <h2 class="m-group">
+                    <span class="g-head">{groupHead(g)}</span>{' '}
+                    {gi() === 0 ? <span class="m-col">mAP50-95</span> : null}
+                  </h2>{' '}
+                  <ul>
+                    <For each={g().rows} key={(m) => m.id}>
+                      {(m) => (
+                        <li>
+                          <a href={href(`/models/${m().id}`)} title={m().about}>
+                            <span class="m-main">
+                              <span class="name truncate">{m().name}</span>{' '}
+                              <span class="m-meta num">
+                                <Meta line>
+                                  <Ident value={m().arch} />
+                                  <span>{m().imgsz} px</span>
+                                  <span>{compact(m().params)}</span>
+                                  <span>{bytes(m().bytes, prefs.units)}</span>
+                                </Meta>
+                              </span>
+                            </span>{' '}
+                            <span class="m-side">
+                              <span class="num map">
+                                {bestText(m)}
+                                <span class="sr-only">mAP50-95 </span>
+                                {score(m())}
+                              </span>
+                            </span>
+                          </a>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                </section>
+              )}
+            </For>
+          </div>
+        ) : (
+          <div class="scroll" class:state={!hasRows.get()}>
           <table class="table models" aria-busy={!models.data} aria-label="Models by evaluation dataset" use:rowNav>
             {hasRows.get() ? (
               <thead>
@@ -466,83 +545,8 @@ export default function Models() {
               </For>
             )}
           </table>
-        </div>{' '}
-        {/* Phones: the same groups as two-line rows (name and one meta line, mAP on the right). */}
-        <div class="rows">
-          {!models.data && !models.error ? (
-            <For each={SK_GROUPS.map((n, gi) => ({ n, gi }))} key={(g) => g.gi}>
-              {(g) => (
-                <section aria-hidden="true">
-                  <h2 class="m-group">
-                    <Skeleton h="10px" w="96px" />
-                  </h2>{' '}
-                  <ul>
-                    <For each={range(g().n)} key={(i) => i}>
-                      {() => (
-                        <li>
-                          <span class="row-sk">
-                            <span class="m-main">
-                              <span class="l-name">
-                                <Skeleton w="55%" h="14px" />
-                              </span>
-                              <span class="l-meta">
-                                <Skeleton w="75%" h="10px" />
-                              </span>
-                            </span>{' '}
-                            <span class="m-side">
-                              <span class="l-name">
-                                <Skeleton w="40px" h="14px" />
-                              </span>
-                            </span>
-                          </span>
-                        </li>
-                      )}
-                    </For>
-                  </ul>
-                </section>
-              )}
-            </For>
-          ) : null}
-          <For each={groups.get()} key={(g) => g.key}>
-            {(g, gi) => (
-              <section aria-label={g().label}>
-                {/* The value column is named once, on the first group's header, not under every value. */}
-                <h2 class="m-group">
-                  <span class="g-head">{groupHead(g)}</span>{' '}
-                  {gi() === 0 ? <span class="m-col">mAP50-95</span> : null}
-                </h2>{' '}
-                <ul>
-                  <For each={g().rows} key={(m) => m.id}>
-                    {(m) => (
-                      <li>
-                        <a href={href(`/models/${m().id}`)} title={m().about}>
-                          <span class="m-main">
-                            <span class="name truncate">{m().name}</span>{' '}
-                            <span class="m-meta num">
-                              <Meta line>
-                                <Ident value={m().arch} />
-                                <span>{m().imgsz} px</span>
-                                <span>{compact(m().params)}</span>
-                                <span>{bytes(m().bytes, prefs.units)}</span>
-                              </Meta>
-                            </span>
-                          </span>{' '}
-                          <span class="m-side">
-                            <span class="num map">
-                              {bestText(m)}
-                              <span class="sr-only">mAP50-95 </span>
-                              {score(m())}
-                            </span>
-                          </span>
-                        </a>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              </section>
-            )}
-          </For>
         </div>
+        )}
       </Panel>{' '}
       {/* No totals line under the table (they are the header's facts): only a narrowed list says what it shows. */}
       {models.data && shownCount.get() < models.data.length ? (

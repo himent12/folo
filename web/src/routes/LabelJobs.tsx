@@ -135,7 +135,55 @@ export default function LabelJobs() {
             </div>
 
             <Panel pad="none">
-              <div class="scroll" class:state={!hasRows.get()}>
+              {phone.current && hasRows.get() ? (
+                shown.get().length ? (
+                  /* Phones: the name, then how far labeling has got and the status; one line each, whole items. */
+                  <ul class="rows" aria-label="Labeling jobs">
+                    <For each={shown.get()} key={(j) => j.id}>
+                      {(j) => {
+                        const st = () => jobStatus(j());
+                        return (
+                          <li class="m-row">
+                            <a href={href(`/datasets/label/${j().id}`)}>
+                              <span class="m-main">
+                                <span class="name truncate">{j().name}</span>
+                                <span class="m-meta num">
+                                  <Meta>
+                                    <span>
+                                      {num(j().counts.labeled)} of {num(j().counts.images)} labeled
+                                    </span>
+                                    <span>{ago(j().created)}</span>
+                                  </Meta>
+                                </span>
+                              </span>
+                              <span class="m-side">
+                                <StatusBadge plain state={st()} />
+                              </span>
+                            </a>
+                          </li>
+                        );
+                      }}
+                    </For>
+                  </ul>
+                ) : (
+                  <ul class="rows" aria-hidden="true">
+                    <For each={[0, 1, 2]}>
+                      {() => (
+                        <li>
+                          <span class="row-sk">
+                            <span class="m-main">
+                              <Skeleton w="55%" h="14px" />
+                              <Skeleton w="45%" h="10px" />
+                            </span>
+                            <Skeleton w="64px" h="12px" />
+                          </span>
+                        </li>
+                      )}
+                    </For>
+                  </ul>
+                )
+              ) : (
+                <div class="scroll" class:state={!hasRows.get()}>
                 <table class="table jobs" aria-busy={!jobs.data} aria-label="Labeling jobs" use:rowNav>
                   {hasRows.get() ? (
                     <thead>
@@ -269,52 +317,7 @@ export default function LabelJobs() {
                   </tbody>
                 </table>
               </div>
-              {/* Phones: the name, then how far labeling has got and the status; one line each, whole items. */}
-              {shown.get().length ? (
-                <ul class="rows" aria-label="Labeling jobs">
-                  <For each={shown.get()} key={(j) => j.id}>
-                    {(j) => {
-                      const st = () => jobStatus(j());
-                      return (
-                        <li class="m-row">
-                          <a href={href(`/datasets/label/${j().id}`)}>
-                            <span class="m-main">
-                              <span class="name truncate">{j().name}</span>
-                              <span class="m-meta num">
-                                <Meta>
-                                  <span>
-                                    {num(j().counts.labeled)} of {num(j().counts.images)} labeled
-                                  </span>
-                                  <span>{ago(j().created)}</span>
-                                </Meta>
-                              </span>
-                            </span>
-                            <span class="m-side">
-                              <StatusBadge plain state={st()} />
-                            </span>
-                          </a>
-                        </li>
-                      );
-                    }}
-                  </For>
-                </ul>
-              ) : !jobs.data && !jobs.error ? (
-                <ul class="rows" aria-hidden="true">
-                  <For each={[0, 1, 2]}>
-                    {() => (
-                      <li>
-                        <span class="row-sk">
-                          <span class="m-main">
-                            <Skeleton w="55%" h="14px" />
-                            <Skeleton w="45%" h="10px" />
-                          </span>
-                          <Skeleton w="64px" h="12px" />
-                        </span>
-                      </li>
-                    )}
-                  </For>
-                </ul>
-              ) : null}
+              )}
             </Panel>
             {jobs.data && shown.get().length ? (
               <p class="list-foot num">

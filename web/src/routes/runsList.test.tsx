@@ -359,18 +359,24 @@ describe('Runs: sort, search and selection kept in the URL; row menus on every e
   });
 
   it("lets a phone row's name and dataset cut themselves, whole in their tooltips (studio-shell handover)", async () => {
-    const api = new MockApi('normal', 0);
-    const done = (await api.runs()).find((r) => r.status === 'completed' && r.dataset)!;
-    await open(Runs, '/runs', api);
-    const row = await vi.waitFor(() => {
-      flushSync();
-      const li = [...target.querySelectorAll<HTMLElement>('.rows li')].find((l) => l.querySelector('.name')?.textContent?.trim() === done.name);
-      if (!li?.querySelector('.r-meta')?.textContent?.includes(done.dataset!.name)) throw new Error('rows not loaded');
-      return li;
-    });
-    expect(row.querySelector('.name')?.getAttribute('title')).toBe(done.name);
-    const ds = [...row.querySelectorAll<HTMLElement>('.r-meta .truncate')].find((e) => e.textContent?.trim() === done.dataset!.name);
-    expect(ds?.getAttribute('title')).toBe(done.dataset!.name);
+    const realMatch = window.matchMedia;
+    window.matchMedia = ((q: string) => ({ matches: q.includes('max-width: 767px'), media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
+    try {
+      const api = new MockApi('normal', 0);
+      const done = (await api.runs()).find((r) => r.status === 'completed' && r.dataset)!;
+      await open(Runs, '/runs', api);
+      const row = await vi.waitFor(() => {
+        flushSync();
+        const li = [...target.querySelectorAll<HTMLElement>('.rows li')].find((l) => l.querySelector('.name')?.textContent?.trim() === done.name);
+        if (!li?.querySelector('.r-meta')?.textContent?.includes(done.dataset!.name)) throw new Error('rows not loaded');
+        return li;
+      });
+      expect(row.querySelector('.name')?.getAttribute('title')).toBe(done.name);
+      const ds = [...row.querySelectorAll<HTMLElement>('.r-meta .truncate')].find((e) => e.textContent?.trim() === done.dataset!.name);
+      expect(ds?.getAttribute('title')).toBe(done.dataset!.name);
+    } finally {
+      window.matchMedia = realMatch;
+    }
   });
 
   it("lets a desktop row's dataset cut itself under the name, whole in its tooltip (w2-verify-studio N4)", async () => {
