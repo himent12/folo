@@ -341,6 +341,7 @@ impl FoloApp {
     fn export_menu(&mut self, m: &Model, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let open = self.export_open;
+        let any_busy = self.exporting.iter().any(|(id, _)| id == &m.id);
         // Estimates from the parameter count: 2 bytes per weight in f16, 4 in ONNX (f32).
         let (half, hu) = bytes(m.params * 2);
         let (onnx, ou) = bytes(m.params * 4);
@@ -356,7 +357,7 @@ impl FoloApp {
         let trigger = self
             .button(
                 "model-export",
-                "Export",
+                if any_busy { "Exporting…" } else { "Export" },
                 Btn::Secondary,
                 Some("icons/download.svg"),
                 window,
@@ -371,7 +372,9 @@ impl FoloApp {
             .capture_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, _, cx| {
                 if this.export_open && matches!(ev.keystroke.key.as_str(), "enter" | "space") {
                     let fmt = fmts[this.export_hl.min(fmts.len() - 1)];
-                    this.export_model(mid.clone(), fmt, cx);
+                    if !this.exporting.contains(&(mid.clone(), fmt)) {
+                        this.export_model(mid.clone(), fmt, cx);
+                    }
                     cx.stop_propagation();
                     cx.notify();
                 }
@@ -435,6 +438,7 @@ impl FoloApp {
                     .shadow(t.shadow_lg())
                     .children(options.into_iter().enumerate().map(|(i, (fmt, label, detail))| {
                         let id = mid.clone();
+                        let busy = self.exporting.contains(&(id.clone(), fmt));
                         div()
                             .id(SharedString::from(format!("export-{fmt}")))
                             .px(px(10.))
@@ -443,15 +447,32 @@ impl FoloApp {
                             .flex_col()
                             .gap(px(2.))
                             .rounded(px(radius::MD))
-                            .cursor_pointer()
-                            .when(i == hl, |d| d.bg(t.bg_hover))
-                            .hover(|s| s.bg(t.bg_hover))
-                            .active(|s| s.bg(t.bg_active))
-                            .on_click(
-                                cx.listener(move |this, _, _, cx| this.export_model(id.clone(), fmt, cx)),
-                            )
+                            .when(busy, |d| d.cursor_not_allowed().opacity(0.65))
+                            .when(!busy, |d| {
+                                d.cursor_pointer()
+                                    .when(i == hl, |d| d.bg(t.bg_hover))
+                                    .hover(|s| s.bg(t.bg_hover))
+                                    .active(|s| s.bg(t.bg_active))
+                                    .on_mouse_move(cx.listener(
+                                        move |this, _: &folo_ui::MouseMoveEvent, _, cx| {
+                                            if this.export_hl != i {
+                                                this.export_hl = i;
+                                                cx.notify();
+                                            }
+                                        },
+                                    ))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.export_model(id.clone(), fmt, cx)
+                                    }))
+                            })
                             .child(
-                                text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).child(label),
+                                text(ty::BASE, if busy { t.text_tertiary } else { t.text_primary })
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(if busy {
+                                        format!("{label} · Exporting…")
+                                    } else {
+                                        label.into()
+                                    }),
                             )
                             .child(text(ty::SM, t.text_tertiary).tnum().child(detail))
                             .into_any_element()
@@ -506,5 +527,83 @@ mod tests {
         // among the curves; the headline still shows them.
         assert_eq!(headline_source(&file, Some(&ev), None), None);
         assert!(file.metrics.is_some() && run_metrics(&file).is_none());
+    }
+
+    #[test]
+    fn model_page_sorts_per_class_links_run_and_dataset_and_guards_export() {
+        use crate::app::tests::{drive, open};
+        use folo_ui::{KeyDownEvent, KeyUpEvent, Keystroke, PlatformInput};
+
+        let send_enter = |app: &mut folo_ui::HeadlessApp, w: folo_ui::WindowHandle<FoloApp>| {
+            let ks = Keystroke::parse("enter").unwrap();
+            app.simulate_input(
+                w.into(),
+                PlatformInput::KeyDown(KeyDownEvent { keystroke: ks.clone(), is_held: false }),
+            );
+            app.run_until_idle();
+            app.frame(w.into());
+            app.simulate_input(w.into(), PlatformInput::KeyUp(KeyUpEvent { keystroke: ks }));
+            app.run_until_idle();
+            app.frame(w.into());
+        };
+
+        let (mut app, window) = open();
+        let (mid, rid, dsid) = drive(&mut app, window, |this, w, cx| {
+            let m = this.store.models.ready().unwrap().iter().find(|m| m.run_id.is_some()).unwrap().clone();
+            let rid = m.run_id.clone().unwrap();
+            let dsid = this.store.run(&rid).unwrap().config.dataset_id.clone();
+            this.navigate(Route::Model(m.id.clone()), w, cx);
+            (m.id, rid, dsid)
+        });
+        for _ in 0..3 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+
+        // 1. Per-class table sort header toggles desc -> asc.
+        drive(&mut app, window, |this, w, cx| this.focus_key("pc-sort-map50", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        drive(&mut app, window, |this, _, _| {
+            assert_eq!(this.class_table_sort, Some(("map50", true)));
+        });
+        send_enter(&mut app, window);
+        drive(&mut app, window, |this, _, _| {
+            assert_eq!(this.class_table_sort, Some(("map50", false)));
+        });
+
+        // 2. Duplicate export guard: calling export_model while already in flight is a no-op;
+        // once completed, exporting clears cleanly.
+        drive(&mut app, window, |this, _, cx| {
+            this.exporting.insert((mid.clone(), "onnx"));
+            let before = this.toasts.len();
+            this.export_model(mid.clone(), "onnx", cx);
+            assert_eq!(this.toasts.len(), before, "in-flight export blocks duplicate request");
+            this.exporting.remove(&(mid.clone(), "onnx"));
+            this.export_model(mid.clone(), "onnx", cx);
+        });
+        drive(&mut app, window, |this, _, _| {
+            assert!(this.exporting.is_empty(), "exporting clears after completion");
+        });
+
+        // 3. Details panel links navigate to the source run and training dataset, resetting table sort.
+        drive(&mut app, window, |this, w, cx| this.focus_key("model-details-run-link", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        drive(&mut app, window, |this, w, cx| {
+            assert_eq!(this.route, Route::Run(rid.clone()));
+            assert_eq!(this.class_table_sort, None, "navigation resets per-class sort");
+            this.navigate(Route::Model(mid.clone()), w, cx);
+        });
+        for _ in 0..2 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        drive(&mut app, window, |this, w, cx| this.focus_key("model-details-train-ds-link", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        drive(&mut app, window, |this, _, _| {
+            assert_eq!(this.route, Route::Dataset(dsid));
+        });
     }
 }

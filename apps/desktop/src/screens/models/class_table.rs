@@ -8,16 +8,52 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use crate::api::{Model, ModelEval};
+use crate::api::{ClassMetrics, Model, ModelEval};
 use crate::app::{FoloApp, act};
-use crate::screens::th;
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
-/// A metric column's width: fits "Precision" and "0.000".
-const NUM_W: f32 = 60.;
+/// Widths of the four metric columns (`AP50`, `AP50-95`, `Precision`, `Recall`), sized to fit each
+/// header label beside its sort chevron without crowding the Class column at 1280 px.
+const COL_W: [f32; 4] = [56., 66., 68., 56.];
 /// A row's height.
 const ROW: f32 = 32.;
+
+/// Orders `per` according to `sort` (`None` keeps class index order). Non-finite metric values
+/// always sort last in both directions; ties preserve ascending class index.
+pub(super) fn sort_per_class(per: &mut [&ClassMetrics], classes: &[String], sort: Option<(&str, bool)>) {
+    let cmp_opt_f32 = |a: f32, b: f32, desc: bool| match (a.is_finite(), b.is_finite()) {
+        (true, true) => {
+            if desc {
+                b.total_cmp(&a)
+            } else {
+                a.total_cmp(&b)
+            }
+        }
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (false, false) => std::cmp::Ordering::Equal,
+    };
+    match sort {
+        None => per.sort_by_key(|c| c.class),
+        Some(("class", desc)) => per.sort_by(|a, b| {
+            let na = classes.get(a.class as usize).map_or("", String::as_str).to_lowercase();
+            let nb = classes.get(b.class as usize).map_or("", String::as_str).to_lowercase();
+            let ord = if desc { nb.cmp(&na) } else { na.cmp(&nb) };
+            ord.then_with(|| a.class.cmp(&b.class))
+        }),
+        Some((col, desc)) => per.sort_by(|a, b| {
+            let val = |c: &ClassMetrics| match col {
+                "map50" => c.map50,
+                "map50_95" => c.map50_95,
+                "precision" => c.precision,
+                "recall" => c.recall,
+                _ => f32::NAN,
+            };
+            cmp_opt_f32(val(a), val(b), desc).then_with(|| a.class.cmp(&b.class))
+        }),
+    }
+}
 
 impl FoloApp {
     /// The table. `beside`: it sits beside the plot, so its rows take the plot's height and scroll;
@@ -34,8 +70,40 @@ impl FoloApp {
         let t = theme(cx);
         let pin = self.pr_pin;
         let nums = |vals: [String; 4], ink: folo_ui::Hsla| {
-            vals.map(|v| text(ty::SM, ink).tnum().w(px(NUM_W)).flex_none().text_right().child(v))
+            vals.into_iter()
+                .zip(COL_W)
+                .map(move |(v, w)| text(ty::SM, ink).tnum().w(px(w)).flex_none().text_right().child(v))
         };
+        let class_th = self.sort_th_on(
+            self.class_table_sort,
+            |a| &mut a.class_table_sort,
+            "pc-sort",
+            "class",
+            "Class",
+            52.,
+            false,
+            window,
+            cx,
+        );
+        let metric_ths = [
+            ("AP50", "map50", COL_W[0]),
+            ("AP50-95", "map50_95", COL_W[1]),
+            ("Precision", "precision", COL_W[2]),
+            ("Recall", "recall", COL_W[3]),
+        ]
+        .map(|(label, key, w)| {
+            self.sort_th_on(
+                self.class_table_sort,
+                |a| &mut a.class_table_sort,
+                "pc-sort",
+                key,
+                label,
+                w,
+                true,
+                window,
+                cx,
+            )
+        });
         let head = div()
             .flex()
             .items_center()
@@ -45,8 +113,8 @@ impl FoloApp {
             .flex_none()
             .border_b_1()
             .border_color(t.line_subtle)
-            .child(div().flex_1().min_w_0().child(th(&t, "Class")))
-            .children(["AP50", "AP50-95", "Precision", "Recall"].map(|h| num_cell(NUM_W, th(&t, h))));
+            .child(div().flex_1().min_w_0().child(class_th))
+            .children(metric_ths);
         // Every class together, as the KPI strip reports it, drawn as the plot's ink line; a run's
         // model only (`run_metrics`: a file's stored numbers may be on another dataset).
         let all = super::detail::run_metrics(m).map(|mm| {
@@ -86,8 +154,7 @@ impl FoloApp {
                 ))
         });
         let mut per: Vec<_> = ev.per_class.iter().collect();
-        // Class order, as the confusion matrix runs.
-        per.sort_by_key(|c| c.class);
+        sort_per_class(&mut per, &m.classes, self.class_table_sort);
         let rows: Vec<AnyElement> = per
             .into_iter()
             .map(|c| {
@@ -221,4 +288,54 @@ impl FoloApp {
 /// line up to the pixel).
 pub(super) fn num_cell(w: f32, content: impl IntoElement) -> folo_ui::Div {
     div().w(px(w)).flex_none().flex().justify_end().child(content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sort_per_class;
+    use crate::api::ClassMetrics;
+
+    fn cm(class: u32, map50: f32, map50_95: f32, precision: f32, recall: f32) -> ClassMetrics {
+        ClassMetrics { class, map50, map50_95, precision, recall }
+    }
+
+    #[test]
+    fn sort_per_class_orders_metrics_and_keeps_non_finite_last() {
+        let classes = vec!["zebra".into(), "apple".into(), "mango".into(), "berry".into()];
+        let data = [
+            cm(0, 0.70, 0.50, 0.80, 0.60),
+            cm(1, f32::NAN, 0.40, 0.90, 0.50),
+            cm(2, 0.90, 0.50, 0.70, f32::INFINITY),
+            cm(3, 0.70, 0.80, 0.85, 0.75),
+        ];
+        let mut refs: Vec<&ClassMetrics> = data.iter().collect();
+
+        // Default None keeps class index order.
+        sort_per_class(&mut refs, &classes, None);
+        assert_eq!(refs.iter().map(|c| c.class).collect::<Vec<_>>(), [0, 1, 2, 3]);
+
+        // AP50 desc/asc: NaN sorts LAST in both; tie (0.70) breaks by class index ascending.
+        sort_per_class(&mut refs, &classes, Some(("map50", true)));
+        assert_eq!(refs.iter().map(|c| c.class).collect::<Vec<_>>(), [2, 0, 3, 1]);
+        sort_per_class(&mut refs, &classes, Some(("map50", false)));
+        assert_eq!(refs.iter().map(|c| c.class).collect::<Vec<_>>(), [0, 3, 2, 1]);
+
+        // Recall desc/asc: +inf sorts LAST in both.
+        sort_per_class(&mut refs, &classes, Some(("recall", true)));
+        assert_eq!(refs.iter().map(|c| c.class).collect::<Vec<_>>(), [3, 0, 1, 2]);
+        sort_per_class(&mut refs, &classes, Some(("recall", false)));
+        assert_eq!(refs.iter().map(|c| c.class).collect::<Vec<_>>(), [1, 0, 3, 2]);
+
+        // AP50-95 and Precision.
+        sort_per_class(&mut refs, &classes, Some(("map50_95", true)));
+        assert_eq!(refs.iter().map(|c| c.class).collect::<Vec<_>>(), [3, 0, 2, 1]);
+        sort_per_class(&mut refs, &classes, Some(("precision", true)));
+        assert_eq!(refs.iter().map(|c| c.class).collect::<Vec<_>>(), [1, 3, 0, 2]);
+
+        // Class name sorting (asc = A..Z, desc = Z..A).
+        sort_per_class(&mut refs, &classes, Some(("class", false)));
+        assert_eq!(refs.iter().map(|c| c.class).collect::<Vec<_>>(), [1, 3, 2, 0]);
+        sort_per_class(&mut refs, &classes, Some(("class", true)));
+        assert_eq!(refs.iter().map(|c| c.class).collect::<Vec<_>>(), [0, 2, 3, 1]);
+    }
 }

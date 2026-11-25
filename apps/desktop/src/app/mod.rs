@@ -479,11 +479,15 @@ pub struct FoloApp {
     /// Models whose full class list is expanded in the Details panel.
     pub model_classes_expanded: std::collections::HashSet<String>,
     pub export_open: bool,
+    /// In-flight model exports `(model_id, format)` so triggers show progress and block duplicates.
+    pub exporting: std::collections::HashSet<(String, &'static str)>,
     pub pr_hover: Option<f32>,
     /// The class isolated on the PR chart (hovered or focused in the per-class table).
     pub pr_focus: Option<u32>,
     /// The class pinned on the PR chart (Enter/Space or a click); hover and focus override it.
     pub pr_pin: Option<u32>,
+    /// Active sort on a model's per-class table: `(column_key, descending)`; `None` keeps class order.
+    pub class_table_sort: Option<(&'static str, bool)>,
     /// Highlighted option while the Export menu is open.
     pub export_hl: usize,
     /// The Models table's sort inside each evaluation group: column key and descending; None keeps
@@ -830,9 +834,11 @@ impl FoloApp {
             bench_search,
             model_classes_expanded: Default::default(),
             export_open: false,
+            exporting: Default::default(),
             pr_hover: None,
             pr_focus: None,
             pr_pin: None,
+            class_table_sort: None,
             export_hl: 0,
             // Newest first, shown on the Created header, which is also how the server lists them.
             // Ranked within each group, best first (as Studio's list opens).

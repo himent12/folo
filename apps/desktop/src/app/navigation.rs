@@ -124,6 +124,7 @@ impl FoloApp {
         self.export_open = false;
         self.pr_pin = None;
         self.pr_focus = None;
+        self.class_table_sort = None;
         self.menu_open = None;
         self.run_x_fit = None;
         self.log_filter = crate::app::LogFilter::All;
