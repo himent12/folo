@@ -36,6 +36,7 @@ pub mod q8;
 pub(crate) mod reduce;
 #[cfg(test)]
 mod sites_tests;
+mod softmax;
 #[cfg(test)]
 mod winograd_tests;
 
@@ -346,7 +347,12 @@ impl Backend for CpuBackend {
 
     fn softmax(&self, x: View<'_>, dim: usize, log: bool) -> Result<Storage> {
         let data = contiguous_f32(&x, "softmax")?;
-        Ok(f32_storage(reduce::softmax(&data, reduce::split3(x.shape().dims(), dim), log)))
+        Ok(f32_storage(softmax::softmax(&data, reduce::split3(x.shape().dims(), dim), log)))
+    }
+
+    fn softmax_backward(&self, y: View<'_>, grad: View<'_>, dim: usize, log: bool) -> Result<Storage> {
+        let (yd, gd) = (contiguous_f32(&y, "softmax_backward")?, contiguous_f32(&grad, "softmax_backward")?);
+        Ok(f32_storage(softmax::softmax_backward(&yd, &gd, reduce::split3(y.shape().dims(), dim), log)))
     }
 
     fn matmul(&self, a: View<'_>, b: View<'_>) -> Result<Storage> {

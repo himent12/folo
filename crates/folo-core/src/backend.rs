@@ -363,6 +363,11 @@ pub trait Backend: Send + Sync + 'static {
     fn softmax(&self, x: View<'_>, dim: usize, log: bool) -> Result<Storage> {
         unsupported!(self, "softmax")
     }
+    /// Gradient of [`Backend::softmax`] (`y` is the forward output: probabilities if `!log`, log-probabilities if
+    /// `log`). The default returns [`Error::NotSupported`] and callers fall back to composite ops.
+    fn softmax_backward(&self, y: View<'_>, grad: View<'_>, dim: usize, log: bool) -> Result<Storage> {
+        unsupported!(self, "softmax_backward")
+    }
     /// Batched matrix product: `a` is `[B.., m, k]`, `b` is `[B.., k, n]` with identical (already broadcast)
     /// batch dims; the output is `[B.., m, n]`.
     fn matmul(&self, a: View<'_>, b: View<'_>) -> Result<Storage> {

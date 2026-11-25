@@ -259,7 +259,7 @@ pub(super) fn recip_1_plus8(e: std::arch::x86_64::__m256) -> std::arch::x86_64::
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-fn exp8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+pub(crate) fn exp8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let xc = _mm256_min_ps(_mm256_max_ps(x, _mm256_set1_ps(-104.0)), _mm256_set1_ps(89.0));
     let v = exp_clamped8(xc);
