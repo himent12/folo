@@ -231,10 +231,18 @@ impl TextInput {
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
+        if self.content.is_empty() {
+            cx.propagate();
+            return;
+        }
         self.move_to(0, cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        if self.content.is_empty() {
+            cx.propagate();
+            return;
+        }
         self.move_to(self.content.len(), cx);
     }
 

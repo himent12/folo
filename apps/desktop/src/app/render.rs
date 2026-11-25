@@ -120,12 +120,12 @@ impl Render for FoloApp {
             .on_action(cx.listener(|this, _: &ToggleTheme, _, cx| this.toggle_theme(cx)))
             .on_action(cx.listener(|_, _: &ToggleFullscreen, w, _| w.toggle_fullscreen()))
             .on_action(cx.listener(|this, _: &Back, w, cx| {
-                if !this.modal_open() {
+                if !this.modal_open() && this.palette.is_none() {
                     this.back(w, cx)
                 }
             }))
             .on_action(cx.listener(|this, _: &Forward, w, cx| {
-                if !this.modal_open() {
+                if !this.modal_open() && this.palette.is_none() {
                     this.forward(w, cx)
                 }
             }))

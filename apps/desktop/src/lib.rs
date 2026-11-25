@@ -358,6 +358,7 @@ pub fn run() {
                         app.theme_prefs = prefs.clone();
                         app.apply_theme(cx);
                         app.spawn_server = spawn_server;
+                        app.saved_server_url = saved.server_url.clone();
                         if let Some(calm) = saved.reduce_motion {
                             app.reduce_motion = calm;
                             crate::ui::set_reduce_motion(calm);
@@ -367,7 +368,8 @@ pub fn run() {
                             scenario::apply(&mut app, s, window, cx);
                         }
                         if auto {
-                            app.autoconnect(connect_url.clone(), spawn_server, app::Reason::Launch, cx);
+                            let spawn = should_auto_spawn(spawn_server, &connect_url);
+                            app.autoconnect(connect_url.clone(), spawn, app::Reason::Launch, cx);
                         }
                         if open.as_deref() == Some("new-run") {
                             app.open_new_run_pending = true;
@@ -431,6 +433,13 @@ fn launch_server_url(env_server: Option<&str>, saved: Option<&str>) -> String {
         .to_string()
 }
 
+/// Whether launch-time autoconnect may spawn a local `folo serve`: only when auto-spawn is enabled
+/// and the target URL is a valid loopback address, so a saved remote server is never silently
+/// replaced by a local instance.
+fn should_auto_spawn(spawn_server: bool, url: &str) -> bool {
+    spawn_server && api::http::address_ok(url) && api::http::is_loopback(url)
+}
+
 #[cfg(test)]
 mod source_tests {
     /// Catches text double-encoded by an editor or shell (UTF-8 read as Windows-1252) and stray BOMs.
@@ -466,6 +475,11 @@ mod tests {
             "http://env:7878"
         );
         assert_eq!(launch_server_url(Some("   "), Some("http://saved:7878")), "http://saved:7878");
+        assert!(should_auto_spawn(true, "http://127.0.0.1:7878"));
+        assert!(should_auto_spawn(true, "http://localhost:7878"));
+        assert!(!should_auto_spawn(false, "http://127.0.0.1:7878"));
+        assert!(!should_auto_spawn(true, "http://10.0.0.5:7878"));
+        assert!(!should_auto_spawn(true, "http://127.0.0.1:99999"));
         assert_eq!(launch_server_url(None, Some(" http://saved:7878 ")), "http://saved:7878");
         assert_eq!(launch_server_url(None, Some("")), "http://127.0.0.1:7878");
         assert_eq!(launch_server_url(None, None), "http://127.0.0.1:7878");

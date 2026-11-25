@@ -560,6 +560,8 @@ pub struct FoloApp {
     // Settings
     pub server_mode: ServerMode,
     pub server_url: Entity<TextInput>,
+    /// Explicitly configured Server URL remembered in `desktop.json` (never clobbered by CLI/env overrides or ephemeral auto-spawned ports).
+    pub saved_server_url: Option<String>,
     pub spawn_server: bool,
     /// A local `folo serve` this app started (stopped when the app quits).
     server_proc: Option<crate::api::http::ServerProcess>,
@@ -881,6 +883,7 @@ impl FoloApp {
             play_pred_for: None,
             server_mode: ServerMode::Mock,
             server_url,
+            saved_server_url: None,
             spawn_server: true,
             server_proc: None,
             connecting: None,

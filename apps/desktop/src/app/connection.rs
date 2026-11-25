@@ -502,6 +502,10 @@ impl FoloApp {
             }
             ServerMode::Local => {
                 let url = self.server_url.read(cx).text().to_string();
+                let trimmed = url.trim();
+                if !trimmed.is_empty() && crate::api::http::address_ok(trimmed) {
+                    self.saved_server_url = Some(trimmed.to_string());
+                }
                 // Only this machine's server can be started here: a typo in another machine's address
                 // must say so, not land on the local data. Nor can an address that isn't one
                 // ("http://127.0.0.1:99999"): it stays as typed and Settings says what is wrong.

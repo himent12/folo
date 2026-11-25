@@ -77,15 +77,14 @@ impl SelectTypeahead {
             let start = if cur_matches { (cur + 1) % n } else { 0 };
             return find(&self.query, start);
         }
-        let repeated_single = self.query == ch_lower;
+        if self.query == ch_lower {
+            return find(&ch_lower, (cur + 1) % n);
+        }
         let mut extended = self.query.clone();
         extended.push_str(&ch_lower);
         if let Some(hit) = find(&extended, cur) {
             self.query = extended;
             return Some(hit);
-        }
-        if repeated_single {
-            return find(&ch_lower, (cur + 1) % n);
         }
         self.query = ch_lower;
         find(&self.query, (cur + 1) % n)
@@ -541,6 +540,21 @@ mod tests {
         // After the 800 ms window, typing starts a fresh prefix from index 0.
         assert_eq!(
             ta.match_option("m", 'a', t0 + std::time::Duration::from_millis(1200), &labels, &disabled, 4),
+            Some(0)
+        );
+
+        // Repeated identical letter cycles through every match even when one starts with doubled letters.
+        let a_labels: Vec<SharedString> =
+            ["Aardvark", "Alpaca", "Ant"].into_iter().map(SharedString::from).collect();
+        let a_disabled = [false, false, false];
+        ta.clear();
+        assert_eq!(ta.match_option("a", 'a', t0, &a_labels, &a_disabled, 0), Some(1));
+        assert_eq!(
+            ta.match_option("a", 'a', t0 + std::time::Duration::from_millis(100), &a_labels, &a_disabled, 1),
+            Some(2)
+        );
+        assert_eq!(
+            ta.match_option("a", 'a', t0 + std::time::Duration::from_millis(200), &a_labels, &a_disabled, 2),
             Some(0)
         );
     }
