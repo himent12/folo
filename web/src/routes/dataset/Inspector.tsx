@@ -165,12 +165,12 @@ export default function Inspector(props: InspectorProps) {
     const pager = props.pager;
     const openId = id.peek();
     const base = pendingIdx !== null ? pendingIdx : idx.peek();
-    if (!openId || base < 0) return;
+    if (!openId || !dialog?.open || base < 0) return;
     const count = total.peek();
     const j = base + d;
     if (j < 0 || j >= count) return;
     pendingIdx = j;
-    stepDir.set(d);
+    stepDir.set(Math.sign(j - idx.peek()) || d);
     const token = ++stepToken;
     const rev = pager.revision;
     // Stepping back to the already-open image cancels the pending fetch immediately instead of round-tripping.
@@ -180,7 +180,7 @@ export default function Inspector(props: InspectorProps) {
     }
     try {
       const n = await pager.at(j);
-      if (unmounted || token !== stepToken || props.pager !== pager || pager.revision !== rev || id.peek() !== openId) return;
+      if (unmounted || !dialog?.open || token !== stepToken || props.pager !== pager || pager.revision !== rev || id.peek() !== openId) return;
       pendingIdx = null;
       if (n) props.onnavigate(n.id);
     } catch {
@@ -509,7 +509,10 @@ export default function Inspector(props: InspectorProps) {
       class="insp"
       style={{ '--ar': img.get() ? im().width / im().height : undefined }}
       aria-label={img.get() ? `Image ${stem(im().file)}` : 'Image'}
-      onclose={() => id.peek() && props.onclose()}
+      onclose={() => {
+        clearPendingStep();
+        if (id.peek()) props.onclose();
+      }}
       onkeydown={onkeydown}
     >
       <header>

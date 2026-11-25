@@ -417,4 +417,30 @@ describe('Logs: search, copy visible, static tokens, and single-reflow pin', () 
     expect(target.querySelectorAll('.line')).toHaveLength(2);
     expect(document.activeElement).toBe(target.querySelector('.log'));
   });
+
+  it('hands focus to the log container when a live matching line unmounts the focused Clear filters button', () => {
+    const log = new AppendLog<LogLine>();
+    log.push(line(1, 'info'));
+    const version = signal(0);
+    c = render(() => <Logs log={log} version={version.get()} live />, target);
+    flushSync();
+
+    const errOpt = [...target.querySelectorAll<HTMLElement>('[aria-label="Log level"] button, [aria-label="Log level"] [role="radio"]')].find((b) =>
+      b.textContent?.trim().startsWith('Error'),
+    )!;
+    errOpt.click();
+    flushSync();
+
+    const clearBtn = [...target.querySelectorAll<HTMLButtonElement>('.empty button')].find((b) => b.textContent?.trim() === 'Clear filters')!;
+    clearBtn.focus();
+    clearBtn.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    expect(document.activeElement).toBe(clearBtn);
+
+    log.push(line(2, 'error'));
+    version.set(1);
+    flushSync();
+
+    expect(target.querySelector('.empty')).toBeNull();
+    expect(document.activeElement).toBe(target.querySelector('.log'));
+  });
 });

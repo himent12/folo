@@ -47,6 +47,7 @@ interface Col {
   /** Fixed width on the header row loading and loaded share; the name takes what is left. */
   w?: string;
 }
+const finite = (v: number | null | undefined): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const cols: Col[] = [
   { key: 'name', label: 'Benchmark', get: (b) => b.name.toLowerCase() },
   { key: 'source', label: 'Images from', get: (b) => b.source_name.toLowerCase(), hide: 'md', w: '208px' },
@@ -54,18 +55,8 @@ const cols: Col[] = [
   { key: 'classes', label: 'Classes', num: true, get: (b) => b.classes.length, hide: 'lg', w: '88px' },
   { key: 'conditions', label: 'Conditions', num: true, get: (b) => b.plan.conditions.length, hide: 'lg', w: '104px' },
   { key: 'entries', label: 'Entries', num: true, get: (b) => b.entries, w: '88px' },
-  { key: 'leader', label: 'Leader', get: (b) => b.best?.score ?? null, w: '256px' },
-  {
-    key: 'created',
-    label: 'Created',
-    num: true,
-    get: (b) => {
-      const t = Date.parse(b.created);
-      return Number.isFinite(t) ? t : null;
-    },
-    hide: 'md',
-    w: '104px',
-  },
+  { key: 'leader', label: 'Leader', get: (b) => finite(b.best?.score), w: '256px' },
+  { key: 'created', label: 'Created', num: true, get: (b) => finite(Date.parse(b.created)), hide: 'md', w: '104px' },
 ];
 const COLS = cols.length;
 const hideCls = (c: Col) => (c.hide ? `hide-${c.hide}` : '');

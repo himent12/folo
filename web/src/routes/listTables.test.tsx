@@ -382,14 +382,15 @@ describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', ()
       { ...(await new MockApi('normal', 0).runs())[0]!, id: 'run_a', name: 'run-alpha', dataset_id: 'ds_fasteners' },
       { ...(await new MockApi('normal', 0).runs())[0]!, id: 'run_z', name: 'run-zebra', dataset_id: 'ds_fasteners' },
     ];
-    // Put all three in the same group (imported files) so they sort together.
+    // Put all four in the same group (imported files) so they sort together (including NaN and 0 scores).
     api.models = async () => [
       { ...mk('m_none', 'alpha-missing', null, null, null), dataset_id: null, source: 'file' as const },
-      { ...mk('m_low', 'beta-low', 0.4, 0.6, 'run_z'), dataset_id: null, source: 'file' as const },
-      { ...mk('m_high', 'gamma-high', 0.9, 0.95, 'run_a'), dataset_id: null, source: 'file' as const },
+      { ...mk('m_nan', 'bravo-nan', Number.NaN, Number.NaN, null), dataset_id: null, source: 'file' as const },
+      { ...mk('m_zero', 'charlie-zero', 0, 0, 'run_z'), dataset_id: null, source: 'file' as const },
+      { ...mk('m_high', 'delta-high', 0.9, 0.95, 'run_a'), dataset_id: null, source: 'file' as const },
     ];
     await open(Models, '/models', api);
-    await table('table.models', (t) => t.querySelectorAll('tbody tr[data-row]').length === 3, 'three models');
+    await table('table.models', (t) => t.querySelectorAll('tbody tr[data-row]').length === 4, 'four models');
 
     const rowNames = () => [...target.querySelectorAll<HTMLAnchorElement>('table.models tbody tr[data-row] a.name')].map((a) => a.textContent!);
     const clickCol = (label: string) => {
@@ -398,37 +399,38 @@ describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', ()
       flushSync();
     };
 
-    // Default sort is mAP50-95 desc -> missing last; clicking toggles asc -> missing STILL last.
-    expect(rowNames()).toEqual(['gamma-high', 'beta-low', 'alpha-missing']);
+    // Default sort is mAP50-95 desc -> missing/NaN last (0 kept finite); clicking toggles asc -> missing/NaN STILL last.
+    expect(rowNames()).toEqual(['delta-high', 'charlie-zero', 'alpha-missing', 'bravo-nan']);
     clickCol('mAP50-95');
-    expect(rowNames()).toEqual(['beta-low', 'gamma-high', 'alpha-missing']);
+    expect(rowNames()).toEqual(['charlie-zero', 'delta-high', 'alpha-missing', 'bravo-nan']);
 
-    // mAP50 desc -> asc -> missing last in both directions.
+    // mAP50 desc -> asc -> missing/NaN last in both directions.
     clickCol('mAP50');
-    expect(rowNames()).toEqual(['gamma-high', 'beta-low', 'alpha-missing']);
+    expect(rowNames()).toEqual(['delta-high', 'charlie-zero', 'alpha-missing', 'bravo-nan']);
     clickCol('mAP50');
-    expect(rowNames()).toEqual(['beta-low', 'gamma-high', 'alpha-missing']);
+    expect(rowNames()).toEqual(['charlie-zero', 'delta-high', 'alpha-missing', 'bravo-nan']);
 
     // Source run asc -> desc -> missing last in both directions.
     clickCol('Source run');
-    expect(rowNames()).toEqual(['gamma-high', 'beta-low', 'alpha-missing']);
+    expect(rowNames()).toEqual(['delta-high', 'charlie-zero', 'alpha-missing', 'bravo-nan']);
     clickCol('Source run');
-    expect(rowNames()).toEqual(['beta-low', 'gamma-high', 'alpha-missing']);
+    expect(rowNames()).toEqual(['charlie-zero', 'delta-high', 'alpha-missing', 'bravo-nan']);
   });
 });
 
 describe('Benchmarks sort missing values last', () => {
-  it('keeps benchmarks without a leader last in both descending and ascending Leader sort', async () => {
+  it('keeps benchmarks without a finite leader score last in both descending and ascending Leader sort', async () => {
     const api = new MockApi('normal', 0);
     const list = await api.benches();
     const base = list[0]!;
     api.benches = async () => [
       { ...base, id: 'bn_none', name: 'alpha-no-leader', best: null },
-      { ...base, id: 'bn_low', name: 'beta-low', best: { entry_id: 'e1', name: 'low', score: 0.45, partial: false } },
-      { ...base, id: 'bn_high', name: 'gamma-high', best: { entry_id: 'e2', name: 'high', score: 0.91, partial: false } },
+      { ...base, id: 'bn_nan', name: 'bravo-nan', best: { entry_id: 'e0', name: 'nan', score: Number.NaN, partial: false } },
+      { ...base, id: 'bn_zero', name: 'charlie-zero', best: { entry_id: 'e1', name: 'zero', score: 0, partial: false } },
+      { ...base, id: 'bn_high', name: 'delta-high', best: { entry_id: 'e2', name: 'high', score: 0.91, partial: false } },
     ];
     await open(Benchmarks, '/benchmarks', api);
-    await table('table', (t) => t.querySelectorAll('tbody tr[data-row]').length === 3, 'three benchmarks');
+    await table('table', (t) => t.querySelectorAll('tbody tr[data-row]').length === 4, 'four benchmarks');
 
     const rowNames = () => [...target.querySelectorAll<HTMLAnchorElement>('table tbody tr[data-row] a.name')].map((a) => a.textContent!);
     const clickLeader = () => {
@@ -437,11 +439,11 @@ describe('Benchmarks sort missing values last', () => {
       flushSync();
     };
 
-    // First click: Leader desc -> missing last.
+    // First click: Leader desc -> missing/NaN last, 0 kept finite.
     clickLeader();
-    expect(rowNames()).toEqual(['gamma-high', 'beta-low', 'alpha-no-leader']);
-    // Second click: Leader asc -> missing STILL last.
+    expect(rowNames()).toEqual(['delta-high', 'charlie-zero', 'alpha-no-leader', 'bravo-nan']);
+    // Second click: Leader asc -> missing/NaN STILL last.
     clickLeader();
-    expect(rowNames()).toEqual(['beta-low', 'gamma-high', 'alpha-no-leader']);
+    expect(rowNames()).toEqual(['charlie-zero', 'delta-high', 'alpha-no-leader', 'bravo-nan']);
   });
 });

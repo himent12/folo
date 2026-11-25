@@ -379,6 +379,7 @@ describe('Inspector labels', () => {
 
     const imageId = signal<string | null>(img0.id);
     const onnavigate = vi.fn((nextId: string) => imageId.set(nextId));
+    const onclose = vi.fn();
     c = render(
       () => (
         <Inspector
@@ -387,7 +388,7 @@ describe('Inspector labels', () => {
           imageId={imageId.get()}
           only={null}
           onnavigate={onnavigate}
-          onclose={() => imageId.set(null)}
+          onclose={onclose}
           onmissing={() => {}}
         />
       ),
@@ -428,7 +429,22 @@ describe('Inspector labels', () => {
     flushSync();
     expect(onnavigate).not.toHaveBeenCalled();
 
-    // Closing the inspector while a step is in flight discards the late resolution.
+    // Closing via native dialog.close() (while imageId has not yet cleared from async history.back()) also discards late resolutions.
+    resolvers.clear();
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', bubbles: true }));
+    expect(resolvers.has(1)).toBe(true);
+    dialog.open = false;
+    dialog.dispatchEvent(new Event('close'));
+    flushSync();
+    expect(onclose).toHaveBeenCalledTimes(1);
+    expect(imageId.peek()).toBe(img2.id);
+    resolvers.get(1)!(img1);
+    await Promise.resolve();
+    flushSync();
+    expect(onnavigate).not.toHaveBeenCalled();
+
+    // Closing via imageId -> null while a step is in flight also discards the late resolution.
+    dialog.open = true;
     resolvers.clear();
     dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', bubbles: true }));
     expect(resolvers.has(1)).toBe(true);

@@ -78,6 +78,7 @@ const hideCls = (c: Col) => (c.hide ? `hide-${c.hide}` : '');
 /** One line for the collapsed engine benchmarks: what is measured and how many rows are not like for like (a win
  *  count would add up unlike conditions; each row's own qualifier says which way it goes). */
 const benchUnlike = versusYolo26n.filter((v) => unlike[v.metric]).length;
+const finite = (v: number | null | undefined): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
 const range = (n: number) => Array.from({ length: n }, (_, i) => i);
 
 export default function Models() {
@@ -134,19 +135,10 @@ export default function Models() {
     { key: 'arch', label: 'Architecture', get: (m) => m.arch, w: '112px' },
     { key: 'classes', label: 'Classes', num: true, get: (m) => m.classes.length, hide: 'md', w: '88px' },
     { key: 'bytes', label: 'Size', num: true, get: (m) => m.bytes, hide: 'md', w: '96px' },
-    { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? null, w: '136px' },
-    { key: 'map50', label: 'mAP50', num: true, get: (m) => m.metrics?.map50 ?? null, w: '88px' },
+    { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => finite(m.metrics?.map50_95), w: '136px' },
+    { key: 'map50', label: 'mAP50', num: true, get: (m) => finite(m.metrics?.map50), w: '88px' },
     { key: 'source', label: 'Source run', get: (m) => sourceName(m).toLowerCase() || null, hide: 'md', w: '144px' },
-    {
-      key: 'created',
-      label: 'Created',
-      num: true,
-      get: (m) => {
-        const t = Date.parse(m.created);
-        return Number.isFinite(t) ? t : null;
-      },
-      w: '112px',
-    },
+    { key: 'created', label: 'Created', num: true, get: (m) => finite(Date.parse(m.created)), w: '112px' },
   ]);
 
   // Default: best first within each dataset.
