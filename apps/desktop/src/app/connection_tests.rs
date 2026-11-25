@@ -499,7 +499,7 @@ fn a_silent_end_reads_the_log_and_latest_samples_again() {
         // What it held of the latest (the epoch the stream went silent at).
         let samples = this.store.api.samples(id, None).unwrap();
         this.store.samples.insert(id.into(), Load::Ready(samples));
-        this.store.install_logs(id, Ok(Vec::new()));
+        this.store.install_logs(id, Ok(crate::api::RunLogs { lines: Vec::new(), total: 0 }));
         drop(stream_of(this, id));
         this.drain_streams(cx);
         assert!(
@@ -508,8 +508,8 @@ fn a_silent_end_reads_the_log_and_latest_samples_again() {
         );
     });
     drive(&mut app, window, |this, _, _| {
-        let Some(Load::Ready(lines)) = this.store.logs.get(id) else { panic!("the log reloaded") };
-        assert!(!lines.is_empty(), "the lines the stream never delivered");
+        let Some(Load::Ready(hist)) = this.store.logs.get(id) else { panic!("the log reloaded") };
+        assert!(!hist.lines.is_empty(), "the lines the stream never delivered");
     });
 }
 

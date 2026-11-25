@@ -641,7 +641,7 @@ mod tests {
         assert!(m.system().unwrap().features.iter().any(|f| f == folo_api::FEATURE_CLOUD));
         // #382: its log ends as the real control plane's does, the weights copied back before the
         // instance goes (Studio's demo, `folo serve --mock`, says the same).
-        let log: Vec<String> = m.logs("run_c9f1").unwrap().into_iter().map(|l| l.message).collect();
+        let log: Vec<String> = m.logs("run_c9f1").unwrap().lines.into_iter().map(|l| l.message).collect();
         let at = |s: &str| log.iter().position(|l| l.contains(s)).unwrap_or_else(|| panic!("{s}: {log:#?}"));
         assert!(at("training on the instance") < at("copying its weights"));
         // Review round 1: its epochs were stamped on another clock than the end's lines, so the
@@ -649,7 +649,7 @@ mod tests {
         let last = log.iter().rposition(|l| l.starts_with("epoch ")).unwrap_or_else(|| panic!("{log:#?}"));
         assert!(log[last].starts_with(&format!("epoch {}/", released.epochs)), "{}", log[last]);
         assert!(last < at("copying its weights"), "{log:#?}");
-        let again: Vec<String> = m.logs("run_c9f1").unwrap().into_iter().map(|l| l.message).collect();
+        let again: Vec<String> = m.logs("run_c9f1").unwrap().lines.into_iter().map(|l| l.message).collect();
         for end in ["copying its weights", "terminating the instance"] {
             assert_eq!(again.iter().filter(|l| l.contains(end)).count(), 1, "{end}");
         }
@@ -676,7 +676,8 @@ mod tests {
                 }
                 s.base.instance_id.clone()
             };
-            let log = || -> Vec<String> { m.logs(&run.id).unwrap().into_iter().map(|l| l.message).collect() };
+            let log =
+                || -> Vec<String> { m.logs(&run.id).unwrap().lines.into_iter().map(|l| l.message).collect() };
             if read_first {
                 log();
             }
@@ -762,7 +763,7 @@ mod tests {
             }
         }
         let log: Vec<&str> =
-            store.logs[&run.id].ready().unwrap().iter().map(|l| l.message.as_str()).collect();
+            store.logs[&run.id].ready().unwrap().lines.iter().map(|l| l.message.as_str()).collect();
         let last = format!("epoch {}/", run.epochs);
         let at = |s: &str| {
             let found: Vec<usize> = (0..log.len()).filter(|&i| log[i].contains(s)).collect();

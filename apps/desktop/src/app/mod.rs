@@ -432,6 +432,8 @@ pub struct FoloApp {
     /// The validation samples' minimum confidence for a prediction to be drawn.
     pub sample_conf: f32,
     pub log_filter: LogFilter,
+    /// Live search input for a run's Logs panel.
+    pub log_search: Entity<TextInput>,
     pub loss_parts: [bool; 4],
     pub log_scroll: ScrollHandle,
     /// The run page's Per class list, scrolled inside its panel.
@@ -696,6 +698,12 @@ impl FoloApp {
         let model_search = cx.new(|cx| TextInput::new("Filter by name, class or arch", cx));
         let model_search_sub =
             cx.subscribe(&model_search, |_, _, _: &crate::input::InputEvent, cx| cx.notify());
+        let log_search = cx.new(|cx| TextInput::new("Search logs", cx));
+        let log_search_sub = cx.subscribe(&log_search, |this, _, _: &crate::input::InputEvent, cx| {
+            this.log_follow = true;
+            this.log_scroll.scroll_to_bottom();
+            cx.notify();
+        });
         let mut this = Self {
             store: Store::new(api),
             route: Route::Overview,
@@ -759,6 +767,7 @@ impl FoloApp {
             // floor, as Studio starts (it started at 0.3 here, so Desktop drew fewer boxes than Studio).
             sample_conf: crate::screens::runs::SAMPLE_CONF.0,
             log_filter: LogFilter::All,
+            log_search,
             loss_parts: [true, true, true, true],
             log_scroll: ScrollHandle::new(),
             per_class_scroll: ScrollHandle::new(),
@@ -884,7 +893,7 @@ impl FoloApp {
             history_tickets: HashMap::new(),
             history_seq: 0,
             _tasks: Vec::new(),
-            _subs: vec![ds_search_sub, run_search_sub, model_search_sub],
+            _subs: vec![ds_search_sub, run_search_sub, model_search_sub, log_search_sub],
         };
         if !frozen {
             this.start_pump(cx);

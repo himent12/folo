@@ -367,8 +367,8 @@ impl Backend for HttpBackend {
         }
     }
 
-    fn logs(&self, id: &str) -> ApiResult<Vec<LogLine>> {
-        self.get::<folo_api::RunLogs>(&format!("/runs/{}/logs?limit=1000", seg(id))).map(|l| l.lines)
+    fn logs(&self, id: &str) -> ApiResult<RunLogs> {
+        self.get(&format!("/runs/{}/logs?limit=1000", seg(id)))
     }
 
     fn events(&self, id: &str) -> ApiResult<Subscription> {

@@ -18,7 +18,7 @@ pub use images::{
 
 /// A queued image fetch: the backend call that answers it (run off the UI thread).
 pub type ImageJob = Box<dyn FnOnce(&dyn Backend) -> ApiResult<ImageData> + Send>;
-pub use live::{Derived, RunData};
+pub use live::{Derived, LogHistory, RunData};
 
 /// A value fetched from the backend.
 #[derive(Clone, Debug, Default)]
@@ -94,7 +94,7 @@ pub struct Store {
     pub runs: Load<Vec<Run>>,
     pub run_data: HashMap<String, Load<RunData>>,
     pub samples: HashMap<String, Load<RunSamples>>,
-    pub logs: HashMap<String, Load<Vec<LogLine>>>,
+    pub logs: HashMap<String, Load<LogHistory>>,
     /// Bumped on every log change; the length stops changing once the 2,000-line cap is hit.
     pub log_rev: u64,
     /// Live events that arrived while a run's history was loading, merged in when it lands.
