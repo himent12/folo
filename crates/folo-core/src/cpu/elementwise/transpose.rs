@@ -109,6 +109,11 @@ pub(crate) fn transpose_f32_2d_serial(
     assert!(dst.len() >= dst_need, "transpose_f32_2d_serial: dst too short ({} < {dst_need})", dst.len());
 
     let dst = &mut dst[..dst_need];
+    if src_cols <= TILE {
+        // SAFETY: `dst` covers all `src_cols` rows of stride `dst_rs >= src_rows`, and `src` bounds were checked.
+        unsafe { transpose_band_ptr(src, src_rs, dst.as_mut_ptr(), dst_rs, src_rows, 0, src_cols) };
+        return;
+    }
     for (b, band_dst) in dst.chunks_mut(TILE * dst_rs).enumerate() {
         let j0 = b * TILE;
         let bh = (src_cols - j0).min(TILE);

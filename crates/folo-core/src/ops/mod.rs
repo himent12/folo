@@ -86,6 +86,32 @@ pub(crate) fn with_views_dyn<R>(ts: &[&Tensor], f: impl FnOnce(&[View<'_>]) -> R
     f(&views)
 }
 
+/// Non-blocking [`with_views_dyn`]: returns `None` immediately (releasing any already-acquired read guards) if
+/// any input storage is currently write-locked, avoiding multi-lock order inversion against concurrent writers.
+pub(crate) fn try_with_views_dyn<R>(ts: &[&Tensor], f: impl FnOnce(&[View<'_>]) -> R) -> Option<R> {
+    let mut cells: SmallVec<[&Arc<StorageCell>; 4]> = SmallVec::new();
+    let mut idx: SmallVec<[usize; 8]> = SmallVec::new();
+    for t in ts {
+        idx.push(match cells.iter().position(|c| Arc::ptr_eq(c, t.cell())) {
+            Some(j) => j,
+            None => {
+                cells.push(t.cell());
+                cells.len() - 1
+            }
+        });
+    }
+    let mut guards: SmallVec<[_; 4]> = SmallVec::with_capacity(cells.len());
+    for c in &cells {
+        guards.push(c.try_read()?);
+    }
+    let views: SmallVec<[View<'_>; 8]> = ts
+        .iter()
+        .zip(&idx)
+        .map(|(t, &i)| View::of_cell(&guards[i], t.layout(), cells[i].derived()))
+        .collect();
+    Some(f(&views))
+}
+
 /// Build the gradient list returned by backward closures.
 macro_rules! grads {
     ($($g:expr),* $(,)?) => {

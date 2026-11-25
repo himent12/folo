@@ -12,7 +12,7 @@ impl Tensor {
     pub fn cat<T: Borrow<Tensor>>(tensors: &[T], dim: impl Dim) -> Result<Tensor> {
         let first = tensors.first().ok_or_else(|| Error::invalid_arg("cat", "no tensors given"))?.borrow();
         let d = dim.to_index(first.rank(), "cat")?;
-        let mut total = 0;
+        let mut total = 0usize;
         for t in tensors {
             let t = t.borrow();
             first.check_same_device(t, "cat")?;
@@ -28,12 +28,19 @@ impl Tensor {
                     rhs: t.shape().clone(),
                 });
             }
-            total += t.dims()[d];
+            total = total
+                .checked_add(t.dims()[d])
+                .ok_or_else(|| Error::invalid_arg("cat", "concatenated dimension overflows usize"))?;
         }
         if tensors.len() == 1 {
             return Ok(first.clone());
         }
         let shape = first.shape().with_dim(d, total);
+        let numel = shape
+            .dims()
+            .iter()
+            .try_fold(1usize, |a, &b| a.checked_mul(b))
+            .ok_or_else(|| Error::invalid_arg("cat", format!("output shape {shape} overflows usize")))?;
         // The pieces tile the output exactly, so it needs no initialisation.
         let out = Tensor::uninit_with(&shape, first.dtype(), first.device())?;
         let mut sizes: smallvec::SmallVec<[usize; 8]> = smallvec::SmallVec::with_capacity(tensors.len());
@@ -41,11 +48,12 @@ impl Tensor {
         for &t in &inputs {
             sizes.push(t.dims()[d]);
         }
-        if out.numel() > 0 {
+        if numel > 0 {
             let mut os = out.cell().write();
             let used_fast = first.device().is_cpu()
                 && inputs.iter().all(|t| t.numel() == 0 || t.is_contiguous())
-                && super::with_views_dyn(&inputs, |views| crate::cpu::cat_contiguous(&mut os, views, d));
+                && super::try_with_views_dyn(&inputs, |views| crate::cpu::cat_contiguous(&mut os, views, d))
+                    == Some(true);
             if !used_fast {
                 let b = first.backend()?;
                 let full = Layout::contiguous(shape);
@@ -531,6 +539,11 @@ mod tests {
         // Row 1 weights: [6, 7, 8, 9, 10] -> ga gets [6+9, 7+10] = [15, 17], gb gets [8]
         assert_eq!(grads.get(&ga).unwrap().to_vec::<f32>().unwrap(), vec![5.0, 7.0, 15.0, 17.0]);
         assert_eq!(grads.get(&gb).unwrap().to_vec::<f32>().unwrap(), vec![3.0, 8.0]);
+
+        // Output element count overflow must error rather than wrapping to zero.
+        let half_max = 1usize << (usize::BITS - 1);
+        let huge = Tensor::scalar(1.0f32).broadcast_to([1, half_max]).unwrap();
+        assert!(Tensor::cat(&[&huge, &huge], 0).is_err());
     }
 
     #[test]

@@ -343,6 +343,15 @@ impl StorageCell {
         self.data.read().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Non-blocking read access: `None` if a writer currently holds the lock.
+    pub fn try_read(&self) -> Option<RwLockReadGuard<'_, Storage>> {
+        match self.data.try_read() {
+            Ok(g) => Some(g),
+            Err(std::sync::TryLockError::Poisoned(e)) => Some(e.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
     /// Write access; bumps the version and drops the derived values.
     pub fn write(&self) -> RwLockWriteGuard<'_, Storage> {
         self.version.fetch_add(1, Ordering::Relaxed);
