@@ -18,7 +18,8 @@ export function createComponent<P>(Comp: (props: P) => JSX.Element, props: P): J
 type AnyProps = Record<PropertyKey, unknown>;
 type Source = AnyProps | (() => AnyProps | null | undefined) | null | undefined | false;
 
-const PROXY = Symbol('fw.props');
+/** Internal marker on reactive props proxies (`mergeProps`, `splitProps`, `defaults`). */
+export const PROXY = Symbol('fw.props');
 
 function resolve(s: Source): AnyProps | null | undefined | false {
   return typeof s === 'function' ? s() : s;
