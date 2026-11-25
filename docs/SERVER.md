@@ -18,13 +18,13 @@ mock/              MockStore: deterministic data for `folo serve --mock` (mock/r
 runs/              the run registry, the FIFO queue and its worker thread, incremental metrics cache, streaming /logs,
                    history and resume
 engine.rs          device selection, GPU info, engine error mapping, single-flight predictor LRU cache of /api/predict
-index.rs           dataset indexes, single-pass split-sliced image/issue paging, and their Fingerprint
+index.rs           dataset indexes, single-pass split-sliced image paging, single-pass issue paging, and their Fingerprint
 models/            models: finished runs' weights, <data dir>/models, published weights, bounded LRU caches,
                    single-flight /eval, per-(model, variant) derived weights, exports (mod, meta, weights, eval, export)
 uploads/           upload sessions (/api/uploads): cached uploads.json, condvar sweeper, streaming tar unpacker
                    (mod, fingerprints, pipe, unpack)
 cloud/             the cloud control plane: connections, ledger, reaper, executor/ (one thread per cloud run)
-label/             agent labeling: jobs, parallel CLI probes, the Agent trait, claude.rs, codex.rs and antigravity/
+label/             agent labeling: jobs, parallel image probes, the Agent trait, claude.rs, codex.rs and antigravity/
 bench/             vision benchmarks: storage, single-flight variant render caches, entries, scheduling and loops
 throughput/        the measured throughput table and run-time estimates
 cli.rs             the `folo train` command of a TrainConfig (GET /api/runs/{id}/cli)
@@ -117,8 +117,8 @@ out through `Store::labeler` and `Store::benches`; the mock has neither.
 ## Datasets, models and inference
 - The real store's datasets are read with folo-data and indexed into a JSON cache under the data dir, invalidated by
   file mtimes (`index.rs`, `Fingerprint`: file sizes and modification times under the dataset folder). On startup
-  `folo-index` checks and rebuilds registered datasets in parallel via rayon; image and issue listings page in a single
-  pass (slicing by split range when `split` is given).
+  `folo-index` checks and rebuilds registered datasets in parallel via rayon; image listings slice directly by split
+  range and page in a single pass, and issue listings filter and count in a single pass.
 - Finished runs' checkpoints, `.folo` files under `<data dir>/models` and pulled published weights are its models
   (`models/`); in-memory metadata, file-ID, skipped-file and `/eval` caches use exact bounded LRU eviction
   (`MAX_META_CACHE = 4096`, `MAX_FILE_ID_CACHE = 4096`, `MAX_SKIPPED_CACHE = 512`, `MAX_EVAL_CACHE = 128`).
@@ -253,7 +253,7 @@ labeling job read through the `Store` and graded by folo-bench. `Benches` is the
 | `folo-uploads`, `folo-<upload_id>` | `Uploads::open` / `Unpacker::start` (`uploads/`) | Condvar-gated sweeper expires idle upload sessions (`UPLOAD_IDLE` = 1 h; zero idle wakeups, exits immediately on shutdown; holds `Weak` ref). Each dataset tar upload spawns one streaming unpacker thread `folo-<id>` joined on session close/drop. |
 | `folo-cloud-reaper`, `folo-cloud-<run_id>`, `folo-cloud-copy-<run_id>` | `Cloud::recover_and_reap` / `executor::spawn` / `Exec::start_copy` (`cloud/`) | Reaper sweeps every 30 s (`reaper_every`) for unfollowed/terminating/unseen instances; one executor thread per active cloud run; optional background checkpoint-download thread (`Exec::start_copy`) during `training`. |
 | `folo-label-<job_id>` | `Labeler::start` (`label/labeling.rs`) | One thread per active labeling job, driving `parallel` worker calls in a thread scope and child CLI processes. |
-| `folo-bench-models`, `folo-bench-expiry`, `folo-bench-agent-<id>`, `folo-bench-loop-<id>` | `Benches::open` / `entries.rs` / `bench/mod.rs` | Persistent FIFO model-entry worker and condvar-gated open external-entry expiry sweeper (30 min timeout; zero idle wakeups); one thread per active agent entry or self-improvement loop. |
+| `folo-bench-models`, `folo-bench-expiry`, `folo-bench-agent-<id>`, `folo-bench-loop-<id>` | `Benches::open` / `entries.rs` / `bench/mod.rs` | Persistent FIFO model-entry worker and condvar-gated open external-entry expiry sweeper (30 min timeout; sleeps the full tick up to 60 s and wakes immediately on timeout updates or shutdown); one thread per active agent entry or self-improvement loop. |
 
 ### Shutdown order
 When `Ctrl+C` or `SIGTERM` resolves `shutdown_signal()`:

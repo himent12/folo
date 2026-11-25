@@ -156,18 +156,18 @@ nested objects included, has `additionalProperties: false`: **an argument the to
   failed run's `error`) are already cut to 500, so a driver report never floods the context. The `*_not_found`
   codes of listed things hint at the list tool (`list_datasets`, `list_models`, `list_runs`, ...), and
   `dataset_not_found`, `model_not_found` and `run_not_found` errors also append a fuzzy `did you mean ...?`
-  suggestion against existing IDs and names (under `--confine`, datasets are revalidated fresh so out-of-bounds
-  datasets are never suggested).
+  suggestion against existing IDs and names when a close match exists (under `--confine`, datasets are revalidated
+  fresh so out-of-bounds datasets are never suggested).
 - **Protocol errors** (malformed JSON-RPC, a malformed `tools/call` envelope, unknown tool or method, unsupported
   protocol version): JSON-RPC errors per the spec, never `isError` results: unknown tool `-32602` (with a fuzzy
-  `did you mean ...?` suggestion against the tools visible in the current mode), unknown method
-  `-32601`, unsupported version `-32022`, unknown prompt `-32602` (with a fuzzy suggestion against visible prompts),
-  a prompt without its required argument `-32602`. Well-formed JSON that is
+  `did you mean ...?` suggestion against the tools visible in the current mode when a close match exists), unknown method
+  `-32601`, unsupported version `-32022`, unknown prompt `-32602` (with a fuzzy suggestion against visible prompts when a
+  close match exists), a prompt without its required argument `-32602`. Well-formed JSON that is
   not a JSON-RPC message gets `-32600` (with `id: null`). A line that is not JSON at all is ignored and logged, as by
   every official MCP SDK (answering unparsable input can start an error loop between two peers).
 - Resource reads for unknown URIs (or ids) return the spec's resource-not-found error: `-32002` on 2025-11-25,
-  `-32602` on 2026-07-28, including fuzzy `did you mean ...?` suggestions for missing dataset/run IDs and unknown
-  `folo://docs/{name}` names.
+  `-32602` on 2026-07-28, including fuzzy `did you mean ...?` suggestions when a close match exists for missing
+  dataset/run IDs and unknown `folo://docs/{name}` names.
 
 ## Paging and size limits
 - Every list tool takes `{ cursor?: string, limit?: integer (default 50, max 200) }` (cursors are opaque; a bad
@@ -352,7 +352,8 @@ Each resource read returns a JSON snapshot, unless stated otherwise.
 - `folo://docs/{name}`: repository docs (`ARCHITECTURE`, `API`, `CLI`, `MODEL`, `FORMAT`, `METRICS`, `MCP`,
   `AGENT_COOKBOOK`) as `text/markdown`, compiled into the binary and served strictly from that allowlist (names must
   contain only ASCII letters, digits, `_`, or `-`, never path separators, dots, null bytes, or traversal segments;
-  the filesystem is never touched). Unknown valid names return resource-not-found with a fuzzy suggestion.
+  the filesystem is never touched). Unknown valid names return resource-not-found (with a fuzzy suggestion when a
+  close match exists).
 
 `resources/list` lists datasets, runs (with their metrics and epochs), the throughput table and docs, 100 per page; images,
 samples, predictions and estimates are reached through `resources/templates/list`.
@@ -453,9 +454,10 @@ In read-only mode, `train_on_folder` and `label_folder` are not listed.
   `https://` (a server behind a TLS proxy or tunnel). A server started with `--token` needs `--token` here too (env
   `FOLO_TOKEN`), sent as `Authorization: Bearer` on every request and never logged; without it every tool is the
   `unauthorized` tool error. The transport is the `folo-client` crate, the same one a cloud control plane uses.
-  Capability and mock-mode probes (`/api/health`, falling back to `/api/system` only when `/api/health` predates
-  `features`) are cached and shared across `HttpStore` and its deadline-bounded `until` clones with single-flight
-  coordination so concurrent calls never duplicate probes.
+  Capability probes (`has_feature`, querying `/api/health` and falling back to `/api/system` when `/api/health` returns
+  an empty `features` list) are cached and shared across `HttpStore` and its deadline-bounded `until` clones with
+  single-flight coordination so concurrent feature checks do not duplicate probes (`is_mock` shares the cached flag
+  once populated, calling `/api/health` directly on a cold cache).
 
 ## Example agent session
 

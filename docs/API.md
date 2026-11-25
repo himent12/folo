@@ -46,9 +46,9 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
 
 ## Errors
 Non-2xx responses return `{ "error": { "code": "dataset_not_found", "message": "...", "hint": "..." | null } }`,
-except RFC 9110 conditional and range responses that carry no body (`304 Not Modified`, `412 Precondition Failed`,
-and `416 Range Not Satisfiable`, used by `/models`, `/models/{id}`, `/models/{id}/eval`, `/weights`, and image
-endpoints).
+except RFC 9110 conditional and range responses that carry no body (`304 Not Modified` and `412 Precondition Failed`
+on `/models`, `/models/{id}`, `/models/{id}/eval`, `/weights`, and image endpoints; `416 Range Not Satisfiable` on
+`/weights`).
 `hint` is always present (`null` when there is nothing useful to add). Codes are stable, and they are one
 vocabulary with the CLI and MCP (`folo_api::codes`, with `Code::find`, lists every code with its status and the
 CLI's exit code; a test keeps the sources in line with it). Messages that wrap a driver report are cut to 500 characters:
@@ -296,8 +296,9 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
 - **Conditional caching on JSON model routes.** `GET /api/models`, `GET /api/models/{id}`, and `GET /api/models/{id}/eval`
   return a weak `ETag` (`W/"<32 hex>"`, 128-bit SHA-256 of the canonical JSON bytes — weak because the compression layer
   may gzip-encode `application/json`), `Cache-Control: no-cache`, and `Vary: accept-encoding`. A matching `If-None-Match`
-  answers `304 Not Modified` with those headers and no body; a failing `If-Match` answers `412 Precondition Failed` with
-  `ETag`, `Cache-Control: no-store`, `Vary: accept-encoding`, and no body.
+  (weak comparison, `*` too) answers `304 Not Modified` with those headers and no body; `If-Match` uses strong
+  comparison per RFC 9110 (`*` succeeds for an existing resource, while any entity-tag, including a replayed weak `ETag`,
+  answers `412 Precondition Failed` with `ETag`, `Cache-Control: no-store`, `Vary: accept-encoding`, and no body).
 - `GET /api/models/{id}/eval` → validation results of the model on its dataset's `val` split (`train` when there is
   none, see Split fallback below), for the PR curves and confusion matrix of the Models view:
   ```jsonc

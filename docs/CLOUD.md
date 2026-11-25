@@ -141,11 +141,12 @@ transfer, while keeping client memory around one part:
   `If-Match` pinned to the first part's `ETag`, so a checkpoint overwritten mid-download (`412 Precondition Failed`)
   restarts cleanly from byte 0 rather than mixing two epochs (up to 3 restarts — 4 attempts in all — before failing).
   Each range response streams directly into the hidden temporary file (`*.download`) next to the destination rather
-  than buffering the part in memory, checking cancellation while streaming; on a transient error, the temporary file is
-  truncated and rewound back to the last completed byte offset before retrying (with the same stop-checked backoff) so
-  partial bytes from a dropped connection never corrupt the file. The first request fetches `8 MiB` and measures link
-  speed: if the remaining bytes are at most `192 MiB` and fit within `30 s` at that rate, the rest is fetched in one
-  streamed request (rewinding and falling back to `8 MiB` parts on transient error).
+  than buffering the part in memory, checking cancellation while streaming; on a transient error while fetching an
+  `8 MiB` part, the temporary file is truncated and rewound back to the last completed byte offset before retrying with
+  the same stop-checked backoff so partial bytes from a dropped connection never corrupt the file. The first request
+  fetches `8 MiB` and measures link speed: if the remaining bytes are at most `192 MiB` and fit within `30 s` at that
+  rate, the rest is fetched in one streamed request (on a transient error, it rewinds and immediately falls back to
+  `8 MiB` parts without sleeping).
   Because a single request streams one open file version, a file rewritten between the first and second request (a
   small model finishing epochs every second) is retried whole in one request when the full file fits those same
   bounds. Once complete, the temporary file is flushed with `sync_all` and atomically renamed into place (retrying
