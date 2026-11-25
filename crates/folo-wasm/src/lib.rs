@@ -14,6 +14,7 @@
 //! The logic lives in [`detector`], which has no wasm-bindgen types and is tested natively.
 
 pub mod detector;
+mod simd;
 
 use std::rc::Rc;
 

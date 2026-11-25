@@ -153,6 +153,26 @@ fn gpu_matches_cpu() {
         });
         assert!(close, "no GPU box matches CPU box {want:?}");
     }
+
+    // Exercise the >CANDIDATE_READBACK overflow readback path: a 256x256 canvas has 1,344 anchors
+    // (32^2 + 16^2 + 8^2 > 1,024), so conf = 0.0 overflows the 1,024-record first download.
+    let (ow, oh) = (256, 256);
+    let sq = rgba(ow, oh);
+    let overflow = DetectOptions { conf: 0.0, iou: 0.7, max_det: 50 };
+    let go = pollster::block_on(gpu.detect(&sq, ow, oh, overflow)).unwrap();
+    let co = pollster::block_on(cpu.detect(&sq, ow, oh, overflow)).unwrap();
+    assert_eq!(go.response.boxes.len(), co.response.boxes.len());
+    assert!(!go.response.boxes.is_empty());
+    for want in &co.response.boxes {
+        let close = go.response.boxes.iter().any(|b| {
+            b.class == want.class
+                && (b.score - want.score).abs() < 1e-3
+                && [b.x1 - want.x1, b.y1 - want.y1, b.x2 - want.x2, b.y2 - want.y2]
+                    .iter()
+                    .all(|d| d.abs() < 0.05)
+        });
+        assert!(close, "no overflow GPU box matches CPU box {want:?}");
+    }
 }
 
 /// `precision: "f16"` on WebGPU runs the model in f16 (with shader-f16) and still matches the f32 CPU boxes, to
