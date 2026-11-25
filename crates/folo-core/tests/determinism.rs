@@ -123,16 +123,21 @@ fn elementwise_simd_ops_are_bitwise_reproducible() {
     let mut rng = Rng::seed(14);
     // Above PAR_MIN with an odd length so parallel chunks and padded AVX2 tails are both exercised.
     let x = Tensor::randn([40_005], 0.0, 2.5, &mut rng).requires_grad_();
+    let xp = Tensor::rand_uniform([40_005], 0.05, 50.0, &mut rng).requires_grad_();
     let g = Tensor::randn([40_005], 0.0, 1.0, &mut rng);
     assert_reproducible("elementwise simd", &|| {
         let ye = x.exp().unwrap();
+        let yl = xp.log().unwrap();
+        let yt = x.tanh().unwrap();
         let ys = x.sigmoid().unwrap();
         let ysi = x.silu().unwrap();
         let ysp = x.softplus().unwrap();
         let ge = ye.backward_with(&g).unwrap().get(&x).unwrap().clone();
+        let gl = yl.backward_with(&g).unwrap().get(&xp).unwrap().clone();
+        let gt = yt.backward_with(&g).unwrap().get(&x).unwrap().clone();
         let gs = ys.backward_with(&g).unwrap().get(&x).unwrap().clone();
         let gsi = ysi.backward_with(&g).unwrap().get(&x).unwrap().clone();
         let gsp = ysp.backward_with(&g).unwrap().get(&x).unwrap().clone();
-        vec![ye, ys, ysi, ge, gs, gsi, gsp]
+        vec![ye, yl, yt, ys, ysi, ysp, ge, gl, gt, gs, gsi, gsp]
     });
 }
