@@ -2,14 +2,14 @@
 
 use axum::Json;
 use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use folo_api::{DatasetList, ImagePage, IssuePage, RegisterDataset, Split, SyntheticDataset};
 use serde::Deserialize;
 
 use crate::AppState;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
-use crate::store::{ImageData, ImageQuery, IssueQuery};
+use crate::store::{ImageData, ImageQuery, IssueQuery, Store};
 
 use super::{DEFAULT_LIMIT, MAX_LIMIT, ThumbParams, blocking};
 
@@ -125,21 +125,137 @@ pub(super) async fn image(
     State(st): State<AppState>,
     ApiPath((id, image_id)): ApiPath<(String, String)>,
     ApiQuery(p): ApiQuery<ThumbParams>,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let thumb = p.thumb.map(|t| t.clamp(16, 2048));
-    let img = blocking(&st, move |s| s.image(&id, &image_id, thumb)).await?;
-    Ok(image_response(img))
+    serve_image(&st, &headers, move |s| s.image(&id, &image_id, thumb)).await
 }
 
-/// An image as a response: its bytes with their type, cacheable forever when they never change.
-pub(crate) fn image_response(img: ImageData) -> Response {
+/// Strong ETag (`"<32 hex>"`, 128-bit SHA-256 of content type and bytes) for an image response.
+/// The compression layer skips non-SVG `image/*` responses (`DefaultPredicate`), and every image endpoint serves
+/// raster formats only (JPEG, PNG, BMP, WebP), so the strong validator describes the exact bytes on the wire.
+fn image_etag(img: &ImageData) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let mut h = Sha256::new();
+    h.update(img.content_type.as_bytes());
+    h.update([0]);
+    h.update(&img.bytes);
+    let digest = h.finalize();
+    let mut out = String::with_capacity(34);
+    out.push('"');
+    for b in &digest[..16] {
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out.push('"');
+    out
+}
+
+/// Loads an image on the blocking pool, hashes it for a strong ETag there, and builds the response (answering
+/// `304 Not Modified` when `headers`'s `If-None-Match` matches).
+pub(crate) async fn serve_image<F>(st: &AppState, headers: &HeaderMap, load: F) -> Result<Response>
+where
+    F: FnOnce(&dyn Store) -> Result<ImageData> + Send + 'static,
+{
+    let (img, etag) = blocking(st, move |s| {
+        let img = load(s)?;
+        let etag = image_etag(&img);
+        Ok((img, etag))
+    })
+    .await?;
+    Ok(image_response(img, &etag, headers))
+}
+
+/// An image as a response: its bytes with their type, strong `ETag` and `Cache-Control`, `412 Precondition Failed`
+/// when `If-Match` fails (RFC 9110 §13.2.2), or `304 Not Modified` when `If-None-Match` matches `etag`.
+fn image_response(img: ImageData, etag: &str, headers: &HeaderMap) -> Response {
     let cache = if img.immutable { "public, max-age=31536000, immutable" } else { "no-cache" };
+    let etag_val = HeaderValue::from_str(etag).expect("ASCII ETag");
+    if !crate::web::if_match(headers, etag) {
+        return (
+            StatusCode::PRECONDITION_FAILED,
+            [(header::ETAG, etag_val), (header::CACHE_CONTROL, HeaderValue::from_static("no-store"))],
+        )
+            .into_response();
+    }
+    if crate::web::if_none_match(headers, etag) == Some(true) {
+        return (
+            StatusCode::NOT_MODIFIED,
+            [(header::ETAG, etag_val), (header::CACHE_CONTROL, HeaderValue::from_static(cache))],
+        )
+            .into_response();
+    }
     (
+        StatusCode::OK,
         [
             (header::CONTENT_TYPE, HeaderValue::from_static(img.content_type)),
             (header::CACHE_CONTROL, HeaderValue::from_static(cache)),
+            (header::ETAG, etag_val),
         ],
         img.bytes,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_image(content_type: &'static str, bytes: &[u8], immutable: bool) -> ImageData {
+        ImageData { content_type, bytes: bytes.to_vec(), immutable }
+    }
+
+    #[test]
+    fn etag_is_strong_and_tracks_bytes_and_content_type() {
+        let a = image_etag(&sample_image("image/jpeg", b"hello", false));
+        let same = image_etag(&sample_image("image/jpeg", b"hello", true));
+        let diff_bytes = image_etag(&sample_image("image/jpeg", b"world", false));
+        let diff_type = image_etag(&sample_image("image/png", b"hello", false));
+        assert!(a.starts_with('"') && a.ends_with('"') && !a.starts_with("W/"), "{a}");
+        assert_eq!(a.len(), 34, "quoted 128-bit hex tag: {a}");
+        assert_eq!(a, same);
+        assert_ne!(a, diff_bytes);
+        assert_ne!(a, diff_type);
+    }
+
+    #[tokio::test]
+    async fn image_response_handles_conditional_if_none_match() {
+        let img = sample_image("image/jpeg", b"jpeg-bytes", false);
+        let etag = image_etag(&img);
+
+        let res = image_response(img.clone(), &etag, &HeaderMap::new());
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::ETAG], etag.as_str());
+        assert_eq!(res.headers()[header::CACHE_CONTROL], "no-cache");
+        assert_eq!(res.headers()[header::CONTENT_TYPE], "image/jpeg");
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(body.as_ref(), b"jpeg-bytes");
+
+        for inm in [etag.clone(), format!("W/{etag}"), format!("\"other\", {etag}"), "*".into()] {
+            let mut h = HeaderMap::new();
+            h.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&inm).unwrap());
+            let res = image_response(img.clone(), &etag, &h);
+            assert_eq!(res.status(), StatusCode::NOT_MODIFIED, "{inm}");
+            assert_eq!(res.headers()[header::ETAG], etag.as_str());
+            assert_eq!(res.headers()[header::CACHE_CONTROL], "no-cache");
+            let body = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+            assert!(body.is_empty(), "{inm}");
+        }
+
+        let mut mismatch = HeaderMap::new();
+        mismatch.insert(header::IF_NONE_MATCH, HeaderValue::from_static("\"stale\""));
+        let res = image_response(sample_image("image/jpeg", b"jpeg-bytes", true), &etag, &mismatch);
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.headers()[header::CACHE_CONTROL], "public, max-age=31536000, immutable");
+
+        // RFC 9110 §13.2.2: If-Match (strong) takes precedence over If-None-Match, and 412 is never cached.
+        let mut both = HeaderMap::new();
+        both.insert(header::IF_MATCH, HeaderValue::from_static("\"stale\""));
+        both.insert(header::IF_NONE_MATCH, HeaderValue::from_static("*"));
+        let res = image_response(sample_image("image/jpeg", b"jpeg-bytes", true), &etag, &both);
+        assert_eq!(res.status(), StatusCode::PRECONDITION_FAILED);
+        assert_eq!(res.headers()[header::ETAG], etag.as_str());
+        assert_eq!(res.headers()[header::CACHE_CONTROL], "no-store");
+        assert!(axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().is_empty());
+    }
 }

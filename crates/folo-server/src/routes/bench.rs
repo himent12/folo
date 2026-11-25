@@ -7,7 +7,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -25,7 +25,7 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use crate::AppState;
 use crate::bench::Benches;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
-use crate::routes::{DEFAULT_LIMIT, KEEP_ALIVE, MAX_LIMIT, MAX_UPLOAD_BYTES, blocking, image_response};
+use crate::routes::{DEFAULT_LIMIT, KEEP_ALIVE, MAX_LIMIT, MAX_UPLOAD_BYTES, blocking, serve_image};
 
 /// The `/bench` routes, merged into the `/api` router.
 pub fn routes() -> Router<AppState> {
@@ -152,11 +152,11 @@ async fn image(
     State(st): State<AppState>,
     ApiPath((id, image_id)): ApiPath<(String, String)>,
     ApiQuery(p): ApiQuery<ImageParams>,
+    headers: HeaderMap,
 ) -> Result<Response> {
     let v = variant(p.condition, p.severity)?;
     let thumb = p.thumb.map(|t| t.clamp(16, 2048));
-    let img = blocking(&st, move |s| s.benches()?.image(&id, &image_id, v, thumb)).await?;
-    Ok(image_response(img))
+    serve_image(&st, &headers, move |s| s.benches()?.image(&id, &image_id, v, thumb)).await
 }
 
 async fn entries(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<BenchEntryList>> {

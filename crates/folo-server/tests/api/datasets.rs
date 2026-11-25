@@ -50,19 +50,58 @@ async fn datasets_and_images() {
     .await;
 
     let img = &page.images[0];
-    let (status, headers, body) =
-        send(&app, get(&format!("/api/datasets/{}/images/{}", fasteners.id, img.id))).await;
+    let img_uri = format!("/api/datasets/{}/images/{}", fasteners.id, img.id);
+    let (status, headers, body) = send(
+        &app,
+        Request::get(&img_uri).header(header::ACCEPT_ENCODING, "gzip").body(Body::empty()).unwrap(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers[header::CONTENT_TYPE], "image/jpeg");
+    assert!(headers.get(header::CONTENT_ENCODING).is_none(), "images are not re-encoded");
+    let etag = headers[header::ETAG].to_str().unwrap().to_string();
+    assert!(etag.starts_with('"') && etag.ends_with('"') && !etag.starts_with("W/"), "{etag}");
+    let (s304, h304, b304) =
+        send(&app, Request::get(&img_uri).header(header::IF_NONE_MATCH, &etag).body(Body::empty()).unwrap())
+            .await;
+    assert_eq!(s304, StatusCode::NOT_MODIFIED);
+    assert_eq!(h304[header::ETAG], etag.as_str());
+    assert_eq!(h304[header::CACHE_CONTROL], headers[header::CACHE_CONTROL]);
+    assert!(b304.is_empty());
+    let (s_head, h_head, b_head) =
+        send(&app, Request::head(&img_uri).header(header::IF_NONE_MATCH, &etag).body(Body::empty()).unwrap())
+            .await;
+    assert_eq!(s_head, StatusCode::NOT_MODIFIED);
+    assert_eq!(h_head[header::ETAG], etag.as_str());
+    assert!(b_head.is_empty());
+    let (s_head_ok, h_head_ok, b_head_ok) =
+        send(&app, Request::head(&img_uri).body(Body::empty()).unwrap()).await;
+    assert_eq!(s_head_ok, StatusCode::OK);
+    assert_eq!(h_head_ok[header::ETAG], etag.as_str());
+    assert_eq!(h_head_ok[header::CONTENT_TYPE], "image/jpeg");
+    assert_eq!(h_head_ok[header::CONTENT_LENGTH], body.len().to_string());
+    assert!(b_head_ok.is_empty());
     let decoded = image::load_from_memory(&body).unwrap();
     assert_eq!((decoded.width(), decoded.height()), (1920, 1080));
-    let (_, _, thumb) =
-        send(&app, get(&format!("/api/datasets/{}/images/{}?thumb=256", fasteners.id, img.id))).await;
+    let thumb_uri = format!("/api/datasets/{}/images/{}?thumb=256", fasteners.id, img.id);
+    let (_, h_thumb, thumb) = send(&app, get(&thumb_uri)).await;
+    let thumb_etag = h_thumb[header::ETAG].to_str().unwrap().to_string();
+    assert_ne!(thumb_etag, etag, "thumbnail has its own ETag");
+    let (s_thumb_304, _, b_thumb_304) = send(
+        &app,
+        Request::get(&thumb_uri).header(header::IF_NONE_MATCH, &thumb_etag).body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(s_thumb_304, StatusCode::NOT_MODIFIED);
+    assert!(b_thumb_304.is_empty());
     let t = image::load_from_memory(&thumb).unwrap();
     assert_eq!((t.width(), t.height()), (256, 144));
     err(
         &app,
-        get(&format!("/api/datasets/{}/images/zzz", fasteners.id)),
+        Request::get(format!("/api/datasets/{}/images/zzz", fasteners.id))
+            .header(header::IF_NONE_MATCH, "*")
+            .body(Body::empty())
+            .unwrap(),
         StatusCode::NOT_FOUND,
         "image_not_found",
     )

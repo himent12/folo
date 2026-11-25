@@ -54,7 +54,7 @@ use runs::{
 use system::{benchmark, health, system, throughput};
 use uploads::{complete_upload, create_upload, delete_upload, get_upload, upload_part};
 
-pub(crate) use datasets::image_response;
+pub(crate) use datasets::serve_image;
 
 /// Largest accepted request body for uploads (`POST /api/predict`, images of a labeling job).
 pub const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;

@@ -124,17 +124,87 @@ pub(crate) async fn dir_is_vite_build(dir: &Path) -> bool {
     is_vite_page(&String::from_utf8_lossy(&head))
 }
 
-/// Whether the request's `If-None-Match` matches `etag` (`None` without the header). It uses the weak comparison
-/// (RFC 9110 §13.1.2): opaque tags match regardless of `W/`, and `*` matches anything.
+fn trim_http_ws(mut s: &[u8]) -> &[u8] {
+    while let Some((&b, rest)) = s.split_first() {
+        if b == b' ' || b == b'\t' {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    while let Some((&b, rest)) = s.split_last() {
+        if b == b' ' || b == b'\t' {
+            s = rest;
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+/// Splits an HTTP entity-tag header (`If-None-Match`, `If-Match`) on commas outside quotes so a quoted opaque tag
+/// containing `,` (RFC 9110 §8.8.3) stays whole.
+fn etag_list(raw: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    for (i, &b) in raw.iter().enumerate() {
+        match b {
+            b'"' => in_quotes = !in_quotes,
+            b',' if !in_quotes => {
+                let item = trim_http_ws(&raw[start..i]);
+                if !item.is_empty() {
+                    out.push(item);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let tail = trim_http_ws(&raw[start..]);
+    if !tail.is_empty() {
+        out.push(tail);
+    }
+    out
+}
+
+fn is_quoted_tag(t: &[u8]) -> bool {
+    t.len() >= 2 && t.starts_with(b"\"") && t.ends_with(b"\"")
+}
+
+fn opaque_tag(t: &[u8]) -> &[u8] {
+    t.strip_prefix(b"W/").unwrap_or(t)
+}
+
+/// Whether the request's `If-None-Match` matches `etag` (`None` without the header). Uses the weak comparison
+/// (RFC 9110 §13.1.2): opaque tags match regardless of `W/`, and `*` matches only as the sole field value.
 pub(crate) fn if_none_match(headers: &HeaderMap, etag: &str) -> Option<bool> {
-    let opaque = |t: &str| t.trim().trim_start_matches("W/").to_string();
+    let target = opaque_tag(trim_http_ws(etag.as_bytes()));
     let mut values = headers.get_all(header::IF_NONE_MATCH).iter().peekable();
     values.peek()?;
-    Some(
-        values
-            .filter_map(|v| v.to_str().ok())
-            .any(|v| v.split(',').any(|t| t.trim() == "*" || opaque(t) == opaque(etag))),
-    )
+    Some(values.any(|v| {
+        let raw = trim_http_ws(v.as_bytes());
+        raw == b"*"
+            || etag_list(raw).into_iter().any(|t| {
+                let o = opaque_tag(t);
+                is_quoted_tag(o) && o == target
+            })
+    }))
+}
+
+/// False when the request has `If-Match` and it names neither `etag` nor `*` (strong comparison, RFC 9110 §13.1.1:
+/// a weak tag never matches).
+pub(crate) fn if_match(headers: &HeaderMap, etag: &str) -> bool {
+    let target = trim_http_ws(etag.as_bytes());
+    let mut values = headers.get_all(header::IF_MATCH).iter().peekable();
+    if values.peek().is_none() {
+        return true;
+    }
+    let strong = is_quoted_tag(target);
+    values.any(|v| {
+        let raw = trim_http_ws(v.as_bytes());
+        raw == b"*" || (strong && etag_list(raw).into_iter().any(|t| is_quoted_tag(t) && t == target))
+    })
 }
 
 fn find<'a>(files: &'a [EmbeddedFile], path: &str) -> Option<&'a EmbeddedFile> {
@@ -246,6 +316,29 @@ mod tests {
         let res = respond(FILES, &Method::POST, &uri, &HeaderMap::new());
         assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(res.headers()[header::ALLOW], "GET, HEAD");
+    }
+
+    #[test]
+    fn etag_matching_respects_quotes_wildcards_and_non_ascii() {
+        let mut h = HeaderMap::new();
+        h.insert(header::IF_NONE_MATCH, HeaderValue::from_static("\"old,*,tag\""));
+        assert_eq!(if_none_match(&h, "\"f1\""), Some(false), "comma-quoted * is not a wildcard");
+
+        let mut h = HeaderMap::new();
+        h.insert(header::IF_NONE_MATCH, HeaderValue::from_bytes(b"\"non-\xff-ascii\", \"f1\"").unwrap());
+        assert_eq!(if_none_match(&h, "\"f1\""), Some(true), "non-ASCII sibling tag does not hide a match");
+
+        let mut h = HeaderMap::new();
+        h.insert(header::IF_NONE_MATCH, HeaderValue::from_static("W/W/\"f1\""));
+        assert_eq!(if_none_match(&h, "\"f1\""), Some(false), "repeated W/ prefix is malformed");
+
+        let mut h = HeaderMap::new();
+        h.insert(header::IF_MATCH, HeaderValue::from_static("W/\"f1\""));
+        assert!(!if_match(&h, "\"f1\""), "If-Match uses strong comparison");
+        h.insert(header::IF_MATCH, HeaderValue::from_static("\"a,b\", \"f1\""));
+        assert!(if_match(&h, "\"f1\""));
+        h.insert(header::IF_MATCH, HeaderValue::from_static("\"old,*,tag\""));
+        assert!(!if_match(&h, "\"f1\""));
     }
 
     #[test]

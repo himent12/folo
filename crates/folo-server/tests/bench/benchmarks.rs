@@ -116,12 +116,37 @@ async fn benchmarks_from_a_dataset_split_their_images_and_plans() {
     let first = &truth.images[0];
     let (headers, stored) = bytes(app, &format!("{uri}/images/1")).await;
     assert!(headers[header::CACHE_CONTROL].to_str().unwrap().contains("immutable"));
+    let stored_etag = headers[header::ETAG].to_str().unwrap().to_string();
+    let (s304, h304, b304) = send(
+        app,
+        Request::get(format!("{uri}/images/1"))
+            .header(header::IF_NONE_MATCH, &stored_etag)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s304, StatusCode::NOT_MODIFIED);
+    assert_eq!(h304[header::ETAG], stored_etag.as_str());
+    assert!(h304[header::CACHE_CONTROL].to_str().unwrap().contains("immutable"));
+    assert!(b304.is_empty());
     let source_image = val.images.iter().find(|i| i.file.ends_with(&first.file)).unwrap();
     let (_, original) = bytes(app, &format!("/api/datasets/{}/images/{}", ds.id, source_image.id)).await;
     assert_eq!(stored, original, "a benchmark copies its files byte for byte");
     let (headers, haze) = bytes(app, &format!("{uri}/images/1?condition=haze&severity=3")).await;
     assert_eq!(headers[header::CONTENT_TYPE], "image/jpeg");
     assert!(headers[header::CACHE_CONTROL].to_str().unwrap().contains("immutable"));
+    let haze_etag = headers[header::ETAG].to_str().unwrap().to_string();
+    assert_ne!(haze_etag, stored_etag);
+    let (s304, _, b304) = send(
+        app,
+        Request::get(format!("{uri}/images/1?condition=haze&severity=3"))
+            .header(header::IF_NONE_MATCH, &haze_etag)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(s304, StatusCode::NOT_MODIFIED);
+    assert!(b304.is_empty());
     let seed = folo_bench::conditions::variant_seed(3, "1", folo_bench::Condition::Haze, 3);
     let want =
         folo_bench::conditions::render(&stored, folo_bench::Condition::Haze, 3, &first.boxes, seed).unwrap();
