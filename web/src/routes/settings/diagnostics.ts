@@ -37,44 +37,59 @@ export interface DiagnosticsSnapshot {
 const VALID_FEATURE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
 const VALID_DEVICE_ID = /^(?:cpu|gpu:\d+|—)$/i;
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
 /**
- * Runtime shape check for `/api/system` JSON so unexpected `200` payloads (for example `{ "status": "ok" }` from a
- * reverse proxy) are flagged as invalid responses instead of crashing rendering or counting as a healthy ping.
+ * Runtime shape check for `/api/system` JSON so unexpected `200` payloads (for example `{ "status": "ok" }` or a
+ * partial `capabilities` object missing `tensor_cores`/`amp`) are rejected cleanly instead of crashing rendering.
  */
 export function isSystemInfo(raw: unknown): raw is SystemInfo {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
-  const o = raw as Record<string, unknown>;
-  if (!o.cpu || typeof o.cpu !== 'object' || Array.isArray(o.cpu)) return false;
-  if (typeof (o.cpu as Record<string, unknown>).name !== 'string') return false;
-  if (!Array.isArray(o.gpus)) return false;
-  for (const g of o.gpus) {
-    if (!g || typeof g !== 'object' || Array.isArray(g)) return false;
-    const gpu = g as Record<string, unknown>;
-    if (typeof gpu.ordinal !== 'number' || typeof gpu.name !== 'string' || typeof gpu.backend !== 'string') return false;
+  if (!isRecord(raw)) return false;
+  if (!isRecord(raw.cpu) || typeof raw.cpu.name !== 'string') return false;
+  if (!Array.isArray(raw.gpus)) return false;
+  for (const g of raw.gpus) {
+    if (!isRecord(g)) return false;
+    if (typeof g.ordinal !== 'number' || typeof g.name !== 'string' || typeof g.backend !== 'string') return false;
   }
-  if (o.capabilities !== undefined) {
-    if (!o.capabilities || typeof o.capabilities !== 'object' || Array.isArray(o.capabilities)) return false;
-    if (typeof (o.capabilities as Record<string, unknown>).device !== 'string') return false;
+  if (raw.capabilities !== undefined) {
+    if (!isRecord(raw.capabilities)) return false;
+    const c = raw.capabilities;
+    if (typeof c.device !== 'string' || typeof c.shader_f16 !== 'boolean') return false;
+    if (!isRecord(c.tensor_cores)) return false;
+    if (
+      typeof c.tensor_cores.available !== 'boolean' ||
+      typeof c.tensor_cores.enabled !== 'boolean' ||
+      (c.tensor_cores.reason !== null && typeof c.tensor_cores.reason !== 'string')
+    ) {
+      return false;
+    }
+    if (!isRecord(c.amp)) return false;
+    if (typeof c.amp.available !== 'boolean' || (c.amp.reason !== null && typeof c.amp.reason !== 'string')) return false;
   }
-  if (o.features !== undefined && (!Array.isArray(o.features) || !o.features.every((f) => typeof f === 'string'))) return false;
+  if (raw.features !== undefined && (!Array.isArray(raw.features) || !raw.features.every((f) => typeof f === 'string'))) return false;
   return true;
 }
 
 /**
  * Strips credentials, path segments, query strings, and hash fragments — returning ONLY a validated `http:`/`https:`
- * origin (or `'same-origin'` when unset / opaque `'null'`, or `'(invalid URL)'` for malformed/local-path input).
+ * origin (or `'same-origin'` when unset / opaque `'null'`, or `'(invalid URL)'` for malformed/relative/local-path input).
  */
 export function sanitizeServerUrl(raw: string, fallbackOrigin = ''): string {
+  // Reject non-empty inputs with leading/trailing or internal whitespace (never silently trimming malformed raw input).
+  if (raw.length > 0 && raw.trim().length > 0 && raw !== raw.trim()) return '(invalid URL)';
   const trimmed = raw.trim();
   const fallback = fallbackOrigin.trim();
   const input = trimmed || (fallback.toLowerCase() === 'null' ? '' : fallback);
   if (!input) return 'same-origin';
-  // Reject backslashes, internal whitespace/control characters, leading slashes, and opaque origins.
-  if (/[\\\s\u0000-\u001f\u007f]/.test(input) || input.startsWith('/') || input.toLowerCase() === 'null') {
+  // Reject backslashes, whitespace/control chars, leading slashes, relative paths (`./`, `../`), and opaque origins.
+  if (/[\\\s\u0000-\u001f\u007f]/.test(input) || input.startsWith('/') || input.startsWith('.') || input.toLowerCase() === 'null') {
     return '(invalid URL)';
   }
+  const explicitScheme = /^https?:\/\//i.test(input);
   let candidate: string;
-  if (/^https?:\/\//i.test(input)) {
+  if (explicitScheme) {
     candidate = input;
   } else if (input.includes('://')) {
     return '(invalid URL)';
@@ -89,6 +104,13 @@ export function sanitizeServerUrl(raw: string, fallbackOrigin = ''): string {
     if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname || parsed.origin === 'null') {
       return '(invalid URL)';
     }
+    if (!explicitScheme) {
+      // Bare inputs without a scheme must look like a real host (localhost, IPv6, dotted host, or explicit port),
+      // never a relative path such as `private-folo/data`.
+      const h = parsed.hostname.toLowerCase();
+      const validBareHost = h === 'localhost' || h.startsWith('[') || (h.includes('.') && !h.startsWith('.') && !h.endsWith('.')) || parsed.port !== '';
+      if (!validBareHost) return '(invalid URL)';
+    }
     return parsed.origin;
   } catch {
     return '(invalid URL)';
@@ -101,6 +123,7 @@ export function sanitizeServerUrl(raw: string, fallbackOrigin = ''): string {
  */
 export function safePingError(err: unknown): string {
   if (err instanceof ApiError) {
+    if (err.status === 0) return 'Unreachable';
     return Number.isInteger(err.status) && err.status >= 100 && err.status <= 599 ? `HTTP ${err.status}` : 'Server error';
   }
   if (err instanceof DOMException && (err.name === 'TimeoutError' || err.name === 'AbortError')) return 'Timed out';
@@ -108,10 +131,12 @@ export function safePingError(err: unknown): string {
   return 'Unreachable';
 }
 
-/** Strips URLs, control characters, and excessive length from display strings placed into copied bug reports. */
+/** Strips URLs, local filesystem paths, inline credentials/tokens, and control characters from copied report lines. */
 function scrubInline(text: string, maxLen = 96): string {
   const cleaned = text
-    .replace(/https?:\/\/\S+/gi, '[redacted-url]')
+    .replace(/https?:\/\/\S+/gi, '[redacted]')
+    .replace(/\b(?:token|secret|password|passwd|pwd|api[_-]?key|auth|bearer)\s*[:=]\s*\S+/gi, '[redacted]')
+    .replace(/(^|\s)(?:[a-zA-Z]:[\\/]|\/)[^\s,)]+/g, '$1[redacted]')
     .replace(/[\r\n\t\u0000-\u001f\u007f]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -137,6 +162,9 @@ export function mergeFeatures(systemFeatures?: readonly string[], hubFeatures?: 
 export function resolveDeviceLabel(system?: SystemInfo): { id: string; summary: string } {
   if (!system || !isSystemInfo(system)) return { id: '—', summary: 'Not loaded' };
   if (system.capabilities) {
+    if (!VALID_DEVICE_ID.test(system.capabilities.device)) {
+      return { id: '—', summary: 'Unavailable' };
+    }
     return {
       id: system.capabilities.device,
       summary: deviceSummary(system.capabilities, system.gpus, system.cpu.name),

@@ -62,6 +62,10 @@ describe('diagnostics helpers', () => {
     expect(sanitizeServerUrl('', '')).toBe('same-origin');
     expect(sanitizeServerUrl('C:\\Users\\alice\\private-folo')).toBe('(invalid URL)');
     expect(sanitizeServerUrl('C:/Users/alice/private-folo')).toBe('(invalid URL)');
+    expect(sanitizeServerUrl('./private-folo')).toBe('(invalid URL)');
+    expect(sanitizeServerUrl('../private-folo')).toBe('(invalid URL)');
+    expect(sanitizeServerUrl('private-folo/data')).toBe('(invalid URL)');
+    expect(sanitizeServerUrl(' https://example.com ')).toBe('(invalid URL)');
     expect(sanitizeServerUrl('file:/home/alice/private-folo')).toBe('(invalid URL)');
     expect(sanitizeServerUrl('/etc/passwd')).toBe('(invalid URL)');
     expect(sanitizeServerUrl('\\\\server\\share\\secret')).toBe('(invalid URL)');
@@ -71,10 +75,12 @@ describe('diagnostics helpers', () => {
     expect(sanitizeServerUrl('javascript:alert(1)')).toBe('(invalid URL)');
   });
 
-  it('validates SystemInfo shapes and classifies errors safely without leaking prose', () => {
+  it('validates SystemInfo shapes (including nested capabilities) and classifies errors safely without leaking prose', () => {
     expect(isSystemInfo({ status: 'ok' })).toBe(false);
+    expect(isSystemInfo({ cpu: { name: 'CPU' }, gpus: [], capabilities: { device: 'cpu' } })).toBe(false);
     expect(isSystemInfo(null)).toBe(false);
     expect(resolveDeviceLabel({ status: 'ok' } as never)).toEqual({ id: '—', summary: 'Not loaded' });
+    expect(safePingError(new ApiError(0, 'network', 'Failed to fetch', null, 'GET /api/system'))).toBe('Unreachable');
     expect(safePingError(new ApiError(503, 'unavailable', 'secret path C:/Users/alice/data https://u:p@h/?t=1', null, 'GET /api/system'))).toBe(
       'HTTP 503',
     );
@@ -108,7 +114,7 @@ describe('diagnostics helpers', () => {
       serverUrl: 'https://user:topsecret@gpu.internal:7878/users/alice:pw@h/?api_key=leak',
       origin: 'http://localhost:5173',
       deviceId: 'gpu:0',
-      deviceSummary: 'RTX 4080 SUPER · Vulkan',
+      deviceSummary: 'RTX 4080 SUPER · Vulkan /home/alice/private-folo token=example-secret',
       features: ['cloud', 'throughput', 'bad feature/secret'],
       pingMs: null,
       pingErrorSafe: 'HTTP 503',
@@ -126,7 +132,7 @@ describe('diagnostics helpers', () => {
     expect(report).toContain('- Server: folo serve 0.4.2 (live)');
     expect(report).toContain('- Endpoint: https://gpu.internal:7878');
     expect(report).toContain('- Ping (/api/system): Failed (HTTP 503)');
-    expect(report).toContain('- Device: RTX 4080 SUPER · Vulkan (gpu:0)');
+    expect(report).toContain('- Device: RTX 4080 SUPER · Vulkan [redacted] [redacted] (gpu:0)');
     expect(report).toContain('- Features: cloud, throughput');
     expect(report).toContain('- Theme: Midnight (midnight, system → dark)');
     expect(report).toContain('- Units: binary');
@@ -134,6 +140,8 @@ describe('diagnostics helpers', () => {
     expect(report).toContain('- Viewport: 1440×900');
     expect(report).not.toContain('topsecret');
     expect(report).not.toContain('alice:pw');
+    expect(report).not.toContain('private-folo');
+    expect(report).not.toContain('example-secret');
     expect(report).not.toContain('api_key');
     expect(report).not.toContain('bad feature');
   });
@@ -211,13 +219,64 @@ describe('DiagnosticsPanel', () => {
     expect(panel.textContent).toContain('gpu:0');
     expect(panel.querySelector('[role="status"]')?.textContent).toBe('Server ping failed: HTTP 503');
 
-    // Invalid JSON payload does not crash and reports Invalid response
-    vi.spyOn(api, 'system').mockResolvedValueOnce({ status: 'ok' } as never);
+    // Invalid JSON payload (including partial capabilities) does not crash and reports Invalid response
+    vi.spyOn(api, 'system').mockResolvedValueOnce({ cpu: { name: 'CPU' }, gpus: [], capabilities: { device: 'cpu' } } as never);
     pingBtn.click();
     await vi.waitFor(() => {
       flushSync();
       if (!panel.querySelector('.diag-err')?.textContent?.includes('Invalid /api/system response')) throw new Error('waiting for invalid');
     });
+
+    // Consecutive identical failure still mutates the live region text node
+    const live = panel.querySelector('[role="status"]')!;
+    const seenTexts: string[] = [];
+    const obs = new MutationObserver(() => seenTexts.push(live.textContent ?? ''));
+    obs.observe(live, { characterData: true, childList: true, subtree: true });
+    vi.spyOn(api, 'system').mockResolvedValueOnce({ status: 'ok' } as never);
+    pingBtn.click();
+    await vi.waitFor(() => {
+      flushSync();
+      if (!seenTexts.includes('Server ping failed: Invalid response')) throw new Error('waiting for repeated live mutation');
+    });
+    obs.disconnect();
+  });
+
+  it('preserves manual ping hardware details across a subsequent Resource refresh failure', async () => {
+    const api = new MockApi('normal', 0);
+    const baseSystem = await api.system();
+    let mode: 'fail' | 'ok' = 'fail';
+    vi.spyOn(api, 'system').mockImplementation(async () => {
+      if (mode === 'fail') throw new ApiError(503, 'unavailable', 'Temporary outage', null, 'GET /api/system');
+      return { ...baseSystem, features: ['manual_ping_feature'] };
+    });
+    hub.api = api;
+    mounted = render(() => <Settings />, target);
+
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('#system .err')) throw new Error('waiting for initial System error');
+    });
+
+    // Manual Ping succeeds while initial Resource failed -> loads hardware details
+    mode = 'ok';
+    const panel = target.querySelector<HTMLElement>('#diagnostics')!;
+    const pingBtn = [...panel.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Ping')!;
+    pingBtn.click();
+    await vi.waitFor(() => {
+      flushSync();
+      if (!panel.textContent?.includes('manual_ping_feature')) throw new Error('waiting for manual ping feature');
+    });
+
+    // Subsequent Resource retry fails -> ping shows failure while hardware details from manual ping are preserved
+    mode = 'fail';
+    const retryBtn = [...target.querySelectorAll('#system button')].find((b) => b.textContent?.includes('Retry'))!;
+    (retryBtn as HTMLButtonElement).click();
+    await vi.waitFor(() => {
+      flushSync();
+      if (!panel.querySelector('.diag-err')) throw new Error('waiting for retry error');
+    });
+    expect(panel.textContent).toContain('manual_ping_feature');
+    expect(panel.textContent).toContain('gpu:0');
   });
 
   it('aborts and discards in-flight manual pings when the connection switches', async () => {

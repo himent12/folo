@@ -5,7 +5,7 @@
 import Check from '$icons/check';
 import Copy from '$icons/copy';
 import RefreshCw from '$icons/refresh-cw';
-import { computed, css, effect, For, onCleanup, signal } from 'fw';
+import { computed, css, effect, flush, For, onCleanup, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { SystemInfo } from '$lib/api/types';
 import { prefs } from '$lib/prefs';
@@ -58,8 +58,10 @@ function errorMessage(e: unknown): string {
 export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
   const pinging = signal(false);
   const manual = signal<ManualPing | null>(null);
+  /** Latest valid hardware payload observed for the current hub epoch (preserved across quiet refresh failures). */
+  const lastKnown = signal<{ epoch: number; system: SystemInfo } | null>(null);
   const copied = signal(false);
-  const announcement = signal('', { equals: false });
+  const announcement = signal('');
 
   let unmounted = false;
   let pingToken = 0;
@@ -71,6 +73,15 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
     pingCtrl?.abort();
     pingCtrl = null;
     pinging.set(false);
+  }
+
+  /** Clears the live region first when repeating identical text so `fw` actually mutates the DOM text node. */
+  function announce(message: string) {
+    if (announcement.peek() === message) {
+      announcement.set('');
+      flush();
+    }
+    announcement.set(message);
   }
 
   onCleanup(() => {
@@ -90,6 +101,7 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
     prevConnecting = connecting;
     abortManualPing();
     manual.set(null);
+    lastKnown.set(null);
   });
 
   const activeManual = computed(() => {
@@ -99,7 +111,14 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
   });
 
   const validPropSystem = computed(() => (hub.mode !== 'connecting' && isSystemInfo(props.system) ? props.system : undefined));
-  const activeSystem = computed(() => activeManual.get()?.system ?? validPropSystem.get());
+  const activeSystem = computed(() => {
+    if (hub.mode === 'connecting') return undefined;
+    const fromManual = activeManual.get()?.system;
+    if (fromManual) return fromManual;
+    const cached = lastKnown.get();
+    if (props.systemError !== undefined && cached && cached.epoch === hub.epoch) return cached.system;
+    return validPropSystem.get() ?? (cached && cached.epoch === hub.epoch ? cached.system : undefined);
+  });
   const pingMs = computed(() => {
     if (hub.mode === 'connecting') return null;
     const m = activeManual.get();
@@ -182,8 +201,9 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
       if (!isSystemInfo(info)) throw new Error('Invalid /api/system response');
       const ms = performance.now() - t0;
       const seq = props.initialPingSeq;
+      lastKnown.set({ epoch: ep, system: info });
       manual.set({ seq, epoch: ep, ms, error: null, errorSafe: null, system: info });
-      announcement.set(`Server ping ${formatPing(ms)}`);
+      announce(`Server ping ${formatPing(ms)}`);
     } catch (e) {
       if (unmounted || token !== pingToken || ctrl.signal.aborted || hub.epoch !== ep || isConnecting()) return;
       const msg = errorMessage(e);
@@ -191,7 +211,7 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
       const seq = props.initialPingSeq;
       const prevSystem = manual.peek()?.epoch === ep ? manual.peek()?.system : undefined;
       manual.set({ seq, epoch: ep, ms: null, error: msg, errorSafe: safe, system: prevSystem });
-      announcement.set(`Server ping failed: ${safe}`);
+      announce(`Server ping failed: ${safe}`);
     } finally {
       if (!unmounted && token === pingToken) pinging.set(false);
     }
@@ -204,15 +224,18 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
       await navigator.clipboard.writeText(text);
       if (unmounted) return;
       copied.set(true);
-      announcement.set('Diagnostics copied to clipboard');
+      announce('Diagnostics copied to clipboard');
       clearTimeout(copyTimer);
       copyTimer = setTimeout(() => {
-        if (!unmounted) copied.set(false);
+        if (!unmounted) {
+          copied.set(false);
+          announcement.set('');
+        }
       }, 2000);
     } catch (e) {
       if (unmounted) return;
       copied.set(false);
-      announcement.set('Could not copy diagnostics');
+      announce('Could not copy diagnostics');
       toast.error(e, 'Could not copy diagnostics');
     }
   }
@@ -224,8 +247,12 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
         desc={
           <span class="diag-sub">
             <Meta>
-              <span>{serverLine.get()}</span>
-              <span class="mono endpoint">{endpoint.get()}</span>
+              <span class="diag-meta-item">
+                <span class="diag-wrap">{serverLine.get()}</span>
+              </span>
+              <span class="diag-meta-item">
+                <span class="mono endpoint diag-wrap">{endpoint.get()}</span>
+              </span>
             </Meta>
           </span>
         }
@@ -241,7 +268,12 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
         }
       />
 
-      <Row fact name="Compute device" desc={device.get().summary} control={<span class="mono diag-val">{device.get().id}</span>} />
+      <Row
+        fact
+        name="Compute device"
+        desc={<span class="diag-wrap">{device.get().summary}</span>}
+        control={<span class="mono diag-val">{device.get().id}</span>}
+      />
 
       <Row
         fact
@@ -260,7 +292,12 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
         control={<span class="num diag-val">{features.get().length}</span>}
       />
 
-      <Row fact name="Studio environment" desc={envDesc.get()} control={<span class="mono diag-val">v{props.studioVersion}</span>} />
+      <Row
+        fact
+        name="Studio environment"
+        desc={<span class="diag-wrap">{envDesc.get()}</span>}
+        control={<span class="mono diag-val">v{props.studioVersion}</span>}
+      />
 
       <Row
         name="Bug report summary"
@@ -284,8 +321,19 @@ css`
     display: block;
     min-width: 0;
   }
-  .endpoint {
+  /* Follow ModelId's <Meta> wrapping pattern: flex item + inner overflow-wrap keeps wrapped lines clear of Meta's 16 px left clip-path. */
+  .diag-sub :global(.ui-meta) > .diag-meta-item {
+    display: flex;
+    max-width: 100%;
+    white-space: normal;
+  }
+  .diag-wrap {
+    display: block;
+    min-width: 0;
+    max-width: 100%;
     overflow-wrap: anywhere;
+  }
+  .endpoint {
     color: var(--text-secondary);
   }
   .ping-ctl {
