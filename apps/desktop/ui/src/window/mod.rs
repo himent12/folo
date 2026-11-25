@@ -154,8 +154,8 @@ pub struct Window {
     pub(crate) framebuffer: Framebuffer,
     /// The tile renderer (keeps last frame's tile hashes).
     pub(crate) renderer: raster::Renderer,
-    /// Glyph and emoji masks, reused across frames.
-    pub(crate) glyph_masks: raster::MaskCache<RenderGlyphParams>,
+    /// Glyph and emoji masks (with their raster bounds), reused across frames.
+    pub(crate) glyph_masks: raster::MaskCache<RenderGlyphParams, raster::GlyphMask>,
     /// SVG icon masks, reused across frames.
     pub(crate) icon_masks: raster::MaskCache<RenderSvgParams>,
     /// Damage rectangles of the last render.

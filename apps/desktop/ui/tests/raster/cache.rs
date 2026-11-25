@@ -60,6 +60,48 @@ fn mask_cache_drops_idle_entries() {
 }
 
 #[test]
+fn glyph_mask_cache_stores_bounds_and_empty_glyphs_and_evicts_idle() {
+    use folo_ui::raster::GlyphMask;
+
+    let mut cache: MaskCache<u32, GlyphMask> = MaskCache::with_budget(1 << 20, 2);
+    let bounds = Bounds::new(point(DevicePixels(3), DevicePixels(-7)), dsize(4, 5));
+    let mut present_calls = 0;
+    let mut empty_calls = 0;
+    for _ in 0..3 {
+        let entry = cache
+            .get_or_insert_with(&1, || {
+                present_calls += 1;
+                Ok(Some(GlyphMask::Present {
+                    raster_bounds: bounds,
+                    mask: Mask::Alpha(Arc::new(AlphaMask::new(dsize(4, 5), vec![255u8; 20]))),
+                }))
+            })
+            .unwrap()
+            .unwrap();
+        let GlyphMask::Present { raster_bounds, mask } = entry else { panic!("expected Present") };
+        assert_eq!(raster_bounds, bounds);
+        assert_eq!(mask.into_alpha().unwrap().size, dsize(4, 5));
+
+        let empty = cache
+            .get_or_insert_with(&2, || {
+                empty_calls += 1;
+                Ok(Some(GlyphMask::Empty))
+            })
+            .unwrap()
+            .unwrap();
+        assert!(matches!(empty, GlyphMask::Empty));
+    }
+    assert_eq!(present_calls, 1, "present glyph should hit cache after first insert");
+    assert_eq!(empty_calls, 1, "empty glyph should hit cache after first insert");
+    assert_eq!(cache.len(), 2);
+
+    for _ in 0..4 {
+        cache.end_frame();
+    }
+    assert!(cache.is_empty(), "idle present and empty glyph entries should both evict");
+}
+
+#[test]
 fn renderer_caches_hold_their_budget_under_image_churn() {
     let mut rng = Rng(77);
     let budget = 2 << 20;

@@ -29,7 +29,7 @@ mod target;
 mod tiles;
 mod triangles;
 
-pub use cache::{Mask, MaskCache};
+pub use cache::{CachedMask, GlyphMask, Mask, MaskCache};
 pub use tiles::TILE as TILE_SIZE;
 
 use crate::{Bounds, DevicePixels, Framebuffer, GlyphBlend, Primitive, Scene};

@@ -15,7 +15,9 @@ use crate::{
     AlphaMask, App, Background, Bounds, BoxShadow, BuiltPath, ColorMask, ColorSprite, Corners, FontId,
     GlyphId, Hsla, Image, MonoSprite, PaintQuad, Pixels, Point, RenderGlyphParams, RenderImage,
     RenderSvgParams, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, SharedString, Size, SpriteKind,
-    StrikethroughStyle, StylePaint, Underline, UnderlineStyle, Window, raster::Mask, size, svg_sprite_bounds,
+    StrikethroughStyle, StylePaint, Underline, UnderlineStyle, Window,
+    raster::{GlyphMask, Mask},
+    size, svg_sprite_bounds,
 };
 
 impl Window {
@@ -99,7 +101,7 @@ impl Window {
         let mask = self.icon_masks.get_or_insert_with(&params, || {
             Ok(renderer.render(&params)?.map(|mask| Mask::from(Arc::new(mask))))
         })?;
-        let Some(mask) = mask.and_then(|mask| mask.alpha().cloned()) else { return Ok(()) };
+        let Some(mask) = mask.and_then(Mask::into_alpha) else { return Ok(()) };
         let bounds = svg_sprite_bounds(bounds, mask.size);
         let clip = self.scaled_clip();
         if bounds.intersect(&clip).is_empty() {
@@ -146,7 +148,7 @@ impl Window {
         else {
             return Ok(());
         };
-        let Some(mask) = mask.alpha().cloned() else { return Ok(()) };
+        let Some(mask) = mask.into_alpha() else { return Ok(()) };
         let bounds = Bounds {
             origin: glyph_origin.map(|px| px.floor()) + raster_bounds.origin.map(Into::into),
             size: mask.size.map(Into::into),
@@ -189,7 +191,7 @@ impl Window {
         else {
             return Ok(());
         };
-        let Some(mask) = mask.color().cloned() else { return Ok(()) };
+        let Some(mask) = mask.into_color() else { return Ok(()) };
         let bounds = Bounds {
             origin: glyph_origin.map(|px| px.floor()) + raster_bounds.origin.map(Into::into),
             size: mask.size.map(Into::into),
@@ -204,21 +206,28 @@ impl Window {
     }
 
     /// The raster bounds and the cached mask of a glyph; `None` when it has no pixels.
+    ///
+    /// Both `raster_bounds` and empty (zero-area) glyphs are stored in `Window::glyph_masks`, so a
+    /// steady-frame glyph hit does a single lock-free cache lookup instead of acquiring
+    /// `TextSystem::raster_bounds`'s `RwLock` and hashing `RenderGlyphParams` twice.
     fn glyph_mask(
         &mut self,
         params: &RenderGlyphParams,
         make: impl FnOnce(Size<crate::DevicePixels>, Vec<u8>) -> Mask,
     ) -> anyhow::Result<Option<(Bounds<crate::DevicePixels>, Mask)>> {
         let text_system = &self.text_system;
-        let raster_bounds = text_system.raster_bounds(params)?;
-        if raster_bounds.size.width.0 == 0 || raster_bounds.size.height.0 == 0 {
-            return Ok(None);
-        }
-        let mask = self.glyph_masks.get_or_insert_with(params, || {
+        let entry = self.glyph_masks.get_or_insert_with(params, || {
+            let raster_bounds = text_system.raster_bounds(params)?;
+            if raster_bounds.size.width.0 <= 0 || raster_bounds.size.height.0 <= 0 {
+                return Ok(Some(GlyphMask::Empty));
+            }
             let (size, bytes) = text_system.rasterize_glyph(params)?;
-            Ok(Some(make(size, bytes)))
+            Ok(Some(GlyphMask::Present { raster_bounds, mask: make(size, bytes) }))
         })?;
-        Ok(mask.map(|mask| (raster_bounds, mask)))
+        Ok(match entry {
+            Some(GlyphMask::Present { raster_bounds, mask }) => Some((raster_bounds, mask)),
+            Some(GlyphMask::Empty) | None => None,
+        })
     }
 
     /// Paints box shadows under a rounded rectangle.
