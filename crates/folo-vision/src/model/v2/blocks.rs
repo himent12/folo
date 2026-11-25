@@ -396,28 +396,48 @@ impl HyperContext {
     }
 
     /// Run P5 hypergraph context; returns `(y_p5 [B, C5, H, W], g_scene [B, C_g])`.
+    ///
+    /// Softmax attention weights, FFN `silu`, hyperedge residual addition, and global scene pooling (`g_scene`)
+    /// always execute in `F32` (both under AMP `autocast()` and in explicit `F16` inference) so high-magnitude
+    /// logits and reductions over `M` hyperedges never overflow or quantize in `F16`.
     pub fn forward_with_scene(&self, x: &Tensor) -> Result<(Tensor, Tensor)> {
         let (b, _, h, w) = x.dims4()?;
         let n = h * w;
-        let av = self.av_proj.forward(x)?;
-        let a_logits = av.narrow(1, 0, self.m_edges)?.reshape([b, self.m_edges, n])?;
-        let v = av.narrow(1, self.m_edges, self.c_g)?.reshape([b, self.c_g, n])?;
-        let a_gather = a_logits.softmax(-1)?; // [B, M, N]: gather over spatial tokens
-        let a_bcast = a_logits.softmax(1)?; // [B, M, N]: convex combination over hyperedges (H*W-invariant)
-        let e = v.matmul(&a_gather.transpose(1, 2)?)?; // [B, C_g, M]
-        let e_t = e.transpose(1, 2)?; // [B, M, C_g]
-        let e_ffn = self.ffn2.forward(&self.ffn1.forward(&e_t)?.silu()?)?;
-        let e_prime_t = e_t.add(&e_ffn)?; // [B, M, C_g]
-        let g_scene = e_prime_t.mean(1, false)?; // [B, C_g]
-        let e_prime = e_prime_t.transpose(1, 2)?; // [B, C_g, M]
-        let y_ctx = e_prime.matmul(&a_bcast)?.reshape([b, self.c_g, h, w])?;
-        let proj = self.out_proj.forward(&y_ctx)?;
-        let x_res = if x.dtype() != proj.dtype() && folo_core::autocast_dtype().is_some() {
-            x.to_dtype(proj.dtype())?
-        } else {
-            x.clone()
+        let to_f32 = |t: Tensor| -> folo_core::Result<Tensor> {
+            if t.dtype() == folo_core::DType::F32 { Ok(t) } else { t.to_dtype(folo_core::DType::F32) }
         };
-        let out = x_res.add(&proj)?;
+        let av = self.av_proj.forward(x)?;
+        let a_logits = to_f32(av.narrow(1, 0, self.m_edges)?.reshape([b, self.m_edges, n])?)?;
+        let v = to_f32(av.narrow(1, self.m_edges, self.c_g)?.reshape([b, self.c_g, n])?)?;
+        let a_gather = a_logits.softmax(-1)?; // [B, M, N] in F32: gather over spatial tokens
+        let a_bcast = a_logits.softmax(1)?; // [B, M, N] in F32: convex combination over hyperedges
+        let e = v.matmul(&a_gather.transpose(1, 2)?)?; // [B, C_g, M]
+        let e_t_f32 = to_f32(e.transpose(1, 2)?)?; // [B, M, C_g] in F32
+        let ffn_in = if e_t_f32.dtype() != self.ffn1.weight.dtype() && folo_core::autocast_dtype().is_none() {
+            e_t_f32.to_dtype(self.ffn1.weight.dtype())?
+        } else {
+            e_t_f32.clone()
+        };
+        let h1 = to_f32(self.ffn1.forward(&ffn_in)?)?.silu()?;
+        let h1 = if h1.dtype() != self.ffn2.weight.dtype() && folo_core::autocast_dtype().is_none() {
+            h1.to_dtype(self.ffn2.weight.dtype())?
+        } else {
+            h1
+        };
+        let e_ffn_f32 = to_f32(self.ffn2.forward(&h1)?)?;
+        let e_prime_t = e_t_f32.add(&e_ffn_f32)?; // [B, M, C_g] in F32
+        let g_scene = e_prime_t.mean(1, false)?; // [B, C_g] in F32
+        let e_prime = e_prime_t.transpose(1, 2)?; // [B, C_g, M] in F32
+        let y_ctx = e_prime.matmul(&a_bcast)?.reshape([b, self.c_g, h, w])?;
+        let y_ctx =
+            if y_ctx.dtype() != self.out_proj.conv.weight.dtype() && folo_core::autocast_dtype().is_none() {
+                y_ctx.to_dtype(self.out_proj.conv.weight.dtype())?
+            } else {
+                y_ctx
+            };
+        let proj = self.out_proj.forward(&y_ctx)?;
+        let proj = if proj.dtype() != x.dtype() { proj.to_dtype(x.dtype())? } else { proj };
+        let out = x.add(&proj)?;
         Ok((out, g_scene))
     }
 }
@@ -467,15 +487,26 @@ impl FullPadGate {
     }
 
     /// Modulate `feat [B, C_tgt, H, W]` with `g_scene [B, C_g]`.
+    ///
+    /// Computes `feat * (1 + tanh(proj(g_scene)))` in `F32` before casting the modulated result back to
+    /// `feat.dtype()`, so small gate updates near zero initialisation are not rounded away before multiplication
+    /// under `F16` AMP or half-precision inference.
     pub fn forward(&self, feat: &Tensor, g_scene: &Tensor) -> Result<Tensor> {
         let (b, c, _, _) = feat.dims4()?;
-        let gate = self.proj.forward(g_scene)?.tanh()?.add_scalar(1.0)?.reshape([b, c, 1, 1])?;
-        let gate = if gate.dtype() != feat.dtype() && folo_core::autocast_dtype().is_some() {
-            gate.to_dtype(feat.dtype())?
+        let g_in = if g_scene.dtype() != self.proj.weight.dtype() && folo_core::autocast_dtype().is_none() {
+            g_scene.to_dtype(self.proj.weight.dtype())?
         } else {
-            gate
+            g_scene.clone()
         };
-        Ok(feat.mul(&gate)?)
+        let raw = self.proj.forward(&g_in)?;
+        let raw_f32 =
+            if raw.dtype() == folo_core::DType::F32 { raw } else { raw.to_dtype(folo_core::DType::F32)? };
+        let gate = raw_f32.tanh()?.add_scalar(1.0)?.reshape([b, c, 1, 1])?;
+        if feat.dtype() == folo_core::DType::F32 {
+            Ok(feat.mul(&gate)?)
+        } else {
+            Ok(feat.to_dtype(folo_core::DType::F32)?.mul(&gate)?.to_dtype(feat.dtype())?)
+        }
     }
 }
 

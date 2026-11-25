@@ -732,3 +732,223 @@ fn standard_groups_excludes_v2_gamma_id_and_alpha_raw_from_weight_decay() {
     let bn_group = groups.iter().find(|g| g.name == "bn").unwrap();
     assert_eq!(bn_group.weight_decay, 0.0);
 }
+
+#[test]
+fn hypercontext_and_fullpad_f16_stability_and_f32_scene_pooling() {
+    let mut rng = Rng::seed(2027);
+    let mut init_ctx = Init::new(&mut rng);
+    let mut hc = HyperContext::new(16, 8, &mut init_ctx);
+    let mut pad = FullPadGate::new(8, 16, &mut init_ctx).unwrap();
+    // Give FullPadGate small non-zero weights so tiny gate updates are exercised.
+    init::copy_(&pad.proj.weight, &Tensor::rand_uniform([16, 8], -0.05, 0.05, &mut rng)).unwrap();
+    hc.eval();
+    pad.eval();
+
+    // Large-magnitude logits where F16 softmax would overflow (> 11.0 -> exp > 65504) if not promoted to F32.
+    let x_f32 = Tensor::rand_uniform([1, 16, 8, 8], -30.0, 30.0, &mut rng);
+    let (y_ref, g_ref) = hc.forward_with_scene(&x_f32).unwrap();
+    let p_ref = pad.forward(&y_ref, &g_ref).unwrap();
+    assert_eq!(g_ref.dtype(), DType::F32);
+    assert!(y_ref.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    assert!(p_ref.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+
+    // GPU AMP autocast + explicit F16 inference check when a GPU with shader-f16 is available.
+    if let Ok(gpu) = folo_gpu::init()
+        && folo_core::backend::computes_f16(gpu)
+    {
+        // 1. AMP autocast training forward + backward: g_scene stays F32, gradients are finite.
+        let mut hc_amp = HyperContext::new(16, 8, &mut Init::new(&mut Rng::seed(2027)));
+        let mut pad_amp = FullPadGate::new(8, 16, &mut Init::new(&mut Rng::seed(2028))).unwrap();
+        init::copy_(&pad_amp.proj.weight, &Tensor::rand_uniform([16, 8], -0.05, 0.05, &mut Rng::seed(2029)))
+            .unwrap();
+        hc_amp.to_device(gpu).unwrap();
+        pad_amp.to_device(gpu).unwrap();
+        let x_g = x_f32.to_device(gpu).unwrap().requires_grad_();
+        let (y_amp, g_amp, p_amp) = {
+            let _ac = folo_core::autocast();
+            let (y, g) = hc_amp.forward_with_scene(&x_g).unwrap();
+            let p = pad_amp.forward(&y, &g).unwrap();
+            (y, g, p)
+        };
+        assert_eq!(g_amp.dtype(), DType::F32, "g_scene must stay F32 under AMP autocast");
+        assert_eq!(y_amp.dtype(), DType::F32, "HyperContext preserves F32 residual stream dtype");
+        let g_vec = g_amp.to_vec::<f32>().unwrap();
+        assert!(g_vec.iter().all(|v| v.is_finite()), "g_scene non-finite under AMP");
+        let loss = p_amp.to_dtype(DType::F32).unwrap().square().unwrap().mean_all().unwrap();
+        let grads = loss.backward().unwrap();
+        let gx = grads.get(&x_g).unwrap().to_vec::<f32>().unwrap();
+        assert!(gx.iter().all(|v| v.is_finite()), "HyperContext/FullPad grad non-finite under AMP");
+
+        // 2. Explicit F16 inference (no autocast): softmax & scene pooling stay F32, no overflow/NaN.
+        hc.to_device(gpu).unwrap();
+        pad.to_device(gpu).unwrap();
+        hc.to_dtype(DType::F16).unwrap();
+        pad.to_dtype(DType::F16).unwrap();
+        let x_f16 = x_f32.to_device(gpu).unwrap().to_dtype(DType::F16).unwrap();
+        let _ng = no_grad();
+        let (y_f16, g_f16) = hc.forward_with_scene(&x_f16).unwrap();
+        let p_f16 = pad.forward(&y_f16, &g_f16).unwrap();
+        assert_eq!(g_f16.dtype(), DType::F32);
+        assert_eq!(y_f16.dtype(), DType::F16);
+        assert!(
+            p_f16.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()),
+            "explicit F16 HyperContext+FullPad produced non-finite values"
+        );
+    }
+}
+
+#[test]
+fn lazyalign_iou_quality_loss_grad_check_and_zero_fg() {
+    use folo_vision::Xyxy;
+    use folo_vision::loss::{ImageTargets, LossConfig, assign_batch};
+    use folo_vision::model::v2::iou_quality_loss;
+
+    let mut rng = Rng::seed(909);
+    let cfg = FoloV2Config::new("n", 3).unwrap().with_iou_head(true);
+    let model = FoloV2Model::with_rng(cfg, &mut rng).unwrap();
+    let x = Tensor::rand_uniform([2, 3, 64, 64], 0.0, 1.0, &mut rng);
+    let out = model.forward(&x).unwrap();
+    let iou_raw = out.iou_raw.expect("iou_head=true produces iou_raw");
+    let targets = vec![
+        ImageTargets { boxes: vec![Xyxy::new(8.0, 8.0, 40.0, 40.0)], labels: vec![0] },
+        ImageTargets {
+            boxes: vec![Xyxy::new(16.0, 12.0, 52.0, 56.0), Xyxy::new(4.0, 20.0, 28.0, 48.0)],
+            labels: vec![1, 2],
+        },
+    ];
+    let loss_cfg = LossConfig::default();
+    let asg = assign_batch(&out.box_raw, &out.cls_raw, &out.anchors, &targets, &loss_cfg).unwrap();
+    assert!(asg.num_fg() > 0);
+
+    // 1. Finite-difference gradient check wrt iou_raw; verify box_raw target is detached (zero grad into box_raw).
+    let iou_probe = Tensor::randn(iou_raw.shape().clone(), 0.0, 0.7, &mut rng);
+    let box_leaf = out.box_raw.detach().requires_grad_();
+    let iou_leaf = iou_probe.detach().requires_grad_();
+    let l = iou_quality_loss(&iou_leaf, &box_leaf, &out.anchors, &asg, out.reg_max, 1.5).unwrap();
+    let g = l.backward().unwrap();
+    assert!(g.get(&box_leaf).is_none(), "IoU target must be detached from box_raw");
+    let g_iou = g.get(&iou_leaf).unwrap().to_vec::<f32>().unwrap();
+    assert!(g_iou.iter().any(|&v| v.abs() > 1e-6) && g_iou.iter().all(|v| v.is_finite()));
+
+    let box_const = out.box_raw.detach();
+    grad_check_with(
+        |inputs| iou_quality_loss(&inputs[0], &box_const, &out.anchors, &asg, out.reg_max, 1.5),
+        &[iou_probe],
+        &GradCheck { eps: 1e-3, atol: 2e-3, rtol: 2e-2, max_checks: 32, seed: 42 },
+    )
+    .unwrap();
+
+    // 2. End-to-end backward reaches `box_branch.iou_out.weight` and shared `box_branch.conv1`.
+    let l_e2e = iou_quality_loss(&iou_raw, &out.box_raw, &out.anchors, &asg, out.reg_max, 1.0).unwrap();
+    let g_e2e = l_e2e.backward().unwrap();
+    let any_iou_grad = model.head.levels.iter().any(|lvl| {
+        g_e2e
+            .get(&lvl.box_branch.iou_out.as_ref().unwrap().weight)
+            .is_some_and(|t| t.to_vec::<f32>().unwrap().iter().any(|&v| v.abs() > 1e-8))
+    });
+    assert!(any_iou_grad, "iou_quality_loss must produce non-zero gradients on iou_out weights");
+
+    // 3. Zero foreground anchors and gain == 0 return exact finite scalar zero with zero gradient,
+    //    even when `iou_raw` contains NaN or Inf logits.
+    let empty_targets = vec![ImageTargets::default(), ImageTargets::default()];
+    let empty_asg =
+        assign_batch(&out.box_raw, &out.cls_raw, &out.anchors, &empty_targets, &loss_cfg).unwrap();
+    assert_eq!(empty_asg.num_fg(), 0);
+    let mut poison = vec![0.0f32; iou_raw.numel()];
+    poison[0] = f32::NAN;
+    poison[1] = f32::INFINITY;
+    let iou_z = Tensor::from_vec(poison, iou_raw.shape().clone()).unwrap().requires_grad_();
+    for (a_ref, gain) in [(&empty_asg, 1.0f32), (&asg, 0.0f32)] {
+        let lz = iou_quality_loss(&iou_z, &out.box_raw, &out.anchors, a_ref, out.reg_max, gain).unwrap();
+        assert_eq!(lz.item::<f32>().unwrap(), 0.0);
+        let gz = lz.backward().unwrap().get(&iou_z).unwrap().to_vec::<f32>().unwrap();
+        assert!(gz.iter().all(|&v| v == 0.0));
+    }
+
+    // 4. Malformed metadata and invalid gain/strides rejected with Err (never panic).
+    assert!(iou_quality_loss(&iou_raw, &out.box_raw, &out.anchors, &asg, out.reg_max, -0.5).is_err());
+    assert!(iou_quality_loss(&iou_raw, &out.box_raw, &out.anchors, &asg, out.reg_max, f32::NAN).is_err());
+    let mut bad_img = asg.clone();
+    bad_img.image.pop();
+    assert!(iou_quality_loss(&iou_raw, &out.box_raw, &out.anchors, &bad_img, out.reg_max, 1.0).is_err());
+    let mut bad_strides = out.anchors.clone();
+    bad_strides.strides.pop();
+    assert!(iou_quality_loss(&iou_raw, &out.box_raw, &bad_strides, &asg, out.reg_max, 1.0).is_err());
+    let mut zero_stride = out.anchors.clone();
+    zero_stride.strides[asg.anchor[0] as usize] = 0.0;
+    assert!(iou_quality_loss(&iou_raw, &out.box_raw, &zero_stride, &asg, out.reg_max, 1.0).is_err());
+}
+
+#[test]
+fn lazyalign_iou_score_fusion_and_detections() {
+    use folo_vision::model::v2::{DEFAULT_IOU_FUSION_ALPHA, fuse_cls_iou_scores};
+    use folo_vision::nms::NmsConfig;
+
+    // 1. Direct score fusion math at alpha = 0.0, 0.5, 1.0.
+    let iou_logits = [0.0f32, 2.0]; // sigmoid(0)=0.5, sigmoid(2)≈0.880797
+    let p_iou0 = 0.5f32;
+    let p_iou1 = 1.0 / (1.0 + (-2.0f32).exp());
+
+    let mut s0 = vec![0.8f32, 0.2, 0.5, 0.9];
+    fuse_cls_iou_scores(&mut s0, &iou_logits, 2, 0.0);
+    assert_eq!(s0, vec![0.8, 0.2, 0.5, 0.9], "alpha=0 must be exact identity");
+
+    let mut s_half = vec![0.8f32, 0.2, 0.5, 0.9];
+    fuse_cls_iou_scores(&mut s_half, &iou_logits, 2, DEFAULT_IOU_FUSION_ALPHA);
+    assert!((s_half[0] - (0.8 * p_iou0).sqrt()).abs() < 1e-6);
+    assert!((s_half[1] - (0.2 * p_iou0).sqrt()).abs() < 1e-6);
+    assert!((s_half[2] - (0.5 * p_iou1).sqrt()).abs() < 1e-6);
+    assert!((s_half[3] - (0.9 * p_iou1).sqrt()).abs() < 1e-6);
+
+    let mut s_one = vec![0.8f32, 0.2, 0.5, 0.9];
+    fuse_cls_iou_scores(&mut s_one, &iou_logits, 2, 1.0);
+    assert_close(&s_one, &[p_iou0, p_iou0, p_iou1, p_iou1], 1e-6, "alpha=1 pure IoU");
+
+    // 2. End-to-end HeadOutputV2::decode_images & detections with iou_head=true.
+    let cfg = FoloV2Config::new("n", 3).unwrap().with_iou_head(true);
+    let model = FoloV2Model::with_rng(cfg, &mut Rng::seed(123)).unwrap();
+    model.eval();
+    let x = Tensor::rand_uniform([1, 3, 64, 64], 0.0, 1.0, &mut Rng::seed(456));
+    let mut out = {
+        let _ng = no_grad();
+        model.forward(&x).unwrap()
+    };
+    let a = out.num_anchors();
+    // Craft synthetic cls_raw & iou_raw on two disjoint anchors (0 and 1):
+    // anchor 0 has higher raw cls (logit 2.0 -> 0.881) but terrible IoU (logit -4.0 -> 0.018),
+    // anchor 1 has lower raw cls (logit 1.0 -> 0.731) but high IoU (logit +4.0 -> 0.982).
+    let mut cls_data = vec![-20.0f32; 3 * a];
+    cls_data[0] = 2.0; // class 0, anchor 0
+    cls_data[1] = 1.0; // class 0, anchor 1
+    let mut iou_data = vec![0.0f32; a];
+    iou_data[0] = -4.0;
+    iou_data[1] = 4.0;
+    out.cls_raw = Tensor::from_vec(cls_data, [1, 3, a]).unwrap();
+    out.iou_raw = Some(Tensor::from_vec(iou_data, [1, 1, a]).unwrap());
+
+    let nms = NmsConfig { conf: 0.05, iou: 0.99, max_det: 10, ..NmsConfig::default() };
+    let dets_raw = out.detections(&nms, 0.0).unwrap();
+    let dets_fused = out.detections(&nms, 0.5).unwrap();
+    assert_eq!(dets_raw[0].len(), 2);
+    assert_eq!(dets_fused[0].len(), 2);
+    // Without IoU fusion, anchor 0 ranks #1; with IoU fusion (alpha=0.5), anchor 1 overtakes anchor 0!
+    assert_ne!(dets_raw[0][0].bbox, dets_fused[0][0].bbox, "IoU fusion should promote higher-IoU anchor");
+    assert!(dets_fused[0][0].score > dets_fused[0][1].score);
+
+    // Invalid iou_alpha rejected, and zero anchors return empty per-image outputs cleanly without panicking.
+    assert!(out.decode_images(-0.1).is_err());
+    assert!(out.decode_images(1.5).is_err());
+    assert!(out.detections(&nms, f32::NAN).is_err());
+    let empty_out = folo_vision::model::v2::HeadOutputV2 {
+        box_raw: Tensor::zeros([2, 64, 0]),
+        cls_raw: Tensor::zeros([2, 3, 0]),
+        iou_raw: Some(Tensor::zeros([2, 1, 0])),
+        mode: HeadMode::O2m,
+        o2o: None,
+        anchors: folo_vision::decode::Anchors { points: Vec::new(), strides: Vec::new(), levels: Vec::new() },
+        reg_max: 16,
+        num_classes: 3,
+    };
+    assert_eq!(empty_out.decode_images(0.5).unwrap(), vec![(Vec::new(), Vec::new()); 2]);
+    assert_eq!(empty_out.detections(&nms, 0.5).unwrap(), vec![Vec::new(); 2]);
+}
