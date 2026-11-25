@@ -210,9 +210,6 @@ impl Route {
 
 pub type Action = Rc<dyn Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>)>;
 
-/// Keyed by the image list's address too: a reload or a new source replaces the list.
-pub type FilterCache = ((String, Option<Split>, Option<u32>, bool, usize, usize), Rc<Vec<usize>>);
-
 pub fn act(f: impl Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>) + 'static) -> Action {
     Rc::new(f)
 }
@@ -275,9 +272,11 @@ pub struct Inspector {
     pub hover_box: Option<usize>,
     /// An image to land on once the dataset's image list is in (opened from a run's sample).
     pub want: Option<String>,
-    /// The image last shown and the filters it was shown under (class, empty images only): when
-    /// they change underneath (the class list read again, a server switch), it lands on it again.
-    pub shown: Option<(String, Option<u32>, bool)>,
+    /// The image last shown and the filter/sort/list state it was shown under (class, empty-only,
+    /// filename query, image sort, loaded list length): when any of these change underneath (a page
+    /// arrives under a non-default sort, a server switch resets filters, class list reloads), the
+    /// inspector re-lands on the same image by id.
+    pub shown: Option<(String, Option<u32>, bool, String, crate::screens::datasets::ImageSort, usize)>,
     /// Opened from a run's samples: that run and the view it was in. Images that are among its
     /// samples show the epoch's predictions over the (dashed) labels, as the run page draws them.
     pub sample: Option<(String, SampleView)>,
@@ -364,8 +363,18 @@ pub struct FoloApp {
     pub ds_format_filter: Option<DatasetFormat>,
     /// Live search input on the Datasets index (matches name, path, format, or id).
     pub ds_search: Entity<TextInput>,
+    /// Sort column and direction on the Datasets index.
+    pub ds_sort: crate::screens::datasets::DatasetSort,
+    pub ds_sort_desc: bool,
     pub ds_tab: DsTab,
     pub ds_split: Option<Split>,
+    /// Live filename/path search input on a dataset's Images tab, plus its cached text.
+    pub ds_img_search: Entity<TextInput>,
+    pub ds_img_query: String,
+    /// Sort order on a dataset's Images tab.
+    pub ds_img_sort: crate::screens::datasets::ImageSort,
+    /// Dataset id that `ds_img_search` currently belongs to (clears when switching datasets).
+    pub ds_img_dataset: Option<String>,
     /// The class filter and the dataset it was set on: a class index means another class in
     /// another dataset, or none, so it applies only there (read it through `class_filter`).
     pub ds_class: Option<(String, u32)>,
@@ -401,8 +410,8 @@ pub struct FoloApp {
     pub ds_tile: f32,
     /// The grid tile under the pointer (it reveals every label, as a focused one does).
     pub ds_hover_tile: Option<String>,
-    /// Filtered image indices keyed by (dataset, split, class, list length).
-    pub ds_filter_cache: RefCell<Option<FilterCache>>,
+    /// Filtered and sorted image indices cached for the dataset grid.
+    pub ds_filter_cache: RefCell<Option<crate::screens::datasets::DatasetFilterCache>>,
     pub grid_scroll: folo_ui::UniformListScrollHandle,
     pub grid_width: Rc<std::cell::Cell<Pixels>>,
     pub inspector: Option<Inspector>,
@@ -701,6 +710,17 @@ impl FoloApp {
         });
         let ds_search = cx.new(|cx| TextInput::new("Filter by name or path", cx));
         let ds_search_sub = cx.subscribe(&ds_search, |_, _, _: &crate::input::InputEvent, cx| cx.notify());
+        let ds_img_search = cx.new(|cx| TextInput::new("Search files", cx));
+        let ds_img_search_sub = cx.subscribe(&ds_img_search, |this, _, ev: &crate::input::InputEvent, cx| {
+            let crate::input::InputEvent::Changed(text) = ev;
+            if let Route::Dataset(id) = &this.route {
+                this.ds_img_dataset = Some(id.clone());
+            }
+            this.ds_img_query = text.to_string();
+            this.ds_hover_tile = None;
+            this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
+            cx.notify();
+        });
         let run_search = cx.new(|cx| TextInput::new("Filter by name, dataset or arch", cx));
         let run_search_sub = cx.subscribe(&run_search, |_, _, _: &crate::input::InputEvent, cx| cx.notify());
         let model_search = cx.new(|cx| TextInput::new("Filter by name, class or arch", cx));
@@ -737,8 +757,14 @@ impl FoloApp {
             dialog_scroll: ScrollHandle::new(),
             ds_format_filter: None,
             ds_search,
+            ds_sort: crate::screens::datasets::DatasetSort::Name,
+            ds_sort_desc: false,
             ds_tab: DsTab::Images,
             ds_split: None,
+            ds_img_search,
+            ds_img_query: String::new(),
+            ds_img_sort: crate::screens::datasets::ImageSort::Default,
+            ds_img_dataset: None,
             ds_class: None,
             ds_empty_of: None,
             ds_boxes: true,
@@ -905,7 +931,7 @@ impl FoloApp {
             history_tickets: HashMap::new(),
             history_seq: 0,
             _tasks: Vec::new(),
-            _subs: vec![ds_search_sub, run_search_sub, model_search_sub, log_search_sub],
+            _subs: vec![ds_search_sub, ds_img_search_sub, run_search_sub, model_search_sub, log_search_sub],
         };
         if !frozen {
             this.start_pump(cx);

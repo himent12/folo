@@ -21,16 +21,26 @@ impl FoloApp {
     /// inspector walks that list); one the dataset doesn't have opens the first image. The class
     /// filter turned on or off under the inspector (its class list read again, after its images)
     /// moves every place: it lands on the image it showed again.
-    fn land_inspector(&mut self) {
+    fn land_inspector(&mut self, cx: &mut Context<Self>) {
         if let Some(i) = self.inspector.as_ref()
             && i.want.is_none()
-            && let Some((image, class, empty)) = &i.shown
-            && (*class, *empty) != (self.class_filter(&i.dataset), self.empty_only(&i.dataset))
+            && let Some((image, class, empty, query, sort, len)) = &i.shown
         {
-            let image = image.clone();
-            let i = self.inspector.as_mut().unwrap();
-            i.want = Some(image);
-            i.shown = None;
+            let cur_len = self.store.images.get(&i.dataset).and_then(|l| l.ready()).map_or(0, Vec::len);
+            let changed = (*class, *empty, query.as_str(), *sort, *len)
+                != (
+                    self.class_filter(&i.dataset),
+                    self.empty_only(&i.dataset),
+                    self.img_query(&i.dataset),
+                    self.img_sort(&i.dataset),
+                    cur_len,
+                );
+            if changed {
+                let image = image.clone();
+                let i = self.inspector.as_mut().unwrap();
+                i.want = Some(image);
+                i.shown = None;
+            }
         }
         let Some((ds, want)) =
             self.inspector.as_ref().and_then(|i| Some((i.dataset.clone(), i.want.clone()?)))
@@ -51,8 +61,12 @@ impl FoloApp {
                 if self.empty_only(&ds) {
                     self.ds_empty_of = None;
                 }
-                // Unfiltered, the list is every image in order.
-                i
+                if self.ds_img_dataset.as_deref() == Some(ds.as_str()) && !self.ds_img_query.is_empty() {
+                    self.ds_img_query.clear();
+                    self.ds_img_search.update(cx, |inp, cx| inp.set_text("", cx));
+                }
+                // Re-resolve in case a non-default sort reordered the unfiltered image list.
+                self.filtered_indices(&ds).iter().position(|&raw| raw == i).unwrap_or(i)
             }
             // Not in yet: a large list arrives a page at a time (a run's sample can be past the
             // first page), so wait for it (or keep waiting on its page error) rather than open
@@ -68,7 +82,7 @@ impl FoloApp {
 
     pub(super) fn inspector_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
-        self.land_inspector();
+        self.land_inspector(cx);
         let insp = self.inspector.as_ref().unwrap();
         let ds_id = insp.dataset.clone();
         let n = self.filtered_indices(&ds_id).len();
@@ -163,8 +177,11 @@ impl FoloApp {
         let (zoom, pan, hover) = (insp.zoom, insp.pan, insp.hover_box);
         let Some(meta) = self.filtered_image(&ds_id, index).cloned() else { return div().into_any_element() };
         let (class, empty) = (self.class_filter(&ds_id), self.empty_only(&ds_id));
+        let query = self.img_query(&ds_id).to_string();
+        let sort = self.img_sort(&ds_id);
+        let loaded_len = self.store.images.get(&ds_id).and_then(|l| l.ready()).map_or(0, Vec::len);
         if let Some(i) = self.inspector.as_mut() {
-            i.shown = Some((meta.id.clone(), class, empty));
+            i.shown = Some((meta.id.clone(), class, empty, query, sort, loaded_len));
         }
         // A keyboard-focused label row highlights its box like the pointer does; while the keyboard
         // is in use it wins over a pointer hover left behind on the image.
@@ -862,7 +879,7 @@ impl FoloApp {
 
     pub fn step_inspector(&mut self, d: i32, cx: &mut Context<Self>) {
         // From the image on screen: the class filter may have changed since it was drawn.
-        self.land_inspector();
+        self.land_inspector(cx);
         // Opened from a run's samples: the previous / next sample (the inspector lands on it by id).
         let next_sample = self.inspector.as_ref().and_then(|i| {
             let (run, _) = i.sample.as_ref()?;

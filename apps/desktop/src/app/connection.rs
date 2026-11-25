@@ -123,6 +123,10 @@ impl FoloApp {
         self.ds_empty_of = None;
         self.ds_format_filter = None;
         self.ds_search.update(cx, |i, cx| i.set_text("", cx));
+        self.ds_img_search.update(cx, |i, cx| i.set_text("", cx));
+        self.ds_img_query.clear();
+        self.ds_img_sort = crate::screens::datasets::ImageSort::Default;
+        self.ds_img_dataset = None;
         self.run_filter = super::RunFilter::All;
         self.run_arch_filter = None;
         self.run_search.update(cx, |i, cx| i.set_text("", cx));

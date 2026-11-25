@@ -99,6 +99,14 @@ impl FoloApp {
             self.reload_cloud();
         }
         self.after_bench_navigate();
+        if let Route::Dataset(id) = &self.route
+            && self.ds_img_dataset.as_deref() != Some(id.as_str())
+        {
+            self.ds_img_dataset = Some(id.clone());
+            self.ds_img_query.clear();
+            self.ds_img_search.update(cx, |i, cx| i.set_text("", cx));
+            self.ds_img_sort = crate::screens::datasets::ImageSort::Default;
+        }
         // The pages with dataset cards show each dataset's health as the server has it now: a
         // folder moved away (or put back) since it was read says so on the next visit.
         if matches!(self.route, Route::Overview | Route::Datasets | Route::Dataset(_)) {

@@ -7,4 +7,6 @@ mod list;
 mod stats;
 mod strip;
 
+pub(crate) use detail::{DatasetFilterCache, ImageSort};
 pub(crate) use images::file_name;
+pub(crate) use list::DatasetSort;

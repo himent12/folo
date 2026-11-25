@@ -1,5 +1,6 @@
 //! The dataset index, format/search filtering, and class names summarised to fit.
 
+use std::cmp::Ordering;
 use std::rc::Rc;
 
 use folo_ui::{AnyElement, Context, Focusable, IntoElement, ParentElement, Styled, Window, div, px};
@@ -11,24 +12,101 @@ use crate::screens::page_header;
 use crate::theme::{size as tsize, theme, ty};
 use crate::ui::*;
 
-/// Filters `list` by optional format and case-insensitive substring query across name, path,
-/// format label, and id (matching Studio's Datasets filter).
+/// How the Datasets index is ordered.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DatasetSort {
+    #[default]
+    Name,
+    Images,
+    Boxes,
+    Classes,
+}
+
+impl DatasetSort {
+    pub const ALL: [Self; 4] = [Self::Name, Self::Images, Self::Boxes, Self::Classes];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Name => "Name",
+            Self::Images => "Images",
+            Self::Boxes => "Boxes",
+            Self::Classes => "Classes",
+        }
+    }
+
+    /// Natural initial direction when picking a sort column: A–Z for Name, largest-first for counts.
+    pub fn default_desc(self) -> bool {
+        !matches!(self, Self::Name)
+    }
+}
+
+/// Filters `list` by optional format and case-insensitive substring query across name, path
+/// (normalizing `\` and `/`), format label, and id (matching Studio's Datasets filter).
 pub fn filter_datasets<'a>(
     list: &'a [Dataset],
     format: Option<DatasetFormat>,
     query: &str,
 ) -> Vec<&'a Dataset> {
     let q = query.trim().to_lowercase();
+    let q_slash = q.contains('\\').then(|| q.replace('\\', "/"));
+    let q_norm = q_slash.as_deref().unwrap_or(&q);
     list.iter()
         .filter(|d| format.is_none_or(|f| d.format == f))
         .filter(|d| {
-            q.is_empty()
-                || d.name.to_lowercase().contains(&q)
-                || d.path.to_lowercase().contains(&q)
+            if q.is_empty() {
+                return true;
+            }
+            if d.name.to_lowercase().contains(&q)
                 || d.format.label().to_lowercase().contains(&q)
                 || d.id.to_lowercase().contains(&q)
+            {
+                return true;
+            }
+            let path = d.path.to_lowercase();
+            path.contains(&q)
+                || ((q_slash.is_some() || path.contains('\\')) && path.replace('\\', "/").contains(q_norm))
         })
         .collect()
+}
+
+/// Sorts `list` by `sort` and `desc`. Missing/unscanned box counts always sort LAST in both
+/// ascending and descending order; ties break alphabetically by name, then id.
+pub fn sort_datasets(list: &mut [Dataset], sort: DatasetSort, desc: bool) {
+    let cmp_name = |a: &Dataset, b: &Dataset| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.id.cmp(&b.id))
+    };
+    list.sort_by(|a, b| {
+        let primary = match sort {
+            DatasetSort::Name => {
+                let ord = cmp_name(a, b);
+                return if desc { ord.reverse() } else { ord };
+            }
+            DatasetSort::Images => {
+                let ord = a.splits.total().cmp(&b.splits.total());
+                if desc { ord.reverse() } else { ord }
+            }
+            DatasetSort::Boxes => {
+                match (a.stats.as_ref().map(|s| s.boxes), b.stats.as_ref().map(|s| s.boxes)) {
+                    (Some(x), Some(y)) => {
+                        let ord = x.cmp(&y);
+                        if desc { ord.reverse() } else { ord }
+                    }
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => Ordering::Equal,
+                }
+            }
+            DatasetSort::Classes => {
+                let ord = a.classes.len().cmp(&b.classes.len());
+                if desc { ord.reverse() } else { ord }
+            }
+        };
+        primary.then_with(|| cmp_name(a, b))
+    });
 }
 
 impl FoloApp {
@@ -123,16 +201,61 @@ impl FoloApp {
                     }),
                 );
                 let query = self.ds_search.read(cx).text().to_string();
-                let filtered: Vec<Dataset> =
+                let mut filtered: Vec<Dataset> =
                     filter_datasets(&l, self.ds_format_filter, &query).into_iter().cloned().collect();
+                sort_datasets(&mut filtered, self.ds_sort, self.ds_sort_desc);
                 let is_filtered = self.ds_format_filter.is_some() || !query.trim().is_empty();
-                let search = self.search_field("ds-search", self.ds_search.clone(), 240., window, cx);
-                let mut toolbar = div()
-                    .h(px(tsize::CONTROL_LG))
+                let sort_labels: Vec<&str> = DatasetSort::ALL.iter().map(|s| s.label()).collect();
+                let sort_sel = DatasetSort::ALL.iter().position(|s| *s == self.ds_sort).unwrap_or(0);
+                let sort_seg = self.segmented(
+                    "ds-sort",
+                    &sort_labels,
+                    sort_sel,
+                    window,
+                    cx,
+                    Rc::new(|this, i, _, cx| {
+                        let picked = DatasetSort::ALL[i];
+                        if this.ds_sort == picked {
+                            this.ds_sort_desc = !this.ds_sort_desc;
+                        } else {
+                            this.ds_sort = picked;
+                            this.ds_sort_desc = picked.default_desc();
+                        }
+                        cx.notify();
+                    }),
+                );
+                let sort_dir = self.icon_button(
+                    "ds-sort-dir",
+                    if self.ds_sort_desc { "icons/chevron-down.svg" } else { "icons/chevron-up.svg" },
+                    if self.ds_sort_desc {
+                        "Descending · click for ascending"
+                    } else {
+                        "Ascending · click for descending"
+                    },
+                    window,
+                    cx,
+                    act(|this, _, cx| {
+                        this.ds_sort_desc = !this.ds_sort_desc;
+                        cx.notify();
+                    }),
+                );
+                let sort_group = div()
                     .flex()
+                    .flex_none()
                     .items_center()
-                    .gap(px(12.))
+                    .gap(px(4.))
+                    .child(sort_seg)
+                    .child(sort_dir);
+                let search = self.search_field("ds-search", self.ds_search.clone(), 220., window, cx);
+                let mut toolbar = div()
+                    .min_h(px(tsize::CONTROL_LG))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_x(px(12.))
+                    .gap_y(px(8.))
                     .child(seg)
+                    .child(sort_group)
                     .child(div().flex_1());
                 if is_filtered {
                     toolbar = toolbar.child(
@@ -225,8 +348,8 @@ pub fn names_summary(names: &[String], budget: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{card_columns, filter_datasets, names_summary};
-    use crate::api::{Dataset, DatasetFormat, Splits};
+    use super::{DatasetSort, card_columns, filter_datasets, names_summary, sort_datasets};
+    use crate::api::{Dataset, DatasetFormat, DatasetStats, Histogram, Splits};
 
     fn sample_dataset(id: &str, name: &str, path: &str, format: DatasetFormat) -> Dataset {
         Dataset {
@@ -239,6 +362,17 @@ mod tests {
             splits: Splits { train: 10, val: 2, test: 0 },
             stats: None,
             revision: None,
+        }
+    }
+
+    fn stats_with_boxes(boxes: u64) -> DatasetStats {
+        DatasetStats {
+            boxes,
+            empty_images: 0,
+            broken_labels: 0,
+            class_counts: vec![boxes],
+            box_size_hist: Histogram { edges: vec![0., 1.], counts: vec![boxes] },
+            boxes_per_image_hist: Histogram { edges: vec![0., 1.], counts: vec![1] },
         }
     }
 
@@ -261,7 +395,7 @@ mod tests {
     #[test]
     fn filters_datasets_by_format_and_query() {
         let list = vec![
-            sample_dataset("ds_1", "Shapes Hard", "D:/data/shapes-hard", DatasetFormat::Yolo),
+            sample_dataset("ds_1", "Shapes Hard", r"D:\data\shapes-hard", DatasetFormat::Yolo),
             sample_dataset("ds_2", "COCO Val", "D:/datasets/coco2017", DatasetFormat::Coco),
             sample_dataset("ds_3", "BCCD Cells", "/mnt/blood/bccd", DatasetFormat::Yolo),
         ];
@@ -280,10 +414,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ds_2"]
         );
-        // Case-insensitive name and path matching, trimmed whitespace.
+        // Case-insensitive name and path matching, trimmed whitespace, and slash normalization.
         assert_eq!(
             filter_datasets(&list, None, "  BLOOD/BCCD ").iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
             vec!["ds_3"]
+        );
+        assert_eq!(
+            filter_datasets(&list, None, r"blood\bccd").iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+            vec!["ds_3"]
+        );
+        assert_eq!(
+            filter_datasets(&list, None, "d:/data/shapes-hard")
+                .iter()
+                .map(|d| d.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ds_1"]
+        );
+        assert_eq!(
+            filter_datasets(&list, None, r"D:\datasets\coco2017")
+                .iter()
+                .map(|d| d.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ds_2"]
         );
         assert_eq!(
             filter_datasets(&list, Some(DatasetFormat::Yolo), "shapes")
@@ -293,5 +445,48 @@ mod tests {
             vec!["ds_1"]
         );
         assert!(filter_datasets(&list, Some(DatasetFormat::Coco), "shapes").is_empty());
+    }
+
+    #[test]
+    fn sorts_datasets_by_name_images_boxes_and_classes_with_missing_boxes_last() {
+        let mut a = sample_dataset("ds_a", "beta", "/a", DatasetFormat::Yolo);
+        a.splits = Splits { train: 50, val: 10, test: 0 };
+        a.classes = vec!["c1".into(), "c2".into()];
+        a.stats = Some(stats_with_boxes(400));
+
+        let mut b = sample_dataset("ds_b", "Alpha", "/b", DatasetFormat::Coco);
+        b.splits = Splits { train: 5, val: 5, test: 0 };
+        b.classes = vec!["c1".into(), "c2".into(), "c3".into(), "c4".into()];
+        b.stats = Some(stats_with_boxes(100));
+
+        let mut c = sample_dataset("ds_c", "Gamma", "/c", DatasetFormat::Yolo);
+        c.splits = Splits { train: 100, val: 20, test: 5 };
+        c.classes = vec!["c1".into()];
+        c.stats = None; // Unscanned: must sort LAST in both asc and desc Boxes sort.
+
+        fn ids(l: &[Dataset]) -> Vec<&str> {
+            l.iter().map(|d| d.id.as_str()).collect()
+        }
+
+        let mut list = vec![a.clone(), b.clone(), c.clone()];
+        sort_datasets(&mut list, DatasetSort::Name, false);
+        assert_eq!(ids(&list), vec!["ds_b", "ds_a", "ds_c"]);
+        sort_datasets(&mut list, DatasetSort::Name, true);
+        assert_eq!(ids(&list), vec!["ds_c", "ds_a", "ds_b"]);
+
+        sort_datasets(&mut list, DatasetSort::Images, true);
+        assert_eq!(ids(&list), vec!["ds_c", "ds_a", "ds_b"]);
+        sort_datasets(&mut list, DatasetSort::Images, false);
+        assert_eq!(ids(&list), vec!["ds_b", "ds_a", "ds_c"]);
+
+        sort_datasets(&mut list, DatasetSort::Boxes, true);
+        assert_eq!(ids(&list), vec!["ds_a", "ds_b", "ds_c"]);
+        sort_datasets(&mut list, DatasetSort::Boxes, false);
+        assert_eq!(ids(&list), vec!["ds_b", "ds_a", "ds_c"]);
+
+        sort_datasets(&mut list, DatasetSort::Classes, true);
+        assert_eq!(ids(&list), vec!["ds_b", "ds_a", "ds_c"]);
+        sort_datasets(&mut list, DatasetSort::Classes, false);
+        assert_eq!(ids(&list), vec!["ds_c", "ds_a", "ds_b"]);
     }
 }
