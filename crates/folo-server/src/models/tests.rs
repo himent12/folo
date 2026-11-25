@@ -365,15 +365,55 @@ fn models_caches_stay_bounded_and_file_model_tracks_disk_changes() {
     assert!(models.meta.lock().unwrap().len() <= 2, "meta cache bounded");
     assert!(models.by_id.lock().unwrap().len() <= 2, "by_id cache bounded");
 
+    // Consecutive scans over a catalog larger than the cache keep the first `cap` entries warm (no LRU thrash).
+    let id0 = file_model_id(&paths[0]);
+    let id1 = file_model_id(&paths[1]);
+    let id2 = file_model_id(&paths[2]);
+    assert!(models.meta.lock().unwrap().contains_key(&paths[0]));
+    assert!(models.meta.lock().unwrap().contains_key(&paths[1]));
+    assert!(models.by_id.lock().unwrap().contains_key(&id0));
+    assert!(models.by_id.lock().unwrap().contains_key(&id1));
+    assert_eq!(models.scan().len(), 3);
+    assert!(models.meta.lock().unwrap().contains_key(&paths[0]), "second scan did not thrash m0");
+    assert!(models.meta.lock().unwrap().contains_key(&paths[1]), "second scan did not thrash m1");
+
+    // Cold lookup of an uncached ID warms only that file (does not read headers of unrelated broken files).
+    let broken = models.models_dir().join("z_broken.folo");
+    std::fs::write(&broken, b"not weights").unwrap();
+    let found2 = models.file_model(&id2).unwrap();
+    assert_eq!(found2.path, paths[2]);
+    assert!(models.by_id.lock().unwrap().contains_key(&id2), "cold lookup warmed requested ID");
+    assert!(models.meta.lock().unwrap().contains_key(&paths[2]), "cold lookup warmed requested meta");
+    assert_eq!(models.skipped.lock().unwrap().len(), 0, "cold lookup did not read sibling headers");
+    std::fs::remove_file(&broken).unwrap();
+
     // Warm hit via by_id index, then deletion invalidates cleanly.
-    let target = &paths[2];
-    let id = file_model_id(target);
-    assert!(models.by_id.lock().unwrap().contains_key(&id));
-    let found = models.file_model(&id).unwrap();
-    assert_eq!(found.path, *target);
-    std::fs::remove_file(target).unwrap();
-    assert!(models.file_model(&id).is_none(), "deleted model is never served stale");
-    assert!(!models.by_id.lock().unwrap().contains_key(&id));
+    let found = models.file_model(&id2).unwrap();
+    assert_eq!(found.path, paths[2]);
+    std::fs::remove_file(&paths[2]).unwrap();
+    assert!(models.file_model(&id2).is_none(), "deleted model is never served stale");
+    assert!(!models.by_id.lock().unwrap().contains_key(&id2));
+
+    // Warm lookup refuses paths outside `models_dir` or replaced with symlinks.
+    let outside = dir.join("outside.folo");
+    write_tiny_model(&outside, 99);
+    assert!(!is_regular_model_file(&models.models_dir(), &outside));
+    assert!(!is_regular_model_file(&models.models_dir(), &models.models_dir().join("not_a_model.txt")));
+    let link_path = models.models_dir().join("link.folo");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&outside, &link_path).is_ok();
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&outside, &link_path).is_ok();
+    if linked {
+        let link_id = file_model_id(&link_path);
+        models.by_id.lock().unwrap().insert(link_id.clone(), link_path.clone());
+        assert!(
+            models.file_model(&link_id).is_none(),
+            "symlinked model file must not resolve on warm lookup"
+        );
+        assert!(!models.by_id.lock().unwrap().contains_key(&link_id));
+        let _ = std::fs::remove_file(&link_path);
+    }
 
     // Skipped-file cache stays bounded too.
     let err = Error::internal("corrupt");
