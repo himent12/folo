@@ -208,8 +208,32 @@ export default function Logs(props: LogsProps) {
     const f = filtered.get();
     return {
       hidden: Math.max(0, f.matched - f.lines.length),
-      older: lv === 'all' && !needle.get() ? counts.get().earlier : 0,
+      older: lv === 'all' || needle.get() ? counts.get().earlier : 0,
     };
+  });
+
+  // Polite live status for search results: updates only when the user edits the query or level filter (never on
+  // streaming log appends, so the log stays silent during live training).
+  const searchStatus = signal('');
+  effect(() => {
+    const q = needle.get();
+    const lv = level.get();
+    if (!q) {
+      searchStatus.set('');
+      return;
+    }
+    untrack(() => {
+      const m = filtered.get().matched;
+      const ct = counts.get();
+      const raw = query.peek().trim();
+      const scope = lv !== 'all' ? ` at ${lv} level` : '';
+      const older = ct.earlier ? ` (${lineCount(ct.earlier)} earlier are in log.jsonl)` : '';
+      searchStatus.set(
+        m
+          ? `${m === 1 ? '1 line matches' : `${lineCount(m)} match`} "${raw}"${scope}${older}.`
+          : `No log lines match "${raw}"${scope}${older}.`,
+      );
+    });
   });
 
   async function copyVisible() {
@@ -258,13 +282,21 @@ export default function Logs(props: LogsProps) {
         }
       }
     }
-    // Set on the element, not through state: compute the target scrollTop without reading scrollHeight a second time
-    // after writing `--tail`, avoiding a second synchronous layout reflow.
-    if (next !== pad) {
+    const targetScroll = Math.max(0, end + next);
+    // Avoid forcing a second layout pass: when tail padding is unchanged or shrinking, assign `scrollTop` while layout
+    // is still clean before mutating `--tail`. Only when `--tail` grows must it precede `scrollTop` so the browser does
+    // not clamp to the smaller prior scroll height.
+    if (next <= pad) {
+      el.scrollTop = targetScroll;
+      if (next !== pad) {
+        pad = next;
+        el.style.setProperty('--tail', `${next}px`);
+      }
+    } else {
       pad = next;
       el.style.setProperty('--tail', `${next}px`);
+      el.scrollTop = targetScroll;
     }
-    el.scrollTop = Math.max(0, end + next);
   }
 
   effect(() => {
@@ -387,14 +419,21 @@ export default function Logs(props: LogsProps) {
           {/* Silent: new lines are read only through the batched status line below, when asked for. */}
           <div class="log" ref={box} onscroll={onscroll} role="log" aria-live="off" aria-label="Training log" tabindex={0}>
             <div ref={inner}>
-              {before.get().hidden || before.get().older ? (
+              {before.get().hidden || (before.get().older && (!needle.get() || shown.get().length > 0)) ? (
                 <p class="earlier">
                   {before.get().hidden ? (
                     <>
-                      {lineCount(before.get().hidden + before.get().older)} earlier{' '}
+                      {lineCount(before.get().hidden + (needle.get() ? 0 : before.get().older))} earlier{' '}
                       <Button size="sm" variant="ghost" onclick={() => cap.set(Infinity)}>
                         Show {before.get().older ? lineCount(before.get().hidden) : 'them'}
                       </Button>
+                      {needle.get() && before.get().older
+                        ? ` (${lineCount(before.get().older)} older are in the run folder's log.jsonl).`
+                        : null}
+                    </>
+                  ) : needle.get() ? (
+                    <>
+                      Search covers the latest {lineCount(counts.get().held)}; {lineCount(before.get().older)} earlier are in the run folder's log.jsonl.
                     </>
                   ) : (
                     <>{lineCount(before.get().older)} earlier are in the run folder's log.jsonl.</>
@@ -407,7 +446,11 @@ export default function Logs(props: LogsProps) {
                 fallback={
                   <p class="empty">
                     {needle.get()
-                      ? `No log lines match "${query.get().trim()}"${level.get() !== 'all' ? ` at ${level.get()} level` : ''}.`
+                      ? `No log lines match "${query.get().trim()}"${level.get() !== 'all' ? ` at ${level.get()} level` : ''}${
+                          counts.get().earlier
+                            ? ` in the latest ${lineCount(counts.get().held)} (${lineCount(counts.get().earlier)} earlier are in the run folder's log.jsonl)`
+                            : ''
+                        }.`
                       : `No log lines${level.get() !== 'all' ? ` at ${level.get()} level` : ''} yet.`}
                   </p>
                 }
@@ -428,6 +471,9 @@ export default function Logs(props: LogsProps) {
           </div>
           <p class="sr-only" role="status">
             {announce.get() && props.live ? said.get() : ''}
+          </p>
+          <p class="sr-only" aria-live="polite" aria-atomic="true">
+            {searchStatus.get()}
           </p>
           {!follow.get() ? (
             <div class="jump">

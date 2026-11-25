@@ -244,21 +244,51 @@ describe('Logs: search, copy visible, static tokens, and single-reflow pin', () 
 
     expect([...target.querySelectorAll('.line .m')].map((el) => el.textContent)).toEqual(['CUDA out of memory']);
     expect(target.querySelector('.matches')?.textContent?.trim()).toBe('1 line');
+    const liveStatus = target.querySelector<HTMLElement>('p[aria-live="polite"]')!;
+    expect(liveStatus.textContent).toBe('1 line matches "MEMORY".');
 
-    // Empty search result shows clear message and disables Copy visible.
+    // Empty search result shows clear message, announces politely, and disables Copy visible.
     search.value = 'nonexistent-token';
     search.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
     expect(target.querySelector('.empty')?.textContent).toContain('No log lines match "nonexistent-token"');
+    expect(liveStatus.textContent).toBe('No log lines match "nonexistent-token".');
     const copyBtn = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Copy visible'))!;
     expect(copyBtn.disabled).toBe(true);
 
-    // Clearing search restores all lines.
+    // Clearing search restores all lines and clears the search status region.
     search.value = '';
     search.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
     expect(target.querySelectorAll('.line')).toHaveLength(4);
     expect(copyBtn.disabled).toBe(false);
+    expect(liveStatus.textContent).toBe('');
+  });
+
+  it('notes unsearched older lines in log.jsonl when searching a truncated log', () => {
+    const log = new AppendLog<LogLine>();
+    log.push(
+      { t: '2026-11-12T10:00:01Z', level: 'info', message: 'epoch 10 done' },
+      { t: '2026-11-12T10:00:02Z', level: 'warn', message: 'lr drop' },
+    );
+    c = render(() => <Logs log={log} version={0} live={false} earlier={350} />, target);
+    flushSync();
+
+    const search = target.querySelector<HTMLInputElement>('input[aria-label="Search logs"]')!;
+    search.value = 'lr';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.earlier')?.textContent).toContain('350 lines earlier are in the run folder\'s log.jsonl');
+
+    search.value = 'epoch 1';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.earlier')?.textContent).toContain('Search covers the latest 2 lines');
+
+    search.value = 'missing';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.empty')?.textContent).toContain('350 lines earlier are in the run folder\'s log.jsonl');
   });
 
   it('copies only the currently visible filtered lines via Copy visible', async () => {
