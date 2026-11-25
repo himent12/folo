@@ -554,3 +554,131 @@ fn winograd4_avx2_matches_scalar_bit_for_bit() {
         }
     }
 }
+
+/// Winograd F(2x2, 3x3) explicit AVX2 input/output transforms and fused register epilogues match the scalar
+/// transform bit-for-bit across even/odd widths, segment boundaries, and every epilogue kind.
+#[test]
+fn winograd2_avx2_matches_scalar_bitwise_across_epilogues() {
+    let p = params([1, 1], [1, 1], [1, 1], 1);
+    let shapes = [
+        (1, 16, [15, 15], 8),
+        (1, 16, [16, 17], 12),
+        (1, 16, [19, 31], 8),
+        (1, 16, [20, 32], 12),
+        (1, 16, [13, 35], 8),
+        (2, 16, [25, 67], 16),
+    ];
+    for (idx, (n, c, hw, o)) in shapes.into_iter().enumerate() {
+        let g = geom(n, c, hw, o, [3, 3], p);
+        let x = data(n * c * hw[0] * hw[1], 101 + idx as u32);
+        let wt = data(o * g.kdim(), 1010 + idx as u32);
+        let u = transform_weights(&wt, o, c);
+        let part = [ConvPart::contiguous(&x, c, hw[0] * hw[1])];
+        let input = ConvInput { parts: &part };
+        let zeros = vec![0.0f32; o];
+        let mut bias: Vec<f32> = (0..o).map(|k| k as f32 * 0.17 - 0.5).collect();
+        if o > 1 {
+            bias[1] = 0.0;
+        }
+        let epis = [
+            None,
+            Some(BiasAct { bias: Some(&zeros), act: None }),
+            Some(BiasAct { bias: Some(&bias), act: None }),
+            Some(BiasAct { bias: None, act: Some(UnaryOp::Silu) }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Silu) }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Relu) }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::LeakyRelu(0.1)) }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Hardswish) }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Sigmoid) }),
+        ];
+        for (ei, epi) in epis.into_iter().enumerate() {
+            let mut got = vec![f32::NAN; n * o * g.ohw()];
+            let mut want = vec![f32::NAN; n * o * g.ohw()];
+            winograd_forward(input, &u, &mut got, &g, epi);
+            super::winograd::winograd_forward_scalar(input, &u, &mut want, &g, epi);
+            let bad = got.iter().zip(&want).position(|(a, b)| a.to_bits() != b.to_bits());
+            assert_eq!(
+                bad, None,
+                "winograd2 shape {idx} ({n}x{c}->{o}@{hw:?}) epi {ei}: AVX2 vs scalar mismatch"
+            );
+        }
+    }
+}
+
+/// Depthwise backward input/weight and strided col2im backward input match naive f64 references across stride 1,
+/// stride 2, dilation 2, multiplier > 1, and wide/ragged widths exercising AVX2 16-wide, 8-wide, and tail paths.
+#[test]
+fn depthwise_backward_and_col2im_match_naive() {
+    let cases = [
+        // Depthwise: stride 1 wide (AVX2 16+8+tail), stride 2, dilation 2, depth multiplier 2.
+        (2, 8, [17, 37], 8, [3, 3], params([1, 1], [1, 1], [1, 1], 8)),
+        (2, 6, [15, 29], 12, [3, 3], params([1, 1], [1, 1], [1, 1], 6)),
+        (2, 8, [17, 35], 8, [3, 3], params([2, 2], [1, 1], [1, 1], 8)),
+        (1, 4, [13, 25], 4, [3, 3], params([1, 1], [2, 2], [2, 2], 4)),
+        // Non-depthwise col2im paths: stride 2 (standard), stride 1 with huge padding (p > d*(k-1) hits col2im!).
+        (2, 8, [17, 35], 12, [3, 3], params([2, 2], [1, 1], [1, 1], 1)),
+        (1, 6, [11, 29], 8, [3, 3], params([1, 1], [3, 3], [1, 1], 1)),
+    ];
+    for (ci, (n, c, hw, o, k, p)) in cases.into_iter().enumerate() {
+        let g = geom(n, c, hw, o, k, p);
+        let x = data(n * c * hw[0] * hw[1], 201 + ci as u32);
+        let wt = data(o * g.kdim(), 2010 + ci as u32);
+        let gy = data(n * o * g.ohw(), 3010 + ci as u32);
+
+        let mut gx = vec![0f32; x.len()];
+        conv2d_backward_input(&gy, &wt, &mut gx, &g);
+        let mut gw = vec![0f32; wt.len()];
+        conv2d_backward_weight(&x, &gy, &mut gw, &g);
+
+        // Naive f64 reference for gx and gw.
+        let (cg, og) = (g.cg(), g.og());
+        let (sh, sw) = (p.stride[0] as isize, p.stride[1] as isize);
+        let (ph, pw) = (p.padding[0] as isize, p.padding[1] as isize);
+        let (dh, dw) = (p.dilation[0] as isize, p.dilation[1] as isize);
+        let mut ref_gx = vec![0f64; x.len()];
+        let mut ref_gw = vec![0f64; wt.len()];
+        for img in 0..n {
+            for grp in 0..p.groups {
+                for oi in 0..og {
+                    let oc = grp * og + oi;
+                    for ci_l in 0..cg {
+                        let ic = grp * cg + ci_l;
+                        for oy in 0..g.oh {
+                            for ox in 0..g.ow {
+                                let gval = gy[((img * o + oc) * g.oh + oy) * g.ow + ox] as f64;
+                                for ky in 0..k[0] {
+                                    let iy = oy as isize * sh - ph + ky as isize * dh;
+                                    if iy < 0 || iy >= hw[0] as isize {
+                                        continue;
+                                    }
+                                    for kx in 0..k[1] {
+                                        let ix = ox as isize * sw - pw + kx as isize * dw;
+                                        if ix < 0 || ix >= hw[1] as isize {
+                                            continue;
+                                        }
+                                        let xi = ((img * c + ic) * hw[0] + iy as usize) * hw[1] + ix as usize;
+                                        let wi = ((oc * cg + ci_l) * k[0] + ky) * k[1] + kx;
+                                        ref_gx[xi] += gval * wt[wi] as f64;
+                                        ref_gw[wi] += gval * x[xi] as f64;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (i, (&got, &want)) in gx.iter().zip(&ref_gx).enumerate() {
+            assert!(
+                (got as f64 - want).abs() <= 1e-4 * (1.0 + want.abs()),
+                "case {ci} gx[{i}]: {got} vs {want}"
+            );
+        }
+        for (i, (&got, &want)) in gw.iter().zip(&ref_gw).enumerate() {
+            assert!(
+                (got as f64 - want).abs() <= 1e-4 * (1.0 + want.abs()),
+                "case {ci} gw[{i}]: {got} vs {want}"
+            );
+        }
+    }
+}
