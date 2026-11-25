@@ -63,12 +63,12 @@ pub fn apply(
         Condition::LowLight => low_light(raw, w, LOW_LIGHT_GAIN[i], LOW_LIGHT_NOISE[i], seed),
         Condition::Overexposure => {
             let (t, g) = (srgb(), OVEREXPOSURE_GAIN[i]);
-            map_values(raw, w, |_, v| t.enc(t.lin(v) * g))
+            map_values_shared(raw, w, |v| t.enc(t.lin(v) * g))
         }
         Condition::LowContrast => {
             let m = mean_rgb(raw).iter().map(|&v| v as f32).sum::<f32>() / 3.0;
             let k = LOW_CONTRAST_KEEP[i];
-            map_values(raw, w, |_, v| (m + k * (v as f32 - m) + 0.5).clamp(0.0, 255.0) as u8)
+            map_values_shared(raw, w, |v| (m + k * (v as f32 - m) + 0.5).clamp(0.0, 255.0) as u8)
         }
         Condition::Defocus => {
             let k = gaussian_kernel(DEFOCUS_SIGMA[i] * px);
@@ -130,13 +130,15 @@ pub fn apply(
             let small = resample_u8_to_u8(raw, w, h, w2, h2, &area_taps(w, w2), &area_taps(h, h2));
             let fill = mean_rgb(raw);
             let mut out = vec![0u8; raw.len()];
+            let (x0, x1) = (ox * 3, (ox + w2) * 3);
+            let small_stride = w2 * 3;
             for_rows(&mut out, w * 3, |y, row| {
-                for p in row.as_chunks_mut::<3>().0 {
-                    *p = fill;
-                }
                 if (oy..oy + h2).contains(&y) {
-                    let src = &small[(y - oy) * w2 * 3..(y - oy + 1) * w2 * 3];
-                    row[ox * 3..(ox + w2) * 3].copy_from_slice(src);
+                    fill_rgb(&mut row[..x0], fill);
+                    row[x0..x1].copy_from_slice(&small[(y - oy) * small_stride..(y - oy + 1) * small_stride]);
+                    fill_rgb(&mut row[x1..], fill);
+                } else {
+                    fill_rgb(row, fill);
                 }
             });
             distance_boxes(&mut boxes, w, h, s);
@@ -182,17 +184,43 @@ fn shrink(n: usize, s: f32) -> usize {
     ((n as f64 * s as f64).round() as usize).clamp(1, n)
 }
 
+#[inline]
+fn fill_rgb(slice: &mut [u8], fill: [u8; 3]) {
+    if fill[0] == fill[1] && fill[1] == fill[2] {
+        slice.fill(fill[0]);
+    } else {
+        for p in slice.as_chunks_mut::<3>().0 {
+            *p = fill;
+        }
+    }
+}
+
+/// Every value through `f(value)`, by one shared 256-entry table over contiguous bytes.
+fn map_values_shared(raw: &[u8], w: usize, f: impl Fn(u8) -> u8) -> Vec<u8> {
+    let lut: [u8; 256] = std::array::from_fn(|v| f(v as u8));
+    let stride = w * 3;
+    let mut out = vec![0u8; raw.len()];
+    for_rows(&mut out, stride, |y, dst| {
+        let src = &raw[y * stride..(y + 1) * stride];
+        for (o, &s) in dst.iter_mut().zip(src) {
+            *o = lut[s as usize];
+        }
+    });
+    out
+}
+
 /// Every value through `f(channel, value)`, by a table per channel.
 fn map_values(raw: &[u8], w: usize, f: impl Fn(usize, u8) -> u8) -> Vec<u8> {
     let luts: [[u8; 256]; 3] = std::array::from_fn(|c| std::array::from_fn(|v| f(c, v as u8)));
+    let [l0, l1, l2] = &luts;
     let stride = w * 3;
     let mut out = vec![0u8; raw.len()];
     for_rows(&mut out, stride, |y, dst| {
         let src = &raw[y * stride..(y + 1) * stride];
         for (o, s) in dst.as_chunks_mut::<3>().0.iter_mut().zip(src.as_chunks::<3>().0) {
-            o[0] = luts[0][s[0] as usize];
-            o[1] = luts[1][s[1] as usize];
-            o[2] = luts[2][s[2] as usize];
+            o[0] = l0[s[0] as usize];
+            o[1] = l1[s[1] as usize];
+            o[2] = l2[s[2] as usize];
         }
     });
     out

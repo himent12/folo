@@ -156,13 +156,17 @@ pub(crate) fn gauss(rng: &mut Rng) -> f32 {
 // Rows
 // ---------------------------------------------------------------------------------------------------------------
 
+/// Minimum rows per rayon task so fast per-pixel passes avoid per-row scheduling overhead while still
+/// load-balancing evenly across high-core-count CPUs.
+const MIN_PAR_ROWS: usize = 4;
+
 /// Calls `f(y, row)` for every row of `buf` (rows of `row_len` values), in parallel for large images.
 pub(crate) fn for_rows<T: Send>(buf: &mut [T], row_len: usize, f: impl Fn(usize, &mut [T]) + Sync) {
     if row_len == 0 {
         return;
     }
     if buf.len() / 3 >= PAR_PIXELS {
-        buf.par_chunks_mut(row_len).enumerate().for_each(|(y, r)| f(y, r));
+        buf.par_chunks_mut(row_len).with_min_len(MIN_PAR_ROWS).enumerate().for_each(|(y, r)| f(y, r));
     } else {
         buf.chunks_mut(row_len).enumerate().for_each(|(y, r)| f(y, r));
     }
@@ -179,10 +183,39 @@ pub(crate) fn for_rows_with<T: Send, S>(
         return;
     }
     if buf.len() / 3 >= PAR_PIXELS {
-        buf.par_chunks_mut(row_len).enumerate().for_each_init(&init, |s, (y, r)| f(s, y, r));
+        buf.par_chunks_mut(row_len)
+            .with_min_len(MIN_PAR_ROWS)
+            .enumerate()
+            .for_each_init(&init, |s, (y, r)| f(s, y, r));
     } else {
         let mut s = init();
         buf.chunks_mut(row_len).enumerate().for_each(|(y, r)| f(&mut s, y, r));
+    }
+}
+
+/// Processes `buf` (`h` rows of `row_len` elements) in contiguous row bands of up to `band_rows` rows,
+/// parallelised with rayon when `parallel` is true, passing `(y_start, band_slice)` and per-worker scratch.
+fn for_row_bands_with<T: Send, S>(
+    buf: &mut [T],
+    row_len: usize,
+    band_rows: usize,
+    parallel: bool,
+    init: impl Fn() -> S + Sync + Send,
+    f: impl Fn(&mut S, usize, &mut [T]) + Sync + Send,
+) {
+    if row_len == 0 || buf.is_empty() {
+        return;
+    }
+    let total_rows = (buf.len() / row_len).max(1);
+    let band_rows = band_rows.clamp(1, total_rows);
+    let band_elems = row_len * band_rows;
+    if parallel {
+        buf.par_chunks_mut(band_elems)
+            .enumerate()
+            .for_each_init(&init, |s, (b, slice)| f(s, b * band_rows, slice));
+    } else {
+        let mut s = init();
+        f(&mut s, 0, buf);
     }
 }
 
@@ -196,18 +229,40 @@ fn to_u8(v: f32) -> u8 {
     (v.clamp(0.0, 255.0) + 0.5) as u8
 }
 
+/// Exact integer RGB channel sum over `chunk` (a multiple of 3 bytes), using `u32` inner block accumulators.
+fn sum_rgb_chunk(chunk: &[u8]) -> [u64; 3] {
+    let mut total = [0u64; 3];
+    // 4096 pixels * 255 = 1,044,480 << u32::MAX, so inner blocks never overflow.
+    for block in chunk.chunks(4096 * 3) {
+        let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+        for px in block.as_chunks::<3>().0 {
+            r += px[0] as u32;
+            g += px[1] as u32;
+            b += px[2] as u32;
+        }
+        total[0] += r as u64;
+        total[1] += g as u64;
+        total[2] += b as u64;
+    }
+    total
+}
+
 /// The per-channel mean of interleaved RGB bytes, rounded (exact integer sums). Black for an empty image.
 pub(crate) fn mean_rgb(raw: &[u8]) -> [u8; 3] {
-    let mut sum = [0u64; 3];
-    for px in raw.as_chunks::<3>().0 {
-        for c in 0..3 {
-            sum[c] += px[c] as u64;
-        }
-    }
-    let n = (raw.len() / 3) as u64;
-    if n == 0 {
+    let pixels = raw.len() / 3;
+    if pixels == 0 {
         return [0; 3];
     }
+    let active = &raw[..pixels * 3];
+    let sum = if pixels >= PAR_PIXELS {
+        active
+            .par_chunks(16384 * 3)
+            .map(sum_rgb_chunk)
+            .reduce(|| [0u64; 3], |a, b| [a[0] + b[0], a[1] + b[1], a[2] + b[2]])
+    } else {
+        sum_rgb_chunk(active)
+    };
+    let n = pixels as u64;
     sum.map(|s| ((s + n / 2) / n) as u8)
 }
 
@@ -235,150 +290,228 @@ pub(crate) fn gaussian_kernel(sigma: f32) -> Vec<f32> {
     w.iter().map(|&v| (v / sum) as f32).collect()
 }
 
-/// Horizontal separable pass from 8-bit interleaved RGB into a `w x h x 3` float buffer, register-tiled in
-/// exact `k` order (bit-identical to `Plane::from_u8` + `axpy`).
-fn convolve_h_from_u8(raw: &[u8], w: usize, h: usize, kx: &[f32]) -> Vec<f32> {
-    if w == 0 || h == 0 {
-        return Vec::new();
-    }
+/// Horizontally convolves one 8-bit RGB source row (`stride = w * 3`) with `kx` into `out` (`stride` floats),
+/// using `pad` (`(w + 2 * rx) * 3` floats) as clamped scratch, register-tiled in exact `k` order.
+#[inline]
+fn convolve_h_row_u8(src: &[u8], w: usize, kx: &[f32], rx: usize, pad: &mut [f32], out: &mut [f32]) {
     let stride = w * 3;
-    assert_eq!(raw.len(), h * stride);
-    let rx = kx.len() / 2;
-    let mut tmp = vec![0.0f32; raw.len()];
-    for_rows_with(
-        &mut tmp,
-        stride,
-        || vec![0.0f32; (w + 2 * rx) * 3],
-        |pad, y, out| {
-            let src = &raw[y * stride..(y + 1) * stride];
-            let l = [src[0] as f32, src[1] as f32, src[2] as f32];
-            let r = [src[stride - 3] as f32, src[stride - 2] as f32, src[stride - 1] as f32];
-            for i in 0..rx {
-                pad[i * 3..i * 3 + 3].copy_from_slice(&l);
-                pad[(rx + w + i) * 3..(rx + w + i) * 3 + 3].copy_from_slice(&r);
+    let l = [src[0] as f32, src[1] as f32, src[2] as f32];
+    let r = [src[stride - 3] as f32, src[stride - 2] as f32, src[stride - 1] as f32];
+    for i in 0..rx {
+        pad[i * 3..i * 3 + 3].copy_from_slice(&l);
+        pad[(rx + w + i) * 3..(rx + w + i) * 3 + 3].copy_from_slice(&r);
+    }
+    for (dst, &v) in pad[rx * 3..(rx + w) * 3].iter_mut().zip(src) {
+        *dst = v as f32;
+    }
+    let mut x = 0;
+    while x + CONV_TILE <= stride {
+        let mut acc = [0.0f32; CONV_TILE];
+        for (k, &wk) in kx.iter().enumerate() {
+            let s = &pad[k * 3 + x..k * 3 + x + CONV_TILE];
+            for i in 0..CONV_TILE {
+                acc[i] += wk * s[i];
             }
-            for (dst, &v) in pad[rx * 3..(rx + w) * 3].iter_mut().zip(src) {
-                *dst = v as f32;
+        }
+        out[x..x + CONV_TILE].copy_from_slice(&acc);
+        x += CONV_TILE;
+    }
+    if x < stride {
+        let rem = stride - x;
+        let mut acc = [0.0f32; CONV_TILE];
+        for (k, &wk) in kx.iter().enumerate() {
+            let s = &pad[k * 3 + x..k * 3 + x + rem];
+            for i in 0..rem {
+                acc[i] += wk * s[i];
             }
+        }
+        out[x..stride].copy_from_slice(&acc[..rem]);
+    }
+}
+
+/// Vertically convolves one output row from `ring` (indexed by `(base, wk)` pairs) straight into `out_row`,
+/// applying an optional fused haze affine `v * t + veil[c]`.
+#[inline]
+fn convolve_v_row_to_u8(
+    ring: &[f32],
+    rows: &[(usize, f32)],
+    stride: usize,
+    haze: Option<(f32, [f32; 3])>,
+    out_row: &mut [u8],
+) {
+    match haze {
+        None => {
             let mut x = 0;
             while x + CONV_TILE <= stride {
                 let mut acc = [0.0f32; CONV_TILE];
-                for (k, &wk) in kx.iter().enumerate() {
-                    let s = &pad[k * 3 + x..k * 3 + x + CONV_TILE];
+                for &(base, wk) in rows {
+                    let s = &ring[base + x..base + x + CONV_TILE];
                     for i in 0..CONV_TILE {
                         acc[i] += wk * s[i];
                     }
                 }
-                out[x..x + CONV_TILE].copy_from_slice(&acc);
+                for i in 0..CONV_TILE {
+                    out_row[x + i] = to_u8(acc[i]);
+                }
                 x += CONV_TILE;
             }
             if x < stride {
                 let rem = stride - x;
                 let mut acc = [0.0f32; CONV_TILE];
-                for (k, &wk) in kx.iter().enumerate() {
-                    let s = &pad[k * 3 + x..k * 3 + x + rem];
+                for &(base, wk) in rows {
+                    let s = &ring[base + x..base + x + rem];
                     for i in 0..rem {
                         acc[i] += wk * s[i];
                     }
                 }
-                out[x..stride].copy_from_slice(&acc[..rem]);
+                for i in 0..rem {
+                    out_row[x + i] = to_u8(acc[i]);
+                }
             }
-        },
-    );
-    tmp
+        }
+        Some((t, veil)) => {
+            let veil_tile: [f32; CONV_TILE] = std::array::from_fn(|i| veil[i % 3]);
+            let mut x = 0;
+            while x + CONV_TILE <= stride {
+                let mut acc = [0.0f32; CONV_TILE];
+                for &(base, wk) in rows {
+                    let s = &ring[base + x..base + x + CONV_TILE];
+                    for i in 0..CONV_TILE {
+                        acc[i] += wk * s[i];
+                    }
+                }
+                for i in 0..CONV_TILE {
+                    out_row[x + i] = to_u8(acc[i] * t + veil_tile[i]);
+                }
+                x += CONV_TILE;
+            }
+            if x < stride {
+                let rem = stride - x;
+                let mut acc = [0.0f32; CONV_TILE];
+                for &(base, wk) in rows {
+                    let s = &ring[base + x..base + x + rem];
+                    for i in 0..rem {
+                        acc[i] += wk * s[i];
+                    }
+                }
+                for i in 0..rem {
+                    out_row[x + i] = to_u8(acc[i] * t + veil_tile[i]);
+                }
+            }
+        }
+    }
 }
 
-/// Vertical separable pass from `tmp` directly to 8-bit interleaved RGB, with an optional fused per-channel
-/// haze affine `v * t + veil[c]`.
-fn convolve_v_to_u8(tmp: &[f32], w: usize, h: usize, ky: &[f32], haze: Option<(f32, [f32; 3])>) -> Vec<u8> {
+/// Separable 2D convolution (`kx` then `ky`, odd lengths, centred): uses a band-streamed L2-resident ring buffer
+/// for compact kernels (`ky.len() <= 25`, e.g. `haze` and mild `defocus`) to avoid the full-frame intermediate
+/// buffer, and falls back to two-pass row-parallel convolution for wide kernels where per-band halo recomputation
+/// would otherwise dominate.
+fn convolve_separable_impl(
+    raw: &[u8],
+    w: usize,
+    h: usize,
+    kx: &[f32],
+    ky: &[f32],
+    haze: Option<(f32, [f32; 3])>,
+) -> Vec<u8> {
     if w == 0 || h == 0 {
         return Vec::new();
     }
     const { assert!(CONV_TILE.is_multiple_of(3)) };
+    const RING_MAX_KLEN: usize = 25;
     let stride = w * 3;
-    assert_eq!(tmp.len(), h * stride);
-    let ry = ky.len() / 2;
-    let mut out = vec![0u8; tmp.len()];
-    for_rows_with(
-        &mut out,
-        stride,
-        || Vec::<(usize, f32)>::with_capacity(ky.len()),
-        |rows, y, out_row| {
-            rows.clear();
-            for (k, &wk) in ky.iter().enumerate() {
-                let sy = (y + k).saturating_sub(ry).min(h - 1);
-                rows.push((sy * stride, wk));
-            }
-            match haze {
-                None => {
-                    let mut x = 0;
-                    while x + CONV_TILE <= stride {
-                        let mut acc = [0.0f32; CONV_TILE];
-                        for &(base, wk) in rows.iter() {
-                            let s = &tmp[base + x..base + x + CONV_TILE];
-                            for i in 0..CONV_TILE {
-                                acc[i] += wk * s[i];
-                            }
-                        }
-                        for i in 0..CONV_TILE {
-                            out_row[x + i] = to_u8(acc[i]);
-                        }
-                        x += CONV_TILE;
-                    }
-                    if x < stride {
-                        let rem = stride - x;
-                        let mut acc = [0.0f32; CONV_TILE];
-                        for &(base, wk) in rows.iter() {
-                            let s = &tmp[base + x..base + x + rem];
-                            for i in 0..rem {
-                                acc[i] += wk * s[i];
-                            }
-                        }
-                        for i in 0..rem {
-                            out_row[x + i] = to_u8(acc[i]);
-                        }
-                    }
+    assert_eq!(raw.len(), h * stride);
+    assert!(kx.len() % 2 == 1 && ky.len() % 2 == 1, "separable kernels must have odd length");
+    let (rx, ry) = (kx.len() / 2, ky.len() / 2);
+    let klen = ky.len();
+    let mut out = vec![0u8; raw.len()];
+    if klen <= RING_MAX_KLEN {
+        let band_rows = (klen * 2).max(24);
+        struct Scratch {
+            pad: Vec<f32>,
+            ring: Vec<f32>,
+            rows: Vec<(usize, f32)>,
+        }
+        for_row_bands_with(
+            &mut out,
+            stride,
+            band_rows,
+            raw.len() / 3 >= PAR_PIXELS,
+            || Scratch {
+                pad: vec![0.0f32; (w + 2 * rx) * 3],
+                ring: vec![0.0f32; klen * stride],
+                rows: Vec::with_capacity(klen),
+            },
+            |sc, y_start, band| {
+                let first_lo = y_start.saturating_sub(ry);
+                let first_hi = (y_start + ry).min(h - 1);
+                for sy in first_lo..=first_hi {
+                    let slot = (sy % klen) * stride;
+                    convolve_h_row_u8(
+                        &raw[sy * stride..(sy + 1) * stride],
+                        w,
+                        kx,
+                        rx,
+                        &mut sc.pad,
+                        &mut sc.ring[slot..slot + stride],
+                    );
                 }
-                Some((t, veil)) => {
-                    let mut x = 0;
-                    while x + CONV_TILE <= stride {
-                        let mut acc = [0.0f32; CONV_TILE];
-                        for &(base, wk) in rows.iter() {
-                            let s = &tmp[base + x..base + x + CONV_TILE];
-                            for i in 0..CONV_TILE {
-                                acc[i] += wk * s[i];
-                            }
-                        }
-                        for i in 0..CONV_TILE {
-                            out_row[x + i] = to_u8(acc[i] * t + veil[i % 3]);
-                        }
-                        x += CONV_TILE;
+                let mut last_loaded = first_hi;
+                for (dy, out_row) in band.chunks_exact_mut(stride).enumerate() {
+                    let y = y_start + dy;
+                    let need_hi = (y + ry).min(h - 1);
+                    while last_loaded < need_hi {
+                        last_loaded += 1;
+                        let slot = (last_loaded % klen) * stride;
+                        convolve_h_row_u8(
+                            &raw[last_loaded * stride..(last_loaded + 1) * stride],
+                            w,
+                            kx,
+                            rx,
+                            &mut sc.pad,
+                            &mut sc.ring[slot..slot + stride],
+                        );
                     }
-                    if x < stride {
-                        let rem = stride - x;
-                        let mut acc = [0.0f32; CONV_TILE];
-                        for &(base, wk) in rows.iter() {
-                            let s = &tmp[base + x..base + x + rem];
-                            for i in 0..rem {
-                                acc[i] += wk * s[i];
-                            }
-                        }
-                        for i in 0..rem {
-                            out_row[x + i] = to_u8(acc[i] * t + veil[i % 3]);
-                        }
+                    sc.rows.clear();
+                    for (k, &wk) in ky.iter().enumerate() {
+                        let sy = (y + k).saturating_sub(ry).min(h - 1);
+                        sc.rows.push(((sy % klen) * stride, wk));
                     }
+                    convolve_v_row_to_u8(&sc.ring, &sc.rows, stride, haze, out_row);
                 }
-            }
-        },
-    );
+            },
+        );
+    } else {
+        let mut tmp = vec![0.0f32; raw.len()];
+        for_rows_with(
+            &mut tmp,
+            stride,
+            || vec![0.0f32; (w + 2 * rx) * 3],
+            |pad, y, dst| {
+                convolve_h_row_u8(&raw[y * stride..(y + 1) * stride], w, kx, rx, pad, dst);
+            },
+        );
+        for_rows_with(
+            &mut out,
+            stride,
+            || Vec::<(usize, f32)>::with_capacity(klen),
+            |rows, y, out_row| {
+                rows.clear();
+                for (k, &wk) in ky.iter().enumerate() {
+                    let sy = (y + k).saturating_sub(ry).min(h - 1);
+                    rows.push((sy * stride, wk));
+                }
+                convolve_v_row_to_u8(&tmp, rows, stride, haze, out_row);
+            },
+        );
+    }
     out
 }
 
 /// 8-bit interleaved RGB `raw` (`w x h`) convolved with `kx` along rows and `ky` along columns (odd lengths,
 /// centred), edges clamped, rounded directly back to 8-bit RGB.
 pub(crate) fn convolve_separable_u8(raw: &[u8], w: usize, h: usize, kx: &[f32], ky: &[f32]) -> Vec<u8> {
-    let tmp = convolve_h_from_u8(raw, w, h, kx);
-    convolve_v_to_u8(&tmp, w, h, ky, None)
+    convolve_separable_impl(raw, w, h, kx, ky, None)
 }
 
 /// [`convolve_separable_u8`] with a fused haze epilogue `v * t + veil[c]` before rounding to `u8`.
@@ -391,8 +524,7 @@ pub(crate) fn convolve_separable_haze_u8(
     t: f32,
     veil: [f32; 3],
 ) -> Vec<u8> {
-    let tmp = convolve_h_from_u8(raw, w, h, kx);
-    convolve_v_to_u8(&tmp, w, h, ky, Some((t, veil)))
+    convolve_separable_impl(raw, w, h, kx, ky, Some((t, veil)))
 }
 
 /// 8-bit interleaved RGB `raw` (`w x h`) convolved with a sparse kernel of `(dx, dy, weight)` taps, edges
@@ -514,15 +646,20 @@ pub(crate) fn bilinear_taps(n_in: usize, n_out: usize) -> Taps {
     t
 }
 
-/// Horizontal resampling pass from 8-bit interleaved RGB into a `w2 x h x 3` float buffer.
-fn resample_h_u8(raw: &[u8], w: usize, h: usize, w2: usize, xt: &Taps) -> Vec<f32> {
-    let (stride, stride2) = (w * 3, w2 * 3);
-    assert_eq!(raw.len(), h * stride);
-    let mut tmp = vec![0.0f32; h * stride2];
-    for_rows(&mut tmp, stride2, |y, out| {
-        let src = &raw[y * stride..(y + 1) * stride];
-        for (x, o) in out.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-            let (s, ws) = xt.get(x);
+/// Horizontally resamples one 8-bit RGB row into `out` (`w2 * 3` floats).
+#[inline]
+fn resample_h_u8_row(src: &[u8], xt: &Taps, out: &mut [f32]) {
+    for (x, o) in out.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+        let (s, ws) = xt.get(x);
+        if ws.len() == 2 {
+            let (w0, w1) = (ws[0], ws[1]);
+            let q = s * 3;
+            *o = [
+                (0.0f32 + w0 * src[q] as f32) + w1 * src[q + 3] as f32,
+                (0.0f32 + w0 * src[q + 1] as f32) + w1 * src[q + 4] as f32,
+                (0.0f32 + w0 * src[q + 2] as f32) + w1 * src[q + 5] as f32,
+            ];
+        } else {
             let mut acc = [0.0f32; 3];
             for (j, &wj) in ws.iter().enumerate() {
                 let q = (s + j) * 3;
@@ -532,18 +669,23 @@ fn resample_h_u8(raw: &[u8], w: usize, h: usize, w2: usize, xt: &Taps) -> Vec<f3
             }
             *o = acc;
         }
-    });
-    tmp
+    }
 }
 
-/// Horizontal resampling pass from a float [`Plane`] into a `w2 x h x 3` float buffer.
-fn resample_h_f32(p: &Plane, w2: usize, xt: &Taps) -> Vec<f32> {
-    let (stride, stride2) = (p.w * 3, w2 * 3);
-    let mut tmp = vec![0.0f32; p.h * stride2];
-    for_rows(&mut tmp, stride2, |y, out| {
-        let src = &p.data[y * stride..(y + 1) * stride];
-        for (x, o) in out.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-            let (s, ws) = xt.get(x);
+/// Horizontally resamples one `f32` RGB row into `out` (`w2 * 3` floats).
+#[inline]
+fn resample_h_f32_row(src: &[f32], xt: &Taps, out: &mut [f32]) {
+    for (x, o) in out.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+        let (s, ws) = xt.get(x);
+        if ws.len() == 2 {
+            let (w0, w1) = (ws[0], ws[1]);
+            let q = s * 3;
+            *o = [
+                (0.0f32 + w0 * src[q]) + w1 * src[q + 3],
+                (0.0f32 + w0 * src[q + 1]) + w1 * src[q + 4],
+                (0.0f32 + w0 * src[q + 2]) + w1 * src[q + 5],
+            ];
+        } else {
             let mut acc = [0.0f32; 3];
             for (j, &wj) in ws.iter().enumerate() {
                 let q = (s + j) * 3;
@@ -553,81 +695,104 @@ fn resample_h_f32(p: &Plane, w2: usize, xt: &Taps) -> Vec<f32> {
             }
             *o = acc;
         }
-    });
-    tmp
+    }
 }
 
-/// Register-tiled vertical resampling pass into a float [`Plane`].
-fn resample_v_to_plane(tmp: &[f32], w2: usize, h2: usize, yt: &Taps) -> Plane {
-    let stride2 = w2 * 3;
-    let mut data = vec![0.0f32; h2 * stride2];
-    for_rows(&mut data, stride2, |y, out| {
+/// Source row range `[lo, hi)` required by output rows `y_start..y_end`.
+#[inline]
+fn band_src_range(yt: &Taps, y_start: usize, y_end: usize) -> (usize, usize) {
+    let mut lo = usize::MAX;
+    let mut hi = 0usize;
+    for y in y_start..y_end {
         let (s, ws) = yt.get(y);
-        let mut x = 0;
-        while x + CONV_TILE <= stride2 {
-            let mut acc = [0.0f32; CONV_TILE];
-            for (j, &wj) in ws.iter().enumerate() {
-                let row = &tmp[(s + j) * stride2 + x..(s + j) * stride2 + x + CONV_TILE];
-                for i in 0..CONV_TILE {
-                    acc[i] += wj * row[i];
-                }
-            }
-            out[x..x + CONV_TILE].copy_from_slice(&acc);
-            x += CONV_TILE;
-        }
-        if x < stride2 {
-            let rem = stride2 - x;
-            let mut acc = [0.0f32; CONV_TILE];
-            for (j, &wj) in ws.iter().enumerate() {
-                let row = &tmp[(s + j) * stride2 + x..(s + j) * stride2 + x + rem];
-                for i in 0..rem {
-                    acc[i] += wj * row[i];
-                }
-            }
-            out[x..stride2].copy_from_slice(&acc[..rem]);
-        }
-    });
-    Plane { w: w2, h: h2, data }
+        lo = lo.min(s);
+        hi = hi.max(s + ws.len());
+    }
+    if lo >= hi { (0, 0) } else { (lo, hi) }
 }
 
-/// Register-tiled vertical resampling pass directly to 8-bit interleaved RGB.
-fn resample_v_to_u8(tmp: &[f32], w2: usize, h2: usize, yt: &Taps) -> Vec<u8> {
-    let stride2 = w2 * 3;
-    let mut out = vec![0u8; h2 * stride2];
-    for_rows(&mut out, stride2, |y, out_row| {
-        let (s, ws) = yt.get(y);
-        let mut x = 0;
-        while x + CONV_TILE <= stride2 {
-            let mut acc = [0.0f32; CONV_TILE];
-            for (j, &wj) in ws.iter().enumerate() {
-                let row = &tmp[(s + j) * stride2 + x..(s + j) * stride2 + x + CONV_TILE];
-                for i in 0..CONV_TILE {
-                    acc[i] += wj * row[i];
-                }
-            }
+/// Register-tiled vertical resampling of one row into `out` (`stride2` floats) from band buffer `tmp` starting at
+/// source row `src_lo`.
+#[inline]
+fn resample_v_row_to_f32(tmp: &[f32], src_lo: usize, stride2: usize, s: usize, ws: &[f32], out: &mut [f32]) {
+    let base_s = s - src_lo;
+    let mut x = 0;
+    while x + CONV_TILE <= stride2 {
+        let mut acc = [0.0f32; CONV_TILE];
+        for (j, &wj) in ws.iter().enumerate() {
+            let row = &tmp[(base_s + j) * stride2 + x..(base_s + j) * stride2 + x + CONV_TILE];
             for i in 0..CONV_TILE {
-                out_row[x + i] = to_u8(acc[i]);
+                acc[i] += wj * row[i];
             }
-            x += CONV_TILE;
         }
-        if x < stride2 {
-            let rem = stride2 - x;
-            let mut acc = [0.0f32; CONV_TILE];
-            for (j, &wj) in ws.iter().enumerate() {
-                let row = &tmp[(s + j) * stride2 + x..(s + j) * stride2 + x + rem];
-                for i in 0..rem {
-                    acc[i] += wj * row[i];
-                }
-            }
+        out[x..x + CONV_TILE].copy_from_slice(&acc);
+        x += CONV_TILE;
+    }
+    if x < stride2 {
+        let rem = stride2 - x;
+        let mut acc = [0.0f32; CONV_TILE];
+        for (j, &wj) in ws.iter().enumerate() {
+            let row = &tmp[(base_s + j) * stride2 + x..(base_s + j) * stride2 + x + rem];
             for i in 0..rem {
-                out_row[x + i] = to_u8(acc[i]);
+                acc[i] += wj * row[i];
             }
         }
-    });
-    out
+        out[x..stride2].copy_from_slice(&acc[..rem]);
+    }
 }
 
-/// 8-bit interleaved RGB `raw` (`w x h`) resampled to a `w2 x h2` float [`Plane`].
+/// Register-tiled vertical resampling of one row into `out_row` (`stride2` bytes) from band buffer `tmp` starting
+/// at source row `src_lo`.
+#[inline]
+fn resample_v_row_to_u8(
+    tmp: &[f32],
+    src_lo: usize,
+    stride2: usize,
+    s: usize,
+    ws: &[f32],
+    out_row: &mut [u8],
+) {
+    let base_s = s - src_lo;
+    if ws.len() == 2 {
+        let (w0, w1) = (ws[0], ws[1]);
+        let r0 = &tmp[base_s * stride2..(base_s + 1) * stride2];
+        let r1 = &tmp[(base_s + 1) * stride2..(base_s + 2) * stride2];
+        for i in 0..stride2 {
+            out_row[i] = to_u8((0.0f32 + w0 * r0[i]) + w1 * r1[i]);
+        }
+        return;
+    }
+    let mut x = 0;
+    while x + CONV_TILE <= stride2 {
+        let mut acc = [0.0f32; CONV_TILE];
+        for (j, &wj) in ws.iter().enumerate() {
+            let row = &tmp[(base_s + j) * stride2 + x..(base_s + j) * stride2 + x + CONV_TILE];
+            for i in 0..CONV_TILE {
+                acc[i] += wj * row[i];
+            }
+        }
+        for i in 0..CONV_TILE {
+            out_row[x + i] = to_u8(acc[i]);
+        }
+        x += CONV_TILE;
+    }
+    if x < stride2 {
+        let rem = stride2 - x;
+        let mut acc = [0.0f32; CONV_TILE];
+        for (j, &wj) in ws.iter().enumerate() {
+            let row = &tmp[(base_s + j) * stride2 + x..(base_s + j) * stride2 + x + rem];
+            for i in 0..rem {
+                acc[i] += wj * row[i];
+            }
+        }
+        for i in 0..rem {
+            out_row[x + i] = to_u8(acc[i]);
+        }
+    }
+}
+
+/// 8-bit interleaved RGB `raw` (`w x h`) resampled to a `w2 x h2` float [`Plane`] via band-streamed passes
+/// (zero full-frame intermediate buffer).
 pub(crate) fn resample_u8_to_plane(
     raw: &[u8],
     w: usize,
@@ -637,17 +802,59 @@ pub(crate) fn resample_u8_to_plane(
     xt: &Taps,
     yt: &Taps,
 ) -> Plane {
-    let tmp = resample_h_u8(raw, w, h, w2, xt);
-    resample_v_to_plane(&tmp, w2, h2, yt)
+    let (stride, stride2) = (w * 3, w2 * 3);
+    assert_eq!(raw.len(), h * stride);
+    let mut data = vec![0.0f32; h2 * stride2];
+    let parallel = w * h >= PAR_PIXELS || w2 * h2 >= PAR_PIXELS;
+    let band_rows = (h2 / 32).clamp(4, 16);
+    for_row_bands_with(&mut data, stride2, band_rows, parallel, Vec::<f32>::new, |tmp, y_start, band| {
+        let band_h = band.len() / stride2;
+        let (src_lo, src_hi) = band_src_range(yt, y_start, y_start + band_h);
+        let need = (src_hi - src_lo) * stride2;
+        if tmp.len() < need {
+            tmp.resize(need, 0.0);
+        }
+        for sy in src_lo..src_hi {
+            let dst = &mut tmp[(sy - src_lo) * stride2..(sy - src_lo + 1) * stride2];
+            resample_h_u8_row(&raw[sy * stride..(sy + 1) * stride], xt, dst);
+        }
+        for (dy, out_row) in band.chunks_exact_mut(stride2).enumerate() {
+            let (s, ws) = yt.get(y_start + dy);
+            resample_v_row_to_f32(&tmp[..need], src_lo, stride2, s, ws, out_row);
+        }
+    });
+    Plane { w: w2, h: h2, data }
 }
 
-/// Float [`Plane`] `p` resampled to `w2 x h2` and rounded directly to 8-bit interleaved RGB.
+/// Float [`Plane`] `p` resampled to `w2 x h2` and rounded directly to 8-bit interleaved RGB via band-streamed
+/// passes (zero full-frame intermediate buffer).
 pub(crate) fn resample_plane_to_u8(p: &Plane, w2: usize, h2: usize, xt: &Taps, yt: &Taps) -> Vec<u8> {
-    let tmp = resample_h_f32(p, w2, xt);
-    resample_v_to_u8(&tmp, w2, h2, yt)
+    let (stride, stride2) = (p.w * 3, w2 * 3);
+    assert_eq!(p.data.len(), p.h * stride);
+    let mut out = vec![0u8; h2 * stride2];
+    let parallel = p.w * p.h >= PAR_PIXELS || w2 * h2 >= PAR_PIXELS;
+    let band_rows = (h2 / 32).clamp(4, 16);
+    for_row_bands_with(&mut out, stride2, band_rows, parallel, Vec::<f32>::new, |tmp, y_start, band| {
+        let band_h = band.len() / stride2;
+        let (src_lo, src_hi) = band_src_range(yt, y_start, y_start + band_h);
+        let need = (src_hi - src_lo) * stride2;
+        if tmp.len() < need {
+            tmp.resize(need, 0.0);
+        }
+        for sy in src_lo..src_hi {
+            let dst = &mut tmp[(sy - src_lo) * stride2..(sy - src_lo + 1) * stride2];
+            resample_h_f32_row(&p.data[sy * stride..(sy + 1) * stride], xt, dst);
+        }
+        for (dy, out_row) in band.chunks_exact_mut(stride2).enumerate() {
+            let (s, ws) = yt.get(y_start + dy);
+            resample_v_row_to_u8(&tmp[..need], src_lo, stride2, s, ws, out_row);
+        }
+    });
+    out
 }
 
-/// 8-bit interleaved RGB `raw` (`w x h`) resampled to `w2 x h2` and rounded directly to 8-bit interleaved RGB.
+/// 8-bit interleaved RGB `raw` (`w x h`) resampled to `w2 x h2` and rounded directly to 8-bit interleaved RGB via
+/// band-streamed passes (zero full-frame intermediate buffer).
 pub(crate) fn resample_u8_to_u8(
     raw: &[u8],
     w: usize,
@@ -657,209 +864,29 @@ pub(crate) fn resample_u8_to_u8(
     xt: &Taps,
     yt: &Taps,
 ) -> Vec<u8> {
-    let tmp = resample_h_u8(raw, w, h, w2, xt);
-    resample_v_to_u8(&tmp, w2, h2, yt)
+    let (stride, stride2) = (w * 3, w2 * 3);
+    assert_eq!(raw.len(), h * stride);
+    let mut out = vec![0u8; h2 * stride2];
+    let parallel = w * h >= PAR_PIXELS || w2 * h2 >= PAR_PIXELS;
+    let band_rows = (h2 / 32).clamp(4, 16);
+    for_row_bands_with(&mut out, stride2, band_rows, parallel, Vec::<f32>::new, |tmp, y_start, band| {
+        let band_h = band.len() / stride2;
+        let (src_lo, src_hi) = band_src_range(yt, y_start, y_start + band_h);
+        let need = (src_hi - src_lo) * stride2;
+        if tmp.len() < need {
+            tmp.resize(need, 0.0);
+        }
+        for sy in src_lo..src_hi {
+            let dst = &mut tmp[(sy - src_lo) * stride2..(sy - src_lo + 1) * stride2];
+            resample_h_u8_row(&raw[sy * stride..(sy + 1) * stride], xt, dst);
+        }
+        for (dy, out_row) in band.chunks_exact_mut(stride2).enumerate() {
+            let (s, ws) = yt.get(y_start + dy);
+            resample_v_row_to_u8(&tmp[..need], src_lo, stride2, s, ws, out_row);
+        }
+    });
+    out
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn math_matches_libm_closely() {
-        for &x in &[1e-9, 0.003, 0.25, 0.5, 0.999, 1.0, 1.5, 7.0, 1234.5] {
-            assert!((ln(x) - x.ln()).abs() < 1e-14 * x.ln().abs().max(1.0), "ln {x}");
-        }
-        for &x in &[-650.0, -20.0, -1.0, -0.1, 0.0, 0.3, 2.0, 40.0] {
-            assert!((exp(x) - x.exp()).abs() <= 1e-14 * x.exp(), "exp {x}");
-        }
-        assert_eq!(pow(0.0, 2.4), 0.0);
-        assert!((pow(0.5, 2.4) - 0.5f64.powf(2.4)).abs() < 1e-15);
-    }
-
-    #[test]
-    fn srgb_round_trips_every_code() {
-        let t = srgb();
-        for c in 0..=255u8 {
-            assert_eq!(t.enc(t.lin(c)), c, "{c}");
-        }
-        assert_eq!((t.enc(-1.0), t.enc(2.0), t.enc(f32::NAN)), (0, 255, 0));
-    }
-
-    #[test]
-    fn gauss_has_unit_variance() {
-        let mut rng = Rng::seed(3);
-        let n = 200_000;
-        let v: Vec<f64> = (0..n).map(|_| gauss(&mut rng) as f64).collect();
-        let mean = v.iter().sum::<f64>() / n as f64;
-        let var = v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n as f64;
-        assert!(mean.abs() < 0.01 && (var - 1.0).abs() < 0.01, "{mean} {var}");
-    }
-
-    #[test]
-    fn taps_sum_to_one() {
-        for (a, b) in [(640, 427), (7, 3), (5, 5), (3, 7), (1, 1), (10, 1)] {
-            for t in [area_taps(a, b), bilinear_taps(a, b)] {
-                for i in 0..b {
-                    let s: f32 = t.get(i).1.iter().sum();
-                    assert!((s - 1.0).abs() < 1e-5, "{a}->{b} at {i}: {s}");
-                }
-            }
-        }
-        let k = gaussian_kernel(2.0);
-        assert_eq!(k.len(), 13);
-        assert!((k.iter().sum::<f32>() - 1.0).abs() < 1e-6);
-    }
-
-    fn ref_separable(
-        raw: &[u8],
-        w: usize,
-        h: usize,
-        kx: &[f32],
-        ky: &[f32],
-        haze: Option<(f32, [f32; 3])>,
-    ) -> Vec<u8> {
-        let stride = w * 3;
-        let (rx, ry) = (kx.len() / 2, ky.len() / 2);
-        let plane: Vec<f32> = raw.iter().map(|&v| v as f32).collect();
-        let mut tmp = vec![0.0f32; plane.len()];
-        for y in 0..h {
-            for x in 0..w {
-                for c in 0..3 {
-                    let mut acc = 0.0f32;
-                    for (k, &wk) in kx.iter().enumerate() {
-                        let sx = (x + k).saturating_sub(rx).min(w - 1);
-                        acc += wk * plane[(y * w + sx) * 3 + c];
-                    }
-                    tmp[y * stride + x * 3 + c] = acc;
-                }
-            }
-        }
-        let mut out = vec![0u8; raw.len()];
-        for y in 0..h {
-            for x in 0..w {
-                for c in 0..3 {
-                    let mut acc = 0.0f32;
-                    for (k, &wk) in ky.iter().enumerate() {
-                        let sy = (y + k).saturating_sub(ry).min(h - 1);
-                        acc += wk * tmp[sy * stride + x * 3 + c];
-                    }
-                    if let Some((t, veil)) = haze {
-                        acc = acc * t + veil[c];
-                    }
-                    out[y * stride + x * 3 + c] = (acc.clamp(0.0, 255.0) + 0.5) as u8;
-                }
-            }
-        }
-        out
-    }
-
-    fn ref_taps(raw: &[u8], w: usize, h: usize, taps: &[(isize, isize, f32)]) -> Vec<u8> {
-        let mut out = vec![0u8; raw.len()];
-        for y in 0..h {
-            for x in 0..w {
-                for c in 0..3 {
-                    let mut acc = 0.0f32;
-                    for &(dx, dy, wk) in taps {
-                        let sx = (x as isize + dx).clamp(0, w as isize - 1) as usize;
-                        let sy = (y as isize + dy).clamp(0, h as isize - 1) as usize;
-                        acc += wk * raw[(sy * w + sx) * 3 + c] as f32;
-                    }
-                    out[(y * w + x) * 3 + c] = (acc.clamp(0.0, 255.0) + 0.5) as u8;
-                }
-            }
-        }
-        out
-    }
-
-    fn ref_resample(raw: &[u8], w: usize, h: usize, w2: usize, h2: usize, xt: &Taps, yt: &Taps) -> Vec<u8> {
-        let mut tmp = vec![0.0f32; h * w2 * 3];
-        for y in 0..h {
-            for x in 0..w2 {
-                let (s, ws) = xt.get(x);
-                for c in 0..3 {
-                    let mut acc = 0.0f32;
-                    for (j, &wj) in ws.iter().enumerate() {
-                        acc += wj * raw[(y * w + s + j) * 3 + c] as f32;
-                    }
-                    tmp[(y * w2 + x) * 3 + c] = acc;
-                }
-            }
-        }
-        let mut out = vec![0u8; h2 * w2 * 3];
-        for y in 0..h2 {
-            let (s, ws) = yt.get(y);
-            for x in 0..w2 {
-                for c in 0..3 {
-                    let mut acc = 0.0f32;
-                    for (j, &wj) in ws.iter().enumerate() {
-                        acc += wj * tmp[((s + j) * w2 + x) * 3 + c];
-                    }
-                    out[(y * w2 + x) * 3 + c] = (acc.clamp(0.0, 255.0) + 0.5) as u8;
-                }
-            }
-        }
-        out
-    }
-
-    #[test]
-    fn register_tiled_convolutions_and_resample_match_reference_bit_exact() {
-        let mut rng = Rng::seed(0xB17_E4AC);
-        let k = gaussian_kernel(1.7);
-        let taps = vec![(-3, -2, 0.08), (-1, -1, 0.14), (0, 0, 0.36), (2, 1, 0.25), (4, 2, 0.17)];
-        let veil = [220.0 * 0.35, 225.0 * 0.35, 232.0 * 0.35];
-        for (w, h) in [(1, 1), (2, 3), (7, 5), (8, 4), (9, 7), (15, 6), (16, 8), (17, 9), (25, 11), (65, 13)]
-        {
-            let raw: Vec<u8> = (0..w * h * 3).map(|_| rng.below(256) as u8).collect();
-            assert_eq!(
-                convolve_separable_u8(&raw, w, h, &k, &k),
-                ref_separable(&raw, w, h, &k, &k, None),
-                "separable {w}x{h}"
-            );
-            assert_eq!(
-                convolve_separable_haze_u8(&raw, w, h, &k, &k, 0.65, veil),
-                ref_separable(&raw, w, h, &k, &k, Some((0.65, veil))),
-                "haze {w}x{h}"
-            );
-            assert_eq!(convolve_taps_u8(&raw, w, h, &taps), ref_taps(&raw, w, h, &taps), "taps {w}x{h}");
-            let (w2, h2) = ((w / 2).max(1), (h / 2).max(1));
-            let (xt, yt) = (area_taps(w, w2), area_taps(h, h2));
-            assert_eq!(
-                resample_u8_to_u8(&raw, w, h, w2, h2, &xt, &yt),
-                ref_resample(&raw, w, h, w2, h2, &xt, &yt),
-                "resample u8->u8 {w}x{h}->{w2}x{h2}"
-            );
-            let small = resample_u8_to_plane(&raw, w, h, w2, h2, &xt, &yt);
-            let (bx, by) = (bilinear_taps(w2, w), bilinear_taps(h2, h));
-            let up = resample_plane_to_u8(&small, w, h, &bx, &by);
-            // Cross-check the two-stage plane resample against reference scalar formula on `small.data`.
-            let mut ref_up = vec![0u8; raw.len()];
-            let mut tmp = vec![0.0f32; h2 * w * 3];
-            for y in 0..h2 {
-                for x in 0..w {
-                    let (s, ws) = bx.get(x);
-                    for c in 0..3 {
-                        let mut acc = 0.0f32;
-                        for (j, &wj) in ws.iter().enumerate() {
-                            acc += wj * small.data[(y * w2 + s + j) * 3 + c];
-                        }
-                        tmp[(y * w + x) * 3 + c] = acc;
-                    }
-                }
-            }
-            for y in 0..h {
-                let (s, ws) = by.get(y);
-                for x in 0..w {
-                    for c in 0..3 {
-                        let mut acc = 0.0f32;
-                        for (j, &wj) in ws.iter().enumerate() {
-                            acc += wj * tmp[((s + j) * w + x) * 3 + c];
-                        }
-                        ref_up[(y * w + x) * 3 + c] = (acc.clamp(0.0, 255.0) + 0.5) as u8;
-                    }
-                }
-            }
-            assert_eq!(up, ref_up, "resample plane->u8 {w}x{h}");
-        }
-    }
-}
+mod tests;
