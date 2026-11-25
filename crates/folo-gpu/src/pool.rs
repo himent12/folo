@@ -41,11 +41,11 @@
 //! bind groups that use them (`context/binds.rs`). It also knows the ids of every buffer it created and has not let
 //! go of ([`BufferPool::owns`]): only those are cached, since only their release is reported.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::context::binds::FxMap;
+use crate::context::binds::{FxHashMap, FxMap, FxSet};
 
 /// Smallest size class in bytes.
 pub const MIN_CLASS: u64 = 256;
@@ -102,7 +102,7 @@ type Key = (u64, wgpu::BufferUsages);
 pub struct BufferPool {
     /// Per key, the free buffers by `(creation number, free stamp)`; reuse takes the first (the oldest buffer, see
     /// the module docs). The stamp keeps keys unique even if two buffers' numbers collided.
-    free: HashMap<Key, BTreeMap<(u64, u64), wgpu::Buffer>>,
+    free: FxHashMap<Key, BTreeMap<(u64, u64), wgpu::Buffer>>,
     /// Every free event `(stamp, key, creation number)` in stamp order, for least-recently-freed eviction. Entries
     /// whose buffer was reused since are stale and skipped.
     order: VecDeque<(u64, Key, u64)>,
@@ -121,7 +121,7 @@ pub struct BufferPool {
     /// Ids of the buffers this pool created and has not let go of (cached or lent out), with their creation numbers.
     owned: FxMap<u64>,
     /// Per key, the buffers lent out now and the most lent out at once in the current and the previous window.
-    lent: HashMap<Key, Lent>,
+    lent: FxHashMap<Key, Lent>,
     /// Requests in the current window.
     window_takes: u64,
 }
@@ -140,7 +140,7 @@ struct Lent {
 pub(crate) enum Retired {
     #[default]
     None,
-    Some(HashSet<u64>),
+    Some(FxSet),
     All,
 }
 
@@ -154,7 +154,7 @@ impl BufferPool {
     /// Creates an empty pool that caches at most `max_cached_bytes`.
     pub fn new(max_cached_bytes: u64) -> Self {
         Self {
-            free: HashMap::new(),
+            free: FxHashMap::default(),
             order: VecDeque::new(),
             stamp: 0,
             created: 0,
@@ -165,7 +165,7 @@ impl BufferPool {
             retired: Retired::None,
             retired_flag: Arc::default(),
             owned: FxMap::default(),
-            lent: HashMap::new(),
+            lent: FxHashMap::default(),
             window_takes: 0,
         }
     }
@@ -197,7 +197,11 @@ impl BufferPool {
             Retired::Some(ids) => {
                 ids.insert(id);
             }
-            Retired::None => self.retired = Retired::Some(HashSet::from([id])),
+            Retired::None => {
+                let mut set = FxSet::default();
+                set.insert(id);
+                self.retired = Retired::Some(set);
+            }
         }
         self.retired_flag.store(true, Ordering::Relaxed);
     }

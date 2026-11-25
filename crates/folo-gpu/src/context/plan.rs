@@ -115,7 +115,7 @@ enum Bind {
 }
 
 enum Step {
-    Dispatch { pipeline: wgpu::ComputePipeline, bind: Bind, offset: u32, groups: [u32; 3] },
+    Dispatch { pipeline_id: u64, pipeline: wgpu::ComputePipeline, bind: Bind, offset: u32, groups: [u32; 3] },
     Copy { src: Buf, src_off: u64, dst: Buf, dst_off: u64, len: u64 },
     Clear { buf: Buf, bytes: u64 },
 }
@@ -412,7 +412,13 @@ impl GpuContext {
                     bytes[slot as usize..(slot + UNIFORM_SLOT) as usize].copy_from_slice(params.bytes());
                     let offset = slot as u32;
                     slot += align;
-                    Step::Dispatch { pipeline: kernel.pipeline.clone(), bind, offset, groups: op.groups }
+                    Step::Dispatch {
+                        pipeline_id: kernel.pipeline_id,
+                        pipeline: kernel.pipeline.clone(),
+                        bind,
+                        offset,
+                        groups: op.groups,
+                    }
                 }
                 TracedKind::Copy { src, src_off, dst, dst_off, len } => Step::Copy {
                     src: map(src),
@@ -455,7 +461,7 @@ impl GpuContext {
         };
         for step in &f.steps {
             match step {
-                Step::Dispatch { pipeline, bind, offset, groups } => {
+                Step::Dispatch { pipeline_id, pipeline, bind, offset, groups } => {
                     let bind = match bind {
                         Bind::Static(g) => g.clone(),
                         Bind::Dynamic(i) => {
@@ -485,7 +491,12 @@ impl GpuContext {
                         b.pass = Some(pass);
                     }
                     let pass = b.pass.as_mut().expect("pass");
-                    pass.set_pipeline(pipeline);
+                    if b.last_pipeline != Some(*pipeline_id) {
+                        pass.set_pipeline(pipeline);
+                        b.last_pipeline = Some(*pipeline_id);
+                        #[cfg(test)]
+                        self.inner.pipeline_sets.fetch_add(1, Ordering::Relaxed);
+                    }
                     pass.set_bind_group(0, &bind, &[*offset]);
                     pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
                     self.inner.dispatches.fetch_add(1, Ordering::Relaxed);

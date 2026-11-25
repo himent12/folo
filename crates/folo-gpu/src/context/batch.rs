@@ -77,6 +77,7 @@ impl GpuContext {
 
     pub(super) fn encoder<'b>(&self, b: &'b mut Batch) -> &'b mut wgpu::CommandEncoder {
         b.pass = None;
+        b.last_pipeline = None;
         b.encoder.get_or_insert_with(|| {
             self.inner
                 .device
@@ -95,6 +96,7 @@ impl GpuContext {
 
     pub(super) fn submit(&self, b: &mut Batch) {
         b.pass = None;
+        b.last_pipeline = None;
         // Here too, so `flush()` and `sync()` release retired buffers when no dispatch follows.
         if self.inner.retired.load(Ordering::Relaxed) {
             self.sweep_binds(b);
@@ -214,7 +216,12 @@ impl GpuContext {
             b.pass = Some(pass);
         }
         let pass = b.pass.as_mut().expect("pass");
-        pass.set_pipeline(&kernel.pipeline);
+        if b.last_pipeline != Some(kernel.pipeline_id) {
+            pass.set_pipeline(&kernel.pipeline);
+            b.last_pipeline = Some(kernel.pipeline_id);
+            #[cfg(test)]
+            self.inner.pipeline_sets.fetch_add(1, Ordering::Relaxed);
+        }
         pass.set_bind_group(0, &bind, &[slot as u32]);
         let mut prof = self.profiler();
         let q = prof.as_mut().map(|p| p.begin(kernel.name));

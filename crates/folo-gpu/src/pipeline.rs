@@ -288,11 +288,15 @@ pub(crate) struct KernelKey {
     pub spec: Spec,
 }
 
+/// Monotonic unique id assigned to each compiled [`Kernel`], for `set_pipeline` deduplication within a pass.
+static NEXT_PIPELINE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// A compiled pipeline and its bind group layout.
 pub(crate) struct Kernel {
     pub name: &'static str,
     /// The specialisation constants, for profiles ([`Spec::describe`]).
     pub spec: String,
+    pub pipeline_id: u64,
     pub pipeline: wgpu::ComputePipeline,
     pub layout: wgpu::BindGroupLayout,
     pub storage: &'static [Access],
@@ -307,6 +311,7 @@ impl Clone for Kernel {
         Self {
             name: self.name,
             spec: self.spec.clone(),
+            pipeline_id: self.pipeline_id,
             pipeline: self.pipeline.clone(),
             layout: self.layout.clone(),
             storage: self.storage,
@@ -483,6 +488,7 @@ impl Kernel {
         Ok(Self {
             name: def.name,
             spec: spec.describe(),
+            pipeline_id: NEXT_PIPELINE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             pipeline,
             layout,
             storage: def.storage,

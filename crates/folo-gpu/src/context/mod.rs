@@ -217,6 +217,8 @@ struct UniformChunk {
 struct Batch {
     encoder: Option<wgpu::CommandEncoder>,
     pass: Option<wgpu::ComputePass<'static>>,
+    /// [`Kernel::pipeline_id`] currently bound on `pass`, cleared whenever `pass` ends.
+    last_pipeline: Option<u64>,
     dispatches: u32,
     /// Dispatches at which the open batch is submitted (see [`FIRST_DISPATCHES_PER_BATCH`]).
     limit: u32,
@@ -233,6 +235,7 @@ impl Default for Batch {
         Self {
             encoder: None,
             pass: None,
+            last_pipeline: None,
             dispatches: 0,
             limit: FIRST_DISPATCHES_PER_BATCH,
             chunks: Vec::new(),
@@ -294,6 +297,9 @@ struct Inner {
     plan_epoch: AtomicU64,
     /// Forward plans are on ([`GpuContext::set_forward_plans`]).
     plans_on: AtomicBool,
+    /// Number of `ComputePass::set_pipeline` calls encoded (for tests verifying pipeline dedup).
+    #[cfg(test)]
+    pipeline_sets: AtomicU64,
 }
 
 /// The idle staging buffers of [`GpuContext::upload_with`].
@@ -520,6 +526,12 @@ impl GpuContext {
             spin_waits: self.inner.spin_waits.load(Ordering::Relaxed),
             blocked_waits: self.inner.blocked_waits.load(Ordering::Relaxed),
         }
+    }
+
+    /// Number of `ComputePass::set_pipeline` calls encoded (for tests).
+    #[cfg(test)]
+    pub(crate) fn pipeline_sets(&self) -> u64 {
+        self.inner.pipeline_sets.load(Ordering::Relaxed)
     }
 
     /// Whether two handles refer to the same device.

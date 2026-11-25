@@ -1,11 +1,10 @@
 //! The bind-group cache (`context/binds.rs`): reuse with each dispatch's own parameters, second-sight admission,
 //! only pool-owned buffers cached, invalidation when the pool lets a buffer go, and its size and index bounds.
 
-use std::collections::HashSet;
 use std::sync::atomic::Ordering;
 
 use super::gpu;
-use crate::context::binds::{BindCache, GENERATION};
+use crate::context::binds::{BindCache, FxSet, GENERATION};
 use crate::pipeline::{Access, Kernel, KernelDef, Params, Source, Spec};
 use crate::pool::{BufferPool, NEED_WINDOW, Retired};
 use crate::{DType, GpuContext, GpuTensor};
@@ -202,14 +201,14 @@ fn pool_reports_the_buffers_it_lets_go() {
     pool.give(x, 2048);
     assert!(flag.load(Ordering::Relaxed));
     match pool.take_retired() {
-        Retired::Some(ids) => assert_eq!(ids, HashSet::from([id_a])),
+        Retired::Some(ids) => assert_eq!(ids, FxSet::from_iter([id_a])),
         other => panic!("{other:?}"),
     }
     assert!(!pool.owns(id_a) && pool.owns(id_x));
     assert!(!flag.load(Ordering::Relaxed));
     pool.clear();
     match pool.take_retired() {
-        Retired::Some(ids) => assert_eq!(ids, HashSet::from([id_x])),
+        Retired::Some(ids) => assert_eq!(ids, FxSet::from_iter([id_x])),
         other => panic!("{other:?}"),
     }
     assert!(!pool.owns(id_x));
@@ -279,7 +278,7 @@ fn bind_cache_is_bounded() {
     }
     assert_eq!((holds(&cache, probed), holds(&cache, stays_old)), (Some(true), Some(false)));
     let before = cache.len();
-    cache.retire(&HashSet::from([crate::context::buffer_id(&bufs[r])]));
+    cache.retire(&FxSet::from_iter([crate::context::buffer_id(&bufs[r])]));
     assert!(cache.len() < before);
     assert!(cache.index_size().1 <= 3 * cache.len());
     assert!(holds(&cache, stays_old).is_none(), "gone from the old generation");
@@ -307,7 +306,7 @@ fn the_reverse_index_stays_bounded() {
             cache.get(dev, &k.layout, &uniform, &[&keep, &short, &out], |_, _| true, &mut made);
         }
         assert_eq!((cache.len(), cache.index_size()), (1, (3, 3)));
-        cache.retire(&HashSet::from([crate::context::buffer_id(&short)]));
+        cache.retire(&FxSet::from_iter([crate::context::buffer_id(&short)]));
         assert_eq!((cache.len(), cache.index_size()), (0, (0, 0)));
     }
 }
@@ -334,4 +333,70 @@ fn the_bind_cache_can_be_switched_off() {
     ctx.set_bind_cache(true);
     assert_eq!(run(5), 2, "the recent keys went with the cache");
     assert_eq!(a.to_vec().unwrap(), vec![15.0; 64]);
+}
+
+/// Consecutive dispatches of the same pipeline inside one compute pass emit `set_pipeline` once; switching
+/// kernels, ending the pass (`copy`, `clear`, `flush`), and frozen-plan replays all re-bind only when needed.
+#[test]
+fn pipeline_dedup_skips_redundant_set_pipeline_within_pass() {
+    let _shared = gpu!();
+    let Some(ctx) = private() else { return };
+    ctx.set_flush_interval(64);
+    let k1 = ctx.kernel(&ADD_PARAM, Spec::new()).unwrap();
+    let k2 = ctx.kernel(&SET_AT, Spec::new()).unwrap();
+    let a = GpuTensor::zeros(&ctx, &[64], DType::F32).unwrap();
+    let b = GpuTensor::zeros(&ctx, &[64], DType::F32).unwrap();
+    ctx.sync().unwrap();
+
+    // 1. Five consecutive dispatches of `k1` in one pass -> 1 set_pipeline call.
+    let before = ctx.pipeline_sets();
+    for _ in 0..5 {
+        ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(1.0), [1, 1, 1]).unwrap();
+    }
+    assert_eq!(ctx.pipeline_sets() - before, 1, "5x same kernel in one pass");
+
+    // 2. Switch to `k2` twice then back to `k1` -> +2 set_pipeline calls.
+    let before = ctx.pipeline_sets();
+    ctx.dispatch(&k2, &[b.raw()], &Params::new().u(0).f(7.0), [1, 1, 1]).unwrap();
+    ctx.dispatch(&k2, &[b.raw()], &Params::new().u(1).f(9.0), [1, 1, 1]).unwrap();
+    ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(2.0), [1, 1, 1]).unwrap();
+    assert_eq!(ctx.pipeline_sets() - before, 2, "k2, k2 (deduped), k1");
+
+    // 3. `copy` and `clear` each end the open compute pass and clear `last_pipeline`, so the next `k1` sets it again.
+    let before = ctx.pipeline_sets();
+    ctx.copy(a.raw(), 0, b.raw(), 16, 16);
+    ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(3.0), [1, 1, 1]).unwrap();
+    assert_eq!(ctx.pipeline_sets() - before, 1, "copy clears pass pipeline state");
+
+    let before = ctx.pipeline_sets();
+    ctx.clear(b.raw(), 16);
+    ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(1.0), [1, 1, 1]).unwrap();
+    assert_eq!(ctx.pipeline_sets() - before, 1, "clear clears pass pipeline state");
+
+    // 4. `flush` ends the pass and clears `last_pipeline`, so the next `k1` sets it again.
+    let before = ctx.pipeline_sets();
+    ctx.flush();
+    ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(4.0), [1, 1, 1]).unwrap();
+    assert_eq!(ctx.pipeline_sets() - before, 1, "flush clears pass pipeline state");
+    assert_eq!(a.to_vec().unwrap(), vec![15.0; 64]);
+    let bv = b.to_vec().unwrap();
+    assert_eq!((bv[0], bv[1], bv[4]), (0.0, 0.0, 7.0));
+
+    // 5. Frozen replay deduplicates consecutive pipelines identically inside its pass and re-sets after `clear`.
+    ctx.trace_begin();
+    ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(1.0), [1, 1, 1]).unwrap();
+    ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(1.0), [1, 1, 1]).unwrap();
+    ctx.clear(b.raw(), 8);
+    ctx.dispatch(&k1, &[a.raw()], &Params::new().u(64).f(1.0), [1, 1, 1]).unwrap();
+    ctx.dispatch(&k2, &[b.raw()], &Params::new().u(2).f(42.0), [1, 1, 1]).unwrap();
+    ctx.dispatch(&k2, &[b.raw()], &Params::new().u(3).f(43.0), [1, 1, 1]).unwrap();
+    let frozen = ctx.freeze(&ctx.trace_end()).unwrap();
+    ctx.sync().unwrap();
+
+    let before = ctx.pipeline_sets();
+    ctx.replay_frozen(&frozen);
+    assert_eq!(ctx.pipeline_sets() - before, 3, "frozen replay: k1, k1 (dedup), clear, k1, k2, k2 (dedup)");
+    assert_eq!(a.to_vec().unwrap(), vec![21.0; 64]);
+    let bv = b.to_vec().unwrap();
+    assert_eq!((bv[2], bv[3]), (42.0, 43.0));
 }

@@ -444,6 +444,8 @@ impl GpuContext {
                 plans_on: AtomicBool::new(
                     !std::env::var(super::ENV_NO_PLAN).is_ok_and(|v| v != "0" && !v.is_empty()),
                 ),
+                #[cfg(test)]
+                pipeline_sets: AtomicU64::new(0),
             }),
         };
         if std::env::var(super::ENV_NO_BIND_CACHE).is_ok_and(|v| v != "0" && !v.is_empty()) {
