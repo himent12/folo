@@ -35,7 +35,7 @@ import Skeleton from '$lib/ui/Skeleton';
 import StatusBadge from '$lib/ui/StatusBadge';
 import TableState from '$lib/ui/TableState';
 import Gate from '$lib/ui/Gate';
-import { compareHint, compareReason } from './runs/compareHint';
+import { COMPARE_CAP_TIP, COMPARE_MAX, compareHint, compareReason } from './runs/compareHint';
 import Ident from '$lib/ui/Ident';
 import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
@@ -255,7 +255,7 @@ export default function Runs() {
 
   function toggle(id: string) {
     const cur = selected.get();
-    selected.set(cur.includes(id) ? cur.filter((x) => x !== id) : cur.length >= 4 ? cur : [...cur, id]);
+    selected.set(cur.includes(id) ? cur.filter((x) => x !== id) : cur.length >= COMPARE_MAX ? cur : [...cur, id]);
   }
 
   /** Where a run started from, in words: the Architecture cell's tooltip (the column of its own went, UNIFIED §4). */
@@ -298,6 +298,11 @@ export default function Runs() {
                       {compareHint(selected.get().length)}
                     </span>
                   ) : null}
+                  {selected.get().length > 0 ? (
+                    <Button variant="ghost" size="sm" onclick={() => (picking.set(false), selected.set([]))} aria-label="Clear selection">
+                      Clear
+                    </Button>
+                  ) : null}
                   <Gate reason={offline.get() ? OFFLINE_REASON : compareReason(selected.get().length)}>{compareButton}</Gate>
                 </span>
                 <Gate reason={offline.get() ? OFFLINE_REASON : null}>
@@ -338,7 +343,7 @@ export default function Runs() {
             </span>
           ) : null}{' '}
           <div class="lt-search">
-            <Input icon={Search} bind:value={query} placeholder="Filter by name, model or dataset" aria-label="Filter runs" disabled={!filterable.get()} />
+            <Input type="search" icon={Search} bind:value={query} placeholder="Filter by name, model or dataset" aria-label="Filter runs" disabled={!filterable.get()} />
           </div>
         </div>{' '}
         <Panel pad="none">
@@ -463,17 +468,18 @@ export default function Runs() {
                   <For each={shown.get()} key={(r) => r.id}>
                     {(r) => {
                       const on = () => selected.get().includes(r().id);
+                      const capped = () => !on() && selected.get().length >= COMPARE_MAX;
                       const from = computed(() => origin(r().config.weights, modelById.get()));
                       const items = computed(() => rowItems(r()));
                       return (
                         <tr class="link" class:on={on()} data-row data-id={r().id} aria-label={r().name} onclick={() => router.go(`/runs/${r().id}`)}>
                           {/* The whole cell is the checkbox's target (44 px on touch); a click in it never opens the run. */}
                           <td class="check" onclick={(e) => e.stopPropagation()}>
-                            <label class="hit">
+                            <label class="hit" use:tooltip={capped() ? COMPARE_CAP_TIP : null}>
                               <input
                                 type="checkbox"
                                 checked={on()}
-                                disabled={!on() && selected.get().length >= 4}
+                                disabled={capped()}
                                 aria-label={`Select ${r().name} for comparison`}
                                 onchange={() => toggle(r().id)}
                               />
@@ -659,6 +665,9 @@ css`
     align-items: center;
     padding-left: var(--space-3);
     cursor: pointer;
+  }
+  .hit:has(> input:disabled) {
+    cursor: not-allowed;
   }
   input[type='checkbox'] {
     width: 14px;

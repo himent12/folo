@@ -5,6 +5,9 @@
 export const COMPARE_MIN = 2;
 export const COMPARE_MAX = 4;
 
+/** Tooltip on disabled row checkboxes once COMPARE_MAX runs are already selected. */
+export const COMPARE_CAP_TIP = `Compare up to ${COMPARE_MAX} runs`;
+
 /** The line beside (desktop) or under (phones) the selection controls, for `n` runs selected. */
 export function compareHint(n: number): string {
   if (n === 0) return `Select ${COMPARE_MIN}–${COMPARE_MAX} runs to compare`;
