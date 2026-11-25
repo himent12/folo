@@ -7,10 +7,37 @@ use folo_ui::{Animation, AnimationExt, IntoElement, SharedString, Styled};
 
 static REDUCE_MOTION: AtomicBool = AtomicBool::new(false);
 
+#[cfg(test)]
+thread_local! {
+    static TEST_REDUCE_MOTION: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+/// Restores the thread-local test override of [`reduce_motion`] on drop.
+#[cfg(test)]
+#[must_use]
+pub(crate) struct ReduceMotionGuard(Option<bool>, std::marker::PhantomData<*const ()>);
+
+#[cfg(test)]
+impl Drop for ReduceMotionGuard {
+    fn drop(&mut self) {
+        TEST_REDUCE_MOTION.with(|c| c.set(self.0));
+    }
+}
+
+/// Pins [`reduce_motion`] on the current test thread so parallel tests calling [`set_reduce_motion`] cannot
+/// race it.
+#[cfg(test)]
+pub(crate) fn override_reduce_motion_for_test(on: bool) -> ReduceMotionGuard {
+    let prev = TEST_REDUCE_MOTION.with(|c| c.replace(Some(on)));
+    ReduceMotionGuard(prev, std::marker::PhantomData)
+}
+
 /// Settings › Reduce motion: stops pulses and shimmers and makes transitions instant.
 /// Whether the OS asks for less motion (Windows: Settings › Accessibility › Animation effects off).
+/// Unit tests return `false` so headless tests stay deterministic on Windows Server CI runners where
+/// client-area animations are off by default.
 pub fn os_prefers_reduced_motion() -> bool {
-    #[cfg(windows)]
+    #[cfg(all(windows, not(test)))]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             SPI_GETCLIENTAREAANIMATION, SystemParametersInfoW,
@@ -21,7 +48,7 @@ pub fn os_prefers_reduced_motion() -> bool {
             unsafe { SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, (&mut on as *mut i32).cast(), 0) };
         ok != 0 && on == 0
     }
-    #[cfg(not(windows))]
+    #[cfg(not(all(windows, not(test))))]
     {
         false
     }
@@ -32,6 +59,10 @@ pub fn set_reduce_motion(on: bool) {
 }
 
 pub fn reduce_motion() -> bool {
+    #[cfg(test)]
+    if let Some(v) = TEST_REDUCE_MOTION.with(|c| c.get()) {
+        return v;
+    }
     REDUCE_MOTION.load(Ordering::Relaxed)
 }
 

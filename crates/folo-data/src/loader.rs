@@ -6,7 +6,7 @@
 //! identical for any number of workers. In-flight work is bounded by a window of positions plus a bounded batch
 //! channel; dropping the epoch iterator stops and joins all threads.
 
-use crate::augment::{AugmentConfig, Fetched, ProducedMeta, TrainTransform};
+use crate::augment::{AugmentConfig, FetchedSample, ProducedMeta, TrainTransform};
 use crate::buffers;
 use crate::dataset::{Dataset, Issue, IssueKind};
 use crate::error::{DataError, Result};
@@ -159,18 +159,14 @@ const MAX_SUBSTITUTES: usize = 64;
 
 impl Shared {
     /// Loads sample `i`; if it cannot be read, records the failure and deterministically tries `i + 1`, `i + 2`, ...
-    fn fetch(&self, i: usize) -> Result<Fetched> {
+    fn fetch(&self, i: usize) -> Result<FetchedSample> {
         let n = self.ds.len();
         let mut last = None;
         for k in 0..MAX_SUBSTITUTES.min(n) {
             let j = (i + k) % n;
             let got = match &self.ram {
-                Some(c) => c.get(j, || self.ds.get(j)).map(|(sample, orig_size)| Fetched {
-                    index: j,
-                    sample,
-                    orig_size,
-                }),
-                None => self.ds.get(j).map(|s| Fetched::decoded(j, s)),
+                Some(c) => c.get(j, || self.ds.get(j)).map(|entry| FetchedSample::Shared { index: j, entry }),
+                None => self.ds.get(j).map(|s| FetchedSample::decoded(j, s)),
             };
             match got {
                 Ok(f) => return Ok(f),

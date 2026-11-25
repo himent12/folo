@@ -44,6 +44,46 @@ use crate::{
     Platform, TextSystem, Window, WindowId,
 };
 
+/// A headless launch mode requested on the command line (`--shot` or `--bench-frames`).
+enum HeadlessMode {
+    Shot(shot::ShotArgs),
+    Bench(bench::BenchArgs),
+}
+
+impl HeadlessMode {
+    /// Parses `--shot` or `--bench-frames` from `args` (program name first), failing closed on
+    /// missing values or when both flags are given together.
+    fn parse(args: &[String]) -> anyhow::Result<Option<Self>> {
+        let rest = args.get(1..).unwrap_or(&[]);
+        let has_shot = rest.iter().any(|a| a == "--shot");
+        let has_bench = rest.iter().any(|a| a == "--bench-frames");
+        if has_shot && has_bench {
+            anyhow::bail!("--shot and --bench-frames cannot be used together");
+        }
+        if let Some(request) = bench::BenchArgs::parse(args).map_err(|error| {
+            let msg = format!("{error:#}");
+            if msg.starts_with("--bench-frames") {
+                anyhow::anyhow!("{msg}")
+            } else {
+                anyhow::anyhow!("--bench-frames: {msg}")
+            }
+        })? {
+            return Ok(Some(Self::Bench(request)));
+        }
+        if let Some(request) = shot::ShotArgs::parse(args).map_err(|error| {
+            let msg = format!("{error:#}");
+            if msg.starts_with("--shot") {
+                anyhow::anyhow!("{msg}")
+            } else {
+                anyhow::anyhow!("--shot: {msg}")
+            }
+        })? {
+            return Ok(Some(Self::Shot(request)));
+        }
+        Ok(None)
+    }
+}
+
 /// The app before it runs: `Application::new().with_assets(..).run(|cx| ..)`. With `--shot <png>` on the
 /// command line it runs headless and writes a screenshot instead (`shot.rs`); with `--bench-frames <n>` it
 /// runs headless and prints the frame bench (`bench.rs`).
@@ -56,8 +96,8 @@ impl Application {
     pub fn new() -> Self {
         trace::mark_start();
         let args: Vec<String> = std::env::args().collect();
-        match bench::BenchArgs::parse(&args) {
-            Ok(Some(request)) => {
+        match HeadlessMode::parse(&args) {
+            Ok(Some(HeadlessMode::Bench(request))) => {
                 let platform = crate::platform::headless::HeadlessPlatform::try_from_options(request.options)
                     .unwrap_or_else(|error| {
                         eprintln!("folo-ui: --bench-frames: {error:#}");
@@ -73,14 +113,7 @@ impl Application {
                 };
                 return Application(app, None, Some(bench));
             }
-            Ok(None) => {}
-            Err(error) => {
-                eprintln!("folo-ui: --bench-frames: {error:#}");
-                std::process::exit(2)
-            }
-        }
-        match shot::ShotArgs::parse(&args) {
-            Ok(Some(request)) => {
+            Ok(Some(HeadlessMode::Shot(request))) => {
                 let platform = crate::platform::headless::HeadlessPlatform::try_from_options(request.options)
                     .unwrap_or_else(|error| {
                         eprintln!("folo-ui: --shot: {error:#}");
@@ -96,7 +129,7 @@ impl Application {
             }
             Ok(None) => {}
             Err(error) => {
-                eprintln!("folo-ui: --shot: {error:#}");
+                eprintln!("folo-ui: {error:#}");
                 std::process::exit(2)
             }
         }
@@ -548,5 +581,52 @@ impl AppContext for App {
         G: Global,
     {
         callback(self.global::<G>(), self)
+    }
+}
+
+#[cfg(test)]
+mod headless_cli_tests {
+    use super::HeadlessMode;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        std::iter::once("folo-desktop").chain(list.iter().copied()).map(String::from).collect()
+    }
+
+    #[test]
+    fn rejects_conflicting_headless_modes_and_missing_values() {
+        assert!(HeadlessMode::parse(&args(&["--scenario", "runs"])).unwrap().is_none());
+        assert!(matches!(
+            HeadlessMode::parse(&args(&["--shot", "out.png"])).unwrap(),
+            Some(HeadlessMode::Shot(_))
+        ));
+        assert!(matches!(
+            HeadlessMode::parse(&args(&["--bench-frames", "2"])).unwrap(),
+            Some(HeadlessMode::Bench(_))
+        ));
+
+        let conflict = HeadlessMode::parse(&args(&[
+            "--scenario",
+            "runs",
+            "--shot",
+            "missing.png",
+            "--bench-frames",
+            "1",
+        ]))
+        .err()
+        .expect("conflict must fail")
+        .to_string();
+        assert!(conflict.contains("--shot") && conflict.contains("--bench-frames"), "{conflict}");
+
+        let conflict_missing = HeadlessMode::parse(&args(&["--shot", "--bench-frames"]))
+            .err()
+            .expect("conflict without values must fail")
+            .to_string();
+        assert!(
+            conflict_missing.contains("--shot") && conflict_missing.contains("--bench-frames"),
+            "{conflict_missing}"
+        );
+
+        assert!(HeadlessMode::parse(&args(&["--shot"])).is_err());
+        assert!(HeadlessMode::parse(&args(&["--bench-frames"])).is_err());
     }
 }

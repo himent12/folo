@@ -89,14 +89,16 @@ pub(crate) struct BenchArgs {
 impl BenchArgs {
     /// The request in `args` (program name first), if `--bench-frames` is there.
     pub(crate) fn parse(args: &[String]) -> Result<Option<Self>> {
-        let value = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1));
-        let Some(frames) = value("--bench-frames") else { return Ok(None) };
+        let Some(frames) = super::shot::flag_value(args, "--bench-frames")? else { return Ok(None) };
         let frames: usize = frames.parse().with_context(|| format!("--bench-frames {frames}"))?;
         anyhow::ensure!(frames > 0, "--bench-frames must be positive");
         let number = |name: &str, default: f32| -> Result<f32> {
-            value(name).map_or(Ok(default), |v| v.parse().with_context(|| format!("{name} {v}")))
+            match super::shot::flag_value(args, name)? {
+                None => Ok(default),
+                Some(v) => v.parse().with_context(|| format!("{name} {v}")),
+            }
         };
-        let text = match value("--text").map(String::as_str) {
+        let text = match super::shot::flag_value(args, "--text")? {
             None | Some("native") => TextBackend::Native,
             Some("portable") => TextBackend::Portable,
             Some(other) => return Err(anyhow!("--text {other}: expected `native` or `portable`")),
@@ -322,6 +324,29 @@ mod tests {
         for good in [&["--scale", "8"][..], &[], &["--width", "1", "--height", "1"], &["--width", "16384"]] {
             let b = bench(good).unwrap().unwrap();
             assert_eq!(b.frames, 3, "{good:?}");
+        }
+    }
+
+    #[test]
+    fn fails_closed_when_bench_frames_or_its_options_lack_a_value() {
+        let parse = |list: &[&str]| {
+            let args: Vec<String> =
+                std::iter::once("folo-desktop").chain(list.iter().copied()).map(String::from).collect();
+            BenchArgs::parse(&args)
+        };
+        for bad in [
+            &["--bench-frames"][..],
+            &["--scenario", "runs", "--bench-frames"],
+            &["--bench-frames", ""],
+            &["--bench-frames", "--width", "960"],
+            &["--bench-frames", "3", "--width"],
+            &["--bench-frames", "3", "--height"],
+            &["--bench-frames", "3", "--scale"],
+            &["--bench-frames", "3", "--text"],
+            &["--bench-frames", "3", "--bench-frames"],
+            &["--bench-frames", "3", "--width", "960", "--width"],
+        ] {
+            assert!(parse(bad).is_err(), "{bad:?}");
         }
     }
 }
