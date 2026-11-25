@@ -842,8 +842,11 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::process::id(),
         N.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&tmp, bytes)?;
-    folo_nn::io::rename_over_with(&tmp, path, STORE_RETRY).map(drop).inspect_err(|_| {
+    let write_and_rename = || -> std::io::Result<()> {
+        std::fs::write(&tmp, bytes)?;
+        folo_nn::io::rename_over_with(&tmp, path, STORE_RETRY).map(drop)
+    };
+    write_and_rename().inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
 }
