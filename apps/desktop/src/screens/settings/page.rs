@@ -211,13 +211,14 @@ impl FoloApp {
 
         let appearance = self.appearance_panel(window, cx);
 
-        let actions: [(&str, &[&str]); 8] = [
+        let actions: [(&str, &[&str]); 9] = [
             ("Command palette", &["Ctrl", "K"]),
             ("New run", &["Ctrl", "N"]),
             ("Open image", &["Ctrl", "O"]),
             ("Switch theme", &["Ctrl", "Shift", "L"]),
             ("Full screen", &["F11"]),
             ("Back", &["Alt", "←"]),
+            ("Forward", &["Alt", "→"]),
             ("Close / back", &["Esc"]),
             ("Submit the open dialog or form", &["Ctrl", "Enter"]),
         ];

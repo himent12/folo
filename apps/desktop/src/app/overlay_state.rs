@@ -97,7 +97,9 @@ impl FoloApp {
             return;
         }
         self.remember_focus(window, cx);
-        let input = cx.new(|cx| TextInput::new("Search runs, models, datasets and commands…", cx));
+        self.ensure_benches(cx);
+        let input =
+            cx.new(|cx| TextInput::new("Search runs, models, datasets, benchmarks and commands…", cx));
         let sub = cx.subscribe(&input, |this: &mut Self, _, ev: &InputEvent, cx| {
             let InputEvent::Changed(q) = ev;
             if let Some(p) = this.palette.as_mut() {

@@ -48,29 +48,48 @@ pub fn fuzzy(q: &str, s: &str) -> Option<i32> {
 }
 
 /// The items matching `q`, at most 40: the 40 best matches, each group kept together under one heading
-/// (the group of the best match first, best first within a group), so a group never shows twice. No
-/// query: every item as listed.
+/// (the group of the best match first, best first within a group), so a group never shows twice.
+/// Matches in `title`/`group` always outrank fallback matches in `detail`. No query: every item as listed.
 pub fn rank(q: &str, items: Vec<PaletteItem>) -> Vec<PaletteItem> {
-    let mut scored: Vec<(i32, usize, PaletteItem)> = items
+    let mut scored: Vec<(bool, i32, usize, PaletteItem)> = items
         .into_iter()
         .enumerate()
-        .filter_map(|(i, it)| fuzzy(q, &format!("{} {}", it.title, it.group)).map(|s| (s, i, it)))
+        .filter_map(|(i, it)| {
+            if let Some(s) = fuzzy(q, &format!("{} {}", it.title, it.group)) {
+                Some((true, s, i, it))
+            } else if !it.detail.is_empty() {
+                fuzzy(q, &it.detail).map(|s| (false, s, i, it))
+            } else {
+                None
+            }
+        })
         .collect();
     if !q.is_empty() {
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(a.2.cmp(&b.2)));
         // Cut before grouping: grouping first let a big group of weak matches push a strong match
         // of a later group out of the list.
         scored.truncate(40);
         let mut groups: Vec<&'static str> = Vec::new();
-        for (_, _, it) in &scored {
+        for (_, _, _, it) in &scored {
             if !groups.contains(&it.group) {
                 groups.push(it.group);
             }
         }
-        // Stable: within a group the order by score stays.
-        scored.sort_by_key(|(_, _, it)| groups.iter().position(|g| *g == it.group));
+        // Stable: within a group the order by (primary, score) stays.
+        scored.sort_by_key(|(_, _, _, it)| groups.iter().position(|g| *g == it.group));
     }
-    scored.into_iter().map(|(_, _, it)| it).take(40).collect()
+    scored.into_iter().map(|(_, _, _, it)| it).take(40).collect()
+}
+
+/// Rows skipped by PageUp / PageDown inside the palette result list.
+const PALETTE_PAGE_STEP: usize = 8;
+
+/// Scrolls the palette list to keep the selected row (and its group heading when first in group) in view.
+fn reveal_palette_item(p: &mut crate::app::Palette, row_child: &[usize]) {
+    if let Some(&ix) = row_child.get(p.selected) {
+        let ix = if ix > 0 && (p.selected == 0 || row_child[p.selected - 1] + 1 != ix) { ix - 1 } else { ix };
+        p.scroll.scroll_to_item(ix);
+    }
 }
 
 impl FoloApp {
@@ -215,6 +234,23 @@ impl FoloApp {
                     ),
                     keys: &[],
                     action: act(move |this, w, cx| this.navigate(Route::Dataset(id.clone()), w, cx)),
+                });
+            }
+        }
+        if let Some(benches) = self.bench.list.ready() {
+            for b in benches {
+                let id = b.id.clone();
+                let mut detail = counted(b.images, "image", "images");
+                if let Some(best) = b.best.as_ref().filter(|x| x.score.is_finite()) {
+                    detail.push_str(&format!(" · {} {:.1}", best.name, best.score));
+                }
+                items.push(PaletteItem {
+                    group: "Benchmarks",
+                    icon: "icons/target.svg",
+                    title: b.name.clone(),
+                    detail,
+                    keys: &[],
+                    action: act(move |this, w, cx| this.navigate(Route::Bench(id.clone()), w, cx)),
                 });
             }
         }
@@ -370,11 +406,11 @@ impl FoloApp {
             );
         }
         if n == 0 {
-            list =
-                list.child(div().p(px(24.)).flex().justify_center().child(
-                    text(ty::SM, t.text_tertiary).child("No matches. Try a run, model or dataset name."),
-                ));
+            list = list.child(div().p(px(24.)).flex().justify_center().child(
+                text(ty::SM, t.text_tertiary).child("No matches. Try a run, model, dataset or benchmark."),
+            ));
         }
+        let row_child_cap = row_child.clone();
         let panel_el =
             div().id("palette").absolute().top(px(88.)).left_0().right_0().flex().justify_center().child(
                 div()
@@ -382,6 +418,22 @@ impl FoloApp {
                     .w(px(640.))
                     .occlude()
                     .capture_any_mouse_down(Self::guard_presses(cx))
+                    .capture_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
+                        let Some(p) = this.palette.as_mut() else { return };
+                        let m = ev.keystroke.modifiers;
+                        let jump = matches!(ev.keystroke.key.as_str(), "home" | "end")
+                            && ((m.control && !m.alt && !m.shift && !m.platform)
+                                || (p.query.is_empty() && !m.control && !m.alt && !m.shift && !m.platform));
+                        if !jump {
+                            return;
+                        }
+                        if n > 0 {
+                            p.selected = if ev.keystroke.key == "home" { 0 } else { n - 1 };
+                            reveal_palette_item(p, &row_child_cap);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
                     .flex()
                     .flex_col()
                     .rounded(px(radius::XL))
@@ -392,24 +444,21 @@ impl FoloApp {
                     .overflow_hidden()
                     .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, w, cx| {
                         let Some(p) = this.palette.as_mut() else { return };
+                        let m = ev.keystroke.modifiers;
                         match ev.keystroke.key.as_str() {
-                            "down" | "up" => {
-                                p.selected = if ev.keystroke.key == "down" {
-                                    (p.selected + 1).min(n.saturating_sub(1))
-                                } else {
-                                    p.selected.saturating_sub(1)
-                                };
-                                // Reveal the row; for the first row of a group, its heading too.
-                                if let Some(&ix) = row_child.get(p.selected) {
-                                    let ix = if ix > 0
-                                        && (p.selected == 0 || row_child[p.selected - 1] + 1 != ix)
-                                    {
-                                        ix - 1
-                                    } else {
-                                        ix
-                                    };
-                                    p.scroll.scroll_to_item(ix);
+                            "down" | "up" | "pagedown" | "pageup" if !m.alt && !m.platform => {
+                                if n == 0 {
+                                    return;
                                 }
+                                let max_ix = n - 1;
+                                let cur = p.selected.min(max_ix);
+                                p.selected = match ev.keystroke.key.as_str() {
+                                    "down" => (cur + 1).min(max_ix),
+                                    "up" => cur.saturating_sub(1),
+                                    "pagedown" => cur.saturating_add(PALETTE_PAGE_STEP).min(max_ix),
+                                    _ => cur.saturating_sub(PALETTE_PAGE_STEP),
+                                };
+                                reveal_palette_item(p, &row_child);
                             }
                             "enter" => {
                                 let sel = p.selected.min(n.saturating_sub(1));
@@ -557,12 +606,41 @@ mod tests {
         assert_eq!(&groups[..3], ["Go to", "Runs", "Runs"], "grouped, the best group first");
         assert_eq!(groups.last(), Some(&"Actions"));
     }
+
+    #[test]
+    fn rank_matches_detail_behind_title_and_group() {
+        let mut by_title = item("Models", "demo-folo-s-v1");
+        by_title.detail = "folo-n · mAP50-95 0.500".into();
+        let mut by_detail = item("Models", "street-detector");
+        by_detail.detail = "folo-s · mAP50-95 0.720".into();
+        let plain = item("Models", "other-model");
+        let ranked = rank("folo-s", vec![by_detail, plain, by_title]);
+        let titles: Vec<&str> = ranked.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["demo-folo-s-v1", "street-detector"]);
+    }
 }
 
 #[cfg(test)]
 mod theme_commands {
+    use crate::api::Backend;
+    use crate::app::Route;
     use crate::app::tests::{drive, open};
+    use crate::store::Load;
     use crate::theme::{ModePref, theme};
+    use folo_ui::{KeyDownEvent, KeyUpEvent, Keystroke, PlatformInput};
+
+    fn press(app: &mut folo_ui::HeadlessApp, w: folo_ui::WindowHandle<crate::app::FoloApp>, key: &str) {
+        let ks = Keystroke::parse(key).unwrap();
+        app.simulate_input(
+            w.into(),
+            PlatformInput::KeyDown(KeyDownEvent { keystroke: ks.clone(), is_held: false }),
+        );
+        app.run_until_idle();
+        app.frame(w.into());
+        app.simulate_input(w.into(), PlatformInput::KeyUp(KeyUpEvent { keystroke: ks }));
+        app.run_until_idle();
+        app.frame(w.into());
+    }
 
     /// "Theme: <name>" for every theme, custom ones too, picking it as Settings does; the toggle stays.
     #[test]
@@ -609,5 +687,70 @@ mod theme_commands {
             (theme(cx).id.as_str().to_string(), this.theme_prefs.mode, this.theme_prefs.light.clone())
         });
         assert_eq!(now, ("sepia-2".into(), ModePref::Light, "sepia-2".into()));
+    }
+
+    #[test]
+    fn benchmarks_indexed_and_jump_keys_navigate_palette() {
+        let (mut app, window) = open();
+        let benches = crate::api::mock::MockBackend::new(4200, true).benches().unwrap();
+        let first_bench_id = benches[0].id.clone();
+        let first_bench_name = benches[0].name.clone();
+        let total = drive(&mut app, window, |this, w, cx| {
+            this.bench.list = Load::Ready(benches);
+            this.open_palette(w, cx);
+            this.filtered_palette(theme(cx).id).len()
+        });
+        assert!(total > super::PALETTE_PAGE_STEP + 2, "need enough items to page: {total}");
+        app.frame(window.into());
+
+        // PageDown advances by PALETTE_PAGE_STEP; PageUp returns to 0.
+        press(&mut app, window, "pagedown");
+        assert_eq!(
+            drive(&mut app, window, |this, _, _| this.palette.as_ref().unwrap().selected),
+            super::PALETTE_PAGE_STEP
+        );
+        press(&mut app, window, "pageup");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.palette.as_ref().unwrap().selected), 0);
+
+        // With empty query, End jumps to the last item and Home returns to 0.
+        press(&mut app, window, "end");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.palette.as_ref().unwrap().selected), total - 1);
+        press(&mut app, window, "home");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.palette.as_ref().unwrap().selected), 0);
+
+        // With a non-empty query, plain End stays with the text input; Ctrl+End still jumps the list.
+        let bench_items = drive(&mut app, window, |this, _, cx| {
+            let p = this.palette.as_mut().unwrap();
+            p.query = "a".into();
+            p.input.update(cx, |i, cx| i.set_text("a", cx));
+            p.selected = 0;
+            this.filtered_palette(theme(cx).id).len()
+        });
+        assert!(bench_items > 1);
+        app.frame(window.into());
+        press(&mut app, window, "end");
+        assert_eq!(
+            drive(&mut app, window, |this, _, _| this.palette.as_ref().unwrap().selected),
+            0,
+            "plain End must not steal cursor movement while typing a query"
+        );
+        press(&mut app, window, "ctrl-end");
+        assert_eq!(
+            drive(&mut app, window, |this, _, _| this.palette.as_ref().unwrap().selected),
+            bench_items - 1,
+            "Ctrl+End still jumps to the last palette item"
+        );
+
+        // Benchmarks appear in the palette and activate into Route::Bench.
+        drive(&mut app, window, |this, w, cx| {
+            let items = this.palette_items(theme(cx).id);
+            let b = items
+                .into_iter()
+                .find(|i| i.group == "Benchmarks" && i.title == first_bench_name)
+                .expect("benchmark indexed in palette");
+            this.close_palette(w, cx);
+            (b.action)(this, w, cx);
+        });
+        assert_eq!(drive(&mut app, window, |this, _, _| this.route.clone()), Route::Bench(first_bench_id));
     }
 }

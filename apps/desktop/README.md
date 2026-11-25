@@ -161,7 +161,7 @@ values, conflicting `--shot` and `--bench-frames`, or an invalid `--scenario` or
 Build output goes to `target\` unless `CARGO_TARGET_DIR` names another folder; the tools below look there too.
 
 Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image (in Playground, with the model of the model or run page it was pressed on) · `Ctrl 1–5` screens · `Ctrl 6` benchmarks · `Ctrl ,` settings ·
-`Ctrl Shift L` dark / light mode · `F11` full screen · `Alt ←` back · `Esc` close (a dialog, an inline form, a delete waiting
+`Ctrl Shift L` dark / light mode · `F11` full screen · `Alt ←` back · `Alt →` forward · `Esc` close (a dialog, an inline form, a delete waiting
 for its second click) or go up · `Ctrl Enter` submit the open dialog or form · `Tab` / arrows move focus ·
 `F6` next region. Text fields: `Home` / `End`, `Ctrl ←/→` word, `Ctrl Backspace` / `Ctrl Delete` delete a word,
 `Shift` with any of these moves select, `Ctrl A` all.
@@ -323,7 +323,7 @@ Everything comes through `api::Backend`, typed with the shared `crates/folo-api`
   a revoked key and a termination the provider hasn't confirmed. Neither it nor `folo serve --mock` resumes a run
   (both say `mock` in their health), so on demo data a stopped or failed run's Resume is off and says why.
 
-By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`; on Windows a closed port on this
+By default the app looks for `folo serve` at `$FOLO_SERVER` (or the last saved Server URL from `window_state`, else `http://127.0.0.1:7878`; on Windows a closed port on this
 machine is told at once, not after the probe's 0.5 s timeout, unless a proxy from the environment is used for it); if none answers it starts a
 local `folo serve` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit, opening
 bare against the real data dir (`$FOLO_HOME` or `~/.folo`). When that data dir already has a `folo serve` (another

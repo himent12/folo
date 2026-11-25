@@ -17,5 +17,6 @@ mod tooltip;
 
 pub use button::Btn;
 pub use chart_group::Cursor;
+pub use select::SelectTypeahead;
 pub use tabs::Tab;
 pub use tooltip::{focus_tip, tip};

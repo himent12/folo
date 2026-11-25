@@ -286,7 +286,8 @@ pub fn run() {
     // `--open run:run_3c02` starts on a screen (also `dataset:ID`, `model:ID`, `runs`, …).
     let open = arg_value(&args, "--open").map(str::to_string);
     let use_mock = args.iter().any(|a| a == "--mock");
-    let default_url = std::env::var("FOLO_SERVER").unwrap_or_else(|_| "http://127.0.0.1:7878".into());
+    let default_url =
+        launch_server_url(std::env::var("FOLO_SERVER").ok().as_deref(), saved.server_url.as_deref());
 
     Application::new().with_assets(Assets).run(move |cx: &mut App| {
         cx.text_system()
@@ -419,6 +420,17 @@ fn restored_bounds(p: window_state::Placement, cx: &App) -> (WindowBounds, Optio
     (window_bounds, displays.get(i).map(|d| d.id()))
 }
 
+/// Server URL used on launch when `--server` is not passed: `$FOLO_SERVER` wins over the URL
+/// remembered in `desktop.json`, which wins over the default local address.
+fn launch_server_url(env_server: Option<&str>, saved: Option<&str>) -> String {
+    env_server
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| saved.map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or("http://127.0.0.1:7878")
+        .to_string()
+}
+
 #[cfg(test)]
 mod source_tests {
     /// Catches text double-encoded by an editor or shell (UTF-8 read as Windows-1252) and stray BOMs.
@@ -446,6 +458,18 @@ mod source_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_server_url_prefers_env_then_saved_then_default() {
+        assert_eq!(
+            launch_server_url(Some(" http://env:7878 "), Some("http://saved:7878")),
+            "http://env:7878"
+        );
+        assert_eq!(launch_server_url(Some("   "), Some("http://saved:7878")), "http://saved:7878");
+        assert_eq!(launch_server_url(None, Some(" http://saved:7878 ")), "http://saved:7878");
+        assert_eq!(launch_server_url(None, Some("")), "http://127.0.0.1:7878");
+        assert_eq!(launch_server_url(None, None), "http://127.0.0.1:7878");
+    }
 
     #[test]
     fn help_and_version_print_instead_of_opening() {

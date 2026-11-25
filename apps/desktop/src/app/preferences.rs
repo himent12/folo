@@ -205,6 +205,10 @@ impl FoloApp {
             dark_theme: None,
             light_theme: None,
             spawn_server: Some(self.spawn_server),
+            server_url: {
+                let u = self.server_url.read(cx).text().trim().to_string();
+                (!u.is_empty()).then_some(u)
+            },
             // Kept only when picked against the OS setting, so an untouched one keeps following it.
             reduce_motion: (self.reduce_motion != crate::ui::os_prefers_reduced_motion())
                 .then_some(self.reduce_motion),

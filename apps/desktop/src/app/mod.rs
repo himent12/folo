@@ -101,6 +101,7 @@ actions!(
         ToggleTheme,
         ToggleFullscreen,
         Back,
+        Forward,
         Dismiss,
         OpenImage,
         FocusNext,
@@ -126,6 +127,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
         KeyBinding::new("f11", ToggleFullscreen, None),
         KeyBinding::new("alt-left", Back, None),
+        KeyBinding::new("alt-right", Forward, None),
         KeyBinding::new("escape", Dismiss, None),
         KeyBinding::new("ctrl-o", OpenImage, None),
         KeyBinding::new("tab", FocusNext, None),
@@ -328,6 +330,7 @@ pub struct FoloApp {
     pub store: Store,
     pub route: Route,
     pub history: Vec<Route>,
+    pub forward_history: Vec<Route>,
     /// The mode shown now (the theme's; with System, the OS's).
     pub mode: Mode,
     /// The user's theme choice: the mode (Dark, Light, System) and each mode's theme.
@@ -666,6 +669,7 @@ pub struct FoloApp {
     pub menu_open: Option<&'static str>,
     /// Highlighted option in the open select (committed with Enter).
     pub menu_hl: usize,
+    pub menu_typeahead: crate::controls::SelectTypeahead,
     pub menu_scroll: ScrollHandle,
     /// Bounds of the open select's trigger, so a click on it toggles rather than counting as outside.
     pub menu_trigger: Rc<std::cell::Cell<Option<folo_ui::Bounds<Pixels>>>>,
@@ -752,6 +756,7 @@ impl FoloApp {
             store: Store::new(api),
             route: Route::Overview,
             history: Vec::new(),
+            forward_history: Vec::new(),
             mode: theme(cx).mode,
             theme_prefs: crate::theme::ThemePrefs::default(),
             themes: crate::theme::Catalog::builtin(),
@@ -930,6 +935,7 @@ impl FoloApp {
             toast_seq: 0,
             menu_open: None,
             menu_hl: 0,
+            menu_typeahead: Default::default(),
             menu_scroll: ScrollHandle::new(),
             menu_trigger: Rc::new(std::cell::Cell::new(None)),
             cm_cols: Rc::new(std::cell::Cell::new(None)),
