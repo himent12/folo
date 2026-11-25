@@ -112,25 +112,48 @@ export default function Benchmarks() {
   const query = signal('');
   // Where the images came from, or what runs now (`Bench.active`: an entry or a loop queued or running).
   const filter = signal<Filter>('all');
-  const count = (f: Filter) => (benches.data ?? []).filter((b) => keep(b, f)).length;
-  const shown = computed(() => {
+  const counts = computed(
+    () => {
+      let all = 0;
+      let dataset = 0;
+      let label_job = 0;
+      let active = 0;
+      for (const b of benches.data ?? []) {
+        all++;
+        if (b.source.kind === 'dataset') dataset++;
+        else if (b.source.kind === 'label_job') label_job++;
+        if (b.active) active++;
+      }
+      return { all, dataset, label_job, active };
+    },
+    { equals: (a, b) => a.all === b.all && a.dataset === b.dataset && a.label_job === b.label_job && a.active === b.active },
+  );
+  const count = (f: Filter) => counts.get()[f];
+  const filtered = computed(() => {
     const q = query.get().trim().toLowerCase();
+    const f = filter.get();
+    return (benches.data ?? []).filter(
+      (b) => keep(b, f) && (!q || `${b.name} ${b.source_name} ${b.classes.join(' ')} ${b.best?.name ?? ''}`.toLowerCase().includes(q)),
+    );
+  });
+  const shown = computed(() => {
     const key = sortKey.get();
     const col = cols.find((c) => c.key === key) ?? cols[0]!;
     const sign = sortDir.get() === 'asc' ? 1 : -1;
-    const f = filter.get();
-    return (benches.data ?? [])
-      .filter((b) => keep(b, f) && (!q || `${b.name} ${b.source_name} ${b.classes.join(' ')} ${b.best?.name ?? ''}`.toLowerCase().includes(q)))
+    return filtered
+      .get()
+      .map((b) => ({ b, k: col.get(b) }))
       .sort((a, b) => {
-        const x = col.get(a);
-        const y = col.get(b);
+        const x = a.k;
+        const y = b.k;
         if (x === null || y === null) {
-          if (x === y) return a.name.localeCompare(b.name);
+          if (x === y) return a.b.name.localeCompare(b.b.name);
           return x === null ? 1 : -1;
         }
         const d = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y));
-        return d * sign || a.name.localeCompare(b.name);
-      });
+        return d * sign || a.b.name.localeCompare(b.b.name);
+      })
+      .map((x) => x.b);
   });
   // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds, "4 benchmarks · 1,240 images ·
   // 9 entries · 1 running", whatever the filter; a narrowed list says what it shows under it.

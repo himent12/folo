@@ -318,19 +318,36 @@ export default function Datasets() {
     });
   }
 
-  const formatCount = (f: Format) => (listed.data ?? []).filter((d) => f === 'all' || d.format === f).length;
-  const shown = computed(() => {
+  const formatCounts = computed(
+    () => {
+      let all = 0;
+      let yolo = 0;
+      let coco = 0;
+      for (const d of listed.data ?? []) {
+        all++;
+        if (d.format === 'yolo') yolo++;
+        else if (d.format === 'coco') coco++;
+      }
+      return { all, yolo, coco };
+    },
+    { equals: (a, b) => a.all === b.all && a.yolo === b.yolo && a.coco === b.coco },
+  );
+  const formatCount = (f: Format) => formatCounts.get()[f];
+  const filtered = computed(() => {
     const q = query.get().trim().toLowerCase();
     const f = format.get();
+    return (datasetsData.get() ?? []).filter(
+      (d) => (f === 'all' || d.format === f) && (!q || `${d.name} ${d.path} ${d.format} ${d.id}`.toLowerCase().includes(q)),
+    );
+  });
+  const shown = computed(() => {
     const s = sort.get();
-    return (datasetsData.get() ?? [])
-      .filter((d) => (f === 'all' || d.format === f) && (!q || `${d.name} ${d.path} ${d.format} ${d.id}`.toLowerCase().includes(q)))
-      .sort((a, b) => {
-        if (s === 'images') return (b.problem ? -1 : imageCount(b)) - (a.problem ? -1 : imageCount(a)) || cmpName(a, b);
-        if (s === 'boxes') return (b.problem ? -1 : (b.stats?.boxes ?? -1)) - (a.problem ? -1 : (a.stats?.boxes ?? -1)) || cmpName(a, b);
-        if (s === 'classes') return b.classes.length - a.classes.length || cmpName(a, b);
-        return cmpName(a, b);
-      });
+    return filtered.get().slice().sort((a, b) => {
+      if (s === 'images') return (b.problem ? -1 : imageCount(b)) - (a.problem ? -1 : imageCount(a)) || cmpName(a, b);
+      if (s === 'boxes') return (b.problem ? -1 : (b.stats?.boxes ?? -1)) - (a.problem ? -1 : (a.stats?.boxes ?? -1)) || cmpName(a, b);
+      if (s === 'classes') return b.classes.length - a.classes.length || cmpName(a, b);
+      return cmpName(a, b);
+    });
   });
   // The header's facts line (design/UNIFIED.md §2, Page header): what the page holds, "5 datasets · 9,400 images ·
   // 64,086 boxes", whatever the filter; a narrowed list says what it shows under it. A dataset that cannot be read

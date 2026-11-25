@@ -175,11 +175,14 @@ export class RunModel {
     { equals: (a, b) => a[0] === b[0] && a[1] === b[1] },
   );
   /** A training run's epochs still to come, shaded from the latest point; the first chart says when they end. */
-  readonly future = computed((): Future | undefined => {
-    const r = this.run();
-    if (r.status !== 'running' && r.status !== 'stopping') return undefined;
-    return { x: this.observed.get(), label: this.etaReady.get() && r.eta_s !== null ? `ETA ${eta(r.eta_s)}` : 'remaining' };
-  });
+  readonly future = computed(
+    (): Future | undefined => {
+      const r = this.run();
+      if (r.status !== 'running' && r.status !== 'stopping') return undefined;
+      return { x: this.observed.get(), label: this.etaReady.get() && r.eta_s !== null ? `ETA ${eta(r.eta_s)}` : 'remaining' };
+    },
+    { equals: (a, b) => a === b || (!!a && !!b && a.x === b.x && a.label === b.label) },
+  );
 
   // ---- mosaic off: the rail's hatched end, a mark on every chart ----
   /** Epochs without mosaic as the trainer runs them (capped at half the run: 7 of a 15-epoch run asked for 10). */
@@ -299,9 +302,18 @@ export class RunModel {
     this.stepsRev();
     const pts = this.stepData.smoothed('ips', 0.9).pts;
     const raw = this.stepData.raw('ips').pts;
-    const last = raw.slice(-IPS_WINDOW);
-    const avg = last.length ? last.reduce((s, p) => s + p.y, 0) / last.length : null;
-    return { trend: pts.slice(-IPS_WINDOW).map((p) => p.y), avg, n: last.length };
+    const rawStart = Math.max(0, raw.length - IPS_WINDOW);
+    const n = raw.length - rawStart;
+    let avg: number | null = null;
+    if (n > 0) {
+      let sum = 0;
+      for (let i = rawStart; i < raw.length; i++) sum += raw[i]!.y;
+      avg = sum / n;
+    }
+    const ptsStart = Math.max(0, pts.length - IPS_WINDOW);
+    const trend = new Array<number>(pts.length - ptsStart);
+    for (let i = 0; i < trend.length; i++) trend[i] = pts[ptsStart + i]!.y;
+    return { trend, avg, n };
   });
   /** The total loss as the chart draws it (smoothed at the chosen EMA): the loss chart's header says it beside the raw step. */
   readonly smoothedLast = computed(() => {
@@ -336,23 +348,33 @@ export class RunModel {
     );
   }
   /** Safety status for plotting the active loss series on a log Y scale (handles <= 0 values cleanly). */
-  readonly lossLogStatus = computed(() => {
-    this.stepsRev();
-    const a = this.alpha();
-    const shown = (['total', 'box', 'cls', 'dfl'] as const).map((f) => this.stepData.smoothed(f, a).ext);
-    const plotted = a > 0 ? [this.stepData.raw('total').ext, ...shown] : shown;
-    const hasAny = joinExtents(shown, false) !== null;
-    const hasPositive = joinExtents(shown, true) !== null;
-    const nonPositive = countNonPositive(plotted);
-    const wantLog = this.scale.get() === 'log';
-    return {
-      hasAny,
-      hasPositive,
-      nonPositive,
-      fallbackLinear: wantLog && hasAny && !hasPositive,
-      skippedNonPositive: wantLog && hasPositive && nonPositive > 0,
-    };
-  });
+  readonly lossLogStatus = computed(
+    () => {
+      this.stepsRev();
+      const a = this.alpha();
+      const shown = (['total', 'box', 'cls', 'dfl'] as const).map((f) => this.stepData.smoothed(f, a).ext);
+      const plotted = a > 0 ? [this.stepData.raw('total').ext, ...shown] : shown;
+      const hasAny = joinExtents(shown, false) !== null;
+      const hasPositive = joinExtents(shown, true) !== null;
+      const nonPositive = countNonPositive(plotted);
+      const wantLog = this.scale.get() === 'log';
+      return {
+        hasAny,
+        hasPositive,
+        nonPositive,
+        fallbackLinear: wantLog && hasAny && !hasPositive,
+        skippedNonPositive: wantLog && hasPositive && nonPositive > 0,
+      };
+    },
+    {
+      equals: (a, b) =>
+        a.hasAny === b.hasAny &&
+        a.hasPositive === b.hasPositive &&
+        a.nonPositive === b.nonPositive &&
+        a.fallbackLinear === b.fallbackLinear &&
+        a.skippedNonPositive === b.skippedNonPositive,
+    },
+  );
 
   lossFit(height: () => number) {
     const tracks = computed(() => {
@@ -379,7 +401,8 @@ export class RunModel {
     return held(
       () => `${height()}|${this.epochKey()}`,
       () => {
-        const e = extentOf(this.lrSeries.get());
+        this.stepsRev();
+        const e = joinExtents([this.stepData.raw('lr').ext], false);
         return e ? niceDomain(e[0], e[1]) : null;
       },
     );
@@ -389,7 +412,8 @@ export class RunModel {
     return held(
       () => `ips|${height()}|${this.epochKey()}`,
       () => {
-        const e = extentOf(this.ipsSeries.get());
+        this.stepsRev();
+        const e = joinExtents([this.stepData.smoothed('ips', 0.9).ext], false);
         return e ? niceDomain(0, e[1]) : null;
       },
     );

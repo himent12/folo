@@ -67,7 +67,24 @@ export default function LabelJobs() {
 
   const query = signal('');
   const filter = signal<Filter>('all');
-  const count = (f: Filter) => (jobs.data ?? []).filter((j) => f === 'all' || filterOf(j) === f).length;
+  const counts = computed(
+    () => {
+      let all = 0;
+      let active = 0;
+      let failed = 0;
+      let idle = 0;
+      for (const j of jobs.data ?? []) {
+        all++;
+        const k = filterOf(j);
+        if (k === 'active') active++;
+        else if (k === 'failed') failed++;
+        else if (k === 'idle') idle++;
+      }
+      return { all, active, failed, idle };
+    },
+    { equals: (a, b) => a.all === b.all && a.active === b.active && a.failed === b.failed && a.idle === b.idle },
+  );
+  const count = (f: Filter) => counts.get()[f];
   const shown = computed(() => {
     const q = query.get().trim().toLowerCase();
     const f = filter.get();
