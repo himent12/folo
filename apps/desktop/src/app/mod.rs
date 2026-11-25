@@ -272,9 +272,11 @@ pub struct Inspector {
     pub hover_box: Option<usize>,
     /// An image to land on once the dataset's image list is in (opened from a run's sample).
     pub want: Option<String>,
-    /// The image last shown and the filters it was shown under (class, empty images only): when
-    /// they change underneath (the class list read again, a server switch), it lands on it again.
-    pub shown: Option<(String, Option<u32>, bool)>,
+    /// The image last shown and the filter/sort/list state it was shown under (class, empty-only,
+    /// filename query, image sort, loaded list length): when any of these change underneath (a page
+    /// arrives under a non-default sort, a server switch resets filters, class list reloads), the
+    /// inspector re-lands on the same image by id.
+    pub shown: Option<(String, Option<u32>, bool, String, crate::screens::datasets::ImageSort, usize)>,
     /// Opened from a run's samples: that run and the view it was in. Images that are among its
     /// samples show the epoch's predictions over the (dashed) labels, as the run page draws them.
     pub sample: Option<(String, SampleView)>,
@@ -711,6 +713,9 @@ impl FoloApp {
         let ds_img_search = cx.new(|cx| TextInput::new("Search files", cx));
         let ds_img_search_sub = cx.subscribe(&ds_img_search, |this, _, ev: &crate::input::InputEvent, cx| {
             let crate::input::InputEvent::Changed(text) = ev;
+            if let Route::Dataset(id) = &this.route {
+                this.ds_img_dataset = Some(id.clone());
+            }
             this.ds_img_query = text.to_string();
             this.ds_hover_tile = None;
             this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);

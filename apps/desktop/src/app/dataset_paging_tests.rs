@@ -379,8 +379,71 @@ fn dataset_images_search_sort_reset_and_clickable_class_balance_bars() {
     drive(&mut app, window, |this, w, cx| this.focus_key("ds-class-bar-0", w, cx));
     app.frame(window.into());
     press_enter(&mut app, window);
-    drive(&mut app, window, |this, _, _| {
+    drive(&mut app, window, |this, w, cx| {
         assert_eq!(this.ds_tab, super::DsTab::Images);
         assert_eq!(this.class_filter(ds_id), Some(0));
+        assert!(
+            this.fh("ds-class", cx).is_focused(w),
+            "activating a class bar moves focus to a persistent Images toolbar control"
+        );
+    });
+
+    // Filename search & sort are scoped to their dataset: opening a run sample on another dataset
+    // neither filters the other dataset nor erases the first dataset's search.
+    let other_ds = "ds_3b91";
+    drive(&mut app, window, |this, _, cx| {
+        this.reset_dataset_image_filters(ds_id, cx);
+        this.ds_img_search.update(cx, |i, cx| i.set_text(query.clone(), cx));
+        this.ds_img_sort = crate::screens::datasets::ImageSort::NameAsc;
+        this.ensure_dataset(other_ds, cx);
+    });
+    app.run_until_idle();
+    app.frame(window.into());
+    let other_first = drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.img_query(other_ds), "");
+        assert_eq!(this.img_sort(other_ds), crate::screens::datasets::ImageSort::Default);
+        this.filtered_image(other_ds, 0).map(|m| m.id.clone()).expect("other dataset loaded")
+    });
+    drive(&mut app, window, |this, w, cx| {
+        this.open_inspector(other_ds.into(), 0, w, cx);
+        if let Some(i) = this.inspector.as_mut() {
+            i.want = Some(other_first.clone());
+        }
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.img_query(ds_id), query, "first dataset's search stays intact");
+        assert_eq!(this.img_sort(ds_id), crate::screens::datasets::ImageSort::NameAsc);
+        this.close_inspector(w, cx);
+    });
+
+    // Under a non-default sort, appending a page that sorts ahead of the inspected image keeps the
+    // inspector locked onto the same image id rather than jumping to the shifted index.
+    drive(&mut app, window, |this, w, cx| {
+        this.ds_img_search.update(cx, |i, cx| i.set_text("", cx));
+        this.ds_img_sort = crate::screens::datasets::ImageSort::NameAsc;
+        this.open_inspector(ds_id.into(), 0, w, cx);
+    });
+    app.frame(window.into());
+    let shown_before = drive(&mut app, window, |this, _, _| {
+        let idx = this.inspector.as_ref().unwrap().index;
+        this.filtered_image(ds_id, idx).unwrap().id.clone()
+    });
+    drive(&mut app, window, |this, _, cx| {
+        if let Some(crate::store::Load::Ready(imgs)) = this.store.images.get_mut(ds_id) {
+            let mut ahead = imgs[0].clone();
+            ahead.id = "img_aaa_new_page".into();
+            ahead.file = "images/train/000000_aaa_first.jpg".into();
+            imgs.push(ahead);
+        }
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let idx = this.inspector.as_ref().unwrap().index;
+        let shown_after = this.filtered_image(ds_id, idx).unwrap().id.clone();
+        assert_eq!(shown_after, shown_before, "inspector keeps its image when a new page sorts ahead");
+        assert!(idx > 0, "inspector index shifted to follow the same image");
     });
 }

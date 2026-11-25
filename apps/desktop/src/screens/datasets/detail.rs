@@ -41,11 +41,23 @@ impl ImageSort {
     pub fn label(self) -> &'static str {
         match self {
             Self::Default => "Order",
-            Self::NameAsc => "Filename A–Z",
-            Self::NameDesc => "Filename Z–A",
+            Self::NameAsc => "Name A–Z",
+            Self::NameDesc => "Name Z–A",
             Self::MostBoxes => "Most boxes",
             Self::FewestBoxes => "Fewest boxes",
         }
+    }
+}
+
+/// Case-insensitive string ordering with a zero-allocation ASCII fast path, breaking ties by raw bytes.
+fn cmp_str_ci(a: &str, b: &str) -> std::cmp::Ordering {
+    if a.is_ascii() && b.is_ascii() {
+        a.bytes()
+            .map(|c| c.to_ascii_lowercase())
+            .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+            .then_with(|| a.cmp(b))
+    } else {
+        a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b))
     }
 }
 
@@ -96,11 +108,7 @@ pub fn filter_and_sort_images(
         let cmp_name = |a: usize, b: usize| {
             let fa = file_name(&all[a].file);
             let fb = file_name(&all[b].file);
-            fa.to_lowercase()
-                .cmp(&fb.to_lowercase())
-                .then_with(|| fa.cmp(fb))
-                .then_with(|| all[a].file.cmp(&all[b].file))
-                .then_with(|| a.cmp(&b))
+            cmp_str_ci(fa, fb).then_with(|| all[a].file.cmp(&all[b].file)).then_with(|| a.cmp(&b))
         };
         indices.sort_by(|&a, &b| match sort {
             ImageSort::Default => a.cmp(&b),
@@ -192,13 +200,23 @@ impl FoloApp {
         self.ds_empty_of.as_deref() == Some(id)
     }
 
+    /// The filename search query scoped to dataset `id` (empty for any other dataset).
+    pub fn img_query(&self, id: &str) -> &str {
+        if self.ds_img_dataset.as_deref() == Some(id) { self.ds_img_query.as_str() } else { "" }
+    }
+
+    /// The image sort order scoped to dataset `id` (`Default` for any other dataset).
+    pub fn img_sort(&self, id: &str) -> ImageSort {
+        if self.ds_img_dataset.as_deref() == Some(id) { self.ds_img_sort } else { ImageSort::Default }
+    }
+
     /// Whether any filter or non-default sort is active on dataset `id`'s Images tab.
     pub fn dataset_image_filters_active(&self, id: &str) -> bool {
         self.ds_split.is_some()
             || self.class_filter(id).is_some()
             || self.empty_only(id)
-            || !self.ds_img_query.trim().is_empty()
-            || self.ds_img_sort != ImageSort::Default
+            || !self.img_query(id).trim().is_empty()
+            || self.img_sort(id) != ImageSort::Default
     }
 
     /// Resets split, class, empty-only, filename search, and sort on dataset `id`'s Images tab.
@@ -210,21 +228,25 @@ impl FoloApp {
         if self.empty_only(id) {
             self.ds_empty_of = None;
         }
-        self.ds_img_query.clear();
-        self.ds_img_search.update(cx, |i, cx| i.set_text("", cx));
-        self.ds_img_sort = ImageSort::Default;
+        if self.ds_img_dataset.as_deref() == Some(id) {
+            self.ds_img_query.clear();
+            self.ds_img_search.update(cx, |i, cx| i.set_text("", cx));
+            self.ds_img_sort = ImageSort::Default;
+        }
         self.ds_hover_tile = None;
         self.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
         cx.notify();
     }
 
     /// Indices (into the dataset's image list) that pass the split, class, empty-only, and filename
-    /// filters, ordered by `ds_img_sort`. Cached until the dataset, its image list, a filter, or the
-    /// sort changes, so scrolling never rescans it.
+    /// filters, ordered by `img_sort(id)`. Cached until the dataset, its image list, a filter, or
+    /// the sort changes, so scrolling never rescans it.
     pub fn filtered_indices(&self, id: &str) -> Rc<Vec<usize>> {
         let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return Rc::new(Vec::new()) };
         let class = self.class_filter(id);
         let empty_only = self.empty_only(id);
+        let query = self.img_query(id);
+        let sort = self.img_sort(id);
         let len = all.len();
         let ptr = all.as_ptr() as usize;
         if let Some(c) = self.ds_filter_cache.borrow().as_ref()
@@ -232,28 +254,21 @@ impl FoloApp {
             && c.split == self.ds_split
             && c.class == class
             && c.empty_only == empty_only
-            && c.query == self.ds_img_query
-            && c.sort == self.ds_img_sort
+            && c.query == query
+            && c.sort == sort
             && c.len == len
             && c.ptr == ptr
         {
             return c.indices.clone();
         }
-        let v = Rc::new(filter_and_sort_images(
-            all,
-            self.ds_split,
-            class,
-            empty_only,
-            &self.ds_img_query,
-            self.ds_img_sort,
-        ));
+        let v = Rc::new(filter_and_sort_images(all, self.ds_split, class, empty_only, query, sort));
         *self.ds_filter_cache.borrow_mut() = Some(DatasetFilterCache {
             dataset: id.to_string(),
             split: self.ds_split,
             class,
             empty_only,
-            query: self.ds_img_query.clone(),
-            sort: self.ds_img_sort,
+            query: query.to_string(),
+            sort,
             len,
             ptr,
             indices: v.clone(),

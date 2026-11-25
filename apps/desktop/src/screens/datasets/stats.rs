@@ -45,11 +45,12 @@ impl FoloApp {
             ds.classes.iter().enumerate().map(|(i, name)| {
                 let c = s.class_counts.get(i).copied().unwrap_or(0);
                 let selected = active_class == Some(i as u32);
+                let clickable = c > 0 || selected;
                 let key = format!("ds-class-bar-{i}");
-                let tip_text = if c == 0 {
-                    format!("No boxes of {name}")
-                } else if selected {
+                let tip_text = if selected {
                     format!("Showing {name} · click to show all images")
+                } else if c == 0 {
+                    format!("No boxes of {name}")
                 } else {
                     format!("Filter images by {name}")
                 };
@@ -62,7 +63,7 @@ impl FoloApp {
                     .items_center()
                     .gap(px(12.))
                     .when(selected, |d| d.bg(t.bg_selected))
-                    .when(c > 0, |d| {
+                    .when(clickable, |d| {
                         d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active))
                     })
                     .tooltip(crate::controls::tip(tip_text, None))
@@ -102,7 +103,7 @@ impl FoloApp {
                             .text_right()
                             .child(format!("{:.0}%", c as f32 / total.max(1) as f32 * 100.)),
                     );
-                if c > 0 {
+                if clickable {
                     let id = ds.id.clone();
                     let cls = i as u32;
                     self.bind(
@@ -111,7 +112,7 @@ impl FoloApp {
                         radius::SM,
                         window,
                         cx,
-                        crate::app::act(move |this, _, cx| {
+                        crate::app::act(move |this, w, cx| {
                             if this.class_filter(&id) == Some(cls) {
                                 this.ds_class = None;
                             } else {
@@ -123,6 +124,10 @@ impl FoloApp {
                             this.ds_tab = crate::app::DsTab::Images;
                             this.ds_hover_tile = None;
                             this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
+                            // Move focus off the disappearing Statistics bar onto a persistent
+                            // control on the Images tab so keyboard Tab continues smoothly.
+                            let fh = this.fh("ds-class", cx);
+                            w.focus(&fh);
                             cx.notify();
                         }),
                     )

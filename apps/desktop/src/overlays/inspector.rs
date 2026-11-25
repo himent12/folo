@@ -24,13 +24,23 @@ impl FoloApp {
     fn land_inspector(&mut self, cx: &mut Context<Self>) {
         if let Some(i) = self.inspector.as_ref()
             && i.want.is_none()
-            && let Some((image, class, empty)) = &i.shown
-            && (*class, *empty) != (self.class_filter(&i.dataset), self.empty_only(&i.dataset))
+            && let Some((image, class, empty, query, sort, len)) = &i.shown
         {
-            let image = image.clone();
-            let i = self.inspector.as_mut().unwrap();
-            i.want = Some(image);
-            i.shown = None;
+            let cur_len = self.store.images.get(&i.dataset).and_then(|l| l.ready()).map_or(0, Vec::len);
+            let changed = (*class, *empty, query.as_str(), *sort, *len)
+                != (
+                    self.class_filter(&i.dataset),
+                    self.empty_only(&i.dataset),
+                    self.img_query(&i.dataset),
+                    self.img_sort(&i.dataset),
+                    cur_len,
+                );
+            if changed {
+                let image = image.clone();
+                let i = self.inspector.as_mut().unwrap();
+                i.want = Some(image);
+                i.shown = None;
+            }
         }
         let Some((ds, want)) =
             self.inspector.as_ref().and_then(|i| Some((i.dataset.clone(), i.want.clone()?)))
@@ -51,7 +61,7 @@ impl FoloApp {
                 if self.empty_only(&ds) {
                     self.ds_empty_of = None;
                 }
-                if !self.ds_img_query.is_empty() {
+                if self.ds_img_dataset.as_deref() == Some(ds.as_str()) && !self.ds_img_query.is_empty() {
                     self.ds_img_query.clear();
                     self.ds_img_search.update(cx, |inp, cx| inp.set_text("", cx));
                 }
@@ -167,8 +177,11 @@ impl FoloApp {
         let (zoom, pan, hover) = (insp.zoom, insp.pan, insp.hover_box);
         let Some(meta) = self.filtered_image(&ds_id, index).cloned() else { return div().into_any_element() };
         let (class, empty) = (self.class_filter(&ds_id), self.empty_only(&ds_id));
+        let query = self.img_query(&ds_id).to_string();
+        let sort = self.img_sort(&ds_id);
+        let loaded_len = self.store.images.get(&ds_id).and_then(|l| l.ready()).map_or(0, Vec::len);
         if let Some(i) = self.inspector.as_mut() {
-            i.shown = Some((meta.id.clone(), class, empty));
+            i.shown = Some((meta.id.clone(), class, empty, query, sort, loaded_len));
         }
         // A keyboard-focused label row highlights its box like the pointer does; while the keyboard
         // is in use it wins over a pointer hover left behind on the image.
