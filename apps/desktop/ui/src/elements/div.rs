@@ -75,11 +75,11 @@ impl Element for Div {
         let children = &mut self.children;
         let layout_id =
             self.interactivity.request_layout(global_id, inspector_id, window, cx, |style, window, cx| {
-                window.with_text_style(style.text_style().cloned(), |window| {
+                window.with_text_style_ref(style.text_style(), |window| {
                     child_layout_ids
                         .extend(children.iter_mut().map(|child| child.request_layout(window, cx)));
-                    window.request_layout(style, child_layout_ids.iter().copied(), cx)
-                })
+                });
+                window.request_layout(style, child_layout_ids.iter().copied(), cx)
             });
         (layout_id, DivFrameState { child_layout_ids })
     }

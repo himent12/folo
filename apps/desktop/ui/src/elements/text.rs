@@ -13,7 +13,7 @@ use smallvec::SmallVec;
 
 use crate::{
     App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement,
-    LayoutId, Pixels, SharedString, Size, TextOverflow, TextRun, WhiteSpace, Window, WrappedLine,
+    LayoutId, Pixels, SharedString, Size, TextAlign, TextOverflow, TextRun, WhiteSpace, Window, WrappedLine,
     text::fx_hash::FxHasher, window::MeasureKey,
 };
 
@@ -165,7 +165,7 @@ impl TextLayout {
         let state = state.as_ref().unwrap_or_else(|| panic!("text {text:?} was not measured"));
         let bounds = state.bounds.unwrap_or_else(|| panic!("text {text:?} was not prepainted"));
         let line_height = state.line_height;
-        let align = window.text_style().text_align;
+        let align = window.text_style_ref().map_or(TextAlign::default(), |style| style.text_align);
         let mut origin = bounds.origin;
         for line in &state.lines {
             if line.decoration_runs().iter().any(|run| run.background_color.is_some())

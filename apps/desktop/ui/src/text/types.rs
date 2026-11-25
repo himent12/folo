@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::fmt::{self, Debug, Display, Formatter};
 use std::hash::{Hash, Hasher};
 use std::ops::{Add, Sub};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 /// An opaque identifier for a specific font.
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
@@ -126,14 +126,25 @@ impl Display for FontStyle {
     }
 }
 
+static EMPTY_FONT_FEATURES: LazyLock<Arc<Vec<(String, u32)>>> = LazyLock::new(|| Arc::new(Vec::new()));
+static DISABLE_LIGATURES_FEATURES: LazyLock<Arc<Vec<(String, u32)>>> =
+    LazyLock::new(|| Arc::new(vec![("calt".into(), 0)]));
+
 /// The OpenType features that can be configured for a given font.
-#[derive(Default, Clone, Eq, PartialEq, Hash)]
+#[derive(Clone, Eq, PartialEq, Hash)]
 pub struct FontFeatures(pub Arc<Vec<(String, u32)>>);
+
+impl Default for FontFeatures {
+    #[inline]
+    fn default() -> Self {
+        Self(Arc::clone(&EMPTY_FONT_FEATURES))
+    }
+}
 
 impl FontFeatures {
     /// Disables `calt`.
     pub fn disable_ligatures() -> Self {
-        Self(Arc::new(vec![("calt".into(), 0)]))
+        Self(Arc::clone(&DISABLE_LIGATURES_FEATURES))
     }
 
     /// The tag name list of the font's OpenType features (only enabled or disabled ones).
