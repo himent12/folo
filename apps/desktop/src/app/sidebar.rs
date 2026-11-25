@@ -19,8 +19,9 @@ use super::{FoloApp, Route, Section, act};
 impl FoloApp {
     pub(super) fn sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = theme(cx);
-        // Narrow windows collapse the sidebar to an icon rail.
-        let compact = window.viewport_size().width < px(1120.);
+        // Narrow windows force the icon rail; wider windows honor the user's collapse toggle.
+        let forced_compact = window.viewport_size().width < px(1120.);
+        let compact = self.sidebar_compact(window);
         let section = self.route.section();
         let live = self.store.live_run().cloned();
         // The Runs badge: how many runs train and how many wait (UNIFIED.md §1, as Studio counts).
@@ -30,8 +31,8 @@ impl FoloApp {
             (Section::Datasets, "Datasets", "icons/images.svg", Route::Datasets, "2"),
             (Section::Runs, "Runs", "icons/activity.svg", Route::Runs, "3"),
             (Section::Models, "Models", "icons/box.svg", Route::Models, "4"),
-            (Section::Benchmarks, "Benchmarks", "icons/target.svg", Route::Benches, "6"),
-            (Section::Playground, "Playground", "icons/scan-eye.svg", Route::Playground, "5"),
+            (Section::Benchmarks, "Benchmarks", "icons/target.svg", Route::Benches, "5"),
+            (Section::Playground, "Playground", "icons/scan-eye.svg", Route::Playground, "6"),
         ];
         let items: Vec<AnyElement> = nav
             .into_iter()
@@ -56,6 +57,7 @@ impl FoloApp {
         let live_card = live
             .map(|r| if compact { self.live_rail(&r, window, cx) } else { self.live_mini(&r, window, cx) });
         let brand_press = self.leave_kb(cx);
+        let collapse_btn = (!forced_compact).then(|| self.sidebar_toggle(compact, window, cx));
         let health = self.connection_line(compact, window, cx);
         div()
             .w(px(if compact { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR }))
@@ -97,8 +99,58 @@ impl FoloApp {
             .child(div().flex().flex_col().gap(px(2.)).px(px(8.)).pt(px(8.)).children(items))
             .child(div().flex_1())
             .children(live_card)
-            .child(div().px(px(8.)).pb(px(4.)).child(settings))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .px(px(8.))
+                    .pb(px(4.))
+                    .child(settings)
+                    .children(collapse_btn),
+            )
             .child(health)
+    }
+
+    /// Subtle footer control to collapse/expand the sidebar on wide windows (`Ctrl+B`).
+    fn sidebar_toggle(&self, compact: bool, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let label = if compact { "Expand sidebar" } else { "Collapse sidebar" };
+        let icon_path = if compact { "icons/chevron-right.svg" } else { "icons/chevron-left.svg" };
+        let ring = self.ring(&self.fh("nav-sidebar-toggle", cx), window);
+        let el = div()
+            .id("nav-sidebar-toggle")
+            .relative()
+            .h(px(30.))
+            .px(px(if compact { 0. } else { 8. }))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(|s| s.bg(t.bg_hover))
+            .active(|s| s.bg(t.bg_active))
+            .tooltip(crate::controls::tip(label, Some("Ctrl B")))
+            .when(compact, |d| {
+                d.justify_center()
+                    .when(ring, |d| d.child(crate::controls::focus_tip(&t, format!("{label} · Ctrl B"), 34.)))
+            })
+            .child(icon(icon_path, 16., t.text_tertiary))
+            .when(!compact, |d| d.child(text(ty::SM, t.text_tertiary).flex_1().child("Collapse")));
+        self.bind(
+            el,
+            "nav-sidebar-toggle",
+            6.,
+            window,
+            cx,
+            act(|this, w, cx| {
+                if w.viewport_size().width >= px(1120.) {
+                    this.sidebar_collapsed = !this.sidebar_collapsed;
+                    cx.notify();
+                }
+            }),
+        )
+        .into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]

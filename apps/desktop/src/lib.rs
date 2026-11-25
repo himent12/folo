@@ -359,6 +359,7 @@ pub fn run() {
                         app.apply_theme(cx);
                         app.spawn_server = spawn_server;
                         app.saved_server_url = saved.server_url.clone();
+                        app.sidebar_collapsed = saved.sidebar_collapsed.unwrap_or(false);
                         if let Some(calm) = saved.reduce_motion {
                             app.reduce_motion = calm;
                             crate::ui::set_reduce_motion(calm);
@@ -370,6 +371,8 @@ pub fn run() {
                         if auto {
                             let spawn = should_auto_spawn(spawn_server, &connect_url);
                             app.autoconnect(connect_url.clone(), spawn, app::Reason::Launch, cx);
+                        } else if server_mode == app::ServerMode::Local {
+                            app.connected_url = Some(connect_url.clone());
                         }
                         if open.as_deref() == Some("new-run") {
                             app.open_new_run_pending = true;

@@ -35,6 +35,9 @@ pub struct State {
     /// Settings › Reduce motion, when picked against the OS's own setting (else it follows the OS).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reduce_motion: Option<bool>,
+    /// Whether the user collapsed the sidebar to the icon rail (`Ctrl+B`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_collapsed: Option<bool>,
 }
 
 /// The window in logical pixels: its restored (windowed) bounds, and how it was showing.
@@ -138,6 +141,7 @@ fn parse(bytes: &[u8]) -> State {
         spawn_server: field(&v, "spawn_server"),
         server_url: field(&v, "server_url"),
         reduce_motion: field(&v, "reduce_motion"),
+        sidebar_collapsed: field(&v, "sidebar_collapsed"),
     }
 }
 
@@ -296,6 +300,7 @@ mod tests {
             spawn_server: Some(false),
             server_url: Some("http://10.0.0.5:7878".into()),
             reduce_motion: Some(true),
+            sidebar_collapsed: Some(true),
         };
         save(&path, &state).unwrap();
         assert_eq!(load(&path), state);

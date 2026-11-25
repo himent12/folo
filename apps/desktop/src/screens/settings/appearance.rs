@@ -83,6 +83,29 @@ impl FoloApp {
             )
             .child(text(ty::SM, t.text_tertiary).text_left().child(what))
             .into_any_element();
+        let folder_open = folder.clone();
+        let open_folder = self
+            .button(
+                "set-themes-open",
+                "Open folder",
+                crate::controls::Btn::Secondary,
+                Some("icons/folder-open.svg"),
+                window,
+                cx,
+                act(move |this, _, cx| {
+                    if let Err(e) = std::fs::create_dir_all(&folder_open) {
+                        this.toast(
+                            Tone::Danger,
+                            "Could not open themes folder",
+                            Some(e.to_string().into()),
+                            cx,
+                        );
+                        return;
+                    }
+                    cx.reveal_path(&folder_open);
+                }),
+            )
+            .into_any_element();
         let reload = self
             .button(
                 "set-themes-reload",
@@ -94,9 +117,11 @@ impl FoloApp {
                 act(|this, _, cx| this.reload_themes(cx)),
             )
             .into_any_element();
+        let theme_actions =
+            div().flex().items_center().gap(px(8.)).child(open_folder).child(reload).into_any_element();
         let below = !customs.is_empty() || !failed.is_empty();
         let custom_row =
-            settings_row(&t, "Custom themes", custom_help, reload).when(below, |d| d.border_b_0());
+            settings_row(&t, "Custom themes", custom_help, theme_actions).when(below, |d| d.border_b_0());
         let themes_list = (!customs.is_empty()).then(|| {
             div()
                 .flex()

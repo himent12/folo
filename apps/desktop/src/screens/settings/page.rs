@@ -25,13 +25,36 @@ const GO_TO_KEYS: [(&str, &[&str]); 9] = [
     ("Datasets", &["Ctrl", "2"]),
     ("Runs", &["Ctrl", "3"]),
     ("Models", &["Ctrl", "4"]),
-    ("Playground", &["Ctrl", "5"]),
-    ("Benchmarks", &["Ctrl", "6"]),
+    ("Benchmarks", &["Ctrl", "5"]),
+    ("Playground", &["Ctrl", "6"]),
     ("Settings", &["Ctrl", "Comma"]),
     // Sidebar, search, page.
     ("Next region", &["F6"]),
     ("Previous region", &["Shift", "F6"]),
 ];
+
+/// Base HTTP(S) URL of FOLO Studio served by the actively connected `folo serve`, or `None` when
+/// not connected to a healthy FOLO server or when the connected URL embeds credentials.
+pub(crate) fn studio_url(
+    server_mode: ServerMode,
+    connected: bool,
+    connected_url: Option<&str>,
+) -> Option<String> {
+    if server_mode != ServerMode::Local || !connected {
+        return None;
+    }
+    let raw = crate::app::persistable_server_url(connected_url?)?;
+    let backend = crate::api::http::HttpBackend::new(&raw);
+    let base = backend.base();
+    let lower = base.to_ascii_lowercase();
+    if lower.starts_with("http://") {
+        Some(format!("http://{}", &base["http://".len()..]))
+    } else if lower.starts_with("https://") {
+        Some(format!("https://{}", &base["https://".len()..]))
+    } else {
+        None
+    }
+}
 
 /// One Settings row (UNIFIED.md §4): the name and its one-line description on the left (they take the
 /// slack and wrap), the control on the right edge; 56 px high, more when the description wraps.
@@ -161,6 +184,58 @@ impl FoloApp {
                     .child(self.connecting.clone().unwrap_or_else(|| "Connecting…".into())),
             ),
         };
+        let studio_connected = self.connecting.is_none() && matches!(self.store.health, Load::Ready(_));
+        let studio_target = studio_url(self.server_mode, studio_connected, self.connected_url.as_deref());
+        let studio_controls = if let Some(url) = studio_target {
+            let open_url = url.clone();
+            let copy_url = url;
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(self.button(
+                    "set-studio-open",
+                    "Open in browser",
+                    crate::controls::Btn::Secondary,
+                    Some("icons/external-link.svg"),
+                    window,
+                    cx,
+                    act(move |_, _, cx| cx.open_url(&open_url)),
+                ))
+                .child(self.button(
+                    "set-studio-copy",
+                    "Copy URL",
+                    crate::controls::Btn::Secondary,
+                    Some("icons/copy.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| {
+                        cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(copy_url.clone()));
+                        this.toast(Tone::Neutral, "Studio URL copied", Some(copy_url.clone().into()), cx);
+                    }),
+                ))
+                .into_any_element()
+        } else {
+            let reason = if self.server_mode == ServerMode::Mock {
+                "Connect to folo serve to open FOLO Studio"
+            } else if self.connecting.is_some() {
+                "Wait for the connection to folo serve to finish"
+            } else if !matches!(self.store.health, Load::Ready(_)) {
+                "Connect to a reachable folo serve to open FOLO Studio"
+            } else {
+                "FOLO Studio links are disabled when the server URL contains embedded credentials"
+            };
+            self.button_disabled(
+                "set-studio-open",
+                "Open in browser",
+                crate::controls::Btn::Secondary,
+                Some("icons/external-link.svg"),
+                reason,
+                window,
+                cx,
+            )
+            .into_any_element()
+        };
         let connection = panel(&t)
             .flex()
             .flex_col()
@@ -207,14 +282,20 @@ impl FoloApp {
                 "Start a local server automatically",
                 help("When no server is running at the address above, launch `folo serve` on a free port and stop it on exit."),
                 spawn.into_any_element(),
+            ))
+            .child(row(
+                "FOLO Studio",
+                help("Web UI served by `folo serve` for browser-only workflows like agent labeling and run comparison."),
+                studio_controls,
             ));
 
         let appearance = self.appearance_panel(window, cx);
 
-        let actions: [(&str, &[&str]); 9] = [
+        let actions: [(&str, &[&str]); 10] = [
             ("Command palette", &["Ctrl", "K"]),
             ("New run", &["Ctrl", "N"]),
             ("Open image", &["Ctrl", "O"]),
+            ("Toggle sidebar", &["Ctrl", "B"]),
             ("Switch theme", &["Ctrl", "Shift", "L"]),
             ("Full screen", &["F11"]),
             ("Back", &["Alt", "←"]),
@@ -295,11 +376,165 @@ impl FoloApp {
 
 #[cfg(test)]
 mod tests {
+    use super::studio_url;
+    use crate::app::{Route, ServerMode};
+
     #[test]
     fn every_page_shortcut_is_listed() {
-        // Ctrl+1–6 go to the six pages (app::bind_keys); Ctrl+6 was missing from the list.
+        // Ctrl+1–6 go to the six pages (app::bind_keys) in sidebar order: 5 = Benchmarks, 6 = Playground.
         for n in ["1", "2", "3", "4", "5", "6"] {
             assert!(super::GO_TO_KEYS.iter().any(|(_, k)| *k == ["Ctrl", n]), "Ctrl {n}");
         }
+        assert!(super::GO_TO_KEYS.iter().any(|(name, k)| *name == "Benchmarks" && *k == ["Ctrl", "5"]));
+        assert!(super::GO_TO_KEYS.iter().any(|(name, k)| *name == "Playground" && *k == ["Ctrl", "6"]));
+    }
+
+    #[test]
+    fn studio_url_requires_valid_credential_free_local_server() {
+        assert_eq!(studio_url(ServerMode::Mock, true, Some("http://127.0.0.1:7878")), None);
+        assert_eq!(studio_url(ServerMode::Local, false, Some("http://127.0.0.1:7878")), None);
+        assert_eq!(studio_url(ServerMode::Local, true, None), None);
+        assert_eq!(studio_url(ServerMode::Local, true, Some("http://127.0.0.1:99999")), None);
+        assert_eq!(studio_url(ServerMode::Local, true, Some("https://user:pass@host:7878")), None);
+        assert_eq!(
+            studio_url(ServerMode::Local, true, Some("http://127.0.0.1:54321/")),
+            Some("http://127.0.0.1:54321".into())
+        );
+        assert_eq!(
+            studio_url(ServerMode::Local, true, Some("HTTP://127.0.0.1:7878/")),
+            Some("http://127.0.0.1:7878".into())
+        );
+        assert_eq!(
+            studio_url(ServerMode::Local, true, Some("10.0.0.5:7878")),
+            Some("http://10.0.0.5:7878".into())
+        );
+    }
+
+    #[test]
+    fn sidebar_toggle_and_ctrl_5_6_shortcuts_work() {
+        use crate::api::Backend;
+        use crate::app::tests::{drive, open};
+        use crate::store::Load;
+        use folo_test_support::TestDir;
+        use folo_ui::{
+            AppContext, Bounds, HeadlessApp, HeadlessOptions, KeyDownEvent, KeyUpEvent, Keystroke,
+            PlatformInput, WindowBounds, WindowOptions, point, px, size,
+        };
+
+        let press = |app: &mut HeadlessApp, w: folo_ui::WindowHandle<crate::app::FoloApp>, key: &str| {
+            let ks = Keystroke::parse(key).unwrap();
+            app.simulate_input(
+                w.into(),
+                PlatformInput::KeyDown(KeyDownEvent { keystroke: ks.clone(), is_held: false }),
+            );
+            app.run_until_idle();
+            app.frame(w.into());
+            app.simulate_input(w.into(), PlatformInput::KeyUp(KeyUpEvent { keystroke: ks }));
+            app.run_until_idle();
+            app.frame(w.into());
+        };
+
+        let (mut app, window) = open();
+        app.update(|cx| {
+            crate::app::bind_keys(cx);
+            crate::input::bind_keys(cx);
+        });
+        app.frame(window.into());
+
+        // Ctrl+5 -> Benchmarks, Ctrl+6 -> Playground (matching sidebar order).
+        press(&mut app, window, "ctrl-5");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.route.clone()), Route::Benches);
+        press(&mut app, window, "ctrl-6");
+        assert_eq!(drive(&mut app, window, |this, _, _| this.route.clone()), Route::Playground);
+
+        // Ctrl+B collapses the sidebar and expands content_width on a 1280 px window.
+        let wide_content = drive(&mut app, window, |this, w, _| {
+            assert!(!this.sidebar_collapsed);
+            assert!(!this.sidebar_compact(w));
+            this.content_width(w)
+        });
+        press(&mut app, window, "ctrl-b");
+        let collapsed_content = drive(&mut app, window, |this, w, _| {
+            assert!(this.sidebar_collapsed);
+            assert!(this.sidebar_compact(w));
+            this.content_width(w)
+        });
+        assert!(
+            collapsed_content > wide_content,
+            "collapsing sidebar widens content area ({collapsed_content} <= {wide_content})"
+        );
+
+        // Activating the sidebar footer toggle expands the sidebar back and participates in F6 region cycling.
+        drive(&mut app, window, |this, w, cx| this.focus_key("nav-sidebar-toggle", w, cx));
+        app.frame(window.into());
+        press(&mut app, window, "enter");
+        assert!(!drive(&mut app, window, |this, _, _| this.sidebar_collapsed));
+        drive(&mut app, window, |this, w, cx| this.focus_key("nav-sidebar-toggle", w, cx));
+        app.frame(window.into());
+        press(&mut app, window, "f6");
+        assert!(
+            drive(&mut app, window, |this, w, cx| this.fh("titlebar-search", cx).is_focused(w)),
+            "F6 from nav-sidebar-toggle cycles out of the sidebar region to titlebar-search"
+        );
+
+        // Settings interactive controls: Open themes folder creates missing dir; Studio copy uses connected_url.
+        let themes_dir = TestDir::new("desktop-themes-open");
+        let missing_themes = themes_dir.path().join("themes");
+        assert!(!missing_themes.exists());
+        let ok_health = crate::api::mock::MockBackend::new(4200, true).health().unwrap();
+        drive(&mut app, window, |this, w, cx| {
+            this.themes.folder = Some(missing_themes.clone());
+            this.server_mode = ServerMode::Local;
+            this.connected_url = Some("http://127.0.0.1:7878".into());
+            // Typing an unsubmitted draft in server_url must not hijack the Studio URL.
+            this.server_url.update(cx, |i, cx| i.set_text("http://unsubmitted:9999", cx));
+            this.store.health = Load::Ready(ok_health);
+            this.navigate(Route::Settings, w, cx);
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.focus_key("set-themes-open", w, cx));
+        app.frame(window.into());
+        press(&mut app, window, "enter");
+        assert!(missing_themes.is_dir(), "Open folder creates the custom themes directory");
+
+        drive(&mut app, window, |this, w, cx| this.focus_key("set-studio-copy", w, cx));
+        app.frame(window.into());
+        press(&mut app, window, "enter");
+        let copied = drive(&mut app, window, |this, _, cx| {
+            let clip = cx.read_from_clipboard().and_then(|c| c.text());
+            let toast = this.toasts.last().map(|t| (t.title.to_string(), t.body.clone()));
+            (clip, toast)
+        });
+        assert_eq!(copied.0.as_deref(), Some("http://127.0.0.1:7878"));
+        assert_eq!(copied.1.as_ref().map(|(t, _)| t.as_str()), Some("Studio URL copied"));
+
+        // Narrow window (< 1120 px): forced compact rail, Ctrl+B is inert, palette omits sidebar toggle.
+        let api = std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true));
+        let mut narrow_app =
+            HeadlessApp::new(HeadlessOptions { size: size(px(1000.), px(700.)), ..Default::default() });
+        let narrow_win = narrow_app.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(crate::theme::Mode::Dark));
+            crate::app::bind_keys(cx);
+            crate::input::bind_keys(cx);
+            let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(700.)));
+            let options =
+                WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+            cx.open_window(options, |w, cx| cx.new(|cx| crate::app::FoloApp::new(api, true, w, cx)))
+                .expect("open narrow window")
+        });
+        narrow_app.frame(narrow_win.into());
+        press(&mut narrow_app, narrow_win, "ctrl-b");
+        drive(&mut narrow_app, narrow_win, |this, w, cx| {
+            assert!(this.narrow);
+            assert!(this.sidebar_compact(w));
+            assert!(!this.sidebar_collapsed, "Ctrl+B is inert while narrow viewport forces icon rail");
+            this.open_palette(w, cx);
+        });
+        narrow_app.frame(narrow_win.into());
+        drive(&mut narrow_app, narrow_win, |this, _, _| {
+            let p = this.palette.as_ref().unwrap();
+            assert!(!p.shown.is_empty());
+            assert!(p.shown.iter().all(|(_, t)| !t.to_lowercase().contains("sidebar")));
+        });
     }
 }

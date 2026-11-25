@@ -209,6 +209,7 @@ impl FoloApp {
             // Kept only when picked against the OS setting, so an untouched one keeps following it.
             reduce_motion: (self.reduce_motion != crate::ui::os_prefers_reduced_motion())
                 .then_some(self.reduce_motion),
+            sidebar_collapsed: Some(self.sidebar_collapsed),
         };
         state.set_theme_prefs(&self.theme_prefs);
         if let Err(e) = crate::window_state::save(path, &state) {
