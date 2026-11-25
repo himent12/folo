@@ -12,26 +12,26 @@
 //! `folo-nn`'s fused `BatchNorm2d`. The fused conv/GEMM epilogue (`silu8` / `silu_bias_inplace`) retains
 //! its FMA formulation.
 
-const LOG2E: f32 = std::f32::consts::LOG2_E;
+pub(super) const LOG2E: f32 = std::f32::consts::LOG2_E;
 // Cody-Waite split of ln(2) = LN2_HI + LN2_LO (exact high bits with 12 trailing zero mantissa bits + residual,
 // so `n * LN2_HI` is exact in f32 for all `|n| <= 150` even without FMA).
 pub(super) const LN2_HI: f32 = 0.693_359_4;
 pub(super) const LN2_LO: f32 = -2.121_944_4e-4;
 
 // Degree-5 minimax coefficients for `(exp(r) - 1) / r` on `r ∈ [-ln(2)/2, ln(2)/2]` (max rel err `9.54e-8`).
-const EXP5_C5: f32 = 8.290_312e-3;
-const EXP5_C4: f32 = 4.189_795_3e-2;
-const EXP5_C3: f32 = 1.666_763_6e-1;
-const EXP5_C2: f32 = 4.999_915e-1;
-const EXP5_C1: f32 = 9.999_997e-1;
+pub(super) const EXP5_C5: f32 = 8.290_312e-3;
+pub(super) const EXP5_C4: f32 = 4.189_795_3e-2;
+pub(super) const EXP5_C3: f32 = 1.666_763_6e-1;
+pub(super) const EXP5_C2: f32 = 4.999_915e-1;
+pub(super) const EXP5_C1: f32 = 9.999_997e-1;
 
 /// `1.5 * 2^23` (`0x4B40_0000`): adding `u ∈ [-2^22, 2^22)` rounds to nearest-even integer in the low
 /// mantissa bits without `vroundps` or `vcvtps2dq`.
-const EXP_MAGIC_0: f32 = 12_582_912.0;
-const EXP_MAGIC_0_BITS: i32 = 0x4B40_0000;
+pub(super) const EXP_MAGIC_0: f32 = 12_582_912.0;
+pub(super) const EXP_MAGIC_0_BITS: i32 = 0x4B40_0000;
 
 /// Minimax IEEE-754 reciprocal seed magic (`max |1 - d * r0| ≈ 0.05051`, exact `r(1.0) == 1.0`, `r(2.0) == 0.5`).
-const RECIP_MAGIC: u32 = 0x7EF3_11C3;
+pub(super) const RECIP_MAGIC: u32 = 0x7EF3_11C3;
 
 /// Bound on the relative error of the vectorised SiLU (`|y - silu(x)| <= SILU_MAX_REL_ERR * |silu(x)|`, plus
 /// the subnormal spacing once `silu(x)` underflows), checked by `silu_avx2_error_bound`: about 4 ulp.
@@ -146,38 +146,45 @@ pub(crate) fn silu_bwd_scalar(x: f32, g: f32) -> f32 {
     g * silu_deriv_scalar(x)
 }
 
-/// FMA scalar twin of the fused conv/GEMM epilogue `silu8`: `e = exp(-|x|)` via Cody-Waite reduction and
-/// degree-5 minimax polynomial (FMA), `1 / (1 + e)` via bit-hack seed + 4-FMA Householder-6, `sigmoid = r`
-/// for `x >= 0` else `e * r`. Bitwise identical to `silu8` for all non-NaN inputs; NaN stays NaN.
+/// Fused conv/GEMM epilogue scalar twin: on `wasm32 +simd128` (no hardware FMA) delegates to the non-FMA
+/// [`silu_scalar`] (bitwise identical to `wasm_simd::silu4`); elsewhere uses the FMA formulation matching
+/// `silu8` bit for bit on all non-NaN inputs (NaN stays NaN).
 #[inline]
 pub(crate) fn silu_epilogue_scalar(x: f32) -> f32 {
-    let t_abs = f32::from_bits(x.to_bits() & 0x7FFF_FFFF);
-    let t = maxps(0.0 - t_abs, -104.0);
-    let z = t.mul_add(LOG2E, EXP_MAGIC_0);
-    let n = z - EXP_MAGIC_0;
-    let r = (-LN2_HI).mul_add(n, t);
-    let r = (-LN2_LO).mul_add(n, r);
-    let mut p = EXP5_C5;
-    p = p.mul_add(r, EXP5_C4);
-    p = p.mul_add(r, EXP5_C3);
-    p = p.mul_add(r, EXP5_C2);
-    p = p.mul_add(r, EXP5_C1);
-    let y = p.mul_add(r, 1.0);
-    let ni = (z.to_bits() as i32).wrapping_sub(EXP_MAGIC_0_BITS);
-    let n1 = ni >> 1;
-    let n2 = ni - n1;
-    let s1 = f32::from_bits(((n1 + 127) as u32) << 23);
-    let s2 = f32::from_bits(((n2 + 127) as u32) << 23);
-    let e = (y * s1) * s2;
-    let d = 1.0 + e;
-    let r0 = f32::from_bits(RECIP_MAGIC.wrapping_sub(d.to_bits()));
-    let e0 = (-d).mul_add(r0, 1.0);
-    let u = r0.mul_add(e0, r0);
-    let e2 = e0 * e0;
-    let t2 = e2.mul_add(e2, e2);
-    let rec = u.mul_add(t2, u);
-    let sig = if x >= 0.0 { rec } else { e * rec };
-    x * sig
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        silu_scalar(x)
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    {
+        let t_abs = f32::from_bits(x.to_bits() & 0x7FFF_FFFF);
+        let t = maxps(0.0 - t_abs, -104.0);
+        let z = t.mul_add(LOG2E, EXP_MAGIC_0);
+        let n = z - EXP_MAGIC_0;
+        let r = (-LN2_HI).mul_add(n, t);
+        let r = (-LN2_LO).mul_add(n, r);
+        let mut p = EXP5_C5;
+        p = p.mul_add(r, EXP5_C4);
+        p = p.mul_add(r, EXP5_C3);
+        p = p.mul_add(r, EXP5_C2);
+        p = p.mul_add(r, EXP5_C1);
+        let y = p.mul_add(r, 1.0);
+        let ni = (z.to_bits() as i32).wrapping_sub(EXP_MAGIC_0_BITS);
+        let n1 = ni >> 1;
+        let n2 = ni - n1;
+        let s1 = f32::from_bits(((n1 + 127) as u32) << 23);
+        let s2 = f32::from_bits(((n2 + 127) as u32) << 23);
+        let e = (y * s1) * s2;
+        let d = 1.0 + e;
+        let r0 = f32::from_bits(RECIP_MAGIC.wrapping_sub(d.to_bits()));
+        let e0 = (-d).mul_add(r0, 1.0);
+        let u = r0.mul_add(e0, r0);
+        let e2 = e0 * e0;
+        let t2 = e2.mul_add(e2, e2);
+        let rec = u.mul_add(t2, u);
+        let sig = if x >= 0.0 { rec } else { e * rec };
+        x * sig
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -383,9 +390,9 @@ pub(crate) fn silu8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     _mm256_mul_ps(x, sig)
 }
 
-/// Generate a 2x8-unrolled + 8-wide + padded-tail AVX2 unary slice loop and its runtime-dispatched wrapper.
+/// Generate a 2x8-unrolled + 8-wide + padded-tail AVX2 (or Wasm SIMD128) unary slice loop and its wrapper.
 macro_rules! define_unary_slice {
-    ($pub_fn:ident, $avx_fn:ident, $vec8:ident, $scalar:ident) => {
+    ($pub_fn:ident, $avx_fn:ident, $vec8:ident, $scalar:ident, $wasm_fn:ident) => {
         pub(crate) fn $pub_fn(x: &[f32], out: &mut [f32]) {
             debug_assert_eq!(x.len(), out.len());
             #[cfg(target_arch = "x86_64")]
@@ -393,6 +400,11 @@ macro_rules! define_unary_slice {
                 // SAFETY: AVX2 was detected above.
                 return unsafe { $avx_fn(x, out) };
             }
+            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            {
+                return super::wasm_simd::$wasm_fn(x, out);
+            }
+            #[allow(unreachable_code)]
             for (o, &v) in out.iter_mut().zip(x) {
                 *o = $scalar(v);
             }
@@ -439,9 +451,9 @@ macro_rules! define_unary_slice {
 }
 pub(super) use define_unary_slice;
 
-/// Generate a 2x8-unrolled + 8-wide + padded-tail AVX2 backward slice loop (both `(x, g)` and `(x, broadcast g)`).
+/// Generate a 2x8-unrolled + 8-wide + padded-tail AVX2 (or Wasm SIMD128) backward slice loop (`(x, g)` and `(x, broadcast g)`).
 macro_rules! define_bwd_slice {
-    ($pub_fn:ident, $pub_bc_fn:ident, $avx_fn:ident, $avx_bc_fn:ident, $vec8:ident, $deriv_scalar:ident) => {
+    ($pub_fn:ident, $pub_bc_fn:ident, $avx_fn:ident, $avx_bc_fn:ident, $vec8:ident, $deriv_scalar:ident, $wasm_fn:ident, $wasm_bc_fn:ident) => {
         pub(crate) fn $pub_fn(x: &[f32], g: &[f32], out: &mut [f32]) {
             debug_assert_eq!(x.len(), g.len());
             debug_assert_eq!(x.len(), out.len());
@@ -450,6 +462,11 @@ macro_rules! define_bwd_slice {
                 // SAFETY: AVX2 was detected above.
                 return unsafe { $avx_fn(x, g, out) };
             }
+            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            {
+                return super::wasm_simd::$wasm_fn(x, g, out);
+            }
+            #[allow(unreachable_code)]
             for ((o, &xv), &gv) in out.iter_mut().zip(x).zip(g) {
                 *o = gv * $deriv_scalar(xv);
             }
@@ -462,6 +479,11 @@ macro_rules! define_bwd_slice {
                 // SAFETY: AVX2 was detected above.
                 return unsafe { $avx_bc_fn(x, g, out) };
             }
+            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            {
+                return super::wasm_simd::$wasm_bc_fn(x, g, out);
+            }
+            #[allow(unreachable_code)]
             for (o, &xv) in out.iter_mut().zip(x) {
                 *o = g * $deriv_scalar(xv);
             }
@@ -554,13 +576,18 @@ pub(super) use define_bwd_slice;
 
 /// Generate a 2x8-unrolled + 8-wide + padded-tail in-place `v[i] = op(v[i] + bias)` epilogue loop.
 macro_rules! define_bias_inplace {
-    ($pub_fn:ident, $avx_fn:ident, $detect:ident, $feat:literal, $vec8:ident, $scalar:ident) => {
+    ($pub_fn:ident, $avx_fn:ident, $detect:ident, $feat:literal, $vec8:ident, $scalar:ident, $wasm_fn:ident) => {
         pub(crate) fn $pub_fn(v: &mut [f32], bias: f32) {
             #[cfg(target_arch = "x86_64")]
             if $detect() {
                 // SAFETY: required CPU features were detected above.
                 return unsafe { $avx_fn(v, bias) };
             }
+            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            {
+                return super::wasm_simd::$wasm_fn(v, bias);
+            }
+            #[allow(unreachable_code)]
             for x in v.iter_mut() {
                 *x = $scalar(*x + bias);
             }
@@ -607,18 +634,29 @@ macro_rules! define_bias_inplace {
 }
 pub(super) use define_bias_inplace;
 
-define_unary_slice!(exp_slice, exp_avx2, exp8, exp_scalar);
-define_unary_slice!(sigmoid_slice, sigmoid_avx2, sigmoid8, sigmoid_scalar);
-define_unary_slice!(silu_slice, silu_avx2, silu_op8, silu_scalar);
+define_unary_slice!(exp_slice, exp_avx2, exp8, exp_scalar, exp_slice);
+define_unary_slice!(sigmoid_slice, sigmoid_avx2, sigmoid8, sigmoid_scalar, sigmoid_slice);
+define_unary_slice!(silu_slice, silu_avx2, silu_op8, silu_scalar, silu_slice);
 
-define_bwd_slice!(exp_bwd_slice, exp_bwd_broadcast_g, exp_bwd_avx2, exp_bwd_bc_avx2, exp_bwd8, exp_scalar);
+define_bwd_slice!(
+    exp_bwd_slice,
+    exp_bwd_broadcast_g,
+    exp_bwd_avx2,
+    exp_bwd_bc_avx2,
+    exp_bwd8,
+    exp_scalar,
+    exp_bwd_slice,
+    exp_bwd_bc_slice
+);
 define_bwd_slice!(
     sigmoid_bwd_slice,
     sigmoid_bwd_broadcast_g,
     sigmoid_bwd_avx2,
     sigmoid_bwd_bc_avx2,
     sigmoid_bwd8,
-    sigmoid_deriv_scalar
+    sigmoid_deriv_scalar,
+    sigmoid_bwd_slice,
+    sigmoid_bwd_bc_slice
 );
 define_bwd_slice!(
     silu_bwd_slice,
@@ -626,7 +664,9 @@ define_bwd_slice!(
     silu_bwd_avx2,
     silu_bwd_bc_avx2,
     silu_bwd8,
-    silu_deriv_scalar
+    silu_deriv_scalar,
+    silu_bwd_slice,
+    silu_bwd_bc_slice
 );
 define_bwd_slice!(
     softplus_bwd_slice,
@@ -634,7 +674,9 @@ define_bwd_slice!(
     softplus_bwd_avx2,
     softplus_bwd_bc_avx2,
     softplus_bwd8,
-    sigmoid_scalar
+    sigmoid_scalar,
+    softplus_bwd_slice,
+    softplus_bwd_bc_slice
 );
 
 define_bias_inplace!(
@@ -643,6 +685,15 @@ define_bias_inplace!(
     has_avx2_fma,
     "avx2,fma",
     silu8,
-    silu_epilogue_scalar
+    silu_epilogue_scalar,
+    silu_bias_inplace
 );
-define_bias_inplace!(sigmoid_bias_inplace, sigmoid_bias_avx2, has_avx2, "avx2", sigmoid8, sigmoid_scalar);
+define_bias_inplace!(
+    sigmoid_bias_inplace,
+    sigmoid_bias_avx2,
+    has_avx2,
+    "avx2",
+    sigmoid8,
+    sigmoid_scalar,
+    sigmoid_bias_inplace
+);

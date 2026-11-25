@@ -7,35 +7,62 @@ use crate::cpu::conv::{ChannelEpilogue, ConvGeom};
 
 use super::{SEG, Tiles};
 
-/// 1D input transform `Bᵀ · d` (exact IEEE-754 FMA twin of `bt_1d_avx2`).
+/// 1D input transform `Bᵀ · d` (exact IEEE-754 FMA twin of `bt_1d_avx2`, or non-FMA twin of `bt_1d_wasm` on
+/// `wasm32 +simd128`).
 #[inline(always)]
-fn bt_1d_scalar(d0: f32, d1: f32, d2: f32, d3: f32, d4: f32, d5: f32) -> [f32; 6] {
+pub(super) fn bt_1d_scalar(d0: f32, d1: f32, d2: f32, d3: f32, d4: f32, d5: f32) -> [f32; 6] {
     let m_even = d2 - d4;
     let m_odd = d1 - d3;
     let t0 = d0 - d2;
-    let b0 = 0.25f32.mul_add(t0, -m_even);
-    let b1 = 0.5f32.mul_add(m_odd, m_even);
-    let b2 = (-0.5f32).mul_add(m_odd, m_even);
-    let s_even = (-0.25f32).mul_add(d2, d4);
-    let s_odd = (-0.25f32).mul_add(d1, d3);
-    let b3 = s_even + s_odd;
-    let b4 = s_even - s_odd;
-    let b5 = 0.25f32.mul_add(m_odd, d5 - d3);
-    [b0, b1, b2, b3, b4, b5]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        let b0 = 0.25 * t0 - m_even;
+        let b1 = 0.5 * m_odd + m_even;
+        let b2 = m_even - 0.5 * m_odd;
+        let s_even = d4 - 0.25 * d2;
+        let s_odd = d3 - 0.25 * d1;
+        let b3 = s_even + s_odd;
+        let b4 = s_even - s_odd;
+        let b5 = 0.25 * m_odd + (d5 - d3);
+        [b0, b1, b2, b3, b4, b5]
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    {
+        let b0 = 0.25f32.mul_add(t0, -m_even);
+        let b1 = 0.5f32.mul_add(m_odd, m_even);
+        let b2 = (-0.5f32).mul_add(m_odd, m_even);
+        let s_even = (-0.25f32).mul_add(d2, d4);
+        let s_odd = (-0.25f32).mul_add(d1, d3);
+        let b3 = s_even + s_odd;
+        let b4 = s_even - s_odd;
+        let b5 = 0.25f32.mul_add(m_odd, d5 - d3);
+        [b0, b1, b2, b3, b4, b5]
+    }
 }
 
-/// 1D output transform `Aᵀ · m` (exact IEEE-754 FMA twin of `at_1d_avx2`).
+/// 1D output transform `Aᵀ · m` (exact IEEE-754 FMA twin of `at_1d_avx2`, or non-FMA twin of `at_1d_wasm` on
+/// `wasm32 +simd128`).
 #[inline(always)]
-fn at_1d_scalar(m0: f32, m1: f32, m2: f32, m3: f32, m4: f32, m5: f32) -> [f32; 4] {
+pub(super) fn at_1d_scalar(m0: f32, m1: f32, m2: f32, m3: f32, m4: f32, m5: f32) -> [f32; 4] {
     let s12 = m1 + m2;
     let d12 = m1 - m2;
     let s34 = m3 + m4;
     let d34 = m3 - m4;
     let y0 = (m0 + s12) + s34;
-    let y1 = 0.5f32.mul_add(d12, d34);
-    let y2 = 0.25f32.mul_add(s12, s34);
-    let y3 = 0.125f32.mul_add(d12, d34 + m5);
-    [y0, y1, y2, y3]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        let y1 = 0.5 * d12 + d34;
+        let y2 = 0.25 * s12 + s34;
+        let y3 = 0.125 * d12 + (d34 + m5);
+        [y0, y1, y2, y3]
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    {
+        let y1 = 0.5f32.mul_add(d12, d34);
+        let y2 = 0.25f32.mul_add(s12, s34);
+        let y3 = 0.125f32.mul_add(d12, d34 + m5);
+        [y0, y1, y2, y3]
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -142,7 +169,7 @@ unsafe fn at_1d_sse(
 
 /// Fill `seg[..4 * len + 2]` with input row `y` from `x0`, zero-padded outside `[0, h) x [0, w)`.
 #[inline(always)]
-fn load_row_seg(
+pub(super) fn load_row_seg(
     plane: &[f32],
     y: isize,
     (h, w): (isize, isize),
@@ -181,8 +208,16 @@ pub(super) unsafe fn input_transform(
         // SAFETY: AVX2 and FMA were detected; pointer contract forwarded.
         return unsafe { input_transform_avx2(planes, ci0, g, ts, t0, t1, tb, v) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        // SAFETY: pointer contract forwarded.
+        return unsafe { super::wasm::input_transform_wasm(planes, ci0, g, ts, t0, t1, tb, v) };
+    }
+    #[allow(unreachable_code)]
     // SAFETY: forwarded.
-    unsafe { input_transform_scalar(planes, ci0, g, ts, t0, t1, tb, v) }
+    unsafe {
+        input_transform_scalar(planes, ci0, g, ts, t0, t1, tb, v)
+    }
 }
 
 /// Portable scalar input transform (also used by tests to verify bit-exact AVX2 parity).
@@ -409,7 +444,7 @@ const _: () = assert!(SEG <= 64);
 #[cold]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-unsafe fn direct_bad_tiles(
+pub(super) unsafe fn direct_bad_tiles(
     planes: &[&[f32]],
     wt: &[f32],
     oc: usize,
@@ -489,8 +524,18 @@ pub(super) unsafe fn output_transform(
         // SAFETY: AVX2 and FMA were detected; pointer contract forwarded.
         return unsafe { output_transform_avx2(m, m_stride, os, g, epi, ts, t0, t1, tb, planes, wt, out) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        // SAFETY: pointer contract forwarded.
+        return unsafe {
+            super::wasm::output_transform_wasm(m, m_stride, os, g, epi, ts, t0, t1, tb, planes, wt, out)
+        };
+    }
+    #[allow(unreachable_code)]
     // SAFETY: forwarded.
-    unsafe { output_transform_scalar(m, m_stride, os, g, epi, ts, t0, t1, tb, planes, wt, out) }
+    unsafe {
+        output_transform_scalar(m, m_stride, os, g, epi, ts, t0, t1, tb, planes, wt, out)
+    }
 }
 
 /// Portable scalar output transform (also used by tests to verify bit-exact AVX2 parity).

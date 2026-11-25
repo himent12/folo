@@ -22,6 +22,8 @@ mod sites;
 mod small_c;
 mod winograd;
 mod winograd4;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod winograd_wasm;
 
 use rayon::prelude::*;
 

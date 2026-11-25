@@ -371,7 +371,8 @@ mod tests {
         assert_eq!(huge.storage_extent(), None);
         assert!(!huge.fits(1));
         // An element count that wraps to zero must not look empty.
-        let wraps = Layout::new(Shape::new(&[1 << 32, 1 << 32]), smallvec::smallvec![1, 1 << 32], 0);
+        let half = 1usize << (usize::BITS / 2);
+        let wraps = Layout::new(Shape::new(&[half, half]), smallvec::smallvec![1, half], 0);
         assert!(!wraps.fits(1));
         let b = Layout::contiguous([3, 1]).broadcast_to(&Shape::new(&[2, 3, 5]), "b").unwrap();
         assert_eq!(b.strides(), &[0, 1, 0]);

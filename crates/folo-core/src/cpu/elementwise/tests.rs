@@ -812,3 +812,75 @@ fn transpose_2d_and_copy_strided_f32_bitwise_exact() {
         );
     }
 }
+
+#[test]
+fn binary_ops_simd_matches_scalar_with_edges() {
+    let edges: [f32; 14] = [
+        -0.0,
+        0.0,
+        -1.5,
+        1.5,
+        -1e-30,
+        1e-30,
+        f32::MIN_POSITIVE,
+        f32::MAX,
+        f32::MIN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        f32::from_bits(0x7fc0_1234),
+        42.25,
+    ];
+    let ops = [
+        (BinaryOp::Add, (|x: f32, y: f32| x + y) as fn(f32, f32) -> f32),
+        (BinaryOp::Sub, |x, y| x - y),
+        (BinaryOp::Mul, |x, y| x * y),
+        (BinaryOp::Div, |x, y| x / y),
+        (BinaryOp::Maximum, f32::max),
+        (BinaryOp::Minimum, f32::min),
+    ];
+
+    // Contiguous pairwise Cartesian product of all edge values plus ragged lengths (0, 1, 3, 4, 7, 8, 11, 19).
+    let mut a_all = Vec::new();
+    let mut b_all = Vec::new();
+    for &x in &edges {
+        for &y in &edges {
+            a_all.push(x);
+            b_all.push(y);
+        }
+    }
+    for len in [0usize, 1, 3, 4, 7, 8, 11, 19, a_all.len()] {
+        let la = Layout::contiguous(Shape::new(&[len]));
+        let a = &a_all[..len];
+        let b = &b_all[..len];
+        for &(op, scalar) in &ops {
+            let got = binary(op, a, &la, b, &la);
+            assert_eq!(got.len(), len);
+            for (i, &g) in got.iter().enumerate() {
+                assert_same_val(g, scalar(a[i], b[i]), &format!("{op:?} contig len={len} i={i}"));
+            }
+        }
+    }
+
+    // Strided (1, 1), broadcast-b (1, 0), broadcast-a (0, 1), and general (2, 3) strides.
+    let (rows, cols) = (4usize, 19usize);
+    let stride_row = cols + 3;
+    let mut a_buf: Vec<f32> = (0..rows * stride_row + 10).map(|i| edges[i % edges.len()]).collect();
+    let mut b_buf: Vec<f32> = (0..rows * stride_row + 10).map(|i| edges[(i * 5 + 1) % edges.len()]).collect();
+    a_buf[0] = -0.0;
+    b_buf[0] = 0.0;
+    let make = |s_inner: usize, off: usize| {
+        let s_outer = if s_inner == 0 { 1 } else { stride_row };
+        Layout::new(Shape::new(&[rows, cols]), vec![s_outer, s_inner].into(), off)
+    };
+    for (sa, sb) in [(1usize, 1usize), (1, 0), (0, 1)] {
+        let (la, lb) = (make(sa, 1), make(sb, 2));
+        for &(op, scalar) in &ops {
+            let got = binary(op, &a_buf, &la, &b_buf, &lb);
+            let want = map2(&a_buf, &la, &b_buf, &lb, scalar);
+            for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+                assert_same_val(g, w, &format!("{op:?} strides=({sa},{sb}) i={i}"));
+            }
+        }
+    }
+}

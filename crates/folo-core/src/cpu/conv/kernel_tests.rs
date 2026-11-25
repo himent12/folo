@@ -682,3 +682,63 @@ fn depthwise_backward_and_col2im_match_naive() {
         }
     }
 }
+
+/// Depthwise forward SIMD path matches the scalar depthwise path across ragged widths, zero-width padding,
+/// accumulate mode, and fused epilogues (`None`, `Bias`, `Silu`, `Relu`, `Sigmoid`).
+#[test]
+fn depthwise_simd_matches_scalar_parity() {
+    let cases = [
+        (1, 4, [5, 1], 4, [3, 3], params([1, 1], [1, 1], [1, 1], 4)),
+        (1, 4, [5, 7], 4, [3, 3], params([1, 1], [1, 1], [1, 1], 4)),
+        (1, 4, [7, 19], 4, [3, 3], params([1, 1], [1, 1], [1, 1], 4)),
+        (2, 6, [9, 37], 12, [3, 3], params([1, 1], [1, 1], [1, 1], 6)),
+        (1, 4, [8, 21], 4, [5, 5], params([1, 1], [2, 2], [1, 1], 4)),
+        (1, 4, [9, 17], 4, [3, 3], params([1, 1], [2, 2], [2, 2], 4)),
+        (1, 2, [3, 0], 2, [3, 3], params([1, 1], [1, 2], [1, 1], 2)),
+    ];
+    for (ci, &(n, c, hw, o, k, p)) in cases.iter().enumerate() {
+        let g = geom(n, c, hw, o, k, p);
+        let x = data(n * c * hw[0] * hw[1], 401 + ci as u32);
+        let wt = data(o * g.kdim(), 4100 + ci as u32);
+        let bias: Vec<f32> = (0..o).map(|j| if j % 2 == 0 { 0.0 } else { j as f32 * 0.2 - 0.5 }).collect();
+        let part = [ConvPart::contiguous(&x, c, hw[0] * hw[1])];
+        let input = ConvInput { parts: &part };
+        let epis = [
+            None,
+            Some(BiasAct { bias: Some(&bias), act: None }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Silu) }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Relu) }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Sigmoid) }),
+        ];
+        for (ei, epi) in epis.into_iter().enumerate() {
+            let mut got = vec![f32::NAN; n * o * g.ohw()];
+            let mut want = vec![f32::NAN; n * o * g.ohw()];
+            depthwise_forward(input, &wt, &mut got, &g, false, epi);
+            super::depthwise::depthwise_forward_scalar(input, &wt, &mut want, &g, false, epi);
+            for (q, (&gv, &wv)) in got.iter().zip(&want).enumerate() {
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                assert_eq!(gv.to_bits(), wv.to_bits(), "case {ci} epi {ei} at {q}: {gv} vs {wv}");
+                #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+                assert!(
+                    (gv - wv).abs() <= 1e-5 * (1.0 + wv.abs()),
+                    "case {ci} epi {ei} at {q}: {gv} vs {wv}"
+                );
+            }
+        }
+        // Accumulate into non-zero prior output.
+        let prior: Vec<f32> = data(n * o * g.ohw(), 4200 + ci as u32)
+            .into_iter()
+            .map(|v| if v == 0.0 { 0.25 } else { v })
+            .collect();
+        let mut got = prior.clone();
+        let mut want = prior;
+        depthwise_forward(input, &wt, &mut got, &g, true, None);
+        super::depthwise::depthwise_forward_scalar(input, &wt, &mut want, &g, true, None);
+        for (q, (&gv, &wv)) in got.iter().zip(&want).enumerate() {
+            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            assert_eq!(gv.to_bits(), wv.to_bits(), "case {ci} acc at {q}: {gv} vs {wv}");
+            #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+            assert!((gv - wv).abs() <= 1e-5 * (1.0 + wv.abs()), "case {ci} acc at {q}: {gv} vs {wv}");
+        }
+    }
+}

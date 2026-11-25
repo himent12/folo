@@ -13,6 +13,8 @@
 //! bit-exact with the scalar path; results are bitwise identical across thread counts and batches.
 
 mod transform;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm;
 
 use super::winograd::winograd_shape;
 use super::{ChannelEpilogue, ConvGeom, ConvInput, for_each_image};
