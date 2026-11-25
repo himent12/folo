@@ -43,11 +43,15 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     switch OP {
         case 1u: {
             let nan_v = isnan1(acc);
-            r_sg = select(subgroupMax(acc), subgroupAdd(select(0.0, acc, nan_v)), subgroupAny(nan_v));
+            let mask = subgroupBallot(nan_v).x;
+            let nan_lane = select(0u, firstTrailingBit(mask), mask != 0u);
+            r_sg = select(subgroupMax(select(acc, identity(), nan_v)), subgroupShuffle(acc, nan_lane), mask != 0u);
         }
         case 2u: {
             let nan_v = isnan1(acc);
-            r_sg = select(subgroupMin(acc), subgroupAdd(select(0.0, acc, nan_v)), subgroupAny(nan_v));
+            let mask = subgroupBallot(nan_v).x;
+            let nan_lane = select(0u, firstTrailingBit(mask), mask != 0u);
+            r_sg = select(subgroupMin(select(acc, identity(), nan_v)), subgroupShuffle(acc, nan_lane), mask != 0u);
         }
         default: { r_sg = subgroupAdd(acc); }
     }

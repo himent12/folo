@@ -1,7 +1,7 @@
 // Softmax / log-softmax over the contiguous last axis, one workgroup per row.
 // Single-pass online softmax (Milakov-Gimelshein) caches up to 4 elements per thread in registers when
 // `CACHE_ROW` is true (n <= 1024, 1 global read of X); longer rows use 2-pass online softmax (2 global reads
-// instead of 3). `reduce.rs` appends either the 1-barrier 32-wide subgroupShuffle reduction or the portable
+// `reduce.rs` prepends either the 1-barrier 32-wide subgroupShuffle reduction or the portable
 // 8-barrier shared-memory tree fallback (`reduce_online` + `@compute fn main`).
 // Spec: LOG (log_softmax), CACHE (n <= 1024). Params: 0 = rows, 1 = row length, 2 = -inf.
 // XT / YT are the storage types of X and Y (f32 or f16); the arithmetic is f32.

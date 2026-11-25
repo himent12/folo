@@ -457,7 +457,9 @@ fn gen_norm_partials_many(spec: &Spec) -> String {
             s.push_str(
                 "  default: {}\n  }\n\
                  \x20 let nan_v = (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u;\n\
-                 \x20 let r = select(subgroupMax(v), subgroupAdd(select(0.0, v, nan_v)), subgroupAny(nan_v));\n\
+                 \x20 let mask = subgroupBallot(nan_v).x;\n\
+                 \x20 let nan_lane = select(0u, firstTrailingBit(mask), mask != 0u);\n\
+                 \x20 let r = select(subgroupMax(select(v, 0.0, nan_v)), subgroupShuffle(v, nan_lane), mask != 0u);\n\
                  \x20 let sg = min(sgid, 7u);\n\
                  \x20 if (lane == 0u) { red[sg] = r; }\n\
                  \x20 workgroupBarrier();\n\

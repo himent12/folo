@@ -8,7 +8,8 @@
 //!    workgroup using a 1-barrier 32-wide pairwise Chan `subgroupShuffleDown` reduction when the native device
 //!    supports 32-wide subgroups, or a portable shared-memory `bn_tree_merge` fallback otherwise (browser WebGPU,
 //!    WARP, Lavapipe).
-//! 2. `bn_finalize`: one workgroup per channel merges its partials into the mean and biased variance,
+//! 2. `bn_finalize`: one workgroup per channel merges its partials into the mean and biased variance (1-barrier
+//!    32-wide pairwise Chan `subgroupShuffleDown` when available, portable `bn_tree_merge` fallback otherwise),
 //!    writes `mean` and `invstd = 1 / sqrt(var + eps)`, and optionally updates the running statistics in
 //!    place.
 //! 3. `bn_apply`: `y = act(((x − mean) · invstd) · w + b)`, `vec4` when `H·W` is a multiple of 4.
@@ -17,7 +18,8 @@
 //! 1. `bn_bwd_reduce`: per (channel, chunk) partial sums of `dz` and `dz · x̂` (`vec4` when `H·W` is a multiple
 //!    of 4, evaluating `bn_act_grad` on 4 real lanes at once and `bn_act_grad_f32` on odd `H·W`; 1-barrier
 //!    `subgroupAdd` when available, portable shared-memory fallback otherwise);
-//! 2. `bn_bwd_finalize`: `db = Σdz` and `dw = Σdz·x̂`;
+//! 2. `bn_bwd_finalize`: `db = Σdz` and `dw = Σdz·x̂` (1-barrier `subgroupAdd` when available, portable fallback
+//!    otherwise);
 //! 3. `bn_bwd_dx`: `dx = w · invstd · (dz − db / n − x̂ · dw / n)` per element, `vec4` when `H·W` is a multiple
 //!    of 4.
 

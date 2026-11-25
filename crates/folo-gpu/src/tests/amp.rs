@@ -274,4 +274,39 @@ fn batch_norm_subgroups_and_portable_fallback_agree() {
             );
         }
     }
+
+    // Multi-chunk (`chunks = 40 > 32`) with `RUNNING = true`: exercises both intra-subgroup and inter-subgroup
+    // merges in `bn_finalize` and `bn_bwd_finalize` plus running-mean / running-var updates.
+    {
+        let shape = [4usize, 2, 64, 320];
+        let c = shape[1];
+        let x = randn(&shape, 51).add_scalar(25.0).unwrap().to_device(dev).unwrap();
+        let g = randn(&shape, 52).to_device(dev).unwrap();
+        let w = randn(&[c], 53).add_scalar(1.0).unwrap().to_device(dev).unwrap();
+        let b = randn(&[c], 54).to_device(dev).unwrap();
+        let run_mc = |force_portable: bool| {
+            let _guard = ForceGuard::set(force_portable);
+            let rm = Tensor::from_slice(&[1.0f32, -2.0], [c]).unwrap().to_device(dev).unwrap();
+            let rv = Tensor::from_slice(&[0.5f32, 1.5], [c]).unwrap().to_device(dev).unwrap();
+            let out = x
+                .batch_norm_act_train(&w, &b, 1e-3, Some(UnaryOp::Silu), Some((&rm, &rv, 0.03)))
+                .unwrap()
+                .expect("kernels");
+            let (dx, dw, db) = x
+                .batch_norm_act_train_backward(&g, &w, &b, &out.mean, &out.invstd, Some(UnaryOp::Silu))
+                .unwrap()
+                .expect("kernels");
+            (out.y, out.mean, out.invstd, rm, rv, dx, dw, db)
+        };
+        let (y_sg, m_sg, iv_sg, rm_sg, rv_sg, dx_sg, dw_sg, db_sg) = run_mc(false);
+        let (y_fb, m_fb, iv_fb, rm_fb, rv_fb, dx_fb, dw_fb, db_fb) = run_mc(true);
+        assert_close_t(&m_sg, &m_fb, 1e-4, 1e-5, "bn multi-chunk mean");
+        assert_close_t(&iv_sg, &iv_fb, 1e-4, 1e-4, "bn multi-chunk invstd");
+        assert_close_t(&rm_sg, &rm_fb, 1e-4, 1e-5, "bn multi-chunk running_mean");
+        assert_close_t(&rv_sg, &rv_fb, 1e-4, 1e-4, "bn multi-chunk running_var");
+        assert_close_t(&y_sg, &y_fb, 1e-4, 1e-4, "bn multi-chunk y");
+        assert_close_t(&dx_sg, &dx_fb, 1e-4, 1e-4, "bn multi-chunk dx");
+        assert_close_t(&dw_sg, &dw_fb, 1e-3, 1e-4, "bn multi-chunk dw");
+        assert_close_t(&db_sg, &db_fb, 1e-3, 1e-4, "bn multi-chunk db");
+    }
 }

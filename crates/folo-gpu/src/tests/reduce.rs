@@ -155,24 +155,69 @@ fn optim_norm_partials_and_unscale_subgroups_match_portable() {
         assert!(sg[4].is_nan() && fb[4].is_nan(), "{op:?} must propagate NaN in partial[4]");
     }
 
-    // unscale_check and unscale_check_many: finite case (flag stays 0) and overflow/NaN case (flag becomes 1).
-    for portable in [false, true] {
-        let _g = ForceGuard::set(portable);
-        for (vals, factor, expect_flag) in
-            [(vec![1.0f32; 300], 0.5f32, 0u32), (vec![1e38f32; 300], 10.0f32, 1u32)]
-        {
-            let x = ctx.upload(bytemuck::cast_slice(&vals)).unwrap();
-            let flag = ctx.upload(bytemuck::cast_slice(&[0u32])).unwrap();
-            unscale_check(&ctx, x.raw(), vals.len(), factor, flag.raw()).unwrap();
-            let got_flag: Vec<u32> = bytemuck::pod_collect_to_vec(&ctx.read(flag.raw(), 0, 4).unwrap());
-            assert_eq!(got_flag[0], expect_flag, "unscale_check portable={portable} factor={factor}");
+    // unscale_check and unscale_check_many: finite case (flag 0), full overflow (flag 1), and a single NaN in a
+    // non-leader lane of the final partial tail subgroup (verifying both the flag and the scaled buffer contents).
+    let mut tail_nan = vec![2.0f32; 300];
+    tail_nan[299] = f32::NAN;
+    let mut small_tail_nan = vec![3.0f32; 19];
+    small_tail_nan[18] = f32::NAN;
 
-            let x0 = ctx.upload(bytemuck::cast_slice(&vals)).unwrap();
-            let x1 = ctx.upload(bytemuck::cast_slice(&[2.0f32; 19])).unwrap();
-            let flag2 = ctx.upload(bytemuck::cast_slice(&[0u32])).unwrap();
-            unscale_check_many(&ctx, &[(x0.raw(), vals.len()), (x1.raw(), 19)], factor, flag2.raw()).unwrap();
-            let got_flag2: Vec<u32> = bytemuck::pod_collect_to_vec(&ctx.read(flag2.raw(), 0, 4).unwrap());
-            assert_eq!(got_flag2[0], expect_flag, "unscale_check_many portable={portable} factor={factor}");
+    for (x0_in, x1_in, factor, expect_single, expect_many) in [
+        (vec![1.0f32; 300], vec![2.0f32; 19], 0.5f32, 0u32, 0u32),
+        (vec![1e38f32; 300], vec![2.0f32; 19], 10.0f32, 1u32, 1u32),
+        (tail_nan, vec![2.0f32; 19], 0.5f32, 1u32, 1u32),
+        (vec![1.0f32; 300], small_tail_nan, 0.5f32, 0u32, 1u32),
+    ] {
+        let run_single = |portable: bool| -> (u32, Vec<f32>) {
+            let _g = ForceGuard::set(portable);
+            let x = ctx.upload(bytemuck::cast_slice(&x0_in)).unwrap();
+            let flag = ctx.upload(bytemuck::cast_slice(&[0u32])).unwrap();
+            unscale_check(&ctx, x.raw(), x0_in.len(), factor, flag.raw()).unwrap();
+            let got_flag: Vec<u32> = bytemuck::pod_collect_to_vec(&ctx.read(flag.raw(), 0, 4).unwrap());
+            let got_x: Vec<f32> =
+                bytemuck::pod_collect_to_vec(&ctx.read(x.raw(), 0, (x0_in.len() * 4) as u64).unwrap());
+            (got_flag[0], got_x)
+        };
+        let (fs, xs_sg) = run_single(false);
+        let (fp, xs_fb) = run_single(true);
+        assert_eq!(fs, expect_single, "unscale_check sg flag factor={factor}");
+        assert_eq!(fp, expect_single, "unscale_check fb flag factor={factor}");
+        for (i, (&a, &b)) in xs_sg.iter().zip(&xs_fb).enumerate() {
+            assert!(
+                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                "unscale_check[{i}]: {a} vs {b}"
+            );
+        }
+
+        let run_many = |portable: bool| -> (u32, Vec<f32>, Vec<f32>) {
+            let _g = ForceGuard::set(portable);
+            let x0 = ctx.upload(bytemuck::cast_slice(&x0_in)).unwrap();
+            let x1 = ctx.upload(bytemuck::cast_slice(&x1_in)).unwrap();
+            let flag = ctx.upload(bytemuck::cast_slice(&[0u32])).unwrap();
+            unscale_check_many(&ctx, &[(x0.raw(), x0_in.len()), (x1.raw(), x1_in.len())], factor, flag.raw())
+                .unwrap();
+            let got_flag: Vec<u32> = bytemuck::pod_collect_to_vec(&ctx.read(flag.raw(), 0, 4).unwrap());
+            let g0: Vec<f32> =
+                bytemuck::pod_collect_to_vec(&ctx.read(x0.raw(), 0, (x0_in.len() * 4) as u64).unwrap());
+            let g1: Vec<f32> =
+                bytemuck::pod_collect_to_vec(&ctx.read(x1.raw(), 0, (x1_in.len() * 4) as u64).unwrap());
+            (got_flag[0], g0, g1)
+        };
+        let (ms, m0_sg, m1_sg) = run_many(false);
+        let (mp, m0_fb, m1_fb) = run_many(true);
+        assert_eq!(ms, expect_many, "unscale_check_many sg flag factor={factor}");
+        assert_eq!(mp, expect_many, "unscale_check_many fb flag factor={factor}");
+        for (i, (&a, &b)) in m0_sg.iter().zip(&m0_fb).enumerate() {
+            assert!(
+                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                "unscale_many x0[{i}]: {a} vs {b}"
+            );
+        }
+        for (i, (&a, &b)) in m1_sg.iter().zip(&m1_fb).enumerate() {
+            assert!(
+                a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan()),
+                "unscale_many x1[{i}]: {a} vs {b}"
+            );
         }
     }
 }
