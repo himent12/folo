@@ -36,13 +36,14 @@ You need Rust stable (`rust-toolchain.toml` pins the channel and the components)
 the docs site: CI uses Node 22 for Studio and Node 24 for the site, whose scripts are TypeScript run by `node` itself.
 
 ```sh
-cargo folo doctor                         # builds the CLI (`cargo folo` = `cargo run --release -p folo-cli --`)
-cargo test --workspace                    # the engine, the server, the CLI
-cargo test -p folo-core                   # fast inner loop: test one crate while iterating
+cargo folo doctor                                     # builds the CLI (`cargo folo` = `cargo run --release -p folo-cli --`)
+cargo build --profile fast -p folo-cli                # fast local CLI/server rebuilds (no cross-crate LTO, incremental; target/fast/)
+cargo test --workspace                                # the engine, the server, the CLI
+cargo test -p folo-core                               # fast inner loop: test one crate while iterating
 bash tools/test-tmp.sh cargo test --workspace         # same as CI: fails on leftover top-level folo-* scratch dirs
 (cd web && npm ci && npm run check && npm test)       # FOLO Studio
 (cd apps/desktop && cargo test --workspace)           # FOLO Desktop and folo-ui: their own cargo workspace
-(cd site && npm ci && npm run check)                  # the docs site: every link, anchor and image in the Markdown
+(cd site && npm ci && npm run check && npm run build) # the docs site: every link, anchor, image and full build
 ```
 
 The GPU tests need a Vulkan, DX12 or Metal adapter and skip without one. CI's hosted runners have no GPU, so if your
@@ -55,8 +56,14 @@ and build directories isolated.
 
 - `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`.
 - `bash tools/file-size.sh`: no source file of 1000 lines or more. Split by responsibility, not by line count.
-- For `web/`: `npm run check` and `npm test`. For `apps/desktop/`: fmt, clippy and the tests in that workspace.
-- For any Markdown: `npm run check` in `site/`, which fails on a broken link or anchor.
+- For `web/`: `npm run check` and `npm test` (plus `npm run qa` for layout and load-fault checks on the production build).
+- For `apps/desktop/`: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` and
+  `cargo test --workspace` in that workspace (pass `--workspace` so `folo-ui` is checked alongside the app).
+- For `crates/folo-wasm/` (or its engine dependencies): install the `wasm32-unknown-unknown` target
+  (`rustup target add wasm32-unknown-unknown`) and the `wasm-bindgen-cli` version pinned in `Cargo.lock`, then run
+  `cargo clippy --target wasm32-unknown-unknown -p folo-wasm -- -D warnings`, `sh scripts/build-wasm.sh`, and
+  `npx --yes -p typescript@6.0 tsc -p crates/folo-wasm/demo/tsconfig.json`.
+- For any Markdown: `npm run check` and `npm run build` in `site/`, which fails on a broken link, anchor or image.
 - For a number in a chart: `node tools/charts/render.mjs` after changing `tools/charts/data.json`
   ([docs/BENCHMARKS.md, Charts](docs/BENCHMARKS.md#charts)); CI runs `node tools/charts/render.mjs --check`.
 

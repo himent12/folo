@@ -7,10 +7,10 @@ a filter that misses a dependency shows up there.
 | workflow | runs for | what it does |
 |---|---|---|
 | `ci.yml` | everything except `web/`, `site/`, `design/`, `apps/desktop/`, `docs/img/` and the other workflows (plus the few files in those folders that a Rust test reads: the package versions and Studio's command-line fixtures) | `rust (linux)`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace` with the ONNX parity test required. `rust (windows)`: clippy and the tests on the runner with a GPU, so the GPU tests run there |
-| `web.yml` | `web/`, `design/` | `check`: `npm ci`, `npm run check`, `npm test`. `qa (1/3)` to `qa (3/3)`: `npm run qa`, the layout checks on the production build (blank sections, overflow, covered controls and cut selects at tablet and phone sizes, and Overview at 1280 px, web/DESIGN_DIRECTION.md §6; the runner's Chrome, else Playwright's headless Chromium), a third of the states each (`FOLO_QA_SHARD`); the first shard also runs `scripts/load-faults.mjs` (Studio recovers from a stylesheet or the mock module that failed to load) |
+| `web.yml` | `web/`, `design/`, `tools/ci-retry*.sh` and `.github/workflows/web.yml` | `check`: `npm ci`, `tools/ci-retry-test.sh`, `npm run check`, `npm test`. `qa (1/3)` to `qa (3/3)`: `npm run qa`, the layout checks on the production build (blank sections, overflow, covered controls and cut selects at tablet and phone sizes, and Overview at 1280 px, web/DESIGN_DIRECTION.md §6; the runner's Chrome, else Playwright's headless Chromium), a third of the states each (`FOLO_QA_SHARD`); the first shard also runs `scripts/load-faults.mjs` (Studio recovers from a stylesheet or the mock module that failed to load) |
 | `site.yml` | every pull request (the Markdown links to files all over the repo; about 20 s) | `bash tools/file-size.sh` (no source file of 1000 lines or more, AGENTS.md), `node tools/charts/render.mjs --check` (the committed charts match their data, docs/BENCHMARKS.md, Charts), then the docs site: `npm ci && npm run check && npm run build` in `site/`, which fails on a broken link, anchor or image in the Markdown (site/README.md) |
-| `wasm.yml` | `crates/folo-wasm/` and the crates it depends on, `Cargo.toml`, `Cargo.lock`, `scripts/build-wasm.sh` | the browser build: `cargo clippy --target wasm32-unknown-unknown -p folo-wasm` and `scripts/build-wasm.sh` with the wasm-bindgen CLI matching `Cargo.lock` (docs/WASM.md) |
-| `desktop.yml` | `apps/desktop/` (the app and folo-ui), `design/`, the crates the app builds and the root `Cargo.toml` they inherit from | FOLO Desktop and folo-ui (below). `desktop (windows)`: fmt, clippy and the tests of both, again for folo-ui with its portable-text and winit features, and the temp-dir hygiene test. `desktop (linux)`: clippy and the tests, a headless screenshot, and folo-ui type-checked for macOS |
+| `wasm.yml` | `crates/folo-wasm/` and the crates it depends on, `Cargo.toml`, `Cargo.lock`, `.cargo/**`, `rust-toolchain.toml`, `scripts/build-wasm.sh` and `.github/workflows/wasm.yml` | the browser build: `cargo clippy --target wasm32-unknown-unknown -p folo-wasm -- -D warnings`, `scripts/build-wasm.sh` with the wasm-bindgen CLI matching `Cargo.lock` (docs/WASM.md), and `tsc -p crates/folo-wasm/demo/tsconfig.json` (Node 22) to type-check the documented JS API against the generated declarations |
+| `desktop.yml` | `apps/desktop/` (the app and folo-ui), `design/`, the crates the app builds, root `Cargo.toml`, `.cargo/**`, `tools/ci-retry.sh`, `tools/test-tmp.sh` and `.github/workflows/desktop.yml` | FOLO Desktop and folo-ui (below). `desktop (windows)`: fmt, clippy and the tests of both, again for folo-ui with its portable-text and winit features, and the temp-dir hygiene test. `desktop (linux)`: clippy and the tests, a headless screenshot, and folo-ui type-checked for macOS |
 
 ONNX export parity (docs/CLI.md, ONNX export) is part of `cargo test --workspace`: `crates/folo-cli/tests/onnx.rs`
 runs the exported graphs in onnxruntime and skips without a Python. `rust (linux)` gives it one (a Python 3.12 venv
@@ -25,7 +25,7 @@ bare `cargo test` there builds only the app.
   `--features portable-text,winit,test-support` (the cosmic-text backend the deterministic text tests use, and
   the winit backend, both opt-in on Windows); the tests of the workspace and of folo-ui with those features,
   through `tools/test-tmp.sh`; and the temp-dir hygiene test (ci.yml does not run for a change to the app alone).
-- **`desktop (linux)`**: clippy and the tests of the workspace on Linux, where the winit backend and cosmic-text are
+- **`desktop (linux)`**: clippy and the tests of the workspace (through `tools/test-tmp.sh`) on Linux, where the winit backend and cosmic-text are
   plain dependencies. Every test is headless, so no display is needed. Building needs no system package: wayland
   and Xlib are loaded at run time (`wayland-sys` and `tiny-xlib` on their `dlopen` features; pkg-config is only
   asked for the library folder and may be missing), `drm-sys` ships its bindings, and the only C code (ring, for
@@ -48,7 +48,8 @@ bare `cargo test` there builds only the app.
 - **The dev profile** (root `Cargo.toml`) builds folo-core, folo-nn, folo-data and folo-vision at `opt-level = 3`
   like the dependencies, because tests train and predict with them, and keeps only line tables as debug info
   (file and line in backtraces): less to generate and to link into each of the test binaries. FOLO Desktop's dev
-  profile does the same. On Windows, every build links with rust-lld, which ships with the toolchain (`linker` in
+  profile (`apps/desktop/Cargo.toml`) also keeps `opt-level = 1` with `debug = "line-tables-only"` for its workspace
+  crates and builds its dependencies at `opt-level = 2`. On Windows, every build links with rust-lld, which ships with the toolchain (`linker` in
   `.cargo/config.toml`), instead of link.exe; it needs no extra install on a runner (apps/desktop/README.md has
   the numbers).
 - **A new job needs a reason to run on every pull request.** Give a new part of the repo its own workflow with a
@@ -69,7 +70,7 @@ fails on any `std::env::temp_dir()` in a crate's `src/` or `tests/` (and in `app
 bypass the guard by accident. (Before this, `cargo test --workspace` runs left `folo-*` folders behind; 3,209 of them,
 about 20 GB, once filled a system drive.)
 
-CI runs `cargo test` (the `rust` jobs) through `tools/test-tmp.sh`. The script points `FOLO_TEST_TMP` and
+CI runs `cargo test` (the `rust` jobs in `ci.yml` and the `desktop` jobs in `desktop.yml`) through `tools/test-tmp.sh`. The script points `FOLO_TEST_TMP` and
 the temp dir itself (`TMPDIR`, `TMP`, `TEMP`) at a new `$RUNNER_TEMP/test-tmp.XXXXXX`, one per run, so concurrent runs
 never share it. Test files therefore land on the runner's work drive, not in the user's %TEMP%.
 After the run it fails the step, listing the entries, if any `folo-*` entry is left there. Because the temp dir is
@@ -96,7 +97,8 @@ WSL2 distribution (Self-hosted runners, below). Set a variable with
 
 Hosted jobs cache their build with `Swatinem/rust-cache` and the npm cache of `actions/setup-node`. Self-hosted jobs
 keep a persistent `CARGO_TARGET_DIR` outside the checkout, so incremental builds stay warm. That folder only grows, so
-on a self-hosted Linux runner `rust (linux)` starts from an empty one when the runner has under 20 GB free.
+on a self-hosted Linux runner `rust (linux)` and `desktop (linux)` start from an empty one when the runner has under
+20 GB free.
 
 The same variables drive every workflow, `release.yml` included (its Linux and Windows jobs, including the CLI
 build matrix that its `plan` job writes). Release builds are the exception to the persistent target dir: they always start

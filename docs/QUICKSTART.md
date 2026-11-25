@@ -77,7 +77,8 @@ folo val --model runs/shapes-n/weights/best.folo --data datasets/shapes
 `val` reports mAP50, mAP50-95, precision and recall, overall and per class, computed as pycocotools does
 ([METRICS.md](METRICS.md)). Add `--split test` to evaluate on a test split. On a COCO dataset, `--coco` adds the
 full COCOeval table (AP small / medium / large, AR); a YOLO dataset converts with `folo dataset convert`. `--half`
-runs `val` and `predict` in f16 on the GPU (`--tensor-cores` puts it on the tensor cores), within 0.002 mAP of f32.
+runs `val` and `predict` in f16 on the GPU (`--tensor-cores` puts it on the tensor cores), within 0.002 mAP of f32. On the CPU, `folo quantize` writes fused f32 weights with int8 calibration metadata (`<name>-int8.folo`) that `val`
+and `predict` run with `--precision int8` ([MODEL.md](MODEL.md) §9.6).
 
 ## 4. Train on your own data
 
@@ -124,7 +125,8 @@ Things to know:
   6.5 GFLOPs at 640; folo-s is 9.5 M and 21.6 GFLOPs.
 - **Small objects**: use a larger `--imgsz` (a multiple of 32) when targets are only a few pixels across at 640 px.
 - **Data loading**: with large JPEGs and mosaic, the data loader can set the pace. `--workers N` (default
-  `min(cores, 16)`) adds decode threads.
+  `min(cores, 16)`) adds decode threads, and `--cache ram` decodes and resizes each training image once into RAM
+  between epochs (refused up front if it does not fit).
 - **Device**: `--device cpu` or `--device gpu:<n>` pins the device. `gpu:<n>` without a usable adapter fails with
   `device_not_found` (exit 3), and the hint lists the devices this machine has.
 - **Mixed precision**: `--amp` trains with f16 activations on the GPU's tensor cores and f32 master weights, about
@@ -132,8 +134,9 @@ Things to know:
   machine without tensor cores it fails with `not_supported` (exit 4) before anything is written.
 - **NMS-free head**: `--head o2o` also trains a one-to-one head, so the model predicts end to end without NMS
   ([MODEL.md](MODEL.md) §6.6); `val`, `predict` and `export` use it automatically.
-- **Watching a run**: add `--json` and read stdout line by line. Each `epoch` record carries the validation metrics,
-  and the run ends with a `done` record that names the weights.
+- **Watching a run**: add `--json` and read stdout line by line (`--json-events epoch` omits per-batch `step`
+  records). Each `epoch` record carries the validation metrics, and the run ends with a `done` record that names the
+  weights.
 
 Two complete recipes with their results: [examples/shapes](../examples/shapes/README.md) (the convergence gate, CPU
 vs GPU) and [examples/coco](../examples/coco/README.md) (folo-n and folo-s pretrained from scratch on COCO 2017). The
@@ -194,7 +197,8 @@ folo export --model runs/shapes-n/weights/best.folo --format folo    # → best-
 folo export --model runs/shapes-n/weights/best.folo --format onnx    # → best.onnx (ONNX opset 17, f32)
 ```
 
-Export fuses BatchNorm into the convolutions and keeps only the EMA weights. The default `folo-f16` stores them as
+Export fuses BatchNorm into the convolutions and keeps only the EMA weights (`--format weights` writes unfused f32 EMA
+weights without optimizer state, for fine-tuning and publishing). The default `folo-f16` stores them as
 f16: 5.2 MB for folo-n, against 42 MB for the full checkpoint. Exports load anywhere a model is expected:
 `folo predict`, `folo val`, `folo serve`'s model list and the browser. `.folo` files are valid safetensors files
 ([FORMAT.md](FORMAT.md)).
@@ -202,7 +206,8 @@ f16: 5.2 MB for folo-n, against 42 MB for the full checkpoint. Exports load anyw
 `--format onnx` writes an ONNX graph for other runtimes (onnxruntime, TensorRT, OpenVINO, the CoreML converters):
 input `images: [1, 3, S, S]` (RGB in `[0, 1]`, `S` the model's imgsz), outputs the raw head `box_raw` / `cls_raw`.
 `--decode` puts the box decode in the graph (one `detections: [B, A, 4 + nc]` output: `x1 y1 x2 y2` in input pixels,
-then class scores; you still run NMS), `--dynamic` makes batch, height and width symbolic, `--half` writes f16. Class
+then class scores; you still run NMS; for an `--head o2o` model it outputs end-to-end `[B, K, 6]` detections without
+NMS), `--dynamic` makes batch, height and width symbolic, `--half` writes f16. Class
 names are in the model's metadata (`names`). Details: [CLI.md, ONNX export](CLI.md#onnx-export).
 
 ```sh
@@ -272,7 +277,9 @@ or, without WebGPU, on the wasm CPU (single-threaded, about 0.5 s) ([WASM.md](WA
 
 Everything above is also available to agents in two ways:
 - **MCP**: `folo mcp`, with 40 tools, `folo://` resources and prompts. It keeps its datasets and runs in the same
-  data dir as `folo serve` (`~/.folo` by default, `--data-dir` to change it). To register it:
+  data dir as `folo serve` (`~/.folo` by default, `--data-dir` to change it), or forwards every tool to a running
+  server with `--server http://127.0.0.1:7878` (or `FOLO_SERVER`). Pass `--read-only` to hide mutating tools and
+  `--confine` to restrict local input paths to `--data-dir`. To register it:
   `claude mcp add folo -- folo mcp` (or `codex mcp add folo -- folo mcp` / `agy mcp add folo -- folo mcp`).
 - **CLI**: any command with `--json`. stdout then carries JSON Lines only, and the exit codes are stable.
 
