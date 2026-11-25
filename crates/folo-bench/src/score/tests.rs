@@ -444,3 +444,199 @@ fn accuracy_by_hand() {
     // Precision / recall at best_conf (0.05): 5/7 and 1.
     assert!(close(e.accuracy.precision, 5.0 / 7.0) && close(e.accuracy.recall, 1.0));
 }
+
+/// Reference naive bootstrap using `Evaluator::add_image` per resample, to verify bit-exact parity.
+fn naive_bootstrap(images: &[Prepared], num_classes: usize, seed: u64, measured: f32) -> [f32; 2] {
+    let n = images.len();
+    if n == 0 {
+        return [0.0; 2];
+    }
+    let mut maps: Vec<f32> = (0..BOOTSTRAP_RESAMPLES)
+        .into_par_iter()
+        .map(|r| {
+            let mut rng = folo_core::rng::Rng::seed(crate::pixels::mix(seed ^ BOOTSTRAP_STREAM, r as u64));
+            let mut ev = Evaluator::new(num_classes);
+            for _ in 0..n {
+                let p = &images[rng.below(n as u64) as usize];
+                ev.add_image(&p.dets, &p.truths);
+            }
+            ev.compute().map50_95
+        })
+        .collect();
+    maps.sort_by(f32::total_cmp);
+    let mean = maps.iter().map(|&m| m as f64).sum::<f64>() / maps.len() as f64;
+    let shift = measured as f64 - mean;
+    let at = |q: f64| (percentile(&maps, q) as f64 + shift).clamp(0.0, 1.0) as f32;
+    [at(0.025).min(measured), at(0.975).max(measured)]
+}
+
+#[test]
+fn fast_bootstrap_matches_evaluator_reference_bit_exact() {
+    let mut rng = folo_core::rng::Rng::seed(99);
+    // 1. Scored multi-class dataset with continuous scores, empty images, rare classes, and >100 dets in one class.
+    let mut scored_samples: Vec<Sample> = (0..32)
+        .map(|i| {
+            let truths: Vec<BBox> = if i % 7 == 0 {
+                vec![]
+            } else {
+                (0..4)
+                    .map(|_| {
+                        let (x, y) = (rng.uniform(0.0, 200.0), rng.uniform(0.0, 200.0));
+                        let (w, h) = (rng.uniform(10.0, 40.0), rng.uniform(10.0, 40.0));
+                        t(rng.below(5) as u32, x, y, x + w, y + h)
+                    })
+                    .collect()
+            };
+            let mut detections = Vec::new();
+            for gt in &truths {
+                if rng.bernoulli(0.75) {
+                    detections.push(d(
+                        gt.class,
+                        rng.uniform(0.15, 0.99),
+                        gt.x1 + rng.uniform(-3.0, 3.0),
+                        gt.y1 + rng.uniform(-3.0, 3.0),
+                        gt.x2 + rng.uniform(-3.0, 3.0),
+                        gt.y2 + rng.uniform(-3.0, 3.0),
+                    ));
+                }
+            }
+            for _ in 0..8 {
+                let (x, y) = (rng.uniform(0.0, 200.0), rng.uniform(0.0, 200.0));
+                detections.push(d(rng.below(5) as u32, rng.uniform(0.01, 0.8), x, y, x + 20.0, y + 20.0));
+            }
+            Sample { truths, detections }
+        })
+        .collect();
+    // Rare class 5 only on one image + >100 detections of class 0 on image 1 to exercise maxDets=100 cap.
+    scored_samples[3].truths.push(t(5, 10.0, 10.0, 30.0, 30.0));
+    for k in 0..115 {
+        scored_samples[1].detections.push(d(0, 0.01 + k as f32 * 0.005, 5.0, 5.0, 15.0, 15.0));
+    }
+
+    // 2. Quantized scores (deliberate cross-image & within-image ties with differing TP/FP).
+    let mut tied_samples = scored_samples.clone();
+    for s in &mut tied_samples {
+        for det in &mut s.detections {
+            det.score = (det.score * 5.0).round() / 5.0;
+        }
+    }
+
+    for (label, samples, scored) in [
+        ("scored", &scored_samples, true),
+        ("tied_scores", &tied_samples, true),
+        ("unscored", &scored_samples, false),
+    ] {
+        let images = prepare_all(samples, 6, scored);
+        let rep = report(images.par_iter(), 6);
+        let fast = bootstrap(&images, 6, 42, rep.map50_95);
+        let want = naive_bootstrap(&images, 6, 42, rep.map50_95);
+        assert_eq!(
+            (fast[0].to_bits(), fast[1].to_bits()),
+            (want[0].to_bits(), want[1].to_bits()),
+            "{label}: fast={fast:?} want={want:?}"
+        );
+    }
+}
+
+#[test]
+fn class_indexed_match_image_and_parallel_coco_match_reference() {
+    fn naive_match(dets: &[Detection], truths: &[Truth]) -> (Vec<Option<f64>>, usize) {
+        let mut order: Vec<usize> = (0..dets.len()).collect();
+        order.sort_by(|&a, &b| {
+            dets[a].class.cmp(&dets[b].class).then(dets[b].score.total_cmp(&dets[a].score))
+        });
+        let mut taken = vec![false; truths.len()];
+        let mut out = vec![None; dets.len()];
+        let mut matched = 0;
+        for &d in &order {
+            let (mut best, mut m) = (MATCH_IOU, None);
+            for (g, t) in truths.iter().enumerate() {
+                if taken[g] || t.class != dets[d].class {
+                    continue;
+                }
+                let a = &dets[d].bbox;
+                let b = &t.bbox;
+                let w = (a.x2 as f64).min(b.x2 as f64) - (a.x1 as f64).max(b.x1 as f64);
+                let h = (a.y2 as f64).min(b.y2 as f64) - (a.y1 as f64).max(b.y1 as f64);
+                let v = if w <= 0.0 || h <= 0.0 {
+                    0.0
+                } else {
+                    let inter = w * h;
+                    let aa = (a.x2 as f64 - a.x1 as f64) * (a.y2 as f64 - a.y1 as f64);
+                    let ba = (b.x2 as f64 - b.x1 as f64) * (b.y2 as f64 - b.y1 as f64);
+                    inter / (aa + ba - inter)
+                };
+                if v >= best {
+                    best = v;
+                    m = Some(g);
+                }
+            }
+            if let Some(g) = m {
+                taken[g] = true;
+                matched += 1;
+                out[d] = Some(best);
+            }
+        }
+        (out, matched)
+    }
+
+    let mut rng = folo_core::rng::Rng::seed(123);
+    let samples: Vec<Sample> = (0..130)
+        .map(|_| {
+            let truths: Vec<BBox> = (0..6)
+                .map(|_| {
+                    let (x, y) = (rng.uniform(0.0, 200.0), rng.uniform(0.0, 200.0));
+                    let (w, h) = (rng.uniform(8.0, 120.0), rng.uniform(8.0, 120.0));
+                    t(rng.below(10) as u32, x, y, x + w, y + h)
+                })
+                .collect();
+            let mut detections: Vec<BenchDetection> = truths
+                .iter()
+                .map(|gt| d(gt.class, (rng.below(5) as f32) * 0.25, gt.x1 + 1.0, gt.y1, gt.x2, gt.y2))
+                .collect();
+            for _ in 0..10 {
+                let (x, y) = (rng.uniform(0.0, 200.0), rng.uniform(0.0, 200.0));
+                detections.push(d(rng.below(10) as u32, rng.uniform(0.0, 1.0), x, y, x + 20.0, y + 20.0));
+            }
+            Sample { truths, detections }
+        })
+        .collect();
+    let images = prepare_all(&samples, 10, true);
+    for (i, p) in images.iter().enumerate() {
+        let got = match_image(&p.dets, &p.truths);
+        let want = naive_match(&p.dets, &p.truths);
+        assert_eq!(got, want, "match_image mismatch at image {i}");
+    }
+
+    let par_coco = coco_report(&images, 10);
+    let mut seq = CocoEval::new(10);
+    for (i, p) in images.iter().enumerate() {
+        let truths: Vec<CocoTruth> = p.truths.iter().map(|t| CocoTruth::from_box(t.bbox, t.class)).collect();
+        seq.add_image(i as u64, &p.dets, &truths);
+    }
+    let seq_coco = seq.compute();
+    assert_eq!(par_coco.as_array().map(f64::to_bits), seq_coco.as_array().map(f64::to_bits));
+}
+
+#[test]
+fn o1_bin_lookups_match_linear_scan_at_every_edge() {
+    let linear_conf = |s: f32| (1..BINS).filter(|&k| s >= k as f32 / BINS as f32).count();
+    let linear_iou = |v: f64| (1..BINS).filter(|&k| v >= (50 + 5 * k) as f64 / 100.0).count();
+
+    for k in 0..=BINS {
+        let c = k as f32 / BINS as f32;
+        for s in [c.next_down(), c, c.next_up()] {
+            assert_eq!(conf_bin(s), linear_conf(s), "conf_bin({s:?})");
+        }
+        let v = (50 + 5 * k) as f64 / 100.0;
+        for u in [v.next_down(), v, v.next_up()] {
+            assert_eq!(iou_bin(u), linear_iou(u), "iou_bin({u:?})");
+        }
+    }
+    for s in [-1.0f32, -0.0, 0.0, 1.0, 2.0, f32::NAN] {
+        assert_eq!(conf_bin(s), linear_conf(s), "conf_bin({s:?})");
+    }
+    for v in [-1.0f64, 0.0, 0.499999, 0.5, 1.0, 1.5, f64::NAN] {
+        assert_eq!(iou_bin(v), linear_iou(v), "iou_bin({v:?})");
+    }
+}
