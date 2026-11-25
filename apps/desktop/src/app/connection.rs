@@ -134,6 +134,8 @@ impl FoloApp {
         self.model_search.update(cx, |i, cx| i.set_text("", cx));
         self.bench_search.update(cx, |i, cx| i.set_text("", cx));
         self.model_classes_expanded.clear();
+        self.class_table_sort = None;
+        self.exporting.clear();
         self.log_filter = super::LogFilter::All;
         self.log_search.update(cx, |i, cx| i.set_text("", cx));
         self.log_cache.clear();

@@ -9,7 +9,7 @@ use folo_ui::{
 };
 
 use crate::api::{InferThroughput, Model, ModelEval, ModelSource, Run, RunStatus, ThroughputSource, time};
-use crate::app::{FoloApp, act};
+use crate::app::{FoloApp, Route, act};
 use crate::store::Load;
 use crate::theme::{Theme, radius, theme, ty};
 use crate::ui::*;
@@ -144,6 +144,43 @@ fn value_with(t: &Theme, s: impl Into<String>, faint: impl Into<String>) -> folo
 }
 
 impl FoloApp {
+    /// A compact clickable link inside the Details panel, navigating to a related run, dataset or
+    /// parent model.
+    fn details_link(
+        &self,
+        t: &Theme,
+        key: &'static str,
+        label: String,
+        route: Route,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let el = div()
+            .id(key)
+            .max_w_full()
+            .min_w_0()
+            .px(px(4.))
+            .mx(px(-4.))
+            .rounded(px(radius::SM))
+            .cursor_pointer()
+            .hover(|s| s.bg(t.bg_hover))
+            .active(|s| s.bg(t.bg_active))
+            .flex()
+            .items_center()
+            .gap(px(3.))
+            .child(text(ty::SM, t.text_primary).min_w_0().ellipsis().child(label))
+            .child(icon("icons/arrow-up-right.svg", 11., t.text_tertiary));
+        self.bind(
+            el,
+            key,
+            radius::SM,
+            window,
+            cx,
+            act(move |this, w, cx| this.navigate(route.clone(), w, cx)),
+        )
+        .into_any_element()
+    }
+
     pub(super) fn details_panel(
         &mut self,
         m: &Model,
@@ -316,49 +353,121 @@ impl FoloApp {
                 .into_any_element(),
         );
         let ds = run.as_ref().map(|r| self.store.run_dataset_name(r));
-        fact(
-            "Source",
-            match (&run, m.source) {
-                (Some(r), _) => match ds.filter(|d| !d.is_empty()) {
-                    Some(d) => value_with(&t, r.name.clone(), format!("on {d}")).into_any_element(),
-                    None => value(&t, r.name.clone()).into_any_element(),
-                },
-                (None, Some(ModelSource::Published)) => match &m.about {
-                    Some(a) => value_with(&t, "Published weights", a.clone()).into_any_element(),
-                    None => value(&t, "Published weights").into_any_element(),
-                },
-                (None, _) if m.run_id.is_some() => {
-                    value(&t, m.run_id.clone().unwrap_or_default()).into_any_element()
+        let source_val: AnyElement = match (&run, m.source) {
+            (Some(r), _) => {
+                let run_link = self.details_link(
+                    &t,
+                    "model-details-run-link",
+                    r.name.clone(),
+                    Route::Run(r.id.clone()),
+                    window,
+                    cx,
+                );
+                match ds.filter(|d| !d.is_empty()) {
+                    Some(d) => {
+                        let ds_el: AnyElement = if self.store.dataset_summary(&r.config.dataset_id).is_some()
+                        {
+                            self.details_link(
+                                &t,
+                                "model-details-train-ds-link",
+                                d,
+                                Route::Dataset(r.config.dataset_id.clone()),
+                                window,
+                                cx,
+                            )
+                        } else {
+                            text(ty::SM, t.text_tertiary).whitespace_normal().child(d).into_any_element()
+                        };
+                        div()
+                            .w_full()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_end()
+                            .gap_x(px(4.))
+                            .child(run_link)
+                            .child(text(ty::SM, t.text_tertiary).child("on"))
+                            .child(ds_el)
+                            .into_any_element()
+                    }
+                    None => div().w_full().flex().justify_end().child(run_link).into_any_element(),
                 }
-                _ => value(&t, "Imported .folo file").into_any_element(),
+            }
+            (None, Some(ModelSource::Published)) => match &m.about {
+                Some(a) => value_with(&t, "Published weights", a.clone()).into_any_element(),
+                None => value(&t, "Published weights").into_any_element(),
             },
-        );
+            (None, _) if m.run_id.is_some() => {
+                value(&t, m.run_id.clone().unwrap_or_default()).into_any_element()
+            }
+            _ => value(&t, "Imported .folo file").into_any_element(),
+        };
+        fact("Source", source_val);
         // What the curves, the class table and the matrix were measured on.
         let evaluated = ev
             .and_then(|e| {
-                e.dataset_name
-                    .clone()
-                    .zip(e.split.map(|s| s.as_str()))
-                    .map(|(d, s)| (d, s, Some(e.images as u64)))
+                e.dataset_name.clone().zip(e.split.map(|s| s.as_str())).map(|(d, s)| {
+                    let id = e
+                        .dataset_id
+                        .as_deref()
+                        .filter(|id| self.store.dataset_summary(id).is_some())
+                        .map(str::to_string);
+                    (id, d, s, Some(e.images as u64))
+                })
             })
             .or_else(|| {
                 run.as_ref().and_then(|r| self.store.dataset_summary(&r.config.dataset_id)).map(|d| {
                     (
+                        Some(d.id.clone()),
                         d.name.clone(),
                         if d.splits.val == 0 { "train" } else { "val" },
                         ev.map(|e| e.images as u64),
                     )
                 })
             });
-        if let Some((d, s, n)) = evaluated {
-            fact("Evaluated on", value(&t, split_label(&d, s, n)).into_any_element());
+        if let Some((ds_id, d, s, n)) = evaluated {
+            let label = split_label(&d, s, n);
+            let el = match ds_id {
+                Some(id) => div()
+                    .w_full()
+                    .flex()
+                    .justify_end()
+                    .child(self.details_link(
+                        &t,
+                        "model-details-eval-ds-link",
+                        label,
+                        Route::Dataset(id),
+                        window,
+                        cx,
+                    ))
+                    .into_any_element(),
+                None => value(&t, label).into_any_element(),
+            };
+            fact("Evaluated on", el);
         }
-        // What the run started from: a model by name, or nothing (from scratch).
+        // What the run started from: a model by name (clickable when still present), or nothing.
         if let Some(r) = &run {
-            let from = r.config.weights.as_deref().map_or("from scratch (random weights)".to_string(), |w| {
-                self.store.model(w).map_or(w.to_string(), |p| p.name.clone())
-            });
-            fact("Started from", value(&t, from).into_any_element());
+            let el = match r.config.weights.as_deref() {
+                None => value(&t, "from scratch (random weights)").into_any_element(),
+                Some(w) => match self.store.model(w) {
+                    Some(p) if p.id != m.id => div()
+                        .w_full()
+                        .flex()
+                        .justify_end()
+                        .child(self.details_link(
+                            &t,
+                            "model-details-parent-link",
+                            p.name.clone(),
+                            Route::Model(p.id.clone()),
+                            window,
+                            cx,
+                        ))
+                        .into_any_element(),
+                    Some(p) => value(&t, p.name.clone()).into_any_element(),
+                    None => value(&t, w.to_string()).into_any_element(),
+                },
+            };
+            fact("Started from", el);
         }
         fact(
             "Model id",

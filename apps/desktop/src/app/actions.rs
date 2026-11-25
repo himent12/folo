@@ -494,25 +494,35 @@ impl FoloApp {
 
     pub fn export_model(&mut self, id: String, format: &'static str, cx: &mut Context<Self>) {
         self.export_open = false;
+        // `fetch` is a no-op while a connection switch holds requests: don't strand an in-flight flag.
+        if self.hold_loading || !self.exporting.insert((id.clone(), format)) {
+            cx.notify();
+            return;
+        }
+        cx.notify();
+        let req_id = id.clone();
         self.fetch(
             cx,
-            move |api| api.export_model(&id, format),
-            |this, r, cx| match r {
-                Ok(res) => {
-                    let (v, u) = bytes(res.bytes);
-                    let path = res.path.clone();
-                    this.toast_with(
-                        Tone::Success,
-                        "Export complete",
-                        Some(format!("{} · {v} {u}", display_path(&res.path)).into()),
-                        Some((
-                            "Show in folder".into(),
-                            act(move |_, _, cx| cx.reveal_path(std::path::Path::new(&path))),
-                        )),
-                        cx,
-                    );
+            move |api| api.export_model(&req_id, format),
+            move |this, r, cx| {
+                this.exporting.remove(&(id, format));
+                match r {
+                    Ok(res) => {
+                        let (v, u) = bytes(res.bytes);
+                        let path = res.path.clone();
+                        this.toast_with(
+                            Tone::Success,
+                            "Export complete",
+                            Some(format!("{} · {v} {u}", display_path(&res.path)).into()),
+                            Some((
+                                "Show in folder".into(),
+                                act(move |_, _, cx| cx.reveal_path(std::path::Path::new(&path))),
+                            )),
+                            cx,
+                        );
+                    }
+                    Err(e) => this.toast(Tone::Danger, "Export failed", Some(e.message.into()), cx),
                 }
-                Err(e) => this.toast(Tone::Danger, "Export failed", Some(e.message.into()), cx),
             },
         );
     }
