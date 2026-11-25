@@ -270,6 +270,12 @@ pub struct Inspector {
     pub pan: (f32, f32),
     pub drag_from: Option<(folo_ui::Point<Pixels>, (f32, f32))>,
     pub hover_box: Option<usize>,
+    /// Box zoomed onto via clicking a label/prediction row (clicking again resets to fit).
+    pub focused_box: Option<usize>,
+    /// Whether bounding boxes are drawn on the stage (`B` toggles).
+    pub boxes: bool,
+    /// Whether label chips are drawn on bounding boxes (`L` toggles).
+    pub labels: bool,
     /// An image to land on once the dataset's image list is in (opened from a run's sample).
     pub want: Option<String>,
     /// The image last shown and the filter/sort/list state it was shown under (class, empty-only,
