@@ -1,20 +1,30 @@
 // @vitest-environment happy-dom
-// Verifies AddEntryDialog offloads external predictions JSON parsing to a Web Worker and terminates it on re-pick, close, and unmount.
+// Verifies AddEntryDialog offloads external predictions JSON parsing to a Web Worker, coordinates in-flight
+// image ID loading, ignores stale worker replies, and terminates workers on re-pick, submit, close, and unmount.
 import { createRoot, flush as flushSync, signal } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, type Rendered } from '../../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
-import type { Bench } from '$lib/api/types';
-import { runExternalParseRequest, type ExternalParseRequest, type ExternalParseResponse } from '$lib/bench/externalWorker';
+import type { Bench, BenchImagePage } from '$lib/api/types';
+import {
+  createExternalWorkerHandler,
+  dispatchExternalWorkerMessage,
+  type ExternalWorkerRequest,
+  type ExternalWorkerResponse,
+} from '$lib/bench/externalWorker';
 import { AgentChoice } from '../label/agentChoice';
 import AddEntryDialog from './AddEntryDialog';
 
 interface RecordedWorker {
-  posted: ExternalParseRequest[];
+  posted: ExternalWorkerRequest[];
   terminated: boolean;
-  deliver: (res: ExternalParseResponse) => void;
+  /** Manually delivers an arbitrary message (even after termination, to verify stale-reply guards). */
+  deliver: (res: ExternalWorkerResponse) => void;
+  /** Executes the real worker handler for the last posted request and delivers its response. */
   runAndDeliver: () => Promise<void>;
+  /** Automatically answers every subsequent request using the real worker handler. */
+  enableAutoAnswer: () => void;
 }
 
 let target: HTMLElement;
@@ -28,7 +38,9 @@ function installMockWorker() {
   originalWorker = globalThis.Worker;
   class StubWorker {
     readonly listeners = new Map<string, Set<(ev: unknown) => void>>();
+    readonly handler = createExternalWorkerHandler();
     readonly rec: RecordedWorker;
+    autoAnswer = false;
 
     constructor() {
       const rec: RecordedWorker = {
@@ -40,16 +52,29 @@ function installMockWorker() {
         runAndDeliver: async () => {
           const req = rec.posted.at(-1);
           if (!req) return;
-          const res = await runExternalParseRequest(req);
-          rec.deliver(res);
+          await dispatchExternalWorkerMessage(
+            { postMessage: (res) => rec.deliver(res) },
+            this.handler,
+            req,
+          );
+        },
+        enableAutoAnswer: () => {
+          this.autoAnswer = true;
         },
       };
       this.rec = rec;
       spawned.push(rec);
     }
 
-    postMessage(req: ExternalParseRequest) {
+    postMessage(req: ExternalWorkerRequest) {
       this.rec.posted.push(req);
+      if (this.autoAnswer) {
+        void dispatchExternalWorkerMessage(
+          { postMessage: (res) => this.rec.deliver(res) },
+          this.handler,
+          req,
+        );
+      }
     }
 
     terminate() {
@@ -72,10 +97,15 @@ function installMockWorker() {
   vi.stubGlobal('Worker', StubWorker);
 }
 
-async function settle(rounds = 8) {
-  for (let i = 0; i < rounds; i++) {
-    await new Promise((r) => setTimeout(r, 0));
+/** Polls via microtasks/immediates until `cond()` becomes truthy (no fixed timer-turn counts). */
+async function until<T>(cond: () => T | null | undefined | false, label: string): Promise<T> {
+  const deadline = performance.now() + 3000;
+  for (;;) {
     flushSync();
+    const v = cond();
+    if (v) return v;
+    if (performance.now() > deadline) throw new Error(`Timed out waiting for ${label}`);
+    await new Promise((r) => setImmediate(r));
   }
 }
 
@@ -108,14 +138,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function mountDialog() {
+async function mountDialog(opts: { interceptBenchImages?: (id: string) => Promise<BenchImagePage> } = {}) {
   const bench: Bench = await hub.api.bench('bn_9f03');
   const models = await hub.api.models();
   const agents = await hub.api.labelAgents();
   const entries = await hub.api.benchEntries('bn_9f03');
   const catalog = await hub.api.benchCatalog();
-  const images = (await hub.api.benchImages('bn_9f03', { limit: 1000 })).images;
-  const validJson = JSON.stringify(images.map((i) => ({ image: i.id, boxes: i.boxes.map((b) => ({ ...b, score: 0.8 })) })));
+  const imagesPage = await hub.api.benchImages('bn_9f03', { limit: 1000 });
+  const validJson = JSON.stringify(imagesPage.images.map((i) => ({ image: i.id, boxes: i.boxes.map((b) => ({ ...b, score: 0.8 })) })));
+
+  if (opts.interceptBenchImages) {
+    vi.spyOn(hub.api, 'benchImages').mockImplementation((id) => opts.interceptBenchImages!(id));
+  }
 
   let choice!: AgentChoice;
   stopRoot = createRoot((dispose) => {
@@ -125,6 +159,7 @@ async function mountDialog() {
 
   const isOpen = signal(true);
   const kind = signal<'model' | 'agent' | 'external'>('external');
+  const onstarted = vi.fn();
   c = render(
     () => (
       <AddEntryDialog
@@ -139,65 +174,123 @@ async function mountDialog() {
         agentsError={undefined}
         retryAgents={() => {}}
         choice={choice}
-        onstarted={() => {}}
+        onstarted={onstarted}
       />
     ),
     target,
   );
   flushSync();
-  await settle();
-  return { isOpen, validJson };
+  return { isOpen, validJson, imagesPage, onstarted };
 }
 
 describe('AddEntryDialog worker offloading', () => {
-  it('parses an external file in a Worker, shows the summary, and terminates the worker on completion', async () => {
-    const { validJson } = await mountDialog();
+  it('parses in a Worker, submits through the worker session, and terminates the worker when the dialog closes', async () => {
+    const { validJson, onstarted } = await mountDialog();
     selectFile(new File([validJson], 'worker-model-predictions.json', { type: 'application/json' }));
-    await settle();
 
-    expect(spawned).toHaveLength(1);
-    expect(spawned[0]!.terminated).toBe(false);
+    const worker = await until(() => spawned[0], 'first worker spawned');
+    expect(worker.terminated).toBe(false);
     expect(document.querySelector('.f-state.busy')).not.toBeNull();
 
-    await spawned[0]!.runAndDeliver();
-    await settle();
-
-    expect(spawned[0]!.terminated).toBe(true);
-    expect(document.querySelector('.f-state.ok')).not.toBeNull();
+    await worker.runAndDeliver();
+    await until(() => document.querySelector('.f-state.ok'), 'validation summary shown');
     expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.value).toBe('worker-model');
+    // Session stays alive while dialog is open so submit can stream predictions from the worker.
+    expect(worker.terminated).toBe(false);
+
+    worker.enableAutoAnswer();
+    const form = document.querySelector<HTMLFormElement>('dialog[open] form')!;
+    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await until(() => onstarted.mock.calls.length > 0, 'entry submitted');
+    expect(onstarted).toHaveBeenCalledWith(expect.objectContaining({ status: 'done', name: 'worker-model' }));
+    expect(worker.terminated).toBe(true);
   });
 
-  it('terminates the previous worker immediately on re-upload and on dialog close', async () => {
+  it('terminates the previous worker on re-upload, ignores its late reply, and terminates on dialog close', async () => {
     const { isOpen, validJson } = await mountDialog();
 
-    selectFile(new File([validJson], 'first.json', { type: 'application/json' }));
-    await settle();
-    expect(spawned).toHaveLength(1);
-    expect(spawned[0]!.terminated).toBe(false);
+    selectFile(new File([validJson], 'first-predictions.json', { type: 'application/json' }));
+    const w1 = await until(() => spawned[0], 'worker #1 spawned');
+    expect(w1.terminated).toBe(false);
 
     // Picking a second file cancels and terminates worker #1 immediately.
-    selectFile(new File([validJson], 'second.json', { type: 'application/json' }));
-    await settle();
-    expect(spawned).toHaveLength(2);
-    expect(spawned[0]!.terminated).toBe(true);
-    expect(spawned[1]!.terminated).toBe(false);
+    const invalidJson = JSON.stringify({
+      predictions: [{ image: '1', boxes: [{ class: 99, x1: 0, y1: 0, x2: 4, y2: 4 }] }],
+    });
+    selectFile(new File([invalidJson], 'second-predictions.json', { type: 'application/json' }));
+    const w2 = await until(() => spawned[1], 'worker #2 spawned');
+    expect(w1.terminated).toBe(true);
+    expect(w2.terminated).toBe(false);
+
+    // Even if worker #1 delivers a late valid reply after worker #2 started, it must not overwrite state.
+    w1.deliver({
+      type: 'parsed',
+      id: 1,
+      ok: true,
+      summary: { images: 2, conditions: [], missing: [], boxes: 1, scores: true },
+      totalRecords: 2,
+      partsCount: 0,
+    });
+    flushSync();
+    expect(document.querySelector('.f-state.ok')).toBeNull();
+    expect(document.querySelector('.f-state.busy')).not.toBeNull();
 
     // Closing the dialog terminates worker #2 immediately.
     isOpen.set(false);
     flushSync();
-    expect(spawned[1]!.terminated).toBe(true);
+    expect(w2.terminated).toBe(true);
   });
 
-  it('terminates an in-flight worker when the dialog unmounts', async () => {
+  it('terminates an in-flight worker and an active validated session when the dialog unmounts', async () => {
     const { validJson } = await mountDialog();
 
     selectFile(new File([validJson], 'unmount.json', { type: 'application/json' }));
-    await settle();
-    expect(spawned).toHaveLength(1);
-    expect(spawned[0]!.terminated).toBe(false);
+    const worker = await until(() => spawned[0], 'worker spawned');
+    await worker.runAndDeliver();
+    await until(() => document.querySelector('.f-state.ok'), 'validated state');
+    expect(worker.terminated).toBe(false);
 
     c!.unmount();
     c = undefined;
-    expect(spawned[0]!.terminated).toBe(true);
+    expect(worker.terminated).toBe(true);
+  });
+
+  it('waits for an in-flight benchImages request before validating, and still validates if benchImages fails', async () => {
+    let resolveImages!: (page: BenchImagePage) => void;
+    const deferred = new Promise<BenchImagePage>((res) => (resolveImages = res));
+    const { imagesPage } = await mountDialog({ interceptBenchImages: () => deferred });
+
+    // Pick a file with an unknown image ID while benchImages is still in flight.
+    const unknownImageJson = JSON.stringify([{ image: 'unknown-img-id', boxes: [] }]);
+    selectFile(new File([unknownImageJson], 'early.json', { type: 'application/json' }));
+    await until(() => document.querySelector('.f-state.busy'), 'reading state');
+    // Worker has not started validating with null imageIds yet.
+    expect(spawned).toHaveLength(0);
+
+    // Resolve benchImages: worker now starts with the full imageIds list and rejects the unknown image ID.
+    resolveImages(imagesPage);
+    const worker = await until(() => spawned[0], 'worker spawned after benchImages resolved');
+    const req = worker.posted[0]!;
+    expect(req.type === 'parse' && req.ctx.imageIds).toEqual(imagesPage.images.map((i) => i.id));
+    await worker.runAndDeliver();
+    const bad = await until(() => document.querySelector('.f-state.bad'), 'unknown image rejected');
+    expect(bad.textContent).toMatch(/has no image "unknown-img-id"/);
+
+    // Now verify that when benchImages fails, partial validation (imageIds: null) still proceeds.
+    c!.unmount();
+    c = undefined;
+    stopRoot?.();
+    stopRoot = undefined;
+    spawned = [];
+
+    const { validJson } = await mountDialog({
+      interceptBenchImages: () => Promise.reject(new Error('offline')),
+    });
+    selectFile(new File([validJson], 'partial.json', { type: 'application/json' }));
+    const wPartial = await until(() => spawned[0], 'worker spawned with null imageIds');
+    const partialReq = wPartial.posted[0]!;
+    expect(partialReq.type === 'parse' && partialReq.ctx.imageIds).toBeNull();
+    await wPartial.runAndDeliver();
+    await until(() => document.querySelector('.f-state.ok'), 'partial validation succeeded');
   });
 });

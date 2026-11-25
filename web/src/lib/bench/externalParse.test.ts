@@ -1,9 +1,14 @@
-// Unit tests for worker-offloaded external benchmark predictions parsing, fallback behavior, and cancellation.
+// Unit tests for worker-offloaded external benchmark predictions parsing, bounded part streaming, fallback, and cancellation.
 import { describe, expect, it, vi } from 'vitest';
-import type { BenchPlan } from '../api/types';
-import type { PredictionContext } from './external';
+import type { BenchEntry, BenchPlan } from '../api/types';
+import { sendExternal, type ExternalSender, type PredictionContext } from './external';
 import { isAbortError, parseExternalPredictionsFile, type ExternalParseWorker } from './externalParse';
-import { runExternalParseRequest, type ExternalParseRequest, type ExternalParseResponse } from './externalWorker';
+import {
+  createExternalWorkerHandler,
+  dispatchExternalWorkerMessage,
+  type ExternalWorkerRequest,
+  type ExternalWorkerResponse,
+} from './externalWorker';
 
 const plan: BenchPlan = {
   conditions: [
@@ -20,10 +25,11 @@ const ctx: PredictionContext = {
   names: { haze: 'Haze', jpeg: 'JPEG compression', low_light: 'Low light' },
 };
 
-const validJson = JSON.stringify([
+const validRecords = [
   { image: '1', boxes: [{ class: 0, score: 0.9, x1: 1, y1: 2, x2: 30, y2: 40 }] },
   { image: '2', boxes: [] },
-]);
+];
+const validJson = JSON.stringify(validRecords);
 
 const invalidJson = JSON.stringify({
   predictions: [{ image: '1', boxes: [{ class: 9, score: 0.5, x1: 0, y1: 0, x2: 10, y2: 10 }] }],
@@ -31,16 +37,17 @@ const invalidJson = JSON.stringify({
 
 /** Minimal in-process fake Worker that lets tests control message/error delivery and inspect termination. */
 class FakeWorker implements ExternalParseWorker {
-  readonly posted: ExternalParseRequest[] = [];
+  readonly posted: ExternalWorkerRequest[] = [];
+  readonly responses: ExternalWorkerResponse[] = [];
   terminated = false;
   readonly listeners = {
-    message: new Set<(ev: MessageEvent<ExternalParseResponse>) => void>(),
+    message: new Set<(ev: MessageEvent<ExternalWorkerResponse>) => void>(),
     error: new Set<(ev: Event) => void>(),
     messageerror: new Set<(ev: Event) => void>(),
   };
-  onPost?: (req: ExternalParseRequest, worker: FakeWorker) => void;
+  onPost?: (req: ExternalWorkerRequest, worker: FakeWorker) => void;
 
-  postMessage(message: ExternalParseRequest) {
+  postMessage(message: ExternalWorkerRequest) {
     this.posted.push(message);
     this.onPost?.(message, this);
   }
@@ -49,75 +56,145 @@ class FakeWorker implements ExternalParseWorker {
     this.terminated = true;
   }
 
-  addEventListener(type: 'message', listener: (ev: MessageEvent<ExternalParseResponse>) => void): void;
+  addEventListener(type: 'message', listener: (ev: MessageEvent<ExternalWorkerResponse>) => void): void;
   addEventListener(type: 'error' | 'messageerror', listener: (ev: Event) => void): void;
   addEventListener(type: 'message' | 'error' | 'messageerror', listener: unknown): void {
     (this.listeners[type] as Set<unknown>).add(listener);
   }
 
-  removeEventListener(type: 'message', listener: (ev: MessageEvent<ExternalParseResponse>) => void): void;
+  removeEventListener(type: 'message', listener: (ev: MessageEvent<ExternalWorkerResponse>) => void): void;
   removeEventListener(type: 'error' | 'messageerror', listener: (ev: Event) => void): void;
   removeEventListener(type: 'message' | 'error' | 'messageerror', listener: unknown): void {
     (this.listeners[type] as Set<unknown>).delete(listener);
   }
 
-  emitMessage(data: ExternalParseResponse) {
-    const ev = { data } as MessageEvent<ExternalParseResponse>;
+  emitMessage(data: ExternalWorkerResponse) {
+    this.responses.push(data);
+    const ev = { data } as MessageEvent<ExternalWorkerResponse>;
     for (const fn of [...this.listeners.message]) fn(ev);
   }
 
   emitError(type: 'error' | 'messageerror' = 'error') {
-    const ev = new Event(type);
+    const ev = new Event(type, { cancelable: true });
     for (const fn of [...this.listeners[type]]) fn(ev);
+    return ev;
   }
 }
 
-describe('runExternalParseRequest', () => {
-  it('reads, parses, and validates valid and invalid files cleanly', async () => {
-    const okRes = await runExternalParseRequest({ file: new File([validJson], 'ok.json'), ctx });
-    expect(okRes.ok).toBe(true);
-    if (okRes.ok) {
-      expect(okRes.check.ok).toBe(true);
-      if (okRes.check.ok) {
-        expect(okRes.check.summary).toEqual({ images: 2, conditions: [], missing: ['haze', 'jpeg'], boxes: 1, scores: true });
-      }
-    }
+/** Wires a FakeWorker directly to the real worker handler and dispatch logic. */
+function attachRealHandler(worker: FakeWorker) {
+  const handler = createExternalWorkerHandler();
+  worker.onPost = (req, w) => {
+    void dispatchExternalWorkerMessage(
+      { postMessage: (res) => w.emitMessage(res) },
+      handler,
+      req,
+    );
+  };
+  return worker;
+}
 
-    const badRes = await runExternalParseRequest({ file: new File([invalidJson], 'bad.json'), ctx });
-    expect(badRes.ok).toBe(true);
-    if (badRes.ok) {
-      expect(badRes.check.ok).toBe(false);
-      if (!badRes.check.ok) expect(badRes.check.error).toMatch(/^Record 1: box 1/);
-    }
-  });
+describe('createExternalWorkerHandler and dispatchExternalWorkerMessage', () => {
+  it('returns only summary metadata on parse, serves bounded parts on demand, and reports read errors', async () => {
+    const handler = createExternalWorkerHandler();
+    const okRes = await handler({ type: 'parse', id: 1, file: new File([validJson], 'ok.json'), ctx, maxPartBytes: 200 });
+    expect(okRes).toEqual({
+      type: 'parsed',
+      id: 1,
+      ok: true,
+      summary: { images: 2, conditions: [], missing: ['haze', 'jpeg'], boxes: 1, scores: true },
+      totalRecords: 2,
+      partsCount: 2,
+    });
+    expect('predictions' in okRes).toBe(false);
 
-  it('reports file read failures as kind="read"', async () => {
+    const p0 = await handler({ type: 'get-part', id: 2, index: 0 });
+    const p1 = await handler({ type: 'get-part', id: 3, index: 1 });
+    expect(p0.type === 'predictions' && p0.predictions).toHaveLength(1);
+    expect(p1.type === 'predictions' && p1.predictions).toHaveLength(1);
+
+    const badRes = await handler({ type: 'parse', id: 4, file: new File([invalidJson], 'bad.json'), ctx });
+    expect(badRes.type === 'parsed' && !badRes.ok && badRes.error).toMatch(/^Record 1: box 1/);
+
     const broken = new File(['{}'], 'broken.json');
     vi.spyOn(broken, 'text').mockRejectedValue(new Error('disk error'));
-    expect(await runExternalParseRequest({ file: broken, ctx })).toEqual({ ok: false, kind: 'read' });
+    expect(await handler({ type: 'parse', id: 5, file: broken, ctx })).toEqual({ type: 'error', id: 5, kind: 'read' });
+  });
+
+  it('catches throwing scope.postMessage and sends a small transport error instead of hanging', async () => {
+    const handler = createExternalWorkerHandler();
+    const replies: ExternalWorkerResponse[] = [];
+    let first = true;
+    await dispatchExternalWorkerMessage(
+      {
+        postMessage(res) {
+          if (first) {
+            first = false;
+            throw new RangeError('Maximum call stack size exceeded');
+          }
+          replies.push(res);
+        },
+      },
+      handler,
+      { type: 'parse', id: 7, file: new File([validJson], 'ok.json'), ctx },
+    );
+
+    expect(replies).toEqual([
+      { type: 'error', id: 7, kind: 'transport', message: 'Maximum call stack size exceeded' },
+    ]);
   });
 });
 
 describe('parseExternalPredictionsFile', () => {
-  it('offloads parsing to the worker and terminates it once done', async () => {
-    const worker = new FakeWorker();
-    worker.onPost = (req, w) => {
-      void runExternalParseRequest(req).then((res) => w.emitMessage(res));
+  it('keeps validated predictions in the worker, streams bounded parts via sendExternal, and terminates on dispose', async () => {
+    const worker = attachRealHandler(new FakeWorker());
+    const file = new File([validJson], 'preds.json', { type: 'application/json' });
+
+    const res = await parseExternalPredictionsFile(file, ctx, {
+      createWorker: () => worker,
+      maxPartBytes: 200,
+    });
+
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.session.summary).toEqual({ images: 2, conditions: [], missing: ['haze', 'jpeg'], boxes: 1, scores: true });
+    expect(res.session.total).toBe(2);
+    expect(res.session.partsCount).toBe(2);
+    // Parse response only carried summary metadata, not the full predictions graph.
+    expect(worker.responses[0]?.type).toBe('parsed');
+    expect('predictions' in (worker.responses[0] ?? {})).toBe(false);
+    expect(worker.terminated).toBe(false);
+
+    const sentParts: number[] = [];
+    const entry = { id: 'be_1', status: 'done' } as BenchEntry;
+    const sender: ExternalSender = {
+      start: async () => ({ id: 'be_1', status: 'running' }) as BenchEntry,
+      send: async (_id, ps) => {
+        sentParts.push(ps.length);
+        return { id: 'be_1', status: 'running' } as BenchEntry;
+      },
+      finish: async () => entry,
+      get: async () => entry,
+      stop: async () => entry,
+      remove: async () => {},
     };
 
-    const file = new File([validJson], 'preds.json', { type: 'application/json' });
-    const result = await parseExternalPredictionsFile(file, ctx, { createWorker: () => worker });
+    const done = await sendExternal(sender, { name: 'ext', scored: true, source: res.session, plan });
+    expect(done.status).toBe('done');
+    expect(sentParts).toEqual([1, 1]);
 
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.summary.images).toBe(2);
-      expect(result.summary.boxes).toBe(1);
-    }
-    expect(worker.posted).toHaveLength(1);
-    expect(worker.posted[0]!.file).toBe(file);
+    res.session.dispose();
     expect(worker.terminated).toBe(true);
-    expect(worker.listeners.message.size).toBe(0);
-    expect(worker.listeners.error.size).toBe(0);
+    await expect(res.session.getPart(0)).rejects.toThrow(/closed/);
+  });
+
+  it('terminates the worker immediately when validation fails', async () => {
+    const worker = attachRealHandler(new FakeWorker());
+    const res = await parseExternalPredictionsFile(new File([invalidJson], 'bad.json'), ctx, {
+      createWorker: () => worker,
+    });
+    expect(res.ok).toBe(false);
+    expect(worker.terminated).toBe(true);
   });
 
   it('terminates the worker immediately when AbortSignal fires and rejects with AbortError', async () => {
@@ -137,8 +214,7 @@ describe('parseExternalPredictionsFile', () => {
     expect(worker.terminated).toBe(true);
     expect(worker.listeners.message.size).toBe(0);
 
-    // Late messages after cancellation are ignored safely.
-    worker.emitMessage({ ok: false, kind: 'read' });
+    worker.emitMessage({ type: 'error', id: 1, kind: 'read' });
   });
 
   it('rejects immediately without spawning a worker when signal is already aborted', async () => {
@@ -155,7 +231,7 @@ describe('parseExternalPredictionsFile', () => {
     expect(createWorker).not.toHaveBeenCalled();
   });
 
-  it('falls back to main thread when Workers are unavailable or fail to start', async () => {
+  it('falls back to main thread when Workers are unavailable, throw, emit error, or reply with transport error', async () => {
     const file = new File([validJson], 'preds.json');
 
     const noWorker = await parseExternalPredictionsFile(file, ctx, {
@@ -171,35 +247,32 @@ describe('parseExternalPredictionsFile', () => {
       yieldOnFallback: false,
     });
     expect(ctorThrows.ok).toBe(true);
-  });
 
-  it('falls back to main thread if worker emits an error or postMessage throws', async () => {
-    const file = new File([validJson], 'preds.json');
-
+    let errorEv: Event | undefined;
     const errorWorker = new FakeWorker();
-    errorWorker.onPost = (_req, w) => queueMicrotask(() => w.emitError('error'));
+    errorWorker.onPost = (_req, w) => queueMicrotask(() => (errorEv = w.emitError('error')));
     const res1 = await parseExternalPredictionsFile(file, ctx, {
       createWorker: () => errorWorker,
       yieldOnFallback: false,
     });
     expect(res1.ok).toBe(true);
     expect(errorWorker.terminated).toBe(true);
+    expect(errorEv?.defaultPrevented).toBe(true);
 
-    const cloneErrorWorker = new FakeWorker();
-    cloneErrorWorker.onPost = () => {
-      throw new DOMException('Cannot clone', 'DataCloneError');
-    };
+    const transportWorker = new FakeWorker();
+    transportWorker.onPost = (req, w) =>
+      queueMicrotask(() => w.emitMessage({ type: 'error', id: req.id, kind: 'transport', message: 'clone failed' }));
     const res2 = await parseExternalPredictionsFile(file, ctx, {
-      createWorker: () => cloneErrorWorker,
+      createWorker: () => transportWorker,
       yieldOnFallback: false,
     });
     expect(res2.ok).toBe(true);
-    expect(cloneErrorWorker.terminated).toBe(true);
+    expect(transportWorker.terminated).toBe(true);
   });
 
   it('returns a read error message without main-thread fallback when the worker reports a read failure', async () => {
     const worker = new FakeWorker();
-    worker.onPost = (_req, w) => queueMicrotask(() => w.emitMessage({ ok: false, kind: 'read' }));
+    worker.onPost = (req, w) => queueMicrotask(() => w.emitMessage({ type: 'error', id: req.id, kind: 'read' }));
     const file = new File([validJson], 'unreadable.json');
     const textSpy = vi.spyOn(file, 'text');
 
@@ -207,6 +280,19 @@ describe('parseExternalPredictionsFile', () => {
     expect(res).toEqual({ ok: false, error: 'The file could not be read.' });
     expect(textSpy).not.toHaveBeenCalled();
     expect(worker.terminated).toBe(true);
+  });
+
+  it('treats a genuine File.text() AbortError with a non-aborted signal as a read error rather than cancellation', async () => {
+    const file = new File(['{}'], 'aborted-io.json');
+    vi.spyOn(file, 'text').mockRejectedValue(new DOMException('read aborted', 'AbortError'));
+    const ctl = new AbortController();
+
+    const res = await parseExternalPredictionsFile(file, ctx, {
+      signal: ctl.signal,
+      createWorker: () => null,
+      yieldOnFallback: false,
+    });
+    expect(res).toEqual({ ok: false, error: 'The file could not be read.' });
   });
 
   it('cancels a pending main-thread fallback read cleanly without unhandled rejections', async () => {

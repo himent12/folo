@@ -271,6 +271,23 @@ export class ExternalSendError extends Error {
 /** A failure worth one retry: no answer (the network, a timeout) or the server's own trouble, never a refusal. */
 const retryable = (e: unknown) => !(e instanceof ApiError) || e.status === 0 || e.status >= 500;
 
+/** Streamable source of already-validated predictions (kept in a Web Worker or memory) for `sendExternal`. */
+export interface ExternalPartSource {
+  /** Total number of records across all parts. */
+  total: number;
+  /** 0 when the payload fits in one request; otherwise the number of bounded parts. */
+  partsCount: number;
+  /** Loads all records for a single-request submission (`partsCount === 0`). */
+  getPredictions: (signal?: AbortSignal) => Promise<BenchPrediction[]>;
+  /** Loads one bounded part (`0 <= index < partsCount`) for a multi-part submission. */
+  getPart: (index: number, signal?: AbortSignal) => Promise<BenchPrediction[]>;
+}
+
+/** Input to `sendExternal`: either an in-memory predictions array or a lazy `ExternalPartSource`. */
+export type SendExternalInput =
+  | { name: string; scored: boolean; predictions: BenchPrediction[]; plan: BenchPlan }
+  | { name: string; scored: boolean; source: ExternalPartSource; plan: BenchPlan };
+
 /**
  * Sends an external entry: in one request when it is small (`maxBytes` of JSON or less), else as an open entry filled
  * in parts (./partsOf) and finished, telling `progress` after each part. A part whose answer was lost (the network, a
@@ -282,18 +299,31 @@ const retryable = (e: unknown) => !(e instanceof ApiError) || e.status === 0 || 
  */
 export async function sendExternal(
   api: ExternalSender,
-  o: { name: string; scored: boolean; predictions: BenchPrediction[]; plan: BenchPlan },
+  o: SendExternalInput,
   progress: (p: SendProgress) => void = () => {},
   signal?: AbortSignal,
   maxBytes = PART_BYTES,
 ): Promise<BenchEntry> {
-  const total = o.predictions.length;
-  if (estimateBytes(o.predictions) <= maxBytes) {
-    const entry = await api.start({ name: o.name, contestant: { kind: 'external', scored: o.scored, predictions: o.predictions } });
+  const source: ExternalPartSource =
+    'source' in o
+      ? o.source
+      : (() => {
+          const small = estimateBytes(o.predictions) <= maxBytes;
+          const parts = small ? null : partsOf(o.predictions, o.plan, maxBytes);
+          return {
+            total: o.predictions.length,
+            partsCount: parts ? parts.length : 0,
+            getPredictions: async () => o.predictions,
+            getPart: async (i: number) => parts![i]!,
+          };
+        })();
+  const total = source.total;
+  if (source.partsCount === 0) {
+    const predictions = await race(source.getPredictions(signal), signal);
+    const entry = await api.start({ name: o.name, contestant: { kind: 'external', scored: o.scored, predictions } });
     progress({ sent: total, total, entry });
     return entry;
   }
-  const parts = partsOf(o.predictions, o.plan, maxBytes);
   let entry = await api.start({ name: o.name, contestant: { kind: 'external', scored: o.scored, open: true, predictions: [] } });
   let sent = 0;
   progress({ sent, total, entry });
@@ -306,7 +336,8 @@ export async function sendExternal(
     }
   };
   try {
-    for (const part of parts) {
+    for (let i = 0; i < source.partsCount; i++) {
+      const part = await race(source.getPart(i, signal), signal);
       entry = await once(() => api.send(entry.id, part));
       sent += part.length;
       progress({ sent, total, entry });
@@ -345,7 +376,10 @@ export async function sendExternal(
 function race<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return p;
   const stopped = () => signal.reason ?? new DOMException('Stopped', 'AbortError');
-  if (signal.aborted) return Promise.reject(stopped());
+  if (signal.aborted) {
+    p.catch(() => {});
+    return Promise.reject(stopped());
+  }
   return new Promise<T>((resolve, reject) => {
     const off = () => reject(stopped());
     signal.addEventListener('abort', off, { once: true });

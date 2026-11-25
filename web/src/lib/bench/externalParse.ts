@@ -1,19 +1,40 @@
 // Runs external benchmark prediction JSON reading, parsing, and validation in a dedicated Web Worker
-// so large files never block the UI thread, with a clean main-thread fallback and AbortSignal cancellation.
-import { parseAndCheckPredictions, type PredictionCheck, type PredictionContext } from './external';
-import type { ExternalParseRequest, ExternalParseResponse } from './externalWorker';
+// so large files never block the UI thread, keeping validated predictions inside the worker and streaming
+// bounded upload parts on demand, with a clean main-thread fallback and AbortSignal cancellation.
+import type { BenchPrediction } from '../api/types';
+import {
+  estimateBytes,
+  PART_BYTES,
+  parseAndCheckPredictions,
+  partsOf,
+  type ExternalPartSource,
+  type PredictionContext,
+  type PredictionSummary,
+} from './external';
+import type { ExternalWorkerRequest, ExternalWorkerResponse } from './externalWorker';
 
 /** Minimal subset of the standard Worker interface used by `parseExternalPredictionsFile`. */
 export interface ExternalParseWorker {
-  postMessage(message: ExternalParseRequest): void;
+  postMessage(message: ExternalWorkerRequest): void;
   terminate(): void;
-  addEventListener(type: 'message', listener: (ev: MessageEvent<ExternalParseResponse>) => void): void;
+  addEventListener(type: 'message', listener: (ev: MessageEvent<ExternalWorkerResponse>) => void): void;
   addEventListener(type: 'error', listener: (ev: Event) => void): void;
   addEventListener(type: 'messageerror', listener: (ev: Event) => void): void;
-  removeEventListener(type: 'message', listener: (ev: MessageEvent<ExternalParseResponse>) => void): void;
+  removeEventListener(type: 'message', listener: (ev: MessageEvent<ExternalWorkerResponse>) => void): void;
   removeEventListener(type: 'error', listener: (ev: Event) => void): void;
   removeEventListener(type: 'messageerror', listener: (ev: Event) => void): void;
 }
+
+/** Validated external predictions session backed by either a live Web Worker or main-thread memory. */
+export interface ExternalPredictionSession extends ExternalPartSource {
+  readonly summary: PredictionSummary;
+  /** Releases worker or memory resources; safe to call multiple times. */
+  dispose(): void;
+}
+
+export type ExternalParseResult =
+  | { ok: true; session: ExternalPredictionSession }
+  | { ok: false; error: string };
 
 export interface ParseExternalOptions {
   /** Aborting terminates an in-flight worker immediately and rejects with an AbortError. */
@@ -22,6 +43,8 @@ export interface ParseExternalOptions {
   createWorker?: () => ExternalParseWorker | null;
   /** When falling back to the main thread, yield a paint frame before parsing. Default true. */
   yieldOnFallback?: boolean;
+  /** Byte cap per upload part (defaults to `PART_BYTES`). */
+  maxPartBytes?: number;
 }
 
 /** True when `err` represents a cancelled parse (DOMException/Error with name `AbortError`). */
@@ -31,12 +54,11 @@ export function isAbortError(err: unknown): boolean {
 
 function abortError(signal: AbortSignal): Error {
   if (signal.reason instanceof Error) return signal.reason;
-  const err = new DOMException('Aborted', 'AbortError');
-  return err;
+  return new DOMException('Aborted', 'AbortError');
 }
 
 /** Races `p` against `signal` without leaving an unhandled rejection if `p` settles after abort. */
-function raceAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+export function raceAbort<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
   if (!signal) return p;
   if (signal.aborted) {
     p.catch(() => {});
@@ -89,59 +111,54 @@ function defaultCreateWorker(): ExternalParseWorker | null {
   return new Worker(new URL('./externalWorker.ts', import.meta.url), { type: 'module' }) as unknown as ExternalParseWorker;
 }
 
-type WorkerOutcome = { fallback: true } | { fallback: false; check: PredictionCheck };
-
-function runInWorker(
-  file: File,
-  ctx: PredictionContext,
+/** Sends a single request to `worker` and resolves with the matching response, or rejects on error/abort. */
+function sendWorkerRequest(
   worker: ExternalParseWorker,
+  req: ExternalWorkerRequest,
   signal?: AbortSignal,
-): Promise<WorkerOutcome> {
+  terminateOnAbort = false,
+): Promise<ExternalWorkerResponse> {
   if (signal?.aborted) {
-    worker.terminate();
+    if (terminateOnAbort) worker.terminate();
     return Promise.reject(abortError(signal));
   }
-  return new Promise<WorkerOutcome>((resolve, reject) => {
+  return new Promise<ExternalWorkerResponse>((resolve, reject) => {
     let settled = false;
     const cleanup = () => {
       worker.removeEventListener('message', onMessage);
       worker.removeEventListener('error', onError);
       worker.removeEventListener('messageerror', onError);
       signal?.removeEventListener('abort', onAbort);
-      worker.terminate();
-    };
-    const finish = (outcome: WorkerOutcome) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(outcome);
     };
     const onAbort = () => {
       if (settled) return;
       settled = true;
       cleanup();
+      if (terminateOnAbort) worker.terminate();
       reject(abortError(signal!));
     };
-    const onError = () => {
+    const onError = (ev: Event) => {
+      ev.preventDefault?.();
       if (signal?.aborted) return onAbort();
-      finish({ fallback: true });
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ type: 'error', id: req.id, kind: 'transport' });
     };
-    const onMessage = (ev: MessageEvent<ExternalParseResponse>) => {
+    const onMessage = (ev: MessageEvent<ExternalWorkerResponse>) => {
       const res = ev.data;
       if (!res || typeof res !== 'object') {
-        finish({ fallback: true });
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve({ type: 'error', id: req.id, kind: 'transport' });
         return;
       }
-      if (res.ok) {
-        finish({ fallback: false, check: res.check });
-      } else if (res.kind === 'read') {
-        finish({ fallback: false, check: { ok: false, error: 'The file could not be read.' } });
-      } else {
-        finish({
-          fallback: false,
-          check: { ok: false, error: res.message ? `The file could not be parsed: ${res.message}.` : 'The file could not be read.' },
-        });
-      }
+      if (res.id !== req.id) return;
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(res);
     };
 
     worker.addEventListener('message', onMessage);
@@ -150,45 +167,177 @@ function runInWorker(
     signal?.addEventListener('abort', onAbort, { once: true });
 
     try {
-      worker.postMessage({ file, ctx });
+      worker.postMessage(req);
     } catch {
-      finish({ fallback: true });
+      if (!settled) {
+        settled = true;
+        cleanup();
+        resolve({ type: 'error', id: req.id, kind: 'transport' });
+      }
     }
   });
+}
+
+function createWorkerSession(
+  worker: ExternalParseWorker,
+  summary: PredictionSummary,
+  total: number,
+  partsCount: number,
+): ExternalPredictionSession {
+  let disposed = false;
+  let nextReqId = 2;
+
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    worker.terminate();
+  };
+
+  const fetchList = async (req: ExternalWorkerRequest, signal?: AbortSignal): Promise<BenchPrediction[]> => {
+    if (disposed) throw new Error('The predictions file session was closed.');
+    const res = await sendWorkerRequest(worker, req, signal);
+    if (res.type === 'predictions') return res.predictions;
+    throw new Error(res.type === 'error' && res.message ? res.message : 'Could not read predictions from worker.');
+  };
+
+  return {
+    summary,
+    total,
+    partsCount,
+    getPredictions: (signal) => fetchList({ type: 'get-all', id: nextReqId++ }, signal),
+    getPart: (index, signal) => fetchList({ type: 'get-part', id: nextReqId++, index }, signal),
+    dispose,
+  };
+}
+
+function createMemorySession(
+  predictions: BenchPrediction[],
+  summary: PredictionSummary,
+  ctx: PredictionContext,
+  maxPartBytes: number,
+): ExternalPredictionSession {
+  let small: BenchPrediction[] | null = estimateBytes(predictions) > maxPartBytes ? null : predictions;
+  let parts: BenchPrediction[][] | null = small ? null : partsOf(predictions, ctx.plan, maxPartBytes);
+  const total = predictions.length;
+  const partsCount = parts ? parts.length : 0;
+
+  return {
+    summary,
+    total,
+    partsCount,
+    getPredictions: async (signal) => {
+      if (signal?.aborted) throw abortError(signal);
+      if (!small) throw new Error('The predictions file session was closed.');
+      return small;
+    },
+    getPart: async (index, signal) => {
+      if (signal?.aborted) throw abortError(signal);
+      const part = parts?.[index];
+      if (!part) throw new Error('The predictions file session was closed.');
+      return part;
+    },
+    dispose: () => {
+      small = null;
+      parts = null;
+    },
+  };
+}
+
+type WorkerParseOutcome = { fallback: true } | { fallback: false; result: ExternalParseResult };
+
+async function runParseInWorker(
+  file: File,
+  ctx: PredictionContext,
+  worker: ExternalParseWorker,
+  maxPartBytes: number,
+  signal?: AbortSignal,
+): Promise<WorkerParseOutcome> {
+  if (signal?.aborted) {
+    worker.terminate();
+    throw abortError(signal);
+  }
+  let res: ExternalWorkerResponse;
+  try {
+    res = await sendWorkerRequest(worker, { type: 'parse', id: 1, file, ctx, maxPartBytes }, signal, true);
+  } catch (err) {
+    worker.terminate();
+    throw err;
+  }
+
+  if (res.type === 'parsed') {
+    if (!res.ok) {
+      worker.terminate();
+      return { fallback: false, result: { ok: false, error: res.error } };
+    }
+    return {
+      fallback: false,
+      result: {
+        ok: true,
+        session: createWorkerSession(worker, res.summary, res.totalRecords, res.partsCount),
+      },
+    };
+  }
+
+  worker.terminate();
+  if (res.type === 'error') {
+    if (res.kind === 'read') return { fallback: false, result: { ok: false, error: 'The file could not be read.' } };
+    if (res.kind === 'parse') {
+      return {
+        fallback: false,
+        result: {
+          ok: false,
+          error: res.message ? `The file could not be parsed: ${res.message}.` : 'The file could not be read.',
+        },
+      };
+    }
+  }
+  return { fallback: true };
 }
 
 async function parseOnMainThread(
   file: File,
   ctx: PredictionContext,
+  maxPartBytes: number,
   signal?: AbortSignal,
   yieldFirst = true,
-): Promise<PredictionCheck> {
+): Promise<ExternalParseResult> {
   if (signal?.aborted) throw abortError(signal);
   if (yieldFirst) await yieldPaint(signal);
   if (signal?.aborted) throw abortError(signal);
   let text: string;
   try {
     text = await raceAbort(file.text(), signal);
-  } catch (err) {
-    if (signal?.aborted || isAbortError(err)) throw signal?.aborted ? abortError(signal) : err;
+  } catch {
+    if (signal?.aborted) throw abortError(signal);
     return { ok: false, error: 'The file could not be read.' };
   }
   if (signal?.aborted) throw abortError(signal);
-  return parseAndCheckPredictions(text, ctx);
+  try {
+    const check = parseAndCheckPredictions(text, ctx);
+    if (!check.ok) return { ok: false, error: check.error };
+    return {
+      ok: true,
+      session: createMemorySession(check.predictions, check.summary, ctx, maxPartBytes),
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: msg ? `The file could not be parsed: ${msg}.` : 'The file could not be read.' };
+  }
 }
 
 /**
  * Reads, parses, and validates an external predictions file against `ctx`.
- * Uses a dedicated Web Worker when available so large files never block the UI thread; terminates the worker
- * immediately on completion or when `signal` aborts, and falls back to the main thread when Workers are
- * unavailable or fail to initialize/communicate.
+ * Uses a dedicated Web Worker when available so large files never block the UI thread; keeps the
+ * validated records inside the worker and exposes a lightweight `ExternalPredictionSession` that serves
+ * bounded upload parts on demand. Terminates the worker immediately on invalid files, cancellation, or
+ * `session.dispose()`, and falls back to the main thread when Workers are unavailable or fail transport.
  */
 export async function parseExternalPredictionsFile(
   file: File,
   ctx: PredictionContext,
   options: ParseExternalOptions = {},
-): Promise<PredictionCheck> {
-  const { signal, createWorker = defaultCreateWorker, yieldOnFallback = true } = options;
+): Promise<ExternalParseResult> {
+  const { signal, createWorker = defaultCreateWorker, yieldOnFallback = true, maxPartBytes = PART_BYTES } = options;
   if (signal?.aborted) throw abortError(signal);
 
   let worker: ExternalParseWorker | null = null;
@@ -199,10 +348,10 @@ export async function parseExternalPredictionsFile(
   }
 
   if (worker) {
-    const outcome = await runInWorker(file, ctx, worker, signal);
-    if (!outcome.fallback) return outcome.check;
+    const outcome = await runParseInWorker(file, ctx, worker, maxPartBytes, signal);
+    if (!outcome.fallback) return outcome.result;
     if (signal?.aborted) throw abortError(signal);
   }
 
-  return parseOnMainThread(file, ctx, signal, yieldOnFallback);
+  return parseOnMainThread(file, ctx, maxPartBytes, signal, yieldOnFallback);
 }
