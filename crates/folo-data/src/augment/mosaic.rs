@@ -82,9 +82,7 @@ pub fn mixup(s: &mut Sample, other: &Sample, rng: &mut Rng) {
     // Beta(32, 32) has mean 0.5 and sd ~0.062; a clamped normal is indistinguishable for this purpose.
     let r = (0.5 + 0.0620 * rng.normal()).clamp(0.0, 1.0);
     let wa = (r * 256.0).round() as u32;
-    let wb = 256 - wa;
-    for (a, &b) in s.image.data.iter_mut().zip(&other.image.data) {
-        *a = ((*a as u32 * wa + b as u32 * wb + 128) >> 8) as u8;
-    }
+    let n = s.image.data.len().min(other.image.data.len());
+    crate::simd::planar::mixup_blend_u8(&mut s.image.data[..n], &other.image.data[..n], wa);
     s.boxes.extend_from_slice(&other.boxes);
 }
