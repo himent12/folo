@@ -1,5 +1,6 @@
 // Letterbox one u8 RGB image into a [3, OH, OW] slice of the output, sampling exactly as folo-data's
 // resize (an integer box prefilter, then 11-bit fixed-point bilinear taps; see kernels/vision.rs).
+// Spec: PREFILTER (bool: fx > 1 || fy > 1), f16 (T is f16 or f32).
 // Params: 0 = OW, 1 = OH, 2 = source width, 3 = source height, 4 = pad x, 5 = pad y, 6 = resized width,
 // 7 = resized height, 8 = fx, 9 = fy, 10 = pad value, 11 = scale (f32), 12 = output offset (elements),
 // 13 = taps offset (words), 14 = source offset (bytes). T is the output type (f32, or f16 rounded once from the
@@ -33,12 +34,12 @@ fn rgb_at(byte_off: u32) -> vec3<u32> {
 // fits in u32.
 fn src_px3(px: u32, py: u32) -> vec3<u32> {
     let w = pu(2u);
+    if (!PREFILTER) {
+        return rgb_at((py * w + px) * 3u);
+    }
     let h = pu(3u);
     let fx = pu(8u);
     let fy = pu(9u);
-    if (fx == 1u && fy == 1u) {
-        return rgb_at((py * w + px) * 3u);
-    }
     let x0 = px * fx;
     let x1 = min(x0 + fx, w);
     let y0 = py * fy;

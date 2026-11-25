@@ -23,6 +23,7 @@ mod precompile;
 mod reduce;
 mod runtime;
 mod sites;
+mod vision;
 
 use crate::GpuContext;
 

@@ -742,7 +742,9 @@ pub fn cast(
     if n == 0 {
         return Ok(());
     }
-    if fast::try_cast_f16_vec4(ctx, src, from, offset, dst, to, n)? {
+    if fast::try_cast_f16_vec4(ctx, src, from, offset, dst, to, n)?
+        || fast::try_cast_u8_to_float_vec4(ctx, src, from, offset, dst, to, n)?
+    {
         return Ok(());
     }
     let k = ctx.kernel(&CAST, Spec::new().u32("SRC", from.code()).u32("DST", to.code()))?;
@@ -892,6 +894,7 @@ pub(crate) static DEFS: &[&KernelDef] = &[
     fast::FAST_DEFS[2],
     fast::FAST_DEFS[3],
     fast::FAST_DEFS[4],
+    fast::FAST_DEFS[5],
 ];
 
 #[cfg(test)]
