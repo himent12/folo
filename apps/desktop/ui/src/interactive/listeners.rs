@@ -146,28 +146,36 @@ impl Interactivity {
             );
         }
 
-        let active_state = element_state.clicked_state.get_or_insert_with(Default::default).clone();
-        if active_state.borrow().is_clicked() {
-            window.on_mouse_event(move |_: &MouseUpEvent, phase, window, _| {
-                if phase == DispatchPhase::Capture {
-                    *active_state.borrow_mut() = ElementClickedState::default();
-                    window.refresh();
-                }
-            });
-        } else {
-            let group_hitbox =
-                self.group_active_style.as_ref().and_then(|group| window.group_hitboxes.get(&group.group));
-            let hitbox = hitbox.clone();
-            window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _| {
-                if phase == DispatchPhase::Bubble && !window.default_prevented() {
-                    let group = group_hitbox.is_some_and(|id: HitboxId| id.is_hovered(window));
-                    let element = hitbox.is_hovered(window);
-                    if group || element {
-                        *active_state.borrow_mut() = ElementClickedState { group, element };
+        // Track pressed state only when an active style can observe it (or to clear a press already in
+        // flight if the style was removed while held).
+        let is_currently_clicked =
+            element_state.clicked_state.as_ref().is_some_and(|state| state.borrow().is_clicked());
+        if self.active_style.is_some() || self.group_active_style.is_some() || is_currently_clicked {
+            let active_state = element_state.clicked_state.get_or_insert_with(Default::default).clone();
+            if is_currently_clicked {
+                window.on_mouse_event(move |_: &MouseUpEvent, phase, window, _| {
+                    if phase == DispatchPhase::Capture {
+                        *active_state.borrow_mut() = ElementClickedState::default();
                         window.refresh();
                     }
-                }
-            });
+                });
+            } else {
+                let group_hitbox = self
+                    .group_active_style
+                    .as_ref()
+                    .and_then(|group| window.group_hitboxes.get(&group.group));
+                let hitbox = hitbox.clone();
+                window.on_mouse_event(move |_: &MouseDownEvent, phase, window, _| {
+                    if phase == DispatchPhase::Bubble && !window.default_prevented() {
+                        let group = group_hitbox.is_some_and(|id: HitboxId| id.is_hovered(window));
+                        let element = hitbox.is_hovered(window);
+                        if group || element {
+                            *active_state.borrow_mut() = ElementClickedState { group, element };
+                            window.refresh();
+                        }
+                    }
+                });
+            }
         }
     }
 
@@ -184,7 +192,6 @@ impl Interactivity {
     ) {
         let pending_mouse_down =
             element_state.pending_mouse_down.get_or_insert_with(Default::default).clone();
-        element_state.clicked_state.get_or_insert_with(Default::default);
         let click_listeners: Rc<[crate::interactive::ClickListener]> = click_listeners.into();
 
         window.on_mouse_event({

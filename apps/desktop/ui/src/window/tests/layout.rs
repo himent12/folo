@@ -104,3 +104,44 @@ fn wheel_scrolls_clamps_and_moves_children() {
     wheel(&mut app, window, 100., 20., point(px(0.), px(100.)));
     assert!(!app.is_dirty(window));
 }
+
+#[test]
+fn recomputed_layout_invalidates_cached_bounds_for_entire_subtree() {
+    use crate::{AvailableSpace, Edges, Length, Style};
+
+    let (mut app, window) = open(size(px(400.), px(300.)), 1.0, |_, _| div().size_full().into_any_element());
+    with_window(&mut app, window, |window, cx| {
+        let mut child_style = Style::default();
+        child_style.size.width = Length::Definite(relative(0.5));
+        child_style.size.height = Length::Definite(px(20.).into());
+        let child = window.request_layout(child_style, [], cx);
+
+        let mut parent_style = Style::default();
+        parent_style.size.width = Length::Definite(relative(1.0));
+        parent_style.size.height = Length::Definite(px(50.).into());
+        parent_style.padding = Edges::all(px(10.).into());
+        let parent = window.request_layout(parent_style, [child], cx);
+
+        window.compute_layout(
+            parent,
+            size(AvailableSpace::Definite(px(200.)), AvailableSpace::Definite(px(100.))),
+            cx,
+        );
+        // Query child before parent to populate parent via recursion first.
+        let child_before = window.layout_bounds(child);
+        let parent_before = window.layout_bounds(parent);
+        assert_eq!(parent_before, Bounds::new(point(px(0.), px(0.)), size(px(200.), px(50.))));
+        assert_eq!(child_before, Bounds::new(point(px(10.), px(10.)), size(px(90.), px(20.))));
+
+        // Recomputing the same root at a new width must invalidate cached bounds for the subtree.
+        window.compute_layout(
+            parent,
+            size(AvailableSpace::Definite(px(400.)), AvailableSpace::Definite(px(100.))),
+            cx,
+        );
+        let child_after = window.layout_bounds(child);
+        let parent_after = window.layout_bounds(parent);
+        assert_eq!(parent_after, Bounds::new(point(px(0.), px(0.)), size(px(400.), px(50.))));
+        assert_eq!(child_after, Bounds::new(point(px(10.), px(10.)), size(px(190.), px(20.))));
+    });
+}

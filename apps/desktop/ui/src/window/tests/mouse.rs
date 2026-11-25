@@ -473,3 +473,77 @@ fn a_tooltip_whose_element_goes_away_before_it_shows_is_dropped() {
     assert!(!app.is_dirty(window), "nothing left to show");
     assert_eq!(drops.get(), 0, "no tooltip is built for an element that is gone");
 }
+
+#[test]
+fn active_style_listeners_are_skipped_without_active_styles_and_clear_when_removed_mid_press() {
+    use std::cell::Cell;
+
+    // 1. A stateful div with hover style only registers no active mouse-down listener and does not
+    //    dirty the window on mouse down.
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, |_, _| {
+        div()
+            .size_full()
+            .child(div().id("plain").w(px(60.)).h(px(30.)).bg(color(1)).hover(|s| s.bg(color(2))))
+            .into_any_element()
+    });
+    let listeners = with_window(&mut app, window, |window, _| window.rendered_frame.mouse_listeners.len());
+    assert_eq!(listeners, 1, "only the hover refresh listener should be registered");
+    mouse_move(&mut app, window, 10., 10.);
+    app.frame(window);
+    assert!(!app.is_dirty(window));
+    mouse_down(&mut app, window, 10., 10.);
+    assert!(!app.is_dirty(window), "pressing a div without active styles should not trigger a redraw");
+
+    // 2. A div with `.active(...)` applies its active style on press, keeps clearing it on release
+    //    even if `.active(...)` is conditionally dropped mid-press, and works with `.group_active(...)`.
+    let enable_active = Rc::new(Cell::new(true));
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, {
+        let enable_active = enable_active.clone();
+        move |_, _| {
+            let mut btn = div().id("btn").w(px(60.)).h(px(30.)).bg(color(1));
+            if enable_active.get() {
+                btn = btn.active(|s| s.bg(color(3)));
+            }
+            div()
+                .size_full()
+                .child(btn)
+                .child(
+                    div().group("g").w(px(60.)).h(px(30.)).child(
+                        div()
+                            .id("g-child")
+                            .w(px(20.))
+                            .h(px(20.))
+                            .bg(color(4))
+                            .group_active("g", |s| s.bg(color(5))),
+                    ),
+                )
+                .into_any_element()
+        }
+    });
+    assert_eq!(quads_of(&mut app, window, color(1)).len(), 1);
+    mouse_down(&mut app, window, 10., 10.);
+    assert!(app.is_dirty(window));
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(3)).len(), 1, "active style applied while pressed");
+
+    // Drop `.active(...)` mid-press, redraw, then release: clicked_state must still clear on MouseUp.
+    enable_active.set(false);
+    with_window(&mut app, window, |window, _| window.refresh());
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(1)).len(), 1);
+    mouse_up(&mut app, window, 10., 10.);
+    assert!(app.is_dirty(window), "mouse up still clears in-flight clicked_state");
+    app.frame(window);
+    enable_active.set(true);
+    with_window(&mut app, window, |window, _| window.refresh());
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(1)).len(), 1, "active style stayed cleared after release");
+
+    // Group active triggers when pressing anywhere inside the group.
+    mouse_down(&mut app, window, 45., 45.);
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(5)).len(), 1, "group_active style applied");
+    mouse_up(&mut app, window, 45., 45.);
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(4)).len(), 1, "group_active style cleared");
+}
