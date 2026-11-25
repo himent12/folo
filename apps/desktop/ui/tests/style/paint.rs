@@ -179,3 +179,23 @@ fn a_shadow_is_culled_by_its_unblurred_box_as_gpui_culls_it() {
     );
     assert_eq!(paint_one(blurred(0., 2.)).len(), 1);
 }
+
+#[test]
+fn offscreen_element_keeps_offset_shadow_but_culls_background_and_borders() {
+    let style = Style::default().refined(
+        StyleRefinement::default().bg(red()).border_1().border_color(blue()).rounded(px(4.)).shadow(vec![
+            BoxShadow {
+                color: shadow_color(),
+                offset: point(px(-10.), px(0.)),
+                blur_radius: px(4.),
+                spread_radius: px(0.),
+            },
+        ]),
+    );
+    let mut clipped = cx(1., 1.);
+    clipped.content_mask = ContentMask { bounds: lbounds(0., 0., 100., 100.) };
+    // Element starts at x = 105 (outside the mask), while its shadow shifted by -10 reaches x = 95.
+    let scene = paint(&style, lbounds(105., 10., 20., 20.), &clipped);
+    assert_eq!(scene.len(), 1, "only the shadow reaches into the mask");
+    assert!(matches!(scene.primitives[0], Primitive::Shadow(_)));
+}

@@ -332,3 +332,32 @@ fn paint_line_handles_empty_runs_and_caches_font_bounds_across_same_font_runs() 
     line.paint_with(point(px(0.), px(0.)), px(20.), &window, everywhere(), &mut rec).unwrap();
     assert_eq!(rec.glyphs().len(), 6);
 }
+
+#[test]
+fn vertically_culled_lines_skip_glyphs_but_preserve_decorations() {
+    let window = window_text_system();
+    let text = "aa bbb cccc ddddd";
+    let wrapped = window.shape_text(text.into(), px(16.), &runs(&[text.len()]), Some(px(72.)), None).unwrap();
+    let line = &wrapped[0];
+    assert!(!line.wrap_boundaries().is_empty());
+
+    // Mask strictly above and strictly below the wrapped line's vertical span.
+    let mut rec = Recorder::default();
+    let mask_below = Bounds::new(point(px(0.), px(200.)), size(px(200.), px(50.)));
+    line.paint_with(point(px(0.), px(0.)), px(20.), TextAlign::Left, None, &window, mask_below, &mut rec)
+        .unwrap();
+    assert!(rec.0.is_empty());
+
+    let mask_above = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(10.)));
+    line.paint_with(point(px(0.), px(100.)), px(20.), TextAlign::Left, None, &window, mask_above, &mut rec)
+        .unwrap();
+    assert!(rec.0.is_empty());
+
+    // An underlined line outside the mask still forwards its underline to the painter (which clips it).
+    let mut decorated = runs(&[4]);
+    decorated[0].underline = Some(UnderlineStyle { thickness: px(1.), color: None, wavy: false });
+    let ul = window.shape_line("abcd".into(), px(16.), &decorated, None);
+    ul.paint_with(point(px(0.), px(100.)), px(20.), &window, mask_above, &mut rec).unwrap();
+    assert!(rec.glyphs().is_empty());
+    assert!(rec.0.iter().any(|op| matches!(op, Op::Underline { .. })));
+}

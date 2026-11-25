@@ -63,6 +63,22 @@ pub fn paint_line(
     if layout.runs.is_empty() {
         return Ok(());
     }
+    let mut max_glyph_size = size(px(0.), px(0.));
+    let mut last_font_id: Option<FontId> = None;
+    let has_line_decorations =
+        decoration_runs.iter().any(|run| run.underline.is_some() || run.strikethrough.is_some());
+    if !has_line_decorations && line_height >= Pixels::ZERO {
+        let first_font = layout.runs[0].font_id;
+        if layout.runs.iter().all(|run| run.font_id == first_font) {
+            max_glyph_size = text_system.bounding_box(first_font, layout.font_size).size;
+            last_font_id = Some(first_font);
+            let min_y = origin.y;
+            let max_bottom = origin.y + line_height * (wrap_boundaries.len() as f32) + max_glyph_size.height;
+            if !(min_y < content_mask.bottom() && max_bottom > content_mask.top()) {
+                return Ok(());
+            }
+        }
+    }
     let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
     let baseline_offset = point(px(0.), padding_top + layout.ascent);
     let mut decoration_runs = decoration_runs.iter();
@@ -76,8 +92,6 @@ pub fn paint_line(
         origin.y,
     );
     let mut prev_glyph_position = Point::default();
-    let mut max_glyph_size = size(px(0.), px(0.));
-    let mut last_font_id: Option<FontId> = None;
     let mut first_glyph_x = origin.x;
     for (run_ix, run) in layout.runs.iter().enumerate() {
         if last_font_id != Some(run.font_id) {

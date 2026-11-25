@@ -121,26 +121,40 @@ impl Style {
     /// The first half of GPUI's `Style::paint`: the shadows, then the background quad (when the background
     /// is set and not transparent; its border color is the background's color with zero alpha).
     pub fn paint_before_children(&self, bounds: Bounds<Pixels>, cx: &StylePaint, scene: &mut Scene) {
-        let corner_radii = self.corner_radii_for(&bounds, cx.rem_size);
-        paint_shadows(scene, cx, bounds, corner_radii, &self.box_shadow);
+        let has_shadows = !self.box_shadow.is_empty();
+        let background =
+            self.background.as_ref().and_then(Fill::color).filter(|color| !color.is_transparent());
+        if !has_shadows && background.is_none() {
+            return;
+        }
+        let sf = cx.scale_factor;
+        let scaled_bounds = bounds.scale(sf);
+        let scaled_clip = cx.content_mask.scale(sf).bounds;
+        let paint_bg = background.is_some() && !scaled_bounds.intersect(&scaled_clip).is_empty();
+        if !has_shadows && !paint_bg {
+            return;
+        }
 
-        let background_color = self.background.as_ref().and_then(Fill::color);
-        if let Some(background) = background_color.filter(|color| !color.is_transparent()) {
+        let corner_radii = self.corner_radii_for(&bounds, cx.rem_size);
+        if has_shadows {
+            paint_shadows(scene, cx, bounds, corner_radii, &self.box_shadow);
+        }
+
+        if paint_bg && let Some(background) = background {
             let mut border_color = match background.tag {
                 BackgroundTag::Solid | BackgroundTag::PatternSlash => background.solid,
                 BackgroundTag::LinearGradient => background.colors[0].color,
             };
             border_color.a = 0.;
-            paint_quad(
-                scene,
-                cx,
-                bounds,
-                corner_radii,
-                background,
-                Edges::default(),
-                border_color,
-                self.border_style,
-            );
+            scene.push_quad(Quad {
+                bounds: scaled_bounds,
+                clip: scaled_clip,
+                background: background.opacity(cx.opacity),
+                border_color: border_color.opacity(cx.opacity),
+                corner_radii: corner_radii.scale(sf),
+                border_widths: Edges::default(),
+                border_style: self.border_style,
+            });
         }
     }
 
@@ -151,6 +165,13 @@ impl Style {
         if !self.is_border_visible() {
             return;
         }
+        let sf = cx.scale_factor;
+        let scaled_bounds = bounds.scale(sf);
+        let scaled_mask = cx.content_mask.scale(sf).bounds;
+        if scaled_bounds.intersect(&scaled_mask).is_empty() {
+            return;
+        }
+
         let corner_radii = self.corner_radii_for(&bounds, cx.rem_size);
         let border_widths = self.border_widths.to_pixels(cx.rem_size);
         let max_border_width = border_widths.max();
@@ -172,18 +193,24 @@ impl Style {
         let border_color = self.border_color.unwrap_or_default();
         let mut background = border_color;
         background.a = 0.;
+        let scaled_radii = corner_radii.scale(sf);
+        let scaled_widths = border_widths.scale(sf);
+        let faded_bg = Background::from(background).opacity(cx.opacity);
+        let faded_border = border_color.opacity(cx.opacity);
         for side in [top_bounds, right_bounds, bottom_bounds, left_bounds] {
-            let cx = cx.with_content_mask(&ContentMask { bounds: side });
-            paint_quad(
-                scene,
-                &cx,
-                bounds,
-                corner_radii,
-                background.into(),
-                border_widths,
-                border_color,
-                self.border_style,
-            );
+            let clip = side.intersect(&cx.content_mask.bounds).scale(sf);
+            if scaled_bounds.intersect(&clip).is_empty() {
+                continue;
+            }
+            scene.push_quad(Quad {
+                bounds: scaled_bounds,
+                clip,
+                background: faded_bg,
+                border_color: faded_border,
+                corner_radii: scaled_radii,
+                border_widths: scaled_widths,
+                border_style: self.border_style,
+            });
         }
     }
 
