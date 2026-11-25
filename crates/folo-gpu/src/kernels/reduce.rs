@@ -142,11 +142,16 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
 "#;
 
 fn gen_rows(s: &Spec) -> String {
+    let split = s.get_bool("SPLIT");
     let main = if s.is_subgroups() { REDUCE_ROWS_MAIN_SUBGROUPS } else { REDUCE_ROWS_MAIN_PORTABLE };
-    typed(s, &format!("{}{main}", include_str!("../shaders/reduce_rows.wgsl")))
+    typed(
+        s,
+        &format!("const SPLIT_K: bool = {split};\n{}{main}", include_str!("../shaders/reduce_rows.wgsl")),
+    )
 }
 fn gen_cols(s: &Spec) -> String {
-    typed(s, include_str!("../shaders/reduce_cols.wgsl"))
+    let split = s.get_bool("SPLIT");
+    typed(s, &format!("const SPLIT_K: bool = {split};\n{}", include_str!("../shaders/reduce_cols.wgsl")))
 }
 /// Maximum row length cached in per-thread registers (4 elements × 256 threads) for single-pass [`SOFTMAX`].
 const SOFTMAX_ROW_CACHE_MAX: usize = 1024;
@@ -236,12 +241,26 @@ pub fn reduce_as(
     r: usize,
     inner: usize,
 ) -> Result<()> {
+    let scale = if op == ReduceOp::Mean { 1.0 / r as f32 } else { 1.0 };
+    reduce_scaled(ctx, op, (x, xdt), (y, ydt), outer, r, inner, scale)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reduce_scaled(
+    ctx: &GpuContext,
+    op: ReduceOp,
+    (x, xdt): (&wgpu::Buffer, DType),
+    (y, ydt): (&wgpu::Buffer, DType),
+    outer: usize,
+    r: usize,
+    inner: usize,
+    scale: f32,
+) -> Result<()> {
     check_buf(x, prod(&[outer, r, inner])?, xdt, "reduce input")?;
     check_buf(y, prod(&[outer, inner])?, ydt, "reduce output")?;
     if outer * inner == 0 {
         return Ok(());
     }
-    let scale = if op == ReduceOp::Mean { 1.0 / r as f32 } else { 1.0 };
     let spec = typed_spec(ctx, xdt, ydt, "reduce")?.u32("OP", op.code());
     if inner == 1 {
         let k = ctx.kernel(&ROWS, spec.subgroups(use_subgroups(ctx)))?;
@@ -319,22 +338,38 @@ static TOPK: KernelDef = KernelDef {
     source: Source::Static(include_str!("../shaders/topk.wgsl")),
 };
 
-/// A divisor `s` of `r` with `r / s >= min_len`, the largest one up to `want` (1 if none).
-fn split_factor(r: usize, want: usize, min_len: usize) -> usize {
-    let mut best = 1;
-    let mut s = 2;
-    while s <= want && r / s >= min_len {
-        if r.is_multiple_of(s) {
-            best = s;
-        }
-        s += 1;
+/// Ceiling-division split plan `(splits, chunk_len)` for a reduction over `[outer, r, inner]`.
+///
+/// Splits when a single pass would launch fewer than 256 workgroups and `r >= 8192`, targeting ~512 total
+/// workgroups with at least `MIN_SPLIT_CHUNK` elements per chunk. Recomputing `splits = r.div_ceil(chunk_len)`
+/// guarantees every split chunk is non-empty (`(splits - 1) * chunk_len < r <= splits * chunk_len`), eliminating
+/// wasted empty partial tiles for prime/odd `r`.
+const MIN_SPLIT_CHUNK: usize = 1024;
+
+fn split_plan(outer: usize, r: usize, inner: usize) -> (usize, usize) {
+    if outer == 0 || inner == 0 || r < 8192 {
+        return (1, r);
     }
-    best
+    let groups = if inner == 1 { outer } else { outer.saturating_mul(inner.div_ceil(64)) };
+    if groups >= 256 {
+        return (1, r);
+    }
+    let want = 512usize.div_ceil(groups);
+    let max_s = r / MIN_SPLIT_CHUNK;
+    let s0 = want.min(max_s);
+    if s0 <= 1 {
+        return (1, r);
+    }
+    let chunk = r.div_ceil(s0);
+    let splits = r.div_ceil(chunk);
+    (splits, chunk)
 }
 
-/// [`reduce`] (sum / max / min) that splits a long reduction over few outputs into two passes so the GPU
-/// fills up: `[outer, r, inner]` is reduced as `[outer · s, r / s, inner]`, then `[outer, s, inner]`. `x` and
-/// `y` hold `dtype` (f32 or f16); the partial results between the passes are f32.
+/// [`reduce`] (sum / mean / max / min) that splits a long reduction over few outputs into two passes using
+/// ceiling-division chunks so the GPU fills up for any `r` (including prime/odd lengths): pass 1 reduces
+/// `[outer, r, inner]` into `splits` non-empty chunks `[outer, splits, inner]` in f32, and pass 2 reduces the
+/// `splits` partials into `y` (applying `1 / r` on pass 2 for [`ReduceOp::Mean`]). `x` and `y` hold `dtype`
+/// (f32 or f16); the partial results between the passes are f32.
 #[allow(clippy::too_many_arguments)]
 pub fn reduce_split(
     ctx: &GpuContext,
@@ -346,17 +381,36 @@ pub fn reduce_split(
     inner: usize,
     dtype: DType,
 ) -> Result<()> {
-    // Workgroups the single-pass kernels would launch.
-    let groups = if inner == 1 { outer } else { outer.saturating_mul(inner.div_ceil(64)) };
-    let s =
-        if groups < 256 && r >= 8192 { split_factor(r, 512usize.div_ceil(groups.max(1)), 1024) } else { 1 };
-    if s <= 1 || op == ReduceOp::Mean {
+    let (splits, chunk) = split_plan(outer, r, inner);
+    if splits <= 1 {
         return reduce_as(ctx, op, (x, dtype), (y, dtype), outer, r, inner);
     }
     check_buf(x, prod(&[outer, r, inner])?, dtype, "reduce input")?;
-    let tmp = ctx.alloc(DType::F32.bytes(prod(&[outer, s, inner])?))?;
-    reduce_as(ctx, op, (x, dtype), (tmp.raw(), DType::F32), outer * s, r / s, inner)?;
-    reduce_as(ctx, op, (tmp.raw(), DType::F32), (y, dtype), outer, s, inner)
+    check_buf(y, prod(&[outer, inner])?, dtype, "reduce output")?;
+    let outer_s = prod(&[outer, splits])?;
+    let tmp = ctx.alloc(DType::F32.bytes(prod(&[outer_s, inner])?))?;
+    let pass_op = if op == ReduceOp::Mean { ReduceOp::Sum } else { op };
+    let spec = typed_spec(ctx, dtype, DType::F32, "reduce")?.u32("OP", pass_op.code()).bool("SPLIT", true);
+    if inner == 1 {
+        let k = ctx.kernel(&ROWS, spec.subgroups(use_subgroups(ctx)))?;
+        let p = Params::new().uz(outer_s)?.uz(r)?.f(1.0).f(pass_op.identity()).uz(splits)?.uz(chunk)?;
+        ctx.dispatch(&k, &[x, tmp.raw()], &p, ctx.grid_1d(outer_s as u64 * 256, 256)?)?;
+    } else {
+        let chunks = inner.div_ceil(64);
+        let k = ctx.kernel(&COLS, spec)?;
+        let p = Params::new()
+            .uz(outer_s)?
+            .uz(r)?
+            .f(1.0)
+            .uz(inner)?
+            .uz(chunks)?
+            .f(pass_op.identity())
+            .uz(splits)?
+            .uz(chunk)?;
+        ctx.dispatch(&k, &[x, tmp.raw()], &p, ctx.grid_1d((outer_s * chunks) as u64 * 256, 256)?)?;
+    }
+    let scale = if op == ReduceOp::Mean { 1.0 / r as f32 } else { 1.0 };
+    reduce_scaled(ctx, pass_op, (tmp.raw(), DType::F32), (y, dtype), outer, splits, inner, scale)
 }
 
 /// Index of the first maximum (`max`) or minimum over the middle axis of dense f32 `[outer, r, inner]`, as
@@ -442,3 +496,32 @@ pub fn topk(
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
 pub(crate) static DEFS: &[&KernelDef] = &[&ROWS, &COLS, &SOFTMAX, &ARG, &SOFTMAX_COLS, &TOPK];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_plan_covers_arbitrary_r_without_empty_chunks() {
+        assert_eq!(split_plan(0, 16384, 1), (1, 16384));
+        assert_eq!(split_plan(1, 8191, 1), (1, 8191));
+        assert_eq!(split_plan(256, 16384, 1), (1, 16384));
+        assert_eq!(split_plan(4, 16384, 64 * 64), (1, 16384));
+
+        for &(outer, r, inner) in &[
+            (1usize, 8192usize, 1usize),
+            (1, 8193, 1),
+            (3, 10007, 1),
+            (2, 16129, 5),
+            (2, 100_003, 70),
+            (1, 1_000_000, 1),
+            (7, 9973, 3),
+        ] {
+            let (splits, chunk) = split_plan(outer, r, inner);
+            assert!(splits >= 2, "expected split for ({outer}, {r}, {inner}), got ({splits}, {chunk})");
+            assert!(chunk >= MIN_SPLIT_CHUNK, "chunk {chunk} < {MIN_SPLIT_CHUNK}");
+            assert_eq!(splits, r.div_ceil(chunk), "no wasted empty tail chunks");
+            assert!((splits - 1) * chunk < r && r <= splits * chunk);
+        }
+    }
+}
