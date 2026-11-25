@@ -620,19 +620,69 @@ fn playground_boxes_labels_class_filter_and_copy_json() {
     assert_eq!(parsed["class_filter"], 1);
     assert_eq!(parsed["detections"].as_array().unwrap().len(), 1);
     assert_eq!(parsed["detections"][0]["name"], "wbc");
+    // End-to-end (O2o) models omit `"iou"` from copied JSON; NMS (O2m) models include it.
+    drive(&mut app, window, |this, _, cx| {
+        let id = this.play_model.clone().unwrap();
+        let m = this.store.models.ready_mut().unwrap().iter_mut().find(|m| m.id == id).unwrap();
+        m.head = crate::api::Head::O2o;
+        this.copy_play_json(cx);
+    });
+    let clip_o2o = app.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default());
+    let parsed_o2o: serde_json::Value = serde_json::from_str(&clip_o2o).expect("valid JSON");
+    assert!(parsed_o2o.get("iou").is_none(), "O2o models should omit iou: {parsed_o2o}");
+    drive(&mut app, window, |this, _, cx| {
+        let id = this.play_model.clone().unwrap();
+        let m = this.store.models.ready_mut().unwrap().iter_mut().find(|m| m.id == id).unwrap();
+        m.head = crate::api::Head::O2m;
+        this.copy_play_json(cx);
+    });
+    let clip_o2m = app.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default());
+    let parsed_o2m: serde_json::Value = serde_json::from_str(&clip_o2m).expect("valid JSON");
+    assert!(parsed_o2m.get("iou").is_some(), "O2m models should include iou: {parsed_o2m}");
+    // Out-of-bounds play_hover never dims remaining boxes, and set_play_conf clears play_hover.
+    drive(&mut app, window, |this, w, cx| {
+        this.play_class = None;
+        this.play_hover = Some(99);
+        assert_eq!(this.play_active(w, cx), None, "out-of-bounds hover is ignored");
+        let drawn = this.visible_boxes(&pred, this.play_active(w, cx));
+        assert!(drawn.iter().all(|b| !b.dim), "remaining boxes must not all be dimmed");
+        this.play_hover = Some(1);
+        this.set_play_conf(0.85, cx);
+        assert_eq!(this.play_hover, None, "confidence change clears hover");
+    });
     // Toggling boxes off keeps detection list intact while hiding overlay; switching models resets class filter.
     drive(&mut app, window, |this, _, cx| {
         this.play_boxes = false;
         this.play_labels = false;
+        this.play_class = Some(1);
+        this.play_hover = Some(0);
         this.pick_play_model(other.clone(), cx);
         assert_eq!(this.play_class, None, "switching model clears stale class filter");
-        // Switching backend resets boxes/labels/class to defaults.
+        assert_eq!(this.play_hover, None, "switching model clears hover");
+        // Switching backend resets boxes/labels/class/hover to defaults.
+        this.play_hover = Some(0);
         this.set_backend(
             Arc::new(crate::api::mock::MockBackend::new(4200, true)),
             super::ServerMode::Local,
             cx,
         );
-        assert!(this.play_boxes && this.play_labels && this.play_class.is_none());
+        assert!(
+            this.play_boxes && this.play_labels && this.play_class.is_none() && this.play_hover.is_none()
+        );
+    });
+}
+
+#[test]
+fn play_sample_dataset_skips_train_only_datasets() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, _| {
+        let model = this.store.models.ready().unwrap()[0].clone();
+        this.play_model = Some(model.id.clone());
+        assert!(this.play_sample_dataset().is_some());
+        for ds in this.store.datasets.ready_mut().unwrap().iter_mut() {
+            ds.splits.val = 0;
+        }
+        assert_eq!(this.play_sample_dataset(), None, "datasets with 0 val images offer no samples");
     });
 }
 
@@ -661,5 +711,16 @@ fn failed_dataset_load_shows_retry_on_runs_and_toast_on_new_run() {
     });
     drive(&mut app, window, |this, _, _| {
         assert!(this.store.datasets.ready().is_some(), "Retry action reloads datasets");
+    });
+    // When both runs and datasets failed (e.g. outage), Retry reloads all core lists, not datasets alone.
+    drive(&mut app, window, |this, w, cx| {
+        this.store.datasets = Load::Failed(ApiError::new("server_unreachable", "server unreachable"));
+        this.store.runs = Load::Failed(ApiError::new("server_unreachable", "server unreachable"));
+        this.open_new_run(None, w, cx);
+        let (_, retry) = this.toasts.last().unwrap().action.as_ref().unwrap().clone();
+        retry(this, w, cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.datasets.ready().is_some() && this.store.runs.ready().is_some());
     });
 }

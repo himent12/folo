@@ -20,10 +20,17 @@ impl FoloApp {
         if self.play_image.is_none() {
             // Every enabled action does something: with no datasets either, the first step is one.
             let no_datasets = self.store.datasets.ready().is_some_and(|d| d.is_empty());
+            let datasets_failed = self.store.datasets.error().is_some();
+            let datasets_loading = self.store.datasets.ready().is_none() && !datasets_failed;
             // The model list failed: the step is fetching it again, not picking an image.
             let models_failed = self.store.models.error().is_some();
-            // The side panel offers validation images only from a dataset the model knows.
-            let samples = self.play_sample_dataset().is_some();
+            // The side panel offers validation images only from a dataset that has val samples.
+            let samples =
+                self.play_sample_dataset().is_some_and(|ds_id| match self.store.images.get(&ds_id) {
+                    Some(Load::Ready(v)) => !super::side::pick_val_samples(v, 1).is_empty(),
+                    Some(Load::Failed(_)) => false,
+                    _ => true,
+                });
             let pick = if models_failed {
                 self.button(
                     "play-pick",
@@ -33,6 +40,26 @@ impl FoloApp {
                     window,
                     cx,
                     act(|this, _, cx| this.retry_models(cx)),
+                )
+            } else if no_models && datasets_failed {
+                self.button(
+                    "play-pick",
+                    "Retry datasets",
+                    Btn::Primary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.retry_datasets(cx)),
+                )
+            } else if no_models && datasets_loading {
+                self.button_disabled(
+                    "play-pick",
+                    "New run",
+                    Btn::Primary,
+                    Some("icons/plus.svg"),
+                    "Loading datasets…",
+                    window,
+                    cx,
                 )
             } else if no_models && no_datasets {
                 self.button(
@@ -108,6 +135,8 @@ impl FoloApp {
                                 // Headline, body and button name the same next step.
                                 .child(text(ty::LG, t.text_primary).child(if models_failed {
                                     "The model list didn't load"
+                                } else if no_models && datasets_failed {
+                                    "The dataset list didn't load"
                                 } else if no_models && no_datasets {
                                     "Add a dataset to get started"
                                 } else if no_models {
@@ -115,7 +144,7 @@ impl FoloApp {
                                 } else {
                                     "Drop an image to detect objects"
                                 }))
-                                .child(text(ty::SM, t.text_secondary).child(if models_failed {
+                                .child(text(ty::SM, t.text_secondary).child(if models_failed || (no_models && datasets_failed) {
                                     "Check the connection, then try again.".to_string()
                                 } else if no_models && no_datasets {
                                     "Then train a model on it and come back with an image.".to_string()

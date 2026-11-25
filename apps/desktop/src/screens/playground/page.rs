@@ -22,7 +22,7 @@ pub(crate) fn detections_json(
     model: &str,
     image: &str,
     conf: f32,
-    iou: f32,
+    iou: Option<f32>,
     class_filter: Option<u32>,
     boxes: &[&ScoredBox],
 ) -> String {
@@ -31,7 +31,8 @@ pub(crate) fn detections_json(
         model: &'a str,
         image: &'a str,
         conf: f32,
-        iou: f32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        iou: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         class_filter: Option<u32>,
         detections: &'a [&'a ScoredBox],
@@ -60,10 +61,12 @@ impl FoloApp {
     pub(crate) fn copy_play_json(&mut self, cx: &mut Context<Self>) {
         let Some(p) = self.play_pred.ready() else { return };
         let vis = filter_detections(&p.boxes, self.play_conf, self.play_class);
-        let model =
-            self.play_shown_model().map(|m| m.name.as_str()).or(self.play_model.as_deref()).unwrap_or("");
+        let shown = self.play_shown_model();
+        let e2e = shown.is_some_and(|m| m.head == crate::api::Head::O2o);
+        let model = shown.map(|m| m.name.as_str()).or(self.play_model.as_deref()).unwrap_or("");
         let image = self.play_image.as_ref().map(|i| i.name.as_ref()).unwrap_or("");
-        let json = detections_json(model, image, self.play_conf, self.play_iou, self.play_class, &vis);
+        let iou = (!e2e).then_some(self.play_iou);
+        let json = detections_json(model, image, self.play_conf, iou, self.play_class, &vis);
         let body = plural(vis.len(), "detection");
         cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(json));
         self.toast(Tone::Success, "Copied detection JSON", Some(body.into()), cx);
@@ -134,6 +137,7 @@ impl FoloApp {
             .ready()
             .map_or(0, |p| filter_detections(&p.boxes, self.play_conf, self.play_class).len());
         let focused = (0..n).find(|i| self.fh(format!("det-{i}"), cx).is_focused(window));
-        if self.kb { focused.or(self.play_hover) } else { self.play_hover.or(focused) }
+        let hover = self.play_hover.filter(|&i| i < n);
+        if self.kb { focused.or(hover) } else { hover.or(focused) }
     }
 }

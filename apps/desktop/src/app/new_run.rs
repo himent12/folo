@@ -147,7 +147,17 @@ impl FoloApp {
                         Tone::Danger,
                         DS_FAILED,
                         Some(err.message.into()),
-                        Some(("Retry".into(), super::act(|this, _, cx| this.retry_datasets(cx)))),
+                        Some((
+                            "Retry".into(),
+                            super::act(|this, _, cx| {
+                                if this.store.runs.error().is_some() {
+                                    this.retry_all(cx);
+                                    this.ensure_core(cx);
+                                } else {
+                                    this.retry_datasets(cx);
+                                }
+                            }),
+                        )),
                         cx,
                     );
                 }

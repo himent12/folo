@@ -266,6 +266,7 @@ impl FoloApp {
                         .and_modify(|(_, c)| *c += 1)
                         .or_insert_with(|| (b.name.clone(), 1));
                 }
+                let distinct_above = class_counts.len();
                 if let Some(cid) = self.play_class
                     && !class_counts.contains_key(&cid)
                 {
@@ -276,7 +277,7 @@ impl FoloApp {
                         .unwrap_or_else(|| format!("class {cid}"));
                     class_counts.insert(cid, (name, 0));
                 }
-                let show_class_chips = class_counts.len() >= 2 || self.play_class.is_some();
+                let show_class_chips = distinct_above >= 2 || self.play_class.is_some();
                 let boxes_chip = self.chip(
                     "play-boxes",
                     "Boxes",
@@ -345,9 +346,12 @@ impl FoloApp {
                             Some(above_conf.len() as u64),
                             window,
                             cx,
-                            act(|this, _, cx| {
+                            act(move |this, w, cx| {
                                 this.play_class = None;
                                 this.play_hover = None;
+                                if distinct_above < 2 {
+                                    this.focus_key("play-boxes", w, cx);
+                                }
                                 cx.notify();
                             }),
                         )
@@ -364,10 +368,15 @@ impl FoloApp {
                                 Some(cnt),
                                 window,
                                 cx,
-                                act(move |this, _, cx| {
-                                    this.play_class =
-                                        if this.play_class == Some(cid) { None } else { Some(cid) };
+                                act(move |this, w, cx| {
+                                    let clearing = this.play_class == Some(cid);
+                                    this.play_class = if clearing { None } else { Some(cid) };
                                     this.play_hover = None;
+                                    if clearing && distinct_above < 2 {
+                                        this.focus_key("play-boxes", w, cx);
+                                    } else if clearing && cnt == 0 {
+                                        this.focus_key("play-class-all", w, cx);
+                                    }
                                     cx.notify();
                                 }),
                             )
@@ -393,9 +402,11 @@ impl FoloApp {
                         None,
                         window,
                         cx,
-                        act(|this, _, cx| {
+                        act(move |this, w, cx| {
                             this.play_class = None;
                             this.play_hover = None;
+                            let target = if distinct_above >= 2 { "play-class-all" } else { "play-boxes" };
+                            this.focus_key(target, w, cx);
                             cx.notify();
                         }),
                     )
