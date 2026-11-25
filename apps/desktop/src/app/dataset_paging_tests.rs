@@ -447,3 +447,86 @@ fn dataset_images_search_sort_reset_and_clickable_class_balance_bars() {
         assert!(idx > 0, "inspector index shifted to follow the same image");
     });
 }
+
+#[test]
+fn inspector_toggles_click_to_zoom_and_try_in_playground() {
+    use crate::api::PredictInput;
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api);
+    let send_key = |app: &mut folo_ui::HeadlessApp, w: folo_ui::WindowHandle<super::FoloApp>, k: &str| {
+        let keystroke = folo_ui::Keystroke::parse(k).unwrap();
+        app.simulate_input(
+            w.into(),
+            folo_ui::PlatformInput::KeyDown(folo_ui::KeyDownEvent { keystroke, is_held: false }),
+        );
+        app.run_until_idle();
+        app.frame(w.into());
+    };
+    let ds_id = "ds_8f2c";
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Dataset(ds_id.into()), w, cx));
+    let _ = drawn_keys(&mut app, window);
+
+    // Open an image that has at least one label box.
+    let img_id = drive(&mut app, window, |this, w, cx| {
+        let imgs = this.store.images.get(ds_id).and_then(|l| l.ready()).unwrap();
+        let (idx, meta) = imgs.iter().enumerate().find(|(_, m)| !m.boxes.is_empty()).unwrap();
+        let id = meta.id.clone();
+        this.open_inspector(ds_id.into(), idx, w, cx);
+        id
+    });
+    app.run_until_idle();
+    app.frame(window.into());
+
+    // B hides boxes; Ctrl+B does not; L while boxes are hidden restores both boxes and labels; L again hides labels.
+    send_key(&mut app, window, "b");
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.inspector.as_ref().unwrap().boxes, "B hides boxes");
+    });
+    send_key(&mut app, window, "ctrl-b");
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.inspector.as_ref().unwrap().boxes, "Ctrl+B must not toggle inspector boxes");
+    });
+    send_key(&mut app, window, "l");
+    drive(&mut app, window, |this, _, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert!(insp.boxes && insp.labels, "L with boxes hidden turns both boxes and labels on");
+    });
+    send_key(&mut app, window, "l");
+    drive(&mut app, window, |this, _, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert!(insp.boxes && !insp.labels, "L toggles labels off while keeping boxes on");
+    });
+
+    // Activating a label row zooms onto that box; activating it a second time resets to fit.
+    drive(&mut app, window, |this, w, cx| this.focus_key("insp-box-0", w, cx));
+    app.frame(window.into());
+    send_key(&mut app, window, "enter");
+    drive(&mut app, window, |this, _, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert!(insp.zoom > 1.0, "activating label row zooms in");
+        assert_eq!(insp.focused_box, Some(0));
+    });
+    send_key(&mut app, window, "enter");
+    drive(&mut app, window, |this, _, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert_eq!(insp.zoom, 1.0, "activating the same label row again fits back to 1x");
+        assert_eq!(insp.pan, (0., 0.));
+        assert_eq!(insp.focused_box, None);
+    });
+
+    // Activating Try in Playground closes the inspector, navigates to Playground, and loads this image.
+    drive(&mut app, window, |this, w, cx| this.focus_key("insp-playground", w, cx));
+    app.frame(window.into());
+    send_key(&mut app, window, "enter");
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.inspector.is_none(), "inspector closed on Try in Playground");
+        assert_eq!(this.route, Route::Playground);
+        let input = &this.play_image.as_ref().expect("image loaded into Playground").input;
+        assert!(
+            matches!(input, PredictInput::Dataset { dataset_id, image_id } if dataset_id == ds_id && image_id == &img_id),
+            "unexpected play input: {input:?}"
+        );
+    });
+}
