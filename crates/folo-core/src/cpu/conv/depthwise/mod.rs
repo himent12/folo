@@ -5,6 +5,7 @@
 #[cfg(target_arch = "x86_64")]
 mod avx2;
 
+#[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 use std::cell::RefCell;
 
 use smallvec::SmallVec;
@@ -147,36 +148,77 @@ fn precompute_kx_cols(g: &ConvGeom) -> SmallVec<[(isize, std::ops::Range<usize>)
         .collect()
 }
 
+/// Output columns `ox` in `0..ow` with `0 <= ox * sw + tap - pw < w`, using overflow-safe unsigned arithmetic.
+#[inline]
+fn valid_cols_u(ow: usize, sw: usize, tap: usize, pw: usize, w: usize) -> std::ops::Range<usize> {
+    if ow == 0 || w == 0 {
+        return 0..0;
+    }
+    let max_ox_end = (usize::MAX / sw).saturating_add(1);
+    let (lo, hi) = if tap >= pw {
+        let shift = tap - pw;
+        if shift >= w {
+            return 0..0;
+        }
+        (0, (w - shift).div_ceil(sw))
+    } else {
+        let need = pw - tap;
+        let lo = need.div_ceil(sw);
+        let hi = match need.checked_add(w) {
+            Some(lim) => lim.div_ceil(sw),
+            None => max_ox_end,
+        };
+        (lo, hi)
+    };
+    let hi = hi.min(max_ox_end).min(ow);
+    let lo = lo.min(hi);
+    lo..hi
+}
+
 /// One output plane of a depthwise conv: `op += conv(xp, wk)` (`op` is `oh x ow`, `xp` one `h x w` input plane).
 #[inline(always)]
 pub(super) fn depthwise_plane(xp: &[f32], wk: &[f32], op: &mut [f32], g: &ConvGeom) {
-    let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
-    let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
-    let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
+    let [sh, sw] = g.p.stride;
+    let [ph, pw] = g.p.padding;
+    let [dh, dw] = g.p.dilation;
     for oy in 0..g.oh {
         let orow = &mut op[oy * g.ow..(oy + 1) * g.ow];
         for ky in 0..g.kh {
-            let iy = oy as isize * sh - ph + ky as isize * dh;
-            if iy < 0 || iy >= g.h as isize {
+            let Some(iy) = oy
+                .checked_mul(sh)
+                .and_then(|v| ky.checked_mul(dh).and_then(|d| v.checked_add(d)))
+                .and_then(|v| v.checked_sub(ph))
+            else {
+                continue;
+            };
+            if iy >= g.h {
                 continue;
             }
-            let xrow = &xp[iy as usize * g.w..(iy as usize + 1) * g.w];
+            let xrow = &xp[iy * g.w..(iy + 1) * g.w];
             for kx in 0..g.kw {
                 let wv = wk[ky * g.kw + kx];
-                let d = kx as isize * dw - pw;
-                let r = valid_cols(g.ow, sw, d, g.w as isize);
+                let Some(tap) = kx.checked_mul(dw) else {
+                    continue;
+                };
+                let r = valid_cols_u(g.ow, sw, tap, pw, g.w);
                 if r.is_empty() {
                     continue;
                 }
                 if sw == 1 {
-                    let s0 = (r.start as isize + d) as usize;
+                    let s0 = if tap >= pw { r.start + (tap - pw) } else { r.start - (pw - tap) };
                     let len = r.len();
                     for (o, &xv) in orow[r].iter_mut().zip(&xrow[s0..s0 + len]) {
                         *o += wv * xv;
                     }
-                } else {
+                } else if tap >= pw {
+                    let shift = tap - pw;
                     for ox in r {
-                        orow[ox] += wv * xrow[(ox as isize * sw + d) as usize];
+                        orow[ox] += wv * xrow[ox * sw + shift];
+                    }
+                } else {
+                    let need = pw - tap;
+                    for ox in r {
+                        orow[ox] += wv * xrow[ox * sw - need];
                     }
                 }
             }
@@ -223,7 +265,8 @@ pub(in super::super) fn depthwise_forward(
     let total = g.n * g.o;
     let per_task = DW_TASK_OUTPUTS.div_ceil(ohw).min(total.div_ceil(4 * rayon::current_num_threads())).max(1);
     par_chunks(out, per_task * ohw, &|t, ops| {
-        let run_ops = |#[cfg(any(
+        let run_ops = |ops: &mut [f32],
+                       #[cfg(any(
             target_arch = "x86_64",
             all(target_arch = "wasm32", target_feature = "simd128")
         ))]
@@ -275,9 +318,9 @@ pub(in super::super) fn depthwise_forward(
             }
         };
         #[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
-        with_dw_pad(run_ops);
+        with_dw_pad(|pad| run_ops(ops, pad));
         #[cfg(not(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128"))))]
-        run_ops();
+        run_ops(ops);
     });
 }
 
@@ -548,21 +591,21 @@ pub(in super::super) fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mu
                             } else if sw == 2 {
                                 let base = (cols.start as isize * 2 + *d) as usize;
                                 let gs = &grow[cols.clone()];
+                                let xs = &xrow[base..];
                                 #[cfg(target_arch = "x86_64")]
                                 if avx2 && gs.len() >= 8 {
                                     // SAFETY: AVX2 was detected above.
-                                    acc += unsafe { avx2::dot_stride2_avx2(gs, &xrow[base..]) };
+                                    acc += unsafe { avx2::dot_stride2_avx2(gs, xs) };
                                     continue;
                                 }
+                                let vec_n = gs.len().min(xs.len() / 2) / 8 * 8;
                                 let mut sub = [0f32; 8];
-                                let mut k = 0;
-                                while k + 8 <= gs.len() {
+                                for k in (0..vec_n).step_by(8) {
                                     for lane in 0..8 {
-                                        sub[lane] += gs[k + lane] * xrow[base + (k + lane) * 2];
+                                        sub[lane] += gs[k + lane] * xs[(k + lane) * 2];
                                     }
-                                    k += 8;
                                 }
-                                let mut s: f32 = (k..gs.len()).map(|j| gs[j] * xrow[base + j * 2]).sum();
+                                let mut s: f32 = (vec_n..gs.len()).map(|j| gs[j] * xs[j * 2]).sum();
                                 for v in sub {
                                     s += v;
                                 }
@@ -660,6 +703,49 @@ mod tests {
         depthwise_forward_scalar(ConvInput { parts: &part }, &wt, &mut want, &g, false, None);
         for (a, b) in got.iter().zip(&want) {
             assert_eq!(a.to_bits(), b.to_bits());
+        }
+
+        // Extreme vertical padding/dilation with a non-finite weight must not overflow in fallback indexing.
+        let p_big = Conv2dParams {
+            stride: [1, 1],
+            padding: [1usize << (usize::BITS - 2), 0],
+            dilation: [1usize << (usize::BITS - 1), 1],
+            groups: 2,
+        };
+        let [oh_b, ow_b] = p_big.output_hw(3, 1, 2, 1).unwrap();
+        let g_big = ConvGeom { n: 1, c: 2, h: 3, w: 1, o: 2, kh: 2, kw: 1, oh: oh_b, ow: ow_b, p: p_big };
+        let x_big = vec![1.0f32; 2 * 3];
+        let wt_big = vec![f32::INFINITY, 1.0, 1.0, 1.0];
+        let part_big = [ConvPart::contiguous(&x_big, 2, 3)];
+        let mut out_big = vec![0.0; 2 * oh_b * ow_b];
+        depthwise_forward(ConvInput { parts: &part_big }, &wt_big, &mut out_big, &g_big, false, None);
+        assert_eq!(out_big, vec![0.0; 2 * oh_b * ow_b]);
+
+        // Odd-width stride-2 dot product (16 samples in 31 floats) matches scalar bit-for-bit.
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            let mut g_s2 = vec![0.0f32; 16];
+            let mut x_s2 = vec![0.0f32; 31];
+            g_s2[0] = 1.0;
+            x_s2[0] = (1u32 << 24) as f32;
+            g_s2[8] = 1.0;
+            x_s2[16] = -((1u32 << 24) as f32);
+            g_s2[9] = 1.0;
+            x_s2[18] = 0.5;
+            // SAFETY: AVX2 detected above.
+            let got = unsafe { avx2::dot_stride2_avx2(&g_s2, &x_s2) };
+            let vec_n = g_s2.len().min(x_s2.len() / 2) / 8 * 8;
+            let mut sub = [0f32; 8];
+            for k in (0..vec_n).step_by(8) {
+                for lane in 0..8 {
+                    sub[lane] += g_s2[k + lane] * x_s2[(k + lane) * 2];
+                }
+            }
+            let mut want: f32 = (vec_n..g_s2.len()).map(|j| g_s2[j] * x_s2[j * 2]).sum();
+            for v in sub {
+                want += v;
+            }
+            assert_eq!(got.to_bits(), want.to_bits());
         }
     }
 }
