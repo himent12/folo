@@ -63,16 +63,106 @@ fn reductions_and_softmax() {
 #[test]
 fn softmax_with_infinite_entries() {
     // A non-finite maximum is replaced by 0, as on the CPU: a row with +inf gives 0 at its finite entries
-    // (NaN at the infinity), a row of -inf NaN; over the last dim (rows kernel) and another dim (columns kernel).
+    // (NaN at the infinity), a row of -inf NaN; over the last dim (cached and uncached rows kernel) and another
+    // dim (small-D and general columns kernel).
     let dev = dev!();
     let (inf, nan) = (f32::INFINITY, f32::NAN);
-    let v = [1.0f32, inf, 2.0, -inf, -inf, -inf, -inf, 3.0, -1.0, nan, 1.0, 0.5];
-    let x = Tensor::from_slice(&v, [4, 3]).unwrap();
+    let cases: [[f32; 4]; 9] = [
+        [1.0, inf, 2.0, -3.0],
+        [inf, inf, 1.0, 0.5],
+        [inf, nan, 1.0, 0.0],
+        [nan, inf, 1.0, 0.0],
+        [-inf, -inf, -inf, -inf],
+        [-inf, nan, -inf, -inf],
+        [nan, nan, nan, nan],
+        [nan, 1.0, 0.5, -2.0],
+        [-inf, 3.0, -1.0, -inf],
+    ];
+    let v: Vec<f32> = cases.iter().flatten().copied().collect();
+    let x = Tensor::from_vec(v, [cases.len(), 4]).unwrap();
     for log in [false, true] {
         let f = move |v: &[Tensor]| if log { v[0].log_softmax(1) } else { v[0].softmax(1) };
-        check(dev, std::slice::from_ref(&x), 1e-6, 1e-6, &format!("rows log={log}"), f);
+        check(dev, std::slice::from_ref(&x), 1e-6, 1e-6, &format!("rows cached log={log}"), f);
         let f = move |v: &[Tensor]| if log { v[0].t()?.log_softmax(0) } else { v[0].t()?.softmax(0) };
-        check(dev, std::slice::from_ref(&x), 1e-6, 1e-6, &format!("columns log={log}"), f);
+        check(dev, std::slice::from_ref(&x), 1e-6, 1e-6, &format!("cols small log={log}"), f);
+    }
+    // Exercise uncached rows (n > 1024) and general columns (d > 32) on the same non-finite edge cases.
+    for (n, label, dim) in [(1057usize, "rows uncached", 1usize), (48usize, "cols general", 0usize)] {
+        let mut padded = Vec::with_capacity(cases.len() * n);
+        for row in &cases {
+            let fill = if row.iter().all(|v| *v == -inf) { -inf } else { -10.0 };
+            padded.extend_from_slice(row);
+            padded.resize(padded.len() + n - row.len(), fill);
+        }
+        let t = Tensor::from_vec(padded, [cases.len(), n]).unwrap();
+        let t = if dim == 0 { t.t().unwrap().contiguous().unwrap() } else { t };
+        for log in [false, true] {
+            let f = move |v: &[Tensor]| if log { v[0].log_softmax(dim) } else { v[0].softmax(dim) };
+            check(dev, std::slice::from_ref(&t), 1e-6, 1e-5, &format!("{label} log={log}"), f);
+        }
+    }
+    // Extreme logits (±1e4) must not overflow or underflow on any of the 4 kernel paths.
+    // Note: GPU drivers may hoist `m + ls` in `x - m - ls`, introducing up to 0.5 ULP(1e4) ≈ 5e-4 on log_softmax.
+    let extreme = [1e4f32, -1e4, 1e4 - 1.0, 0.0];
+    for (n, label, dim) in [
+        (4usize, "extreme rows cached", 1usize),
+        (1057, "extreme rows uncached", 1),
+        (4, "extreme cols small", 0),
+        (48, "extreme cols general", 0),
+    ] {
+        let mut row = extreme.to_vec();
+        row.resize(n, -1e4);
+        let t = Tensor::from_vec(row, [1, n]).unwrap();
+        let t = if dim == 0 { t.t().unwrap().contiguous().unwrap() } else { t };
+        check(dev, std::slice::from_ref(&t), 1e-6, 1e-5, &format!("{label} softmax"), |v| v[0].softmax(dim));
+        check(dev, std::slice::from_ref(&t), 1e-3, 1e-3, &format!("{label} log_softmax"), |v| {
+            v[0].log_softmax(dim)
+        });
+    }
+}
+
+#[test]
+fn online_softmax_paths_and_backward_grads() {
+    let dev = dev!();
+    // Cover register-cached rows (n <= 1024), 2-pass rows (n > 1024), small-D cols (d <= 32, incl. DFL d = 16),
+    // and general 2-pass cols (d > 32), checking forward parity and autograd backward gradients vs CPU.
+    let shapes_and_dims: &[(&[usize], usize, &str)] = &[
+        (&[3, 16], 1, "rows n=16"),
+        (&[2, 256], 1, "rows n=256"),
+        (&[2, 400], 1, "rows n=400"),
+        (&[2, 1024], 1, "rows n=1024"),
+        (&[2, 1025], 1, "rows n=1025"),
+        (&[2, 16, 45], 1, "cols d=16"),
+        (&[2, 32, 17], 1, "cols d=32"),
+        (&[2, 33, 13], 1, "cols d=33"),
+        (&[2, 64, 11], 1, "cols d=64"),
+    ];
+    for &(shape, dim, label) in shapes_and_dims {
+        let x = randn(shape, 77);
+        let w = randn(shape, 78);
+        for log in [false, true] {
+            let f = move |v: &[Tensor]| if log { v[0].log_softmax(dim) } else { v[0].softmax(dim) };
+            check(dev, std::slice::from_ref(&x), 1e-6, 1e-5, &format!("{label} fwd log={log}"), f);
+
+            let xc = x.detach().requires_grad_();
+            let yc = if log { xc.log_softmax(dim).unwrap() } else { xc.softmax(dim).unwrap() };
+            let lc = yc.mul(&w).unwrap().sum_all().unwrap();
+            let gc = lc.backward().unwrap().get(&xc).unwrap().clone();
+
+            let xg = x.to_device(dev).unwrap().detach().requires_grad_();
+            let wg = w.to_device(dev).unwrap();
+            let yg = if log { xg.log_softmax(dim).unwrap() } else { xg.softmax(dim).unwrap() };
+            let lg = yg.mul(&wg).unwrap().sum_all().unwrap();
+            let gg = lg.backward().unwrap().get(&xg).unwrap().to_device(Device::Cpu).unwrap();
+
+            let gv = gg.to_vec::<f32>().unwrap();
+            let cv = gc.to_vec::<f32>().unwrap();
+            for (i, (&a, &b)) in gv.iter().zip(&cv).enumerate() {
+                let err = (a - b).abs();
+                let lim = 1e-4 + 1e-4 * b.abs();
+                assert!(err <= lim, "{label} bwd log={log} [{i}]: gpu={a} cpu={b} err={err}");
+            }
+        }
     }
 }
 
