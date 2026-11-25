@@ -202,38 +202,47 @@ pub fn box_iou(a: &Xyxy, b: &Xyxy) -> f32 {
 }
 
 /// The overlap measure `kind` between two boxes. Symmetric in `a` and `b`, always finite and within the range
-/// documented on [`IouKind`]. Inverted boxes are first collapsed to zero extent at their `(x1, y1)` corner.
+/// documented on [`IouKind`], including on degenerate, tiny (`1e-30`) and huge (`1e25`) finite boxes. Inverted
+/// boxes are first collapsed to zero extent at their `(x1, y1)` corner.
 #[inline]
 pub fn iou(a: &Xyxy, b: &Xyxy, kind: IouKind) -> f32 {
     let collapse = |b: &Xyxy| Xyxy { x1: b.x1, y1: b.y1, x2: b.x2.max(b.x1), y2: b.y2.max(b.y1) };
     let (a, b) = (&collapse(a), &collapse(b));
-    let inter = a.intersection(b);
-    let union = a.area() + b.area() - inter;
-    let iou = if union > 0.0 { inter / union } else { 0.0 };
+    let (ax1, ay1, ax2, ay2) = (a.x1 as f64, a.y1 as f64, a.x2 as f64, a.y2 as f64);
+    let (bx1, by1, bx2, by2) = (b.x1 as f64, b.y1 as f64, b.x2 as f64, b.y2 as f64);
+    let iw = (ax2.min(bx2) - ax1.max(bx1)).max(0.0);
+    let ih = (ay2.min(by2) - ay1.max(by1)).max(0.0);
+    let inter = iw * ih;
+    let wa = (ax2 - ax1).max(0.0);
+    let ha = (ay2 - ay1).max(0.0);
+    let wb = (bx2 - bx1).max(0.0);
+    let hb = (by2 - by1).max(0.0);
+    let union = wa * ha + wb * hb - inter;
+    let iou = if union > 0.0 { (inter / union) as f32 } else { 0.0 };
     if kind == IouKind::Iou {
         return iou;
     }
-    // Enclosing box.
-    let cw = a.x2.max(b.x2) - a.x1.min(b.x1);
-    let ch = a.y2.max(b.y2) - a.y1.min(b.y1);
+    // Enclosing box in f64: avoids f32 overflow on huge boxes and underflow on tiny boxes.
+    let cw = (ax2.max(bx2) - ax1.min(bx1)).max(0.0);
+    let ch = (ay2.max(by2) - ay1.min(by1)).max(0.0);
     match kind {
         IouKind::Iou => iou,
         IouKind::Giou => {
-            let c_area = cw.max(0.0) * ch.max(0.0);
-            if c_area > 0.0 { iou - (c_area - union) / c_area } else { iou }
+            let c_area = cw * ch;
+            if c_area > 0.0 { (iou as f64 - (c_area - union) / c_area) as f32 } else { iou }
         }
         IouKind::Diou | IouKind::Ciou => {
             let c2 = cw * cw + ch * ch;
             // Pairwise differences first: each term negates exactly when a and b swap, so the result is symmetric.
-            let dx = ((b.x1 - a.x1) + (b.x2 - a.x2)) * 0.5;
-            let dy = ((b.y1 - a.y1) + (b.y2 - a.y2)) * 0.5;
+            let dx = ((bx1 - ax1) + (bx2 - ax2)) * 0.5;
+            let dy = ((by1 - ay1) + (by2 - ay2)) * 0.5;
             let rho2 = dx * dx + dy * dy;
-            let dist = if c2 > 0.0 { rho2 / c2 } else { 0.0 };
+            let dist = if c2 > 0.0 { (rho2 / c2).min(1.0) as f32 } else { 0.0 };
             if kind == IouKind::Diou {
                 return iou - dist;
             }
             // atan2(w, h) == atan(w / h) for h > 0 and stays finite for h == 0.
-            let d = b.width().atan2(b.height()) - a.width().atan2(a.height());
+            let d = (wb.atan2(hb) - wa.atan2(ha)) as f32;
             let v = (4.0 / (std::f32::consts::PI * std::f32::consts::PI)) * d * d;
             let denom = v - iou + 1.0;
             let alpha = if denom > 0.0 { v / denom } else { 0.0 };
@@ -245,28 +254,56 @@ pub fn iou(a: &Xyxy, b: &Xyxy, kind: IouKind) -> f32 {
 /// CIoU in the exact form of `docs/MODEL.md` §7.2 (Ultralytics' `bbox_iou(..., CIoU=True)`), with its `eps = 1e-7`
 /// terms added to both heights, the union and the squared enclosing diagonal, and inside the `alpha` denominator.
 /// The assigner and the box loss use this form. Unlike [`iou`] with [`IouKind::Ciou`], identical boxes score slightly
-/// below 1 (noticeably so for boxes of a few 1e-3 pixels). Symmetric in `a` and `b`.
+/// below 1 (noticeably so for boxes of a few 1e-3 pixels). Symmetric in `a` and `b`, and guarded against negative
+/// extents or `f32` `c²` overflow on degenerate / extreme boxes.
 #[inline]
 pub fn ciou_eps(a: &Xyxy, b: &Xyxy) -> f32 {
-    const EPS: f32 = 1e-7;
-    let (w1, h1) = (a.x2 - a.x1, a.y2 - a.y1 + EPS);
-    let (w2, h2) = (b.x2 - b.x1, b.y2 - b.y1 + EPS);
-    let inter = (a.x2.min(b.x2) - a.x1.max(b.x1)).max(0.0) * (a.y2.min(b.y2) - a.y1.max(b.y1)).max(0.0);
-    let union = w1 * h1 + w2 * h2 - inter + EPS;
-    let iou = inter / union;
-    let cw = a.x2.max(b.x2) - a.x1.min(b.x1);
-    let ch = a.y2.max(b.y2) - a.y1.min(b.y1);
+    let normal = |b: &Xyxy| {
+        b.x2 >= b.x1 && b.y2 >= b.y1 && b.x1.abs().max(b.y1.abs()).max(b.x2.abs()).max(b.y2.abs()) <= 1e15
+    };
+    if normal(a) && normal(b) {
+        // Exact §7.2 f32 evaluation order for valid in-range boxes (bit-identical to Ultralytics / tensor `ciou`).
+        const EPS: f32 = 1e-7;
+        let (w1, h1) = (a.x2 - a.x1, a.y2 - a.y1 + EPS);
+        let (w2, h2) = (b.x2 - b.x1, b.y2 - b.y1 + EPS);
+        let inter = (a.x2.min(b.x2) - a.x1.max(b.x1)).max(0.0) * (a.y2.min(b.y2) - a.y1.max(b.y1)).max(0.0);
+        let union = w1 * h1 + w2 * h2 - inter + EPS;
+        let iou = inter / union;
+        let cw = a.x2.max(b.x2) - a.x1.min(b.x1);
+        let ch = a.y2.max(b.y2) - a.y1.min(b.y1);
+        let c2 = cw * cw + ch * ch + EPS;
+        let dx = b.x1 + b.x2 - a.x1 - a.x2;
+        let dy = b.y1 + b.y2 - a.y1 - a.y2;
+        let rho2 = (dx * dx + dy * dy) / 4.0;
+        let at = |w: f32, h: f32| if h != 0.0 { (w / h).atan() } else { w.atan2(h) };
+        let d = at(w2, h2) - at(w1, h1);
+        let v = (4.0 / (std::f32::consts::PI * std::f32::consts::PI)) * d * d;
+        // Ultralytics' evaluation order of §7.2's `1 − iou + v + eps`.
+        let alpha = v / (v - iou + (1.0 + EPS)).max(EPS);
+        return iou - (rho2 / c2 + v * alpha);
+    }
+    // Fallback in f64 with collapsed inverted extents so extreme (`1e25`) or inverted boxes stay finite and in range.
+    const EPS: f64 = 1e-7;
+    let collapse = |b: &Xyxy| Xyxy { x1: b.x1, y1: b.y1, x2: b.x2.max(b.x1), y2: b.y2.max(b.y1) };
+    let (a, b) = (collapse(a), collapse(b));
+    let (ax1, ay1, ax2, ay2) = (a.x1 as f64, a.y1 as f64, a.x2 as f64, a.y2 as f64);
+    let (bx1, by1, bx2, by2) = (b.x1 as f64, b.y1 as f64, b.x2 as f64, b.y2 as f64);
+    let (w1, h1) = ((ax2 - ax1).max(0.0), (ay2 - ay1).max(0.0) + EPS);
+    let (w2, h2) = ((bx2 - bx1).max(0.0), (by2 - by1).max(0.0) + EPS);
+    let inter = (ax2.min(bx2) - ax1.max(bx1)).max(0.0) * (ay2.min(by2) - ay1.max(by1)).max(0.0);
+    let union = (w1 * h1 + w2 * h2 - inter).max(0.0) + EPS;
+    let iou = (inter / union).clamp(0.0, 1.0);
+    let cw = (ax2.max(bx2) - ax1.min(bx1)).max(0.0);
+    let ch = (ay2.max(by2) - ay1.min(by1)).max(0.0);
     let c2 = cw * cw + ch * ch + EPS;
-    let dx = b.x1 + b.x2 - a.x1 - a.x2;
-    let dy = b.y1 + b.y2 - a.y1 - a.y2;
-    let rho2 = (dx * dx + dy * dy) / 4.0;
-    // atan(w / h), kept finite if a malformed box makes h exactly 0.
-    let at = |w: f32, h: f32| if h != 0.0 { (w / h).atan() } else { w.atan2(h) };
-    let d = at(w2, h2) - at(w1, h1);
-    let v = (4.0 / (std::f32::consts::PI * std::f32::consts::PI)) * d * d;
-    // Ultralytics' evaluation order of §7.2's `1 − iou + v + eps`.
-    let alpha = v / (v - iou + (1.0 + EPS));
-    iou - (rho2 / c2 + v * alpha)
+    let dx = ((bx1 - ax1) + (bx2 - ax2)) * 0.5;
+    let dy = ((by1 - ay1) + (by2 - ay2)) * 0.5;
+    let rho2 = dx * dx + dy * dy;
+    let dist = (rho2 / c2).min(1.0);
+    let d = w2.atan2(h2) - w1.atan2(h1);
+    let v = (4.0 / (std::f64::consts::PI * std::f64::consts::PI)) * d * d;
+    let alpha = v / (v - iou + (1.0 + EPS)).max(EPS);
+    (iou - (dist + v * alpha)) as f32
 }
 
 /// Elementwise overlap: `out[i] = iou(a[i], b[i], kind)`.
@@ -303,12 +340,19 @@ pub fn iou_matrix_into(a: &[Xyxy], b: &[Xyxy], kind: IouKind, out: &mut [f32]) {
     }
     let row = |(ra, orow): (&Xyxy, &mut [f32])| {
         if kind == IouKind::Iou {
-            // Hoist the area of `ra`; the hot inner loop is branch-light and vectorises.
-            let area_a = ra.area();
+            // Hoist collapsed f64 corners and area of `ra`; stays branch-light while matching `iou()` on extreme boxes.
+            let (ax1, ay1) = (ra.x1 as f64, ra.y1 as f64);
+            let (ax2, ay2) = (ra.x2.max(ra.x1) as f64, ra.y2.max(ra.y1) as f64);
+            let area_a = (ax2 - ax1).max(0.0) * (ay2 - ay1).max(0.0);
             for (o, rb) in orow.iter_mut().zip(b) {
-                let inter = ra.intersection(rb);
-                let union = area_a + rb.area() - inter;
-                *o = if union > 0.0 { inter / union } else { 0.0 };
+                let (bx1, by1) = (rb.x1 as f64, rb.y1 as f64);
+                let (bx2, by2) = (rb.x2.max(rb.x1) as f64, rb.y2.max(rb.y1) as f64);
+                let iw = (ax2.min(bx2) - ax1.max(bx1)).max(0.0);
+                let ih = (ay2.min(by2) - ay1.max(by1)).max(0.0);
+                let inter = iw * ih;
+                let area_b = (bx2 - bx1).max(0.0) * (by2 - by1).max(0.0);
+                let union = area_a + area_b - inter;
+                *o = if union > 0.0 { (inter / union) as f32 } else { 0.0 };
             }
         } else {
             for (o, rb) in orow.iter_mut().zip(b) {
@@ -481,6 +525,10 @@ mod tests {
             (Xyxy::new(0.0, 0.0, 1.0, 10.0), Xyxy::new(5.0, 500.0, -300.0, 0.0)),
             // Nearly coincident points: the centre delta must not depend on argument order through rounding.
             (Xyxy::new(100.0, 0.0, 100.0, 0.0), Xyxy::new(100.0, 0.0, 100.000_01, 0.0)),
+            // Tiny sub-pixel boxes (f32 c² would underflow to 0).
+            (Xyxy::new(0.0, 0.0, 1e-25, 1e-25), Xyxy::new(2e-25, 0.0, 3e-25, 1e-25)),
+            // Extreme huge boxes (f32 c² would overflow to inf -> inf/inf = NaN).
+            (Xyxy::new(0.0, 0.0, 1e25, 1e25), Xyxy::new(0.5e25, 0.0, 1.5e25, 1e25)),
         ];
         for (x, y) in cases {
             for kind in [IouKind::Iou, IouKind::Giou, IouKind::Diou, IouKind::Ciou] {
@@ -494,8 +542,23 @@ mod tests {
                 assert!((lo..=1.0).contains(&v), "{kind:?}({x:?}, {y:?}) = {v} out of range");
                 assert_eq!(v, iou(&y, &x, kind), "{kind:?} must be symmetric");
             }
-            assert_eq!(box_iou(&x, &y), 0.0);
+            let ce = ciou_eps(&x, &y);
+            assert!(ce.is_finite(), "ciou_eps({x:?}, {y:?}) = {ce}");
+            assert!((-1.5..=1.0).contains(&ce), "ciou_eps({x:?}, {y:?}) = {ce} out of range");
+            assert!(
+                (ce - ciou_eps(&y, &x)).abs() <= 1e-3,
+                "ciou_eps must be symmetric: {ce} vs {}",
+                ciou_eps(&y, &x)
+            );
         }
+        // Check exact box_iou == 0 on the degenerate/disjoint cases (all except the last overlapping huge pair).
+        for (x, y) in &cases[..cases.len() - 1] {
+            assert_eq!(box_iou(x, y), 0.0);
+        }
+        // Matrix path must agree with scalar `iou` even on extreme huge boxes (no f32 overflow).
+        let huge = Xyxy::new(0.0, 0.0, 1e25, 1e25);
+        assert_eq!(iou(&huge, &huge, IouKind::Iou), 1.0);
+        assert_eq!(iou_matrix(&[huge], &[huge], IouKind::Iou), vec![1.0]);
     }
 
     #[test]

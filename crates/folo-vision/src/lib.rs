@@ -50,6 +50,6 @@ pub use error::{Error, Result};
 pub use loss::{DistillConfig, ImageTargets, LossConfig, LossItems, LossOutput, detection_loss};
 pub use metrics::{EvalConfig, EvalReport, Evaluator, Truth};
 pub use model::{FoloModel, HeadOutput, ModelConfig};
-pub use nms::{Detection, NmsConfig};
+pub use nms::{Detection, NmsConfig, NmsKind};
 pub use predict::{Precision, PredictConfig, Prediction, Predictor, PreparedBatch, Timing};
 pub use train::{TrainConfig, TrainData, TrainOptions, Trainer};

@@ -650,7 +650,9 @@ pub fn ciou(b1: &Tensor, b2: &Tensor) -> Result<Tensor> {
     let v = d.square()?.mul_scalar(4.0 / (std::f32::consts::PI * std::f32::consts::PI))?;
     let alpha = {
         let _g = no_grad();
-        v.div(&v.sub(&iou)?.add_scalar(1.0 + EPS)?)?
+        let raw = v.sub(&iou)?.add_scalar(1.0 + EPS)?;
+        let eps = raw.zeros_like()?.add_scalar(EPS)?;
+        v.div(&raw.maximum(&eps)?)?
     };
     iou.sub(&rho2.div(&c2)?.add(&v.mul(&alpha)?)?)
 }

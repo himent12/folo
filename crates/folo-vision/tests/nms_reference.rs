@@ -210,6 +210,7 @@ fn post_process_matches_naive() {
             fusion: [BoxFusion::None, BoxFusion::Vote, BoxFusion::Dfl][(case / 3) % 3],
             fusion_iou: [0.75, 0.5][(case / 4) % 2],
             score: [ScoreRule::None, ScoreRule::Consensus][(case / 5) % 2],
+            ..NmsConfig::default()
         };
         // Side precisions spanning three orders of magnitude, and some zeros.
         let prec: Vec<[f32; 4]> = (0..a)
