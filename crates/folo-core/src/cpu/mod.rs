@@ -9,7 +9,9 @@
 //!   kernels below; [`in_pool`] and [`take_buffer`].
 //! - `elementwise.rs`: strided copies, unary / binary / `where` kernels and the unary gradients, and the shared
 //!   [`silu`], [`silu_backward`] and [`fast_exp`] formulas.
-//! - `reduce.rs`: reductions, arg-reductions, softmax and top-k over one dimension (`[outer, d, inner]`).
+//! - `reduce/`: AVX2 reductions (`sum`, `min`, `max`, `var`), arg-reductions and top-k over one dimension
+//!   (`[outer, d, inner]`).
+//! - `norm/`: fused AVX2+FMA `layer_norm` and `rms_norm` forward and backward kernels.
 //! - `index.rs`: `index_select`, `index_add`, `gather` and `scatter_add` over one dimension.
 //! - `pool.rs`: max, average and adaptive average pooling and nearest upsampling, with their gradients.
 //! - `pool_alloc/`: the two-level cache of large `f32` buffers ([`set_buffer_cache_limit`]).
@@ -30,6 +32,7 @@ mod conv;
 pub(crate) mod elementwise;
 pub mod gemm;
 mod index;
+mod norm;
 mod pool;
 mod pool_alloc;
 pub mod q8;
@@ -331,6 +334,12 @@ impl Backend for CpuBackend {
         })
     }
 
+    fn reduce_var(&self, x: View<'_>, dim: usize, unbiased: bool) -> Result<Storage> {
+        let data = contiguous_f32(&x, "reduce_var")?;
+        let s3 = reduce::split3(x.shape().dims(), dim);
+        Ok(f32_storage(reduce::reduce_var_f32(&data, s3, unbiased)))
+    }
+
     fn softmax(&self, x: View<'_>, dim: usize, log: bool) -> Result<Storage> {
         let data = contiguous_f32(&x, "softmax")?;
         Ok(f32_storage(softmax::softmax(&data, reduce::split3(x.shape().dims(), dim), log)))
@@ -339,6 +348,71 @@ impl Backend for CpuBackend {
     fn softmax_backward(&self, y: View<'_>, grad: View<'_>, dim: usize, log: bool) -> Result<Storage> {
         let (yd, gd) = (contiguous_f32(&y, "softmax_backward")?, contiguous_f32(&grad, "softmax_backward")?);
         Ok(f32_storage(softmax::softmax_backward(&yd, &gd, reduce::split3(y.shape().dims(), dim), log)))
+    }
+
+    fn layer_norm(
+        &self,
+        x: View<'_>,
+        weight: Option<View<'_>>,
+        bias: Option<View<'_>>,
+        eps: f32,
+    ) -> Result<(Storage, Storage, Storage)> {
+        let xd = contiguous_f32(&x, "layer_norm")?;
+        let wd = weight.map(|w| contiguous_f32(&w, "layer_norm")).transpose()?;
+        let bd = bias.map(|b| contiguous_f32(&b, "layer_norm")).transpose()?;
+        let d = *x.shape().dims().last().unwrap_or(&0);
+        let outer = x.layout.numel().checked_div(d).unwrap_or(0);
+        let (y, m, r) = norm::layer_norm(&xd, wd.as_deref(), bd.as_deref(), outer, d, eps);
+        Ok((f32_storage(y), f32_storage(m), f32_storage(r)))
+    }
+
+    fn layer_norm_backward(
+        &self,
+        x: View<'_>,
+        grad: View<'_>,
+        weight: Option<View<'_>>,
+        mean: View<'_>,
+        rstd: View<'_>,
+        need_weight: bool,
+        need_bias: bool,
+    ) -> Result<(Storage, Option<Storage>, Option<Storage>)> {
+        let xd = contiguous_f32(&x, "layer_norm_backward")?;
+        let gd = contiguous_f32(&grad, "layer_norm_backward")?;
+        let wd = weight.map(|w| contiguous_f32(&w, "layer_norm_backward")).transpose()?;
+        let md = contiguous_f32(&mean, "layer_norm_backward")?;
+        let rd = contiguous_f32(&rstd, "layer_norm_backward")?;
+        let d = *x.shape().dims().last().unwrap_or(&0);
+        let outer = x.layout.numel().checked_div(d).unwrap_or(0);
+        let (dx, dw, db) =
+            norm::layer_norm_backward(&xd, &gd, wd.as_deref(), &md, &rd, outer, d, need_weight, need_bias);
+        Ok((f32_storage(dx), dw.map(f32_storage), db.map(f32_storage)))
+    }
+
+    fn rms_norm(&self, x: View<'_>, weight: Option<View<'_>>, eps: f32) -> Result<(Storage, Storage)> {
+        let xd = contiguous_f32(&x, "rms_norm")?;
+        let wd = weight.map(|w| contiguous_f32(&w, "rms_norm")).transpose()?;
+        let d = *x.shape().dims().last().unwrap_or(&0);
+        let outer = x.layout.numel().checked_div(d).unwrap_or(0);
+        let (y, r) = norm::rms_norm(&xd, wd.as_deref(), outer, d, eps);
+        Ok((f32_storage(y), f32_storage(r)))
+    }
+
+    fn rms_norm_backward(
+        &self,
+        x: View<'_>,
+        grad: View<'_>,
+        weight: Option<View<'_>>,
+        rstd: View<'_>,
+        need_weight: bool,
+    ) -> Result<(Storage, Option<Storage>)> {
+        let xd = contiguous_f32(&x, "rms_norm_backward")?;
+        let gd = contiguous_f32(&grad, "rms_norm_backward")?;
+        let wd = weight.map(|w| contiguous_f32(&w, "rms_norm_backward")).transpose()?;
+        let rd = contiguous_f32(&rstd, "rms_norm_backward")?;
+        let d = *x.shape().dims().last().unwrap_or(&0);
+        let outer = x.layout.numel().checked_div(d).unwrap_or(0);
+        let (dx, dw) = norm::rms_norm_backward(&xd, &gd, wd.as_deref(), &rd, outer, d, need_weight);
+        Ok((f32_storage(dx), dw.map(f32_storage)))
     }
 
     fn matmul(&self, a: View<'_>, b: View<'_>) -> Result<Storage> {
