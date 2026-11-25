@@ -20,6 +20,8 @@ mod forms;
 #[cfg(test)]
 mod image_tests;
 #[cfg(test)]
+mod list_filter_tests;
+#[cfg(test)]
 mod list_tests;
 mod lists;
 mod navigation;
@@ -414,6 +416,10 @@ pub struct FoloApp {
 
     // Runs
     pub run_filter: RunFilter,
+    /// Architecture filter on the Runs list (`None` = All).
+    pub run_arch_filter: Option<Arch>,
+    /// Live search input on the Runs list (matches name, dataset, architecture, status, or id).
+    pub run_search: Entity<TextInput>,
     pub chart_hover: Option<f32>,
     /// The run chart the cursor is on (its id, "run-map", "run-loss", ...): the pointer's, or the
     /// one ↑ / ↓ picked; only that chart draws `chart_hover`'s cursor and reads its legend there.
@@ -444,6 +450,12 @@ pub struct FoloApp {
     pub sample_epoch: Option<u32>,
 
     // Models
+    /// Architecture filter on the Models list (`None` = All).
+    pub models_arch_filter: Option<Arch>,
+    /// Live search input on the Models list (matches name, class, dataset, source run, arch, or id).
+    pub model_search: Entity<TextInput>,
+    /// Models whose full class list is expanded in the Details panel.
+    pub model_classes_expanded: std::collections::HashSet<String>,
     pub export_open: bool,
     pub pr_hover: Option<f32>,
     /// The class isolated on the PR chart (hovered or focused in the per-class table).
@@ -679,6 +691,11 @@ impl FoloApp {
         });
         let ds_search = cx.new(|cx| TextInput::new("Filter by name or path", cx));
         let ds_search_sub = cx.subscribe(&ds_search, |_, _, _: &crate::input::InputEvent, cx| cx.notify());
+        let run_search = cx.new(|cx| TextInput::new("Filter by name, dataset or arch", cx));
+        let run_search_sub = cx.subscribe(&run_search, |_, _, _: &crate::input::InputEvent, cx| cx.notify());
+        let model_search = cx.new(|cx| TextInput::new("Filter by name, class or arch", cx));
+        let model_search_sub =
+            cx.subscribe(&model_search, |_, _, _: &crate::input::InputEvent, cx| cx.notify());
         let mut this = Self {
             store: Store::new(api),
             route: Route::Overview,
@@ -732,6 +749,8 @@ impl FoloApp {
             inspector_return: None,
             hist_hover: HashMap::new(),
             run_filter: RunFilter::All,
+            run_arch_filter: None,
+            run_search,
             chart_hover: None,
             chart_hover_on: None,
             run_x_fit: None,
@@ -749,6 +768,9 @@ impl FoloApp {
             log_last_y: px(0.),
             log_run: None,
             sample_epoch: None,
+            models_arch_filter: None,
+            model_search,
+            model_classes_expanded: Default::default(),
             export_open: false,
             pr_hover: None,
             pr_focus: None,
@@ -862,7 +884,7 @@ impl FoloApp {
             history_tickets: HashMap::new(),
             history_seq: 0,
             _tasks: Vec::new(),
-            _subs: vec![ds_search_sub],
+            _subs: vec![ds_search_sub, run_search_sub, model_search_sub],
         };
         if !frozen {
             this.start_pump(cx);

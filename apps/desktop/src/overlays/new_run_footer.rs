@@ -1,14 +1,16 @@
 //! The New run dialog's footer: the time and memory estimate (the server's, or the app's own
 //! reference figures), a cloud run's cost, Cancel and Start; and the dialog's frame.
 
+use std::rc::Rc;
+
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, Div, FontWeight, InteractiveElement, ParentElement, StatefulInteractiveElement,
-    Styled, Window, div, px,
+    AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, ParentElement,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use crate::api::RunStatus;
-use crate::app::{BATCHES, DEVICES, FoloApp, IMGSZ, act};
+use crate::app::{DEVICES, FoloApp, act};
 use crate::controls::Btn;
 use crate::theme::{Theme, radius, ty};
 use crate::ui::*;
@@ -76,8 +78,8 @@ pub(super) struct NewRunSummary {
     pub(super) cloud_offer: Option<crate::api::CloudOffer>,
     pub(super) arch: usize,
     pub(super) epochs: f32,
-    pub(super) batch: usize,
-    pub(super) imgsz: usize,
+    pub(super) batch: u32,
+    pub(super) imgsz: u32,
     pub(super) device: usize,
     pub(super) amp: bool,
     pub(super) amp_why: Option<String>,
@@ -89,6 +91,45 @@ pub(super) struct NewRunSummary {
 }
 
 impl FoloApp {
+    /// A segmented preset control that also exposes a cloned non-preset `custom` value in sorted order.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn nr_preset_seg(
+        &mut self,
+        key: &'static str,
+        presets: &'static [u32],
+        val: u32,
+        custom: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        set: fn(&mut crate::app::NewRunForm, Option<usize>, u32),
+    ) -> AnyElement {
+        let mut vals: Vec<u32> = presets.to_vec();
+        if let Some(cv) = custom
+            && !vals.contains(&cv)
+        {
+            vals.push(cv);
+            vals.sort_unstable();
+        }
+        let sel = vals.iter().position(|&v| v == val).unwrap_or(0);
+        let labels: Vec<String> = vals.iter().map(|v| v.to_string()).collect();
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        self.segmented_fill(
+            key,
+            &refs,
+            sel,
+            window,
+            cx,
+            Rc::new(move |this, i, _, _| {
+                if let Some(f) = this.new_run.as_mut()
+                    && let Some(&v) = vals.get(i)
+                {
+                    set(f, presets.iter().position(|&p| p == v), v);
+                }
+            }),
+        )
+        .into_any_element()
+    }
+
     /// The New run dialog around its `body`: the footer (the estimate, a cloud run's cost, Cancel and
     /// Start) and the frame. `new_run_dialog` hands over what it read from the form.
     pub(super) fn frame_new_run(
@@ -168,7 +209,7 @@ impl FoloApp {
                 },
             }
         };
-        let (local_secs, local_vram) = estimate(arch, epochs, BATCHES[batch], IMGSZ[imgsz], images as u32);
+        let (local_secs, local_vram) = estimate(arch, epochs, batch, imgsz, images as u32);
         // Mixed precision trains in about 0.58x the memory (folo-n batch 16: 2022 vs 3474 MiB,
         // docs/BENCHMARKS.md) and no faster at 640 px (the epoch is bound elsewhere), so only the
         // memory moves.

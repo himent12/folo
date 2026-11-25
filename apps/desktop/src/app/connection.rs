@@ -123,6 +123,12 @@ impl FoloApp {
         self.ds_empty_of = None;
         self.ds_format_filter = None;
         self.ds_search.update(cx, |i, cx| i.set_text("", cx));
+        self.run_filter = super::RunFilter::All;
+        self.run_arch_filter = None;
+        self.run_search.update(cx, |i, cx| i.set_text("", cx));
+        self.models_arch_filter = None;
+        self.model_search.update(cx, |i, cx| i.set_text("", cx));
+        self.model_classes_expanded.clear();
         // Ids are only unique per server: cached pixels (and failures) belong to the old one. The
         // textures are freed after this update, when no window is mid-draw, so every window's atlas
         // is reached (this often runs inside a click handler).

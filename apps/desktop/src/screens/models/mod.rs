@@ -9,3 +9,6 @@ mod details;
 mod groups;
 mod list;
 mod pr;
+
+#[cfg(test)]
+pub(crate) use list::filter_models;

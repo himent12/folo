@@ -3,13 +3,38 @@
 //! architecture's measured and reference latency.
 
 use folo_ui::prelude::FluentBuilder;
-use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::{
+    AnyElement, Context, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
+    Window, div, px,
+};
 
 use crate::api::{InferThroughput, Model, ModelEval, ModelSource, Run, RunStatus, ThroughputSource, time};
-use crate::app::FoloApp;
+use crate::app::{FoloApp, act};
 use crate::store::Load;
-use crate::theme::{Theme, theme, ty};
+use crate::theme::{Theme, radius, theme, ty};
 use crate::ui::*;
+
+/// Maximum classes previewed inline before collapsing behind a "Show all" toggle.
+pub(super) const CLASS_PREVIEW_CAP: usize = 10;
+
+/// Formats the model's classes for the compact Details row (first [`CLASS_PREVIEW_CAP`] plus
+/// `+{more} more` when collapsed; count alone when expanded into the full-width band below).
+pub(super) fn classes_summary(classes: &[String], expanded: bool) -> String {
+    if classes.is_empty() {
+        return "0".to_string();
+    }
+    let more = classes.len().saturating_sub(CLASS_PREVIEW_CAP);
+    if expanded && more > 0 {
+        return format!("{} classes", int(classes.len() as u64));
+    }
+    let shown: Vec<&str> = classes.iter().take(CLASS_PREVIEW_CAP).map(String::as_str).collect();
+    format!(
+        "{} · {}{}",
+        int(classes.len() as u64),
+        shown.join(", "),
+        if more > 0 { format!(" +{} more", int(more as u64)) } else { String::new() }
+    )
+}
 
 /// The epochs a run finished, None when not known (Studio's `finishedEpochs`,
 /// web/src/routes/model/weightsEpoch.ts). A `completed` or `stopped` run's `epoch` is the server's
@@ -205,20 +230,90 @@ impl FoloApp {
                 value(&t, format!("{b} {bu} · .folo")).into_any_element()
             },
         );
-        let shown: Vec<String> = m.classes.iter().take(10).cloned().collect();
-        let more = m.classes.len().saturating_sub(10);
+        let more = m.classes.len().saturating_sub(CLASS_PREVIEW_CAP);
+        let classes_expanded = more > 0 && self.model_classes_expanded.contains(&m.id);
+        let mut class_actions: Vec<AnyElement> = Vec::new();
+        if more > 0 {
+            let mid = m.id.clone();
+            let toggle_label = if classes_expanded {
+                "Show fewer".to_string()
+            } else {
+                format!("Show all {}", int(m.classes.len() as u64))
+            };
+            let el = div()
+                .id("model-classes-toggle")
+                .px(px(4.))
+                .rounded(px(radius::SM))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bg_hover))
+                .active(|s| s.bg(t.bg_active))
+                .child(inline_link(&t, toggle_label));
+            class_actions.push(
+                self.bind(
+                    el,
+                    "model-classes-toggle",
+                    radius::SM,
+                    window,
+                    cx,
+                    act(move |this, _, cx| {
+                        if !this.model_classes_expanded.remove(&mid) {
+                            this.model_classes_expanded.insert(mid.clone());
+                        }
+                        cx.notify();
+                    }),
+                )
+                .into_any_element(),
+            );
+        }
+        if !m.classes.is_empty() {
+            let classes_text = m.classes.join(", ");
+            let class_count = m.classes.len();
+            let el = div()
+                .id("model-classes-copy")
+                .px(px(4.))
+                .rounded(px(radius::SM))
+                .cursor_pointer()
+                .hover(|s| s.bg(t.bg_hover))
+                .active(|s| s.bg(t.bg_active))
+                .tooltip(crate::controls::tip("Copy all class names", None))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .child(icon("icons/copy.svg", 12., t.text_secondary))
+                .child(text(ty::SM, t.text_secondary).child("Copy"));
+            class_actions.push(
+                self.bind(
+                    el,
+                    "model-classes-copy",
+                    radius::SM,
+                    window,
+                    cx,
+                    act(move |this, _, cx| {
+                        cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(classes_text.clone()));
+                        this.toast(
+                            Tone::Neutral,
+                            format!("Copied {}", counted(class_count as u64, "class", "classes")),
+                            None,
+                            cx,
+                        );
+                    }),
+                )
+                .into_any_element(),
+            );
+        }
         fact(
             "Classes",
-            value(
-                &t,
-                format!(
-                    "{} · {}{}",
-                    m.classes.len(),
-                    shown.join(", "),
-                    if more > 0 { format!(" +{more} more") } else { String::new() }
-                ),
-            )
-            .into_any_element(),
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_end()
+                .gap(px(4.))
+                .child(value(&t, classes_summary(&m.classes, classes_expanded)))
+                .when(!class_actions.is_empty(), |d| {
+                    d.child(div().flex().items_center().justify_end().gap(px(6.)).children(class_actions))
+                })
+                .into_any_element(),
         );
         let ds = run.as_ref().map(|r| self.store.run_dataset_name(r));
         fact(
@@ -329,6 +424,47 @@ impl FoloApp {
             .flex_col()
             .child(panel_header(&t, "Details"))
             .child(div().flex().gap(px(32.)).px(px(16.)).py(px(8.)).children(columns))
+            .when(classes_expanded, |d| {
+                d.child(
+                    div()
+                        .border_t_1()
+                        .border_color(t.line_subtle)
+                        .px(px(16.))
+                        .py(px(12.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(
+                            text(ty::SM, t.text_tertiary)
+                                .child(format!("All {} classes", int(m.classes.len() as u64))),
+                        )
+                        .child(div().flex().flex_wrap().gap(px(6.)).children(
+                            m.classes.iter().enumerate().map(|(i, name)| {
+                                div()
+                                    .max_w_full()
+                                    .min_w_0()
+                                    .px(px(8.))
+                                    .py(px(2.))
+                                    .rounded(px(radius::SM))
+                                    .bg(t.bg_inset)
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.))
+                                    .child(crate::ui::class_swatch(&t, i as u32, 6.))
+                                    .child(
+                                        text(ty::SM, t.text_tertiary).flex_none().tnum().child(i.to_string()),
+                                    )
+                                    .child(
+                                        text(ty::SM, t.text_primary)
+                                            .min_w_0()
+                                            .max_w_full()
+                                            .whitespace_normal()
+                                            .child(name.clone()),
+                                    )
+                            }),
+                        )),
+                )
+            })
             .into_any_element()
     }
 }

@@ -52,9 +52,11 @@ pub fn detail_header(
 ) -> Div {
     div()
         .flex()
+        .flex_wrap()
         .items_start()
         .justify_between()
-        .gap(px(16.))
+        .gap_x(px(16.))
+        .gap_y(px(8.))
         .pb(px(4.))
         .child(
             div()
@@ -62,10 +64,19 @@ pub fn detail_header(
                 .flex_col()
                 .gap(px(4.))
                 .min_w_0()
-                .child(div().h(px(ty::XL.line)).flex().items_center().child(title))
+                .child(div().h(px(ty::XL.line)).flex().items_center().min_w_0().child(title))
                 .child(div().text_color(t.text_secondary).text_size(px(ty::SM.size)).child(subtitle)),
         )
-        .child(div().h(px(ty::XL.line)).flex().items_center().gap(px(8.)).flex_none().children(actions))
+        .child(
+            div()
+                .min_h(px(ty::XL.line))
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .justify_end()
+                .gap(px(8.))
+                .children(actions),
+        )
 }
 
 impl FoloApp {

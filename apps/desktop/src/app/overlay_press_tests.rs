@@ -14,8 +14,6 @@ const BACKDROP: (f32, f32) = (1200., 700.);
 /// Generate synthetic, in the Datasets header (1280 × 800): under the title bar, so the backdrop
 /// once the form is up.
 const SYNTH_BUTTON: (f32, f32) = (1050., 73.);
-/// Delete, in a finished run's header.
-const DELETE_BUTTON: (f32, f32) = (930., 73.);
 
 fn click(app: &mut HeadlessApp, window: WindowHandle<FoloApp>, (x, y): (f32, f32), count: usize) {
     click_n_at(app, window, x, y, count);
@@ -111,7 +109,29 @@ fn a_double_click_that_opens_a_confirmation_cannot_confirm_it() {
     let (mut app, window) = open();
     drive(&mut app, window, |this, w, cx| this.navigate(Route::Run("run_52e8".into()), w, cx));
     app.frame(window.into());
-    click(&mut app, window, DELETE_BUTTON, 1);
+    // Delete leads the run header's action buttons (leftmost secondary button in the header band).
+    let raised = drive(&mut app, window, |_, _, cx| crate::theme::theme(cx).bg_raised);
+    let sp = |v: folo_ui::ScaledPixels| f64::from(v) as f32;
+    let delete_btn = app
+        .scene(window.into())
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            folo_ui::Primitive::Quad(q)
+                if q.background.solid == raised
+                    && sp(q.bounds.origin.y) >= 48.
+                    && sp(q.bounds.origin.y) <= 104.
+                    && sp(q.bounds.origin.x) >= 500.
+                    && sp(q.bounds.size.height) >= 24. =>
+            {
+                Some(q.bounds)
+            }
+            _ => None,
+        })
+        .min_by(|a, b| sp(a.origin.x).total_cmp(&sp(b.origin.x)))
+        .map(|b| (sp(b.origin.x) + sp(b.size.width) / 2., sp(b.origin.y) + sp(b.size.height) / 2.))
+        .expect("Delete button painted in run header");
+    click(&mut app, window, delete_btn, 1);
     assert!(drive(&mut app, window, |this, _, _| this.confirm_delete.is_some()), "Delete asks");
     // The confirm button: rightmost in the footer under the body (20 px in, 14 px down).
     let body = drive(&mut app, window, |this, _, _| this.dialog_scroll.bounds());

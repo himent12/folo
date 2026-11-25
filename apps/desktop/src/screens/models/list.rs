@@ -1,20 +1,49 @@
 //! The model list: the models grouped by what they were evaluated on, and the sortable column
 //! headers.
 
+use std::rc::Rc;
+
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    AnyElement, Context, Focusable, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
 use super::class_table::num_cell;
-use super::groups::{best_mark, best_word, group_models, same_as_best};
-use crate::api::{Model, time};
+use super::groups::{best_mark, best_word, eval_set, group_models, same_as_best};
+use crate::api::{Arch, Model, time};
 use crate::app::{FoloApp, Route, act};
 use crate::controls::Btn;
 use crate::screens::{FirstStep, loading_rows, page_header, th};
 use crate::theme::{radius, theme, ty};
 use crate::ui::*;
+
+/// Filters `models` by optional architecture and case-insensitive substring query across model
+/// name, id, architecture, source run name, evaluation group label, and class names.
+pub fn filter_models<'a>(
+    store: &crate::store::Store,
+    models: &'a [Model],
+    arch: Option<Arch>,
+    query: &str,
+) -> Vec<&'a Model> {
+    let q = query.trim().to_lowercase();
+    models
+        .iter()
+        .filter(|m| arch.is_none_or(|a| m.arch == a))
+        .filter(|m| {
+            q.is_empty()
+                || m.name.to_lowercase().contains(&q)
+                || m.id.to_lowercase().contains(&q)
+                || m.arch.as_str().to_lowercase().contains(&q)
+                || m.classes.iter().any(|c| c.to_lowercase().contains(&q))
+                || m.run_id
+                    .as_deref()
+                    .and_then(|id| store.run(id))
+                    .is_some_and(|r| r.name.to_lowercase().contains(&q))
+                || eval_set(store, m).label.to_lowercase().contains(&q)
+        })
+        .collect()
+}
 
 impl FoloApp {
     pub fn models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -77,9 +106,9 @@ impl FoloApp {
             .child(self.sort_th("created", "Created", 84., true, window, cx));
         // The score the list is ranked by leads in primary ink; the other in secondary.
         let strong = |key: &str| self.models_sort.map_or("map", |s| s.0) == key;
-        let body = match groups {
+        let body = match models {
             None => panel(&t).child(head).child(loading_rows(&t, "models", 4)).into_any_element(),
-            Some(g) if g.is_empty() => {
+            Some(l) if l.is_empty() => {
                 // An empty server: what to do first, and the button that does it.
                 let step = self.next_first_step();
                 let body = match step {
@@ -101,16 +130,106 @@ impl FoloApp {
                     )
                     .into_any_element()
             }
-            Some(groups) => {
-                // Up and down walk the rows across the groups, in the order shown.
-                let ids: Vec<String> =
-                    groups.iter().flat_map(|g| g.rows.iter().map(|m| m.id.clone())).collect();
-                let mut out: Vec<AnyElement> = Vec::new();
-                let mut i = 0;
-                for g in groups {
-                    // The group's best (none on an unranked group): a tertiary word before its score.
-                    let contenders: Vec<Option<f32>> =
-                        g.rows
+            Some(l) => {
+                let total = l.len();
+                let archs = [None, Some(Arch::N), Some(Arch::S), Some(Arch::M), Some(Arch::L), Some(Arch::X)];
+                let arch_count = |a: Option<Arch>| l.iter().filter(|m| a.is_none_or(|w| m.arch == w)).count();
+                let arch_labels: Vec<String> = archs
+                    .iter()
+                    .map(|&a| {
+                        let name = match a {
+                            None => "All",
+                            Some(Arch::N) => "n",
+                            Some(Arch::S) => "s",
+                            Some(Arch::M) => "m",
+                            Some(Arch::L) => "l",
+                            Some(Arch::X) => "x",
+                        };
+                        format!("{name}\u{a0}{}", arch_count(a))
+                    })
+                    .collect();
+                let arch_refs: Vec<&str> = arch_labels.iter().map(String::as_str).collect();
+                let arch_sel = archs.iter().position(|a| *a == self.models_arch_filter).unwrap_or(0);
+                let arch_seg = self.segmented(
+                    "models-arch-filter",
+                    &arch_refs,
+                    arch_sel,
+                    window,
+                    cx,
+                    Rc::new(move |this, i, _, cx| {
+                        this.models_arch_filter = archs[i];
+                        cx.notify();
+                    }),
+                );
+                let query = self.model_search.read(cx).text().to_string();
+                let filtered: Vec<Model> = filter_models(&self.store, &l, self.models_arch_filter, &query)
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                let is_filtered = self.models_arch_filter.is_some() || !query.trim().is_empty();
+                let search = self.search_field("models-search", self.model_search.clone(), 240., window, cx);
+                let mut toolbar = div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(arch_seg)
+                    .child(div().flex_1().min_w(px(8.)));
+                if is_filtered {
+                    toolbar = toolbar.child(
+                        text(ty::SM, t.text_tertiary).tnum().whitespace_nowrap().child(format!(
+                            "{} of {}",
+                            filtered.len(),
+                            plural(total, "model")
+                        )),
+                    );
+                }
+                toolbar = toolbar.child(search);
+
+                let table = if filtered.is_empty() {
+                    let clear = self.button(
+                        "models-filter-clear",
+                        "Clear filters",
+                        Btn::Secondary,
+                        None,
+                        window,
+                        cx,
+                        act(|this, w, cx| {
+                            this.models_arch_filter = None;
+                            this.model_search.update(cx, |i, cx| i.set_text("", cx));
+                            w.focus(&this.model_search.read(cx).focus_handle(cx));
+                            cx.notify();
+                        }),
+                    );
+                    panel(&t)
+                        .overflow_hidden()
+                        .child(head)
+                        .child(
+                            empty_state(
+                                &t,
+                                "icons/list-filter.svg",
+                                "No models match",
+                                "Try another architecture or clear the search filter.",
+                                Tone::Neutral,
+                            )
+                            .child(clear),
+                        )
+                        .into_any_element()
+                } else {
+                    let filtered_groups = if is_filtered {
+                        group_models(&self.store, &filtered, self.models_sort)
+                    } else {
+                        groups.unwrap_or_default()
+                    };
+                    // Up and down walk the rows across the groups, in the order shown.
+                    let ids: Vec<String> =
+                        filtered_groups.iter().flat_map(|g| g.rows.iter().map(|m| m.id.clone())).collect();
+                    let mut out: Vec<AnyElement> = Vec::new();
+                    let mut i = 0;
+                    for g in filtered_groups {
+                        // The group's best (none on an unranked group): a tertiary word before its score.
+                        let contenders: Vec<Option<f32>> = g
+                            .rows
                             .iter()
                             .map(|m| {
                                 if same_as_best(&self.store, m) {
@@ -120,26 +239,30 @@ impl FoloApp {
                                 }
                             })
                             .collect();
-                    let mark = g.set.ranked.then(|| best_mark(&contenders, 3, 6));
-                    out.push(group_head(&t, &g.set.label, g.rows.len(), g.set.ranked).into_any_element());
-                    for (j, m) in g.rows.iter().enumerate() {
-                        let word = mark.as_ref().and_then(|b| {
-                            if b.best.contains(&j) {
-                                Some(best_word(b))
-                            } else if same_as_best(&self.store, m) {
-                                Some("same as best")
-                            } else {
-                                None
-                            }
-                        });
-                        let decimals = mark.as_ref().map_or(3, |b| b.decimals);
-                        out.push(
-                            self.model_row(m, i, &ids, word, decimals, &c, name_w, now, &strong, window, cx),
-                        );
-                        i += 1;
+                        let mark = g.set.ranked.then(|| best_mark(&contenders, 3, 6));
+                        out.push(group_head(&t, &g.set.label, g.rows.len(), g.set.ranked).into_any_element());
+                        for (j, m) in g.rows.iter().enumerate() {
+                            let word = mark.as_ref().and_then(|b| {
+                                if b.best.contains(&j) {
+                                    Some(best_word(b))
+                                } else if same_as_best(&self.store, m) {
+                                    Some("same as best")
+                                } else {
+                                    None
+                                }
+                            });
+                            let decimals = mark.as_ref().map_or(3, |b| b.decimals);
+                            out.push(
+                                self.model_row(
+                                    m, i, &ids, word, decimals, &c, name_w, now, &strong, window, cx,
+                                ),
+                            );
+                            i += 1;
+                        }
                     }
-                }
-                panel(&t).overflow_hidden().child(head).children(out).into_any_element()
+                    panel(&t).overflow_hidden().child(head).children(out).into_any_element()
+                };
+                div().flex().flex_col().gap(px(12.)).child(toolbar).child(table).into_any_element()
             }
         };
         self.page_frame(&t, header, body, cx)
