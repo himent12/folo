@@ -17,7 +17,7 @@ impl ScaledSumSq {
     pub const ZERO: Self = Self { scale: 0.0, ssq: 0.0 };
 
     /// Construct from an unscaled `f64` sum of squares (e.g. from an `f32` slice, where every finite `f32`
-    /// squares into `[2^-298, 2^77]` with zero overflow or underflow in `f64`).
+    /// squares into `[2^-298, 2^256]` with zero overflow or underflow in `f64`).
     #[inline]
     pub fn from_sq_f64(sq: f64) -> Self {
         if sq.is_nan() {

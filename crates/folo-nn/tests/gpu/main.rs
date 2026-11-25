@@ -715,6 +715,12 @@ fn grad_accumulator_on_gpu_matches_cpu() {
     };
     put(&mut eacc, [0.0; 4]);
     assert_eq!(eacc.global_norm().unwrap(), 0.0);
+    // Subnormal gradients are preserved without FTZ loss.
+    let tiny = f32::from_bits(1);
+    put(&mut eacc, [tiny; 4]);
+    let want_tiny = 2.0 * (tiny as f64);
+    let got_tiny = eacc.global_norm().unwrap();
+    assert!((got_tiny - want_tiny).abs() <= 1e-12 * want_tiny, "subnormal norm {got_tiny} vs {want_tiny}");
     put(&mut eacc, [f32::MAX; 4]);
     let want = 2.0 * (f32::MAX as f64);
     let got = eacc.global_norm().unwrap();
@@ -723,6 +729,15 @@ fn grad_accumulator_on_gpu_matches_cpu() {
     assert_eq!(eacc.global_norm().unwrap(), f64::INFINITY);
     put(&mut eacc, [1.0, f32::INFINITY, f32::NAN, 3.0]);
     assert!(eacc.global_norm().unwrap().is_nan());
+
+    // Shared GPU gradient storage across two parameters works cleanly in `global_grad_norm` (no duplicate RwLock).
+    let dp2 = Tensor::zeros_with([4], folo_core::DType::F32, dev).unwrap().requires_grad_();
+    let shared_g = Tensor::from_slice(&[3.0f32, 0.0, 0.0, 0.0], [4]).unwrap().to_device(dev).unwrap();
+    let mut shared_map = folo_core::Grads::default();
+    shared_map.insert(&dp, shared_g.clone());
+    shared_map.insert(&dp2, shared_g);
+    let sn = global_grad_norm(&[dp, dp2], &shared_map).unwrap();
+    assert!((sn - (18.0f64).sqrt()).abs() <= 1e-6, "shared gpu norm={sn}");
 }
 
 /// The device check of `RunningStats::all_finite`, `all_finite_live`, and `recapture` sees a NaN or an

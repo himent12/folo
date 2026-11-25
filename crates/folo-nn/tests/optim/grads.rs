@@ -229,12 +229,27 @@ fn add_owned_adopts_unaliased_and_falls_back_safely() {
     acc.add_owned(b2).unwrap();
     assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [4.0, 4.0, 4.0]);
 
-    // 6. Self-aliasing add (caller passes acc's own grad tensor back in) must not deadlock.
+    // 6. Self-aliasing and cross-slot aliasing above PAR_THRESHOLD must not deadlock or corrupt values.
     let self_alias = acc.grad(&p).unwrap().clone();
     let mut sa = Grads::default();
     sa.insert(&p, self_alias);
     acc.add(&sa).unwrap();
     assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [8.0, 8.0, 8.0]);
+
+    let big_n = 40_000usize;
+    let (bp0, bp1) = (Tensor::zeros([big_n]).requires_grad_(), Tensor::zeros([big_n]).requires_grad_());
+    let mut bacc = GradAccumulator::new(&[bp0.clone(), bp1.clone()]);
+    let mut init_g = Grads::default();
+    init_g.insert(&bp0, Tensor::full([big_n], 2.0));
+    init_g.insert(&bp1, Tensor::full([big_n], 5.0));
+    bacc.add_owned(init_g).unwrap();
+    // Cross-alias: bp0 receives bp1's accumulator buffer and bp1 receives bp0's accumulator buffer.
+    let mut cross = Grads::default();
+    cross.insert(&bp0, bacc.grad(&bp1).unwrap().clone());
+    cross.insert(&bp1, bacc.grad(&bp0).unwrap().clone());
+    bacc.add(&cross).unwrap();
+    assert_eq!(bacc.grad(&bp0).unwrap().to_vec::<f32>().unwrap()[0], 7.0);
+    assert_eq!(bacc.grad(&bp1).unwrap().to_vec::<f32>().unwrap()[0], 7.0);
 }
 
 #[test]
@@ -281,4 +296,16 @@ fn extreme_norm_subnormal_safe_clipping_and_unit_unscale() {
     acc.add_owned(grads_for(&p, &[1.0, f32::NAN])).unwrap();
     assert!(!acc.unscale_clip(1.0, 0.0).unwrap());
     assert!(!acc.unscale_clip(1.0, 1.0).unwrap());
+
+    // Tiny positive clip threshold (c64 < f32::MIN_POSITIVE^2, e.g. 1e-100): must scale cleanly to 0.0, never NaN.
+    acc.zero();
+    acc.add_owned(grads_for(&p, &[1.0, -2.0])).unwrap();
+    assert!(acc.unscale_clip(1.0, 1e-100).unwrap());
+    assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [0.0, 0.0]);
+    // Extreme finite grad with c64 = 1e-80 (produces subnormal result, not NaN or 0).
+    acc.zero();
+    acc.add_owned(grads_for(&p, &[f32::MAX, 0.0])).unwrap();
+    let _ = acc.clip_grad_norm(1e-42).unwrap();
+    let clipped = acc.grad(&p).unwrap().to_vec::<f32>().unwrap();
+    assert!(clipped.iter().all(|x| x.is_finite()) && clipped[0] > 0.0, "clipped={clipped:?}");
 }

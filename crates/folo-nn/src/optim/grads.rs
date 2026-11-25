@@ -1,6 +1,6 @@
 //! Gradient accumulation over several backward passes, and global-norm clipping.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use folo_core::backend::{NormReduce, OptimStep};
 use folo_core::{DType, Device, Grads, Tensor, TensorId, no_grad};
@@ -143,18 +143,39 @@ impl GradAccumulator {
 
     /// Accumulate `g` into every already-valid slot referenced by `pairs`.
     fn add_valid_pairs(&mut self, pairs: &[(usize, &Tensor)]) -> Result<()> {
+        // Detect any incoming gradient that aliases ANY destination buffer (self-slot or cross-slot) before
+        // mutating any buffer, and snapshot those reads up front so neither CPU parallel RwLocks nor GPU
+        // storage bindings / sequential updates can deadlock or observe read-after-write corruption.
+        let mut written_keys: HashSet<usize> = HashSet::new();
+        let mut valid_count = 0usize;
+        for &(i, _) in pairs {
+            if self.slots[i].valid {
+                let buf = self.slots[i].buf.as_ref().expect("valid slot has a buffer");
+                written_keys.insert(storage_key(buf));
+                valid_count += 1;
+            }
+        }
+        if valid_count == 0 {
+            return Ok(());
+        }
+        let mut snapshots: Vec<Option<Tensor>> = vec![None; pairs.len()];
+        for (pos, &(i, g)) in pairs.iter().enumerate() {
+            if self.slots[i].valid && written_keys.contains(&storage_key(g)) {
+                snapshots[pos] = Some(g.mul_scalar(1.0)?);
+            }
+        }
+        let grad_at = |pos: usize| -> &Tensor { snapshots[pos].as_ref().unwrap_or(pairs[pos].1) };
+
         let mut dev_done: Vec<bool> = vec![false; pairs.len()];
         if pairs.iter().any(|&(i, _)| self.slots[i].valid && !self.slots[i].param.device().is_cpu()) {
             let (mut idxs, mut bufs, mut gs) = (Vec::new(), Vec::new(), Vec::new());
-            for (pos, &(i, g)) in pairs.iter().enumerate() {
+            for (pos, &(i, _)) in pairs.iter().enumerate() {
                 let s = &self.slots[i];
                 if s.valid && !s.param.device().is_cpu() {
                     let buf = s.buf.as_ref().expect("valid slot has a buffer");
-                    if !buf.same_storage(g) {
-                        idxs.push(pos);
-                        bufs.push(buf);
-                        gs.push(g);
-                    }
+                    idxs.push(pos);
+                    bufs.push(buf);
+                    gs.push(grad_at(pos));
                 }
             }
             if !bufs.is_empty() {
@@ -167,35 +188,41 @@ impl GradAccumulator {
             }
         }
 
-        // Parallel AVX2 fast path for contiguous CPU F32 accumulations when total elements exceed PAR_THRESHOLD.
-        let cpu_fast_total: usize = pairs
-            .iter()
-            .enumerate()
-            .filter_map(|(pos, &(i, g))| {
-                if dev_done[pos] {
-                    return None;
-                }
-                let s = &self.slots[i];
-                if !s.valid {
-                    return None;
-                }
-                let buf = s.buf.as_ref().expect("valid slot has a buffer");
-                if cpu_fast(&[buf])
-                    && g.device().is_cpu()
-                    && g.dtype() == DType::F32
-                    && buf.shape() == g.shape()
-                    && !buf.same_storage(g)
-                {
-                    Some(buf.numel())
-                } else {
-                    None
-                }
-            })
-            .sum();
+        // Parallel AVX2 fast path for contiguous CPU F32 accumulations when total elements exceed PAR_THRESHOLD
+        // and every mutated buffer has a distinct storage (aliased reads were snapshotted above).
+        let bufs_unique = written_keys.len() == valid_count;
+        let cpu_fast_total: usize = if bufs_unique {
+            pairs
+                .iter()
+                .enumerate()
+                .filter_map(|(pos, &(i, _))| {
+                    if dev_done[pos] {
+                        return None;
+                    }
+                    let s = &self.slots[i];
+                    if !s.valid {
+                        return None;
+                    }
+                    let buf = s.buf.as_ref().expect("valid slot has a buffer");
+                    let g = grad_at(pos);
+                    if cpu_fast(&[buf])
+                        && g.device().is_cpu()
+                        && g.dtype() == DType::F32
+                        && buf.shape() == g.shape()
+                    {
+                        Some(buf.numel())
+                    } else {
+                        None
+                    }
+                })
+                .sum()
+        } else {
+            0
+        };
 
         if cpu_fast_total >= PAR_THRESHOLD {
             let mut fast_items: Vec<(&Tensor, &Tensor)> = Vec::new();
-            for (pos, &(i, g)) in pairs.iter().enumerate() {
+            for (pos, &(i, _)) in pairs.iter().enumerate() {
                 if dev_done[pos] {
                     continue;
                 }
@@ -204,11 +231,11 @@ impl GradAccumulator {
                     continue;
                 }
                 let buf = s.buf.as_ref().expect("valid slot has a buffer");
+                let g = grad_at(pos);
                 if cpu_fast(&[buf])
                     && g.device().is_cpu()
                     && g.dtype() == DType::F32
                     && buf.shape() == g.shape()
-                    && !buf.same_storage(g)
                 {
                     fast_items.push((buf, g));
                     dev_done[pos] = true;
@@ -223,20 +250,12 @@ impl GradAccumulator {
             })?;
         }
 
-        for (pos, &(i, g)) in pairs.iter().enumerate() {
+        for (pos, &(i, _)) in pairs.iter().enumerate() {
             if dev_done[pos] || !self.slots[i].valid {
                 continue;
             }
             let buf = self.slots[i].buf.as_ref().expect("valid slot has a buffer");
-            // Guard against a caller passing a gradient aliasing the accumulator's own buffer (which would
-            // deadlock a CPU RwLock or violate wgpu's storage-binding exclusivity).
-            let owned_g;
-            let g = if buf.same_storage(g) {
-                owned_g = g.mul_scalar(1.0)?;
-                &owned_g
-            } else {
-                g
-            };
+            let g = grad_at(pos);
             // One fused in-place `buf = buf + g` where the backend has it (the GPU), else a tensor op.
             let fused = !buf.device().is_cpu()
                 && buf.optimizer_step_(g, &[], &OptimStep::Axpby { a: 1.0, b: 1.0 })?;
@@ -339,23 +358,40 @@ impl GradAccumulator {
     }
 
     /// Scale every valid CPU buffer by `c64` in place (AVX2, parallelized when large). When `c64` is a positive
-    /// subnormal or underflows `f32` (extreme finite gradients near `f32::MAX`), splits into two normal `f32`
-    /// factors `f1 · f2 = c64` in one pass via [`scale2_slice`] to preserve gradient direction and norm.
+    /// subnormal or underflows `f32`, uses two normal `f32` factors `f1 · f2 = c64` in one pass via
+    /// [`scale2_slice`] when both stay normal (`c64 >= f32::MIN_POSITIVE²`), and falls back to widened `f64`
+    /// scaling for tinier positive factors so finite gradients never turn into `NaN` via `0 * Inf`.
     fn scale_cpu_valid_f64(&self, c64: f64) -> Result<()> {
+        #[derive(Clone, Copy)]
+        enum ScaleMode {
+            Single(f32),
+            Split(f32, f32),
+            Wide(f64),
+        }
         let _g = no_grad();
         let total: usize =
             self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid").numel()).sum();
-        let split = if c64 > 0.0 && c64 < f32::MIN_POSITIVE as f64 {
+        let mode = if c64 > 0.0 && c64 < f32::MIN_POSITIVE as f64 {
             let f1 = c64.sqrt() as f32;
-            let f2 = (c64 / f1 as f64) as f32;
-            Some((f1, f2))
+            let f2 = if f1 >= f32::MIN_POSITIVE { (c64 / f1 as f64) as f32 } else { 0.0 };
+            if f1 >= f32::MIN_POSITIVE && f2 >= f32::MIN_POSITIVE && f2.is_finite() {
+                ScaleMode::Split(f1, f2)
+            } else {
+                ScaleMode::Wide(c64)
+            }
         } else {
-            None
+            ScaleMode::Single(c64 as f32)
         };
-        let c32 = c64 as f32;
         let scale_one = |b: &Tensor| -> Result<()> {
-            match split {
-                Some((f1, f2)) => {
+            match mode {
+                ScaleMode::Single(c32) => {
+                    if cpu_fast(&[b]) {
+                        b.update_f32(|s| scale_slice(s, c32))?;
+                    } else {
+                        b.mul_scalar_assign(c32)?;
+                    }
+                }
+                ScaleMode::Split(f1, f2) => {
                     if cpu_fast(&[b]) {
                         b.update_f32(|s| scale2_slice(s, f1, f2))?;
                     } else {
@@ -363,11 +399,22 @@ impl GradAccumulator {
                         b.mul_scalar_assign(f2)?;
                     }
                 }
-                None => {
+                ScaleMode::Wide(c) => {
                     if cpu_fast(&[b]) {
-                        b.update_f32(|s| scale_slice(s, c32))?;
+                        b.update_f32(|s| {
+                            for v in s {
+                                *v = (*v as f64 * c) as f32;
+                            }
+                        })?;
                     } else {
-                        b.mul_scalar_assign(c32)?;
+                        let vals: Vec<f32> = b
+                            .to_dtype(DType::F32)?
+                            .to_vec::<f32>()?
+                            .into_iter()
+                            .map(|v| (v as f64 * c) as f32)
+                            .collect();
+                        let scaled = Tensor::from_vec(vals, b.shape().clone())?.to_dtype(b.dtype())?;
+                        b.copy_from(&scaled)?;
                     }
                 }
             }
@@ -573,15 +620,17 @@ fn copy_into_private_slot(s: &mut Slot, g: &Tensor) -> Result<()> {
             b
         }
     };
-    if cpu_fast(&[&buf])
-        && g.device().is_cpu()
-        && g.dtype() == DType::F32
-        && buf.shape() == g.shape()
-        && !buf.same_storage(g)
-    {
-        g.with_f32_slice(|gs| buf.update_f32(|bs| bs.copy_from_slice(gs)))??;
+    let g_f32;
+    let src = if buf.same_storage(g) {
+        g_f32 = g.to_dtype(DType::F32)?.mul_scalar(1.0)?;
+        &g_f32
     } else {
-        buf.copy_from(&g.to_dtype(DType::F32)?)?;
+        g
+    };
+    if cpu_fast(&[&buf]) && src.device().is_cpu() && src.dtype() == DType::F32 && buf.shape() == src.shape() {
+        src.with_f32_slice(|gs| buf.update_f32(|bs| bs.copy_from_slice(gs)))??;
+    } else {
+        buf.copy_from(&src.to_dtype(DType::F32)?)?;
     }
     s.valid = true;
     Ok(())
@@ -621,7 +670,9 @@ pub fn global_grad_norm(params: &[Tensor], grads: &dyn GradSource) -> Result<f64
 }
 
 /// Overflow- and underflow-safe global L2 norm on a GPU device in a single 2-float readback (`[peak, sum]`),
-/// returning `Ok(None)` if the tensors do not share one device or cannot use the multi-tensor kernel.
+/// returning `Ok(None)` if the tensors do not share one device, repeat any underlying storage (avoiding
+/// recursive same-thread `RwLock::read` in `norm_partials_many`), cannot use the multi-tensor kernel, or have a
+/// subnormal/zero peak where WGSL may flush subnormals to zero (falling back to exact host `f64` summation).
 fn device_global_norm(bufs: &[&Tensor]) -> Result<Option<f64>> {
     let non_empty: Vec<&Tensor> = bufs.iter().copied().filter(|b| b.numel() > 0).collect();
     let Some(first) = non_empty.first() else {
@@ -629,6 +680,10 @@ fn device_global_norm(bufs: &[&Tensor]) -> Result<Option<f64>> {
     };
     let dev = first.device();
     if dev.is_cpu() || !non_empty.iter().all(|b| b.device() == dev && b.dtype() == DType::F32) {
+        return Ok(None);
+    }
+    let mut seen = HashSet::with_capacity(non_empty.len());
+    if !non_empty.iter().all(|b| seen.insert(storage_key(b))) {
         return Ok(None);
     }
     let _g = no_grad();
@@ -652,8 +707,10 @@ fn device_global_norm(bufs: &[&Tensor]) -> Result<Option<f64>> {
     if p.is_infinite() {
         return Ok(Some(f64::INFINITY));
     }
-    if p == 0.0 {
-        return Ok(Some(0.0));
+    // If `p` is zero or subnormal, WGSL is allowed to flush subnormals to zero in `AbsMax` or `sqrt`, so fall
+    // back to exact host `f64` summation (zero cost on all normal finite gradients).
+    if p < f32::MIN_POSITIVE || !s.is_finite() {
+        return Ok(None);
     }
     Ok(Some((p as f64) * (s as f64).sqrt()))
 }
