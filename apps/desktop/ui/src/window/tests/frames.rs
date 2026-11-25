@@ -427,5 +427,50 @@ fn steady_frame_reuses_global_element_id_arcs_and_evicts_removed_ids() {
             .flatten()
             .any(|id| id.path().last() == Some(&ElementId::from("transient")));
         assert!(!has_transient, "removed element ids must be evicted after frame swap");
+
+        // Calling `with_global_id` outside a draw must bypass the frame cache so idle input
+        // callbacks cannot grow `next_frame.element_ids` unboundedly.
+        assert!(window.next_frame.element_ids.is_empty());
+        window.with_global_id(ElementId::from("outside-draw"), |id, _| {
+            assert_eq!(id.path(), &[ElementId::from("outside-draw")]);
+        });
+        assert!(window.next_frame.element_ids.is_empty());
+    });
+}
+
+#[test]
+fn compute_style_preserves_existing_interactive_state_across_frame_swap() {
+    use std::cell::Cell;
+
+    use crate::{ElementId, Interactivity};
+
+    let placeholder_frame = Rc::new(Cell::new(false));
+    let placeholder_in_render = placeholder_frame.clone();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, move |window, cx| {
+        if placeholder_in_render.get() {
+            // Render a frame that only calls public `compute_style` with the same element id.
+            window.with_global_id(ElementId::from("clickable"), |global_id, window| {
+                let _ = Interactivity::default().compute_style(Some(global_id), None, window, cx);
+            });
+            div().size_full().into_any_element()
+        } else {
+            div().id("clickable").size_full().on_click(|_, _, _| {}).into_any_element()
+        }
+    });
+
+    with_window(&mut app, window, |window, _| {
+        assert_eq!(window.rendered_frame.element_states.len(), 1);
+    });
+
+    // Frame 2: only `compute_style` touches "clickable"; its non-empty state must survive the swap.
+    placeholder_frame.set(true);
+    with_window(&mut app, window, |window, _| window.refresh());
+    app.frame(window);
+    with_window(&mut app, window, |window, _| {
+        assert_eq!(
+            window.rendered_frame.element_states.len(),
+            1,
+            "compute_style must carry existing non-empty InteractiveElementState into the next frame"
+        );
     });
 }

@@ -120,10 +120,13 @@ impl Window {
     }
 
     /// Returns a [`GlobalElementId`] for the current `element_id_stack`, reusing the previous or current
-    /// frame's `Arc<[ElementId]>` when the same path was already seen.
+    /// frame's `Arc<[ElementId]>` when drawing so steady frames avoid allocating per-element ID slices.
     pub(crate) fn intern_global_id(&mut self) -> GlobalElementId {
         let path = self.element_id_stack.as_slice();
         let hash = GlobalElementId::hash_path(path);
+        if !self.drawing {
+            return GlobalElementId::from_parts(path, hash);
+        }
         if let Some(bucket) = self.next_frame.element_ids.get(&hash)
             && let Some(existing) = bucket.iter().find(|id| id.path() == path)
         {
@@ -239,19 +242,6 @@ impl Window {
             }
             result
         }
-    }
-
-    /// Borrows an existing element state without removing or cloning its key (read-only queries).
-    pub(crate) fn peek_element_state<S: 'static>(&self, global_id: Option<&GlobalElementId>) -> Option<&S> {
-        let global_id = global_id?;
-        let lookup = ElementStateKeyRef { global_id, type_id: TypeId::of::<S>() };
-        let lookup_key: &dyn AsElementStateKey = &lookup;
-        let boxed = self
-            .next_frame
-            .element_states
-            .get(lookup_key)
-            .or_else(|| self.rendered_frame.element_states.get(lookup_key))?;
-        boxed.downcast_ref::<Option<S>>().expect("element state of the requested type").as_ref()
     }
 
     /// `with_element_state` for an element that may have no id (`f` gets `None` then and keeps nothing).

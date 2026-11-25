@@ -259,8 +259,14 @@ impl Interactivity {
         window: &mut Window,
         _cx: &mut App,
     ) -> Style {
-        let element_state = window.peek_element_state::<InteractiveElementState>(global_id);
-        self.compute_style_internal(hitbox, element_state, window)
+        window.with_sparse_element_state::<InteractiveElementState, _>(
+            global_id,
+            InteractiveElementState::is_empty,
+            |element_state, window| {
+                let style = self.compute_style_internal(hitbox, element_state.as_ref(), window);
+                (style, element_state)
+            },
+        )
     }
 
     /// GPUI's `compute_style_internal`: hover styles need a hitbox (so only paint sees them) and no drag;
