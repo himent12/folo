@@ -107,11 +107,12 @@ fn write_fake_agy(dir: &Path, mode: FakeMode) -> PathBuf {
         let spawn_helper_ps = format!(
             r#"$evName = 'Local\folo-helper-' + [Guid]::NewGuid().ToString('N')
             $ev = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $evName)
-            $psi = [Diagnostics.ProcessStartInfo]::new('powershell.exe', "-NoProfile -Command `"[Console]::Out.WriteLine('{HELPER_STDOUT_MARKER}'); [Console]::Out.Flush(); [Console]::Error.WriteLine('{HELPER_STDERR_MARKER}'); [Console]::Error.Flush(); [Threading.EventWaitHandle]::OpenExisting('$evName').Set(); Start-Sleep -Seconds 60`"")
+            $psi = [Diagnostics.ProcessStartInfo]::new('powershell.exe', "-NoProfile -Command `"[Console]::Out.WriteLine('{HELPER_STDOUT_MARKER}'); [Console]::Out.Flush(); [Console]::Error.WriteLine('{HELPER_STDERR_MARKER}'); [Console]::Error.Flush(); [void][Threading.EventWaitHandle]::OpenExisting('$evName').Set(); Start-Sleep -Seconds 60`"")
             $psi.UseShellExecute = $false
             [Diagnostics.Process]::Start($psi) | Out-Null
-            [void]$ev.WaitOne(10000)
-            $ev.Dispose()"#
+            $ready = $ev.WaitOne(15000)
+            $ev.Dispose()
+            if (-not $ready) {{ [Console]::Error.WriteLine('helper failed to signal ready'); [Console]::Error.Flush(); exit 2 }}"#
         );
         let prompt_body = match mode {
             FakeMode::CleanWithHelper => format!(
