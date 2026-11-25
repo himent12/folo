@@ -13,7 +13,8 @@ documents the JS API, how it works and its performance.
 | Path | What it holds |
 |---|---|
 | `src/lib.rs` | The JS API: `FoloDetector` (`load`, `detect`, `info`, `backend`), `hasWebGpu`, `version`, the panic hook, and the hand-written TypeScript declarations (`TS_TYPES`) |
-| `src/detector.rs` | `Detector`: the logic behind the bindings, free of wasm-bindgen types; `BackendChoice`, `LoadOptions`, `DetectOptions`, `DetectorInfo` |
+| `src/detector.rs` | `Detector`: the logic behind the bindings, free of wasm-bindgen types; `BackendChoice`, `LoadOptions`, `DetectOptions`, `DetectorInfo`; candidate-compacted async GPU readback and direct CPU path |
+| `src/simd.rs` | WASM SIMD128 (and portable fallback) RGBA→RGB stripping and direct RGBA→planar-`f32` letterbox preprocessing |
 | `tests/detector.rs` | The detector run natively: the CPU path against folo-vision's `Predictor`, the GPU path against the CPU path, the JSON shape, the options |
 | `demo/index.html` | A standalone page: pick a model and an image, pick the backend, detect, benchmark |
 | `demo/test.mjs` | End-to-end check in headless Chrome (Playwright): each backend, latency, boxes against `folo predict --json` |
@@ -37,8 +38,9 @@ rustup when missing) and `wasm-bindgen-cli` at exactly the `wasm-bindgen` versio
 1. The module docs and `FoloDetector` in `src/lib.rs`: the whole JS API in one place.
 2. `Detector::load` in `src/detector.rs`: parsing the `.folo` file and picking WebGPU or the CPU (`auto` checks
    WebGPU with one small forward pass and falls back to the CPU).
-3. `Detector::detect`: folo-vision's `Predictor` pipeline, except that on the GPU the decoded head is read back with
-   an awaited `folo_gpu::download_async`, because the browser cannot block for the GPU.
+3. `Detector::detect`: folo-vision's `Predictor` pipeline, with device-side candidate extraction and an awaited
+   `folo_gpu::download_async` on WebGPU (downloading only the above-threshold candidates, ~28 KiB per frame,
+   with a dense fallback) and direct SIMD128 RGBA→planar-`f32` letterboxing + candidate-first decode on the CPU.
 
 ## Common changes
 
