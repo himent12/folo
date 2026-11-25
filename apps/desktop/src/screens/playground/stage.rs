@@ -31,6 +31,12 @@ impl FoloApp {
                     Some(Load::Failed(_)) => false,
                     _ => true,
                 });
+            let pick_disabled = !models_failed && no_models && datasets_loading;
+            if pick_disabled && self.fh("play-pick", cx).is_focused(window) {
+                window.focus(&self.fh("play-pick-disabled", cx));
+            } else if !pick_disabled && self.fh("play-pick-disabled", cx).is_focused(window) {
+                window.focus(&self.fh("play-pick", cx));
+            }
             let pick = if models_failed {
                 self.button(
                     "play-pick",

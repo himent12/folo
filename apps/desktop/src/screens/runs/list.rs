@@ -437,6 +437,11 @@ impl FoloApp {
                 }),
             )
         });
+        let empty_retry_ds_stop = self.passing_stop(
+            "runs-empty-retry-ds",
+            !self.store.runs.is_loading() && total == 0 && ds_err.is_some(),
+            cx,
+        );
         let table = panel(&t).overflow_hidden().child(head).map(|d| {
             if self.store.runs.is_loading() {
                 d.child(loading_rows(&t, "runs", 6))
@@ -454,7 +459,7 @@ impl FoloApp {
                     d.child(
                         empty_state(
                             &t,
-                            "icons/alert-circle.svg",
+                            "icons/circle-alert.svg",
                             "Datasets didn't load",
                             &format!("{} · retry datasets to start a run.", err.message),
                             Tone::Danger,
@@ -471,6 +476,7 @@ impl FoloApp {
                     };
                     d.child(
                         empty_state(&t, "icons/activity.svg", "No runs yet", body, Tone::Neutral)
+                            .when_some(empty_retry_ds_stop.clone(), |d, fh| d.child(div().track_focus(&fh)))
                             .children(first.take()),
                     )
                 }
