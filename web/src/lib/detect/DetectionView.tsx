@@ -148,6 +148,35 @@ export default function DetectionView(props: DetectionViewProps) {
     loaded.set(false);
   });
 
+  let layerEl: HTMLDivElement | undefined;
+
+  function boxIndex(el: EventTarget | null): number | null {
+    const node = el instanceof Element ? el : el instanceof Node ? el.parentElement : null;
+    const box = node?.closest<HTMLElement>('[data-box]');
+    if (!box || (layerEl && !layerEl.contains(box))) return null;
+    const i = Number(box.dataset.box);
+    return Number.isInteger(i) ? i : null;
+  }
+
+  function onLayerPointerOver(e: PointerEvent) {
+    if (!p.onhover) return;
+    const to = boxIndex(e.target);
+    if (to === null || to === boxIndex(e.relatedTarget)) return;
+    p.onhover(to);
+  }
+
+  function onLayerPointerOut(e: PointerEvent) {
+    if (!p.onhover) return;
+    if (boxIndex(e.target) === null) return;
+    if (boxIndex(e.relatedTarget) === null) p.onhover(null);
+  }
+
+  function onLayerClick(e: MouseEvent) {
+    if (!p.onselect) return;
+    const i = boxIndex(e.target);
+    if (i !== null) p.onselect(i);
+  }
+
   return (
     <div class="view" class:compact={p.compact} class:small={small.get()} class:cover={p.fit === 'cover'} bind:clientWidth={cw} bind:clientHeight={ch}>
       {p.src ? (
@@ -155,6 +184,7 @@ export default function DetectionView(props: DetectionViewProps) {
           ref={cancelOnRemove}
           src={p.src}
           alt={p.alt}
+          decoding="async"
           class:loaded={loaded.get()}
           style:object-fit={p.fit}
           draggable="false"
@@ -168,7 +198,14 @@ export default function DetectionView(props: DetectionViewProps) {
         />
       ) : null}
       {geo.get() ? (
-        <div class="layer" aria-hidden="true">
+        <div
+          class="layer"
+          ref={(el) => (layerEl = el)}
+          aria-hidden="true"
+          onpointerover={p.onhover ? onLayerPointerOver : undefined}
+          onpointerout={p.onhover ? onLayerPointerOut : undefined}
+          onclick={p.onselect ? onLayerClick : undefined}
+        >
           <Index each={p.truth}>
             {(b) => (
               <>
@@ -213,9 +250,6 @@ export default function DetectionView(props: DetectionViewProps) {
                         width: `${(b().x2 - b().x1) * geo.get()!.s}px`,
                         height: `${(b().y2 - b().y1) * geo.get()!.s}px`,
                       }}
-                      onpointerenter={p.onhover ? () => p.onhover!(i) : undefined}
-                      onpointerleave={p.onhover ? () => p.onhover!(null) : undefined}
-                      onclick={p.onselect ? () => p.onselect!(i) : undefined}
                     >
                       {p.selected === i && small32(b()) ? <span class="vf"></span> : null}
                       {p.labels && !p.compact && ((!c()?.hidden && !tiny(b())) || p.active === i || p.selected === i) ? (

@@ -300,4 +300,32 @@ describe('placeChips on a small view (phones)', () => {
       }
     }
   });
+
+  it('handles sparse null entries and dense 80-box scenes without overlap or out-of-bounds chips', () => {
+    const bigBounds = { minX: 4, maxX: 956, minY: 2, maxY: 638 };
+    const dense = scene(77, 80, bigBounds).map((box, i) => (i % 7 === 0 ? null : i % 11 === 0 ? { x: box.x, y: box.y, w: box.w } : box));
+    const ps = placeChips(dense, bigBounds);
+    expect(ps).toHaveLength(dense.length);
+    const shown: { x: number; y: number; w: number }[] = [];
+    for (let i = 0; i < dense.length; i++) {
+      const box = dense[i];
+      const p = ps[i];
+      if (!box) {
+        expect(p).toBeNull();
+        continue;
+      }
+      expect(p).not.toBeNull();
+      const x = box.x + p!.dx;
+      const y = box.y + p!.dy;
+      expect(x).toBeGreaterThanOrEqual(bigBounds.minX);
+      expect(x + box.w).toBeLessThanOrEqual(bigBounds.maxX);
+      expect(y).toBeGreaterThanOrEqual(bigBounds.minY);
+      expect(y + CHIP_H).toBeLessThanOrEqual(bigBounds.maxY);
+      if (!p!.hidden) {
+        for (const q of shown) expect(x < q.x + q.w && x + box.w > q.x && y < q.y + CHIP_H && y + CHIP_H > q.y).toBe(false);
+        shown.push({ x, y, w: box.w });
+      }
+    }
+    expect(shown.length).toBeGreaterThan(20);
+  });
 });
