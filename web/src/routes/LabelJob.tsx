@@ -8,7 +8,7 @@ import RotateCw from '$icons/rotate-cw';
 import Square from '$icons/square';
 import Trash from '$icons/trash-2';
 import WifiOff from '$icons/wifi-off';
-import { computed, css, effect, field, For, MediaQuery, onCleanup, signal, untrack } from 'fw';
+import { computed, css, effect, field, For, MediaQuery, onCleanup, onWindow, signal, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { isActive, LiveLabelJob } from '$lib/api/liveLabel';
 import { lastKnown, Now } from '$lib/api/freshness';
@@ -84,7 +84,19 @@ export default function LabelJob() {
   const view = (path: string, q: URLSearchParams | string) => `${path}?${q}`;
   /** Entry currently unwinding via async `history.back()`, so concurrent effects/clicks never double-back. */
   let backingEntry: number | null = null;
-  onCleanup(router.onEntry(() => (backingEntry = null)));
+  let backTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearBacking = () => {
+    backingEntry = null;
+    clearTimeout(backTimer);
+    backTimer = undefined;
+  };
+  onCleanup(router.onEntry(clearBacking));
+  onCleanup(clearBacking);
+  // If a navigation guard vetoes `history.back()`, the router bounces back to `backingEntry` without firing `onEntry`:
+  // clearing on the return `popstate` (plus a bounded fallback) ensures `backingEntry` can never latch permanently.
+  onWindow('popstate', () => {
+    if (backingEntry !== null && router.entry === backingEntry) clearBacking();
+  });
 
   /** Changes query params (null removes one): `push` adds a history entry; `replaceOnly` forces in-place replace. */
   function setQuery(patch: Record<string, string | null>, push = false, replaceOnly = false) {
@@ -99,16 +111,18 @@ export default function LabelJob() {
     const at = router.route.path;
     const path = `/datasets/label/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`;
     if (push) {
-      backingEntry = null;
+      clearBacking();
       const was = router.entry;
       router.go(path);
       if (router.entry !== was) from.set(view(at, before));
     } else if (!replaceOnly && from.get() === view(at, s)) {
       if (backingEntry === router.entry) return;
       backingEntry = router.entry;
+      clearTimeout(backTimer);
+      backTimer = setTimeout(clearBacking, 200);
       history.back();
     } else {
-      backingEntry = null;
+      clearBacking();
       if (replaceOnly && patch.image === null) from.set(undefined);
       router.go(path, { replace: true });
     }

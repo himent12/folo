@@ -315,7 +315,7 @@ export default function Editor(props: EditorProps) {
    * (`proceed`: a link, Back, the palette, another `?image=`), which goes on after Save or Discard and is dropped on Cancel.
    */
   const leaving = signal<{ to: string | null; proceed?: () => void } | null>(null);
-  const unsaved = () => props.imageId !== null && dirty.peek() && !locked.peek();
+  const unsaved = () => !!img.peek() && dirty.peek() && !locked.peek();
   function go(to: string | null) {
     if (unsaved()) leaving.set({ to });
     else props.onnavigate(to);
@@ -461,6 +461,7 @@ export default function Editor(props: EditorProps) {
     try {
       await hub.api.deleteLabelImage(props.job.id, cur.id);
       props.live.drop(cur.id);
+      draft.set(base.peek());
       removing.set(false);
       props.onnavigate(next && next.id !== cur.id ? next.id : null);
     } catch (e) {

@@ -908,4 +908,58 @@ describe('LabelJob editor history', () => {
     });
     expect(back).not.toHaveBeenCalled();
   });
+
+  it('removes the last image even with unsaved edits without triggering a save prompt or stranding the editor', async () => {
+    const realList = hub.api.labelImages.bind(hub.api);
+    let dropped = false;
+    vi.spyOn(hub.api, 'labelImages').mockImplementation(async (jobId, q) => {
+      const page = await realList(jobId, q);
+      const only = dropped ? [] : page.images.slice(0, 1);
+      return { total: only.length, images: only };
+    });
+    vi.spyOn(hub.api, 'deleteLabelImage').mockImplementation(async () => {
+      dropped = true;
+    });
+
+    const at = '#/datasets/label/lb_7c21';
+    history.replaceState(history.state, '', at);
+    router.route = parse(at);
+    c = mount(LabelJobPage, { target });
+    const cell = await vi.waitFor(() => {
+      flushSync();
+      const el = target.querySelector<HTMLElement>('[data-i="0"]');
+      if (!el) throw new Error('waiting for sole grid tile');
+      return el;
+    });
+    cell.click();
+    await vi.waitFor(() => {
+      flushSync();
+      if (!hash().includes('image=1') || !editor()?.open) throw new Error('waiting for editor open');
+    });
+
+    // Make an unsaved edit before deleting the image.
+    click(inEditor('Add box'));
+    expect(footer()).toMatch(/Unsaved changes/);
+
+    const back = vi.spyOn(history, 'back');
+    const info = vi.spyOn(toast, 'info');
+    click(inEditor('Remove image'));
+    const confirm = await vi.waitFor(() => {
+      flushSync();
+      const d = [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].find((el) => el !== editor() && el.textContent?.includes('Remove'));
+      const b = d ? [...d.querySelectorAll<HTMLButtonElement>('button')].find((x) => x.textContent?.trim() === 'Remove image') : undefined;
+      if (!b) throw new Error('waiting for Remove confirm');
+      return b;
+    });
+    confirm.click();
+
+    await vi.waitFor(() => {
+      flushSync();
+      expect(hash()).toBe('#/datasets/label/lb_7c21');
+    });
+    expect(asking()).toBeUndefined();
+    expect(editor()?.open).toBeFalsy();
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(info).not.toHaveBeenCalled();
+  });
 });
