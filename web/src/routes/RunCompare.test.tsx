@@ -6,6 +6,7 @@ import { ApiError, hub } from '$lib/api/index';
 import { metric } from '$lib/format';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
+import { gChord } from '$lib/shell/shortcuts';
 import RunCompare, { COMPARE_POLL_MS } from './RunCompare';
 import { emaSetting } from './run/resolved';
 
@@ -217,6 +218,36 @@ describe('Compare: the keyboard', () => {
     const chips = () => [...target.querySelectorAll<HTMLButtonElement>('.chip button.key')];
     const baseline = () => table.querySelector('thead .base-tag')?.closest('th')?.querySelector('.th-name')?.textContent;
 
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(chips()[1]!.getAttribute('aria-pressed')).toBe('true');
+    expect(chips().map((b) => b.getAttribute('aria-keyshortcuts'))).toEqual(['1', '2', '3']);
+
+    // Repeat events are ignored by discrete 1–4 and B shortcuts.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', repeat: true, bubbles: true, cancelable: true }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', repeat: true, bubbles: true, cancelable: true }));
+    flushSync();
+    expect(chips()[1]!.getAttribute('aria-pressed')).toBe('true');
+    expect(baseline()).toBe(runs[0]!.name);
+
+    // An armed G-chord suppresses Escape unpinning so cancelling a chord does not alter the pin.
+    gChord.set(true);
+    try {
+      const chordEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      document.dispatchEvent(chordEsc);
+      flushSync();
+      expect(chordEsc.defaultPrevented).toBe(false);
+      expect(chips()[1]!.getAttribute('aria-pressed')).toBe('true');
+    } finally {
+      gChord.set(false);
+    }
+
+    // Focusing chip 1 and pressing 2 clears hover emphasis so chip 2's pin takes effect immediately.
+    chips()[0]!.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    flushSync();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(chips()[1]!.getAttribute('aria-pressed')).toBe('false');
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '2', bubbles: true, cancelable: true }));
     flushSync();
     expect(chips()[1]!.getAttribute('aria-pressed')).toBe('true');

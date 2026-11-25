@@ -7,6 +7,7 @@ import { href } from '$lib/router';
 import { setCrumbs } from '$lib/shell/crumbs';
 import Page from '$lib/shell/Page';
 import { pageKeys } from '$lib/shell/pageCommands';
+import { gChord } from '$lib/shell/shortcuts';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -41,16 +42,17 @@ export default function RunCompare() {
     if (k >= '1' && k <= '4') {
       const target = list[Number(k) - 1];
       if (!target) return false;
+      s.hovered.set(null);
       s.pinned.set((p) => (p === target.id ? null : target.id));
       return true;
     }
     return false;
   });
 
-  // Escape unpins an active chip before global Escape returns to Runs.
+  // Escape unpins an active chip before global Escape returns to Runs (but never intercepts a G-chord cancel or popover).
   onDocument('keydown', (e) => {
     if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isTyping(e)) return;
-    if (!keyPrefs.singleKeys || document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"], #folo-tooltip[data-show], .info-pop.open')) return;
+    if (!keyPrefs.singleKeys || gChord.peek() || document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"], #folo-tooltip[data-show], .info-pop.open, [popover]:popover-open')) return;
     const p = s.pinned.peek();
     if (p !== null && s.chosen.peek().some((x) => x.id === p)) {
       e.preventDefault();

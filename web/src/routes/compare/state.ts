@@ -256,11 +256,13 @@ export function compareState() {
       next.set(id, m);
       const nextByRun = new Map(prevByRun ?? []);
       nextByRun.set(id, stamp);
-      const nextErrs = { ...metricErrors.peek() };
-      delete nextErrs[id];
+      const curErrs = metricErrors.peek();
+      const hadErr = id in curErrs;
+      const nextErrs = hadErr ? { ...curErrs } : curErrs;
+      if (hadErr) delete nextErrs[id];
       const curIds = ids.peek().join(',');
       readAt.set(next, { ids: curIds, byRun: nextByRun });
-      metricErrors.set(nextErrs);
+      if (hadErr) metricErrors.set(nextErrs);
       metrics.error = undefined;
       if (Object.keys(nextErrs).length === 0) metrics.stale = undefined;
       metrics.set(next);
@@ -524,13 +526,15 @@ export function compareState() {
   const allRuns = signal(false);
   const otherAt = signal(0);
   const baselineId = signal<string | null>(null);
-  // A baseline removed from the comparison is forgotten, not latent: the table falls back to the first run, and adding
-  // that run again later must not quietly make it the baseline once more.
+  // A baseline or pinned run removed from the comparison is forgotten, not latent: adding that run again later must not
+  // quietly restore it as baseline or pinned.
   effect(() => {
     const cur = ids.get();
     untrack(() => {
       const b = baselineId.get();
       if (b !== null && !cur.includes(b)) baselineId.set(null);
+      const p = pinned.get();
+      if (p !== null && !cur.includes(p)) pinned.set(null);
     });
   });
 

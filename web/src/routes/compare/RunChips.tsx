@@ -12,6 +12,7 @@ import { metric } from '$lib/format';
 import { FROM_SCRATCH } from '$lib/lineage';
 import { href } from '$lib/router';
 import Ident from '$lib/ui/Ident';
+import { keyPrefs } from '$lib/ui/keyPrefs';
 
 export interface RunChipsProps {
   hint: string | null;
@@ -65,7 +66,7 @@ export default function RunChips(props: RunChipsProps) {
         </button>
       </div>
       <For each={props.chosen} key={(r) => r.id}>
-        {(r) => {
+        {(r, i) => {
           const v = () => props.valueOf(r().id);
           const from = () => props.startOf(r());
           const end = () => runEnd(r().status);
@@ -86,6 +87,7 @@ export default function RunChips(props: RunChipsProps) {
                 type="button"
                 class="key"
                 aria-pressed={pinned.get() === r().id}
+                aria-keyshortcuts={keyPrefs.singleKeys && props.chosen.length >= 2 ? String(i() + 1) : undefined}
                 title={pinned.get() === r().id ? 'Let the line fall back' : 'Keep this line in front'}
                 onclick={() => pinned.set(pinned.peek() === r().id ? null : r().id)}
               >
