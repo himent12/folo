@@ -218,7 +218,7 @@ impl Interactivity {
     /// Clamps the scroll offset to `-max..=0` (max = content plus padding minus bounds, two decimals) and
     /// reports bounds and max to the scroll handle (GPUI's `clamp_scroll_position`).
     fn clamp_scroll_position(
-        &self,
+        &mut self,
         bounds: Bounds<Pixels>,
         style: &Style,
         window: &mut Window,
@@ -240,6 +240,7 @@ impl Interactivity {
             round_to_two_decimals(padded.width - bounds.size.width).max(px(0.)),
             round_to_two_decimals(padded.height - bounds.size.height).max(px(0.)),
         );
+        self.scroll_max = scroll_max;
         let mut offset = scroll_offset.borrow_mut();
         offset.x = offset.x.clamp(-scroll_max.width, px(0.));
         offset.y =

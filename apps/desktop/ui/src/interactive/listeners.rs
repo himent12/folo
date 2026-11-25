@@ -269,9 +269,11 @@ impl Interactivity {
     }
 
     /// A scroll container moves its offset by the wheel delta (line deltas at the current line height),
-    /// on the axes that scroll, and redraws when it moved; the clamp happens at the next prepaint.
+    /// clamped to `-scroll_max..=0` on the axes that scroll, and redraws only when the clamped offset
+    /// actually changes.
     pub(crate) fn paint_scroll_listener(&self, hitbox: &Hitbox, style: &Style, window: &mut Window) {
         let Some(scroll_offset) = self.scroll_offset.clone() else { return };
+        let scroll_max = self.scroll_max;
         let overflow = style.overflow;
         let allow_concurrent_scroll = style.allow_concurrent_scroll;
         let restrict_scroll_to_axis = style.restrict_scroll_to_axis;
@@ -305,11 +307,23 @@ impl Interactivity {
                     delta_x = Pixels::ZERO;
                 }
             }
+            let clamp_axis = |current: Pixels, delta: Pixels, max: Pixels| -> Pixels {
+                if delta == Pixels::ZERO {
+                    return current;
+                }
+                let next = current + delta;
+                if max.0.is_finite() && max.0 >= 0.0 && next.0.is_finite() {
+                    let min = if max.0 == 0.0 { Pixels::ZERO } else { -max };
+                    next.clamp(min, Pixels::ZERO)
+                } else {
+                    next
+                }
+            };
             let moved = {
                 let mut offset = scroll_offset.borrow_mut();
                 let old = *offset;
-                offset.x += delta_x;
-                offset.y += delta_y;
+                offset.x = clamp_axis(offset.x, delta_x, scroll_max.width);
+                offset.y = clamp_axis(offset.y, delta_y, scroll_max.height);
                 *offset != old
             };
             if moved {
