@@ -71,7 +71,7 @@ pub fn run(cmd: LabelCommand, out: Out) -> Result<(), CliError> {
             out.human(format!("{}: {}", r.job_id, print::status_name(r.status)));
         }
         LabelCommand::Status(a) => {
-            if a.log > 50 {
+            if !crate::cli::bounds::LABEL_LOG.contains_u64(u64::from(a.log)) {
                 return Err(usage("--log must be in 0..=50"));
             }
             let r = open(&a.conn, false)?.labels.status(&a.job, a.log as usize).map_err(api_error)?;
@@ -79,7 +79,7 @@ pub fn run(cmd: LabelCommand, out: Out) -> Result<(), CliError> {
             print::status(&r, out);
         }
         LabelCommand::Images(a) => {
-            if !(1..=1000).contains(&a.limit) {
+            if !crate::cli::bounds::LABEL_LIMIT.contains_u64(a.limit) {
                 return Err(usage("--limit must be in 1..=1000"));
             }
             let status = a.status.map(image_status);
@@ -337,10 +337,10 @@ fn same_run(ours: Option<&LabelRun>, now: Option<&LabelRun>, last: Option<(u64, 
 }
 
 fn view(a: LabelViewArgs, out: Out) -> Result<(), CliError> {
-    if !(256..=1568).contains(&a.size) {
+    if !crate::cli::bounds::LABEL_VIEW_SIZE.contains_u64(u64::from(a.size)) {
         return Err(usage("--size must be in 256..=1568"));
     }
-    if a.from == 0 {
+    if !crate::cli::bounds::POSITIVE_INT.contains_u64(u64::from(a.from)) {
         return Err(usage("--from is a box number, 1 or more"));
     }
     let s = open(&a.conn, false)?;

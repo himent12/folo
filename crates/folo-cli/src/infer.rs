@@ -13,7 +13,7 @@ use folo_vision::val::{ValConfig, check_config, val_metrics, validate};
 use folo_vision::{FoloModel, NmsConfig, Precision, PredictConfig, Predictor};
 use serde_json::json;
 
-use crate::cli::{ExportArgs, ExportFormatArg, PrecisionArg, PredictArgs, SplitArg, ValArgs};
+use crate::cli::{ExportArgs, ExportFormatArg, PrecisionArg, PredictArgs, SplitArg, ValArgs, bounds};
 use crate::draw::annotate;
 use crate::engine::{engine_error, open_dataset_splits};
 use crate::output::{CliError, ExitCode, Out};
@@ -139,7 +139,7 @@ fn precision_of(model: &FoloModel) -> &'static str {
 
 /// `--fusion-iou` is an IoU: in `0..=1` (a NaN would put every candidate of a class in every cluster).
 fn check_fusion_iou(v: f32) -> Result<(), CliError> {
-    if (0.0..=1.0).contains(&v) {
+    if bounds::UNIT_INTERVAL.contains_f64(f64::from(v)) {
         return Ok(());
     }
     Err(CliError::new(ExitCode::Usage, "usage", format!("--fusion-iou must be in 0..=1, got {v}")))
@@ -158,34 +158,30 @@ fn check_infer_args(
     iou: f32,
     max_det: u32,
     imgsz: Option<u32>,
-    max_imgsz: Option<u32>,
+    imgsz_bounds: bounds::NumericBounds,
     batch: Option<u32>,
 ) -> Result<(), CliError> {
-    if !(0.0..=1.0).contains(&conf) {
+    if !bounds::UNIT_INTERVAL.contains_f64(f64::from(conf)) {
         return Err(invalid_config(command, format!("--conf must be in 0..=1, got {conf}")));
     }
-    if !(0.0..=1.0).contains(&iou) {
+    if !bounds::UNIT_INTERVAL.contains_f64(f64::from(iou)) {
         return Err(invalid_config(command, format!("--iou must be in 0..=1, got {iou}")));
     }
-    if max_det == 0 {
+    if !bounds::POSITIVE_INT.contains_u64(u64::from(max_det)) {
         return Err(invalid_config(command, "--max-det must be at least 1"));
     }
-    if let Some(s) = imgsz {
-        if let Some(max) = max_imgsz {
-            if s == 0 || !s.is_multiple_of(32) || s > max {
-                return Err(invalid_config(
-                    command,
-                    format!("--imgsz must be a multiple of 32 in 32..={max}, got {s}"),
-                ));
+    if let Some(s) = imgsz
+        && !imgsz_bounds.contains_u64(u64::from(s))
+    {
+        let msg = match imgsz_bounds.max {
+            Some(bounds::BoundValue::Int(max)) => {
+                format!("--imgsz must be a multiple of 32 in 32..={max}, got {s}")
             }
-        } else if s == 0 || !s.is_multiple_of(32) {
-            return Err(invalid_config(
-                command,
-                format!("--imgsz must be a positive multiple of 32, got {s}"),
-            ));
-        }
+            _ => format!("--imgsz must be a positive multiple of 32, got {s}"),
+        };
+        return Err(invalid_config(command, msg));
     }
-    if batch == Some(0) {
+    if batch.is_some_and(|b| !bounds::POSITIVE_INT.contains_u64(u64::from(b))) {
         return Err(invalid_config(command, "--batch must be at least 1"));
     }
     Ok(())
@@ -211,7 +207,15 @@ fn check_save_dir(save: Option<&Path>) -> Result<(), CliError> {
 
 pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     check_fusion_iou(args.fusion_iou)?;
-    check_infer_args("val", args.conf, args.iou, args.max_det, args.imgsz, None, Some(args.batch))?;
+    check_infer_args(
+        "val",
+        args.conf,
+        args.iou,
+        args.max_det,
+        args.imgsz,
+        bounds::VAL_IMGSZ,
+        Some(args.batch),
+    )?;
     let shape = format!("imgsz {:?} batch {} head {:?}", args.imgsz, args.batch, args.head);
     let model =
         open_model("val", &args.model, &args.device, (args.half, args.precision), args.tensor_cores, &shape)?;
@@ -541,7 +545,7 @@ fn check_save_outside(save: Option<&Path>, sources: &[PathBuf]) -> Result<(), Cl
 
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     check_fusion_iou(args.fusion_iou)?;
-    check_infer_args("predict", args.conf, args.iou, args.max_det, args.imgsz, Some(8192), None)?;
+    check_infer_args("predict", args.conf, args.iou, args.max_det, args.imgsz, bounds::INFER_IMGSZ, None)?;
     check_save_dir(args.save.as_deref())?;
     check_save_outside(args.save.as_deref(), &args.sources)?;
     let shape = format!("imgsz {:?} head {:?}", args.imgsz, args.head);
@@ -697,20 +701,20 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
         return Err(CliError::new(ExitCode::Usage, "usage", "--batch and --dynamic exclude each other")
             .hint("--dynamic makes the batch symbolic; leave out --batch"));
     }
-    if args.batch == Some(0) {
+    if args.batch.is_some_and(|b| !bounds::POSITIVE_INT.contains_u64(b as u64)) {
         return Err(CliError::new(ExitCode::Usage, "usage", "--batch must be at least 1"));
     }
-    if args.max_det == 0 {
+    if !bounds::POSITIVE_INT.contains_u64(args.max_det as u64) {
         return Err(CliError::new(ExitCode::Usage, "usage", "--max-det must be at least 1"));
     }
     if let Some(imgsz) = args.imgsz
         && onnx
-        && (imgsz == 0 || !imgsz.is_multiple_of(32) || imgsz > 8192)
+        && !bounds::INFER_IMGSZ.contains_u64(u64::from(imgsz))
     {
         return Err(CliError::new(
             ExitCode::Usage,
             "usage",
-            format!("--imgsz {imgsz} must be a multiple of 32 in 32..=8192"),
+            format!("--imgsz {imgsz} must be a multiple of 32 in 32..={}", bounds::INFER_IMGSZ_MAX),
         ));
     }
     args.model = crate::weights::resolve(&args.model)?;
@@ -741,11 +745,11 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
         ));
     }
     let imgsz = args.imgsz.unwrap_or(file.metadata().imgsz);
-    if onnx && (imgsz == 0 || !imgsz.is_multiple_of(32) || imgsz > 8192) {
+    if onnx && !bounds::INFER_IMGSZ.contains_u64(u64::from(imgsz)) {
         return Err(CliError::new(
             ExitCode::Usage,
             "usage",
-            format!("--imgsz {imgsz} must be a multiple of 32 in 32..=8192"),
+            format!("--imgsz {imgsz} must be a multiple of 32 in 32..={}", bounds::INFER_IMGSZ_MAX),
         ));
     }
     let output = OutputFile::new("export", &args.model, args.output.clone(), suffix, ext)?;
@@ -890,26 +894,26 @@ mod tests {
     #[test]
     fn check_infer_args_validates_thresholds_and_sizes() {
         // Boundary valid values pass (`val` has no 8192 upper bound, matching `val::check_config`).
-        check_infer_args("predict", 0.0, 0.0, 1, Some(32), Some(8192), None).unwrap();
-        check_infer_args("predict", 1.0, 1.0, 300, Some(8192), Some(8192), None).unwrap();
-        check_infer_args("val", 1.0, 1.0, 300, Some(8224), None, Some(1)).unwrap();
+        check_infer_args("predict", 0.0, 0.0, 1, Some(32), bounds::INFER_IMGSZ, None).unwrap();
+        check_infer_args("predict", 1.0, 1.0, 300, Some(8192), bounds::INFER_IMGSZ, None).unwrap();
+        check_infer_args("val", 1.0, 1.0, 300, Some(8224), bounds::VAL_IMGSZ, Some(1)).unwrap();
 
-        for (conf, iou, max_det, imgsz, max_imgsz, batch, flag) in [
-            (-0.01, 0.5, 10, None, Some(8192), None, "--conf"),
-            (1.01, 0.5, 10, None, Some(8192), None, "--conf"),
-            (f32::NAN, 0.5, 10, None, Some(8192), None, "--conf"),
-            (f32::INFINITY, 0.5, 10, None, Some(8192), None, "--conf"),
-            (0.25, -0.1, 10, None, Some(8192), None, "--iou"),
-            (0.25, 1.5, 10, None, Some(8192), None, "--iou"),
-            (0.25, f32::NAN, 10, None, Some(8192), None, "--iou"),
-            (0.25, 0.7, 0, None, Some(8192), None, "--max-det"),
-            (0.25, 0.7, 10, Some(0), Some(8192), None, "--imgsz"),
-            (0.25, 0.7, 10, Some(33), Some(8192), None, "--imgsz"),
-            (0.25, 0.7, 10, Some(8224), Some(8192), None, "--imgsz"),
-            (0.25, 0.7, 10, Some(33), None, Some(1), "--imgsz"),
-            (0.25, 0.7, 10, Some(64), None, Some(0), "--batch"),
+        for (conf, iou, max_det, imgsz, imgsz_bounds, batch, flag) in [
+            (-0.01, 0.5, 10, None, bounds::INFER_IMGSZ, None, "--conf"),
+            (1.01, 0.5, 10, None, bounds::INFER_IMGSZ, None, "--conf"),
+            (f32::NAN, 0.5, 10, None, bounds::INFER_IMGSZ, None, "--conf"),
+            (f32::INFINITY, 0.5, 10, None, bounds::INFER_IMGSZ, None, "--conf"),
+            (0.25, -0.1, 10, None, bounds::INFER_IMGSZ, None, "--iou"),
+            (0.25, 1.5, 10, None, bounds::INFER_IMGSZ, None, "--iou"),
+            (0.25, f32::NAN, 10, None, bounds::INFER_IMGSZ, None, "--iou"),
+            (0.25, 0.7, 0, None, bounds::INFER_IMGSZ, None, "--max-det"),
+            (0.25, 0.7, 10, Some(0), bounds::INFER_IMGSZ, None, "--imgsz"),
+            (0.25, 0.7, 10, Some(33), bounds::INFER_IMGSZ, None, "--imgsz"),
+            (0.25, 0.7, 10, Some(8224), bounds::INFER_IMGSZ, None, "--imgsz"),
+            (0.25, 0.7, 10, Some(33), bounds::VAL_IMGSZ, Some(1), "--imgsz"),
+            (0.25, 0.7, 10, Some(64), bounds::VAL_IMGSZ, Some(0), "--batch"),
         ] {
-            let e = check_infer_args("predict", conf, iou, max_det, imgsz, max_imgsz, batch).unwrap_err();
+            let e = check_infer_args("predict", conf, iou, max_det, imgsz, imgsz_bounds, batch).unwrap_err();
             assert_eq!((e.exit, e.code.as_str()), (ExitCode::Usage, "invalid_config"), "{flag}: {e:?}");
             assert!(e.message.contains(flag), "expected {flag} in {}", e.message);
             assert!(e.hint.as_deref().is_some_and(|h| h.contains("folo describe predict --json")));

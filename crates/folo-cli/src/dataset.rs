@@ -467,10 +467,10 @@ impl Progress {
 }
 
 fn synth(args: SynthArgs, out: Out) -> Result<(), CliError> {
-    if !(1..=1_000_000).contains(&args.images) {
+    if !crate::cli::bounds::SYNTH_IMAGES.contains_u64(args.images) {
         return Err(CliError::new(ExitCode::Usage, "usage", "--images must be in 1..=1000000"));
     }
-    if !(32..=8192).contains(&args.imgsz) {
+    if !crate::cli::bounds::SYNTH_IMGSZ.contains_u64(u64::from(args.imgsz)) {
         return Err(CliError::new(ExitCode::Usage, "usage", "--imgsz must be in 32..=8192"));
     }
     let names: Vec<String> = args.classes.iter().map(|c| c.trim().to_string()).collect();

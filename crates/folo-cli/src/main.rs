@@ -628,5 +628,154 @@ mod tests {
         assert_eq!(via_alias["name"], "check");
         assert_eq!(via_alias["aliases"], json!(["verify"]));
         assert_eq!(arg(&via_alias, "fast")["aliases"], json!(["-f"]));
+        assert_eq!(arg(&via_alias, "fast")["bounds"], json!(null));
+    }
+
+    /// Every validated numeric argument exposes its accepted bounds in `folo describe` and concise range text in
+    /// `--help`, matching the validation hints emitted on `invalid_config`.
+    #[test]
+    fn describe_exposes_numeric_bounds_for_validated_args() {
+        let arg = |cmd: &serde_json::Value, name: &str| {
+            cmd["args"].as_array().unwrap().iter().find(|a| a["name"] == name).unwrap().clone()
+        };
+
+        let predict = describe::describe(&Cli::command(), &["predict".into()], false).unwrap();
+        assert_eq!(arg(&predict, "conf")["bounds"], json!({ "minimum": 0.0, "maximum": 1.0 }));
+        assert_eq!(arg(&predict, "iou")["bounds"], json!({ "minimum": 0.0, "maximum": 1.0 }));
+        assert_eq!(arg(&predict, "fusion_iou")["bounds"], json!({ "minimum": 0.0, "maximum": 1.0 }));
+        assert_eq!(arg(&predict, "max_det")["bounds"], json!({ "minimum": 1 }));
+        assert_eq!(
+            arg(&predict, "imgsz")["bounds"],
+            json!({ "minimum": 32, "maximum": 8192, "multiple_of": 32 })
+        );
+        assert_eq!(arg(&predict, "model")["bounds"], json!(null));
+        assert_eq!(arg(&predict, "half")["bounds"], json!(null));
+        assert!(arg(&predict, "conf")["help"].as_str().unwrap().contains("[0..=1]"));
+        assert!(arg(&predict, "imgsz")["help"].as_str().unwrap().contains("[32..=8192, multiple of 32]"));
+
+        let val = describe::describe(&Cli::command(), &["val".into()], false).unwrap();
+        assert_eq!(arg(&val, "conf")["bounds"], json!({ "minimum": 0.0, "maximum": 1.0 }));
+        assert_eq!(arg(&val, "iou")["bounds"], json!({ "minimum": 0.0, "maximum": 1.0 }));
+        assert_eq!(arg(&val, "fusion_iou")["bounds"], json!({ "minimum": 0.0, "maximum": 1.0 }));
+        assert_eq!(arg(&val, "max_det")["bounds"], json!({ "minimum": 1 }));
+        assert_eq!(arg(&val, "batch")["bounds"], json!({ "minimum": 1 }));
+        assert_eq!(arg(&val, "imgsz")["bounds"], json!({ "minimum": 32, "multiple_of": 32 }));
+        assert!(arg(&val, "imgsz")["help"].as_str().unwrap().contains("[>= 32, multiple of 32]"));
+
+        let export = describe::describe(&Cli::command(), &["export".into()], false).unwrap();
+        assert_eq!(
+            arg(&export, "imgsz")["bounds"],
+            json!({ "minimum": 32, "maximum": 8192, "multiple_of": 32 })
+        );
+        assert_eq!(arg(&export, "batch")["bounds"], json!({ "minimum": 1 }));
+        assert_eq!(arg(&export, "max_det")["bounds"], json!({ "minimum": 1 }));
+
+        let train = describe::describe(&Cli::command(), &["train".into()], false).unwrap();
+        assert_eq!(arg(&train, "epochs")["bounds"], json!({ "minimum": 1, "maximum": 10_000 }));
+        assert_eq!(arg(&train, "batch")["bounds"], json!({ "minimum": 1, "maximum": 1024 }));
+        assert_eq!(
+            arg(&train, "imgsz")["bounds"],
+            json!({ "minimum": 64, "maximum": 4096, "multiple_of": 32 })
+        );
+        assert_eq!(
+            arg(&train, "lr0")["bounds"],
+            json!({ "exclusive_minimum": 0.0, "exclusive_maximum": 10.0 })
+        );
+        assert_eq!(arg(&train, "lrf")["bounds"], json!({ "exclusive_minimum": 0.0, "maximum": 1.0 }));
+        assert_eq!(arg(&train, "scale")["bounds"], json!({ "minimum": 0.0, "exclusive_maximum": 1.0 }));
+        assert_eq!(arg(&train, "mosaic")["bounds"], json!({ "minimum": 0.0, "maximum": 1.0 }));
+        assert_eq!(arg(&train, "warmup_epochs")["bounds"], json!({ "minimum": 0.0 }));
+
+        let quantize = describe::describe(&Cli::command(), &["quantize".into()], false).unwrap();
+        assert_eq!(
+            arg(&quantize, "tail")["bounds"],
+            json!({ "exclusive_minimum": 0.0, "exclusive_maximum": 0.5 })
+        );
+        assert_eq!(
+            arg(&quantize, "imgsz")["bounds"],
+            json!({ "minimum": 32, "maximum": 8192, "multiple_of": 32 })
+        );
+        assert_eq!(arg(&quantize, "images")["bounds"], json!({ "minimum": 1 }));
+        assert_eq!(arg(&quantize, "batch")["bounds"], json!({ "minimum": 1 }));
+
+        let bench_create =
+            describe::describe(&Cli::command(), &["bench".into(), "create".into()], false).unwrap();
+        assert_eq!(arg(&bench_create, "max_images")["bounds"], json!({ "minimum": 1, "maximum": 5000 }));
+        assert_eq!(
+            arg(&bench_create, "seed")["bounds"],
+            json!({ "minimum": 0, "maximum": 9_007_199_254_740_991u64 })
+        );
+        assert!(arg(&bench_create, "seed")["help"].as_str().unwrap().contains("[0..=9007199254740991]"));
+    }
+
+    /// Every entry in `cli::bounds::ARG_BOUNDS` matches a real numeric argument in the clap tree, has no
+    /// duplicates, accepts its own default value(s), and appears identically in full and scoped `folo describe`.
+    #[test]
+    fn arg_bounds_table_matches_clap_tree_and_defaults() {
+        use std::collections::BTreeSet;
+        let root = Cli::command();
+        let all = describe::describe(&root, &[], false).unwrap();
+        let mut seen = BTreeSet::new();
+
+        fn find_cmd<'a>(node: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+            if node["path"].as_str() == Some(path) {
+                return Some(node);
+            }
+            let children = node.get("commands").or_else(|| node.get("subcommands"))?.as_array()?;
+            children.iter().find_map(|c| find_cmd(c, path))
+        }
+
+        for &(cmd_path, arg_id, b) in cli::bounds::ARG_BOUNDS {
+            assert!(seen.insert((cmd_path, arg_id)), "duplicate ARG_BOUNDS entry for {cmd_path} {arg_id}");
+            let sub_path: Vec<String> =
+                cmd_path.split_whitespace().skip(1).map(ToString::to_string).collect();
+            let scoped = describe::describe(&root, &sub_path, false)
+                .unwrap_or_else(|e| panic!("{cmd_path} missing from clap tree: {e:?}"));
+            let from_all =
+                find_cmd(&all, cmd_path).unwrap_or_else(|| panic!("{cmd_path} missing from describe_all"));
+            let find_arg = |cmd: &serde_json::Value| {
+                cmd["args"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|a| a["name"] == arg_id)
+                    .unwrap_or_else(|| panic!("{arg_id} missing on {cmd_path}"))
+                    .clone()
+            };
+            let a_scoped = find_arg(&scoped);
+            let a_all = find_arg(from_all);
+            assert_eq!(a_scoped["bounds"], b.to_json(), "{cmd_path} {arg_id}");
+            assert_eq!(a_scoped["bounds"], a_all["bounds"], "{cmd_path} {arg_id}");
+            assert!(!a_scoped["bounds"].as_object().unwrap().is_empty(), "{cmd_path} {arg_id}");
+            let ty = a_scoped["type"].as_str().unwrap();
+            assert!(matches!(ty, "integer" | "number"), "{cmd_path} {arg_id}: unexpected type {ty}");
+            // Integer args must use Int bounds and float args must use Float bounds (no silent type mismatch).
+            for bound in [b.min, b.max].into_iter().flatten() {
+                match (ty, bound) {
+                    ("integer", cli::bounds::BoundValue::Int(_))
+                    | ("number", cli::bounds::BoundValue::Float(_)) => {}
+                    _ => panic!("{cmd_path} {arg_id}: bound {bound:?} does not match clap type {ty}"),
+                }
+            }
+            if ty == "number" {
+                assert!(b.multiple_of.is_none(), "{cmd_path} {arg_id}: float arg should not set multiple_of");
+            }
+            // Verify every configured default value lies inside the declared bounds.
+            let defaults: Vec<&str> = match &a_scoped["default"] {
+                serde_json::Value::String(s) => vec![s.as_str()],
+                serde_json::Value::Array(arr) => arr.iter().map(|v| v.as_str().unwrap()).collect(),
+                serde_json::Value::Null => vec![],
+                other => panic!("{cmd_path} {arg_id}: unexpected default {other}"),
+            };
+            for d in defaults {
+                if ty == "integer" {
+                    let v: u64 = d.parse().unwrap_or_else(|e| panic!("{cmd_path} {arg_id}={d}: {e}"));
+                    assert!(b.contains_u64(v), "{cmd_path} {arg_id} default {v} outside {b:?}");
+                } else {
+                    let v: f64 = d.parse().unwrap_or_else(|e| panic!("{cmd_path} {arg_id}={d}: {e}"));
+                    assert!(b.contains_f64(v), "{cmd_path} {arg_id} default {v} outside {b:?}");
+                }
+            }
+        }
     }
 }
