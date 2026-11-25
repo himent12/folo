@@ -26,75 +26,66 @@ fn dot_scalar(a: &[f32], b: &[f32]) -> f32 {
     s
 }
 
-/// 16-wide AVX2+FMA dot product with deterministic fixed reduction order.
+/// 8-wide AVX2 dot product, bitwise identical to [`dot_scalar`] (non-FMA `mul` + `add`, 8 lanes, remainder
+/// summed first).
 ///
 /// # Safety
-/// The CPU supports AVX2 and FMA.
+/// The CPU supports AVX2.
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
+#[target_feature(enable = "avx2")]
 unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
     assert_eq!(a.len(), b.len());
-    let (a16, a_rem) = a.as_chunks::<16>();
-    let (b16, b_rem) = b.as_chunks::<16>();
-    let (a8, a_tail) = a_rem.as_chunks::<8>();
-    let (b8, b_tail) = b_rem.as_chunks::<8>();
-    let mut acc = [0f32; 16];
-    // SAFETY: `as_chunks::<16>()` / `as_chunks::<8>()` guarantee exact lengths; AVX2+FMA enabled.
+    let (ca, ra) = a.as_chunks::<8>();
+    let (cb, rb) = b.as_chunks::<8>();
+    let mut acc = [0f32; 8];
+    // SAFETY: `as_chunks::<8>()` guarantees 8-float chunks, `acc` is `[f32; 8]`, and AVX2 is enabled.
     unsafe {
         let mut s0 = _mm256_setzero_ps();
-        let mut s1 = _mm256_setzero_ps();
-        for (x, y) in a16.iter().zip(b16) {
-            s0 = _mm256_fmadd_ps(_mm256_loadu_ps(x.as_ptr()), _mm256_loadu_ps(y.as_ptr()), s0);
-            s1 = _mm256_fmadd_ps(_mm256_loadu_ps(x.as_ptr().add(8)), _mm256_loadu_ps(y.as_ptr().add(8)), s1);
-        }
-        for (x, y) in a8.iter().zip(b8) {
-            s0 = _mm256_fmadd_ps(_mm256_loadu_ps(x.as_ptr()), _mm256_loadu_ps(y.as_ptr()), s0);
+        for (x, y) in ca.iter().zip(cb) {
+            let prod = _mm256_mul_ps(_mm256_loadu_ps(x.as_ptr()), _mm256_loadu_ps(y.as_ptr()));
+            s0 = _mm256_add_ps(s0, prod);
         }
         _mm256_storeu_ps(acc.as_mut_ptr(), s0);
-        _mm256_storeu_ps(acc.as_mut_ptr().add(8), s1);
     }
-    let mut s = 0f32;
+    let mut s: f32 = ra.iter().zip(rb).map(|(x, y)| x * y).sum();
     for v in acc {
         s += v;
-    }
-    for (&x, &y) in a_tail.iter().zip(b_tail) {
-        s += x * y;
     }
     s
 }
 
-/// 16-wide AVX2+FMA row update `dst[i] += wv * src[i]`.
+/// 16-wide AVX2 row update `dst[i] += wv * src[i]`, bitwise identical to scalar `*d += wv * s` (non-FMA).
 ///
 /// # Safety
-/// The CPU supports AVX2 and FMA.
+/// The CPU supports AVX2.
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn fma_row_avx2(dst: &mut [f32], src: &[f32], wv: f32) {
+#[target_feature(enable = "avx2")]
+unsafe fn mul_add_row_avx2(dst: &mut [f32], src: &[f32], wv: f32) {
     use std::arch::x86_64::*;
     assert_eq!(dst.len(), src.len());
     let w = _mm256_set1_ps(wv);
     let (d16, d_rem) = dst.as_chunks_mut::<16>();
     let (s16, s_rem) = src.as_chunks::<16>();
     for (dc, sc) in d16.iter_mut().zip(s16) {
-        // SAFETY: `dc` and `sc` are `[f32; 16]` (64 bytes) and AVX2+FMA is enabled.
+        // SAFETY: `dc` and `sc` are `[f32; 16]` (64 bytes) and AVX2 is enabled.
         unsafe {
             let d0 = _mm256_loadu_ps(dc.as_ptr());
             let d1 = _mm256_loadu_ps(dc.as_ptr().add(8));
             let s0 = _mm256_loadu_ps(sc.as_ptr());
             let s1 = _mm256_loadu_ps(sc.as_ptr().add(8));
-            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_fmadd_ps(w, s0, d0));
-            _mm256_storeu_ps(dc.as_mut_ptr().add(8), _mm256_fmadd_ps(w, s1, d1));
+            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_add_ps(d0, _mm256_mul_ps(w, s0)));
+            _mm256_storeu_ps(dc.as_mut_ptr().add(8), _mm256_add_ps(d1, _mm256_mul_ps(w, s1)));
         }
     }
     let (d8, d_tail) = d_rem.as_chunks_mut::<8>();
     let (s8, s_tail) = s_rem.as_chunks::<8>();
     for (dc, sc) in d8.iter_mut().zip(s8) {
-        // SAFETY: `dc` and `sc` are `[f32; 8]` (32 bytes) and AVX2+FMA is enabled.
+        // SAFETY: `dc` and `sc` are `[f32; 8]` (32 bytes) and AVX2 is enabled.
         unsafe {
             let d0 = _mm256_loadu_ps(dc.as_ptr());
             let s0 = _mm256_loadu_ps(sc.as_ptr());
-            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_fmadd_ps(w, s0, d0));
+            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_add_ps(d0, _mm256_mul_ps(w, s0)));
         }
     }
     for (d, &s) in d_tail.iter_mut().zip(s_tail) {
@@ -331,7 +322,7 @@ pub(super) fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g
     let (ph, dh) = (g.p.padding[0] as isize, g.p.dilation[0] as isize);
     let kx_cols = precompute_kx_cols(g);
     #[cfg(target_arch = "x86_64")]
-    let avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
+    let avx2 = std::is_x86_feature_detected!("avx2");
     let total = g.n * g.c;
     let per_task = DW_TASK_OUTPUTS.div_ceil(hw).min(total.div_ceil(4 * rayon::current_num_threads())).max(1);
     par_chunks(gx, per_task * hw, &|t, gxps| {
@@ -361,8 +352,8 @@ pub(super) fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g
                                 let src = &grow[r.clone()];
                                 #[cfg(target_arch = "x86_64")]
                                 if avx2 && len >= 8 {
-                                    // SAFETY: AVX2 and FMA were detected above.
-                                    unsafe { fma_row_avx2(dst, src, wv) };
+                                    // SAFETY: AVX2 was detected above.
+                                    unsafe { mul_add_row_avx2(dst, src, wv) };
                                     continue;
                                 }
                                 for (xv, &gv) in dst.iter_mut().zip(src) {
@@ -393,7 +384,7 @@ pub(super) fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mut [f32], g
     let (ph, dh) = (g.p.padding[0] as isize, g.p.dilation[0] as isize);
     let kx_cols = precompute_kx_cols(g);
     #[cfg(target_arch = "x86_64")]
-    let avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
+    let avx2 = std::is_x86_feature_detected!("avx2");
     let per_task =
         DW_TASK_OUTPUTS.div_ceil(g.n * ohw).min(g.o.div_ceil(4 * rayon::current_num_threads())).max(1);
     par_chunks(gw, per_task * khw, &|t, gks| {
@@ -422,7 +413,7 @@ pub(super) fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mut [f32], g
                                 let xs = &xrow[s0..s0 + cols.len()];
                                 #[cfg(target_arch = "x86_64")]
                                 if avx2 && gs.len() >= 8 {
-                                    // SAFETY: AVX2 and FMA were detected above.
+                                    // SAFETY: AVX2 was detected above.
                                     acc += unsafe { dot_avx2(gs, xs) };
                                     continue;
                                 }
