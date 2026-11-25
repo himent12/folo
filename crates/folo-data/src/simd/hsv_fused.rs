@@ -16,16 +16,40 @@ use super::{INV255_HI, INV255_LO, has_avx2, has_avx2_fma};
 /// Hue units per full circle (6 sectors of 256).
 pub(crate) const HUE_CIRCLE: i32 = 6 * 256;
 
+/// Compile-time rounded fixed-point reciprocals `round(2^16 / d)` for `d in 1..=255` (`RECIP[0] = 0`).
+const RECIP: [u32; 256] = {
+    let mut t = [0u32; 256];
+    let mut d = 1usize;
+    while d < 256 {
+        t[d] = ((1u32 << 16) + d as u32 / 2) / d as u32;
+        d += 1;
+    }
+    t
+};
+
+/// Exact IEEE-754 `i as f32 / 255.0` lookup table for division-free scalar planar `f32` conversion.
+const DIV255_LUT: [f32; 256] = {
+    let mut t = [0.0f32; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        t[i] = i as f32 / 255.0;
+        i += 1;
+    }
+    t
+};
+
 /// Precomputed integer HSV tables, built once per image.
 pub(crate) struct HsvTables {
     pub shift: i32,
     pub slut: [u8; 256],
     pub vlut: [u8; 256],
-    pub recip: [u32; 256],
-    /// `slut[i] as u32` for direct AVX2 gather without per-row stack rebuilds.
+    /// True when every saturation entry maps to `0` (e.g. `sat_gain == 0.0`): every pixel becomes
+    /// `[vlut[max(r, g, b)]; 3]`, bit-exact with the full hexcone kernel.
+    pub zero_sat: bool,
+    /// `slut[i] as u32` for direct AVX2 lookup without per-row stack rebuilds.
     #[cfg(target_arch = "x86_64")]
     pub slut_u32: [u32; 256],
-    /// `(vlut[i] as u32) | (recip[i] << 8)`: one gather delivers both `v` and `recip[max]`.
+    /// `(vlut[i] as u32) | (RECIP[i] << 8)`: one lookup delivers both `v` and `RECIP[max]`.
     #[cfg(target_arch = "x86_64")]
     pub max_lut: [u32; 256],
 }
@@ -45,19 +69,16 @@ impl HsvTables {
             t
         };
         let (slut, vlut) = (lut(sat_gain), lut(val_gain));
-        let mut recip = [0u32; 256];
-        for (d, r) in recip.iter_mut().enumerate().skip(1) {
-            *r = ((1u32 << 16) + d as u32 / 2) / d as u32;
-        }
+        let zero_sat = slut.iter().all(|&v| v == 0);
         #[cfg(target_arch = "x86_64")]
         let slut_u32 = std::array::from_fn(|i| slut[i] as u32);
         #[cfg(target_arch = "x86_64")]
-        let max_lut = std::array::from_fn(|i| (vlut[i] as u32) | (recip[i] << 8));
+        let max_lut = std::array::from_fn(|i| (vlut[i] as u32) | (RECIP[i] << 8));
         Some(HsvTables {
             shift,
             slut,
             vlut,
-            recip,
+            zero_sat,
             #[cfg(target_arch = "x86_64")]
             slut_u32,
             #[cfg(target_arch = "x86_64")]
@@ -65,33 +86,46 @@ impl HsvTables {
         })
     }
 
-    /// Applies this HSV transform to one pixel (scalar reference).
+    /// Applies this HSV transform to one pixel (division-free scalar kernel, bit-exact with the integer hexcone
+    /// specification across all 2^24 RGB triples).
     #[inline]
     pub(crate) fn apply_pixel(&self, px: [u8; 3]) -> [u8; 3] {
         let (r, g, b) = (px[0] as i32, px[1] as i32, px[2] as i32);
         let max = r.max(g).max(b);
+        let v = self.vlut[max as usize] as i32;
+        if self.zero_sat {
+            return [v as u8; 3];
+        }
         let min = r.min(g).min(b);
         let delta = max - min;
-        let v = self.vlut[max as usize] as i32;
         if delta == 0 {
             return [v as u8; 3];
         }
-        let rd = self.recip[delta as usize] as i32;
+        let rd = RECIP[delta as usize] as i32;
         let mut h = if max == r {
-            ((g - b) * 256 * rd) >> 16
+            ((g - b) * rd) >> 8
         } else if max == g {
-            512 + (((b - r) * 256 * rd) >> 16)
+            512 + (((b - r) * rd) >> 8)
         } else {
-            1024 + (((r - g) * 256 * rd) >> 16)
+            1024 + (((r - g) * rd) >> 8)
         };
-        h = (h + self.shift).rem_euclid(HUE_CIRCLE);
-        let s0 = ((delta * 255 * self.recip[max as usize] as i32 + (1 << 15)) >> 16).min(255);
+        h += self.shift;
+        if h < 0 {
+            h += HUE_CIRCLE;
+        } else if h >= HUE_CIRCLE {
+            h -= HUE_CIRCLE;
+        }
+        let s0 = ((delta * 255 * RECIP[max as usize] as i32 + (1 << 15)) >> 16).min(255);
         let s = self.slut[s0 as usize] as i32;
         let sector = h >> 8;
         let frac = h & 255;
-        let p = (v * (255 - s) + 127) / 255;
-        let q = (v * (255 * 256 - s * frac) + 255 * 128) / (255 * 256);
-        let t = (v * (255 * 256 - s * (256 - frac)) + 255 * 128) / (255 * 256);
+        let xp = v * (255 - s) + 128;
+        let p = (xp + (xp >> 8)) >> 8;
+        let sf = s * frac;
+        let aq = (v * (255 * 256 - sf) + (255 * 128 + 256)) >> 8;
+        let q = (aq + (aq >> 8)) >> 8;
+        let at = (v * (255 * 256 - ((s << 8) - sf)) + (255 * 128 + 256)) >> 8;
+        let t = (at + (at >> 8)) >> 8;
         let (r2, g2, b2) = match sector {
             0 => (v, t, p),
             1 => (q, v, p),
@@ -104,9 +138,13 @@ impl HsvTables {
     }
 }
 
-/// Applies HSV in place on one interleaved RGB row (`width * 3` bytes).
+/// Applies HSV in place on one contiguous slice of interleaved RGB pixels (`pixels * 3` bytes).
 #[inline]
 pub(crate) fn hsv_row_inplace(row: &mut [u8], t: &HsvTables) {
+    if t.zero_sat {
+        hsv_row_zero_sat_inplace(row, &t.vlut);
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     if has_avx2() && row.len() >= 48 {
         // SAFETY: CPU supports AVX2.
@@ -114,6 +152,14 @@ pub(crate) fn hsv_row_inplace(row: &mut [u8], t: &HsvTables) {
         return;
     }
     hsv_row_inplace_scalar(row, t);
+}
+
+#[inline]
+fn hsv_row_zero_sat_inplace(row: &mut [u8], vlut: &[u8; 256]) {
+    for px in row.as_chunks_mut::<3>().0.iter_mut() {
+        let v = vlut[px[0].max(px[1]).max(px[2]) as usize];
+        *px = [v, v, v];
+    }
 }
 
 #[inline]
@@ -171,23 +217,42 @@ pub(crate) fn rgb_row_hsv_to_planar_scalar(
     dst: &mut PlanarRow<'_>,
 ) {
     let w = src.len() / 3;
+    let pixels = src.as_chunks::<3>().0;
     match dst {
         PlanarRow::U8 { r, g, b } => {
-            for (x, px) in src.as_chunks::<3>().0.iter().enumerate() {
-                let o = t.apply_pixel(*px);
-                let d = if flip_lr { w - 1 - x } else { x };
-                r[d] = o[0];
-                g[d] = o[1];
-                b[d] = o[2];
+            if flip_lr {
+                for (x, px) in pixels.iter().enumerate() {
+                    let o = t.apply_pixel(*px);
+                    let d = w - 1 - x;
+                    r[d] = o[0];
+                    g[d] = o[1];
+                    b[d] = o[2];
+                }
+            } else {
+                for (x, px) in pixels.iter().enumerate() {
+                    let o = t.apply_pixel(*px);
+                    r[x] = o[0];
+                    g[x] = o[1];
+                    b[x] = o[2];
+                }
             }
         }
         PlanarRow::F32Div255 { r, g, b } => {
-            for (x, px) in src.as_chunks::<3>().0.iter().enumerate() {
-                let o = t.apply_pixel(*px);
-                let d = if flip_lr { w - 1 - x } else { x };
-                r[d] = o[0] as f32 / 255.0;
-                g[d] = o[1] as f32 / 255.0;
-                b[d] = o[2] as f32 / 255.0;
+            if flip_lr {
+                for (x, px) in pixels.iter().enumerate() {
+                    let o = t.apply_pixel(*px);
+                    let d = w - 1 - x;
+                    r[d] = DIV255_LUT[o[0] as usize];
+                    g[d] = DIV255_LUT[o[1] as usize];
+                    b[d] = DIV255_LUT[o[2] as usize];
+                }
+            } else {
+                for (x, px) in pixels.iter().enumerate() {
+                    let o = t.apply_pixel(*px);
+                    r[x] = DIV255_LUT[o[0] as usize];
+                    g[x] = DIV255_LUT[o[1] as usize];
+                    b[x] = DIV255_LUT[o[2] as usize];
+                }
             }
         }
     }
@@ -309,9 +374,9 @@ pub(crate) fn warp_interior_to_planar_fused_scalar(
                 b[d] = px[2];
             }
             PlanarRow::F32Div255 { r, g, b } => {
-                r[d] = px[0] as f32 / 255.0;
-                g[d] = px[1] as f32 / 255.0;
-                b[d] = px[2] as f32 / 255.0;
+                r[d] = DIV255_LUT[px[0] as usize];
+                g[d] = DIV255_LUT[px[1] as usize];
+                b[d] = DIV255_LUT[px[2] as usize];
             }
         }
     }
@@ -347,7 +412,6 @@ pub(crate) unsafe fn hsv_8_i32_avx2(
     let c2 = _mm256_set1_epi32(2);
     let c3 = _mm256_set1_epi32(3);
     let c4 = _mm256_set1_epi32(4);
-    let c5 = _mm256_set1_epi32(5);
     let c128 = _mm256_set1_epi32(128);
     let c255 = _mm256_set1_epi32(255);
     let c512 = _mm256_set1_epi32(512);
@@ -360,13 +424,17 @@ pub(crate) unsafe fn hsv_8_i32_avx2(
     let vshift = _mm256_set1_epi32(t.shift);
 
     let max = _mm256_max_epi32(_mm256_max_epi32(r, g), b);
+    // SAFETY: `max` is in `0..=255`; `max_lut` has 256 `u32` entries.
+    let packed_max = unsafe { _mm256_i32gather_epi32::<4>(t.max_lut.as_ptr() as *const i32, max) };
+    let v = _mm256_and_si256(packed_max, c255);
+    if t.zero_sat {
+        return (v, v, v);
+    }
     let min = _mm256_min_epi32(_mm256_min_epi32(r, g), b);
     let delta = _mm256_sub_epi32(max, min);
 
-    // SAFETY: `max` and `delta` are in `0..=255`; `max_lut` and `recip` have 256 `u32` entries.
-    let packed_max = unsafe { _mm256_i32gather_epi32::<4>(t.max_lut.as_ptr() as *const i32, max) };
-    let rd = unsafe { _mm256_i32gather_epi32::<4>(t.recip.as_ptr() as *const i32, delta) };
-    let v = _mm256_and_si256(packed_max, c255);
+    // SAFETY: `delta` is in `0..=255`; `RECIP` has 256 `u32` entries.
+    let rd = unsafe { _mm256_i32gather_epi32::<4>(RECIP.as_ptr() as *const i32, delta) };
     let rmax = _mm256_srli_epi32::<8>(packed_max);
 
     let eq_r = _mm256_cmpeq_epi32(max, r);
@@ -413,15 +481,15 @@ pub(crate) unsafe fn hsv_8_i32_avx2(
     let w = _mm256_srli_epi32::<8>(_mm256_add_epi32(aw, _mm256_srli_epi32::<8>(aw)));
 
     // Sectors 0..5: (v, w, p), (q, v, p), (p, v, w), (p, q, v), (w, p, v), (v, p, q).
+    // Defaulting to sector 5 eliminates one `cmpeq` and two `or` masks.
     let s0m = _mm256_cmpeq_epi32(sector, c0);
     let s1m = _mm256_cmpeq_epi32(sector, c1);
     let s2m = _mm256_cmpeq_epi32(sector, c2);
     let s3m = _mm256_cmpeq_epi32(sector, c3);
     let s4m = _mm256_cmpeq_epi32(sector, c4);
-    let s5m = _mm256_cmpeq_epi32(sector, c5);
 
     let r2 = _mm256_blendv_epi8(
-        _mm256_blendv_epi8(_mm256_blendv_epi8(p, v, _mm256_or_si256(s0m, s5m)), q, s1m),
+        _mm256_blendv_epi8(_mm256_blendv_epi8(v, p, _mm256_or_si256(s2m, s3m)), q, s1m),
         w,
         s4m,
     );
@@ -431,7 +499,7 @@ pub(crate) unsafe fn hsv_8_i32_avx2(
         s0m,
     );
     let b2 = _mm256_blendv_epi8(
-        _mm256_blendv_epi8(_mm256_blendv_epi8(p, v, _mm256_or_si256(s3m, s4m)), q, s5m),
+        _mm256_blendv_epi8(_mm256_blendv_epi8(q, p, _mm256_or_si256(s0m, s1m)), v, _mm256_or_si256(s3m, s4m)),
         w,
         s2m,
     );

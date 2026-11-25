@@ -6,7 +6,7 @@
 //! AVX2 against the scalar per-pixel reference on all 2^24 colours.
 
 use crate::image::Image;
-use crate::par::for_rows;
+use crate::par::for_bands;
 use crate::rng::Rng;
 pub(crate) use crate::simd::hsv_fused::HsvTables;
 use crate::simd::hsv_fused::hsv_row_inplace;
@@ -18,7 +18,7 @@ pub fn random_hsv(img: &mut Image, gains: [f32; 3], rng: &mut Rng) {
         return;
     };
     let stride = img.stride();
-    for_rows(&mut img.data, stride, |_, row| hsv_row_inplace(row, &t));
+    for_bands(&mut img.data, stride, |_, band| hsv_row_inplace(band, &t));
 }
 
 /// Draws the three RNG numbers of [`random_hsv`] and builds the precomputed [`HsvTables`] (`None` if no-op).
@@ -37,7 +37,7 @@ pub fn apply_hsv(img: &mut Image, hue_turns: f32, sat_gain: f32, val_gain: f32) 
         return;
     };
     let stride = img.stride();
-    for_rows(&mut img.data, stride, |_, row| hsv_row_inplace(row, &t));
+    for_bands(&mut img.data, stride, |_, band| hsv_row_inplace(band, &t));
 }
 
 #[cfg(test)]
@@ -175,6 +175,68 @@ mod tests {
             for x in 0..50 {
                 let inside = (10..20).contains(&x) && (10..20).contains(&y);
                 assert_eq!(img.pixel(x, y), if inside { b } else { a });
+            }
+        }
+    }
+
+    /// Reference integer hexcone HSV with explicit `/ 255` and `/ (255 * 256)` divisions.
+    fn apply_pixel_div_ref(t: &HsvTables, px: [u8; 3]) -> [u8; 3] {
+        let (r, g, b) = (px[0] as i32, px[1] as i32, px[2] as i32);
+        let max = r.max(g).max(b);
+        let min = r.min(g).min(b);
+        let delta = max - min;
+        let v = t.vlut[max as usize] as i32;
+        if delta == 0 {
+            return [v as u8; 3];
+        }
+        let recip = |d: i32| ((1u32 << 16) + d as u32 / 2) as i32 / d;
+        let rd = recip(delta);
+        let mut h = if max == r {
+            ((g - b) * 256 * rd) >> 16
+        } else if max == g {
+            512 + (((b - r) * 256 * rd) >> 16)
+        } else {
+            1024 + (((r - g) * 256 * rd) >> 16)
+        };
+        h = (h + t.shift).rem_euclid(crate::simd::hsv_fused::HUE_CIRCLE);
+        let s0 = ((delta * 255 * recip(max) + (1 << 15)) >> 16).min(255);
+        let s = t.slut[s0 as usize] as i32;
+        let sector = h >> 8;
+        let frac = h & 255;
+        let p = (v * (255 - s) + 127) / 255;
+        let q = (v * (255 * 256 - s * frac) + 255 * 128) / (255 * 256);
+        let w = (v * (255 * 256 - s * (256 - frac)) + 255 * 128) / (255 * 256);
+        let (r2, g2, b2) = match sector {
+            0 => (v, w, p),
+            1 => (q, v, p),
+            2 => (p, v, w),
+            3 => (p, q, v),
+            4 => (w, p, v),
+            _ => (v, p, q),
+        };
+        [r2 as u8, g2 as u8, b2 as u8]
+    }
+
+    #[test]
+    fn division_free_and_zero_sat_match_reference_bit_exact() {
+        let mut rng = Rng::new(77);
+        let t_full = tables(&mut rng);
+        let t_desat = HsvTables::new(0.25, 0.0, 1.35).unwrap();
+        assert!(t_desat.zero_sat);
+        for red in (0..256u32).step_by(5) {
+            let mut row = Vec::with_capacity(64 * 3);
+            for k in 0..64u32 {
+                row.extend_from_slice(&[red as u8, ((k * 4) & 255) as u8, ((k * 7 + red) & 255) as u8]);
+            }
+            for t in [&t_full, &t_desat] {
+                let expected: Vec<u8> =
+                    row.as_chunks::<3>().0.iter().flat_map(|&px| apply_pixel_div_ref(t, px)).collect();
+                let mut got_scalar = row.clone();
+                hsv_row_inplace_scalar(&mut got_scalar, t);
+                assert_eq!(got_scalar, expected);
+                let mut got_fast = row.clone();
+                hsv_row_inplace(&mut got_fast, t);
+                assert_eq!(got_fast, expected);
             }
         }
     }
