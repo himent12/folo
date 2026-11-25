@@ -1,12 +1,19 @@
 //! Unit and fake-subprocess tests for the Antigravity ACP labeling driver.
+//!
+//! Files: this one holds catalog, option resolution, round-trip, usage, and stdio helper tests; `session_mode` tests
+//! mode enforcement, mid-prompt drift, pre-dispatch cancel, and chatty parent-exit detection; `session_config` tests
+//! legacy model switches, default-model pinning, variant resolution, and stdout flood bounds; `subprocess` drives
+//! real fake-child subprocesses to verify process-tree and pipe cleanup.
 
-mod session;
+mod session_config;
+mod session_mode;
 mod subprocess;
 
+use std::io::{BufReader, Cursor, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use folo_api::{LabelEffort, LabelModel, LabelUsage};
@@ -14,7 +21,9 @@ use folo_test_support::TestDir;
 use serde_json::{Value, json};
 
 use super::acp::{drive_acp, drive_acp_with_grace};
-use super::process::{MAX_STDERR_BYTES, StderrTail, acp_command};
+use super::process::{
+    DoneSignal, MAX_STDERR_BYTES, StderrTail, acp_command, join_bounded, read_bounded_line,
+};
 use super::protocol::{
     LABEL_AGENT_NAME, LABEL_CLI_DIR, find_effort_option, find_model_option, parse_config_options,
     prepare_isolation, resolve_effort_value, resolve_executable, resolve_model_and_effort, rpc_failure,
@@ -847,4 +856,69 @@ fn structured_errors_hints_stderr_cap_and_isolation_work_cleanly() {
     assert!(args.windows(2).any(|w| w == ["--cli_dir_name", LABEL_CLI_DIR]));
     assert!(args.iter().any(|a| a == "--sandbox"));
     assert!(Path::new(cmd.get_program()).is_absolute());
+}
+
+#[test]
+fn bounded_stdout_line_reader_handles_endings_chunk_boundaries_and_oversize_lines() {
+    let mut reader = BufReader::with_capacity(3, Cursor::new(b"ab\ncd\r\n\n\r\nef".as_slice()));
+    assert_eq!(read_bounded_line(&mut reader, 4).unwrap().as_deref(), Some("ab"));
+    assert_eq!(read_bounded_line(&mut reader, 4).unwrap().as_deref(), Some("cd"));
+    assert_eq!(read_bounded_line(&mut reader, 4).unwrap().as_deref(), Some(""));
+    assert_eq!(read_bounded_line(&mut reader, 4).unwrap().as_deref(), Some(""));
+    assert_eq!(read_bounded_line(&mut reader, 4).unwrap().as_deref(), Some("ef"));
+    assert_eq!(read_bounded_line(&mut reader, 4).unwrap(), None);
+
+    // Exact boundary with CRLF split across buffer refills (`abcd\r` then `\n`) succeeds.
+    let mut exact = BufReader::with_capacity(5, Cursor::new(b"abcd\r\nok".as_slice()));
+    assert_eq!(read_bounded_line(&mut exact, 4).unwrap().as_deref(), Some("abcd"));
+    assert_eq!(read_bounded_line(&mut exact, 4).unwrap().as_deref(), Some("ok"));
+    assert_eq!(read_bounded_line(&mut exact, 4).unwrap(), None);
+
+    // Trailing `\r` at EOF without `\n` counts toward line length and is rejected when exceeding the cap.
+    let mut trailing_cr_eof = BufReader::with_capacity(5, Cursor::new(b"abcd\r".as_slice()));
+    let err = read_bounded_line(&mut trailing_cr_eof, 4).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+
+    // Oversize line without newline fails immediately with InvalidData instead of buffering indefinitely.
+    let mut oversize = BufReader::with_capacity(3, Cursor::new(b"abcdefgh\n".as_slice()));
+    let err = read_bounded_line(&mut oversize, 4).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+
+    // Oversize line with newline inside one buffer fails with InvalidData.
+    let mut oversize_one_chunk = BufReader::with_capacity(32, Cursor::new(b"abcde\n".as_slice()));
+    let err = read_bounded_line(&mut oversize_one_chunk, 4).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+
+    // Invalid UTF-8 fails with InvalidData.
+    let mut bad_utf8 = BufReader::new(Cursor::new(b"\xff\xfe\n".as_slice()));
+    let err = read_bounded_line(&mut bad_utf8, 16).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidData);
+}
+
+#[test]
+fn done_signal_and_join_bounded_wake_promptly_and_respect_timeout() {
+    // Immediate wake when worker signals completion.
+    let done = Arc::new(DoneSignal::new());
+    let done_bg = done.clone();
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let handle = std::thread::spawn(move || {
+        go_rx.recv().unwrap();
+        done_bg.mark();
+    });
+    let t0 = Instant::now();
+    go_tx.send(()).unwrap();
+    assert!(join_bounded(handle, &done, Duration::from_secs(5)));
+    assert!(t0.elapsed() < Duration::from_secs(2), "condvar join took too long: {:?}", t0.elapsed());
+
+    // Timeout returns false without blocking past the bound; unblocking afterwards finishes cleanly.
+    let stuck_done = Arc::new(DoneSignal::new());
+    let stuck_done_bg = stuck_done.clone();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let stuck_handle = std::thread::spawn(move || {
+        let _ = release_rx.recv();
+        stuck_done_bg.mark();
+    });
+    assert!(!stuck_done.wait_timeout(Duration::from_millis(15)));
+    release_tx.send(()).unwrap();
+    assert!(join_bounded(stuck_handle, &stuck_done, Duration::from_secs(5)));
 }

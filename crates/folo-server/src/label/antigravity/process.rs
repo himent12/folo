@@ -1,11 +1,11 @@
 //! OS subprocess lifecycle, stdio pipe reader/writer threads, and strict process-tree cleanup for `agy acp`.
 
 use std::collections::VecDeque;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -23,20 +23,67 @@ use crate::label::tree::Tree;
 const CLOSE_GRACE: Duration = Duration::from_millis(250);
 /// Maximum bytes retained from child stderr (most recent tail).
 pub(super) const MAX_STDERR_BYTES: usize = 64 * 1024;
+/// Maximum bytes accepted for a single stdout JSON-RPC line before failing closed (16 MiB).
+pub(super) const MAX_STDOUT_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Condvar-backed one-shot completion signal so pipe drains and bounded thread joins wake immediately on EOF
+/// instead of sleeping in fixed intervals.
+pub(super) struct DoneSignal {
+    done: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl DoneSignal {
+    pub(super) fn new() -> DoneSignal {
+        DoneSignal { done: Mutex::new(false), cv: Condvar::new() }
+    }
+
+    pub(super) fn mark(&self) {
+        let mut done = self.done.lock().unwrap_or_else(|p| p.into_inner());
+        *done = true;
+        self.cv.notify_all();
+    }
+
+    pub(super) fn is_done(&self) -> bool {
+        *self.done.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    pub(super) fn wait_timeout(&self, wait: Duration) -> bool {
+        let mut done = self.done.lock().unwrap_or_else(|p| p.into_inner());
+        if *done || wait.is_zero() {
+            return *done;
+        }
+        let Some(deadline) = Instant::now().checked_add(wait) else {
+            while !*done {
+                done = self.cv.wait(done).unwrap_or_else(|p| p.into_inner());
+            }
+            return true;
+        };
+        while !*done {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (guard, _) = self.cv.wait_timeout(done, remaining).unwrap_or_else(|p| p.into_inner());
+            done = guard;
+        }
+        *done
+    }
+}
 
 /// Bounded stderr tail with EOF tracking so unexpected exits wait briefly for diagnostics without unbounded memory.
 pub(super) struct StderrTail {
     bytes: Mutex<VecDeque<u8>>,
-    ended: AtomicBool,
+    done: DoneSignal,
 }
 
 impl StderrTail {
     pub(super) fn new() -> Arc<StderrTail> {
-        Arc::new(StderrTail { bytes: Mutex::new(VecDeque::new()), ended: AtomicBool::new(false) })
+        Arc::new(StderrTail { bytes: Mutex::new(VecDeque::new()), done: DoneSignal::new() })
     }
 
     pub(super) fn push(&self, chunk: &[u8]) {
-        let mut buf = self.bytes.lock().unwrap();
+        let mut buf = self.bytes.lock().unwrap_or_else(|p| p.into_inner());
         if chunk.len() >= MAX_STDERR_BYTES {
             buf.clear();
             buf.extend(&chunk[chunk.len() - MAX_STDERR_BYTES..]);
@@ -50,25 +97,84 @@ impl StderrTail {
     }
 
     pub(super) fn mark_ended(&self) {
-        self.ended.store(true, Ordering::Release);
-    }
-
-    pub(super) fn ended(&self) -> bool {
-        self.ended.load(Ordering::Acquire)
+        self.done.mark();
     }
 
     pub(super) fn drain_text(&self, wait: Duration) -> String {
-        let deadline = Instant::now() + wait;
-        while !self.ended() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        let buf = self.bytes.lock().unwrap();
+        let _ = self.done.wait_timeout(wait);
+        let buf = self.bytes.lock().unwrap_or_else(|p| p.into_inner());
         let (a, b) = buf.as_slices();
         let mut all = Vec::with_capacity(a.len() + b.len());
         all.extend_from_slice(a);
         all.extend_from_slice(b);
         String::from_utf8_lossy(&all).into_owned()
     }
+}
+
+/// Reads one UTF-8 line (stripping trailing `\n` and optional `\r`) from `reader`, rejecting any single line whose
+/// payload exceeds `max_bytes` with [`ErrorKind::InvalidData`] without unbounded allocation.
+pub(super) fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> std::io::Result<Option<String>> {
+    let mut buf = Vec::new();
+    let mut saw_any = false;
+    loop {
+        let avail = match reader.fill_buf() {
+            Ok(b) => b,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if avail.is_empty() {
+            if !saw_any {
+                return Ok(None);
+            }
+            if buf.len() > max_bytes {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("stdout line exceeded {max_bytes} bytes"),
+                ));
+            }
+            break;
+        }
+        saw_any = true;
+        if let Some(pos) = avail.iter().position(|&b| b == b'\n') {
+            let chunk = &avail[..pos];
+            // Allow one extra byte here for a trailing `\r` right before `\n`, checked after stripping.
+            if buf.len().saturating_add(chunk.len()) > max_bytes.saturating_add(1) {
+                reader.consume(pos + 1);
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("stdout line exceeded {max_bytes} bytes"),
+                ));
+            }
+            buf.extend_from_slice(chunk);
+            reader.consume(pos + 1);
+            if buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            if buf.len() > max_bytes {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("stdout line exceeded {max_bytes} bytes"),
+                ));
+            }
+            break;
+        }
+        let n = avail.len();
+        let next_len = buf.len().saturating_add(n);
+        let allow_trailing_cr = next_len == max_bytes.saturating_add(1) && avail.last() == Some(&b'\r');
+        if next_len > max_bytes && !allow_trailing_cr {
+            reader.consume(n);
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidData,
+                format!("stdout line exceeded {max_bytes} bytes"),
+            ));
+        }
+        buf.extend_from_slice(avail);
+        reader.consume(n);
+    }
+    String::from_utf8(buf).map(Some).map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))
 }
 
 /// Process-tree guard for `agy acp`: tracks child exit separately from process-group termination so descendants on
@@ -104,16 +210,20 @@ impl AcpProcess {
         self.child_exited
     }
 
-    fn finish_gracefully(&mut self, stdout_ended: &AtomicBool, stderr_ended: &AtomicBool) {
+    fn finish_gracefully(&mut self, stdout_done: &DoneSignal, stderr_done: &DoneSignal) {
         let deadline = Instant::now() + CLOSE_GRACE;
         while Instant::now() < deadline {
-            if self.poll_exited()
-                && stdout_ended.load(Ordering::Acquire)
-                && stderr_ended.load(Ordering::Acquire)
-            {
+            if self.poll_exited() && stdout_done.is_done() && stderr_done.is_done() {
                 break;
             }
-            std::thread::sleep(Duration::from_millis(10));
+            let step = deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(10));
+            if !stdout_done.is_done() {
+                let _ = stdout_done.wait_timeout(step);
+            } else if !stderr_done.is_done() {
+                let _ = stderr_done.wait_timeout(step);
+            } else {
+                std::thread::sleep(step);
+            }
         }
         // Always terminate the process group / job even after a clean parent exit so no helper outlives the call.
         self.kill();
@@ -196,26 +306,29 @@ pub(super) fn run_acp_checked(
 
     // Dedicated stdin writer thread so a wedged child never blocks deadline/cancel checks on large image batches.
     let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>();
-    let _in_thread = std::thread::spawn(move || {
+    let stdin_done = Arc::new(DoneSignal::new());
+    let stdin_done_out = stdin_done.clone();
+    let in_thread = std::thread::spawn(move || {
         let mut stdin = stdin;
         while let Ok(bytes) = in_rx.recv() {
             if stdin.write_all(&bytes).is_err() || stdin.flush().is_err() {
                 break;
             }
         }
+        drop(stdin);
+        stdin_done_out.mark();
     });
 
-    // Dedicated stdout line reader thread.
+    // Dedicated bounded stdout line reader thread.
     let (out_tx, out_rx) = mpsc::channel::<String>();
-    let stdout_ended = Arc::new(AtomicBool::new(false));
-    let stdout_done = stdout_ended.clone();
+    let stdout_done = Arc::new(DoneSignal::new());
+    let stdout_done_out = stdout_done.clone();
     let saw_marker = Arc::new(AtomicBool::new(false));
     let saw_marker_out = saw_marker.clone();
     let marker = stdout_marker.map(str::to_string);
     let out_thread = std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
+        let mut reader = BufReader::new(stdout);
+        while let Ok(Some(line)) = read_bounded_line(&mut reader, MAX_STDOUT_LINE_BYTES) {
             if let Some(m) = marker.as_deref()
                 && line.contains(m)
             {
@@ -225,7 +338,9 @@ pub(super) fn run_acp_checked(
                 break;
             }
         }
-        stdout_done.store(true, Ordering::Release);
+        drop(out_tx);
+        drop(reader);
+        stdout_done_out.mark();
     });
 
     // Dedicated bounded stderr tail reader thread.
@@ -237,6 +352,7 @@ pub(super) fn run_acp_checked(
         while let Ok(n @ 1..) = stderr.read(&mut chunk) {
             stderr_out.push(&chunk[..n]);
         }
+        drop(stderr);
         stderr_out.mark_ended();
     });
 
@@ -265,24 +381,21 @@ pub(super) fn run_acp_checked(
     if outcome.kill_immediately {
         proc.kill();
     } else {
-        proc.finish_gracefully(&stdout_ended, &stderr_tail.ended);
+        proc.finish_gracefully(&stdout_done, &stderr_tail.done);
     }
-    let out_closed = join_bounded(out_thread, &stdout_ended, EXIT_DRAIN);
-    let err_closed = join_bounded(err_thread, &stderr_tail.ended, EXIT_DRAIN);
+    let in_closed = join_bounded(in_thread, &stdin_done, EXIT_DRAIN);
+    let out_closed = join_bounded(out_thread, &stdout_done, EXIT_DRAIN);
+    let err_closed = join_bounded(err_thread, &stderr_tail.done, EXIT_DRAIN);
     AcpRunCheck {
         result: outcome.result,
-        pipes_closed: out_closed && err_closed,
+        pipes_closed: in_closed && out_closed && err_closed,
         saw_stdout_marker: saw_marker.load(Ordering::Acquire),
         stderr: stderr_tail.drain_text(Duration::ZERO),
     }
 }
 
-fn join_bounded(handle: JoinHandle<()>, ended: &AtomicBool, wait: Duration) -> bool {
-    let deadline = Instant::now() + wait;
-    while !ended.load(Ordering::Acquire) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    if ended.load(Ordering::Acquire) {
+pub(super) fn join_bounded(handle: JoinHandle<()>, done: &DoneSignal, wait: Duration) -> bool {
+    if done.wait_timeout(wait) {
         let _ = handle.join();
         true
     } else {
