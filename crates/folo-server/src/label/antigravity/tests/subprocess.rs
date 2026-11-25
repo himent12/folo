@@ -15,6 +15,11 @@ use crate::label::antigravity::process::run_acp_checked;
 
 const HELPER_STDOUT_MARKER: &str = "helper-stdout-acquired";
 const HELPER_STDERR_MARKER: &str = "helper-stderr-acquired";
+/// Timeout passed to `run_acp_checked`: generously above nested PowerShell startup on saturated Windows CI runners,
+/// yet strictly below the 120 s helper/wedged sleep so any real hang still trips it.
+const CALL_TIMEOUT: Duration = Duration::from_secs(90);
+/// Upper bound proving clean/early exit and cancellation did not wait on the 120 s helper or 90 s timeout.
+const MAX_CALL_ELAPSED: Duration = Duration::from_secs(60);
 
 #[derive(Copy, Clone)]
 enum FakeMode {
@@ -47,7 +52,7 @@ fn subprocess_acp_handles_clean_exit_early_exit_with_helper_and_wedged_cancel() 
     let clean_scratch = dir.join("s-clean");
     let req = test_req(&clean_scratch, &imgs, Some("gemini-4-neon"), LabelEffort::Low, &schema, &cancel);
     let t0 = Instant::now();
-    let check = run_acp_checked(&bin, &req, Duration::from_secs(30), Some(&home), Some(HELPER_STDOUT_MARKER));
+    let check = run_acp_checked(&bin, &req, CALL_TIMEOUT, Some(&home), Some(HELPER_STDOUT_MARKER));
     let reply = check.result.unwrap();
     assert!(check.saw_stdout_marker, "helper did not inherit captured stdout pipe before parent exit");
     assert!(
@@ -56,23 +61,18 @@ fn subprocess_acp_handles_clean_exit_early_exit_with_helper_and_wedged_cancel() 
         check.stderr
     );
     assert!(check.pipes_closed, "helper holding stdout/stderr survived clean ACP exit");
-    assert!(t0.elapsed() < Duration::from_secs(20), "call hung waiting on descendant: {:?}", t0.elapsed());
+    assert!(t0.elapsed() < MAX_CALL_ELAPSED, "call hung waiting on descendant: {:?}", t0.elapsed());
     assert_eq!(reply.text, r#"{"images":[{"image":1,"boxes":[["car",1,2,30,40]]}]}"#);
     assert_eq!((reply.usage.calls, reply.usage.input_tokens, reply.usage.output_tokens), (1, 512, 32));
 
     // 2. Parent exits BEFORE responding to `session/prompt` after its helper has written onto BOTH captured stdio
-    // pipes: must detect parent exit promptly (never stall until the 30s timeout), kill the helper, and close pipes.
+    // pipes: must detect parent exit promptly (never stall until CALL_TIMEOUT), kill the helper, and close pipes.
     let early_bin = write_fake_agy(&dir.join("early"), FakeMode::EarlyExitWithHelper);
     let early_scratch = dir.join("s-early");
     let early_req = test_req(&early_scratch, &[], None, LabelEffort::Low, &schema, &cancel);
     let t1 = Instant::now();
-    let check = run_acp_checked(
-        &early_bin,
-        &early_req,
-        Duration::from_secs(30),
-        Some(&home),
-        Some(HELPER_STDOUT_MARKER),
-    );
+    let check =
+        run_acp_checked(&early_bin, &early_req, CALL_TIMEOUT, Some(&home), Some(HELPER_STDOUT_MARKER));
     assert!(
         matches!(check.result, Err(AgentError::Failed(ref f)) if f.message.contains("early crash")),
         "{:?}",
@@ -85,7 +85,7 @@ fn subprocess_acp_handles_clean_exit_early_exit_with_helper_and_wedged_cancel() 
         check.stderr
     );
     assert!(check.pipes_closed, "helper survived early parent exit");
-    assert!(t1.elapsed() < Duration::from_secs(15), "early exit with helper stalled: {:?}", t1.elapsed());
+    assert!(t1.elapsed() < MAX_CALL_ELAPSED, "early exit with helper stalled: {:?}", t1.elapsed());
 
     // 3. Wedged subprocess on `session/prompt` signaled deterministically by marker file (no fixed sleep).
     let wedged_bin = write_fake_agy(&dir.join("wedged"), FakeMode::WedgedOnPrompt);
@@ -93,10 +93,10 @@ fn subprocess_acp_handles_clean_exit_early_exit_with_helper_and_wedged_cancel() 
     let cancel_wedged = cancel_when(wedged_scratch.join("work/wedged"));
     let wedged_req = test_req(&wedged_scratch, &[], None, LabelEffort::Low, &schema, &cancel_wedged);
     let t2 = Instant::now();
-    let check = run_acp_checked(&wedged_bin, &wedged_req, Duration::from_secs(30), Some(&home), None);
+    let check = run_acp_checked(&wedged_bin, &wedged_req, CALL_TIMEOUT, Some(&home), None);
     assert!(matches!(check.result, Err(AgentError::Cancelled(_))), "{:?}", check.result);
     assert!(check.pipes_closed, "wedged child survived cancel");
-    assert!(t2.elapsed() < Duration::from_secs(15), "wedged cancel took {:?}", t2.elapsed());
+    assert!(t2.elapsed() < MAX_CALL_ELAPSED, "wedged cancel took {:?}", t2.elapsed());
 }
 
 /// Writes a cross-platform fake `agy` executable handling `--version`, `models` and `acp`.
@@ -107,10 +107,10 @@ fn write_fake_agy(dir: &Path, mode: FakeMode) -> PathBuf {
         let spawn_helper_ps = format!(
             r#"$evName = 'Local\folo-helper-' + [Guid]::NewGuid().ToString('N')
             $ev = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset, $evName)
-            $psi = [Diagnostics.ProcessStartInfo]::new('powershell.exe', "-NoProfile -Command `"[Console]::Out.WriteLine('{HELPER_STDOUT_MARKER}'); [Console]::Out.Flush(); [Console]::Error.WriteLine('{HELPER_STDERR_MARKER}'); [Console]::Error.Flush(); [void][Threading.EventWaitHandle]::OpenExisting('$evName').Set(); Start-Sleep -Seconds 60`"")
+            $psi = [Diagnostics.ProcessStartInfo]::new('powershell.exe', "-NoProfile -Command `"[Console]::Out.WriteLine('{HELPER_STDOUT_MARKER}'); [Console]::Out.Flush(); [Console]::Error.WriteLine('{HELPER_STDERR_MARKER}'); [Console]::Error.Flush(); [void][Threading.EventWaitHandle]::OpenExisting('$evName').Set(); Start-Sleep -Seconds 120`"")
             $psi.UseShellExecute = $false
             [Diagnostics.Process]::Start($psi) | Out-Null
-            $ready = $ev.WaitOne(15000)
+            $ready = $ev.WaitOne(45000)
             $ev.Dispose()
             if (-not $ready) {{ [Console]::Error.WriteLine('helper failed to signal ready'); [Console]::Error.Flush(); exit 2 }}"#
         );
@@ -127,7 +127,7 @@ fn write_fake_agy(dir: &Path, mode: FakeMode) -> PathBuf {
             exit 1"#
             ),
             FakeMode::WedgedOnPrompt => r#"[IO.File]::WriteAllText('wedged', '1')
-            Start-Sleep -Seconds 60"#
+            Start-Sleep -Seconds 120"#
                 .to_string(),
         };
         let close_body = match mode {
@@ -198,7 +198,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {{
             r#"fifo="$PWD/helper_ready.fifo"
       rm -f "$fifo"
       mkfifo "$fifo"
-      ( printf '{HELPER_STDOUT_MARKER}\n'; printf '{HELPER_STDERR_MARKER}\n' >&2; printf 'ready\n' > "$fifo"; exec sleep 60 ) &
+      ( printf '{HELPER_STDOUT_MARKER}\n'; printf '{HELPER_STDERR_MARKER}\n' >&2; printf 'ready\n' > "$fifo"; exec sleep 120 ) &
       read -r _ < "$fifo""#
         );
         let prompt_body = match mode {
@@ -213,7 +213,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {{
       exit 1"#
             ),
             FakeMode::WedgedOnPrompt => r#"touch wedged
-      sleep 60"#
+      sleep 120"#
                 .to_string(),
         };
         let close_body = match mode {

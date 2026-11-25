@@ -71,8 +71,25 @@ impl Provider for RunPod {
 
     fn offers(&self, values: &Values) -> Result<Vec<CloudOffer>> {
         let key = api_key(values)?;
-        let mut offers = self.catalog(key, Cloud::Secure)?;
-        offers.extend(self.catalog(key, Cloud::Community)?);
+        // Fetch Secure and Community GPU catalogs concurrently; fall back to inline execution if thread creation
+        // fails, and preserve Secure-first error precedence and deterministic sorting.
+        let (secure, community) = std::thread::scope(|s| {
+            let community = std::thread::Builder::new()
+                .name("folo-runpod-catalog".into())
+                .spawn_scoped(s, || self.catalog(key, Cloud::Community))
+                .ok();
+            let secure = self.catalog(key, Cloud::Secure);
+            let community = match community {
+                Some(handle) => match handle.join() {
+                    Ok(res) => res,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                },
+                None => self.catalog(key, Cloud::Community),
+            };
+            (secure, community)
+        });
+        let mut offers = secure?;
+        offers.extend(community?);
         offers.sort_by(|a, b| {
             let price = |o: &CloudOffer| o.price_per_hour.unwrap_or(0.0);
             price(a).total_cmp(&price(b)).then_with(|| a.gpu.cmp(&b.gpu)).then_with(|| a.id.cmp(&b.id))
