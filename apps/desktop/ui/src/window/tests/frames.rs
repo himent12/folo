@@ -362,3 +362,115 @@ fn deferred_draw_inherits_enclosing_text_style_in_prepaint() {
         assert!(window.text_style_ref().is_none(), "stack cleared after deferred prepaint");
     });
 }
+
+#[test]
+fn steady_frame_reuses_global_element_id_arcs_and_evicts_removed_ids() {
+    use std::cell::Cell;
+    use std::sync::Arc;
+
+    use crate::{ElementId, GlobalElementId};
+
+    let show_transient = Rc::new(Cell::new(true));
+    let seen_ids: Rc<RefCell<Vec<GlobalElementId>>> = Rc::default();
+    let show_in_render = show_transient.clone();
+    let seen_in_render = seen_ids.clone();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, move |window, _| {
+        let seen = seen_in_render.clone();
+        let transient = show_in_render.get();
+        window.with_id("scope", |window| {
+            window.with_global_id(ElementId::from("stable"), |id, _| {
+                seen.borrow_mut().push(id.clone());
+            });
+            if transient {
+                window.with_global_id(ElementId::from("transient"), |id, _| {
+                    seen.borrow_mut().push(id.clone());
+                });
+            }
+        });
+        div()
+            .id("pure-id-only")
+            .size_full()
+            .child(div().id("clickable").size(px(20.)).on_click(|_, _, _| {}))
+            .into_any_element()
+    });
+
+    let first_stable = seen_ids.borrow()[0].clone();
+    assert_eq!(seen_ids.borrow().len(), 2);
+    with_window(&mut app, window, |window, _| {
+        // Pure-ID `div().id("pure-id-only")` stores no empty InteractiveElementState box, while
+        // `clickable` stores its pending_mouse_down state.
+        assert_eq!(window.rendered_frame.element_states.len(), 1);
+    });
+
+    // Frame 2: same paths reuse the exact same `Arc<[ElementId]>`.
+    seen_ids.borrow_mut().clear();
+    with_window(&mut app, window, |window, _| window.refresh());
+    app.frame(window);
+    let second_stable = seen_ids.borrow()[0].clone();
+    assert!(
+        Arc::ptr_eq(&first_stable.0, &second_stable.0),
+        "steady-state frame should reuse GlobalElementId's Arc<[ElementId]>"
+    );
+
+    // Frame 3: removing `transient` drops it from the interned id map while keeping `stable`.
+    show_transient.set(false);
+    seen_ids.borrow_mut().clear();
+    with_window(&mut app, window, |window, _| window.refresh());
+    app.frame(window);
+    let third_stable = seen_ids.borrow()[0].clone();
+    assert!(Arc::ptr_eq(&first_stable.0, &third_stable.0));
+    with_window(&mut app, window, |window, _| {
+        let has_transient = window
+            .rendered_frame
+            .element_ids
+            .values()
+            .flatten()
+            .any(|id| id.path().last() == Some(&ElementId::from("transient")));
+        assert!(!has_transient, "removed element ids must be evicted after frame swap");
+
+        // Calling `with_global_id` outside a draw must bypass the frame cache so idle input
+        // callbacks cannot grow `next_frame.element_ids` unboundedly.
+        assert!(window.next_frame.element_ids.is_empty());
+        window.with_global_id(ElementId::from("outside-draw"), |id, _| {
+            assert_eq!(id.path(), &[ElementId::from("outside-draw")]);
+        });
+        assert!(window.next_frame.element_ids.is_empty());
+    });
+}
+
+#[test]
+fn compute_style_preserves_existing_interactive_state_across_frame_swap() {
+    use std::cell::Cell;
+
+    use crate::{ElementId, Interactivity};
+
+    let placeholder_frame = Rc::new(Cell::new(false));
+    let placeholder_in_render = placeholder_frame.clone();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, move |window, cx| {
+        if placeholder_in_render.get() {
+            // Render a frame that only calls public `compute_style` with the same element id.
+            window.with_global_id(ElementId::from("clickable"), |global_id, window| {
+                let _ = Interactivity::default().compute_style(Some(global_id), None, window, cx);
+            });
+            div().size_full().into_any_element()
+        } else {
+            div().id("clickable").size_full().on_click(|_, _, _| {}).into_any_element()
+        }
+    });
+
+    with_window(&mut app, window, |window, _| {
+        assert_eq!(window.rendered_frame.element_states.len(), 1);
+    });
+
+    // Frame 2: only `compute_style` touches "clickable"; its non-empty state must survive the swap.
+    placeholder_frame.set(true);
+    with_window(&mut app, window, |window, _| window.refresh());
+    app.frame(window);
+    with_window(&mut app, window, |window, _| {
+        assert_eq!(
+            window.rendered_frame.element_states.len(),
+            1,
+            "compute_style must carry existing non-empty InteractiveElementState into the next frame"
+        );
+    });
+}

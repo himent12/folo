@@ -141,10 +141,19 @@ impl Window {
         children: impl IntoIterator<Item = LayoutId>,
         _cx: &mut App,
     ) -> LayoutId {
+        self.request_layout_ref(&style, children)
+    }
+
+    /// Adds a layout node from a borrowed `style` (avoids cloning `Style` for internal elements).
+    pub(crate) fn request_layout_ref(
+        &mut self,
+        style: &Style,
+        children: impl IntoIterator<Item = LayoutId>,
+    ) -> LayoutId {
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
         let font_generation = self.text_system.font_generation();
-        self.layout_engine_mut().request_layout(&style, rem_size, scale_factor, font_generation, children)
+        self.layout_engine_mut().request_layout(style, rem_size, scale_factor, font_generation, children)
     }
 
     /// Adds a leaf whose size `measure` computes from the known dimensions and available space.

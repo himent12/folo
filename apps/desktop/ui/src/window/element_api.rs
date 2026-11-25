@@ -20,7 +20,8 @@ use crate::{
     WindowControlHitbox,
     style::Refineable,
     window::{
-        AnyMouseListener, DispatchNodeId, MouseDownEntry, MouseMoveEntry, input_handler::InputHandlerSlot,
+        AnyMouseListener, AsElementStateKey, DispatchNodeId, ElementStateKey, ElementStateKeyRef,
+        MouseDownEntry, MouseMoveEntry, input_handler::InputHandlerSlot,
     },
 };
 
@@ -118,6 +119,32 @@ impl Window {
         result
     }
 
+    /// Returns a [`GlobalElementId`] for the current `element_id_stack`, reusing the previous or current
+    /// frame's `Arc<[ElementId]>` when drawing so steady frames avoid allocating per-element ID slices.
+    pub(crate) fn intern_global_id(&mut self) -> GlobalElementId {
+        let path = self.element_id_stack.as_slice();
+        let hash = GlobalElementId::hash_path(path);
+        if !self.drawing {
+            return GlobalElementId::from_parts(path, hash);
+        }
+        if let Some(bucket) = self.next_frame.element_ids.get(&hash)
+            && let Some(existing) = bucket.iter().find(|id| id.path() == path)
+        {
+            return existing.clone();
+        }
+        if let Some(bucket) = self.rendered_frame.element_ids.get_mut(&hash)
+            && let Some(pos) = bucket.iter().position(|id| id.path() == path)
+        {
+            let existing = bucket.swap_remove(pos);
+            let reused = existing.clone();
+            self.next_frame.element_ids.entry(hash).or_default().push(existing);
+            return reused;
+        }
+        let created = GlobalElementId::from_parts(path, hash);
+        self.next_frame.element_ids.entry(hash).or_default().push(created.clone());
+        created
+    }
+
     /// Runs `f` with `element_id` pushed on the id path, giving it the element's global id.
     pub fn with_global_id<R>(
         &mut self,
@@ -125,7 +152,7 @@ impl Window {
         f: impl FnOnce(&GlobalElementId, &mut Self) -> R,
     ) -> R {
         self.element_id_stack.push(element_id);
-        let global_id = GlobalElementId::new(self.element_id_stack.as_slice());
+        let global_id = self.intern_global_id();
         let result = f(&global_id, self);
         self.element_id_stack.pop();
         result
@@ -133,7 +160,10 @@ impl Window {
 
     /// Runs `f` with `id` pushed on the id path.
     pub fn with_id<R>(&mut self, id: impl Into<ElementId>, f: impl FnOnce(&mut Self) -> R) -> R {
-        self.with_global_id(id.into(), |_, window| f(window))
+        self.element_id_stack.push(id.into());
+        let result = f(self);
+        self.element_id_stack.pop();
+        result
     }
 
     /// Runs `f` with the element's state of type `S` from the previous frame (`None` the first time) and
@@ -146,13 +176,14 @@ impl Window {
     where
         S: 'static,
     {
-        let key = (global_id.clone(), TypeId::of::<S>());
+        let lookup = ElementStateKeyRef { global_id, type_id: TypeId::of::<S>() };
+        let lookup_key: &dyn AsElementStateKey = &lookup;
         let existing = self
             .next_frame
             .element_states
-            .remove(&key)
-            .or_else(|| self.rendered_frame.element_states.remove(&key));
-        if let Some(mut boxed) = existing {
+            .remove_entry(lookup_key)
+            .or_else(|| self.rendered_frame.element_states.remove_entry(lookup_key));
+        if let Some((key, mut boxed)) = existing {
             // The box holds an `Option<S>` so it can be reused instead of reallocated.
             let slot = boxed.downcast_mut::<Option<S>>().expect("element state of the requested type");
             let state = slot.take().expect("re-entrant with_element_state for one element and type");
@@ -162,7 +193,53 @@ impl Window {
             result
         } else {
             let (result, state) = f(None, self);
-            self.next_frame.element_states.insert(key, Box::new(Some(state)));
+            self.next_frame
+                .element_states
+                .insert(ElementStateKey(global_id.clone(), TypeId::of::<S>()), Box::new(Some(state)));
+            result
+        }
+    }
+
+    /// Like `with_optional_element_state`, but omits boxing and storing `S` when `is_empty(&state)` is true.
+    pub(crate) fn with_sparse_element_state<S, R>(
+        &mut self,
+        global_id: Option<&GlobalElementId>,
+        is_empty: impl Fn(&S) -> bool,
+        f: impl FnOnce(Option<S>, &mut Self) -> (R, Option<S>),
+    ) -> R
+    where
+        S: Default + 'static,
+    {
+        let Some(global_id) = global_id else {
+            return f(None, self).0;
+        };
+        let lookup = ElementStateKeyRef { global_id, type_id: TypeId::of::<S>() };
+        let lookup_key: &dyn AsElementStateKey = &lookup;
+        let existing = self
+            .next_frame
+            .element_states
+            .remove_entry(lookup_key)
+            .or_else(|| self.rendered_frame.element_states.remove_entry(lookup_key));
+        if let Some((key, mut boxed)) = existing {
+            let slot = boxed.downcast_mut::<Option<S>>().expect("element state of the requested type");
+            let state = slot.take().expect("re-entrant with_element_state for one element and type");
+            let (result, state) = f(Some(state), self);
+            if let Some(state) = state
+                && !is_empty(&state)
+            {
+                *boxed.downcast_mut::<Option<S>>().expect("checked above") = Some(state);
+                self.next_frame.element_states.insert(key, boxed);
+            }
+            result
+        } else {
+            let (result, state) = f(Some(S::default()), self);
+            if let Some(state) = state
+                && !is_empty(&state)
+            {
+                self.next_frame
+                    .element_states
+                    .insert(ElementStateKey(global_id.clone(), TypeId::of::<S>()), Box::new(Some(state)));
+            }
             result
         }
     }
