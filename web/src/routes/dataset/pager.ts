@@ -126,6 +126,7 @@ export class ImagePager {
       hi = Math.max(hi, 1);
       visHi = Math.max(visHi, 1);
     }
+    if (lo >= hi) return;
     const a = Math.max(0, Math.floor(lo / PAGE));
     const b = Math.floor((Math.min(hi, max) - 1) / PAGE);
     if (a > b) return;
@@ -231,16 +232,23 @@ export class ImagePager {
     this.#pages.set(p, images);
   }
 
-  #evict(): void {
+  #evict(keep?: number): void {
     while (this.#pages.size > this.maxPages) {
       let oldest: number | undefined;
       for (const p of this.#pages.keys()) {
-        if (!this.#observed.has(p)) {
+        if (p !== keep && !this.#observed.has(p)) {
           oldest = p;
           break;
         }
       }
-      if (oldest === undefined) oldest = this.#pages.keys().next().value;
+      if (oldest === undefined) {
+        for (const p of this.#pages.keys()) {
+          if (p !== keep) {
+            oldest = p;
+            break;
+          }
+        }
+      }
       if (oldest === undefined) break;
       const dropped = this.#pages.get(oldest);
       this.#pages.delete(oldest);
@@ -274,7 +282,7 @@ export class ImagePager {
     this.#pageRev.set(p, this.#gen);
     this.#touch(p, images);
     for (let k = 0; k < images.length; k++) this.#index.set(images[k]!.id, p * PAGE + k);
-    this.#evict();
+    this.#evict(p);
     batch(() => {
       this.#total.set(total);
       this.#bumpPage(p);

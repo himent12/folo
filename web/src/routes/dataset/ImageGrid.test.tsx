@@ -136,4 +136,60 @@ describe('ImageGrid visible-over-overscan thumbnail priority', () => {
       unmount();
     }
   });
+
+  it('ignores a stale async tile open if the grid unmounts or a newer tile is activated first', async () => {
+    let releasePage1!: () => void;
+    let gate1 = new Promise<void>((r) => (releasePage1 = r));
+    const api: Partial<Api> = {
+      datasetImages: async (_id, q) => {
+        const off = q.offset ?? 0;
+        const lim = q.limit ?? PAGE;
+        if (off === 100) await gate1;
+        return { total: 400, images: Array.from({ length: lim }, (_, k) => makeImg(off + k)) };
+      },
+      imageUrl: async (_ds, id) => `data:image/png;base64,${id}`,
+    };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_1', undefined, undefined);
+    await pager.at(0);
+    // Rows 24..26 span items 96..107 (item 99 on cached page 0, item 100 on uncached page 1).
+    gridTop = -24 * 154;
+    const opened: Array<[number, string]> = [];
+    const { container, unmount } = render(() => (
+      <ImageGrid pager={pager} classes={['car']} density="m" boxes={false} only={null} onopen={(i, id) => opened.push([i, id])} />
+    ));
+    flush();
+    const tile100 = container.querySelector<HTMLElement>('[data-i="100"]');
+    expect(tile100).not.toBeNull();
+    // Click tile 100 while page 1 metadata is still in flight, then unmount before it resolves.
+    tile100!.click();
+    unmount();
+    releasePage1();
+    await vi.advanceTimersByTimeAsync(0);
+    flush();
+    expect(opened).toEqual([]);
+
+    // Also verify a newer cached activation supersedes a slower uncached one on a mounted grid.
+    gate1 = new Promise<void>((r) => (releasePage1 = r));
+    const pager2 = new ImagePager('ds_2', undefined, undefined);
+    await pager2.at(0);
+    const mounted = render(() => (
+      <ImageGrid pager={pager2} classes={['car']} density="m" boxes={false} only={null} onopen={(i, id) => opened.push([i, id])} />
+    ));
+    try {
+      flush();
+      const pendingTile = mounted.container.querySelector<HTMLElement>('[data-i="100"]');
+      const cachedTile = mounted.container.querySelector<HTMLElement>('[data-i="99"]');
+      expect(pendingTile).not.toBeNull();
+      expect(cachedTile).not.toBeNull();
+      pendingTile!.click();
+      cachedTile!.click();
+      releasePage1();
+      await vi.advanceTimersByTimeAsync(0);
+      flush();
+      expect(opened).toEqual([[99, 'img_99']]);
+    } finally {
+      mounted.unmount();
+    }
+  });
 });

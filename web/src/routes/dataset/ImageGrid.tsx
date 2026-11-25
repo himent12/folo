@@ -2,7 +2,7 @@
  * A dataset's thumbnails in a virtualised grid (ui/TileGrid): image pages load as their rows come into view. The
  * cells take the dataset's dominant image shape.
  */
-import { computed, css, effect, signal, untrack } from 'fw';
+import { computed, css, effect, onCleanup, signal, untrack } from 'fw';
 import DatasetImage from '$lib/detect/DatasetImage';
 import TileGrid, { dominantAspect, type Density } from '$lib/ui/TileGrid';
 import type { DatasetImage as ImageInfo } from '$lib/api/types';
@@ -38,10 +38,15 @@ export default function ImageGrid(props: ImageGridProps) {
     return img ? `${stem(img.file)}, ${img.split}, ${count(img.boxes.length, 'box')}` : 'Loading image';
   }
 
+  let openSeq = 0;
+  onCleanup(() => {
+    openSeq++;
+  });
   function open(i: number) {
+    const seq = ++openSeq;
     const img = props.pager.get(i);
     if (img) props.onopen(i, img.id);
-    else void props.pager.at(i).then((loaded) => loaded && props.onopen(i, loaded.id));
+    else void props.pager.at(i).then((loaded) => loaded && seq === openSeq && props.onopen(i, loaded.id));
   }
 
   // A tile reads its image through one computed subscribed only to its own page's signal, so a page landing elsewhere

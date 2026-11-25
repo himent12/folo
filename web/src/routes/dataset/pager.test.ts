@@ -343,4 +343,42 @@ describe('ImagePager', () => {
     expect(imgA?.id).toBe('img_0');
     expect(imgB?.id).toBe(`img_${PAGE}`);
   });
+
+  it('never self-evicts a newly stored page when all previously cached pages are observed at the cap', async () => {
+    const api: Partial<Api> = {
+      datasetImages: async (_id, q) => {
+        const off = q.offset ?? 0;
+        const lim = q.limit ?? PAGE;
+        return {
+          total: 600,
+          images: Array.from({ length: lim }, (_, k) => ({
+            id: `img_${off + k}`,
+            file: `img_${off + k}.jpg`,
+            split: 'train' as const,
+            width: 640,
+            height: 480,
+            boxes: [],
+          })),
+        };
+      },
+    };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_big', undefined, undefined, 0, 1);
+    const stop = createRoot((dispose) => {
+      effect(() => {
+        void pager.get(0);
+      });
+      return dispose;
+    });
+    try {
+      await pager.at(0);
+      flush();
+      // Page 0 is observed and fills maxPages=1; finding img_500 must keep page 5 (not self-evict it).
+      expect(await pager.find('img_500')).toBe(500);
+      expect(pager.indexOf('img_500')).toBe(500);
+      expect(pager.get(500)?.id).toBe('img_500');
+    } finally {
+      stop();
+    }
+  });
 });
