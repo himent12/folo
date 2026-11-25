@@ -2,7 +2,7 @@
 //! kernel (no col2im); pointwise convs as `Wᵀ · gy`; strided convs through an unfolded gradient and col2im.
 
 use super::depthwise::depthwise_backward_input;
-use super::{ConvGeom, conv2d_forward, for_each_image};
+use super::{ConvGeom, conv2d_forward, for_each_image, valid_cols};
 use crate::backend::Conv2dParams;
 use crate::cpu::gemm::{Strided, gemm_ex};
 use crate::cpu::par_chunks;
@@ -111,16 +111,68 @@ fn backward_input_col2im(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom) {
     });
 }
 
+/// 16-wide AVX2 row accumulation `dst[i] += src[i]`, bitwise identical to scalar `+`.
+///
+/// # Safety
+/// The CPU supports AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn add_row_avx2(dst: &mut [f32], src: &[f32]) {
+    use std::arch::x86_64::*;
+    assert_eq!(dst.len(), src.len());
+    let (d16, d_rem) = dst.as_chunks_mut::<16>();
+    let (s16, s_rem) = src.as_chunks::<16>();
+    for (dc, sc) in d16.iter_mut().zip(s16) {
+        // SAFETY: `dc` and `sc` are `[f32; 16]` (64 bytes) and AVX2 is enabled.
+        unsafe {
+            let d0 = _mm256_loadu_ps(dc.as_ptr());
+            let d1 = _mm256_loadu_ps(dc.as_ptr().add(8));
+            let s0 = _mm256_loadu_ps(sc.as_ptr());
+            let s1 = _mm256_loadu_ps(sc.as_ptr().add(8));
+            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_add_ps(d0, s0));
+            _mm256_storeu_ps(dc.as_mut_ptr().add(8), _mm256_add_ps(d1, s1));
+        }
+    }
+    let (d8, d_tail) = d_rem.as_chunks_mut::<8>();
+    let (s8, s_tail) = s_rem.as_chunks::<8>();
+    for (dc, sc) in d8.iter_mut().zip(s8) {
+        // SAFETY: `dc` and `sc` are `[f32; 8]` (32 bytes) and AVX2 is enabled.
+        unsafe {
+            let d0 = _mm256_loadu_ps(dc.as_ptr());
+            let s0 = _mm256_loadu_ps(sc.as_ptr());
+            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_add_ps(d0, s0));
+        }
+    }
+    for (d, &s) in d_tail.iter_mut().zip(s_tail) {
+        *d += s;
+    }
+}
+
 /// Accumulate the unfolded gradient `col` (`[cg*kh*kw, ohw]`) into the input planes of one group.
 fn col2im(col: &[f32], gx: &mut [f32], g: &ConvGeom, parallel: bool) {
     let (khw, ohw, hw) = (g.kh * g.kw, g.ohw(), g.h * g.w);
+    if hw == 0 || ohw == 0 || g.cg() == 0 {
+        return;
+    }
     let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
     let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
     let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
     let (hi, wi) = (g.h as isize, g.w as isize);
+    let kx_cols: Vec<(isize, std::ops::Range<usize>)> = (0..g.kw)
+        .map(|kx| {
+            let d = kx as isize * dw - pw;
+            (d, valid_cols(g.ow, sw, d, wi))
+        })
+        .collect();
+    #[cfg(target_arch = "x86_64")]
+    let avx2 = std::is_x86_feature_detected!("avx2");
     let plane = |(ci, gxp): (usize, &mut [f32])| {
         for r in 0..khw {
-            let (ky, kx) = ((r / g.kw) as isize, (r % g.kw) as isize);
+            let ky = (r / g.kw) as isize;
+            let (d, cols) = &kx_cols[r % g.kw];
+            if cols.is_empty() {
+                continue;
+            }
             let crow = &col[(ci * khw + r) * ohw..(ci * khw + r + 1) * ohw];
             for oy in 0..g.oh {
                 let iy = oy as isize * sh - ph + ky * dh;
@@ -129,10 +181,25 @@ fn col2im(col: &[f32], gx: &mut [f32], g: &ConvGeom, parallel: bool) {
                 }
                 let dst = &mut gxp[iy as usize * g.w..(iy as usize + 1) * g.w];
                 let src = &crow[oy * g.ow..(oy + 1) * g.ow];
-                for (ox, &v) in src.iter().enumerate() {
-                    let ix = ox as isize * sw - pw + kx * dw;
-                    if ix >= 0 && ix < wi {
-                        dst[ix as usize] += v;
+                if sw == 1 {
+                    let s0 = (cols.start as isize + *d) as usize;
+                    let len = cols.len();
+                    let dslice = &mut dst[s0..s0 + len];
+                    let sslice = &src[cols.clone()];
+                    #[cfg(target_arch = "x86_64")]
+                    if avx2 && len >= 8 {
+                        // SAFETY: AVX2 was detected above.
+                        unsafe { add_row_avx2(dslice, sslice) };
+                        continue;
+                    }
+                    for (dv, &sv) in dslice.iter_mut().zip(sslice) {
+                        *dv += sv;
+                    }
+                } else {
+                    let base = (cols.start as isize * sw + *d) as usize;
+                    let step = sw as usize;
+                    for (k, &v) in src[cols.clone()].iter().enumerate() {
+                        dst[base + k * step] += v;
                     }
                 }
             }

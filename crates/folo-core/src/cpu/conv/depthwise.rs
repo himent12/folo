@@ -10,7 +10,7 @@ use crate::cpu::par_chunks;
 
 /// Dot product with independent accumulators so it vectorises.
 #[inline]
-fn dot(a: &[f32], b: &[f32]) -> f32 {
+fn dot_scalar(a: &[f32], b: &[f32]) -> f32 {
     let mut acc = [0f32; 8];
     let (ca, ra) = a.as_chunks::<8>();
     let (cb, rb) = b.as_chunks::<8>();
@@ -24,6 +24,93 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
         s += v;
     }
     s
+}
+
+/// 16-wide AVX2+FMA dot product with deterministic fixed reduction order.
+///
+/// # Safety
+/// The CPU supports AVX2 and FMA.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_avx2(a: &[f32], b: &[f32]) -> f32 {
+    use std::arch::x86_64::*;
+    assert_eq!(a.len(), b.len());
+    let (a16, a_rem) = a.as_chunks::<16>();
+    let (b16, b_rem) = b.as_chunks::<16>();
+    let (a8, a_tail) = a_rem.as_chunks::<8>();
+    let (b8, b_tail) = b_rem.as_chunks::<8>();
+    let mut acc = [0f32; 16];
+    // SAFETY: `as_chunks::<16>()` / `as_chunks::<8>()` guarantee exact lengths; AVX2+FMA enabled.
+    unsafe {
+        let mut s0 = _mm256_setzero_ps();
+        let mut s1 = _mm256_setzero_ps();
+        for (x, y) in a16.iter().zip(b16) {
+            s0 = _mm256_fmadd_ps(_mm256_loadu_ps(x.as_ptr()), _mm256_loadu_ps(y.as_ptr()), s0);
+            s1 = _mm256_fmadd_ps(_mm256_loadu_ps(x.as_ptr().add(8)), _mm256_loadu_ps(y.as_ptr().add(8)), s1);
+        }
+        for (x, y) in a8.iter().zip(b8) {
+            s0 = _mm256_fmadd_ps(_mm256_loadu_ps(x.as_ptr()), _mm256_loadu_ps(y.as_ptr()), s0);
+        }
+        _mm256_storeu_ps(acc.as_mut_ptr(), s0);
+        _mm256_storeu_ps(acc.as_mut_ptr().add(8), s1);
+    }
+    let mut s = 0f32;
+    for v in acc {
+        s += v;
+    }
+    for (&x, &y) in a_tail.iter().zip(b_tail) {
+        s += x * y;
+    }
+    s
+}
+
+/// 16-wide AVX2+FMA row update `dst[i] += wv * src[i]`.
+///
+/// # Safety
+/// The CPU supports AVX2 and FMA.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn fma_row_avx2(dst: &mut [f32], src: &[f32], wv: f32) {
+    use std::arch::x86_64::*;
+    assert_eq!(dst.len(), src.len());
+    let w = _mm256_set1_ps(wv);
+    let (d16, d_rem) = dst.as_chunks_mut::<16>();
+    let (s16, s_rem) = src.as_chunks::<16>();
+    for (dc, sc) in d16.iter_mut().zip(s16) {
+        // SAFETY: `dc` and `sc` are `[f32; 16]` (64 bytes) and AVX2+FMA is enabled.
+        unsafe {
+            let d0 = _mm256_loadu_ps(dc.as_ptr());
+            let d1 = _mm256_loadu_ps(dc.as_ptr().add(8));
+            let s0 = _mm256_loadu_ps(sc.as_ptr());
+            let s1 = _mm256_loadu_ps(sc.as_ptr().add(8));
+            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_fmadd_ps(w, s0, d0));
+            _mm256_storeu_ps(dc.as_mut_ptr().add(8), _mm256_fmadd_ps(w, s1, d1));
+        }
+    }
+    let (d8, d_tail) = d_rem.as_chunks_mut::<8>();
+    let (s8, s_tail) = s_rem.as_chunks::<8>();
+    for (dc, sc) in d8.iter_mut().zip(s8) {
+        // SAFETY: `dc` and `sc` are `[f32; 8]` (32 bytes) and AVX2+FMA is enabled.
+        unsafe {
+            let d0 = _mm256_loadu_ps(dc.as_ptr());
+            let s0 = _mm256_loadu_ps(sc.as_ptr());
+            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_fmadd_ps(w, s0, d0));
+        }
+    }
+    for (d, &s) in d_tail.iter_mut().zip(s_tail) {
+        *d += wv * s;
+    }
+}
+
+/// Precompute `(kx * dw - pw, valid_cols)` once per kernel column.
+fn precompute_kx_cols(g: &ConvGeom) -> Vec<(isize, std::ops::Range<usize>)> {
+    let (sw, pw, dw) = (g.p.stride[1] as isize, g.p.padding[1] as isize, g.p.dilation[1] as isize);
+    (0..g.kw)
+        .map(|kx| {
+            let d = kx as isize * dw - pw;
+            (d, valid_cols(g.ow, sw, d, g.w as isize))
+        })
+        .collect()
 }
 
 /// One output plane of a depthwise conv: `op += conv(xp, wk)` (`op` is `oh x ow`, `xp` one `h x w` input plane).
@@ -237,38 +324,56 @@ unsafe fn depthwise_s1_avx2(
 pub(super) fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom) {
     let mult = g.o / g.c;
     let (hw, ohw, khw) = (g.h * g.w, g.ohw(), g.kh * g.kw);
+    if g.n == 0 || g.c == 0 || hw == 0 || ohw == 0 {
+        return;
+    }
     let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
-    let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
-    let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
-    par_chunks(gx, hw, &|plane, gxp| {
-        let (img, ic) = (plane / g.c, plane % g.c);
-        for oc in ic * mult..(ic + 1) * mult {
-            let gp = &gy[(img * g.o + oc) * ohw..][..ohw];
-            let wk = &wt[oc * khw..(oc + 1) * khw];
-            for oy in 0..g.oh {
-                let grow = &gp[oy * g.ow..(oy + 1) * g.ow];
-                for ky in 0..g.kh {
-                    let iy = oy as isize * sh - ph + ky as isize * dh;
-                    if iy < 0 || iy >= g.h as isize {
-                        continue;
-                    }
-                    let xrow = &mut gxp[iy as usize * g.w..(iy as usize + 1) * g.w];
-                    for kx in 0..g.kw {
-                        let wv = wk[ky * g.kw + kx];
-                        let d = kx as isize * dw - pw;
-                        let r = valid_cols(g.ow, sw, d, g.w as isize);
-                        if r.is_empty() {
+    let (ph, dh) = (g.p.padding[0] as isize, g.p.dilation[0] as isize);
+    let kx_cols = precompute_kx_cols(g);
+    #[cfg(target_arch = "x86_64")]
+    let avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
+    let total = g.n * g.c;
+    let per_task = DW_TASK_OUTPUTS.div_ceil(hw).min(total.div_ceil(4 * rayon::current_num_threads())).max(1);
+    par_chunks(gx, per_task * hw, &|t, gxps| {
+        for (p, gxp) in gxps.chunks_mut(hw).enumerate() {
+            let plane = t * per_task + p;
+            let (img, ic) = (plane / g.c, plane % g.c);
+            for oc in ic * mult..(ic + 1) * mult {
+                let gp = &gy[(img * g.o + oc) * ohw..][..ohw];
+                let wk = &wt[oc * khw..(oc + 1) * khw];
+                for oy in 0..g.oh {
+                    let grow = &gp[oy * g.ow..(oy + 1) * g.ow];
+                    for ky in 0..g.kh {
+                        let iy = oy as isize * sh - ph + ky as isize * dh;
+                        if iy < 0 || iy >= g.h as isize {
                             continue;
                         }
-                        if sw == 1 {
-                            let s0 = (r.start as isize + d) as usize;
-                            let len = r.len();
-                            for (xv, &gv) in xrow[s0..s0 + len].iter_mut().zip(&grow[r]) {
-                                *xv += wv * gv;
+                        let xrow = &mut gxp[iy as usize * g.w..(iy as usize + 1) * g.w];
+                        for (kx, (d, r)) in kx_cols.iter().enumerate() {
+                            if r.is_empty() {
+                                continue;
                             }
-                        } else {
-                            for ox in r {
-                                xrow[(ox as isize * sw + d) as usize] += wv * grow[ox];
+                            let wv = wk[ky * g.kw + kx];
+                            if sw == 1 {
+                                let s0 = (r.start as isize + *d) as usize;
+                                let len = r.len();
+                                let dst = &mut xrow[s0..s0 + len];
+                                let src = &grow[r.clone()];
+                                #[cfg(target_arch = "x86_64")]
+                                if avx2 && len >= 8 {
+                                    // SAFETY: AVX2 and FMA were detected above.
+                                    unsafe { fma_row_avx2(dst, src, wv) };
+                                    continue;
+                                }
+                                for (xv, &gv) in dst.iter_mut().zip(src) {
+                                    *xv += wv * gv;
+                                }
+                            } else {
+                                let base = (r.start as isize * sw + *d) as usize;
+                                let step = sw as usize;
+                                for (k, &gv) in grow[r.clone()].iter().enumerate() {
+                                    xrow[base + k * step] += wv * gv;
+                                }
                             }
                         }
                     }
@@ -281,39 +386,57 @@ pub(super) fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g
 pub(super) fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom) {
     let mult = g.o / g.c;
     let (hw, ohw, khw) = (g.h * g.w, g.ohw(), g.kh * g.kw);
+    if g.n == 0 || g.o == 0 || khw == 0 || ohw == 0 || hw == 0 {
+        return;
+    }
     let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
-    let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
-    let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
-    par_chunks(gw, khw, &|oc, gk| {
-        let ic = oc / mult;
-        for img in 0..g.n {
-            let xp = &x[(img * g.c + ic) * hw..][..hw];
-            let gp = &gy[(img * g.o + oc) * ohw..][..ohw];
-            for ky in 0..g.kh {
-                for kx in 0..g.kw {
-                    let d = kx as isize * dw - pw;
-                    let cols = valid_cols(g.ow, sw, d, g.w as isize);
-                    let mut acc = 0f32;
-                    for oy in 0..g.oh {
-                        let iy = oy as isize * sh - ph + ky as isize * dh;
-                        if iy < 0 || iy >= g.h as isize {
-                            continue;
-                        }
-                        let xrow = &xp[iy as usize * g.w..(iy as usize + 1) * g.w];
-                        let grow = &gp[oy * g.ow..(oy + 1) * g.ow];
+    let (ph, dh) = (g.p.padding[0] as isize, g.p.dilation[0] as isize);
+    let kx_cols = precompute_kx_cols(g);
+    #[cfg(target_arch = "x86_64")]
+    let avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
+    let per_task =
+        DW_TASK_OUTPUTS.div_ceil(g.n * ohw).min(g.o.div_ceil(4 * rayon::current_num_threads())).max(1);
+    par_chunks(gw, per_task * khw, &|t, gks| {
+        for (p, gk) in gks.chunks_mut(khw).enumerate() {
+            let oc = t * per_task + p;
+            let ic = oc / mult;
+            for img in 0..g.n {
+                let xp = &x[(img * g.c + ic) * hw..][..hw];
+                let gp = &gy[(img * g.o + oc) * ohw..][..ohw];
+                for ky in 0..g.kh {
+                    for (kx, (d, cols)) in kx_cols.iter().enumerate() {
                         if cols.is_empty() {
                             continue;
                         }
-                        if sw == 1 {
-                            let s0 = (cols.start as isize + d) as usize;
-                            acc += dot(&grow[cols.clone()], &xrow[s0..s0 + cols.len()]);
-                        } else {
-                            for ox in cols.clone() {
-                                acc += grow[ox] * xrow[(ox as isize * sw + d) as usize];
+                        let mut acc = 0f32;
+                        for oy in 0..g.oh {
+                            let iy = oy as isize * sh - ph + ky as isize * dh;
+                            if iy < 0 || iy >= g.h as isize {
+                                continue;
+                            }
+                            let xrow = &xp[iy as usize * g.w..(iy as usize + 1) * g.w];
+                            let grow = &gp[oy * g.ow..(oy + 1) * g.ow];
+                            if sw == 1 {
+                                let s0 = (cols.start as isize + *d) as usize;
+                                let gs = &grow[cols.clone()];
+                                let xs = &xrow[s0..s0 + cols.len()];
+                                #[cfg(target_arch = "x86_64")]
+                                if avx2 && gs.len() >= 8 {
+                                    // SAFETY: AVX2 and FMA were detected above.
+                                    acc += unsafe { dot_avx2(gs, xs) };
+                                    continue;
+                                }
+                                acc += dot_scalar(gs, xs);
+                            } else {
+                                let base = (cols.start as isize * sw + *d) as usize;
+                                let step = sw as usize;
+                                for (k, &gv) in grow[cols.clone()].iter().enumerate() {
+                                    acc += gv * xrow[base + k * step];
+                                }
                             }
                         }
+                        gk[ky * g.kw + kx] += acc;
                     }
-                    gk[ky * g.kw + kx] += acc;
                 }
             }
         }
