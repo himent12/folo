@@ -34,11 +34,18 @@ fn gen_rows(s: &Spec) -> String {
 fn gen_cols(s: &Spec) -> String {
     typed(s, include_str!("../shaders/reduce_cols.wgsl"))
 }
+/// Maximum row length cached in per-thread registers (4 elements × 256 threads) for single-pass [`SOFTMAX`].
+const SOFTMAX_ROW_CACHE_MAX: usize = 1024;
+/// Maximum column length cached in a per-thread local array for single-pass [`SOFTMAX_COLS`] (covers DFL `d = 16`).
+const SOFTMAX_COL_SMALL_MAX: usize = 32;
+
 fn gen_softmax(s: &Spec) -> String {
-    typed(s, include_str!("../shaders/softmax.wgsl"))
+    let cache = s.get_bool("CACHE");
+    typed(s, &format!("const CACHE_ROW: bool = {cache};\n{}", include_str!("../shaders/softmax.wgsl")))
 }
 fn gen_softmax_cols(s: &Spec) -> String {
-    typed(s, include_str!("../shaders/softmax_cols.wgsl"))
+    let small = s.get_bool("SMALL");
+    typed(s, &format!("const SMALL_COL: bool = {small};\n{}", include_str!("../shaders/softmax_cols.wgsl")))
 }
 
 /// Reduction kind.
@@ -165,8 +172,11 @@ pub fn softmax_rows(
     if rows * n == 0 {
         return Ok(());
     }
-    let k = ctx.kernel(&SOFTMAX, typed_spec(ctx, dtype, dtype, "softmax")?.bool("LOG", log))?;
-    let p = Params::new().uz(rows)?.uz(n)?;
+    let k = ctx.kernel(
+        &SOFTMAX,
+        typed_spec(ctx, dtype, dtype, "softmax")?.bool("LOG", log).bool("CACHE", n <= SOFTMAX_ROW_CACHE_MAX),
+    )?;
+    let p = Params::new().uz(rows)?.uz(n)?.f(f32::NEG_INFINITY);
     ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(rows as u64 * 256, 256)?)
 }
 
@@ -272,7 +282,10 @@ pub fn softmax_dim(
     if n * d == 0 {
         return Ok(());
     }
-    let k = ctx.kernel(&SOFTMAX_COLS, typed_spec(ctx, dtype, dtype, "softmax")?.bool("LOG", log))?;
+    let k = ctx.kernel(
+        &SOFTMAX_COLS,
+        typed_spec(ctx, dtype, dtype, "softmax")?.bool("LOG", log).bool("SMALL", d <= SOFTMAX_COL_SMALL_MAX),
+    )?;
     let p = Params::new().uz(n)?.uz(d)?.uz(inner)?.f(f32::NEG_INFINITY);
     ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(n as u64, 256)?)
 }

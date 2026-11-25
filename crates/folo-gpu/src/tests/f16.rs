@@ -152,6 +152,18 @@ fn softmax_rows_and_columns() {
     check16(dev, std::slice::from_ref(&x), 1e-4, 1e-3, "softmax last", |t| t[0].softmax(-1));
     check16(dev, std::slice::from_ref(&x), 1e-4, 1e-3, "softmax middle", |t| t[0].softmax(1));
     check16(dev, std::slice::from_ref(&x), 2e-3, 1e-3, "log_softmax", |t| t[0].log_softmax(-1));
+    check16(dev, std::slice::from_ref(&x), 2e-3, 1e-3, "log_softmax middle", |t| t[0].log_softmax(1));
+    // Exercise uncached rows (n > 1024) and general columns (d > 32) in f16 storage too.
+    let long_row = randn(&[2, 1057], 16).mul_scalar(4.0).unwrap();
+    check16(dev, std::slice::from_ref(&long_row), 1e-4, 1e-3, "softmax long row", |t| t[0].softmax(-1));
+    check16(dev, std::slice::from_ref(&long_row), 2e-3, 1e-3, "log_softmax long row", |t| {
+        t[0].log_softmax(-1)
+    });
+    let tall_col = randn(&[2, 48, 17], 17).mul_scalar(4.0).unwrap();
+    check16(dev, std::slice::from_ref(&tall_col), 1e-4, 1e-3, "softmax tall col", |t| t[0].softmax(1));
+    check16(dev, std::slice::from_ref(&tall_col), 2e-3, 1e-3, "log_softmax tall col", |t| {
+        t[0].log_softmax(1)
+    });
 }
 
 #[test]
