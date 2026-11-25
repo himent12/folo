@@ -646,3 +646,74 @@ describe('New run from a MuSGD run', () => {
     expect(sel.options[sel.selectedIndex]?.textContent?.trim()).toBe('MuSGD');
   });
 });
+
+describe('New run: ?weights= prefill, name-only estimate skip, and Escape cancel', () => {
+  it('prefills weights and switches arch from ?weights=<id>, and falls back cleanly when missing', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open('?weights=m_fast_n');
+    const sel = target.querySelector<HTMLSelectElement>('select#weights')!;
+    await until(() => sel.value === 'm_fast_n', 'weights prefilled');
+    expect(target.querySelector<HTMLInputElement>('input[name="arch"]:checked')?.value).toBe('folo-n');
+
+    // Reopening with an unknown weights id resets to none and notifies once.
+    unmount(c!);
+    c = undefined;
+    sessionStorage.clear();
+    const { toast } = await import('$lib/ui/toast');
+    toast.items = [];
+    await open('?weights=m_missing');
+    await until(() => toast.items.some((t) => t.title === 'Linked weights not found'), 'missing weights toast');
+    expect(target.querySelector<HTMLSelectElement>('select#weights')!.value).toBe('none');
+  });
+
+  it('skips redundant /api/runs/estimate calls when only the run name changes, while updating server CLI --name', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const real = api.estimateRun.bind(api);
+    const ask = vi.spyOn(api, 'estimateRun').mockImplementation(async (b) => ({
+      ...(await real(b)),
+      cli: `folo train --data D:/x --name ${b.name}`,
+    }));
+    await open();
+    await until(() => target.querySelector('.cli code')?.textContent?.includes('D:/x'), "the server's command");
+    const callsBefore = ask.mock.calls.length;
+
+    const nameInput = target.querySelector<HTMLInputElement>('input#name')!;
+    nameInput.value = 'renamed-only';
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    await new Promise((r) => setTimeout(r, 360));
+    flushSync();
+    expect(ask.mock.calls.length).toBe(callsBefore);
+    expect(target.querySelector('.cli code')?.textContent).toContain('--name renamed-only');
+  });
+
+  it('returns to /runs on Escape when no nested dialog or select is active, and stays put otherwise', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    try {
+      await open();
+      // Escape while a native <select> has focus must not leave the page.
+      const select = target.querySelector<HTMLSelectElement>('select#device')!;
+      select.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      expect(go).not.toHaveBeenCalled();
+
+      // Escape while an open <dialog> is present must not leave the page.
+      const dlg = document.createElement('dialog');
+      dlg.setAttribute('open', '');
+      document.body.appendChild(dlg);
+      try {
+        target.querySelector('input#name')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        expect(go).not.toHaveBeenCalled();
+      } finally {
+        dlg.remove();
+      }
+
+      // Otherwise Escape returns cleanly to /runs.
+      target.querySelector('input#name')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      expect(go).toHaveBeenCalledWith('/runs');
+    } finally {
+      go.mockRestore();
+    }
+  });
+});
