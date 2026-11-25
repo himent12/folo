@@ -65,23 +65,23 @@ fn focal_neg_grad(x: f32, scale: f32, gamma: f32) -> f32 {
 }
 
 /// Positive-anchor QFL `(loss, dL/dx)` in `f64` for `|t - p|^beta * (softplus(x) - x * t)` with `beta == 0`
-/// or `beta >= 1`.
+/// or `beta >= 1`. Takes `p_f32` computed by `Tensor::sigmoid()` so the cusp at `p == t` (notably `beta == 1`)
+/// matches the device-generic composite path `x.sigmoid() - t` bit-for-bit on every input.
 #[inline]
-fn qfl_pos_f64(x: f32, t: f32, beta: f32) -> (f64, f64) {
+fn qfl_pos_f64(x: f32, p_f32: f32, t: f32, beta: f32) -> (f64, f64) {
     let x64 = x as f64;
     let t64 = t as f64;
     let b64 = beta as f64;
     let sp = x64.max(0.0) + (-x64.abs()).exp().ln_1p();
     let bce = sp - x64 * t64;
-    let e = (-x64.abs()).exp();
-    let p = if x64 >= 0.0 { 1.0 / (1.0 + e) } else { e / (1.0 + e) };
+    let p = p_f32 as f64;
     let q = 1.0 - p;
     if b64 == 0.0 {
         return (bce, p - t64);
     }
     let diff = p - t64;
     let d = diff.abs();
-    if d == 0.0 {
+    if d == 0.0 && bce.is_finite() {
         return (0.0, 0.0);
     }
     let pow_b = if b64 == 2.0 {
@@ -94,7 +94,7 @@ fn qfl_pos_f64(x: f32, t: f32, beta: f32) -> (f64, f64) {
     let d_pow = if b64 == 2.0 {
         2.0 * diff
     } else if b64 == 1.0 {
-        diff.signum()
+        if d == 0.0 { 0.0 } else { diff.signum() }
     } else {
         b64 * d.powf(b64 - 1.0) * diff.signum()
     };
@@ -183,6 +183,14 @@ fn focal_cls_sum_cpu(
     let mut order: Vec<usize> = (0..idx.len()).filter(|&k| t[k] > 0.0).collect();
     order.sort_unstable_by_key(|&k| idx[k]);
     let pos: Vec<usize> = order.iter().map(|&k| idx[k]).collect();
+    let pos_t: Vec<f32> = order.iter().map(|&k| t[k]).collect();
+    let qfl_p: Vec<f32> = if matches!(pos_rule, FocalPosRule::Qfl { .. }) && !pos.is_empty() {
+        let fg_x: Vec<f32> = x.with_f32_slice(|v| pos.iter().map(|&i| v[i]).collect())?;
+        let _g = no_grad();
+        Tensor::from_vec(fg_x, [pos.len()])?.sigmoid()?.to_vec::<f32>()?
+    } else {
+        Vec::new()
+    };
     let value = x.with_f32_slice(|v| {
         let rows: Vec<f32> = v
             .par_chunks(row * PAR_ROWS)
@@ -209,17 +217,18 @@ fn focal_cls_sum_cpu(
             })
             .collect();
         let dense: f64 = rows.iter().map(|&r| r as f64).sum();
-        let fg: f64 = order
+        let fg: f64 = pos
             .iter()
-            .map(|&k| {
-                let xv = v[idx[k]];
-                let tk = t[k];
+            .zip(&pos_t)
+            .enumerate()
+            .map(|(m, (&i, &tk))| {
+                let xv = v[i];
                 match pos_rule {
                     FocalPosRule::UnweightedBce => softplus(xv) as f64 - xv as f64 * tk as f64,
                     FocalPosRule::VflTargetWeighted => {
                         tk as f64 * (softplus(xv) as f64 - xv as f64 * tk as f64)
                     }
-                    FocalPosRule::Qfl { beta } => qfl_pos_f64(xv, tk, beta).0,
+                    FocalPosRule::Qfl { beta } => qfl_pos_f64(xv, qfl_p[m], tk, beta).0,
                 }
             })
             .sum();
@@ -238,15 +247,13 @@ fn focal_cls_sum_cpu(
             out
         })?;
         xs.with_f32_slice(|v| {
-            for (&i, &tk) in idx.iter().zip(&t) {
-                if tk > 0.0 {
-                    let xv = v[i];
-                    grad[i] = match pos_rule {
-                        FocalPosRule::UnweightedBce => g * (sigmoid_fast(xv) - tk),
-                        FocalPosRule::VflTargetWeighted => g * tk * (sigmoid_fast(xv) - tk),
-                        FocalPosRule::Qfl { beta } => (g as f64 * qfl_pos_f64(xv, tk, beta).1) as f32,
-                    };
-                }
+            for (m, (&i, &tk)) in pos.iter().zip(&pos_t).enumerate() {
+                let xv = v[i];
+                grad[i] = match pos_rule {
+                    FocalPosRule::UnweightedBce => g * (sigmoid_fast(xv) - tk),
+                    FocalPosRule::VflTargetWeighted => g * tk * (sigmoid_fast(xv) - tk),
+                    FocalPosRule::Qfl { beta } => (g as f64 * qfl_pos_f64(xv, qfl_p[m], tk, beta).1) as f32,
+                };
             }
         })?;
         Ok(vec![Some(Tensor::from_vec(grad, xs.shape())?)])
@@ -269,7 +276,7 @@ pub(super) fn cls_loss_sum(
 ) -> Result<Tensor> {
     if fused {
         return match cls_loss {
-            ClsLossKind::Bce if mal_gamma == 0.0 => bce_sum_cpu(cls_raw, idx_cls, scores.to_vec()),
+            ClsLossKind::Bce if mal_gamma <= 0.0 => bce_sum_cpu(cls_raw, idx_cls, scores.to_vec()),
             ClsLossKind::Bce => focal_cls_sum_cpu(
                 cls_raw,
                 idx_cls,

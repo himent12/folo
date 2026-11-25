@@ -424,9 +424,6 @@ impl TrainConfig {
         if l.tal.topk == 0 || l.tal.topk2 == Some(0) {
             return bad("loss.tal.topk and loss.tal.topk2 must be at least 1".into());
         }
-        if !(0.0..=5.0).contains(&l.mal_gamma) {
-            return bad(format!("loss.mal_gamma must be in 0..=5, got {}", l.mal_gamma));
-        }
         if !(0.0..=1.0).contains(&l.nwd_weight) {
             return bad(format!("loss.nwd_weight must be in 0..=1, got {}", l.nwd_weight));
         }

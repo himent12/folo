@@ -64,6 +64,41 @@ pub fn ciou(b1: &Tensor, b2: &Tensor) -> Result<Tensor> {
     iou.sub(&rho2.div(&c2)?.add(&v.mul(&alpha)?)?)
 }
 
+/// Validate that `b1` and `b2` are matching `[N, 4]` `F32` tensors on the same device.
+fn check_box_pair(b1: &Tensor, b2: &Tensor, op: &'static str) -> Result<usize> {
+    if b1.dtype() != DType::F32 {
+        return Err(folo_core::Error::DTypeMismatch { op, expected: DType::F32, got: b1.dtype() });
+    }
+    if b2.dtype() != DType::F32 {
+        return Err(folo_core::Error::DTypeMismatch { op, expected: DType::F32, got: b2.dtype() });
+    }
+    if b1.device() != b2.device() {
+        return Err(folo_core::Error::DeviceMismatch { op, lhs: b1.device(), rhs: b2.device() });
+    }
+    let (n1, c1) =
+        b1.dims2().map_err(|_| invalid(format!("{op}: b1 must be rank 2 [N, 4], got {}", b1.shape())))?;
+    let (n2, c2) =
+        b2.dims2().map_err(|_| invalid(format!("{op}: b2 must be rank 2 [N, 4], got {}", b2.shape())))?;
+    if c1 != 4 || c2 != 4 || n1 != n2 {
+        return Err(invalid(format!(
+            "{op}: b1 {} and b2 {} must be matching [N, 4] tensors",
+            b1.shape(),
+            b2.shape()
+        )));
+    }
+    Ok(n1)
+}
+
+/// `[N]` tensor equal to `0.0` (with zero gradient) on every finite row of `(b1, b2)`, and `NaN`
+/// (with `NaN` gradients on both `b1` and `b2`) on any row containing `NaN` or `±Inf`.
+fn nonfinite_box_poison(b1: &Tensor, b2: &Tensor) -> Result<Tensor> {
+    let mask = {
+        let _g = no_grad();
+        b1.mul_scalar(0.0)?.add(&b2.mul_scalar(0.0)?)?.sum(1, false)?.unsqueeze(1)?
+    };
+    b1.mul(&mask)?.add(&b2.mul(&mask)?)?.sum(1, false)
+}
+
 /// Differentiable Inner-CIoU loss (Zhang et al. 2023) between rows of `b1` and `b2` (`[N, 4]`, `xyxy`),
 /// returning `[N]`:
 ///
@@ -73,26 +108,31 @@ pub fn ciou(b1: &Tensor, b2: &Tensor) -> Result<Tensor> {
 ///
 /// where `IoU_inner` is the plain IoU of auxiliary boxes scaled about their centres by `ratio` (typically
 /// `0.7` in `[0.5, 1.5]`), while the distance and aspect-ratio penalties stay on the full boxes. At
-/// `ratio == 1.0`, reduces identically to `1 - ciou(b1, b2)`.
+/// `ratio == 1.0`, reduces identically to `1 - ciou(b1, b2)` on valid non-inverted boxes.
 pub fn inner_ciou_loss(b1: &Tensor, b2: &Tensor, ratio: f32) -> Result<Tensor> {
     if !ratio.is_finite() || ratio <= 0.0 {
         return Err(invalid(format!("inner_ratio must be finite and > 0, got {ratio}")));
+    }
+    let n = check_box_pair(b1, b2, "inner_ciou_loss")?;
+    if n == 0 {
+        return Tensor::zeros_with([0], DType::F32, b1.device());
     }
     const EPS: f32 = 1e-7;
     let col = |b: &Tensor, k: usize| b.narrow(1, k, 1)?.squeeze(1);
     let (ax1, ay1, ax2, ay2) = (col(b1, 0)?, col(b1, 1)?, col(b1, 2)?, col(b1, 3)?);
     let (bx1, by1, bx2, by2) = (col(b2, 0)?, col(b2, 1)?, col(b2, 2)?, col(b2, 3)?);
+    let poison = nonfinite_box_poison(b1, b2)?;
 
-    // Full-box CIoU terms (identical to `ciou`).
-    let (w1, h1) = (ax2.sub(&ax1)?, ay2.sub(&ay1)?.add_scalar(EPS)?);
-    let (w2, h2) = (bx2.sub(&bx1)?, by2.sub(&by1)?.add_scalar(EPS)?);
+    // Full-box CIoU terms with non-negative side clamps so inverted boxes never hit 0-division or negative union.
+    let (w1, h1) = (ax2.sub(&ax1)?.relu()?, ay2.sub(&ay1)?.relu()?.add_scalar(EPS)?);
+    let (w2, h2) = (bx2.sub(&bx1)?.relu()?, by2.sub(&by1)?.relu()?.add_scalar(EPS)?);
     let iw = ax2.minimum(&bx2)?.sub(&ax1.maximum(&bx1)?)?.relu()?;
     let ih = ay2.minimum(&by2)?.sub(&ay1.maximum(&by1)?)?.relu()?;
     let inter = iw.mul(&ih)?;
-    let union = w1.mul(&h1)?.add(&w2.mul(&h2)?)?.sub(&inter)?.add_scalar(EPS)?;
+    let union = w1.mul(&h1)?.add(&w2.mul(&h2)?)?.sub(&inter)?.relu()?.add_scalar(EPS)?;
     let full_iou = inter.div(&union)?;
-    let cw = ax2.maximum(&bx2)?.sub(&ax1.minimum(&bx1)?)?;
-    let ch = ay2.maximum(&by2)?.sub(&ay1.minimum(&by1)?)?;
+    let cw = ax2.maximum(&bx2)?.sub(&ax1.minimum(&bx1)?)?.relu()?;
+    let ch = ay2.maximum(&by2)?.sub(&ay1.minimum(&by1)?)?.relu()?;
     let c2 = cw.square()?.add(&ch.square()?)?.add_scalar(EPS)?;
     let dx = bx1.add(&bx2)?.sub(&ax1)?.sub(&ax2)?;
     let dy = by1.add(&by2)?.sub(&ay1)?.sub(&ay2)?;
@@ -106,27 +146,33 @@ pub fn inner_ciou_loss(b1: &Tensor, b2: &Tensor, ratio: f32) -> Result<Tensor> {
         v.div(&raw.maximum(&eps)?)?
     };
 
-    // Auxiliary scaled boxes around each box's centre.
-    let half_r = 0.5 * ratio;
-    let cx1 = ax1.add(&ax2)?.mul_scalar(0.5)?;
-    let cy1 = ay1.add(&ay2)?.mul_scalar(0.5)?;
-    let cx2 = bx1.add(&bx2)?.mul_scalar(0.5)?;
-    let cy2 = by1.add(&by2)?.mul_scalar(0.5)?;
-    let (hw1, hh1) = (ax2.sub(&ax1)?.mul_scalar(half_r)?, ay2.sub(&ay1)?.mul_scalar(half_r)?);
-    let (hw2, hh2) = (bx2.sub(&bx1)?.mul_scalar(half_r)?, by2.sub(&by1)?.mul_scalar(half_r)?);
-    let (ix1_a, iy1_a, ix2_a, iy2_a) = (cx1.sub(&hw1)?, cy1.sub(&hh1)?, cx1.add(&hw1)?, cy1.add(&hh1)?);
-    let (ix1_b, iy1_b, ix2_b, iy2_b) = (cx2.sub(&hw2)?, cy2.sub(&hh2)?, cx2.add(&hw2)?, cy2.add(&hh2)?);
-    let in_iw = ix2_a.minimum(&ix2_b)?.sub(&ix1_a.maximum(&ix1_b)?)?.relu()?;
-    let in_ih = iy2_a.minimum(&iy2_b)?.sub(&iy1_a.maximum(&iy1_b)?)?.relu()?;
-    let in_inter = in_iw.mul(&in_ih)?;
-    let in_w1 = ix2_a.sub(&ix1_a)?;
-    let in_h1 = iy2_a.sub(&iy1_a)?.add_scalar(EPS)?;
-    let in_w2 = ix2_b.sub(&ix1_b)?;
-    let in_h2 = iy2_b.sub(&iy1_b)?.add_scalar(EPS)?;
-    let in_union = in_w1.mul(&in_h1)?.add(&in_w2.mul(&in_h2)?)?.sub(&in_inter)?.add_scalar(EPS)?;
-    let inner_iou = in_inter.div(&in_union)?;
+    // At ratio == 1.0, auxiliary boxes equal the full boxes directly (avoids midpoint rounding on thin boxes).
+    let inner_iou = if ratio == 1.0 {
+        full_iou
+    } else {
+        let ca = 0.5 * (1.0 + ratio);
+        let cb = 0.5 * (1.0 - ratio);
+        let ix1_a = ax1.mul_scalar(ca)?.add(&ax2.mul_scalar(cb)?)?;
+        let iy1_a = ay1.mul_scalar(ca)?.add(&ay2.mul_scalar(cb)?)?;
+        let ix2_a = ax2.mul_scalar(ca)?.add(&ax1.mul_scalar(cb)?)?;
+        let iy2_a = ay2.mul_scalar(ca)?.add(&ay1.mul_scalar(cb)?)?;
+        let ix1_b = bx1.mul_scalar(ca)?.add(&bx2.mul_scalar(cb)?)?;
+        let iy1_b = by1.mul_scalar(ca)?.add(&by2.mul_scalar(cb)?)?;
+        let ix2_b = bx2.mul_scalar(ca)?.add(&bx1.mul_scalar(cb)?)?;
+        let iy2_b = by2.mul_scalar(ca)?.add(&by1.mul_scalar(cb)?)?;
+        let in_iw = ix2_a.minimum(&ix2_b)?.sub(&ix1_a.maximum(&ix1_b)?)?.relu()?;
+        let in_ih = iy2_a.minimum(&iy2_b)?.sub(&iy1_a.maximum(&iy1_b)?)?.relu()?;
+        let in_inter = in_iw.mul(&in_ih)?;
+        let in_w1 = ix2_a.sub(&ix1_a)?.relu()?;
+        let in_h1 = iy2_a.sub(&iy1_a)?.relu()?.add_scalar(EPS)?;
+        let in_w2 = ix2_b.sub(&ix1_b)?.relu()?;
+        let in_h2 = iy2_b.sub(&iy1_b)?.relu()?.add_scalar(EPS)?;
+        let in_union =
+            in_w1.mul(&in_h1)?.add(&in_w2.mul(&in_h2)?)?.sub(&in_inter)?.relu()?.add_scalar(EPS)?;
+        in_inter.div(&in_union)?
+    };
 
-    inner_iou.rsub_scalar(1.0)?.add(&rho2.div(&c2)?)?.add(&v.mul(&alpha)?)
+    inner_iou.rsub_scalar(1.0)?.add(&rho2.div(&c2)?)?.add(&v.mul(&alpha)?)?.add(&poison)
 }
 
 /// Differentiable Wise-IoU v3 loss (Tong et al. 2023) between rows of `b1` (predicted) and `b2` (target)
@@ -135,31 +181,52 @@ pub fn inner_ciou_loss(b1: &Tensor, b2: &Tensor, ratio: f32) -> Result<Tensor> {
 /// ```text
 /// L_IoU = 1 - IoU(b1, b2)
 /// R_WIoU = exp(((cx1 - cx2)² + (cy1 - cy2)²) / ((cw² + ch²)* + eps))
-/// beta = L_IoU* / max(mean(L_IoU*), 1e-4)
+/// beta = L_IoU* / max(iou_mean, 1e-4)
 /// r = beta / (delta * alpha^(beta - delta))       (detached non-monotonic focusing gain)
 /// L_WIoU_v3 = r * R_WIoU * L_IoU
 /// ```
 ///
-/// Both the enclosing diagonal denominator `(cw² + ch²)*` and the dynamic focusing gain `r` are detached
-/// under `no_grad()` so gradients never suffer enclosing-box hindrance or outlier amplification.
-pub fn wiou_v3_loss(b1: &Tensor, b2: &Tensor, alpha: f32, delta: f32) -> Result<Tensor> {
+/// `iou_mean` is the running exponential moving average `L_IoU_bar` across training steps (Tong et al. §III-B,
+/// initialized to `1.0`). Both the enclosing diagonal denominator `(cw² + ch²)*` and the dynamic focusing gain
+/// `r` are detached under `no_grad()` so gradients never suffer enclosing-box hindrance or outlier amplification.
+pub fn wiou_v3_loss(b1: &Tensor, b2: &Tensor, alpha: f32, delta: f32, iou_mean: f32) -> Result<Tensor> {
+    Ok(wiou_v3_loss_and_mean(b1, b2, alpha, delta, iou_mean)?.0)
+}
+
+/// [`wiou_v3_loss`] also returning the current batch's unweighted mean `L_IoU` (`None` when `N == 0`), so
+/// the trainer can update its running EMA `L_IoU_bar`.
+pub(super) fn wiou_v3_loss_and_mean(
+    b1: &Tensor,
+    b2: &Tensor,
+    alpha: f32,
+    delta: f32,
+    iou_mean: f32,
+) -> Result<(Tensor, Option<f32>)> {
     if !alpha.is_finite() || alpha <= 1.0 {
         return Err(invalid(format!("wiou_alpha must be finite and > 1, got {alpha}")));
     }
     if !delta.is_finite() || delta <= 0.0 {
         return Err(invalid(format!("wiou_delta must be finite and > 0, got {delta}")));
     }
+    if !iou_mean.is_finite() || iou_mean <= 0.0 {
+        return Err(invalid(format!("wiou iou_mean must be finite and > 0, got {iou_mean}")));
+    }
+    let n = check_box_pair(b1, b2, "wiou_v3_loss")?;
+    if n == 0 {
+        return Ok((Tensor::zeros_with([0], DType::F32, b1.device())?, None));
+    }
     const EPS: f32 = 1e-7;
     let col = |b: &Tensor, k: usize| b.narrow(1, k, 1)?.squeeze(1);
     let (ax1, ay1, ax2, ay2) = (col(b1, 0)?, col(b1, 1)?, col(b1, 2)?, col(b1, 3)?);
     let (bx1, by1, bx2, by2) = (col(b2, 0)?, col(b2, 1)?, col(b2, 2)?, col(b2, 3)?);
+    let poison = nonfinite_box_poison(b1, b2)?;
     let (w1, h1) = (ax2.sub(&ax1)?.relu()?, ay2.sub(&ay1)?.relu()?);
     let (w2, h2) = (bx2.sub(&bx1)?.relu()?, by2.sub(&by1)?.relu()?);
     let iw = ax2.minimum(&bx2)?.sub(&ax1.maximum(&bx1)?)?.relu()?;
     let ih = ay2.minimum(&by2)?.sub(&ay1.maximum(&by1)?)?.relu()?;
     let inter = iw.mul(&ih)?;
     let union = w1.mul(&h1)?.add(&w2.mul(&h2)?)?.sub(&inter)?.relu()?.add_scalar(EPS)?;
-    let l_iou = inter.div(&union)?.clamp(0.0, 1.0)?.rsub_scalar(1.0)?;
+    let l_iou = inter.div(&union)?.clamp(0.0, 1.0)?.rsub_scalar(1.0)?.add(&poison)?;
 
     // Distance attention R_WIoU = exp(rho² / c2*) with detached enclosing diagonal c2*.
     let dx = bx1.add(&bx2)?.sub(&ax1)?.sub(&ax2)?;
@@ -174,21 +241,17 @@ pub fn wiou_v3_loss(b1: &Tensor, b2: &Tensor, alpha: f32, delta: f32) -> Result<
     let r_dist = rho2.div(&c2_detached)?.clamp(0.0, 10.0)?.exp()?;
 
     // Non-monotonic dynamic focusing gain r = beta / (delta * alpha^(beta - delta)), completely detached.
-    let r_focus = {
+    let (r_focus, batch_mean) = {
         let _g = no_grad();
-        let n = l_iou.numel();
-        if n == 0 {
-            l_iou.zeros_like()?
-        } else {
-            let mean_val = l_iou.mean_all()?.item::<f32>()?.max(1e-4);
-            let beta = l_iou.div_scalar(mean_val)?;
-            let ln_a = alpha.ln();
-            let exponent = beta.sub_scalar(delta)?.mul_scalar(ln_a)?.clamp(-80.0, 80.0)?;
-            let denom = exponent.exp()?.mul_scalar(delta)?;
-            beta.div(&denom)?
-        }
+        let batch_mean = l_iou.mean_all()?.item::<f32>()?;
+        let beta = l_iou.div_scalar(iou_mean.max(1e-4))?;
+        let ln_a = alpha.ln();
+        let exponent = beta.sub_scalar(delta)?.mul_scalar(ln_a)?.clamp(-80.0, 80.0)?;
+        let denom = exponent.exp()?.mul_scalar(delta)?;
+        (beta.div(&denom)?, batch_mean)
     };
-    r_focus.mul(&r_dist)?.mul(&l_iou)
+    let loss = r_focus.mul(&r_dist)?.mul(&l_iou)?.add(&poison)?;
+    Ok((loss, Some(batch_mean)))
 }
 
 /// Single-box `R-PIoU` forward `(loss, dL/d(ax1, ay1, ax2, ay2))` in `f64`, matching `det_box.wgsl` tie-breaking.

@@ -84,6 +84,7 @@ pub(super) fn detection_loss_device_with_assignment(
             items: LossItems { box_: st[1], cls: st[2], dfl: st[3] },
             num_fg: st[4] as usize,
             target_score_sum: st[5],
+            mean_iou_loss: None,
         },
         Some(asg),
     ))

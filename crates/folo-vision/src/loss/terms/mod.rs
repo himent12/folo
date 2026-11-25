@@ -15,7 +15,7 @@ use super::{BatchAssignment, BoxLossKind, LossConfig, LossItems, LossOutput, che
 use crate::assign::{bbox2dist_clamped, dfl_bins, nwd_lambda};
 use crate::decode::Anchors;
 
-use box_loss::rpiou_from_logits;
+use box_loss::{rpiou_from_logits, wiou_v3_loss_and_mean};
 use cls::cls_loss_sum;
 use dfl::ot_dfl_tail;
 
@@ -64,11 +64,24 @@ pub fn loss_with_assignment(
     asg: &BatchAssignment,
     cfg: &LossConfig,
 ) -> Result<LossOutput> {
-    loss_impl(box_raw, cls_raw, anchors, asg, cfg, box_raw.device().is_cpu())
+    loss_impl_wiou(box_raw, cls_raw, anchors, asg, cfg, box_raw.device().is_cpu(), 1.0)
+}
+
+/// [`loss_with_assignment`] with an explicit WIoU v3 running-EMA denominator `wiou_iou_mean`.
+pub(super) fn loss_with_assignment_wiou(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &Anchors,
+    asg: &BatchAssignment,
+    cfg: &LossConfig,
+    wiou_iou_mean: f32,
+) -> Result<LossOutput> {
+    loss_impl_wiou(box_raw, cls_raw, anchors, asg, cfg, box_raw.device().is_cpu(), wiou_iou_mean)
 }
 
 /// [`loss_with_assignment`] with the kernel choice explicit: `fused` uses the CPU custom ops, otherwise the
 /// device-generic composite of tensor ops. Both give the same values and gradients (the tests compare them).
+#[cfg(test)]
 pub(super) fn loss_impl(
     box_raw: &Tensor,
     cls_raw: &Tensor,
@@ -76,6 +89,18 @@ pub(super) fn loss_impl(
     asg: &BatchAssignment,
     cfg: &LossConfig,
     fused: bool,
+) -> Result<LossOutput> {
+    loss_impl_wiou(box_raw, cls_raw, anchors, asg, cfg, fused, 1.0)
+}
+
+fn loss_impl_wiou(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &Anchors,
+    asg: &BatchAssignment,
+    cfg: &LossConfig,
+    fused: bool,
+    wiou_iou_mean: f32,
 ) -> Result<LossOutput> {
     let (b, nc, n_a) = check_inputs(box_raw, cls_raw, anchors, cfg)?;
     if (asg.batch, asg.num_classes, asg.num_anchors) != (b, nc, n_a) {
@@ -153,8 +178,8 @@ pub(super) fn loss_impl(
         fused,
     )?;
 
-    let (wb, wd) = if n == 0 {
-        (Tensor::zeros_with([], DType::F32, dev)?, Tensor::zeros_with([], DType::F32, dev)?)
+    let (wb, wd, mean_iou_loss) = if n == 0 {
+        (Tensor::zeros_with([], DType::F32, dev)?, Tensor::zeros_with([], DType::F32, dev)?, None)
     } else {
         let logits = if fused {
             gather_flat_cpu(box_raw, idx_box)?
@@ -183,10 +208,16 @@ pub(super) fn loss_impl(
             };
             sum_fixed_order(&box_per.mul(&t)?)?.div_scalar(tss)?.mul_scalar(cfg.box_gain)
         };
+        let mut mean_iou_loss = None;
         let wb = match cfg.box_loss {
             BoxLossKind::Ciou => blend_nwd(ciou(&pd, &tb)?.rsub_scalar(1.0)?)?,
             BoxLossKind::InnerCiou => blend_nwd(inner_ciou_loss(&pd, &tb, cfg.inner_ratio)?)?,
-            BoxLossKind::WiouV3 => blend_nwd(wiou_v3_loss(&pd, &tb, cfg.wiou_alpha, cfg.wiou_delta)?)?,
+            BoxLossKind::WiouV3 => {
+                let (w_per, batch_mean) =
+                    wiou_v3_loss_and_mean(&pd, &tb, cfg.wiou_alpha, cfg.wiou_delta, wiou_iou_mean)?;
+                mean_iou_loss = batch_mean;
+                blend_nwd(w_per)?
+            }
             BoxLossKind::Rpiou => {
                 if cfg.nwd_weight > 0.0 {
                     let lams: Vec<f32> = (0..n).map(|k| nwd_lambda(&asg.target[k], cfg.nwd_weight)).collect();
@@ -245,12 +276,12 @@ pub(super) fn loss_impl(
         } else {
             l_dfl_ce.mul_scalar(cfg.dfl_gain)?
         };
-        (wb, wd)
+        (wb, wd, mean_iou_loss)
     };
     let wc = cls_sum.div_scalar(tss)?.mul_scalar(cfg.cls_gain)?;
 
     let items = LossItems { box_: wb.item::<f32>()?, cls: wc.item::<f32>()?, dfl: wd.item::<f32>()? };
     let total = wb.add(&wc)?.add(&wd)?.mul_scalar(b as f32)?;
     let total_value = total.item::<f32>()?;
-    Ok(LossOutput { total, total_value, items, num_fg: n, target_score_sum: tss_raw as f32 })
+    Ok(LossOutput { total, total_value, items, num_fg: n, target_score_sum: tss_raw as f32, mean_iou_loss })
 }
