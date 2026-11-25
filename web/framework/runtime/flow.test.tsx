@@ -435,6 +435,210 @@ describe('For', () => {
     expect(f2).toHaveBeenCalledTimes(1);
     unmount();
   });
+
+  it('skips DOM reconciliation completely on same-key same-order item updates', () => {
+    const items = Array.from({ length: 100 }, (_, i) => ({ id: i, label: `r${i}` }));
+    const { list, lis, container, unmount } = setup(items);
+    const before = lis();
+    const ul = container.querySelector('ul')!;
+    const insertSpy = vi.spyOn(ul, 'insertBefore');
+    const replaceSpy = vi.spyOn(ul, 'replaceChild');
+    const removeSpy = vi.spyOn(ul, 'removeChild');
+
+    // Update every 10th item with a new object under the same key & order.
+    list.set(items.map((x, i) => (i % 10 === 0 ? { id: x.id, label: `u${i}` } : x)));
+    flush();
+
+    expect(insertSpy).not.toHaveBeenCalled();
+    expect(replaceSpy).not.toHaveBeenCalled();
+    expect(removeSpy).not.toHaveBeenCalled();
+    expect(lis()).toEqual(before);
+    expect(lis()[0]!.textContent).toBe('0:u0');
+    expect(lis()[10]!.textContent).toBe('10:u10');
+    expect(lis()[1]!.textContent).toBe('1:r1');
+    unmount();
+  });
+
+  it('fast-paths adjacent pair swap, single-row rotate left/right, single-row replace, and disjoint full replace', () => {
+    const mk = (id: number) => ({ id, label: `L${id}` });
+    const { list, lis, container, unmount } = setup([mk(1), mk(2), mk(3), mk(4), mk(5)]);
+    const ul = container.querySelector('ul')!;
+    const insertSpy = vi.spyOn(ul, 'insertBefore');
+    const replaceSpy = vi.spyOn(ul, 'replaceChild');
+
+    // Adjacent pair swap [2,3] -> [3,2]: 1 DOM move instead of 2.
+    const beforeSwap = lis();
+    list.set([mk(1), mk(3), mk(2), mk(4), mk(5)]);
+    flush();
+    expect(insertSpy).toHaveBeenCalledTimes(1);
+    expect(lis()).toEqual([beforeSwap[0], beforeSwap[2], beforeSwap[1], beforeSwap[3], beforeSwap[4]]);
+
+    // Rotate right (move item 4 earlier to index 1): 1 DOM move.
+    insertSpy.mockClear();
+    const beforeRotR = lis();
+    list.set([mk(1), mk(4), mk(3), mk(2), mk(5)]);
+    flush();
+    expect(insertSpy).toHaveBeenCalledTimes(1);
+    expect(lis()).toEqual([beforeRotR[0], beforeRotR[3], beforeRotR[1], beforeRotR[2], beforeRotR[4]]);
+
+    // Rotate left (move item 4 later to index 3): 1 DOM move.
+    insertSpy.mockClear();
+    const beforeRotL = lis();
+    list.set([mk(1), mk(3), mk(2), mk(4), mk(5)]);
+    flush();
+    expect(insertSpy).toHaveBeenCalledTimes(1);
+    expect(lis()).toEqual([beforeRotL[0], beforeRotL[2], beforeRotL[3], beforeRotL[1], beforeRotL[4]]);
+
+    // Single-row replace (middle): direct replaceChild without building a key map.
+    replaceSpy.mockClear();
+    const beforeRep = lis();
+    list.set([mk(1), mk(3), mk(99), mk(4), mk(5)]);
+    flush();
+    expect(replaceSpy).toHaveBeenCalledTimes(1);
+    expect(lis()[0]).toBe(beforeRep[0]);
+    expect(lis()[2]).not.toBe(beforeRep[2]);
+    expect(lis()[2]!.textContent).toBe('2:L99');
+
+    // Disjoint full replace: all new nodes replace all old nodes cleanly.
+    const beforeFull = lis();
+    list.set([mk(10), mk(11), mk(12)]);
+    flush();
+    const afterFull = lis();
+    expect(afterFull).toHaveLength(3);
+    for (const n of afterFull) expect(beforeFull).not.toContain(n);
+    expect(text(container)).toBe('0:L101:L112:L12');
+    unmount();
+  });
+
+  it('preserves FIFO identity on duplicate keys when a rotated key appears more than once', () => {
+    const list = signal(['x', 'a', 'b', 'a']);
+    const { container, unmount } = render(() => (
+      <p>
+        <For each={list.get()}>{(k) => <i>{k()}</i>}</For>
+      </p>
+    ));
+    const before = [...container.querySelectorAll('i')];
+    // Rotating the trailing 'a' to the front must still assign the first 'a' (before[1]) to index 0 (FIFO).
+    list.set(['a', 'x', 'a', 'b']);
+    flush();
+    const after = [...container.querySelectorAll('i')];
+    expect(text(container)).toBe('axab');
+    expect(after[0]).toBe(before[1]);
+    expect(after[1]).toBe(before[0]);
+    expect(after[2]).toBe(before[3]);
+    expect(after[3]).toBe(before[2]);
+    unmount();
+  });
+
+  it('isolates nested Show transitions inside For rows without leaking across branch scopes', async () => {
+    const rows = signal([1, 2]);
+    const showInner = signal(true);
+    const outSpy = vi.fn();
+    const fastOut = (_el: Element) => {
+      outSpy();
+      return { duration: 0 };
+    };
+    const { container, unmount } = render(() => (
+      <ul>
+        <For each={rows.get()}>
+          {(id) => (
+            <li>
+              <Show when={showInner.get()}>
+                <span out:fastOut={{}}>{id()}</span>
+              </Show>
+            </li>
+          )}
+        </For>
+      </ul>
+    ));
+    expect(container.querySelectorAll('span')).toHaveLength(2);
+    // Hiding the inner Show triggers only the Show's outro (not the outer For row's).
+    showInner.set(false);
+    flush();
+    expect(outSpy).toHaveBeenCalledTimes(2);
+    expect(container.querySelectorAll('li')).toHaveLength(2);
+    expect(container.querySelectorAll('span')).toHaveLength(0);
+    // Removing a For row afterwards does not re-trigger the already-left Show outro.
+    rows.set([1]);
+    flush();
+    expect(outSpy).toHaveBeenCalledTimes(2);
+    expect(container.querySelectorAll('li')).toHaveLength(1);
+    unmount();
+  });
+
+  it('recovers DOM cleanly after a mid-append row error or throwing fallback', () => {
+    const list = signal<string[]>(['a']);
+    const showFallback = signal(true);
+    let throwFallback = false;
+    const { container, unmount } = render(() => (
+      <ul>
+        <For
+          each={list.get()}
+          fallback={(() => {
+            if (!showFallback.get()) return undefined;
+            if (throwFallback) throw new Error('fallback boom');
+            return <li>empty</li>;
+          })()}
+        >
+          {(k) => {
+            if (k() === 'bad') throw new Error('row boom');
+            return <li>{k()}</li>;
+          }}
+        </For>
+      </ul>
+    ));
+    expect(text(container)).toBe('a');
+
+    // Mid-append throw: 'b' is created before 'bad' throws; recovering to ['a', 'b'] must render both.
+    list.set(['a', 'b', 'bad']);
+    expect(() => flush()).toThrow('row boom');
+    list.set(['a', 'b']);
+    flush();
+    expect(text(container)).toBe('ab');
+
+    // Non-empty -> empty with throwing fallback: recovering with no fallback must render empty, not stale rows.
+    throwFallback = true;
+    list.set([]);
+    expect(() => flush()).toThrow('fallback boom');
+    showFallback.set(false);
+    throwFallback = false;
+    list.set([]);
+    flush();
+    expect(text(container)).toBe('');
+    unmount();
+  });
+
+  it('reuses a single row with a NaN key and runs returned snippet settlement outside the row branch scope', () => {
+    const list = signal([{ k: Number.NaN, label: 'first' }]);
+    const { container, unmount } = render(() => (
+      <ul>
+        <For each={list.get()} key={(x) => x.k}>
+          {(item) => <li>{item().label}</li>}
+        </For>
+      </ul>
+    ));
+    const li = container.querySelector('li');
+    list.set([{ k: Number.NaN, label: 'second' }]);
+    flush();
+    expect(container.querySelector('li')).toBe(li);
+    expect(text(container)).toBe('second');
+    unmount();
+
+    // Appending a row whose child returns a snippet must settle outside the row's branch scope (no unexpected intro).
+    const introSpy = vi.fn(() => ({ duration: 0 }));
+    const ids = signal([1]);
+    const r2 = render(() => (
+      <ul>
+        <For each={ids.get()}>{(n) => () => <li in:introSpy={{}}>{n()}</li>}</For>
+      </ul>
+    ));
+    expect(introSpy).not.toHaveBeenCalled();
+    ids.set([1, 2]);
+    flush();
+    expect(introSpy).not.toHaveBeenCalled();
+    expect(text(r2.container)).toBe('12');
+    r2.unmount();
+  });
 });
 
 describe('Index', () => {

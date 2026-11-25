@@ -505,3 +505,82 @@ describe('flushOrder', () => {
     expect(log).toEqual(['memo false']);
   });
 });
+
+describe('scheduler & component perf fast paths', () => {
+  it('reuses flush buffers across steady-state and burst (>256) flushes without losing updates', () => {
+    const sigs = Array.from({ length: 300 }, (_, i) => signal(i));
+    let renderTotal = 0;
+    let userTotal = 0;
+    const dispose = createRoot((d) => {
+      for (let i = 0; i < sigs.length; i++) {
+        const s = sigs[i]!;
+        renderEffect(() => {
+          renderTotal += s.get();
+        });
+        effect(() => {
+          userTotal += s.get();
+        });
+      }
+      return d;
+    });
+    flush();
+    const expected0 = (299 * 300) / 2;
+    expect(renderTotal).toBe(expected0);
+    expect(userTotal).toBe(expected0);
+
+    // Burst (> MAX_SPARE_QUEUE = 256) in one flush
+    renderTotal = 0;
+    userTotal = 0;
+    for (let i = 0; i < sigs.length; i++) sigs[i]!.set(i + 1);
+    flush();
+    const expected1 = (300 * 301) / 2;
+    expect(renderTotal).toBe(expected1);
+    expect(userTotal).toBe(expected1);
+
+    // Steady-state single-signal updates after burst
+    for (let step = 0; step < 50; step++) {
+      renderTotal = 0;
+      userTotal = 0;
+      sigs[0]!.set(step + 10);
+      flush();
+      expect(renderTotal).toBe(step + 10);
+      expect(userTotal).toBe(step + 10);
+    }
+    dispose();
+  });
+
+  it('defers component effects in order, skips empty deferral cleanly, and restores state on throw', () => {
+    const log: string[] = [];
+    const Leaf = (p: { id: string }) => {
+      log.push(`render:${p.id}`);
+      return null;
+    };
+    const WithEffect = (p: { id: string }) => {
+      log.push(`render:${p.id}`);
+      effect(() => void log.push(`effect:${p.id}`));
+      createComponent(Leaf, { id: `${p.id}-leaf` });
+      return null;
+    };
+    const Failing = () => {
+      effect(() => void log.push('never'));
+      throw new Error('boom');
+    };
+
+    const dispose = createRoot((d) => {
+      createComponent(WithEffect, { id: 'a' });
+      expect(() => createComponent(Failing, {})).toThrow('boom');
+      createComponent(WithEffect, { id: 'b' });
+      return d;
+    });
+    flush();
+    expect(log).toEqual([
+      'render:a',
+      'render:a-leaf',
+      'render:b',
+      'render:b-leaf',
+      'effect:a',
+      'effect:b',
+    ]);
+    dispose();
+  });
+});

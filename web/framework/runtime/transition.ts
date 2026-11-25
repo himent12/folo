@@ -86,20 +86,53 @@ export interface Branch {
   t: Manager[] | null;
 }
 
-let branch: Branch | null = null;
+/** Opaque list of transition managers registered in a branch (null when the branch has no transitions). */
+export type BranchTransitions = Manager[] | null;
+
+const savedActive: boolean[] = [];
+const savedManagers: (Manager[] | null)[] = [];
+const savedIntro: boolean[] = [];
+let branchDepth = 0;
+let branchActive = false;
+let branchManagers: Manager[] | null = null;
 let intro = false;
+
+/**
+ * Internal: starts a zero-allocation transition-tracking scope for a branch (`For` row, `Show`, `Switch`, `Key`);
+ * pair with `exitBranch()` in a `finally` block. `track = false` disables registration (e.g. a fallback).
+ */
+export function enterBranch(introOk: boolean, track = true): void {
+  savedActive[branchDepth] = branchActive;
+  savedManagers[branchDepth] = branchManagers;
+  savedIntro[branchDepth] = intro;
+  branchDepth++;
+  branchActive = track;
+  branchManagers = null;
+  intro = introOk;
+}
+
+/** Internal: ends the current branch scope and returns any transitions registered inside it (or `null`). */
+export function exitBranch(): BranchTransitions {
+  const t = branchManagers;
+  branchDepth--;
+  branchActive = savedActive[branchDepth]!;
+  branchManagers = savedManagers[branchDepth]!;
+  savedManagers[branchDepth] = null;
+  intro = savedIntro[branchDepth]!;
+  return t;
+}
 
 /** Internal: runs `fn` (which creates a branch's content) with `b` as the current branch; `introOk` lets intros play. */
 export function inBranch<T>(b: Branch | null, introOk: boolean, fn: () => T): T {
-  const pb = branch;
-  const pi = intro;
-  branch = b;
-  intro = introOk;
+  enterBranch(introOk, b !== null);
   try {
     return fn();
   } finally {
-    branch = pb;
-    intro = pi;
+    const t = exitBranch();
+    if (b !== null && t !== null) {
+      if (b.t === null) b.t = t;
+      else b.t.push(...t);
+    }
   }
 }
 
@@ -114,12 +147,14 @@ function collect(value: unknown, out: Node[], inRun = false): void {
 }
 
 /**
- * Internal: `b`'s content is being removed. If it has outros, its top nodes (`value`) wait for them before leaving
+ * Internal: a branch's content is being removed. If it has outros, its top nodes (`value`) wait for them before leaving
  * the DOM. Returns whether any outro was set up.
  */
-export function leaveBranch(b: Branch | null, value: unknown): boolean {
-  const outs = b?.t?.filter((m) => m.out);
-  if (!outs || outs.length === 0) return false;
+export function leaveBranch(b: Branch | BranchTransitions, value: unknown): boolean {
+  const list = b === null ? null : Array.isArray(b) ? b : b.t;
+  if (list === null || list.length === 0) return false;
+  const outs = list.filter((m) => m.out);
+  if (outs.length === 0) return false;
   const nodes: Node[] = [];
   collect(value, nodes);
   if (nodes.length === 0) return false;
@@ -262,7 +297,7 @@ export function transition<P>(el: Element, fn: TransitionFn<P>, params: (() => P
       });
     };
   }
-  if (branch !== null) (branch.t ??= []).push(manager);
+  if (branchActive) (branchManagers ??= []).push(manager);
   if (flags & IN && intro) {
     effectNow(() => {
       untrack(() => {

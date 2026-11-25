@@ -120,13 +120,30 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
   }
 
   if (Array.isArray(value)) {
-    const array: Node[] = [];
     const currentArray = Array.isArray(current) ? (current as Node[]) : null;
-    if (normalize(array, value, currentArray, unwrap)) {
-      // Reactive parts: resolve them in an effect of their own, so the code that built the array does not re-run.
-      let cur: Current = current;
-      renderEffect<Current>((c) => (cur = insertExpression(parent, array, c, marker, true)), current);
-      return () => cur;
+    const len = value.length;
+    // Single-pass copy for flat `Node[]` (the common `For`/`Index` case); reads each index at most once and hands off
+    // to `normalize` at the first non-node element if any is found.
+    const array = new Array<Node>(len);
+    let nonNodeAt = -1;
+    let nonNodeItem: unknown;
+    for (let i = 0; i < len; i++) {
+      const item = value[i];
+      if (item !== null && typeof item === 'object' && (item as Node).nodeType !== undefined) array[i] = item as Node;
+      else {
+        nonNodeAt = i;
+        nonNodeItem = item;
+        break;
+      }
+    }
+    if (nonNodeAt !== -1) {
+      array.length = nonNodeAt;
+      if (normalize(array, value, currentArray, unwrap, nonNodeAt, nonNodeItem)) {
+        // Reactive parts: resolve them in an effect of their own, so the code that built the array does not re-run.
+        let cur: Current = current;
+        renderEffect<Current>((c) => (cur = insertExpression(parent, array, c, marker, true)), current);
+        return () => cur;
+      }
     }
     if (array.length === 0) {
       const r = cleanChildren(parent, current, marker);
@@ -156,10 +173,10 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
  * Flattens `value` into nodes; returns true when it holds functions (reactive parts) that were not resolved. Before
  * resolving (`unwrap` false), a snippet in the array is wrapped in a memo once, so the array's effect only reads.
  */
-function normalize(out: Node[], value: unknown[], current: Node[] | null, unwrap?: boolean): boolean {
+function normalize(out: Node[], value: unknown[], current: Node[] | null, unwrap?: boolean, start = 0, first: unknown = UNSET): boolean {
   let dynamic = false;
-  for (let i = 0, len = value.length; i < len; i++) {
-    let item = value[i];
+  for (let i = start, len = value.length; i < len; i++) {
+    let item = i === start && first !== UNSET ? first : value[i];
     const prev = current?.[out.length];
     if (item == null || item === true || item === false) continue;
     const t = typeof item;
@@ -267,14 +284,20 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
       aEnd--;
       bEnd--;
     }
-    // Two rows swapped end for end (udomdiff's swap): two moves, no map.
+    // Two rows swapped end for end (udomdiff's swap): 1 move for an adjacent pair, 2 moves otherwise, no map.
     if (aEnd - aStart > 1 && bEnd - bStart > 1 && a[aStart] === b[bEnd - 1] && a[aEnd - 1] === b[bStart]) {
       if (active === undefined) active = findFocused(parent);
+      if (aEnd - aStart === 2 && bEnd - bStart === 2 && a[aStart]!.parentNode === parent) {
+        move(parent, b[bStart]!, a[aStart]!, active);
+        return;
+      }
       const next = a[aEnd - 1]!.nextSibling;
       active = move(parent, b[bStart]!, a[aStart]!.nextSibling, active);
       active = move(parent, b[bEnd - 1]!, next, active);
-      a[aEnd - 1] = b[bEnd - 1]!;
-      a[aStart] = b[bStart]!;
+      aStart++;
+      bStart++;
+      aEnd--;
+      bEnd--;
       continue;
     }
     break;
@@ -290,7 +313,74 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
     while (aStart < aEnd) removeNode(a[aStart++]!);
     return;
   }
+  const aLen = aEnd - aStart;
   const n = bEnd - bStart;
+  if (aLen === 1 && n === 1) {
+    // Single-node replacement (only when `oldNode` is still attached to `parent` and has no outro): no map/typed array.
+    const oldNode = a[aStart]!;
+    if (oldNode.parentNode === parent && (oldNode as Leaving).$$leave === undefined) {
+      parent.replaceChild(b[bStart]!, oldNode);
+      return;
+    }
+  }
+  if (aLen === n && n >= 3) {
+    // Single-node rotate right (moved earlier in the list) or left (moved later): 1 move, no map or LIS.
+    if (a[aEnd - 1] === b[bStart] && a[aStart]!.parentNode === parent) {
+      let ok = true;
+      for (let k = 0; k < n - 1; k++) {
+        if (a[aStart + k] !== b[bStart + 1 + k]) {
+          ok = false;
+          break;
+        }
+      }
+      if (ok) {
+        if (active === undefined) active = findFocused(parent);
+        move(parent, b[bStart]!, a[aStart]!, active);
+        return;
+      }
+    }
+    if (a[aStart] === b[bEnd - 1]) {
+      const ref = bEnd < b.length ? b[bEnd]! : after;
+      if (ref === null || ref.parentNode === parent) {
+        let ok = true;
+        for (let k = 0; k < n - 1; k++) {
+          if (a[aStart + 1 + k] !== b[bStart + k]) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) {
+          if (active === undefined) active = findFocused(parent);
+          move(parent, b[bEnd - 1]!, ref, active);
+          return;
+        }
+      }
+    }
+  }
+  // Fast full-replace check: when the insert owns `parent` with no active outros, every incoming node is unattached,
+  // and every outgoing node is in `parent`, the sets are guaranteed disjoint (`reused === 0`), skipping Map/Int32Array.
+  if (marker === undefined && aStart === 0 && aEnd === a.length && leaving === 0) {
+    let disjoint = true;
+    for (let i = bStart; i < bEnd; i++) {
+      if (b[i]!.parentNode !== null) {
+        disjoint = false;
+        break;
+      }
+    }
+    if (disjoint) {
+      for (let i = aStart; i < aEnd; i++) {
+        if (a[i]!.parentNode !== parent) {
+          disjoint = false;
+          break;
+        }
+      }
+    }
+    if (disjoint) {
+      parent.textContent = '';
+      appendNodes(parent, b, null);
+      return;
+    }
+  }
   const index = new Map<Node, number>();
   for (let i = bStart; i < bEnd; i++) index.set(b[i]!, i);
   const sources = new Int32Array(n).fill(-1);
