@@ -1,10 +1,11 @@
 //! `--bench-frames <n>`: the frame bench. The app runs headless (as `--shot` does, with `--width`,
-//! `--height`, `--scale`, `--text`), settles the way `--shot` settles, then draws `n` full redraws (the window
+//! `--height`, `--scale`, `--text`), settles the way `--shot` settles, warms up each kind untimed
+//! (excluding warm-up frames from timings and `shaped` counts), then draws `n` full redraws (the window
 //! marked dirty, nothing changed), `n` animation ticks (the fake clock moved by one 240 Hz refresh, the
 //! window asked for its next frame) and `n` scroll frames (a 40 px wheel step over the window's centre, five
-//! down then five up, each frame drawing one step), and prints one line per kind with the median of every phase
-//! (`FrameTimes`), the median allocations per frame, and the frame's primitive, element and hitbox counts
-//! and the lines shaped. Owner tag: `"runtime"`.
+//! down then five up, each frame drawing one step), and prints one line per kind with the `p50` of every
+//! phase (`FrameTimes`), total and wall `p50`/`p95`, `p50` allocations per frame, and the frame's primitive,
+//! element and hitbox counts and the lines shaped. Owner tag: `"runtime"`.
 //!
 //! Allocations are counted only when the binary installs [`CountingAlloc`] as its global allocator (the app
 //! does with its `bench-alloc` feature); otherwise they print as `-`.
@@ -25,6 +26,28 @@ use crate::{
 
 /// One refresh of the 240 Hz display the app is measured on.
 const TICK: Duration = Duration::from_nanos(1_000_000_000 / 240);
+/// Untimed warm-up frames run before measuring `full` and `tick`.
+const WARMUP: usize = 3;
+/// Balanced wheel steps run untimed before measuring `scroll` so scroll caches warm up while
+/// returning the scroll offset to where it settled.
+const SCROLL_WARMUP_STEPS: [f32; 4] = [-40.0, -40.0, 40.0, 40.0];
+
+/// Wheel step for the `index`th scroll frame: five 40 px steps down, then five back up, so content
+/// stays near where it settled.
+fn scroll_step(index: usize) -> f32 {
+    if (index / 5).is_multiple_of(2) { -40.0 } else { 40.0 }
+}
+
+/// Nearest-rank percentile (`ceil(pct / 100 * len) - 1`) on an ascending slice.
+/// Returns `0` for an empty slice.
+fn percentile(sorted: &[u64], pct: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let pct = pct.min(100);
+    let rank = (sorted.len() as u128 * pct as u128).div_ceil(100) as usize;
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+}
 
 /// A global allocator that counts allocations (and reallocations) on top of the system allocator, for
 /// `--bench-frames`. Install it with `#[global_allocator]` in the binary that runs the bench.
@@ -132,8 +155,8 @@ enum Kind {
     Full,
     /// The fake clock moved by one refresh.
     Tick,
-    /// The `i`th wheel step over the window's centre.
-    Scroll(usize),
+    /// One wheel step (logical px) over the window's centre.
+    ScrollStep(f32),
 }
 
 /// One measured frame.
@@ -153,7 +176,6 @@ impl Bench {
         harness.run_until_idle();
         let window = *harness.windows().first().context("the app opened no window")?;
         harness.settle_advancing(window, super::shot::SETTLE_TIME, super::shot::SETTLE_STEP);
-        let shaped_before = shaped_lines(&harness, window);
 
         let center = point(self.options.size.width / 2., self.options.size.height / 2.);
         let measure = |harness: &mut HeadlessApp, kind: Kind| -> Sample {
@@ -162,9 +184,7 @@ impl Bench {
                     harness.app.update(|cx| cx.update_window(window, |_, window, _| window.refresh())).ok();
                 }
                 Kind::Tick => harness.advance_clock(TICK),
-                Kind::Scroll(i) => {
-                    // Five steps down, five back up: the content stays near where it settled.
-                    let step = if (i / 5) % 2 == 0 { -40.0 } else { 40.0 };
+                Kind::ScrollStep(step) => {
                     harness.simulate_input(
                         window,
                         PlatformInput::ScrollWheel(ScrollWheelEvent {
@@ -196,17 +216,28 @@ impl Bench {
             let allocations = allocations.zip(self::allocations()).map(|(a, b)| b - a);
             Sample { times, wall_us, allocations }
         };
-        // Warm up: caches, pools, buffers at their steady size.
-        for _ in 0..3 {
+        // Warm up each kind untimed so caches, pools and buffers are steady before measuring.
+        for _ in 0..WARMUP {
             measure(&mut harness, Kind::Full);
         }
+        let shaped_before_full = shaped_lines(&harness, window);
         let full: Vec<Sample> = (0..self.frames).map(|_| measure(&mut harness, Kind::Full)).collect();
-        let shaped_full = shaped_lines(&harness, window) - shaped_before;
+        let shaped_full = shaped_lines(&harness, window).saturating_sub(shaped_before_full);
+
+        for _ in 0..WARMUP {
+            measure(&mut harness, Kind::Tick);
+        }
+        let shaped_before_ticks = shaped_lines(&harness, window);
         let ticks: Vec<Sample> = (0..self.frames).map(|_| measure(&mut harness, Kind::Tick)).collect();
-        let shaped_ticks = shaped_lines(&harness, window) - shaped_before - shaped_full;
-        let shaped = shaped_lines(&harness, window);
-        let scrolls: Vec<Sample> = (0..self.frames).map(|i| measure(&mut harness, Kind::Scroll(i))).collect();
-        let shaped_scrolls = shaped_lines(&harness, window) - shaped;
+        let shaped_ticks = shaped_lines(&harness, window).saturating_sub(shaped_before_ticks);
+
+        for step in SCROLL_WARMUP_STEPS {
+            measure(&mut harness, Kind::ScrollStep(step));
+        }
+        let shaped_before_scrolls = shaped_lines(&harness, window);
+        let scrolls: Vec<Sample> =
+            (0..self.frames).map(|i| measure(&mut harness, Kind::ScrollStep(scroll_step(i)))).collect();
+        let shaped_scrolls = shaped_lines(&harness, window).saturating_sub(shaped_before_scrolls);
 
         let last = full.last().map(|s| s.times).unwrap_or_default();
         let (w, h, s) = (self.options.size.width.0, self.options.size.height.0, self.options.scale_factor);
@@ -254,32 +285,37 @@ fn shaped_lines(harness: &HeadlessApp, window: crate::AnyWindowHandle) -> usize 
     }
 }
 
-/// Prints the medians of `samples` as one line.
+/// Prints the `p50` of every phase and `p50`/`p95` of total and wall times as one line.
 fn print_line(kind: &str, samples: &[Sample], shaped: usize) {
-    let median = |f: &dyn Fn(&Sample) -> u64| -> u64 {
+    let pct_of = |f: &dyn Fn(&Sample) -> u64| -> (u64, u64) {
         let mut v: Vec<u64> = samples.iter().map(f).collect();
         v.sort_unstable();
-        v.get(v.len() / 2).copied().unwrap_or_default()
+        (percentile(&v, 50), percentile(&v, 95))
     };
+    let p50 = |f: &dyn Fn(&Sample) -> u64| pct_of(f).0;
+    let (total_p50, total_p95) = pct_of(&|s| s.times.total_us().into());
+    let (wall_p50, wall_p95) = pct_of(&|s| s.wall_us.into());
     let drawn = samples.iter().filter(|s| s.times.frame != 0 && s.times.total_us() != 0).count();
     let allocations = if samples.iter().all(|s| s.allocations.is_some()) {
-        median(&|s| s.allocations.unwrap_or_default()).to_string()
+        p50(&|s| s.allocations.unwrap_or_default()).to_string()
     } else {
         "-".to_string()
     };
     println!(
-        "  {kind}: render {} build {} layout {} prepaint {} paint {} finish {} raster {} present {} total {} (min {}) wall {} us | allocs {} | drawn {}/{} | shaped {}",
-        median(&|s| s.times.render_us.into()),
-        median(&|s| s.times.build_us.into()),
-        median(&|s| s.times.layout_us.into()),
-        median(&|s| s.times.prepaint_us.into()),
-        median(&|s| s.times.paint_us.into()),
-        median(&|s| s.times.finish_us.into()),
-        median(&|s| s.times.raster_us.into()),
-        median(&|s| s.times.present_us.into()),
-        median(&|s| s.times.total_us().into()),
+        "  {kind}: render {} build {} layout {} prepaint {} paint {} finish {} raster {} present {} total p50 {} p95 {} (min {}) wall p50 {} p95 {} us | allocs {} | drawn {}/{} | shaped {}",
+        p50(&|s| s.times.render_us.into()),
+        p50(&|s| s.times.build_us.into()),
+        p50(&|s| s.times.layout_us.into()),
+        p50(&|s| s.times.prepaint_us.into()),
+        p50(&|s| s.times.paint_us.into()),
+        p50(&|s| s.times.finish_us.into()),
+        p50(&|s| s.times.raster_us.into()),
+        p50(&|s| s.times.present_us.into()),
+        total_p50,
+        total_p95,
         samples.iter().map(|s| s.times.total_us()).filter(|&t| t > 0).min().unwrap_or_default(),
-        median(&|s| s.wall_us.into()),
+        wall_p50,
+        wall_p95,
         allocations,
         drawn,
         samples.len(),
@@ -348,5 +384,39 @@ mod tests {
         ] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn percentile_handles_empty_singleton_and_nearest_rank_bounds() {
+        assert_eq!(percentile(&[], 50), 0);
+        assert_eq!(percentile(&[], 95), 0);
+        assert_eq!(percentile(&[42], 0), 42);
+        assert_eq!(percentile(&[42], 50), 42);
+        assert_eq!(percentile(&[42], 95), 42);
+        assert_eq!(percentile(&[10, 20], 50), 10);
+        assert_eq!(percentile(&[10, 20], 95), 20);
+        let twenty: Vec<u64> = (1..=20).collect();
+        assert_eq!(percentile(&twenty, 50), 10);
+        assert_eq!(percentile(&twenty, 95), 19);
+        let forty: Vec<u64> = (1..=40).collect();
+        assert_eq!(percentile(&forty, 50), 20);
+        assert_eq!(percentile(&forty, 95), 38);
+        let hundred: Vec<u64> = (1..=100).collect();
+        assert_eq!(percentile(&hundred, 0), 1);
+        assert_eq!(percentile(&hundred, 50), 50);
+        assert_eq!(percentile(&hundred, 95), 95);
+        assert_eq!(percentile(&hundred, 100), 100);
+        assert_eq!(percentile(&hundred, 150), 100);
+    }
+
+    #[test]
+    fn scroll_warmup_and_cycle_steps_are_balanced() {
+        assert_eq!(SCROLL_WARMUP_STEPS.iter().sum::<f32>(), 0.0);
+        let cycle: f32 = (0..10).map(scroll_step).sum();
+        assert_eq!(cycle, 0.0);
+        assert_eq!(scroll_step(0), -40.0);
+        assert_eq!(scroll_step(4), -40.0);
+        assert_eq!(scroll_step(5), 40.0);
+        assert_eq!(scroll_step(9), 40.0);
     }
 }

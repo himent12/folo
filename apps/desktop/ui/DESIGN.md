@@ -196,9 +196,11 @@ paint into a `Scene`, then rasterize and present the damage. Three things keep i
 - **Built paths** (`path_cache.rs`). `PathBuilder::build` (lyon's tessellation) is a pure function of the
   builder, so a builder equal word for word to one built recently (its contours, transform, dashes and options,
   every float compared by its bits) gets a copy of that result instead of being tessellated again: the live run
-  page's chart lines were about a quarter of its full frame. Per thread, what the cache has allocated is at most
-  8 MB after every call: keys without spare capacity, the triangles, and its table at the size the table has
-  allocated (all its slots, not only the used ones). While the table grows, the old one is held too for the
+  page's chart lines were about a quarter of its full frame. Per thread, the cache's stored path entries and
+  lookup table stay at or under 8 MB after every call: keys without spare capacity, the triangles, and its
+  table at the size the table has allocated (all its slots, not only the used ones); a separate reusable
+  key-serialization scratch buffer per thread is retained up to 64 KiB (`16,384` `u32` words) so cache hits
+  avoid allocating a temporary key vector. While the table grows, the old one is held too for the
   copy. Over 8 MB, one pass drops the least recently used until the rest, with a table for a quarter more
   entries than are left (room for the table's next growth, so the next inserts don't go over again), is down
   to 6 MB. A path whose entry alone would be over 1 MB is turned away before it is copied. An error is never
@@ -207,6 +209,13 @@ paint into a `Scene`, then rasterize and present the damage. Three things keep i
   counted, the allocator's count of many tiny paths stays within the count and the budget, an oversized path
   is not copied, one big path evicts in one pass, a cache of small paths is not cut on every insert, a path
   built after the cache is gone, the budget holds).
+- **Zero-allocation steady-frame paths**. Steady frames also avoid transient heap traffic across the pipeline:
+  two-generation `GlobalElementId` interning (`window/frame.rs`), per-frame `Interactivity` style reuse
+  (`window/mod.rs`, `interactive/phases.rs`), borrowed font/SVG/glyph cache lookups (`text/`, `raster/cache.rs`),
+  throttled idle cache sweeps (`raster/cache.rs`), early clip culling and precomputed clipped hitboxes
+  (`style/paint.rs`, `text/paint.rs`, `window/element_api.rs`), pooled `UniformList` row scratch buffers and
+  clamped wheel scroll no-ops (`elements/uniform_list.rs`, `interactive/listeners.rs`), and fast 1:1 / integer
+  opaque bilinear image resampling and SIMD span fills (`raster/image.rs`, `raster/blend.rs`).
 
 ## Renderer contract (`raster`)
 
