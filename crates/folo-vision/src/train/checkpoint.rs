@@ -51,7 +51,7 @@ impl Trainer {
             meta.extra.insert(AMP_KEY.into(), s.to_json());
         }
         if self.loss_cfg.box_loss == BoxLossKind::WiouV3 {
-            meta.extra.insert(WIOU_IOU_MEAN_KEY.into(), format!("{:.9}", self.wiou_iou_mean));
+            meta.extra.insert(WIOU_IOU_MEAN_KEY.into(), self.wiou_iou_mean.to_string());
         }
         let mut streams = BTreeMap::new();
         // Every random draw after initialisation is derived from (seed, epoch, ...), so the seed is the whole
