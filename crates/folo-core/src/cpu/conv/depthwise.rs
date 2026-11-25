@@ -238,7 +238,7 @@ pub(super) fn depthwise_forward(
     #[cfg(target_arch = "x86_64")]
     let fast = avx2 && g.p.stride == [1, 1];
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    let fast_wasm = g.p.stride == [1, 1];
+    let wasm_pad = if !accumulate && g.p.stride == [1, 1] { wasm_pad_dims(g) } else { None };
     let total = g.n * g.o;
     let per_task = DW_TASK_OUTPUTS.div_ceil(ohw).min(total.div_ceil(4 * rayon::current_num_threads())).max(1);
     par_chunks(out, per_task * ohw, &|t, ops| {
@@ -258,8 +258,10 @@ pub(super) fn depthwise_forward(
                 continue;
             }
             #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-            if fast_wasm {
-                depthwise_s1_wasm(xp, wk, op, g, accumulate, epi.map(|e| e.rows_from(oc)), &mut pad);
+            if let Some((owp, wpd, pad_len)) = wasm_pad
+                && wk.iter().all(|v| v.is_finite())
+            {
+                depthwise_s1_wasm(xp, wk, op, g, (owp, wpd, pad_len), epi.map(|e| e.rows_from(oc)), &mut pad);
                 continue;
             }
             if !accumulate {
@@ -281,16 +283,39 @@ pub(super) fn depthwise_forward(
     });
 }
 
-/// One output plane of a stride-1 depthwise conv with Wasm SIMD128 (`f32x4` x 4 register accumulators):
-/// pads the input plane once, computes taps in `(ky, kx)` order, and fuses `bias`, `bias + SiLU`, and
-/// `bias + ReLU` directly in `v128` registers.
+/// Maximum padded plane scratch (4M floats = 16 MiB) allowed for [`depthwise_s1_wasm`] before falling back
+/// to the zero-scratch scalar path.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+const DW_WASM_MAX_PAD: usize = 1 << 22;
+
+/// Checked `(owp, wpd, h * wpd)` for [`depthwise_s1_wasm`], or `None` if sizing overflows or exceeds
+/// [`DW_WASM_MAX_PAD`].
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn wasm_pad_dims(g: &ConvGeom) -> Option<(usize, usize, usize)> {
+    let pw = g.p.padding[1];
+    let dw = g.p.dilation[1];
+    let owp = g.ow.checked_add(3)? / 4 * 4;
+    let tap_span = dw.checked_mul(g.kw.saturating_sub(1))?.checked_add(owp)?;
+    let row_span = pw.checked_add(g.w)?;
+    let wpd = tap_span.max(row_span);
+    let pad_len = g.h.checked_mul(wpd)?;
+    (pad_len <= DW_WASM_MAX_PAD).then_some((owp, wpd, pad_len))
+}
+
+/// One output plane of a stride-1 overwriting depthwise conv with Wasm SIMD128 (`f32x4` × 4 register
+/// accumulators): pads the input plane once, computes taps in `(ky, kx)` order, and fuses `bias`,
+/// `bias + SiLU`, and `bias + ReLU` directly in `v128` registers.
+///
+/// Caller ensures `!accumulate` and every weight in `wk` is finite, so starting accumulators at `+0.0`
+/// guarantees `acc` never becomes `-0.0` and padded `wv * 0.0` taps leave every accumulator bitwise
+/// identical to [`depthwise_plane`].
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 fn depthwise_s1_wasm(
     xp: &[f32],
     wk: &[f32],
     op: &mut [f32],
     g: &ConvGeom,
-    accumulate: bool,
+    (owp, wpd, pad_len): (usize, usize, usize),
     epi: Option<BiasAct<'_>>,
     pad: &mut Vec<f32>,
 ) {
@@ -298,10 +323,8 @@ fn depthwise_s1_wasm(
     let (ph, pw) = (g.p.padding[0], g.p.padding[1]);
     let (dh, dw) = (g.p.dilation[0], g.p.dilation[1]);
     let (h, w, ow) = (g.h, g.w, g.ow);
-    let owp = ow.div_ceil(4) * 4;
-    let wpd = (owp + dw * (g.kw - 1)).max(pw + w);
     pad.clear();
-    pad.resize(h * wpd, 0.0);
+    pad.resize(pad_len, 0.0);
     if w > 0 {
         for (prow, xrow) in pad.chunks_exact_mut(wpd).zip(xp.chunks_exact(w)) {
             prow[pw..pw + w].copy_from_slice(xrow);
@@ -322,16 +345,6 @@ fn depthwise_s1_wasm(
         while x0 < owp {
             let nv = ((owp - x0) / 4).min(4);
             let mut acc = [zero; 4];
-            if accumulate {
-                for (v, a) in acc.iter_mut().enumerate().take(nv) {
-                    let c = x0 + 4 * v;
-                    let mut tmp = [0f32; 4];
-                    let len = ow.saturating_sub(c).min(4);
-                    tmp[..len].copy_from_slice(&orow[c..c + len]);
-                    // SAFETY: `tmp` holds 4 floats.
-                    *a = unsafe { v128_load(tmp.as_ptr() as *const v128) };
-                }
-            }
             for ky in 0..g.kh {
                 let iy = (oy + ky * dh) as isize - ph as isize;
                 if iy < 0 || iy >= h as isize {
@@ -358,7 +371,8 @@ fn depthwise_s1_wasm(
                     match act {
                         None => x,
                         Some(UnaryOp::Silu) => crate::cpu::elementwise::silu4_wasm(x),
-                        Some(UnaryOp::Relu) => f32x4_pmax(x, zero),
+                        // `f32x4_pmax(zero, x)` = `0.0 < x ? x : +0.0`, matching `x.max(0.0)` on `-0.0` and NaN.
+                        Some(UnaryOp::Relu) => f32x4_pmax(zero, x),
                         _ => unreachable!(),
                     }
                 };

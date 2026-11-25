@@ -883,4 +883,24 @@ fn binary_ops_simd_matches_scalar_with_edges() {
             }
         }
     }
+
+    // Verify `exp_neg_abs4` NaN-clamping contract directly on Wasm SIMD128.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        use std::arch::wasm32::*;
+        let inp = [f32::NAN, -0.0f32, 0.0, -200.0];
+        let mut got = [0.0f32; 4];
+        // SAFETY: `inp` and `got` are 4 floats.
+        unsafe {
+            let v = super::wasm_simd::exp_neg_abs4(v128_load(inp.as_ptr() as *const v128));
+            v128_store(got.as_mut_ptr() as *mut v128, v);
+        }
+        for (i, (&x, &g)) in inp.iter().zip(&got).enumerate() {
+            assert_eq!(
+                g.to_bits(),
+                simd::exp_neg_abs_scalar(x).to_bits(),
+                "exp_neg_abs4 mismatch at lane {i} ({x})"
+            );
+        }
+    }
 }

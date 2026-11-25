@@ -133,15 +133,17 @@ fn apply_winograd_epi_wasm(v: v128, act: Option<UnaryOp>, bv: v128) -> v128 {
     match act {
         None => x,
         Some(UnaryOp::Silu) => crate::cpu::elementwise::silu4_wasm(x),
-        Some(UnaryOp::Relu) => f32x4_pmax(x, zero),
+        // `f32x4_pmax(zero, x)` = `0.0 < x ? x : +0.0`, matching `x.max(0.0)` on `-0.0` and NaN.
+        Some(UnaryOp::Relu) => f32x4_pmax(zero, x),
         Some(UnaryOp::LeakyRelu(a)) => {
             let pos = f32x4_gt(x, zero);
             let neg = f32x4_mul(f32x4_splat(a), x);
             v128_bitselect(x, neg, pos)
         }
+        // `f32x4_pmin(f32x4_pmax(y, 0.0), 6.0)` preserves NaN and `-0.0`, matching `y.clamp(0.0, 6.0)`.
         Some(UnaryOp::Hardswish) => {
             let y = f32x4_add(x, f32x4_splat(3.0));
-            let c = f32x4_pmin(f32x4_splat(6.0), f32x4_pmax(zero, y));
+            let c = f32x4_pmin(f32x4_pmax(y, zero), f32x4_splat(6.0));
             f32x4_mul(f32x4_mul(x, c), f32x4_splat(1.0 / 6.0))
         }
         _ => unreachable!("apply_winograd_epi_wasm called for unfused activation"),

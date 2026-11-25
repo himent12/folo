@@ -275,10 +275,10 @@ pub(super) unsafe fn output_transform_wasm(
                                     q3 = crate::cpu::elementwise::silu4_wasm(q3);
                                 }
                                 Some(UnaryOp::Relu) => {
-                                    q0 = f32x4_pmax(q0, zero);
-                                    q1 = f32x4_pmax(q1, zero);
-                                    q2 = f32x4_pmax(q2, zero);
-                                    q3 = f32x4_pmax(q3, zero);
+                                    q0 = f32x4_pmax(zero, q0);
+                                    q1 = f32x4_pmax(zero, q1);
+                                    q2 = f32x4_pmax(zero, q2);
+                                    q3 = f32x4_pmax(zero, q3);
                                 }
                                 _ => {}
                             }

@@ -53,7 +53,8 @@ pub(super) fn exp_clamped4(xc: v128) -> v128 {
 pub(super) fn exp_neg_abs4(x: v128) -> v128 {
     let zero = f32x4_splat(0.0);
     let t_abs = f32x4_abs(x);
-    let t = f32x4_pmax(f32x4_sub(zero, t_abs), f32x4_splat(-104.0));
+    // `f32x4_pmax(a, b)` returns `a < b ? b : a`, so placing `-104.0` first matches `maxps(-|x|, -104.0)` on NaN.
+    let t = f32x4_pmax(f32x4_splat(-104.0), f32x4_sub(zero, t_abs));
     exp_clamped4(t)
 }
 
@@ -73,7 +74,7 @@ pub(super) fn recip_1_plus4(e: v128) -> v128 {
 /// `exp(x)` on four lanes, bitwise identical to `exp_scalar` (preserves NaN payload).
 #[inline(always)]
 pub(crate) fn exp4(x: v128) -> v128 {
-    let xc = f32x4_pmin(f32x4_pmax(x, f32x4_splat(-104.0)), f32x4_splat(89.0));
+    let xc = f32x4_pmin(f32x4_splat(89.0), f32x4_pmax(f32x4_splat(-104.0), x));
     let v = exp_clamped4(xc);
     v128_bitselect(x, v, f32x4_ne(x, x))
 }
@@ -178,7 +179,7 @@ fn tanh4(x: v128) -> v128 {
     q = f32x4_add(f32x4_mul(q, x2), f32x4_splat(TANH_C2));
     q = f32x4_add(f32x4_mul(q, x2), f32x4_splat(TANH_C1));
     let poly = f32x4_add(ax, f32x4_mul(ax, f32x4_mul(x2, q)));
-    let t = f32x4_pmax(f32x4_mul(f32x4_splat(-2.0), ax), f32x4_splat(-104.0));
+    let t = f32x4_pmax(f32x4_splat(-104.0), f32x4_mul(f32x4_splat(-2.0), ax));
     let e = exp_clamped4(t);
     let rec = recip_1_plus4(e);
     let large = f32x4_sub(f32x4_splat(1.0), f32x4_mul(f32x4_splat(2.0), f32x4_mul(e, rec)));
@@ -191,10 +192,10 @@ fn tanh4(x: v128) -> v128 {
 #[inline(always)]
 fn tanh_bwd4(x: v128, g: v128) -> v128 {
     let ax = f32x4_abs(x);
-    let t = f32x4_pmax(f32x4_mul(f32x4_splat(-2.0), ax), f32x4_splat(-104.0));
+    let t = f32x4_pmax(f32x4_splat(-104.0), f32x4_mul(f32x4_splat(-2.0), ax));
     let e = exp_clamped4(t);
     let rec = recip_1_plus4(e);
-    let ds = f32x4_pmin(f32x4_mul(f32x4_mul(f32x4_mul(f32x4_splat(4.0), e), rec), rec), f32x4_splat(1.0));
+    let ds = f32x4_pmin(f32x4_splat(1.0), f32x4_mul(f32x4_mul(f32x4_mul(f32x4_splat(4.0), e), rec), rec));
     let ds = v128_bitselect(x, ds, f32x4_ne(x, x));
     f32x4_mul(g, ds)
 }
@@ -213,7 +214,7 @@ fn softplus4(x: v128) -> v128 {
     p = f32x4_add(f32x4_mul(p, z2), f32x4_splat(LN1P_C2));
     p = f32x4_add(f32x4_mul(p, z2), f32x4_splat(LN1P_C1));
     let ln1p_e = f32x4_add(u, f32x4_mul(u, f32x4_mul(z2, p)));
-    let sp = f32x4_add(f32x4_pmax(x, f32x4_splat(0.0)), ln1p_e);
+    let sp = f32x4_add(f32x4_pmax(f32x4_splat(0.0), x), ln1p_e);
     v128_bitselect(x, sp, f32x4_ne(x, x))
 }
 
