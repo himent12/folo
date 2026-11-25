@@ -220,6 +220,113 @@ describe('For', () => {
     unmount();
   });
 
+  it('hoists focus check out of row moves when focus is outside the list and preserves nested focus on swaps and reorders', () => {
+    const list = signal([1, 2, 3, 4, 5]);
+    const { container, unmount } = render(() => (
+      <section>
+        <button id="outside">outside</button>
+        <ul>
+          <For each={list.get()}>
+            {(n) => (
+              <li>
+                <input value={String(n())} />
+              </li>
+            )}
+          </For>
+        </ul>
+      </section>
+    ));
+    const outside = container.querySelector<HTMLButtonElement>('#outside')!;
+    const ul = container.querySelector('ul')!;
+    const rowSpies = [...ul.querySelectorAll('li')].map((li) => vi.spyOn(li, 'contains'));
+    const parentSpy = vi.spyOn(ul, 'contains');
+
+    // Focus outside the list: LIS reorder checks parent.contains once, skips per-row walks, and keeps focus outside.
+    outside.focus();
+    list.set([5, 3, 1, 4, 2]);
+    flush();
+    expect(parentSpy).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(outside);
+    for (const s of rowSpies) expect(s).not.toHaveBeenCalled();
+
+    // End-for-end swap with focus still outside: checks parent.contains once, zero per-row contains walks.
+    parentSpy.mockClear();
+    list.set([2, 3, 1, 4, 5]);
+    flush();
+    expect(parentSpy).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(outside);
+    for (const s of rowSpies) expect(s).not.toHaveBeenCalled();
+
+    // Focus on document.body or on the parent itself: never calls parent.contains.
+    parentSpy.mockClear();
+    outside.blur();
+    list.set([5, 3, 1, 4, 2]);
+    flush();
+    expect(parentSpy).not.toHaveBeenCalled();
+
+    ul.tabIndex = -1;
+    ul.focus();
+    parentSpy.mockClear();
+    list.set([2, 3, 1, 4, 5]);
+    flush();
+    expect(parentSpy).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(ul);
+
+    // Pure append / remove: never calls parent.contains at all.
+    parentSpy.mockClear();
+    outside.focus();
+    list.set([2, 3, 1, 4, 5, 6]);
+    flush();
+    list.set([2, 3, 1, 4, 5]);
+    flush();
+    expect(parentSpy).not.toHaveBeenCalled();
+
+    // Focus inside a deeply nested input: preserved across both end-for-end swap and LIS reorder.
+    const targetInput = ul.querySelectorAll('input')[0]!;
+    targetInput.focus();
+    list.set([5, 3, 1, 4, 2]);
+    flush();
+    expect(document.activeElement).toBe(targetInput);
+    list.set([4, 2, 5, 1, 3]);
+    flush();
+    expect(document.activeElement).toBe(targetInput);
+
+    // Focus inside a removed row during a mixed remove + reorder: detached input is not refocused.
+    const doomed = ul.querySelectorAll('input')[0]!;
+    doomed.focus();
+    list.set([3, 1, 5, 2]);
+    flush();
+    expect(document.activeElement).not.toBe(doomed);
+
+    parentSpy.mockRestore();
+    for (const s of rowSpies) s.mockRestore();
+    unmount();
+  });
+
+  it('preserves focus redirected to another moved row by a focus listener during swap', () => {
+    const list = signal(['A', 'M', 'B']);
+    const { container, unmount } = render(() => (
+      <ul>
+        <For each={list.get()}>
+          {(id) => (
+            <li>
+              <input data-id={id()} />
+            </li>
+          )}
+        </For>
+      </ul>
+    ));
+    const inputA = container.querySelector<HTMLInputElement>('input[data-id="A"]')!;
+    const inputB = container.querySelector<HTMLInputElement>('input[data-id="B"]')!;
+    inputB.focus();
+    // When moving B restores focus on B, its focus listener redirects focus to A before A moves.
+    inputB.addEventListener('focus', () => inputA.focus());
+    list.set(['B', 'M', 'A']);
+    flush();
+    expect(document.activeElement).toBe(inputA);
+    unmount();
+  });
+
   it('disposes removed rows and everything on unmount', () => {
     const list = signal([1, 2, 3]);
     const disposed: number[] = [];
