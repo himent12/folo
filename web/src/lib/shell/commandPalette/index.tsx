@@ -233,6 +233,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
       class="palette"
       aria-label="Command palette"
       onclose={() => {
+        if (el?.open) return;
         data.cancelFetches();
         data.clearPending();
         open.set(false);

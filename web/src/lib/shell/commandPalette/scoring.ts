@@ -13,11 +13,11 @@ export interface PreparedText {
 
 export interface PreparedQuery {
   /** Trimmed, lowercased, single-space collapsed query string (used for word/text matching). */
-  norm: string;
+  readonly norm: string;
   /** Trimmed, lowercased query string without collapsing internal spaces (used for exact/prefix/suffix id matching). */
-  idNorm: string;
-  words: string[];
-  hasSpace: boolean;
+  readonly idNorm: string;
+  readonly words: readonly string[];
+  readonly hasSpace: boolean;
 }
 
 /** What the palette ranks: a label, and the other phrasings it answers to ("toggle theme", a dataset's own name). */
@@ -106,17 +106,16 @@ function prepareItem(item: Rankable): PreparedItem {
 }
 
 /**
- * Where `pq` matches `pt`, best way first, as the spans to mark, and how good that way is: the whole text,
- * its start, a word's start, every query word starting a word in order ("shapes s" in "shapes-small"), the middle of a
- * word, the words' initials ("nr" in "New run"). Characters scattered anywhere in order do not match: "cloud" must
- * not find every "Open … in Playground" (shell F14). Null for no match.
+ * Hot-path scorer (zero allocations): returns the match score for `pq` against `pt`, or -1 for no match.
+ * Precedence: exact text, prefix, word start, ordered word prefixes ("shapes s" in "shapes-small"), substring,
+ * word initials ("nr" in "New run"). Characters scattered anywhere in order do not match (shell F14).
  */
-function matchPrepared(pq: PreparedQuery, pt: PreparedText, needSpans: boolean): { score: number; spans: [number, number][] } | null {
+function scorePrepared(pq: PreparedQuery, pt: PreparedText): number {
   const q = pq.norm;
-  if (!q) return { score: 0, spans: [] };
+  if (!q) return 0;
   const t = pt.lower;
   const extra = (t.length - q.length) * 0.1;
-  if (t === q) return { score: 2000, spans: needSpans ? [[0, q.length]] : [] };
+  if (t === q) return 2000;
   const tw = pt.words;
   let atWord: number | undefined;
   for (let i = 0; i < tw.length; i++) {
@@ -126,42 +125,82 @@ function matchPrepared(pq: PreparedQuery, pt: PreparedText, needSpans: boolean):
       break;
     }
   }
-  if (atWord === 0) return { score: 1600 - extra, spans: needSpans ? [[0, q.length]] : [] };
-  if (atWord !== undefined) return { score: 1400 - atWord * 2 - extra, spans: needSpans ? [[atWord, atWord + q.length]] : [] };
+  if (atWord === 0) return 1600 - extra;
+  if (atWord !== undefined) return 1400 - atWord * 2 - extra;
   if (pq.words.length > 1) {
-    const spans: [number, number][] = [];
     let j = 0;
     let matched = 0;
     for (let wi = 0; wi < pq.words.length; wi++) {
       const w = pq.words[wi]!;
       while (j < tw.length && !tw[j]!.w.startsWith(w)) j++;
       if (j === tw.length) break;
-      if (needSpans) spans.push([tw[j]!.at, tw[j]!.at + w.length]);
       matched++;
       j++;
     }
-    if (matched === pq.words.length) return { score: 1100 - extra, spans };
+    if (matched === pq.words.length) return 1100 - extra;
   }
   const mid = t.indexOf(q);
-  if (mid >= 0) return { score: 800 - mid * 2 - extra, spans: needSpans ? [[mid, mid + q.length]] : [] };
+  if (mid >= 0) return 800 - mid * 2 - extra;
+  if (!pq.hasSpace && q.length >= 2 && q.length <= tw.length) {
+    let j = 0;
+    for (const ch of q) {
+      while (j < tw.length && tw[j]!.w[0] !== ch) j++;
+      if (j === tw.length) return -1;
+      j++;
+    }
+    return 500 - extra;
+  }
+  return -1;
+}
+
+/** Computes highlight spans for `pq` against `pt` using the same precedence as `scorePrepared`. */
+function matchSpans(pq: PreparedQuery, pt: PreparedText): [number, number][] {
+  const q = pq.norm;
+  if (!q) return [];
+  const t = pt.lower;
+  if (t === q) return [[0, q.length]];
+  const tw = pt.words;
+  let atWord: number | undefined;
+  for (let i = 0; i < tw.length; i++) {
+    const at = tw[i]!.at;
+    if (t.startsWith(q, at)) {
+      atWord = at;
+      break;
+    }
+  }
+  if (atWord === 0) return [[0, q.length]];
+  if (atWord !== undefined) return [[atWord, atWord + q.length]];
+  if (pq.words.length > 1) {
+    const spans: [number, number][] = [];
+    let j = 0;
+    for (let wi = 0; wi < pq.words.length; wi++) {
+      const w = pq.words[wi]!;
+      while (j < tw.length && !tw[j]!.w.startsWith(w)) j++;
+      if (j === tw.length) break;
+      spans.push([tw[j]!.at, tw[j]!.at + w.length]);
+      j++;
+    }
+    if (spans.length === pq.words.length) return spans;
+  }
+  const mid = t.indexOf(q);
+  if (mid >= 0) return [[mid, mid + q.length]];
   if (!pq.hasSpace && q.length >= 2 && q.length <= tw.length) {
     const spans: [number, number][] = [];
     let j = 0;
-    for (let ci = 0; ci < q.length; ci++) {
-      const ch = q[ci]!;
+    for (const ch of q) {
       while (j < tw.length && tw[j]!.w[0] !== ch) j++;
-      if (j === tw.length) return null;
-      if (needSpans) spans.push([tw[j]!.at, tw[j]!.at + 1]);
+      if (j === tw.length) return [];
+      spans.push([tw[j]!.at, tw[j]!.at + 1]);
       j++;
     }
-    return { score: 500 - extra, spans };
+    return spans;
   }
-  return null;
+  return [];
 }
 
-/** Scores how well `query` matches `text` (higher is better; see `matchPrepared`), or -1 for no match. */
+/** Scores how well `query` matches `text` (higher is better; see `scorePrepared`), or -1 for no match. */
 export function fuzzy(query: string, text: string): number {
-  return matchPrepared(prepareQuery(query), prepareText(text), false)?.score ?? -1;
+  return scorePrepared(prepareQuery(query), prepareText(text));
 }
 
 function sliceHighlight(text: string, spans: [number, number][]): { s: string; m: boolean }[] {
@@ -171,14 +210,13 @@ function sliceHighlight(text: string, spans: [number, number][]): { s: string; m
   for (const [a, b] of spans) {
     const start = Math.max(pos, Math.min(a, text.length));
     const end = Math.min(b, text.length);
+    if (end <= start) continue;
     if (start > pos) out.push({ s: text.slice(pos, start), m: false });
-    if (end > start) {
-      const seg = text.slice(start, end);
-      const prev = out[out.length - 1];
-      if (prev && prev.m) prev.s += seg;
-      else out.push({ s: seg, m: true });
-      pos = end;
-    }
+    const seg = text.slice(start, end);
+    const prev = out[out.length - 1];
+    if (prev && prev.m) prev.s += seg;
+    else out.push({ s: seg, m: true });
+    pos = end;
   }
   if (pos < text.length) out.push({ s: text.slice(pos), m: false });
   return out;
@@ -188,8 +226,8 @@ function sliceHighlight(text: string, spans: [number, number][]): { s: string; m
 export function highlight(query: string, text: string): { s: string; m: boolean }[] {
   if (!text) return [];
   const pq = prepareQuery(query);
-  const spans = pq.norm ? (matchPrepared(pq, prepareText(text), true)?.spans ?? []) : [];
-  return sliceHighlight(text, spans);
+  if (!pq.norm) return [{ s: text, m: false }];
+  return sliceHighlight(text, matchSpans(pq, prepareText(text)));
 }
 
 /** Highlights a rankable item's label using its cached PreparedText (zero per-keystroke tokenization). */
@@ -197,8 +235,7 @@ export function highlightItem(query: string, item: Rankable): { s: string; m: bo
   if (!item.label) return [];
   const pq = prepareQuery(query);
   if (!pq.norm) return [{ s: item.label, m: false }];
-  const spans = matchPrepared(pq, prepareItem(item).labelText, true)?.spans ?? [];
-  return sliceHighlight(item.label, spans);
+  return sliceHighlight(item.label, matchSpans(pq, prepareItem(item).labelText));
 }
 
 function idScorePrepared(idNorm: string, idLower: string): number {
@@ -224,13 +261,13 @@ export function rank<T extends Rankable>(items: T[], query: string, limit = 40):
   for (let idx = 0; idx < items.length; idx++) {
     const item = items[idx]!;
     const p = prepareItem(item);
-    let best = matchPrepared(pq, p.labelText, false)?.score ?? -1;
-    const grp = matchPrepared(pq, p.groupLabelText, false);
-    if (grp && grp.score - 20 > best) best = grp.score - 20;
+    let best = scorePrepared(pq, p.labelText);
+    const grpScore = scorePrepared(pq, p.groupLabelText);
+    if (grpScore >= 0 && grpScore - 20 > best) best = grpScore - 20;
     const penalty = item.scoped ? 10 : 0;
     for (let mi = 0; mi < p.matchTexts.length; mi++) {
-      const m = matchPrepared(pq, p.matchTexts[mi]!, false);
-      if (m && m.score - penalty > best) best = m.score - penalty;
+      const mScore = scorePrepared(pq, p.matchTexts[mi]!);
+      if (mScore >= 0 && mScore - penalty > best) best = mScore - penalty;
     }
     if (p.entityIdLower !== undefined) {
       const ids = idScorePrepared(pq.idNorm, p.entityIdLower);

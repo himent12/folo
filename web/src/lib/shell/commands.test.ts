@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { highlight, rank, type Rankable } from './commands';
+import { groupResults, highlightItem } from './commandPalette/scoring';
+import type { Item } from './commandPalette/types';
 
 const items: (Rankable & { id: string })[] = [
   { id: 'nav-runs', group: 'Go to', label: 'Runs' },
@@ -89,11 +91,33 @@ describe('rank', () => {
     ];
     expect(rank(dynamic, 'alpha').map((x) => x.id)).toEqual(['a']);
     expect(rank(dynamic, 'beta').map((x) => x.id)).toEqual(['b']);
-    // Mutating label/match invalidates the WeakMap entry automatically.
+    // Mutating label/match (including in-place push) invalidates the WeakMap entry automatically.
     dynamic[0]!.label = 'gamma-tuned';
     dynamic[0]!.match = ['special-alias'];
     expect(rank(dynamic, 'alpha').map((x) => x.id)).toEqual([]);
     expect(rank(dynamic, 'gamma').map((x) => x.id)).toEqual(['a']);
     expect(rank(dynamic, 'special').map((x) => x.id)).toEqual(['a']);
+    dynamic[0]!.match.push('pushed-alias');
+    expect(rank(dynamic, 'pushed').map((x) => x.id)).toEqual(['a']);
+  });
+
+  it('never duplicates text in highlight/highlightItem when lowercasing expands UTF-16 length', () => {
+    for (const label of ['İa', 'İ a', 'İabc']) {
+      const parts = highlight('a', label);
+      expect(parts.map((p) => p.s).join('')).toBe(label);
+      const itemParts = highlightItem('a', { group: 'Runs', label });
+      expect(itemParts.map((p) => p.s).join('')).toBe(label);
+    }
+  });
+
+  it('groups non-descriptive groups ahead of describes-only groups with sequential visual indices', () => {
+    const stub = (id: string, group: string, describes?: boolean) => ({ id, group, label: id, describes, run: () => {} }) as unknown as Item;
+    const grouped = groupResults([stub('act-1', 'Actions', true), stub('ds-1', 'Datasets'), stub('act-2', 'Actions', true)]);
+    expect(grouped.map((g) => g.group)).toEqual(['Datasets', 'Actions']);
+    expect(grouped.flatMap((g) => g.items.map((x) => [x.item.id, x.n]))).toEqual([
+      ['ds-1', 0],
+      ['act-1', 1],
+      ['act-2', 2],
+    ]);
   });
 });
