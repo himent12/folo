@@ -3,9 +3,13 @@
 //!
 //! Every input is a strided view (offset + strides, stride 0 broadcasts) of the output's shape, so broadcast
 //! and transposed operands are read in place instead of being copied first. The shape is coalesced across all
-//! operands; when every input is contiguous the kernel indexes linearly (with `vec4` loads when sizes and
-//! offsets allow), otherwise it walks up to [`MAX_RANK`] dims. Semantics follow folo-core's CPU kernels: stable
-//! sigmoid / softplus, NaN-ignoring `max` / `min` (Rust's `f32::max`), C `powf`, rounding half away from zero.
+//! operands; when the innermost coalesced dim is a multiple of 4 and every operand is either contiguous along
+//! it (with 4-aligned offset and outer strides) or broadcast along it (stride 0, no alignment required), the
+//! kernel emits `vec4` loads/stores (splatting broadcast operands and unpacking 4 `u8` condition bytes per
+//! `u32` word). Otherwise it falls back to scalar indexing over up to [`MAX_RANK`] dims. Each generated shader
+//! emits only the active `(KIND, OP)` body and the helper functions it references. Semantics follow
+//! folo-core's CPU kernels: stable sigmoid / softplus, NaN-ignoring `max` / `min` (Rust's `f32::max`), C
+//! `powf`, rounding half away from zero.
 //!
 //! Values are stored as f32 or (with `shader-f16`) f16: every value operand and the output share one storage
 //! type, the arithmetic is f32 either way (an f16 input is widened on load and the result rounded once on the
@@ -107,24 +111,25 @@ fn binary_code(op: BinaryOp) -> Result<u32> {
     })
 }
 
-/// Op functions over `V` (`f32` or `vec4<f32>`); `a` / `b` are the op's scalar parameters.
-const EW_FNS: &str = r#"
-fn isnanv(x: V) -> BV { return (bitcast<UV>(x) & UV(0x7fffffffu)) > UV(0x7f800000u); }
+const FN_ISNANV: &str =
+    "fn isnanv(x: V) -> BV { return (bitcast<UV>(x) & UV(0x7fffffffu)) > UV(0x7f800000u); }\n";
 // Rust f32::max / f32::min: a NaN operand loses.
-fn maxn(a: V, b: V) -> V { return select(select(max(a, b), a, isnanv(b)), b, isnanv(a)); }
-fn minn(a: V, b: V) -> V { return select(select(min(a, b), a, isnanv(b)), b, isnanv(a)); }
-fn sigm(x: V) -> V { let e = exp(-abs(x)); let r = V(1.0) / (V(1.0) + e); return select(e * r, r, x >= V(0.0)); }
-fn log1pv(e: V) -> V { let u = V(1.0) + e; return select(log(u) * (e / (u - V(1.0))), e, u == V(1.0)); }
-fn tanhv(x: V) -> V {
-    return select(select(tanh(clamp(x, V(-9.0), V(9.0))), sign(x), abs(x) >= V(9.0)), x, isnanv(x));
-}
-fn sgn(x: V) -> V { return select(select(V(0.0), V(-1.0), x < V(0.0)), V(1.0), x > V(0.0)); }
-fn roundv(x: V) -> V { let t = trunc(x); return select(t, t + sgn(x), abs(x - t) >= V(0.5)); }
-fn mask(c: BV) -> V { return select(V(0.0), V(1.0), c); }
-fn ordered(x: V, y: V) -> BV { return !(isnanv(x) | isnanv(y)); }
+const FN_MAXN: &str =
+    "fn maxn(a: V, b: V) -> V { return select(select(max(a, b), a, isnanv(b)), b, isnanv(a)); }\n";
+const FN_MINN: &str =
+    "fn minn(a: V, b: V) -> V { return select(select(min(a, b), a, isnanv(b)), b, isnanv(a)); }\n";
+const FN_SIGM: &str = "fn sigm(x: V) -> V { let e = exp(-abs(x)); let r = V(1.0) / (V(1.0) + e); return select(e * r, r, x >= V(0.0)); }\n";
+const FN_LOG1PV: &str = "fn log1pv(e: V) -> V { let u = V(1.0) + e; return select(log(u) * (e / (u - V(1.0))), e, u == V(1.0)); }\n";
+const FN_TANHV: &str = "fn tanhv(x: V) -> V {\n    return select(select(tanh(clamp(x, V(-9.0), V(9.0))), sign(x), abs(x) >= V(9.0)), x, isnanv(x));\n}\n";
+const FN_SGN: &str =
+    "fn sgn(x: V) -> V { return select(select(V(0.0), V(-1.0), x < V(0.0)), V(1.0), x > V(0.0)); }\n";
+const FN_ROUNDV: &str =
+    "fn roundv(x: V) -> V { let t = trunc(x); return select(t, t + sgn(x), abs(x - t) >= V(0.5)); }\n";
+const FN_MASK: &str = "fn mask(c: BV) -> V { return select(V(0.0), V(1.0), c); }\n";
+const FN_ORDERED: &str = "fn ordered(x: V, y: V) -> BV { return !(isnanv(x) | isnanv(y)); }\n";
 
 // C `powf` for one lane (see binary.wgsl); NaN and +inf come from params 62 / 63.
-fn pow1(x: f32, y: f32) -> f32 {
+const FN_POW1: &str = r#"fn pow1(x: f32, y: f32) -> f32 {
     let bx = bitcast<u32>(x);
     let ax = bx & 0x7fffffffu;
     let ay = bitcast<u32>(y) & 0x7fffffffu;
@@ -148,123 +153,279 @@ fn pow1(x: f32, y: f32) -> f32 {
     let r = exp2(y * log2(bitcast<f32>(ax)));
     return select(r, -r, negate);
 }
-
-fn un(x: V, a: f32, b: f32) -> V {
-    switch OP {
-        case 0u: { return -x; }
-        case 1u: { return abs(x); }
-        case 2u: { return exp(x); }
-        case 3u: { return log(x); }
-        case 4u: { return sqrt(x); }
-        case 5u: { return V(1.0) / sqrt(x); }
-        case 6u: { return V(1.0) / x; }
-        case 7u: { return x * x; }
-        case 8u: { return sin(x); }
-        case 9u: { return cos(x); }
-        case 10u: { return tanhv(x); }
-        case 11u: { return sigm(x); }
-        case 12u: { return x * sigm(x); }
-        case 13u: { return maxn(x, V(0.0)); }
-        case 14u: { return select(V(a) * x, x, x > V(0.0)); }
-        case 15u: { return x * clamp(x + V(3.0), V(0.0), V(6.0)) * V(1.0 / 6.0); }
-        case 16u: { return max(x, V(0.0)) + log1pv(exp(-abs(x))); }
-        case 17u: { return minn(maxn(x, V(a)), V(b)); }
-        case 18u: {
-            if (a == 2.0) { return x * x; }
-            if (a == 0.5) { return sqrt(x); }
-            return powv(x, V(a));
-        }
-        case 19u: { return x + V(a); }
-        case 20u: { return x * V(a); }
-        case 21u: { return V(a) - x; }
-        case 22u: { return V(a) / x; }
-        case 23u: { return x / V(a); }
-        case 24u: { return maxn(x, V(a)); }
-        case 25u: { return minn(x, V(a)); }
-        case 26u: { return floor(x); }
-        case 27u: { return ceil(x); }
-        case 28u: { return roundv(x); }
-        default: { return sgn(x); }
-    }
-}
-
-fn unb(x: V, g: V, a: f32, b: f32) -> V {
-    switch OP {
-        case 0u: { return -g; }
-        case 1u: { return g * sgn(x); }
-        case 2u: { return g * exp(x); }
-        case 3u: { return g / x; }
-        case 4u: { return g * V(0.5) / sqrt(x); }
-        case 5u: { return V(-0.5) * g / sqrt(x) / x; }
-        case 6u: { return -(g / x) / x; }
-        case 7u: { return V(2.0) * x * g; }
-        case 8u: { return g * cos(x); }
-        case 9u: { return -g * sin(x); }
-        case 10u: { let t = tanhv(x); return g * (V(1.0) - t * t); }
-        case 11u: { let s = sigm(x); return g * s * (V(1.0) - s); }
-        case 12u: { let s = sigm(x); return g * (s + x * s * (V(1.0) - s)); }
-        case 13u: { return select(V(0.0), g, x > V(0.0)); }
-        case 14u: { return select(V(a) * g, g, x > V(0.0)); }
-        case 15u: {
-            let mid = g * (V(2.0) * x + V(3.0)) * V(1.0 / 6.0);
-            return select(select(mid, g, x > V(3.0)), V(0.0), x < V(-3.0));
-        }
-        case 16u: { return g * sigm(x); }
-        case 17u: { return select(V(0.0), g, (x >= V(a)) & (x <= V(b))); }
-        case 18u: {
-            if (a == 0.0) { return V(0.0); }
-            return g * V(a) * powv(x, V(a - 1.0));
-        }
-        case 19u: { return g; }
-        case 20u: { return g * V(a); }
-        case 21u: { return -g; }
-        case 22u: { return -(g * (V(a) / x)) / x; }
-        case 23u: { return g / V(a); }
-        case 24u: { return select(V(0.0), g, x >= V(a)); }
-        case 25u: { return select(V(0.0), g, x <= V(a)); }
-        default: { return V(0.0); }
-    }
-}
-
-fn bin(x: V, y: V) -> V {
-    switch OP {
-        case 0u: { return x + y; }
-        case 1u: { return x - y; }
-        case 2u: { return x * y; }
-        case 3u: { return x / y; }
-        case 4u: { return powv(x, y); }
-        case 5u: { return maxn(x, y); }
-        case 6u: { return minn(x, y); }
-        // Comparisons with a NaN operand are false (true for `ne`), whatever the driver assumes about NaN.
-        case 7u: { return mask((x == y) & ordered(x, y)); }
-        case 8u: { return mask(!((x == y) & ordered(x, y))); }
-        case 9u: { return mask((x > y) & ordered(x, y)); }
-        case 10u: { return mask((x >= y) & ordered(x, y)); }
-        case 11u: { return mask((x < y) & ordered(x, y)); }
-        default: { return mask((x <= y) & ordered(x, y)); }
-    }
-}
 "#;
 
 const POW_SCALAR: &str = "fn powv(x: f32, y: f32) -> f32 { return pow1(x, y); }\n";
 const POW_VEC: &str = "fn powv(x: vec4<f32>, y: vec4<f32>) -> vec4<f32> {\n\
     \x20 return vec4<f32>(pow1(x.x, y.x), pow1(x.y, y.y), pow1(x.z, y.z), pow1(x.w, y.w));\n}\n";
 
-/// Spec: KIND (1 unary, 2 unary backward, 3 binary, 4 where), OP, RANK (0 = linear), VEC4, COND_U8, and the
-/// f16 switch (value storage `S` is f16 / `vec4<f16>`, the arithmetic type `V` stays f32 / `vec4<f32>`).
+/// Appends only the helper functions and active op function (`un`, `unb`, or `bin`) needed by `(kind, op)`.
+fn push_ew_op(s: &mut String, kind: u32, op: u32, vec: bool) {
+    let mut need_isnan = false;
+    let mut need_maxn = false;
+    let mut need_minn = false;
+    let mut need_sigm = false;
+    let mut need_log1p = false;
+    let mut need_tanh = false;
+    let mut need_sgn = false;
+    let mut need_round = false;
+    let mut need_mask = false;
+    let mut need_ordered = false;
+    let mut need_pow = false;
+
+    let body = match kind {
+        1 => match op {
+            0 => "return -x;",
+            1 => "return abs(x);",
+            2 => "return exp(x);",
+            3 => "return log(x);",
+            4 => "return sqrt(x);",
+            5 => "return V(1.0) / sqrt(x);",
+            6 => "return V(1.0) / x;",
+            7 => "return x * x;",
+            8 => "return sin(x);",
+            9 => "return cos(x);",
+            10 => {
+                need_isnan = true;
+                need_tanh = true;
+                "return tanhv(x);"
+            }
+            11 => {
+                need_sigm = true;
+                "return sigm(x);"
+            }
+            12 => {
+                need_sigm = true;
+                "return x * sigm(x);"
+            }
+            13 => {
+                need_isnan = true;
+                need_maxn = true;
+                "return maxn(x, V(0.0));"
+            }
+            14 => "return select(V(a) * x, x, x > V(0.0));",
+            15 => "return x * clamp(x + V(3.0), V(0.0), V(6.0)) * V(1.0 / 6.0);",
+            16 => {
+                need_log1p = true;
+                "return max(x, V(0.0)) + log1pv(exp(-abs(x)));"
+            }
+            17 => {
+                need_isnan = true;
+                need_maxn = true;
+                need_minn = true;
+                "return minn(maxn(x, V(a)), V(b));"
+            }
+            18 => {
+                need_pow = true;
+                "if (a == 2.0) { return x * x; }\n    if (a == 0.5) { return sqrt(x); }\n    return powv(x, V(a));"
+            }
+            19 => "return x + V(a);",
+            20 => "return x * V(a);",
+            21 => "return V(a) - x;",
+            22 => "return V(a) / x;",
+            23 => "return x / V(a);",
+            24 => {
+                need_isnan = true;
+                need_maxn = true;
+                "return maxn(x, V(a));"
+            }
+            25 => {
+                need_isnan = true;
+                need_minn = true;
+                "return minn(x, V(a));"
+            }
+            26 => "return floor(x);",
+            27 => "return ceil(x);",
+            28 => {
+                need_sgn = true;
+                need_round = true;
+                "return roundv(x);"
+            }
+            _ => {
+                need_sgn = true;
+                "return sgn(x);"
+            }
+        },
+        2 => match op {
+            0 => "return -g;",
+            1 => {
+                need_sgn = true;
+                "return g * sgn(x);"
+            }
+            2 => "return g * exp(x);",
+            3 => "return g / x;",
+            4 => "return g * V(0.5) / sqrt(x);",
+            5 => "return V(-0.5) * g / sqrt(x) / x;",
+            6 => "return -(g / x) / x;",
+            7 => "return V(2.0) * x * g;",
+            8 => "return g * cos(x);",
+            9 => "return -g * sin(x);",
+            10 => {
+                need_isnan = true;
+                need_tanh = true;
+                "let t = tanhv(x); return g * (V(1.0) - t * t);"
+            }
+            11 => {
+                need_sigm = true;
+                "let s = sigm(x); return g * s * (V(1.0) - s);"
+            }
+            12 => {
+                need_sigm = true;
+                "let s = sigm(x); return g * (s + x * s * (V(1.0) - s));"
+            }
+            13 => "return select(V(0.0), g, x > V(0.0));",
+            14 => "return select(V(a) * g, g, x > V(0.0));",
+            15 => {
+                "let mid = g * (V(2.0) * x + V(3.0)) * V(1.0 / 6.0);\n    \
+                 return select(select(mid, g, x > V(3.0)), V(0.0), x < V(-3.0));"
+            }
+            16 => {
+                need_sigm = true;
+                "return g * sigm(x);"
+            }
+            17 => "return select(V(0.0), g, (x >= V(a)) & (x <= V(b)));",
+            18 => {
+                need_pow = true;
+                "if (a == 0.0) { return V(0.0); }\n    return g * V(a) * powv(x, V(a - 1.0));"
+            }
+            19 => "return g;",
+            20 => "return g * V(a);",
+            21 => "return -g;",
+            22 => "return -(g * (V(a) / x)) / x;",
+            23 => "return g / V(a);",
+            24 => "return select(V(0.0), g, x >= V(a));",
+            25 => "return select(V(0.0), g, x <= V(a));",
+            _ => "return V(0.0);",
+        },
+        3 => match op {
+            0 => "return x + y;",
+            1 => "return x - y;",
+            2 => "return x * y;",
+            3 => "return x / y;",
+            4 => {
+                need_pow = true;
+                "return powv(x, y);"
+            }
+            5 => {
+                need_isnan = true;
+                need_maxn = true;
+                "return maxn(x, y);"
+            }
+            6 => {
+                need_isnan = true;
+                need_minn = true;
+                "return minn(x, y);"
+            }
+            // Comparisons with a NaN operand are false (true for `ne`), whatever the driver assumes about NaN.
+            7 => {
+                need_isnan = true;
+                need_ordered = true;
+                need_mask = true;
+                "return mask((x == y) & ordered(x, y));"
+            }
+            8 => {
+                need_isnan = true;
+                need_ordered = true;
+                need_mask = true;
+                "return mask(!((x == y) & ordered(x, y)));"
+            }
+            9 => {
+                need_isnan = true;
+                need_ordered = true;
+                need_mask = true;
+                "return mask((x > y) & ordered(x, y));"
+            }
+            10 => {
+                need_isnan = true;
+                need_ordered = true;
+                need_mask = true;
+                "return mask((x >= y) & ordered(x, y));"
+            }
+            11 => {
+                need_isnan = true;
+                need_ordered = true;
+                need_mask = true;
+                "return mask((x < y) & ordered(x, y));"
+            }
+            _ => {
+                need_isnan = true;
+                need_ordered = true;
+                need_mask = true;
+                "return mask((x <= y) & ordered(x, y));"
+            }
+        },
+        _ => return,
+    };
+
+    if need_isnan {
+        s.push_str(FN_ISNANV);
+    }
+    if need_maxn {
+        s.push_str(FN_MAXN);
+    }
+    if need_minn {
+        s.push_str(FN_MINN);
+    }
+    if need_sigm {
+        s.push_str(FN_SIGM);
+    }
+    if need_log1p {
+        s.push_str(FN_LOG1PV);
+    }
+    if need_tanh {
+        s.push_str(FN_TANHV);
+    }
+    if need_sgn {
+        s.push_str(FN_SGN);
+    }
+    if need_round {
+        s.push_str(FN_ROUNDV);
+    }
+    if need_mask {
+        s.push_str(FN_MASK);
+    }
+    if need_ordered {
+        s.push_str(FN_ORDERED);
+    }
+    if need_pow {
+        s.push_str(FN_POW1);
+        s.push_str(if vec { POW_VEC } else { POW_SCALAR });
+    }
+    match kind {
+        1 => {
+            let _ = writeln!(s, "fn un(x: V, a: f32, b: f32) -> V {{\n    {body}\n}}");
+        }
+        2 => {
+            let _ = writeln!(s, "fn unb(x: V, g: V, a: f32, b: f32) -> V {{\n    {body}\n}}");
+        }
+        3 => {
+            let _ = writeln!(s, "fn bin(x: V, y: V) -> V {{\n    {body}\n}}");
+        }
+        _ => {}
+    }
+}
+
+/// Spec: KIND (1 unary, 2 unary backward, 3 binary, 4 where), OP, RANK (0 = linear), VEC4, BCAST (3-bit mask of
+/// inputs whose innermost coalesced dim is broadcast under VEC4, read as scalars and splatted), COND_U8, and the
+/// f16 switch (value storage `S` is f16 / `vec4<f16>`, scalar broadcast storage `S1` is f16 / f32, and the
+/// arithmetic type `V` stays f32 / `vec4<f32>`).
 /// Params: 0 = output units, 2 = a, 3 = b, 4.. dims, 12.. / 20.. / 28.. strides of inputs 0 / 1 / 2,
-/// 36 / 37 / 38 = input offsets (in units), 62 = NaN, 63 = +inf.
+/// 36 / 37 / 38 = input offsets (in `vec4` / `u32` units for vector inputs, in elements for scalar/broadcast
+/// inputs), 62 = NaN, 63 = +inf.
 fn gen_ew(spec: &Spec) -> String {
     let kind = spec.get_u32("KIND", 1);
+    let op = spec.get_u32("OP", 0);
     let rank = spec.get_u32("RANK", 0);
     let vec = spec.get_bool("VEC4");
+    let bcast = if vec { spec.get_u32("BCAST", 0) } else { 0 };
     let cond_u8 = spec.get_bool("COND_U8");
     let half = spec.is_f16();
-    let nin = match kind {
+    let nin: u32 = match kind {
         1 => 1,
         2 | 3 => 2,
         _ => 3,
     };
+    let is_bcast = |k: u32| vec && ((bcast & (1u32 << k)) != 0);
     let mut s = String::new();
     if vec {
         s.push_str("alias V = vec4<f32>;\nalias UV = vec4<u32>;\nalias BV = vec4<bool>;\n");
@@ -273,21 +434,23 @@ fn gen_ew(spec: &Spec) -> String {
     }
     let _ = writeln!(
         s,
-        "alias S = {};",
+        "alias S = {};\nalias S1 = {};",
         match (half, vec) {
             (true, true) => "vec4<f16>",
             (true, false) => "f16",
             (false, true) => "vec4<f32>",
             (false, false) => "f32",
-        }
+        },
+        if half { "f16" } else { "f32" },
     );
-    s.push_str(EW_FNS);
-    s.push_str(if vec { POW_VEC } else { POW_SCALAR });
+    push_ew_op(&mut s, kind, op, vec);
     for i in 0..nin {
-        let ty = match (i == 0 && kind == 4, cond_u8) {
-            (true, true) => "u32",
-            (true, false) => "V",
-            _ => "S",
+        let ty = match (i == 0 && kind == 4, cond_u8, is_bcast(i)) {
+            (true, true, _) => "u32",
+            (true, false, true) => "f32",
+            (true, false, false) => "V",
+            (false, _, true) => "S1",
+            (false, _, false) => "S",
         };
         let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> X{i}: array<{ty}>;", i + 1);
     }
@@ -297,12 +460,18 @@ fn gen_ew(spec: &Spec) -> String {
          fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
          \x20       @builtin(local_invocation_index) lid: u32) {\n\
          \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
-         \x20 if (i >= pu(0u)) { return; }\n\
-         \x20 let a = pf(2u); let b = pf(3u);\n",
+         \x20 if (i >= pu(0u)) { return; }\n",
     );
+    if kind <= 2 {
+        s.push_str("  let a = pf(2u); let b = pf(3u);\n");
+    }
     for k in 0..nin {
         if rank == 0 {
-            let _ = writeln!(s, "  let o{k} = pu({}u) + i;", 36 + k);
+            if is_bcast(k) {
+                let _ = writeln!(s, "  let o{k} = pu({}u);", 36 + k);
+            } else {
+                let _ = writeln!(s, "  let o{k} = pu({}u) + i;", 36 + k);
+            }
         } else {
             let _ = writeln!(s, "  var o{k} = pu({}u);", 36 + k);
         }
@@ -322,22 +491,93 @@ fn gen_ew(spec: &Spec) -> String {
             s.push_str("  }\n");
         }
     }
+    let load_v = |k: u32| {
+        if is_bcast(k) { format!("V(f32(X{k}[o{k}]))") } else { format!("V(X{k}[o{k}])") }
+    };
+    let load_s = |k: u32| {
+        if is_bcast(k) { format!("S(X{k}[o{k}])") } else { format!("X{k}[o{k}]") }
+    };
     match kind {
-        1 => s.push_str("  Y[i] = S(un(V(X0[o0]), a, b));\n"),
-        2 => s.push_str("  Y[i] = S(unb(V(X0[o0]), V(X1[o1]), a, b));\n"),
-        3 => s.push_str("  Y[i] = S(bin(V(X0[o0]), V(X1[o1])));\n"),
+        1 => {
+            let _ = writeln!(s, "  Y[i] = S(un({}, a, b));", load_v(0));
+        }
+        2 => {
+            let _ = writeln!(s, "  Y[i] = S(unb({}, {}, a, b));", load_v(0), load_v(1));
+        }
+        3 => {
+            let _ = writeln!(s, "  Y[i] = S(bin({}, {}));", load_v(0), load_v(1));
+        }
         _ => {
             if cond_u8 {
-                s.push_str("  let c = ((X0[o0 >> 2u] >> ((o0 & 3u) * 8u)) & 0xffu) != 0u;\n");
-            } else {
+                if !vec {
+                    s.push_str("  let c = ((X0[o0 >> 2u] >> ((o0 & 3u) * 8u)) & 0xffu) != 0u;\n");
+                } else if is_bcast(0) {
+                    s.push_str("  let c = vec4<bool>(((X0[o0 >> 2u] >> ((o0 & 3u) * 8u)) & 0xffu) != 0u);\n");
+                } else {
+                    s.push_str(
+                        "  let w = X0[o0];\n  \
+                         let c = (vec4<u32>(w) & vec4<u32>(0xffu, 0xff00u, 0xff0000u, 0xff000000u)) != vec4<u32>(0u);\n",
+                    );
+                }
+            } else if is_bcast(0) {
                 // Nonzero by bit pattern, so NaN counts as true (as on the CPU) whatever the driver assumes.
+                s.push_str("  let c = vec4<bool>((bitcast<u32>(X0[o0]) & 0x7fffffffu) != 0u);\n");
+            } else {
                 s.push_str("  let c = (bitcast<UV>(X0[o0]) & UV(0x7fffffffu)) != UV(0u);\n");
             }
-            s.push_str("  Y[i] = select(X2[o2], X1[o1], c);\n");
+            let _ = writeln!(s, "  Y[i] = select({}, {}, c);", load_s(2), load_s(1));
         }
     }
     s.push_str("}\n");
     s
+}
+
+struct EwPlan {
+    dims: Vec<usize>,
+    strides: Vec<Vec<usize>>,
+    offsets: Vec<usize>,
+    vec: bool,
+    bcast: u32,
+    linear: bool,
+}
+
+/// Coalesces `dims`/`strides` and detects whether the innermost coalesced dim can be vectorized by 4 (with
+/// broadcast operands splatted from scalar reads).
+fn plan_ew(dims: &[usize], strides: &[&[usize]], mut offsets: Vec<usize>) -> EwPlan {
+    let (mut cd, mut cs) = coalesce(dims, strides);
+    let mut bcast_mask = 0u32;
+    let vec = !cd.is_empty() && {
+        let last = cd.len() - 1;
+        cd[last].is_multiple_of(4)
+            && cs.iter().zip(&offsets).enumerate().all(|(j, (s, &off))| {
+                if s[last] == 0 {
+                    bcast_mask |= 1u32 << j;
+                    true
+                } else {
+                    s[last] == 1 && off.is_multiple_of(4) && s[..last].iter().all(|v| v.is_multiple_of(4))
+                }
+            })
+    };
+    let bcast = if vec { bcast_mask } else { 0 };
+    if vec {
+        let last = cd.len() - 1;
+        cd[last] /= 4;
+        for (j, (s, off)) in cs.iter_mut().zip(offsets.iter_mut()).enumerate() {
+            if (bcast & (1u32 << j)) == 0 {
+                *off /= 4;
+                for v in &mut s[..last] {
+                    *v /= 4;
+                }
+            }
+        }
+        // Dropping a trailing dim that shrank to 1 can merge adjacent outer dims (e.g. `[C, 4] + [C, 1]`).
+        let s_refs: Vec<&[usize]> = cs.iter().map(Vec::as_slice).collect();
+        (cd, cs) = coalesce(&cd, &s_refs);
+    }
+    let linear = cd.is_empty()
+        || (cd.len() == 1
+            && cs.iter().enumerate().all(|(j, s)| s[0] == usize::from((bcast & (1u32 << j)) == 0)));
+    EwPlan { dims: cd, strides: cs, offsets, vec, bcast, linear }
 }
 
 static EW1: KernelDef =
@@ -402,22 +642,26 @@ pub fn elementwise(
         return Ok(());
     }
     let strides: Vec<&[usize]> = inputs.iter().map(|i| i.view.strides.as_slice()).collect();
-    let (cd, cs) = coalesce(dims, &strides);
-    let linear = cd.len() <= 1 && cs.iter().all(|s| s.first().is_none_or(|&v| v == 1));
     let offsets: Vec<usize> = inputs.iter().map(|i| i.view.offset).collect();
-    let vec = linear && !cond_u8 && n.is_multiple_of(4) && offsets.iter().all(|o| o.is_multiple_of(4));
-    if !linear && cd.len() > MAX_RANK {
-        return Err(shape_err(format!("elementwise: rank {} after coalescing exceeds {MAX_RANK}", cd.len())));
+    let plan = plan_ew(dims, &strides, offsets);
+    if !plan.linear && plan.dims.len() > MAX_RANK {
+        return Err(shape_err(format!(
+            "elementwise: rank {} after coalescing exceeds {MAX_RANK}",
+            plan.dims.len()
+        )));
     }
-    let q = if vec { 4 } else { 1 };
+    let q = if plan.vec { 4 } else { 1 };
     let units = n / q;
-    let spec = Spec::new()
+    let mut spec = Spec::new()
         .u32("KIND", kind)
         .u32("OP", code)
-        .u32("RANK", if linear { 0 } else { cd.len() as u32 })
-        .bool("VEC4", vec)
+        .u32("RANK", if plan.linear { 0 } else { plan.dims.len() as u32 })
+        .bool("VEC4", plan.vec)
         .bool("COND_U8", cond_u8)
         .f16(dtype == DType::F16);
+    if plan.bcast != 0 {
+        spec = spec.u32("BCAST", plan.bcast);
+    }
     let def = match nin {
         1 => &EW1,
         2 => &EW2,
@@ -426,16 +670,20 @@ pub fn elementwise(
     let k = ctx.kernel(def, spec)?;
     let mut p = Params::new().uz(units)?.u(0).f(a).f(b).at(4);
     for i in 0..MAX_RANK {
-        p = p.uz(if linear { 1 } else { cd.get(i).copied().unwrap_or(1) })?;
+        p = p.uz(if plan.linear { 1 } else { plan.dims.get(i).copied().unwrap_or(1) })?;
     }
     for j in 0..3 {
         for i in 0..MAX_RANK {
-            let v = if linear { 0 } else { cs.get(j).and_then(|s| s.get(i)).copied().unwrap_or(0) };
+            let v = if plan.linear {
+                0
+            } else {
+                plan.strides.get(j).and_then(|s| s.get(i)).copied().unwrap_or(0)
+            };
             p = p.uz(v)?;
         }
     }
     for j in 0..3 {
-        p = p.uz(offsets.get(j).copied().unwrap_or(0) / q)?;
+        p = p.uz(plan.offsets.get(j).copied().unwrap_or(0))?;
     }
     let p = p.at(62).f(f32::NAN).f(f32::INFINITY);
     let mut bufs: Vec<&wgpu::Buffer> = inputs.iter().map(|i| i.buf).collect();
@@ -445,3 +693,64 @@ pub fn elementwise(
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
 pub(crate) static DEFS: &[&KernelDef] = &[&EW1, &EW2, &EW3];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gen_ew_prunes_unused_ops_and_helpers() {
+        let add_src = gen_ew(&Spec::new().u32("KIND", 3).u32("OP", 0).u32("RANK", 0).bool("VEC4", true));
+        assert!(add_src.contains("fn bin(") && add_src.contains("return x + y;"));
+        for dead in ["fn un(", "fn unb(", "fn pow1(", "fn tanhv(", "fn sigm(", "fn isnanv(", "fn roundv("] {
+            assert!(!add_src.contains(dead), "add shader unexpectedly contains {dead}");
+        }
+
+        let silu_src = gen_ew(&Spec::new().u32("KIND", 1).u32("OP", 12).u32("RANK", 0).bool("VEC4", true));
+        assert!(silu_src.contains("fn sigm(") && silu_src.contains("fn un("));
+        for dead in ["fn unb(", "fn bin(", "fn pow1(", "fn tanhv(", "fn isnanv("] {
+            assert!(!silu_src.contains(dead), "silu shader unexpectedly contains {dead}");
+        }
+
+        let where_src = gen_ew(
+            &Spec::new()
+                .u32("KIND", 4)
+                .u32("OP", 0)
+                .u32("RANK", 2)
+                .bool("VEC4", true)
+                .u32("BCAST", 0b101)
+                .bool("COND_U8", true),
+        );
+        for dead in ["fn un(", "fn unb(", "fn bin(", "fn pow1(", "fn sigm("] {
+            assert!(!where_src.contains(dead), "where shader unexpectedly contains {dead}");
+        }
+        assert!(where_src.contains("X0: array<u32>"));
+        assert!(where_src.contains("X1: array<S>"));
+        assert!(where_src.contains("X2: array<S1>"));
+    }
+
+    #[test]
+    fn plan_ew_vectorizes_broadcast_and_rejects_unaligned() {
+        // [2, 3, 4, 5] + [1, 3, 1, 1] -> [2, 3, 20] -> vec4 [2, 3, 5] with bcast bit 1 (odd offset allowed).
+        let p = plan_ew(&[2, 3, 4, 5], &[&[60, 20, 5, 1], &[0, 1, 0, 0]], vec![8, 3]);
+        assert!(p.vec && !p.linear && p.bcast == 0b10);
+        assert_eq!(p.dims, vec![2, 3, 5]);
+        assert_eq!(p.strides, vec![vec![15, 5, 1], vec![0, 1, 0]]);
+        assert_eq!(p.offsets, vec![2, 3]);
+
+        // [3, 4] + [3, 1] -> inner dim 4 collapses to 1 and drops cleanly to 1D rank 1.
+        let p = plan_ew(&[3, 4], &[&[4, 1], &[1, 0]], vec![0, 1]);
+        assert!(p.vec && !p.linear && p.bcast == 0b10);
+        assert_eq!(p.dims, vec![3]);
+        assert_eq!(p.strides, vec![vec![1], vec![1]]);
+        assert_eq!(p.offsets, vec![0, 1]);
+
+        // 1D scalar broadcast [1024] + [1] stays linear (RANK = 0).
+        let p = plan_ew(&[1024], &[&[1], &[0]], vec![4, 7]);
+        assert!(p.vec && p.linear && p.bcast == 0b10 && p.dims == vec![256]);
+
+        // Unaligned vector offset rejects vec4.
+        let p = plan_ew(&[1024], &[&[1], &[0]], vec![2, 0]);
+        assert!(!p.vec && p.bcast == 0 && p.offsets == vec![2, 0]);
+    }
+}

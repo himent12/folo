@@ -47,8 +47,9 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
             };
             cfg.valid() && cat_fits(spec) && (1..=cfg.bk).contains(&spec.get_u32("WG_RUN", 8))
         }
-        "ew1" | "ew2" | "ew3" => rank && (1..=4).contains(&u("KIND", 1)),
-        "binary" | "permute" => rank,
+        "ew1" | "ew2" | "ew3" => rank && (1..=4).contains(&u("KIND", 1)) && u("BCAST", 0) < 8,
+        "binary" => rank && u("BCAST", 0) < 4,
+        "permute" => rank,
         "move" => rank && eb_fits(spec) && u("MODE", 0) <= 2,
         "scatter" => rank && eb_fits(spec),
         "tal_topk" => {

@@ -1,5 +1,7 @@
 //! Elementwise kernels: unary ops, broadcasting binary ops and fused bias + activation.
 
+use std::fmt::Write as _;
+
 use super::{UNARY_FN, check_buf, shape_numel, vec_prelude};
 use crate::DType;
 use crate::context::GpuContext;
@@ -171,7 +173,27 @@ fn gen_unary(spec: &Spec) -> String {
 }
 
 fn gen_binary(spec: &Spec) -> String {
-    format!("{}{}", vec_prelude(spec.get_bool("VEC4")), include_str!("../shaders/binary.wgsl"))
+    let vec = spec.get_bool("VEC4");
+    let bcast = if vec { spec.get_u32("BCAST", 0) } else { 0 };
+    let ba = (bcast & 1) != 0;
+    let bb = (bcast & 2) != 0;
+    let mut s = String::from(vec_prelude(vec));
+    let _ = writeln!(s, "alias TA = {};", if vec && !ba { "vec4<f32>" } else { "f32" });
+    let _ = writeln!(s, "alias TB = {};", if vec && !bb { "vec4<f32>" } else { "f32" });
+    let _ = writeln!(s, "const BCAST_A: bool = {ba};");
+    let _ = writeln!(s, "const BCAST_B: bool = {bb};");
+    s.push_str(if vec && !ba {
+        "fn ld_a(i: u32) -> vec4<f32> { return A[i]; }\n"
+    } else {
+        "fn ld_a(i: u32) -> vec4<f32> { return vec4<f32>(A[i]); }\n"
+    });
+    s.push_str(if vec && !bb {
+        "fn ld_b(i: u32) -> vec4<f32> { return B[i]; }\n"
+    } else {
+        "fn ld_b(i: u32) -> vec4<f32> { return vec4<f32>(B[i]); }\n"
+    });
+    s.push_str(include_str!("../shaders/binary.wgsl"));
+    s
 }
 
 fn gen_bias_act(spec: &Spec) -> String {
@@ -297,6 +319,48 @@ fn coalesce(out: &[usize], sa: &[usize], sb: &[usize]) -> (Vec<usize>, Vec<usize
     (d, a, b)
 }
 
+/// Plans coalesced dims/strides and optional vec4 vectorization (with broadcast-dim scalar splats) for `binary`.
+fn plan_binary(
+    out: &[usize],
+    sa: &[usize],
+    sb: &[usize],
+) -> (Vec<usize>, Vec<usize>, Vec<usize>, bool, u32, bool) {
+    let (mut dims, mut sa, mut sb) = coalesce(out, sa, sb);
+    let (vec, bcast) = if let Some(&last_d) = dims.last() {
+        let last = dims.len() - 1;
+        let a_ok = sa[last] == 0 || (sa[last] == 1 && sa[..last].iter().all(|s| s.is_multiple_of(4)));
+        let b_ok = sb[last] == 0 || (sb[last] == 1 && sb[..last].iter().all(|s| s.is_multiple_of(4)));
+        if last_d.is_multiple_of(4) && a_ok && b_ok {
+            let mask = u32::from(sa[last] == 0) | (u32::from(sb[last] == 0) << 1);
+            (true, mask)
+        } else {
+            (false, 0)
+        }
+    } else {
+        (false, 0)
+    };
+    if vec {
+        let last = dims.len() - 1;
+        dims[last] /= 4;
+        if (bcast & 1) == 0 {
+            for s in &mut sa[..last] {
+                *s /= 4;
+            }
+        }
+        if (bcast & 2) == 0 {
+            for s in &mut sb[..last] {
+                *s /= 4;
+            }
+        }
+        (dims, sa, sb) = coalesce(&dims, &sa, &sb);
+    }
+    let linear = dims.is_empty()
+        || (dims.len() == 1
+            && sa[0] == usize::from((bcast & 1) == 0)
+            && sb[0] == usize::from((bcast & 2) == 0));
+    (dims, sa, sb, vec, bcast, linear)
+}
+
 /// `out = a (op) b` with NumPy broadcasting; `out` must hold `broadcast_shape(a, b)` elements.
 pub fn binary(
     ctx: &GpuContext,
@@ -315,25 +379,27 @@ pub fn binary(
     if n == 0 {
         return Ok(oshape);
     }
-    let (dims, sa, sb) =
-        coalesce(&oshape, &bcast_strides(a_shape, &oshape), &bcast_strides(b_shape, &oshape));
-    let same = dims.len() <= 1 && sa.iter().chain(&sb).all(|&s| s == 1);
-    if dims.len() > MAX_RANK {
+    let (dims, sa, sb, vec, bcast, linear) =
+        plan_binary(&oshape, &bcast_strides(a_shape, &oshape), &bcast_strides(b_shape, &oshape));
+    if !linear && dims.len() > MAX_RANK {
         return Err(shape_err(format!("binary: rank {} after coalescing exceeds {MAX_RANK}", dims.len())));
     }
-    let vec = same && n.is_multiple_of(4);
     let units = if vec { n / 4 } else { n };
-    let rank = if same { 0 } else { dims.len() as u32 };
-    let k = ctx.kernel(&BINARY, Spec::new().u32("OP", op.code()).u32("RANK", rank).bool("VEC4", vec))?;
+    let rank = if linear { 0 } else { dims.len() as u32 };
+    let mut spec = Spec::new().u32("OP", op.code()).u32("RANK", rank).bool("VEC4", vec);
+    if bcast != 0 {
+        spec = spec.u32("BCAST", bcast);
+    }
+    let k = ctx.kernel(&BINARY, spec)?;
     let mut p = Params::new().uz(units)?.at(4);
     for i in 0..MAX_RANK {
-        p = p.uz(dims.get(i).copied().unwrap_or(1))?;
+        p = p.uz(if linear { 1 } else { dims.get(i).copied().unwrap_or(1) })?;
     }
     for i in 0..MAX_RANK {
-        p = p.uz(sa.get(i).copied().unwrap_or(0))?;
+        p = p.uz(if linear { 0 } else { sa.get(i).copied().unwrap_or(0) })?;
     }
     for i in 0..MAX_RANK {
-        p = p.uz(sb.get(i).copied().unwrap_or(0))?;
+        p = p.uz(if linear { 0 } else { sb.get(i).copied().unwrap_or(0) })?;
     }
     let p = p.f(f32::NAN).f(f32::INFINITY);
     ctx.dispatch(&k, &[a, b, out], &p, ctx.grid_1d(units as u64, 256)?)?;
