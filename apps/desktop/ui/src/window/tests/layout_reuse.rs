@@ -189,7 +189,7 @@ fn lay_out(window: &mut crate::Window, cx: &mut crate::App, layouts: &[f32]) -> 
     let mut leaves = Vec::new();
     for (ix, text) in ["alpha", "beta gamma"].into_iter().enumerate() {
         let calls = calls.clone();
-        let key = MeasureKey { hash: ix as u64, text: text.into() };
+        let key = MeasureKey::Text { hash: ix as u64, text: text.into() };
         leaves.push(window.request_keyed_measured_layout(
             Style::default(),
             key,

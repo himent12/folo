@@ -225,7 +225,7 @@ fn measure_key(
         None => h.write_u8(0),
     }
     style.line_clamp.hash(&mut h);
-    MeasureKey { hash: h.finish(), text: text.clone() }
+    MeasureKey::Text { hash: h.finish(), text: text.clone() }
 }
 
 /// Implements `Element` for a text type: `$text` turns `self` into the `SharedString` to lay out.
