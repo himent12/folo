@@ -51,7 +51,7 @@ pub(crate) use sites::{
 #[cfg(test)]
 pub(crate) use weight_grad::{LAST_ROUTE, WgradRoute};
 pub(crate) use weight_grad::{
-    can_pointwise_wgrad, finish_wgrad, plan_pointwise_wgrad, plan_wgrad_per_img, weight_grad_dims,
+    WgradPlan, can_pointwise_wgrad, finish_wgrad, plan_pointwise_wgrad, plan_wgrad_per_img, weight_grad_dims,
     weight_grad_spec, wgrad_b_load, wgrad_b_setup, wgrad_b_units,
 };
 pub use weight_grad::{conv2d_backward_weight, conv2d_backward_weight_as};

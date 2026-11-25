@@ -36,7 +36,7 @@ A kernel is a `KernelDef { name, storage, source }` in a `src/kernels/` module, 
 Its `source` is either `Source::Static(include_str!("../shaders/<file>.wgsl"))` or `Source::Generated(fn)`, a Rust
 function that returns WGSL for a `Spec`. Generators either concatenate files with shared snippets
 (`unary_fn.wgsl`, `bn_common.wgsl`, `bn_welford.wgsl`, `detect_common.wgsl`, `kd_common.wgsl`, the `E` / `V4` / `OUT` aliases of
-`kernels::vec_prelude`) or write the whole source in Rust: the GEMM and implicit-GEMM convs (`kernels/gemm.rs`,
+`kernels::vec_prelude`) or write the whole source in Rust: the GEMM and implicit-GEMM convs (`kernels/gemm/`,
 `kernels/conv/`), tensor cores (`kernels/coop/shader.rs`), `kernels/ew.rs`, `kernels/strided/`,
 `kernels/pool_grad.rs`, Muon and the multi-tensor optimizer kernels. There is no include mechanism inside WGSL.
 `pipeline::render` then puts `Spec::header` (`enable f16;` and `enable wgpu_cooperative_matrix;` when asked,
@@ -69,8 +69,8 @@ kernels (`kd_*.wgsl`). Tests are grouped by area, not by op.
 | sum / mean / max / min, argmax / argmin | `reduce` | `kernels::reduce::{reduce_split, arg_reduce}` (ceiling-division split-K for `Sum`/`Max`/`Min` from `GpuBackend`, plus `Mean` in `reduce_split` directly; 32-wide subgroup reductions on rows) | `reduce_rows.wgsl`, `reduce_cols.wgsl`, `arg_reduce.wgsl` | `src/tests/backend/reduce.rs`, `src/tests/reduce.rs` |
 | softmax, log-softmax | `softmax` | `kernels::reduce::softmax_dim` (online row softmax when `inner == 1`, 1 read up to 1,024 elems / 2-pass online above; `softmax_cols` otherwise, register-cached for `D ≤ 32` and 2-pass online above) | `softmax.wgsl`, `softmax_cols.wgsl` | `src/tests/backend/reduce.rs` |
 | top-k | `topk` | `kernels::reduce::topk` (workgroup-parallel bitonic sort for `d ≤ 512`; `k`-pass selection with 32-wide subgroup reductions and a portable shared-memory tree fallback above) | `topk.wgsl` | `src/tests/backend/reduce.rs`, `src/tests/backend/index.rs` |
-| matmul | `matmul` | `kernels::gemm::gemm` | generated in `gemm.rs` | `src/tests/backend/matmul.rs`, `src/tests/gemm.rs` |
-| conv2d and its gradients | `conv2d`, `conv2d_act`, `conv2d_backward_input`, `conv2d_backward_weight(_as)` | `kernels::conv::{conv2d, conv2d_input, conv2d_backward_input, conv2d_backward_weight_as}` | generated (`gemm.rs`, `conv/`, `coop/shader.rs`); `depthwise.wgsl` | `src/tests/backend/conv.rs`, `src/tests/conv.rs`, `src/tests/coop_conv.rs` |
+| matmul | `matmul` | `kernels::gemm::gemm` | generated in `gemm/shader.rs` | `src/tests/backend/matmul.rs`, `src/tests/gemm.rs` |
+| conv2d and its gradients | `conv2d`, `conv2d_act`, `conv2d_backward_input`, `conv2d_backward_weight(_as)` | `kernels::conv::{conv2d, conv2d_input, conv2d_backward_input, conv2d_backward_weight_as}` | generated (`gemm/shader.rs`, `conv/`, `coop/shader.rs`); `depthwise.wgsl` | `src/tests/backend/conv.rs`, `src/tests/conv.rs`, `src/tests/coop_conv/` |
 | 1x1 conv over a concatenation | `conv2d_act_cat` | `kernels::conv::conv2d_cat` (`conv/forward.rs`, calling `gemm_cat.rs`) | generated | `src/tests/backend/conv_cat.rs` |
 | max / avg / adaptive pooling and gradients | `max_pool2d`, `max_pool2d_values` (inference, skips `i64` indices within `maxpool` limits), `avg_pool2d`, `adaptive_avg_pool2d`, their `_backward` | `kernels::pooling::max_pool2d` (values only), `kernels::pool_grad::*` | `maxpool.wgsl`; generated in `pool_grad.rs` | `src/tests/backend/pooling.rs` |
 | nearest upsampling | `upsample_nearest2d`, `upsample_nearest2d_backward` | `kernels::layout::upsample_nearest2d` (`upsample_2x_vec4` fast path for 2×2 even widths), `kernels::pool_grad::upsample_nearest2d_backward` | `upsample.wgsl`; generated | `src/tests/backend/pooling.rs` |

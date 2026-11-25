@@ -18,7 +18,8 @@
 //! - `ew.rs`: strided elementwise ops (unary and their gradients, binary, comparisons, `where`).
 //! - `strided/`: strided gathers and scatters, fills, casts, tiled transpose and index ops for every dtype.
 //! - `reduce.rs`: reductions, arg-reductions, softmax and top-k (also the tensor wrapper's reduce and softmax).
-//! - `gemm.rs`: the tiled GEMM generator; `gemm_cat.rs`: GEMMs whose `B` is a concatenation read in place.
+//! - `gemm/`: the tiled GEMM descriptors/config (`config.rs`), WGSL generator (`shader.rs`) and dispatch (`mod.rs`);
+//!   `gemm_cat.rs`: GEMMs whose `B` is a concatenation read in place.
 //! - `conv/`: conv2d forward, gradients, split-K, depthwise and per-site convs.
 //! - `coop/`: tensor-core (cooperative-matrix) f16 GEMM and conv.
 //! - `pool_grad.rs`: pooling with folo-core's semantics and the pooling and upsampling gradients.
