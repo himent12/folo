@@ -20,6 +20,8 @@
  * row re-rendered). Pinning finds the top entry by bisection instead of reading every line's position.
  */
 import ArrowDownToLine from '$icons/arrow-down-to-line';
+import Copy from '$icons/copy';
+import Search from '$icons/search';
 import Volume2 from '$icons/volume-2';
 import VolumeOff from '$icons/volume-off';
 import { computed, css, effect, For, signal, untrack } from 'fw';
@@ -27,6 +29,8 @@ import type { AppendLog, LogCursor } from '$lib/api/appendLog';
 import type { LogLevel, LogLine } from '$lib/api/types';
 import { clock } from '$lib/format';
 import Button from '$lib/ui/Button';
+import { feedback } from '$lib/ui/feedback';
+import Input from '$lib/ui/Input';
 import Panel from '$lib/ui/Panel';
 import Segmented from '$lib/ui/Segmented';
 import { tooltip } from '$lib/ui/tooltip';
@@ -114,11 +118,32 @@ const lastLines = (list: Kept[], n: number) => {
 const lineCount = (n: number) => `${n.toLocaleString('en-US')} ${n === 1 ? 'line' : 'lines'}`;
 
 export default function Logs(props: LogsProps) {
+  const notify = feedback();
   const level = signal<'all' | 'warn' | 'error'>('all');
+  const query = signal('');
+  const needle = computed(() => query.get().trim().toLowerCase());
   /** How many of the latest lines the box shows: `SHOWN`, or every line held once asked ("Show earlier"). */
   const cap = signal(SHOWN);
   const follow = signal(true);
   const box = signal<HTMLDivElement>();
+
+  // Scoped span templates cloned per immutable log token so rendering 500+ lines creates zero per-token effects.
+  const wordTpl = (<span class="w" />) as HTMLSpanElement;
+  const longTpl = (<span class="w long" />) as HTMLSpanElement;
+  function fillMessage(el: HTMLSpanElement, message: string) {
+    el.textContent = '';
+    const frag = document.createDocumentFragment();
+    for (const p of logPieces(message)) {
+      if (p.space) {
+        frag.appendChild(document.createTextNode(p.text));
+      } else {
+        const span = (p.long ? longTpl : wordTpl).cloneNode(false) as HTMLSpanElement;
+        span.textContent = p.text;
+        frag.appendChild(span);
+      }
+    }
+    el.appendChild(frag);
+  }
 
   const index = new LevelIndex();
   // `log` changes in place; `version` is the signal that it did.
@@ -135,33 +160,101 @@ export default function Logs(props: LogsProps) {
   // The lines shown: a new list only when the log or the filter changed (steps bump `version` too, several times a
   // second, and each new list would re-pin the box: a layout read).
   let shownKey = '';
-  let shownLines: LogLine[] = [];
-  const shown = computed(() => {
+  let shownState: { lines: LogLine[]; matched: number } = { lines: [], matched: 0 };
+  const filtered = computed(() => {
     void props.version;
-    counts.get();
+    const ct = counts.get();
     const lv = level.get();
+    const q = needle.get();
     const n = cap.get();
     const c = index.cursor;
-    const key = c ? `${c.gen}|${c.start}|${c.end}|${lv}|${n}` : `${lv}|${n}`;
+    const key = c ? `${c.gen}|${c.start}|${c.end}|${lv}|${n}|${q}` : `${lv}|${n}|${q}`;
     if (key !== shownKey) {
       shownKey = key;
-      shownLines = lv === 'all' ? props.log.items.slice(-n) : lastLines(lv === 'warn' ? index.warnUp : index.errors, n);
+      if (!q) {
+        const lines = lv === 'all' ? props.log.items.slice(-n) : lastLines(lv === 'warn' ? index.warnUp : index.errors, n);
+        const matched = lv === 'all' ? ct.held : lv === 'warn' ? ct.warn + ct.error : ct.error;
+        shownState = { lines, matched };
+      } else {
+        const matchedLines: LogLine[] = [];
+        if (lv === 'all') {
+          const items = props.log.items;
+          for (let i = 0; i < items.length; i++) {
+            const line = items[i]!;
+            if (line.message.toLowerCase().includes(q) || line.level.includes(q)) matchedLines.push(line);
+          }
+        } else {
+          const list = lv === 'warn' ? index.warnUp : index.errors;
+          for (let i = 0; i < list.length; i++) {
+            const line = list[i]!.line;
+            if (line.message.toLowerCase().includes(q) || line.level.includes(q)) matchedLines.push(line);
+          }
+        }
+        shownState = {
+          lines: matchedLines.length > n ? matchedLines.slice(-n) : matchedLines,
+          matched: matchedLines.length,
+        };
+      }
     }
-    return shownLines;
+    return shownState;
   });
+  const shown = computed(() => filtered.get().lines);
   /**
    * The lines above the first one shown, at this level: the ones the box leaves out (it can show them), and for All
-   * the ones older than this view holds (the run folder's log.jsonl has them).
+   * without a search filter the ones older than this view holds (the run folder's log.jsonl has them).
    */
   const before = computed(() => {
     const lv = level.get();
-    // Warn shows warnings and errors.
-    const held = lv === 'all' ? counts.get().held : lv === 'warn' ? counts.get().warn + counts.get().error : counts.get().error;
-    return { hidden: Math.max(0, held - shown.get().length), older: lv === 'all' ? counts.get().earlier : 0 };
+    const f = filtered.get();
+    return {
+      hidden: Math.max(0, f.matched - f.lines.length),
+      older: lv === 'all' || needle.get() ? counts.get().earlier : 0,
+    };
   });
+
+  // Polite live status for search results: updates when the user edits the query or level filter, or when search state
+  // flips between empty/non-empty matches or truncated/untruncated (never on every streaming count tick).
+  const hasMatches = computed(() => filtered.get().matched > 0);
+  const hasEarlier = computed(() => counts.get().earlier > 0);
+  const searchStatus = signal('');
+  effect(() => {
+    const q = needle.get();
+    const lv = level.get();
+    if (!q) {
+      searchStatus.set('');
+      return;
+    }
+    void hasMatches.get();
+    void hasEarlier.get();
+    untrack(() => {
+      const m = filtered.get().matched;
+      const ct = counts.get();
+      const raw = query.peek().trim();
+      const scope = lv !== 'all' ? ` at ${lv} level` : '';
+      const older = ct.earlier ? ` (${lineCount(ct.earlier)} earlier are in log.jsonl)` : '';
+      searchStatus.set(
+        m
+          ? `${m === 1 ? '1 line matches' : `${lineCount(m)} match`} "${raw}"${scope}${older}.`
+          : `No log lines match "${raw}"${scope}${older}.`,
+      );
+    });
+  });
+
+  async function copyVisible() {
+    const lines = shown.peek();
+    if (!lines.length) return;
+    const text = lines.map((l) => `${clock(l.t)} ${l.level} ${l.message}`).join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      notify.success('Logs copied', lineCount(lines.length));
+    } catch (e) {
+      notify.error(e, 'Could not copy the log lines');
+    }
+  }
 
   /** Space after the last entry, so that, pinned to the bottom, the top entry starts whole on the box's top edge. */
   let pad = 0;
+  let pinEl: HTMLDivElement | undefined;
   /** The box's top padding: an entry the view starts on sits this far under the edge, as the first one does. */
   const INSET = 8;
 
@@ -169,26 +262,45 @@ export default function Logs(props: LogsProps) {
   function pin() {
     const el = box.peek();
     if (!el) return;
+    if (el !== pinEl) {
+      pinEl = el;
+      pad = 0;
+    }
     const end = el.scrollHeight - pad - el.clientHeight;
     let next = 0;
     if (end > 0) {
-      // The first entry starting at or below `end`: entries are stacked top to bottom, so their offsets only grow and
-      // a bisection finds it in a few reads (the original read every entry's position).
-      const lines = el.querySelectorAll<HTMLElement>('.line');
-      let lo = 0;
-      let hi = lines.length;
-      while (lo < hi) {
-        const mid = (lo + hi) >> 1;
-        if (lines[mid]!.offsetTop - INSET >= end - 0.5) hi = mid;
-        else lo = mid + 1;
+      // The first entry starting at or below `end`: entries are stacked top to bottom inside `inner`, so their offsets
+      // only grow and a direct bisection over `inner.children` avoids both scanning every line and querySelectorAll.
+      const kids = inner.peek()?.children;
+      if (kids && kids.length) {
+        let lo = kids[0]!.classList.contains('earlier') ? 1 : 0;
+        if (lo < kids.length && kids[lo]!.classList.contains('line')) {
+          let hi = kids.length;
+          while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if ((kids[mid] as HTMLElement).offsetTop - INSET >= end - 0.5) hi = mid;
+            else lo = mid + 1;
+          }
+          const top = lo < kids.length ? (kids[lo] as HTMLElement) : undefined;
+          next = top ? Math.max(0, top.offsetTop - INSET - end) : 0;
+        }
       }
-      const top = lines[lo];
-      next = top ? top.offsetTop - INSET - end : 0;
     }
-    // Set on the element, not through state: the scroll below must see the new padding in this frame.
-    pad = next;
-    el.style.setProperty('--tail', `${next}px`);
-    el.scrollTop = el.scrollHeight;
+    const targetScroll = Math.max(0, end + next);
+    // Avoid forcing a second layout pass: when tail padding is unchanged or shrinking, assign `scrollTop` while layout
+    // is still clean before mutating `--tail`. Only when `--tail` grows must it precede `scrollTop` so the browser does
+    // not clamp to the smaller prior scroll height.
+    if (next <= pad) {
+      el.scrollTop = targetScroll;
+      if (next !== pad) {
+        pad = next;
+        el.style.setProperty('--tail', `${next}px`);
+      }
+    } else {
+      pad = next;
+      el.style.setProperty('--tail', `${next}px`);
+      el.scrollTop = targetScroll;
+    }
   }
 
   effect(() => {
@@ -286,37 +398,86 @@ export default function Logs(props: LogsProps) {
         <p class="none">No log lines yet.</p>
       ) : (
         <div class="wrap">
+          <div class="toolbar">
+            <Input
+              class="search"
+              size="sm"
+              type="search"
+              icon={Search}
+              placeholder="Search logs"
+              aria-label="Search logs"
+              bind:value={query}
+            />
+            {needle.get() ? <span class="matches">{lineCount(filtered.get().matched)}</span> : null}
+            <Button
+              class="copy"
+              size="sm"
+              variant="ghost"
+              icon={Copy}
+              disabled={shown.get().length === 0}
+              onclick={copyVisible}
+            >
+              Copy visible
+            </Button>
+          </div>
           {/* Silent: new lines are read only through the batched status line below, when asked for. */}
           <div class="log" ref={box} onscroll={onscroll} role="log" aria-live="off" aria-label="Training log" tabindex={0}>
             <div ref={inner}>
-              {before.get().hidden || before.get().older ? (
+              {before.get().hidden || (before.get().older && (!needle.get() || shown.get().length > 0)) ? (
                 <p class="earlier">
                   {before.get().hidden ? (
                     <>
-                      {lineCount(before.get().hidden + before.get().older)} earlier{' '}
+                      {lineCount(before.get().hidden + (needle.get() ? 0 : before.get().older))} earlier{' '}
                       <Button size="sm" variant="ghost" onclick={() => cap.set(Infinity)}>
                         Show {before.get().older ? lineCount(before.get().hidden) : 'them'}
                       </Button>
+                      {needle.get() && before.get().older
+                        ? ` (${lineCount(before.get().older)} older are in the run folder's log.jsonl).`
+                        : null}
+                    </>
+                  ) : needle.get() ? (
+                    <>
+                      Search covers the latest {lineCount(counts.get().held)}; {lineCount(before.get().older)} earlier are in the run folder's log.jsonl.
                     </>
                   ) : (
                     <>{lineCount(before.get().older)} earlier are in the run folder's log.jsonl.</>
                   )}
                 </p>
               ) : null}
-              <For each={shown.get()} key={(l) => l} fallback={<p class="empty">No log lines{level.get() !== 'all' ? ` at ${level.get()} level` : ''} yet.</p>}>
-                {(l) => (
-                  // The message wraps only at spaces, each `key value` pair and flag whole (./logTokens).
-                  <p class={`line ${l().level}`}>
-                    <span class="t">{clock(l().t)}</span>
-                    <span class="lv">{l().level}</span>
-                    <span class="m">{logPieces(l().message).map((p) => (p.space ? p.text : <span class="w" class:long={p.long ?? false}>{p.text}</span>))}</span>
+              <For
+                each={shown.get()}
+                key={(l) => l}
+                fallback={
+                  <p class="empty">
+                    {needle.get()
+                      ? `No log lines match "${query.get().trim()}"${level.get() !== 'all' ? ` at ${level.get()} level` : ''}${
+                          counts.get().earlier
+                            ? ` in the latest ${lineCount(counts.get().held)} (${lineCount(counts.get().earlier)} earlier are in the run folder's log.jsonl)`
+                            : ''
+                        }.`
+                      : `No log lines${level.get() !== 'all' ? ` at ${level.get()} level` : ''} yet.`}
                   </p>
-                )}
+                }
+              >
+                {(l) => {
+                  // Each row is keyed by its immutable LogLine reference; tokens are cloned statically with zero effects.
+                  const item = untrack(l);
+                  return (
+                    <p class={`line ${item.level}`}>
+                      <span class="t">{clock(item.t)}</span>
+                      <span class="lv">{item.level}</span>
+                      <span class="m" ref={(el) => fillMessage(el, item.message)}></span>
+                    </p>
+                  );
+                }}
               </For>
             </div>
           </div>
           <p class="sr-only" role="status">
             {announce.get() && props.live ? said.get() : ''}
+          </p>
+          <p class="sr-only" aria-live="polite" aria-atomic="true">
+            {searchStatus.get()}
           </p>
           {!follow.get() ? (
             <div class="jump">
@@ -359,6 +520,26 @@ css`
     display: flex;
     flex-direction: column;
     min-height: 0;
+  }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-panel);
+  }
+  .toolbar :global(.search) {
+    flex: 1 1 160px;
+    max-width: 320px;
+  }
+  .matches {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+  }
+  .toolbar :global(.copy) {
+    margin-left: auto;
   }
   .log {
     position: relative;
