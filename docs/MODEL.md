@@ -38,8 +38,12 @@ Conventions used throughout:
 | **Polar-FOLO** | `musgd.ortho = polar4` (default for new MuSGD runs; `polar5`, legacy `ns5`) | 4-step minimax Remez orthogonalisation + step-0 Schatten-4 spectral rescaling (12 GEMMs vs 15 for `ns5`) | §8.2 |
 | **Conv-GeoMuon** | `musgd.geo = geo` (opt-in; default `legacy`) | flattened 2-D conv aspect scaling `sqrt(max(1, c_out / (c_in · k_h · k_w)))` + zero-GEMM per-channel Polar LMO on depthwise convs | §8.2 |
 | **R-PIoU** | `loss.box_loss = rpiou` (opt-in; default `ciou`) | purely algebraic Rational-Focal Edge-Decoupled IoU (`rpiou_beta = 0.5`, `rpiou_kappa = 2.0`, `rpiou_delta = 0.5`) | §7.2 |
+| **Inner-CIoU / WIoU v3** | `loss.box_loss = inner_ciou \| wiou_v3` (opt-in; default `ciou`) | auxiliary-box Inner-CIoU (`inner_ratio = 0.7`) or dynamic non-monotonic Wise-IoU v3 (`wiou_alpha = 1.9`, `wiou_delta = 3.0`, `wiou_momentum = 0.01`, EMA in `folo.wiou_iou_mean`) | §7.2 |
+| **VFL / QFL** | `loss.cls_loss = vfl \| qfl` (opt-in; default `bce`) | Varifocal Loss (`vfl_alpha = 0.75`, `vfl_gamma = 2.0`) or Quality Focal Loss (`qfl_beta = 2.0`) | §7.4 |
+| **Backbone LR / freeze** | `backbone_lr_scale` (`1.0`), `freeze_backbone_epochs` (`0`) | differential LR multiplier on `<group>.backbone` groups and initial backbone weight/BN freezing for transfer fine-tuning | §8.1 |
 | **OT-DFL** | `loss.dfl_ot_weight > 0` (opt-in; default `0.0`) | exact `O(R)` log-space 1-D optimal-transport cumulative tail barrier added to DFL (active when `reg_max > 2`) | §7.4 |
 | **SEBF / DFL-CGR** | `--fusion sebf --score dfl-cgr` (opt-in; default `none`) | 1-step Student-t (`ν = 3`) IRLS exclusive-ownership box fusion (`IoU^4 · score · side_precision`) + confidence-gated greedy repulsion (`p_m^0.25`, `γ = 3.0`) | §9.4 |
+| **DIoU-NMS / Soft-NMS** | `NmsConfig.kind = diou \| soft_linear \| soft_gaussian` (opt-in; default `standard`) | center-distance-aware DIoU-NMS (`IoU − ρ²/c² > iou`) or score-decaying Linear / Gaussian Soft-NMS (`sigma = 0.5`) | §9.3 |
 | **int8 CPU** | `folo quantize`, `--precision int8` (opt-in; default `f32`) | post-training CPU int8 backbone/neck (`version: 2` per-channel C4 grids, per-part concat decoupling, direct `u8` stem `q8::stem_u8`, P5-tail `neck.out5.*` in `f32`; head stays `f32`) | §9.6 |
 | **FOLO v2-Iso** | `FoloV2Model` / `FoloV2Config` (`folo2-n/s/m/l/x`) | clean-sheet `ceil16`-aligned detector family (`StemV2`, `WsQARepConv3x3`, `FoloBlock`, `HyperContext`, `FullPadGate`, `LazyAlignHead`, `PeakSuppress`) | §11 |
 
@@ -570,6 +574,19 @@ corners where boxes touch or edges coincide, requires no `atan` host round-trip 
 while the CPU / `reg_max > 32` fallback evaluates R-PIoU in host `f64`), and couples with `loss.nwd_weight`
 identically to CIoU.
 
+**Inner-CIoU (`loss.box_loss = inner_ciou`) and Wise-IoU v3 (`loss.box_loss = wiou_v3`, opt-in).**
+- *Inner-CIoU* (Zhang et al. 2023; `loss::inner_ciou_loss`, `loss.inner_ratio` in `[0.5, 1.5]`, default `0.7`): keeps
+  CIoU's full-box center-distance (`ρ²/c²`) and aspect-ratio (`α·v`) penalties while replacing `1 − IoU` with
+  `1 − IoU_inner(ratio)` computed on auxiliary boxes scaled about their centres by `ratio` (at `ratio = 1.0`, reduces
+  to `1 − CIoU` on non-inverted boxes).
+- *Wise-IoU v3* (Tong et al. 2023; `loss::wiou_v3_loss`, `loss.wiou_alpha > 1` default `1.9`, `loss.wiou_delta > 0`
+  default `3.0`, `loss.wiou_momentum ∈ [0, 1]` default `0.01`): computes
+  `L_WIoU_v3 = r · exp(ρ² / (c²* + ε)) · L_IoU` with `L_IoU = 1 − IoU`, outlier degree
+  `β = L_IoU* / max(L̄_IoU, 1e-4)`, and non-monotonic focusing gain `r = β / (δ · α^(β − δ))` where both `c²*` and `r`
+  are detached under `no_grad()`. The trainer updates the running EMA `L̄_IoU` (initialised to `1.0`) on each finite
+  batch and persists it in checkpoints as `folo.wiou_iou_mean`. Both `inner_ciou` and `wiou_v3` run through
+  `loss_with_assignment` (device-generic tensor composites, with host assignment).
+
 ### 7.3 Task-aligned assigner
 Per image, for ground truths `g` and anchors `a` (anchor points in pixels), with `top_k = 10`, `alpha = 0.5`,
 `beta = 6.0`, `eps = 1e-9`:
@@ -633,7 +650,8 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
   reproducible.
 - If any head output is NaN or infinite, `detection_loss` skips the assigner and returns a non-finite loss
   (`LossOutput::is_finite() == false`, `total` a detached NaN), which the trainer skips (§8.3).
-- **On a GPU** (head outputs on a folo-gpu device, `topk <= 64`, `reg_max <= 32`) `detection_loss` runs all of the above as kernels
+- **On a GPU** (head outputs on a folo-gpu device, `cls_loss = bce`, `box_loss ∈ {ciou, rpiou}`, `topk <= 64`,
+  `reg_max <= 32`) `detection_loss` runs all of the above as kernels
   (`folo_gpu::detect`, docs/GPU.md) and downloads nothing but the reported items: the decode, §7.3 step by step (each
   gt's candidates scored and ranked in one workgroup, conflicts by atomics, then the soft targets and a dense
   per-anchor target map), the BCE over every logit (each element formed whole), CIoU + DFL per positive with the
@@ -643,6 +661,12 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
   sizes, class counts and settings, and the items and both gradients against the host loss. The positives are
   listed per gt slot rather than per anchor and the sums run in another (fixed) order, so values agree to float
   rounding, not bit for bit.
+- **VFL and QFL (opt-in classification losses, `loss.cls_loss = vfl | qfl`).**
+  - `vfl` (Varifocal Loss, Zhang et al. 2021): positives (`t > 0`) use quality-weighted `t · BCE(x, t)` and negatives
+    (`t = 0`) use `α · p^γ · softplus(x)` (`loss.vfl_alpha > 0` default `0.75`, `loss.vfl_gamma >= 0` default `2.0`).
+  - `qfl` (Quality Focal Loss, Li et al. 2020): `|t − p|^β · BCE(x, t)` across both positives and negatives
+    (`loss.qfl_beta` `0` or `>= 1`, default `2.0`).
+  Both run through `loss_with_assignment` (fused CPU custom ops on CPU, device-generic tensor composites on GPU).
 - **OT-DFL (opt-in DFL tail barrier, `loss.dfl_ot_weight > 0`).** Standard DFL applies cross-entropy only to the two
   adjacent target bins `j` and `j + 1`, giving identical gradient to misplaced mass 1 bin away or 10 bins away. When
   `λ_ot = loss.dfl_ot_weight > 0` (recommended `0.25`) and `reg_max > 2`, each foreground side adds an exact $O(R)$
@@ -696,8 +720,11 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
 | `cls_lr_close_scale` | 1.0 | opt-in multiplier applied to MuSGD `.cls` parameter groups' LR during closed-mosaic epochs (`> 0`, e.g. `0.3333` decays `3× → 1×`); refused for non-MuSGD optimizers |
 | `musgd.ortho` | `polar4` | Muon orthogonalisation schedule (§8.2): `polar4` (4-step Polar-FOLO minimax Remez + step-0 Schatten-4 spectral rescaling, 12 GEMMs), `polar5` (5-step Polar-FOLO, 15 GEMMs), or legacy `ns5` (fixed 5-step Newton–Schulz, 15 GEMMs); missing in older configs reads as `ns5` |
 | `musgd.geo` | `legacy` | opt-in Conv-GeoMuon geometric conditioning (§8.2): `geo` fixes flattened 2-D conv aspect scaling (`sqrt(max(1, c_out / (c_in·k_h·k_w)))`) and uses exact zero-GEMM per-channel Polar LMO on depthwise convs; `legacy` keeps `sqrt(max(1, d_{-2} / d_{-1}))` |
-| `loss.box_loss` | `ciou` | box regression geometry loss (§7.2): `ciou` (default) or `rpiou` (Rational-Focal Edge-Decoupled IoU; parameters `loss.rpiou_beta = 0.5`, `loss.rpiou_kappa = 2.0`, `loss.rpiou_delta = 0.5`) |
+| `loss.box_loss` | `ciou` | box regression geometry loss (§7.2): `ciou` (default), `rpiou` (Rational-Focal Edge-Decoupled IoU; `loss.rpiou_beta = 0.5`, `loss.rpiou_kappa = 2.0`, `loss.rpiou_delta = 0.5`), `inner_ciou` (`loss.inner_ratio = 0.7`, in `[0.5, 1.5]`), or `wiou_v3` (`loss.wiou_alpha = 1.9`, `loss.wiou_delta = 3.0`, `loss.wiou_momentum = 0.01`) |
+| `loss.cls_loss` | `bce` | classification loss family (§7.4): `bce` (default, or MAL when `loss.mal_gamma > 0`), `vfl` (`loss.vfl_alpha = 0.75`, `loss.vfl_gamma = 2.0`), or `qfl` (`loss.qfl_beta = 2.0`, `0` or `>= 1`) |
 | `loss.dfl_ot_weight` | 0.0 | opt-in weight `λ_ot >= 0` of the 1-D optimal-transport cumulative tail-barrier term added to DFL (§7.4; recommended `0.25`) |
+| `backbone_lr_scale` | 1.0 | opt-in differential LR multiplier (`> 0`) on `backbone.*` parameters (splits each optimizer group into `<group>.backbone` and scales `bias.backbone`'s warmup start; default `1.0` keeps standard groups unchanged) |
+| `freeze_backbone_epochs` | 0 | opt-in count of initial epochs (`0..freeze_backbone_epochs`) during which `backbone.*` parameters have `requires_grad = false` and backbone BatchNorms stay in eval mode |
 
 ### 8.2 Optimizer and parameter groups
 Three groups, assigned by tensor name:
@@ -849,9 +876,12 @@ for e in 0 .. epochs:
 `t` advances only with an optimizer step, as FORMAT.md requires. A window made only of non-finite batches is
 skipped without a step, so the run can end with `t < T` (the remaining iterations are not made up).
 
-**Non-finite batches.** The train-mode forward updates BN running statistics before the loss is known, so the
-trainer snapshots every `running_mean` / `running_var` before each forward (well under 100k floats even for folo-x).
-If the loss is not finite, or any running statistic became non-finite, it restores the snapshot, so the next EMA
+**Non-finite batches.** The train-mode forward updates BN running statistics before the loss is known, so at epoch
+entry the trainer validates any frozen eval-mode BN buffers (`RunningStats::all_finite_eval`) and allocates one
+reusable `RunningStats` snapshot of active train-mode BN buffers (`RunningStats::capture_training`, refreshed in place
+with `recapture()` before each subsequent batch and checked via `all_finite_live()`, well under 100k floats even for
+folo-x).
+If the loss is not finite, or any active running statistic became non-finite, it restores the snapshot, so the next EMA
 update never sees poisoned buffers. Ten consecutive non-finite batches, or an epoch without a single finite batch,
 abort the run with an error (`status: failed`).
 
@@ -997,7 +1027,8 @@ them; a checkpoint without the key predates the cap and resumes with `min(close_
 augmentation: resize as above and pad to a square `s × s` (§9.2) only.
 
 ### 8.7 Validation schedule and checkpoints
-- Validate after every epoch and always after the last, with the EMA weights (or the live model if `ema = false`),
+- Validate after every epoch and always after the last, on a pre-folded eval clone (`FoloModel::fused_eval_clone()`,
+  with GPU `ForwardPlans` enabled) of the EMA weights (or the live model if `ema = false`),
   at the training `imgsz`, with batch `2 · batch`, `conf = 0.001`, `iou = 0.7`, `max_det = 300`, multi-label NMS
   (§9.3).
 - Metrics: precision, recall, mAP@0.5 and mAP@0.5:0.95 exactly as docs/METRICS.md defines them (pycocotools mAP,
@@ -1006,7 +1037,11 @@ augmentation: resize as above and pad to a square `s × s` (§9.2) only.
   the same resize and pad as the image, so predictions need no inverse map; they are clipped to the letterboxed
   image (not to the padded input), as the COCO path clips them to the original image. Fitness is mAP@0.5:0.95.
 - Best and early stopping: `best_fitness` starts at −∞ and `best_epoch` at −1. After validating epoch `e`, if
-  `fitness > best_fitness`, set both and write `best`. Write `last` every epoch (on a GPU its tensors come back in one download per dtype and 128 MiB chunk, concatenated on the device, not one wait per tensor). Stop after epoch `e` when
+  `fitness > best_fitness`, set both and promote `last.folo` to `best.folo` (on non-Windows, via an O(1)
+  same-filesystem hardlink to a sibling temp path + atomic rename with atomic-copy fallback; on Windows, via an
+  independent atomic copy so readers holding `best.folo` open cannot block future `last.folo` writes). Write `last`
+  every epoch (on a GPU its tensors come back in one download per dtype and 128 MiB chunk, concatenated on the device,
+  not one wait per tensor). Stop after epoch `e` when
   `e − best_epoch >= patience`. Checkpoints persist `{ "epoch": best_epoch, "fitness": best_fitness }` as
   `folo.best` (FORMAT.md; `fitness` is `null` while it is −∞), so a resume continues the same patience count.
 - v1 reports training losses only (API `Epoch.train_loss`). Validation loss is not computed.
@@ -1179,7 +1214,10 @@ export should resize the same way: PIL's antialiased `BILINEAR` gives the same b
 
 From the `[A, 4 + nc]` decode, keep the candidates whose score is `> conf`, sort by score (descending, ties by anchor
 index then class), keep at most 30000, run greedy class-aware NMS (a candidate is suppressed when a kept box of the
-same class has plain IoU `> iou`), keep the first `max_det`, then map boxes back (§9.2). Output per image:
+same class has plain IoU `> iou`; opt-in `NmsConfig.kind` also supports `diou` DIoU-NMS `IoU − ρ²/c² > iou`,
+`soft_linear` Linear Soft-NMS `score *= 1 − IoU` when `IoU > iou`, and `soft_gaussian` Gaussian Soft-NMS
+`score *= exp(−IoU² / sigma)` when `IoU > 0`, default `sigma = 0.5`, dropping once `score <= conf`), keep the first
+`max_det`, then map boxes back (§9.2). Output per image:
 `[x1, y1, x2, y2, score, class]`, sorted by score.
 
 ### 9.4 Box fusion (opt-in)
@@ -1642,13 +1680,15 @@ ch(base) = max(1, ceil(min(base, max_channels) · width / 16)) · 16
   eliding concatenation on fused paths.
 - **`HyperContext(c_p5, M)` (`HyperACE-Lite` at P5, replacing `C2PSA`):** linear `O(N·M)` hypergraph global context
   with `c_g = c_p5 / 2`. `av_proj: Conv(c_p5 → M + c_g, 1×1, act=none)` produces `A_logits [B, M, N]` and
-  `V [B, c_g, N]` (`N = H·W`); `A_gather = softmax(A_logits, dim=-1)` gathers tokens into `E = V · A_gather^T`
-  (`[B, c_g, M]`); two `Linear(c_g → c_g)` layers with SiLU refine `E' = E^T + ffn2(SiLU(ffn1(E^T)))`;
-  `g_scene = mean(E', dim=1)` (`[B, c_g]`); `A_bcast = softmax(A_logits, dim=1)` (`H·W`-invariant convex combination
-  over hyperedges) broadcasts `Y_ctx = E'^T · A_bcast` reshaped to `[B, c_g, H, W]`;
-  `out_proj: Conv(c_g → c_p5, 1×1, act=none)` adds back to `x` (`(x + out_proj(Y_ctx), g_scene)`).
+  `V [B, c_g, N]` (`N = H·W`), both promoted to `F32`; `A_gather = softmax(A_logits, dim=-1)` gathers tokens into
+  `E = V · A_gather^T` (`[B, c_g, M]`); two `Linear(c_g → c_g)` layers with SiLU refine `E' = E^T + ffn2(SiLU(ffn1(E^T)))`
+  in `F32`; `g_scene = mean(E', dim=1)` (`[B, c_g]` in `F32`); `A_bcast = softmax(A_logits, dim=1)` (`H·W`-invariant
+  convex combination over hyperedges) broadcasts `Y_ctx = E'^T · A_bcast` reshaped to `[B, c_g, H, W]`;
+  `out_proj: Conv(c_g → c_p5, 1×1, act=none)` casts back to `x.dtype()` and adds to `x` (`(x + out_proj(Y_ctx), g_scene)`).
 - **`FullPadGate(c_g → c_tgt)`:** residual FiLM gate `feat * (1 + tanh(proj(g_scene)))` with `proj: Linear(c_g → c_tgt)`
-  zero-initialised (weight and bias `0.0`), making step 0 exact identity.
+  zero-initialised (weight and bias `0.0`), making step 0 exact identity. Computes the `tanh` gate and multiplication in
+  `F32` before casting back to `feat.dtype()` so small gate updates are not rounded away under `F16` AMP or half-precision
+  inference.
 
 ### 11.3 Backbone and SPD-PAN neck (`model/v2/mod.rs`)
 
@@ -1677,7 +1717,9 @@ Decoupled three-level head on `[P3_head, P4_head, out5]` (`[c16, c19, c22]`, str
 - **`BoxBranchV2` (`head.box.{p3,p4,p5}.*`):** `conv0: WsQARepConv3x3(C_L → c_box)` → `conv1: WsQARepConv3x3(c_box →
   c_box)` → `out: Conv2d(c_box → 4·reg_max, 1×1)` (bias `2.0`; `64` channels at default `reg_max = 16`), plus opt-in
   separate `iou_out: Conv2d(c_box → 1, 1×1)` (bias `0.0`, when `iou_head = true`), keeping `box.out` at `4·reg_max`
-  channels without appending an extra IoU channel.
+  channels without appending an extra IoU channel. `model::v2::iou` provides `iou_quality_loss` (BCE-with-logits on
+  foreground `iou_raw` against detached predicted-vs-GT plain IoU, weighted by `asg.score` and normalised by
+  `max(sum_fg t_k, 1.0)`) and `fuse_cls_iou_scores` (`p_cls^(1 − α) · p_iou^α`, default `DEFAULT_IOU_FUSION_ALPHA = 0.5`).
 - **`ClsBranchV2` (`head.cls.{p3,p4,p5}.*`):** depthwise-free dense branch: optional `align: Conv(C_L → c_cls, 1×1)`
   (omitted when `C_L == c_cls`, e.g. P3 on `folo2-n`) → `conv0: WsQARepConv3x3(c_cls → c_cls)` → `out: Conv2d(c_cls →
   nc, 1×1)`. Output bias is initialised to `MAL_CLS_BIAS_PRIOR = -4.59512` (`ln(0.01 / 0.99)`) when
