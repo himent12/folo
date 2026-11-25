@@ -321,9 +321,24 @@ fn busy_scene(a: &Assets, w: f32, h: f32, scroll: f32, hover: bool) -> Scene {
     s
 }
 
-fn median(mut v: Vec<Duration>) -> Duration {
+const WARMUP: usize = 3;
+
+fn percentile(sorted: &[Duration], pct: usize) -> Duration {
+    if sorted.is_empty() {
+        return Duration::ZERO;
+    }
+    let pct = pct.min(100);
+    let rank = (sorted.len() as u128 * pct as u128).div_ceil(100) as usize;
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+}
+
+fn p50_p95(mut v: Vec<Duration>) -> (Duration, Duration) {
     v.sort();
-    v[v.len() / 2]
+    (percentile(&v, 50), percentile(&v, 95))
+}
+
+fn median(v: Vec<Duration>) -> Duration {
+    p50_p95(v).0
 }
 
 fn ms(d: Duration) -> String {
@@ -375,7 +390,11 @@ fn run(name: &str, w: u32, h: u32, a: &Assets) {
     let mut fb1 = Framebuffer::new(w, h);
     one.render(&base, blend, &mut fb1);
     let full = |r: &mut Renderer, fb: &mut Framebuffer| {
-        let mut v = Vec::new();
+        for _ in 0..WARMUP {
+            r.invalidate();
+            r.render(&base, blend, fb);
+        }
+        let mut v = Vec::with_capacity(iters);
         let mut last = None;
         for _ in 0..iters {
             r.invalidate();
@@ -384,21 +403,23 @@ fn run(name: &str, w: u32, h: u32, a: &Assets) {
             v.push(t.elapsed());
             last = Some(r.stats().clone());
         }
-        (median(v), last.unwrap())
+        (p50_p95(v), last.unwrap())
     };
-    let (d, st) = full(&mut one, &mut fb1);
+    let ((d50, d95), st) = full(&mut one, &mut fb1);
     println!(
-        "  full repaint, 1 thread:      {}  (bin+hash {}, prepare {}, raster {})",
-        ms(d),
+        "  full repaint, 1 thread:      p50 {} p95 {}  (bin+hash {}, prepare {}, raster {})",
+        ms(d50),
+        ms(d95),
         ms(st.bin_hash),
         ms(st.prepare),
         ms(st.raster)
     );
-    let (d, st) = full(&mut pool, &mut fb);
+    let ((d50, d95), st) = full(&mut pool, &mut fb);
     println!(
-        "  full repaint, pool ({}):      {}  (bin+hash {}, prepare {}, raster {}; {} tiles)",
+        "  full repaint, pool ({}):      p50 {} p95 {}  (bin+hash {}, prepare {}, raster {}; {} tiles)",
         st.threads_used,
-        ms(d),
+        ms(d50),
+        ms(d95),
         ms(st.bin_hash),
         ms(st.prepare),
         ms(st.raster),
@@ -407,8 +428,12 @@ fn run(name: &str, w: u32, h: u32, a: &Assets) {
     assert_eq!(fb.pixels, fb1.pixels, "pool and single thread differ");
 
     // Unchanged.
-    let mut v = Vec::new();
-    let (mut bh, mut rs, mut bi) = (Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..WARMUP {
+        pool.render(&base, blend, &mut fb);
+    }
+    let mut v = Vec::with_capacity(iters * 5);
+    let (mut bh, mut rs, mut bi) =
+        (Vec::with_capacity(iters * 5), Vec::with_capacity(iters * 5), Vec::with_capacity(iters * 5));
     for _ in 0..iters * 5 {
         let t = Instant::now();
         let d = pool.render(&base, blend, &mut fb);
@@ -424,24 +449,34 @@ fn run(name: &str, w: u32, h: u32, a: &Assets) {
         ms(median(rs)),
         ms(median(bi))
     );
-    println!("  unchanged frame:             {}", ms(median(v)));
+    let (u50, u95) = p50_p95(v);
+    println!("  unchanged frame:             p50 {} p95 {}", ms(u50), ms(u95));
 
     // One 200x40 region changes (a button's hover colour).
-    let mut v = Vec::new();
+    for k in 0..WARMUP {
+        let s = if k.is_multiple_of(2) { &hover } else { &base };
+        pool.render(s, blend, &mut fb);
+    }
+    pool.render(&base, blend, &mut fb);
+    let mut v = Vec::with_capacity(iters * 5);
     let mut tiles = 0;
     for k in 0..iters * 5 {
-        let s = if k % 2 == 0 { &hover } else { &base };
+        let s = if k.is_multiple_of(2) { &hover } else { &base };
         let t = Instant::now();
         pool.render(s, blend, &mut fb);
         v.push(t.elapsed());
         tiles = pool.stats().dirty_tiles;
     }
-    println!("  small change (200x40):       {}  ({tiles} tiles)", ms(median(v)));
+    let (s50, s95) = p50_p95(v);
+    println!("  small change (200x40):       p50 {} p95 {}  ({tiles} tiles)", ms(s50), ms(s95));
 
     // Scroll: the left two thirds of the content move 11 px per frame (new geometry every frame).
     let scenes: Vec<Scene> = (1..=iters).map(|k| busy_scene(a, wf, hf, k as f32 * 11., false)).collect();
+    for s in scenes.iter().take(WARMUP) {
+        pool.render(s, blend, &mut fb);
+    }
     pool.render(&base, blend, &mut fb);
-    let mut v = Vec::new();
+    let mut v = Vec::with_capacity(scenes.len());
     let mut last = None;
     for s in &scenes {
         let t = Instant::now();
@@ -450,10 +485,12 @@ fn run(name: &str, w: u32, h: u32, a: &Assets) {
         last = Some(pool.stats().clone());
     }
     let st = last.unwrap();
+    let (sc50, sc95) = p50_p95(v);
     println!(
-        "  scroll ({:.0}% of tiles):       {}  (bin+hash {}, prepare {}, raster {}; {} of {} tiles)",
+        "  scroll ({:.0}% of tiles):       p50 {} p95 {}  (bin+hash {}, prepare {}, raster {}; {} of {} tiles)",
         st.dirty_tiles as f64 * 100. / st.tiles as f64,
-        ms(median(v)),
+        ms(sc50),
+        ms(sc95),
         ms(st.bin_hash),
         ms(st.prepare),
         ms(st.raster),
@@ -485,7 +522,7 @@ fn breakdown(a: &Assets) {
     ];
     println!(
         "
-4K breakdown, full repaint on 1 thread (median of 15):"
+4K breakdown, full repaint on 1 thread (p50/p95 of 15, after {WARMUP} warm-up):"
     );
     for (name, keep) in kinds {
         let mut s = Scene::new();
@@ -493,7 +530,11 @@ fn breakdown(a: &Assets) {
         let mut r = Renderer::with_threads(1);
         let mut fb = Framebuffer::new(w, h);
         r.render(&s, blend, &mut fb);
-        let mut v = Vec::new();
+        for _ in 0..WARMUP {
+            r.invalidate();
+            r.render(&s, blend, &mut fb);
+        }
+        let mut v = Vec::with_capacity(15);
         for _ in 0..15 {
             r.invalidate();
             let t = Instant::now();
@@ -501,7 +542,14 @@ fn breakdown(a: &Assets) {
             v.push(t.elapsed());
         }
         let st = r.stats();
-        println!("  {name:8} {}  (raster {}, prepare {})", ms(median(v)), ms(st.raster), ms(st.prepare));
+        let (b50, b95) = p50_p95(v);
+        println!(
+            "  {name:8} p50 {} p95 {}  (raster {}, prepare {})",
+            ms(b50),
+            ms(b95),
+            ms(st.raster),
+            ms(st.prepare)
+        );
     }
 }
 

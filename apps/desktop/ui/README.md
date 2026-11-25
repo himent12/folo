@@ -65,7 +65,9 @@ fresh layout's. Within a frame, a node's cached final layout is not reused once 
 again since it was stored: taffy's block algorithm lays a block's children out at the width it measures with.
 And an element that only animates its opacity (`with_opacity_animation`: the breathing status dot, fades, shimmers) is painted once inside an opacity group (`opacity.rs`, `window/paint_animation.rs`); at
 each refresh the window re-fades that group's primitives in the scene and repaints only their tiles, with no
-render, layout or paint.
+render, layout or paint. On top of those, steady frames intern element ids across two generations, reuse resolved
+`Interactivity` styles across layout/prepaint/paint, borrow cache keys for fonts/SVGs/glyphs/paths, cull
+off-screen quads/text/hitboxes early, pool `UniformList` row buffers, and suppress redraws on clamped wheel input.
 
 ## Build, test, bench
 
@@ -78,7 +80,7 @@ cargo test -p folo-ui                                                     # Wind
 cargo test -p folo-ui --features portable-text,winit,test-support         # adds the cosmic-text and winit code
 cargo clippy -p folo-ui --all-targets -- -D warnings
 cargo clippy -p folo-ui --all-targets --features portable-text,winit,test-support -- -D warnings
-cargo bench -p folo-ui --bench raster                                     # the renderer on a busy frame
+cargo bench -p folo-ui --bench raster                                     # the renderer on a busy frame (p50/p95 after warm-up)
 bash tools/cross-check.sh                                                 # type-check and lint for Linux and macOS
 ```
 
