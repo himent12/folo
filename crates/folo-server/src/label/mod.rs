@@ -347,11 +347,16 @@ impl Labeler {
         Ok((crate::store::SseFrame::label(&LabelEvent::Job(Box::new(initial))), rx, Arc::downgrade(&job)))
     }
 
-    /// The labeling job behind a [`Labeler::subscribe_sse`] handle, while it exists.
-    pub(crate) fn current_job(job: &Weak<Job>) -> Option<LabelJob> {
+    /// Atomically snapshots the labeling job behind a [`Labeler::subscribe_sse`] handle and returns a fresh
+    /// tail-positioned frame receiver for lag recovery (`None` once deleted).
+    pub(crate) fn resync_sse(
+        job: &Weak<Job>,
+    ) -> Option<(crate::store::SseFrame, broadcast::Receiver<crate::store::SseFrame>)> {
         let job = job.upgrade()?;
         let state = job.lock();
-        (!state.deleted).then(|| state.job())
+        (!state.deleted).then(|| {
+            (crate::store::SseFrame::label(&LabelEvent::Job(Box::new(state.job()))), job.subscribe_sse())
+        })
     }
 
     /// `GET /api/label/jobs/{id}/logs`: the last `limit` lines, oldest first.

@@ -12,15 +12,15 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use folo_api::{
-    Bench, BenchCatalog, BenchDesign, BenchEntry, BenchEntryImagePage, BenchEntryList, BenchEvent,
-    BenchImagePage, BenchList, BenchLoop, BenchLoopList, BenchPredictions, BenchResult, CreateBench,
-    DesignBench, StartBenchEntry, StartBenchLoop, UpdateBench,
+    Bench, BenchCatalog, BenchDesign, BenchEntry, BenchEntryImagePage, BenchEntryList, BenchImagePage,
+    BenchList, BenchLoop, BenchLoopList, BenchPredictions, BenchResult, CreateBench, DesignBench,
+    StartBenchEntry, StartBenchLoop, UpdateBench,
 };
 use folo_bench::Condition;
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
-use tokio_stream::wrappers::BroadcastStream;
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::AppState;
 use crate::bench::Benches;
@@ -283,25 +283,33 @@ async fn stop_loop(
 
 fn bench_sse_frames<F>(
     initial: SseFrame,
-    rx: tokio::sync::broadcast::Receiver<SseFrame>,
-    current: F,
+    rx: broadcast::Receiver<SseFrame>,
+    resync: F,
 ) -> impl Stream<Item = SseFrame>
 where
-    F: Fn() -> Option<Bench> + Send + 'static,
+    F: Fn() -> Option<(SseFrame, broadcast::Receiver<SseFrame>)> + Send + 'static,
 {
-    let first = stream::once(std::future::ready(Some(initial)));
-    let rest = BroadcastStream::new(rx).map(move |r| match r {
-        Ok(frame) => Some(frame),
-        Err(BroadcastStreamRecvError::Lagged(_)) => {
-            current().map(|b| SseFrame::bench(&BenchEvent::Bench(Box::new(b))))
+    stream::unfold((Some(initial), rx, resync), |(mut initial, mut rx, resync)| async move {
+        if let Some(frame) = initial.take() {
+            return Some((frame, (initial, rx, resync)));
         }
-    });
-    first.chain(rest).filter_map(std::future::ready)
+        match rx.recv().await {
+            Ok(frame) => Some((frame, (initial, rx, resync))),
+            Err(RecvError::Closed) => None,
+            Err(RecvError::Lagged(_)) => {
+                // Atomically snapshot the benchmark and advance to a tail-positioned receiver so stale buffered
+                // frames never overwrite the resync snapshot or race with the client's reload.
+                let (bench_frame, new_rx) = resync()?;
+                rx = new_rx;
+                Some((bench_frame, (initial, rx, resync)))
+            }
+        }
+    })
 }
 
 /// `GET /api/bench/benchmarks/{id}/events`: a `bench` event, then live pre-serialized events until the client
 /// disconnects, the benchmark is deleted or the server shuts down. A subscriber that falls behind gets the current
-/// `bench`.
+/// `bench` snapshot from the live tail.
 async fn events(
     State(st): State<AppState>,
     ApiPath(id): ApiPath<String>,
@@ -311,7 +319,7 @@ async fn events(
     let stopped = async move {
         let _ = shutdown.wait_for(|v| *v).await;
     };
-    let events = bench_sse_frames(initial, rx, move || Benches::current(&slot))
+    let events = bench_sse_frames(initial, rx, move || Benches::resync(&slot))
         .map(|frame| Ok(frame.to_sse()))
         .take_until(stopped);
     Ok(Sse::new(events).keep_alive(KeepAlive::new().interval(KEEP_ALIVE).text("keep-alive")))
@@ -319,9 +327,11 @@ async fn events(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::Store as _;
-    use folo_api::{BenchPlan, BenchRemoved, BenchSource};
-    use tokio::sync::broadcast;
+    use folo_api::{BenchEvent, BenchPlan, BenchRemoved, BenchSource};
+    use tokio::sync::{Notify, broadcast};
 
     use super::*;
 
@@ -347,28 +357,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bench_sse_lag_resyncs_current_bench_and_shares_payloads() {
+    async fn bench_sse_lag_resyncs_to_live_tail_without_stale_buffered_frames() {
         let (tx, rx1) = broadcast::channel::<SseFrame>(2);
         let rx2 = tx.subscribe();
         let initial = SseFrame::bench(&BenchEvent::Bench(Box::new(sample_bench("before", 0))));
-        for i in 0..4 {
-            let _ = tx.send(SseFrame::bench(&BenchEvent::Removed(BenchRemoved { id: format!("be_{i}") })));
-        }
+        let _ = tx.send(SseFrame::bench(&BenchEvent::Bench(Box::new(sample_bench("mid", 1)))));
+        let _ = tx.send(SseFrame::bench(&BenchEvent::Removed(BenchRemoved { id: "be_1".into() })));
+        let _ = tx.send(SseFrame::bench(&BenchEvent::Removed(BenchRemoved { id: "be_2".into() })));
+        let _ = tx.send(SseFrame::bench(&BenchEvent::Bench(Box::new(sample_bench("stale", 2)))));
+
+        let resynced = Arc::new(AtomicUsize::new(0));
+        let ready = Arc::new(Notify::new());
+        let tx_slot = Arc::new(std::sync::Mutex::new(Some(tx.clone())));
+        let make_resync = || {
+            let tx_slot = tx_slot.clone();
+            let resynced = resynced.clone();
+            let ready = ready.clone();
+            move || {
+                let sub = tx_slot.lock().unwrap().as_ref()?.subscribe();
+                if resynced.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                    ready.notify_one();
+                }
+                Some((SseFrame::bench(&BenchEvent::Bench(Box::new(sample_bench("after", 3)))), sub))
+            }
+        };
+
+        let post = tokio::spawn({
+            let tx_slot = tx_slot.clone();
+            let ready = ready.clone();
+            async move {
+                ready.notified().await;
+                if let Some(tx) = tx_slot.lock().unwrap().take() {
+                    let _ = tx
+                        .send(SseFrame::bench(&BenchEvent::Removed(BenchRemoved { id: "be_fresh".into() })));
+                }
+            }
+        });
         drop(tx);
 
-        let frames1: Vec<SseFrame> =
-            bench_sse_frames(initial.clone(), rx1, || Some(sample_bench("after", 3))).collect().await;
-        let frames2: Vec<SseFrame> =
-            bench_sse_frames(initial, rx2, || Some(sample_bench("after", 3))).collect().await;
+        let (frames1, frames2): (Vec<SseFrame>, Vec<SseFrame>) = tokio::join!(
+            bench_sse_frames(initial.clone(), rx1, make_resync()).collect(),
+            bench_sse_frames(initial, rx2, make_resync()).collect(),
+        );
+        post.await.unwrap();
 
         assert_eq!(
             frames1.iter().map(|f| f.event).collect::<Vec<_>>(),
-            ["bench", "bench", "removed", "removed"]
+            ["bench", "bench", "removed"],
+            "stale buffered bench/removed frames must not follow the resync snapshot"
         );
         let resync: Bench = serde_json::from_str(&frames1[1].data).unwrap();
         assert_eq!((resync.name.as_str(), resync.entries), ("after", 3));
+        assert!(frames1[2].data.contains("be_fresh"));
         assert!(Arc::ptr_eq(&frames1[2].data, &frames2[2].data));
-        assert!(Arc::ptr_eq(&frames1[3].data, &frames2[3].data));
+
+        // Deletion while lagged closes the stream cleanly without emitting stale buffered frames.
+        let (tx_del, rx_del) = broadcast::channel::<SseFrame>(1);
+        let _ = tx_del.send(SseFrame::new("removed", "{}"));
+        let _ = tx_del.send(SseFrame::new("removed", "{}"));
+        drop(tx_del);
+        let del: Vec<SseFrame> = bench_sse_frames(
+            SseFrame::bench(&BenchEvent::Bench(Box::new(sample_bench("before", 0)))),
+            rx_del,
+            || None,
+        )
+        .collect()
+        .await;
+        assert_eq!(del.iter().map(|f| f.event).collect::<Vec<_>>(), ["bench"]);
     }
 
     #[tokio::test]
@@ -402,21 +457,25 @@ mod tests {
         let (init, mut rx1, weak) = benches.subscribe(&bench.id).unwrap();
         let (_, mut rx2, _) = benches.subscribe(&bench.id).unwrap();
         assert_eq!(init.event, "bench");
-        assert!(Benches::current(&weak).is_some());
+        let (snap, mut rx3) = Benches::resync(&weak).expect("alive bench resyncs");
+        assert_eq!(snap.event, "bench");
 
         benches
             .update(&bench.id, UpdateBench { name: Some("b2".into()), description: None, plan: None })
             .unwrap();
         let f1 = rx1.recv().await.unwrap();
         let f2 = rx2.recv().await.unwrap();
+        let f3 = rx3.recv().await.unwrap();
         assert_eq!(f1.event, "bench");
         assert!(f1.data.contains("b2"));
         assert!(Arc::ptr_eq(&f1.data, &f2.data), "concurrent subscribers share one Arc<str>");
+        assert!(Arc::ptr_eq(&f1.data, &f3.data), "resynced subscriber shares the same Arc<str>");
 
         benches.delete(&bench.id).unwrap();
-        assert!(Benches::current(&weak).is_none());
+        assert!(Benches::resync(&weak).is_none());
         assert!(matches!(rx1.recv().await, Err(broadcast::error::RecvError::Closed)));
         assert!(matches!(rx2.recv().await, Err(broadcast::error::RecvError::Closed)));
+        assert!(matches!(rx3.recv().await, Err(broadcast::error::RecvError::Closed)));
         store.shutdown();
     }
 }

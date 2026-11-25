@@ -305,11 +305,13 @@ impl Benches {
         Ok((SseFrame::bench(&BenchEvent::Bench(Box::new(bench))), rx, Arc::downgrade(&slot)))
     }
 
-    /// The benchmark behind a [`Benches::subscribe`] handle, while it exists.
-    pub(crate) fn current(slot: &Weak<Slot>) -> Option<Bench> {
+    /// Atomically snapshots the benchmark behind a [`Benches::subscribe`] handle and returns a fresh
+    /// tail-positioned frame receiver for lag recovery (`None` once deleted).
+    pub(crate) fn resync(slot: &Weak<Slot>) -> Option<(SseFrame, broadcast::Receiver<SseFrame>)> {
         let slot = slot.upgrade()?;
         let state = slot.lock();
-        (!state.deleted).then(|| state.bench())
+        (!state.deleted)
+            .then(|| (SseFrame::bench(&BenchEvent::Bench(Box::new(state.bench()))), slot.subscribe()))
     }
 
     /// Ends every entry and loop (they become `failed`, "the server stopped"; the agent calls in flight are

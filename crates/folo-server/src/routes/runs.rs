@@ -1,5 +1,6 @@
 //! `/api/runs`: creating, resuming, stopping and deleting runs, their history, logs and live events.
 
+use std::collections::VecDeque;
 use std::convert::Infallible;
 
 use axum::Json;
@@ -12,14 +13,13 @@ use folo_api::{
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
+use tokio::sync::broadcast::error::RecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::AppState;
 use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
-use crate::store::{
-    LogsQuery, MetricsQuery, QueueMove, RunSseStream, RunSseSubscription, RunStatusResync, SseFrame,
-};
+use crate::store::{LogsQuery, MetricsQuery, QueueMove, RunSseStream, RunSseSubscription, SseFrame};
 use crate::util::{rfc3339, unix_now};
 
 use super::{DEFAULT_LOG_LINES, KEEP_ALIVE, LogsParams, MAX_LOG_LINES, blocking};
@@ -191,46 +191,59 @@ pub(super) async fn run_logs(
     Ok(Json(blocking(&st, move |s| s.run_logs(&id, &q)).await?))
 }
 
-fn lagged_run_frames(dropped: u64, current: Option<&RunStatusResync>) -> Vec<SseFrame> {
-    let mut out = Vec::with_capacity(2);
-    out.push(SseFrame::run(&RunEvent::Log(LogLine {
+fn lag_warning_frame(dropped: u64) -> SseFrame {
+    SseFrame::run(&RunEvent::Log(LogLine {
         t: rfc3339(unix_now()),
         level: LogLevel::Warn,
         message: format!(
             "client fell behind; {dropped} events dropped (reload /metrics for the full history)"
         ),
-    })));
-    if let Some(status) = current.and_then(|f| f()) {
-        out.push(SseFrame::run(&RunEvent::Status(status)));
-    }
-    out
+    }))
 }
 
 fn run_sse_frames(sub: RunSseSubscription) -> impl Stream<Item = SseFrame> {
-    let first = stream::once(std::future::ready(sub.initial));
-    let current = sub.current;
     let rest: std::pin::Pin<Box<dyn Stream<Item = SseFrame> + Send>> = match sub.stream {
-        RunSseStream::Frames(rx) => Box::pin(BroadcastStream::new(rx).flat_map(move |r| {
-            let frames = match r {
-                Ok(frame) => vec![frame],
-                Err(BroadcastStreamRecvError::Lagged(n)) => lagged_run_frames(n, current.as_ref()),
-            };
-            stream::iter(frames)
-        })),
-        RunSseStream::Events(rx) => Box::pin(BroadcastStream::new(rx).flat_map(move |r| {
-            let frames = match r {
-                Ok(ev) => vec![SseFrame::run(&ev)],
-                Err(BroadcastStreamRecvError::Lagged(n)) => lagged_run_frames(n, current.as_ref()),
-            };
-            stream::iter(frames)
-        })),
+        RunSseStream::Frames(rx) => {
+            let mut pending = VecDeque::with_capacity(2);
+            pending.push_back(sub.initial);
+            Box::pin(stream::unfold((pending, rx, sub.resync), |(mut pending, mut rx, resync)| async move {
+                if let Some(frame) = pending.pop_front() {
+                    return Some((frame, (pending, rx, resync)));
+                }
+                match rx.recv().await {
+                    Ok(frame) => Some((frame, (pending, rx, resync))),
+                    Err(RecvError::Closed) => None,
+                    Err(RecvError::Lagged(dropped)) => {
+                        let Some(resync_fn) = resync.as_ref() else {
+                            return Some((lag_warning_frame(dropped), (pending, rx, resync)));
+                        };
+                        // Advance past stale buffered frames by atomically snapshotting and resubscribing at
+                        // the live tail so a lagged client never observes older status transitions after the
+                        // snapshot.
+                        let skipped = dropped.saturating_add(rx.len() as u64);
+                        let (status, new_rx) = resync_fn()?;
+                        rx = new_rx;
+                        pending.push_back(SseFrame::run(&RunEvent::Status(status)));
+                        Some((lag_warning_frame(skipped), (pending, rx, resync)))
+                    }
+                }
+            }))
+        }
+        RunSseStream::Events(rx) => {
+            let first = stream::once(std::future::ready(sub.initial));
+            let live = BroadcastStream::new(rx).map(|r| match r {
+                Ok(ev) => SseFrame::run(&ev),
+                Err(BroadcastStreamRecvError::Lagged(dropped)) => lag_warning_frame(dropped),
+            });
+            Box::pin(first.chain(live))
+        }
     };
-    first.chain(rest)
+    rest
 }
 
 /// `GET /api/runs/{id}/events`: a `status` event, then live pre-serialized events until the client disconnects,
 /// the run is deleted or the server shuts down. A subscriber that falls behind receives a warning `log` event
-/// followed by a fresh `status` snapshot so missed state transitions are recovered cleanly.
+/// followed by a fresh `status` snapshot from the live tail so missed state transitions are recovered in order.
 pub(super) async fn run_events(
     State(st): State<AppState>,
     ApiPath(id): ApiPath<String>,
@@ -247,66 +260,110 @@ pub(super) async fn run_events(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use folo_api::{RunStatus, StatusEvent};
-    use tokio::sync::broadcast;
+    use crate::store::RunSseResync;
+    use folo_api::{Loss, RunStatus, StatusEvent, Step};
+    use tokio::sync::{Notify, broadcast};
 
     use super::*;
 
     #[tokio::test]
-    async fn run_sse_lag_emits_warning_and_current_status_then_resumes() {
-        let (tx, rx1) = broadcast::channel::<SseFrame>(2);
+    async fn run_sse_lag_resyncs_to_live_tail_without_stale_status_transitions() {
+        let (tx, rx1) = broadcast::channel::<SseFrame>(4);
         let rx2 = tx.subscribe();
         let initial = SseFrame::run(&RunEvent::Status(StatusEvent::new(RunStatus::Running, None)));
-        let alive = Arc::new(AtomicBool::new(true));
-        let alive_ref = alive.clone();
-        let current: RunStatusResync = Arc::new(move || {
-            alive_ref.load(Ordering::SeqCst).then(|| StatusEvent::new(RunStatus::Completed, None))
+        let resynced = Arc::new(AtomicUsize::new(0));
+        let ready = Arc::new(Notify::new());
+        let tx_slot = Arc::new(std::sync::Mutex::new(Some(tx.clone())));
+        let tx_resync = tx_slot.clone();
+        let resynced_ref = resynced.clone();
+        let ready_ref = ready.clone();
+        let resync: RunSseResync = Arc::new(move || {
+            let sub = tx_resync.lock().unwrap().as_ref()?.subscribe();
+            if resynced_ref.fetch_add(1, Ordering::SeqCst) + 1 == 2 {
+                ready_ref.notify_one();
+            }
+            Some((StatusEvent::new(RunStatus::Stopped, None), sub))
         });
 
-        // Overflow the capacity-2 buffer with 4 frames so both subscribers lag by 2.
-        for i in 0..4 {
-            let frame = SseFrame::run(&RunEvent::Log(LogLine {
-                t: "2026-01-01T00:00:00Z".into(),
-                level: LogLevel::Info,
-                message: format!("msg-{i}"),
-            }));
-            let _ = tx.send(frame);
-        }
+        // Overflow the capacity-4 buffer so Step(1) is dropped while Stopping -> Log("final") -> Stopped stay
+        // retained in the ring buffer. Resync must advance past those stale buffered transitions instead of
+        // emitting `Stopped` followed by `Stopping`.
+        let _ = tx.send(SseFrame::run(&RunEvent::Step(Step {
+            step: 1,
+            epoch: 1,
+            epochs: 5,
+            steps_per_epoch: 10,
+            loss: Loss { box_: 1.0, cls: 1.0, dfl: 1.0, total: 3.0 },
+            lr: 0.01,
+            imgs_per_s: 10.0,
+            eta_s: 5.0,
+        })));
+        let _ = tx.send(SseFrame::run(&RunEvent::Step(Step {
+            step: 2,
+            epoch: 1,
+            epochs: 5,
+            steps_per_epoch: 10,
+            loss: Loss { box_: 0.9, cls: 0.9, dfl: 0.9, total: 2.7 },
+            lr: 0.01,
+            imgs_per_s: 10.0,
+            eta_s: 4.0,
+        })));
+        let _ = tx.send(SseFrame::run(&RunEvent::Status(StatusEvent::new(RunStatus::Stopping, None))));
+        let _ = tx.send(SseFrame::run(&RunEvent::Log(LogLine {
+            t: "2026-01-01T00:00:00Z".into(),
+            level: LogLevel::Info,
+            message: "final".into(),
+        })));
+        let _ = tx.send(SseFrame::run(&RunEvent::Status(StatusEvent::new(RunStatus::Stopped, None))));
+
+        let post = tokio::spawn({
+            let tx_slot = tx_slot.clone();
+            let ready = ready.clone();
+            async move {
+                ready.notified().await;
+                if let Some(tx) = tx_slot.lock().unwrap().take() {
+                    let _ = tx.send(SseFrame::run(&RunEvent::Log(LogLine {
+                        t: "2026-01-01T00:00:01Z".into(),
+                        level: LogLevel::Info,
+                        message: "post-resync".into(),
+                    })));
+                }
+            }
+        });
         drop(tx);
 
-        let frames1: Vec<SseFrame> = run_sse_frames(RunSseSubscription {
-            initial: initial.clone(),
-            stream: RunSseStream::Frames(rx1),
-            current: Some(current.clone()),
-        })
-        .collect()
-        .await;
-        let frames2: Vec<SseFrame> = run_sse_frames(RunSseSubscription {
-            initial,
-            stream: RunSseStream::Frames(rx2),
-            current: Some(current),
-        })
-        .collect()
-        .await;
+        let (frames1, frames2): (Vec<SseFrame>, Vec<SseFrame>) = tokio::join!(
+            run_sse_frames(RunSseSubscription {
+                initial: initial.clone(),
+                stream: RunSseStream::Frames(rx1),
+                resync: Some(resync.clone()),
+            })
+            .collect(),
+            run_sse_frames(RunSseSubscription {
+                initial,
+                stream: RunSseStream::Frames(rx2),
+                resync: Some(resync),
+            })
+            .collect(),
+        );
+        post.await.unwrap();
 
-        assert_eq!(frames1[0].event, "status");
-        assert_eq!(frames1[1].event, "log");
-        assert!(frames1[1].data.contains("2 events dropped"), "{}", frames1[1].data);
-        assert_eq!(frames1[2].event, "status");
-        let resync: StatusEvent = serde_json::from_str(&frames1[2].data).unwrap();
-        assert_eq!(resync.status, RunStatus::Completed);
-        assert_eq!(frames1[3].event, "log");
-        assert!(frames1[3].data.contains("msg-2"));
-        assert_eq!(frames1[4].event, "log");
-        assert!(frames1[4].data.contains("msg-3"));
+        assert_eq!(
+            frames1.iter().map(|f| f.event).collect::<Vec<_>>(),
+            ["status", "log", "status", "log"],
+            "stale buffered stopping/final/stopped frames must not follow the resync snapshot"
+        );
+        assert!(frames1[1].data.contains("5 events dropped"), "{}", frames1[1].data);
+        let resync_status: StatusEvent = serde_json::from_str(&frames1[2].data).unwrap();
+        assert_eq!(resync_status.status, RunStatus::Stopped);
+        assert!(frames1[3].data.contains("post-resync"));
         // Concurrent subscribers share the exact same pre-serialized Arc<str> payload.
         assert!(Arc::ptr_eq(&frames1[3].data, &frames2[3].data));
-        assert!(Arc::ptr_eq(&frames1[4].data, &frames2[4].data));
 
-        // When the run is deleted while lagged, resync omits status and stream terminates cleanly.
-        alive.store(false, Ordering::SeqCst);
+        // When the run is deleted while lagged, resync returns None and the stream closes cleanly without
+        // emitting stale buffered frames.
         let (tx2, rx_del) = broadcast::channel::<SseFrame>(1);
         let _ = tx2.send(SseFrame::new("log", "{}"));
         let _ = tx2.send(SseFrame::new("log", "{}"));
@@ -314,11 +371,11 @@ mod tests {
         let del_frames: Vec<SseFrame> = run_sse_frames(RunSseSubscription {
             initial: SseFrame::run(&RunEvent::Status(StatusEvent::new(RunStatus::Running, None))),
             stream: RunSseStream::Frames(rx_del),
-            current: Some(Arc::new(move || None)),
+            resync: Some(Arc::new(|| None)),
         })
         .collect()
         .await;
-        assert_eq!(del_frames.iter().map(|f| f.event).collect::<Vec<_>>(), ["status", "log", "log"]);
+        assert_eq!(del_frames.iter().map(|f| f.event).collect::<Vec<_>>(), ["status"]);
     }
 
     #[tokio::test]
@@ -343,21 +400,25 @@ mod tests {
         let sub2 = runs.subscribe_sse(&id).unwrap();
         let RunSseStream::Frames(mut rx1) = sub1.stream else { panic!("expected Frames stream") };
         let RunSseStream::Frames(mut rx2) = sub2.stream else { panic!("expected Frames stream") };
-        let current = sub1.current.expect("real store provides lag resync callback");
-        assert!(current().is_some());
+        let resync = sub1.resync.expect("real store provides lag resync callback");
+        let (snap, mut rx3) = resync().expect("alive run resyncs");
+        assert_eq!(snap.status, RunStatus::Queued);
 
         entry.log(LogLevel::Info, "shared payload");
         let f1 = rx1.recv().await.unwrap();
         let f2 = rx2.recv().await.unwrap();
+        let f3 = rx3.recv().await.unwrap();
         assert_eq!(f1.event, "log");
         assert!(Arc::ptr_eq(&f1.data, &f2.data), "concurrent subscribers share one Arc<str>");
+        assert!(Arc::ptr_eq(&f1.data, &f3.data), "resynced subscriber shares the same Arc<str>");
 
         // Dropping our local `Arc<RunEntry>` and deleting the run drops `sse_tx` so open streams close immediately.
         drop(entry);
         runs.delete(&id).unwrap();
-        assert!(current().is_none(), "weak resync handle returns None once deleted");
+        assert!(resync().is_none(), "weak resync handle returns None once deleted");
         assert!(matches!(rx1.recv().await, Err(broadcast::error::RecvError::Closed)));
         assert!(matches!(rx2.recv().await, Err(broadcast::error::RecvError::Closed)));
+        assert!(matches!(rx3.recv().await, Err(broadcast::error::RecvError::Closed)));
         runs.shutdown(None);
     }
 }

@@ -25,7 +25,7 @@ use folo_api::{
 use tokio::sync::broadcast;
 
 use super::cloud::SimCloud;
-use crate::store::{RunSseStream, RunSseSubscription, RunStatusResync, SseFrame, Subscription};
+use crate::store::{RunSseResync, RunSseStream, RunSseSubscription, SseFrame, Subscription};
 use crate::util::{noise, rfc3339, unix_now};
 
 use events::ticker;
@@ -477,14 +477,19 @@ impl SimRun {
         }
         drop(hub);
         let weak = Arc::downgrade(self);
-        let current: RunStatusResync = Arc::new(move || {
+        let resync: RunSseResync = Arc::new(move || {
             let run = weak.upgrade()?;
-            (!run.deleted.load(Ordering::SeqCst)).then(|| run.status_event(run.snap().status))
+            let hub = run.hub.lock().unwrap_or_else(|p| p.into_inner());
+            if run.deleted.load(Ordering::SeqCst) {
+                return None;
+            }
+            let rx = hub.sse_tx.as_ref()?.subscribe();
+            Some((run.status_event(run.snap().status), rx))
         });
         RunSseSubscription {
             initial: SseFrame::run(&RunEvent::Status(self.status_event(snap.status))),
             stream: RunSseStream::Frames(rx),
-            current: Some(current),
+            resync: Some(resync),
         }
     }
 

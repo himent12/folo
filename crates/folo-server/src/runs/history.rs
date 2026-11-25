@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 use crate::error::Result;
 use crate::store::{
-    LogsQuery, MetricsQuery, RunSseStream, RunSseSubscription, RunStatusResync, SseFrame, Subscription,
+    LogsQuery, MetricsQuery, RunSseResync, RunSseStream, RunSseSubscription, SseFrame, Subscription,
 };
 use crate::util::{fnv1a, parse_rfc3339, rfc3339, unix_now};
 
@@ -329,15 +329,15 @@ impl Runs {
             (status_event(&st.file.run), e.sse_tx.subscribe())
         };
         let weak = Arc::downgrade(&e);
-        let current: RunStatusResync = Arc::new(move || {
+        let resync: RunSseResync = Arc::new(move || {
             let entry = weak.upgrade()?;
             let st = entry.state.lock().unwrap_or_else(|p| p.into_inner());
-            (!st.deleted).then(|| status_event(&st.file.run))
+            (!st.deleted).then(|| (status_event(&st.file.run), entry.sse_tx.subscribe()))
         });
         Ok(RunSseSubscription {
             initial: SseFrame::run(&RunEvent::Status(initial)),
             stream: RunSseStream::Frames(frames),
-            current: Some(current),
+            resync: Some(resync),
         })
     }
 

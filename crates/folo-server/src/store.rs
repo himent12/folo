@@ -436,8 +436,9 @@ pub enum RunSseStream {
     Events(broadcast::Receiver<RunEvent>),
 }
 
-/// Callback returning a run's current [`StatusEvent`] for lag recovery (`None` once the run is deleted).
-pub type RunStatusResync = Arc<dyn Fn() -> Option<StatusEvent> + Send + Sync>;
+/// Callback atomically returning a run's current [`StatusEvent`] paired with a tail-positioned frame receiver
+/// for lag recovery (`None` once the run is deleted).
+pub type RunSseResync = Arc<dyn Fn() -> Option<(StatusEvent, broadcast::Receiver<SseFrame>)> + Send + Sync>;
 
 /// A live SSE subscription to a run's events, sharing pre-serialized payloads across concurrent clients and
 /// carrying a weak resync callback for lag recovery.
@@ -446,8 +447,9 @@ pub struct RunSseSubscription {
     pub initial: SseFrame,
     /// Subsequent live events.
     pub stream: RunSseStream,
-    /// Current status snapshot for lag recovery (`None` when the store does not provide one).
-    pub current: Option<RunStatusResync>,
+    /// Atomic status snapshot and tail-positioned receiver for lag recovery (`None` when the store does not
+    /// provide one).
+    pub resync: Option<RunSseResync>,
 }
 
 /// The data behind the API. See the module docs.
@@ -591,7 +593,7 @@ pub trait Store: Send + Sync + 'static {
         Ok(RunSseSubscription {
             initial: SseFrame::run(&RunEvent::Status(sub.initial)),
             stream: RunSseStream::Events(sub.events),
-            current: None,
+            resync: None,
         })
     }
 
