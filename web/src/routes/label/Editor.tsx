@@ -49,6 +49,7 @@ import type { AgentChoice } from './agentChoice';
 import { keyStep, newBox, nudge, sameBoxes, stretch, tidy } from './boxEdit';
 import { History } from './history';
 import EditCanvas from './EditCanvas';
+import EditorHints from './EditorHints';
 import { askOutcome, imageState } from './words';
 
 export interface EditorProps {
@@ -111,8 +112,15 @@ export default function Editor(props: EditorProps) {
   // This image's edits, for Undo and Redo; `rev` tells the buttons it changed.
   const history = new History<Box[]>();
   const rev = signal(0);
-  const canUndo = computed(() => (rev.get(), history.past.length > 0));
-  const canRedo = computed(() => (rev.get(), history.future.length > 0));
+  const undoCount = computed(() => (rev.get(), history.past.length));
+  const redoCount = computed(() => (rev.get(), history.future.length));
+  const canUndo = computed(() => undoCount.get() > 0);
+  const canRedo = computed(() => redoCount.get() > 0);
+  const activeClass = computed(() => {
+    const b = picked.get();
+    if (b) return b.class;
+    return Math.min(lastClass.get(), Math.max(0, props.job.classes.length - 1));
+  });
   function forget() {
     history.clear();
     rev.set(rev.peek() + 1);
@@ -149,6 +157,16 @@ export default function Editor(props: EditorProps) {
   });
 
   const locked = computed(() => (img.get()?.status === 'labeling' ? 'The agent is labeling this image. You can edit it once it is done.' : null));
+  const undoTip = computed(() => {
+    if (locked.get()) return { text: 'Undo unavailable while the agent is labeling' };
+    const n = undoCount.get();
+    return n > 0 ? { text: `Undo (${n} ${n === 1 ? 'step' : 'steps'})`, keys: 'Mod+Z' } : { text: 'Nothing to undo', keys: 'Mod+Z' };
+  });
+  const redoTip = computed(() => {
+    if (locked.get()) return { text: 'Redo unavailable while the agent is labeling' };
+    const n = redoCount.get();
+    return n > 0 ? { text: `Redo (${n} ${n === 1 ? 'step' : 'steps'})`, keys: 'Mod+Shift+Z' } : { text: 'Nothing to redo', keys: 'Mod+Shift+Z' };
+  });
 
   // ---------- editing ----------
   /** Every edit of the draft goes through here, so it can be undone; `kind` joins a run of like edits into one step. */
@@ -168,10 +186,12 @@ export default function Editor(props: EditorProps) {
     draft.set(to);
     rev.set(rev.peek() + 1);
   }
+  /** Sets the active drawing class and, when a box is selected, reclassifies that box too (keys 1–9 or quick chips). */
   function setClass(c: number) {
-    const s = selected.peek();
-    if (s === null || locked.peek() || c >= props.job.classes.length) return;
+    if (locked.peek() || c < 0 || c >= props.job.classes.length) return;
     lastClass.set(c);
+    const s = selected.peek();
+    if (s === null) return;
     edit(draft.peek().map((b, i) => (i === s ? { ...b, class: c } : b)));
   }
   function removeBox() {
@@ -578,6 +598,14 @@ export default function Editor(props: EditorProps) {
                   onchange={edit}
                 />
               </div>
+              <EditorHints
+                classes={props.job.classes}
+                activeClass={activeClass.get()}
+                hasSelection={selected.get() !== null}
+                disabled={!!locked.get()}
+                touch={touch.current}
+                onselectclass={setClass}
+              />
             </div>
 
             <aside class="side">
@@ -587,10 +615,10 @@ export default function Editor(props: EditorProps) {
                     Boxes <span class="meta num">{draft.get().length}</span>
                   </h3>
                   <span class="tools">
-                    <span use:tooltip={{ text: 'Undo', keys: 'Mod+Z' }}>
+                    <span use:tooltip={undoTip.get()}>
                       <Button variant="ghost" size="sm" icon={Undo} aria-label="Undo" disabled={!canUndo.get() || !!locked.get()} onclick={() => undo()} />
                     </span>
-                    <span use:tooltip={{ text: 'Redo', keys: 'Mod+Shift+Z' }}>
+                    <span use:tooltip={redoTip.get()}>
                       <Button variant="ghost" size="sm" icon={Redo} aria-label="Redo" disabled={!canRedo.get() || !!locked.get()} onclick={() => undo(true)} />
                     </span>
                     <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} onclick={addBox}>
@@ -598,6 +626,11 @@ export default function Editor(props: EditorProps) {
                     </Button>
                   </span>
                 </div>
+                {undoCount.get() > 0 || redoCount.get() > 0 ? (
+                  <p class="hist-depth num">
+                    History: {undoCount.get()} undo · {redoCount.get()} redo
+                  </p>
+                ) : null}
                 {draft.get().length ? (
                   <ul class="boxes scroll-shade" onpointerleave={() => hovered.set(null)}>
                     <Index each={draft.get()}>
@@ -720,7 +753,8 @@ css`
   }
   .stage {
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
     gap: var(--space-2);
     min-width: 0;
   }
@@ -787,6 +821,14 @@ css`
     display: flex;
     align-items: center;
     gap: var(--space-1);
+  }
+  .tools > span {
+    display: inline-flex;
+  }
+  .hist-depth {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
   }
   .meta {
     margin-left: var(--space-1);
