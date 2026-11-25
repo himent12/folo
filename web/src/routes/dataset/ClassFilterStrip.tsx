@@ -4,8 +4,9 @@
  * users can inspect class balance and filter images in one click without opening a menu.
  */
 import { computed, css, For, signal } from 'fw';
-import { classInk } from '$lib/design/classInk';
-import { compact, count as plural } from '$lib/format';
+import { classStroke } from '$lib/design/classInk';
+import { compact } from '$lib/format';
+import { fadeScroll } from '$lib/ui/fadeScroll';
 import { swatchStyle } from './swatch';
 
 export interface ClassFilterStripProps {
@@ -72,7 +73,7 @@ export default function ClassFilterStrip(props: ClassFilterStripProps) {
   const ranked = computed(() => rankedClassChips(props.classes, props.counts, props.value, expanded.get(), limit()));
 
   return (
-    <div class="class-strip" role="group" aria-label="Filter by class distribution">
+    <div class="class-strip" role="group" aria-label="Filter by class distribution" data-scrolls use:fadeScroll>
       <For each={ranked.get().visible} key={(item) => item.cls}>
         {(item) => {
           const active = () => props.value === item().cls;
@@ -81,19 +82,24 @@ export default function ClassFilterStrip(props: ClassFilterStripProps) {
             <button
               type="button"
               class="chip"
-              class:active={active()}
               class:absent={absent()}
+              class:active={active()}
               aria-pressed={active()}
-              aria-label={`${item().name}: ${plural(item().count, 'box')}, ${item().sharePct.toFixed(1)}%${active() ? '. Active class filter, click to clear' : ''}`}
               onclick={() => props.onchange(active() ? undefined : item().cls)}
             >
               <span class="chip-top">
                 <span class="sw" style={swatchStyle(item().cls, absent())} aria-hidden="true"></span>
                 <span class="cname truncate">{item().name}</span>
-                <span class="ccount num">{compact(item().count)}</span>
+                <span class="ccount num">
+                  {compact(item().count)}
+                  <span class="sr-only">
+                    {' '}
+                    {item().count === 1 ? 'box' : 'boxes'}, {item().sharePct.toFixed(1)}%
+                  </span>
+                </span>
               </span>
               <span class="bar-track" aria-hidden="true">
-                <span class="bar-fill" style:width={`${item().pctOfMax}%`} style:background={classInk(item().cls)}></span>
+                <span class="bar-fill" style:width={`${item().pctOfMax}%`} style:background={classStroke(item().cls)}></span>
               </span>
             </button>
           );
@@ -121,6 +127,9 @@ css`
     gap: 6px;
     min-width: 0;
   }
+  .class-strip:focus-visible {
+    outline-offset: -2px;
+  }
   .chip {
     position: relative;
     display: inline-flex;
@@ -143,18 +152,29 @@ css`
       background-color var(--dur-fast) var(--ease-standard),
       color var(--dur-fast) var(--ease-standard);
   }
-  .chip:hover {
-    border-color: var(--line-strong);
-    background: var(--bg-hover);
-    color: var(--text-primary);
+  .chip:focus-visible,
+  .more-btn:focus-visible {
+    outline-offset: -2px;
   }
-  .chip.active {
-    border-color: var(--accent-line);
-    background: var(--bg-selected);
-    color: var(--text-primary);
+  @media (hover: hover) {
+    .chip:hover {
+      border-color: var(--line-strong);
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+    .more-btn:hover {
+      border-color: var(--line-strong);
+      color: var(--text-primary);
+    }
   }
   .chip.absent {
     color: var(--text-tertiary);
+  }
+  /* Selection is neutral ink (DESIGN_DIRECTION §2.6–§2.7), placed after .absent so selected zero-count chips keep primary ink. */
+  .chip.active {
+    border-color: var(--text-tertiary);
+    background: var(--bg-active);
+    color: var(--text-primary);
   }
   .chip-top {
     display: inline-flex;
@@ -192,7 +212,7 @@ css`
   .bar-fill {
     display: block;
     height: 100%;
-    opacity: 0.85;
+    opacity: 0.9;
   }
   .chip.active .bar-fill {
     opacity: 1;
@@ -210,10 +230,6 @@ css`
     flex-shrink: 0;
     transition: border-color var(--dur-fast) var(--ease-standard), color var(--dur-fast) var(--ease-standard);
   }
-  .more-btn:hover {
-    border-color: var(--line-strong);
-    color: var(--text-primary);
-  }
   @media (pointer: coarse) {
     .chip,
     .more-btn {
@@ -225,7 +241,16 @@ css`
       flex-wrap: nowrap;
       overflow-x: auto;
       scrollbar-width: none;
-      padding-bottom: 2px;
+      padding: 2px 0;
+    }
+    .class-strip:global([data-fade='end']) {
+      mask-image: linear-gradient(90deg, #000 calc(100% - 48px), transparent);
+    }
+    .class-strip:global([data-fade='start']) {
+      mask-image: linear-gradient(90deg, transparent, #000 48px);
+    }
+    .class-strip:global([data-fade='both']) {
+      mask-image: linear-gradient(90deg, transparent, #000 48px, #000 calc(100% - 48px), transparent);
     }
     .chip {
       flex-shrink: 0;

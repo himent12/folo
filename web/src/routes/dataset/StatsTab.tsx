@@ -266,7 +266,7 @@ export default function StatsTab(props: StatsTabProps) {
                   <span class="clear-sep" aria-hidden="true">
                     ·
                   </span>
-                  <span>Clear filter</span>
+                  <span class="clear-label">Clear filter</span>
                   <X size={12} strokeWidth={2} aria-hidden="true" />
                 </button>
               )
@@ -283,7 +283,7 @@ export default function StatsTab(props: StatsTabProps) {
                     type="button"
                     class:active={active()}
                     class:absent={b().count === 0}
-                    aria-pressed={active()}
+                    aria-current={active() ? 'true' : undefined}
                     onclick={() => props.onclass(b().cls)}
                     aria-label={`${b().name}: ${count(b().count, 'box')}, ${share(b().count).toFixed(1)}%. ${active() ? 'Active filter; show images' : 'Show images'}`}
                   >
@@ -596,8 +596,8 @@ css`
     background: var(--bg-hover);
   }
   .bars button.active {
-    background: var(--bg-selected);
-    box-shadow: inset 2px 0 0 var(--accent-line);
+    background: var(--bg-active);
+    box-shadow: var(--select-bar);
   }
   .bars button.active .go {
     opacity: 1;
@@ -607,20 +607,31 @@ css`
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    max-width: 240px;
+    max-width: min(240px, 100%);
     height: var(--control-sm);
     padding: 0 var(--space-2);
     border-radius: var(--radius-sm);
-    border: 1px solid var(--accent-line);
-    background: var(--bg-selected);
+    border: 1px solid var(--text-tertiary);
+    background: var(--bg-active);
     font-size: var(--type-sm-size);
     font-weight: var(--weight-medium);
     color: var(--text-primary);
     white-space: nowrap;
-    transition: background-color var(--dur-fast) var(--ease-standard);
+    transition: background-color var(--dur-fast) var(--ease-standard), border-color var(--dur-fast) var(--ease-standard);
   }
-  .clear-cls:hover {
-    background: var(--bg-hover);
+  @media (hover: hover) {
+    .clear-cls:hover {
+      background: var(--bg-hover);
+      border-color: var(--line-strong);
+    }
+  }
+  .clear-cls .truncate {
+    min-width: 0;
+  }
+  .clear-sep,
+  .clear-label,
+  .clear-cls :global(svg) {
+    flex-shrink: 0;
   }
   .clear-sep {
     color: var(--text-tertiary);
@@ -632,6 +643,7 @@ css`
     width: 10px;
     height: 10px;
     border-radius: 2px;
+    flex-shrink: 0;
   }
   .cname {
     font-weight: var(--weight-medium);

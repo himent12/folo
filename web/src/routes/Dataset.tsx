@@ -542,9 +542,7 @@ export default function Dataset() {
                         }
                         actions={() => (
                           <>
-                            <Button variant="primary" onclick={() => setFilter({ split: null, class: null })}>
-                              Clear filters
-                            </Button>
+                            <Button onclick={() => setFilter({ split: null, class: null })}>Clear filters</Button>
                             {cls.get() !== undefined && split.get() !== 'all' ? (
                               <Button onclick={() => setFilter({ class: null })}>All classes in {split.get()}</Button>
                             ) : null}

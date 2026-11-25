@@ -54,8 +54,15 @@ describe('ClassFilterStrip', () => {
     );
     flushSync();
 
+    const strip = target.querySelector<HTMLElement>('.class-strip')!;
+    expect(strip.hasAttribute('data-scrolls')).toBe(true);
+
     const chips = () => [...target.querySelectorAll<HTMLButtonElement>('button.chip')];
     expect(chips().map((b) => b.querySelector('.cname')?.textContent)).toEqual(['square', 'circle']);
+    expect(chips()[0]!.hasAttribute('aria-label')).toBe(false);
+    expect(chips()[0]!.textContent).toContain('square');
+    expect(chips()[0]!.textContent).toContain('120');
+    expect(chips()[0]!.textContent).toContain('boxes');
 
     // Click top chip selects class 1 ('square')
     chips()[0]!.click();

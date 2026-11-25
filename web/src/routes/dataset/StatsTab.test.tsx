@@ -119,7 +119,7 @@ describe('Dataset stats: Health heading', () => {
     });
     flushSync();
 
-    const activeBars = [...target.querySelectorAll<HTMLButtonElement>('#ds-balance .bars button[aria-pressed="true"]')];
+    const activeBars = [...target.querySelectorAll<HTMLButtonElement>('#ds-balance .bars button[aria-current="true"]')];
     expect(activeBars).toHaveLength(1);
     expect(activeBars[0]!.classList.contains('active')).toBe(true);
     expect(activeBars[0]!.querySelector('.cname')?.textContent).toBe(dataset.classes[1]);
