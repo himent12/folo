@@ -593,6 +593,8 @@ unsafe fn flip_lr_row_avx2(row: &mut [u8], w: usize) {
         row.swap(a + 2, b + 2);
         x += 1;
     }
+    // Re-derive `p` after any `row.swap` reborrow above so provenance stays valid under Stacked/Tree Borrows.
+    let p = row.as_mut_ptr();
     while x + 4 <= half {
         let left = x * 3;
         let right = (w - 4 - x) * 3;
