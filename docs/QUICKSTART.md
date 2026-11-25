@@ -284,6 +284,25 @@ Everything above is also available to agents in two ways:
 |---|---|
 | `folo serve` says the web app is not built | `(cd web && npm ci && npm run build)` from the repo root, or pass `--web-dir` |
 | `folo serve` cannot bind its port | another server holds port 7878: `--port 0` picks a free port |
-| Playground shows "does not include the in-browser runtime" | run `scripts/build-wasm.sh`, then rebuild Studio |
-| training is on the CPU | `folo doctor`: is a GPU listed? Try `FOLO_GPU_BACKEND=dx12` or `vulkan` |
-| a command failed in a script | the last stdout line of `--json` is `{"error":{"code","message","hint"}}`; exit codes are 1 runtime, 2 usage, 3 not found, 4 not implemented |
+| `data_dir_in_use` (exit 1) | another `folo serve`, FOLO Desktop's local server, or local `folo mcp` / `folo label` / `folo bench` already owns `--data-dir`; for commands that accept `--server` (`folo mcp` without `--confine`, `folo label`, `folo bench`, Desktop), pass the URL reported in the error when an HTTP server owns it — otherwise (including `folo mcp --confine`) stop the existing process or pass a separate `--data-dir` on CLI commands that take it |
+| Playground shows "does not include the in-browser runtime" | run `scripts/build-wasm.sh` (or `scripts\build-wasm.ps1`), then rebuild Studio |
+| `scripts/build-wasm.sh` fails on `wasm-bindgen-cli` version | install the exact `wasm-bindgen-cli` version pinned in `Cargo.lock` (the script prints the exact `cargo install` command) |
+| training is on the CPU | `folo doctor`: is a GPU listed? Try `FOLO_GPU_BACKEND=dx12` or `vulkan`, or `FOLO_GPU_ADAPTER=<index or substring>` |
+| `--amp` fails with `not_supported` (exit 4) | mixed-precision training requires GPU tensor cores (`folo doctor` shows whether your adapter supports them); drop `--amp` for f32, or start `folo serve --tensor-cores` / `folo mcp --tensor-cores` when running through Studio or MCP |
+| `weights_not_found` (exit 3) on `--weights` | `train` never downloads weights automatically; run `folo weights pull <name>` first (`folo weights list` shows published names) |
+| `gpu_out_of_memory` (exit 1) | lower `--batch` or `--imgsz`, enable `--amp` (when tensor cores are available), or pick a smaller scale (`folo-n`) |
+| Windows cannot copy or zip a live run folder | exclude `train.lock` while training is active (the training process holds it open) |
+| a command failed in a script | the last stdout line of `--json` is `{"error":{"code","message","hint"}}` (except `folo mcp`, which reserves stdout for protocol messages and writes CLI errors to stderr); exit codes are 1 runtime, 2 usage, 3 not found, 4 not implemented or not supported |
+
+## Go further
+
+| goal | where to read |
+|---|---|
+| Tune architecture, loss, optimizer, EMA, or AMP | [MODEL.md](MODEL.md) |
+| Dataset formats, checks, and augmentation knobs | [DATA.md](DATA.md) |
+| Label raw images with Claude Code, Codex, or Antigravity | [LABELING.md](LABELING.md) |
+| Stress-test and compare detectors on vision benchmarks | [BENCH.md](BENCH.md), [BENCHMARKS.md](BENCHMARKS.md) |
+| Train on a rented cloud GPU or remote FOLO server | [CLOUD.md](CLOUD.md) |
+| Run models in the browser (WebGPU / wasm CPU) | [WASM.md](WASM.md) |
+| Drive FOLO from an agent (MCP tools & `--json` CLI recipes) | [MCP.md](MCP.md), [AGENT_COOKBOOK.md](AGENT_COOKBOOK.md) |
+| Full CLI flags, HTTP/SSE contract, or repo architecture | [CLI.md](CLI.md), [API.md](API.md), [ARCHITECTURE.md](ARCHITECTURE.md) |
