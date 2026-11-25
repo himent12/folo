@@ -56,11 +56,14 @@
   color: var(--text-tertiary);
   font-weight: var(--weight-regular);
   opacity: 0;
-  transition: opacity var(--dur-fast) var(--ease-standard);
+  transition:
+    opacity var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
 }
 
-:is(h2, h3, h4):hover .h-anchor,
-.h-anchor:focus-visible {
+:is(h2, h3, h4, h5, h6):hover .h-anchor,
+.h-anchor:focus-visible,
+.h-anchor[data-copy-state] {
   opacity: 1;
 }
 
@@ -68,9 +71,17 @@
   color: var(--text-primary);
 }
 
+.prose .h-anchor[data-copy-state='copied'] {
+  color: var(--success-text);
+}
+
+.prose .h-anchor[data-copy-state='failed'] {
+  color: var(--danger-text);
+}
+
 @media (hover: none) {
   .h-anchor {
-    display: none;
+    opacity: 1;
   }
 }
 
@@ -158,9 +169,9 @@
 
 .prose code {
   padding: 1px var(--space-1);
-  border: var(--size-hairline) solid var(--line-subtle);
+  border: var(--size-hairline) solid var(--line-default);
   border-radius: var(--radius-xs);
-  background: var(--bg-raised);
+  background: var(--code-inline-bg);
   color: var(--text-primary);
   font-family: var(--font-mono);
   font-size: 0.85em;
@@ -303,21 +314,23 @@ img.theme-light {
 }
 
 .prose .code,
-.prose .table-wrap {
+.prose .table-frame {
   margin-top: var(--space-5);
 }
 
 .prose .code + *,
-.prose .table-wrap + * {
+.prose .table-frame + * {
   margin-top: var(--space-5);
 }
 
 .shiki {
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
   padding: var(--space-3) var(--space-4);
-  border: var(--size-hairline) solid var(--line-subtle);
+  border: var(--size-hairline) solid var(--line-default);
   border-radius: var(--radius-lg);
-  background: var(--bg-inset) !important;
+  background: var(--code-bg) !important;
   color: var(--shiki-foreground) !important;
   font-family: var(--font-mono);
   font-size: var(--type-base-size);
@@ -362,9 +375,9 @@ img.theme-light {
   height: var(--control-md);
   padding: 0 var(--space-2);
   overflow: hidden;
-  border: var(--size-hairline) solid var(--line-subtle);
+  border: var(--size-hairline) solid var(--line-default);
   border-radius: var(--radius-md);
-  background: var(--bg-raised);
+  background: var(--code-tool-bg);
   color: var(--text-secondary);
   font-family: var(--font-mono);
   font-size: var(--type-sm-size);
@@ -384,7 +397,7 @@ img.theme-light {
   padding: 0 var(--space-2);
   border: var(--size-hairline) solid var(--line-default);
   border-radius: var(--radius-md);
-  background: var(--bg-raised);
+  background: var(--code-tool-bg);
   color: var(--text-secondary);
   font-size: var(--type-sm-size);
   opacity: 0;
@@ -405,6 +418,12 @@ img.theme-light {
   color: var(--text-primary);
 }
 
+.copy[data-copy-state='copied'],
+.copy[data-copy-state='copied']:hover {
+  border-color: var(--success-solid);
+  color: var(--text-primary);
+}
+
 .copy[data-copy-state='failed'],
 .copy[data-copy-state='failed']:hover {
   border-color: var(--danger-solid);
@@ -418,7 +437,7 @@ img.theme-light {
 
 .copy[data-copy-state='copied'] .i-check {
   display: block;
-  color: var(--success-solid);
+  color: var(--success-text);
 }
 
 .copy-label {
@@ -442,15 +461,19 @@ img.theme-light {
   }
 }
 
-/* Highlighting: shiki's CSS-variable theme, coloured from the tokens (status `text` colours, AA on every surface). */
+/* Highlighting: shiki's CSS-variable theme, coloured from the tokens (AA >= 4.9:1 on both dark --bg-inset and light
+   --bg-app code surfaces). */
 :root {
+  --code-bg: var(--bg-inset);
+  --code-inline-bg: var(--bg-raised);
+  --code-tool-bg: var(--bg-raised);
   --shiki-foreground: var(--text-primary);
-  --shiki-background: var(--bg-inset);
+  --shiki-background: var(--code-bg);
   --shiki-token-keyword: var(--info-text);
   --shiki-token-string: var(--success-text);
   --shiki-token-string-expression: var(--success-text);
   --shiki-token-constant: var(--warning-text);
-  --shiki-token-function: var(--text-primary);
+  --shiki-token-function: var(--chart-text-5);
   --shiki-token-parameter: var(--text-primary);
   --shiki-token-punctuation: var(--text-secondary);
   --shiki-token-comment: var(--text-tertiary);
@@ -460,9 +483,62 @@ img.theme-light {
   --shiki-token-changed: var(--warning-text);
 }
 
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --code-bg: var(--bg-app);
+    --code-inline-bg: var(--bg-app);
+    --code-tool-bg: var(--bg-panel);
+  }
+}
+
+:root[data-theme='light'] {
+  --code-bg: var(--bg-app);
+  --code-inline-bg: var(--bg-app);
+  --code-tool-bg: var(--bg-panel);
+}
+
 /* Tables */
+.table-frame {
+  position: relative;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.table-frame::before,
+.table-frame::after {
+  content: '';
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  z-index: 1;
+  width: 3px;
+  background: var(--text-tertiary);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+
+.table-frame::before {
+  left: 1px;
+  border-radius: calc(var(--radius-lg) - 1px) 0 0 calc(var(--radius-lg) - 1px);
+}
+
+.table-frame::after {
+  right: 1px;
+  border-radius: 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px) 0;
+}
+
+.table-frame[data-scroll-left]::before,
+.table-frame[data-scroll-right]::after {
+  opacity: 1;
+}
+
 .table-wrap {
+  max-width: 100%;
+  min-width: 0;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
   border: var(--size-hairline) solid var(--line-default);
   border-radius: var(--radius-lg);
 }
@@ -522,9 +598,31 @@ img.theme-light {
   max-width: 420px;
 }
 
+@media (max-width: 639px) {
+  .prose th,
+  .prose td {
+    padding: var(--space-1-5) var(--space-2);
+  }
+
+  .prose td {
+    min-width: 5.5em;
+    max-width: 260px;
+  }
+}
+
 @media print {
+  :root,
+  :root[data-theme='dark'],
+  :root[data-theme='light'] {
+    --code-bg: var(--bg-app);
+    --code-inline-bg: var(--bg-app);
+    --code-tool-bg: var(--bg-panel);
+  }
+
   .code-tools,
-  .h-anchor {
+  .h-anchor,
+  .table-frame::before,
+  .table-frame::after {
     display: none !important;
   }
 

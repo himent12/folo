@@ -27,6 +27,59 @@ function announce(msg: string) {
   });
 }
 
+// Transient feedback toast (visual companion to `announce`, which handles screen readers).
+const toast = document.createElement('div');
+toast.className = 'toast';
+toast.setAttribute('aria-hidden', 'true');
+toast.hidden = true;
+const toastIcon = document.createElement('span');
+toastIcon.className = 'toast-icon';
+const toastMsg = document.createElement('span');
+toastMsg.className = 'toast-msg';
+toast.append(toastIcon, toastMsg);
+document.body.append(toast);
+let toastHideTimer = 0;
+let toastRemoveTimer = 0;
+let toastShowRaf = 0;
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const TOAST_CHECK_SVG =
+  '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const TOAST_FAIL_SVG =
+  '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="m4.5 4.5 7 7M11.5 4.5l-7 7" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>';
+
+function hideToast() {
+  clearTimeout(toastHideTimer);
+  clearTimeout(toastRemoveTimer);
+  cancelAnimationFrame(toastShowRaf);
+  delete toast.dataset.open;
+  if (reducedMotion.matches) {
+    toast.hidden = true;
+  } else {
+    toastRemoveTimer = window.setTimeout(() => {
+      if (!('open' in toast.dataset)) toast.hidden = true;
+    }, 180);
+  }
+}
+
+function showToast(msg: string, state: 'ok' | 'error' = 'ok', duration = state === 'ok' ? 2000 : 2800) {
+  clearTimeout(toastHideTimer);
+  clearTimeout(toastRemoveTimer);
+  cancelAnimationFrame(toastShowRaf);
+  toast.dataset.state = state;
+  toastIcon.innerHTML = state === 'ok' ? TOAST_CHECK_SVG : TOAST_FAIL_SVG;
+  toastMsg.textContent = msg;
+  toast.hidden = false;
+  if (reducedMotion.matches || 'open' in toast.dataset) {
+    toast.dataset.open = '';
+  } else {
+    toastShowRaf = requestAnimationFrame(() => {
+      toast.dataset.open = '';
+    });
+  }
+  toastHideTimer = window.setTimeout(hideToast, duration);
+}
+toast.addEventListener('click', hideToast);
+
 // Theme: cycle between system (no override), light and dark; start by flipping away from the system theme.
 type ThemePref = 'system' | 'light' | 'dark';
 const lightMq = matchMedia('(prefers-color-scheme: light)');
@@ -209,10 +262,16 @@ async function runSearch(fromRetry = false) {
 }
 
 function openSearch() {
-  if (!dialog || !input || dialog.open) return;
+  if (!dialog || !input) return;
+  if (dialog.open) {
+    input.focus();
+    input.select();
+    return;
+  }
   setNav(false, true);
   indexError = false;
   dialog.showModal();
+  input.focus();
   input.select();
   void runSearch();
 }
@@ -279,10 +338,24 @@ dialog?.addEventListener('click', (e) => {
   // A result on this page only scrolls, so close the dialog for it too.
   if ((e.target as Element).closest('.search-result a')) dialog.close();
 });
+function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+  if (!el) return false;
+  if (el.closest('input, textarea, select')) return true;
+  let cur: Element | null = el;
+  while (cur) {
+    if (cur instanceof HTMLElement) return cur.isContentEditable;
+    cur = cur.parentElement;
+  }
+  return false;
+}
+
 document.addEventListener('keydown', (e) => {
-  const t = e.target as HTMLElement;
-  const typing = t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName);
-  if ((e.key === 'k' && (e.metaKey || e.ctrlKey)) || (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey)) {
+  if (e.key === 'Escape' && !toast.hidden) hideToast();
+  if (e.defaultPrevented || e.isComposing) return;
+  const isModK = e.key.toLowerCase() === 'k' && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey;
+  const isSlash = e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey && !isTypingTarget(e.target);
+  if (isModK || isSlash) {
     e.preventDefault();
     openSearch();
   }
@@ -382,7 +455,8 @@ async function copyText(text: string, isCurrent: () => boolean): Promise<boolean
 }
 
 document.addEventListener('click', async (e) => {
-  const btn = (e.target as Element).closest<HTMLButtonElement>('.copy');
+  const target = e.target instanceof Element ? e.target : null;
+  const btn = target?.closest<HTMLButtonElement>('.copy');
   const code = btn?.closest('.code')?.querySelector('pre');
   if (!btn || !code) return;
   const seq = (copySeq.get(btn) ?? 0) + 1;
@@ -395,7 +469,7 @@ document.addEventListener('click', async (e) => {
   btn.dataset.copyState = ok ? 'copied' : 'failed';
   const label = btn.querySelector('.copy-label');
   if (label) label.textContent = ok ? 'Copied' : 'Failed';
-  announce(ok ? 'Copied to the clipboard' : 'Could not copy to the clipboard');
+  if (copyOp === op) announce(ok ? 'Copied to the clipboard' : 'Could not copy to the clipboard');
   copyTimers.set(
     btn,
     window.setTimeout(() => {
@@ -406,13 +480,65 @@ document.addEventListener('click', async (e) => {
   );
 });
 
-// Wide tables and code blocks scroll sideways: make those reachable by keyboard and name them for screen readers.
+// Heading anchor links: copy the full section URL and show toast feedback without blocking hash navigation.
+const anchorTimers = new WeakMap<HTMLAnchorElement, number>();
+const anchorSeq = new WeakMap<HTMLAnchorElement, number>();
+
+document.addEventListener('click', async (e) => {
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+  const target = e.target instanceof Element ? e.target : null;
+  const anchor = target?.closest<HTMLAnchorElement>('a.h-anchor');
+  if (!anchor) return;
+  const seq = (anchorSeq.get(anchor) ?? 0) + 1;
+  anchorSeq.set(anchor, seq);
+  const op = ++copyOp;
+  const ok = await copyText(anchor.href, () => copyOp === op);
+  if (anchorSeq.get(anchor) !== seq) return;
+  const prevTimer = anchorTimers.get(anchor);
+  if (prevTimer !== undefined) clearTimeout(prevTimer);
+  anchor.dataset.copyState = ok ? 'copied' : 'failed';
+  if (copyOp === op) {
+    showToast(ok ? 'Link copied' : 'Could not copy link', ok ? 'ok' : 'error');
+    announce(ok ? 'Link copied to the clipboard' : 'Could not copy link');
+  }
+  anchorTimers.set(
+    anchor,
+    window.setTimeout(() => {
+      anchorTimers.delete(anchor);
+      delete anchor.dataset.copyState;
+    }, ok ? 1600 : 2400),
+  );
+});
+
+// Wide tables and code blocks scroll sideways: make those reachable by keyboard, name them for screen readers and
+// show directional edge cues on overflowing tables.
+const watchedTables = new WeakSet<HTMLElement>();
+function syncTableScrollCue(el: HTMLElement) {
+  const host = el.parentElement?.classList.contains('table-frame') ? el.parentElement : el;
+  const max = el.scrollWidth - el.clientWidth;
+  if (max <= 1) {
+    delete host.dataset.scrollLeft;
+    delete host.dataset.scrollRight;
+    return;
+  }
+  const left = el.scrollLeft;
+  if (left > 1) host.dataset.scrollLeft = '';
+  else delete host.dataset.scrollLeft;
+  if (left < max - 1) host.dataset.scrollRight = '';
+  else delete host.dataset.scrollRight;
+}
+
 function markScrollers() {
   for (const el of $$<HTMLElement>('.table-wrap, .shiki')) {
+    const isTable = el.classList.contains('table-wrap');
+    if (isTable && !watchedTables.has(el)) {
+      watchedTables.add(el);
+      el.addEventListener('scroll', () => syncTableScrollCue(el), { passive: true });
+    }
     const scrolls = el.scrollWidth > el.clientWidth + 1;
     if (scrolls) {
       el.tabIndex = 0;
-      if (el.classList.contains('table-wrap')) {
+      if (isTable) {
         el.setAttribute('role', 'region');
         el.setAttribute('aria-label', 'Table (scrolls sideways)');
       }
@@ -421,6 +547,7 @@ function markScrollers() {
       el.removeAttribute('role');
       el.removeAttribute('aria-label');
     }
+    if (isTable) syncTableScrollCue(el);
   }
 }
 markScrollers();

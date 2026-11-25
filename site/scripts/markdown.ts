@@ -157,8 +157,8 @@ export async function createMarkdown(): Promise<MarkdownIt> {
   md.renderer.rules.code_block = (tokens, idx) =>
     `<div class="code"><div class="code-tools">${copyButton()}</div><pre class="shiki plain"><code>${escapeHtml(tokens[idx].content.replace(/\n$/, ''))}</code></pre></div>\n`;
 
-  md.renderer.rules.table_open = () => '<div class="table-wrap"><table>\n';
-  md.renderer.rules.table_close = () => '</table></div>\n';
+  md.renderer.rules.table_open = () => '<div class="table-frame"><div class="table-wrap"><table>\n';
+  md.renderer.rules.table_close = () => '</table></div></div>\n';
 
   const image = md.renderer.rules.image!;
   md.renderer.rules.image = (tokens, idx, options, env, self) => {
