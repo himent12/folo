@@ -580,4 +580,87 @@ describe('CommandPalette: async hardening, deferred loops, clear button, and poi
     await vi.waitFor(() => expect(inFlight).toBe(0));
     expect(maxInFlight).toBe(6);
   });
+
+  it('restores opener focus on close and in-place commands, but does not steal focus from a dialog opened by a command', () => {
+    const opener = document.createElement('button');
+    opener.textContent = 'Trigger';
+    document.body.appendChild(opener);
+    opener.focus();
+    const otherDialog = document.createElement('dialog');
+    const otherBtn = document.createElement('button');
+    otherDialog.appendChild(otherBtn);
+    document.body.appendChild(otherDialog);
+    try {
+      const open = signal(true);
+      c = render(
+        () => (
+          <CommandPalette
+            bind:open={open}
+            onshortcuts={() => {
+              otherDialog.open = true;
+              otherBtn.focus();
+            }}
+          />
+        ),
+        target,
+      );
+      flushSync();
+      // Choosing an in-place toggle (Switch theme) closes the palette and restores focus to opener.
+      const themeOpt = document.getElementById('pi-theme')!;
+      themeOpt.click();
+      flushSync();
+      expect(document.activeElement).toBe(opener);
+
+      // Reopen and choose Keyboard shortcuts: focus stays in the newly opened dialog, never stolen back to opener.
+      open.set(true);
+      flushSync();
+      const shortcutsOpt = document.getElementById('pi-shortcuts')!;
+      shortcutsOpt.click();
+      flushSync();
+      expect(document.activeElement).toBe(otherBtn);
+    } finally {
+      otherDialog.remove();
+      opener.remove();
+    }
+  });
+
+  it('ignores a stale queued native close event delivered after the palette has reopened, and supports Ctrl+Home/End', () => {
+    const open = signal(true);
+    const runsSpy = vi.spyOn(hub.api, 'runs');
+    let secondSignal: AbortSignal | undefined;
+    runsSpy.mockImplementation((s?: AbortSignal) => {
+      secondSignal = s;
+      return new Promise(() => {});
+    });
+    c = render(() => <CommandPalette bind:open={open} onshortcuts={() => {}} />, target);
+    flushSync();
+    const dlg = document.querySelector<HTMLDialogElement>('dialog.palette')!;
+    const input = document.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    const opts = () => [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+
+    // Ctrl+End jumps to last option and Ctrl+Home jumps to first, both calling preventDefault.
+    const endEv = new KeyboardEvent('keydown', { key: 'End', ctrlKey: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(endEv);
+    flushSync();
+    expect(endEv.defaultPrevented).toBe(true);
+    expect(input.getAttribute('aria-activedescendant')).toBe(opts().at(-1)!.id);
+    const homeEv = new KeyboardEvent('keydown', { key: 'Home', ctrlKey: true, bubbles: true, cancelable: true });
+    input.dispatchEvent(homeEv);
+    flushSync();
+    expect(homeEv.defaultPrevented).toBe(true);
+    expect(input.getAttribute('aria-activedescendant')).toBe(opts()[0]!.id);
+
+    // Close and immediately reopen, then deliver a late queued `close` event from the first close:
+    // must NOT abort the reopened opening's fetches or close the palette.
+    open.set(false);
+    flushSync();
+    open.set(true);
+    flushSync();
+    expect(dlg.open).toBe(true);
+    expect(secondSignal?.aborted).toBe(false);
+    dlg.dispatchEvent(new Event('close'));
+    flushSync();
+    expect(open.get()).toBe(true);
+    expect(secondSignal?.aborted).toBe(false);
+  });
 });
