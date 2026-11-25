@@ -3,241 +3,55 @@
 // time: whatever is due is applied lazily (`advance`) before every answer and on every tick of a subscribed stream,
 // so the demo moves in real time and a paused clock (the screenshots) holds it still. The agent's boxes are the
 // image's own objects as a decent model would find them (a few missed, shifted or confused), never exact.
+// Agent catalog/validation live in `./labelAgents.ts`; serialization/simulation/dataset building in `./labelSim.ts`.
 
+import { AGENT_NAME, boxRevision, classChangeError, classesError, folderPath, folderPathError, INSTRUCTIONS_MAX, JOB_NAME_MAX, NOTE_MAX } from '../../label';
 import { ApiError, type LabelEventHandlers } from '../client';
 import type {
   Box,
   CreateLabelJob,
-  LabelAgent,
-  LabelAgentId,
   LabelDatasetRequest,
-  LabelEffort,
   LabelImage,
   LabelImagePage,
   LabelImagesAdded,
   LabelImagesQuery,
-  LabelImageStatus,
   LabelJob,
   LabelOutcome,
-  LabelUsage,
   LogLine,
   SkippedImage,
   StartLabeling,
   UpdateLabelJob,
 } from '../types';
-import { AGENT_NAME, boxRevision, classChangeError, classesError, folderPath, folderPathError, INSTRUCTIONS_MAX, JOB_NAME_MAX, NOTE_MAX } from '../../label';
-import { imageSize, inventBoxes, predictBoxes, round } from './boxes';
+import { imageSize } from './boxes';
 import { image, specs, type MockDatasetSpec } from './datasets';
+import {
+  addUsage,
+  BATCH_MAX,
+  BATCH_MS,
+  BULK,
+  checkMockModel,
+  DEFAULT_BATCH,
+  FULL,
+  HOUR,
+  inRange,
+  iso,
+  LEFT_OUT,
+  MAX_IMAGES,
+  MIN,
+  mockAgents,
+  PARALLEL_MAX,
+  plural,
+  resolveAgentRequest,
+  zeroUsage,
+  type Img,
+  type Job,
+  type Run,
+} from './labelAgents';
+import { buildDatasetSpec, callUsage, draftBoxes, runSummary, serializeImage, serializeJob } from './labelSim';
 import { renderImage } from './render';
 import { hash, hashBytes } from './rng';
 
-/** One agent call ends every this many ms. */
-export const BATCH_MS = 1500;
-const MIN = 60_000;
-const HOUR = 60 * MIN;
-/** A job's image limit (docs/API.md), and why an image past it is skipped. */
-const MAX_IMAGES = 10_000;
-const FULL = `a job holds at most ${MAX_IMAGES} images`;
-/** Over this many images added at once, the stream says `reload` instead of one `image` event each (docs/API.md). */
-const BULK = 100;
-
-/** What `start` takes at most (docs/API.md): a model name's characters, images per call, calls at a time. */
-const MODEL_MAX = 100;
-const BATCH_MAX = 16;
-const PARALLEL_MAX = 8;
-/** Whether an optional count is absent or a whole number in `1..=max`. */
-const inRange = (v: number | null | undefined, max: number) => v === null || v === undefined || (Number.isInteger(v) && v >= 1 && v <= max);
-
-const EFFORT_SUFFIXES = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
-
-/** Mirrors the server's `check_model`: trims a model name and refuses invalid characters or length. */
-export function checkMockModel(rawModel: string | null | undefined): string | null {
-  const model = rawModel?.trim() || null;
-  if (model && !/^[A-Za-z0-9._:/[\]-]{1,100}$/.test(model))
-    throw new ApiError(400, 'invalid_body', `model must be at most ${MODEL_MAX} characters of A-Z a-z 0-9 . _ : / - [ ]`);
-  return model;
-}
-
-/** Mirrors the server's `Agent::resolve_request`: validates model, maps Antigravity effort-suffixed slugs, and rejects conflicts. */
-export function resolveAgentRequest(
-  agent: LabelAgentId,
-  rawModel: string | null | undefined,
-  explicitEffort: LabelEffort | null | undefined,
-  defaultModel: string | null,
-  defaultEffort: LabelEffort,
-): { model: string | null; effort: LabelEffort } {
-  const model = checkMockModel(rawModel);
-  if (agent === 'antigravity' && model) {
-    const lower = model.toLowerCase();
-    for (const suffix of EFFORT_SUFFIXES) {
-      const tail = `-${suffix}`;
-      if (lower.endsWith(tail) && model.length > tail.length) {
-        const base = model.slice(0, model.length - tail.length);
-        const mapped: LabelEffort = suffix === 'minimal' || suffix === 'low' ? 'low' : suffix === 'medium' ? 'medium' : 'high';
-        if (explicitEffort && explicitEffort !== mapped) {
-          throw new ApiError(
-            400,
-            'invalid_body',
-            `model '${model}' already specifies effort '${suffix}', which conflicts with effort '${explicitEffort}': omit effort or pass the base model '${base}'`,
-          );
-        }
-        return { model, effort: mapped };
-      }
-    }
-  }
-  return { model: model ?? defaultModel, effort: explicitEffort ?? defaultEffort };
-}
-
-/** Images per call when a run names none (docs/API.md: Claude Code 4, Codex 8, Antigravity 8). */
-const DEFAULT_BATCH: Record<LabelAgentId, number> = { claude: 4, codex: 8, antigravity: 8 };
-/** Claude Code's list prices per million tokens, input and output (Codex reports no cost). */
-const PRICE: Record<string, [number, number]> = { sonnet: [3, 15], haiku: [1, 5], opus: [15, 75] };
-/** How well each model finds the objects (the share a call gets right, roughly). */
-const QUALITY: Record<string, number> = {
-  sonnet: 0.86,
-  haiku: 0.74,
-  opus: 0.92,
-  'gemini-4-neon': 0.91,
-  'gemini-4-hydrogen': 0.88,
-  'gemini-4-carbon': 0.84,
-  'gemini-4-argon': 0.8,
-  'gemini-3.8-flash': 0.78,
-};
-
-/**
- * The agents a server finds, with the real server's models and defaults: Claude Code installed; Codex and Antigravity
- * not installed (their hints say how), except in `all-agents`, where all three are.
- */
-export function mockAgents(codex: boolean): LabelAgent[] {
-  return [
-    {
-      id: 'claude',
-      name: AGENT_NAME.claude,
-      available: true,
-      version: '2.1.302',
-      models: [
-        { id: 'haiku', label: 'Haiku' },
-        { id: 'sonnet', label: 'Sonnet' },
-        { id: 'opus', label: 'Opus' },
-      ],
-      default_model: 'haiku',
-      default_effort: 'low',
-      fast: false,
-      hint: null,
-    },
-    {
-      id: 'codex',
-      name: AGENT_NAME.codex,
-      available: codex,
-      version: codex ? '0.58.0' : null,
-      models: [
-        { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol', fast: true },
-        { id: 'gpt-6-astra', label: 'GPT-6-Astra', fast: true },
-        { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra', fast: true },
-        { id: 'gpt-6-luna', label: 'GPT-6-Luna', fast: true },
-      ],
-      default_model: null,
-      default_effort: 'low',
-      fast: true,
-      hint: codex ? null : 'Install Codex (npm install -g @openai/codex) and sign in with `codex login`, or set FOLO_CODEX_BIN to its path.',
-    },
-    {
-      id: 'antigravity',
-      name: AGENT_NAME.antigravity,
-      available: codex,
-      version: codex ? '1.5.13' : null,
-      models: [
-        { id: 'gemini-4-neon', label: 'Gemini 4 Neon' },
-        { id: 'gemini-4-hydrogen', label: 'Gemini 4 Hydrogen' },
-        { id: 'gemini-4-carbon', label: 'Gemini 4 Carbon' },
-        { id: 'gemini-4-argon', label: 'Gemini 4 Argon' },
-        { id: 'gemini-3.8-flash', label: 'Gemini 3.8 Flash' },
-      ],
-      default_model: null,
-      default_effort: 'low',
-      fast: false,
-      hint: codex
-        ? null
-        : 'Install Antigravity CLI (https://antigravity.google/docs/getting-started) and sign in by running `agy` once, or set FOLO_ANTIGRAVITY_BIN to its path.',
-    },
-  ];
-}
-
-interface Img {
-  id: string;
-  file: string;
-  width: number;
-  height: number;
-  status: LabelImageStatus;
-  boxes: Box[];
-  source: 'agent' | 'manual' | null;
-  error: string | null;
-  /** A person checked its labels (reported for a labeled image only). */
-  reviewed: boolean;
-  /** Its pixels: an image of a mock dataset, or a file uploaded in this page. */
-  from: { spec: MockDatasetSpec; index: number } | { blob: Blob; key: string };
-  /** What it was before an agent call took it: a stopped call gives it back. */
-  before: { status: LabelImageStatus; error: string | null } | null;
-  /** Agent calls that have failed for it: the mock's agent fails an image once at most. */
-  failures: number;
-}
-
-interface Run {
-  agent: LabelAgentId;
-  model: string | null;
-  effort: LabelEffort;
-  fast: boolean;
-  note: string;
-  startedAt: number;
-  finishedAt: number | null;
-  ids: string[];
-  /** Images changed by hand while they waited for their call: they left the run. */
-  left: Set<string>;
-  batch: number;
-  parallel: number;
-  /** Calls answered so far. */
-  applied: number;
-  done: number;
-  failed: number;
-  outcome: LabelOutcome | null;
-  error: string | null;
-  hint: string | null;
-  usage: LabelUsage;
-  /** Set by a stop: when the calls in flight have been ended. */
-  stopAt: number | null;
-}
-
-interface Job {
-  id: string;
-  name: string;
-  classes: string[];
-  instructions: string;
-  createdAt: number;
-  images: Img[];
-  run: Run | null;
-  usage: LabelUsage;
-  datasetId: string | null;
-  logs: LogLine[];
-  nextImage: number;
-  /** Runs started so far: what seeds a run's boxes (never the clock, so every load draws the same ones). */
-  runs: number;
-}
-
-const zeroUsage = (): LabelUsage => ({ calls: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, cost_usd: null });
-
-function addUsage(a: LabelUsage, b: LabelUsage) {
-  a.calls += b.calls;
-  a.input_tokens += b.input_tokens;
-  a.cached_input_tokens += b.cached_input_tokens;
-  a.output_tokens += b.output_tokens;
-  if (b.cost_usd !== null) a.cost_usd = round((a.cost_usd ?? 0) + b.cost_usd, 6);
-}
-
-const iso = (ms: number) => new Date(ms).toISOString();
-/** `word` for `k` of them, as the server's log writes it. */
-const plural = (k: number, word: string) => (k === 1 ? word : word === 'box' ? 'boxes' : `${word}s`);
-/** Why an image the reply did not mention failed (the server's words). */
-const LEFT_OUT = "the agent's reply left this image out";
+export { BATCH_MS, checkMockModel, mockAgents, resolveAgentRequest } from './labelAgents';
 
 export class MockLabeling {
   #jobs: Job[] = [];
@@ -352,66 +166,19 @@ export class MockLabeling {
     return im;
   }
 
-  #toImage(im: Img): LabelImage {
-    const reviewed = im.reviewed && im.status === 'labeled';
-    return { id: im.id, file: im.file, width: im.width, height: im.height, status: im.status, boxes: im.boxes, source: im.source, error: im.error, reviewed };
-  }
-
-  #toJob(j: Job): LabelJob {
-    // An image in an agent call counts as what it was before it (pending + labeled + failed == images).
-    const counts = { images: j.images.length, pending: 0, labeled: 0, failed: 0, boxes: 0 };
-    for (const im of j.images) {
-      const s = im.status === 'labeling' ? (im.before?.status ?? 'pending') : im.status;
-      if (s === 'labeled') {
-        counts.labeled++;
-        counts.boxes += im.boxes.length;
-      } else if (s === 'failed') counts.failed++;
-      else counts.pending++;
-    }
-    const r = j.run;
-    return {
-      id: j.id,
-      name: j.name,
-      classes: [...j.classes],
-      instructions: j.instructions,
-      created: iso(j.createdAt),
-      status: !r || r.outcome ? 'idle' : r.stopAt !== null ? 'stopping' : 'running',
-      counts,
-      run: r
-        ? {
-            agent: r.agent,
-            model: r.model,
-            effort: r.effort,
-            ...(r.fast ? { fast: true } : {}),
-            started: iso(r.startedAt),
-            finished: r.finishedAt === null ? null : iso(r.finishedAt),
-            total: r.ids.length - r.left.size,
-            done: r.done,
-            failed: r.failed,
-            outcome: r.outcome,
-            error: r.error,
-            ...(r.hint ? { hint: r.hint } : {}),
-            usage: { ...r.usage },
-          }
-        : null,
-      usage: { ...j.usage },
-      dataset_id: j.datasetId,
-    };
-  }
-
   #active(j: Job) {
     return !!j.run && !j.run.outcome;
   }
 
   jobs(now: number): LabelJob[] {
     for (const j of this.#jobs) this.advance(j, now);
-    return [...this.#jobs].sort((a, b) => b.createdAt - a.createdAt).map((j) => this.#toJob(j));
+    return [...this.#jobs].sort((a, b) => b.createdAt - a.createdAt).map(serializeJob);
   }
 
   job(id: string, now: number): LabelJob {
     const j = this.#job(id);
     this.advance(j, now);
-    return this.#toJob(j);
+    return serializeJob(j);
   }
 
   images(id: string, q: LabelImagesQuery, now: number): LabelImagePage {
@@ -422,7 +189,7 @@ export class MockLabeling {
     const all = j.images.filter((i) => (!q.status || i.status === q.status) && (!q.ids || q.ids.includes(i.id)));
     const offset = Math.max(0, q.offset ?? 0);
     const limit = Math.max(0, Math.min(1000, q.limit ?? 100));
-    return { total: all.length, images: all.slice(offset, offset + limit).map((i) => this.#toImage(i)) };
+    return { total: all.length, images: all.slice(offset, offset + limit).map(serializeImage) };
   }
 
   logs(id: string, limit: number, now: number): { lines: LogLine[] } {
@@ -473,7 +240,7 @@ export class MockLabeling {
     const id = `lb_${(hash(body.name + now + this.#next++) & 0xffff).toString(16).padStart(4, '0')}`;
     const job = this.#make(id, body.name.trim(), body.classes.map((c) => c.trim()), body.instructions ?? '', now);
     if (folder) this.#import(job, folder);
-    return this.#toJob(job);
+    return serializeJob(job);
   }
 
   update(id: string, body: UpdateLabelJob, now: number): LabelJob {
@@ -488,7 +255,7 @@ export class MockLabeling {
     if (body.name !== undefined) j.name = body.name.trim();
     if (body.classes) j.classes = body.classes.map((c) => c.trim());
     if (body.instructions !== undefined) j.instructions = body.instructions;
-    const out = this.#toJob(j);
+    const out = serializeJob(j);
     this.#emit(j.id, (h) => h.job?.(out));
     return out;
   }
@@ -574,11 +341,11 @@ export class MockLabeling {
   }
 
   #added(job: Job, added: Img[], skipped: SkippedImage[]): LabelImagesAdded {
-    const out = this.#toJob(job);
+    const out = serializeJob(job);
     if (added.length > BULK) this.#emit(job.id, (h) => h.reload?.({}));
-    else for (const im of added) this.#emit(job.id, (h) => h.image?.(this.#toImage(im)));
+    else for (const im of added) this.#emit(job.id, (h) => h.image?.(serializeImage(im)));
     this.#emit(job.id, (h) => h.job?.(out));
-    return { added: added.map((i) => this.#toImage(i)), skipped, job: out };
+    return { added: added.map(serializeImage), skipped, job: out };
   }
 
   /** File names are unique within a job: a second `a.jpg` becomes `a-2.jpg`. */
@@ -628,10 +395,10 @@ export class MockLabeling {
     }
     this.#claim(j, im);
     Object.assign(im, { boxes: clipped, status: 'labeled', source: 'manual', error: null, reviewed: true });
-    this.#emit(j.id, (h) => h.image?.(this.#toImage(im)));
-    const out = this.#toJob(j);
+    this.#emit(j.id, (h) => h.image?.(serializeImage(im)));
+    const out = serializeJob(j);
     this.#emit(j.id, (h) => h.job?.(out));
-    return this.#toImage(im);
+    return serializeImage(im);
   }
 
   /** `PUT …/images/{id}` with `reviewed` alone: the labels checked (or not), the boxes as they are. */
@@ -646,8 +413,8 @@ export class MockLabeling {
       throw new ApiError(400, 'invalid_body', `image '${imageId}' has no labels to mark reviewed: save its boxes instead`);
     this.#claim(j, im);
     im.reviewed = reviewed;
-    this.#emit(j.id, (h) => h.image?.(this.#toImage(im)));
-    return this.#toImage(im);
+    this.#emit(j.id, (h) => h.image?.(serializeImage(im)));
+    return serializeImage(im);
   }
 
   deleteImage(id: string, imageId: string, now: number) {
@@ -657,7 +424,7 @@ export class MockLabeling {
     this.#claim(j, im);
     j.images = j.images.filter((x) => x !== im);
     this.#emit(j.id, (h) => h.removed?.({ id: im.id }));
-    const out = this.#toJob(j);
+    const out = serializeJob(j);
     this.#emit(j.id, (h) => h.job?.(out));
   }
 
@@ -699,7 +466,7 @@ export class MockLabeling {
       throw new ApiError(400, 'invalid_body', 'nothing to label: every image of the job is labeled', 'Start with `scope: all` to label them again.');
     }
     this.advance(j, now);
-    return this.#toJob(j);
+    return serializeJob(j);
   }
 
   /** Starts a run at `at` (the images it takes: `image_ids`, else the scope's) and sends its first calls. */
@@ -753,7 +520,7 @@ export class MockLabeling {
     Object.assign(r, { outcome: 'failed', finishedAt: at + 4000, error, hint });
     r.usage.calls = 1;
     j.usage.calls += 1;
-    this.#log(j, at + 4000, 'error', `${AGENT_NAME[r.agent]} stopped: ${error} (${this.#summary(r)})`);
+    this.#log(j, at + 4000, 'error', `${AGENT_NAME[r.agent]} stopped: ${error} (${runSummary(r)})`);
   }
 
   stop(id: string, now: number): LabelJob {
@@ -765,7 +532,7 @@ export class MockLabeling {
       r.stopAt = now + 1000;
       this.#log(j, now, 'info', 'stop requested');
     }
-    const out = this.#toJob(j);
+    const out = serializeJob(j);
     this.#emit(j.id, (h) => h.job?.(out));
     return out;
   }
@@ -785,7 +552,7 @@ export class MockLabeling {
         if (!im || im.status === 'labeling' || r.left.has(id)) continue;
         im.before = { status: im.status, error: im.error };
         im.status = 'labeling';
-        this.#emit(j.id, (h) => h.image?.(this.#toImage(im)));
+        this.#emit(j.id, (h) => h.image?.(serializeImage(im)));
       }
   }
 
@@ -803,10 +570,11 @@ export class MockLabeling {
     let changed = false;
     if (r.stopAt !== null) {
       if (now < r.stopAt) return;
-      for (const im of j.images) if (im.status === 'labeling') {
-        this.#giveBack(im);
-        this.#emit(j.id, (h) => h.image?.(this.#toImage(im)));
-      }
+      for (const im of j.images)
+        if (im.status === 'labeling') {
+          this.#giveBack(im);
+          this.#emit(j.id, (h) => h.image?.(serializeImage(im)));
+        }
       this.#end(j, 'stopped', r.stopAt);
       return;
     }
@@ -821,7 +589,7 @@ export class MockLabeling {
     this.#send(j);
     if (r.applied >= calls) this.#end(j, 'completed', r.startedAt + calls * BATCH_MS);
     else {
-      const out = this.#toJob(j);
+      const out = serializeJob(j);
       this.#emit(j.id, (h) => h.job?.(out));
     }
   }
@@ -844,14 +612,14 @@ export class MockLabeling {
         r.failed++;
         leftOut = true;
       } else {
-        Object.assign(im, { status: 'labeled', boxes: this.#draft(j, im, r), source: 'agent', error: null, reviewed: false });
+        Object.assign(im, { status: 'labeled', boxes: draftBoxes(j, im, r), source: 'agent', error: null, reviewed: false });
         boxes += im.boxes.length;
         labeled++;
         r.done++;
       }
-      this.#emit(j.id, (h) => h.image?.(this.#toImage(im)));
+      this.#emit(j.id, (h) => h.image?.(serializeImage(im)));
     }
-    const usage = this.#usage(j, r, k, ids.length, boxes);
+    const usage = callUsage(j, r, k, ids.length, boxes);
     addUsage(r.usage, usage);
     addUsage(j.usage, usage);
     // The server's lines for a call: what it labeled and used, then what it dropped and why images failed.
@@ -860,50 +628,15 @@ export class MockLabeling {
     if (leftOut) this.#log(j, at, 'warn', `call ${k + 1}: ${LEFT_OUT}`);
   }
 
-  /** The agent's boxes for an image: its objects as a decent model finds them, in the job's classes. */
-  #draft(j: Job, im: Img, r: Run): Box[] {
-    const seed = hash(`${j.id}:${im.id}:${j.runs}`);
-    const quality = Math.min(0.97, (r.model ? (QUALITY[r.model] ?? 0.85) : 0.85) + (r.effort === 'high' ? 0.04 : r.effort === 'medium' ? 0.02 : 0) + (r.note ? 0.03 : 0));
-    let drawn;
-    if ('spec' in im.from) {
-      const s = im.from.spec;
-      const truth = image(s, im.from.index).boxes.flatMap((b) => {
-        const c = j.classes.findIndex((x) => x.toLowerCase() === (s.classes[b.class] ?? '').toLowerCase());
-        return c < 0 ? [] : [{ ...b, class: c }];
-      });
-      drawn = predictBoxes(truth, im.width, im.height, quality, seed, j.classes.length).filter((b) => b.score >= 0.3);
-    } else drawn = inventBoxes(im.width, im.height, seed, j.classes.length).filter((b) => b.score >= 0.5);
-    return drawn.map(({ class: c, x1, y1, x2, y2 }) => ({ class: c, x1, y1, x2, y2 }));
-  }
-
-  /** What a CLI reports for one call: about 1000 tokens an image plus its fixed prompt (Codex's ~10k), cached after the first call. */
-  #usage(j: Job, r: Run, k: number, images: number, boxes: number): LabelUsage {
-    const fixed = r.agent === 'claude' ? 420 + Math.round(j.instructions.length / 4) : r.agent === 'antigravity' ? 1_200 + Math.round(j.instructions.length / 4) : 10_200;
-    const input = fixed + images * 1012 + (hash(`${j.id}:${k}`) % 60);
-    const cached = k === 0 ? 0 : Math.round(fixed * 0.86);
-    const reasoning = { low: 0, medium: 260, high: 820 }[r.effort] * images;
-    const output = 48 + boxes * 23 + reasoning;
-    const price = r.agent === 'claude' ? PRICE[r.model ?? 'haiku'] : undefined;
-    const cost = price ? round(((input - cached) * price[0] + cached * price[0] * 0.1 + output * price[1]) / 1e6, 6) : null;
-    return { calls: 1, input_tokens: input, cached_input_tokens: cached, output_tokens: output, cost_usd: cost };
-  }
-
   #end(j: Job, outcome: LabelOutcome, at: number) {
     const r = j.run as Run;
     r.outcome = outcome;
     r.finishedAt = at;
     r.stopAt = null;
     const name = AGENT_NAME[r.agent];
-    this.#log(j, at, 'info', outcome === 'completed' ? `${name} is done: ${this.#summary(r)}` : `${name} was stopped: ${this.#summary(r)}`);
-    const out = this.#toJob(j);
+    this.#log(j, at, 'info', outcome === 'completed' ? `${name} is done: ${runSummary(r)}` : `${name} was stopped: ${runSummary(r)}`);
+    const out = serializeJob(j);
     this.#emit(j.id, (h) => h.job?.(out));
-  }
-
-  /** A run's figures as the server's last log line has them. */
-  #summary(r: Run): string {
-    const total = r.ids.length - r.left.size;
-    const u = r.usage;
-    return `${r.done} of ${total} ${plural(total, 'image')} labeled, ${r.failed} failed · ${u.calls} ${plural(u.calls, 'call')}, ${u.input_tokens} tokens in, ${u.output_tokens} out`;
   }
 
   // ---------- datasets ----------
@@ -916,37 +649,10 @@ export class MockLabeling {
     const j = this.#job(id);
     this.advance(j, now);
     if (this.#active(j)) throw this.#busy(j);
-    const frac = body.val_fraction ?? 0.2;
-    if (!(frac >= 0 && frac <= 0.5)) throw new ApiError(400, 'invalid_body', 'field `val_fraction`: between 0 and 0.5');
-    const labeled = j.images.filter((i) => i.status === 'labeled');
-    if (!labeled.length) throw new ApiError(400, 'invalid_dataset', `No image of ${j.name} is labeled yet.`, 'Label some images first.');
-    const base = (body.name?.trim() || j.name).toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'labeled';
-    let name = base;
-    for (let k = 2; taken.includes(name); k++) name = `${base}-${k}`;
-    const val = Math.min(labeled.length - 1, Math.round(labeled.length * frac));
-    const first = labeled.find((i) => 'spec' in i.from)?.from;
-    const look = first && 'spec' in first ? first.spec : (specs[1] as MockDatasetSpec);
-    const counts = j.classes.map((_, c) => labeled.reduce((a, i) => a + i.boxes.filter((b) => b.class === c).length, 0));
-    const boxes = counts.reduce((a, b) => a + b, 0);
-    const dsId = `ds_${(hash(name + now) & 0xffff).toString(16).padStart(4, '0')}`;
-    j.datasetId = dsId;
-    this.#log(j, now, 'info', `dataset '${name}' made: ${labeled.length - val} train and ${val} val images`);
-    return {
-      ...look,
-      id: dsId,
-      name,
-      path: `D:/folo/datasets/${name}`,
-      format: 'yolo',
-      classes: [...j.classes],
-      classWeights: counts.map((c) => Math.max(1, c)),
-      classShape: j.classes.map((_, c) => look.classShape[c] ?? 'square'),
-      splits: { train: labeled.length - val, val, test: 0 },
-      meanBoxes: boxes / labeled.length,
-      emptyRate: labeled.filter((i) => !i.boxes.length).length / labeled.length,
-      brokenLabels: 0,
-      createdAgoS: (this.t0 - now) / 1000,
-      seed: hash(j.id),
-    };
+    const { spec, logMessage } = buildDatasetSpec(j, body, taken, now, this.t0);
+    j.datasetId = spec.id;
+    this.#log(j, now, 'info', logMessage);
+    return spec;
   }
 
   // ---------- events ----------
