@@ -118,7 +118,7 @@ pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
         Backend::Proxy { url, token } => {
             if !url.starts_with("http://") && !url.starts_with("https://") {
                 return Err(format!(
-                    "--server must be the http:// or https:// URL of a `folo serve`, got `{url}`"
+                    "--server (or FOLO_SERVER) must be the http:// or https:// URL of a `folo serve`, got `{url}`"
                 ));
             }
             let http = Arc::new(proxy::HttpStore::new(&url, token.as_deref()));
