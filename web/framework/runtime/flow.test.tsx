@@ -565,6 +565,80 @@ describe('For', () => {
     expect(container.querySelectorAll('li')).toHaveLength(1);
     unmount();
   });
+
+  it('recovers DOM cleanly after a mid-append row error or throwing fallback', () => {
+    const list = signal<string[]>(['a']);
+    const showFallback = signal(true);
+    let throwFallback = false;
+    const { container, unmount } = render(() => (
+      <ul>
+        <For
+          each={list.get()}
+          fallback={(() => {
+            if (!showFallback.get()) return undefined;
+            if (throwFallback) throw new Error('fallback boom');
+            return <li>empty</li>;
+          })()}
+        >
+          {(k) => {
+            if (k() === 'bad') throw new Error('row boom');
+            return <li>{k()}</li>;
+          }}
+        </For>
+      </ul>
+    ));
+    expect(text(container)).toBe('a');
+
+    // Mid-append throw: 'b' is created before 'bad' throws; recovering to ['a', 'b'] must render both.
+    list.set(['a', 'b', 'bad']);
+    expect(() => flush()).toThrow('row boom');
+    list.set(['a', 'b']);
+    flush();
+    expect(text(container)).toBe('ab');
+
+    // Non-empty -> empty with throwing fallback: recovering with no fallback must render empty, not stale rows.
+    throwFallback = true;
+    list.set([]);
+    expect(() => flush()).toThrow('fallback boom');
+    showFallback.set(false);
+    throwFallback = false;
+    list.set([]);
+    flush();
+    expect(text(container)).toBe('');
+    unmount();
+  });
+
+  it('reuses a single row with a NaN key and runs returned snippet settlement outside the row branch scope', () => {
+    const list = signal([{ k: Number.NaN, label: 'first' }]);
+    const { container, unmount } = render(() => (
+      <ul>
+        <For each={list.get()} key={(x) => x.k}>
+          {(item) => <li>{item().label}</li>}
+        </For>
+      </ul>
+    ));
+    const li = container.querySelector('li');
+    list.set([{ k: Number.NaN, label: 'second' }]);
+    flush();
+    expect(container.querySelector('li')).toBe(li);
+    expect(text(container)).toBe('second');
+    unmount();
+
+    // Appending a row whose child returns a snippet must settle outside the row's branch scope (no unexpected intro).
+    const introSpy = vi.fn(() => ({ duration: 0 }));
+    const ids = signal([1]);
+    const r2 = render(() => (
+      <ul>
+        <For each={ids.get()}>{(n) => () => <li in:introSpy={{}}>{n()}</li>}</For>
+      </ul>
+    ));
+    expect(introSpy).not.toHaveBeenCalled();
+    ids.set([1, 2]);
+    flush();
+    expect(introSpy).not.toHaveBeenCalled();
+    expect(text(r2.container)).toBe('12');
+    r2.unmount();
+  });
 });
 
 describe('Index', () => {

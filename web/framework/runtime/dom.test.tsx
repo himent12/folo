@@ -695,4 +695,36 @@ describe('Svelte attribute and prop semantics', () => {
     expect(container.querySelector('video')!.muted).toBe(true);
     unmount();
   });
+
+  it('replaces single-element DocumentFragment arrays cleanly and reads array indices once', () => {
+    const frag = (s: string) => {
+      const f = document.createDocumentFragment();
+      f.appendChild(document.createTextNode(s));
+      return f;
+    };
+    const items = signal<unknown[]>([frag('old')]);
+    const { container, unmount } = render(() => <div>{items.get() as JSX.Element}</div>);
+    expect(container.firstElementChild!.textContent).toBe('old');
+
+    items.set([frag('new')]);
+    flush();
+    expect(container.firstElementChild!.textContent).toBe('new');
+
+    // Indexed getter returning a Text node on first read must only be read once during flat-array fast path.
+    let reads = 0;
+    const oneShot: unknown[] = [];
+    Object.defineProperty(oneShot, 0, {
+      enumerable: true,
+      get() {
+        reads++;
+        return reads === 1 ? document.createTextNode('once') : 'twice';
+      },
+    });
+    oneShot.length = 1;
+    items.set(oneShot);
+    flush();
+    expect(reads).toBe(1);
+    expect(container.firstElementChild!.textContent).toBe('once');
+    unmount();
+  });
 });

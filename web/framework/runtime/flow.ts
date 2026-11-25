@@ -118,20 +118,26 @@ export function For<T>(props: ForProps<T>): JSX.Element {
   let rows: Row<T>[] = [];
   let fallback: { root: Owner; value: JSX.Element } | null = null;
   let out: JSX.Element[] = [];
+  let outDirty = false;
   let ran = false;
 
   const make = (item: T, i: number, key: unknown): Row<T> => {
     const root = ownedRoot(parent);
     const prevOwner = swapOwner(root);
-    enterBranch(ran);
     const sig = keyFn ? signal(item) : null;
     const idx = withIndex ? signal(i) : null;
     let value: JSX.Element;
     let t: BranchTransitions = null;
     try {
-      value = settle(fn(sig ? () => sig.get() : () => item, idx ? () => idx.get() : () => i));
+      enterBranch(ran);
+      let raw: JSX.Element;
+      try {
+        raw = fn(sig ? () => sig.get() : () => item, idx ? () => idx.get() : () => i);
+      } finally {
+        t = exitBranch();
+      }
+      value = settle(raw);
     } finally {
-      t = exitBranch();
       swapOwner(prevOwner);
     }
     return { key, item, sig, idx, root, value, t };
@@ -140,12 +146,17 @@ export function For<T>(props: ForProps<T>): JSX.Element {
   const makeFallback = (): { root: Owner; value: JSX.Element } => {
     const root = ownedRoot(parent);
     const prevOwner = swapOwner(root);
-    enterBranch(ran, false);
     let value: JSX.Element;
     try {
-      value = settle(props.fallback);
+      enterBranch(ran, false);
+      let raw: JSX.Element;
+      try {
+        raw = props.fallback;
+      } finally {
+        exitBranch();
+      }
+      value = settle(raw);
     } finally {
-      exitBranch();
       swapOwner(prevOwner);
     }
     return { root, value };
@@ -177,27 +188,31 @@ export function For<T>(props: ForProps<T>): JSX.Element {
     }
     return untrack(() => {
       if (n === 0) {
-        let changed = false;
         if (rows.length > 0) {
           for (let i = 0; i < rows.length; i++) drop(rows[i]!);
           rows = [];
-          changed = true;
+          outDirty = true;
         }
         if (fallback === null && props.fallback !== undefined) {
+          outDirty = true;
           fallback = makeFallback();
-          changed = true;
         }
         ran = true;
-        if (changed) out = fallback !== null ? [fallback.value] : [];
+        if (outDirty) {
+          out = fallback !== null ? [fallback.value] : [];
+          outDirty = false;
+        }
         return out;
       }
       if (fallback !== null) {
         const prevFallback = fallback;
         fallback = null;
+        outDirty = true;
         dispose(prevFallback.root);
       }
       const prevLen = rows.length;
       if (prevLen === 0) {
+        outDirty = true;
         const next = new Array<Row<T>>(n);
         const nextOut = new Array<JSX.Element>(n);
         for (let j = 0; j < n; j++) {
@@ -207,6 +222,7 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         }
         rows = next;
         ran = true;
+        outDirty = false;
         return (out = nextOut);
       }
       // Scan common prefix before allocating `next` so identical-order updates, pure appends, and pure truncations
@@ -219,9 +235,16 @@ export function For<T>(props: ForProps<T>): JSX.Element {
       }
       if (start === n && n === prevLen) {
         ran = true;
+        if (outDirty) {
+          const nextOut = new Array<JSX.Element>(n);
+          for (let j = 0; j < n; j++) nextOut[j] = rows[j]!.value;
+          out = nextOut;
+          outDirty = false;
+        }
         return out;
       }
       if (start === prevLen) {
+        outDirty = true;
         const nextOut = new Array<JSX.Element>(n);
         for (let j = 0; j < start; j++) nextOut[j] = rows[j]!.value;
         for (let j = start; j < n; j++) {
@@ -230,14 +253,17 @@ export function For<T>(props: ForProps<T>): JSX.Element {
           nextOut[j] = r.value;
         }
         ran = true;
+        outDirty = false;
         return (out = nextOut);
       }
       if (start === n) {
+        outDirty = true;
         for (let i = n; i < prevLen; i++) drop(rows[i]!);
         rows.length = n;
         const nextOut = new Array<JSX.Element>(n);
         for (let j = 0; j < n; j++) nextOut[j] = rows[j]!.value;
         ran = true;
+        outDirty = false;
         return (out = nextOut);
       }
       const next = new Array<Row<T>>(n);
@@ -272,9 +298,12 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         // Pure removals.
         for (let i = start; i <= end; i++) drop(rows[i]!);
       } else if (start === end && start === newEnd) {
-        // Single-row replacement: no map needed.
-        drop(rows[start]!);
-        next[start] = make(list[start]!, start, keys[start]);
+        // Single-row slot: preserve SameValueZero parity for `NaN` keys before replacing.
+        if (Object.is(rows[start]!.key, keys[start])) update((next[start] = rows[start]!), list[start]!, start);
+        else {
+          drop(rows[start]!);
+          next[start] = make(list[start]!, start, keys[start]);
+        }
       } else if (
         end - start === newEnd - start &&
         rows[end]!.key === keys[start] &&
@@ -321,6 +350,7 @@ export function For<T>(props: ForProps<T>): JSX.Element {
       ran = true;
       const nextOut = new Array<JSX.Element>(n);
       for (let j = 0; j < n; j++) nextOut[j] = next[j]!.value;
+      outDirty = false;
       return (out = nextOut);
     });
   });
@@ -366,15 +396,19 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         for (let i = prevLen; i < n; i++) {
           const root = ownedRoot(parent);
           const prevOwner = swapOwner(root);
-          enterBranch(ran);
-          let sig!: Signal<T>;
+          const sig = signal<T>(items[i]!);
           let value: JSX.Element;
           let t: BranchTransitions = null;
           try {
-            sig = signal<T>(items[i]!);
-            value = settle(fn(() => sig.get(), i));
+            enterBranch(ran);
+            let raw: JSX.Element;
+            try {
+              raw = fn(() => sig.get(), i);
+            } finally {
+              t = exitBranch();
+            }
+            value = settle(raw);
           } finally {
-            t = exitBranch();
             swapOwner(prevOwner);
           }
           rows.push({ sig, root, t, value });
@@ -392,12 +426,17 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         outDirty = true;
         const root = ownedRoot(parent);
         const prevOwner = swapOwner(root);
-        enterBranch(ran, false);
         let value: JSX.Element;
         try {
-          value = settle(props.fallback);
+          enterBranch(ran, false);
+          let raw: JSX.Element;
+          try {
+            raw = props.fallback;
+          } finally {
+            exitBranch();
+          }
+          value = settle(raw);
         } finally {
-          exitBranch();
           swapOwner(prevOwner);
         }
         fallback = { root, value };
