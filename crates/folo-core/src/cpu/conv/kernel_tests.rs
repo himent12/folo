@@ -682,3 +682,181 @@ fn depthwise_backward_and_col2im_match_naive() {
         }
     }
 }
+
+/// Depthwise forward SIMD path matches the scalar depthwise path across ragged widths, zero-width padding,
+/// accumulate mode, and fused epilogues (`None`, `Bias`, `Silu`, `Relu`, `Sigmoid`).
+#[test]
+fn depthwise_simd_matches_scalar_parity() {
+    let cases = [
+        (1, 4, [5, 1], 4, [3, 3], params([1, 1], [1, 1], [1, 1], 4)),
+        (1, 4, [5, 7], 4, [3, 3], params([1, 1], [1, 1], [1, 1], 4)),
+        (1, 4, [7, 19], 4, [3, 3], params([1, 1], [1, 1], [1, 1], 4)),
+        (2, 6, [9, 37], 12, [3, 3], params([1, 1], [1, 1], [1, 1], 6)),
+        (1, 4, [8, 21], 4, [5, 5], params([1, 1], [2, 2], [1, 1], 4)),
+        (1, 4, [9, 17], 4, [3, 3], params([1, 1], [2, 2], [2, 2], 4)),
+        (1, 2, [3, 0], 2, [3, 3], params([1, 1], [1, 2], [1, 1], 2)),
+    ];
+    for (ci, &(n, c, hw, o, k, p)) in cases.iter().enumerate() {
+        let g = geom(n, c, hw, o, k, p);
+        let x = data(n * c * hw[0] * hw[1], 401 + ci as u32);
+        let wt = data(o * g.kdim(), 4100 + ci as u32);
+        let bias: Vec<f32> = (0..o).map(|j| if j % 2 == 0 { 0.0 } else { j as f32 * 0.2 - 0.5 }).collect();
+        let part = [ConvPart::contiguous(&x, c, hw[0] * hw[1])];
+        let input = ConvInput { parts: &part };
+        let epis = [
+            None,
+            Some(BiasAct { bias: Some(&bias), act: None }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Silu) }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Relu) }),
+            Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Sigmoid) }),
+        ];
+        for (ei, epi) in epis.into_iter().enumerate() {
+            let mut got = vec![f32::NAN; n * o * g.ohw()];
+            let mut want = vec![f32::NAN; n * o * g.ohw()];
+            depthwise_forward(input, &wt, &mut got, &g, false, epi);
+            super::depthwise::depthwise_forward_scalar(input, &wt, &mut want, &g, false, epi);
+            for (q, (&gv, &wv)) in got.iter().zip(&want).enumerate() {
+                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                assert_eq!(gv.to_bits(), wv.to_bits(), "case {ci} epi {ei} at {q}: {gv} vs {wv}");
+                #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+                assert!(
+                    (gv - wv).abs() <= 1e-5 * (1.0 + wv.abs()),
+                    "case {ci} epi {ei} at {q}: {gv} vs {wv}"
+                );
+            }
+        }
+        // Accumulate into non-zero prior output.
+        let prior: Vec<f32> = data(n * o * g.ohw(), 4200 + ci as u32)
+            .into_iter()
+            .map(|v| if v == 0.0 { 0.25 } else { v })
+            .collect();
+        let mut got = prior.clone();
+        let mut want = prior;
+        depthwise_forward(input, &wt, &mut got, &g, true, None);
+        super::depthwise::depthwise_forward_scalar(input, &wt, &mut want, &g, true, None);
+        for (q, (&gv, &wv)) in got.iter().zip(&want).enumerate() {
+            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            assert_eq!(gv.to_bits(), wv.to_bits(), "case {ci} acc at {q}: {gv} vs {wv}");
+            #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+            assert!((gv - wv).abs() <= 1e-5 * (1.0 + wv.abs()), "case {ci} acc at {q}: {gv} vs {wv}");
+        }
+    }
+
+    // Wasm SIMD128 edge cases: non-finite weights on padded taps, accumulate over -0.0, and huge
+    // padding/dilation that would overflow 32-bit padded scratch sizing.
+    #[cfg(target_arch = "wasm32")]
+    {
+        let g = geom(1, 2, [1, 1], 2, [1, 3], params([1, 1], [0, 1], [1, 1], 2));
+        let x = [1.0f32, 1.0];
+        let wt = [f32::INFINITY, 2.0, 1.0, 1.0, -1.0, 1.0];
+        let part = [ConvPart::contiguous(&x, 2, 1)];
+        let input = ConvInput { parts: &part };
+        let mut got = vec![f32::NAN; 2];
+        let mut want = vec![f32::NAN; 2];
+        depthwise_forward(input, &wt, &mut got, &g, false, None);
+        super::depthwise::depthwise_forward_scalar(input, &wt, &mut want, &g, false, None);
+        assert_eq!(got[0].to_bits(), want[0].to_bits(), "inf padded tap must not yield NaN");
+        assert_eq!(got[1].to_bits(), want[1].to_bits());
+
+        let x_zero = [0.0f32, 0.0];
+        let wt_fin = [1.0f32, -1.0, 1.0, 1.0, -1.0, 1.0];
+        let part_z = [ConvPart::contiguous(&x_zero, 2, 1)];
+        let input_z = ConvInput { parts: &part_z };
+        let mut got_acc = vec![-0.0f32; 2];
+        let mut want_acc = vec![-0.0f32; 2];
+        depthwise_forward(input_z, &wt_fin, &mut got_acc, &g, true, None);
+        super::depthwise::depthwise_forward_scalar(input_z, &wt_fin, &mut want_acc, &g, true, None);
+        assert_eq!(
+            got_acc.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want_acc.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        );
+
+        let g_big = geom(1, 2, [1024, 1], 2, [1, 3], params([1, 1], [0, 1 << 21], [1, 1 << 21], 2));
+        let x_big = vec![1.0f32; 2 * 1024];
+        let wt_big = [1.0f32, 2.0, 3.0, -1.0, 0.5, 2.0];
+        let part_b = [ConvPart::contiguous(&x_big, 2, 1024)];
+        let input_b = ConvInput { parts: &part_b };
+        let mut got_b = vec![f32::NAN; 2 * 1024];
+        let mut want_b = vec![f32::NAN; 2 * 1024];
+        depthwise_forward(input_b, &wt_big, &mut got_b, &g_big, false, None);
+        super::depthwise::depthwise_forward_scalar(input_b, &wt_big, &mut want_b, &g_big, false, None);
+        assert_eq!(
+            got_b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want_b.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        );
+
+        // Large vertical padding + dilation must not overflow `isize` row-index arithmetic on 32-bit wasm.
+        let g_vert = geom(1, 2, [3, 1], 2, [2, 1], params([1, 1], [1 << 30, 0], [(1 << 31) - 1, 1], 2));
+        let x_v = vec![1.0f32; 2 * 3];
+        let wt_v = [1.0f32, 2.0, 3.0, 4.0];
+        let part_v = [ConvPart::contiguous(&x_v, 2, 3)];
+        let input_v = ConvInput { parts: &part_v };
+        let mut got_v = vec![f32::NAN; 2 * g_vert.ohw()];
+        let mut want_v = vec![f32::NAN; 2 * g_vert.ohw()];
+        depthwise_forward(input_v, &wt_v, &mut got_v, &g_vert, false, None);
+        super::depthwise::depthwise_forward_scalar(input_v, &wt_v, &mut want_v, &g_vert, false, None);
+        assert_eq!(
+            got_v.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want_v.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        );
+    }
+
+    // Fused ReLU and Hardswish with NaN and -0.0 bias across SIMD prefix and scalar tail lanes.
+    {
+        let g_wide = geom(1, 2, [2, 10], 2, [1, 1], params([1, 1], [0, 0], [1, 1], 2));
+        let x_neg0 = vec![-0.0f32; 2 * 20];
+        let wt1 = [1.0f32, 1.0];
+        let bias = [f32::NAN, -0.0];
+        let epi = Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Relu) });
+        let part_w = [ConvPart::contiguous(&x_neg0, 2, 20)];
+        let input_w = ConvInput { parts: &part_w };
+        let mut got_r = vec![f32::NAN; 40];
+        let mut want_r = vec![f32::NAN; 40];
+        depthwise_forward(input_w, &wt1, &mut got_r, &g_wide, false, epi);
+        super::depthwise::depthwise_forward_scalar(input_w, &wt1, &mut want_r, &g_wide, false, epi);
+        assert_eq!(
+            got_r.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want_r.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        );
+
+        let p = params([1, 1], [1, 1], [1, 1], 1);
+        // F(2x2): 5 tiles wide (ow = 10 -> 4 SIMD tiles + 1 scalar tail tile).
+        let g2 = geom(1, 4, [4, 10], 2, [3, 3], p);
+        let x2 = vec![0.0f32; 4 * 40];
+        let w2 = vec![0.0f32; 2 * 4 * 9];
+        let u2 = transform_weights(&w2, 2, 4);
+        let part2 = [ConvPart::contiguous(&x2, 4, 40)];
+        let in2 = ConvInput { parts: &part2 };
+        for act in [UnaryOp::Relu, UnaryOp::Hardswish] {
+            let epi = Some(BiasAct { bias: Some(&bias), act: Some(act) });
+            let mut got = vec![0.0f32; 2 * 40];
+            let mut want = vec![0.0f32; 2 * 40];
+            winograd_forward(in2, &u2, &mut got, &g2, epi);
+            super::winograd::winograd_forward_scalar(in2, &u2, &mut want, &g2, epi);
+            for (q, (&gv, &wv)) in got.iter().zip(&want).enumerate() {
+                if wv.is_nan() {
+                    assert!(gv.is_nan(), "wino2 {act:?} at {q}: expected NaN, got {gv}");
+                } else {
+                    assert_eq!(gv.to_bits(), wv.to_bits(), "wino2 {act:?} at {q}: {gv} vs {wv}");
+                }
+            }
+        }
+        // F(4x4): 5 tiles wide (ow = 20 -> 4 SIMD tiles + 1 scalar tail tile).
+        let g4 = geom(1, 4, [4, 20], 2, [3, 3], p);
+        let x4 = vec![0.0f32; 4 * 80];
+        let w4 = vec![0.0f32; 2 * 4 * 9];
+        let u4 = transform_weights4(&w4, 2, 4);
+        let part4 = [ConvPart::contiguous(&x4, 4, 80)];
+        let in4 = ConvInput { parts: &part4 };
+        let epi = Some(BiasAct { bias: Some(&bias), act: Some(UnaryOp::Relu) });
+        let mut got = vec![0.0f32; 2 * 80];
+        let mut want = vec![0.0f32; 2 * 80];
+        winograd4_forward(in4, &w4, &u4, &mut got, &g4, epi);
+        super::winograd4::winograd4_forward_scalar(in4, &w4, &u4, &mut want, &g4, epi);
+        assert_eq!(
+            got.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "wino4 ReLU NaN/-0.0 bias mismatch"
+        );
+    }
+}

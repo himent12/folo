@@ -5,6 +5,8 @@ mod simd_log_tanh;
 #[cfg(test)]
 mod tests;
 mod transpose;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm_simd;
 
 use super::pool_alloc::alloc_uninit;
 use super::{CHUNK, PAR_MIN};
@@ -21,6 +23,8 @@ pub(crate) use transpose::{
     copy_strided_f32, copy_strided_f32_into, copy_strided_f32_into_slice, transpose_f32_2d,
     transpose_f32_2d_serial,
 };
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+pub(crate) use wasm_simd::silu4 as silu4_wasm;
 
 /// Fill `out` (contiguous, `plan.rows * plan.len` long) row by row, in parallel when large.
 #[inline]
@@ -891,6 +895,16 @@ fn mask(b: bool) -> f32 {
 /// Apply a binary op to two operands already broadcast to the output shape.
 pub(crate) fn binary(op: BinaryOp, a: &[f32], la: &Layout, b: &[f32], lb: &Layout) -> Vec<f32> {
     use BinaryOp::*;
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    match op {
+        Add => return wasm_simd::binary_map2(op, a, la, b, lb, |a, b| a + b),
+        Sub => return wasm_simd::binary_map2(op, a, la, b, lb, |a, b| a - b),
+        Mul => return wasm_simd::binary_map2(op, a, la, b, lb, |a, b| a * b),
+        Div => return wasm_simd::binary_map2(op, a, la, b, lb, |a, b| a / b),
+        Maximum => return wasm_simd::binary_map2(op, a, la, b, lb, f32::max),
+        Minimum => return wasm_simd::binary_map2(op, a, la, b, lb, f32::min),
+        _ => {}
+    }
     match op {
         Add => map2(a, la, b, lb, |a, b| a + b),
         Sub => map2(a, la, b, lb, |a, b| a - b),

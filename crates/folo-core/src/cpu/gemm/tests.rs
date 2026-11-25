@@ -52,7 +52,17 @@ fn matches_naive_on_odd_sizes() {
 fn rejects_overflowing_ldc() {
     let (a, b) = ([1f32], [1f32]);
     let mut c = [0f32];
-    gemm(3, 1, 1, &Strided::lhs(&a, 0, 0, 0), &Strided::rhs(&b, 0, 0, 0), &mut c, 1 << 63, false, false);
+    gemm(
+        3,
+        1,
+        1,
+        &Strided::lhs(&a, 0, 0, 0),
+        &Strided::rhs(&b, 0, 0, 0),
+        &mut c,
+        1usize << (usize::BITS - 1),
+        false,
+        false,
+    );
 }
 
 /// A's extent is checked without overflow before its rows are read in place: a row stride that wraps

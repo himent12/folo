@@ -38,7 +38,7 @@ fn has_avx2_fma() -> bool {
 }
 
 /// Tiles a segment of one tile row is processed in at most (stack buffers).
-const SEG: usize = 64;
+pub(super) const SEG: usize = 64;
 
 /// Floats of `V` plus `M` a block aims to keep (about 1 MiB, inside a core's L2).
 const BLOCK_FLOATS: usize = 1 << 18;
@@ -149,7 +149,7 @@ fn block_tiles(c: usize, o: usize, tiles: usize, threads: usize) -> usize {
 /// The 2x2 output tiles a Winograd pass computes in one image: all of them (row-major `0..n`), or a list of
 /// tile indices `ty · ⌈OW/2⌉ + tx`, ascending and distinct.
 #[derive(Clone, Copy)]
-enum Tiles<'a> {
+pub(super) enum Tiles<'a> {
     All(usize),
     List(&'a [u32]),
 }
@@ -164,7 +164,12 @@ impl Tiles<'_> {
 
     /// The runs of the tiles at positions `t0..t1` (in a `tw`-wide tile grid) that are consecutive tiles of one
     /// tile row, at most [`SEG`] long: `(ty, tx0, len, pos)` with `pos` the run's first position relative to `t0`.
-    fn segments(self, t0: usize, t1: usize, tw: usize) -> impl Iterator<Item = (usize, usize, usize, usize)> {
+    pub(super) fn segments(
+        self,
+        t0: usize,
+        t1: usize,
+        tw: usize,
+    ) -> impl Iterator<Item = (usize, usize, usize, usize)> {
         let mut t = t0;
         std::iter::from_fn(move || {
             if t >= t1 {
@@ -355,6 +360,12 @@ unsafe fn input_transform(
         unsafe { input_transform_avx2(planes, ci0, g, ts, t0, t1, tb, v) };
         return;
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if allow_simd {
+        // SAFETY: pointer contract forwarded.
+        unsafe { super::winograd_wasm::input_transform_wasm(planes, ci0, g, ts, t0, t1, tb, v) };
+        return;
+    }
     let _ = allow_simd;
     // SAFETY: pointer contract forwarded.
     unsafe { input_transform_scalar(planes, ci0, g, ts, t0, t1, tb, v) }
@@ -362,7 +373,13 @@ unsafe fn input_transform(
 
 /// Horizontal `d·B` for `len` tiles from `seg` (`2 * len + 2` floats), scalar.
 #[inline]
-fn winograd_h_scalar(seg: &[f32], t0r: &mut [f32], t1r: &mut [f32], t2r: &mut [f32], t3r: &mut [f32]) {
+pub(super) fn winograd_h_scalar(
+    seg: &[f32],
+    t0r: &mut [f32],
+    t1r: &mut [f32],
+    t2r: &mut [f32],
+    t3r: &mut [f32],
+) {
     let pairs = seg.as_chunks::<2>().0;
     for ((((p, q), a), b), (cc, d)) in pairs
         .iter()
@@ -608,6 +625,12 @@ unsafe fn gemm_output(
     if allow_simd && has_avx2_fma() {
         // SAFETY: AVX2+FMA was detected above; pointer contract forwarded.
         unsafe { output_transform_avx2(m, mo, o0, g, epi, ts, t0, t1, tb, out) };
+        return;
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if allow_simd {
+        // SAFETY: pointer contract forwarded.
+        unsafe { super::winograd_wasm::output_transform_wasm(m, mo, o0, g, epi, ts, t0, t1, tb, out) };
         return;
     }
     let _ = allow_simd;

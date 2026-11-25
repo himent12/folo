@@ -12,38 +12,38 @@ use super::simd::{
 use super::simd::{exp_clamped8, exp_neg_abs8, has_avx2, recip_1_plus8};
 
 // Range-reduction constants for `ln(x)`: reduce `m` into `[sqrt(2)/2, sqrt(2)]`.
-const SQRT2_HALF_BITS: i32 = 0x3F35_04F3;
-const LN_MAGIC: i32 = 0x3F80_0000 - SQRT2_HALF_BITS; // 0x004A_FB0D
-const SUBNORMAL_SCALE: f32 = 16_777_216.0; // 2^24
-const QNAN_BITS: u32 = 0x7FC0_0000;
+pub(super) const SQRT2_HALF_BITS: i32 = 0x3F35_04F3;
+pub(super) const LN_MAGIC: i32 = 0x3F80_0000 - SQRT2_HALF_BITS; // 0x004A_FB0D
+pub(super) const SUBNORMAL_SCALE: f32 = 16_777_216.0; // 2^24
+pub(super) const QNAN_BITS: u32 = 0x7FC0_0000;
 
 // Degree-8 minimax polynomial for `(ln(1 + f) - f) / f^2` on `f ∈ [sqrt(2)/2 - 1, sqrt(2) - 1]`
 // (max rel err `1.29e-8` across the whole reduced range).
-const LN_C2: f32 = -4.999_999e-1;
-const LN_C3: f32 = 3.333_333e-1;
-const LN_C4: f32 = -2.500_127e-1;
-const LN_C5: f32 = 2.000_130_1e-1;
-const LN_C6: f32 = -1.661_659_3e-1;
-const LN_C7: f32 = 1.420_033e-1;
-const LN_C8: f32 = -1.319_644e-1;
-const LN_C9: f32 = 1.276_082_8e-1;
-const LN_C10: f32 = -7.559_620_6e-2;
+pub(super) const LN_C2: f32 = -4.999_999e-1;
+pub(super) const LN_C3: f32 = 3.333_333e-1;
+pub(super) const LN_C4: f32 = -2.500_127e-1;
+pub(super) const LN_C5: f32 = 2.000_130_1e-1;
+pub(super) const LN_C6: f32 = -1.661_659_3e-1;
+pub(super) const LN_C7: f32 = 1.420_033e-1;
+pub(super) const LN_C8: f32 = -1.319_644e-1;
+pub(super) const LN_C9: f32 = 1.276_082_8e-1;
+pub(super) const LN_C10: f32 = -7.559_620_6e-2;
 
 // Cutoff and degree-4 minimax odd polynomial for `tanh(x) = x + x * x^2 * Q(x^2)` on `|x| < 0.625`
 // (max rel err `1.15e-8`). Above `0.625`, `exp(-2|x|) <= 0.2865` avoids cancellation in `1 - 2*e/(1 + e)`.
-const TANH_SMALL_CUTOFF: f32 = 0.625;
-const TANH_C1: f32 = -3.333_329_3e-1;
-const TANH_C2: f32 = 1.333_176e-1;
-const TANH_C3: f32 = -5.376_721e-2;
-const TANH_C4: f32 = 2.073_115_1e-2;
-const TANH_C5: f32 = -5.810_007e-3;
+pub(super) const TANH_SMALL_CUTOFF: f32 = 0.625;
+pub(super) const TANH_C1: f32 = -3.333_329_3e-1;
+pub(super) const TANH_C2: f32 = 1.333_176e-1;
+pub(super) const TANH_C3: f32 = -5.376_721e-2;
+pub(super) const TANH_C4: f32 = 2.073_115_1e-2;
+pub(super) const TANH_C5: f32 = -5.810_007e-3;
 
 // Degree-3 minimax polynomial in `z^2` for `ln(1 + e) = u + u * z^2 * R(z^2)` on `e ∈ [0, 1]`,
 // where `u = 2e / (2 + e) = e * recip_1_plus(0.5 * e)` and `z = 0.5 * u` (max rel err `1.03e-8`).
-const LN1P_C1: f32 = 3.333_322_4e-1;
-const LN1P_C2: f32 = 2.000_965_5e-1;
-const LN1P_C3: f32 = 1.402_164e-1;
-const LN1P_C4: f32 = 1.389_356_6e-1;
+pub(super) const LN1P_C1: f32 = 3.333_322_4e-1;
+pub(super) const LN1P_C2: f32 = 2.000_965_5e-1;
+pub(super) const LN1P_C3: f32 = 1.402_164e-1;
+pub(super) const LN1P_C4: f32 = 1.389_356_6e-1;
 
 // ---------------------------------------------------------------------------
 // Non-FMA scalar twins (bitwise identical to the AVX2 kernels below)
@@ -263,7 +263,7 @@ fn softplus8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     _mm256_blendv_ps(sp, x, _mm256_cmp_ps::<_CMP_UNORD_Q>(x, x))
 }
 
-/// Exact IEEE-754 `g / x` on eight lanes for `Log` backward.
+/// Exact IEEE-754 `g / x` on eight AVX2 lanes (or four Wasm SIMD128 lanes) for `Log` backward.
 pub(crate) fn log_bwd_slice(x: &[f32], g: &[f32], out: &mut [f32]) {
     debug_assert_eq!(x.len(), g.len());
     debug_assert_eq!(x.len(), out.len());
@@ -272,6 +272,11 @@ pub(crate) fn log_bwd_slice(x: &[f32], g: &[f32], out: &mut [f32]) {
         // SAFETY: AVX2 was detected above.
         return unsafe { log_bwd_avx2(x, g, out) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        return super::wasm_simd::log_bwd_slice(x, g, out);
+    }
+    #[allow(unreachable_code)]
     for ((o, &xv), &gv) in out.iter_mut().zip(x).zip(g) {
         *o = gv / xv;
     }
@@ -285,6 +290,11 @@ pub(crate) fn log_bwd_broadcast_g(x: &[f32], g: f32, out: &mut [f32]) {
         // SAFETY: AVX2 was detected above.
         return unsafe { log_bwd_bc_avx2(x, g, out) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        return super::wasm_simd::log_bwd_bc_slice(x, g, out);
+    }
+    #[allow(unreachable_code)]
     for (o, &xv) in out.iter_mut().zip(x) {
         *o = g / xv;
     }
@@ -356,9 +366,9 @@ fn log_bwd_bc_avx2(x: &[f32], g: f32, out: &mut [f32]) {
     }
 }
 
-define_unary_slice!(ln_slice, ln_avx2, ln8, ln_scalar);
-define_unary_slice!(tanh_slice, tanh_avx2, tanh8, tanh_scalar);
-define_unary_slice!(softplus_slice, softplus_avx2, softplus8, softplus_scalar);
+define_unary_slice!(ln_slice, ln_avx2, ln8, ln_scalar, ln_slice);
+define_unary_slice!(tanh_slice, tanh_avx2, tanh8, tanh_scalar, tanh_slice);
+define_unary_slice!(softplus_slice, softplus_avx2, softplus8, softplus_scalar, softplus_slice);
 
 define_bwd_slice!(
     tanh_bwd_slice,
@@ -366,7 +376,17 @@ define_bwd_slice!(
     tanh_bwd_avx2,
     tanh_bwd_bc_avx2,
     tanh_bwd8,
-    tanh_deriv_scalar
+    tanh_deriv_scalar,
+    tanh_bwd_slice,
+    tanh_bwd_bc_slice
 );
 
-define_bias_inplace!(tanh_bias_inplace, tanh_bias_avx2, has_avx2, "avx2", tanh8, tanh_scalar);
+define_bias_inplace!(
+    tanh_bias_inplace,
+    tanh_bias_avx2,
+    has_avx2,
+    "avx2",
+    tanh8,
+    tanh_scalar,
+    tanh_bias_inplace
+);
