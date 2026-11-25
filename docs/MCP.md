@@ -18,9 +18,48 @@ them (`folo_info`'s `capabilities.amp` says whether they are on). They have to b
 first used, so it is a start-up flag, not a runtime switch; with `--server`, the `folo serve` decides.
 One process owns a data dir at a time (docs/CLI.md, `serve`): when a `folo serve` already owns `--data-dir` (FOLO
 Desktop starts one), the embedded mode goes through that server, as `--server` would; with `--confine` it fails
-with `data_dir_in_use` instead. Setup snippets for
-Claude Code and Codex are in the README ([Use FOLO from an agent](../README.md#use-folo-from-an-agent)). The implementation is the
-`folo-mcp` crate; the end-to-end tests are `crates/folo-cli/tests/mcp/`.
+with `data_dir_in_use` instead. The implementation is the `folo-mcp` crate; the end-to-end tests are
+`crates/folo-cli/tests/mcp/`.
+
+## Client setup
+
+CLI-managed MCP clients:
+
+```sh
+claude mcp add folo -- folo mcp                 # Claude Code
+codex mcp add folo -- folo mcp                  # Codex
+agy mcp add folo -- folo mcp                    # Antigravity
+```
+
+JSON config (`.mcp.json`, Claude Desktop `claude_desktop_config.json`, or Cursor `.cursor/mcp.json`):
+
+```json
+{ "mcpServers": { "folo": { "command": "folo", "args": ["mcp"] } } }
+```
+
+From a source checkout without an installed `folo` binary (prefer setting the client's working directory to the
+checkout so Cargo picks up `.cargo/config.toml`; `--manifest-path` locates the workspace if launched elsewhere):
+
+```json
+{
+  "mcpServers": {
+    "folo": {
+      "command": "cargo",
+      "args": ["run", "-q", "--release", "--manifest-path", "/path/to/folo/Cargo.toml", "-p", "folo-cli", "--", "mcp"]
+    }
+  }
+}
+```
+
+Common `args` recipes:
+
+| mode | `args` | when to use |
+|---|---|---|
+| Embedded + tensor cores | `["mcp", "--tensor-cores"]` | enables `train { "amp": true }` in embedded mode (`FOLO_GPU_TENSOR_CORES=1` works too) |
+| Proxy to `folo serve` | `["mcp", "--server", "http://127.0.0.1:7878"]` | share datasets and long-running jobs with Studio / Desktop (add `"--token", "<secret>"` or env `FOLO_TOKEN` if protected; start `folo serve --precision f16 --tensor-cores` for f16 inference/`val`) |
+| Read-only inspection | `["mcp", "--read-only"]` | hides and rejects every mutating tool (training, labeling edits, exports, deletes) |
+| Confined reads | `["mcp", "--confine", "--data-dir", "/path/to/data"]` | restricts tool-supplied input paths and embedded dataset/label reads to `--data-dir` (benchmark tools return `not_supported` under `--confine`) |
+| Mock dry-run | `["mcp", "--mock"]` | deterministic demo datasets and simulated runs, no GPU or disk writes needed |
 
 ## Status
 Implemented: both protocol revisions, all 40 tools with generated input and output schemas, every resource and
@@ -391,13 +430,46 @@ In read-only mode, `train_on_folder` and `label_folder` are not listed.
   `unauthorized` tool error. The transport is the `folo-client` crate, the same one a cloud control plane uses.
 
 ## Example agent session
+
+An end-to-end tool and resource session — inspect hardware, generate a dataset, estimate runtime, train, validate,
+predict, and export:
+
+```text
+# 1. Inspect available devices, capabilities (including amp / tensor cores) and model scales
+→ folo_info {}
+← { "version": "0.1.0", "mode": "embedded", "devices": { "gpus": [{ "name": "NVIDIA GeForce RTX 4080 SUPER", ... }] }, "capabilities": { "amp": { "available": true, "reason": null }, ... }, ... }
+
+# 2. Generate (or register) a dataset
+→ create_synthetic_dataset { "name": "shapes", "images": 1000, "imgsz": 320 }
+← { "id": "ds_8f2c", "format": "yolo", "classes": ["circle", "square", "triangle"], "splits": { "train": 800, "val": 200, "test": 0 }, ... }
+
+# 3. Estimate wall time and peak VRAM before starting a run (resource read)
+→ resources/read folo://estimate/ds_8f2c?arch=folo-n&epochs=30&imgsz=320
+← { "device": "gpu:0", "est_total_s": 85.0, "est_peak_vram_bytes": 1200000000, "source": "reference", "confidence": "low", ... }
+
+# 4. Launch training (returns immediately; train runs in the background)
+→ train { "name": "shapes-n", "dataset_id": "ds_8f2c", "arch": "folo-n", "epochs": 30, "imgsz": 320 }
+← { "run_id": "run_7d1e", "status": "queued" }
+
+# 5. Follow progress via subscription (folo://runs/run_7d1e) or run_status
+→ run_status { "run_id": "run_7d1e", "log_lines": 5 }
+← { "id": "run_7d1e", "status": "completed", "epoch": 30, "epochs": 30, "best": { "epoch": 28, "map50_95": 0.823 }, "model_id": "m_7d1e", ... }
+
+# 6. Validate on the val split and run single-image inference (absolute path, or dataset_id + image_id from list_dataset_images)
+→ val { "model_id": "m_7d1e", "dataset_id": "ds_8f2c", "split": "val" }
+← { "model_id": "m_7d1e", "images": 200, "val": { "map50": 0.955, "map50_95": 0.823, ... }, "timing": { "total_s": 1.8, "per_image_ms": 9.0 }, ... }
+
+→ predict { "model_id": "m_7d1e", "image_path": "/path/to/photo.jpg", "conf": 0.25 }
+← { "model_id": "m_7d1e", "image": { "width": 640, "height": 480 }, "boxes": [...], "timing": { "total_ms": 42.0, ... }, "device": "gpu:0", "cold": true }
+  # first predict on a newly loaded model sets "cold": true (timing includes warm-up; subsequent calls omit it)
+
+# 7. Export fused f16 weights (or ONNX with decode: true)
+→ export { "model_id": "m_7d1e", "format": "folo-f16" }
+← { "path": ".../exports/shapes-n-best-f16.folo", "bytes": 5452800 }
 ```
-→ create_synthetic_dataset { "name": "shapes", "images": 2000 }      ← { "id": "ds_1", ... }
-→ train { "name": "shapes-n", "dataset_id": "ds_1", "arch": "folo-n", "epochs": 30, "imgsz": 320 }
-                                                                      ← { "run_id": "run_1", "status": "queued" }
-→ (subscribe folo://runs/run_1, or call run_status every ~30 s)       ← { "epoch": 12, "best": { "map50_95": 0.71 }, ... }
-→ predict { "model_id": "m_1", "image_path": "test.jpg" }             ← { "boxes": [...], "timing": {...} }
-```
+
+For full side-by-side MCP and CLI (`--json`) workflows — including dataset checking, agent labeling, cloud runs and
+vision benchmarks — see [AGENT_COOKBOOK.md](AGENT_COOKBOOK.md).
 
 ## Tests
 `crates/folo-cli/tests/mcp/` spawns `folo mcp` and, for **each supported revision**, runs the handshake or discovery (plus,
