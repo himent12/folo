@@ -11,20 +11,25 @@
 pub mod blocks;
 pub mod config;
 pub mod head;
+pub mod iou;
 
 use folo_core::rng::Rng;
-use folo_core::{DType, Device, Tensor};
+use folo_core::{DType, Device, Tensor, no_grad};
 use folo_nn::{ConvBnAct, Error, Forward, Mode, Module, ModuleList, Result};
+use rayon::prelude::*;
 
+use crate::boxes::Xyxy;
 use crate::decode::{Anchors, make_anchors};
 use crate::model::blocks::{Fuse, Init, Sppf};
 use crate::model::{HeadMode, HeadOutput};
+use crate::nms::{Detection, NmsConfig, postprocess_with_inputs};
 
 pub use blocks::{
     FoloBlock, FullPadGate, HyperContext, QARepBranches, StemV2, WsQARepConv3x3, space_to_depth_2x2,
 };
 pub use config::{FoloV2Config, MAL_CLS_BIAS_PRIOR, ScalingV2};
 pub use head::{BoxBranchV2, ClsBranchV2, HeadLevelV2, LazyAlignHead, O2oClsLevel, PeakSuppress};
+pub use iou::{DEFAULT_IOU_FUSION_ALPHA, fuse_cls_iou_scores, iou_quality_loss};
 
 /// FOLO v2 backbone: `StemV2`, wide `QARep` `stage2` (P2 tap), `FoloBlock` stages 3–5, `SPPF`, and
 /// `HyperContext` (`HyperACE-Lite` at P5).
@@ -184,6 +189,66 @@ impl HeadOutputV2 {
             reg_max: self.reg_max,
             num_classes: self.num_classes,
         }
+    }
+
+    /// Decode every image's `(boxes [A], scores [A, nc])` in input pixels, fusing `iou_raw` with exponent
+    /// `iou_alpha` in `0..=1` (`p_cls^(1 - alpha) * sigmoid(iou_raw)^alpha`) when `iou_raw` is present and
+    /// `iou_alpha > 0`.
+    pub fn decode_images(&self, iou_alpha: f32) -> Result<Vec<(Vec<Xyxy>, Vec<f32>)>> {
+        if !iou_alpha.is_finite() || !(0.0..=1.0).contains(&iou_alpha) {
+            return Err(Error::Invalid(format!(
+                "HeadOutputV2::decode_images: iou_alpha must be in 0..=1, got {iou_alpha}"
+            )));
+        }
+        let head = self.clone().into_head_output();
+        let mut decoded = head.decode_images()?;
+        if iou_alpha == 0.0 {
+            return Ok(decoded);
+        }
+        let Some(iou_raw) = &self.iou_raw else {
+            return Ok(decoded);
+        };
+        let (b, a, nc) = (self.batch(), self.num_anchors(), self.num_classes);
+        if iou_raw.dims() != [b, 1, a] {
+            return Err(Error::Invalid(format!(
+                "HeadOutputV2: iou_raw {:?} does not match [{b}, 1, {a}]",
+                iou_raw.dims()
+            )));
+        }
+        let _g = no_grad();
+        let iou_host = if iou_raw.device().is_cpu() {
+            iou_raw.to_dtype(DType::F32)?
+        } else {
+            iou_raw.to_device(Device::Cpu)?.to_dtype(DType::F32)?
+        };
+        let iou_vals = iou_host.to_vec::<f32>()?;
+        for ((_, scores), iou_img) in decoded.iter_mut().zip(iou_vals.chunks_exact(a)) {
+            fuse_cls_iou_scores(scores, iou_img, nc, iou_alpha);
+        }
+        Ok(decoded)
+    }
+
+    /// Decode and post-process every image into detections, fusing `iou_raw` with exponent `iou_alpha` in
+    /// `0..=1` when `iou_raw` is present and `iou_alpha > 0`. When `iou_raw` is `None` or `iou_alpha == 0.0`,
+    /// delegates straight to [`HeadOutput::detections`] (preserving every fast path).
+    pub fn detections(&self, nms: &NmsConfig, iou_alpha: f32) -> Result<Vec<Vec<Detection>>> {
+        if !iou_alpha.is_finite() || !(0.0..=1.0).contains(&iou_alpha) {
+            return Err(Error::Invalid(format!(
+                "HeadOutputV2::detections: iou_alpha must be in 0..=1, got {iou_alpha}"
+            )));
+        }
+        let head = self.clone().into_head_output();
+        if self.iou_raw.is_none() || iou_alpha == 0.0 {
+            return head.detections(nms);
+        }
+        let (nc, mode) = (self.num_classes, self.mode);
+        let aux = head.dfl_aux_for(nms)?;
+        let decoded = self.decode_images(iou_alpha)?;
+        Ok(decoded
+            .into_par_iter()
+            .enumerate()
+            .map(|(i, (b, s))| postprocess_with_inputs(&b, &s, aux.inputs(i), nc, nms, mode))
+            .collect())
     }
 }
 
