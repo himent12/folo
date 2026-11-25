@@ -7,6 +7,7 @@ import { computed, css, deep, effect, Key, onCleanup, signal, tick, untrack } fr
 import { ApiError, hub } from '$lib/api/index';
 import { followedDatasets, listedName } from '$lib/api/datasetReads';
 import { Resource } from '$lib/api/resource';
+import { runsChanged } from '$lib/api/runs';
 import type { Arch, Augment, DatasetImage, Optimizer, TrainConfig } from '$lib/api/types';
 import { modelChoices, scoreMeta } from '$lib/scoreSummary';
 import { sentence } from '$lib/format';
@@ -555,6 +556,7 @@ function RunNewForm() {
     };
     try {
       const run = await hub.api.createRun(config.get());
+      runsChanged();
       draftStore.markStarted();
       const where = run.cloud ? `, at ${cloudPick.provider} on ${run.cloud.offer.gpu}` : '';
       // page-level: the sheet is closed (above).

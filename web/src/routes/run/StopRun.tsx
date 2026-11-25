@@ -6,6 +6,7 @@
 import CircleStop from '$icons/circle-stop';
 import { signal } from 'fw';
 import { hub } from '$lib/api/index';
+import { runsChanged } from '$lib/api/runs';
 import type { Run } from '$lib/api/types';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
@@ -70,6 +71,7 @@ export default function StopRun(props: StopRunProps) {
     busy.set(true);
     try {
       const r = await hub.api.stopRun(cur.id);
+      runsChanged();
       props.onclose();
       // page-level: the confirm closed on the line above.
       stoppedToast(r, finishedEpochs(cur));

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // The Datasets list's view of the datasets there are: one whose folder is gone (moved, renamed, deleted) is marked and
 // its page keeps its name and can remove it from FOLO; and the list reads them again when they may have changed.
-import { flush as flushSync, type Component } from 'fw';
+import { flush as flushSync, signal, type Component } from 'fw';
 import { render } from '../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
@@ -438,5 +438,27 @@ describe('progressive dataset list rendering', () => {
     resolveSlow(slowDetail);
     await until(() => target.querySelector(`.card[data-id="${slowId}"] .foot button, .card[data-id="${slowId}"] .foot .strip`), 'slow dataset strip');
     expect(target.querySelector(`.card[data-id="${slowId}"]`)!.textContent).not.toContain('Folder missing');
+  });
+
+  it('retries transiently failed dataset detail reads on hub.back even when /api/datasets returns an unchanged list', async () => {
+    const api = new MockApi('normal', 0);
+    const realDataset = api.dataset.bind(api);
+    let outage = true;
+    vi.spyOn(api, 'dataset').mockImplementation((id: string) => {
+      if (id === 'ds_fasteners' && outage) return Promise.reject(new ApiError(503, 'unavailable', 'temporary outage'));
+      return realDataset(id);
+    });
+    const back = signal(0);
+    vi.spyOn(hub, 'back', 'get').mockImplementation(() => back.get());
+    hub.api = api;
+    hub.mode = 'mock';
+
+    open(Datasets, '/datasets');
+    await until(() => target.querySelector('.card[data-id="ds_fasteners"] .foot .no-strip'), 'transiently failed card settled without strip');
+
+    outage = false;
+    back.set(1);
+    flushSync();
+    await until(() => target.querySelector('.card[data-id="ds_fasteners"] .foot button, .card[data-id="ds_fasteners"] .foot .strip'), 'recovered ClassStrip');
   });
 });

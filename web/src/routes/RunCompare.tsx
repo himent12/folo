@@ -90,7 +90,17 @@ export default function RunCompare() {
   const ids = computed(() => [...new Set((router.route.query.get('ids') ?? '').split(',').filter(Boolean))].slice(0, MAX), {
     equals: (a, b) => a.length === b.length && a.every((v, i) => v === b[i]),
   });
-  const runs = new Resource((s) => hub.api.runs(s), { startFrom: () => watched.source });
+  let borrowed = false;
+  let confirming = false;
+  let confirmSeq = 0;
+  const confirmed = signal(0);
+  const runs = new Resource((s) => hub.api.runs(s), {
+    startFrom: () => {
+      const src = watched.source;
+      if (src) borrowed = true;
+      return src;
+    },
+  });
   const datasets = new Resource((s) => hub.api.datasets(s));
   // Names for runs fine-tuned from a model ("Start from").
   const models = new Resource((s) => hub.api.models(s));
@@ -121,6 +131,9 @@ export default function RunCompare() {
     const epoch = hub.epoch;
     if (epoch === prevEpoch) return;
     prevEpoch = epoch;
+    borrowed = false;
+    confirming = false;
+    confirmSeq++;
     for (const c of retryCtrls.values()) c.abort();
     retryCtrls.clear();
     untrack(() => {
@@ -132,14 +145,30 @@ export default function RunCompare() {
   });
 
   // Reconcile `?ids=` against the loaded run list so deleted run IDs never hold slots or trap the page in an empty dead-end.
+  // When the initial list came from `watched.source`, confirm missing IDs with a fresh read before rewriting `?ids=`.
   effect(() => {
     const list = runs.data;
+    void confirmed.get();
     if (!list) return;
     const cur = ids.get();
     if (!cur.length) return;
     const known = new Set(list.map((r) => r.id));
     const missing = cur.filter((id) => !known.has(id));
     if (!missing.length) return;
+    if (borrowed) {
+      if (runs.refreshing || runs.error || runs.stale || confirming) return;
+      confirming = true;
+      const seq = ++confirmSeq;
+      const epoch = untrack(() => hub.epoch);
+      void runs.refresh().then(() => {
+        if (seq !== confirmSeq) return;
+        confirming = false;
+        if (!alive || untrack(() => hub.epoch) !== epoch || runs.refreshing || runs.error || runs.stale) return;
+        borrowed = false;
+        confirmed.set((n) => n + 1);
+      });
+      return;
+    }
     untrack(() => {
       if (router.route.path !== '/runs/compare') return;
       const keep = cur.filter((id) => known.has(id));

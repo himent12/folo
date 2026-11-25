@@ -67,54 +67,52 @@ export default function Datasets() {
   // when the list may have changed (`again`, below).
   const listed = new Resource((s) => hub.api.datasets(s));
   const details = signal<ReadonlyMap<string, ListedDataset>>(new Map());
-  const rereadTick = signal(0);
-  let again = false;
-  let rereadSeq = 0;
+  const detailTrigger = signal(0);
+  let wantFresh = false;
+  let wantRecover = false;
   let detailSeq = 0;
   let detailCtrl: AbortController | null = null;
-  let alive = true;
   onCleanup(() => {
-    alive = false;
-    rereadSeq++;
     detailSeq++;
     detailCtrl?.abort();
     detailCtrl = null;
   });
 
   const reread = () => {
-    again = true;
-    const seq = ++rereadSeq;
-    const epoch = untrack(() => hub.epoch);
-    const beforeList = listed.data;
-    void listed.refresh().then(() => {
-      if (!alive || seq !== rereadSeq || untrack(() => hub.epoch) !== epoch) return;
-      if (listed.error || listed.stale) {
-        again = false;
-        return;
-      }
-      // Resource.reuse() keeps listed.data identical when the list itself did not change;
-      // bump rereadTick so an explicit reread still re-checks each dataset's detail and folder.
-      if (listed.data === beforeList) rereadTick.set((n) => n + 1);
-    });
+    wantFresh = true;
+    void listed.refresh();
   };
+
+  // When the server comes back after an outage, `listed` refreshes automatically; mark `wantRecover` so even if the
+  // registration list is unchanged (`reuse()`), transiently failed dataset detail reads are retried once it settles.
+  let lastBack = untrack(() => hub.back);
+  effect(() => {
+    const now = hub.back;
+    if (now === lastBack) return;
+    lastBack = now;
+    if (hub.mode !== 'connecting') wantRecover = true;
+  });
 
   effect(() => {
     const list = listed.data;
-    void rereadTick.get();
+    void detailTrigger.get();
     if (!list) {
       detailSeq++;
       detailCtrl?.abort();
       detailCtrl = null;
+      wantFresh = false;
+      wantRecover = false;
       details.set(new Map());
       return;
     }
-    if (untrack(() => listed.error || listed.stale)) {
-      again = false;
-      return;
-    }
+    if (untrack(() => listed.error || listed.stale)) return;
+    // Wait for an in-flight reread/recovery refresh to finish so we never consume its intent against the prior list.
+    if (untrack(() => listed.refreshing && (wantFresh || wantRecover))) return;
     const api = untrack(() => hub.api);
-    const fresh = again;
-    again = false;
+    const fresh = wantFresh;
+    const recover = wantRecover;
+    wantFresh = false;
+    wantRecover = false;
     const seq = ++detailSeq;
     detailCtrl?.abort();
     const ctl = (detailCtrl = new AbortController());
@@ -123,18 +121,23 @@ export default function Datasets() {
     const toFetch: Dataset[] = [];
     for (const d of list) {
       const existing = prev.get(d.id);
-      if (!fresh && existing && !existing.pending && (existing.stats || existing.problem) && sameBase(existing, d)) {
+      if (!fresh && !recover && existing && !existing.pending && (existing.stats || existing.problem) && sameBase(existing, d)) {
         seed.set(d.id, existing);
         continue;
       }
       if (!fresh) {
         const known = missingError(api, d.id);
         if (known !== undefined) {
-          seed.set(d.id, { ...d, problem: datasetProblem(known) });
+          seed.set(d.id, existing && !existing.pending && existing.problem === datasetProblem(known) && sameBase(existing, d) ? existing : { ...d, problem: datasetProblem(known) });
           continue;
         }
       }
-      seed.set(d.id, existing && !existing.pending ? { ...d, stats: existing.stats, problem: existing.problem } : { ...d, pending: true });
+      if (existing && !existing.pending) {
+        // Keep the existing object identity when base fields did not change so cards do not re-trigger failed mosaics twice.
+        seed.set(d.id, sameBase(existing, d) ? existing : { ...d, stats: existing.stats, problem: existing.problem });
+      } else {
+        seed.set(d.id, { ...d, pending: true });
+      }
       toFetch.push(d);
     }
     details.set(seed);
@@ -158,6 +161,18 @@ export default function Datasets() {
         },
       );
     }
+  });
+
+  // Resource.reuse() preserves `listed.data` when the list itself did not change; once a refresh settles cleanly,
+  // bump `detailTrigger` if an explicit reread or outage recovery is still pending.
+  let wasRefreshing = false;
+  effect(() => {
+    const refreshing = listed.refreshing;
+    const ok = !!listed.data && !listed.error && !listed.stale;
+    if (wasRefreshing && !refreshing && ok && (wantFresh || wantRecover)) {
+      untrack(() => detailTrigger.set((n) => n + 1));
+    }
+    wasRefreshing = refreshing;
   });
 
   const datasetsData = computed<ListedDataset[] | undefined>(() => {
