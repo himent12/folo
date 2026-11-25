@@ -37,8 +37,8 @@ are normative, this one is the map.
 `RunningStats` (`layers/batchnorm/stats.rs`, alongside `mod.rs`, `cpu.rs`, and `tests.rs` in the split
 `layers/batchnorm/` module) implements the non-finite batch guard of MODEL.md §8.3: `RunningStats::capture(model)`
 snapshots every floating buffer, while `RunningStats::capture_training(model)` captures only active train-mode
-`BatchNorm2d` buffers once per epoch, refreshes them in place via `recapture()` with zero per-batch allocations, checks
-live finiteness via `all_finite_live()` without re-walking the module tree, and pairs with
+`BatchNorm2d` buffers once per epoch, refreshes them in place via `recapture()` without reallocating snapshot tensors,
+checks live finiteness via `all_finite_live()` without re-walking the module tree, and pairs with
 `RunningStats::all_finite_eval(model)` to validate frozen eval-mode BN buffers at epoch entry (`restore()` undoes a
 non-finite batch). Buffers on a device are checked with one readback per device via multi-tensor
 `Tensor::norm_partials_many(bufs, NormReduce::AbsMax, None)` + `max_all()` (falling back to `Σ 0 · x == 0` when

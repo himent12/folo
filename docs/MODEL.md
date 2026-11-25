@@ -659,9 +659,10 @@ Implementation: `folo_vision::loss` (`detection_loss`, `LossConfig` with these w
   gt's candidates scored and ranked in one workgroup, conflicts by atomics, then the soft targets and a dense
   per-anchor target map), the BCE over every logit (each element formed whole), CIoU + DFL per positive with the
   backward written out by hand (α constant, min / max ties split as folo-core's autograd does), and a fixed-order
-  reduction. `detection_loss_host` keeps the host assigner on any device (and on this fallback path, `inner_ciou` reads
-  foreground aspect ratios back for `atan`, and `dfl_ot_weight > 0` reads gathered foreground logits back for host
-  `f64` evaluation). `crates/folo-vision/tests/gpu_loss/`
+  reduction. `detection_loss_host` keeps the host assigner on any device (on this GPU fallback path, `inner_ciou` reads
+  foreground aspect ratios back for `atan`, `rpiou` reads foreground boxes back for host `f64` evaluation, `wiou_v3`
+  reads back the foreground mean IoU loss scalar, and `dfl_ot_weight > 0` with foreground anchors and `reg_max > 2`
+  reads gathered foreground logits back for host `f64` evaluation). `crates/folo-vision/tests/gpu_loss/`
   checks the device assignment against the host one (the same positives, gts and labels; `t` to 1e-5) on several
   sizes, class counts and settings, and the items and both gradients against the host loss. The positives are
   listed per gt slot rather than per anchor and the sums run in another (fixed) order, so values agree to float
@@ -1225,9 +1226,10 @@ index then class), keep at most 30000, run greedy class-aware NMS (a candidate i
 same class has plain IoU `> iou`; opt-in `NmsConfig.nms_kind`, serialized in JSON as
 `"nms_kind": {"kind": "diou" | "soft_linear" | "soft_gaussian", ...}`, also supports `diou` DIoU-NMS
 `IoU − ρ²/c² > iou`, `soft_linear` Linear Soft-NMS `score *= 1 − IoU` when `IoU > iou`, and `soft_gaussian` Gaussian
-Soft-NMS `score *= exp(−IoU² / sigma)` when `IoU > 0`, default `sigma = 0.5`, dropping once `score <= conf`; Soft-NMS
-skips score-rescoring rules, gives `sebf` only the survivor's own box, and `validate` rejects combining Soft-NMS with
-score rules or box fusion), keep the first `max_det`, then map boxes back (§9.2). Output per image:
+Soft-NMS `score *= exp(−IoU² / sigma)` when `IoU > 0`, default `sigma = 0.5`, requiring finite `sigma > 0`, dropping
+once `score <= conf`; Soft-NMS skips score-rescoring rules, gives `sebf` only the survivor's own box, and `validate`
+rejects combining Soft-NMS with score rules or `sebf` box fusion while still allowing `vote` and `dfl` fusion), keep
+the first `max_det`, then map boxes back (§9.2). Output per image:
 `[x1, y1, x2, y2, score, class]`, sorted by score.
 
 ### 9.4 Box fusion (opt-in)

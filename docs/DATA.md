@@ -33,9 +33,10 @@ produces plain buffers that the trainer wraps in tensors.
   it by a path that names the `images` folder to use the mirror). A missing label file means a background image.
 - Label lines (`dataset/labels.rs`, parsed directly from byte/str slices without intermediate per-line allocations):
   `class cx cy w h` or a segment polygon `class x1 y1 x2 y2 ...` (normalised; the polygon's bounding box is used).
-  Coordinates may exceed `[0, 1]` by up to 0.01 (clipped with a warning, except non-degenerate 5-token boxes within
-  `1e-5` of the boundary, which keep their original coordinates without warning); exact duplicates are removed;
-  zero-size boxes are dropped.
+  Coordinates may exceed `[0, 1]` by up to 0.01 (clipped with a warning; within `1e-5` of the boundary, the clipping
+  warning is suppressed for both polygons — whose bounding boxes are still clamped to `[0, 1]` — and non-degenerate
+  5-token boxes, which also keep their original `cx cy w h`); exact duplicates are removed; zero-size boxes are
+  dropped.
 - A label file is **broken** (and its image skipped) if a value is not a finite number, a line has the wrong number of
   values, a class id is negative, fractional or `>= nc`, a size is negative, or coordinates are clearly not
   normalised.

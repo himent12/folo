@@ -116,10 +116,11 @@ A shared graph walk (`walk.rs`) drives three executors:
     non-monotonic dynamic focusing: `wiou_alpha = 1.9`, `wiou_delta = 3.0`, `wiou_momentum = 0.01`, running `L_IoU_bar`
     persisted in checkpoints as `folo.wiou_iou_mean`); `LossConfig.nwd_weight` adds the scale-adaptive NWD box blend;
     `LossConfig.dfl_ot_weight > 0` adds an exact `O(R)` log-space 1D optimal-transport cumulative tail barrier to DFL
-    (when `reg_max > 2`; CPU + GPU fused when `device_loss_supported`, host `f64` readback on the fallback path).
+    (when `reg_max > 2`: host `f64` custom op `ot_dfl_tail` on CPU, fused in `folo_gpu::detect` on GPU when
+    `device_loss_supported` holds, or host `f64` readback on the GPU fallback path when foreground anchors exist).
     `Vfl`, `Qfl`, `InnerCiou`, and `WiouV3` run through the host-assigner + `loss_with_assignment` path (fused CPU
-    custom ops for VFL/QFL classification, device-generic tensor composites on other devices, with foreground `atan`
-    host readbacks for `InnerCiou`).
+    custom ops for VFL/QFL classification, device-generic tensor composites on other devices, with foreground host
+    readbacks for `InnerCiou` `atan`, `Rpiou` `f64`, and `WiouV3` mean IoU loss).
   - *Distillation (`loss/distill/`):* dense teacher output KD (MODEL.md §8.9, fused GPU path in `distill/fused.rs`),
     plus `DistillConfig.bckd_gamma > 0` (BCKD focal disagreement weighting `sg(|p_S − p_T|^γ)` with positive teacher
     clamping) and `DistillConfig.gt_verify` (positive-only GT-verified DFL KD gating where `IoU(b_T, g) > IoU(b_S, g) +
