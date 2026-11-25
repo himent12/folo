@@ -23,6 +23,7 @@ import { conf, metric, num, pct } from '$lib/format';
 import { isTyping } from '$lib/keys';
 import { href } from '$lib/router';
 import Page from '$lib/shell/Page';
+import { pageKeys } from '$lib/shell/pageCommands';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -90,29 +91,35 @@ export default function BenchCompare() {
 
   const key = (eid: string) => <i class="key" style={{ '--c': fill(eid) }} data-pattern={SLOT_PATTERN[slotOf(eid)]} aria-hidden="true"></i>;
 
-  // Single-key shortcuts: 1–4 pin/unpin an entry in front across every chart, B promotes the next entry to baseline,
-  // and Escape unpins first before global Escape returns to the leaderboard.
-  onDocument('keydown', (e) => {
-    if (e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isTyping(e)) return;
-    if (document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"]')) return;
-    if (e.key === 'Escape') {
-      if (pinned.peek() !== null) {
-        e.preventDefault();
-        pinned.set(null);
-      }
-      return;
-    }
-    if (!keyPrefs.singleKeys) return;
+  // Single-key shortcuts via pageKeys (window bubble, after shell/shortcuts so G B navigates to Benchmarks cleanly):
+  // 1–4 pin/unpin an entry across every chart; B rotates the baseline through all shown entries.
+  pageKeys((k) => {
+    if (document.querySelector('[aria-expanded="true"][aria-haspopup], [role="menu"]')) return false;
     const list = shown.peek();
-    if (list.length < 2) return;
-    if (e.key >= '1' && e.key <= '4') {
-      const target = list[Number(e.key) - 1];
-      if (!target) return;
-      e.preventDefault();
+    if (list.length < 2) return false;
+    if (k >= '1' && k <= '4') {
+      const target = list[Number(k) - 1];
+      if (!target) return false;
       pinned.set((p) => (p === target.id ? null : target.id));
-    } else if (e.key.toLowerCase() === 'b') {
+      return true;
+    }
+    if (k.toLowerCase() === 'b') {
+      const shownIds = list.map((x) => x.id);
+      const extra = ids.peek().filter((x) => !shownIds.includes(x));
+      setIds([...shownIds.slice(1), shownIds[0]!, ...extra]);
+      return true;
+    }
+    return false;
+  });
+
+  // Escape unpins an active chip before global Escape returns to the leaderboard.
+  onDocument('keydown', (e) => {
+    if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isTyping(e)) return;
+    if (!keyPrefs.singleKeys || document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"], #folo-tooltip[data-show], .info-pop.open')) return;
+    const p = pinned.peek();
+    if (p !== null && shown.peek().some((x) => x.id === p)) {
       e.preventDefault();
-      makeBaseline(list[1]!.id);
+      pinned.set(null);
     }
   });
 
@@ -429,7 +436,7 @@ export default function BenchCompare() {
                 type="button"
                 class="ck"
                 aria-pressed={pinned.get() === e().id}
-                aria-keyshortcuts={String(i() + 1)}
+                aria-keyshortcuts={keyPrefs.singleKeys && shown.get().length >= 2 ? String(i() + 1) : undefined}
                 title={pinned.get() === e().id ? 'Let it fall back' : 'Keep it in front'}
                 onclick={() => pinned.set((p) => (p === e().id ? null : e().id))}
               >

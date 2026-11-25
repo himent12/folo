@@ -905,7 +905,7 @@ describe('the list', () => {
     });
   }
 
-  it('opens New benchmark reactively when navigating to ?new=1 while already on /benchmarks, and strips ?new=1 from the URL', async () => {
+  it('opens New benchmark reactively when navigating to ?new=1 while already on /benchmarks, strips ?new=1, and closes if health reports benchmarks unavailable', async () => {
     const go = vi.spyOn(router, 'go').mockImplementation((path) => {
       router.route = parse(`#${path}`);
     });
@@ -919,5 +919,14 @@ describe('the list', () => {
     expect(formOpen()).toBe(true);
     expect(go).toHaveBeenCalledWith('/benchmarks', { replace: true });
     expect(router.route.query.get('new')).toBeNull();
+
+    // If health arrives after the dialog opened without the benchmarks feature, the dialog closes.
+    try {
+      hub.features = ['queue_control'];
+      flushSync();
+      expect(formOpen()).toBe(false);
+    } finally {
+      hub.features = null;
+    }
   });
 });

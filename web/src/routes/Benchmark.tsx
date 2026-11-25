@@ -233,7 +233,7 @@ export default function Benchmark() {
   const comparing = computed(() => selected.get().length >= 2);
   function clearSelection() {
     selected.set([]);
-    (document.getElementById('bn-tab-leaderboard') ?? document.querySelector<HTMLElement>('h1[data-route-focus]'))?.focus();
+    (document.getElementById(`bn-tab-${tab.peek()}`) ?? document.querySelector<HTMLElement>('h1[data-route-focus]'))?.focus();
   }
   /** The entries as the leaderboard shows them (one graded on an earlier version after the current ones): Compare's order. */
   const board = computed(() => {

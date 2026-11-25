@@ -72,15 +72,16 @@ export default function Benchmarks() {
   // Polled: an entry running somewhere changes a benchmark's leader and its count.
   const benches = new Resource((s) => hub.api.benches(s), { poll: 10_000 });
   const unsupported = computed(() => cannotBench(system.data, benches.error));
+  const unavailable = computed(() => unsupported.get() || hub.lacks(BENCH_FEATURE));
 
   // `#/benchmarks?new=1` opens the dialog (the palette's "New benchmark"), both on initial mount and when navigated
-  // to while already on `/benchmarks`, then strips `?new=1` so reload/Back never reopens it. Suppressed when the server's
-  // health says it lacks benchmarks (`folo serve --mock`, #324).
+  // to while already on `/benchmarks`, then strips `?new=1` so reload/Back never reopens it. Suppressed and closed
+  // whenever server health or capability checks say benchmarks are unavailable (`folo serve --mock`, #324).
   const creating = signal(false);
   effect(() => {
     if (router.route.name !== 'benchmarks' || router.route.query.get('new') !== '1') return;
     untrack(() => {
-      if (!hub.lacks(BENCH_FEATURE) && !unsupported.peek()) creating.set(true);
+      if (!unavailable.peek()) creating.set(true);
       const q = new URLSearchParams(router.route.query);
       q.delete('new');
       const s = q.toString();
@@ -88,7 +89,7 @@ export default function Benchmarks() {
     });
   });
   effect(() => {
-    if (unsupported.get() && creating.peek()) creating.set(false);
+    if (unavailable.get() && creating.peek()) creating.set(false);
   });
 
   // Newest first, as the server sends them.
@@ -152,7 +153,7 @@ export default function Benchmarks() {
         subPhone={facts.get() ? () => <span class="num">{facts.get()!.slice(0, 2).join(' · ')}</span> : undefined}
         actions={() => (
           <>
-            {!unsupported.get() ? (
+            {!unavailable.get() ? (
               <Gate reason={offline.get() ? OFFLINE_REASON : null}>
                 {(why) => (
                   <Button variant="primary" icon={Plus} disabled={!!why()} aria-describedby={why()} onclick={() => creating.set(true)}>
