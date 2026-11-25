@@ -95,10 +95,10 @@ impl ConvBnAct {
         let p = self.conv.config().params();
         let act = self.act.unary_op();
         match &self.bn {
-            None => Ok(Tensor::conv2d_act_cat(xs, &self.conv.weight, self.conv.bias.as_ref(), &p, act)?),
+            None => conv2d_act_cat_autocast(xs, &self.conv.weight, self.conv.bias.as_ref(), &p, act),
             Some(bn) if !bn.is_training() && (!first.device().is_cpu() || !is_grad_enabled()) => {
                 let (w, b) = self.folded_eval(bn)?;
-                Ok(Tensor::conv2d_act_cat(xs, &w, Some(&b), &p, act)?)
+                conv2d_act_cat_autocast(xs, &w, Some(&b), &p, act)
             }
             Some(_) => self.forward(&Tensor::cat(xs, 1)?),
         }
@@ -116,6 +116,57 @@ impl ConvBnAct {
         };
         Ok((w, b))
     }
+}
+
+/// Whether `ConvBnAct` should cast non-recording operands to `F16` under GPU [`folo_core::autocast`]:
+/// `Tensor::conv2d_act` / `conv2d_act_cat` only apply autocast on their recording path, so a frozen or eval-mode
+/// conv (e.g. `freeze_backbone_epochs` under AMP) casts its inputs and weights here so outputs match downstream
+/// autocast ops (such as `Attention`'s `F16` `matmul` and active `neck` skips).
+fn autocast_f16_no_grad(dev: Device, xs: &[&Tensor], w: &Tensor, b: Option<&Tensor>) -> Result<bool> {
+    if folo_core::autocast_dtype() != Some(DType::F16) || dev.is_cpu() {
+        return Ok(false);
+    }
+    if is_grad_enabled()
+        && (xs.iter().any(|t| t.requires_grad()) || w.requires_grad() || b.is_some_and(Tensor::requires_grad))
+    {
+        return Ok(false);
+    }
+    Ok(folo_core::backend::backend(dev)?.computes_f16())
+}
+
+fn conv2d_act_autocast(
+    x: &Tensor,
+    w: &Tensor,
+    b: Option<&Tensor>,
+    p: &folo_core::Conv2dParams,
+    act: Option<folo_core::UnaryOp>,
+) -> Result<Tensor> {
+    if autocast_f16_no_grad(x.device(), &[x], w, b)? {
+        let x16 = x.to_dtype(DType::F16)?;
+        let w16 = w.to_dtype(DType::F16)?;
+        let b16 = b.map(|t| t.to_dtype(DType::F16)).transpose()?;
+        return Ok(x16.conv2d_act(&w16, b16.as_ref(), p, act)?);
+    }
+    Ok(x.conv2d_act(w, b, p, act)?)
+}
+
+fn conv2d_act_cat_autocast(
+    xs: &[&Tensor],
+    w: &Tensor,
+    b: Option<&Tensor>,
+    p: &folo_core::Conv2dParams,
+    act: Option<folo_core::UnaryOp>,
+) -> Result<Tensor> {
+    let first = *xs.first().ok_or_else(|| Error::Invalid("ConvBnAct::forward_cat: no inputs".into()))?;
+    if autocast_f16_no_grad(first.device(), xs, w, b)? {
+        let xs16: Vec<Tensor> =
+            xs.iter().map(|t| t.to_dtype(DType::F16)).collect::<folo_core::Result<_>>()?;
+        let refs: Vec<&Tensor> = xs16.iter().collect();
+        let w16 = w.to_dtype(DType::F16)?;
+        let b16 = b.map(|t| t.to_dtype(DType::F16)).transpose()?;
+        return Ok(Tensor::conv2d_act_cat(&refs, &w16, b16.as_ref(), p, act)?);
+    }
+    Ok(Tensor::conv2d_act_cat(xs, w, b, p, act)?)
 }
 
 impl Module for ConvBnAct {
@@ -140,11 +191,11 @@ impl Forward for ConvBnAct {
         let p = self.conv.config().params();
         let act = self.act.unary_op();
         match &self.bn {
-            None => Ok(x.conv2d_act(&self.conv.weight, self.conv.bias.as_ref(), &p, act)?),
+            None => conv2d_act_autocast(x, &self.conv.weight, self.conv.bias.as_ref(), &p, act),
             Some(bn) if bn.is_training() => bn.forward_act(&self.conv.forward(x)?, self.act),
             Some(bn) if !x.device().is_cpu() || !is_grad_enabled() => {
                 let (w, b) = self.folded_eval(bn)?;
-                Ok(x.conv2d_act(&w, Some(&b), &p, act)?)
+                conv2d_act_autocast(x, &w, Some(&b), &p, act)
             }
             Some(bn) => self.act.forward(&bn.forward(&self.conv.forward(x)?)?),
         }

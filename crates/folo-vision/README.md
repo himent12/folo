@@ -23,7 +23,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | `src/fusion/` | `mod.rs` (cluster box fusion after NMS — `vote`, `dfl`, `sebf` — opt-in through `NmsConfig::fusion`, and the `consensus` / `elc` / `dfl-consensus` / `dfl-repulse` / `dfl-cgr` score modes opt-in through `NmsConfig::score`), `tests.rs` |
 | `src/metrics.rs` | `Evaluator`: mAP, precision / recall / F1, PR curves, confusion matrix |
 | `src/cocoeval.rs` | `CocoEval`: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) |
-| `src/train/` | `mod.rs` (`Trainer`), `config.rs` (`TrainConfig`), `setup.rs` (new and resumed runs), `epoch.rs` (one epoch), `run.rs` (the run loop), `checkpoint.rs`, `writer/` (epoch files off the training thread), `events.rs`, `feed.rs` (batches staged for a GPU), `device.rs`, `teacher.rs` (the distillation teacher), `gauge.rs` (BN-Conv Floor Gauge Normalisation), `tests.rs` |
+| `src/train/` | `mod.rs` (`Trainer`), `config/` (`mod.rs` for `TrainConfig`, `tests.rs`), `setup.rs` (new and resumed runs), `epoch.rs` (one epoch), `run.rs` (the run loop), `checkpoint.rs`, `writer/` (epoch files off the training thread), `events.rs`, `feed.rs` (batches staged for a GPU), `device.rs`, `teacher.rs` (the distillation teacher), `gauge.rs` (BN-Conv Floor Gauge Normalisation), `tests.rs` |
 | `src/val.rs` | `validate`: a model on a dataset split, scored with `Evaluator` |
 | `src/predict.rs` | `Predictor`: `.folo` weights to detections in image pixels, with a timing breakdown |
 | `src/export/` | `onnx/`: `mod.rs` (`export`, `OnnxOptions`, the op table), `graph.rs`, `blocks.rs`, `decode.rs`, `proto.rs` (protobuf encoder) |
@@ -49,8 +49,8 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | §6.5 Bias priors | folo-nn `src/init.rs`, `src/model/head.rs` |
 | §6.6 One-to-one head | `src/model/head.rs`, `src/assign.rs`, `dual_loss` in `src/loss/mod.rs`, the top-k in `src/nms/topk.rs` |
 | §7.1, §7.3 Assigner | `src/assign.rs`, `src/loss/assignment.rs` |
-| §7.2 CIoU, §7.4 Terms | `src/boxes.rs`, `src/loss/terms.rs`; on a GPU `src/loss/device.rs` and folo-gpu's `src/detect.rs` |
-| §8.1 Defaults, §8.2 Optimizer | `src/train/config.rs`, `src/train/setup.rs`; folo-nn `src/optim/` |
+| §7.2 CIoU, §7.4 Terms | `src/boxes.rs`, `src/loss/terms/`; on a GPU `src/loss/device.rs` and folo-gpu's `src/detect.rs` |
+| §8.1 Defaults, §8.2 Optimizer | `src/train/config/`, `src/train/setup.rs`; folo-nn `src/optim/` |
 | §8.3 Step loop | `src/train/epoch.rs` |
 | §8.4 Schedule, §8.5 EMA | folo-nn `src/sched.rs`, `src/ema.rs` |
 | §8.6 Data and augmentation | folo-data `src/augment/`, `src/loader.rs` |
@@ -78,8 +78,8 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | To do this | Touch these files |
 |---|---|
 | Change a block or a layer table | `src/model/blocks.rs` or `src/model/mod.rs`; the same change in `src/export/onnx/blocks.rs`; `tests/model.rs` (when names change, re-bless `tests/golden/folo-n-names.txt` with `FOLO_BLESS=1 cargo test -p folo-vision --test model golden_names`); the parameter count in the `src/model/mod.rs` doctest; MODEL.md §2, §4, §5 |
-| Add a training recipe key | The field and its default in `TrainConfig` (`src/train/config.rs`); where it acts (`setup.rs`, `epoch.rs` or `run.rs`); `tests/train.rs`; MODEL.md §8.1. To set it over the API: `TrainConfig` in `crates/folo-api/src/runs.rs`, `TrainConfig::from_api`, and API.md |
-| Change a loss term | `src/loss/terms.rs`; on a GPU, folo-gpu's `src/detect.rs`, `src/kernels/detect.rs` and the shaders `det_bce_fwd.wgsl`, `det_bce_bwd.wgsl`, `det_box.wgsl` and `detect_common.wgsl` behind `src/loss/device.rs`; `tests/loss_cases.rs` and `tests/gpu_loss/`; MODEL.md §7.4 |
+| Add a training recipe key | The field and its default in `TrainConfig` (`src/train/config/mod.rs`); where it acts (`setup.rs`, `epoch.rs` or `run.rs`); `tests/train.rs`; MODEL.md §8.1. To set it over the API: `TrainConfig` in `crates/folo-api/src/runs.rs`, `TrainConfig::from_api`, and API.md |
+| Change a loss term | `src/loss/terms/`; on a GPU, folo-gpu's `src/detect.rs`, `src/kernels/detect.rs` and the shaders `det_bce_fwd.wgsl`, `det_bce_bwd.wgsl`, `det_box.wgsl` and `detect_common.wgsl` behind `src/loss/device.rs`; `tests/loss_cases.rs` and `tests/gpu_loss/`; MODEL.md §7.4 |
 | Change the post-process | `src/nms/` (`mod.rs`, `kernel.rs`, `topk.rs`) or `src/fusion/mod.rs`; `tests/nms_reference.rs`, `tests/fusion_reference.rs`, `tests/elc_postproc.rs`, and `tests/lazy_head.rs` / `tests/gpu_lazy_head.rs` (candidate-first must equal the dense path); MODEL.md §9.3, §9.4 |
 | Change a metric | `src/metrics.rs` or `src/cocoeval.rs`; `tests/metrics_known.rs`, `tests/coco_parity.rs`, `tests/coco_full.rs`; METRICS.md |
 | Change the ONNX export | `src/export/onnx/graph.rs` (layer helpers), `blocks.rs` or `decode.rs`; the unit tests and the op table in `src/export/onnx/mod.rs`; CLI.md (`folo export`) |

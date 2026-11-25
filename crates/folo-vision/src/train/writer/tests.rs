@@ -442,3 +442,49 @@ fn epoch_checkpoint_matches_save_checkpoint() {
     assert_eq!(a.len(), b.len());
     assert!(blank(a) == blank(b), "the epoch checkpoint differs from save_checkpoint's");
 }
+
+/// O(1) hardlink promotion of `best.folo`: an earlier best epoch stays intact after a later epoch overwrites
+/// `last.folo`, a new best atomically replaces `best.folo`, and no temporary link files are left behind.
+#[test]
+fn promote_best_preserves_prior_best_when_last_overwritten() {
+    let dir = TestDir::new("train-writer-hardlink");
+    let weights = dir.join("weights");
+    std::fs::create_dir_all(&weights).unwrap();
+    let last = weights.join("last.folo");
+    let best = weights.join("best.folo");
+
+    let write_last = |val: f32| {
+        let t = folo_core::Tensor::from_slice(&[val, val + 1.0], [2]).unwrap();
+        folo_nn::io::safetensors::write_file(&last, None, &[("w".into(), t)]).unwrap();
+    };
+    let read_w = |p: &Path| {
+        let bytes = std::fs::read(p).unwrap();
+        let c = folo_nn::io::safetensors::Container::parse(&bytes).unwrap();
+        folo_nn::io::safetensors::decode(&c.tensors[0], c.data(&bytes, &c.tensors[0]))
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap()
+    };
+
+    // Epoch 1: improved -> best promoted from last (val = 1.0).
+    write_last(1.0);
+    super::promote_best(&last, &best).unwrap();
+    assert_eq!(read_w(&last), vec![1.0, 2.0]);
+    assert_eq!(read_w(&best), vec![1.0, 2.0]);
+
+    // Epoch 2: not improved -> last overwritten via atomic rename, best must retain epoch 1's exact bytes.
+    write_last(2.0);
+    assert_eq!(read_w(&last), vec![2.0, 3.0]);
+    assert_eq!(read_w(&best), vec![1.0, 2.0]);
+
+    // Epoch 3: improved -> best atomically updated to epoch 3, no leftover `.tmp` entries.
+    write_last(3.0);
+    super::promote_best(&last, &best).unwrap();
+    assert_eq!(read_w(&best), vec![3.0, 4.0]);
+    let temps: Vec<_> = std::fs::read_dir(&weights)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+        .collect();
+    assert!(temps.is_empty(), "leftover temp files in weights/: {temps:?}");
+}

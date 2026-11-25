@@ -267,19 +267,19 @@ impl Trainer {
         Ok(summary)
     }
 
-    /// Validate the EMA model (or the live model in eval mode) on the validation split.
+    /// Validate a pre-folded eval clone of the EMA model (or the live model) on the validation split, so
+    /// Conv+BN is folded once per epoch and GPU [`folo_gpu::ForwardPlans`] engage across validation batches
+    /// while leaving the live and EMA models untouched.
     fn validate_epoch(&mut self) -> Result<ValResult> {
         let ds = if self.data.val.is_empty() { self.data.train.clone() } else { self.data.val.clone() };
         let vc =
             ValConfig { workers: self.cfg.workers, ..ValConfig::new(self.cfg.imgsz, self.cfg.val_batch()) };
-        match &self.ema {
-            Some(ema) => validate(ema.module(), ds, &vc),
-            None => {
-                self.model.eval();
-                let r = validate(&self.model, ds, &vc);
-                self.model.train();
-                r
-            }
-        }
+        let source = match &self.ema {
+            Some(ema) => ema.module(),
+            None => &self.model,
+        };
+        let fused = source.fused_eval_clone()?;
+        fused.set_forward_plans(true);
+        validate(&fused, ds, &vc)
     }
 }

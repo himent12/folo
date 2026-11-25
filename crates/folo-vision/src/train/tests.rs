@@ -291,3 +291,281 @@ fn early_stopping() {
     let mut b = BestState { epoch: 0, fitness: Some(0.5) };
     assert_eq!(update_best(&mut b, 1, 0.5, 10), (false, false));
 }
+
+struct StopAfter(u32);
+
+impl EpochHook for StopAfter {
+    fn pauses(&mut self, epoch: u32) -> bool {
+        epoch == self.0
+    }
+    fn pause(&mut self, _epoch: u32, stop: &AtomicBool) {
+        stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// `freeze_backbone_epochs` keeps every `backbone.*` parameter and BatchNorm running stat bit-identical during
+/// frozen epochs while `neck.*`/`head.*` train, then unfreezes `backbone.*` on the following epoch and resumes
+/// bit-exactly across a frozen boundary.
+#[test]
+fn freeze_backbone_epochs_freezes_unfreezes_and_resumes() {
+    use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+    use folo_test_support::TestDir;
+
+    let shapes = SyntheticConfig {
+        images: 6,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        seed: 7,
+        val_fraction: 0.34,
+        ..SyntheticConfig::default()
+    };
+    let split = |s| Arc::new(SyntheticDataset::new(shapes.clone(), s).unwrap());
+    let data = TrainData {
+        train: split(folo_data::Split::Train),
+        val: split(folo_data::Split::Val),
+        classes: shapes.classes.clone(),
+    };
+    let snap = |m: &crate::model::FoloModel, prefix: &str| -> Vec<(String, Vec<u8>)> {
+        m.named_tensors()
+            .into_iter()
+            .filter(|nt| nt.name.starts_with(prefix))
+            .map(|nt| (nt.name, nt.tensor.to_cpu_storage().unwrap().as_bytes().to_vec()))
+            .collect()
+    };
+
+    let cfg = TrainConfig {
+        epochs: 1,
+        batch: 2,
+        nbs: 2,
+        imgsz: 64,
+        device: "cpu".into(),
+        optimizer: OptimizerChoice::Musgd,
+        lr0: 0.01,
+        warmup_epochs: 0.0,
+        workers: 0,
+        freeze_backbone_epochs: 1,
+        augment: folo_data::AugmentConfig::none(),
+        ..TrainConfig::default()
+    };
+    let dir = TestDir::new("train-freeze-bb");
+    let mut t = Trainer::new(
+        cfg.clone(),
+        data.clone(),
+        TrainOptions { run_dir: Some(dir.to_path_buf()), ..TrainOptions::default() },
+    )
+    .unwrap();
+    let bb_before = snap(t.model(), "backbone.");
+    let head_before = snap(t.model(), "head.");
+    // A caller-frozen parameter must stay frozen even after `freeze_backbone_epochs` exits.
+    t.model().backbone.stem.conv.weight.set_requires_grad(false);
+    assert_eq!(t.run().unwrap().epochs_completed, 1);
+    assert_eq!(snap(t.model(), "backbone."), bb_before, "backbone must stay bit-frozen during epoch 1");
+    assert_ne!(snap(t.model(), "head."), head_before, "head must train while backbone is frozen");
+    assert!(!t.model().backbone.stem.conv.weight.requires_grad(), "caller-frozen flag must be preserved");
+    assert!(
+        t.model().backbone.parameters().iter().skip(1).all(|p| p.requires_grad()),
+        "other backbone params must have requires_grad restored"
+    );
+    assert!(!t.ema_model().unwrap().is_fused());
+
+    // Now run a 2-epoch continuous run vs stop-after-1 + resume (unfreezing on epoch 2).
+    let cfg2 = TrainConfig { epochs: 2, ..cfg };
+    let mut cont = Trainer::new(cfg2.clone(), data.clone(), TrainOptions::default()).unwrap();
+    assert_eq!(cont.run().unwrap().epochs_completed, 2);
+    assert_ne!(snap(cont.model(), "backbone."), bb_before, "backbone must unfreeze and train on epoch 2");
+
+    let dir_r = TestDir::new("train-freeze-bb-resume");
+    let mut part = Trainer::new(
+        cfg2,
+        data.clone(),
+        TrainOptions {
+            run_dir: Some(dir_r.to_path_buf()),
+            after_epoch: Some(Box::new(StopAfter(1))),
+            ..TrainOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(part.run().unwrap().epochs_completed, 1);
+    let mut resumed = Trainer::resume(
+        dir_r.join("weights/last.folo"),
+        data,
+        TrainOptions::default(),
+        ResumeOverrides::default(),
+    )
+    .unwrap();
+    assert_eq!(resumed.run().unwrap().epochs_completed, 2);
+    assert_eq!(
+        snap(cont.model(), ""),
+        snap(resumed.model(), ""),
+        "resume across freeze boundary is bit-exact"
+    );
+}
+
+/// `backbone_lr_scale` splits `backbone.*` parameters into `<group>.backbone` at `backbone_lr_scale * lr0`,
+/// scales `bias.backbone` during warmup, and resumes bit-exactly.
+#[test]
+fn backbone_lr_scale_splits_groups_scales_warmup_and_resumes() {
+    use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+    use folo_test_support::TestDir;
+
+    let shapes = SyntheticConfig {
+        images: 6,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        seed: 11,
+        val_fraction: 0.34,
+        ..SyntheticConfig::default()
+    };
+    let split = |s| Arc::new(SyntheticDataset::new(shapes.clone(), s).unwrap());
+    let data = TrainData {
+        train: split(folo_data::Split::Train),
+        val: split(folo_data::Split::Val),
+        classes: shapes.classes.clone(),
+    };
+    for opt in [OptimizerChoice::Sgd, OptimizerChoice::Adamw, OptimizerChoice::Musgd] {
+        let cfg = TrainConfig {
+            epochs: 2,
+            batch: 2,
+            nbs: 2,
+            imgsz: 64,
+            device: "cpu".into(),
+            optimizer: opt,
+            lr0: 0.01,
+            warmup_epochs: 1.0,
+            warmup_bias_lr: 0.1,
+            workers: 0,
+            backbone_lr_scale: 0.1,
+            augment: folo_data::AugmentConfig::none(),
+            ..TrainConfig::default()
+        };
+        let t = Trainer::new(cfg, data.clone(), TrainOptions::default()).unwrap();
+        let groups = t.param_groups();
+        for base in ["decay", "bn", "bias"] {
+            let g_base = groups.iter().find(|g| g.name == base).expect("base group");
+            let g_bb = groups.iter().find(|g| g.name == format!("{base}.backbone")).expect("backbone group");
+            assert!(g_base.params.iter().all(|(n, _)| !n.starts_with("backbone.")));
+            assert!(g_bb.params.iter().all(|(n, _)| n.starts_with("backbone.")));
+            assert!((g_bb.base_lr - g_base.base_lr * 0.1).abs() < 1e-12);
+        }
+    }
+
+    // Verify warmup step scales `bias.backbone` and stop+resume matches continuous run bit-exactly.
+    let cfg = TrainConfig {
+        epochs: 2,
+        batch: 2,
+        nbs: 2,
+        imgsz: 64,
+        device: "cpu".into(),
+        optimizer: OptimizerChoice::Musgd,
+        lr0: 0.01,
+        warmup_epochs: 1.5,
+        warmup_bias_lr: 0.1,
+        workers: 0,
+        backbone_lr_scale: 0.1,
+        augment: folo_data::AugmentConfig::none(),
+        ..TrainConfig::default()
+    };
+    let mut cont = Trainer::new(cfg.clone(), data.clone(), TrainOptions::default()).unwrap();
+    assert_eq!(cont.run().unwrap().epochs_completed, 2);
+    let g_bias = cont.param_groups().iter().find(|g| g.name == "bias").unwrap();
+    let g_bb_bias = cont.param_groups().iter().find(|g| g.name == "bias.backbone").unwrap();
+    assert!((g_bb_bias.lr - g_bias.lr * 0.1).abs() < 1e-12);
+
+    let dir = TestDir::new("train-diff-lr-resume");
+    let mut part = Trainer::new(
+        cfg,
+        data.clone(),
+        TrainOptions {
+            run_dir: Some(dir.to_path_buf()),
+            after_epoch: Some(Box::new(StopAfter(1))),
+            ..TrainOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(part.run().unwrap().epochs_completed, 1);
+    // Epoch 1 ended inside warmup (warmup_epochs = 1.5): verify bias.backbone stayed 0.1x of bias during warmup.
+    let g_bias_w = part.param_groups().iter().find(|g| g.name == "bias").unwrap();
+    let g_bb_bias_w = part.param_groups().iter().find(|g| g.name == "bias.backbone").unwrap();
+    assert!((g_bb_bias_w.lr - g_bias_w.lr * 0.1).abs() < 1e-12);
+    let mut resumed = Trainer::resume(
+        dir.join("weights/last.folo"),
+        data,
+        TrainOptions::default(),
+        ResumeOverrides::default(),
+    )
+    .unwrap();
+    assert_eq!(resumed.run().unwrap().epochs_completed, 2);
+    let bytes = |m: &crate::model::FoloModel| -> Vec<(String, Vec<u8>)> {
+        m.named_tensors()
+            .into_iter()
+            .map(|nt| (nt.name, nt.tensor.to_cpu_storage().unwrap().as_bytes().to_vec()))
+            .collect()
+    };
+    assert_eq!(bytes(cont.model()), bytes(resumed.model()));
+}
+
+/// GPU AMP (`amp: true`) with `freeze_backbone_epochs > 0` runs frozen backbone convs in `F16` under autocast
+/// (matching `Attention`'s `F16` matmul and active `neck` skips), keeps `backbone.*` frozen during epoch 1,
+/// and trains `backbone.*` on epoch 2 without dtype mismatches.
+#[test]
+fn freeze_backbone_epochs_works_with_gpu_amp() {
+    let ctx = match folo_gpu::GpuContext::shared() {
+        Ok(c) => c,
+        Err(e) => return eprintln!("note: skipping GPU AMP test, no adapter: {e}"),
+    };
+    if ctx.summary().device_type == "Cpu" && std::env::var("FOLO_GPU_TEST_SOFTWARE").is_err() {
+        return eprintln!("note: skipping GPU AMP test on software adapter {}", ctx.summary().name);
+    }
+    let dev = folo_gpu::init().unwrap();
+    if amp_support(dev).is_err() {
+        return eprintln!("note: skipping GPU AMP test, no F16 tensor cores");
+    }
+    use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+    let shapes = SyntheticConfig {
+        images: 6,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        seed: 19,
+        val_fraction: 0.34,
+        ..SyntheticConfig::default()
+    };
+    let split = |s| Arc::new(SyntheticDataset::new(shapes.clone(), s).unwrap());
+    let data = TrainData {
+        train: split(folo_data::Split::Train),
+        val: split(folo_data::Split::Val),
+        classes: shapes.classes.clone(),
+    };
+    let snap = |m: &crate::model::FoloModel, prefix: &str| -> Vec<(String, Vec<u8>)> {
+        m.named_tensors()
+            .into_iter()
+            .filter(|nt| nt.name.starts_with(prefix))
+            .map(|nt| (nt.name, nt.tensor.to_cpu_storage().unwrap().as_bytes().to_vec()))
+            .collect()
+    };
+    let cfg = TrainConfig {
+        epochs: 1,
+        batch: 2,
+        nbs: 2,
+        imgsz: 64,
+        device: "gpu:0".into(),
+        optimizer: OptimizerChoice::Musgd,
+        lr0: 0.01,
+        warmup_epochs: 0.0,
+        amp: true,
+        workers: 0,
+        freeze_backbone_epochs: 1,
+        backbone_lr_scale: 0.1,
+        augment: folo_data::AugmentConfig::none(),
+        ..TrainConfig::default()
+    };
+    let mut t = Trainer::new(cfg, data, TrainOptions::default()).unwrap();
+    let bb_before = snap(t.model(), "backbone.");
+    let head_before = snap(t.model(), "head.");
+    assert_eq!(t.run().unwrap().epochs_completed, 1);
+    assert_eq!(snap(t.model(), "backbone."), bb_before, "backbone must stay frozen under GPU AMP");
+    assert_ne!(
+        snap(t.model(), "head."),
+        head_before,
+        "head must train under GPU AMP while backbone is frozen"
+    );
+}
