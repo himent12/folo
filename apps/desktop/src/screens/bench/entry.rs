@@ -137,15 +137,30 @@ impl FoloApp {
                     .child(images)
                     .into_any_element()
             }
-            Load::Failed(err) => panel(&t)
-                .child(empty_state(
-                    &t,
-                    "icons/circle-alert.svg",
-                    "The result didn't load",
-                    &err.message,
-                    Tone::Danger,
-                ))
-                .into_any_element(),
+            Load::Failed(err) => {
+                let (bid, eid) = (b.id.clone(), e.id.clone());
+                let retry = self.button(
+                    "bench-result-retry",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.retry_bench_result(&bid, &eid, cx)),
+                );
+                panel(&t)
+                    .child(
+                        empty_state(
+                            &t,
+                            "icons/circle-alert.svg",
+                            "The result didn't load",
+                            &err.message,
+                            Tone::Danger,
+                        )
+                        .child(retry),
+                    )
+                    .into_any_element()
+            }
             _ => panel(&t).child(loading_rows(&t, "result", 6)).into_any_element(),
         };
         self.page_frame(&t, header, body, cx)

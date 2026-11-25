@@ -224,6 +224,26 @@ impl FoloApp {
         self.fetch(cx, |api| api.cloud_connections(), |this, r, _| this.cloud.connections = r.into());
     }
 
+    /// Retries whichever cloud lists failed (`providers`, `connections`, `instances`).
+    pub fn retry_cloud(&mut self, cx: &mut Context<Self>) {
+        if self.cloud.providers.error().is_some() {
+            self.cloud.providers = Load::Idle;
+        }
+        if self.cloud.connections.error().is_some() {
+            self.cloud.connections = Load::Idle;
+        }
+        if self.cloud.instances.error().is_some() {
+            self.cloud.instances = Load::Idle;
+        }
+        let refresh_failed =
+            std::mem::take(&mut self.cloud.instances_failed) && self.cloud.instances.ready().is_some();
+        self.ensure_cloud(cx);
+        if refresh_failed && self.cloud_on() {
+            self.refresh_instances(cx);
+        }
+        cx.notify();
+    }
+
     /// Reloads the instance list in place (no loading state once it has one).
     pub fn refresh_instances(&mut self, cx: &mut Context<Self>) {
         // The cloud runs known now: an answer covers them (a run seen later isn't).

@@ -56,9 +56,28 @@ impl FoloApp {
         let (page, loading_more, more_error) = match state {
             Some((Load::Ready(p), more, err)) => (p, more, err),
             Some((Load::Failed(err), _, _)) => {
+                let (bid, eid) = (b.id.clone(), e.id.clone());
+                let retry = self.button(
+                    "bench-entry-images-retry",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.retry_entry_images(&bid, &eid, cx)),
+                );
                 return panel(&t)
                     .child(header)
-                    .child(div().p(px(16.)).child(text(ty::SM, t.danger_text).child(err.message)))
+                    .child(
+                        div()
+                            .p(px(16.))
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(16.))
+                            .child(text(ty::SM, t.danger_text).flex_1().min_w_0().child(err.message))
+                            .child(retry),
+                    )
                     .into_any_element();
             }
             _ => {

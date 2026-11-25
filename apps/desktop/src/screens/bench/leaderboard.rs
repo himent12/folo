@@ -247,15 +247,28 @@ impl FoloApp {
         let list = match entries {
             Load::Ready(l) => l.clone(),
             Load::Failed(e) => {
+                let bid = b.id.clone();
+                let retry = self.button(
+                    "bench-board-retry",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.retry_bench_entries(&bid, cx)),
+                );
                 return panel(&t)
                     .child(head_row)
-                    .child(empty_state(
-                        &t,
-                        "icons/circle-alert.svg",
-                        "The leaderboard didn't load",
-                        &e.message,
-                        Tone::Danger,
-                    ))
+                    .child(
+                        empty_state(
+                            &t,
+                            "icons/circle-alert.svg",
+                            "The leaderboard didn't load",
+                            &e.message,
+                            Tone::Danger,
+                        )
+                        .child(retry),
+                    )
                     .into_any_element();
             }
             _ => {

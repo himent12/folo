@@ -57,6 +57,19 @@ impl FoloApp {
         };
         // In the header, or the empty state's one action.
         let mut connect = Some(connect);
+        let providers_retry =
+            (self.cloud.providers.error().is_some() && self.cloud.connections.error().is_none()).then(|| {
+                self.button(
+                    "cloud-providers-retry",
+                    "Retry",
+                    crate::controls::Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| this.retry_cloud(cx)),
+                )
+                .into_any_element()
+            });
         let connections = self.cloud.connections.ready().cloned();
         let body = match &self.cloud.connections {
             Load::Failed(e) => div()
@@ -78,7 +91,7 @@ impl FoloApp {
                     Some("icons/refresh-cw.svg"),
                     window,
                     cx,
-                    act(|this, _, cx| this.load_connections(cx)),
+                    act(|this, _, cx| this.retry_cloud(cx)),
                 ))
                 .into_any_element(),
             Load::Ready(list) if list.is_empty() => empty_state(
@@ -100,11 +113,13 @@ impl FoloApp {
                 .into_any_element(),
             _ => loading_rows(&t, "cloud-sk", 2).into_any_element(),
         };
+        let header_actions = (providers_retry.is_some() || connect.is_some())
+            .then(|| div().flex().items_center().gap(px(8.)).children(providers_retry).children(connect));
         panel(&t)
             .flex()
             .flex_col()
             .overflow_hidden()
-            .child(panel_header(&t, "Cloud").children(connect))
+            .child(panel_header(&t, "Cloud").children(header_actions))
             .child(body)
             .into_any_element()
     }
@@ -487,5 +502,72 @@ impl FoloApp {
                 .child(body)
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use folo_ui::{KeyDownEvent, Keystroke, PlatformInput};
+
+    use crate::api::ApiError;
+    use crate::app::Route;
+    use crate::app::tests::{drive, open};
+    use crate::store::Load;
+
+    fn send_enter(app: &mut folo_ui::HeadlessApp, window: folo_ui::WindowHandle<crate::app::FoloApp>) {
+        app.simulate_input(
+            window.into(),
+            PlatformInput::KeyDown(KeyDownEvent {
+                keystroke: Keystroke { key: "enter".into(), ..Default::default() },
+                is_held: false,
+            }),
+        );
+    }
+
+    fn err() -> ApiError {
+        ApiError {
+            status: Some(500),
+            code: "internal".into(),
+            message: "Temporary failure".into(),
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn settings_cloud_retry_recovers_failed_providers_and_connections() {
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| this.navigate(Route::Settings, w, cx));
+        app.frame(window.into());
+        app.run_until_idle();
+
+        // Both providers and connections failed: clicking `cloud-retry` recovers both.
+        drive(&mut app, window, |this, _, cx| {
+            this.cloud.providers = Load::Failed(err());
+            this.cloud.connections = Load::Failed(err());
+            cx.notify();
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.focus_key("cloud-retry", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        app.run_until_idle();
+        drive(&mut app, window, |this, _, _| {
+            assert!(this.cloud.providers.ready().is_some(), "cloud-retry also reloads failed providers");
+            assert!(this.cloud.connections.ready().is_some(), "cloud-retry reloads failed connections");
+        });
+
+        // Providers failed alone (connections ready): header offers `cloud-providers-retry`.
+        drive(&mut app, window, |this, _, cx| {
+            this.cloud.providers = Load::Failed(err());
+            cx.notify();
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.focus_key("cloud-providers-retry", w, cx));
+        app.frame(window.into());
+        send_enter(&mut app, window);
+        app.run_until_idle();
+        drive(&mut app, window, |this, _, _| {
+            assert!(this.cloud.providers.ready().is_some(), "cloud-providers-retry reloads providers");
+        });
     }
 }

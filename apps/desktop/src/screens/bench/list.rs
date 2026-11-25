@@ -344,11 +344,14 @@ impl FoloApp {
                         )
                         .into_any_element()
                 } else {
+                    let ids: Vec<String> = shown.iter().map(|b| b.id.clone()).collect();
                     let rows: Vec<AnyElement> = shown
                         .into_iter()
-                        .map(|b| {
+                        .enumerate()
+                        .map(|(i, b)| {
                             let key = format!("bench-row-{}", b.id);
                             let id = b.id.clone();
+                            let ids_k = ids.clone();
                             // The leader: its score (what the board ranks by), then its name.
                             let leader = match &b.best {
                                 Some(best) => div()
@@ -420,6 +423,17 @@ impl FoloApp {
                                 .cursor_pointer()
                                 .hover(|s| s.bg(t.bg_hover))
                                 .active(|s| s.bg(t.bg_active))
+                                .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, w, cx| {
+                                    let next = match ev.keystroke.key.as_str() {
+                                        "down" => i + 1,
+                                        "up" if i > 0 => i - 1,
+                                        _ => return,
+                                    };
+                                    if let Some(id) = ids_k.get(next) {
+                                        this.focus_key(&format!("bench-row-{id}"), w, cx);
+                                        cx.stop_propagation();
+                                    }
+                                }))
                                 .child(name)
                                 .child(
                                     text(ty::SM, t.text_secondary)
@@ -626,5 +640,64 @@ mod tests {
         assert_eq!(refs.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_c", "bn_a", "bn_d", "bn_b"]);
         sort_benches(&mut refs, Some(("entries", false)));
         assert_eq!(refs.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), ["bn_b", "bn_d", "bn_a", "bn_c"]);
+    }
+
+    #[test]
+    fn bench_rows_navigate_with_up_and_down_arrow_keys() {
+        use crate::app::Route;
+        use crate::app::tests::{drive, open};
+        use crate::store::Load;
+        use folo_ui::{KeyDownEvent, Keystroke, PlatformInput};
+
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| this.navigate(Route::Benches, w, cx));
+        app.frame(window.into());
+        app.run_until_idle();
+
+        let (first, second) = drive(&mut app, window, |this, _, cx| {
+            let mut list = this.bench.list.ready().cloned().expect("benches loaded");
+            assert!(!list.is_empty());
+            if list.len() < 2 {
+                let mut copy = list[0].clone();
+                copy.id = "bn_second".into();
+                copy.name = "Second benchmark".into();
+                list.push(copy);
+            }
+            let ids = (list[0].id.clone(), list[1].id.clone());
+            this.bench.list = Load::Ready(list);
+            cx.notify();
+            ids
+        });
+        app.frame(window.into());
+
+        let send_key = |app: &mut folo_ui::HeadlessApp, key: &str| {
+            app.simulate_input(
+                window.into(),
+                PlatformInput::KeyDown(KeyDownEvent {
+                    keystroke: Keystroke { key: key.into(), ..Default::default() },
+                    is_held: false,
+                }),
+            );
+        };
+
+        drive(&mut app, window, |this, w, cx| this.focus_key(&format!("bench-row-{first}"), w, cx));
+        app.frame(window.into());
+        send_key(&mut app, "down");
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            assert!(
+                this.fh(format!("bench-row-{second}"), cx).is_focused(w),
+                "down arrow moves focus to next benchmark row"
+            );
+        });
+
+        send_key(&mut app, "up");
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            assert!(
+                this.fh(format!("bench-row-{first}"), cx).is_focused(w),
+                "up arrow moves focus back to previous benchmark row"
+            );
+        });
     }
 }

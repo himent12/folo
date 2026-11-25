@@ -60,15 +60,28 @@ impl FoloApp {
         let list = match loops {
             Load::Ready(l) => l.clone(),
             Load::Failed(e) => {
+                let bid = b.id.clone();
+                let retry = self.button(
+                    "bench-loops-retry",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.retry_bench_loops(&bid, cx)),
+                );
                 return panel(&t)
                     .child(header)
-                    .child(empty_state(
-                        &t,
-                        "icons/circle-alert.svg",
-                        "Loops didn't load",
-                        &e.message,
-                        Tone::Danger,
-                    ))
+                    .child(
+                        empty_state(
+                            &t,
+                            "icons/circle-alert.svg",
+                            "Loops didn't load",
+                            &e.message,
+                            Tone::Danger,
+                        )
+                        .child(retry),
+                    )
                     .into_any_element();
             }
             _ => return panel(&t).child(header).child(loading_rows(&t, "loops", 3)).into_any_element(),

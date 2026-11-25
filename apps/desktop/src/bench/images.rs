@@ -49,6 +49,13 @@ impl FoloApp {
         );
     }
 
+    /// Retries a failed entry images page load.
+    pub fn retry_entry_images(&mut self, bench: &str, entry: &str, cx: &mut Context<Self>) {
+        self.bench.entry_images.remove(&(bench.to_string(), entry.to_string()));
+        self.ensure_entry_images(bench, entry, cx);
+        cx.notify();
+    }
+
     /// The next page of an entry's images, after the ones there are.
     pub fn more_entry_images(&mut self, bench: &str, entry: &str, cx: &mut Context<Self>) {
         let key = (bench.to_string(), entry.to_string());
