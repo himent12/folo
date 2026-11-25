@@ -535,3 +535,147 @@ describe('G-chord indicator, guarded/staggered route preloading, and lazy Shortc
     expect(target.querySelector('.lazy-shortcuts')?.getAttribute('data-open')).toBe('false');
   });
 });
+
+describe('lazy CommandPalette', () => {
+  beforeEach(() => {
+    HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
+      this.open = true;
+    };
+    HTMLDialogElement.prototype.close ??= function (this: HTMLDialogElement) {
+      this.open = false;
+      this.dispatchEvent(new Event('close'));
+    };
+  });
+
+  it('defers loading until first Ctrl+K, retries after failure, and caches across close/reopen via Cmd+K and header button', async () => {
+    let attempts = 0;
+    const loadPalette = vi.fn(async () => {
+      attempts++;
+      if (attempts === 1) throw new TypeError('offline');
+      return {
+        default: (p: { open?: boolean; onshortcuts: () => void; takeInitialQuery?: () => string }) => {
+          const open = bindable(p, 'open', false);
+          return (
+            <div class="lazy-palette" data-open={String(open.get())}>
+              <button class="close-palette" onclick={() => open.set(false)}>
+                Close
+              </button>
+            </div>
+          );
+        },
+      };
+    });
+    const screens = new Screens((name) => (name === 'overview' ? () => Promise.resolve(screen('the overview')) : undefined));
+    router.route = parse('#/');
+    c = render(() => <App screens={screens} loadPalette={loadPalette} />, target);
+    await until(() => main().querySelector('.fake'), 'the overview');
+
+    // Never fetched on initial render.
+    expect(loadPalette).not.toHaveBeenCalled();
+    expect(target.querySelector('.lazy-palette')).toBeNull();
+
+    // First Ctrl+K attempt fails cleanly with an error toast and resets so a retry works.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    await until(() => toast.items.some((t) => t.tone === 'error' && t.title === 'Could not load command palette'), 'error toast');
+    expect(loadPalette).toHaveBeenCalledTimes(1);
+    expect(target.querySelector('.lazy-palette')).toBeNull();
+
+    // Second open via Topbar search button loads, clears error toast, and opens the palette.
+    target.querySelector<HTMLButtonElement>('header button[aria-label="Search and commands"]')!.click();
+    await until(() => target.querySelector('.lazy-palette[data-open="true"]'), 'lazy palette open');
+    expect(loadPalette).toHaveBeenCalledTimes(2);
+    expect(toast.items.some((t) => t.key === 'palette')).toBe(false);
+
+    // Close and reopen via Cmd+K: reuses the cached chunk with no extra load.
+    target.querySelector<HTMLButtonElement>('.close-palette')!.click();
+    flush();
+    expect(target.querySelector('.lazy-palette')?.getAttribute('data-open')).toBe('false');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true, cancelable: true }));
+    flush();
+    expect(target.querySelector('.lazy-palette')?.getAttribute('data-open')).toBe('true');
+    expect(loadPalette).toHaveBeenCalledTimes(2);
+  });
+
+  it('buffers keystrokes typed while the palette chunk loads, suppresses background shortcuts, and focuses the real input', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    const pending = deferred<typeof import('$lib/shell/CommandPalette')>();
+    const loadPalette = vi.fn(() => pending.promise);
+    const screens = new Screens((name) => (name === 'overview' ? () => Promise.resolve(screen('the overview')) : undefined));
+    router.route = parse('#/');
+    c = render(() => <App screens={screens} loadPalette={loadPalette} />, target);
+    await until(() => main().querySelector('.fake'), 'the overview');
+
+    // Open with Ctrl+K and immediately type 'nx' + Backspace + 'ew' before the chunk resolves.
+    // 'n' is normally a single-key shortcut ("New training run"), so it must be suppressed while loading.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    flush();
+    for (const key of ['n', 'x', 'Backspace', 'e', 'w']) {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+    }
+    flush();
+    expect(go).not.toHaveBeenCalled();
+    expect(loadPalette).toHaveBeenCalledTimes(1);
+
+    // Resolve with the real CommandPalette module: it opens with 'new' already populated and the input focused.
+    const realPalette = await import('$lib/shell/CommandPalette');
+    pending.resolve(realPalette);
+    await until(() => target.querySelector<HTMLDialogElement>('dialog.palette[open] input'), 'real CommandPalette open');
+
+    const input = target.querySelector<HTMLInputElement>('dialog.palette[open] input')!;
+    expect(input.value).toBe('new');
+    await until(() => document.activeElement === input, 'palette search input focused');
+    expect(input.selectionStart).toBe(3);
+
+    // Closing and reopening starts with an empty query (buffered seed was consumed once).
+    target.querySelector<HTMLButtonElement>('dialog.palette button[aria-label="Close"]')!.click();
+    flush();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    flush();
+    expect(input.value).toBe('');
+  });
+
+  it('Escape and second Ctrl+K cancel a pending palette load without navigating back or popping open late', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    const pending = deferred<{ default: (p: { open?: boolean; onshortcuts: () => void; takeInitialQuery?: () => string }) => JSX.Element }>();
+    const loadPalette = vi.fn(() => pending.promise);
+    const screens = new Screens((name) => (name === 'run' ? () => Promise.resolve(screen('the run detail')) : undefined));
+    router.route = parse('#/runs/run_7d1e');
+    c = render(() => <App screens={screens} loadPalette={loadPalette} />, target);
+    await until(() => main().querySelector('.fake'), 'the run detail');
+
+    // First open + type + Escape cancels without navigating back.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    flush();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    flush();
+    expect(go).not.toHaveBeenCalled();
+
+    // Re-open while still pending + second Ctrl+K toggles off again (no duplicate import call).
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    flush();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true, cancelable: true }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    flush();
+    expect(loadPalette).toHaveBeenCalledTimes(1);
+
+    let seenSeed = 'UNSET';
+    pending.resolve({
+      default: (p: { open?: boolean; onshortcuts: () => void; takeInitialQuery?: () => string }) => {
+        const open = bindable(p, 'open', false);
+        return (
+          <div class="lazy-palette" data-open={String(open.get())}>
+            <button class="read-seed" onclick={() => (seenSeed = p.takeInitialQuery?.() ?? '')}>
+              Seed
+            </button>
+          </div>
+        );
+      },
+    });
+    await until(() => target.querySelector('.lazy-palette'), 'cached palette component');
+    expect(target.querySelector('.lazy-palette')?.getAttribute('data-open')).toBe('false');
+    target.querySelector<HTMLButtonElement>('.read-seed')!.click();
+    expect(seenSeed).toBe('');
+  });
+});
