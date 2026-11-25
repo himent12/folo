@@ -2,7 +2,7 @@
 //! resampled images, glyph and gradient tables) and `MaskCache`, the window's glyph / icon masks.
 
 use super::hash::FastBuild;
-use crate::{AlphaMask, ColorMask};
+use crate::{AlphaMask, Bounds, ColorMask, DevicePixels};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -139,6 +139,59 @@ impl Mask {
             Mask::Alpha(_) => None,
         }
     }
+
+    /// Consumes this mask and returns the alpha mask, if it is one (avoiding an extra `Arc::clone`).
+    pub fn into_alpha(self) -> Option<Arc<AlphaMask>> {
+        match self {
+            Mask::Alpha(m) => Some(m),
+            Mask::Color(_) => None,
+        }
+    }
+
+    /// Consumes this mask and returns the colour mask, if it is one (avoiding an extra `Arc::clone`).
+    pub fn into_color(self) -> Option<Arc<ColorMask>> {
+        match self {
+            Mask::Color(m) => Some(m),
+            Mask::Alpha(_) => None,
+        }
+    }
+}
+
+/// A value stored in a [`MaskCache`] whose pixel memory can be accounted against the byte budget.
+pub trait CachedMask: Clone {
+    /// Bytes held by this value's pixel data (excluding map entry bookkeeping).
+    fn byte_size(&self) -> usize;
+}
+
+impl CachedMask for Mask {
+    fn byte_size(&self) -> usize {
+        Mask::byte_size(self)
+    }
+}
+
+/// A cached glyph entry in `Window::glyph_masks`: its device-pixel raster bounds paired with its
+/// mask, or `Empty` for zero-area glyphs (such as spaces) so steady frames never re-query
+/// `TextSystem::raster_bounds` (and its `RwLock`).
+#[derive(Clone, Debug)]
+pub enum GlyphMask {
+    /// A glyph whose raster bounds are empty (nothing to draw).
+    Empty,
+    /// A rasterized glyph with its raster bounds relative to the floored baseline origin.
+    Present {
+        /// Device-pixel raster bounds relative to the glyph's floored baseline origin.
+        raster_bounds: Bounds<DevicePixels>,
+        /// The rasterized alpha or colour mask.
+        mask: Mask,
+    },
+}
+
+impl CachedMask for GlyphMask {
+    fn byte_size(&self) -> usize {
+        match self {
+            GlyphMask::Empty => 0,
+            GlyphMask::Present { mask, .. } => mask.byte_size(),
+        }
+    }
 }
 
 impl From<Arc<AlphaMask>> for Mask {
@@ -158,11 +211,11 @@ impl From<Arc<ColorMask>> for Mask {
 /// Call `begin_frame` before a frame's paint and `end_frame` after it. While the cache holds more
 /// than its byte budget, `end_frame` drops the least recently used masks the frame did not use;
 /// masks unused for `max_idle_frames` frames are dropped regardless.
-pub struct MaskCache<K> {
-    inner: ByteCache<K, Mask>,
+pub struct MaskCache<K, V = Mask> {
+    inner: ByteCache<K, V>,
 }
 
-impl<K: Hash + Eq + Clone> MaskCache<K> {
+impl<K: Hash + Eq + Clone, V: CachedMask> MaskCache<K, V> {
     /// The default budget: 32 MB of masks.
     pub const DEFAULT_BUDGET: usize = 32 << 20;
     /// The default idle limit: about a minute at 60 Hz.
@@ -183,8 +236,8 @@ impl<K: Hash + Eq + Clone> MaskCache<K> {
     pub fn get_or_insert_with(
         &mut self,
         key: &K,
-        make: impl FnOnce() -> Result<Option<Mask>>,
-    ) -> Result<Option<Mask>> {
+        make: impl FnOnce() -> Result<Option<V>>,
+    ) -> Result<Option<V>> {
         if let Some(m) = self.inner.get(key) {
             return Ok(Some(m));
         }
@@ -225,7 +278,7 @@ impl<K: Hash + Eq + Clone> MaskCache<K> {
     }
 }
 
-impl<K: Hash + Eq + Clone> Default for MaskCache<K> {
+impl<K: Hash + Eq + Clone, V: CachedMask> Default for MaskCache<K, V> {
     fn default() -> Self {
         Self::new()
     }

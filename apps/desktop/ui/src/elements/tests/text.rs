@@ -195,3 +195,23 @@ fn styled_text_paints_background_only_when_runs_have_one() {
     assert_eq!(super::solid(&quads[0]), highlight);
     assert_eq!(quads[0].bounds, super::sb(6., 0., 12., 20.));
 }
+
+#[test]
+fn steady_frame_reuses_glyph_bounds_and_empty_glyph_entries() {
+    let (mut app, window) = open(|_, _| text_box(200.).child("hi world").into_any_element());
+    let first = draw(&mut app, window);
+    let cached_after_first = app.read(|cx| match cx.windows.get(&window.id) {
+        Some(Some(w)) => w.glyph_masks.len(),
+        _ => 0,
+    });
+    // 7 distinct visible glyphs ('h','i','w','o','r','l','d') + 1 empty space entry = 8.
+    assert_eq!(cached_after_first, 8);
+
+    app.update(|cx| cx.refresh_windows());
+    let second = draw(&mut app, window);
+    assert_eq!(sprites(&first).len(), sprites(&second).len());
+    for (a, b) in sprites(&first).iter().zip(sprites(&second).iter()) {
+        assert_eq!(a.bounds, b.bounds);
+        assert_eq!(a.mask.id, b.mask.id);
+    }
+}
