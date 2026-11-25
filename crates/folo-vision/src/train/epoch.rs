@@ -10,8 +10,8 @@ use super::feed;
 use super::{BatchSource, MAX_AMP_SKIPS, MAX_NONFINITE_BATCHES, Trainer};
 use crate::error::{Error, Result};
 use crate::loss::{
-    LossConfig, LossItems, detection_loss, detection_loss_for_distill, o2m_weight, step_loss,
-    targets_from_normalized,
+    BoxLossKind, LossConfig, LossItems, detection_loss_for_distill_with_wiou_mean,
+    detection_loss_with_wiou_mean, o2m_weight, step_loss, targets_from_normalized,
 };
 use crate::val::batch_tensor;
 
@@ -79,13 +79,14 @@ impl Trainer {
             // Mixed precision: the loss (assigner, BCE, CIoU + DFL) runs in f32 on f32 copies of the f16 head.
             let f32_head = |t: &folo_core::Tensor| t.to_dtype(folo_core::DType::F32);
             let (box_raw, cls_raw) = (f32_head(&out.box_raw)?, f32_head(&out.cls_raw)?);
-            let (mut loss, kd_asg) = detection_loss_for_distill(
+            let (mut loss, kd_asg) = detection_loss_for_distill_with_wiou_mean(
                 &box_raw,
                 &cls_raw,
                 &out.anchors,
                 &targets,
                 &epoch_loss_cfg,
                 need_kd_asg,
+                self.wiou_iou_mean,
             )?;
             // On the one-to-many outputs, over the supervised loss's normaliser; part of the one-to-many loss below.
             // Skip distillation when the supervised loss is already non-finite (e.g. early AMP forward overflow,
@@ -109,7 +110,14 @@ impl Trainer {
                 Some((b, c)) => {
                     let (box_raw, cls_raw) = (f32_head(b)?, f32_head(c)?);
                     let cfg = epoch_loss_cfg.o2o_branch(self.cfg.o2o_keeps_tal);
-                    Some(detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &cfg)?)
+                    Some(detection_loss_with_wiou_mean(
+                        &box_raw,
+                        &cls_raw,
+                        &out.anchors,
+                        &targets,
+                        &cfg,
+                        self.wiou_iou_mean,
+                    )?)
                 }
                 None => None,
             };
@@ -120,7 +128,15 @@ impl Trainer {
             let kd_finite = kd.is_none_or(|v| v.iter().all(|x| x.is_finite()));
             let finite = loss.is_finite() && kd_finite && RunningStats::all_finite(&self.model)?;
             let items = loss.items;
+            let wiou_batch_mean = loss.mean_iou_loss;
             if finite {
+                if epoch_loss_cfg.box_loss == BoxLossKind::WiouV3
+                    && let Some(m) = wiou_batch_mean
+                    && m.is_finite()
+                {
+                    let mom = epoch_loss_cfg.wiou_momentum;
+                    self.wiou_iou_mean = ((1.0 - mom) * self.wiou_iou_mean + mom * m).max(1e-4);
+                }
                 if let Some(v) = kd {
                     kd_items.push(v);
                 }

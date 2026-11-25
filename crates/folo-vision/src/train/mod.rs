@@ -114,6 +114,9 @@ pub const SHORT_RUN_STEPS: u64 = 200;
 /// Checkpoint metadata key (docs/FORMAT.md) of a mixed-precision run's loss scaler: [`GradScaler::to_json`].
 pub const AMP_KEY: &str = "folo.amp";
 
+/// Checkpoint metadata key holding the WIoU v3 running EMA `L_IoU_bar` (written only when `box_loss == wiou_v3`).
+pub const WIOU_IOU_MEAN_KEY: &str = "folo.wiou_iou_mean";
+
 /// Consecutive optimizer steps skipped for non-finite gradients that fail a mixed-precision run (§8.8): by then the
 /// loss scale has backed off by `2^50`, so the gradients are not finite at any scale.
 pub const MAX_AMP_SKIPS: usize = 50;
@@ -247,6 +250,8 @@ pub struct Trainer {
     at_boundary: bool,
     /// Non-finite batches in a row, across epoch boundaries (§8.3).
     consecutive_bad: usize,
+    /// Running exponential moving average `L_IoU_bar` for [`crate::loss::BoxLossKind::WiouV3`] (Tong et al. §III-B).
+    wiou_iou_mean: f32,
     /// Unknown `folo.*` metadata of the checkpoint a run resumed from, written back into its checkpoints
     /// (FORMAT.md: tools that rewrite a file preserve them).
     extra_meta: BTreeMap<String, String>,

@@ -10,9 +10,11 @@ use folo_nn::EmaState;
 use folo_nn::io::{CheckpointParts, FileContents, Metrics, RngState};
 
 use super::{
-    AMP_KEY, CLOSE_MOSAIC_KEY, NONFINITE_STREAK_KEY, TRAIN_IMAGES_KEY, Trainer, f32_decimal, rfc3339_now,
+    AMP_KEY, CLOSE_MOSAIC_KEY, NONFINITE_STREAK_KEY, TRAIN_IMAGES_KEY, Trainer, WIOU_IOU_MEAN_KEY,
+    f32_decimal, rfc3339_now,
 };
 use crate::error::{Error, Result};
+use crate::loss::BoxLossKind;
 
 impl Trainer {
     /// Write the complete training state (FORMAT.md checkpoint) to `path`, atomically.
@@ -47,6 +49,9 @@ impl Trainer {
         meta.extra.insert(NONFINITE_STREAK_KEY.into(), self.consecutive_bad.to_string());
         if let Some(s) = &self.scaler {
             meta.extra.insert(AMP_KEY.into(), s.to_json());
+        }
+        if self.loss_cfg.box_loss == BoxLossKind::WiouV3 {
+            meta.extra.insert(WIOU_IOU_MEAN_KEY.into(), self.wiou_iou_mean.to_string());
         }
         let mut streams = BTreeMap::new();
         // Every random draw after initialisation is derived from (seed, epoch, ...), so the seed is the whole

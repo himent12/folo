@@ -16,7 +16,8 @@ use super::events::Emitter;
 use super::teacher::Teacher;
 use super::{
     AMP_KEY, CLOSE_MOSAIC_KEY, NONFINITE_STREAK_KEY, ResumeOverrides, SHORT_RUN_STEPS, TRAIN_IMAGES_KEY,
-    TrainConfig, TrainData, TrainOptions, Trainer, amp_support, can_place, place_model, resolve_device,
+    TrainConfig, TrainData, TrainOptions, Trainer, WIOU_IOU_MEAN_KEY, amp_support, can_place, place_model,
+    resolve_device,
 };
 use crate::error::{Error, Result};
 use crate::loss::LossConfig;
@@ -192,8 +193,21 @@ impl Trainer {
         t.epoch = u32::try_from(r.epoch).map_err(|_| Error::Config("folo.epoch out of range".into()))?;
         t.best = r.best;
         t.extra_meta = file.metadata().extra.clone();
-        // Written afresh by `save_checkpoint` when the run has a scaler.
+        // Written afresh by `save_checkpoint` when the run has a scaler or uses WIoU v3.
         t.extra_meta.remove(AMP_KEY);
+        t.extra_meta.remove(WIOU_IOU_MEAN_KEY);
+        t.wiou_iou_mean = match file.metadata().extra.get(WIOU_IOU_MEAN_KEY) {
+            Some(v) => {
+                let parsed: f32 = v
+                    .parse()
+                    .map_err(|_| Error::Config(format!("{WIOU_IOU_MEAN_KEY} `{v}` is not a number")))?;
+                if !(parsed.is_finite() && parsed > 0.0) {
+                    return Err(Error::Config(format!("{WIOU_IOU_MEAN_KEY} `{v}` must be finite and > 0")));
+                }
+                parsed
+            }
+            None => 1.0,
+        };
         t.last_saved = Some((path.to_path_buf(), t.epoch));
         t.consecutive_bad = match file.metadata().extra.get(NONFINITE_STREAK_KEY) {
             Some(v) => v
@@ -432,6 +446,7 @@ impl Trainer {
             warnings: Vec::new(),
             at_boundary: true,
             consecutive_bad: 0,
+            wiou_iou_mean: 1.0,
             extra_meta: BTreeMap::new(),
             last_saved: None,
             scaler,

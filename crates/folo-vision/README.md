@@ -18,7 +18,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | `src/boxes.rs` | `Xyxy` / `Cxcywh`, letterbox mapping, IoU / GIoU / DIoU / CIoU |
 | `src/decode.rs` | Anchor grids (`make_anchors`) and the DFL decode of raw head outputs |
 | `src/assign.rs` | The task-aligned assigner and the DFL target encoding |
-| `src/loss/` | `mod.rs` (`detection_loss`, `LossConfig`, `BoxLossKind`, `dual_loss`), `assignment.rs` (host assignment), `terms.rs` (BCE, MAL, CIoU, R-PIoU, NWD-IoU, DFL, OT-DFL), `device.rs` (the folo-gpu kernels), `distill/` (the opt-in distillation term, `fused.rs` its fused folo-gpu path, and their tests), `tests.rs` |
+| `src/loss/` | `mod.rs` (`detection_loss`, `LossConfig`, `ClsLossKind`, `BoxLossKind`, `dual_loss`), `assignment.rs` (host assignment), `terms/` (`mod.rs`, `cls.rs` for BCE/MAL/VFL/QFL, `box_loss.rs` for CIoU/Inner-CIoU/WIoU v3/R-PIoU/NWD, `dfl.rs` for OT-DFL), `device.rs` (the folo-gpu kernels), `distill/` (the opt-in distillation term, `fused.rs` its fused folo-gpu path, and their tests), `tests.rs` |
 | `src/nms/` | `mod.rs` (NMS config/pipeline and ELC / consensus / DFL-consensus / DFL-repulse / DFL-CGR post-processing), `kernel.rs` (AVX2-accelerated standard IoU NMS, DIoU-NMS, Soft-NMS, and class-aware bucketing), `topk.rs` (the NMS-free top-k of the `o2o` head), `tests.rs` |
 | `src/fusion/` | `mod.rs` (cluster box fusion after NMS — `vote`, `dfl`, `sebf` — opt-in through `NmsConfig::fusion`, and the `consensus` / `elc` / `dfl-consensus` / `dfl-repulse` / `dfl-cgr` score modes opt-in through `NmsConfig::score`), `tests.rs` |
 | `src/metrics.rs` | `Evaluator`: mAP, precision / recall / F1, PR curves, confusion matrix |

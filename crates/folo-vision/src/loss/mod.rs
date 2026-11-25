@@ -35,7 +35,7 @@
 //! Every sum over many elements is a fixed tree of per-row sums, so the loss and its gradients do not depend on
 //! thread scheduling: repeated runs are bitwise identical.
 //!
-//! Files: `assignment.rs` ([`assign_batch`], the detached host part), `terms.rs` ([`loss_with_assignment`] and
+//! Files: `assignment.rs` ([`assign_batch`], the detached host part), `terms/` ([`loss_with_assignment`] and
 //! [`ciou`], the differentiable terms), `device.rs` ([`assign_batch_device`], the folo-gpu kernels), `distill/`
 //! (the opt-in distillation term of §8.9, [`distill_loss`]) and `tests.rs`.
 //! This file: [`LossConfig`], [`ImageTargets`], [`BatchAssignment`], [`detection_loss`], [`dual_loss`] (§6.6) and
@@ -56,7 +56,7 @@ pub use distill::{
     DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss, distill_loss_with_context,
     gt_verify_weights_cpu,
 };
-pub use terms::{ciou, loss_with_assignment, nwd_loss, rpiou_loss};
+pub use terms::{ciou, inner_ciou_loss, loss_with_assignment, nwd_loss, rpiou_loss, wiou_v3_loss};
 
 use crate::assign::TalConfig;
 use crate::boxes::Xyxy;
@@ -72,15 +72,33 @@ fn invalid(msg: impl Into<String>) -> Error {
     Error::InvalidArgument { op: OP, msg: msg.into() }
 }
 
-/// Which box regression geometry loss [`detection_loss`] uses.
+/// Which classification loss [`detection_loss`] uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+pub enum ClsLossKind {
+    /// Standard BCE-with-logits (or MAL when `mal_gamma > 0`, default).
+    #[default]
+    Bce,
+    /// Varifocal Loss (Zhang et al. 2021): positives (`t > 0`) use quality-weighted `t · BCE(x, t)` and
+    /// negatives (`t == 0`) use `vfl_alpha · p^vfl_gamma · softplus(x)`.
+    Vfl,
+    /// Quality Focal Loss (Li et al. 2020): `|t − p|^qfl_beta · BCE(x, t)` across both positives and negatives.
+    Qfl,
+}
+
+/// Which box regression geometry loss [`detection_loss`] uses.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum BoxLossKind {
     /// Complete IoU (default, `docs/MODEL.md` §7.2).
     #[default]
     Ciou,
     /// Rational-Focal Edge-Decoupled IoU (`R-PIoU`): `(1 - u)(1 + β·u) + κ·E² / (1 + κ·E²)`, purely algebraic.
     Rpiou,
+    /// Inner-CIoU (Zhang et al. 2023): CIoU with its IoU term computed on auxiliary boxes scaled by `inner_ratio`.
+    InnerCiou,
+    /// Wise-IoU v3 (Tong et al. 2023): distance-attended IoU loss with non-monotonic dynamic focusing (`wiou_alpha`, `wiou_delta`, `wiou_momentum`).
+    WiouV3,
 }
 
 /// Loss hyper-parameters. Defaults are `docs/MODEL.md` §7.4's.
@@ -100,10 +118,26 @@ pub struct LossConfig {
     /// Matchability-Aware Loss (MAL) background focal exponent (`0.0` = plain BCE). When `> 0`, negatives use
     /// `p^γ · softplus(x)` while positives keep 100% unweighted BCE.
     pub mal_gamma: f32,
+    /// Classification loss family ([`ClsLossKind::Bce`] default; opt-in `Vfl` or `Qfl`).
+    pub cls_loss: ClsLossKind,
+    /// Negative weight `α > 0` for [`ClsLossKind::Vfl`] (`0.75` default).
+    pub vfl_alpha: f32,
+    /// Negative focal exponent `γ >= 0` for [`ClsLossKind::Vfl`] (`2.0` default).
+    pub vfl_gamma: f32,
+    /// Focal exponent `β` (`0` or `>= 1`) for [`ClsLossKind::Qfl`] (`2.0` default).
+    pub qfl_beta: f32,
     /// Scale-adaptive NWD blending weight `λ₀` in `[0, 1]` for the box loss (`0.0` = no NWD blend).
     pub nwd_weight: f32,
-    /// Box regression geometry loss (`Ciou` default, or `Rpiou`).
+    /// Box regression geometry loss (`Ciou` default, `Rpiou`, `InnerCiou`, or `WiouV3`).
     pub box_loss: BoxLossKind,
+    /// Auxiliary box scale ratio `r` in `[0.5, 1.5]` for [`BoxLossKind::InnerCiou`] (`0.7` default).
+    pub inner_ratio: f32,
+    /// Non-monotonic focusing base `α > 1` for [`BoxLossKind::WiouV3`] (`1.9` default).
+    pub wiou_alpha: f32,
+    /// Non-monotonic focusing pivot `δ > 0` for [`BoxLossKind::WiouV3`] (`3.0` default).
+    pub wiou_delta: f32,
+    /// EMA momentum `m` in `[0, 1]` for the [`BoxLossKind::WiouV3`] running `L_IoU` mean (`0.01` default).
+    pub wiou_momentum: f32,
     /// High-IoU focusing slope `β` in `[0, 1]` for [`BoxLossKind::Rpiou`] (`0.5` default).
     pub rpiou_beta: f32,
     /// Rational edge-penalty sharpness `κ > 0` for [`BoxLossKind::Rpiou`] (`2.0` default).
@@ -123,8 +157,16 @@ impl Default for LossConfig {
             reg_max: 16,
             tal: TalConfig::default(),
             mal_gamma: 0.0,
+            cls_loss: ClsLossKind::Bce,
+            vfl_alpha: 0.75,
+            vfl_gamma: 2.0,
+            qfl_beta: 2.0,
             nwd_weight: 0.0,
             box_loss: BoxLossKind::Ciou,
+            inner_ratio: 0.7,
+            wiou_alpha: 1.9,
+            wiou_delta: 3.0,
+            wiou_momentum: 0.01,
             rpiou_beta: 0.5,
             rpiou_kappa: 2.0,
             rpiou_delta: 0.5,
@@ -146,6 +188,59 @@ impl LossConfig {
     pub fn o2o_branch(&self, keeps_tal: bool) -> Self {
         let tal = if keeps_tal { self.tal.one_to_one() } else { TalConfig::o2o() };
         Self { tal, ..*self }
+    }
+
+    /// Validate all loss hyper-parameters (shared by [`detection_loss`] and `TrainConfig::validate`).
+    pub fn validate_params(&self) -> std::result::Result<(), String> {
+        if !(self.mal_gamma.is_finite() && (0.0..=5.0).contains(&self.mal_gamma)) {
+            return Err(format!("loss.mal_gamma must be finite and in 0..=5, got {}", self.mal_gamma));
+        }
+        if !(self.rpiou_beta.is_finite() && (0.0..=1.0).contains(&self.rpiou_beta)) {
+            return Err(format!("loss.rpiou_beta must be finite and in 0..=1, got {}", self.rpiou_beta));
+        }
+        if !(self.rpiou_kappa.is_finite() && self.rpiou_kappa > 0.0) {
+            return Err(format!("loss.rpiou_kappa must be finite and > 0, got {}", self.rpiou_kappa));
+        }
+        if !(self.rpiou_delta.is_finite() && self.rpiou_delta > 0.0) {
+            return Err(format!("loss.rpiou_delta must be finite and > 0, got {}", self.rpiou_delta));
+        }
+        if !(self.dfl_ot_weight.is_finite() && self.dfl_ot_weight >= 0.0) {
+            return Err(format!("loss.dfl_ot_weight must be finite and >= 0, got {}", self.dfl_ot_weight));
+        }
+        if self.cls_loss != ClsLossKind::Bce && self.mal_gamma != 0.0 {
+            return Err(format!(
+                "loss.mal_gamma ({}) applies only to ClsLossKind::Bce, got {:?}",
+                self.mal_gamma, self.cls_loss
+            ));
+        }
+        if !(self.vfl_alpha.is_finite() && self.vfl_alpha > 0.0) {
+            return Err(format!("loss.vfl_alpha must be finite and > 0, got {}", self.vfl_alpha));
+        }
+        if !(self.vfl_gamma.is_finite() && self.vfl_gamma >= 0.0) {
+            return Err(format!("loss.vfl_gamma must be finite and >= 0, got {}", self.vfl_gamma));
+        }
+        if !(self.qfl_beta.is_finite() && (self.qfl_beta == 0.0 || self.qfl_beta >= 1.0)) {
+            return Err(format!("loss.qfl_beta must be finite and 0 or >= 1, got {}", self.qfl_beta));
+        }
+        if !(self.inner_ratio.is_finite() && (0.5..=1.5).contains(&self.inner_ratio)) {
+            return Err(format!(
+                "loss.inner_ratio must be finite and in 0.5..=1.5, got {}",
+                self.inner_ratio
+            ));
+        }
+        if !(self.wiou_alpha.is_finite() && self.wiou_alpha > 1.0) {
+            return Err(format!("loss.wiou_alpha must be finite and > 1, got {}", self.wiou_alpha));
+        }
+        if !(self.wiou_delta.is_finite() && self.wiou_delta > 0.0) {
+            return Err(format!("loss.wiou_delta must be finite and > 0, got {}", self.wiou_delta));
+        }
+        if !(self.wiou_momentum.is_finite() && (0.0..=1.0).contains(&self.wiou_momentum)) {
+            return Err(format!(
+                "loss.wiou_momentum must be finite and in 0..=1, got {}",
+                self.wiou_momentum
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -171,6 +266,7 @@ pub fn dual_loss(o2m: &LossOutput, o2o: &LossOutput, w_m: f32) -> Result<LossOut
         items: LossItems { box_: mix(m.box_, o.box_), cls: mix(m.cls, o.cls), dfl: mix(m.dfl, o.dfl) },
         num_fg: o2m.num_fg,
         target_score_sum: o2m.target_score_sum,
+        mean_iou_loss: o2m.mean_iou_loss,
     })
 }
 
@@ -327,6 +423,9 @@ pub struct LossOutput {
     pub num_fg: usize,
     /// The unfloored target-score sum `Σ T` (the normaliser is `max(Σ T, 1)`).
     pub target_score_sum: f32,
+    /// Mean unweighted `1 - IoU` over foreground anchors when [`BoxLossKind::WiouV3`] runs with `num_fg > 0`,
+    /// used by the trainer to update the Tong et al. §III-B exponential moving average `L_IoU_bar`.
+    pub mean_iou_loss: Option<f32>,
 }
 
 impl LossOutput {
@@ -355,18 +454,7 @@ fn check_inputs(
     if cfg.reg_max < 2 {
         return Err(invalid(format!("reg_max must be >= 2, got {}", cfg.reg_max)));
     }
-    if !(cfg.rpiou_beta.is_finite() && (0.0..=1.0).contains(&cfg.rpiou_beta)) {
-        return Err(invalid(format!("rpiou_beta {} must be finite and in [0, 1]", cfg.rpiou_beta)));
-    }
-    if !(cfg.rpiou_kappa.is_finite() && cfg.rpiou_kappa > 0.0) {
-        return Err(invalid(format!("rpiou_kappa {} must be finite and > 0", cfg.rpiou_kappa)));
-    }
-    if !(cfg.rpiou_delta.is_finite() && cfg.rpiou_delta > 0.0) {
-        return Err(invalid(format!("rpiou_delta {} must be finite and > 0", cfg.rpiou_delta)));
-    }
-    if !(cfg.dfl_ot_weight.is_finite() && cfg.dfl_ot_weight >= 0.0) {
-        return Err(invalid(format!("dfl_ot_weight {} must be finite and >= 0", cfg.dfl_ot_weight)));
-    }
+    cfg.validate_params().map_err(invalid)?;
     let shapes = || format!("box_raw {}, cls_raw {}", box_raw.shape(), cls_raw.shape());
     let ((b, ch, a), (b2, nc, a2)) = match (box_raw.dims3(), cls_raw.dims3()) {
         (Ok(x), Ok(y)) => (x, y),
@@ -409,10 +497,22 @@ pub fn detection_loss(
     targets: &[ImageTargets],
     cfg: &LossConfig,
 ) -> Result<LossOutput> {
+    detection_loss_with_wiou_mean(box_raw, cls_raw, anchors, targets, cfg, 1.0)
+}
+
+/// [`detection_loss`] with an explicit WIoU v3 running-EMA denominator `wiou_iou_mean` (Tong et al. §III-B).
+pub(crate) fn detection_loss_with_wiou_mean(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &Anchors,
+    targets: &[ImageTargets],
+    cfg: &LossConfig,
+    wiou_iou_mean: f32,
+) -> Result<LossOutput> {
     if device_loss_supported(box_raw, cfg) {
         return detection_loss_device(box_raw, cls_raw, anchors, targets, cfg);
     }
-    detection_loss_host(box_raw, cls_raw, anchors, targets, cfg)
+    detection_loss_host_with_wiou_mean(box_raw, cls_raw, anchors, targets, cfg, wiou_iou_mean)
 }
 
 /// Supervised assignment context kept alongside [`LossOutput`] when distillation needs GT verification or
@@ -433,8 +533,24 @@ pub fn detection_loss_for_distill(
     cfg: &LossConfig,
     keep_assignment: bool,
 ) -> Result<(LossOutput, Option<DistillAssignment>)> {
+    detection_loss_for_distill_with_wiou_mean(box_raw, cls_raw, anchors, targets, cfg, keep_assignment, 1.0)
+}
+
+/// [`detection_loss_for_distill`] with an explicit WIoU v3 running-EMA denominator `wiou_iou_mean`.
+pub(crate) fn detection_loss_for_distill_with_wiou_mean(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &Anchors,
+    targets: &[ImageTargets],
+    cfg: &LossConfig,
+    keep_assignment: bool,
+    wiou_iou_mean: f32,
+) -> Result<(LossOutput, Option<DistillAssignment>)> {
     if !keep_assignment {
-        return Ok((detection_loss(box_raw, cls_raw, anchors, targets, cfg)?, None));
+        return Ok((
+            detection_loss_with_wiou_mean(box_raw, cls_raw, anchors, targets, cfg, wiou_iou_mean)?,
+            None,
+        ));
     }
     if device_loss_supported(box_raw, cfg) {
         let (out, asg) =
@@ -445,7 +561,7 @@ pub fn detection_loss_for_distill(
     if !asg.inputs_finite {
         return Ok((nan_loss(cls_raw.device())?, None));
     }
-    let out = loss_with_assignment(box_raw, cls_raw, anchors, &asg, cfg)?;
+    let out = terms::loss_with_assignment_wiou(box_raw, cls_raw, anchors, &asg, cfg, wiou_iou_mean)?;
     Ok((out, Some(DistillAssignment::Host(asg))))
 }
 
@@ -453,6 +569,8 @@ pub fn detection_loss_for_distill(
 /// and `reg_max` fit its kernels (`1..=64`, `2..=32`); other settings take the host path.
 pub fn device_loss_supported(box_raw: &Tensor, cfg: &LossConfig) -> bool {
     folo_gpu::detect::supported(box_raw.device())
+        && cfg.cls_loss == ClsLossKind::Bce
+        && matches!(cfg.box_loss, BoxLossKind::Ciou | BoxLossKind::Rpiou)
         && (1..=folo_gpu::detect::MAX_TOPK).contains(&cfg.tal.topk)
         && cfg.tal.topk2 != Some(0)
         && (2..=folo_gpu::detect::MAX_REG_MAX).contains(&cfg.reg_max)
@@ -467,11 +585,22 @@ pub fn detection_loss_host(
     targets: &[ImageTargets],
     cfg: &LossConfig,
 ) -> Result<LossOutput> {
+    detection_loss_host_with_wiou_mean(box_raw, cls_raw, anchors, targets, cfg, 1.0)
+}
+
+fn detection_loss_host_with_wiou_mean(
+    box_raw: &Tensor,
+    cls_raw: &Tensor,
+    anchors: &Anchors,
+    targets: &[ImageTargets],
+    cfg: &LossConfig,
+    wiou_iou_mean: f32,
+) -> Result<LossOutput> {
     let asg = assign_batch(box_raw, cls_raw, anchors, targets, cfg)?;
     if !asg.inputs_finite {
         return nan_loss(cls_raw.device());
     }
-    loss_with_assignment(box_raw, cls_raw, anchors, &asg, cfg)
+    terms::loss_with_assignment_wiou(box_raw, cls_raw, anchors, &asg, cfg, wiou_iou_mean)
 }
 
 fn nan_loss(device: folo_core::Device) -> Result<LossOutput> {
@@ -482,5 +611,6 @@ fn nan_loss(device: folo_core::Device) -> Result<LossOutput> {
         items: LossItems { box_: nan, cls: nan, dfl: nan },
         num_fg: 0,
         target_score_sum: 0.0,
+        mean_iou_loss: None,
     })
 }
