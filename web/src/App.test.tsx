@@ -644,12 +644,21 @@ describe('lazy CommandPalette', () => {
     c = render(() => <App screens={screens} loadPalette={loadPalette} />, target);
     await until(() => main().querySelector('.fake'), 'the run detail');
 
+    // First open + type + Escape cancels without navigating back.
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
     flush();
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true, cancelable: true }));
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     flush();
     expect(go).not.toHaveBeenCalled();
+
+    // Re-open while still pending + second Ctrl+K toggles off again (no duplicate import call).
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    flush();
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true, cancelable: true }));
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    flush();
+    expect(loadPalette).toHaveBeenCalledTimes(1);
 
     let seenSeed = 'UNSET';
     pending.resolve({

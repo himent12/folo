@@ -161,7 +161,10 @@ export default function App(props: AppProps) {
         return;
       }
       if (!e.ctrlKey && !e.metaKey && !e.altKey) {
-        if (e.key === 'Backspace') {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          e.stopPropagation();
+        } else if (e.key === 'Backspace') {
           e.preventDefault();
           e.stopPropagation();
           pendingQuery = pendingQuery.slice(0, -1);
