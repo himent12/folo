@@ -47,6 +47,13 @@ describe('LabelJobs and ImagesArea filter live regions', () => {
       expect(status().getAttribute('aria-live')).toBe('polite');
       expect(status().textContent?.trim()).toBe('');
 
+      // Selecting a status filter first must not drop search tracking.
+      const idleBtn = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.startsWith('Idle'))!;
+      expect(idleBtn).toBeDefined();
+      idleBtn.click();
+      flush();
+      expect(status().textContent).toMatch(/^Showing \d+ of \d+ labeling jobs?\.$/);
+
       const search = target.querySelector<HTMLInputElement>('input[type="search"]')!;
       search.value = 'no-match-xyz';
       search.dispatchEvent(new Event('input', { bubbles: true }));

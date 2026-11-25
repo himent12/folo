@@ -85,14 +85,19 @@ export default function LabelJobs() {
   const searchEl = signal<HTMLInputElement | undefined>(undefined);
   const clearSeq = signal(0);
   const filterStatus = signal('');
+  const jobsReady = computed(() => jobs.data !== undefined);
   let hasFiltered = false;
   let lastClear = 0;
   effect(() => {
-    const active = filter.get() !== 'all' || query.get().trim().length > 0;
-    const cleared = clearSeq.get() !== lastClear;
-    lastClear = clearSeq.peek();
+    const f = filter.get();
+    const q = query.get().trim();
+    const c = clearSeq.get();
+    const ready = jobsReady.get();
+    const active = f !== 'all' || q.length > 0;
+    const cleared = c !== lastClear;
+    lastClear = c;
     if (active || cleared) hasFiltered = true;
-    if (!hasFiltered) return;
+    if (!hasFiltered || !ready) return;
     const msg = untrack(() => {
       const all = jobs.data;
       if (!all) return '';
