@@ -7,6 +7,7 @@
 mod benches;
 mod entries;
 mod images;
+pub(super) mod label;
 mod live;
 mod loops;
 mod scoring;
@@ -89,6 +90,9 @@ struct MockBenchData {
     benches: Vec<BenchFixture>,
     agents: Vec<LabelAgent>,
     jobs: Vec<LabelJob>,
+    label_images: HashMap<String, Vec<label::MockLabelImage>>,
+    label_img_seq: HashMap<String, u64>,
+    label_logs: HashMap<String, Vec<LogLine>>,
 }
 
 impl MockBench {

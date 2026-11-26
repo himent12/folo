@@ -24,6 +24,8 @@ impl FoloApp {
             Route::Bench(id) => self.bench_view(&id, window, cx),
             Route::BenchEntry(b, e) => self.bench_entry_view(&b, &e, window, cx),
             Route::Playground => self.playground(window, cx),
+            Route::LabelJobs => self.label_jobs_screen(window, cx),
+            Route::LabelJob(id) => self.label_job_view(&id, window, cx),
             Route::Settings => self.settings(window, cx),
         }
     }

@@ -114,6 +114,7 @@ impl FoloApp {
         self.store.api = api;
         self.server_mode = mode;
         self.clear_bench();
+        self.clear_label();
         self.subscriptions.clear();
         self.subscribing.clear();
         self.stream_lost.clear();
@@ -149,6 +150,7 @@ impl FoloApp {
         self.models_arch_filter = None;
         self.model_search.update(cx, |i, cx| i.set_text("", cx));
         self.bench_search.update(cx, |i, cx| i.set_text("", cx));
+        self.label_search.update(cx, |i, cx| i.set_text("", cx));
         self.model_classes_expanded.clear();
         self.class_table_sort = None;
         self.exporting.clear();
@@ -213,6 +215,11 @@ impl FoloApp {
             self.bench.new_bench.as_mut().map(|f| &mut f.error),
             self.bench.new_loop.as_mut().map(|f| &mut f.error),
             self.bench.design.as_mut().map(|f| &mut f.error),
+            self.label.new_job.as_mut().map(|f| &mut f.error),
+            self.label.add_folder.as_mut().map(|f| &mut f.error),
+            self.label.export_ds.as_mut().map(|f| &mut f.error),
+            Some(&mut self.label.start_error),
+            Some(&mut self.label.review_error),
             self.cloud.disconnect.as_mut().map(|c| &mut c.error),
             self.cloud.terminate.as_mut().map(|c| &mut c.error),
         ]
@@ -311,6 +318,15 @@ impl FoloApp {
         }
         if unreachable(&b.jobs) {
             b.jobs = Load::Idle;
+        }
+        let l = &mut self.label;
+        forget_unreachable(&mut l.images);
+        forget_unreachable(&mut l.logs);
+        if unreachable(&l.jobs) {
+            l.jobs = Load::Idle;
+        }
+        if unreachable(&l.agents) {
+            l.agents = Load::Idle;
         }
         if refresh_cloud_instances && self.cloud_on() {
             self.refresh_instances(cx);

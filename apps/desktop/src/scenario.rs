@@ -88,6 +88,10 @@ pub const ALL: &[&str] = &[
     "bench-entry",
     "bench-entry+light",
     "bench-entry+bottom",
+    "labeling",
+    "labeling+light",
+    "label-job",
+    "label-job+light",
     "overview+cloud",
     "runs+cloud",
     "settings+cloud",
@@ -374,6 +378,8 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
                 app.scroll_end_pending = 60;
             }
         }
+        "labeling" => app.route = Route::LabelJobs,
+        "label-job" => app.route = Route::LabelJob("lb_4f10".into()),
         "model" => {
             app.route = Route::Model("m_44c0".into());
             // The page's end: the confusion matrix and the Details panel.
@@ -466,6 +472,9 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
     }
     if (screen.starts_with("bench") || screen == "benchmarks") && !s.fail && !app.hold_loading {
         preload_bench(app, &app.route.clone());
+    }
+    if (screen == "labeling" || screen == "label-job") && !s.fail && !app.hold_loading {
+        preload_label(app, &app.route.clone());
     }
     match screen {
         "bench-new" => app.open_new_bench(window, cx),
@@ -622,6 +631,26 @@ fn preload_bench(app: &mut FoloApp, route: &Route) {
         let images =
             crate::bench::EntryImages { sort, page: page.into(), more: false, more_error: None, seq: 0 };
         app.bench.entry_images.insert(key, images);
+    }
+}
+
+/// The system answer (its `agent_labeling` feature), agents, jobs, and open job's images/logs.
+fn preload_label(app: &mut FoloApp, route: &Route) {
+    let api = app.store.api.clone();
+    if let Ok(s) = api.system() {
+        app.store.features = s.features;
+        app.store.capabilities = s.capabilities;
+        app.store.system = Load::Ready(s.system);
+    }
+    app.label.jobs = api.label_jobs().into();
+    let agents = api.label_agents();
+    if let Ok(list) = &agents {
+        app.sync_default_label_agent(list);
+    }
+    app.label.agents = agents.into();
+    if let Route::LabelJob(id) = route {
+        app.label.images.insert(id.clone(), api.label_images(id, 0, 500).map(|p| p.images).into());
+        app.label.logs.insert(id.clone(), api.label_logs(id).map(|r| r.lines).into());
     }
 }
 

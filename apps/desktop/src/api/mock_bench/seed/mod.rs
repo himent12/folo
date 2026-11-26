@@ -66,7 +66,7 @@ pub(super) fn seed_data(datasets: &[DatasetFixture], models: &[Model]) -> MockBe
             hint: None,
         },
     ];
-    let jobs = vec![LabelJob {
+    let mut jobs = vec![LabelJob {
         id: "lb_4f10".into(),
         name: "line-rejects".into(),
         classes: vec!["circle".into(), "square".into(), "triangle".into()],
@@ -84,6 +84,7 @@ pub(super) fn seed_data(datasets: &[DatasetFixture], models: &[Model]) -> MockBe
         },
         dataset_id: None,
     }];
+    let (label_images, label_logs) = crate::api::mock_bench::label::seed_default_label_data(&mut jobs);
 
     let model_spec = |mid: &str, fallback_arch: &str, fallback_params: u64| -> BenchContestant {
         match models.iter().find(|m| m.id == mid) {
@@ -101,6 +102,8 @@ pub(super) fn seed_data(datasets: &[DatasetFixture], models: &[Model]) -> MockBe
             },
         }
     };
+
+    let label_img_seq = label_images.iter().map(|(k, v)| (k.clone(), v.len() as u64)).collect();
 
     let ShapesHardSeed {
         b1,
@@ -175,5 +178,8 @@ pub(super) fn seed_data(datasets: &[DatasetFixture], models: &[Model]) -> MockBe
         ],
         agents,
         jobs,
+        label_images,
+        label_img_seq,
+        label_logs,
     }
 }

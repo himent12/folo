@@ -250,6 +250,7 @@ impl FoloApp {
             | Route::Models
             | Route::Benches
             | Route::Playground
+            | Route::LabelJobs
             | Route::Settings => {
                 vec![]
             }
@@ -272,6 +273,9 @@ impl FoloApp {
                 (self.bench_name(b).into(), Some(Route::Bench(b.clone()))),
                 (self.bench_entry_name(b, e).into(), None),
             ],
+            Route::LabelJob(id) => {
+                vec![("Labeling".into(), Some(Route::LabelJobs)), (self.label_job_name(id).into(), None)]
+            }
         }
     }
 }

@@ -320,6 +320,47 @@ pub trait Backend: Send + Sync + 'static {
     fn label_jobs(&self) -> ApiResult<Vec<LabelJob>> {
         Err(no_label())
     }
+    fn create_label_job(&self, _req: &CreateLabelJob) -> ApiResult<LabelJob> {
+        Err(no_label())
+    }
+    fn delete_label_job(&self, _id: &str) -> ApiResult<()> {
+        Err(no_label())
+    }
+    fn import_label_images(&self, _id: &str, _req: &ImportLabelImages) -> ApiResult<LabelImagesAdded> {
+        Err(no_label())
+    }
+    fn label_images(&self, _id: &str, _offset: u32, _limit: u32) -> ApiResult<LabelImagePage> {
+        Err(no_label())
+    }
+    fn label_image(&self, _job_id: &str, _image_id: &str, _thumb: Option<u32>) -> ApiResult<ImageData> {
+        Err(no_label())
+    }
+    fn update_label_image(
+        &self,
+        _job_id: &str,
+        _image_id: &str,
+        _req: &UpdateLabelImage,
+    ) -> ApiResult<LabelImage> {
+        Err(no_label())
+    }
+    fn delete_label_image(&self, _job_id: &str, _image_id: &str) -> ApiResult<()> {
+        Err(no_label())
+    }
+    fn start_labeling(&self, _id: &str, _req: &StartLabeling) -> ApiResult<LabelJob> {
+        Err(no_label())
+    }
+    fn stop_labeling(&self, _id: &str) -> ApiResult<LabelJob> {
+        Err(no_label())
+    }
+    fn label_logs(&self, _id: &str) -> ApiResult<RunLogs> {
+        Err(no_label())
+    }
+    fn label_events(&self, _id: &str) -> ApiResult<LabelSubscription> {
+        Err(no_label())
+    }
+    fn create_label_dataset(&self, _id: &str, _req: &LabelDatasetRequest) -> ApiResult<Dataset> {
+        Err(no_label())
+    }
 
     /// Whether models can be downloaded and run in this process ([`Backend::model_weights`]).
     fn local_inference(&self) -> bool {
@@ -364,6 +405,7 @@ pub struct EventStream<E> {
 
 pub type Subscription = EventStream<RunEvent>;
 pub type BenchSubscription = EventStream<BenchEvent>;
+pub type LabelSubscription = EventStream<LabelEvent>;
 
 impl<E> EventStream<E> {
     pub fn new(rx: Receiver<E>) -> (Self, Arc<AtomicBool>) {

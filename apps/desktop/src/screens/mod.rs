@@ -3,6 +3,7 @@
 pub mod bench;
 pub mod datasets;
 mod first_step;
+pub mod label;
 pub mod models;
 pub mod overview;
 pub mod playground;
@@ -261,6 +262,7 @@ impl FoloApp {
         self.throughput = Load::Idle;
         self.clear_cloud();
         self.clear_bench();
+        self.clear_label();
         cx.notify();
     }
 }
