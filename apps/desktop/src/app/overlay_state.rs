@@ -190,6 +190,8 @@ impl FoloApp {
     /// if the route changed, positional Playground detection rows (`det-*`) shifted while the
     /// overlay was open, or the remembered handle is no longer mounted in the frame.
     pub fn restore_focus(&mut self, window: &mut Window) {
+        self.menu_open = None;
+        self.menu_typeahead.clear();
         let Some(ret) = self.overlay_return.take() else {
             self.verify_focus = None;
             window.focus(&self.root_focus);

@@ -57,9 +57,13 @@ impl ScrollHandle {
         *self.0.borrow().offset.borrow()
     }
 
-    /// Sets the offset (clamped at the next prepaint).
+    /// Sets the offset (clamped at the next prepaint) and clears any queued `scroll_to_item` or
+    /// `scroll_to_bottom` request so an earlier deferred scroll cannot overwrite it on prepaint.
     pub fn set_offset(&self, position: Point<Pixels>) {
-        *self.0.borrow().offset.borrow_mut() = position;
+        let mut state = self.0.borrow_mut();
+        state.active_item = None;
+        state.scroll_to_bottom = false;
+        *state.offset.borrow_mut() = position;
     }
 
     /// The largest offset (content size plus padding minus container size, two decimals).

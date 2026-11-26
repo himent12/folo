@@ -347,6 +347,39 @@ fn palette_query_edit_resets_scroll_to_top() {
     assert_eq!(query, "a");
     assert_eq!(sel_after, 0, "query edit resets selection to the first match");
     assert_eq!(scroll_after, 0., "query edit scrolls the palette back to the top");
+
+    // Same-frame race: `End` queues `scroll_to_item` and a query edit arrives before the next
+    // paint. `set_offset(0, 0)` must cancel the pending item scroll so prepaint stays at top.
+    press_key(&mut app, window, "backspace", None);
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent {
+            keystroke: Keystroke { modifiers: Modifiers::default(), key: "end".to_string(), key_char: None },
+            is_held: false,
+        }),
+    );
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent {
+            keystroke: Keystroke {
+                modifiers: Modifiers::default(),
+                key: "a".to_string(),
+                key_char: Some("a".to_string()),
+            },
+            is_held: false,
+        }),
+    );
+    app.run_until_idle();
+    app.frame(window.into());
+    let (sel_same_frame, scroll_same_frame) = drive(&mut app, window, |this, _, _| {
+        let p = this.palette.as_ref().expect("palette open");
+        (p.selected, f32::from(-p.scroll.offset().y))
+    });
+    assert_eq!(sel_same_frame, 0);
+    assert_eq!(
+        scroll_same_frame, 0.,
+        "pending scroll_to_item from End must not override same-frame query scroll reset"
+    );
 }
 
 #[test]
@@ -581,4 +614,31 @@ fn page_down_and_page_up_scroll_new_run_dialog_and_playground_side_rail() {
         0.,
         "Page Down does not scroll Playground rail behind an open dropdown"
     );
+
+    // 4. Submitting New Run while its Dataset dropdown is open closes `menu_open` cleanly so the
+    // new run dashboard stays pageable with Page Down.
+    drive(&mut app, window, |this, w, cx| {
+        this.menu_open = None;
+        this.open_new_run(None, w, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        let fh = this.fh("nr-dataset", cx);
+        w.focus(&fh);
+    });
+    app.frame(window.into());
+    press_key(&mut app, window, "enter", None);
+    assert_eq!(drive(&mut app, window, |this, _, _| this.menu_open), Some("nr-dataset"));
+    drive(&mut app, window, |this, w, cx| this.submit_new_run(w, cx));
+    settle(&mut app, window);
+    let (route, menu, max_page) = drive(&mut app, window, |this, _, _| {
+        (this.route.clone(), this.menu_open, f32::from(this.page_scroll.max_offset().height))
+    });
+    assert!(matches!(route, Route::Run(_)), "submitting New Run navigates to the run page");
+    assert!(menu.is_none(), "submitting New Run clears the closed dialog's dropdown menu");
+    if max_page > 40. {
+        press_key(&mut app, window, "pagedown", None);
+        let run_y = drive(&mut app, window, |this, _, _| f32::from(-this.page_scroll.offset().y));
+        assert!(run_y > 40., "Page Down still scrolls the run page after submitting New Run (got {run_y})");
+    }
 }
