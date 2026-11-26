@@ -911,6 +911,11 @@ describe('Svelte attribute and prop semantics', () => {
     expect(el.classList.contains('active')).toBe(true);
     expect(el.classList.contains('fw-s')).toBe(true);
 
+    // Re-adding a falsy directive key over non-undefined prevDirs ({}) must remove the base class again.
+    dirs.set({ active: false });
+    flush();
+    expect(el.classList.contains('active')).toBe(false);
+
     // Dropping a truthy directive whose token is also in base must keep it from base.
     dirs.set({ active: true });
     flush();
@@ -922,7 +927,7 @@ describe('Svelte attribute and prop semantics', () => {
     stop();
   });
 
-  it('spread cleans up delegated event handlers on dispose and treats literal "on" as an attribute', () => {
+  it('spread cleans up delegated event handlers on dispose without clobbering another writer, and treats literal "on" as an attribute', () => {
     const el = document.createElement('button') as HTMLButtonElement & { $$click?: unknown };
     const handler = vi.fn();
     const stop = createRoot((d) => {
@@ -933,5 +938,17 @@ describe('Svelte attribute and prop semantics', () => {
     expect(el.getAttribute('on')).toBe('yes');
     stop();
     expect(el.$$click).toBeUndefined();
+
+    // If another writer overwrote $$click before dispose, disposing the first spread must leave the newer handler intact.
+    const h1 = vi.fn();
+    const h2 = vi.fn();
+    const stopA = createRoot((d) => {
+      spread(el, () => ({ onclick: h1 }));
+      return d;
+    });
+    expect(el.$$click).toBe(h1);
+    el.$$click = h2;
+    stopA();
+    expect(el.$$click).toBe(h2);
   });
 });

@@ -9,6 +9,7 @@ import { LiveRun } from '$lib/api/live';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
 import { pageCommandList } from '$lib/shell/pageCommands';
+import { toast } from '$lib/ui/toast';
 import Run from './Run';
 
 let target: HTMLElement;
@@ -122,5 +123,53 @@ describe('the run page', () => {
     await new Promise((r) => setTimeout(r, 0));
     flushSync();
     expect(document.querySelector('dialog[open]')).toBeNull();
+  });
+
+  it('uses the finished-epoch count captured before Stop when a stopping response arrives after navigation', async () => {
+    const api = new MockApi('normal', 0);
+    const runs = await api.runs();
+    const running = runs.find((r) => r.status === 'running')!;
+    const other = runs.find((r) => r.status === 'completed')!;
+    // Simulate a run mid-epoch 1 with 0 finished epochs.
+    const realRun = api.run.bind(api);
+    const realMetrics = api.runMetrics.bind(api);
+    vi.spyOn(api, 'run').mockImplementation(async (id) => {
+      const r = await realRun(id);
+      return id === running.id ? { ...r, epoch: 1 } : r;
+    });
+    vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
+      const m = await realMetrics(id, ...rest);
+      return id === running.id ? { ...m, epochs: [] } : m;
+    });
+    let resolveStop!: (r: typeof running) => void;
+    vi.spyOn(api, 'stopRun').mockImplementation(() => new Promise((res) => (resolveStop = res)));
+    hub.api = api;
+    hub.mode = 'mock';
+    router.route = parse(`#/runs/${running.id}`);
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = render(() => <Run />, target);
+
+    const header = () => [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Stop');
+    await until('Stop', () => !!header());
+    header()!.click();
+    const confirm = () => [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find((b) => b.textContent?.trim() === 'Stop run');
+    await until('the confirm', () => !!confirm());
+    confirm()!.click();
+    flushSync();
+
+    // Navigate away before stopRun resolves.
+    router.route = parse(`#/runs/${other.id}`);
+    await until('other run', () => target.textContent?.includes(other.name) ?? false);
+
+    const infoSpy = vi.spyOn(toast, 'info');
+    resolveStop({ ...running, status: 'stopping', epoch: 1 });
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+
+    const msg = infoSpy.mock.calls.map((args) => args.join(' ')).join(' ');
+    expect(msg).toContain(`Stopping ${running.name}`);
+    expect(msg).toContain('No epoch had finished yet');
+    expect(msg).not.toContain('checkpoint from epoch 1');
   });
 });

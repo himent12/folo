@@ -68,6 +68,50 @@ describe('Playground backend switch and viewport cleanup', () => {
     expect(target.querySelector('section[aria-labelledby="pg-timing"]')?.textContent).toContain('Timing appears after a run.');
   });
 
+  it('clears hidden class filters when switching models even if a pending backend switch already cleared pred', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    api.predictInPage = async () => {
+      throw new ApiError(501, 'not_implemented', 'This server cannot send weights.');
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s');
+    c = render(() => <Playground />, target);
+
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'sample')).click();
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'detections');
+    // Hide the first class on model A.
+    const classesTab = [...target.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent?.includes('Classes'))!;
+    classesTab.click();
+    flushSync();
+    const firstToggle = target.querySelector<HTMLButtonElement>('#pg-panel button[aria-pressed="true"]')!;
+    firstToggle.click();
+    flushSync();
+    expect(target.querySelector('.vb-facts')?.textContent).toContain('1 class hidden');
+
+    // Switch to CPU (clears pred while weights are missing), then switch to model B and back to server.
+    const group = target.querySelector('[role="radiogroup"][aria-label="Run the model on"]')!;
+    const cpu = await until(
+      () => [...group.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'CPU' && !b.disabled),
+      'CPU option',
+    );
+    cpu.click();
+    await until(() => target.textContent?.includes('Choose .folo file'), 'weights missing');
+
+    const select = target.querySelector<HTMLSelectElement>('select[aria-label="Model"]')!;
+    const otherModel = [...select.options].find((o) => o.value && o.value !== 'm_hard_s')!.value;
+    select.value = otherModel;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    const serverBtn = [...group.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Server')!;
+    serverBtn.click();
+    await until(() => target.querySelector('#pg-panel button[aria-pressed]'), 'model B classes');
+    expect(target.querySelector('.vb-facts')?.textContent).not.toContain('hidden');
+  });
+
   it('closes the narrow thresholds sheet when widening to desktop so narrowing again does not re-open it', async () => {
     const api = new MockApi('normal', 0);
     api.imageUrl = async () => 'data:,';

@@ -270,6 +270,7 @@ export default function Run() {
     if (!cur || busy.peek()) return;
     const seq = ++stopSeq;
     const wasRemoving = removing.peek();
+    const startDone = epochsDone.peek();
     const startPath = router.location.path;
     busy.set(true);
     try {
@@ -287,7 +288,7 @@ export default function Run() {
       if (!r) return;
       if (mounted && seq === stopSeq) stopOpen.set(false);
       // The checkpoint is the last finished epoch's: none before the first one ends.
-      stoppedToast(r, untrack(() => (seq === stopSeq ? epochsDone.get() : r.epoch)));
+      stoppedToast(r, untrack(() => (seq === stopSeq ? epochsDone.get() : startDone)));
     } catch (e) {
       const msg = wasRemoving ? 'Could not remove the run from the queue' : 'Could not stop the run';
       if (mounted && seq === stopSeq && stopOpen.peek()) stopStatus.error(e, msg);

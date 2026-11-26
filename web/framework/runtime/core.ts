@@ -502,6 +502,14 @@ export function isReader(fn: unknown): fn is Reader<unknown> {
   return typeof fn === 'function' && (fn as Reader<unknown>).$$r === 1;
 }
 
+/** Clears stale NOTIFIED flags on retained non-OWNING upstream computeds so later writes still propagate notifications. */
+function clearUpstreamNotified(s: Source): void {
+  if (!(s instanceof ComputedNode)) return;
+  if ((s._flags & (NOTIFIED | OWNING)) !== NOTIFIED) return;
+  s._flags &= ~NOTIFIED;
+  for (let node = s._sources; node !== undefined; node = node._ns) clearUpstreamNotified(node._s);
+}
+
 /**
  * Internal: an owning memo. Like `computed`, but what `fn` creates (DOM, effects, components) belongs to the memo:
  * it is disposed when `fn` re-runs and when the current owner goes away. Branches (`Show`, conditionals, `Key`) are
@@ -519,7 +527,8 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
         dispose(prev);
       } catch (e) {
         // `fn()` never ran, so `cleanupSources(c)` would otherwise unsubscribe every dependency and strand `c` in HAS_ERROR.
-        retainSources(c);
+        const stale = (c._flags & OUTDATED) !== 0 || c._globalVersion !== globalVersion;
+        retainSources(c, stale, clearUpstreamNotified);
         throw e;
       }
     }
@@ -703,6 +712,21 @@ function run(q: Job[], error: unknown): unknown {
   return error;
 }
 
+let flushError: unknown;
+let hasFlushError = false;
+
+/**
+ * Internal: records a cleanup error to throw after the current flush finishes reconciling the DOM.
+ * Outside an active flush, throws immediately so direct reads still observe the error.
+ */
+export function deferFlushError(err: unknown): void {
+  if (!flushing) throw err;
+  if (!hasFlushError) {
+    hasFlushError = true;
+    flushError = err;
+  }
+}
+
 /**
  * Runs every pending effect now, in cycles: the DOM bindings (render effects), then user effects; repeats while
  * effects write (port of `flushSync`). Writes otherwise flush on their own in a microtask. Effects run parent before child,
@@ -715,6 +739,10 @@ export function flush(): void {
     return;
   }
   flushing = true;
+  const prevFlushError = flushError;
+  const prevHasFlushError = hasFlushError;
+  flushError = undefined;
+  hasFlushError = false;
   let error: unknown;
   let rounds = 0;
   try {
@@ -763,7 +791,12 @@ export function flush(): void {
       }
     }
   } finally {
+    const deferred = hasFlushError;
+    const deferredErr = flushError;
+    flushError = prevFlushError;
+    hasFlushError = prevHasFlushError;
     flushing = false;
+    if (error === undefined && deferred) error = deferredErr;
   }
   if (error !== undefined) throw error;
 }

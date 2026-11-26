@@ -746,7 +746,7 @@ export function className(el: Element, fn: () => unknown, scope?: string, dirs?:
     if (prevDirs !== undefined) for (const k in prevDirs) if (d === undefined || !(k in d)) { dropped = true; break; }
     if (value !== prevValue || dropped) writeClass(el, toClass(value, scope, d));
     else if (d !== undefined) {
-      for (const k in d) if (prevDirs === undefined || !d[k] !== !prevDirs[k]) el.classList.toggle(k, !!d[k]);
+      for (const k in d) if (prevDirs === undefined || !(k in prevDirs) || !d[k] !== !prevDirs[k]) el.classList.toggle(k, !!d[k]);
     }
     prevValue = value;
     prevDirs = d;

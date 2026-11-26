@@ -328,7 +328,7 @@ export default function Logs(props: LogsProps) {
     if (follow.get()) pin();
     else {
       const el = box.peek();
-      if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 24) follow.set(true);
+      if (el && el.clientHeight > 0 && el.scrollHeight - el.scrollTop - el.clientHeight < 24) follow.set(true);
     }
   });
   // Re-pin when the box's height follows the page (Run stretches it to the rail) or the entries re-wrap (the mono

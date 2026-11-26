@@ -510,4 +510,30 @@ describe('Logs: search, copy visible, static tokens, and single-reflow pin', () 
     flushSync();
     expect(target.querySelector('.jump')).toBeNull();
   });
+
+  it('keeps follow paused when new lines stream while the log panel is hidden (clientHeight === 0)', () => {
+    const log = new AppendLog<LogLine>();
+    for (let i = 0; i < 40; i++) log.push(line(i + 1));
+    const version = signal(0);
+    c = render(() => <Logs log={log} version={version.get()} live />, target);
+    flushSync();
+
+    const boxEl = target.querySelector<HTMLDivElement>('.log')!;
+    let scrollH = 800;
+    let clientH = 200;
+    Object.defineProperty(boxEl, 'scrollHeight', { get: () => scrollH, configurable: true });
+    Object.defineProperty(boxEl, 'clientHeight', { get: () => clientH, configurable: true });
+    boxEl.scrollTop = 0;
+    boxEl.dispatchEvent(new Event('scroll'));
+    flushSync();
+    expect(target.querySelector('.jump button')).not.toBeNull();
+
+    // Simulate switching away on mobile (`display: none` -> clientHeight/scrollHeight become 0) while a live line arrives.
+    clientH = 0;
+    scrollH = 0;
+    log.push(line(41));
+    version.set(1);
+    flushSync();
+    expect(target.querySelector('.jump button')).not.toBeNull();
+  });
 });

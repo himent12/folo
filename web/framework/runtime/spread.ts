@@ -32,12 +32,14 @@ export function spread(
   const handlers: Record<string, unknown> = {};
   /** The listeners added, by key: each removed when its key goes, all when the element does. */
   const listeners = new Map<string, () => void>();
-  /** Delegated event types set by this spread, cleared when the spread's owner disposes. */
-  const delegated = new Set<string>();
+  /** Delegated event handlers set by this spread, cleared on dispose only if still installed. */
+  const delegated = new Map<string, unknown>();
   onCleanup(() => {
     for (const off of listeners.values()) off();
     listeners.clear();
-    for (const type of delegated) setDelegated(el, type, undefined);
+    for (const [type, handler] of delegated) {
+      if ((el as unknown as Record<string, unknown>)['$$' + type] === handler) setDelegated(el, type, undefined);
+    }
     delegated.clear();
   });
   let classSet = false;
@@ -69,7 +71,7 @@ export function spread(
         classSet = true;
         prevClass = cls;
       } else if (d !== undefined) {
-        for (const k in d) if (prevDirs === undefined || !d[k] !== !prevDirs[k]) el.classList.toggle(k, !!d[k]);
+        for (const k in d) if (prevDirs === undefined || !(k in prevDirs) || !d[k] !== !prevDirs[k]) el.classList.toggle(k, !!d[k]);
       }
       prevDirs = d;
     }
@@ -82,9 +84,16 @@ export function spread(
       if (key.length > 2 && key[0] === 'o' && key[1] === 'n') {
         const { type, capture } = eventOf(key.slice(2));
         if (!capture && DELEGATED.has(type)) {
-          setDelegated(el, type, value);
-          if (value == null) delegated.delete(type);
-          else delegated.add(type);
+          if (value == null) {
+            const prevHandler = delegated.get(type);
+            if (prevHandler !== undefined && (el as unknown as Record<string, unknown>)['$$' + type] === prevHandler) {
+              setDelegated(el, type, undefined);
+            }
+            delegated.delete(type);
+          } else {
+            setDelegated(el, type, value);
+            delegated.set(type, value);
+          }
         } else {
           handlers[key] = value;
           const off = listeners.get(key);

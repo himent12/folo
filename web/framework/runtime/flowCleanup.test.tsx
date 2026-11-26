@@ -30,32 +30,35 @@ describe('For / Index throwing row cleanup disposal', () => {
     flush();
     expect(view.container.textContent).toBe('abc');
 
-    // Clear all: 'a' throws in cleanup, yet 'b' and 'c' must still be disposed and recovery must work cleanly.
+    // Clear all: 'a' throws in cleanup, yet 'b' and 'c' must still be disposed and DOM updated immediately.
     items.set([]);
     expect(() => flush()).toThrow('boom:a');
     expect(cleaned).toEqual(['a', 'b', 'c']);
+    expect(view.container.textContent).toBe('');
 
     items.set(['x', 'y', 'z']);
     flush();
     expect(view.container.textContent).toBe('xyz');
 
-    // Truncate: 'y' throws in cleanup, yet 'z' must still be disposed and rows truncated cleanly.
+    // Truncate: 'y' throws in cleanup, yet 'z' must still be disposed and DOM truncated immediately.
     cleaned.length = 0;
     failOn = 'y';
     items.set(['x']);
     expect(() => flush()).toThrow('boom:y');
     expect(cleaned).toEqual(['y', 'z']);
+    expect(view.container.textContent).toBe('x');
 
     items.set(['x', 'm', 'n', 'w']);
     flush();
     expect(view.container.textContent).toBe('xmnw');
 
-    // Pure middle removal: 'm' throws in cleanup, yet 'n' must still be disposed and next update must reconcile cleanly.
+    // Pure middle removal: 'm' throws in cleanup, yet 'n' must still be disposed and DOM updated immediately.
     cleaned.length = 0;
     failOn = 'm';
     items.set(['x', 'w']);
     expect(() => flush()).toThrow('boom:m');
     expect(cleaned).toEqual(['m', 'n']);
+    expect(view.container.textContent).toBe('xw');
 
     items.set(['x', 'w', 'q']);
     flush();
@@ -63,7 +66,7 @@ describe('For / Index throwing row cleanup disposal', () => {
     view.unmount();
   });
 
-  it('Index disposes all remaining doomed rows when shrinking throws in cleanup and recovers cleanly', () => {
+  it('Index disposes all remaining doomed rows when shrinking throws in cleanup and reconciles DOM immediately', () => {
     const cleaned: number[] = [];
     let failIdx = 1;
     const items = signal(['a', 'b', 'c', 'd']);
@@ -89,6 +92,7 @@ describe('For / Index throwing row cleanup disposal', () => {
     items.set(['a']);
     expect(() => flush()).toThrow('idx-cleanup:1');
     expect(cleaned).toEqual([1, 2, 3]);
+    expect(view.container.textContent).toBe('a');
 
     items.set(['a', 'e']);
     flush();

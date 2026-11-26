@@ -410,6 +410,13 @@ export default function Playground() {
     onModelUrl: (write) => (syncModelUrl = write),
   });
 
+  let lastModelId: string | null = null;
+  effect(() => {
+    const id = modelId.get();
+    if (id !== null && lastModelId !== null && id !== lastModelId) untrack(() => hidden.set(new Set()));
+    if (id !== null) lastModelId = id;
+  });
+
   effect(() => {
     const id = modelId.get();
     const s = source.get();

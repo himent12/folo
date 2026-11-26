@@ -640,4 +640,92 @@ describe('scheduler & component perf fast paths', () => {
     stop();
     expect(cleanups).toEqual([1, 3]);
   });
+
+  it('keeps tracked memo reactive when cleanup writes a dependency before throwing or a dirty upstream computed was skipped', () => {
+    // Case 1a: direct read — cleanup mutates a tracked dependency before throwing; next read must recompute to 30.
+    const dep = signal(1);
+    let throwOnce = true;
+    let read1!: () => number;
+    const stop1 = createRoot((d) => {
+      read1 = memo(() => {
+        const v = dep.get();
+        onCleanup(() => {
+          if (v === 1 && throwOnce) {
+            throwOnce = false;
+            dep.set(3);
+            throw new Error('cleanup-write-boom');
+          }
+        });
+        return v * 10;
+      });
+      return d;
+    });
+    expect(read1()).toBe(10);
+    dep.set(2);
+    expect(() => read1()).toThrow('cleanup-write-boom');
+    // The write to dep=3 happened during teardown, so the next read must recompute to 30 without needing another write.
+    expect(read1()).toBe(30);
+    stop1();
+
+    // Case 1b: nested computed reading a memo whose cleanup writes its dependency before throwing must not stay stuck throwing.
+    const depB = signal(1);
+    let throwB = true;
+    let readB!: () => number;
+    const stopB = createRoot((d) => {
+      readB = memo(() => {
+        const v = depB.get();
+        onCleanup(() => {
+          if (v === 1 && throwB) {
+            throwB = false;
+            depB.set(3);
+            throw new Error('nested-cleanup-write-boom');
+          }
+        });
+        return v * 10;
+      });
+      return d;
+    });
+    const outer = computed(() => readB());
+    expect(outer.get()).toBe(10);
+    depB.set(2);
+    expect(outer.get()).toBe(30);
+    stopB();
+
+    // Case 2: tracked memo reads signal s1 and computed d2; both change before flush, s1 short-circuits needsToRecompute,
+    // cleanup throws, and subsequent updates to s2 alone must still notify and recover the memo.
+    const s1 = signal(1);
+    const s2 = signal(1);
+    const d2 = computed(() => s2.get() * 10);
+    let throwOnCleanup = true;
+    const seen: number[] = [];
+    const stop2 = createRoot((d) => {
+      const m = memo(() => {
+        const a = s1.get();
+        const b = d2.get();
+        onCleanup(() => {
+          if (throwOnCleanup) {
+            throwOnCleanup = false;
+            throw new Error('upstream-notified-boom');
+          }
+        });
+        return a + b;
+      });
+      effect(() => {
+        seen.push(m());
+      });
+      return d;
+    });
+    flush();
+    expect(seen).toEqual([11]);
+
+    s1.set(2);
+    s2.set(2);
+    expect(() => flush()).toThrow('upstream-notified-boom');
+
+    // Only s2 changes now — d2 must propagate notification to m so the effect recovers to 2 + 30 = 32.
+    s2.set(3);
+    flush();
+    expect(seen).toEqual([11, 32]);
+    stop2();
+  });
 });

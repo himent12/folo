@@ -386,6 +386,7 @@ export class LiveRun {
       const gone = (e: unknown): boolean => {
         if (closed || !(e instanceof ApiError && e.status === 404)) return false;
         closed = true;
+        this.#viewSeq++;
         view.abort();
         clearTimeout(lostTimer);
         clearTimeout(syncTimer);
