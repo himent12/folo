@@ -733,4 +733,160 @@ describe('lazy CommandPalette', () => {
     target.querySelector<HTMLButtonElement>('.read-seed')!.click();
     expect(seenSeed).toBe('');
   });
+
+  it('closes an open ShortcutsDialog on Ctrl+K, navigates cleanly to the chosen route, and focuses the destination heading', async () => {
+    const realPalette = await import('$lib/shell/CommandPalette');
+    const realShortcuts = await import('$lib/shell/ShortcutsDialog');
+    const screens = new Screens((name) =>
+      name === 'overview'
+        ? () => Promise.resolve({ default: () => <h1 tabindex={-1} data-route-focus>Overview</h1> })
+        : name === 'models'
+          ? () => Promise.resolve({ default: () => <h1 tabindex={-1} data-route-focus>Models</h1> })
+          : undefined,
+    );
+    router.route = parse('#/');
+    c = render(
+      () => <App screens={screens} loadPalette={() => Promise.resolve(realPalette)} loadShortcuts={() => Promise.resolve(realShortcuts)} />,
+      target,
+    );
+    await until(() => main().querySelector('h1')?.textContent === 'Overview', 'Overview rendered');
+
+    // Open Shortcuts with `?`.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+    await until(() => target.querySelector<HTMLDialogElement>('dialog.shortcuts[open]'), 'ShortcutsDialog open');
+
+    // Press Ctrl+K while Shortcuts is open: Shortcuts closes immediately and CommandPalette opens.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    await until(() => target.querySelector<HTMLDialogElement>('dialog.palette[open] input'), 'CommandPalette open');
+    expect(target.querySelector('dialog.shortcuts[open]')).toBeNull();
+
+    // Filter to Models and accept with Enter: navigates to #/models, no open dialogs remain, focus lands on Models heading.
+    const input = target.querySelector<HTMLInputElement>('dialog.palette[open] input')!;
+    input.value = 'models';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flush();
+    await until(
+      () => target.querySelector('dialog.palette [role="option"][aria-selected="true"]')?.textContent?.includes('Models'),
+      'Models option selected',
+    );
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    flush();
+
+    await until(() => router.route.name === 'models' && main().querySelector('h1')?.textContent === 'Models', 'Models route rendered');
+    expect(target.querySelector('dialog[open]')).toBeNull();
+    await until(() => document.activeElement === main().querySelector('h1'), 'focus on Models heading');
+  });
+
+  it('closes ShortcutsDialog and CommandPalette on real history/path navigation, but keeps them open during same-path replace URL syncs', async () => {
+    const realPalette = await import('$lib/shell/CommandPalette');
+    const realShortcuts = await import('$lib/shell/ShortcutsDialog');
+    const screens = new Screens((name) =>
+      name === 'playground'
+        ? () => Promise.resolve(screen('the playground'))
+        : name === 'dataset'
+          ? () => Promise.resolve(screen('the dataset'))
+          : name === 'models'
+            ? () => Promise.resolve(screen('the models'))
+            : undefined,
+    );
+    router.go('/playground', { replace: true });
+    try {
+      c = render(
+        () => <App screens={screens} loadPalette={() => Promise.resolve(realPalette)} loadShortcuts={() => Promise.resolve(realShortcuts)} />,
+        target,
+      );
+      await until(() => main().querySelector('.fake'), 'playground');
+
+      // Same-path `replace: true` URL sync (e.g. Playground's 300ms keepSession) keeps CommandPalette and ShortcutsDialog open.
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.palette[open]'), 'CommandPalette open');
+      router.go('/playground?model=m_1&conf=0.35', { replace: true });
+      await settle();
+      expect(target.querySelector('dialog.palette[open]')).not.toBeNull();
+
+      // Real history entry move on same path (e.g. pushing or traversing ?image=img_1) closes ShortcutsDialog.
+      router.go('/datasets/ds_1', { replace: true });
+      await until(() => main().textContent === 'the dataset', 'dataset');
+      expect(target.querySelector('dialog.palette[open]')).toBeNull();
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.shortcuts[open]'), 'ShortcutsDialog open');
+      router.go('/datasets/ds_1?image=img_1');
+      await until(() => !target.querySelector('dialog.shortcuts[open]'), 'ShortcutsDialog closed on history entry move');
+
+      // Independent path change also closes CommandPalette.
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.palette[open]'), 'CommandPalette open');
+      router.route = parse('#/models');
+      await until(() => main().textContent === 'the models', 'models');
+      expect(target.querySelector('dialog.palette[open]')).toBeNull();
+    } finally {
+      router.go('/', { replace: true });
+      await settle();
+    }
+  });
+
+  it('keeps CommandPalette closed if an unrelated modal dialog opens while its chunk is still loading', async () => {
+    const pending = deferred<typeof import('$lib/shell/CommandPalette')>();
+    const screens = new Screens((name) => (name === 'overview' ? () => Promise.resolve(screen('the overview')) : undefined));
+    router.route = parse('#/');
+    c = render(() => <App screens={screens} loadPalette={() => pending.promise} />, target);
+    await until(() => main().querySelector('.fake'), 'overview');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    flush();
+
+    // An unrelated modal dialog (e.g. Export) opens before the palette chunk finishes loading.
+    const modal = target.appendChild(document.createElement('dialog'));
+    modal.setAttribute('open', '');
+    const realPalette = await import('$lib/shell/CommandPalette');
+    pending.resolve(realPalette);
+    await settle();
+    expect(target.querySelector('dialog.palette[open]')).toBeNull();
+    modal.remove();
+  });
+
+  it('ignores a stale queued native close event when ShortcutsDialog is reopened via CommandPalette', async () => {
+    const queuedCloses: HTMLDialogElement[] = [];
+    const origClose = HTMLDialogElement.prototype.close;
+    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+      this.open = false;
+      queuedCloses.push(this);
+    };
+    try {
+      const realPalette = await import('$lib/shell/CommandPalette');
+      const realShortcuts = await import('$lib/shell/ShortcutsDialog');
+      const screens = new Screens((name) => (name === 'overview' ? () => Promise.resolve(screen('the overview')) : undefined));
+      router.route = parse('#/');
+      c = render(
+        () => <App screens={screens} loadPalette={() => Promise.resolve(realPalette)} loadShortcuts={() => Promise.resolve(realShortcuts)} />,
+        target,
+      );
+      await until(() => main().querySelector('.fake'), 'overview');
+
+      // Open Shortcuts -> Ctrl+K closes Shortcuts (close event queued) -> choose "Keyboard shortcuts" to reopen it.
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.shortcuts[open]'), 'ShortcutsDialog open');
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.palette[open] input'), 'CommandPalette open');
+      const input = target.querySelector<HTMLInputElement>('dialog.palette[open] input')!;
+      input.value = 'keyboard shortcuts';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      flush();
+      await until(
+        () => target.querySelector('dialog.palette [role="option"][aria-selected="true"]')?.textContent?.includes('Keyboard shortcuts'),
+        'Keyboard shortcuts option selected',
+      );
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.shortcuts[open]'), 'ShortcutsDialog reopened');
+
+      // Now deliver all queued native `close` events: the reopened ShortcutsDialog must stay open.
+      for (const dlg of queuedCloses.splice(0)) dlg.dispatchEvent(new Event('close'));
+      flush();
+      expect(target.querySelector('dialog.shortcuts[open]')).not.toBeNull();
+      expect(target.querySelector('dialog.palette[open]')).toBeNull();
+    } finally {
+      HTMLDialogElement.prototype.close = origClose;
+    }
+  });
 });

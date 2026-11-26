@@ -518,8 +518,9 @@ css`
     gap: var(--space-4);
     min-width: 0;
   }
+  /* Root html already reserves --size-topbar + --space-3 via scroll-padding-top; add the remaining 4 px to total --space-4. */
   .col :global(section.panel) {
-    scroll-margin-top: calc(var(--size-topbar) + var(--space-4));
+    scroll-margin-top: var(--space-1);
   }
   /* The switch is its own row: its label and hint on the left, the switch on the right edge. */
   .switch-row :global(.switch) {
@@ -682,9 +683,9 @@ css`
         color: var(--text-primary);
       }
     }
-    /* A section's heading lands clear of the top bar and the strip. */
+    /* A section's heading lands clear of the top bar (html scroll-padding-top) and the 44 px jump strip. */
     .col :global(section.panel) {
-      scroll-margin-top: calc(var(--size-topbar) + 44px + var(--space-4));
+      scroll-margin-top: calc(44px + var(--space-1));
     }
   }
   @media (max-width: 767px) {
@@ -701,7 +702,7 @@ css`
       height: 52px;
     }
     .col :global(section.panel) {
-      scroll-margin-top: calc(var(--size-topbar) + 52px + var(--space-4));
+      scroll-margin-top: calc(52px + var(--space-1));
     }
   }
 `;
