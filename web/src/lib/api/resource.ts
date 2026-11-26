@@ -14,9 +14,17 @@
 // no data, and if it fails, its error. When the server answers
 // again after an outage (`hub.back`), a Resource that failed retries by itself and one holding data refreshes quietly.
 
-import { effect, onCleanup, signal, untrack } from 'fw';
+import { batch, effect, onCleanup, signal, untrack } from 'fw';
 import { hub } from './index';
 import { abortError, copy, pollTogether, reuse, together } from './share';
+
+/** Global monotonic sequence counter across all Resources so cross-Resource freshness checks have one total order. */
+let nextSeq = 0;
+
+/** Latest fetch sequence number issued by any Resource. */
+export function currentResourceSeq(): number {
+  return nextSeq;
+}
 
 /** How old an answer a Resource may start from (`startFrom`): one poll of the list and the meters that use it. */
 export const START_FRESH = 2000;
@@ -59,6 +67,7 @@ export class Resource<T> {
   #refreshing = signal(false);
   #stale = signal<unknown>(undefined);
   #updated = signal<number | null>(null);
+  #committed = signal(0);
 
   get data(): T | undefined {
     return this.#data.get();
@@ -101,6 +110,14 @@ export class Resource<T> {
   }
   set updated(v: number | null) {
     this.#updated.set(v);
+  }
+  /** Monotonic sequence number of the latest fetch started on this Resource. */
+  get requestSeq(): number {
+    return this.#seq;
+  }
+  /** Reactive sequence number of the latest fetch that succeeded and committed data (never bumps on abort or error). */
+  get committedSeq(): number {
+    return this.#committed.get();
   }
 
   #fetcher: (signal: AbortSignal) => Promise<T>;
@@ -150,7 +167,7 @@ export class Resource<T> {
       }
       return () => {
         // Invalidate whatever is in flight (including refreshes started since), so nothing lands after cleanup.
-        this.#seq++;
+        this.#seq = ++nextSeq;
         this.#ctrl?.abort();
         ctrl.abort();
       };
@@ -180,7 +197,7 @@ export class Resource<T> {
     // Synchronous lifetime cleanup, so disposal before the first effect flush still marks `#disposed`.
     onCleanup(() => {
       this.#disposed = true;
-      this.#seq++;
+      this.#seq = ++nextSeq;
       this.#ctrl?.abort();
     });
   }
@@ -257,7 +274,7 @@ export class Resource<T> {
     this.#ctrl?.abort();
     this.#ctrl = ctrl;
     this.#loadingRead = null;
-    const seq = ++this.#seq;
+    const seq = (this.#seq = ++nextSeq);
     if (quiet && (this.data !== undefined || (poll && this.error !== undefined))) this.refreshing = true;
     else {
       this.loading = true;
@@ -267,12 +284,16 @@ export class Resource<T> {
     try {
       const v = await promise;
       if (seq !== this.#seq) return;
-      // Equal parts of the answer keep the objects already shown (an unchanged answer writes nothing).
-      this.data = reuse(this.#data.peek(), v);
-      this.error = undefined;
-      this.stale = undefined;
-      this.#invalidated = false;
-      this.updated = Date.now();
+      // Commit data, freshness flags, and `committedSeq` in one batch so readers never observe a torn state.
+      batch(() => {
+        // Equal parts of the answer keep the objects already shown (an unchanged answer writes nothing).
+        this.data = reuse(this.#data.peek(), v);
+        this.error = undefined;
+        this.stale = undefined;
+        this.#invalidated = false;
+        this.updated = Date.now();
+        this.#committed.set(seq);
+      });
     } catch (e) {
       if (seq !== this.#seq || (e instanceof DOMException && e.name === 'AbortError')) return;
       if (!quiet || this.data === undefined) this.error = e;

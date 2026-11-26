@@ -36,7 +36,7 @@ import { FROM_SCRATCH_META, origin } from '$lib/lineage';
 import { href, router } from '$lib/router';
 import { setCrumbs } from '$lib/shell/crumbs';
 import Page from '$lib/shell/Page';
-import { watched } from '$lib/shell/runList';
+import { noteRunEnded, watched } from '$lib/shell/runList';
 import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
@@ -87,7 +87,27 @@ const sameItems = (a: MenuItem[], b: MenuItem[]) =>
 
 export default function Run() {
   const id = computed(() => router.route.params.id ?? '');
-  const live = new LiveRun(() => id.get() || null);
+  // Track the active run id this page is watching so terminal SSE (including during initial load before `/run` +
+  // `/metrics` settle) notifies the shared run list immediately without firing on historical completed runs or waking
+  // up on 10 Hz step ticks.
+  let prevActiveId: string | undefined;
+  const live = new LiveRun(() => id.get() || null, {
+    onEnded: (r, terminal) => {
+      const curId = r?.id ?? untrack(() => id.get());
+      const listed = curId ? untrack(() => watched.runs?.find((x) => x.id === curId)) : undefined;
+      const listedActive = !!listed && ACTIVE.includes(listed.status);
+      if (r) {
+        if (prevActiveId === curId || listedActive) noteRunEnded(r);
+      } else if (listedActive) {
+        noteRunEnded({ ...listed, status: terminal.status, error: terminal.error, queue_position: null });
+      }
+    },
+  });
+  effect(() => {
+    const curId = live.runId;
+    const curStatus = live.status;
+    prevActiveId = curId && curStatus && ACTIVE.includes(curStatus) ? curId : undefined;
+  });
   // Read again with the runs list (one tick): a dataset removed while the page is open shows as removed (stress s3-live-3).
   const datasets = new Resource((s) => hub.api.datasets(s), { poll: 5000 });
   const run = computed(() => live.run);

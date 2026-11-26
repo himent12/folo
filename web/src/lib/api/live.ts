@@ -24,7 +24,7 @@ import { AppendLog } from './appendLog';
 import { ApiError } from './client';
 import { hub } from './index';
 import { heldResults, type HeldResults } from './progress';
-import type { Epoch, LogLine, Run, RunCloud, RunLogs, RunMetrics, Step } from './types';
+import type { Epoch, LogLine, Run, RunCloud, RunLogs, RunMetrics, RunStatus, Step } from './types';
 
 /** Log lines a live view keeps (the latest). */
 export const MAX_LOGS = 2000;
@@ -104,8 +104,21 @@ export function streamedRun(id: string | undefined): Run | undefined {
   return undefined;
 }
 
+/**
+ * The current status of `id` from a live mounted stream while it is up (loaded, not `lost`). Reads only the stream's
+ * id/status signals (never step-level progress fields), so callers that only need status consistency (Overview's header
+ * and slot, the sidebar's Runs badge) do not recompute on 10 Hz step ticks.
+ */
+export function streamedStatus(id: string | undefined): RunStatus | undefined {
+  if (!id) return undefined;
+  for (const s of streams) if (s.runId === id && s.lost === null && !s.loading) return s.status;
+  return undefined;
+}
+
 export class LiveRun {
   #run = signal<Run | undefined>(undefined);
+  #runId = signal<string | undefined>(undefined);
+  #status = signal<RunStatus | undefined>(undefined);
   #error = signal<unknown>(undefined);
   #loading = signal(true);
   #connection = signal<'idle' | 'open' | 'reconnecting'>('idle');
@@ -120,6 +133,15 @@ export class LiveRun {
   }
   set run(v: Run | undefined) {
     this.#run.set(v);
+    this.#runId.set(v?.id);
+    this.#status.set(v?.status);
+    this.#notifyEnded();
+  }
+  get runId(): string | undefined {
+    return this.#runId.get();
+  }
+  get status(): RunStatus | undefined {
+    return this.#status.get();
   }
   get error(): unknown {
     return this.#error.get();
@@ -132,6 +154,7 @@ export class LiveRun {
   }
   set loading(v: boolean) {
     this.#loading.set(v);
+    if (!v) this.#notifyEnded();
   }
   get connection(): 'idle' | 'open' | 'reconnecting' {
     return this.#connection.get();
@@ -149,6 +172,7 @@ export class LiveRun {
   }
   set lost(v: number | null) {
     this.#lost.set(v);
+    if (v === null) this.#notifyEnded();
   }
   /**
    * The run as the server's latest applied snapshot has it, uncorrected by events: once it says the run ended, how many
@@ -240,9 +264,39 @@ export class LiveRun {
   #viewSeq = 0;
   /** While a resumed run repeats steps it had already run: the old last step, and what the new attempt streamed. */
   #replay: { until: number; steps: Step[]; epochs: Epoch[] } | null = null;
+  #onEnded: ((run: Run | null, terminal: { status: RunStatus; error: string | null }) => void) | undefined;
+  #currentId: string | null = null;
+  #endedId: string | null = null;
 
-  constructor(id: () => string | null, opts?: { logs?: boolean }) {
+  #notifyEnded(terminal?: { status: RunStatus; error: string | null }) {
+    if (!this.#onEnded) return;
+    const r = this.#run.peek();
+    const id = r?.id ?? this.#currentId;
+    if (!id) return;
+    if (!terminal) {
+      if (r && ACTIVE.includes(r.status)) {
+        if (this.#endedId === id) this.#endedId = null;
+        return;
+      }
+      if (!r || this.#loading.peek() || this.#lost.peek() !== null) return;
+      if (this.#endedId === id) return;
+      this.#endedId = id;
+      untrack(() => this.#onEnded?.(r, { status: r.status, error: r.error }));
+      return;
+    }
+    if (ACTIVE.includes(terminal.status)) {
+      if (this.#endedId === id) this.#endedId = null;
+      return;
+    }
+    if (this.#endedId === id) return;
+    this.#endedId = id;
+    const endedRun = r ? { ...r, status: terminal.status, error: terminal.error, queue_position: null } : null;
+    untrack(() => this.#onEnded?.(endedRun, terminal));
+  }
+
+  constructor(id: () => string | null, opts?: { logs?: boolean; onEnded?: (run: Run | null, terminal: { status: RunStatus; error: string | null }) => void }) {
     const withLogs = opts?.logs ?? true;
+    this.#onEnded = opts?.onEnded;
     effect(() => {
       untrack(() => streams.add(this));
       return () => void streams.delete(this);
@@ -251,6 +305,8 @@ export class LiveRun {
       const runId = id();
       if (!runId) {
         this.#viewSeq++;
+        this.#currentId = null;
+        this.#endedId = null;
         this.#lastStatus = null;
         this.#lastQueue = null;
         this.#lastCloud = null;
@@ -280,6 +336,8 @@ export class LiveRun {
       void hub.epoch;
       void this.#retry.get();
       this.#viewSeq++;
+      this.#currentId = runId;
+      this.#endedId = null;
       const api = hub.api;
       let closed = false;
       // Every request this view makes ends with it (and with the run's deletion): nothing of it answers later.
@@ -417,6 +475,7 @@ export class LiveRun {
         if (closed || !(e instanceof ApiError && e.status === 404)) return false;
         closed = true;
         this.#viewSeq++;
+        this.#endedId = null;
         view.abort();
         clearTimeout(lostTimer);
         clearTimeout(syncTimer);
@@ -517,6 +576,9 @@ export class LiveRun {
             const next = withLength({ ...this.#takePendingStep(this.run), status, error }, steps_per_epoch, epochs);
             // Only a waiting run has a place in the queue.
             this.run = status !== 'queued' && next.queue_position != null ? { ...next, queue_position: null } : next;
+          } else {
+            // SSE status arrived before the initial `/run` + `/metrics` GETs finished: notify terminal immediately or clear `#endedId` on resume.
+            this.#notifyEnded({ status, error });
           }
           // The trainer resolved the config by the time it reports `running` (docs/API.md): ask once for `resolved`.
           if (status === 'running' && this.run && this.run.resolved == null && !resolvedAsked) {
@@ -661,6 +723,7 @@ export class LiveRun {
       return () => {
         closed = true;
         this.#viewSeq++;
+        this.#endedId = null;
         view.abort();
         clearTimeout(lostTimer);
         clearTimeout(syncTimer);

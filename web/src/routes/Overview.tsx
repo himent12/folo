@@ -15,7 +15,7 @@ import { runDatasetLabel } from '$lib/runDataset';
 import { href } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
-import { watched } from '$lib/shell/runList';
+import { effectiveRuns, noteRunEnded, watched } from '$lib/shell/runList';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -51,8 +51,10 @@ export default function Overview() {
   const system = new Resource((s) => hub.api.system(s));
   // The run list the sidebar's live card reads (the shell polls it every 2 s, shell/RunWatch) while it is current, so the
   // Training card and Recent runs never say something the sidebar contradicts; this page's own list when the shell's
-  // stopped refreshing.
-  const runList = computed(() => (watched.runs && (watched.since === null || !runs.data) ? watched.runs : runs.data));
+  // stopped refreshing. Reconciled with live SSE status transitions so the header summary, live slot, and Recent runs
+  // reflect a finished or stopped run in the same frame as the stream.
+  const usingWatched = computed(() => !!(watched.runs && (watched.since === null || !runs.data)));
+  const runList = computed(() => effectiveRuns(usingWatched.get() ? watched.runs : runs.data, usingWatched.get() ? undefined : runs));
   const runsFailed = computed(() => !!runs.error && !runList.get());
 
   // The run training, or starting (./overview/slot): a run just started shows here at once, as it does in the sidebar.
@@ -278,19 +280,20 @@ export default function Overview() {
                 </div>
               </Panel>
             ) : live.get() ? (
-              <Key when={live.get()!.id}>
+              <Key when={live.get()?.id}>
                 <LiveRunCard
                   run={live.get()!}
                   dataset={
-                    datasets.data && !lookingUp(live.get()!.config.dataset_id)
+                    datasets.data && live.get() && !lookingUp(live.get()!.config.dataset_id)
                       ? (dsById.get().get(live.get()!.config.dataset_id) ?? null)
                       : datasets.error
                         ? null
                         : undefined
                   }
-                  datasetName={dsLabel(live.get()!)}
+                  datasetName={live.get() ? dsLabel(live.get()!) : null}
                   system={system}
                   bind:lost={streamLost}
+                  onended={(r) => noteRunEnded(r, runs)}
                 />
               </Key>
             ) : (

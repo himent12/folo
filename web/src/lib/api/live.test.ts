@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
-import { createRoot, flush as flushSync } from 'fw';
+import { createRoot, effect, flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type Api, type RunEventHandlers } from './client';
 import { hub } from './index';
-import { keepStepsPerEpoch, LiveRun, mergeBy, STREAM_GRACE_MS, streamedRun } from './live';
+import { keepStepsPerEpoch, LiveRun, mergeBy, STREAM_GRACE_MS, streamedRun, streamedStatus } from './live';
 import { MockApi } from './mock';
 import type { Run, RunMetrics, Step } from './types';
 
@@ -170,6 +170,37 @@ describe('LiveRun ordering', () => {
     expect(streamedRun('run_7d1e')).toBeUndefined();
     stop();
     expect(streamedRun('run_7d1e')).toBeUndefined();
+  });
+
+  it('exposes streamedStatus without notifying subscribers on step ticks, only on status or liveness changes', async () => {
+    let live!: LiveRun;
+    const seen: (string | undefined)[] = [];
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+      effect(() => {
+        seen.push(streamedStatus('run_7d1e'));
+      });
+    });
+    flushSync();
+    expect(seen).toEqual([undefined]);
+    metrics.resolve({ steps: [], epochs: [] });
+    handlers.connection?.('open');
+    await vi.advanceTimersByTimeAsync(0);
+    flushSync();
+    expect(seen).toEqual([undefined, 'running']);
+    // Step ticks update `live.run` at frame cadence but must not re-run `streamedStatus` subscribers.
+    handlers.step?.(step(3));
+    await vi.advanceTimersByTimeAsync(20);
+    handlers.step?.(step(4));
+    await vi.advanceTimersByTimeAsync(20);
+    flushSync();
+    expect(seen).toEqual([undefined, 'running']);
+    // A status change notifies immediately.
+    handlers.status?.({ status: 'completed', error: null });
+    flushSync();
+    expect(seen).toEqual([undefined, 'running', 'completed']);
+    stop();
+    expect(streamedStatus('run_7d1e')).toBeUndefined();
   });
 
   it('calls a reopened stream current again on its first step, even while the history load is still pending', async () => {
