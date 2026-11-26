@@ -5,9 +5,15 @@
 use std::collections::HashMap;
 
 use folo_core::Tensor;
+use folo_core::rng::Rng;
+use folo_test_support::TestDir;
 
 use super::*;
-use crate::optim::{AdamW, Optimizer, ParamGroup, Sgd};
+use crate::io::{
+    BestState, CheckpointParts, FileKind, Metadata, ModelConfig, ModelFile, RngState, save_checkpoint,
+};
+use crate::optim::{AdamW, Optimizer, ParamGroup, Sgd, StandardGroups};
+use crate::{Conv2d, Conv2dConfig, DecayKind, Forward, LrSchedule};
 
 /// Exact analytical verification of k-step fast exploration followed by alpha slow-weight interpolation.
 #[test]
@@ -142,7 +148,111 @@ fn lookahead_convergence_resume_and_validation() {
     let make_sgd = || Sgd::new(vec![ParamGroup::new("q", vec![("q".into(), q.clone())])]).unwrap();
     assert!(Lookahead::new(make_sgd(), LookaheadConfig { k: 0, alpha: 0.5 }).is_err());
     assert!(Lookahead::new(make_sgd(), LookaheadConfig { k: 5, alpha: 0.0 }).is_err());
+    assert!(Lookahead::new(make_sgd(), LookaheadConfig { k: 5, alpha: 1e-50 }).is_err());
     assert!(Lookahead::new(make_sgd(), LookaheadConfig { k: 5, alpha: -0.2 }).is_err());
     assert!(Lookahead::new(make_sgd(), LookaheadConfig { k: 5, alpha: 1.1 }).is_err());
     assert!(Lookahead::new(make_sgd(), LookaheadConfig { k: 5, alpha: f64::NAN }).is_err());
+
+    // Tied/aliased parameter storage and nested Lookahead must both be rejected.
+    let tied_sgd =
+        Sgd::new(vec![ParamGroup::new("t", vec![("a".into(), q.clone()), ("b".into(), q.clone())])]).unwrap();
+    assert!(Lookahead::with_defaults(tied_sgd).is_err());
+    let la_once = Lookahead::with_defaults(make_sgd()).unwrap();
+    assert!(Lookahead::with_defaults(la_once).is_err());
+}
+
+/// End-to-end on-disk `.folo` checkpoint save & `ModelFile::resume` round-trip mid-cycle, including
+/// preserving Lookahead phase when wrapping a pre-stepped inner optimizer, and rejecting mismatched
+/// plain-vs-Lookahead resume.
+#[test]
+fn lookahead_folo_checkpoint_resume_round_trip() {
+    let build =
+        |seed: u64| Conv2d::new(Conv2dConfig::new(2, 2, 1).padding(0).bias(true), &mut Rng::seed(seed));
+    let m1 = build(11);
+    let mut inner1 = AdamW::new(StandardGroups::from_module(&m1).into_groups(0.05, 0.9, 0.0)).unwrap();
+    let mut sched1 = LrSchedule::new(DecayKind::Linear, 1, 20, 0.05, 0.0, 0.0, 0.9).unwrap();
+
+    // Advance inner optimizer 2 steps BEFORE wrapping in Lookahead so `fast_steps != step_count()`.
+    let mut rng = Rng::seed(77);
+    for _ in 0..2 {
+        let x = Tensor::randn([1, 2, 3, 3], 0.0, 1.0, &mut rng);
+        let grads = m1.forward(&x).unwrap().square().unwrap().mean_all().unwrap().backward().unwrap();
+        inner1.step(&grads).unwrap();
+        sched1.advance();
+    }
+    let cfg = LookaheadConfig { k: 4, alpha: 0.6 };
+    let mut opt1 = Lookahead::new(inner1, cfg).unwrap();
+    for _ in 0..3 {
+        let x = Tensor::randn([1, 2, 3, 3], 0.0, 1.0, &mut rng);
+        let grads = m1.forward(&x).unwrap().square().unwrap().mean_all().unwrap().backward().unwrap();
+        opt1.step(&grads).unwrap();
+        sched1.advance();
+    }
+    // At checkpoint: inner step = 5, Lookahead fast_steps = 3, slow_steps = 0 (1 step away from sync!).
+    assert_eq!((opt1.step_count(), opt1.fast_step_count(), opt1.slow_step_count()), (5, 3, 0));
+
+    let dir = TestDir::new("folo-nn-lookahead-ckpt");
+    let path = dir.path().join("la.folo");
+    let meta = Metadata::new(FileKind::Checkpoint, ModelConfig::new("n", 1).unwrap(), vec!["obj".into()], 32)
+        .unwrap();
+    save_checkpoint(
+        &path,
+        &meta,
+        &CheckpointParts {
+            model: &m1,
+            ema: None,
+            optimizer: &opt1,
+            schedule: &sched1,
+            rng: &RngState::default(),
+            epoch: 1,
+            best: BestState::default(),
+            train_config: &serde_json::json!({}),
+        },
+    )
+    .unwrap();
+
+    let file = ModelFile::open(&path).unwrap();
+    // Plain AdamW must reject resuming a Lookahead checkpoint.
+    let m_plain = build(99);
+    let mut plain_opt =
+        AdamW::new(StandardGroups::from_module(&m_plain).into_groups(0.05, 0.9, 0.0)).unwrap();
+    assert!(file.resume(&m_plain, &mut plain_opt, None, None).is_err());
+
+    // Conversely, Lookahead<AdamW> must reject resuming a plain (non-Lookahead) checkpoint.
+    let mut plain_contract = opt1.contract();
+    plain_contract.lookahead = None;
+    let m_tmp = build(99);
+    let mut la_reject = Lookahead::new(
+        AdamW::new(StandardGroups::from_module(&m_tmp).into_groups(0.05, 0.9, 0.0)).unwrap(),
+        cfg,
+    )
+    .unwrap();
+    assert!(la_reject.apply_contract(&plain_contract).is_err());
+
+    // Lookahead<AdamW> resumes with exact phase (`fast_steps = 3, slow_steps = 0`) and bit-exact parity!
+    let m2 = build(99);
+    let mut opt2 = Lookahead::new(
+        AdamW::new(StandardGroups::from_module(&m2).into_groups(0.01, 0.9, 0.0)).unwrap(),
+        LookaheadConfig { k: 2, alpha: 0.2 }, // contract adopts saved (k=4, alpha=0.6)
+    )
+    .unwrap();
+    file.resume(&m2, &mut opt2, None, None).unwrap();
+    assert_eq!(opt2.config(), cfg);
+    assert_eq!((opt2.step_count(), opt2.fast_step_count(), opt2.slow_step_count()), (5, 3, 0));
+
+    // Step 1 more time (crosses fast_steps == 4 -> slow_steps == 1!) and 2 more times after: bit-exact!
+    for _ in 0..3 {
+        let x = Tensor::randn([1, 2, 3, 3], 0.0, 1.0, &mut rng);
+        let g1 = m1.forward(&x).unwrap().square().unwrap().mean_all().unwrap().backward().unwrap();
+        let g2 = m2.forward(&x).unwrap().square().unwrap().mean_all().unwrap().backward().unwrap();
+        opt1.step(&g1).unwrap();
+        opt2.step(&g2).unwrap();
+    }
+    assert_eq!((opt1.fast_step_count(), opt1.slow_step_count()), (6, 1));
+    assert_eq!((opt2.fast_step_count(), opt2.slow_step_count()), (6, 1));
+    assert_eq!(m1.weight.to_vec::<f32>().unwrap(), m2.weight.to_vec::<f32>().unwrap());
+    assert_eq!(
+        opt1.slow_weight(0, 0).unwrap().to_vec::<f32>().unwrap(),
+        opt2.slow_weight(0, 0).unwrap().to_vec::<f32>().unwrap()
+    );
 }

@@ -84,6 +84,7 @@ pub fn radam_rectification(step: u64, beta2: f64) -> Result<RAdamRectification> 
     }
     let t = step as f64;
     let ln_b2 = (-one_minus_b2).ln_1p();
+    let u = -ln_b2;
     let t_ln_b2 = t * ln_b2;
     let b2_t = t_ln_b2.exp();
     let one_minus_b2_t = -t_ln_b2.exp_m1();
@@ -91,6 +92,13 @@ pub fn radam_rectification(step: u64, beta2: f64) -> Result<RAdamRectification> 
         rho_inf
     } else if step == 1 {
         1.0
+    } else if t * u < 1e-3 {
+        // Exact small-argument expansion cancelling the 2/u singularity in `rho_inf - 2*t*b2^t/(1-b2^t)`:
+        //   rho_t = t - (t^2 - 1)*u/6 + (t^4 - 1)*u^3/360 - O((t*u)^5 / t)
+        // Machine-accurate in `f64` even when `beta2` is within a few ULPs of `1.0`.
+        let t2 = t * t;
+        let u2 = u * u;
+        (t - ((t2 - 1.0) * u) / 6.0 + ((t2 * t2 - 1.0) * u * u2) / 360.0).clamp(1.0, rho_inf)
     } else {
         (rho_inf - (2.0 * t * b2_t) / one_minus_b2_t).clamp(1.0, rho_inf)
     };
@@ -98,9 +106,9 @@ pub fn radam_rectification(step: u64, beta2: f64) -> Result<RAdamRectification> 
         if b2_t == 0.0 || (rho_inf - rho_t) == 0.0 {
             Some(1.0)
         } else {
-            let num = (rho_t - 4.0) * (rho_t - 2.0) * rho_inf;
-            let den = (rho_inf - 4.0) * (rho_inf - 2.0) * rho_t;
-            Some((num / den).sqrt())
+            let ratio =
+                ((rho_t - 4.0) / (rho_inf - 4.0)) * ((rho_t - 2.0) / (rho_inf - 2.0)) * (rho_inf / rho_t);
+            Some(ratio.sqrt())
         }
     } else {
         None
@@ -212,6 +220,8 @@ struct StagedGroup {
 
 struct PendingResume {
     step: u64,
+    group_names: Vec<String>,
+    param_names: Vec<Vec<String>>,
     groups: Vec<StagedGroup>,
     param_steps: Vec<Vec<u64>>,
     beta1_prods: Vec<Vec<f64>>,
@@ -604,6 +614,12 @@ impl RAdam {
             .collect();
         self.pending_resume = Some(PendingResume {
             step: c.step,
+            group_names: self.groups.iter().map(|g| g.name.clone()).collect(),
+            param_names: self
+                .groups
+                .iter()
+                .map(|g| g.params.iter().map(|(n, _)| n.clone()).collect())
+                .collect(),
             groups: staged_groups,
             param_steps: staged_steps,
             beta1_prods: staged_prods,
@@ -624,14 +640,35 @@ impl RAdam {
     }
 
     /// Restore step counter and state tensors from a checkpoint map.
+    ///
+    /// Resuming at `step > 0` requires staging the matching [`RAdamContract`] via [`RAdam::apply_contract`]
+    /// first so per-parameter active step counts and cumulative `beta1` products are restored accurately.
     pub fn load_state(&mut self, step: u64, state: &HashMap<String, Tensor>) -> Result<()> {
-        if let Some(pending) = &self.pending_resume
-            && pending.step != step
-        {
-            return Err(Error::Load(format!(
-                "RAdam state: step {step} does not match staged contract step {}",
-                pending.step
-            )));
+        if step > 0 && self.pending_resume.is_none() {
+            return Err(Error::Load(
+                "RAdam state: non-zero step resume requires `apply_contract` before `load_state`".into(),
+            ));
+        }
+        if let Some(pending) = &self.pending_resume {
+            if pending.step != step {
+                return Err(Error::Load(format!(
+                    "RAdam state: step {step} does not match staged contract step {}",
+                    pending.step
+                )));
+            }
+            let same_layout = self.groups.len() == pending.group_names.len()
+                && self.groups.iter().zip(&pending.group_names).zip(&pending.param_names).all(
+                    |((g, gname), pnames)| {
+                        g.name == *gname
+                            && g.params.len() == pnames.len()
+                            && g.params.iter().zip(pnames).all(|((n, _), pn)| n == pn)
+                    },
+                );
+            if !same_layout {
+                return Err(Error::Load(
+                    "RAdam state: parameter groups changed after `apply_contract`".into(),
+                ));
+            }
         }
         let mut problems = Vec::new();
         let mut loaded = Vec::new();
@@ -641,6 +678,15 @@ impl RAdam {
                 let req = p_step > 0;
                 for (k, what) in ["exp_avg", "exp_avg_sq"].into_iter().enumerate() {
                     if let Some(t) = take_state(state, name, p, what, req, &mut problems) {
+                        if k == 1 {
+                            let vals = t.to_vec::<f32>()?;
+                            if vals.iter().any(|&v| v < 0.0 || v.is_nan()) {
+                                problems.push(format!(
+                                    "`optim.{name}.exp_avg_sq` contains negative or NaN values"
+                                ));
+                                continue;
+                            }
+                        }
                         loaded.push((gi, pi, k, t));
                     }
                 }
@@ -673,20 +719,6 @@ impl RAdam {
                     ps.beta1_prod = prod;
                 }
             }
-        } else {
-            for (g, st) in self.groups.iter().zip(&mut fresh) {
-                let prod = if step == 0 {
-                    1.0
-                } else if g.base_momentum == 0.0 {
-                    0.0
-                } else {
-                    ((step as f64) * g.base_momentum.ln()).exp()
-                };
-                for ps in st {
-                    ps.param_step = step;
-                    ps.beta1_prod = prod;
-                }
-            }
         }
         self.state = fresh;
         self.step = step;
@@ -695,17 +727,19 @@ impl RAdam {
 }
 
 fn validate_radam_hyperparams(group: &str, lr: f64, b1: f64, b2: f64, eps: f64, wd: f64) -> Result<()> {
-    if !(lr.is_finite() && lr >= 0.0) {
-        return Err(Error::Invalid(format!("radam group `{group}`: lr must be finite and >= 0, got {lr}")));
-    }
-    if !(b1.is_finite() && (0.0..1.0).contains(&b1)) {
+    if !(lr.is_finite() && lr >= 0.0 && (lr as f32).is_finite()) {
         return Err(Error::Invalid(format!(
-            "radam group `{group}`: beta1 must be finite and in [0, 1), got {b1}"
+            "radam group `{group}`: lr must be finite in f32 and >= 0, got {lr}"
         )));
     }
-    if !(b2.is_finite() && (0.0..1.0).contains(&b2)) {
+    if !(b1.is_finite() && (0.0..1.0).contains(&b1) && (b1 as f32) < 1.0 && ((1.0 - b1) as f32) > 0.0) {
         return Err(Error::Invalid(format!(
-            "radam group `{group}`: beta2 must be finite and in [0, 1), got {b2}"
+            "radam group `{group}`: beta1 must be finite in [0, 1) with f32(beta1) < 1, got {b1}"
+        )));
+    }
+    if !(b2.is_finite() && (0.0..1.0).contains(&b2) && (b2 as f32) < 1.0 && ((1.0 - b2) as f32) > 0.0) {
+        return Err(Error::Invalid(format!(
+            "radam group `{group}`: beta2 must be finite in [0, 1) with f32(beta2) < 1, got {b2}"
         )));
     }
     if !(eps.is_finite() && eps > 0.0 && (eps as f32).is_finite() && (eps as f32) > 0.0) {
@@ -713,9 +747,9 @@ fn validate_radam_hyperparams(group: &str, lr: f64, b1: f64, b2: f64, eps: f64, 
             "radam group `{group}`: eps must be finite and > 0 in f32, got {eps}"
         )));
     }
-    if !(wd.is_finite() && wd >= 0.0) {
+    if !(wd.is_finite() && wd >= 0.0 && (wd as f32).is_finite() && ((1.0 - lr * wd) as f32).is_finite()) {
         return Err(Error::Invalid(format!(
-            "radam group `{group}`: weight_decay must be finite and >= 0, got {wd}"
+            "radam group `{group}`: weight_decay must be finite in f32 and >= 0 with finite (1 - lr * wd), got {wd}"
         )));
     }
     Ok(())
@@ -802,23 +836,22 @@ fn radam_step_one(p: &Tensor, g: &Tensor, ps: &ParamState, c: GroupCoef) -> Resu
         })?;
     }
 
-    // Device-generic / aliased fallback using tensor ops under `no_grad`.
+    // Device-generic / aliased fallback using out-of-place tensor ops under `no_grad` so
+    // `g`, `p`, `m`, and `v` can alias arbitrarily without clobbering pre-step values.
     let g_ref = GradRef::as_f32(g)?;
     let g_eff =
         if coupled_wd { g_ref.as_tensor().add(&p.mul_scalar(wd)?)? } else { g_ref.as_tensor().clone() };
-    if let Some(d) = decay {
-        p.mul_scalar_assign(d)?;
-    }
-    m.mul_scalar_assign(b1)?;
-    m.add_scaled_assign(&g_eff, one_minus_b1)?;
-    v.mul_scalar_assign(b2)?;
-    v.add_scaled_assign(&g_eff.square()?, one_minus_b2)?;
-    if rectified {
-        let denom = v.sqrt()?.div_scalar(bc2_sqrt)?.add_scalar(eps)?;
-        let u = m.div(&denom)?;
-        p.add_scaled_assign(&u, -step_size)?;
+    let p_base = if let Some(d) = decay { p.mul_scalar(d)? } else { p.clone() };
+    let m_new = m.mul_scalar(b1)?.add(&g_eff.mul_scalar(one_minus_b1)?)?;
+    let v_new = v.mul_scalar(b2)?.add(&g_eff.square()?.mul_scalar(one_minus_b2)?)?;
+    let p_new = if rectified {
+        let denom = v_new.sqrt()?.div_scalar(bc2_sqrt)?.add_scalar(eps)?;
+        p_base.sub(&m_new.div(&denom)?.mul_scalar(step_size)?)?
     } else {
-        p.add_scaled_assign(m, -step_size)?;
-    }
+        p_base.sub(&m_new.mul_scalar(step_size)?)?
+    };
+    p.copy_from(&p_new)?;
+    m.copy_from(&m_new)?;
+    v.copy_from(&v_new)?;
     Ok(())
 }

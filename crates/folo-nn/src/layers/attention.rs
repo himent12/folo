@@ -39,6 +39,24 @@ fn check_nchw(x: &Tensor, expected_c: Option<usize>, op: &str) -> Result<(usize,
     Ok((n, c, h, w))
 }
 
+/// Verify input and module weight reside on the same device (checked before any `N == 0` early return).
+fn check_device(x: &Tensor, weight: &Tensor, op: &str) -> Result<()> {
+    if x.device() != weight.device() {
+        return Err(Error::Invalid(format!(
+            "{op}: input on {:?} does not match weight on {:?}",
+            x.device(),
+            weight.device()
+        )));
+    }
+    Ok(())
+}
+
+/// Align an attention gate's dtype to `x.dtype()` (required under GPU `autocast(F16)` where `Conv2d`
+/// outputs `F16` while `x` may still be `F32`, or vice versa).
+fn align_gate(x: &Tensor, gate: Tensor) -> Result<Tensor> {
+    if gate.dtype() != x.dtype() { Ok(gate.to_dtype(x.dtype())?) } else { Ok(gate) }
+}
+
 /// Squeeze-and-Excitation (SE) channel attention block (Hu et al., CVPR 2018).
 ///
 /// ```text
@@ -109,13 +127,14 @@ impl Module for SqueezeExcitation {
 impl Forward for SqueezeExcitation {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let (n, _, _, _) = check_nchw(x, Some(self.channels), "SqueezeExcitation")?;
+        check_device(x, &self.fc1.weight, "SqueezeExcitation")?;
         if n == 0 {
             return Ok(x.mul_scalar(0.0)?);
         }
         let s = x.mean([2, 3], true)?;
         let s = self.fc1.forward(&s)?;
         let s = self.act.forward(&s)?;
-        let s = self.fc2.forward(&s)?.sigmoid()?;
+        let s = align_gate(x, self.fc2.forward(&s)?.sigmoid()?)?;
         Ok(x.mul(&s)?)
     }
 }
@@ -138,7 +157,13 @@ pub fn eca_kernel_size(channels: usize, gamma: f32, b: f32) -> Result<usize> {
     if !b.is_finite() {
         return Err(Error::Invalid(format!("eca_kernel_size: b must be finite, got {b}")));
     }
-    let raw = (((channels as f64).log2() + b as f64) / gamma as f64).abs().floor() as usize;
+    let raw_f = (((channels as f64).log2() + b as f64) / gamma as f64).abs().floor();
+    if !raw_f.is_finite() || raw_f > 1_000_000.0 {
+        return Err(Error::Invalid(format!(
+            "eca_kernel_size: computed kernel size {raw_f} exceeds supported range for channels={channels}, gamma={gamma}, b={b}"
+        )));
+    }
+    let raw = raw_f as usize;
     let k = if raw == 0 {
         1
     } else if raw % 2 == 1 {
@@ -214,13 +239,7 @@ impl Forward for Eca {
                 self.kernel_size
             )));
         }
-        if x.device() != self.weight.device() {
-            return Err(Error::Invalid(format!(
-                "Eca: input on {:?} does not match weight on {:?}",
-                x.device(),
-                self.weight.device()
-            )));
-        }
+        check_device(x, &self.weight, "Eca")?;
         if n == 0 {
             return Ok(x.mul_scalar(0.0)?);
         }
@@ -228,12 +247,17 @@ impl Forward for Eca {
         let y_1d = y.reshape([n, 1, 1, c])?;
         let params =
             Conv2dParams { stride: [1, 1], padding: [0, self.kernel_size / 2], dilation: [1, 1], groups: 1 };
-        let w = if y_1d.dtype() == DType::F16 && self.weight.dtype() == DType::F32 {
+        // Under GPU `autocast(F16)`, pass the `F32` master weight straight to `conv2d_with` so
+        // `conv2d_autocast` handles the mixed-precision cast and keeps `F32` master weight gradients.
+        let w = if folo_core::autocast_dtype().is_none()
+            && y_1d.dtype() == DType::F16
+            && self.weight.dtype() == DType::F32
+        {
             self.weight.to_dtype(DType::F16)?
         } else {
             self.weight.clone()
         };
-        let s = y_1d.conv2d_with(&w, None, &params)?.sigmoid()?.reshape([n, c, 1, 1])?;
+        let s = align_gate(x, y_1d.conv2d_with(&w, None, &params)?.sigmoid()?.reshape([n, c, 1, 1])?)?;
         Ok(x.mul(&s)?)
     }
 }
@@ -289,6 +313,7 @@ impl Module for ChannelAttention {
 impl Forward for ChannelAttention {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let (n, _, _, _) = check_nchw(x, Some(self.channels), "ChannelAttention")?;
+        check_device(x, &self.fc1.weight, "ChannelAttention")?;
         if n == 0 {
             return Ok(x.mul_scalar(0.0)?);
         }
@@ -296,7 +321,7 @@ impl Forward for ChannelAttention {
         let max_pool = x.max([2, 3], true)?;
         let avg_out = self.fc2.forward(&self.fc1.forward(&avg_pool)?.relu()?)?;
         let max_out = self.fc2.forward(&self.fc1.forward(&max_pool)?.relu()?)?;
-        let mc = avg_out.add(&max_out)?.sigmoid()?;
+        let mc = align_gate(x, avg_out.add(&max_out)?.sigmoid()?)?;
         Ok(x.mul(&mc)?)
     }
 }
@@ -321,6 +346,16 @@ impl SpatialAttention {
                 "SpatialAttention: kernel_size must be odd and >= 1, got {kernel_size}"
             )));
         }
+        if kernel_size
+            .checked_mul(kernel_size)
+            .and_then(|k2| k2.checked_mul(2))
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .is_none()
+        {
+            return Err(Error::Invalid(format!(
+                "SpatialAttention: kernel_size {kernel_size} overflows weight allocation"
+            )));
+        }
         let conv =
             Conv2d::try_new(Conv2dConfig::new(2, 1, kernel_size).padding(kernel_size / 2).bias(false), rng)?;
         Ok(Self { conv, kernel_size })
@@ -341,13 +376,14 @@ impl Module for SpatialAttention {
 impl Forward for SpatialAttention {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let (n, _, _, _) = check_nchw(x, None, "SpatialAttention")?;
+        check_device(x, &self.conv.weight, "SpatialAttention")?;
         if n == 0 {
             return Ok(x.mul_scalar(0.0)?);
         }
         let avg_s = x.mean(1, true)?;
         let max_s = x.max(1, true)?;
         let cat = Tensor::cat(&[avg_s, max_s], 1)?;
-        let ms = self.conv.forward(&cat)?.sigmoid()?;
+        let ms = align_gate(x, self.conv.forward(&cat)?.sigmoid()?)?;
         Ok(x.mul(&ms)?)
     }
 }

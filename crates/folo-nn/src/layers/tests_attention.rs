@@ -83,6 +83,7 @@ fn eca_kernel_formula_grad_check_and_edge_cases() {
     assert_eq!(eca_kernel_size(256, 2.0, 1.0).unwrap(), 5);
     assert!(eca_kernel_size(0, 2.0, 1.0).is_err());
     assert!(eca_kernel_size(64, 0.0, 1.0).is_err());
+    assert!(eca_kernel_size(64, 1e-30, 1.0).is_err()); // huge kernel rejected instead of saturating usize::MAX
     assert!(eca_kernel_size(64, 2.0, f32::NAN).is_err());
 
     let mut rng = Rng::seed(202);
@@ -163,6 +164,7 @@ fn cbam_grad_check_and_edge_cases() {
     assert!(ChannelAttention::new(4, 0, &mut rng).is_err());
     assert!(SpatialAttention::new(0, &mut rng).is_err());
     assert!(SpatialAttention::new(4, &mut rng).is_err()); // even kernel rejected
+    assert!(SpatialAttention::new(usize::MAX, &mut rng).is_err()); // overflow rejected
     assert!(Cbam::new(4, 2, 6, &mut rng).is_err());
 }
 
@@ -194,7 +196,12 @@ fn weight_standardized_conv2d_properties_grad_check_and_edge_cases() {
         assert!((a - b).abs() < 1e-4, "shift invariance: {a} vs {b}");
     }
 
-    // Constant filter and fan_in == 1 stay finite in both forward and backward.
+    // Constant filter (including huge finite 1e38 values that would overflow an unscaled sum) and
+    // fan_in == 1 stay finite in both forward and backward.
+    let huge_const = Tensor::full([1, 4, 1, 1], 1e38f32);
+    let huge_hat = standardize_weight(&huge_const, WS_CONV_DEFAULT_EPS).unwrap();
+    assert!(huge_hat.to_vec::<f32>().unwrap().iter().all(|&v| v == 0.0));
+
     let const_w = Tensor::full([2, 3, 2, 2], 5.0).requires_grad_();
     let cw_hat = standardize_weight(&const_w, WS_CONV_DEFAULT_EPS).unwrap();
     assert!(cw_hat.to_vec::<f32>().unwrap().iter().all(|&v| v == 0.0));
@@ -246,6 +253,7 @@ fn weight_standardized_conv2d_properties_grad_check_and_edge_cases() {
     assert!(standardize_weight(&w, 0.0).is_err());
     assert!(standardize_weight(&w, f32::NAN).is_err());
     assert!(WeightStandardizedConv2d::with_eps(cfg, -1e-5, &mut rng).is_err());
+    assert!(WeightStandardizedConv2d::new(Conv2dConfig::new(1, 1, usize::MAX), &mut rng).is_err());
 }
 
 /// Clean parameter naming and on-disk `.folo` weights save/load round-trip across all four new blocks.

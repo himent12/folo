@@ -48,6 +48,10 @@ fn radam_rectification_analytical_values_and_transition() {
     assert!(radam_rectification(100, 0.5).unwrap().rect.is_none());
     // beta2 = 0.0 -> rho_inf = 1.0 -> unrectified.
     assert!(radam_rectification(1, 0.0).unwrap().rect.is_none());
+    // Extreme beta2 very close to 1.0 still hits the step-5 rectification transition via small-argument series.
+    let r5_extreme = radam_rectification(5, 0.9999999999999999).unwrap();
+    assert!((r5_extreme.rho_t - 5.0).abs() < 1e-12, "rho_t={}", r5_extreme.rho_t);
+    assert!(r5_extreme.rect.is_some_and(|r| r.is_finite() && r > 0.0 && r < 1.0));
 
     // Invalid inputs.
     assert!(radam_rectification(0, 0.999).is_err());
@@ -181,21 +185,65 @@ fn radam_convergence_resume_and_validation() {
     }
     assert_eq!(p_a.to_vec::<f32>().unwrap(), p_b.to_vec::<f32>().unwrap());
 
-    // 3. Validation errors.
+    // 3. Validation errors (including f32 representability, negative exp_avg_sq, and contract enforcement).
     let q = Tensor::zeros([2]).requires_grad_();
     for bad in [
         RAdamConfig { lr: -1e-3, ..RAdamConfig::default() },
         RAdamConfig { lr: f64::NAN, ..RAdamConfig::default() },
+        RAdamConfig { lr: 1e40, ..RAdamConfig::default() }, // overflows f32
         RAdamConfig { betas: [1.0, 0.999], ..RAdamConfig::default() },
+        RAdamConfig { betas: [1.0 - 1e-12, 0.999], ..RAdamConfig::default() }, // rounds to 1.0 in f32
         RAdamConfig { betas: [0.9, 1.0], ..RAdamConfig::default() },
+        RAdamConfig { betas: [0.9, 1.0 - 1e-12], ..RAdamConfig::default() }, // rounds to 1.0 in f32
         RAdamConfig { betas: [-0.1, 0.999], ..RAdamConfig::default() },
         RAdamConfig { eps: 0.0, ..RAdamConfig::default() },
         RAdamConfig { eps: 1e-60, ..RAdamConfig::default() }, // underflows to 0.0 in f32
         RAdamConfig { weight_decay: -0.01, ..RAdamConfig::default() },
+        RAdamConfig { lr: 1e20, weight_decay: 1e20, ..RAdamConfig::default() }, // 1 - lr*wd overflows f32
     ] {
         assert!(RAdam::from_params(vec![("q".into(), q.clone())], bad).is_err(), "expected err for {bad:?}");
     }
-    // Group validation rejects mismatched step in load_state after apply_contract.
-    let mut opt_c = RAdam::new(vec![ParamGroup::new("p", vec![("p".into(), q)])]).unwrap();
-    assert!(opt_c.load_state(1, &HashMap::new()).is_err());
+
+    // Non-zero load_state requires apply_contract first.
+    let mut opt_c = RAdam::new(vec![ParamGroup::new("p", vec![("p".into(), q.clone())])]).unwrap();
+    let mut dummy_state = HashMap::new();
+    dummy_state.insert("p.exp_avg".into(), Tensor::zeros([2]));
+    dummy_state.insert("p.exp_avg_sq".into(), Tensor::zeros([2]));
+    assert!(opt_c.load_state(1, &dummy_state).is_err());
+
+    // Negative and NaN exp_avg_sq must be rejected on load_state.
+    let mut bad_contract = opt_c.contract();
+    bad_contract.step = 1;
+    bad_contract.groups[0].param_steps = vec![1];
+    bad_contract.groups[0].beta1_prods = vec![0.9];
+    for bad_v in [-1.0f32, f32::NAN] {
+        opt_c.apply_contract(&bad_contract).unwrap();
+        let mut st = HashMap::new();
+        st.insert("p.exp_avg".into(), Tensor::zeros([2]));
+        st.insert("p.exp_avg_sq".into(), Tensor::from_slice(&[0.0, bad_v], [2]).unwrap());
+        assert!(opt_c.load_state(1, &st).is_err());
+    }
+
+    // Mutating groups_mut() after apply_contract must error cleanly instead of panicking.
+    opt_c.apply_contract(&bad_contract).unwrap();
+    opt_c.groups_mut()[0].params.push(("extra".into(), Tensor::zeros([2])));
+    assert!(opt_c.load_state(1, &dummy_state).is_err());
+}
+
+/// Aliased gradient (`g` shares storage with `p`) must use pre-decay `g` in the fallback path.
+#[test]
+fn radam_aliased_grad_equals_param_does_not_clobber() {
+    struct SelfGrad(Tensor);
+    impl GradSource for SelfGrad {
+        fn grad(&self, _param: &Tensor) -> Option<&Tensor> {
+            Some(&self.0)
+        }
+    }
+    let p = Tensor::from_slice(&[2.0f32], [1]).unwrap().requires_grad_();
+    let cfg = RAdamConfig { lr: 0.1, betas: [0.0, 0.999], eps: 1e-8, weight_decay: 0.5, decoupled_wd: true };
+    let mut opt = RAdam::from_params(vec![("p".into(), p.clone())], cfg).unwrap();
+    opt.step(&SelfGrad(p.clone())).unwrap();
+    // Unrectified step 1: p_decayed = 2.0 * (1 - 0.1 * 0.5) = 1.9, g_eff = 2.0 -> p = 1.9 - 0.1 * 2.0 = 1.70.
+    let got = p.to_vec::<f32>().unwrap()[0];
+    assert!((got - 1.70).abs() < 1e-6, "expected 1.70, got {got}");
 }

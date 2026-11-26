@@ -177,6 +177,9 @@ pub(crate) fn validate(file: &ModelFile) -> Result<CheckpointMeta> {
                 .into(),
         ));
     }
+    if let Some(la) = &optim.lookahead {
+        la.validate(optim.step).map_err(|e| Error::Metadata(format!("folo.optim: {e}")))?;
+    }
 
     // Every model tensor is in exactly one group, and every group parameter is a model tensor.
     let model: BTreeSet<&str> = file.names(Namespace::Model).into_iter().collect();
@@ -391,7 +394,7 @@ impl ModelFile {
         let report = self.load(model, &opts)?;
 
         optimizer.apply_contract(&c.optim)?;
-        let state_names = expected_state(optimizer);
+        let state_names = expected_state(optimizer, c.optim.lookahead.is_some());
         let mut state = HashMap::new();
         let mut unexpected = Vec::new();
         for n in self.names(Namespace::Optim) {
@@ -429,17 +432,26 @@ impl ModelFile {
 }
 
 /// `<param>.<state>` keys the optimizer type can use.
-fn expected_state(opt: &dyn Optimizer) -> BTreeSet<String> {
+fn expected_state(opt: &dyn Optimizer, has_lookahead: bool) -> BTreeSet<String> {
     let states: &[&str] = match opt.kind() {
         OptimKind::Sgd => &["momentum_buffer"],
         OptimKind::AdamW => &["exp_avg", "exp_avg_sq"],
         OptimKind::MuSgd => &["momentum_buffer", "muon_buffer"],
     };
-    opt.groups()
+    let mut out: BTreeSet<String> = opt
+        .groups()
         .iter()
         .flat_map(|g| &g.params)
         .flat_map(|(n, _)| states.iter().map(move |s| format!("{n}.{s}")))
-        .collect()
+        .collect();
+    if has_lookahead {
+        for g in opt.groups() {
+            for (n, _) in &g.params {
+                out.insert(format!("{n}.lookahead_slow"));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

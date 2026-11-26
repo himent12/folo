@@ -16,12 +16,12 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use folo_core::{DType, Device, Tensor, no_grad};
 use serde::{Deserialize, Serialize};
 
-use super::{GradSource, OptimContract, OptimKind, Optimizer, ParamGroup, cpu_fast, take_state};
+use super::{GradSource, OptimContract, OptimKind, Optimizer, ParamGroup, cpu_fast, storage_key, take_state};
 use crate::{Error, Result};
 
 /// Default number of fast inner steps `k` per slow-weight synchronization (`5`).
@@ -35,7 +35,7 @@ pub const LOOKAHEAD_DEFAULT_ALPHA: f64 = 0.5;
 pub struct LookaheadConfig {
     /// Number of fast inner optimizer steps per slow-weight interpolation (`>= 1`, default `5`).
     pub k: u64,
-    /// Slow-weight interpolation factor `alpha` in `(0, 1]` (default `0.5`).
+    /// Slow-weight interpolation factor `alpha` in `(0, 1]` (must remain positive in `f32`; default `0.5`).
     pub alpha: f64,
 }
 
@@ -51,14 +51,61 @@ impl LookaheadConfig {
         if self.k == 0 {
             return Err(Error::Invalid("lookahead: k must be >= 1, got 0".into()));
         }
-        if !(self.alpha.is_finite() && self.alpha > 0.0 && self.alpha <= 1.0) {
+        if !(self.alpha.is_finite()
+            && self.alpha > 0.0
+            && self.alpha <= 1.0
+            && (self.alpha as f32).is_finite()
+            && (self.alpha as f32) > 0.0)
+        {
             return Err(Error::Invalid(format!(
-                "lookahead: alpha must be finite and in (0, 1], got {}",
+                "lookahead: alpha must be finite in (0, 1] and positive in f32, got {}",
                 self.alpha
             )));
         }
         Ok(())
     }
+}
+
+/// Serializable Lookahead wrapper contract stored in [`OptimContract::lookahead`].
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LookaheadContract {
+    /// Fast inner steps `k >= 1` per slow-weight synchronization.
+    pub k: u64,
+    /// Slow-weight interpolation factor `alpha` in `(0, 1]` (positive in `f32`).
+    pub alpha: f64,
+    /// Completed fast steps under this Lookahead wrapper.
+    pub fast_steps: u64,
+    /// Completed slow-weight synchronizations (`fast_steps / k`).
+    pub slow_steps: u64,
+}
+
+impl LookaheadContract {
+    /// Validate `self` against the outer optimizer's `optim_step` count.
+    pub fn validate(&self, optim_step: u64) -> Result<()> {
+        LookaheadConfig { k: self.k, alpha: self.alpha }.validate()?;
+        if self.fast_steps > optim_step {
+            return Err(Error::Invalid(format!(
+                "lookahead contract: fast_steps {} exceeds optimizer step {}",
+                self.fast_steps, optim_step
+            )));
+        }
+        if self.slow_steps != self.fast_steps / self.k {
+            return Err(Error::Invalid(format!(
+                "lookahead contract: slow_steps {} does not match fast_steps {} / k {}",
+                self.slow_steps, self.fast_steps, self.k
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PendingLookahead {
+    step: u64,
+    cfg: LookaheadConfig,
+    fast_steps: u64,
+    slow_steps: u64,
 }
 
 /// Lookahead optimizer wrapper (`k` steps forward with `O`, 1 interpolation step back toward slow weights).
@@ -71,6 +118,7 @@ pub struct Lookahead<O: Optimizer> {
     fast_steps: u64,
     /// Number of completed slow-weight synchronizations (`fast_steps / k`).
     slow_steps: u64,
+    pending_resume: Option<PendingLookahead>,
 }
 
 impl<O: Optimizer> Lookahead<O> {
@@ -78,8 +126,13 @@ impl<O: Optimizer> Lookahead<O> {
     /// parameters.
     pub fn new(inner: O, cfg: LookaheadConfig) -> Result<Self> {
         cfg.validate()?;
+        if inner.contract().lookahead.is_some() {
+            return Err(Error::Invalid(
+                "lookahead: cannot wrap an optimizer that is already wrapped in Lookahead".into(),
+            ));
+        }
         let slow_weights = clone_params_detached(inner.groups())?;
-        Ok(Self { inner, cfg, slow_weights, fast_steps: 0, slow_steps: 0 })
+        Ok(Self { inner, cfg, slow_weights, fast_steps: 0, slow_steps: 0, pending_resume: None })
     }
 
     /// Wrap `inner` with [`LookaheadConfig::default`] (`k = 5, alpha = 0.5`).
@@ -182,6 +235,7 @@ impl<O: Optimizer> Lookahead<O> {
                 self.slow_weights.len()
             )));
         }
+        let mut seen_params = HashSet::new();
         for (grp, slows) in groups.iter().zip(&self.slow_weights) {
             if grp.params.len() != slows.len() {
                 return Err(Error::Invalid(format!(
@@ -192,12 +246,18 @@ impl<O: Optimizer> Lookahead<O> {
                 )));
             }
             for ((name, p), phi) in grp.params.iter().zip(slows) {
+                if !seen_params.insert(storage_key(p)) {
+                    return Err(Error::Invalid(format!(
+                        "lookahead.{op}: parameter `{name}` aliases another parameter's storage"
+                    )));
+                }
                 if p.dtype() != DType::F32
                     || phi.dtype() != DType::F32
                     || p.shape() != phi.shape()
                     || p.device() != phi.device()
                     || !p.layout().is_non_overlapping()
                     || !phi.layout().is_non_overlapping()
+                    || p.same_storage(phi)
                 {
                     return Err(Error::Invalid(format!(
                         "lookahead.{op}: parameter `{name}` ({:?} {:?} {}) does not match slow weight ({:?} {:?} {})",
@@ -242,6 +302,7 @@ impl<O: Optimizer> Optimizer for Lookahead<O> {
     fn step(&mut self, grads: &dyn GradSource) -> Result<()> {
         self.check_alignment("step")?;
         self.inner.step(grads)?;
+        self.pending_resume = None;
         self.fast_steps = self.fast_steps.saturating_add(1);
         if self.fast_steps.is_multiple_of(self.cfg.k) {
             self.interpolate_slow_and_sync()?;
@@ -255,6 +316,7 @@ impl<O: Optimizer> Optimizer for Lookahead<O> {
     }
 
     fn state_tensors(&self) -> Result<Vec<(String, Tensor)>> {
+        self.check_alignment("state_tensors")?;
         let mut out = self.inner.state_tensors()?;
         for (grp, slows) in self.inner.groups().iter().zip(&self.slow_weights) {
             for ((name, _), phi) in grp.params.iter().zip(slows) {
@@ -265,6 +327,15 @@ impl<O: Optimizer> Optimizer for Lookahead<O> {
     }
 
     fn load_state(&mut self, step: u64, state: &HashMap<String, Tensor>) -> Result<()> {
+        self.check_alignment("load_state").map_err(|e| Error::Load(e.to_string()))?;
+        if let Some(pending) = &self.pending_resume
+            && pending.step != step
+        {
+            return Err(Error::Load(format!(
+                "Lookahead state: step {step} does not match staged contract step {}",
+                pending.step
+            )));
+        }
         let mut problems = Vec::new();
         let mut loaded = Vec::new();
         for (gi, g) in self.inner.groups().iter().enumerate() {
@@ -285,8 +356,14 @@ impl<O: Optimizer> Optimizer for Lookahead<O> {
             dst.copy_from(&t.to_device(dst.device())?)?;
         }
         self.slow_weights = fresh;
-        self.fast_steps = step;
-        self.slow_steps = step / self.cfg.k;
+        if let Some(pending) = self.pending_resume.take() {
+            self.cfg = pending.cfg;
+            self.fast_steps = pending.fast_steps;
+            self.slow_steps = pending.slow_steps;
+        } else {
+            self.fast_steps = step;
+            self.slow_steps = step / self.cfg.k;
+        }
         Ok(())
     }
 
@@ -301,22 +378,49 @@ impl<O: Optimizer> Optimizer for Lookahead<O> {
     }
 
     fn contract(&self) -> OptimContract {
-        self.inner.contract()
+        let mut c = self.inner.contract();
+        c.lookahead = Some(LookaheadContract {
+            k: self.cfg.k,
+            alpha: self.cfg.alpha,
+            fast_steps: self.fast_steps,
+            slow_steps: self.slow_steps,
+        });
+        c
     }
 
     fn apply_contract(&mut self, c: &OptimContract) -> Result<()> {
-        self.inner.apply_contract(c)
+        self.check_alignment("apply_contract").map_err(|e| Error::Load(e.to_string()))?;
+        let lc = c.lookahead.ok_or_else(|| {
+            Error::Load("folo.optim: Lookahead optimizer requires a `lookahead` contract".into())
+        })?;
+        lc.validate(c.step).map_err(|e| Error::Load(e.to_string()))?;
+        let mut inner_c = c.clone();
+        inner_c.lookahead = None;
+        self.inner.apply_contract(&inner_c)?;
+        self.pending_resume = Some(PendingLookahead {
+            step: c.step,
+            cfg: LookaheadConfig { k: lc.k, alpha: lc.alpha },
+            fast_steps: lc.fast_steps,
+            slow_steps: lc.slow_steps,
+        });
+        Ok(())
     }
 }
 
 fn clone_params_detached(groups: &[ParamGroup]) -> Result<Vec<Vec<Tensor>>> {
     let _ng = no_grad();
+    let mut seen_params = HashSet::new();
     groups
         .iter()
         .map(|g| {
             g.params
                 .iter()
                 .map(|(name, p)| {
+                    if !seen_params.insert(storage_key(p)) {
+                        return Err(Error::Invalid(format!(
+                            "lookahead: parameter `{name}` aliases another parameter's storage"
+                        )));
+                    }
                     if p.dtype() != DType::F32 {
                         return Err(Error::Invalid(format!(
                             "lookahead: parameter `{name}` is {}, expected f32",

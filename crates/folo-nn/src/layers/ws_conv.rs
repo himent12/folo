@@ -51,7 +51,10 @@ pub fn standardize_weight(weight: &Tensor, eps: f32) -> Result<Tensor> {
         )));
     }
     let out_c = dims[0];
-    let fan_in: usize = dims[1..].iter().product();
+    let fan_in = dims[1..]
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or_else(|| Error::Invalid(format!("standardize_weight: fan_in overflow for shape {dims:?}")))?;
     if out_c == 0 || fan_in == 0 {
         return Err(Error::Invalid(format!(
             "standardize_weight: weight must be non-empty, got shape {dims:?}"
@@ -60,7 +63,8 @@ pub fn standardize_weight(weight: &Tensor, eps: f32) -> Result<Tensor> {
 
     let work = if orig_dtype == DType::F16 { weight.to_dtype(DType::F32)? } else { weight.clone() };
     let flat = work.reshape([out_c, fan_in])?;
-    let mean = flat.mean(1, true)?;
+    // Scale before summing so large finite constant filters (e.g. `[1e38; fan_in]`) do not overflow `f32`.
+    let mean = flat.mul_scalar(1.0 / fan_in as f32)?.sum(1, true)?;
     let centered = flat.sub(&mean)?;
     let var = centered.square()?.mean(1, true)?;
     let denom = var.add_scalar(eps)?.sqrt()?;
@@ -160,6 +164,18 @@ fn validate_ws_conv(c: &Conv2dConfig, eps: f32) -> Result<()> {
         || !c.out_channels.is_multiple_of(c.groups)
     {
         return Err(Error::Invalid(format!("WeightStandardizedConv2d: invalid config {c:?}")));
+    }
+    let in_per_group = c.in_channels / c.groups;
+    if in_per_group
+        .checked_mul(c.kernel)
+        .and_then(|v| v.checked_mul(c.kernel))
+        .and_then(|v| v.checked_mul(c.out_channels))
+        .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
+        .is_none()
+    {
+        return Err(Error::Invalid(format!(
+            "WeightStandardizedConv2d: weight geometry overflows allocation for {c:?}"
+        )));
     }
     Ok(())
 }
