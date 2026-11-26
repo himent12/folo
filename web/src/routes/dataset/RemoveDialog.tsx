@@ -82,6 +82,7 @@ export default function RemoveDialog(props: RemoveDialogProps) {
   async function remove() {
     if (deleting.peek()) return;
     const d = props.dataset;
+    const startPath = router.location.path;
     deleting.set(true);
     try {
       const gone = files();
@@ -89,7 +90,7 @@ export default function RemoveDialog(props: RemoveDialogProps) {
       datasetsChanged();
       if (mounted) open.set(false);
       toast.success('Dataset removed', gone ? `${d.name} and its ${images()} were deleted.` : `${d.name} is no longer registered. Files on disk were not touched.`);
-      if (mounted) router.go('/datasets', { replace: true });
+      if (mounted && router.location.path === startPath) router.go('/datasets', { replace: true });
     } catch (e) {
       if (mounted && open.peek()) status.error(e, 'Could not remove the dataset');
       else toast.error(e, 'Could not remove the dataset');

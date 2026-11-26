@@ -218,14 +218,19 @@ export default function Benchmark() {
   async function answer(keep: 'save' | 'discard') {
     if (saving.peek()) return;
     const ask = leaving.peek();
+    const startPath = router.location.path;
     if (keep === 'save' && !(await savePlan())) {
       if (mounted) leaving.set(null);
       return;
     }
     if (keep === 'discard') discard();
     if (mounted) leaving.set(null);
-    // The editor is clean now, so the guard lets it through.
-    queueMicrotask(() => ask?.proceed());
+    // The editor is clean now, so the guard lets it through (unless the page unmounted or moved on).
+    if (mounted && router.location.path === startPath) {
+      queueMicrotask(() => {
+        if (mounted && router.location.path === startPath) ask?.proceed();
+      });
+    }
   }
   onWindow('beforeunload', (e: BeforeUnloadEvent) => {
     if (dirty.peek()) e.preventDefault();
@@ -352,12 +357,13 @@ export default function Benchmark() {
   async function remove() {
     const b = bench.peek();
     if (!b || deleteBusy.peek()) return;
+    const startPath = router.location.path;
     deleteBusy.set(true);
     try {
       await hub.api.deleteBench(b.id);
       if (mounted) deleteOpen.set(false);
       toast.success(`Deleted ${b.name}`, 'Its images, entries and loops are gone. Models, runs and datasets were not touched.');
-      if (mounted) router.go('/benchmarks', { replace: true });
+      if (mounted && router.location.path === startPath) router.go('/benchmarks', { replace: true });
     } catch (e) {
       if (mounted && deleteOpen.peek()) deleteStatus.error(e, 'Could not delete the benchmark');
       else toast.error(e, 'Could not delete the benchmark');

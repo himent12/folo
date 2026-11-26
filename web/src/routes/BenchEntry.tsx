@@ -174,6 +174,7 @@ export default function BenchEntryPage() {
     const e = entry.peek();
     if (!e || removeBusy.peek()) return;
     const bid = id.peek();
+    const startPath = router.location.path;
     removeBusy.set(true);
     try {
       await hub.api.deleteBenchEntry(bid, e.id);
@@ -181,7 +182,7 @@ export default function BenchEntryPage() {
       if (mounted) removing.set(false);
       // page-level: its confirm dialog has closed on the line above.
       toast.success(`Deleted ${e.name}`, 'Its result is gone from the leaderboard. The model and its files were not touched.');
-      if (mounted) router.go(`/benchmarks/${bid}`, { replace: true });
+      if (mounted && router.location.path === startPath) router.go(`/benchmarks/${bid}`, { replace: true });
     } catch (err) {
       if (mounted && removing.peek()) removeStatus.error(err, 'Could not delete the entry');
       // page-level: the delete confirm is closed or unmounted.

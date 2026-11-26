@@ -250,6 +250,7 @@ export default function Run() {
     const cur = run.peek();
     if (!cur || busy.peek()) return;
     const wasRemoving = removing.peek();
+    const startPath = router.location.path;
     busy.set(true);
     try {
       if (wasRemoving) {
@@ -257,7 +258,7 @@ export default function Run() {
         const r = await live.stop(() => removeQueued(cur));
         if (mounted) stopOpen.set(false);
         removedToast(cur);
-        if (!r && mounted) router.go('/runs', { replace: true });
+        if (!r && mounted && router.location.path === startPath) router.go('/runs', { replace: true });
         return;
       }
       // The run as the view now has it: the stream may have said it ended while the stop was on its way.

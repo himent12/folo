@@ -218,7 +218,14 @@ function toKeyframe(css: string): Keyframe {
   return keyframe;
 }
 
-function animate(el: Element, options: TransitionConfig, counterpart: Animation | undefined, t2: number, onFinish: () => void): Animation {
+function animate(
+  el: Element,
+  options: TransitionConfig,
+  counterpart: Animation | undefined,
+  t2: number,
+  onFinish: () => void,
+  shouldAbort?: () => boolean,
+): Animation {
   const isIntro = t2 === 1;
   let aborted = false;
   counterpart?.deactivate();
@@ -231,7 +238,10 @@ function animate(el: Element, options: TransitionConfig, counterpart: Animation 
   let getT = () => 1 - t2;
   let finish = onFinish;
   queueMicrotask(() => {
-    if (aborted) return;
+    if (aborted || shouldAbort?.()) {
+      aborted = true;
+      return;
+    }
     if (typeof el.animate !== 'function') {
       // No Web Animations (a test DOM): end at once.
       getT = () => t2;
@@ -326,14 +336,22 @@ export function transition<P>(el: Element, fn: TransitionFn<P>, params: (() => P
   if (branchActive) (branchManagers ??= []).push(manager);
   if (flags & IN && intro) {
     effectNow(() => {
+      let disposed = false;
       untrack(() => {
         html.inert = inert;
         introAnim?.abort();
-        introAnim = animate(el, getOptions(), outroAnim, 1, () => {
-          el.dispatchEvent(new CustomEvent('introend'));
-          introAnim?.abort();
-          introAnim = options = undefined;
-        });
+        introAnim = animate(
+          el,
+          getOptions(),
+          outroAnim,
+          1,
+          () => {
+            el.dispatchEvent(new CustomEvent('introend'));
+            introAnim?.abort();
+            introAnim = options = undefined;
+          },
+          flags & OUT ? () => disposed && outroAnim === undefined : undefined,
+        );
       });
       if (!(flags & OUT)) {
         return () => {
@@ -342,6 +360,7 @@ export function transition<P>(el: Element, fn: TransitionFn<P>, params: (() => P
         };
       }
       return () => {
+        disposed = true;
         queueMicrotask(() => {
           if (outroAnim === undefined) {
             introAnim?.abort();

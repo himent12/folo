@@ -174,6 +174,7 @@ export default function BenchLoop() {
     const l = loop.peek();
     if (!l || removeBusy.peek()) return;
     const bid = id.peek();
+    const startPath = router.location.path;
     removeBusy.set(true);
     try {
       await hub.api.deleteBenchLoop(bid, l.id);
@@ -181,7 +182,7 @@ export default function BenchLoop() {
       if (mounted) removing.set(false);
       // page-level: its confirm dialog has closed on the line above.
       toast.success(`Deleted ${l.name}`, 'Its datasets, runs, models and entries stay.');
-      if (mounted) router.go(`/benchmarks/${bid}?tab=loops`, { replace: true });
+      if (mounted && router.location.path === startPath) router.go(`/benchmarks/${bid}?tab=loops`, { replace: true });
     } catch (e) {
       if (mounted && removing.peek()) removeStatus.error(e, 'Could not delete the loop');
       // page-level: the delete confirm is closed or unmounted.

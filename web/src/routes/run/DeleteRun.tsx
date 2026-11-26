@@ -11,6 +11,7 @@ import { modelsChanged } from '$lib/api/models';
 import { runsChanged } from '$lib/api/runs';
 import type { Model, Run } from '$lib/api/types';
 import { prefs } from '$lib/prefs';
+import { router } from '$lib/router';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
 import { DialogStatus } from '$lib/ui/feedback';
@@ -51,6 +52,7 @@ export default function DeleteRun(props: DeleteRunProps) {
     const r = props.run;
     if (!r || busy.peek()) return;
     const targetId = r.id;
+    const startPath = router.location.path;
     const known = models.peek();
     const gone = known ? runModels(r, known).length : undefined;
     busy.set(true);
@@ -61,7 +63,7 @@ export default function DeleteRun(props: DeleteRunProps) {
       if (mounted && props.run?.id === targetId) props.onclose();
       // page-level: the confirm closed on the line above (or the page left while deleting).
       toast.success(`Deleted ${r.name}`, gone ? `Its weights and ${gone === 1 ? 'model are' : `${gone} models are`} gone too.` : undefined);
-      if (mounted) props.ondeleted?.(r);
+      if (mounted && router.location.path === startPath) props.ondeleted?.(r);
     } catch (e) {
       if (mounted && props.run?.id === targetId) status.error(e, 'Could not delete the run');
       else toast.error(e, 'Could not delete the run');

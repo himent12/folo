@@ -213,12 +213,13 @@ export default function LabelJob() {
   async function remove() {
     const cur = job.peek();
     if (!cur || deleteBusy.peek()) return;
+    const startPath = router.location.path;
     deleteBusy.set(true);
     try {
       await hub.api.deleteLabelJob(cur.id);
       if (mounted) deleteOpen.set(false);
       toast.success(`Deleted ${cur.name}`, 'Images from folders and datasets made from it were not touched.');
-      if (mounted) router.go('/datasets/label', { replace: true });
+      if (mounted && router.location.path === startPath) router.go('/datasets/label', { replace: true });
     } catch (e) {
       if (mounted && deleteOpen.peek()) deleteStatus.error(e, 'Could not delete the job');
       else toast.error(e, 'Could not delete the job');
