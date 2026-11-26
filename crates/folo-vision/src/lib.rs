@@ -12,6 +12,7 @@
 //! - [`calibration`]: post-hoc temperature scaling confidence calibration and ECE / MCE / Brier score metrics.
 //! - [`cocoeval`]: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) for reporting on COCO splits.
 //! - [`assign`]: the task-aligned assigner and DFL target encoding.
+//! - [`assigner`]: additional label assignment algorithms (SimOTA dynamic-`k` assignment).
 //! - [`loss`]: the detection loss (BCE + CIoU + DFL) on folo-core tensors, with autograd. The assigner runs on
 //!   host copies of the detached head outputs; that read is the loss's only full-size device-to-host transfer.
 //!
@@ -29,6 +30,7 @@
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
 
 pub mod assign;
+pub mod assigner;
 pub mod boxes;
 pub mod calibration;
 pub mod cocoeval;
@@ -46,6 +48,7 @@ pub mod train;
 pub mod val;
 
 pub use assign::{Assignment, TalConfig};
+pub use assigner::{SimOtaAssignment, SimOtaConfig, assign_simota};
 pub use boxes::{Cxcywh, IouKind, Letterbox, Xyxy};
 pub use calibration::{
     CalibrationConfig, CalibrationMetrics, ClassTemperatureFit, ClasswiseCalibrationConfig,
