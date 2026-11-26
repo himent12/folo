@@ -89,12 +89,12 @@ describe('shareApi', () => {
     const first = new AbortController();
     const second = new AbortController();
     const a = together(() => s.runs(first.signal)).value;
-    // First caller aborts synchronously before the turn ends.
+    // First caller aborts synchronously, and second caller starts synchronously in the EXACT SAME TURN (before any
+    // microtask clears `joinable`): must start a fresh live request instead of inheriting AbortError.
     first.abort();
-    await expect(a).rejects.toThrow('aborted');
-    // Second caller in the exact same turn must start a fresh request, not inherit AbortError.
     const b = together(() => s.runs(second.signal)).value;
     expect(calls).toEqual(['runs', 'runs']);
+    await expect(a).rejects.toThrow('aborted');
     await vi.advanceTimersByTimeAsync(10);
     await expect(b).resolves.toEqual([{ id: 'a', n: 2 }]);
 

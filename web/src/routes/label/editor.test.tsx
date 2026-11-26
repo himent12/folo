@@ -859,27 +859,49 @@ describe('the labeling editor: reviewing', () => {
     }
   });
 
-  it('ignores stale save and review settlements after hub.epoch changes and blocks concurrent save/review', async () => {
-    await openEditor('1', 'lb_51d0');
-    const saveGate = deferred<Awaited<ReturnType<typeof hub.api.updateLabelImage>>>();
-    vi.spyOn(hub.api, 'updateLabelImage').mockReturnValue(saveGate.promise);
-    const reviewSpy = vi.spyOn(hub.api, 'reviewLabelImage');
-
-    // Make an edit and start Save; concurrent review attempt while Save is in flight is blocked.
-    click(inEditor('Add box'));
-    click(inEditor('Save'));
-    flushSync();
+  it('blocks concurrent save while review is in flight and cancels deferred save-and-leave navigation when hub.epoch changes', async () => {
+    await openEditor('23', 'lb_51d0');
+    // 1. Start review ("Looks right") on an unreviewed labeled image, then add a box and press Ctrl+S while review is
+    // in flight: the mutual busy guard must prevent starting a concurrent save.
+    const reviewGate = deferred<Awaited<ReturnType<typeof hub.api.reviewLabelImage>>>();
+    const reviewSpy = vi.spyOn(hub.api, 'reviewLabelImage').mockReturnValue(reviewGate.promise);
+    const saveSpy = vi.spyOn(hub.api, 'updateLabelImage');
     key('Enter');
     flushSync();
-    expect(reviewSpy).not.toHaveBeenCalled();
+    expect(reviewSpy).toHaveBeenCalledTimes(1);
+    click(inEditor('Add box'));
+    key('s', { ctrlKey: true });
+    flushSync();
+    expect(saveSpy).not.toHaveBeenCalled();
 
-    // Server epoch switches before Save settles: late settlement must not stamp status or overwrite live state.
+    // Finish the review cleanly, then open a fresh editor on image 1 to test stale save-and-leave across hub.epoch++.
+    const img23 = (await hub.api.labelImages('lb_51d0', { ids: ['23'] })).images[0]!;
+    reviewGate.resolve({ ...img23, reviewed: true });
+    await new Promise((r) => setTimeout(r, 10));
+    unmount(c!);
+    c = undefined;
+    reviewSpy.mockRestore();
+    saveSpy.mockRestore();
+
+    await openEditor('1', 'lb_51d0');
     const one = (await hub.api.labelImages('lb_51d0', { ids: ['1'] })).images[0]!;
+    const saveGate = deferred<Awaited<ReturnType<typeof hub.api.updateLabelImage>>>();
+    vi.spyOn(hub.api, 'updateLabelImage').mockReturnValue(saveGate.promise);
+    click(inEditor('Add box'));
+    key('j');
+    flushSync();
+    const confirmDlg = asking()!;
+    expect(confirmDlg).toBeDefined();
+    click([...confirmDlg.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Save'));
+    flushSync();
+
+    // Advance hub.epoch while the save-and-leave request is in flight, then resolve the old save.
     hub.epoch++;
     flushSync();
     saveGate.resolve({ ...one, status: 'labeled', source: 'manual', reviewed: true });
     await new Promise((r) => setTimeout(r, 10));
     flushSync();
-    expect(editor()?.textContent ?? '').not.toContain('Saved');
+    // Stale save must return false and NEVER execute deferred navigation to image 2.
+    expect(router.route.query.get('image')).toBe('1');
   });
 });

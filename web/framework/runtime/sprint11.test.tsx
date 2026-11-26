@@ -43,6 +43,33 @@ describe('fw Sprint 11 runtime hardening', () => {
     expect(watches).toBe(0);
   });
 
+  it('unsubscribes earlier sources when a later source throws during ComputedNode._subscribe', () => {
+    let firstWatches = 0;
+    let shouldThrow = false;
+    const first = watchedSignal(1, (on) => {
+      firstWatches += on ? 1 : -1;
+    });
+    const second = watchedSignal(2, (on) => {
+      if (on && shouldThrow) throw new Error('watch-boom');
+    });
+    const derived = computed(() => first.get() + second.get());
+    expect(derived.peek()).toBe(3);
+    expect(firstWatches).toBe(0);
+
+    shouldThrow = true;
+    const stop = createRoot((dispose) => {
+      effect(() => {
+        void derived.get();
+      });
+      return dispose;
+    });
+    expect(() => flush()).toThrow('watch-boom');
+    stop();
+    // Because `subscribeLink(this, node)` ran before recursing into sources, disposing the effect unsubscribes `first`
+    // cleanly instead of leaking `firstWatches === 1` forever.
+    expect(firstWatches).toBe(0);
+  });
+
   it('keeps ReactiveMap and ReactiveSet keySignals registered when re-subscribed after an unwatched mutation', () => {
     const map = new ReactiveMap<string, number>([['a', 1]]);
     const positive = computed(() => (map.get('a') ?? 0) > 0);
@@ -126,9 +153,10 @@ describe('fw Sprint 11 runtime hardening', () => {
     stop();
   });
 
-  it('toClass ignores an empty-string directive key instead of looping infinitely', () => {
+  it('toClass ignores an empty-string directive key instead of looping infinitely or adding trailing spaces', () => {
     expect(toClass('alpha beta', undefined, { '': false, alpha: false })).toBe('beta');
     expect(toClass('alpha', 'fw-s', { '': false })).toBe('alpha fw-s');
+    expect(toClass('alpha', undefined, { '': true })).toBe('alpha');
     const spy = vi.fn(() => toClass('solo', undefined, { '': 0 }));
     expect(spy()).toBe('solo');
   });

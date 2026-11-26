@@ -327,8 +327,9 @@ export default function Editor(props: EditorProps) {
     status.clear();
     try {
       const saved = await hub.api.updateLabelImage(jobId, id, sent.map(tidy), expect);
-      if (!disposed && props.job.id === jobId && hub.epoch === epoch) props.live.put([saved], mark);
-      if (!disposed && props.job.id === jobId && hub.epoch === epoch && shownId === id) {
+      if (disposed || props.job.id !== jobId || hub.epoch !== epoch) return false;
+      props.live.put([saved], mark);
+      if (shownId === id) {
         base.set(saved.boxes);
         elsewhere.set(false);
         if (draft.peek() === sent) draft.set(saved.boxes);
@@ -427,15 +428,16 @@ export default function Editor(props: EditorProps) {
     const ask = leaving.peek();
     if (!ask || leaveSaving.peek()) return;
     if (keep === 'save') {
+      const jobId = props.job.id, epoch = hub.epoch, id = shownId;
       leaveSaving.set(true);
       let ok = false;
       try {
         ok = await save();
       } finally {
-        leaveSaving.set(false);
+        if (!disposed) leaveSaving.set(false);
       }
-      if (!ok || leaving.peek() !== ask) {
-        if (leaving.peek() === ask) leaving.set(null);
+      if (disposed || !ok || leaving.peek() !== ask || props.job.id !== jobId || hub.epoch !== epoch || shownId !== id) {
+        if (!disposed && leaving.peek() === ask) leaving.set(null);
         return;
       }
     }
