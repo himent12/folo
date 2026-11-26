@@ -849,7 +849,7 @@ fn parallel_max_pool_and_cacheline_padded_image_rows_match_reference() {
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn silu_q8_avx2_x4_matches_scalar_bit_for_bit() {
-    if !super::kernel::uses_avx2() {
+    if !(std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")) {
         return;
     }
     let mut vals: Vec<f32> = (-200..=200).map(|i| i as f32 * 0.5).collect();

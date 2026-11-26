@@ -120,6 +120,36 @@ fn row_scale_avx2(dst: &mut [f32], scale: f32) {
     }
 }
 
+/// `dst[i] += v` in place.
+#[inline]
+fn row_add_scalar(dst: &mut [f32], v: f32) {
+    #[cfg(target_arch = "x86_64")]
+    if dst.len() >= 8 && has_avx2() {
+        // SAFETY: AVX2 was detected above.
+        return unsafe { row_add_scalar_avx2(dst, v) };
+    }
+    for d in dst.iter_mut() {
+        *d += v;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn row_add_scalar_avx2(dst: &mut [f32], v: f32) {
+    use std::arch::x86_64::*;
+    let vv = _mm256_set1_ps(v);
+    let (dc, dr) = dst.as_chunks_mut::<8>();
+    for d in dc {
+        // SAFETY: `d` is 8 floats.
+        unsafe {
+            _mm256_storeu_ps(d.as_mut_ptr(), _mm256_add_ps(_mm256_loadu_ps(d.as_ptr()), vv));
+        }
+    }
+    for d in dr {
+        *d += v;
+    }
+}
+
 /// `dst[i] = src[2*i] + src[2*i + 1]` for `i < dst.len()` (`src.len() >= 2 * dst.len()`).
 #[inline]
 fn sum_pairs(src: &[f32], dst: &mut [f32]) {
@@ -408,11 +438,11 @@ pub(crate) fn max_pool2d_values(
     out
 }
 
-/// Outputs per task of [`max_pool2d_values`] (a few microseconds of work).
+/// Elements per parallel task of the pooling and upsampling kernels (a few microseconds of work).
 pub(super) const POOL_TASK: usize = 1 << 12;
 
-/// How far [`max_pool2d_values`]'s padded rows and columns may exceed twice the input's before it falls back to
-/// the clipped scan (every detector pool pads by at most a few elements).
+/// How far padded pooling scratch extents may exceed twice the input's before falling back to the clipped scan
+/// (every detector pool pads by at most a few elements).
 const PAD_SLACK: usize = 16;
 
 pub(crate) fn max_pool2d_backward(g: &[f32], idx: &[i64], (np, h, w): Planes, ohw: usize) -> Vec<f32> {
@@ -565,7 +595,9 @@ pub(crate) fn avg_pool2d_backward(
     let range = |o: usize, s: usize, pad: usize, k: usize, n: usize| {
         (o * s).saturating_sub(pad)..(o * s + k).saturating_sub(pad).min(n)
     };
-    let xs: Vec<_> = (0..ow).map(|ox| range(ox, sw, pw, kw, w)).collect();
+    let fast_dup2 = sw == 2 && kw == 2 && pw == 0 && 2 * ow == w;
+    let xs: Vec<_> =
+        if fast_dup2 || sw == 1 { Vec::new() } else { (0..ow).map(|ox| range(ox, sw, pw, kw, w)).collect() };
     let ys: Vec<_> = (0..oh).map(|oy| range(oy, sh, ph, kh, h)).collect();
     let work = |rv: &mut Vec<f32>, (pl, gp): (usize, &mut [f32])| {
         let gs = &g[pl * oh * ow..(pl + 1) * oh * ow];
@@ -580,11 +612,14 @@ pub(crate) fn avg_pool2d_backward(
         for yy in 0..h {
             let rrow = &rv[yy * ow..(yy + 1) * ow];
             let gprow = &mut gp[yy * w..(yy + 1) * w];
-            if sw == 2 && kw == 2 && pw == 0 && 2 * ow == w {
+            if fast_dup2 {
                 duplicate_row2(rrow, gprow);
             } else if sw == 1 {
-                // Reverse `t` visits `ox` in ascending order for every `xx`, matching the scalar scatter bit for bit.
-                for t in (0..kw).rev() {
+                // Clamp `t` to taps that intersect `[0, w)` (at most `w + ow - 1` iterations even for huge `kw`),
+                // visiting `ox` in ascending order for every `xx` to match the scalar scatter bit for bit.
+                let t_lo = pw.saturating_sub(ow - 1);
+                let t_hi = kw.min(w.saturating_add(pw));
+                for t in (t_lo..t_hi).rev() {
                     let (ox_start, ox_end, xx_start) = if t >= pw {
                         let d = t - pw;
                         (0, ow.min(w.saturating_sub(d)), d)
@@ -628,6 +663,23 @@ fn adaptive_range(i: usize, input: usize, output: usize) -> std::ops::Range<usiz
     (i * input / output)..((i + 1) * input).div_ceil(output)
 }
 
+#[cold]
+fn adaptive_bin_mean_f64(
+    xp: &[f32],
+    w: usize,
+    ys: std::ops::Range<usize>,
+    xs: std::ops::Range<usize>,
+) -> f32 {
+    let denom = (ys.len() * xs.len()) as f64;
+    let mut s = 0.0f64;
+    for yy in ys {
+        for &v in &xp[yy * w + xs.start..yy * w + xs.end] {
+            s += v as f64;
+        }
+    }
+    (s / denom) as f32
+}
+
 pub(crate) fn adaptive_avg_pool2d(x: &[f32], (np, h, w): Planes, [oh, ow]: [usize; 2]) -> Vec<f32> {
     let mut out = alloc_uninit(np * oh * ow);
     if out.is_empty() || h * w == 0 {
@@ -637,7 +689,8 @@ pub(crate) fn adaptive_avg_pool2d(x: &[f32], (np, h, w): Planes, [oh, ow]: [usiz
         let inv = 1.0 / (h * w) as f32;
         let run = |pl: usize, o: &mut f32| {
             let xp = &x[pl * h * w..(pl + 1) * h * w];
-            *o = sum_slice(xp) * inv;
+            let s = sum_slice(xp);
+            *o = if s.is_finite() { s * inv } else { adaptive_bin_mean_f64(xp, w, 0..h, 0..w) };
         };
         if x.len() >= PAR_MIN && np > 1 {
             let per_task = (POOL_TASK / (h * w)).max(1);
@@ -671,7 +724,11 @@ pub(crate) fn adaptive_avg_pool2d(x: &[f32], (np, h, w): Planes, [oh, ow]: [usiz
                 } else {
                     row_sum[xs.start..xs.end].iter().sum()
                 };
-                orow[ox] = s / (ylen * xs.len()) as f32;
+                orow[ox] = if s.is_finite() {
+                    s / (ylen * xs.len()) as f32
+                } else {
+                    adaptive_bin_mean_f64(xp, w, ys.clone(), xs.clone())
+                };
             }
         }
     };
@@ -721,21 +778,32 @@ pub(crate) fn adaptive_avg_pool2d_backward(g: &[f32], (np, h, w): Planes, [oh, o
     let mut gx = alloc_zeroed(np * h * w);
     let y_ranges: Vec<_> = (0..oh).map(|oy| adaptive_range(oy, h, oh)).collect();
     let x_ranges: Vec<_> = (0..ow).map(|ox| adaptive_range(ox, w, ow)).collect();
+    let disjoint_x = x_ranges.windows(2).all(|p| p[0].end <= p[1].start);
     let work = |row_g: &mut Vec<f32>, (pl, gp): (usize, &mut [f32])| {
         let gs = &g[pl * oh * ow..(pl + 1) * oh * ow];
-        row_g.resize(w, 0.0);
-        for (oy, ys) in y_ranges.iter().enumerate() {
-            row_g.fill(0.0);
-            let ylen = ys.len();
-            let grow = &gs[oy * ow..(oy + 1) * ow];
-            for (ox, xs) in x_ranges.iter().enumerate() {
-                let v = grow[ox] / (ylen * xs.len()) as f32;
-                for d in &mut row_g[xs.start..xs.end] {
-                    *d += v;
+        if disjoint_x {
+            row_g.resize(w, 0.0);
+            for (oy, ys) in y_ranges.iter().enumerate() {
+                let ylen = ys.len();
+                let grow = &gs[oy * ow..(oy + 1) * ow];
+                for (ox, xs) in x_ranges.iter().enumerate() {
+                    row_g[xs.start..xs.end].fill(grow[ox] / (ylen * xs.len()) as f32);
+                }
+                for yy in ys.clone() {
+                    row_add(&mut gp[yy * w..(yy + 1) * w], row_g);
                 }
             }
-            for yy in ys.clone() {
-                row_add(&mut gp[yy * w..(yy + 1) * w], row_g);
+        } else {
+            // Overlapping horizontal bins: scatter in exact `(oy, ox)` order so cancellations match directly.
+            for (oy, ys) in y_ranges.iter().enumerate() {
+                let ylen = ys.len();
+                let grow = &gs[oy * ow..(oy + 1) * ow];
+                for (ox, xs) in x_ranges.iter().enumerate() {
+                    let v = grow[ox] / (ylen * xs.len()) as f32;
+                    for yy in ys.clone() {
+                        row_add_scalar(&mut gp[yy * w + xs.start..yy * w + xs.end], v);
+                    }
+                }
             }
         }
     };

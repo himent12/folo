@@ -285,6 +285,8 @@ fn adaptive_avg_pool_and_backward_match_direct_across_sizes() {
     for ((np, h, w), out_hw) in [
         ((3, 19, 23), [1, 1]),
         ((3, 19, 23), [3, 5]),
+        ((2, 9, 41), [2, 2]), // exercises wide horizontal bin (`xs.len() >= 16`)
+        ((2, 3, 5), [7, 11]), // exercises upsampling (`oh > h`, `ow > w`)
         ((2, 7, 17), [7, 17]),
         ((128, 17, 19), [1, 1]),
         ((64, 21, 29), [5, 7]),
@@ -341,4 +343,39 @@ fn adaptive_avg_pool_and_backward_match_direct_across_sizes() {
             );
         }
     }
+
+    // Finite extreme cancellation in forward (`2x4 -> 1x2`): must return `0.0`, not `NaN`.
+    let cancel_in = vec![f32::MAX, -f32::MAX, 0.0, 0.0, f32::MAX, -f32::MAX, 0.0, 0.0];
+    let cancel_out = adaptive_avg_pool2d(&cancel_in, (1, 2, 4), [1, 2]);
+    assert_eq!(cancel_out, vec![0.0, 0.0]);
+    let cancel_gap = adaptive_avg_pool2d(&cancel_in, (1, 2, 4), [1, 1]);
+    assert_eq!(cancel_gap, vec![0.0]);
+
+    // Overlapping-bin cancellation in backward (`3x3 -> 2x2`): center cell sees `1e8 + 0 - 1e8 + 1 = 1.0`.
+    let bwd_cancel = adaptive_avg_pool2d_backward(&[4e8, 0.0, -4e8, 4.0], (1, 3, 3), [2, 2]);
+    assert_eq!(bwd_cancel[4], 1.0);
+}
+
+#[test]
+fn avg_pool_backward_handles_huge_stride1_kernel_and_all_padding() {
+    // Huge single-axis kernel (`kw = usize::MAX`) must finish in O(1), not loop `usize::MAX` times.
+    let p_huge = Pool2dParams { kernel: [1, usize::MAX], stride: [1, 1], padding: [0, usize::MAX / 2] };
+    let ohw = p_huge.output_hw(1, 1).unwrap();
+    let fwd = avg_pool2d(&[3.0], (1, 1, 1), &p_huge, ohw);
+    let bwd = avg_pool2d_backward(&[5.0], (1, 1, 1), &p_huge, ohw);
+    assert_eq!(fwd.len(), 1);
+    assert_eq!(bwd, vec![5.0 / usize::MAX as f32]);
+
+    // Extreme padding with `ow == 1` and `pw > wp`: all-padding window returns 0 without panicking.
+    let p_ext = Pool2dParams { kernel: [1, 1], stride: [10, 10], padding: [2, 2] };
+    let ohw_ext = p_ext.output_hw(1, 1).unwrap();
+    assert_eq!(avg_pool2d(&[7.0], (1, 1, 1), &p_ext, ohw_ext), vec![0.0]);
+    assert_eq!(avg_pool2d_backward(&[7.0], (1, 1, 1), &p_ext, ohw_ext), vec![0.0]);
+
+    // Stride-1 with `pw > ow` (`w = 1, k = 3, s = 1, pad = 2` -> `ow = 3`? Try `w = 2, k = 5, s = 1, pad = 2` and `pw = 4, kw = 9`).
+    let p_pad = Pool2dParams { kernel: [1, 9], stride: [1, 1], padding: [0, 4] };
+    let ohw_pad = p_pad.output_hw(1, 2).unwrap();
+    let gy = vec![1.0, 2.0];
+    let gx = avg_pool2d_backward(&gy, (1, 1, 2), &p_pad, ohw_pad);
+    assert_eq!(gx, vec![3.0 / 9.0, 3.0 / 9.0]);
 }

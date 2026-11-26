@@ -62,7 +62,7 @@ fn beats_indexed8(
 #[inline]
 pub(super) fn max_row_s1(row: &[f32], kw: usize, dst: &mut [f32]) {
     let ow = dst.len();
-    assert!(kw >= 1 && row.len() >= ow + kw - 1);
+    assert!(kw >= 1 && ow.checked_add(kw - 1).is_some_and(|n| row.len() >= n));
     #[cfg(target_arch = "x86_64")]
     if ow >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above; bounds asserted above.
@@ -77,6 +77,8 @@ pub(super) fn max_row_s1(row: &[f32], kw: usize, dst: &mut [f32]) {
     }
 }
 
+/// # Safety
+/// The CPU supports AVX2, `kw >= 1`, and `row.len() >= dst.len() + kw - 1` without overflow.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn max_row_s1_avx2(row: &[f32], kw: usize, dst: &mut [f32]) {
@@ -107,7 +109,7 @@ unsafe fn max_row_s1_avx2(row: &[f32], kw: usize, dst: &mut [f32]) {
 /// Horizontal `sw == 2, kw == 2` max: `dst[ox] = max(row[2*ox], row[2*ox + 1])`.
 #[inline]
 pub(super) fn max_pairs(row: &[f32], dst: &mut [f32]) {
-    assert!(row.len() >= 2 * dst.len());
+    assert!(dst.len().checked_mul(2).is_some_and(|n| row.len() >= n));
     #[cfg(target_arch = "x86_64")]
     if dst.len() >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above; bounds asserted above.
@@ -120,6 +122,8 @@ pub(super) fn max_pairs(row: &[f32], dst: &mut [f32]) {
     }
 }
 
+/// # Safety
+/// The CPU supports AVX2 and `row.len() >= 2 * dst.len()` without overflow.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn max_pairs_avx2(row: &[f32], dst: &mut [f32]) {
@@ -149,7 +153,7 @@ unsafe fn max_pairs_avx2(row: &[f32], dst: &mut [f32]) {
 /// Vertical max over `kh` rows of width `ow` (stride `ow` between rows), writing `dst[0..ow]` once.
 #[inline]
 pub(super) fn max_cols(rv: &[f32], ow: usize, kh: usize, dst: &mut [f32]) {
-    assert!(kh >= 1 && dst.len() == ow && rv.len() >= (kh - 1) * ow + ow);
+    assert!(kh >= 1 && dst.len() == ow && kh.checked_mul(ow).is_some_and(|n| rv.len() >= n));
     #[cfg(target_arch = "x86_64")]
     if ow >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above; bounds asserted above.
@@ -164,6 +168,8 @@ pub(super) fn max_cols(rv: &[f32], ow: usize, kh: usize, dst: &mut [f32]) {
     }
 }
 
+/// # Safety
+/// The CPU supports AVX2, `kh >= 1`, `dst.len() == ow`, and `rv.len() >= kh * ow` without overflow.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn max_cols_avx2(rv: &[f32], ow: usize, kh: usize, dst: &mut [f32]) {
@@ -202,7 +208,11 @@ pub(super) fn max_row_idx_s1(
     dst_i: &mut [i32],
 ) {
     let ow = dst_v.len();
-    assert!(kw >= 1 && dst_i.len() == ow && row.len() >= ow + kw - 1 && row_idx.len() >= ow + kw - 1);
+    assert!(
+        kw >= 1
+            && dst_i.len() == ow
+            && ow.checked_add(kw - 1).is_some_and(|n| row.len() >= n && row_idx.len() >= n)
+    );
     #[cfg(target_arch = "x86_64")]
     if ow >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above; bounds asserted above.
@@ -219,6 +229,9 @@ pub(super) fn max_row_idx_s1(
     }
 }
 
+/// # Safety
+/// The CPU supports AVX2, `kw >= 1`, `dst_i.len() == dst_v.len()`, and `row`/`row_idx` hold at least
+/// `dst_v.len() + kw - 1` entries without overflow.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn max_row_idx_s1_avx2(
@@ -275,7 +288,7 @@ pub(super) fn max_pairs_idx(
     dst_i: &mut [i32],
 ) {
     let ow = dst_v.len();
-    assert!(dst_i.len() == ow && row.len() >= 2 * ow && row_idx.len() >= 2 * ow);
+    assert!(dst_i.len() == ow && ow.checked_mul(2).is_some_and(|n| row.len() >= n && row_idx.len() >= n));
     #[cfg(target_arch = "x86_64")]
     if ow >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above; bounds asserted above.
@@ -290,6 +303,8 @@ pub(super) fn max_pairs_idx(
     }
 }
 
+/// # Safety
+/// The CPU supports AVX2, `dst_i.len() == dst_v.len()`, and `row`/`row_idx` hold at least `2 * dst_v.len()` entries.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn max_pairs_idx_avx2(
@@ -347,7 +362,12 @@ pub(super) fn max_cols_idx(
     dst_v: &mut [f32],
     dst_i: &mut [i64],
 ) {
-    assert!(kh >= 1 && dst_v.len() == ow && dst_i.len() == ow && rv.len() >= kh * ow && ri.len() >= kh * ow);
+    assert!(
+        kh >= 1
+            && dst_v.len() == ow
+            && dst_i.len() == ow
+            && kh.checked_mul(ow).is_some_and(|n| rv.len() >= n && ri.len() >= n)
+    );
     #[cfg(target_arch = "x86_64")]
     if ow >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above; bounds asserted above.
@@ -364,6 +384,8 @@ pub(super) fn max_cols_idx(
     }
 }
 
+/// # Safety
+/// The CPU supports AVX2, `kh >= 1`, `dst_v.len() == dst_i.len() == ow`, and `rv`/`ri` hold at least `kh * ow` entries.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn max_cols_idx_avx2(
