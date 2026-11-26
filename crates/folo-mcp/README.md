@@ -60,10 +60,10 @@ One `ToolDef` per tool in `TOOLS` (`src/tools/mod.rs`), dispatched by name in `s
 - **`--read-only`.** `tools::listed` leaves the `mutating` tools out of `tools/list`, `Inner::call` refuses them
   with the `read_only` error, `prompts::list` leaves out `train_on_folder` and `label_folder`, and
   `FoloMcp::get_info` returns read-only initialization `instructions` naming only read-only tools and `diagnose_run`.
-- **`--confine`.** `build` installs the dataset read guard (`confine::install_read_guard`) unless the backend is
-  `Proxy`, where `folo serve` reads the datasets; `PathPolicy` checks every input path, label paths included,
-  and the labeling tools that read a job's images check them all first (`confine_job`). The benchmark tools are
-  refused (`bench::refuse_confined`): the store reads and writes a benchmark's files without these checks.
+- **`--confine`.** `build` installs the dataset read guard (`confine::install_read_guard`) whenever `--confine` is
+  set (including `Proxy`, so local manifest validation runs guarded); `PathPolicy` checks every input path, label
+  paths included, and the labeling tools that read a job's images check them all first (`confine_job`). The benchmark
+  tools are refused (`bench::refuse_confined`): the store reads and writes a benchmark's files without these checks.
 - **Schemas.** The tool types derive `schemars::JsonSchema`: those in `src/types.rs` directly, the folo-api types
   through its `schema` feature, which this crate's `Cargo.toml` turns on. `schemas.rs` generates each schema with
   rmcp's `schema_for_input` / `schema_for_output`, removes what does not help validation and marks every object

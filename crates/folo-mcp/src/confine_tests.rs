@@ -366,7 +366,7 @@ fn discovery_candidates_and_canonical_signature_catch_symlinks_escaping_data_dir
     std::fs::write(outside.join("secret.yaml"), "names: [leaked]\n").unwrap();
 
     let proxy = Arc::new(HttpStore::new("http://127.0.0.1:9", None));
-    let c = Confinement::new(PathPolicy { data_dir: data_dir.clone(), confine: true }, Some(proxy));
+    let c = Confinement::new(PathPolicy { data_dir, confine: true }, Some(proxy));
 
     // 1. Custom `*.yaml` symlink pointing outside `--data-dir` is caught even when a valid YOLO decoy exists.
     std::os::unix::fs::symlink(outside.join("secret.yaml"), ds.join("custom.yaml")).unwrap();
@@ -376,7 +376,7 @@ fn discovery_candidates_and_canonical_signature_catch_symlinks_escaping_data_dir
 
     // 2. Replacing a split folder with a symlink pointing outside `--data-dir` invalidates `canonical_signature`
     //    even if filenames, sizes, and mtimes stay identical.
-    assert!(c.canonical_signature(&[ds.clone()]).is_some());
+    assert!(c.canonical_signature(std::slice::from_ref(&ds)).is_some());
     let moved = outside.join("train_copy");
     std::fs::rename(ds.join("images/train"), &moved).unwrap();
     std::os::unix::fs::symlink(&moved, ds.join("images/train")).unwrap();

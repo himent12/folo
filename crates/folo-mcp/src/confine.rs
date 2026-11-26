@@ -388,14 +388,23 @@ impl Confinement {
                 .hint("`folo mcp --confine` only reads inside --data-dir; copy the files there or restart without --confine"));
             }
         };
-        self.verify_loaded_dataset(path, format, &ds, "")?;
+        let (_, watched) = self.verify_loaded_dataset(path, format, &ds, "")?;
+        if self.canonical_signature(&watched).is_none() {
+            return Err(Error::new(
+                StatusCode::FORBIDDEN,
+                "path_outside_data_dir",
+                format!("dataset {} contains a symlink outside the data dir", path.display()),
+            )
+            .hint("`folo mcp --confine` only reads inside --data-dir; copy the files there or restart without --confine"));
+        }
         Ok(())
     }
 
     /// `Ok` when dataset `id` reads nothing outside the data dir (always without `--confine`, and for datasets
     /// hosted on a verified separate remote server). In local proxy mode, registry-only lookup obtains the
     /// dataset's path without triggering `fresh_index` on `folo serve`, and cached verdicts are verified against
-    /// both an on-disk [`folo_server::Fingerprint`] and [`Self::canonical_signature`] on every call. Blocking.
+    /// [`Self::canonical_signature`] first (before [`folo_server::Fingerprint`], so outside links are never
+    /// walked) on every call. Blocking.
     pub fn dataset(&self, store: &dyn Store, id: &str) -> Result<(), Error> {
         if !self.policy.confine {
             return Ok(());
@@ -413,8 +422,8 @@ impl Confinement {
                 && tag.path == d.path
                 && tag.format == d.format
                 && !tag.watched.is_empty()
-                && folo_server::Fingerprint::of(&tag.watched, &[]) == tag.fingerprint
                 && self.canonical_signature(&tag.watched) == Some(tag.canon_hash)
+                && folo_server::Fingerprint::of(&tag.watched, &[]) == tag.fingerprint
             {
                 return verdict;
             }
@@ -462,31 +471,26 @@ impl Confinement {
             },
         };
         let res = self.scan(store, id, &d).map_err(map_denied);
-        // Only cache definitive confinement verdicts (allowed, or explicitly outside the data dir).
-        // Unknown datasets and transient store/IO errors are never cached so recovery works without a restart.
+        // Cache definitive confinement verdicts; in local proxy mode never cache denials so `Fingerprint::of`
+        // never walks a rejected dataset path and repaired datasets recover immediately without restart.
         match &res {
             Ok(watched) => {
-                let tag = watched.as_ref().and_then(|w| {
-                    let canon_hash = self.canonical_signature(w)?;
-                    Some(ProxyTag {
-                        path: d.path.clone(),
-                        format: d.format,
-                        watched: w.clone(),
-                        fingerprint: folo_server::Fingerprint::of(w, &[]),
-                        canon_hash,
-                    })
+                let tag = watched.as_ref().map(|(w, canon_hash)| ProxyTag {
+                    path: d.path.clone(),
+                    format: d.format,
+                    watched: w.clone(),
+                    fingerprint: folo_server::Fingerprint::of(w, &[]),
+                    canon_hash: *canon_hash,
                 });
                 self.cache.lock().unwrap().insert(id.to_string(), (tag, Ok(())));
                 Ok(())
             }
             Err(e) if e.body.code == "path_outside_data_dir" => {
-                let tag = self.proxy.is_some().then(|| {
-                    let w = vec![PathBuf::from(&d.path)];
-                    let fingerprint = folo_server::Fingerprint::of(&w, &[]);
-                    let canon_hash = self.canonical_signature(&w).unwrap_or(0);
-                    ProxyTag { path: d.path.clone(), format: d.format, watched: w, fingerprint, canon_hash }
-                });
-                self.cache.lock().unwrap().insert(id.to_string(), (tag, Err(e.clone())));
+                if self.proxy.is_some() {
+                    self.cache.lock().unwrap().remove(id);
+                } else {
+                    self.cache.lock().unwrap().insert(id.to_string(), (None, Err(e.clone())));
+                }
                 Err(e.clone())
             }
             Err(e) if e.body.code == "dataset_not_found" => {
@@ -595,7 +599,7 @@ impl Confinement {
         store: &dyn Store,
         id: &str,
         d: &folo_api::Dataset,
-    ) -> Result<Option<Vec<PathBuf>>, Error> {
+    ) -> Result<Option<(Vec<PathBuf>, u64)>, Error> {
         if d.path.starts_with("mock://") {
             return Ok(None);
         }
@@ -632,7 +636,18 @@ impl Confinement {
                     )
                 })?;
                 let (ds_root, watched) = self.verify_loaded_dataset(&root, d.format, &ds, id)?;
-                (ds_root, Some(watched))
+                let Some(canon_hash) = self.canonical_signature(&watched) else {
+                    return Err(in_dataset(
+                        Error::new(
+                            StatusCode::FORBIDDEN,
+                            "path_outside_data_dir",
+                            format!("dataset {} contains a symlink outside the data dir", root.display()),
+                        )
+                        .hint("`folo mcp --confine` only reads inside --data-dir; copy the files there or restart without --confine"),
+                        id,
+                    ));
+                };
+                (ds_root, Some((watched, canon_hash)))
             }
         };
         // Check YOLO class-name sidecar files (`classes.txt`, `labels/classes.txt`), which are omitted from
