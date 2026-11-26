@@ -518,8 +518,7 @@ impl Attention {
                         let r2 = &v_plane[(y + 1) * w..(y + 2) * w];
                         let dst = &mut out_plane[y * w..(y + 1) * w];
                         for x in 1..w - 1 {
-                            let s = bias
-                                + w00 * r0[x - 1]
+                            let taps = w00 * r0[x - 1]
                                 + w01 * r0[x]
                                 + w02 * r0[x + 1]
                                 + w10 * r1[x - 1]
@@ -528,13 +527,13 @@ impl Attention {
                                 + w20 * r2[x - 1]
                                 + w21 * r2[x]
                                 + w22 * r2[x + 1];
-                            dst[x] += s;
+                            dst[x] += taps + bias;
                         }
                     }
                 }
                 // Border pixels (top row, bottom row, left/right edges of interior rows).
                 let border_pixel = |y: usize, x: usize| -> f32 {
-                    let mut s = bias;
+                    let mut taps = 0.0f32;
                     for ky in 0..3usize {
                         let iy = y + ky;
                         if iy == 0 || iy > h {
@@ -546,10 +545,10 @@ impl Attention {
                             if ix == 0 || ix > w {
                                 continue;
                             }
-                            s += w9[ky * 3 + kx] * row[ix - 1];
+                            taps += w9[ky * 3 + kx] * row[ix - 1];
                         }
                     }
-                    s
+                    taps + bias
                 };
                 for x in 0..w {
                     out_plane[x] += border_pixel(0, x);

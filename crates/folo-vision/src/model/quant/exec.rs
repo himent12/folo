@@ -143,16 +143,18 @@ impl Int8Plan {
             {
                 return Ok(bg.triple());
             }
-            let bg = BoundaryGrids::new(vec![g; c]);
             if let Ok(mut guard) = self.uniform_grids.write() {
-                let entry = guard.entry(name.to_string()).or_insert(bg);
-                if entry.grids.len() == c {
-                    return Ok(entry.triple());
+                if let Some(bg) = guard.get(name)
+                    && bg.grids.len() == c
+                {
+                    return Ok(bg.triple());
                 }
-                *entry = BoundaryGrids::new(vec![g; c]);
-                return Ok(entry.triple());
+                let bg = BoundaryGrids::new(vec![g; c]);
+                let out = bg.triple();
+                guard.insert(name.to_string(), bg);
+                return Ok(out);
             }
-            return Ok(bg.triple());
+            return Ok(BoundaryGrids::new(vec![g; c]).triple());
         }
         let gs = self.cal.channel_params(name, c)?;
         Ok(BoundaryGrids::new(gs).triple())
@@ -839,17 +841,21 @@ impl Exec for Int8<'_> {
                     }),
                 })
             }
-            QActRepr::F32(f) => Ok(QAct {
-                repr: QActRepr::F32(QActF32 {
-                    tensor: f.tensor.max_pool2d(k, 1, k / 2)?,
-                    dims: f.dims,
-                    grids: f.grids.clone(),
-                    zeros: f.zeros.clone(),
-                    grid_offset: f.grid_offset,
-                    grids_hash: f.grids_hash,
-                    u8_cache: Arc::new(OnceLock::new()),
-                }),
-            }),
+            QActRepr::F32(f) => {
+                let tensor = f.tensor.max_pool2d(k, 1, k / 2)?;
+                let (n, c, oh, ow) = tensor.dims4()?;
+                Ok(QAct {
+                    repr: QActRepr::F32(QActF32 {
+                        tensor,
+                        dims: [n, c, oh, ow],
+                        grids: f.grids.clone(),
+                        zeros: f.zeros.clone(),
+                        grid_offset: f.grid_offset,
+                        grids_hash: f.grids_hash,
+                        u8_cache: Arc::new(OnceLock::new()),
+                    }),
+                })
+            }
         }
     }
 

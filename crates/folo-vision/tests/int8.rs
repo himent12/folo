@@ -357,11 +357,18 @@ fn f32_convs_subgraphs_skip_redundant_quantization_and_match_fake_quant() {
     }
 
     // Thread-count bit-determinism on the mixed f32/int8 graph (exercises lazy QAct::F32 -> U8 caching on
-    // multi-consumer skips like `x10` into both int8 `neck.td4.cv1` and f32 `neck.out5.cv1`).
+    // multi-consumer skips like `x10` into both int8 `neck.td4.cv1` and f32 `neck.out5.cv1`, with `no_grad`
+    // created inside each worker closure since `no_grad` is thread-local).
     let mut m_mixed = model(29);
     m_mixed.set_int8(Some(mixed_cal)).unwrap();
-    let y_t1 = pool(1).install(|| m_mixed.forward(&x).unwrap());
-    let y_t7 = pool(7).install(|| m_mixed.forward(&x).unwrap());
+    let y_t1 = pool(1).install(|| {
+        let _g = no_grad();
+        m_mixed.forward(&x).unwrap()
+    });
+    let y_t7 = pool(7).install(|| {
+        let _g = no_grad();
+        m_mixed.forward(&x).unwrap()
+    });
     for (p, q) in [(&y_t1.box_raw, &y_t7.box_raw), (&y_t1.cls_raw, &y_t7.cls_raw)] {
         let (p, q) = (p.to_vec::<f32>().unwrap(), q.to_vec::<f32>().unwrap());
         assert!(
@@ -429,19 +436,60 @@ fn fused_cpu_attention_matches_tensor_reference_and_is_thread_deterministic() {
         let x = Tensor::rand_uniform([b, 128, h, w], -1.0, 1.0, &mut Rng::seed(100 + (h * 31 + w) as u64));
         // With grad enabled, `Attention::forward` takes the generic tensor reference path.
         let ref_y = attn.forward(&x).unwrap().to_vec::<f32>().unwrap();
-        // Under `no_grad`, `Attention::forward` takes the fused CPU path.
-        let (fast_t1, fast_t7) = {
+        // Under `no_grad` (created inside each worker closure because `no_grad` is thread-local),
+        // `Attention::forward` takes the fused CPU path.
+        let fast_t1 = pool(1).install(|| {
             let _g = no_grad();
-            (
-                pool(1).install(|| attn.forward(&x).unwrap()).to_vec::<f32>().unwrap(),
-                pool(7).install(|| attn.forward(&x).unwrap()).to_vec::<f32>().unwrap(),
-            )
-        };
+            attn.forward(&x).unwrap().to_vec::<f32>().unwrap()
+        });
+        let fast_t7 = pool(7).install(|| {
+            let _g = no_grad();
+            attn.forward(&x).unwrap().to_vec::<f32>().unwrap()
+        });
         assert!(
             fast_t1.iter().zip(&fast_t7).all(|(u, v)| u.to_bits() == v.to_bits()),
             "fused attention ({b}x128x{h}x{w}) differs across thread counts"
         );
         let max_err = ref_y.iter().zip(&fast_t1).map(|(u, v)| (u - v).abs()).fold(0.0f32, f32::max);
         assert!(max_err < 1e-4, "fused attention ({b}x128x{h}x{w}) max err {max_err} >= 1e-4");
+    }
+
+    // Regression: cancelling large PE taps (+/- 2^24) must not swallow a small bias (0.5).
+    // With `v = 1.0` everywhere, attention output `o = 1.0`; with PE weights `+2^24` and `-2^24` on the
+    // left/right neighbors and bias `0.5`, center pixel (1, 1) must yield `1.0 + (0.0 + 0.5) = 1.5`
+    // (starting the accumulation with `bias` would round `0.5 + 2^24` to `2^24` and yield `1.0`).
+    let mut rng = Rng::seed(41);
+    let mut cancel_attn = Attention::new(4, 1, &mut Init::new(&mut rng)).unwrap();
+    cancel_attn.fuse_().unwrap();
+    let mut pe_w = vec![0.0f32; 4 * 9];
+    for ch in 0..4 {
+        pe_w[ch * 9 + 3] = 16_777_216.0; // +2^24 on left neighbor
+        pe_w[ch * 9 + 5] = -16_777_216.0; // -2^24 on right neighbor
+    }
+    cancel_attn.pe.conv.weight = Tensor::from_vec(pe_w, [4, 1, 3, 3]).unwrap();
+    cancel_attn.pe.conv.bias = Some(Tensor::from_vec(vec![0.5f32; 4], [4]).unwrap());
+    let c_qkv = cancel_attn.qkv.conv.config().out_channels;
+    cancel_attn.qkv.conv.weight = Tensor::zeros([c_qkv, 4, 1, 1]);
+    let mut qkv_b = vec![0.0f32; c_qkv];
+    for v_b in &mut qkv_b[2 * cancel_attn.key_dim..] {
+        *v_b = 1.0;
+    }
+    cancel_attn.qkv.conv.bias = Some(Tensor::from_vec(qkv_b, [c_qkv]).unwrap());
+    let mut eye = vec![0.0f32; 16];
+    for i in 0..4 {
+        eye[i * 4 + i] = 1.0;
+    }
+    cancel_attn.proj.conv.weight = Tensor::from_vec(eye, [4, 4, 1, 1]).unwrap();
+    cancel_attn.proj.conv.bias = Some(Tensor::zeros([4]));
+
+    let x_c = Tensor::zeros([1, 4, 3, 3]);
+    let ref_c = cancel_attn.forward(&x_c).unwrap().to_vec::<f32>().unwrap();
+    let fast_c = {
+        let _g = no_grad();
+        cancel_attn.forward(&x_c).unwrap().to_vec::<f32>().unwrap()
+    };
+    assert_eq!(ref_c, fast_c, "PE bias handling diverged from reference");
+    for ch in 0..4 {
+        assert_eq!(fast_c[ch * 9 + 4], 1.5, "center pixel lost bias on cancelling taps (ch {ch})");
     }
 }
