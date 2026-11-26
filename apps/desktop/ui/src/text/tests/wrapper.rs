@@ -355,6 +355,17 @@ fn wrap_updates_prev_char_on_wrap_and_truncation_covers_exact_run_boundary() {
         wrap(&mut wrapper, &[LineFragment::text("ab cdefg")], 30.),
         [Boundary::new(3, 0), Boundary::new(6, 0)]
     );
+    // "abc def": space overflows at byte 3, starting the next line with " "; 'd' at byte 4 must NOT
+    // become a wrap candidate that would leave a whitespace-only line (" " | "def").
+    assert_eq!(
+        wrap(&mut wrapper, &[LineFragment::text("abc def")], 30.),
+        [Boundary::new(3, 0), Boundary::new(6, 0)]
+    );
+    // Same when CJK follows an overflowing space: no whitespace-only line before '你'.
+    assert_eq!(
+        wrap(&mut wrapper, &[LineFragment::text("abc 你好世")], 30.),
+        [Boundary::new(3, 0), Boundary::new(10, 0)]
+    );
 
     // When runs total exactly `truncate_at`, the ellipsis is still covered by the last run.
     let cut = runs_after_truncation("abcd…", "…", &runs(&[4]));

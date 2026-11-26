@@ -494,12 +494,13 @@ impl EntityInputHandler for TextInput {
         let clean = one_line(new_text);
         self.content = (self.content[0..range.start].to_owned() + &clean + &self.content[range.end..]).into();
         self.marked_range = (!clean.is_empty()).then(|| range.start..range.start + clean.len());
-        // The IME's selection is relative to the composed text, so convert it against `clean`.
+        // The IME's selection is relative to the raw composed text; map UTF-16 offsets through
+        // `one_line` sanitization so collapsed `\r\n` or dropped control chars keep the caret right.
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|r| {
-                let a = utf16_to_utf8(&clean, r.start);
-                let b = utf16_to_utf8(&clean, r.end);
+                let a = one_line_utf16_to_utf8(new_text, r.start);
+                let b = one_line_utf16_to_utf8(new_text, r.end);
                 range.start + a.min(b)..range.start + a.max(b)
             })
             .unwrap_or_else(|| range.start + clean.len()..range.start + clean.len());
@@ -784,6 +785,32 @@ fn one_line(s: &str) -> String {
             c => Some(c),
         })
         .collect()
+}
+
+/// Byte offset in `one_line(raw)` corresponding to UTF-16 offset `offset` in `raw`.
+fn one_line_utf16_to_utf8(raw: &str, offset: usize) -> usize {
+    let mut raw_utf16 = 0;
+    let mut clean_utf8 = 0;
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if raw_utf16 >= offset {
+            break;
+        }
+        if ch == '\r' && chars.peek() == Some(&'\n') {
+            chars.next();
+            raw_utf16 += 2;
+            clean_utf8 += 1;
+        } else if matches!(ch, '\r' | '\n' | '\t') {
+            raw_utf16 += 1;
+            clean_utf8 += 1;
+        } else if ch.is_control() {
+            raw_utf16 += ch.len_utf16();
+        } else {
+            raw_utf16 += ch.len_utf16();
+            clean_utf8 += ch.len_utf8();
+        }
+    }
+    clean_utf8
 }
 
 /// Byte offset in `s` of UTF-16 offset `offset`, clamped to the end and to char boundaries.

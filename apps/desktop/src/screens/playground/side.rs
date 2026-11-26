@@ -444,13 +444,15 @@ impl FoloApp {
                             .active(|s| s.bg(t.bg_active))
                             .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, w, cx| {
                                 let next = match ev.keystroke.key.as_str() {
-                                    "down" if i + 1 < n_vis => i + 1,
-                                    "up" if i > 0 => i - 1,
-                                    "home" if i > 0 => 0,
-                                    "end" if i + 1 < n_vis => n_vis - 1,
+                                    "down" => (i + 1 < n_vis).then_some(i + 1),
+                                    "up" => i.checked_sub(1),
+                                    "home" => (i > 0).then_some(0),
+                                    "end" => (i + 1 < n_vis).then_some(n_vis - 1),
                                     _ => return,
                                 };
-                                this.focus_key(&format!("det-{next}"), w, cx);
+                                if let Some(next) = next {
+                                    this.focus_key_and_reveal(&format!("det-{next}"), w, cx);
+                                }
                                 cx.stop_propagation();
                             }))
                             .on_hover(cx.listener(move |this, h: &bool, _, cx| {

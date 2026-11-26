@@ -154,14 +154,24 @@ pub fn format_step(v: f32, step: f32) -> String {
     format!("{v:.d$}")
 }
 
+/// Clamped base-2 exponent bounds `(e0, e1)` for finite log-axis range `y0..=y1`.
+fn pow2_bounds(y0: f32, y1: f32) -> Option<(i32, i32)> {
+    if !y0.is_finite() || !y1.is_finite() {
+        return None;
+    }
+    let e0 = (f64::from(y0.max(1e-6))).log2().ceil() as i32;
+    let e1 = (f64::from(y1.max(1e-6)) * 1.0001).log2().floor() as i32;
+    let e0 = e0.clamp(-20, 127);
+    let e1 = e1.clamp(-20, 127);
+    (e1 >= e0).then_some((e0, e1))
+}
+
 /// The stride (in octaves) of a log axis over `y0..y1` with room for `max` labels.
 pub(super) fn pow2_stride(y0: f32, y1: f32, max: usize) -> i32 {
-    if !y0.is_finite() || !y1.is_finite() {
+    let Some((e0, e1)) = pow2_bounds(y0, y1) else {
         return 1;
-    }
-    let e0 = y0.max(1e-6).log2().ceil() as i32;
-    let e1 = (y1.max(1e-6) * 1.0001).log2().floor() as i32;
-    let n = (e1.saturating_sub(e0).saturating_add(1)).max(1) as usize;
+    };
+    let n = (e1 - e0 + 1).max(1) as usize;
     n.div_ceil(max.max(1)) as i32
 }
 
@@ -173,14 +183,9 @@ pub fn pow2_ticks(y0: f32, y1: f32, max: usize) -> Vec<f32> {
 
 /// [`pow2_ticks`] at a given stride of `k` octaves.
 pub fn pow2_ticks_every(y0: f32, y1: f32, k: i32) -> Vec<f32> {
-    if !y0.is_finite() || !y1.is_finite() {
+    let Some((e0, e1)) = pow2_bounds(y0, y1) else {
         return Vec::new();
-    }
-    let e0 = y0.max(1e-6).log2().ceil() as i32;
-    let e1 = (y1.max(1e-6) * 1.0001).log2().floor() as i32;
-    if e1 < e0 {
-        return Vec::new();
-    }
+    };
     // More powers than fit: every k-th, counted down from the top (8 2 0.5), so the top power
     // keeps its label and every step is the same factor.
     let k = k.max(1);
@@ -317,6 +322,8 @@ mod tests {
         assert!(!huge.is_empty() && huge.len() <= 25 && huge.iter().all(|v| v.is_finite()));
         assert!(pow2_ticks(f32::NAN, 10.0, 4).is_empty());
         assert!(pow2_ticks(0.1, f32::INFINITY, 4).is_empty());
+        let max_log = pow2_ticks(0.1, f32::MAX, 4);
+        assert!(!max_log.is_empty() && max_log.len() <= 6 && max_log.iter().all(|v| v.is_finite()));
         assert_eq!(format_step(f32::NAN, 1.0), "–");
         assert_eq!(format_step(1.5, f32::NAN), "1.5");
         assert_eq!(format_tick(f32::INFINITY), "–");

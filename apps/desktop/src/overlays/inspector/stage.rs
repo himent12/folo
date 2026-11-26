@@ -161,6 +161,9 @@ impl FoloApp {
                         return None;
                     }
                     let b = up_cell.get()?;
+                    if !b.contains(&m.up.position) {
+                        return None;
+                    }
                     let (x, y) = to_image(b, dims, Fit::Contain, insp.zoom, insp.pan, m.up.position);
                     let idx = hit_box(&up_boxes, x, y)?;
                     let bx = &up_boxes[idx];

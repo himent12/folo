@@ -547,13 +547,13 @@ fn clicking_dialog_scrim_with_open_select_closes_only_the_dropdown() {
     let (mut app, window) = open();
     drive(&mut app, window, |this, w, cx| {
         this.open_new_run(None, w, cx);
-        this.menu_open = Some("nr-ds");
+        this.menu_open = Some("nr-dataset");
         cx.notify();
     });
     app.frame(window.into());
     drive(&mut app, window, |this, _, _| {
         assert!(this.new_run.is_some());
-        assert_eq!(this.menu_open, Some("nr-ds"));
+        assert_eq!(this.menu_open, Some("nr-dataset"));
     });
 
     // First click on the backdrop closes only the open dropdown, leaving New run open.
@@ -571,14 +571,39 @@ fn clicking_dialog_scrim_with_open_select_closes_only_the_dropdown() {
         assert!(this.new_run.is_none(), "second scrim click dismisses the dialog");
     });
 
-    // Opening the inspector clears any open dropdown/export popover.
+    // Opening the inspector clears any open dropdown/export popover, and clicking the inspector's
+    // 24 px margin outside the painted `inner` bounds while zoomed does not activate a clipped box.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Dataset("ds_8f2c".into()), w, cx);
+    });
+    app.frame(window.into());
+    app.run_until_idle();
     drive(&mut app, window, |this, w, cx| {
         this.menu_open = Some("play-model");
         this.export_open = true;
         this.open_inspector("ds_8f2c".into(), 0, w, cx);
     });
-    drive(&mut app, window, |this, _, _| {
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    let margin = drive(&mut app, window, |this, _, cx| {
         assert_eq!(this.menu_open, None);
         assert!(!this.export_open);
+        let insp = this.inspector.as_mut().unwrap();
+        insp.zoom = 4.0;
+        insp.pan = (0., 0.);
+        insp.focused_box = None;
+        cx.notify();
+        let inner = this.insp_view.get().expect("inspector inner bounds painted");
+        (f32::from(inner.left()) - 10., f32::from(inner.top() + inner.size.height * 0.5))
+    });
+    app.frame(window.into());
+    click(&mut app, window, margin, 1);
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert_eq!(insp.focused_box, None, "margin click must not activate a clipped box");
+        assert_eq!(insp.zoom, 4.0);
+        assert_eq!(insp.pan, (0., 0.));
     });
 }

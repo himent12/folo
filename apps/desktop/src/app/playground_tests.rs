@@ -895,7 +895,10 @@ fn playground_shortcuts_iou_noop_detection_keys_and_stage_margin_hover() {
         assert_eq!(this.play_pred_seq, seq_before, "no-op IoU arrow at min must not re-run predict");
     });
 
-    // 3. Detection list rows (`det-*`) support Down / End / Home / Up keyboard navigation.
+    // 3. Detection list rows (`det-*`) support Down / End / Home / Up, scroll `play_side_scroll`,
+    //    and boundary Up on `det-0` does not bubble to zoomed stage panning.
+    app.resize_window(window.into(), folo_ui::size(px(1280.), px(420.)));
+    app.frame(window.into());
     let n_vis = drive(&mut app, window, |this, w, cx| {
         let n = this
             .play_pred
@@ -905,12 +908,22 @@ fn playground_shortcuts_iou_noop_detection_keys_and_stage_margin_hover() {
             })
             .unwrap_or(0);
         if n >= 2 {
+            this.play_zoom = 2.0;
+            this.play_pan = (0., 0.);
             this.focus_key("det-0", w, cx);
         }
         n
     });
     assert!(n_vis >= 2, "demo playground prediction has >= 2 visible detections");
     app.frame(window.into());
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent { keystroke: Keystroke::parse("up").unwrap(), is_held: false }),
+    );
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.play_pan, (0., 0.), "boundary Up on det-0 must not pan zoomed stage");
+    });
     for (key, expected) in
         [("down", "det-1".to_string()), ("end", format!("det-{}", n_vis - 1)), ("home", "det-0".to_string())]
     {
@@ -922,10 +935,19 @@ fn playground_shortcuts_iou_noop_detection_keys_and_stage_margin_hover() {
             }),
         );
         app.frame(window.into());
+        if key == "end" {
+            assert!(app.wants_frame(window.into()), "det-last reveal schedules a follow-up frame");
+            app.frame(window.into());
+            drive(&mut app, window, |this, _, _| {
+                assert!(-this.play_side_scroll.offset().y > px(0.), "End scrolled play_side_scroll");
+            });
+        }
         drive(&mut app, window, |this, w, cx| {
             assert!(this.fh(expected.clone(), cx).is_focused(w), "{key} focused {expected}");
         });
     }
+    app.resize_window(window.into(), folo_ui::size(px(1280.), px(800.)));
+    app.frame(window.into());
 
     // 4. Moving into the 16 px dark margin outside the painted stage `inner` bounds when zoomed
     //    clears `play_hover` instead of hitting a clipped-off box.

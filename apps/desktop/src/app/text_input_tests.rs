@@ -191,6 +191,12 @@ fn text_input_sanitizes_reversed_ranges_multiline_ime_noop_deletes_and_double_cl
         input.update(cx, |i, cx| i.replace_and_mark_text_in_range(Some(4..2), "PQ\n", Some(3..1), w, cx));
         assert_eq!(input.read(cx).text().as_ref(), "aXPQ ef");
         assert_eq!(input.read(cx).selection(), 3..5);
+
+        // CRLF collapsing in preedit maps UTF-16 caret offset 3 ("A\r\n|BC") to byte 2 ("A |BC").
+        input.update(cx, |i, cx| i.set_text("", cx));
+        input.update(cx, |i, cx| i.replace_and_mark_text_in_range(None, "A\r\nBC", Some(3..3), w, cx));
+        assert_eq!(input.read(cx).text().as_ref(), "A BC");
+        assert_eq!(input.read(cx).selection(), 2..2);
     });
 
     // 2. No-op Backspace at start / Delete at end must not emit InputEvent::Changed.

@@ -200,8 +200,10 @@ fn paint_line_chart(
     // stepping down from the top power so the steps stay even and the domain stays the data's.
     let fit = ((f32::from(bounds.size.height) - 40.) / 22.).floor().max(2.) as usize;
     let stride = pow2_stride(y0, y1, fit);
-    let (ly0, mut ly1) = if spec.log_y { (y0.max(1e-6).ln(), y1.max(1e-6).ln()) } else { (y0, y1) };
-    if !ly0.is_finite() || !ly1.is_finite() || ly1 <= ly0 {
+    let (mut ly0, mut ly1) = if spec.log_y { (y0.max(1e-6).ln(), y1.max(1e-6).ln()) } else { (y0, y1) };
+    if !ly0.is_finite() || !ly1.is_finite() {
+        (ly0, ly1) = (0.0, 1.0);
+    } else if ly1 <= ly0 {
         ly1 = ly0 + 1.0;
     }
     let yticks = if let Some(f) = &unit {

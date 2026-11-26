@@ -218,7 +218,8 @@ impl<E: IntoElement + 'static> Element for OpacityAnimationElement<E> {
         });
         let (delta, done) = progress(&self.animation, now.saturating_duration_since(start));
         let animator = self.animator.as_ref().expect("the animator is kept until paint");
-        self.factor = animator(delta);
+        let raw = animator(delta);
+        self.factor = if raw.is_finite() { raw } else { 1.0 };
         self.start = Some(start);
         self.done = done;
         let mut element = self.element.take().expect("an animation element lays out once").into_any_element();
@@ -275,7 +276,7 @@ pub(crate) fn progress(animation: &Animation, elapsed: Duration) -> (f32, bool) 
     let duration = animation.duration.as_secs_f32();
     if !duration.is_finite() || duration <= 0.0 {
         let eased = (animation.easing)(1.0);
-        return (if eased.is_finite() { eased } else { 1.0 }, animation.oneshot);
+        return (if eased.is_finite() { eased } else { 1.0 }, true);
     }
     let mut delta = elapsed.as_secs_f32() / duration;
     let mut done = false;

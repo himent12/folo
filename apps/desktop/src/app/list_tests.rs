@@ -402,10 +402,13 @@ fn a_failed_list_keeps_its_error_while_it_is_asked_again() {
 
 #[test]
 fn runs_and_models_tables_support_arrow_home_end_and_bench_delete_clears_ui_state() {
-    use folo_ui::{KeyDownEvent, Keystroke, PlatformInput};
+    use folo_ui::{KeyDownEvent, Keystroke, PlatformInput, px, size};
 
     let (mut app, window) = super::tests::open();
-    // 1. Runs list keyboard Down / End / Home navigation.
+    // Use a short viewport so the Runs table overflows `page_scroll` and End must scroll + request a redraw.
+    app.resize_window(window.into(), size(px(1280.), px(260.)));
+    app.frame(window.into());
+    // 1. Runs list keyboard Down / End / Home navigation with scroll reveal.
     let run_ids = drive(&mut app, window, |this, w, cx| {
         this.navigate(Route::Runs, w, cx);
         let ids: Vec<String> = this.store.runs.ready().unwrap().iter().map(|r| r.id.clone()).collect();
@@ -415,21 +418,28 @@ fn runs_and_models_tables_support_arrow_home_end_and_bench_delete_clears_ui_stat
     assert!(run_ids.len() >= 2);
     drive(&mut app, window, |this, w, cx| this.focus_key(&format!("run-row-{}", run_ids[0]), w, cx));
     app.frame(window.into());
-    for (key, target) in
-        [("end", format!("run-row-{}", run_ids.last().unwrap())), ("home", format!("run-row-{}", run_ids[0]))]
-    {
-        app.simulate_input(
-            window.into(),
-            PlatformInput::KeyDown(KeyDownEvent {
-                keystroke: Keystroke::parse(key).unwrap(),
-                is_held: false,
-            }),
-        );
-        app.frame(window.into());
-        drive(&mut app, window, |this, w, cx| {
-            assert!(this.fh(target.clone(), cx).is_focused(w), "runs {key} focused {target}");
-        });
-    }
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent { keystroke: Keystroke::parse("end").unwrap(), is_held: false }),
+    );
+    app.frame(window.into());
+    assert!(app.wants_frame(window.into()), "reveal during prepaint schedules a follow-up frame");
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.fh(format!("run-row-{}", run_ids.last().unwrap()), cx).is_focused(w));
+        assert!(-this.page_scroll.offset().y > px(0.), "End scrolled page_scroll to reveal the last run row");
+    });
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent { keystroke: Keystroke::parse("home").unwrap(), is_held: false }),
+    );
+    app.frame(window.into());
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.fh(format!("run-row-{}", run_ids[0]), cx).is_focused(w));
+    });
+    app.resize_window(window.into(), size(px(1280.), px(800.)));
+    app.frame(window.into());
 
     // 2. Models list keyboard End / Home navigation (ordered by rendered groups).
     let model_ids = drive(&mut app, window, |this, w, cx| {
