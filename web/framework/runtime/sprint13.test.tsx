@@ -331,4 +331,56 @@ describe('fw Sprint 13 runtime hardening', () => {
     view.unmount();
     mountTarget.remove();
   });
+
+  it('scopes For and Index fallback transitions inside enterBranch(ran, false) without leaking to an enclosing Show', () => {
+    const outer = signal(true);
+    const forItems = signal<string[]>([]);
+    const idxItems = signal<string[]>(['a']);
+    const events: string[] = [];
+
+    const spy = (tag: string) => (_node: Element, _params: unknown, opts: { direction: 'in' | 'out' | 'both' }) => {
+      events.push(`${tag}:${opts.direction}`);
+      return { duration: 10, css: () => '' };
+    };
+    const forSpy = spy('for');
+    const idxSpy = spy('idx');
+
+    const host = document.createElement('div');
+    const view = render(
+      () => (
+        <Show when={outer.get()}>
+          {() => (
+            <div>
+              <For each={forItems.get()} key={(x) => x} fallback={<span transition:forSpy={{}}>for-empty</span>}>
+                {(x) => <b>{x()}</b>}
+              </For>
+              <Index each={idxItems.get()} fallback={<span in:idxSpy={{}}>idx-empty</span>}>
+                {(x) => <i>{x()}</i>}
+              </Index>
+            </div>
+          )}
+        </Show>
+      ),
+      host,
+    );
+    flush();
+    // Initial empty mount of For must not play intro (ran === false).
+    expect(events).toEqual([]);
+
+    // Populated -> empty on Index must play intro because ran === true.
+    idxItems.set([]);
+    flush();
+    expect(events).toEqual(['idx:in']);
+
+    // Populate For so its fallback is disposed, then close the enclosing Show:
+    // the disposed For fallback transition must NOT have leaked into Show's outro list.
+    forItems.set(['x']);
+    flush();
+    events.length = 0;
+    outer.set(false);
+    flush();
+    expect(events).toEqual([]);
+
+    view.unmount();
+  });
 });

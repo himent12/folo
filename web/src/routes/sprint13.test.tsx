@@ -5,7 +5,7 @@
 // 3. Playground ZoomStage non-finite guards.
 // 4. Queue optimistic-update rollback & SSE sequencing when a detail refresh races with a live queue event.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createRoot, effect, flush, signal } from 'fw';
+import { createRoot, effect, flush, signal, tick } from 'fw';
 import { render } from '../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
@@ -144,7 +144,7 @@ describe('Sprint 13 charts edge cases', () => {
     expect(mixed).toBe('s');
   });
 
-  it('LineChart and Histogram render SVGs, tables, and hover readouts cleanly with NaN/Inf/negative inputs', () => {
+  it('LineChart and Histogram render SVGs, tables, and hover readouts cleanly with NaN/Inf/negative inputs', async () => {
     const host = document.createElement('div');
     document.body.appendChild(host);
     const view = render(
@@ -160,6 +160,15 @@ describe('Sprint 13 charts edge cases', () => {
                 color: 'var(--chart-1)',
                 points: [
                   { x: Number.NaN, y: 1 },
+                  { x: 1, y: 0.5 },
+                  { x: 2, y: 0.25 },
+                ],
+              },
+              {
+                id: 'band',
+                label: 'band',
+                color: 'var(--chart-2)',
+                points: [
                   { x: 1, y: 0.5 },
                   { x: 2, y: 0.25 },
                 ],
@@ -191,9 +200,26 @@ describe('Sprint 13 charts edge cases', () => {
         el.dispatchEvent(new Event('resize'));
       }
       flush();
-      expect(host.querySelectorAll('svg')).toHaveLength(3);
+      expect(host.querySelectorAll('svg[aria-roledescription=chart]')).toHaveLength(3);
       expect(host.innerHTML).not.toContain('NaN');
       expect(host.innerHTML).not.toContain('Infinity');
+
+      // Keyboard navigation on LineChart with leading NaN point must skip NaN and land on finite points (1, 2).
+      const lineSvg = host.querySelector<SVGSVGElement>('.chart svg[aria-roledescription=chart]')!;
+      lineSvg.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+      await tick();
+      await Promise.resolve();
+      flush();
+      const lineSpoken = host.querySelector('.chart [aria-live]')!;
+      expect(lineSpoken.textContent).toContain('0.5');
+      expect(lineSpoken.textContent).not.toContain('NaN');
+      expect(lineSvg.innerHTML).not.toContain('NaN');
+      lineSvg.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+      await tick();
+      await Promise.resolve();
+      flush();
+      expect(lineSpoken.textContent).toContain('0.25');
+      expect(lineSpoken.textContent).not.toContain('NaN');
 
       // Focus + navigate onto dirty bins (bin 0 = NaN, bin 1 = -3) and verify visible readout stays sanitized.
       const dirtySvg = host.querySelector<SVGSVGElement>('.dirty-hist svg')!;
@@ -329,6 +355,84 @@ describe('Sprint 13 queueState optimistic rollback & SSE sequencing safety', () 
       expect(others.data).not.toBe(initial);
       expect(others.data?.length).toBe(3);
       expect(live.run?.queue_position).toBe(4);
+    } finally {
+      dispose();
+    }
+  });
+
+  it('does not roll back to the pre-move position when SSE already confirmed the exact optimistic position before HTTP failure', async () => {
+    const api = new MockApi('normal', 0);
+    hub.api = api;
+    hub.mode = 'mock';
+    const sample = (await api.runs())[0]!;
+    const makeQueued = (id: string, pos: number): Run => ({
+      ...sample,
+      id,
+      name: id,
+      status: 'queued',
+      queue_position: pos,
+    });
+
+    const initial = [makeQueued('r1', 1), makeQueued('r2', 2)];
+    let rejectMove!: (e: Error) => void;
+    vi.spyOn(api, 'moveRun').mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectMove = reject;
+        }),
+    );
+
+    let emitQueue!: (ev: { position: number; waiting: number }) => void;
+    vi.spyOn(api, 'runEvents').mockImplementation((_id, handlers) => {
+      emitQueue = (ev) => handlers.queue?.(ev);
+      return () => {};
+    });
+    vi.spyOn(api, 'runMetrics').mockResolvedValue({ steps: [], epochs: [] });
+    vi.spyOn(api, 'runLogs').mockResolvedValue({ lines: [], total: 0 });
+    vi.spyOn(api, 'runs').mockResolvedValue([makeQueued('r2', 1), makeQueued('r1', 2)]);
+    vi.spyOn(api, 'system').mockResolvedValue({ features: ['queue_control'] } as unknown as SystemInfo);
+
+    let runCall = 0;
+    const runSpy = vi.spyOn(api, 'run').mockImplementation((id) => {
+      runCall++;
+      return Promise.resolve(makeQueued(id, runCall === 1 ? 2 : 1));
+    });
+
+    let dispose!: () => void;
+    let live!: LiveRun;
+    let state!: ReturnType<typeof queueState>;
+    let others!: Resource<Run[]>;
+
+    createRoot((d) => {
+      dispose = d;
+      live = new LiveRun(() => 'r2');
+      others = new Resource(() => api.runs());
+      others.set(initial);
+      const sys = new Resource(() => Promise.resolve({ features: ['queue_control'] } as unknown as SystemInfo));
+      sys.set({ features: ['queue_control'] } as unknown as SystemInfo);
+      state = queueState({ run: () => live.run, live, others, system: sys });
+    });
+
+    try {
+      await vi.waitFor(() => {
+        flush();
+        expect(live.run?.queue_position).toBe(2);
+      });
+
+      const pending = state.move({ action: 'up' });
+      expect(live.run?.queue_position).toBe(1);
+
+      // SSE confirms the exact same optimistic position (1) while HTTP is still pending.
+      emitQueue({ position: 1, waiting: 2 });
+
+      // HTTP response is lost/fails: rollback must see queueSeq moved, keep position 1, and trigger refresh.
+      rejectMove(new ApiError(503, 'network', 'connection dropped'));
+      await pending;
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(live.run?.queue_position).toBe(1);
+      expect(runSpy).toHaveBeenCalledTimes(2);
     } finally {
       dispose();
     }

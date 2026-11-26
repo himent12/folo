@@ -175,12 +175,14 @@ export function For<T>(props: ForProps<T>): JSX.Element {
     const prevOwner = swapOwner(root);
     let value: JSX.Element;
     try {
-      enterBranch(ran, false);
-      try {
-        value = memo(() => props.fallback);
-      } finally {
-        exitBranch();
-      }
+      value = memo(() => {
+        enterBranch(ran, false);
+        try {
+          return props.fallback;
+        } finally {
+          exitBranch();
+        }
+      });
       // Eagerly surface a synchronous initial error (preserving throwing-fallback recovery semantics).
       (value as Reader<JSX.Element>)();
     } catch (e) {
@@ -617,12 +619,14 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         const prevOwner = swapOwner(root);
         let value: JSX.Element;
         try {
-          enterBranch(ran, false);
-          try {
-            value = memo(() => props.fallback);
-          } finally {
-            exitBranch();
-          }
+          value = memo(() => {
+            enterBranch(ran, false);
+            try {
+              return props.fallback;
+            } finally {
+              exitBranch();
+            }
+          });
           (value as Reader<JSX.Element>)();
         } catch (e) {
           try {

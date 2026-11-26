@@ -395,16 +395,8 @@ export default function LineChart(props: LineChartProps) {
 
   function onkeydown(e: KeyboardEvent) {
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
-    const s = longestSeries.peek();
-    if (!s || !s.points.length) return;
     const c = cursor.peek();
-    const big = e.shiftKey ? 10 : 1;
-    let i: number;
-    if (e.key === 'ArrowLeft') i = c === null ? s.points.length - 1 : Math.max(0, nearest(s.points, c) - big);
-    else if (e.key === 'ArrowRight') i = c === null ? 0 : Math.min(s.points.length - 1, nearest(s.points, c) + big);
-    else if (e.key === 'Home') i = 0;
-    else if (e.key === 'End') i = s.points.length - 1;
-    else if (e.key === 'Escape') {
+    if (e.key === 'Escape') {
       if ((c === null && !pinned.peek()) || !canDismissChartOnEscape(e)) return;
       e.preventDefault();
       speakSeq++;
@@ -413,9 +405,22 @@ export default function LineChart(props: LineChartProps) {
       picked.set(null);
       spoken.set('');
       return;
-    } else return;
+    }
+    let pts: Series['points'] = [];
+    for (const s of keyed.peek()) {
+      const f = s.points.filter((pt) => Number.isFinite(pt.x) && Number.isFinite(pt.y));
+      if (f.length > pts.length) pts = f;
+    }
+    if (!pts.length) return;
+    const big = e.shiftKey ? 10 : 1;
+    let i: number;
+    if (e.key === 'ArrowLeft') i = c === null ? pts.length - 1 : Math.max(0, nearest(pts, c) - big);
+    else if (e.key === 'ArrowRight') i = c === null ? 0 : Math.min(pts.length - 1, nearest(pts, c) + big);
+    else if (e.key === 'Home') i = 0;
+    else if (e.key === 'End') i = pts.length - 1;
+    else return;
     e.preventDefault();
-    cursor.set(s.points[i]!.x);
+    cursor.set(pts[i]!.x);
     const seq = ++speakSeq;
     // `hover` derives from the cursor; read it once the update has settled.
     void tick().then(() => {

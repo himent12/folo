@@ -128,7 +128,12 @@ export function queueState(src: QueueSource) {
           if (list && others.data === optimisticList) others.set(list);
           else void others.refresh();
           if (live.run?.id === id && next != null) {
-            if (live.run.queue_position === next) live.run = { ...live.run, queue_position: prev };
+            const curTok = live.queueToken?.();
+            const stillOwned =
+              !moveTok ||
+              !curTok ||
+              (curTok.viewSeq === moveTok.viewSeq && curTok.statusSeq === moveTok.statusSeq && curTok.queueSeq === moveTok.queueSeq);
+            if (stillOwned && live.run.queue_position === next) live.run = { ...live.run, queue_position: prev };
             else refresh();
           }
         };

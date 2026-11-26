@@ -13,12 +13,21 @@ export function hoverOf(
   xFormat: (x: number) => string,
   x: Scale,
 ) {
-  if (cursor === null || cursor === undefined || !hasData) return null;
+  if (cursor === null || cursor === undefined || !Number.isFinite(cursor) || !hasData) return null;
   if (cursor < xExtent[0] || cursor > xExtent[1]) return null;
   const c = cursor as number;
   const rows = keyed
     .map((s) => {
-      const pts = s.points;
+      const raw = s.points;
+      let allFinite = true;
+      for (let i = 0; i < raw.length; i++) {
+        const pt = raw[i]!;
+        if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) {
+          allFinite = false;
+          break;
+        }
+      }
+      const pts = allFinite ? raw : raw.filter((pt) => Number.isFinite(pt.x) && Number.isFinite(pt.y));
       const first = pts[0];
       const last = pts[pts.length - 1];
       if (!first || !last) return null;
@@ -32,12 +41,14 @@ export function hoverOf(
   if (!rows.length) return null;
   // Title at the series with the densest sampling (closest to the cursor); rows sampled elsewhere say where.
   const ref = rows.reduce((a, b) => (Math.abs(b.p.x - c) < Math.abs(a.p.x - c) ? b : a));
+  const px = x(ref.p.x);
+  if (!Number.isFinite(px)) return null;
   const title = xTitle ? xTitle(ref.p.x) : xFormat(ref.p.x);
   const labelled = rows.map((r) => {
     const t = xTitle ? xTitle(r.p.x) : xFormat(r.p.x);
     return { ...r, at: t === title ? null : t };
   });
-  return { rows: labelled, px: x(ref.p.x), xv: ref.p.x, title };
+  return { rows: labelled, px, xv: ref.p.x, title };
 }
 
 /** The pickable series whose drawn line passes nearest (px, py), within `r` px; null for none. */
