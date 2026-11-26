@@ -261,6 +261,16 @@ impl FoloApp {
         forget_unreachable(&mut s.evals);
         forget_unreachable(&mut s.run_data);
         forget_unreachable(&mut s.samples);
+        s.samples_refresh_error.retain(|id, e| {
+            if e.code == "server_unreachable" {
+                if matches!(s.samples.get(id), Some(Load::Ready(_))) {
+                    s.samples_stale.insert(id.clone());
+                }
+                false
+            } else {
+                true
+            }
+        });
         forget_unreachable(&mut s.logs);
         if unreachable(&self.throughput) {
             self.throughput = Load::Idle;

@@ -227,6 +227,9 @@ impl Store {
         self.run_data.remove(run_id);
         self.logs.remove(run_id);
         self.samples.remove(run_id);
+        self.samples_stale.remove(run_id);
+        self.samples_refreshing.remove(run_id);
+        self.samples_refresh_error.remove(run_id);
         self.pending.remove(run_id);
         self.resumed.insert(run_id.to_string());
     }
@@ -301,18 +304,27 @@ impl Store {
             RunEvent::Epoch(e) => {
                 if let Some(runs) = self.runs.ready_mut()
                     && let Some(r) = runs.iter_mut().find(|r| r.id == run_id)
-                    && r.best.as_ref().is_none_or(|b| e.val.map50_95 > b.map50_95)
                 {
-                    r.best = Some(BestEpoch { epoch: e.epoch, map50_95: e.val.map50_95 });
+                    r.epoch = r.epoch.max(e.epoch);
+                    if r.best.as_ref().is_none_or(|b| e.val.map50_95 > b.map50_95) {
+                        r.best = Some(BestEpoch { epoch: e.epoch, map50_95: e.val.map50_95 });
+                    }
                 }
                 if let Some(Load::Ready(d)) = self.run_data.get_mut(run_id) {
                     d.push_epoch(e);
                 }
-                // New validation predictions exist; refetch samples lazily.
-                if let Some(s) = self.samples.get_mut(run_id)
-                    && matches!(s, Load::Ready(_))
-                {
-                    *s = Load::Idle;
+                // New validation predictions exist: keep ready tiles visible while refreshing in
+                // place, and clear any earlier failure (e.g. a premature epoch-0 error).
+                self.samples_refresh_error.remove(run_id);
+                match self.samples.get_mut(run_id) {
+                    Some(Load::Ready(_)) | Some(Load::Loading) => {
+                        self.samples_stale.insert(run_id.to_string());
+                    }
+                    Some(s @ Load::Failed(_)) => {
+                        *s = Load::Idle;
+                        self.samples_stale.remove(run_id);
+                    }
+                    _ => {}
                 }
             }
             RunEvent::Queue(q) => {
@@ -391,6 +403,23 @@ impl Store {
                 // Finished: the server's history is complete again.
                 if !st.status.is_active() {
                     self.resumed.remove(run_id);
+                    match self.samples.get_mut(run_id) {
+                        Some(s @ Load::Failed(_)) => {
+                            *s = Load::Idle;
+                            self.samples_stale.remove(run_id);
+                            self.samples_refresh_error.remove(run_id);
+                        }
+                        Some(Load::Loading) => {
+                            self.samples_stale.insert(run_id.to_string());
+                        }
+                        Some(Load::Ready(_))
+                            if self.samples_refresh_error.remove(run_id).is_some()
+                                || self.samples_refreshing.contains(run_id) =>
+                        {
+                            self.samples_stale.insert(run_id.to_string());
+                        }
+                        _ => {}
+                    }
                 }
             }
         }

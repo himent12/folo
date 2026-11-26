@@ -178,6 +178,9 @@ impl FoloApp {
         // request for the picked epoch still on its way is dropped when it lands.
         if self.sample_epoch.take().is_some() {
             self.store.samples.clear();
+            self.store.samples_stale.clear();
+            self.store.samples_refreshing.clear();
+            self.store.samples_refresh_error.clear();
             self.history_tickets.retain(|(_, what), _| *what != "samples");
         }
         if !self.focus_within_page(window) {

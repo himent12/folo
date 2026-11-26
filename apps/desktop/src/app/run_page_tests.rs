@@ -587,3 +587,335 @@ fn switching_to_another_cached_runs_logs_scrolls_to_bottom() {
         assert!(max - y < px(8.), "run B logs scrolled to bottom (y={y:?}, max={max:?})");
     });
 }
+
+#[test]
+fn validation_samples_wait_for_first_evaluation_and_recover_from_failure_on_epoch() {
+    use crate::api::{ApiError, Epoch, Loss, RunEvent, RunStatus, ValMetrics};
+    use crate::app::Route;
+    use crate::store::Load;
+
+    let (mut app, window) = open();
+    // Pick a running run and reset it to mid-epoch 1 before any evaluation has finished.
+    let id = drive(&mut app, window, |this, _, _| {
+        let r = this
+            .store
+            .runs
+            .ready_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|r| r.status == RunStatus::Running)
+            .expect("demo has a running run");
+        r.epoch = 1;
+        r.best = None;
+        let id = r.id.clone();
+        this.store.run_data.insert(
+            id.clone(),
+            Load::Ready(crate::store::RunData::new(
+                crate::api::RunMetrics { steps: Vec::new(), epochs: Vec::new() },
+                r.steps_per_epoch,
+            )),
+        );
+        this.store.samples.remove(&id);
+        this.store.samples_stale.remove(&id);
+        id
+    });
+
+    // Opening the run mid-epoch 1 must show the waiting state and NOT fire an epoch-0 sample fetch.
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Run(id.clone()), w, cx));
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let r = this.store.run(&id).unwrap();
+        assert_eq!(this.evaluated_epoch(r), 0, "no epoch evaluated yet");
+        assert!(
+            !this.store.samples.contains_key(&id),
+            "must not request samples before the first evaluation completes"
+        );
+    });
+
+    // Even if a prior sample fetch failed, an arriving Epoch event clears the failure and loads samples.
+    drive(&mut app, window, |this, _, cx| {
+        this.store
+            .samples
+            .insert(id.clone(), Load::Failed(ApiError::new("not_found", "no samples for epoch 0")));
+        this.store.apply(
+            &id,
+            RunEvent::Epoch(Epoch {
+                epoch: 1,
+                train_loss: Loss { box_: 1.0, cls: 1.0, dfl: 1.0, total: 3.0 },
+                val: ValMetrics {
+                    map50: 0.5,
+                    map50_95: 0.3,
+                    precision: 0.6,
+                    recall: 0.5,
+                    best_f1_conf: Some(0.4),
+                    per_class: Vec::new(),
+                },
+                duration_s: 1.0,
+            }),
+        );
+        cx.notify();
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(
+            this.store.samples.get(&id).is_some_and(|l| l.ready().is_some()),
+            "Epoch event cleared failed samples and automatically loaded latest samples"
+        );
+    });
+}
+
+#[test]
+fn live_sample_refresh_keeps_ready_tiles_mounted_without_placeholder_jump() {
+    use crate::api::{Epoch, Loss, RunEvent, RunStatus, ValMetrics};
+    use crate::app::Route;
+
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let id = drive(&mut app, window, |this, w, cx| {
+        let id = this
+            .store
+            .runs
+            .ready()
+            .unwrap()
+            .iter()
+            .find(|r| r.status == RunStatus::Running)
+            .expect("demo has a running run")
+            .id
+            .clone();
+        this.navigate(Route::Run(id.clone()), w, cx);
+        id
+    });
+    for _ in 0..3 {
+        app.frame(window.into());
+        app.run_until_idle();
+    }
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.samples.get(&id).is_some_and(|l| l.ready().is_some()), "initial samples loaded");
+    });
+
+    // Hold the next samples fetch and deliver a new live Epoch event.
+    let hold_key: &'static str = Box::leak(format!("samples {id}").into_boxed_str());
+    let held = api.hold(hold_key);
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                this.store.apply(
+                    &id,
+                    RunEvent::Epoch(Epoch {
+                        epoch: 99,
+                        train_loss: Loss { box_: 0.5, cls: 0.5, dfl: 0.5, total: 1.5 },
+                        val: ValMetrics {
+                            map50: 0.8,
+                            map50_95: 0.55,
+                            precision: 0.82,
+                            recall: 0.78,
+                            best_f1_conf: Some(0.45),
+                            per_class: Vec::new(),
+                        },
+                        duration_s: 1.0,
+                    }),
+                );
+                cx.notify();
+            })
+            .unwrap();
+    });
+    app.frame(window.into());
+    app.run_until_held(1);
+    held.wait_held();
+    app.frame(window.into());
+
+    // While the refresh is in flight, existing Ready samples must remain mounted (never Load::Loading).
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, _| {
+                assert!(
+                    this.store.samples.get(&id).is_some_and(|l| l.ready().is_some()),
+                    "live refresh keeps ready tiles visible instead of replacing with 8 skeletons"
+                );
+                assert!(this.focus.borrow().contains_key("smp-0"), "sample tiles stay mounted");
+            })
+            .unwrap();
+    });
+
+    drop(held);
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.samples.get(&id).is_some_and(|l| l.ready().is_some()));
+        assert!(!this.store.samples_stale.contains(&id));
+    });
+}
+
+#[test]
+fn evaluated_epoch_fallbacks_in_flight_failure_and_refresh_error_retry() {
+    use crate::api::{ApiError, BestEpoch, Epoch, Loss, RunEvent, RunStatus, StatusEvent, ValMetrics};
+    use crate::app::Route;
+    use crate::store::Load;
+
+    let (mut app, window) = open();
+    // 1. Verify `evaluated_epoch` across `run_data` Ready and absent/Loading fallback states.
+    drive(&mut app, window, |this, _, _| {
+        let mut r = this.store.runs.ready().unwrap()[0].clone();
+        this.store.run_data.remove(&r.id);
+        this.store.samples.remove(&r.id);
+
+        // Loaded `run_data` takes precedence even if `r.epoch` is still 0 in a stale run snapshot.
+        r.status = RunStatus::Running;
+        r.epoch = 0;
+        this.store.run_data.insert(
+            r.id.clone(),
+            Load::Ready(crate::store::RunData::new(
+                crate::api::RunMetrics {
+                    steps: Vec::new(),
+                    epochs: vec![Epoch {
+                        epoch: 1,
+                        train_loss: Loss { box_: 1.0, cls: 1.0, dfl: 1.0, total: 3.0 },
+                        val: ValMetrics {
+                            map50: 0.5,
+                            map50_95: 0.3,
+                            precision: 0.6,
+                            recall: 0.5,
+                            best_f1_conf: Some(0.4),
+                            per_class: Vec::new(),
+                        },
+                        duration_s: 1.0,
+                    }],
+                },
+                10,
+            )),
+        );
+        assert_eq!(this.evaluated_epoch(&r), 1);
+        this.store.run_data.remove(&r.id);
+
+        // Checkpoint-seeded queued/active run at epoch 0 with inherited `best`: must be 0.
+        r.status = RunStatus::Queued;
+        r.epoch = 0;
+        r.best = Some(BestEpoch { epoch: 5, map50_95: 0.4 });
+        assert_eq!(this.evaluated_epoch(&r), 0);
+
+        // Failed mid-epoch 1 without `run_data`: must be 0 (`r.epoch` is the epoch it failed in).
+        r.status = RunStatus::Failed;
+        r.epoch = 1;
+        r.best = None;
+        assert_eq!(this.evaluated_epoch(&r), 0);
+
+        // Stopped run without `run_data`: `r.epoch` is the last finished epoch (0 if stopped in epoch 1).
+        r.status = RunStatus::Stopped;
+        r.epoch = 0;
+        assert_eq!(this.evaluated_epoch(&r), 0);
+        r.epoch = 3;
+        assert_eq!(this.evaluated_epoch(&r), 3);
+
+        // Completed run while `run_data` is loading: uses `r.epoch` (not lower `r.best.epoch`).
+        r.status = RunStatus::Completed;
+        r.epoch = 10;
+        r.best = Some(BestEpoch { epoch: 1, map50_95: 0.4 });
+        assert_eq!(this.evaluated_epoch(&r), 10);
+
+        // Active run on epoch 10 while `run_data` reloads on stream recovery: keeps epoch >= 9.
+        r.status = RunStatus::Running;
+        r.epoch = 10;
+        r.best = Some(BestEpoch { epoch: 1, map50_95: 0.4 });
+        assert_eq!(this.evaluated_epoch(&r), 9);
+    });
+
+    // 2. If an in-flight `Load::Loading` sample fetch fails AFTER a newer `RunEvent::Epoch`
+    //    marked it stale, `ensure_samples` consumes `samples_stale` and recovers automatically.
+    let id = drive(&mut app, window, |this, w, cx| {
+        let id = this
+            .store
+            .runs
+            .ready()
+            .unwrap()
+            .iter()
+            .find(|r| r.status == RunStatus::Running)
+            .unwrap()
+            .id
+            .clone();
+        this.navigate(Route::Run(id.clone()), w, cx);
+        id
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, cx| {
+        this.store.runs.ready_mut().unwrap().iter_mut().find(|r| r.id == id).unwrap().epoch = 0;
+        this.store.samples.insert(id.clone(), Load::Loading);
+        this.store.apply(
+            &id,
+            RunEvent::Epoch(Epoch {
+                epoch: 5,
+                train_loss: Loss { box_: 0.5, cls: 0.5, dfl: 0.5, total: 1.5 },
+                val: ValMetrics {
+                    map50: 0.7,
+                    map50_95: 0.45,
+                    precision: 0.7,
+                    recall: 0.7,
+                    best_f1_conf: Some(0.4),
+                    per_class: Vec::new(),
+                },
+                duration_s: 1.0,
+            }),
+        );
+        assert_eq!(this.store.run(&id).unwrap().epoch, 5, "Epoch event advances Run.epoch");
+        assert!(this.store.samples_stale.contains(&id));
+        // Simulate the older in-flight request failing after Epoch arrived.
+        this.store.samples.insert(id.clone(), Load::Failed(ApiError::new("not_found", "stale epoch failed")));
+        cx.notify();
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(
+            this.store.samples.get(&id).is_some_and(|l| l.ready().is_some()),
+            "stale failed samples automatically recovered after newer Epoch"
+        );
+    });
+
+    // 3. Terminal Status arriving while a background Latest refresh is in flight queues a retry.
+    drive(&mut app, window, |this, _, cx| {
+        this.store.samples_refreshing.insert(id.clone());
+        this.store.apply(&id, RunEvent::Status(StatusEvent::new(RunStatus::Completed, None)));
+        assert!(
+            this.store.samples_stale.contains(&id),
+            "terminal status during in-flight refresh marks samples stale for auto-retry"
+        );
+        cx.notify();
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.store.samples_stale.contains(&id));
+        assert!(!this.store.samples_refreshing.contains(&id));
+        assert!(!this.store.samples_refresh_error.contains_key(&id));
+        assert!(this.store.samples.get(&id).is_some_and(|l| l.ready().is_some()));
+    });
+
+    // 4. A failed background Latest refresh keeps Ready tiles mounted AND surfaces Retry.
+    drive(&mut app, window, |this, _, cx| {
+        this.store
+            .samples_refresh_error
+            .insert(id.clone(), ApiError::new("server_unreachable", "refresh timed out"));
+        this.focus.borrow_mut().clear();
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, cx| {
+        let drawn = this.focus.borrow();
+        assert!(drawn.contains_key("smp-0"), "existing tiles stay mounted during refresh error");
+        assert!(drawn.contains_key("run-samples-retry"), "caption surfaces inline Retry button");
+        drop(drawn);
+        this.retry_samples(&id, cx);
+    });
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.store.samples_refresh_error.contains_key(&id), "Retry cleared refresh error");
+        assert!(this.store.samples.get(&id).is_some_and(|l| l.ready().is_some()));
+    });
+}

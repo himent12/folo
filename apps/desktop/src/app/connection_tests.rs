@@ -503,9 +503,12 @@ fn a_silent_end_reads_the_log_and_latest_samples_again() {
         drop(stream_of(this, id));
         this.drain_streams(cx);
         assert!(
-            matches!(this.store.samples.get(id), Some(Load::Idle)),
-            "the latest samples are asked for again"
+            this.store.samples_stale.contains(id)
+                && matches!(this.store.samples.get(id), Some(Load::Ready(_))),
+            "the latest samples are marked stale for in-place refresh while keeping ready tiles"
         );
+        this.ensure_samples(id, cx);
+        assert!(!this.store.samples_stale.contains(id), "ensure_samples consumed the stale flag and fetched");
     });
     drive(&mut app, window, |this, _, _| {
         let Some(Load::Ready(hist)) = this.store.logs.get(id) else { panic!("the log reloaded") };
@@ -520,18 +523,27 @@ fn a_page_that_failed_while_the_server_was_away_loads_once_it_is_back() {
     let (mut app, window) = open();
     let down =
         crate::api::ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:18110");
-    let ds = drive(&mut app, window, |this, _, cx| {
+    let (ds, run_id) = drive(&mut app, window, |this, _, cx| {
         let ds = this.store.datasets.ready().unwrap()[0].id.clone();
+        let run_id = this.store.runs.ready().unwrap()[0].id.clone();
+        let samples = this.store.api.samples(&run_id, None).unwrap();
         this.store.health = Load::Failed(down.clone());
         this.store.dataset.insert(ds.clone(), Load::Failed(down.clone()));
+        this.store.samples.insert(run_id.clone(), Load::Ready(samples));
+        this.store.samples_refresh_error.insert(run_id.clone(), down.clone());
         this.bench.list = Load::Failed(down.clone());
         this.store.system = Load::Idle;
         this.ensure_core(cx);
-        ds
+        (ds, run_id)
     });
     drive(&mut app, window, |this, _, cx| {
         assert!(!this.store.unreachable());
         assert!(this.bench.list.error().is_none(), "the benchmark list is asked for again");
+        assert!(
+            !this.store.samples_refresh_error.contains_key(&run_id)
+                && this.store.samples_stale.contains(&run_id),
+            "unreachable background sample refresh error clears on reconnect and queues refresh"
+        );
         this.ensure_dataset(&ds, cx);
     });
     drive(&mut app, window, |this, _, _| {

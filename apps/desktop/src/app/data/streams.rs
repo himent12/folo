@@ -163,10 +163,23 @@ impl FoloApp {
     /// ones): read again when shown. An earlier epoch picked on its page stays.
     fn invalidate_latest_samples(&mut self, id: &str) {
         let picked = matches!(&self.route, Route::Run(r) if r == id) && self.sample_epoch.is_some();
-        if !picked && matches!(self.store.samples.get(id), Some(Load::Ready(_) | Load::Loading)) {
-            self.store.samples.insert(id.to_string(), Load::Idle);
-            // An answer still on its way predates the gap.
-            self.history_tickets.remove(&(id.to_string(), "samples"));
+        if !picked {
+            self.store.samples_refreshing.remove(id);
+            self.store.samples_refresh_error.remove(id);
+            match self.store.samples.get(id) {
+                Some(Load::Ready(_)) => {
+                    self.store.samples_stale.insert(id.to_string());
+                    // An answer still on its way predates the gap.
+                    self.history_tickets.remove(&(id.to_string(), "samples"));
+                }
+                Some(Load::Loading | Load::Failed(_)) => {
+                    self.store.samples.insert(id.to_string(), Load::Idle);
+                    self.store.samples_stale.remove(id);
+                    // An answer still on its way predates the gap.
+                    self.history_tickets.remove(&(id.to_string(), "samples"));
+                }
+                _ => {}
+            }
         }
     }
 

@@ -30,6 +30,31 @@ impl FoloApp {
         Some(d.metrics.epochs.last().map_or(0, |e| e.epoch))
     }
 
+    /// The last epoch with completed validation metrics (0 until the first evaluation finishes).
+    /// Checks loaded `run_data` first so a fast first epoch or live `Epoch` event isn't masked
+    /// by a stale run-list snapshot (`r.epoch == 0`). When `run_data` is absent or reloading,
+    /// completed and stopped runs use `r.epoch` (their last finished epoch), active runs use
+    /// `r.epoch.saturating_sub(1)`, and failed runs wait for `run_data` (since `r.epoch` is the
+    /// epoch in which they failed).
+    pub(crate) fn evaluated_epoch(&self, r: &Run) -> u32 {
+        if let Some(d) = self.store.run_data.get(&r.id).and_then(|l| l.ready()) {
+            return d.metrics.epochs.last().map_or(0, |e| e.epoch);
+        }
+        if r.epoch == 0 {
+            return 0;
+        }
+        let from_samples = self.store.samples.get(&r.id).and_then(|l| l.ready()).map_or(0, |s| s.epoch);
+        let fallback = if matches!(r.status, RunStatus::Completed | RunStatus::Stopped) {
+            r.epoch
+        } else if r.status.is_active() {
+            // Active on epoch N means epochs 1..=N-1 finished (epoch 1 -> 0 until evaluated).
+            r.epoch.saturating_sub(1)
+        } else {
+            0
+        };
+        from_samples.max(fallback)
+    }
+
     fn resume_button(&self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let rid = r.id.clone();
         // No checkpoint (no epoch finished): it starts again, as Studio says, never "Resume".
@@ -91,7 +116,7 @@ impl FoloApp {
         };
         self.ensure_run_data(id, cx);
         self.ensure_logs(id, cx);
-        if r.epoch > 0 {
+        if self.evaluated_epoch(&r) > 0 {
             self.ensure_samples(id, cx);
         }
         let now = self.store.api.now();
