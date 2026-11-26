@@ -172,8 +172,8 @@ unsafe fn warp_general_interior_to_rgb_avx2(
     let sp = sdata.as_ptr();
     let op = out_rgb.as_mut_ptr();
     let vround = _mm256_set1_epi32(ROUND as i32);
-    // Pairs `[R0, R1, G0, G1, B0, B1, 0, 0]` for top row (low 8 bytes) and bottom row (high 8 bytes) from a 128-bit
-    // register holding `[top_6_bytes .. | bot_6_bytes ..]`.
+    // Pairs `[R0, R1, G0, G1, B0, B1, 0, 0]` for pixel 0 (low 8 bytes) and pixel 1 (high 8 bytes) from a 128-bit
+    // register holding `[p0_6_bytes .. | p1_6_bytes ..]`.
     let pair_shuf = _mm_setr_epi8(0, 3, 1, 4, 2, 5, -1, -1, 8, 11, 9, 12, 10, 13, -1, -1);
     let rgb0_to_rgb = _mm_setr_epi8(0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, -1, -1, -1, -1);
     let (mut fu, mut fv) = (fu0, fv0);

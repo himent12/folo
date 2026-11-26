@@ -32,7 +32,7 @@ impl BoxFilter {
             && w > self.min_px
             && h > self.min_px
             && unclipped_area.is_finite()
-            && unclipped_area >= 0.0
+            && unclipped_area > 0.0
             && w * h >= self.min_area_ratio * unclipped_area
             && (w / h).max(h / w) < self.max_aspect
     }
@@ -88,6 +88,9 @@ fn transform_box_axis(
     filter: &BoxFilter,
 ) -> Option<BBox> {
     let [x1, y1, x2, y2] = bx.pixel_xyxy(src_w, src_h);
+    if !(x2 > x1 && y2 > y1) {
+        return None;
+    }
     let u1 = (a * x1 as f64 + c) as f32;
     let u2 = (a * x2 as f64 + c) as f32;
     let v1 = (e * y1 as f64 + f) as f32;
@@ -116,6 +119,9 @@ fn transform_box_general(
     filter: &BoxFilter,
 ) -> Option<BBox> {
     let [x1, y1, x2, y2] = bx.pixel_xyxy(src_w, src_h);
+    if !(x2 > x1 && y2 > y1) {
+        return None;
+    }
     let (x1d, y1d, x2d, y2d) = (x1 as f64, y1 as f64, x2 as f64, y2 as f64);
     let (ax1, ax2, by1, by2) = (a * x1d, a * x2d, b * y1d, b * y2d);
     let (dx1, dx2, ey1, ey2) = (d * x1d, d * x2d, e * y1d, e * y2d);
@@ -487,9 +493,18 @@ mod tests {
         let perm = BoxFilter { min_px: 0.0, min_area_ratio: 0.0, max_aspect: 1e9 };
         assert!(!perm.keep(0.0, 10.0, 100.0));
         assert!(!perm.keep(10.0, 0.0, 100.0));
+        assert!(!perm.keep(10.0, 10.0, 0.0));
         assert!(!perm.keep(10.0, 10.0, f32::NAN));
         assert!(!perm.keep(10.0, 10.0, -1.0));
         assert!(perm.keep(1.0, 1.0, 1.0));
+        // Invertible shear must not expand a zero-width or inverted annotation into a positive-area box.
+        let shear = Affine([1.0, 1.0, -32.0, 0.0, 1.0, 0.0]);
+        let degenerate = vec![BBox::new(0, 0.5, 0.5, 0.0, 0.5), BBox::new(1, 0.5, 0.5, -0.2, -0.2)];
+        assert!(transform_boxes(&degenerate, 64, 64, &shear, 64, 64, &BoxFilter::default()).is_empty());
+        assert!(transform_boxes(&degenerate, 64, 64, &shear, 64, 64, &perm).is_empty());
+        let mut degen_in_place = degenerate;
+        transform_boxes_in_place(&mut degen_in_place, 64, 64, &shear, 64, 64, &BoxFilter::default());
+        assert!(degen_in_place.is_empty());
         // `transform_boxes_in_place` matches `transform_boxes` bit for bit and handles zero output size.
         let boxes = vec![BBox::new(0, 0.5, 0.5, 0.3, 0.4), BBox::new(1, 0.99, 0.99, 0.01, 0.01)];
         let m = Affine::rotate(11.0).then(&Affine::translate(20.0, 10.0));
