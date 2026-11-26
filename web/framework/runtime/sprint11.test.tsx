@@ -43,7 +43,7 @@ describe('fw Sprint 11 runtime hardening', () => {
     expect(watches).toBe(0);
   });
 
-  it('unsubscribes earlier sources when a later source throws during ComputedNode._subscribe', () => {
+  it('rolls back partial subscriptions on throw so earlier sources do not leak and later subscribers connect all sources', () => {
     let firstWatches = 0;
     let shouldThrow = false;
     const first = watchedSignal(1, (on) => {
@@ -52,21 +52,41 @@ describe('fw Sprint 11 runtime hardening', () => {
     const second = watchedSignal(2, (on) => {
       if (on && shouldThrow) throw new Error('watch-boom');
     });
-    const derived = computed(() => first.get() + second.get());
-    expect(derived.peek()).toBe(3);
+    const third = signal(3);
+    const derived = computed(() => first.get() + second.get() + third.get());
+    expect(derived.peek()).toBe(6);
     expect(firstWatches).toBe(0);
 
     shouldThrow = true;
-    const stop = createRoot((dispose) => {
+    const stop1 = createRoot((dispose) => {
       effect(() => {
         void derived.get();
       });
       return dispose;
     });
     expect(() => flush()).toThrow('watch-boom');
-    stop();
-    // Because `subscribeLink(this, node)` ran before recursing into sources, disposing the effect unsubscribes `first`
-    // cleanly instead of leaking `firstWatches === 1` forever.
+    // Rollback unsubscribed `first` immediately and left `derived` untracked (not stuck partially subscribed).
+    expect(firstWatches).toBe(0);
+
+    // Even before the failed root is disposed, a second subscriber must walk and subscribe every source including `third`.
+    shouldThrow = false;
+    const seen: number[] = [];
+    const stop2 = createRoot((dispose) => {
+      effect(() => {
+        seen.push(derived.get());
+      });
+      return dispose;
+    });
+    flush();
+    expect(seen).toEqual([6]);
+    expect(firstWatches).toBe(1);
+
+    third.set(20);
+    flush();
+    expect(seen).toEqual([6, 23]);
+
+    stop1();
+    stop2();
     expect(firstWatches).toBe(0);
   });
 

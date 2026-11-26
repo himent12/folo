@@ -120,11 +120,11 @@ export function cleanupSources(target: Target): void {
   if (hasErr) throw err;
 }
 
-/** Unsubscribes every link in `head` and runs optional `after`, finishing all before rethrowing the first error. */
-export function unsubscribeSources(head: Link | undefined, after?: () => void): void {
+/** Unsubscribes every link in `head` (up to optional `stop`) and runs optional `after`, finishing all before rethrowing the first error. */
+export function unsubscribeSources(head: Link | undefined, after?: () => void, stop?: Link): void {
   let err: unknown;
   let hasErr = false;
-  for (let n = head; n !== undefined; n = n._ns) {
+  for (let n = head; n !== stop && n !== undefined; n = n._ns) {
     try {
       n._s._unsubscribe(n);
     } catch (e) {
