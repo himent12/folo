@@ -73,28 +73,34 @@ export default function ExportDialog(props: ExportDialogProps) {
   const switchesOk = signal(false);
   /** Whether the server serves the ONNX graph for download (`weights_onnx`), so ONNX skips the server-side file. */
   const onnxDirect = signal(false);
-  /** Whether `/api/system` is still in flight for the current open/server epoch. */
-  const capsLoading = signal(false);
+  /** Capability discovery state for `/api/system` on the current open/server epoch. */
+  const capsState = signal<'idle' | 'loading' | 'ready' | 'error'>('idle');
+  const capsError = signal<unknown>(null);
+  const capsAttempt = signal(0);
   effect(() => {
     void hub.epoch;
+    void capsAttempt.get();
     if (!open.get()) {
-      capsLoading.set(false);
+      capsState.set('idle');
+      capsError.set(null);
       return;
     }
     let live = true;
-    capsLoading.set(true);
+    capsState.set('loading');
+    capsError.set(null);
     hub.api.system().then(
       (s) => {
         if (!live) return;
         switchesOk.set(!!s.features?.includes('export_onnx_switches'));
         onnxDirect.set(!!s.features?.includes('weights_onnx'));
-        capsLoading.set(false);
+        capsState.set('ready');
       },
-      () => {
+      (e) => {
         if (!live) return;
         switchesOk.set(false);
         onnxDirect.set(false);
-        capsLoading.set(false);
+        capsError.set(e);
+        capsState.set('error');
       },
     );
     return () => {
@@ -102,7 +108,18 @@ export default function ExportDialog(props: ExportDialogProps) {
     };
   });
   /** While ONNX is chosen on a live server and `/api/system` has not answered yet, hold export so we do not fall back to writing on the server. */
-  const checkingOnnx = computed(() => !demo.get() && format.get() === 'onnx' && capsLoading.get());
+  const checkingOnnx = computed(() => !demo.get() && format.get() === 'onnx' && capsState.get() === 'loading');
+  /** Capability discovery failed while ONNX is chosen: keep ONNX blocked and offer Retry instead of writing on the server. */
+  const onnxCapsFailed = computed(() => !demo.get() && format.get() === 'onnx' && capsState.get() === 'error');
+  function retryCaps() {
+    capsAttempt.set(capsAttempt.peek() + 1);
+    void tick().then(() => {
+      if (destroyed || !open.peek()) return;
+      if (!document.activeElement || document.activeElement === document.body) {
+        statusEl?.closest('dialog')?.querySelector<HTMLElement>('input[name="export-format"]:checked')?.focus({ preventScroll: true });
+      }
+    });
+  }
   /** The estimate follows the switches: an f16 ONNX file is about half the size. */
   const perParam = (f: (typeof formats)[number]) => (f.value === 'onnx' && onnxSwitches.get() && switches.get().half ? 2.05 : f.bytesPerParam);
   /** The app's one size format (`bytes`: one decimal, "≈ 18.3 MiB", "≈ 37.0 MiB"). */
@@ -238,7 +255,7 @@ export default function ExportDialog(props: ExportDialogProps) {
   }
 
   async function start() {
-    if (phase.peek() === 'running' || checkingOnnx.peek()) return;
+    if (phase.peek() === 'running' || checkingOnnx.peek() || onnxCapsFailed.peek()) return;
     if (direct.peek()) return downloadFile();
     const id = ++uiRun;
     const m = model();
@@ -351,7 +368,7 @@ export default function ExportDialog(props: ExportDialogProps) {
           <Button variant="ghost" onclick={close}>
             Cancel
           </Button>
-          <Button variant="primary" icon={Download} loading={phase.get() === 'running' || checkingOnnx.get()} onclick={start}>
+          <Button variant="primary" icon={Download} loading={phase.get() === 'running' || checkingOnnx.get()} disabled={onnxCapsFailed.get()} onclick={start}>
             {checkingOnnx.get() ? (
               'Checking server…'
             ) : phase.get() === 'error' ? (
@@ -499,6 +516,10 @@ export default function ExportDialog(props: ExportDialogProps) {
                   <>Exporting {model().name}…</>
                 )}
               </span>
+            </div>
+          ) : onnxCapsFailed.get() ? (
+            <div class="err">
+              <ErrorState error={capsError.get()} title="Could not check ONNX support" retry={retryCaps} compact />
             </div>
           ) : phase.get() === 'error' ? (
             <div class="err">

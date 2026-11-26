@@ -293,6 +293,50 @@ describe('ExportDialog: ONNX download (weights_onnx)', () => {
     expect(exp).not.toHaveBeenCalled();
   });
 
+  it('blocks ONNX export and offers Retry when /api/system fails, recovering to direct ONNX download on Retry', async () => {
+    const api = new HttpApi('http://folo.test');
+    const sysSpy = vi
+      .spyOn(api, 'system')
+      .mockRejectedValueOnce(new Error('502 Bad Gateway'))
+      .mockResolvedValueOnce({ ...SYS, features: ['export_onnx_switches', 'weights_onnx'] });
+    const exp = vi.spyOn(api, 'exportModel');
+    const get = vi.spyOn(api, 'onnxFile').mockResolvedValue(new File([new Uint8Array(1024)], 'shapes-n-best.onnx'));
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x');
+    hub.api = api;
+    c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+
+    // Switch to ONNX after /api/system failed: Export must stay disabled (never POST /export) and show Retry.
+    target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
+    const retryBtn = await until(() => button('Retry'), 'capability Retry button');
+    expect(retryBtn.disabled).toBe(false);
+    const expBtn = button('Export')!;
+    expect(expBtn.disabled).toBe(true);
+    expBtn.click();
+    flushSync();
+    expect(exp).not.toHaveBeenCalled();
+
+    // FOLO f16 remains immediately downloadable even while ONNX capability check failed.
+    target.ownerDocument.querySelector<HTMLInputElement>('input[value="folo-f16"]')!.click();
+    flushSync();
+    expect(button('Download shapes-n-best-f16.folo')?.disabled).toBe(false);
+
+    // Back to ONNX -> click Retry -> recovers and downloads ONNX directly.
+    target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
+    flushSync();
+    button('Retry')!.click();
+    const dl = await until(() => {
+      const b = button('Download shapes-n-best.onnx');
+      return b && !b.disabled ? b : null;
+    }, 'direct ONNX download after retry');
+    expect(sysSpy).toHaveBeenCalledTimes(2);
+    dl.click();
+    await until(() => button('Done'), 'finished download');
+    expect(get).toHaveBeenCalledTimes(1);
+    expect(exp).not.toHaveBeenCalled();
+  });
+
   it('moves keyboard focus to the done action when export finishes and back to the format radio on Export another', async () => {
     hub.api = new MockApi('normal', 0);
     c = mount(ExportDialog, { target, props: { model: { ...model, id: 'm_fast_n', name: 'fasteners-n-best' }, open: true } });

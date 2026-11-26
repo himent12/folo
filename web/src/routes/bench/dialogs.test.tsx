@@ -342,4 +342,71 @@ describe('Bench dialogs async & busy guards', () => {
     });
     expect(resSpy).toHaveBeenCalledTimes(2);
   });
+
+  it('moves keyboard focus to the confidence input when Retry resolves with a null threshold', async () => {
+    const api = new MockApi('normal', 0);
+    hub.api = api;
+    const benches = await api.benches();
+    const models = await api.models();
+    const datasets = await api.datasets();
+    const jobs = await api.labelJobs();
+    const modelIds = new Set(models.map((m) => m.id));
+    let bench = benches[0]!;
+    let entries = await api.benchEntries(bench.id);
+    let teacher: string | null = null;
+    let entryId = '';
+    for (const b of benches) {
+      const es = await api.benchEntries(b.id);
+      const hit = es.find(
+        (e) => e.contestant.kind === 'model' && modelIds.has(e.contestant.model_id) && e.status === 'done' && !e.score?.partial && e.fingerprint === b.fingerprint,
+      );
+      if (hit && hit.contestant.kind === 'model') {
+        bench = b;
+        entries = es;
+        teacher = hit.contestant.model_id;
+        entryId = hit.id;
+        break;
+      }
+    }
+    expect(teacher).not.toBeNull();
+    const realRes = await api.benchResult(bench.id, entryId);
+    let resolveRetry!: (r: BenchResult) => void;
+    vi.spyOn(api, 'benchResult')
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockImplementationOnce(
+        () =>
+          new Promise<BenchResult>((res) => {
+            resolveRetry = res;
+          }),
+      );
+
+    const open = signal(true);
+    c = render(
+      () => <NewLoopDialog bind:open={open} bench={bench} models={models} datasets={datasets} jobs={jobs} entries={entries} teacher={teacher} onstarted={vi.fn()} />,
+      target,
+    );
+    flushSync();
+
+    const retry = await vi.waitFor(() => {
+      flushSync();
+      const b = button('Retry');
+      if (!b) throw new Error('waiting for Retry');
+      return b;
+    });
+    retry.focus();
+    retry.click();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.ownerDocument.activeElement).toBe(target.ownerDocument.querySelector('dialog .conf input[type="checkbox"]'));
+    });
+
+    // Retry resolves with threshold: null -> switch becomes disabled and focus must move to the required confidence input.
+    resolveRetry({ ...realRes, self_labeling: { ...realRes.self_labeling, threshold: null } });
+    await vi.waitFor(() => {
+      flushSync();
+      const confInput = target.ownerDocument.querySelector<HTMLInputElement>('dialog input[placeholder="e.g. 0.30"]');
+      if (!confInput || target.ownerDocument.activeElement !== confInput) throw new Error('waiting for focus on confidence input');
+    });
+    expect(target.ownerDocument.querySelector<HTMLInputElement>('dialog .conf input[type="checkbox"]')!.disabled).toBe(true);
+  });
 });

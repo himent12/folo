@@ -247,6 +247,19 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
       document.getElementById(`${uid}-form`)?.querySelector<HTMLElement>('.conf button, .conf input')?.focus({ preventScroll: true });
     }
   }
+  // If reading the entry reports no threshold, the threshold switch becomes disabled (dropping focus to <body> if it
+  // held focus, e.g. right after clicking Retry): move focus directly to the newly revealed confidence input.
+  effect(() => {
+    if (!open.get() || !needConf.get()) return;
+    void tick().then(() => {
+      if (!alive || !open.peek() || !needConf.peek()) return;
+      const active = document.activeElement;
+      const confSwitch = document.getElementById(`${uid}-form`)?.querySelector<HTMLElement>('.conf input[type="checkbox"]');
+      if (!active || active === document.body || active === confSwitch) {
+        document.getElementById(`${uid}-conf`)?.focus({ preventScroll: true });
+      }
+    });
+  });
 
   /** "Keep labels from a lower confidence": the switch off, a lower confidence proposed, its field focused. */
   async function lower() {
