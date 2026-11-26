@@ -15,7 +15,7 @@ import { setCrumbs } from '$lib/shell/crumbs';
 import { assignSlots, bestAsPrinted, classRows, compareShown, conditionRows, dotDomain, labelTradeoff, SLOT_PATTERN, SLOTS } from '../charts';
 import { COMPARE_MAX, compareIds, finished, intervalDomain, stale } from '../leaderboard';
 import { BenchResults } from '../results';
-import { cannotBench } from '../support';
+import { benchUnavailable } from '../support';
 import { compareCaveats, intervalsVerdict, scoreText } from '../words';
 import type { DotKey } from './DotRows';
 
@@ -54,10 +54,11 @@ export function compareState() {
   const id = computed(() => router.route.params.id ?? '');
   const ids = computed(() => compareIds(router.route.query));
   const system = new Resource((s) => hub.api.system(s));
-  const catalog = new Resource((s) => hub.api.benchCatalog(s));
-  const live = new LiveBench(() => id.get() || null);
+  const noBench = computed(() => benchUnavailable(system.data));
+  const catalog = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : hub.api.benchCatalog(s)));
+  const live = new LiveBench(() => (noBench.get() ? null : id.get() || null));
   const bench = () => live.bench;
-  const unsupported = computed(() => cannotBench(system.data, live.error));
+  const unsupported = computed(() => benchUnavailable(system.data, live.error));
   const picked = computed(() => {
     const all = compareShown(ids.get(), live.entries);
     return { shown: all.shown.slice(0, COMPARE_MAX), missing: all.missing };

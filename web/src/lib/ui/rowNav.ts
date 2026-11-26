@@ -195,7 +195,8 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
   const hasOpenPopover = (): boolean => {
     if (document.querySelector('.info-pop.open')) return true;
     try {
-      return !!document.querySelector('[popover]:popover-open');
+      // Passive hover tooltips (`#folo-tooltip`, role="tooltip") use `popover="manual"` and must not block J/K.
+      return !!document.querySelector('[popover]:not([role="tooltip"]):popover-open');
     } catch {
       return false;
     }

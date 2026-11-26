@@ -3,6 +3,7 @@
 // endpoints `501 not_implemented`.
 
 import { ApiError } from '$lib/api/client';
+import { hub } from '$lib/api/index';
 import { hasFeature } from '$lib/api/queue';
 import type { SystemInfo } from '$lib/api/types';
 import { BENCH_FEATURE } from '$lib/bench/rules';
@@ -11,4 +12,9 @@ import { BENCH_FEATURE } from '$lib/bench/rules';
 export function cannotBench(system: SystemInfo | undefined, error?: unknown): boolean {
   if (error instanceof ApiError && error.status === 501 && error.code === 'not_implemented') return true;
   return !!system && !hasFeature(system, BENCH_FEATURE);
+}
+
+/** True once health features (`hub.lacks`), `/api/system`, or a 501 response shows benchmarks are unavailable. */
+export function benchUnavailable(system: SystemInfo | undefined, error?: unknown): boolean {
+  return hub.lacks(BENCH_FEATURE) || cannotBench(system, error);
 }

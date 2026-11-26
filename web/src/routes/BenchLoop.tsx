@@ -46,8 +46,9 @@ import StatusBadge from '$lib/ui/StatusBadge';
 import { toast } from '$lib/ui/toast';
 import Callout from './run/Callout';
 import { generationDomain, generationPoints } from './bench/charts';
-import { cannotBench } from './bench/support';
+import { benchUnavailable } from './bench/support';
 import Unsupported from './bench/Unsupported';
+import { labelUnavailable } from './label/support';
 import { hintText, intervalText, labelsLine, LOOP_CAVEAT, loopQuestion, loopStatus, loopSteps, loopVerdictText, progressFacts, scoreText, VERDICT } from './bench/words';
 import { tickingNow } from './runs/when';
 
@@ -64,15 +65,17 @@ export default function BenchLoop() {
   const loopId = computed(() => router.route.params.loopId ?? '');
   const phone = new MediaQuery(media.phone, false);
   const system = new Resource((s) => hub.api.system(s));
-  const models = new Resource((s) => hub.api.models(s));
-  const datasets = new Resource((s) => hub.api.datasets(s));
-  const jobs = new Resource((s) => hub.api.labelJobs(s));
-  const runs = new Resource((s) => hub.api.runs(s), { startFrom: () => watched.source });
-  const catalog = new Resource((s) => hub.api.benchCatalog(s));
-  const live = new LiveBench(() => id.get() || null);
+  const noBench = computed(() => benchUnavailable(system.data));
+  const noLabel = computed(() => labelUnavailable(system.data));
+  const models = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : hub.api.models(s)));
+  const datasets = new Resource((s) => (noBench.get() ? Promise.resolve([]) : hub.api.datasets(s)));
+  const jobs = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : noLabel.get() ? Promise.resolve([]) : hub.api.labelJobs(s)));
+  const runs = new Resource((s) => (noBench.get() ? Promise.resolve([]) : hub.api.runs(s)), { startFrom: () => watched.source });
+  const catalog = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : hub.api.benchCatalog(s)));
+  const live = new LiveBench(() => (noBench.get() ? null : id.get() || null));
   const bench = () => live.bench;
   const loop = computed(() => live.loops.find((l) => l.id === loopId.get()));
-  const unsupported = computed(() => cannotBench(system.data, live.error));
+  const unsupported = computed(() => benchUnavailable(system.data, live.error));
 
   effect(() => {
     setCrumbs(

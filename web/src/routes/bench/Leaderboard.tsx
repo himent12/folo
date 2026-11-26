@@ -540,7 +540,9 @@ css`
   .scroll {
     overflow-x: auto;
   }
-  /* Fixed columns on the header row; the entry's name takes what is left. */
+  /* Fixed columns on the header row; the entry's name takes what is left.
+     Compact desktop widths keep the Entry column >= 200 px at 1280 px (with sidebar open and Speed · cost shown)
+     and avoid container containment on .scroll, which would trap fixed row action dropdowns. */
   .board .check {
     position: relative;
     width: 32px;
@@ -554,16 +556,16 @@ css`
     color: var(--text-tertiary);
   }
   .board th.score {
-    width: 104px;
+    width: 96px;
   }
   .board .axes-col {
     width: 80px;
   }
   .board th.map {
-    width: 240px;
+    width: 188px;
   }
   .board th.ran {
-    width: 224px;
+    width: 148px;
   }
   /* What it was graded on wraps whole facts onto a second line rather than widen the column. */
   .board td.ran {
@@ -578,7 +580,7 @@ css`
     padding-bottom: 0;
   }
   .board th.cost {
-    width: 112px;
+    width: 100px;
   }
   .board .act {
     width: 40px;
@@ -761,19 +763,10 @@ css`
   .rows {
     display: none;
   }
-  /* Laptops: the plot and the facts columns narrow, so who an entry is stays on one line. */
+  /* Laptops: omit the wide-only band caption below 1280 px while keeping the compact column widths monotonic. */
   @media (max-width: 1279px) {
     .wide-only {
       display: none;
-    }
-    .board th.score {
-      width: 96px;
-    }
-    .board th.map {
-      width: 200px;
-    }
-    .board th.ran {
-      width: 184px;
     }
   }
   .tablet-only {
@@ -822,12 +815,6 @@ css`
     .rows li.on {
       background: var(--bg-active);
       box-shadow: var(--select-bar);
-    }
-  }
-  /* Tablets: the plot narrows with its column. */
-  @media (max-width: 1023px) {
-    .board th.map {
-      width: 200px;
     }
   }
   @media (max-width: 767px) {

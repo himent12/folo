@@ -4,22 +4,46 @@
 // overflow check skips).
 
 export function fadeScroll(node: HTMLElement) {
+  let raf = 0;
+  let destroyed = false;
   const update = () => {
     const max = node.scrollWidth - node.clientWidth;
     const start = node.scrollLeft > 1;
     const end = max > 1 && node.scrollLeft < max - 1;
-    if (start || end) node.dataset.fade = start && end ? 'both' : start ? 'start' : 'end';
-    else delete node.dataset.fade;
-    if (max > 1) node.tabIndex = 0;
-    else node.removeAttribute('tabindex');
+    const next = start || end ? (start && end ? 'both' : start ? 'start' : 'end') : undefined;
+    if (next !== node.dataset.fade) {
+      if (next) node.dataset.fade = next;
+      else delete node.dataset.fade;
+    }
+    if (max > 1) {
+      if (node.getAttribute('tabindex') !== '0') node.tabIndex = 0;
+    } else if (node.hasAttribute('tabindex')) {
+      node.removeAttribute('tabindex');
+    }
+  };
+  // Defer ResizeObserver DOM writes to the next animation frame so layout-driven attribute/mask changes
+  // never trigger Chromium's "ResizeObserver loop completed with undelivered notifications." error.
+  const schedule = () => {
+    if (raf || destroyed) return;
+    if (typeof requestAnimationFrame === 'undefined') {
+      update();
+      return;
+    }
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      if (!destroyed && node.isConnected) update();
+    });
   };
   update();
   node.addEventListener('scroll', update, { passive: true });
-  const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(update);
+  const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule);
   ro?.observe(node);
   return {
     update,
     destroy() {
+      destroyed = true;
+      if (raf && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(raf);
+      raf = 0;
       node.removeEventListener('scroll', update);
       ro?.disconnect();
     },
