@@ -183,8 +183,10 @@ impl MockBench {
                 usage: LabelUsage::default(),
                 dataset_id: None,
             };
+            let next_seq = imgs.len() as u64;
             d.jobs.insert(0, job.clone());
             d.label_images.insert(id.clone(), imgs);
+            d.label_img_seq.insert(id.clone(), next_seq);
             d.label_logs.insert(id, logs);
             Ok(job)
         })
@@ -202,6 +204,7 @@ impl MockBench {
             }
             d.jobs.remove(idx);
             d.label_images.remove(id);
+            d.label_img_seq.remove(id);
             d.label_logs.remove(id);
             Ok(())
         })
@@ -221,10 +224,11 @@ impl MockBench {
         self.with(datasets, models, |d, _, now| {
             let classes = find_job(&d.jobs, id)?.classes.len().max(1) as u32;
             let imgs = d.label_images.entry(id.to_string()).or_default();
-            let start = imgs.len() as u64;
+            let seq = d.label_img_seq.entry(id.to_string()).or_insert_with(|| imgs.len() as u64);
             let mut added = Vec::new();
-            for k in 0..8u64 {
-                let n = start + k + 1;
+            for _ in 0..8u64 {
+                *seq += 1;
+                let n = *seq;
                 let s = hash(&format!("{id}:{path}:{n}"));
                 let im = LabelImage {
                     id: format!("li_{n:04}"),

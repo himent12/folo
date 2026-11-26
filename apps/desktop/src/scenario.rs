@@ -643,7 +643,11 @@ fn preload_label(app: &mut FoloApp, route: &Route) {
         app.store.system = Load::Ready(s.system);
     }
     app.label.jobs = api.label_jobs().into();
-    app.label.agents = api.label_agents().into();
+    let agents = api.label_agents();
+    if let Ok(list) = &agents {
+        app.sync_default_label_agent(list);
+    }
+    app.label.agents = agents.into();
     if let Route::LabelJob(id) = route {
         app.label.images.insert(id.clone(), api.label_images(id, 0, 500).map(|p| p.images).into());
         app.label.logs.insert(id.clone(), api.label_logs(id).map(|r| r.lines).into());

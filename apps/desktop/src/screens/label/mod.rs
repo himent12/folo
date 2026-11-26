@@ -7,6 +7,9 @@ mod list;
 mod page;
 mod review;
 
+#[cfg(test)]
+pub(crate) use review::filmstrip_max_tiles;
+
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Window};
 
 use crate::api::*;

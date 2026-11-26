@@ -60,15 +60,9 @@ impl FoloApp {
             return self.page_frame(&t, header, body, cx);
         };
 
-        let reviewed_n = self
-            .label
-            .images
-            .get(id)
-            .and_then(|l| l.ready())
-            .map(|imgs| {
-                imgs.iter().filter(|i| i.status == LabelImageStatus::Labeled && i.reviewed).count() as u64
-            })
-            .unwrap_or(0);
+        let reviewed_n = self.label.images.get(id).and_then(|l| l.ready()).map(|imgs| {
+            imgs.iter().filter(|i| i.status == LabelImageStatus::Labeled && i.reviewed).count() as u64
+        });
         let (st_label, st_tone, st_kind) = job_status(&job);
         let title_row = div()
             .flex()
@@ -83,8 +77,10 @@ impl FoloApp {
             counted(job.counts.images, "image", "images"),
             format!("{} labeled", int(job.counts.labeled)),
         ];
-        if job.counts.labeled > 0 {
-            facts.push(format!("{} / {} reviewed", int(reviewed_n), int(job.counts.labeled)));
+        if job.counts.labeled > 0
+            && let Some(rev) = reviewed_n
+        {
+            facts.push(format!("{} / {} reviewed", int(rev), int(job.counts.labeled)));
         }
         facts.push(counted(job.classes.len() as u64, "class", "classes"));
         let made_link = job.dataset_id.as_ref().and_then(|ds_id| {
@@ -216,13 +212,14 @@ impl FoloApp {
 
         let content_w = self.content_width(window);
         let stacked = content_w < 920.;
-        let main = self.label_review_workspace(&t, &job, window, cx);
+        let rail_w = if content_w >= 1120. { 320. } else { 288. };
+        let review_w = if stacked { content_w } else { (content_w - rail_w - 16.).max(240.) };
+        let main = self.label_review_workspace(&t, &job, review_w, window, cx);
         let rail = self.label_agent_rail(&t, &job, window, cx);
 
         let workspace = if stacked {
             div().flex().flex_col().gap(px(16.)).child(main).child(rail)
         } else {
-            let rail_w = if content_w >= 1120. { 320. } else { 288. };
             div()
                 .flex()
                 .items_start()

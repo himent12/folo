@@ -91,6 +91,7 @@ struct MockBenchData {
     agents: Vec<LabelAgent>,
     jobs: Vec<LabelJob>,
     label_images: HashMap<String, Vec<label::MockLabelImage>>,
+    label_img_seq: HashMap<String, u64>,
     label_logs: HashMap<String, Vec<LogLine>>,
 }
 

@@ -9,15 +9,22 @@ use folo_ui::{
     ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, px,
 };
 
-use crate::api::{LabelImage, LabelImageStatus, LabelJob, LabelSource};
+use crate::api::{LabelImage, LabelImageStatus, LabelJob, LabelSource, label_box_revision};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
-use crate::label::{LabelImageFilter, filter_label_images};
+use crate::label::{LabelImageFilter, SelectedBox, filter_label_images};
 use crate::screens::loading_rows;
 use crate::store::ImgKind;
 use crate::theme::{Theme, alpha, radius, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit, hit_box, paint_image_with_boxes, to_image, zoom_step};
+
+/// Computes how many 72 px thumbnails (with 6 px gaps) fit inside `review_w` without clipping.
+pub(crate) fn filmstrip_max_tiles(review_w: f32) -> usize {
+    // 28 px horizontal stage padding + 2 px panel border.
+    let inner = (review_w - 30.).max(0.);
+    (((inner + 6.) / 78.).floor() as usize).clamp(3, 12)
+}
 
 impl FoloApp {
     /// Main column of `Route::LabelJob`: filter bar, review stage, box list, and filmstrip.
@@ -25,6 +32,7 @@ impl FoloApp {
         &mut self,
         t: &Theme,
         job: &LabelJob,
+        review_w: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -245,9 +253,15 @@ impl FoloApp {
             self.label.selected_image = Some(active.id.clone());
             self.label.selected_box = None;
         }
-        let sel_box = self.label.selected_box.filter(|&i| i < active.boxes.len());
-        if sel_box != self.label.selected_box {
-            self.label.selected_box = sel_box;
+        let active_rev = label_box_revision(&active.boxes);
+        let sel_box = self
+            .label
+            .selected_box
+            .as_ref()
+            .filter(|s| s.image_id == active.id && s.index < active.boxes.len() && s.revision == active_rev)
+            .map(|s| s.index);
+        if sel_box.is_none() && self.label.selected_box.is_some() {
+            self.label.selected_box = None;
         }
 
         // Toolbar above the image stage.
@@ -455,9 +469,9 @@ impl FoloApp {
         }
 
         // Bounding-box stage canvas.
-        let stage = self.label_stage(t, job, &active, sel_box, cx);
-        let box_rail = self.label_box_list(t, job, &active, sel_box, locked || busy, window, cx);
-        let filmstrip = self.label_filmstrip(t, &jid, &shown, &active.id, window, cx);
+        let stage = self.label_stage(t, job, &active, &active_rev, sel_box, cx);
+        let box_rail = self.label_box_list(t, job, &active, &active_rev, sel_box, locked || busy, window, cx);
+        let filmstrip = self.label_filmstrip(t, &jid, &shown, &active.id, review_w, window, cx);
 
         let stage_area = div()
             .flex()
@@ -491,6 +505,7 @@ impl FoloApp {
         t: &Theme,
         job: &LabelJob,
         active: &LabelImage,
+        active_rev: &str,
         sel_box: Option<usize>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -551,6 +566,8 @@ impl FoloApp {
         )
         .size_full();
 
+        let active_id_click = active.id.clone();
+        let active_rev_click = active_rev.to_string();
         div()
             .id("label-stage")
             .relative()
@@ -567,7 +584,11 @@ impl FoloApp {
                     if let Some(b) = view_for_click.get() {
                         let (ix, iy) =
                             to_image(b, dims, Fit::Contain, this.label.zoom, this.label.pan, ev.position);
-                        this.label.selected_box = hit_box(&draw_for_hit, ix, iy);
+                        this.label.selected_box = hit_box(&draw_for_hit, ix, iy).map(|index| SelectedBox {
+                            image_id: active_id_click.clone(),
+                            index,
+                            revision: active_rev_click.clone(),
+                        });
                         cx.notify();
                     }
                 }),
@@ -583,6 +604,7 @@ impl FoloApp {
         t: &Theme,
         job: &LabelJob,
         active: &LabelImage,
+        active_rev: &str,
         sel_box: Option<usize>,
         disabled: bool,
         window: &Window,
@@ -653,6 +675,8 @@ impl FoloApp {
                             .child(cls_name),
                     )
                     .child(text(ty::XS, t.text_tertiary).tnum().child(coords));
+                let img_for_row = img_id.clone();
+                let rev_for_row = active_rev.to_string();
                 self.bind(
                     row,
                     &format!("label-box-{i}"),
@@ -660,8 +684,7 @@ impl FoloApp {
                     window,
                     cx,
                     act(move |this, _, cx| {
-                        this.label.selected_box =
-                            if this.label.selected_box == Some(i) { None } else { Some(i) };
+                        this.toggle_label_box(img_for_row.clone(), i, rev_for_row.clone());
                         cx.notify();
                     }),
                 )
@@ -757,19 +780,20 @@ impl FoloApp {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn label_filmstrip(
         &mut self,
         t: &Theme,
         job_id: &str,
         shown: &[LabelImage],
         active_id: &str,
+        review_w: f32,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        // Show a focused window of up to 12 thumbnails centered around the active image so the strip
-        // stays fast and never overflows vertically.
+        // Fit the thumbnail window to the review column width so no tile or active image ever clips.
         let cur = shown.iter().position(|im| im.id == active_id).unwrap_or(0);
-        let max_tiles = 10usize;
+        let max_tiles = filmstrip_max_tiles(review_w);
         let start = cur.saturating_sub(max_tiles / 2).min(shown.len().saturating_sub(max_tiles));
         let end = (start + max_tiles).min(shown.len());
         let tiles: Vec<AnyElement> = shown[start..end]

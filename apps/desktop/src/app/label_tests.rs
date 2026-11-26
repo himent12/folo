@@ -9,14 +9,14 @@ use folo_ui::{
 
 use crate::api::mock::MockBackend;
 use crate::api::{
-    Backend, FEATURE_AGENT_LABELING, LabelImageStatus, LabelOutcome, LabelScope, LabelSource,
-    UpdateLabelImage,
+    Backend, FEATURE_AGENT_LABELING, ImportLabelImages, LabelImageStatus, LabelOutcome, LabelScope,
+    LabelSource, UpdateLabelImage, label_box_revision,
 };
 use crate::app::tests::{drive, open};
 use crate::app::{FoloApp, Route, Section};
 use crate::label::{
-    LabelImageFilter, LabelJobFilter, filter_label_images, filter_label_jobs, parse_class_list, route_label,
-    validate_new_job,
+    LabelImageFilter, LabelJobFilter, SelectedBox, filter_label_images, filter_label_jobs, parse_class_list,
+    route_label, validate_new_job,
 };
 use crate::store::Load;
 use crate::theme::{Mode, Theme};
@@ -239,7 +239,8 @@ fn review_workspace_keyboard_mutations_conflicts_agent_and_export() {
     });
     drive(&mut app, window, |this, _, cx| {
         this.select_label_image(target_img.clone(), cx);
-        this.label.selected_box = Some(0);
+        let rev = label_box_revision(&orig_boxes);
+        this.label.selected_box = Some(SelectedBox { image_id: target_img.clone(), index: 0, revision: rev });
         cx.notify();
     });
     settle(&mut app, window);
@@ -263,11 +264,7 @@ fn review_workspace_keyboard_mutations_conflicts_agent_and_export() {
     assert_eq!(after_recls.boxes[0].class, next_cls, "reclassify updated box class");
     assert_eq!(after_recls.source, Some(LabelSource::Manual));
 
-    // Delete box 0 with Delete key.
-    drive(&mut app, window, |this, _, cx| {
-        this.label.selected_box = Some(0);
-        cx.notify();
-    });
+    // Delete box 0 with Delete key (revision updated automatically after reclassify).
     press(&mut app, window, "delete");
     settle(&mut app, window);
     let after_del = drive(&mut app, window, |this, _, _| {
@@ -282,6 +279,23 @@ fn review_workspace_keyboard_mutations_conflicts_agent_and_export() {
             .clone()
     });
     assert_eq!(after_del.boxes.len(), orig_boxes.len() - 1, "Delete removed the selected box");
+
+    // Bare Enter does NOT silently approve an image when focus is on a segmented filter or root.
+    press(&mut app, window, "enter");
+    settle(&mut app, window);
+    let still_unreviewed = drive(&mut app, window, |this, _, _| {
+        !this
+            .label
+            .images
+            .get("lb_4f10")
+            .and_then(|l| l.ready())
+            .unwrap()
+            .iter()
+            .find(|i| i.id == target_img)
+            .unwrap()
+            .reviewed
+    });
+    assert!(still_unreviewed, "bare Enter must not approve/mutate the active image");
 
     // Approve via 'a' marks reviewed and advances selection.
     press(&mut app, window, "a");
@@ -372,4 +386,89 @@ fn unsupported_and_failing_backends_render_cleanly() {
     drive(&mut fail_app, fail_win, |this, w, cx| this.navigate(Route::LabelJob("lb_4f10".into()), w, cx));
     settle(&mut fail_app, fail_win);
     assert!(drive(&mut fail_app, fail_win, |this, _, _| this.store.system.error().is_some()));
+}
+
+#[test]
+fn review_round1_regressions_revision_binding_ctrl_enter_filmstrip_and_monotonic_ids() {
+    // 1. Filmstrip tile count never clips inside the review column at 1280×800 or 1120×720.
+    for review_w in [668.0_f32, 708.0, 822.0, 852.0, 1000.0] {
+        let n = crate::screens::label::filmstrip_max_tiles(review_w);
+        let needed = n as f32 * 72.0 + n.saturating_sub(1) as f32 * 6.0;
+        assert!(needed <= review_w - 30.0, "review_w={review_w}: {n} tiles need {needed}px");
+    }
+
+    // 2. Mock folder import after deleting a non-last image never produces duplicate image IDs.
+    let api = Arc::new(MockBackend::new(4200, true));
+    let before = api.label_images("lb_4f10", 0, 500).unwrap().images;
+    assert!(before.len() >= 3);
+    api.delete_label_image("lb_4f10", &before[0].id).unwrap();
+    let added = api.import_label_images("lb_4f10", &ImportLabelImages { path: "D:/more".into() }).unwrap();
+    assert!(!added.added.is_empty());
+    let after = api.label_images("lb_4f10", 0, 500).unwrap().images;
+    let unique: std::collections::HashSet<&str> = after.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(unique.len(), after.len(), "imported images must have strictly unique IDs");
+
+    // 3. Stale box-revision selection refuses to delete or reclassify a shifted box array.
+    let (mut app, window) = open_with(api, 1280., 800., Mode::Dark);
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::LabelJob("lb_4f10".into()), w, cx));
+    settle(&mut app, window);
+    let target = drive(&mut app, window, |this, _, _| {
+        this.label
+            .images
+            .get("lb_4f10")
+            .and_then(|l| l.ready())
+            .unwrap()
+            .iter()
+            .find(|i| !i.boxes.is_empty())
+            .unwrap()
+            .clone()
+    });
+    let orig_len = target.boxes.len();
+    drive(&mut app, window, |this, _, cx| {
+        this.select_label_image(target.id.clone(), cx);
+        this.label.selected_box =
+            Some(SelectedBox { image_id: target.id.clone(), index: 0, revision: "stale-rev".into() });
+        this.delete_selected_label_box("lb_4f10", &target.id, cx);
+    });
+    settle(&mut app, window);
+    let (after_len, sel_cleared, err_code) = drive(&mut app, window, |this, _, _| {
+        let len = this
+            .label
+            .images
+            .get("lb_4f10")
+            .and_then(|l| l.ready())
+            .unwrap()
+            .iter()
+            .find(|i| i.id == target.id)
+            .unwrap()
+            .boxes
+            .len();
+        (len, this.label.selected_box.is_none(), this.label.review_error.as_ref().map(|e| e.code.clone()))
+    });
+    assert_eq!(after_len, orig_len, "stale revision selection must not delete a box");
+    assert!(sel_cleared, "stale box selection is invalidated");
+    assert_eq!(err_code.as_deref(), Some("label_boxes_changed"));
+
+    // 4. Ctrl+Enter closes an open dropdown menu without submitting an open labeling form behind it.
+    drive(&mut app, window, |this, w, cx| {
+        this.open_add_label_folder("lb_4f10", w, cx);
+        this.label.add_folder.as_ref().unwrap().path.clone().update(cx, |i, cx| i.set_text("D:/extra", cx));
+        this.menu_open = Some("label-agent");
+        cx.notify();
+    });
+    app.frame(window.into());
+    press(&mut app, window, "ctrl-enter");
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.menu_open.is_none(), "Ctrl+Enter closed the open menu");
+        let f = this.label.add_folder.as_ref().expect("Add folder form stays open, not submitted");
+        assert!(!f.submitting, "Add folder form was not submitted behind the menu");
+    });
+
+    // 5. clear_label() advances generation so Retry isolates prior in-flight callbacks.
+    let (g0, g1) = drive(&mut app, window, |this, _, _| {
+        let g0 = this.label.epoch;
+        this.clear_label();
+        (g0, this.label.epoch)
+    });
+    assert_eq!(g1, g0 + 1);
 }

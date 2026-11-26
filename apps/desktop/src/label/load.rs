@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use folo_ui::{Context, RenderImage};
 
-use super::state::{LabelImageFilter, LabelState};
+use super::state::{LabelImageFilter, LabelState, PendingImageEvent};
 use crate::api::*;
 use crate::app::{FoloApp, Route};
 use crate::store::{ImgKey, ImgKind, ImgSlot, Load};
@@ -62,10 +62,14 @@ impl FoloApp {
         }
         if self.label.agents.needs_fetch() {
             self.label.agents = Load::Loading;
+            let lgen = self.label.epoch;
             self.fetch(
                 cx,
                 |api| api.label_agents(),
-                |this, r, _| {
+                move |this, r, _| {
+                    if this.label.epoch != lgen {
+                        return;
+                    }
                     if let Ok(agents) = &r {
                         this.sync_default_label_agent(agents);
                     }
@@ -76,7 +80,7 @@ impl FoloApp {
     }
 
     /// Picks the first available agent if none is selected yet (or the selected one is unavailable).
-    pub(super) fn sync_default_label_agent(&mut self, agents: &[LabelAgent]) {
+    pub(crate) fn sync_default_label_agent(&mut self, agents: &[LabelAgent]) {
         let valid = self.label.agent_id.is_some_and(|id| agents.iter().any(|a| a.id == id && a.available));
         if !valid && let Some(first) = agents.iter().find(|a| a.available).or_else(|| agents.first()) {
             self.label.agent_id = Some(first.id);
@@ -86,22 +90,40 @@ impl FoloApp {
         }
     }
 
-    /// Reloads the labeling jobs list in place.
+    /// Reloads the labeling jobs list in place without regressing jobs updated by newer SSE events.
     pub fn refresh_label_jobs(&mut self, cx: &mut Context<Self>) {
         if !self.label_on() {
             return;
         }
+        let lgen = self.label.epoch;
+        let seen_seqs = self.label.job_event_seq.clone();
         self.fetch(
             cx,
             |api| api.label_jobs(),
-            |this, r, _| match r {
-                Ok(mut list) => {
-                    list.retain(|j| !this.label.removed.contains(&j.id));
-                    this.label.jobs = Load::Ready(list);
+            move |this, r, _| {
+                if this.label.epoch != lgen {
+                    return;
                 }
-                Err(e) => {
-                    if this.label.jobs.ready().is_none() {
-                        this.label.jobs = Load::Failed(e);
+                match r {
+                    Ok(mut list) => {
+                        list.retain(|j| !this.label.removed.contains(&j.id));
+                        if let Some(prev) = this.label.jobs.ready() {
+                            for job in &mut list {
+                                let before = seen_seqs.get(&job.id).copied().unwrap_or(0);
+                                let now = this.label.job_event_seq.get(&job.id).copied().unwrap_or(0);
+                                if now > before
+                                    && let Some(newer) = prev.iter().find(|p| p.id == job.id)
+                                {
+                                    *job = newer.clone();
+                                }
+                            }
+                        }
+                        this.label.jobs = Load::Ready(list);
+                    }
+                    Err(e) => {
+                        if this.label.jobs.ready().is_none() {
+                            this.label.jobs = Load::Failed(e);
+                        }
                     }
                 }
             },
@@ -120,52 +142,136 @@ impl FoloApp {
         }
         if self.label.logs.get(id).is_none_or(|l| l.needs_fetch()) {
             self.label.logs.insert(id.to_string(), Load::Loading);
-            let jid = id.to_string();
-            let key = id.to_string();
-            self.fetch(
-                cx,
-                move |api| api.label_logs(&jid),
-                move |this, r, _| {
-                    this.label.logs.insert(key, r.map(|l| l.lines).into());
-                },
-            );
+            self.reload_label_logs(id, cx);
         }
     }
 
-    /// Loads every image of a labeling job (paging through up to 10,000 images in chunks of 1,000).
+    /// Reloads a job's log history in place, replaying any live log lines received while in flight.
+    pub fn reload_label_logs(&mut self, id: &str, cx: &mut Context<Self>) {
+        if !self.label_on() {
+            return;
+        }
+        self.label.logs_seq += 1;
+        let seq = self.label.logs_seq;
+        let lgen = self.label.epoch;
+        self.label.logs_reqs.insert(id.to_string(), seq);
+        self.label.pending_log_events.insert(id.to_string(), Vec::new());
+        let jid = id.to_string();
+        let key = id.to_string();
+        self.fetch(
+            cx,
+            move |api| api.label_logs(&jid),
+            move |this, r, _| {
+                if this.label.epoch != lgen || this.label.logs_reqs.get(&key) != Some(&seq) {
+                    return;
+                }
+                this.label.logs_reqs.remove(&key);
+                let buffered = this.label.pending_log_events.remove(&key).unwrap_or_default();
+                match r {
+                    Ok(mut res) => {
+                        for line in buffered {
+                            let dup = res.lines.last().is_some_and(|l| {
+                                l.t == line.t && l.level == line.level && l.message == line.message
+                            });
+                            if !dup {
+                                res.lines.push(line);
+                            }
+                        }
+                        if res.lines.len() > 500 {
+                            let drop_n = res.lines.len() - 500;
+                            res.lines.drain(..drop_n);
+                        }
+                        this.label.logs.insert(key, Load::Ready(res.lines));
+                    }
+                    Err(e) => {
+                        if this.label.logs.get(&key).is_none_or(|l| l.ready().is_none()) {
+                            this.label.logs.insert(key, Load::Failed(e));
+                        }
+                    }
+                }
+            },
+        );
+    }
+
+    /// Loads every image of a labeling job (paging in chunks of 1,000, restarting if concurrent
+    /// edits shift `total`, and replaying live SSE image events that arrived while paging).
     pub fn reload_label_images(&mut self, id: &str, cx: &mut Context<Self>) {
         if !self.label_on() {
             return;
         }
         self.label.images_seq += 1;
         let seq = self.label.images_seq;
+        let lgen = self.label.epoch;
         self.label.images_reqs.insert(id.to_string(), seq);
+        self.label.pending_image_events.insert(id.to_string(), Vec::new());
         let jid = id.to_string();
         let key = id.to_string();
         self.fetch(
             cx,
             move |api| {
-                let mut all = Vec::new();
-                let mut offset = 0u32;
-                loop {
-                    let page = api.label_images(&jid, offset, 1000)?;
-                    let n = page.images.len();
-                    all.extend(page.images);
-                    offset = offset.saturating_add(n as u32);
-                    if n == 0 || (all.len() as u64) >= page.total || offset >= 10_000 {
-                        break;
+                for attempt in 0..2 {
+                    let mut all = Vec::new();
+                    let mut offset = 0u32;
+                    let mut expected_total: Option<u64> = None;
+                    let mut shifted = false;
+                    loop {
+                        let page = api.label_images(&jid, offset, 1000)?;
+                        match expected_total {
+                            None => expected_total = Some(page.total),
+                            Some(prev) if prev != page.total && attempt == 0 => {
+                                shifted = true;
+                                break;
+                            }
+                            _ => {}
+                        }
+                        let n = page.images.len();
+                        all.extend(page.images);
+                        offset = offset.saturating_add(n as u32);
+                        if n == 0 || (all.len() as u64) >= page.total || offset >= 10_000 {
+                            break;
+                        }
+                    }
+                    if !shifted {
+                        return Ok(all);
                     }
                 }
-                Ok(all)
+                Ok(Vec::new())
             },
             move |this, r, _| {
-                if this.label.images_reqs.get(&key) != Some(&seq) {
+                if this.label.epoch != lgen || this.label.images_reqs.get(&key) != Some(&seq) {
                     return;
                 }
+                this.label.images_reqs.remove(&key);
+                let buffered = this.label.pending_image_events.remove(&key).unwrap_or_default();
                 match r {
-                    Ok(imgs) => {
+                    Ok(mut imgs) => {
+                        for ev in buffered {
+                            match ev {
+                                PendingImageEvent::Updated(im) => {
+                                    match imgs.iter_mut().find(|x| x.id == im.id) {
+                                        Some(slot) => *slot = im,
+                                        None => imgs.push(im),
+                                    }
+                                }
+                                PendingImageEvent::Removed(rid) => imgs.retain(|x| x.id != rid),
+                            }
+                        }
+                        let on_this_job = route_label(&this.route) == Some(key.as_str());
+                        if on_this_job && let Some(sel) = this.label.selected_box.as_ref() {
+                            let still_valid =
+                                imgs.iter().find(|im| im.id == sel.image_id).is_some_and(|im| {
+                                    sel.index < im.boxes.len()
+                                        && label_box_revision(&im.boxes) == sel.revision
+                                });
+                            if !still_valid {
+                                this.label.selected_box = None;
+                                this.label.hover_box = None;
+                            }
+                        }
                         this.label.images.insert(key.clone(), Load::Ready(imgs));
-                        this.reconcile_selected_label_image(&key);
+                        if on_this_job {
+                            this.reconcile_selected_label_image(&key);
+                        }
                     }
                     Err(e) => {
                         if this.label.images.get(&key).is_none_or(|l| l.ready().is_none()) {
@@ -218,11 +324,24 @@ impl FoloApp {
         self.store.images_px.failed(&key)
     }
 
-    /// Clears all labeling state (on backend switch or full retry).
+    /// Clears all labeling state (on backend switch or full retry), advancing `label.gen` so
+    /// in-flight callbacks from before the reset cannot write into the fresh state.
     pub fn clear_label(&mut self) {
+        let epoch = self.label.epoch + 1;
         let form_seq = self.label.form_seq;
         let images_seq = self.label.images_seq;
-        self.label = LabelState { form_seq, images_seq, ..LabelState::default() };
+        let logs_seq = self.label.logs_seq;
+        let mutating_seq = self.label.mutating_seq;
+        let starting_seq = self.label.starting_seq;
+        self.label = LabelState {
+            epoch,
+            form_seq,
+            images_seq,
+            logs_seq,
+            mutating_seq,
+            starting_seq,
+            ..LabelState::default()
+        };
     }
 
     /// Resets transient per-job UI state when navigating between routes.
@@ -235,6 +354,7 @@ impl FoloApp {
         self.label.hover_box = None;
         self.label.zoom = 1.0;
         self.label.pan = (0., 0.);
+        self.label.scope = LabelScope::Unlabeled;
         if matches!(self.route, Route::LabelJobs) {
             self.label.list_stale = true;
             self.label.add_folder = None;
@@ -258,13 +378,40 @@ impl FoloApp {
         }
     }
 
-    /// Upserts a job snapshot into `self.label.jobs` (keeping newest-first order).
+    /// Upserts a job snapshot into `self.label.jobs` (ignoring jobs deleted in this session).
     pub(super) fn upsert_label_job(&mut self, job: LabelJob) {
+        if self.label.removed.contains(&job.id) {
+            return;
+        }
         if let Some(list) = self.label.jobs.ready_mut() {
             match list.iter_mut().find(|j| j.id == job.id) {
                 Some(slot) => *slot = job,
                 None => list.insert(0, job),
             }
+        }
+    }
+
+    /// Applies an authoritative SSE `LabelEvent::Job` snapshot and bumps its per-job event sequence
+    /// so older HTTP responses cannot regress it.
+    pub(super) fn upsert_label_job_from_event(&mut self, job: LabelJob) {
+        if self.label.removed.contains(&job.id) {
+            return;
+        }
+        *self.label.job_event_seq.entry(job.id.clone()).or_insert(0) += 1;
+        self.upsert_label_job(job);
+    }
+
+    /// Clears `selected_box` if a live update changed the box array of the currently selected image.
+    pub(super) fn invalidate_stale_box_selection(&mut self, job_id: &str, image: &LabelImage) {
+        if route_label(&self.route) != Some(job_id) {
+            return;
+        }
+        if let Some(sel) = self.label.selected_box.as_ref()
+            && sel.image_id == image.id
+            && (sel.index >= image.boxes.len() || label_box_revision(&image.boxes) != sel.revision)
+        {
+            self.label.selected_box = None;
+            self.label.hover_box = None;
         }
     }
 

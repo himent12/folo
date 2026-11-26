@@ -294,6 +294,36 @@ impl FoloApp {
                             )
                             .child(eff_seg),
                     );
+                    let can_fast = if self.label.model_idx == 0 {
+                        a.fast
+                    } else {
+                        a.models.get(self.label.model_idx - 1).is_some_and(|m| m.fast)
+                    };
+                    if can_fast {
+                        let fast_sw = self.switch(
+                            "label-fast",
+                            self.label.fast,
+                            window,
+                            cx,
+                            act(|this, _, cx| {
+                                this.label.fast = !this.label.fast;
+                                cx.notify();
+                            }),
+                        );
+                        run_col = run_col.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap(px(8.))
+                                .child(
+                                    text(ty::XS, t.text_secondary)
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("Fast mode"),
+                                )
+                                .child(fast_sw),
+                        );
+                    }
                     if to_label > 0 && job.counts.labeled > 0 {
                         let scope_idx = if self.label.scope == LabelScope::All { 1 } else { 0 };
                         let scope_seg = self.segmented(

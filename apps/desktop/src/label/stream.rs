@@ -5,6 +5,7 @@ use std::sync::mpsc::TryRecvError;
 use folo_ui::Context;
 
 use super::load::route_label;
+use super::state::PendingImageEvent;
 use crate::api::*;
 use crate::app::{FoloApp, Route};
 use crate::store::Load;
@@ -80,58 +81,73 @@ impl FoloApp {
                             None => {}
                         }
                     }
-                    self.upsert_label_job(*job);
+                    self.upsert_label_job_from_event(*job);
                 }
                 LabelEvent::Image(img) => {
-                    let selected_matches = self.label.selected_image.as_deref() == Some(img.id.as_str());
-                    if selected_matches
-                        && let Some(sel_box) = self.label.selected_box
-                        && sel_box >= img.boxes.len()
-                    {
-                        self.label.selected_box = None;
+                    if self.label.images_reqs.contains_key(&id) {
+                        self.label
+                            .pending_image_events
+                            .entry(id.clone())
+                            .or_default()
+                            .push(PendingImageEvent::Updated(img.clone()));
                     }
+                    self.invalidate_stale_box_selection(&id, &img);
                     self.upsert_label_image(&id, img);
                     self.reconcile_selected_label_image(&id);
                 }
                 LabelEvent::Removed(r) => {
+                    if self.label.images_reqs.contains_key(&id) {
+                        self.label
+                            .pending_image_events
+                            .entry(id.clone())
+                            .or_default()
+                            .push(PendingImageEvent::Removed(r.id.clone()));
+                    }
                     if let Some(list) = self.label.images.get_mut(&id).and_then(|l| l.ready_mut()) {
                         list.retain(|i| i.id != r.id);
                     }
                     if self.label.selected_image.as_deref() == Some(r.id.as_str()) {
                         self.label.selected_image = None;
                         self.label.selected_box = None;
+                        self.label.hover_box = None;
+                    } else if self.label.selected_box.as_ref().is_some_and(|s| s.image_id == r.id) {
+                        self.label.selected_box = None;
+                        self.label.hover_box = None;
                     }
                     self.reconcile_selected_label_image(&id);
                 }
                 LabelEvent::Reload => {
                     reload = true;
                 }
-                LabelEvent::Log(line) => match self.label.logs.get_mut(&id) {
-                    Some(Load::Ready(lines)) => {
+                LabelEvent::Log(line) => {
+                    if self.label.logs_reqs.contains_key(&id) {
+                        self.label.pending_log_events.entry(id.clone()).or_default().push(line.clone());
+                    }
+                    if let Some(Load::Ready(lines)) = self.label.logs.get_mut(&id) {
                         lines.push(line);
                         if lines.len() > 500 {
                             let drop_n = lines.len() - 500;
                             lines.drain(..drop_n);
                         }
                     }
-                    _ => {
-                        self.label.logs.insert(id.clone(), Load::Ready(vec![line]));
-                    }
-                },
+                }
             }
         }
 
         if ended {
             self.label.events = None;
-            reload = true;
         }
         if reload {
             self.reload_label_images(&id, cx);
+            self.reload_label_logs(&id, cx);
             self.refresh_label_jobs(cx);
         }
 
+        let job_exists = !self.label.removed.contains(&id)
+            && self.label.jobs.ready().is_none_or(|l| l.iter().any(|j| j.id == id));
         let first = self.label.sub_for.as_deref() != Some(id.as_str());
-        if self.label.events.is_none()
+        if job_exists
+            && self.label.events.is_none()
             && self.label.subscribing.is_none()
             && (first || tick.is_multiple_of(20))
         {
@@ -143,18 +159,27 @@ impl FoloApp {
     fn subscribe_label(&mut self, id: String, cx: &mut Context<Self>) {
         self.label.subscribing = Some(id.clone());
         self.label.sub_for = Some(id.clone());
+        let lgen = self.label.epoch;
         let jid = id.clone();
         self.fetch(
             cx,
             move |api| api.label_events(&jid),
-            move |this, r, _| {
+            move |this, r, cx| {
+                if this.label.epoch != lgen {
+                    return;
+                }
                 if this.label.subscribing.as_deref() == Some(id.as_str()) {
                     this.label.subscribing = None;
                 }
                 if let Ok(sub) = r
                     && route_label(&this.route) == Some(id.as_str())
                 {
-                    this.label.events = Some((id, sub));
+                    // Subscribe first, then snapshot images + logs + job summary so events arriving
+                    // during the reload buffer and reconcile cleanly with zero gap.
+                    this.label.events = Some((id.clone(), sub));
+                    this.reload_label_images(&id, cx);
+                    this.reload_label_logs(&id, cx);
+                    this.refresh_label_jobs(cx);
                 }
             },
         );

@@ -103,6 +103,8 @@ pub(super) fn seed_data(datasets: &[DatasetFixture], models: &[Model]) -> MockBe
         }
     };
 
+    let label_img_seq = label_images.iter().map(|(k, v)| (k.clone(), v.len() as u64)).collect();
+
     let ShapesHardSeed {
         b1,
         imgs_1,
@@ -177,6 +179,7 @@ pub(super) fn seed_data(datasets: &[DatasetFixture], models: &[Model]) -> MockBe
         agents,
         jobs,
         label_images,
+        label_img_seq,
         label_logs,
     }
 }

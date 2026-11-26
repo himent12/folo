@@ -1,11 +1,11 @@
 //! Mutations, filtering, form validation, and keyboard review actions for Agent Labeling.
 
-use folo_ui::{AppContext, Context, Focusable, Window};
+use folo_ui::Context;
 
-use super::state::{AddFolderForm, ExportDatasetForm, LabelImageFilter, LabelJobFilter, NewLabelJobForm};
+use super::load::route_label;
+use super::state::{LabelImageFilter, LabelJobFilter, SelectedBox};
 use crate::api::*;
-use crate::app::{FoloApp, Route, act};
-use crate::input::TextInput;
+use crate::app::{FoloApp, Route};
 use crate::ui::Tone;
 
 /// Validation split shares offered when exporting a labeling job to a YOLO dataset.
@@ -102,6 +102,9 @@ impl FoloApp {
         key: &str,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.label.confirm_delete_job.is_some() || self.label.confirm_delete_image.is_some() {
+            return false;
+        }
         let shown = self.current_filtered_label_images(job_id);
         let active_id = self
             .label
@@ -113,11 +116,14 @@ impl FoloApp {
             return false;
         };
         let n_classes = self.label_job_by_id(job_id).map_or(0, |j| j.classes.len());
+        let has_selected_box = self.label.selected_box.as_ref().is_some_and(|s| s.image_id == active_id);
         match key {
             "left" => self.step_label_image(job_id, -1, cx),
             "right" | "s" | "S" => self.step_label_image(job_id, 1, cx),
-            "a" | "A" | "enter" => self.approve_label_image(job_id, &active_id, true, cx),
-            "delete" | "backspace" => self.delete_selected_label_box(job_id, &active_id, cx),
+            "a" | "A" => self.approve_label_image(job_id, &active_id, true, cx),
+            "delete" | "backspace" if has_selected_box => {
+                self.delete_selected_label_box(job_id, &active_id, cx)
+            }
             "b" | "B" => {
                 self.label.show_boxes = !self.label.show_boxes;
             }
@@ -136,7 +142,7 @@ impl FoloApp {
                 self.label.zoom = 1.0;
                 self.label.pan = (0., 0.);
             }
-            k if k.len() == 1 && k.as_bytes()[0].is_ascii_digit() => {
+            k if has_selected_box && k.len() == 1 && k.as_bytes()[0].is_ascii_digit() => {
                 let d = (k.as_bytes()[0] - b'0') as usize;
                 if d >= 1 && d <= n_classes {
                     self.reclassify_selected_label_box(job_id, &active_id, (d - 1) as u32, cx);
@@ -247,7 +253,7 @@ impl FoloApp {
         } else {
             UpdateLabelImage { boxes: Some(im.boxes.clone()), reviewed: Some(true), expect }
         };
-        self.send_label_image_update(job_id, image_id, req, next_after, cx);
+        self.send_label_image_update(job_id, image_id, req, next_after, false, cx);
     }
 
     /// Deletes the currently selected box from `image_id` and persists via `PUT /api/label/jobs/{id}/images/{img}`.
@@ -255,7 +261,12 @@ impl FoloApp {
         if self.label.mutating {
             return;
         }
-        let Some(sel) = self.label.selected_box else { return };
+        let Some(sel) = self.label.selected_box.clone() else { return };
+        if sel.image_id != image_id {
+            self.label.selected_box = None;
+            cx.notify();
+            return;
+        }
         let Some(im) = self
             .label
             .images
@@ -266,17 +277,21 @@ impl FoloApp {
         else {
             return;
         };
-        if sel >= im.boxes.len() {
+        if sel.index >= im.boxes.len() || label_box_revision(&im.boxes) != sel.revision {
             self.label.selected_box = None;
+            self.label.hover_box = None;
+            self.label.review_error = Some(ApiError::new(
+                "label_boxes_changed",
+                "This image's boxes changed; reselect the box before deleting.",
+            ));
             cx.notify();
             return;
         }
-        let expect = Some(label_box_revision(&im.boxes));
+        let expect = Some(sel.revision);
         let mut boxes = im.boxes.clone();
-        boxes.remove(sel);
+        boxes.remove(sel.index);
         let req = UpdateLabelImage { boxes: Some(boxes), reviewed: Some(im.reviewed), expect };
-        self.label.selected_box = None;
-        self.send_label_image_update(job_id, image_id, req, None, cx);
+        self.send_label_image_update(job_id, image_id, req, None, true, cx);
     }
 
     /// Reclassifies the currently selected box on `image_id` to `class` and persists to `/api/label`.
@@ -290,7 +305,12 @@ impl FoloApp {
         if self.label.mutating {
             return;
         }
-        let Some(sel) = self.label.selected_box else { return };
+        let Some(sel) = self.label.selected_box.clone() else { return };
+        if sel.image_id != image_id {
+            self.label.selected_box = None;
+            cx.notify();
+            return;
+        }
         let Some(im) = self
             .label
             .images
@@ -301,14 +321,24 @@ impl FoloApp {
         else {
             return;
         };
-        if sel >= im.boxes.len() || im.boxes[sel].class == class {
+        if sel.index >= im.boxes.len() || label_box_revision(&im.boxes) != sel.revision {
+            self.label.selected_box = None;
+            self.label.hover_box = None;
+            self.label.review_error = Some(ApiError::new(
+                "label_boxes_changed",
+                "This image's boxes changed; reselect the box before reclassifying.",
+            ));
+            cx.notify();
             return;
         }
-        let expect = Some(label_box_revision(&im.boxes));
+        if im.boxes[sel.index].class == class {
+            return;
+        }
+        let expect = Some(sel.revision);
         let mut boxes = im.boxes.clone();
-        boxes[sel].class = class;
+        boxes[sel.index].class = class;
         let req = UpdateLabelImage { boxes: Some(boxes), reviewed: Some(im.reviewed), expect };
-        self.send_label_image_update(job_id, image_id, req, None, cx);
+        self.send_label_image_update(job_id, image_id, req, None, false, cx);
     }
 
     fn next_image_after(&self, job_id: &str, current_id: &str) -> Option<String> {
@@ -324,33 +354,71 @@ impl FoloApp {
         image_id: &str,
         req: UpdateLabelImage,
         advance_to: Option<String>,
+        clear_box: bool,
         cx: &mut Context<Self>,
     ) {
         self.label.mutating = true;
+        self.label.mutating_seq += 1;
+        let mseq = self.label.mutating_seq;
+        let lgen = self.label.epoch;
         self.label.review_error = None;
         let jid = job_id.to_string();
         let iid = image_id.to_string();
         let jid2 = jid.clone();
+        let iid2 = iid.clone();
         cx.notify();
         self.fetch(
             cx,
             move |api| api.update_label_image(&jid, &iid, &req),
             move |this, r, cx| {
-                this.label.mutating = false;
+                if this.label.epoch != lgen {
+                    return;
+                }
+                if this.label.mutating_seq == mseq {
+                    this.label.mutating = false;
+                }
+                let on_job = route_label(&this.route) == Some(jid2.as_str());
                 match r {
                     Ok(updated) => {
+                        let new_rev = label_box_revision(&updated.boxes);
+                        let new_len = updated.boxes.len();
                         this.upsert_label_image(&jid2, updated);
                         this.refresh_label_jobs(cx);
-                        if let Some(next_id) = advance_to {
-                            this.select_label_image(next_id, cx);
+                        if on_job {
+                            if clear_box {
+                                if this.label.selected_box.as_ref().is_some_and(|s| s.image_id == iid2) {
+                                    this.label.selected_box = None;
+                                    this.label.hover_box = None;
+                                }
+                            } else if let Some(sel) = this.label.selected_box.as_mut()
+                                && sel.image_id == iid2
+                            {
+                                if sel.index < new_len {
+                                    sel.revision = new_rev;
+                                } else {
+                                    this.label.selected_box = None;
+                                }
+                            }
+                            if let Some(next_id) = advance_to
+                                && this.label.selected_image.as_deref() == Some(iid2.as_str())
+                            {
+                                this.select_label_image(next_id, cx);
+                            }
+                            this.reconcile_selected_label_image(&jid2);
                         }
-                        this.reconcile_selected_label_image(&jid2);
                     }
                     Err(e) => {
                         if e.code == "label_boxes_changed" {
+                            if on_job && this.label.selected_box.as_ref().is_some_and(|s| s.image_id == iid2)
+                            {
+                                this.label.selected_box = None;
+                                this.label.hover_box = None;
+                            }
                             this.reload_label_images(&jid2, cx);
                         }
-                        this.label.review_error = Some(e);
+                        if on_job {
+                            this.label.review_error = Some(e);
+                        }
                     }
                 }
             },
@@ -364,6 +432,9 @@ impl FoloApp {
         }
         self.label.confirm_delete_image = None;
         self.label.mutating = true;
+        self.label.mutating_seq += 1;
+        let mseq = self.label.mutating_seq;
+        let lgen = self.label.epoch;
         self.label.review_error = None;
         let next = self.next_image_after(job_id, image_id);
         let jid = job_id.to_string();
@@ -375,328 +446,51 @@ impl FoloApp {
             cx,
             move |api| api.delete_label_image(&jid, &iid),
             move |this, r, cx| {
-                this.label.mutating = false;
+                if this.label.epoch != lgen {
+                    return;
+                }
+                if this.label.mutating_seq == mseq {
+                    this.label.mutating = false;
+                }
+                let on_job = route_label(&this.route) == Some(jid2.as_str());
                 match r {
                     Ok(()) => {
                         if let Some(list) = this.label.images.get_mut(&jid2).and_then(|l| l.ready_mut()) {
                             list.retain(|i| i.id != iid2);
                         }
-                        if let Some(next_id) = next {
-                            this.label.selected_image = Some(next_id);
+                        if on_job {
+                            if this.label.selected_image.as_deref() == Some(iid2.as_str()) {
+                                this.label.selected_image = next;
+                                this.label.selected_box = None;
+                                this.label.hover_box = None;
+                            } else if this.label.selected_box.as_ref().is_some_and(|s| s.image_id == iid2) {
+                                this.label.selected_box = None;
+                                this.label.hover_box = None;
+                            }
+                            this.reconcile_selected_label_image(&jid2);
                         }
-                        this.label.selected_box = None;
-                        this.reconcile_selected_label_image(&jid2);
                         this.refresh_label_jobs(cx);
                         this.toast(Tone::Neutral, "Removed image from job", None, cx);
                     }
                     Err(e) => {
-                        this.label.review_error = Some(e);
+                        if on_job {
+                            this.label.review_error = Some(e);
+                        }
                     }
                 }
             },
         );
     }
 
-    // ---------- New labeling job form ----------
-
-    pub fn open_new_label_job(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.label_on() {
-            return;
-        }
-        self.label.form_seq += 1;
-        let seq = self.label.form_seq;
-        let name = cx.new(|cx| TextInput::new("e.g. street-scenes", cx));
-        let classes = cx.new(|cx| TextInput::new("car, person, bicycle", cx));
-        let path = cx.new(|cx| TextInput::new("Optional folder path on the server", cx));
-        let instructions =
-            cx.new(|cx| TextInput::new("Optional instructions for the agent (what to include or skip)", cx));
-        let fh = name.read(cx).focus_handle(cx);
-        window.focus(&fh);
-        self.label.new_job = Some(NewLabelJobForm {
-            seq,
-            name,
-            classes,
-            path,
-            instructions,
-            submitting: false,
-            touched: false,
-            error: None,
-        });
-        cx.notify();
-    }
-
-    pub fn close_new_label_job(&mut self, cx: &mut Context<Self>) {
-        self.label.new_job = None;
-        cx.notify();
-    }
-
-    pub fn browse_new_label_folder(&mut self, cx: &mut Context<Self>) {
-        let Some(form) = self.label.new_job.as_ref() else { return };
-        let path_input = form.path.clone();
-        let seq = form.seq;
-        let rx = cx.prompt_for_paths(folo_ui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Select image folder".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await
-                && let Some(p) = paths.into_iter().next()
-            {
-                let text = p.to_string_lossy().to_string();
-                let _ = this.update(cx, |this, cx| {
-                    if this.label.new_job.as_ref().is_some_and(|f| f.seq == seq) {
-                        path_input.update(cx, |i, cx| i.set_text(text, cx));
-                        cx.notify();
-                    }
-                });
-            }
-        })
-        .detach();
-    }
-
-    pub fn submit_new_label_job(&mut self, cx: &mut Context<Self>) {
-        let Some(form) = self.label.new_job.as_mut() else { return };
-        if form.submitting {
-            return;
-        }
-        form.touched = true;
-        let name = form.name.read(cx).text().trim().to_string();
-        let classes_raw = form.classes.read(cx).text().to_string();
-        let path_raw = form.path.read(cx).text().trim().to_string();
-        let instructions = form.instructions.read(cx).text().trim().to_string();
-        let classes = match validate_new_job(&name, &classes_raw, &instructions) {
-            Ok(c) => c,
-            Err(msg) => {
-                form.error = Some(ApiError::new("invalid_body", msg));
-                cx.notify();
-                return;
-            }
-        };
-        form.submitting = true;
-        form.error = None;
-        let seq = form.seq;
-        let req =
-            CreateLabelJob { name, classes, instructions, path: (!path_raw.is_empty()).then_some(path_raw) };
-        cx.notify();
-        self.fetch(
-            cx,
-            move |api| api.create_label_job(&req),
-            move |this, r, cx| {
-                let mine = this.label.new_job.as_ref().is_some_and(|f| f.seq == seq);
-                match r {
-                    Ok(job) => {
-                        let id = job.id.clone();
-                        let title = job.name.clone();
-                        let n_cls = job.classes.len();
-                        if mine {
-                            this.label.new_job = None;
-                        }
-                        this.upsert_label_job(job);
-                        this.route_pending = Some(Route::LabelJob(id));
-                        this.toast(
-                            Tone::Accent,
-                            format!("Created {title}"),
-                            Some(format!("{n_cls} {}", if n_cls == 1 { "class" } else { "classes" }).into()),
-                            cx,
-                        );
-                    }
-                    Err(e) if mine => {
-                        if let Some(f) = this.label.new_job.as_mut() {
-                            f.submitting = false;
-                            f.error = Some(e);
-                        }
-                    }
-                    Err(e) => this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx),
-                }
-            },
-        );
-    }
-
-    // ---------- Add folder to existing job ----------
-
-    pub fn open_add_label_folder(&mut self, job_id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.label.export_ds = None;
-        self.label.form_seq += 1;
-        let seq = self.label.form_seq;
-        let path = cx.new(|cx| TextInput::new("Folder or image path on the server", cx));
-        let fh = path.read(cx).focus_handle(cx);
-        window.focus(&fh);
-        self.label.add_folder =
-            Some(AddFolderForm { job: job_id.to_string(), seq, path, submitting: false, error: None });
-        cx.notify();
-    }
-
-    pub fn browse_add_label_folder(&mut self, cx: &mut Context<Self>) {
-        let Some(form) = self.label.add_folder.as_ref() else { return };
-        let path_input = form.path.clone();
-        let seq = form.seq;
-        let rx = cx.prompt_for_paths(folo_ui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Select image folder".into()),
-        });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await
-                && let Some(p) = paths.into_iter().next()
-            {
-                let text = p.to_string_lossy().to_string();
-                let _ = this.update(cx, |this, cx| {
-                    if this.label.add_folder.as_ref().is_some_and(|f| f.seq == seq) {
-                        path_input.update(cx, |i, cx| i.set_text(text, cx));
-                        cx.notify();
-                    }
-                });
-            }
-        })
-        .detach();
-    }
-
-    pub fn submit_add_label_folder(&mut self, cx: &mut Context<Self>) {
-        let Some(form) = self.label.add_folder.as_mut() else { return };
-        if form.submitting {
-            return;
-        }
-        let path = form.path.read(cx).text().trim().to_string();
-        if path.is_empty() {
-            form.error = Some(ApiError::new("invalid_body", "Enter a folder path."));
-            cx.notify();
-            return;
-        }
-        form.submitting = true;
-        form.error = None;
-        let job_id = form.job.clone();
-        let seq = form.seq;
-        let req = ImportLabelImages { path };
-        let jid = job_id.clone();
-        cx.notify();
-        self.fetch(
-            cx,
-            move |api| api.import_label_images(&jid, &req),
-            move |this, r, cx| {
-                let mine = this.label.add_folder.as_ref().is_some_and(|f| f.seq == seq);
-                match r {
-                    Ok(res) => {
-                        if mine {
-                            this.label.add_folder = None;
-                        }
-                        let added_n = res.added.len();
-                        let skipped_n = res.skipped.len();
-                        this.upsert_label_job(res.job);
-                        this.reload_label_images(&job_id, cx);
-                        let body =
-                            if skipped_n > 0 { Some(format!("{skipped_n} skipped").into()) } else { None };
-                        this.toast(
-                            Tone::Success,
-                            format!("Added {} {}", added_n, if added_n == 1 { "image" } else { "images" }),
-                            body,
-                            cx,
-                        );
-                    }
-                    Err(e) if mine => {
-                        if let Some(f) = this.label.add_folder.as_mut() {
-                            f.submitting = false;
-                            f.error = Some(e);
-                        }
-                    }
-                    Err(e) => this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx),
-                }
-            },
-        );
-    }
-
-    // ---------- Export / Register as Dataset ----------
-
-    pub fn open_export_label_dataset(&mut self, job: &LabelJob, window: &mut Window, cx: &mut Context<Self>) {
-        self.label.add_folder = None;
-        self.label.form_seq += 1;
-        let seq = self.label.form_seq;
-        let default_name = job.name.clone();
-        let name = cx.new(|cx| {
-            let mut i = TextInput::new("Dataset name", cx);
-            i.set_text(default_name, cx);
-            i
-        });
-        let fh = name.read(cx).focus_handle(cx);
-        window.focus(&fh);
-        self.label.export_ds = Some(ExportDatasetForm {
-            job: job.id.clone(),
-            seq,
-            name,
-            val_idx: 1, // 20%
-            submitting: false,
-            error: None,
-        });
-        cx.notify();
-    }
-
-    pub fn submit_export_label_dataset(&mut self, cx: &mut Context<Self>) {
-        let Some(form) = self.label.export_ds.as_mut() else { return };
-        if form.submitting {
-            return;
-        }
-        let name = form.name.read(cx).text().trim().to_string();
-        if name.is_empty() {
-            form.error = Some(ApiError::new("invalid_body", "Enter a dataset name."));
-            cx.notify();
-            return;
-        }
-        form.submitting = true;
-        form.error = None;
-        let job_id = form.job.clone();
-        let seq = form.seq;
-        let val_fraction = LABEL_VAL_FRACTIONS[form.val_idx.min(LABEL_VAL_FRACTIONS.len() - 1)];
-        let req = LabelDatasetRequest { name: Some(name), val_fraction, seed: 0 };
-        let jid = job_id.clone();
-        cx.notify();
-        self.fetch(
-            cx,
-            move |api| api.create_label_dataset(&jid, &req),
-            move |this, r, cx| {
-                let mine = this.label.export_ds.as_ref().is_some_and(|f| f.seq == seq);
-                match r {
-                    Ok(ds) => {
-                        if mine {
-                            this.label.export_ds = None;
-                        }
-                        let ds_id = ds.id.clone();
-                        let ds_name = ds.name.clone();
-                        let total = ds.splits.total();
-                        if let Some(list) = this.store.datasets.ready_mut() {
-                            match list.iter_mut().find(|d| d.id == ds.id) {
-                                Some(slot) => *slot = ds,
-                                None => list.push(ds),
-                            }
-                        }
-                        if let Some(jobs) = this.label.jobs.ready_mut()
-                            && let Some(job) = jobs.iter_mut().find(|j| j.id == job_id)
-                        {
-                            job.dataset_id = Some(ds_id.clone());
-                        }
-                        this.refresh_label_jobs(cx);
-                        this.toast_with(
-                            Tone::Success,
-                            format!("Exported dataset {ds_name}"),
-                            Some(format!("{total} images registered and ready to train.").into()),
-                            Some((
-                                "Open dataset".into(),
-                                act(move |this, w, cx| this.navigate(Route::Dataset(ds_id.clone()), w, cx)),
-                            )),
-                            cx,
-                        );
-                    }
-                    Err(e) if mine => {
-                        if let Some(f) = this.label.export_ds.as_mut() {
-                            f.submitting = false;
-                            f.error = Some(e);
-                        }
-                    }
-                    Err(e) => this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx),
-                }
-            },
-        );
+    /// Selects or toggles box `index` on `image_id` bound to its current box-array revision.
+    pub fn toggle_label_box(&mut self, image_id: String, index: usize, revision: String) {
+        let already = self
+            .label
+            .selected_box
+            .as_ref()
+            .is_some_and(|s| s.image_id == image_id && s.index == index && s.revision == revision);
+        self.label.selected_box =
+            if already { None } else { Some(SelectedBox { image_id, index, revision }) };
     }
 
     // ---------- Agent Start / Stop & Delete Job ----------
@@ -739,6 +533,10 @@ impl FoloApp {
             parallel: None,
         };
         self.label.starting = true;
+        self.label.starting_seq += 1;
+        let sseq = self.label.starting_seq;
+        let lgen = self.label.epoch;
+        let seen_job_seq = self.label.job_event_seq.get(job_id).copied().unwrap_or(0);
         self.label.start_error = None;
         let jid = job_id.to_string();
         let jid2 = jid.clone();
@@ -747,12 +545,20 @@ impl FoloApp {
             cx,
             move |api| api.start_labeling(&jid, &req),
             move |this, r, cx| {
-                this.label.starting = false;
+                if this.label.epoch != lgen {
+                    return;
+                }
+                if this.label.starting_seq == sseq {
+                    this.label.starting = false;
+                }
                 match r {
                     Ok(job) => {
                         let name = job.name.clone();
                         let active = job.status.is_active();
-                        this.upsert_label_job(job);
+                        let cur_seq = this.label.job_event_seq.get(&jid2).copied().unwrap_or(0);
+                        if cur_seq == seen_job_seq || !active {
+                            this.upsert_label_job(job);
+                        }
                         this.reload_label_images(&jid2, cx);
                         if active {
                             this.toast(Tone::Accent, format!("Started labeling {name}"), None, cx);
@@ -761,7 +567,9 @@ impl FoloApp {
                         }
                     }
                     Err(e) => {
-                        this.label.start_error = Some(e);
+                        if route_label(&this.route) == Some(jid2.as_str()) {
+                            this.label.start_error = Some(e);
+                        }
                     }
                 }
             },
@@ -772,6 +580,8 @@ impl FoloApp {
         if !self.label.busy.insert(job_id.to_string()) {
             return;
         }
+        let lgen = self.label.epoch;
+        let seen_job_seq = self.label.job_event_seq.get(job_id).copied().unwrap_or(0);
         let jid = job_id.to_string();
         let jid2 = jid.clone();
         cx.notify();
@@ -779,11 +589,20 @@ impl FoloApp {
             cx,
             move |api| api.stop_labeling(&jid),
             move |this, r, cx| {
+                if this.label.epoch != lgen {
+                    return;
+                }
                 this.label.busy.remove(&jid2);
                 match r {
                     Ok(job) => {
-                        this.upsert_label_job(job);
+                        let cur_seq = this.label.job_event_seq.get(&jid2).copied().unwrap_or(0);
+                        if cur_seq == seen_job_seq || !job.status.is_active() {
+                            this.upsert_label_job(job);
+                        }
                         this.toast(Tone::Neutral, "Stopping labeling run", None, cx);
+                    }
+                    Err(e) if e.code == "label_job_not_active" => {
+                        this.refresh_label_jobs(cx);
                     }
                     Err(e) => this.toast(Tone::Danger, "Couldn't stop labeling", Some(e.message.into()), cx),
                 }
@@ -796,6 +615,7 @@ impl FoloApp {
             return;
         }
         self.label.confirm_delete_job = None;
+        let lgen = self.label.epoch;
         let name = self.label_job_name(job_id);
         let jid = job_id.to_string();
         let jid2 = jid.clone();
@@ -804,6 +624,9 @@ impl FoloApp {
             cx,
             move |api| api.delete_label_job(&jid),
             move |this, r, cx| {
+                if this.label.epoch != lgen {
+                    return;
+                }
                 this.label.busy.remove(&jid2);
                 match r {
                     Ok(()) => {
@@ -827,40 +650,5 @@ impl FoloApp {
                 }
             },
         );
-    }
-
-    /// Closes an inline labeling form or delete confirmation on `Esc`.
-    pub fn dismiss_label_form(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.label.new_job.take().is_some()
-            || self.label.add_folder.take().is_some()
-            || self.label.export_ds.take().is_some()
-            || self.label.confirm_delete_job.take().is_some()
-            || self.label.confirm_delete_image.take().is_some()
-        {
-            window.focus(&self.root_focus);
-            cx.notify();
-            true
-        } else if self.label.selected_box.take().is_some() {
-            cx.notify();
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Submits the open inline labeling form on `Ctrl+Enter`.
-    pub fn submit_label_form(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.label.new_job.is_some() {
-            self.submit_new_label_job(cx);
-            true
-        } else if self.label.add_folder.is_some() {
-            self.submit_add_label_folder(cx);
-            true
-        } else if self.label.export_ds.is_some() {
-            self.submit_export_label_dataset(cx);
-            true
-        } else {
-            false
-        }
     }
 }

@@ -521,3 +521,54 @@ fn real_server_bench_calls() {
     ran.unwrap();
     assert!(!api.benches().unwrap().iter().any(|x| x.id == created.id));
 }
+
+#[test]
+fn label_calls_hit_their_paths_page_and_decode_sse_and_conflicts() {
+    let job_json = r#"{"id":"lb_1","name":"street","classes":["car","person"],"instructions":"","created":"2026-01-01T00:00:00Z","status":"idle","counts":{"images":2,"pending":0,"labeled":2,"failed":0,"boxes":1},"run":null,"usage":{"calls":1,"input_tokens":100,"cached_input_tokens":0,"output_tokens":20,"cost_usd":0.01},"dataset_id":null}"#;
+    let img1_json = r#"{"id":"li_1","file":"a.jpg","width":640,"height":480,"status":"labeled","boxes":[{"class":0,"x1":10.0,"y1":20.0,"x2":100.0,"y2":120.0}],"source":"agent","error":null,"reviewed":false}"#;
+    let img2_json = r#"{"id":"li_2","file":"b.jpg","width":640,"height":480,"status":"pending","boxes":[],"source":null,"error":null,"reviewed":false}"#;
+    let sse_body = format!("event: job\ndata: {job_json}\n\nevent: reload\ndata: {{}}\n\n");
+    let sse_resp = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse_body}",
+        sse_body.len()
+    )
+    .into_bytes();
+    let conflict_json = r#"{"error":{"code":"label_boxes_changed","message":"This image's boxes changed since you opened it."}}"#;
+    let (url, requests) = canned_server(vec![
+        json("200 OK", &format!(r#"{{"images":[{img1_json}],"total":2}}"#)),
+        json("200 OK", &format!(r#"{{"images":[{img2_json}],"total":2}}"#)),
+        json("409 Conflict", conflict_json),
+        sse_resp,
+    ]);
+    let api = HttpBackend::new(&url);
+
+    let page = api.label_images("lb_1", 0, 1000).unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.images.len(), 2);
+    assert_eq!(page.images[0].id, "li_1");
+    assert_eq!(page.images[1].id, "li_2");
+    assert!(requests.recv().unwrap().starts_with("GET /api/label/jobs/lb_1/images?offset=0&limit=1000 "));
+    assert!(requests.recv().unwrap().starts_with("GET /api/label/jobs/lb_1/images?offset=1&limit=999 "));
+
+    let err = api
+        .update_label_image(
+            "lb_1",
+            "li_1",
+            &UpdateLabelImage {
+                boxes: Some(Vec::new()),
+                reviewed: Some(false),
+                expect: Some("stale".into()),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err.code, "label_boxes_changed");
+    assert_eq!(err.status, Some(409));
+    assert!(requests.recv().unwrap().starts_with("PUT /api/label/jobs/lb_1/images/li_1 "));
+
+    let sub = api.label_events("lb_1").unwrap();
+    assert!(requests.recv().unwrap().starts_with("GET /api/label/jobs/lb_1/events "));
+    assert!(
+        matches!(sub.recv_timeout(Duration::from_secs(2)).unwrap(), LabelEvent::Job(j) if j.id == "lb_1")
+    );
+    assert!(matches!(sub.recv_timeout(Duration::from_secs(2)).unwrap(), LabelEvent::Reload));
+}

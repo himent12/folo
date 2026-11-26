@@ -199,6 +199,7 @@ impl Render for FoloApp {
                 }
                 if this.close_menus() {
                     cx.notify();
+                    return;
                 }
                 if this.cloud.connect.is_some() {
                     this.submit_connect(w, cx);
