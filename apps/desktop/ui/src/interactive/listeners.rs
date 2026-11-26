@@ -112,13 +112,16 @@ impl Interactivity {
             let active_tooltip = element_state.active_tooltip.get_or_insert_with(Default::default).clone();
             let pending_mouse_down =
                 element_state.pending_mouse_down.get_or_insert_with(Default::default).clone();
-            let check_is_hovered_during_prepaint = Rc::new({
+            let check_is_hovered_during_prepaint: tooltip::PrepaintHoverCheck = Rc::new({
                 let pending_mouse_down = pending_mouse_down.clone();
                 let source_bounds = hitbox.bounds;
-                move |window: &Window| {
+                move |source_hitbox: Option<HitboxId>, window: &Window| {
                     window.hovered.get()
                         && pending_mouse_down.borrow().is_none()
-                        && source_bounds.contains(&window.mouse_position())
+                        && match source_hitbox {
+                            Some(id) => id.is_hovered(window),
+                            None => source_bounds.contains(&window.mouse_position()),
+                        }
                 }
             });
             let check_is_hovered = Rc::new({
@@ -128,6 +131,7 @@ impl Interactivity {
             tooltip::register_tooltip_mouse_handlers(
                 &active_tooltip,
                 self.tooltip_id,
+                hitbox.id,
                 build_tooltip,
                 check_is_hovered,
                 check_is_hovered_during_prepaint,

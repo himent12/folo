@@ -95,6 +95,12 @@ impl FoloApp {
             .map(|d| d.classes.clone())
             .or_else(|| self.store.dataset_summary(&r.config.dataset_id).map(|d| d.classes.clone()))
             .unwrap_or_default();
+        let samples_failed =
+            r.epoch > 0 && self.store.samples.get(&r.id).is_some_and(|l| l.error().is_some());
+        let retry_anchor = match self.passing_stop("run-samples-retry", samples_failed, cx) {
+            Some(fh) if !samples_failed => Some(div().track_focus(&fh)),
+            _ => None,
+        };
         let body = match self.store.samples.get(&r.id) {
             _ if r.epoch == 0 => div()
                 .child(empty_state(
@@ -226,10 +232,33 @@ impl FoloApp {
                     )))
                     .into_any_element()
             }
-            Some(Load::Failed(e)) => div()
-                .p(px(16.))
-                .child(text(ty::SM, t.danger_text).child(e.message.clone()))
-                .into_any_element(),
+            Some(Load::Failed(e)) => {
+                let rid = r.id.clone();
+                let retry = self.button(
+                    "run-samples-retry",
+                    "Retry",
+                    crate::controls::Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.retry_samples(&rid, cx)),
+                );
+                div()
+                    .p(px(16.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(
+                        text(ty::SM, t.danger_text)
+                            .flex_1()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .child(e.message.clone()),
+                    )
+                    .child(retry)
+                    .into_any_element()
+            }
             _ => div()
                 .p(px(16.))
                 .flex()
@@ -292,6 +321,7 @@ impl FoloApp {
                 .child(div().flex().items_center().gap(px(8.)).child(seg).children(picker)),
             )
             .child(tools)
+            .children(retry_anchor)
             .child(body)
             .into_any_element()
     }

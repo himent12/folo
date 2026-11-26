@@ -62,17 +62,35 @@ pub enum Fit {
 /// value back, so reversing a pan never has a dead zone.
 pub fn clamp_pan(b: Bounds<Pixels>, w: f32, h: f32, fit: Fit, zoom: f32, pan: (f32, f32)) -> (f32, f32) {
     let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
+    if !w.is_finite()
+        || !h.is_finite()
+        || w <= 0.
+        || h <= 0.
+        || !bw.is_finite()
+        || !bh.is_finite()
+        || bw <= 0.
+        || bh <= 0.
+        || !zoom.is_finite()
+        || zoom <= 0.
+    {
+        return (0., 0.);
+    }
     let s = match fit {
         Fit::Cover => (bw / w).max(bh / h),
         Fit::Contain => (bw / w).min(bh / h),
     } * zoom;
     let (dw, dh) = (w * s, h * s);
     let keep = |view: f32, drawn: f32| ((view + drawn) / 2. - 48.).max(0.);
-    (pan.0.clamp(-keep(bw, dw), keep(bw, dw)), pan.1.clamp(-keep(bh, dh), keep(bh, dh)))
+    let px_ = if pan.0.is_finite() { pan.0 } else { 0. };
+    let py_ = if pan.1.is_finite() { pan.1 } else { 0. };
+    (px_.clamp(-keep(bw, dw), keep(bw, dw)), py_.clamp(-keep(bh, dh), keep(bh, dh)))
 }
 
 pub fn image_rect(b: Bounds<Pixels>, w: f32, h: f32, fit: Fit, zoom: f32, pan: (f32, f32)) -> Bounds<Pixels> {
-    let (bw, bh) = (f32::from(b.size.width), f32::from(b.size.height));
+    let (bw, bh) = (f32::from(b.size.width).max(0.), f32::from(b.size.height).max(0.));
+    if !w.is_finite() || !h.is_finite() || w <= 0. || h <= 0. || !zoom.is_finite() || zoom <= 0. {
+        return Bounds::new(b.origin, size(px(0.), px(0.)));
+    }
     let s = match fit {
         Fit::Cover => (bw / w).max(bh / h),
         Fit::Contain => (bw / w).min(bh / h),
@@ -490,16 +508,21 @@ pub fn zoom_about(
     cursor: Point<Pixels>,
     new_zoom: f32,
 ) -> (f32, f32) {
-    if new_zoom <= 1.0 {
+    if !new_zoom.is_finite() || new_zoom <= 1.0 {
         return (0., 0.);
     }
     let rect = image_rect(bounds, w, h, Fit::Contain, zoom, pan);
-    let fx = f32::from(cursor.x - rect.left()) / f32::from(rect.size.width);
-    let fy = f32::from(cursor.y - rect.top()) / f32::from(rect.size.height);
+    let (rw, rh) = (f32::from(rect.size.width), f32::from(rect.size.height));
+    if rw <= 0. || rh <= 0. {
+        return (0., 0.);
+    }
+    let fx = f32::from(cursor.x - rect.left()) / rw;
+    let fy = f32::from(cursor.y - rect.top()) / rh;
     let fresh = image_rect(bounds, w, h, Fit::Contain, new_zoom, (0., 0.));
     let want_x = f32::from(cursor.x) - fx * f32::from(fresh.size.width);
     let want_y = f32::from(cursor.y) - fy * f32::from(fresh.size.height);
-    (want_x - f32::from(fresh.left()), want_y - f32::from(fresh.top()))
+    let next = (want_x - f32::from(fresh.left()), want_y - f32::from(fresh.top()));
+    clamp_pan(bounds, w, h, Fit::Contain, new_zoom, next)
 }
 
 /// Map a window point to image pixel coordinates (for hover hit-testing).
@@ -512,8 +535,12 @@ pub fn to_image(
     p: Point<Pixels>,
 ) -> (f32, f32) {
     let rect = image_rect(bounds, w, h, fit, zoom, pan);
-    let x = f32::from(p.x - rect.left()) / f32::from(rect.size.width) * w;
-    let y = f32::from(p.y - rect.top()) / f32::from(rect.size.height) * h;
+    let (rw, rh) = (f32::from(rect.size.width), f32::from(rect.size.height));
+    if rw <= 0. || rh <= 0. {
+        return (-1., -1.);
+    }
+    let x = f32::from(p.x - rect.left()) / rw * w;
+    let y = f32::from(p.y - rect.top()) / rh * h;
     (x, y)
 }
 
@@ -582,5 +609,42 @@ mod tests {
         assert_eq!(hit_box(&boxes, 15., 15.), Some(1));
         assert_eq!(hit_box(&boxes, 50., 50.), Some(0));
         assert_eq!(hit_box(&boxes, 150., 50.), None);
+    }
+
+    #[test]
+    fn degenerate_bounds_and_dims_never_produce_nan() {
+        let valid_b = Bounds::new(point(px(10.), px(20.)), size(px(400.), px(300.)));
+        let zero_b = Bounds::new(point(px(10.), px(20.)), size(px(0.), px(300.)));
+        let neg_b = Bounds::new(point(px(10.), px(20.)), size(px(-10.), px(-20.)));
+
+        for (b, dims, zoom, pan) in [
+            (valid_b, (0., 480.), 2.0, (10., 10.)),
+            (valid_b, (640., 0.), 2.0, (10., 10.)),
+            (valid_b, (f32::NAN, 480.), 2.0, (10., 10.)),
+            (zero_b, (640., 480.), 2.0, (10., 10.)),
+            (neg_b, (640., 480.), 2.0, (10., 10.)),
+            (valid_b, (640., 480.), 0.0, (10., 10.)),
+            (valid_b, (640., 480.), f32::NAN, (f32::NAN, f32::INFINITY)),
+        ] {
+            let p = clamp_pan(b, dims.0, dims.1, Fit::Contain, zoom, pan);
+            assert!(p.0.is_finite() && p.1.is_finite(), "clamp_pan produced non-finite: {p:?}");
+            let r = image_rect(b, dims.0, dims.1, Fit::Contain, zoom, pan);
+            assert!(
+                f32::from(r.origin.x).is_finite()
+                    && f32::from(r.origin.y).is_finite()
+                    && f32::from(r.size.width).is_finite()
+                    && f32::from(r.size.height).is_finite(),
+                "image_rect produced non-finite: {r:?}"
+            );
+            let z = zoom_about(b, dims, zoom, pan, point(px(50.), px(50.)), 2.5);
+            assert!(z.0.is_finite() && z.1.is_finite(), "zoom_about produced non-finite: {z:?}");
+            let m = to_image(b, dims, Fit::Contain, zoom, pan, point(px(50.), px(50.)));
+            assert!(m.0.is_finite() && m.1.is_finite(), "to_image produced non-finite: {m:?}");
+        }
+        assert_eq!(
+            to_image(zero_b, (640., 480.), Fit::Contain, 1.0, (0., 0.), point(px(10.), px(20.))),
+            (-1., -1.)
+        );
+        assert_eq!(clamp_pan(valid_b, 640., 480., Fit::Contain, 2.0, (f32::NAN, f32::INFINITY)), (0., 0.));
     }
 }

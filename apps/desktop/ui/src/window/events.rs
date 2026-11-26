@@ -30,20 +30,40 @@ impl Window {
             PlatformInput::MouseMove(event) => {
                 self.mouse_position = event.position;
                 self.modifiers = event.modifiers;
+                match event.pressed_button {
+                    Some(btn) => {
+                        if !self.pressed_buttons.contains(&btn) {
+                            self.pressed_buttons.push(btn);
+                        }
+                    }
+                    None => self.pressed_buttons.clear(),
+                }
                 PlatformInput::MouseMove(event)
             }
             PlatformInput::MouseDown(event) => {
                 self.mouse_position = event.position;
                 self.modifiers = event.modifiers;
+                if !self.pressed_buttons.contains(&event.button) {
+                    self.pressed_buttons.push(event.button);
+                }
                 PlatformInput::MouseDown(event)
             }
             PlatformInput::MouseUp(event) => {
                 self.mouse_position = event.position;
                 self.modifiers = event.modifiers;
+                self.pressed_buttons.retain(|b| *b != event.button);
                 PlatformInput::MouseUp(event)
             }
             PlatformInput::MouseExited(event) => {
                 self.modifiers = event.modifiers;
+                match event.pressed_button {
+                    Some(btn) => {
+                        if !self.pressed_buttons.contains(&btn) {
+                            self.pressed_buttons.push(btn);
+                        }
+                    }
+                    None => self.pressed_buttons.clear(),
+                }
                 PlatformInput::MouseExited(event)
             }
             PlatformInput::ModifiersChanged(event) => {
@@ -127,6 +147,7 @@ impl Window {
             }
             FileDropEvent::Exited => {
                 self.active_drag = None;
+                self.pressed_buttons.clear();
                 if self.hovered.get() {
                     self.on_hover_status_change(false, cx);
                     cx.propagate_event = true;
@@ -411,7 +432,7 @@ impl Window {
         if !hovered {
             let event = MouseMoveEvent {
                 position: self.mouse_position,
-                pressed_button: None,
+                pressed_button: self.pressed_buttons.first().copied(),
                 modifiers: self.modifiers,
             };
             cx.propagate_event = true;

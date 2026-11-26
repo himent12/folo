@@ -246,6 +246,13 @@ impl FoloApp {
         }
     }
 
+    /// Fetch a run's validation samples again after a failed load.
+    pub fn retry_samples(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.store.samples.remove(id);
+        self.ensure_samples(id, cx);
+        cx.notify();
+    }
+
     pub fn ensure_logs(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.store.logs.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.logs.insert(id.to_string(), Load::Loading);
@@ -267,6 +274,13 @@ impl FoloApp {
                 },
             );
         }
+    }
+
+    /// Fetch a run's logs again after a failed load.
+    pub fn retry_logs(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.store.logs.remove(id);
+        self.ensure_logs(id, cx);
+        cx.notify();
     }
 
     pub fn ensure_eval(&mut self, id: &str, cx: &mut Context<Self>) {

@@ -97,8 +97,16 @@ impl Window {
         root_element.prepaint_at(Point::default(), self, cx);
         self.sort_deferred_draws();
         self.prepaint_deferred_draws(cx);
-        let mut tooltip_element = if self.active_drag.is_none() { self.prepaint_tooltip(cx) } else { None };
         self.mouse_hit_test = self.hit_test_mouse(&self.next_frame);
+        let mut tooltip_element = if self.active_drag.is_none() {
+            self.prepaint_tooltip(cx)
+        } else {
+            self.next_frame.tooltip_requests.clear();
+            None
+        };
+        if tooltip_element.is_some() {
+            self.mouse_hit_test = self.hit_test_mouse(&self.next_frame);
+        }
         let prepainted = Instant::now();
         self.frame_times.prepaint_us = micros_since(laid_out);
 
@@ -225,8 +233,9 @@ impl Window {
     /// Lays out and prepaints the tooltip of the hovered element, placed next to the mouse and kept inside
     /// the window (GPUI's `prepaint_tooltip`). The topmost request whose element still wants it wins.
     pub(crate) fn prepaint_tooltip(&mut self, cx: &mut App) -> Option<AnyElement> {
+        let mut winner = None;
         for ix in (0..self.next_frame.tooltip_requests.len()).rev() {
-            let Some(Some(request)) = self.next_frame.tooltip_requests.get(ix).cloned() else { continue };
+            let Some(request) = self.next_frame.tooltip_requests[ix].take() else { continue };
             let mut element = request.tooltip.view.clone().into_any_element();
             let mouse_position = request.tooltip.mouse_position;
             let tooltip_size = element.layout_as_root(AvailableSpace::min_size(), self, cx);
@@ -248,14 +257,16 @@ impl Window {
                     Pixels::ZERO.max(window_bounds.bottom() - bounds.size.height)
                 };
             }
-            if !(request.tooltip.check_visible_and_update)(bounds, self, cx) {
+            if !(request.tooltip.check_visible_and_update)(bounds, request.source_hitbox, self, cx) {
                 continue;
             }
             self.with_absolute_element_offset(bounds.origin, |window| element.prepaint(window, cx));
             self.tooltip_bounds = Some((request.id, bounds));
-            return Some(element);
+            winner = Some(element);
+            break;
         }
-        None
+        self.next_frame.tooltip_requests.clear();
+        winner
     }
 
     /// The deferred draws' order: by priority, ties in insertion order (a stable sort, as GPUI's).

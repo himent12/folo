@@ -48,8 +48,15 @@ impl FoloApp {
             cx.notify();
         }
         // A scroll thumb being dragged: move the content by the thumb's travel ratio.
-        if let Some((handle, y0, off0)) = self.scroll_drag.as_ref() {
-            if let Some(g) = crate::ui::ThumbGeo::of(handle) {
+        if self.scroll_drag.is_some() {
+            if ev.pressed_button != Some(MouseButton::Left) {
+                self.scroll_drag = None;
+                cx.notify();
+                return;
+            }
+            if let Some((handle, y0, off0)) = self.scroll_drag.as_ref()
+                && let Some(g) = crate::ui::ThumbGeo::of(handle)
+            {
                 let travel = (g.h - g.thumb).max(px(1.));
                 let to = (*off0 + (ev.position.y - *y0) * (g.max / travel)).clamp(px(0.), g.max);
                 handle.set_offset(point(handle.offset().x, -to));
@@ -58,7 +65,19 @@ impl FoloApp {
             return;
         }
         let Some(drag) = self.drag.as_ref() else { return };
+        if ev.pressed_button != Some(MouseButton::Left) {
+            if let Some(d) = self.drag.take() {
+                if d.id == "play-iou" {
+                    self.run_predict(cx);
+                }
+                cx.notify();
+            }
+            return;
+        }
         let Some(b) = self.slider_bounds.borrow().get(drag.id).copied() else { return };
+        if b.size.width <= px(0.) {
+            return;
+        }
         let frac = ((ev.position.x - b.left()) / b.size.width).clamp(0.0, 1.0);
         let id = drag.id;
         self.set_slider(id, frac, cx);

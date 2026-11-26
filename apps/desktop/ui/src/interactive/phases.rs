@@ -162,12 +162,8 @@ impl Interactivity {
                     if state.clicked_state.is_some() {
                         self.active = Some(clicked.element);
                     }
-                    if let Some(active_tooltip) = state.active_tooltip.as_ref() {
-                        if self.tooltip_builder.is_some() {
-                            self.tooltip_id = tooltip::set_tooltip_on_window(active_tooltip, window);
-                        } else {
-                            state.active_tooltip.take();
-                        }
+                    if self.tooltip_builder.is_none() {
+                        state.active_tooltip.take();
                     }
                 }
 
@@ -176,6 +172,16 @@ impl Interactivity {
                     window.with_content_mask(style.overflow_mask(bounds, window.rem_size()), |window| {
                         let hitbox = (self.should_insert_hitbox(&style) || has_active_click)
                             .then(|| window.insert_hitbox(bounds, self.hitbox_behavior));
+                        if self.tooltip_builder.is_some()
+                            && let Some(active_tooltip) =
+                                element_state.as_ref().and_then(|state| state.active_tooltip.as_ref())
+                        {
+                            self.tooltip_id = tooltip::set_tooltip_on_window(
+                                active_tooltip,
+                                hitbox.as_ref().map(|h| h.id),
+                                window,
+                            );
+                        }
                         let scroll_offset = self.clamp_scroll_position(bounds, &style, window);
                         f(&style, scroll_offset, hitbox, window, cx)
                     })
@@ -231,7 +237,9 @@ impl Interactivity {
         let mut scroll_to_bottom = false;
         if let Some(state) = handle_state.as_deref_mut() {
             state.overflow = style.overflow;
+            state.bounds = bounds;
             scroll_to_bottom = std::mem::take(&mut state.scroll_to_bottom);
+            state.scroll_to_active_item();
         }
         let padding = style.padding.to_pixels(bounds.size.into(), window.rem_size());
         let padding_size = size(padding.left + padding.right, padding.top + padding.bottom);
@@ -247,7 +255,6 @@ impl Interactivity {
             if scroll_to_bottom { -scroll_max.height } else { offset.y.clamp(-scroll_max.height, px(0.)) };
         if let Some(mut state) = handle_state {
             state.max_offset = scroll_max;
-            state.bounds = bounds;
         }
         *offset
     }

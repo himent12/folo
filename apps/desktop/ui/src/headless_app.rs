@@ -255,4 +255,16 @@ impl HeadlessApp {
             })
             .expect("resize_window: the window is not open");
     }
+
+    /// Delivers a platform window hover-status change (e.g. cursor leaving or re-entering `window`).
+    #[track_caller]
+    pub fn set_window_hovered(&mut self, window: AnyWindowHandle, hovered: bool) {
+        self.app
+            .update(|cx| {
+                cx.update_window(window, |_, window, cx| {
+                    window.on_hover_status_change(hovered, cx);
+                })
+            })
+            .expect("set_window_hovered: the window is not open");
+    }
 }

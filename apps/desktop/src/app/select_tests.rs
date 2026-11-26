@@ -135,3 +135,33 @@ fn a_class_filter_stays_with_its_dataset() {
     press(&mut app, window, "enter");
     assert_eq!(class_filter(&mut app, window), None, "by keys");
 }
+
+/// Opening a long select whose active option sits below the popup's max height scrolls that option
+/// into view on the very first frame it mounts (via `ScrollHandle::scroll_to_item` resolving after
+/// layout in the same prepaint pass).
+#[test]
+fn opening_a_long_select_scrolls_chosen_option_into_view_on_first_frame() {
+    let (mut app, window) = open();
+    open_dataset(&mut app, window, Route::Dataset("ds_8f2c".into()));
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        let ds = this.store.dataset.get_mut("ds_8f2c").and_then(|l| l.ready_mut()).unwrap();
+        ds.classes = (0..25).map(|i| format!("cls_{i:02}")).collect();
+        // Option 0 is "All classes", so class 20 is option index 21 (far below the 260 px menu).
+        this.ds_class = Some(("ds_8f2c".into(), 20));
+        w.focus(&this.fh("ds-class", cx));
+        cx.notify();
+    });
+    app.frame(window.into());
+    press(&mut app, window, "enter");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.menu_open, Some("ds-class"));
+        assert_eq!(this.menu_hl, 21);
+        assert!(
+            f32::from(this.menu_scroll.offset().y) < 0.,
+            "chosen option 21 should scroll into view on the first open frame, got offset {:?}",
+            this.menu_scroll.offset()
+        );
+    });
+}

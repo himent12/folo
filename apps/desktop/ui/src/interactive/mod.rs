@@ -57,8 +57,9 @@ pub(crate) type KeyDownListener = Box<dyn Fn(&KeyDownEvent, DispatchPhase, &mut 
 pub(crate) type ActionListener = Box<dyn Fn(&dyn Any, DispatchPhase, &mut Window, &mut App)>;
 /// A drop listener (the dragged value as `Any`).
 pub(crate) type DropListener = Box<dyn Fn(&dyn Any, &mut Window, &mut App)>;
-/// Whether a shown tooltip is still wanted, given its bounds.
-pub(crate) type TooltipVisibility = Rc<dyn Fn(Bounds<Pixels>, &mut Window, &mut App) -> bool>;
+/// Whether a shown tooltip is still wanted, given its bounds and its source element's hitbox id.
+pub(crate) type TooltipVisibility =
+    Rc<dyn Fn(Bounds<Pixels>, Option<crate::HitboxId>, &mut Window, &mut App) -> bool>;
 /// Builds a tooltip view.
 pub(crate) type TooltipBuilder = Rc<dyn Fn(&mut Window, &mut App) -> AnyView>;
 

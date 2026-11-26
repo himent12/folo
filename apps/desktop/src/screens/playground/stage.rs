@@ -453,16 +453,19 @@ impl FoloApp {
                         cx.listener(|this, _, _, _| this.play_drag = None),
                     )
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
-                        if let Some((from, pan0)) = this.play_drag
-                            && ev.pressed_button == Some(folo_ui::MouseButton::Left)
-                            && this.play_zoom > 1.0
-                        {
-                            this.play_pan = (
-                                pan0.0 + f32::from(ev.position.x - from.x),
-                                pan0.1 + f32::from(ev.position.y - from.y),
-                            );
-                            cx.notify();
-                            return;
+                        if let Some((from, pan0)) = this.play_drag {
+                            if ev.pressed_button == Some(folo_ui::MouseButton::Left) {
+                                if this.play_zoom > 1.0 {
+                                    this.play_pan = (
+                                        pan0.0 + f32::from(ev.position.x - from.x),
+                                        pan0.1 + f32::from(ev.position.y - from.y),
+                                    );
+                                    cx.notify();
+                                    return;
+                                }
+                            } else {
+                                this.play_drag = None;
+                            }
                         }
                         let Some(b) = bounds_cell.get() else { return };
                         let (x, y) =

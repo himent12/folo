@@ -4,14 +4,15 @@ use std::sync::Arc;
 
 use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    ParentElement, RenderImage, ScrollWheelEvent, Styled, Window, canvas, div, px,
+    ParentElement, RenderImage, ScrollWheelEvent, StatefulInteractiveElement, Styled, Window, canvas, div,
+    px,
 };
 
 use crate::app::{FoloApp, act};
 use crate::store::ImgKind;
 use crate::theme::{Theme, radius, ty};
 use crate::ui::*;
-use crate::viz::{DrawBox, Fit, hit_box, image_rect, paint_image_with_boxes, to_image};
+use crate::viz::{DrawBox, Fit, hit_box, paint_image_with_boxes, to_image, zoom_about};
 
 impl FoloApp {
     #[allow(clippy::too_many_arguments)]
@@ -91,22 +92,22 @@ impl FoloApp {
                 let factor = (1.0 + dy * 0.0025).clamp(0.5, 2.0);
                 let new_zoom = (insp.zoom * factor).clamp(1.0, 12.0);
                 // Zoom about the cursor: keep the image point under it fixed.
-                let rect = image_rect(b, dims.0, dims.1, Fit::Contain, insp.zoom, insp.pan);
-                let (px_, py_) = (
-                    f32::from(ev.position.x - rect.left()) / f32::from(rect.size.width),
-                    f32::from(ev.position.y - rect.top()) / f32::from(rect.size.height),
-                );
-                let new_rect = image_rect(b, dims.0, dims.1, Fit::Contain, new_zoom, (0., 0.));
-                let want_x = f32::from(ev.position.x) - px_ * f32::from(new_rect.size.width);
-                let want_y = f32::from(ev.position.y) - py_ * f32::from(new_rect.size.height);
-                insp.pan = if new_zoom <= 1.0 {
-                    (0., 0.)
-                } else {
-                    (want_x - f32::from(new_rect.left()), want_y - f32::from(new_rect.top()))
-                };
+                insp.pan = zoom_about(b, dims, insp.zoom, insp.pan, ev.position, new_zoom);
                 insp.zoom = new_zoom;
+                insp.drag_from = None;
                 insp.focused_box = None;
                 cx.notify();
+            }))
+            .on_hover(cx.listener(|this, h: &bool, _, cx| {
+                if !*h
+                    && let Some(insp) = this.inspector.as_mut()
+                    && insp.hover_from_stage
+                {
+                    insp.hover_from_stage = false;
+                    if insp.hover_box.take().is_some() {
+                        cx.notify();
+                    }
+                }
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -129,9 +130,11 @@ impl FoloApp {
             )
             .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
                 let Some(insp) = this.inspector.as_mut() else { return };
-                if let Some((from, pan0)) = insp.drag_from
-                    && ev.pressed_button == Some(MouseButton::Left)
-                {
+                if insp.drag_from.is_some() && ev.pressed_button != Some(MouseButton::Left) {
+                    insp.drag_from = None;
+                    cx.notify();
+                }
+                if let Some((from, pan0)) = insp.drag_from {
                     if insp.zoom > 1.0 {
                         insp.pan = (
                             pan0.0 + f32::from(ev.position.x - from.x),
@@ -143,7 +146,8 @@ impl FoloApp {
                     return;
                 }
                 if !insp.boxes {
-                    if insp.hover_box.take().is_some() {
+                    if insp.hover_from_stage && insp.hover_box.take().is_some() {
+                        insp.hover_from_stage = false;
                         cx.notify();
                     }
                     return;
@@ -151,8 +155,9 @@ impl FoloApp {
                 let Some(b) = bounds_cell.get() else { return };
                 let (x, y) = to_image(b, dims, Fit::Contain, insp.zoom, insp.pan, ev.position);
                 let hit = hit_box(&hit_boxes, x, y);
-                if hit != insp.hover_box {
+                if hit != insp.hover_box || insp.hover_from_stage != hit.is_some() {
                     insp.hover_box = hit;
+                    insp.hover_from_stage = hit.is_some();
                     // The pointer moved over the image: hover leads again (not a keyboard
                     // focus left on a label row).
                     this.kb = false;

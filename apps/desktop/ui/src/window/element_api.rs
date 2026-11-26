@@ -297,9 +297,18 @@ impl Window {
 
     /// Asks for a tooltip this frame.
     pub fn set_tooltip(&mut self, tooltip: AnyTooltip) -> TooltipId {
+        self.set_tooltip_for(tooltip, None)
+    }
+
+    /// Asks for a tooltip this frame, bound to the source element's hitbox id.
+    pub(crate) fn set_tooltip_for(
+        &mut self,
+        tooltip: AnyTooltip,
+        source_hitbox: Option<HitboxId>,
+    ) -> TooltipId {
         let id = TooltipId(self.next_tooltip_id);
         self.next_tooltip_id = self.next_tooltip_id.wrapping_add(1);
-        self.next_frame.tooltip_requests.push(Some(TooltipRequest { id, tooltip }));
+        self.next_frame.tooltip_requests.push(Some(TooltipRequest { id, tooltip, source_hitbox }));
         id
     }
 

@@ -254,3 +254,57 @@ fn uniform_list_truncates_excess_rendered_items_without_panicking() {
     let scene = draw(&mut app, window);
     assert_eq!(painted_rows(&scene).len(), 2, "only visible_range.len() rows are laid out and painted");
 }
+
+#[test]
+fn div_scroll_handle_scrolls_on_first_frame_tracks_container_move_and_clears_empty_children() {
+    use std::cell::Cell;
+
+    use crate::{InteractiveElement, ScrollHandle, StatefulInteractiveElement};
+
+    let handle = ScrollHandle::new();
+    let count = Rc::new(Cell::new(10usize));
+    let top_margin = Rc::new(Cell::new(0.0f32));
+
+    // Request scroll-to-item BEFORE the scrollable container has ever been laid out.
+    handle.scroll_to_item(8);
+
+    let (mut app, window) = open({
+        let (handle, count, top_margin) = (handle.clone(), count.clone(), top_margin.clone());
+        move |_, _| {
+            let n = count.get();
+            div()
+                .size_full()
+                .child(
+                    div()
+                        .id("scroller")
+                        .mt(px(top_margin.get()))
+                        .w(px(100.))
+                        .h(px(60.))
+                        .overflow_y_scroll()
+                        .track_scroll(&handle)
+                        .children((0..n).map(|ix| div().h(px(20.)).w_full().bg(rgb(ix as u32 + 1)))),
+                )
+                .into_any_element()
+        }
+    });
+
+    // Frame 1: child 8 (y = 160..180) is scrolled into the 60 px viewport on the very first draw.
+    draw(&mut app, window);
+    assert_eq!(handle.children_count(), 10);
+    assert_eq!(handle.offset().y, px(-120.), "item 8 bottom (180) aligns with viewport bottom (60)");
+
+    // Frame 2: shifting the container down by 50 px updates `bounds` BEFORE resolving scroll_to_item(0).
+    top_margin.set(50.);
+    handle.scroll_to_item(0);
+    app.update(|cx| cx.refresh_windows());
+    draw(&mut app, window);
+    assert_eq!(handle.offset().y, px(0.), "item 0 scrolls to top using the moved container's bounds");
+
+    // Frame 3: emptying all children clears stale child_bounds instead of retaining the old 10 entries.
+    count.set(0);
+    app.update(|cx| cx.refresh_windows());
+    draw(&mut app, window);
+    assert_eq!(handle.children_count(), 0);
+    assert!(handle.bounds_for_item(0).is_none());
+    assert_eq!(handle.offset().y, px(0.));
+}

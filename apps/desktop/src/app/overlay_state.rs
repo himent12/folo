@@ -244,6 +244,7 @@ impl FoloApp {
             pan: (0., 0.),
             drag_from: None,
             hover_box: None,
+            hover_from_stage: false,
             focused_box: None,
             boxes: true,
             labels: true,

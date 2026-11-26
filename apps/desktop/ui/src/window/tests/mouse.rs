@@ -874,3 +874,119 @@ fn same_frame_mouse_down_and_up_does_not_stick_active_style() {
     assert_eq!(quads_of(&mut app, window, color(1)).len(), 1, "active style must not stick");
     assert!(quads_of(&mut app, window, color(3)).is_empty());
 }
+
+#[test]
+fn tooltip_hides_when_occluded_or_moved_and_pending_timer_respects_occlusion() {
+    use std::cell::Cell;
+
+    let occluded = Rc::new(Cell::new(false));
+    let left_offset = Rc::new(Cell::new(0.0f32));
+    let drops = Rc::new(Cell::new(0u32));
+    let (mut app, window) = open(size(px(300.), px(200.)), 1.0, {
+        let (occluded, left_offset, drops) = (occluded.clone(), left_offset.clone(), drops.clone());
+        move |_, _| {
+            let drops = drops.clone();
+            div()
+                .size_full()
+                .child(div().id("tipped").ml(px(left_offset.get())).w(px(50.)).h(px(20.)).tooltip(
+                    move |_, cx| {
+                        let drops = drops.clone();
+                        cx.new(|_| Tip(drops)).into()
+                    },
+                ))
+                .children(occluded.get().then(|| div().absolute().top_0().left_0().size_full().occlude()))
+                .into_any_element()
+        }
+    });
+
+    // 1. An already-visible tooltip hides on the next frame when an `.occlude()` overlay mounts
+    //    above its source element, with no mouse movement.
+    show_tip(&mut app, window);
+    occluded.set(true);
+    with_window(&mut app, window, |w, _| w.refresh());
+    app.frame(window);
+    app.run_until_idle();
+    assert!(quads_of(&mut app, window, color(9)).is_empty(), "occluded tooltip must hide immediately");
+    assert_eq!(drops.get(), 1, "hidden tooltip view is dropped");
+
+    // 2. A pending tooltip timer does not display if an `.occlude()` overlay mounts before the
+    //    delay elapses.
+    occluded.set(false);
+    with_window(&mut app, window, |w, _| w.refresh());
+    app.frame(window);
+    mouse_move(&mut app, window, 200., 150.);
+    app.frame(window);
+    mouse_move(&mut app, window, 10., 10.);
+    app.frame(window);
+    app.advance_clock(Duration::from_millis(250));
+    occluded.set(true);
+    with_window(&mut app, window, |w, _| w.refresh());
+    app.frame(window);
+    app.advance_clock(Duration::from_millis(300));
+    app.frame(window);
+    app.run_until_idle();
+    assert!(quads_of(&mut app, window, color(9)).is_empty(), "occluded pending tooltip must not appear");
+    assert_eq!(drops.get(), 1, "no tooltip view built while occluded");
+
+    // 3. Moving the hovered element out from under a stationary pointer hides its tooltip.
+    occluded.set(false);
+    with_window(&mut app, window, |w, _| w.refresh());
+    app.frame(window);
+    mouse_move(&mut app, window, 200., 150.);
+    app.frame(window);
+    show_tip(&mut app, window);
+    left_offset.set(120.);
+    with_window(&mut app, window, |w, _| w.refresh());
+    app.frame(window);
+    app.run_until_idle();
+    assert!(quads_of(&mut app, window, color(9)).is_empty(), "moved source hides its tooltip");
+    assert_eq!(drops.get(), 2);
+}
+
+#[test]
+fn cursor_exit_while_dragging_preserves_pressed_button_and_clears_hover() {
+    let seen: Rc<RefCell<Vec<Option<MouseButton>>>> = Rc::default();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, {
+        let seen = seen.clone();
+        move |_, _| {
+            let seen = seen.clone();
+            div()
+                .size_full()
+                .child(div().id("btn").w(px(60.)).h(px(30.)).bg(color(1)).hover(|s| s.bg(color(2))))
+                .child(
+                    crate::canvas(
+                        |_, _, _| {},
+                        move |_, (), window, _| {
+                            let seen = seen.clone();
+                            window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, _| {
+                                if phase == crate::DispatchPhase::Capture {
+                                    seen.borrow_mut().push(ev.pressed_button);
+                                }
+                            });
+                        },
+                    )
+                    .size_0(),
+                )
+                .into_any_element()
+        }
+    });
+
+    mouse_move(&mut app, window, 10., 10.);
+    mouse_down(&mut app, window, 10., 10.);
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(2)).len(), 1, "hovered before exit");
+
+    // Simulate cursor exit while Left is still held (winit CursorLeft -> hover_status_change(false)).
+    seen.borrow_mut().clear();
+    with_window(&mut app, window, |w, cx| w.on_hover_status_change(false, cx));
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(1)).len(), 1, "hover style cleared on exit");
+    assert_eq!(*seen.borrow(), vec![Some(MouseButton::Left)], "synthetic exit move keeps Left pressed");
+
+    // Re-entering and releasing Left updates pressed state so subsequent exit reports None.
+    with_window(&mut app, window, |w, cx| w.on_hover_status_change(true, cx));
+    mouse_up(&mut app, window, 10., 10.);
+    seen.borrow_mut().clear();
+    with_window(&mut app, window, |w, cx| w.on_hover_status_change(false, cx));
+    assert_eq!(*seen.borrow(), vec![None], "after release, exit move reports no pressed button");
+}
