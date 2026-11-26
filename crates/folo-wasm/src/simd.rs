@@ -240,10 +240,12 @@ fn vaccum_u8_into_u32(row: &[u8], col_sum: &mut [u32]) {
 }
 
 fn box_hreduce_rgba32(col_sum: &[u32], dst: &mut [u8], w: usize, pw: usize, fx: usize, ny: u32) {
+    debug_assert!(fx >= 1 && ny >= 1 && pw == w.div_ceil(fx));
     debug_assert_eq!(col_sum.len(), w * 4);
     debug_assert_eq!(dst.len(), pw * 4);
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    // SAFETY: `col_sum.len() == w * 4` and `dst.len() == pw * 4`.
+    // SAFETY: `fx >= 1`, `ny >= 1`, `pw == w.div_ceil(fx)`, `col_sum.len() == w * 4`, and `dst.len() == pw * 4`
+    // (all guaranteed by `box_downsample_rgba`).
     unsafe {
         wasm_simd::box_hreduce_rgba32_simd128(col_sum, dst, w, pw, fx, ny);
     }
@@ -738,12 +740,19 @@ mod tests {
             (321, 217, 96, false),
             (403, 299, 96, true),
             (515, 387, 96, false),
-            // Extreme aspect ratios (prefilter on one axis only: fx > 1, fy == 1 and fx == 1, fy > 1)
-            (257, 31, 96, true),
-            (31, 257, 96, true),
+            // Extreme aspect ratios (single-axis prefilter: [2, 1] and [1, 2])
+            (192, 9, 96, true),
+            (9, 192, 96, true),
             // Tiny 1x1
             (1, 1, 32, true),
         ];
+        // Verify the two single-axis cases truly exercise `[2, 1]` and `[1, 2]` box prefiltering.
+        let lb_x =
+            Letterbox::compute(192, 9, 96, 96, &LetterboxOptions { stride: Some(32), ..Default::default() });
+        assert_eq!(resize_plan(192, 9, lb_x.resized[0], lb_x.resized[1]).prefilter, [2, 1]);
+        let lb_y =
+            Letterbox::compute(9, 192, 96, 96, &LetterboxOptions { stride: Some(32), ..Default::default() });
+        assert_eq!(resize_plan(9, 192, lb_y.resized[0], lb_y.resized[1]).prefilter, [1, 2]);
         for (w, h, imgsz, rect) in cases {
             let rgba = pattern_rgba(w, h);
             let mut rgb = vec![0u8; (w * h * 3) as usize];

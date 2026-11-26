@@ -271,7 +271,7 @@ impl Default for CopyPasteConfig {
 
 /// Box-level Copy-Paste augmentation: selects donor boxes from `other` with probability `cfg.prob`, filters
 /// clipped floating-point donor boxes through `filter`, rejects any paste whose copied pixel rectangle overlaps
-/// an existing destination box by more than `cfg.max_ioa` (intersection over existing box area), copies the RGB
+/// an original host box in `s` by more than `cfg.max_ioa` (intersection over host box area), copies the RGB
 /// crop into `s` (horizontally mirrored via SIMD when `cfg.flip_lr` is true), and appends the exact (mirrored if
 /// `cfg.flip_lr`) floating-point box to `s.boxes`. Returns the number of boxes pasted.
 ///
@@ -303,7 +303,9 @@ pub fn copy_paste(
     }
     let (fw, fh) = (w as f32, h as f32);
     let stride = w as usize * 3;
-    let mut existing: Vec<[f32; 4]> = s.boxes.iter().map(|b| b.pixel_xyxy(w, h)).collect();
+    // Check occlusion only against original host boxes: overlapping or nested donor boxes from the same
+    // `other.image` share identical pixels in their overlap and do not occlude one another.
+    let host_boxes: Vec<[f32; 4]> = s.boxes.iter().map(|b| b.pixel_xyxy(w, h)).collect();
     let mut pasted = 0usize;
 
     for b in &other.boxes {
@@ -336,7 +338,7 @@ pub fn copy_paste(
         let dst_crop = [dx1 as f32, sy1 as f32, dx2 as f32, sy2 as f32];
 
         let mut occluded = false;
-        for &ex in &existing {
+        for &ex in &host_boxes {
             if !(ex[0].is_finite() && ex[1].is_finite() && ex[2].is_finite() && ex[3].is_finite()) {
                 continue;
             }
@@ -371,9 +373,7 @@ pub fn copy_paste(
         if cfg.flip_lr {
             new_box.cx = 1.0 - new_box.cx;
         }
-        let new_px = new_box.pixel_xyxy(w, h);
         s.boxes.push(new_box);
-        existing.push(new_px);
         pasted += 1;
     }
     pasted
@@ -649,6 +649,29 @@ mod tests {
                 && (px2 - 6.75).abs() < 1e-5
                 && (py2 - 6.75).abs() < 1e-5
         );
+
+        // Nested donor boxes from the same image do not occlude one another (both paste identical pixels).
+        let mut nested_dst = Sample { image: Image::new(64, 64, [0, 0, 0]), boxes: vec![] };
+        let mut nested_img = Image::new(64, 64, [0, 0, 0]);
+        nested_img.fill_rect(8, 8, 56, 56, [10, 20, 30]);
+        nested_img.fill_rect(16, 16, 48, 48, [40, 50, 60]);
+        let nested_donor = Sample {
+            image: nested_img,
+            boxes: vec![
+                BBox::from_pixel_xyxy(0, [8.0, 8.0, 56.0, 56.0], 64, 64),
+                BBox::from_pixel_xyxy(1, [16.0, 16.0, 48.0, 48.0], 64, 64),
+            ],
+        };
+        let n_nested = copy_paste(
+            &mut nested_dst,
+            &nested_donor,
+            &CopyPasteConfig { prob: 1.0, max_ioa: 0.3, flip_lr: false },
+            &BoxFilter::default(),
+            &mut Rng::new(3),
+        );
+        assert_eq!(n_nested, 2);
+        assert_eq!(nested_dst.boxes.len(), 2);
+        assert_eq!(nested_dst.image.pixel(24, 24), [40, 50, 60]);
 
         // NaN `max_ioa` / `prob` fails closed without modifying pixels or boxes.
         let mut guard_dst = tiny_dst.clone();
