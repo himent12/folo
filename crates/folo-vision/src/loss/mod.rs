@@ -54,6 +54,8 @@ mod tests_asl_poly;
 #[cfg(test)]
 mod tests_geom;
 #[cfg(test)]
+mod tests_inner_iou;
+#[cfg(test)]
 mod tests_math;
 #[cfg(test)]
 mod tests_nwd_wiou;
@@ -61,6 +63,8 @@ mod tests_nwd_wiou;
 mod tests_piou;
 #[cfg(test)]
 mod tests_siou_eiou;
+#[cfg(test)]
+mod tests_slide_loss;
 #[cfg(test)]
 mod tests_vfl_qfl;
 
@@ -71,11 +75,13 @@ pub use distill::{
     gt_verify_weights_cpu,
 };
 pub use terms::{
-    LossReduction, QflConfig, VflConfig, asymmetric_loss, ciou, eiou_loss, focaler_iou, focaler_iou_loss,
-    inner_ciou_loss, loss_with_assignment, mpdiou_loss, mpdiou_loss_with_scale, nwd_loss, nwd_loss_with_c,
-    piou_attention, piou_attention_f64, piou_loss, piou2_loss, poly1_bce_loss, poly1_focal_loss,
-    poly1_focal_loss_with_alpha, quality_focal_loss, rpiou_loss, saeiou_loss, shape_iou_loss, siou_loss,
-    varifocal_loss, wiou_v1_loss, wiou_v3_loss,
+    DEFAULT_SLIDE_DELTA, EmaSlideLoss, InnerIouBase, LossReduction, QflConfig, SlideLossConfig,
+    SlideWeightKind, VflConfig, asymmetric_loss, ciou, eiou_loss, focaler_iou, focaler_iou_loss,
+    inner_ciou_loss, inner_iou, inner_iou_loss, loss_with_assignment, mpdiou_loss, mpdiou_loss_with_scale,
+    nwd_loss, nwd_loss_with_c, piou_attention, piou_attention_f64, piou_loss, piou2_loss, poly1_bce_loss,
+    poly1_focal_loss, poly1_focal_loss_with_alpha, quality_focal_loss, rpiou_loss, saeiou_loss,
+    shape_iou_loss, siou_loss, slide_bce_loss, slide_reweight_loss, slide_weight, slide_weight_f64,
+    varifocal_loss, wiou_v1_loss, wiou_v3_loss, wrap_inner_iou_loss,
 };
 
 use crate::assign::TalConfig;
