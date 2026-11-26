@@ -535,7 +535,7 @@ export default function Playground() {
   const json = computed(() => {
     const h = hidden.get();
     const cls = classes.get();
-    const hiddenClasses = h.size ? [...h].sort((a, b) => a - b).map((c) => cls[c] ?? String(c)) : undefined;
+    const hiddenClasses = h.size ? [...h].sort((a, b) => a - b).map((c) => cls[c] ?? `class ${c}`) : undefined;
     return predictionJson(
       pred.get(),
       !!result.get(),

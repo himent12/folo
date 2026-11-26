@@ -149,6 +149,12 @@ describe("an entry's page", () => {
       flushSync();
       expect(scrollSpy).toHaveBeenCalledWith({ block: 'start' });
       expect(previewAnchor.contains(document.activeElement)).toBe(true);
+      // Changing Preview's own controls to a severity not graded in the heat table keeps .preview-jump in sync with Preview.
+      const ungradedSev = [...previewAnchor.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((r) => r.textContent?.trim() === '2')!;
+      expect(ungradedSev).not.toBeUndefined();
+      ungradedSev.click();
+      flushSync();
+      expect(jump.querySelector('[role="status"]')?.textContent).toMatch(/Preview: Distance · severity 2/);
       // Its charts announce a row at every stop.
       for (const s of speak('#self-labeling')) expect(s).toMatch(/^From [01]\.\d+ up: [\d,]+ labels?, \d+% right/);
       for (const s of speak('#calibration')) expect(s).toMatch(/\d/);

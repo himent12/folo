@@ -150,7 +150,7 @@ export function compareState() {
       shown
         .get()
         .filter((_, i) => !o[i])
-        .map((e) => ({ name: e.name, map: e.map50_95 ?? 0, ci: e.ci95 })),
+        .map((e) => ({ name: labelOf(e), map: e.map50_95 ?? 0, ci: e.ci95 })),
     );
   });
 

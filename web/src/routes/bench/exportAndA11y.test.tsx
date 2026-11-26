@@ -483,5 +483,21 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     const spoken = dots.querySelector('[aria-live]')?.textContent ?? '';
     expect(spoken).toContain('fasteners-s-v1 · score ');
     expect(spoken).toContain('fasteners-s-v1 · earlier version');
+
+    // Two current-fingerprint entries with the same name and separated intervals use disambiguated labels in the mAP verdict.
+    view?.unmount();
+    view = undefined;
+    const origEntries = hub.api.benchEntries.bind(hub.api);
+    vi.spyOn(hub.api, 'benchEntries').mockImplementation(async (id, s) => {
+      const list = await origEntries(id, s);
+      return list.map((e) =>
+        e.id === 'be_f102' ? { ...e, name: 'fasteners-s-v1', map50_95: 0.3, ci95: [0.25, 0.35] as [number, number] } : e,
+      );
+    });
+    mountRoute(BenchCompare, '#/benchmarks/bn_3c90/compare?entries=be_f101,be_f102');
+    await settle(18);
+    const verdictText = target.querySelector('.verdict')?.textContent ?? '';
+    expect(verdictText).toContain('fasteners-s-v1 · score ');
+    expect((verdictText.match(/fasteners-s-v1 · score /g) ?? []).length).toBe(2);
   });
 });

@@ -253,7 +253,7 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
         {props.catalog ? (
           <div class="preview-jump">
             <span class="pj-text" role="status" aria-live="polite">
-              Preview: <span class="pj-val">{nameOf(sel.get().condition)}</span> · severity <span class="num">{sel.get().severity}</span>
+              Preview: <span class="pj-val">{nameOf(previewCond.get() || sel.get().condition)}</span> · severity <span class="num">{previewSev.get()}</span>
             </span>
             <Button size="sm" variant="ghost" iconRight={ChevronDown} onclick={(e) => jumpToPreview(e.detail === 0)}>
               View preview
