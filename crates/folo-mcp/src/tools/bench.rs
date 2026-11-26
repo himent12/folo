@@ -304,6 +304,10 @@ fn entry_summary(r: &BenchEntryState) -> String {
         (None, BenchEntryStatus::Failed) => {
             format!("{head} failed: {}", short(r.error.as_deref().unwrap_or("no reason given"), 200))
         }
+        (None, BenchEntryStatus::Done) => match &r.hint {
+            Some(h) => format!("{head} done: {}", short(h, 200)),
+            None => format!("{head} done"),
+        },
         (None, status) if status.is_active() => {
             format!(
                 "{head} {}: {}/{} images; bench_entry with wait follows it",

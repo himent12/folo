@@ -96,6 +96,25 @@ pub fn describe_tools() -> serde_json::Value {
     tools::describe()
 }
 
+/// Opens the embedded [`RealStore`] configured by `opts`, skipping `Benches::open` when `--confine` refuses every
+/// benchmark tool.
+pub(crate) fn open_real_store(opts: &Options) -> RealStore {
+    let store = if opts.confine {
+        RealStore::open_without_benches(opts.data_dir.clone())
+    } else {
+        RealStore::open(opts.data_dir.clone())
+    };
+    let mut store = store.device(opts.device.clone());
+    if let Some(dir) = &opts.published_weights {
+        store = store.published_weights(dir);
+    }
+    // Test support: how long a dataset's index is trusted before its files are looked at again (5 s).
+    if let Some(ms) = std::env::var("FOLO_DATASET_RECHECK_MS").ok().and_then(|v| v.parse().ok()) {
+        store = store.recheck_every(std::time::Duration::from_millis(ms));
+    }
+    store
+}
+
 /// Builds the server for `backend`.
 pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
     // With --confine, the dataset reader refuses files outside the data dir (embedded mode; in proxy mode
@@ -105,17 +124,7 @@ pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
         confine::install_read_guard(&policy).map_err(|e| e.body.message)?;
     }
     Ok(match backend {
-        Backend::Real => {
-            let mut store = RealStore::open(opts.data_dir.clone()).device(opts.device.clone());
-            if let Some(dir) = &opts.published_weights {
-                store = store.published_weights(dir);
-            }
-            // Test support: how long a dataset's index is trusted before its files are looked at again (5 s).
-            if let Some(ms) = std::env::var("FOLO_DATASET_RECHECK_MS").ok().and_then(|v| v.parse().ok()) {
-                store = store.recheck_every(std::time::Duration::from_millis(ms));
-            }
-            FoloMcp::new(Arc::new(store), None, opts)
-        }
+        Backend::Real => FoloMcp::new(Arc::new(open_real_store(&opts)), None, opts),
         Backend::Mock => FoloMcp::new(Arc::new(MockStore::new()), None, opts),
         Backend::Proxy { url, token } => {
             if !url.starts_with("http://") && !url.starts_with("https://") {

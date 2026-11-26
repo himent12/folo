@@ -376,3 +376,20 @@ fn confine_keeps_yolo_labels_inside() {
     assert_eq!(c.ok("list_datasets", json!({}))["total"], 0);
     c.finish();
 }
+
+/// With `--confine`, `folo mcp` refuses every benchmark tool and does not read or clean up `<data_dir>/bench/` at
+/// startup.
+#[test]
+fn confined_mcp_does_not_open_bench_folder_at_startup() {
+    let data = folo_test_support::TestDir::new("mcp-confine-no-bench-open");
+    // An incomplete benchmark folder (missing `bench.json`) would be deleted by `Benches::open`.
+    let canary = data.join("bench").join("bn_unfinished");
+    std::fs::create_dir_all(&canary).unwrap();
+
+    let mut c = spawn(&["--confine", "--data-dir", data.to_str().unwrap()], None);
+    init_old(&mut c);
+    c.tool_error("list_benchmarks", json!({}), "not_supported");
+    c.finish();
+
+    assert!(canary.is_dir(), "`folo mcp --confine` must not touch `<data_dir>/bench/` at startup");
+}

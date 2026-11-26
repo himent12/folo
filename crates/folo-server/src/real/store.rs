@@ -524,7 +524,14 @@ impl Store for RealStore {
     }
 
     fn benches(&self) -> Result<&Benches> {
-        Ok(&self.benches)
+        self.benches.as_ref().ok_or_else(|| {
+            Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_supported",
+                "vision benchmarks are not enabled on this store",
+            )
+            .hint("restart without --confine to use vision benchmarks")
+        })
     }
 
     fn check_run(&self, config: &TrainConfig) -> Result<()> {
@@ -611,7 +618,9 @@ impl Store for RealStore {
         // Cloud runs train on without this server; their threads let go of them (each logs it).
         self.cloud.shutdown();
         // Before the runs: a loop stops the run it follows.
-        self.benches.shutdown();
+        if let Some(benches) = &self.benches {
+            benches.shutdown();
+        }
         self.labeler.shutdown();
         self.runs.shutdown(Some(SHUTDOWN_WAIT));
         self.throughput.flush();

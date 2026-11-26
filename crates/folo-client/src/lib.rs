@@ -151,8 +151,12 @@ impl Client {
     /// [`Client::new`] with its own timeouts: `connect` to establish a connection, `request` for a whole call,
     /// body included.
     pub fn with_timeouts(base: &str, connect: Duration, request: Duration) -> Client {
+        // Never follow HTTP redirects: FOLO endpoints do not redirect, and following one would risk treating a
+        // proxy or captive portal's answer as the server's (or sending requests to an unexpected host).
         let agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            .max_redirects(0)
+            .max_redirects_will_error(false)
             .timeout_connect(Some(connect))
             .timeout_global(Some(request))
             .build()
@@ -662,5 +666,59 @@ mod tests {
         assert!(sink.bytes > 0 && sink.bytes < total, "stopped mid-stream at {} / {total}", sink.bytes);
 
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn redirects_are_not_followed() {
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // A second server that must never be contacted if redirects are disabled.
+        let target_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        let target_hit = Arc::new(AtomicBool::new(false));
+        let hit_clone = target_hit.clone();
+        let stop_target = Arc::new(AtomicBool::new(false));
+        let stop_clone = stop_target.clone();
+        let target_thread = std::thread::spawn(move || {
+            for stream in target_listener.incoming() {
+                if stop_clone.load(Ordering::Relaxed) {
+                    break;
+                }
+                if let Ok(mut s) = stream {
+                    hit_clone.store(true, Ordering::Relaxed);
+                    let mut buf = [0u8; 512];
+                    let _ = s.read(&mut buf);
+                    let _ = s.write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    );
+                }
+            }
+        });
+
+        let redirect_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let redirect_addr = redirect_listener.local_addr().unwrap();
+        let redirect_thread = std::thread::spawn(move || {
+            let (mut s, _) = redirect_listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/api/health\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = s.write_all(resp.as_bytes());
+        });
+
+        let client = Client::new(&format!("http://{redirect_addr}")).token("s3cret");
+        let err = client.get::<serde_json::Value>("/health").unwrap_err();
+        assert_eq!(err.status, Some(StatusCode::FOUND), "{err:?}");
+        assert_eq!(err.code(), NOT_FOLO, "{err:?}");
+        assert!(!err.is_transient(), "{err:?}");
+        assert!(!target_hit.load(Ordering::Relaxed), "redirect target must not be contacted");
+
+        redirect_thread.join().unwrap();
+        stop_target.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(target_addr);
+        target_thread.join().unwrap();
     }
 }

@@ -275,8 +275,10 @@ enum Fate {
     LoseAnswer,
     /// It never reaches the server.
     Never,
-    /// It never reaches the server, and this status and error code come back.
+    /// It never reaches the server, and this status and FOLO error code come back.
     Answer(u16, &'static str),
+    /// It never reaches the server, and this status with a non-FOLO plain-text body comes back.
+    Raw(u16, &'static str),
 }
 
 impl From<bool> for Fate {
@@ -335,9 +337,13 @@ impl Drop for Forwarder {
 }
 
 /// One request through: its head and body to `upstream` with `Connection: close` and the whole answer back, as its
-/// [`Fate`] says (the client sees its connection closed with no answer otherwise).
+/// [`Fate`] says (the client sees its connection closed with no answer otherwise). Every socket gets a read/write
+/// deadline so a stalled peer cannot hang the forwarder or its drop join.
 fn forward(mut client: std::net::TcpStream, upstream: &str, hook: &dyn Fn(&str) -> Fate) {
     use std::io::Write;
+    let io_timeout = Some(Duration::from_secs(10));
+    let _ = client.set_read_timeout(io_timeout);
+    let _ = client.set_write_timeout(io_timeout);
     let mut reader = BufReader::new(client.try_clone().unwrap());
     let (mut head, mut length) = (Vec::new(), 0usize);
     let mut first = String::new();
@@ -362,7 +368,9 @@ fn forward(mut client: std::net::TcpStream, upstream: &str, hook: &dyn Fn(&str) 
     }
     head.extend_from_slice(b"Connection: close\r\n\r\n");
     let mut body = vec![0; length];
-    reader.read_exact(&mut body).unwrap();
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
     let fate = hook(first.trim());
     if let Fate::Answer(status, code) = fate {
         let json = format!(r#"{{"error":{{"code":"{code}","message":"answered by the test","hint":null}}}}"#);
@@ -374,17 +382,32 @@ fn forward(mut client: std::net::TcpStream, upstream: &str, hook: &dyn Fn(&str) 
         let _ = client.shutdown(std::net::Shutdown::Both);
         return;
     }
+    if let Fate::Raw(status, text) = fate {
+        let _ = write!(
+            client,
+            "HTTP/1.1 {status} Test\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
+            text.len()
+        );
+        let _ = client.shutdown(std::net::Shutdown::Both);
+        return;
+    }
     if fate == Fate::Never {
         let _ = client.shutdown(std::net::Shutdown::Both);
         return;
     }
-    let mut server = std::net::TcpStream::connect(upstream).unwrap();
-    server.write_all(&head).unwrap();
-    server.write_all(&body).unwrap();
+    let Ok(mut server) = std::net::TcpStream::connect(upstream) else {
+        let _ = client.shutdown(std::net::Shutdown::Both);
+        return;
+    };
+    let _ = server.set_read_timeout(io_timeout);
+    let _ = server.set_write_timeout(io_timeout);
+    if server.write_all(&head).is_err() || server.write_all(&body).is_err() {
+        let _ = client.shutdown(std::net::Shutdown::Both);
+        return;
+    }
     let mut answer = Vec::new();
-    server.read_to_end(&mut answer).unwrap();
-    if fate == Fate::Pass {
-        client.write_all(&answer).unwrap();
+    if server.read_to_end(&mut answer).is_ok() && fate == Fate::Pass {
+        let _ = client.write_all(&answer);
     }
     let _ = client.shutdown(std::net::Shutdown::Both);
 }
@@ -741,4 +764,145 @@ fn a_lost_answer_to_the_stop_still_removes_the_entry() {
 #[test]
 fn predictions_go_in_parts_through_a_server() {
     with_server("mcp-bench-parts-http", |url, id, dir| parts(&http(url), id, dir));
+}
+
+/// Only parsed FOLO 4xx answers (excluding `409 bench_entry_not_open`) count as finish refusals: an unparsed 4xx
+/// from a proxy stops nothing, while a FOLO 409 with another code still cleans up the open entry.
+#[test]
+fn refused_distinguishes_unparsed_4xx_and_other_409_codes() {
+    with_server("mcp-bench-refused-rules", |url, id, dir| {
+        // 1. Proxy 404 HTML/plain body (unparsed -> bad_gateway): NOT treated as a FOLO refusal; stops nothing.
+        let (removals, count) = counter();
+        let via = Forwarder::new(url, move |line| {
+            count(line);
+            if line.starts_with("POST") && line.contains("/finish ") {
+                Fate::Raw(404, "<html>not found by proxy</html>")
+            } else {
+                Fate::Pass
+            }
+        });
+        let e = http(&via.url)
+            .submit_in(id, "proxy404".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        assert_eq!((e.status.as_u16(), e.body.code.as_str()), (404, folo_client::NOT_FOLO), "{e:?}");
+        assert_eq!(removals.load(Ordering::Relaxed), 0, "unparsed 4xx must not stop or delete");
+        let kept = http(url).entries(id).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].status, BenchEntryStatus::Running);
+        // Clean up the left-open entry before the next subcase.
+        http(url).stop_entry(id, &kept[0].id).unwrap();
+        http(url).delete_entry(id, &kept[0].id).unwrap();
+
+        // 2. Parsed FOLO 409 with a code other than `bench_entry_not_open`: IS a refusal; stops & removes entry.
+        let (removals, count) = counter();
+        let via = Forwarder::new(url, move |line| {
+            count(line);
+            if line.starts_with("POST") && line.contains("/finish ") {
+                Fate::Answer(409, "bench_frozen")
+            } else {
+                Fate::Pass
+            }
+        });
+        let e = http(&via.url)
+            .submit_in(id, "other409".into(), true, &whole_file(dir), THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        assert_eq!((e.status.as_u16(), e.body.code.as_str()), (409, "bench_frozen"), "{e:?}");
+        assert!(e.body.hint.as_deref().unwrap_or_default().contains("was removed"), "{e:?}");
+        assert_eq!(removals.load(Ordering::Relaxed), 2, "one stop and one delete");
+        assert!(http(url).entries(id).unwrap().is_empty());
+    });
+}
+
+/// After a lost finish, if recovery reads the entry `done` and the follow-up `/result` request fails, the upload
+/// still succeeds with `status: done` and a hint noting the score instead of failing the whole command.
+#[test]
+fn lost_finish_recovered_done_survives_failed_result_fetch() {
+    with_server("mcp-bench-lost-finish-result", |url, id, dir| {
+        let via = Forwarder::new(url, |line| {
+            if line.starts_with("POST") && line.contains("/finish ") {
+                Fate::LoseAnswer
+            } else if line.starts_with("GET") && line.contains("/result ") {
+                Fate::Never
+            } else {
+                Fate::Pass
+            }
+        });
+        let who = Contestant::Predictions { path: whole_file(dir), scored: true };
+        let state =
+            http(&via.url).start_unless(id, who, Some("recovered".into()), &AtomicBool::new(false)).unwrap();
+        assert_eq!(state.status, BenchEntryStatus::Done, "{state:?}");
+        assert!(state.result.is_none(), "detailed result was unavailable");
+        let hint = state.hint.as_deref().unwrap_or_default();
+        assert!(hint.contains("was scored") && hint.contains("score "), "{hint}");
+    });
+}
+
+/// Ctrl+C set while a blocked reader returns a blank line stops before starting another read.
+#[test]
+fn interrupt_during_blank_line_stops_before_next_read() {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+
+    struct BlankPipe {
+        reads: Arc<AtomicUsize>,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl Read for BlankPipe {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.reads.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(n, 0, "must not start a second read after Ctrl+C on a blank line");
+            self.stop.store(true, Ordering::Relaxed);
+            buf[0] = b'\n';
+            Ok(1)
+        }
+    }
+
+    let reads = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader = BufReader::new(BlankPipe { reads: reads.clone(), stop: stop.clone() });
+    let mut it = records_of_unless(reader, "pipe".into(), Some(&stop));
+    let err = it.next().unwrap().unwrap_err();
+    assert_eq!(err.body.code, "interrupted", "{err:?}");
+    assert_eq!(reads.load(Ordering::Relaxed), 1);
+}
+
+/// `left()` names `queued` and `stopping` accurately instead of calling them "open or being scored".
+#[test]
+fn left_hint_names_each_status_accurately() {
+    let mut entry = BenchEntry {
+        id: "be_1".into(),
+        bench_id: "bn_1".into(),
+        name: "m".into(),
+        contestant: BenchContestant::External,
+        status: BenchEntryStatus::Running,
+        created: String::new(),
+        finished: None,
+        images: 4,
+        conditions: false,
+        scored: true,
+        fingerprint: String::new(),
+        progress: folo_api::BenchProgress { done: 0, total: 4, condition: None, severity: None },
+        score: None,
+        map50_95: None,
+        ci95: None,
+        conditions_run: 0,
+        speed: None,
+        usage: None,
+        missing_classes: vec![],
+        error: None,
+        hint: None,
+    };
+    for (status, expected) in [
+        (BenchEntryStatus::Running, "it is open or being scored"),
+        (BenchEntryStatus::Queued, "it is queued"),
+        (BenchEntryStatus::Stopping, "it is stopping"),
+        (BenchEntryStatus::Done, "it is done"),
+        (BenchEntryStatus::Failed, "it is failed"),
+        (BenchEntryStatus::Stopped, "it is stopped"),
+    ] {
+        entry.status = status;
+        let text = left(&named(&entry), &entry);
+        assert!(text.contains(expected), "{status:?} -> {text}");
+    }
 }

@@ -239,7 +239,7 @@ pub struct RealStore {
     uploads: Arc<Uploads>,
     cloud: Cloud,
     labeler: Labeler,
-    benches: Benches,
+    benches: Option<Benches>,
 }
 
 impl RealStore {
@@ -268,7 +268,13 @@ impl RealStore {
     /// logged) but stay in the registry file. Cloud runs a previous process left are picked up
     /// ([`crate::cloud`]), with FOLO's providers ([`folo_cloud::providers`]).
     pub fn open(data_dir: PathBuf) -> RealStore {
-        RealStore::open_with_cloud(data_dir, folo_cloud::providers(), cloud::Tuning::default())
+        RealStore::open_inner(data_dir, folo_cloud::providers(), cloud::Tuning::default(), true)
+    }
+
+    /// [`RealStore::open`] without opening the `bench/` folder or starting the benchmark worker threads: used by
+    /// `folo mcp --confine`, which refuses every benchmark tool.
+    pub fn open_without_benches(data_dir: PathBuf) -> RealStore {
+        RealStore::open_inner(data_dir, folo_cloud::providers(), cloud::Tuning::default(), false)
     }
 
     /// [`RealStore::open`] with these cloud providers and timings. They are given at open because the cloud runs a
@@ -278,6 +284,15 @@ impl RealStore {
         data_dir: PathBuf,
         providers: Vec<Arc<dyn folo_cloud::Provider>>,
         tuning: cloud::Tuning,
+    ) -> RealStore {
+        RealStore::open_inner(data_dir, providers, tuning, true)
+    }
+
+    fn open_inner(
+        data_dir: PathBuf,
+        providers: Vec<Arc<dyn folo_cloud::Provider>>,
+        tuning: cloud::Tuning,
+        open_benches: bool,
     ) -> RealStore {
         let registry_unread = AtomicBool::new(false);
         let mut registry_cache = RegistryCache::default();
@@ -320,15 +335,15 @@ impl RealStore {
         let idle = Arc::new(GpuIdle::new());
         let labeler = Labeler::open(&data_dir);
         // Benchmark entries count as inference for the idle sweeper, as predictions do.
-        let guard: crate::bench::InferenceGuard = {
+        let benches = open_benches.then(|| {
             let idle = idle.clone();
-            Arc::new(move |device| {
+            let guard: crate::bench::InferenceGuard = Arc::new(move |device| {
                 let g = idle.using();
                 g.on(device);
                 Box::new(g)
-            })
-        };
-        let benches = Benches::open(&data_dir, Some(guard));
+            });
+            Benches::open(&data_dir, Some(guard))
+        });
         spawn_idle_sweeper(Arc::downgrade(&idle), Arc::downgrade(&predictors), Arc::downgrade(&runs));
         let uploads = Uploads::open(&data_dir);
         let cloud = Cloud::with(&data_dir, providers, tuning);
@@ -367,7 +382,9 @@ impl RealStore {
     /// CPU; `cpu`; `gpu:<n>`). Training uses each run's `TrainConfig.device`.
     pub fn device(mut self, device: impl Into<String>) -> RealStore {
         self.device = device.into();
-        self.benches.set_device(&self.device);
+        if let Some(benches) = &self.benches {
+            benches.set_device(&self.device);
+        }
         self
     }
 
@@ -405,7 +422,9 @@ impl RealStore {
     /// How long an open external benchmark entry waits for its next part before it expires (default 30 minutes;
     /// tests shorten it).
     pub fn bench_open_timeout(self, timeout: Duration) -> RealStore {
-        self.benches.set_open_timeout(timeout);
+        if let Some(benches) = &self.benches {
+            benches.set_open_timeout(timeout);
+        }
         self
     }
 
@@ -413,14 +432,18 @@ impl RealStore {
     /// that got no part for [`RealStore::bench_open_timeout`] by then expires. Nothing else calls it.
     #[doc(hidden)]
     pub fn expire_bench_entries_at(&self, now: std::time::Instant) {
-        self.benches.expire_open_entries_at(now);
+        if let Some(benches) = &self.benches {
+            benches.expire_open_entries_at(now);
+        }
     }
 
     /// Test support: while `on`, every benchmark model entry waits after its last pass, before it is graded (a
     /// stop can then land while it is graded). Nothing else turns it on.
     #[doc(hidden)]
     pub fn hold_bench_entries(&self, on: bool) {
-        self.benches.hold_entries(on);
+        if let Some(benches) = &self.benches {
+            benches.hold_entries(on);
+        }
     }
 
     /// Test support: replaces the labeling agents (Claude Code and Codex) with scripted ones, so tests exercise
@@ -457,7 +480,9 @@ impl RealStore {
 
 impl Drop for RealStore {
     fn drop(&mut self) {
-        self.benches.shutdown();
+        if let Some(benches) = &self.benches {
+            benches.shutdown();
+        }
         self.labeler.shutdown();
         self.runs.shutdown(None);
     }
