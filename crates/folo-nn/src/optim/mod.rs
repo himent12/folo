@@ -39,8 +39,10 @@ mod cautious;
 mod dispatch;
 mod grads;
 mod lion;
+mod lookahead;
 mod musgd;
 mod ortho;
+mod radam;
 mod schedulefree;
 mod sgd;
 pub(crate) mod simd;
@@ -63,11 +65,17 @@ pub use grads::{GradAccumulator, global_grad_norm};
 pub use lion::{
     LION_DEFAULT_BETA1, LION_DEFAULT_BETA2, LION_DEFAULT_LR, Lion, LionContract, LionGroupContract,
 };
+pub use lookahead::{LOOKAHEAD_DEFAULT_ALPHA, LOOKAHEAD_DEFAULT_K, Lookahead, LookaheadConfig};
 pub use musgd::{MUON_SCALE, MuSgd, MuSgdWeights, is_muon_group};
 pub use ortho::{
     MuonGeoMode, MuonOrtho, NS_COEFFS, NS_EPS, NS_STEPS, NS5_SCHEDULE, POLAR3_CS9_COEFFS, POLAR4_COEFFS,
     POLAR5_COEFFS, muon_scale, muon_scale_geo, orthogonalize, orthogonalize_many, orthogonalize_many_with,
     orthogonalize_with,
+};
+pub use radam::{
+    RADAM_DEFAULT_BETA1, RADAM_DEFAULT_BETA2, RADAM_DEFAULT_EPS, RADAM_DEFAULT_LR,
+    RADAM_DEFAULT_WEIGHT_DECAY, RAdam, RAdamConfig, RAdamContract, RAdamGroupContract, RAdamRectification,
+    radam_rectification,
 };
 pub use schedulefree::{
     SF_DEFAULT_BETA1, SF_DEFAULT_BETA2, SF_DEFAULT_EPS, SF_DEFAULT_LR, SF_DEFAULT_R,

@@ -9,8 +9,12 @@
 //! - `rmsnorm.rs`: [`RmsNorm`] (Root Mean Square Layer Normalization).
 //! - `regularize.rs`: [`DropPath`] (stochastic depth) and [`LayerScale`] (per-channel residual scaling).
 //! - `spectral_norm.rs`: [`SpectralNorm`], [`power_iteration`], [`spectral_norm`], and [`spectral_normalize`].
+//! - `attention.rs`: [`SqueezeExcitation`], [`Eca`] ([`eca_kernel_size`]), [`ChannelAttention`],
+//!   [`SpatialAttention`], and [`Cbam`].
+//! - `ws_conv.rs`: [`WeightStandardizedConv2d`] and [`standardize_weight`].
 //! - `container.rs`: [`Sequential`] and [`ModuleList`].
 
+mod attention;
 mod batchnorm;
 mod container;
 mod conv;
@@ -20,7 +24,11 @@ mod regularize;
 mod rmsnorm;
 mod simple;
 mod spectral_norm;
+#[cfg(test)]
+mod tests_attention;
+mod ws_conv;
 
+pub use attention::{Cbam, ChannelAttention, Eca, SpatialAttention, SqueezeExcitation, eca_kernel_size};
 pub use batchnorm::{BN_EPS, BN_MOMENTUM, BatchNorm2d, RunningStats};
 pub use container::{ModuleList, Sequential};
 pub use conv::{Conv2d, Conv2dConfig};
@@ -33,3 +41,4 @@ pub use spectral_norm::{
     PowerIterationResult, SPECTRAL_NORM_EPS, SpectralNorm, SpectralNormTarget, power_iteration,
     spectral_norm, spectral_normalize,
 };
+pub use ws_conv::{WS_CONV_DEFAULT_EPS, WeightStandardizedConv2d, standardize_weight};
