@@ -316,6 +316,8 @@ describe('Playground: confidence summary and quick JSON copy', () => {
     const errOverlay = await until(() => target.querySelector<HTMLElement>('.image-failed'), 'image unavailable overlay');
     expect(errOverlay.textContent).toContain('Image unavailable');
     expect(target.querySelectorAll('[data-box]').length).toBe(0);
+    // ZoomStage and its focusable HUD buttons must not remain mounted behind the opaque error overlay.
+    expect(target.querySelector('.zoom-stage, .zoom-hud')).toBeNull();
 
     // Retry succeeds and mounts the image with a cache-busting retry query param.
     errOverlay.querySelector<HTMLButtonElement>('button')!.click();
@@ -363,5 +365,26 @@ describe('Playground: confidence summary and quick JSON copy', () => {
 
     releaseDs();
     await until(() => target.querySelector('.stage img'), 'linked image loaded');
+
+    // Now navigate from the loaded image A to a link for image B with a vanished model + custom conf while B is blocked:
+    // model fallback must keep B and conf=0.6 instead of reverting the URL to A or dropping thresholds.
+    const page2 = await api.datasetImages(firstDs.id, { split: 'val', limit: 2 });
+    const secondImg = page2.images[1]!;
+    let releaseSecond!: () => void;
+    const gate2 = new Promise<void>((r) => (releaseSecond = r));
+    api.dataset = async (id: string) => {
+      await gate2;
+      return origDataset(id);
+    };
+    router.go(`/playground?model=m_vanished_2&dataset=${firstDs.id}&image=${secondImg.id}&split=val&at=1&conf=0.6`, { replace: true });
+    await until(() => {
+      const m = router.route.query.get('model');
+      return m && m !== 'm_vanished_2' ? m : null;
+    }, 'second vanished model fallback');
+    expect(router.route.query.get('dataset')).toBe(firstDs.id);
+    expect(router.route.query.get('image')).toBe(secondImg.id);
+    expect(router.route.query.get('conf')).toBe('0.6');
+    releaseSecond();
+    await until(() => target.querySelector('.stage img')?.getAttribute('alt')?.includes(secondImg.file), 'second linked image shown');
   });
 });

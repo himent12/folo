@@ -14,7 +14,7 @@
 // no data, and if it fails, its error. When the server answers
 // again after an outage (`hub.back`), a Resource that failed retries by itself and one holding data refreshes quietly.
 
-import { effect, signal, untrack } from 'fw';
+import { effect, onCleanup, signal, untrack } from 'fw';
 import { hub } from './index';
 import { abortError, copy, pollTogether, reuse, together } from './share';
 
@@ -177,8 +177,8 @@ export class Resource<T> {
         if (hub.mode !== 'connecting' && (this.error !== undefined || this.data !== undefined)) void this.refresh();
       });
     });
-    // Lifetime cleanup, independent of the fetch effect (which returns early while the hub reconnects).
-    effect(() => () => {
+    // Synchronous lifetime cleanup, so disposal before the first effect flush still marks `#disposed`.
+    onCleanup(() => {
       this.#disposed = true;
       this.#seq++;
       this.#ctrl?.abort();
@@ -250,6 +250,7 @@ export class Resource<T> {
 
   async #settle(promise: Promise<T>, ctrl: AbortController, quiet: boolean, poll = false): Promise<void> {
     if (this.#disposed) {
+      void promise.catch(() => {});
       ctrl.abort();
       return;
     }

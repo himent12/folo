@@ -467,13 +467,18 @@ describe('LineChart end labels and marks', () => {
     svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 60, clientY: 90, pointerType: 'mouse', bubbles: true }));
     flushSync();
     expect(target.querySelector('.legend .note')?.textContent).toBe('1');
-
-    // External banner shifts SVG down by 300px and right by 100px within the 200ms cache TTL: pointer at new position self-heals.
-    left = 100;
-    top = 300;
-    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 700, clientY: 390, pointerType: 'mouse', bubbles: true }));
+    // Second move while already hovering populates rectCache without flipping hasHover (so rectCache stays warm).
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 340, clientY: 90, pointerType: 'mouse', bubbles: true }));
     flushSync();
-    expect(target.querySelector('.legend .note')?.textContent).toBe('3');
+    expect(target.querySelector('.legend .note')?.textContent).toBe('2');
+
+    // External banner shifts SVG right by 200px and down by 300px within the 200ms cache TTL:
+    // clientX=260 is x=60 (point 1) in the shifted rect, vs x=260 (point 2) if stale rect were used.
+    left = 200;
+    top = 300;
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 260, clientY: 390, pointerType: 'mouse', bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.legend .note')?.textContent).toBe('1');
     unmount(c);
   });
 });

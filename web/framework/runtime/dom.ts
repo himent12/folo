@@ -342,7 +342,7 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
   let bEnd = b.length;
   let active: Focusable | null | undefined;
   const tail = a[aEnd - 1]!;
-  const after = tail.parentNode === parent ? tail.nextSibling : (marker ?? null);
+  const after = tail.parentNode === parent ? tail.nextSibling : marker?.parentNode === parent ? marker : null;
   const anchor = (idx: number): Node | null => {
     for (let j = idx; j < b.length; j++) if (b[j]!.parentNode === parent) return b[j]!;
     return after;

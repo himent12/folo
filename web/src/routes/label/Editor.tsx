@@ -159,12 +159,18 @@ export default function Editor(props: EditorProps) {
         status.clear();
         elsewhere.set(false);
         leaving.set(null);
-        removing.set(false);
+        removing.set(null);
+        removeStatus.clear();
         untrack(forget);
       }
       return;
     }
     if (!cur) return void hovered.set(null);
+    const rem = removing.peek();
+    if (rem && (rem.id !== cur.id || rem.jobId !== props.job.id)) {
+      removing.set(null);
+      removeStatus.clear();
+    }
     if (cur.id !== shownId) {
       shownId = cur.id;
       base.set(cur.boxes);
@@ -538,25 +544,32 @@ export default function Editor(props: EditorProps) {
   }
 
   // ---------- removing ----------
-  const removing = signal(false);
+  const removing = signal<{ jobId: string; id: string; file: string } | null>(null);
   const removeBusy = signal(false);
   const removeStatus = new DialogStatus();
-  async function remove() {
+  function openRemove() {
     const cur = img.peek();
-    if (!cur || removeBusy.peek()) return;
+    if (!cur) return;
+    removeStatus.clear();
+    removing.set({ jobId: props.job.id, id: cur.id, file: cur.file });
+  }
+  async function remove() {
+    const target = removing.peek();
+    if (!target || removeBusy.peek()) return;
     removeBusy.set(true);
     const i = idx.peek();
     const next = props.images[i + 1] ?? props.images[i - 1];
     try {
-      await hub.api.deleteLabelImage(props.job.id, cur.id);
-      props.live.drop(cur.id);
-      if (shownId === cur.id) {
+      await hub.api.deleteLabelImage(target.jobId, target.id);
+      if (props.job.id === target.jobId) props.live.drop(target.id);
+      if (shownId === target.id && props.job.id === target.jobId && open.peek()) {
         draft.set(base.peek());
-        removing.set(false);
-        props.onnavigate(next && next.id !== cur.id ? next.id : null);
+        removing.set(null);
+        props.onnavigate(next && next.id !== target.id ? next.id : null);
       }
     } catch (e) {
-      if (shownId === cur.id) removeStatus.error(e, 'Could not remove the image');
+      if (shownId === target.id && props.job.id === target.jobId && removing.peek()?.id === target.id)
+        removeStatus.error(e, 'Could not remove the image');
     } finally {
       removeBusy.set(false);
     }
@@ -687,9 +700,7 @@ export default function Editor(props: EditorProps) {
             <aside class="side">
               <section>
                 <div class="head">
-                  <h3>
-                    Boxes <span class="meta num">{draft.get().length}</span>
-                  </h3>
+                  <h3>Boxes <span class="meta num">{draft.get().length}</span></h3>
                   <span class="tools">
                     <span class:off={!canUndo.get() || !!locked.get()} use:tooltip={undoTip.get()}>
                       <Button variant="ghost" size="sm" icon={Undo} aria-label="Undo" disabled={!canUndo.get() || !!locked.get()} onclick={() => undo()} />
@@ -697,15 +708,11 @@ export default function Editor(props: EditorProps) {
                     <span class:off={!canRedo.get() || !!locked.get()} use:tooltip={redoTip.get()}>
                       <Button variant="ghost" size="sm" icon={Redo} aria-label="Redo" disabled={!canRedo.get() || !!locked.get()} onclick={() => undo(true)} />
                     </span>
-                    <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} data-add-box onclick={addBox}>
-                      Add box
-                    </Button>
+                    <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} data-add-box onclick={addBox}>Add box</Button>
                   </span>
                 </div>
                 {undoCount.get() > 0 || redoCount.get() > 0 ? (
-                  <p class="hist-depth num">
-                    History: {undoCount.get()} undo · {redoCount.get()} redo
-                  </p>
+                  <p class="hist-depth num">History: {undoCount.get()} undo · {redoCount.get()} redo</p>
                 ) : null}
                 {draft.get().length ? (
                   <ul class="boxes scroll-shade" onpointerleave={() => hovered.set(null)}>
@@ -742,9 +749,7 @@ export default function Editor(props: EditorProps) {
                         onchange={(v) => setClass(Number(v))}
                       />
                     </Field>
-                    <Button size="sm" icon={X} disabled={!!locked.get()} onclick={removeBox}>
-                      Delete box
-                    </Button>
+                    <Button size="sm" icon={X} disabled={!!locked.get()} onclick={removeBox}>Delete box</Button>
                   </div>
                 ) : null}
               </section>
@@ -760,17 +765,11 @@ export default function Editor(props: EditorProps) {
                     </Button>
                   )}
                 </Gate>
-                {askWhy.get() ? (
-                  <p class="why" data-gate-why>
-                    {askWhy.get()}
-                  </p>
-                ) : null}
+                {askWhy.get() ? <p class="why" data-gate-why>{askWhy.get()}</p> : null}
               </section>
 
               <section class="foot">
-                <Button variant="danger" icon={Trash} disabled={!!locked.get()} onclick={() => removing.set(true)}>
-                  Remove image
-                </Button>
+                <Button variant="danger" icon={Trash} disabled={!!locked.get()} onclick={openRemove}>Remove image</Button>
               </section>
             </aside>
           </div>
@@ -788,26 +787,23 @@ export default function Editor(props: EditorProps) {
         footer={() => (
           <>
             <Button onclick={() => answer('discard')}>Discard changes</Button>
-            <Button variant="primary" loading={saving.get()} onclick={() => answer('save')}>
-              Save
-            </Button>
+            <Button variant="primary" loading={saving.get()} onclick={() => answer('save')}>Save</Button>
           </>
         )}
       />
 
       <Dialog
-        bind:open={removing}
-        title={`Remove ${img.get()?.file ?? 'this image'}?`}
+        open={!!removing.get()}
+        title={`Remove ${removing.get()?.file ?? 'this image'}?`}
         description="Its labels go with it. An uploaded file is deleted; an image added from a folder stays on disk."
         size="sm"
         status={removeStatus}
         onbeforeclose={() => !removeBusy.peek()}
+        onclose={() => removing.set(null)}
         footer={() => (
           <>
-            <Button disabled={removeBusy.get()} onclick={() => removing.set(false)}>Keep it</Button>
-            <Button variant="destructive" icon={Trash} loading={removeBusy.get()} onclick={remove}>
-              Remove image
-            </Button>
+            <Button disabled={removeBusy.get()} onclick={() => removing.set(null)}>Keep it</Button>
+            <Button variant="destructive" icon={Trash} loading={removeBusy.get()} onclick={remove}>Remove image</Button>
           </>
         )}
       />

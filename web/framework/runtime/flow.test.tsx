@@ -968,13 +968,27 @@ describe('Switch / Key', () => {
     ));
     flush();
     expect(text(container)).toBe('a');
+    const bEl = container.querySelector('b') as HTMLElement & { $$leave?: unknown };
+    let leaveWrites = 0;
+    let leaveVal: unknown;
+    Object.defineProperty(bEl, '$$leave', {
+      configurable: true,
+      get: () => leaveVal,
+      set: (fn) => {
+        if (typeof fn === 'function') leaveWrites++;
+        leaveVal = fn;
+      },
+    });
+
     mode.set('throw');
     expect(() => flush()).toThrow('branch-boom');
-    // Leaving branch was armed on the first transition, then cleared before throwing; recovery runs the outro once.
+    expect(leaveWrites).toBe(1);
     expect(leaveCalls).toBe(0);
 
     mode.set('b');
     flush();
+    // Recovery must not re-invoke leaveBranch (which would overwrite $$leave a second time).
+    expect(leaveWrites).toBe(1);
     expect(leaveCalls).toBe(1);
     expect(text(container)).toBe('b');
     unmount();

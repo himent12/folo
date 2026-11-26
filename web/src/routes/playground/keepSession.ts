@@ -102,8 +102,8 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
    * A URL changed while the page is open: what it names replaces what is shown. A threshold it leaves out is the
    * default (playgroundPath writes only the others); a model or image it leaves out stays.
    */
-  function apply(u: FromUrl) {
-    if (u.model) k.pickModel(u.model);
+  function apply(u: FromUrl, skipModel = false) {
+    if (!skipModel && u.model) k.pickModel(u.model);
     k.conf.set(u.conf ?? DEFAULTS.conf);
     k.iou.set(u.iou ?? DEFAULTS.iou);
     k.maxDet.set(u.maxDet ?? DEFAULTS.maxDet);
@@ -120,7 +120,18 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
   // the path it wrote, once: the same path reached later by Back or Forward is followed (it may name other values).
   let wrote: string | null = null;
   let seen = String(router.route.query);
+  function syncFromRoute(skipModel = false) {
+    const r = router.route;
+    const qs = String(r.query);
+    if (r.name !== 'playground' || qs === seen) return;
+    seen = qs;
+    const own = `${r.path}${qs ? `?${qs}` : ''}` === wrote;
+    wrote = null;
+    if (!own) untrack(() => apply(fromUrl(r.query), skipModel));
+  }
   k.onModelUrl?.((id) => {
+    // Apply any pending external route change first (followVanished can run before our route effect).
+    syncFromRoute(true);
     const r = router.route;
     if (r.name !== 'playground') return;
     const liveLink = linking.peek();
@@ -132,13 +143,7 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
     router.go(path, { replace: true });
   });
   effect(() => {
-    const r = router.route;
-    const qs = String(r.query);
-    if (r.name !== 'playground' || qs === seen) return;
-    seen = qs;
-    const own = `${r.path}${qs ? `?${qs}` : ''}` === wrote;
-    wrote = null;
-    if (!own) untrack(() => apply(fromUrl(r.query)));
+    syncFromRoute();
   });
 
   // Kept as it changes.

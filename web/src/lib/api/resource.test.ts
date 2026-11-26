@@ -171,4 +171,49 @@ describe('Resource', () => {
     expect(r.data).toBe('ok');
     stop();
   });
+
+  it('marks disposed synchronously before first flush and consumes rejections if a refresh fetcher disposes and throws', async () => {
+    let calls = 0;
+    let r!: Resource<number>;
+    const stop = root(() => {
+      r = new Resource(() => {
+        calls++;
+        return Promise.resolve(1);
+      });
+    });
+    // Dispose BEFORE flushSync(): synchronous onCleanup must prevent later refresh()/invalidate() fetches.
+    stop();
+    await r.refresh();
+    await r.invalidate();
+    expect(calls).toBe(0);
+
+    // If a refresh fetcher synchronously disposes its owner and throws, no unhandled rejection escapes.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      let disposeNow!: () => void;
+      let throwOnSecond = false;
+      let r2!: Resource<number>;
+      disposeNow = root(() => {
+        r2 = new Resource(() => {
+          if (throwOnSecond) {
+            disposeNow();
+            throw new Error('disposed mid-refresh');
+          }
+          return Promise.resolve(7);
+        });
+      });
+      flushSync();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(r2.data).toBe(7);
+
+      throwOnSecond = true;
+      await r2.refresh();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
 });

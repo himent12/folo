@@ -305,25 +305,6 @@ export default function ImagePanel(props: ImagePanelProps) {
             />
           ) : props.dims ? (
             <>
-              <ZoomStage resetKey={sourceImageKey(props.source)}>
-                <DetectionView
-                  src={props.imageError ? null : props.src}
-                  width={props.dims.width}
-                  height={props.dims.height}
-                  boxes={props.pred && !props.imageError ? props.kept : []}
-                  truth={props.imageError ? [] : props.truthBoxes}
-                  classes={props.classes}
-                  labels={props.labels}
-                  scores={props.scores}
-                  only={props.only}
-                  active={props.activeIdx}
-                  selected={props.selectedIdx}
-                  onhover={(i) => hover.set(i === null ? null : (props.kept[i] ?? null))}
-                  onselect={props.pickFromImage}
-                  onload={props.onImageLoad}
-                  alt={props.sourceName}
-                />
-              </ZoomStage>
               {props.imageError ? (
                 <div class="image-failed" role="status">
                   <ImageOff size={18} strokeWidth={1.75} aria-hidden="true" />
@@ -334,7 +315,27 @@ export default function ImagePanel(props: ImagePanelProps) {
                     </Button>
                   ) : null}
                 </div>
-              ) : null}
+              ) : (
+                <ZoomStage resetKey={sourceImageKey(props.source)}>
+                  <DetectionView
+                    src={props.src}
+                    width={props.dims.width}
+                    height={props.dims.height}
+                    boxes={props.pred ? props.kept : []}
+                    truth={props.truthBoxes}
+                    classes={props.classes}
+                    labels={props.labels}
+                    scores={props.scores}
+                    only={props.only}
+                    active={props.activeIdx}
+                    selected={props.selectedIdx}
+                    onhover={(i) => hover.set(i === null ? null : (props.kept[i] ?? null))}
+                    onselect={props.pickFromImage}
+                    onload={props.onImageLoad}
+                    alt={props.sourceName}
+                  />
+                </ZoomStage>
+              )}
               {/* A failed prediction: the image steps back and says, in its own frame, why it has no boxes (the notice
                   above has the cause and the ways out), so it never reads as "nothing found". */}
               {props.notice === 'error' && !props.imageError ? (

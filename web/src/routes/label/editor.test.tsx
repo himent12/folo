@@ -705,4 +705,30 @@ describe('the labeling editor: reviewing', () => {
     flushSync();
     expect(removeDlg()).toBeUndefined();
   });
+
+  it('dismisses the Remove dialog instead of retargeting when URL switches images during pending delete', async () => {
+    await openEditor('1');
+    const del = deferred<void>();
+    vi.spyOn(hub.api, 'deleteLabelImage').mockReturnValue(del.promise);
+    click(inEditor('Remove image'));
+    const removeDlg = () =>
+      [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].find((d) => d.querySelector('h2')?.textContent?.startsWith('Remove '));
+    expect(removeDlg()?.querySelector('h2')?.textContent).toContain('0901');
+    click([...removeDlg()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Remove image'));
+
+    // Navigate to image 3 via URL while image 1 deletion is still pending: dialog must dismiss and not retarget.
+    router.go('/datasets/label/lb_7c21?image=3', { replace: true });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBe('3');
+    });
+    expect(removeDlg()).toBeUndefined();
+
+    // Settling image 1's delete must not navigate away from image 3.
+    del.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(router.route.query.get('image')).toBe('3');
+    expect(removeDlg()).toBeUndefined();
+  });
 });
