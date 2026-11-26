@@ -2,7 +2,7 @@
 // entries compared (from the URL), their results, their slots (hue and shape), the legend's highlight and every
 // derived table and series. Call it in the component's body: its effects and resources follow the component's life.
 
-import { computed, effect, signal, untrack } from 'fw';
+import { computed, effect, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { LiveBench } from '$lib/api/liveBench';
 import { Resource } from '$lib/api/resource';
@@ -63,17 +63,34 @@ export function compareState() {
     return { shown: all.shown.slice(0, COMPARE_MAX), missing: all.missing };
   });
   const shown = computed(() => picked.get().shown);
-  /** In-progress entries named in `?entries=` (running or queued): kept in the URL so they join when SSE finishes them. */
+  /** In-progress entries named in `?entries=` that have room to join when SSE finishes them (capped at COMPARE_MAX). */
   const pending = computed(() => {
-    const missing = new Set(picked.get().missing);
-    if (!missing.size) return [];
-    return live.entries.filter((e) => missing.has(e.id) && isEntryActive(e));
+    const room = Math.max(0, COMPARE_MAX - shown.get().length);
+    if (!room) return [];
+    const byId = new Map(live.entries.map((e) => [e.id, e]));
+    const out: BenchEntry[] = [];
+    for (const eid of picked.get().missing) {
+      const e = byId.get(eid);
+      if (e && isEntryActive(e)) {
+        out.push(e);
+        if (out.length >= room) break;
+      }
+    }
+    return out;
   });
-  /** Unavailable entry IDs pruned from `?entries=` after the benchmark's entries loaded, scoped to the comparison that produced them. */
+  const canAdd = computed(() => shown.get().length + pending.get().length < COMPARE_MAX);
+  /** Unavailable entry IDs pruned from `?entries=` after the benchmark's entries loaded, scoped to the comparison & history entry that produced them. */
   const dropped = signal<string[]>([]);
+  const missingCount = computed(() => new Set([...dropped.get(), ...picked.get().missing]).size);
   let prevCtx = untrack(() => `${hub.epoch}:${id.get()}`);
   let lastIdsKey = untrack(() => ids.get().join(','));
   let prunedKey: string | null = null;
+  onCleanup(
+    router.onEntry(() => {
+      prunedKey = null;
+      untrack(() => dropped.set([]));
+    }),
+  );
   effect(() => {
     const ctx = `${hub.epoch}:${id.get()}`;
     const key = ids.get().join(',');
@@ -99,7 +116,7 @@ export function compareState() {
     if (live.loading || live.error || !b || b.id !== id.get()) return;
     const missing = picked.get().missing;
     if (!missing.length) return;
-    const activeIds = new Set(pending.get().map((e) => e.id));
+    const activeIds = new Set(live.entries.filter(isEntryActive).map((e) => e.id));
     const unavailable = missing.filter((eid) => !activeIds.has(eid));
     if (!unavailable.length) return;
     const unavailableSet = new Set(unavailable);
@@ -195,9 +212,25 @@ export function compareState() {
       key === 'accuracy' ? shown.get().map((e, i) => (o[i] ? null : e.ci95)) : null,
     );
   };
+  const pendingIds = () => pending.peek().map((e) => e.id);
   const makeBaseline = (eid: string) => {
     const current = shown.peek().map((e) => e.id);
-    setIds([eid, ...current.filter((x) => x !== eid)]);
+    setIds([eid, ...current.filter((x) => x !== eid), ...pendingIds()]);
+  };
+  const rotateBaseline = () => {
+    const current = shown.peek().map((e) => e.id);
+    if (current.length < 2) return;
+    setIds([...current.slice(1), current[0]!, ...pendingIds()]);
+  };
+  const appendEntry = (eid: string): boolean => {
+    const current = shown.peek().map((e) => e.id);
+    const active = pendingIds();
+    if (current.length + active.length >= COMPARE_MAX || current.includes(eid) || active.includes(eid)) return false;
+    setIds([...current, eid, ...active]);
+    return true;
+  };
+  const dropShown = (eid: string) => {
+    setIds([...shown.peek().map((e) => e.id).filter((x) => x !== eid), ...pendingIds()]);
   };
 
   // ---- mAP intervals ----
@@ -273,9 +306,14 @@ export function compareState() {
     picked,
     shown,
     pending,
+    canAdd,
     dropped,
+    missingCount,
     results,
     setIds,
+    appendEntry,
+    dropShown,
+    rotateBaseline,
     candidates,
     slotOf,
     color,

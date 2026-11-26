@@ -270,7 +270,86 @@ describe('BenchCompare Escape coordination', () => {
     expect(target.querySelectorAll('.chips .chip')).toHaveLength(2);
   });
 
-  it('keeps an active running entry in ?entries= so it joins the comparison when SSE finishes it', async () => {
+  it('keeps an active running entry in ?entries= across baseline/add/remove edits so it joins when SSE finishes it', async () => {
+    const benches = await hub.api.benches();
+    let benchId = '';
+    let doneEntries: Awaited<ReturnType<typeof hub.api.benchEntries>> = [];
+    let runningEntry: Awaited<ReturnType<typeof hub.api.benchEntries>>[number] | undefined;
+    for (const candidate of benches) {
+      const all = await hub.api.benchEntries(candidate.id);
+      const done = all.filter((e) => e.status === 'done');
+      const running = all.find((e) => e.status === 'running' || e.status === 'queued');
+      if (done.length >= 4 && running) {
+        benchId = candidate.id;
+        doneEntries = done;
+        runningEntry = running;
+        break;
+      }
+    }
+    expect(doneEntries.length).toBeGreaterThanOrEqual(4);
+    expect(runningEntry).toBeTruthy();
+
+    let emitEntry: ((e: Awaited<ReturnType<typeof hub.api.benchEntries>>[number]) => void) | undefined;
+    const realEvents = hub.api.benchEvents.bind(hub.api);
+    vi.spyOn(hub.api, 'benchEvents').mockImplementation((id, handlers) => {
+      emitEntry = handlers.entry;
+      return realEvents(id, handlers);
+    });
+
+    const url = `#/benchmarks/${benchId}/compare?entries=${doneEntries[0]!.id},${doneEntries[1]!.id},${runningEntry!.id}`;
+    history.replaceState(history.state, '', url);
+    router.route = parse(url);
+    const go = vi.spyOn(router, 'go').mockImplementation((path) => {
+      router.route = parse(`#${path}`);
+    });
+
+    c = render(() => <BenchCompare />, target);
+    // Live region is already mounted during loading before any omission/status announcement.
+    expect(target.querySelector('[role="status"]')).not.toBeNull();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelectorAll('.chips .chip')).toHaveLength(2);
+      const pendingNote = target.querySelector<HTMLElement>('[data-pending-entries]');
+      if (!pendingNote) throw new Error('waiting for pending entry note');
+      expect(pendingNote.textContent).toContain(runningEntry!.name);
+    });
+    // Running entry must NOT be pruned from `?entries=` or reported as unavailable.
+    expect(go).not.toHaveBeenCalled();
+    expect(target.querySelector('[data-missing-entries]')).toBeNull();
+
+    // Rotating baseline via `B` preserves the running entry in `?entries=` and keeps the waiting notice.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(go).toHaveBeenLastCalledWith(`/benchmarks/${benchId}/compare?entries=${doneEntries[1]!.id},${doneEntries[0]!.id},${runningEntry!.id}`, { replace: true });
+    expect(target.querySelector('[data-pending-entries]')).not.toBeNull();
+
+    // Adding a 3rd finished entry fills all 4 slots (3 finished + 1 pending) and hides the adder while preserving runningEntry.
+    const adder = target.querySelector<HTMLSelectElement>('.add select')!;
+    adder.value = doneEntries[2]!.id;
+    adder.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(go).toHaveBeenLastCalledWith(
+      `/benchmarks/${benchId}/compare?entries=${doneEntries[1]!.id},${doneEntries[0]!.id},${doneEntries[2]!.id},${runningEntry!.id}`,
+      { replace: true },
+    );
+    expect(target.querySelector('.add select')).toBeNull();
+
+    // Removing one finished entry still preserves runningEntry in `?entries=`.
+    target.querySelector<HTMLButtonElement>('.chips .chip button.rm')!.click();
+    flushSync();
+    expect(go).toHaveBeenLastCalledWith(`/benchmarks/${benchId}/compare?entries=${doneEntries[0]!.id},${doneEntries[2]!.id},${runningEntry!.id}`, { replace: true });
+
+    // When SSE delivers the finished entry with a score, it joins the comparison automatically.
+    const finishedCopy = { ...doneEntries[0]!, id: runningEntry!.id, name: runningEntry!.name };
+    emitEntry?.(finishedCopy);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelectorAll('.chips .chip')).toHaveLength(3);
+      expect(target.querySelector('[data-pending-entries]')).toBeNull();
+    });
+  });
+
+  it('reports combined missing count in EmptyState for mixed running + unavailable entries and clears omission notice on Back history entry change', async () => {
     const benches = await hub.api.benches();
     let benchId = '';
     let doneEntries: Awaited<ReturnType<typeof hub.api.benchEntries>> = [];
@@ -289,39 +368,47 @@ describe('BenchCompare Escape coordination', () => {
     expect(doneEntries.length).toBeGreaterThanOrEqual(2);
     expect(runningEntry).toBeTruthy();
 
-    let emitEntry: ((e: Awaited<ReturnType<typeof hub.api.benchEntries>>[number]) => void) | undefined;
-    const realEvents = hub.api.benchEvents.bind(hub.api);
-    vi.spyOn(hub.api, 'benchEvents').mockImplementation((id, handlers) => {
-      emitEntry = handlers.entry;
-      return realEvents(id, handlers);
-    });
-
-    const url = `#/benchmarks/${benchId}/compare?entries=${doneEntries[0]!.id},${doneEntries[1]!.id},${runningEntry!.id}`;
+    // 1 finished + 1 running + 1 unavailable -> EmptyState must report 2 entries, plus show the pending notice.
+    const url = `#/benchmarks/${benchId}/compare?entries=${doneEntries[0]!.id},${runningEntry!.id},be_gone`;
     history.replaceState(history.state, '', url);
     router.route = parse(url);
-    const go = vi.spyOn(router, 'go').mockImplementation((path) => {
+    vi.spyOn(router, 'go').mockImplementation((path) => {
       router.route = parse(`#${path}`);
     });
 
     c = render(() => <BenchCompare />, target);
     await vi.waitFor(() => {
       flushSync();
-      expect(target.querySelectorAll('.chips .chip')).toHaveLength(2);
-      const pendingNote = target.querySelector<HTMLElement>('[data-pending-entries]');
-      if (!pendingNote) throw new Error('waiting for pending entry note');
-      expect(pendingNote.textContent).toContain(runningEntry!.name);
+      expect(target.textContent).toContain('2 entries in this link are');
+      expect(target.querySelector('[data-pending-entries]')?.textContent).toContain(runningEntry!.name);
     });
-    // Running entry must NOT be pruned from `?entries=` or reported as unavailable.
-    expect(go).not.toHaveBeenCalled();
-    expect(target.querySelector('[data-missing-entries]')).toBeNull();
+    c.unmount();
+    c = undefined;
+    vi.restoreAllMocks();
 
-    // When SSE delivers the finished entry with a score, it joins the comparison automatically.
-    const finishedCopy = { ...doneEntries[0]!, id: runningEntry!.id, name: runningEntry!.name };
-    emitEntry?.(finishedCopy);
+    // History entry move (Back to clean `?entries=A,B` after `?entries=A,B,be_gone` pruned to `?entries=A,B`):
+    // capture the onEntry listener to simulate traversing back to a clean history entry with identical parsed IDs.
+    let entryCb: ((e: { from: number; to: number; traverse: boolean }) => void) | undefined;
+    const realOnEntry = router.onEntry.bind(router);
+    vi.spyOn(router, 'onEntry').mockImplementation((fn) => {
+      entryCb = fn;
+      return realOnEntry(fn);
+    });
+    const url2 = `#/benchmarks/${benchId}/compare?entries=${doneEntries[0]!.id},${doneEntries[1]!.id},be_gone`;
+    history.replaceState(history.state, '', url2);
+    router.route = parse(url2);
+    vi.spyOn(router, 'go').mockImplementation((path) => {
+      router.route = parse(`#${path}`);
+    });
+
+    c = render(() => <BenchCompare />, target);
     await vi.waitFor(() => {
       flushSync();
-      expect(target.querySelectorAll('.chips .chip')).toHaveLength(3);
-      expect(target.querySelector('[data-pending-entries]')).toBeNull();
+      expect(target.querySelector('[data-missing-entries]')?.textContent).toContain('be_gone');
     });
+    // Back to original clean history entry with the same `?entries=A,B`: onEntry clears the stale notice.
+    entryCb?.({ from: 1, to: 0, traverse: true });
+    flushSync();
+    expect(target.querySelector('[data-missing-entries]')).toBeNull();
   });
 });
