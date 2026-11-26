@@ -26,6 +26,7 @@ import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
 import { pageCommands, type PageCommand } from '$lib/shell/pageCommands';
+import { gChord } from '$lib/shell/shortcuts';
 import { exportTableCsv, exportTableJson } from '$lib/tableExport';
 import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
@@ -239,16 +240,24 @@ export default function Benchmark() {
     selected.set([]);
     (document.getElementById(`bn-tab-${tab.peek()}`) ?? document.querySelector<HTMLElement>('h1[data-route-focus]'))?.focus();
   }
-  // Escape clears Compare selection before global Escape navigates back to /benchmarks.
+  // Escape clears Compare selection before global Escape navigates back to /benchmarks (never intercepting G-chord or popovers).
+  const hasOpenPopover = () => {
+    try {
+      return !!document.querySelector('[popover]:popover-open');
+    } catch {
+      return false;
+    }
+  };
   onDocument('keydown', (e) => {
-    if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isTyping(e)) return;
+    const onCheckbox = e.target instanceof HTMLInputElement && e.target.type === 'checkbox';
+    if (e.key !== 'Escape' || e.repeat || e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || (!onCheckbox && isTyping(e))) return;
     if (tab.peek() !== 'leaderboard' || !selected.peek().length) return;
-    if (document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"], #folo-tooltip[data-show], .info-pop.open')) return;
+    if (gChord.peek() || hasOpenPopover() || document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"], #folo-tooltip[data-show], .info-pop.open')) return;
     e.preventDefault();
     selected.set([]);
     queueMicrotask(() => {
       if (!document.activeElement || document.activeElement === document.body) {
-        (document.getElementById('bn-tab-leaderboard') ?? document.querySelector<HTMLElement>('h1[data-route-focus]'))?.focus();
+        document.querySelector<HTMLElement>('h1[data-route-focus]')?.focus();
       }
     });
   });

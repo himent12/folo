@@ -72,11 +72,9 @@ export default function DotRows(props: DotRowsProps) {
     else if (e.key === 'Home') j = 0;
     else if (e.key === 'End') j = rows.length - 1;
     else if (e.key === 'Escape') {
-      if (pointed.peek() !== null) {
-        e.preventDefault();
-        pointed.set(null);
-        spoken.set('');
-      }
+      if (i >= 0) e.preventDefault();
+      pointed.set(null);
+      spoken.set('');
       return;
     } else return;
     e.preventDefault();

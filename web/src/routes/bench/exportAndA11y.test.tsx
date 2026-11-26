@@ -6,6 +6,7 @@ import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { Bench, BenchEntry } from '$lib/api/types';
 import { parse, router } from '$lib/router';
+import { gChord } from '$lib/shell/shortcuts';
 import { toast } from '$lib/ui/toast';
 import Benchmark from '../Benchmark';
 import BenchCompare from '../BenchCompare';
@@ -320,9 +321,13 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     expect(document.activeElement?.getAttribute('data-entry-id')).toBe(e3!.id);
     expect(target.querySelector('.sr-only[role="status"]')?.textContent).toContain(`Added ${e3!.name} to comparison.`);
 
-    // Phone baseline picker in SideBySide changes the baseline entry and announces it.
+    // Phone baseline picker in SideBySide disambiguates colliding entry names (be_f100 & be_f101 are both `fasteners-s-v1`), changes baseline, and announces it.
     const baseSelect = target.querySelector<HTMLSelectElement>('.sbs-base select')!;
     expect(baseSelect).not.toBeNull();
+    const baseOptionLabels = [...baseSelect.options].map((o) => o.textContent);
+    expect(baseOptionLabels.some((l) => l?.includes('fasteners-s-v1 · earlier version'))).toBe(true);
+    expect(baseOptionLabels.some((l) => l?.includes('fasteners-s-v1 · score'))).toBe(true);
+    expect(new Set(baseOptionLabels).size).toBe(baseOptionLabels.length);
     expect(baseSelect.value).toBe(e0!.id);
     baseSelect.value = e2!.id;
     baseSelect.dispatchEvent(new Event('change', { bubbles: true }));
@@ -365,7 +370,7 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     expect(firstPin.getAttribute('aria-pressed')).toBe('false');
   });
 
-  it('clears Benchmark leaderboard Compare selection on Escape before navigating away and restores focus if Clear unmounts', async () => {
+  it('clears Benchmark leaderboard Compare selection on Escape (including from checkboxes), respects popovers & G-chords, and restores focus to h1[data-route-focus]', async () => {
     mountRoute(Benchmark, '#/benchmarks/bn_3c90');
     await settle(18);
 
@@ -379,16 +384,54 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     boxes[0]!.click();
     boxes[1]!.click();
     flushSync();
-    const clearBtn = target.querySelector<HTMLButtonElement>('button[aria-label="Clear selection"]')!;
-    expect(clearBtn).not.toBeNull();
-    clearBtn.focus();
+    expect(target.querySelector('button[aria-label="Clear selection"]')).not.toBeNull();
 
+    // Active G-chord: Escape cancels G-chord instead of clearing Compare selection.
+    gChord.set(true);
+    try {
+      const chordEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      boxes[1]!.dispatchEvent(chordEsc);
+      flushSync();
+      expect(chordEsc.defaultPrevented).toBe(false);
+      expect(target.querySelector('button[aria-label="Clear selection"]')).not.toBeNull();
+    } finally {
+      gChord.set(false);
+    }
+
+    // Open fallback or native popover: Escape dismisses the popover instead of clearing selection.
+    const pop = document.createElement('div');
+    pop.className = 'info-pop open';
+    document.body.appendChild(pop);
+    try {
+      const popEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      boxes[1]!.dispatchEvent(popEsc);
+      flushSync();
+      expect(popEsc.defaultPrevented).toBe(false);
+      expect(target.querySelector('button[aria-label="Clear selection"]')).not.toBeNull();
+    } finally {
+      pop.remove();
+    }
+
+    // Pressing Escape directly on a focused leaderboard checkbox clears the selection.
+    boxes[1]!.focus();
+    const boxEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    boxes[1]!.dispatchEvent(boxEsc);
+    flushSync();
+    expect(boxEsc.defaultPrevented).toBe(true);
+    expect(target.querySelector('button[aria-label="Clear selection"]')).toBeNull();
+
+    // Selecting again, focusing the Clear button, and pressing Escape restores focus to h1[data-route-focus] (atRest for a second Escape).
+    boxes[0]!.click();
+    boxes[1]!.click();
+    flushSync();
+    const clearBtn = target.querySelector<HTMLButtonElement>('button[aria-label="Clear selection"]')!;
+    clearBtn.focus();
     const clearEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
-    document.dispatchEvent(clearEsc);
+    clearBtn.dispatchEvent(clearEsc);
     flushSync();
     await Promise.resolve();
     expect(clearEsc.defaultPrevented).toBe(true);
     expect(target.querySelector('button[aria-label="Clear selection"]')).toBeNull();
-    expect(document.activeElement).not.toBe(document.body);
+    expect(document.activeElement).toBe(target.querySelector('h1[data-route-focus]'));
   });
 });

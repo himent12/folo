@@ -8,6 +8,7 @@ import NoValue from '$lib/ui/NoValue';
 import Panel from '$lib/ui/Panel';
 import Select from '$lib/ui/Select';
 import { diffAsPrinted } from '../charts';
+import { scoreText } from '../words';
 import type { Row } from './state';
 
 export interface SideBySideProps {
@@ -23,6 +24,15 @@ export interface SideBySideProps {
 
 export default function SideBySide(props: SideBySideProps) {
   const baseId = `${createUniqueId()}-base`;
+  const baselineOptions = computed(() => {
+    const counts = new Map<string, number>();
+    for (const e of props.shown) counts.set(e.name, (counts.get(e.name) ?? 0) + 1);
+    return props.shown.map((e, i) => {
+      if ((counts.get(e.name) ?? 0) <= 1) return { value: e.id, label: e.name };
+      const parts = [props.old[i] ? 'earlier version' : null, e.score ? `score ${scoreText(e.score.total)}` : null].filter(Boolean);
+      return { value: e.id, label: `${e.name} · ${parts.length ? parts.join(' · ') : e.id}` };
+    });
+  });
   let tableEl: HTMLTableElement | undefined;
   /** A value's difference from the baseline's, unless either is graded on an earlier version. */
   const diffOf = (row: () => Row, v: () => number, i: number) =>
@@ -135,7 +145,7 @@ export default function SideBySide(props: SideBySideProps) {
             id={baseId}
             size="sm"
             value={props.shown[0]!.id}
-            options={props.shown.map((e) => ({ value: e.id, label: e.name }))}
+            options={baselineOptions.get()}
             onchange={(eid) => {
               if (eid && eid !== props.shown[0]?.id) props.makeBaseline(eid);
             }}

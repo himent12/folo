@@ -146,7 +146,10 @@ export default function Editor(props: EditorProps) {
   }
   effect(() => {
     const cur = img.get();
-    if (!cur) return;
+    if (!cur) {
+      hovered.set(null);
+      return;
+    }
     if (cur.id !== shownId) {
       shownId = cur.id;
       base.set(cur.boxes);
@@ -229,16 +232,26 @@ export default function Editor(props: EditorProps) {
       queueMicrotask(() => {
         const cur = body.peek();
         const btns = [...(cur?.querySelectorAll<HTMLButtonElement>('.boxes button') ?? [])];
-        const next = btns[Math.min(s, btns.length - 1)] ?? cur?.querySelector<HTMLButtonElement>('[data-add-box]') ?? cur?.closest('dialog');
-        if (next && !(next instanceof HTMLButtonElement && next.disabled)) next.focus();
+        const addBtn = cur?.querySelector<HTMLButtonElement>('[data-add-box]');
+        const next = btns[Math.min(s, btns.length - 1)] ?? (addBtn && !addBtn.disabled ? addBtn : null) ?? cur?.closest('dialog');
+        next?.focus();
       });
     }
   }
-  // Keep the selected box visible in the scrollable side list when picked on canvas or added at the end.
+  // Keep the selected box visible inside `.boxes` only (never `scrollIntoView`, which scrolls `dialog .body` mid-drag on phones).
   effect(() => {
     const s = selected.get();
     if (s === null) return;
-    queueMicrotask(() => body.peek()?.querySelectorAll<HTMLButtonElement>('.boxes button')[s]?.scrollIntoView?.({ block: 'nearest' }));
+    queueMicrotask(() => {
+      const list = body.peek()?.querySelector<HTMLElement>('.boxes');
+      const btn = list?.querySelectorAll<HTMLButtonElement>('button')[s];
+      if (!list || !btn) return;
+      const lr = list.getBoundingClientRect();
+      const br = btn.getBoundingClientRect();
+      if (lr.height <= 0 || br.height <= 0) return;
+      if (br.top < lr.top) list.scrollTop += br.top - lr.top;
+      else if (br.bottom > lr.bottom) list.scrollTop += br.bottom - lr.bottom;
+    });
   });
   /** Add box: a box of the class used last in the middle of the image, selected (the keyboard's way to draw one). */
   function addBox() {

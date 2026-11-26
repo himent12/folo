@@ -314,14 +314,19 @@ describe('the labeling editor: keys', () => {
     expect(key('Escape').defaultPrevented).toBe(false);
   });
 
-  it('restores keyboard focus when deleting a box from the side list or Delete box button, and scrolls newly selected boxes into view', async () => {
+  it('restores keyboard focus when deleting a box from the side list or Delete box button, and scrolls only .boxes to keep selected box visible', async () => {
     await openEditor('1');
-    const scrollSpy = vi.fn();
-    HTMLElement.prototype.scrollIntoView = scrollSpy;
     click(inEditor('Add box'));
+    const list = editor()!.querySelector<HTMLElement>('.boxes')!;
+    const dialogBody = editor()!.querySelector<HTMLElement>('.body')!;
+    vi.spyOn(list, 'getBoundingClientRect').mockReturnValue({ top: 100, bottom: 200, left: 0, right: 200, width: 200, height: 100, x: 0, y: 100, toJSON: () => ({}) } as DOMRect);
     click(inEditor('Add box'));
+    const secondBtn = list.querySelectorAll<HTMLButtonElement>('button')[1]!;
+    vi.spyOn(secondBtn, 'getBoundingClientRect').mockReturnValue({ top: 230, bottom: 258, left: 0, right: 200, width: 200, height: 28, x: 0, y: 230, toJSON: () => ({}) } as DOMRect);
     await Promise.resolve();
-    expect(scrollSpy).toHaveBeenCalledWith({ block: 'nearest' });
+    // Only `.boxes` scrolls (by 58px to bring bottom 258 up to list bottom 200); the enclosing dialog body never moves.
+    expect(list.scrollTop).toBe(58);
+    expect(dialogBody.scrollTop).toBe(0);
     expect(boxCount()).toBe(2);
 
     // Click Delete box while focused inside `.sel`: focus moves to the remaining box button in `.boxes`.
