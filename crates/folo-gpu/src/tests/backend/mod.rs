@@ -11,6 +11,7 @@ mod elementwise;
 mod fixtures;
 mod index;
 mod matmul;
+mod norm;
 mod pooling;
 mod reduce;
 mod transfer;

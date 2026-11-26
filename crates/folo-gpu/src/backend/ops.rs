@@ -247,6 +247,48 @@ impl Backend for GpuBackend {
         Ok(self.wrap(dtype, n, out))
     }
 
+    fn softmax_backward(&self, y: View<'_>, grad: View<'_>, dim: usize, log: bool) -> Result<Storage> {
+        self.run_softmax_backward(y, grad, dim, log)
+    }
+
+    fn layer_norm(
+        &self,
+        x: View<'_>,
+        weight: Option<View<'_>>,
+        bias: Option<View<'_>>,
+        eps: f32,
+    ) -> Result<(Storage, Storage, Storage)> {
+        self.run_layer_norm(x, weight, bias, eps)
+    }
+
+    fn layer_norm_backward(
+        &self,
+        x: View<'_>,
+        grad: View<'_>,
+        weight: Option<View<'_>>,
+        mean: View<'_>,
+        rstd: View<'_>,
+        need_weight: bool,
+        need_bias: bool,
+    ) -> Result<(Storage, Option<Storage>, Option<Storage>)> {
+        self.run_layer_norm_backward(x, grad, weight, mean, rstd, need_weight, need_bias)
+    }
+
+    fn rms_norm(&self, x: View<'_>, weight: Option<View<'_>>, eps: f32) -> Result<(Storage, Storage)> {
+        self.run_rms_norm(x, weight, eps)
+    }
+
+    fn rms_norm_backward(
+        &self,
+        x: View<'_>,
+        grad: View<'_>,
+        weight: Option<View<'_>>,
+        rstd: View<'_>,
+        need_weight: bool,
+    ) -> Result<(Storage, Option<Storage>)> {
+        self.run_rms_norm_backward(x, grad, weight, rstd, need_weight)
+    }
+
     fn matmul(&self, a: View<'_>, b: View<'_>) -> Result<Storage> {
         let r = a.layout.rank();
         let (m, k, n) = (a.layout.dims()[r - 2], a.layout.dims()[r - 1], b.layout.dims()[r - 1]);

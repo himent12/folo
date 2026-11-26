@@ -37,6 +37,7 @@
 
 mod convert;
 mod encode;
+mod norm;
 mod ops;
 mod plan;
 mod sites;

@@ -105,6 +105,36 @@ mod tests {
             ),
             (
                 "conv2d_depthwise",
+                Spec::new()
+                    .u32("KH", 7)
+                    .u32("KW", 7)
+                    .u32("SH", 1)
+                    .u32("SW", 1)
+                    .u32("DH", 1)
+                    .u32("DW", 1)
+                    .bool("TILED", true)
+                    .bool("VEC4_OUT", true),
+            ),
+            (
+                "norm_fwd",
+                Spec::new()
+                    .bool("RMS", false)
+                    .bool("HAS_W", true)
+                    .bool("HAS_B", true)
+                    .bool("VEC4", true)
+                    .bool("CACHE", true)
+                    .subgroups(true),
+            ),
+            (
+                "norm_bwd_dx",
+                Spec::new().bool("RMS", true).bool("HAS_W", true).bool("VEC4", true).bool("CACHE", true),
+            ),
+            ("norm_bwd_dwb", Spec::new().bool("RMS", false).bool("VEC4", true)),
+            ("norm_bwd_param", Spec::new().bool("RMS", true).bool("VEC4", false).u32("MODE", 0)),
+            ("softmax_bwd_rows", Spec::new().bool("LOG", false).bool("VEC4", true).bool("CACHE", true)),
+            ("softmax_bwd_cols", Spec::new().bool("LOG", true).bool("VEC4", true).f16(true)),
+            (
+                "conv2d_depthwise",
                 Spec::new().u32("KH", 31).u32("KW", 31).u32("SW", 1).u32("DH", 1).u32("DW", 1),
             ),
             (
@@ -240,6 +270,18 @@ mod tests {
             ("conv2d_depthwise", Spec::new().u32("KH", 65536).u32("KW", 65536)),
             ("conv2d_depthwise", Spec::new().u32("KH", 3).u32("KW", 3).u32("SW", 65536)),
             ("conv2d_depthwise", Spec::new().u32("KH", 3).u32("KW", 0)),
+            (
+                "conv2d_depthwise",
+                Spec::new().u32("KH", 8).u32("KW", 3).u32("SH", 1).u32("SW", 1).bool("TILED", true),
+            ),
+            (
+                "conv2d_depthwise",
+                Spec::new().u32("KH", 3).u32("KW", 3).u32("SH", 2).u32("SW", 1).bool("TILED", true),
+            ),
+            (
+                "conv2d_depthwise",
+                Spec::new().u32("KH", 1).u32("KW", 3).u32("SH", 1).u32("SW", 1).bool("TILED", true),
+            ),
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 8).u32("KW", 8).u32("MODE", 1)),
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 8).u32("KW", 8).u32("MODE", 0).bool("VX4", true)),
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 0).u32("KW", 3).u32("MODE", 0).bool("VX4", true)),

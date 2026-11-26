@@ -304,6 +304,83 @@ fn conv_depthwise() {
     run(&desc(1, 4, 11, 11, 4, 4, Window2d::square(5, 1, 2)), false, None, 17);
     let dil = Window2d { kernel: (3, 3), stride: (1, 1), padding: (2, 2), dilation: (2, 2) };
     run(&desc(1, 3, 8, 8, 3, 3, dil), true, None, 18);
+
+    // Tiled shared-memory + vec4 depthwise forward coverage: 2x2, 3x3, 5x5, 7x7, asymmetric 3x5 / 5x3,
+    // exact & ragged tile boundaries (16x32 tiles), vec4-aligned and odd widths, prime channels, MULT=2,
+    // tiny non-tiled fallback (3x3 plane), stride-2 vec4 output, and f16 parity.
+    let tiled_cases = [
+        (desc(2, 7, 17, 36, 7, 7, Window2d::square(3, 1, 1)), true, UnaryOp::Silu),
+        (desc(2, 5, 17, 33, 5, 5, Window2d::square(3, 1, 1)), true, UnaryOp::Relu),
+        (desc(2, 4, 20, 32, 8, 4, Window2d::square(5, 1, 2)), true, UnaryOp::Silu),
+        (desc(2, 3, 18, 35, 3, 3, Window2d::square(7, 1, 3)), false, UnaryOp::Identity),
+        (desc(2, 6, 32, 64, 6, 6, Window2d::square(7, 1, 3)), true, UnaryOp::Silu),
+        (desc(1, 4, 9, 8, 4, 4, Window2d::square(2, 1, 0)), true, UnaryOp::Hardswish),
+        (
+            desc(
+                2,
+                5,
+                19,
+                36,
+                5,
+                5,
+                Window2d { kernel: (3, 5), stride: (1, 1), padding: (1, 2), dilation: (1, 1) },
+            ),
+            true,
+            UnaryOp::Silu,
+        ),
+        (
+            desc(
+                1,
+                4,
+                17,
+                33,
+                4,
+                4,
+                Window2d { kernel: (5, 3), stride: (1, 1), padding: (2, 1), dilation: (1, 1) },
+            ),
+            false,
+            UnaryOp::Identity,
+        ),
+        // Non-tiled fallback: tiny 3x3 plane, stride-2 with ow % 4 == 0 (vec4 store), and 9x9 kernel.
+        (desc(2, 4, 3, 3, 4, 4, Window2d::square(3, 1, 1)), true, UnaryOp::Silu),
+        (desc(2, 4, 16, 16, 4, 4, Window2d::square(3, 2, 1)), true, UnaryOp::Silu),
+        (desc(1, 3, 11, 12, 3, 3, Window2d::square(9, 1, 4)), false, UnaryOp::Identity),
+    ];
+    for (i, (mut c, bias, act)) in tiled_cases.into_iter().enumerate() {
+        c.act = act;
+        run(&c, bias, None, 110 + i as u64);
+        let mut cf16 = c;
+        cf16.dtype = DType::F16;
+        run(&cf16, bias, None, 130 + i as u64);
+    }
+
+    // Padded border taps must be skipped even when weights contain +Inf (0 * +Inf must not contaminate
+    // padded outputs with NaN). Use c_in = c_out = groups = 2 so `is_depthwise()` routes to the tiled kernel.
+    let ctx = gpu!();
+    for (h, w) in [(4usize, 4usize), (4usize, 5usize)] {
+        let d = desc(1, 2, h, w, 2, 2, Window2d::square(3, 1, 1));
+        assert!(d.is_depthwise());
+        let x = vec![1.0f32; 2 * h * w];
+        let gx = GpuTensor::from_slice(&ctx, &x, &[x.len()]).unwrap();
+        for (tap, label) in [(1usize, "top-center"), (3usize, "left-center")] {
+            let mut wt = vec![0.0f32; 2 * 9];
+            wt[tap] = f32::INFINITY;
+            wt[9 + tap] = f32::INFINITY;
+            let want = cpu_conv(&d, &x, &wt, None);
+            let gw = GpuTensor::from_slice(&ctx, &wt, &[wt.len()]).unwrap();
+            let gy = GpuTensor::empty(&ctx, &[want.len()], DType::F32).unwrap();
+            conv::conv2d(&ctx, &d, gx.raw(), gw.raw(), None, gy.raw()).unwrap();
+            let got = gy.to_vec().unwrap();
+            assert_eq!(got.len(), want.len());
+            for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+                assert!(
+                    (g.is_infinite() && w.is_infinite() && g.is_sign_positive() == w.is_sign_positive())
+                        || (g == 0.0 && w == 0.0),
+                    "depthwise tiled {h}x{w} non-finite {label} tap mismatch at {i}: got={g}, want={w}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
