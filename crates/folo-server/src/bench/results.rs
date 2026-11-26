@@ -22,6 +22,8 @@ pub struct Graded {
     pub images: Vec<ImageOutcome>,
     pub score: BenchScore,
     pub map50_95: f32,
+    /// Whether the entry was graded with contestant confidences.
+    pub scored: bool,
 }
 
 impl Graded {
@@ -81,6 +83,7 @@ pub fn grade_maps(
     Graded {
         map50_95: evaluation.accuracy.map50_95,
         score: total,
+        scored,
         images,
         parts: ResultParts {
             accuracy: evaluation.accuracy,

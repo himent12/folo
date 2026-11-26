@@ -218,8 +218,9 @@ labeling job read through the `Store` and graded by folo-bench. `Benches` is the
 - **Model entries** queue for one worker thread that runs them on the store's inference device with validation's
   predictor settings, a preparing thread making the next batch of variants (decode, condition, canonical JPEG,
   decode) on the rayon pool while one is predicted, each variant graded (to its mAP pair) as soon as its pass ends.
-- **Agent entries** ask the labeler's agents (so scripted agents script them too) with the labeling prompt and
-  failure policy, a thread each.
+- **Agent entries** ask the labeler's agents (so scripted agents script them too) with the benchmark confidence
+  prompt/schema (`label::prompt::BENCH_SYSTEM` / `bench_reply_schema`, falling back to unscored grading if an agent
+  omits confidences) and the labeling batching and failure policy, a thread each.
 - **External entries** come in one request or in parts (an open entry: each part checked whole and taken, repeats of
   the same content ignored, a variant graded and dropped once all its images are in; a sweeper thread fails open
   entries that get no part for 30 minutes).

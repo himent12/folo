@@ -1246,12 +1246,17 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
     from the end of the first batch, so loading the model and warming up the device are left out: a throughput,
     not the latency of one image. Each condition's severity is graded right after its pass (its mAP pair is all
     the result needs), so only the unchanged images' detections are kept until the end.
-  - `agent`: the agent is asked for boxes as agent labeling asks (the same prompt, with the benchmark's classes
-    and its description as the instructions; batches of the agent's default size, three calls in flight, every
-    image scaled as labeling scales it; under a condition, the variant's JPEG). Defaults: the first 48 images,
-    `conditions: false` (each condition is another call per batch). The entry is `running` from the start, on a
-    thread of its own (never behind the model queue). `501 not_supported` when its CLI is not installed. `scored`
-    is false: agents give no confidences. `usage` adds up the calls. Failures follow labeling runs: a CLI that
+  - `agent`: the agent is asked for boxes with a calibrated confidence (`0.0` to `1.0`) per box (the benchmark
+    confidence prompt and strict 6-item box schema, with the benchmark's classes and its description as the
+    instructions; batches of the agent's default size, three calls in flight, every image scaled as labeling
+    scales it; under a condition, the variant's JPEG). Defaults: the first 48 images, `conditions: false` (each
+    condition is another call per batch). The entry is `running` from the start, on a thread of its own (never
+    behind the model queue). `501 not_supported` when its CLI is not installed. The entry starts with `scored`
+    true (requesting confidences) and keeps `scored: true` on completion when every detection carries a valid
+    confidence in `0..=1` (populating `calibration` whenever at least one unchanged detection reaches `0.1`, and
+    the 101-point `self_labeling` curve); if an agent omits a confidence on any detection (legacy or mixed
+    replies), the entry finishes with `scored: false` and `calibration: null` rather than scoring fallback
+    constants. `usage` adds up the calls. Failures follow labeling runs: a CLI that
     cannot be started or reports an error ends the entry at once as `failed` with the CLI's message and the
     agent's hint, and so do three calls in a row that time out or return garbage; a reply that cannot be read, or
     a passing fault, is asked once more (two calls a batch at most). An image whose call still failed, that a

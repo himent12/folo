@@ -48,6 +48,8 @@ pub(super) struct Scripted {
     steps: Mutex<VecDeque<Step>>,
     pub(super) calls: AtomicUsize,
     pub(super) prompts: Mutex<Vec<(String, usize)>>,
+    pub(super) systems: Mutex<Vec<String>>,
+    pub(super) schemas: Mutex<Vec<Value>>,
 }
 
 impl Scripted {
@@ -58,6 +60,8 @@ impl Scripted {
             steps: Mutex::default(),
             calls: AtomicUsize::new(0),
             prompts: Mutex::default(),
+            systems: Mutex::default(),
+            schemas: Mutex::default(),
         })
     }
 
@@ -113,6 +117,8 @@ impl Agent for Scripted {
         assert!(req.scratch.is_dir(), "the call's scratch folder exists");
         assert!(req.images.iter().all(|jpeg| jpeg.starts_with(&[0xff, 0xd8])), "images arrive as JPEG");
         self.prompts.lock().unwrap().push((req.prompt.to_string(), req.images.len()));
+        self.systems.lock().unwrap().push(req.system.to_string());
+        self.schemas.lock().unwrap().push(req.schema.clone());
         let step = self.steps.lock().unwrap().pop_front();
         let text = match step {
             Some(Step::Reply(text)) => text,

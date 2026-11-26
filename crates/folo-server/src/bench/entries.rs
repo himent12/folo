@@ -271,7 +271,7 @@ impl Benches {
                     BenchEntryStatus::Running,
                     images,
                     conditions,
-                    false,
+                    true,
                     model::total(images, passes),
                     Vec::new(),
                 );
