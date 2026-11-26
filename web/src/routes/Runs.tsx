@@ -141,20 +141,24 @@ export default function Runs() {
   /** The waiting run Remove from queue asks about (the same confirm as on its own page). */
   const removing = signal<Run | null>(null);
   const removeBusy = signal(false);
+  let mounted = true;
+  onCleanup(() => (mounted = false));
   /** Its failure shows in the confirm, which stays open; the success toasts once it has closed. */
   const removeStatus = new DialogStatus();
   async function remove() {
-    const r = removing.get();
-    if (!r) return;
+    const r = removing.peek();
+    if (!r || removeBusy.peek()) return;
+    const targetId = r.id;
     removeBusy.set(true);
     try {
       await removeQueued(r);
-      removing.set(null);
-      // page-level: the confirm closed on the line above.
+      if (mounted && removing.peek()?.id === targetId) removing.set(null);
+      // page-level: the confirm closed on the line above (or the page left while removing).
       removedToast(r);
-      void runs.refresh();
+      if (mounted) void runs.refresh();
     } catch (e) {
-      removeStatus.error(e, `Could not remove ${r.name} from the queue`);
+      if (mounted && removing.peek()?.id === targetId) removeStatus.error(e, `Could not remove ${r.name} from the queue`);
+      else toast.error(e, `Could not remove ${r.name} from the queue`);
     } finally {
       removeBusy.set(false);
     }
@@ -664,13 +668,16 @@ export default function Runs() {
       <Dialog
         open={!!removing.get()}
         onclose={() => removing.set(null)}
+        onbeforeclose={() => !removeBusy.peek()}
         status={removeStatus}
         title={removing.get() ? removeTitle(removing.get()!.name) : ''}
         description={removing.get() ? removeDescription(removing.get()!) : undefined}
         size="sm"
         footer={() => (
           <>
-            <Button onclick={() => removing.set(null)}>Keep it queued</Button>{' '}
+            <Button disabled={removeBusy.get()} onclick={() => !removeBusy.peek() && removing.set(null)}>
+              Keep it queued
+            </Button>{' '}
             <Button variant="destructive" icon={X} loading={removeBusy.get()} onclick={remove}>
               {REMOVE_LABEL}
             </Button>

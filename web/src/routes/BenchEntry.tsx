@@ -15,7 +15,7 @@ import Square from '$icons/square';
 import Target from '$icons/target';
 import Trash from '$icons/trash-2';
 import TriangleAlert from '$icons/triangle-alert';
-import { computed, css, effect, For, Index, MediaQuery, signal } from 'fw';
+import { computed, css, effect, For, Index, MediaQuery, onCleanup, signal } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { LiveBench } from '$lib/api/liveBench';
 import { Resource } from '$lib/api/resource';
@@ -149,16 +149,20 @@ export default function BenchEntryPage() {
   const stopping = signal(false);
   const stopBusy = signal(false);
   const stopStatus = new DialogStatus();
+  let mounted = true;
+  onCleanup(() => (mounted = false));
   async function stop() {
     const e = entry.peek();
-    if (!e) return;
+    if (!e || stopBusy.peek()) return;
     stopBusy.set(true);
     const mark = live.mark();
     try {
       live.putEntry(await hub.api.stopBenchEntry(id.peek(), e.id), mark);
-      stopping.set(false);
+      if (mounted) stopping.set(false);
     } catch (err) {
-      stopStatus.error(err, 'Could not stop the entry');
+      if (mounted && stopping.peek()) stopStatus.error(err, 'Could not stop the entry');
+      // page-level: the stop confirm is closed or unmounted.
+      else toast.error(err, 'Could not stop the entry');
     } finally {
       stopBusy.set(false);
     }
@@ -168,17 +172,20 @@ export default function BenchEntryPage() {
   const removeStatus = new DialogStatus();
   async function remove() {
     const e = entry.peek();
-    if (!e) return;
+    if (!e || removeBusy.peek()) return;
+    const bid = id.peek();
     removeBusy.set(true);
     try {
-      await hub.api.deleteBenchEntry(id.peek(), e.id);
+      await hub.api.deleteBenchEntry(bid, e.id);
       live.dropEntry(e.id);
-      removing.set(false);
+      if (mounted) removing.set(false);
       // page-level: its confirm dialog has closed on the line above.
       toast.success(`Deleted ${e.name}`, 'Its result is gone from the leaderboard. The model and its files were not touched.');
-      router.go(`/benchmarks/${id.peek()}`, { replace: true });
+      if (mounted) router.go(`/benchmarks/${bid}`, { replace: true });
     } catch (err) {
-      removeStatus.error(err, 'Could not delete the entry');
+      if (mounted && removing.peek()) removeStatus.error(err, 'Could not delete the entry');
+      // page-level: the delete confirm is closed or unmounted.
+      else toast.error(err, 'Could not delete the entry');
     } finally {
       removeBusy.set(false);
     }
@@ -511,13 +518,14 @@ export default function BenchEntryPage() {
           <Dialog
             open={stopping.get()}
             onclose={() => stopping.set(false)}
+            onbeforeclose={() => !stopBusy.peek()}
             title={`Stop ${en().name}?`}
             description="It ends what is in flight. A stopped entry has no score: what it ran so far is not kept."
             size="sm"
             status={stopStatus}
             footer={() => (
               <>
-                <Button onclick={() => stopping.set(false)}>Keep running</Button>
+                <Button disabled={stopBusy.get()} onclick={() => !stopBusy.peek() && stopping.set(false)}>Keep running</Button>
                 <Button variant="destructive" icon={Square} loading={stopBusy.get()} onclick={stop}>
                   Stop entry
                 </Button>
@@ -527,13 +535,14 @@ export default function BenchEntryPage() {
           <Dialog
             open={removing.get()}
             onclose={() => removing.set(false)}
+            onbeforeclose={() => !removeBusy.peek()}
             title={`Delete ${en().name}?`}
             description="Removes the entry and its result from the leaderboard. The model, its files and the benchmark's images are not touched."
             size="sm"
             status={removeStatus}
             footer={() => (
               <>
-                <Button onclick={() => removing.set(false)}>Cancel</Button>
+                <Button disabled={removeBusy.get()} onclick={() => !removeBusy.peek() && removing.set(false)}>Cancel</Button>
                 <Button variant="destructive" icon={Trash} loading={removeBusy.get()} onclick={remove}>
                   Delete entry
                 </Button>

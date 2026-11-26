@@ -76,4 +76,24 @@ describe('the run page', () => {
     flushSync();
     expect(resume()).toBe(true);
   });
+
+  it('prevents duplicate resumeRun calls when triggered twice while in flight', async () => {
+    const api = await open('stopped');
+    hub.mode = 'live';
+    hub.serverMock = false;
+    await until('Resume command', () => pageCommandList.items.some((x) => x.id === 'run-resume'));
+    const run = (await api.runs()).find((r) => r.status === 'stopped')!;
+    let finishResume!: (r: typeof run) => void;
+    const resumeSpy = vi.spyOn(hub.api, 'resumeRun').mockImplementation(() => new Promise((r) => (finishResume = r)));
+
+    const cmd = pageCommandList.items.find((x) => x.id === 'run-resume')!;
+    cmd.run();
+    cmd.run();
+    flushSync();
+    expect(resumeSpy).toHaveBeenCalledTimes(1);
+
+    finishResume({ ...run, status: 'running' });
+    await Promise.resolve();
+    await Promise.resolve();
+  });
 });

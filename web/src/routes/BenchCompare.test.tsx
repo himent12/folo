@@ -145,4 +145,48 @@ describe('BenchCompare Escape coordination', () => {
     expect(target.querySelectorAll('.chips .chip')).toHaveLength(2);
     expect(target.querySelector<HTMLSelectElement>('.add select')).not.toBeNull();
   });
+
+  it('clears stale hovered highlight when a hovered chip is removed and later re-added', async () => {
+    const benches = await hub.api.benches();
+    let benchId = '';
+    let entries: Awaited<ReturnType<typeof hub.api.benchEntries>> = [];
+    for (const candidate of benches) {
+      const done = (await hub.api.benchEntries(candidate.id)).filter((e) => e.status === 'done');
+      if (done.length >= 3) {
+        benchId = candidate.id;
+        entries = done;
+        break;
+      }
+    }
+    expect(entries.length).toBeGreaterThanOrEqual(3);
+    const url = `#/benchmarks/${benchId}/compare?entries=${entries[0]!.id},${entries[1]!.id},${entries[2]!.id}`;
+    history.replaceState(history.state, '', url);
+    router.route = parse(url);
+    vi.spyOn(router, 'go').mockImplementation((path) => {
+      router.route = parse(`#${path}`);
+    });
+
+    c = render(() => <BenchCompare />, target);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelectorAll('.chips .chip')).toHaveLength(3);
+    });
+
+    // Hover chip 0 and remove it via its × button (which unmounts the chip without firing pointerleave).
+    const firstChip = target.querySelector<HTMLElement>('.chips .chip')!;
+    firstChip.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true }));
+    flushSync();
+    const removeBtn = firstChip.querySelector<HTMLButtonElement>('button.rm')!;
+    removeBtn.click();
+    flushSync();
+    expect(target.querySelectorAll('.chips .chip')).toHaveLength(2);
+
+    // Re-add entry 0: no interval row should be dimmed by a stale hover on entry 0.
+    const adder = target.querySelector<HTMLSelectElement>('.add select')!;
+    adder.value = entries[0]!.id;
+    adder.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(target.querySelectorAll('.chips .chip')).toHaveLength(3);
+    expect(target.querySelectorAll('.iv li.dim')).toHaveLength(0);
+  });
 });

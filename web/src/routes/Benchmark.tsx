@@ -11,7 +11,7 @@ import Sparkles from '$icons/sparkles';
 import Square from '$icons/square';
 import Trash from '$icons/trash-2';
 import WifiOff from '$icons/wifi-off';
-import { computed, css, effect, For, MediaQuery, onDocument, onWindow, signal, untrack } from 'fw';
+import { computed, css, effect, For, MediaQuery, onCleanup, onDocument, onWindow, signal, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { LiveBench } from '$lib/api/liveBench';
 import { lastKnown, Now } from '$lib/api/freshness';
@@ -157,9 +157,11 @@ export default function Benchmark() {
     });
   });
   const planWhy = computed(() => (editable.get() ? editedPlanError(draft.get(), typed.get(), catalog.data?.conditions) : null));
+  let mounted = true;
+  onCleanup(() => (mounted = false));
   async function savePlan(): Promise<boolean> {
     const b = bench.peek();
-    if (!b) return false;
+    if (!b || saving.peek()) return false;
     const why = planWhy.peek();
     if (why) {
       // page-level: both Save plan buttons are held while this fails; the leave dialog closes on a refused save (answer).
@@ -214,13 +216,14 @@ export default function Benchmark() {
     return () => void off();
   });
   async function answer(keep: 'save' | 'discard') {
+    if (saving.peek()) return;
     const ask = leaving.peek();
     if (keep === 'save' && !(await savePlan())) {
-      leaving.set(null);
+      if (mounted) leaving.set(null);
       return;
     }
     if (keep === 'discard') discard();
-    leaving.set(null);
+    if (mounted) leaving.set(null);
     // The editor is clean now, so the guard lets it through.
     queueMicrotask(() => ask?.proceed());
   }
@@ -286,14 +289,17 @@ export default function Benchmark() {
   async function stopEntry() {
     const b = bench.peek();
     const e = stopping.peek();
-    if (!b || !e) return;
+    if (!b || !e || stopBusy.peek()) return;
+    const targetId = e.id;
     stopBusy.set(true);
     const mark = live.mark();
     try {
-      live.putEntry(await hub.api.stopBenchEntry(b.id, e.id), mark);
-      stopping.set(null);
+      live.putEntry(await hub.api.stopBenchEntry(b.id, targetId), mark);
+      if (mounted && stopping.peek()?.id === targetId) stopping.set(null);
     } catch (err) {
-      stopStatus.error(err, 'Could not stop the entry');
+      if (mounted && stopping.peek()?.id === targetId) stopStatus.error(err, 'Could not stop the entry');
+      // page-level: the stop confirm is closed or unmounted.
+      else toast.error(err, 'Could not stop the entry');
     } finally {
       stopBusy.set(false);
     }
@@ -304,16 +310,19 @@ export default function Benchmark() {
   async function removeEntry() {
     const b = bench.peek();
     const e = removing.peek();
-    if (!b || !e) return;
+    if (!b || !e || removeBusy.peek()) return;
+    const targetId = e.id;
     removeBusy.set(true);
     try {
-      await hub.api.deleteBenchEntry(b.id, e.id);
-      live.dropEntry(e.id);
-      removing.set(null);
+      await hub.api.deleteBenchEntry(b.id, targetId);
+      live.dropEntry(targetId);
+      if (mounted && removing.peek()?.id === targetId) removing.set(null);
       // page-level: its confirm dialog has closed on the line above.
       toast.success(`Deleted ${e.name}`, 'Its result is gone from the leaderboard. The model and its files were not touched.');
     } catch (err) {
-      removeStatus.error(err, 'Could not delete the entry');
+      if (mounted && removing.peek()?.id === targetId) removeStatus.error(err, 'Could not delete the entry');
+      // page-level: the delete confirm is closed or unmounted.
+      else toast.error(err, 'Could not delete the entry');
     } finally {
       removeBusy.set(false);
     }
@@ -342,15 +351,16 @@ export default function Benchmark() {
   }
   async function remove() {
     const b = bench.peek();
-    if (!b) return;
+    if (!b || deleteBusy.peek()) return;
     deleteBusy.set(true);
     try {
       await hub.api.deleteBench(b.id);
-      deleteOpen.set(false);
+      if (mounted) deleteOpen.set(false);
       toast.success(`Deleted ${b.name}`, 'Its images, entries and loops are gone. Models, runs and datasets were not touched.');
-      router.go('/benchmarks', { replace: true });
+      if (mounted) router.go('/benchmarks', { replace: true });
     } catch (e) {
-      deleteStatus.error(e, 'Could not delete the benchmark');
+      if (mounted && deleteOpen.peek()) deleteStatus.error(e, 'Could not delete the benchmark');
+      else toast.error(e, 'Could not delete the benchmark');
     } finally {
       deleteBusy.set(false);
     }
@@ -720,13 +730,14 @@ export default function Benchmark() {
           <Dialog
             open={!!stopping.get()}
             onclose={() => stopping.set(null)}
+            onbeforeclose={() => !stopBusy.peek()}
             title={`Stop ${stopping.get()?.name ?? 'the entry'}?`}
             description="It ends what is in flight. A stopped entry has no score: what it ran so far is not kept."
             size="sm"
             status={stopStatus}
             footer={() => (
               <>
-                <Button onclick={() => stopping.set(null)}>Keep running</Button>
+                <Button disabled={stopBusy.get()} onclick={() => !stopBusy.peek() && stopping.set(null)}>Keep running</Button>
                 <Button variant="destructive" icon={Square} loading={stopBusy.get()} onclick={stopEntry}>
                   Stop entry
                 </Button>
@@ -736,13 +747,14 @@ export default function Benchmark() {
           <Dialog
             open={!!removing.get()}
             onclose={() => removing.set(null)}
+            onbeforeclose={() => !removeBusy.peek()}
             title={`Delete ${removing.get()?.name ?? 'the entry'}?`}
             description="Removes the entry and its result from the leaderboard. The model, its files and the benchmark's images are not touched."
             size="sm"
             status={removeStatus}
             footer={() => (
               <>
-                <Button onclick={() => removing.set(null)}>Cancel</Button>
+                <Button disabled={removeBusy.get()} onclick={() => !removeBusy.peek() && removing.set(null)}>Cancel</Button>
                 <Button variant="destructive" icon={Trash} loading={removeBusy.get()} onclick={removeEntry}>
                   Delete entry
                 </Button>
@@ -751,6 +763,7 @@ export default function Benchmark() {
           />
           <Dialog
             bind:open={deleteOpen}
+            onbeforeclose={() => !deleteBusy.peek()}
             title={`Delete ${b().name}?`}
             description="Removes the benchmark, its copy of the images, its entries and its loops. Models, runs and datasets (a loop's included) are not touched."
             size="sm"
@@ -762,7 +775,7 @@ export default function Benchmark() {
                     {busyWhy.get()}
                   </p>
                 ) : null}
-                <Button onclick={() => deleteOpen.set(false)}>Cancel</Button>
+                <Button disabled={deleteBusy.get()} onclick={() => !deleteBusy.peek() && deleteOpen.set(false)}>Cancel</Button>
                 <Gate reason={busyWhy.get()}>
                   {(why) => (
                     <Button variant="destructive" icon={Trash} loading={deleteBusy.get()} disabled={!!why()} aria-describedby={why()} onclick={remove}>
@@ -781,9 +794,10 @@ export default function Benchmark() {
             }`}
             size="sm"
             onclose={() => leaving.set(null)}
+            onbeforeclose={() => !saving.peek()}
             footer={() => (
               <>
-                <Button onclick={() => answer('discard')}>Discard changes</Button>
+                <Button disabled={saving.get()} onclick={() => answer('discard')}>Discard changes</Button>
                 {planWhy.get() ? (
                   <p class="why" data-gate-why>
                     {planWhy.get()}

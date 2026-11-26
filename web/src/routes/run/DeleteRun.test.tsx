@@ -72,4 +72,42 @@ describe('DeleteRun', () => {
     flushSync();
     expect(document.querySelector('dialog')!.textContent).toContain('Its weights and models are deleted too.');
   });
+
+  it('locks dismissal and blocks double-submit while deletion is in flight', async () => {
+    let finishDelete!: () => void;
+    const del = vi.spyOn(hub.api, 'deleteRun').mockImplementation(() => new Promise<void>((r) => (finishDelete = r)));
+    vi.spyOn(hub.api, 'models').mockResolvedValue([]);
+    const run = signal<{ id: string; name: string } | null>({ id: 'run_f6f1', name: 'shapes-n' });
+    const onclose = vi.fn(() => run.set(null));
+    const ondeleted = vi.fn();
+    c = render(() => <DeleteRun run={run.get()} onclose={onclose} ondeleted={ondeleted} />, target);
+    flushSync();
+
+    const dialog = document.querySelector<HTMLDialogElement>('dialog')!;
+    const cancelBtn = [...dialog.querySelectorAll<HTMLButtonElement>('footer button')].find((b) => b.textContent?.trim() === 'Cancel')!;
+    const confirmBtn = [...dialog.querySelectorAll<HTMLButtonElement>('footer button')].find((b) => b.textContent?.includes('Delete'))!;
+
+    confirmBtn.click();
+    flushSync();
+    expect(del).toHaveBeenCalledTimes(1);
+    expect(cancelBtn.disabled).toBe(true);
+    expect(confirmBtn.disabled).toBe(true);
+
+    // Escape cancel event and Cancel click must be blocked while deleting.
+    const cancelEvent = new Event('cancel', { cancelable: true });
+    dialog.dispatchEvent(cancelEvent);
+    expect(cancelEvent.defaultPrevented).toBe(true);
+    cancelBtn.click();
+    flushSync();
+    expect(onclose).not.toHaveBeenCalled();
+
+    finishDelete();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(run.get()).toBeNull();
+      expect(dialog.open).toBe(false);
+      expect(onclose).toHaveBeenCalled();
+      expect(ondeleted).toHaveBeenCalledTimes(1);
+    });
+  });
 });

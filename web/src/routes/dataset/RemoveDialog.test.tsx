@@ -105,4 +105,35 @@ describe('RemoveDialog', () => {
     // No run trained on this dataset, so nothing is said about runs losing their samples.
     expect(document.querySelector('dialog')!.textContent).not.toContain('trained on it');
   });
+
+  it('locks dismissal while removal is in flight and skips redirect if unmounted before completion', async () => {
+    vi.spyOn(hub.api, 'runs').mockResolvedValue([]);
+    let finishDelete!: () => void;
+    const del = vi.spyOn(hub.api, 'deleteDataset').mockImplementation(() => new Promise<void>((r) => (finishDelete = r)));
+    const { router } = await import('$lib/router');
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    const dataset = { id: 'ds_x', name: 'cells', path: 'D:/data/cells' };
+    c = render(() => <RemoveDialog open dataset={dataset} />, target);
+    flushSync();
+
+    const dialog = document.querySelector<HTMLDialogElement>('dialog')!;
+    const cancelBtn = [...dialog.querySelectorAll<HTMLButtonElement>('footer button')].find((b) => b.textContent?.trim() === 'Cancel')!;
+    const confirmBtn = [...dialog.querySelectorAll<HTMLButtonElement>('footer button')].find((b) => b.textContent?.includes('Remove'))!;
+
+    confirmBtn.click();
+    flushSync();
+    expect(del).toHaveBeenCalledTimes(1);
+    expect(cancelBtn.disabled).toBe(true);
+    const cancelEvent = new Event('cancel', { cancelable: true });
+    dialog.dispatchEvent(cancelEvent);
+    expect(cancelEvent.defaultPrevented).toBe(true);
+
+    // Unmount before the server answers: completion must not hijack navigation.
+    c.unmount();
+    c = undefined;
+    finishDelete();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(go).not.toHaveBeenCalled();
+  });
 });

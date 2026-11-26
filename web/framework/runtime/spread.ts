@@ -21,7 +21,7 @@ export function spread(
   el: Element,
   props: object | (() => object),
   scope?: string,
-  dirs?: () => Record<string, unknown>,
+  dirs?: () => Record<string, unknown> | undefined,
   styleDirs?: () => Record<string, unknown>,
   styleImportant?: () => Record<string, unknown>,
 ): void {
@@ -56,6 +56,9 @@ export function spread(
         prevClass = cls;
       } else if (d !== undefined) {
         for (const k in d) if (prevDirs === undefined || !d[k] !== !prevDirs[k]) el.classList.toggle(k, !!d[k]);
+        if (prevDirs !== undefined) for (const k in prevDirs) if (!(k in d) && prevDirs[k]) el.classList.remove(k);
+      } else if (prevDirs !== undefined) {
+        for (const k in prevDirs) if (prevDirs[k]) el.classList.remove(k);
       }
       prevDirs = d;
     }
@@ -113,8 +116,10 @@ export function spread(
         continue;
       }
       const name = el.namespaceURI === 'http://www.w3.org/1999/xhtml' ? (propName(key) ?? key) : key;
-      if (value == null) el.removeAttribute(key);
-      else if (typeof value !== 'string' && hasSetter(el, name)) (el as any)[name] = value;
+      if (value == null) {
+        if (typeof prev[key] === 'boolean' && hasSetter(el, name)) (el as any)[name] = false;
+        el.removeAttribute(key);
+      } else if (typeof value !== 'string' && hasSetter(el, name)) (el as any)[name] = value;
       else if (typeof value !== 'function') setAttribute(el, name, value);
     }
     prev = next;

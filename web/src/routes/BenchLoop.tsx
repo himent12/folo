@@ -14,7 +14,7 @@ import Repeat from '$icons/repeat';
 import Square from '$icons/square';
 import Trash from '$icons/trash-2';
 import TriangleAlert from '$icons/triangle-alert';
-import { computed, css, deep, effect, For, MediaQuery, signal, untrack } from 'fw';
+import { computed, css, deep, effect, For, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { LiveBench } from '$lib/api/liveBench';
 import { Resource } from '$lib/api/resource';
@@ -149,16 +149,20 @@ export default function BenchLoop() {
   const stopping = signal(false);
   const stopBusy = signal(false);
   const stopStatus = new DialogStatus();
+  let mounted = true;
+  onCleanup(() => (mounted = false));
   async function stop() {
     const l = loop.peek();
-    if (!l) return;
+    if (!l || stopBusy.peek()) return;
     stopBusy.set(true);
     const mark = live.mark();
     try {
       live.putLoop(await hub.api.stopBenchLoop(id.peek(), l.id), mark);
-      stopping.set(false);
+      if (mounted) stopping.set(false);
     } catch (e) {
-      stopStatus.error(e, 'Could not stop the loop');
+      if (mounted && stopping.peek()) stopStatus.error(e, 'Could not stop the loop');
+      // page-level: the stop confirm is closed or unmounted.
+      else toast.error(e, 'Could not stop the loop');
     } finally {
       stopBusy.set(false);
     }
@@ -168,18 +172,20 @@ export default function BenchLoop() {
   const removeStatus = new DialogStatus();
   async function remove() {
     const l = loop.peek();
-    if (!l) return;
+    if (!l || removeBusy.peek()) return;
     const bid = id.peek();
     removeBusy.set(true);
     try {
       await hub.api.deleteBenchLoop(bid, l.id);
       live.dropLoop(l.id);
-      removing.set(false);
+      if (mounted) removing.set(false);
       // page-level: its confirm dialog has closed on the line above.
       toast.success(`Deleted ${l.name}`, 'Its datasets, runs, models and entries stay.');
-      router.go(`/benchmarks/${bid}?tab=loops`, { replace: true });
+      if (mounted) router.go(`/benchmarks/${bid}?tab=loops`, { replace: true });
     } catch (e) {
-      removeStatus.error(e, 'Could not delete the loop');
+      if (mounted && removing.peek()) removeStatus.error(e, 'Could not delete the loop');
+      // page-level: the delete confirm is closed or unmounted.
+      else toast.error(e, 'Could not delete the loop');
     } finally {
       removeBusy.set(false);
     }
@@ -612,13 +618,14 @@ export default function BenchLoop() {
       <Dialog
         open={stopping.get()}
         onclose={() => stopping.set(false)}
+        onbeforeclose={() => !stopBusy.peek()}
         title={`Stop ${l().name}?`}
         description="It stops what the loop is doing now (its entry or its run). The generations it finished, and their datasets, runs and models, stay."
         size="sm"
         status={stopStatus}
         footer={() => (
           <>
-            <Button onclick={() => stopping.set(false)}>Keep running</Button>
+            <Button disabled={stopBusy.get()} onclick={() => !stopBusy.peek() && stopping.set(false)}>Keep running</Button>
             <Button variant="destructive" icon={Square} loading={stopBusy.get()} onclick={stop}>
               Stop loop
             </Button>
@@ -628,13 +635,14 @@ export default function BenchLoop() {
       <Dialog
         open={removing.get()}
         onclose={() => removing.set(false)}
+        onbeforeclose={() => !removeBusy.peek()}
         title={`Delete ${l().name}?`}
         description="Removes the loop from this benchmark. Its datasets, runs, models and entries stay."
         size="sm"
         status={removeStatus}
         footer={() => (
           <>
-            <Button onclick={() => removing.set(false)}>Cancel</Button>
+            <Button disabled={removeBusy.get()} onclick={() => !removeBusy.peek() && removing.set(false)}>Cancel</Button>
             <Button variant="destructive" icon={Trash} loading={removeBusy.get()} onclick={remove}>
               Delete loop
             </Button>

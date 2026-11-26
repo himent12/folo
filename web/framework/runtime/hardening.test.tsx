@@ -853,4 +853,95 @@ describe('runtime action, spread, transition, deep, and unmount hardening', () =
     expect(el.parentNode).toBe(root2);
     unmount2();
   });
+
+  it('aborts intro-only and orphaned bidirectional transition intros on unmount without breaking local intro->outro handoff', async () => {
+    // 1. Intro-only (flags = 1): unmounting before the animation microtask runs aborts synchronously so animate() never starts.
+    const introEl = document.createElement('div');
+    const introAnimate = vi.fn(() => ({ onfinish: null as (() => void) | null, cancel: vi.fn(), currentTime: 0, effect: {} }));
+    (introEl as unknown as { animate: typeof introAnimate }).animate = introAnimate;
+    const onIntroEnd = vi.fn();
+    introEl.addEventListener('introend', onIntroEnd);
+    const show1 = signal(false);
+    const root1 = document.createElement('div');
+    const unmount1 = rawRender(
+      () => (
+        <Show when={show1.get()}>
+          {() => {
+            transition(introEl, () => ({ duration: 100, css: (t) => `opacity: ${t}` }), undefined, 1);
+            return introEl;
+          }}
+        </Show>
+      ),
+      root1,
+    );
+    flush();
+    show1.set(true);
+    flush();
+    unmount1();
+    await Promise.resolve();
+    expect(introAnimate).not.toHaveBeenCalled();
+    expect(onIntroEnd).not.toHaveBeenCalled();
+
+    // 2. Bidirectional (flags = 3): unmounting parent root aborts running intro animation.
+    const anims2: { onfinish: (() => void) | null; cancel: ReturnType<typeof vi.fn>; currentTime: number; effect: unknown }[] = [];
+    const bothEl = document.createElement('div');
+    (bothEl as unknown as { animate: () => unknown }).animate = () => {
+      const a = { onfinish: null as (() => void) | null, cancel: vi.fn(), currentTime: 0, effect: {} };
+      anims2.push(a);
+      return a;
+    };
+    const show2 = signal(false);
+    const root2 = document.createElement('div');
+    const unmount2 = rawRender(
+      () => (
+        <Show when={show2.get()}>
+          {() => {
+            transition(bothEl, () => ({ duration: 100, css: (t) => `opacity: ${t}` }), undefined, 3);
+            return bothEl;
+          }}
+        </Show>
+      ),
+      root2,
+    );
+    flush();
+    show2.set(true);
+    flush();
+    await Promise.resolve();
+    expect(anims2).toHaveLength(1);
+    unmount2();
+    await Promise.resolve();
+    expect(anims2[0]!.cancel).toHaveBeenCalled();
+  });
+
+  it('spread cleans up dropped class: directive keys and resets removed boolean DOM properties', () => {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    const propsSig = signal<Record<string, unknown>>({ class: 'base', indeterminate: true, disabled: true });
+    const dirsSig = signal<Record<string, unknown> | undefined>({ active: true, extra: true });
+    const stop = createRoot((d) => {
+      spread(input, () => propsSig.get(), 'fw-s', () => dirsSig.get());
+      return d;
+    });
+    flush();
+    expect(input.indeterminate).toBe(true);
+    expect(input.disabled).toBe(true);
+    expect(input.classList.contains('active')).toBe(true);
+    expect(input.classList.contains('extra')).toBe(true);
+
+    // Drop one directive key and both boolean properties.
+    dirsSig.set({ active: true });
+    propsSig.set({ class: 'base' });
+    flush();
+    expect(input.indeterminate).toBe(false);
+    expect(input.disabled).toBe(false);
+    expect(input.classList.contains('active')).toBe(true);
+    expect(input.classList.contains('extra')).toBe(false);
+
+    // Returning undefined from dirs removes remaining directive classes.
+    dirsSig.set(undefined);
+    flush();
+    expect(input.classList.contains('active')).toBe(false);
+    expect(input.classList.contains('base')).toBe(true);
+    stop();
+  });
 });

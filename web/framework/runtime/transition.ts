@@ -248,6 +248,7 @@ function animate(el: Element, options: TransitionConfig, counterpart: Animation 
       }
     }
     animation = el.animate(first, { duration: delay, fill: 'forwards' });
+    animation.finished?.catch(noop);
     animation.onfinish = () => {
       if (aborted) return;
       animation!.cancel();
@@ -265,6 +266,7 @@ function animate(el: Element, options: TransitionConfig, counterpart: Animation 
       }
       if (duration > 0) getT = () => t1 + delta * easing((animation!.currentTime as number) / duration);
       animation = el.animate(frames, { duration, fill: 'forwards' });
+      animation.finished?.catch(noop);
       animation.onfinish = () => {
         if (aborted) return;
         getT = () => t2;
@@ -314,6 +316,8 @@ export function transition<P>(el: Element, fn: TransitionFn<P>, params: (() => P
       }));
       return () => {
         anim.abort();
+        introAnim?.abort();
+        introAnim = undefined;
         html.inert = inert;
         if (outroAnim === anim) outroAnim = undefined;
       };
@@ -331,6 +335,20 @@ export function transition<P>(el: Element, fn: TransitionFn<P>, params: (() => P
           introAnim = options = undefined;
         });
       });
+      if (!(flags & OUT)) {
+        return () => {
+          introAnim?.abort();
+          introAnim = options = undefined;
+        };
+      }
+      return () => {
+        queueMicrotask(() => {
+          if (outroAnim === undefined) {
+            introAnim?.abort();
+            introAnim = options = undefined;
+          }
+        });
+      };
     });
   }
 }

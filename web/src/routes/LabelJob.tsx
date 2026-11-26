@@ -156,12 +156,15 @@ export default function LabelJob() {
   });
 
   // ---------- runs ----------
+  let mounted = true;
+  onCleanup(() => (mounted = false));
   const starting = signal(false);
   const startError = signal<unknown>(undefined);
   async function start(scope: 'unlabeled' | 'all' = 'unlabeled') {
     const req = choice.request();
     const cur = job.peek();
-    if (!cur || !req) return;
+    if (!cur || !req || starting.peek()) return;
+    const fromAgain = againOpen.peek();
     starting.set(true);
     startError.set(undefined);
     try {
@@ -169,11 +172,12 @@ export default function LabelJob() {
       if (!(await instructions.save())) return;
       const jobId = cur.id;
       await live.act(() => hub.api.startLabeling(jobId, { ...req, scope }));
-      againOpen.set(false);
+      if (mounted) againOpen.set(false);
     } catch (e) {
       // In its dialog when asked from one, else in the panel under the button.
-      if (againOpen.peek()) againStatus.error(e, 'Could not start the agent');
-      else startError.set(e);
+      if (mounted && fromAgain && againOpen.peek()) againStatus.error(e, 'Could not start the agent');
+      else if (mounted) startError.set(e);
+      else toast.error(e, 'Could not start the agent');
     } finally {
       starting.set(false);
     }
@@ -184,14 +188,15 @@ export default function LabelJob() {
   const stopStatus = new DialogStatus();
   async function stop() {
     const cur = job.peek();
-    if (!cur) return;
+    if (!cur || stopBusy.peek()) return;
     stopBusy.set(true);
     const jobId = cur.id;
     try {
       await live.act(() => hub.api.stopLabeling(jobId));
-      stopOpen.set(false);
+      if (mounted) stopOpen.set(false);
     } catch (e) {
-      stopStatus.error(e, 'Could not stop the agent');
+      if (mounted && stopOpen.peek()) stopStatus.error(e, 'Could not stop the agent');
+      else toast.error(e, 'Could not stop the agent');
     } finally {
       stopBusy.set(false);
     }
@@ -207,15 +212,16 @@ export default function LabelJob() {
   const deleteStatus = new DialogStatus();
   async function remove() {
     const cur = job.peek();
-    if (!cur) return;
+    if (!cur || deleteBusy.peek()) return;
     deleteBusy.set(true);
     try {
       await hub.api.deleteLabelJob(cur.id);
-      deleteOpen.set(false);
+      if (mounted) deleteOpen.set(false);
       toast.success(`Deleted ${cur.name}`, 'Images from folders and datasets made from it were not touched.');
-      router.go('/datasets/label', { replace: true });
+      if (mounted) router.go('/datasets/label', { replace: true });
     } catch (e) {
-      deleteStatus.error(e, 'Could not delete the job');
+      if (mounted && deleteOpen.peek()) deleteStatus.error(e, 'Could not delete the job');
+      else toast.error(e, 'Could not delete the job');
     } finally {
       deleteBusy.set(false);
     }
@@ -476,13 +482,14 @@ export default function LabelJob() {
 
           <Dialog
             bind:open={stopOpen}
+            onbeforeclose={() => !stopBusy.peek()}
             title={`Stop labeling ${j().name}?`}
             description="The agent's calls in flight end, and the images they held keep the labels they had. What it has labeled so far stays."
             size="sm"
             status={stopStatus}
             footer={() => (
               <>
-                <Button onclick={() => stopOpen.set(false)}>Keep labeling</Button>
+                <Button disabled={stopBusy.get()} onclick={() => !stopBusy.peek() && stopOpen.set(false)}>Keep labeling</Button>
                 <Button variant="destructive" icon={Square} loading={stopBusy.get()} onclick={stop}>
                   Stop
                 </Button>
@@ -491,13 +498,14 @@ export default function LabelJob() {
           />
           <Dialog
             bind:open={againOpen}
+            onbeforeclose={() => !starting.peek()}
             title={`Label all ${imagesText(j().counts.images)} again?`}
             description={`${choice.agent ? AGENT_NAME[choice.agent.id] : 'The agent'} labels every image again. The labels they have now, hand-drawn ones too, are replaced.`}
             size="sm"
             status={againStatus}
             footer={() => (
               <>
-                <Button onclick={() => againOpen.set(false)}>Cancel</Button>
+                <Button disabled={starting.get()} onclick={() => !starting.peek() && againOpen.set(false)}>Cancel</Button>
                 <Button variant="destructive" icon={RotateCw} loading={starting.get()} onclick={() => start('all')}>
                   Label all again
                 </Button>
@@ -506,13 +514,14 @@ export default function LabelJob() {
           />
           <Dialog
             bind:open={deleteOpen}
+            onbeforeclose={() => !deleteBusy.peek()}
             title={`Delete ${j().name}?`}
             description="Removes the job, its uploaded images and its labels. Images added from a folder stay on disk, and datasets made from this job are not touched."
             size="sm"
             status={deleteStatus}
             footer={() => (
               <>
-                <Button onclick={() => deleteOpen.set(false)}>Cancel</Button>
+                <Button disabled={deleteBusy.get()} onclick={() => !deleteBusy.peek() && deleteOpen.set(false)}>Cancel</Button>
                 <Button variant="destructive" icon={Trash} loading={deleteBusy.get()} onclick={remove}>
                   Delete job
                 </Button>
