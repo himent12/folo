@@ -480,9 +480,11 @@ pub(super) fn reconcile(file: &mut RunFile, dir: &Path) {
     }
     if let Some((_, b)) = ckpt
         && let Some(f) = b.fitness
+        && f.is_finite()
         && best.is_none_or(|x| (f as f32) > x.map50_95)
     {
-        best = Some(BestEpoch { epoch: (b.epoch + 1).max(1) as u32, map50_95: f as f32 });
+        let epoch = b.epoch.saturating_add(1).clamp(1, i64::from(u32::MAX)) as u32;
+        best = Some(BestEpoch { epoch, map50_95: f as f32 });
     }
     file.run.best = best;
     file.last_metrics = m.epochs.last().filter(|e| e.epoch == done).map(|e| model_metrics(&e.val));

@@ -707,6 +707,7 @@ name = "folo-client"
 version = "0.1.0"
 dependencies = [
  "folo-api",
+ "folo-test-support",
  "http",
  "serde",
  "serde_json",

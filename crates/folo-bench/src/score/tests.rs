@@ -689,13 +689,19 @@ fn robustness_edge_cases_duplicate_runs_weights_and_non_finite() {
         assert_eq!(rb.conditions[0].points[0].retention, 0.0);
     }
     let bad_runs = [
-        (Condition::Haze, 1, Map { map50: 0.5, map50_95: f32::NAN }),
-        (Condition::Haze, 2, Map { map50: 0.5, map50_95: f32::INFINITY }),
+        (Condition::Haze, 1, Map { map50: f32::NAN, map50_95: f32::NAN }),
+        (Condition::Haze, 2, Map { map50: f32::INFINITY, map50_95: f32::INFINITY }),
         (Condition::Haze, 3, Map { map50: 0.5, map50_95: -0.2 }),
     ];
-    let rb = robustness(0.5, &plan(&[("haze", &[1, 2, 3], 1.0)]), &bad_runs).unwrap();
+    let rb = robustness(0.5, &plan(&[("haze", &[1, 2, 3], f32::NAN)]), &bad_runs).unwrap();
     assert_eq!(rb.retention, 0.0);
-    assert!(rb.conditions[0].points.iter().all(|pt| pt.retention == 0.0));
+    assert_eq!(rb.conditions[0].weight, 0.0);
+    assert!(
+        rb.conditions[0]
+            .points
+            .iter()
+            .all(|pt| pt.retention == 0.0 && pt.map50.is_finite() && pt.map50_95.is_finite())
+    );
 }
 
 #[test]
@@ -773,6 +779,23 @@ fn outcome_and_labels_edge_cases_and_tie_order() {
     let o_zero = outcome(&s, 0, true, 0.0);
     assert_eq!((o_zero.detections.len(), o_zero.missed, o_zero.wrong), (0, 0, 0));
     assert!(labels(&s.detections, 0, true, 0.0).is_empty());
+
+    // `-0.0` is canonicalised to `+0.0` so input-order tie-breaking and bootstrap tie detection match `+0.0`.
+    let neg_zero = Sample {
+        truths: vec![t(0, 0.0, 0.0, 10.0, 10.0)],
+        detections: vec![d(0, -0.0, 0.0, 0.0, 10.0, 10.0), d(0, 0.0, 20.0, 0.0, 30.0, 10.0)],
+    };
+    let pos_zero = Sample {
+        truths: vec![t(0, 0.0, 0.0, 10.0, 10.0)],
+        detections: vec![d(0, 0.0, 0.0, 0.0, 10.0, 10.0), d(0, 0.0, 20.0, 0.0, 30.0, 10.0)],
+    };
+    let o_neg = outcome(&neg_zero, 1, true, 0.0);
+    assert_eq!(o_neg.detections.iter().map(|b| b.x1).collect::<Vec<_>>(), [0.0, 20.0]);
+    assert!(o_neg.detections.iter().all(|b| b.score.to_bits() == 0.0f32.to_bits()));
+    assert_eq!(labels(&neg_zero.detections, 1, true, 0.0), labels(&pos_zero.detections, 1, true, 0.0));
+    let ev_neg = evaluate(&[neg_zero], 1, true, 7);
+    let ev_pos = evaluate(&[pos_zero], 1, true, 7);
+    assert_eq!(ev_neg, ev_pos);
 }
 
 #[test]

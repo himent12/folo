@@ -17,3 +17,6 @@ serde.workspace = true
 serde_json.workspace = true
 http.workspace = true
 ureq = { workspace = true, features = ["rustls"] }
+
+[dev-dependencies]
+folo-test-support.workspace = true

@@ -1,7 +1,7 @@
 //! [`RunPod`] as a [`Provider`]: check a connection, list offers, launch a pod, look it up, find it by name and
 //! terminate it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use folo_api::{CloudField, CloudOffer, CloudProvider};
 
@@ -195,14 +195,22 @@ impl Provider for RunPod {
         let key = api_key(values)?;
         // The API has no filter by name: list every pod and look.
         let mut ids = Vec::new();
+        let mut seen_ids = HashSet::new();
+        let mut seen_cursors = HashSet::new();
         let mut cursor: Option<String> = None;
         for _ in 0..MAX_PAGES {
             let page = self.pods(key, cursor.as_deref())?;
-            ids.extend(
-                page.pods.into_iter().filter(|p| p.name == name && p.status != "TERMINATED").map(|p| p.id),
-            );
+            for p in page.pods {
+                if p.name == name
+                    && p.status != "TERMINATED"
+                    && check_pod_id(&p.id).is_ok()
+                    && seen_ids.insert(p.id.clone())
+                {
+                    ids.push(p.id);
+                }
+            }
             match page.pagination.next_cursor.filter(|c| !c.is_empty()) {
-                Some(next) if cursor.as_ref() != Some(&next) => cursor = Some(next),
+                Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
                 _ => return Ok(ids),
             }
         }

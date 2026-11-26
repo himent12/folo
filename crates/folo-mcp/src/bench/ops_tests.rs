@@ -34,6 +34,16 @@ fn a_file_of_predictions_is_json_lines_of_records() {
     assert!(e.body.message.contains("line 2") && e.body.message.contains("boxes"), "{e:?}");
     let missing = read_predictions(Path::new("no/such/predictions.jsonl")).err().unwrap();
     assert_eq!(missing.body.code, "path_not_found");
+    // UTF-8 BOM on line 1 (common from Windows editors/PowerShell) is accepted cleanly.
+    let bom = format!("\u{FEFF}{}\n{}\n", r("1"), r("2"));
+    assert_eq!(records(&bom).unwrap().len(), 2);
+    // Misspelled keys in records or boxes fail loudly instead of silently falling back to defaults.
+    let typo_box = r#"{"image":"1","boxes":[{"class":0,"confidence":0.4,"x1":1,"y1":2,"x2":3,"y2":4}]}"#;
+    let e = records(typo_box).unwrap_err();
+    assert!(e.body.message.contains("line 1") && e.body.message.contains("confidence"), "{e:?}");
+    let typo_rec = r#"{"image":"1","cond":"haze","boxes":[]}"#;
+    let e = records(typo_rec).unwrap_err();
+    assert!(e.body.message.contains("line 1") && e.body.message.contains("cond"), "{e:?}");
 }
 
 /// A line is judged after at most [`MAX_RECORD_BYTES`] and its line ending: no more of it is read, what is left of

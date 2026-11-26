@@ -143,6 +143,21 @@ fn valid_box(x1: f32, y1: f32, x2: f32, y2: f32) -> bool {
     x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite() && x2 > x1 && y2 > y1
 }
 
+/// Cleans a detection confidence into `[0, 1]` with `-0.0` canonicalised to `+0.0` (so `total_cmp` and
+/// `to_bits` treat zero scores identically and preserve input-order tie-breaking). Unscored contestants
+/// always receive `1.0`.
+#[inline]
+fn clean_score(score: f32, scored: bool) -> Option<f32> {
+    if !scored {
+        return Some(1.0);
+    }
+    if !score.is_finite() {
+        return None;
+    }
+    let clamped = score.clamp(0.0, 1.0);
+    Some(if clamped == 0.0 { 0.0 } else { clamped })
+}
+
 /// The usable detections of a list at or above `min_score`, scores clamped (all 1 when unscored), in input order.
 fn clean_detections_above(
     dets: &[BenchDetection],
@@ -156,13 +171,8 @@ fn clean_detections_above(
     let mut out = Vec::with_capacity(dets.len());
     for d in dets {
         if valid_box(d.x1, d.y1, d.x2, d.y2) && (d.class as usize) < num_classes {
-            let score = if scored {
-                if !d.score.is_finite() {
-                    continue;
-                }
-                d.score.clamp(0.0, 1.0)
-            } else {
-                1.0
+            let Some(score) = clean_score(d.score, scored) else {
+                continue;
             };
             if score >= min_score {
                 out.push(BenchDetection { score, ..*d });
@@ -203,13 +213,8 @@ fn prepare(s: &Sample, num_classes: usize, scored: bool) -> Prepared {
     let mut dets = Vec::with_capacity(s.detections.len());
     for d in &s.detections {
         if valid_box(d.x1, d.y1, d.x2, d.y2) && (d.class as usize) < num_classes {
-            let score = if scored {
-                if !d.score.is_finite() {
-                    continue;
-                }
-                d.score.clamp(0.0, 1.0)
-            } else {
-                1.0
+            let Some(score) = clean_score(d.score, scored) else {
+                continue;
             };
             dets.push(Detection { bbox: Xyxy::new(d.x1, d.y1, d.x2, d.y2), score, class: d.class });
         }
@@ -677,11 +682,13 @@ pub fn robustness(
             .iter()
             .map(|&s| {
                 let &m = by_pair.get(&(c, s))?;
+                let map50_95 = if m.map50_95.is_finite() { m.map50_95 } else { 0.0 };
+                let map50 = if m.map50.is_finite() { m.map50 } else { 0.0 };
                 Some(BenchSeverityPoint {
                     severity: s,
-                    map50_95: m.map50_95,
-                    map50: m.map50,
-                    retention: kept_share(m.map50_95, clean_map50_95),
+                    map50_95,
+                    map50,
+                    retention: kept_share(map50_95, clean_map50_95),
                 })
             })
             .collect();
@@ -693,7 +700,7 @@ pub fn robustness(
         den += w;
         conditions.push(BenchConditionResult {
             condition: c.id().to_string(),
-            weight: pc.weight,
+            weight: w as f32,
             retention: retention as f32,
             points,
         });

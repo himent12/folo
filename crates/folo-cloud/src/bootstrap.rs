@@ -47,21 +47,35 @@ pub struct Spec<'a> {
     pub terminate: &'a str,
 }
 
-/// Checks that `url` can be where a worker downloads FOLO from: `http://` or `https://`, a host, and no spaces or
-/// control characters ([`ErrorKind::Invalid`] otherwise, naming the [`crate::WORKER_BASE_URL_FIELD`] field).
-/// Quotes and `$` are fine: [`script`] quotes the URL.
+/// Checks that `url` can be where a worker downloads FOLO from: `http://` or `https://`, a host (no embedded
+/// credentials, query, or fragment), and no spaces or control characters ([`ErrorKind::Invalid`] otherwise,
+/// naming the [`crate::WORKER_BASE_URL_FIELD`] field). Quotes and `$` in the path are fine: [`script`] quotes
+/// the URL.
 pub fn check_base_url(url: &str) -> Result<()> {
     let invalid =
         |why: &str| Error::new(ErrorKind::Invalid, format!("`{}` {why}", crate::WORKER_BASE_URL_FIELD));
+    if !url.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err(invalid("must not contain spaces or control characters"));
+    }
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .ok_or_else(|| invalid("must start with https:// or http://"))?;
-    if rest.split('/').next().unwrap_or_default().is_empty() {
-        return Err(invalid("has no host"));
+    if rest.contains('?') || rest.contains('#') {
+        return Err(invalid("must not have a query or a fragment"));
     }
-    if !url.bytes().all(|b| b.is_ascii_graphic()) {
-        return Err(invalid("must not contain spaces or control characters"));
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.contains('@') {
+        return Err(invalid("must not contain a user name or password"));
+    }
+    let host = if let Some(after_open) = authority.strip_prefix('[') {
+        let (h, _) = after_open.split_once(']').ok_or_else(|| invalid("has an invalid IPv6 host"))?;
+        h
+    } else {
+        authority.split(':').next().unwrap_or_default()
+    };
+    if host.is_empty() {
+        return Err(invalid("has no host"));
     }
     Ok(())
 }
@@ -262,14 +276,27 @@ mod tests {
 
     #[test]
     fn urls_that_are_not_downloads_are_refused() {
-        for bad in
-            ["", "ftp://x", "https://", "https:///path", "file:///srv/folo", "https://a b", "https://a\nb"]
-        {
+        for bad in [
+            "",
+            "ftp://x",
+            "https://",
+            "https:///path",
+            "https://:8080/folo",
+            "https://[]/folo",
+            "https://[::1/folo",
+            "https://user:pass@example.com/folo",
+            "https://example.com/folo?token=secret",
+            "https://example.com/folo#frag",
+            "file:///srv/folo",
+            "https://a b",
+            "https://a\nb",
+        ] {
             let e = script(&spec(bad)).unwrap_err();
             assert_eq!(e.kind, ErrorKind::Invalid, "{bad:?}");
             assert!(e.message.contains("worker_base_url"), "{}", e.message);
         }
         assert!(check_base_url("http://10.0.0.5:8000/folo").is_ok());
+        assert!(check_base_url("http://[::1]:8000/folo").is_ok());
     }
 
     #[test]

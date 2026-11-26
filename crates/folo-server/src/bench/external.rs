@@ -48,6 +48,12 @@ fn record(i: usize, p: &BenchPrediction) -> String {
     }
 }
 
+/// Canonical IEEE 754 bit pattern of `v` with `-0.0` normalized to `+0.0` so equivalent retries hash identically.
+#[inline]
+fn canonical_bits(v: f32) -> u32 {
+    if v == 0.0 { 0.0f32.to_bits() } else { v.to_bits() }
+}
+
 /// A record's content as a 64-bit FNV-1a digest: its boxes (classes, coordinates, and scores when the contestant
 /// gives confidences), in order. Its image, condition and severity are where it is kept.
 fn content(p: &BenchPrediction, scored: bool) -> u64 {
@@ -60,9 +66,9 @@ fn content(p: &BenchPrediction, scored: bool) -> u64 {
     eat(p.boxes.len() as u64);
     for d in &p.boxes {
         eat(d.class as u64);
-        eat(if scored { d.score.to_bits() as u64 } else { 0 });
+        eat(if scored { canonical_bits(d.score) as u64 } else { 0 });
         for v in [d.x1, d.y1, d.x2, d.y2] {
-            eat(v.to_bits() as u64);
+            eat(canonical_bits(v) as u64);
         }
     }
     h
@@ -746,9 +752,19 @@ mod tests {
         let e = fill.add(vec![p("2", None), p("9", None)]).unwrap_err();
         assert!(e.body.message.contains("no image '9'"), "{}", e.body.message);
         assert_eq!(fill.received, 1);
-        // The same record again (a retry) is taken as it is; with other boxes it is refused.
+        // The same record again (a retry) is taken as it is (including `-0.0` vs `+0.0`); with other boxes it is refused.
         fill.add(vec![p("1", None)]).unwrap();
         assert_eq!(fill.received, 1);
+        let mut neg_zero = BenchPrediction {
+            boxes: vec![BenchDetection { class: 0, score: -0.0, x1: -0.0, y1: 0.0, x2: 10.0, y2: 10.0 }],
+            ..p("2", None)
+        };
+        let mut fill_z = Filling::new(f.clone(), true);
+        fill_z.add(vec![neg_zero.clone()]).unwrap();
+        neg_zero.boxes[0].score = 0.0;
+        neg_zero.boxes[0].x1 = 0.0;
+        fill_z.add(vec![neg_zero]).unwrap();
+        assert_eq!(fill_z.received, 1);
         let mut other = p("1", None);
         other.boxes[0].x2 = 51.0;
         let e = fill.add(vec![other.clone()]).unwrap_err();
