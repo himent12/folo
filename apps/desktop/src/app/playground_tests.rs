@@ -724,3 +724,131 @@ fn failed_dataset_load_shows_retry_on_runs_and_toast_on_new_run() {
         assert!(this.store.datasets.ready().is_some() && this.store.runs.ready().is_some());
     });
 }
+
+/// Playtest R3 finding #3: moving the pointer directly downward from row `i` to row `i + 1` in
+/// Playground's detections list (and in the Image Inspector's box list) must preserve the new row's
+/// hover highlight instead of letting the earlier row's exit callback overwrite it with `None`.
+#[test]
+fn hovering_downward_across_playground_and_inspector_rows_preserves_highlight() {
+    use folo_ui::{Modifiers, MouseMoveEvent, PlatformInput, point, px};
+
+    let move_to =
+        |app: &mut folo_ui::HeadlessApp, w: folo_ui::WindowHandle<super::FoloApp>, x: f32, y: f32| {
+            app.simulate_input(
+                w.into(),
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: point(px(x), px(y)),
+                    pressed_button: None,
+                    modifiers: Modifiers::default(),
+                }),
+            );
+            app.frame(w.into());
+        };
+
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| {
+        this.play_model = Some("m_44c0".into());
+        this.play_dataset_image("ds_3b91", "img_03417", cx);
+        this.play_conf = 0.05;
+        this.navigate(super::Route::Playground, w, cx);
+    });
+    for _ in 0..3 {
+        app.frame(window.into());
+        app.run_until_idle();
+    }
+
+    // Scan vertically in Playground's right-hand rail (x = 1120) to locate row 0, then verify:
+    // 1. Hovering a detection box on the stage and moving directly onto row 0 preserves `Some(0)`
+    //    (stage exit must not overwrite row hover ownership).
+    // 2. Moving directly downward from row 0 to row 1 preserves `Some(1)`.
+    // 3. Hovering a box on the stage and leaving the stage to empty chrome clears `play_hover`.
+    let mut row0_y = None;
+    for y in (200..780).step_by(14) {
+        move_to(&mut app, window, 1120., y as f32);
+        if drive(&mut app, window, |this, _, _| this.play_hover) == Some(0) {
+            row0_y = Some(y as f32);
+            break;
+        }
+    }
+    let y0 = row0_y.expect("located Playground detection row 0");
+
+    let mut stage_hit = None;
+    'scan: for y in (160..700).step_by(24) {
+        for x in (280..860).step_by(24) {
+            move_to(&mut app, window, x as f32, y as f32);
+            if drive(&mut app, window, |this, _, _| this.play_hover.is_some() && this.play_hover_from_stage) {
+                stage_hit = Some((x as f32, y as f32));
+                break 'scan;
+            }
+        }
+    }
+    let (sx, sy) = stage_hit.expect("located a detection box on Playground stage");
+    move_to(&mut app, window, 1120., y0);
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| (this.play_hover, this.play_hover_from_stage)),
+        (Some(0), false),
+        "moving directly from Playground stage to row 0 preserves row 0 hover"
+    );
+
+    move_to(&mut app, window, 1120., y0 + 29.);
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| this.play_hover),
+        Some(1),
+        "moving directly down from det-0 to det-1 preserves play_hover == Some(1)"
+    );
+
+    move_to(&mut app, window, sx, sy);
+    assert!(
+        drive(&mut app, window, |this, _, _| this.play_hover.is_some() && this.play_hover_from_stage),
+        "re-entering stage box assigns stage hover ownership"
+    );
+    move_to(&mut app, window, 260., 70.);
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| (this.play_hover, this.play_hover_from_stage)),
+        (None, false),
+        "leaving stage to empty area clears stage-owned hover"
+    );
+
+    // Same invariant in the Image Inspector's box list: find an image with >= 2 boxes, locate
+    // label row 0 in the right-hand inspector sidebar, and move directly down into row 1.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(super::Route::Dataset("ds_8f2c".into()), w, cx);
+    });
+    for _ in 0..3 {
+        app.frame(window.into());
+        app.run_until_idle();
+    }
+    drive(&mut app, window, |this, w, cx| {
+        let idx = this
+            .filtered_indices("ds_8f2c")
+            .iter()
+            .enumerate()
+            .find_map(|(pos, &raw)| {
+                let im = this.store.images.get("ds_8f2c")?.ready()?.get(raw)?;
+                (im.boxes.len() >= 2).then_some(pos)
+            })
+            .expect("demo dataset has an image with at least 2 boxes");
+        this.open_inspector("ds_8f2c".into(), idx, w, cx);
+    });
+    for _ in 0..2 {
+        app.frame(window.into());
+        app.run_until_idle();
+    }
+    let mut insp_first = None;
+    for y in (80..720).step_by(12) {
+        move_to(&mut app, window, 1120., y as f32);
+        if let Some(first_id) =
+            drive(&mut app, window, |this, _, _| this.inspector.as_ref().and_then(|i| i.hover_box))
+        {
+            insp_first = Some((first_id, y as f32));
+            break;
+        }
+    }
+    let (first_id, iy0) = insp_first.expect("located first visual Inspector label row");
+    move_to(&mut app, window, 1120., iy0 + 32.);
+    let second = drive(&mut app, window, |this, _, _| this.inspector.as_ref().and_then(|i| i.hover_box));
+    assert!(
+        second.is_some_and(|id| id != first_id),
+        "moving directly down from first inspector label row ({first_id}) to next row preserves hover (got {second:?})"
+    );
+}

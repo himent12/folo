@@ -62,10 +62,7 @@ mod titlebar;
 #[cfg(test)]
 mod unavailable_tests;
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use folo_ui::{
     App, AppContext, Bounds, Context, Entity, FocusHandle, KeyBinding, Pixels, ScrollHandle, SharedString,
@@ -81,6 +78,7 @@ use crate::ui::*;
 pub(crate) use connection::persistable_server_url;
 pub use connection::{Connector, Reason};
 pub use focus::focus_ring;
+pub(crate) use focus::reveal_bounds_in_scroll;
 pub use forms::{
     ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, format_lr,
     retry_batch, synth_errors,
@@ -540,6 +538,7 @@ pub struct FoloApp {
     pub play_image: Option<PlayImage>,
     pub play_pred: Load<PredictResponse>,
     pub play_hover: Option<usize>,
+    pub(crate) play_hover_from_stage: bool,
     pub play_drop_hover: bool,
     /// Stage zoom (1 = fit) and pan in px, like the inspector.
     pub play_zoom: f32,
@@ -884,6 +883,7 @@ impl FoloApp {
             play_image: None,
             play_pred: Load::Idle,
             play_hover: None,
+            play_hover_from_stage: false,
             play_drop_hover: false,
             play_zoom: 1.0,
             play_pan: (0., 0.),

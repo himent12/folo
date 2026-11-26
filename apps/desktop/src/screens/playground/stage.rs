@@ -468,17 +468,20 @@ impl FoloApp {
                         let (x, y) =
                             to_image(b, dims, Fit::Contain, this.play_zoom, this.play_pan, ev.position);
                         let hit = hit_box(&hover_boxes, x, y);
-                        if hit != this.play_hover {
+                        if hit != this.play_hover || (hit.is_some() && !this.play_hover_from_stage) {
                             this.play_hover = hit;
+                            this.play_hover_from_stage = hit.is_some();
                             // The pointer moved over the image: hover leads again.
                             this.kb = false;
                             cx.notify();
                         }
                     }))
                     .on_hover(cx.listener(|this, h: &bool, _, cx| {
-                        if !*h && this.play_hover.is_some() {
-                            this.play_hover = None;
-                            cx.notify();
+                        if !*h && this.play_hover_from_stage {
+                            this.play_hover_from_stage = false;
+                            if this.play_hover.take().is_some() {
+                                cx.notify();
+                            }
                         }
                     }))
                     .child(

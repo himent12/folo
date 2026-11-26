@@ -747,12 +747,22 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .child(
-                        canvas(move |b, _, _| width_cell.set(b.size.width), |_, _, _, _| {})
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .h(px(1.)),
+                        canvas(
+                            move |b, window, _| {
+                                if b.size.width > px(0.)
+                                    && (f32::from(width_cell.get()) - f32::from(b.size.width)).abs() > 0.5
+                                {
+                                    width_cell.set(b.size.width);
+                                    window.request_animation_frame();
+                                }
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(1.)),
                     )
                     .child(grid),
             )

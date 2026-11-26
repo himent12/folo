@@ -529,3 +529,35 @@ fn inspector_toggles_click_to_zoom_and_try_in_playground() {
         );
     });
 }
+
+/// Playtest R3 finding #2: resizing a window on the dataset image grid immediately requests a
+/// follow-up frame when the measured `grid_width` changes so columns snap to the new width without
+/// waiting for hover or another interaction.
+#[test]
+fn resizing_dataset_grid_requests_followup_frame_and_updates_columns() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api);
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Dataset("ds_8f2c".into()), w, cx));
+    for _ in 0..3 {
+        app.frame(window.into());
+        app.run_until_idle();
+    }
+    let width_before = drive(&mut app, window, |this, _, _| f32::from(this.grid_width.get()));
+    assert!(width_before > 950., "1280×800 grid width measured ({width_before})");
+
+    // Resize window from 1280×800 to 960×620 and render a single resize frame.
+    app.resize_window(window.into(), folo_ui::size(folo_ui::px(960.), folo_ui::px(620.)));
+    app.frame(window.into());
+    let width_after = drive(&mut app, window, |this, _, _| f32::from(this.grid_width.get()));
+    assert!(
+        width_after < width_before - 100.,
+        "canvas updated grid_width on resize ({width_before} -> {width_after})"
+    );
+    assert!(
+        app.wants_frame(window.into()),
+        "grid_width change schedules a follow-up frame so the rightmost column is never clipped"
+    );
+    // Drawing the scheduled follow-up frame settles without requesting another redraw.
+    app.frame(window.into());
+    assert!(!app.wants_frame(window.into()), "grid settles cleanly after one follow-up frame");
+}
