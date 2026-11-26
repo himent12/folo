@@ -41,9 +41,14 @@ pub struct DatasetScrollAnchor {
     /// Pending `scroll_to_item` strategy (for example from closing the inspector right before a
     /// deferred recheck invalidated the image list).
     pub strategy: Option<folo_ui::ScrollStrategy>,
-    /// When true (captured from closing the inspector), also move keyboard focus to the restored
-    /// tile once the final position is known.
-    pub focus_tile: bool,
+    /// True while this anchor is speculative (captured on `close_inspector` while waiting on the
+    /// record recheck to decide whether `forget_dataset_contents` actually fires). Flipped to
+    /// `false` once committed to an image reload, so a second unchanged recheck mid-paging never
+    /// discards an active reload anchor.
+    pub pending_recheck: bool,
+    /// Focus handle held when closing the inspector: deferred tile focus only applies if no
+    /// overlay is open and focus has not moved to another control since closing.
+    pub focus_from: Option<folo_ui::FocusHandle>,
 }
 
 /// Whether a failed image-list page is likely transient (worth bounded automatic backoff) rather
@@ -149,9 +154,14 @@ impl FoloApp {
                                     return;
                                 }
                                 this.forget_dataset_contents(&b, cx);
-                            } else if this.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == b) {
-                                // Record unchanged: no image reload will run, so drop any speculative
-                                // anchor captured on inspector close.
+                            } else if this
+                                .ds_scroll_anchor
+                                .as_ref()
+                                .is_some_and(|a| a.dataset == b && a.pending_recheck)
+                            {
+                                // Record unchanged: no image reload will run, so drop only a
+                                // speculative anchor captured on inspector close (never an anchor
+                                // already committed to an in-progress paged reload).
                                 this.ds_scroll_anchor = None;
                             }
                             this.store.dataset.insert(b, Load::Ready(d));
@@ -171,8 +181,10 @@ impl FoloApp {
                             this.store.dataset.insert(b, Load::Failed(e));
                         }
                         Err(_) => {
-                            if this.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == b)
-                                && this.store.images.get(&b).is_some_and(|l| l.ready().is_some())
+                            if this
+                                .ds_scroll_anchor
+                                .as_ref()
+                                .is_some_and(|a| a.dataset == b && a.pending_recheck)
                             {
                                 this.ds_scroll_anchor = None;
                             }
@@ -484,9 +496,10 @@ impl FoloApp {
         {
             return;
         }
-        // Keep an anchor captured before an earlier in-flight reload instead of replacing it with
-        // an empty or partially-loaded grid's row 0.
-        if self.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == id) {
+        // Keep an anchor captured before an earlier in-flight reload (or on inspector close),
+        // committing any speculative anchor to this active image reload.
+        if let Some(existing) = self.ds_scroll_anchor.as_mut().filter(|a| a.dataset == id) {
+            existing.pending_recheck = false;
             return;
         }
         let (deferred, scroll_y, item_h) = {
@@ -522,7 +535,8 @@ impl FoloApp {
             split: meta.split,
             intra_row,
             strategy,
-            focus_tile: false,
+            pending_recheck: false,
+            focus_from: None,
         });
     }
 
@@ -545,10 +559,9 @@ impl FoloApp {
         let Some(anchor) = self.ds_scroll_anchor.as_ref().filter(|a| a.dataset == id).cloned() else {
             return;
         };
-        // Wait until an in-flight dataset record recheck finishes (and either invalidates
-        // `store.images` or drops this anchor as unchanged) so a frame rendered before the recheck
-        // answers cannot consume the anchor against the stale image list.
-        if self.ds_reads.contains_key(id) {
+        // Wait until a speculative inspector-close anchor is either committed by
+        // `forget_dataset_contents` or cleared by an unchanged/failed recheck.
+        if anchor.pending_recheck {
             return;
         }
         let still_incomplete = more || has_failed_page;
@@ -591,7 +604,10 @@ impl FoloApp {
             !still_incomplete || (default_sort && viewport_h > 0. && target_y + viewport_h <= content_h)
         };
         if can_finish {
-            if anchor.focus_tile {
+            if let Some(prev) = anchor.focus_from.as_ref()
+                && !self.any_overlay()
+                && (prev.is_focused(window) || self.root_focus.is_focused(window))
+            {
                 let fh = self.fh(format!("tile-{tile_id}"), cx);
                 window.focus(&fh);
             }

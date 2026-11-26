@@ -291,22 +291,29 @@ fn back_to_the_window_on_overview_and_datasets_rechecks_loaded_cards() {
     }
 }
 
-/// Pumps frames and background work with a bounded retry limit until `is_held` becomes true,
-/// avoiding unbounded loops or deadlocks if an expected request never starts.
-fn pump_until_held(
+/// Pumps frames until the expected `images` call count reaches `want_image_calls`, then blocks
+/// cleanly via `wait_held()` (which has its own bounded timeout and does not depend on worker
+/// thread scheduling speed).
+fn wait_for_image_page_hold(
     app: &mut HeadlessApp,
     window: WindowHandle<FoloApp>,
-    is_held: impl Fn() -> bool,
+    api: &MockBackend,
+    want_image_calls: usize,
+    wait_held: impl FnOnce(),
     label: &str,
 ) {
     for _ in 0..64 {
-        if is_held() {
+        if api.image_lists().len() >= want_image_calls {
+            wait_held();
             return;
         }
         app.frame(window.into());
         app.run_until_held(1);
     }
-    panic!("expected held request '{label}' to start");
+    panic!(
+        "expected held request '{label}' to be dispatched (image_lists len={}, wanted {want_image_calls})",
+        api.image_lists().len()
+    );
 }
 
 /// #382: refreshing a large multi-page dataset after an external edit preserves the user's scroll
@@ -354,21 +361,31 @@ fn large_dataset_grid_preserves_scroll_position_across_paged_revision_refresh() 
     });
     // Hold page 0 and page 1 in order so we can observe the intermediate state after page 0 lands
     // and before page 1 (containing all Val images) arrives.
+    let base_calls = api.image_lists().len();
     let page0 = api.hold("images");
     let page1 = api.hold("images");
     away_and_back(&mut app);
-    pump_until_held(&mut app, window, || page0.is_held(), "page 0");
+    wait_for_image_page_hold(&mut app, window, &api, base_calls + 1, || page0.wait_held(), "page 0");
     drop(page0);
-    pump_until_held(&mut app, window, || page1.is_held(), "page 1");
+    wait_for_image_page_hold(&mut app, window, &api, base_calls + 2, || page1.wait_held(), "page 1");
     app.frame(window.into());
+
+    // A second window activation while page 1 is still pending returns an unchanged dataset record
+    // and must NOT discard the active reload's scroll anchor.
+    app.platform().set_active(false);
+    app.platform().set_active(true);
+    app.run_until_held(1);
+    frames_holding_one(&mut app, window);
 
     // Anchor must still be waiting while page 1 (containing Val images) is in flight.
     app.update(|cx| {
         window
             .update(cx, |this, _, _| {
-                let anchor = this.ds_scroll_anchor.as_ref().expect("scroll anchor waiting for val batch");
+                let anchor =
+                    this.ds_scroll_anchor.as_ref().expect("scroll anchor survives second activation");
                 assert_eq!(anchor.file, expected_file);
                 assert_eq!(anchor.split, crate::api::Split::Val);
+                assert!(!anchor.pending_recheck, "anchor is committed to active reload");
             })
             .unwrap()
     });
@@ -405,21 +422,22 @@ fn large_dataset_grid_preserves_scroll_position_across_paged_revision_refresh() 
     });
     away_and_back(&mut app);
     frames(&mut app, window);
+    let insp_base = api.image_lists().len();
     let p0 = api.hold("images");
     let p1 = api.hold("images");
     app.update(|cx| window.update(cx, |this, w, cx| this.close_inspector(w, cx)).unwrap());
-    pump_until_held(&mut app, window, || p0.is_held(), "inspector reload page 0");
+    wait_for_image_page_hold(&mut app, window, &api, insp_base + 1, || p0.wait_held(), "inspector page 0");
     app.update(|cx| {
         window
             .update(cx, |this, _, _| {
                 let anchor = this.ds_scroll_anchor.as_ref().expect("exact inspected file anchored");
                 assert_eq!(anchor.file, inspected_file, "anchors exact inspected column, not col 0");
-                assert!(anchor.focus_tile, "marks refreshed tile for focus restoration");
+                assert!(anchor.focus_from.is_some(), "records focus handle for conditional restoration");
             })
             .unwrap()
     });
     drop(p0);
-    pump_until_held(&mut app, window, || p1.is_held(), "inspector reload page 1");
+    wait_for_image_page_hold(&mut app, window, &api, insp_base + 2, || p1.wait_held(), "inspector page 1");
     drop(p1);
     app.run_until_idle();
     frames(&mut app, window);
@@ -430,6 +448,36 @@ fn large_dataset_grid_preserves_scroll_position_across_paged_revision_refresh() 
         assert!(got_y > 100., "grid stayed scrolled near the inspected val image (got_y={got_y})");
         let tile_fh = this.fh(format!("tile-{expected_tile_id}"), cx);
         assert!(tile_fh.is_focused(w), "focus restored to refreshed inspected tile");
+    });
+
+    // Opening the command palette while an inspector-close reload is pending must NOT lose focus
+    // when the target page arrives.
+    drive(&mut app, window, |this, w, cx| this.open_inspector(ID.into(), inspected_idx, w, cx));
+    drive(&mut app, window, |this, _, _| {
+        let mut old = this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("read");
+        old.revision = Some("before-palette".into());
+        this.store.dataset.insert(ID.into(), Load::Ready(old));
+    });
+    away_and_back(&mut app);
+    frames(&mut app, window);
+    let pal_base = api.image_lists().len();
+    let pal_p0 = api.hold("images");
+    let pal_p1 = api.hold("images");
+    app.update(|cx| window.update(cx, |this, w, cx| this.close_inspector(w, cx)).unwrap());
+    wait_for_image_page_hold(&mut app, window, &api, pal_base + 1, || pal_p0.wait_held(), "palette page 0");
+    drop(pal_p0);
+    wait_for_image_page_hold(&mut app, window, &api, pal_base + 2, || pal_p1.wait_held(), "palette page 1");
+    app.update(|cx| window.update(cx, |this, w, cx| this.open_palette(w, cx)).unwrap());
+    drop(pal_p1);
+    app.run_until_idle();
+    frames(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        use folo_ui::Focusable;
+        let palette = this.palette.as_ref().expect("palette remains open");
+        assert!(
+            palette.input.read(cx).focus_handle(cx).is_focused(w),
+            "arriving page must not steal focus from open command palette"
+        );
     });
 }
 
@@ -458,12 +506,13 @@ fn typing_filename_search_during_paged_reload_clears_scroll_anchor() {
     });
     app.frame(window.into());
 
+    let base_calls = api.image_lists().len();
     let page0 = api.hold("images");
     let page1 = api.hold("images");
     away_and_back(&mut app);
-    pump_until_held(&mut app, window, || page0.is_held(), "search page 0");
+    wait_for_image_page_hold(&mut app, window, &api, base_calls + 1, || page0.wait_held(), "search page 0");
     drop(page0);
-    pump_until_held(&mut app, window, || page1.is_held(), "search page 1");
+    wait_for_image_page_hold(&mut app, window, &api, base_calls + 2, || page1.wait_held(), "search page 1");
     app.frame(window.into());
 
     // Simulate user typing into `ds_img_search` (matching the old Val anchor) while page 1 is held.
@@ -567,26 +616,22 @@ fn non_default_sort_and_retryable_later_page_preserve_scroll_anchor() {
         assert_eq!(all[indices[got_row * cols]].file, anchor_file);
     });
 
-    // Completed reload with zero matching images must clear any stale anchor (no leak).
+    // Completed reload with zero matching images must clear any stale anchor during render (no leak).
+    // Settle the empty-matching query first so the subscription fires before we arm the anchor.
     drive(&mut app, window, |this, _, cx| {
-        this.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
-            dataset: ID.into(),
-            file: "deleted.jpg".into(),
-            split: crate::api::Split::Val,
-            intra_row: 0.,
-            strategy: None,
-            focus_tile: false,
-        });
-        this.ds_img_query = "no-such-file-xyz".into();
         this.ds_img_search.update(cx, |inp, cx| inp.set_text("no-such-file-xyz", cx));
-        // Re-arm after subscription to simulate a completed reload landing on 0 matches directly.
+    });
+    frames(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
+        assert_eq!(this.filtered_indices(ID).len(), 0, "zero matches settled before arming anchor");
         this.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
             dataset: ID.into(),
             file: "deleted.jpg".into(),
             split: crate::api::Split::Val,
             intra_row: 0.,
             strategy: None,
-            focus_tile: false,
+            pending_recheck: false,
+            focus_from: None,
         });
         cx.notify();
     });

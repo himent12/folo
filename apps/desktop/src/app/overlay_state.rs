@@ -168,6 +168,7 @@ impl FoloApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.ds_scroll_anchor = None;
         self.inspector = Some(Inspector {
             dataset,
             index,
@@ -219,24 +220,12 @@ impl FoloApp {
     }
 
     pub fn close_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // If closing the inspector will trigger (or join) a dataset reload on this page, anchor on
-        // the exact inspected file (not column 0 of its row) so re-sorts or external edits return
-        // both scroll position and keyboard focus to the refreshed tile.
-        if let Some(i) = self.inspector.as_ref()
-            && i.sample.is_none()
-            && self.route == super::Route::Dataset(i.dataset.clone())
-            && (self.ds_recheck.contains(&i.dataset) || self.ds_reads.contains_key(&i.dataset))
-            && let Some(meta) = self.filtered_image(&i.dataset, i.index)
-        {
-            self.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
-                dataset: i.dataset.clone(),
-                file: meta.file.clone(),
-                split: meta.split,
-                intra_row: 0.,
-                strategy: Some(folo_ui::ScrollStrategy::Center),
-                focus_tile: true,
-            });
-        }
+        // Whether closing the inspector will trigger (or join) a dataset record recheck on this page.
+        let recheck_pending = self.inspector.as_ref().is_some_and(|i| {
+            i.sample.is_none()
+                && self.route == super::Route::Dataset(i.dataset.clone())
+                && (self.ds_recheck.contains(&i.dataset) || self.ds_reads.contains_key(&i.dataset))
+        });
         let closed = self.take_inspector(cx);
         let opener = self.inspector_return.take();
         // Opened from the dataset's grid: back on the image it showed last (scrolled into view and
@@ -244,11 +233,25 @@ impl FoloApp {
         let last =
             closed.filter(|i| i.sample.is_none() && self.route == super::Route::Dataset(i.dataset.clone()));
         if let Some(i) = last
-            && let Some(id) = self.filtered_image(&i.dataset, i.index).map(|m| m.id.clone())
+            && let Some(meta) = self.filtered_image(&i.dataset, i.index).cloned()
         {
             self.grid_scroll.scroll_to_item(i.index / self.grid_cols(), folo_ui::ScrollStrategy::Center);
-            let fh = self.fh(format!("tile-{id}"), cx);
+            let fh = self.fh(format!("tile-{}", meta.id), cx);
             window.focus(&fh);
+            if recheck_pending {
+                // Anchor on the exact inspected file (not column 0 of its row) until the recheck
+                // resolves, and remember the focus handle so a later page never steals focus from
+                // an overlay or control opened in the meantime.
+                self.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
+                    dataset: i.dataset,
+                    file: meta.file,
+                    split: meta.split,
+                    intra_row: 0.,
+                    strategy: Some(folo_ui::ScrollStrategy::Center),
+                    pending_recheck: true,
+                    focus_from: Some(fh),
+                });
+            }
         } else {
             match opener {
                 Some(fh) => window.focus(&fh),

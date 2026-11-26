@@ -115,30 +115,35 @@ fn detail_page_headings_paint_across_all_detail_routes() {
     });
     drive(&mut app, window, |this, win, cx| this.navigate(Route::Model(model_id), win, cx));
     settle(&mut app, window);
-    // Find the leftmost header action button (`Export`, rendered with `bg_raised` in the header band).
-    let raised = drive(&mut app, window, |_, _, cx| theme(cx).bg_raised);
-    let action_left = app
-        .scene(window.into())
-        .primitives
-        .iter()
-        .filter_map(|p| match p {
-            Primitive::Quad(q)
-                if q.background.solid == raised
-                    && sp(q.bounds.origin.y) >= 48.
-                    && sp(q.bounds.origin.y) <= 105.
-                    && sp(q.bounds.origin.x) >= 400.
-                    && sp(q.bounds.size.height) >= 24. =>
-            {
-                Some(sp(q.bounds.origin.x))
-            }
-            _ => None,
-        })
-        .fold(f32::INFINITY, f32::min);
-    assert!(action_left.is_finite() && action_left < 960., "header actions remain on-screen ({action_left})");
+    // Find both header action buttons (`Export` and `Try in Playground`) in the header band.
+    let (raised, accent) = drive(&mut app, window, |_, _, cx| {
+        let t = theme(cx);
+        (t.bg_raised, t.accent_fill())
+    });
+    let mut action_left = f32::INFINITY;
+    let mut action_right = f32::NEG_INFINITY;
+    for p in &app.scene(window.into()).primitives {
+        if let Primitive::Quad(q) = p
+            && (q.background.solid == raised || q.background.solid == accent)
+            && sp(q.bounds.origin.y) >= 48.
+            && sp(q.bounds.origin.y) <= 105.
+            && sp(q.bounds.origin.x) >= 400.
+            && sp(q.bounds.size.height) >= 24.
+        {
+            action_left = action_left.min(sp(q.bounds.origin.x));
+            action_right = action_right.max(sp(q.bounds.origin.x) + sp(q.bounds.size.width));
+        }
+    }
+    assert!(
+        action_left.is_finite() && action_right <= 960.,
+        "both header actions fit inside the 960px window ({action_left:.1}..{action_right:.1})"
+    );
+    // Check all primary-ink glyphs left of the action buttons: the 90-char model name must paint
+    // truncated with an ellipsis rather than overflowing into the actions.
     let (count, lo, hi) = title_band_glyphs(&mut app, window, 64., action_left);
     assert!(
-        count >= 8 && hi - lo >= 80.,
-        "long model title renders visible glyphs ({count}, {lo:.1}..{hi:.1})"
+        (8..75).contains(&count) && hi - lo >= 80.,
+        "long model title renders truncated visible glyphs ({count}, {lo:.1}..{hi:.1})"
     );
     assert!(hi < action_left, "long model title stops left of header actions ({hi:.1} < {action_left:.1})");
 }
