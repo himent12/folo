@@ -41,6 +41,7 @@ export class LiveBench {
   #entries = signal<BenchEntry[]>([]);
   #loops = signal<BenchLoop[]>([]);
   #error = signal<unknown>(undefined);
+  #resyncError = signal<unknown>(undefined);
   #loading = signal<boolean>(true);
   #listed = signal<boolean>(false);
   #connection = signal<'idle' | 'open' | 'reconnecting'>('idle');
@@ -71,6 +72,13 @@ export class LiveBench {
   }
   set error(v: unknown) {
     this.#error.set(v);
+  }
+  /** Error from a post-load background resync (kept separate from `error` so the loaded board stays visible). */
+  get resyncError(): unknown {
+    return this.#resyncError.get();
+  }
+  set resyncError(v: unknown) {
+    this.#resyncError.set(v);
   }
   get loading(): boolean {
     return this.#loading.get();
@@ -126,6 +134,7 @@ export class LiveBench {
         this.entries = [];
         this.loops = [];
         this.error = undefined;
+        this.resyncError = undefined;
         this.loading = true;
         this.listed = false;
         this.lost = null;
@@ -156,6 +165,7 @@ export class LiveBench {
           this.loading = false;
           this.listed = true;
           this.error = undefined;
+          this.resyncError = undefined;
           heard = Date.now();
           if (this.lost !== null) this.lost = this.connection === 'reconnecting' ? heard : null;
         } finally {
@@ -176,6 +186,7 @@ export class LiveBench {
         resync = undefined;
         unsub();
         this.error = e;
+        this.resyncError = undefined;
         this.bench = undefined;
         this.entries = [];
         this.loops = [];
@@ -195,6 +206,8 @@ export class LiveBench {
           if (!this.listed) {
             this.error = e;
             this.loading = false;
+          } else {
+            this.resyncError = e;
           }
           clearTimeout(syncTimer);
           syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
@@ -210,6 +223,7 @@ export class LiveBench {
       const alive = () => {
         heard = Date.now();
         this.lost = null;
+        this.resyncError = undefined;
       };
       const change = <T extends { id: string }>(kind: 'entries' | 'loops', item: T | null, itemId: string) => {
         this.#heard.set(itemId, ++this.#seq);

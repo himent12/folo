@@ -534,7 +534,7 @@ function clearUpstreamNotified(s: Source): void {
  * memos, so reading one from several places, or again, never re-creates its content. A snippet `fn` returns is
  * wrapped in a memo of its own, so a branch's content is created once and read thereafter.
  */
-export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
+export function memo<T>(fn: () => T, options?: SignalOptions<T> & { raw?: boolean }): Reader<T> {
   const parent = owner;
   let root: Owner | null = null;
   const c = new ComputedNode<T>(() => {
@@ -563,7 +563,7 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
     owner = r;
     try {
       const v = fn();
-      return (typeof v === 'function' && !isReader(v) ? memo(v as () => unknown) : v) as T;
+      return (!options?.raw && typeof v === 'function' && !isReader(v) ? memo(v as () => unknown) : v) as T;
     } catch (e) {
       if (!dead) {
         try {
@@ -927,6 +927,14 @@ export function deferEffects<T>(fn: () => T): T {
   }
   if (fns !== null) for (let i = 0; i < fns.length; i++) effectNow(fns[i]!);
   return out;
+}
+
+/** Internal: `[stableOwner, siteKey]` for `propJsx` (steps past the active tracking effect/memo's per-run owner). */
+export function propScope(): readonly [Owner | null, object | null] {
+  if (owner === null) return [null, null];
+  if ((owner as unknown) === listener) return [owner._parent, owner];
+  if (listener instanceof ComputedNode && (listener._flags & OWNING) !== 0 && owner._parent === listener._parent && owner._id === listener._id) return [owner._parent, listener];
+  return [owner, owner];
 }
 
 /** Internal: maps each component's props object to its component owner (used by `propJsx`). */

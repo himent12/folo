@@ -10,7 +10,7 @@ const parseKind = (p: string | null): EntryKind => (p === 'agent' || p === 'exte
  * - Closes a URL-opened dialog when browser Back removes `?add=`.
  * - Strips `?add=` from the URL (`replace: true`) when the dialog closes so a reload does not reopen it.
  */
-export function useAddQuery(clearAdd: () => void) {
+export function useAddQuery(clearAdd: () => void, canClose: () => boolean = () => true) {
   const addParam = computed(() => (router.route.name === 'benchmark' ? router.route.query.get('add') : null));
   const first = untrack(() => addParam.get());
   const addOpen = signal(first !== null);
@@ -27,6 +27,7 @@ export function useAddQuery(clearAdd: () => void) {
     const p = addParam.get();
     if (p !== null) untrack(() => openAdd(parseKind(p), true));
     else if (openedFromUrl && untrack(() => addOpen.get())) {
+      if (!untrack(canClose)) return;
       openedFromUrl = false;
       untrack(() => addOpen.set(false));
     }

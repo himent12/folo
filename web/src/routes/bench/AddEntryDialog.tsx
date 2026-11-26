@@ -61,6 +61,8 @@ export interface AddEntryDialogProps {
   choice: AgentChoice;
   /** Page-level reason preventing starting an entry (e.g. unsaved plan edits or offline). */
   blockedReason?: string | null;
+  /** Registers `beforeClose` so programmatic URL-driven closes respect active-upload confirmation. */
+  registerClose?: (fn: () => boolean) => void;
   /** The new entry, as the server answered (the page shows it at once). */
   onstarted: (entry: BenchEntry) => void;
 }
@@ -409,6 +411,8 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
     confirmStop.set(true);
     return false;
   };
+  untrack(() => props.registerClose?.(beforeClose));
+  onCleanup(() => props.registerClose?.(() => true));
   const stopSending = () => abort?.abort(new DOMException('Stopped', 'AbortError'));
 
   function body(): StartBenchEntry | null {

@@ -301,7 +301,11 @@ export default function Benchmark() {
     const b = bench.get();
     return b ? boardOrder(live.entries, b.fingerprint) : live.entries;
   });
-  const { addOpen, addKind, openAdd } = useAddQuery(() => setQuery({ add: null }));
+  let closeAdd: () => boolean = () => true;
+  const { addOpen, addKind, openAdd } = useAddQuery(
+    () => setQuery({ add: null }),
+    () => closeAdd(),
+  );
   function started(e: BenchEntry) {
     live.putEntry(e, live.mark());
     if (tab.peek() !== 'leaderboard') setQuery({ tab: null });
@@ -412,7 +416,7 @@ export default function Benchmark() {
   // ---------- the header ----------
   const phone = new MediaQuery(media.phone, false);
   const now = new Now(() => live.lost !== null);
-  const offline = computed(() => isOffline(live.error));
+  const offline = computed(() => isOffline(live.error) || isOffline(live.resyncError));
   const addWhy = computed(() => (offline.get() ? OFFLINE_REASON : unsaved.get() ? 'Save or discard the plan’s changes first' : null));
   const designWhy = computed(() => (!bench.get() ? null : !editable.get() ? FROZEN : null));
   /** The source, linked while the server still has it; a benchmark keeps its own copy either way. */
@@ -454,7 +458,7 @@ export default function Benchmark() {
     if (!b) return [];
     const out: PageCommand[] = [];
     if (!addWhy.get())
-      out.push({ id: 'bench-add', label: 'Add entry', match: ['New entry', 'Benchmark a model'], icon: Plus, run: () => (addKind.set('model'), addOpen.set(true)) });
+      out.push({ id: 'bench-add', label: 'Add entry', match: ['New entry', 'Benchmark a model'], icon: Plus, run: () => !addWhy.peek() && openAdd('model') });
     if (comparing.get()) out.push({ id: 'bench-compare', label: 'Compare selected entries', icon: GitCompare, run: () => router.go(comparePath(b.id, selected.peek(), board.peek())) });
     if (editable.get())
       out.push({ id: 'bench-design', label: 'Design the plan with an agent', icon: Sparkles, run: () => (setQuery({ tab: 'conditions' }), designOpen.set(true)) });
@@ -733,6 +737,7 @@ export default function Benchmark() {
             retryAgents={() => agents.refresh()}
             choice={choice}
             blockedReason={addWhy.get()}
+            registerClose={(fn) => (closeAdd = fn)}
             onstarted={started}
           />
           {catalog.data ? (

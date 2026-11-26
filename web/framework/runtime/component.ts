@@ -2,7 +2,7 @@
 // getters for dynamic values (the compiler emits them), so reading `props.x` where it is used tracks it; never
 // destructure props at the top of a component (that reads them once). These helpers keep the getters intact.
 
-import { computed, getOwner, memo, onCleanup, propOwners, runComponent, runWithOwner, signal, untrack, type Reader, type Signal } from './core';
+import { computed, memo, onCleanup, propOwners, propScope, runComponent, runWithOwner, signal, untrack, type Owner, type Reader, type Signal } from './core';
 
 /** A component: called once with its props; returns what it renders. */
 export type Component<P = Record<string, never>> = (props: P) => JSX.Element;
@@ -42,12 +42,29 @@ function descriptor(obj: object, key: PropertyKey): PropertyDescriptor | undefin
   return Reflect.getOwnPropertyDescriptor(obj, key);
 }
 
+/** The nearest component owner reading through a props wrapper (`splitProps`, `defaults`, `mergeProps`). */
+let activePropOwner: Owner | null = null;
+
+function readFrom(wrapper: object, src: AnyProps, key: PropertyKey): unknown {
+  const o = propOwners.get(wrapper);
+  if (o === undefined) return src[key as string];
+  const prev = activePropOwner;
+  activePropOwner = o;
+  try {
+    return src[key as string];
+  } finally {
+    activePropOwner = prev;
+  }
+}
+
 /** A live descriptor for `src[key]`: a getter, and a setter only if `src` has one (a bound prop). */
 function live(src: AnyProps, key: PropertyKey, d = descriptor(src, key)): PropertyDescriptor {
   return {
     configurable: true,
     enumerable: true,
-    get: () => src[key as string],
+    get(this: object) {
+      return readFrom(this, src, key);
+    },
     set: d?.set ? (v: unknown) => (src[key as string] = v) : undefined,
   };
 }
@@ -68,6 +85,7 @@ export function mergeProps<T extends Source[]>(...sources: T): Merged<T> {
     for (const s of sources) {
       if (!s) continue;
       for (const key of Reflect.ownKeys(s)) {
+        if (key === MEMOS || key === JSX_MEMOS) continue;
         const d = descriptor(s, key)!;
         Object.defineProperty(out, key, { ...d, configurable: true, enumerable: true });
       }
@@ -85,10 +103,7 @@ export function mergeProps<T extends Source[]>(...sources: T): Merged<T> {
     get(_, key) {
       if (key === PROXY) return true;
       const s = find(key);
-      if (!s) return undefined;
-      const o = propOwners.get(proxy);
-      if (o !== undefined && !propOwners.has(s)) propOwners.set(s, o);
-      return s[key as string];
+      return s ? readFrom(proxy, s, key) : undefined;
     },
     set(_, key, value) {
       const s = find(key);
@@ -102,7 +117,7 @@ export function mergeProps<T extends Source[]>(...sources: T): Merged<T> {
       const keys = new Set<PropertyKey>();
       for (const s of sources) {
         const o = resolve(s);
-        if (o) for (const k of Reflect.ownKeys(o)) keys.add(k);
+        if (o) for (const k of Reflect.ownKeys(o)) if (k !== MEMOS && k !== JSX_MEMOS) keys.add(k);
       }
       return [...keys] as (string | symbol)[];
     },
@@ -152,15 +167,14 @@ export function splitProps(props: AnyProps, ...lists: readonly PropertyKey[][]):
     for (const key of keys) Object.defineProperty(part, key, live(props, key));
     return part;
   });
-  parts.push(
-    new Proxy({} as AnyProps, {
-      get: (_, key) => (key === PROXY ? true : excluded.has(key) ? undefined : props[key as string]),
-      set: (_, key, value) => ((props[key as string] = value), true),
-      has: (_, key) => !excluded.has(key) && key in props,
-      ownKeys: () => Reflect.ownKeys(props).filter((k) => !excluded.has(k)) as (string | symbol)[],
-      getOwnPropertyDescriptor: (_, key) => (excluded.has(key) || !(key in props) ? undefined : live(props, key)),
-    }),
-  );
+  const restProxy: AnyProps = new Proxy({} as AnyProps, {
+    get: (_, key) => (key === PROXY ? true : excluded.has(key) ? undefined : readFrom(restProxy, props, key)),
+    set: (_, key, value) => ((props[key as string] = value), true),
+    has: (_, key) => !excluded.has(key) && key in props,
+    ownKeys: () => Reflect.ownKeys(props).filter((k) => k !== MEMOS && k !== JSX_MEMOS && !excluded.has(k)) as (string | symbol)[],
+    getOwnPropertyDescriptor: (_, key) => (excluded.has(key) || !(key in props) ? undefined : live(props, key)),
+  });
+  parts.push(restProxy);
   return parts;
 }
 
@@ -190,8 +204,8 @@ export function defaults<T extends object, const D extends Partial<T>>(props: T,
         Object.defineProperty(out, key, {
           configurable: true,
           enumerable: true,
-          get: () => {
-            const v = p[key as string];
+          get(this: object) {
+            const v = readFrom(this, p, key);
             return v === undefined ? d[key as string] : v;
           },
           set: dp.set ? (v: unknown) => (p[key as string] = v) : undefined,
@@ -206,20 +220,21 @@ export function defaults<T extends object, const D extends Partial<T>>(props: T,
     }
     return out as WithDefaults<T, D>;
   }
-  const read = (key: PropertyKey) => {
-    const v = p[key as string];
+  const read = (wrapper: object, key: PropertyKey) => {
+    const v = readFrom(wrapper, p, key);
     return v === undefined && key in d ? d[key as string] : v;
   };
-  return new Proxy({} as AnyProps, {
-    get: (_, key) => (key === PROXY ? true : read(key)),
+  const defProxy: AnyProps = new Proxy({} as AnyProps, {
+    get: (_, key) => (key === PROXY ? true : read(defProxy, key)),
     set: (_, key, value) => ((p[key as string] = value), true),
     has: (_, key) => key in p || key in d,
-    ownKeys: () => [...new Set([...Reflect.ownKeys(p), ...Reflect.ownKeys(d)])] as (string | symbol)[],
+    ownKeys: () => [...new Set([...Reflect.ownKeys(p), ...Reflect.ownKeys(d)])].filter((k) => k !== MEMOS && k !== JSX_MEMOS) as (string | symbol)[],
     getOwnPropertyDescriptor: (_, key) => {
       if (!(key in p) && !(key in d)) return undefined;
-      return { ...live(p, key), get: () => read(key) };
+      return { ...live(p, key), get: () => read(defProxy, key) };
     },
-  }) as WithDefaults<T, D>;
+  });
+  return defProxy as WithDefaults<T, D>;
 }
 
 /** Whether `props` has a setter for `key` (the parent bound it: `bind:key={...}`). */
@@ -283,29 +298,81 @@ export function propMemo(holder: object, key: string, fn: () => unknown): unknow
   return (memos[key] ??= computed(fn)).get();
 }
 
+interface JsxSlot {
+  cond: Map<Owner | null, { reader: Reader<unknown>; claimedBy: object | null }>;
+  bySite: WeakMap<object, Reader<unknown>>;
+}
+
 /**
- * Internal: a component prop whose expression directly evaluates JSX. Runs lazily inside an owning memo attached to
- * the active owner (or the component's owner when first read inside a `computed`/`cond`), so checking `props.x ?`
- * before rendering `{props.x}` builds the subtree once, preserves child context, and disposes cleanly on unmount.
+ * Internal: a component prop whose expression directly evaluates JSX. Runs lazily inside a raw owning memo so:
+ * - A presence check (`props.x ?` inside `cond`/`computed`) runs under the consuming component's owner (never `null`)
+ *   and is claimed by the first live insertion under that owner (no double-mount, no leaked effects).
+ * - Distinct sibling insertions (`<div>{props.x}</div><div>{props.x}</div>`) each keep their own DOM instance.
+ * - Reactive updates inside an insertion reuse its memo on the stable enclosing owner without double-mounting.
+ * - Returned functions (e.g. `flag ? <em /> : callback`) are preserved without eager invocation.
  */
 export function propJsx(holder: object, key: string, fn: () => unknown): unknown {
-  let memos = (holder as Record<symbol, Record<string, Reader<unknown> | undefined> | undefined>)[JSX_MEMOS];
-  if (memos === undefined) Object.defineProperty(holder, JSX_MEMOS, { value: (memos = {}) });
-  let m = memos[key];
-  if (m === undefined) {
-    const target = getOwner() ?? propOwners.get(holder) ?? null;
-    const created = runWithOwner(target, () => {
-      const r = memo(fn);
-      if (target !== null) {
-        onCleanup(() => {
-          if (memos![key] === r) memos![key] = undefined;
-        });
-      }
-      return r;
-    });
-    memos[key] = m = created;
+  let slots = (holder as Record<symbol, Record<string, JsxSlot | undefined> | undefined>)[JSX_MEMOS];
+  if (slots === undefined) Object.defineProperty(holder, JSX_MEMOS, { value: (slots = {}) });
+  const slot = (slots[key] ??= { cond: new Map(), bySite: new WeakMap() });
+  const [target, site] = propScope();
+
+  // Read inside a non-owning computed / cond (`owner === null`): attach to the consuming component's owner.
+  if (site === null) {
+    const compOwner = activePropOwner ?? propOwners.get(holder) ?? null;
+    let entry = slot.cond.get(compOwner);
+    if (entry === undefined) {
+      entry = runWithOwner(compOwner, () => {
+        const reader = memo(fn, { raw: true });
+        const created = { reader, claimedBy: null as object | null };
+        slot.cond.set(compOwner, created);
+        if (compOwner !== null) {
+          onCleanup(() => {
+            if (slot.cond.get(compOwner) === created) slot.cond.delete(compOwner);
+          });
+        }
+        return created;
+      });
+    }
+    return entry.reader();
   }
-  return m();
+
+  // Read at a concrete insertion / effect / component site: reuse this site's memo across reactive re-runs.
+  const existing = slot.bySite.get(site);
+  if (existing !== undefined) return existing();
+
+  // Claim an unclaimed `cond()` memo from an enclosing owner so `props.x ? <div>{props.x}</div> : null` mounts once.
+  if (slot.cond.size > 0) {
+    for (let cur = target; cur !== null; cur = cur._parent) {
+      const entry = slot.cond.get(cur);
+      if (entry !== undefined && entry.claimedBy === null) {
+        entry.claimedBy = site;
+        slot.bySite.set(site, entry.reader);
+        if (target !== null) {
+          runWithOwner(target, () => {
+            onCleanup(() => {
+              if (entry.claimedBy === site) entry.claimedBy = null;
+              if (slot.bySite.get(site) === entry.reader) slot.bySite.delete(site);
+            });
+          });
+        }
+        return entry.reader();
+      }
+    }
+  }
+
+  // Otherwise create a dedicated owning memo for this insertion site on its stable enclosing owner.
+  const created = runWithOwner(target, () => {
+    const r = memo(fn, { raw: true });
+    slot.bySite.set(site, r);
+    if (target !== null) {
+      onCleanup(() => {
+        if (slot.bySite.get(site) === r) slot.bySite.delete(site);
+      });
+    }
+    return r;
+  });
+  return created();
 }
 
 /** Internal: a memoized spread source (`{...attrs()}` on a component), read lazily. */
