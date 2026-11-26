@@ -10,7 +10,7 @@ use std::arch::x86_64::*;
 
 use super::simd::has_avx2;
 use super::simd_binary::{map2_avx2, max8_exact, min8_exact};
-use super::{fill_rows, max_num, min_num};
+use super::{fill_rows, max_num, min_num, sign};
 use crate::Layout;
 use crate::backend::UnaryOp;
 use crate::cpu::pool_alloc::alloc_uninit;
@@ -62,6 +62,28 @@ fn hardswish_bwd8(x: __m256, g: __m256) -> __m256 {
     let mid = _mm256_mul_ps(_mm256_mul_ps(g, _mm256_add_ps(_mm256_mul_ps(two, x), c3)), inv6);
     let r = _mm256_blendv_ps(mid, g, _mm256_cmp_ps::<_CMP_GT_OQ>(x, c3));
     _mm256_blendv_ps(r, zero, _mm256_cmp_ps::<_CMP_LT_OQ>(x, neg3))
+}
+
+/// Exact round-half-away-from-zero (`f32::round`) across all 2^32 binary32 values:
+/// `copysign(trunc(|v| + (0.5 - 2^-25)), v)`.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn round_away8(v: __m256) -> __m256 {
+    let sign_bit = _mm256_set1_ps(-0.0);
+    let prev_half = _mm256_set1_ps(f32::from_bits(0x3eff_ffff));
+    let s = _mm256_and_ps(v, sign_bit);
+    let abs_v = _mm256_andnot_ps(sign_bit, v);
+    let r = _mm256_round_ps::<{ _MM_FROUND_TO_ZERO | _MM_FROUND_NO_EXC }>(_mm256_add_ps(abs_v, prev_half));
+    _mm256_or_ps(r, s)
+}
+
+#[target_feature(enable = "avx2")]
+#[inline]
+fn sign8(v: __m256) -> __m256 {
+    let zero = _mm256_setzero_ps();
+    let pos = _mm256_and_ps(_mm256_cmp_ps::<_CMP_GT_OQ>(v, zero), _mm256_set1_ps(1.0));
+    let neg = _mm256_and_ps(_mm256_cmp_ps::<_CMP_LT_OQ>(v, zero), _mm256_set1_ps(-1.0));
+    _mm256_or_ps(pos, neg)
 }
 
 macro_rules! avx2_unary_loop {
@@ -247,6 +269,10 @@ pub(super) fn try_unary_avx2(op: UnaryOp, x: &[f32], lx: &Layout) -> Option<Vec<
                 go_p1!(c, cv, v => min8_exact(v, cv), s => min_num(s, c))
             }
         }
+        Floor => go!(v => _mm256_floor_ps(v), s => s.floor()),
+        Ceil => go!(v => _mm256_ceil_ps(v), s => s.ceil()),
+        Round => go!(v => round_away8(v), s => s.round()),
+        Sign => go!(v => sign8(v), s => sign(s)),
         _ => None,
     }
 }
@@ -293,6 +319,7 @@ pub(super) fn try_unary_backward_avx2(
     use UnaryOp::*;
     match op {
         Neg | RSubScalar(_) => go2!(_vx, vg => _mm256_xor_ps(vg, _mm256_set1_ps(-0.0)); _sx, sg => -sg),
+        Abs => go2!(vx, vg => _mm256_mul_ps(vg, sign8(vx)); sx, sg => sg * sign(sx)),
         AddScalar(_) => go2!(_vx, vg => vg; _sx, sg => sg),
         MulScalar(c) => go2_p1!(c, cv, _vx, vg => _mm256_mul_ps(vg, cv); _sx, sg => sg * c),
         DivScalar(c) => go2_p1!(c, cv, _vx, vg => _mm256_div_ps(vg, cv); _sx, sg => sg / c),

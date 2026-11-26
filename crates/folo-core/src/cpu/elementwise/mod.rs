@@ -13,7 +13,10 @@ mod simd_ops_tests;
 mod tests;
 mod transpose;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm_ops;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 mod wasm_simd;
+mod where_cond;
 
 use super::pool_alloc::alloc_uninit;
 use super::{CHUNK, PAR_MIN};
@@ -36,7 +39,10 @@ pub(crate) use transpose::{
     transpose_f32_2d_serial,
 };
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-pub(crate) use wasm_simd::silu4 as silu4_wasm;
+pub(crate) use wasm_simd::{exp4 as exp4_wasm, ln4 as ln4_wasm, silu4 as silu4_wasm};
+#[cfg(any(target_arch = "x86_64", test))]
+pub(crate) use where_cond::where3;
+pub(crate) use where_cond::{where3_f32, where3_u8};
 
 /// Fill `out` (contiguous, `plan.rows * plan.len` long) row by row, in parallel when large.
 #[inline]
@@ -551,130 +557,6 @@ fn map2_exact_slice(
     out
 }
 
-/// `cond != 0 ? a : b` with three strided operands of the output shape.
-pub(crate) fn where3<C: Copy + Send + Sync>(
-    c: &[C],
-    lc: &Layout,
-    a: &[f32],
-    la: &Layout,
-    b: &[f32],
-    lb: &Layout,
-    truthy: impl Fn(C) -> bool + Sync,
-) -> Vec<f32> {
-    let n = la.numel();
-    if n == 0 {
-        return Vec::new();
-    }
-    let mut out = alloc_uninit(n);
-    if let (Some(rc), Some(ra), Some(rb)) =
-        (lc.contiguous_range(), la.contiguous_range(), lb.contiguous_range())
-    {
-        let (c, a, b) = (&c[rc], &a[ra], &b[rb]);
-        let piece = |k: usize, o: &mut [f32]| {
-            let r = k * CHUNK..k * CHUNK + o.len();
-            for (((o, &cv), &av), &bv) in o.iter_mut().zip(&c[r.clone()]).zip(&a[r.clone()]).zip(&b[r]) {
-                *o = if truthy(cv) { av } else { bv };
-            }
-        };
-        if n >= PAR_MIN {
-            par_chunks(&mut out, CHUNK, &piece);
-        } else {
-            piece(0, &mut out);
-        }
-        return out;
-    }
-    let plan = RowPlan::<3>::new(
-        la.dims(),
-        [lc.strides(), la.strides(), lb.strides()],
-        [lc.offset(), la.offset(), lb.offset()],
-    );
-    let [sc, sa, sb] = plan.inner;
-    fill_rows(&mut out, &plan, |row, [oc, oa, ob]| {
-        let len = row.len();
-        match (sc, sa, sb) {
-            (1, 1, 1) => {
-                for (((r, &cv), &av), &bv) in
-                    row.iter_mut().zip(&c[oc..oc + len]).zip(&a[oa..oa + len]).zip(&b[ob..ob + len])
-                {
-                    *r = if truthy(cv) { av } else { bv };
-                }
-            }
-            (1, 1, 0) => {
-                let bv = b[ob];
-                for ((r, &cv), &av) in row.iter_mut().zip(&c[oc..oc + len]).zip(&a[oa..oa + len]) {
-                    *r = if truthy(cv) { av } else { bv };
-                }
-            }
-            (1, 0, 1) => {
-                let av = a[oa];
-                for ((r, &cv), &bv) in row.iter_mut().zip(&c[oc..oc + len]).zip(&b[ob..ob + len]) {
-                    *r = if truthy(cv) { av } else { bv };
-                }
-            }
-            (1, 0, 0) => {
-                let (av, bv) = (a[oa], b[ob]);
-                for (r, &cv) in row.iter_mut().zip(&c[oc..oc + len]) {
-                    *r = if truthy(cv) { av } else { bv };
-                }
-            }
-            (0, 1, 1) => {
-                if truthy(c[oc]) {
-                    row.copy_from_slice(&a[oa..oa + len]);
-                } else {
-                    row.copy_from_slice(&b[ob..ob + len]);
-                }
-            }
-            (0, 1, 0) => {
-                if truthy(c[oc]) {
-                    row.copy_from_slice(&a[oa..oa + len]);
-                } else {
-                    row.fill(b[ob]);
-                }
-            }
-            (0, 0, 1) => {
-                if truthy(c[oc]) {
-                    row.fill(a[oa]);
-                } else {
-                    row.copy_from_slice(&b[ob..ob + len]);
-                }
-            }
-            (0, 0, 0) => {
-                row.fill(if truthy(c[oc]) { a[oa] } else { b[ob] });
-            }
-            _ => {
-                for (i, r) in row.iter_mut().enumerate() {
-                    *r = if truthy(c[oc + i * sc]) { a[oa + i * sa] } else { b[ob + i * sb] };
-                }
-            }
-        }
-    });
-    out
-}
-
-/// `cond != 0.0 ? a : b` for `F32` conditions, using AVX2 on `x86_64` when available.
-pub(crate) fn where3_f32(c: &[f32], lc: &Layout, a: &[f32], la: &Layout, b: &[f32], lb: &Layout) -> Vec<f32> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        simd_binary::where3_f32_avx2(c, lc, a, la, b, lb)
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        where3(c, lc, a, la, b, lb, |v| v != 0.0)
-    }
-}
-
-/// `cond != 0 ? a : b` for `U8` conditions, using AVX2 on `x86_64` when available.
-pub(crate) fn where3_u8(c: &[u8], lc: &Layout, a: &[f32], la: &Layout, b: &[f32], lb: &Layout) -> Vec<f32> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        simd_binary::where3_u8_avx2(c, lc, a, la, b, lb)
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        where3(c, lc, a, la, b, lb, |v| v != 0)
-    }
-}
-
 /// `maxNum` with explicit tie-to-right-operand semantics (`if a > b || b.is_nan() { a } else { b }`),
 /// matching AVX2 `vmaxps`, Wasm `max4_exact`, and `f32::max` lowering across scalar and SIMD paths.
 #[inline(always)]
@@ -733,7 +615,7 @@ pub fn silu_backward(x: f32, g: f32) -> f32 {
 }
 
 #[inline(always)]
-fn sign(x: f32) -> f32 {
+pub(super) fn sign(x: f32) -> f32 {
     if x > 0.0 {
         1.0
     } else if x < 0.0 {
@@ -757,6 +639,10 @@ pub(crate) fn bias_act_inplace(op: Option<UnaryOp>, bias: f32, v: &mut [f32]) {
     }
     #[cfg(target_arch = "x86_64")]
     if simd_ops::try_bias_act_inplace_avx2(op, bias, v) {
+        return;
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if wasm_ops::try_bias_act_inplace_wasm(op, bias, v) {
         return;
     }
     match op {
@@ -812,6 +698,10 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
     if let Some(out) = simd_ops::try_unary_avx2(op, x, lx) {
         return out;
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if let Some(out) = wasm_ops::try_unary_wasm(op, x, lx) {
+        return out;
+    }
     use UnaryOp::*;
     match op {
         Neg => map1(x, lx, |v| -v),
@@ -863,6 +753,10 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
 pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg: &Layout) -> Vec<f32> {
     #[cfg(target_arch = "x86_64")]
     if let Some(out) = simd_ops::try_unary_backward_avx2(op, x, lx, g, lg) {
+        return out;
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if let Some(out) = wasm_ops::try_unary_backward_wasm(op, x, lx, g, lg) {
         return out;
     }
     use UnaryOp::*;
@@ -969,17 +863,11 @@ pub(crate) fn binary(op: BinaryOp, a: &[f32], la: &Layout, b: &[f32], lb: &Layou
     if let Some(out) = simd_binary::try_binary_avx2(op, a, la, b, lb) {
         return out;
     }
-    use BinaryOp::*;
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    match op {
-        Add => return wasm_simd::binary_map2(op, a, la, b, lb, |a, b| a + b),
-        Sub => return wasm_simd::binary_map2(op, a, la, b, lb, |a, b| a - b),
-        Mul => return wasm_simd::binary_map2(op, a, la, b, lb, |a, b| a * b),
-        Div => return wasm_simd::binary_map2(op, a, la, b, lb, |a, b| a / b),
-        Maximum => return wasm_simd::binary_map2(op, a, la, b, lb, f32::max),
-        Minimum => return wasm_simd::binary_map2(op, a, la, b, lb, f32::min),
-        _ => {}
+    if let Some(out) = wasm_simd::try_binary_wasm(op, a, la, b, lb) {
+        return out;
     }
+    use BinaryOp::*;
     match op {
         Add => map2(a, la, b, lb, |a, b| a + b),
         Sub => map2(a, la, b, lb, |a, b| a - b),

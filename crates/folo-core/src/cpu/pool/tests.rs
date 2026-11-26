@@ -54,7 +54,7 @@ fn max_pool_values_are_the_indexed_values_bit_for_bit() {
     let special = [0.0f32, -0.0, f32::NEG_INFINITY, f32::from_bits(0x7fc0_0001), f32::from_bits(0xffc0_0002)];
     for (np, h, w) in [(3, 11, 9), (2, 2, 3), (5, 1, 1), (17, 20, 20)] {
         let x: Vec<f32> = (0..np * h * w)
-            .map(|i| match (i * 2654435761) % 11 {
+            .map(|i: usize| match i.wrapping_mul(2654435761) % 11 {
                 k @ 0..=4 => special[k],
                 k => (k as f32 - 7.0) * 0.5,
             })
@@ -215,7 +215,7 @@ fn avx2_max_pool_values_and_indexed_match_direct_across_widths_and_edge_cases() 
     // Unaligned widths across 8-wide AVX2 boundary + scalar tails, plus a parallel batch (`>= PAR_MIN`).
     for (np, h, w) in [(2, 5, 1), (2, 7, 7), (2, 8, 8), (2, 9, 9), (2, 11, 17), (3, 20, 20), (2, 13, 37)] {
         let x: Vec<f32> = (0..np * h * w)
-            .map(|i| match (i * 2654435761) % 13 {
+            .map(|i: usize| match i.wrapping_mul(2654435761) % 13 {
                 k @ 0..=5 => special[k],
                 k => (k as f32 - 8.0) * 0.25,
             })
