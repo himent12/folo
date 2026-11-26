@@ -395,10 +395,20 @@ impl RAdam {
             }
         }
 
-        let aliases_state = self.groups.iter().flat_map(|g| &g.params).any(|(_, p)| {
-            self.state_keys.contains(&storage_key(p))
-                || grads.grad(p).is_some_and(|g| self.state_keys.contains(&storage_key(g)))
-        });
+        for grp in &self.groups {
+            for (name, p) in &grp.params {
+                if self.state_keys.contains(&storage_key(p)) {
+                    return Err(Error::Invalid(format!(
+                        "radam: parameter `{name}` aliases an optimizer state buffer"
+                    )));
+                }
+            }
+        }
+        let aliases_state = self
+            .groups
+            .iter()
+            .flat_map(|g| &g.params)
+            .any(|(_, p)| grads.grad(p).is_some_and(|g| self.state_keys.contains(&storage_key(g))));
         self.plan.sync(&self.groups);
         self.coefs.clear();
         for g in &self.groups {

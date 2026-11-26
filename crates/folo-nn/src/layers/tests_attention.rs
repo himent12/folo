@@ -109,6 +109,7 @@ fn eca_kernel_formula_grad_check_and_edge_cases() {
     assert_eq!(eca_auto.forward(&Tensor::zeros([0, 64, 3, 5])).unwrap().dims(), &[0, 64, 3, 5]);
     assert!(Eca::with_kernel_size(4, 0, &mut rng).is_err());
     assert!(Eca::with_kernel_size(4, 4, &mut rng).is_err()); // even kernel rejected
+    assert!(Eca::with_kernel_size(1, usize::MAX, &mut rng).is_err()); // overflow rejected
     assert!(eca.forward(&Tensor::zeros([1, 4, 3, 3])).is_err());
 }
 
@@ -196,11 +197,21 @@ fn weight_standardized_conv2d_properties_grad_check_and_edge_cases() {
         assert!((a - b).abs() < 1e-4, "shift invariance: {a} vs {b}");
     }
 
-    // Constant filter (including huge finite 1e38 values that would overflow an unscaled sum) and
-    // fan_in == 1 stay finite in both forward and backward.
+    // Constant filters (including `[100000.0; 3]` where `1/3` pre-scaling would round off and huge
+    // `[1e38; 4]` that would overflow unscaled sum), extreme opposite-sign filters `[1e20, -1e20]` whose
+    // unscaled square overflows f32, and `fan_in == 1` stay exact and finite.
     let huge_const = Tensor::full([1, 4, 1, 1], 1e38f32);
     let huge_hat = standardize_weight(&huge_const, WS_CONV_DEFAULT_EPS).unwrap();
     assert!(huge_hat.to_vec::<f32>().unwrap().iter().all(|&v| v == 0.0));
+
+    let const_100k = Tensor::full([1, 3, 1, 1], 100_000.0f32);
+    let const_100k_hat = standardize_weight(&const_100k, WS_CONV_DEFAULT_EPS).unwrap();
+    assert_eq!(const_100k_hat.to_vec::<f32>().unwrap(), vec![0.0, 0.0, 0.0]);
+
+    let extreme_pair = Tensor::from_slice(&[1e20f32, -1e20], [1, 2, 1, 1]).unwrap();
+    let extreme_hat =
+        standardize_weight(&extreme_pair, WS_CONV_DEFAULT_EPS).unwrap().to_vec::<f32>().unwrap();
+    assert!((extreme_hat[0] - 1.0).abs() < 1e-6 && (extreme_hat[1] + 1.0).abs() < 1e-6, "{extreme_hat:?}");
 
     let const_w = Tensor::full([2, 3, 2, 2], 5.0).requires_grad_();
     let cw_hat = standardize_weight(&const_w, WS_CONV_DEFAULT_EPS).unwrap();

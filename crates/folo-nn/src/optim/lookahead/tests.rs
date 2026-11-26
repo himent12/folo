@@ -159,6 +159,31 @@ fn lookahead_convergence_resume_and_validation() {
     assert!(Lookahead::with_defaults(tied_sgd).is_err());
     let la_once = Lookahead::with_defaults(make_sgd()).unwrap();
     assert!(Lookahead::with_defaults(la_once).is_err());
+
+    // `alpha == 1.0` copies fast weights directly without `(fast - slow)` cancellation:
+    // slow = 1.0, step 1 moves fast to 0.0, step 2 moves fast to 1e-8 and syncs with alpha = 1.0.
+    let p_end = Tensor::from_slice(&[1.0f32], [1]).unwrap().requires_grad_();
+    let sgd_end =
+        Sgd::new(vec![ParamGroup::new("e", vec![("e".into(), p_end.clone())]).lr(1.0).momentum(0.0)])
+            .unwrap();
+    let mut la_end = Lookahead::new(sgd_end, LookaheadConfig { k: 2, alpha: 1.0 }).unwrap();
+    let g1 = Tensor::from_slice(&[1.0f32], [1]).unwrap();
+    let g2 = Tensor::from_slice(&[-1e-8f32], [1]).unwrap();
+    la_end.step(&p_end.mul(&g1).unwrap().sum_all().unwrap().backward().unwrap()).unwrap();
+    la_end.step(&p_end.mul(&g2).unwrap().sum_all().unwrap().backward().unwrap()).unwrap();
+    assert_eq!(p_end.to_vec::<f32>().unwrap(), vec![1e-8f32]);
+    assert_eq!(la_end.slow_weight(0, 0).unwrap().to_vec::<f32>().unwrap(), vec![1e-8f32]);
+
+    // Cross-parameter slow-weight aliasing via `groups_mut()` must be rejected.
+    let a = Tensor::zeros([2]).requires_grad_();
+    let b = Tensor::zeros([2]).requires_grad_();
+    let sgd_ab =
+        Sgd::new(vec![ParamGroup::new("ab", vec![("a".into(), a.clone()), ("b".into(), b.clone())])])
+            .unwrap();
+    let mut la_ab = Lookahead::with_defaults(sgd_ab).unwrap();
+    let slow0 = la_ab.slow_weight(0, 0).unwrap().clone();
+    la_ab.groups_mut()[0].params[1].1 = slow0;
+    assert!(la_ab.sync_slow_to_fast().is_err());
 }
 
 /// End-to-end on-disk `.folo` checkpoint save & `ModelFile::resume` round-trip mid-cycle, including

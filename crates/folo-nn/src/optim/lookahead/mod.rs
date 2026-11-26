@@ -257,7 +257,6 @@ impl<O: Optimizer> Lookahead<O> {
                     || p.device() != phi.device()
                     || !p.layout().is_non_overlapping()
                     || !phi.layout().is_non_overlapping()
-                    || p.same_storage(phi)
                 {
                     return Err(Error::Invalid(format!(
                         "lookahead.{op}: parameter `{name}` ({:?} {:?} {}) does not match slow weight ({:?} {:?} {})",
@@ -267,6 +266,15 @@ impl<O: Optimizer> Lookahead<O> {
                         phi.dims(),
                         phi.device(),
                         phi.dtype()
+                    )));
+                }
+            }
+        }
+        for (grp, slows) in groups.iter().zip(&self.slow_weights) {
+            for ((name, _), phi) in grp.params.iter().zip(slows) {
+                if seen_params.contains(&storage_key(phi)) {
+                    return Err(Error::Invalid(format!(
+                        "lookahead.{op}: slow weight for `{name}` aliases a parameter's storage"
                     )));
                 }
             }
@@ -455,6 +463,11 @@ fn copy_tensor_in_place(dst: &Tensor, src: &Tensor) -> Result<()> {
 }
 
 fn interpolate_pair(p: &Tensor, phi: &Tensor, alpha: f32) -> Result<()> {
+    // At the `alpha = 1` endpoint, `phi <- theta` directly without computing `phi + (theta - phi)` so
+    // small fast weights cannot cancel against large slow weights.
+    if alpha == 1.0 {
+        return copy_tensor_in_place(phi, p);
+    }
     if cpu_fast(&[p, phi]) && !p.same_storage(phi) {
         phi.update_f32(|s| {
             p.update_f32(|f| {

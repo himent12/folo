@@ -63,11 +63,24 @@ pub fn standardize_weight(weight: &Tensor, eps: f32) -> Result<Tensor> {
 
     let work = if orig_dtype == DType::F16 { weight.to_dtype(DType::F32)? } else { weight.clone() };
     let flat = work.reshape([out_c, fan_in])?;
-    // Scale before summing so large finite constant filters (e.g. `[1e38; fan_in]`) do not overflow `f32`.
-    let mean = flat.mul_scalar(1.0 / fan_in as f32)?.sum(1, true)?;
-    let centered = flat.sub(&mean)?;
+    // Rescale each filter by detached `s = max(max(|W_o|), 1.0)` so `|u| <= 1.0` everywhere (eliminating
+    // sum/diff/square overflow for extreme weights like `[1e20, -1e20]` or `[1e38; 4]`), then shift by
+    // detached `u[:, 0:1]` before taking the mean so any constant filter (e.g. `[100000.0; 3]`) cancels to
+    // exact bit-for-bit zero before division. Because `s` and `anchor` are detached constants that cancel
+    // algebraically, both forward values and autograd gradients match the exact unscaled definition.
+    let scale = flat.abs()?.max(1, true)?.detach().clamp(1.0, f32::MAX)?;
+    let u = flat.div(&scale)?;
+    let anchor = u.narrow(1, 0, 1)?.detach();
+    let shifted = u.sub(&anchor)?;
+    let centered = shifted.sub(&shifted.mean(1, true)?)?;
     let var = centered.square()?.mean(1, true)?;
-    let denom = var.add_scalar(eps)?.sqrt()?;
+    let eps_scaled = scale
+        .mul_scalar(0.0)?
+        .add_scalar(eps)?
+        .div(&scale)?
+        .div(&scale)?
+        .clamp(f32::MIN_POSITIVE, f32::MAX)?;
+    let denom = var.add(&eps_scaled)?.sqrt()?;
     let normed = centered.div(&denom)?.reshape(weight.shape())?;
     if orig_dtype == DType::F16 { Ok(normed.to_dtype(DType::F16)?) } else { Ok(normed) }
 }
@@ -171,7 +184,7 @@ fn validate_ws_conv(c: &Conv2dConfig, eps: f32) -> Result<()> {
         .and_then(|v| v.checked_mul(c.kernel))
         .and_then(|v| v.checked_mul(c.out_channels))
         .and_then(|v| v.checked_mul(std::mem::size_of::<f32>()))
-        .is_none()
+        .is_none_or(|bytes| bytes > isize::MAX as usize)
     {
         return Err(Error::Invalid(format!(
             "WeightStandardizedConv2d: weight geometry overflows allocation for {c:?}"

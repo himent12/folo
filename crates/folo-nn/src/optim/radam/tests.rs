@@ -246,4 +246,9 @@ fn radam_aliased_grad_equals_param_does_not_clobber() {
     // Unrectified step 1: p_decayed = 2.0 * (1 - 0.1 * 0.5) = 1.9, g_eff = 2.0 -> p = 1.9 - 0.1 * 2.0 = 1.70.
     let got = p.to_vec::<f32>().unwrap()[0];
     assert!((got - 1.70).abs() < 1e-6, "expected 1.70, got {got}");
+
+    // Parameter aliasing an optimizer moment buffer via `groups_mut()` must be rejected before stepping.
+    let m_alias = opt.moments(0, 0).unwrap().0.clone();
+    opt.groups_mut()[0].params[0].1 = m_alias;
+    assert!(opt.step(&SelfGrad(p)).is_err());
 }

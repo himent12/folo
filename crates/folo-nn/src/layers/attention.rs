@@ -207,6 +207,12 @@ impl Eca {
         if kernel_size == 0 || kernel_size.is_multiple_of(2) {
             return Err(Error::Invalid(format!("Eca: kernel_size must be odd and >= 1, got {kernel_size}")));
         }
+        if kernel_size.checked_mul(std::mem::size_of::<f32>()).is_none_or(|bytes| bytes > isize::MAX as usize)
+        {
+            return Err(Error::Invalid(format!(
+                "Eca: kernel_size {kernel_size} overflows weight allocation"
+            )));
+        }
         let b = init::default_conv_bound(kernel_size);
         let weight = init::uniform([1, 1, 1, kernel_size], b, rng).requires_grad_();
         Ok(Self { weight, channels, kernel_size })
@@ -350,7 +356,7 @@ impl SpatialAttention {
             .checked_mul(kernel_size)
             .and_then(|k2| k2.checked_mul(2))
             .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
-            .is_none()
+            .is_none_or(|bytes| bytes > isize::MAX as usize)
         {
             return Err(Error::Invalid(format!(
                 "SpatialAttention: kernel_size {kernel_size} overflows weight allocation"
