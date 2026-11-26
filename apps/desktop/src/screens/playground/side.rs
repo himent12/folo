@@ -880,6 +880,11 @@ impl FoloApp {
                     .mb(px(1.))
                     .overflow_y_scroll()
                     .track_scroll(&self.play_side_scroll)
+                    .on_scroll_wheel(cx.listener(|this, _, window, cx| {
+                        if window.default_prevented() && this.close_menus() {
+                            cx.notify();
+                        }
+                    }))
                     .child(
                         div()
                             .flex()

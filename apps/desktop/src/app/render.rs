@@ -102,6 +102,14 @@ impl Render for FoloApp {
         let titlebar = self.titlebar(window, cx).into_any_element();
         let sidebar = self.sidebar(window, cx).into_any_element();
         *self.key_hint.borrow_mut() = None;
+        if self.menu_open.is_some() || self.export_open {
+            let scroll_y = self.menu_scroll_offset();
+            if self.menu_typeahead.scroll_moved(scroll_y) {
+                self.close_menus();
+            }
+        } else {
+            self.menu_typeahead.reset_scroll_anchor();
+        }
         let page = self.page(window, cx);
         // A dialog or the inspector owns the keys: the page's hint stands down.
         let key_hint = self.key_hint.borrow_mut().take().filter(|_| self.kb && !self.modal_open());

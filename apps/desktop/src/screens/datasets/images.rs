@@ -697,6 +697,9 @@ impl FoloApp {
             let ds_id = wheel_ds;
             move |this, _, _, cx| {
                 this.ds_scroll_anchor = None;
+                if this.close_menus() {
+                    cx.notify();
+                }
                 let Some(hovered) = this.ds_hover_tile.as_deref() else { return };
                 let Some((hover_ds, cached_idx, hover_img)) = parse_hover_tile(hovered) else {
                     this.ds_hover_tile = None;

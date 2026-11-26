@@ -66,6 +66,11 @@ impl FoloApp {
                     .size_full()
                     .overflow_y_scroll()
                     .track_scroll(&self.page_scroll)
+                    .on_scroll_wheel(cx.listener(|this, _, window, cx| {
+                        if window.default_prevented() && this.close_menus() {
+                            cx.notify();
+                        }
+                    }))
                     .child(
                         div()
                             .w_full()

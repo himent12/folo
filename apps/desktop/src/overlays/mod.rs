@@ -414,6 +414,11 @@ impl FoloApp {
                                                 .min_h_0()
                                                 .overflow_y_scroll()
                                                 .track_scroll(&self.dialog_scroll)
+                                                .on_scroll_wheel(cx.listener(|this, _, window, cx| {
+                                                    if window.default_prevented() && this.close_menus() {
+                                                        cx.notify();
+                                                    }
+                                                }))
                                                 .child(body),
                                         )
                                         // Fades only where more of the form lies (a row half under

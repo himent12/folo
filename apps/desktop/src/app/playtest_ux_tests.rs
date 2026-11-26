@@ -916,3 +916,6 @@ fn select_paging_clamped_highlight_and_export_menu_exclusivity() {
         assert!(!this.export_open, "Enter closes export menu cleanly when all formats are busy");
     });
 }
+
+#[path = "playtest_r7_tests.rs"]
+mod playtest_r7_tests;

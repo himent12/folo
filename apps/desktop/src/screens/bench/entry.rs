@@ -31,6 +31,11 @@ impl FoloApp {
     ) -> AnyElement {
         let t = theme(cx);
         self.ensure_bench(bench, cx);
+        if self.bench_unsupported() {
+            let header = page_header(&t, "Entry", "Not available on this server", vec![]);
+            let body = self.bench_unsupported_panel(&t, window, cx);
+            return self.page_frame(&t, header, body, cx);
+        }
         let e = self
             .bench
             .entries
@@ -41,11 +46,18 @@ impl FoloApp {
         let b = self.bench.list.ready().and_then(|l| l.iter().find(|x| x.id == bench)).cloned();
         let (Some(e), Some(b)) = (e, b) else {
             let header = page_header(&t, "Entry", "", vec![]);
-            let failed =
-                self.bench.entries.get(bench).and_then(|l| l.error()).or(self.bench.list.error()).cloned();
+            let failed = self
+                .bench
+                .entries
+                .get(bench)
+                .and_then(|l| l.error())
+                .or_else(|| self.bench.list.error())
+                .or_else(|| self.bench_blocked_error())
+                .cloned();
             let body = if let Some(err) = failed {
                 self.error_panel(&err, "bench-entry-retry", window, cx)
             } else if self.bench.list.is_loading()
+                || self.bench_discovering()
                 || self.bench.entries.get(bench).is_none_or(|l| l.is_loading())
             {
                 panel(&t).child(loading_rows(&t, "entry", 5)).into_any_element()

@@ -17,6 +17,10 @@ pub struct SelectTypeahead {
     query: String,
     last: Option<std::time::Instant>,
     menu: Option<&'static str>,
+    /// Enclosing container's vertical scroll offset when the active popup opened; if it changes
+    /// while the popup is open (wheel, scrollbar, or programmatic scroll), the popup closes so it
+    /// never detaches over a dialog header or the title bar.
+    scroll_anchor: Option<Option<folo_ui::Pixels>>,
 }
 
 /// Pause after which the next typed character starts a fresh typeahead prefix.
@@ -28,6 +32,24 @@ impl SelectTypeahead {
         self.query.clear();
         self.last = None;
         self.menu = None;
+        self.scroll_anchor = None;
+    }
+
+    /// Clears only the recorded scroll anchor (called on frames when no popup menu is open).
+    pub(crate) fn reset_scroll_anchor(&mut self) {
+        self.scroll_anchor = None;
+    }
+
+    /// Records the enclosing scroll offset on the first frame a popup is open, and returns `true`
+    /// once that scroll container moves to a different offset.
+    pub(crate) fn scroll_moved(&mut self, current: Option<folo_ui::Pixels>) -> bool {
+        match self.scroll_anchor {
+            None => {
+                self.scroll_anchor = Some(current);
+                false
+            }
+            Some(initial) => initial != current,
+        }
     }
 
     /// Appends `ch` to the active prefix for `menu` and returns the matching enabled option index.
@@ -119,6 +141,46 @@ fn menu_box(trigger: (f32, f32), viewport_w: f32) -> (f32, f32) {
 pub type OnSelect = std::rc::Rc<dyn Fn(&mut FoloApp, usize, &mut Window, &mut Context<FoloApp>)>;
 
 impl FoloApp {
+    /// Closes any open select dropdown or model export menu and clears its anchor/typeahead state.
+    pub(crate) fn close_menus(&mut self) -> bool {
+        let was_open = self.menu_open.is_some() || self.export_open;
+        if was_open {
+            self.menu_open = None;
+            self.menu_trigger.set(None);
+            self.menu_typeahead.clear();
+            self.export_open = false;
+        }
+        was_open
+    }
+
+    /// The viewport bounds clipping an open popup's trigger, when its enclosing scroll container
+    /// is mounted and laid out.
+    pub(crate) fn menu_clip_bounds(&self) -> Option<folo_ui::Bounds<folo_ui::Pixels>> {
+        let b = if self.new_run.is_some() || self.synth.is_some() || self.cloud.connect.is_some() {
+            self.dialog_scroll.bounds()
+        } else if self.modal_open() || matches!(self.route, crate::app::Route::Dataset(_)) {
+            return None;
+        } else if self.route == crate::app::Route::Playground {
+            self.play_side_scroll.bounds()
+        } else {
+            self.page_scroll.bounds()
+        };
+        (b.size.height > px(0.)).then_some(b)
+    }
+
+    /// Vertical scroll offset of the active popup's enclosing scroll container, if any.
+    pub(crate) fn menu_scroll_offset(&self) -> Option<folo_ui::Pixels> {
+        if self.new_run.is_some() || self.synth.is_some() || self.cloud.connect.is_some() {
+            Some(self.dialog_scroll.offset().y)
+        } else if self.modal_open() || matches!(self.route, crate::app::Route::Dataset(_)) {
+            None
+        } else if self.route == crate::app::Route::Playground {
+            Some(self.play_side_scroll.offset().y)
+        } else {
+            Some(self.page_scroll.offset().y)
+        }
+    }
+
     /// Dropdown trigger that opens a listbox under itself.
     #[allow(clippy::too_many_arguments)]
     pub fn select(
@@ -393,13 +455,16 @@ impl FoloApp {
                 14.,
                 t.text_tertiary,
             ));
-        // Below the trigger when it fits, else above; never taller than the room there (8 px margin).
+        // Below the trigger when it fits, else above; never taller than the room there (8 px margin),
+        // and never extending over the title bar or enclosing dialog header.
         let want = (n as f32 * 33. + 8.).min(288.);
+        let top_edge =
+            self.menu_clip_bounds().map_or(tsize::TOPBAR, |c| (f32::from(c.top()) + 8.).max(tsize::TOPBAR));
         let (up, max_h) = match self.menu_trigger.get() {
             Some(b) if open => {
                 let vh = f32::from(window.viewport_size().height);
-                let below = vh - f32::from(b.bottom()) - 12.;
-                let above = f32::from(b.top()) - 12.;
+                let below = (vh - f32::from(b.bottom()) - 12.).max(0.);
+                let above = (f32::from(b.top()) - top_edge).max(0.);
                 if below >= want || below >= above {
                     (false, below.min(288.))
                 } else {
@@ -408,16 +473,17 @@ impl FoloApp {
             }
             _ => (false, 288.),
         };
+        let show_menu = open && !empty;
         // Measured on the first open frame: until then, the trigger's own width.
-        let wide = self.menu_trigger.get().filter(|_| open).map(|b| {
+        let wide = self.menu_trigger.get().filter(|_| show_menu).map(|b| {
             menu_box((f32::from(b.left()), f32::from(b.right())), f32::from(window.viewport_size().width))
         });
-        let menu_chrome = if open && !empty {
+        let menu_chrome = if show_menu {
             self.scroll_chrome(menu_scroll.clone(), t.bg_overlay, 0., radius::LG - 1., cx)
         } else {
             Vec::new()
         };
-        let menu = (open && !empty).then(|| {
+        let menu = show_menu.then(|| {
             folo_ui::deferred(
                 div()
                     .absolute()

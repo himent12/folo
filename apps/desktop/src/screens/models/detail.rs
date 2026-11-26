@@ -422,11 +422,19 @@ impl FoloApp {
             .when(open, |d| {
                 let cell = self.menu_trigger.clone();
                 d.child(
-                    folo_ui::canvas(move |b, _, _| cell.set(Some(b)), |_, _, _, _| {})
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
+                    folo_ui::canvas(
+                        move |b, window, _| {
+                            if cell.get() != Some(b) {
+                                cell.set(Some(b));
+                                window.request_animation_frame();
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
                 )
             })
             .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, _, cx| {
@@ -459,12 +467,26 @@ impl FoloApp {
                 cx.notify();
             }));
         let export_w = (f32::from(window.viewport_size().width) - 16.).clamp(0., 300.);
+        let export_want = options.len() as f32 * 52. + 10.;
+        let export_top_edge = self.menu_clip_bounds().map_or(crate::theme::size::TOPBAR, |c| {
+            (f32::from(c.top()) + 8.).max(crate::theme::size::TOPBAR)
+        });
+        let export_up = match self.menu_trigger.get() {
+            Some(b) if open => {
+                let vh = f32::from(window.viewport_size().height);
+                let below = (vh - f32::from(b.bottom()) - 12.).max(0.);
+                let above = (f32::from(b.top()) - export_top_edge).max(0.);
+                below < export_want && above > below
+            }
+            _ => false,
+        };
         let menu = open.then(|| {
             let mid = m.id.clone();
             folo_ui::deferred(
                 div()
                     .absolute()
-                    .top(px(34.))
+                    .when(!export_up, |d| d.top(px(34.)))
+                    .when(export_up, |d| d.bottom(px(34.)))
                     .right_0()
                     .w(px(export_w))
                     .occlude()

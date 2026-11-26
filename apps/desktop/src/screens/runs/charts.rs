@@ -499,6 +499,11 @@ impl FoloApp {
                 q.to_string()
             }
         };
+        let map_caption = zoom("per epoch", map_max);
+        // Whenever the header carries the `So far / All N` switch or a zoomed-axis note, place the
+        // caption below the plot (matching `loss_card`) so narrow or high-DPI cards never overflow
+        // the switch into the adjacent Training loss card.
+        let map_footer = x_switch.is_some() || crate::charts::domain::unit_zoomed(map_max);
         let map_card = panel(&t).flex_1().min_w_0().child(
             div()
                 .w_full()
@@ -507,16 +512,21 @@ impl FoloApp {
                 .min_w_0()
                 .child(
                     panel_header(&t, map_title)
+                        .min_w_0()
                         .child(
                             div()
                                 .flex()
                                 .items_center()
+                                .min_w_0()
                                 .gap(px(12.))
-                                .child(
-                                    text(ty::SM, t.text_tertiary)
-                                        .font_weight(folo_ui::FontWeight::MEDIUM)
-                                        .child(zoom("per epoch", map_max)),
-                                )
+                                .when(!map_footer, |d| {
+                                    d.child(
+                                        text(ty::SM, t.text_tertiary)
+                                            .font_weight(folo_ui::FontWeight::MEDIUM)
+                                            .ellipsis()
+                                            .child(map_caption.clone()),
+                                    )
+                                })
                                 .children(x_switch),
                         )
                         .when(short, |d| d.h(px(32.))),
@@ -530,7 +540,15 @@ impl FoloApp {
                         .items_center()
                         .child(map_legend),
                 )
-                .child(div().px(px(12.)).pb(px(6.)).child(line_chart(&t, map))),
+                .child(div().px(px(12.)).pb(px(if map_footer { 4. } else { 6. })).child(line_chart(&t, map)))
+                .when(map_footer, |d| {
+                    d.child(
+                        div()
+                            .px(px(16.))
+                            .pb(px(8.))
+                            .child(text(ty::SM, t.text_tertiary).ellipsis().child(map_caption)),
+                    )
+                }),
         );
         let loss_smooth_seg = self
             .segmented(

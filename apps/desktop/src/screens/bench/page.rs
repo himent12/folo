@@ -25,21 +25,22 @@ impl FoloApp {
         }
         let Some(b) = self.bench.list.ready().and_then(|l| l.iter().find(|b| b.id == id)).cloned() else {
             let header = page_header(&t, "Benchmark", "", vec![]);
-            let body = if let Some(e) = self.bench.list.error().cloned() {
-                self.error_panel(&e, "bench-retry", window, cx)
-            } else if self.bench.list.is_loading() {
-                panel(&t).child(loading_rows(&t, "bench", 5)).into_any_element()
-            } else {
-                panel(&t)
-                    .child(empty_state(
-                        &t,
-                        "icons/circle-alert.svg",
-                        "Benchmark not found",
-                        "It may have been deleted.",
-                        Tone::Neutral,
-                    ))
-                    .into_any_element()
-            };
+            let body =
+                if let Some(e) = self.bench.list.error().or_else(|| self.bench_blocked_error()).cloned() {
+                    self.error_panel(&e, "bench-retry", window, cx)
+                } else if self.bench.list.is_loading() || self.bench_discovering() {
+                    panel(&t).child(loading_rows(&t, "bench", 5)).into_any_element()
+                } else {
+                    panel(&t)
+                        .child(empty_state(
+                            &t,
+                            "icons/circle-alert.svg",
+                            "Benchmark not found",
+                            "It may have been deleted.",
+                            Tone::Neutral,
+                        ))
+                        .into_any_element()
+                };
             return self.page_frame(&t, header, body, cx);
         };
         let now = self.store.api.now();

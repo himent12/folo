@@ -141,7 +141,13 @@ impl FoloApp {
             self.refresh_benches(cx);
         }
         let list = self.bench.list.ready().cloned();
-        let subtitle = match (&list, self.bench.list.error()) {
+        let list_err = self
+            .bench
+            .list
+            .error()
+            .or_else(|| list.is_none().then(|| self.bench_blocked_error()).flatten())
+            .cloned();
+        let subtitle = match (&list, &list_err) {
             // What the page holds (§2 page header): how many, and how many have an entry running.
             (Some(l), _) => {
                 let running = l.iter().filter(|b| b.active).count();
@@ -177,7 +183,7 @@ impl FoloApp {
             let body = self.bench_unsupported_panel(&t, window, cx);
             return self.page_frame(&t, header, body, cx);
         }
-        if let Some(e) = self.bench.list.error().cloned() {
+        if let Some(e) = list_err {
             let err = self.error_panel(&e, "benches-retry", window, cx);
             return self.page_frame(&t, header, err, cx);
         }
