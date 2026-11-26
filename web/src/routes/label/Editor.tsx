@@ -50,7 +50,7 @@ import { keyStep, newBox, nudge, sameBoxes, stretch, tidy } from './boxEdit';
 import { History } from './history';
 import EditCanvas from './EditCanvas';
 import EditorHints from './EditorHints';
-import { askOutcome, imageState } from './words';
+import { askOutcome, imageState, leaveDescription } from './words';
 
 export interface EditorProps {
   live: LiveLabelJob;
@@ -311,7 +311,7 @@ export default function Editor(props: EditorProps) {
   const savable = computed(() => dirty.get() || (!!img.get() && img.get()!.status !== 'labeled'));
   async function save(): Promise<boolean> {
     const cur = img.peek();
-    if (!cur || saving.peek() || reviewing.peek()) return false;
+    if (!cur || locked.peek() || saving.peek() || reviewing.peek()) return false;
     // The answer is this image's, sent with these boxes: by the time it comes another image, job, or server epoch
     // may be active, or the boxes edited further, and none is this answer's to change.
     const id = cur.id, jobId = props.job.id, epoch = hub.epoch;
@@ -419,7 +419,7 @@ export default function Editor(props: EditorProps) {
    */
   const leaving = signal<{ to: string | null; proceed?: () => void } | null>(null);
   const leaveSaving = signal(false);
-  const unsaved = () => !!img.peek() && dirty.peek() && !locked.peek();
+  const unsaved = () => !!img.peek() && dirty.peek();
   function go(to: string | null) {
     if (unsaved()) leaving.set({ to });
     else props.onnavigate(to);
@@ -428,6 +428,7 @@ export default function Editor(props: EditorProps) {
     const ask = leaving.peek();
     if (!ask || leaveSaving.peek()) return;
     if (keep === 'save') {
+      if (locked.peek()) return;
       const jobId = props.job.id, epoch = hub.epoch, id = shownId;
       leaveSaving.set(true);
       let ok = false;
@@ -606,7 +607,7 @@ export default function Editor(props: EditorProps) {
         class="label-editor"
         status={status}
         onbeforeclose={() => {
-          if (!dirty.peek() || locked.peek()) return true;
+          if (!unsaved()) return true;
           leaving.set({ to: null });
           return false;
         }}
@@ -615,7 +616,7 @@ export default function Editor(props: EditorProps) {
           <>
             {dirty.get() ? (
               <p class="state" data-gate-why>
-                Unsaved changes{touch.current ? null : <>. <Kbd keys="Enter" subtle /> saves them and opens the next image to review.</>}
+                Unsaved changes{locked.get() || touch.current ? null : <>. <Kbd keys="Enter" subtle /> saves them and opens the next image to review.</>}
               </p>
             ) : savable.get() && !locked.get() ? (
               <p class="state">Save keeps it as labeled by hand, {draft.get().length ? 'with these boxes' : 'with no boxes: a background image'}.</p>
@@ -780,15 +781,13 @@ export default function Editor(props: EditorProps) {
       <Dialog
         open={!!leaving.get()}
         title="Save your changes?"
-        description={`${img.get()?.file ?? 'This image'} has boxes you have not saved.${
-          elsewhere.get() ? ' Its labels were also saved from another tab or window while you edited: Save replaces them with yours; Discard keeps those.' : ''
-        }`}
+        description={leaveDescription(img.get()?.file, !!locked.get(), elsewhere.get())}
         size="sm"
         onclose={() => leaving.set(null)}
         footer={() => (
           <>
             <Button disabled={leaveSaving.get()} onclick={() => answer('discard')}>Discard changes</Button>
-            <Button variant="primary" loading={saving.get()} onclick={() => answer('save')}>Save</Button>
+            <Button variant="primary" loading={saving.get()} disabled={!!locked.get()} onclick={() => answer('save')}>Save</Button>
           </>
         )}
       />

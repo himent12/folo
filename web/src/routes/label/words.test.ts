@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { LabelAgent, LabelImage, LabelJob, LabelRun } from '$lib/api/types';
 import { classChangeError, classesError } from '$lib/label';
-import { askOutcome, imageState, jobStatus, modelLabel, runAgent, tokens, usageFacts } from './words';
+import { askOutcome, imageState, jobStatus, leaveDescription, modelLabel, runAgent, tokens, usageFacts } from './words';
 
 const job = (status: LabelJob['status'], outcome: LabelRun['outcome'] = null) =>
   ({ status, run: outcome ? { outcome } : null, counts: { images: 3, pending: 2, labeled: 1, failed: 0, boxes: 4 } }) as LabelJob;
@@ -57,6 +57,14 @@ describe('agents and images', () => {
     expect(imageState({ ...img('labeled', 2), reviewed: true, error: 'the reply has no JSON object' })).toBe(
       '2 boxes, drawn by the agent, reviewed. Last ask failed: the reply has no JSON object',
     );
+  });
+
+  it('explains unsaved changes when leaving, including while the agent locks the image or another tab saved it', () => {
+    expect(leaveDescription('a.jpg', false, false)).toBe('a.jpg has boxes you have not saved.');
+    expect(leaveDescription('a.jpg', true, false)).toContain('The agent is labeling this image right now');
+    expect(leaveDescription('a.jpg', true, true)).toContain('The agent is labeling this image right now');
+    expect(leaveDescription('a.jpg', false, true)).toContain('saved from another tab or window');
+    expect(leaveDescription(undefined, false, false)).toBe('This image has boxes you have not saved.');
   });
 });
 
