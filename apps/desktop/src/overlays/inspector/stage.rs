@@ -96,6 +96,8 @@ impl FoloApp {
                 insp.zoom = new_zoom;
                 insp.drag_from = None;
                 insp.focused_box = None;
+                w.prevent_default();
+                cx.stop_propagation();
                 cx.notify();
             }))
             .on_hover(cx.listener(|this, h: &bool, _, cx| {
@@ -168,10 +170,12 @@ impl FoloApp {
                 canvas(
                     |_, _, _| (),
                     move |b, _, window, cx| {
+                        let pad_x = (b.size.width / 2.).min(px(24.));
+                        let pad_y = (b.size.height / 2.).min(px(24.));
                         let inner = folo_ui::Bounds::new(
-                            b.origin + folo_ui::point(px(24.), px(24.)),
-                            // 24 px on every side (the zoom controls live in the header now).
-                            b.size - folo_ui::size(px(48.), px(48.)),
+                            b.origin + folo_ui::point(pad_x, pad_y),
+                            // 24 px on every side when there is room (the zoom controls live in the header now).
+                            b.size - folo_ui::size(pad_x * 2., pad_y * 2.),
                         );
                         paint_cell.set(Some(inner));
                         window.with_content_mask(Some(folo_ui::ContentMask { bounds: b }), |window| {

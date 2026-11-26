@@ -130,8 +130,19 @@ impl FoloApp {
                 let hot = hover == Some(idx);
                 let key = format!("insp-pred-{j}");
                 let coords = (p.x1, p.y1, p.x2, p.y2);
-                let row = div()
-                    .id(SharedString::from(key.clone()))
+                let full_name = classes.get(p.class as usize).cloned().unwrap_or_default();
+                let long = crate::ui::may_overflow(&full_name, ty::SM.size, 70.);
+                let row = self
+                    .disclose(
+                        div().id(SharedString::from(key.clone())),
+                        &key,
+                        full_name,
+                        long,
+                        30.,
+                        false,
+                        window,
+                        cx,
+                    )
                     .h(px(30.))
                     .px(px(8.))
                     .flex()

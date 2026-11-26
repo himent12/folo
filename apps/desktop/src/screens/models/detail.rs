@@ -43,6 +43,15 @@ impl FoloApp {
                     .child(div().pb(px(24.)).flex().justify_center().child(retry))
                     .into_any_element()
             } else {
+                let all = self.button(
+                    "model-all",
+                    "All models",
+                    Btn::Secondary,
+                    Some("icons/arrow-left.svg"),
+                    window,
+                    cx,
+                    act(|this, w, cx| this.navigate(Route::Models, w, cx)),
+                );
                 panel(&t)
                     .child(empty_state(
                         &t,
@@ -51,6 +60,7 @@ impl FoloApp {
                         "It may have been deleted or moved.",
                         Tone::Neutral,
                     ))
+                    .child(div().pb(px(24.)).flex().justify_center().child(all))
                     .into_any_element()
             };
             return self.page_frame(&t, header, body, cx);
@@ -381,6 +391,7 @@ impl FoloApp {
                 act(move |this, _, cx| {
                     let opening = !this.export_open;
                     this.export_open = opening;
+                    this.menu_trigger.set(None);
                     if opening {
                         this.menu_open = None;
                         this.menu_typeahead.clear();
@@ -394,6 +405,7 @@ impl FoloApp {
                 if this.export_open && matches!(ev.keystroke.key.as_str(), "enter" | "space") {
                     if key_usable.is_empty() {
                         this.export_open = false;
+                        this.menu_trigger.set(None);
                     } else {
                         let pick =
                             if key_usable.contains(&this.export_hl) { this.export_hl } else { first_usable };
@@ -422,6 +434,7 @@ impl FoloApp {
                 match ev.keystroke.key.as_str() {
                     "down" | "up" if !open => {
                         this.export_open = true;
+                        this.menu_trigger.set(None);
                         this.menu_open = None;
                         this.menu_typeahead.clear();
                         this.export_hl = first_usable;
@@ -430,9 +443,13 @@ impl FoloApp {
                     "up" => this.export_hl = step(this.export_hl.min(n - 1), false),
                     "home" if open => this.export_hl = first_usable,
                     "end" if open => this.export_hl = last_usable,
-                    "escape" if open => this.export_open = false,
+                    "escape" if open => {
+                        this.export_open = false;
+                        this.menu_trigger.set(None);
+                    }
                     "tab" if open => {
                         this.export_open = false;
+                        this.menu_trigger.set(None);
                         cx.notify();
                         return;
                     }
@@ -441,6 +458,7 @@ impl FoloApp {
                 cx.stop_propagation();
                 cx.notify();
             }));
+        let export_w = (f32::from(window.viewport_size().width) - 16.).clamp(180., 300.);
         let menu = open.then(|| {
             let mid = m.id.clone();
             folo_ui::deferred(
@@ -448,12 +466,13 @@ impl FoloApp {
                     .absolute()
                     .top(px(34.))
                     .right_0()
-                    .w(px(300.))
+                    .w(px(export_w))
                     .occlude()
                     .on_mouse_down_out(cx.listener(|this, ev: &folo_ui::MouseDownEvent, _, cx| {
                         let on_trigger = this.menu_trigger.get().is_some_and(|b| b.contains(&ev.position));
                         if this.export_open && !on_trigger {
                             this.export_open = false;
+                            this.menu_trigger.set(None);
                             cx.notify();
                         }
                     }))

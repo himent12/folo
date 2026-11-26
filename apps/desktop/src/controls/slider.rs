@@ -61,7 +61,11 @@ impl FoloApp {
                 }),
             )
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
-                let big = ev.keystroke.modifiers.shift;
+                let m = &ev.keystroke.modifiers;
+                if m.control || m.alt || m.platform {
+                    return;
+                }
+                let big = m.shift;
                 let s = step / (max - min) * if big { 10.0 } else { 1.0 };
                 let next = match ev.keystroke.key.as_str() {
                     "left" | "down" => Some(f - s),

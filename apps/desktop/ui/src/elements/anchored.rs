@@ -187,23 +187,21 @@ pub(crate) fn fit(
 
     if fit_mode == AnchoredFitMode::SwitchAnchor {
         let mut anchor_corner = anchor_corner;
+        let mut cur_offset = offset;
         if desired.left() < limits.left() || desired.right() > limits.right() {
-            let switched = Bounds::from_corner_and_size(
-                anchor_corner.other_side_corner_along(Axis::Horizontal),
-                origin,
-                size,
-            );
+            let flipped_corner = anchor_corner.other_side_corner_along(Axis::Horizontal);
+            let flipped_offset = point(-cur_offset.x, cur_offset.y);
+            let switched = Bounds::from_corner_and_size(flipped_corner, origin + flipped_offset, size);
             if !(switched.left() < limits.left() || switched.right() > limits.right()) {
-                anchor_corner = anchor_corner.other_side_corner_along(Axis::Horizontal);
+                anchor_corner = flipped_corner;
+                cur_offset = flipped_offset;
                 desired = switched;
             }
         }
         if desired.top() < limits.top() || desired.bottom() > limits.bottom() {
-            let switched = Bounds::from_corner_and_size(
-                anchor_corner.other_side_corner_along(Axis::Vertical),
-                origin,
-                size,
-            );
+            let flipped_corner = anchor_corner.other_side_corner_along(Axis::Vertical);
+            let flipped_offset = point(cur_offset.x, -cur_offset.y);
+            let switched = Bounds::from_corner_and_size(flipped_corner, origin + flipped_offset, size);
             if !(switched.top() < limits.top() || switched.bottom() > limits.bottom()) {
                 desired = switched;
             }
@@ -215,16 +213,16 @@ pub(crate) fn fit(
         AnchoredFitMode::SnapToWindowWithMargin(edges) => edges,
         AnchoredFitMode::SwitchAnchor => Edges::default(),
     };
-    if desired.right() > limits.right() {
-        desired.origin.x -= desired.right() - limits.right() + edges.right;
+    if desired.right() > limits.right() - edges.right {
+        desired.origin.x -= desired.right() - (limits.right() - edges.right);
     }
-    if desired.left() < limits.left() {
+    if desired.left() < limits.left() + edges.left {
         desired.origin.x = limits.origin.x + edges.left;
     }
-    if desired.bottom() > limits.bottom() {
-        desired.origin.y -= desired.bottom() - limits.bottom() + edges.bottom;
+    if desired.bottom() > limits.bottom() - edges.bottom {
+        desired.origin.y -= desired.bottom() - (limits.bottom() - edges.bottom);
     }
-    if desired.top() < limits.top() {
+    if desired.top() < limits.top() + edges.top {
         desired.origin.y = limits.origin.y + edges.top;
     }
     desired

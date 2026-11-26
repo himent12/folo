@@ -199,3 +199,194 @@ fn enter_on_a_button_acts_once() {
         "one press, one toggle"
     );
 }
+
+#[test]
+fn modified_chords_do_not_nudge_sliders_or_activate_buttons() {
+    let (mut app, window) = open();
+    app.update(|cx| {
+        crate::app::bind_keys(cx);
+        crate::input::bind_keys(cx);
+    });
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Playground, w, cx);
+    });
+    app.frame(window.into());
+
+    // Alt+Enter on a focused button must not activate it.
+    drive(&mut app, window, |this, w, cx| w.focus(&this.fh("play-picker-toggle", cx)));
+    app.frame(window.into());
+    let picker_before = drive(&mut app, window, |this, _, _| this.play_picker_open);
+    press(&mut app, window, "alt-enter");
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| this.play_picker_open),
+        picker_before,
+        "Alt+Enter must not toggle focused button"
+    );
+
+    // Alt+Left on a focused slider must not nudge the slider and must allow Back navigation.
+    drive(&mut app, window, |this, w, cx| w.focus(&this.fh("play-conf", cx)));
+    app.frame(window.into());
+    let conf_before = drive(&mut app, window, |this, _, _| this.play_conf);
+    press(&mut app, window, "alt-left");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.play_conf, conf_before, "Alt+Left must not nudge play-conf slider");
+        assert_eq!(this.route, Route::Overview, "Alt+Left navigates back instead of being swallowed");
+    });
+}
+
+#[test]
+fn modal_waiting_scrim_keeps_tab_focus_trapped() {
+    let (mut app, window) = open();
+    app.update(|cx| {
+        crate::app::bind_keys(cx);
+        crate::input::bind_keys(cx);
+    });
+    // Put inspector into waiting state (images still Loading for a dataset with no loaded images),
+    // so only the loading scrim is mounted and no `insp-*` focus stops exist yet.
+    drive(&mut app, window, |this, w, cx| {
+        this.store.images.insert("loading-ds".into(), crate::store::Load::Loading);
+        this.inspector = Some(crate::app::Inspector {
+            dataset: "loading-ds".into(),
+            index: 0,
+            sample: None,
+            zoom: 1.0,
+            pan: (0., 0.),
+            boxes: true,
+            labels: true,
+            hover_box: None,
+            hover_from_stage: false,
+            focused_box: None,
+            drag_from: None,
+            want: None,
+            shown: None,
+        });
+        w.focus(&this.inspector_focus);
+        cx.notify();
+    });
+    app.frame(window.into());
+    press(&mut app, window, "tab");
+    drive(&mut app, window, |this, w, _| {
+        assert!(
+            this.inspector_focus.is_focused(w),
+            "Tab inside an empty loading modal stays on inspector_focus instead of leaking to page controls"
+        );
+    });
+}
+
+#[test]
+fn model_not_found_offers_all_models_recovery_and_select_clears_stale_trigger() {
+    let (mut app, window) = open();
+    // Opening select A measures its trigger; switching to select B clears stale trigger immediately
+    // before B renders its new bounds.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Playground, w, cx);
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| w.focus(&this.fh("play-model", cx)));
+    app.frame(window.into());
+    press(&mut app, window, "enter");
+    assert!(drive(&mut app, window, |this, _, _| this.menu_trigger.get().is_some()));
+    press(&mut app, window, "escape");
+    assert!(
+        drive(&mut app, window, |this, _, _| this.menu_trigger.get().is_none()),
+        "closing select clears menu_trigger so the next select never inherits stale bounds"
+    );
+
+    // Navigating to a deleted/missing model shows an "All models" button that returns to Models.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Model("does-not-exist".into()), w, cx);
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| this.focus_key("model-all", w, cx));
+    app.frame(window.into());
+    press(&mut app, window, "enter");
+    assert_eq!(drive(&mut app, window, |this, _, _| this.route.clone()), Route::Models);
+}
+
+#[test]
+fn tiny_charts_do_not_panic_or_emit_nan_hover() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use folo_ui::{
+        AppContext, Bounds, HeadlessApp, HeadlessOptions, IntoElement, Modifiers, MouseMoveEvent,
+        ParentElement, PlatformInput, Styled, WindowBounds, WindowOptions, div, point, px, size,
+    };
+
+    let saw_nan = Rc::new(Cell::new(false));
+    let saw_nan_line = saw_nan.clone();
+    let saw_nan_hist = saw_nan.clone();
+
+    let mut app = HeadlessApp::new(HeadlessOptions { size: size(px(12.), px(12.)), ..Default::default() });
+    let win = app.update(|cx| {
+        let t = crate::theme::Theme::new(crate::theme::Mode::Dark);
+        cx.set_global(t);
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(12.), px(12.)));
+        let options =
+            WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+        cx.open_window(options, |_, cx| {
+            cx.new(|_| {
+                struct TinyCharts {
+                    saw_nan_line: Rc<Cell<bool>>,
+                    saw_nan_hist: Rc<Cell<bool>>,
+                }
+                impl folo_ui::Render for TinyCharts {
+                    fn render(
+                        &mut self,
+                        _window: &mut folo_ui::Window,
+                        cx: &mut folo_ui::Context<Self>,
+                    ) -> impl IntoElement {
+                        let t = crate::theme::theme(cx);
+                        let l_flag = self.saw_nan_line.clone();
+                        let h_flag = self.saw_nan_hist.clone();
+                        let mut spec = crate::charts::LineChart::new(
+                            "tiny-line",
+                            vec![crate::charts::Series::new(
+                                "loss",
+                                t.accent_solid,
+                                Arc::new(vec![(0., 1.), (1., 0.5)]),
+                            )],
+                        );
+                        spec.height = 10.;
+                        spec.hover = Some(0.5);
+                        spec.on_hover = Some(Rc::new(move |f, _, _| {
+                            if f.is_some_and(f32::is_nan) {
+                                l_flag.set(true);
+                            }
+                        }));
+                        div().size_full().child(crate::charts::line_chart(&t, spec)).child(
+                            crate::charts::histogram(
+                                &t,
+                                "tiny-hist",
+                                Arc::new(vec![1, 5, 2]),
+                                Arc::new(vec!["a".into(), "b".into(), "c".into()]),
+                                t.accent_solid,
+                                10.,
+                                Some(0.5),
+                                Some(Rc::new(move |f, _, _| {
+                                    if f.is_some_and(f32::is_nan) {
+                                        h_flag.set(true);
+                                    }
+                                })),
+                            ),
+                        )
+                    }
+                }
+                TinyCharts { saw_nan_line, saw_nan_hist }
+            })
+        })
+        .expect("open tiny chart window")
+    });
+    app.frame(win.into());
+    app.simulate_input(
+        win.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: point(px(5.), px(5.)),
+            pressed_button: None,
+            modifiers: Modifiers::none(),
+        }),
+    );
+    app.frame(win.into());
+    assert!(!saw_nan.get(), "tiny charts must never emit NaN hover fractions");
+}

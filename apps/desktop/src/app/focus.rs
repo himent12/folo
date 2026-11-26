@@ -181,6 +181,16 @@ impl FoloApp {
                 return;
             }
         }
+        // No mounted focusable control matched the topmost overlay's scope (for example, a loading
+        // scrim before controls mount): keep focus trapped on the overlay's root instead of
+        // stranding it on a background page control.
+        if let Some(p) = &self.palette {
+            window.focus(&p.input.read(cx).focus_handle(cx));
+        } else if self.inspector.is_some() {
+            window.focus(&self.inspector_focus);
+        } else if self.modal_open() {
+            window.focus(&self.root_focus);
+        }
     }
 }
 

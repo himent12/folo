@@ -425,11 +425,8 @@ impl Window {
 
     /// Records `focus_handle` in Tab order (paint, as GPUI's `tab_stops.insert`).
     pub(crate) fn insert_tab_stop(&mut self, focus_handle: &FocusHandle) {
-        self.next_frame.dispatch_tree.insert_tab_stop(
-            focus_handle.id,
-            focus_handle.tab_index,
-            focus_handle.tab_stop,
-        );
+        let (tab_index, tab_stop) = focus_handle.tab_stop_config();
+        self.next_frame.dispatch_tree.insert_tab_stop(focus_handle.id, tab_index, tab_stop);
     }
 
     /// Prevents the default of the event being dispatched (a focusable parent then does not take focus on
