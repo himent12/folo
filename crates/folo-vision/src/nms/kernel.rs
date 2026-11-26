@@ -1,7 +1,7 @@
 //! NMS suppression kernels: standard IoU NMS, DIoU-NMS, Soft-NMS (Linear / Gaussian), and batched
 //! class-aware bucketing, with AVX2-vectorised SoA suppression loops on x86-64.
 
-use crate::boxes::{IouKind, Xyxy, box_iou, iou};
+use crate::boxes::{IouKind, Xyxy, iou};
 use rayon::prelude::*;
 
 use super::NmsKind;
@@ -37,12 +37,13 @@ pub fn diou_nms_sorted_with_owner(boxes: &[Xyxy], iou_thr: f32, limit: usize) ->
 
 /// Soft-NMS (Bodla et al. 2017) over `boxes` and `scores` (not required to be pre-sorted).
 ///
-/// Decays overlapping boxes' positive scores instead of hard-dropping them:
+/// Decays overlapping boxes' positive scores instead of hard-dropping them using exact `f64` IoU and decay:
 /// - `sigma == None`: Linear Soft-NMS — when `IoU > iou_thr` and `score > 0`, `score *= 1 - IoU`.
 /// - `sigma == Some(s)`: Gaussian Soft-NMS — when `IoU > 0` and `score > 0`, `score *= exp(-IoU² / s)`.
 ///
-/// Non-positive scores are never multiplied (so decay can never increase a score), preserving descending
-/// output order for every finite `score_thr`.
+/// Non-finite scores (`NaN`, `±Inf`) are dropped before selection so malformed entries can never survive or
+/// suppress valid detections. Non-positive scores are never multiplied (so decay can never increase a score),
+/// preserving descending output order for every finite `score_thr`.
 ///
 /// Returns `(input_index, decayed_score)` pairs sorted by descending decayed score (ties: lower input index),
 /// keeping only boxes whose final score is `> score_thr` and stopping at `limit`.
@@ -65,8 +66,11 @@ pub fn soft_nms_sorted(
     if n == 0 || limit == 0 {
         return Vec::new();
     }
+    let iou_thr64 = iou_thr as f64;
+    let sigma64 = sigma.map(|s| s as f64);
     let mut work_scores = scores.to_vec();
-    let mut active: Vec<usize> = (0..n).filter(|&i| work_scores[i] > score_thr).collect();
+    let mut active: Vec<usize> =
+        (0..n).filter(|&i| work_scores[i].is_finite() && work_scores[i] > score_thr).collect();
     let mut kept: Vec<(usize, f32)> = Vec::with_capacity(active.len().min(limit));
 
     while kept.len() < limit && !active.is_empty() {
@@ -83,7 +87,7 @@ pub fn soft_nms_sorted(
             }
         }
         active.swap_remove(best_pos);
-        if best_score <= score_thr || best_score.is_nan() {
+        if !best_score.is_finite() || best_score <= score_thr {
             break;
         }
         kept.push((best_idx, best_score));
@@ -91,6 +95,15 @@ pub fn soft_nms_sorted(
             break;
         }
         let best_box = &boxes[best_idx];
+        if !(best_box.x1.is_finite()
+            && best_box.y1.is_finite()
+            && best_box.x2.is_finite()
+            && best_box.y2.is_finite())
+        {
+            continue;
+        }
+        let (ax1, ay1) = (best_box.x1 as f64, best_box.y1 as f64);
+        let (ax2, ay2) = (best_box.x2.max(best_box.x1) as f64, best_box.y2.max(best_box.y1) as f64);
         let mut pos = active.len();
         while pos > 0 {
             pos -= 1;
@@ -99,25 +112,50 @@ pub fn soft_nms_sorted(
             if cur <= 0.0 {
                 continue;
             }
-            let ov = box_iou(best_box, &boxes[idx]);
-            let decayed = match sigma {
-                Some(s) => {
-                    if ov > 0.0 {
-                        cur * (-(ov * ov) / s).exp()
-                    } else {
-                        cur
+            let b = &boxes[idx];
+            if !(b.x1.is_finite() && b.y1.is_finite() && b.x2.is_finite() && b.y2.is_finite()) {
+                continue;
+            }
+            let (bx1, by1) = (b.x1 as f64, b.y1 as f64);
+            let (bx2, by2) = (b.x2.max(b.x1) as f64, b.y2.max(b.y1) as f64);
+            let ix1 = ax1.max(bx1);
+            let iy1 = ay1.max(by1);
+            let ix2 = ax2.min(bx2);
+            let iy2 = ay2.min(by2);
+            let iw = (ix2 - ix1).max(0.0);
+            let ih = (iy2 - iy1).max(0.0);
+            let decayed = if iw == 0.0 || ih == 0.0 {
+                cur
+            } else {
+                // Compute non-overlap deficit directly as a sum of non-negative products so near-identical
+                // boxes (e.g. shifted by 1e-20) preserve their exact `1 - IoU` fraction without cancellation.
+                let inter = iw * ih;
+                let dw_a = (ix1 - ax1) + (ax2 - ix2);
+                let dh_a = (iy1 - ay1) + (ay2 - iy2);
+                let dw_b = (ix1 - bx1) + (bx2 - ix2);
+                let dh_b = (iy1 - by1) + (by2 - iy2);
+                let deficit = (dw_a * ih + iw * dh_a + dw_a * dh_a) + (dw_b * ih + iw * dh_b + dw_b * dh_b);
+                let union = inter + deficit;
+                let ov = if union > 0.0 { (inter / union).clamp(0.0, 1.0) } else { 0.0 };
+                match sigma64 {
+                    Some(s) => {
+                        if ov > 0.0 {
+                            (cur as f64 * (-(ov * ov) / s).exp()) as f32
+                        } else {
+                            cur
+                        }
                     }
-                }
-                None => {
-                    if ov > iou_thr {
-                        cur * (1.0 - ov)
-                    } else {
-                        cur
+                    None => {
+                        if ov > iou_thr64 {
+                            (cur as f64 * (deficit / union)) as f32
+                        } else {
+                            cur
+                        }
                     }
                 }
             };
             work_scores[idx] = decayed;
-            if decayed <= score_thr || decayed.is_nan() {
+            if !decayed.is_finite() || decayed <= score_thr {
                 active.swap_remove(pos);
             }
         }
@@ -303,9 +341,10 @@ fn suppress_diou_scalar(
     iou_thr: f32,
     kp: u32,
     sup: &mut [bool],
-    own: Option<&mut [u32]>,
+    mut own: Option<&mut [u32]>,
 ) {
-    if let Some(own) = own {
+    let a_finite = a.x1.is_finite() && a.y1.is_finite() && a.x2.is_finite() && a.y2.is_finite();
+    if !a_finite {
         for k in 0..sup.len() {
             if sup[k] {
                 continue;
@@ -313,17 +352,53 @@ fn suppress_diou_scalar(
             let b = Xyxy::new(cx1[k], cy1[k], cx2[k], cy2[k]);
             if iou(a, &b, IouKind::Diou) > iou_thr {
                 sup[k] = true;
-                own[k] = kp;
+                if let Some(ref mut o) = own {
+                    o[k] = kp;
+                }
             }
         }
-    } else {
-        for k in 0..sup.len() {
-            if sup[k] {
-                continue;
+        return;
+    }
+    let ax1 = a.x1 as f64;
+    let ay1 = a.y1 as f64;
+    let ax2 = a.x2.max(a.x1) as f64;
+    let ay2 = a.y2.max(a.y1) as f64;
+    let area_a = (ax2 - ax1) * (ay2 - ay1);
+    let nonneg_thr = iou_thr >= 0.0;
+    for k in 0..sup.len() {
+        if sup[k] {
+            continue;
+        }
+        let (x1, y1, x2, y2) = (cx1[k], cy1[k], cx2[k], cy2[k]);
+        let hit = if x1.is_finite() && y1.is_finite() && x2.is_finite() && y2.is_finite() {
+            let bx1 = x1 as f64;
+            let by1 = y1 as f64;
+            let bx2 = x2.max(x1) as f64;
+            let by2 = y2.max(y1) as f64;
+            let iw = (ax2.min(bx2) - ax1.max(bx1)).max(0.0);
+            let ih = (ay2.min(by2) - ay1.max(by1)).max(0.0);
+            if nonneg_thr && (iw == 0.0 || ih == 0.0) {
+                // Disjoint finite boxes have IoU == 0 and rho²/c² >= 0, so DIoU <= 0 <= iou_thr.
+                false
+            } else {
+                let inter = iw * ih;
+                let union = area_a + (bx2 - bx1) * (by2 - by1) - inter;
+                let iou_val = if union > 0.0 { (inter / union) as f32 } else { 0.0 };
+                let cw = (ax2.max(bx2) - ax1.min(bx1)).max(0.0);
+                let ch = (ay2.max(by2) - ay1.min(by1)).max(0.0);
+                let c2 = cw * cw + ch * ch;
+                let dx = ((bx1 - ax1) + (bx2 - ax2)) * 0.5;
+                let dy = ((by1 - ay1) + (by2 - ay2)) * 0.5;
+                let dist = if c2 > 0.0 { ((dx * dx + dy * dy) / c2).min(1.0) as f32 } else { 0.0 };
+                iou_val - dist > iou_thr
             }
-            let b = Xyxy::new(cx1[k], cy1[k], cx2[k], cy2[k]);
-            if iou(a, &b, IouKind::Diou) > iou_thr {
-                sup[k] = true;
+        } else {
+            iou(a, &Xyxy::new(x1, y1, x2, y2), IouKind::Diou) > iou_thr
+        };
+        if hit {
+            sup[k] = true;
+            if let Some(ref mut o) = own {
+                o[k] = kp;
             }
         }
     }

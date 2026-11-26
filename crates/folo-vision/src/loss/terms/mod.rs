@@ -1,6 +1,7 @@
 //! The differentiable terms of §7.4 for a fixed assignment ([`loss_with_assignment`]):
 //! - [`cls`]: BCE, MAL, Varifocal Loss (VFL), Quality Focal Loss (QFL),
-//! - [`box_loss`]: CIoU, Inner-CIoU, Wise-IoU v3, R-PIoU, S-AEIoU, NWD,
+//! - [`box_loss`]: CIoU, Inner-CIoU, R-PIoU, S-AEIoU,
+//! - [`nwd_wiou`]: Normalized Wasserstein Distance (NWD) and Wise-IoU v1 / v3,
 //! - [`geom_loss`]: MPDIoU, Shape-IoU, and Focaler-IoU remapping,
 //! - [`siou_eiou`]: EIoU (Efficient-IoU) and SIoU (Scylla-IoU),
 //! - [`dfl`]: DFL cross-entropy, 1D Optimal-Transport tail barrier (`OT-DFL`), and `CRPS-DFL`.
@@ -9,15 +10,21 @@ mod box_loss;
 mod cls;
 mod dfl;
 mod geom_loss;
+mod nwd_wiou;
 mod siou_eiou;
 
 #[cfg(test)]
 pub(crate) use box_loss::saeiou_box_f64;
-pub use box_loss::{ciou, inner_ciou_loss, nwd_loss, rpiou_loss, saeiou_loss, wiou_v3_loss};
+pub use box_loss::{ciou, inner_ciou_loss, rpiou_loss, saeiou_loss};
 pub(crate) use dfl::crps_dfl;
 pub use geom_loss::{focaler_iou, focaler_iou_loss, mpdiou_loss, mpdiou_loss_with_scale, shape_iou_loss};
 #[cfg(test)]
 pub(crate) use geom_loss::{mpdiou_box_f64, shape_iou_box_f64};
+#[cfg(test)]
+pub(crate) use nwd_wiou::{
+    nwd_box_eps_f64, nwd_box_f64, wiou_v1_box_f64, wiou_v3_box_f64, wiou_v3_focus_gain,
+};
+pub use nwd_wiou::{nwd_loss, nwd_loss_with_c, wiou_v1_loss, wiou_v3_loss};
 #[cfg(test)]
 pub(crate) use siou_eiou::{eiou_box_f64, siou_box_f64};
 pub use siou_eiou::{eiou_loss, siou_loss};
@@ -28,10 +35,11 @@ use super::{BatchAssignment, BoxLossKind, LossConfig, LossItems, LossOutput, che
 use crate::assign::{bbox2dist_clamped, dfl_bins, nwd_lambda};
 use crate::decode::Anchors;
 
-use box_loss::{rpiou_from_logits, saeiou_from_logits, wiou_v3_loss_and_mean};
+use box_loss::{rpiou_from_logits, saeiou_from_logits};
 use cls::cls_loss_sum;
 use dfl::ot_dfl_tail;
 use geom_loss::{mpdiou_from_logits, shape_iou_from_logits};
+use nwd_wiou::{nwd_blend_loss_eps, nwd_from_logits, wiou_v1_from_logits, wiou_v3_from_logits};
 use siou_eiou::{eiou_from_logits, siou_from_logits};
 
 /// Sum of every element as a rank-0 tensor, in an order that does not depend on thread scheduling: long inputs are
@@ -222,7 +230,7 @@ fn loss_impl_wiou(
                 let cs: Vec<f32> = (0..n).map(|k| 12.8 / anchors.strides[asg.anchor[k] as usize]).collect();
                 let lam_t = on_dev(Tensor::from_vec(lams, [n])?)?;
                 let c_t = on_dev(Tensor::from_vec(cs, [n])?)?;
-                let l_nwd = nwd_loss(&pd, &tb, &c_t)?;
+                let l_nwd = nwd_blend_loss_eps(&pd, &tb, &c_t)?;
                 lam_t.rsub_scalar(1.0)?.mul(&l_base)?.add(&lam_t.mul(&l_nwd)?)?
             } else {
                 l_base
@@ -233,20 +241,41 @@ fn loss_impl_wiou(
         let wb = match cfg.box_loss {
             BoxLossKind::Ciou => blend_nwd(ciou(&pd, &tb)?.rsub_scalar(1.0)?)?,
             BoxLossKind::InnerCiou => blend_nwd(inner_ciou_loss(&pd, &tb, cfg.inner_ratio)?)?,
-            BoxLossKind::WiouV3 => {
-                let (w_per, batch_mean) =
-                    wiou_v3_loss_and_mean(&pd, &tb, cfg.wiou_alpha, cfg.wiou_delta, wiou_iou_mean)?;
-                mean_iou_loss = batch_mean;
-                blend_nwd(w_per)?
-            }
-            BoxLossKind::Rpiou
+            BoxLossKind::Nwd
+            | BoxLossKind::WiouV1
+            | BoxLossKind::WiouV3
+            | BoxLossKind::Rpiou
             | BoxLossKind::Saeiou
             | BoxLossKind::Mpdiou
             | BoxLossKind::ShapeIou
             | BoxLossKind::Eiou
             | BoxLossKind::Siou => {
-                let eval_direct = |lams_opt: Option<&[f32]>| -> Result<Tensor> {
+                let mut eval_direct = |lams_opt: Option<&[f32]>| -> Result<Tensor> {
                     match cfg.box_loss {
+                        BoxLossKind::Nwd => {
+                            let cs: Vec<f32> =
+                                (0..n).map(|k| cfg.nwd_c / anchors.strides[asg.anchor[k] as usize]).collect();
+                            nwd_from_logits(&logits, &pd, &tbox, &cs, &asg.score, lams_opt, tss, cfg.box_gain)
+                        }
+                        BoxLossKind::WiouV1 => {
+                            wiou_v1_from_logits(&logits, &pd, &tbox, &asg.score, lams_opt, tss, cfg.box_gain)
+                        }
+                        BoxLossKind::WiouV3 => {
+                            let (loss, batch_mean) = wiou_v3_from_logits(
+                                &logits,
+                                &pd,
+                                &tbox,
+                                &asg.score,
+                                lams_opt,
+                                tss,
+                                cfg.box_gain,
+                                cfg.wiou_alpha,
+                                cfg.wiou_delta,
+                                wiou_iou_mean,
+                            )?;
+                            mean_iou_loss = batch_mean;
+                            Ok(loss)
+                        }
                         BoxLossKind::Rpiou => rpiou_from_logits(
                             &logits,
                             &pd,
@@ -300,14 +329,14 @@ fn loss_impl_wiou(
                         _ => unreachable!(),
                     }
                 };
-                if cfg.nwd_weight > 0.0 {
+                if cfg.nwd_weight > 0.0 && cfg.box_loss != BoxLossKind::Nwd {
                     let lams: Vec<f32> = (0..n).map(|k| nwd_lambda(&asg.target[k], cfg.nwd_weight)).collect();
                     let wb_alg = eval_direct(Some(&lams))?;
                     let cs: Vec<f32> =
                         (0..n).map(|k| 12.8 / anchors.strides[asg.anchor[k] as usize]).collect();
                     let lam_t = on_dev(Tensor::from_vec(lams, [n])?)?;
                     let c_t = on_dev(Tensor::from_vec(cs, [n])?)?;
-                    let l_nwd = nwd_loss(&pd, &tb, &c_t)?;
+                    let l_nwd = nwd_blend_loss_eps(&pd, &tb, &c_t)?;
                     let wb_nwd = sum_fixed_order(&lam_t.mul(&l_nwd)?.mul(&t)?)?
                         .div_scalar(tss)?
                         .mul_scalar(cfg.box_gain)?;
