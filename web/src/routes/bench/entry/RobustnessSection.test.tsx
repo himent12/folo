@@ -77,7 +77,7 @@ afterEach(() => {
 });
 
 describe('RobustnessSection', () => {
-  it('falls back to a valid cell and keeps keyboard navigation working when the previously chosen cell vanishes', () => {
+  it('restores focus to a valid fallback cell when the focused cell vanishes and keeps ArrowRight working on activeElement', () => {
     const res = signal<BenchResult>(
       makeResult([
         { condition: 'haze', severities: [1, 3] },
@@ -87,24 +87,53 @@ describe('RobustnessSection', () => {
     const view = render(() => <RobustnessSection result={res.get()} entry={entry} bench={bench} catalog={catalog} />, host);
     flush();
 
-    // Select blur severity 4.
+    // Focus and select blur severity 4.
     const blur4 = [...host.querySelectorAll<HTMLButtonElement>('button.cell')].find((b) => b.getAttribute('aria-label')?.startsWith('blur, severity 4'))!;
+    blur4.focus();
     blur4.click();
     flush();
     expect(blur4.tabIndex).toBe(0);
+    expect(document.activeElement).toBe(blur4);
 
-    // Replace result so blur is no longer present: tabindex="0" must fall back to a valid haze cell and arrows must not crash.
+    // Replace result so blur is no longer present: focus and tabindex="0" must move to the fallback haze cell.
     res.set(makeResult([{ condition: 'haze', severities: [1, 3] }]));
     flush();
     const activeCells = [...host.querySelectorAll<HTMLButtonElement>('button.cell[tabindex="0"]')];
     expect(activeCells).toHaveLength(1);
     expect(activeCells[0]!.getAttribute('aria-label')).toContain('haze');
+    expect(document.activeElement).toBe(activeCells[0]);
 
-    const table = host.querySelector('table.heat')!;
-    expect(() => table.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))).not.toThrow();
+    // ArrowRight on the actual activeElement must bubble to the table and advance selection.
+    expect(() => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))).not.toThrow();
     flush();
     expect(host.querySelector<HTMLButtonElement>('button.cell[tabindex="0"]')?.getAttribute('aria-label')).toContain('haze, severity 3');
 
+    view.unmount();
+  });
+
+  it('does not steal focus into the table when rows update while focus is outside the table', () => {
+    const outside = document.createElement('button');
+    outside.textContent = 'outside';
+    host.appendChild(outside);
+    const res = signal<BenchResult>(
+      makeResult([
+        { condition: 'haze', severities: [1, 3] },
+        { condition: 'blur', severities: [2, 4] },
+      ]),
+    );
+    const view = render(() => <RobustnessSection result={res.get()} entry={entry} bench={bench} catalog={catalog} />, host);
+    flush();
+
+    const blur4 = [...host.querySelectorAll<HTMLButtonElement>('button.cell')].find((b) => b.getAttribute('aria-label')?.startsWith('blur, severity 4'))!;
+    blur4.focus();
+    blur4.click();
+    flush();
+    outside.focus();
+    expect(document.activeElement).toBe(outside);
+
+    res.set(makeResult([{ condition: 'haze', severities: [1, 3] }]));
+    flush();
+    expect(document.activeElement).toBe(outside);
     view.unmount();
   });
 });

@@ -443,15 +443,18 @@ describe('ImagePager', () => {
     }
   });
 
-  it('retries find() cleanly when reload() interrupts the initial page-0 load and stops after dispose()', async () => {
+  it('retries find() cleanly when reload() interrupts the initial page-0 load without a redundant scan', async () => {
     let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
     const firstGate = new Promise<void>((r) => (releaseFirst = r));
+    const secondGate = new Promise<void>((r) => (releaseSecond = r));
     let calls = 0;
     const api: Partial<Api> = {
       datasetImages: async (_id, q) => {
         calls++;
         const my = calls;
         if (my === 1) await firstGate;
+        if (my === 2) await secondGate;
         const off = q.offset ?? 0;
         const lim = q.limit ?? PAGE;
         return {
@@ -472,8 +475,13 @@ describe('ImagePager', () => {
     // Start finding an image whose name doesn't match the numeric guess: enters initial #load(0).
     const found = pager.find('alpha_3');
     pager.reload();
+    // Release call 1 while call 2 is still pending so `total` is still null when call 1 settles.
     releaseFirst();
+    await Promise.resolve();
+    await Promise.resolve();
+    releaseSecond();
     expect(await found).toBe(3);
+    expect(calls).toBe(2);
 
     // Once disposed, further find() and uncached at() calls bail out without issuing new requests.
     const beforeDispose = calls;
@@ -481,5 +489,51 @@ describe('ImagePager', () => {
     expect(await pager.find('alpha_missing')).toBe(-1);
     expect(await pager.at(250)).toBeUndefined();
     expect(calls).toBe(beforeDispose);
+  });
+
+  it('dispose() resolves an in-flight find() scan to -1 and prevents an un-aborted page response from mutating or returning from at()', async () => {
+    let resolvePage0!: (v: { total: number; images: DatasetImage[] }) => void;
+    const img = (k: number): DatasetImage => ({
+      id: `beta_${k}`,
+      file: `beta_${k}.jpg`,
+      split: 'train',
+      width: 640,
+      height: 480,
+      boxes: [],
+    });
+
+    // Case 1: in-flight page load that ignores AbortSignal must not cache or return after dispose().
+    hub.api = {
+      datasetImages: () =>
+        new Promise((resolve) => {
+          resolvePage0 = resolve;
+        }),
+    } as unknown as Api;
+    const p1 = new ImagePager('ds_dispose_page', undefined, undefined);
+    const pendingAt = p1.at(0);
+    p1.dispose();
+    resolvePage0({ total: 10, images: [img(0)] });
+    expect(await pendingAt).toBeUndefined();
+    expect(p1.get(0)).toBeUndefined();
+    expect(p1.total).toBeNull();
+
+    // Case 2: in-flight find() scan aborted by dispose() resolves cleanly to -1 instead of rejecting with AbortError.
+    let scanCalls = 0;
+    const scanApi: Partial<Api> = {
+      datasetImages: (_id, _q, signal) => {
+        scanCalls++;
+        if (scanCalls === 1) return Promise.resolve({ total: 500, images: Array.from({ length: PAGE }, (_, k) => img(k)) });
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+        });
+      },
+    };
+    hub.api = scanApi as Api;
+    const p2 = new ImagePager('ds_dispose_scan', undefined, 0);
+    const pendingFind = p2.find('beta_450');
+    await Promise.resolve();
+    await Promise.resolve();
+    p2.dispose();
+    expect(await pendingFind).toBe(-1);
   });
 });

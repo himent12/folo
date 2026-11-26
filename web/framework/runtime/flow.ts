@@ -764,7 +764,8 @@ export function Dynamic<P>(props: DynamicProps<P>): JSX.Element {
       const el = SVG_TAGS.has(comp) ? document.createElementNS('http://www.w3.org/2000/svg', comp) : document.createElement(comp);
       const [kids, attrs] = splitProps(others as Record<string, unknown>, ['children', 'ref']);
       spread(el, attrs, local.$$scope);
-      if (kids.ref != null) ref(el, kids.ref as Ref<Element>);
+      const elRef = kids.ref;
+      if (elRef != null) ref(el, elRef as Ref<Element>);
       insert(el, () => kids.children);
       return el;
     });

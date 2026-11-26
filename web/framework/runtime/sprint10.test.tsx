@@ -6,16 +6,24 @@ import { flush, signal } from './core';
 import { bindValue } from './bind';
 import { insert, setStyle } from './dom';
 import { Dynamic } from './flow';
+import { run } from './text';
 import { render } from '../testing';
 
 describe('fw Sprint 10 runtime hardening', () => {
   it('preserves shared signal dependencies when a text run splits on a later expression', () => {
     const active = signal(true);
-    const { container, unmount } = render(() => (
-      <p>
-        {active.get() ? 'on' : 'off'}: {active.get() ? <strong>live</strong> : 'idle'}
-      </p>
-    ));
+    const badge = () => {
+      const strong = document.createElement('strong');
+      strong.textContent = 'live';
+      return strong;
+    };
+    const { container, unmount } = render(() => {
+      const p = document.createElement('p');
+      const text = document.createTextNode('');
+      p.appendChild(text);
+      run(text, [() => (active.get() ? 'on' : 'off'), ': ', () => (active.get() ? badge() : 'idle')]);
+      return p;
+    });
     flush();
     expect(container.textContent).toBe('on: live');
     expect(container.querySelector('strong')?.textContent).toBe('live');
@@ -32,12 +40,16 @@ describe('fw Sprint 10 runtime hardening', () => {
     unmount();
   });
 
-  it('forwards ref (callback and signal with cleanup) on string Dynamic elements across tag swaps and unmount', () => {
+  it('forwards direct ref (signal with cleanup and callback) on string Dynamic elements across tag swaps and unmount', () => {
     const tag = signal<'button' | 'a'>('button');
     const elRef = signal<Element | undefined>(undefined);
     const cbSeen: string[] = [];
 
-    const view1 = render(() => <Dynamic component={tag.get()} {...{ ref: elRef }}>go</Dynamic>);
+    const view1 = render(() => (
+      <Dynamic component={tag.get()} ref={elRef}>
+        go
+      </Dynamic>
+    ));
     flush();
     expect(elRef.peek()?.tagName).toBe('BUTTON');
 
@@ -49,7 +61,7 @@ describe('fw Sprint 10 runtime hardening', () => {
     expect(elRef.peek()).toBeUndefined();
 
     const view2 = render(() => (
-      <Dynamic component="span" {...{ ref: (el: Element) => cbSeen.push(el.tagName) }}>
+      <Dynamic component="span" ref={(el: Element) => cbSeen.push(el.tagName)}>
         hi
       </Dynamic>
     ));
@@ -103,12 +115,21 @@ describe('fw Sprint 10 runtime hardening', () => {
 
   it('respects marker in insert() when replacing a non-array current value with a single node', () => {
     const parent = document.createElement('div');
+    const lead = document.createElement('i');
     const marker = document.createComment('end');
+    parent.appendChild(lead);
     parent.appendChild(marker);
+
+    // Non-undefined scalar initial (null) bypasses insert()'s `initial === undefined -> []` normalization.
     const node = document.createElement('span');
     node.textContent = 'x';
-    insert(parent, node, marker, undefined as unknown);
-    expect(parent.firstChild).toBe(node);
-    expect(node.nextSibling).toBe(marker);
+    insert(parent, node, marker, null);
+    expect([...parent.childNodes]).toEqual([lead, node, marker]);
+
+    // Replacing a previous single node in a marked region must also keep `lead` intact and stay before `marker`.
+    const node2 = document.createElement('b');
+    node2.textContent = 'y';
+    insert(parent, node2, marker, node);
+    expect([...parent.childNodes]).toEqual([lead, node2, marker]);
   });
 });

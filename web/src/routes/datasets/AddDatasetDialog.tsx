@@ -107,9 +107,11 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
   const cleaned = computed(() => cleanPath(path.get()));
   /** The datasets there are, when the page did not give them: for names, and to tell a registered folder. */
   const fetched = signal<readonly { id: string; name: string }[] | null>(null);
+  const isConnecting = () => hub.mode === 'connecting';
+  const connecting = computed(isConnecting);
   effect(() => {
     const ep = hub.epoch;
-    if (!open.get() || props.known) {
+    if (!open.get() || props.known || connecting.get()) {
       fetched.set(null);
       return;
     }
@@ -168,6 +170,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
    *  that cannot work), saying which; it lifts as soon as the field is fixed. */
   const shownError = computed(() => (touched.get() ? Object.entries(errs.get()).find(([, e]) => e)?.[0] : undefined));
   const reason = computed(() => {
+    if (connecting.get()) return 'Connecting to server';
     const s = shownError.get();
     return missing.get() ?? (s ? (FIX[s] ?? null) : null);
   });
@@ -215,7 +218,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     }
     touched.set(true);
     error.set(undefined);
-    if (busy.get()) return;
+    if (busy.get() || hub.mode === 'connecting') return;
     if (!valid.get()) {
       flush();
       focusFirstInvalid();
@@ -239,7 +242,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     try {
       // Registering a folder that is already registered answers with that dataset (docs/API.md), not a copy.
       const before = m === 'folder' ? (props.known ?? fetched.peek() ?? (await hub.api.datasets().catch(() => []))) : [];
-      if (hub.epoch !== epoch) {
+      if (hub.epoch !== epoch || isConnecting()) {
         work.set(null);
         generationEnded(gen);
         return;

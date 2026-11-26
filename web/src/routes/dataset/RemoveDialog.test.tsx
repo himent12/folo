@@ -194,4 +194,17 @@ describe('RemoveDialog', () => {
     expect(go).not.toHaveBeenCalled();
     expect(toast.items).toEqual([]);
   });
+
+  it('disables and guards dataset removal while hub.mode is connecting', async () => {
+    const del = vi.spyOn(hub.api, 'deleteDataset');
+    hub.mode = 'connecting';
+    const dataset = { id: 'ds_conn', name: 'cells', path: 'D:/data/cells' };
+    c = render(() => <RemoveDialog open dataset={dataset} />, target);
+    flushSync();
+    const confirmBtn = [...document.querySelectorAll<HTMLButtonElement>('dialog footer button')].find((b) => b.textContent?.includes('Remove'))!;
+    expect(confirmBtn.disabled).toBe(true);
+    confirmBtn.click();
+    await Promise.resolve();
+    expect(del).not.toHaveBeenCalled();
+  });
 });

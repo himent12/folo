@@ -83,6 +83,36 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
   // ---- the heat table's keys: arrows move the chosen cell over the cells that ran ----
   let tableEl: HTMLTableElement | undefined;
   let previewEl: HTMLDivElement | undefined;
+  let focusedCell: HTMLElement | null = null;
+  function onfocusin(e: FocusEvent) {
+    if (e.target instanceof HTMLElement && e.target.classList.contains('cell')) focusedCell = e.target;
+  }
+  function onfocusout(e: FocusEvent) {
+    const leaving = e.target instanceof HTMLElement ? e.target : null;
+    const next = e.relatedTarget as Node | null;
+    if (next) {
+      if (!tableEl?.contains(next)) focusedCell = null;
+      return;
+    }
+    queueMicrotask(() => {
+      if (focusedCell === leaving && leaving?.isConnected && (!document.activeElement || !tableEl?.contains(document.activeElement))) {
+        focusedCell = null;
+      }
+    });
+  }
+  effect(() => {
+    void rows.get();
+    void sel.get();
+    if (!focusedCell || focusedCell.isConnected || !tableEl?.isConnected) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== document.documentElement && !tableEl.contains(active)) {
+      focusedCell = null;
+      return;
+    }
+    const next = tableEl.querySelector<HTMLElement>('button.cell[tabindex="0"]');
+    focusedCell = next ?? null;
+    next?.focus();
+  });
   function jumpToPreview(keyboard: boolean) {
     if (!previewEl) return;
     previewEl.scrollIntoView?.({ block: 'start' });
@@ -188,6 +218,8 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
             ref={(e) => (tableEl = e)}
             aria-label="Accuracy kept by condition and severity. Arrow keys move between cells."
             onkeydown={onkeydown}
+            onfocusin={onfocusin}
+            onfocusout={onfocusout}
           >
             <thead>
               <tr>

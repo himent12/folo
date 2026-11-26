@@ -344,7 +344,7 @@ export class Compiler {
       }
       if (ns !== null) this.fail(a, `${ns}:${key} is not supported on a component`);
       if (key === 'children') this.fail(a, 'pass children as JSX children');
-      if (key === 'ref') this.fail(a, 'ref is not supported on a component (pass a callback prop)');
+      if (key === 'ref' && name !== 'Dynamic') this.fail(a, 'ref is not supported on a component (pass a callback prop)');
       const k = propKey(key);
       if (a.value === null || a.value === undefined) prop([`${k}: true`]);
       else if (a.value.type === 'Literal' || a.value.type === 'StringLiteral') prop([`${k}: ${JSON.stringify(this.decode(a.value, a.value.value))}`]);

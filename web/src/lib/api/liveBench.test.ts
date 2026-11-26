@@ -259,6 +259,33 @@ describe('LiveBench ordering', () => {
     expect(live.bench?.name).toBe('back');
     stop();
   });
+
+  it('ignores a deferred act() response from the previous server when a new server has the same benchmark id', async () => {
+    snapshot = bench('server-A');
+    const { live, stop } = mount();
+    entries.resolve([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.bench?.name).toBe('server-A');
+
+    const saveA = deferred<Bench>();
+    const pending = live.act(() => saveA.promise);
+
+    // Switch servers while saveA is still in flight; server B has a benchmark with the same id `bn_1`.
+    snapshot = bench('server-B');
+    entries = deferred<BenchEntry[]>();
+    hub.epoch++;
+    flushSync();
+    entries.resolve([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.bench?.name).toBe('server-B');
+
+    // Resolving server A's deferred save must not overwrite server B's snapshot.
+    saveA.resolve(bench('server-A-saved'));
+    await pending;
+    flushSync();
+    expect(live.bench?.name).toBe('server-B');
+    stop();
+  });
 });
 
 describe('LiveBench with the mock', () => {

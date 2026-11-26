@@ -421,4 +421,44 @@ describe('AddDatasetDialog', () => {
     expect(go).not.toHaveBeenCalled();
     expect(toast.items).toEqual([]);
   });
+
+  it('blocks dataset registration while hub.mode is connecting, including after folder preflight', async () => {
+    const create = vi.spyOn(hub.api, 'createDataset');
+    hub.mode = 'connecting';
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'folder', known: [] } });
+    flushSync();
+    const pathEl = document.querySelector<HTMLInputElement>('input[id$="-path"]')!;
+    pathEl.value = 'D:/data/shapes';
+    pathEl.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const submitBtn = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    expect(submitBtn.disabled).toBe(true);
+    pathEl.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await Promise.resolve();
+    expect(create).not.toHaveBeenCalled();
+    unmount(c);
+
+    // Also block if hub transitions to connecting while the preflight datasets() call is in flight.
+    let releasePreflight!: (list: Dataset[]) => void;
+    vi.spyOn(hub.api, 'datasets').mockImplementation(
+      () =>
+        new Promise<Dataset[]>((resolve) => {
+          releasePreflight = resolve;
+        }),
+    );
+    hub.mode = 'mock';
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'folder' } });
+    flushSync();
+    const pathEl2 = document.querySelector<HTMLInputElement>('input[id$="-path"]')!;
+    pathEl2.value = 'D:/data/shapes';
+    pathEl2.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    pathEl2.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    flushSync();
+    hub.mode = 'connecting';
+    releasePreflight([]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(create).not.toHaveBeenCalled();
+  });
 });

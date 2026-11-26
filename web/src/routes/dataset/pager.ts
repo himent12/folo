@@ -97,7 +97,9 @@ export class ImagePager {
   /** Stops pending requests (call when the filter changes). */
   dispose() {
     this.#disposed = true;
+    this.#gen++;
     this.#ctrl.abort();
+    this.#inflight.clear();
   }
 
   get(i: number): DatasetImage | undefined {
@@ -153,10 +155,11 @@ export class ImagePager {
 
   /** The image at `i`, loading its page if needed. */
   async at(i: number): Promise<DatasetImage | undefined> {
-    if (i < 0 || (this.total !== null && i >= this.total)) return undefined;
+    if (this.#disposed || i < 0 || (this.total !== null && i >= this.total)) return undefined;
     const p = Math.floor(i / PAGE);
     const gen = this.#gen;
     const loaded = await this.#load(p);
+    if (this.#disposed) return undefined;
     const page = this.#pages.get(p);
     if (page !== undefined) {
       this.#touch(p, page);
@@ -200,7 +203,8 @@ export class ImagePager {
       if (pages.every((p) => this.#fresh(p))) continue;
       const gen = this.#gen;
       const res = await hub.api.datasetImages(this.datasetId, this.#query(off, SCAN), this.#ctrl.signal).catch((e: unknown) => {
-        if (gen === this.#gen) throw e;
+        if (this.#disposed || gen !== this.#gen) return undefined;
+        throw e;
       });
       if (this.#disposed) return -1;
       // A reload() meanwhile: look again in the dataset as it is now.
@@ -333,14 +337,14 @@ export class ImagePager {
       .datasetImages(this.datasetId, this.#query(p * PAGE, PAGE), this.#ctrl.signal)
       .then(
         (res) => {
-          if (gen !== this.#gen) return undefined;
+          if (this.#disposed || gen !== this.#gen) return undefined;
           this.#failed.delete(p);
           if (this.#failed.size === 0) this.#error.set(undefined);
           this.#store(p, res.images, res.total);
           return res.images;
         },
         (e: unknown) => {
-          if (gen !== this.#gen || (e instanceof DOMException && e.name === 'AbortError')) return undefined;
+          if (this.#disposed || gen !== this.#gen || (e instanceof DOMException && e.name === 'AbortError')) return undefined;
           // A stale page that cannot be read again keeps what it showed (still stale, so Retry reads it).
           this.#failed.add(p);
           this.#error.set(e);
