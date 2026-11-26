@@ -192,3 +192,94 @@ fn adafactor_resume_parity_and_validation() {
     assert!(AdafactorConfig { decay_rate: 0.5, ..AdafactorConfig::default() }.validate().is_err());
     assert!(AdafactorConfig { clip_threshold: 0.0, ..AdafactorConfig::default() }.validate().is_err());
 }
+
+struct MapGrads(HashMap<folo_core::TensorId, Tensor>);
+
+impl GradSource for MapGrads {
+    fn grad(&self, param: &Tensor) -> Option<&Tensor> {
+        self.0.get(&param.id())
+    }
+}
+
+#[test]
+fn adafactor_r1_regressions_spike_aliasing_reordered_resume_and_beta1_varying_lr() {
+    // 1. Finite gradient spike 2e20 does not poison factored or unfactored state to Inf/NaN.
+    let wf = Tensor::ones([2, 3]).requires_grad_();
+    let bu = Tensor::ones([3]).requires_grad_();
+    let mut opt = Adafactor::from_params(
+        vec![("w".into(), wf.clone()), ("b".into(), bu.clone())],
+        AdafactorConfig { lr: Some(0.01), scale_parameter: false, ..AdafactorConfig::default() },
+    )
+    .unwrap();
+    let mut g_spike = HashMap::new();
+    g_spike.insert(wf.id(), Tensor::from_slice(&[2e20f32; 6], [2, 3]).unwrap());
+    g_spike.insert(bu.id(), Tensor::from_slice(&[2e20f32; 3], [3]).unwrap());
+    opt.step(&MapGrads(g_spike)).unwrap();
+    let mut g_norm = HashMap::new();
+    g_norm.insert(wf.id(), Tensor::from_slice(&[1.0f32; 6], [2, 3]).unwrap());
+    g_norm.insert(bu.id(), Tensor::from_slice(&[1.0f32; 3], [3]).unwrap());
+    opt.step(&MapGrads(g_norm)).unwrap();
+    assert!(wf.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    assert!(bu.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+
+    // Non-finite gradient fails atomically before any write.
+    let step_before = opt.step_count();
+    let mut g_nan = HashMap::new();
+    g_nan.insert(wf.id(), Tensor::from_slice(&[f32::NAN; 6], [2, 3]).unwrap());
+    assert!(opt.step(&MapGrads(g_nan)).is_err());
+    assert_eq!(opt.step_count(), step_before);
+
+    // 2. Parameter-state aliasing rejected in preflight.
+    let p_a = Tensor::ones([3]).requires_grad_();
+    let mut opt_a = Adafactor::from_params(vec![("b".into(), p_a)], AdafactorConfig::default()).unwrap();
+    let st_buf = opt_a.state_tensors().unwrap()[0].1.clone();
+    opt_a.groups_mut()[0].params[0].1 = st_buf;
+    assert!(opt_a.step(&MapGrads(HashMap::new())).is_err());
+
+    // 3. Reordered parameter resume maps param_steps by name.
+    let a1 = Tensor::ones([2]).requires_grad_();
+    let b1 = Tensor::ones([2]).requires_grad_();
+    let mut src = Adafactor::from_params(
+        vec![("a".into(), a1.clone()), ("b".into(), b1.clone())],
+        AdafactorConfig::default(),
+    )
+    .unwrap();
+    src.step(&a1.square().unwrap().sum_all().unwrap().backward().unwrap()).unwrap();
+    let contract = src.contract();
+    let state: HashMap<String, Tensor> = src.state_tensors().unwrap().into_iter().collect();
+    let a2 = Tensor::ones([2]).requires_grad_();
+    let b2 = Tensor::ones([2]).requires_grad_();
+    let mut dst = Adafactor::from_params(
+        vec![("b".into(), b2.clone()), ("a".into(), a2.clone())],
+        AdafactorConfig::default(),
+    )
+    .unwrap();
+    dst.apply_contract(&contract).unwrap();
+    dst.load_state(contract.step, &state).unwrap();
+    assert_eq!(dst.param_step(0, 0), Some(0)); // "b"
+    assert_eq!(dst.param_step(0, 1), Some(1)); // "a"
+
+    // 4. Optional beta1 scales by alpha_t BEFORE EMA (Transformers parity under varying LR).
+    let p = Tensor::from_slice(&[10.0f32], [1]).unwrap().requires_grad_();
+    let mut opt_b1 = Adafactor::from_params(
+        vec![("p".into(), p.clone())],
+        AdafactorConfig {
+            lr: Some(0.1),
+            beta1: Some(0.5),
+            scale_parameter: false,
+            weight_decay: 0.0,
+            ..AdafactorConfig::default()
+        },
+    )
+    .unwrap();
+    let mut g1 = HashMap::new();
+    g1.insert(p.id(), Tensor::from_slice(&[2.0f32], [1]).unwrap());
+    let g1 = MapGrads(g1);
+    // Step 1 (lr=0.1): u_clip = 1.0, scaled = 0.1, m1 = 0.5*0 + 0.5*0.1 = 0.05, p1 = 9.95
+    opt_b1.step(&g1).unwrap();
+    assert!((p.to_vec::<f32>().unwrap()[0] - 9.95).abs() < 1e-5);
+    // Step 2 (lr=0.4): u_clip = 1.0, scaled = 0.4, m2 = 0.5*0.05 + 0.5*0.4 = 0.225, p2 = 9.725
+    opt_b1.groups_mut()[0].lr = 0.4;
+    opt_b1.step(&g1).unwrap();
+    assert!((p.to_vec::<f32>().unwrap()[0] - 9.725).abs() < 1e-5);
+}

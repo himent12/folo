@@ -59,8 +59,16 @@ impl RoPE2d {
         }
         let quarter = head_dim / 4;
         let half = (head_dim / 2) as f64;
-        let freqs: Vec<f32> =
-            (0..quarter).map(|k| (coord_scale * base.powf(-(2.0 * k as f64) / half)) as f32).collect();
+        let mut freqs = Vec::with_capacity(quarter);
+        for k in 0..quarter {
+            let f = (coord_scale * base.powf(-(2.0 * k as f64) / half)) as f32;
+            if !f.is_finite() {
+                return Err(Error::Invalid(format!(
+                    "RoPE2d: inv_freq[{k}] overflows f32 for base={base}, coord_scale={coord_scale}"
+                )));
+            }
+            freqs.push(f);
+        }
         let inv_freq = Tensor::from_vec(freqs, [quarter])?;
         Ok(Self { inv_freq, head_dim, base, coord_scale })
     }
@@ -71,20 +79,23 @@ impl RoPE2d {
         self.head_dim
     }
 
-    /// Frequency base.
+    /// Construction-time frequency base. Note: loading an `inv_freq` buffer from a `.folo` file updates
+    /// [`Self::inv_freq`] directly without changing this metadata field; construct with matching options if
+    /// callers inspect `base()` after load.
     #[inline]
     pub fn base(&self) -> f64 {
         self.base
     }
 
-    /// Coordinate scaling multiplier.
+    /// Construction-time coordinate scaling multiplier (see [`Self::base`] regarding `.folo` loads).
     #[inline]
     pub fn coord_scale(&self) -> f64 {
         self.coord_scale
     }
 
     /// Compute `(cos_y, sin_y, cos_x, sin_x)` tables of shape `[1, 1, height * width, head_dim / 4]`
-    /// on `self.inv_freq`'s device and dtype `dtype`.
+    /// on `self.inv_freq`'s device and dtype `dtype` (tables are synthesized in `f64` on the host and
+    /// uploaded to `self.inv_freq.device()`).
     fn tables(&self, height: usize, width: usize, dtype: DType) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
         let quarter = self.head_dim / 4;
         let len = height.checked_mul(width).ok_or_else(|| {
@@ -96,6 +107,9 @@ impl RoPE2d {
                 "RoPE2d: inv_freq length {} != head_dim / 4 ({quarter})",
                 freqs.len()
             )));
+        }
+        if freqs.iter().any(|f| !f.is_finite()) {
+            return Err(Error::Invalid("RoPE2d: inv_freq contains non-finite value".into()));
         }
         let mut cy = Vec::with_capacity(len * quarter);
         let mut sy = Vec::with_capacity(len * quarter);
@@ -190,8 +204,11 @@ impl RoPE2d {
                 self.head_dim
             )));
         }
+        let seq_len = h.checked_mul(w).ok_or_else(|| {
+            Error::Invalid(format!("RoPE2d::apply_nchw: height ({h}) * width ({w}) overflows"))
+        })?;
         // [B, num_heads, head_dim, H*W] -> [B, num_heads, H*W, head_dim]
-        let tokens = x.reshape([b, num_heads, self.head_dim, h * w])?.transpose(2, 3)?.contiguous()?;
+        let tokens = x.reshape([b, num_heads, self.head_dim, seq_len])?.transpose(2, 3)?.contiguous()?;
         let rotated = self.apply(&tokens, h, w)?;
         Ok(rotated.transpose(2, 3)?.contiguous()?.reshape([b, c, h, w])?)
     }

@@ -14,19 +14,22 @@
 //! ```
 //!
 //! Rank `< 2` parameters (1-D biases, normalization gains, or scalars) store a full unfactored second moment
-//! `v`. Supports optional first-moment EMA (`beta1`), relative step-size schedules (`relative_step` /
+//! `v`. Supports optional first-moment EMA (`beta1`, applied to the `alpha_t`-scaled update `alpha_t * u_clip`
+//! matching HuggingFace Transformers / Shazeer & Stern §7), relative step-size schedules (`relative_step` /
 //! `warmup_init`), parameter-RMS scaling (`scale_parameter`), and decoupled weight decay. Parameters without
-//! a gradient in a step are skipped completely (no decay and no state update).
+//! a gradient in a step are skipped completely (no decay and no state update). Note: the `f64` update kernel
+//! currently stages GPU tensors on the host per step for numerical accuracy.
 
+mod checkpoint;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use folo_core::{DType, Device, Tensor, no_grad};
 use serde::{Deserialize, Serialize};
 
-use super::{GradSource, ParamGroup, check_param_sets, storage_key, validate_groups};
+use super::{GradSource, ParamGroup, storage_key, validate_groups};
 use crate::{Error, Result};
 
 /// Default Adafactor explicit learning rate when `relative_step = false` (`1e-3`).
@@ -43,7 +46,7 @@ pub const ADAFACTOR_DEFAULT_DECAY_RATE: f64 = -0.8;
 #[serde(default, deny_unknown_fields)]
 pub struct AdafactorConfig {
     /// Explicit learning rate `>= 0` when `relative_step = false` (default `Some(1e-3)`). Must be `None`
-    /// when `relative_step = true` (or ignored in favor of the relative schedule).
+    /// when `relative_step = true`.
     pub lr: Option<f64>,
     /// Regularization floors `[eps1, eps2]`: `eps1 > 0` added to `g²`, `eps2 > 0` floor on `RMS(param)`
     /// (paper default `[1e-30, 1e-3]`).
@@ -105,9 +108,9 @@ impl AdafactorConfig {
         if self.warmup_init && !self.relative_step {
             return Err(Error::Invalid("adafactor: warmup_init requires relative_step = true".into()));
         }
-        if !(self.eps[0].is_finite() && self.eps[0] > 0.0) {
+        if !(self.eps[0].is_finite() && self.eps[0] >= 1e-300) {
             return Err(Error::Invalid(format!(
-                "adafactor: eps[0] must be finite and > 0, got {}",
+                "adafactor: eps[0] must be finite and >= 1e-300, got {}",
                 self.eps[0]
             )));
         }
@@ -154,6 +157,9 @@ pub struct AdafactorGroupContract {
     pub params: Vec<String>,
     /// Base learning rate (used when `relative_step = false`).
     pub lr: f64,
+    /// Current scheduled learning rate (defaults to `lr` when omitted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_lr: Option<f64>,
     /// Decoupled weight decay.
     pub weight_decay: f64,
 }
@@ -184,6 +190,21 @@ struct ParamState {
     param_step: u64,
 }
 
+struct StagedGroup {
+    base_lr: f64,
+    lr: f64,
+    weight_decay: f64,
+}
+
+struct PendingResume {
+    step: u64,
+    cfg: AdafactorConfig,
+    group_names: Vec<String>,
+    param_names: Vec<Vec<String>>,
+    groups: Vec<StagedGroup>,
+    param_steps: Vec<Vec<u64>>,
+}
+
 /// Adafactor memory-efficient optimizer (Shazeer & Stern, ICML 2018).
 pub struct Adafactor {
     groups: Vec<ParamGroup>,
@@ -191,6 +212,7 @@ pub struct Adafactor {
     cfg: AdafactorConfig,
     state_keys: HashSet<usize>,
     step: u64,
+    pending_resume: Option<PendingResume>,
 }
 
 /// Compute Adafactor's second-moment retention `beta2_t = 1 - t^decay_rate` for active step `t >= 1`.
@@ -224,7 +246,7 @@ impl Adafactor {
         }
         let state = init_state(&groups, cfg.beta1.is_some())?;
         let state_keys = HashSet::with_capacity(groups.iter().map(|g| g.params.len() * 3).sum());
-        Ok(Self { groups, state, cfg, state_keys, step: 0 })
+        Ok(Self { groups, state, cfg, state_keys, step: 0, pending_resume: None })
     }
 
     /// Convenience constructor for a single `"params"` group configured by [`AdafactorConfig`].
@@ -294,6 +316,7 @@ impl Adafactor {
             )));
         }
         self.state_keys.clear();
+        let mut param_keys = HashSet::with_capacity(self.groups.iter().map(|g| g.params.len()).sum());
         for (grp, st) in self.groups.iter().zip(&self.state) {
             validate_adafactor_group(grp, self.cfg.relative_step)?;
             if grp.params.len() != st.len() {
@@ -314,6 +337,11 @@ impl Adafactor {
                 if !p.layout().is_non_overlapping() {
                     return Err(Error::Invalid(format!(
                         "adafactor: parameter `{name}` has an overlapping/broadcast layout"
+                    )));
+                }
+                if !param_keys.insert(storage_key(p)) {
+                    return Err(Error::Invalid(format!(
+                        "adafactor: parameter `{name}` aliases another parameter"
                     )));
                 }
                 check_state_alignment(name, p, ps, &mut self.state_keys)?;
@@ -341,6 +369,15 @@ impl Adafactor {
                 }
             }
         }
+        for grp in &self.groups {
+            for (name, p) in &grp.params {
+                if self.state_keys.contains(&storage_key(p)) {
+                    return Err(Error::Invalid(format!(
+                        "adafactor: parameter `{name}` aliases an optimizer state buffer"
+                    )));
+                }
+            }
+        }
 
         let _ng = no_grad();
         let cfg = self.cfg;
@@ -348,36 +385,63 @@ impl Adafactor {
         let eps2 = cfg.eps[1];
         let clip_thr = cfg.clip_threshold;
 
-        for (grp, st) in self.groups.iter().zip(&mut self.state) {
+        // Compute and validate every staged parameter/state update before mutating any tensor.
+        enum StagedSecond {
+            Factored(Vec<f32>, Vec<f32>),
+            Unfactored(Vec<f32>),
+            Empty,
+        }
+        struct StagedUpdate {
+            gi: usize,
+            pi: usize,
+            new_step: u64,
+            second: StagedSecond,
+            exp_avg: Option<Vec<f32>>,
+            param: Option<Vec<f32>>,
+        }
+
+        let mut updates = Vec::new();
+        for (gi, (grp, st)) in self.groups.iter().zip(&self.state).enumerate() {
             let group_lr = grp.lr;
             let wd = grp.weight_decay;
 
-            for ((_, p), ps) in grp.params.iter().zip(st.iter_mut()) {
+            for (pi, ((name, p), ps)) in grp.params.iter().zip(st).enumerate() {
                 let Some(g) = grads.grad(p) else { continue };
                 let n = p.numel();
-                let t = ps.param_step + 1;
+                let t = ps.param_step.saturating_add(1);
                 if n == 0 {
-                    ps.param_step = t;
+                    updates.push(StagedUpdate {
+                        gi,
+                        pi,
+                        new_step: t,
+                        second: StagedSecond::Empty,
+                        exp_avg: None,
+                        param: None,
+                    });
                     continue;
+                }
+
+                let p_vec = p.to_vec::<f32>()?;
+                let g_vec = g.to_vec::<f32>()?;
+                if g_vec.iter().any(|v| !v.is_finite()) {
+                    return Err(Error::Invalid(format!(
+                        "adafactor: gradient of `{name}` contains non-finite values"
+                    )));
+                }
+                if p_vec.iter().any(|v| !v.is_finite()) {
+                    return Err(Error::Invalid(format!(
+                        "adafactor: parameter `{name}` contains non-finite values"
+                    )));
                 }
 
                 let beta2_t = adafactor_beta2(t, cfg.decay_rate);
                 let base_step =
                     if cfg.relative_step { adafactor_relative_lr(t, cfg.warmup_init) } else { group_lr };
-                let p_vec = p.to_vec::<f32>()?;
-                let g_vec = g.to_vec::<f32>()?;
-                let dev = p.device();
-
-                let rms_p = if cfg.scale_parameter {
-                    let sq_sum: f64 = p_vec.iter().map(|&v| (v as f64) * (v as f64)).sum();
-                    (sq_sum / n as f64).sqrt().max(eps2)
-                } else {
-                    1.0
-                };
+                let rms_p = if cfg.scale_parameter { rms_f32_safe(&p_vec).max(eps2) } else { 1.0 };
                 let alpha_t = base_step * rms_p;
 
                 let mut u = vec![0.0f64; n];
-                match &mut ps.second {
+                let staged_second = match &ps.second {
                     SecondMoment::Factored { row, col } => {
                         let rows = p.dims()[0];
                         let cols = n / rows;
@@ -409,17 +473,16 @@ impl Adafactor {
                         for r in 0..rows {
                             let v = beta2_t * (vr[r] as f64) + one_minus_b2 * row_means[r];
                             vr_f64[r] = v;
-                            vr[r] = v as f32;
+                            vr[r] = clamp_f32_finite(v);
                             vr_sum += v;
                         }
                         let vr_mean = vr_sum * inv_rows;
                         for c in 0..cols {
                             let v = beta2_t * (vc[c] as f64) + one_minus_b2 * col_means[c];
                             vc_f64[c] = v;
-                            vc[c] = v as f32;
+                            vc[c] = clamp_f32_finite(v);
                         }
 
-                        // inv_sqrt(v_hat[r, c]) = sqrt(vr_mean / vr[r]) / sqrt(vc[c]).
                         let row_scale: Vec<f64> =
                             vr_f64
                                 .iter()
@@ -442,9 +505,12 @@ impl Adafactor {
                                 u[base + c] = (g_vec[base + c] as f64) * rs * cs;
                             }
                         }
-
-                        row.copy_from(&Tensor::from_vec(vr, [rows])?.to_device(dev)?)?;
-                        col.copy_from(&Tensor::from_vec(vc, [cols])?.to_device(dev)?)?;
+                        if vr.iter().any(|v| !v.is_finite()) || vc.iter().any(|v| !v.is_finite()) {
+                            return Err(Error::Invalid(format!(
+                                "adafactor: non-finite factored moment for `{name}`"
+                            )));
+                        }
+                        StagedSecond::Factored(vr, vc)
                     }
                     SecondMoment::Unfactored(v_buf) => {
                         let mut v_vec = v_buf.to_vec::<f32>()?;
@@ -452,23 +518,28 @@ impl Adafactor {
                         for i in 0..n {
                             let gv = g_vec[i] as f64;
                             let v = beta2_t * (v_vec[i] as f64) + one_minus_b2 * (gv * gv + eps1);
-                            v_vec[i] = v as f32;
+                            v_vec[i] = clamp_f32_finite(v);
                             u[i] = gv / v.sqrt();
                         }
-                        v_buf.copy_from(&Tensor::from_vec(v_vec, p.shape().clone())?.to_device(dev)?)?;
+                        if v_vec.iter().any(|v| !v.is_finite()) {
+                            return Err(Error::Invalid(format!(
+                                "adafactor: non-finite second moment for `{name}`"
+                            )));
+                        }
+                        StagedSecond::Unfactored(v_vec)
                     }
-                }
+                };
 
-                // RMS update clipping: u /= max(1, RMS(u) / clip_threshold).
-                let rms_u = (u.iter().map(|&v| v * v).sum::<f64>() / n as f64).sqrt();
+                // Overflow-safe RMS update clipping: u /= max(1, RMS(u) / clip_threshold).
+                let rms_u = rms_f64_safe(&u);
                 let clip_div = (rms_u / clip_thr).max(1.0);
                 let inv_clip = 1.0 / clip_div;
                 for v in &mut u {
-                    *v *= inv_clip;
+                    *v *= inv_clip * alpha_t;
                 }
 
-                // Optional first moment EMA.
-                if let (Some(b1), Some(m_buf)) = (cfg.beta1, &mut ps.exp_avg) {
+                // Optional first-moment EMA on the scaled update `alpha_t * u_clip` (Transformers parity).
+                let staged_m = if let (Some(b1), Some(m_buf)) = (cfg.beta1, &ps.exp_avg) {
                     let mut m_vec = m_buf.to_vec::<f32>()?;
                     let one_minus_b1 = 1.0 - b1;
                     for i in 0..n {
@@ -476,206 +547,66 @@ impl Adafactor {
                         m_vec[i] = m as f32;
                         u[i] = m;
                     }
-                    m_buf.copy_from(&Tensor::from_vec(m_vec, p.shape().clone())?.to_device(dev)?)?;
-                }
+                    if m_vec.iter().any(|v| !v.is_finite()) {
+                        return Err(Error::Invalid(format!(
+                            "adafactor: non-finite first moment for `{name}`"
+                        )));
+                    }
+                    Some(m_vec)
+                } else {
+                    None
+                };
 
                 // Decoupled weight decay and parameter step.
                 let decay = if wd != 0.0 { 1.0 - alpha_t * wd } else { 1.0 };
                 let mut p_out = vec![0.0f32; n];
                 for i in 0..n {
-                    p_out[i] = ((p_vec[i] as f64) * decay - alpha_t * u[i]) as f32;
+                    p_out[i] = ((p_vec[i] as f64) * decay - u[i]) as f32;
                 }
+                if p_out.iter().any(|v| !v.is_finite()) {
+                    return Err(Error::Invalid(format!(
+                        "adafactor: non-finite parameter update for `{name}`"
+                    )));
+                }
+                updates.push(StagedUpdate {
+                    gi,
+                    pi,
+                    new_step: t,
+                    second: staged_second,
+                    exp_avg: staged_m,
+                    param: Some(p_out),
+                });
+            }
+        }
+
+        // Commit all validated updates.
+        for upd in updates {
+            let (_, p) = &self.groups[upd.gi].params[upd.pi];
+            let ps = &mut self.state[upd.gi][upd.pi];
+            let dev = p.device();
+            match (&mut ps.second, upd.second) {
+                (SecondMoment::Factored { row, col }, StagedSecond::Factored(vr, vc)) => {
+                    let rows = row.dims()[0];
+                    let cols = col.dims()[0];
+                    row.copy_from(&Tensor::from_vec(vr, [rows])?.to_device(dev)?)?;
+                    col.copy_from(&Tensor::from_vec(vc, [cols])?.to_device(dev)?)?;
+                }
+                (SecondMoment::Unfactored(v_buf), StagedSecond::Unfactored(v_vec)) => {
+                    v_buf.copy_from(&Tensor::from_vec(v_vec, p.shape().clone())?.to_device(dev)?)?;
+                }
+                (_, StagedSecond::Empty) => {}
+                _ => unreachable!("staged second-moment variant matches parameter state"),
+            }
+            if let (Some(m_buf), Some(m_vec)) = (&mut ps.exp_avg, upd.exp_avg) {
+                m_buf.copy_from(&Tensor::from_vec(m_vec, p.shape().clone())?.to_device(dev)?)?;
+            }
+            if let Some(p_out) = upd.param {
                 p.copy_from(&Tensor::from_vec(p_out, p.shape().clone())?.to_device(dev)?)?;
-                ps.param_step = t;
             }
+            ps.param_step = upd.new_step;
         }
 
-        self.step += 1;
-        Ok(())
-    }
-
-    /// Export all optimizer state tensors keyed `<param_name>.<state>`.
-    pub fn state_tensors(&self) -> Result<Vec<(String, Tensor)>> {
-        let mut out = Vec::new();
-        for (g, st) in self.groups.iter().zip(&self.state) {
-            for ((name, _), ps) in g.params.iter().zip(st) {
-                match &ps.second {
-                    SecondMoment::Factored { row, col } => {
-                        out.push((format!("{name}.exp_avg_sq_row"), row.clone()));
-                        out.push((format!("{name}.exp_avg_sq_col"), col.clone()));
-                    }
-                    SecondMoment::Unfactored(v) => {
-                        out.push((format!("{name}.exp_avg_sq"), v.clone()));
-                    }
-                }
-                if let Some(m) = &ps.exp_avg {
-                    out.push((format!("{name}.exp_avg"), m.clone()));
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// Build a serializable [`AdafactorContract`] for checkpointing.
-    pub fn contract(&self) -> AdafactorContract {
-        let param_steps = self.state.iter().flat_map(|g| g.iter().map(|s| s.param_step)).collect();
-        AdafactorContract {
-            groups: self
-                .groups
-                .iter()
-                .map(|g| AdafactorGroupContract {
-                    name: g.name.clone(),
-                    params: g.params.iter().map(|(n, _)| n.clone()).collect(),
-                    lr: g.base_lr,
-                    weight_decay: g.weight_decay,
-                })
-                .collect(),
-            config: self.cfg,
-            step: self.step,
-            param_steps,
-        }
-    }
-
-    /// Validate and apply a checkpoint [`AdafactorContract`] before [`Adafactor::load_state`].
-    pub fn apply_contract(&mut self, c: &AdafactorContract) -> Result<()> {
-        c.config.validate().map_err(|e| Error::Load(e.to_string()))?;
-        let group_contracts: Vec<super::GroupContract> = c
-            .groups
-            .iter()
-            .map(|gc| super::GroupContract {
-                name: gc.name.clone(),
-                params: gc.params.clone(),
-                lr: gc.lr,
-                momentum: None,
-                nesterov: None,
-                weight_decay: gc.weight_decay,
-                betas: None,
-                eps: None,
-                decoupled_wd: true,
-                cautious_wd: false,
-                cautious: false,
-            })
-            .collect();
-        check_param_sets(&self.groups, &group_contracts)?;
-        if c.config.beta1.is_some() != self.cfg.beta1.is_some() {
-            return Err(Error::Load(
-                "adafactor contract beta1 presence does not match optimizer state".into(),
-            ));
-        }
-        let total_params: usize = self.groups.iter().map(|g| g.params.len()).sum();
-        if !c.param_steps.is_empty() && c.param_steps.len() != total_params {
-            return Err(Error::Load(format!(
-                "adafactor contract param_steps length {} != total params {total_params}",
-                c.param_steps.len()
-            )));
-        }
-        for (g, gc) in self.groups.iter_mut().zip(&c.groups) {
-            g.base_lr = gc.lr;
-            g.lr = gc.lr;
-            g.weight_decay = gc.weight_decay;
-            validate_adafactor_group(g, c.config.relative_step).map_err(|e| Error::Load(e.to_string()))?;
-        }
-        self.cfg = c.config;
-        if !c.param_steps.is_empty() {
-            let mut idx = 0usize;
-            for st in &mut self.state {
-                for ps in st.iter_mut() {
-                    ps.param_step = c.param_steps[idx];
-                    idx += 1;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Restore step count and state tensors from a checkpoint map.
-    pub fn load_state(&mut self, step: u64, state: &HashMap<String, Tensor>) -> Result<()> {
-        let required = step > 0;
-        let mut problems = Vec::new();
-        let mut staged = Vec::with_capacity(self.groups.len());
-
-        let fetch = |key: &str, expected: &[usize], problems: &mut Vec<String>| -> Option<Tensor> {
-            match state.get(key) {
-                Some(t) if t.dims() == expected && t.dtype() == DType::F32 => Some(t.clone()),
-                Some(t) => {
-                    problems.push(format!(
-                        "`optim.{key}` is {:?} {}, expected {expected:?} f32",
-                        t.dims(),
-                        t.dtype()
-                    ));
-                    None
-                }
-                None => {
-                    if required {
-                        problems.push(format!("`optim.{key}` is missing"));
-                    }
-                    None
-                }
-            }
-        };
-
-        for (g, st) in self.groups.iter().zip(&self.state) {
-            let mut gs = Vec::with_capacity(g.params.len());
-            for ((name, p), ps) in g.params.iter().zip(st) {
-                let s_t = match &ps.second {
-                    SecondMoment::Factored { row, col } => {
-                        let r = fetch(&format!("{name}.exp_avg_sq_row"), row.dims(), &mut problems);
-                        let c = fetch(&format!("{name}.exp_avg_sq_col"), col.dims(), &mut problems);
-                        (r, c)
-                    }
-                    SecondMoment::Unfactored(_) => {
-                        let v = fetch(&format!("{name}.exp_avg_sq"), p.dims(), &mut problems);
-                        (v, None)
-                    }
-                };
-                let m_t = if ps.exp_avg.is_some() {
-                    fetch(&format!("{name}.exp_avg"), p.dims(), &mut problems)
-                } else {
-                    None
-                };
-                gs.push((s_t.0, s_t.1, m_t));
-            }
-            staged.push(gs);
-        }
-        if !problems.is_empty() {
-            return Err(Error::Load(format!("adafactor state mismatch: {}", problems.join("; "))));
-        }
-
-        let _ng = no_grad();
-        for ((g, st), gs) in self.groups.iter().zip(&mut self.state).zip(staged) {
-            for (((_, p), ps), (t1, t2, tm)) in g.params.iter().zip(st.iter_mut()).zip(gs) {
-                let dev = p.device();
-                match &mut ps.second {
-                    SecondMoment::Factored { row, col } => {
-                        let sr = match t1 {
-                            Some(t) => t.to_device(dev)?,
-                            None => Tensor::zeros_with(row.shape(), DType::F32, dev)?,
-                        };
-                        let sc = match t2 {
-                            Some(t) => t.to_device(dev)?,
-                            None => Tensor::zeros_with(col.shape(), DType::F32, dev)?,
-                        };
-                        row.copy_from(&sr)?;
-                        col.copy_from(&sc)?;
-                    }
-                    SecondMoment::Unfactored(v) => {
-                        let sv = match t1 {
-                            Some(t) => t.to_device(dev)?,
-                            None => Tensor::zeros_with(p.shape(), DType::F32, dev)?,
-                        };
-                        v.copy_from(&sv)?;
-                    }
-                }
-                if let Some(m) = &mut ps.exp_avg {
-                    let sm = match tm {
-                        Some(t) => t.to_device(dev)?,
-                        None => Tensor::zeros_with(p.shape(), DType::F32, dev)?,
-                    };
-                    m.copy_from(&sm)?;
-                }
-            }
-        }
-        self.step = step;
+        self.step = self.step.saturating_add(1);
         Ok(())
     }
 
@@ -693,16 +624,46 @@ impl Adafactor {
     }
 }
 
-fn validate_adafactor_group(g: &ParamGroup, relative_step: bool) -> Result<()> {
-    let lr_ok = relative_step || (g.lr.is_finite() && g.lr >= 0.0);
-    let wd_ok = g.weight_decay.is_finite() && g.weight_decay >= 0.0;
+#[inline]
+fn clamp_f32_finite(v: f64) -> f32 {
+    if v.is_finite() { v.min(f32::MAX as f64) as f32 } else { v as f32 }
+}
+
+fn rms_f64_safe(xs: &[f64]) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    let m = xs.iter().fold(0.0f64, |acc, &v| acc.max(v.abs()));
+    if m == 0.0 || !m.is_finite() {
+        return m;
+    }
+    let sum_sq: f64 = xs.iter().map(|&v| (v / m) * (v / m)).sum();
+    m * (sum_sq / xs.len() as f64).sqrt()
+}
+
+fn rms_f32_safe(xs: &[f32]) -> f64 {
+    if xs.is_empty() {
+        return 0.0;
+    }
+    let m = xs.iter().fold(0.0f64, |acc, &v| acc.max((v as f64).abs()));
+    if m == 0.0 || !m.is_finite() {
+        return m;
+    }
+    let sum_sq: f64 = xs.iter().map(|&v| ((v as f64) / m).powi(2)).sum();
+    m * (sum_sq / xs.len() as f64).sqrt()
+}
+
+fn validate_adafactor_scalars(name: &str, lr: f64, wd: f64, relative_step: bool) -> Result<()> {
+    let lr_ok = relative_step || (lr.is_finite() && lr >= 0.0 && (lr as f32).is_finite());
+    let wd_ok = wd.is_finite() && wd >= 0.0 && (wd as f32).is_finite();
     if !(lr_ok && wd_ok) {
-        return Err(Error::Invalid(format!(
-            "adafactor group `{}`: invalid lr={}, weight_decay={}",
-            g.name, g.lr, g.weight_decay
-        )));
+        return Err(Error::Invalid(format!("adafactor group `{name}`: invalid lr={lr}, weight_decay={wd}")));
     }
     Ok(())
+}
+
+fn validate_adafactor_group(g: &ParamGroup, relative_step: bool) -> Result<()> {
+    validate_adafactor_scalars(&g.name, g.lr, g.weight_decay, relative_step)
 }
 
 fn init_state(groups: &[ParamGroup], has_beta1: bool) -> Result<Vec<Vec<ParamState>>> {

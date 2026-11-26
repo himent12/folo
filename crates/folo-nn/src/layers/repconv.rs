@@ -250,6 +250,12 @@ impl RepConv {
         }
 
         if let Some(bn_id) = &self.rbr_identity {
+            if self.config.in_channels != self.config.out_channels || self.config.stride != 1 {
+                return Err(Error::Invalid(format!(
+                    "RepConv: rbr_identity requires in_channels == out_channels and stride == 1, got in={} out={} stride={}",
+                    self.config.in_channels, self.config.out_channels, self.config.stride
+                )));
+            }
             let (gamma, beta, rm, rv) = read_bn_f64(bn_id, o)?;
             for oc in 0..o {
                 let k = gamma[oc] / (rv[oc] + bn_id.eps).sqrt();
@@ -358,18 +364,48 @@ impl Module for RepConv {
     }
 }
 
+fn conv2d_act_autocast(
+    x: &Tensor,
+    w: &Tensor,
+    b: Option<&Tensor>,
+    p: &folo_core::Conv2dParams,
+    act: Option<folo_core::UnaryOp>,
+) -> Result<Tensor> {
+    if folo_core::autocast_dtype() == Some(DType::F16)
+        && !x.device().is_cpu()
+        && !(folo_core::is_grad_enabled()
+            && (x.requires_grad() || w.requires_grad() || b.is_some_and(Tensor::requires_grad)))
+        && folo_core::backend::backend(x.device())?.computes_f16()
+    {
+        let x16 = x.to_dtype(DType::F16)?;
+        let w16 = w.to_dtype(DType::F16)?;
+        let b16 = b.map(|t| t.to_dtype(DType::F16)).transpose()?;
+        return Ok(x16.conv2d_act(&w16, b16.as_ref(), p, act)?);
+    }
+    Ok(x.conv2d_act(w, b, p, act)?)
+}
+
 impl Forward for RepConv {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         if let Some(reparam) = &self.rbr_reparam {
             let p = reparam.config().params();
-            return Ok(x.conv2d_act(&reparam.weight, reparam.bias.as_ref(), &p, self.act.unary_op())?);
+            return conv2d_act_autocast(x, &reparam.weight, reparam.bias.as_ref(), &p, self.act.unary_op());
         }
         let dense =
             self.rbr_dense.as_ref().ok_or_else(|| Error::Invalid("RepConv: missing rbr_dense".into()))?;
         let b1x1 = self.rbr_1x1.as_ref().ok_or_else(|| Error::Invalid("RepConv: missing rbr_1x1".into()))?;
         let mut y = dense.forward(x)?.add(&b1x1.forward(x)?)?;
         if let Some(id) = &self.rbr_identity {
-            y = y.add(&id.forward(x)?)?;
+            let x_id = if !id.is_training() && x.dtype() != id.weight.dtype() {
+                x.to_dtype(id.weight.dtype())?
+            } else {
+                x.clone()
+            };
+            let mut id_out = id.forward(&x_id)?;
+            if id_out.dtype() != y.dtype() {
+                id_out = id_out.to_dtype(y.dtype())?;
+            }
+            y = y.add(&id_out)?;
         }
         self.act.forward(&y)
     }

@@ -72,6 +72,12 @@ impl MultiHeadCrossAttentionConfig {
         self
     }
 
+    /// Set the epsilon for optional per-head QK-RMSNorm.
+    pub fn qk_norm_eps(mut self, eps: f32) -> Self {
+        self.qk_norm_eps = eps;
+        self
+    }
+
     /// Effective key/value input dimension.
     #[inline]
     pub fn resolved_kv_dim(&self) -> usize {
@@ -230,6 +236,14 @@ impl MultiHeadCrossAttention {
                 )));
             }
         }
+        if query.dtype() != key.dtype() || query.dtype() != value.dtype() {
+            return Err(Error::Invalid(format!(
+                "MultiHeadCrossAttention: query/key/value dtypes must match (got {}, {}, {})",
+                query.dtype(),
+                key.dtype(),
+                value.dtype()
+            )));
+        }
         let (bq, lq, dq) = query.dims3().map_err(|_| {
             Error::Invalid(format!(
                 "MultiHeadCrossAttention: query must be [B, L_q, D], got {:?}",
@@ -260,6 +274,8 @@ impl MultiHeadCrossAttention {
                 "MultiHeadCrossAttention: batch/length mismatch (Q [{bq},{lq}], K [{bk},{lk}], V [{bv},{lv}])"
             )));
         }
+        let h = self.config.num_heads;
+        let hd = d / h;
         if let Some(mask) = attn_mask {
             if mask.device() != dev {
                 return Err(Error::Invalid(format!(
@@ -273,9 +289,13 @@ impl MultiHeadCrossAttention {
                     mask.dtype()
                 )));
             }
+            if !broadcasts_to(mask.dims(), &[bq, h, lq, lk]) {
+                return Err(Error::Invalid(format!(
+                    "MultiHeadCrossAttention: attn_mask shape {:?} cannot broadcast to [{bq}, {h}, {lq}, {lk}]",
+                    mask.dims()
+                )));
+            }
         }
-        let h = self.config.num_heads;
-        let hd = d / h;
         if let Some((rope2d, (qh, qw), (kvh, kvw))) = rope {
             if rope2d.head_dim() != hd {
                 return Err(Error::Invalid(format!(
@@ -307,9 +327,26 @@ impl MultiHeadCrossAttention {
             ));
         }
         if bq == 0 || lq == 0 {
-            // Preserve autograd linkage through `out_proj(q_proj(query))` on empty batch/query sequences.
-            let q = self.q_proj.forward(query)?;
-            return self.out_proj.forward(&q);
+            // Preserve autograd linkage through every participating projection, norm, and input.
+            let mut q_empty = self.q_proj.forward(query)?;
+            let mut k_empty = self.k_proj.forward(key)?;
+            let v_empty = self.v_proj.forward(value)?;
+            if let Some(qn) = &self.q_norm {
+                q_empty = qn.forward(&q_empty.reshape([bq, lq, h, hd])?)?.reshape([bq, lq, d])?;
+            }
+            if let Some(kn) = &self.k_norm {
+                k_empty = kn.forward(&k_empty.reshape([bq, lk, h, hd])?)?.reshape([bq, lk, d])?;
+            }
+            let mut anchor = k_empty.sum_all()?.mul_scalar(0.0)?.add(&v_empty.sum_all()?.mul_scalar(0.0)?)?;
+            if let Some(mask) = attn_mask
+                && mask.requires_grad()
+            {
+                let m_sum = mask.to_dtype(anchor.dtype())?.sum_all()?.mul_scalar(0.0)?;
+                anchor = anchor.add(&m_sum)?;
+            }
+            let anchor =
+                if anchor.dtype() != q_empty.dtype() { anchor.to_dtype(q_empty.dtype())? } else { anchor };
+            return self.out_proj.forward(&q_empty.add(&anchor)?);
         }
 
         let mut q = self.q_proj.forward(query)?.reshape([bq, lq, h, hd])?.transpose(1, 2)?.contiguous()?;
@@ -329,15 +366,38 @@ impl MultiHeadCrossAttention {
 
         let scale = (hd as f64).sqrt().recip() as f32;
         let mut scores = q.matmul(&k.transpose(2, 3)?.contiguous()?)?.mul_scalar(scale)?;
-        if let Some(mask) = attn_mask {
+        let weights = if let Some(mask) = attn_mask {
             let m =
                 if mask.dtype() != scores.dtype() { mask.to_dtype(scores.dtype())? } else { mask.clone() };
             scores = scores.add(&m)?;
-        }
-        let weights = scores.softmax(3)?;
+            // Guard fully-masked rows (every key logit == -inf) so softmax yields exact 0 weights
+            // and 0 gradients instead of NaN, while letting genuine NaN logits propagate unchanged.
+            let is_neg_inf = scores.eq_scalar(f32::NEG_INFINITY)?;
+            let all_neg_inf = is_neg_inf
+                .to_dtype(DType::F32)?
+                .sum(3, true)?
+                .eq_scalar(lk as f32)?
+                .broadcast_to(scores.shape())?;
+            let zeros = Tensor::zeros_with(scores.shape(), scores.dtype(), scores.device())?;
+            let safe_scores = all_neg_inf.where_cond(&zeros, &scores)?;
+            let raw_weights = safe_scores.softmax(3)?;
+            let w_zeros = Tensor::zeros_with(raw_weights.shape(), raw_weights.dtype(), raw_weights.device())?;
+            all_neg_inf.where_cond(&w_zeros, &raw_weights)?
+        } else {
+            scores.softmax(3)?
+        };
+        let weights = if weights.dtype() != v.dtype() { weights.to_dtype(v.dtype())? } else { weights };
         let ctx = weights.matmul(&v)?.transpose(1, 2)?.contiguous()?.reshape([bq, lq, d])?;
         self.out_proj.forward(&ctx)
     }
+}
+
+fn broadcasts_to(src: &[usize], dst: &[usize]) -> bool {
+    if src.len() > dst.len() {
+        return false;
+    }
+    let offset = dst.len() - src.len();
+    src.iter().enumerate().all(|(i, &s)| s == 1 || s == dst[offset + i])
 }
 
 impl Module for MultiHeadCrossAttention {

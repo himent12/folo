@@ -205,10 +205,12 @@ fn rope2d_norm_preservation_relative_invariance_grad_check_and_roundtrip() {
         rope_loaded.apply(&q, h, w).unwrap().to_vec::<f32>().unwrap()
     );
 
-    // Invalid head_dim / base rejected.
+    // Invalid head_dim / base / overflowing coord_scale rejected.
     assert!(RoPE2d::new(6).is_err());
     assert!(RoPE2d::new(0).is_err());
     assert!(RoPE2d::with_options(8, 0.0, 1.0).is_err());
+    assert!(RoPE2d::with_options(8, 10_000.0, 1e40).is_err());
+    assert!(RoPE2d::with_options(8, 1e-100, 1.0).is_err());
 }
 
 #[test]
@@ -315,11 +317,99 @@ fn multi_head_cross_attention_grad_check_masking_rope2d_and_folo_roundtrip() {
     let y2 = loaded.forward_cross_with_rope2d(&q, (2, 2), &k, (2, 3), &rope, Some(&mask)).unwrap();
     assert_eq!(y1.to_vec::<f32>().unwrap(), y2.to_vec::<f32>().unwrap());
 
-    // 5. Empty batch preserves autograd; L_kv == 0 with L_q > 0 errors cleanly.
+    // 5. Empty batch AND zero-length query preserve autograd for Q, K, V; L_kv == 0 with L_q > 0 errors.
     let q0 = Tensor::zeros([0, 4, 8]).requires_grad_();
-    let kv0 = Tensor::zeros([0, 6, 6]);
-    let y0 = attn.forward_cross(&q0, &kv0, None).unwrap();
+    let k0 = Tensor::zeros([0, 6, 6]).requires_grad_();
+    let v0 = Tensor::zeros([0, 6, 6]).requires_grad_();
+    let y0 = attn.forward_cross_qkv(&q0, &k0, &v0, None).unwrap();
     assert_eq!(y0.dims(), &[0, 4, 8]);
-    assert_eq!(y0.sum_all().unwrap().backward().unwrap().get(&q0).unwrap().dims(), &[0, 4, 8]);
+    let g0 = y0.sum_all().unwrap().backward().unwrap();
+    assert_eq!(g0.get(&q0).unwrap().dims(), &[0, 4, 8]);
+    assert_eq!(g0.get(&k0).unwrap().dims(), &[0, 6, 6]);
+    assert_eq!(g0.get(&v0).unwrap().dims(), &[0, 6, 6]);
+
+    let q_lq0 = Tensor::zeros([2, 0, 8]).requires_grad_();
+    let k_lq0 = Tensor::randn([2, 6, 6], 0.0, 0.5, &mut rng).requires_grad_();
+    let v_lq0 = Tensor::randn([2, 6, 6], 0.0, 0.5, &mut rng).requires_grad_();
+    let y_lq0 = attn.forward_cross_qkv(&q_lq0, &k_lq0, &v_lq0, None).unwrap();
+    assert_eq!(y_lq0.dims(), &[2, 0, 8]);
+    let g_lq0 = y_lq0.sum_all().unwrap().backward().unwrap();
+    assert_eq!(g_lq0.get(&q_lq0).unwrap().dims(), &[2, 0, 8]);
+    assert_eq!(g_lq0.get(&k_lq0).unwrap().dims(), &[2, 6, 6]);
+    assert_eq!(g_lq0.get(&v_lq0).unwrap().dims(), &[2, 6, 6]);
     assert!(attn.forward_cross(&q, &Tensor::zeros([2, 0, 6]), None).is_err());
+
+    // 6. Mask broadcasting validation rejects rank-5 and expanding masks (including on empty queries).
+    let rank5_mask = Tensor::zeros([1, 1, 1, 1, 1]);
+    assert!(attn.forward_cross_qkv(&q, &k, &v, Some(&rank5_mask)).is_err());
+    assert!(attn.forward_cross_qkv(&q_lq0, &k_lq0, &v_lq0, Some(&rank5_mask)).is_err());
+    let expand_mask = Tensor::zeros([3, 1, 4, 6]);
+    assert!(attn.forward_cross_qkv(&q, &k, &v, Some(&expand_mask)).is_err());
+
+    // 7. Fully `-inf` masked row returns finite zero-weighted output and finite zero gradients (no NaN).
+    let mut full_mask_data = vec![0.0f32; 4 * 6];
+    full_mask_data[..6].fill(f32::NEG_INFINITY); // row 0 fully masked
+    let full_mask = Tensor::from_vec(full_mask_data, [1, 1, 4, 6]).unwrap();
+    let q_fm = q.detach().requires_grad_();
+    let v_fm = v.detach().requires_grad_();
+    let y_fm = attn.forward_cross_qkv(&q_fm, &k, &v_fm, Some(&full_mask)).unwrap();
+    assert!(y_fm.to_vec::<f32>().unwrap().iter().all(|x| x.is_finite()));
+    let g_fm = y_fm.square().unwrap().sum_all().unwrap().backward().unwrap();
+    assert!(g_fm.get(&q_fm).unwrap().to_vec::<f32>().unwrap().iter().all(|x| x.is_finite()));
+    assert!(g_fm.get(&v_fm).unwrap().to_vec::<f32>().unwrap().iter().all(|x| x.is_finite()));
+}
+
+#[test]
+fn repconv_gpu_autocast_identity_and_deploy() {
+    let mut rng = Rng::seed(804);
+    // CPU check: manually setting `rbr_identity` on a stride-2 block is rejected by `equivalent_kernel_bias`.
+    let mut bad_id = RepConv::new(RepConvConfig::new(4, 4).stride(2), &mut rng).unwrap();
+    bad_id.rbr_identity = Some(super::BatchNorm2d::new(4));
+    assert!(bad_id.equivalent_kernel_bias().is_err());
+
+    let Ok(ctx) = folo_gpu::GpuContext::shared() else {
+        return;
+    };
+    if ctx.summary().device_type == "Cpu" && std::env::var("FOLO_GPU_TEST_SOFTWARE").is_err() {
+        return;
+    }
+    let Ok(dev) = folo_gpu::init() else {
+        return;
+    };
+
+    let mut blk =
+        RepConv::new(RepConvConfig::new(6, 6).use_identity(true).act(Activation::Silu), &mut rng).unwrap();
+    blk.to_device(dev).unwrap();
+    let x_f32 = Tensor::randn([2, 6, 6, 6], 0.0, 1.0, &mut rng).to_device(dev).unwrap().requires_grad_();
+
+    // 1. Training mode with identity BN under GPU autocast (F16) succeeds forward + backward.
+    let y_tr = {
+        let _ac = folo_core::autocast();
+        blk.forward(&x_f32).unwrap()
+    };
+    let loss = y_tr.to_dtype(folo_core::DType::F32).unwrap().square().unwrap().mean_all().unwrap();
+    let grads = loss.backward().unwrap();
+    let gx = grads.get(&x_f32).unwrap().to_vec::<f32>().unwrap();
+    assert!(gx.iter().all(|v| v.is_finite()), "GPU autocast RepConv train grad non-finite");
+
+    // 2. Eval mode with F16 input and F32 weights under GPU autocast succeeds cleanly.
+    blk.eval();
+    let x_f16 = x_f32.detach().to_dtype(folo_core::DType::F16).unwrap();
+    let y_ev = {
+        let _ac = folo_core::autocast();
+        blk.forward(&x_f16).unwrap()
+    };
+    assert!(
+        y_ev.to_dtype(folo_core::DType::F32).unwrap().to_vec::<f32>().unwrap().iter().all(|v| v.is_finite())
+    );
+
+    // 3. Deployed mode under GPU autocast matches expected F16 autocast behavior and stays finite.
+    blk.switch_to_deploy().unwrap();
+    let y_dep = {
+        let _ac = folo_core::autocast();
+        blk.forward(&x_f32.detach()).unwrap()
+    };
+    assert!(
+        y_dep.to_dtype(folo_core::DType::F32).unwrap().to_vec::<f32>().unwrap().iter().all(|v| v.is_finite())
+    );
 }

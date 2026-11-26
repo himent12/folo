@@ -8,6 +8,7 @@ use folo_core::Tensor;
 use folo_core::rng::Rng;
 
 use super::*;
+use crate::optim::Optimizer;
 use crate::{Conv2d, Conv2dConfig, Forward, Linear, Module};
 
 #[test]
@@ -212,4 +213,105 @@ fn muon_resume_parity_sgd_fallback_and_validation() {
     assert!(MuonConfig { lr: -0.1, ..MuonConfig::default() }.validate().is_err());
     assert!(MuonConfig { momentum: 1.0, ..MuonConfig::default() }.validate().is_err());
     assert!(MuonConfig { ns_steps: 0, ortho: None, ..MuonConfig::default() }.validate().is_err());
+    assert!(MuonConfig { aux_eps: 1e-50, ..MuonConfig::default() }.validate().is_err());
+}
+
+struct MapGrads(HashMap<folo_core::TensorId, Tensor>);
+
+impl GradSource for MapGrads {
+    fn grad(&self, param: &Tensor) -> Option<&Tensor> {
+        self.0.get(&param.id())
+    }
+}
+
+#[test]
+fn muon_r1_regressions_aliasing_overflow_reordered_resume_and_sgd_parity() {
+    // 1. Large finite 2e20 input does not overflow to zero in newton_schulz_quintic or AuxAdamW.
+    let big = Tensor::from_slice(&[2e20f32, 0.0, 0.0, 0.0], [2, 2]).unwrap();
+    let o_big = newton_schulz_quintic(&big, 5).unwrap().to_vec::<f32>().unwrap();
+    assert!(o_big.iter().all(|v| v.is_finite()) && o_big[0].abs() > 0.5, "big NS5 collapsed: {o_big:?}");
+
+    let w_big = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], [2, 2]).unwrap().requires_grad_();
+    let b_big = Tensor::from_slice(&[1.0f32, -1.0], [2]).unwrap().requires_grad_();
+    let mut opt_big = Muon::from_params(
+        vec![("w".into(), w_big.clone()), ("b".into(), b_big.clone())],
+        MuonConfig { lr: 0.01, ..MuonConfig::default() },
+    )
+    .unwrap();
+    let mut gmap = HashMap::new();
+    gmap.insert(w_big.id(), big.clone());
+    gmap.insert(b_big.id(), Tensor::from_slice(&[2e20f32, 0.0], [2]).unwrap());
+    opt_big.step(&MapGrads(gmap)).unwrap();
+    assert!(w_big.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    assert!(b_big.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+
+    // 2. Non-finite gradient rejected before any state mutation.
+    let step_before = opt_big.step_count();
+    let w_snap = w_big.to_vec::<f32>().unwrap();
+    let mut bad_g = HashMap::new();
+    bad_g.insert(w_big.id(), Tensor::from_slice(&[1.0f32, f32::NAN, 0.0, 0.0], [2, 2]).unwrap());
+    assert!(opt_big.step(&MapGrads(bad_g)).is_err());
+    assert_eq!(opt_big.step_count(), step_before);
+    assert_eq!(w_big.to_vec::<f32>().unwrap(), w_snap);
+
+    // 3. Parameter-state aliasing rejected in preflight.
+    let p_alias = Tensor::ones([2, 2]).requires_grad_();
+    let mut opt_alias = Muon::from_params(vec![("w".into(), p_alias)], MuonConfig::default()).unwrap();
+    let state_buf = opt_alias.state_tensors().unwrap()[0].1.clone();
+    opt_alias.groups_mut()[0].params[0].1 = state_buf;
+    assert!(opt_alias.step(&MapGrads(HashMap::new())).is_err());
+
+    // 4. Reordered parameter resume maps param_steps by name and rejects bad contracts atomically.
+    let a1 = Tensor::ones([2]).requires_grad_();
+    let b1 = Tensor::ones([2]).requires_grad_();
+    let mut opt_src =
+        Muon::from_params(vec![("a".into(), a1.clone()), ("b".into(), b1.clone())], MuonConfig::default())
+            .unwrap();
+    opt_src.step(&a1.square().unwrap().sum_all().unwrap().backward().unwrap()).unwrap();
+    assert_eq!((opt_src.param_step(0, 0), opt_src.param_step(0, 1)), (Some(1), Some(0)));
+
+    let c_src = opt_src.contract();
+    let st_src: HashMap<String, Tensor> = opt_src.state_tensors().unwrap().into_iter().collect();
+    let a2 = Tensor::ones([2]).requires_grad_();
+    let b2 = Tensor::ones([2]).requires_grad_();
+    let mut opt_dst =
+        Muon::from_params(vec![("b".into(), b2.clone()), ("a".into(), a2.clone())], MuonConfig::default())
+            .unwrap();
+    // Rejected contract leaves optimizer untouched.
+    let mut bad_c = c_src.clone();
+    bad_c.groups[0].lr = -1.0;
+    assert!(opt_dst.apply_contract(&bad_c).is_err());
+    assert_eq!(opt_dst.groups()[0].lr, MUON_DEFAULT_LR);
+
+    opt_dst.apply_contract(&c_src).unwrap();
+    opt_dst.load_state(c_src.step, &st_src).unwrap();
+    assert_eq!(opt_dst.param_step(0, 0), Some(0)); // "b"
+    assert_eq!(opt_dst.param_step(0, 1), Some(1)); // "a"
+
+    // 5. SGD fallback matches FOLO Sgd undampened Nesterov step.
+    let x1 = Tensor::from_slice(&[2.0f32, -3.0], [2]).unwrap().requires_grad_();
+    let x2 = Tensor::from_slice(&[2.0f32, -3.0], [2]).unwrap().requires_grad_();
+    let mut m_sgd = Muon::from_params(
+        vec![("x".into(), x1.clone())],
+        MuonConfig {
+            lr: 0.1,
+            momentum: 0.9,
+            nesterov: true,
+            weight_decay: 0.0,
+            fallback: MuonFallback::Sgd,
+            ..MuonConfig::default()
+        },
+    )
+    .unwrap();
+    let mut ref_sgd = crate::optim::Sgd::new(vec![
+        ParamGroup::new("p", vec![("x".into(), x2.clone())]).lr(0.1).momentum(0.9).nesterov(true),
+    ])
+    .unwrap();
+    for _ in 0..3 {
+        m_sgd.step(&x1.square().unwrap().sum_all().unwrap().backward().unwrap()).unwrap();
+        ref_sgd.step(&x2.square().unwrap().sum_all().unwrap().backward().unwrap()).unwrap();
+    }
+    for (u, v) in x1.to_vec::<f32>().unwrap().iter().zip(x2.to_vec::<f32>().unwrap()) {
+        assert!((u - v).abs() < 1e-5, "Muon SGD fallback vs Sgd mismatch: {u} vs {v}");
+    }
 }

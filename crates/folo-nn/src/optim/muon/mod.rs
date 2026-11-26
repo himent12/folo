@@ -16,16 +16,17 @@
 //! configurable auxiliary fallback ([`MuonFallback::AdamW`] by default, or [`MuonFallback::Sgd`]).
 //! Parameters that receive no gradient in a step are skipped completely (no decay and no state mutation).
 
+mod checkpoint;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use folo_core::{DType, Device, Tensor, no_grad};
 use serde::{Deserialize, Serialize};
 
 use super::ortho::{MuonOrtho, NS_COEFFS, NS_EPS, NS_STEPS, orthogonalize_with};
-use super::{GradSource, ParamGroup, check_param_sets, storage_key, take_state, validate_groups};
+use super::{GradSource, ParamGroup, storage_key, validate_groups};
 use crate::{Error, Result};
 
 /// Default Muon learning rate (`0.02`, standard Keller Jordan 2024 recipe).
@@ -133,8 +134,8 @@ impl Default for MuonConfig {
 impl MuonConfig {
     /// Validate all Muon configuration parameters.
     pub fn validate(&self) -> Result<()> {
-        if !(self.lr.is_finite() && self.lr >= 0.0) {
-            return Err(Error::Invalid(format!("muon: lr must be finite and >= 0, got {}", self.lr)));
+        if !(self.lr.is_finite() && self.lr >= 0.0 && (self.lr as f32).is_finite()) {
+            return Err(Error::Invalid(format!("muon: lr must be finite f32 and >= 0, got {}", self.lr)));
         }
         if !(self.momentum.is_finite() && (0.0..1.0).contains(&self.momentum)) {
             return Err(Error::Invalid(format!(
@@ -142,9 +143,12 @@ impl MuonConfig {
                 self.momentum
             )));
         }
-        if !(self.weight_decay.is_finite() && self.weight_decay >= 0.0) {
+        if !(self.weight_decay.is_finite()
+            && self.weight_decay >= 0.0
+            && (self.weight_decay as f32).is_finite())
+        {
             return Err(Error::Invalid(format!(
-                "muon: weight_decay must be finite and >= 0, got {}",
+                "muon: weight_decay must be finite f32 and >= 0, got {}",
                 self.weight_decay
             )));
         }
@@ -152,9 +156,9 @@ impl MuonConfig {
             return Err(Error::Invalid("muon: ns_steps must be >= 1 when ortho is None, got 0".into()));
         }
         if let Some(alr) = self.aux_lr
-            && !(alr.is_finite() && alr >= 0.0)
+            && !(alr.is_finite() && alr >= 0.0 && (alr as f32).is_finite())
         {
-            return Err(Error::Invalid(format!("muon: aux_lr must be finite and >= 0, got {alr}")));
+            return Err(Error::Invalid(format!("muon: aux_lr must be finite f32 and >= 0, got {alr}")));
         }
         if !(self.aux_betas[0].is_finite() && (0.0..1.0).contains(&self.aux_betas[0])) {
             return Err(Error::Invalid(format!(
@@ -168,16 +172,18 @@ impl MuonConfig {
                 self.aux_betas[1]
             )));
         }
-        if !(self.aux_eps.is_finite() && self.aux_eps > 0.0) {
+        if !(self.aux_eps.is_finite() && self.aux_eps > 0.0 && (self.aux_eps as f32) > 0.0) {
             return Err(Error::Invalid(format!(
-                "muon: aux_eps must be finite and > 0, got {}",
+                "muon: aux_eps must be finite and > 0 in f32, got {}",
                 self.aux_eps
             )));
         }
         if let Some(awd) = self.aux_weight_decay
-            && !(awd.is_finite() && awd >= 0.0)
+            && !(awd.is_finite() && awd >= 0.0 && (awd as f32).is_finite())
         {
-            return Err(Error::Invalid(format!("muon: aux_weight_decay must be finite and >= 0, got {awd}")));
+            return Err(Error::Invalid(format!(
+                "muon: aux_weight_decay must be finite f32 and >= 0, got {awd}"
+            )));
         }
         Ok(())
     }
@@ -193,8 +199,14 @@ pub struct MuonGroupContract {
     pub params: Vec<String>,
     /// Base learning rate.
     pub lr: f64,
+    /// Current scheduled learning rate (defaults to `lr` when omitted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_lr: Option<f64>,
     /// Base momentum.
     pub momentum: f64,
+    /// Current scheduled momentum (defaults to `momentum` when omitted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_momentum: Option<f64>,
     /// Nesterov lookahead flag.
     pub nesterov: bool,
     /// Decoupled weight decay.
@@ -257,6 +269,24 @@ impl ParamState {
     }
 }
 
+struct StagedGroup {
+    base_lr: f64,
+    lr: f64,
+    base_momentum: f64,
+    momentum: f64,
+    nesterov: bool,
+    weight_decay: f64,
+}
+
+struct PendingResume {
+    step: u64,
+    cfg: MuonConfig,
+    group_names: Vec<String>,
+    param_names: Vec<Vec<String>>,
+    groups: Vec<StagedGroup>,
+    param_steps: Vec<Vec<u64>>,
+}
+
 /// Standalone Muon (Momentum Orthogonalized by Newton–Schulz) optimizer with aspect-ratio scaling,
 /// decoupled weight decay, and AdamW/SGD fallback for rank `< 2` parameters.
 pub struct Muon {
@@ -265,13 +295,17 @@ pub struct Muon {
     cfg: MuonConfig,
     state_keys: HashSet<usize>,
     step: u64,
+    pending_resume: Option<PendingResume>,
 }
 
 /// Run `ns_steps` iterations of classic quintic Newton–Schulz orthogonalization `(a, b, c) = NS_COEFFS`
-/// on a rank-2+ tensor reshaped to `[d_0, prod(d_1..)]` (without aspect scaling).
+/// on an `F32` rank-2+ tensor reshaped to `[d_0, prod(d_1..)]` (without aspect scaling).
 pub fn newton_schulz_quintic(u: &Tensor, ns_steps: usize) -> Result<Tensor> {
     if ns_steps == 0 {
         return Err(Error::Invalid("newton_schulz_quintic: ns_steps must be >= 1, got 0".into()));
+    }
+    if u.dtype() != DType::F32 {
+        return Err(Error::Invalid(format!("newton_schulz_quintic: expected f32, got {}", u.dtype())));
     }
     let dims = u.dims();
     if dims.len() < 2 {
@@ -286,9 +320,17 @@ pub fn newton_schulz_quintic(u: &Tensor, ns_steps: usize) -> Result<Tensor> {
     let m = u.reshape([rows, cols])?;
     let transposed = rows > cols;
     let mut x = if transposed { m.transpose(0, 1)?.contiguous()? } else { m.contiguous()? };
-    // Normalize by Frobenius norm (+ NS_EPS) so spectral norm <= 1.
-    let norm = x.square()?.sum_all()?.sqrt()?.add_scalar(NS_EPS)?;
-    x = x.div(&norm)?;
+    // Overflow-safe Frobenius normalization so large finite inputs (e.g. 2e20) do not square to +inf.
+    const BIG_THRESH: f32 = f32::from_bits(0x5780_0000);
+    const DOWN_SCALE: f32 = f32::from_bits(0x1780_0000);
+    let max_abs = x.abs()?.max([0, 1], true)?;
+    let is_big = max_abs.gt_scalar(BIG_THRESH)?;
+    let one = max_abs.ones_like()?;
+    let scale = is_big.where_cond(&one.mul_scalar(DOWN_SCALE)?, &one)?;
+    let xs = x.mul(&scale)?;
+    let eps_s = scale.mul_scalar(NS_EPS)?;
+    let norm = xs.square()?.sum([0, 1], true)?.sqrt()?.add(&eps_s)?;
+    x = xs.div(&norm)?;
     let (a, b, c) = NS_COEFFS;
     for _ in 0..ns_steps {
         let xt = x.transpose(0, 1)?.contiguous()?;
@@ -319,7 +361,7 @@ impl Muon {
         }
         let state = init_state(&groups, cfg.fallback)?;
         let state_keys = HashSet::with_capacity(groups.iter().map(|g| g.params.len() * 2).sum());
-        Ok(Self { groups, state, cfg, state_keys, step: 0 })
+        Ok(Self { groups, state, cfg, state_keys, step: 0, pending_resume: None })
     }
 
     /// Convenience constructor for a single `"params"` group configured by [`MuonConfig`].
@@ -382,6 +424,7 @@ impl Muon {
             )));
         }
         self.state_keys.clear();
+        let mut param_keys = HashSet::with_capacity(self.groups.iter().map(|g| g.params.len()).sum());
         for (grp, st) in self.groups.iter().zip(&self.state) {
             validate_muon_group(grp)?;
             if grp.params.len() != st.len() {
@@ -402,6 +445,11 @@ impl Muon {
                 if !p.layout().is_non_overlapping() {
                     return Err(Error::Invalid(format!(
                         "muon: parameter `{name}` has an overlapping/broadcast layout"
+                    )));
+                }
+                if !param_keys.insert(storage_key(p)) {
+                    return Err(Error::Invalid(format!(
+                        "muon: parameter `{name}` aliases another parameter"
                     )));
                 }
                 check_state_alignment(name, p, ps, &mut self.state_keys)?;
@@ -426,23 +474,53 @@ impl Muon {
                             p.device()
                         )));
                     }
+                    check_finite_f32(g, name)?;
+                }
+            }
+        }
+        for grp in &self.groups {
+            for (name, p) in &grp.params {
+                if self.state_keys.contains(&storage_key(p)) {
+                    return Err(Error::Invalid(format!(
+                        "muon: parameter `{name}` aliases an optimizer state buffer"
+                    )));
                 }
             }
         }
 
         let _ng = no_grad();
-        let cfg = self.cfg;
+        // Snapshot any gradient that shares storage with a parameter or state buffer before writing.
+        let mut active_grads: Vec<Vec<Option<Tensor>>> = Vec::with_capacity(self.groups.len());
+        for grp in &self.groups {
+            let mut gg = Vec::with_capacity(grp.params.len());
+            for (_, p) in &grp.params {
+                let snapped = match grads.grad(p) {
+                    Some(g) => {
+                        let gk = storage_key(g);
+                        if param_keys.contains(&gk) || self.state_keys.contains(&gk) {
+                            Some(g.mul_scalar(1.0)?)
+                        } else {
+                            Some(g.clone())
+                        }
+                    }
+                    None => None,
+                };
+                gg.push(snapped);
+            }
+            active_grads.push(gg);
+        }
 
-        for (grp, st) in self.groups.iter().zip(&mut self.state) {
+        let cfg = self.cfg;
+        for ((grp, st), g_list) in self.groups.iter().zip(&mut self.state).zip(active_grads) {
             let lr = grp.lr;
             let beta = grp.momentum;
             let wd = grp.weight_decay;
             let nesterov = grp.nesterov;
 
-            for ((_, p), ps) in grp.params.iter().zip(st.iter_mut()) {
-                let Some(g) = grads.grad(p) else { continue };
+            for (((_, p), ps), g_opt) in grp.params.iter().zip(st.iter_mut()).zip(g_list) {
+                let Some(g) = g_opt else { continue };
                 if p.numel() == 0 {
-                    ps.set_param_step(ps.param_step() + 1);
+                    ps.set_param_step(ps.param_step().saturating_add(1));
                     continue;
                 }
 
@@ -450,38 +528,36 @@ impl Muon {
                     ParamState::Matrix { momentum_buf, param_step } => {
                         let m_new =
                             momentum_buf.mul_scalar(beta as f32)?.add(&g.mul_scalar((1.0 - beta) as f32)?)?;
-                        momentum_buf.copy_from(&m_new)?;
-
                         let u = if nesterov {
                             m_new.mul_scalar(beta as f32)?.add(&g.mul_scalar((1.0 - beta) as f32)?)?
                         } else {
-                            m_new
+                            m_new.clone()
                         };
 
                         let rows = p.dims()[0];
                         let cols = p.numel() / rows;
-                        let ortho_u = if let Some(sched) = cfg.ortho {
-                            // `orthogonalize_with` already multiplies by `sqrt(max(1, rows / cols))`;
-                            // undo that factor so `cfg.aspect_scale` is applied exactly once.
+                        let (ortho_u, builtin_scale) = if let Some(sched) = cfg.ortho {
+                            // `orthogonalize_with` multiplies by `sqrt(max(1, rows / cols))`; fold the undo
+                            // factor into `step_scale` to avoid an extra full-tensor pass.
                             let raw = orthogonalize_with(&u.reshape([rows, cols])?, sched)?
                                 .reshape(p.shape().clone())?;
-                            let builtin_scale = (rows as f64 / cols as f64).max(1.0).sqrt();
-                            if builtin_scale != 1.0 { raw.div_scalar(builtin_scale as f32)? } else { raw }
+                            (raw, (rows as f64 / cols as f64).max(1.0).sqrt())
                         } else {
-                            newton_schulz_quintic(&u, cfg.ns_steps)?
+                            (newton_schulz_quintic(&u, cfg.ns_steps)?, 1.0)
                         };
 
                         let scale = cfg.aspect_scale.factor(rows, cols);
-                        let step_scale = (lr * scale) as f32;
+                        let step_scale = (lr * scale / builtin_scale) as f32;
 
                         let decayed =
                             if wd != 0.0 { p.mul_scalar((1.0 - lr * wd) as f32)? } else { p.clone() };
                         let p_new = decayed.sub(&ortho_u.mul_scalar(step_scale)?)?;
+                        momentum_buf.copy_from(&m_new)?;
                         p.copy_from(&p_new)?;
-                        *param_step += 1;
+                        *param_step = param_step.saturating_add(1);
                     }
                     ParamState::AuxAdamW { exp_avg, exp_avg_sq, param_step } => {
-                        let t = *param_step + 1;
+                        let t = param_step.saturating_add(1);
                         let alr = cfg.aux_lr.unwrap_or(lr);
                         let awd = cfg.aux_weight_decay.unwrap_or(wd);
                         let b1 = cfg.aux_betas[0];
@@ -489,220 +565,43 @@ impl Muon {
                         let eps = cfg.aux_eps as f32;
 
                         let m_new = exp_avg.mul_scalar(b1 as f32)?.add(&g.mul_scalar((1.0 - b1) as f32)?)?;
-                        let v_new = exp_avg_sq
-                            .mul_scalar(b2 as f32)?
-                            .add(&g.square()?.mul_scalar((1.0 - b2) as f32)?)?;
-                        exp_avg.copy_from(&m_new)?;
-                        exp_avg_sq.copy_from(&v_new)?;
+                        let g_scaled = g.mul_scalar((1.0 - b2).sqrt() as f32)?;
+                        let v_raw = exp_avg_sq.mul_scalar(b2 as f32)?.add(&g_scaled.square()?)?;
+                        let max_t = v_raw.ones_like()?.mul_scalar(f32::MAX)?;
+                        let v_new = v_raw.lt_scalar(f32::MAX)?.where_cond(&v_raw, &max_t)?;
 
                         let bc1 = 1.0 - b1.powi(t.min(i32::MAX as u64) as i32);
                         let bc2 = 1.0 - b2.powi(t.min(i32::MAX as u64) as i32);
                         let step_size = (alr / bc1) as f32;
-                        let denom = v_new.div_scalar(bc2 as f32)?.sqrt()?.add_scalar(eps)?;
+                        let denom = v_new.sqrt()?.div_scalar(bc2.sqrt() as f32)?.add_scalar(eps)?;
                         let decayed =
                             if awd != 0.0 { p.mul_scalar((1.0 - alr * awd) as f32)? } else { p.clone() };
                         let p_new = decayed.sub(&m_new.div(&denom)?.mul_scalar(step_size)?)?;
+                        exp_avg.copy_from(&m_new)?;
+                        exp_avg_sq.copy_from(&v_new)?;
                         p.copy_from(&p_new)?;
                         *param_step = t;
                     }
                     ParamState::AuxSgd { momentum_buf, param_step } => {
+                        // Matches FOLO `Sgd` undampened momentum equations (`buf = beta * buf + g`,
+                        // Nesterov `u = g + beta * buf`, else `u = buf`) with decoupled weight decay.
                         let alr = cfg.aux_lr.unwrap_or(lr);
                         let awd = cfg.aux_weight_decay.unwrap_or(wd);
-                        let m_new =
-                            momentum_buf.mul_scalar(beta as f32)?.add(&g.mul_scalar((1.0 - beta) as f32)?)?;
-                        momentum_buf.copy_from(&m_new)?;
-                        let u = if nesterov {
-                            m_new.mul_scalar(beta as f32)?.add(&g.mul_scalar((1.0 - beta) as f32)?)?
-                        } else {
-                            m_new
-                        };
+                        let m_new = momentum_buf.mul_scalar(beta as f32)?.add(&g)?;
+                        let u =
+                            if nesterov { g.add(&m_new.mul_scalar(beta as f32)?)? } else { m_new.clone() };
                         let decayed =
                             if awd != 0.0 { p.mul_scalar((1.0 - alr * awd) as f32)? } else { p.clone() };
                         let p_new = decayed.sub(&u.mul_scalar(alr as f32)?)?;
+                        momentum_buf.copy_from(&m_new)?;
                         p.copy_from(&p_new)?;
-                        *param_step += 1;
+                        *param_step = param_step.saturating_add(1);
                     }
                 }
             }
         }
 
-        self.step += 1;
-        Ok(())
-    }
-
-    /// Export all optimizer state tensors keyed `<param_name>.<state>`.
-    pub fn state_tensors(&self) -> Result<Vec<(String, Tensor)>> {
-        let mut out = Vec::new();
-        for (g, st) in self.groups.iter().zip(&self.state) {
-            for ((name, _), ps) in g.params.iter().zip(st) {
-                match ps {
-                    ParamState::Matrix { momentum_buf, .. } | ParamState::AuxSgd { momentum_buf, .. } => {
-                        out.push((format!("{name}.momentum_buffer"), momentum_buf.clone()));
-                    }
-                    ParamState::AuxAdamW { exp_avg, exp_avg_sq, .. } => {
-                        out.push((format!("{name}.exp_avg"), exp_avg.clone()));
-                        out.push((format!("{name}.exp_avg_sq"), exp_avg_sq.clone()));
-                    }
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// Build a serializable [`MuonContract`] for checkpointing.
-    pub fn contract(&self) -> MuonContract {
-        let param_steps = self.state.iter().flat_map(|g| g.iter().map(ParamState::param_step)).collect();
-        MuonContract {
-            groups: self
-                .groups
-                .iter()
-                .map(|g| MuonGroupContract {
-                    name: g.name.clone(),
-                    params: g.params.iter().map(|(n, _)| n.clone()).collect(),
-                    lr: g.base_lr,
-                    momentum: g.base_momentum,
-                    nesterov: g.nesterov,
-                    weight_decay: g.weight_decay,
-                })
-                .collect(),
-            ns_steps: self.cfg.ns_steps,
-            ortho: self.cfg.ortho,
-            aspect_scale: self.cfg.aspect_scale,
-            fallback: self.cfg.fallback,
-            aux_lr: self.cfg.aux_lr,
-            aux_betas: self.cfg.aux_betas,
-            aux_eps: self.cfg.aux_eps,
-            aux_weight_decay: self.cfg.aux_weight_decay,
-            step: self.step,
-            param_steps,
-        }
-    }
-
-    /// Validate and apply a checkpoint [`MuonContract`] before calling [`Muon::load_state`].
-    pub fn apply_contract(&mut self, c: &MuonContract) -> Result<()> {
-        let group_contracts: Vec<super::GroupContract> = c
-            .groups
-            .iter()
-            .map(|gc| super::GroupContract {
-                name: gc.name.clone(),
-                params: gc.params.clone(),
-                lr: gc.lr,
-                momentum: Some(gc.momentum),
-                nesterov: Some(gc.nesterov),
-                weight_decay: gc.weight_decay,
-                betas: None,
-                eps: None,
-                decoupled_wd: true,
-                cautious_wd: false,
-                cautious: false,
-            })
-            .collect();
-        check_param_sets(&self.groups, &group_contracts)?;
-        if c.fallback != self.cfg.fallback {
-            return Err(Error::Load(format!(
-                "muon contract fallback {:?} does not match optimizer {:?}",
-                c.fallback, self.cfg.fallback
-            )));
-        }
-        let total_params: usize = self.groups.iter().map(|g| g.params.len()).sum();
-        if !c.param_steps.is_empty() && c.param_steps.len() != total_params {
-            return Err(Error::Load(format!(
-                "muon contract param_steps length {} != total params {total_params}",
-                c.param_steps.len()
-            )));
-        }
-        let new_cfg = MuonConfig {
-            lr: c.groups.first().map_or(self.cfg.lr, |g| g.lr),
-            momentum: c.groups.first().map_or(self.cfg.momentum, |g| g.momentum),
-            nesterov: c.groups.first().map_or(self.cfg.nesterov, |g| g.nesterov),
-            weight_decay: c.groups.first().map_or(self.cfg.weight_decay, |g| g.weight_decay),
-            ns_steps: c.ns_steps,
-            ortho: c.ortho,
-            aspect_scale: c.aspect_scale,
-            fallback: c.fallback,
-            aux_lr: c.aux_lr,
-            aux_betas: c.aux_betas,
-            aux_eps: c.aux_eps,
-            aux_weight_decay: c.aux_weight_decay,
-        };
-        new_cfg.validate().map_err(|e| Error::Load(e.to_string()))?;
-        for (g, gc) in self.groups.iter_mut().zip(&c.groups) {
-            g.base_lr = gc.lr;
-            g.lr = gc.lr;
-            g.base_momentum = gc.momentum;
-            g.momentum = gc.momentum;
-            g.nesterov = gc.nesterov;
-            g.weight_decay = gc.weight_decay;
-            validate_muon_group(g).map_err(|e| Error::Load(e.to_string()))?;
-        }
-        self.cfg = new_cfg;
-        if !c.param_steps.is_empty() {
-            let mut idx = 0usize;
-            for st in &mut self.state {
-                for ps in st.iter_mut() {
-                    ps.set_param_step(c.param_steps[idx]);
-                    idx += 1;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Restore step count and state tensors from a checkpoint map.
-    pub fn load_state(&mut self, step: u64, state: &HashMap<String, Tensor>) -> Result<()> {
-        let required = step > 0;
-        let mut problems = Vec::new();
-        let mut staged: Vec<Vec<(Option<Tensor>, Option<Tensor>)>> = Vec::with_capacity(self.groups.len());
-
-        for (g, st) in self.groups.iter().zip(&self.state) {
-            let mut g_staged = Vec::with_capacity(g.params.len());
-            for ((name, p), ps) in g.params.iter().zip(st) {
-                match ps {
-                    ParamState::Matrix { .. } | ParamState::AuxSgd { .. } => {
-                        let mb = take_state(state, name, p, "momentum_buffer", required, &mut problems);
-                        g_staged.push((mb, None));
-                    }
-                    ParamState::AuxAdamW { .. } => {
-                        let m = take_state(state, name, p, "exp_avg", required, &mut problems);
-                        let v = take_state(state, name, p, "exp_avg_sq", required, &mut problems);
-                        g_staged.push((m, v));
-                    }
-                }
-            }
-            staged.push(g_staged);
-        }
-        if !problems.is_empty() {
-            return Err(Error::Load(format!("muon state mismatch: {}", problems.join("; "))));
-        }
-
-        let _ng = no_grad();
-        for ((g, st), g_staged) in self.groups.iter().zip(&mut self.state).zip(staged) {
-            for (((_, p), ps), (t1, t2)) in g.params.iter().zip(st.iter_mut()).zip(g_staged) {
-                let dev = p.device();
-                match ps {
-                    ParamState::Matrix { momentum_buf, .. } | ParamState::AuxSgd { momentum_buf, .. } => {
-                        let src = match t1 {
-                            Some(t) => t.to_device(dev)?,
-                            None => Tensor::zeros_with(p.shape(), DType::F32, dev)?,
-                        };
-                        momentum_buf.copy_from(&src)?;
-                    }
-                    ParamState::AuxAdamW { exp_avg, exp_avg_sq, .. } => {
-                        let s1 = match t1 {
-                            Some(t) => t.to_device(dev)?,
-                            None => Tensor::zeros_with(p.shape(), DType::F32, dev)?,
-                        };
-                        let s2 = match t2 {
-                            Some(t) => t.to_device(dev)?,
-                            None => Tensor::zeros_with(p.shape(), DType::F32, dev)?,
-                        };
-                        exp_avg.copy_from(&s1)?;
-                        exp_avg_sq.copy_from(&s2)?;
-                    }
-                }
-            }
-        }
-        self.step = step;
+        self.step = self.step.saturating_add(1);
         Ok(())
     }
 
@@ -720,18 +619,38 @@ impl Muon {
     }
 }
 
-fn validate_muon_group(g: &ParamGroup) -> Result<()> {
-    let ok = g.lr.is_finite()
-        && g.lr >= 0.0
-        && g.momentum.is_finite()
-        && (0.0..1.0).contains(&g.momentum)
-        && g.weight_decay.is_finite()
-        && g.weight_decay >= 0.0;
+fn validate_muon_scalars(name: &str, lr: f64, momentum: f64, weight_decay: f64) -> Result<()> {
+    let ok = lr.is_finite()
+        && lr >= 0.0
+        && (lr as f32).is_finite()
+        && momentum.is_finite()
+        && (0.0..1.0).contains(&momentum)
+        && weight_decay.is_finite()
+        && weight_decay >= 0.0
+        && (weight_decay as f32).is_finite();
     if !ok {
         return Err(Error::Invalid(format!(
-            "muon group `{}`: invalid lr={}, momentum={}, wd={}",
-            g.name, g.lr, g.momentum, g.weight_decay
+            "muon group `{name}`: invalid lr={lr}, momentum={momentum}, wd={weight_decay}"
         )));
+    }
+    Ok(())
+}
+
+fn validate_muon_group(g: &ParamGroup) -> Result<()> {
+    validate_muon_scalars(&g.name, g.lr, g.momentum, g.weight_decay)
+}
+
+fn check_finite_f32(t: &Tensor, name: &str) -> Result<()> {
+    if t.numel() == 0 {
+        return Ok(());
+    }
+    let all_finite = if t.device().is_cpu() {
+        t.with_f32_slice(|s| s.iter().all(|v| v.is_finite()))?
+    } else {
+        t.to_vec::<f32>()?.iter().all(|v| v.is_finite())
+    };
+    if !all_finite {
+        return Err(Error::Invalid(format!("muon: gradient of `{name}` contains non-finite values")));
     }
     Ok(())
 }
