@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use folo_data::{Dataset, Split};
 use folo_nn::Module;
-use folo_nn::io::{FloatDType, ModelFile, export_tensors};
+use folo_nn::io::{FloatDType, ModelFile, write_export};
 use folo_vision::model::quant::{self, Calibration, Method};
 use folo_vision::train::resolve_device;
 use folo_vision::{FoloModel, Precision};
@@ -67,13 +67,13 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     }
     let workers = args.workers.unwrap_or_else(folo_vision::train::default_workers);
     // Claimed first, so a taken --output fails before the calibration, not after it.
-    let output = OutputFile::new("quantize", &path, args.output.clone(), "-int8", "folo")?;
+    let mut output = OutputFile::new("quantize", &path, args.output.clone(), "-int8", "folo")?;
     out.human(format!("Calibrating int8 on {n} {} images at {imgsz}px (two passes)", split.as_str()));
     let t = Instant::now();
     let sizes = (imgsz, args.batch as usize, workers);
     let done = quant::calibrate_sample(&model, part, args.images, args.seed, sizes, method)
         .map_err(nn_error)
-        .and_then(|(cal, n)| write(&file, &model, &cal, imgsz, output.tmp()).map(|()| (cal, n)));
+        .and_then(|(cal, n)| write(&file, &model, &cal, imgsz, &mut output).map(|()| (cal, n)));
     let (cal, n) = done?;
     let output = output.publish()?;
     let bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
@@ -109,7 +109,7 @@ fn write(
     model: &FoloModel,
     cal: &Calibration,
     imgsz: u32,
-    output: &std::path::Path,
+    output: &mut OutputFile,
 ) -> Result<(), CliError> {
     let mut meta = file.metadata().clone();
     meta.fused = true;
@@ -117,8 +117,8 @@ fn write(
     meta.imgsz = imgsz;
     cal.store(&mut meta).map_err(nn_error)?;
     let tensors = model.named_tensors().into_iter().map(|t| (t.name, t.tensor)).collect();
-    export_tensors(output, &meta, tensors, FloatDType::F32).map_err(nn_error)?;
-    let back = ModelFile::open(output).map_err(nn_error)?;
+    output.write_with(|w| write_export(w, &meta, tensors, FloatDType::F32).map_err(nn_error))?;
+    let back = ModelFile::open(output.tmp()).map_err(nn_error)?;
     let mut m = open_cpu(&back)?;
     let stored = Calibration::from_metadata(back.metadata()).map_err(nn_error)?;
     m.set_int8(stored).map_err(nn_error)?;

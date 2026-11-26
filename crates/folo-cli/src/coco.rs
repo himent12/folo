@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::Path;
 
-use folo_data::{CocoGroundTruth, CocoImage, FileDataset, Split};
+use folo_data::{CocoGroundTruth, CocoImage, FileDataset, Issue, IssueKind, Split};
 use folo_vision::Detection;
 use folo_vision::cocoeval::{CocoEval, CocoStats, CocoTruth};
 use serde::de::{self, Deserialize, Deserializer, IgnoredAny, MapAccess, Visitor};
@@ -83,9 +83,24 @@ pub fn validate_categories(
     data: &str,
     gt: &CocoGroundTruth,
     dataset_classes: &[String],
+    dataset_issues: &[Issue],
     model_classes: &[String],
 ) -> Result<CategoryMap, CliError> {
     let gt_path = folo_api::json::path(&gt.path);
+    // Refuse conflicting category names across splits even when `gt.categories` happens to match the winning
+    // `dataset_classes` (fast path below would otherwise skip inspecting the other split files).
+    if let Some(conflict) = dataset_issues.iter().find(|i| {
+        i.kind == IssueKind::Other
+            && i.message.starts_with("category ")
+            && i.message.contains(" is named both ")
+    }) {
+        return Err(CliError::new(
+            ExitCode::Runtime,
+            "invalid_dataset",
+            format!("{}: {}", folo_api::json::path(&conflict.path), conflict.message),
+        )
+        .hint("make category id -> name mappings consistent across every COCO split JSON"));
+    }
     if gt.images.is_empty() {
         return Err(CliError::new(
             ExitCode::Runtime,
@@ -512,7 +527,7 @@ mod tests {
         let full = vec!["cat".to_string(), "dog".to_string(), "bird".to_string()];
 
         // Valid strict subset with matching model classes maps class 0 -> 1, class 1 -> None, class 2 -> 3.
-        let map = super::validate_categories(dir.path().to_str().unwrap(), &gt, &full, &full).unwrap();
+        let map = super::validate_categories(dir.path().to_str().unwrap(), &gt, &full, &[], &full).unwrap();
         assert_eq!(map.category_of(0), Some(1));
         assert_eq!(map.category_of(1), None);
         assert_eq!(map.category_of(2), Some(3));
@@ -520,29 +535,40 @@ mod tests {
         assert_eq!(map.class_of(2), None);
         assert_eq!(map.class_of(3), Some(2));
 
+        // Conflicting category names reported by the loader are refused even on the fast path.
+        let conflict = folo_data::Issue {
+            kind: folo_data::IssueKind::Other,
+            path: val_json.clone(),
+            message: "category 1 is named both \"dog\" and \"cat\"".into(),
+        };
+        let err = super::validate_categories(dir.path().to_str().unwrap(), &gt, &full, &[conflict], &full)
+            .unwrap_err();
+        assert_eq!(err.code, "invalid_dataset");
+        assert!(err.message.contains("is named both"), "{}", err.message);
+
         // Reordered or subset model classes are refused.
         let reordered = vec!["dog".to_string(), "cat".to_string(), "bird".to_string()];
-        let err =
-            super::validate_categories(dir.path().to_str().unwrap(), &gt, &full, &reordered).unwrap_err();
+        let err = super::validate_categories(dir.path().to_str().unwrap(), &gt, &full, &[], &reordered)
+            .unwrap_err();
         assert_eq!(err.code, "invalid_dataset");
         let subset_model = vec!["cat".to_string(), "bird".to_string()];
-        let err =
-            super::validate_categories(dir.path().to_str().unwrap(), &gt, &full, &subset_model).unwrap_err();
+        let err = super::validate_categories(dir.path().to_str().unwrap(), &gt, &full, &[], &subset_model)
+            .unwrap_err();
         assert_eq!(err.code, "invalid_dataset");
 
         // Undeclared category_id in an annotation is refused.
         let mut bad_ann = gt.clone();
         bad_ann.images[0].annotations[0].category_id = 2;
-        let err =
-            super::validate_categories(dir.path().to_str().unwrap(), &bad_ann, &full, &full).unwrap_err();
+        let err = super::validate_categories(dir.path().to_str().unwrap(), &bad_ann, &full, &[], &full)
+            .unwrap_err();
         assert_eq!(err.code, "invalid_dataset");
         assert!(err.message.contains("undeclared category_id 2"), "{}", err.message);
 
         // Empty categories are refused.
         let mut empty_cats = gt.clone();
         empty_cats.categories.clear();
-        let err =
-            super::validate_categories(dir.path().to_str().unwrap(), &empty_cats, &full, &full).unwrap_err();
+        let err = super::validate_categories(dir.path().to_str().unwrap(), &empty_cats, &full, &[], &full)
+            .unwrap_err();
         assert_eq!(err.code, "invalid_dataset");
         assert!(err.message.contains("no categories"), "{}", err.message);
     }

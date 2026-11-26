@@ -14,14 +14,33 @@ use crate::output::{CliError, ExitCode, Out};
 
 use super::{data_error, format_name, format_of, rel, splits_json};
 
+/// Returns `true` when `meta` indicates a symlink or (on Windows) a reparse point such as a directory junction,
+/// avoiding extra `read_link` syscalls on regular files and folders.
+fn maybe_link(meta: &std::fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 /// Returns a clear diagnostic when `p` is a symlink (or Windows directory junction) whose target cannot be
 /// resolved (missing target, symlink loop, or inaccessible target). Returns `None` for regular files/dirs,
 /// working symlinks, or paths that do not exist at all.
 pub(super) fn dangling_link_message(p: &Path) -> Option<String> {
     let meta = std::fs::symlink_metadata(p).ok()?;
+    if !maybe_link(&meta) {
+        return None;
+    }
     let target = std::fs::read_link(p).ok();
-    // On Windows, directory junctions (`mklink /J`) have `is_symlink() == false` in Rust std while `read_link`
-    // succeeds with the target path.
     if !meta.file_type().is_symlink() && target.is_none() {
         return None;
     }
@@ -30,10 +49,9 @@ pub(super) fn dangling_link_message(p: &Path) -> Option<String> {
         Err(e) => e,
     };
     let arrow = target.as_deref().map(|t| format!(" -> {}", folo_api::json::path(t))).unwrap_or_default();
-    let is_loop = is_symlink_loop(&err);
     if err.kind() == std::io::ErrorKind::NotFound {
         Some(format!("dangling symlink{arrow} (target does not exist)"))
-    } else if is_loop {
+    } else if is_symlink_loop(&err) {
         Some(format!("broken symlink{arrow} (symlink loop)"))
     } else {
         Some(format!("broken symlink{arrow} ({err})"))
@@ -209,15 +227,29 @@ fn reconcile_coco_size_mismatches(path: &Path, report: &mut CheckReport) {
 /// Detects dangling / broken symlinks (and Windows directory junctions) inside the dataset that `folo-data`'s
 /// directory walks silently skip or misreport as missing files / empty background images (#382).
 fn enrich_dangling_symlinks(input_path: &Path, report: &mut CheckReport) {
-    // 1. Upgrade any existing `MissingImage` (from COCO JSON or YOLO `.txt` lists) whose path is a dangling link.
+    // 1. Upgrade any existing loader issue whose file is a broken symlink (including orphan YOLO `.txt` labels,
+    //    symlink-loop labels / listed images, and COCO missing images) in place, tracking normalized paths so
+    //    each broken link is reported exactly once.
     let mut reported_files: HashSet<PathBuf> = HashSet::new();
+    let is_yolo = report.format == Format::Yolo;
     for issue in &mut report.issues {
-        if issue.kind == CheckKind::MissingImage
-            && let Some(detail) = dangling_link_message(&issue.file)
-        {
+        let Some(detail) = dangling_link_message(&issue.file) else { continue };
+        let is_txt = issue.file.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"));
+        if is_yolo && is_txt && matches!(issue.kind, CheckKind::MissingImage | CheckKind::BrokenLabel) {
+            // Convert orphan dangling `.txt` labels (from `orphan_labels`) or ELOOP labels in place to BrokenLabel.
+            issue.kind = CheckKind::BrokenLabel;
+            issue.message = detail;
+            issue.fix = Some("fix the symlink target or delete the broken label symlink".into());
+            reported_files.insert(folo_data::paths::normalize(&issue.file));
+        } else if matches!(issue.kind, CheckKind::MissingImage | CheckKind::CorruptImage) {
+            issue.kind = CheckKind::MissingImage;
             issue.message = detail;
             issue.fix = Some("fix the symlink target or remove the broken symlink".into());
-            reported_files.insert(issue.file.clone());
+            reported_files.insert(folo_data::paths::normalize(&issue.file));
+        } else if issue.kind == CheckKind::BrokenLabel {
+            issue.message = detail;
+            issue.fix = Some("fix the symlink target or delete the broken label symlink".into());
+            reported_files.insert(folo_data::paths::normalize(&issue.file));
         }
     }
 
@@ -274,8 +306,7 @@ fn enrich_yolo_dangling_symlinks(
         label_dirs.insert(labels_root);
     }
 
-    // For every image directory we discovered, also pair its mirrored label directory (and itself, for beside-image
-    // labels).
+    // For every image directory we discovered, also pair its mirrored label directory.
     let discovered_image_dirs: Vec<PathBuf> = image_dirs.iter().cloned().collect();
     for dir in &discovered_image_dirs {
         let probe = folo_data::label_path_for(&dir.join("probe.jpg"));
@@ -286,34 +317,34 @@ fn enrich_yolo_dangling_symlinks(
                 label_dirs.insert(lbl_dir.to_path_buf());
             }
         }
-        // Labels may sit beside images when there is no `images` -> `labels` mirror.
-        label_dirs.insert(dir.clone());
     }
 
-    // Walk every image dir (skipping cycles, without dropping dangling entries) to find dangling image/subdir links.
+    // Walk every image dir once (capturing dangling image links, beside-image `.txt` label links, and broken
+    // subdir links in one pass without double-walking `image_dirs`).
     let mut dangling_images: Vec<(PathBuf, String)> = Vec::new();
+    let mut dangling_labels: Vec<(PathBuf, String)> = Vec::new();
     let mut dangling_other: Vec<(PathBuf, String)> = Vec::new();
     for p in extra_links {
         if let Some(msg) = dangling_link_message(&p) {
             dangling_other.push((p, msg));
         }
     }
-    let mut visited_image_dirs: HashSet<PathBuf> = HashSet::new();
+    let mut visited_dirs: HashSet<PathBuf> = HashSet::new();
     for dir in &image_dirs {
-        walk_dangling(dir, &mut visited_image_dirs, &mut |p, msg| {
+        walk_dangling(dir, &mut visited_dirs, &mut |p, msg| {
             if folo_data::is_image_path(p) {
                 dangling_images.push((p.to_path_buf(), msg));
-            } else if !p.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) {
+            } else if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) {
+                dangling_labels.push((p.to_path_buf(), msg));
+            } else {
                 dangling_other.push((p.to_path_buf(), msg));
             }
         });
     }
 
-    // Walk every label dir for dangling `.txt` symlinks.
-    let mut dangling_labels: Vec<(PathBuf, String)> = Vec::new();
-    let mut visited_label_dirs: HashSet<PathBuf> = HashSet::new();
+    // Walk dedicated label dirs (skipping any already visited via `image_dirs`) for dangling `.txt` symlinks.
     for dir in &label_dirs {
-        walk_dangling(dir, &mut visited_label_dirs, &mut |p, msg| {
+        walk_dangling(dir, &mut visited_dirs, &mut |p, msg| {
             if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt")) {
                 dangling_labels.push((p.to_path_buf(), msg));
             }
@@ -321,29 +352,20 @@ fn enrich_yolo_dangling_symlinks(
     }
 
     // Suppress bogus `EmptyImage` ("no label file (background image)") emitted when an image's label file is a
-    // dangling symlink, and suppress generic `MissingImage` orphan-label warnings for a dangling `.txt` symlink.
+    // dangling symlink.
     if !dangling_labels.is_empty() {
         let dangling_label_set: HashSet<PathBuf> =
             dangling_labels.iter().map(|(p, _)| folo_data::paths::normalize(p)).collect();
         report.issues.retain(|issue| {
-            if issue.kind == CheckKind::EmptyImage
+            !(issue.kind == CheckKind::EmptyImage
                 && issue.message.starts_with("no label file")
-                && matches_dangling_label(&issue.file, &dangling_label_set)
-            {
-                return false;
-            }
-            if issue.kind == CheckKind::MissingImage
-                && dangling_label_set.contains(&folo_data::paths::normalize(&issue.file))
-            {
-                return false;
-            }
-            true
+                && matches_dangling_label(&issue.file, &dangling_label_set))
         });
     }
 
     dangling_images.sort_by(|a, b| a.0.cmp(&b.0));
     for (p, msg) in dangling_images {
-        if reported_files.insert(p.clone()) {
+        if reported_files.insert(folo_data::paths::normalize(&p)) {
             report.issues.push(CheckIssue {
                 kind: CheckKind::MissingImage,
                 file: p,
@@ -356,7 +378,7 @@ fn enrich_yolo_dangling_symlinks(
 
     dangling_labels.sort_by(|a, b| a.0.cmp(&b.0));
     for (p, msg) in dangling_labels {
-        if reported_files.insert(p.clone()) {
+        if reported_files.insert(folo_data::paths::normalize(&p)) {
             report.issues.push(CheckIssue {
                 kind: CheckKind::BrokenLabel,
                 file: p,
@@ -369,7 +391,7 @@ fn enrich_yolo_dangling_symlinks(
 
     dangling_other.sort_by(|a, b| a.0.cmp(&b.0));
     for (p, msg) in dangling_other {
-        if reported_files.insert(p.clone()) {
+        if reported_files.insert(folo_data::paths::normalize(&p)) {
             report.issues.push(CheckIssue {
                 kind: CheckKind::Other,
                 file: p,
@@ -418,7 +440,7 @@ fn enrich_coco_dangling_symlinks(report: &mut CheckReport, reported_files: &mut 
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
     for (p, msg) in found {
-        if reported_files.insert(p.clone()) {
+        if reported_files.insert(folo_data::paths::normalize(&p)) {
             report.issues.push(CheckIssue {
                 kind: CheckKind::BrokenLabel,
                 file: p,
@@ -458,31 +480,40 @@ fn find_yolo_yaml(input_path: &Path, root: &Path) -> Option<PathBuf> {
     {
         return Some(input_path.to_path_buf());
     }
-    for name in ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"] {
-        let p = root.join(name);
-        if p.is_file() {
-            return Some(p);
+    // Check `input_path` first (handles `config/data.yaml` with `path: ../actual_data`), then `root`.
+    for dir in [input_path, root] {
+        if !dir.is_dir() {
+            continue;
+        }
+        for name in ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"] {
+            let p = dir.join(name);
+            if p.is_file() {
+                return Some(p);
+            }
         }
     }
     None
 }
 
-/// Reads split paths declared in a YOLO YAML (`train`, `val`, `valid`, `test`) so custom split folders (outside
-/// `images/{train,val,test}`) are scanned for dangling symlinks too.
-fn collect_yaml_split_dirs(
-    yaml: &Path,
-    root: &Path,
-    image_dirs: &mut BTreeSet<PathBuf>,
-    extra_links: &mut BTreeSet<PathBuf>,
-) {
-    let Ok(text) = std::fs::read_to_string(yaml) else { return };
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    let yaml_dir = yaml.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+/// Extracts split path strings (`train`, `val`, `valid`, `test`) from YOLO `data.yaml` text, handling quoted
+/// scalars, flow sequences with quoted commas (`['custom,train', images/train]`), and both indented and column-0
+/// block sequences (`train:\n- dir`).
+fn parse_yaml_split_paths(text: &str) -> Vec<String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut active_split = false;
     let mut raw_paths: Vec<String> = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        // A YAML sequence item (`- value` or `-`) may appear either indented or at column 0 under `train:`.
+        if active_split && (trimmed == "-" || trimmed.starts_with("- ") || trimmed.starts_with("-\t")) {
+            let item = trimmed.strip_prefix('-').unwrap_or("");
+            let val = unquote_yaml_scalar(strip_yaml_comment(item).trim());
+            if !val.is_empty() {
+                raw_paths.push(val);
+            }
             continue;
         }
         let indented = line.starts_with(' ') || line.starts_with('\t');
@@ -494,31 +525,84 @@ fn collect_yaml_split_dirs(
                     active_split = true;
                     let val = strip_yaml_comment(rest).trim();
                     if let Some(inner) = val.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-                        for item in inner.split(',') {
+                        for item in split_yaml_flow_items(inner) {
                             let s = unquote_yaml_scalar(item.trim());
                             if !s.is_empty() {
                                 raw_paths.push(s);
                             }
                         }
+                        active_split = false;
                     } else if !val.is_empty() && !matches!(val, "null" | "~") {
                         let s = unquote_yaml_scalar(val);
                         if !s.is_empty() {
                             raw_paths.push(s);
                         }
+                        active_split = false;
                     }
                 }
             }
-        } else if active_split && let Some(item) = trimmed.strip_prefix('-') {
-            let val = unquote_yaml_scalar(strip_yaml_comment(item).trim());
-            if !val.is_empty() {
-                raw_paths.push(val);
+        }
+    }
+    raw_paths
+}
+
+/// Splits a YAML flow sequence body (inside `[...]`) by commas outside single/double quotes.
+fn split_yaml_flow_items(inner: &str) -> Vec<&str> {
+    let mut items = Vec::new();
+    let mut start = 0;
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for (i, ch) in inner.char_indices() {
+        if in_double {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_double = false;
+            }
+        } else if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+        } else {
+            match ch {
+                '\'' => in_single = true,
+                '"' => in_double = true,
+                ',' => {
+                    items.push(&inner[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
             }
         }
     }
-    for raw in raw_paths {
+    items.push(&inner[start..]);
+    items
+}
+
+/// Reads split paths declared in a YOLO YAML (`train`, `val`, `valid`, `test`) so custom split folders (outside
+/// `images/{train,val,test}`) are scanned for dangling symlinks too.
+fn collect_yaml_split_dirs(
+    yaml: &Path,
+    root: &Path,
+    image_dirs: &mut BTreeSet<PathBuf>,
+    extra_links: &mut BTreeSet<PathBuf>,
+) {
+    let Ok(text) = std::fs::read_to_string(yaml) else { return };
+    let yaml_dir = yaml.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    for raw in parse_yaml_split_paths(&text) {
         let p = Path::new(&raw);
-        let candidates: Vec<PathBuf> =
-            if p.is_absolute() { vec![p.to_path_buf()] } else { vec![root.join(p), yaml_dir.join(p)] };
+        let candidates: Vec<PathBuf> = if p.is_absolute() {
+            vec![p.to_path_buf()]
+        } else {
+            let stripped: PathBuf = p
+                .components()
+                .skip_while(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir))
+                .collect();
+            vec![root.join(p), yaml_dir.join(p), root.join(&stripped), yaml_dir.join(&stripped)]
+        };
         for cand in candidates {
             if dangling_link_message(&cand).is_some() {
                 extra_links.insert(cand);
@@ -535,15 +619,28 @@ fn collect_yaml_split_dirs(
 fn strip_yaml_comment(s: &str) -> &str {
     let mut in_single = false;
     let mut in_double = false;
+    let mut escaped = false;
     let bytes = s.as_bytes();
     for (i, &b) in bytes.iter().enumerate() {
-        match b {
-            b'\'' if !in_double => in_single = !in_single,
-            b'"' if !in_single && (i == 0 || bytes[i - 1] != b'\\') => in_double = !in_double,
-            b'#' if !in_single && !in_double && (i == 0 || bytes[i - 1].is_ascii_whitespace()) => {
-                return &s[..i];
+        if in_double {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_double = false;
             }
-            _ => {}
+        } else if in_single {
+            if b == b'\'' {
+                in_single = false;
+            }
+        } else {
+            match b {
+                b'\'' => in_single = true,
+                b'"' => in_double = true,
+                b'#' if i == 0 || bytes[i - 1].is_ascii_whitespace() => return &s[..i],
+                _ => {}
+            }
         }
     }
     s
@@ -680,5 +777,22 @@ mod tests {
         assert_eq!(dangling_link_message(&regular), None);
         assert_eq!(dangling_link_message(dir.path()), None);
         assert_eq!(dangling_link_message(&dir.join("absent.txt")), None);
+    }
+
+    #[test]
+    fn parse_yaml_split_paths_handles_quoted_commas_and_column_zero_sequences() {
+        let yaml = "\
+train: ['custom,train', \"quoted,dir\", images/train]
+val:
+- col0/val
+- 'col0,val2'
+test:
+  - indented/test # trailing comment
+names: [circle]
+";
+        assert_eq!(
+            parse_yaml_split_paths(yaml),
+            vec!["custom,train", "quoted,dir", "images/train", "col0/val", "col0,val2", "indented/test"]
+        );
     }
 }

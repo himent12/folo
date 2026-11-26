@@ -80,7 +80,7 @@ From the `Command` enum in `src/cli.rs` and the `run` match in `src/main.rs`.
 2. `run` in `src/main.rs`: which function each subcommand calls.
 3. `Out` and `CliError` in `src/output.rs`: how every command reports results and failures.
 4. `engine_error` in `src/engine.rs`: how engine errors get their code, exit code and hint.
-5. `train` in `src/train/mod.rs` or `val` / `predict` in `src/infer.rs`: a full command on the engine.
+5. `train` in `src/train/mod.rs` or `val` / `predict` in `src/infer/`: a full command on the engine.
 6. `acquire` in `src/serve_lock.rs`, then `src/serve.rs` and `src/mcp.rs`: who owns a data dir.
 
 ## Common changes
@@ -89,7 +89,7 @@ From the `Command` enum in `src/cli.rs` and the `run` match in `src/main.rs`.
 |---|---|
 | Add a top-level command | A variant of `Command` and its `Args` struct (doc comment on every field) in `src/cli.rs`; a module in `src/` declared in `src/main.rs` and an arm in `run`; a `--json` test in `tests/cli.rs` (or a topic file in `tests/`); the Commands table of [docs/CLI.md](../../docs/CLI.md) |
 | Add a flag | The field and its doc comment in the `*Args` struct in `src/cli.rs` (the help text is `folo describe`'s); the command's module; docs/CLI.md. For `train`, `train_defaults_match_the_api` in `src/main.rs` compares defaults with the API's `TrainConfig` |
-| Add a `dataset`, `weights` or `cloud` subcommand | The variant in `DatasetCommand`, `WeightsCommand` or `CloudCommand` (`src/cli.rs`); the match in `src/dataset.rs`, `src/weights/mod.rs` or `src/cloud.rs`; `tests/dataset.rs`, `tests/weights.rs` or `tests/cloud.rs`; docs/CLI.md |
+| Add a `dataset`, `weights` or `cloud` subcommand | The variant in `DatasetCommand`, `WeightsCommand` or `CloudCommand` (`src/cli.rs`); the match in `src/dataset/mod.rs`, `src/weights/mod.rs` or `src/cloud.rs`; `tests/dataset.rs`, `tests/weights.rs` or `tests/cloud.rs`; docs/CLI.md |
 | Add an error code | A `c(code, status, exit, meaning)` entry in `CODES` (`crates/folo-api/src/codes.rs`); `CliError::new(ExitCode::<exit>, "<code>", ...)` where it fails. `tests/codes.rs` fails when a code is missing from `CODES` or exits with another code |
 | Change what `folo describe` prints | `src/describe.rs`; the `describe_covers_every_command` and `help_states_the_computed_defaults` tests in `src/main.rs` |
 

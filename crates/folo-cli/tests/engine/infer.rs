@@ -510,7 +510,34 @@ fn val_coco_subset_categories_and_fail_fast_validation() {
     assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_dataset", "{lines:?}");
     assert!(!refused_undecl.parent().unwrap().exists());
 
-    // 5. Empty split (`--split test` with no test images) fails fast with `invalid_dataset` and no folder created.
+    // 5. Conflicting category names across splits (train calls id 1 "ring", val calls id 1 "circle") fail fast
+    //    with `invalid_dataset` even when val declares every category and matches the model's names.
+    let bad_conflict = root.join("coco_cat_conflict");
+    let (code, _, stderr) =
+        folo(&["dataset", "convert", s(&tiny.data), s(&bad_conflict), "--to", "coco", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let train_p = bad_conflict.join("annotations/instances_train.json");
+    let train_text = std::fs::read_to_string(&train_p).unwrap().replace("\"circle\"", "\"ring\"");
+    std::fs::write(&train_p, train_text).unwrap();
+    let refused_conflict = root.join("refused_conflict/dets.json");
+    let (code, lines, _) = folo(&[
+        "val",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(&bad_conflict),
+        "--workers",
+        "1",
+        "--coco",
+        "--save-json",
+        s(&refused_conflict),
+    ]);
+    assert_eq!(code, 1);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_dataset", "{lines:?}");
+    assert!(!refused_conflict.parent().unwrap().exists());
+
+    // 6. Empty split (`--split test` with no test images) fails fast with `invalid_dataset` and no folder created.
     let refused_split = root.join("refused_split/dets.json");
     let (code, lines, _) = folo(&[
         "val",

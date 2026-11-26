@@ -253,7 +253,13 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     check_config(&model, part.class_names().len(), &cfg).map_err(|e| engine_error("val", e))?;
     let coco_ctx = if args.coco || args.save_json.is_some() {
         let gt = crate::coco::ground_truth(&args.data, split)?;
-        let cats = crate::coco::validate_categories(&args.data, &gt, &ds.classes, model.classes())?;
+        let cats = crate::coco::validate_categories(
+            &args.data,
+            &gt,
+            &ds.classes,
+            &ds.report.issues,
+            model.classes(),
+        )?;
         Some((gt, cats))
     } else {
         if ds.classes != model.classes() {
@@ -429,7 +435,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             format!("--imgsz {imgsz} must be a multiple of 32 in 32..={}", bounds::INFER_IMGSZ_MAX),
         ));
     }
-    let output = OutputFile::new("export", &args.model, args.output.clone(), suffix, ext)?;
+    let mut output = OutputFile::new("export", &args.model, args.output.clone(), suffix, ext)?;
     let t = Instant::now();
     let source = if file.has_ema() { "ema" } else { "model" };
     let meta = file.metadata();

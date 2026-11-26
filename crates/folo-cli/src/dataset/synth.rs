@@ -47,9 +47,11 @@ impl Progress {
 }
 
 /// Stages a new dataset in a short sibling directory (`.folo-synth-<pid>-<n>.tmp`) inside the output's parent and
-/// atomically moves it to `target` once complete. On any error before [`SynthStage::publish`], `Drop` deletes the
-/// staging folder and any empty parent folders this call created, leaving no partial output behind.
+/// atomically moves it to `target` once complete without replacing any existing directory or file. On any error
+/// before [`SynthStage::publish`], `Drop` deletes the staging folder and any empty parent folders this call created,
+/// leaving no partial output behind.
 struct SynthStage {
+    /// Target path with any trailing `/` or `/.` normalized (`parent.join(file_name)`), for reliable rename.
     target: PathBuf,
     stage: PathBuf,
     created_parents: Vec<PathBuf>,
@@ -57,39 +59,48 @@ struct SynthStage {
 }
 
 impl SynthStage {
-    fn new(target: &Path) -> Result<Self, CliError> {
-        let parent = target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        let created_parents = create_parents_tracked(parent, target)?;
-        let target_name = target.file_name().map(|n| n.to_string_lossy().to_lowercase());
+    fn new(raw_target: &Path) -> Result<Self, CliError> {
+        let parent = raw_target.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let name = raw_target.file_name().ok_or_else(|| {
+            CliError::new(ExitCode::Usage, "usage", "output directory path must name a folder")
+        })?;
+        // Normalizes trailing `/` and `/.` so POSIX rename targets the folder name itself.
+        let target = if raw_target.parent().is_some_and(|p| !p.as_os_str().is_empty()) {
+            parent.join(name)
+        } else {
+            PathBuf::from(name)
+        };
+        let created_parents = create_parents_tracked(parent, &target)?;
+        let target_name = name.to_string_lossy().to_lowercase();
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let stage = loop {
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
-            let name = format!(".folo-synth-{}-{n}.tmp", std::process::id());
-            if Some(name.to_lowercase()) == target_name {
+            let candidate_name = format!(".folo-synth-{}-{n}.tmp", std::process::id());
+            if candidate_name.to_lowercase() == target_name {
                 continue;
             }
-            let candidate = parent.join(&name);
+            let candidate = parent.join(&candidate_name);
             match std::fs::create_dir(&candidate) {
                 Ok(()) => break candidate,
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => {
                     remove_empty_parents(&created_parents);
                     return Err(output_data_error(
-                        DataError::Io { path: target.to_path_buf(), source: e },
-                        target,
+                        DataError::Io { path: target.clone(), source: e },
+                        &target,
                     ));
                 }
             }
         };
-        Ok(SynthStage { target: target.to_path_buf(), stage, created_parents, published: false })
+        Ok(SynthStage { target, stage, created_parents, published: false })
     }
 
     fn path(&self) -> &Path {
         &self.stage
     }
 
-    /// Atomically publishes the finished staging directory at `self.target`, refusing to overwrite anything that
-    /// appeared at `self.target` concurrently.
+    /// Atomically publishes the finished staging directory at `self.target`, refusing to overwrite any file or
+    /// directory (including an empty directory created concurrently).
     fn publish(mut self) -> Result<PathBuf, CliError> {
         if std::fs::symlink_metadata(&self.target).is_ok() {
             return Err(output_exists(
@@ -99,7 +110,7 @@ impl SynthStage {
         }
         let mut tries = 0;
         let res = loop {
-            match std::fs::rename(&self.stage, &self.target) {
+            match rename_dir_noreplace(&self.stage, &self.target) {
                 Ok(()) => break Ok(()),
                 // On Windows, a search indexer or antivirus scanner can briefly hold a freshly written file open,
                 // causing directory rename to return PermissionDenied or ERROR_SHARING_VIOLATION (32).
@@ -145,7 +156,62 @@ impl Drop for SynthStage {
     }
 }
 
+/// Renames directory `from` to `to` without replacing an existing `to` (even an empty directory).
+///
+/// On Linux, uses `renameat2(..., RENAME_NOREPLACE)` so a concurrently created empty directory at `to` is
+/// atomically rejected with `EEXIST` instead of being silently replaced; on filesystems without `RENAME_NOREPLACE`
+/// (`EINVAL` / `ENOSYS`), falls back to checking `symlink_metadata` + `std::fs::rename`. On Windows,
+/// `folo_nn::io::publish_new` calls `MoveFileExW(..., 0)` without `MOVEFILE_REPLACE_EXISTING`, which atomically
+/// rejects any existing file or directory at `to` (and supports long `\\?\` paths).
+fn rename_dir_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        folo_nn::io::publish_new(from, to)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::{CString, c_char, c_int, c_uint};
+        use std::os::unix::ffi::OsStrExt;
+        unsafe extern "C" {
+            fn renameat2(
+                olddirfd: c_int,
+                oldpath: *const c_char,
+                newdirfd: c_int,
+                newpath: *const c_char,
+                flags: c_uint,
+            ) -> c_int;
+        }
+        const AT_FDCWD: c_int = -100;
+        const RENAME_NOREPLACE: c_uint = 1;
+        let to_c = |p: &Path| CString::new(p.as_os_str().as_bytes()).map_err(std::io::Error::from);
+        let (old, new) = (to_c(from)?, to_c(to)?);
+        // SAFETY: both pointers are NUL-terminated C strings alive across the call; return value is checked.
+        if unsafe { renameat2(AT_FDCWD, old.as_ptr(), AT_FDCWD, new.as_ptr(), RENAME_NOREPLACE) } == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if matches!(err.kind(), std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput) {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+            }
+            return std::fs::rename(from, to);
+        }
+        Err(err)
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        if std::fs::symlink_metadata(to).is_ok() {
+            return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+        }
+        std::fs::rename(from, to)
+    }
+}
+
 /// Cleans up partial output written into a pre-existing empty directory (such as `.`) if `synth` fails.
+///
+/// MUST only be constructed *after* [`folo_data::unfinished::claim`] succeeds, so a losing writer never deletes
+/// another writer's marker or dataset files. Removes generated contents before removing `.folo-unfinished` so no
+/// other writer can claim the directory mid-rollback.
 struct CleanEmptyDirGuard {
     dir: PathBuf,
     finished: bool,
@@ -167,9 +233,9 @@ impl Drop for CleanEmptyDirGuard {
             for sub in ["images", "labels"] {
                 let _ = std::fs::remove_dir_all(self.dir.join(sub));
             }
-            for file in ["data.yaml", folo_data::unfinished::MARKER] {
-                let _ = std::fs::remove_file(self.dir.join(file));
-            }
+            let _ = std::fs::remove_file(self.dir.join("data.yaml"));
+            // Remove the marker last so the folder stays marked unfinished until cleanup finishes.
+            let _ = std::fs::remove_file(self.dir.join(folo_data::unfinished::MARKER));
         }
     }
 }
@@ -213,8 +279,25 @@ fn remove_empty_parents(created: &[PathBuf]) {
     }
 }
 
+/// Rewrites any `DataError::Io` path rooted inside `stage` to point at `out_dir`, so internal staging directory
+/// names never leak into error messages or confuse `output_data_error`'s output-vs-input hint.
+fn remap_stage_error(e: DataError, stage: &Path, out_dir: &Path) -> DataError {
+    match e {
+        DataError::Io { path, source } => {
+            let mapped = match path.strip_prefix(stage) {
+                Ok(rel) if rel.as_os_str().is_empty() => out_dir.to_path_buf(),
+                Ok(rel) => out_dir.join(rel),
+                Err(_) => path,
+            };
+            DataError::Io { path: mapped, source }
+        }
+        other => other,
+    }
+}
+
 /// Runs `writer` against `out_dir`: stages into a sibling directory and atomically renames when `out_dir` does not
-/// yet exist, or writes directly into a pre-existing empty directory (like `.`) with rollback on failure.
+/// yet exist, or writes directly into a pre-existing empty directory (like `.`) with rollback armed *only after*
+/// `claim` succeeds.
 fn run_synth_into(
     out_dir: &Path,
     writer: impl FnOnce(folo_data::unfinished::Claim) -> Result<WrittenDataset, DataError>,
@@ -232,15 +315,20 @@ fn run_synth_into(
         );
     if can_stage {
         let stage = SynthStage::new(out_dir)?;
-        let claim = folo_data::unfinished::claim(stage.path()).map_err(|e| output_data_error(e, out_dir))?;
-        let mut written = writer(claim).map_err(|e| output_data_error(e, out_dir))?;
+        let stage_path = stage.path().to_path_buf();
+        let claim = folo_data::unfinished::claim(&stage_path)
+            .map_err(|e| output_data_error(remap_stage_error(e, &stage_path, out_dir), out_dir))?;
+        let mut written = writer(claim)
+            .map_err(|e| output_data_error(remap_stage_error(e, &stage_path, out_dir), out_dir))?;
         let final_root = stage.publish()?;
         written.yaml = final_root.join("data.yaml");
         written.root = final_root;
         Ok(written)
     } else {
-        let guard = CleanEmptyDirGuard::new(out_dir);
+        // Claim FIRST: if another writer already claimed `out_dir`, return immediately without arming rollback
+        // so we never touch the winner's marker or files.
         let claim = folo_data::unfinished::claim(out_dir).map_err(|e| output_data_error(e, out_dir))?;
+        let guard = CleanEmptyDirGuard::new(out_dir);
         let written = writer(claim).map_err(|e| output_data_error(e, out_dir))?;
         guard.finish();
         Ok(written)
@@ -248,6 +336,10 @@ fn run_synth_into(
 }
 
 pub(super) fn synth(args: SynthArgs, out: Out) -> Result<(), CliError> {
+    if args.out_dir.as_os_str().is_empty() {
+        return Err(CliError::new(ExitCode::Usage, "usage", "output directory path must not be empty")
+            .hint("pass a target folder path, e.g. `folo dataset synth ./shapes`"));
+    }
     if !crate::cli::bounds::SYNTH_IMAGES.contains_u64(args.images) {
         return Err(CliError::new(ExitCode::Usage, "usage", "--images must be in 1..=1000000"));
     }
@@ -342,6 +434,7 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(err.code, "io_error");
+        assert!(!err.message.contains(".folo-synth-"), "staging path leaked: {}", err.message);
         assert!(!target.exists(), "target must not exist after failure");
         assert!(!root.join("nested").exists(), "newly created empty parents must be cleaned up");
         assert!(dir_entries(root.path()).is_empty(), "leftovers: {:?}", dir_entries(root.path()));
@@ -373,17 +466,52 @@ mod tests {
     }
 
     #[test]
+    fn failed_claim_on_claimed_dir_never_deletes_winners_dataset() {
+        let root = TestDir::new("cli-synth-claim-race");
+        let target = root.join("shared");
+        std::fs::create_dir(&target).unwrap();
+        // Simulate another writer that already won `claim(&target)` and is actively writing files.
+        let _winner_claim = folo_data::unfinished::claim(&target).unwrap();
+        std::fs::create_dir_all(target.join("images/train")).unwrap();
+        std::fs::write(target.join("images/train/000000.png"), b"winner").unwrap();
+        std::fs::write(target.join("data.yaml"), "winner: true\n").unwrap();
+
+        let err = run_synth_into(&target, |_claim| unreachable!("loser must fail at claim")).unwrap_err();
+        assert_eq!(err.code, "output_exists");
+        assert!(target.join(folo_data::unfinished::MARKER).is_file(), "winner's marker must stay");
+        assert_eq!(std::fs::read(target.join("images/train/000000.png")).unwrap(), b"winner");
+        assert_eq!(std::fs::read_to_string(target.join("data.yaml")).unwrap(), "winner: true\n");
+    }
+
+    #[test]
     fn concurrent_target_creation_refuses_publish_and_cleans_stage() {
         let root = TestDir::new("cli-synth-race");
+        // Non-empty target created concurrently.
         let target = root.join("raced");
         let stage = SynthStage::new(&target).unwrap();
         std::fs::write(stage.path().join("data.yaml"), "ok").unwrap();
-        // Another process creates `target` before publish.
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("keep.txt"), b"mine").unwrap();
         let err = stage.publish().unwrap_err();
         assert_eq!(err.code, "output_exists");
         assert_eq!(std::fs::read(target.join("keep.txt")).unwrap(), b"mine");
         assert_eq!(dir_entries(root.path()), ["raced"], "staging dir must be removed on publish error");
+
+        // Empty directory created concurrently right before atomic no-replace rename must NOT be replaced.
+        let empty_target = root.join("raced_empty");
+        let stage2 = SynthStage::new(&empty_target).unwrap();
+        std::fs::write(stage2.path().join("data.yaml"), "ok").unwrap();
+        std::fs::create_dir(&empty_target).unwrap();
+        let rename_err = rename_dir_noreplace(stage2.path(), &empty_target).unwrap_err();
+        assert!(
+            matches!(
+                rename_err.kind(),
+                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
+            ),
+            "expected AlreadyExists/PermissionDenied, got {rename_err:?}"
+        );
+        assert!(dir_entries(&empty_target).is_empty(), "empty target must stay untouched");
+        drop(stage2);
+        assert_eq!(dir_entries(root.path()), ["raced", "raced_empty"]);
     }
 }

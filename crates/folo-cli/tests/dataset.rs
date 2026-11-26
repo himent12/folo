@@ -786,12 +786,15 @@ fn check_flags_dangling_symlinks_portably() {
     assert!(sub["message"].as_str().unwrap().contains("dangling symlink"), "{sub}");
     assert!(sub["fix"].as_str().unwrap().contains("symlink"), "{sub}");
 
-    // 2. Dangling image and label file symlinks (always tested on Unix; on Windows when file symlinks are enabled).
+    // 2. Dangling image, paired label, and orphan label file symlinks (always on Unix; on Windows when enabled).
     let dangling_img = ds.join("images/train/ghost.jpg");
     if try_file_symlink(&t.join("no_such_image.jpg"), &dangling_img) {
         let lbl = ds.join("labels/train/000000.txt");
         std::fs::remove_file(&lbl).unwrap();
         assert!(try_file_symlink(&t.join("no_such_label.txt"), &lbl));
+        // Orphan dangling label symlink (no matching image) must be reported as `broken_label`, never dropped.
+        let orphan_lbl = ds.join("labels/train/dangling_orphan.txt");
+        assert!(try_file_symlink(&t.join("no_such_orphan.txt"), &orphan_lbl));
 
         let (code, stdout, _) = folo(&["dataset", "check", s(&ds), "--json", "--fix-dry-run"]);
         assert_eq!(code, 1);
@@ -813,12 +816,35 @@ fn check_flags_dangling_symlinks_portably() {
         assert_eq!(lbl_issue["kind"], "broken_label", "{lbl_issue}");
         assert_eq!(lbl_issue["severity"], "error", "{lbl_issue}");
         assert!(lbl_issue["message"].as_str().unwrap().contains("dangling symlink"), "{lbl_issue}");
+
+        let orphan_issues: Vec<_> =
+            issues.iter().filter(|i| i["file"] == "labels/train/dangling_orphan.txt").collect();
+        assert_eq!(orphan_issues.len(), 1, "orphan dangling label must appear once: {issues:?}");
+        assert_eq!(orphan_issues[0]["kind"], "broken_label", "{orphan_issues:?}");
+        assert!(
+            orphan_issues[0]["message"].as_str().unwrap().contains("dangling symlink"),
+            "{orphan_issues:?}"
+        );
         // Must NOT also misreport `000000.jpg` as a background image (`empty_image`).
         assert!(
             !issues.iter().any(|i| i["kind"] == "empty_image" && i["file"] == "images/train/000000.jpg"),
             "dangling label symlink must not be misreported as empty_image: {issues:?}"
         );
     }
+
+    // 3. Empty `folo dataset synth ""` inside an existing dataset must be refused with exit 2 and delete nothing.
+    let empty_out = folo_cmd()
+        .args(["dataset", "synth", "", "--images", "2", "--imgsz", "32", "--json"])
+        .current_dir(&ds)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(empty_out.stdout).unwrap();
+    assert_eq!(empty_out.status.code(), Some(2), "{stdout}");
+    assert_eq!(json_lines(&stdout).last().unwrap()["error"]["code"], "usage");
+    assert!(
+        ds.join("data.yaml").is_file() && ds.join("images/train").is_dir(),
+        "cwd dataset must stay intact"
+    );
 }
 
 /// `folo dataset check` on COCO evaluates boxes against the real image dimensions (matching the loader) when the
