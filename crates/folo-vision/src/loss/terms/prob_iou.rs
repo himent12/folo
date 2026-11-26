@@ -132,6 +132,33 @@ pub(crate) fn prob_iou_l1_box_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4], [
     (hd, ga, gb)
 }
 
+/// Single-box ProbIoU similarity `1 - H_D = exp(-B_D) / (1 + H_D)` and exact gradients
+/// `(ProbIoU, dProbIoU/da, dProbIoU/db)` in `f64`.
+///
+/// Rationalizing `1 - sqrt(1 - exp(-B_D))` as `exp(-B_D) / (1 + H_D)` avoids catastrophic cancellation when
+/// `B_D` is large (e.g. `B_D = 37.5` where `H_D` rounds to `1.0` in `f64` while `exp(-B_D) / 2 ≈ 2.59e-17`
+/// remains cleanly representable in `f32`).
+pub(crate) fn prob_iou_sim_box_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4], [f64; 4]) {
+    let (bd, gbd_a, gbd_b) = prob_iou_l2_box_f64(a, b);
+    if !bd.is_finite() {
+        return (f64::NAN, [f64::NAN; 4], [f64::NAN; 4]);
+    }
+    if bd <= 0.0 {
+        return (1.0, [0.0; 4], [0.0; 4]);
+    }
+    let one_minus_bc = -(-bd).exp_m1();
+    let hd = one_minus_bc.sqrt();
+    if hd == 0.0 {
+        return (1.0, [0.0; 4], [0.0; 4]);
+    }
+    let e = (-bd).exp();
+    let sim = e / (1.0 + hd);
+    let scale = if e == 0.0 { 0.0 } else { -e / (2.0 * hd) };
+    let ga = [scale * gbd_a[0], scale * gbd_a[1], scale * gbd_a[2], scale * gbd_a[3]];
+    let gb = [scale * gbd_b[0], scale * gbd_b[1], scale * gbd_b[2], scale * gbd_b[3]];
+    (sim, ga, gb)
+}
+
 /// Single-box GWD loss `f(W_2²) / (tau + f(W_2²))` and exact gradients `(loss, dL/da, dL/db)` in `f64`
 /// (Yang et al. ICML 2021 Eq. 7). By antisymmetry, `dL/db = -dL/da`.
 pub(crate) fn gwd_box_f64(
@@ -179,15 +206,18 @@ pub(crate) fn gwd_box_f64(
     (loss, ga, gb)
 }
 
-/// Cancellation-free `0.5 * (r² - 1 - 2 * ln(r))` for `r > 0`, using a Taylor expansion near `r = 1` so
-/// tiny perturbations `|r - 1| < 1e-4` retain full `f64` precision.
+/// Cancellation-free `0.5 * (r² - 1 - 2 * ln(r))` for `r > 0`:
+/// - near `r == 1` (`|r - 1| < 1e-4`), evaluates the exact Taylor series in `r - 1`;
+/// - for `r >= 0.5`, uses `ln_1p(r - 1)` to preserve precision around unity;
+/// - for `r < 0.5`, evaluates `0.5 * (r² - 1 - 2 * ln(r))` directly so tiny ratios `r << 1` (down to
+///   `f64::MIN_POSITIVE`) never round `r - 1` to `-1.0` and blow up `ln_1p`.
 #[inline]
 fn kld_scale_term_f64(r: f64) -> f64 {
+    if r < 0.5 {
+        return 0.5 * (r * r - 1.0 - 2.0 * r.ln());
+    }
     let delta = r - 1.0;
     if delta.abs() < 1e-4 {
-        // 0.5 * (delta² + 2 * (delta - ln(1 + delta)))
-        // = 0.5 * (delta² + 2 * (delta²/2 - delta³/3 + delta⁴/4 - delta⁵/5 + delta⁶/6))
-        // = delta² * (1 - delta/3 + delta²/4 - delta³/5 + delta⁴/6)
         let d = delta;
         let d2 = d * d;
         d2 * (1.0 + d * (-1.0 / 3.0 + d * (0.25 + d * (-0.2 + d / 6.0))))
@@ -254,13 +284,18 @@ where
 {
     let n = check_box_pair(b1, b2, op)?;
     let dev = b1.device();
+    let need_a = b1.requires_grad();
+    let need_b = b2.requires_grad();
     if n == 0 {
-        return Tensor::zeros_with([0], DType::F32, dev);
+        let out_t = Tensor::zeros_with([0], DType::F32, dev)?;
+        return Tensor::custom_op(op, &[b1, b2], out_t, move |_g| {
+            let ga = if need_a { Some(Tensor::zeros_with([0, 4], DType::F32, dev)?) } else { None };
+            let gb = if need_b { Some(Tensor::zeros_with([0, 4], DType::F32, dev)?) } else { None };
+            Ok(vec![ga, gb])
+        });
     }
     let a = b1.to_vec::<f32>()?;
     let b = b2.to_vec::<f32>()?;
-    let need_a = b1.requires_grad();
-    let need_b = b2.requires_grad();
     let mut out = vec![0.0f32; n];
     let mut g_a = if need_a { vec![[0.0f64; 4]; n] } else { Vec::new() };
     let mut g_b = if need_b { vec![[0.0f64; 4]; n] } else { Vec::new() };
@@ -313,13 +348,10 @@ where
     })
 }
 
-/// Differentiable Probabilistic IoU (`ProbIoU = 1 - H_D = 1 - sqrt(1 - exp(-B_D))`, Llerena et al. 2021)
+/// Differentiable Probabilistic IoU (`ProbIoU = 1 - H_D = exp(-B_D) / (1 + H_D)`, Llerena et al. 2021)
 /// between rows of `b1` and `b2` (`[N, 4]`, `xyxy`), returning `[N]` in `[0, 1]`.
 pub fn prob_iou(b1: &Tensor, b2: &Tensor) -> Result<Tensor> {
-    gaussian_box_op(b1, b2, "prob_iou", |a, b| {
-        let (hd, ga, gb) = prob_iou_l1_box_f64(a, b);
-        (1.0 - hd, [-ga[0], -ga[1], -ga[2], -ga[3]], [-gb[0], -gb[1], -gb[2], -gb[3]])
-    })
+    gaussian_box_op(b1, b2, "prob_iou", prob_iou_sim_box_f64)
 }
 
 /// Differentiable ProbIoU `L_1` regression loss (`1 - ProbIoU = H_D = sqrt(1 - exp(-B_D))`, Llerena et al.

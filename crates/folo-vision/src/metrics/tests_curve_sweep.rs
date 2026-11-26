@@ -70,6 +70,22 @@ fn confidence_sweep_optimal_micro_and_macro_f1() {
     for c in 0..2 {
         assert_eq!(sweep.per_class[c].best_f1, pr.per_class[c].best_f1);
     }
+
+    // Zero-F1 macro sweep on a sub-range `[0.5, 0.9]` must pick the highest grid threshold `0.9`
+    // with matching counts from that threshold (never an out-of-grid `0.0`).
+    let zero_f1_imgs =
+        vec![(vec![det(40.0, 40.0, 50.0, 50.0, 0.20, 0)], vec![truth(0.0, 0.0, 10.0, 10.0, 0)])];
+    let sub_sweep = compute_confidence_sweep(
+        1,
+        &ConfidenceSweepConfig { iou_thresh: 0.5, num_thresholds: 5, min_conf: 0.5, max_conf: 0.9 },
+        &zero_f1_imgs,
+    )
+    .unwrap();
+    assert!((sub_sweep.best_macro_f1.conf_thresh - 0.9).abs() < 1e-6);
+    assert_eq!(
+        (sub_sweep.best_macro_f1.tp, sub_sweep.best_macro_f1.fp, sub_sweep.best_macro_f1.fn_count),
+        (0, 0, 1)
+    );
 }
 
 #[test]
@@ -99,7 +115,31 @@ fn calibration_report_equal_width_and_equal_mass_bins() {
     assert!(em.bins.iter().all(|b| b.count == 2), "equal-mass bins must each contain 2 samples");
     assert!(em.ece.is_finite() && em.mce >= em.ece - 1e-12);
 
-    // End-to-end image calibration report computes overall + per-class + SCE cleanly.
+    // Equal-mass binning keeps tied scores atomic and permutation-invariant:
+    // a perfectly calibrated constant-score predictor (50% TP at score 0.5) must report exact 0.0 error
+    // regardless of whether TPs and FPs are grouped or interleaved.
+    let tied_scores = [0.5f32; 4];
+    let tied_a = reliability_diagnostics_from_scores(
+        &tied_scores,
+        &[true, true, false, false],
+        2,
+        BinningStrategy::EqualMass,
+    )
+    .unwrap();
+    let tied_b = reliability_diagnostics_from_scores(
+        &tied_scores,
+        &[true, false, true, false],
+        2,
+        BinningStrategy::EqualMass,
+    )
+    .unwrap();
+    assert_eq!(tied_a, tied_b);
+    assert_eq!(tied_a.bins.len(), 1);
+    assert_eq!(tied_a.ece, 0.0);
+    assert_eq!(tied_a.equal_bin_ece, 0.0);
+    assert_eq!(tied_a.mce, 0.0);
+
+    // End-to-end image calibration report computes overall + per-class + SCE (EqualWidth) cleanly.
     let images = vec![(
         vec![
             det(0.0, 0.0, 10.0, 10.0, 0.90, 0),  // TP
@@ -122,8 +162,25 @@ fn calibration_report_equal_width_and_equal_mass_bins() {
     assert_eq!(rep.overall.count, 3);
     assert_eq!(rep.per_class.len(), 2);
     let want_sce = 0.5 * (rep.per_class[0].ece + rep.per_class[1].ece);
-    assert!((rep.static_calibration_error - want_sce).abs() < 1e-12);
+    assert!((rep.mean_class_ece - want_sce).abs() < 1e-12);
+    assert!((rep.static_calibration_error.unwrap() - want_sce).abs() < 1e-12);
     assert!((rep.max_class_ece - rep.per_class[0].ece.max(rep.per_class[1].ece)).abs() < 1e-12);
+
+    // EqualMass report leaves static_calibration_error as None and reports mean_class_equal_bin_ece.
+    let rep_em = compute_calibration_report(
+        2,
+        &CalibrationReportConfig {
+            iou_thresh: 0.5,
+            conf_thresh: 0.0,
+            num_bins: 2,
+            binning: BinningStrategy::EqualMass,
+        },
+        &images,
+    )
+    .unwrap();
+    assert!(rep_em.static_calibration_error.is_none());
+    let want_eq = 0.5 * (rep_em.per_class[0].equal_bin_ece + rep_em.per_class[1].equal_bin_ece);
+    assert!((rep_em.mean_class_equal_bin_ece - want_eq).abs() < 1e-12);
 
     // Empty inputs & validation errors.
     let empty = reliability_diagnostics_from_scores(&[], &[], 5, BinningStrategy::EqualMass).unwrap();

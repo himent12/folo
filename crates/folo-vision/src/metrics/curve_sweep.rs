@@ -271,13 +271,13 @@ where
 
     let mut macro_curve = Vec::with_capacity(m);
     let mut best_macro_f1 = OptimalF1Point {
-        conf_thresh: 0.0,
+        conf_thresh: thresholds[0],
         f1: 0.0,
         precision: 0.0,
         recall: 0.0,
-        tp: 0,
-        fp: micro_curve.first().map_or(0, |p| p.fp),
-        fn_count: total_gt,
+        tp: micro_curve[0].tp,
+        fp: micro_curve[0].fp,
+        fn_count: micro_curve[0].fn_count,
     };
     let mut best_macro_score = -1.0f64;
 
@@ -298,8 +298,8 @@ where
             fp: mc.fp,
             fn_count: mc.fn_count,
         });
-        // Pick highest threshold on exact ties when positive macro-F1 exists.
-        if active_classes > 0 && f > 0.0 && f >= best_macro_score {
+        // Pick highest threshold on exact ties across the actual grid (including zero-F1 ties).
+        if f >= best_macro_score {
             best_macro_score = f;
             best_macro_f1 = OptimalF1Point {
                 conf_thresh: thresholds[i],
@@ -378,14 +378,20 @@ impl CalibrationReportConfig {
     }
 }
 
-/// Extended reliability-bin calibration diagnostics (ECE / ACE, MCE, Brier score, signed bias, and
-/// overconfidence error).
+/// Extended reliability-bin calibration diagnostics (count-weighted ECE, equal-bin-weight calibration error,
+/// MCE, Brier score, signed bias, and overconfidence error).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CalibrationReport {
-    /// Binning strategy used (`EqualWidth` -> ECE, `EqualMass` -> ACE).
+    /// Binning strategy used (`EqualWidth` or `EqualMass`).
     pub binning: BinningStrategy,
-    /// Expected (or Adaptive) Calibration Error: `sum_b (count_b / N) * |avg_accuracy_b - avg_confidence_b|`.
+    /// Sample-count-weighted Expected Calibration Error:
+    /// `sum_b (count_b / N) * |avg_accuracy_b - avg_confidence_b|`.
     pub ece: f64,
+    /// Equal-bin-weight mean calibration gap across non-empty bins:
+    /// `(1 / B_nonempty) * sum_{b: count_b > 0} |avg_accuracy_b - avg_confidence_b|`.
+    /// Under [`BinningStrategy::EqualMass`], this matches the equal-bin-weight Adaptive Calibration Error
+    /// formulation of Nixon et al. (CVPRW 2019 §4).
+    pub equal_bin_ece: f64,
     /// Maximum Calibration Error: `max_{b: count_b > 0} |avg_accuracy_b - avg_confidence_b|`.
     pub mce: f64,
     /// Brier score: `(1 / N) * sum_i (p_i - y_i)²`.
@@ -400,7 +406,7 @@ pub struct CalibrationReport {
     pub bins: Vec<ReliabilityBin>,
 }
 
-/// Pooled and per-class detection calibration report with Static Calibration Error (`SCE`).
+/// Pooled and per-class detection calibration report.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DetectionCalibrationReport {
     /// Configuration used to compute this report.
@@ -409,8 +415,14 @@ pub struct DetectionCalibrationReport {
     pub overall: CalibrationReport,
     /// Per-class calibration reports for classes `0..num_classes`.
     pub per_class: Vec<CalibrationReport>,
-    /// Static Calibration Error (macro average of per-class `ece` over non-empty classes; `0.0` if none).
-    pub static_calibration_error: f64,
+    /// Macro average of per-class count-weighted `ece` across non-empty classes (`0.0` if none).
+    pub mean_class_ece: f64,
+    /// Static Calibration Error (macro average of per-class fixed-width `ece` across non-empty classes),
+    /// populated (`Some`) under [`BinningStrategy::EqualWidth`] and `None` under [`BinningStrategy::EqualMass`].
+    pub static_calibration_error: Option<f64>,
+    /// Macro average of per-class equal-bin-weight `equal_bin_ece` across non-empty classes (matches
+    /// class-averaged ACE under [`BinningStrategy::EqualMass`]; `0.0` if none).
+    pub mean_class_equal_bin_ece: f64,
     /// Worst per-class `ece` across non-empty classes (`0.0` if none).
     pub max_class_ece: f64,
 }
@@ -490,29 +502,77 @@ pub fn reliability_diagnostics_from_scores(
                     })
                     .collect()
             } else {
+                // Group identical scores into atomic runs so tied confidence values are never split across
+                // bins, making equal-mass metrics strictly permutation-invariant.
                 let mut pairs: Vec<(f64, bool)> =
                     scores.iter().zip(is_tp).map(|(&s, &tp)| (s as f64, tp)).collect();
-                pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-                let active_bins = num_bins.min(n);
-                let mut out = Vec::with_capacity(active_bins);
-                for b in 0..active_bins {
-                    let start = (b * n) / active_bins;
-                    let end = ((b + 1) * n) / active_bins;
-                    let slice = &pairs[start..end];
-                    let lower = slice[0].0;
-                    let upper = slice[slice.len() - 1].0;
-                    let mut tp_b = 0usize;
-                    let mut fp_b = 0usize;
-                    let mut sum_c = 0.0f64;
-                    for &(p, is_pos) in slice {
+                pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
+
+                struct ScoreRun {
+                    score: f64,
+                    count: usize,
+                    tp: usize,
+                }
+                let mut runs: Vec<ScoreRun> = Vec::new();
+                for (score, is_pos) in pairs {
+                    if let Some(last) = runs.last_mut()
+                        && last.score == score
+                    {
+                        last.count += 1;
                         if is_pos {
-                            tp_b += 1;
-                        } else {
-                            fp_b += 1;
+                            last.tp += 1;
                         }
-                        sum_c += p;
+                    } else {
+                        runs.push(ScoreRun { score, count: 1, tp: usize::from(is_pos) });
                     }
-                    out.push(make_bin(lower, upper, tp_b, fp_b, sum_c));
+                }
+
+                let target_bins = num_bins.min(runs.len());
+                let mut out = Vec::with_capacity(target_bins);
+                let mut run_idx = 0usize;
+                let mut emitted_samples = 0u128;
+                let total_samples = n as u128;
+
+                while run_idx < runs.len() {
+                    let bins_left = (target_bins - out.len()).max(1);
+                    let rem_samples = total_samples - emitted_samples;
+                    let lower = runs[run_idx].score;
+                    let mut upper = lower;
+                    let mut tp_b = 0usize;
+                    let mut count_b = 0usize;
+                    let mut sum_c = 0.0f64;
+
+                    if bins_left == 1 {
+                        for r in &runs[run_idx..] {
+                            upper = r.score;
+                            tp_b += r.tp;
+                            count_b += r.count;
+                            sum_c += r.score * r.count as f64;
+                        }
+                        run_idx = runs.len();
+                    } else {
+                        let bins_left_u = bins_left as u128;
+                        loop {
+                            let r = &runs[run_idx];
+                            upper = r.score;
+                            tp_b += r.tp;
+                            count_b += r.count;
+                            sum_c += r.score * r.count as f64;
+                            run_idx += 1;
+                            let rem_runs = runs.len() - run_idx;
+                            if rem_runs < bins_left {
+                                break;
+                            }
+                            let cur_err = (count_b as u128 * bins_left_u).abs_diff(rem_samples);
+                            let next_count = count_b as u128 + runs[run_idx].count as u128;
+                            let next_err = (next_count * bins_left_u).abs_diff(rem_samples);
+                            if next_err >= cur_err {
+                                break;
+                            }
+                        }
+                    }
+                    emitted_samples += count_b as u128;
+                    out.push(make_bin(lower, upper, tp_b, count_b - tp_b, sum_c));
                 }
                 out
             }
@@ -520,6 +580,8 @@ pub fn reliability_diagnostics_from_scores(
     };
 
     let mut ece = 0.0f64;
+    let mut gap_sum = 0.0f64;
+    let mut non_empty_bins = 0usize;
     let mut mce = 0.0f64;
     let mut oe = 0.0f64;
     if n > 0 {
@@ -528,6 +590,8 @@ pub fn reliability_diagnostics_from_scores(
             if bin.count == 0 {
                 continue;
             }
+            non_empty_bins += 1;
+            gap_sum += bin.gap;
             let frac = bin.count as f64 * inv_n;
             ece += frac * bin.gap;
             if bin.gap > mce {
@@ -538,8 +602,19 @@ pub fn reliability_diagnostics_from_scores(
         }
     }
 
+    let equal_bin_ece = if non_empty_bins == 0 { 0.0 } else { gap_sum / non_empty_bins as f64 };
     let (brier, signed_bias) = if n == 0 { (0.0, 0.0) } else { (brier_sum / n as f64, bias_sum / n as f64) };
-    Ok(CalibrationReport { binning, ece, mce, brier, signed_bias, overconfidence_error: oe, count: n, bins })
+    Ok(CalibrationReport {
+        binning,
+        ece,
+        equal_bin_ece,
+        mce,
+        brier,
+        signed_bias,
+        overconfidence_error: oe,
+        count: n,
+        bins,
+    })
 }
 
 #[inline]
@@ -583,7 +658,8 @@ where
     let mut all_scores = Vec::new();
     let mut all_tp = Vec::new();
     let mut per_class = Vec::with_capacity(num_classes);
-    let mut sce_sum = 0.0f64;
+    let mut ece_sum = 0.0f64;
+    let mut eq_ece_sum = 0.0f64;
     let mut non_empty = 0usize;
     let mut max_class_ece = 0.0f64;
 
@@ -594,7 +670,8 @@ where
         all_tp.extend_from_slice(&flags);
         let rep = reliability_diagnostics_from_scores(&scores, &flags, cfg.num_bins, cfg.binning)?;
         if rep.count > 0 {
-            sce_sum += rep.ece;
+            ece_sum += rep.ece;
+            eq_ece_sum += rep.equal_bin_ece;
             non_empty += 1;
             if rep.ece > max_class_ece {
                 max_class_ece = rep.ece;
@@ -604,13 +681,17 @@ where
     }
 
     let overall = reliability_diagnostics_from_scores(&all_scores, &all_tp, cfg.num_bins, cfg.binning)?;
-    let static_calibration_error = if non_empty == 0 { 0.0 } else { sce_sum / non_empty as f64 };
+    let mean_class_ece = if non_empty == 0 { 0.0 } else { ece_sum / non_empty as f64 };
+    let mean_class_equal_bin_ece = if non_empty == 0 { 0.0 } else { eq_ece_sum / non_empty as f64 };
+    let static_calibration_error = (cfg.binning == BinningStrategy::EqualWidth).then_some(mean_class_ece);
 
     Ok(DetectionCalibrationReport {
         config: *cfg,
         overall,
         per_class,
+        mean_class_ece,
         static_calibration_error,
+        mean_class_equal_bin_ece,
         max_class_ece,
     })
 }

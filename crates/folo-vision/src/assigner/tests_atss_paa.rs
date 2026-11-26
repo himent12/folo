@@ -117,6 +117,19 @@ fn atss_handles_empty_degenerate_disjoint_and_nonfinite() {
         assign_atss(&anchors, &[2], &[Xyxy::new(0.0, 0.0, 5.0, 5.0)], &[2], 2, &cfg).is_err(),
         "out-of-range label must error"
     );
+
+    // Exact constant-IoU ties (3 anchors with IoU 0.1, and 9 anchors with IoU 4/9) must not lose
+    // candidates to 1-ULP mean/std rounding.
+    let tie3_anchors =
+        [Xyxy::new(1.0, 0.0, 2.0, 10.0), Xyxy::new(4.0, 0.0, 5.0, 10.0), Xyxy::new(7.0, 0.0, 8.0, 10.0)];
+    let tie3 = assign_atss(&tie3_anchors, &[3], &[Xyxy::new(0.0, 0.0, 10.0, 10.0)], &[0], 1, &cfg).unwrap();
+    assert_eq!(tie3.num_fg, 3, "exact 0.1 IoU tie must keep all 3 candidates");
+    assert_eq!(tie3.iou_thresholds[0], 0.1);
+
+    let tie9_anchors: Vec<Xyxy> =
+        (0..9).map(|i| Xyxy::new(i as f32 * 0.5, 0.0, i as f32 * 0.5 + 4.0, 9.0)).collect();
+    let tie9 = assign_atss(&tie9_anchors, &[9], &[Xyxy::new(0.0, 0.0, 9.0, 9.0)], &[0], 1, &cfg).unwrap();
+    assert_eq!(tie9.num_fg, 9, "exact 4/9 IoU tie across 9 candidates must keep all 9");
 }
 
 #[test]
@@ -149,6 +162,12 @@ fn gmm_1d_bimodal_separation_and_tail_safety() {
     assert!(fit_gmm_1d_two_component(&[0.5, f64::NAN], 20, 1e-6, 1e-6).is_err());
     assert!(fit_gmm_1d_two_component(&[0.5, 1.0], 0, 1e-6, 1e-6).is_err());
     assert!(fit_gmm_1d_two_component(&[0.5, 1.0], 20, 1e-6, 0.0).is_err());
+
+    // Large identical finite values (`[1e308, 1e308]`) stay finite without sum overflow;
+    // unrepresentable variance spreads (`[0.0, 1e160]`) return Error::Config instead of NaN/Inf.
+    let huge_const = fit_gmm_1d_two_component(&[1e308, 1e308], 20, 1e-6, 1e-6).unwrap();
+    assert!(huge_const.pos_mean == 1e308 && huge_const.log_likelihood.is_finite());
+    assert!(fit_gmm_1d_two_component(&[0.0, 1e160], 20, 1e-6, 1e-6).is_err());
 }
 
 #[test]

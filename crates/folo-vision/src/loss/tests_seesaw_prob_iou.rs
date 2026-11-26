@@ -102,10 +102,25 @@ fn seesaw_f64_central_fd_mitigation_and_compensation() {
     let (_, g_comp) = seesaw_row_f64(&[0.5, 2.0, 0.0], 0, &[1000.0, 10.0, 1000.0], 0.8, 2.0, 1e-6, true);
     assert!(g_comp[1] > g_nocomp[1], "misclassified class 1 must receive compensated penalty");
 
-    // 3. Extreme logits remain finite and cancellation-free (shift-invariant).
+    // 3. Extreme logits & huge shared offsets remain finite, cancellation-free, and shift-invariant.
     let (l_ext, g_ext) =
         seesaw_row_f64(&[500.0, -500.0, 498.0], 0, &[100.0, 10.0, 1.0], 0.8, 2.0, 1e-6, true);
     assert!(l_ext.is_finite() && l_ext >= 0.0 && g_ext.iter().all(|v| v.is_finite()));
+
+    let (l_off, g_off) = seesaw_row_f64(&[1e20, 1e20], 0, &[100.0, 1.0], 1.0, 2.0, 1e-6, true);
+    let want_l_off = (0.01f64).ln_1p();
+    assert!(
+        (l_off - want_l_off).abs() < 1e-14,
+        "large shared offset lost mitigation: {l_off} vs {want_l_off}"
+    );
+    assert!((g_off[1] - 0.01 / 1.01).abs() < 1e-14);
+    assert!((g_off[0] + g_off[1]).abs() < 1e-15);
+
+    // 4. Single-class (`C == 1`) and non-finite logit propagation.
+    let (l_one, g_one) = seesaw_row_f64(&[2.5], 0, &[10.0], 0.8, 2.0, 1e-6, true);
+    assert_eq!((l_one, g_one), (0.0, vec![0.0]));
+    let (l_nan, g_nan) = seesaw_row_f64(&[f64::NAN, 1.0], 0, &[10.0, 10.0], 0.8, 2.0, 1e-6, true);
+    assert!(l_nan.is_nan() && g_nan.iter().all(|v| v.is_nan()));
 }
 
 #[test]
@@ -148,9 +163,17 @@ fn seesaw_tensor_grad_check_and_stateful_tracker() {
     // Out-of-range target errors without mutating counts.
     assert!(tracker.forward(&logits, &[0, 5]).is_err());
     assert_eq!(tracker.counts(), &[3.0, 1.0, 1.0]);
-    // Empty batch returns 0.0 cleanly.
-    let empty = Tensor::zeros([0, 3]);
-    assert_eq!(tracker.loss(&empty, &[]).unwrap().item::<f32>().unwrap(), 0.0);
+    // Empty batch preserves autograd graph and returns 0.0 cleanly; with_counts / update_counts / reset work.
+    let empty = Tensor::zeros([0, 3]).requires_grad_();
+    let el = tracker.loss(&empty, &[]).unwrap();
+    assert_eq!(el.item::<f32>().unwrap(), 0.0);
+    assert_eq!(el.backward().unwrap().get(&empty).unwrap().dims(), &[0, 3]);
+
+    let mut custom = SeesawLoss::with_counts(vec![10.0, 2.0, 1.0], SeesawConfig::default()).unwrap();
+    custom.update_counts(&[1, 2]).unwrap();
+    assert_eq!(custom.counts(), &[10.0, 3.0, 2.0]);
+    custom.reset();
+    assert_eq!(custom.counts(), &[1.0, 1.0, 1.0]);
 }
 
 #[test]
@@ -238,6 +261,26 @@ fn prob_iou_gwd_kld_f64_central_fd_and_properties() {
     assert!(prob_iou_l1_box_f64(small_a, small_b).1[0].abs() > 1e-3);
     assert!(gwd_box_f64(small_a, small_b, 1.0, GwdTransform::Log1p).1[0].abs() > 1e-3);
     assert!(kld_box_f64(small_a, small_b, 1.0).1[0].abs() > 1e-3);
+
+    // KLD extreme small width ratio (w1 = 1 vs w2 = 1e18): must NOT saturate to 1.0 / zero grad.
+    let kld_a = [-0.5, -0.5, 0.5, 0.5];
+    let kld_b = [-0.5e18, -0.5, 0.5e18, 0.5];
+    let (kl_val, kl_ga, kl_gb) = kld_box_f64(kld_a, kld_b, 1.0);
+    let want_dkl = 0.5 * ((1e-18f64).powi(2) - 1.0 - 2.0 * (1e-18f64).ln());
+    let want_kl = want_dkl.ln_1p() / (1.0 + want_dkl.ln_1p());
+    assert!((kl_val - want_kl).abs() < 1e-12, "KLD extreme ratio mismatch: {kl_val} vs {want_kl}");
+    assert!(kl_ga[0].abs() > 1e-4 && kl_gb[0].abs() > 0.0, "KLD extreme ratio must have nonzero grads");
+
+    // Degenerate/inverted boxes and non-finite inputs remain finite / propagate NaN cleanly.
+    let inv = [10.0, 10.0, 2.0, 2.0];
+    let valid = [1.0, 1.0, 5.0, 5.0];
+    assert!(prob_iou_l1_box_f64(inv, valid).0.is_finite());
+    assert!(gwd_box_f64(inv, valid, 1.0, GwdTransform::Log1p).0.is_finite());
+    assert!(kld_box_f64(inv, valid, 1.0).0.is_finite());
+    let nan_box = [f64::NAN, 0.0, 2.0, 2.0];
+    assert!(prob_iou_l1_box_f64(nan_box, valid).0.is_nan());
+    assert!(gwd_box_f64(nan_box, valid, 1.0, GwdTransform::Log1p).0.is_nan());
+    assert!(kld_box_f64(nan_box, valid, 1.0).0.is_nan());
 }
 
 #[test]
@@ -275,10 +318,23 @@ fn prob_iou_gwd_kld_tensor_grad_check_and_validation() {
         assert!((p + l - 1.0).abs() < 1e-6);
     }
 
-    // Invalid tau and empty tensors handled properly.
+    // Rationalized ProbIoU similarity stays representably positive at large B_D = 37.5 (5 widths apart).
+    let far_a = Tensor::from_slice(&[0.0f32, 0.0, 1.0, 1.0], [1, 4]).unwrap().requires_grad_();
+    let far_b = Tensor::from_slice(&[5.0f32, 0.0, 6.0, 1.0], [1, 4]).unwrap();
+    let far_sim = prob_iou(&far_a, &far_b).unwrap();
+    let sim_v = far_sim.to_vec::<f32>().unwrap()[0];
+    let want_sim = ((-37.5f64).exp() / 2.0) as f32;
+    assert!(sim_v > 0.0 && (sim_v - want_sim).abs() <= 1e-5 * want_sim, "far sim {sim_v:e} vs {want_sim:e}");
+
+    // Invalid tau and empty autograd-tracked tensors handled properly.
     assert!(gwd_loss(&b1, &b2, 0.0, GwdTransform::Log1p).is_err());
     assert!(kld_loss(&b1, &b2, -1.0).is_err());
-    let empty = Tensor::zeros([0, 4]);
-    assert_eq!(prob_iou_loss(&empty, &empty).unwrap().dims(), &[0]);
-    assert_eq!(kld_loss(&empty, &empty, 1.0).unwrap().dims(), &[0]);
+    let empty_a = Tensor::zeros([0, 4]).requires_grad_();
+    let empty_b = Tensor::zeros([0, 4]).requires_grad_();
+    let empty_out = prob_iou_loss(&empty_a, &empty_b).unwrap();
+    assert_eq!(empty_out.dims(), &[0]);
+    let empty_grads = empty_out.sum_all().unwrap().backward().unwrap();
+    assert_eq!(empty_grads.get(&empty_a).unwrap().dims(), &[0, 4]);
+    assert_eq!(empty_grads.get(&empty_b).unwrap().dims(), &[0, 4]);
+    assert_eq!(kld_loss(&empty_a, &empty_b, 1.0).unwrap().dims(), &[0]);
 }

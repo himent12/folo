@@ -12,8 +12,8 @@
 //! - [`calibration`]: post-hoc temperature scaling confidence calibration and ECE / MCE / Brier score metrics.
 //! - [`cocoeval`]: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) for reporting on COCO splits.
 //! - [`assign`]: the task-aligned assigner and DFL target encoding.
-//! - [`assigner`]: additional label assignment algorithms (SimOTA dynamic-`k`, exact Hungarian / linear-sum
-//!   assignment, and [`OneToOneMatcher`]).
+//! - [`assigner`]: additional label assignment algorithms (ATSS, PAA, SimOTA dynamic-`k`, exact Hungarian /
+//!   linear-sum assignment, and [`OneToOneMatcher`]).
 //! - [`loss`]: the detection loss (BCE + CIoU + DFL) on folo-core tensors, with autograd. The assigner runs on
 //!   host copies of the detached head outputs; that read is the loss's only full-size device-to-host transfer.
 //!

@@ -317,19 +317,31 @@ pub fn assign_atss(
             continue;
         }
 
-        let mean = cands.iter().map(|&(_, iou)| iou).sum::<f64>() / m as f64;
-        let var = if m <= 1 {
-            0.0
+        let mut min_iou = f64::INFINITY;
+        let mut max_iou = f64::NEG_INFINITY;
+        for &(_, iou) in &cands {
+            if iou < min_iou {
+                min_iou = iou;
+            }
+            if iou > max_iou {
+                max_iou = iou;
+            }
+        }
+        let (mean, var) = if min_iou == max_iou {
+            (min_iou, 0.0)
         } else {
+            let ref_iou = min_iou;
+            let mean = ref_iou + cands.iter().map(|&(_, iou)| iou - ref_iou).sum::<f64>() / m as f64;
             let denom = if cfg.unbiased_std { (m - 1) as f64 } else { m as f64 };
-            cands
+            let var = cands
                 .iter()
                 .map(|&(_, iou)| {
                     let d = iou - mean;
                     d * d
                 })
                 .sum::<f64>()
-                / denom
+                / denom;
+            (mean, var)
         };
         let thresh = (mean + var.sqrt()).max(min_thr);
         out.iou_thresholds[g] = thresh;

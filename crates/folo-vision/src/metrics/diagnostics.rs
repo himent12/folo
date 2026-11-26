@@ -753,7 +753,8 @@ where
     Ok(PrCurveDiagnostics { iou_thresh, mean_ap_continuous, mean_ap_101, per_class })
 }
 
-/// One equal-width reliability diagram bin over `[lower, upper)` (the final bin is closed `[lower, 1.0]`).
+/// One reliability diagram bin over `[lower, upper)` (closed `[lower, 1.0]` for the final equal-width bin,
+/// or empirical `[min_score, max_score]` bounds for equal-mass adaptive bins).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReliabilityBin {
     /// Lower bin edge in `[0, 1]`.

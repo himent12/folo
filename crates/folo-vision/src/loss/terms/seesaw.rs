@@ -97,9 +97,9 @@ pub(crate) fn seesaw_row_f64(
     let ny = counts[target];
     let log_eps = if eps > 0.0 { eps.ln() } else { f64::NEG_INFINITY };
 
-    let mut adj = vec![f64::NEG_INFINITY; c];
+    let mut adj_rel = vec![f64::NEG_INFINITY; c];
     let mut comp_active = vec![false; c];
-    adj[target] = zy;
+    adj_rel[target] = 0.0;
 
     for j in 0..c {
         if j == target {
@@ -125,16 +125,17 @@ pub(crate) fn seesaw_row_f64(
         } else {
             0.0
         };
-        adj[j] = z[j] + log_m + log_c;
+        // Shift relative to z[target] before adding log_m / log_c so large shared offsets never swallow log_m.
+        adj_rel[j] = dz + log_m + log_c;
     }
 
-    let max_a = adj.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    // Cancellation-free logsumexp(adj) - z_y: when target achieves max_a, compute ln_1p(sum_{j!=y} exp(a_j - zy)).
+    let max_a = adj_rel.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    // Cancellation-free logsumexp(adj_rel): when target achieves max_a (0.0), compute ln_1p(sum_{j!=y} exp(a_j)).
     let mut sum_other = 0.0f64;
     let mut exp_vals = vec![0.0f64; c];
     for j in 0..c {
-        if adj[j].is_finite() {
-            let e = (adj[j] - max_a).exp();
+        if adj_rel[j].is_finite() {
+            let e = (adj_rel[j] - max_a).exp();
             exp_vals[j] = e;
             if j != target {
                 sum_other += e;
@@ -142,7 +143,7 @@ pub(crate) fn seesaw_row_f64(
         }
     }
     let sum_all = exp_vals[target] + sum_other;
-    let loss = if max_a == zy { sum_other.ln_1p() } else { (max_a - zy) + sum_all.ln() };
+    let loss = if max_a == 0.0 { sum_other.ln_1p() } else { max_a + sum_all.ln() };
 
     // Cancellation-free gradient: sum_j dL/dz_j == 0 identically, so dL/dz_y = -sum_{j != y} dL/dz_j.
     let mut grad = vec![0.0f64; c];

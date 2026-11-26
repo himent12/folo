@@ -4,10 +4,13 @@
 //! For one image with `A` anchors across pyramid levels (`level_sizes` summing to `A`), `C` classes, and `G`
 //! ground-truth boxes:
 //!
-//! 1. **Per-level candidate pre-selection.** For each valid (positive-area) GT box `g` and each pyramid
-//!    level `l`, pick the top `min(topk, level_sizes[l])` anchors by descending `IoU(gt[g], anchor[a])`
-//!    (breaking ties by smaller squared center distance to `gt[g]`, then smaller anchor index), optionally
-//!    filtering by `anchor_iou >= min_anchor_iou`.
+//! 1. **Per-level candidate pre-selection (FOLO IoU-first variant).** For each valid (positive-area) GT box
+//!    `g` and each pyramid level `l`, pick the top `min(topk, level_sizes[l])` anchors by descending
+//!    `IoU(gt[g], anchor[a])` (breaking ties by smaller squared center distance to `gt[g]`, then smaller
+//!    anchor index), optionally filtering by `anchor_iou >= min_anchor_iou`. (Note: Kim & Lee's Procedure 1
+//!    first assigns anchors to their highest-IoU GT and ranks eligible anchors by joint prediction score;
+//!    FOLO's variant selects spatial candidates by anchor-to-GT IoU first so each GT's pool stays spatially
+//!    anchored before scoring.)
 //! 2. **Joint classification + regression anchor loss.** For each candidate `a in C_g`:
 //!    ```text
 //!    cls_loss(g, a) = softplus(-x[a, y_g]) + sum_{c != y_g} softplus(x[a, c])
@@ -158,17 +161,38 @@ fn log_add_exp(a: f64, b: f64) -> f64 {
     hi + (lo - hi).exp().ln_1p()
 }
 
+/// Exact responsibility `P(comp 0 | x)` with deterministic Mahalanobis fallback if both component
+/// log-densities underflow to `-inf`.
+#[inline]
+fn responsibility_0(x: f64, mu0: f64, var0: f64, lp0: f64, mu1: f64, var1: f64, lp1: f64) -> (f64, f64) {
+    let lse = log_add_exp(lp0, lp1);
+    if lse.is_finite() {
+        return (lse, (lp0 - lse).exp().clamp(0.0, 1.0));
+    }
+    let z0 = (x - mu0).abs() / var0.sqrt();
+    let z1 = (x - mu1).abs() / var1.sqrt();
+    let r0 = match z0.total_cmp(&z1) {
+        std::cmp::Ordering::Less => 1.0,
+        std::cmp::Ordering::Greater => 0.0,
+        std::cmp::Ordering::Equal => 0.5,
+    };
+    (lse, r0)
+}
+
 /// Fit a deterministic 2-component 1D Gaussian Mixture Model via EM on candidate anchor losses `scores`
 /// (lower score = more likely positive).
 ///
 /// Initialization follows PAA (Kim & Lee ECCV 2020 §3.2): component means start at `(min(scores), max(scores))`,
 /// mixing weights start at `(0.5, 0.5)`, and both variances start at `max(sample_var, var_floor)`.
+/// Moment accumulation is performed in centered/scaled coordinates `[0, 1]` to prevent overflow on large
+/// finite offsets; if the fitted variance or log-likelihood cannot be represented in `f64`, returns
+/// [`Error::Config`].
 ///
 /// # Edge cases
 /// - Empty `scores`: returns an empty, converged [`Gmm1dResult`].
 /// - Single score or constant scores (`max - min <= 1e-12`): marks all candidates positive without division by
 ///   zero.
-/// - Non-finite scores or invalid solver parameters return [`Error::Config`].
+/// - Non-finite scores, unrepresentable variance scale, or invalid solver parameters return [`Error::Config`].
 pub fn fit_gmm_1d_two_component(
     scores: &[f64],
     max_iters: usize,
@@ -230,7 +254,6 @@ pub fn fit_gmm_1d_two_component(
 
     let mut s_min = f64::INFINITY;
     let mut s_max = f64::NEG_INFINITY;
-    let mut sum = 0.0f64;
     for &x in scores {
         if x < s_min {
             s_min = x;
@@ -238,11 +261,37 @@ pub fn fit_gmm_1d_two_component(
         if x > s_max {
             s_max = x;
         }
-        sum += x;
     }
-    let mean_all = sum / n as f64;
-    if s_max - s_min <= 1e-12 {
-        let ll = scores.iter().map(|&x| log_gaussian_1d(x, mean_all, var_floor)).sum();
+    let spread = s_max - s_min;
+    if !spread.is_finite() {
+        return Err(Error::Config("fit_gmm_1d_two_component: score range overflows f64".into()));
+    }
+    if spread == 0.0 {
+        let ll = (n as f64) * log_gaussian_1d(s_min, s_min, var_floor);
+        if !ll.is_finite() {
+            return Err(Error::Config("fit_gmm_1d_two_component: log-likelihood overflows f64".into()));
+        }
+        return Ok(Gmm1dResult {
+            pos_mean: s_min,
+            neg_mean: s_min,
+            pos_var: var_floor,
+            neg_var: var_floor,
+            pos_weight: 0.5,
+            neg_weight: 0.5,
+            log_likelihood: ll,
+            iterations: 0,
+            converged: true,
+            positive_mask: vec![true; n],
+            pos_posteriors: vec![0.5; n],
+        });
+    }
+    let mean_offset = scores.iter().map(|&x| x - s_min).sum::<f64>() / n as f64;
+    let mean_all = s_min + mean_offset;
+    if spread <= 1e-12 {
+        let ll: f64 = scores.iter().map(|&x| log_gaussian_1d(x, mean_all, var_floor)).sum();
+        if !ll.is_finite() {
+            return Err(Error::Config("fit_gmm_1d_two_component: log-likelihood overflows f64".into()));
+        }
         return Ok(Gmm1dResult {
             pos_mean: mean_all,
             neg_mean: mean_all,
@@ -258,20 +307,32 @@ pub fn fit_gmm_1d_two_component(
         });
     }
 
-    let init_var = (scores
+    let spread_sq = spread * spread;
+    if !spread_sq.is_finite() || spread_sq == 0.0 {
+        return Err(Error::Config(
+            "fit_gmm_1d_two_component: score variance scale cannot be represented in f64".into(),
+        ));
+    }
+    // Work in normalized coordinates `u_i = (x_i - s_min) / spread in [0, 1]` so all intermediate moments
+    // stay strictly bounded and immune to large-offset cancellation or quadratic overflow.
+    let inv_spread = 1.0 / spread;
+    let u_scores: Vec<f64> = scores.iter().map(|&x| (x - s_min) * inv_spread).collect();
+    let var_floor_u = (var_floor / spread_sq).max(1e-15);
+    let u_mean = u_scores.iter().sum::<f64>() / n as f64;
+    let init_var_u = (u_scores
         .iter()
-        .map(|&x| {
-            let d = x - mean_all;
+        .map(|&u| {
+            let d = u - u_mean;
             d * d
         })
         .sum::<f64>()
         / n as f64)
-        .max(var_floor);
+        .max(var_floor_u);
 
-    let mut mu0 = s_min;
-    let mut mu1 = s_max;
-    let mut var0 = init_var;
-    let mut var1 = init_var;
+    let mut mu0 = 0.0f64;
+    let mut mu1 = 1.0f64;
+    let mut var0 = init_var_u;
+    let mut var1 = init_var_u;
     let mut w0 = 0.5f64;
     let mut w1 = 0.5f64;
 
@@ -281,82 +342,102 @@ pub fn fit_gmm_1d_two_component(
     let mut converged = false;
 
     const MIN_WEIGHT: f64 = 1e-6;
+    let ll_shift = (n as f64) * spread.ln();
 
     for iter in 1..=max_iters {
         iters = iter;
-        // E-step in log-space.
         let log_w0 = w0.ln();
         let log_w1 = w1.ln();
         let mut cur_ll = 0.0f64;
-        for (i, &x) in scores.iter().enumerate() {
-            let lp0 = log_w0 + log_gaussian_1d(x, mu0, var0);
-            let lp1 = log_w1 + log_gaussian_1d(x, mu1, var1);
-            let lse = log_add_exp(lp0, lp1);
+        for (i, &u) in u_scores.iter().enumerate() {
+            let lp0 = log_w0 + log_gaussian_1d(u, mu0, var0);
+            let lp1 = log_w1 + log_gaussian_1d(u, mu1, var1);
+            let (lse, r0) = responsibility_0(u, mu0, var0, lp0, mu1, var1, lp1);
             cur_ll += lse;
-            resp0[i] = (lp0 - lse).exp().clamp(0.0, 1.0);
+            resp0[i] = r0;
         }
-        let ll = cur_ll;
+        let ll = cur_ll - ll_shift;
 
-        // M-step.
+        // M-step in normalized coordinates.
         let mut n0 = 0.0f64;
         let mut n1 = 0.0f64;
-        let mut sx0 = 0.0f64;
-        let mut sx1 = 0.0f64;
-        for (&x, &r0) in scores.iter().zip(&resp0) {
+        let mut su0 = 0.0f64;
+        let mut su1 = 0.0f64;
+        for (&u, &r0) in u_scores.iter().zip(&resp0) {
             let r1 = 1.0 - r0;
             n0 += r0;
             n1 += r1;
-            sx0 += r0 * x;
-            sx1 += r1 * x;
+            su0 += r0 * u;
+            su1 += r1 * u;
         }
         if n0 > 1e-12 {
-            mu0 = sx0 / n0;
-            let mut sxx0 = 0.0f64;
-            for (&x, &r0) in scores.iter().zip(&resp0) {
-                let d = x - mu0;
-                sxx0 += r0 * d * d;
+            mu0 = su0 / n0;
+            let mut suu0 = 0.0f64;
+            for (&u, &r0) in u_scores.iter().zip(&resp0) {
+                let d = u - mu0;
+                suu0 += r0 * d * d;
             }
-            var0 = (sxx0 / n0).max(var_floor);
+            var0 = (suu0 / n0).max(var_floor_u);
         } else {
-            var0 = var_floor;
+            var0 = var_floor_u;
         }
         if n1 > 1e-12 {
-            mu1 = sx1 / n1;
-            let mut sxx1 = 0.0f64;
-            for (&x, &r0) in scores.iter().zip(&resp0) {
+            mu1 = su1 / n1;
+            let mut suu1 = 0.0f64;
+            for (&u, &r0) in u_scores.iter().zip(&resp0) {
                 let r1 = 1.0 - r0;
-                let d = x - mu1;
-                sxx1 += r1 * d * d;
+                let d = u - mu1;
+                suu1 += r1 * d * d;
             }
-            var1 = (sxx1 / n1).max(var_floor);
+            var1 = (suu1 / n1).max(var_floor_u);
         } else {
-            var1 = var_floor;
+            var1 = var_floor_u;
         }
         w0 = (n0 / n as f64).clamp(MIN_WEIGHT, 1.0 - MIN_WEIGHT);
         w1 = 1.0 - w0;
 
-        if iter > 1 && (ll - prev_ll).abs() <= tol {
+        if iter > 1 && ll.is_finite() && prev_ll.is_finite() && (ll - prev_ll).abs() <= tol {
             converged = true;
             break;
         }
         prev_ll = ll;
     }
 
-    // Recompute final responsibilities and log-likelihood at the converged M-step parameters, and canonicalize
-    // component 0 as the lower-loss (positive) component (`pos_mean <= neg_mean`).
-    let (pos_mean, neg_mean, pos_var, neg_var, pos_weight, neg_weight) =
-        if mu0 <= mu1 { (mu0, mu1, var0, var1, w0, w1) } else { (mu1, mu0, var1, var0, w1, w0) };
+    // Unscale back to original coordinates and canonicalize component 0 as lower-loss (`pos_mean <= neg_mean`).
+    let (mu0_raw, mu1_raw) = (s_min + spread * mu0, s_min + spread * mu1);
+    let (var0_raw, var1_raw) = ((var0 * spread_sq).max(var_floor), (var1 * spread_sq).max(var_floor));
+    let (
+        pos_mean,
+        neg_mean,
+        pos_var,
+        neg_var,
+        pos_weight,
+        neg_weight,
+        pos_mu_u,
+        neg_mu_u,
+        pos_var_u,
+        neg_var_u,
+    ) = if mu0_raw <= mu1_raw {
+        (mu0_raw, mu1_raw, var0_raw, var1_raw, w0, w1, mu0, mu1, var0, var1)
+    } else {
+        (mu1_raw, mu0_raw, var1_raw, var0_raw, w1, w0, mu1, mu0, var1, var0)
+    };
+    if !(pos_mean.is_finite() && neg_mean.is_finite() && pos_var.is_finite() && neg_var.is_finite()) {
+        return Err(Error::Config(
+            "fit_gmm_1d_two_component: fitted parameters cannot be represented in f64".into(),
+        ));
+    }
+
     let log_wp = pos_weight.ln();
     let log_wn = neg_weight.ln();
     let mut final_ll = 0.0f64;
     let mut pos_posteriors = Vec::with_capacity(n);
     let mut positive_mask = Vec::with_capacity(n);
-    for &x in scores {
-        let lp = log_wp + log_gaussian_1d(x, pos_mean, pos_var);
-        let ln_ = log_wn + log_gaussian_1d(x, neg_mean, neg_var);
-        let lse = log_add_exp(lp, ln_);
+    for (&x, &u) in scores.iter().zip(&u_scores) {
+        let lp = log_wp + log_gaussian_1d(u, pos_mu_u, pos_var_u);
+        let ln_ = log_wn + log_gaussian_1d(u, neg_mu_u, neg_var_u);
+        let (lse, post) = responsibility_0(u, pos_mu_u, pos_var_u, lp, neg_mu_u, neg_var_u, ln_);
         final_ll += lse;
-        let post = (lp - lse).exp().clamp(0.0, 1.0);
         pos_posteriors.push(post);
         let is_pos = if x <= pos_mean {
             true
@@ -366,6 +447,12 @@ pub fn fit_gmm_1d_two_component(
             post >= 0.5
         };
         positive_mask.push(is_pos);
+    }
+    final_ll -= ll_shift;
+    if !final_ll.is_finite() {
+        return Err(Error::Config(
+            "fit_gmm_1d_two_component: log-likelihood cannot be represented in f64".into(),
+        ));
     }
 
     Ok(Gmm1dResult {
