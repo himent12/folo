@@ -11,9 +11,9 @@ use crate::ui::*;
 
 use super::focus::REVEAL;
 use super::{
-    Back, Dismiss, FocusNext, FocusPrev, FoloApp, Forward, GoBenchmarks, GoDatasets, GoModels, GoOverview,
-    GoPlayground, GoRuns, GoSettings, NewRunAction, NextRegion, OpenImage, OpenPalette, PrevRegion, Route,
-    Submit, ToggleFullscreen, ToggleSidebar, ToggleTheme,
+    Back, Dismiss, FocusNext, FocusPrev, FoloApp, Forward, GoBenchmarks, GoDatasets, GoLabeling, GoModels,
+    GoOverview, GoPlayground, GoRuns, GoSettings, NewRunAction, NextRegion, OpenImage, OpenPalette,
+    PrevRegion, Route, Submit, ToggleFullscreen, ToggleSidebar, ToggleTheme,
 };
 
 // ---------- render ----------
@@ -164,6 +164,7 @@ impl Render for FoloApp {
             .on_action(
                 cx.listener(|this, _: &GoPlayground, w, cx| this.nav_shortcut(Route::Playground, w, cx)),
             )
+            .on_action(cx.listener(|this, _: &GoLabeling, w, cx| this.nav_shortcut(Route::LabelJobs, w, cx)))
             .on_action(cx.listener(|this, _: &GoSettings, w, cx| this.nav_shortcut(Route::Settings, w, cx)))
             .on_action(cx.listener(|this, _: &ToggleTheme, _, cx| this.toggle_theme(cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, w, cx| {
@@ -207,7 +208,9 @@ impl Render for FoloApp {
                     this.submit_synth(w, cx);
                 } else if !this.modal_open() && this.palette.is_none() {
                     // Not under the palette either: its Enter is the palette's.
-                    this.submit_bench_form(cx);
+                    if !this.submit_label_form(cx) {
+                        this.submit_bench_form(cx);
+                    }
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusNext, w, cx| {
@@ -324,6 +327,20 @@ impl Render for FoloApp {
                         }
                         _ => return,
                     }
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                if let Route::LabelJob(job_id) = this.route.clone()
+                    && !this.modal_open()
+                    && this.palette.is_none()
+                    && this.menu_open.is_none()
+                    && this.label.new_job.is_none()
+                    && this.label.add_folder.is_none()
+                    && this.label.export_ds.is_none()
+                    && !(m.control || m.alt || m.platform)
+                    && this.handle_label_review_key(&job_id, ev.keystroke.key.as_str(), cx)
+                {
                     cx.stop_propagation();
                     cx.notify();
                 }

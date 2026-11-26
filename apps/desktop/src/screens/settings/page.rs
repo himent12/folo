@@ -20,13 +20,14 @@ use crate::ui::*;
 pub(super) const COLUMN_MAX: f32 = 880.;
 
 /// Settings › Keyboard's "Go to" column: every page shortcut `app::bind_keys` binds.
-const GO_TO_KEYS: [(&str, &[&str]); 9] = [
+const GO_TO_KEYS: [(&str, &[&str]); 10] = [
     ("Overview", &["Ctrl", "1"]),
     ("Datasets", &["Ctrl", "2"]),
     ("Runs", &["Ctrl", "3"]),
     ("Models", &["Ctrl", "4"]),
     ("Benchmarks", &["Ctrl", "5"]),
     ("Playground", &["Ctrl", "6"]),
+    ("Labeling", &["Ctrl", "7"]),
     ("Settings", &["Ctrl", "Comma"]),
     // Sidebar, search, page.
     ("Next region", &["F6"]),
@@ -285,7 +286,7 @@ impl FoloApp {
             ))
             .child(row(
                 "FOLO Studio",
-                help("Web UI served by `folo serve` for browser-only workflows like agent labeling and run comparison."),
+                help("Web UI served by `folo serve` for browser access and run comparison."),
                 studio_controls,
             ));
 

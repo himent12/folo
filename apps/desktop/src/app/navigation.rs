@@ -6,7 +6,85 @@ use folo_ui::{Context, Window, px};
 use crate::store::*;
 use crate::ui::Tone;
 
-use super::{FoloApp, Route};
+use super::FoloApp;
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Route {
+    Overview,
+    Datasets,
+    Dataset(String),
+    Runs,
+    Run(String),
+    Models,
+    Model(String),
+    /// Vision benchmarks (servers with `vision_bench`).
+    Benches,
+    Bench(String),
+    /// An entry of a benchmark: (benchmark, entry).
+    BenchEntry(String, String),
+    Playground,
+    /// Agent labeling jobs (servers with `agent_labeling`).
+    LabelJobs,
+    LabelJob(String),
+    Settings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Section {
+    Overview,
+    Datasets,
+    Runs,
+    Models,
+    Benchmarks,
+    Playground,
+    Labeling,
+    Settings,
+}
+
+impl Route {
+    /// `overview`, `datasets`, `dataset:ID`, `runs`, `run:ID`, `models`, `model:ID`, `benchmarks`, `bench:ID`,
+    /// `bench-entry:ID/ENTRY`, `playground`, `labeling`, `label:ID`, `settings`.
+    pub fn parse(s: &str) -> Option<Route> {
+        let valid_id = |v: &str| !v.trim().is_empty();
+        let (kind, id) = s.split_once(':').map_or((s, None), |(k, i)| (k, Some(i)));
+        Some(match (kind, id) {
+            ("overview", None) => Route::Overview,
+            ("datasets", None) => Route::Datasets,
+            ("dataset", Some(id)) if valid_id(id) => Route::Dataset(id.to_string()),
+            ("runs", None) => Route::Runs,
+            ("run", Some(id)) if valid_id(id) => Route::Run(id.to_string()),
+            ("models", None) => Route::Models,
+            ("model", Some(id)) if valid_id(id) => Route::Model(id.to_string()),
+            ("benchmarks" | "benches", None) => Route::Benches,
+            ("bench", Some(id)) if valid_id(id) => Route::Bench(id.to_string()),
+            ("bench-entry", Some(id)) => {
+                let (b, e) = id.split_once('/')?;
+                if !valid_id(b) || !valid_id(e) || e.contains('/') {
+                    return None;
+                }
+                Route::BenchEntry(b.to_string(), e.to_string())
+            }
+            ("playground", None) => Route::Playground,
+            ("labeling" | "label", None) => Route::LabelJobs,
+            ("label", Some(id)) if valid_id(id) => Route::LabelJob(id.to_string()),
+            ("settings", None) => Route::Settings,
+            _ => return None,
+        })
+    }
+
+    pub fn section(&self) -> Section {
+        match self {
+            Route::Overview => Section::Overview,
+            Route::Datasets | Route::Dataset(_) => Section::Datasets,
+            Route::Runs | Route::Run(_) => Section::Runs,
+            Route::Models | Route::Model(_) => Section::Models,
+            Route::Benches | Route::Bench(_) | Route::BenchEntry(..) => Section::Benchmarks,
+            Route::Playground => Section::Playground,
+            Route::LabelJobs | Route::LabelJob(_) => Section::Labeling,
+            Route::Settings => Section::Settings,
+        }
+    }
+}
 
 /// The list to open instead of `route` when it is the page of something in `deleted`, with that
 /// thing's name.
@@ -74,6 +152,7 @@ impl FoloApp {
             Route::BenchEntry(b, e) => {
                 self.bench.removed.contains_key(b) || self.bench.removed.contains_key(e)
             }
+            Route::LabelJob(id) => self.label.removed.contains(id),
             _ => false,
         }
     }
@@ -125,6 +204,7 @@ impl FoloApp {
             Route::Model(_) => Some(Route::Models),
             Route::Bench(_) => Some(Route::Benches),
             Route::BenchEntry(b, _) => Some(Route::Bench(b.clone())),
+            Route::LabelJob(_) => Some(Route::LabelJobs),
             _ => None,
         }
     }
@@ -139,6 +219,7 @@ impl FoloApp {
             self.reload_cloud();
         }
         self.after_bench_navigate();
+        self.after_label_navigate();
         if let Route::Dataset(id) = &self.route
             && self.ds_img_dataset.as_deref() != Some(id.as_str())
         {

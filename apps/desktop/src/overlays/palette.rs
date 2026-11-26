@@ -113,13 +113,14 @@ impl FoloApp {
     /// Every command; `shown` is the theme on screen (its command says so).
     fn palette_items(&self, shown: crate::theme::ThemeId) -> Vec<PaletteItem> {
         let mut items = Vec::new();
-        let nav: [(&str, &'static str, Route, &'static [&'static str]); 7] = [
+        let nav: [(&str, &'static str, Route, &'static [&'static str]); 8] = [
             ("Overview", "icons/layout-dashboard.svg", Route::Overview, &["Ctrl", "1"]),
             ("Datasets", "icons/images.svg", Route::Datasets, &["Ctrl", "2"]),
             ("Runs", "icons/activity.svg", Route::Runs, &["Ctrl", "3"]),
             ("Models", "icons/box.svg", Route::Models, &["Ctrl", "4"]),
             ("Benchmarks", "icons/target.svg", Route::Benches, &["Ctrl", "5"]),
             ("Playground", "icons/scan-eye.svg", Route::Playground, &["Ctrl", "6"]),
+            ("Labeling", "icons/sparkles.svg", Route::LabelJobs, &["Ctrl", "7"]),
             ("Settings", "icons/settings.svg", Route::Settings, &["Ctrl", ","]),
         ];
         items.push(PaletteItem {
@@ -130,6 +131,19 @@ impl FoloApp {
             keys: &["Ctrl", "N"],
             action: act(|this, w, cx| this.open_new_run(None, w, cx)),
         });
+        if self.label_on() {
+            items.push(PaletteItem {
+                group: "Actions",
+                icon: "icons/sparkles.svg",
+                title: "New labeling job".into(),
+                detail: "Agent labeling".into(),
+                keys: &[],
+                action: act(|this, w, cx| {
+                    this.navigate(Route::LabelJobs, w, cx);
+                    this.open_new_label_job(w, cx);
+                }),
+            });
+        }
         items.push(PaletteItem {
             group: "Actions",
             icon: "icons/image-up.svg",
@@ -287,6 +301,25 @@ impl FoloApp {
                 });
             }
         }
+        if let Some(jobs) = self.label.jobs.ready() {
+            for j in jobs {
+                let id = j.id.clone();
+                let detail = format!(
+                    "{} / {} labeled · {}",
+                    int(j.counts.labeled),
+                    int(j.counts.images),
+                    j.classes.join(", ")
+                );
+                items.push(PaletteItem {
+                    group: "Labeling",
+                    icon: "icons/sparkles.svg",
+                    title: j.name.clone(),
+                    detail,
+                    keys: &[],
+                    action: act(move |this, w, cx| this.navigate(Route::LabelJob(id.clone()), w, cx)),
+                });
+            }
+        }
         // One command per theme (custom ones too), as Settings' selects pick them: the theme becomes
         // its mode's, and the mode switches to it unless it is System. Last, and for a query only
         // (`filtered_palette`): "theme" finds them.
@@ -324,8 +357,9 @@ impl FoloApp {
     }
 
     pub(super) fn palette_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        // Trigger benchmark loading if `/system` reported `vision_bench` after the palette opened.
+        // Trigger benchmark & labeling loading if `/system` reported features after the palette opened.
         self.ensure_benches(cx);
+        self.ensure_label_jobs(cx);
         let t = theme(cx);
         let items = self.filtered_palette(t.id);
         let n = items.len();

@@ -20,6 +20,8 @@ mod forms;
 #[cfg(test)]
 mod image_tests;
 #[cfg(test)]
+mod label_tests;
+#[cfg(test)]
 mod list_filter_tests;
 #[cfg(test)]
 mod list_tests;
@@ -83,6 +85,7 @@ pub use forms::{
     ARCHS, BATCHES, IMGSZ, NewRunForm, SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, device_label, format_lr,
     gpu_index, retry_batch, synth_errors,
 };
+pub use navigation::{Route, Section};
 pub use playground::{IMAGE_FORMATS, PLAY_CONF_FLOOR};
 pub use preferences::{follow_system_appearance, is_dark};
 pub use sidebar::logo;
@@ -98,6 +101,7 @@ actions!(
         GoModels,
         GoBenchmarks,
         GoPlayground,
+        GoLabeling,
         GoSettings,
         ToggleTheme,
         ToggleSidebar,
@@ -125,6 +129,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-4", GoModels, None),
         KeyBinding::new("ctrl-5", GoBenchmarks, None),
         KeyBinding::new("ctrl-6", GoPlayground, None),
+        KeyBinding::new("ctrl-7", GoLabeling, None),
         KeyBinding::new("ctrl-,", GoSettings, None),
         KeyBinding::new("ctrl-b", ToggleSidebar, None),
         KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
@@ -140,77 +145,6 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-f6", PrevRegion, None),
         KeyBinding::new("ctrl-enter", Submit, None),
     ]);
-}
-
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum Route {
-    Overview,
-    Datasets,
-    Dataset(String),
-    Runs,
-    Run(String),
-    Models,
-    Model(String),
-    /// Vision benchmarks (servers with `vision_bench`).
-    Benches,
-    Bench(String),
-    /// An entry of a benchmark: (benchmark, entry).
-    BenchEntry(String, String),
-    Playground,
-    Settings,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Section {
-    Overview,
-    Datasets,
-    Runs,
-    Models,
-    Benchmarks,
-    Playground,
-    Settings,
-}
-
-impl Route {
-    /// `overview`, `datasets`, `dataset:ID`, `runs`, `run:ID`, `models`, `model:ID`, `benchmarks`, `bench:ID`,
-    /// `bench-entry:ID/ENTRY`, `playground`, `settings`.
-    pub fn parse(s: &str) -> Option<Route> {
-        let valid_id = |v: &str| !v.trim().is_empty();
-        let (kind, id) = s.split_once(':').map_or((s, None), |(k, i)| (k, Some(i)));
-        Some(match (kind, id) {
-            ("overview", None) => Route::Overview,
-            ("datasets", None) => Route::Datasets,
-            ("dataset", Some(id)) if valid_id(id) => Route::Dataset(id.to_string()),
-            ("runs", None) => Route::Runs,
-            ("run", Some(id)) if valid_id(id) => Route::Run(id.to_string()),
-            ("models", None) => Route::Models,
-            ("model", Some(id)) if valid_id(id) => Route::Model(id.to_string()),
-            ("benchmarks" | "benches", None) => Route::Benches,
-            ("bench", Some(id)) if valid_id(id) => Route::Bench(id.to_string()),
-            ("bench-entry", Some(id)) => {
-                let (b, e) = id.split_once('/')?;
-                if !valid_id(b) || !valid_id(e) || e.contains('/') {
-                    return None;
-                }
-                Route::BenchEntry(b.to_string(), e.to_string())
-            }
-            ("playground", None) => Route::Playground,
-            ("settings", None) => Route::Settings,
-            _ => return None,
-        })
-    }
-
-    pub fn section(&self) -> Section {
-        match self {
-            Route::Overview => Section::Overview,
-            Route::Datasets | Route::Dataset(_) => Section::Datasets,
-            Route::Runs | Route::Run(_) => Section::Runs,
-            Route::Models | Route::Model(_) => Section::Models,
-            Route::Benches | Route::Bench(_) | Route::BenchEntry(..) => Section::Benchmarks,
-            Route::Playground => Section::Playground,
-            Route::Settings => Section::Settings,
-        }
-    }
 }
 
 pub type Action = Rc<dyn Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>)>;
@@ -486,6 +420,8 @@ pub struct FoloApp {
     pub model_search: Entity<TextInput>,
     /// Live search input on the Benchmarks list (matches name, source, leader, or id).
     pub bench_search: Entity<TextInput>,
+    /// Live search input on the Agent Labeling job list (matches name, class, source, or id).
+    pub label_search: Entity<TextInput>,
     /// Models whose full class list is expanded in the Details panel.
     pub model_classes_expanded: std::collections::HashSet<String>,
     pub export_open: bool,
@@ -647,6 +583,8 @@ pub struct FoloApp {
     pub cloud: crate::cloud::CloudState,
     /// Vision benchmarks: lists, leaderboards, results, the open benchmark's stream (`vision_bench`).
     pub bench: crate::bench::BenchState,
+    /// Agent labeling: jobs, images, review controls, and the open job's live stream (`agent_labeling`).
+    pub label: crate::label::LabelState,
     /// A page to open on the next render (set where no window is at hand, e.g. after a request).
     pub route_pending: Option<Route>,
     /// Runs, models and datasets deleted lately, by id, with their names: a link to one left behind
@@ -761,6 +699,9 @@ impl FoloApp {
         let bench_search = cx.new(|cx| TextInput::new("Search benchmarks", cx));
         let bench_search_sub =
             cx.subscribe(&bench_search, |_, _, _: &crate::input::InputEvent, cx| cx.notify());
+        let label_search = cx.new(|cx| TextInput::new("Filter by name or class", cx));
+        let label_search_sub =
+            cx.subscribe(&label_search, |_, _, _: &crate::input::InputEvent, cx| cx.notify());
         let log_search = cx.new(|cx| TextInput::new("Search logs", cx));
         let log_search_sub = cx.subscribe(&log_search, |this, _, _: &crate::input::InputEvent, cx| {
             this.log_follow = true;
@@ -854,6 +795,7 @@ impl FoloApp {
             models_arch_filter: None,
             model_search,
             bench_search,
+            label_search,
             model_classes_expanded: Default::default(),
             export_open: false,
             exporting: Default::default(),
@@ -938,6 +880,7 @@ impl FoloApp {
             throughput: Load::Idle,
             cloud: Default::default(),
             bench: Default::default(),
+            label: Default::default(),
             route_pending: None,
             deleted: Default::default(),
             tp_view: 0,
@@ -984,6 +927,7 @@ impl FoloApp {
                 run_search_sub,
                 model_search_sub,
                 bench_search_sub,
+                label_search_sub,
                 log_search_sub,
             ],
         };

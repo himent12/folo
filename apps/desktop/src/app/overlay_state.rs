@@ -117,6 +117,7 @@ impl FoloApp {
         }
         self.remember_focus(window, cx);
         self.ensure_benches(cx);
+        self.ensure_label_jobs(cx);
         let input =
             cx.new(|cx| TextInput::new("Search runs, models, datasets, benchmarks and commands…", cx));
         let sub = cx.subscribe(&input, |this: &mut Self, _, ev: &InputEvent, cx| {
@@ -376,6 +377,8 @@ impl FoloApp {
             self.close_synth(window, cx);
         } else if self.inspector.is_some() {
             self.close_inspector(window, cx);
+        } else if self.dismiss_label_form(window, cx) {
+            // An Agent Labeling form (or a delete's second click) closed; the page stays.
         } else if self.dismiss_bench_form(window, cx) {
             // A Benchmarks form (or a delete's second click) closed; the page stays.
         } else if let Some(p) = self.parent_route() {

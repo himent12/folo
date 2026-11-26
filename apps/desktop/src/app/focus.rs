@@ -125,6 +125,7 @@ impl FoloApp {
                 Section::Models => "Models",
                 Section::Benchmarks => "Benchmarks",
                 Section::Playground => "Playground",
+                Section::Labeling => "Labeling",
                 Section::Settings => "Settings",
             }
         );

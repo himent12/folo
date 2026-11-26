@@ -875,6 +875,80 @@ impl Backend for MockBackend {
 
     fn label_jobs(&self) -> ApiResult<Vec<LabelJob>> {
         self.check()?;
+        if self.empty && self.benches.enabled {
+            return Ok(Vec::new());
+        }
         self.benches.jobs(&self.datasets, &self.models)
+    }
+
+    fn create_label_job(&self, req: &CreateLabelJob) -> ApiResult<LabelJob> {
+        self.check()?;
+        self.benches.create_label_job(req, &self.datasets, &self.models)
+    }
+
+    fn delete_label_job(&self, id: &str) -> ApiResult<()> {
+        self.check()?;
+        self.benches.delete_label_job(id, &self.datasets, &self.models)
+    }
+
+    fn import_label_images(&self, id: &str, req: &ImportLabelImages) -> ApiResult<LabelImagesAdded> {
+        self.check()?;
+        self.benches.import_label_images(id, req, &self.datasets, &self.models)
+    }
+
+    fn label_images(&self, id: &str, offset: u32, limit: u32) -> ApiResult<LabelImagePage> {
+        self.check()?;
+        self.benches.label_images(id, offset, limit, &self.datasets, &self.models)
+    }
+
+    fn label_image(&self, job_id: &str, image_id: &str, thumb: Option<u32>) -> ApiResult<ImageData> {
+        self.check()?;
+        self.pixels_check()?;
+        self.benches.label_image_pixels(job_id, image_id, thumb, &self.datasets, &self.models)
+    }
+
+    fn update_label_image(
+        &self,
+        job_id: &str,
+        image_id: &str,
+        req: &UpdateLabelImage,
+    ) -> ApiResult<LabelImage> {
+        self.check()?;
+        self.benches.update_label_image(job_id, image_id, req, &self.datasets, &self.models)
+    }
+
+    fn delete_label_image(&self, job_id: &str, image_id: &str) -> ApiResult<()> {
+        self.check()?;
+        self.benches.delete_label_image(job_id, image_id, &self.datasets, &self.models)
+    }
+
+    fn start_labeling(&self, id: &str, req: &StartLabeling) -> ApiResult<LabelJob> {
+        self.check()?;
+        self.benches.start_labeling(id, req, &self.datasets, &self.models)
+    }
+
+    fn stop_labeling(&self, id: &str) -> ApiResult<LabelJob> {
+        self.check()?;
+        self.benches.stop_labeling(id, &self.datasets, &self.models)
+    }
+
+    fn label_logs(&self, id: &str) -> ApiResult<RunLogs> {
+        self.check()?;
+        self.benches.label_logs(id, &self.datasets, &self.models)
+    }
+
+    fn label_events(&self, id: &str) -> ApiResult<LabelSubscription> {
+        self.check()?;
+        crate::api::mock_bench::MockBench::label_events(
+            self.benches.clone(),
+            id,
+            self.datasets.clone(),
+            self.models.clone(),
+        )
+    }
+
+    fn create_label_dataset(&self, id: &str, req: &LabelDatasetRequest) -> ApiResult<Dataset> {
+        self.check()?;
+        self.benches.create_label_dataset(id, req, &self.datasets, &self.models)
     }
 }

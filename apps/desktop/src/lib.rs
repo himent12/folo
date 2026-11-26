@@ -31,6 +31,7 @@ mod charts;
 mod cloud;
 mod controls;
 mod input;
+mod label;
 mod local;
 mod overlays;
 mod scenario;
@@ -94,7 +95,7 @@ Options:
   --mock                Use the built-in demo data
   --open SCREEN         Start on a screen: overview, datasets, dataset:ID, runs, run:ID, models,
                         model:ID, benchmarks, bench:ID, bench-entry:ID/ENTRY, playground,
-                        settings, or new-run (the dialog)
+                        labeling, label:ID, settings, or new-run (the dialog)
   --theme MODE|THEME    The mode (dark, light or system), or a theme: dark, midnight, dim,
                         contrast-dark, light, paper, contrast-light, or a custom theme's id
                         (midnight: mode dark with Midnight) [default: the last one, else dark]
@@ -557,6 +558,8 @@ mod tests {
             "bench:ID",
             "bench-entry:ID/ENTRY",
             "playground",
+            "labeling",
+            "label:ID",
             "settings",
         ] {
             assert!(app::Route::parse(target).is_some(), "{target}");
@@ -654,6 +657,8 @@ mod tests {
             "run:",
             "model:",
             "bench:",
+            "label:",
+            "label:   ",
             "bench-entry:",
             "bench-entry:abc",
             "bench-entry:abc/",

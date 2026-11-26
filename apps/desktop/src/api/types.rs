@@ -25,10 +25,12 @@ pub use folo_api::{
     BenchImagePage, BenchLabelPoint, BenchLabels, BenchList, BenchLocalization, BenchLoop, BenchLoopList,
     BenchLoopPhase, BenchLoopStatus, BenchLoopVerdict, BenchPlan, BenchPlanCondition, BenchPrediction,
     BenchProgress, BenchReadiness, BenchRemoved, BenchResult, BenchRobustness, BenchSelfLabeling,
-    BenchSeverityPoint, BenchSource, BenchSpeed, BenchStudent, CreateBench, DesignBench,
-    FEATURE_AGENT_LABELING, FEATURE_VISION_BENCH, LabelAgent, LabelAgentId, LabelAgentList, LabelCounts,
-    LabelEffort, LabelJob, LabelJobList, LabelJobStatus, LabelModel, LabelUsage, StartBenchEntry,
-    StartBenchLoop, UpdateBench,
+    BenchSeverityPoint, BenchSource, BenchSpeed, BenchStudent, CreateBench, CreateLabelJob, DesignBench,
+    FEATURE_AGENT_LABELING, FEATURE_VISION_BENCH, ImportLabelImages, LabelAgent, LabelAgentId,
+    LabelAgentList, LabelCounts, LabelDatasetRequest, LabelEffort, LabelEvent, LabelImage, LabelImagePage,
+    LabelImageStatus, LabelImagesAdded, LabelJob, LabelJobList, LabelJobStatus, LabelModel, LabelOutcome,
+    LabelRun, LabelScope, LabelSource, LabelUsage, StartBenchEntry, StartBenchLoop, StartLabeling,
+    UpdateBench, UpdateLabelImage, label_box_revision,
 };
 pub use folo_api::{
     CloudAvailability, CloudConnection, CloudConnectionStatus, CloudField, CloudInstance,

@@ -223,6 +223,9 @@ impl FoloApp {
                         if this.bench_pump(tick, cx) {
                             changed = true;
                         }
+                        if this.label_pump(tick, cx) {
+                            changed = true;
+                        }
                         if tick.is_multiple_of(20) {
                             this.refresh_system(cx);
                             this.ensure_core(cx);
