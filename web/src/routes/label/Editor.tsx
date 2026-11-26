@@ -152,6 +152,7 @@ export default function Editor(props: EditorProps) {
       base.set(cur.boxes);
       draft.set(cur.boxes);
       selected.set(null);
+      hovered.set(null);
       note.set('');
       asked.set(null);
       status.clear();
@@ -162,6 +163,7 @@ export default function Editor(props: EditorProps) {
         base.set(cur.boxes);
         draft.set(cur.boxes);
         selected.set(null);
+        hovered.set(null);
         untrack(forget);
       } else if (!saving.get()) {
         // Not this editor's own save on its way (its answer sets `base`): someone else's.
@@ -216,9 +218,28 @@ export default function Editor(props: EditorProps) {
   function removeBox() {
     const s = selected.peek();
     if (s === null || locked.peek()) return;
+    const root = body.peek();
+    const active = document.activeElement;
+    const restoreFocus =
+      active instanceof Node &&
+      !!(root?.querySelector('.boxes')?.contains(active) || root?.querySelector('.sel')?.contains(active));
     edit(draft.peek().filter((_, i) => i !== s));
     selected.set(null);
+    if (restoreFocus) {
+      queueMicrotask(() => {
+        const cur = body.peek();
+        const btns = [...(cur?.querySelectorAll<HTMLButtonElement>('.boxes button') ?? [])];
+        const next = btns[Math.min(s, btns.length - 1)] ?? cur?.querySelector<HTMLButtonElement>('[data-add-box]') ?? cur?.closest('dialog');
+        if (next && !(next instanceof HTMLButtonElement && next.disabled)) next.focus();
+      });
+    }
   }
+  // Keep the selected box visible in the scrollable side list when picked on canvas or added at the end.
+  effect(() => {
+    const s = selected.get();
+    if (s === null) return;
+    queueMicrotask(() => body.peek()?.querySelectorAll<HTMLButtonElement>('.boxes button')[s]?.scrollIntoView?.({ block: 'nearest' }));
+  });
   /** Add box: a box of the class used last in the middle of the image, selected (the keyboard's way to draw one). */
   function addBox() {
     const cur = img.peek();
@@ -645,7 +666,7 @@ export default function Editor(props: EditorProps) {
                     <span class:off={!canRedo.get() || !!locked.get()} use:tooltip={redoTip.get()}>
                       <Button variant="ghost" size="sm" icon={Redo} aria-label="Redo" disabled={!canRedo.get() || !!locked.get()} onclick={() => undo(true)} />
                     </span>
-                    <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} onclick={addBox}>
+                    <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} data-add-box onclick={addBox}>
                       Add box
                     </Button>
                   </span>

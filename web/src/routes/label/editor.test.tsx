@@ -313,6 +313,72 @@ describe('the labeling editor: keys', () => {
     expect(editor()!.open).toBe(true);
     expect(key('Escape').defaultPrevented).toBe(false);
   });
+
+  it('restores keyboard focus when deleting a box from the side list or Delete box button, and scrolls newly selected boxes into view', async () => {
+    await openEditor('1');
+    const scrollSpy = vi.fn();
+    HTMLElement.prototype.scrollIntoView = scrollSpy;
+    click(inEditor('Add box'));
+    click(inEditor('Add box'));
+    await Promise.resolve();
+    expect(scrollSpy).toHaveBeenCalledWith({ block: 'nearest' });
+    expect(boxCount()).toBe(2);
+
+    // Click Delete box while focused inside `.sel`: focus moves to the remaining box button in `.boxes`.
+    const delBtn = inEditor('Delete box')!;
+    delBtn.focus();
+    click(delBtn);
+    await Promise.resolve();
+    expect(boxCount()).toBe(1);
+    const remaining = editor()!.querySelector<HTMLButtonElement>('.boxes button')!;
+    expect(document.activeElement).toBe(remaining);
+
+    // Select that last box and press Delete while focused on its row button: focus moves to Add box.
+    click(remaining);
+    remaining.focus();
+    key('Delete', {}, remaining);
+    await Promise.resolve();
+    expect(boxCount()).toBe(0);
+    expect(document.activeElement).toBe(editor()!.querySelector<HTMLButtonElement>('[data-add-box]'));
+  });
+
+  it('clears hovered box highlight when stepping to another image', async () => {
+    const cw = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    const ch = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight');
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 400 });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => 300 });
+    vi.spyOn(hub.api, 'labelImageUrl').mockResolvedValue('data:,a');
+    try {
+      await openEditor('1', 'lb_51d0');
+      const loadCanvasImg = async () => {
+        await vi.waitFor(() => {
+          flushSync();
+          const im = editor()!.querySelector('.canvas img');
+          if (!im) throw new Error('no image yet');
+          im.dispatchEvent(new Event('load'));
+          flushSync();
+          if (!editor()!.querySelector('.canvas .box')) throw new Error('no boxes yet');
+        });
+      };
+      await loadCanvasImg();
+      const firstBoxBtn = editor()!.querySelector<HTMLButtonElement>('.boxes button')!;
+      expect(firstBoxBtn).not.toBeNull();
+      firstBoxBtn.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'mouse', bubbles: true }));
+      flushSync();
+      expect(editor()!.querySelector('.canvas .box.active')).not.toBeNull();
+
+      key('j');
+      await vi.waitFor(() => {
+        flushSync();
+        expect(router.route.query.get('image')).toBe('2');
+      });
+      await loadCanvasImg();
+      expect(editor()!.querySelector('.canvas .box.active')).toBeNull();
+    } finally {
+      if (cw) Object.defineProperty(HTMLElement.prototype, 'clientWidth', cw);
+      if (ch) Object.defineProperty(HTMLElement.prototype, 'clientHeight', ch);
+    }
+  });
 });
 
 describe('the labeling editor: undo and redo (studio-label F4)', () => {

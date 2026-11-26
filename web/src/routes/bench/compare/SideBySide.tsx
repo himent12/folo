@@ -2,10 +2,11 @@
  * Side-by-side comparison table (desktop/tablet) and stacked entry-by-entry list (phones) for BenchCompare:
  * scores and five axes against the first entry (the baseline), with "Make baseline" swaps and best-in-row highlights.
  */
-import { computed, css, For, Index } from 'fw';
+import { computed, createUniqueId, css, For, Index } from 'fw';
 import type { BenchEntry } from '$lib/api/types';
 import NoValue from '$lib/ui/NoValue';
 import Panel from '$lib/ui/Panel';
+import Select from '$lib/ui/Select';
 import { diffAsPrinted } from '../charts';
 import type { Row } from './state';
 
@@ -21,6 +22,7 @@ export interface SideBySideProps {
 }
 
 export default function SideBySide(props: SideBySideProps) {
+  const baseId = `${createUniqueId()}-base`;
   let tableEl: HTMLTableElement | undefined;
   /** A value's difference from the baseline's, unless either is graded on an earlier version. */
   const diffOf = (row: () => Row, v: () => number, i: number) =>
@@ -123,7 +125,23 @@ export default function SideBySide(props: SideBySideProps) {
           </tbody>
         </table>
       </div>
-      {/* Phones: one block per measure, each entry's value (and its difference from the baseline) in a 2 × 2 grid. */}
+      {/* Phones: baseline picker + one block per measure, each entry's value (and its difference from the baseline) in a 2 × 2 grid. */}
+      {props.shown.length >= 2 ? (
+        <div class="sbs-base">
+          <label class="sbs-base-lbl" for={baseId}>
+            Baseline
+          </label>
+          <Select
+            id={baseId}
+            size="sm"
+            value={props.shown[0]!.id}
+            options={props.shown.map((e) => ({ value: e.id, label: e.name }))}
+            onchange={(eid) => {
+              if (eid && eid !== props.shown[0]?.id) props.makeBaseline(eid);
+            }}
+          />
+        </div>
+      ) : null}
       <ul class="sbs" aria-label="Scores and axes, entry by entry">
         <For each={props.rows} key={(r) => r.key}>
           {(row) => {
@@ -216,7 +234,8 @@ css`
     color: var(--text-tertiary);
     text-align: right;
   }
-  .sbs {
+  .sbs,
+  .sbs-base {
     display: none;
   }
   /* Narrower columns: the difference under its value. */
@@ -230,6 +249,22 @@ css`
   @media (max-width: 767px) {
     .scroll:has(.cmp) {
       display: none;
+    }
+    .sbs-base {
+      display: flex;
+      align-items: center;
+      gap: var(--space-3);
+      padding: var(--space-3) var(--space-4);
+      border-bottom: 1px solid var(--line-subtle);
+    }
+    .sbs-base-lbl {
+      flex-shrink: 0;
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
+      color: var(--text-secondary);
+    }
+    .sbs-base :global(.select) {
+      flex: 1;
     }
     .sbs {
       display: grid;
