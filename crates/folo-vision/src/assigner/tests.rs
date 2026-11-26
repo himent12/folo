@@ -166,6 +166,27 @@ fn conflict_resolution_lowest_cost_and_deterministic_tie_break() {
     .unwrap();
     assert_eq!(tie_asg.num_fg, 1);
     assert_eq!(tie_asg.target_gt[0], 0);
+
+    // Three-GT contesting-only conflict resolution regression: GT 0 and GT 1 both select anchor 0 (k = 1 each)
+    // while GT 2 selects anchor 1 (k = 1). Even though GT 2 has a slightly lower cost at anchor 0 than GT 0/1,
+    // GT 2 did not select anchor 0, so conflict resolution stays strictly among contesting GTs (GT 0 wins tie).
+    let gts3 =
+        [Xyxy::new(0.0, 0.0, 10.0, 10.0), Xyxy::new(0.0, 0.0, 10.0, 10.0), Xyxy::new(2.0, 0.0, 12.0, 10.0)];
+    let preds3 = [Xyxy::new(1.5, 0.0, 11.5, 10.0), Xyxy::new(2.0, 0.0, 12.0, 10.0)];
+    let pts3 = [[5.0, 5.0], [6.0, 5.0]];
+    let asg3 = assign_simota(
+        &[1.0, 1.0],
+        1,
+        &preds3,
+        &pts3,
+        &[4.0, 4.0],
+        &gts3,
+        &[0, 0, 0],
+        &SimOtaConfig { max_k: Some(1), ..SimOtaConfig::default() },
+    )
+    .unwrap();
+    assert_eq!(asg3.fg_mask, vec![true, true]);
+    assert_eq!(asg3.target_gt, vec![0, 2]);
 }
 
 /// Edge cases: 0 GTs, 0 anchors, degenerate GT & predicted boxes, non-finite inputs, extreme logits,
@@ -211,7 +232,7 @@ fn edge_cases_degenerate_non_finite_and_vfl_qfl_pipeline() {
     assert_eq!(asg_deg.target_ious[0], 0.0);
     assert!(asg_deg.matched_costs[0].is_finite());
 
-    // 4. Extreme logits ±50 stay finite and match properly.
+    // 4. Extreme logits ±50 and ±f32::MAX stay finite in f64 matched_costs and match properly.
     let asg_ext = assign_simota(
         &[-50.0, 50.0],
         2,
@@ -224,6 +245,20 @@ fn edge_cases_degenerate_non_finite_and_vfl_qfl_pipeline() {
     )
     .unwrap();
     assert!(asg_ext.inputs_finite && asg_ext.num_fg == 1 && asg_ext.matched_costs[0].is_finite());
+
+    let asg_max = assign_simota(
+        &[-f32::MAX, f32::MAX],
+        2,
+        &[Xyxy::new(0.0, 0.0, 20.0, 20.0)],
+        &[[10.0, 10.0]],
+        &[8.0],
+        &[Xyxy::new(0.0, 0.0, 20.0, 20.0)],
+        &[0],
+        &cfg,
+    )
+    .unwrap();
+    assert!(asg_max.inputs_finite && asg_max.num_fg == 1 && asg_max.matched_costs[0].is_finite());
+    assert!(asg_max.matched_costs[0] > 6.8e38);
 
     // 5. Non-finite logits, pred boxes, anchor points, or GT boxes return `inputs_finite = false` and 0 fg.
     for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {

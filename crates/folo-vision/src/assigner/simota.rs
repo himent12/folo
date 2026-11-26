@@ -24,7 +24,18 @@
 //!    `k_g = floor(sum_q IoU).clamp(1, M_g)` (further capped by [`SimOtaConfig::max_k`] if set). Each GT
 //!    selects its `k_g` lowest-cost candidates, ties broken by smaller anchor index.
 //! 4. **Conflict resolution.** Any anchor selected by multiple GTs is assigned to the GT with the strictly
-//!    lowest `cost(g, a)` among the GTs that selected it, ties broken by smaller GT index.
+//!    lowest `cost(g, a)` **among the GTs that selected it**, ties broken by smaller GT index.
+//!
+//! **Differences from YOLOX v0.1.0's reference SimOTA** (deliberate, matching FOLO's [`crate::assign`]
+//! design):
+//! - **Per-GT candidate pools:** each GT's candidates and dynamic-`k` clamp `[1, |C_g|]` are restricted to
+//!   anchors satisfying that GT's own spatial prior (`in_box` / `center_radius`), rather than a global union
+//!   over all GTs (so a GT never steals a distant GT's anchor when its own prior has fewer than `k` anchors).
+//! - **Anchor-free class logits without objectness:** classification cost uses multi-label BCE directly on
+//!   the detached class logits (matching FOLO's decoupled head, which has no separate objectness branch).
+//! - **Contesting-GT conflict resolution:** an anchor selected by multiple GTs is resolved strictly among the
+//!   GTs that selected it rather than across all GTs in the image, so a contested anchor can never be
+//!   reassigned to a GT that did not select it.
 //!
 //! Degenerate GT boxes (`width <= 0` or `height <= 0`) receive `0` candidates (`dynamic_k[g] = 0`) without
 //! disturbing valid GTs. Non-finite model predictions, anchor coordinates, or GT coordinates set
@@ -141,8 +152,9 @@ pub struct SimOtaAssignment {
     /// IoU between each foreground anchor's predicted box and its assigned GT (`[A]`, in `[0, 1]`).
     /// Directly usable as the continuous quality target for Varifocal Loss or Quality Focal Loss.
     pub target_ious: Vec<f32>,
-    /// Pairwise SimOTA matching cost for each foreground anchor (`[A]`).
-    pub matched_costs: Vec<f32>,
+    /// Pairwise SimOTA matching cost in `f64` for each foreground anchor (`[A]`; kept in `f64` so extreme
+    /// finite logits such as `±f32::MAX` never overflow to `+Inf`).
+    pub matched_costs: Vec<f64>,
     /// Dynamic `k` chosen per GT prior to conflict resolution (`[G]`; `0` for degenerate or unmatched GTs).
     pub dynamic_k: Vec<usize>,
     /// Total foreground anchors after conflict resolution.
@@ -435,7 +447,7 @@ pub fn assign_simota(
             out.target_labels[a] = gt_labels[g];
             out.target_bboxes[a] = gt_bboxes[g];
             out.target_ious[a] = iou as f32;
-            out.matched_costs[a] = cost as f32;
+            out.matched_costs[a] = cost;
             out.num_fg += 1;
         }
     }

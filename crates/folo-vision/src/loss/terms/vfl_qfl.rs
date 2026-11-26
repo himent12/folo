@@ -129,17 +129,28 @@ fn bce_f64(x: f64, q: f64) -> f64 {
     pos + neg
 }
 
-/// Cancellation-free `p - q` in `f64`, using `(1 - q) - sigmoid(-x)` when `x >= 0` so `q = 1` at large
-/// positive `x` preserves full precision of `-sigmoid(-x)`.
+/// Cancellation-free `p - q` in `f64`:
+/// - for `|x| <= 1`, evaluates `((1 - 2q) - q * expm1(-x)) / (1 + exp(-x))` so tiny perturbations around
+///   `p == q` (such as `x = ±1e-20` at `q = 0.5`) retain full precision without rounding `p` to `0.5`;
+/// - for `x > 1`, evaluates `(1 - q) - sigmoid(-x)` so `q = 1` at large positive `x` preserves `-sigmoid(-x)`;
+/// - for `x < -1`, evaluates `sigmoid(x) - q` so `q = 0` at large negative `x` preserves `sigmoid(x)`.
 #[inline]
 fn prob_minus_target(x: f64, p: f64, r: f64, q: f64) -> f64 {
-    if x >= 0.0 { (1.0 - q) - r } else { p - q }
+    if x.abs() <= 1.0 {
+        ((1.0 - 2.0 * q) - q * (-x).exp_m1()) / (1.0 + (-x).exp())
+    } else if x > 0.0 {
+        (1.0 - q) - r
+    } else {
+        p - q
+    }
 }
 
 /// Exact single-element Varifocal Loss `(loss, dL/dx)` in `f64` for logit `x`, quality target `q in [0, 1]`,
 /// negative weight `alpha > 0`, and negative focusing exponent `gamma >= 0`.
 ///
-/// Non-finite `x` or `q` return `(NaN, NaN)`.
+/// Evaluates `p^gamma = exp(-gamma * softplus(-x))` in log space so large exponents (e.g. `gamma = 1e22` at
+/// `x = 50`) stay accurate even when `sigmoid(x)` rounds to `1.0` in `f64`. Non-finite `x` or `q` return
+/// `(NaN, NaN)`.
 #[inline]
 pub(crate) fn vfl_elem_f64(x: f64, q: f64, alpha: f64, gamma: f64) -> (f64, f64) {
     if !x.is_finite() || !q.is_finite() {
@@ -152,18 +163,12 @@ pub(crate) fn vfl_elem_f64(x: f64, q: f64, alpha: f64, gamma: f64) -> (f64, f64)
         if gamma == 0.0 {
             return (alpha * sp, alpha * p);
         }
-        if p == 0.0 {
+        let pg = (-gamma * softplus_f64(-x)).exp();
+        if pg == 0.0 {
             return (0.0, 0.0);
         }
-        let pg = if gamma == 2.0 {
-            p * p
-        } else if gamma == 1.0 {
-            p
-        } else {
-            p.powf(gamma)
-        };
-        let r_sp = if r == 0.0 { 0.0 } else { r * sp };
-        return (alpha * pg * sp, alpha * pg * (gamma * r_sp + p));
+        let gr_sp = if r == 0.0 { 0.0 } else { (gamma * r) * sp };
+        return (alpha * pg * sp, alpha * pg * (gr_sp + p));
     }
     let bce = bce_f64(x, q);
     let diff = prob_minus_target(x, p, r, q);
@@ -173,9 +178,10 @@ pub(crate) fn vfl_elem_f64(x: f64, q: f64, alpha: f64, gamma: f64) -> (f64, f64)
 /// Exact single-element Quality Focal Loss `(loss, dL/dx)` in `f64` for logit `x`, quality target `q in [0, 1]`,
 /// and focusing exponent `beta` (`0.0` or `>= 1.0`).
 ///
-/// Special-cases `q = 0` and `q = 1` in factored form to prevent `0^(beta - 1)` singularities and
-/// cancellation at extreme logits, and returns `(0.0, 0.0)` at the exact `p == q` point (including the
-/// symmetric subgradient at the `beta == 1` cusp). Non-finite `x` or `q` return `(NaN, NaN)`.
+/// Special-cases `q = 0` and `q = 1` in log-space factored form (`exp(-beta * softplus(∓x))`) to prevent
+/// `0^(beta - 1)` singularities, extreme-exponent rounding, and cancellation at extreme logits, and returns
+/// `(0.0, 0.0)` at the exact `p == q` point (including the symmetric subgradient at the `beta == 1` cusp).
+/// Non-finite `x` or `q` return `(NaN, NaN)`.
 #[inline]
 pub(crate) fn qfl_elem_f64(x: f64, q: f64, beta: f64) -> (f64, f64) {
     if !x.is_finite() || !q.is_finite() {
@@ -187,34 +193,22 @@ pub(crate) fn qfl_elem_f64(x: f64, q: f64, beta: f64) -> (f64, f64) {
         return (bce_f64(x, q), prob_minus_target(x, p, r, q));
     }
     if q == 0.0 {
-        if p == 0.0 {
+        let pb = (-beta * softplus_f64(-x)).exp();
+        if pb == 0.0 {
             return (0.0, 0.0);
         }
         let sp = softplus_f64(x);
-        let pb = if beta == 2.0 {
-            p * p
-        } else if beta == 1.0 {
-            p
-        } else {
-            p.powf(beta)
-        };
-        let r_sp = if r == 0.0 { 0.0 } else { r * sp };
-        return (pb * sp, pb * (beta * r_sp + p));
+        let br_sp = if r == 0.0 { 0.0 } else { (beta * r) * sp };
+        return (pb * sp, pb * (br_sp + p));
     }
     if q == 1.0 {
-        if r == 0.0 {
+        let rb = (-beta * softplus_f64(x)).exp();
+        if rb == 0.0 {
             return (0.0, 0.0);
         }
         let sp_neg = softplus_f64(-x);
-        let rb = if beta == 2.0 {
-            r * r
-        } else if beta == 1.0 {
-            r
-        } else {
-            r.powf(beta)
-        };
-        let p_sp = if p == 0.0 { 0.0 } else { p * sp_neg };
-        return (rb * sp_neg, -rb * (beta * p_sp + r));
+        let bp_sp = if p == 0.0 { 0.0 } else { (beta * p) * sp_neg };
+        return (rb * sp_neg, -rb * (bp_sp + r));
     }
     let diff = prob_minus_target(x, p, r, q);
     let d = diff.abs();

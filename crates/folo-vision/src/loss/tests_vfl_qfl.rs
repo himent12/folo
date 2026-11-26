@@ -97,6 +97,63 @@ fn qfl_f64_central_fd_cusp_and_extreme_logits() {
         }
     }
 
+    // Tiny perturbations around the beta == 1 cusp (x = ±1e-20f32, q = 0.5) must NOT collapse to a false
+    // zero-gradient dead zone: true loss ≈ 0.25 * |x| * ln(2) ≈ 1.7329e-21, true grad ≈ ±0.25 * ln(2) ≈ ±0.17329.
+    let eps_x = 1e-20f32;
+    let cusp_x = Tensor::from_slice(&[-eps_x, 0.0, eps_x], [3]).unwrap().requires_grad_();
+    let cusp_q = Tensor::from_slice(&[0.5f32, 0.5, 0.5], [3]).unwrap();
+    let cusp_loss =
+        quality_focal_loss(&cusp_x, &cusp_q, &QflConfig { beta: 1.0, reduction: LossReduction::None })
+            .unwrap();
+    let cusp_lv = cusp_loss.to_vec::<f32>().unwrap();
+    let cusp_gv =
+        cusp_loss.sum_all().unwrap().backward().unwrap().get(&cusp_x).unwrap().to_vec::<f32>().unwrap();
+    let want_cusp_l = (0.25 * (eps_x as f64) * 2.0f64.ln()) as f32;
+    let want_cusp_g = (0.25 * 2.0f64.ln()) as f32;
+    assert!((cusp_lv[0] - want_cusp_l).abs() <= 1e-5 * want_cusp_l, "cusp -eps loss: {}", cusp_lv[0]);
+    assert_eq!(cusp_lv[1], 0.0, "exact midpoint loss must be 0");
+    assert!((cusp_lv[2] - want_cusp_l).abs() <= 1e-5 * want_cusp_l, "cusp +eps loss: {}", cusp_lv[2]);
+    assert!((cusp_gv[0] + want_cusp_g).abs() <= 1e-5 * want_cusp_g, "cusp -eps grad: {}", cusp_gv[0]);
+    assert_eq!(cusp_gv[1], 0.0, "exact midpoint subgradient must be 0");
+    assert!((cusp_gv[2] - want_cusp_g).abs() <= 1e-5 * want_cusp_g, "cusp +eps grad: {}", cusp_gv[2]);
+
+    // Large exponents (1e22f32) at x = ±50 evaluate the focusing factor in log space without rounding p/r to 1.0.
+    let big_exp = 1e22f32 as f64;
+    let sp_m50 = (-50.0f64).exp().ln_1p();
+    let sp_p50 = 50.0 + sp_m50;
+    let r50_exact = (-50.0f64).exp() / (1.0 + (-50.0f64).exp());
+    let p50_exact = 1.0 / (1.0 + (-50.0f64).exp());
+    let pow_big = (-big_exp * sp_m50).exp();
+    let want_big_l = pow_big * sp_p50;
+    let want_big_g = pow_big * ((big_exp * r50_exact) * sp_p50 + p50_exact);
+    let (vfl_bl, vfl_bg) = vfl_elem_f64(50.0, 0.0, 1.0, big_exp);
+    assert!(
+        (vfl_bl - want_big_l).abs() <= 1e-12 * want_big_l,
+        "vfl big gamma loss: {vfl_bl} vs {want_big_l}"
+    );
+    assert!(
+        (vfl_bg - want_big_g).abs() <= 1e-12 * want_big_g,
+        "vfl big gamma grad: {vfl_bg} vs {want_big_g}"
+    );
+    let (qfl_bl0, qfl_bg0) = qfl_elem_f64(50.0, 0.0, big_exp);
+    assert!(
+        (qfl_bl0 - want_big_l).abs() <= 1e-12 * want_big_l,
+        "qfl q=0 big beta loss: {qfl_bl0} vs {want_big_l}"
+    );
+    assert!(
+        (qfl_bg0 - want_big_g).abs() <= 1e-12 * want_big_g,
+        "qfl q=0 big beta grad: {qfl_bg0} vs {want_big_g}"
+    );
+    let (qfl_bl1, qfl_bg1) = qfl_elem_f64(-50.0, 1.0, big_exp);
+    assert!(
+        (qfl_bl1 - want_big_l).abs() <= 1e-12 * want_big_l,
+        "qfl q=1 big beta loss: {qfl_bl1} vs {want_big_l}"
+    );
+    assert!(
+        (qfl_bg1 + want_big_g).abs() <= 1e-12 * want_big_g,
+        "qfl q=1 big beta grad: {qfl_bg1} vs -{want_big_g}"
+    );
+
     // Cancellation-free precision at x = +50, q = 1.0, beta = 2.0:
     // True loss = r^2 * softplus(-50) ≈ e^-150, true grad = -r^2 * (2 * p * softplus(-50) + r) ≈ -3 * e^-150.
     let r50 = (-50.0f64).exp() / (1.0 + (-50.0f64).exp());
