@@ -558,6 +558,18 @@ fn reduce_cols_vec4_matches_cpu_and_propagates_nan() {
             }
         }
     }
+    // Empty `r == 0` column reduction with a tightly sized 4-byte raw storage buffer must stay scalar so WebGPU
+    // binding validation (16 B minimum for `array<vec4<f32>>`) never rejects it.
+    let tiny_x = ctx.device().unwrap().create_buffer(&wgpu::BufferDescriptor {
+        label: Some("reduce_cols_empty_r"),
+        size: 4,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let by_empty = ctx.alloc(16).unwrap();
+    reduce_split(&ctx, ReduceOp::Sum, &tiny_x, by_empty.raw(), 1, 0, 4, DType::F32).unwrap();
+    let got_empty: Vec<f32> = bytemuck::pod_collect_to_vec(&ctx.read(by_empty.raw(), 0, 16).unwrap());
+    assert_eq!(got_empty, [0.0; 4]);
     assert!(ctx.kernels_without_registry().is_empty());
 }
 
@@ -705,16 +717,20 @@ fn optim_vec4_and_mixed_many_match_cpu() {
         for n in [1028usize, 1027] {
             let mut p_ref = rng.vec(n, -2.0, 2.0);
             let mut g_in = rng.vec(n, -2.0, 2.0);
-            // Force exact zero and opposing-sign lanes inside the same vec4 for cautious SGD.
+            // Force opposing signs and nonzero `p` with zero `u` (`u * p == 0.0`) inside the same vec4 for cautious SGD.
             p_ref[0] = 1.5;
             g_in[0] = 0.5;
             p_ref[1] = 1.5;
             g_in[1] = -0.5;
-            p_ref[2] = 0.0;
-            g_in[2] = 0.5;
+            p_ref[2] = 1.5;
+            g_in[2] = 0.0;
             p_ref[3] = -1.5;
             g_in[3] = -0.5;
-            let mut s0_ref = (ns >= 1).then(|| rng.vec(n, -1.0, 1.0));
+            let mut s0_ref = (ns >= 1).then(|| {
+                let mut v = rng.vec(n, -1.0, 1.0);
+                v[2] = 0.0;
+                v
+            });
             let mut s1_ref = (ns >= 2).then(|| rng.vec(n, 0.01, 2.0));
             let bp = ctx.upload(bytemuck::cast_slice(&p_ref)).unwrap();
             let bg = ctx.upload(bytemuck::cast_slice(&g_in)).unwrap();
@@ -746,37 +762,53 @@ fn optim_vec4_and_mixed_many_match_cpu() {
             }
         }
 
-        let lens = [4usize, 1028, 7, 256, 3, 0];
-        let mut ps: Vec<Vec<f32>> = lens.iter().map(|&n| rng.vec(n, -2.0, 2.0)).collect();
-        let gs: Vec<Vec<f32>> = lens.iter().map(|&n| rng.vec(n, -2.0, 2.0)).collect();
-        let mut s0s: Vec<Option<Vec<f32>>> =
-            lens.iter().map(|&n| (ns >= 1).then(|| rng.vec(n, -1.0, 1.0))).collect();
-        let mut s1s: Vec<Option<Vec<f32>>> =
-            lens.iter().map(|&n| (ns >= 2).then(|| rng.vec(n, 0.01, 2.0))).collect();
-        let bps: Vec<_> = ps.iter().map(|v| ctx.upload(bytemuck::cast_slice(v)).unwrap()).collect();
-        let bgs: Vec<_> = gs.iter().map(|v| ctx.upload(bytemuck::cast_slice(v)).unwrap()).collect();
-        let bs0s: Vec<_> =
-            s0s.iter().map(|o| o.as_ref().map(|v| ctx.upload(bytemuck::cast_slice(v)).unwrap())).collect();
-        let bs1s: Vec<_> =
-            s1s.iter().map(|o| o.as_ref().map(|v| ctx.upload(bytemuck::cast_slice(v)).unwrap())).collect();
-        let items: Vec<_> = (0..lens.len())
-            .map(|i| ManyItem {
-                p: bps[i].raw(),
-                g: bgs[i].raw(),
-                s0: bs0s[i].as_ref().map(|b| b.raw()),
-                s1: bs1s[i].as_ref().map(|b| b.raw()),
-                n: lens[i],
-            })
-            .collect();
-        optimizer_step_many(&ctx, &u, &items).unwrap();
-        for i in 0..lens.len() {
-            cpu_optim_step(&u, &mut ps[i], &gs[i], s0s[i].as_deref_mut(), s1s[i].as_deref_mut());
-            if lens[i] == 0 {
-                continue;
+        // Exercise both an all-4-aligned chunk (VEC4) and a mixed chunk (scalar fallback), checking p, s0, and s1.
+        for lens in [&[4usize, 1028, 256, 0][..], &[4usize, 1028, 7, 256, 3, 0][..]] {
+            let mut ps: Vec<Vec<f32>> = lens.iter().map(|&n| rng.vec(n, -2.0, 2.0)).collect();
+            let gs: Vec<Vec<f32>> = lens.iter().map(|&n| rng.vec(n, -2.0, 2.0)).collect();
+            let mut s0s: Vec<Option<Vec<f32>>> =
+                lens.iter().map(|&n| (ns >= 1).then(|| rng.vec(n, -1.0, 1.0))).collect();
+            let mut s1s: Vec<Option<Vec<f32>>> =
+                lens.iter().map(|&n| (ns >= 2).then(|| rng.vec(n, 0.01, 2.0))).collect();
+            let bps: Vec<_> = ps.iter().map(|v| ctx.upload(bytemuck::cast_slice(v)).unwrap()).collect();
+            let bgs: Vec<_> = gs.iter().map(|v| ctx.upload(bytemuck::cast_slice(v)).unwrap()).collect();
+            let bs0s: Vec<_> = s0s
+                .iter()
+                .map(|o| o.as_ref().map(|v| ctx.upload(bytemuck::cast_slice(v)).unwrap()))
+                .collect();
+            let bs1s: Vec<_> = s1s
+                .iter()
+                .map(|o| o.as_ref().map(|v| ctx.upload(bytemuck::cast_slice(v)).unwrap()))
+                .collect();
+            let items: Vec<_> = (0..lens.len())
+                .map(|i| ManyItem {
+                    p: bps[i].raw(),
+                    g: bgs[i].raw(),
+                    s0: bs0s[i].as_ref().map(|b| b.raw()),
+                    s1: bs1s[i].as_ref().map(|b| b.raw()),
+                    n: lens[i],
+                })
+                .collect();
+            optimizer_step_many(&ctx, &u, &items).unwrap();
+            for i in 0..lens.len() {
+                cpu_optim_step(&u, &mut ps[i], &gs[i], s0s[i].as_deref_mut(), s1s[i].as_deref_mut());
+                if lens[i] == 0 {
+                    continue;
+                }
+                let got: Vec<f32> =
+                    bytemuck::pod_collect_to_vec(&ctx.read(bps[i].raw(), 0, (lens[i] * 4) as u64).unwrap());
+                assert_close(&got, &ps[i], 1e-6, 1e-6, &format!("optim_many {label}[{i}] n={} p", lens[i]));
+                if let (Some(b), Some(r)) = (&bs0s[i], &s0s[i]) {
+                    let got: Vec<f32> =
+                        bytemuck::pod_collect_to_vec(&ctx.read(b.raw(), 0, (lens[i] * 4) as u64).unwrap());
+                    assert_close(&got, r, 1e-6, 1e-6, &format!("optim_many {label}[{i}] n={} s0", lens[i]));
+                }
+                if let (Some(b), Some(r)) = (&bs1s[i], &s1s[i]) {
+                    let got: Vec<f32> =
+                        bytemuck::pod_collect_to_vec(&ctx.read(b.raw(), 0, (lens[i] * 4) as u64).unwrap());
+                    assert_close(&got, r, 1e-6, 1e-6, &format!("optim_many {label}[{i}] n={} s1", lens[i]));
+                }
             }
-            let got: Vec<f32> =
-                bytemuck::pod_collect_to_vec(&ctx.read(bps[i].raw(), 0, (lens[i] * 4) as u64).unwrap());
-            assert_close(&got, &ps[i], 1e-6, 1e-6, &format!("optim_many {label}[{i}] n={}", lens[i]));
         }
     }
 
@@ -785,7 +817,7 @@ fn optim_vec4_and_mixed_many_match_cpu() {
         for bad_val in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             let mut x_vec4 = vec![2.0f32; 1028];
             x_vec4[1024 + lane] = bad_val;
-            let x_scalar = vec![3.0f32; 19];
+            let x_vec4_ok = vec![3.0f32; 20];
             for portable in [false, true] {
                 let _g = ForceGuard::set(portable);
                 let bx = ctx.upload(bytemuck::cast_slice(&x_vec4)).unwrap();
@@ -795,11 +827,11 @@ fn optim_vec4_and_mixed_many_match_cpu() {
                 assert_eq!(f[0], 1, "unscale_check vec4 lane {lane} val={bad_val} portable={portable}");
 
                 let b0 = ctx.upload(bytemuck::cast_slice(&x_vec4)).unwrap();
-                let b1 = ctx.upload(bytemuck::cast_slice(&x_scalar)).unwrap();
+                let b1 = ctx.upload(bytemuck::cast_slice(&x_vec4_ok)).unwrap();
                 let flag_m = ctx.upload(bytemuck::cast_slice(&[0u32])).unwrap();
                 unscale_check_many(
                     &ctx,
-                    &[(b0.raw(), x_vec4.len()), (b1.raw(), x_scalar.len())],
+                    &[(b0.raw(), x_vec4.len()), (b1.raw(), x_vec4_ok.len())],
                     0.5,
                     flag_m.raw(),
                 )
@@ -810,26 +842,27 @@ fn optim_vec4_and_mixed_many_match_cpu() {
         }
     }
 
-    // 3. scale_many across mixed vec4 + scalar tensors (exact two roundings).
+    // 3. scale_many across all-4-aligned (VEC4) and mixed (scalar) chunks (exact two roundings).
     let f1_val = 0.3f32;
     let f2_val = 1.7f32;
     let bf1 = ctx.upload(bytemuck::cast_slice(&[f1_val])).unwrap();
     let bf2 = ctx.upload(bytemuck::cast_slice(&[f2_val])).unwrap();
-    let s_lens = [4usize, 1028, 7, 256, 3];
-    let s_in: Vec<Vec<f32>> = s_lens.iter().map(|&n| rng.vec(n, -5.0, 5.0)).collect();
-    let s_bufs: Vec<_> = s_in.iter().map(|v| ctx.upload(bytemuck::cast_slice(v)).unwrap()).collect();
-    let s_xs: Vec<_> = s_bufs.iter().zip(s_lens).map(|(b, n)| (b.raw(), n)).collect();
-    scale_many(&ctx, &s_xs, bf1.raw(), bf2.raw()).unwrap();
-    for (i, (&n, orig)) in s_lens.iter().zip(&s_in).enumerate() {
-        let got: Vec<f32> =
-            bytemuck::pod_collect_to_vec(&ctx.read(s_bufs[i].raw(), 0, (n * 4) as u64).unwrap());
-        let want: Vec<f32> = orig.iter().map(|&x| (x * f1_val) * f2_val).collect();
-        // Bit-for-bit check ensures the GPU did not reassociate `(x * f1) * f2` into `x * (f1 * f2)`.
-        assert_eq!(got, want, "scale_many[{i}] n={n} bit-exact two roundings");
+    for s_lens in [&[4usize, 1028, 256][..], &[4usize, 1028, 7, 256, 3][..]] {
+        let s_in: Vec<Vec<f32>> = s_lens.iter().map(|&n| rng.vec(n, -5.0, 5.0)).collect();
+        let s_bufs: Vec<_> = s_in.iter().map(|v| ctx.upload(bytemuck::cast_slice(v)).unwrap()).collect();
+        let s_xs: Vec<_> = s_bufs.iter().zip(s_lens).map(|(b, &n)| (b.raw(), n)).collect();
+        scale_many(&ctx, &s_xs, bf1.raw(), bf2.raw()).unwrap();
+        for (i, (&n, orig)) in s_lens.iter().zip(&s_in).enumerate() {
+            let got: Vec<f32> =
+                bytemuck::pod_collect_to_vec(&ctx.read(s_bufs[i].raw(), 0, (n * 4) as u64).unwrap());
+            let want: Vec<f32> = orig.iter().map(|&x| (x * f1_val) * f2_val).collect();
+            // Bit-for-bit check ensures the GPU did not reassociate `(x * f1) * f2` into `x * (f1 * f2)`.
+            assert_eq!(got, want, "scale_many[{i}] n={n} bit-exact two roundings");
+        }
     }
 
-    // Extreme finite values near `f32::MAX`: `h = 1 / sqrt(f32::MAX)` has `h * h` underflowing to 0, so
-    // `norm_partials_many(ScaledSquares)` must keep `(x * h) * h` separate (not reassociated).
+    // Extreme finite values near `f32::MAX`: `h = 1 / sqrt(f32::MAX)` makes `h * h` a subnormal that flushes to
+    // 0 on FTZ GPU backends, so `norm_partials_many(ScaledSquares)` must keep `(x * h) * h` separate.
     let max_in = [f32::MAX; 4];
     let h_max = 1.0f32 / f32::MAX.sqrt();
     let bmax = ctx.upload(bytemuck::cast_slice(&max_in)).unwrap();
@@ -847,17 +880,19 @@ fn optim_vec4_and_mixed_many_match_cpu() {
     let t_max = (f32::MAX * h_max) * h_max;
     assert_close(&got_max, &[4.0 * t_max * t_max], 1e-4, 1e-4, "norm_partials vec4 f32::MAX");
 
-    // 4. norm_partials_many vec4 (all-4-aligned chunk) with NaN in every lane 0..4, subgroups vs portable.
+    // 4. norm_partials_many vec4 (all-4-aligned chunk) with NaN in every lane 0..4 (covering both subgroup 0 in
+    // `t0`/`t2` and subgroup 1 `lid=63` in `t1`), subgroups vs portable.
     let h_val = 0.5f32;
     let bh = ctx.upload(bytemuck::cast_slice(&[h_val])).unwrap();
     let np_lens = [4usize, 256, 260, 1024];
     let plen = norm_partials_len(&np_lens);
     for lane in 0..4 {
         let mut t0 = rng.vec(np_lens[0], -3.0, 3.0);
-        let t1 = rng.vec(np_lens[1], -3.0, 3.0);
+        let mut t1 = rng.vec(np_lens[1], -3.0, 3.0);
         let mut t2 = rng.vec(np_lens[2], -3.0, 3.0);
         let t3 = rng.vec(np_lens[3], -3.0, 3.0);
         t0[lane] = f32::NAN;
+        t1[252 + lane] = f32::NAN;
         t2[256 + lane] = f32::NAN;
         let b0 = ctx.upload(bytemuck::cast_slice(&t0)).unwrap();
         let b1 = ctx.upload(bytemuck::cast_slice(&t1)).unwrap();
@@ -881,14 +916,18 @@ fn optim_vec4_and_mixed_many_match_cpu() {
             let sg = run(false);
             let fb = run(true);
             assert_eq!(sg.len(), plen);
-            // Partials layout: t0 -> [0], t1 -> [1], t2 -> [2, 3], t3 -> [4..8].
+            // Partials layout: t0 -> [0], t1 -> [1] (sgid=1 NaN), t2 -> [2, 3], t3 -> [4..8].
             assert!(sg[0].is_nan() && fb[0].is_nan(), "norm_partials vec4 {op:?} lane {lane} missed t0 NaN");
-            assert!(sg[1].is_finite() && fb[1].is_finite(), "norm_partials vec4 {op:?} leaked to t1");
+            assert!(
+                sg[1].is_nan() && fb[1].is_nan(),
+                "norm_partials vec4 {op:?} lane {lane} missed t1 sg1 NaN"
+            );
             assert!(sg[2].is_finite() && fb[2].is_finite(), "norm_partials vec4 {op:?} leaked to t2[0]");
             assert!(
                 sg[3].is_nan() && fb[3].is_nan(),
                 "norm_partials vec4 {op:?} lane {lane} missed t2 tail NaN"
             );
+            assert!(sg[4].is_finite() && fb[4].is_finite(), "norm_partials vec4 {op:?} leaked to t3");
             for (i, (&a, &b)) in sg.iter().zip(&fb).enumerate() {
                 if a.is_nan() && b.is_nan() {
                     continue;

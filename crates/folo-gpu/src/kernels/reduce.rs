@@ -429,7 +429,7 @@ fn reduce_scaled(
         let p = Params::new().uz(outer)?.uz(units_r)?.f(scale).f(op.identity());
         ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(outer as u64 * 256, 256)?)
     } else {
-        let vec4 = inner.is_multiple_of(4);
+        let vec4 = r > 0 && inner.is_multiple_of(4);
         let units_inner = if vec4 { inner / 4 } else { inner };
         let chunks = units_inner.div_ceil(64);
         let k = ctx.kernel(&COLS, spec.bool("VEC4", vec4))?;
@@ -762,7 +762,7 @@ pub fn reduce_split(
             .uz(units_chunk)?;
         ctx.dispatch(&k, &[x, tmp.raw()], &p, ctx.grid_1d(outer_s as u64 * 256, 256)?)?;
     } else {
-        let vec4 = inner.is_multiple_of(4);
+        let vec4 = r > 0 && inner.is_multiple_of(4);
         let units_inner = if vec4 { inner / 4 } else { inner };
         let chunks = units_inner.div_ceil(64);
         let k = ctx.kernel(&COLS, spec.bool("VEC4", vec4))?;
