@@ -156,10 +156,11 @@ right.
   benchmark class the model does not know scores 0 and is listed on the entry.
 - **A coding agent**: Claude Code, Codex or Antigravity, asked for boxes with a calibrated confidence (`0.0` to `1.0`)
   per box (same CLIs, batching and failure policy as agent labeling, [LABELING.md](LABELING.md)). When the agent
-  reports valid confidences on its detections, the entry gets a calibration axis and a confidence-thresholded
-  self-labeling curve; if an agent omits confidences on any box, the entry falls back to unscored grading (no
-  calibration axis, marked partial) rather than scoring fallback constants. By default an agent runs the first 48
-  images, unchanged only: every condition is another call per image.
+  reports valid confidences on its detections, the entry gets a confidence-thresholded self-labeling curve and a
+  calibration axis (provided at least one unchanged-image detection reaches the 0.1 calibration floor); if an agent
+  omits confidences on any box, the entry falls back to unscored grading (no calibration axis, marked partial) rather
+  than scoring fallback constants. By default an agent runs the first 48 images, unchanged only: every condition is
+  another call per image.
 - **Anything else**: fetch the images, run your model, send the predictions.
 
 ```sh
