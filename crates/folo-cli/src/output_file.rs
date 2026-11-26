@@ -3,13 +3,15 @@
 //! the name exists). An export that fails or is killed therefore leaves the name free for a retry (#312), concurrent
 //! commands never share or replace a file, and an existing file is never overwritten.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::output::{CliError, ExitCode};
 
-/// A command's output being written: write [`OutputFile::tmp`], then [`OutputFile::publish`] it. Dropped
-/// unpublished (an error), the temporary file is removed; a killed process leaves at most that temporary file
-/// (`.folo-<pid>-<n>.tmp`, or the writer's own temporary file named after it), which no later run reads or blocks on.
+/// A command's output being written: write directly into the reserved temporary file via [`OutputFile::write_with`]
+/// or [`OutputFile::write_bytes`] (or [`OutputFile::tmp`] for writers that take a path), then [`OutputFile::publish`]
+/// it. Dropped unpublished (an error), the temporary file is removed; a killed process leaves at most that temporary
+/// file (`.folo-<pid>-<n>.tmp`), which no later run reads or blocks on.
 pub(crate) struct OutputFile {
     command: &'static str,
     /// `--output`, or `None` for a free name next to the model.
@@ -79,6 +81,32 @@ impl OutputFile {
     /// The temporary file to write the output to (in the output's folder; created empty, the writer writes over it).
     pub(crate) fn tmp(&self) -> &Path {
         &self.tmp
+    }
+
+    /// Writes directly into the reserved temporary file through a 1 MiB buffer, flushes and `sync_all`s, then
+    /// closes the handle before returning so [`OutputFile::publish`] can rename it cleanly on Windows without
+    /// creating a second nested temporary file.
+    pub(crate) fn write_with(
+        &self,
+        write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> Result<(), CliError>,
+    ) -> Result<(), CliError> {
+        let target = self.name(1);
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.tmp)
+            .map_err(|e| io_error(&target, e))?;
+        let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
+        write(&mut w)?;
+        let f = w.into_inner().map_err(|e| io_error(&target, e.into_error()))?;
+        f.sync_all().map_err(|e| io_error(&target, e))?;
+        Ok(())
+    }
+
+    /// Writes `bytes` directly into the reserved temporary file, syncs it to disk, and closes it.
+    pub(crate) fn write_bytes(&self, bytes: &[u8]) -> Result<(), CliError> {
+        let target = self.name(1);
+        self.write_with(|w| w.write_all(bytes).map_err(|e| io_error(&target, e)))
     }
 
     /// Gives the written temporary file its name and returns it.
@@ -153,10 +181,10 @@ mod tests {
         for step in 0..4 {
             let killed = OutputFile::new("export", &model, Some(out.clone()), "", "onnx").unwrap();
             if step >= 1 {
-                std::fs::write(killed.tmp(), b"ha").unwrap();
+                killed.write_bytes(b"ha").unwrap();
             }
             if step >= 2 {
-                std::fs::write(killed.tmp(), b"done").unwrap();
+                killed.write_bytes(b"done").unwrap();
             }
             if step == 3 {
                 assert_eq!(killed.publish().unwrap(), out);
@@ -175,9 +203,39 @@ mod tests {
         // A retry of a killed export is not blocked by its leftovers.
         std::fs::remove_file(&out).unwrap();
         let retry = OutputFile::new("export", &model, Some(out.clone()), "", "onnx").unwrap();
-        std::fs::write(retry.tmp(), b"again").unwrap();
+        retry.write_bytes(b"again").unwrap();
         assert_eq!(retry.publish().unwrap(), out);
         assert_eq!(std::fs::read(&out).unwrap(), b"again");
+    }
+
+    #[test]
+    fn failed_write_cleans_up_temp_file_and_leaves_no_output() {
+        let dir = TestDir::new("cli-output-write-fail");
+        let (model, out) = (dir.join("best.folo"), dir.join("failed.onnx"));
+        std::fs::write(&model, b"model").unwrap();
+        {
+            let file = OutputFile::new("export", &model, Some(out.clone()), "", "onnx").unwrap();
+            let err = file
+                .write_with(|w| {
+                    use std::io::Write;
+                    w.write_all(b"partial").map_err(|e| {
+                        crate::output::CliError::new(
+                            crate::output::ExitCode::Runtime,
+                            "io_error",
+                            e.to_string(),
+                        )
+                    })?;
+                    Err(crate::output::CliError::new(
+                        crate::output::ExitCode::Runtime,
+                        "io_error",
+                        "simulated write error",
+                    ))
+                })
+                .unwrap_err();
+            assert_eq!(err.code, "io_error");
+        }
+        assert!(!out.exists(), "failed write must not publish output");
+        assert_eq!(names(&dir), ["best.folo"], "temp file must be removed on failure");
     }
 
     #[test]
@@ -189,16 +247,16 @@ mod tests {
         let out = dir.join("new.onnx");
         let a = OutputFile::new("export", &model, Some(out.clone()), "", "onnx").unwrap();
         let b = OutputFile::new("export", &model, Some(out.clone()), "", "onnx").unwrap();
-        std::fs::write(a.tmp(), b"a").unwrap();
-        std::fs::write(b.tmp(), b"b").unwrap();
+        a.write_bytes(b"a").unwrap();
+        b.write_bytes(b"b").unwrap();
         a.publish().unwrap();
         assert_eq!(b.publish().unwrap_err().code, "output_exists");
         assert_eq!(std::fs::read(&out).unwrap(), b"a");
         // Two exports without --output take distinct free names.
         let c = OutputFile::new("export", &model, None, "-f16", "folo").unwrap();
         let d = OutputFile::new("export", &model, None, "-f16", "folo").unwrap();
-        std::fs::write(c.tmp(), b"c").unwrap();
-        std::fs::write(d.tmp(), b"d").unwrap();
+        c.write_bytes(b"c").unwrap();
+        d.write_bytes(b"d").unwrap();
         assert_eq!(d.publish().unwrap(), dir.join("best-f16.folo"));
         assert_eq!(c.publish().unwrap(), dir.join("best-f16-2.folo"));
         assert_eq!(names(&dir), ["best-f16-2.folo", "best-f16.folo", "best.folo", "new.onnx"]);
@@ -212,7 +270,7 @@ mod tests {
         // 255 characters, the limit of one path component (main took it; a temporary name built on it did not).
         let out = dir.join(format!("{}.onnx", "q".repeat(250)));
         let file = OutputFile::new("export", &model, Some(out.clone()), "", "onnx").unwrap();
-        std::fs::write(file.tmp(), b"done").unwrap();
+        file.write_bytes(b"done").unwrap();
         assert_eq!(file.publish().unwrap(), out);
         assert_eq!(std::fs::read(&out).unwrap(), b"done");
     }
@@ -230,7 +288,7 @@ mod tests {
         let out = dir.join(format!(".folo-{}-{}.tmp", std::process::id(), n + 1));
         let file = OutputFile::new("export", &model, Some(out.clone()), "", "onnx").unwrap();
         assert_ne!(file.tmp(), out);
-        std::fs::write(file.tmp(), b"done").unwrap();
+        file.write_bytes(b"done").unwrap();
         assert_eq!(file.publish().unwrap(), out);
         assert_eq!(std::fs::read(&out).unwrap(), b"done");
         assert_eq!(names(&dir).len(), 2, "{:?}", names(&dir));

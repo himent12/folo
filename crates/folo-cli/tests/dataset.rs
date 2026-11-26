@@ -733,6 +733,168 @@ fn synth_and_convert_to_missing_drive_give_output_path_hint() {
     assert!(hint.contains("output") && !hint.contains("data.yaml"), "convert hint: {err}");
 }
 
+/// Helper to create a file symlink when the OS/account allows it (always on Unix; on Windows, skipped only if
+/// unprivileged accounts lack SeCreateSymbolicLinkPrivilege / Developer Mode).
+fn try_file_symlink(target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+    #[cfg(windows)]
+    {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => true,
+            Err(e) if e.raw_os_error() == Some(1314) => false,
+            Err(e) => panic!("symlink_file {} -> {}: {e}", link.display(), target.display()),
+        }
+    }
+}
+
+/// `folo dataset check` flags dangling symlinks / Windows directory junctions with clear diagnostics instead of
+/// silently skipping them or misreporting a dangling label symlink as a background image (#382).
+#[test]
+fn check_flags_dangling_symlinks_portably() {
+    let t = TestDir::new("cli-check-dangling");
+    let ds = t.join("ds");
+    let (code, _, stderr) = folo(&["dataset", "synth", s(&ds), "--images", "4", "--imgsz", "64", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+
+    // 1. Dangling directory link (junction on Windows, symlink on Unix) inside `images/train/` and as the dataset
+    // path itself.
+    let doomed_dir = t.join("doomed_dir");
+    std::fs::create_dir(&doomed_dir).unwrap();
+    let _dangling_sub = DirLink::new(&doomed_dir, ds.join("images/train/broken_sub"));
+    let _dangling_root = DirLink::new(&doomed_dir, t.join("broken_ds_link"));
+    std::fs::remove_dir(&doomed_dir).unwrap();
+
+    // Passing a dangling symlink as the dataset path reports `path_not_found` (exit 3) naming the broken link.
+    let (code, stdout, _) = folo(&["dataset", "check", s(&t.join("broken_ds_link")), "--json"]);
+    let err = &json_lines(&stdout).pop().unwrap()["error"];
+    assert_eq!((code, err["code"].as_str()), (3, Some("path_not_found")), "{err}");
+    assert!(err["message"].as_str().unwrap().contains("dangling symlink"), "{err}");
+
+    // Inside `images/train/`, the dangling subdirectory link is flagged rather than silently skipped.
+    let (code, stdout, _) = folo(&["dataset", "check", s(&ds), "--json", "--fix-dry-run"]);
+    assert_eq!(code, 1);
+    let r = &json_lines(&stdout)[0];
+    let issues = r["issues"].as_array().unwrap();
+    let sub = issues
+        .iter()
+        .find(|i| i["file"] == "images/train/broken_sub")
+        .unwrap_or_else(|| panic!("expected dangling dir issue in {issues:?}"));
+    assert!(sub["message"].as_str().unwrap().contains("dangling symlink"), "{sub}");
+    assert!(sub["fix"].as_str().unwrap().contains("symlink"), "{sub}");
+
+    // 2. Dangling image and label file symlinks (always tested on Unix; on Windows when file symlinks are enabled).
+    let dangling_img = ds.join("images/train/ghost.jpg");
+    if try_file_symlink(&t.join("no_such_image.jpg"), &dangling_img) {
+        let lbl = ds.join("labels/train/000000.txt");
+        std::fs::remove_file(&lbl).unwrap();
+        assert!(try_file_symlink(&t.join("no_such_label.txt"), &lbl));
+
+        let (code, stdout, _) = folo(&["dataset", "check", s(&ds), "--json", "--fix-dry-run"]);
+        assert_eq!(code, 1);
+        let r = &json_lines(&stdout)[0];
+        let issues = r["issues"].as_array().unwrap();
+
+        let img_issue = issues
+            .iter()
+            .find(|i| i["file"] == "images/train/ghost.jpg")
+            .unwrap_or_else(|| panic!("expected dangling image issue in {issues:?}"));
+        assert_eq!(img_issue["kind"], "missing_image", "{img_issue}");
+        assert_eq!(img_issue["severity"], "error", "{img_issue}");
+        assert!(img_issue["message"].as_str().unwrap().contains("dangling symlink"), "{img_issue}");
+
+        let lbl_issue = issues
+            .iter()
+            .find(|i| i["file"] == "labels/train/000000.txt")
+            .unwrap_or_else(|| panic!("expected dangling label issue in {issues:?}"));
+        assert_eq!(lbl_issue["kind"], "broken_label", "{lbl_issue}");
+        assert_eq!(lbl_issue["severity"], "error", "{lbl_issue}");
+        assert!(lbl_issue["message"].as_str().unwrap().contains("dangling symlink"), "{lbl_issue}");
+        // Must NOT also misreport `000000.jpg` as a background image (`empty_image`).
+        assert!(
+            !issues.iter().any(|i| i["kind"] == "empty_image" && i["file"] == "images/train/000000.jpg"),
+            "dangling label symlink must not be misreported as empty_image: {issues:?}"
+        );
+    }
+}
+
+/// `folo dataset check` on COCO evaluates boxes against the real image dimensions (matching the loader) when the
+/// JSON's declared `width`/`height` disagree with the actual image (#422).
+#[test]
+fn check_coco_reconciles_boxes_against_real_image_dimensions() {
+    let t = TestDir::new("cli-check-coco-dims");
+    let src = t.join("src");
+    let (code, _, stderr) = folo(&[
+        "dataset",
+        "synth",
+        s(&src),
+        "--images",
+        "4",
+        "--imgsz",
+        "64",
+        "--image-format",
+        "png",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let real_png = src.join("images/train/000000.png");
+
+    let coco = t.join("coco");
+    std::fs::create_dir_all(coco.join("images/train")).unwrap();
+    std::fs::create_dir_all(coco.join("annotations")).unwrap();
+    std::fs::copy(&real_png, coco.join("images/train/small_decl.png")).unwrap();
+    std::fs::copy(&real_png, coco.join("images/train/large_decl.png")).unwrap();
+
+    // Both images are actually 64x64:
+    // - `small_decl.png` declares 32x32 with a box at [40, 40, 10, 10] (valid in 64x64, outside 32x32).
+    // - `large_decl.png` declares 128x128 with a box at [80, 80, 10, 10] (outside 64x64, inside 128x128).
+    let doc = serde_json::json!({
+        "images": [
+            { "id": 1, "file_name": "small_decl.png", "width": 32, "height": 32 },
+            { "id": 2, "file_name": "large_decl.png", "width": 128, "height": 128 }
+        ],
+        "annotations": [
+            { "id": 1, "image_id": 1, "category_id": 1, "bbox": [40, 40, 10, 10], "iscrowd": 0 },
+            { "id": 2, "image_id": 2, "category_id": 1, "bbox": [80, 80, 10, 10], "iscrowd": 0 }
+        ],
+        "categories": [
+            { "id": 1, "name": "circle" }
+        ]
+    });
+    std::fs::write(coco.join("annotations/instances_train.json"), doc.to_string()).unwrap();
+
+    for extra in [&[][..], &["--headers-only"][..]] {
+        let mut args = vec!["dataset", "check", s(&coco), "--json"];
+        args.extend_from_slice(extra);
+        let (code, stdout, _) = folo(&args);
+        assert_eq!(code, 1, "{extra:?}");
+        let r = &json_lines(&stdout)[0];
+        let issues = r["issues"].as_array().unwrap();
+        let kinds_of = |file: &str| -> Vec<&str> {
+            issues.iter().filter(|i| i["file"] == file).map(|i| i["kind"].as_str().unwrap()).collect()
+        };
+
+        // 64x64 declared as 32x32: size mismatch warning ONLY — no false zero_size_box or empty_image.
+        let small = kinds_of("images/train/small_decl.png");
+        assert_eq!(small, vec!["other"], "extra={extra:?}, issues={issues:?}");
+
+        // 64x64 declared as 128x128: size mismatch warning PLUS the zero_size_box and empty_image the loader sees.
+        let large = kinds_of("images/train/large_decl.png");
+        assert!(large.contains(&"other"), "missing size mismatch: {large:?}");
+        assert!(large.contains(&"zero_size_box"), "missing zero_size_box: {large:?}");
+        assert!(large.contains(&"empty_image"), "missing empty_image: {large:?}");
+    }
+
+    // Normal loader (`stats`) agrees: 1 box kept (from small_decl), 1 empty image (large_decl).
+    let (code, stdout, stderr) = folo(&["dataset", "stats", s(&coco), "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let st = &json_lines(&stdout)[0]["stats"];
+    assert_eq!((st["boxes"].as_u64(), st["empty_images"].as_u64()), (Some(1), Some(1)), "{st}");
+}
+
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
 fn folo_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
