@@ -7,6 +7,8 @@
 mod rms;
 #[cfg(test)]
 mod tests;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm_simd;
 
 pub(crate) use rms::{rms_norm, rms_norm_backward};
 
@@ -98,7 +100,14 @@ fn ln_row_stats(row: &[f32], inv_d: f32, eps: f32) -> (f32, f32) {
 // ---------- LayerNorm forward ----------
 
 #[inline]
-fn ln_apply_scalar(x: &[f32], y: &mut [f32], w: Option<&[f32]>, b: Option<&[f32]>, mean: f32, rstd: f32) {
+pub(super) fn ln_apply_scalar(
+    x: &[f32],
+    y: &mut [f32],
+    w: Option<&[f32]>,
+    b: Option<&[f32]>,
+    mean: f32,
+    rstd: f32,
+) {
     match (w, b) {
         (Some(w), Some(b)) => {
             for (((&xv, yv), &wv), &bv) in x.iter().zip(y).zip(w).zip(b) {
@@ -252,6 +261,11 @@ fn ln_apply(x: &[f32], y: &mut [f32], w: Option<&[f32]>, b: Option<&[f32]>, mean
     if x.len() >= 8 && has_avx2_fma() {
         // SAFETY: AVX2 and FMA were detected above.
         unsafe { ln_apply_avx2_fma(x, y, w, b, mean, rstd) };
+        return;
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len() >= 4 {
+        wasm_simd::ln_apply_wasm(x, y, w, b, mean, rstd);
         return;
     }
     ln_apply_scalar(x, y, w, b, mean, rstd);
@@ -496,6 +510,10 @@ fn ln_bwd_sums_block(x: &[f32], g: &[f32], w: Option<&[f32]>, mean: f32, rstd: f
         // SAFETY: AVX2 and FMA were detected above.
         return unsafe { ln_bwd_sums_avx2_fma(x, g, w, mean, rstd) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len() >= 16 {
+        return wasm_simd::ln_bwd_sums_wasm(x, g, w, mean, rstd);
+    }
     ln_bwd_sums_scalar(x, g, w, mean, rstd)
 }
 
@@ -557,7 +575,7 @@ fn ln_bwd_coeffs_row(
 
 #[allow(clippy::too_many_arguments)]
 #[inline]
-fn ln_bwd_write_scalar(
+pub(super) fn ln_bwd_write_scalar(
     x: &[f32],
     g: &[f32],
     w: Option<&[f32]>,
@@ -762,6 +780,11 @@ fn ln_bwd_write(
     if x.len() >= 8 && has_avx2_fma() {
         // SAFETY: AVX2 and FMA were detected above.
         unsafe { ln_bwd_write_avx2_fma(x, g, w, dx, dw, db, mean, rstd, c1_d, c2_d) };
+        return;
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len() >= 4 {
+        wasm_simd::ln_bwd_write_wasm(x, g, w, dx, dw, db, mean, rstd, c1_d, c2_d);
         return;
     }
     ln_bwd_write_scalar(x, g, w, dx, dw, db, mean, rstd, c1_d, c2_d);

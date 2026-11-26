@@ -190,28 +190,10 @@ fn box_downsample_rgba(rgba: &[u8], w: usize, h: usize, fx: usize, fy: usize) ->
             col_sum.fill(0);
             for y in y0..y1 {
                 let row = &rgba[y * sstride..(y + 1) * sstride];
-                for (acc, &v) in col_sum.iter_mut().zip(row) {
-                    *acc += v as u32;
-                }
+                vaccum_u8_into_u32(row, &mut col_sum);
             }
             let dst = &mut out[oy * dstride..(oy + 1) * dstride];
-            for ox in 0..pw {
-                let x0 = ox * fx;
-                let x1 = (x0 + fx).min(w);
-                let n = (x1 - x0) as u32 * ny;
-                let half = n / 2;
-                let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
-                for x in x0..x1 {
-                    let q = x * 4;
-                    sr += col_sum[q];
-                    sg += col_sum[q + 1];
-                    sb += col_sum[q + 2];
-                }
-                let d = ox * 4;
-                dst[d] = ((sr + half) / n) as u8;
-                dst[d + 1] = ((sg + half) / n) as u8;
-                dst[d + 2] = ((sb + half) / n) as u8;
-            }
+            box_hreduce_rgba32(&col_sum, dst, w, pw, fx, ny);
         }
     } else {
         for oy in 0..ph {
@@ -242,6 +224,47 @@ fn box_downsample_rgba(rgba: &[u8], w: usize, h: usize, fx: usize, fy: usize) ->
         }
     }
     (out, pw)
+}
+
+fn vaccum_u8_into_u32(row: &[u8], col_sum: &mut [u32]) {
+    debug_assert_eq!(row.len(), col_sum.len());
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: `row.len() == col_sum.len()`.
+    unsafe {
+        wasm_simd::vaccum_u8_into_u32_simd128(row, col_sum);
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    for (acc, &v) in col_sum.iter_mut().zip(row) {
+        *acc += v as u32;
+    }
+}
+
+fn box_hreduce_rgba32(col_sum: &[u32], dst: &mut [u8], w: usize, pw: usize, fx: usize, ny: u32) {
+    debug_assert_eq!(col_sum.len(), w * 4);
+    debug_assert_eq!(dst.len(), pw * 4);
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    // SAFETY: `col_sum.len() == w * 4` and `dst.len() == pw * 4`.
+    unsafe {
+        wasm_simd::box_hreduce_rgba32_simd128(col_sum, dst, w, pw, fx, ny);
+    }
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    for ox in 0..pw {
+        let x0 = ox * fx;
+        let x1 = (x0 + fx).min(w);
+        let n = (x1 - x0) as u32 * ny;
+        let half = n / 2;
+        let (mut sr, mut sg, mut sb) = (0u32, 0u32, 0u32);
+        for x in x0..x1 {
+            let q = x * 4;
+            sr += col_sum[q];
+            sg += col_sum[q + 1];
+            sb += col_sum[q + 2];
+        }
+        let d = ox * 4;
+        dst[d] = ((sr + half) / n) as u8;
+        dst[d + 1] = ((sg + half) / n) as u8;
+        dst[d + 2] = ((sb + half) / n) as u8;
+    }
 }
 
 fn rgba_row_to_planar_f32_scale(src: &[u8], scale: f32, r: &mut [f32], g: &mut [f32], b: &mut [f32]) {
@@ -559,6 +582,116 @@ mod wasm_simd {
             b[i] = bv as f32 * scale;
         }
     }
+
+    /// Accumulates `col_sum[i] += row[i] as u32`, 16 bytes per iteration.
+    ///
+    /// # Safety
+    /// `row.len() == col_sum.len()`.
+    pub(super) unsafe fn vaccum_u8_into_u32_simd128(row: &[u8], col_sum: &mut [u32]) {
+        let n = row.len();
+        let chunks = n / 16;
+        let sp = row.as_ptr();
+        let dp = col_sum.as_mut_ptr();
+        for i in 0..chunks {
+            // SAFETY: `i * 16 + 16 <= n`.
+            unsafe {
+                let bytes = v128_load(sp.add(i * 16) as *const v128);
+                let lo16 = u16x8_extend_low_u8x16(bytes);
+                let hi16 = u16x8_extend_high_u8x16(bytes);
+                let outp = dp.add(i * 16) as *mut v128;
+                v128_store(outp, u32x4_add(v128_load(outp), u32x4_extend_low_u16x8(lo16)));
+                v128_store(outp.add(1), u32x4_add(v128_load(outp.add(1)), u32x4_extend_high_u16x8(lo16)));
+                v128_store(outp.add(2), u32x4_add(v128_load(outp.add(2)), u32x4_extend_low_u16x8(hi16)));
+                v128_store(outp.add(3), u32x4_add(v128_load(outp.add(3)), u32x4_extend_high_u16x8(hi16)));
+            }
+        }
+        for i in chunks * 16..n {
+            col_sum[i] += row[i] as u32;
+        }
+    }
+
+    /// Horizontally reduces vertically summed RGBA `u32` columns into `[R, G, B, 0]` `u8` pixels using
+    /// 4-lane `u32x4_add`, matching `(sum + n / 2) / n` bit for bit.
+    ///
+    /// # Safety
+    /// `col_sum.len() == w * 4` and `dst.len() == pw * 4`.
+    pub(super) unsafe fn box_hreduce_rgba32_simd128(
+        col_sum: &[u32],
+        dst: &mut [u8],
+        w: usize,
+        pw: usize,
+        fx: usize,
+        ny: u32,
+    ) {
+        let cp = col_sum.as_ptr() as *const v128;
+        let full = w / fx;
+        let full_n = fx as u32 * ny;
+        let full_half = full_n / 2;
+        let write_px = |dst: &mut [u8], ox: usize, sum: v128, n: u32, half: u32| {
+            let d = ox * 4;
+            dst[d] = ((u32x4_extract_lane::<0>(sum) + half) / n) as u8;
+            dst[d + 1] = ((u32x4_extract_lane::<1>(sum) + half) / n) as u8;
+            dst[d + 2] = ((u32x4_extract_lane::<2>(sum) + half) / n) as u8;
+        };
+        match fx {
+            2 => {
+                for ox in 0..full {
+                    // SAFETY: `ox * 2 + 1 < w`.
+                    let sum = unsafe { u32x4_add(v128_load(cp.add(ox * 2)), v128_load(cp.add(ox * 2 + 1))) };
+                    write_px(dst, ox, sum, full_n, full_half);
+                }
+            }
+            3 => {
+                for ox in 0..full {
+                    // SAFETY: `ox * 3 + 2 < w`.
+                    let sum = unsafe {
+                        let p = cp.add(ox * 3);
+                        u32x4_add(u32x4_add(v128_load(p), v128_load(p.add(1))), v128_load(p.add(2)))
+                    };
+                    write_px(dst, ox, sum, full_n, full_half);
+                }
+            }
+            4 => {
+                for ox in 0..full {
+                    // SAFETY: `ox * 4 + 3 < w`.
+                    let sum = unsafe {
+                        let p = cp.add(ox * 4);
+                        u32x4_add(
+                            u32x4_add(v128_load(p), v128_load(p.add(1))),
+                            u32x4_add(v128_load(p.add(2)), v128_load(p.add(3))),
+                        )
+                    };
+                    write_px(dst, ox, sum, full_n, full_half);
+                }
+            }
+            _ => {
+                for ox in 0..full {
+                    let x0 = ox * fx;
+                    // SAFETY: `x0 + fx <= w`.
+                    let mut sum = u32x4_splat(0);
+                    unsafe {
+                        for x in x0..x0 + fx {
+                            sum = u32x4_add(sum, v128_load(cp.add(x)));
+                        }
+                    }
+                    write_px(dst, ox, sum, full_n, full_half);
+                }
+            }
+        }
+        if full < pw {
+            let x0 = full * fx;
+            let n = (w - x0) as u32 * ny;
+            let half = n / 2;
+            let mut sum = u32x4_splat(0);
+            // SAFETY: `x0..w` are within `col_sum` (`w * 4` u32s = `w` `v128`s).
+            unsafe {
+                for x in x0..w {
+                    sum = u32x4_add(sum, v128_load(cp.add(x)));
+                }
+            }
+            write_px(dst, full, sum, n, half);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -600,9 +733,11 @@ mod tests {
             (37, 29, 128, true),
             // Mild downscaling (fx=1, fy=1)
             (199, 131, 128, true),
-            // Heavy downscaling with box prefilter (fx>=2, fy>=2) and partial edge cells
+            // Heavy downscaling with box prefilter (fx = 2, 3, 4, 5) and partial edge cells
             (321, 217, 96, true),
             (321, 217, 96, false),
+            (403, 299, 96, true),
+            (515, 387, 96, false),
             // Extreme aspect ratio (prefilter on one axis only)
             (257, 31, 96, true),
             // Tiny 1x1

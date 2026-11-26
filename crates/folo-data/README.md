@@ -19,7 +19,7 @@ the determinism rules.
 | `src/letterbox.rs` | Letterbox resize with exact box mapping both ways |
 | `src/resize.rs`, `src/warp/` | Bilinear resize and affine warp of 8-bit RGB images (`warp/mod.rs`, `warp/tests.rs`: reads a `Plane` of inline tiles with gap-only border fill, so a mosaic needs no canvas; also fuses warp, HSV, flips and planar conversion in one pass) |
 | `src/simd/` | Bit-exact AVX2/FMA SIMD kernels and scalar fallbacks (`mod.rs`, `tests.rs`): `planar.rs` (32-wide RGB → planar `u8`/`f32` and packed `RGB0` `u32`, row flip, mixup blend, `RGBA`/`L8` → `RGB`), `bilinear/` (`mod.rs`, `hinterp.rs`, `warp.rs`: vertical blend and horizontal fixed-point interpolation for resize and warp), `box_filter.rs` (vertical row sum and horizontal box-downsample reduction), `hsv/` (`mod.rs`, `fused.rs`: gather-free AVX2 hexcone HSV and L1-fused warp/RGB → HSV → flip → planar passes) |
-| `src/augment/` | `mod.rs` (`AugmentConfig`), `geometry.rs` (affine, flips), `hsv.rs`, `mosaic.rs` (mosaic and mixup), `pipeline.rs` (`TrainTransform`, the training transform) |
+| `src/augment/` | `mod.rs` (`AugmentConfig`), `geometry.rs` (affine, flips), `hsv.rs`, `mosaic.rs` (mosaic and mixup), `occlusion.rs` (box-aware `cutmix`, `copy_paste`, and `random_erasing`), `pipeline.rs` (`TrainTransform`, the training transform) |
 | `src/loader.rs` | `DataLoader`: worker threads, batches identical for a seed and epoch whatever the worker count |
 | `src/ram_cache.rs` | `--cache ram`: decoded, resized training images kept in memory |
 | `src/synthetic/` | `mod.rs` (the shapes generator, `write_yolo`, `SyntheticDataset`), `raster.rs` (rasteriser, backgrounds), `math.rs` (sine, cosine and powers of two from basic operations), `tests.rs` (golden digests) |

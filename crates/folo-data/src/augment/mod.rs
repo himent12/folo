@@ -8,12 +8,14 @@
 //!   [`BoxFilter`]).
 //! - `hsv.rs`: HSV colour jitter ([`random_hsv`], [`apply_hsv`]). `mosaic.rs`: [`mosaic4`], [`mosaic_affine`] and
 //!   [`mixup`].
+//! - `occlusion.rs`: box-aware [`cutmix`], [`copy_paste`], and [`random_erasing`].
 //! - `pipeline.rs`: [`TrainTransform`], the training transform.
 //! - This file: [`AugmentConfig`], the parameters (`TrainConfig.augment` in docs/API.md).
 
 mod geometry;
 mod hsv;
 mod mosaic;
+mod occlusion;
 mod pipeline;
 
 pub use geometry::{
@@ -22,6 +24,10 @@ pub use geometry::{
 };
 pub use hsv::{apply_hsv, random_hsv};
 pub use mosaic::{mixup, mosaic_affine, mosaic4};
+pub use occlusion::{
+    CopyPasteConfig, ErasingFill, RandomErasingConfig, copy_paste, cutmix, cutmix_rect, erase_rect,
+    random_erasing,
+};
 pub use pipeline::{Fetched, TrainTransform, Transformed};
 pub(crate) use pipeline::{FetchedSample, ProducedMeta};
 

@@ -32,7 +32,7 @@ fn rms_row_rstd(row: &[f32], inv_d: f32, eps: f32) -> f32 {
 }
 
 #[inline]
-fn rms_apply_scalar(x: &[f32], y: &mut [f32], w: Option<&[f32]>, rstd: f32) {
+pub(super) fn rms_apply_scalar(x: &[f32], y: &mut [f32], w: Option<&[f32]>, rstd: f32) {
     match w {
         Some(w) => {
             for ((&xv, yv), &wv) in x.iter().zip(y).zip(w) {
@@ -119,6 +119,11 @@ fn rms_apply(x: &[f32], y: &mut [f32], w: Option<&[f32]>, rstd: f32) {
     if x.len() >= 8 && has_avx2_fma() {
         // SAFETY: AVX2 and FMA were detected above.
         unsafe { rms_apply_avx2_fma(x, y, w, rstd) };
+        return;
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len() >= 4 {
+        super::wasm_simd::rms_apply_wasm(x, y, w, rstd);
         return;
     }
     rms_apply_scalar(x, y, w, rstd);
@@ -298,6 +303,10 @@ fn rms_bwd_c_block(x: &[f32], g: &[f32], w: Option<&[f32]>, rstd: f32) -> f32 {
         // SAFETY: AVX2 and FMA were detected above.
         return unsafe { rms_bwd_c_avx2_fma(x, g, w, rstd) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len() >= 16 {
+        return super::wasm_simd::rms_bwd_c_wasm(x, g, w, rstd);
+    }
     rms_bwd_c_scalar(x, g, w, rstd)
 }
 
@@ -346,7 +355,7 @@ pub(super) fn rms_bwd_write_scalar_for_test(
 }
 
 #[inline]
-fn rms_bwd_write_scalar(
+pub(super) fn rms_bwd_write_scalar(
     x: &[f32],
     g: &[f32],
     w: Option<&[f32]>,
@@ -493,6 +502,11 @@ fn rms_bwd_write(
     if x.len() >= 8 && has_avx2_fma() {
         // SAFETY: AVX2 and FMA were detected above.
         unsafe { rms_bwd_write_avx2_fma(x, g, w, dx, dw, rstd, c_d) };
+        return;
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len() >= 4 {
+        super::wasm_simd::rms_bwd_write_wasm(x, g, w, dx, dw, rstd, c_d);
         return;
     }
     rms_bwd_write_scalar(x, g, w, dx, dw, rstd, c_d);
