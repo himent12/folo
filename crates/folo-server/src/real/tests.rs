@@ -721,3 +721,75 @@ fn delete_dataset_if_unused_protects_shared_and_referenced_datasets() {
     assert_eq!(err.body.code, "dataset_in_use", "{err:?}");
     reopened.shutdown();
 }
+
+#[test]
+fn stale_v7_index_cache_is_rebuilt_on_reopen() {
+    let t = TestDir::new("real-index-version-bump");
+    let home = t.join("home");
+    let data = t.join("yolo");
+    std::fs::create_dir_all(data.join("images/train")).unwrap();
+    std::fs::create_dir_all(data.join("labels/train")).unwrap();
+    image::RgbImage::from_pixel(32, 32, image::Rgb([100, 150, 200]))
+        .save(data.join("images/train/a.png"))
+        .unwrap();
+    std::fs::write(data.join("labels/train/a.txt"), "0 0.5 0.5 0.4 0.4\n").unwrap();
+
+    let store = RealStore::open(home.clone());
+    let ds = store
+        .register_dataset(RegisterDataset {
+            name: None,
+            path: data.to_string_lossy().into_owned(),
+            format: DatasetFormat::Auto,
+        })
+        .unwrap();
+    store.shutdown();
+    drop(store);
+
+    // Downgrade the cached index JSON to pre-upgrade version 7 with a bogus `watched` list.
+    let cache_path = home.join("cache").join("datasets").join(format!("{}.json", ds.id));
+    let mut cached: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cache_path).unwrap()).unwrap();
+    assert_eq!(cached["version"], crate::index::INDEX_VERSION);
+    cached["version"] = serde_json::json!(7);
+    cached["watched"] = serde_json::json!([]);
+    std::fs::write(&cache_path, serde_json::to_vec(&cached).unwrap()).unwrap();
+
+    let reopened = RealStore::open(home);
+    let got = reopened.get_dataset(&ds.id).unwrap();
+    assert_eq!(got.splits.train, 1);
+    let rebuilt: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&cache_path).unwrap()).unwrap();
+    assert_eq!(rebuilt["version"], crate::index::INDEX_VERSION);
+    assert!(!rebuilt["watched"].as_array().unwrap().is_empty());
+    reopened.shutdown();
+}
+
+#[cfg(unix)]
+#[test]
+fn register_dataset_resolves_symlink_before_dotdot() {
+    let t = TestDir::new("real-register-symlink-dotdot");
+    let home = t.join("home");
+    let release = t.join("releases/v7");
+    std::fs::create_dir_all(release.join("images/birds/train")).unwrap();
+    std::fs::create_dir_all(release.join("meta")).unwrap();
+    std::fs::create_dir_all(t.join("work")).unwrap();
+    image::RgbImage::from_pixel(16, 16, image::Rgb([10, 20, 30]))
+        .save(release.join("images/birds/train/a.png"))
+        .unwrap();
+    std::fs::write(release.join("images/birds/train/a.txt"), "0 0.5 0.5 0.4 0.4\n").unwrap();
+    std::fs::write(release.join("meta/data.yaml"), "path: ../images/birds\ntrain: train\nnames: [bird]\n")
+        .unwrap();
+    std::os::unix::fs::symlink(release.join("meta"), t.join("work/current")).unwrap();
+
+    let via_parent = t.join("work/current").join("..").join("meta").join("data.yaml");
+    let store = RealStore::open(home);
+    let ds = store
+        .register_dataset(RegisterDataset {
+            name: None,
+            path: via_parent.to_string_lossy().into_owned(),
+            format: DatasetFormat::Auto,
+        })
+        .unwrap();
+    assert_eq!(ds.splits.train, 1);
+    store.shutdown();
+}

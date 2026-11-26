@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use folo_api::{Dataset, DatasetFormat};
 
 use crate::error::{Error, Result};
-use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, default_name, free_name, write_atomic};
+use crate::index::{Fingerprint, INDEX_VERSION, Index, default_name, free_name, write_atomic};
 use crate::runs::DatasetRef;
 use crate::store::Store;
 use crate::util::{claim_dir, fnv1a, rfc3339, unique_id, unix_now};
@@ -201,7 +201,7 @@ impl RealStore {
     ) -> Result<(Dataset, Option<String>)> {
         self.registry_loaded()?;
         // Registered absolute, so the registry works whatever the working directory of the next start.
-        let path = absolute(Path::new(&path)).to_string_lossy().into_owned();
+        let path = crate::index::resolve_input_path(&path).to_string_lossy().into_owned();
         // Registering a folder again (by its canonical path) returns the dataset it already is. Checked before
         // indexing (cheap) and again under the write lock (two requests for one folder may index at once).
         let want = std::fs::canonicalize(&path).ok();

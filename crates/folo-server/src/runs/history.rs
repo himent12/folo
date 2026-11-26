@@ -48,7 +48,9 @@ struct ParsedMetrics {
     steps: Vec<Step>,
     epochs: Vec<Epoch>,
     last_status: Option<String>,
-    resumed_unflushed: bool,
+    /// Set by a persisted `{"event":"resume"}` boundary (or a subsequent `"status":"running"` in legacy files) until
+    /// the resumed attempt writes its first step or epoch.
+    resumed_epoch: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +63,12 @@ struct EventTag<'a> {
 struct StatusTag<'a> {
     #[serde(borrow)]
     status: Cow<'a, str>,
+}
+
+#[derive(Deserialize)]
+struct ResumeTag {
+    #[serde(default)]
+    epoch: Option<u32>,
 }
 
 /// Zero-allocation string validator for skipped `log.jsonl` lines.
@@ -113,7 +121,7 @@ impl ParsedMetrics {
                         self.epochs.pop();
                     }
                     self.steps.push(s);
-                    self.resumed_unflushed = false;
+                    self.resumed_epoch = None;
                 }
             }
             "epoch" => {
@@ -122,19 +130,29 @@ impl ParsedMetrics {
                         self.epochs.pop();
                     }
                     self.epochs.push(e);
-                    self.resumed_unflushed = false;
+                    self.resumed_epoch = None;
                 }
             }
             "status" => {
                 if let Ok(st) = serde_json::from_slice::<StatusTag<'_>>(line) {
-                    if st.status == "running" && !self.steps.is_empty() {
-                        self.resumed_unflushed = true;
+                    // Legacy `metrics.jsonl` written before persisted `resume` markers: a subsequent `running`
+                    // event discards steps past the last completed epoch.
+                    if st.status == "running" && self.resumed_epoch.is_none() && !self.steps.is_empty() {
+                        let keep = self.epochs.last().map_or(0, |e| e.epoch);
+                        self.steps.retain(|s| s.epoch <= keep);
+                        self.resumed_epoch = Some(keep);
                     }
                     self.last_status = Some(st.status.into_owned());
                 }
             }
-            "resume" if !self.steps.is_empty() => {
-                self.resumed_unflushed = true;
+            "resume" => {
+                let keep = serde_json::from_slice::<ResumeTag>(line)
+                    .ok()
+                    .and_then(|r| r.epoch)
+                    .unwrap_or_else(|| self.epochs.last().map_or(0, |e| e.epoch));
+                self.epochs.retain(|e| e.epoch <= keep);
+                self.steps.retain(|s| s.epoch <= keep);
+                self.resumed_epoch = Some(keep);
             }
             _ => {}
         }
@@ -148,11 +166,12 @@ impl ParsedMetrics {
         tail: &[Step],
         q: &MetricsQuery,
     ) -> RunMetrics {
-        let hide_unflushed =
-            self.resumed_unflushed || (waiting_resume && self.last_status.as_deref() != Some("running"));
+        // Legacy fallback when a run was resumed before persisted `resume` markers existed.
+        let legacy_hide =
+            self.resumed_epoch.is_none() && waiting_resume && self.last_status.as_deref() != Some("running");
         let completed = epochs_done.max(self.epochs.last().map_or(0, |e| e.epoch));
 
-        let mut last = if hide_unflushed {
+        let mut last = if legacy_hide {
             self.steps.iter().rev().find(|s| s.epoch <= completed).map_or(0, |s| s.step)
         } else {
             self.steps.last().map_or(0, |s| s.step)
@@ -162,7 +181,7 @@ impl ParsedMetrics {
             Some(after) => self.steps.partition_point(|s| s.step <= after),
             None => 0,
         };
-        let mut steps: Vec<Step> = if hide_unflushed {
+        let mut steps: Vec<Step> = if legacy_hide {
             self.steps[start..].iter().copied().filter(|s| s.epoch <= completed).collect()
         } else {
             self.steps[start..].to_vec()
@@ -482,7 +501,10 @@ pub(super) fn reconcile(file: &mut RunFile, dir: &Path) {
     if file.run.started.is_some() {
         file.run.finished = last_trained(file, dir).map(rfc3339);
     }
-    let m = read_metrics(&dir.join("metrics.jsonl"));
+    let metrics_path = dir.join("metrics.jsonl");
+    super::ensure_trailing_newline(&metrics_path);
+    super::ensure_trailing_newline(&dir.join("log.jsonl"));
+    let m = read_metrics(&metrics_path);
     let ckpt = crate::engine::read_model_file(&dir.join("weights").join("last.folo"))
         .ok()
         .and_then(|f| f.checkpoint().map(|c| (c.epoch, c.best)));
@@ -533,4 +555,285 @@ fn last_trained(file: &RunFile, dir: &Path) -> Option<f64> {
 pub(super) fn read_metrics(path: &Path) -> RunMetrics {
     let mut cache = MetricsCache::default();
     cache.read_select(path, 0, false, &[], &MetricsQuery::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runs::{DatasetRef, RunEntry, Runs, append_line, mark_resume, now};
+    use crate::throughput::Throughput;
+    use folo_api::{DatasetFormat, RunStatus, StatusEvent, TrainConfig};
+    use folo_test_support::TestDir;
+
+    fn make_step(epoch: u32, step: u64, total: f32) -> Step {
+        serde_json::from_str(&format!(
+            r#"{{"epoch":{epoch},"step":{step},"loss":{{"box":1,"cls":1,"dfl":1,"total":{total}}},"lr":0.01,"imgs_per_s":1,"eta_s":1}}"#
+        ))
+        .unwrap()
+    }
+
+    fn make_epoch_with_map(epoch: u32, map50_95: f32) -> Epoch {
+        serde_json::from_str(&format!(
+            r#"{{"epoch":{epoch},"train_loss":{{"box":1,"cls":1,"dfl":1,"total":3}},"val":{{"map50":0.1,"map50_95":{map50_95},"precision":0.1,"recall":0.1,"per_class":[]}},"duration_s":1}}"#
+        ))
+        .unwrap()
+    }
+
+    fn make_epoch(epoch: u32) -> Epoch {
+        make_epoch_with_map(epoch, 0.05)
+    }
+
+    fn write_valid_checkpoint(path: &Path, epoch: u64, best_epoch_zero_based: i64, best_fitness: f64) {
+        use folo_core::rng::Rng;
+        use folo_nn::io::{
+            BestState, CheckpointParts, FileKind, Metadata, ModelConfig, RngState, save_checkpoint,
+        };
+        use folo_nn::optim::{Sgd, StandardGroups};
+        use folo_nn::{DecayKind, Linear, LrSchedule};
+        let mut rng = Rng::seed(0);
+        let model = Linear::new(2, 2, true, &mut rng);
+        let sg = StandardGroups::from_module(&model);
+        let optim = Sgd::new(sg.into_groups(0.01, 0.9, 5e-4)).unwrap();
+        let sched = LrSchedule::new(DecayKind::Cosine, 5, 2, 0.01, 0.0, 0.1, 0.8).unwrap();
+        let meta =
+            Metadata::new(FileKind::Checkpoint, ModelConfig::new("n", 1).unwrap(), vec!["box".into()], 64)
+                .unwrap();
+        let rng_state = RngState { seed: 0, streams: [("data".to_string(), Rng::seed(0))].into() };
+        let train_cfg = serde_json::json!({ "epochs": 5 });
+        let parts = CheckpointParts {
+            model: &model,
+            ema: None,
+            optimizer: &optim,
+            schedule: &sched,
+            rng: &rng_state,
+            epoch,
+            best: BestState { fitness: Some(best_fitness), epoch: best_epoch_zero_based },
+            train_config: &train_cfg,
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        save_checkpoint(path, &meta, &parts).unwrap();
+    }
+
+    fn record(ev: RunEvent) -> String {
+        folo_vision::train::event_record(&ev).to_string()
+    }
+
+    /// A persisted `resume` boundary discards pre-resume steps past the boundary immediately, so even if the
+    /// resumed attempt skips the first step (e.g. a non-finite batch) or writes an epoch event directly, discarded
+    /// steps from the previous attempt never leak back.
+    #[test]
+    fn resume_boundary_never_leaks_discarded_steps_when_first_resumed_step_is_skipped() {
+        let dir = TestDir::new("history-resume-boundary");
+        let path = dir.join("metrics.jsonl");
+        let lines = [
+            record(RunEvent::Status(StatusEvent::new(RunStatus::Running, None))),
+            record(RunEvent::Step(make_step(1, 1, 3.0))),
+            record(RunEvent::Step(make_step(1, 2, 2.5))),
+            record(RunEvent::Epoch(make_epoch(1))),
+            record(RunEvent::Step(make_step(2, 3, 9.0))),
+            record(RunEvent::Step(make_step(2, 4, 8.0))),
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        mark_resume(&path, 1);
+
+        // Immediately after resume (before any new step), discarded epoch-2 steps are gone.
+        let m = read_metrics(&path);
+        assert_eq!(m.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(m.epochs.iter().map(|e| e.epoch).collect::<Vec<_>>(), [1]);
+
+        // Resumed attempt skips step 3 (non-finite batch) and emits step 4 (loss 1.2) + epoch 2: old step 3 must
+        // stay gone.
+        append_line(&path, &record(RunEvent::Status(StatusEvent::new(RunStatus::Running, None))));
+        append_line(&path, &record(RunEvent::Step(make_step(2, 4, 1.2))));
+        append_line(&path, &record(RunEvent::Epoch(make_epoch(2))));
+        let after = read_metrics(&path);
+        assert_eq!(after.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2, 4]);
+        assert_eq!(after.steps[2].loss.total, 1.2);
+        assert_eq!(after.epochs.iter().map(|e| e.epoch).collect::<Vec<_>>(), [1, 2]);
+    }
+
+    /// Cloud resume where `weights/last.folo` is absent OR lags mirrored `metrics.jsonl` (e.g. instance died
+    /// after mirroring epochs 2–3 while `last.folo` is still at epoch 1): `resume` truncates lost epochs and
+    /// restores `run.epoch`, `run.step`, and `run.best` from the synced checkpoint and retained history.
+    #[test]
+    fn cloud_resume_truncates_metrics_and_rolls_back_best_and_step_to_checkpoint() {
+        let dir = TestDir::new("history-cloud-resume");
+        let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+        let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"cloud"}"#).unwrap();
+        let dataset = DatasetRef {
+            id: "ds_1".into(),
+            name: "d".into(),
+            path: "nowhere".into(),
+            format: DatasetFormat::Yolo,
+            classes: vec![],
+        };
+
+        // Case 1: no `weights/last.folo` synced -> restarts from epoch 0, clearing step and best.
+        let e = runs.register(config.clone(), dataset.clone(), None, None, 0, "cpu".into(), None).unwrap();
+        let lines = [
+            record(RunEvent::Step(make_step(1, 1, 3.0))),
+            record(RunEvent::Epoch(make_epoch_with_map(1, 0.40))),
+            record(RunEvent::Step(make_step(2, 2, 2.0))),
+            record(RunEvent::Epoch(make_epoch_with_map(2, 0.85))),
+            record(RunEvent::Step(make_step(3, 3, 1.5))),
+        ];
+        std::fs::write(e.metrics_path(), lines.join("\n") + "\n").unwrap();
+        {
+            let mut st = e.state.lock().unwrap();
+            st.file.epochs_done = 2;
+            st.file.run.epoch = 2;
+            st.file.run.step = 3;
+            st.file.run.best = Some(BestEpoch { epoch: 2, map50_95: 0.85 });
+            st.file.run.started = Some(now());
+            e.finish(&mut st, RunStatus::Failed, Some("instance lost".into()));
+        }
+        let (resumed, _) = runs.restart(&e, config.clone(), None).unwrap();
+        assert_eq!((resumed.epoch, resumed.step, resumed.best), (0, 0, None));
+        let m = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
+        assert!(m.steps.is_empty() && m.epochs.is_empty(), "lost cloud epochs must be hidden on resume");
+
+        // Case 2: real `weights/last.folo` synced at epoch 1 (best = 0.40), while `metrics.jsonl` mirrored
+        // epochs 1..3 (best = epoch 2 at 0.85) + partial epoch 4 (step 7).
+        let e2 = runs.register(config.clone(), dataset.clone(), None, None, 0, "cpu".into(), None).unwrap();
+        let lines2 = [
+            record(RunEvent::Step(make_step(1, 1, 3.0))),
+            record(RunEvent::Step(make_step(1, 2, 2.6))),
+            record(RunEvent::Epoch(make_epoch_with_map(1, 0.40))),
+            record(RunEvent::Step(make_step(2, 3, 2.0))),
+            record(RunEvent::Step(make_step(2, 4, 1.8))),
+            record(RunEvent::Epoch(make_epoch_with_map(2, 0.85))),
+            record(RunEvent::Step(make_step(3, 5, 1.6))),
+            record(RunEvent::Step(make_step(3, 6, 1.5))),
+            record(RunEvent::Epoch(make_epoch_with_map(3, 0.60))),
+            record(RunEvent::Step(make_step(4, 7, 1.4))),
+        ];
+        std::fs::write(e2.metrics_path(), lines2.join("\n") + "\n").unwrap();
+        write_valid_checkpoint(&e2.dir.join("weights").join("last.folo"), 1, 0, 0.40);
+        {
+            let mut st = e2.state.lock().unwrap();
+            st.file.epochs_done = 3;
+            st.file.run.epoch = 3;
+            st.file.run.step = 7;
+            st.file.run.best = Some(BestEpoch { epoch: 2, map50_95: 0.85 });
+            st.file.run.started = Some(now());
+            e2.finish(&mut st, RunStatus::Failed, Some("instance lost".into()));
+        }
+        let (resumed2, _) = runs.restart(&e2, config.clone(), None).unwrap();
+        assert_eq!(resumed2.epoch, 1);
+        assert_eq!(resumed2.step, 2, "step must roll back to epoch 1's last retained step");
+        assert_eq!(resumed2.best, Some(BestEpoch { epoch: 1, map50_95: 0.40 }));
+        let m2 = runs.metrics(e2.id(), &MetricsQuery::default()).unwrap();
+        assert_eq!(m2.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(m2.epochs.iter().map(|ep| ep.epoch).collect::<Vec<_>>(), [1]);
+
+        // A subsequent resumed epoch 2 with 0.55 beats the rolled-back epoch 1 (0.40) and becomes the new best.
+        e2.on_event(&RunEvent::Epoch(make_epoch_with_map(2, 0.55)));
+        assert_eq!(e2.run().best, Some(BestEpoch { epoch: 2, map50_95: 0.55 }));
+
+        // Case 3: synced `weights/last.folo` is AHEAD of mirrored local history (history has epoch 1 at 0.40,
+        // checkpoint is at epoch 2 with best = 0.80 at epoch 2). Resume must advance epoch/step/best to the
+        // checkpoint boundary instead of leaving progress and best behind the checkpoint it loads.
+        let e3 = runs.register(config.clone(), dataset, None, None, 10, "cpu".into(), None).unwrap();
+        let lines3 = [
+            record(RunEvent::Step(make_step(1, 1, 3.0))),
+            record(RunEvent::Step(make_step(1, 10, 2.2))),
+            record(RunEvent::Epoch(make_epoch_with_map(1, 0.40))),
+        ];
+        std::fs::write(e3.metrics_path(), lines3.join("\n") + "\n").unwrap();
+        write_valid_checkpoint(&e3.dir.join("weights").join("last.folo"), 2, 1, 0.80);
+        {
+            let mut st = e3.state.lock().unwrap();
+            st.file.epochs_done = 1;
+            st.file.run.epoch = 1;
+            st.file.run.step = 10;
+            st.file.run.steps_per_epoch = 10;
+            st.file.run.best = Some(BestEpoch { epoch: 1, map50_95: 0.40 });
+            st.file.run.started = Some(now());
+            e3.finish(&mut st, RunStatus::Failed, Some("instance lost".into()));
+        }
+        let (resumed3, _) = runs.restart(&e3, config, None).unwrap();
+        assert_eq!(resumed3.epoch, 2, "epoch must match checkpoint ahead of local history");
+        assert_eq!(resumed3.step, 20, "step must match checkpoint epoch * steps_per_epoch");
+        assert_eq!(resumed3.best, Some(BestEpoch { epoch: 2, map50_95: 0.80 }));
+        assert_eq!(e3.state.lock().unwrap().file.epochs_done, 2);
+        runs.shutdown(None);
+    }
+
+    /// Reconciling after a crash that left torn trailing lines in `metrics.jsonl` and `log.jsonl` heals both
+    /// trailing newlines so startup interruption warnings and subsequent metric appends parse cleanly while
+    /// ignoring the torn fragments.
+    #[test]
+    fn reconcile_and_cloud_recovery_heal_torn_trailing_lines_before_appends() {
+        let dir = TestDir::new("history-torn-reconcile");
+        let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"torn"}"#).unwrap();
+        let dataset = DatasetRef {
+            id: "ds_1".into(),
+            name: "d".into(),
+            path: "nowhere".into(),
+            format: DatasetFormat::Yolo,
+            classes: vec![],
+        };
+        let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+        let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
+        let torn = format!(
+            "{}\n{}\n{{\"event\":\"step\",\"epoch\":2,\"step\":2",
+            record(RunEvent::Step(make_step(1, 1, 3.0))),
+            record(RunEvent::Epoch(make_epoch(1))),
+        );
+        std::fs::write(e.metrics_path(), torn).unwrap();
+        std::fs::write(
+            e.dir.join("log.jsonl"),
+            concat!(
+                r#"{"t":"2026-01-01T00:00:00Z","level":"info","message":"before-crash"}"#,
+                "\n",
+                r#"{"t":"torn"#,
+            ),
+        )
+        .unwrap();
+        {
+            let mut st = e.state.lock().unwrap();
+            st.file.run.status = RunStatus::Running;
+            st.file.run.started = Some(now());
+            e.persist(&st);
+        }
+        runs.shutdown(None);
+
+        // Reopen triggers `reconcile`, which must heal both `metrics.jsonl` and `log.jsonl` before `Runs::open`
+        // appends its interruption warning.
+        let reopened = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+        let e2: Arc<RunEntry> = reopened.get(e.id()).unwrap();
+        assert_eq!(e2.run().epoch, 1);
+        append_line(&e2.metrics_path(), &record(RunEvent::Step(make_step(2, 2, 1.9))));
+        let m = reopened.metrics(e2.id(), &MetricsQuery::default()).unwrap();
+        assert_eq!(m.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(m.steps[1].loss.total, 1.9);
+        let logs = reopened.logs(e2.id(), &LogsQuery::last(10)).unwrap();
+        let msgs: Vec<&str> = logs.lines.iter().map(|l| l.message.as_str()).collect();
+        assert_eq!(msgs.len(), 2, "both pre-crash log and restart warning must parse cleanly: {msgs:?}");
+        assert_eq!(msgs[0], "before-crash");
+        assert!(msgs[1].contains("server stopped"), "expected restart warning, got {:?}", msgs[1]);
+
+        // Direct check of `ensure_trailing_newline` on torn metrics and log files with real newlines.
+        let cloud_metrics = dir.join("cloud_metrics.jsonl");
+        let cloud_log = dir.join("cloud_log.jsonl");
+        std::fs::write(
+            &cloud_metrics,
+            format!("{}\n{{\"event\":\"step\"", record(RunEvent::Step(make_step(1, 1, 3.0)))),
+        )
+        .unwrap();
+        std::fs::write(
+            &cloud_log,
+            concat!(r#"{"t":"2026-01-01T00:00:00Z","level":"info","message":"ok"}"#, "\n", r#"{"t":"torn"#,),
+        )
+        .unwrap();
+        crate::runs::ensure_trailing_newline(&cloud_metrics);
+        crate::runs::ensure_trailing_newline(&cloud_log);
+        append_line(&cloud_metrics, &record(RunEvent::Step(make_step(1, 2, 2.2))));
+        append_line(&cloud_log, r#"{"t":"2026-01-01T00:00:01Z","level":"info","message":"recovered"}"#);
+        let cm = read_metrics(&cloud_metrics);
+        assert_eq!(cm.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
+        let cl = read_logs(&cloud_log, &LogsQuery::last(10));
+        assert_eq!(cl.lines.iter().map(|l| l.message.as_str()).collect::<Vec<_>>(), ["ok", "recovered"]);
+        reopened.shutdown(None);
+    }
 }

@@ -267,8 +267,17 @@ fn predictions_go_in_parts_in_process() {
     folo_server::Store::shutdown(&*store);
 }
 
-/// A real server on a loopback port, for the time of `f(url, benchmark id, folder)`.
+/// A real server on a loopback port, for the time of `f(url, benchmark id, folder)`. Server and store shutdown
+/// always run on drop even if `f` panics.
 fn with_server(name: &str, f: impl FnOnce(&str, &str, &Path)) {
+    struct Guard(Option<Box<dyn FnOnce()>>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            if let Some(d) = self.0.take() {
+                d();
+            }
+        }
+    }
     let home = folo_test_support::TestDir::new(name);
     let (store, id) = bench_store(&home.join("server"));
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -279,10 +288,12 @@ fn with_server(name: &str, f: impl FnOnce(&str, &str, &Path)) {
     let serving = rt.spawn(server.serve(listener, async move {
         let _ = stopped.await;
     }));
+    let _guard = Guard(Some(Box::new(move || {
+        let _ = stop.send(());
+        let _ = rt.block_on(serving);
+        folo_server::Store::shutdown(&*store);
+    })));
     f(&url, &id, home.path());
-    let _ = stop.send(());
-    rt.block_on(serving).unwrap().unwrap();
-    folo_server::Store::shutdown(&*store);
 }
 
 fn http(url: &str) -> Benchmarks {
@@ -429,7 +440,22 @@ fn forward(mut client: std::net::TcpStream, upstream: &str, hook: &dyn Fn(&str) 
         return;
     }
     let mut answer = Vec::new();
-    if server.read_to_end(&mut answer).is_ok() && fate == Fate::Pass {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut chunk = [0u8; 4096];
+    let ok = loop {
+        let Some(rem) = deadline.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero())
+        else {
+            break false;
+        };
+        let _ = server.set_read_timeout(Some(rem));
+        match server.read(&mut chunk) {
+            Ok(0) => break true,
+            Ok(n) => answer.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break false,
+        }
+    };
+    if ok && fate == Fate::Pass {
         let _ = client.write_all(&answer);
     }
     let _ = client.shutdown(std::net::Shutdown::Both);

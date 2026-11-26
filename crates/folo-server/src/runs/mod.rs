@@ -200,10 +200,43 @@ pub(crate) fn append_line(path: &Path, line: &str) {
     }
 }
 
-/// Appends a persisted resume boundary marker (`{"event":"resume"}`) to an existing non-empty `metrics.jsonl`,
-/// inserting a leading `\n` if the file ends with a torn line that lacks a trailing newline. Called only when the
-/// run is inactive (under `RunEntry.state`), so no trainer or cloud mirror is concurrently writing the file.
-pub(super) fn mark_resume(path: &Path) {
+/// Ensures an existing non-empty JSONL file ends with `\n`, appending one if a crash left a torn trailing line so
+/// subsequent appends (e.g., recovered cloud mirroring or resumed training) never glue onto a partial record.
+/// Called only when no writer is concurrently appending to `path`.
+pub(crate) fn ensure_trailing_newline(path: &Path) {
+    let mut f = match std::fs::OpenOptions::new().read(true).append(true).open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!("opening {} to check trailing newline: {e}", path.display());
+            return;
+        }
+    };
+    let len = match f.seek(SeekFrom::End(0)) {
+        Ok(0) => return,
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("seeking {} to check trailing newline: {e}", path.display());
+            return;
+        }
+    };
+    let mut last = [0u8; 1];
+    match f.seek(SeekFrom::Start(len - 1)).and_then(|_| f.read_exact(&mut last)) {
+        Ok(()) if last[0] != b'\n' => {
+            if let Err(e) = f.write_all(b"\n") {
+                tracing::warn!("writing newline to {}: {e}", path.display());
+            }
+        }
+        Ok(()) => {}
+        Err(e) => tracing::warn!("reading {} tail: {e}", path.display()),
+    }
+}
+
+/// Appends a persisted resume boundary marker (`{"event":"resume","epoch":<epoch>}`) to an existing non-empty
+/// `metrics.jsonl`, inserting a leading `\n` if the file ends with a torn line that lacks a trailing newline.
+/// Called only when the run is inactive (under `RunEntry.state`), so no trainer or cloud mirror is concurrently
+/// writing the file.
+pub(super) fn mark_resume(path: &Path, epoch: u32) {
     let mut f = match std::fs::OpenOptions::new().read(true).append(true).open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
@@ -228,7 +261,8 @@ pub(super) fn mark_resume(path: &Path) {
             return;
         }
     };
-    let record = if needs_newline { "\n{\"event\":\"resume\"}\n" } else { "{\"event\":\"resume\"}\n" };
+    let prefix = if needs_newline { "\n" } else { "" };
+    let record = format!("{prefix}{{\"event\":\"resume\",\"epoch\":{epoch}}}\n");
     if let Err(e) = f.write_all(record.as_bytes()) {
         tracing::warn!("writing resume marker to {}: {e}", path.display());
     }

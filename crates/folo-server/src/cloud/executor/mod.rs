@@ -113,6 +113,8 @@ pub(crate) fn abandon(core: &Core, entry: &Arc<RunEntry>, why: &str) -> Result<(
     }
     entry.execute(|| {
         let _lock = lock;
+        crate::runs::ensure_trailing_newline(&entry.metrics_path());
+        crate::runs::ensure_trailing_newline(&dir.join("log.jsonl"));
         entry.log(
             LogLevel::Warn,
             format!(

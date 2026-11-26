@@ -30,6 +30,10 @@ impl Exec {
     }
 
     pub(super) fn recover(&mut self) -> std::result::Result<Outcome, Halt> {
+        // Repair any torn trailing line left by a crash before any recovery, interruption, or release path appends
+        // logs/metrics (this thread already holds `self._lock`, so no other writer is active on these files).
+        crate::runs::ensure_trailing_newline(&self.entry.metrics_path());
+        crate::runs::ensure_trailing_newline(&self.dir.join("log.jsonl"));
         // Collected before the restart: what is left is the release.
         if let Some(o) = self.private.outcome.clone() {
             return Ok(o);

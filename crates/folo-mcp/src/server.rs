@@ -266,12 +266,12 @@ impl FoloMcp {
         FoloMcp {
             inner: Arc::new(Inner {
                 store,
+                confinement: Confinement::new(paths.clone(), proxy.clone()),
                 proxy,
                 labels,
                 benchmarks,
                 mock,
                 opts,
-                confinement: Confinement::new(paths.clone()),
                 paths,
                 created_runs: Mutex::new(Vec::new()),
                 batches: Mutex::new(BatchCache::new()),
