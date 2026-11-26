@@ -22,11 +22,12 @@ thread_local! {
     static STAGE_PANNED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Interrupts an in-progress stage drag (e.g. from wheel zoom or `0` reset): if a press is still
-/// held (`was_dragging`), keep `STAGE_PANNED` set so releasing near the press point does not turn
-/// an interrupted gesture into a box click; otherwise clear it.
+/// Latches `STAGE_PANNED` when an active drag is interrupted (e.g. by wheel zoom or `0`/Fit), so
+/// multiple interrupting events during the same held press never re-enable box clicking on release.
 pub(super) fn interrupt_stage_drag(was_dragging: bool) {
-    STAGE_PANNED.with(|p| p.set(was_dragging));
+    if was_dragging {
+        STAGE_PANNED.with(|p| p.set(true));
+    }
 }
 
 impl FoloApp {

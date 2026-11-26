@@ -163,30 +163,34 @@ fn concurrent_multi_render_is_byte_identical_across_thread_counts_and_workers() 
     let barrier = Arc::new(Barrier::new(thread_counts.len()));
 
     // Render concurrently from multiple OS threads with varied internal worker thread counts.
+    // Use a one-shot start barrier and collect mismatches before asserting on the main thread so a
+    // failure can never deadlock peer workers on a later barrier.
     let handles: Vec<_> = thread_counts
         .into_iter()
         .map(|threads| {
             let s = Arc::clone(&s);
             let want = Arc::clone(&reference);
             let barrier = Arc::clone(&barrier);
-            std::thread::spawn(move || {
+            std::thread::spawn(move || -> Result<(), String> {
                 let mut r = Renderer::with_threads(threads);
                 let mut fb = Framebuffer::new(W, H);
+                barrier.wait();
                 for iter in 0..3 {
                     fb.fill(0x0013_579b ^ (iter * 0x0101_0101));
                     r.invalidate();
-                    barrier.wait();
                     r.render(&s, blend(), &mut fb);
-                    assert_eq!(
-                        fb.pixels, *want,
-                        "threads={threads} iter={iter}: concurrent render diverged from 1-thread reference"
-                    );
+                    if fb.pixels != *want {
+                        return Err(format!(
+                            "threads={threads} iter={iter}: concurrent render diverged from 1-thread reference"
+                        ));
+                    }
                 }
+                Ok(())
             })
         })
         .collect();
 
     for h in handles {
-        h.join().expect("render worker panicked");
+        h.join().expect("render worker panicked").expect("concurrent render matched 1-thread reference");
     }
 }

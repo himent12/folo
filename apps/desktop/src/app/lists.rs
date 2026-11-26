@@ -26,6 +26,12 @@ pub struct ListTickets {
     seq: u64,
     installed: [u64; 3],
     changed: [u64; 3],
+    /// Per dataset id, the ticket of the newest detail record (`GET /api/datasets/{id}`) installed,
+    /// sharing `seq` with list fetches so out-of-order list and detail responses reconcile cleanly.
+    detail_installed: std::collections::HashMap<String, u64>,
+    /// Per dataset id, the shared-sequence ticket of the latest in-flight detail read, so a newer
+    /// list summary can cancel an older pending detail request without altering `ds_read_seq`.
+    detail_in_flight: std::collections::HashMap<String, u64>,
     /// Per list, all fetch tickets still outstanding, so overlapping explicit/poll fetches never
     /// lose track of an earlier in-flight request.
     in_flight: [Vec<u64>; 3],
@@ -35,10 +41,54 @@ pub struct ListTickets {
 }
 
 impl ListTickets {
-    /// A ticket for a fetch of `list` asked for now.
+    /// A ticket for a fetch asked for now (shared by list and dataset-detail requests).
     pub fn ask(&mut self) -> u64 {
         self.seq += 1;
         self.seq
+    }
+
+    /// The newest installed ticket for `list` (0 if none installed yet).
+    pub fn list_installed(&self, list: List) -> u64 {
+        self.installed[list as usize]
+    }
+
+    /// Allocates and records a shared-sequence ticket for an in-flight dataset detail read.
+    pub fn start_detail(&mut self, id: &str) -> u64 {
+        let ticket = self.ask();
+        self.detail_in_flight.insert(id.to_string(), ticket);
+        ticket
+    }
+
+    /// Whether the latest in-flight detail read for `id` predates `list_ticket`.
+    pub fn detail_in_flight_older_than(&self, id: &str, list_ticket: u64) -> bool {
+        self.detail_in_flight.get(id).is_some_and(|&t| t < list_ticket)
+    }
+
+    /// Clears the in-flight detail marker for `id` if it matches `ticket` (or unconditionally when `None`).
+    pub fn finish_detail(&mut self, id: &str, ticket: Option<u64>) {
+        if ticket.is_none_or(|t| self.detail_in_flight.get(id) == Some(&t)) {
+            self.detail_in_flight.remove(id);
+        }
+    }
+
+    /// Records that a detail record for `id` asked for at `ticket` was installed.
+    pub fn note_detail(&mut self, id: &str, ticket: u64) {
+        self.finish_detail(id, Some(ticket));
+        let e = self.detail_installed.entry(id.to_string()).or_insert(0);
+        if ticket > *e {
+            *e = ticket;
+        }
+    }
+
+    /// The newest installed detail ticket for `id` (0 if none installed yet).
+    pub fn detail_ticket(&self, id: &str) -> u64 {
+        self.detail_installed.get(id).copied().unwrap_or(0)
+    }
+
+    /// Drops the recorded detail ticket for `id` (e.g. when the dataset is removed).
+    pub fn forget_detail(&mut self, id: &str) {
+        self.detail_installed.remove(id);
+        self.detail_in_flight.remove(id);
     }
 
     /// A ticket for a fetch of `list`, recorded as in flight.
@@ -95,7 +145,12 @@ impl ListTickets {
     /// dropped, a retry among them too, so the new request goes out at once and only its answer counts.
     pub fn restart(&mut self, list: List) {
         self.changed(list);
+        self.in_flight[list as usize].clear();
         self.retrying[list as usize] = 0;
+        if list == List::Datasets {
+            self.detail_installed.clear();
+            self.detail_in_flight.clear();
+        }
     }
 }
 
@@ -179,7 +234,7 @@ impl FoloApp {
                 move |this, r, cx| {
                     let loaded = this.store.datasets.ready().is_some();
                     if let Some(l) = take(this, list, ticket, r, loaded) {
-                        this.install_datasets(l, cx);
+                        this.install_datasets(l, ticket, cx);
                     }
                 },
             ),
@@ -233,7 +288,8 @@ impl FoloApp {
     }
 
     /// Keeps the cached list summary aligned when a per-dataset record (`GET /api/datasets/{id}`)
-    /// refreshes first so list filters, format counts, and cards agree on one record.
+    /// refreshes first so list filters, format counts, and cards agree on one record. Leaves
+    /// `item.revision` (and `item.stats`) untouched because `GET /api/datasets` omits revisions.
     pub(super) fn sync_dataset_summary(&mut self, fresh: &Dataset) {
         if let Some(list) = self.store.datasets.ready_mut()
             && let Some(item) = list.iter_mut().find(|d| d.id == fresh.id)
@@ -243,27 +299,38 @@ impl FoloApp {
             item.format = fresh.format;
             item.classes = fresh.classes.clone();
             item.splits = fresh.splits;
-            item.revision = fresh.revision.clone();
         }
     }
 
-    pub(super) fn install_datasets(&mut self, list: Vec<Dataset>, cx: &mut Context<Self>) {
+    pub(super) fn install_datasets(&mut self, mut list: Vec<Dataset>, ticket: u64, cx: &mut Context<Self>) {
+        // Reconcile against any newer per-dataset detail record that already landed after `ticket`
+        // was sent: keep its fresher summary fields instead of regressing or evicting it.
+        for d in &mut list {
+            if self.list_tickets.detail_ticket(&d.id) > ticket
+                && let Some(newer) = self.store.dataset.get(&d.id).and_then(|l| l.ready())
+            {
+                d.name = newer.name.clone();
+                d.path = newer.path.clone();
+                d.format = newer.format;
+                d.classes = newer.classes.clone();
+                d.splits = newer.splits;
+            }
+        }
         if self.store.datasets.ready() == Some(&list) {
             return;
         }
-        let stale_cached: Vec<String> = self
+        let changed_ids: Vec<String> = self
             .store
             .datasets
             .ready()
             .into_iter()
             .flat_map(|old| {
                 list.iter().filter_map(|d| {
-                    let prev = old.iter().find(|x| x.id == d.id)?;
-                    if !dataset_summary_changed(prev, d) {
+                    if self.list_tickets.detail_ticket(&d.id) > ticket {
                         return None;
                     }
-                    let cached = self.store.dataset.get(&d.id).and_then(|l| l.ready())?;
-                    dataset_summary_changed(cached, d).then(|| d.id.clone())
+                    let prev = old.iter().find(|x| x.id == d.id)?;
+                    dataset_summary_changed(prev, d).then(|| d.id.clone())
                 })
             })
             .collect();
@@ -277,11 +344,29 @@ impl FoloApp {
             self.deleted.remove(&d.id);
         }
         self.store.datasets = Load::Ready(list);
-        for id in stale_cached {
-            self.ds_recheck.insert(id.clone());
-            if !self.inspecting(&id) {
-                self.forget_dataset_contents(&id, cx);
-                self.store.dataset.remove(&id);
+        for id in changed_ids {
+            // Drop any in-flight detail read that predates this newer list summary so its stale
+            // answer cannot overwrite `store.datasets` when it arrives.
+            if self.list_tickets.detail_in_flight_older_than(&id, ticket) {
+                self.ds_reads.remove(&id);
+                self.list_tickets.finish_detail(&id, None);
+                if self.store.dataset.get(&id).is_some_and(|l| l.is_loading()) {
+                    self.store.dataset.remove(&id);
+                }
+            }
+            let cached_stale = self
+                .store
+                .dataset
+                .get(&id)
+                .and_then(|l| l.ready())
+                .zip(self.store.dataset_summary(&id))
+                .is_some_and(|(cached, summary)| dataset_summary_changed(cached, summary));
+            if cached_stale {
+                self.ds_recheck.insert(id.clone());
+                if !self.inspecting(&id) {
+                    self.forget_dataset_contents(&id, cx);
+                    self.store.dataset.remove(&id);
+                }
             }
         }
         // An open select may list them: its highlight is an index into the list.
@@ -319,6 +404,7 @@ impl FoloApp {
     /// if open, gives way to its list and says so, as a deletion here does.
     fn removed_elsewhere(&mut self, id: &str, name: String, cx: &mut Context<Self>) {
         self.deleted.insert(id.to_string(), name);
+        self.list_tickets.forget_detail(id);
         self.store.dataset.remove(id);
         self.store.images.remove(id);
         self.images_more.remove(id);
@@ -349,13 +435,14 @@ impl FoloApp {
 }
 
 /// Whether any summary field carried by `GET /api/datasets` changed between two dataset records.
-fn dataset_summary_changed(a: &Dataset, b: &Dataset) -> bool {
+/// List responses omit `revision` (`None`), so revisions only disagree when both records carry one.
+pub(super) fn dataset_summary_changed(a: &Dataset, b: &Dataset) -> bool {
     a.name != b.name
         || a.path != b.path
         || a.format != b.format
         || a.classes != b.classes
         || a.splits != b.splits
-        || a.revision != b.revision
+        || (a.revision.is_some() && b.revision.is_some() && a.revision != b.revision)
 }
 
 /// What `old` listed that `new` doesn't, as (id, name).

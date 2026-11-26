@@ -133,11 +133,13 @@ impl FoloApp {
             && self.store.dataset.get(id).is_some_and(|l| !l.is_loading())
         {
             let ticket = self.ds_read_ticket(id);
+            let order = self.list_tickets.start_detail(id);
             let (a, b) = (id.to_string(), id.to_string());
             self.fetch(
                 cx,
                 move |api| api.dataset(&a),
                 move |this, r, cx| {
+                    this.list_tickets.finish_detail(&b, Some(order));
                     // A newer read was asked for since (another Retry or visit): its answer stands.
                     if !this.ds_read_done(&b, ticket) {
                         return;
@@ -148,6 +150,18 @@ impl FoloApp {
                     }
                     match r {
                         Ok(d) => {
+                            // A newer `GET /api/datasets` list already installed different summary
+                            // fields after this detail read started: discard this stale detail and
+                            // queue a fresh read instead of regressing the summary.
+                            if order < this.list_tickets.list_installed(super::super::lists::List::Datasets)
+                                && this
+                                    .store
+                                    .dataset_summary(&b)
+                                    .is_some_and(|s| super::super::lists::dataset_summary_changed(s, &d))
+                            {
+                                this.ds_recheck.insert(b);
+                                return;
+                            }
                             // Back from a failure, or its contents changed: the images, their labels and
                             // their pixels are read again (image ids are positions, docs/API.md).
                             if this.store.dataset.get(&b).and_then(|l| l.ready()) != Some(&d) {
@@ -167,6 +181,7 @@ impl FoloApp {
                                 // already committed to an in-progress paged reload).
                                 this.ds_scroll_anchor = None;
                             }
+                            this.list_tickets.note_detail(&b, order);
                             this.sync_dataset_summary(&d);
                             this.store.dataset.insert(b, Load::Ready(d));
                         }
@@ -200,13 +215,26 @@ impl FoloApp {
         if self.store.dataset.get(id).is_none_or(|l| l.needs_fetch()) {
             self.store.dataset.insert(id.to_string(), Load::Loading);
             let ticket = self.ds_read_ticket(id);
+            let order = self.list_tickets.start_detail(id);
             let (a, b) = (id.to_string(), id.to_string());
             self.fetch(
                 cx,
                 move |api| api.dataset(&a),
                 move |this, r, _| {
+                    this.list_tickets.finish_detail(&b, Some(order));
                     if this.ds_read_done(&b, ticket) {
                         if let Ok(d) = &r {
+                            if order < this.list_tickets.list_installed(super::super::lists::List::Datasets)
+                                && this
+                                    .store
+                                    .dataset_summary(&b)
+                                    .is_some_and(|s| super::super::lists::dataset_summary_changed(s, d))
+                            {
+                                this.store.dataset.remove(&b);
+                                this.ds_recheck.insert(b);
+                                return;
+                            }
+                            this.list_tickets.note_detail(&b, order);
                             this.sync_dataset_summary(d);
                         }
                         this.store.dataset.insert(b, r.into());
@@ -431,6 +459,7 @@ impl FoloApp {
                         // Files changed on disk or the server dropped revision tracking:
                         // discard stale prefix + decoded images and reload from page zero.
                         this.forget_dataset_contents(&id, cx);
+                        this.sync_dataset_summary(&fresh);
                         this.store.dataset.insert(id.clone(), Load::Ready(fresh));
                         this.ensure_dataset(&id, cx);
                     }

@@ -572,22 +572,54 @@ mod tests {
         );
 
         // Auto-closing the inspector during render when its image list finishes empty must NOT
-        // mount a stale scrim: the underlying page must accept the very first click immediately.
+        // mount a stale scrim: the underlying page must accept the very first click immediately
+        // with zero extra redraws before pointer down.
+        let btn_pos = folo_ui::point(folo_ui::px(1050.), folo_ui::px(73.));
         drive(&mut app, window, |this, w, cx| {
             this.server_mode = crate::app::ServerMode::Local;
             this.navigate(Route::Datasets, w, cx);
+        });
+        app.frame(window.into());
+        // Position the pointer on Generate synthetic before opening and auto-closing the inspector.
+        app.simulate_input(
+            window.into(),
+            folo_ui::PlatformInput::MouseMove(folo_ui::MouseMoveEvent {
+                position: btn_pos,
+                pressed_button: None,
+                modifiers: Default::default(),
+            }),
+        );
+        drive(&mut app, window, |this, w, cx| {
             this.store.images.insert("ds_empty_auto".into(), crate::store::Load::Ready(Vec::new()));
             this.open_inspector("ds_empty_auto".into(), 0, w, cx);
         });
-        // One single frame triggers `inspector_waiting` auto-close without extra redraws.
+        // One single frame triggers `inspector_waiting` auto-close; dispatch down/up directly
+        // against that exact frame with no intermediate hover frame.
         app.frame(window.into());
         drive(&mut app, window, |this, w, _| {
             assert!(this.inspector.is_none(), "empty completed list auto-closed inspector");
             assert!(!this.any_overlay(), "no overlay reported after auto-close");
             assert!(this.root_focus.is_focused(w), "auto-close restored focus cleanly");
         });
-        // Generate synthetic button in the Datasets header (1280x800) works on the very first click.
-        crate::app::select_driving::click_n_at(&mut app, window, 1050., 73., 1);
+        app.simulate_input(
+            window.into(),
+            folo_ui::PlatformInput::MouseDown(folo_ui::MouseDownEvent {
+                button: folo_ui::MouseButton::Left,
+                position: btn_pos,
+                modifiers: Default::default(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+        );
+        app.simulate_input(
+            window.into(),
+            folo_ui::PlatformInput::MouseUp(folo_ui::MouseUpEvent {
+                button: folo_ui::MouseButton::Left,
+                position: btn_pos,
+                modifiers: Default::default(),
+                click_count: 1,
+            }),
+        );
         app.frame(window.into());
         assert!(
             drive(&mut app, window, |this, _, _| this.synth.is_some()),

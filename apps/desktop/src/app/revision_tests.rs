@@ -759,7 +759,9 @@ fn window_activation_on_datasets_refreshes_list_deduplicated_and_updates_summary
         let mut fresh_list = this.store.datasets.ready().expect("datasets list").clone();
         let entry = fresh_list.iter_mut().find(|d| d.id == ID).expect("target dataset");
         entry.splits.train = 777;
-        this.install_datasets(fresh_list, cx);
+        let ticket = this.list_tickets.ask();
+        this.list_tickets.installed(super::lists::List::Datasets, ticket);
+        this.install_datasets(fresh_list, ticket, cx);
         let current = this.store.datasets.ready().unwrap().iter().find(|d| d.id == ID).unwrap();
         assert_eq!(
             this.effective_dataset(current).splits.train,
@@ -769,9 +771,100 @@ fn window_activation_on_datasets_refreshes_list_deduplicated_and_updates_summary
     });
 }
 
-/// #308 item 6: rendering the live-run screen into two independent headless apps at 1.5x DPI
-/// (including mid-transition chart easing on the executor clock) produces byte-for-byte identical
-/// framebuffers.
+/// PR #711 Round 2: detail records carry `revision: Some(...)` while `GET /api/datasets` returns
+/// `revision: None`; polling the unchanged list must NOT evict `store.dataset` or `store.images`.
+/// Also verify both out-of-order list/detail arrival orders reconcile via shared ticket order.
+#[test]
+fn detail_revision_does_not_thrash_on_list_poll_and_reconciles_out_of_order_responses() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = on_its_page(api.clone());
+
+    // 1. Detail has `revision: Some("rev-1")`, list has `revision: None`: polling the unchanged
+    // list must keep `store.dataset` and `store.images` intact (no 5 s reload thrash).
+    drive(&mut app, window, |this, _, cx| {
+        let mut detail = this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("detail");
+        detail.revision = Some("rev-1".into());
+        this.sync_dataset_summary(&detail);
+        this.store.dataset.insert(ID.into(), Load::Ready(detail));
+        let summary_rev = this.store.dataset_summary(ID).and_then(|d| d.revision.clone());
+        assert!(summary_rev.is_none(), "sync_dataset_summary must not copy detail revision into list");
+        this.poll_lists(cx);
+    });
+    frames(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.dataset.get(ID).and_then(|l| l.ready()).is_some(), "detail kept across poll");
+        assert!(this.store.images.get(ID).and_then(|l| l.ready()).is_some(), "images kept across poll");
+    });
+
+    // 2. Arrival order A: initial detail request is held while a newer list arrives with updated
+    // splits; when the older detail later arrives it must NOT overwrite the newer list summary.
+    let held_detail = api.hold("dataset");
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                this.store.dataset.remove(ID);
+                this.ensure_dataset_record(ID, cx);
+            })
+            .unwrap()
+    });
+    wait_for_held(&mut app, window, &held_detail, false, "older detail");
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                let mut newer_list = this.store.datasets.ready().expect("datasets").clone();
+                let entry = newer_list.iter_mut().find(|d| d.id == ID).unwrap();
+                entry.splits.train += 123;
+                let ticket = this.list_tickets.ask();
+                this.list_tickets.installed(super::lists::List::Datasets, ticket);
+                this.install_datasets(newer_list, ticket, cx);
+            })
+            .unwrap()
+    });
+    let expected_train = app.update(|cx| {
+        window.update(cx, |this, _, _| this.store.dataset_summary(ID).unwrap().splits.train).unwrap()
+    });
+    drop(held_detail);
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        let current = this.store.dataset_summary(ID).unwrap();
+        assert_eq!(
+            this.effective_dataset(current).splits.train,
+            expected_train,
+            "older held detail must not overwrite newer datasets summary"
+        );
+    });
+
+    // 3. Arrival order B: an older list response arriving AFTER a newer detail installed must NOT
+    // evict the newer detail or regress its summary fields.
+    drive(&mut app, window, |this, _, cx| {
+        let older_list_ticket = this.list_tickets.ask();
+        let mut stale_list = this.store.datasets.ready().expect("datasets").clone();
+        stale_list.iter_mut().find(|d| d.id == ID).unwrap().splits.train = 5;
+
+        let newer_detail_ticket = this.list_tickets.ask();
+        let mut newer_detail = this.store.dataset_summary(ID).unwrap().clone();
+        newer_detail.splits.train = 999;
+        this.list_tickets.note_detail(ID, newer_detail_ticket);
+        this.sync_dataset_summary(&newer_detail);
+        this.store.dataset.insert(ID.into(), Load::Ready(newer_detail));
+
+        this.install_datasets(stale_list, older_list_ticket, cx);
+        assert_eq!(
+            this.store.dataset.get(ID).and_then(|l| l.ready()).map(|d| d.splits.train),
+            Some(999),
+            "older list response must not evict newer detail record"
+        );
+        assert_eq!(
+            this.store.dataset_summary(ID).map(|d| d.splits.train),
+            Some(999),
+            "older list response must not regress summary past newer detail record"
+        );
+    });
+}
+
+/// #308 item 6: rendering a live-run screen into two independent headless apps at 1.5x DPI with
+/// chart easing active on the executor clock produces byte-for-byte identical framebuffers, and the
+/// intermediate 80 ms frame visibly differs from both the initial and settled frames.
 #[test]
 fn headless_run_live_render_is_byte_identical_across_runs() {
     use crate::api::{RunEvent, RunStatus};
@@ -779,8 +872,11 @@ fn headless_run_live_render_is_byte_identical_across_runs() {
     use folo_ui::{AppContext, Bounds, HeadlessOptions, WindowBounds, WindowOptions, point, px, size};
     use std::time::Duration;
 
+    let _reduce_motion = crate::ui::override_reduce_motion_for_test(false);
+
     let render_once = || {
-        let api = Arc::new(MockBackend::new(4200, true));
+        // 40 steps stays well below `EASE_MAX_POINTS` (512) so appending a step enters `charts/ease.rs`.
+        let api = Arc::new(MockBackend::new(40, true));
         let mut app = HeadlessApp::new(HeadlessOptions { scale_factor: 1.5, ..Default::default() });
         let window = app.update(|cx| {
             cx.set_global(Theme::new(Mode::Dark));
@@ -790,11 +886,7 @@ fn headless_run_live_render_is_byte_identical_across_runs() {
             cx.open_window(options, |window, cx| cx.new(|cx| FoloApp::new(api.clone(), true, window, cx)))
                 .expect("open window")
         });
-        let run_id = drive(&mut app, window, |this, _, cx| {
-            this.ensure_core(cx);
-            String::new()
-        });
-        let _ = run_id;
+        drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
         let run_id = drive(&mut app, window, |this, w, cx| {
             let id = this
                 .store
@@ -810,25 +902,39 @@ fn headless_run_live_render_is_byte_identical_across_runs() {
             id
         });
         frames(&mut app, window);
-        // Verify the actual running fixture and its chart history loaded, then append a live step
-        // and advance the executor clock mid-ease (80 ms < 240 ms) to exercise `charts/ease.rs`.
+        let initial = app.frame(window.into()).pixels.clone();
+
+        // Append a visible loss jump so chart easing animates over 240 ms on the executor clock.
         drive(&mut app, window, |this, _, cx| {
             let run = this.store.run(&run_id).expect("live run fixture loaded");
             assert_eq!(run.status, RunStatus::Running);
             let hist = this.store.run_data.get(&run_id).and_then(|l| l.ready()).expect("history loaded");
-            assert!(!hist.metrics.steps.is_empty(), "live run chart history is populated");
+            assert!(!hist.metrics.steps.is_empty() && hist.metrics.steps.len() < 512);
             let mut next = *hist.metrics.steps.last().unwrap();
             next.step += 1;
-            next.loss.total *= 0.92;
+            next.loss.box_ *= 0.25;
+            next.loss.cls *= 0.25;
+            next.loss.dfl *= 0.25;
+            next.loss.total *= 0.25;
             this.store.apply(&run_id, RunEvent::Step(next));
             cx.notify();
         });
         app.frame(window.into());
         app.advance_clock(Duration::from_millis(80));
-        app.frame(window.into()).pixels.clone()
+        let mid = app.frame(window.into()).pixels.clone();
+        app.advance_clock(Duration::from_millis(300));
+        let settled = app.frame(window.into()).pixels.clone();
+        (initial, mid, settled)
     };
-    let a = render_once();
-    let b = render_once();
-    assert!(!a.is_empty());
-    assert_eq!(a, b, "repeated 1.5x headless run-live renders with easing must be byte-for-byte identical");
+    let (init_a, mid_a, settled_a) = render_once();
+    let (init_b, mid_b, settled_b) = render_once();
+    assert!(!mid_a.is_empty());
+    assert_ne!(mid_a, init_a, "80 ms frame must visibly advance from initial frame");
+    assert_ne!(mid_a, settled_a, "80 ms frame must be mid-ease before settling at 300 ms");
+    assert_eq!(init_a, init_b, "initial 1.5x headless run-live renders must be byte-for-byte identical");
+    assert_eq!(mid_a, mid_b, "mid-ease 1.5x headless run-live renders must be byte-for-byte identical");
+    assert_eq!(
+        settled_a, settled_b,
+        "settled 1.5x headless run-live renders must be byte-for-byte identical"
+    );
 }
