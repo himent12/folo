@@ -1,5 +1,6 @@
 //! Interactive image stage of the inspector: canvas painting, wheel zoom, drag pan, hover hit-test.
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use folo_ui::{
@@ -13,6 +14,13 @@ use crate::store::ImgKind;
 use crate::theme::{Theme, radius, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit, hit_box, paint_image_with_boxes, to_image, zoom_about};
+
+thread_local! {
+    /// Whether the active left-button press on the inspector stage engaged drag-panning past the
+    /// click deadzone (cleared on press/click), so dragging out and back to the press point never
+    /// triggers click-to-zoom on release.
+    static STAGE_PANNED: Cell<bool> = const { Cell::new(false) };
+}
 
 impl FoloApp {
     #[allow(clippy::too_many_arguments)]
@@ -74,8 +82,11 @@ impl FoloApp {
         let paint_cell = bounds_cell.clone();
         let wheel_cell = bounds_cell.clone();
         let down_cell = bounds_cell.clone();
+        let up_cell = bounds_cell.clone();
         let paint_boxes = if show_boxes { boxes.to_vec() } else { Vec::new() };
         let hit_boxes = paint_boxes.clone();
+        let up_boxes = paint_boxes.clone();
+        let hovering_stage_box = self.inspector.as_ref().is_some_and(|i| i.hover_from_stage);
         let tt = *t;
         let img2 = img;
         div()
@@ -84,7 +95,13 @@ impl FoloApp {
             .flex_1()
             .min_w_0()
             .bg(t.bg_inset)
-            .cursor(if zoom > 1.0 { folo_ui::CursorStyle::OpenHand } else { folo_ui::CursorStyle::Arrow })
+            .cursor(if zoom > 1.0 {
+                folo_ui::CursorStyle::OpenHand
+            } else if hovering_stage_box {
+                folo_ui::CursorStyle::PointingHand
+            } else {
+                folo_ui::CursorStyle::Arrow
+            })
             .on_scroll_wheel(cx.listener(move |this, ev: &ScrollWheelEvent, w, cx| {
                 let Some(b) = wheel_cell.get() else { return };
                 let Some(insp) = this.inspector.as_mut() else { return };
@@ -115,6 +132,7 @@ impl FoloApp {
                 MouseButton::Left,
                 cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
                     let _ = down_cell.get();
+                    STAGE_PANNED.with(|p| p.set(false));
                     if let Some(insp) = this.inspector.as_mut() {
                         insp.drag_from = Some((ev.position, insp.pan));
                         cx.notify();
@@ -130,6 +148,36 @@ impl FoloApp {
                     }
                 }),
             )
+            .on_click(cx.listener(move |this, ev: &folo_ui::ClickEvent, _, cx| {
+                let folo_ui::ClickEvent::Mouse(m) = ev else { return };
+                let panned = STAGE_PANNED.with(|p| p.replace(false));
+                let dx = f32::from(m.up.position.x - m.down.position.x);
+                let dy = f32::from(m.up.position.y - m.down.position.y);
+                if panned || dx * dx + dy * dy > 16.0 {
+                    return;
+                }
+                let hit = this.inspector.as_ref().and_then(|insp| {
+                    if !insp.boxes {
+                        return None;
+                    }
+                    let b = up_cell.get()?;
+                    let (x, y) = to_image(b, dims, Fit::Contain, insp.zoom, insp.pan, m.up.position);
+                    let idx = hit_box(&up_boxes, x, y)?;
+                    let bx = &up_boxes[idx];
+                    Some((idx, (bx.x1, bx.y1, bx.x2, bx.y2), b))
+                });
+                if let Some((idx, coords, b)) = hit {
+                    this.focus_inspector_box(idx, dims, coords, cx);
+                    // Re-sync stage hover against the updated zoom/pan so returning to Fit never
+                    // leaves stale highlight or `hover_from_stage = false` under the pointer.
+                    if let Some(insp) = this.inspector.as_mut() {
+                        let (x, y) = to_image(b, dims, Fit::Contain, insp.zoom, insp.pan, m.up.position);
+                        let next_hit = if insp.boxes { hit_box(&up_boxes, x, y) } else { None };
+                        insp.hover_box = next_hit;
+                        insp.hover_from_stage = next_hit.is_some();
+                    }
+                }
+            }))
             .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
                 let Some(insp) = this.inspector.as_mut() else { return };
                 if insp.drag_from.is_some() && ev.pressed_button != Some(MouseButton::Left) {
@@ -138,12 +186,18 @@ impl FoloApp {
                 }
                 if let Some((from, pan0)) = insp.drag_from {
                     if insp.zoom > 1.0 {
-                        insp.pan = (
-                            pan0.0 + f32::from(ev.position.x - from.x),
-                            pan0.1 + f32::from(ev.position.y - from.y),
-                        );
-                        insp.focused_box = None;
-                        cx.notify();
+                        let dx = f32::from(ev.position.x - from.x);
+                        let dy = f32::from(ev.position.y - from.y);
+                        if STAGE_PANNED.with(Cell::get)
+                            || dx * dx + dy * dy > 16.0
+                            || (insp.pan.0 - pan0.0).abs() > 0.5
+                            || (insp.pan.1 - pan0.1).abs() > 0.5
+                        {
+                            STAGE_PANNED.with(|p| p.set(true));
+                            insp.pan = (pan0.0 + dx, pan0.1 + dy);
+                            insp.focused_box = None;
+                            cx.notify();
+                        }
                     }
                     return;
                 }

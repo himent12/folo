@@ -78,12 +78,17 @@ impl FoloApp {
         // "Missed" is never shortened: when an even share can't hold it, it takes the width it needs
         // and the class columns share the rest.
         let missed_need = wide(window, "Missed") + px(4.);
-        let missed_w =
-            cols.get().filter(|w| (*w - px(6.)) / n.max(1) as f32 <= missed_need).map(|_| missed_need);
+        let missed_w = cols
+            .get()
+            .filter(|w| (*w - px(6.)) / n.max(1) as f32 <= missed_need)
+            .map(|w| missed_need.min(((w - px(6.)) * 0.5).max(px(0.))));
         let col_w = cols.get().map(|w| {
             let k = if missed_w.is_some() { n.saturating_sub(1) } else { n };
-            (w - px(6.) - missed_w.unwrap_or_default()) / k.max(1) as f32 - px(2.)
+            ((w - px(6.) - missed_w.unwrap_or_default()).max(px(0.)) / k.max(1) as f32 - px(2.)).max(px(0.))
         });
+        // Keep header and body horizontal cell padding identical (and zero when columns are very
+        // narrow) so high class counts never widen the header past the body rows.
+        let cell_px = if col_w.is_some_and(|w| w <= px(4.)) { px(0.) } else { px(1.) };
         let header_row = div().flex().pl(px(LABEL_W)).child(
             div()
                 .relative()
@@ -121,11 +126,18 @@ impl FoloApp {
                     };
                     div()
                         .id(SharedString::from(format!("cm-col-{i}")))
-                        .flex_1()
-                        .min_w_0()
-                        .px(px(2.))
-                        .when(i == n - 1, |d| d.ml(px(6.)))
-                        .when(i == n - 1, |d| d.when_some(missed_w, |d, w| d.flex_none().w(w)))
+                        .px(cell_px)
+                        .map(|d| {
+                            if i == n - 1 {
+                                let d = d.ml(px(6.));
+                                match missed_w {
+                                    Some(w) => d.flex_none().w(w),
+                                    None => d.flex_1().min_w_0(),
+                                }
+                            } else {
+                                d.flex_1().min_w_0()
+                            }
+                        })
                         .flex()
                         .justify_center()
                         .when(!fits, |d| d.tooltip(crate::controls::tip(l.clone(), None)))
@@ -205,11 +217,20 @@ impl FoloApp {
                     let picked = sel == Some((r, c));
                     div()
                         .id(SharedString::from(format!("cm-{r}-{c}")))
-                        .flex_1()
-                        .min_w_0()
                         .h(cell_h)
-                        .p(px(1.))
-                        .when(c == n - 1, |d| d.ml(px(6.)).when_some(missed_w, |d, w| d.flex_none().w(w)))
+                        .py(px(1.))
+                        .px(cell_px)
+                        .map(|d| {
+                            if c == n - 1 {
+                                let d = d.ml(px(6.));
+                                match missed_w {
+                                    Some(w) => d.flex_none().w(w),
+                                    None => d.flex_1().min_w_0(),
+                                }
+                            } else {
+                                d.flex_1().min_w_0()
+                            }
+                        })
                         .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                             if *h {
                                 this.cm_cell = Some((r, c));
@@ -379,7 +400,6 @@ impl FoloApp {
     ) -> AnyElement {
         let t = theme(cx);
         let all = rank_confusions(&ev.confusion, usize::MAX, MIN_ROW);
-        let any_errors = !rank_confusions(&ev.confusion, 1, 1).is_empty();
         let name = |i: usize| labels.get(i).cloned().unwrap_or_else(|| format!("class {i}"));
         let mut col = div().flex().flex_col().gap(px(12.));
         for (kind, title) in [(Kind::Confused, "Most confused"), (Kind::Missed, "Most missed")] {
@@ -444,11 +464,9 @@ impl FoloApp {
             col = col.child(list);
         }
         if all.is_empty() {
-            col = col.child(text(ty::SM, t.text_tertiary).whitespace_normal().child(if any_errors {
-                "No class with 20 or more objects is confused or missed: the few errors are in the matrix."
-            } else {
-                "No confusions and no misses: every object was found as its own class."
-            }));
+            col = col.child(
+                text(ty::SM, t.text_tertiary).whitespace_normal().child(empty_rank_summary(&ev.confusion)),
+            );
         }
         if let Some(v) = missed_overall(&ev.confusion) {
             let pct = share_pct(v);
@@ -473,4 +491,142 @@ impl FoloApp {
 fn short_name(name: &str) -> String {
     let short: String = name.chars().take(3).collect();
     if short.chars().count() < name.chars().count() { format!("{short}.") } else { short }
+}
+
+/// Summary text when `Most confused` / `Most missed` has no ranked rows: explains the 20-object
+/// ranking floor without characterizing unranked error rates as "few".
+fn empty_rank_summary(conf: &[Vec<u32>]) -> &'static str {
+    let any_errors = !rank_confusions(conf, 1, 1).is_empty();
+    if !any_errors {
+        return "No confusions and no misses: every object was found as its own class.";
+    }
+    let k = conf.len().saturating_sub(1);
+    let has_ranked_class = conf.iter().take(k).any(|r| r.iter().sum::<u32>() >= MIN_ROW);
+    if has_ranked_class {
+        "No class with 20 or more objects had errors; classes with fewer than 20 objects are shown in the matrix."
+    } else {
+        "Classes need at least 20 objects to rank here; see the matrix for per-class errors."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_rank_summary_explains_sample_floor_without_saying_few_errors() {
+        // 100% missed across small classes (< 20 objects each): never claims "few errors".
+        let small_missed = vec![vec![0, 0, 5], vec![0, 0, 4], vec![0, 0, 0]];
+        let msg = empty_rank_summary(&small_missed);
+        assert!(msg.contains("20 objects"), "{msg}");
+        assert!(!msg.contains("few"), "{msg}");
+
+        // Large class (>= 20) clean, small class (< 20) has errors: explains why small class is unranked.
+        let mixed = vec![vec![25, 0, 0], vec![0, 0, 3], vec![0, 0, 0]];
+        let msg_mixed = empty_rank_summary(&mixed);
+        assert!(msg_mixed.contains("fewer than 20"), "{msg_mixed}");
+        assert!(!msg_mixed.contains("few errors"), "{msg_mixed}");
+
+        // Zero errors anywhere.
+        let clean = vec![vec![10, 0, 0], vec![0, 12, 0], vec![0, 0, 0]];
+        assert!(empty_rank_summary(&clean).contains("No confusions and no misses"));
+    }
+
+    #[test]
+    fn many_class_confusion_matrix_keeps_missed_column_width_and_fill() {
+        use crate::api::ModelEval;
+        use crate::app::{FoloApp, Route, tests::drive};
+        use crate::store::Load;
+        use folo_ui::{
+            AppContext, Bounds, HeadlessApp, HeadlessOptions, WindowBounds, WindowOptions, point, px, size,
+        };
+
+        // 25 classes + Missed at 960 px width triggers the dedicated `missed_w` branch (tall window
+        // keeps the Confusion matrix panel below KPIs + PR curves inside the viewport).
+        let api = std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true));
+        let mut app =
+            HeadlessApp::new(HeadlessOptions { size: size(px(960.), px(2400.)), ..Default::default() });
+        let win = app.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(crate::theme::Mode::Dark));
+            let bounds = Bounds::new(point(px(0.), px(0.)), size(px(960.), px(2400.)));
+            let options =
+                WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+            cx.open_window(options, |w, cx| cx.new(|cx| FoloApp::new(api, true, w, cx)))
+                .expect("open 960px window")
+        });
+        for _ in 0..3 {
+            app.frame(win.into());
+            app.run_until_idle();
+        }
+        let n_classes = 25usize;
+        let dim = n_classes + 1;
+        let mut conf = vec![vec![0u32; dim]; dim];
+        for row in conf.iter_mut().take(n_classes) {
+            row[n_classes] = 4; // 100% missed
+        }
+        let mid = drive(&mut app, win, |this, w, cx| {
+            let mut m = this.store.models.ready().unwrap()[0].clone();
+            m.classes = (0..n_classes).map(|i| format!("cls{i:02}")).collect();
+            let mid = m.id.clone();
+            if let Load::Ready(list) = &mut this.store.models {
+                list[0] = m;
+            }
+            let base = this.store.api.model_eval(&mid).unwrap();
+            this.store.evals.insert(mid.clone(), Load::Ready(ModelEval { confusion: conf, ..base }));
+            this.navigate(Route::Model(mid.clone()), w, cx);
+            mid
+        });
+        // Two frames: frame 1 measures `cm_cols`, frame 2 applies `missed_w`.
+        for _ in 0..3 {
+            app.frame(win.into());
+            app.run_until_idle();
+        }
+        // Inspect the rendered scene: there must be filled 100%-missed cells with non-zero width (>= 35 px).
+        let scene = app.scene(win.into());
+        let expected_fill: folo_ui::Hsla =
+            cell_fill(&crate::theme::Theme::new(crate::theme::Mode::Dark), 1.0);
+        let missed_quads: Vec<_> = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                folo_ui::Primitive::Quad(q) => Some(q),
+                _ => None,
+            })
+            .filter(|q| {
+                q.background.solid == expected_fill
+                    && q.bounds.size.height >= px(24.).scale(1.)
+                    && q.bounds.size.width >= px(35.).scale(1.)
+            })
+            .collect();
+        assert!(
+            missed_quads.len() >= n_classes,
+            "expected >= {n_classes} wide filled Missed cells for {mid}, got {}",
+            missed_quads.len()
+        );
+        // Missed column cells stay inside the 960 px viewport, and the Missed heading glyphs sit
+        // directly above the Missed column rather than overflowing right or overlapping class labels.
+        let col_left = missed_quads[0].bounds.origin.x;
+        let col_right = missed_quads[0].bounds.right();
+        assert!(col_right <= px(960.).scale(1.), "Missed column stayed inside 960 px viewport");
+        let first_row_top =
+            missed_quads.iter().map(|q| q.bounds.origin.y).min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
+        let header_glyphs = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                folo_ui::Primitive::MonoSprite(s) => Some(s),
+                _ => None,
+            })
+            .filter(|s| {
+                s.bounds.origin.y >= first_row_top - px(28.).scale(1.)
+                    && s.bounds.origin.y < first_row_top
+                    && s.bounds.origin.x >= col_left - px(4.).scale(1.)
+                    && s.bounds.right() <= col_right + px(4.).scale(1.)
+            })
+            .count();
+        assert!(
+            header_glyphs >= 6,
+            "Missed heading (6 glyphs) must align above the Missed column (got {header_glyphs})"
+        );
+    }
 }

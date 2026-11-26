@@ -191,3 +191,20 @@ fn truncated_text_in_min_w_0_flex_row_does_not_cache_zero_width_probe() {
     assert!(q1.size.width > ScaledPixels(50.), "title_div must keep text width: {q1:?}");
     assert!(q2.origin.x > q1.origin.x + q1.size.width, "badge sits to the right of title: {q1:?} {q2:?}");
 }
+
+#[test]
+fn flex_none_after_flex_1_respects_explicit_width() {
+    let (mut app, window) = open(size(px(200.), px(40.)), 1.0, |_, _| {
+        div()
+            .size_full()
+            .flex()
+            .child(div().flex_1().h_full().bg(color(1)))
+            .child(div().flex_1().flex_none().w(px(60.)).h_full().bg(color(2)))
+            .into_any_element()
+    });
+    let q1 = quad_of(&mut app, window, color(1));
+    let q2 = quad_of(&mut app, window, color(2));
+    assert_eq!(q1.size.width, ScaledPixels(140.));
+    assert_eq!(q2.size.width, ScaledPixels(60.));
+    assert_eq!(q2.origin.x, ScaledPixels(140.));
+}

@@ -394,10 +394,11 @@ pub trait Styled: Sized {
         self
     }
 
-    /// Neither grows nor shrinks.
+    /// Neither grows nor shrinks (`flex: none`, i.e. `0 0 auto`).
     fn flex_none(mut self) -> Self {
         self.style().flex_grow = Some(0.);
         self.style().flex_shrink = Some(0.);
+        self.style().flex_basis = Some(Length::Auto);
         self
     }
 
