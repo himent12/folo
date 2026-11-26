@@ -777,24 +777,78 @@ describe('lazy CommandPalette', () => {
     await until(() => document.activeElement === main().querySelector('h1'), 'focus on Models heading');
   });
 
-  it('closes an open ShortcutsDialog if the route changes independently', async () => {
+  it('closes ShortcutsDialog and CommandPalette on independent path or query navigation', async () => {
+    const realPalette = await import('$lib/shell/CommandPalette');
     const realShortcuts = await import('$lib/shell/ShortcutsDialog');
     const screens = new Screens((name) =>
-      name === 'overview'
-        ? () => Promise.resolve(screen('the overview'))
+      name === 'dataset'
+        ? () => Promise.resolve(screen('the dataset'))
         : name === 'models'
           ? () => Promise.resolve(screen('the models'))
           : undefined,
     );
-    router.route = parse('#/');
-    c = render(() => <App screens={screens} loadShortcuts={() => Promise.resolve(realShortcuts)} />, target);
-    await until(() => main().querySelector('.fake'), 'overview');
+    router.route = parse('#/datasets/ds_1');
+    c = render(
+      () => <App screens={screens} loadPalette={() => Promise.resolve(realPalette)} loadShortcuts={() => Promise.resolve(realShortcuts)} />,
+      target,
+    );
+    await until(() => main().querySelector('.fake'), 'dataset');
 
+    // Same-page query change (e.g. Forward restoring ?image=img_1) closes ShortcutsDialog.
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
     await until(() => target.querySelector('dialog.shortcuts[open]'), 'ShortcutsDialog open');
+    router.route = parse('#/datasets/ds_1?image=img_1');
+    await until(() => !target.querySelector('dialog.shortcuts[open]'), 'ShortcutsDialog closed on query change');
 
+    // Independent route change (e.g. browser Back/Forward) also closes CommandPalette.
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    await until(() => target.querySelector('dialog.palette[open]'), 'CommandPalette open');
     router.route = parse('#/models');
     await until(() => main().textContent === 'the models', 'models');
-    expect(target.querySelector('dialog.shortcuts[open]')).toBeNull();
+    expect(target.querySelector('dialog.palette[open]')).toBeNull();
+  });
+
+  it('ignores a stale queued native close event when ShortcutsDialog is reopened via CommandPalette', async () => {
+    const queuedCloses: HTMLDialogElement[] = [];
+    const origClose = HTMLDialogElement.prototype.close;
+    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+      this.open = false;
+      queuedCloses.push(this);
+    };
+    try {
+      const realPalette = await import('$lib/shell/CommandPalette');
+      const realShortcuts = await import('$lib/shell/ShortcutsDialog');
+      const screens = new Screens((name) => (name === 'overview' ? () => Promise.resolve(screen('the overview')) : undefined));
+      router.route = parse('#/');
+      c = render(
+        () => <App screens={screens} loadPalette={() => Promise.resolve(realPalette)} loadShortcuts={() => Promise.resolve(realShortcuts)} />,
+        target,
+      );
+      await until(() => main().querySelector('.fake'), 'overview');
+
+      // Open Shortcuts -> Ctrl+K closes Shortcuts (close event queued) -> choose "Keyboard shortcuts" to reopen it.
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.shortcuts[open]'), 'ShortcutsDialog open');
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.palette[open] input'), 'CommandPalette open');
+      const input = target.querySelector<HTMLInputElement>('dialog.palette[open] input')!;
+      input.value = 'keyboard shortcuts';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      flush();
+      await until(
+        () => target.querySelector('dialog.palette [role="option"][aria-selected="true"]')?.textContent?.includes('Keyboard shortcuts'),
+        'Keyboard shortcuts option selected',
+      );
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.shortcuts[open]'), 'ShortcutsDialog reopened');
+
+      // Now deliver all queued native `close` events: the reopened ShortcutsDialog must stay open.
+      for (const dlg of queuedCloses.splice(0)) dlg.dispatchEvent(new Event('close'));
+      flush();
+      expect(target.querySelector('dialog.shortcuts[open]')).not.toBeNull();
+      expect(target.querySelector('dialog.palette[open]')).toBeNull();
+    } finally {
+      HTMLDialogElement.prototype.close = origClose;
+    }
   });
 });

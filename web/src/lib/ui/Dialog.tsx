@@ -70,7 +70,7 @@ export default function Dialog(props: DialogProps) {
   });
 
   function onDialogClose() {
-    if (!alive) return;
+    if (!alive || el?.open) return;
     open.set(false);
     status.clear();
     p.onclose?.();

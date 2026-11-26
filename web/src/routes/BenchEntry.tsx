@@ -553,13 +553,13 @@ css`
     gap: var(--space-4);
     min-width: 0;
   }
-  /* A section jumped to lands clear of the top bar and the strip. */
+  /* A section jumped to lands clear of the top bar (html scroll-padding-top) and the sticky jump strip. */
   .sections :global(:is(#score, #accuracy, #robustness, #calibration, #self-labeling, #localization, #images)) {
-    scroll-margin-top: calc(var(--size-topbar) + 44px + var(--space-4));
+    scroll-margin-top: calc(44px + var(--space-1));
   }
   @media (pointer: coarse) {
     .sections :global(:is(#score, #accuracy, #robustness, #calibration, #self-labeling, #localization, #images)) {
-      scroll-margin-top: calc(var(--size-topbar) + 52px + var(--space-4));
+      scroll-margin-top: calc(52px + var(--space-1));
     }
   }
   .facts {

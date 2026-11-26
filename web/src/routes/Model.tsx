@@ -575,9 +575,9 @@ css`
     padding: 0 var(--space-4) var(--space-4);
   }
   @media (max-width: 767px) {
-    /* "View curve" and "Back to Classes" land the curves panel under the top bar and the section picker. */
+    /* "View curve" and "Back to Classes" land the curves panel under the top bar (html scroll-padding-top) and picker. */
     .part :global(#pr) {
-      scroll-margin-top: calc(var(--size-topbar) + var(--space-16));
+      scroll-margin-top: calc(var(--space-16) - var(--space-3));
     }
   }
 `;

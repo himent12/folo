@@ -90,13 +90,17 @@ export default function App(props: AppProps) {
   // and a custom theme's own colours as inline properties over it, the last theme's cleared first.
   effect(() => applyTheme(document.documentElement, prefs.activeTheme));
 
-  // A route change (e.g. browser back/forward) never leaves the shortcuts modal stranded over the new page.
-  let prevLocPath = router.location.path;
+  // Any navigation (path or query, e.g. browser back/forward reopening ?image= or ?add=) closes shell overlays.
+  let prevLoc = `${router.location.path}?${router.location.query.toString()}`;
   effect(() => {
-    const path = router.location.path;
-    if (path === prevLocPath) return;
-    prevLocPath = path;
+    const nextLoc = `${router.location.path}?${router.location.query.toString()}`;
+    if (nextLoc === prevLoc) return;
+    prevLoc = nextLoc;
     if (shortcutsOpen.peek()) shortcutsOpen.set(false);
+    if (paletteOpen.peek()) {
+      pendingQuery = '';
+      paletteOpen.set(false);
+    }
   });
 
   onMount(() => {
