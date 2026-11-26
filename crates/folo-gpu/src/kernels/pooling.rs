@@ -104,7 +104,7 @@ fn max_nan(a: f32, b: f32) -> f32 {
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
         @builtin(local_invocation_id) lid: vec3<u32>) {
     let tile_id = wid.y * nwg.x + wid.x;
-    if (tile_id >= pu(0u)) { return; }
+    let valid = tile_id < pu(0u);
     let h = pu(1u); let w = pu(2u); let oh = pu(3u); let ow = pu(4u);
     let neg_inf = pf(5u);
     let ph = i32(pu(6u)); let pw = i32(pu(7u));
@@ -118,31 +118,36 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let base = p * h * w;
     let tid = lid.y * 16u + lid.x;
 
-    for (var idx = tid; idx < LOAD_N; idx += 256u) {
-        let ly = idx / LOAD_W;
-        let lx = idx % LOAD_W;
-        let iy = i32(ty0 + ly) - ph;
-        let ix = i32(tx0 + lx) - pw;
-        if (iy >= 0 && iy < i32(h) && ix >= 0 && ix < i32(w)) {
-            sh_in[idx] = f32(X[base + u32(iy) * w + u32(ix)]);
-        } else {
-            sh_in[idx] = neg_inf;
+    if (valid) {
+        for (var idx = tid; idx < LOAD_N; idx += 256u) {
+            let ly = idx / LOAD_W;
+            let lx = idx % LOAD_W;
+            let iy = i32(ty0 + ly) - ph;
+            let ix = i32(tx0 + lx) - pw;
+            if (iy >= 0 && iy < i32(h) && ix >= 0 && ix < i32(w)) {
+                sh_in[idx] = f32(X[base + u32(iy) * w + u32(ix)]);
+            } else {
+                sh_in[idx] = neg_inf;
+            }
         }
     }
     workgroupBarrier();
 
-    for (var idx = tid; idx < H_N; idx += 256u) {
-        let ly = idx / 16u;
-        let lx = idx % 16u;
-        let row = ly * LOAD_W + lx;
-        var m = sh_in[row];
-        for (var kx = 1u; kx < KW; kx++) {
-            m = max_nan(m, sh_in[row + kx]);
+    if (valid) {
+        for (var idx = tid; idx < H_N; idx += 256u) {
+            let ly = idx / 16u;
+            let lx = idx % 16u;
+            let row = ly * LOAD_W + lx;
+            var m = sh_in[row];
+            for (var kx = 1u; kx < KW; kx++) {
+                m = max_nan(m, sh_in[row + kx]);
+            }
+            sh_h[idx] = m;
         }
-        sh_h[idx] = m;
     }
     workgroupBarrier();
 
+    if (!valid) { return; }
     let ox = tx0 + lid.x;
     let oy = ty0 + lid.y;
     if (oy < oh && ox < ow) {

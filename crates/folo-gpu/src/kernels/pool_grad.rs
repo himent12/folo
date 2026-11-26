@@ -86,7 +86,7 @@ fn isnan1(v: f32) -> bool { return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
         @builtin(local_invocation_id) lid: vec3<u32>) {
     let tile_id = wid.y * nwg.x + wid.x;
-    if (tile_id >= pu(0u)) { return; }
+    let valid = tile_id < pu(0u);
     let h = pu(1u); let w = pu(2u); let oh = pu(3u); let ow = pu(4u);
     let neg_inf = pf(5u);
     let ph = i32(pu(6u)); let pw = i32(pu(7u));
@@ -100,44 +100,49 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let base = p * h * w;
     let tid = lid.y * 16u + lid.x;
 
-    for (var idx = tid; idx < LOAD_N; idx += 256u) {
-        let ly = idx / LOAD_W;
-        let lx = idx % LOAD_W;
-        let iy = i32(ty0 + ly) - ph;
-        let ix = i32(tx0 + lx) - pw;
-        if (iy >= 0 && iy < i32(h) && ix >= 0 && ix < i32(w)) {
-            let at = iy * i32(w) + ix;
-            sh_in[idx] = f32(X[base + u32(at)]);
-            sh_in_i[idx] = at;
-        } else {
-            sh_in[idx] = neg_inf;
-            sh_in_i[idx] = -1;
-        }
-    }
-    workgroupBarrier();
-
-    for (var idx = tid; idx < H_N; idx += 256u) {
-        let ly = idx / 16u;
-        let lx = idx % 16u;
-        let row = ly * LOAD_W + lx;
-        var best = sh_in[row];
-        var bi = sh_in_i[row];
-        var has_nan = bi >= 0 && isnan1(best);
-        for (var kx = 1u; kx < KW; kx++) {
-            let vi = sh_in_i[row + kx];
-            if (vi < 0) { continue; }
-            let v = sh_in[row + kx];
-            if (bi < 0 || (!has_nan && (isnan1(v) || v > best))) {
-                best = v;
-                bi = vi;
-                has_nan = isnan1(v);
+    if (valid) {
+        for (var idx = tid; idx < LOAD_N; idx += 256u) {
+            let ly = idx / LOAD_W;
+            let lx = idx % LOAD_W;
+            let iy = i32(ty0 + ly) - ph;
+            let ix = i32(tx0 + lx) - pw;
+            if (iy >= 0 && iy < i32(h) && ix >= 0 && ix < i32(w)) {
+                let at = iy * i32(w) + ix;
+                sh_in[idx] = f32(X[base + u32(at)]);
+                sh_in_i[idx] = at;
+            } else {
+                sh_in[idx] = neg_inf;
+                sh_in_i[idx] = -1;
             }
         }
-        sh_h[idx] = best;
-        sh_h_i[idx] = bi;
     }
     workgroupBarrier();
 
+    if (valid) {
+        for (var idx = tid; idx < H_N; idx += 256u) {
+            let ly = idx / 16u;
+            let lx = idx % 16u;
+            let row = ly * LOAD_W + lx;
+            var best = sh_in[row];
+            var bi = sh_in_i[row];
+            var has_nan = bi >= 0 && isnan1(best);
+            for (var kx = 1u; kx < KW; kx++) {
+                let vi = sh_in_i[row + kx];
+                if (vi < 0) { continue; }
+                let v = sh_in[row + kx];
+                if (bi < 0 || (!has_nan && (isnan1(v) || v > best))) {
+                    best = v;
+                    bi = vi;
+                    has_nan = isnan1(v);
+                }
+            }
+            sh_h[idx] = best;
+            sh_h_i[idx] = bi;
+        }
+    }
+    workgroupBarrier();
+
+    if (!valid) { return; }
     let ox = tx0 + lid.x;
     let oy = ty0 + lid.y;
     if (oy < oh && ox < ow) {
@@ -184,7 +189,7 @@ var<workgroup> sh_g: array<f32, LOAD_N>;
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
         @builtin(local_invocation_id) lid: vec3<u32>) {
     let tile_id = wid.y * nwg.x + wid.x;
-    if (tile_id >= pu(0u)) { return; }
+    let valid = tile_id < pu(0u);
     let h = pu(1u); let w = pu(2u); let oh = pu(3u); let ow = pu(4u);
     let ph = i32(pu(5u)); let pw = i32(pu(6u));
     let tiles_x = pu(7u); let tiles_y = pu(8u);
@@ -199,22 +204,25 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let oy_base = i32(ty0) + ph - i32(KH - 1u);
     let ox_base = i32(tx0) + pw - i32(KW - 1u);
 
-    for (var idx = tid; idx < LOAD_N; idx += 256u) {
-        let ly = idx / LOAD_W;
-        let lx = idx % LOAD_W;
-        let oy = oy_base + i32(ly);
-        let ox = ox_base + i32(lx);
-        if (oy >= 0 && oy < i32(oh) && ox >= 0 && ox < i32(ow)) {
-            let o = gbase + u32(oy) * ow + u32(ox);
-            sh_idx[idx] = IDX[2u * o];
-            sh_g[idx] = f32(X[o]);
-        } else {
-            sh_idx[idx] = 0xffffffffu;
-            sh_g[idx] = 0.0;
+    if (valid) {
+        for (var idx = tid; idx < LOAD_N; idx += 256u) {
+            let ly = idx / LOAD_W;
+            let lx = idx % LOAD_W;
+            let oy = oy_base + i32(ly);
+            let ox = ox_base + i32(lx);
+            if (oy >= 0 && oy < i32(oh) && ox >= 0 && ox < i32(ow)) {
+                let o = gbase + u32(oy) * ow + u32(ox);
+                sh_idx[idx] = IDX[2u * o];
+                sh_g[idx] = f32(X[o]);
+            } else {
+                sh_idx[idx] = 0xffffffffu;
+                sh_g[idx] = 0.0;
+            }
         }
     }
     workgroupBarrier();
 
+    if (!valid) { return; }
     let ix = tx0 + lid.x;
     let iy = ty0 + lid.y;
     if (iy < h && ix < w) {
