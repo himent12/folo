@@ -82,31 +82,38 @@ describe('Dialog focus return', () => {
 
     const dialog = target.querySelector<HTMLDialogElement>('dialog')!;
     expect(dialog.open).toBe(true);
+    // Stub `close()` to match Chromium's HTML spec behavior: clears `open` synchronously without firing `close` yet.
+    const closeSpy = vi.spyOn(dialog, 'close').mockImplementation(() => {
+      dialog.open = false;
+    });
+    try {
+      // Simulate Chromium Escape: `cancel` fires synchronously, while `close` is queued for a later task.
+      const cancel = new Event('cancel', { cancelable: true });
+      dialog.dispatchEvent(cancel);
+      expect(cancel.defaultPrevented).toBe(true);
+      expect(dialog.open).toBe(false);
+      expect(onclose).toHaveBeenCalledTimes(1);
+      expect(document.activeElement).toBe(opener);
 
-    // Simulate Chromium Escape: `cancel` fires synchronously, while `close` is queued for a later task.
-    const cancel = new Event('cancel', { cancelable: true });
-    dialog.dispatchEvent(cancel);
-    expect(cancel.defaultPrevented).toBe(true);
-    expect(dialog.open).toBe(false);
-    expect(onclose).toHaveBeenCalledTimes(1);
-    expect(document.activeElement).toBe(opener);
+      // Late queued `close` event must not fire `onclose` a second time.
+      dialog.dispatchEvent(new Event('close'));
+      expect(onclose).toHaveBeenCalledTimes(1);
 
-    // Late queued `close` event must not fire `onclose` a second time.
-    dialog.dispatchEvent(new Event('close'));
-    expect(onclose).toHaveBeenCalledTimes(1);
+      // Reopen immediately (same tick, without an intermediate flush) and dismiss via Close button.
+      open.set(true);
+      flush();
+      expect(dialog.open).toBe(true);
+      const closeBtn = dialog.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!;
+      closeBtn.click();
+      expect(dialog.open).toBe(false);
+      expect(onclose).toHaveBeenCalledTimes(2);
+      expect(document.activeElement).toBe(opener);
 
-    // Reopen immediately and dismiss via Close button: synchronous close + no duplicate on late `close` event.
-    open.set(true);
-    flush();
-    expect(dialog.open).toBe(true);
-    const closeBtn = dialog.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!;
-    closeBtn.click();
-    expect(dialog.open).toBe(false);
-    expect(onclose).toHaveBeenCalledTimes(2);
-    expect(document.activeElement).toBe(opener);
-
-    dialog.dispatchEvent(new Event('close'));
-    expect(onclose).toHaveBeenCalledTimes(2);
-    view.unmount();
+      dialog.dispatchEvent(new Event('close'));
+      expect(onclose).toHaveBeenCalledTimes(2);
+    } finally {
+      closeSpy.mockRestore();
+      view.unmount();
+    }
   });
 });
