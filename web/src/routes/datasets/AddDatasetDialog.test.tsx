@@ -347,4 +347,49 @@ describe('AddDatasetDialog', () => {
     expect(toast.items[0]).toMatchObject({ tone: 'success', title: 'Dataset registered' });
     expect(go).toHaveBeenCalledWith('/datasets/ds_shapes');
   });
+
+  it('focuses the first invalid field when submitting Register folder or Generate sample set fails validation', () => {
+    const type = (el: HTMLInputElement, v: string) => {
+      el.value = v;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+    };
+
+    // Folder mode: relative path invalid -> focuses Folder input with aria-invalid already applied.
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'folder' } });
+    flushSync();
+    const pathEl = document.querySelector<HTMLInputElement>('input[id$="-path"]')!;
+    const nameEl = document.querySelector<HTMLInputElement>('input[id$="-name"]')!;
+    const submitBtn = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    type(pathEl, 'relative/folder');
+    submitBtn.focus();
+    pathEl.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    expect(submitBtn.disabled).toBe(true);
+    expect(pathEl.getAttribute('aria-invalid')).toBe('true');
+    expect(document.activeElement).toBe(pathEl);
+
+    // Fix path, break name -> focuses Name input.
+    type(pathEl, 'D:/data/valid');
+    type(nameEl, 'bad name!');
+    submitBtn.focus();
+    pathEl.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    expect(document.activeElement).toBe(nameEl);
+    unmount(c);
+
+    // Synthetic mode: invalid images (10.5) and seed ('abc') -> focuses Images first, then Seed once Images is fixed.
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'synthetic' } });
+    flushSync();
+    const imagesEl = document.querySelector<HTMLInputElement>('input[id$="-images"]')!;
+    const seedEl = document.querySelector<HTMLInputElement>('input[id$="-seed"]')!;
+    const genBtn = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    type(imagesEl, '10.5');
+    type(seedEl, 'abc');
+    genBtn.focus();
+    imagesEl.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    expect(document.activeElement).toBe(imagesEl);
+    type(imagesEl, '10');
+    genBtn.focus();
+    imagesEl.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    expect(document.activeElement).toBe(seedEl);
+  });
 });

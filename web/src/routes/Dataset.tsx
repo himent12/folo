@@ -139,9 +139,16 @@ export default function Dataset() {
     else router.go(path, { replace: true });
   }
 
+  const toolbarEl = signal<HTMLDivElement | undefined>(undefined);
   /** A filter change: the first one on an unfiltered view adds a history entry. */
   function setFilter(patch: Record<string, string | null>) {
     setQuery({ ...patch, image: null }, !filtered.peek());
+  }
+  /** Clears filters from an unmounting Clear button and returns keyboard focus to the persistent class picker. */
+  function clearFilters(patch: Record<string, string | null>) {
+    setFilter(patch);
+    const trigger = toolbarEl.peek()?.querySelector<HTMLElement>('.picker .trigger');
+    if (trigger?.isConnected) trigger.focus({ preventScroll: true });
   }
 
   // ---------- image list for the current filter ----------
@@ -447,7 +454,7 @@ export default function Dataset() {
               ) : (
                 <>
                   {/* One toolbar: what to show on the left, how to show it on the right. Phones keep it to one row. */}
-                  <div class="ds-toolbar" class:phone={phone()}>
+                  <div class="ds-toolbar" class:phone={phone()} ref={toolbarEl}>
                     {phone() ? (
                       <span class="split-pick">
                         <Select
@@ -497,7 +504,7 @@ export default function Dataset() {
                       )}
                     </span>
                     {filtered.get() ? (
-                      <button type="button" class="clear" aria-label="Clear filters" onclick={() => setFilter({ split: null, class: null })}>
+                      <button type="button" class="clear" aria-label="Clear filters" onclick={() => clearFilters({ split: null, class: null })}>
                         <X size={12} strokeWidth={2} aria-hidden="true" />
                         Clear
                       </button>
@@ -542,9 +549,9 @@ export default function Dataset() {
                         }
                         actions={() => (
                           <>
-                            <Button onclick={() => setFilter({ split: null, class: null })}>Clear filters</Button>
+                            <Button onclick={() => clearFilters({ split: null, class: null })}>Clear filters</Button>
                             {cls.get() !== undefined && split.get() !== 'all' ? (
-                              <Button onclick={() => setFilter({ class: null })}>All classes in {split.get()}</Button>
+                              <Button onclick={() => clearFilters({ class: null })}>All classes in {split.get()}</Button>
                             ) : null}
                           </>
                         )}

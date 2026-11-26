@@ -523,6 +523,7 @@ export default function Logs(props: LogsProps) {
                 onclick={() => {
                   follow.set(true);
                   pin();
+                  box.peek()?.focus({ preventScroll: true });
                 }}
               >
                 Follow

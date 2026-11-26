@@ -352,9 +352,16 @@ export default function App(props: AppProps) {
     );
   });
 
+  function skipToContent(e: MouseEvent) {
+    e.preventDefault();
+    if (!mainEl?.isConnected) return;
+    mainEl.focus();
+    mainEl.scrollIntoView?.({ block: 'start' });
+  }
+
   return (
     <>
-      <a class="skip" href="#content">
+      <a class="skip" href="#content" onclick={skipToContent}>
         Skip to content
       </a>
       <div class="app">

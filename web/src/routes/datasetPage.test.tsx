@@ -332,7 +332,20 @@ describe('Dataset page history', () => {
       () => [...target.querySelectorAll<HTMLButtonElement>('.empty button')].find((b) => b.textContent?.includes('Clear filters')),
       'empty state Clear filters button',
     );
+    clearBtn.focus();
     clearBtn.click();
     await until(() => router.route.query.get('class') === null, 'empty state cleared');
+    expect(document.activeElement).toBe(target.querySelector('.ds-toolbar .picker .trigger'));
+  });
+
+  it('returns keyboard focus to the class picker when the toolbar Clear filters button unmounts', async () => {
+    open('/datasets/ds_shapes?class=0');
+    const clearBtn = await until(() => target.querySelector<HTMLButtonElement>('button[aria-label="Clear filters"]'), 'toolbar Clear button');
+    clearBtn.focus();
+    expect(document.activeElement).toBe(clearBtn);
+    clearBtn.click();
+    await until(() => router.route.query.get('class') === null, 'class filter cleared');
+    expect(target.querySelector('button[aria-label="Clear filters"]')).toBeNull();
+    expect(document.activeElement).toBe(target.querySelector('.ds-toolbar .picker .trigger'));
   });
 });
