@@ -361,6 +361,105 @@ async fn folder_images_are_read_in_place() {
 }
 
 #[tokio::test]
+async fn export_rejects_changed_and_corrupt_source_images() {
+    let t = TestDir::new("label-export-integrity");
+    let photos = t.join("photos");
+    std::fs::create_dir_all(&photos).unwrap();
+    let img_path = photos.join("shape.jpg");
+    let orig_img = folo_data::Image::new(64, 64, [20, 120, 200]);
+    let orig_jpg = folo_data::encode(&orig_img, folo_data::ImageFormat::Jpeg(90)).unwrap();
+    std::fs::write(&img_path, &orig_jpg).unwrap();
+
+    let f = fixture(&t.join("home"), vec![]);
+    let app = &f.app;
+    let body = json!({ "name": "shapes", "classes": ["box"], "path": photos.to_string_lossy() });
+    let job: LabelJob = ok(app, post("/api/label/jobs", body)).await;
+    let page = images(app, &job.id, "").await;
+    let image_id = &page.images[0].id;
+    let box_req = json!({ "boxes": [{ "class": 0, "x1": 8.0, "y1": 8.0, "x2": 24.0, "y2": 24.0 }] });
+    ok::<LabelImage>(app, put(&format!("/api/label/jobs/{}/images/{image_id}", job.id), box_req)).await;
+
+    let export_uri = format!("/api/label/jobs/{}/dataset", job.id);
+    let datasets_dir = t.join("home/datasets");
+    let assert_clean = |datasets: &DatasetList, current_job: &LabelJob| {
+        assert!(datasets.datasets.is_empty(), "failed export must not register a dataset: {datasets:?}");
+        assert!(current_job.dataset_id.is_none(), "failed export must not set job.dataset_id");
+        assert!(
+            !datasets_dir.exists() || std::fs::read_dir(&datasets_dir).unwrap().next().is_none(),
+            "failed export must not leave a folder behind"
+        );
+    };
+
+    // 1. Replaced with a different-sized image (128x128): rejected instead of scaling old boxes onto it.
+    let bigger =
+        folo_data::encode(&folo_data::Image::new(128, 128, [20, 120, 200]), folo_data::ImageFormat::Jpeg(90))
+            .unwrap();
+    std::fs::write(&img_path, &bigger).unwrap();
+    let e = err(app, post(&export_uri, json!({})), StatusCode::BAD_REQUEST, "invalid_dataset").await;
+    assert!(e.message.contains("64x64") && e.message.contains("128x128"), "{}", e.message);
+    assert_clean(
+        &ok(app, get("/api/datasets")).await,
+        &ok(app, get(&format!("/api/label/jobs/{}", job.id))).await,
+    );
+
+    // 2. Replaced with a different image of the same dimensions (64x64): caught by recorded content SHA-256.
+    let other_same_size =
+        folo_data::encode(&folo_data::Image::new(64, 64, [220, 30, 10]), folo_data::ImageFormat::Jpeg(90))
+            .unwrap();
+    assert_ne!(other_same_size, orig_jpg);
+    std::fs::write(&img_path, &other_same_size).unwrap();
+    let e = err(app, post(&export_uri, json!({})), StatusCode::BAD_REQUEST, "invalid_dataset").await;
+    assert!(e.message.contains("changed on disk"), "{}", e.message);
+    assert_clean(
+        &ok(app, get("/api/datasets")).await,
+        &ok(app, get(&format!("/api/label/jobs/{}", job.id))).await,
+    );
+
+    // 3. Replaced with invalid JPEG bytes: rejected instead of registering a 0-image dataset.
+    std::fs::write(&img_path, b"not a jpeg at all").unwrap();
+    err(app, post(&export_uri, json!({})), StatusCode::UNPROCESSABLE_ENTITY, "image_decode_failed").await;
+    assert_clean(
+        &ok(app, get("/api/datasets")).await,
+        &ok(app, get(&format!("/api/label/jobs/{}", job.id))).await,
+    );
+
+    // 4. Truncated JPEG (missing EOI marker FF D9): rejected as image_decode_failed.
+    let truncated = &orig_jpg[..orig_jpg.len() - 2];
+    assert!(folo_data::jpeg_truncated(truncated));
+    std::fs::write(&img_path, truncated).unwrap();
+    let e =
+        err(app, post(&export_uri, json!({})), StatusCode::UNPROCESSABLE_ENTITY, "image_decode_failed").await;
+    assert!(e.message.contains("truncated"), "{}", e.message);
+    assert_clean(
+        &ok(app, get("/api/datasets")).await,
+        &ok(app, get(&format!("/api/label/jobs/{}", job.id))).await,
+    );
+
+    // 5. Restoring the original file lets export succeed cleanly.
+    std::fs::write(&img_path, &orig_jpg).unwrap();
+    let ds: Dataset = ok(app, post(&export_uri, json!({}))).await;
+    assert_eq!(ds.splits, Splits { train: 1, val: 0, test: 0 });
+    let after_job: LabelJob = ok(app, get(&format!("/api/label/jobs/{}", job.id))).await;
+    assert_eq!(after_job.dataset_id.as_deref(), Some(ds.id.as_str()));
+
+    // 6. Agent labeling also verifies the source digest before sending to the agent: swapping in a different
+    // same-sized image fails that image instead of saving the swapped image's boxes under the original digest.
+    let body2 = json!({ "name": "shapes-agent", "classes": ["box"], "path": photos.to_string_lossy() });
+    let job2: LabelJob = ok(app, post("/api/label/jobs", body2)).await;
+    std::fs::write(&img_path, &other_same_size).unwrap();
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job2.id), json!({ "agent": "claude" })))
+        .await;
+    let finished = idle(app, &job2.id).await;
+    assert_eq!((finished.counts.labeled, finished.counts.failed), (0, 1), "{finished:?}");
+    let page2 = images(app, &job2.id, "").await;
+    assert!(
+        page2.images[0].error.as_deref().is_some_and(|m| m.contains("changed on disk")),
+        "{:?}",
+        page2.images[0]
+    );
+}
+
+#[tokio::test]
 async fn a_person_marks_images_reviewed_and_the_agent_relabeling_one_clears_it() {
     let t = TestDir::new("label-reviewed");
     let f = fixture(&t.join("home"), vec![]);

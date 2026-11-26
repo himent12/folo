@@ -37,6 +37,10 @@ pub struct Record {
     /// FNV-1a of an upload's bytes, so the same upload is not added twice.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hash: Option<u64>,
+    /// SHA-256 hex digest of the source file's bytes when added to the job (checked at export so an image
+    /// replaced in place after labeling never silently inherits stale boxes). Absent in older jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
     pub width: u32,
     pub height: u32,
     /// `pending`, `labeled` or `failed` (`labeling` is a view of an image in a call, never stored).
@@ -519,6 +523,7 @@ mod tests {
             file: format!("{id}.jpg"),
             external: None,
             hash: None,
+            sha256: None,
             width: 10,
             height: 10,
             status,

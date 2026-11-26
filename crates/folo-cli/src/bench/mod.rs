@@ -7,6 +7,7 @@
 
 mod print;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -133,22 +134,31 @@ fn create(a: BenchCreateArgs, out: Out) -> Result<(), CliError> {
         return Err(usage("--split is for a dataset (--dataset or --data), not for --label-job"));
     }
     let plan = a.plan.as_deref().map(plan).transpose()?;
+    // Validate benchmark arguments before opening the store or registering `--data`, so invalid flags or plans
+    // never leave a newly registered dataset behind.
+    folo_server::bench::check_create(&a.name, &a.description, a.max_images, a.seed, plan.as_ref())
+        .map_err(api_error)?;
     let s = open(&a.conn, None)?;
     let split = a.split.map(|s| match s {
         SplitArg::Train => folo_api::Split::Train,
         SplitArg::Val => folo_api::Split::Val,
         SplitArg::Test => folo_api::Split::Test,
     });
+    let mut registered_ds = None;
     let source = match (a.dataset, a.data, a.label_job) {
         (Some(dataset_id), _, _) => BenchSource::Dataset { dataset_id, split },
         (_, Some(path), _) => {
             let path = crate::label::paths(&[path], a.conn.server.is_some())?.remove(0);
             // Not a dataset registered for a benchmark that cannot be made.
             s.benchmarks.check().map_err(api_error)?;
+            let before: HashSet<String> =
+                s.store.list_datasets().map_err(api_error)?.into_iter().map(|d| d.id).collect();
             let req = RegisterDataset { name: None, path, format: DatasetFormat::Auto };
             let ds = s.store.register_dataset(req).map_err(api_error)?;
-            out.human(format!("dataset {} '{}' ({})", ds.id, ds.name, ds.path));
-            BenchSource::Dataset { dataset_id: ds.id, split }
+            let newly_registered = !before.contains(&ds.id);
+            let id = ds.id.clone();
+            registered_ds = Some((ds, newly_registered));
+            BenchSource::Dataset { dataset_id: id, split }
         }
         (_, _, Some(job_id)) => BenchSource::LabelJob { job_id },
         _ => unreachable!("clap requires a source"),
@@ -161,7 +171,22 @@ fn create(a: BenchCreateArgs, out: Out) -> Result<(), CliError> {
         seed: a.seed,
         plan,
     };
-    let r = s.benchmarks.create_bench(req).map_err(api_error)?;
+    let r = match s.benchmarks.create_bench(req) {
+        Ok(r) => r,
+        Err(e) => {
+            // If `--data` just registered a dataset and the server definitively refused to create the benchmark
+            // (e.g. an empty requested split), unregister it again (never deleting files).
+            if e.status.is_client_error()
+                && let Some((ds, true)) = &registered_ds
+            {
+                let _ = s.store.delete_dataset(&ds.id);
+            }
+            return Err(api_error(e));
+        }
+    };
+    if let Some((ds, _)) = &registered_ds {
+        out.human(format!("dataset {} '{}' ({})", ds.id, ds.name, ds.path));
+    }
     out.record(&r);
     print::detail(&r, out);
     Ok(())

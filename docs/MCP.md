@@ -402,8 +402,11 @@ In read-only mode, `train_on_folder` and `label_folder` are not listed.
   data dir are refused when they are added, and a job (made earlier without `--confine`) that has images outside it
   is left out of `list_label_jobs` and refused by every other labeling tool (`path_outside_data_dir`; results cached
   per job until its image files change). In proxy mode `folo serve` reads the datasets and the label images, so
-  `--confine` covers only the files the MCP process reads itself (`predict.image_path`, `predict_batch`); the
-  labeling tools that would have the server read image files (`create_label_job` with paths, `start_labeling`,
+  `--confine` covers only the files the MCP process reads itself (`predict.image_path`, `predict_batch`), and
+  `create_synthetic_dataset` allows `--mock` servers, refuses non-loopback remote servers (`not_supported`), and
+  checks on loopback real servers that the reported `<data_dir>/datasets` lies inside this MCP process's
+  `--data-dir` (refusing with `path_outside_data_dir` if missing or outside);
+  the labeling tools that would have the server read image files (`create_label_job` with paths, `start_labeling`,
   `view_label_image`, `export_label_dataset`) are refused there with `not_supported` (run `folo mcp --confine` on
   the data dir itself to label confined); a job without paths reads nothing and can be made there. All eight
   benchmark tools are refused with `not_supported` under `--confine`, embedded and through a server (with

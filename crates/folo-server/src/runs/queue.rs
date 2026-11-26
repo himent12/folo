@@ -16,6 +16,17 @@ use super::entry::{Ended, INTERRUPTED, status_event};
 use super::train::execute;
 use super::{DatasetRef, Queue, RunEntry, RunFile, Runs, STOP_REQUESTED, now};
 
+/// A validated checkpoint snapshot staged for a new continued run ([`Runs::create`], [`Runs::create_cloud`]).
+pub struct CheckpointSnapshot<'a> {
+    /// Private staged copy of the checkpoint file, validated before queueing so an active trainer overwriting
+    /// `origin` cannot swap a different snapshot in underneath registration.
+    pub staged: &'a Path,
+    /// Original model path logged for the user.
+    pub origin: &'a Path,
+    /// Scheduled epoch count read from the checkpoint (overrides `Run.epochs` immediately while queued).
+    pub epochs: Option<u32>,
+}
+
 impl Runs {
     /// Sends every waiting run its place in the queue (the SSE `queue` event). Called with the queue locked, after
     /// every change to it, so a run's events arrive in the order of the changes, and before the `running` status
@@ -75,14 +86,14 @@ impl Runs {
     }
 
     /// Registers a new run (status `queued`) and queues it. `config` is already validated, its name filled in. A
-    /// `checkpoint` (a full training checkpoint) is copied to the run's `weights/last.folo` first, so the worker
-    /// continues it as it resumes a run.
+    /// `checkpoint` (a validated snapshot of a full training checkpoint) is copied to the run's `weights/last.folo`
+    /// first, so the worker continues that exact snapshot as it resumes a run.
     pub fn create(
         self: &Arc<Self>,
         config: TrainConfig,
         dataset: DatasetRef,
         weights: Option<PathBuf>,
-        checkpoint: Option<&Path>,
+        checkpoint: Option<CheckpointSnapshot<'_>>,
         val_offset: u64,
         device: String,
     ) -> Result<Run> {
@@ -100,7 +111,7 @@ impl Runs {
         config: TrainConfig,
         dataset: DatasetRef,
         weights: Option<PathBuf>,
-        checkpoint: Option<&Path>,
+        checkpoint: Option<CheckpointSnapshot<'_>>,
         val_offset: u64,
         device: String,
         cloud: RunCloud,
@@ -116,7 +127,7 @@ impl Runs {
         config: TrainConfig,
         dataset: DatasetRef,
         weights: Option<PathBuf>,
-        checkpoint: Option<&Path>,
+        checkpoint: Option<CheckpointSnapshot<'_>>,
         val_offset: u64,
         device: String,
         cloud: Option<RunCloud>,
@@ -128,20 +139,24 @@ impl Runs {
         let dir = self.dir.join(&id);
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::internal(format!("creating {}: {e}", dir.display())))?;
-        if let Some(src) = checkpoint {
+        if let Some(ckpt) = &checkpoint {
             let last = dir.join("weights").join("last.folo");
             let copied =
-                std::fs::create_dir_all(dir.join("weights")).and_then(|()| std::fs::copy(src, &last));
+                std::fs::create_dir_all(dir.join("weights")).and_then(|()| std::fs::copy(ckpt.staged, &last));
             if let Err(e) = copied {
                 let _ = std::fs::remove_dir_all(&dir);
-                return Err(Error::io(format!("copying {} to {}: {e}", src.display(), last.display())));
+                return Err(Error::io(format!(
+                    "copying {} to {}: {e}",
+                    ckpt.origin.display(),
+                    last.display()
+                )));
             }
         }
         let run = Run {
             id: id.clone(),
             name: config.name.clone(),
             status: RunStatus::Queued,
-            epochs: config.epochs,
+            epochs: checkpoint.as_ref().and_then(|c| c.epochs).unwrap_or(config.epochs),
             config,
             created: now(),
             started: None,
@@ -180,10 +195,10 @@ impl Runs {
         }
         list.push(entry.clone());
         drop(list);
-        if let Some(src) = checkpoint {
+        if let Some(ckpt) = checkpoint {
             entry.log(
                 LogLevel::Info,
-                format!("continuing the training state of {}", folo_api::json::path(src)),
+                format!("continuing the training state of {}", folo_api::json::path(ckpt.origin)),
             );
         }
         Ok(entry)

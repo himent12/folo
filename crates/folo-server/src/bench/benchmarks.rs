@@ -25,22 +25,36 @@ use super::{
     invalid, io_error, sha256, source, state,
 };
 
+/// Validates the non-source fields of [`CreateBench`] (`name`, `description`, `max_images`, `seed`, `plan`).
+/// Shared by [`Benches::create`] and `folo bench create` so invalid CLI arguments fail before registering `--data`.
+pub fn check_create(
+    name: &str,
+    description: &str,
+    max_images: Option<u32>,
+    seed: u64,
+    plan: Option<&folo_api::BenchPlan>,
+) -> Result<(String, String, u32, folo_api::BenchPlan)> {
+    let name = check_name(name)?;
+    let description = check_text("description", description, MAX_DESCRIPTION_CHARS)?;
+    let max = max_images.unwrap_or(DEFAULT_IMAGES);
+    if !(1..=MAX_IMAGES).contains(&max) {
+        return Err(invalid(format!("max_images must be in 1..={MAX_IMAGES}")));
+    }
+    if seed > MAX_SEED {
+        return Err(invalid(format!("seed must be at most {MAX_SEED} (2^53 - 1), got {seed}")));
+    }
+    let plan = match plan {
+        Some(p) => folo_bench::check_plan(p).map_err(invalid)?,
+        None => folo_bench::default_plan(),
+    };
+    Ok((name, description, max, plan))
+}
+
 impl Benches {
     /// `POST /api/bench/benchmarks`: copies the source's images and truth into a new benchmark.
     pub fn create(&self, store: &dyn Store, req: CreateBench) -> Result<Bench> {
-        let name = check_name(&req.name)?;
-        let description = check_text("description", &req.description, MAX_DESCRIPTION_CHARS)?;
-        let max = req.max_images.unwrap_or(DEFAULT_IMAGES);
-        if !(1..=MAX_IMAGES).contains(&max) {
-            return Err(invalid(format!("max_images must be in 1..={MAX_IMAGES}")));
-        }
-        if req.seed > MAX_SEED {
-            return Err(invalid(format!("seed must be at most {MAX_SEED} (2^53 - 1), got {}", req.seed)));
-        }
-        let plan = match &req.plan {
-            Some(p) => folo_bench::check_plan(p).map_err(invalid)?,
-            None => folo_bench::default_plan(),
-        };
+        let (name, description, max, plan) =
+            check_create(&req.name, &req.description, req.max_images, req.seed, req.plan.as_ref())?;
         let source = source::gather(store, &req.source, Split::Val, true)?;
         let what = match &req.source {
             BenchSource::Dataset { .. } => format!(

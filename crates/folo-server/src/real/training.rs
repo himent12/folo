@@ -16,7 +16,7 @@ use crate::engine::{self, engine_error};
 use crate::error::{Error, Result};
 use crate::index::{Index, absolute};
 use crate::models::ModelRef;
-use crate::runs::{Ended, RunEntry};
+use crate::runs::{CheckpointSnapshot, Ended, RunEntry};
 
 use super::RealStore;
 
@@ -34,8 +34,12 @@ pub(super) fn check_trainable(idx: &Index) -> Result<()> {
 
 impl RealStore {
     /// `POST /api/runs`: checks `config` and queues a new run, which continues the training state in the
-    /// `checkpoint` file when there is one (it becomes the run's `weights/last.folo`).
-    pub(super) fn start_run(&self, mut config: TrainConfig, checkpoint: Option<&Path>) -> Result<Run> {
+    /// validated `checkpoint` snapshot when there is one (it becomes the run's `weights/last.folo`).
+    pub(super) fn start_run(
+        &self,
+        mut config: TrainConfig,
+        checkpoint: Option<CheckpointSnapshot<'_>>,
+    ) -> Result<Run> {
         // Shared with registration; a deletion of dataset files waits until the run is in the registry (see
         // `RealStore::files`).
         let _files = self.files.read().unwrap_or_else(|p| p.into_inner());

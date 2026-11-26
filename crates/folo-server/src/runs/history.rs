@@ -374,7 +374,8 @@ impl Runs {
 }
 
 /// Streams `log.jsonl` line-by-line, validating discarded lines in place without allocating `LogLine`s and only
-/// deserializing the returned window.
+/// deserializing the returned window. `RunLogs::total` always counts every valid line in the log; when `q.after`
+/// is set, callers paginate with `next_after = after + lines.len()`.
 pub(super) fn read_logs(path: &Path, q: &LogsQuery) -> RunLogs {
     let Ok(file) = File::open(path) else {
         return RunLogs { lines: Vec::new(), total: 0 };

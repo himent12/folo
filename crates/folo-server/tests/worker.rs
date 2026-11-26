@@ -140,6 +140,18 @@ async fn a_checkpoint_continues_on_another_server_and_history_has_cursors() {
     assert_eq!(two.lines, full.lines[full.lines.len() - 2..]);
     let first: RunLogs = ok(&app_a, logs("?after=0&limit=3")).await;
     assert_eq!(first.lines, full.lines[..3]);
+    assert_eq!(first.total, total);
+    // Paginated cursor polling advances by `after + lines.len()` (not `total`, which stays the full log length).
+    let mut cursor = 0u64;
+    let mut paged = Vec::new();
+    while cursor < total {
+        let page: RunLogs = ok(&app_a, logs(&format!("?after={cursor}&limit=1"))).await;
+        assert_eq!(page.total, total);
+        assert_eq!(page.lines.len(), 1);
+        cursor += page.lines.len() as u64;
+        paged.extend(page.lines);
+    }
+    assert_eq!(paged, full.lines);
     assert!(ok::<RunLogs>(&app_a, logs(&format!("?after={}", total + 10))).await.lines.is_empty());
     let tail: RunLogs = ok(&app_a, logs("?limit=2")).await;
     assert_eq!((tail.lines.as_slice(), tail.total), (two.lines.as_slice(), total));
@@ -192,19 +204,37 @@ async fn a_checkpoint_continues_on_another_server_and_history_has_cursors() {
     assert!(ok::<RunList>(&app_b, get("/api/runs")).await.runs.is_empty(), "refused requests leave no run");
 
     // On B: a new run that continues at epoch 2 (the step numbers too) and completes.
-    let (status, body) = send(&app_b, with(json!({ "checkpoint": model.id }))).await;
+    // Even if the request asks for a different epoch count (5), the queued response immediately reports the
+    // checkpoint's real schedule (2 epochs).
+    let (status, body) = send(&app_b, with(json!({ "checkpoint": model.id, "epochs": 5 }))).await;
     assert_eq!(status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&body));
     let cont: Run = serde_json::from_slice(&body).unwrap();
-    assert_eq!(cont.status, RunStatus::Queued);
+    assert_eq!((cont.status, cont.epochs), (RunStatus::Queued, 2));
     let dir = t.join("b").join("runs").join(&cont.id);
     let done = wait_run(&app_b, &cont.id, |r| !r.status.is_active()).await;
-    assert_eq!((done.status, done.epoch, done.step), (RunStatus::Completed, 2, 6), "{done:?}");
+    assert_eq!(
+        (done.status, done.epoch, done.epochs, done.step),
+        (RunStatus::Completed, 2, 2, 6),
+        "{done:?}"
+    );
     let m: RunMetrics = ok(&app_b, get(&format!("/api/runs/{}/metrics", cont.id))).await;
     assert_eq!((steps(&m), epochs(&m)), ((4..=6).collect::<Vec<_>>(), vec![2]));
     let log: RunLogs = ok(&app_b, get(&format!("/api/runs/{}/logs", cont.id))).await;
     assert!(log.lines.iter().any(|l| l.message.starts_with("continuing the training state of")), "{log:?}");
     assert!(done.model_id.is_some());
     assert!(std::fs::read(dir.join("weights").join("last.folo")).unwrap() != ckpt, "trained on");
+
+    // Continuing a checkpoint that already completed its schedule is refused with 409 run_not_resumable
+    // (whether the request asks for the same or more epochs), and leaves no bogus run behind.
+    let completed_last = format!("m_{}-last", cont.id.trim_start_matches("run_"));
+    for epochs in [2, 3] {
+        let mut body = tiny(&ds_b.id, epochs);
+        body.as_object_mut().unwrap().insert("checkpoint".into(), json!(completed_last));
+        let e = err(&app_b, post_json("/api/runs", body), StatusCode::CONFLICT, "run_not_resumable").await;
+        assert!(e.message.contains("already completed"), "{}", e.message);
+        assert!(e.hint.as_deref().is_some_and(|h| h.contains("weights")), "{e:?}");
+    }
+    assert_eq!(ok::<RunList>(&app_b, get("/api/runs")).await.runs.len(), 1);
 }
 
 #[tokio::test]

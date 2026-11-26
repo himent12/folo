@@ -99,6 +99,22 @@ impl PathPolicy {
             .map_err(|e| Error::internal(format!("data dir {}: {e}", folo_api::json::path(&self.data_dir))))
     }
 
+    /// With `confine`, fails with `path_outside_data_dir` unless `dir` (which may not exist yet; symlinks and
+    /// junctions along its existing ancestors are resolved) lies inside the canonical data dir.
+    pub fn check_dir_inside(&self, dir: &Path) -> Result<(), Error> {
+        if !self.confine {
+            return Ok(());
+        }
+        let root = self.canonical_root()?;
+        if let Ok(canon) = std::fs::canonicalize(dir) {
+            return outside_error(&root, &canon);
+        }
+        match resolve_nonexistent(dir, 0) {
+            Some(target) => outside_error(&root, &target),
+            None => Err(path_outside_error(&root, dir)),
+        }
+    }
+
     /// With `confine`, checks that every existing path in `files` resolves (symlinks and junctions followed) inside
     /// the data dir. Paths that cannot be resolved (missing, or not a valid name on this OS) are skipped: they cannot
     /// be read either.

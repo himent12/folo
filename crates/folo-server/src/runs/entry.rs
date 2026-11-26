@@ -163,6 +163,9 @@ impl RunEntry {
                 let file = &mut st.file;
                 let r = &mut file.run;
                 if s.status == RunStatus::Running {
+                    if s.epochs > 0 {
+                        r.epochs = s.epochs;
+                    }
                     if r.started.is_none() {
                         r.started = Some(now());
                     } else if let Some(at) = file.resumed_at.take() {

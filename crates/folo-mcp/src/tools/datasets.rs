@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use folo_api::{Dataset, IssueCounts, IssuePage, IssueSeverity, RegisterDataset, SyntheticDataset};
+use folo_server::Store as _;
 use folo_server::store::{ImageQuery, IssueQuery};
 
 use super::Progress;
@@ -275,6 +276,62 @@ impl Inner {
         if a.classes.len() > 80 || a.classes.iter().any(|c| c.chars().count() > 64) {
             return Err(invalid_arguments("classes must hold at most 80 names of at most 64 characters"));
         }
+        // In proxy mode with --confine, `folo serve` writes synthetic datasets under its own `<data_dir>/datasets`:
+        // allow mock servers (procedural `mock://` datasets), refuse non-loopback servers whose filesystem cannot be
+        // checked locally, and verify loopback real servers report a `data_dir` whose `datasets/` lies inside this
+        // MCP process's --data-dir before generating anything.
+        if self.confinement.active()
+            && let Some(proxy) = &self.proxy
+        {
+            let proxy = proxy.clone();
+            let paths = self.paths.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), Error> {
+                if proxy.is_mock() {
+                    return Ok(());
+                }
+                if !is_loopback_url(proxy.base()) {
+                    return Err(Error::new(
+                        http::StatusCode::NOT_IMPLEMENTED,
+                        "not_supported",
+                        format!(
+                            "create_synthetic_dataset with --confine is not available through remote server {}",
+                            proxy.base()
+                        ),
+                    )
+                    .hint("run `folo mcp --confine` against a local `folo serve` sharing --data-dir, without --server, or without --confine"));
+                }
+                let sys = proxy.system()?;
+                let Some(remote_dir) = sys.data_dir else {
+                    return Err(Error::new(
+                        http::StatusCode::FORBIDDEN,
+                        "path_outside_data_dir",
+                        format!(
+                            "the proxied folo serve at {} did not report its data_dir, so --confine cannot verify where synthetic datasets are written",
+                            proxy.base()
+                        ),
+                    )
+                    .hint("update folo serve, run `folo mcp --confine` without --server, or restart without --confine"));
+                };
+                let target = std::path::Path::new(&remote_dir).join("datasets");
+                paths.check_dir_inside(&target).map_err(|mut e| {
+                    if e.body.code == "path_outside_data_dir" {
+                        e.body.message = format!(
+                            "the proxied folo serve writes synthetic datasets under {}, which is outside --data-dir {}",
+                            folo_api::json::path(&target),
+                            folo_api::json::path(&paths.data_dir)
+                        );
+                        e.body.hint = Some(
+                            "pass the server's --data-dir to `folo mcp --confine --server ...`, run `folo mcp --confine` without --server, or restart without --confine"
+                                .into(),
+                        );
+                    }
+                    e
+                })?;
+                Ok(())
+            })
+            .await
+            .map_err(super::join)??;
+        }
         let total = a.images as f64;
         progress.report(0.0, Some(total), false).await;
         let req = SyntheticDataset {
@@ -285,6 +342,15 @@ impl Inner {
             seed: a.seed,
         };
         let d = self.blocking(move |s| s.create_synthetic(req)).await?;
+        // Defense-in-depth: if the server placed the dataset outside --data-dir anyway (e.g. a symlink or an older
+        // server omitting `data_dir` in `/api/system`), clean up what this call just created before returning the error.
+        if let Err(e) = self.ensure_dataset(&d.id).await {
+            let (id, c) = (d.id.clone(), self.confinement.clone());
+            let _ =
+                self.blocking(move |s| s.delete_dataset_files(&id).or_else(|_| s.delete_dataset(&id))).await;
+            c.forget(&d.id);
+            return Err(e);
+        }
         progress.report(total, Some(total), true).await;
         let summary = format!(
             "created {} ({}): {} train / {} val images, classes {}",
@@ -296,6 +362,22 @@ impl Inner {
         );
         out(&d, summary)
     }
+}
+
+/// True when `url` targets a loopback address (`localhost`, `127.x.x.x`, or `[::1]`) on this machine.
+fn is_loopback_url(url: &str) -> bool {
+    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(after) = authority.strip_prefix('[') {
+        after.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 #[cfg(test)]
@@ -487,5 +569,76 @@ mod tests {
             .unwrap();
         assert_eq!(out.value["items"].as_array().unwrap().len(), 0);
         assert!(out.value["next_cursor"].is_null());
+    }
+
+    #[test]
+    fn loopback_url_detection_covers_local_and_remote_hosts() {
+        assert!(is_loopback_url("http://127.0.0.1:7878"));
+        assert!(is_loopback_url("http://localhost:7878/api"));
+        assert!(is_loopback_url("https://[::1]:7878"));
+        assert!(!is_loopback_url("http://192.168.1.5:7878"));
+        assert!(!is_loopback_url("https://gpu.example.com:7878"));
+    }
+
+    #[tokio::test]
+    async fn confined_proxy_rejects_remote_host_and_missing_data_dir() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let home = folo_test_support::TestDir::new("mcp-confine-remote-or-legacy");
+        let opts = Options {
+            data_dir: home.to_path_buf(),
+            read_only: false,
+            confine: true,
+            device: "cpu".into(),
+            published_weights: None,
+        };
+        let args = || SyntheticArgs {
+            name: "s".into(),
+            images: 4,
+            classes: vec!["circle".into()],
+            imgsz: 64,
+            seed: 0,
+        };
+
+        // Loopback real server that omits `data_dir` in `/api/system`: refused before creating.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let serve = tokio::spawn(async move {
+            for _ in 0..4 {
+                let Ok((mut s, _)) = listener.accept().await else { break };
+                let mut buf = [0u8; 1024];
+                let n = s.read(&mut buf).await.unwrap_or(0);
+                let head = String::from_utf8_lossy(&buf[..n]);
+                let body = if head.starts_with("GET /api/health") {
+                    r#"{"status":"ok","version":"0.1.0","mock":false,"features":[]}"#.to_string()
+                } else if head.starts_with("GET /api/system") {
+                    serde_json::to_string(&folo_api::SystemResponse {
+                        system: folo_api::SystemInfo {
+                            cpu: folo_api::CpuInfo { name: "c".into(), threads: 1, util: 0.0 },
+                            memory: folo_api::MemoryInfo { used_bytes: 1, total_bytes: 2 },
+                            gpus: vec![],
+                        },
+                        data_dir: None,
+                        features: vec![],
+                        capabilities: None,
+                        gpu_pool: None,
+                    })
+                    .unwrap()
+                } else {
+                    panic!("unexpected request before confinement refusal: {head}");
+                };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
+        });
+        let http = Arc::new(HttpStore::new(&url, None));
+        let server = FoloMcp::new(http.clone(), Some(http), opts);
+        let err = server.inner.create_synthetic(args(), &mut Progress::none()).await.err().unwrap();
+        assert_eq!(err.body.code, "path_outside_data_dir", "{err:?}");
+        serve.abort();
+        let _ = serve.await;
     }
 }

@@ -330,6 +330,10 @@ impl Store for HttpStore {
         self.delete(&format!("/datasets/{}", encode(id)))
     }
 
+    fn delete_dataset_files(&self, id: &str) -> Result<(), Error> {
+        self.delete(&format!("/datasets/{}?files=true", encode(id)))
+    }
+
     fn list_models(&self) -> Result<Vec<Model>, Error> {
         Ok(self.get::<ModelList>("/models")?.models)
     }

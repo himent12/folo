@@ -49,6 +49,7 @@ impl Labeler {
                     Ok(size) => Ok(Candidate {
                         name: upload.name,
                         source: Source::Upload { tmp, hash: fnv1a(&upload.bytes) },
+                        sha256: super::dataset::sha256_bytes(&upload.bytes),
                         size,
                     }),
                     Err(reason) => {
@@ -138,7 +139,7 @@ impl Labeler {
         let mut folders: HashSet<PathBuf> = images.iter().filter_map(|r| r.external.clone()).collect();
         let (first_new, next_image) = (images.len(), state.file.next_image);
         for candidate in staged {
-            let Candidate { name, source, size: (width, height) } = candidate;
+            let Candidate { name, source, sha256, size: (width, height) } = candidate;
             let reason = if let Source::Upload { hash, .. } = &source
                 && let Some(same) = uploads.get(hash)
             {
@@ -180,6 +181,7 @@ impl Labeler {
                 file,
                 external,
                 hash,
+                sha256: Some(sha256),
                 width,
                 height,
                 status: LabelImageStatus::Pending,
@@ -468,6 +470,7 @@ pub struct LabelImageQuery {
 struct Candidate {
     name: String,
     source: Source,
+    sha256: String,
     size: (u32, u32),
 }
 
@@ -558,8 +561,14 @@ fn probe_folder_files(
                 wave_slots.push(Slot::Probe(idx));
             }
         }
-        let probed: Vec<Option<(u32, u32)>> =
-            to_probe.par_iter().map(|(p, _)| folo_data::probe_size(p).ok()).collect();
+        let mut probed: Vec<Option<((u32, u32), String)>> = to_probe
+            .par_iter()
+            .map(|(p, _)| {
+                let size = folo_data::probe_size(p).ok()?;
+                let sha256 = super::dataset::sha256_file(p).ok()?;
+                Some((size, sha256))
+            })
+            .collect();
         let mut to_probe: Vec<Option<(PathBuf, String)>> = to_probe.into_iter().map(Some).collect();
         for slot in wave_slots {
             match slot {
@@ -568,8 +577,10 @@ fn probe_folder_files(
                 }
                 Slot::Probe(i) => {
                     let (path, name) = to_probe[i].take().expect("unique probe index");
-                    match probed[i] {
-                        Some(size) => staged.push(Candidate { name, source: Source::Folder(path), size }),
+                    match probed[i].take() {
+                        Some((size, sha256)) => {
+                            staged.push(Candidate { name, source: Source::Folder(path), sha256, size })
+                        }
                         None => {
                             skipped.push(SkippedImage { file: name, reason: "not a readable image".into() })
                         }

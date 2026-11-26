@@ -33,6 +33,7 @@ impl Labeler {
                 .map(|r| dataset::Item {
                     source: job.image_path(r),
                     file: r.file.clone(),
+                    sha256: r.sha256.clone(),
                     width: r.width,
                     height: r.height,
                     boxes: r.boxes.clone(),
@@ -69,7 +70,43 @@ impl Labeler {
             dataset::write(&path, &classes, &items, req.val_fraction, req.seed, dataset::PROVENANCE)
         {
             let _ = std::fs::remove_dir_all(&path);
-            return Err(io_error("writing the dataset", &path, e));
+            return Err(match e {
+                dataset::WriteError::Missing(src) => Error::new(
+                    StatusCode::NOT_FOUND,
+                    "image_not_found",
+                    format!("1 labeled image is no longer on disk, such as {}", src.display()),
+                )
+                .hint("put the folder back where it was, or remove those images from the job"),
+                dataset::WriteError::Unreadable { file, path, reason } => Error::new(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "image_decode_failed",
+                    format!("labeled image '{file}' ({}) cannot be decoded: {reason}", path.display()),
+                )
+                .hint("restore the original image file, or remove the corrupt image from the job"),
+                dataset::WriteError::DimensionsChanged { file, path, expected, actual } => Error::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_dataset",
+                    format!(
+                        "labeled image '{file}' ({}) changed size on disk: expected {}x{}, found {}x{}",
+                        path.display(),
+                        expected.0,
+                        expected.1,
+                        actual.0,
+                        actual.1
+                    ),
+                )
+                .hint("restore the original image, or remove it from the job, add the new image and label it again"),
+                dataset::WriteError::ContentChanged { file, path } => Error::new(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_dataset",
+                    format!(
+                        "labeled image '{file}' ({}) changed on disk since it was added to the job",
+                        path.display()
+                    ),
+                )
+                .hint("restore the original image, or remove it from the job, add the new image and label it again"),
+                dataset::WriteError::Io(e) => io_error("writing the dataset", &path, e),
+            });
         }
         Ok(WrittenDataset { name, path, export })
     }

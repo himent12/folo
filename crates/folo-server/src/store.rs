@@ -122,7 +122,8 @@ pub struct LogsQuery {
     /// Most lines answered.
     pub limit: usize,
     /// The lines after the first `after` of the log (the oldest `limit` of them) instead of the last `limit` lines
-    /// (feature `run_cursors`).
+    /// (feature `run_cursors`). `RunLogs::total` still reports the full log length; a paginated poller advances its
+    /// cursor to `after + lines.len()`.
     pub after: Option<u64>,
 }
 
