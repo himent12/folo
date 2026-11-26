@@ -1,6 +1,7 @@
 //! Copies, casts and elementwise kernels.
 
 mod cat;
+mod inplace_simd;
 mod simd;
 #[cfg(target_arch = "x86_64")]
 mod simd_binary;
@@ -12,6 +13,8 @@ mod simd_ops_tests;
 #[cfg(test)]
 mod tests;
 mod transpose;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod transpose_wasm;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 mod wasm_ops;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -26,6 +29,7 @@ use crate::cpu::{par_chunks, par_for};
 use crate::layout::RowPlan;
 
 pub(crate) use cat::cat_contiguous_slices;
+pub(crate) use inplace_simd::{InplaceOp, binary_inplace, mul_scalar_inplace};
 
 pub use simd::SILU_MAX_REL_ERR;
 pub(crate) use simd::{exp_scalar, silu_bias_inplace};
@@ -127,7 +131,7 @@ pub(crate) fn copy_strided_into<T: Copy + Send + Sync>(
 
 /// Dispatch a two-operand row kernel over `plan` serially or via rayon, guaranteeing `from < to` on every call.
 #[inline]
-fn run_strided_rows(plan: &RowPlan<2>, row: impl Fn([usize; 2], usize, usize) + Sync) {
+pub(super) fn run_strided_rows(plan: &RowPlan<2>, row: impl Fn([usize; 2], usize, usize) + Sync) {
     let len = plan.len;
     if plan.rows == 0 || len == 0 {
         return;
@@ -218,6 +222,7 @@ pub(crate) fn copy_into<T: Copy + Send + Sync>(
 }
 
 /// `dst[i] = f(dst[i], src[i])` through two layouts of the same shape. Same panics as [`copy_into`].
+#[cfg(test)]
 pub(crate) fn fill_rows_inplace(
     dst: &mut [f32],
     dst_layout: &Layout,
@@ -228,6 +233,7 @@ pub(crate) fn fill_rows_inplace(
     strided_update(dst, dst_layout, src, src_layout, f);
 }
 
+#[cfg(test)]
 fn strided_update<T: Copy + Send + Sync>(
     dst: &mut [T],
     dst_layout: &Layout,

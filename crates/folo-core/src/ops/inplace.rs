@@ -10,7 +10,7 @@
 
 use crate::autograd::is_grad_enabled;
 use crate::backend::{BinaryOp, View};
-use crate::cpu::elementwise::fill_rows_inplace;
+use crate::cpu::elementwise::{InplaceOp, binary_inplace, mul_scalar_inplace};
 use crate::{Error, Result, Tensor};
 
 impl Tensor {
@@ -59,14 +59,14 @@ impl Tensor {
             let src = sr.as_cpu(name)?.as_f32(name)?;
             let mut dst = self.cell().write();
             let d = dst.as_cpu_mut(name)?.as_f32_mut(name)?;
-            let f: fn(f32, f32) -> f32 = match op {
-                BinaryOp::Add => |a, b| a + b,
-                BinaryOp::Sub => |a, b| a - b,
-                BinaryOp::Mul => |a, b| a * b,
-                BinaryOp::Div => |a, b| a / b,
+            let iop = match op {
+                BinaryOp::Add => InplaceOp::Add,
+                BinaryOp::Sub => InplaceOp::Sub,
+                BinaryOp::Mul => InplaceOp::Mul,
+                BinaryOp::Div => InplaceOp::Div,
                 _ => unreachable!(),
             };
-            fill_rows_inplace(d, self.layout(), src, &lo, f);
+            binary_inplace(iop, d, self.layout(), src, &lo);
             return Ok(());
         }
         let _g = crate::no_grad();
@@ -106,7 +106,7 @@ impl Tensor {
             let src = sr.as_cpu("add_scaled_assign")?.as_f32("add_scaled_assign")?;
             let mut dst = self.cell().write();
             let d = dst.as_cpu_mut("add_scaled_assign")?.as_f32_mut("add_scaled_assign")?;
-            fill_rows_inplace(d, self.layout(), src, &lo, move |a, b| a + alpha * b);
+            binary_inplace(InplaceOp::AddScaled(alpha), d, self.layout(), src, &lo);
             return Ok(());
         }
         let scaled = {
@@ -118,6 +118,14 @@ impl Tensor {
 
     /// `self *= c`.
     pub fn mul_scalar_assign(&self, c: f32) -> Result<()> {
+        self.check_inplace("mul_scalar_assign")?;
+        self.check_f32("mul_scalar_assign")?;
+        if self.device().is_cpu() {
+            let mut dst = self.cell().write();
+            let d = dst.as_cpu_mut("mul_scalar_assign")?.as_f32_mut("mul_scalar_assign")?;
+            mul_scalar_inplace(d, self.layout(), c);
+            return Ok(());
+        }
         let s = Tensor::full_with(crate::Shape::scalar(), c as f64, self.dtype(), self.device())?;
         self.mul_assign(&s)
     }

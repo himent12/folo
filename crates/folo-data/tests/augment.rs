@@ -5,8 +5,9 @@ mod common;
 
 use common::*;
 use folo_data::augment::{
-    BoxFilter, affine_sample, flip_lr, flip_ud, mixup, mosaic4, random_affine, random_hsv, resize_long_side,
-    transform_boxes,
+    BoxFilter, CopyPasteConfig, ErasingFill, RandomErasingConfig, affine_sample, copy_paste, cutmix,
+    cutmix_rect, erase_rect, flip_lr, flip_ud, mixup, mosaic4, random_affine, random_erasing, random_hsv,
+    resize_long_side, transform_boxes,
 };
 use folo_data::warp::Affine;
 use folo_data::{
@@ -382,4 +383,65 @@ fn loader_mixup_fused_matches_apply_bit_exact() {
             }
         }
     }
+}
+
+#[test]
+fn cutmix_copy_paste_and_random_erasing_keep_boxes_consistent() {
+    let perm = BoxFilter { min_px: 0.0, min_area_ratio: 0.0, max_aspect: 1e9 };
+
+    // 1. CutMix: every coloured pixel matches its surviving box and deterministic across seeds.
+    for seed in 0..8u64 {
+        let a = random_rect_sample(10 + seed, 128, 96, 4);
+        let b = random_rect_sample(50 + seed, 128, 96, 4);
+        let mut out1 = a.clone();
+        let mut out2 = a.clone();
+        let r1 = cutmix(&mut out1, &b, &perm, &mut Rng::new(seed + 100));
+        let r2 = cutmix(&mut out2, &b, &perm, &mut Rng::new(seed + 100));
+        assert_eq!(r1, r2);
+        assert_eq!(out1, out2);
+        assert!(r1[2] > r1[0] && r1[3] > r1[1]);
+        // Every surviving box stays within image bounds with positive area.
+        for bx in &out1.boxes {
+            let [x1, y1, x2, y2] = bx.pixel_xyxy(128, 96);
+            assert!(x1 >= -1e-4 && y1 >= -1e-4 && x2 <= 128.0001 && y2 <= 96.0001 && x2 > x1 && y2 > y1);
+        }
+    }
+    // Exact pixel/box parity on explicit CutMix patch covering right half of canvas.
+    let mut host = rect_sample(100, 80, &[(0, [10, 10, 40, 60]), (1, [60, 10, 90, 60])]);
+    let donor = rect_sample(100, 80, &[(2, [55, 20, 85, 70])]);
+    cutmix_rect(&mut host, &donor, [50, 0, 100, 80], &BoxFilter::default());
+    assert_consistent(&host, 0.5, 0.98, "cutmix explicit");
+    assert_eq!(host.boxes.len(), 2);
+
+    // 2. Copy-Paste (plain and mirrored): pasted boxes land directly on their coloured pixels.
+    for flip_lr_flag in [false, true] {
+        let mut dst = rect_sample(120, 96, &[(0, [8, 8, 36, 36])]);
+        let donor = rect_sample(120, 96, &[(1, [50, 48, 84, 86]), (2, [10, 10, 34, 34])]);
+        let cfg = CopyPasteConfig { prob: 1.0, max_ioa: 0.1, flip_lr: flip_lr_flag };
+        let n = copy_paste(&mut dst, &donor, &cfg, &BoxFilter::default(), &mut Rng::new(42));
+        assert_eq!(n, if flip_lr_flag { 2 } else { 1 });
+        assert_consistent(&dst, 0.5, 0.98, &format!("copy_paste flip_lr={flip_lr_flag}"));
+    }
+
+    // 3. Random Erasing: constant grey fill trims/drops occluded boxes and preserves box/pixel alignment.
+    let mut s = rect_sample(100, 80, &[(0, [10, 10, 40, 70]), (1, [60, 10, 90, 70])]);
+    erase_rect(
+        &mut s,
+        [25, 0, 100, 80],
+        ErasingFill::Constant([0, 0, 0]),
+        &BoxFilter::default(),
+        &mut Rng::new(0),
+    );
+    // Box 1 is completely erased; Box 0 is cleanly trimmed to [10, 10, 25, 70].
+    assert_eq!(s.boxes.len(), 1);
+    assert_consistent(&s, 0.5, 0.98, "erase_rect");
+
+    let mut noisy = random_rect_sample(77, 96, 96, 4);
+    let erased = random_erasing(
+        &mut noisy,
+        &RandomErasingConfig { prob: 1.0, count: 2, fill: ErasingFill::RandomNoise, ..Default::default() },
+        &BoxFilter::default(),
+        &mut Rng::new(77),
+    );
+    assert_eq!(erased, 2);
 }

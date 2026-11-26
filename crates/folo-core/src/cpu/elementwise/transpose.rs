@@ -8,7 +8,7 @@ use crate::Layout;
 use crate::layout::RowPlan;
 
 /// Cache tile side (multiple of 8): a 32×32 `f32` block is 4 KiB and fits comfortably in L1d.
-const TILE: usize = 32;
+pub(super) const TILE: usize = 32;
 
 /// Transpose a `src_rows × src_cols` matrix in `src` (row stride `src_rs`) into a `src_cols × src_rows` matrix
 /// in `dst` (row stride `dst_rs`): `dst[j * dst_rs + i] = src[i * src_rs + j]`.
@@ -159,6 +159,30 @@ unsafe fn transpose_band_ptr(
         }
         if bh >= 8 && src_rows >= 8 {
             unsafe { transpose_band_avx2(src, src_rs, dst_ptr, dst_rs, src_rows, j0, bh) };
+            return;
+        }
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        // SAFETY: caller guarantees `src` and `dst_ptr` bounds.
+        if bh == 4 && src_rows >= 4 {
+            unsafe {
+                super::transpose_wasm::transpose_c4_deinterleave_wasm(
+                    src, src_rs, dst_ptr, dst_rs, src_rows, j0,
+                )
+            };
+            return;
+        }
+        if src_rows == 4 && bh >= 4 {
+            unsafe {
+                super::transpose_wasm::transpose_c4_interleave_wasm(src, src_rs, dst_ptr, dst_rs, j0, bh)
+            };
+            return;
+        }
+        if bh >= 4 && src_rows >= 4 {
+            unsafe {
+                super::transpose_wasm::transpose_band_wasm(src, src_rs, dst_ptr, dst_rs, src_rows, j0, bh)
+            };
             return;
         }
     }
