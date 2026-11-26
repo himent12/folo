@@ -268,8 +268,9 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
 - `TextSystem` (app-wide: font ids, metrics, fallback stack) and `WindowTextSystem` (per window: the line
   layout cache that keeps what the previous frame used) expose what the app and the text element call:
   `shape_line`, `shape_text`, `layout_line`, `line_wrapper`, `ShapedLine::{paint, width, x_for_index,
-  index_for_x, closest_index_for_x, len}`, `WrappedLine`. Wrapping and truncation follow GPUI's rules exactly
-  (they decide where every line of the UI breaks).
+  index_for_x, closest_index_for_x, len}`, `WrappedLine`. Wrapping and truncation follow GPUI's rules with
+  grapheme-cluster-safe boundaries (never splitting a base character from its combining marks or multi-glyph
+  cluster, as noted under Differences from GPUI).
 - Painting a line goes through `trait GlyphPainter` (paint_glyph, paint_emoji, paint_underline,
   paint_strikethrough, paint_background); the window implements it, so `text/` does not depend on `window/`.
 - Fonts come from `add_fonts` (the app bundles Geist and Geist Mono). A glyph the bundled fonts lack falls

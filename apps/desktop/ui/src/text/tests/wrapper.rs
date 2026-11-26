@@ -322,4 +322,25 @@ fn wrap_and_truncate_never_split_grapheme_clusters() {
             }
         }
     }
+
+    // Consecutive text fragments that split a grapheme cluster or `\r\n` must be segmented together
+    // so neither wraps between base + combining mark nor measures `\r` separately.
+    assert_eq!(
+        wrap(&mut wrapper, &[LineFragment::text("ae"), LineFragment::text("\u{0301}b")], 20.),
+        [Boundary::new(1, 0), Boundary::new(4, 0)],
+        "must wrap before 'e' (byte 1) and 'b' (byte 4), never at byte 2 between 'e' and accent"
+    );
+    assert_eq!(
+        wrap(&mut wrapper, &[LineFragment::text("a\r"), LineFragment::text("\nb")], 100.),
+        wrap(&mut wrapper, &[LineFragment::text("a\r\nb")], 100.)
+    );
+    // CRLF truncation stays on a grapheme boundary (never keeps a dangling `\r`).
+    let crlf = "ab\r\ncd";
+    for width in [10., 20., 25., 30., 40.] {
+        let (cut, cut_runs) = wrapper.truncate_line(crlf.into(), px(width), "…", &runs(&[crlf.len()]));
+        assert_covers(&cut, &cut_runs);
+        if let Some(prefix) = cut.strip_suffix('…') {
+            assert!(!prefix.ends_with('\r'), "truncate_line split CRLF at width {width}: {cut:?}");
+        }
+    }
 }

@@ -341,4 +341,98 @@ fn shape_text_never_wraps_between_base_letter_and_combining_accent() {
     };
     let bounds = split_run_layout.compute_wrap_boundaries(cluster_text, px(44.), None);
     assert_eq!(bounds.as_slice(), &[WrapBoundary { run_ix: 0, glyph_ix: 3 }]);
+
+    // Non-monotonic intra-cluster mark x offset: a base glyph at x=20 with a mark positioned at x=31
+    // whose next cluster begins at x=28 has total advance 28 <= wrap_width (30), so it must NOT wrap.
+    let offset_text = "aae\u{0301}b";
+    let offset_layout = crate::LineLayout {
+        font_size: px(16.),
+        width: px(36.),
+        ascent: px(12.),
+        descent: px(4.),
+        len: offset_text.len(),
+        runs: vec![crate::ShapedRun {
+            font_id: crate::FontId(0),
+            glyphs: vec![
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(0.), px(0.)),
+                    index: 0,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(10.), px(0.)),
+                    index: 1,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(2),
+                    position: point(px(20.), px(0.)),
+                    index: 2,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(3),
+                    position: point(px(31.), px(0.)),
+                    index: 3,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(4),
+                    position: point(px(28.), px(0.)),
+                    index: 5,
+                    is_emoji: false,
+                },
+            ],
+        }],
+    };
+    let bounds = offset_layout.compute_wrap_boundaries(offset_text, px(30.), None);
+    assert_eq!(
+        bounds.as_slice(),
+        &[WrapBoundary { run_ix: 0, glyph_ix: 4 }],
+        "cluster ending at x=28 fits within 30 px; only the following 'b' wraps"
+    );
+
+    // max_lines clamping on a multi-glyph cluster stops at the limit without splitting the cluster.
+    let clamped = same_index_layout.compute_wrap_boundaries(cluster_text, px(25.), Some(2));
+    assert_eq!(clamped.as_slice(), &[WrapBoundary { run_ix: 0, glyph_ix: 2 }]);
+
+    // Descending / RTL glyph indices (as emitted for visual RTL runs): stays linear/fast and keeps
+    // combining marks attached to their RTL base character.
+    let rtl_text = format!("prefix {}", "א\u{05B8}".repeat(200));
+    let mut rtl_glyphs = Vec::new();
+    let mut x = 0.0f32;
+    for (i, ch) in rtl_text.char_indices().rev() {
+        rtl_glyphs.push(crate::ShapedGlyph {
+            id: crate::GlyphId(ch as u32),
+            position: point(px(x), px(0.)),
+            index: i,
+            is_emoji: false,
+        });
+        x += 8.0;
+    }
+    let rtl_layout = crate::LineLayout {
+        font_size: px(16.),
+        width: px(x),
+        ascent: px(12.),
+        descent: px(4.),
+        len: rtl_text.len(),
+        runs: vec![crate::ShapedRun { font_id: crate::FontId(0), glyphs: rtl_glyphs }],
+    };
+    let rtl_grapheme_starts: Vec<usize> = rtl_text.grapheme_indices(true).map(|(i, _)| i).collect();
+    let rtl_bounds = rtl_layout.compute_wrap_boundaries(&rtl_text, px(80.), None);
+    assert!(!rtl_bounds.is_empty());
+    for b in &rtl_bounds {
+        let g = &rtl_layout.runs[b.run_ix].glyphs[b.glyph_ix];
+        // The glyph at the wrap boundary must start a new cluster relative to the previous glyph.
+        if b.glyph_ix > 0 {
+            let prev = &rtl_layout.runs[b.run_ix].glyphs[b.glyph_ix - 1];
+            let cluster_of = |ix: usize| {
+                let pos = rtl_grapheme_starts.partition_point(|&s| s <= ix);
+                rtl_grapheme_starts[pos.saturating_sub(1)]
+            };
+            assert_ne!(cluster_of(g.index), cluster_of(prev.index), "RTL wrap split a grapheme cluster");
+        }
+    }
 }

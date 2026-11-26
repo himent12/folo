@@ -284,3 +284,98 @@ fn startup_cost() {
         fallback.as_secs_f64() * 1e3
     );
 }
+
+#[test]
+fn rtl_filename_with_english_reason_wraps_and_keeps_both_inks() {
+    use folo_ui::text::GlyphPainter;
+    use folo_ui::{
+        Bounds, Hsla, Pixels, StrikethroughStyle, TextAlign, TextRun, TextSystem, UnderlineStyle,
+        WindowTextSystem, blue, red, size,
+    };
+
+    struct Recorder {
+        glyphs: Vec<(Point<Pixels>, Hsla)>,
+    }
+
+    impl GlyphPainter for Recorder {
+        fn paint_glyph(
+            &mut self,
+            origin: Point<Pixels>,
+            _font_id: FontId,
+            _glyph_id: GlyphId,
+            _font_size: Pixels,
+            color: Hsla,
+        ) -> anyhow::Result<()> {
+            self.glyphs.push((origin, color));
+            Ok(())
+        }
+        fn paint_emoji(&mut self, _: Point<Pixels>, _: FontId, _: GlyphId, _: Pixels) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn paint_underline(&mut self, _: Point<Pixels>, _: Pixels, _: &UnderlineStyle) {}
+        fn paint_strikethrough(&mut self, _: Point<Pixels>, _: Pixels, _: &StrikethroughStyle) {}
+        fn paint_background(&mut self, _: Bounds<Pixels>, _: Hsla) {}
+    }
+
+    let ts = Arc::new(TextSystem::new(Arc::new(text_system())));
+    let wts = WindowTextSystem::new(ts.clone());
+    let file = "אx.json ";
+    let reason = "invalid option with detailed reason text that wraps cleanly across multiple lines";
+    let combined = format!("{file}{reason}");
+    let name_color = blue();
+    let error_color = red();
+    let runs = [
+        TextRun {
+            len: file.len(),
+            font: font("Geist Mono"),
+            color: name_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        },
+        TextRun {
+            len: reason.len(),
+            font: geist(400.),
+            color: error_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        },
+    ];
+    let wrap_w = px(220.);
+    let wrapped = wts.shape_text(combined.clone().into(), px(12.), &runs, Some(wrap_w), None).unwrap();
+    assert_eq!(wrapped.len(), 1);
+    let line = &wrapped[0];
+
+    // Glyphs are in visual left-to-right order (non-decreasing x) even for an RTL paragraph, so
+    // wrapping triggers and nothing clips past wrap_w.
+    let xs: Vec<Pixels> = line.runs().iter().flat_map(|r| r.glyphs.iter().map(|g| g.position.x)).collect();
+    assert!(xs.windows(2).all(|w| w[0] <= w[1]), "expected non-decreasing visual x positions: {xs:?}");
+    assert!(!line.wrap_boundaries().is_empty(), "long reason after RTL filename must wrap");
+
+    let mut rec = Recorder { glyphs: Vec::new() };
+    folo_ui::text::paint_line(
+        Point { x: px(0.), y: px(0.) },
+        &line.unwrapped_layout,
+        px(16.),
+        TextAlign::Left,
+        Some(wrap_w),
+        line.decoration_runs(),
+        line.wrap_boundaries(),
+        &ts,
+        Bounds::new(Point { x: px(0.), y: px(0.) }, size(px(1000.), px(1000.))),
+        &mut rec,
+    )
+    .unwrap();
+
+    // Count non-space glyphs in each ink against the two standalone single-run layouts.
+    let name_count = rec.glyphs.iter().filter(|(_, c)| *c == name_color).count();
+    let error_count = rec.glyphs.iter().filter(|(_, c)| *c == error_color).count();
+    assert!(name_count >= 7, "all filename glyphs (אx.json) must keep name_color, got {name_count}");
+    assert!(error_count >= 60, "all reason glyphs must keep error_color, got {error_count}");
+    let max_x = rec.glyphs.iter().map(|(p, _)| p.x).fold(px(0.), Pixels::max);
+    assert!(
+        max_x <= wrap_w + px(12.),
+        "wrapped glyphs must stay within wrap_w ({wrap_w:?}), max_x={max_x:?}"
+    );
+}

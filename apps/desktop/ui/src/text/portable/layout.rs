@@ -8,14 +8,20 @@ use cosmic_text::{Attrs, AttrsList, Family, LayoutLine, ShapeLine, Shaping, Wrap
 
 impl State {
     pub fn layout_line(&mut self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
-        let mut line = self.shape(text, font_size, font_runs);
+        let (mut line, mut rtl) = self.shape(text, font_size, font_runs);
         if !self.system_fonts_loaded() && has_missing_glyphs(text, line.as_ref()) {
             self.load_system_fonts();
-            line = self.shape(text, font_size, font_runs);
+            (line, rtl) = self.shape(text, font_size, font_runs);
         }
-        let Some(line) = line else {
+        let Some(mut line) = line else {
             return LineLayout { font_size, len: text.len(), ..Default::default() };
         };
+        // For RTL paragraphs cosmic-text emits glyphs from right to left (decreasing `x`); reverse
+        // into visual left-to-right order so `compute_wrap_boundaries` and `paint_line` see
+        // non-decreasing `x` positions just as DirectWrite produces.
+        if rtl {
+            line.glyphs.reverse();
+        }
 
         let mut runs: Vec<ShapedRun> = Vec::new();
         for glyph in &line.glyphs {
@@ -52,8 +58,9 @@ impl State {
         }
     }
 
-    /// Shapes and lays out `text` as one unwrapped line (`None` only if cosmic-text returns no line).
-    fn shape(&mut self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> Option<LayoutLine> {
+    /// Shapes and lays out `text` as one unwrapped line (`None` only if cosmic-text returns no line),
+    /// alongside whether cosmic-text laid the paragraph out right-to-left.
+    fn shape(&mut self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> (Option<LayoutLine>, bool) {
         let mut attrs_list = AttrsList::new(&Attrs::new());
         let mut offset = 0;
         for run in font_runs {
@@ -74,9 +81,10 @@ impl State {
         }
 
         let shaped = ShapeLine::new(&mut self.font_system, text, &attrs_list, Shaping::Advanced, 4);
+        let rtl = shaped.rtl;
         let mut lines = Vec::with_capacity(1);
         shaped.layout_to_buffer(&mut self.scratch, font_size.0, None, Wrap::None, None, &mut lines, None);
-        lines.into_iter().next()
+        (lines.into_iter().next(), rtl)
     }
 }
 

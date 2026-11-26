@@ -7,27 +7,33 @@ use std::sync::Arc;
 use unicode_segmentation::{GraphemeIndices, UnicodeSegmentation};
 
 /// Tracks which UAX #29 extended grapheme cluster contains each byte index in a line, with a
-/// zero-overhead fast path for ASCII-only text.
+/// zero-overhead fast path for ASCII-only text and an O(log N) lookup table built lazily on any
+/// backward jump (e.g. RTL runs emitted in visual order).
 struct GraphemeCursor<'a> {
     text: &'a str,
     iter: Option<GraphemeIndices<'a>>,
     cur_start: usize,
     next_start: Option<usize>,
+    starts: Option<Vec<usize>>,
 }
 
 impl<'a> GraphemeCursor<'a> {
     fn new(text: &'a str) -> Self {
         if text.is_ascii() {
-            return Self { text, iter: None, cur_start: 0, next_start: None };
+            return Self { text, iter: None, cur_start: 0, next_start: None, starts: None };
         }
         let mut iter = text.grapheme_indices(true);
         let cur_start = iter.next().map_or(0, |(i, _)| i);
         let next_start = iter.next().map(|(i, _)| i);
-        Self { text, iter: Some(iter), cur_start, next_start }
+        Self { text, iter: Some(iter), cur_start, next_start, starts: None }
     }
 
     /// The UTF-8 byte index where the extended grapheme cluster containing `byte_ix` begins.
     fn cluster_start(&mut self, byte_ix: usize) -> usize {
+        if let Some(starts) = self.starts.as_deref() {
+            let pos = starts.partition_point(|&s| s <= byte_ix);
+            return pos.checked_sub(1).map_or(0, |i| starts[i]);
+        }
         let Some(iter) = self.iter.as_mut() else {
             let bytes = self.text.as_bytes();
             if byte_ix > 0 && bytes.get(byte_ix) == Some(&b'\n') && bytes.get(byte_ix - 1) == Some(&b'\r') {
@@ -36,9 +42,11 @@ impl<'a> GraphemeCursor<'a> {
             return byte_ix;
         };
         if byte_ix < self.cur_start {
-            *iter = self.text.grapheme_indices(true);
-            self.cur_start = iter.next().map_or(0, |(i, _)| i);
-            self.next_start = iter.next().map(|(i, _)| i);
+            let starts: Vec<usize> = self.text.grapheme_indices(true).map(|(i, _)| i).collect();
+            let pos = starts.partition_point(|&s| s <= byte_ix);
+            let found = pos.checked_sub(1).map_or(0, |i| starts[i]);
+            self.starts = Some(starts);
+            return found;
         }
         while let Some(next) = self.next_start
             && next <= byte_ix
@@ -150,14 +158,13 @@ impl LineLayout {
             .enumerate()
             .flat_map(move |(run_ix, run)| {
                 run.glyphs.iter().enumerate().map(move |(glyph_ix, glyph)| {
-                    let character = text[glyph.index..].chars().next().unwrap_or('\0');
-                    (WrapBoundary { run_ix, glyph_ix }, glyph.index, character, glyph.position.x)
+                    (WrapBoundary { run_ix, glyph_ix }, glyph.index, glyph.position.x)
                 })
             })
             .peekable();
 
-        while let Some((boundary, glyph_index, ch, x)) = glyphs.next() {
-            if ch == '\n' {
+        while let Some((boundary, glyph_index, x)) = glyphs.next() {
+            if text.as_bytes().get(glyph_index) == Some(&b'\n') {
                 continue;
             }
 
@@ -168,6 +175,7 @@ impl LineLayout {
                 cluster_boundary = boundary;
                 cluster_x = x;
 
+                let ch = text[cluster_start..].chars().next().unwrap_or('\0');
                 if LineWrapper::is_word_char(ch) {
                     if prev_ch == ' ' && ch != ' ' && first_non_whitespace_ix.is_some() {
                         last_candidate_ix = Some(boundary);
@@ -185,7 +193,17 @@ impl LineLayout {
                 prev_ch = ch;
             }
 
-            let next_x = glyphs.peek().map_or(self.width, |(_, _, _, x)| *x);
+            // Defer the overflow check until the last glyph of the current cluster so intra-cluster
+            // mark offsets (whose x may momentarily exceed the cluster's advance) never trigger an
+            // early wrap.
+            let next_in_same_cluster = glyphs.peek().is_some_and(|&(_, next_ix, _)| {
+                text.as_bytes().get(next_ix) != Some(&b'\n') && cursor.cluster_start(next_ix) == cluster_start
+            });
+            if next_in_same_cluster {
+                continue;
+            }
+
+            let next_x = glyphs.peek().map_or(self.width, |(_, _, x)| *x);
             let width = next_x - last_boundary_x;
 
             if width > wrap_width && cluster_boundary > last_boundary {

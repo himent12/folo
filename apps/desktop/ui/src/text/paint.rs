@@ -97,8 +97,9 @@ pub fn paint_line(
     }
     let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
     let baseline_offset = point(px(0.), padding_top + layout.ascent);
-    let mut decoration_runs = decoration_runs.iter();
+    let mut decoration_iter = decoration_runs.iter();
     let mut wraps = wrap_boundaries.iter().peekable();
+    let mut run_start = 0;
     let mut run_end = 0;
     let mut color = black();
     let mut current_underline: Option<(Point<Pixels>, UnderlineStyle)> = None;
@@ -162,8 +163,12 @@ pub fn paint_line(
 
             let mut finished_underline: Option<(Point<Pixels>, UnderlineStyle)> = None;
             let mut finished_strikethrough: Option<(Point<Pixels>, StrikethroughStyle)> = None;
-            if glyph.index >= run_end {
-                let mut style_run = decoration_runs.next();
+            if glyph.index < run_start || glyph.index >= run_end {
+                if glyph.index < run_start {
+                    decoration_iter = decoration_runs.iter();
+                    run_end = 0;
+                }
+                let mut style_run = decoration_iter.next();
 
                 // Ignore style runs that apply to a partial glyph.
                 while let Some(run) = style_run {
@@ -171,7 +176,7 @@ pub fn paint_line(
                         break;
                     }
                     run_end += run.len as usize;
-                    style_run = decoration_runs.next();
+                    style_run = decoration_iter.next();
                 }
 
                 if let Some(style_run) = style_run {
@@ -211,9 +216,11 @@ pub fn paint_line(
                         ));
                     }
 
+                    run_start = run_end;
                     run_end += style_run.len as usize;
                     color = style_run.color;
                 } else {
+                    run_start = run_end;
                     run_end = layout.len;
                     finished_underline = current_underline.take();
                     finished_strikethrough = current_strikethrough.take();
@@ -309,8 +316,9 @@ pub fn paint_line_background(
     if layout.runs.is_empty() || !decoration_runs.iter().any(|run| run.background_color.is_some()) {
         return Ok(());
     }
-    let mut decoration_runs = decoration_runs.iter();
+    let mut decoration_iter = decoration_runs.iter();
     let mut wraps = wrap_boundaries.iter().peekable();
+    let mut run_start = 0;
     let mut run_end = 0;
     let mut current_background: Option<(Point<Pixels>, Hsla)> = None;
     let mut glyph_origin = point(
@@ -359,8 +367,12 @@ pub fn paint_line_background(
             prev_glyph_position = glyph.position;
 
             let mut finished_background: Option<(Point<Pixels>, Hsla)> = None;
-            if glyph.index >= run_end {
-                let mut style_run = decoration_runs.next();
+            if glyph.index < run_start || glyph.index >= run_end {
+                if glyph.index < run_start {
+                    decoration_iter = decoration_runs.iter();
+                    run_end = 0;
+                }
+                let mut style_run = decoration_iter.next();
 
                 // Ignore style runs that apply to a partial glyph.
                 while let Some(run) = style_run {
@@ -368,7 +380,7 @@ pub fn paint_line_background(
                         break;
                     }
                     run_end += run.len as usize;
-                    style_run = decoration_runs.next();
+                    style_run = decoration_iter.next();
                 }
 
                 if let Some(style_run) = style_run {
@@ -381,8 +393,10 @@ pub fn paint_line_background(
                         current_background
                             .get_or_insert((point(glyph_origin.x, glyph_origin.y), run_background));
                     }
+                    run_start = run_end;
                     run_end += style_run.len as usize;
                 } else {
+                    run_start = run_end;
                     run_end = layout.len;
                     finished_background = current_background.take();
                 }

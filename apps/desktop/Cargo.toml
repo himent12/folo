@@ -4,6 +4,9 @@ resolver = "3"
 # folo-ui (ui/): the app's UI framework (ui/README.md).
 members = [".", "ui"]
 
+[workspace.dependencies]
+unicode-segmentation = "1"
+
 [package]
 name = "folo-desktop"
 version = "0.1.0"
