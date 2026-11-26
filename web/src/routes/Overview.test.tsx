@@ -16,7 +16,9 @@ import type { Run, SystemInfo } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import RunWatch from '$lib/shell/RunWatch.tsx';
 import SidebarLive from '$lib/shell/SidebarLive';
-import { activeRuns, watched } from '$lib/shell/runList';
+import { activeRuns, effectiveRuns, noteRunEnded, watched } from '$lib/shell/runList';
+import { streamedStatus } from '$lib/api/live';
+import { runsChanged } from '$lib/api/runs';
 import Overview from './Overview';
 
 let target: HTMLElement;
@@ -651,6 +653,7 @@ describe('Overview', () => {
     // Ensure LiveRun finished initial loading before SSE completion arrives.
     await vi.waitFor(() => {
       flush();
+      expect(target.querySelector('.facts')?.textContent).toContain('1 run training');
       expect(target.querySelector('.live .card .legend')).not.toBeNull();
     });
     expect(eventOpens).toBe(1);
@@ -741,6 +744,7 @@ describe('Overview', () => {
 
     await vi.waitFor(() => {
       flush();
+      expect(target.querySelector('.facts')?.textContent).toContain('1 run training');
       expect(target.querySelector('.live .card .legend')).not.toBeNull();
     });
 
@@ -759,5 +763,202 @@ describe('Overview', () => {
     watched.runs = initialList;
     flush();
     expect(activeRuns().training).toBe(1);
+  });
+
+  it('retires a stale terminal override once a later healthy poll commits a resumed run, and never lets a stale override beat a live stream (R1 review)', async () => {
+    const api = new MockApi('normal', 0);
+    const liveRun = (await api.runs()).find((r) => r.status === 'running')!;
+    const runs = await idleRuns();
+    const runningList = runs.map((r) => (r.id === liveRun.id ? liveRun : r));
+    let handlers: RunEventHandlers = {};
+    api.runEvents = (_id, h) => {
+      handlers = h;
+      return () => {};
+    };
+    api.run = async () => liveRun;
+    let calls = 0;
+    api.runs = () => {
+      calls++;
+      if (calls === 1) return Promise.resolve(runningList);
+      if (calls === 2) return Promise.reject(new ApiError(0, 'offline', 'down'));
+      // Server recovered and the run was resumed in another tab.
+      return Promise.resolve(runningList);
+    };
+
+    hub.api = api;
+    hub.mode = 'mock';
+    const shell = document.body.appendChild(document.createElement('div'));
+    const shellView = render(
+      () => (
+        <>
+          <RunWatch />
+          <SidebarLive collapsed={false} />
+        </>
+      ),
+      shell,
+    );
+    onTestFinished(() => {
+      shellView.unmount();
+      shell.remove();
+    });
+    open(api);
+
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.facts')?.textContent).toContain('1 run training');
+      expect(streamedStatus(liveRun.id)).toBe('running');
+    });
+
+    // SSE reports stopped, and the immediate post-terminal refresh fails offline.
+    handlers.status?.({ status: 'stopped', error: null });
+    flush();
+    await vi.waitFor(() => expect(calls).toBe(2));
+    await Promise.resolve();
+    flush();
+    expect(target.querySelector('.facts')?.textContent).toContain('nothing training');
+    expect(shell.querySelector('a.live-run')).toBeNull();
+
+    // Subsequent healthy poll succeeds after recovery with the run resumed to `running`: override must retire.
+    await watched.source!.refresh();
+    flush();
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.facts')?.textContent).toContain('1 run training');
+      expect(target.querySelector('.live .card h2')?.textContent).toBe(liveRun.name);
+      expect(shell.querySelector('a.live-run')).not.toBeNull();
+      expect(streamedStatus(liveRun.id)).toBe('running');
+    });
+    // Even if a stale terminal note exists while the live stream is actively `running`, effectiveRuns prefers the stream.
+    api.runs = () => Promise.reject(new ApiError(0, 'offline', 'down'));
+    noteRunEnded({ ...liveRun, status: 'stopped' });
+    flush();
+    expect(effectiveRuns(runningList)?.find((r) => r.id === liveRun.id)?.status).toBe('running');
+  });
+
+  it('keeps the terminal override when a superseded invalidate() aborts before the replacement refresh commits (R1 review)', async () => {
+    const api = new MockApi('normal', 0);
+    const liveRun = (await api.runs()).find((r) => r.status === 'running')!;
+    const runs = await idleRuns();
+    const initialList = runs.map((r) => (r.id === liveRun.id ? liveRun : r));
+    let handlers: RunEventHandlers = {};
+    let eventOpens = 0;
+    api.runEvents = (_id, h) => {
+      eventOpens++;
+      handlers = h;
+      return () => {};
+    };
+    api.run = async () => liveRun;
+    let resolveThird: ((v: Run[]) => void) | null = null;
+    let calls = 0;
+    api.runs = (signal?: AbortSignal) => {
+      calls++;
+      if (calls === 1) return Promise.resolve(initialList);
+      if (calls === 2) {
+        return new Promise<Run[]>((_, reject) => {
+          signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+        });
+      }
+      return new Promise<Run[]>((res) => (resolveThird = res));
+    };
+
+    hub.api = api;
+    hub.mode = 'mock';
+    const shell = document.body.appendChild(document.createElement('div'));
+    const shellView = render(
+      () => (
+        <>
+          <RunWatch />
+          <SidebarLive collapsed={false} />
+        </>
+      ),
+      shell,
+    );
+    onTestFinished(() => {
+      shellView.unmount();
+      shell.remove();
+    });
+    open(api);
+
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.facts')?.textContent).toContain('1 run training');
+      expect(streamedStatus(liveRun.id)).toBe('running');
+    });
+    expect(eventOpens).toBe(1);
+
+    // SSE completion starts Request #2, then a concurrent runsChanged() in the next turn aborts Request #2 and starts Request #3.
+    handlers.status?.({ status: 'completed', error: null });
+    flush();
+    expect(calls).toBe(2);
+    await Promise.resolve();
+    runsChanged();
+    expect(calls).toBe(3);
+    await Promise.resolve();
+    await Promise.resolve();
+    flush();
+
+    // Request #2 resolved on abort without committing: Overview and Sidebar must NOT snap back to running or remount LiveRunCard.
+    expect(target.querySelector('.facts')?.textContent).toContain('nothing training');
+    expect(target.querySelector('.live')?.textContent).toContain('Nothing is training');
+    expect(shell.querySelector('a.live-run')).toBeNull();
+    expect(eventOpens).toBe(1);
+
+    // Request #3 commits the completed list.
+    resolveThird!(initialList.map((r) => (r.id === liveRun.id ? { ...r, status: 'completed' } : r)));
+    await Promise.resolve();
+    flush();
+    expect(target.querySelector('.facts')?.textContent).toContain('nothing training');
+    expect(eventOpens).toBe(1);
+  });
+
+  it('does not let an older running SSE stream override a fresh terminal poll, and reconciles terminal SSE during initial load (R1 review)', async () => {
+    const api = new MockApi('normal', 0);
+    const liveRun = (await api.runs()).find((r) => r.status === 'running')!;
+    const runs = await idleRuns();
+    const initialList = runs.map((r) => (r.id === liveRun.id ? liveRun : r));
+    let handlers: RunEventHandlers = {};
+    api.runEvents = (_id, h) => {
+      handlers = h;
+      return () => {};
+    };
+    api.run = async () => liveRun;
+    // Hold `/metrics` indefinitely so LiveRun stays in its initial loading state.
+    api.runMetrics = () => new Promise(() => {});
+    api.runs = () => new Promise<Run[]>(() => {});
+    watched.runs = initialList;
+    open(api);
+
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.facts')?.textContent).toContain('1 run training');
+      expect(target.querySelector('.live .card h2')?.textContent).toBe(liveRun.name);
+    });
+
+    // Terminal SSE arrives while `/metrics` is still pending: Overview reconciles immediately without waiting for GETs.
+    handlers.status?.({ status: 'completed', error: null });
+    flush();
+    expect(target.querySelector('.facts')?.textContent).toContain('nothing training');
+    expect(target.querySelector('.live')?.textContent).toContain('Nothing is training');
+    expect(target.querySelector('#recent-runs tbody')?.textContent).toContain('Completed');
+
+    // Fresh terminal poll beats a stale running SSE stream.
+    c!.unmount();
+    target.remove();
+    watched.runs = undefined;
+    const api2 = new MockApi('normal', 0);
+    api2.runEvents = () => () => {};
+    api2.run = async () => liveRun;
+    watched.runs = initialList;
+    open(api2);
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.facts')?.textContent).toContain('1 run training');
+      expect(streamedStatus(liveRun.id)).toBe('running');
+    });
+    // Polled list updates to completed before SSE delivers any terminal event.
+    watched.runs = initialList.map((r) => (r.id === liveRun.id ? { ...r, status: 'completed' } : r));
+    flush();
+    expect(target.querySelector('.facts')?.textContent).toContain('nothing training');
+    expect(target.querySelector('.live')?.textContent).toContain('Nothing is training');
   });
 });

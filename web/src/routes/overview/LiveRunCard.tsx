@@ -57,12 +57,19 @@ export default function LiveRunCard(props: LiveRunCardProps) {
   // placeholder, never a guess that changes when it arrives ("Evaluation" in the skeleton, "Validation" loaded).
   const scores = computed(() => (props.dataset === undefined ? null : scoresTitle(runEvalSource(props.dataset))));
 
-  const runId = computed(() => props.run.id);
+  // Latch the last non-undefined prop so teardown computations (which can run before the parent branch disposes this
+  // card when `live` flips to undefined) never read `.id` off undefined.
+  let lastProp = props.run;
+  const propRun = computed(() => (props.run ? (lastProp = props.run) : lastProp));
+  const runId = computed(() => propRun.get().id);
   // Overview's live card does not show run logs: skip the `/logs` requests and log buffering (#309).
   // Notify Overview synchronously when the stream reports a terminal state so its summary, live slot, Recent runs,
   // and sidebar stay in lockstep before the card unmounts and before the polled run list catches up.
-  const live = new LiveRun(() => runId.get(), { logs: false, onEnded: (r) => props.onended?.(r) });
-  const run = computed(() => live.run ?? props.run);
+  const live = new LiveRun(() => runId.get(), {
+    logs: false,
+    onEnded: (r, terminal) => props.onended?.(r ?? { ...propRun.get(), status: terminal.status, error: terminal.error, queue_position: null }),
+  });
+  const run = computed(() => live.run ?? propRun.get());
   // The stream went quiet: what the card shows is the last known state, as of then. The status says so, the estimate
   // is qualified and the live marks (the badge's heartbeat, the line's lime end, the lime rail) stop (DESIGN_DIRECTION
   // §2.8).

@@ -4,7 +4,7 @@
 
 import { signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
-import { streamedRun, streamedStatus } from '$lib/api/live';
+import { streamedStatus } from '$lib/api/live';
 import type { Resource } from '$lib/api/resource';
 import type { Run } from '$lib/api/types';
 
@@ -13,13 +13,17 @@ const ACTIVE = new Set(['queued', 'running', 'stopping']);
 interface EndedOverride {
   run: Run;
   epoch: number;
-  seq: number;
+  /** The run-list Resource refreshed when this terminal state was noted, and the requestSeq that must commit to retire it. */
+  target?: Resource<Run[]>;
+  minSeq: number;
 }
 
 const runs = signal<{ v: Run[] | undefined; epoch: number }>({ v: undefined, epoch: -1 });
 const since = signal<{ v: number | null; epoch: number }>({ v: null, epoch: -1 });
 const ended = signal<ReadonlyMap<string, EndedOverride>>(new Map());
-let endedSeq = 0;
+
+const isRetired = (entry: EndedOverride, epoch: number): boolean =>
+  entry.epoch !== epoch || (entry.target !== undefined && entry.target.committedSeq >= entry.minSeq);
 
 function pruneEnded(list: readonly Run[] | undefined, epoch: number) {
   const cur = ended.peek();
@@ -32,7 +36,7 @@ function pruneEnded(list: readonly Run[] | undefined, epoch: number) {
   let dirty = false;
   for (const [id, entry] of cur) {
     const listed = byId.get(id);
-    if (entry.epoch !== epoch || !listed || !ACTIVE.has(listed.status)) {
+    if (untrack(() => isRetired(entry, epoch)) || !listed || !ACTIVE.has(listed.status)) {
       dirty = true;
       break;
     }
@@ -41,7 +45,7 @@ function pruneEnded(list: readonly Run[] | undefined, epoch: number) {
   const next = new Map<string, EndedOverride>();
   for (const [id, entry] of cur) {
     const listed = byId.get(id);
-    if (entry.epoch === epoch && listed && ACTIVE.has(listed.status)) next.set(id, entry);
+    if (!untrack(() => isRetired(entry, epoch)) && listed && ACTIVE.has(listed.status)) next.set(id, entry);
   }
   ended.set(next);
 }
@@ -72,44 +76,38 @@ export const watched = {
  * Records a run whose live SSE stream already reported a terminal state (`completed` / `stopped` / `failed`), so
  * Overview (its header summary, live slot, and Recent runs), the sidebar live row, and the Runs badge reflect the
  * terminal state in the same frame instead of disagreeing with the live card until the next list poll. Immediately
- * triggers an authoritative run-list refresh and clears the temporary override once that refresh succeeds.
+ * triggers an authoritative run-list refresh and retires the override as soon as that refresh (or any later healthy
+ * poll on the same Resource) commits fresh data — never on an aborted/superseded refresh or a failed offline poll.
  */
 export function noteRunEnded(run: Run, fallback?: Resource<Run[]>): void {
   if (ACTIVE.has(run.status)) return;
   const epoch = untrack(() => hub.epoch);
-  const seq = ++endedSeq;
-  const next = new Map<string, EndedOverride>();
-  for (const [id, entry] of ended.peek()) if (entry.epoch === epoch) next.set(id, entry);
-  next.set(run.id, { run, epoch, seq });
-  ended.set(next);
-
-  const clearIfCurrent = () => {
-    const cur = ended.peek();
-    const entry = cur.get(run.id);
-    if (!entry || entry.seq !== seq) return;
-    const pruned = new Map(cur);
-    pruned.delete(run.id);
-    ended.set(pruned);
-  };
-
   const src = watched.source;
   const target = src ?? fallback;
-  if (!target) return;
-  const promise = src ? src.invalidate() : target.refresh();
-  void promise.then(() => {
-    if (untrack(() => hub.epoch) !== epoch) return;
-    // Keep the terminal override if the post-terminal fetch failed (server went offline right after the SSE event).
-    if (untrack(() => target.stale !== undefined || (target.error !== undefined && !target.data))) return;
+  let trackedTarget: Resource<Run[]> | undefined;
+  let minSeq = Infinity;
+  if (target) {
+    const before = target.requestSeq;
+    void (src ? src.invalidate() : target.refresh());
+    const after = target.requestSeq;
     // When `RunWatch` is not mounted and `watched.runs` is externally populated, refreshing `fallback` does not update
     // `watched.runs`; keep the override until `watched.runs` itself moves on or clears.
-    if (!src && untrack(() => watched.runs !== undefined)) return;
-    clearIfCurrent();
-  });
+    if (after > before && (src || untrack(() => watched.runs === undefined))) {
+      trackedTarget = target;
+      minSeq = after;
+    }
+  }
+  const next = new Map<string, EndedOverride>();
+  for (const [id, entry] of ended.peek()) if (!untrack(() => isRetired(entry, epoch))) next.set(id, entry);
+  next.set(run.id, { run, epoch, target: trackedTarget, minSeq });
+  ended.set(next);
 }
 
 /**
  * Reconciles a polled run list with live stream status transitions (`streamedStatus`) and recently ended runs
- * (`noteRunEnded`) without recomputing on 10 Hz step ticks. Returns `list` unchanged when no entry differs.
+ * (`noteRunEnded`) without recomputing on 10 Hz step ticks. Only overrides runs that the polled list still reports as
+ * active (so an older stream never drags a fresh terminal poll back to `running`), and prefers an up, live stream over
+ * any stale terminal override. Returns `list` unchanged when no entry differs.
  */
 export function effectiveRuns(list: readonly Run[] | undefined): Run[] | undefined {
   if (!list) return undefined;
@@ -117,13 +115,17 @@ export function effectiveRuns(list: readonly Run[] | undefined): Run[] | undefin
   const notes = ended.get();
   let changed = false;
   const out = list.map((r) => {
+    if (!ACTIVE.has(r.status)) return r;
     const st = streamedStatus(r.id);
-    if (st && st !== r.status) {
-      changed = true;
-      return { ...r, status: st, ...(st !== 'queued' && r.queue_position != null ? { queue_position: null } : {}) };
+    if (st) {
+      if (st !== r.status) {
+        changed = true;
+        return { ...r, status: st, ...(st !== 'queued' && r.queue_position != null ? { queue_position: null } : {}) };
+      }
+      return r;
     }
     const note = notes.get(r.id);
-    if (note && note.epoch === epoch && ACTIVE.has(r.status)) {
+    if (note && !isRetired(note, epoch)) {
       changed = true;
       return note.run;
     }
@@ -137,8 +139,8 @@ export const training = (r: { status: string }) => r.status === 'running' || r.s
 
 /** A run a page streams (the run page, Overview's hero) and the stream says trains: current whatever the list says. */
 const streaming = (r: Run) => {
-  const s = streamedRun(r.id);
-  return !!s && training(s);
+  const st = streamedStatus(r.id);
+  return st !== undefined && training({ status: st });
 };
 
 /**

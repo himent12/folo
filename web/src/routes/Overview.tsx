@@ -280,17 +280,17 @@ export default function Overview() {
                 </div>
               </Panel>
             ) : live.get() ? (
-              <Key when={live.get()!.id}>
+              <Key when={live.get()?.id}>
                 <LiveRunCard
                   run={live.get()!}
                   dataset={
-                    datasets.data && !lookingUp(live.get()!.config.dataset_id)
+                    datasets.data && live.get() && !lookingUp(live.get()!.config.dataset_id)
                       ? (dsById.get().get(live.get()!.config.dataset_id) ?? null)
                       : datasets.error
                         ? null
                         : undefined
                   }
-                  datasetName={dsLabel(live.get()!)}
+                  datasetName={live.get() ? dsLabel(live.get()!) : null}
                   system={system}
                   bind:lost={streamLost}
                   onended={(r) => noteRunEnded(r, runs)}

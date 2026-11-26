@@ -59,6 +59,7 @@ export class Resource<T> {
   #refreshing = signal(false);
   #stale = signal<unknown>(undefined);
   #updated = signal<number | null>(null);
+  #committed = signal(0);
 
   get data(): T | undefined {
     return this.#data.get();
@@ -101,6 +102,14 @@ export class Resource<T> {
   }
   set updated(v: number | null) {
     this.#updated.set(v);
+  }
+  /** Monotonic sequence number of the latest fetch started on this Resource. */
+  get requestSeq(): number {
+    return this.#seq;
+  }
+  /** Reactive sequence number of the latest fetch that succeeded and committed data (never bumps on abort or error). */
+  get committedSeq(): number {
+    return this.#committed.get();
   }
 
   #fetcher: (signal: AbortSignal) => Promise<T>;
@@ -273,6 +282,7 @@ export class Resource<T> {
       this.stale = undefined;
       this.#invalidated = false;
       this.updated = Date.now();
+      this.#committed.set(seq);
     } catch (e) {
       if (seq !== this.#seq || (e instanceof DOMException && e.name === 'AbortError')) return;
       if (!quiet || this.data === undefined) this.error = e;

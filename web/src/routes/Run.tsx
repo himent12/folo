@@ -96,22 +96,35 @@ export default function Run() {
   const resolved = computed(() => run.get()?.resolved);
   const cloud = computed(() => run.get()?.cloud);
   const status = computed(() => run.get()?.status);
-  // When an active run transitions to a terminal state over SSE, notify the shared run list so the sidebar badge and
-  // Overview stay consistent immediately (including if the user navigates back before the next 2 s poll).
+  // When an active run transitions to a terminal state over SSE (or loads terminal while the shell's polled list still
+  // calls it active), notify the shared run list so the sidebar badge and Overview stay consistent immediately. Reads
+  // only `live.runId`/`live.status` so this effect never wakes up on 10 Hz step ticks.
   let prevStreamId: string | undefined;
   let prevStreamStatus: string | undefined;
   effect(() => {
-    const r = run.get();
-    const curId = r?.id;
-    const curStatus = r?.status;
+    const curId = live.runId;
+    const curStatus = live.status;
     if (curId !== prevStreamId) {
       prevStreamId = curId;
       prevStreamStatus = curStatus;
+      if (curId && curStatus && !ACTIVE.includes(curStatus)) {
+        const listedActive = untrack(() => {
+          const listed = watched.runs?.find((x) => x.id === curId);
+          return !!listed && ACTIVE.includes(listed.status);
+        });
+        if (listedActive) {
+          const snap = untrack(() => live.run);
+          if (snap) untrack(() => noteRunEnded(snap));
+        }
+      }
       return;
     }
-    const wasActive = prevStreamStatus === 'queued' || prevStreamStatus === 'running' || prevStreamStatus === 'stopping';
+    const wasActive = prevStreamStatus !== undefined && ACTIVE.includes(prevStreamStatus);
     prevStreamStatus = curStatus;
-    if (r && wasActive && curStatus && !ACTIVE.includes(curStatus)) untrack(() => noteRunEnded(r));
+    if (curId && wasActive && curStatus && !ACTIVE.includes(curStatus)) {
+      const snap = untrack(() => live.run);
+      if (snap) untrack(() => noteRunEnded(snap));
+    }
   });
   const dataset = computed(() => {
     const c = config.get();

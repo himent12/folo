@@ -45,14 +45,21 @@ export default function SidebarLive(props: { collapsed: boolean }) {
     seen = id;
   });
 
-  const run = () => live.get() as Run;
+  const run = () => live.get();
   const held = () => since.get() !== null;
   const percent = () => `${Math.floor(progress.get() * 100 + 1e-9)}%`;
   // As the run page says it: no time left until the first epoch is done (lib/api/progress etaSettled).
-  const left = () => (etaSettled(run()) ? `${held() && run().eta_s !== null ? '~' : ''}${etaText(run().eta_s, null, now.current)}` : ETA_PENDING);
+  const left = (r: Run) => (etaSettled(r) ? `${held() && r.eta_s !== null ? '~' : ''}${etaText(r.eta_s, null, now.current)}` : ETA_PENDING);
   /** Everything the row leaves to its page, in one line: its tooltip and (with "Live run") its accessible name. */
-  const facts = () => `${run().name} · epoch ${run().epoch} of ${run().epochs} · ${left()}`;
-  const name = () => (held() ? `${run().name}, last known ${asOf(since.get() as number, now.current)}: epoch ${run().epoch} of ${run().epochs}` : `Live run ${facts()}`);
+  const facts = () => {
+    const r = run();
+    return r ? `${r.name} · epoch ${r.epoch} of ${r.epochs} · ${left(r)}` : '';
+  };
+  const name = () => {
+    const r = run();
+    if (!r) return '';
+    return held() ? `${r.name}, last known ${asOf(since.get() as number, now.current)}: epoch ${r.epoch} of ${r.epochs}` : `Live run ${facts()}`;
+  };
 
   return (
     <>
@@ -61,7 +68,7 @@ export default function SidebarLive(props: { collapsed: boolean }) {
       </p>
       {live.get() ? (
         <a
-          href={href(`/runs/${run().id}`)}
+          href={href(`/runs/${run()?.id ?? ''}`)}
           class="live-run"
           class:rail={props.collapsed}
           class:held={held()}
@@ -73,7 +80,7 @@ export default function SidebarLive(props: { collapsed: boolean }) {
             <span class="pct num">{percent()}</span>
           ) : (
             <span class="line">
-              <span class="name truncate">{run().name}</span>
+              <span class="name truncate">{run()?.name ?? ''}</span>
               <span class="pct num">{percent()}</span>
             </span>
           )}

@@ -264,23 +264,37 @@ export class LiveRun {
   #viewSeq = 0;
   /** While a resumed run repeats steps it had already run: the old last step, and what the new attempt streamed. */
   #replay: { until: number; steps: Step[]; epochs: Epoch[] } | null = null;
-  #onEnded: ((run: Run) => void) | undefined;
+  #onEnded: ((run: Run | null, terminal: { status: RunStatus; error: string | null }) => void) | undefined;
+  #currentId: string | null = null;
   #endedId: string | null = null;
 
-  #notifyEnded() {
+  #notifyEnded(terminal?: { status: RunStatus; error: string | null }) {
     if (!this.#onEnded) return;
     const r = this.#run.peek();
-    if (!r || this.#loading.peek() || this.#lost.peek() !== null) return;
-    if (ACTIVE.includes(r.status)) {
-      if (this.#endedId === r.id) this.#endedId = null;
+    const id = r?.id ?? this.#currentId;
+    if (!id) return;
+    if (!terminal) {
+      if (!r || this.#loading.peek() || this.#lost.peek() !== null) return;
+      if (ACTIVE.includes(r.status)) {
+        if (this.#endedId === id) this.#endedId = null;
+        return;
+      }
+      if (this.#endedId === id) return;
+      this.#endedId = id;
+      untrack(() => this.#onEnded?.(r, { status: r.status, error: r.error }));
       return;
     }
-    if (this.#endedId === r.id) return;
-    this.#endedId = r.id;
-    untrack(() => this.#onEnded?.(r));
+    if (ACTIVE.includes(terminal.status)) {
+      if (this.#endedId === id) this.#endedId = null;
+      return;
+    }
+    if (this.#endedId === id) return;
+    this.#endedId = id;
+    const endedRun = r ? { ...r, status: terminal.status, error: terminal.error, queue_position: null } : null;
+    untrack(() => this.#onEnded?.(endedRun, terminal));
   }
 
-  constructor(id: () => string | null, opts?: { logs?: boolean; onEnded?: (run: Run) => void }) {
+  constructor(id: () => string | null, opts?: { logs?: boolean; onEnded?: (run: Run | null, terminal: { status: RunStatus; error: string | null }) => void }) {
     const withLogs = opts?.logs ?? true;
     this.#onEnded = opts?.onEnded;
     effect(() => {
@@ -291,6 +305,8 @@ export class LiveRun {
       const runId = id();
       if (!runId) {
         this.#viewSeq++;
+        this.#currentId = null;
+        this.#endedId = null;
         this.#lastStatus = null;
         this.#lastQueue = null;
         this.#lastCloud = null;
@@ -320,6 +336,8 @@ export class LiveRun {
       void hub.epoch;
       void this.#retry.get();
       this.#viewSeq++;
+      this.#currentId = runId;
+      this.#endedId = null;
       const api = hub.api;
       let closed = false;
       // Every request this view makes ends with it (and with the run's deletion): nothing of it answers later.
@@ -457,6 +475,7 @@ export class LiveRun {
         if (closed || !(e instanceof ApiError && e.status === 404)) return false;
         closed = true;
         this.#viewSeq++;
+        this.#endedId = null;
         view.abort();
         clearTimeout(lostTimer);
         clearTimeout(syncTimer);
@@ -557,6 +576,9 @@ export class LiveRun {
             const next = withLength({ ...this.#takePendingStep(this.run), status, error }, steps_per_epoch, epochs);
             // Only a waiting run has a place in the queue.
             this.run = status !== 'queued' && next.queue_position != null ? { ...next, queue_position: null } : next;
+          } else if (!ACTIVE.includes(status)) {
+            // Terminal SSE arrived before the initial `/run` + `/metrics` GETs finished: notify immediately.
+            this.#notifyEnded({ status, error });
           }
           // The trainer resolved the config by the time it reports `running` (docs/API.md): ask once for `resolved`.
           if (status === 'running' && this.run && this.run.resolved == null && !resolvedAsked) {
@@ -701,6 +723,7 @@ export class LiveRun {
       return () => {
         closed = true;
         this.#viewSeq++;
+        this.#endedId = null;
         view.abort();
         clearTimeout(lostTimer);
         clearTimeout(syncTimer);
