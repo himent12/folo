@@ -11,12 +11,23 @@ use crate::ui::*;
 
 use super::{Action, FoloApp, Inspector, Palette, Route, Toast};
 
+/// Identity of the Playground detection displayed at a positional `det-{idx}` row.
+#[derive(Clone, PartialEq, Eq)]
+struct DetSig {
+    class: u32,
+    name: String,
+    score_bits: u32,
+    coords_bits: [u32; 4],
+}
+
 /// Focus target remembered before an overlay opened, with enough page context to reject stale or
 /// positionally shifted targets when the overlay closes.
 pub(super) struct OverlayReturn {
     handle: FocusHandle,
     route: Route,
-    play_pred_seq: u64,
+    /// When the remembered handle is Playground's positional `det-{idx}` row, its index and
+    /// displayed detection identity at the time the overlay opened.
+    det_row: Option<(usize, Option<DetSig>)>,
 }
 
 /// How long a toast shows before it leaves by itself (not counting time hovered or focused): a
@@ -136,6 +147,19 @@ impl FoloApp {
         cx.notify();
     }
 
+    fn play_det_sig(&self, idx: usize) -> Option<DetSig> {
+        let pred = self.play_pred.ready()?;
+        let b = crate::screens::playground::filter_detections(&pred.boxes, self.play_conf, self.play_class)
+            .get(idx)
+            .copied()?;
+        Some(DetSig {
+            class: b.class,
+            name: b.name.clone(),
+            score_bits: b.score.to_bits(),
+            coords_bits: [b.x1.to_bits(), b.y1.to_bits(), b.x2.to_bits(), b.y2.to_bits()],
+        })
+    }
+
     /// Remember the focused control before an overlay takes focus. When another overlay is already
     /// open and a pre-overlay return target is saved, keep it so overlay-to-overlay hand-offs
     /// (e.g. Command Palette → New run / Delete) never clobber the page control with a dying
@@ -144,10 +168,16 @@ impl FoloApp {
         if self.any_overlay() && self.overlay_return.is_some() {
             return;
         }
-        self.overlay_return = window.focused(cx).map(|handle| OverlayReturn {
-            handle,
-            route: self.route.clone(),
-            play_pred_seq: self.play_pred_seq,
+        self.overlay_return = window.focused(cx).map(|handle| {
+            let det_row = (self.route == Route::Playground)
+                .then(|| {
+                    self.focus.borrow().iter().find_map(|(k, fh)| {
+                        (fh.id == handle.id).then(|| k.strip_prefix("det-")?.parse::<usize>().ok()).flatten()
+                    })
+                })
+                .flatten()
+                .map(|idx| (idx, self.play_det_sig(idx)));
+            OverlayReturn { handle, route: self.route.clone(), det_row }
         });
     }
 
@@ -160,9 +190,7 @@ impl FoloApp {
             window.focus(&self.root_focus);
             return;
         };
-        let shifted_det = ret.route == Route::Playground
-            && self.play_pred_seq != ret.play_pred_seq
-            && self.focus.borrow().iter().any(|(k, fh)| fh.id == ret.handle.id && k.starts_with("det-"));
+        let shifted_det = ret.det_row.as_ref().is_some_and(|(idx, saved)| self.play_det_sig(*idx) != *saved);
         if ret.route == self.route && !shifted_det && window.is_focus_mounted(&ret.handle) {
             window.focus(&ret.handle);
             // Re-verify once this closing frame prepaints in case the remembered control vanished on
@@ -423,27 +451,36 @@ mod tests {
             "same-tick removed control falls back to root_focus after prepaint verification"
         );
 
-        // 4. On Playground, if positional detection rows (`det-*`) change predictions while the
-        // palette is open, closing the palette falls back to `root_focus` instead of focusing a
-        // shifted detection at the old index.
+        // 4. On Playground, if an in-flight same-image IoU request (`play_pred_seq` already
+        // incremented before the palette opened) lands while the palette is open and replaces the
+        // detection at `det-0`, closing the palette falls back to `root_focus` instead of focusing
+        // the replacement detection.
         drive(&mut app, window, |this, w, cx| {
+            this.play_model = Some("m_44c0".into());
+            this.play_dataset_image("ds_3b91", "img_03417", cx);
             this.navigate(Route::Playground, w, cx);
         });
         app.frame(window.into());
-        app.run_until_idle();
-        app.frame(window.into());
         drive(&mut app, window, |this, w, cx| {
+            // Simulate a same-image IoU request already in flight before the palette opens.
+            this.play_pred_seq += 1;
+            let seq = this.play_pred_seq;
+            let key = this.play_pred_for.clone().expect("playground prediction loaded");
+            let mut replacement = this.play_pred.ready().expect("playground boxes").clone();
+            replacement.boxes[0].class += 1;
+            replacement.boxes[0].name = "replacement".into();
             let fh = this.fh("det-0", cx);
             w.focus(&fh);
             this.open_palette(w, cx);
-            this.play_pred_seq += 1;
+            this.play_pred_answered(seq, key, Ok(replacement));
+            cx.notify();
         });
         app.frame(window.into());
         drive(&mut app, window, |this, w, cx| this.close_palette(w, cx));
         app.frame(window.into());
         assert!(
             drive(&mut app, window, |this, w, _| this.root_focus.is_focused(w)),
-            "shifted positional det-* index falls back to root_focus"
+            "in-flight replacement of positional det-* row falls back to root_focus"
         );
     }
 }

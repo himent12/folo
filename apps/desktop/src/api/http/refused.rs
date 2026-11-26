@@ -34,6 +34,7 @@ pub const DEADLINE: Duration = Duration::from_millis(100);
 
 /// A loopback TCP connection established by [`check`], handed to the health probe so it does not open a
 /// second connection.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub struct ConnectedStream {
     /// Declared first so the socket closes before `_wsa` releases Winsock.
     stream: TcpStream,
@@ -41,6 +42,7 @@ pub struct ConnectedStream {
     _wsa: win::Wsa,
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 impl ConnectedStream {
     /// The underlying connected TCP socket (in blocking mode).
     pub fn stream(&self) -> &TcpStream {
@@ -62,6 +64,7 @@ impl ureq::unversioned::transport::ShutdownHandle for ConnectedStream {
 
 /// What [`check`] found at an address.
 #[derive(Debug)]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub enum Found {
     /// Every address refused a connection by the deadline: no server answers there.
     Nothing,
@@ -80,7 +83,7 @@ impl Found {
     }
 
     /// Whether [`check`] connected to a listener (carrying its socket or not).
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub fn is_listener(&self) -> bool {
         matches!(self, Found::Listener(_))
     }
@@ -133,11 +136,22 @@ fn check_within(url: &str, limit: Duration) -> Found {
     connect_all(&addrs, deadline, &Instant::now)
 }
 
+/// Per-address state tracked in resolver order so [`connect_all`] always hands over the first
+/// listening address that `ureq`'s own resolver-order dialer would connect to (e.g. `::1` before
+/// `127.0.0.1` for `localhost`).
+#[cfg(windows)]
+enum AddrState {
+    Pending(win::Socket),
+    Connected(win::Socket),
+    Refused,
+}
+
 /// One TCP connection to each of `addrs` at once, without SYN retries: [`Found::Nothing`] when every one
-/// was refused by `deadline` (on the clock `now`), [`Found::Listener`] as soon as one was accepted. A
-/// deadline already past (also one that passes between two addresses: nothing more is started), any other
-/// error, a connection still unanswered at the deadline, a refusal known only after it, or more addresses
-/// than one `select` takes are all [`Found::Unsure`].
+/// was refused by `deadline` (on the clock `now`), [`Found::Listener`] carrying the first listening
+/// address in resolver order once every earlier address has refused. A deadline already past (also one
+/// that passes between two addresses: nothing more is started), any other error, a connection still
+/// unanswered at the deadline, a refusal known only after it, or more addresses than one `select` takes
+/// are all [`Found::Unsure`].
 #[cfg(windows)]
 fn connect_all(addrs: &[SocketAddr], deadline: Instant, now: &dyn Fn() -> Instant) -> Found {
     use windows_sys::Win32::Networking::WinSock::FD_SETSIZE;
@@ -145,23 +159,27 @@ fn connect_all(addrs: &[SocketAddr], deadline: Instant, now: &dyn Fn() -> Instan
         return Found::Unsure;
     }
     let Some(wsa) = win::Wsa::start() else { return Found::Unsure };
-    let mut pending: Vec<win::Socket> = Vec::with_capacity(addrs.len());
+    let mut states: Vec<AddrState> = Vec::with_capacity(addrs.len());
     for addr in addrs {
         match win::start_connect(addr, deadline, now) {
-            win::Started::Pending(s) => pending.push(s),
-            win::Started::Refused => {}
+            win::Started::Pending(s) => states.push(AddrState::Pending(s)),
+            win::Started::Refused => states.push(AddrState::Refused),
             win::Started::Connected(s) => {
-                // Close any earlier pending sockets while `wsa` is still alive, then hand `s` + `wsa` out.
-                drop(pending);
-                return Found::Listener(into_connected(s, wsa));
+                if states.iter().all(|st| matches!(st, AddrState::Refused)) {
+                    // Every earlier address in resolver order already refused: this socket wins.
+                    return Found::Listener(into_connected(s, wsa));
+                }
+                // Earlier addresses are still pending; no address after this one can beat it.
+                states.push(AddrState::Connected(s));
+                break;
             }
             win::Started::Other => {
-                drop(pending);
+                drop(states);
                 return Found::Unsure;
             }
         }
     }
-    wait(pending, wsa, deadline, now)
+    wait(states, wsa, deadline, now)
 }
 
 /// Switches a connected Winsock socket back to blocking mode and wraps it with its [`win::Wsa`] guard.
@@ -181,29 +199,54 @@ fn into_connected(s: win::Socket, wsa: win::Wsa) -> Option<ConnectedStream> {
     Some(ConnectedStream { stream, _wsa: wsa })
 }
 
-/// Waits on the connections `pending` (started without blocking, at most `FD_SETSIZE`):
-/// [`Found::Nothing`] once every one was refused, if that is before `deadline` (on the clock `now`);
-/// [`Found::Listener`] as soon as one connected (carrying that socket); [`Found::Unsure`] as soon as one
-/// failed some other way, or at `deadline` with one still unanswered.
+/// Waits on the connections in `states` (started without blocking, at most `FD_SETSIZE`, in resolver
+/// order): [`Found::Nothing`] once every one was refused before `deadline` (on the clock `now`);
+/// [`Found::Listener`] carrying the earliest address in resolver order that connected once every earlier
+/// address has refused; [`Found::Unsure`] as soon as an earlier address fails some other way, or at
+/// `deadline` with one still unanswered.
 #[cfg(windows)]
-fn wait(mut pending: Vec<win::Socket>, wsa: win::Wsa, deadline: Instant, now: &dyn Fn() -> Instant) -> Found {
+fn wait(mut states: Vec<AddrState>, wsa: win::Wsa, deadline: Instant, now: &dyn Fn() -> Instant) -> Found {
     use windows_sys::Win32::Networking::WinSock::{
         FD_SET, SO_ERROR, SOCKET_ERROR, SOL_SOCKET, TIMEVAL, WSAECONNREFUSED, getsockopt, select,
     };
-    while !pending.is_empty() {
+    loop {
+        // Close any sockets after the first connected address: they can never win resolver order.
+        if let Some(first_conn) = states.iter().position(|st| matches!(st, AddrState::Connected(_))) {
+            states.truncate(first_conn + 1);
+        }
+        match states.iter().position(|st| !matches!(st, AddrState::Refused)) {
+            None => {
+                // Every one refused, but a refusal known only after the deadline is not reported as one.
+                drop(states);
+                return if now() >= deadline { Found::Unsure } else { Found::Nothing };
+            }
+            Some(i) if matches!(states[i], AddrState::Connected(_)) => {
+                let AddrState::Connected(s) = std::mem::replace(&mut states[i], AddrState::Refused) else {
+                    unreachable!()
+                };
+                // Close every remaining socket while `wsa` is still alive, then hand `s` + `wsa` out.
+                drop(states);
+                return Found::Listener(into_connected(s, wsa));
+            }
+            Some(_) => {}
+        }
         let left = deadline.saturating_duration_since(now());
         if left.is_zero() {
-            drop(pending);
+            drop(states);
             return Found::Unsure;
         }
         let mut connected = FD_SET::default();
         let mut failed = FD_SET::default();
-        for (i, s) in pending.iter().enumerate() {
-            connected.fd_array[i] = s.0;
-            failed.fd_array[i] = s.0;
+        let mut count = 0usize;
+        for st in &states {
+            if let AddrState::Pending(s) = st {
+                connected.fd_array[count] = s.0;
+                failed.fd_array[count] = s.0;
+                count += 1;
+            }
         }
-        connected.fd_count = pending.len() as u32;
-        failed.fd_count = pending.len() as u32;
+        connected.fd_count = count as u32;
+        failed.fd_count = count as u32;
         // At least a microsecond: a zero `TIMEVAL` would only poll.
         let micros = left.as_micros().max(1);
         let wait = TIMEVAL { tv_sec: (micros / 1_000_000) as i32, tv_usec: (micros % 1_000_000) as i32 };
@@ -211,7 +254,7 @@ fn wait(mut pending: Vec<win::Socket>, wsa: win::Wsa, deadline: Instant, now: &d
         // `wait`; the first argument is ignored by Winsock.
         let ready = unsafe { select(0, std::ptr::null_mut(), &mut connected, &mut failed, &wait) };
         if ready < 0 {
-            drop(pending);
+            drop(states);
             return Found::Unsure;
         }
         // Nothing answered in the time asked: the loop gives up at the deadline (a wait can end a little
@@ -219,29 +262,31 @@ fn wait(mut pending: Vec<win::Socket>, wsa: win::Wsa, deadline: Instant, now: &d
         if ready == 0 {
             continue;
         }
-        // On return each set holds only its ready sockets. A connection that completed: someone listens.
-        if connected.fd_count > 0 {
-            let raw = connected.fd_array[0];
-            let won = pending.iter().position(|p| p.0 == raw).map(|i| pending.swap_remove(i));
-            // Close every other pending socket before handing `wsa` out (or dropping it).
-            drop(pending);
-            return Found::Listener(won.and_then(|s| into_connected(s, wsa)));
+        for &raw in &connected.fd_array[..connected.fd_count as usize] {
+            if let Some(slot) = states.iter_mut().find(|st| matches!(st, AddrState::Pending(s) if s.0 == raw))
+            {
+                let AddrState::Pending(s) = std::mem::replace(slot, AddrState::Refused) else {
+                    unreachable!()
+                };
+                *slot = AddrState::Connected(s);
+            }
         }
-        for &s in &failed.fd_array[..failed.fd_count as usize] {
+        for &raw in &failed.fd_array[..failed.fd_count as usize] {
             let mut error = 0i32;
             let mut len = size_of::<i32>() as i32;
-            // SAFETY: `s` is one of our live sockets; `error` and `len` describe a writable i32.
+            // SAFETY: `raw` is one of our live sockets; `error` and `len` describe a writable i32.
             let got =
-                unsafe { getsockopt(s, SOL_SOCKET, SO_ERROR, (&mut error as *mut i32).cast(), &mut len) };
+                unsafe { getsockopt(raw, SOL_SOCKET, SO_ERROR, (&mut error as *mut i32).cast(), &mut len) };
             if got == SOCKET_ERROR || error != WSAECONNREFUSED {
-                drop(pending);
+                drop(states);
                 return Found::Unsure;
             }
-            pending.retain(|p| p.0 != s);
+            if let Some(slot) = states.iter_mut().find(|st| matches!(st, AddrState::Pending(s) if s.0 == raw))
+            {
+                *slot = AddrState::Refused;
+            }
         }
     }
-    // Every one refused, but a refusal known only after the deadline is not reported as one.
-    if now() >= deadline { Found::Unsure } else { Found::Nothing }
 }
 
 /// Elsewhere a refused loopback connection fails at once: the probe itself is quick.
@@ -555,12 +600,12 @@ mod tests {
         // Refused at once, or later, in the wait.
         let addr = SocketAddr::from(([127, 0, 0, 1], closed.port));
         match win::start_connect(&addr, Instant::now() + TEST_LIMIT, &Instant::now) {
-            win::Started::Pending(s) => pending.push(s),
+            win::Started::Pending(s) => pending.push(AddrState::Pending(s)),
             win::Started::Refused => {}
             _ => panic!("a closed port neither refused nor pending"),
         }
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        pending.push(win::Socket(listener.into_raw_socket() as usize));
+        pending.push(AddrState::Pending(win::Socket(listener.into_raw_socket() as usize)));
         let limit = Duration::from_millis(50);
         let t = Instant::now();
         assert!(wait(pending, wsa, t + limit, &Instant::now).is_unsure());
@@ -637,6 +682,29 @@ mod tests {
         assert!(win::tcp_socket(&addr).is_none());
         // SAFETY: reads this thread's last Winsock error.
         assert_eq!(unsafe { WSAGetLastError() }, WSAEAFNOSUPPORT);
+    }
+
+    /// When multiple loopback addresses are probed (`localhost` -> `[::1, 127.0.0.1]`), `connect_all`
+    /// hands over the first listener in resolver order rather than whichever address won the race, so
+    /// the health probe always inspects the same endpoint subsequent backend requests reach.
+    #[cfg(windows)]
+    #[test]
+    fn connect_all_preserves_resolver_order() {
+        let a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr_a = a.local_addr().unwrap();
+        let addr_b = b.local_addr().unwrap();
+        match connect_all(&[addr_a, addr_b], Instant::now() + TEST_LIMIT, &Instant::now) {
+            Found::Listener(Some(conn)) => assert_eq!(conn.stream().peer_addr().unwrap(), addr_a),
+            other => panic!("expected first resolver-order listener {addr_a}, got {other:?}"),
+        }
+        // If the first address refuses, the second address wins once the refusal arrives.
+        let closed = ports::closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
+        let closed_addr = SocketAddr::from(([127, 0, 0, 1], closed.port));
+        match connect_all(&[closed_addr, addr_b], Instant::now() + TEST_LIMIT, &Instant::now) {
+            Found::Listener(Some(conn)) => assert_eq!(conn.stream().peer_addr().unwrap(), addr_b),
+            other => panic!("expected fallback listener {addr_b}, got {other:?}"),
+        }
     }
 
     #[test]

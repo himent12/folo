@@ -252,12 +252,13 @@ impl FoloApp {
     }
 
     /// A compact signature of everything visibly rendered for `run_id` outside per-step views:
-    /// epoch/length numbers, rounded percentage (`{:.0}%`), progress bar device-pixel width, any
-    /// displayed ETA for a queued run waiting behind `run_id`, and the stop-dialog epoch boundary.
+    /// epoch/length numbers, rounded percentage (`{:.0}%`), sidebar and table progress-bar
+    /// device-pixel widths tracked independently (so a compact 24 px sidebar rail and a 56 px table
+    /// rail never mask each other's pixel boundaries), any displayed ETA for a queued run waiting
+    /// behind `run_id`, and the stop-dialog epoch boundary.
     fn step_visible_sig(&self, run_id: &str) -> Option<StepVisibleSig> {
         let r = self.store.run(run_id)?;
         let is_sidebar_live = self.store.live_run().is_some_and(|live| live.id == run_id);
-        let on_runs_list = self.route == Route::Runs;
         let sidebar_w = if is_sidebar_live {
             if self.narrow || self.sidebar_collapsed {
                 24.0
@@ -268,11 +269,12 @@ impl FoloApp {
         } else {
             0.0
         };
-        let table_w = if on_runs_list { 56.0 } else { 0.0 };
-        let bar_logical_w = sidebar_w.max(table_w);
+        // Both `Route::Runs` and `Route::Overview`'s Recent runs table render a 56 px progress rail.
+        let table_w = if matches!(self.route, Route::Runs | Route::Overview) { 56.0 } else { 0.0 };
         let scale = self.last_scale_factor.max(1.0);
         let progress = r.progress().clamp(0.0, 1.0);
-        let bar_px = if bar_logical_w > 0.0 { (progress * bar_logical_w * scale).round() as u32 } else { 0 };
+        let sidebar_bar_px = if sidebar_w > 0.0 { (progress * sidebar_w * scale).round() as u32 } else { 0 };
+        let table_bar_px = if table_w > 0.0 { (progress * table_w * scale).round() as u32 } else { 0 };
         let pct = if is_sidebar_live { (progress * 100.0).round_ties_even() as u32 } else { 0 };
         // A queued run's detail page displays the formatted ETA of the run currently training ahead of it.
         let ahead_eta = if let Route::Run(open) = &self.route
@@ -295,7 +297,8 @@ impl FoloApp {
             epochs: r.epochs,
             spe: r.steps_per_epoch,
             pct,
-            bar_px,
+            sidebar_bar_px,
+            table_bar_px,
             ahead_eta,
             stop_epoch_done,
         })
@@ -308,7 +311,8 @@ struct StepVisibleSig {
     epochs: u32,
     spe: u64,
     pct: u32,
-    bar_px: u32,
+    sidebar_bar_px: u32,
+    table_bar_px: u32,
     ahead_eta: Option<String>,
     stop_epoch_done: bool,
 }
@@ -398,5 +402,54 @@ mod tests {
             let notified = drive(&mut app, window, |this, _, cx| this.drain_streams(cx));
             assert!(notified, "short run step {s} moves the bar visibly and must notify");
         }
+
+        // Compact sidebar (24 px) on `Route::Runs` (56 px table rail) at 1x scale: 2.0% -> 2.2%
+        // crosses the 24 px bar's rounded pixel boundary (0.48 -> 0.528) while the 56 px rail and
+        // rounded % stay unchanged; tracking both widths independently catches it.
+        drive(&mut app, window, |this, w, cx| {
+            this.last_scale_factor = 1.0;
+            this.sidebar_collapsed = true;
+            this.navigate(Route::Runs, w, cx);
+            let r = this.store.runs.ready_mut().unwrap().iter_mut().find(|r| r.id == live_id).unwrap();
+            r.epochs = 10;
+            r.steps_per_epoch = 100;
+            r.step = 20;
+            r.epoch = 1;
+        });
+        tx.send(make_step(22, 100, 10)).unwrap();
+        assert!(
+            drive(&mut app, window, |this, _, cx| this.drain_streams(cx)),
+            "compact 24 px sidebar pixel crossing on Runs must notify even when 56 px table rail does not"
+        );
+
+        // On Overview, a non-hero running job in the Recent runs table still notifies when its 56 px
+        // progress rail crosses a device pixel.
+        let (tx2, rx2) = channel();
+        let (sub2, _cancel2) = Subscription::new(rx2);
+        let other_id = drive(&mut app, window, |this, w, cx| {
+            let other = this
+                .store
+                .runs
+                .ready_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|r| r.id != live_id)
+                .expect("mock has a second run");
+            other.status = crate::api::RunStatus::Running;
+            other.epochs = 10;
+            other.steps_per_epoch = 100;
+            other.step = 20;
+            other.epoch = 1;
+            let id = other.id.clone();
+            this.subscriptions.insert(id.clone(), sub2);
+            this.navigate(Route::Overview, w, cx);
+            id
+        });
+        tx2.send(make_step(30, 100, 10)).unwrap();
+        assert!(
+            drive(&mut app, window, |this, _, cx| this.drain_streams(cx)),
+            "non-hero running job on Overview must notify when its Recent runs 56 px rail advances"
+        );
+        assert_eq!(drive(&mut app, window, |this, _, _| this.store.run(&other_id).unwrap().step), 30);
     }
 }

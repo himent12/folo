@@ -825,68 +825,6 @@ connection: close
         assert_eq!(probe_through(&url, None), Probe::Nothing);
     }
 
-    /// #308 item 1: a server with a 1-slot accept queue that waits longer than the 500 ms connect limit
-    /// (here 700 ms) before accepting still answers `Probe::Folo` on the very first connection, with zero
-    /// throwaway empty connections from the listening check.
-    #[cfg(windows)]
-    #[test]
-    fn a_server_whose_queue_the_check_filled_is_still_found() {
-        use std::io::{Read, Write};
-        let health = json("200 OK", r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#);
-        let listener = super::refused::ports::listener(1);
-        let addr = listener.local_addr().unwrap();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(700));
-            let Ok((mut sock, _)) = listener.accept() else { return };
-            let mut buf = [0u8; 4096];
-            let n = sock.read(&mut buf).unwrap_or(0);
-            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
-            if n > 0 {
-                let _ = sock.write_all(&health);
-                let _ = sock.flush();
-            }
-        });
-        assert_eq!(super::server::probe_through(&format!("http://{addr}"), None), Probe::Folo);
-        let first = rx.recv().unwrap();
-        assert!(first.starts_with("GET /api/health "), "first connection carried health request: {first:?}");
-    }
-
-    /// The probe's fallback retry (#308), with scripted answers: taken once, and only when `retry_connect`
-    /// is true and the first attempt never connected; a connection that was made and then reset, or
-    /// timed out reading, is final (a listener that resets after `t` cost `2t`, and a request was sent twice).
-    #[test]
-    fn only_a_connection_never_made_is_asked_again() {
-        use super::server::ask_health;
-        use std::io::{Error as IoError, ErrorKind};
-        type Answer = Result<&'static str, ureq::Error>;
-        let scripted = |first: fn() -> Answer| {
-            let mut calls = 0;
-            move || {
-                calls += 1;
-                if calls == 1 { first() } else { Ok("health") }
-            }
-        };
-        let connect_timeout: fn() -> Answer = || Err(ureq::Error::Timeout(ureq::Timeout::Connect));
-        let failed: fn() -> Answer = || Err(ureq::Error::ConnectionFailed);
-        for first in [connect_timeout, failed] {
-            let (answer, calls) = ask_health(true, scripted(first));
-            assert_eq!((answer.ok(), calls), (Some("health"), 2), "fallback retry: once more");
-            let (answer, calls) = ask_health(false, scripted(first));
-            assert!(answer.is_err() && calls == 1, "no throwaway listener: no second attempt");
-        }
-        let reset: fn() -> Answer = || Err(ureq::Error::Io(IoError::from(ErrorKind::ConnectionReset)));
-        let aborted: fn() -> Answer = || Err(ureq::Error::Io(IoError::from(ErrorKind::ConnectionAborted)));
-        let refused: fn() -> Answer = || Err(ureq::Error::Io(IoError::from(ErrorKind::ConnectionRefused)));
-        let read_timeout: fn() -> Answer = || Err(ureq::Error::Timeout(ureq::Timeout::RecvResponse));
-        for first in [reset, aborted, refused, read_timeout] {
-            let (answer, calls) = ask_health(true, scripted(first));
-            assert!(answer.is_err() && calls == 1, "{:?}: one attempt", answer);
-        }
-        let (answer, calls) = ask_health(true, scripted(|| Ok("health")));
-        assert_eq!((answer.ok(), calls), (Some("health"), 1));
-    }
-
     #[test]
     fn closing_asks_the_apps_server_for_its_runs_and_tells_no_answer_apart() {
         let (url, requests) = canned_server(vec![json("200 OK", r#"{ "runs": [] }"#), Vec::new()]);
