@@ -16,6 +16,8 @@ use crate::types::*;
 
 /// Longest text beside a view (the box list is at most [`crate::label::VIEW_BOXES`] lines).
 const MAX_VIEW_TEXT: usize = 16_000;
+/// Most path entries `create_label_job` accepts per call (matches `CreateLabelJobArgs::paths` schema).
+const MAX_LABEL_PATHS: usize = 100;
 
 impl Inner {
     /// Runs labeling calls on the blocking pool (they read files or make HTTP requests); errors get MCP hints.
@@ -105,6 +107,12 @@ impl Inner {
     }
 
     pub(super) async fn create_label_job(&self, a: CreateLabelJobArgs) -> Result<Output, Error> {
+        if a.paths.len() > MAX_LABEL_PATHS {
+            return Err(invalid_arguments(format!(
+                "paths must have at most {MAX_LABEL_PATHS} entries, got {}",
+                a.paths.len()
+            )));
+        }
         if let Some(id) = a.job_id {
             if a.name.is_some() || a.classes.is_some() {
                 return Err(invalid_arguments(

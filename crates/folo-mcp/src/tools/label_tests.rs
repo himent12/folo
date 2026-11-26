@@ -768,3 +768,39 @@ async fn antigravity_agent_labels_and_rejects_fast() {
     assert!(msg.contains("`claude`") && msg.contains("`codex`") && msg.contains("`antigravity`"), "{msg}");
     store.shutdown();
 }
+
+#[tokio::test]
+async fn create_label_job_enforces_100_path_limit() {
+    let dir = TestDir::new("mcp-label-path-limit");
+    let store = std::sync::Arc::new(folo_server::RealStore::open(dir.to_path_buf()));
+    let s = FoloMcp::new(
+        store.clone(),
+        None,
+        Options {
+            data_dir: dir.to_path_buf(),
+            read_only: false,
+            confine: false,
+            device: "cpu".into(),
+            published_weights: None,
+        },
+    );
+
+    let too_many: Vec<String> = (0..101).map(|i| format!("img_{i}.png")).collect();
+    let e = call(&s, "create_label_job", json!({ "name": "big", "classes": ["car"], "paths": too_many }))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(e.body.code, "invalid_arguments");
+    assert!(e.body.message.contains("100"), "{}", e.body.message);
+
+    // Also enforced when adding paths to an existing job via `job_id`.
+    let job = ok(&s, "create_label_job", json!({ "name": "ok", "classes": ["car"] })).await["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let too_many: Vec<String> = (0..101).map(|i| format!("img_{i}.png")).collect();
+    let e = call(&s, "create_label_job", json!({ "job_id": job, "paths": too_many })).await.err().unwrap();
+    assert_eq!(e.body.code, "invalid_arguments");
+    assert!(e.body.message.contains("100"), "{}", e.body.message);
+    store.shutdown();
+}

@@ -401,10 +401,25 @@ impl Labeler {
     pub fn delete_image(&self, id: &str, image_id: &str) -> Result<()> {
         let job = self.job(id)?;
         let mut state = job.live()?;
-        let record = state.record(image_id)?.clone();
+        let pos = state
+            .file
+            .images
+            .iter()
+            .position(|r| r.id == image_id)
+            .ok_or_else(|| crate::error::Error::not_found("image", image_id))?;
+        state.check_editable(image_id)?;
+        let waiting = state.active.as_ref().is_some_and(|a| a.waiting.contains(image_id));
+        let record = state.file.images[pos].clone();
+        // Persist a copy with the image removed before mutating in-memory state, so a failed save leaves
+        // `state.file.images`, `active.waiting`, and `run.total` unchanged.
+        let mut next = state.file.clone();
+        next.images.remove(pos);
+        if waiting && let Some(run) = next.run.as_mut() {
+            run.total = run.total.saturating_sub(1);
+        }
+        job.save_file(&next)?;
         state.claim(image_id)?;
-        state.file.images.retain(|r| r.id != image_id);
-        job.save(&state)?;
+        state.file.images.remove(pos);
         if record.external.is_none() {
             let _ = std::fs::remove_file(job.image_path(&record));
         }
@@ -614,5 +629,43 @@ mod tests {
             ]
         );
         assert_eq!(over, 1);
+    }
+
+    #[test]
+    fn delete_image_leaves_memory_unchanged_when_save_fails() {
+        let dir = TestDir::new("label-delete-save-fail");
+        let labeler = Labeler::open(dir.path());
+        let job = labeler
+            .create(folo_api::CreateLabelJob {
+                name: "test".into(),
+                classes: vec!["cat".into()],
+                instructions: String::new(),
+                path: None,
+            })
+            .unwrap();
+        let img = folo_data::Image { width: 8, height: 6, data: vec![128u8; 8 * 6 * 3] };
+        let jpeg = folo_data::encode(&img, folo_data::ImageFormat::Jpeg(85)).unwrap();
+        let added = labeler.add_uploads(&job.id, vec![Upload { name: "a.jpg".into(), bytes: jpeg }]).unwrap();
+        assert_eq!(added.added.len(), 1);
+        let page = labeler.query(&job.id, &LabelImageQuery { limit: 10, ..Default::default() }).unwrap();
+        assert_eq!(page.total, 1);
+        let image_id = page.images[0].id.clone();
+        let upload_path = dir.join("label").join(&job.id).join("images").join(&page.images[0].file);
+        assert!(upload_path.is_file());
+
+        // Replace `job.json` with a directory so `write_atomic` cannot rename over it on any OS.
+        let job_json = dir.join("label").join(&job.id).join("job.json");
+        std::fs::remove_file(&job_json).unwrap();
+        std::fs::create_dir(&job_json).unwrap();
+
+        let err = labeler.delete_image(&job.id, &image_id).unwrap_err();
+        assert_eq!(err.body.code, "internal", "{err:?}");
+
+        // Restore cleanup-friendly state and verify in-memory job and uploaded image stayed intact.
+        let after = labeler.query(&job.id, &LabelImageQuery { limit: 10, ..Default::default() }).unwrap();
+        assert_eq!(after.total, 1, "failed save must not drop image from memory");
+        assert_eq!(after.images[0].id, image_id);
+        assert!(upload_path.is_file(), "failed save must not delete uploaded image file");
+        std::fs::remove_dir(&job_json).unwrap();
     }
 }

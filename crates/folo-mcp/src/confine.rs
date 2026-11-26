@@ -92,9 +92,19 @@ impl Confinement {
             return Ok(());
         }
         let r = self.scan(store, id).map_err(map_denied);
-        // Unknown datasets are not cached: they may be registered later under that id.
-        if r.as_ref().err().is_none_or(|e| e.body.code != "dataset_not_found") {
-            self.cache.lock().unwrap().insert(id.to_string(), r.clone());
+        // Only cache definitive confinement verdicts (allowed, or explicitly outside the data dir).
+        // Unknown datasets and transient store/IO errors are never cached so recovery works without a restart.
+        match &r {
+            Ok(()) => {
+                self.cache.lock().unwrap().insert(id.to_string(), Ok(()));
+            }
+            Err(e) if e.body.code == "path_outside_data_dir" => {
+                self.cache.lock().unwrap().insert(id.to_string(), Err(e.clone()));
+            }
+            Err(e) if e.body.code == "dataset_not_found" => {
+                self.cache.lock().unwrap().remove(id);
+            }
+            Err(_) => {}
         }
         r
     }
@@ -123,7 +133,9 @@ impl Confinement {
                 format!("labeling job '{id}' has images outside the data dir: {}", e.body.message);
             e
         });
-        self.jobs.lock().unwrap().insert(id.to_string(), (key, r.clone()));
+        if r.as_ref().err().is_none_or(|e| e.body.code == "path_outside_data_dir") {
+            self.jobs.lock().unwrap().insert(id.to_string(), (key, r.clone()));
+        }
         r
     }
 
@@ -213,5 +225,115 @@ mod tests {
         let e = Error::internal(format!("reading x: x {}", folo_data::guard::DENIED));
         assert_eq!(map_denied(e).body.code, "path_outside_data_dir");
         assert_eq!(map_denied(Error::internal("other")).body.code, "internal");
+    }
+
+    #[test]
+    fn dataset_does_not_cache_transient_store_errors() {
+        use folo_api::{
+            Dataset, ExportResult, ExportSpec, GpuInfo, ImagePage, IssuePage, Model, ModelEval,
+            PredictResponse, RegisterDataset, Run, RunLogs, RunMetrics, RunSamples, SyntheticDataset,
+            TrainConfig,
+        };
+        use folo_server::store::{ImageData, LogsQuery, MetricsQuery, PredictInput, Subscription};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct FlakyStore {
+            inner: folo_server::MockStore,
+            calls: AtomicUsize,
+        }
+        impl Store for FlakyStore {
+            fn is_mock(&self) -> bool {
+                self.inner.is_mock()
+            }
+            fn gpus(&self) -> Vec<GpuInfo> {
+                self.inner.gpus()
+            }
+            fn list_datasets(&self) -> Result<Vec<Dataset>, Error> {
+                self.inner.list_datasets()
+            }
+            fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset, Error> {
+                self.inner.register_dataset(req)
+            }
+            fn create_synthetic(&self, req: SyntheticDataset) -> Result<Dataset, Error> {
+                self.inner.create_synthetic(req)
+            }
+            fn get_dataset(&self, id: &str) -> Result<Dataset, Error> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    return Err(Error::new(
+                        StatusCode::BAD_GATEWAY,
+                        "server_unreachable",
+                        "temporary outage",
+                    ));
+                }
+                self.inner.get_dataset(id)
+            }
+            fn list_images(&self, id: &str, q: &ImageQuery) -> Result<ImagePage, Error> {
+                self.inner.list_images(id, q)
+            }
+            fn list_issues(&self, id: &str, q: &IssueQuery) -> Result<IssuePage, Error> {
+                self.inner.list_issues(id, q)
+            }
+            fn image(&self, id: &str, image_id: &str, thumb: Option<u32>) -> Result<ImageData, Error> {
+                self.inner.image(id, image_id, thumb)
+            }
+            fn delete_dataset(&self, id: &str) -> Result<(), Error> {
+                self.inner.delete_dataset(id)
+            }
+            fn list_models(&self) -> Result<Vec<Model>, Error> {
+                self.inner.list_models()
+            }
+            fn get_model(&self, id: &str) -> Result<Model, Error> {
+                self.inner.get_model(id)
+            }
+            fn model_eval(&self, id: &str) -> Result<ModelEval, Error> {
+                self.inner.model_eval(id)
+            }
+            fn export_model(&self, id: &str, spec: ExportSpec) -> Result<ExportResult, Error> {
+                self.inner.export_model(id, spec)
+            }
+            fn list_runs(&self) -> Result<Vec<Run>, Error> {
+                self.inner.list_runs()
+            }
+            fn create_run(&self, config: TrainConfig) -> Result<Run, Error> {
+                self.inner.create_run(config)
+            }
+            fn get_run(&self, id: &str) -> Result<Run, Error> {
+                self.inner.get_run(id)
+            }
+            fn stop_run(&self, id: &str) -> Result<Run, Error> {
+                self.inner.stop_run(id)
+            }
+            fn delete_run(&self, id: &str) -> Result<(), Error> {
+                self.inner.delete_run(id)
+            }
+            fn run_metrics(&self, id: &str, q: &MetricsQuery) -> Result<RunMetrics, Error> {
+                self.inner.run_metrics(id, q)
+            }
+            fn run_samples(&self, id: &str, epoch: Option<u32>) -> Result<RunSamples, Error> {
+                self.inner.run_samples(id, epoch)
+            }
+            fn run_logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs, Error> {
+                self.inner.run_logs(id, q)
+            }
+            fn subscribe(&self, id: &str) -> Result<Subscription, Error> {
+                self.inner.subscribe(id)
+            }
+            fn predict(&self, input: PredictInput) -> Result<PredictResponse, Error> {
+                self.inner.predict(input)
+            }
+        }
+
+        let dir = folo_test_support::TestDir::new("mcp-confine-transient");
+        let c = Confinement::new(PathPolicy { data_dir: dir.to_path_buf(), confine: true });
+        let store = FlakyStore { inner: folo_server::MockStore::new(), calls: AtomicUsize::new(0) };
+        let id = store.list_datasets().unwrap().remove(0).id;
+
+        let first = c.dataset(&store, &id).unwrap_err();
+        assert_eq!(first.body.code, "server_unreachable");
+        assert!(c.dataset(&store, &id).is_ok(), "transient error must not be permanently cached");
+        assert_eq!(store.calls.load(Ordering::SeqCst), 2);
+        // Now that Ok(()) was cached, a third call uses the cache without hitting the store again.
+        assert!(c.dataset(&store, &id).is_ok());
+        assert_eq!(store.calls.load(Ordering::SeqCst), 2);
     }
 }

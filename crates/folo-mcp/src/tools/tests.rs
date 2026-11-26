@@ -449,3 +449,73 @@ async fn predict_batch_evicts_oldest_results_past_lru_cap() {
     let cache = server.inner.batches.lock().unwrap();
     assert!(cache.contains("pb_keep"), "oversized batch must not evict valid cached entries");
 }
+
+#[tokio::test]
+async fn predict_batch_confined_strips_verbatim_paths_and_records_missing_in_failed() {
+    use crate::batch_cache::BatchLookup;
+
+    let store = std::sync::Arc::new(folo_server::MockStore::new());
+    let root = folo_test_support::TestDir::new("mcp-batch-confine");
+    let data = root.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    image::RgbImage::from_pixel(16, 16, image::Rgb([10, 20, 30])).save(data.join("a.png")).unwrap();
+    let opts = crate::Options {
+        data_dir: data.clone(),
+        read_only: false,
+        confine: true,
+        device: "cpu".into(),
+        published_weights: None,
+    };
+    let server = crate::server::FoloMcp::new(store, None, opts);
+    let def = find("predict_batch").unwrap();
+
+    // 1. Glob under --confine strips Windows verbatim `\\?\` prefixes in the cached details resource.
+    let mut p = Progress::none();
+    let out = server
+        .inner
+        .call(def, json!({ "model_id": "m_31aa", "glob": "*.png" }).as_object().unwrap().clone(), &mut p)
+        .await
+        .unwrap();
+    assert_eq!(out.value["processed"], 1);
+    let batch_id = out.value["batch_id"].as_str().unwrap().to_string();
+    let details = match server.inner.batches.lock().unwrap().lookup(&batch_id) {
+        BatchLookup::Found(v) => v,
+        _ => panic!("expected cached batch {batch_id}"),
+    };
+    let img_path = details["images"][0]["path"].as_str().unwrap();
+    assert!(!img_path.starts_with(r"\\?\"), "details path must not leak verbatim prefix: {img_path}");
+    assert!(!img_path.contains('\\'), "details path should use forward slashes: {img_path}");
+
+    // 2. Missing file inside --data-dir under --confine is recorded in `failed[]` rather than failing the call.
+    let mut p = Progress::none();
+    let out = server
+        .inner
+        .call(
+            def,
+            json!({ "model_id": "m_31aa", "paths": ["a.png", "missing.png"] }).as_object().unwrap().clone(),
+            &mut p,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.value["processed"], 1);
+    assert_eq!(out.value["failed_total"], 1);
+    assert_eq!(out.value["failed"][0]["path"], "missing.png");
+    assert_eq!(out.value["failed"][0]["code"], "path_not_found");
+
+    // 3. Missing file outside --data-dir still aborts the whole call with `path_outside_data_dir`.
+    let mut p = Progress::none();
+    let err = server
+        .inner
+        .call(
+            def,
+            json!({ "model_id": "m_31aa", "paths": ["a.png", "../outside_missing.png"] })
+                .as_object()
+                .unwrap()
+                .clone(),
+            &mut p,
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.body.code, "path_outside_data_dir");
+}
