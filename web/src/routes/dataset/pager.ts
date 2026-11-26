@@ -195,6 +195,8 @@ export class ImagePager {
       await this.#load(0);
       if (this.#disposed) return -1;
       if (initGen !== this.#gen) return this.find(id);
+      const hit0 = this.#index.get(id);
+      if (hit0 !== undefined && this.#fresh(Math.floor(hit0 / PAGE))) return hit0;
     }
     const total = this.total ?? 0;
     for (let off = 0; off < total; off += SCAN) {

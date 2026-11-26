@@ -259,7 +259,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
             });
       work.set(null);
       generationEnded(gen);
-      if (hub.epoch !== epoch) return;
+      if (hub.epoch !== epoch || isConnecting()) return;
       const known = before.some((d) => d.id === ds.id);
       const title = known ? `Already registered as ${ds.name}` : m === 'folder' ? 'Dataset registered' : 'Synthetic dataset ready';
       // Where the images went, when none can train (a COCO test file registered alone puts them all in test).
@@ -288,7 +288,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       const failed = () => {
         work.set(null);
         generationEnded(gen);
-        if (hub.epoch !== epoch) return;
+        if (hub.epoch !== epoch || isConnecting()) return;
         if (here()) error.set(err);
         else if (showing()) status.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
         // page-level: no opening of the dialog is on screen.

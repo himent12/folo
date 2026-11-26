@@ -140,18 +140,21 @@ describe('router guards', () => {
 
     // And a `go` to the transiently visible hash while reverting back is queued instead of dropped.
     remove();
-    remove = router.guard(() => {
+    let seenHash = '';
+    remove = router.guard((to) => {
       queueMicrotask(() => {
+        seenHash = location.hash;
         remove?.();
         remove = undefined;
-        router.go('/datasets');
+        router.go(to.path);
       });
       return false;
     });
     tab.back();
     await tab.settle();
-    expect(router.route.path).toBe('/datasets');
-    expect(location.hash).toBe('#/datasets');
+    expect(seenHash).toBe('#/');
+    expect(router.route.path).toBe('/');
+    expect(location.hash).toBe('#/');
   });
 
   it('holds Back to an entry from before the app kept places, wherever that entry is', async () => {

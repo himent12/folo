@@ -181,7 +181,7 @@ export default function Benchmark() {
     try {
       // The answer holds the plan as the server keeps it (a weight rounded to a 32-bit float, a reason trimmed).
       const saved = (await live.act(() => hub.api.updateBench(benchId, { plan }))).plan;
-      if (hub.epoch !== epoch) return false;
+      if (hub.epoch !== epoch || hub.mode === 'connecting') return false;
       const now = bench.peek();
       if (!mounted || !now || now.id !== benchId) {
         // page-level: the benchmark page unmounted or switched benchmarks while the save was in flight.
@@ -215,7 +215,7 @@ export default function Benchmark() {
       toast.success('Plan saved', `${plan.conditions.length} conditions. It is fixed once the first entry runs.`);
       return true;
     } catch (e) {
-      if (hub.epoch !== epoch) return false;
+      if (hub.epoch !== epoch || hub.mode === 'connecting') return false;
       // page-level: the plan's own Save, or the leave dialog closes on a refused save in answer.
       toast.error(e, 'Could not save the plan');
       return false;

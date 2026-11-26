@@ -284,6 +284,15 @@ describe('LiveBench ordering', () => {
     await pending;
     flushSync();
     expect(live.bench?.name).toBe('server-B');
+
+    // Also ignore a deferred save settling while hub.mode is 'connecting' (before hub.epoch increments).
+    const saveB = deferred<Bench>();
+    const pendingB = live.act(() => saveB.promise);
+    hub.mode = 'connecting';
+    saveB.resolve(bench('server-B-stale'));
+    await pendingB;
+    flushSync();
+    expect(live.bench?.name).toBe('server-B');
     stop();
   });
 });

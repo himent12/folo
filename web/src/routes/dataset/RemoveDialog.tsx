@@ -59,7 +59,8 @@ export default function RemoveDialog(props: RemoveDialogProps) {
   onCleanup(() => (mounted = false));
   /** A failed removal says so in the dialog, which stays open for another try (the toaster sits behind the modal). */
   const status = new DialogStatus();
-  const connecting = computed(() => hub.mode === 'connecting');
+  const isConnecting = () => hub.mode === 'connecting';
+  const connecting = computed(isConnecting);
   /** The server's runs, read each time the dialog opens (a run may have started since). */
   const runs = new Resource(async (s) => (open.get() && !connecting.get() ? hub.api.runs(s) : null));
   /** The runs that trained on the dataset. */
@@ -81,7 +82,7 @@ export default function RemoveDialog(props: RemoveDialogProps) {
   const images = () => (props.dataset.splits ? count(props.dataset.splits.train + props.dataset.splits.val + props.dataset.splits.test, 'generated image') : 'generated images');
 
   async function remove() {
-    if (deleting.peek() || hub.mode === 'connecting') return;
+    if (deleting.peek() || isConnecting()) return;
     const d = props.dataset;
     const epoch = hub.epoch;
     const startPath = router.location.path;
@@ -89,13 +90,13 @@ export default function RemoveDialog(props: RemoveDialogProps) {
     try {
       const gone = files();
       await hub.api.deleteDataset(d.id, { files: gone });
-      if (hub.epoch !== epoch) return;
+      if (hub.epoch !== epoch || isConnecting()) return;
       datasetsChanged();
       if (mounted) open.set(false);
       toast.success('Dataset removed', gone ? `${d.name} and its ${images()} were deleted.` : `${d.name} is no longer registered. Files on disk were not touched.`);
       if (mounted && router.location.path === startPath) router.go('/datasets', { replace: true });
     } catch (e) {
-      if (hub.epoch !== epoch) return;
+      if (hub.epoch !== epoch || isConnecting()) return;
       if (mounted && open.peek()) status.error(e, 'Could not remove the dataset');
       else toast.error(e, 'Could not remove the dataset');
     } finally {

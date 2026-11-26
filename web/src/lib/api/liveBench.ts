@@ -302,7 +302,7 @@ export class LiveBench {
     const epoch = hub.epoch;
     const seq = this.#benchSeq;
     const b = await call();
-    if (hub.epoch === epoch && this.#benchSeq === seq && this.bench?.id === b.id) this.bench = b;
+    if (hub.epoch === epoch && hub.mode !== 'connecting' && this.#benchSeq === seq && this.bench?.id === b.id) this.bench = b;
     return b;
   }
 

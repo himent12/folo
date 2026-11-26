@@ -420,6 +420,31 @@ describe('AddDatasetDialog', () => {
     flushSync();
     expect(go).not.toHaveBeenCalled();
     expect(toast.items).toEqual([]);
+    unmount(c);
+
+    // Also ignore a late createDataset completion when hub.mode entered 'connecting' before hub.epoch incremented.
+    let releaseLate!: (ds: Dataset) => void;
+    vi.spyOn(hub.api, 'createDataset').mockImplementation(
+      () =>
+        new Promise<Dataset>((resolve) => {
+          releaseLate = resolve;
+        }),
+    );
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'folder', known: [] } });
+    flushSync();
+    const pathEl2 = document.querySelector<HTMLInputElement>('input[id$="-path"]')!;
+    pathEl2.value = 'D:/data/shapes';
+    pathEl2.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    pathEl2.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    flushSync();
+    hub.mode = 'connecting';
+    releaseLate({ ...sample, id: 'ds_late_connecting' });
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+    expect(go).not.toHaveBeenCalled();
+    expect(toast.items).toEqual([]);
   });
 
   it('blocks dataset registration while hub.mode is connecting, including after folder preflight', async () => {

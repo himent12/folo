@@ -193,6 +193,27 @@ describe('RemoveDialog', () => {
     await Promise.resolve();
     expect(go).not.toHaveBeenCalled();
     expect(toast.items).toEqual([]);
+    c.unmount();
+
+    // Also ignore completion when hub.mode switches to connecting before hub.epoch increments.
+    let finishLate!: () => void;
+    vi.spyOn(hub.api, 'deleteDataset').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishLate = resolve;
+        }),
+    );
+    c = render(() => <RemoveDialog open dataset={dataset} />, target);
+    flushSync();
+    const confirmBtn2 = [...document.querySelectorAll<HTMLButtonElement>('dialog footer button')].find((b) => b.textContent?.includes('Remove'))!;
+    confirmBtn2.click();
+    flushSync();
+    hub.mode = 'connecting';
+    finishLate();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(go).not.toHaveBeenCalled();
+    expect(toast.items).toEqual([]);
   });
 
   it('disables and guards dataset removal while hub.mode is connecting', async () => {
