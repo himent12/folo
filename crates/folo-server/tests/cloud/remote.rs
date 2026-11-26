@@ -207,3 +207,61 @@ fn a_worker_run_that_failed_before_its_lost_answer_was_found_is_not_posted_again
         log_of(store, &run.id)
     );
 }
+
+#[test]
+fn a_64_char_run_name_succeeds_on_a_remote_worker() {
+    no_gpu();
+    let t = TestDir::new("cloud-remote-long-name");
+    let l = Lossy::new(&t);
+    let mut cfg = l.config(None);
+    cfg.name = "x".repeat(folo_server::store::MAX_RUN_NAME_CHARS);
+    let run = l.store.create_run(cfg).unwrap();
+    let done = finished(&l.store, &run.id);
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&l.store, &run.id));
+    let worker_runs = l.worker.list_runs().unwrap();
+    assert_eq!(worker_runs.len(), 1);
+    assert!(worker_runs[0].name.chars().count() <= folo_server::store::MAX_RUN_NAME_CHARS);
+    assert!(
+        worker_runs[0].name.ends_with(&format!(" ({})", run.id)),
+        "worker name must preserve controller run id: {}",
+        worker_runs[0].name
+    );
+}
+
+#[test]
+fn a_modified_worker_dataset_is_reuploaded_instead_of_reused() {
+    no_gpu();
+    let t = TestDir::new("cloud-remote-modified-ds");
+    let l = Lossy::new(&t);
+
+    // 1. First run uploads the dataset to the worker.
+    let run1 = l.store.create_run(l.config(None)).unwrap();
+    assert_eq!(finished(&l.store, &run1.id).status, RunStatus::Completed, "{:?}", log_of(&l.store, &run1.id));
+    let worker_ds = l.worker.list_datasets().unwrap();
+    assert_eq!(worker_ds.len(), 1);
+    let first_worker_ds = &worker_ds[0];
+
+    // 2. Empty every validation label file on the worker copy so its content diverges from the controller's.
+    let val_labels = std::path::Path::new(&first_worker_ds.path).join("labels").join("val");
+    for entry in std::fs::read_dir(&val_labels).unwrap() {
+        let p = entry.unwrap().path();
+        if p.is_file() {
+            std::fs::write(p, "").unwrap();
+        }
+    }
+
+    // 3. Second run must detect the modified worker copy and upload a fresh intact dataset instead of reusing it.
+    let run2 = l.store.create_run(l.config(None)).unwrap();
+    assert_eq!(finished(&l.store, &run2.id).status, RunStatus::Completed, "{:?}", log_of(&l.store, &run2.id));
+    assert!(
+        !logged(&l.store, &run2.id, "the worker already has this dataset; nothing to send"),
+        "modified worker copy must not be reused: {:?}",
+        log_of(&l.store, &run2.id)
+    );
+    let worker_ds_after = l.worker.list_datasets().unwrap();
+    assert_eq!(worker_ds_after.len(), 2, "worker should have received a fresh upload");
+    let worker_runs = l.worker.list_runs().unwrap();
+    let ds_ids: std::collections::HashSet<&str> =
+        worker_runs.iter().map(|r| r.config.dataset_id.as_str()).collect();
+    assert_eq!(ds_ids.len(), 2, "second worker run must train on the fresh uploaded dataset");
+}

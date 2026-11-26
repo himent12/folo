@@ -10,12 +10,16 @@ use serde::{Deserialize, Serialize};
 use crate::index::write_atomic;
 
 /// One finished upload with a fingerprint (`uploads.json`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(super) struct Known {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Known {
     pub(super) kind: UploadKind,
     pub(super) fingerprint: String,
     /// The dataset id or model id it became.
-    pub(super) id: String,
+    pub id: String,
+    /// Content validator captured when the upload was adopted (`None` in legacy `uploads.json` entries), checked
+    /// before reusing an upload so a dataset or model modified on disk is never silently reused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
 }
 
 /// `<data dir>/uploads.json`, cached in memory after its first read and updated atomically on write. A missing or
@@ -84,10 +88,10 @@ impl Fingerprints {
         cache.as_mut()
     }
 
-    pub(super) fn find(&self, kind: UploadKind, fingerprint: &str) -> Option<String> {
+    pub(super) fn find(&self, kind: UploadKind, fingerprint: &str) -> Option<Known> {
         let mut cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
         let list = self.load(&mut cache)?;
-        list.iter().find(|k| k.kind == kind && k.fingerprint == fingerprint).map(|k| k.id.clone())
+        list.iter().find(|k| k.kind == kind && k.fingerprint == fingerprint).cloned()
     }
 
     /// Records `k`, replacing an older record of its kind and fingerprint.

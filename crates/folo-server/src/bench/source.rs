@@ -18,6 +18,8 @@ pub struct SourceImage {
     pub file: String,
     /// Where the file is.
     pub path: PathBuf,
+    /// Expected SHA-256 hex digest recorded by the source (labeling jobs), when known.
+    pub sha256: Option<String>,
     /// Width after EXIF orientation.
     pub width: u32,
     /// Height.
@@ -60,7 +62,7 @@ pub fn gather(
                     let path = store.dataset_image_path(dataset_id, &im.id)?;
                     let file = im.file.rsplit(['/', '\\']).next().unwrap_or(&im.file).to_string();
                     let boxes = if truth { im.boxes } else { Vec::new() };
-                    Ok(SourceImage { file, path, width: im.width, height: im.height, boxes })
+                    Ok(SourceImage { file, path, sha256: None, width: im.width, height: im.height, boxes })
                 })
                 .collect::<Result<Vec<_>>>()?;
             Ok(Gathered { name: ds.name, classes: ds.classes, images, split: Some(split) })
@@ -73,6 +75,7 @@ pub fn gather(
                 .map(|im| SourceImage {
                     file: im.file,
                     path: im.path,
+                    sha256: im.sha256,
                     width: im.width,
                     height: im.height,
                     boxes: if truth { im.boxes } else { Vec::new() },

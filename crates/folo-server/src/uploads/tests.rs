@@ -42,16 +42,19 @@ fn fingerprints_cache_reads_uploads_json_once() {
     assert_eq!(uploads.known(UploadKind::Model, "fp1"), None);
     assert_eq!(uploads.known.disk_reads.load(Ordering::Relaxed), 1);
 
-    uploads.remember(UploadKind::Model, "fp1", "m_1");
-    assert_eq!(uploads.known(UploadKind::Model, "fp1").as_deref(), Some("m_1"));
-    uploads.remember(UploadKind::Model, "fp1", "m_2");
-    assert_eq!(uploads.known(UploadKind::Model, "fp1").as_deref(), Some("m_2"));
+    uploads.remember(UploadKind::Model, "fp1", "m_1", Some("sha-1".into()));
+    let k1 = uploads.known(UploadKind::Model, "fp1").unwrap();
+    assert_eq!((k1.id.as_str(), k1.content.as_deref()), ("m_1", Some("sha-1")));
+    uploads.remember(UploadKind::Model, "fp1", "m_2", Some("sha-2".into()));
+    let k2 = uploads.known(UploadKind::Model, "fp1").unwrap();
+    assert_eq!((k2.id.as_str(), k2.content.as_deref()), ("m_2", Some("sha-2")));
     assert_eq!(uploads.known.disk_reads.load(Ordering::Relaxed), 1, "no repeat disk reads after warmup");
 
     // Fresh instance loads persisted state on first lookup.
     uploads.shutdown();
     let reopened = Uploads::open(dir.path());
-    assert_eq!(reopened.known(UploadKind::Model, "fp1").as_deref(), Some("m_2"));
+    let k3 = reopened.known(UploadKind::Model, "fp1").unwrap();
+    assert_eq!((k3.id.as_str(), k3.content.as_deref()), ("m_2", Some("sha-2")));
     assert_eq!(reopened.known.disk_reads.load(Ordering::Relaxed), 1);
     reopened.shutdown();
 
@@ -242,9 +245,11 @@ fn check_rejects_bad_names_and_blank_or_control_fingerprints() {
         assert_eq!((err.status, err.body.code.as_str()), (StatusCode::BAD_REQUEST, "invalid_body"));
     }
 
-    // Exact fingerprint lookup keeps `"fp"` and `" fp "` distinct across upgrades.
-    assert_eq!(uploads.known(UploadKind::Model, "fp").as_deref(), Some("m_trimmed"));
-    assert_eq!(uploads.known(UploadKind::Model, " fp ").as_deref(), Some("m_padded"));
+    // Exact fingerprint lookup keeps `"fp"` and `" fp "` distinct across upgrades (legacy entries have content=None).
+    let trimmed = uploads.known(UploadKind::Model, "fp").unwrap();
+    let padded = uploads.known(UploadKind::Model, " fp ").unwrap();
+    assert_eq!((trimmed.id.as_str(), trimmed.content), ("m_trimmed", None));
+    assert_eq!((padded.id.as_str(), padded.content), ("m_padded", None));
 
     let mut req = create_req(UploadKind::Model, "  ok  ");
     req.fingerprint = Some("  fp-exact  ".into());

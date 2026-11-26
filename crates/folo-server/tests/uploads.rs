@@ -731,3 +731,86 @@ async fn upload_parts_require_octet_stream_media_type() {
     let accepted: Upload = ok(&app, valid, StatusCode::OK).await;
     assert_eq!((accepted.part, accepted.received_bytes), (1, 1));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn modified_uploaded_dataset_and_model_are_not_reused_by_fingerprint() {
+    let t = TestDir::new("uploads-modified-no-reuse");
+    let home = t.join("home");
+    // Use default `recheck_every` (5s) so the test also proves edits inside the recheck window are caught.
+    let app = app(RealStore::open(home.clone()).device("cpu"));
+
+    // 1. Upload a dataset with a fingerprint and confirm immediate reuse while untouched.
+    let tar_bytes = packed_dataset(&t.join("src_ds"));
+
+    let u1 = start(&app, json!({ "kind": "dataset", "name": "shapes", "fingerprint": "fp-ds-1" })).await;
+    send_parts(&app, &u1.id, &tar_bytes, 1 << 20, 0).await;
+    let done1: Uploaded =
+        ok(&app, bare("POST", &format!("/api/uploads/{}/complete", u1.id)), StatusCode::CREATED).await;
+    let first_ds = done1.dataset.unwrap();
+    let reused: UploadCreated = ok(
+        &app,
+        post_json("/api/uploads", json!({ "kind": "dataset", "name": "shapes", "fingerprint": "fp-ds-1" })),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(reused.existing.unwrap().dataset.unwrap().id, first_ds.id);
+
+    // 2. Empty a label file in the uploaded dataset on disk (even inside the default 5s recheck window):
+    //    `POST /api/uploads` must NOT reuse the modified dataset and must start a fresh upload session instead.
+    let label_dir = Path::new(&first_ds.path).join("labels").join("train");
+    let first_label = std::fs::read_dir(&label_dir).unwrap().next().unwrap().unwrap().path();
+    std::fs::write(&first_label, "").unwrap();
+
+    let fresh: UploadCreated = ok(
+        &app,
+        post_json("/api/uploads", json!({ "kind": "dataset", "name": "shapes", "fingerprint": "fp-ds-1" })),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert!(fresh.existing.is_none(), "modified worker dataset must not be reused");
+    let u2 = fresh.upload.expect("new upload session started");
+    send_parts(&app, &u2.id, &tar_bytes, 1 << 20, 0).await;
+    let done2: Uploaded =
+        ok(&app, bare("POST", &format!("/api/uploads/{}/complete", u2.id)), StatusCode::CREATED).await;
+    let second_ds = done2.dataset.unwrap();
+    assert_ne!(second_ds.id, first_ds.id);
+
+    // 3. After re-uploading the intact dataset, subsequent lookups reuse the new intact copy.
+    let reused2: UploadCreated = ok(
+        &app,
+        post_json("/api/uploads", json!({ "kind": "dataset", "name": "shapes", "fingerprint": "fp-ds-1" })),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(reused2.existing.unwrap().dataset.unwrap().id, second_ds.id);
+
+    // 4. Same guarantee for uploaded models: modifying the `.folo` file on disk invalidates fingerprint reuse.
+    let m_bytes = model_bytes(&t);
+    let mu1 = start(&app, json!({ "kind": "model", "name": "pets", "fingerprint": "fp-mod-1" })).await;
+    send_parts(&app, &mu1.id, &m_bytes, 3 << 20, 0).await;
+    let mdone: Uploaded =
+        ok(&app, bare("POST", &format!("/api/uploads/{}/complete", mu1.id)), StatusCode::CREATED).await;
+    let m1 = mdone.model.unwrap();
+    let m_reused: UploadCreated = ok(
+        &app,
+        post_json("/api/uploads", json!({ "kind": "model", "name": "pets", "fingerprint": "fp-mod-1" })),
+        StatusCode::OK,
+    )
+    .await;
+    assert_eq!(m_reused.existing.unwrap().model.unwrap().id, m1.id);
+
+    let mut alt_model =
+        FoloModel::with_rng(ModelConfig::new("n", 2).unwrap(), &mut folo_core::rng::Rng::seed(99)).unwrap();
+    alt_model.set_classes(vec!["cat".into(), "dog".into()]).unwrap();
+    alt_model.set_imgsz(320);
+    alt_model.save(home.join("models").join("pets.folo")).unwrap();
+
+    let m_fresh: UploadCreated = ok(
+        &app,
+        post_json("/api/uploads", json!({ "kind": "model", "name": "pets", "fingerprint": "fp-mod-1" })),
+        StatusCode::CREATED,
+    )
+    .await;
+    assert!(m_fresh.existing.is_none(), "modified model file must not be reused");
+    assert!(m_fresh.upload.is_some());
+}

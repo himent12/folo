@@ -42,7 +42,8 @@ use folo_api::{CreateUpload, DatasetFormat, Upload, UploadKind};
 use crate::error::{Error, Result};
 use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
 
-use fingerprints::{Fingerprints, Known};
+use fingerprints::Fingerprints;
+pub use fingerprints::Known;
 use pipe::{Finish, Unpacker};
 
 /// The largest part a session takes (`Upload.max_part_bytes`; the part route's body limit).
@@ -491,14 +492,15 @@ impl Uploads {
         }
     }
 
-    /// What a finished upload of `kind` with `fingerprint` became (a dataset or model id), if one was remembered.
-    pub fn known(&self, kind: UploadKind, fingerprint: &str) -> Option<String> {
+    /// What a finished upload of `kind` with `fingerprint` became (a dataset or model id and its adopted content
+    /// validator), if one was remembered.
+    pub fn known(&self, kind: UploadKind, fingerprint: &str) -> Option<Known> {
         self.known.find(kind, fingerprint)
     }
 
-    /// Remembers that the upload of `kind` with `fingerprint` became `id`.
-    pub fn remember(&self, kind: UploadKind, fingerprint: &str, id: &str) {
-        self.known.write(Known { kind, fingerprint: fingerprint.to_string(), id: id.to_string() });
+    /// Remembers that the upload of `kind` with `fingerprint` became `id` with adopted content validator `content`.
+    pub fn remember(&self, kind: UploadKind, fingerprint: &str, id: &str, content: Option<String>) {
+        self.known.write(Known { kind, fingerprint: fingerprint.to_string(), id: id.to_string(), content });
     }
 }
 

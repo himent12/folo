@@ -143,6 +143,7 @@ impl Labeler {
             .map(|r| JobImage {
                 file: r.file.clone(),
                 path: job.image_path(r),
+                sha256: r.sha256.clone(),
                 width: r.width,
                 height: r.height,
                 boxes: if r.status == LabelImageStatus::Labeled { r.boxes.clone() } else { Vec::new() },

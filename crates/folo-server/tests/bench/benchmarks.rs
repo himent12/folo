@@ -383,3 +383,73 @@ async fn plans_seeds_and_the_leaderboard() {
     ok::<BenchEntry>(app, post(&format!("{entries}/{}/stop", running.id), json!({}))).await;
     err(app, put(&uri, json!({ "plan": { "conditions": [] } })), StatusCode::CONFLICT, "bench_frozen").await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn benchmark_from_label_job_rejects_changed_resized_corrupt_or_missing_images() {
+    let t = TestDir::new("bench-label-changed-image");
+    let home = t.join("home");
+    let f = fixture(&home);
+    let app = &f.app;
+    let folder = t.join("images");
+    std::fs::create_dir_all(&folder).unwrap();
+    let img_path = folder.join("item.jpg");
+    image::RgbImage::from_pixel(64, 64, image::Rgb([10, 20, 30])).save(&img_path).unwrap();
+
+    let job: LabelJob = ok(
+        app,
+        post(
+            "/api/label/jobs",
+            json!({ "name": "label source", "classes": ["circle"], "path": folder.to_string_lossy() }),
+        ),
+    )
+    .await;
+    let page_out: LabelImagePage = ok(app, get(&format!("/api/label/jobs/{}/images", job.id))).await;
+    let img_id = &page_out.images[0].id;
+    ok::<LabelImage>(
+        app,
+        put(
+            &format!("/api/label/jobs/{}/images/{img_id}", job.id),
+            json!({ "boxes": [{ "class": 0, "x1": 8.0, "y1": 8.0, "x2": 40.0, "y2": 40.0 }] }),
+        ),
+    )
+    .await;
+    let req_body = || {
+        json!({
+            "name": "from label job",
+            "source": { "kind": "label_job", "job_id": job.id },
+            "plan": { "conditions": [] }
+        })
+    };
+
+    // 1. Replace with a different valid 64x64 JPEG (same dimensions, different bytes) -> 400 invalid_dataset.
+    image::RgbImage::from_pixel(64, 64, image::Rgb([220, 10, 10])).save(&img_path).unwrap();
+    let e =
+        err(app, post("/api/bench/benchmarks", req_body()), StatusCode::BAD_REQUEST, "invalid_dataset").await;
+    assert!(e.message.contains("changed on disk since it was added to the job"), "{}", e.message);
+
+    // 2. Replace with a different-sized valid image (32x32) -> 400 invalid_dataset naming dimension mismatch.
+    image::RgbImage::from_pixel(32, 32, image::Rgb([10, 20, 30])).save(&img_path).unwrap();
+    let e =
+        err(app, post("/api/bench/benchmarks", req_body()), StatusCode::BAD_REQUEST, "invalid_dataset").await;
+    assert!(e.message.contains("changed size on disk"), "{}", e.message);
+
+    // 3. Replace with corrupt non-image bytes -> 422 image_decode_failed.
+    std::fs::write(&img_path, b"not a valid jpeg").unwrap();
+    err(
+        app,
+        post("/api/bench/benchmarks", req_body()),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "image_decode_failed",
+    )
+    .await;
+
+    // 4. Delete the image -> 404 image_not_found.
+    std::fs::remove_file(&img_path).unwrap();
+    err(app, post("/api/bench/benchmarks", req_body()), StatusCode::NOT_FOUND, "image_not_found").await;
+
+    // Failed benchmark creations must never leave behind partial benchmark folders or list entries.
+    let listed: BenchList = ok(app, get("/api/bench/benchmarks")).await;
+    assert!(listed.benchmarks.is_empty());
+    let leftovers: Vec<_> = std::fs::read_dir(home.join("bench")).into_iter().flatten().flatten().collect();
+    assert!(leftovers.is_empty(), "failed creations left orphan folders: {leftovers:?}");
+}
