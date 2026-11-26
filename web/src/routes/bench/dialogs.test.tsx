@@ -271,4 +271,75 @@ describe('Bench dialogs async & busy guards', () => {
     await new Promise((r) => setTimeout(r, 10));
     expect(onstarted).not.toHaveBeenCalled();
   });
+
+  it('keeps Start disabled and offers Retry or explicit confidence when reading the teacher entry fails', async () => {
+    const api = new MockApi('normal', 0);
+    hub.api = api;
+    const benches = await api.benches();
+    const models = await api.models();
+    const datasets = await api.datasets();
+    const jobs = await api.labelJobs();
+    const modelIds = new Set(models.map((m) => m.id));
+    let bench = benches[0]!;
+    let entries = await api.benchEntries(bench.id);
+    let teacher: string | null = null;
+    let entryId = '';
+    for (const b of benches) {
+      const es = await api.benchEntries(b.id);
+      const hit = es.find(
+        (e) => e.contestant.kind === 'model' && modelIds.has(e.contestant.model_id) && e.status === 'done' && !e.score?.partial && e.fingerprint === b.fingerprint,
+      );
+      if (hit && hit.contestant.kind === 'model') {
+        bench = b;
+        entries = es;
+        teacher = hit.contestant.model_id;
+        entryId = hit.id;
+        break;
+      }
+    }
+    expect(teacher).not.toBeNull();
+    const realRes = await api.benchResult(bench.id, entryId);
+    const resSpy = vi
+      .spyOn(api, 'benchResult')
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce({ ...realRes, self_labeling: { ...realRes.self_labeling, threshold: 0.4 } });
+
+    const open = signal(true);
+    c = render(
+      () => <NewLoopDialog bind:open={open} bench={bench} models={models} datasets={datasets} jobs={jobs} entries={entries} teacher={teacher} onstarted={vi.fn()} />,
+      target,
+    );
+    flushSync();
+
+    const startBtn = () => [...target.ownerDocument.querySelectorAll<HTMLButtonElement>('dialog button')].find((b) => text(b).startsWith('Start'))!;
+    await vi.waitFor(() => {
+      flushSync();
+      if (!button('Retry')) throw new Error('waiting for Retry button');
+    });
+    // Failed read must not claim it is still reading and must keep Start disabled.
+    expect(target.ownerDocument.querySelector('dialog')?.textContent).not.toContain('reading its entry…');
+    expect(startBtn().disabled).toBe(true);
+    expect(target.ownerDocument.querySelector('dialog [data-gate-why]')?.textContent).toContain('Could not read');
+
+    // Turning off own threshold and supplying an explicit confidence unblocks Start even without a retry.
+    const sw = target.ownerDocument.querySelector<HTMLInputElement>('dialog .conf input[type="checkbox"]')!;
+    sw.click();
+    flushSync();
+    const confInput = target.ownerDocument.querySelector<HTMLInputElement>('dialog input[placeholder="e.g. 0.30"]')!;
+    confInput.value = '0.35';
+    confInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(startBtn().disabled).toBe(false);
+
+    // Turning own threshold back on re-shows Retry; clicking Retry re-fetches and unblocks Start once threshold resolves.
+    sw.click();
+    flushSync();
+    expect(startBtn().disabled).toBe(true);
+    button('Retry')!.click();
+    await vi.waitFor(() => {
+      flushSync();
+      if (startBtn().disabled) throw new Error('waiting for Start after retry');
+    });
+    expect(resSpy).toHaveBeenCalledTimes(2);
+  });
 });

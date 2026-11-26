@@ -287,7 +287,7 @@ export default function TrainingSection(props: TrainingSectionProps) {
                     min="0.25"
                     max="720"
                     step="0.25"
-                    bind:value={field(cloudPick, 'hours')}
+                    bind:value={{ get: () => cloudPick.hours, set: (v) => cloudPick.editHours(v) }}
                     oninput={() => (cloudPick.hoursEdited = true)}
                     invalid={!!props.errors.hours}
                     suffix="hours"

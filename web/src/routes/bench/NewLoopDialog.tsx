@@ -172,11 +172,14 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
   const readEntry = computed(() => teacherEntry.get() ?? props.entries.find(ofTeacher));
   const found = signal<{ entry: string; images: number; self: BenchSelfLabeling; bestConf: number | null } | null>(null);
   const entryReadFailed = signal(false);
+  const readAttempt = signal(0);
   // By id: the page hands down a new benchmark and new entries on every `bench` event and every load of the lists, and
   // a finished entry's result never changes.
   const benchId = computed(() => props.bench.id);
   const readId = computed(() => readEntry.get()?.id ?? null);
   effect(() => {
+    void hub.epoch;
+    void readAttempt.get();
     const id = readId.get();
     const isOpen = open.get();
     found.set(null);
@@ -204,6 +207,8 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     const f = found.get();
     return open.get() && !!te && ownThreshold.get() && f?.entry !== te.id && !entryReadFailed.get();
   });
+  /** Reading the teacher's complete entry failed while the user still relies on its threshold: hold Start until Retry succeeds or a confidence is set. */
+  const thresholdReadFailed = computed(() => open.get() && !!teacherEntry.get() && ownThreshold.get() && entryReadFailed.get());
   /** Whether the teacher's own threshold is used. */
   const useOwn = computed(() => ownThreshold.get() && !needConf.get());
   const thresholdText = computed(() => {
@@ -211,11 +216,13 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     const f = found.get();
     return !te
       ? 'From the threshold its entry finds (that entry runs first). If it finds none, the loop stops after that entry unless you set a confidence.'
-      : !f || f.entry !== te.id
-        ? 'From its entry’s threshold (reading its entry…).'
-        : f.self.threshold !== null
-          ? `From ${conf(f.self.threshold)}, where its entry keeps ${labelsText(f.self.labels)}, 90% right.`
-          : 'Off: its entry found no threshold, and a loop never guesses one.';
+      : entryReadFailed.get()
+        ? 'Could not read its entry’s threshold. Retry, or turn this off to set a confidence.'
+        : !f || f.entry !== te.id
+          ? 'From its entry’s threshold (reading its entry…).'
+          : f.self.threshold !== null
+            ? `From ${conf(f.self.threshold)}, where its entry keeps ${labelsText(f.self.labels)}, 90% right.`
+            : 'Off: its entry found no threshold, and a loop never guesses one.';
   });
   /** The confidence a person set, once it is a valid one; null while the teacher's own threshold is used. */
   const chosen = computed(() => {
@@ -231,6 +238,16 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     const fc = forecast.get();
     return fc ? forecastText(fc, poolImages.get()) : null;
   });
+  /** Re-reads the teacher's entry result after a failed read, keeping focus inside the dialog if the Retry button unmounts. */
+  async function retryEntry() {
+    readAttempt.set(readAttempt.peek() + 1);
+    await tick();
+    if (!alive || !open.peek()) return;
+    if (!document.activeElement || document.activeElement === document.body) {
+      document.getElementById(`${uid}-form`)?.querySelector<HTMLElement>('.conf button, .conf input')?.focus({ preventScroll: true });
+    }
+  }
+
   /** "Keep labels from a lower confidence": the switch off, a lower confidence proposed, its field focused. */
   async function lower() {
     const f = found.peek();
@@ -327,9 +344,11 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
                     : null) ??
       (readingThreshold.get()
         ? 'Reading the teacher’s entry…'
-        : needConf.get() && chosen.get() === null
-          ? 'Choose a confidence: its entry found no threshold'
-          : null)
+        : thresholdReadFailed.get()
+          ? 'Could not read the teacher’s entry: retry or set a confidence'
+          : needConf.get() && chosen.get() === null
+            ? 'Choose a confidence: its entry found no threshold'
+            : null)
     );
   });
   const shownErr = computed(() => (touched.get() ? Object.values(errs.get()).find((e) => e) : (liveErr.get() ?? undefined)));
@@ -543,6 +562,21 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
                 <Input id={`${uid}-conf`} bind:value={minConf} inputmode="decimal" placeholder="e.g. 0.30" invalid={!!showNow(minConf.get(), errs.get().conf)} />
               </div>
             </Field>
+          ) : null}
+          {thresholdReadFailed.get() ? (
+            <div class="fc warn" role="alert">
+              <span class="fc-icon" aria-hidden="true">
+                <TriangleAlert size={16} strokeWidth={1.75} />
+              </span>
+              <div class="fc-body">
+                <p class="fc-text">Could not read the teacher’s entry to check whether it found a threshold.</p>
+                <div class="fc-act">
+                  <Button size="sm" onclick={retryEntry}>
+                    Retry
+                  </Button>
+                </div>
+              </div>
+            </div>
           ) : null}
           {forecast.get() && forecastWords.get() ? (
             // What the first teacher's labels would be, from its entry's curve: said plainly when they are too few.

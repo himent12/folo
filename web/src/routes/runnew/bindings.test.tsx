@@ -371,4 +371,32 @@ describe('New run: Start while the user moves on (round s2-runs)', () => {
       expect($<HTMLInputElement>('input#lr0').getAttribute('aria-invalid'), v).toBe(bad ? 'true' : null);
     }
   });
+
+  it('keeps a hand-typed 0 -> 0.25 cloud time limit without snapping back to the default when the estimate updates', async () => {
+    await open();
+    await until(() => target.querySelectorAll('select#runon option').length > 1, 'cloud connection options');
+    const connId = target.querySelectorAll<HTMLOptionElement>('select#runon option')[1]!.value;
+    choose('select#runon', connId);
+    const hours = await until(() => target.querySelector<HTMLInputElement>('input#hours'), 'Stop after input');
+    await until(() => Number(hours.value) >= 1, 'default stop-after limit');
+    // Wait for the initial server estimate to settle so typing 0 triggers estimating false -> true.
+    await new Promise((r) => setTimeout(r, 400));
+    flush();
+
+    // Simulate a real browser microtask checkpoint between bindValue's direct input listener and delegated oninput:
+    // stopPropagation keeps delegated oninput from running before flush(), exercising editHours's synchronous guard.
+    hours.value = '0';
+    hours.dispatchEvent(new Event('input', { bubbles: false }));
+    flush();
+    expect(hours.value).toBe('0');
+    expect(hours.getAttribute('aria-invalid')).toBe('true');
+
+    hours.value = '0.25';
+    hours.dispatchEvent(new Event('input', { bubbles: true }));
+    flush();
+    expect(hours.value).toBe('0.25');
+    expect(hours.getAttribute('aria-invalid')).toBeNull();
+    const sent = await start();
+    expect(sent.compute?.max_hours).toBe(0.25);
+  });
 });

@@ -202,6 +202,12 @@ export class CloudPick {
     if (!this.hoursEdited) this.hours = defaultMaxHours(highSeconds);
   }
 
+  /** Sets the time limit from a user edit, marking `hoursEdited` first so `follow` never snaps it back. */
+  editHours(v: number | null) {
+    this.hoursEdited = true;
+    this.hours = v;
+  }
+
   /** "New run from this config" of a cloud run: its connection, GPU and limit, if they still exist. */
   prefill(compute: Compute | null | undefined, gpu: string) {
     if (!compute) return;

@@ -17,7 +17,7 @@ import Plug from '$icons/plug';
 import Copy from '$icons/copy';
 import Download from '$icons/download';
 import Info from '$icons/info';
-import { bindable, computed, css, effect, For, onCleanup, signal } from 'fw';
+import { bindable, computed, css, effect, For, onCleanup, signal, tick } from 'fw';
 import { f16FileName, onnxFileName } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { ExportFormat, ExportResult, Model, OnnxSwitches } from '$lib/api/types';
@@ -73,26 +73,36 @@ export default function ExportDialog(props: ExportDialogProps) {
   const switchesOk = signal(false);
   /** Whether the server serves the ONNX graph for download (`weights_onnx`), so ONNX skips the server-side file. */
   const onnxDirect = signal(false);
+  /** Whether `/api/system` is still in flight for the current open/server epoch. */
+  const capsLoading = signal(false);
   effect(() => {
     void hub.epoch;
-    if (!open.get()) return;
+    if (!open.get()) {
+      capsLoading.set(false);
+      return;
+    }
     let live = true;
+    capsLoading.set(true);
     hub.api.system().then(
       (s) => {
         if (!live) return;
         switchesOk.set(!!s.features?.includes('export_onnx_switches'));
         onnxDirect.set(!!s.features?.includes('weights_onnx'));
+        capsLoading.set(false);
       },
       () => {
         if (!live) return;
         switchesOk.set(false);
         onnxDirect.set(false);
+        capsLoading.set(false);
       },
     );
     return () => {
       live = false;
     };
   });
+  /** While ONNX is chosen on a live server and `/api/system` has not answered yet, hold export so we do not fall back to writing on the server. */
+  const checkingOnnx = computed(() => !demo.get() && format.get() === 'onnx' && capsLoading.get());
   /** The estimate follows the switches: an f16 ONNX file is about half the size. */
   const perParam = (f: (typeof formats)[number]) => (f.value === 'onnx' && onnxSwitches.get() && switches.get().half ? 2.05 : f.bytesPerParam);
   /** The app's one size format (`bytes`: one decimal, "≈ 18.3 MiB", "≈ 37.0 MiB"). */
@@ -138,6 +148,7 @@ export default function ExportDialog(props: ExportDialogProps) {
   let uiRun = 0;
   let destroyed = false;
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  let statusEl: HTMLElement | undefined;
   let lastModelId = model().id;
   let lastEpoch = hub.epoch;
   effect(() => {
@@ -155,6 +166,21 @@ export default function ExportDialog(props: ExportDialogProps) {
       lastModelId = mid;
       reset();
     }
+  });
+  // Disabling the Export button while running or swapping the footer to the result drops focus to <body>: keep focus
+  // on the dialog's primary next action when the result or error lands while the dialog is open.
+  effect(() => {
+    const ph = phase.get();
+    if (!open.get() || (ph !== 'done' && ph !== 'error')) return;
+    void tick().then(() => {
+      if (destroyed || !open.peek() || phase.peek() !== ph) return;
+      const dlg = statusEl?.closest('dialog');
+      if (!dlg) return;
+      const active = document.activeElement;
+      if (active && active !== document.body && active !== dlg && dlg.contains(active)) return;
+      const next = dlg.querySelector<HTMLElement>('footer .primary') ?? dlg.querySelector<HTMLElement>('footer button:not(:disabled), footer a[href]');
+      (next ?? dlg).focus({ preventScroll: true });
+    });
   });
   onCleanup(() => {
     destroyed = true;
@@ -212,7 +238,7 @@ export default function ExportDialog(props: ExportDialogProps) {
   }
 
   async function start() {
-    if (phase.peek() === 'running') return;
+    if (phase.peek() === 'running' || checkingOnnx.peek()) return;
     if (direct.peek()) return downloadFile();
     const id = ++uiRun;
     const m = model();
@@ -287,6 +313,16 @@ export default function ExportDialog(props: ExportDialogProps) {
     if (phase.peek() !== 'running') reset();
   };
 
+  function exportAnother() {
+    reset();
+    void tick().then(() => {
+      if (destroyed || !open.peek() || phase.peek() !== 'idle') return;
+      const dlg = statusEl?.closest('dialog');
+      const next = dlg?.querySelector<HTMLElement>('input[name="export-format"]:checked') ?? dlg?.querySelector<HTMLElement>('input[name="export-format"]');
+      next?.focus({ preventScroll: true });
+    });
+  }
+
   const footer = () => (
     <>
       {phase.get() === 'done' ? (
@@ -294,7 +330,7 @@ export default function ExportDialog(props: ExportDialogProps) {
         // the result), and the result's next step the one primary at the end: Connect to a server in the demo (Done the
         // secondary), else Done (the file is saved already, or stays on the server).
         <>
-          <button type="button" class="another" onclick={reset}>
+          <button type="button" class="another" onclick={exportAnother}>
             Export another
           </button>
           {demo.get() ? (
@@ -315,8 +351,10 @@ export default function ExportDialog(props: ExportDialogProps) {
           <Button variant="ghost" onclick={close}>
             Cancel
           </Button>
-          <Button variant="primary" icon={Download} loading={phase.get() === 'running'} onclick={start}>
-            {phase.get() === 'error' ? (
+          <Button variant="primary" icon={Download} loading={phase.get() === 'running' || checkingOnnx.get()} onclick={start}>
+            {checkingOnnx.get() ? (
+              'Checking server…'
+            ) : phase.get() === 'error' ? (
               'Retry'
             ) : direct.get() ? (
               <>
@@ -335,7 +373,7 @@ export default function ExportDialog(props: ExportDialogProps) {
     <Dialog bind:open={open} title="Export model" description={`Write ${model().name} to a file you can deploy.`} onclose={onclose} status={status} footer={footer}>
       {/* One live region that stays in the dialog, so the start and the end of an export are both announced (the toast is
           held back while the dialog is open). Failures announce themselves through ErrorState's alert. */}
-      <p class="sr-only" role="status">
+      <p class="sr-only" role="status" ref={(e) => (statusEl = e)}>
         {announcement.get()}
       </p>
       {phase.get() === 'done' && demo.get() ? (

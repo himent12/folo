@@ -561,4 +561,39 @@ describe('Overview', () => {
     expect(card.querySelector('header .meta')?.textContent).toContain('Ryzen 9 7950X');
     expect(card.querySelector('.foot')).toBeNull();
   });
+
+  it('keeps keyboard focus inside the Training slot when the live card swaps runs or becomes idle', async () => {
+    const runs = await idleRuns();
+    const [first, second] = runs;
+    const api = new MockApi('normal', 0);
+    watched.runs = runs.map((r) => (r.id === first!.id ? { ...r, status: 'running' as const } : r));
+    open(api);
+    await training((t) => t.includes(first!.name), 'first live run');
+
+    const cta = () => target.querySelector<HTMLAnchorElement>('.live .cta a')!;
+    cta().focus();
+    cta().dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    expect(document.activeElement).toBe(cta());
+
+    // First run completes and second run takes over the keyed LiveRunCard: simulate Chromium dispatching a
+    // synchronous focusout (relatedTarget: null) right as the focused link is detached during the swap.
+    cta().dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: null }));
+    watched.runs = runs.map((r) => (r.id === second!.id ? { ...r, status: 'running' as const } : r));
+    flush();
+    await training((t) => t.includes(second!.name), 'second live run');
+    await vi.waitFor(() => {
+      flush();
+      expect(document.activeElement).toBe(cta());
+      expect(cta().getAttribute('href')).toBe(`#/runs/${second!.id}`);
+    });
+
+    // Second run completes with nothing else training: focus lands on the route heading rather than <body>.
+    watched.runs = runs;
+    flush();
+    await training((t) => t.includes('Nothing is training'), 'idle training panel');
+    await vi.waitFor(() => {
+      flush();
+      expect(document.activeElement).toBe(target.querySelector('h1[data-route-focus]'));
+    });
+  });
 });

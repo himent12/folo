@@ -104,7 +104,10 @@ describe('ExportDialog', () => {
     flushSync();
     target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
     flushSync();
-    button('Export')!.click();
+    (await until(() => {
+      const b = button('Export');
+      return b && !b.disabled ? b : null;
+    }, 'Export ready')).click();
     await until(() => button('Done'), 'the finished state');
     expect(target.ownerDocument.querySelector('dialog')?.textContent).toContain('Export finished');
     expect(success).not.toHaveBeenCalled();
@@ -123,7 +126,10 @@ describe('ExportDialog', () => {
     flushSync();
     target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
     flushSync();
-    button('Export')!.click();
+    (await until(() => {
+      const b = button('Export');
+      return b && !b.disabled ? b : null;
+    }, 'Export ready')).click();
     await until(() => target.ownerDocument.querySelector('dialog .where code'), 'the path');
     expect(button('Download')).toBeUndefined();
     expect(button('Done')!.classList.contains('primary')).toBe(true);
@@ -242,6 +248,64 @@ describe('ExportDialog: ONNX download (weights_onnx)', () => {
     hub.epoch++;
     flushSync();
     await until(() => sysSpy.mock.calls.length === 2 && target.ownerDocument.querySelectorAll('dialog input[type="checkbox"]').length === 0, 'cleared switches');
+  });
+
+  it('waits for slow /api/system before allowing ONNX export so weights_onnx does not fall back to server export', async () => {
+    const api = new HttpApi('http://folo.test');
+    let resolveSystem!: (s: typeof SYS & { features: string[] }) => void;
+    vi.spyOn(api, 'system').mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveSystem = res;
+        }),
+    );
+    const exp = vi.spyOn(api, 'exportModel');
+    const get = vi.spyOn(api, 'onnxFile').mockResolvedValue(new File([new Uint8Array(1024)], 'shapes-n-best.onnx'));
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x');
+    hub.api = api;
+    c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+
+    // FOLO f16 stays ready immediately even while /api/system is still pending.
+    expect(button('Download shapes-n-best-f16.folo')?.disabled).toBe(false);
+
+    // Switching to ONNX while /api/system is pending holds the primary action instead of writing to the server.
+    target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
+    flushSync();
+    const pendingBtn = button('Checking server…');
+    expect(pendingBtn).toBeDefined();
+    expect(pendingBtn!.disabled).toBe(true);
+    pendingBtn!.click();
+    flushSync();
+    expect(exp).not.toHaveBeenCalled();
+
+    // Once /api/system resolves with weights_onnx + switches, ONNX downloads directly instead of POST /export.
+    resolveSystem({ ...SYS, features: ['export_onnx_switches', 'weights_onnx'] });
+    const dl = await until(() => {
+      const b = button('Download shapes-n-best.onnx');
+      return b && !b.disabled ? b : null;
+    }, 'direct ONNX download button');
+    expect(target.ownerDocument.querySelectorAll('dialog [role="group"] input[type="checkbox"]')).toHaveLength(3);
+    dl.click();
+    await until(() => button('Done'), 'finished download');
+    expect(get).toHaveBeenCalledWith('m_x', { decode: false, dynamic: false, half: false });
+    expect(exp).not.toHaveBeenCalled();
+  });
+
+  it('moves keyboard focus to the done action when export finishes and back to the format radio on Export another', async () => {
+    hub.api = new MockApi('normal', 0);
+    c = mount(ExportDialog, { target, props: { model: { ...model, id: 'm_fast_n', name: 'fasteners-n-best' }, open: true } });
+    flushSync();
+    const expBtn = button('Export')!;
+    expBtn.focus();
+    expBtn.click();
+    await until(() => button('Done'), 'done state');
+    await until(() => target.ownerDocument.activeElement?.textContent?.includes('Connect to a server'), 'focus on primary done action');
+    expect(target.ownerDocument.activeElement).not.toBe(target.ownerDocument.body);
+
+    button('Export another')!.click();
+    await until(() => target.ownerDocument.activeElement?.matches('input[name="export-format"]:checked'), 'focus back on checked format radio');
   });
 });
 

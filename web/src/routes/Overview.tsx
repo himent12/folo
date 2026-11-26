@@ -3,7 +3,7 @@ import Activity from '$icons/activity';
 import Plus from '$icons/plus';
 import WifiOff from '$icons/wifi-off';
 import RefreshCwOff from '$icons/refresh-cw-off';
-import { computed, css, Key, signal } from 'fw';
+import { computed, css, effect, Key, onCleanup, signal, tick } from 'fw';
 import { readDatasets } from '$lib/api/datasetReads';
 import { hub } from '$lib/api/index';
 import { modelsResource } from '$lib/api/models';
@@ -135,6 +135,82 @@ export default function Overview() {
     </Button>
   );
 
+  // When a live run finishes and the keyed LiveRunCard swaps to the next run (or idle), browsers drop focus from the
+  // removed card onto <body>. Track keyboard focus inside `.live` and place it on the matching control of the replacement.
+  let liveEl: HTMLElement | undefined;
+  let focusInLive: 'cta' | 'title' | 'other' | null = null;
+  let focusOutGen = 0;
+  let alive = true;
+  onCleanup(() => {
+    alive = false;
+  });
+  function onLiveFocusIn(e: FocusEvent) {
+    const t = e.target;
+    if (!(t instanceof Element)) return;
+    focusOutGen++;
+    focusInLive = t.closest('.cta') ? 'cta' : t.closest('h2') ? 'title' : 'other';
+  }
+  function onLiveFocusOut(e: FocusEvent) {
+    const next = e.relatedTarget;
+    if (next instanceof Node) {
+      if (!liveEl?.contains(next)) {
+        focusOutGen++;
+        focusInLive = null;
+      }
+      return;
+    }
+    // Chromium fires `focusout` with `relatedTarget === null` synchronously during DOM removal (before our user
+    // effect runs in the same flush). Defer clearing to a microtask so a live-card swap can still claim the focus,
+    // while a genuine blur to blank canvas clears `focusInLive` right after the event.
+    const gen = ++focusOutGen;
+    queueMicrotask(() => {
+      if (alive && gen === focusOutGen && (!liveEl || !liveEl.contains(document.activeElement))) {
+        focusInLive = null;
+      }
+    });
+  }
+  const liveSlotKey = computed(() =>
+    down.get() ? 'down' : runsFailed.get() ? 'err' : !runList.get() ? 'loading' : live.get() ? `run:${live.get()!.id}` : 'idle',
+  );
+  let prevLiveSlot: string | undefined;
+  effect(() => {
+    const key = liveSlotKey.get();
+    if (prevLiveSlot === undefined) {
+      prevLiveSlot = key;
+      return;
+    }
+    if (key === prevLiveSlot) return;
+    prevLiveSlot = key;
+    const kind = focusInLive;
+    if (!kind) return;
+    focusOutGen++;
+    void tick().then(() => {
+      if (!alive) return;
+      const host = liveEl?.isConnected ? liveEl : document.querySelector<HTMLElement>('.page .live');
+      if (!host) {
+        focusInLive = null;
+        return;
+      }
+      const active = document.activeElement;
+      if (active && active !== document.body && active.isConnected && !host.contains(active)) {
+        focusInLive = null;
+        return;
+      }
+      if (active && host.contains(active) && active !== host) return;
+      const pick =
+        (kind === 'cta' ? host.querySelector<HTMLElement>('.cta a[href], .cta button:not(:disabled)') : null) ??
+        (kind === 'title' ? host.querySelector<HTMLElement>('h2 a[href]') : null) ??
+        host.querySelector<HTMLElement>('.cta a[href], h2 a[href], a[href], button:not(:disabled)') ??
+        document.querySelector<HTMLElement>('h1[data-route-focus]');
+      if (pick) {
+        pick.focus({ preventScroll: true });
+        if (!host.contains(pick)) focusInLive = null;
+      } else {
+        focusInLive = null;
+      }
+    });
+  });
+
   return (
     <Page
       title="Overview"
@@ -176,7 +252,7 @@ export default function Overview() {
               </Callout>
             </div>
           ) : null}{' '}
-          <div class="live">
+          <div class="live" ref={(e) => (liveEl = e)} onfocusin={onLiveFocusIn} onfocusout={onLiveFocusOut}>
             {runsFailed.get() ? (
               <Panel title="Training">
                 <ErrorState error={runs.error} retry={() => runs.refresh()} title="Could not check what is training" compact />
