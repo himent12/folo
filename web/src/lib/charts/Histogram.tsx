@@ -9,7 +9,7 @@ import { scaleLinear } from 'd3-scale';
 import { computed, css, defaults, effect, Index, signal } from 'fw';
 import { ticks as niceTicks } from './downsample';
 import { binAt, categoryBars, edgeX } from './histogram';
-import { TouchGesture, type PinAction } from './pin';
+import { canDismissChartOnEscape, TouchGesture, type PinAction } from './pin';
 import { createRectCache } from './rectCache';
 
 export interface HistogramProps {
@@ -62,8 +62,12 @@ export default function Histogram(props: HistogramProps) {
     const t = total.get();
     return t ? ((c / t) * 100).toFixed(1) : '0';
   };
-  const readout = computed(() => {
+  const activeHovered = computed(() => {
     const h = hovered.get();
+    return h !== null && h >= 0 && h < p.counts.length ? h : null;
+  });
+  const readout = computed(() => {
+    const h = activeHovered.get();
     return h === null ? '' : `${name(h)}: ${(p.counts[h] ?? 0).toLocaleString('en-US')} ${p.unit}, ${shareOf(p.counts[h] ?? 0)}%`;
   });
   // Every category is named while each has 34 px; past that, every k-th.
@@ -115,6 +119,15 @@ export default function Histogram(props: HistogramProps) {
       }
     }
   }
+  // Clear an out-of-bounds bin selection if the histogram's bin count shrinks (`activeHovered` guards render immediately).
+  effect(() => {
+    const n = p.counts.length;
+    const h = hovered.peek();
+    if (h !== null && h >= n) {
+      hovered.set(null);
+      pinned.set(false);
+    }
+  });
   effect(() => {
     if (!pinned.get()) return;
     const outside = (e: PointerEvent) => {
@@ -122,7 +135,10 @@ export default function Histogram(props: HistogramProps) {
       if (svg && !svg.contains(e.target as Node)) apply({ kind: 'clear' });
     };
     const esc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') apply({ kind: 'clear' });
+      if (canDismissChartOnEscape(e, true)) {
+        e.preventDefault();
+        apply({ kind: 'clear' });
+      }
     };
     document.addEventListener('pointerdown', outside, true);
     document.addEventListener('keydown', esc);
@@ -166,15 +182,19 @@ export default function Histogram(props: HistogramProps) {
     if (!touchy(e) && !pinned.peek()) hovered.set(null);
   }
   function onkeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
     const n = p.counts.length;
     if (!n) return;
-    const i = hovered.peek() ?? firstBin.peek();
-    let j = i;
-    if (e.key === 'ArrowRight') j = Math.min(n - 1, i + 1);
-    else if (e.key === 'ArrowLeft') j = Math.max(0, i - 1);
+    const cur = hovered.peek();
+    const step = e.shiftKey ? 5 : 1;
+    let j: number;
+    if (e.key === 'ArrowRight') j = cur === null ? firstBin.peek() : Math.min(n - 1, cur + step);
+    else if (e.key === 'ArrowLeft') j = cur === null ? n - 1 : Math.max(0, cur - step);
     else if (e.key === 'Home') j = 0;
     else if (e.key === 'End') j = n - 1;
     else if (e.key === 'Escape') {
+      if ((cur === null && !pinned.peek()) || !canDismissChartOnEscape(e)) return;
+      e.preventDefault();
       hovered.set(null);
       pinned.set(false);
       return;
@@ -189,12 +209,12 @@ export default function Histogram(props: HistogramProps) {
   return (
     <>
       {/* The readout: the legend row of the chart frame, in one stable place (no floating tooltip). */}
-      <p class="readout num" class:at={hovered.get() !== null} aria-hidden="true">
-        {hovered.get() !== null ? (
+      <p class="readout num" class:at={activeHovered.get() !== null} aria-hidden="true">
+        {activeHovered.get() !== null ? (
           <>
-            <span class="t">{name(hovered.get()!)}</span>
-            <span class="v">{`${(p.counts[hovered.get()!] ?? 0).toLocaleString('en-US')} ${p.unit}`}</span>
-            <span class="p">{`${shareOf(p.counts[hovered.get()!] ?? 0)}%`}</span>
+            <span class="t">{name(activeHovered.get()!)}</span>
+            <span class="v">{`${(p.counts[activeHovered.get()!] ?? 0).toLocaleString('en-US')} ${p.unit}`}</span>
+            <span class="p">{`${shareOf(p.counts[activeHovered.get()!] ?? 0)}%`}</span>
           </>
         ) : (
           <span class="v">{`${total.get().toLocaleString('en-US')} ${p.unit}`}</span>
@@ -209,7 +229,7 @@ export default function Histogram(props: HistogramProps) {
             role="group"
             aria-roledescription="chart"
             aria-label={`${p.label}. Focus and use the arrow keys to read each bin.`}
-            tabindex={0}
+            tabindex={p.counts.length > 0 ? 0 : -1}
             onkeydown={onkeydown}
             onpointerenter={onpointerenter}
             onpointermove={onpointermove}
@@ -217,7 +237,9 @@ export default function Histogram(props: HistogramProps) {
             onpointerdown={onpointerdown}
             onpointerup={onpointerup}
             onpointercancel={onpointercancel}
-            onfocus={() => hovered.set((h) => h ?? firstBin.peek())}
+            onfocus={() => {
+              if (p.counts.length > 0) hovered.set((h) => (h !== null && h < p.counts.length ? h : firstBin.peek()));
+            }}
             onblur={() => {
               if (!pinned.peek()) hovered.set(null);
             }}
@@ -242,8 +264,8 @@ export default function Histogram(props: HistogramProps) {
                 <>
                   <path
                     class="bar"
-                    class:dim={!p.hoverColor && hovered.get() !== null && hovered.get() !== i}
-                    style:fill={p.hoverColor && hovered.get() === i ? p.hoverColor : p.color}
+                    class:dim={!p.hoverColor && activeHovered.get() !== null && activeHovered.get() !== i}
+                    style:fill={p.hoverColor && activeHovered.get() === i ? p.hoverColor : p.color}
                     d={g().d}
                   />
                   {g().tick ? (

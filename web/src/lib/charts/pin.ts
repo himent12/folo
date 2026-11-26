@@ -2,8 +2,33 @@
 // dismissed by tapping it again, tapping outside or pressing Escape. A gesture that turns into a vertical page
 // scroll changes nothing, so the chart never traps the scroll (the plot is `touch-action: pan-y`).
 
+import { isTyping } from '$lib/keys';
+import { gChord } from '$lib/shell/shortcuts';
+
 /** What a touch gesture asks of the chart's cursor. */
 export type PinAction = { kind: 'set'; px: number } | { kind: 'clear' } | { kind: 'none' };
+
+/** True while a higher-priority overlay (dialog, menu, tooltip, or popover) is open and owns Escape first. */
+export function hasChartEscapeBlocker(): boolean {
+  if (document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"], #folo-tooltip[data-show], .info-pop.open')) {
+    return true;
+  }
+  try {
+    return !!document.querySelector('[popover]:popover-open');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether an Escape keydown should dismiss a chart's active readout/pin instead of deferring to an overlay, chord,
+ * modifier shortcut, or (for document-level touch-pin listeners) a focused form control.
+ */
+export function canDismissChartOnEscape(e: KeyboardEvent, global = false): boolean {
+  if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return false;
+  if (global && isTyping(e)) return false;
+  return !gChord.peek() && !hasChartEscapeBlocker();
+}
 
 /** Sideways travel (px) before a touch counts as a scrub; below it the gesture is still a tap or a scroll. */
 export const SCRUB_SLOP = 6;

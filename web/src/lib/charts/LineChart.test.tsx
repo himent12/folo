@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { deep, field, flush as flushSync, tick } from 'fw';
+import { deep, field, flush as flushSync, signal, tick } from 'fw';
 import { describe, expect, it } from 'vitest';
+import { gChord } from '$lib/shell/shortcuts';
 import { render } from '../../../framework/testing';
 import LineChart, { type LineChartProps } from './LineChart';
 
@@ -82,16 +83,90 @@ describe('LineChart keyboard', () => {
     expect(target.querySelector('.legend .note')!.textContent).toBe('Last');
     unmount(c);
   });
+
+  it('starts from the first point on ArrowRight and last point on ArrowLeft, ignores modifier-held arrows, and consumes Escape only while active', async () => {
+    const series = [{ id: 'a', label: 'mAP', color: 'red', points: [0, 1, 2, 3].map((x) => ({ x, y: x / 10 })) }];
+    const { target, c, svg } = mountAt({ series, label: 'nav', xTitle: (x: number) => `Epoch ${x}`, legendNote: 'Latest' }, 400);
+    const live = target.querySelector('[aria-live]')!;
+
+    // Modifier-held ArrowLeft (e.g. Alt+ArrowLeft browser back) is ignored.
+    const altBack = new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true });
+    svg.dispatchEvent(altBack);
+    flushSync();
+    expect(altBack.defaultPrevented).toBe(false);
+    expect(target.querySelector('.cursor')).toBeNull();
+
+    // Idle Escape is not consumed so page-level Escape handlers can still run.
+    const idleEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    svg.dispatchEvent(idleEsc);
+    flushSync();
+    expect(idleEsc.defaultPrevented).toBe(false);
+
+    // ArrowRight from idle lands on the first point (Epoch 0).
+    svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+    flushSync();
+    await tick();
+    await tick();
+    expect(live.textContent).toContain('Epoch 0');
+
+    // Escape while active consumes the event and clears cursor + speech.
+    const activeEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    svg.dispatchEvent(activeEsc);
+    flushSync();
+    expect(activeEsc.defaultPrevented).toBe(true);
+    expect(target.querySelector('.cursor')).toBeNull();
+    expect(live.textContent).toBe('');
+
+    // ArrowLeft from idle lands on the last point (Epoch 3), not skipping it.
+    svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
+    flushSync();
+    await tick();
+    await tick();
+    expect(live.textContent).toContain('Epoch 3');
+
+    // Rapid ArrowLeft followed immediately by Escape cancels the pending async announcement.
+    svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
+    svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    flushSync();
+    await tick();
+    await tick();
+    expect(live.textContent).toBe('');
+    unmount(c);
+  });
+
+  it('clears spoken text when an external bound cursor resets to null', async () => {
+    const cursor = signal<number | null>(null);
+    const series = [{ id: 'a', label: 'mAP', color: 'red', points: [0, 1, 2].map((x) => ({ x, y: x / 10 })) }];
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = render(() => <LineChart series={series} label="synced" xTitle={(x) => `Epoch ${x}`} bind:cursor={cursor} />, target);
+    Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: 400 });
+    target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
+    flushSync();
+    const svg = target.querySelector<SVGSVGElement>('svg[aria-roledescription=chart]')!;
+    const live = target.querySelector('[aria-live]')!;
+    svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+    flushSync();
+    await tick();
+    await tick();
+    expect(live.textContent).toContain('Epoch 2');
+    cursor.set(null);
+    flushSync();
+    expect(live.textContent).toBe('');
+    c.unmount();
+    target.remove();
+  });
 });
 
 describe('LineChart touch readout', () => {
-  it('pins the cursor on a tap, keeps it when the finger lifts, and lets go on a tap outside', () => {
+  it('pins the cursor on a tap, keeps it when the finger lifts or focus blurs, and lets go on a tap outside', () => {
     const series = [{ id: 'a', label: 'long', color: 'red', points: [0, 1, 2, 3, 4].map((x) => ({ x, y: x / 10 })) }];
     const { target, c, svg } = mountAt({ series, label: 'touch', xTitle: (x: number) => `Epoch ${x}` }, 400);
     const touch = (type: string, clientX: number, clientY = 50) => svg.dispatchEvent(new PointerEvent(type, { pointerType: 'touch', clientX, clientY, bubbles: true }));
     touch('pointerdown', 300);
     touch('pointerup', 300);
     touch('pointerleave', 300);
+    svg.dispatchEvent(new FocusEvent('blur'));
     flushSync();
     expect(target.querySelector('.cursor.pinned')).toBeTruthy();
     // The cursor's x reads out on the axis.
@@ -102,7 +177,7 @@ describe('LineChart touch readout', () => {
     unmount(c);
   });
 
-  it('lets go when the pinned cursor is tapped again, or on Escape', () => {
+  it('lets go when the pinned cursor is tapped again, or on Escape (deferring to dialogs, popovers, tooltips, inputs, and gChord)', () => {
     const series = [{ id: 'a', label: 'a', color: 'red', points: [0, 1, 2, 3, 4].map((x) => ({ x, y: x / 10 })) }];
     const { target, c, svg } = mountAt({ series, label: 'touch' }, 600);
     const tap = (clientX: number) => {
@@ -116,9 +191,94 @@ describe('LineChart touch readout', () => {
     expect(target.querySelector('.cursor')).toBeNull();
     tap(300);
     expect(target.querySelector('.cursor.pinned')).toBeTruthy();
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+
+    // Open dialog, info popover, tooltip, active G-chord, and focused input all take Escape priority.
+    const blockers = [
+      Object.assign(document.createElement('dialog'), { open: true }),
+      Object.assign(document.createElement('div'), { className: 'info-pop open' }),
+      (() => {
+        const tip = document.createElement('div');
+        tip.id = 'folo-tooltip';
+        tip.setAttribute('data-show', '');
+        return tip;
+      })(),
+    ];
+    for (const el of blockers) {
+      document.body.appendChild(el);
+      const blockedEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+      document.dispatchEvent(blockedEsc);
+      flushSync();
+      expect(blockedEsc.defaultPrevented).toBe(false);
+      expect(target.querySelector('.cursor.pinned')).toBeTruthy();
+      el.remove();
+    }
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    const inputEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    input.dispatchEvent(inputEsc);
+    flushSync();
+    expect(inputEsc.defaultPrevented).toBe(false);
+    expect(target.querySelector('.cursor.pinned')).toBeTruthy();
+    input.remove();
+
+    gChord.set(true);
+    try {
+      const chordEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+      document.dispatchEvent(chordEsc);
+      flushSync();
+      expect(chordEsc.defaultPrevented).toBe(false);
+      expect(target.querySelector('.cursor.pinned')).toBeTruthy();
+    } finally {
+      gChord.set(false);
+    }
+
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    document.dispatchEvent(esc);
+    flushSync();
+    expect(esc.defaultPrevented).toBe(true);
+    expect(target.querySelector('.cursor')).toBeNull();
+    unmount(c);
+  });
+
+  it('does not arm a phantom touch pin on an empty chart or in a live chart future band, and drops the pin if data clears', () => {
+    const { c: emptyC, svg: emptySvg } = mountAt({ series: [], label: 'empty' }, 400);
+    emptySvg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 200, clientY: 50, bubbles: true }));
+    emptySvg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 200, clientY: 50, bubbles: true }));
+    flushSync();
+    const emptyEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    document.dispatchEvent(emptyEsc);
+    flushSync();
+    expect(emptyEsc.defaultPrevented).toBe(false);
+    unmount(emptyC);
+
+    // Live run with data on epochs 0..2 inside a planned domain 0..20: tapping the future region must not arm a pin.
+    const props = deep({
+      series: [{ id: 'a', label: 'mAP', color: 'red', points: [0, 1, 2].map((x) => ({ x, y: x / 10 })) }],
+      label: 'live',
+      xDomain: [0, 20] as [number, number],
+      picked: null as string | null,
+    });
+    const { target, c, svg } = mountAt(props, 400);
+    svg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 350, clientY: 50, bubbles: true }));
+    svg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 350, clientY: 50, bubbles: true }));
     flushSync();
     expect(target.querySelector('.cursor')).toBeNull();
+    const futureEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    document.dispatchEvent(futureEsc);
+    flushSync();
+    expect(futureEsc.defaultPrevented).toBe(false);
+
+    // Pinning on real data then clearing the series drops the pin so Escape is no longer claimed.
+    svg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 60, clientY: 50, bubbles: true }));
+    svg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 60, clientY: 50, bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.cursor.pinned')).toBeTruthy();
+    props.series = [];
+    flushSync();
+    const goneEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    document.dispatchEvent(goneEsc);
+    flushSync();
+    expect(goneEsc.defaultPrevented).toBe(false);
     unmount(c);
   });
 });

@@ -1,7 +1,7 @@
 // The line chart behind the run, compare and model screens: series on a linear or log y scale, with ticks, markers,
 // a hover tooltip and legend, and series the pointer can pick out.
 import { scaleLinear, scaleLog } from 'd3-scale';
-import { bindable, computed, createUniqueId, css, cubicOut, defaults, effect, For, MediaQuery, signal, tick, Tween, untrack } from 'fw';
+import { bindable, computed, createUniqueId, css, cubicOut, defaults, effect, For, MediaQuery, onCleanup, signal, tick, Tween, untrack } from 'fw';
 import { prefs } from '$lib/prefs';
 import { media } from '$lib/design/tokens';
 import { motion } from '$lib/ui/motion';
@@ -10,7 +10,7 @@ import { logMinors, MAX_TICKS } from './domain';
 import { END_LABELS_MIN, memoPlaceEndLabels } from './endLabels';
 import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
 import { paintOrder } from './layers';
-import { TouchGesture, type PinAction } from './pin';
+import { canDismissChartOnEscape, TouchGesture, type PinAction } from './pin';
 import { patternOf, dashOf, inkOf, seriesSummary, strokeWidth } from './lineSeries';
 import { capInPlotOf, eventOf, futureOf, marginOf, markOf, xExtentOf, xTicksOf, yExtentOf, yFormatOf, yTicksOf, type Margin, type Scale } from './lineAxes';
 import { mergesOf } from './linePaths';
@@ -240,15 +240,24 @@ export default function LineChart(props: LineChartProps) {
   // Touch: a tap or a sideways scrub pins the cursor and its readout until it is tapped again, a tap lands outside
   // the chart or Escape is pressed (./pin). A mouse reads out on hover, as before.
   const pinned = signal(false);
+  // Keyboard scrubbing announces the values under the cursor. The text is written from the key handler itself, so
+  // pointer movement here or on a linked chart never produces announcements.
+  const spoken = signal('');
+  let speakSeq = 0;
+  onCleanup(() => speakSeq++);
   let gesture: TouchGesture | null = null;
   const svgEl = signal<SVGSVGElement>();
   function apply(a: PinAction) {
     if (a.kind === 'clear') {
+      speakSeq++;
+      spoken.set('');
       cursor.set(null);
       pinned.set(false);
     } else if (a.kind === 'set' && inPlot(a.px)) {
       const m = margin.peek();
-      cursor.set(x.peek().invert(Math.min(width.peek() - m.right, Math.max(m.left, a.px))));
+      const next = x.peek().invert(Math.min(width.peek() - m.right, Math.max(m.left, a.px)));
+      if (hoverOf(next, hasData.peek(), xExtent.peek(), keyed.peek(), p.xTitle, xFormat.peek(), x.peek()) === null) return;
+      cursor.set(next);
       pinned.set(true);
       tapHint.set(false);
     }
@@ -290,11 +299,16 @@ export default function LineChart(props: LineChartProps) {
       keyFocus.set(false);
     }
   }
-  // A cursor cleared elsewhere (a synced chart, blur) is no longer pinned here, and picks nothing.
+  // A cursor cleared elsewhere (a synced chart, blur) is no longer pinned here, picks nothing, and drops stale speech.
+  // If data disappears while pinned, drop the pin so an invisible cursor never keeps claiming Escape.
   effect(() => {
     if (cursor.get() === null) {
+      speakSeq++;
+      spoken.set('');
       pinned.set(false);
       picked.set(null);
+    } else if (hover.get() === null) {
+      pinned.set(false);
     }
   });
 
@@ -311,7 +325,10 @@ export default function LineChart(props: LineChartProps) {
       if (el && !el.contains(e.target as Node)) apply({ kind: 'clear' });
     };
     const esc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') apply({ kind: 'clear' });
+      if (canDismissChartOnEscape(e, true)) {
+        e.preventDefault();
+        apply({ kind: 'clear' });
+      }
     };
     document.addEventListener('pointerdown', outside, true);
     document.addEventListener('keydown', esc);
@@ -325,6 +342,7 @@ export default function LineChart(props: LineChartProps) {
     rectCache.clear();
   }
   function onpointerdown(e: PointerEvent) {
+    speakSeq++;
     spoken.set('');
     if (!touchy(e)) return;
     rectCache.clear();
@@ -353,6 +371,7 @@ export default function LineChart(props: LineChartProps) {
     gesture = null;
   }
   function onpointermove(e: PointerEvent) {
+    speakSeq++;
     spoken.set('');
     const { px, py } = local(e);
     if (touchy(e)) {
@@ -375,32 +394,35 @@ export default function LineChart(props: LineChartProps) {
   const compact = computed(() => width.get() > 0 && width.get() < 480);
   const pill = computed(() => pillOf(compact.get(), hover.get(), width.get()));
 
-  // Keyboard scrubbing announces the values under the cursor. The text is written from the key handler itself, so
-  // pointer movement here or on a linked chart never produces announcements.
-  const spoken = signal('');
-
   const summary = computed(() => seriesSummary(keyed.get()));
 
   function onkeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
     const s = longestSeries.peek();
     if (!s || !s.points.length) return;
     const c = cursor.peek();
-    let i = c === null ? s.points.length - 1 : nearest(s.points, c);
     const big = e.shiftKey ? 10 : 1;
-    if (e.key === 'ArrowLeft') i = Math.max(0, i - big);
-    else if (e.key === 'ArrowRight') i = Math.min(s.points.length - 1, i + big);
+    let i: number;
+    if (e.key === 'ArrowLeft') i = c === null ? s.points.length - 1 : Math.max(0, nearest(s.points, c) - big);
+    else if (e.key === 'ArrowRight') i = c === null ? 0 : Math.min(s.points.length - 1, nearest(s.points, c) + big);
     else if (e.key === 'Home') i = 0;
     else if (e.key === 'End') i = s.points.length - 1;
     else if (e.key === 'Escape') {
+      if ((c === null && !pinned.peek()) || !canDismissChartOnEscape(e)) return;
+      e.preventDefault();
+      speakSeq++;
       cursor.set(null);
       pinned.set(false);
+      picked.set(null);
       spoken.set('');
       return;
     } else return;
     e.preventDefault();
     cursor.set(s.points[i]!.x);
+    const seq = ++speakSeq;
     // `hover` derives from the cursor; read it once the update has settled.
     void tick().then(() => {
+      if (seq !== speakSeq) return;
       const h = hover.peek();
       const fmt = fmtValue.peek();
       spoken.set(h ? `${h.title}: ${h.rows.map((r) => `${r.s.label} ${fmt(r.p.y)}`).join(', ')}` : '');
@@ -576,7 +598,12 @@ export default function LineChart(props: LineChartProps) {
               onpointercancel={onpointercancel}
               onkeydown={onkeydown}
               onfocus={onfocus}
-              onblur={() => (cursor.set(null), spoken.set(''), keyFocus.set(false))}
+              onblur={() => {
+                speakSeq++;
+                spoken.set('');
+                keyFocus.set(false);
+                if (!pinned.peek()) cursor.set(null);
+              }}
             >
               {p.well ? (
                 // The plot as an inset well: the data's own surface, under the gridlines.

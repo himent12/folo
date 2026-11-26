@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { flush } from 'fw';
+import { flush, signal } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
 import XYChart from './XYChart';
@@ -116,5 +116,141 @@ describe('XYChart', () => {
     } finally {
       c.unmount();
     }
+  });
+
+  it('ignores modifier-held arrows, consumes Escape only while active, and clears speech on blur/pointermove', () => {
+    const { target, c, svg } = mount();
+    try {
+      const live = target.querySelector('[aria-live]')!;
+      const altLeft = new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true });
+      svg.dispatchEvent(altLeft);
+      flush();
+      expect(altLeft.defaultPrevented).toBe(false);
+      expect(target.querySelector('.out')!.textContent).toBe('idle');
+
+      const idleEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      svg.dispatchEvent(idleEsc);
+      flush();
+      expect(idleEsc.defaultPrevented).toBe(false);
+
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      flush();
+      expect(target.querySelector('.out')!.textContent).toBe('x=0');
+      expect(live.textContent).not.toBe('');
+
+      const activeEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      svg.dispatchEvent(activeEsc);
+      flush();
+      expect(activeEsc.defaultPrevented).toBe(true);
+      expect(target.querySelector('.out')!.textContent).toBe('idle');
+      expect(live.textContent).toBe('');
+
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+      flush();
+      expect(live.textContent).not.toBe('');
+      svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 120, clientY: 80, bubbles: true }));
+      flush();
+      expect(live.textContent).toBe('');
+
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+      flush();
+      expect(live.textContent).not.toBe('');
+      svg.dispatchEvent(new FocusEvent('blur'));
+      flush();
+      expect(live.textContent).toBe('');
+      expect(target.querySelector('.out')!.textContent).toBe('idle');
+
+      // Touch-pinned cursor clears on Escape with defaultPrevented, but defers to open dialog/popover.
+      svg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 200, clientY: 80, bubbles: true }));
+      svg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 200, clientY: 80, bubbles: true }));
+      flush();
+      expect(target.querySelector('.cursor.pinned')).toBeTruthy();
+      const pop = document.createElement('div');
+      pop.className = 'info-pop open';
+      document.body.appendChild(pop);
+      const blockedEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+      document.dispatchEvent(blockedEsc);
+      flush();
+      expect(blockedEsc.defaultPrevented).toBe(false);
+      expect(target.querySelector('.cursor.pinned')).toBeTruthy();
+      pop.remove();
+
+      const esc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+      document.dispatchEvent(esc);
+      flush();
+      expect(esc.defaultPrevented).toBe(true);
+      expect(target.querySelector('.cursor')).toBeNull();
+    } finally {
+      c.unmount();
+    }
+  });
+
+  it('does not arm a phantom touch pin when stops is empty and clears pinned/speech on external cursor reset', () => {
+    const cursor = signal<number | null>(null);
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const emptyChart = render(
+      () => (
+        <XYChart
+          label="Empty stops"
+          series={SERIES}
+          stops={[]}
+          xDomain={[0, 1]}
+          yDomain={[0, 1]}
+          xTicks={[0, 1]}
+          yTicks={[0, 1]}
+          readout={() => <span>idle</span>}
+          table={{ caption: 'Empty', head: ['x', 'y'], rows: [] }}
+        />
+      ),
+      target,
+    );
+    Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: 480 });
+    target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
+    flush();
+    const emptySvg = target.querySelector<SVGSVGElement>('svg[aria-roledescription=chart]')!;
+    emptySvg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 200, clientY: 80, bubbles: true }));
+    emptySvg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 200, clientY: 80, bubbles: true }));
+    flush();
+    const emptyEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    document.dispatchEvent(emptyEsc);
+    flush();
+    expect(emptyEsc.defaultPrevented).toBe(false);
+    emptyChart.unmount();
+
+    const syncedTarget = document.createElement('div');
+    document.body.appendChild(syncedTarget);
+    const synced = render(
+      () => (
+        <XYChart
+          label="Synced"
+          series={SERIES}
+          xDomain={[0, 1]}
+          yDomain={[0, 1]}
+          xTicks={[0, 0.5, 1]}
+          yTicks={[0, 0.5, 1]}
+          bind:cursor={cursor}
+          readout={(cur) => <span class="out">{cur() ?? 'idle'}</span>}
+          table={{ caption: 'PR', head: ['x', 'y'], rows: [['0', '0.2']] }}
+        />
+      ),
+      syncedTarget,
+    );
+    Object.defineProperty(syncedTarget.querySelector('.plot')!, 'clientWidth', { value: 480 });
+    syncedTarget.querySelector('.plot')!.dispatchEvent(new Event('resize'));
+    flush();
+    const syncedSvg = syncedTarget.querySelector<SVGSVGElement>('svg[aria-roledescription=chart]')!;
+    const live = syncedTarget.querySelector('[aria-live]')!;
+    syncedSvg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 200, clientY: 80, bubbles: true }));
+    syncedSvg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 200, clientY: 80, bubbles: true }));
+    syncedSvg.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+    flush();
+    expect(syncedTarget.querySelector('.cursor.pinned')).toBeTruthy();
+    expect(live.textContent).not.toBe('');
+    cursor.set(null);
+    flush();
+    expect(syncedTarget.querySelector('.cursor')).toBeNull();
+    expect(live.textContent).toBe('');
+    synced.unmount();
   });
 });
