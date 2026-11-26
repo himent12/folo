@@ -14,7 +14,7 @@ use super::box_loss::{check_box_pair, dfl_box_from_logits};
 use crate::loss::invalid;
 
 #[inline]
-fn w_min(x: f64, y: f64) -> f64 {
+pub(super) fn w_min(x: f64, y: f64) -> f64 {
     if x < y {
         1.0
     } else if x == y {
@@ -25,7 +25,7 @@ fn w_min(x: f64, y: f64) -> f64 {
 }
 
 #[inline]
-fn w_max(x: f64, y: f64) -> f64 {
+pub(super) fn w_max(x: f64, y: f64) -> f64 {
     if x > y {
         1.0
     } else if x == y {
@@ -38,20 +38,20 @@ fn w_max(x: f64, y: f64) -> f64 {
 /// Scale-normalized `1 - IoU` and its analytical gradient `d(1 - IoU) / d(ax1, ay1, ax2, ay2)` in `f64`,
 /// together with normalized side lengths so geometric penalties are exact and scale-invariant at every
 /// positive scale (from `1e-30` to `1e30`) with explicit zero-denominator guards.
-struct IouTerm {
-    one_minus_iou: f64,
-    grad: [f64; 4],
-    w1s: f64,
-    h1s: f64,
-    w2s: f64,
-    h2s: f64,
-    w2: f64,
-    h2: f64,
-    inv_sx: f64,
-    inv_sy: f64,
+pub(super) struct IouTerm {
+    pub(super) one_minus_iou: f64,
+    pub(super) grad: [f64; 4],
+    pub(super) w1s: f64,
+    pub(super) h1s: f64,
+    pub(super) w2s: f64,
+    pub(super) h2s: f64,
+    pub(super) w2: f64,
+    pub(super) h2: f64,
+    pub(super) inv_sx: f64,
+    pub(super) inv_sy: f64,
 }
 
-fn one_minus_iou_f64(a: [f64; 4], b: [f64; 4]) -> IouTerm {
+pub(super) fn one_minus_iou_f64(a: [f64; 4], b: [f64; 4]) -> IouTerm {
     let (ax1, ay1, ax2, ay2) = (a[0], a[1], a[2], a[3]);
     let (bx1, by1, bx2, by2) = (b[0], b[1], b[2], b[3]);
     let w1 = (ax2 - ax1).max(0.0);

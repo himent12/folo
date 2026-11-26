@@ -2,12 +2,14 @@
 //! - [`cls`]: BCE, MAL, Varifocal Loss (VFL), Quality Focal Loss (QFL),
 //! - [`box_loss`]: CIoU, Inner-CIoU, Wise-IoU v3, R-PIoU, S-AEIoU, NWD,
 //! - [`geom_loss`]: MPDIoU, Shape-IoU, and Focaler-IoU remapping,
+//! - [`siou_eiou`]: EIoU (Efficient-IoU) and SIoU (Scylla-IoU),
 //! - [`dfl`]: DFL cross-entropy, 1D Optimal-Transport tail barrier (`OT-DFL`), and `CRPS-DFL`.
 
 mod box_loss;
 mod cls;
 mod dfl;
 mod geom_loss;
+mod siou_eiou;
 
 #[cfg(test)]
 pub(crate) use box_loss::saeiou_box_f64;
@@ -16,6 +18,9 @@ pub(crate) use dfl::crps_dfl;
 pub use geom_loss::{focaler_iou, focaler_iou_loss, mpdiou_loss, mpdiou_loss_with_scale, shape_iou_loss};
 #[cfg(test)]
 pub(crate) use geom_loss::{mpdiou_box_f64, shape_iou_box_f64};
+#[cfg(test)]
+pub(crate) use siou_eiou::{eiou_box_f64, siou_box_f64};
+pub use siou_eiou::{eiou_loss, siou_loss};
 
 use folo_core::{DType, Result, Tensor};
 
@@ -27,6 +32,7 @@ use box_loss::{rpiou_from_logits, saeiou_from_logits, wiou_v3_loss_and_mean};
 use cls::cls_loss_sum;
 use dfl::ot_dfl_tail;
 use geom_loss::{mpdiou_from_logits, shape_iou_from_logits};
+use siou_eiou::{eiou_from_logits, siou_from_logits};
 
 /// Sum of every element as a rank-0 tensor, in an order that does not depend on thread scheduling: long inputs are
 /// summed in rows of 4096 (each row serially), then the row sums the same way.
@@ -233,7 +239,12 @@ fn loss_impl_wiou(
                 mean_iou_loss = batch_mean;
                 blend_nwd(w_per)?
             }
-            BoxLossKind::Rpiou | BoxLossKind::Saeiou | BoxLossKind::Mpdiou | BoxLossKind::ShapeIou => {
+            BoxLossKind::Rpiou
+            | BoxLossKind::Saeiou
+            | BoxLossKind::Mpdiou
+            | BoxLossKind::ShapeIou
+            | BoxLossKind::Eiou
+            | BoxLossKind::Siou => {
                 let eval_direct = |lams_opt: Option<&[f32]>| -> Result<Tensor> {
                     match cfg.box_loss {
                         BoxLossKind::Rpiou => rpiou_from_logits(
@@ -272,6 +283,19 @@ fn loss_impl_wiou(
                             tss,
                             cfg.box_gain,
                             cfg.shape_scale,
+                        ),
+                        BoxLossKind::Eiou => {
+                            eiou_from_logits(&logits, &pd, &tbox, &asg.score, lams_opt, tss, cfg.box_gain)
+                        }
+                        BoxLossKind::Siou => siou_from_logits(
+                            &logits,
+                            &pd,
+                            &tbox,
+                            &asg.score,
+                            lams_opt,
+                            tss,
+                            cfg.box_gain,
+                            cfg.siou_theta,
                         ),
                         _ => unreachable!(),
                     }
