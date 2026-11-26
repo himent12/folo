@@ -138,10 +138,11 @@ pub fn check_base_url(url: &str) -> std::result::Result<(), String> {
     if !url.bytes().all(|b| b.is_ascii_graphic()) {
         return Err("URL must not contain spaces or control characters".into());
     }
-    let rest = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .ok_or_else(|| "URL must start with http:// or https://".to_string())?;
+    let (scheme, rest) =
+        url.split_once("://").ok_or_else(|| "URL must start with http:// or https://".to_string())?;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err("URL must start with http:// or https://".into());
+    }
     if rest.contains('?') || rest.contains('#') {
         return Err("URL must not contain a query or fragment".into());
     }

@@ -133,8 +133,8 @@ impl Server {
         }
         let uri: http::Uri = raw.parse().map_err(|_| invalid("is not a URL"))?;
         let https = match uri.scheme_str() {
-            Some("https") => true,
-            Some("http") => false,
+            Some(s) if s.eq_ignore_ascii_case("https") => true,
+            Some(s) if s.eq_ignore_ascii_case("http") => false,
             _ => return Err(invalid("must start with https:// or http://")),
         };
         let authority = uri.authority().ok_or_else(|| invalid("has no host"))?;
@@ -142,7 +142,8 @@ impl Server {
         if host.is_empty() {
             return Err(invalid("has no host"));
         }
-        let url = raw.trim_end_matches('/').to_string();
+        let rest = raw.split_once("://").map_or(raw, |(_, r)| r).trim_end_matches('/');
+        let url = format!("{}://{rest}", if https { "https" } else { "http" });
         let token = values.get(TOKEN_FIELD).unwrap_or_default().to_string();
         if !token.is_empty() && http::HeaderValue::from_str(&format!("Bearer {token}")).is_err() {
             return Err(Error::new(
@@ -516,6 +517,16 @@ mod tests {
         assert_eq!(
             (s.url.as_str(), s.host.as_str(), s.https),
             ("https://gpu-box.example.com:7878/folo", "gpu-box.example.com", true)
+        );
+        let upper_http = Server::of(&values("HTTP://127.0.0.1:7878/FoloApi/", "")).unwrap();
+        assert_eq!(
+            (upper_http.url.as_str(), upper_http.host.as_str(), upper_http.https),
+            ("http://127.0.0.1:7878/FoloApi", "127.0.0.1", false)
+        );
+        let mixed_https = Server::of(&values("HtTpS://gpu-box.example.com:7878/FoloApi/", TOKEN)).unwrap();
+        assert_eq!(
+            (mixed_https.url.as_str(), mixed_https.host.as_str(), mixed_https.https),
+            ("https://gpu-box.example.com:7878/FoloApi", "gpu-box.example.com", true)
         );
         assert_eq!(Server::of(&values("http://[::1]:7878", "")).unwrap().host, "::1");
         for bad in [

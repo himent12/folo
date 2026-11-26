@@ -330,23 +330,29 @@ impl Benchmarks {
             let msg = left(&who, e);
             if e.status.is_active() { CleanUp::OpenOrUnknown(msg) } else { CleanUp::Closed(msg) }
         };
+        let is_gone =
+            |err: &Error| err.status == StatusCode::NOT_FOUND && err.body.code == "bench_entry_not_found";
+        let gone = || CleanUp::Closed(format!("{who} was already removed"));
         let stopped = match self.entry(id, &opened.id) {
             // A stop whose answer was lost may have worked: the entry's state says.
             Ok(e) if e.status == BenchEntryStatus::Running => {
                 self.stop_entry(id, &opened.id).or_else(|_| self.entry(id, &opened.id))
             }
             Ok(e) => return classify(&e),
+            Err(ref err) if is_gone(err) => return gone(),
             Err(_) => return CleanUp::OpenOrUnknown(unread(&who)),
         };
         match stopped {
             Ok(e) if e.status == BenchEntryStatus::Stopped => match self.delete_entry(id, &opened.id) {
                 Ok(()) => CleanUp::Closed(format!("{who} was removed")),
+                Err(ref u) if is_gone(u) => gone(),
                 Err(u) => CleanUp::Closed(format!(
                     "{who} is stopped; removing it did not succeed ({})",
                     u.body.message
                 )),
             },
             Ok(e) => classify(&e),
+            Err(ref err) if is_gone(err) => gone(),
             Err(_) => CleanUp::OpenOrUnknown(unread(&who)),
         }
     }
@@ -370,8 +376,12 @@ enum CleanUp {
     OpenOrUnknown(String),
 }
 
-/// Translates a server per-part record diagnostic (`prediction <k> ...`, and any intra-part `repeats prediction <j>
-/// with other boxes:`) into the exact 1-based file line numbers of the predictions file (`shown`).
+const REPEATS_PREDICTION: &str = " repeats prediction ";
+const REPEATS_SUFFIX: &str = " with other boxes: answer each image and condition once";
+
+/// Translates a server per-part record diagnostic (`prediction <k> ...`, and any trailing intra-part
+/// `repeats prediction <j> with other boxes: answer each image and condition once`) into the exact 1-based file line
+/// numbers of the predictions file (`shown`).
 fn rewrite_part_error(mut e: Error, shown: &str, part_lines: &[usize]) -> Error {
     let Some(rest) = e.body.message.strip_prefix("prediction ") else {
         return e;
@@ -387,18 +397,23 @@ fn rewrite_part_error(mut e: Error, shown: &str, part_lines: &[usize]) -> Error 
     if !tail.starts_with([' ', ':']) {
         return e;
     }
-    let mut msg = format!("{shown}: line {line}{tail}");
-    if let Some(pos) = msg.rfind(" repeats prediction ") {
-        let after = &msg[pos + " repeats prediction ".len()..];
-        let j_len = after.bytes().take_while(u8::is_ascii_digit).count();
-        if after[j_len..].starts_with(" with other boxes:")
-            && let Some(j) = after[..j_len].parse::<usize>().ok().filter(|&j| j >= 1)
-            && let Some(&first_line) = part_lines.get(j - 1)
-        {
-            msg = format!("{} repeats line {first_line}{}", &msg[..pos], &after[j_len..]);
+    let rewritten_tail = tail.strip_suffix(REPEATS_SUFFIX).and_then(|before_suffix| {
+        let pos = before_suffix.rfind(REPEATS_PREDICTION)?;
+        if !before_suffix[..pos].ends_with(')') {
+            return None;
         }
-    }
-    e.body.message = msg;
+        let digits = &before_suffix[pos + REPEATS_PREDICTION.len()..];
+        let j = (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| digits.parse::<usize>().ok())
+            .flatten()
+            .filter(|&j| j >= 1)?;
+        let &first_line = part_lines.get(j - 1)?;
+        Some(format!("{} repeats line {first_line}{REPEATS_SUFFIX}", &before_suffix[..pos]))
+    });
+    e.body.message = match rewritten_tail {
+        Some(t) => format!("{shown}: line {line}{t}"),
+        None => format!("{shown}: line {line}{tail}"),
+    };
     e
 }
 

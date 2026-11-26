@@ -243,7 +243,8 @@ fn rewrite_part_error_maps_part_indices_to_file_line_numbers() {
         "preds.jsonl: line 15 (image '1', unchanged) repeats line 10 with other boxes: answer each image and condition once"
     );
 
-    // An image id containing a similar substring does not hijack the suffix rewrite.
+    // An image id containing a similar substring does not hijack the suffix rewrite, and an unknown-image error
+    // with that image id leaves the image id completely intact.
     let tricky = rewrite_part_error(
         mk(
             "prediction 2 (image 'x repeats prediction 1 with other boxes:', unchanged) repeats prediction 1 with other boxes: answer each image and condition once",
@@ -254,6 +255,17 @@ fn rewrite_part_error_maps_part_indices_to_file_line_numbers() {
     assert_eq!(
         tricky.body.message,
         "preds.jsonl: line 15 (image 'x repeats prediction 1 with other boxes:', unchanged) repeats line 10 with other boxes: answer each image and condition once"
+    );
+    let unknown_img = rewrite_part_error(
+        mk(
+            "prediction 2 (image 'x repeats prediction 1 with other boxes:', unchanged): the benchmark has no image 'x repeats prediction 1 with other boxes:'",
+        ),
+        "preds.jsonl",
+        &[10, 15],
+    );
+    assert_eq!(
+        unknown_img.body.message,
+        "preds.jsonl: line 15 (image 'x repeats prediction 1 with other boxes:', unchanged): the benchmark has no image 'x repeats prediction 1 with other boxes:'"
     );
 
     // Non-record server errors stay untouched.

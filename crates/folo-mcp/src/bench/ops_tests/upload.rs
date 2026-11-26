@@ -586,3 +586,61 @@ fn multipart_conflict_reports_exact_file_line_and_non_contradictory_cleanup_hint
         );
     });
 }
+
+/// When cleanup reads `404 bench_entry_not_found` (another client already removed the entry), cleanup classifies
+/// it as closed and replaces `RETRY_PART_HINT`; a transport failure leaves the state unknown and keeps the hint.
+#[test]
+fn cleanup_replaces_retry_hint_when_entry_already_deleted_but_keeps_it_when_unread() {
+    with_server("mcp-bench-cleanup-gone", |url, id, dir| {
+        let file = dir.join("conflict.jsonl");
+        std::fs::write(
+            &file,
+            "{\"image\":\"1\",\"boxes\":[]}\n\
+             {\"image\":\"2\",\"boxes\":[]}\n\
+             {\"image\":\"3\",\"boxes\":[]}\n\
+             \n\
+             {\"image\":\"1\",\"boxes\":[{\"class\":0,\"score\":0.5,\"x1\":5,\"y1\":5,\"x2\":15,\"y2\":15}]}\n",
+        )
+        .unwrap();
+
+        // 1. Another client stops and deletes the entry right before cleanup's GET -> `404 bench_entry_not_found`.
+        let (other, bench) = (http(url), id.to_string());
+        let via = Forwarder::new(url, move |line| {
+            if line.starts_with("GET") && line.contains("/entries/") {
+                let path = line.split(' ').nth(1).unwrap();
+                let entry_id = path.rsplit('/').next().unwrap();
+                let _ = other.stop_entry(&bench, entry_id);
+                let _ = other.delete_entry(&bench, entry_id);
+            }
+            Fate::Pass
+        });
+        let err = http(&via.url)
+            .submit_in(id, "already-gone".into(), true, &file, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = err.body.hint.as_deref().unwrap_or_default();
+        assert!(
+            hint.contains("was already removed")
+                && hint.contains("fix the predictions file and run again")
+                && !hint.contains(RETRY_PART_HINT),
+            "expected replacement hint when entry is 404 bench_entry_not_found: {hint}"
+        );
+
+        // 2. Cleanup's GET fails with a transport error -> state is unknown, so `RETRY_PART_HINT` stays.
+        let via_unread = Forwarder::new(url, |line| {
+            if line.starts_with("GET") && line.contains("/entries/") { Fate::Never } else { Fate::Pass }
+        });
+        let err = http(&via_unread.url)
+            .submit_in(id, "unread".into(), true, &file, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = err.body.hint.as_deref().unwrap_or_default();
+        assert!(
+            hint.contains("its state could not be read") && hint.contains(RETRY_PART_HINT),
+            "expected retry hint preserved when cleanup cannot read entry state: {hint}"
+        );
+        // Clean up the left-open entry.
+        for e in http(url).entries(id).unwrap() {
+            let _ = http(url).stop_entry(id, &e.id);
+            let _ = http(url).delete_entry(id, &e.id);
+        }
+    });
+}
