@@ -631,10 +631,10 @@ pub struct ExportArgs {
     #[arg(long)]
     pub imgsz: Option<u32>,
     /// Fixed batch size of the graph [>= 1] (ONNX only) [default: 1].
-    #[arg(long)]
+    #[arg(long, conflicts_with = "dynamic")]
     pub batch: Option<usize>,
     /// Symbolic batch, height and width (ONNX only): any batch, any H and W that are multiples of 32.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "batch")]
     pub dynamic: bool,
     /// F16 weights, input, activations and outputs (ONNX only; use `--format folo-f16` for `.folo`).
     #[arg(long)]

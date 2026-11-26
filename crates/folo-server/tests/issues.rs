@@ -226,3 +226,50 @@ async fn real_issues_are_cached_and_refreshed() {
     assert_eq!(restarted, fixed);
     assert_eq!(err_code(&app(&home), get("/api/datasets/ds_none/issues")).await.1, "dataset_not_found");
 }
+
+#[tokio::test]
+async fn real_issues_report_and_refresh_dangling_links() {
+    let t = TestDir::new("issues-dangling-link");
+    let (home, data) = (t.join("home"), t.join("shapes"));
+    write_shapes(&data);
+    let dead = data.join("images").join("train").join("dead");
+    #[cfg(windows)]
+    {
+        let target = t.join("dead-target");
+        std::fs::create_dir_all(&target).unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/j"])
+            .arg(&dead)
+            .arg(&target)
+            .output()
+            .expect("mklink /j");
+        assert!(status.status.success(), "mklink failed: {}", String::from_utf8_lossy(&status.stderr));
+        std::fs::remove_dir(&target).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(t.join("dead-target"), &dead).unwrap();
+    }
+
+    let store = RealStore::open(home).recheck_every(Duration::ZERO);
+    let app = Server::new(Arc::new(store), Options::default()).router();
+    let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": data.to_str().unwrap() }))).await;
+    let uri = format!("/api/datasets/{}/issues?limit=1000", ds.id);
+    let all: IssuePage = ok(&app, get(&uri)).await;
+    let link_issue = all
+        .issues
+        .iter()
+        .find(|i| i.file == "images/train/dead")
+        .unwrap_or_else(|| panic!("expected dangling link issue in {all:?}"));
+    assert_eq!((link_issue.kind.as_str(), link_issue.severity), ("other", IssueSeverity::Warning));
+    assert!(link_issue.message.contains("dangling symlink"), "{link_issue:?}");
+
+    // Removing the dangling link invalidates the fingerprint and clears the issue on the next request.
+    #[cfg(windows)]
+    std::fs::remove_dir(&dead).unwrap();
+    #[cfg(unix)]
+    std::fs::remove_file(&dead).unwrap();
+
+    let after: IssuePage = ok(&app, get(&uri)).await;
+    assert!(after.issues.iter().all(|i| i.file != "images/train/dead"), "{after:?}");
+}

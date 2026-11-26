@@ -23,7 +23,7 @@ it.
 | `src/bench/` | Vision benchmarks: `Benches` in `mod.rs`, `state.rs`, `benchmarks.rs`, `entries.rs`, `model.rs`, `agent.rs`, `external.rs`, `results.rs`, `images.rs` (single-flight rendered-variant and decoded-base-image LRU caches), `source.rs`, `design.rs`, `loops.rs` |
 | `src/throughput/` | The measured throughput table and run-time estimates: `mod.rs`, `recording.rs`, `api_table.rs`, `reference.rs`, `run_estimate.rs`, `tests.rs` |
 | `src/engine.rs` | Device selection, GPU info, `engine_error` (engine errors to API errors), the single-flight predictor cache of `/api/predict` |
-| `src/index.rs` | A dataset's `Index` of images and boxes, its `Fingerprint`, thumbnails (tests in `src/index/tests.rs`) |
+| `src/index.rs` | A dataset's `Index` of images and boxes, its `Fingerprint`, thumbnails (`src/index/links.rs` for dangling symlink / Windows junction diagnostics; tests in `src/index/tests.rs`) |
 | `src/models/` | The real store's models: `mod.rs` (`Models`, bounded LRU caches, `<data dir>/models` scan and `by_id` index, published weights), `meta.rs` (`.folo` header metadata, `ModelRef`, FLOPs), `weights.rs` (cached derived `/weights?format=...` with per-`(model, variant)` locks), `eval.rs` (single-flight bounded `/eval` cache and `POST /api/val`), `export.rs` (`/export` publishing and ONNX export), `tests.rs` |
 | `src/uploads/` | Upload sessions (`/api/uploads`): `mod.rs` (sessions into `<data dir>/uploads/<id>/`, condvar-gated expiry sweeper), `fingerprints.rs` (cached `uploads.json` fingerprints), `pipe.rs` (streaming part bridge), `unpack.rs` (tar extraction and path validation), `tests.rs` |
 | `src/error.rs` | `Error` (status + `{ "error": { code, message, hint } }`), `ApiJson`, `ApiPath`, `ApiQuery`, `ApiBytes` |

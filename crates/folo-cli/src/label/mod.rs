@@ -419,9 +419,40 @@ fn expect_map(flags: &[String]) -> Result<BTreeMap<String, String>, CliError> {
         .collect()
 }
 
-/// `folo label set`'s flags as a [`BoxEdit`]; classes may be given by name.
+/// Resolves a CLI class token (`CLASS` in `--box`, `--add`, `--relabel`) to its numeric class index.
+///
+/// Accepts `#INDEX` (always treated as an explicit class index), a case-insensitive class name, or a bare numeric
+/// index. Refuses a bare number when it matches both a valid class index and a different class's name (e.g. `0`
+/// for classes `["circle", "0"]`) so numeric class names cannot silently save the wrong class.
+fn resolve_class(s: &str, names: &[String]) -> Result<u32, CliError> {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix('#')
+        && let Ok(idx) = rest.trim().parse::<u32>()
+    {
+        return Ok(idx);
+    }
+    let by_name = names.iter().position(|n| n.eq_ignore_ascii_case(s)).map(|i| i as u32);
+    let by_index = s.parse::<u32>().ok();
+    match (by_index, by_name) {
+        (Some(idx), Some(name_idx)) if idx != name_idx && (idx as usize) < names.len() => Err(usage(format!(
+            "class `{s}` is ambiguous: it matches index {idx} (`{}`) and class name `{}` (index {name_idx})",
+            names[idx as usize], names[name_idx as usize]
+        ))
+        .hint(format!(
+            "pass `#{idx}` for index {idx} (`{}`) or `#{name_idx}` for index {name_idx} (`{}`)",
+            names[idx as usize], names[name_idx as usize]
+        ))),
+        (_, Some(name_idx)) => Ok(name_idx),
+        (Some(idx), None) => Ok(idx),
+        (None, None) => {
+            Err(usage(format!("`{s}` is not a class of the job (its classes: {})", names.join(", "))))
+        }
+    }
+}
+
+/// `folo label set`'s flags as a [`BoxEdit`]; classes may be given by index, name, or `#INDEX`.
 fn box_edit(labels: &Labels, a: &LabelSetArgs) -> Result<BoxEdit, CliError> {
-    if a.expect.is_none() {
+    if a.expect.trim().is_empty() {
         return Err(usage(
             "--expect REVISION is required: the revision `folo label view` printed for the boxes",
         ));
@@ -437,15 +468,7 @@ fn box_edit(labels: &Labels, a: &LabelSetArgs) -> Result<BoxEdit, CliError> {
     } else {
         Vec::new()
     };
-    let class = |s: &str| -> Result<u32, CliError> {
-        let s = s.trim();
-        if let Ok(i) = s.parse::<u32>() {
-            return Ok(i);
-        }
-        names.iter().position(|n| n.eq_ignore_ascii_case(s)).map(|i| i as u32).ok_or_else(|| {
-            usage(format!("`{s}` is not a class of the job (its classes: {})", names.join(", ")))
-        })
-    };
+    let class = |s: &str| resolve_class(s, &names);
     let px = |s: &String| -> Result<PxBox, CliError> {
         let parts: Vec<&str> = s.split(',').collect();
         let [c, x1, y1, x2, y2] = parts[..] else {
@@ -493,7 +516,7 @@ fn box_edit(labels: &Labels, a: &LabelSetArgs) -> Result<BoxEdit, CliError> {
             Ok::<_, CliError>([n(w)?, n(h)?])
         })
         .transpose()?;
-    Ok(BoxEdit { expect: a.expect.clone(), size, boxes, remove, relabel, add })
+    Ok(BoxEdit { expect: Some(a.expect.clone()), size, boxes, remove, relabel, add })
 }
 
 fn image_status(s: ImageStatusArg) -> LabelImageStatus {
@@ -633,5 +656,31 @@ mod tests {
             assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"), "{flag}: {err:?}");
             assert!(err.message.contains(flag), "{}", err.message);
         }
+    }
+
+    #[test]
+    fn resolve_class_rejects_ambiguous_numeric_names_and_accepts_hash_index() {
+        let names = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        let colliding = names(&["circle", "0"]);
+        assert_eq!(resolve_class("circle", &colliding).unwrap(), 0);
+        assert_eq!(resolve_class("1", &colliding).unwrap(), 1);
+        assert_eq!(resolve_class("#0", &colliding).unwrap(), 0);
+        assert_eq!(resolve_class("#1", &colliding).unwrap(), 1);
+        let err = resolve_class("0", &colliding).unwrap_err();
+        assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"));
+        assert!(err.message.contains("ambiguous"), "{}", err.message);
+        assert!(err.hint.as_deref().unwrap_or("").contains("#0"), "{err:?}");
+        assert!(err.hint.as_deref().unwrap_or("").contains("#1"), "{err:?}");
+
+        // Out-of-range numeric class name resolves to its class index instead of failing as out-of-range.
+        let out_of_range = names(&["circle", "5"]);
+        assert_eq!(resolve_class("5", &out_of_range).unwrap(), 1);
+        assert_eq!(resolve_class("1", &out_of_range).unwrap(), 1);
+
+        // Matching numeric class name at its own index is unambiguous.
+        let aligned = names(&["0", "1"]);
+        assert_eq!(resolve_class("0", &aligned).unwrap(), 0);
+        assert_eq!(resolve_class("1", &aligned).unwrap(), 1);
     }
 }

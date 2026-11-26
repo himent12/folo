@@ -649,3 +649,48 @@ fn antigravity_labels_via_acp() {
         "usage"
     );
 }
+
+#[test]
+fn numeric_class_name_round_trips_and_rejects_ambiguous_bare_token() {
+    let t = TestDir::new("cli-label-numeric-class");
+    let home = t.join("home");
+    let dir = t.join("photos");
+    std::fs::create_dir_all(&dir).unwrap();
+    image::RgbImage::from_pixel(64, 48, image::Rgb([40, 80, 120])).save(dir.join("p0.png")).unwrap();
+    let env = Env::new(&t).after(&["--data-dir", home.to_str().unwrap()]);
+
+    let job = s(
+        &env.ok(&["create", "numeric", "--classes", "circle,0", "--path", dir.to_str().unwrap()])["job_id"],
+    )
+    .to_string();
+    let page = env.ok(&["images", &job, "--boxes"]);
+    let img = s(&page["items"][0]["id"]).to_string();
+    let rev = s(&page["items"][0]["revision"]).to_string();
+
+    // Saving class index 1 (class name `"0"`) succeeds and `view` prints the unambiguous class index `1`.
+    let set = env.ok(&["set", &job, &img, "--expect", &rev, "--size", "64x48", "--box", "1,2,2,20,20"]);
+    assert_eq!(set["boxes"], json!([[1, 2, 2, 20, 20]]));
+    let rev2 = s(&set["revision"]).to_string();
+
+    let mut view_cmd = env.cmd();
+    view_cmd
+        .args(["label", "view", &job, &img, "--data-dir", home.to_str().unwrap(), "-o"])
+        .arg(t.join("view.jpg"));
+    let (code, stdout, stderr) = run(view_cmd);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("Boxes (n class-index x1,y1,x2,y2):"), "{stdout}");
+    assert!(stdout.contains("\n1 1 2,2,20,20\n"), "{stdout}");
+
+    // Bare `0` is ambiguous (matches index 0 `circle` and class name `0` at index 1) and must fail cleanly.
+    let amb =
+        env.error(&["set", &job, &img, "--expect", &rev2, "--size", "64x48", "--box", "0,2,2,20,20"], 2);
+    assert_eq!(s(&amb["code"]), "usage");
+    assert!(s(&amb["message"]).contains("ambiguous"), "{amb}");
+
+    // Explicit `#0` and `#1` disambiguate cleanly.
+    let set0 = env.ok(&["set", &job, &img, "--expect", &rev2, "--size", "64x48", "--box", "#0,2,2,20,20"]);
+    assert_eq!(set0["boxes"], json!([[0, 2, 2, 20, 20]]));
+    let rev3 = s(&set0["revision"]).to_string();
+    let set1 = env.ok(&["set", &job, &img, "--expect", &rev3, "--size", "64x48", "--box", "#1,2,2,20,20"]);
+    assert_eq!(set1["boxes"], json!([[1, 2, 2, 20, 20]]));
+}

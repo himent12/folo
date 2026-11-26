@@ -17,14 +17,18 @@ use crate::error::{Error, Result};
 use crate::store::{ImageData, ImageQuery, IssueQuery};
 use crate::util::fnv1a;
 
+pub mod links;
+
+pub use links::{coco_dangling_annotation_links, dangling_link_message, enrich_dangling_symlinks};
+
 /// Most classes a dataset may have.
 pub const MAX_CLASSES: usize = 4096;
 
 /// Bumped whenever the cached [`Index`] layout or its derivation changes, so old caches are rebuilt. 6: empty YOLO
 /// split paths are unset. 7: folo-data reads COCO splits, float category ids and crowd flags, and labels below a
 /// folder called `images`, differently. 8: symlink-preserving `..` normalization for dataset roots, image paths,
-/// and watched folders.
-pub const INDEX_VERSION: u32 = 8;
+/// and watched folders. 9: dangling symlink and Windows junction diagnostics included in issues and fingerprints.
+pub const INDEX_VERSION: u32 = 9;
 
 /// A cheap summary of every file under a dataset's folders: count, total size and a hash of each file's relative
 /// path, size and modification time (and of each folder's name). Adding, removing, renaming or editing a file, or
@@ -60,7 +64,27 @@ impl Fingerprint {
             feed(&[u8::from(dir.exists())]);
             let walk = walkdir::WalkDir::new(dir).follow_links(true).sort_by_file_name();
             let walk = walk.into_iter().filter_entry(|e| !excluded(e.path(), exclude));
-            for e in walk.filter_map(|e| e.ok()) {
+            for entry in walk {
+                let e = match entry {
+                    Ok(e) => e,
+                    Err(err) => {
+                        // A dangling symlink, broken Windows junction, or symlink loop makes `follow_links`
+                        // yield `Err`: fold its path and link target into the fingerprint so adding, removing,
+                        // or retargeting a broken link invalidates the cached index and its issues.
+                        if let Some(p) = err.path()
+                            && !excluded(p, exclude)
+                        {
+                            let rel = p.strip_prefix(dir).unwrap_or(p);
+                            feed(rel.to_string_lossy().as_bytes());
+                            feed(b"!");
+                            if let Ok(target) = std::fs::read_link(p) {
+                                feed(target.to_string_lossy().as_bytes());
+                            }
+                            feed(b"\0");
+                        }
+                        continue;
+                    }
+                };
                 if e.file_type().is_dir() {
                     // Folders count by name: creating an empty one can change the dataset (a `path:` or split
                     // folder that did not exist yet).
@@ -619,7 +643,8 @@ impl Index {
             if now == watched || attempt == 3 {
                 // Only run the header-check pass once the watched set has stabilized so external-source datasets
                 // do not scan every image header twice.
-                let report = folo_data::check::check(&p, &check_opts).map_err(|e| data_error(e, path))?;
+                let mut report = folo_data::check::check(&p, &check_opts).map_err(|e| data_error(e, path))?;
+                links::enrich_dangling_symlinks(&p, &mut report);
                 watched = now;
                 break (ds, report, fingerprint);
             }
