@@ -98,6 +98,145 @@ pub fn xavier_normal(shape: impl Into<Shape>, gain: f64, rng: &mut Rng) -> Resul
     Ok(normal(shape, gain * (2.0 / (fi + fo) as f64).sqrt(), rng))
 }
 
+/// Seeded Orthogonal initialization (Saxe et al. 2014; Mezzadri 2007; PyTorch `nn.init.orthogonal_`).
+///
+/// Reshapes a tensor of rank `>= 2` as `[rows, cols]` where `rows = dims[0]` and `cols = dims[1..].product()`
+/// (so 2D `[out, in]` and 4D `[out, in, kH, kW]` weights are both handled directly). Draws a standard normal
+/// matrix of shape `[max(rows, cols), min(rows, cols)]` in row-major order from `rng`, computes its thin
+/// Householder QR factorization `A = Q R` in `f64`, applies Mezzadri's positive-diagonal sign correction
+/// (`Q[:, k] *= sign(R[k, k])` with `sign(0) = +1`) so `Q` is Haar-uniform on the orthogonal / Stiefel
+/// manifold, scales by `gain`, and transposes back when `rows < cols`.
+///
+/// Satisfies:
+/// - `W^T W = gain² · I_cols` when `rows >= cols` (tall or square),
+/// - `W W^T = gain² · I_rows` when `rows < cols` (wide).
+///
+/// Errors if `shape` has rank `< 2`, has any zero-sized dimension, or `gain` is non-finite.
+pub fn orthogonal(shape: impl Into<Shape>, gain: f64, rng: &mut Rng) -> Result<Tensor> {
+    let shape = shape.into();
+    let dims = shape.dims();
+    if dims.len() < 2 {
+        return Err(Error::Invalid(format!(
+            "init::orthogonal: expected rank >= 2 tensor, got shape {shape}"
+        )));
+    }
+    if dims.contains(&0) {
+        return Err(Error::Invalid(format!("init::orthogonal: zero dimension in shape {shape}")));
+    }
+    if !gain.is_finite() {
+        return Err(Error::Invalid(format!("init::orthogonal: gain must be finite, got {gain}")));
+    }
+    let rows = dims[0];
+    let cols: usize = dims[1..].iter().product();
+    let transposed = rows < cols;
+    let (m, n) = if transposed { (cols, rows) } else { (rows, cols) };
+
+    // Draw standard normal entries in canonical row-major order from `rng`.
+    let raw = Tensor::randn([m, n], 0.0, 1.0, rng).to_vec::<f32>()?;
+    let mut a: Vec<f64> = raw.into_iter().map(f64::from).collect();
+    let q = householder_qr_thin_q(&mut a, m, n, gain);
+
+    let out: Vec<f32> = if transposed {
+        let mut t = vec![0.0f32; rows * cols];
+        for i in 0..m {
+            for j in 0..n {
+                t[j * m + i] = q[i * n + j] as f32;
+            }
+        }
+        t
+    } else {
+        q.into_iter().map(|v| v as f32).collect()
+    };
+    Ok(Tensor::from_vec(out, shape)?)
+}
+
+/// Thin Householder QR orthogonalization of row-major `a` (`m x n`, `m >= n`) in `f64`, returning
+/// `gain * Q * diag(sign(diag(R)))` (`m x n`) with `sign(0) = +1`.
+fn householder_qr_thin_q(a: &mut [f64], m: usize, n: usize, gain: f64) -> Vec<f64> {
+    debug_assert!(m >= n && a.len() == m * n);
+    let mut betas = vec![0.0f64; n];
+    let mut r_diag = vec![0.0f64; n];
+
+    // Factor A = H_0 H_1 ... H_{n-1} R, storing v_k[1..] in the lower triangle A[k+1..m, k].
+    for k in 0..n {
+        let mut scale = 0.0f64;
+        for i in k..m {
+            scale = scale.max(a[i * n + k].abs());
+        }
+        if scale == 0.0 {
+            betas[k] = 0.0;
+            r_diag[k] = 0.0;
+            continue;
+        }
+        let inv_scale = 1.0 / scale;
+        let mut sum_sq = 0.0f64;
+        for i in k..m {
+            let s = a[i * n + k] * inv_scale;
+            sum_sq += s * s;
+        }
+        let norm = scale * sum_sq.sqrt();
+        let x0 = a[k * n + k];
+        // Choose alpha with opposite sign to x0 so v0 = x0 - alpha never cancels.
+        let alpha = if x0 >= 0.0 { -norm } else { norm };
+        let v0 = x0 - alpha;
+        r_diag[k] = alpha;
+
+        let mut v_norm_sq = 1.0f64;
+        for i in (k + 1)..m {
+            let vi = a[i * n + k] / v0;
+            a[i * n + k] = vi;
+            v_norm_sq += vi * vi;
+        }
+        let beta = 2.0 / v_norm_sq;
+        betas[k] = beta;
+
+        // Apply H_k = I - beta * v * v^T from the left to trailing columns j = k+1..n.
+        for j in (k + 1)..n {
+            let mut dot = a[k * n + j];
+            for i in (k + 1)..m {
+                dot += a[i * n + k] * a[i * n + j];
+            }
+            let tau = beta * dot;
+            a[k * n + j] -= tau;
+            for i in (k + 1)..m {
+                a[i * n + j] -= tau * a[i * n + k];
+            }
+        }
+    }
+
+    // Backward accumulation of thin Q = H_0 H_1 ... H_{n-1} [I_n; 0].
+    let mut q = vec![0.0f64; m * n];
+    for i in 0..n {
+        q[i * n + i] = 1.0;
+    }
+    for k in (0..n).rev() {
+        let beta = betas[k];
+        if beta == 0.0 {
+            continue;
+        }
+        for j in k..n {
+            let mut dot = q[k * n + j];
+            for i in (k + 1)..m {
+                dot += a[i * n + k] * q[i * n + j];
+            }
+            let tau = beta * dot;
+            q[k * n + j] -= tau;
+            for i in (k + 1)..m {
+                q[i * n + j] -= tau * a[i * n + k];
+            }
+        }
+    }
+
+    // Mezzadri (2007) positive-diagonal sign correction and gain scaling.
+    for k in 0..n {
+        let s = if r_diag[k] < 0.0 { -gain } else { gain };
+        for i in 0..m {
+            q[i * n + k] *= s;
+        }
+    }
+    q
+}
+
 /// The bound `1 / sqrt(fan_in)` of docs/MODEL.md §2.9 (PyTorch's default `kaiming_uniform(a = √5)`), used for
 /// conv and linear weights and biases. `fan_in = (c_in / groups) · k · k`.
 pub fn default_conv_bound(fan_in: usize) -> f64 {
@@ -154,5 +293,155 @@ mod tests {
         let xn = xavier_normal([400, 600], 1.0, &mut rng).unwrap().to_vec::<f32>().unwrap();
         let var = xn.iter().map(|&x| (x as f64).powi(2)).sum::<f64>() / xn.len() as f64;
         assert!((var - 2.0 / 1000.0).abs() < 1e-4, "{var}");
+    }
+
+    /// Check `W^T W == gain² I_cols` (if `rows >= cols`) or `W W^T == gain² I_rows` (if `rows < cols`).
+    fn assert_orthogonal(w: &[f32], rows: usize, cols: usize, gain: f64, tol: f64) {
+        let g2 = gain * gain;
+        if rows >= cols {
+            for i in 0..cols {
+                for j in 0..cols {
+                    let mut dot = 0.0f64;
+                    for r in 0..rows {
+                        dot += w[r * cols + i] as f64 * w[r * cols + j] as f64;
+                    }
+                    let want = if i == j { g2 } else { 0.0 };
+                    assert!(
+                        (dot - want).abs() <= tol,
+                        "W^T W[{i},{j}] = {dot} vs {want} (shape {rows}x{cols}, gain={gain})"
+                    );
+                }
+            }
+        } else {
+            for i in 0..rows {
+                for j in 0..rows {
+                    let mut dot = 0.0f64;
+                    for c in 0..cols {
+                        dot += w[i * cols + c] as f64 * w[j * cols + c] as f64;
+                    }
+                    let want = if i == j { g2 } else { 0.0 };
+                    assert!(
+                        (dot - want).abs() <= tol,
+                        "W W^T[{i},{j}] = {dot} vs {want} (shape {rows}x{cols}, gain={gain})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn orthogonal_2d_4d_orthogonality_gain_and_determinism() {
+        let mut rng = Rng::seed(2026);
+        let gain_relu = leaky_relu_gain(0.0); // sqrt(2)
+
+        // Square, tall, wide 2D, and tall/wide 4D Conv2d shapes, plus 1x1 edge cases.
+        let cases: &[(&[usize], f64)] = &[
+            (&[16, 16], 1.0),
+            (&[16, 16], gain_relu),
+            (&[32, 12], 1.0),
+            (&[12, 32], 1.5),
+            (&[32, 3, 3, 3], gain_relu), // 32 x 27 (tall)
+            (&[16, 8, 3, 3], 0.75),      // 16 x 72 (wide)
+            (&[1, 1], 2.5),
+            (&[1, 1, 1, 1], 1.0),
+            (&[8, 8], 0.0), // zero gain -> exact zero tensor
+        ];
+        for &(dims, gain) in cases {
+            let w = orthogonal(dims, gain, &mut rng).unwrap();
+            assert_eq!(w.dims(), dims);
+            let data = w.to_vec::<f32>().unwrap();
+            assert!(data.iter().all(|v| v.is_finite()));
+            let rows = dims[0];
+            let cols: usize = dims[1..].iter().product();
+            assert_orthogonal(&data, rows, cols, gain, 1e-5);
+            if rows == cols {
+                // Square matrices are orthogonal on both sides: W^T W == W W^T == gain² I.
+                assert_orthogonal(&data, cols, rows, gain, 1e-5);
+            }
+        }
+
+        // Exact seed determinism and seed sensitivity.
+        let a1 = orthogonal([12, 4, 3, 3], gain_relu, &mut Rng::seed(77)).unwrap().to_vec::<f32>().unwrap();
+        let a2 = orthogonal([12, 4, 3, 3], gain_relu, &mut Rng::seed(77)).unwrap().to_vec::<f32>().unwrap();
+        let b1 = orthogonal([12, 4, 3, 3], gain_relu, &mut Rng::seed(78)).unwrap().to_vec::<f32>().unwrap();
+        assert_eq!(
+            a1.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            a2.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "same seed must be bitwise deterministic"
+        );
+        assert_ne!(a1, b1, "different seeds must produce distinct orthogonal matrices");
+    }
+
+    #[test]
+    fn householder_qr_positive_diagonal_and_rank_deficient_orthogonality() {
+        // 1. Verify A = Q * R with R upper-triangular and diag(R) >= 0 (Mezzadri 2007).
+        let (m, n) = (10usize, 6usize);
+        let mut rng = Rng::seed(123);
+        let orig: Vec<f64> = Tensor::randn([m, n], 0.0, 1.0, &mut rng)
+            .to_vec::<f32>()
+            .unwrap()
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        let mut work = orig.clone();
+        let q = householder_qr_thin_q(&mut work, m, n, 1.0);
+
+        // Compute R = Q^T A (n x n).
+        let mut r = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = 0.0;
+                for row in 0..m {
+                    s += q[row * n + i] * orig[row * n + j];
+                }
+                r[i * n + j] = s;
+            }
+        }
+        for i in 0..n {
+            assert!(
+                r[i * n + i] >= 0.0,
+                "Mezzadri sign correction requires R[{i},{i}] >= 0, got {}",
+                r[i * n + i]
+            );
+            for j in 0..i {
+                assert!(
+                    r[i * n + j].abs() < 1e-12,
+                    "R[{i},{j}] = {} must be zero below diagonal",
+                    r[i * n + j]
+                );
+            }
+        }
+        // Reconstruct Q * R == orig.
+        for row in 0..m {
+            for col in 0..n {
+                let mut s = 0.0;
+                for k in 0..n {
+                    s += q[row * n + k] * r[k * n + col];
+                }
+                assert!((s - orig[row * n + col]).abs() < 1e-12, "Q*R mismatch at ({row},{col})");
+            }
+        }
+
+        // 2. Rank-deficient / zero matrix still produces exact Q^T Q == I_n.
+        let mut zeros = vec![0.0f64; m * n];
+        let q_zero = householder_qr_thin_q(&mut zeros, m, n, 1.0);
+        for i in 0..n {
+            for j in 0..n {
+                let mut dot = 0.0;
+                for row in 0..m {
+                    dot += q_zero[row * n + i] * q_zero[row * n + j];
+                }
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!((dot - want).abs() < 1e-14, "zero-matrix Q^T Q[{i},{j}] = {dot} vs {want}");
+            }
+        }
+
+        // 3. Invalid shapes and non-finite gains are rejected.
+        assert!(orthogonal([], 1.0, &mut rng).is_err());
+        assert!(orthogonal([8], 1.0, &mut rng).is_err());
+        assert!(orthogonal([4, 0], 1.0, &mut rng).is_err());
+        assert!(orthogonal([0, 4, 3, 3], 1.0, &mut rng).is_err());
+        assert!(orthogonal([4, 4], f64::NAN, &mut rng).is_err());
+        assert!(orthogonal([4, 4], f64::INFINITY, &mut rng).is_err());
     }
 }

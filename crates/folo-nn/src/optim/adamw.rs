@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use folo_core::backend::OptimStep;
 use folo_core::{DType, Tensor};
 
+use super::cautious::{adamw_cautious_slice, cautious_mask_and_scale};
 use super::simd::adamw_slice;
 use super::{
     GradSource, OptimKind, Optimizer, ParamGroup, ParamPlan, cpu_fast, for_each_param_planned, step_many,
@@ -71,6 +72,7 @@ struct Coef {
     step_size: f32,
     bc2_sqrt: f32,
     eps: f32,
+    cautious: bool,
 }
 
 fn update(p: &Tensor, g: &Tensor, m: &Tensor, v: &Tensor, c: &Coef) -> Result<()> {
@@ -88,20 +90,37 @@ fn update(p: &Tensor, g: &Tensor, m: &Tensor, v: &Tensor, c: &Coef) -> Result<()
             m.update_f32(|m| {
                 v.update_f32(|v| {
                     p.update_f32(|p| {
-                        adamw_slice(
-                            p,
-                            g,
-                            m,
-                            v,
-                            c.decay,
-                            c.b1,
-                            c.one_minus_b1,
-                            c.b2,
-                            c.one_minus_b2,
-                            c.step_size,
-                            c.bc2_sqrt,
-                            c.eps,
-                        );
+                        if c.cautious {
+                            adamw_cautious_slice(
+                                p,
+                                g,
+                                m,
+                                v,
+                                c.decay,
+                                c.b1,
+                                c.one_minus_b1,
+                                c.b2,
+                                c.one_minus_b2,
+                                c.step_size,
+                                c.bc2_sqrt,
+                                c.eps,
+                            );
+                        } else {
+                            adamw_slice(
+                                p,
+                                g,
+                                m,
+                                v,
+                                c.decay,
+                                c.b1,
+                                c.one_minus_b1,
+                                c.b2,
+                                c.one_minus_b2,
+                                c.step_size,
+                                c.bc2_sqrt,
+                                c.eps,
+                            );
+                        }
                     })
                 })
             })???;
@@ -109,7 +128,7 @@ fn update(p: &Tensor, g: &Tensor, m: &Tensor, v: &Tensor, c: &Coef) -> Result<()
         })?;
     }
     let g = g.to_dtype(DType::F32)?;
-    if !p.device().is_cpu() {
+    if !c.cautious && !p.device().is_cpu() {
         let step = OptimStep::AdamW {
             decay: c.decay,
             beta1: c.b1,
@@ -132,7 +151,13 @@ fn update(p: &Tensor, g: &Tensor, m: &Tensor, v: &Tensor, c: &Coef) -> Result<()
     v.mul_scalar_assign(c.b2)?;
     v.add_scaled_assign(&g.square()?, c.one_minus_b2)?;
     let denom = v.sqrt()?.div_scalar(c.bc2_sqrt)?.add_scalar(c.eps)?;
-    p.add_scaled_assign(&m.div(&denom)?, -c.step_size)?;
+    let u = m.div(&denom)?;
+    if c.cautious {
+        let (mask, scale) = cautious_mask_and_scale(&u, &g)?;
+        p.add_scaled_assign(&u.mul(&mask)?, -(c.step_size * scale))?;
+    } else {
+        p.add_scaled_assign(&u, -c.step_size)?;
+    }
     Ok(())
 }
 
@@ -164,6 +189,7 @@ impl Optimizer for AdamW {
                 step_size: (g.lr / (1.0 - b1.powi(t))) as f32,
                 bc2_sqrt: (1.0 - b2.powi(t)).sqrt() as f32,
                 eps: g.eps as f32,
+                cautious: g.cautious,
             }
         }));
         let (groups, state, plan, coefs) = (&self.groups, &self.state, &self.plan, &self.coefs);
@@ -180,8 +206,11 @@ impl Optimizer for AdamW {
                 eps: c.eps,
             }
         };
-        let done =
-            step_many("adamw", groups, grads, adamw, |gi, pi| vec![&state[gi][pi].0, &state[gi][pi].1])?;
+        let done = if groups.iter().any(|g| g.cautious) {
+            None
+        } else {
+            step_many("adamw", groups, grads, adamw, |gi, pi| vec![&state[gi][pi].0, &state[gi][pi].1])?
+        };
         if done.as_ref().is_none_or(|d| d.iter().any(|&v| !v)) {
             for_each_param_planned(plan, groups, |gi, pi| {
                 if done.as_ref().is_some_and(|d| d[gi]) {
