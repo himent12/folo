@@ -302,3 +302,37 @@ fn depthwise_s1_s2_and_strided_conv_are_bitwise_reproducible() {
         ]
     });
 }
+
+#[test]
+fn elementwise_activations_binary_and_where_are_bitwise_reproducible() {
+    let mut rng = Rng::seed(21);
+    // Odd shape above PAR_MIN to exercise parallel chunking, 16-wide, 8-wide, and tail AVX2 paths.
+    let x = Tensor::randn([64, 631], 0.0, 2.5, &mut rng).requires_grad_();
+    let xp = Tensor::rand_uniform([64, 631], 0.1, 20.0, &mut rng).requires_grad_();
+    let b = Tensor::randn([1, 631], 0.0, 1.5, &mut rng).requires_grad_();
+    let g = Tensor::randn([64, 631], 0.0, 1.0, &mut rng);
+    let cond_f = x.gt_scalar(0.0).unwrap();
+    let cond_u = cond_f.to_dtype(folo_core::DType::U8).unwrap();
+    assert_reproducible("elementwise_activations_binary_where", &|| {
+        let y_relu = x.relu().unwrap();
+        let y_lrelu = x.leaky_relu(0.1).unwrap();
+        let y_hswish = x.hardswish().unwrap();
+        let y_clamp = x.clamp(-1.5, 1.5).unwrap();
+        let y_sqrt = xp.sqrt().unwrap();
+        let y_rsqrt = xp.rsqrt().unwrap();
+        let y_recip = xp.recip().unwrap();
+        let y_add = x.add(&b).unwrap();
+        let y_max = x.maximum(&b).unwrap();
+        let y_min = x.minimum(&b).unwrap();
+        let y_wf = cond_f.where_cond(&x, &b).unwrap();
+        let y_wu = cond_u.where_cond(&x, &b).unwrap();
+        let g_hswish = y_hswish.backward_with(&g).unwrap().get(&x).unwrap().clone();
+        let g_lrelu = y_lrelu.backward_with(&g).unwrap().get(&x).unwrap().clone();
+        let g_clamp = y_clamp.backward_with(&g).unwrap().get(&x).unwrap().clone();
+        let g_rsqrt = y_rsqrt.backward_with(&g).unwrap().get(&xp).unwrap().clone();
+        vec![
+            y_relu, y_lrelu, y_hswish, y_clamp, y_sqrt, y_rsqrt, y_recip, y_add, y_max, y_min, y_wf, y_wu,
+            g_hswish, g_lrelu, g_clamp, g_rsqrt,
+        ]
+    });
+}

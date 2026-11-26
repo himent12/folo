@@ -2,7 +2,13 @@
 
 mod cat;
 mod simd;
+#[cfg(target_arch = "x86_64")]
+mod simd_binary;
 mod simd_log_tanh;
+#[cfg(target_arch = "x86_64")]
+mod simd_ops;
+#[cfg(test)]
+mod simd_ops_tests;
 #[cfg(test)]
 mod tests;
 mod transpose;
@@ -642,6 +648,44 @@ pub(crate) fn where3<C: Copy + Send + Sync>(
     out
 }
 
+/// `cond != 0.0 ? a : b` for `F32` conditions, using AVX2 on `x86_64` when available.
+pub(crate) fn where3_f32(c: &[f32], lc: &Layout, a: &[f32], la: &Layout, b: &[f32], lb: &Layout) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        simd_binary::where3_f32_avx2(c, lc, a, la, b, lb)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        where3(c, lc, a, la, b, lb, |v| v != 0.0)
+    }
+}
+
+/// `cond != 0 ? a : b` for `U8` conditions, using AVX2 on `x86_64` when available.
+pub(crate) fn where3_u8(c: &[u8], lc: &Layout, a: &[f32], la: &Layout, b: &[f32], lb: &Layout) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        simd_binary::where3_u8_avx2(c, lc, a, la, b, lb)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        where3(c, lc, a, la, b, lb, |v| v != 0)
+    }
+}
+
+/// `maxNum` with explicit tie-to-right-operand semantics (`if a > b || b.is_nan() { a } else { b }`),
+/// matching AVX2 `vmaxps`, Wasm `max4_exact`, and `f32::max` lowering across scalar and SIMD paths.
+#[inline(always)]
+pub(super) fn max_num(a: f32, b: f32) -> f32 {
+    if a > b || b.is_nan() { a } else { b }
+}
+
+/// `minNum` with explicit tie-to-right-operand semantics (`if a < b || b.is_nan() { a } else { b }`),
+/// matching AVX2 `vminps`, Wasm `min4_exact`, and `f32::min` lowering across scalar and SIMD paths.
+#[inline(always)]
+pub(super) fn min_num(a: f32, b: f32) -> f32 {
+    if a < b || b.is_nan() { a } else { b }
+}
+
 const LOG2E: f32 = std::f32::consts::LOG2_E;
 
 /// `e^x` to about 1 ulp over the whole finite range (including subnormal results), written so loops over it
@@ -705,11 +749,17 @@ pub(crate) fn bias_act_inplace(op: Option<UnaryOp>, bias: f32, v: &mut [f32]) {
             *x = f(*x + bias);
         }
     }
+    if op.is_none() && bias == 0.0 {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if simd_ops::try_bias_act_inplace_avx2(op, bias, v) {
+        return;
+    }
     match op {
-        None if bias == 0.0 => {}
         None => go(v, bias, |x| x),
         Some(UnaryOp::Silu) => simd::silu_bias_inplace(v, bias),
-        Some(UnaryOp::Relu) => go(v, bias, |x| x.max(0.0)),
+        Some(UnaryOp::Relu) => go(v, bias, |x| max_num(x, 0.0)),
         Some(UnaryOp::Sigmoid) => simd::sigmoid_bias_inplace(v, bias),
         Some(UnaryOp::Tanh) => simd_log_tanh::tanh_bias_inplace(v, bias),
         Some(UnaryOp::LeakyRelu(a)) => go(v, bias, |x| if x > 0.0 { x } else { a * x }),
@@ -755,6 +805,10 @@ pub(crate) fn erf(x: f32) -> f32 {
 
 /// Apply a unary op.
 pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(out) = simd_ops::try_unary_avx2(op, x, lx) {
+        return out;
+    }
     use UnaryOp::*;
     match op {
         Neg => map1(x, lx, |v| -v),
@@ -774,11 +828,11 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
         Erf => map1(x, lx, erf),
         Sigmoid => map1_slice(x, lx, simd::sigmoid_slice, simd::sigmoid_scalar),
         Silu => map1_slice(x, lx, simd::silu_slice, simd::silu_scalar),
-        Relu => map1(x, lx, |v| v.max(0.0)),
+        Relu => map1(x, lx, |v| max_num(v, 0.0)),
         LeakyRelu(a) => map1(x, lx, move |v| if v > 0.0 { v } else { a * v }),
         Hardswish => map1(x, lx, |v| v * (v + 3.0).clamp(0.0, 6.0) * (1.0 / 6.0)),
         Softplus => map1_slice(x, lx, simd_log_tanh::softplus_slice, simd_log_tanh::softplus_scalar),
-        Clamp(lo, hi) => map1(x, lx, move |v| v.max(lo).min(hi)),
+        Clamp(lo, hi) => map1(x, lx, move |v| min_num(max_num(v, lo), hi)),
         PowScalar(p) => {
             if p == 2.0 {
                 map1(x, lx, |v| v * v)
@@ -793,8 +847,8 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
         RSubScalar(c) => map1(x, lx, move |v| c - v),
         RDivScalar(c) => map1(x, lx, move |v| c / v),
         DivScalar(c) => map1(x, lx, move |v| v / c),
-        MaxScalar(c) => map1(x, lx, move |v| v.max(c)),
-        MinScalar(c) => map1(x, lx, move |v| v.min(c)),
+        MaxScalar(c) => map1(x, lx, move |v| max_num(v, c)),
+        MinScalar(c) => map1(x, lx, move |v| min_num(v, c)),
         Floor => map1(x, lx, f32::floor),
         Ceil => map1(x, lx, f32::ceil),
         Round => map1(x, lx, f32::round),
@@ -804,6 +858,10 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
 
 /// `grad * op'(x)`.
 pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg: &Layout) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(out) = simd_ops::try_unary_backward_avx2(op, x, lx, g, lg) {
+        return out;
+    }
     use UnaryOp::*;
     match op {
         Neg => map2(x, lx, g, lg, |_, g| -g),
@@ -904,6 +962,10 @@ fn mask(b: bool) -> f32 {
 
 /// Apply a binary op to two operands already broadcast to the output shape.
 pub(crate) fn binary(op: BinaryOp, a: &[f32], la: &Layout, b: &[f32], lb: &Layout) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(out) = simd_binary::try_binary_avx2(op, a, la, b, lb) {
+        return out;
+    }
     use BinaryOp::*;
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     match op {
@@ -921,8 +983,8 @@ pub(crate) fn binary(op: BinaryOp, a: &[f32], la: &Layout, b: &[f32], lb: &Layou
         Mul => map2(a, la, b, lb, |a, b| a * b),
         Div => map2(a, la, b, lb, |a, b| a / b),
         Pow => map2(a, la, b, lb, f32::powf),
-        Maximum => map2(a, la, b, lb, f32::max),
-        Minimum => map2(a, la, b, lb, f32::min),
+        Maximum => map2(a, la, b, lb, max_num),
+        Minimum => map2(a, la, b, lb, min_num),
         Atan2 => map2(a, la, b, lb, f32::atan2),
         Eq => map2(a, la, b, lb, |a, b| mask(a == b)),
         Ne => map2(a, la, b, lb, |a, b| mask(a != b)),
