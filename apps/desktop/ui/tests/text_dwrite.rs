@@ -351,6 +351,18 @@ fn rtl_and_bidi_runs_preserve_all_glyphs_and_visual_positions() {
     assert_eq!(all_spans.len(), 1, "Select All on mixed text merges into one full-width span");
     assert_eq!(f(all_spans[0].0), 0.0);
     assert!((f(all_spans[0].1) - f(trailing_line.width)).abs() < 0.5);
+    // Clicking the left half of 'ם' (leftmost Hebrew glyph) reaches logical end (14), while
+    // clicking the right half of the preceding space reaches byte 6.
+    assert_eq!(
+        trailing_line.closest_index_for_x(px(heb_left + 0.5)),
+        trailing_rtl.len(),
+        "clicking left half of leftmost Hebrew glyph reaches logical end"
+    );
+    assert_eq!(
+        trailing_line.closest_index_for_x(px(heb_left - 0.5)),
+        6,
+        "clicking right half of space before Hebrew reaches byte 6"
+    );
 
     // Pure Arabic ("مرحبا", 5 chars): must not collapse to a single glyph; every index is a valid
     // char boundary and visual positions advance left-to-right.

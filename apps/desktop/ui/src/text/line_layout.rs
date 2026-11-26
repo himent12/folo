@@ -147,14 +147,11 @@ impl LineLayout {
             sorted_indices.get(pos).copied().unwrap_or(self.len)
         };
 
-        let mut best: Option<(Pixels, usize)> = None;
-        let mut consider = |stop_x: Pixels, idx: usize| {
-            let dist = (stop_x - x).abs();
-            if best.is_none_or(|(best_dist, _)| dist < best_dist) {
-                best = Some((dist, idx));
-            }
-        };
-
+        // Locate the cluster whose visual interval `[left_x, right_x]` contains `x` (clamping out-of-
+        // bounds `x` to the first/last cluster's outer edge), then pick the nearer edge of that
+        // cluster so opposite-direction runs meeting at the same x never shadow each other's indices.
+        let mut first_left_idx: Option<(Pixels, usize)> = None;
+        let mut last_right_idx = self.len;
         for (run_ix, run) in self.runs.iter().enumerate() {
             if run.glyphs.is_empty() {
                 continue;
@@ -174,17 +171,27 @@ impl LineLayout {
                 }
                 let right_x = run.glyphs.get(end).map_or(run_right, |g| g.position.x);
                 let end_logical = next_logical(cluster_idx);
-                if is_rtl {
-                    consider(left_x, end_logical);
-                    consider(right_x, cluster_idx);
-                } else {
-                    consider(left_x, cluster_idx);
-                    consider(right_x, end_logical);
+                let (left_idx, right_idx) =
+                    if is_rtl { (end_logical, cluster_idx) } else { (cluster_idx, end_logical) };
+                if first_left_idx.is_none() {
+                    first_left_idx = Some((left_x, left_idx));
+                    if x < left_x {
+                        return left_idx;
+                    }
                 }
+                if x < right_x {
+                    return if x - left_x <= right_x - x { left_idx } else { right_idx };
+                }
+                last_right_idx = right_idx;
                 g_ix = end;
             }
         }
-        best.map_or(self.len, |(_, idx)| idx)
+        if let Some((first_x, left_idx)) = first_left_idx
+            && x <= first_x
+        {
+            return left_idx;
+        }
+        last_right_idx
     }
 
     /// The visual horizontal spans `(left_x, right_x)` covered by the logical byte `range`.
