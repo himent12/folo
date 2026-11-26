@@ -313,6 +313,10 @@ impl Window {
         for &ix in &order {
             let draw = &mut draws[ix];
             self.element_id_stack.clone_from(&draw.element_id_stack);
+            self.text_style_stack.clear();
+            if let Some(style) = draw.text_style.clone() {
+                self.text_style_stack.push(style);
+            }
             if draw.parent_node.0 < self.next_frame.dispatch_tree.len() {
                 self.next_frame.dispatch_tree.set_active_node(draw.parent_node);
             }
@@ -323,5 +327,6 @@ impl Window {
         self.next_frame.deferred_draws = draws;
         self.scratch_order = order;
         self.element_id_stack.clear();
+        self.text_style_stack.clear();
     }
 }

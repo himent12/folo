@@ -197,6 +197,7 @@ impl Render for FoloApp {
             }))
             .on_action(cx.listener(|this, _: &FocusNext, w, cx| {
                 this.menu_open = None;
+                this.menu_trigger.set(None);
                 this.menu_typeahead.clear();
                 this.export_open = false;
                 this.kb = true;
@@ -205,6 +206,7 @@ impl Render for FoloApp {
             }))
             .on_action(cx.listener(|this, _: &FocusPrev, w, cx| {
                 this.menu_open = None;
+                this.menu_trigger.set(None);
                 this.menu_typeahead.clear();
                 this.export_open = false;
                 this.kb = true;
@@ -269,12 +271,36 @@ impl Render for FoloApp {
                 {
                     let d = if m.shift { 128. } else { 32. };
                     let zoomed = this.play_zoom > 1.0;
+                    let clamp_play_pan = |this: &mut Self| {
+                        if let (Some(b), Some(img)) = (this.play_view.get(), this.play_image.as_ref()) {
+                            this.play_pan = crate::viz::clamp_pan(
+                                b,
+                                img.width as f32,
+                                img.height as f32,
+                                crate::viz::Fit::Contain,
+                                this.play_zoom,
+                                this.play_pan,
+                            );
+                        }
+                    };
                     match ev.keystroke.key.as_str() {
                         // Arrows reach here only when no focused control used them.
-                        "left" if zoomed => this.play_pan.0 += d,
-                        "right" if zoomed => this.play_pan.0 -= d,
-                        "up" if zoomed => this.play_pan.1 += d,
-                        "down" if zoomed => this.play_pan.1 -= d,
+                        "left" if zoomed => {
+                            this.play_pan.0 += d;
+                            clamp_play_pan(this);
+                        }
+                        "right" if zoomed => {
+                            this.play_pan.0 -= d;
+                            clamp_play_pan(this);
+                        }
+                        "up" if zoomed => {
+                            this.play_pan.1 += d;
+                            clamp_play_pan(this);
+                        }
+                        "down" if zoomed => {
+                            this.play_pan.1 -= d;
+                            clamp_play_pan(this);
+                        }
                         "+" | "=" => this.play_zoom_by(1.4, cx),
                         "-" => this.play_zoom_by(1.0 / 1.4, cx),
                         "0" => {

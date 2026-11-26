@@ -126,6 +126,16 @@ impl FocusHandle {
         self
     }
 
+    /// Reads the shared authoritative `(tab_index, tab_stop)` so clones stay consistent when another
+    /// clone mutates the handle's tab-stop state.
+    pub(crate) fn tab_stop_config(&self) -> (isize, bool) {
+        self.handles
+            .handles
+            .read()
+            .get(&self.id)
+            .map_or((self.tab_index, self.tab_stop), |entry| (entry.tab_index, entry.tab_stop))
+    }
+
     /// A weak handle.
     pub fn downgrade(&self) -> WeakFocusHandle {
         WeakFocusHandle { id: self.id, handles: Arc::downgrade(&self.handles) }

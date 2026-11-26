@@ -36,7 +36,10 @@ pub fn histogram(
         .when_some(on_hover, |d, f| {
             let cell = cell.clone();
             d.on_mouse_move(move |ev: &MouseMoveEvent, window, cx| {
-                if let Some(b) = cell.get() {
+                if let Some(b) = cell.get()
+                    && b.size.width > px(0.)
+                    && b.size.height > px(0.)
+                {
                     let frac = ((ev.position.x - b.left()) / b.size.width).clamp(0.0, 0.9999);
                     f(b.contains(&ev.position).then_some(frac), window, cx);
                 }
@@ -56,10 +59,18 @@ pub fn histogram(
                     let n = counts.len().max(1);
                     let max = counts.iter().copied().max().unwrap_or(1).max(1) as f32;
                     let label_h = px(18.);
-                    let plot = Bounds::new(b.origin, size(b.size.width, b.size.height - label_h));
+                    let plot = Bounds::new(
+                        b.origin,
+                        size(b.size.width.max(px(0.)), (b.size.height - label_h).max(px(0.))),
+                    );
+                    if plot.size.width <= px(0.) || plot.size.height <= px(0.) {
+                        paint_cell.set(None);
+                        return;
+                    }
                     paint_cell.set(Some(plot));
-                    let gap = px(4.);
-                    let bw = (plot.size.width - gap * (n as f32 - 1.)) / n as f32;
+                    let gap =
+                        if n > 1 && plot.size.width >= px(5.) * n as f32 - px(4.) { px(4.) } else { px(0.) };
+                    let bw = ((plot.size.width - gap * (n as f32 - 1.)) / n as f32).max(px(0.));
                     let hovered = hover.map(|f| (f * n as f32) as usize);
                     window.paint_quad(fill(
                         Bounds::new(point(plot.left(), plot.bottom()), size(plot.size.width, px(1.))),
@@ -67,8 +78,8 @@ pub fn histogram(
                     ));
                     for (i, &c) in counts.iter().enumerate() {
                         let x = plot.left() + (bw + gap) * i as f32;
-                        let h = (plot.size.height - px(16.)) * (c as f32 / max);
-                        let h = if c > 0 { h.max(px(2.)) } else { px(0.) };
+                        let h = (plot.size.height - px(16.)).max(px(0.)) * (c as f32 / max);
+                        let h = if c > 0 { h.max(px(2.)).min(plot.size.height) } else { px(0.) };
                         let hot = hovered == Some(i);
                         let col = if hovered.is_some() && !hot { alpha(color, 0.45) } else { color };
                         window.paint_quad(
@@ -100,15 +111,9 @@ pub fn histogram(
                         if hot {
                             let s = crate::ui::int(c);
                             let w = text_width(window, &s, ty::SM.size);
-                            paint_text(
-                                window,
-                                cx,
-                                &s,
-                                point(x + bw / 2. - w / 2., plot.bottom() - h - px(15.)),
-                                t.text_primary,
-                                ty::SM.size,
-                                false,
-                            );
+                            let lx = (x + bw / 2. - w / 2.).clamp(b.left(), (b.right() - w).max(b.left()));
+                            let ly = (plot.bottom() - h - px(15.)).max(b.top());
+                            paint_text(window, cx, &s, point(lx, ly), t.text_primary, ty::SM.size, false);
                         }
                     }
                 },

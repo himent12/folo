@@ -200,14 +200,32 @@ impl Element for UniformList {
                 style.padding.to_pixels(bounds.size.into(), window.rem_size()),
             )
         });
-        let padded_bounds = Bounds::from_corners(
+        let inner_size = size(
+            (bounds.size.width - border.left - border.right).max(Pixels::ZERO),
+            (bounds.size.height - border.top - border.bottom).max(Pixels::ZERO),
+        );
+        let padded_bounds = Bounds::new(
             bounds.origin + point(border.left + padding.left, border.top + padding.top),
-            bounds.bottom_right() - point(border.right + padding.right, border.bottom + padding.bottom),
+            size(
+                (inner_size.width - padding.left - padding.right).max(Pixels::ZERO),
+                (inner_size.height - padding.top - padding.bottom).max(Pixels::ZERO),
+            ),
         );
 
         let item_height = frame_state.item_height;
-        let content_height = item_height * self.item_count as f32 + padding.top + padding.bottom;
-        let content_size = Size { width: padded_bounds.size.width, height: content_height };
+        let items_height = item_height * self.item_count as f32;
+        let content_height = items_height + padding.top + padding.bottom;
+        // `Interactivity::clamp_scroll_position` adds `padding` once and subtracts `bounds.size`;
+        // include `border` here so `scroll_max` and `base_handle.max_offset` match the inner height
+        // (`items_height + padding - inner_size.height`) without double-counting padding.
+        let content_size = Size {
+            width: padded_bounds.size.width,
+            height: if self.item_count > 0 && item_height > Pixels::ZERO {
+                items_height + border.top + border.bottom
+            } else {
+                Pixels::ZERO
+            },
+        };
 
         let shared_scroll_offset =
             self.interactivity.scroll_offset.clone().expect("a uniform list scrolls (overflow-y: scroll)");
@@ -231,8 +249,8 @@ impl Element for UniformList {
                 if item_count == 0 || item_height <= Pixels::ZERO {
                     return hitbox;
                 }
-                let list_height = padded_bounds.size.height;
-                let min_scroll_offset = list_height - content_height;
+                let list_height = inner_size.height;
+                let min_scroll_offset = (list_height - content_height).min(Pixels::ZERO);
                 if !scroll_offset.y.is_zero() && scroll_offset.y < min_scroll_offset {
                     shared_scroll_offset.borrow_mut().y = min_scroll_offset;
                     scroll_offset.y = min_scroll_offset;
@@ -245,7 +263,8 @@ impl Element for UniformList {
                 }
 
                 let first = (-(scroll_offset.y + padding.top) / item_height).floor().max(0.) as usize;
-                let last = ((-scroll_offset.y + list_height) / item_height).ceil().max(0.) as usize;
+                let last =
+                    ((list_height - scroll_offset.y - padding.top) / item_height).ceil().max(0.) as usize;
                 let visible_range = first..last.min(item_count);
                 let max_visible = visible_range.len();
                 if items.capacity() == 0 {
@@ -267,7 +286,7 @@ impl Element for UniformList {
                 window.with_content_mask(Some(ContentMask { bounds }), |window| {
                     for (item, ix) in items.iter_mut().zip(visible_range) {
                         let item_origin = padded_bounds.origin
-                            + point(scroll_offset.x, item_height * ix as f32 + scroll_offset.y + padding.top);
+                            + point(scroll_offset.x, item_height * ix as f32 + scroll_offset.y);
                         let available_space = size(
                             AvailableSpace::Definite(padded_bounds.size.width),
                             AvailableSpace::Definite(item_height),
@@ -280,9 +299,13 @@ impl Element for UniformList {
             },
         );
         if item_count > 0 && item_height > Pixels::ZERO {
-            let list_max = (content_height - padded_bounds.size.height).max(Pixels::ZERO);
+            let list_max = (content_height - inner_size.height).max(Pixels::ZERO);
             if list_max.0.is_finite() {
                 self.interactivity.scroll_max.height = self.interactivity.scroll_max.height.min(list_max);
+                if let Some(handle) = self.interactivity.tracked_scroll_handle.as_ref() {
+                    let mut state = handle.0.borrow_mut();
+                    state.max_offset.height = state.max_offset.height.min(list_max);
+                }
             }
         }
         hitbox

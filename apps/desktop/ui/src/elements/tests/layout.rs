@@ -216,3 +216,73 @@ fn a_view_that_notifies_in_render_does_not_redraw_forever() {
     app.run_until_idle();
     assert!(!app.is_dirty(window), "GPUI ignores a view's notify while its window draws");
 }
+
+#[test]
+fn anchored_enforces_margin_band_and_switch_anchor_preserves_offset() {
+    let fit = crate::elements::anchored::fit;
+    let limits = crate::Bounds::new(point(px(0.), px(0.)), crate::size(px(400.), px(300.)));
+    let size = crate::size(px(100.), px(40.));
+
+    // Landing inside the 8 px margin band (right = 398, bottom = 297) still snaps inside the margin.
+    let snapped = fit(
+        point(px(298.), px(257.)),
+        point(px(0.), px(0.)),
+        crate::Corner::TopLeft,
+        crate::AnchoredFitMode::SnapToWindowWithMargin(crate::Edges::all(px(8.))),
+        size,
+        limits,
+    );
+    assert_eq!(snapped, crate::Bounds::new(point(px(292.), px(252.)), size));
+
+    // Near the top-left inside the margin band (2, 3) snaps to (8, 8).
+    let snapped_tl = fit(
+        point(px(2.), px(3.)),
+        point(px(0.), px(0.)),
+        crate::Corner::TopLeft,
+        crate::AnchoredFitMode::SnapToWindowWithMargin(crate::Edges::all(px(8.))),
+        size,
+        limits,
+    );
+    assert_eq!(snapped_tl, crate::Bounds::new(point(px(8.), px(8.)), size));
+
+    // SwitchAnchor flipping horizontally mirrors offset.x and preserves offset.y.
+    let flipped = fit(
+        point(px(350.), px(100.)),
+        point(px(6.), px(12.)),
+        crate::Corner::TopLeft,
+        crate::AnchoredFitMode::SwitchAnchor,
+        size,
+        limits,
+    );
+    assert_eq!(
+        flipped,
+        crate::Bounds::new(point(px(244.), px(112.)), size),
+        "x mirrors offset (350 - 6 - 100 = 244) and y preserves +12 (100 + 12 = 112)"
+    );
+}
+
+#[test]
+fn deferred_paint_restores_inherited_text_style() {
+    let observed = Rc::new(RefCell::new(None));
+    let observed2 = observed.clone();
+    let (mut app, window) = open(move |_, _| {
+        let observed = observed2.clone();
+        div()
+            .size_full()
+            .text_right()
+            .line_height(px(30.))
+            .child(deferred(
+                canvas(
+                    |_, _, _| (),
+                    move |_, _, window, _| {
+                        let align = window.text_style_ref().map(|s| s.text_align);
+                        *observed.borrow_mut() = Some((align, window.line_height()));
+                    },
+                )
+                .size(px(20.)),
+            ))
+            .into_any_element()
+    });
+    draw(&mut app, window);
+    assert_eq!(*observed.borrow(), Some((Some(crate::TextAlign::Right), px(30.))));
+}

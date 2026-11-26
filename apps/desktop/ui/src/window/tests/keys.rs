@@ -248,3 +248,39 @@ fn tab_order_and_focus_on_mouse_down() {
         assert!(!window.is_focus_mounted(&orphan));
     });
 }
+
+#[test]
+fn focus_handle_tab_stop_mutation_applies_to_existing_clones() {
+    let mut app = HeadlessApp::new(HeadlessOptions {
+        size: size(px(300.), px(100.)),
+        scale_factor: 1.,
+        text: TextBackend::Fixed,
+    });
+    let handles: Vec<FocusHandle> =
+        app.update(|cx| (0..3).map(|_| cx.focus_handle().tab_stop(true)).collect());
+    // Track handles BEFORE mutating tab_stop on a sibling clone so the element stores a clone
+    // whose cached local `tab_stop` field is still `true` when paint calls `insert_tab_stop`.
+    let rendered = handles.clone();
+    let render: RenderFn = Rc::new(move |_, _| {
+        let children: Vec<_> =
+            rendered.iter().map(|handle| div().track_focus(handle).w(px(50.)).h(px(20.))).collect();
+        let _ = rendered[1].clone().tab_stop(false);
+        div().flex().size_full().children(children).into_any_element()
+    });
+    let window: AnyWindowHandle = app
+        .update(|cx| cx.open_window(WindowOptions::default(), |_, cx| cx.new(|_| TestView { render })))
+        .unwrap()
+        .into();
+
+    app.frame(window);
+
+    // Step Tab directly against frame 1's painted tab stops (before any second frame runs).
+    let next = |app: &mut HeadlessApp| {
+        with_window(app, window, |window, cx| {
+            window.focus_next();
+            window.focused(cx).map(|h| handles.iter().position(|x| *x == h).unwrap())
+        })
+    };
+    assert_eq!(next(&mut app), Some(0));
+    assert_eq!(next(&mut app), Some(2), "pre-existing clone observes shared tab_stop(false) on paint");
+}

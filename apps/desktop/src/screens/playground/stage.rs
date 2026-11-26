@@ -439,6 +439,8 @@ impl FoloApp {
                             new_zoom,
                         );
                         this.play_zoom = new_zoom;
+                        w.prevent_default();
+                        cx.stop_propagation();
                         cx.notify();
                     }))
                     .on_mouse_down(
@@ -495,9 +497,11 @@ impl FoloApp {
                                 canvas(
                                     |_, _, _| (),
                                     move |b, _, window, cx| {
+                                        let pad_x = (b.size.width / 2.).min(px(16.));
+                                        let pad_y = (b.size.height / 2.).min(px(16.));
                                         let inner = Bounds::new(
-                                            b.origin + folo_ui::point(px(16.), px(16.)),
-                                            b.size - folo_ui::size(px(32.), px(32.)),
+                                            b.origin + folo_ui::point(pad_x, pad_y),
+                                            b.size - folo_ui::size(pad_x * 2., pad_y * 2.),
                                         );
                                         paint_cell.set(Some(inner));
                                         paint_image_with_boxes(

@@ -290,7 +290,10 @@ impl Interactivity {
         let line_height = window.line_height();
         let hitbox = hitbox.clone();
         window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, _| {
-            if phase != DispatchPhase::Bubble || !hitbox.should_handle_scroll(window) {
+            if phase != DispatchPhase::Bubble
+                || window.default_prevented()
+                || !hitbox.should_handle_scroll(window)
+            {
                 return;
             }
             let delta = event.delta.pixel_delta(line_height);
@@ -337,6 +340,7 @@ impl Interactivity {
                 *offset != old
             };
             if moved {
+                window.prevent_default();
                 window.refresh();
             }
         });

@@ -95,12 +95,24 @@ impl SelectTypeahead {
 /// a narrow trigger (a leaderboard's Run select is 220 px).
 const MENU_MIN_W: f32 = 300.;
 
-/// A menu's width and which edge of its trigger it hangs from: as wide as the trigger, at least
-/// [`MENU_MIN_W`]; from the left edge, or the right one when the window has no room for it on the
-/// right (`trigger`: its left and right edge, `viewport_w`: the window's width).
-fn menu_box(trigger: (f32, f32), viewport_w: f32) -> (f32, bool) {
-    let w = (trigger.1 - trigger.0).max(MENU_MIN_W);
-    (w, trigger.0 + w > viewport_w - 8.)
+/// A menu's width and horizontal offset relative to its trigger's left edge: as wide as the
+/// trigger (at least [`MENU_MIN_W`], capped to the viewport's 16 px horizontal margin), left-aligned
+/// when it fits on the right, right-aligned when it fits on the left, otherwise clamped inside
+/// `[8., viewport_w - 8.]` (`trigger`: its left and right edge, `viewport_w`: the window's width).
+fn menu_box(trigger: (f32, f32), viewport_w: f32) -> (f32, f32) {
+    let trig_w = (trigger.1 - trigger.0).max(0.);
+    let max_w = (viewport_w - 16.).max(0.);
+    let w = if viewport_w > 16. { trig_w.max(MENU_MIN_W).min(max_w) } else { trig_w };
+    let max_left = (viewport_w - 8. - w).max(8.);
+    let raw_left = if trigger.0 + w <= viewport_w - 8. {
+        trigger.0
+    } else if trigger.1 - w >= 8. {
+        trigger.1 - w
+    } else {
+        max_left
+    };
+    let menu_left = raw_left.clamp(8., max_left);
+    (w, menu_left - trigger.0)
 }
 
 /// Called with the chosen option index.
@@ -270,6 +282,7 @@ impl FoloApp {
                 window.focus(&this.fh(key, cx));
                 let opening = this.menu_open != Some(key);
                 this.menu_open = if opening { Some(key) } else { None };
+                this.menu_trigger.set(None);
                 if opening {
                     this.export_open = false;
                 }
@@ -286,6 +299,7 @@ impl FoloApp {
                     "enter" | "space" if is_open => {
                         let pick = this.menu_hl.min(n - 1);
                         this.menu_open = None;
+                        this.menu_trigger.set(None);
                         this.menu_typeahead.clear();
                         if pick != selected && !dead[pick] {
                             keys(this, pick, window, cx);
@@ -293,6 +307,7 @@ impl FoloApp {
                     }
                     "enter" | "space" | "down" | "up" if !is_open => {
                         this.menu_open = Some(key);
+                        this.menu_trigger.set(None);
                         this.export_open = false;
                         this.menu_hl = initial_hl;
                         this.menu_typeahead.clear();
@@ -330,10 +345,12 @@ impl FoloApp {
                     }
                     "escape" if is_open => {
                         this.menu_open = None;
+                        this.menu_trigger.set(None);
                         this.menu_typeahead.clear();
                     }
                     "tab" if is_open => {
                         this.menu_open = None;
+                        this.menu_trigger.set(None);
                         this.menu_typeahead.clear();
                         return;
                     }
@@ -407,8 +424,7 @@ impl FoloApp {
                     .when(!up, |d| d.top(px(trigger_h + 4.)))
                     .when(up, |d| d.bottom(px(trigger_h + 4.)))
                     .map(|d| match wide {
-                        Some((w, true)) => d.right_0().w(px(w)),
-                        Some((w, false)) => d.left_0().w(px(w)),
+                        Some((w, left)) => d.left(px(left)).w(px(w)),
                         None => d.left_0().right_0(),
                     })
                     .occlude()
@@ -416,6 +432,7 @@ impl FoloApp {
                         let on_trigger = this.menu_trigger.get().is_some_and(|b| b.contains(&ev.position));
                         if this.menu_open == Some(key) && !on_trigger {
                             this.menu_open = None;
+                            this.menu_trigger.set(None);
                             this.menu_typeahead.clear();
                             cx.notify();
                         }
@@ -471,6 +488,7 @@ impl FoloApp {
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 f(this, i, window, cx);
                                                 this.menu_open = None;
+                                                this.menu_trigger.set(None);
                                                 this.menu_typeahead.clear();
                                                 cx.notify();
                                             }))
@@ -522,12 +540,26 @@ mod tests {
 
     #[test]
     fn a_narrow_select_opens_a_wider_menu_toward_the_room() {
-        // A 220 px select by the window's right edge: 300 px wide, hung from its right edge.
-        assert_eq!(menu_box((1000., 1220.), 1280.), (300., true));
-        // The same select further left: from its left edge.
-        assert_eq!(menu_box((600., 820.), 1280.), (300., false));
+        // A 220 px select by the window's right edge: 300 px wide, right-aligned (offset -80).
+        assert_eq!(menu_box((1000., 1220.), 1280.), (300., -80.));
+        // The same select further left: left-aligned (offset 0).
+        assert_eq!(menu_box((600., 820.), 1280.), (300., 0.));
         // A wide select keeps its own width.
-        assert_eq!(menu_box((900., 1240.), 1280.), (340., false));
+        assert_eq!(menu_box((900., 1240.), 1280.), (340., 0.));
+        // Narrow viewport where right-alignment would overflow the left edge: clamps inside [8, w-8].
+        let (w, off) = menu_box((80., 220.), 360.);
+        assert_eq!(w, 300.);
+        assert!(80. + off >= 8. && 80. + off + w <= 352., "menu stays inside viewport margins: off={off}");
+        // Very narrow viewport narrower than MENU_MIN_W + 16: width caps to viewport - 16.
+        let (w, off) = menu_box((20., 200.), 260.);
+        assert_eq!(w, 244.);
+        assert_eq!(20. + off, 8.);
+        assert_eq!(20. + off + w, 252.);
+        // Trigger partially past the right viewport edge still clamps menu strictly inside [8, w-8].
+        let (w, off) = menu_box((200., 300.), 260.);
+        assert_eq!(w, 244.);
+        assert_eq!(200. + off, 8.);
+        assert_eq!(200. + off + w, 252.);
     }
 
     #[test]

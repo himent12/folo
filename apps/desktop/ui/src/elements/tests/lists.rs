@@ -308,3 +308,123 @@ fn div_scroll_handle_scrolls_on_first_frame_tracks_container_move_and_clears_emp
     assert!(handle.bounds_for_item(0).is_none());
     assert_eq!(handle.offset().y, px(0.));
 }
+
+#[test]
+fn uniform_list_with_vertical_padding_and_border_aligns_rows_and_scroll_max() {
+    let handle = UniformListScrollHandle::new();
+    let (mut app, window) = open({
+        let handle = handle.clone();
+        move |_, _| {
+            div()
+                .h(px(100.))
+                .w(px(80.))
+                .child(
+                    uniform_list("padded", 10, |range, _, _| {
+                        range.map(|ix| div().h(px(20.)).w_full().bg(rgb(ix as u32 + 1))).collect::<Vec<_>>()
+                    })
+                    .h_full()
+                    .p(px(10.))
+                    .border_2()
+                    .track_scroll(handle.clone()),
+                )
+                .into_any_element()
+        }
+    });
+
+    // Inner border-box height is 100 - 4 = 96, content height is 10 * 20 + 20 = 220 => max scroll = 124.
+    let scene = draw(&mut app, window);
+    let base = handle.0.borrow().base_handle.clone();
+    assert_eq!(base.max_offset().height, px(124.));
+    // Row 0 starts at border.top (2) + padding.top (10) = 12, not double-padded at 22.
+    let rows: Vec<_> = painted_rows(&scene).into_iter().filter(|&(c, _)| c > 0 && c <= 10).collect();
+    assert_eq!(rows[0], (1, 12.));
+    assert_eq!(rows[1], (2, 32.));
+
+    // Scroll to the very bottom: last row (id 10) ends at y = 88 (leaving 10 px bottom padding + 2 px border).
+    base.set_offset(crate::point(px(0.), px(-200.)));
+    app.update(|cx| cx.refresh_windows());
+    let scene = draw(&mut app, window);
+    assert_eq!(base.offset().y, px(-124.));
+    let rows: Vec<_> = painted_rows(&scene).into_iter().filter(|&(c, _)| c > 0 && c <= 10).collect();
+    assert_eq!(rows.last().copied(), Some((10, 68.)), "row 9 sits at 68..88 above 10px padding + 2px border");
+}
+
+#[test]
+fn nested_scroll_containers_prevent_outer_scroll_until_inner_reaches_boundary() {
+    use std::cell::Cell;
+
+    use crate::{
+        InteractiveElement, Modifiers, PlatformInput, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+        StatefulInteractiveElement, TouchPhase, point,
+    };
+
+    let outer = ScrollHandle::new();
+    let inner = ScrollHandle::new();
+    let inner_wheel_hits = Rc::new(Cell::new(0usize));
+
+    let (mut app, window) = open({
+        let (outer, inner, inner_wheel_hits) = (outer.clone(), inner.clone(), inner_wheel_hits.clone());
+        move |_, _| {
+            let hits = inner_wheel_hits.clone();
+            div()
+                .id("outer")
+                .w(px(200.))
+                .h(px(120.))
+                .overflow_y_scroll()
+                .track_scroll(&outer)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .id("inner")
+                                .w_full()
+                                .h(px(60.))
+                                .overflow_y_scroll()
+                                .track_scroll(&inner)
+                                .on_scroll_wheel(move |_, _, _| {
+                                    hits.set(hits.get() + 1);
+                                })
+                                .child(div().h(px(120.)).w_full()),
+                        )
+                        .child(div().h(px(200.)).w_full()),
+                )
+                .into_any_element()
+        }
+    });
+
+    draw(&mut app, window);
+    assert_eq!(inner.max_offset().height, px(60.));
+    assert_eq!(outer.max_offset().height, px(140.));
+
+    let wheel = |app: &mut crate::HeadlessApp, dy: f32| {
+        app.simulate_input(
+            window,
+            PlatformInput::ScrollWheel(ScrollWheelEvent {
+                position: point(px(20.), px(20.)),
+                delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+                modifiers: Modifiers::none(),
+                touch_phase: TouchPhase::Moved,
+            }),
+        );
+        draw(app, window);
+    };
+
+    // Scrolling inside the inner container consumes the wheel tick and leaves outer untouched,
+    // while still running the inner container's own `on_scroll_wheel` listener.
+    wheel(&mut app, -30.);
+    assert_eq!(inner.offset().y, px(-30.));
+    assert_eq!(outer.offset().y, px(0.));
+    assert_eq!(inner_wheel_hits.get(), 1);
+
+    // Reaching inner's bottom still consumes that tick.
+    wheel(&mut app, -50.);
+    assert_eq!(inner.offset().y, px(-60.));
+    assert_eq!(outer.offset().y, px(0.));
+
+    // Once inner is already at its boundary, the next wheel tick chains to the outer container.
+    wheel(&mut app, -40.);
+    assert_eq!(inner.offset().y, px(-60.));
+    assert_eq!(outer.offset().y, px(-40.));
+}

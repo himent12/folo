@@ -87,7 +87,10 @@ pub fn line_chart(t: &Theme, spec: LineChart) -> AnyElement {
         .when_some(on_hover, |d, f| {
             let cell = plot_cell.clone();
             d.on_mouse_move(move |ev: &MouseMoveEvent, window, cx| {
-                if let Some(b) = cell.get() {
+                if let Some(b) = cell.get()
+                    && b.size.width > px(0.)
+                    && b.size.height > px(0.)
+                {
                     let inside = b.contains(&ev.position)
                         || (ev.position.y >= b.top()
                             && ev.position.y <= b.bottom() + px(20.)
@@ -223,8 +226,9 @@ fn paint_line_chart(
     // A shared minimum gutter keeps plots in a grid aligned.
     let label_w = ylabels.iter().map(|l| text_width(window, l, label_size)).fold(px(30.), |a, b| a.max(b));
     let left = bounds.left() + label_w + px(10.);
-    let (named, gutter) = end_gutter(spec, window, x0, x1, bounds.right() - left - px(2.));
-    let plot_w = bounds.right() - left - px(2.) - gutter;
+    let avail_w = (bounds.right() - left - px(2.)).max(px(0.));
+    let (named, gutter) = end_gutter(spec, window, x0, x1, avail_w);
+    let plot_w = (avail_w - gutter).max(px(0.));
     let sx0 = |x: f32| left + plot_w * ((x - x0) / (x1 - x0));
     // Marker labels live in a band above the plot, in lanes so they never overlap each other, and
     // the data never runs through them.
@@ -260,10 +264,12 @@ fn paint_line_chart(
     }
     let band = marker_layout.iter().map(|l| l.2 + 1).max().unwrap_or(0).max(spec.min_lanes) as f32 * LANE;
     let (top_pad, bottom_pad) = if spec.axis_titles.is_some() { (26. + band, 40.) } else { (6. + band, 22.) };
-    let plot = Bounds::new(
-        point(left, bounds.top() + px(top_pad)),
-        size(plot_w, bounds.size.height - px(top_pad) - px(bottom_pad)),
-    );
+    let plot_h = (bounds.size.height - px(top_pad) - px(bottom_pad)).max(px(0.));
+    let plot = Bounds::new(point(left, bounds.top() + px(top_pad)), size(plot_w, plot_h));
+    if plot_w <= px(0.) || plot_h <= px(0.) {
+        plot_cell.set(None);
+        return;
+    }
     if let Some((xt, yt)) = spec.axis_titles {
         paint_text(window, cx, yt, point(bounds.left(), bounds.top()), t.text_tertiary, ty::SM.size, false);
         let w = text_width(window, xt, ty::SM.size);
@@ -619,9 +625,10 @@ fn paint_line_chart(
         || cx_px + px(12.) + w > plot.right();
     // Beside the cursor (preferred side first), at the top or bottom of the plot: whichever spot
     // covers the least data, and isn't level with the highlighted points.
-    let left_x = (cx_px - px(12.) - w).max(bounds.left());
-    let right_x = cx_px + px(12.);
-    let fits_right = right_x + w <= plot.right();
+    let max_x = (bounds.right() - w).max(bounds.left());
+    let left_x = (cx_px - px(12.) - w).clamp(bounds.left(), max_x);
+    let right_x = (cx_px + px(12.)).clamp(bounds.left(), max_x);
+    let fits_right = cx_px + px(12.) + w <= plot.right();
     let fits_left = cx_px - px(12.) - w >= bounds.left();
     let sides: Vec<Pixels> = match (flip, fits_left, fits_right) {
         (true, _, true) | (false, true, true) => {
@@ -647,32 +654,35 @@ fn paint_line_chart(
             .sum::<usize>()
             + point_ys.iter().filter(|&&y| y > r.top() && y < r.bottom()).count() * 50
     };
-    let top_y = plot.top() + px(4.);
-    let bottom_y = plot.bottom() - h - px(4.);
+    let max_y = (bounds.bottom() - h).max(bounds.top());
+    let top_y = (plot.top() + px(4.)).clamp(bounds.top(), max_y);
+    let bottom_y = (plot.bottom() - h - px(4.)).clamp(bounds.top(), max_y);
     let (bx, by) = sides
         .iter()
         .flat_map(|&x| [(x, top_y), (x, bottom_y)])
         .min_by_key(|&(x, y)| covered(x, y))
         .unwrap_or((sides[0], top_y));
     let rect = Bounds::new(point(bx, by), size(w, h));
-    window.paint_quad(folo_ui::quad(
-        rect,
-        px(6.),
-        t.bg_overlay,
-        px(1.),
-        t.line_strong,
-        folo_ui::BorderStyle::Solid,
-    ));
-    paint_text(window, cx, &title, point(bx + px(10.), by + px(6.)), t.text_tertiary, fs, false);
-    for (i, (color, name, value)) in rows.iter().enumerate() {
-        let y = by + px(6.) + px(16.) * (i as f32 + 1.);
-        window.paint_quad(
-            fill(Bounds::new(point(bx + px(10.), y + px(4.)), size(px(8.), px(8.))), *color)
-                .corner_radii(px(2.)),
-        );
-        paint_text(window, cx, name, point(bx + px(24.), y), t.text_secondary, fs, false);
-        paint_text(window, cx, value, point(bx + w - px(10.), y), t.text_primary, fs, true);
-    }
+    window.with_content_mask(Some(folo_ui::ContentMask { bounds }), |window| {
+        window.paint_quad(folo_ui::quad(
+            rect,
+            px(6.),
+            t.bg_overlay,
+            px(1.),
+            t.line_strong,
+            folo_ui::BorderStyle::Solid,
+        ));
+        paint_text(window, cx, &title, point(bx + px(10.), by + px(6.)), t.text_tertiary, fs, false);
+        for (i, (color, name, value)) in rows.iter().enumerate() {
+            let y = by + px(6.) + px(16.) * (i as f32 + 1.);
+            window.paint_quad(
+                fill(Bounds::new(point(bx + px(10.), y + px(4.)), size(px(8.), px(8.))), *color)
+                    .corner_radii(px(2.)),
+            );
+            paint_text(window, cx, name, point(bx + px(24.), y), t.text_secondary, fs, false);
+            paint_text(window, cx, value, point(bx + w - px(10.), y), t.text_primary, fs, true);
+        }
+    });
 }
 
 #[cfg(test)]

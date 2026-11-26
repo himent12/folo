@@ -57,7 +57,12 @@ impl FoloApp {
                 cx.notify();
             }))
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
-                if matches!(ev.keystroke.key.as_str(), "enter" | "space") && !ev.keystroke.modifiers.control {
+                let m = &ev.keystroke.modifiers;
+                if matches!(ev.keystroke.key.as_str(), "enter" | "space")
+                    && !m.control
+                    && !m.alt
+                    && !m.platform
+                {
                     action(this, window, cx);
                     cx.stop_propagation();
                     cx.notify();

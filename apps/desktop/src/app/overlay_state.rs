@@ -333,6 +333,8 @@ impl FoloApp {
     pub fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu_open.is_some() || self.export_open {
             self.menu_open = None;
+            self.menu_trigger.set(None);
+            self.menu_typeahead.clear();
             self.export_open = false;
         } else if self.confirm_close.is_some() {
             // On top of every other overlay: it goes first, and theirs stay as they were.
