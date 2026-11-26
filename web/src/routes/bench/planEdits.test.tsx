@@ -335,11 +335,11 @@ describe('Benchmark plan concurrent save and empty-weight leave guard', () => {
       expect(b.disabled).toBe(true);
     }
 
-    // Recovery re-enables Add entry.
+    // Recovery via immediate reconnect resync re-enables Add entry without wall-clock sleeps.
     entriesSpy.mockImplementation(realEntries);
     sseHandlers.connection?.('open');
-    await new Promise((r) => setTimeout(r, 1100));
-    await settle(4);
+    sseHandlers.reconnect?.();
+    await settle(6);
     expect(dlg.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(false);
   });
 });

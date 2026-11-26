@@ -168,6 +168,9 @@ export class LiveBench {
           this.resyncError = undefined;
           heard = Date.now();
           if (this.lost !== null) this.lost = this.connection === 'reconnecting' ? heard : null;
+        } catch (e) {
+          if (closed || my < applied) return;
+          throw e;
         } finally {
           this.#inflight.delete(flight);
         }

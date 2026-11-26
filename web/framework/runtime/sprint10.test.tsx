@@ -334,4 +334,125 @@ describe('fw Sprint 10 runtime hardening', () => {
     v3.unmount();
     expect(leafDestroys).toBe(2);
   });
+
+  it('disposes hidden aliased/nested-cond JSX props, keeps distinct nodes in [props.body, props.body], and isolates nested/multi-hop forwarding', () => {
+    // 1. Aliased JSX.Element type in `{open.get() ? props.value : null}` disposes immediately when hidden and remounts on show.
+    type Slot = JSX.Element;
+    let mounts = 0;
+    let destroys = 0;
+    function Tracked() {
+      mounts++;
+      onCleanup(() => destroys++);
+      return <em>x</em>;
+    }
+    const open = signal(true);
+    function AliasedGate(props: { value: Slot }) {
+      return <div>{open.get() ? props.value : null}</div>;
+    }
+    const v1 = render(() => <AliasedGate value={<Tracked />} />);
+    flush();
+    expect([mounts, destroys]).toEqual([1, 0]);
+    open.set(false);
+    flush();
+    expect([mounts, destroys]).toEqual([1, 1]);
+    open.set(true);
+    flush();
+    expect([mounts, destroys]).toEqual([2, 1]);
+    v1.unmount();
+    expect(destroys).toBe(2);
+
+    // 2. Nested cond() inside a conditional branch disposes when outer branch hides.
+    mounts = 0;
+    destroys = 0;
+    const outerOpen = signal(true);
+    function NestedCond(props: { body?: JSX.Element }) {
+      return <div>{outerOpen.get() ? <section>{props.body ? <b>{props.body}</b> : null}</section> : null}</div>;
+    }
+    const v2 = render(() => <NestedCond body={<Tracked />} />);
+    flush();
+    expect([mounts, destroys]).toEqual([1, 0]);
+    outerOpen.set(false);
+    flush();
+    expect([mounts, destroys]).toEqual([1, 1]);
+    outerOpen.set(true);
+    flush();
+    expect([mounts, destroys]).toEqual([2, 1]);
+    v2.unmount();
+    expect(destroys).toBe(2);
+
+    // 3. Two reads in a single insertion expression `[props.body, props.body]` render two distinct DOM nodes.
+    mounts = 0;
+    destroys = 0;
+    function ArrayDual(props: { body: JSX.Element }) {
+      return <div>{[props.body, props.body]}</div>;
+    }
+    const v3 = render(() => <ArrayDual body={<Tracked />} />);
+    flush();
+    expect(v3.container.querySelectorAll('em')).toHaveLength(2);
+    expect([mounts, destroys]).toEqual([2, 0]);
+    v3.unmount();
+    expect(destroys).toBe(2);
+
+    // 4. Multi-hop forwarding through Dynamic + dynamic spread + splitProps + local mergeProps preserves innermost context & disposal.
+    const CTX = createContext('missing');
+    let seenCtx = '';
+    mounts = 0;
+    destroys = 0;
+    function CtxLeaf() {
+      seenCtx = CTX.get();
+      mounts++;
+      onCleanup(() => destroys++);
+      return <i>ok</i>;
+    }
+    function InnerConsumer(props: { control?: JSX.Element }) {
+      CTX.set('inner-ctx');
+      const m = mergeProps({ extra: 'def' }, props);
+      return <section>{m.control ? <div class="c">{m.control}</div> : null}</section>;
+    }
+    function MidForward(props: { control?: JSX.Element; tag?: string }) {
+      CTX.set('mid-ctx');
+      const [, rest] = splitProps(props, ['tag']);
+      return <InnerConsumer {...rest} />;
+    }
+    const showDyn = signal(true);
+    const dynExtra = signal('e1');
+    const v4 = render(() => <Dynamic {...{ extra: dynExtra.get() }} component={showDyn.get() ? MidForward : null} control={<CtxLeaf />} />);
+    flush();
+    expect(seenCtx).toBe('inner-ctx');
+    expect([mounts, destroys]).toEqual([1, 0]);
+    showDyn.set(false);
+    flush();
+    expect(destroys).toBe(1);
+    v4.unmount();
+
+    // 5. Nested JSX props `<Outer control={<Inner badge={<Deep />} />} />` do not leak Outer's owner/context into Deep,
+    // and `{props.control ? <PassChild {...props} /> : null}` shares the cond memo without double-mounting.
+    const NEST = createContext('none');
+    let deepCtx = '';
+    mounts = 0;
+    destroys = 0;
+    function Deep() {
+      deepCtx = NEST.get();
+      mounts++;
+      onCleanup(() => destroys++);
+      return <u>deep</u>;
+    }
+    function InnerBadge(props: { badge?: JSX.Element }) {
+      NEST.set('from-inner');
+      return <span>{props.badge ? <b>{props.badge}</b> : null}</span>;
+    }
+    function PassChild(props: { control?: JSX.Element }) {
+      return <div class="pass">{props.control}</div>;
+    }
+    function OuterBox(props: { control?: JSX.Element }) {
+      NEST.set('from-outer');
+      return <article>{props.control ? <PassChild {...props} /> : null}</article>;
+    }
+    const v5 = render(() => <OuterBox {...{ extra: dynExtra.get() }} control={<InnerBadge badge={<Deep />} />} />);
+    flush();
+    expect(deepCtx).toBe('from-inner');
+    expect([mounts, destroys]).toEqual([1, 0]);
+    v5.unmount();
+    expect(destroys).toBe(1);
+  });
 });

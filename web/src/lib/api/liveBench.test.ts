@@ -317,6 +317,23 @@ describe('LiveBench ordering', () => {
     spy.mockResolvedValue([]);
     await vi.advanceTimersByTimeAsync(1100);
     expect(live.resyncError).toBeUndefined();
+
+    // Overlapping resyncs: if an older request rejects AFTER a newer snapshot already succeeded, resyncError stays cleared.
+    const older = deferred<BenchEntry[]>();
+    const newer = deferred<BenchEntry[]>();
+    let rejectOlder!: (e: unknown) => void;
+    const olderPromise = new Promise<BenchEntry[]>((_r, rej) => (rejectOlder = rej));
+    let call = 0;
+    spy.mockImplementation(() => (++call === 1 ? olderPromise : newer.promise));
+    handlers.reconnect?.();
+    handlers.reconnect?.();
+    newer.resolve([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.resyncError).toBeUndefined();
+    rejectOlder(netErr);
+    void older;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.resyncError).toBeUndefined();
     stop();
   });
 });

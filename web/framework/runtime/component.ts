@@ -46,14 +46,14 @@ function descriptor(obj: object, key: PropertyKey): PropertyDescriptor | undefin
 let activePropOwner: Owner | null = null;
 
 function readFrom(wrapper: object, src: AnyProps, key: PropertyKey): unknown {
+  if (activePropOwner !== null) return src[key as string];
   const o = propOwners.get(wrapper);
   if (o === undefined) return src[key as string];
-  const prev = activePropOwner;
   activePropOwner = o;
   try {
     return src[key as string];
   } finally {
-    activePropOwner = prev;
+    activePropOwner = null;
   }
 }
 
@@ -87,7 +87,11 @@ export function mergeProps<T extends Source[]>(...sources: T): Merged<T> {
       for (const key of Reflect.ownKeys(s)) {
         if (key === MEMOS || key === JSX_MEMOS) continue;
         const d = descriptor(s, key)!;
-        Object.defineProperty(out, key, { ...d, configurable: true, enumerable: true });
+        if (d.get === undefined && d.set === undefined) {
+          Object.defineProperty(out, key, { value: d.value, writable: true, enumerable: true, configurable: true });
+        } else {
+          Object.defineProperty(out, key, live(s as AnyProps, key, d));
+        }
       }
     }
     return out as Merged<T>;
@@ -300,79 +304,106 @@ export function propMemo(holder: object, key: string, fn: () => unknown): unknow
 
 interface JsxSlot {
   cond: Map<Owner | null, { reader: Reader<unknown>; claimedBy: object | null }>;
-  bySite: WeakMap<object, Reader<unknown>>;
+  bySite: WeakMap<object, { run: number; occ: number; list: (Reader<unknown> | undefined)[] }>;
+}
+
+/** Runs `fn` with `activePropOwner` cleared so nested JSX props resolve against their own component owner. */
+function withoutPropOwner<T>(fn: () => T): T {
+  if (activePropOwner === null) return fn();
+  const prev = activePropOwner;
+  activePropOwner = null;
+  try {
+    return fn();
+  } finally {
+    activePropOwner = prev;
+  }
 }
 
 /**
  * Internal: a component prop whose expression directly evaluates JSX. Runs lazily inside a raw owning memo so:
- * - A presence check (`props.x ?` inside `cond`/`computed`) runs under the consuming component's owner (never `null`)
- *   and is claimed by the first live insertion under that owner (no double-mount, no leaked effects).
- * - Distinct sibling insertions (`<div>{props.x}</div><div>{props.x}</div>`) each keep their own DOM instance.
- * - Reactive updates inside an insertion reuse its memo on the stable enclosing owner without double-mounting.
+ * - A presence check (`props.x ?` inside `cond`/`computed`) runs under the enclosing owner (never `null`) and is
+ *   claimed by the first live insertion under that owner (no double-mount, no leaked effects).
+ * - Distinct sibling insertions or multiple reads within one insertion (`[props.x, props.x]`) keep distinct DOM nodes.
+ * - Reactive updates inside an insertion reuse its memo on the stable enclosing owner without double-mounting, and
+ *   unsubscribed memos dispose their subtree when hidden.
  * - Returned functions (e.g. `flag ? <em /> : callback`) are preserved without eager invocation.
  */
 export function propJsx(holder: object, key: string, fn: () => unknown): unknown {
   let slots = (holder as Record<symbol, Record<string, JsxSlot | undefined> | undefined>)[JSX_MEMOS];
   if (slots === undefined) Object.defineProperty(holder, JSX_MEMOS, { value: (slots = {}) });
   const slot = (slots[key] ??= { cond: new Map(), bySite: new WeakMap() });
-  const [target, site] = propScope();
+  const [target, site, runId] = propScope();
 
-  // Read inside a non-owning computed / cond (`owner === null`): attach to the consuming component's owner.
+  // Read inside a non-owning computed / cond (`owner === null`): attach to the computed's creation owner or consuming component owner.
   if (site === null) {
-    const compOwner = activePropOwner ?? propOwners.get(holder) ?? null;
+    const compOwner = target ?? activePropOwner ?? propOwners.get(holder) ?? null;
     let entry = slot.cond.get(compOwner);
     if (entry === undefined) {
-      entry = runWithOwner(compOwner, () => {
-        const reader = memo(fn, { raw: true });
-        const created = { reader, claimedBy: null as object | null };
-        slot.cond.set(compOwner, created);
-        if (compOwner !== null) {
-          onCleanup(() => {
-            if (slot.cond.get(compOwner) === created) slot.cond.delete(compOwner);
-          });
-        }
-        return created;
-      });
+      entry = withoutPropOwner(() =>
+        runWithOwner(compOwner, () => {
+          const reader = memo(fn, { raw: true });
+          const created = { reader, claimedBy: null as object | null };
+          slot.cond.set(compOwner, created);
+          if (compOwner !== null) {
+            onCleanup(() => {
+              if (slot.cond.get(compOwner) === created) slot.cond.delete(compOwner);
+            });
+          }
+          return created;
+        }),
+      );
     }
-    return entry.reader();
+    return withoutPropOwner(() => entry!.reader());
   }
 
-  // Read at a concrete insertion / effect / component site: reuse this site's memo across reactive re-runs.
-  const existing = slot.bySite.get(site);
-  if (existing !== undefined) return existing();
+  // Read at a concrete insertion / effect / component site: track occurrence within each evaluation run.
+  let rec = slot.bySite.get(site);
+  if (rec === undefined) {
+    rec = { run: runId, occ: 0, list: [] };
+    slot.bySite.set(site, rec);
+  } else if (rec.run !== runId) {
+    rec.run = runId;
+    rec.occ = 0;
+  }
+  const idx = rec.occ++;
+  const existing = rec.list[idx];
+  if (existing !== undefined) return withoutPropOwner(() => existing());
 
   // Claim an unclaimed `cond()` memo from an enclosing owner so `props.x ? <div>{props.x}</div> : null` mounts once.
   if (slot.cond.size > 0) {
     for (let cur = target; cur !== null; cur = cur._parent) {
       const entry = slot.cond.get(cur);
       if (entry !== undefined && entry.claimedBy === null) {
-        entry.claimedBy = site;
-        slot.bySite.set(site, entry.reader);
+        const claim = {};
+        entry.claimedBy = claim;
+        rec.list[idx] = entry.reader;
         if (target !== null) {
           runWithOwner(target, () => {
             onCleanup(() => {
-              if (entry.claimedBy === site) entry.claimedBy = null;
-              if (slot.bySite.get(site) === entry.reader) slot.bySite.delete(site);
+              if (entry.claimedBy === claim) entry.claimedBy = null;
+              if (rec!.list[idx] === entry.reader) rec!.list[idx] = undefined;
             });
           });
         }
-        return entry.reader();
+        return withoutPropOwner(() => entry.reader());
       }
     }
   }
 
-  // Otherwise create a dedicated owning memo for this insertion site on its stable enclosing owner.
-  const created = runWithOwner(target, () => {
-    const r = memo(fn, { raw: true });
-    slot.bySite.set(site, r);
-    if (target !== null) {
-      onCleanup(() => {
-        if (slot.bySite.get(site) === r) slot.bySite.delete(site);
-      });
-    }
-    return r;
-  });
-  return created();
+  // Otherwise create a dedicated owning memo for this insertion occurrence on its stable enclosing owner.
+  const created = withoutPropOwner(() =>
+    runWithOwner(target, () => {
+      const r = memo(fn, { raw: true });
+      rec!.list[idx] = r;
+      if (target !== null) {
+        onCleanup(() => {
+          if (rec!.list[idx] === r) rec!.list[idx] = undefined;
+        });
+      }
+      return r;
+    }),
+  );
+  return withoutPropOwner(() => created());
 }
 
 /** Internal: a memoized spread source (`{...attrs()}` on a component), read lazily. */

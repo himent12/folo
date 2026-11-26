@@ -15,19 +15,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { sortJobs } from './flushOrder';
-import {
-  cleanupSources,
-  linkDependency,
-  needsToRecompute,
-  prepareSources,
-  retainSources,
-  subscribeLink,
-  TRACKING,
-  unsubscribeLink,
-  type Link,
-  type Source,
-  type Target,
-} from './links';
+import { cleanupSources, linkDependency, needsToRecompute, prepareSources, retainSources, subscribeLink, TRACKING, unsubscribeLink, type Link, type Source, type Target } from './links';
 
 const NOTIFIED = 1;
 const OUTDATED = 2;
@@ -70,6 +58,8 @@ let owner: Owner | null = null;
 /** Bumped on every write; lets an untracked computed skip a check when nothing at all changed. */
 let globalVersion = 0;
 let nextId = 0;
+let runSeq = 0;
+let activeRun = 0;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Dependency links
@@ -219,9 +209,11 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
   _sources: Link | undefined = undefined;
   _fn: () => T;
   _equals: Equals<T>;
+  _onEmpty: (() => void) | undefined = undefined;
   constructor(fn: () => T, equals: Equals<T> | undefined) {
     this._fn = fn;
     this._equals = equals === undefined ? is : equals;
+    this._parent = owner ?? (listener instanceof ComputedNode ? listener._parent : null);
   }
   _refresh(): boolean {
     this._flags &= ~NOTIFIED;
@@ -238,6 +230,8 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     }
     const prevListener = listener;
     const prevOwner = owner;
+    const prevRun = activeRun;
+    activeRun = ++runSeq;
     try {
       prepareSources(this);
       listener = this;
@@ -256,6 +250,7 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     }
     listener = prevListener;
     owner = prevOwner;
+    activeRun = prevRun;
     cleanupSources(this);
     this._flags &= ~RUNNING;
     return true;
@@ -277,6 +272,7 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
       if (this._flags & OWNING) this._flags = (this._flags & ~NOTIFIED) | OUTDATED;
       this._flags &= ~TRACKING;
       for (let n = this._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
+      this._onEmpty?.();
     }
   }
   _notify(): void {
@@ -579,6 +575,7 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T> & { raw?: boolea
   c._flags |= OWNING;
   c._parent = parent;
   c._depth = parent === null ? 0 : parent._depth + 1;
+  if (options?.raw) c._onEmpty = () => { if (root !== null) { const prev = root; root = null; c._version = 0; c._globalVersion = globalVersion - 1; dispose(prev); } };
   // Created now, where it is written, as Svelte creates a block: what it renders comes before what follows it in the
   // document (component order, `createUniqueId` numbering). Untracked: whoever reads it later subscribes then. An
   // error is kept for that first read.
@@ -668,6 +665,8 @@ class EffectNode extends Owner implements Target {
     if (this._flags & DISPOSED) return;
     const prevListener = listener;
     const prevOwner = owner;
+    const prevRun = activeRun;
+    activeRun = ++runSeq;
     prepareSources(this);
     listener = this;
     owner = this;
@@ -687,6 +686,7 @@ class EffectNode extends Owner implements Target {
     } finally {
       listener = prevListener;
       owner = prevOwner;
+      activeRun = prevRun;
       cleanupSources(this);
       this._flags &= ~RUNNING;
       if (this._flags & DISPOSED) {
@@ -929,12 +929,12 @@ export function deferEffects<T>(fn: () => T): T {
   return out;
 }
 
-/** Internal: `[stableOwner, siteKey]` for `propJsx` (steps past the active tracking effect/memo's per-run owner). */
-export function propScope(): readonly [Owner | null, object | null] {
-  if (owner === null) return [null, null];
-  if ((owner as unknown) === listener) return [owner._parent, owner];
-  if (listener instanceof ComputedNode && (listener._flags & OWNING) !== 0 && owner._parent === listener._parent && owner._id === listener._id) return [owner._parent, listener];
-  return [owner, owner];
+/** Internal: `[stableOwner, siteKey, runId]` for `propJsx`. */
+export function propScope(): readonly [Owner | null, object | null, number] {
+  if (owner === null) return [listener instanceof ComputedNode ? listener._parent : null, null, activeRun];
+  if ((owner as unknown) === listener) return [owner._parent, owner, activeRun];
+  if (listener instanceof ComputedNode && (listener._flags & OWNING) !== 0 && owner._parent === listener._parent && owner._id === listener._id) return [owner._parent, listener, activeRun];
+  return [owner, owner, activeRun];
 }
 
 /** Internal: maps each component's props object to its component owner (used by `propJsx`). */
