@@ -251,19 +251,20 @@ pub fn check_config(model: &FoloModel, classes: usize, cfg: &ValConfig) -> Resul
             n.conf, n.iou, n.fusion_iou, cfg.sample_conf, n.max_det, n.max_candidates
         )));
     }
-    if let crate::nms::NmsKind::SoftGaussian { sigma } = n.nms_kind
+    if let crate::nms::NmsKind::SoftGaussian { sigma } | crate::nms::NmsKind::MatrixGaussian { sigma } =
+        n.nms_kind
         && (!sigma.is_finite() || sigma <= 0.0)
     {
         return Err(Error::Config(format!(
-            "validation Soft-NMS Gaussian sigma must be finite and > 0; got {sigma}"
+            "validation Gaussian NMS sigma must be finite and > 0; got {sigma}"
         )));
     }
     if n.nms_kind.is_soft()
         && (n.score != crate::fusion::ScoreRule::None || n.fusion == crate::fusion::BoxFusion::Sebf)
     {
         return Err(Error::Config(
-            "validation cannot combine Soft-NMS with ScoreRule rescoring or BoxFusion::Sebf (Soft-NMS has no hard \
-             suppression clusters)"
+            "validation cannot combine Soft-NMS or Matrix-NMS with ScoreRule rescoring or BoxFusion::Sebf \
+             (score-decaying NMS has no hard suppression clusters)"
                 .into(),
         ));
     }
@@ -870,19 +871,26 @@ mod tests {
         let model = FoloModel::new(ModelConfig::new("n", 2).unwrap()).unwrap();
         model.eval();
         for bad_sigma in [0.0f32, -0.5, f32::NAN, f32::INFINITY] {
-            let mut vc = ValConfig::new(64, 2);
-            vc.nms.nms_kind = crate::nms::NmsKind::SoftGaussian { sigma: bad_sigma };
-            assert!(
-                matches!(check_config(&model, 2, &vc), Err(Error::Config(_))),
-                "sigma {bad_sigma} should fail check_config"
-            );
+            for kind in [
+                crate::nms::NmsKind::SoftGaussian { sigma: bad_sigma },
+                crate::nms::NmsKind::MatrixGaussian { sigma: bad_sigma },
+            ] {
+                let mut vc = ValConfig::new(64, 2);
+                vc.nms.nms_kind = kind;
+                assert!(
+                    matches!(check_config(&model, 2, &vc), Err(Error::Config(_))),
+                    "{kind:?} should fail check_config"
+                );
+            }
         }
-        let mut vc = ValConfig::new(64, 2);
-        vc.nms.nms_kind = crate::nms::NmsKind::SoftLinear;
-        vc.nms.score = crate::fusion::ScoreRule::Elc;
-        assert!(matches!(check_config(&model, 2, &vc), Err(Error::Config(_))));
-        vc.nms.score = crate::fusion::ScoreRule::None;
-        vc.nms.fusion = BoxFusion::Sebf;
-        assert!(matches!(check_config(&model, 2, &vc), Err(Error::Config(_))));
+        for kind in [crate::nms::NmsKind::SoftLinear, crate::nms::NmsKind::MatrixLinear] {
+            let mut vc = ValConfig::new(64, 2);
+            vc.nms.nms_kind = kind;
+            vc.nms.score = crate::fusion::ScoreRule::Elc;
+            assert!(matches!(check_config(&model, 2, &vc), Err(Error::Config(_))));
+            vc.nms.score = crate::fusion::ScoreRule::None;
+            vc.nms.fusion = BoxFusion::Sebf;
+            assert!(matches!(check_config(&model, 2, &vc), Err(Error::Config(_))));
+        }
     }
 }

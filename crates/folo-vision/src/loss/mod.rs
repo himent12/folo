@@ -50,6 +50,8 @@ mod terms;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_geom;
+#[cfg(test)]
 mod tests_math;
 
 pub use assignment::assign_batch;
@@ -59,7 +61,8 @@ pub use distill::{
     gt_verify_weights_cpu,
 };
 pub use terms::{
-    ciou, inner_ciou_loss, loss_with_assignment, nwd_loss, rpiou_loss, saeiou_loss, wiou_v3_loss,
+    ciou, focaler_iou, focaler_iou_loss, inner_ciou_loss, loss_with_assignment, mpdiou_loss,
+    mpdiou_loss_with_scale, nwd_loss, rpiou_loss, saeiou_loss, shape_iou_loss, wiou_v3_loss,
 };
 
 use crate::assign::TalConfig;
@@ -106,6 +109,12 @@ pub enum BoxLossKind {
     InnerCiou,
     /// Wise-IoU v3 (Tong et al. 2023): distance-attended IoU loss with non-monotonic dynamic focusing (`wiou_alpha`, `wiou_delta`, `wiou_momentum`).
     WiouV3,
+    /// Minimum Point Distance IoU (Ma & Xu 2023): scale-invariant corner-distance penalty
+    /// `(1 - IoU) + (d1² + d2²) / (2 * (cw² + ch² + eps))`.
+    Mpdiou,
+    /// Shape-IoU (Zhang & Zhang 2023): GT aspect-weighted center distance plus shape-value penalty
+    /// (`shape_scale` in `[0, 2]`).
+    ShapeIou,
 }
 
 /// Loss hyper-parameters. Defaults are `docs/MODEL.md` §7.4's.
@@ -135,10 +144,12 @@ pub struct LossConfig {
     pub qfl_beta: f32,
     /// Scale-adaptive NWD blending weight `λ₀` in `[0, 1]` for the box loss (`0.0` = no NWD blend).
     pub nwd_weight: f32,
-    /// Box regression geometry loss (`Ciou` default, `Rpiou`, `Saeiou`, `InnerCiou`, or `WiouV3`).
+    /// Box regression geometry loss (`Ciou` default, `Rpiou`, `Saeiou`, `InnerCiou`, `WiouV3`, `Mpdiou`, or `ShapeIou`).
     pub box_loss: BoxLossKind,
     /// Auxiliary box scale ratio `r` in `[0.5, 1.5]` for [`BoxLossKind::InnerCiou`] (`0.7` default).
     pub inner_ratio: f32,
+    /// Scale factor `s` in `[0, 2]` for [`BoxLossKind::ShapeIou`] (`0.0` default; `0.5..=1.5` for small-object sensitivity).
+    pub shape_scale: f32,
     /// Non-monotonic focusing base `α > 1` for [`BoxLossKind::WiouV3`] (`1.9` default).
     pub wiou_alpha: f32,
     /// Non-monotonic focusing pivot `δ > 0` for [`BoxLossKind::WiouV3`] (`3.0` default).
@@ -173,6 +184,7 @@ impl Default for LossConfig {
             nwd_weight: 0.0,
             box_loss: BoxLossKind::Ciou,
             inner_ratio: 0.7,
+            shape_scale: 0.0,
             wiou_alpha: 1.9,
             wiou_delta: 3.0,
             wiou_momentum: 0.01,
@@ -243,6 +255,9 @@ impl LossConfig {
                 "loss.inner_ratio must be finite and in 0.5..=1.5, got {}",
                 self.inner_ratio
             ));
+        }
+        if !(self.shape_scale.is_finite() && (0.0..=2.0).contains(&self.shape_scale)) {
+            return Err(format!("loss.shape_scale must be finite and in 0..=2, got {}", self.shape_scale));
         }
         if !(self.wiou_alpha.is_finite() && self.wiou_alpha > 1.0) {
             return Err(format!("loss.wiou_alpha must be finite and > 1, got {}", self.wiou_alpha));

@@ -1,16 +1,21 @@
 //! The differentiable terms of §7.4 for a fixed assignment ([`loss_with_assignment`]):
 //! - [`cls`]: BCE, MAL, Varifocal Loss (VFL), Quality Focal Loss (QFL),
 //! - [`box_loss`]: CIoU, Inner-CIoU, Wise-IoU v3, R-PIoU, S-AEIoU, NWD,
+//! - [`geom_loss`]: MPDIoU, Shape-IoU, and Focaler-IoU remapping,
 //! - [`dfl`]: DFL cross-entropy, 1D Optimal-Transport tail barrier (`OT-DFL`), and `CRPS-DFL`.
 
 mod box_loss;
 mod cls;
 mod dfl;
+mod geom_loss;
 
 #[cfg(test)]
 pub(crate) use box_loss::saeiou_box_f64;
 pub use box_loss::{ciou, inner_ciou_loss, nwd_loss, rpiou_loss, saeiou_loss, wiou_v3_loss};
 pub(crate) use dfl::crps_dfl;
+pub use geom_loss::{focaler_iou, focaler_iou_loss, mpdiou_loss, mpdiou_loss_with_scale, shape_iou_loss};
+#[cfg(test)]
+pub(crate) use geom_loss::{mpdiou_box_f64, shape_iou_box_f64};
 
 use folo_core::{DType, Result, Tensor};
 
@@ -21,6 +26,7 @@ use crate::decode::Anchors;
 use box_loss::{rpiou_from_logits, saeiou_from_logits, wiou_v3_loss_and_mean};
 use cls::cls_loss_sum;
 use dfl::ot_dfl_tail;
+use geom_loss::{mpdiou_from_logits, shape_iou_from_logits};
 
 /// Sum of every element as a rank-0 tensor, in an order that does not depend on thread scheduling: long inputs are
 /// summed in rows of 4096 (each row serially), then the row sums the same way.
@@ -227,10 +233,10 @@ fn loss_impl_wiou(
                 mean_iou_loss = batch_mean;
                 blend_nwd(w_per)?
             }
-            BoxLossKind::Rpiou | BoxLossKind::Saeiou => {
-                let eval_alg = |lams_opt: Option<&[f32]>| -> Result<Tensor> {
-                    if cfg.box_loss == BoxLossKind::Rpiou {
-                        rpiou_from_logits(
+            BoxLossKind::Rpiou | BoxLossKind::Saeiou | BoxLossKind::Mpdiou | BoxLossKind::ShapeIou => {
+                let eval_direct = |lams_opt: Option<&[f32]>| -> Result<Tensor> {
+                    match cfg.box_loss {
+                        BoxLossKind::Rpiou => rpiou_from_logits(
                             &logits,
                             &pd,
                             &tbox,
@@ -241,9 +247,8 @@ fn loss_impl_wiou(
                             cfg.rpiou_beta,
                             cfg.rpiou_kappa,
                             cfg.rpiou_delta,
-                        )
-                    } else {
-                        saeiou_from_logits(
+                        ),
+                        BoxLossKind::Saeiou => saeiou_from_logits(
                             &logits,
                             &pd,
                             &tbox,
@@ -254,12 +259,26 @@ fn loss_impl_wiou(
                             cfg.rpiou_beta,
                             cfg.rpiou_kappa,
                             cfg.rpiou_delta,
-                        )
+                        ),
+                        BoxLossKind::Mpdiou => {
+                            mpdiou_from_logits(&logits, &pd, &tbox, &asg.score, lams_opt, tss, cfg.box_gain)
+                        }
+                        BoxLossKind::ShapeIou => shape_iou_from_logits(
+                            &logits,
+                            &pd,
+                            &tbox,
+                            &asg.score,
+                            lams_opt,
+                            tss,
+                            cfg.box_gain,
+                            cfg.shape_scale,
+                        ),
+                        _ => unreachable!(),
                     }
                 };
                 if cfg.nwd_weight > 0.0 {
                     let lams: Vec<f32> = (0..n).map(|k| nwd_lambda(&asg.target[k], cfg.nwd_weight)).collect();
-                    let wb_alg = eval_alg(Some(&lams))?;
+                    let wb_alg = eval_direct(Some(&lams))?;
                     let cs: Vec<f32> =
                         (0..n).map(|k| 12.8 / anchors.strides[asg.anchor[k] as usize]).collect();
                     let lam_t = on_dev(Tensor::from_vec(lams, [n])?)?;
@@ -270,7 +289,7 @@ fn loss_impl_wiou(
                         .mul_scalar(cfg.box_gain)?;
                     wb_alg.add(&wb_nwd)?
                 } else {
-                    eval_alg(None)?
+                    eval_direct(None)?
                 }
             }
         };

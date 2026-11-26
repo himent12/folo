@@ -65,7 +65,7 @@ pub fn ciou(b1: &Tensor, b2: &Tensor) -> Result<Tensor> {
 }
 
 /// Validate that `b1` and `b2` are matching `[N, 4]` `F32` tensors on the same device.
-fn check_box_pair(b1: &Tensor, b2: &Tensor, op: &'static str) -> Result<usize> {
+pub(super) fn check_box_pair(b1: &Tensor, b2: &Tensor, op: &'static str) -> Result<usize> {
     if b1.dtype() != DType::F32 {
         return Err(folo_core::Error::DTypeMismatch { op, expected: DType::F32, got: b1.dtype() });
     }
@@ -398,12 +398,12 @@ pub fn rpiou_loss(b1: &Tensor, b2: &Tensor, beta: f32, kappa: f32, delta0: f32) 
 
 type BoxLossF64Fn = fn([f64; 4], [f64; 4], f64, f64, f64) -> (f64, [f64; 4]);
 
-/// Weighted `R-PIoU` or `S-AEIoU` scalar `(box_gain / tss) * Σ_i t_i * (1 - lam_i) * L_box_i` directly from DFL
-/// `logits: [N, 4, R]`, reusing the tensor-decoded `pd` so focal-IoU and edge terms evaluate the exact same
+/// Weighted box-loss scalar `(box_gain / tss) * Σ_i t_i * (1 - lam_i) * L_box_i` directly from DFL
+/// `logits: [N, 4, R]`, reusing the tensor-decoded `pd` so IoU and geometric terms evaluate the exact same
 /// predicted box, and computing the DFL softmax Jacobian centered on the dominant bin `k*` in `f64` alongside
 /// batch scaling, `box_gain`, `tss`, `t`, and `(1 - lam)` before rounding the final logit gradient to `f32`.
 #[allow(clippy::too_many_arguments)]
-fn algebraic_box_from_logits(
+pub(super) fn dfl_box_from_logits(
     op_name: &'static str,
     logits: &Tensor,
     pd_t: &Tensor,
@@ -412,10 +412,7 @@ fn algebraic_box_from_logits(
     lams: Option<&[f32]>,
     tss: f32,
     box_gain: f32,
-    beta: f32,
-    kappa: f32,
-    delta0: f32,
-    box_fn: BoxLossF64Fn,
+    mut box_fn: impl FnMut([f64; 4], [f64; 4]) -> (f64, [f64; 4]),
 ) -> Result<Tensor> {
     let (n, sides, r) = logits.dims3()?;
     debug_assert_eq!(sides, 4);
@@ -425,14 +422,13 @@ fn algebraic_box_from_logits(
     }
     let raw_logits = logits.to_vec::<f32>()?;
     let pds = pd_t.to_vec::<f32>()?;
-    let (b64, k64, d64) = (beta as f64, kappa as f64, delta0 as f64);
     let mut sum_w = 0.0f64;
     let mut base_d = vec![0.0f64; n * 4];
     let mut weights = vec![0.0f64; n];
     for i in 0..n {
         let ai = [pds[4 * i] as f64, pds[4 * i + 1] as f64, pds[4 * i + 2] as f64, pds[4 * i + 3] as f64];
         let bi = [tbox[4 * i] as f64, tbox[4 * i + 1] as f64, tbox[4 * i + 2] as f64, tbox[4 * i + 3] as f64];
-        let (lv, g_xyxy) = box_fn(ai, bi, b64, k64, d64);
+        let (lv, g_xyxy) = box_fn(ai, bi);
         let wi = (t_scores[i] as f64) * lams.map_or(1.0, |v| 1.0 - v[i] as f64);
         weights[i] = wi;
         sum_w += wi * lv;
@@ -443,23 +439,30 @@ fn algebraic_box_from_logits(
     }
     let out_val = ((sum_w / tss as f64) * box_gain as f64) as f32;
     let out_t = Tensor::scalar(out_val).to_device(dev)?;
+    let has_nonfinite = !sum_w.is_finite() || base_d.iter().any(|v| !v.is_finite());
     Tensor::custom_op(op_name, &[logits], out_t, move |g| {
         let gv = g.item::<f32>()? as f64;
         let scale = gv * (box_gain as f64 / tss as f64);
         let mut grad = vec![0.0f32; n * 4 * r];
-        if scale != 0.0 {
+        if scale != 0.0 || has_nonfinite {
             let mut p_row = vec![0.0f64; r];
             for i in 0..n {
                 let gi = scale * weights[i];
-                if gi == 0.0 {
+                let row_nonfinite = !base_d[4 * i..4 * i + 4].iter().all(|v| v.is_finite());
+                if gi == 0.0 && !row_nonfinite {
                     continue;
                 }
                 for side in 0..4 {
-                    let gd = gi * base_d[4 * i + side];
-                    if gd == 0.0 {
+                    let bd = base_d[4 * i + side];
+                    let gd = gi * bd;
+                    if gd == 0.0 && bd.is_finite() {
                         continue;
                     }
                     let row = (4 * i + side) * r..(4 * i + side + 1) * r;
+                    if !gd.is_finite() {
+                        grad[row].fill(f32::NAN);
+                        continue;
+                    }
                     let lrow = &raw_logits[row.clone()];
                     let grow = &mut grad[row];
                     let (k_star, m_side) =
@@ -490,6 +493,28 @@ fn algebraic_box_from_logits(
             }
         }
         Ok(vec![Some(Tensor::from_vec(grad, [n, 4, r])?.to_device(dev)?)])
+    })
+}
+
+/// Weighted `R-PIoU` or `S-AEIoU` scalar directly from DFL `logits: [N, 4, R]`.
+#[allow(clippy::too_many_arguments)]
+fn algebraic_box_from_logits(
+    op_name: &'static str,
+    logits: &Tensor,
+    pd_t: &Tensor,
+    tbox: &[f32],
+    t_scores: &[f32],
+    lams: Option<&[f32]>,
+    tss: f32,
+    box_gain: f32,
+    beta: f32,
+    kappa: f32,
+    delta0: f32,
+    box_fn: BoxLossF64Fn,
+) -> Result<Tensor> {
+    let (b64, k64, d64) = (beta as f64, kappa as f64, delta0 as f64);
+    dfl_box_from_logits(op_name, logits, pd_t, tbox, t_scores, lams, tss, box_gain, move |a, b| {
+        box_fn(a, b, b64, k64, d64)
     })
 }
 

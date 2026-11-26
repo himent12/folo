@@ -435,7 +435,7 @@ fn score_order(scores: &[f32], idx: &mut [u32]) {
 
 /// Group `order` (already sorted by descending score) into per-class buckets preserving score order inside each
 /// bucket. Uses counting sort for dense class ids and stable sort for sparse ids.
-fn bucket_by_class(order: &[u32], classes: &[u32]) -> (Vec<u32>, Vec<(usize, usize)>) {
+pub(super) fn bucket_by_class(order: &[u32], classes: &[u32]) -> (Vec<u32>, Vec<(usize, usize)>) {
     let n = order.len();
     let max_class = classes.iter().copied().max().unwrap_or(0) as usize;
     if max_class <= n.max(1024) {
@@ -486,12 +486,15 @@ pub fn batched_nms(
     batched_nms_inner(boxes, scores, classes, iou_thr, max_det, agnostic, false, false).0
 }
 
-/// Class-aware NMS supporting [`NmsKind::Standard`], [`NmsKind::Diou`], [`NmsKind::SoftLinear`], and
-/// [`NmsKind::SoftGaussian`]. Returns `(input_index, final_score)` pairs sorted by descending score, at most
-/// `max_det` of them. `score_thr` is only used by Soft-NMS to drop boxes whose decayed score falls to or below it.
+/// Class-aware NMS supporting [`NmsKind::Standard`], [`NmsKind::Diou`], [`NmsKind::SoftLinear`],
+/// [`NmsKind::SoftGaussian`], [`NmsKind::MatrixLinear`], and [`NmsKind::MatrixGaussian`]. Returns
+/// `(input_index, final_score)` pairs sorted by descending score, at most `max_det` of them. `iou_thr` is
+/// ignored by `SoftGaussian`, `MatrixLinear`, and `MatrixGaussian`; `score_thr` is used by Soft-NMS and
+/// Matrix-NMS to drop boxes whose decayed score falls to or below it.
 ///
 /// # Panics
-/// If the three slices differ in length, or if `SoftGaussian` has `!sigma.is_finite() || sigma <= 0.0`.
+/// If the three slices differ in length, or if `SoftGaussian` / `MatrixGaussian` has
+/// `!sigma.is_finite() || sigma <= 0.0`.
 #[allow(clippy::too_many_arguments)]
 pub fn batched_nms_with_kind(
     boxes: &[Xyxy],
@@ -522,6 +525,18 @@ pub fn batched_nms_with_kind(
         NmsKind::SoftGaussian { sigma } => {
             batched_soft_nms(boxes, scores, classes, iou_thr, score_thr, Some(sigma), max_det, agnostic)
         }
+        NmsKind::MatrixLinear => {
+            super::matrix::batched_matrix_nms(boxes, scores, classes, score_thr, None, max_det, agnostic)
+        }
+        NmsKind::MatrixGaussian { sigma } => super::matrix::batched_matrix_nms(
+            boxes,
+            scores,
+            classes,
+            score_thr,
+            Some(sigma),
+            max_det,
+            agnostic,
+        ),
     }
 }
 
