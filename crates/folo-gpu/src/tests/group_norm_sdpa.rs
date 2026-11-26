@@ -482,6 +482,119 @@ fn group_norm_and_instance_norm_match_cpu() {
             1e-5,
             &format!("gn 3e38 spread fb={portable}"),
         );
+        // Verify backward `dx`/`dw` stay finite on `[3e38, -3e38, -3e38, -3e38]` (where `rstd ≈ 3.85e-39` is
+        // subnormal and may FTZ on GPU) and exact on `[5e36, -5e36, -5e36, -5e36]` (where `rstd ≈ 2.31e-37` is normal).
+        let g_sp = GpuTensor::from_slice(&ctx, &[1.0, 2.0, -1.0, 0.5], &[4]).unwrap();
+        let dx_sp = GpuTensor::empty(&ctx, &[4], DType::F32).unwrap();
+        let dw_sp = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        group_norm_backward(
+            &ctx,
+            spread.raw(),
+            g_sp.raw(),
+            None,
+            ms.raw(),
+            rs.raw(),
+            dx_sp.raw(),
+            Some(dw_sp.raw()),
+            None,
+            (1, 1, 4),
+            1,
+            DType::F32,
+        )
+        .unwrap();
+        assert!(dx_sp.to_vec().unwrap().iter().all(|v| v.is_finite()));
+        assert!(dw_sp.to_vec().unwrap().iter().all(|v| v.is_finite()));
+
+        let spread_n = GpuTensor::from_slice(&ctx, &[5e36f32, -5e36, -5e36, -5e36], &[4]).unwrap();
+        let ysn = GpuTensor::empty(&ctx, &[4], DType::F32).unwrap();
+        let msn = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        let rsn = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        group_norm_forward(
+            &ctx,
+            spread_n.raw(),
+            None,
+            None,
+            ysn.raw(),
+            msn.raw(),
+            rsn.raw(),
+            (1, 1, 4),
+            1,
+            0.0,
+            DType::F32,
+        )
+        .unwrap();
+        group_norm_backward(
+            &ctx,
+            spread_n.raw(),
+            g_sp.raw(),
+            None,
+            msn.raw(),
+            rsn.raw(),
+            dx_sp.raw(),
+            Some(dw_sp.raw()),
+            None,
+            (1, 1, 4),
+            1,
+            DType::F32,
+        )
+        .unwrap();
+        let want_dw = 1.0 * s3 + (2.0 - 1.0 + 0.5) * (-1.0 / s3);
+        assert!(dx_sp.to_vec().unwrap().iter().all(|v| v.is_finite()));
+        assert_close(&dw_sp.to_vec().unwrap(), &[want_dw], 1e-4, 1e-4, &format!("gn 5e36 dw fb={portable}"));
+
+        // Balanced opposite-infinity sum `[3e38, 3e38, -3e38, -3e38]` (whose raw sum produces +Inf + -Inf = NaN)
+        // and non-power-of-two constant huge row `[1e38; 3]`.
+        let bal = GpuTensor::from_slice(&ctx, &[3e38f32, 3e38, -3e38, -3e38], &[4]).unwrap();
+        let yb = GpuTensor::empty(&ctx, &[4], DType::F32).unwrap();
+        let mb = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        let rb = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        group_norm_forward(
+            &ctx,
+            bal.raw(),
+            None,
+            None,
+            yb.raw(),
+            mb.raw(),
+            rb.raw(),
+            (1, 1, 4),
+            1,
+            0.0,
+            DType::F32,
+        )
+        .unwrap();
+        assert_close(
+            &yb.to_vec().unwrap(),
+            &[1.0, 1.0, -1.0, -1.0],
+            1e-5,
+            1e-5,
+            &format!("gn bal 3e38 fb={portable}"),
+        );
+
+        let c3 = GpuTensor::from_slice(&ctx, &[1e38f32; 3], &[3]).unwrap();
+        let yc3 = GpuTensor::empty(&ctx, &[3], DType::F32).unwrap();
+        let mc3 = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        let rc3 = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        group_norm_forward(
+            &ctx,
+            c3.raw(),
+            None,
+            None,
+            yc3.raw(),
+            mc3.raw(),
+            rc3.raw(),
+            (1, 1, 3),
+            1,
+            1e-5,
+            DType::F32,
+        )
+        .unwrap();
+        assert_close(
+            &yc3.to_vec().unwrap(),
+            &[0.0; 3],
+            1e-5,
+            1e-5,
+            &format!("gn const 1e38x3 fb={portable}"),
+        );
 
         let big = GpuTensor::from_slice(&ctx, &[100_000_000.0, 100_000_008.0], &[2]).unwrap();
         let y_big = GpuTensor::empty(&ctx, &[2], DType::F32).unwrap();
@@ -709,14 +822,14 @@ fn tiled_sdpa_forward_matches_cpu() {
         .unwrap();
     assert_close(&goe.to_vec().unwrap(), &want_ext, 1e-4, 1e-4, "sdpa extreme logits");
 
-    // Large V values (`1e38`) with equal zero logits stay finite (`1e38`, no unnormalized sum overflow).
-    let q_z = GpuTensor::from_slice(&ctx, &[0.0f32; 16], &[16]).unwrap();
-    let k_z = GpuTensor::from_slice(&ctx, &[0.0f32; 16], &[16]).unwrap();
-    let v_big = GpuTensor::from_slice(&ctx, &[1e38f32; 16], &[16]).unwrap();
+    // Large V values (`1e38`) across multiple KV tiles (`sk = 64 > 32`) stay finite (`1e38`, exercising `o_scale`).
+    let q_z = GpuTensor::from_slice(&ctx, &[0.0f32; 4 * 4], &[16]).unwrap();
+    let k_z = GpuTensor::from_slice(&ctx, &[0.0f32; 64 * 4], &[256]).unwrap();
+    let v_big = GpuTensor::from_slice(&ctx, &[1e38f32; 64 * 4], &[256]).unwrap();
     let o_big = GpuTensor::empty(&ctx, &[16], DType::F32).unwrap();
-    sdpa_forward(&ctx, q_z.raw(), k_z.raw(), v_big.raw(), o_big.raw(), (1, 4, 4, 4), 0.5, false, DType::F32)
+    sdpa_forward(&ctx, q_z.raw(), k_z.raw(), v_big.raw(), o_big.raw(), (1, 4, 64, 4), 0.5, false, DType::F32)
         .unwrap();
-    assert_close(&o_big.to_vec().unwrap(), &[1e38f32; 16], 1e33, 1e-5, "sdpa large V 1e38");
+    assert_close(&o_big.to_vec().unwrap(), &[1e38f32; 16], 1e33, 1e-5, "sdpa large V 1e38 multi-tile");
 
     // Zero-edge shapes (sq=0 / b=0 -> Ok; sk=0 with sq>0 -> Err).
     let tiny = GpuTensor::from_slice(&ctx, &[1.0], &[1]).unwrap();
