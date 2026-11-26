@@ -79,14 +79,16 @@ impl FoloApp {
         let export_btn = self.export_menu(&m, window, cx);
         let e2e = self.model_e2e(&m);
         let title = div()
+            .w_full()
             .flex()
             .items_center()
             .gap(px(10.))
-            .child(text(ty::XL, t.text_primary).child(m.name.clone()))
-            .child(badge(&t, m.arch.as_str(), Tone::Neutral))
+            .min_w_0()
+            .child(text(ty::XL, t.text_primary).min_w_0().ellipsis().child(m.name.clone()))
+            .child(div().flex_none().child(badge(&t, m.arch.as_str(), Tone::Neutral)))
             // The same compact tag as every list, right after the architecture badge, its help on
             // hover; the Details panel's Head row gives it a keyboard route.
-            .when(e2e, |d| d.child(e2e_tag(&t, "e2e-model-head")));
+            .when(e2e, |d| d.child(div().flex_none().child(e2e_tag(&t, "e2e-model-head"))));
         let mut subtitle =
             div().flex().items_center().gap(px(6.)).child(text(ty::BASE, t.text_secondary).child(format!(
                 "{} px · {}{}{} · created {created}",

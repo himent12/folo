@@ -57,6 +57,8 @@ pub(crate) struct TextLayoutInner {
     pub(crate) line_height: Pixels,
     /// The width the lines were wrapped at (a later measure at the same width reuses them, as GPUI).
     pub(crate) wrap_width: Option<Pixels>,
+    /// The width the text was truncated to, if any (a later measure at a different width re-measures).
+    pub(crate) truncate_width: Option<Pixels>,
     /// The measured size.
     pub(crate) size: Option<Size<Pixels>>,
     /// The element's bounds once prepainted.
@@ -109,7 +111,8 @@ impl TextLayout {
 
                 if let Some(layout) = element_state.0.borrow().as_ref()
                     && let Some(size) = layout.size
-                    && (wrap_width.is_none() || wrap_width == layout.wrap_width)
+                    && wrap_width == layout.wrap_width
+                    && truncate_width == layout.truncate_width
                 {
                     return size;
                 }
@@ -170,6 +173,7 @@ impl TextLayout {
                     lines,
                     line_height,
                     wrap_width,
+                    truncate_width,
                     size: Some(size),
                     bounds: None,
                 });

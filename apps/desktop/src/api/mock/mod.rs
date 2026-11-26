@@ -205,6 +205,36 @@ impl MockBackend {
         self
     }
 
+    /// Replaces dataset `id`'s images with `train` train images followed by `val` val images, each
+    /// with a unique relative `file` path (e.g. to place all val images on a later image page).
+    #[cfg(test)]
+    pub fn with_paged_splits(mut self, id: &str, train: usize, val: usize) -> Self {
+        let f = self.datasets.iter_mut().find(|d| d.ds.id == id).expect("a demo dataset");
+        let template = f.images.first().cloned().expect("an image");
+        let mut images = Vec::with_capacity(train + val);
+        for i in 0..train {
+            images.push(ImageInfo {
+                id: format!("img_{}", i + 1),
+                file: format!("images/train/{:05}.jpg", i + 1),
+                split: Split::Train,
+                ..template.clone()
+            });
+        }
+        for i in 0..val {
+            images.push(ImageInfo {
+                id: format!("img_{}", train + i + 1),
+                file: format!("images/val/{:05}.jpg", i + 1),
+                split: Split::Val,
+                ..template.clone()
+            });
+        }
+        f.images = images;
+        f.ds.splits.train = train as u64;
+        f.ds.splits.val = val as u64;
+        f.ds.splits.test = 0;
+        self
+    }
+
     /// Takes the boxes off a dataset's first `n` images: background images listed first.
     #[cfg(test)]
     pub fn with_background_first(mut self, id: &str, n: usize) -> Self {

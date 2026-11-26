@@ -142,6 +142,7 @@ impl FoloApp {
         self.ds_img_query.clear();
         self.ds_img_sort = crate::screens::datasets::ImageSort::Default;
         self.ds_img_dataset = None;
+        self.ds_scroll_anchor = None;
         self.run_filter = super::RunFilter::All;
         self.run_arch_filter = None;
         self.run_search.update(cx, |i, cx| i.set_text("", cx));

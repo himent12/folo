@@ -40,6 +40,7 @@ impl FoloApp {
         let current_query = self.ds_img_search.read(cx).text().to_string();
         if self.ds_img_query != current_query {
             self.ds_img_query = current_query;
+            self.ds_scroll_anchor = None;
         }
         let total = self.store.images.get(&id).and_then(|l| l.ready()).map_or(0, |v| v.len());
         let count = self.filtered_indices(&id).len();
@@ -65,6 +66,7 @@ impl FoloApp {
             Rc::new(move |this, i, _, _| {
                 this.ds_split = splits[i];
                 this.ds_hover_tile = None;
+                this.ds_scroll_anchor = None;
                 this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
             }),
         );
@@ -122,6 +124,7 @@ impl FoloApp {
                             None => {}
                         }
                         this.ds_hover_tile = None;
+                        this.ds_scroll_anchor = None;
                         this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
                         cx.notify();
                     }
@@ -275,6 +278,7 @@ impl FoloApp {
                     this.ds_img_dataset = Some(sort_ds.clone());
                     this.ds_img_sort = super::ImageSort::ALL[i];
                     this.ds_hover_tile = None;
+                    this.ds_scroll_anchor = None;
                     this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
                     cx.notify();
                 }),
@@ -336,6 +340,7 @@ impl FoloApp {
                     act(|this, _, cx| {
                         this.ds_empty_of = None;
                         this.ds_hover_tile = None;
+                        this.ds_scroll_anchor = None;
                         cx.notify();
                     }),
                 ))
@@ -428,6 +433,7 @@ impl FoloApp {
         let rows = count.div_ceil(cols);
         let cell_w = (width - GAP * (cols as f32 - 1.)) / cols as f32;
         let row_h = cell_w * 0.75 + GAP + 1.;
+        self.try_restore_dataset_scroll_anchor(&id, cols, row_h, more);
         let width_cell = self.grid_width.clone();
         let ds_id: SharedString = id.clone().into();
         // Pre-interned class names, shared across visible tiles and box chips without per-box allocs.
@@ -643,6 +649,7 @@ impl FoloApp {
                             } else {
                                 folo_ui::ScrollStrategy::Bottom
                             };
+                            this.ds_scroll_anchor = None;
                             this.grid_scroll.scroll_to_item(j / cols, strategy);
                             this.kb = true;
                             let fh = this.fh(format!("tile-{next}"), cx);
@@ -673,6 +680,7 @@ impl FoloApp {
         .on_scroll_wheel(cx.listener({
             let ds_id = wheel_ds;
             move |this, _, _, cx| {
+                this.ds_scroll_anchor = None;
                 let Some(hovered) = this.ds_hover_tile.as_deref() else { return };
                 let Some((hover_ds, cached_idx, hover_img)) = parse_hover_tile(hovered) else {
                     this.ds_hover_tile = None;

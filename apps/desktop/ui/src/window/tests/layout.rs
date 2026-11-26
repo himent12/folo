@@ -148,3 +148,46 @@ fn recomputed_layout_invalidates_cached_bounds_for_entire_subtree() {
         assert_eq!(child_after, Bounds::new(point(px(10.), px(10.)), size(px(190.), px(20.))));
     });
 }
+
+#[test]
+fn truncated_text_in_min_w_0_flex_row_does_not_cache_zero_width_probe() {
+    let (mut app, window) = open(size(px(1000.), px(200.)), 1.0, |_, _| {
+        div()
+            .size_full()
+            .flex()
+            .items_start()
+            .justify_between()
+            .gap(px(16.))
+            .child(
+                div().flex().flex_col().flex_1().gap(px(4.)).min_w_0().child(
+                    div().h(px(28.)).w_full().flex().items_center().min_w_0().child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .bg(color(1))
+                                    .text_size(px(20.))
+                                    .line_height(px(28.))
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_normal()
+                                    .line_clamp(1)
+                                    .text_ellipsis()
+                                    .child("shapes-hard"),
+                            )
+                            .child(div().flex_none().bg(color(2)).w(px(40.)).h(px(20.))),
+                    ),
+                ),
+            )
+            .child(div().bg(color(3)).w(px(200.)).h(px(28.)))
+            .into_any_element()
+    });
+    let q1 = quad_of(&mut app, window, color(1));
+    let q2 = quad_of(&mut app, window, color(2));
+    assert!(q1.size.width > ScaledPixels(50.), "title_div must keep text width: {q1:?}");
+    assert!(q2.origin.x > q1.origin.x + q1.size.width, "badge sits to the right of title: {q1:?} {q2:?}");
+}

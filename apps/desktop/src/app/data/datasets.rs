@@ -29,6 +29,20 @@ pub struct FailedImagePage {
     pub error: ApiError,
 }
 
+/// Place in a dataset's image grid saved across an external revision refresh and restored once the
+/// batch carrying that file arrives. Keyed by `(file, split)` because image IDs are positional.
+#[derive(Clone, Debug)]
+pub struct DatasetScrollAnchor {
+    pub dataset: String,
+    pub file: String,
+    pub split: Split,
+    /// Pixel scroll offset within the anchor row (`0..row_h`) when captured from a scrolled grid.
+    pub intra_row: f32,
+    /// Pending `scroll_to_item` strategy (for example from closing the inspector right before a
+    /// deferred recheck invalidated the image list).
+    pub strategy: Option<folo_ui::ScrollStrategy>,
+}
+
 /// Whether a failed image-list page is likely transient (worth bounded automatic backoff) rather
 /// than a permanent permission, missing-dataset, or client error.
 pub(crate) fn is_transient_page_error(error: &ApiError) -> bool {
@@ -188,6 +202,7 @@ impl FoloApp {
     /// way, its card's first images, its label issues, its decoded images, the grid's filter): read
     /// again when shown.
     pub(crate) fn forget_dataset_contents(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.capture_dataset_scroll_anchor(id);
         self.store.images.remove(id);
         self.images_more.remove(id);
         self.failed_pages.remove(id);
@@ -440,5 +455,104 @@ impl FoloApp {
     /// Whether more of a dataset's image list is still on its way (the grid shows what came).
     pub fn images_pending(&self, id: &str) -> bool {
         self.images_more.contains_key(id)
+    }
+
+    /// Saves the user's visible place in dataset `id`'s image grid before a revision reload drops
+    /// `store.images`, so paged reloads return to the same file and offset once its batch arrives.
+    fn capture_dataset_scroll_anchor(&mut self, id: &str) {
+        if !matches!(&self.route, super::super::Route::Dataset(cur) if cur == id)
+            || self.ds_tab != super::super::DsTab::Images
+        {
+            return;
+        }
+        // Keep an anchor captured before an earlier in-flight reload instead of replacing it with
+        // an empty or partially-loaded grid's row 0.
+        if self.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == id) {
+            return;
+        }
+        let (deferred, scroll_y, item_h) = {
+            let state = self.grid_scroll.0.borrow();
+            (
+                state.deferred_scroll_to_item,
+                f32::from(-state.base_handle.offset().y).max(0.),
+                state.last_item_height.map(f32::from),
+            )
+        };
+        let (target_row, intra_row, strategy) = if let Some((row, strategy)) = deferred {
+            if row == 0 && scroll_y <= 0. {
+                return;
+            }
+            (row, 0., Some(strategy))
+        } else {
+            let Some(item_h) = item_h.filter(|&h| h > 0.) else { return };
+            if scroll_y <= 0. {
+                return;
+            }
+            let row = (scroll_y / item_h).floor().max(0.) as usize;
+            let rem = (scroll_y - row as f32 * item_h).clamp(0., item_h);
+            (row, rem, None)
+        };
+        let cols = self.grid_cols();
+        let indices = self.filtered_indices(id);
+        let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else { return };
+        let Some(&raw_idx) = indices.get(target_row * cols).or_else(|| indices.last()) else { return };
+        let Some(meta) = all.get(raw_idx) else { return };
+        self.ds_scroll_anchor = Some(DatasetScrollAnchor {
+            dataset: id.to_string(),
+            file: meta.file.clone(),
+            split: meta.split,
+            intra_row,
+            strategy,
+        });
+    }
+
+    /// Restores a saved dataset grid scroll anchor once the image batch carrying `(file, split)`
+    /// has arrived. Keeps waiting across earlier batches while `more` is true, and clears once the
+    /// target row can sit at its saved position (or when loading finishes without the file).
+    pub(crate) fn try_restore_dataset_scroll_anchor(
+        &mut self,
+        id: &str,
+        cols: usize,
+        row_h: f32,
+        more: bool,
+    ) {
+        let Some(anchor) = self.ds_scroll_anchor.as_ref().filter(|a| a.dataset == id).cloned() else {
+            return;
+        };
+        let indices = self.filtered_indices(id);
+        let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else {
+            if !more {
+                self.ds_scroll_anchor = None;
+            }
+            return;
+        };
+        let found = indices
+            .iter()
+            .position(|&raw| all.get(raw).is_some_and(|m| m.split == anchor.split && m.file == anchor.file));
+        let Some(pos) = found else {
+            if !more {
+                self.ds_scroll_anchor = None;
+            }
+            return;
+        };
+        let row = pos / cols;
+        let rows = indices.len().div_ceil(cols);
+        let content_h = row_h * rows as f32;
+        let viewport_h = f32::from(self.grid_scroll.0.borrow().base_handle.bounds().size.height);
+        let enough_below = if let Some(strategy) = anchor.strategy {
+            self.grid_scroll.scroll_to_item(row, strategy);
+            !more || (viewport_h > 0. && (row + 1) as f32 * row_h + viewport_h <= content_h)
+        } else {
+            let target_y = row as f32 * row_h + anchor.intra_row;
+            self.grid_scroll
+                .0
+                .borrow()
+                .base_handle
+                .set_offset(folo_ui::point(folo_ui::px(0.), -folo_ui::px(target_y)));
+            !more || (viewport_h > 0. && target_y + viewport_h <= content_h)
+        };
+        if enough_below {
+            self.ds_scroll_anchor = None;
+        }
     }
 }

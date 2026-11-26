@@ -45,13 +45,19 @@ impl FoloApp {
         let now = self.store.api.now();
         let created = time::parse(&b.created).map_or(String::new(), |c| time::ago(c, now));
         let title = div()
+            .w_full()
             .flex()
             .items_center()
             .gap(px(10.))
             .min_w_0()
-            .child(text(ty::XL, t.text_primary).ellipsis().child(b.name.clone()))
+            .child(text(ty::XL, t.text_primary).min_w_0().ellipsis().child(b.name.clone()))
             .when(b.active, |d| {
-                d.child(status_badge_of(&t, StatusKind::Running, "Running", format!("bench-hdr-{}", b.id)))
+                d.child(div().flex_none().child(status_badge_of(
+                    &t,
+                    StatusKind::Running,
+                    "Running",
+                    format!("bench-hdr-{}", b.id),
+                )))
             });
         let subtitle = format!(
             "{} · {} · {} · {} · created {created}",

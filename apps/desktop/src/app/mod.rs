@@ -33,6 +33,8 @@ mod page;
 mod playground;
 #[cfg(test)]
 mod playground_tests;
+#[cfg(test)]
+mod playtest_ux_tests;
 mod preferences;
 mod previews;
 mod render;
@@ -425,6 +427,7 @@ pub struct FoloApp {
     /// Filtered and sorted image indices cached for the dataset grid.
     pub ds_filter_cache: RefCell<Option<crate::screens::datasets::DatasetFilterCache>>,
     pub grid_scroll: folo_ui::UniformListScrollHandle,
+    pub ds_scroll_anchor: Option<data::DatasetScrollAnchor>,
     pub grid_width: Rc<std::cell::Cell<Pixels>>,
     pub inspector: Option<Inspector>,
     /// Focus target of the inspector so its keys (arrows, +/-, 0, Esc) work as soon as it opens.
@@ -812,6 +815,7 @@ impl FoloApp {
             ds_hover_tile: None,
             ds_filter_cache: RefCell::new(None),
             grid_scroll: folo_ui::UniformListScrollHandle::new(),
+            ds_scroll_anchor: None,
             grid_width: Rc::new(std::cell::Cell::new(px(900.))),
             inspector: None,
             inspector_focus: cx.focus_handle(),

@@ -263,20 +263,31 @@ impl FoloApp {
             actions.insert(0, delete.into_any_element());
         }
         let title = div()
+            .w_full()
             .flex()
             .items_center()
             .min_w_0()
             .gap(px(12.))
             .child(text(ty::XL, t.text_primary).min_w_0().ellipsis().child(r.name.clone()))
-            .child(status_badge(&t, &r, &format!("hdr-{}", r.id)))
+            .child(div().flex_none().child(status_badge(&t, &r, &format!("hdr-{}", r.id))))
             // The worker is silent: the numbers stand still for that, not because training does
             // (the Cloud panel says more).
             .when(r.cloud.as_ref().is_some_and(|c| c.unanswered_since.is_some()), |d| {
-                d.child(badge_icon(&t, "icons/wifi-off.svg", "Worker not answering", Tone::Warning))
+                d.child(div().flex_none().child(badge_icon(
+                    &t,
+                    "icons/wifi-off.svg",
+                    "Worker not answering",
+                    Tone::Warning,
+                )))
             })
             // The subtitle's e2e tag explains itself on hover; this help gives it a keyboard route.
             .when(r.config.head == crate::api::Head::O2o, |d| {
-                d.child(self.help_icon("run-head-help", FoloApp::E2E_HELP, window, cx))
+                d.child(div().flex_none().child(self.help_icon(
+                    "run-head-help",
+                    FoloApp::E2E_HELP,
+                    window,
+                    cx,
+                )))
             });
         let header = detail_header(&t, title, subtitle, actions);
 

@@ -252,3 +252,147 @@ fn the_close_question_in_a_sample_inspector_s_place_reads_its_dataset_again() {
         assert!(read_again(this), "its dataset read again");
     });
 }
+
+/// #382: returning to the window while on Overview or Datasets refreshes loaded dataset cards
+/// (updating their cached record and invalidating stale preview boxes) without duplicating reads
+/// that are already in flight.
+#[test]
+fn back_to_the_window_on_overview_and_datasets_rechecks_loaded_cards() {
+    for route in [Route::Overview, Route::Datasets] {
+        let api = Arc::new(MockBackend::new(4200, true));
+        let (mut app, window) = open_with(api.clone());
+        drive(&mut app, window, |this, w, cx| this.navigate(route.clone(), w, cx));
+        frames(&mut app, window);
+
+        // Simulate an external edit by marking the cached dataset record with an older revision and
+        // mutating a cached preview box.
+        let now = drive(&mut app, window, |this, _, _| {
+            let mut old = this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("card read");
+            old.revision = Some("before".into());
+            this.store.dataset.insert(ID.into(), Load::Ready(old));
+            let previews =
+                this.store.previews.get_mut(ID).and_then(|l| l.ready_mut()).expect("card previews");
+            let b = previews.iter_mut().find_map(|im| im.boxes.first_mut()).expect("preview box");
+            b.x1 -= 5.;
+            b.x2 -= 5.;
+            b.x1 + 5.
+        });
+
+        away_and_back(&mut app);
+        frames(&mut app, window);
+
+        drive(&mut app, window, |this, _, _| {
+            assert!(read_again(this), "{route:?}: dataset record refreshed on window activation");
+            let previews =
+                this.store.previews.get(ID).and_then(|l| l.ready()).expect("card previews reloaded");
+            let x1 = previews.iter().find_map(|im| im.boxes.first()).map(|b| b.x1);
+            assert_eq!(x1, Some(now), "{route:?}: card preview boxes refreshed on revision change");
+        });
+    }
+}
+
+/// #382: refreshing a large multi-page dataset after an external edit preserves the user's scroll
+/// place (anchored by `(file, split)`) across paged reloads, including while the later batch is
+/// delayed and when triggered right after closing an open inspector.
+#[test]
+fn large_dataset_grid_preserves_scroll_position_across_paged_revision_refresh() {
+    let api = Arc::new(MockBackend::new(4200, true).with_paged_splits(ID, 10_000, 60));
+    let (mut app, window) = on_its_page(api.clone());
+
+    // Switch to the Val split (which arrives entirely on the second image page, offset 10_000+)
+    // and scroll partway down the grid.
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_split = Some(crate::api::Split::Val);
+        cx.notify();
+    });
+    frames(&mut app, window);
+
+    let (saved_y, expected_file, expected_row) = drive(&mut app, window, |this, _, cx| {
+        let cols = this.grid_cols();
+        let item_h = f32::from(this.grid_scroll.0.borrow().last_item_height.expect("measured row height"));
+        // Scroll to row 6 + 37 px intra-row offset.
+        let want_row = 6usize;
+        let want_y = want_row as f32 * item_h + 37.;
+        this.grid_scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(folo_ui::point(folo_ui::px(0.), -folo_ui::px(want_y)));
+        cx.notify();
+        let indices = this.filtered_indices(ID);
+        let all = this.store.images.get(ID).and_then(|l| l.ready()).unwrap();
+        let meta = &all[indices[want_row * cols]];
+        (want_y, meta.file.clone(), want_row)
+    });
+    app.frame(window.into());
+
+    // Simulate external label edit on disk (older cached revision), delay the second image batch,
+    // and reactivate the window.
+    drive(&mut app, window, |this, _, _| {
+        let mut old = this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("read");
+        old.revision = Some("before".into());
+        this.store.dataset.insert(ID.into(), Load::Ready(old));
+    });
+    // Hold page 0 and page 1 in order so we can observe the intermediate state after page 0 lands
+    // and before page 1 (containing all Val images) arrives.
+    let page0 = api.hold("images");
+    let page1 = api.hold("images");
+    away_and_back(&mut app);
+    frames_holding_one(&mut app, window);
+    page0.wait_held();
+    drop(page0);
+    // Let page 0 finish on the main thread and spawn page 1, which blocks on `page1`.
+    while !page1.is_held() {
+        app.run_until_held(1);
+    }
+    page1.wait_held();
+    app.frame(window.into());
+
+    // Anchor must still be waiting while page 1 (containing Val images) is in flight.
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, _| {
+                let anchor = this.ds_scroll_anchor.as_ref().expect("scroll anchor waiting for val batch");
+                assert_eq!(anchor.file, expected_file);
+                assert_eq!(anchor.split, crate::api::Split::Val);
+            })
+            .unwrap()
+    });
+
+    // Release page 1 and let the grid repaint.
+    drop(page1);
+    app.run_until_idle();
+    frames(&mut app, window);
+
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.ds_scroll_anchor.is_none(), "scroll anchor consumed once target batch arrived");
+        let got_y = f32::from(-this.grid_scroll.0.borrow().base_handle.offset().y);
+        let item_h = f32::from(this.grid_scroll.0.borrow().last_item_height.expect("row height"));
+        let got_row = (got_y / item_h).floor() as usize;
+        assert_eq!(got_row, expected_row, "grid restored to the same row (got_y={got_y}, saved_y={saved_y})");
+        assert!(
+            (got_y - saved_y).abs() <= 2.0,
+            "grid preserved intra-row scroll offset (got_y={got_y}, saved_y={saved_y})"
+        );
+    });
+
+    // Repeat the same flow through an open inspector on Val image 35: closing the inspector
+    // triggers the deferred revision refresh and still returns to the inspected row once page 1 lands.
+    let inspected_idx = 35usize;
+    drive(&mut app, window, |this, w, cx| this.open_inspector(ID.into(), inspected_idx, w, cx));
+    drive(&mut app, window, |this, _, _| {
+        let mut old = this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("read");
+        old.revision = Some("before-inspector".into());
+        this.store.dataset.insert(ID.into(), Load::Ready(old));
+    });
+    away_and_back(&mut app);
+    frames(&mut app, window);
+    drive(&mut app, window, |this, w, cx| this.close_inspector(w, cx));
+    frames(&mut app, window);
+
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.ds_scroll_anchor.is_none(), "inspector-close scroll anchor consumed");
+        let got_y = f32::from(-this.grid_scroll.0.borrow().base_handle.offset().y);
+        assert!(got_y > 100., "grid stayed scrolled near the inspected val image (got_y={got_y})");
+    });
+}

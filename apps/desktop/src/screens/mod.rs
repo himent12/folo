@@ -60,10 +60,13 @@ pub fn detail_header(
             div()
                 .flex()
                 .flex_col()
+                .flex_1()
                 .gap(px(4.))
                 .min_w_0()
-                .child(div().h(px(ty::XL.line)).flex().items_center().min_w_0().child(title))
-                .child(div().text_color(t.text_secondary).text_size(px(ty::SM.size)).child(subtitle)),
+                .child(div().h(px(ty::XL.line)).w_full().flex().items_center().min_w_0().child(title))
+                .child(
+                    div().text_color(t.text_secondary).text_size(px(ty::SM.size)).min_w_0().child(subtitle),
+                ),
         )
         .child(
             div()
