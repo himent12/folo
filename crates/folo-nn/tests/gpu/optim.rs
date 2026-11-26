@@ -106,3 +106,65 @@ fn multi_group_gpu_cross_group_alias_falls_back_cleanly() {
     close(&p0_g, &p0_c, 1e-6, 1e-6, "cross-alias p0");
     close(&p1_g, &p1_c, 1e-6, 1e-6, "cross-alias p1");
 }
+
+#[test]
+fn agc_and_swa_gpu_parity_and_device_mismatch_safety() {
+    use folo_nn::SwaModel;
+    use folo_nn::optim::clip_grad_agc_tensor;
+
+    let dev = gpu!();
+    let mut rng = Rng::seed(2027);
+
+    // 1. AGC bit-exact CPU vs GPU parity.
+    let w_cpu = Tensor::rand_uniform([4, 3, 3, 3], -1.0, 1.0, &mut rng);
+    let g_cpu = Tensor::rand_uniform([4, 3, 3, 3], -5.0, 5.0, &mut rng);
+    let w_gpu = w_cpu.to_device(dev).unwrap();
+    let g_gpu = g_cpu.to_device(dev).unwrap();
+    let st_c = clip_grad_agc_tensor(&w_cpu, &g_cpu, 0.01, 1e-3).unwrap();
+    let st_g = clip_grad_agc_tensor(&w_gpu, &g_gpu, 0.01, 1e-3).unwrap();
+    assert_eq!(st_c, st_g);
+    assert_eq!(g_gpu.device(), dev);
+    assert_eq!(g_gpu.to_vec::<f32>().unwrap(), g_cpu.to_vec::<f32>().unwrap());
+
+    // 2. SWA CPU vs GPU parity, `to_device`, and atomic non-corruption on device mismatch.
+    let live_cpu = folo_nn::Linear::new(4, 3, true, &mut rng);
+    let mut swa_cpu = SwaModel::new(folo_nn::Linear::new(4, 3, true, &mut Rng::seed(1)), &live_cpu).unwrap();
+    let mut live_gpu = folo_nn::Linear::new(4, 3, true, &mut Rng::seed(2));
+    live_gpu.to_device(dev).unwrap();
+    let mut swa_gpu = SwaModel::new(folo_nn::Linear::new(4, 3, true, &mut Rng::seed(3)), &live_gpu).unwrap();
+    assert_eq!(swa_gpu.module().weight.device(), dev);
+
+    for step in 0..4 {
+        let w = Tensor::randn([3, 4], step as f32, 1.0, &mut rng);
+        let b = Tensor::randn([3], -(step as f32), 0.5, &mut rng);
+        {
+            let _g = no_grad();
+            live_cpu.weight.copy_from(&w).unwrap();
+            live_cpu.bias.as_ref().unwrap().copy_from(&b).unwrap();
+            live_gpu.weight.copy_from(&w.to_device(dev).unwrap()).unwrap();
+            live_gpu.bias.as_ref().unwrap().copy_from(&b.to_device(dev).unwrap()).unwrap();
+        }
+        swa_cpu.update(&live_cpu).unwrap();
+        swa_gpu.update(&live_gpu).unwrap();
+    }
+    close(&swa_gpu.module().weight, &swa_cpu.module().weight, 1e-6, 1e-6, "swa weight");
+    close(
+        swa_gpu.module().bias.as_ref().unwrap(),
+        swa_cpu.module().bias.as_ref().unwrap(),
+        1e-6,
+        1e-6,
+        "swa bias",
+    );
+
+    // Mismatched device update must return Err WITHOUT mutating SWA weights or counter!
+    let before = swa_gpu.module().weight.to_vec::<f32>().unwrap();
+    assert!(swa_gpu.update(&live_cpu).is_err());
+    assert_eq!(swa_gpu.num_averaged(), 4);
+    assert_eq!(swa_gpu.module().weight.to_vec::<f32>().unwrap(), before);
+
+    // Moving SWA back to CPU then updating with live_cpu succeeds cleanly.
+    swa_gpu.to_device(Device::Cpu).unwrap();
+    assert_eq!(swa_gpu.module().weight.device(), Device::Cpu);
+    swa_gpu.update(&live_cpu).unwrap();
+    assert_eq!(swa_gpu.num_averaged(), 5);
+}

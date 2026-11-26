@@ -384,6 +384,22 @@ impl GradAccumulator {
         Ok(n)
     }
 
+    /// Adaptive Gradient Clipping (Brock et al. 2021, NFNet) across every accumulated gradient in place:
+    /// scales each output unit `i` whose gradient norm exceeds `clip_factor * max(||W_i||_F, eps)` down to that
+    /// bound. When `skip_1d` is true, 0-D and 1-D parameters (biases, BatchNorm scales) are left unclipped.
+    pub fn clip_grad_agc(&mut self, clip_factor: f64, eps: f64, skip_1d: bool) -> Result<super::AgcStats> {
+        super::agc::validate_agc_params(clip_factor, eps)?;
+        let mut stats = super::AgcStats::default();
+        for s in self.slots.iter().filter(|s| s.valid) {
+            if skip_1d && s.param.dims().len() < 2 {
+                continue;
+            }
+            let buf = s.buf.as_ref().expect("valid");
+            stats = stats.merge(super::agc::clip_grad_agc_tensor(&s.param, buf, clip_factor, eps)?);
+        }
+        Ok(stats)
+    }
+
     /// Scale every valid CPU buffer by `c64` in place (AVX2, parallelized when large). When `c64` is a positive
     /// subnormal or underflows `f32`, uses two normal `f32` factors `f1 · f2 = c64` in one pass via
     /// [`scale2_slice`] when both stay normal (`c64 >= f32::MIN_POSITIVE²`), and falls back to widened `f64`

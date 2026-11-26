@@ -1,6 +1,6 @@
 //! The LR / momentum schedule of docs/MODEL.md §8.4: linear warmup, then linear, cosine,
-//! Warmup–Stable–Decay (WSD), or cosine-with-restarts (SGDR) decay, counted in optimizer steps
-//! (`folo.sched` in docs/FORMAT.md).
+//! Warmup–Stable–Decay (WSD), cosine-with-restarts (SGDR), polynomial decay, or OneCycleLR,
+//! counted in optimizer steps (`folo.sched` in docs/FORMAT.md).
 
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +13,12 @@ pub const WSD_DEFAULT_DECAY_FRACTION: f64 = 0.2;
 pub const DEFAULT_RESTART_CYCLES: u64 = 3;
 /// Default cycle-length multiplier (`T_mult`) for [`DecayKind::CosineRestarts`].
 pub const DEFAULT_RESTART_MULT: u64 = 1;
+/// Default exponent `p` for [`DecayKind::Polynomial`] (`1.0`, identical to linear decay).
+pub const DEFAULT_POLY_POWER: f64 = 1.0;
+/// Default rising-phase fraction for [`DecayKind::OneCycle`] (Smith & Topin 2019: `0.3`).
+pub const DEFAULT_ONE_CYCLE_PCT_START: f64 = 0.3;
+/// Default initial LR divisor for [`DecayKind::OneCycle`] (Smith & Topin 2019: `25.0`, starting at `lr / 25`).
+pub const DEFAULT_ONE_CYCLE_DIV_FACTOR: f64 = 25.0;
 
 /// The decay shape after warmup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +35,18 @@ pub enum DecayKind {
     /// cycles starting at `restart_period` iterations and multiplying cycle length by `restart_mult` each
     /// restart (defaults: [`DEFAULT_RESTART_CYCLES`] equal cycles, `restart_mult = 1`).
     CosineRestarts,
+    /// Power-law polynomial decay: `lf(t) = lrf + (1 − lrf) · (1 − x)^p` with `p > 0`
+    /// (default [`DEFAULT_POLY_POWER`] = `1.0`, matching [`DecayKind::Linear`]).
+    Polynomial,
+    /// OneCycleLR (Smith & Topin 2019): cosine rise from `1 / div_factor` to peak `1.0` over the first
+    /// `pct_start` of the run, then cosine anneal down to `lrf` in `[0, 1]`, paired with inverse cosine
+    /// momentum cycling between `base_momentum` (at endpoints) and `warmup_momentum` (at peak).
+    ///
+    /// Manages its own warmup via `pct_start`/`div_factor`, so `warmup_iters` must be `0`. Note: when
+    /// cycling `momentum` with [`crate::optim::AdamW`], FOLO's `AdamW` (like PyTorch's) uses `1 − β1(t)^t`
+    /// bias correction rather than `1 − ∏ β1(i)`; set `warmup_momentum == base_momentum` to keep `β1` fixed
+    /// for exact AdamW bias correction, or pair momentum cycling with `Sgd` / `MuSgd`.
+    OneCycle,
 }
 
 /// Decay tail shape for [`DecayKind::Wsd`].
@@ -88,6 +106,15 @@ pub struct SchedContract {
     /// For [`DecayKind::CosineRestarts`]: integer cycle-length multiplier `T_mult >= 1` (default `1`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart_mult: Option<u64>,
+    /// For [`DecayKind::Polynomial`]: decay exponent `p > 0` (default [`DEFAULT_POLY_POWER`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poly_power: Option<f64>,
+    /// For [`DecayKind::OneCycle`]: rising-phase fraction in `(0, 1)` (default [`DEFAULT_ONE_CYCLE_PCT_START`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub one_cycle_pct_start: Option<f64>,
+    /// For [`DecayKind::OneCycle`]: initial LR divisor `>= 1` (default [`DEFAULT_ONE_CYCLE_DIV_FACTOR`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub one_cycle_div_factor: Option<f64>,
 }
 
 /// The schedule state: its parameters and the iteration counter `t`.
@@ -179,6 +206,9 @@ impl LrSchedule {
             wsd_tail: None,
             restart_period: None,
             restart_mult: None,
+            poly_power: None,
+            one_cycle_pct_start: None,
+            one_cycle_div_factor: None,
         })
     }
 
@@ -201,9 +231,27 @@ impl LrSchedule {
         Self::from_contract(self.c)
     }
 
+    /// Configure the power exponent (`power > 0`, finite) on a [`DecayKind::Polynomial`] schedule.
+    ///
+    /// Rejects non-`Polynomial` schedules or invalid `power`.
+    pub fn with_poly_power(mut self, power: f64) -> Result<Self> {
+        self.c.poly_power = Some(power);
+        Self::from_contract(self.c)
+    }
+
+    /// Configure the rising fraction (`pct_start` in `(0, 1)`) and initial divisor (`div_factor >= 1`)
+    /// on a [`DecayKind::OneCycle`] schedule.
+    ///
+    /// Rejects non-`OneCycle` schedules or out-of-range parameters.
+    pub fn with_one_cycle(mut self, pct_start: f64, div_factor: f64) -> Result<Self> {
+        self.c.one_cycle_pct_start = Some(pct_start);
+        self.c.one_cycle_div_factor = Some(div_factor);
+        Self::from_contract(self.c)
+    }
+
     /// A schedule from a `folo.sched` contract (resume). Rejects non-finite values, a length `T` that does not
-    /// fit a `u64`, a warmup longer than the run, a counter past the end, and invalid or mismatched optional
-    /// WSD / restart parameters.
+    /// fit a `u64`, a warmup longer than the run (or non-zero warmup on [`DecayKind::OneCycle`]), a counter
+    /// past the end, and invalid or mismatched optional WSD / restart / polynomial / OneCycle parameters.
     pub fn from_contract(c: SchedContract) -> Result<Self> {
         let finite = [c.lrf, c.warmup_bias_lr, c.warmup_momentum].iter().all(|v| v.is_finite());
         if !finite || c.steps_per_epoch == 0 || c.epochs == 0 {
@@ -248,6 +296,53 @@ impl LrSchedule {
         {
             return Err(Error::Invalid("schedule: restart_mult must be >= 1".into()));
         }
+        if c.poly_power.is_some() && c.kind != DecayKind::Polynomial {
+            return Err(Error::Invalid(format!(
+                "schedule: poly_power is only valid for polynomial, got {:?}",
+                c.kind
+            )));
+        }
+        if let Some(p) = c.poly_power
+            && (!p.is_finite() || p <= 0.0)
+        {
+            return Err(Error::Invalid(format!("schedule: poly_power must be finite and > 0, got {p}")));
+        }
+        if c.kind == DecayKind::OneCycle {
+            if c.warmup_iters > 0 {
+                return Err(Error::Invalid(format!(
+                    "schedule: one_cycle manages its own warmup via pct_start/div_factor; warmup_iters must be 0, got {}",
+                    c.warmup_iters
+                )));
+            }
+            if !(0.0..=1.0).contains(&c.lrf) {
+                return Err(Error::Invalid(format!(
+                    "schedule: one_cycle lrf must be in 0..=1, got {}",
+                    c.lrf
+                )));
+            }
+        }
+        if (c.one_cycle_pct_start.is_some() || c.one_cycle_div_factor.is_some())
+            && c.kind != DecayKind::OneCycle
+        {
+            return Err(Error::Invalid(format!(
+                "schedule: one_cycle_* fields are only valid for one_cycle, got {:?}",
+                c.kind
+            )));
+        }
+        if let Some(pct) = c.one_cycle_pct_start
+            && (!pct.is_finite() || pct <= 0.0 || pct >= 1.0)
+        {
+            return Err(Error::Invalid(format!(
+                "schedule: one_cycle_pct_start must be finite and in (0, 1), got {pct}"
+            )));
+        }
+        if let Some(div) = c.one_cycle_div_factor
+            && (!div.is_finite() || div < 1.0)
+        {
+            return Err(Error::Invalid(format!(
+                "schedule: one_cycle_div_factor must be finite and >= 1, got {div}"
+            )));
+        }
         Ok(LrSchedule { c })
     }
 
@@ -277,8 +372,8 @@ impl LrSchedule {
     }
 
     /// The decay multiplier `lf(t)`; from `t = T - 1` on it stays clamped at the final step (`lrf` for
-    /// `Linear` / `Cosine` / `Wsd`, and the `T - 1` phase for `CosineRestarts`; `from_contract` accepts a
-    /// finished run's `t = T`).
+    /// `Linear` / `Cosine` / `Wsd` / `Polynomial` / `OneCycle`, and the `T - 1` phase for `CosineRestarts`;
+    /// `from_contract` accepts a finished run's `t = T`).
     pub fn lf(&self, t: u64) -> f64 {
         let total = self.total_iters();
         let denom = total.saturating_sub(1).max(1) as f64;
@@ -339,6 +434,28 @@ impl LrSchedule {
                 let keep = 0.5 * (1.0 + (std::f64::consts::PI * u).cos());
                 keep + (1.0 - keep) * lrf
             }
+            DecayKind::Polynomial => {
+                let p = self.c.poly_power.unwrap_or(DEFAULT_POLY_POWER);
+                let keep = (1.0 - x).powf(p);
+                keep + (1.0 - keep) * lrf
+            }
+            DecayKind::OneCycle => {
+                if total <= 1 {
+                    return 1.0;
+                }
+                let pct = self.c.one_cycle_pct_start.unwrap_or(DEFAULT_ONE_CYCLE_PCT_START);
+                let div = self.c.one_cycle_div_factor.unwrap_or(DEFAULT_ONE_CYCLE_DIV_FACTOR);
+                if x <= pct {
+                    let u = x / pct;
+                    let init_f = 1.0 / div;
+                    let rise = 0.5 * (1.0 - (std::f64::consts::PI * u).cos());
+                    rise + (1.0 - rise) * init_f
+                } else {
+                    let v = ((x - pct) / (1.0 - pct)).min(1.0);
+                    let keep = 0.5 * (1.0 + (std::f64::consts::PI * v).cos());
+                    keep + (1.0 - keep) * lrf
+                }
+            }
         }
     }
 
@@ -355,8 +472,27 @@ impl LrSchedule {
     }
 
     /// The momentum (SGD μ / AdamW β1) of a group at iteration `t`: ramped from `warmup_momentum` to the
-    /// group's base value during warmup.
+    /// group's base value during warmup, or — for [`DecayKind::OneCycle`] — inversely cosine-cycled from
+    /// `base_momentum` down to `warmup_momentum` at the LR peak and back to `base_momentum`.
     pub fn momentum_at(&self, t: u64, group: &ParamGroup) -> f64 {
+        if self.c.kind == DecayKind::OneCycle {
+            let total = self.total_iters();
+            if total <= 1 {
+                return group.base_momentum;
+            }
+            let x = (t as f64 / (total - 1) as f64).min(1.0);
+            let pct = self.c.one_cycle_pct_start.unwrap_or(DEFAULT_ONE_CYCLE_PCT_START);
+            let (m_max, m_min) = (group.base_momentum, self.c.warmup_momentum);
+            return if x <= pct {
+                let u = x / pct;
+                let frac = 0.5 * (1.0 - (std::f64::consts::PI * u).cos());
+                m_max + (m_min - m_max) * frac
+            } else {
+                let v = ((x - pct) / (1.0 - pct)).min(1.0);
+                let frac = 0.5 * (1.0 - (std::f64::consts::PI * v).cos());
+                m_min + (m_max - m_min) * frac
+            };
+        }
         if t < self.c.warmup_iters {
             interp(t, self.c.warmup_iters, self.c.warmup_momentum, group.base_momentum)
         } else {

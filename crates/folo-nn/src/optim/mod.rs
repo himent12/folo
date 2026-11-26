@@ -33,6 +33,7 @@
 //! ```
 
 mod adamw;
+mod agc;
 mod dispatch;
 mod grads;
 mod musgd;
@@ -46,6 +47,7 @@ use folo_core::{Device, Grads, Tensor};
 use serde::{Deserialize, Serialize};
 
 pub use adamw::AdamW;
+pub use agc::{AGC_DEFAULT_CLIP_FACTOR, AGC_DEFAULT_EPS, AgcStats, clip_grad_agc_tensor};
 pub(crate) use dispatch::{
     GradRef, PAR_THRESHOLD, ParamPlan, cpu_fast, for_each_param_planned, step_many, storage_key,
 };
