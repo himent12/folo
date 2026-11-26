@@ -14,6 +14,8 @@ import { Resource } from '$lib/api/resource';
 import { ApiError } from '$lib/api/client';
 import type { Run, SystemInfo } from '$lib/api/types';
 import { logDomain, niceDomain } from '$lib/charts/domain';
+import { downsample } from '$lib/charts/downsample';
+import { yExtentOf } from '$lib/charts/lineAxes';
 import { pickNearest } from '$lib/charts/lineHover';
 import LineChart from '$lib/charts/LineChart';
 import Histogram from '$lib/charts/Histogram.tsx';
@@ -142,6 +144,17 @@ describe('Sprint 13 charts edge cases', () => {
       12,
     );
     expect(mixed).toBe('s');
+  });
+
+  it('ignores non-finite x points during bucket downsampling and automatic y-extent fitting', () => {
+    const pts = Array.from({ length: 96 }, (_, i) => ({ x: i, y: i === 2 ? 5 : 1 }));
+    pts[1] = { x: Number.NaN, y: 100 };
+    const sampled = downsample(pts, 10);
+    expect(sampled.some((p) => p.x === 2 && p.y === 5)).toBe(true);
+    expect(sampled.every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))).toBe(true);
+
+    const [, yHi] = yExtentOf(undefined, [{ id: 's', label: 's', color: '#f00', points: pts }], false);
+    expect(yHi).toBeLessThan(10);
   });
 
   it('LineChart and Histogram render SVGs, tables, and hover readouts cleanly with NaN/Inf/negative inputs', async () => {

@@ -18,24 +18,15 @@ export function hoverOf(
   const c = cursor as number;
   const rows = keyed
     .map((s) => {
-      const raw = s.points;
-      let allFinite = true;
-      for (let i = 0; i < raw.length; i++) {
-        const pt = raw[i]!;
-        if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) {
-          allFinite = false;
-          break;
-        }
-      }
-      const pts = allFinite ? raw : raw.filter((pt) => Number.isFinite(pt.x) && Number.isFinite(pt.y));
+      const pts = s.points;
       const first = pts[0];
       const last = pts[pts.length - 1];
-      if (!first || !last) return null;
+      if (!first || !last || !Number.isFinite(first.x) || !Number.isFinite(last.x)) return null;
       // A series only reads out where it has data: never its last value under a cursor past its end.
       const tol = pts.length > 1 ? (last.x - first.x) / (pts.length - 1) / 2 : 0.5;
       if (c < first.x - tol || c > last.x + tol) return null;
       const p = pts[nearest(pts, c)];
-      return p ? { s, p } : null;
+      return p && Number.isFinite(p.x) && Number.isFinite(p.y) ? { s, p } : null;
     })
     .filter((r): r is { s: Series; p: Pt } => r !== null);
   if (!rows.length) return null;

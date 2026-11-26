@@ -41,7 +41,7 @@ export function yExtentOf(yDomain: [number, number] | undefined, visible: Series
   let hi = -Infinity;
   for (const s of visible)
     for (const p of s.points) {
-      if (!Number.isFinite(p.y) || (yLog && p.y <= 0)) continue;
+      if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || (yLog && p.y <= 0)) continue;
       if (p.y < lo) lo = p.y;
       if (p.y > hi) hi = p.y;
     }

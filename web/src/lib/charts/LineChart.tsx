@@ -225,9 +225,24 @@ export default function LineChart(props: LineChartProps) {
 
   // ---- hover / keyboard cursor ----
   const keyed = computed(() => visible.get().filter((s) => !s.ghost && !s.context && !s.lower));
-  const longestSeries = computed(() => keyed.get().reduce<Series | undefined>((m, s) => (!m || s.points.length > m.points.length ? s : m), undefined));
+  // Prepared once when series data changes so hover and keyboard stepping stay O(log n) with zero per-cursor scans.
+  const finiteKeyed = computed(() =>
+    keyed.get().map((s) => {
+      const raw = s.points;
+      for (let i = 0; i < raw.length; i++) {
+        const pt = raw[i]!;
+        if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) {
+          return { ...s, points: raw.filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y)) };
+        }
+      }
+      return s;
+    }),
+  );
+  const longestFinite = computed(() =>
+    finiteKeyed.get().reduce<Series['points']>((m, s) => (s.points.length > m.length ? s.points : m), []),
+  );
 
-  const hover = computed(() => hoverOf(cursor.get(), hasData.get(), xExtent.get(), keyed.get(), p.xTitle, xFormat.get(), x.get()));
+  const hover = computed(() => hoverOf(cursor.get(), hasData.get(), xExtent.get(), finiteKeyed.get(), p.xTitle, xFormat.get(), x.get()));
 
   const rectCache = createRectCache();
   const local = (e: PointerEvent) => localPointer(rectCache, e.currentTarget as SVGElement, e, width.peek(), p.height);
@@ -253,7 +268,7 @@ export default function LineChart(props: LineChartProps) {
     } else if (a.kind === 'set' && inPlot(a.px)) {
       const m = margin.peek();
       const next = x.peek().invert(Math.min(width.peek() - m.right, Math.max(m.left, a.px)));
-      if (hoverOf(next, hasData.peek(), xExtent.peek(), keyed.peek(), p.xTitle, xFormat.peek(), x.peek()) === null) return;
+      if (hoverOf(next, hasData.peek(), xExtent.peek(), finiteKeyed.peek(), p.xTitle, xFormat.peek(), x.peek()) === null) return;
       cursor.set(next);
       pinned.set(true);
       tapHint.set(false);
@@ -406,11 +421,7 @@ export default function LineChart(props: LineChartProps) {
       spoken.set('');
       return;
     }
-    let pts: Series['points'] = [];
-    for (const s of keyed.peek()) {
-      const f = s.points.filter((pt) => Number.isFinite(pt.x) && Number.isFinite(pt.y));
-      if (f.length > pts.length) pts = f;
-    }
+    const pts = longestFinite.peek();
     if (!pts.length) return;
     const big = e.shiftKey ? 10 : 1;
     let i: number;
