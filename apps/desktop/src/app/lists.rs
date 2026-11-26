@@ -352,21 +352,43 @@ impl FoloApp {
                 self.list_tickets.finish_detail(&id, None);
                 if self.store.dataset.get(&id).is_some_and(|l| l.is_loading()) {
                     self.store.dataset.remove(&id);
+                    if self.inspecting(&id) {
+                        self.ds_recheck.insert(id.clone());
+                    } else {
+                        self.forget_dataset_contents(&id, cx);
+                    }
+                } else if self.store.dataset.contains_key(&id) {
+                    // Re-queue a canceled recheck on a failed/loaded record so retries aren't dropped.
+                    self.ds_recheck.insert(id.clone());
                 }
+            } else if !self.inspecting(&id)
+                && !self.store.dataset.contains_key(&id)
+                && (self.store.images.contains_key(&id) || self.store.previews.contains_key(&id))
+            {
+                self.forget_dataset_contents(&id, cx);
             }
-            let cached_stale = self
-                .store
-                .dataset
-                .get(&id)
-                .and_then(|l| l.ready())
-                .zip(self.store.dataset_summary(&id))
-                .is_some_and(|(cached, summary)| dataset_summary_changed(cached, summary));
-            if cached_stale {
-                self.ds_recheck.insert(id.clone());
-                if !self.inspecting(&id) {
-                    self.forget_dataset_contents(&id, cx);
-                    self.store.dataset.remove(&id);
+        }
+        // Check every installed dataset whose cached detail record predates `ticket` (including
+        // when `store.datasets` transitioned from Loading/Failed to Ready so `old` was None).
+        let stale_cached: Vec<String> = self
+            .store
+            .datasets
+            .ready()
+            .into_iter()
+            .flatten()
+            .filter_map(|summary| {
+                if self.list_tickets.detail_ticket(&summary.id) >= ticket {
+                    return None;
                 }
+                let cached = self.store.dataset.get(&summary.id).and_then(|l| l.ready())?;
+                dataset_summary_changed(cached, summary).then(|| summary.id.clone())
+            })
+            .collect();
+        for id in stale_cached {
+            self.ds_recheck.insert(id.clone());
+            if !self.inspecting(&id) {
+                self.forget_dataset_contents(&id, cx);
+                self.store.dataset.remove(&id);
             }
         }
         // An open select may list them: its highlight is an index into the list.

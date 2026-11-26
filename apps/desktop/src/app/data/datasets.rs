@@ -432,6 +432,7 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) {
         let req_id = id.clone();
+        let order = self.list_tickets.ask();
         self.fetch(
             cx,
             move |api| api.dataset(&req_id),
@@ -452,16 +453,50 @@ impl FoloApp {
                             && fresh.revision == cached.revision
                             && fresh == cached =>
                     {
-                        this.store.dataset.insert(id.clone(), Load::Ready(fresh));
-                        this.load_images_from(id, generation, offset, attempt, cx);
+                        let superseded = order
+                            < this.list_tickets.list_installed(super::super::lists::List::Datasets)
+                            && this
+                                .store
+                                .dataset_summary(&id)
+                                .is_some_and(|s| super::super::lists::dataset_summary_changed(s, &fresh));
+                        if superseded {
+                            if this.inspecting(&id) {
+                                this.images_more.remove(&id);
+                                this.ds_recheck.insert(id);
+                            } else {
+                                this.forget_dataset_contents(&id, cx);
+                                this.store.dataset.remove(&id);
+                                this.ensure_dataset(&id, cx);
+                            }
+                        } else {
+                            this.list_tickets.note_detail(&id, order);
+                            this.sync_dataset_summary(&fresh);
+                            this.store.dataset.insert(id.clone(), Load::Ready(fresh));
+                            this.load_images_from(id, generation, offset, attempt, cx);
+                        }
                     }
                     Ok(fresh) => {
-                        // Files changed on disk or the server dropped revision tracking:
-                        // discard stale prefix + decoded images and reload from page zero.
-                        this.forget_dataset_contents(&id, cx);
-                        this.sync_dataset_summary(&fresh);
-                        this.store.dataset.insert(id.clone(), Load::Ready(fresh));
-                        this.ensure_dataset(&id, cx);
+                        if this.inspecting(&id) {
+                            this.images_more.remove(&id);
+                            this.ds_recheck.insert(id);
+                        } else {
+                            let superseded =
+                                order < this.list_tickets.list_installed(super::super::lists::List::Datasets)
+                                    && this.store.dataset_summary(&id).is_some_and(|s| {
+                                        super::super::lists::dataset_summary_changed(s, &fresh)
+                                    });
+                            // Files changed on disk or the server dropped revision tracking:
+                            // discard stale prefix + decoded images and reload from page zero.
+                            this.forget_dataset_contents(&id, cx);
+                            if superseded {
+                                this.store.dataset.remove(&id);
+                            } else {
+                                this.list_tickets.note_detail(&id, order);
+                                this.sync_dataset_summary(&fresh);
+                                this.store.dataset.insert(id.clone(), Load::Ready(fresh));
+                            }
+                            this.ensure_dataset(&id, cx);
+                        }
                     }
                     Err(e)
                         if still_aligned
@@ -618,7 +653,7 @@ impl FoloApp {
                 let fallback_tile = if !indices.is_empty() {
                     let rows = indices.len().div_ceil(cols);
                     let row = anchor.fallback_row.min(rows - 1);
-                    if anchor.fallback_row > 0 || anchor.strategy.is_some() {
+                    if anchor.fallback_row > 0 || anchor.intra_row > 0. || anchor.strategy.is_some() {
                         if let Some(strategy) = anchor.strategy {
                             self.grid_scroll.scroll_to_item(row, strategy);
                         } else {

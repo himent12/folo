@@ -482,7 +482,7 @@ impl FoloApp {
     ) {
         let bounds = self.insp_view.get();
         let Some(insp) = self.inspector.as_mut() else { return };
-        insp.drag_from = None;
+        stage::interrupt_stage_drag(insp.drag_from.take().is_some());
         insp.hover_from_stage = false;
         if insp.focused_box == Some(box_idx) && insp.zoom > 1.0 {
             insp.zoom = 1.0;

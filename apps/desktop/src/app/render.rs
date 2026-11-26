@@ -274,6 +274,7 @@ impl Render for FoloApp {
                     let d = if m.shift { 128. } else { 32. };
                     let zoomed = this.play_zoom > 1.0;
                     let clamp_play_pan = |this: &mut Self| {
+                        this.play_drag = None;
                         if let (Some(b), Some(img)) = (this.play_view.get(), this.play_image.as_ref()) {
                             this.play_pan = crate::viz::clamp_pan(
                                 b,

@@ -383,7 +383,7 @@ impl FoloApp {
         if matches!(self.store.runs, Load::Failed(_)) {
             self.retry_list(List::Runs, cx);
         } else if matches!(self.store.runs, Load::Ready(_)) {
-            self.refresh_runs(cx);
+            self.refresh_list_if_idle(List::Runs, cx);
         }
         self.ensure_core(cx);
     }

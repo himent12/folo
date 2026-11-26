@@ -132,6 +132,8 @@ fn ease_frame(
         }
         let p = progress(e.start);
         if p >= 1. || e.from.iter().all(Option::is_none) {
+            e.start = None;
+            e.from.fill(None);
             return None;
         }
         let k = ease_out(p);
