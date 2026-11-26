@@ -197,6 +197,7 @@ impl Render for FoloApp {
             }))
             .on_action(cx.listener(|this, _: &FocusNext, w, cx| {
                 this.menu_open = None;
+                this.menu_trigger.set(None);
                 this.menu_typeahead.clear();
                 this.export_open = false;
                 this.kb = true;
@@ -205,6 +206,7 @@ impl Render for FoloApp {
             }))
             .on_action(cx.listener(|this, _: &FocusPrev, w, cx| {
                 this.menu_open = None;
+                this.menu_trigger.set(None);
                 this.menu_typeahead.clear();
                 this.export_open = false;
                 this.kb = true;

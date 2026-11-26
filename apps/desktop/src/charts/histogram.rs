@@ -69,8 +69,8 @@ pub fn histogram(
                     }
                     paint_cell.set(Some(plot));
                     let gap =
-                        if n > 1 && plot.size.width <= px(4.) * (n as f32 - 1.) { px(0.) } else { px(4.) };
-                    let bw = ((plot.size.width - gap * (n as f32 - 1.)) / n as f32).max(px(1.));
+                        if n > 1 && plot.size.width >= px(5.) * n as f32 - px(4.) { px(4.) } else { px(0.) };
+                    let bw = ((plot.size.width - gap * (n as f32 - 1.)) / n as f32).max(px(0.));
                     let hovered = hover.map(|f| (f * n as f32) as usize);
                     window.paint_quad(fill(
                         Bounds::new(point(plot.left(), plot.bottom()), size(plot.size.width, px(1.))),
@@ -79,7 +79,7 @@ pub fn histogram(
                     for (i, &c) in counts.iter().enumerate() {
                         let x = plot.left() + (bw + gap) * i as f32;
                         let h = (plot.size.height - px(16.)).max(px(0.)) * (c as f32 / max);
-                        let h = if c > 0 { h.max(px(2.)) } else { px(0.) };
+                        let h = if c > 0 { h.max(px(2.)).min(plot.size.height) } else { px(0.) };
                         let hot = hovered == Some(i);
                         let col = if hovered.is_some() && !hot { alpha(color, 0.45) } else { color };
                         window.paint_quad(

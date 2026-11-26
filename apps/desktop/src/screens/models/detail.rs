@@ -458,7 +458,7 @@ impl FoloApp {
                 cx.stop_propagation();
                 cx.notify();
             }));
-        let export_w = (f32::from(window.viewport_size().width) - 16.).clamp(180., 300.);
+        let export_w = (f32::from(window.viewport_size().width) - 16.).clamp(0., 300.);
         let menu = open.then(|| {
             let mid = m.id.clone();
             folo_ui::deferred(

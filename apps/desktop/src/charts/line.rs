@@ -654,32 +654,35 @@ fn paint_line_chart(
             .sum::<usize>()
             + point_ys.iter().filter(|&&y| y > r.top() && y < r.bottom()).count() * 50
     };
-    let top_y = plot.top() + px(4.);
-    let bottom_y = (plot.bottom() - h - px(4.)).max(top_y);
+    let max_y = (bounds.bottom() - h).max(bounds.top());
+    let top_y = (plot.top() + px(4.)).clamp(bounds.top(), max_y);
+    let bottom_y = (plot.bottom() - h - px(4.)).clamp(bounds.top(), max_y);
     let (bx, by) = sides
         .iter()
         .flat_map(|&x| [(x, top_y), (x, bottom_y)])
         .min_by_key(|&(x, y)| covered(x, y))
         .unwrap_or((sides[0], top_y));
     let rect = Bounds::new(point(bx, by), size(w, h));
-    window.paint_quad(folo_ui::quad(
-        rect,
-        px(6.),
-        t.bg_overlay,
-        px(1.),
-        t.line_strong,
-        folo_ui::BorderStyle::Solid,
-    ));
-    paint_text(window, cx, &title, point(bx + px(10.), by + px(6.)), t.text_tertiary, fs, false);
-    for (i, (color, name, value)) in rows.iter().enumerate() {
-        let y = by + px(6.) + px(16.) * (i as f32 + 1.);
-        window.paint_quad(
-            fill(Bounds::new(point(bx + px(10.), y + px(4.)), size(px(8.), px(8.))), *color)
-                .corner_radii(px(2.)),
-        );
-        paint_text(window, cx, name, point(bx + px(24.), y), t.text_secondary, fs, false);
-        paint_text(window, cx, value, point(bx + w - px(10.), y), t.text_primary, fs, true);
-    }
+    window.with_content_mask(Some(folo_ui::ContentMask { bounds }), |window| {
+        window.paint_quad(folo_ui::quad(
+            rect,
+            px(6.),
+            t.bg_overlay,
+            px(1.),
+            t.line_strong,
+            folo_ui::BorderStyle::Solid,
+        ));
+        paint_text(window, cx, &title, point(bx + px(10.), by + px(6.)), t.text_tertiary, fs, false);
+        for (i, (color, name, value)) in rows.iter().enumerate() {
+            let y = by + px(6.) + px(16.) * (i as f32 + 1.);
+            window.paint_quad(
+                fill(Bounds::new(point(bx + px(10.), y + px(4.)), size(px(8.), px(8.))), *color)
+                    .corner_radii(px(2.)),
+            );
+            paint_text(window, cx, name, point(bx + px(24.), y), t.text_secondary, fs, false);
+            paint_text(window, cx, value, point(bx + w - px(10.), y), t.text_primary, fs, true);
+        }
+    });
 }
 
 #[cfg(test)]

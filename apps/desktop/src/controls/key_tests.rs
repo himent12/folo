@@ -223,10 +223,18 @@ fn modified_chords_do_not_nudge_sliders_or_activate_buttons() {
         "Alt+Enter must not toggle focused button"
     );
 
-    // Alt+Left on a focused slider must not nudge the slider and must allow Back navigation.
+    // Unbound modified arrow chords (Ctrl+Right, Alt+Up) reach the slider's own key handler and
+    // must NOT nudge it; Alt+Left also navigates back cleanly.
     drive(&mut app, window, |this, w, cx| w.focus(&this.fh("play-conf", cx)));
     app.frame(window.into());
     let conf_before = drive(&mut app, window, |this, _, _| this.play_conf);
+    press(&mut app, window, "ctrl-right");
+    press(&mut app, window, "alt-up");
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| this.play_conf),
+        conf_before,
+        "Ctrl+Right / Alt+Up must not nudge play-conf slider"
+    );
     press(&mut app, window, "alt-left");
     drive(&mut app, window, |this, _, _| {
         assert_eq!(this.play_conf, conf_before, "Alt+Left must not nudge play-conf slider");
@@ -276,8 +284,12 @@ fn modal_waiting_scrim_keeps_tab_focus_trapped() {
 #[test]
 fn model_not_found_offers_all_models_recovery_and_select_clears_stale_trigger() {
     let (mut app, window) = open();
-    // Opening select A measures its trigger; switching to select B clears stale trigger immediately
-    // before B renders its new bounds.
+    app.update(|cx| {
+        crate::app::bind_keys(cx);
+        crate::input::bind_keys(cx);
+    });
+    // Opening select A measures its trigger; dismissing via the bound Escape (`Dismiss`) action or
+    // Tab clears stale `menu_trigger` so the next select never inherits old bounds.
     drive(&mut app, window, |this, w, cx| {
         this.navigate(Route::Playground, w, cx);
     });
@@ -287,10 +299,20 @@ fn model_not_found_offers_all_models_recovery_and_select_clears_stale_trigger() 
     press(&mut app, window, "enter");
     assert!(drive(&mut app, window, |this, _, _| this.menu_trigger.get().is_some()));
     press(&mut app, window, "escape");
-    assert!(
-        drive(&mut app, window, |this, _, _| this.menu_trigger.get().is_none()),
-        "closing select clears menu_trigger so the next select never inherits stale bounds"
-    );
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.menu_open, None);
+        assert!(
+            this.menu_trigger.get().is_none(),
+            "Dismiss clears menu_trigger so the next select never inherits stale bounds"
+        );
+    });
+    press(&mut app, window, "enter");
+    assert!(drive(&mut app, window, |this, _, _| this.menu_trigger.get().is_some()));
+    press(&mut app, window, "tab");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.menu_open, None);
+        assert!(this.menu_trigger.get().is_none(), "Tab clears menu_trigger too");
+    });
 
     // Navigating to a deleted/missing model shows an "All models" button that returns to Models.
     drive(&mut app, window, |this, w, cx| {

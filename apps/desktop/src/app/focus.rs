@@ -114,6 +114,7 @@ impl FoloApp {
             return;
         }
         self.menu_open = None;
+        self.menu_trigger.set(None);
         self.menu_typeahead.clear();
         self.export_open = false;
         let nav = format!(
@@ -182,14 +183,23 @@ impl FoloApp {
             }
         }
         // No mounted focusable control matched the topmost overlay's scope (for example, a loading
-        // scrim before controls mount): keep focus trapped on the overlay's root instead of
-        // stranding it on a background page control.
-        if let Some(p) = &self.palette {
+        // scrim before controls mount): keep focus trapped on the overlay's root in the same
+        // stacking order as `focus_in_scope` instead of stranding it on a background page control.
+        if self.confirm_close.is_some() {
+            window.focus(&self.root_focus);
+        } else if let Some(p) = &self.palette {
             window.focus(&p.input.read(cx).focus_handle(cx));
+        } else if self.confirm_delete.is_some()
+            || self.confirm_stop.is_some()
+            || self.cloud.disconnect.is_some()
+            || self.cloud.terminate.is_some()
+            || self.cloud.connect.is_some()
+            || self.new_run.is_some()
+            || self.synth.is_some()
+        {
+            window.focus(&self.root_focus);
         } else if self.inspector.is_some() {
             window.focus(&self.inspector_focus);
-        } else if self.modal_open() {
-            window.focus(&self.root_focus);
         }
     }
 }

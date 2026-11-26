@@ -103,13 +103,15 @@ fn menu_box(trigger: (f32, f32), viewport_w: f32) -> (f32, f32) {
     let trig_w = (trigger.1 - trigger.0).max(0.);
     let max_w = (viewport_w - 16.).max(0.);
     let w = if viewport_w > 16. { trig_w.max(MENU_MIN_W).min(max_w) } else { trig_w };
-    let menu_left = if trigger.0 + w <= viewport_w - 8. {
-        trigger.0.max(8.)
+    let max_left = (viewport_w - 8. - w).max(8.);
+    let raw_left = if trigger.0 + w <= viewport_w - 8. {
+        trigger.0
     } else if trigger.1 - w >= 8. {
         trigger.1 - w
     } else {
-        (viewport_w - 8. - w).max(8.)
+        max_left
     };
+    let menu_left = raw_left.clamp(8., max_left);
     (w, menu_left - trigger.0)
 }
 
@@ -553,6 +555,11 @@ mod tests {
         assert_eq!(w, 244.);
         assert_eq!(20. + off, 8.);
         assert_eq!(20. + off + w, 252.);
+        // Trigger partially past the right viewport edge still clamps menu strictly inside [8, w-8].
+        let (w, off) = menu_box((200., 300.), 260.);
+        assert_eq!(w, 244.);
+        assert_eq!(200. + off, 8.);
+        assert_eq!(200. + off + w, 252.);
     }
 
     #[test]
