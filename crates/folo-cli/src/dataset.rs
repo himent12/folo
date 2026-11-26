@@ -78,7 +78,7 @@ fn data_error(e: DataError, path: &Path) -> CliError {
 fn output_data_error(e: DataError, out_dir: &Path) -> CliError {
     match e {
         DataError::Io { path: err_path, source } if source.kind() == std::io::ErrorKind::NotFound => {
-            if err_path == out_dir || err_path.starts_with(out_dir) {
+            if err_path.starts_with(out_dir) {
                 CliError::new(
                     ExitCode::NotFound,
                     "path_not_found",
@@ -98,31 +98,81 @@ fn output_data_error(e: DataError, out_dir: &Path) -> CliError {
     }
 }
 
-/// Canonical path of `p`, or, when `p` does not exist yet, its nearest existing ancestor's canonical path joined
-/// with the remaining lexically normalised components.
+/// Canonical path of `p`, resolving each existing prefix with filesystem semantics before applying any subsequent
+/// `..` (so `<symlink>/../out` resolves `<symlink>` first instead of collapsing `<symlink>/..` lexically), and
+/// keeping any remaining non-existent suffix components. Returns `None` when not even an ancestor root exists.
 fn canonical_target(p: &Path) -> Option<PathBuf> {
     let p = if p.as_os_str().is_empty() { Path::new(".") } else { p };
-    let mut abs = PathBuf::new();
-    for c in std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()).components() {
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let mut cur = PathBuf::new();
+    let mut missing = false;
+    for c in abs.components() {
         match c {
             std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                let _ = abs.pop();
+            std::path::Component::Prefix(prefix) => {
+                // Wait for RootDir before canonicalising so drive-relative `D:` is never resolved to cwd.
+                cur.push(prefix.as_os_str());
             }
-            c => abs.push(c),
+            std::path::Component::RootDir => {
+                cur.push(std::path::Component::RootDir);
+                if let Ok(canon) = std::fs::canonicalize(&cur) {
+                    cur = canon;
+                    missing = false;
+                } else {
+                    missing = true;
+                }
+            }
+            std::path::Component::ParentDir => {
+                if !missing {
+                    if let Ok(canon) = std::fs::canonicalize(cur.join("..")) {
+                        cur = canon;
+                    } else {
+                        let _ = cur.pop();
+                        missing = true;
+                    }
+                } else {
+                    let _ = cur.pop();
+                    if let Ok(canon) = std::fs::canonicalize(&cur) {
+                        cur = canon;
+                        missing = false;
+                    }
+                }
+            }
+            std::path::Component::Normal(part) => {
+                cur.push(part);
+                if !missing {
+                    if let Ok(canon) = std::fs::canonicalize(&cur) {
+                        cur = canon;
+                    } else {
+                        missing = true;
+                    }
+                }
+            }
         }
     }
-    abs.ancestors().find_map(|a| Some(std::fs::canonicalize(a).ok()?.join(abs.strip_prefix(a).ok()?)))
+    if cur.as_os_str().is_empty() {
+        return None;
+    }
+    if missing && !cur.ancestors().skip(1).any(Path::exists) {
+        return None;
+    }
+    Some(cur)
 }
 
-/// Refuses a `convert` output inside (or containing) the input dataset or any of its source folders, so converted
-/// images are never written into the input and picked up on its next open.
-fn check_convert_output_outside(output: &Path, ds: &LoadedDataset) -> Result<(), CliError> {
+/// Refuses a `convert` output inside (or containing) the input dataset, its supplied folder, or any of its source
+/// folders, so converted images are never written into the input and picked up on its next open.
+fn check_convert_output_outside(output: &Path, input: &Path, ds: &LoadedDataset) -> Result<(), CliError> {
     let Some(dir) = canonical_target(output) else {
         return Ok(());
     };
+    let input_dir: PathBuf = if input.is_dir() {
+        input.to_path_buf()
+    } else {
+        let abs = folo_data::paths::normalize(input);
+        abs.parent().map_or(abs.clone(), Path::to_path_buf)
+    };
     let mut dirs: Vec<(&Path, PathBuf)> = Vec::new();
-    for p in ds.sources.iter().map(PathBuf::as_path).chain(std::iter::once(ds.root.as_path())) {
+    for p in ds.sources.iter().map(PathBuf::as_path).chain([ds.root.as_path(), input_dir.as_path()]) {
         if p.is_dir()
             && let Ok(canon) = std::fs::canonicalize(p)
         {
@@ -615,9 +665,9 @@ fn convert(args: ConvertArgs, out: Out) -> Result<(), CliError> {
         TargetFormatArg::Yolo => Format::Yolo,
         TargetFormatArg::Coco => Format::Coco,
     };
-    ensure_empty_output(&args.output)?;
     let ds = open(&args.input, format_of(args.from))?;
-    check_convert_output_outside(&args.output, &ds)?;
+    check_convert_output_outside(&args.output, &args.input, &ds)?;
+    ensure_empty_output(&args.output)?;
     let skipped = ds.report.skipped_images() + ds.report.skipped_label_images();
     let t0 = Instant::now();
     let done = folo_data::convert::convert(&ds, &args.output, to).map_err(|e| match e {

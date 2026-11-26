@@ -253,9 +253,9 @@ pub struct LoadReport {
 }
 
 impl LoadReport {
-    /// Builds a report from existing issues (with zero skipped label images recorded yet).
-    pub(crate) fn from_issues(issues: Vec<Issue>) -> Self {
-        Self { issues, skipped_label_images: 0 }
+    /// Builds a report from existing issues and any image rows already skipped while parsing them.
+    pub(crate) fn from_issues(issues: Vec<Issue>, skipped_label_images: usize) -> Self {
+        Self { issues, skipped_label_images }
     }
 
     /// Number of issues of `kind`.

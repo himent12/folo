@@ -363,3 +363,49 @@ fn annotations_round_trip_exactly() {
         assert_eq!(coco::decode(&bytes[..cut], &stamps), None, "cut to {cut}");
     }
 }
+
+#[test]
+fn skipped_label_images_matches_across_yolo_coco_and_scan_cache() {
+    // YOLO: one corrupt image (counted in skipped_images) + one broken label file (counted in skipped_label_images).
+    let y = TestDir::new("scan-skipped-yolo");
+    let ycache = TestDir::new("scan-skipped-yolo-cache");
+    yolo(&y);
+    let y_plain = with_settings(uncached(), || open_with(&*y, &OpenOptions::default()).unwrap());
+    assert_eq!(y_plain.report.skipped_images(), 1);
+    assert_eq!(y_plain.report.skipped_label_images(), 1);
+    let y_cold = with_settings(settings(&ycache), || open_with(&*y, &OpenOptions::default()).unwrap());
+    let y_warm = with_settings(settings(&ycache), || open_with(&*y, &OpenOptions::default()).unwrap());
+    assert_eq!(y_cold.report, y_plain.report);
+    assert_eq!(y_warm.report, y_plain.report);
+
+    // COCO: non-image broken entries (bad category, annotation without image_id) do not count in skipped_label_images,
+    // while a malformed `images[]` row and an image with a broken bbox do — identically across cold and warm cache.
+    let c = TestDir::new("scan-skipped-coco");
+    let ccache = TestDir::new("scan-skipped-coco-cache");
+    std::fs::create_dir_all(c.join("images/train")).unwrap();
+    std::fs::create_dir_all(c.join("annotations")).unwrap();
+    png(&c.join("images/train/a.png"), 20, 20);
+    png(&c.join("images/train/b.png"), 20, 20);
+    let doc = r#"{
+        "images": [
+            {"id": 1, "file_name": "a.png", "width": 20, "height": 20},
+            {"id": 2, "file_name": "b.png", "width": 20, "height": 20},
+            {"file_name": "no_id.png", "width": 20, "height": 20}
+        ],
+        "annotations": [
+            {"id": 1, "image_id": 1, "category_id": 1, "bbox": [1, 1, 5, 5]},
+            {"id": 2, "category_id": 1, "bbox": [1, 1, 5, 5]},
+            {"id": 3, "image_id": 2, "category_id": 1, "bbox": [1, 1, -2, 5]}
+        ],
+        "categories": [{"id": 1, "name": "cat"}, {"name": "no_id"}]
+    }"#;
+    write(&c.join("annotations/instances_train.json"), doc);
+    let c_plain = with_settings(uncached(), || open_with(&*c, &OpenOptions::default()).unwrap());
+    assert_eq!(c_plain.report.skipped_images(), 0);
+    assert_eq!(c_plain.report.broken_labels(), 4);
+    assert_eq!(c_plain.report.skipped_label_images(), 2);
+    let c_cold = with_settings(settings(&ccache), || open_with(&*c, &OpenOptions::default()).unwrap());
+    let c_warm = with_settings(settings(&ccache), || open_with(&*c, &OpenOptions::default()).unwrap());
+    assert_eq!(c_cold.report, c_plain.report);
+    assert_eq!(c_warm.report, c_plain.report);
+}
