@@ -31,7 +31,7 @@ impl<W> ErrorIdWriter<W> {
 
     /// Rewrites `line` into `out`, injecting `"id":null` iff `line` is a JSON-RPC 2.0 error object without `id` or
     /// `method`. Every other message is copied byte-for-byte without parsing JSON.
-    fn normalize_line(line: &[u8], out: &mut Vec<u8>) {
+    fn normalize_line(&mut self, line: &[u8]) {
         // Fast path: rmcp serializes normal responses/requests starting with `{"jsonrpc":"2.0","id":` and
         // notifications starting with `{"jsonrpc":"2.0","method":`. Only lines lacking those prefixes and
         // containing `"error":` need JSON inspection.
@@ -47,11 +47,11 @@ impl<W> ErrorIdWriter<W> {
             && !obj.contains_key("method")
         {
             obj.insert("id".into(), Value::Null);
-            if serde_json::to_writer(&mut *out, &val).is_ok() {
+            if serde_json::to_writer(&mut self.out, &val).is_ok() {
                 return;
             }
         }
-        out.extend_from_slice(line);
+        self.out.extend_from_slice(line);
     }
 }
 
@@ -86,11 +86,11 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ErrorIdWriter<W> {
             if b == b'\n' {
                 let chunk = &buf[start..i];
                 if self.line.is_empty() {
-                    Self::normalize_line(chunk, &mut self.out);
+                    self.normalize_line(chunk);
                 } else {
                     self.line.extend_from_slice(chunk);
                     let mut line = std::mem::take(&mut self.line);
-                    Self::normalize_line(&line, &mut self.out);
+                    self.normalize_line(&line);
                     line.clear();
                     self.line = line;
                 }
@@ -117,7 +117,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for ErrorIdWriter<W> {
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if !self.line.is_empty() {
             let mut line = std::mem::take(&mut self.line);
-            Self::normalize_line(&line, &mut self.out);
+            self.normalize_line(&line);
             line.clear();
             self.line = line;
         }
@@ -190,5 +190,183 @@ mod tests {
         assert_eq!(lines[1], with_id.trim_end());
         assert_eq!(lines[2], normal.trim_end());
         assert_eq!(lines[3], note.trim_end());
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_params_return_invalid_params_over_real_rmcp_session() {
+        use rmcp::ServiceExt;
+        use std::sync::Arc;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let home = folo_test_support::TestDir::new("mcp-stdio-invalid-params");
+        let opts = crate::Options {
+            data_dir: home.to_path_buf(),
+            read_only: false,
+            confine: false,
+            device: "cpu".into(),
+            published_weights: None,
+        };
+        let server = crate::FoloMcp::new(Arc::new(folo_server::MockStore::new()), None, opts);
+        let (mut client_w, server_r) = tokio::io::duplex(64 * 1024);
+        let (server_w, client_r) = tokio::io::duplex(64 * 1024);
+        let serve = tokio::spawn(async move {
+            let running = server.serve((server_r, ErrorIdWriter::new(server_w))).await.unwrap();
+            let _ = running.waiting().await;
+        });
+
+        let mut reader = BufReader::new(client_r);
+        let send_and_read =
+            async |w: &mut tokio::io::DuplexStream, r: &mut BufReader<tokio::io::DuplexStream>, msg: &str| {
+                w.write_all(msg.as_bytes()).await.unwrap();
+                w.write_all(b"\n").await.unwrap();
+                w.flush().await.unwrap();
+                let mut line = String::new();
+                r.read_line(&mut line).await.unwrap();
+                serde_json::from_str::<Value>(&line).unwrap()
+            };
+
+        let init = send_and_read(
+            &mut client_w,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}"#,
+        )
+        .await;
+        assert!(init.get("result").is_some(), "{init}");
+        client_w
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .await
+            .unwrap();
+        client_w.flush().await.unwrap();
+
+        // Malformed params on recognized `tools/call` and `resources/subscribe` report -32602 in 2025-11-25.
+        let bad_params = send_and_read(
+            &mut client_w,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"folo_info","arguments":[]}}"#,
+        )
+        .await;
+        assert_eq!(bad_params["id"], 2);
+        assert_eq!(bad_params["error"]["code"], -32602, "{bad_params}");
+
+        let bad_sub = send_and_read(
+            &mut client_w,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":3,"method":"resources/subscribe","params":{"uri":123}}"#,
+        )
+        .await;
+        assert_eq!(bad_sub["id"], 3);
+        assert_eq!(bad_sub["error"]["code"], -32602, "{bad_sub}");
+
+        // 2026-only method `subscriptions/listen` and unknown methods still report -32601 in 2025-11-25.
+        let listen_2025 = send_and_read(
+            &mut client_w,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":4,"method":"subscriptions/listen","params":{"notifications":"bad"}}"#,
+        )
+        .await;
+        assert_eq!(listen_2025["error"]["code"], -32601, "{listen_2025}");
+
+        let unknown = send_and_read(
+            &mut client_w,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":5,"method":"no/such_method","params":{}}"#,
+        )
+        .await;
+        assert_eq!(unknown["error"]["code"], -32601, "{unknown}");
+
+        // Valid `tools/call` still succeeds.
+        let ok = send_and_read(
+            &mut client_w,
+            &mut reader,
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"folo_info","arguments":{}}}"#,
+        )
+        .await;
+        assert!(ok.get("result").is_some(), "{ok}");
+
+        drop(client_w);
+        serve.await.unwrap();
+
+        // 2026-07-28 inline session: `ping` and `resources/subscribe` return -32601, while malformed
+        // `tools/call`, `subscriptions/listen` and `server/discover` return -32602.
+        let opts2 = crate::Options {
+            data_dir: home.to_path_buf(),
+            read_only: false,
+            confine: false,
+            device: "cpu".into(),
+            published_weights: None,
+        };
+        let server2 = crate::FoloMcp::new(Arc::new(folo_server::MockStore::new()), None, opts2);
+        let (mut client_w, server_r) = tokio::io::duplex(64 * 1024);
+        let (server_w, client_r) = tokio::io::duplex(64 * 1024);
+        let serve2 = tokio::spawn(async move {
+            let running = server2.serve((server_r, ErrorIdWriter::new(server_w))).await.unwrap();
+            let _ = running.waiting().await;
+        });
+        let mut reader = BufReader::new(client_r);
+        let meta = r#""_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}"#;
+
+        // Open the 2026-07-28 inline session with a valid request first.
+        let open_2026 = send_and_read(
+            &mut client_w,
+            &mut reader,
+            &format!(r#"{{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{{{meta},"name":"folo_info","arguments":{{}}}}}}"#),
+        )
+        .await;
+        assert!(open_2026.get("result").is_some(), "{open_2026}");
+
+        let ping_2026 = send_and_read(
+            &mut client_w,
+            &mut reader,
+            &format!(r#"{{"jsonrpc":"2.0","id":10,"method":"ping","params":{{{meta}}}}}"#),
+        )
+        .await;
+        assert_eq!(ping_2026["error"]["code"], -32601, "{ping_2026}");
+
+        let sub_2026 = send_and_read(
+            &mut client_w,
+            &mut reader,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":11,"method":"resources/subscribe","params":{{{meta},"uri":123}}}}"#
+            ),
+        )
+        .await;
+        assert_eq!(sub_2026["error"]["code"], -32601, "{sub_2026}");
+
+        let bad_call_2026 = send_and_read(
+            &mut client_w,
+            &mut reader,
+            &format!(r#"{{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{{{meta},"name":"folo_info","arguments":[]}}}}"#),
+        )
+        .await;
+        assert_eq!(bad_call_2026["error"]["code"], -32602, "{bad_call_2026}");
+
+        let bad_listen_2026 = send_and_read(
+            &mut client_w,
+            &mut reader,
+            &format!(r#"{{"jsonrpc":"2.0","id":13,"method":"subscriptions/listen","params":{{{meta},"notifications":"bad"}}}}"#),
+        )
+        .await;
+        assert_eq!(bad_listen_2026["error"]["code"], -32602, "{bad_listen_2026}");
+
+        let discover_2026 = send_and_read(
+            &mut client_w,
+            &mut reader,
+            &format!(r#"{{"jsonrpc":"2.0","id":14,"method":"server/discover","params":{{{meta}}}}}"#),
+        )
+        .await;
+        assert!(discover_2026.get("result").is_some(), "{discover_2026}");
+
+        let bad_read_2026 = send_and_read(
+            &mut client_w,
+            &mut reader,
+            &format!(
+                r#"{{"jsonrpc":"2.0","id":15,"method":"resources/read","params":{{{meta},"uri":123}}}}"#
+            ),
+        )
+        .await;
+        assert_eq!(bad_read_2026["error"]["code"], -32602, "{bad_read_2026}");
+
+        drop(client_w);
+        serve2.await.unwrap();
     }
 }

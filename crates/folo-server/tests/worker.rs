@@ -92,6 +92,7 @@ async fn upload(app: &Router, kind: &str, name: &str, bytes: &[u8]) -> Uploaded 
     let u = created.upload.unwrap();
     for (n, chunk) in bytes.chunks(u.max_part_bytes as usize).enumerate() {
         let part = Request::put(format!("/api/uploads/{}/parts/{n}", u.id))
+            .header(header::CONTENT_TYPE, "application/octet-stream")
             .body(Body::from(chunk.to_vec()))
             .unwrap();
         ok::<Upload>(app, part).await;

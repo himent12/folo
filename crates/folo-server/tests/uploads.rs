@@ -683,3 +683,51 @@ async fn legacy_persisted_fingerprints_remain_reachable_on_create_upload() {
     )
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn upload_parts_require_octet_stream_media_type() {
+    let t = TestDir::new("uploads-media-type");
+    let app = app(open(&t.join("home")));
+    let u = start(&app, json!({ "kind": "model", "name": "media-type" })).await;
+    let uri = format!("/api/uploads/{}/parts/0", u.id);
+
+    // Wrong Content-Type -> 415 unsupported_media_type and session does not advance.
+    let wrong = Request::put(&uri)
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from(b"x".to_vec()))
+        .unwrap();
+    err(&app, wrong, StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type").await;
+    let after_wrong: Upload = ok(&app, bare("GET", &format!("/api/uploads/{}", u.id)), StatusCode::OK).await;
+    assert_eq!((after_wrong.part, after_wrong.received_bytes), (0, 0));
+
+    // Missing Content-Type -> 415 unsupported_media_type and session still does not advance.
+    let missing = Request::put(&uri).body(Body::from(b"x".to_vec())).unwrap();
+    err(&app, missing, StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type").await;
+    let after_missing: Upload =
+        ok(&app, bare("GET", &format!("/api/uploads/{}", u.id)), StatusCode::OK).await;
+    assert_eq!((after_missing.part, after_missing.received_bytes), (0, 0));
+
+    // Malformed parameter (unterminated quote) and duplicate conflicting headers -> 415 and no state advance.
+    let bad_param = Request::put(&uri)
+        .header(header::CONTENT_TYPE, "application/octet-stream; charset=\"binary")
+        .body(Body::from(b"x".to_vec()))
+        .unwrap();
+    err(&app, bad_param, StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type").await;
+
+    let dup_headers = Request::put(&uri)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from(b"x".to_vec()))
+        .unwrap();
+    err(&app, dup_headers, StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type").await;
+    let after_bad: Upload = ok(&app, bare("GET", &format!("/api/uploads/{}", u.id)), StatusCode::OK).await;
+    assert_eq!((after_bad.part, after_bad.received_bytes), (0, 0));
+
+    // Case-insensitive media type with valid RFC 9110 parameters (including quoted semicolon) is accepted.
+    let valid = Request::put(&uri)
+        .header(header::CONTENT_TYPE, "Application/Octet-Stream; charset=binary; name=\"a;b\"")
+        .body(Body::from(b"x".to_vec()))
+        .unwrap();
+    let accepted: Upload = ok(&app, valid, StatusCode::OK).await;
+    assert_eq!((accepted.part, accepted.received_bytes), (1, 1));
+}
