@@ -423,6 +423,7 @@ fn read_predictions_unless<'a>(
     path: &Path,
     stop: &'a AtomicBool,
 ) -> Result<impl Iterator<Item = Result<BenchPrediction, Error>> + 'a, Error> {
+    check_interrupt(stop)?;
     let (file, shown) = open_predictions_file(path)?;
     Ok(records_of_unless(BufReader::new(file), shown, Some(stop)))
 }

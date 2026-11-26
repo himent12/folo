@@ -530,7 +530,7 @@ impl Store for RealStore {
                 "not_supported",
                 "vision benchmarks are not enabled on this store",
             )
-            .hint("restart without --confine to use vision benchmarks")
+            .hint("vision benchmarks were disabled when this store was opened")
         })
     }
 

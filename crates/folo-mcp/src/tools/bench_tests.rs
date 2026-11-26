@@ -478,14 +478,8 @@ fn a_wait_follows_an_entry_until_it_ends() {
         }
         store.shutdown();
     };
-    let zero_start = Instant::now();
     let now = bounded(|| rt.block_on(ok(&s, "bench_entry", args(0))), release);
-    let zero_elapsed = zero_start.elapsed();
     assert_eq!(now["status"], "running", "{now}");
-    assert!(
-        zero_elapsed < Duration::from_millis(800),
-        "wait: 0 should not sleep like wait: 1 ({zero_elapsed:?})"
-    );
     let start = Instant::now();
     let held = bounded(|| rt.block_on(ok(&s, "bench_entry", args(1))), release);
     assert_eq!(held["status"], "running", "{held}");

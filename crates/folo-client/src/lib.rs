@@ -674,51 +674,78 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicBool, Ordering};
 
+        struct StopOnDrop {
+            flag: Arc<AtomicBool>,
+            addr: std::net::SocketAddr,
+        }
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.flag.store(true, Ordering::Relaxed);
+                let _ = std::net::TcpStream::connect_timeout(&self.addr, Duration::from_secs(1));
+            }
+        }
+
+        let io_timeout = Some(Duration::from_secs(5));
         // A second server that must never be contacted if redirects are disabled.
         let target_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let target_addr = target_listener.local_addr().unwrap();
         let target_hit = Arc::new(AtomicBool::new(false));
-        let hit_clone = target_hit.clone();
         let stop_target = Arc::new(AtomicBool::new(false));
-        let stop_clone = stop_target.clone();
-        let target_thread = std::thread::spawn(move || {
-            for stream in target_listener.incoming() {
-                if stop_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-                if let Ok(mut s) = stream {
-                    hit_clone.store(true, Ordering::Relaxed);
-                    let mut buf = [0u8; 512];
-                    let _ = s.read(&mut buf);
-                    let _ = s.write_all(
-                        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
-                    );
-                }
-            }
-        });
 
         let redirect_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let redirect_addr = redirect_listener.local_addr().unwrap();
-        let redirect_thread = std::thread::spawn(move || {
-            let (mut s, _) = redirect_listener.accept().unwrap();
-            let mut buf = [0u8; 1024];
-            let _ = s.read(&mut buf);
-            let resp = format!(
-                "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/api/health\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            );
-            let _ = s.write_all(resp.as_bytes());
+        let stop_redirect = Arc::new(AtomicBool::new(false));
+
+        std::thread::scope(|scope| {
+            let hit_clone = target_hit.clone();
+            let stop_t = stop_target.clone();
+            scope.spawn(move || {
+                for stream in target_listener.incoming() {
+                    if stop_t.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if let Ok(mut s) = stream {
+                        let _ = s.set_read_timeout(io_timeout);
+                        let _ = s.set_write_timeout(io_timeout);
+                        hit_clone.store(true, Ordering::Relaxed);
+                        let mut buf = [0u8; 512];
+                        let _ = s.read(&mut buf);
+                        let _ = s.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        );
+                    }
+                }
+            });
+            let _stop_t = StopOnDrop { flag: stop_target.clone(), addr: target_addr };
+
+            let stop_r = stop_redirect.clone();
+            scope.spawn(move || {
+                if let Ok((mut s, _)) = redirect_listener.accept()
+                    && !stop_r.load(Ordering::Relaxed)
+                {
+                    let _ = s.set_read_timeout(io_timeout);
+                    let _ = s.set_write_timeout(io_timeout);
+                    let mut buf = [0u8; 1024];
+                    let _ = s.read(&mut buf);
+                    let resp = format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/api/health\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    );
+                    let _ = s.write_all(resp.as_bytes());
+                }
+            });
+            let _stop_r = StopOnDrop { flag: stop_redirect.clone(), addr: redirect_addr };
+
+            let client = Client::with_timeouts(
+                &format!("http://{redirect_addr}"),
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+            )
+            .token("s3cret");
+            let err = client.get::<serde_json::Value>("/health").unwrap_err();
+            assert_eq!(err.status, Some(StatusCode::FOUND), "{err:?}");
+            assert_eq!(err.code(), NOT_FOLO, "{err:?}");
+            assert!(!err.is_transient(), "{err:?}");
+            assert!(!target_hit.load(Ordering::Relaxed), "redirect target must not be contacted");
         });
-
-        let client = Client::new(&format!("http://{redirect_addr}")).token("s3cret");
-        let err = client.get::<serde_json::Value>("/health").unwrap_err();
-        assert_eq!(err.status, Some(StatusCode::FOUND), "{err:?}");
-        assert_eq!(err.code(), NOT_FOLO, "{err:?}");
-        assert!(!err.is_transient(), "{err:?}");
-        assert!(!target_hit.load(Ordering::Relaxed), "redirect target must not be contacted");
-
-        redirect_thread.join().unwrap();
-        stop_target.store(true, Ordering::Relaxed);
-        let _ = std::net::TcpStream::connect(target_addr);
-        target_thread.join().unwrap();
     }
 }
