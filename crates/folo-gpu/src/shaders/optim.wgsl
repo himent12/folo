@@ -1,15 +1,16 @@
-// In-place optimizer updates, one thread per element, in the exact op order of folo-nn's CPU loops.
+// In-place optimizer updates, one thread per element (or vec4<f32> when VEC4 is set), in the exact op order
+// of folo-nn's CPU loops. `optim.rs` prepends `alias V = f32;` or `alias V = vec4<f32>;`.
 // Spec: MODE (0 SGD, 1 SGD with momentum, 2 AdamW, 3 p = a·p + b·g, 4/5 decoupled SGD no-mom/mom,
-// 6/7 cautious decoupled SGD no-mom/mom), FLAG (SGD: weight decay, AdamW: decoupled decay), NESTEROV.
-// Params: 0 = n, then
+// 6/7 cautious decoupled SGD no-mom/mom), FLAG (SGD: weight decay, AdamW: decoupled decay), NESTEROV, VEC4.
+// Params: 0 = n (elements when scalar, vec4 units when VEC4), then
 //   SGD (0,1):     1 = lr, 2 = momentum, 3 = coupled weight decay
 //   SGD (4..7):    1 = lr, 2 = momentum, 3 = decoupled wd_step (unscaled_lr * wd)
 //   AdamW (2):     1 = decay, 2 = β1, 3 = 1 − β1, 4 = β2, 5 = 1 − β2, 6 = step size, 7 = sqrt(1 − β2^t), 8 = ε
 //   axpby (3):     1 = a, 2 = b
-@group(0) @binding(1) var<storage, read_write> PARAM: array<f32>;
-@group(0) @binding(2) var<storage, read> G: array<f32>;
-@group(0) @binding(3) var<storage, read_write> S0: array<f32>;
-@group(0) @binding(4) var<storage, read_write> S1: array<f32>;
+@group(0) @binding(1) var<storage, read_write> PARAM: array<V>;
+@group(0) @binding(2) var<storage, read> G: array<V>;
+@group(0) @binding(3) var<storage, read_write> S0: array<V>;
+@group(0) @binding(4) var<storage, read_write> S1: array<V>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
@@ -36,7 +37,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             let v = pf(4u) * S1[i] + pf(5u) * (g * g);
             S0[i] = m;
             S1[i] = v;
-            let denom = sqrt(v) / pf(7u) + pf(8u);
+            let denom = sqrt(v) / pf(7u) + V(pf(8u));
             p = p + (-pf(6u)) * (m / denom);
         }
         case 4u, 5u, 6u, 7u: {
@@ -47,10 +48,10 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                 S0[i] = b;
                 if (NESTEROV) { u = g + mu * b; } else { u = b; }
             }
-            var decay = 0.0;
+            var decay = V(0.0);
             if (FLAG) {
                 if (MODE >= 6u) {
-                    if (u * p > 0.0) { decay = pf(3u) * p; }
+                    decay = select(V(0.0), pf(3u) * p, u * p > V(0.0));
                 } else {
                     decay = pf(3u) * p;
                 }
