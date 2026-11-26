@@ -209,19 +209,25 @@ describe('the sidebar foot', () => {
     expect(shell.querySelector('.conn .label')!.textContent).toBe('Demo data');
   });
 
-  it('says Demo failed or Loading demo… instead of Server offline when demo chunk loading fails or stalls', () => {
-    hub.mode = 'connecting';
-    hub.demoSlow = true;
-    const shell = mount(() => <ConnectionStatus collapsed={false} />);
-    expect(shell.querySelector('.conn .label')!.textContent).toBe('Loading demo…');
-    expect(shell.querySelector('.conn .ver')).toBeNull();
+  it('says Demo failed or Loading demo… instead of Server offline when demo chunk loading fails or stalls (even while offline)', () => {
+    const offlineSpy = vi.spyOn(hub, 'offline', 'get').mockReturnValue(true);
+    try {
+      hub.mode = 'connecting';
+      hub.demoSlow = true;
+      const shell = mount(() => <ConnectionStatus collapsed={false} />);
+      expect(shell.querySelector('.conn .label')!.textContent).toBe('Loading demo…');
+      expect(shell.querySelector('.conn')!.classList.contains('offline')).toBe(false);
+      expect(shell.querySelector('.conn .ver')).toBeNull();
 
-    hub.demoSlow = false;
-    hub.demoError = new SyntaxError('bad demo');
-    flush();
-    expect(shell.querySelector('.conn .label')!.textContent).toBe('Demo failed');
-    expect(shell.querySelector('.conn')!.classList.contains('offline')).toBe(true);
-    expect(shell.querySelector('.conn .ver')).toBeNull();
+      hub.demoSlow = false;
+      hub.demoError = new SyntaxError('bad demo');
+      flush();
+      expect(shell.querySelector('.conn .label')!.textContent).toBe('Demo failed');
+      expect(shell.querySelector('.conn')!.classList.contains('offline')).toBe(true);
+      expect(shell.querySelector('.conn .ver')).toBeNull();
+    } finally {
+      offlineSpy.mockRestore();
+    }
   });
 });
 

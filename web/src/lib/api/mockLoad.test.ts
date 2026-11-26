@@ -6,7 +6,7 @@ import { PROBE_DELAYS } from './reach';
 
 describe('the mock module that cannot be loaded', () => {
   let loads = 0;
-  let fail: boolean | Error = true;
+  let fail: boolean | Error | { raw: unknown } = true;
   let gate: Promise<void> | null = null;
   let actual: unknown;
   beforeEach(async () => {
@@ -21,6 +21,7 @@ describe('the mock module that cannot be loaded', () => {
       loads++;
       if (gate) await gate;
       if (fail instanceof Error) throw fail;
+      if (typeof fail === 'object' && fail !== null && 'raw' in fail) throw fail.raw;
       if (fail) throw new TypeError('Failed to fetch dynamically imported module');
       return actual as object;
     });
@@ -79,5 +80,52 @@ describe('the mock module that cannot be loaded', () => {
     release();
     await vi.waitFor(() => expect(hub.mode).toBe('mock'));
     expect([hub.offline, hub.demoSlow, hub.demoError, hub.reason]).toEqual([false, false, null, 'forced']);
+  });
+
+  it('surfaces demoSlow when a retry after a failed fetch stalls, and clears it on recovery', async () => {
+    const { hub, SLOW_CONNECT } = await import('./index');
+    await hub.connect();
+    expect([hub.mode, hub.offline, hub.demoSlow]).toEqual(['connecting', true, false]);
+
+    // Next retry hangs open past SLOW_CONNECT while `hub.offline` is still true.
+    let release!: () => void;
+    gate = new Promise<void>((ok) => (release = ok));
+    fail = false;
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    await vi.advanceTimersByTimeAsync(SLOW_CONNECT);
+    expect([hub.mode, hub.offline, hub.demoSlow, hub.demoError]).toEqual(['connecting', true, true, null]);
+
+    release();
+    await vi.waitFor(() => expect(hub.mode).toBe('mock'));
+    expect([hub.offline, hub.demoSlow, hub.demoError]).toEqual([false, false, null]);
+  });
+
+  it('normalizes a null/undefined evaluation rejection so demoError is never swallowed', async () => {
+    fail = { raw: null };
+    const { hub } = await import('./index');
+    await hub.connect();
+    expect(hub.mode).toBe('connecting');
+    expect(hub.offline).toBe(false);
+    expect(hub.demoError).not.toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('settles a superseded connect() immediately when loadMock() is hanging', async () => {
+    let release!: () => void;
+    gate = new Promise<void>((ok) => (release = ok));
+    fail = false;
+    const { hub } = await import('./index');
+    let firstSettled = false;
+    const first = hub.connect().then(() => {
+      firstSettled = true;
+    });
+    // Start a second connect before SLOW_CONNECT elapses: the first must settle immediately.
+    const second = hub.connect();
+    await first;
+    expect(firstSettled).toBe(true);
+
+    release();
+    await second;
+    await vi.waitFor(() => expect(hub.mode).toBe('mock'));
   });
 });

@@ -9,6 +9,7 @@ describe('chunkError', () => {
     ['Safari generic fetch failure', new TypeError('Load failed')],
     ['Generic network error', new TypeError('NetworkError when attempting to fetch resource.')],
     ['Vite CSS preload failure', new Error('Unable to preload CSS for /assets/Overview-abc.css')],
+    ['ChunkLoadError by error name', Object.assign(new Error('Loading chunk 42 failed'), { name: 'ChunkLoadError' })],
     ['Wrapped fetch error via cause', new Error('wrapper', { cause: new TypeError('Failed to fetch dynamically imported module') })],
     ['AbortError', new DOMException('Aborted', 'AbortError')],
   ])('treats %s as a retryable fetch error', (_, err) => {

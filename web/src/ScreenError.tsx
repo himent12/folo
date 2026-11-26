@@ -14,9 +14,17 @@ import ErrorState from '$lib/ui/ErrorState';
 import { isChunkEvalError } from '$lib/chunkError';
 import type { ScreenName, Screens } from './routes';
 
+/** Removes `?mock` and `?scenario` from a Studio URL while keeping the path, other query params, and hash route. */
+export function leaveDemoUrl(currentHref: string): string {
+  const to = new URL(currentHref);
+  to.searchParams.delete('mock');
+  to.searchParams.delete('scenario');
+  return to.href;
+}
+
 /**
  * The screen shown when the built-in demo (`?mock=1`) chunk threw while evaluating: browsers cache module evaluation
- * errors per URL, so retrying the import cannot recover and only a full reload can.
+ * errors per URL, so retrying the import cannot recover and only a full reload (or leaving demo mode) can.
  */
 export function DemoError(props: { error: unknown }) {
   const nav = computed(() => {
@@ -32,11 +40,16 @@ export function DemoError(props: { error: unknown }) {
       <ErrorState
         error={props.error instanceof Error ? props.error : new Error(String(props.error))}
         title="Could not load demo data"
-        hint="The built-in demo module failed to start. Reload the page to try again."
+        hint="The built-in demo module failed to start. Reload the page to try again, or leave demo data to connect to a server."
         actions={
-          <Button size="sm" variant="primary" icon={RotateCw} onclick={() => location.reload()}>
-            Reload
-          </Button>
+          <>
+            <Button size="sm" variant="primary" icon={RotateCw} onclick={() => location.reload()}>
+              Reload
+            </Button>
+            <Button size="sm" onclick={() => location.assign(leaveDemoUrl(location.href))}>
+              Leave demo data
+            </Button>
+          </>
         }
       />
     </Page>

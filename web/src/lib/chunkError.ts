@@ -8,7 +8,7 @@
 export function isChunkFetchError(error: unknown): boolean {
   let cur: unknown = error;
   for (let depth = 0; cur instanceof Error && depth < 5; depth++) {
-    if (cur.name === 'AbortError') return true;
+    if (cur.name === 'AbortError' || cur.name === 'ChunkLoadError') return true;
     const msg = cur.message;
     // Vite's modulepreload helper rejects with this when a chunk's companion stylesheet fails to load.
     if (/^Unable to preload CSS\b/i.test(msg)) return true;

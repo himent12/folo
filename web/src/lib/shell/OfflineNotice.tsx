@@ -9,7 +9,7 @@
  */
 import TriangleAlert from '$icons/triangle-alert';
 import WifiOff from '$icons/wifi-off';
-import { computed, css, signal } from 'fw';
+import { computed, css, effect, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { href, router } from '$lib/router';
 
@@ -19,10 +19,27 @@ export default function OfflineNotice() {
   const lastRefused = signal<string | null>(null);
   const onSettings = computed(() => router.route.name === 'settings');
   const demoErr = computed(() => hub.demoError !== null);
-  const demoSlow = computed(() => !demoErr.get() && !hub.offline && hub.demoSlow);
-  const visible = computed(() => hub.offline || demoErr.get() || demoSlow.get() || retrying.get());
+  // Prioritize slow demo load over `hub.offline` so a stalled retry (or `?mock=1&scenario=error`) still offers Reload.
+  const demoSlow = computed(() => !demoErr.get() && hub.demoSlow);
+  const demoReload = computed(() => demoErr.get() || demoSlow.get());
+  const visible = computed(() => hub.offline || demoReload.get() || retrying.get());
   const refused = computed(() => hub.refused ?? (retrying.get() ? lastRefused.get() : null));
+  let slotEl: HTMLDivElement | undefined;
   let retryBtn: HTMLButtonElement | undefined;
+  let reloadBtn: HTMLButtonElement | undefined;
+  let reloadFocused = false;
+
+  const focusFallback = () =>
+    slotEl?.closest('header')?.querySelector<HTMLElement>(':scope > .actions button, :scope > .actions a[href]') ?? document.getElementById('content');
+
+  // If the demo chunk finishes while the top-bar Reload button holds focus, hand focus to a stable control instead of body.
+  effect(() => {
+    if (!demoReload.get() && reloadFocused) {
+      reloadFocused = false;
+      const active = document.activeElement;
+      if (!active || active === document.body || active === reloadBtn) focusFallback()?.focus();
+    }
+  });
 
   async function retry() {
     if (retrying.peek()) return;
@@ -34,9 +51,7 @@ export default function OfflineNotice() {
       /* hub.connect handles connection errors internally */
     } finally {
       const hadFocus = !!retryBtn && document.activeElement === retryBtn;
-      const fallback = hadFocus
-        ? (retryBtn?.closest('header')?.querySelector<HTMLElement>(':scope > .actions button, :scope > .actions a[href]') ?? document.getElementById('content'))
-        : null;
+      const fallback = hadFocus ? focusFallback() : null;
       retrying.set(false);
       lastRefused.set(null);
       // If recovery hid the notice while Retry held keyboard focus, hand focus to a stable control instead of body.
@@ -45,7 +60,7 @@ export default function OfflineNotice() {
   }
 
   return (
-    <div class="slot">
+    <div class="slot" ref={(el) => (slotEl = el)}>
       <div class="notice" class:idle={!visible.get()} class:bad={demoErr.get()}>
         <span class="msg" role="status">
           {visible.get() ? (
@@ -72,8 +87,15 @@ export default function OfflineNotice() {
         </span>
         {visible.get() ? (
           <span class="actions">
-            {demoErr.get() || demoSlow.get() ? (
-              <button type="button" class="action" onclick={() => location.reload()}>
+            {demoReload.get() ? (
+              <button
+                ref={(el) => (reloadBtn = el)}
+                type="button"
+                class="action"
+                onfocus={() => (reloadFocused = true)}
+                onblur={() => (reloadFocused = false)}
+                onclick={() => location.reload()}
+              >
                 Reload
               </button>
             ) : (

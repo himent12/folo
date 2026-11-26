@@ -379,7 +379,11 @@ class Hub {
       clearTimeout(slow);
       slow = undefined;
     };
-    abort.addEventListener('abort', clearSlow, { once: true });
+    const onAbort = () => {
+      clearSlow();
+      settled();
+    };
+    abort.addEventListener('abort', onAbort, { once: true });
     try {
       let m = mockModule;
       for (let i = 0; !m; i++) {
@@ -396,7 +400,7 @@ class Hub {
           if (isChunkEvalError(e)) {
             this.#demoSlow.set(false);
             this.#unreachable.set(false);
-            this.#demoError.set(e);
+            this.#demoError.set(e == null ? new Error('Built-in demo module failed to evaluate') : e);
             settled();
             return;
           }
@@ -418,7 +422,7 @@ class Hub {
       this.mode = 'mock';
       this.epoch++;
     } finally {
-      abort.removeEventListener('abort', clearSlow);
+      abort.removeEventListener('abort', onAbort);
       clearSlow();
       settled();
     }
