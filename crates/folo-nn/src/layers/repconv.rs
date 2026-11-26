@@ -315,6 +315,12 @@ fn fuse_branch_f64(
     in_per_g: usize,
     k_size: usize,
 ) -> Result<(Vec<f64>, Vec<f64>)> {
+    if branch.act != Activation::Identity {
+        return Err(Error::Invalid(format!(
+            "RepConv: cannot fuse branch with non-identity activation {:?}",
+            branch.act
+        )));
+    }
     let expected = [o, in_per_g, k_size, k_size];
     if branch.conv.weight.dims() != expected {
         return Err(Error::Invalid(format!(

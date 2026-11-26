@@ -364,11 +364,17 @@ impl MultiHeadCrossAttention {
             k = rope2d.apply(&k, kvh, kvw)?;
         }
 
-        let scale = (hd as f64).sqrt().recip() as f32;
-        let mut scores = q.matmul(&k.transpose(2, 3)?.contiguous()?)?.mul_scalar(scale)?;
+        // Symmetric pre-scaling (`D_h^(-1/4)` on Q and K) prevents raw `Q @ K^T` overflow in `F16`
+        // autocast when the scaled logits fit, and computing mask addition + softmax in `F32` prevents
+        // large finite masks (e.g. `-100_000.0`) from underflowing to `-inf` in `F16`.
+        let inv_fourth = (hd as f64).powf(-0.25) as f32;
+        let q_scaled = q.mul_scalar(inv_fourth)?;
+        let k_scaled = k.mul_scalar(inv_fourth)?;
+        let raw_scores = q_scaled.matmul(&k_scaled.transpose(2, 3)?.contiguous()?)?;
+        let mut scores =
+            if raw_scores.dtype() != DType::F32 { raw_scores.to_dtype(DType::F32)? } else { raw_scores };
         let weights = if let Some(mask) = attn_mask {
-            let m =
-                if mask.dtype() != scores.dtype() { mask.to_dtype(scores.dtype())? } else { mask.clone() };
+            let m = if mask.dtype() != DType::F32 { mask.to_dtype(DType::F32)? } else { mask.clone() };
             scores = scores.add(&m)?;
             // Guard fully-masked rows (every key logit == -inf) so softmax yields exact 0 weights
             // and 0 gradients instead of NaN, while letting genuine NaN logits propagate unchanged.
@@ -378,7 +384,7 @@ impl MultiHeadCrossAttention {
                 .sum(3, true)?
                 .eq_scalar(lk as f32)?
                 .broadcast_to(scores.shape())?;
-            let zeros = Tensor::zeros_with(scores.shape(), scores.dtype(), scores.device())?;
+            let zeros = Tensor::zeros_with(scores.shape(), DType::F32, scores.device())?;
             let safe_scores = all_neg_inf.where_cond(&zeros, &scores)?;
             let raw_weights = safe_scores.softmax(3)?;
             let w_zeros = Tensor::zeros_with(raw_weights.shape(), raw_weights.dtype(), raw_weights.device())?;

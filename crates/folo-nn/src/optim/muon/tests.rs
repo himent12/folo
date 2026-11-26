@@ -314,4 +314,33 @@ fn muon_r1_regressions_aliasing_overflow_reordered_resume_and_sgd_parity() {
     for (u, v) in x1.to_vec::<f32>().unwrap().iter().zip(x2.to_vec::<f32>().unwrap()) {
         assert!((u - v).abs() < 1e-5, "Muon SGD fallback vs Sgd mismatch: {u} vs {v}");
     }
+
+    // 6. Active GPU autocast with a bias before a matrix fails atomically in preflight (no partial update).
+    if let Ok(ctx) = folo_gpu::GpuContext::shared()
+        && (ctx.summary().device_type != "Cpu" || std::env::var("FOLO_GPU_TEST_SOFTWARE").is_ok())
+        && let Ok(dev) = folo_gpu::init()
+        && folo_core::backend::backend(dev).is_ok_and(|b| b.computes_f16())
+    {
+        let b_gpu = Tensor::from_slice(&[1.0f32, 2.0], [2]).unwrap().to_device(dev).unwrap().requires_grad_();
+        let w_gpu = Tensor::ones([2, 2]).to_device(dev).unwrap().requires_grad_();
+        let mut opt_gpu = Muon::from_params(
+            vec![("b".into(), b_gpu.clone()), ("w".into(), w_gpu.clone())],
+            MuonConfig::default(),
+        )
+        .unwrap();
+        let loss = b_gpu
+            .square()
+            .unwrap()
+            .sum_all()
+            .unwrap()
+            .add(&w_gpu.square().unwrap().sum_all().unwrap())
+            .unwrap();
+        let grads = loss.backward().unwrap();
+        {
+            let _ac = folo_core::autocast();
+            assert!(opt_gpu.step(&grads).is_err());
+        }
+        assert_eq!(opt_gpu.step_count(), 0);
+        assert_eq!(b_gpu.to_vec::<f32>().unwrap(), vec![1.0, 2.0]);
+    }
 }

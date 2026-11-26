@@ -362,10 +362,14 @@ fn multi_head_cross_attention_grad_check_masking_rope2d_and_folo_roundtrip() {
 #[test]
 fn repconv_gpu_autocast_identity_and_deploy() {
     let mut rng = Rng::seed(804);
-    // CPU check: manually setting `rbr_identity` on a stride-2 block is rejected by `equivalent_kernel_bias`.
+    // CPU checks: mismatched `rbr_identity` and non-identity branch activation are rejected before fusion.
     let mut bad_id = RepConv::new(RepConvConfig::new(4, 4).stride(2), &mut rng).unwrap();
     bad_id.rbr_identity = Some(super::BatchNorm2d::new(4));
     assert!(bad_id.equivalent_kernel_bias().is_err());
+
+    let mut bad_act = RepConv::new(RepConvConfig::new(4, 4), &mut rng).unwrap();
+    bad_act.rbr_1x1.as_mut().unwrap().act = Activation::Relu;
+    assert!(bad_act.switch_to_deploy().is_err());
 
     let Ok(ctx) = folo_gpu::GpuContext::shared() else {
         return;
@@ -376,6 +380,7 @@ fn repconv_gpu_autocast_identity_and_deploy() {
     let Ok(dev) = folo_gpu::init() else {
         return;
     };
+    let has_f16 = folo_core::backend::backend(dev).is_ok_and(|b| b.computes_f16());
 
     let mut blk =
         RepConv::new(RepConvConfig::new(6, 6).use_identity(true).act(Activation::Silu), &mut rng).unwrap();
@@ -392,16 +397,23 @@ fn repconv_gpu_autocast_identity_and_deploy() {
     let gx = grads.get(&x_f32).unwrap().to_vec::<f32>().unwrap();
     assert!(gx.iter().all(|v| v.is_finite()), "GPU autocast RepConv train grad non-finite");
 
-    // 2. Eval mode with F16 input and F32 weights under GPU autocast succeeds cleanly.
+    // 2. Eval mode with F16 input and F32 weights under GPU autocast (only when adapter supports F16).
     blk.eval();
-    let x_f16 = x_f32.detach().to_dtype(folo_core::DType::F16).unwrap();
-    let y_ev = {
-        let _ac = folo_core::autocast();
-        blk.forward(&x_f16).unwrap()
-    };
-    assert!(
-        y_ev.to_dtype(folo_core::DType::F32).unwrap().to_vec::<f32>().unwrap().iter().all(|v| v.is_finite())
-    );
+    if has_f16 {
+        let x_f16 = x_f32.detach().to_dtype(folo_core::DType::F16).unwrap();
+        let y_ev = {
+            let _ac = folo_core::autocast();
+            blk.forward(&x_f16).unwrap()
+        };
+        assert!(
+            y_ev.to_dtype(folo_core::DType::F32)
+                .unwrap()
+                .to_vec::<f32>()
+                .unwrap()
+                .iter()
+                .all(|v| v.is_finite())
+        );
+    }
 
     // 3. Deployed mode under GPU autocast matches expected F16 autocast behavior and stays finite.
     blk.switch_to_deploy().unwrap();
@@ -411,5 +423,44 @@ fn repconv_gpu_autocast_identity_and_deploy() {
     };
     assert!(
         y_dep.to_dtype(folo_core::DType::F32).unwrap().to_vec::<f32>().unwrap().iter().all(|v| v.is_finite())
+    );
+
+    // 4. MultiHeadCrossAttention under GPU F16 autocast:
+    //    - D_h = 64 with large Q/K=32 does not overflow pre-scale Q @ K^T in F16;
+    //    - F32 mask `-100_000.0` stays finite (does not underflow to `-inf` in F16 and zero out attention).
+    let mut ca = MultiHeadCrossAttention::new(
+        MultiHeadCrossAttentionConfig::new(64, 1).bias(false),
+        &mut Rng::seed(805),
+    )
+    .unwrap();
+    {
+        let _ng = folo_core::no_grad();
+        let mut eye = vec![0.0f32; 64 * 64];
+        for i in 0..64 {
+            eye[i * 64 + i] = 1.0;
+        }
+        let eye_t = Tensor::from_vec(eye, [64, 64]).unwrap();
+        ca.q_proj.weight.copy_from(&eye_t).unwrap();
+        ca.k_proj.weight.copy_from(&eye_t).unwrap();
+        ca.v_proj.weight.copy_from(&eye_t).unwrap();
+        ca.out_proj.weight.copy_from(&eye_t).unwrap();
+    }
+    ca.to_device(dev).unwrap();
+    let q_big = Tensor::from_vec(vec![32.0f32; 64], [1, 1, 64]).unwrap().to_device(dev).unwrap();
+    let k_big = Tensor::from_vec(vec![32.0f32; 2 * 64], [1, 2, 64]).unwrap().to_device(dev).unwrap();
+    let mut v_data = vec![1.0f32; 64];
+    v_data.extend(vec![3.0f32; 64]);
+    let v_big = Tensor::from_vec(v_data, [1, 2, 64]).unwrap().to_device(dev).unwrap();
+    let finite_shift =
+        Tensor::from_slice(&[-100_000.0f32, -100_000.0], [1, 1, 1, 2]).unwrap().to_device(dev).unwrap();
+    let y_ca = {
+        let _ac = folo_core::autocast();
+        ca.forward_cross_qkv(&q_big, &k_big, &v_big, Some(&finite_shift)).unwrap()
+    };
+    let y_vals = y_ca.to_dtype(folo_core::DType::F32).unwrap().to_vec::<f32>().unwrap();
+    assert!(
+        y_vals.iter().all(|&v| v.is_finite() && (v - 2.0).abs() < 1e-2),
+        "GPU autocast cross-attention should average V=[1,3] to ~2.0, got {:?}",
+        &y_vals[..4]
     );
 }

@@ -101,8 +101,8 @@ impl AdafactorConfig {
             let lr = self.lr.ok_or_else(|| {
                 Error::Invalid("adafactor: lr must be Some(>= 0) when relative_step is false".into())
             })?;
-            if !(lr.is_finite() && lr >= 0.0) {
-                return Err(Error::Invalid(format!("adafactor: lr must be finite and >= 0, got {lr}")));
+            if !(lr.is_finite() && lr >= 0.0 && (lr as f32).is_finite()) {
+                return Err(Error::Invalid(format!("adafactor: lr must be finite f32 and >= 0, got {lr}")));
             }
         }
         if self.warmup_init && !self.relative_step {
@@ -137,9 +137,12 @@ impl AdafactorConfig {
         {
             return Err(Error::Invalid(format!("adafactor: beta1 must be finite and in [0, 1), got {b1}")));
         }
-        if !(self.weight_decay.is_finite() && self.weight_decay >= 0.0) {
+        if !(self.weight_decay.is_finite()
+            && self.weight_decay >= 0.0
+            && (self.weight_decay as f32).is_finite())
+        {
             return Err(Error::Invalid(format!(
-                "adafactor: weight_decay must be finite and >= 0, got {}",
+                "adafactor: weight_decay must be finite f32 and >= 0, got {}",
                 self.weight_decay
             )));
         }

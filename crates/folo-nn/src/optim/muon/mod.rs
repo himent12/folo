@@ -307,6 +307,15 @@ pub fn newton_schulz_quintic(u: &Tensor, ns_steps: usize) -> Result<Tensor> {
     if u.dtype() != DType::F32 {
         return Err(Error::Invalid(format!("newton_schulz_quintic: expected f32, got {}", u.dtype())));
     }
+    if folo_core::autocast_dtype().is_some()
+        && !u.device().is_cpu()
+        && folo_core::backend::backend(u.device())?.computes_f16()
+    {
+        return Err(Error::Invalid(
+            "newton_schulz_quintic: cannot run F32 orthogonalization inside an active GPU autocast() scope"
+                .into(),
+        ));
+    }
     let dims = u.dims();
     if dims.len() < 2 {
         return Err(Error::Invalid(format!("newton_schulz_quintic: expected rank >= 2, got {dims:?}")));
@@ -475,6 +484,17 @@ impl Muon {
                         )));
                     }
                     check_finite_f32(g, name)?;
+                    if matches!(ps, ParamState::Matrix { .. })
+                        && p.numel() > 0
+                        && folo_core::autocast_dtype().is_some()
+                        && !p.device().is_cpu()
+                        && folo_core::backend::backend(p.device())?.computes_f16()
+                    {
+                        return Err(Error::Invalid(
+                            "muon: cannot run F32 Newton–Schulz orthogonalization inside an active GPU autocast() scope; drop the autocast guard before stepping"
+                                .into(),
+                        ));
+                    }
                 }
             }
         }
