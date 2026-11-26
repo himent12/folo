@@ -5,6 +5,8 @@ import { flush } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import type { CloudField } from '$lib/api/types';
+import { prefs } from '$lib/prefs';
+import { toast } from '$lib/ui/toast';
 import { render } from '../../../framework/testing';
 import { fieldMessage } from './ConnectDialog';
 import ConnectionPanel, { addressProblem, serverAddress } from './ConnectionPanel';
@@ -89,6 +91,96 @@ describe('ConnectionPanel', () => {
     expect(target.querySelector('.msg.error')).toBeNull();
     c.unmount();
     target.remove();
+  });
+
+  it('aborts an in-flight Test when the address changes or Enter starts a new test', async () => {
+    const signals: AbortSignal[] = [];
+    const resolvers: ((r: Response) => void)[] = [];
+    vi.stubGlobal('fetch', (_url: string, init?: RequestInit) => {
+      if (init?.signal) signals.push(init.signal);
+      return new Promise<Response>((ok, no) => {
+        resolvers.push(ok);
+        init?.signal?.addEventListener('abort', () => no(new DOMException('aborted', 'AbortError')), { once: true });
+      });
+    });
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = render(() => <ConnectionPanel />, target);
+    const input = target.querySelector<HTMLInputElement>('#server-url')!;
+    const type = (v: string) => {
+      input.value = v;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      flush();
+    };
+    type('http://127.0.0.1:7878');
+    // First Enter starts test #1.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    flush();
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(false);
+    // Second Enter aborts test #1 and starts test #2.
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    flush();
+    expect(signals).toHaveLength(2);
+    expect(signals[0]!.aborted).toBe(true);
+    expect(signals[1]!.aborted).toBe(false);
+    // Editing the URL aborts test #2 as well.
+    type('http://127.0.0.1:7879');
+    expect(signals[1]!.aborted).toBe(true);
+    c.unmount();
+    target.remove();
+  });
+
+  it('suppresses stale error toast when a second Save supersedes an in-flight connect', async () => {
+    toast.items = [];
+    const prevUrl = prefs.serverUrl;
+    const prevMode = hub.mode;
+    const connects: (() => void)[] = [];
+    const spy = vi.spyOn(hub, 'connect').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          connects.push(resolve);
+        }),
+    );
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = render(() => <ConnectionPanel />, target);
+    const input = target.querySelector<HTMLInputElement>('#server-url')!;
+    const type = (v: string) => {
+      input.value = v;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      flush();
+    };
+    const saveBtn = () => [...target.querySelectorAll<HTMLButtonElement>('.row-actions button')].at(-1)!;
+    try {
+      type('http://127.0.0.1:7871');
+      saveBtn().click();
+      flush();
+      expect(connects).toHaveLength(1);
+      // User edits to a second URL and saves again while first connect is still pending.
+      type('http://127.0.0.1:7872');
+      saveBtn().click();
+      flush();
+      expect(connects).toHaveLength(2);
+      // First connect resolves while hub is still connecting (superseded): must NOT emit an error toast.
+      hub.mode = 'connecting';
+      connects[0]!();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(toast.items).toEqual([]);
+      // Second connect succeeds -> emits only the success toast.
+      hub.mode = 'live';
+      hub.version = '0.1.0';
+      connects[1]!();
+      await vi.waitFor(() => expect(toast.items).toHaveLength(1));
+      expect(toast.items[0]).toMatchObject({ tone: 'success', title: 'Connected' });
+    } finally {
+      spy.mockRestore();
+      prefs.serverUrl = prevUrl;
+      hub.mode = prevMode;
+      c.unmount();
+      target.remove();
+    }
   });
 
   it("tests an address by FOLO's health payload, and says what else answered (review studio-2 R1, R4)", async () => {

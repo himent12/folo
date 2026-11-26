@@ -40,15 +40,19 @@ export function use<E extends Element, P>(el: E, action: Action<E, P>, param?: (
     const payload = untrack(() => action(el, param?.() as P)) || {};
     if (param && payload.update) {
       let inited = false;
-      let prev: unknown = {};
+      let prev: unknown;
       renderEffect(() => {
         const value = param();
-        if (inited && safeNotEqual(prev, value)) {
+        if (!inited) {
+          prev = value;
+          inited = true;
+          return;
+        }
+        if (safeNotEqual(prev, value)) {
           prev = value;
           untrack(() => payload.update!(value));
         }
       });
-      inited = true;
     }
     if (payload.destroy) return () => payload.destroy!();
   });

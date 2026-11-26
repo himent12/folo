@@ -78,7 +78,7 @@ export function fly(node: Element, { delay = 0, duration = 400, easing = cubicOu
 // Blocks
 
 interface Manager {
-  out?: (done: () => void) => void;
+  out?: (done: () => void) => (() => void) | void;
 }
 
 /** A block's branch (a `For` row, a `Show` or `Key` content): the local transitions inside it. */
@@ -161,23 +161,35 @@ export function leaveBranch(b: Branch | BranchTransitions, value: unknown): bool
   let remaining = outs.length;
   let started = false;
   let finished = false;
+  let cancelled = false;
   const dones: (() => void)[] = [];
+  const aborts: (() => void)[] = [];
   const start = () => {
-    if (started) return;
+    if (started || cancelled) return;
     started = true;
-    for (const m of outs)
-      m.out!(() => {
+    for (const m of outs) {
+      const abort = m.out!(() => {
+        if (cancelled) return;
         if (--remaining === 0) {
           finished = true;
           for (const d of dones) d();
         }
       });
+      if (typeof abort === 'function') aborts.push(abort);
+    }
+  };
+  const cancel = () => {
+    if (finished || cancelled) return;
+    cancelled = true;
+    for (const a of aborts) a();
+    aborts.length = 0;
   };
   for (const n of nodes)
     setLeave(n, (done) => {
       if (finished) done();
       else dones.push(done);
       start();
+      return cancel;
     });
   return true;
 }
@@ -196,9 +208,12 @@ const noop = () => {};
 function toKeyframe(css: string): Keyframe {
   const keyframe: Keyframe = {};
   for (const part of css.split(';')) {
-    const [property, value] = part.split(':');
-    if (!property || value === undefined) break;
-    keyframe[property.trim().replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())] = value.trim();
+    const colon = part.indexOf(':');
+    if (colon <= 0) continue;
+    const property = part.slice(0, colon).trim();
+    if (!property) continue;
+    const value = part.slice(colon + 1).trim();
+    keyframe[property.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())] = value;
   }
   return keyframe;
 }
@@ -234,6 +249,7 @@ function animate(el: Element, options: TransitionConfig, counterpart: Animation 
     }
     animation = el.animate(first, { duration: delay, fill: 'forwards' });
     animation.onfinish = () => {
+      if (aborted) return;
       animation!.cancel();
       const t1 = counterpart?.t() ?? 1 - t2;
       counterpart?.abort();
@@ -250,6 +266,7 @@ function animate(el: Element, options: TransitionConfig, counterpart: Animation 
       if (duration > 0) getT = () => t1 + delta * easing((animation!.currentTime as number) / duration);
       animation = el.animate(frames, { duration, fill: 'forwards' });
       animation.onfinish = () => {
+        if (aborted) return;
         getT = () => t2;
         tick?.(t2, 1 - t2);
         finish();
@@ -291,10 +308,15 @@ export function transition<P>(el: Element, fn: TransitionFn<P>, params: (() => P
   if (flags & OUT) {
     manager.out = (done) => {
       html.inert = true;
-      outroAnim = animate(el, getOptions(), introAnim, 0, () => {
+      const anim = (outroAnim = animate(el, getOptions(), introAnim, 0, () => {
         el.dispatchEvent(new CustomEvent('outroend'));
         done();
-      });
+      }));
+      return () => {
+        anim.abort();
+        html.inert = inert;
+        if (outroAnim === anim) outroAnim = undefined;
+      };
     };
   }
   if (branchActive) (branchManagers ??= []).push(manager);

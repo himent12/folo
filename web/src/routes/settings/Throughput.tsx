@@ -6,7 +6,7 @@
  * the rows.
  */
 import Gauge from '$icons/gauge';
-import { computed, css, defaults, effect, For, MediaQuery, signal } from 'fw';
+import { computed, css, defaults, effect, For, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
@@ -69,29 +69,55 @@ export default function Throughput(props: { benchmark?: boolean }) {
 
   // ---- Measure now ----
   const measuring = signal(false);
+  const reconnecting = computed(() => hub.mode === 'connecting');
+  let alive = true;
+  let measureSeq = 0;
   let started = 0;
   const elapsed = signal(0);
   const failure = signal<{ message: string; hint?: string | null } | null>(null);
+  onCleanup(() => {
+    alive = false;
+    measureSeq++;
+  });
+  let prevEpoch = untrack(() => hub.epoch);
+  let prevConnecting = untrack(() => hub.mode === 'connecting');
+  effect(() => {
+    const ep = hub.epoch;
+    const isConnecting = hub.mode === 'connecting';
+    if (ep === prevEpoch && isConnecting === prevConnecting) return;
+    prevEpoch = ep;
+    prevConnecting = isConnecting;
+    measureSeq++;
+    measuring.set(false);
+    failure.set(null);
+  });
   effect(() => {
     if (!measuring.get()) return;
     const t = setInterval(() => elapsed.set(Math.floor((Date.now() - started) / 1000)), 250);
     return () => clearInterval(t);
   });
 
+  const isConnecting = () => hub.mode === 'connecting';
+
   async function measure() {
-    if (measuring.peek()) return;
+    if (measuring.peek() || isConnecting()) return;
+    const seq = ++measureSeq;
+    const epoch = hub.epoch;
     measuring.set(true);
     failure.set(null);
     started = Date.now();
     elapsed.set(0);
     try {
       const r = await hub.api.benchmark({});
+      if (!alive || seq !== measureSeq || isConnecting() || hub.epoch !== epoch) return;
       await table.refresh();
+      if (!alive || seq !== measureSeq || isConnecting() || hub.epoch !== epoch) return;
       toast.success('Measured', `${r.training.arch} at ${r.training.imgsz} px: ${num(r.train_imgs_per_s)} img/s training, ${latencyMs(r.latency_ms)} a prediction.`);
     } catch (e) {
+      if (!alive || seq !== measureSeq || isConnecting() || hub.epoch !== epoch) return;
       failure.set(e instanceof ApiError ? { message: e.message, hint: e.hint } : { message: e instanceof Error ? e.message : String(e) });
     } finally {
-      measuring.set(false);
+      if (alive && seq === measureSeq) measuring.set(false);
     }
   }
 
@@ -197,7 +223,7 @@ export default function Throughput(props: { benchmark?: boolean }) {
 
   const measureButton = () =>
     p.benchmark ? (
-      <Button size="sm" icon={Gauge} loading={measuring.get()} onclick={measure}>
+      <Button size="sm" icon={Gauge} loading={measuring.get()} disabled={reconnecting.get()} onclick={measure}>
         {measuring.get() ? 'Measuring' : 'Measure now'}
       </Button>
     ) : null;

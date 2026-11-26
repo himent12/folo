@@ -19,11 +19,15 @@ import {
   watchedSignal,
   type Owner,
 } from './core';
+import { use } from './bind';
 import { createComponent } from './component';
 import { insert, setLeave } from './dom';
 import { delegateEvents, delegateRoot, setDelegated } from './events';
-import { For, Index } from './flow';
+import { For, Index, Show } from './flow';
+import { deep } from './reactivity';
 import { render as rawRender } from './render';
+import { spread } from './spread';
+import { transition } from './transition';
 import { render } from '../testing';
 
 describe('batch() scheduler hardening', () => {
@@ -624,5 +628,229 @@ describe('For / Index keyed diff & single-node outro hardening', () => {
     expect(host.innerHTML).toBe('<strong>second-el</strong>');
 
     stop();
+  });
+});
+
+describe('runtime action, spread, transition, deep, and unmount hardening', () => {
+  it('use:action records initial primitive param so an unchanged first reactive re-evaluation does not spuriously call update()', () => {
+    const count = signal(0);
+    const updates: unknown[] = [];
+    const action = (_node: HTMLElement, init: string | null) => {
+      expect(init).toBeNull();
+      return {
+        update: (v: string | null) => {
+          updates.push(v);
+        },
+      };
+    };
+    const el = document.createElement('div');
+    const stop = createRoot((d) => {
+      use(el, action, () => (count.get() >= 2 ? 'capped' : null));
+      return d;
+    });
+    flush();
+    expect(updates).toEqual([]);
+
+    // Dependency changes from 0 -> 1, param still evaluates to null: update() must NOT be called.
+    count.set(1);
+    flush();
+    expect(updates).toEqual([]);
+
+    // Dependency changes from 1 -> 2, param flips to 'capped': update() fires once.
+    count.set(2);
+    flush();
+    expect(updates).toEqual(['capped']);
+    stop();
+  });
+
+  it('spread with class: directives does not rewrite className when only unrelated props change', () => {
+    const title = signal('a');
+    const active = signal(true);
+    const el = document.createElement('div');
+    let classWrites = 0;
+    const desc = Object.getOwnPropertyDescriptor(Element.prototype, 'className')!;
+    Object.defineProperty(el, 'className', {
+      configurable: true,
+      get() {
+        return desc.get!.call(this);
+      },
+      set(v: string) {
+        classWrites++;
+        desc.set!.call(this, v);
+      },
+    });
+    const stop = createRoot((d) => {
+      spread(el, () => ({ class: 'base', title: title.get() }), 'fw-test', () => ({ on: active.get() }));
+      return d;
+    });
+    flush();
+    expect(el.className).toBe('base fw-test on');
+    const initialWrites = classWrites;
+
+    // Unrelated prop changes: must not rewrite className.
+    title.set('b');
+    flush();
+    expect(el.getAttribute('title')).toBe('b');
+    expect(classWrites).toBe(initialWrites);
+
+    // Directive change toggles class without rewriting className.
+    active.set(false);
+    flush();
+    expect(el.classList.contains('on')).toBe(false);
+    expect(classWrites).toBe(initialWrites);
+    stop();
+  });
+
+  it('transition preserves CSS values containing colons and ignores aborted onfinish callbacks', async () => {
+    const seenKeyframes: Keyframe[][] = [];
+    const anims: { onfinish: (() => void) | null; cancel: ReturnType<typeof vi.fn>; currentTime: number; effect: unknown }[] = [];
+    const el = document.createElement('div');
+    (el as unknown as { animate: (k: Keyframe[]) => unknown }).animate = (k: Keyframe[]) => {
+      seenKeyframes.push(k);
+      const a = { onfinish: null as (() => void) | null, cancel: vi.fn(), currentTime: 0, effect: {} };
+      anims.push(a);
+      return a;
+    };
+    const onIntroEnd = vi.fn();
+    el.addEventListener('introend', onIntroEnd);
+    const show = signal(false);
+    const view = render(() => (
+      <Show when={show.get()}>
+        {() => {
+          transition(
+            el,
+            () => ({
+              delay: 10,
+              duration: 16,
+              css: () => '; background-image: url(https://example.com/a.png); opacity: 0.5;',
+            }),
+            undefined,
+            1,
+          );
+          return el;
+        }}
+      </Show>
+    ));
+    flush();
+    show.set(true);
+    flush();
+    // Wait for intro microtask to start delay animation.
+    await Promise.resolve();
+    expect(anims).toHaveLength(1);
+    const firstFinish = anims[0]!.onfinish!;
+    // Finish delay animation -> builds real keyframes with colon preserved and skips empty `;` segments.
+    firstFinish();
+    expect(anims).toHaveLength(2);
+    expect(seenKeyframes[1]![0]).toEqual({
+      backgroundImage: 'url(https://example.com/a.png)',
+      opacity: '0.5',
+    });
+    // Completing the second animation fires introend and aborts cleanly; re-invoking a stale onfinish does nothing.
+    const secondFinish = anims[1]!.onfinish!;
+    secondFinish();
+    expect(onIntroEnd).toHaveBeenCalledTimes(1);
+    secondFinish();
+    expect(onIntroEnd).toHaveBeenCalledTimes(1);
+    view.unmount();
+  });
+
+  it('deep() ignores deleting inherited properties and notifies truncated indices on string array length', () => {
+    const obj = deep<{ a: number }>({ a: 1 });
+    let objRuns = 0;
+    const stopObj = createRoot((d) => {
+      effect(() => {
+        Object.keys(obj);
+        objRuns++;
+      });
+      return d;
+    });
+    flush();
+    expect(objRuns).toBe(1);
+    // Deleting an inherited property that is not own must not trigger reactivity.
+    Reflect.deleteProperty(obj, 'toString');
+    flush();
+    expect(objRuns).toBe(1);
+    stopObj();
+
+    const arr = deep(['x', 'y', 'z']);
+    const seenSecond: (string | undefined)[] = [];
+    const stopArr = createRoot((d) => {
+      effect(() => {
+        seenSecond.push(arr[1]);
+      });
+      return d;
+    });
+    flush();
+    expect(seenSecond).toEqual(['y']);
+    (arr as unknown as { length: unknown }).length = '1';
+    flush();
+    expect(seenSecond).toEqual(['y', undefined]);
+    stopArr();
+  });
+
+  it('unmounting a render() root clears pending outro leave handlers so leaving counter does not leak', () => {
+    const container = document.createElement('div');
+    const unmount = rawRender(() => {
+      const el = document.createElement('div');
+      setLeave(el, () => {});
+      return el;
+    }, container);
+    const leavingEl = container.querySelector('div') as (HTMLDivElement & { $$leave?: unknown }) | null;
+    expect(leavingEl?.$$leave).toBeDefined();
+    unmount();
+    expect(leavingEl?.$$leave).toBeUndefined();
+    expect(container.childNodes.length).toBe(0);
+  });
+
+  it('unmounting a root cancels started outros so reused DOM nodes are never removed from another root', async () => {
+    const anims: { onfinish: (() => void) | null; cancel: ReturnType<typeof vi.fn>; currentTime: number; effect: unknown }[] = [];
+    const el = document.createElement('div');
+    el.textContent = 'reusable';
+    (el as unknown as { animate: () => unknown }).animate = () => {
+      const a = { onfinish: null as (() => void) | null, cancel: vi.fn(), currentTime: 0, effect: {} };
+      anims.push(a);
+      return a;
+    };
+
+    const show = signal(true);
+    const root1 = document.createElement('div');
+    const unmount1 = rawRender(
+      () => (
+        <Show when={show.get()}>
+          {() => {
+            transition(el, () => ({ duration: 120, css: (t) => `opacity: ${t}` }), undefined, 2);
+            return el;
+          }}
+        </Show>
+      ),
+      root1,
+    );
+    flush();
+    expect(el.parentNode).toBe(root1);
+
+    // Hide the branch so the outro starts (el stays in root1 while animating out).
+    show.set(false);
+    flush();
+    await Promise.resolve();
+    expect(anims).toHaveLength(1);
+    const delayFinish = anims[0]!.onfinish!;
+    delayFinish();
+    expect(anims).toHaveLength(2);
+    const outroFinish = anims[1]!.onfinish!;
+    expect(el.inert).toBe(true);
+
+    // Unmount root1 before the outro finishes, then render the same DOM node into root2.
+    unmount1();
+    expect(anims[1]!.cancel).toHaveBeenCalled();
+    expect(el.inert).toBe(false);
+
+    const root2 = document.createElement('div');
+    const unmount2 = rawRender(() => el, root2);
+    expect(el.parentNode).toBe(root2);
+
+    // Even if the old outro animation's finish callback runs late, it must not remove el from root2.
+    outroFinish();
+    expect(el.parentNode).toBe(root2);
+    unmount2();
   });
 });

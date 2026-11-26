@@ -26,16 +26,18 @@ export const NOT_FOLO = 'This address answered, but not as a FOLO server.';
 export const TOKEN_WALL = "This server needs a token (folo serve --token), which Studio can't send.";
 
 /**
- * Whether the FOLO server at `base` refuses Studio's requests for want of a token. `GET /api/health` is the one path
- * `folo serve --token` leaves open, so its answer cannot tell; a `HEAD` of the runs list (what Studio polls anyway, without
- * the body) can: `401` is the token wall. No answer is not a wall: the requests that follow will find the server gone.
+ * Whether the FOLO server at `base` refuses Studio's requests (a token wall or a proxy refusing access).
+ * `GET /api/health` is the one path `folo serve --token` (and many auth proxies) leave open, so its answer cannot
+ * tell; a `HEAD` of the runs list (what Studio polls anyway, without the body) can: `401` is the token wall, `403` is
+ * a refusal. No answer is not a wall: the requests that follow will find the server gone.
  */
-export async function tokenWall(base: string, signal: AbortSignal): Promise<boolean> {
+export async function tokenWall(base: string, signal: AbortSignal): Promise<401 | 403 | null> {
   try {
-    return (await fetch(`${base}/api/runs`, { method: 'HEAD', signal })).status === 401;
+    const { status } = await fetch(`${base}/api/runs`, { method: 'HEAD', signal });
+    return status === 401 || status === 403 ? status : null;
   } catch (e) {
     if (signal.aborted) throw e;
-    return false;
+    return null;
   }
 }
 

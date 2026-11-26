@@ -9,7 +9,7 @@ import OfflineNotice from '$lib/shell/OfflineNotice';
 import ConnectionPanel from '../../routes/settings/ConnectionPanel';
 import { render } from '../../../framework/testing';
 import { ApiError } from './client';
-import { isHealth, NOT_FOLO, refusal, TOKEN_WALL } from './handshake';
+import { isHealth, NOT_FOLO, refusal, REFUSES_ACCESS, TOKEN_WALL } from './handshake';
 import { CONNECT_TIMEOUT, hub, TOKEN_GRACE } from './index';
 import { PROBE_DELAYS } from './reach';
 
@@ -201,6 +201,36 @@ describe('the first handshake with an address that answers', () => {
     await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
     const said = c.said();
     expect([said.mode, said.label, hub.refused, hub.offline]).toEqual(['live', 'Connected', null, false]);
+    c.unmount();
+  });
+
+  it('does not go live when post-health HEAD /api/runs answers 403, says access is refused, and goes live once it answers 200', async () => {
+    const forbidden = () => new Response(null, { status: 403 });
+    // Early HEAD returns 403 (ignored -> falls back to post-health tokenWall), post-health HEAD returns 403 (refused),
+    // then on the next probe cycle HEAD returns 200 and Studio goes live.
+    const c = await connectTo([healthy], [forbidden, forbidden, () => new Response(null, { status: 200 })]);
+    const said = c.said();
+    expect([said.mode, said.label, said.notice, hub.refused, hub.offline]).toEqual([
+      'connecting',
+      'Not connected',
+      `${REFUSES_ACCESS} Retrying…`,
+      REFUSES_ACCESS,
+      true,
+    ]);
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    const next = c.said();
+    expect([next.mode, next.label, hub.refused, hub.offline]).toEqual(['live', 'Connected', null, false]);
+    c.unmount();
+  });
+
+  it('cancels the retry backoff timer when a newer connect supersedes an unreachable connect', async () => {
+    const c = start([() => Promise.reject(new TypeError('Failed to fetch'))]);
+    await c.done;
+    expect(vi.getTimerCount()).toBe(1);
+    const second = hub.connect();
+    await second;
+    // Only the new connect's retry timer remains scheduled; the superseded one was aborted immediately.
+    expect(vi.getTimerCount()).toBe(1);
     c.unmount();
   });
 

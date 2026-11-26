@@ -6,7 +6,7 @@ import FlaskConical from '$icons/flask-conical';
 import Plug from '$icons/plug';
 import PlugZap from '$icons/plug-zap';
 import WifiOff from '$icons/wifi-off';
-import { computed, css, effect, signal } from 'fw';
+import { computed, css, effect, onCleanup, signal } from 'fw';
 import { HttpApi } from '$lib/api/client';
 import { accessCheck, isHealth, NOT_FOLO, refusal, refusedWords } from '$lib/api/handshake';
 import { hub } from '$lib/api/index';
@@ -58,6 +58,7 @@ export default function ConnectionPanel() {
   const origin = typeof location === 'undefined' ? '' : location.origin;
   const url = signal(prefs.serverUrl);
   const testing = signal(false);
+  const saving = signal(false);
   const test = signal<Test | null>(null);
   /** The last test, by outcome. */
   const passed = computed(() => {
@@ -78,51 +79,75 @@ export default function ConnectionPanel() {
   const problem = computed(() => addressProblem(normalized.get()));
   const invalid = computed(() => problem.get() !== null);
   const dirty = computed(() => normalized.get() !== prefs.serverUrl);
-  // A test result is about the address it tested: another address clears it (and a test still out is dropped).
+  // A test result is about the address it tested: another address clears it (and aborts any test still out).
+  let alive = true;
   let tested = 0;
+  let testCtrl: AbortController | null = null;
+  let saveSeq = 0;
+  onCleanup(() => {
+    alive = false;
+    tested++;
+    saveSeq++;
+    testCtrl?.abort();
+    testCtrl = null;
+  });
   effect(() => {
     void normalized.get();
     tested++;
+    testCtrl?.abort();
+    testCtrl = null;
     test.set(null);
     testing.set(false);
   });
 
   async function runTest() {
     if (invalid.peek()) return;
+    testCtrl?.abort();
+    const ctrl = new AbortController();
+    testCtrl = ctrl;
+    const mine = ++tested;
     testing.set(true);
     test.set(null);
-    const mine = tested;
     const t0 = performance.now();
     try {
       // As a connect checks it: FOLO's health, then whether it lets Studio in (the token check, `accessCheck`). Green only
       // when that check answers 2xx; one that cannot tell (no answer, another status) is not a pass.
       const base = normalized.peek();
-      const within = AbortSignal.timeout(3000);
+      const within = AbortSignal.any([ctrl.signal, AbortSignal.timeout(3000)]);
       const h: unknown = await new HttpApi(base).health(within);
-      if (mine !== tested) return;
+      if (!alive || mine !== tested) return;
       if (!isHealth(h)) return test.set({ ok: false, message: NOT_FOLO });
       const access = await accessCheck(base, within);
-      if (mine !== tested) return;
+      if (!alive || mine !== tested) return;
       if (access === null) return test.set({ ok: null, version: h.version });
       test.set(access === 'in' ? { ok: true, version: h.version, mock: h.mock, ms: performance.now() - t0 } : { ok: false, message: refusedWords(access) });
     } catch (e) {
+      if (!alive || mine !== tested || ctrl.signal.aborted) return;
       const timeout = e instanceof DOMException && (e.name === 'TimeoutError' || e.name === 'AbortError');
       const message = timeout ? 'No answer within 3 s.' : (refusal(e) ?? (e instanceof Error ? e.message : String(e)));
-      if (mine === tested) test.set({ ok: false, message });
+      test.set({ ok: false, message });
     } finally {
-      if (mine === tested) testing.set(false);
+      if (testCtrl === ctrl) testCtrl = null;
+      if (alive && mine === tested) testing.set(false);
     }
   }
 
   async function save() {
     if (invalid.peek()) return;
+    const seq = ++saveSeq;
+    saving.set(true);
     prefs.serverUrl = normalized.peek();
     url.set(prefs.serverUrl);
-    await hub.connect();
-    if (hub.mode === 'live') toast.success('Connected', `folo serve ${hub.version} at ${hub.serverUrl}`);
-    else if (forced) toast.info('Saved', 'Demo data stays on while the address has ?mock=1.');
-    else if (hub.refused) toast.error(new Error(`${hub.serverUrl}: ${hub.refused} Studio keeps trying.`), 'Saved, but not connected');
-    else toast.error(new Error(`No answer from ${hub.serverUrl} yet. Studio keeps trying.`), 'Saved, but not connected');
+    try {
+      await hub.connect();
+      if (!alive || seq !== saveSeq) return;
+      if (hub.mode === 'live') toast.success('Connected', `folo serve ${hub.version} at ${hub.serverUrl}`);
+      else if (forced) toast.info('Saved', 'Demo data stays on while the address has ?mock=1.');
+      else if (hub.refused) toast.error(new Error(`${hub.serverUrl}: ${hub.refused} Studio keeps trying.`), 'Saved, but not connected');
+      else toast.error(new Error(`No answer from ${hub.serverUrl} yet. Studio keeps trying.`), 'Saved, but not connected');
+    } finally {
+      if (alive && seq === saveSeq) saving.set(false);
+    }
   }
 
   /** Demo data only when asked for: this page again with `?mock=1` (the screen kept). */
@@ -307,7 +332,7 @@ export default function ConnectionPanel() {
             </Button>
           ) : null}
           {/* The primary action only once there is something to save; reconnecting as is stays secondary. */}
-          <Button variant={dirty.get() ? 'primary' : 'secondary'} disabled={invalid.get()} onclick={save}>
+          <Button variant={dirty.get() ? 'primary' : 'secondary'} loading={saving.get() && !dirty.get()} disabled={invalid.get()} onclick={save}>
             {dirty.get() ? 'Save and reconnect' : 'Reconnect'}
           </Button>
         </div>

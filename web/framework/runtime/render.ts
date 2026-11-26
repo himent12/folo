@@ -1,7 +1,7 @@
 // Mounting: `render(() => <App />, el)` appends the app to `el` and returns the function that removes it.
 
 import { createRoot, untrack } from './core';
-import { insert } from './dom';
+import { clearLeaves, insert } from './dom';
 import { delegateRoot } from './events';
 
 /**
@@ -19,6 +19,7 @@ export function render(code: () => JSX.Element, container: Element | DocumentFra
     let n: Node | null = start;
     while (n !== null) {
       const next: Node | null = n === end ? null : n.nextSibling;
+      clearLeaves(n);
       n.parentNode?.removeChild(n);
       n = next;
     }

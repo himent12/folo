@@ -31,6 +31,7 @@ export class Access implements AccessWatch {
   #again = false;
   #attempt = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
+  #ctrl: AbortController | null = null;
 
   /** The status the latest check refused Studio with (401, 403), or null: let in, or nothing refused yet. */
   get refusal(): 401 | 403 | null {
@@ -44,16 +45,31 @@ export class Access implements AccessWatch {
     return this.#checks;
   }
 
-  /** The server in use changed: forget any refusal; a check still out says nothing; `check` asks the new one. */
+  /** The server in use changed: forget any refusal; a check still out is cancelled and says nothing; `check` asks the new one. */
   reset(check: Check | null): void {
     this.#checks++;
     this.#check = check;
     this.#out = false;
     this.#again = false;
     this.#attempt = 0;
+    const ctrl = this.#ctrl;
+    this.#ctrl = null;
+    ctrl?.abort();
     clearTimeout(this.#timer);
     this.#timer = undefined;
     this.#refusal.set(null);
+  }
+
+  /** While refused, check again right away (e.g. once the server is reachable again after an outage) instead of waiting out the backoff or a stale pre-outage check. */
+  recheck(): void {
+    if (!this.#check || this.#refusal.peek() === null) return;
+    const ctrl = this.#ctrl;
+    this.#ctrl = null;
+    ctrl?.abort();
+    clearTimeout(this.#timer);
+    this.#timer = undefined;
+    this.#attempt = 0;
+    void this.#run();
   }
 
   refused(seen: number): void {
@@ -68,9 +84,12 @@ export class Access implements AccessWatch {
     const check = this.#check;
     if (!check) return;
     const mine = ++this.#checks;
+    const ctrl = new AbortController();
+    this.#ctrl = ctrl;
     this.#out = true;
     this.#again = false;
-    const answer = await check(AbortSignal.timeout(PROBE_TIMEOUT)).catch(() => null);
+    const answer = await check(AbortSignal.any([ctrl.signal, AbortSignal.timeout(PROBE_TIMEOUT)])).catch(() => null);
+    if (this.#ctrl === ctrl) this.#ctrl = null;
     if (mine !== this.#checks) return;
     this.#out = false;
     if (answer === 'in') {
