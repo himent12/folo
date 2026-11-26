@@ -24,7 +24,7 @@ import Sparkles from '$icons/sparkles';
 import Trash from '$icons/trash-2';
 import Undo from '$icons/undo-2';
 import X from '$icons/x';
-import { computed, createUniqueId, css, effect, Index, MediaQuery, onWindow, signal, untrack } from 'fw';
+import { computed, createUniqueId, css, effect, Index, MediaQuery, onCleanup, onWindow, signal, untrack } from 'fw';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { LiveLabelJob } from '$lib/api/liveLabel';
@@ -132,6 +132,8 @@ export default function Editor(props: EditorProps) {
     return s === null ? undefined : draft.get()[s];
   });
   // This image's edits, for Undo and Redo; `rev` tells the buttons it changed.
+  let disposed = false;
+  onCleanup(() => (disposed = true));
   const history = new History<Box[]>();
   const rev = signal(0);
   const undoCount = computed(() => (rev.get(), history.past.length));
@@ -323,7 +325,7 @@ export default function Editor(props: EditorProps) {
     try {
       const saved = await hub.api.updateLabelImage(props.job.id, id, sent.map(tidy), expect);
       props.live.put([saved], mark);
-      if (shownId === id) {
+      if (!disposed && shownId === id) {
         base.set(saved.boxes);
         elsewhere.set(false);
         if (draft.peek() === sent) draft.set(saved.boxes);
@@ -332,7 +334,7 @@ export default function Editor(props: EditorProps) {
       return true;
     } catch (e) {
       // The edits stay; the stream brings the labels saved elsewhere, as the base Discard goes back to.
-      if (shownId !== id) return false;
+      if (disposed || shownId !== id) return false;
       if (!changedElsewhere(e)) status.error(e, 'Could not save the boxes');
       else status.show('info', 'Changed elsewhere while you edited', 'Its labels were saved from another tab or window first, so yours were not. Save replaces them with yours; Discard shows them.');
       return false;
@@ -372,11 +374,11 @@ export default function Editor(props: EditorProps) {
     try {
       const saved = await hub.api.reviewLabelImage(props.job.id, cur.id, reviewed, expect);
       props.live.put([saved], mark);
-      if (shownId !== cur.id || !reviewed) return;
-      if (next) props.onnavigate(next);
-      else status.success('Reviewed', 'Every labeled image here is reviewed.');
+      if (disposed || shownId !== cur.id || !reviewed) return;
+      if (next && router.route.name === 'label-job' && router.route.params.id === props.job.id && router.route.query.get('image') === cur.id) props.onnavigate(next);
+      else if (!next) status.success('Reviewed', 'Every labeled image here is reviewed.');
     } catch (e) {
-      if (!changedElsewhere(e)) { if (shownId === cur.id) status.error(e, 'Could not mark the image'); } else await reload(cur.id);
+      if (!changedElsewhere(e)) { if (!disposed && shownId === cur.id) status.error(e, 'Could not mark the image'); } else if (!disposed) await reload(cur.id);
     } finally {
       reviewing.set(false);
     }
@@ -400,7 +402,7 @@ export default function Editor(props: EditorProps) {
     const cur = img.peek();
     if (!cur) return;
     const next = nextToReview(cur.id);
-    if ((await save()) && shownId === cur.id && next) props.onnavigate(next);
+    if ((await save()) && !disposed && shownId === cur.id && next && router.route.name === 'label-job' && router.route.params.id === props.job.id && router.route.query.get('image') === cur.id) props.onnavigate(next);
   }
 
   // ---------- leaving with changes ----------
@@ -561,17 +563,18 @@ export default function Editor(props: EditorProps) {
     const next = props.images[i + 1] ?? props.images[i - 1];
     try {
       await hub.api.deleteLabelImage(target.jobId, target.id);
+      if (disposed) return;
       if (props.job.id === target.jobId) props.live.drop(target.id);
-      if (shownId === target.id && props.job.id === target.jobId && open.peek()) {
+      const r = router.route;
+      if (shownId === target.id && props.job.id === target.jobId && open.peek() && r.name === 'label-job' && r.params.id === target.jobId && r.query.get('image') === target.id) {
         draft.set(base.peek());
         removing.set(null);
         props.onnavigate(next && next.id !== target.id ? next.id : null);
       }
     } catch (e) {
-      if (shownId === target.id && props.job.id === target.jobId && removing.peek()?.id === target.id)
-        removeStatus.error(e, 'Could not remove the image');
+      if (!disposed && shownId === target.id && props.job.id === target.jobId && removing.peek()?.id === target.id) removeStatus.error(e, 'Could not remove the image');
     } finally {
-      removeBusy.set(false);
+      if (!disposed) removeBusy.set(false);
     }
   }
 
