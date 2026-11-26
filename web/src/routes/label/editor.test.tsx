@@ -731,4 +731,27 @@ describe('the labeling editor: reviewing', () => {
     expect(router.route.query.get('image')).toBe('3');
     expect(removeDlg()).toBeUndefined();
   });
+
+  it('does not redirect back to the labeling job when leaving the page while a delete is pending', async () => {
+    await openEditor('1');
+    const del = deferred<void>();
+    vi.spyOn(hub.api, 'deleteLabelImage').mockReturnValue(del.promise);
+    click(inEditor('Remove image'));
+    const removeDlg = [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].find((d) =>
+      d.querySelector('h2')?.textContent?.startsWith('Remove '),
+    );
+    click([...removeDlg!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Remove image'));
+
+    // Navigate away to /runs and unmount the labeling page before delete settles.
+    router.go('/runs', { replace: true });
+    unmount(c!);
+    c = undefined;
+    flushSync();
+    expect(router.route.path).toBe('/runs');
+
+    del.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(router.route.path).toBe('/runs');
+  });
 });
