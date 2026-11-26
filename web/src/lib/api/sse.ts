@@ -116,24 +116,54 @@ export function openEventStream<M>(
     }
   };
 
-  // The connection is gone (ended, failed, refused or silent): say so and open another after the backoff.
-  const drop = (notifyReachFailed = true) => {
+  // The connection is gone (ended, failed, refused or silent): say so and open another after the backoff (or at once
+  // when recovering from an offline / sleeping-tab wake).
+  const drop = (notifyReachFailed = true, immediate = false) => {
     if (closed) return;
     const old = ctrl;
     ctrl = null;
     old?.abort();
     clearTimeout(watchdog);
+    watchdog = undefined;
     hadError = true;
     if (notifyReachFailed) watch?.reach?.failed();
     handlers.connection?.('reconnecting');
     clearTimeout(timer);
-    timer = setTimeout(() => void connect(), backoff.delay(attempt++));
+    timer = undefined;
+    if (immediate) {
+      attempt = 0;
+      void connect();
+      return;
+    }
+    timer = setTimeout(() => {
+      timer = undefined;
+      void connect();
+    }, backoff.delay(attempt++));
   };
   const checkSilence = () => {
+    if (closed || ctrl === null) return;
     const idle = Date.now() - heard;
     if (idle >= silence) drop();
     else watchdog = setTimeout(checkSilence, silence - idle);
   };
+  // Wake from network return or a backgrounded/sleeping tab: skip any lingering backoff timer, and drop a stream that
+  // went silent while timers were throttled so history resyncs immediately.
+  const wake = () => {
+    if (closed) return;
+    if (ctrl === null && timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+      attempt = 0;
+      void connect();
+    } else if (ctrl !== null && Date.now() - heard >= silence) {
+      drop(true, true);
+    }
+  };
+  const onVisible = () => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible') wake();
+  };
+  if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') window.addEventListener('online', wake);
+  if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') document.addEventListener('visibilitychange', onVisible);
 
   const connect = async () => {
     if (closed) return;
@@ -179,7 +209,11 @@ export function openEventStream<M>(
       for (;;) {
         const { done, value } = await reader.read();
         if (ctrl !== my) return;
-        if (done) break;
+        if (done) {
+          const tail = decoder.decode();
+          if (tail) feed(tail);
+          break;
+        }
         heard = Date.now();
         feed(decoder.decode(value, { stream: true }));
       }
@@ -193,7 +227,11 @@ export function openEventStream<M>(
   return () => {
     closed = true;
     clearTimeout(timer);
+    timer = undefined;
     clearTimeout(watchdog);
+    watchdog = undefined;
+    if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') window.removeEventListener('online', wake);
+    if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') document.removeEventListener('visibilitychange', onVisible);
     const old = ctrl;
     ctrl = null;
     old?.abort();

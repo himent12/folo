@@ -226,4 +226,63 @@ describe('openEventStream', () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(Conn.all).toHaveLength(2);
   });
+
+  it('reconnects immediately on window online and tab visibility return without waiting out long backoff', async () => {
+    const listeners = new Map<string, Set<() => void>>();
+    const add = (map: Map<string, Set<() => void>>, ev: string, fn: () => void) => {
+      if (!map.has(ev)) map.set(ev, new Set());
+      map.get(ev)!.add(fn);
+    };
+    const del = (map: Map<string, Set<() => void>>, ev: string, fn: () => void) => map.get(ev)?.delete(fn);
+    let visibility: DocumentVisibilityState = 'hidden';
+    vi.stubGlobal('window', {
+      addEventListener: (ev: string, fn: () => void) => add(listeners, `w:${ev}`, fn),
+      removeEventListener: (ev: string, fn: () => void) => del(listeners, `w:${ev}`, fn),
+    });
+    vi.stubGlobal('document', {
+      get visibilityState() {
+        return visibility;
+      },
+      addEventListener: (ev: string, fn: () => void) => add(listeners, `d:${ev}`, fn),
+      removeEventListener: (ev: string, fn: () => void) => del(listeners, `d:${ev}`, fn),
+    });
+
+    const reconnect = vi.fn();
+    const close = openEventStream<RunEventMap>('/e', RUN_EVENTS, { reconnect }, { delay: () => 15_000 });
+    // First attempt fails and enters a 15s backoff.
+    Conn.all[0]!.fail();
+    await settle();
+    expect(Conn.all).toHaveLength(1);
+
+    // Browser comes back online -> reconnects at once instead of waiting 15s.
+    for (const fn of listeners.get('w:online') ?? []) fn();
+    await settle();
+    expect(Conn.all).toHaveLength(2);
+    Conn.all[1]!.fail();
+    await settle();
+
+    // Tab becomes visible -> reconnects at once too.
+    visibility = 'visible';
+    for (const fn of listeners.get('d:visibilitychange') ?? []) fn();
+    await settle();
+    expect(Conn.all).toHaveLength(3);
+    Conn.all[2]!.open();
+    await settle();
+    expect(reconnect).toHaveBeenCalledOnce();
+
+    // Simulate OS sleep: Date advances past STREAM_SILENCE_MS without timers firing; visibility wake aborts and reconnects immediately.
+    vi.setSystemTime(Date.now() + STREAM_SILENCE_MS + 5_000);
+    for (const fn of listeners.get('d:visibilitychange') ?? []) fn();
+    await settle();
+    expect(Conn.all[2]!.aborted).toBe(true);
+    expect(Conn.all).toHaveLength(4);
+    Conn.all[3]!.open();
+    await settle();
+    expect(reconnect).toHaveBeenCalledTimes(2);
+
+    // Closing removes both online and visibilitychange listeners.
+    close();
+    expect(listeners.get('w:online')?.size ?? 0).toBe(0);
+    expect(listeners.get('d:visibilitychange')?.size ?? 0).toBe(0);
+  });
 });

@@ -146,10 +146,29 @@ export class LiveLabelJob {
   constructor(id: () => string | null) {
     effect(() => {
       const jobId = id();
-      if (hub.mode === 'connecting' || !jobId) return;
+      if (!jobId) {
+        this.#viewSeq++;
+        this.#heard.clear();
+        this.#loaded = 0;
+        this.#cancelFrame();
+        untrack(() => {
+          this.job = undefined;
+          this.images = [];
+          this.logs = [];
+          this.error = undefined;
+          this.loading = false;
+          this.lost = null;
+          this.connection = 'idle';
+          this.#version.set((v) => v + 1);
+        });
+        return;
+      }
+      if (hub.mode === 'connecting') return;
       void hub.epoch;
       void this.#retry.get();
       this.#viewSeq++;
+      this.#heard.clear();
+      this.#loaded = 0;
       const api = hub.api;
       let closed = false;
       const view = new AbortController();

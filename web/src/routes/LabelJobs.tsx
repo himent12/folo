@@ -3,7 +3,7 @@
 import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Tags from '$icons/tags';
-import { computed, css, effect, For, MediaQuery, signal, untrack } from 'fw';
+import { computed, css, effect, For, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { LabelJob } from '$lib/api/types';
@@ -29,11 +29,10 @@ import Skeleton from '$lib/ui/Skeleton';
 import StatusBadge from '$lib/ui/StatusBadge';
 import TableState from '$lib/ui/TableState';
 import JobDialog from './label/JobDialog';
+import { emptyFilterSummary, leftForLabelJob, readState, returnQuery, writeState, type LabelFilter as Filter } from './label/listState';
 import { cannotLabel } from './label/support';
 import Unsupported from './label/Unsupported';
 import { jobStatus, runAgent } from './label/words';
-
-type Filter = 'all' | 'active' | 'failed' | 'idle';
 
 /** Columns of the desktop table (for state rows that span it), the empty last one included. */
 const COLS = 7;
@@ -56,17 +55,46 @@ export default function LabelJobs() {
   // leaves the URL at once, so the next one is a change again. Not on a server whose health said it cannot label
   // (`folo serve --mock`): the page says so instead of a form whose Create can only fail (#324).
   const creating = signal(false);
-  const askedNew = computed(() => router.route.query.get('new') === '1');
+  const askedNew = computed(() => router.route.name === 'label-jobs' && router.route.query.get('new') === '1');
   effect(() => {
     if (!askedNew.get()) return;
     untrack(() => {
       if (!hub.lacks(LABEL_FEATURE)) creating.set(true);
-      router.go('/datasets/label', { replace: true });
+      const q = new URLSearchParams(router.route.query);
+      q.delete('new');
+      const s = q.toString();
+      router.go(`/datasets/label${s ? `?${s}` : ''}`, { replace: true });
     });
   });
 
-  const query = signal('');
-  const filter = signal<Filter>('all');
+  // Status filter and search query live in the URL query (./label/listState) so Back, reload and shared links restore them.
+  const back = untrack(() => returnQuery(router.entry, router.route.query));
+  if (back !== null) router.go(`/datasets/label?${back}`, { replace: true });
+  const startQuery = back !== null ? new URLSearchParams(back) : untrack(() => router.route.query);
+  const start = readState(startQuery);
+  const query = signal(start.q);
+  const filter = signal<Filter>(start.filter);
+  const norm = (q: URLSearchParams) => writeState(readState(q));
+  let written = norm(startQuery);
+  onCleanup(() => {
+    if (router.location.name === 'label-job') leftForLabelJob(router.entry, written);
+  });
+  effect(() => {
+    const next = writeState({ filter: filter.get(), q: query.get() });
+    if (next === written || untrack(() => router.route.name) !== 'label-jobs' || untrack(() => router.location.name) !== 'label-jobs') return;
+    written = next;
+    const full = writeState({ filter: filter.peek(), q: query.peek() }, untrack(() => router.route.query));
+    router.go(`/datasets/label${full ? `?${full}` : ''}`, { replace: true });
+  });
+  effect(() => {
+    const r = router.route;
+    if (r.name !== 'label-jobs' || norm(r.query) === written) return;
+    const st = readState(r.query);
+    written = norm(r.query);
+    filter.set(st.filter);
+    query.set(st.q);
+  });
+  const emptySummary = computed(() => emptyFilterSummary({ filter: filter.get(), q: query.get() }));
   const counts = computed(
     () => {
       let all = 0;
@@ -290,7 +318,7 @@ export default function LabelJobs() {
                         <EmptyState
                           icon={Search}
                           title="No labeling jobs match"
-                          description="Try another status or search term."
+                          description={emptySummary.get()}
                           actions={() => (
                             <Button size="sm" onclick={clearFilters}>
                               Clear filters

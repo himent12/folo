@@ -284,7 +284,7 @@ function normalize(out: Node[], value: unknown[], current: Node[] | null, unwrap
 }
 
 function appendNodes(parent: Node, array: Node[], marker: Node | null | undefined): void {
-  const m = marker ?? null;
+  const m = marker != null && marker.parentNode === parent ? marker : null;
   const owned = ownedOf(marker);
   for (let i = 0, len = array.length; i < len; i++) {
     const n = array[i]!;
@@ -307,6 +307,7 @@ function cleanChildren(parent: Node, current: Current, marker: Node | null | und
     return replacement === undefined ? [] : [replacement];
   }
   const owned = ownedOf(marker);
+  const ref = marker != null && marker.parentNode === parent ? marker : null;
   const node = replacement ?? document.createTextNode('');
   const cur = Array.isArray(current) ? (current as Node[]) : current instanceof Node ? [current] : [];
   if (cur.length > 0) {
@@ -324,14 +325,14 @@ function cleanChildren(parent: Node, current: Current, marker: Node | null | und
               parent.replaceChild(node, el);
               owned?.delete(el);
             }
-          } else parent.insertBefore(node, marker);
+          } else parent.insertBefore(node, ref);
           trackOwned(owned, node);
         } else if (isParent) removeNode(el, owned);
         else owned?.delete(el);
       } else inserted = true;
     }
   } else {
-    parent.insertBefore(node, marker);
+    parent.insertBefore(node, ref);
     trackOwned(owned, node);
   }
   return [node];

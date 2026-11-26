@@ -195,7 +195,7 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
   // J / K with nothing focused enters the list (the page's other single keys live in shell/shortcuts.ts).
   const onwindowkey = (e: KeyboardEvent) => {
     if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || isTyping(e)) return;
-    if (!keyPrefs.singleKeys || document.querySelector('dialog[open]')) return;
+    if (!keyPrefs.singleKeys || document.querySelector('dialog[open], [role="menu"], .info-pop.open, .g-chord')) return;
     const k = e.key.toLowerCase();
     if (k !== 'j' && k !== 'k') return;
     const active = document.activeElement;

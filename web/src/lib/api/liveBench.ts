@@ -109,6 +109,8 @@ export class LiveBench {
   #retry = signal(0);
   /** Every `bench` event bumps it: a snapshot or an action's answer older than the latest event is not applied. */
   #benchSeq = 0;
+  /** Bumps whenever the bound benchmark view starts or tears down so late `act()` answers never cross switches. */
+  #viewSeq = 0;
   /** The clock items are ordered by: every entry, loop or removal event and every load sent bumps it. */
   #seq = 0;
   /** Per entry or loop id, the clock at its latest event; `#loaded` the clock at which the lists shown were asked for. */
@@ -119,9 +121,29 @@ export class LiveBench {
   constructor(id: () => string | null) {
     effect(() => {
       const benchId = id();
-      if (hub.mode === 'connecting' || !benchId) return;
+      if (!benchId) {
+        this.#viewSeq++;
+        this.#heard.clear();
+        this.#loaded = 0;
+        untrack(() => {
+          this.bench = undefined;
+          this.entries = [];
+          this.loops = [];
+          this.error = undefined;
+          this.resyncError = undefined;
+          this.loading = false;
+          this.listed = false;
+          this.lost = null;
+          this.connection = 'idle';
+        });
+        return;
+      }
+      if (hub.mode === 'connecting') return;
       void hub.epoch;
       void this.#retry.get();
+      this.#viewSeq++;
+      this.#heard.clear();
+      this.#loaded = 0;
       const api = hub.api;
       let closed = false;
       const view = new AbortController();
@@ -295,6 +317,7 @@ export class LiveBench {
 
       return () => {
         closed = true;
+        this.#viewSeq++;
         view.abort();
         clearTimeout(lostTimer);
         clearTimeout(syncTimer);
@@ -314,12 +337,13 @@ export class LiveBench {
     return this.#seq;
   }
 
-  /** Runs an action that answers with the benchmark (rename, a new plan) and shows its answer, unless an event or server switch was newer. */
+  /** Runs an action that answers with the benchmark (rename, a new plan) and shows its answer, unless an event or server/benchmark switch was newer. */
   async act(call: () => Promise<Bench>): Promise<Bench> {
     const epoch = hub.epoch;
+    const view = this.#viewSeq;
     const seq = this.#benchSeq;
     const b = await call();
-    if (hub.epoch === epoch && hub.mode !== 'connecting' && this.#benchSeq === seq && this.bench?.id === b.id) this.bench = b;
+    if (hub.epoch === epoch && hub.mode !== 'connecting' && this.#viewSeq === view && this.#benchSeq === seq && this.bench?.id === b.id) this.bench = b;
     return b;
   }
 

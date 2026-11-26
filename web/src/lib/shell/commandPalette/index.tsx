@@ -52,12 +52,20 @@ export default function CommandPalette(props: CommandPaletteProps) {
     recent,
   });
 
+  // Bumped whenever the native dialog closes so a same-tick close -> reopen (`open`: true -> false -> true before
+  // flush, or native `close` followed by reopen) still re-runs the effect and calls `el.showModal()`.
+  const closedTick = signal(0);
+  let shown = false;
+
   const closePalette = () => {
     data.cancelFetches();
     data.clearPending();
+    const wasShown = shown;
+    shown = false;
     const fn = restore;
     restore = null;
     if (el?.open) el.close();
+    if (wasShown) closedTick.set((n) => n + 1);
     if (open.peek()) open.set(false);
     fn?.();
   };
@@ -68,6 +76,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
   let restore: (() => void) | null = null;
 
   onCleanup(() => {
+    shown = false;
     const fn = restore;
     restore = null;
     if (el?.open) el.close();
@@ -75,12 +84,14 @@ export default function CommandPalette(props: CommandPaletteProps) {
   });
 
   effect(() => {
+    void closedTick.get();
     if (open.get()) {
       const epoch = hub.epoch;
       const opening = !el.open;
       if (!opening && !data.isStaleEpoch(epoch)) return;
       if (opening) {
         restore = rememberFocus();
+        shown = true;
         el.showModal();
         backdrop.opened();
         lastPointer = null;
@@ -241,9 +252,11 @@ export default function CommandPalette(props: CommandPaletteProps) {
         closePalette();
       }}
       onclose={() => {
-        if (el?.open) return;
+        if (el?.open || !shown) return;
+        shown = false;
         data.cancelFetches();
         data.clearPending();
+        closedTick.set((n) => n + 1);
         open.set(false);
         const fn = restore;
         restore = null;
