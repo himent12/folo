@@ -297,22 +297,22 @@ impl FoloApp {
     }
 
     pub fn close_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Whether closing the inspector will trigger (or join) a dataset record recheck on this page.
-        let recheck_pending = self.inspector.as_ref().is_some_and(|i| {
-            i.sample.is_none()
-                && self.route == super::Route::Dataset(i.dataset.clone())
-                && (self.ds_recheck.contains(&i.dataset) || self.ds_reads.contains_key(&i.dataset))
+        // Resolve the last-inspected dataset grid tile and arm `ds_scroll_anchor` BEFORE calling
+        // `take_inspector`, because `take_inspector` can synchronously run `forget_dataset_contents`
+        // when a deferred invalidation removed `store.dataset`.
+        let grid_target = self.inspector.as_ref().and_then(|i| {
+            if i.sample.is_some() || self.route != super::Route::Dataset(i.dataset.clone()) {
+                return None;
+            }
+            let meta = self.filtered_image(&i.dataset, i.index)?.clone();
+            let recheck_pending =
+                self.ds_recheck.contains(&i.dataset) || self.ds_reads.contains_key(&i.dataset);
+            Some((i.dataset.clone(), i.index, meta, recheck_pending))
         });
-        let closed = self.take_inspector(cx);
         let opener = self.inspector_return.take();
-        // Opened from the dataset's grid: back on the image it showed last (scrolled into view and
-        // focused), not on the tile it was opened from (←/→ may have walked far from it).
-        let last =
-            closed.filter(|i| i.sample.is_none() && self.route == super::Route::Dataset(i.dataset.clone()));
-        if let Some(i) = last
-            && let Some(meta) = self.filtered_image(&i.dataset, i.index).cloned()
-        {
-            self.grid_scroll.scroll_to_item(i.index / self.grid_cols(), folo_ui::ScrollStrategy::Center);
+        if let Some((dataset, index, meta, recheck_pending)) = grid_target {
+            let row = index / self.grid_cols();
+            self.grid_scroll.scroll_to_item(row, folo_ui::ScrollStrategy::Center);
             let fh = self.fh(format!("tile-{}", meta.id), cx);
             window.focus(&fh);
             if recheck_pending {
@@ -320,17 +320,19 @@ impl FoloApp {
                 // resolves, and remember the focus handle so a later page never steals focus from
                 // an overlay or control opened in the meantime.
                 self.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
-                    dataset: i.dataset,
+                    dataset,
                     file: meta.file,
                     split: meta.split,
-                    fallback_row: i.index / self.grid_cols(),
+                    fallback_row: row,
                     intra_row: 0.,
                     strategy: Some(folo_ui::ScrollStrategy::Center),
                     pending_recheck: true,
                     focus_from: Some(fh),
                 });
             }
+            self.take_inspector(cx);
         } else {
+            self.take_inspector(cx);
             match opener {
                 Some(fh) if window.is_focus_mounted(&fh) => {
                     window.focus(&fh);

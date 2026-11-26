@@ -354,6 +354,7 @@ impl FoloApp {
                         if self.inspecting(&id) {
                             self.ds_recheck.insert(id.clone());
                         } else {
+                            self.ds_recheck.remove(&id);
                             self.forget_dataset_contents(&id, cx);
                         }
                     } else if self.store.dataset.contains_key(&id) {
@@ -366,6 +367,7 @@ impl FoloApp {
                     if self.inspecting(&id) {
                         self.ds_recheck.insert(id.clone());
                     } else {
+                        self.ds_recheck.remove(&id);
                         self.forget_dataset_contents(&id, cx);
                     }
                 } else if self.store.dataset.get(&id).is_some_and(|l| l.error().is_some()) {
@@ -393,8 +395,10 @@ impl FoloApp {
             })
             .collect();
         for id in stale_cached {
-            self.ds_recheck.insert(id.clone());
-            if !self.inspecting(&id) {
+            if self.inspecting(&id) {
+                self.ds_recheck.insert(id);
+            } else {
+                self.ds_recheck.remove(&id);
                 self.forget_dataset_contents(&id, cx);
                 self.store.dataset.remove(&id);
             }

@@ -150,13 +150,21 @@ impl FoloApp {
                         if this.store.dataset.get(&b).is_none_or(|l| l.is_loading()) {
                             return;
                         }
+                        // A newer per-dataset detail (e.g. from paging revalidation) already
+                        // installed: ignore this older recheck response (Ok or Err).
+                        if order < this.list_tickets.detail_ticket(&b) {
+                            if !this.ds_recheck.contains(&b)
+                                && this
+                                    .ds_scroll_anchor
+                                    .as_ref()
+                                    .is_some_and(|a| a.dataset == b && a.pending_recheck)
+                            {
+                                this.ds_scroll_anchor = None;
+                            }
+                            return;
+                        }
                         match r {
                             Ok(d) => {
-                                // A newer per-dataset detail (e.g. from paging revalidation) already
-                                // installed: ignore this older recheck response.
-                                if order < this.list_tickets.detail_ticket(&b) {
-                                    return;
-                                }
                                 // A newer `GET /api/datasets` list already installed different summary
                                 // fields after this detail read started: discard this stale detail and
                                 // queue a fresh read instead of regressing the summary.
@@ -172,6 +180,10 @@ impl FoloApp {
                                 }
                                 // Back from a failure, or its contents changed: the images, their labels and
                                 // their pixels are read again (image ids are positions, docs/API.md).
+                                let deferred_paging = this
+                                    .failed_pages
+                                    .get(&b)
+                                    .is_some_and(|f| f.error.code == "dataset_changed");
                                 if this.store.dataset.get(&b).and_then(|l| l.ready()) != Some(&d) {
                                     // An inspector opened on it since: all stays, read again when it closes.
                                     if this.inspecting(&b) {
@@ -179,6 +191,9 @@ impl FoloApp {
                                         return;
                                     }
                                     this.forget_dataset_contents(&b, cx);
+                                } else if deferred_paging && !this.inspecting(&b) {
+                                    // Paging had been deferred under an inspector; resume now that it closed.
+                                    this.retry_failed_image_page(&b, cx);
                                 } else if this
                                     .ds_scroll_anchor
                                     .as_ref()
@@ -205,6 +220,7 @@ impl FoloApp {
                                 if this.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == b) {
                                     this.ds_scroll_anchor = None;
                                 }
+                                this.list_tickets.note_detail(&b, order);
                                 this.store.dataset.insert(b, Load::Failed(e));
                             }
                             Err(_) => {
@@ -234,10 +250,18 @@ impl FoloApp {
                 move |this, r, cx| {
                     this.list_tickets.finish_detail(&b, Some(order));
                     if this.ds_read_done(&b, ticket) {
-                        if let Ok(d) = &r {
-                            if order < this.list_tickets.detail_ticket(&b) {
-                                return;
+                        if order < this.list_tickets.detail_ticket(&b) {
+                            if !this.ds_recheck.contains(&b)
+                                && this
+                                    .ds_scroll_anchor
+                                    .as_ref()
+                                    .is_some_and(|a| a.dataset == b && a.pending_recheck)
+                            {
+                                this.ds_scroll_anchor = None;
                             }
+                            return;
+                        }
+                        if let Ok(d) = &r {
                             if order < this.list_tickets.list_installed(super::super::lists::List::Datasets)
                                 && this
                                     .store
@@ -248,12 +272,25 @@ impl FoloApp {
                                 if this.inspecting(&b) {
                                     this.ds_recheck.insert(b);
                                 } else {
+                                    this.ds_recheck.remove(&b);
                                     this.forget_dataset_contents(&b, cx);
                                 }
                                 return;
                             }
                             this.list_tickets.note_detail(&b, order);
                             this.sync_dataset_summary(d);
+                        } else if let Err(e) = &r
+                            && (e.code == "dataset_not_found" || crate::screens::dataset_problem(e).is_some())
+                        {
+                            this.list_tickets.note_detail(&b, order);
+                        }
+                        if !this.ds_recheck.contains(&b)
+                            && this
+                                .ds_scroll_anchor
+                                .as_ref()
+                                .is_some_and(|a| a.dataset == b && a.pending_recheck)
+                        {
+                            this.ds_scroll_anchor = None;
                         }
                         this.store.dataset.insert(b, r.into());
                     }
@@ -483,8 +520,19 @@ impl FoloApp {
                         if superseded {
                             if defer_for_inspector {
                                 this.images_more.remove(&id);
+                                this.failed_pages.insert(
+                                    id.clone(),
+                                    FailedImagePage {
+                                        offset,
+                                        error: ApiError::new(
+                                            "dataset_changed",
+                                            "Dataset changed on disk while inspecting",
+                                        ),
+                                    },
+                                );
                                 this.ds_recheck.insert(id);
                             } else {
+                                this.ds_recheck.remove(&id);
                                 this.forget_dataset_contents(&id, cx);
                                 this.store.dataset.remove(&id);
                                 this.ensure_dataset(&id, cx);
@@ -499,6 +547,16 @@ impl FoloApp {
                     Ok(fresh) => {
                         if defer_for_inspector {
                             this.images_more.remove(&id);
+                            this.failed_pages.insert(
+                                id.clone(),
+                                FailedImagePage {
+                                    offset,
+                                    error: ApiError::new(
+                                        "dataset_changed",
+                                        "Dataset changed on disk while inspecting",
+                                    ),
+                                },
+                            );
                             this.ds_recheck.insert(id);
                         } else {
                             let superseded = order < this.list_tickets.detail_ticket(&id)
@@ -509,6 +567,7 @@ impl FoloApp {
                                     }));
                             // Files changed on disk or the server dropped revision tracking:
                             // discard stale prefix + decoded images and reload from page zero.
+                            this.ds_recheck.remove(&id);
                             this.forget_dataset_contents(&id, cx);
                             if superseded {
                                 this.store.dataset.remove(&id);
