@@ -24,7 +24,7 @@ server from the `folo mcp` flags, `folo describe` includes the tool schemas, `fo
 | `src/render.rs` | `folo://runs/{id}/samples/{epoch}`: an epoch's validation samples as one annotated JPEG grid |
 | `src/prompts.rs` | The prompts `train_on_folder`, `label_folder` and `diagnose_run` |
 | `src/proxy.rs` | `HttpStore`: the `Store` of `--server`, forwarding the request / response calls to a running `folo serve` through `folo_client::Client`; `subscribe` answers `not_implemented` |
-| `src/paths.rs` | `PathPolicy`: relative input paths resolve against `--data-dir`; with `--confine`, canonical paths must stay inside it |
+| `src/paths.rs` | `PathPolicy`: relative input paths resolve against `--data-dir`; with `--confine`, canonical paths must stay inside it (its tests are `paths_tests.rs`) |
 | `src/confine.rs` | `--confine` for datasets: a read guard on every file the dataset reader opens, and the report before a tool reads a dataset |
 | `src/errors.rs` | Tool errors: folo-server's error type, plus `invalid_arguments`, `read_only` and `not_implemented` |
 

@@ -629,3 +629,16 @@ fn dataset_thumbnail_cache_serves_hits_invalidates_on_edit_and_evicts_on_unregis
     assert_eq!(store.thumbs.lock().unwrap().total_bytes(), 0);
     store.shutdown();
 }
+
+#[test]
+fn delete_dataset_files_checks_registry_loaded_before_lookup() {
+    let t = TestDir::new("real-delete-unread-registry");
+    let home = t.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    // Corrupt datasets.json so startup marks the registry unread and leaves entries empty.
+    std::fs::write(home.join("datasets.json"), "{broken json").unwrap();
+    let store = RealStore::open(home.clone());
+    let err = store.delete_dataset_files("ds_any").unwrap_err();
+    assert_eq!(err.body.code, "internal", "expected unread-registry error, not not_found: {err:?}");
+    store.shutdown();
+}

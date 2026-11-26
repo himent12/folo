@@ -23,6 +23,7 @@ impl RealStore {
     /// deletion hold [`RealStore::files`] exclusively, so no dataset is registered and no run created or resumed in
     /// between.
     pub(super) fn delete_own_dataset(&self, id: &str) -> Result<()> {
+        self.registry_loaded()?;
         let _files = self.files.write().unwrap_or_else(|p| p.into_inner());
         let reg = self.entry(id)?.reg();
         let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_query", m);

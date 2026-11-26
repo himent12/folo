@@ -18,7 +18,7 @@ use super::results::{
 };
 use crate::batch_cache::MAX_BATCH_BYTES;
 use crate::errors::{Error, invalid_arguments};
-use crate::paths::{MAX_BATCH, too_many_inputs};
+use crate::paths::{BatchPath, MAX_BATCH, too_many_inputs};
 use crate::server::Inner;
 use crate::types::*;
 
@@ -154,7 +154,7 @@ impl Inner {
         check_unit("iou", a.iou)?;
         let model_id = a.model_id.clone();
         let model = self.blocking(move |s| s.get_model(&model_id)).await?;
-        let paths: Vec<(String, std::path::PathBuf)> = match (a.paths, a.glob) {
+        let paths: Vec<(String, BatchPath)> = match (a.paths, a.glob) {
             (Some(paths), None) => {
                 if paths.len() > MAX_BATCH {
                     return Err(too_many_inputs(format!("{} paths given, at most {MAX_BATCH}", paths.len())));
@@ -166,7 +166,7 @@ impl Inner {
                 let resolve = move || {
                     paths
                         .into_iter()
-                        .map(|p| policy.resolve(&p).map(|r| (p, r)))
+                        .map(|p| policy.resolve_for_batch(&p).map(|r| (folo_api::json::path(&p), r)))
                         .collect::<Result<Vec<_>, _>>()
                 };
                 tokio::task::spawn_blocking(resolve).await.map_err(join)??
@@ -178,7 +178,7 @@ impl Inner {
                 if found.is_empty() {
                     return Err(invalid_arguments("the glob matches no files"));
                 }
-                found.into_iter().map(|p| (p.to_string_lossy().into_owned(), p)).collect()
+                found.into_iter().map(|p| (folo_api::json::path(&p), BatchPath::Ready(p))).collect()
             }
             _ => return Err(invalid_arguments("give exactly one of paths or glob")),
         };
@@ -189,21 +189,25 @@ impl Inner {
         let mut failed = Vec::new();
         let mut per_class: BTreeMap<String, u64> = BTreeMap::new();
         let (mut boxes_total, mut model_ms) = (0u64, 0f64);
-        for (i, (shown, path)) in paths.into_iter().enumerate() {
-            let model_id = a.model_id.clone();
-            let (conf, iou) = (a.conf, a.iou);
-            let res = self
-                .blocking(move |s| {
-                    let bytes = read_image(&path)?;
-                    s.predict(PredictInput {
-                        model_id,
-                        source: PredictSource::Upload(bytes),
-                        conf,
-                        iou,
-                        max_det: folo_api::default_max_det(),
+        for (i, (shown, entry)) in paths.into_iter().enumerate() {
+            let res = match entry {
+                BatchPath::Ready(path) => {
+                    let model_id = a.model_id.clone();
+                    let (conf, iou) = (a.conf, a.iou);
+                    self.blocking(move |s| {
+                        let bytes = read_image(&path)?;
+                        s.predict(PredictInput {
+                            model_id,
+                            source: PredictSource::Upload(bytes),
+                            conf,
+                            iou,
+                            max_det: folo_api::default_max_det(),
+                        })
                     })
-                })
-                .await;
+                    .await
+                }
+                BatchPath::Missing(err) => Err(err),
+            };
             match res {
                 Ok(r) => {
                     boxes_total += r.boxes.len() as u64;
