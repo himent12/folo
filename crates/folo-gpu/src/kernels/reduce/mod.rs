@@ -7,6 +7,11 @@
 //! The `*_as` / dtype-taking entry points also read and write f16 storage (with `shader-f16`); the arithmetic
 //! is always f32, so an f16 reduction or softmax accumulates in f32 and rounds once on the store.
 
+mod arg;
+
+pub use arg::arg_reduce;
+use arg::{ARG, ARG_ROWS};
+
 use super::{check_buf, prod, use_subgroups};
 use crate::DType;
 use crate::context::GpuContext;
@@ -206,7 +211,7 @@ fn gen_rows(s: &Spec) -> String {
         s,
         &format!(
             "const SPLIT_K: bool = {split};\n{}{thread}{main}",
-            include_str!("../shaders/reduce_rows.wgsl")
+            include_str!("../../shaders/reduce_rows.wgsl")
         ),
     )
 }
@@ -310,7 +315,7 @@ fn gen_cols(s: &Spec) -> String {
     let main = if vec4 { REDUCE_COLS_MAIN_VEC4 } else { REDUCE_COLS_MAIN_SCALAR };
     typed(
         s,
-        &format!("const SPLIT_K: bool = {split};\n{}{main}", include_str!("../shaders/reduce_cols.wgsl")),
+        &format!("const SPLIT_K: bool = {split};\n{}{main}", include_str!("../../shaders/reduce_cols.wgsl")),
     )
 }
 /// Maximum row length cached in per-thread registers (4 elements × 256 threads) for single-pass [`SOFTMAX`].
@@ -323,12 +328,15 @@ fn gen_softmax(s: &Spec) -> String {
     let main = if s.is_subgroups() { SOFTMAX_MAIN_SUBGROUPS } else { SOFTMAX_MAIN_PORTABLE };
     typed(
         s,
-        &format!("const CACHE_ROW: bool = {cache};\n{main}\n{}", include_str!("../shaders/softmax.wgsl")),
+        &format!("const CACHE_ROW: bool = {cache};\n{main}\n{}", include_str!("../../shaders/softmax.wgsl")),
     )
 }
 fn gen_softmax_cols(s: &Spec) -> String {
     let small = s.get_bool("SMALL");
-    typed(s, &format!("const SMALL_COL: bool = {small};\n{}", include_str!("../shaders/softmax_cols.wgsl")))
+    typed(
+        s,
+        &format!("const SMALL_COL: bool = {small};\n{}", include_str!("../../shaders/softmax_cols.wgsl")),
+    )
 }
 
 /// Reduction kind.
@@ -486,11 +494,6 @@ pub fn softmax_rows(
 
 // ----- folo-core backend: arg-reductions, softmax over any dim, long-row splitting, top-k -----------------------
 
-static ARG: KernelDef = KernelDef {
-    name: "arg_reduce",
-    storage: &[Access::Read, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/arg_reduce.wgsl")),
-};
 static SOFTMAX_COLS: KernelDef = KernelDef {
     name: "softmax_cols",
     storage: &[Access::Read, Access::ReadWrite],
@@ -683,7 +686,7 @@ fn gen_topk(s: &Spec) -> String {
     } else {
         TOPK_MAIN_SELECT_PORTABLE
     };
-    format!("{}{main}", include_str!("../shaders/topk.wgsl"))
+    format!("{}{main}", include_str!("../../shaders/topk.wgsl"))
 }
 
 static TOPK: KernelDef = KernelDef {
@@ -700,7 +703,7 @@ static TOPK: KernelDef = KernelDef {
 /// wasted empty partial tiles for prime/odd `r`.
 const MIN_SPLIT_CHUNK: usize = 1024;
 
-fn split_plan(outer: usize, r: usize, inner: usize) -> (usize, usize) {
+pub(super) fn split_plan(outer: usize, r: usize, inner: usize) -> (usize, usize) {
     if outer == 0 || inner == 0 || r < 8192 {
         return (1, r);
     }
@@ -781,31 +784,6 @@ pub fn reduce_split(
     reduce_scaled(ctx, pass_op, (tmp.raw(), DType::F32), (y, dtype), outer, splits, inner, scale)
 }
 
-/// Index of the first maximum (`max`) or minimum over the middle axis of dense f32 `[outer, r, inner]`, as
-/// `i64` (two words per element) into `y` (`[outer, inner]`). NaN counts as the extreme (the first NaN wins).
-pub fn arg_reduce(
-    ctx: &GpuContext,
-    max: bool,
-    x: &wgpu::Buffer,
-    y: &wgpu::Buffer,
-    outer: usize,
-    r: usize,
-    inner: usize,
-) -> Result<()> {
-    check_buf(x, prod(&[outer, r, inner])?, DType::F32, "arg_reduce input")?;
-    check_buf(y, prod(&[outer, inner, 2])?, DType::F32, "arg_reduce output")?;
-    let n = outer * inner;
-    if n == 0 {
-        return Ok(());
-    }
-    if r == 0 {
-        return Err(shape_err("arg_reduce over an empty dimension"));
-    }
-    let k = ctx.kernel(&ARG, Spec::new().bool("MAX", max))?;
-    let p = Params::new().uz(n)?.uz(r)?.uz(inner)?;
-    ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(n as u64, 256)?)
-}
-
 /// Softmax (or log-softmax) over the middle axis of dense `[outer, d, inner]` of `dtype` (f32 or f16, f32
 /// arithmetic).
 pub fn softmax_dim(
@@ -869,7 +847,7 @@ pub fn topk(
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&ROWS, &COLS, &SOFTMAX, &ARG, &SOFTMAX_COLS, &TOPK];
+pub(crate) static DEFS: &[&KernelDef] = &[&ROWS, &COLS, &SOFTMAX, &ARG, &ARG_ROWS, &SOFTMAX_COLS, &TOPK];
 
 #[cfg(test)]
 mod tests {

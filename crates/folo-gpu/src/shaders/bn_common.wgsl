@@ -7,6 +7,15 @@ fn bn_act(z: vec4<f32>) -> vec4<f32> {
     }
 }
 
+// Scalar activation at z (avoids 4x wasted exp() on odd-hw fallback).
+fn bn_act_f32(z: f32) -> f32 {
+    switch ACT {
+        case 1u: { return z / (1.0 + exp(-z)); }
+        case 2u: { return max(z, 0.0); }
+        default: { return z; }
+    }
+}
+
 // The derivative of the activation at z (4 lanes).
 fn bn_act_grad(z: vec4<f32>) -> vec4<f32> {
     switch ACT {

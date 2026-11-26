@@ -160,8 +160,40 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
 }
 "#;
 
+/// Vectorized 2×2 stride-2 pad-0 `max_pool2d` (values only, NaN-propagating, signed-zero preserving) for
+/// exact 2× input dims (`h == 2 * oh`, `w == 2 * ow`) and even `ow`: each thread reads two `vec4<T>`s (8 input
+/// pixels across consecutive rows) and writes one `vec2<T>`.
+/// Params: 0 = output `vec2<T>` units (`planes * oh * (ow / 2)`), 1 = `ow / 2`.
+const MAXPOOL_2X2_S2_VEC4_SRC: &str = r#"
+@group(0) @binding(1) var<storage, read> X: array<vec4<T>>;
+@group(0) @binding(2) var<storage, read_write> Y: array<vec2<T>>;
+
+fn isnan1(v: f32) -> bool { return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u; }
+fn max_nan(a: f32, b: f32) -> f32 {
+    return select(select(select(a, b, b > a), b, isnan1(b)), a, isnan1(a));
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let i = linear_id(wid, nwg, lid, 256u);
+    if (i >= pu(0u)) { return; }
+    let w2 = pu(1u);
+    let x2 = i % w2;
+    let t = i / w2;
+    let in0 = t * (2u * w2) + x2;
+    let r0 = vec4<f32>(X[in0]);
+    let r1 = vec4<f32>(X[in0 + w2]);
+    let a = max_nan(max_nan(r0.x, r0.y), max_nan(r1.x, r1.y));
+    let b = max_nan(max_nan(r0.z, r0.w), max_nan(r1.z, r1.w));
+    Y[i] = vec2<T>(T(a), T(b));
+}
+"#;
+
 fn gen_maxpool(spec: &Spec) -> String {
-    if spec.get_bool("TILED") {
+    if spec.get_bool("S2_VEC4") {
+        MAXPOOL_2X2_S2_VEC4_SRC.into()
+    } else if spec.get_bool("TILED") {
         MAXPOOL_TILED_SRC.into()
     } else {
         include_str!("../shaders/maxpool.wgsl").into()
@@ -214,6 +246,14 @@ pub fn max_pool2d(
     }
     if h > i32::MAX as usize - 2 * win.padding.0 || w > i32::MAX as usize - 2 * win.padding.1 {
         return Err(GpuError::Limit("max_pool2d: plane dimensions exceed i32 indexing".into()));
+    }
+    if *win == Window2d::square(2, 2, 0) && h == 2 * oh && w == 2 * ow && ow.is_multiple_of(2) {
+        let w2 = ow / 2;
+        let units = planes * oh * w2;
+        let k = ctx.kernel(&MAXPOOL, Spec::new().bool("S2_VEC4", true).f16(dtype == DType::F16))?;
+        let p = Params::new().uz(units)?.uz(w2)?;
+        ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(units as u64, 256)?)?;
+        return Ok((oh, ow));
     }
     let tiled_geom = win.stride == (1, 1)
         && win.dilation == (1, 1)

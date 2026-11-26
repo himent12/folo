@@ -324,3 +324,267 @@ fn batch_norm_subgroups_and_portable_fallback_agree() {
         assert_close_t(&db_sg, &db_fb, 1e-3, 1e-4, "bn multi-chunk db");
     }
 }
+
+/// Verifies single-dispatch register-cached `bn_fused_fwd` / `bn_fused_bwd` against the CPU f64 reference
+/// across `REGS = 4` / `REGS = 8`, exact boundaries (`1024`, `2048`, `2049`), odd `hw`, prime channels,
+/// `RUNNING = true/false`, all activations, F32 & F16, and both subgroup and portable paths, plus dispatch trace.
+#[test]
+fn batch_norm_fused_single_dispatch_parity_and_trace() {
+    use folo_core::backend::{Backend, RunningUpdate, View};
+    use folo_core::{Layout, Shape};
+
+    struct ForceGuard(bool);
+    impl ForceGuard {
+        fn set(v: bool) -> Self {
+            Self(crate::kernels::norm::FORCE_NO_SUBGROUPS.replace(v))
+        }
+    }
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            crate::kernels::norm::FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
+
+    let dev = dev!();
+    let ctx = crate::context_for(dev).unwrap();
+    let has_f16 = ctx.caps().shader_f16;
+    let _g = no_grad();
+
+    // Shapes covering REGS=4 (m_u<=1024), exact REGS=4 boundary (m_u=1024), REGS=8 (m_u=1600),
+    // exact REGS=8 boundary (m_u=2048), multi-chunk boundary (m_u=2049 odd), odd hw, and 1x1x1x1.
+    let cases: &[([usize; 4], Option<UnaryOp>, bool)] = &[
+        ([4, 32, 8, 8], Some(UnaryOp::Silu), true),
+        ([16, 32, 16, 16], Some(UnaryOp::Relu), true), // m_u = 1024 (REGS=4 exact)
+        ([16, 32, 20, 20], Some(UnaryOp::Silu), false), // m_u = 1600 (REGS=8)
+        ([32, 32, 16, 16], None, true),                // m_u = 2048 (REGS=8 exact)
+        ([4, 37, 7, 9], Some(UnaryOp::Silu), true),    // odd hw + prime C (REGS=4 scalar)
+        ([4, 32, 21, 21], Some(UnaryOp::Silu), true),  // odd hw, m_u=1764 (REGS=8 scalar)
+        ([3, 1, 1, 2049], Some(UnaryOp::Silu), false), // m_u = 6147 > 2048 (multi-chunk odd)
+        ([1, 3, 1, 1], Some(UnaryOp::Silu), true),     // m = 1 edge case
+    ];
+    let eps = 1e-3f64;
+    let mom = 0.1f64;
+
+    for &(shape, act, with_running) in cases {
+        let [n, c, h, w_dim] = shape;
+        let hw = h * w_dim;
+        let m = n * hw;
+        let x_cpu = randn(&shape, 100 + c as u64 + hw as u64);
+        let g_cpu = randn(&shape, 200 + c as u64 + hw as u64);
+        let w_cpu = randn(&[c], 300 + c as u64).add_scalar(1.0).unwrap();
+        let b_cpu = randn(&[c], 400 + c as u64);
+
+        // Exact f64 CPU reference for forward & backward.
+        let xv = x_cpu.to_vec::<f32>().unwrap();
+        let gv = g_cpu.to_vec::<f32>().unwrap();
+        let wv = w_cpu.to_vec::<f32>().unwrap();
+        let bv = b_cpu.to_vec::<f32>().unwrap();
+        let mut ref_mean = vec![0.0f32; c];
+        let mut ref_inv = vec![0.0f32; c];
+        let mut ref_rm = vec![0.25f32; c];
+        let mut ref_rv = vec![0.75f32; c];
+        let mut ref_y = vec![0.0f32; n * c * hw];
+        let mut ref_dx = vec![0.0f32; n * c * hw];
+        let mut ref_dw = vec![0.0f32; c];
+        let mut ref_db = vec![0.0f32; c];
+        for ch in 0..c {
+            let mut sum = 0.0f64;
+            for bi in 0..n {
+                for j in 0..hw {
+                    sum += xv[(bi * c + ch) * hw + j] as f64;
+                }
+            }
+            let mean = sum / m as f64;
+            let mut sq = 0.0f64;
+            for bi in 0..n {
+                for j in 0..hw {
+                    let d = xv[(bi * c + ch) * hw + j] as f64 - mean;
+                    sq += d * d;
+                }
+            }
+            let var_b = sq / m as f64;
+            let inv = 1.0 / (var_b + eps).sqrt();
+            ref_mean[ch] = mean as f32;
+            ref_inv[ch] = inv as f32;
+            if with_running {
+                let unbias = if m > 1 { m as f64 / (m as f64 - 1.0) } else { 1.0 };
+                ref_rm[ch] = (ref_rm[ch] as f64 * (1.0 - mom) + mom * mean) as f32;
+                ref_rv[ch] = (ref_rv[ch] as f64 * (1.0 - mom) + mom * unbias * var_b) as f32;
+            }
+            let (wc, bc) = (wv[ch] as f64, bv[ch] as f64);
+            let mut db_acc = 0.0f64;
+            let mut dw_acc = 0.0f64;
+            for bi in 0..n {
+                for j in 0..hw {
+                    let idx = (bi * c + ch) * hw + j;
+                    let xh = (xv[idx] as f64 - mean) * inv;
+                    let z = xh * wc + bc;
+                    let (y, dz) = match act {
+                        None => (z, gv[idx] as f64),
+                        Some(UnaryOp::Relu) => (z.max(0.0), if z > 0.0 { gv[idx] as f64 } else { 0.0 }),
+                        Some(UnaryOp::Silu) => {
+                            let s = 1.0 / (1.0 + (-z).exp());
+                            (z * s, gv[idx] as f64 * s * (1.0 + z * (1.0 - s)))
+                        }
+                        _ => unreachable!(),
+                    };
+                    ref_y[idx] = y as f32;
+                    db_acc += dz;
+                    dw_acc += dz * xh;
+                }
+            }
+            ref_db[ch] = db_acc as f32;
+            ref_dw[ch] = dw_acc as f32;
+            for bi in 0..n {
+                for j in 0..hw {
+                    let idx = (bi * c + ch) * hw + j;
+                    let xh = (xv[idx] as f64 - mean) * inv;
+                    let z = xh * wc + bc;
+                    let dz = match act {
+                        None => gv[idx] as f64,
+                        Some(UnaryOp::Relu) => {
+                            if z > 0.0 {
+                                gv[idx] as f64
+                            } else {
+                                0.0
+                            }
+                        }
+                        Some(UnaryOp::Silu) => {
+                            let s = 1.0 / (1.0 + (-z).exp());
+                            gv[idx] as f64 * s * (1.0 + z * (1.0 - s))
+                        }
+                        _ => unreachable!(),
+                    };
+                    ref_dx[idx] = (wc * inv * (dz - db_acc / m as f64 - xh * dw_acc / m as f64)) as f32;
+                }
+            }
+        }
+
+        let x_g = x_cpu.to_device(dev).unwrap();
+        let g_g = g_cpu.to_device(dev).unwrap();
+        let w_g = w_cpu.to_device(dev).unwrap();
+        let b_g = b_cpu.to_device(dev).unwrap();
+        let y_ref_t = Tensor::from_vec(ref_y, shape).unwrap();
+        let dx_ref_t = Tensor::from_vec(ref_dx, shape).unwrap();
+        let mean_ref_t = Tensor::from_vec(ref_mean, [c]).unwrap();
+        let inv_ref_t = Tensor::from_vec(ref_inv, [c]).unwrap();
+        let rm_ref_t = Tensor::from_vec(ref_rm, [c]).unwrap();
+        let rv_ref_t = Tensor::from_vec(ref_rv, [c]).unwrap();
+        let dw_ref_t = Tensor::from_vec(ref_dw, [c]).unwrap();
+        let db_ref_t = Tensor::from_vec(ref_db, [c]).unwrap();
+
+        for portable in [false, true] {
+            let _guard = ForceGuard::set(portable);
+            let rm = Tensor::full([c], 0.25).to_device(dev).unwrap();
+            let rv = Tensor::full([c], 0.75).to_device(dev).unwrap();
+            let run_opt = with_running.then_some((&rm, &rv, mom));
+            let out = x_g.batch_norm_act_train(&w_g, &b_g, eps, act, run_opt).unwrap().expect("kernels");
+            let (dx, dw, db) = x_g
+                .batch_norm_act_train_backward(&g_g, &w_g, &b_g, &out.mean, &out.invstd, act)
+                .unwrap()
+                .expect("kernels");
+            let tag = format!("bn_fused {shape:?} {act:?} run={with_running} fb={portable}");
+            assert_close_t(&out.mean, &mean_ref_t, 1e-4, 1e-4, &format!("{tag} mean"));
+            assert_close_t(&out.invstd, &inv_ref_t, 2e-4, 1e-4, &format!("{tag} invstd"));
+            assert_close_t(&out.y, &y_ref_t, 5e-4, 2e-4, &format!("{tag} y"));
+            assert_close_t(&dx, &dx_ref_t, 5e-4, 2e-4, &format!("{tag} dx"));
+            assert_close_t(&dw, &dw_ref_t, 2e-3, 5e-4, &format!("{tag} dw"));
+            assert_close_t(&db, &db_ref_t, 2e-3, 5e-4, &format!("{tag} db"));
+            if with_running {
+                assert_close_t(&rm, &rm_ref_t, 1e-4, 1e-4, &format!("{tag} rm"));
+                assert_close_t(&rv, &rv_ref_t, 2e-4, 1e-4, &format!("{tag} rv"));
+            }
+        }
+    }
+
+    // F16 single-dispatch fused parity on REGS=8 shape ([16, 32, 20, 20]) and odd hw ([4, 32, 9, 11]).
+    if has_f16 {
+        for shape in [[16usize, 32, 20, 20], [4, 32, 9, 11]] {
+            let c = shape[1];
+            let x = q(&randn(&shape, 501)).to_device(dev).unwrap();
+            let g = q(&randn(&shape, 502)).to_device(dev).unwrap();
+            let w = randn(&[c], 503).add_scalar(1.0).unwrap().to_device(dev).unwrap();
+            let b = randn(&[c], 504).to_device(dev).unwrap();
+            let o32 = x.batch_norm_act_train(&w, &b, eps, Some(UnaryOp::Silu), None).unwrap().unwrap();
+            let (dx32, dw32, db32) = x
+                .batch_norm_act_train_backward(&g, &w, &b, &o32.mean, &o32.invstd, Some(UnaryOp::Silu))
+                .unwrap()
+                .unwrap();
+            let (x16, g16) = (x.to_dtype(DType::F16).unwrap(), g.to_dtype(DType::F16).unwrap());
+            let o16 = x16.batch_norm_act_train(&w, &b, eps, Some(UnaryOp::Silu), None).unwrap().unwrap();
+            let (dx16, dw16, db16) = x16
+                .batch_norm_act_train_backward(&g16, &w, &b, &o16.mean, &o16.invstd, Some(UnaryOp::Silu))
+                .unwrap()
+                .unwrap();
+            assert_close_t(&o16.mean, &o32.mean, 1e-4, 1e-4, &format!("f16 fused {shape:?} mean"));
+            assert_close_t(&o16.invstd, &o32.invstd, 1e-4, 1e-4, &format!("f16 fused {shape:?} invstd"));
+            assert_close_t(
+                &o16.y.to_dtype(DType::F32).unwrap(),
+                &o32.y,
+                3e-3,
+                3e-3,
+                &format!("f16 fused {shape:?} y"),
+            );
+            assert_close_t(
+                &dx16.to_dtype(DType::F32).unwrap(),
+                &dx32,
+                3e-3,
+                3e-3,
+                &format!("f16 fused {shape:?} dx"),
+            );
+            assert_close_t(&dw16, &dw32, 2e-3, 1e-3, &format!("f16 fused {shape:?} dw"));
+            assert_close_t(&db16, &db32, 2e-3, 1e-3, &format!("f16 fused {shape:?} db"));
+        }
+    }
+
+    // Dispatch trace on a fresh context: fused single-dispatch for REGS=4/8 vs 3-pass multi-chunk above 2048 units.
+    let fresh = crate::GpuContext::new().unwrap();
+    let backend = crate::GpuBackend::new(fresh.clone(), dev);
+    for (dims, expect_fwd, expect_bwd) in [
+        ([4usize, 32, 8, 8], vec!["bn_fused_fwd"], vec!["bn_fused_bwd"]),
+        ([16, 32, 20, 20], vec!["bn_fused_fwd"], vec!["bn_fused_bwd"]),
+        (
+            [16, 64, 40, 40],
+            vec!["bn_stats", "bn_finalize", "bn_apply"],
+            vec!["bn_bwd_reduce", "bn_bwd_finalize", "bn_bwd_dx"],
+        ),
+    ] {
+        let s = Shape::new(&dims);
+        let c = dims[1];
+        let sc = Shape::new(&[c]);
+        let x = backend.full(dev, DType::F32, s.numel(), 1.0).unwrap();
+        let g = backend.full(dev, DType::F32, s.numel(), 0.5).unwrap();
+        let w = backend.full(dev, DType::F32, c, 1.0).unwrap();
+        let b = backend.full(dev, DType::F32, c, 0.0).unwrap();
+        let mut rm = backend.full(dev, DType::F32, c, 0.0).unwrap();
+        let mut rv = backend.full(dev, DType::F32, c, 1.0).unwrap();
+        let lx = Layout::contiguous(s.clone());
+        let lc = Layout::contiguous(sc.clone());
+        fresh.trace_begin();
+        let (_, mean, inv) = backend
+            .batch_norm_act(
+                View::new(&x, &lx),
+                View::new(&w, &lc),
+                View::new(&b, &lc),
+                eps as f32,
+                Some(UnaryOp::Silu),
+                Some(RunningUpdate { mean: &mut rm, var: &mut rv, momentum: 0.03 }),
+            )
+            .unwrap();
+        assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), expect_fwd);
+        fresh.trace_begin();
+        let _ = backend
+            .batch_norm_act_backward(
+                View::new(&x, &lx),
+                View::new(&g, &lx),
+                View::new(&w, &lc),
+                View::new(&b, &lc),
+                View::new(&mean, &lc),
+                View::new(&inv, &lc),
+                Some(UnaryOp::Silu),
+            )
+            .unwrap();
+        assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), expect_bwd);
+    }
+    assert!(fresh.kernels_without_registry().is_empty());
+}

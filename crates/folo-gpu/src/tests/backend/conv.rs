@@ -448,3 +448,69 @@ fn depthwise_grad_vx4_and_subgroup_vec4_parity() {
         );
     }
 }
+
+#[test]
+fn depthwise_backward_input_tiled_s2_and_vx4_parity() {
+    let dev = dev!();
+    let ctx = crate::context_for(dev).unwrap();
+    let has_f16 = ctx.caps().shader_f16;
+
+    let cases = [
+        // Tiled stride-1 (`h, w >= 64`): even & odd spatial dims, k=3/5/7, MULT=1 & MULT=2
+        ([1, 4, 64, 64], [4, 1, 3, 3], 1, 1, 4, "dw_dx tiled 3x3 even"),
+        ([1, 3, 65, 67], [3, 1, 5, 5], 1, 2, 3, "dw_dx tiled 5x5 odd"),
+        ([1, 2, 64, 68], [4, 1, 7, 7], 1, 3, 2, "dw_dx tiled 7x7 mult2"),
+        // Phase-unrolled stride-2 (`S2`): even & odd spatial dims, pad 0/1/2, k=2/3/5, MULT=1 & MULT=2
+        ([2, 4, 16, 16], [4, 1, 3, 3], 2, 1, 4, "dw_dx s2 3x3 p1 even"),
+        ([2, 3, 15, 17], [3, 1, 3, 3], 2, 1, 3, "dw_dx s2 3x3 p1 odd"),
+        ([1, 4, 14, 15], [4, 1, 3, 3], 2, 0, 4, "dw_dx s2 3x3 p0 odd"),
+        ([2, 3, 18, 19], [6, 1, 5, 5], 2, 2, 3, "dw_dx s2 5x5 p2 mult2"),
+        ([1, 4, 12, 14], [4, 1, 2, 2], 2, 0, 4, "dw_dx s2 2x2 p0"),
+        // VX4 + VEC4_OUT (h, w < 64 stride-1, including k=1)
+        ([2, 4, 12, 16], [4, 1, 3, 3], 1, 1, 4, "dw_dx vx4 vec4_out 3x3"),
+        ([2, 4, 10, 12], [4, 1, 1, 1], 1, 0, 4, "dw_dx vx4 vec4_out 1x1"),
+        ([2, 3, 9, 11], [6, 1, 5, 5], 1, 2, 3, "dw_dx vx4 scalar_out 5x5 mult2"),
+    ];
+    for (idx, &(xs, ws, s, p, g, label)) in cases.iter().enumerate() {
+        let x = randn(&xs, 600 + idx as u64);
+        let w = randn(&ws, 700 + idx as u64).mul_scalar(0.3).unwrap();
+        let atol = 2e-4 * ((ws[2] * ws[3]) as f32).sqrt();
+        check(dev, &[x.clone(), w.clone()], atol, 1e-4, label, move |v| v[0].conv2d(&v[1], None, s, p, 1, g));
+        if has_f16 && xs[2] <= 64 {
+            let x16 = x.to_dtype(DType::F16).unwrap();
+            let w16 = w.to_dtype(DType::F16).unwrap();
+            let xc = x16.to_dtype(DType::F32).unwrap().detach().requires_grad_();
+            let wc = w16.to_dtype(DType::F32).unwrap();
+            let yc = xc.conv2d(&wc, None, s, p, 1, g).unwrap();
+            let gy = randn(yc.dims(), 800 + idx as u64).to_dtype(DType::F16).unwrap();
+            let gxc = yc.backward_with(&gy.to_dtype(DType::F32).unwrap()).unwrap().get(&xc).unwrap().clone();
+
+            let xg = x16.to_device(dev).unwrap().detach().requires_grad_();
+            let wg = w16.to_device(dev).unwrap();
+            let yg = xg.conv2d(&wg, None, s, p, 1, g).unwrap();
+            let gxg = yg.backward_with(&gy.to_device(dev).unwrap()).unwrap().get(&xg).unwrap().clone();
+            assert_eq!(gxg.dtype(), DType::F16);
+            assert_close_t(&gxg.to_dtype(DType::F32).unwrap(), &gxc, 5e-3, 5e-3, &format!("f16 {label}"));
+        }
+    }
+
+    // Infinite weight at a padded corner must not turn zero-padded out-of-bounds taps into NaN on TILED or S2
+    // (use groups=2 so both CPU and GPU take their depthwise paths).
+    for &(h, w_dim, stride) in &[(64usize, 64usize, 1usize), (16, 16, 2)] {
+        let mut wv = vec![1.0f32; 2 * 9];
+        wv[0] = f32::INFINITY;
+        wv[9] = f32::INFINITY;
+        let wt = Tensor::from_vec(wv, [2, 1, 3, 3]).unwrap();
+        let x = Tensor::ones([1, 2, h, w_dim]);
+        let xg = x.to_device(dev).unwrap().detach().requires_grad_();
+        let yg = xg.conv2d(&wt.to_device(dev).unwrap(), None, stride, 1, 1, 2).unwrap();
+        let gy = Tensor::ones(yg.dims());
+        let gxg = yg.backward_with(&gy.to_device(dev).unwrap()).unwrap().get(&xg).unwrap().clone();
+        let gv = gxg.to_vec::<f32>().unwrap();
+        // Bottom-right corner of both channels: ky=0 / kx=0 fall outside (OH, OW), so finite taps only -> no NaN.
+        let want = if stride == 1 { 4.0f32 } else { 1.0f32 };
+        assert_eq!(gv[h * w_dim - 1], want, "stride={stride} ch0 corner: {}", gv[h * w_dim - 1]);
+        assert_eq!(gv[2 * h * w_dim - 1], want, "stride={stride} ch1 corner: {}", gv[2 * h * w_dim - 1]);
+    }
+    assert!(ctx.kernels_without_registry().is_empty());
+}

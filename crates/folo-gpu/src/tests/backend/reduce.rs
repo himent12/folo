@@ -349,3 +349,156 @@ fn subgroup_vs_portable_row_reductions_and_softmax() {
         });
     }
 }
+
+#[test]
+fn arg_reduce_rows_vec4_split_k_and_nan_ties_match_cpu() {
+    use folo_core::backend::{Backend, ReduceOp, View};
+    use folo_core::{DType, Layout, Shape};
+
+    struct ForceGuard(bool);
+    impl ForceGuard {
+        fn set(v: bool) -> Self {
+            Self(crate::kernels::FORCE_NO_SUBGROUPS.replace(v))
+        }
+    }
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            crate::kernels::FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
+
+    let dev = dev!();
+    // Covers: small fallback (80, 31, 1), vec4 single-pass (256, 1028), scalar single-pass (129, 257),
+    // vec4 split-K (8192, 16388), and scalar split-K (8193, 10007).
+    for &(rows, r) in &[
+        (4usize, 1usize),
+        (8, 31),
+        (8, 80),
+        (4, 129),
+        (4, 256),
+        (3, 257),
+        (3, 1028),
+        (1, 8192),
+        (2, 8193),
+        (1, 10007),
+        (2, 16388),
+    ] {
+        let t = randn(&[rows, r], 300 + r as u64);
+        let max_cpu = t.argmax(1, false).unwrap();
+        let min_cpu = t.argmin(1, false).unwrap();
+        let tg = t.to_device(dev).unwrap();
+        for portable in [false, true] {
+            let _g = ForceGuard::set(portable);
+            assert_same(&tg.argmax(1, false).unwrap(), &max_cpu, &format!("argmax {rows}x{r} fb={portable}"));
+            assert_same(&tg.argmin(1, false).unwrap(), &min_cpu, &format!("argmin {rows}x{r} fb={portable}"));
+        }
+    }
+
+    // Exact tie-breaking (lowest index wins across workgroups/splits, -0.0 == +0.0) and first-NaN winning
+    // across all 4 vec4 lanes and split-K boundaries.
+    for &(r, label) in
+        &[(512usize, "vec4 single"), (513, "scalar single"), (10000, "vec4 split"), (10007, "scalar split")]
+    {
+        let mut data = vec![1.0f32; 7 * r];
+        // Row 0: ties at indices 5, 261, r-1 -> lowest (5) must win for max.
+        data[5] = 9.0;
+        data[261] = 9.0;
+        data[r - 1] = 9.0;
+        // Row 1: -inf ties -> index 0 wins for min; +inf ties -> first +inf wins for max.
+        data[r + 3] = f32::INFINITY;
+        data[r + r - 2] = f32::INFINITY;
+        data[r + 7] = f32::NEG_INFINITY;
+        data[r + r - 1] = f32::NEG_INFINITY;
+        // Row 2: -0.0 and +0.0 ties -> index 0 must win for both max and min.
+        for j in 0..r {
+            data[2 * r + j] = if j % 2 == 0 { -0.0 } else { 0.0 };
+        }
+        // Rows 3..7: NaN placed in each lane (0..4) before a later NaN -> earlier NaN index must win.
+        for lane in 0..4usize {
+            let base = (3 + lane) * r;
+            let first = 256 + lane;
+            let second = r - 4 + lane;
+            data[base + first] = f32::NAN;
+            data[base + second] = f32::NAN;
+            data[base] = f32::INFINITY;
+            data[base + 1] = f32::NEG_INFINITY;
+        }
+        let t = Tensor::from_vec(data, [7, r]).unwrap();
+        let max_cpu = t.argmax(1, false).unwrap();
+        let min_cpu = t.argmin(1, false).unwrap();
+        let tg = t.to_device(dev).unwrap();
+        for portable in [false, true] {
+            let _g = ForceGuard::set(portable);
+            assert_same(
+                &tg.argmax(1, false).unwrap(),
+                &max_cpu,
+                &format!("argmax ties/nan {label} fb={portable}"),
+            );
+            assert_same(
+                &tg.argmin(1, false).unwrap(),
+                &min_cpu,
+                &format!("argmin ties/nan {label} fb={portable}"),
+            );
+        }
+    }
+
+    // Dispatch trace check: short-row large-batch -> arg_reduce; single-pass rows -> arg_reduce_rows; split-K -> 2x arg_reduce_rows.
+    let fresh = crate::GpuContext::new().unwrap();
+    let backend = crate::GpuBackend::new(fresh.clone(), dev);
+    for (dims, expect) in [
+        ([512usize, 80usize], vec!["arg_reduce"]),
+        ([4, 512], vec!["arg_reduce_rows"]),
+        ([1, 16384], vec!["arg_reduce_rows", "arg_reduce_rows"]),
+    ] {
+        let s = Shape::new(&dims);
+        let b = backend.full(dev, DType::F32, s.numel(), 1.0).unwrap();
+        fresh.trace_begin();
+        let _ = backend.reduce(ReduceOp::ArgMax, View::new(&b, &Layout::contiguous(s)), 1).unwrap();
+        assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), expect);
+    }
+    assert!(fresh.kernels_without_registry().is_empty());
+
+    // Mixed-alignment optimizer_step_many, scale_many, and unscale_check_many partition 4-aligned tensors onto
+    // VEC4 dispatches separately from odd-length tensors while matching CPU reference exactly.
+    use crate::kernels::optim::{ManyItem, OptimUpdate, optimizer_step_many, scale_many, unscale_check_many};
+    let lens = [1024usize, 3, 2048, 7];
+    let ps: Vec<_> =
+        lens.iter().map(|&n| fresh.upload(bytemuck::cast_slice(&vec![1.5f32; n])).unwrap()).collect();
+    let gs: Vec<_> =
+        lens.iter().map(|&n| fresh.upload(bytemuck::cast_slice(&vec![0.25f32; n])).unwrap()).collect();
+    let items: Vec<_> = (0..lens.len())
+        .map(|i| ManyItem { p: ps[i].raw(), g: gs[i].raw(), s0: None, s1: None, n: lens[i] })
+        .collect();
+    let sgd = OptimUpdate::Sgd { lr: 0.1, momentum: 0.0, weight_decay: 0.0, nesterov: false };
+    fresh.trace_begin();
+    optimizer_step_many(&fresh, &sgd, &items).unwrap();
+    let tr = fresh.trace_end();
+    assert_eq!(tr.len(), 2, "mixed alignment should partition into 1 vec4 + 1 scalar dispatch");
+    assert_eq!(tr.iter().map(|o| o.name).collect::<Vec<_>>(), vec!["optim_many", "optim_many"]);
+    // 1024/4 = 256 (1 wg) + 2048/4 = 512 (2 wgs) = 3 wgs for aligned chunk; 1 + 1 = 2 wgs for unaligned chunk.
+    assert_eq!(tr[0].groups, [3, 1, 1]);
+    assert_eq!(tr[1].groups, [2, 1, 1]);
+
+    let xs: Vec<_> = ps.iter().zip(lens).map(|(b, n)| (b.raw(), n)).collect();
+    let f1 = fresh.upload(bytemuck::cast_slice(&[0.5f32])).unwrap();
+    let f2 = fresh.upload(bytemuck::cast_slice(&[2.0f32])).unwrap();
+    let flag = fresh.upload(bytemuck::cast_slice(&[0u32])).unwrap();
+    fresh.trace_begin();
+    scale_many(&fresh, &xs, f1.raw(), f2.raw()).unwrap();
+    let tr_sc = fresh.trace_end();
+    assert_eq!(tr_sc.len(), 2);
+    assert_eq!(tr_sc[0].groups, [3, 1, 1]);
+    assert_eq!(tr_sc[1].groups, [2, 1, 1]);
+    fresh.trace_begin();
+    unscale_check_many(&fresh, &xs, 0.5, flag.raw()).unwrap();
+    let tr_un = fresh.trace_end();
+    assert_eq!(tr_un.len(), 2);
+    assert_eq!(tr_un[0].groups, [3, 1, 1]);
+    assert_eq!(tr_un[1].groups, [2, 1, 1]);
+    for (b, n) in ps.iter().zip(lens) {
+        let got: Vec<f32> = bytemuck::pod_collect_to_vec(&fresh.read(b.raw(), 0, (n * 4) as u64).unwrap());
+        // After sgd (1.5 - 0.1*0.25 = 1.475), scale (*0.5*2.0 = 1.475), unscale (*0.5 = 0.7375).
+        assert!(got.iter().all(|&v| (v - 0.7375).abs() < 1e-6), "n={n}: {got:?}");
+    }
+    assert!(fresh.kernels_without_registry().is_empty());
+}

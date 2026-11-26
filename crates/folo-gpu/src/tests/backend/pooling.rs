@@ -508,6 +508,68 @@ fn tiled_max_pool_vec4_2x2_and_gap_fast_paths() {
     assert_eq!(tr.len(), 1);
     assert_eq!((tr[0].name, tr[0].groups), ("pool_bw_idx", [16, 1, 1]));
 
+    // 2x2 stride-2 pad-0 values-only max_pool2d S2_VEC4 fast path: even width uses 1/4 threads of output pixels.
+    let s_m2 = Shape::new(&[1, 4, 16, 16]);
+    let b_m2 = backend.full(dev, DType::F32, s_m2.numel(), 1.0).unwrap();
+    fresh.trace_begin();
+    let _ = backend.max_pool2d_values(View::new(&b_m2, &Layout::contiguous(s_m2.clone())), &p2).unwrap();
+    let tr_m2 = fresh.trace_end();
+    assert_eq!(tr_m2.len(), 1);
+    // 4 * 8 * (8 / 2) = 128 vec2 units -> 1 workgroup (vs 4 * 8 * 8 = 256 -> still 1 wg; check larger [4, 4, 16, 16]).
+    let s_m2b = Shape::new(&[4, 4, 16, 16]);
+    let b_m2b = backend.full(dev, DType::F32, s_m2b.numel(), 1.0).unwrap();
+    fresh.trace_begin();
+    let _ = backend.max_pool2d_values(View::new(&b_m2b, &Layout::contiguous(s_m2b)), &p2).unwrap();
+    let tr_m2b = fresh.trace_end();
+    // 16 planes * 8 * 4 = 512 vec2 units -> 2 workgroups (scalar would be 1024 -> 4 workgroups).
+    assert_eq!((tr_m2b[0].name, tr_m2b[0].groups), ("max_pool2d", [2, 1, 1]));
+
+    // NaN in every one of the 4 positions of a 2x2 window + signed-zero bit preservation on S2_VEC4 (F32 & F16).
+    {
+        let _g = folo_core::no_grad();
+        let dtypes: Vec<DType> = if has_f16 { vec![DType::F32, DType::F16] } else { vec![DType::F32] };
+        let mut vals = vec![1.0f32; 4 * 4];
+        // Four 2x2 windows across a 4x4 plane (ow=2 even -> hits S2_VEC4): place NaN in each corner.
+        vals[0] = f32::NAN; // top-left of (0,0)
+        vals[3] = f32::NAN; // top-right of (0,1)
+        vals[8] = f32::NAN; // bottom-left of (1,0)
+        vals[15] = f32::NAN; // bottom-right of (1,1)
+        let t_nan = Tensor::from_vec(vals, [1, 1, 4, 4]).unwrap();
+        let t_neg0 = Tensor::from_vec(
+            vec![
+                -0.0f32,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                -0.0,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+                -0.0,
+                -0.0,
+                2.0,
+                -5.0,
+                f32::NEG_INFINITY,
+                -0.0,
+                -1.0,
+                3.0,
+            ],
+            [1, 1, 4, 4],
+        )
+        .unwrap();
+        for &dt in &dtypes {
+            let rn = t_nan.to_dtype(dt).unwrap();
+            let got = rn.to_device(dev).unwrap().max_pool2d(2, 2, 0).unwrap();
+            let got_v = got.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap();
+            assert!(got_v.iter().all(|v| v.is_nan()), "S2_VEC4 {dt:?} missed NaN: {got_v:?}");
+            let rz = t_neg0.to_dtype(dt).unwrap();
+            let cz = if dt == DType::F16 { rz.to_dtype(DType::F32).unwrap() } else { rz.clone() };
+            let want = cz.max_pool2d(2, 2, 0).unwrap().to_dtype(dt).unwrap();
+            let got_z = rz.to_device(dev).unwrap().max_pool2d(2, 2, 0).unwrap();
+            super::fixtures::assert_same(&got_z, &want, &format!("S2_VEC4 {dt:?} -0.0 bits"));
+        }
+    }
+
     // Every new kernel is registered in `DEFS` for precompile.
     assert!(
         fresh.kernels_without_registry().is_empty(),
