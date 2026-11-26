@@ -18,6 +18,7 @@ import type { LabelImage, LabelJob as LabelJobType, SystemInfo } from '$lib/api/
 import { parse, router } from '$lib/router';
 import { fadeScroll } from '$lib/ui/fadeScroll';
 import { forgetRows, rowNav } from '$lib/ui/rowNav';
+import { toast } from '$lib/ui/toast';
 import Benchmark from './Benchmark';
 import BenchCompare from './BenchCompare';
 import BenchEntry from './BenchEntry';
@@ -40,9 +41,9 @@ const MOCK_SYSTEM_NO_EXTRAS: SystemInfo = {
 } as unknown as SystemInfo;
 
 function spyMockServerApi() {
-  const err501 = () => Promise.reject(new ApiError(501, 'not_implemented', 'Not implemented in mock mode'));
+  const err501 = <T,>(): Promise<T> => Promise.reject(new ApiError(501, 'not_implemented', 'Not implemented in mock mode'));
   const calls = {
-    labelJobs: vi.fn(err501),
+    labelJobs: vi.fn<() => Promise<LabelJobType[]>>(err501),
     labelAgents: vi.fn(err501),
     labelJob: vi.fn(err501),
     labelImages: vi.fn(err501),
@@ -113,23 +114,91 @@ describe('Round 14 playtest: capability-gated routes suppress 501 requests and r
       listView.unmount();
     }
 
-    history.replaceState(history.state, '', '#/datasets/label/lj_1');
-    router.route = parse('#/datasets/label/lj_1');
+    history.replaceState(history.state, '', '#/datasets/label/lj_1?image=img_1');
+    router.route = parse('#/datasets/label/lj_1?image=img_1');
+    const toastInfo = vi.spyOn(toast, 'info');
     const detailView = render(() => <LabelJob />, target);
     try {
       flush();
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(11_000);
       flush();
       expect(calls.labelJob).not.toHaveBeenCalled();
       expect(calls.labelImages).not.toHaveBeenCalled();
       expect(calls.labelAgents).not.toHaveBeenCalled();
       expect(calls.labelEvents).not.toHaveBeenCalled();
+      expect(calls.datasets).not.toHaveBeenCalled();
+      expect(toastInfo).not.toHaveBeenCalled();
+      expect(router.location.query.get('image')).toBe('img_1');
     } finally {
       detailView.unmount();
     }
   });
 
-  it('NewBenchDialog defers dataset/job fetches until opened and skips labelJobs when lacking agent_labeling', async () => {
+  it('LabelJobs stays unread until support returns (no false empty state) and stops 5s polls after a legacy 501', async () => {
+    vi.useFakeTimers();
+    const { api, calls } = spyMockServerApi();
+    let resolveJobs!: (v: LabelJobType[]) => void;
+    let rejectJobs!: (e: unknown) => void;
+    calls.labelJobs.mockImplementation(
+      () =>
+        new Promise<LabelJobType[]>((res, rej) => {
+          resolveJobs = res;
+          rejectJobs = rej;
+        }),
+    );
+    hub.api = api;
+    hub.mode = 'live';
+    hub.features = ['queue_control'];
+    hub.epoch++;
+
+    history.replaceState(history.state, '', '#/datasets/label');
+    router.route = parse('#/datasets/label');
+    const view = render(() => <LabelJobs />, target);
+    try {
+      flush();
+      expect(calls.labelJobs).not.toHaveBeenCalled();
+
+      // Server restarts with labeling enabled: while initial fetch is in flight, must NOT show "No labeling jobs yet".
+      calls.system.mockResolvedValue({ ...MOCK_SYSTEM_NO_EXTRAS, features: ['queue_control', 'agent_labeling'] });
+      hub.features = ['queue_control', 'agent_labeling'];
+      hub.epoch++;
+      flush();
+      expect(calls.labelJobs).toHaveBeenCalledTimes(1);
+      expect(target.textContent).not.toContain('No labeling jobs yet');
+
+      // If the fetch fails, ErrorState + Retry must render (not hidden behind a stale `[]`).
+      rejectJobs(new ApiError(500, 'internal', 'boom'));
+      await vi.advanceTimersByTimeAsync(0);
+      flush();
+      expect(target.textContent).not.toContain('No labeling jobs yet');
+      expect(target.textContent).toContain('Retry');
+      // Avoid unused variable warning.
+      expect(typeof resolveJobs).toBe('function');
+    } finally {
+      view.unmount();
+    }
+
+    // Legacy server: `/api/health` omits features and `/api/system` fails, while `/api/label/jobs` returns 501.
+    const legacy = spyMockServerApi();
+    legacy.calls.system.mockRejectedValue(new ApiError(503, 'unavailable', 'slow'));
+    hub.api = legacy.api;
+    hub.mode = 'live';
+    hub.features = null;
+    hub.epoch++;
+
+    const legacyView = render(() => <LabelJobs />, target);
+    try {
+      flush();
+      await vi.advanceTimersByTimeAsync(16_000);
+      flush();
+      expect(legacy.calls.labelJobs).toHaveBeenCalledTimes(1);
+      expect(target.textContent).toContain('cannot label');
+    } finally {
+      legacyView.unmount();
+    }
+  });
+
+  it('NewBenchDialog defers dataset/job fetches until opened, skips labelJobs, and disables the labeling-job source when lacking agent_labeling', async () => {
     const { api, calls } = spyMockServerApi();
     hub.api = api;
     hub.mode = 'live';
@@ -148,8 +217,57 @@ describe('Round 14 playtest: capability-gated routes suppress 501 requests and r
       flush();
       await vi.waitFor(() => expect(calls.datasets).toHaveBeenCalledTimes(1));
       expect(calls.labelJobs).not.toHaveBeenCalled();
+      const labelOpt = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('A labeling job'))!;
+      expect(labelOpt.disabled).toBe(true);
     } finally {
       view.unmount();
+    }
+  });
+
+  it('LiveBench and LiveLabelJob preserve loaded snapshots when hub.features drops to null during an outage', async () => {
+    const mockApi = new MockApi('normal', 0);
+    const benchSpy = vi.spyOn(mockApi, 'bench');
+    const jobSpy = vi.spyOn(mockApi, 'labelJob');
+    hub.api = mockApi;
+    hub.mode = 'mock';
+    hub.features = ['vision_bench', 'agent_labeling'];
+    hub.epoch++;
+
+    const benches = await mockApi.benches();
+    const jobs = await mockApi.labelJobs();
+    let lb!: LiveBench;
+    let ll!: LiveLabelJob;
+    const stop = createRoot((dispose) => {
+      lb = new LiveBench(() => benches[0]!.id);
+      ll = new LiveLabelJob(() => jobs[0]!.id);
+      return dispose;
+    });
+    try {
+      flush();
+      await vi.waitFor(() => {
+        flush();
+        expect(lb.bench?.id).toBe(benches[0]!.id);
+        expect(ll.job?.id).toBe(jobs[0]!.id);
+      });
+      const benchCalls = benchSpy.mock.calls.length;
+      const jobCalls = jobSpy.mock.calls.length;
+
+      // Confirmed outage sets `hub.features = null`, then recovery restores it: must NOT wipe snapshots or refetch.
+      hub.features = null;
+      flush();
+      expect(lb.bench?.id).toBe(benches[0]!.id);
+      expect(ll.job?.id).toBe(jobs[0]!.id);
+      expect(benchSpy.mock.calls.length).toBe(benchCalls);
+      expect(jobSpy.mock.calls.length).toBe(jobCalls);
+
+      hub.features = ['vision_bench', 'agent_labeling'];
+      flush();
+      expect(lb.bench?.id).toBe(benches[0]!.id);
+      expect(ll.job?.id).toBe(jobs[0]!.id);
+      expect(benchSpy.mock.calls.length).toBe(benchCalls);
+      expect(jobSpy.mock.calls.length).toBe(jobCalls);
+    } finally {
+      stop();
     }
   });
 
@@ -297,12 +415,18 @@ describe('Round 14 playtest: rowNav popover guard, Leaderboard widths, and fadeS
     }
   });
 
-  it('Leaderboard uses compact desktop column widths with container-query widening so Entry stays readable at 1280px', () => {
+  it('Leaderboard uses monotonic compact desktop widths (<= 720px fixed) without trapping fixed menus in container containment', () => {
     const src = readFileSync(resolve(import.meta.dirname, 'bench/Leaderboard.tsx'), 'utf8');
-    expect(src).toContain('container-type: inline-size;');
-    expect(src).toContain('@container (min-width: 1120px)');
+    // `.scroll` must NOT use `container-type`, which creates a containing block that traps/clips `<Menu fixed />`.
+    expect(src).not.toContain('container-type');
+    expect(src).not.toContain('@container');
+    // Compact fixed column widths keep Entry >= 200px at 1280px, and smaller media tiers must not widen them back up.
+    expect(src).toContain('width: 96px;');
     expect(src).toContain('width: 188px;');
     expect(src).toContain('width: 148px;');
+    expect(src).toContain('width: 100px;');
+    const max1279 = src.slice(src.indexOf('@media (max-width: 1279px)'));
+    expect(max1279).not.toMatch(/\.board\s+th\.(map|ran|score)/);
   });
 
   it('fadeScroll defers ResizeObserver DOM mutations via coalesced requestAnimationFrame and cancels on destroy', () => {

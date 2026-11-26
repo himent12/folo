@@ -5,6 +5,7 @@
 
 export function fadeScroll(node: HTMLElement) {
   let raf = 0;
+  let destroyed = false;
   const update = () => {
     const max = node.scrollWidth - node.clientWidth;
     const start = node.scrollLeft > 1;
@@ -23,14 +24,14 @@ export function fadeScroll(node: HTMLElement) {
   // Defer ResizeObserver DOM writes to the next animation frame so layout-driven attribute/mask changes
   // never trigger Chromium's "ResizeObserver loop completed with undelivered notifications." error.
   const schedule = () => {
-    if (raf) return;
+    if (raf || destroyed) return;
     if (typeof requestAnimationFrame === 'undefined') {
       update();
       return;
     }
     raf = requestAnimationFrame(() => {
       raf = 0;
-      if (node.isConnected) update();
+      if (!destroyed && node.isConnected) update();
     });
   };
   update();
@@ -40,6 +41,7 @@ export function fadeScroll(node: HTMLElement) {
   return {
     update,
     destroy() {
+      destroyed = true;
       if (raf && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(raf);
       raf = 0;
       node.removeEventListener('scroll', update);

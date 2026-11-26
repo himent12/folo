@@ -7,7 +7,7 @@
 // new entry, a rename) shows at once, except where the stream has told of that item since the action began. The
 // entries are kept in the leaderboard's order ($lib/bench/rules `rankEntries`), the loops newest first.
 
-import { effect, signal, untrack } from 'fw';
+import { computed, effect, signal, untrack } from 'fw';
 import { BENCH_FEATURE, rankEntries } from '../bench/rules';
 import { ApiError } from './client';
 import { hub } from './index';
@@ -119,6 +119,8 @@ export class LiveBench {
   #inflight = new Set<{ sent: number; entries: Map<string, BenchEntry | null>; loops: Map<string, BenchLoop | null> }>();
 
   constructor(id: () => string | null) {
+    // Memoized boolean so `hub.features` flipping `['vision_bench'] -> null` during an outage keeps the last snapshot.
+    const lacksBench = computed(() => hub.lacks(BENCH_FEATURE));
     effect(() => {
       const benchId = id();
       const resetView = () => {
@@ -142,7 +144,7 @@ export class LiveBench {
         return;
       }
       if (hub.mode === 'connecting') return;
-      if (hub.lacks(BENCH_FEATURE)) {
+      if (lacksBench.get()) {
         resetView();
         return;
       }

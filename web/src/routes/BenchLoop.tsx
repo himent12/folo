@@ -66,9 +66,10 @@ export default function BenchLoop() {
   const phone = new MediaQuery(media.phone, false);
   const system = new Resource((s) => hub.api.system(s));
   const noBench = computed(() => benchUnavailable(system.data));
-  const models = new Resource((s) => (noBench.get() ? Promise.resolve([]) : hub.api.models(s)));
+  const noLabel = computed(() => labelUnavailable(system.data));
+  const models = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : hub.api.models(s)));
   const datasets = new Resource((s) => (noBench.get() ? Promise.resolve([]) : hub.api.datasets(s)));
-  const jobs = new Resource((s) => (noBench.get() || labelUnavailable(system.data) ? Promise.resolve([]) : hub.api.labelJobs(s)));
+  const jobs = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : noLabel.get() ? Promise.resolve([]) : hub.api.labelJobs(s)));
   const runs = new Resource((s) => (noBench.get() ? Promise.resolve([]) : hub.api.runs(s)), { startFrom: () => watched.source });
   const catalog = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : hub.api.benchCatalog(s)));
   const live = new LiveBench(() => (noBench.get() ? null : id.get() || null));

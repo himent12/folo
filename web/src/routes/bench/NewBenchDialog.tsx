@@ -51,9 +51,12 @@ export default function NewBenchDialog(props: { open?: boolean }) {
   const open = bindable(props, 'open', false);
 
   const uid = createUniqueId();
+  // Memoized boolean so `hub.features` flipping to `null` during an outage does not trigger unnecessary refetches.
+  const noLabel = computed(() => hub.lacks(LABEL_FEATURE));
   // Defer source lists until the dialog actually opens, and skip labeling jobs when the server lacks agent labeling.
   const datasets = new Resource<Dataset[] | undefined>((s) => (open.get() ? hub.api.datasets(s) : Promise.resolve(undefined)));
-  const jobs = new Resource<LabelJob[] | undefined>((s) => (open.get() && !hub.lacks(LABEL_FEATURE) ? hub.api.labelJobs(s) : Promise.resolve(undefined)));
+  const jobs = new Resource<LabelJob[] | undefined>((s) => (open.get() && !noLabel.get() ? hub.api.labelJobs(s) : Promise.resolve(undefined)));
+  const labelOff = computed(() => noLabel.get() || !!jobs.error);
 
   const name = signal('');
   const description = signal('');
@@ -153,7 +156,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
           : sourceImages.get() === 0
             ? `Pick a split with images`
             : null
-      : hub.lacks(LABEL_FEATURE) || jobs.error
+      : labelOff.get()
         ? 'This server does not label images'
         : !jobs.data
           ? 'Loading labeling jobs'
@@ -276,7 +279,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
             bind:value={kind}
             options={[
               { value: 'dataset', label: 'A dataset split' },
-              { value: 'label_job', label: 'A labeling job', disabled: !!jobs.error, tip: jobs.error ? 'This server does not label images' : undefined },
+              { value: 'label_job', label: 'A labeling job', disabled: labelOff.get(), tip: labelOff.get() ? 'This server does not label images' : undefined },
             ]}
           />
         </Field>

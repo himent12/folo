@@ -136,7 +136,7 @@ export default function LabelJob() {
   // its images once loaded, so the link is dropped in place (scrubbing any stale Forward entry) and the page says why.
   effect(() => {
     const want = imageParam.get();
-    if (!want || backingEntry === router.entry || live.loading || live.error || live.images.some((i) => i.id === want)) return;
+    if (!want || backingEntry === router.entry || unsupported.get() || !job.get() || live.loading || live.error || live.images.some((i) => i.id === want)) return;
     if (router.location.name !== 'label-job' || router.location.params.id !== id.peek()) return;
     untrack(() => {
       // page-level: the editor never opened for it.
@@ -259,7 +259,7 @@ export default function LabelJob() {
   // The list is read (every 5 s: one removed while the page is open stops linking) while the job loads and once it made a
   // dataset, never for a job that made none nor while the page shows an error (a job not found names none).
   const madeId = computed(() => job.get()?.dataset_id ?? null);
-  const datasets = datasetsFor(() => (live.error ? [] : job.get() ? [madeId.get()] : undefined));
+  const datasets = datasetsFor(() => (unsupported.get() || live.error ? [] : job.get() ? [madeId.get()] : undefined));
   const presence = datasetPresence(datasets, () => [madeId.get()]);
   const madeDataset = computed(() => {
     const dsId = madeId.get();

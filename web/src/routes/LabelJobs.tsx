@@ -4,7 +4,7 @@ import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Tags from '$icons/tags';
 import { computed, css, effect, For, MediaQuery, onCleanup, signal, untrack } from 'fw';
-import { hub } from '$lib/api/index';
+import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { LabelJob } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
@@ -44,12 +44,29 @@ export default function LabelJobs() {
   ownCreateAction();
 
   const system = new Resource((s) => hub.api.system(s));
-  const noLabel = computed(() => labelUnavailable(system.data));
-  // Polled: a job an agent is labeling moves on its own. Skip fetching/polling once health or `/api/system` says
-  // the server cannot label (`folo serve --mock`).
-  const jobs = new Resource((s) => (noLabel.get() ? Promise.resolve<LabelJob[]>([]) : hub.api.labelJobs(s)), { poll: 5000 });
+  // Legacy servers without `/api/health` features whose `/api/system` fails/stalls still return 501 on `/api/label/jobs`;
+  // remember that terminal 501 for the current connection so the 5 s poll stops until reconnect/recovery.
+  const saw501 = signal(false);
+  effect(() => {
+    void hub.epoch;
+    void hub.back;
+    saw501.set(false);
+  });
+  const noLabel = computed(() => labelUnavailable(system.data) || saw501.get());
+  // Polled: a job an agent is labeling moves on its own. Resolve `undefined` (unread, not `[]`) when unsupported so
+  // if the server restarts with labeling enabled, the page shows a loading state instead of a false empty state.
+  const jobs = new Resource<LabelJob[] | undefined>(
+    (s) =>
+      noLabel.get()
+        ? Promise.resolve(undefined)
+        : hub.api.labelJobs(s).catch((e) => {
+            if (e instanceof ApiError && e.status === 501 && e.code === 'not_implemented') saw501.set(true);
+            throw e;
+          }),
+    { poll: 5000 },
+  );
   const agents = new Resource((s) => (noLabel.get() ? Promise.resolve(undefined) : hub.api.labelAgents(s)));
-  const unsupported = computed(() => labelUnavailable(system.data, jobs.error));
+  const unsupported = computed(() => noLabel.get() || labelUnavailable(system.data, jobs.error));
 
   // `#/datasets/label?new=1` opens the dialog (the palette's "New labeling job").
   // Followed, not read once: the palette can ask while this page is open (pages are keyed by path, not query). The ask

@@ -8,7 +8,7 @@
 // The images (at most 10,000 a job) are all kept, in the order they were added: the page filters them and the grid
 // draws only the ones in view.
 
-import { batch, effect, signal, untrack } from 'fw';
+import { batch, computed, effect, signal, untrack } from 'fw';
 import { LABEL_FEATURE } from '../label';
 import { hub } from './index';
 import { AppendLog } from './appendLog';
@@ -145,6 +145,8 @@ export class LiveLabelJob {
   #raf = 0;
 
   constructor(id: () => string | null) {
+    // Memoized boolean so `hub.features` flipping `['agent_labeling'] -> null` during an outage keeps the last snapshot.
+    const lacksLabel = computed(() => hub.lacks(LABEL_FEATURE));
     effect(() => {
       const jobId = id();
       const resetView = () => {
@@ -168,7 +170,7 @@ export class LiveLabelJob {
         return;
       }
       if (hub.mode === 'connecting') return;
-      if (hub.lacks(LABEL_FEATURE)) {
+      if (lacksLabel.get()) {
         resetView();
         return;
       }

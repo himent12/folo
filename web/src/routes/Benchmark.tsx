@@ -79,11 +79,12 @@ export default function Benchmark() {
 
   const system = new Resource((s) => hub.api.system(s));
   const noBench = computed(() => benchUnavailable(system.data));
+  const noLabel = computed(() => labelUnavailable(system.data));
   const catalog = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : hub.api.benchCatalog(s)));
-  const agents = new Resource((s) => (noBench.get() || labelUnavailable(system.data) ? Promise.resolve(undefined) : hub.api.labelAgents(s)));
-  const models = new Resource((s) => (noBench.get() ? Promise.resolve([]) : hub.api.models(s)));
-  const datasets = new Resource((s) => (noBench.get() ? Promise.resolve([]) : hub.api.datasets(s)));
-  const jobs = new Resource((s) => (noBench.get() || labelUnavailable(system.data) ? Promise.resolve([]) : hub.api.labelJobs(s)));
+  const agents = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : noLabel.get() ? Promise.resolve([]) : hub.api.labelAgents(s)));
+  const models = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : hub.api.models(s)));
+  const datasets = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : hub.api.datasets(s)));
+  const jobs = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : noLabel.get() ? Promise.resolve([]) : hub.api.labelJobs(s)));
   const live = new LiveBench(() => (noBench.get() ? null : id.get() || null));
   const choice = new AgentChoice(() => agents.data);
   const bench = computed(() => live.bench);
