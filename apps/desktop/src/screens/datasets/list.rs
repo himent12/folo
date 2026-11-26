@@ -114,7 +114,11 @@ impl FoloApp {
     /// server can still read. One it can't (folder gone, images deleted) has only a last known
     /// count, which its card says; it is left out of the total, as in Studio (s1-datasets-6).
     pub(crate) fn datasets_subtitle(&self, l: &[Dataset]) -> String {
-        let images = l.iter().filter(|d| !self.dataset_unreadable(&d.id)).map(|d| d.splits.total()).sum();
+        let images = l
+            .iter()
+            .filter(|d| !self.dataset_unreadable(&d.id))
+            .map(|d| self.store.dataset.get(&d.id).and_then(|r| r.ready()).unwrap_or(d).splits.total())
+            .sum();
         format!("{} · {}", plural(l.len(), "dataset"), counted(images, "image", "images"))
     }
 
@@ -201,8 +205,17 @@ impl FoloApp {
                     }),
                 );
                 let query = self.ds_search.read(cx).text().to_string();
-                let mut filtered: Vec<Dataset> =
-                    filter_datasets(&l, self.ds_format_filter, &query).into_iter().cloned().collect();
+                let mut filtered: Vec<Dataset> = filter_datasets(&l, self.ds_format_filter, &query)
+                    .into_iter()
+                    .map(|d| {
+                        self.store
+                            .dataset
+                            .get(&d.id)
+                            .and_then(|r| r.ready())
+                            .cloned()
+                            .unwrap_or_else(|| d.clone())
+                    })
+                    .collect();
                 sort_datasets(&mut filtered, self.ds_sort, self.ds_sort_desc);
                 let is_filtered = self.ds_format_filter.is_some() || !query.trim().is_empty();
                 let sort_labels: Vec<&str> = DatasetSort::ALL.iter().map(|s| s.label()).collect();

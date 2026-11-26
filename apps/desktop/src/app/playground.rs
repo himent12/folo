@@ -120,6 +120,7 @@ impl FoloApp {
 
     pub fn play_zoom_by(&mut self, f: f32, cx: &mut Context<Self>) {
         (self.play_zoom, self.play_pan) = crate::viz::zoom_step(self.play_zoom, self.play_pan, f);
+        self.play_drag = None;
         cx.notify();
     }
 
@@ -138,6 +139,7 @@ impl FoloApp {
         self.clear_play_hover();
         self.play_zoom = 1.0;
         self.play_pan = (0., 0.);
+        self.play_drag = None;
         self.run_predict(cx);
     }
 
@@ -164,6 +166,7 @@ impl FoloApp {
             self.play_pred_dim = false;
             self.play_pred_for = None;
             self.clear_play_hover();
+            self.play_drag = None;
             self.play_image.take().map(|p| p.image)
         } else {
             None

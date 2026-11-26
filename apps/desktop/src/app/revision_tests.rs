@@ -597,6 +597,7 @@ fn non_default_sort_and_retryable_later_page_preserve_scroll_anchor() {
             dataset: ID.into(),
             file: "deleted.jpg".into(),
             split: crate::api::Split::Val,
+            fallback_row: 0,
             intra_row: 0.,
             strategy: None,
             pending_recheck: false,
@@ -608,4 +609,103 @@ fn non_default_sort_and_retryable_later_page_preserve_scroll_anchor() {
     drive(&mut app, window, |this, _, _| {
         assert!(this.ds_scroll_anchor.is_none(), "empty completed grid clears stale scroll anchor");
     });
+}
+
+/// #382: when the exact anchored file was removed externally during a paged reload, the grid falls
+/// back to the clamped previous row instead of snapping all the way back to row 0 (batch 1).
+#[test]
+fn deleted_anchor_file_falls_back_to_clamped_row_instead_of_row_zero() {
+    let api = Arc::new(MockBackend::new(4200, true).with_paged_splits(ID, 10_000, 60));
+    let (mut app, window) = on_its_page(api);
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_split = Some(crate::api::Split::Val);
+        cx.notify();
+    });
+    frames(&mut app, window);
+
+    let (expected_row, item_h) = drive(&mut app, window, |this, _, cx| {
+        let item_h = f32::from(this.grid_scroll.0.borrow().last_item_height.expect("row height"));
+        let fallback_row = 4usize;
+        this.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
+            dataset: ID.into(),
+            file: "images/val/deleted_externally.jpg".into(),
+            split: crate::api::Split::Val,
+            fallback_row,
+            intra_row: 12.,
+            strategy: None,
+            pending_recheck: false,
+            focus_from: None,
+        });
+        cx.notify();
+        (fallback_row, item_h)
+    });
+    frames(&mut app, window);
+
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.ds_scroll_anchor.is_none(), "anchor consumed after fallback restore");
+        let got_y = f32::from(-this.grid_scroll.0.borrow().base_handle.offset().y);
+        let max_y = f32::from(this.grid_scroll.0.borrow().base_handle.max_offset().height);
+        let want_y = (expected_row as f32 * item_h + 12.).min(max_y);
+        assert!(
+            got_y > 0. && (got_y - want_y).abs() <= 2.0,
+            "grid stayed near fallback row {expected_row} (got_y={got_y}, want_y={want_y}, max_y={max_y})"
+        );
+    });
+}
+
+/// #382: window activation on Overview / Datasets triggers a deduplicated dataset-list refresh and
+/// renders refreshed per-dataset records immediately on summary cards and subtitle counts.
+#[test]
+fn window_activation_on_datasets_refreshes_list_deduplicated_and_updates_summary() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Datasets, w, cx));
+    frames(&mut app, window);
+
+    // Hold the next `datasets` list fetch and bounce focus twice: only one list fetch goes out.
+    let list_first = api.hold("datasets");
+    let list_second = api.hold("datasets");
+    app.platform().set_active(false);
+    app.platform().set_active(true);
+    wait_for_held(&mut app, window, &list_first, true, "first datasets refresh");
+
+    app.platform().set_active(false);
+    app.platform().set_active(true);
+    frames_holding_one(&mut app, window);
+    assert!(!list_second.is_held(), "second focus bounce must not launch a duplicate datasets fetch");
+    drop((list_first, list_second));
+    app.run_until_idle();
+    frames(&mut app, window);
+
+    // When `store.dataset` holds fresher split counts than `store.datasets`, `datasets_subtitle`
+    // reflects the fresher record immediately without waiting for the next list poll.
+    drive(&mut app, window, |this, _, _| {
+        let list = this.store.datasets.ready().expect("datasets loaded").clone();
+        let before = this.datasets_subtitle(&list);
+        let mut updated =
+            this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("dataset loaded");
+        updated.splits.train += 50;
+        this.store.dataset.insert(ID.into(), Load::Ready(updated));
+        let after = this.datasets_subtitle(&list);
+        assert_ne!(before, after, "datasets subtitle reflects fresher store.dataset counts");
+    });
+}
+
+/// #308 item 6: rendering the live-run screen into two independent headless apps at 1.5x DPI
+/// produces byte-for-byte identical framebuffers (no wall-clock or parallel raster drift).
+#[test]
+fn headless_run_live_render_is_byte_identical_across_runs() {
+    let render_once = || {
+        let api = Arc::new(MockBackend::new(4200, true));
+        let (mut app, window) = open_with(api);
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::Run("run_7b1a".into()), w, cx);
+        });
+        frames(&mut app, window);
+        app.frame(window.into()).pixels.clone()
+    };
+    let a = render_once();
+    let b = render_once();
+    assert!(!a.is_empty());
+    assert_eq!(a, b, "repeated headless run-live renders must be byte-for-byte identical");
 }

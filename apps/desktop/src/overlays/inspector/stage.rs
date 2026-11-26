@@ -22,6 +22,11 @@ thread_local! {
     static STAGE_PANNED: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Clears the active stage-pan flag (called on zoom reset, outside release, or wheel zoom).
+pub(super) fn clear_stage_panned() {
+    STAGE_PANNED.with(|p| p.set(false));
+}
+
 impl FoloApp {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn inspector_stage(
@@ -113,6 +118,7 @@ impl FoloApp {
                 insp.zoom = new_zoom;
                 insp.drag_from = None;
                 insp.focused_box = None;
+                clear_stage_panned();
                 w.prevent_default();
                 cx.stop_propagation();
                 cx.notify();
@@ -144,6 +150,17 @@ impl FoloApp {
                 cx.listener(|this, _, _, cx| {
                     if let Some(insp) = this.inspector.as_mut() {
                         insp.drag_from = None;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    clear_stage_panned();
+                    if let Some(insp) = this.inspector.as_mut()
+                        && insp.drag_from.take().is_some()
+                    {
                         cx.notify();
                     }
                 }),

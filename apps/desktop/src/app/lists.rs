@@ -26,6 +26,9 @@ pub struct ListTickets {
     seq: u64,
     installed: [u64; 3],
     changed: [u64; 3],
+    /// Per list, the latest fetch ticket still out (0: none), used to deduplicate background
+    /// refreshes such as window-activation rechecks while a list request is already in flight.
+    in_flight: [u64; 3],
     /// Per list, the ticket of a failed list's retry still out (0: none): one at a time, so a server
     /// that never answers isn't asked again at every refresh.
     retrying: [u64; 3],
@@ -36,6 +39,17 @@ impl ListTickets {
     pub fn ask(&mut self) -> u64 {
         self.seq += 1;
         self.seq
+    }
+
+    /// A ticket for an in-place refresh of `list`, unless a fetch or retry is already in flight.
+    pub fn refresh_if_idle(&mut self, list: List) -> Option<u64> {
+        let i = list as usize;
+        if self.in_flight[i] != 0 || self.retrying[i] != 0 {
+            return None;
+        }
+        let ticket = self.ask();
+        self.in_flight[i] = ticket;
+        Some(ticket)
     }
 
     /// Whether an answer to `ticket` is still news: no later fetch's answer is installed, and the list
@@ -58,14 +72,19 @@ impl ListTickets {
         if self.retrying[list as usize] != 0 {
             return None;
         }
-        self.retrying[list as usize] = self.ask();
-        Some(self.seq)
+        let ticket = self.ask();
+        self.retrying[list as usize] = ticket;
+        self.in_flight[list as usize] = ticket;
+        Some(ticket)
     }
 
-    /// The answer to `ticket` is in (news or not): a retry it was is out no longer.
+    /// The answer to `ticket` is in (news or not): any retry or in-flight mark it held is cleared.
     pub fn answered(&mut self, list: List, ticket: u64) {
         if self.retrying[list as usize] == ticket {
             self.retrying[list as usize] = 0;
+        }
+        if self.in_flight[list as usize] == ticket {
+            self.in_flight[list as usize] = 0;
         }
     }
 
@@ -73,6 +92,7 @@ impl ListTickets {
     /// dropped, a retry among them too, so the new request goes out at once and only its answer counts.
     pub fn restart(&mut self, list: List) {
         self.changed(list);
+        self.in_flight[list as usize] = 0;
         self.retrying[list as usize] = 0;
     }
 }
@@ -82,7 +102,24 @@ impl FoloApp {
     /// place (a failure leaves it as it is). Either way only while it is still news.
     pub(super) fn fetch_list(&mut self, list: List, cx: &mut Context<Self>) {
         let ticket = self.list_tickets.ask();
+        self.list_tickets.in_flight[list as usize] = ticket;
         self.fetch_list_as(list, ticket, cx);
+    }
+
+    /// Refreshes an already-loaded `list` in place (e.g. on window activation) if no fetch for it is
+    /// currently in flight.
+    pub(super) fn refresh_list_if_idle(&mut self, list: List, cx: &mut Context<Self>) {
+        let loaded = match list {
+            List::Datasets => self.store.datasets.ready().is_some(),
+            List::Models => self.store.models.ready().is_some(),
+            List::Runs => self.store.runs.ready().is_some(),
+        };
+        if !loaded {
+            return;
+        }
+        if let Some(ticket) = self.list_tickets.refresh_if_idle(list) {
+            self.fetch_list_as(list, ticket, cx);
+        }
     }
 
     /// Fetches failed `list` again in place: its error stays on screen until an answer replaces it (the
@@ -246,6 +283,8 @@ impl FoloApp {
         self.ds_recheck.remove(id);
         if self.inspector.as_ref().is_some_and(|i| i.dataset == id) {
             self.take_inspector(cx);
+            self.inspector_return = None;
+            self.restore_pending = true;
         }
         if let Some((name, list)) = super::navigation::deleted_route(&self.deleted, &self.route) {
             let title = super::navigation::gone_title(&name, &self.route);
@@ -294,5 +333,15 @@ mod tests {
         assert!(t.current(List::Models, c));
         let d = t.ask();
         assert!(t.current(List::Datasets, d), "the fetch that follows the change counts");
+    }
+
+    #[test]
+    fn refresh_if_idle_deduplicates_concurrent_refreshes() {
+        let mut t = ListTickets::default();
+        let first = t.refresh_if_idle(List::Datasets).expect("first refresh starts");
+        assert!(t.refresh_if_idle(List::Datasets).is_none(), "second refresh deduplicated while in flight");
+        assert!(t.refresh_if_idle(List::Models).is_some(), "other lists stay independent");
+        t.answered(List::Datasets, first);
+        assert!(t.refresh_if_idle(List::Datasets).is_some(), "next refresh allowed once answered");
     }
 }

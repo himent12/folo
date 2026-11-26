@@ -138,8 +138,10 @@ impl FoloApp {
                     if let Some(i) = this.inspector.as_mut() {
                         i.zoom = 1.0;
                         i.pan = (0., 0.);
+                        i.drag_from = None;
                         i.focused_box = None;
                     }
+                    super::stage::clear_stage_panned();
                     cx.notify();
                 }),
             ))

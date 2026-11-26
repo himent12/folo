@@ -24,7 +24,8 @@ struct Ease {
     /// Per series: the points it moves from, or None when it isn't moving.
     from: Vec<Option<Pts>>,
     to: Vec<Pts>,
-    start: std::time::Instant,
+    /// Start time of an active easing transition, or `None` once settled.
+    start: Option<std::time::Instant>,
 }
 
 thread_local! {
@@ -80,19 +81,21 @@ fn ease_frame(
     now: std::time::Instant,
     reduce: bool,
 ) -> Option<Vec<Pts>> {
-    let progress = |start: std::time::Instant| (now - start).as_secs_f32() * 1000. / EASE_MS;
-    let settled = now - std::time::Duration::from_secs(1);
+    let progress = |start: Option<std::time::Instant>| match start {
+        Some(s) => now.saturating_duration_since(s).as_secs_f32() * 1000. / EASE_MS,
+        None => 1.,
+    };
     EASES.with(|m| {
         let mut m = m.borrow_mut();
         let e = m.entry(id.clone()).or_insert_with(|| Ease {
             key: key.clone(),
             from: vec![None; to.len()],
             to: to.to_vec(),
-            start: settled,
+            start: None,
         });
         if reduce {
             // Reduce motion: no move starts, and one in progress stops where its data is.
-            *e = Ease { key, from: vec![None; to.len()], to: to.to_vec(), start: settled };
+            *e = Ease { key, from: vec![None; to.len()], to: to.to_vec(), start: None };
             return None;
         }
         let unchanged =
@@ -125,7 +128,7 @@ fn ease_frame(
                     .collect()
             };
             let moving = from.iter().any(Option::is_some);
-            *e = Ease { key, from, to: to.to_vec(), start: if moving { now } else { settled } };
+            *e = Ease { key, from, to: to.to_vec(), start: moving.then_some(now) };
         }
         let p = progress(e.start);
         if p >= 1. || e.from.iter().all(Option::is_none) {
@@ -145,10 +148,10 @@ fn ease_frame(
 
 /// Ease new live data in over 240 ms (instant under Reduce motion). Numbers elsewhere are not
 /// animated; only this chart's geometry is.
-pub(super) fn ease(spec: &mut LineChart, window: &mut Window) {
+pub(super) fn ease(spec: &mut LineChart, window: &mut Window, now: std::time::Instant) {
     let key = (spec.ease_key, spec.series.iter().map(|s| s.name.clone()).collect());
     let to: Vec<Pts> = spec.series.iter().map(|s| s.points.clone()).collect();
-    if let Some(pts) = ease_frame(&spec.id, key, &to, std::time::Instant::now(), crate::ui::reduce_motion()) {
+    if let Some(pts) = ease_frame(&spec.id, key, &to, now, crate::ui::reduce_motion()) {
         for (s, p) in spec.series.iter_mut().zip(pts) {
             s.points = p;
         }

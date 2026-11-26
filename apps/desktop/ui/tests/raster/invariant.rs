@@ -147,3 +147,41 @@ fn big_scenes_take_the_parallel_front_end_identically() {
         assert_eq!(fresh(&s, 1).pixels, a.pixels, "step {step}");
     }
 }
+
+#[test]
+fn concurrent_multi_render_is_byte_identical_across_thread_counts_and_workers() {
+    use std::sync::Arc;
+
+    // Dense scene covering all primitive kinds (quads, gradients, shadows, paths, sprites, images,
+    // underlines) across enough primitives to exercise both single- and multi-part parallel binning.
+    let mut rng = Rng(308_006);
+    let assets = Assets::new(&mut rng);
+    let s = Arc::new(scene(&mut rng, &assets, 2400, W as f32, H as f32));
+    let reference = Arc::new(fresh(&s, 1).pixels);
+
+    // Render concurrently from multiple OS threads with varied internal worker thread counts.
+    let handles: Vec<_> = [1usize, 2, 4, 8, 2, 4]
+        .into_iter()
+        .map(|threads| {
+            let s = Arc::clone(&s);
+            let want = Arc::clone(&reference);
+            std::thread::spawn(move || {
+                let mut r = Renderer::with_threads(threads);
+                let mut fb = Framebuffer::new(W, H);
+                for iter in 0..4 {
+                    fb.fill(0x0013_579b ^ (iter * 0x0101_0101));
+                    r.invalidate();
+                    r.render(&s, blend(), &mut fb);
+                    assert_eq!(
+                        fb.pixels, *want,
+                        "threads={threads} iter={iter}: concurrent render diverged from 1-thread reference"
+                    );
+                }
+            })
+        })
+        .collect();
+
+    for h in handles {
+        h.join().expect("render worker panicked");
+    }
+}

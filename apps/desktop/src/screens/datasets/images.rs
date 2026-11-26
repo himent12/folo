@@ -638,11 +638,17 @@ impl FoloApp {
                         // Arrow keys walk the grid; the list scrolls the target row into view.
                         let nav_ds = ds_id.clone();
                         let el = el.on_key_down(cx.listener(move |this, ev: &KeyDownEvent, w, cx| {
+                            let m = &ev.keystroke.modifiers;
+                            if m.control || m.alt || m.platform || m.shift {
+                                return;
+                            }
                             let target = match ev.keystroke.key.as_str() {
                                 "left" => idx.checked_sub(1),
                                 "right" => Some(idx + 1),
                                 "up" => idx.checked_sub(cols),
                                 "down" => Some(idx + cols),
+                                "home" if idx > 0 => Some(0),
+                                "end" if idx + 1 < count => Some(count - 1),
                                 _ => return,
                             };
                             cx.stop_propagation();

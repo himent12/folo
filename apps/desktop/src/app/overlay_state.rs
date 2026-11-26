@@ -323,6 +323,7 @@ impl FoloApp {
                     dataset: i.dataset,
                     file: meta.file,
                     split: meta.split,
+                    fallback_row: i.index / self.grid_cols(),
                     intra_row: 0.,
                     strategy: Some(folo_ui::ScrollStrategy::Center),
                     pending_recheck: true,
@@ -331,8 +332,14 @@ impl FoloApp {
             }
         } else {
             match opener {
-                Some(fh) => window.focus(&fh),
-                None => window.focus(&self.root_focus),
+                Some(fh) if window.is_focus_mounted(&fh) => {
+                    window.focus(&fh);
+                    self.verify_focus = Some(fh);
+                }
+                _ => {
+                    self.verify_focus = None;
+                    window.focus(&self.root_focus);
+                }
             }
         }
         cx.notify();
@@ -499,6 +506,69 @@ mod tests {
         assert!(
             drive(&mut app, window, |this, w, _| this.root_focus.is_focused(w)),
             "in-flight replacement of positional det-* row falls back to root_focus"
+        );
+    }
+
+    #[test]
+    fn inspector_close_falls_back_when_opener_unmounted_and_tile_preserves_alt_left() {
+        let (mut app, window) = open();
+        app.update(|cx| {
+            crate::app::bind_keys(cx);
+            crate::input::bind_keys(cx);
+        });
+        // Navigate Overview -> Dataset so Back (Alt+Left) has history to return to.
+        drive(&mut app, window, |this, w, cx| this.navigate(Route::Dataset("ds_8f2c".into()), w, cx));
+        for _ in 0..3 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        // Focus a non-first tile and press Alt+Left: modified arrow must NOT be swallowed by tile nav.
+        let tile_id = drive(&mut app, window, |this, w, cx| {
+            let id = this.filtered_image("ds_8f2c", 2).expect("tile 2").id.clone();
+            this.focus_key(&format!("tile-{id}"), w, cx);
+            id
+        });
+        app.frame(window.into());
+        assert!(drive(&mut app, window, |this, w, cx| this.fh(format!("tile-{tile_id}"), cx).is_focused(w)));
+        app.simulate_input(
+            window.into(),
+            folo_ui::PlatformInput::KeyDown(folo_ui::KeyDownEvent {
+                keystroke: folo_ui::Keystroke {
+                    modifiers: folo_ui::Modifiers { alt: true, ..Default::default() },
+                    key: "left".into(),
+                    key_char: None,
+                },
+                is_held: false,
+            }),
+        );
+        app.frame(window.into());
+        assert_eq!(
+            drive(&mut app, window, |this, _, _| this.route.clone()),
+            Route::Overview,
+            "Alt+Left on a focused dataset tile triggers Back navigation instead of tile navigation"
+        );
+
+        // Opening the inspector from a handle that then unmounts (e.g. live-mini disappearing)
+        // must fall back cleanly to `root_focus` when the inspector closes.
+        drive(&mut app, window, |this, w, cx| {
+            this.focus_key("live-mini", w, cx);
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            this.open_sample("ds_8f2c".into(), "img_00001".into(), "run_7b1a".into(), w, cx);
+            for r in this.store.runs.ready_mut().unwrap() {
+                if r.status == RunStatus::Running {
+                    r.status = RunStatus::Completed;
+                }
+            }
+            cx.notify();
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.close_inspector(w, cx));
+        app.frame(window.into());
+        assert!(
+            drive(&mut app, window, |this, w, _| this.root_focus.is_focused(w)),
+            "closing inspector with unmounted opener falls back to root_focus"
         );
     }
 }

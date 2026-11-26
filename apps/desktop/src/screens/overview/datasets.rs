@@ -104,22 +104,20 @@ impl FoloApp {
         let row2: Vec<AnyElement> = it.collect();
         let id = d.id.clone();
         let key = format!("ds-card-{}", d.id);
+        // Prefer the freshly loaded per-dataset record over the cached list summary so window-
+        // activation rechecks update counts, classes, and class balance immediately.
+        let fresh = self.store.dataset.get(&d.id).and_then(|l| l.ready()).cloned();
+        let view = fresh.as_ref().unwrap_or(d);
         // Boxes per class, from the dataset's own record (the list has no stats).
-        let counts = self
-            .store
-            .dataset
-            .get(&d.id)
-            .and_then(|l| l.ready())
-            .and_then(|x| x.stats.as_ref())
-            .map(|s| s.class_counts.clone());
-        let (badge_label, badge_tone, problem) = self.dataset_card_badge(d);
+        let counts = view.stats.as_ref().map(|s| s.class_counts.clone());
+        let (badge_label, badge_tone, problem) = self.dataset_card_badge(view);
         // The card in full: its name, size and every class with its boxes (the strip's breakdown), on
         // hover and on keyboard focus; what is wrong with it, when something is.
         let mut full = format!(
             "{} · {} · {}",
-            d.name,
-            counted(d.splits.total(), "image", "images"),
-            counts.as_deref().map_or_else(|| d.classes.join(", "), |c| balance_text(&d.classes, c))
+            view.name,
+            counted(view.splits.total(), "image", "images"),
+            counts.as_deref().map_or_else(|| view.classes.join(", "), |c| balance_text(&view.classes, c))
         );
         if let Some(why) = &problem {
             full = format!("{full} · {badge_label}: {why}");
@@ -163,10 +161,10 @@ impl FoloApp {
                     .border_color(t.line_subtle)
                     .child(cell2(
                         &t,
-                        d.name.clone(),
+                        view.name.clone(),
                         // Counts that never need cutting; the class names are the card's tip (hover
                         // and keyboard focus), in full.
-                        card_facts(d, self.dataset_unreadable(&d.id)),
+                        card_facts(view, self.dataset_unreadable(&d.id)),
                     ))
                     .child(badge(&t, badge_label, badge_tone)),
             )

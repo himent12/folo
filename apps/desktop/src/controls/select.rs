@@ -366,7 +366,7 @@ impl FoloApp {
                         if let Some(next) = this.menu_typeahead.match_option(
                             key,
                             ch,
-                            std::time::Instant::now(),
+                            cx.background_executor().now(),
                             &labels,
                             &dead,
                             this.menu_hl.min(n - 1),

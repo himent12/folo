@@ -374,7 +374,7 @@ impl FoloApp {
         }
         // Still loading the image list (or the filter emptied it): keep the scrim up.
         if self.store.images.get(ds_id).is_some_and(|l| !l.is_loading()) && !self.images_pending(ds_id) {
-            self.take_inspector(cx);
+            self.close_inspector(window, cx);
         }
         // The page's scrim (it takes the clicks, and a click there closes, as Esc does).
         self.scrim(t, "insp-scrim", window, cx, act(|this, w, cx| this.close_inspector(w, cx)))
@@ -413,6 +413,7 @@ impl FoloApp {
                     i.drag_from = None;
                     i.focused_box = None;
                 }
+                stage::clear_stage_panned();
             }
             k if k.eq_ignore_ascii_case("b") => self.toggle_inspector_boxes(cx),
             k if k.eq_ignore_ascii_case("l") => self.toggle_inspector_labels(cx),

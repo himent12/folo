@@ -36,6 +36,9 @@ pub struct DatasetScrollAnchor {
     pub dataset: String,
     pub file: String,
     pub split: Split,
+    /// Row index captured with the anchor, used as a clamped fallback if the exact file was
+    /// removed externally so large paged grids stay in the same region instead of snapping to row 0.
+    pub fallback_row: usize,
     /// Pixel scroll offset within the anchor row (`0..row_h`) when captured from a scrolled grid.
     pub intra_row: f32,
     /// Pending `scroll_to_item` strategy (for example from closing the inspector right before a
@@ -533,6 +536,7 @@ impl FoloApp {
             dataset: id.to_string(),
             file: meta.file.clone(),
             split: meta.split,
+            fallback_row: target_row,
             intra_row,
             strategy,
             pending_recheck: false,
@@ -578,6 +582,21 @@ impl FoloApp {
         });
         let Some((pos, tile_id)) = found else {
             if !still_incomplete {
+                if !indices.is_empty() && (anchor.fallback_row > 0 || anchor.strategy.is_some()) {
+                    let rows = indices.len().div_ceil(cols);
+                    let row = anchor.fallback_row.min(rows - 1);
+                    if let Some(strategy) = anchor.strategy {
+                        self.grid_scroll.scroll_to_item(row, strategy);
+                    } else {
+                        let clamped_intra = anchor.intra_row.min((row_h - 1.).max(0.));
+                        let target_y = row as f32 * row_h + clamped_intra;
+                        let mut scroll = self.grid_scroll.0.borrow_mut();
+                        scroll.deferred_scroll_to_item = None;
+                        scroll
+                            .base_handle
+                            .set_offset(folo_ui::point(folo_ui::px(0.), -folo_ui::px(target_y)));
+                    }
+                }
                 self.ds_scroll_anchor = None;
             }
             return;
