@@ -161,14 +161,18 @@ fn eiou_and_siou_algebraic_identities() {
 /// zero-width line, inverted, huge `1e15`, empty `[0, 4]`, `NaN`/`±Inf` poison, and invalid `theta` rejection.
 #[test]
 fn eiou_and_siou_edge_cases_and_autograd() {
-    // 1. Huge 1e15 boxes stay finite in forward & backward.
-    let huge_a = Tensor::from_slice(&[0.0f32, 0.0, 1e15, 1e15], [1, 4]).unwrap().requires_grad_();
-    let huge_b = Tensor::from_slice(&[1e14f32, 2e14, 1.1e15, 1.2e15], [1, 4]).unwrap();
+    // 1. Huge 1e15 boxes and extreme inverted [1e30, 0, 0, 0] vs [0, 0, 1e-30, 0] stay finite in forward & backward.
+    let huge_a =
+        Tensor::from_slice(&[0.0f32, 0.0, 1e15, 1e15, 1e30, 0.0, 0.0, 0.0], [2, 4]).unwrap().requires_grad_();
+    let huge_b = Tensor::from_slice(&[1e14f32, 2e14, 1.1e15, 1.2e15, 0.0, 0.0, 1e-30, 0.0], [2, 4]).unwrap();
     for l in [eiou_loss(&huge_a, &huge_b).unwrap(), siou_loss(&huge_a, &huge_b, 4.0).unwrap()] {
-        let v = l.to_vec::<f32>().unwrap()[0];
-        assert!(v.is_finite() && v > 0.0 && v < 4.0, "huge 1e15 loss out of range: {v}");
+        let vs = l.to_vec::<f32>().unwrap();
+        assert!(
+            vs.iter().all(|&v| v.is_finite() && (0.0..=4.0).contains(&v)),
+            "extreme losses out of range: {vs:?}"
+        );
         let g = l.sum_all().unwrap().backward().unwrap().get(&huge_a).unwrap().to_vec::<f32>().unwrap();
-        assert!(g.iter().all(|x| x.is_finite()), "huge 1e15 grad non-finite: {g:?}");
+        assert!(g.iter().all(|x| x.is_finite()), "extreme grad non-finite: {g:?}");
     }
 
     // 2. Degenerate / tiny identical / collinear / zero-area / inverted / identical boxes.

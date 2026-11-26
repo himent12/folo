@@ -5,7 +5,7 @@
 //! enclosing-box and side-length denominators explicitly so that:
 //! - identical valid boxes at any positive scale yield exact `0.0` loss and `0.0` gradient,
 //! - every geometric term is strictly scale-invariant across `1e-30..1e30`,
-//! - degenerate (zero-area, collinear, inverted) boxes produce finite losses and gradients,
+//! - degenerate (zero-area, collinear, inverted, extreme-scale) boxes produce finite losses and gradients,
 //! - `NaN` and `±Inf` inputs propagate `NaN` through both forward and backward.
 
 use folo_core::{DType, Result, Tensor};
@@ -14,6 +14,39 @@ use super::box_loss::{check_box_pair, dfl_box_from_logits};
 use super::geom_loss::{one_minus_iou_f64, w_max, w_min};
 use crate::loss::invalid;
 
+/// Enclosing span `c = max(a1, a2, b1, b2) - min(a1, a2, b1, b2) >= 0` and its exact partial derivatives
+/// `(dc/da1, dc/da2)`. Reduces identically to `max(a2, b2) - min(a1, b1)` on valid boxes (`a1 <= a2`,
+/// `b1 <= b2`), while guaranteeing that inverted boxes remain enclosed (`|dcx| <= c`) so center-distance and
+/// size ratios stay bounded in `[0, 1]` without overflow even on extreme inverted coordinates.
+#[inline]
+fn enclosing_axis(a1: f64, a2: f64, b1: f64, b2: f64) -> (f64, f64, f64) {
+    let (a_lo, a_hi) = if a1 <= a2 { (a1, a2) } else { (a2, a1) };
+    let (b_lo, b_hi) = if b1 <= b2 { (b1, b2) } else { (b2, b1) };
+    let c = a_hi.max(b_hi) - a_lo.min(b_lo);
+    if c <= 0.0 {
+        return (0.0, 0.0, 0.0);
+    }
+    let d_lo = w_min(a_lo, b_lo);
+    let d_hi = w_max(a_hi, b_hi);
+    let (da_lo_1, da_lo_2) = if a1 < a2 {
+        (1.0, 0.0)
+    } else if a1 > a2 {
+        (0.0, 1.0)
+    } else {
+        (0.5, 0.5)
+    };
+    let (da_hi_1, da_hi_2) = if a1 > a2 {
+        (1.0, 0.0)
+    } else if a1 < a2 {
+        (0.0, 1.0)
+    } else {
+        (0.5, 0.5)
+    };
+    let dc_da1 = d_hi * da_hi_1 - d_lo * da_lo_1;
+    let dc_da2 = d_hi * da_hi_2 - d_lo * da_lo_2;
+    (c, dc_da1, dc_da2)
+}
+
 /// Single-box EIoU forward `(loss, dL/d(ax1, ay1, ax2, ay2))` in `f64` (Zhang et al. 2022):
 ///
 /// ```text
@@ -21,8 +54,8 @@ use crate::loss::invalid;
 /// ```
 ///
 /// where `dcx = cx1 - cx2`, `dcy = cy1 - cy2`, `w1 = max(ax2 - ax1, 0)`, `h1 = max(ay2 - ay1, 0)`,
-/// `w2 = max(bx2 - bx1, 0)`, `h2 = max(by2 - by1, 0)`, and `(cw, ch)` are the enclosing-box extents.
-/// Zero denominators are guarded explicitly (0 penalty and 0 gradient).
+/// `w2 = max(bx2 - bx1, 0)`, `h2 = max(by2 - by1, 0)`, and `(cw, ch)` are the enclosing-box extents over all
+/// endpoints of `a` and `b`. Zero denominators are guarded explicitly (0 penalty and 0 gradient).
 pub(crate) fn eiou_box_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4]) {
     if !a.iter().chain(&b).all(|v| v.is_finite()) {
         return (f64::NAN, [f64::NAN; 4]);
@@ -37,14 +70,8 @@ pub(crate) fn eiou_box_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4]) {
     let w2 = (bx2 - bx1).max(0.0);
     let h2 = (by2 - by1).max(0.0);
 
-    let cw_raw = ax2.max(bx2) - ax1.min(bx1);
-    let ch_raw = ay2.max(by2) - ay1.min(by1);
-    let cw = cw_raw.max(0.0);
-    let ch = ch_raw.max(0.0);
-    let e_x1 = if cw_raw > 0.0 { w_min(ax1, bx1) } else { 0.0 };
-    let e_x2 = if cw_raw > 0.0 { w_max(ax2, bx2) } else { 0.0 };
-    let e_y1 = if ch_raw > 0.0 { w_min(ay1, by1) } else { 0.0 };
-    let e_y2 = if ch_raw > 0.0 { w_max(ay2, by2) } else { 0.0 };
+    let (cw, dcw_da1, dcw_da2) = enclosing_axis(ax1, ax2, bx1, bx2);
+    let (ch, dch_da1, dch_da2) = enclosing_axis(ay1, ay2, by1, by2);
 
     // Center-distance penalty (dcx² + dcy²) / (cw² + ch²).
     let dcx = 0.5 * ((ax1 - bx1) + (ax2 - bx2));
@@ -61,10 +88,10 @@ pub(crate) fn eiou_box_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4]) {
         let g_dcx = (dcxs * inv_c) / c2;
         let g_dcy = (dcys * inv_c) / c2;
         let dc_coeff = 2.0 * dist * inv_c / c2;
-        g[0] += g_dcx + dc_coeff * cws * e_x1;
-        g[1] += g_dcy + dc_coeff * chs * e_y1;
-        g[2] += g_dcx - dc_coeff * cws * e_x2;
-        g[3] += g_dcy - dc_coeff * chs * e_y2;
+        g[0] += g_dcx - dc_coeff * cws * dcw_da1;
+        g[1] += g_dcy - dc_coeff * chs * dch_da1;
+        g[2] += g_dcx - dc_coeff * cws * dcw_da2;
+        g[3] += g_dcy - dc_coeff * chs * dch_da2;
         dist
     };
 
@@ -82,8 +109,8 @@ pub(crate) fn eiou_box_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4]) {
                 g[2] += d_w1;
             }
             let d_cw = 2.0 * pen * inv_cw;
-            g[0] += d_cw * e_x1;
-            g[2] -= d_cw * e_x2;
+            g[0] -= d_cw * dcw_da1;
+            g[2] -= d_cw * dcw_da2;
         }
         pen
     };
@@ -102,8 +129,8 @@ pub(crate) fn eiou_box_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4]) {
                 g[3] += d_h1;
             }
             let d_ch = 2.0 * pen * inv_ch;
-            g[1] += d_ch * e_y1;
-            g[3] -= d_ch * e_y2;
+            g[1] -= d_ch * dch_da1;
+            g[3] -= d_ch * dch_da2;
         }
         pen
     };
@@ -230,15 +257,9 @@ pub(crate) fn siou_box_f64(a: [f64; 4], b: [f64; 4], theta: f64) -> (f64, [f64; 
         (2.0 - lambda, -dlam_du * sgn0(dx), -dlam_dv * sgn0(dy))
     };
 
-    // Enclosing box extents.
-    let cw_raw = ax2.max(bx2) - ax1.min(bx1);
-    let ch_raw = ay2.max(by2) - ay1.min(by1);
-    let cw = cw_raw.max(0.0);
-    let ch = ch_raw.max(0.0);
-    let e_x1 = if cw_raw > 0.0 { w_min(ax1, bx1) } else { 0.0 };
-    let e_x2 = if cw_raw > 0.0 { w_max(ax2, bx2) } else { 0.0 };
-    let e_y1 = if ch_raw > 0.0 { w_min(ay1, by1) } else { 0.0 };
-    let e_y2 = if ch_raw > 0.0 { w_max(ay2, by2) } else { 0.0 };
+    // Enclosing box extents over all endpoints (handles valid and inverted boxes uniformly).
+    let (cw, dcw_da1, dcw_da2) = enclosing_axis(ax1, ax2, bx1, bx2);
+    let (ch, dch_da1, dch_da2) = enclosing_axis(ay1, ay2, by1, by2);
 
     // Distance cost 0.5 * Delta = 0.5 * ((1 - exp(-gamma * rho_x)) + (1 - exp(-gamma * rho_y))).
     let (qx, rho_x) = if cw > 0.0 {
@@ -268,16 +289,16 @@ pub(crate) fn siou_box_f64(a: [f64; 4], b: [f64; 4], theta: f64) -> (f64, [f64; 
         let ge = gamma * ex;
         d_delta_ddx += ge * (2.0 * qx * inv_cw);
         let d_cw_half = 0.5 * ge * (2.0 * rho_x * inv_cw);
-        g[0] += d_cw_half * e_x1;
-        g[2] -= d_cw_half * e_x2;
+        g[0] -= d_cw_half * dcw_da1;
+        g[2] -= d_cw_half * dcw_da2;
     }
     if ch > 0.0 && qy != 0.0 {
         let inv_ch = 1.0 / ch;
         let ge = gamma * ey;
         d_delta_ddy += ge * (2.0 * qy * inv_ch);
         let d_ch_half = 0.5 * ge * (2.0 * rho_y * inv_ch);
-        g[1] += d_ch_half * e_y1;
-        g[3] -= d_ch_half * e_y2;
+        g[1] -= d_ch_half * dch_da1;
+        g[3] -= d_ch_half * dch_da2;
     }
     // d(0.5 * Delta)/dax = 0.5 * dDelta/ddx * (-0.5) = -0.25 * dDelta/ddx.
     let gx_center = -0.25 * d_delta_ddx;
