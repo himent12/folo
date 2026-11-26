@@ -68,8 +68,9 @@ pub use ema::{
 };
 pub use error::{Error, Result};
 pub use layers::{
-    Activation, BN_EPS, BN_MOMENTUM, BatchNorm2d, Concat, Conv2d, Conv2dConfig, ConvBnAct, Identity, Linear,
-    MaxPool2d, ModuleList, RunningStats, Sequential, Upsample, fuse_conv_bn,
+    Activation, BN_EPS, BN_MOMENTUM, BatchNorm2d, ChannelLayout, Concat, Conv2d, Conv2dConfig, ConvBnAct,
+    DropPath, Identity, LAYERSCALE_DEFAULT_INIT, LayerScale, Linear, MaxPool2d, ModuleList, RunningStats,
+    Sequential, Upsample, fuse_conv_bn,
 };
 pub use module::{Forward, Layer, Mode, Module, NamedTensor, TensorKind};
 pub use sched::{

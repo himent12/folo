@@ -243,3 +243,50 @@ fn cautious_optim_gpu_parity_and_large_cross_group_alias_order() {
     close(&p0_g, &p0_c, 1e-6, 1e-6, "large cautious cross-alias p0");
     close(&p1_g, &p1_c, 1e-6, 1e-6, "large cautious cross-alias p1");
 }
+
+#[test]
+fn lion_drop_path_and_layer_scale_gpu_match_cpu() {
+    let dev = gpu!();
+    let mut rng = Rng::seed(2026);
+
+    // 1. Lion optimizer GPU vs CPU parity across 3 steps (including zero grad and decoupled weight decay).
+    let p_c = Tensor::randn([4, 8], 0.0, 1.0, &mut rng).requires_grad_();
+    let p_g = p_c.to_device(dev).unwrap().detach().requires_grad_();
+    let mut opt_c = Lion::from_params(vec![("w".into(), p_c.clone())], 0.02, 0.9, 0.99, 0.1).unwrap();
+    let mut opt_g = Lion::from_params(vec![("w".into(), p_g.clone())], 0.02, 0.9, 0.99, 0.1).unwrap();
+    for step in 0..3 {
+        let gv = if step == 1 { Tensor::zeros([4, 8]) } else { Tensor::randn([4, 8], 0.0, 1.0, &mut rng) };
+        let mut gc = folo_core::Grads::default();
+        gc.insert(&p_c, gv.clone());
+        let mut gg = folo_core::Grads::default();
+        gg.insert(&p_g, gv.to_device(dev).unwrap());
+        opt_c.step(&gc).unwrap();
+        opt_g.step(&gg).unwrap();
+    }
+    close(&p_g, &p_c, 1e-6, 1e-6, "lion gpu param parity");
+    close(opt_g.exp_avg(0, 0).unwrap(), opt_c.exp_avg(0, 0).unwrap(), 1e-6, 1e-6, "lion gpu exp_avg parity");
+
+    // 2. DropPath and LayerScale forward + backward GPU vs CPU parity.
+    let x_c = Tensor::randn([6, 4, 3, 3], 0.0, 1.0, &mut rng).requires_grad_();
+    let x_g = x_c.to_device(dev).unwrap().detach().requires_grad_();
+    let dp_c = DropPath::new(0.4, 99);
+    let dp_g = DropPath::new(0.4, 99);
+    let mut ls_c = LayerScale::new(4, 1e-3).unwrap();
+    let mut ls_g = LayerScale::new(4, 1e-3).unwrap();
+    ls_g.to_device(dev).unwrap();
+
+    let y_c = ls_c.forward(&dp_c.forward(&x_c).unwrap()).unwrap();
+    let y_g = ls_g.forward(&dp_g.forward(&x_g).unwrap()).unwrap();
+    close(&y_g, &y_c, 1e-6, 1e-6, "droppath+layerscale gpu forward");
+    let grad_c = y_c.square().unwrap().mean_all().unwrap().backward().unwrap();
+    let grad_g = y_g.square().unwrap().mean_all().unwrap().backward().unwrap();
+    close(grad_g.get(&x_g).unwrap(), grad_c.get(&x_c).unwrap(), 1e-6, 1e-6, "droppath+layerscale gpu dx");
+    close(
+        grad_g.get(&ls_g.gamma).unwrap(),
+        grad_c.get(&ls_c.gamma).unwrap(),
+        1e-6,
+        1e-6,
+        "layerscale gpu dgamma",
+    );
+    ls_c.to_device(dev).unwrap();
+}

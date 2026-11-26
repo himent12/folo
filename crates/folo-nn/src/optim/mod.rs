@@ -37,6 +37,7 @@ mod agc;
 mod cautious;
 mod dispatch;
 mod grads;
+mod lion;
 mod musgd;
 mod ortho;
 mod sgd;
@@ -53,6 +54,9 @@ pub(crate) use dispatch::{
     GradRef, PAR_THRESHOLD, ParamPlan, cpu_fast, for_each_param_planned, step_many, storage_key,
 };
 pub use grads::{GradAccumulator, global_grad_norm};
+pub use lion::{
+    LION_DEFAULT_BETA1, LION_DEFAULT_BETA2, LION_DEFAULT_LR, Lion, LionContract, LionGroupContract,
+};
 pub use musgd::{MUON_SCALE, MuSgd, MuSgdWeights, is_muon_group};
 pub use ortho::{
     MuonGeoMode, MuonOrtho, NS_COEFFS, NS_EPS, NS_STEPS, NS5_SCHEDULE, POLAR3_CS9_COEFFS, POLAR4_COEFFS,
@@ -203,6 +207,14 @@ impl ParamGroup {
     pub fn adam(mut self, beta2: f64, eps: f64) -> Self {
         self.beta2 = beta2;
         self.eps = eps;
+        self
+    }
+
+    /// Set Lion's `(β1, β2)` (storing `β1` in `base_momentum` / `momentum` and `β2` in `beta2`).
+    pub fn lion(mut self, beta1: f64, beta2: f64) -> Self {
+        self.base_momentum = beta1;
+        self.momentum = beta1;
+        self.beta2 = beta2;
         self
     }
 
@@ -645,6 +657,8 @@ impl StandardGroups {
         let mut note = |m: &dyn Module| {
             if let Some(bn) = (m as &dyn std::any::Any).downcast_ref::<BatchNorm2d>() {
                 bn_ids.insert(bn.weight.id());
+            } else if let Some(ls) = (m as &dyn std::any::Any).downcast_ref::<crate::LayerScale>() {
+                bn_ids.insert(ls.gamma.id());
             } else if let Some(conv) = (m as &dyn std::any::Any).downcast_ref::<crate::Conv2d>() {
                 let c = conv.config();
                 if c.groups > 1 && c.groups == c.in_channels && c.groups == c.out_channels {
