@@ -199,11 +199,24 @@ impl FoloApp {
         let off: Vec<Option<SharedString>> = (0..n).map(|i| disabled.get(i).cloned().flatten()).collect();
         let usable: Vec<usize> = (0..n).filter(|&i| off[i].is_none()).collect();
         let (first, last) = (usable.first().copied().unwrap_or(0), usable.last().copied().unwrap_or(0));
+        let initial_hl = if selected < n && off[selected].is_none() { selected } else { first };
         // The usable option after (or before) `i`, staying put at the ends.
+        let step_usable = usable.clone();
         let step = move |i: usize, down: bool| {
-            let next =
-                if down { usable.iter().find(|&&u| u > i) } else { usable.iter().rev().find(|&&u| u < i) };
+            let next = if down {
+                step_usable.iter().find(|&&u| u > i)
+            } else {
+                step_usable.iter().rev().find(|&&u| u < i)
+            };
             next.copied().unwrap_or(i)
+        };
+        let page_step = move |i: usize, down: bool| {
+            if usable.is_empty() {
+                return i;
+            }
+            let pos = usable.binary_search(&i).unwrap_or_else(|p| p.min(usable.len() - 1));
+            let next = if down { (pos + 8).min(usable.len() - 1) } else { pos.saturating_sub(8) };
+            usable[next]
         };
         // While open, arrows move a highlight; Enter commits it, Esc closes without a change.
         let hl = if open { self.menu_hl.min(n.saturating_sub(1)) } else { selected };
@@ -250,15 +263,19 @@ impl FoloApp {
             .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                 // Enter and Space work the menu on the press (below); the release's keyboard click
                 // would open what they closed, or close what they opened.
-                if ev.is_keyboard() {
+                if ev.is_keyboard() || empty {
                     return;
                 }
                 // The clicked select takes focus, so the keys then work its menu.
                 window.focus(&this.fh(key, cx));
-                this.menu_open = if this.menu_open == Some(key) { None } else { Some(key) };
-                this.menu_hl = selected;
+                let opening = this.menu_open != Some(key);
+                this.menu_open = if opening { Some(key) } else { None };
+                if opening {
+                    this.export_open = false;
+                }
+                this.menu_hl = initial_hl;
                 this.menu_typeahead.clear();
-                this.menu_scroll.scroll_to_item(selected);
+                this.menu_scroll.scroll_to_item(initial_hl);
                 cx.notify();
             }))
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
@@ -276,9 +293,10 @@ impl FoloApp {
                     }
                     "enter" | "space" | "down" | "up" if !is_open => {
                         this.menu_open = Some(key);
-                        this.menu_hl = selected;
+                        this.export_open = false;
+                        this.menu_hl = initial_hl;
                         this.menu_typeahead.clear();
-                        this.menu_scroll.scroll_to_item(selected);
+                        this.menu_scroll.scroll_to_item(initial_hl);
                     }
                     "down" => {
                         this.menu_typeahead.clear();
@@ -288,6 +306,16 @@ impl FoloApp {
                     "up" => {
                         this.menu_typeahead.clear();
                         this.menu_hl = step(this.menu_hl.min(n - 1), false);
+                        this.menu_scroll.scroll_to_item(this.menu_hl);
+                    }
+                    "pagedown" if is_open => {
+                        this.menu_typeahead.clear();
+                        this.menu_hl = page_step(this.menu_hl.min(n - 1), true);
+                        this.menu_scroll.scroll_to_item(this.menu_hl);
+                    }
+                    "pageup" if is_open => {
+                        this.menu_typeahead.clear();
+                        this.menu_hl = page_step(this.menu_hl.min(n - 1), false);
                         this.menu_scroll.scroll_to_item(this.menu_hl);
                     }
                     "home" if is_open => {

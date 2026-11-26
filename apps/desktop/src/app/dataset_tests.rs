@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use super::data::IMAGE_PAGE;
 use super::previews::PREVIEW_PAGE;
-use super::tests::{drive, open_with};
+use super::tests::{drive, open_with, wait_for_held};
 use super::{Route, ServerMode};
 use crate::api::mock::MockBackend;
 use crate::api::{ImageQuery, Split, SplitsExt};
@@ -36,13 +36,9 @@ fn a_large_list_shows_its_first_page_while_the_rest_arrives() {
     // The first page lands; the second is held at the server.
     let (first, second) = (api.hold("images"), api.hold("images"));
     app.update(|cx| window.update(cx, |this, _, cx| this.ensure_dataset("ds_8f2c", cx)).unwrap());
-    app.run_until_held(1);
+    wait_for_held(&mut app, window, &first, false, "first image page");
     drop(first);
-    // Until the first page is applied and the second asked for (bounded by the condition, not
-    // a time: a call that never comes fails `run_until_held`).
-    while !second.is_held() {
-        app.run_until_held(1);
-    }
+    wait_for_held(&mut app, window, &second, false, "second image page");
     // (Plain updates while it is held: `drive` waits for every call.)
     app.update(|cx| {
         window
@@ -122,11 +118,9 @@ fn a_sample_past_the_first_page_opens_on_itself() {
             .update(cx, |this, w, cx| this.open_sample("ds_8f2c".into(), want.clone(), "run_x".into(), w, cx))
             .unwrap()
     });
-    app.run_until_held(1);
+    wait_for_held(&mut app, window, &first, false, "sample first image page");
     drop(first);
-    while !second.is_held() {
-        app.run_until_held(1);
-    }
+    wait_for_held(&mut app, window, &second, false, "sample second image page");
     app.frame(window.into());
     app.update(|cx| {
         window

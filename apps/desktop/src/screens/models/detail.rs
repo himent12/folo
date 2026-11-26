@@ -379,7 +379,12 @@ impl FoloApp {
                 window,
                 cx,
                 act(move |this, _, cx| {
-                    this.export_open = !this.export_open;
+                    let opening = !this.export_open;
+                    this.export_open = opening;
+                    if opening {
+                        this.menu_open = None;
+                        this.menu_typeahead.clear();
+                    }
                     this.export_hl = first_usable;
                     cx.notify();
                 }),
@@ -387,12 +392,16 @@ impl FoloApp {
             // Captured before the button's own Enter/Space toggle.
             .capture_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, _, cx| {
                 if this.export_open && matches!(ev.keystroke.key.as_str(), "enter" | "space") {
-                    let pick =
-                        if key_usable.contains(&this.export_hl) { this.export_hl } else { first_usable };
-                    if let Some(&fmt) = fmts.get(pick)
-                        && !this.exporting.contains(&(mid.clone(), fmt))
-                    {
-                        this.export_model(mid.clone(), fmt, cx);
+                    if key_usable.is_empty() {
+                        this.export_open = false;
+                    } else {
+                        let pick =
+                            if key_usable.contains(&this.export_hl) { this.export_hl } else { first_usable };
+                        if let Some(&fmt) = fmts.get(pick)
+                            && !this.exporting.contains(&(mid.clone(), fmt))
+                        {
+                            this.export_model(mid.clone(), fmt, cx);
+                        }
                     }
                     cx.stop_propagation();
                     cx.notify();
@@ -413,6 +422,8 @@ impl FoloApp {
                 match ev.keystroke.key.as_str() {
                     "down" | "up" if !open => {
                         this.export_open = true;
+                        this.menu_open = None;
+                        this.menu_typeahead.clear();
                         this.export_hl = first_usable;
                     }
                     "down" => this.export_hl = step(this.export_hl.min(n - 1), true),

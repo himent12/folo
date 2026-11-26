@@ -43,7 +43,10 @@ impl FoloApp {
                 Some("icons/repeat.svg"),
                 window,
                 cx,
-                act(|this, _, cx| this.open_new_loop(cx)),
+                act(|this, w, cx| {
+                    this.open_new_loop(cx);
+                    this.focus_key("bench-loop-teacher", w, cx);
+                }),
             )
         });
         let header = panel_header(&t, "Self-improvement loops").child(
@@ -145,6 +148,7 @@ impl FoloApp {
                 let actions: AnyElement = if busy {
                     text(ty::SM, t.text_tertiary).child("…").into_any_element()
                 } else if confirming {
+                    let del_key = format!("{key}-del");
                     div()
                         .flex()
                         .gap(px(4.))
@@ -155,8 +159,9 @@ impl FoloApp {
                             None,
                             window,
                             cx,
-                            act(|this, _, cx| {
+                            act(move |this, w, cx| {
                                 this.bench.confirm_delete = None;
+                                this.focus_key(&del_key, w, cx);
                                 cx.notify();
                             }),
                         ))
@@ -185,14 +190,16 @@ impl FoloApp {
                     div().into_any_element()
                 } else {
                     let (bid, lid) = (b.id.clone(), l.id.clone());
+                    let keep_key = format!("{key}-keep");
                     self.icon_button(
                         &format!("{key}-del"),
                         "icons/trash-2.svg",
                         "Delete this loop",
                         window,
                         cx,
-                        act(move |this, _, cx| {
+                        act(move |this, w, cx| {
                             this.bench.confirm_delete = Some((bid.clone(), Some(lid.clone())));
+                            this.focus_key(&keep_key, w, cx);
                             cx.notify();
                         }),
                     )

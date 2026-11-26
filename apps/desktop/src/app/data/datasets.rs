@@ -596,11 +596,11 @@ impl FoloApp {
         } else {
             let clamped_intra = anchor.intra_row.min((row_h - 1.).max(0.));
             let target_y = row as f32 * row_h + clamped_intra;
-            self.grid_scroll
-                .0
-                .borrow()
-                .base_handle
-                .set_offset(folo_ui::point(folo_ui::px(0.), -folo_ui::px(target_y)));
+            {
+                let mut scroll = self.grid_scroll.0.borrow_mut();
+                scroll.deferred_scroll_to_item = None;
+                scroll.base_handle.set_offset(folo_ui::point(folo_ui::px(0.), -folo_ui::px(target_y)));
+            }
             !still_incomplete || (default_sort && viewport_h > 0. && target_y + viewport_h <= content_h)
         };
         if can_finish {

@@ -41,6 +41,53 @@ pub(crate) fn drive<R>(
     r
 }
 
+/// Pumps foreground work (and draws frames when `draw` is true) until `held` reaches its
+/// [`MockBackend::hold`] point, sleeping on dispatcher progress rather than busy-spinning or using
+/// a fixed iteration cap that races against worker scheduling under CI load.
+pub(crate) fn wait_for_held(
+    app: &mut HeadlessApp,
+    window: WindowHandle<FoloApp>,
+    held: &crate::api::mock::Held,
+    draw: bool,
+    label: &str,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut first_frame = draw;
+    let mut drew_idle = false;
+    loop {
+        if held.is_held() {
+            return;
+        }
+        if draw && (first_frame || app.wants_frame(window.into())) {
+            first_frame = false;
+            drew_idle = false;
+            app.frame(window.into());
+            if held.is_held() {
+                return;
+            }
+        }
+        if app.pump_progress(std::time::Duration::from_millis(5)) {
+            drew_idle = false;
+            continue;
+        }
+        if held.is_held() {
+            return;
+        }
+        if app.dispatcher().is_idle() {
+            if draw && !drew_idle {
+                drew_idle = true;
+                app.frame(window.into());
+                continue;
+            }
+            panic!("held request '{label}' was never dispatched (dispatcher is idle)");
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for held request '{label}' to reach hold_point"
+        );
+    }
+}
+
 /// The New run dialog's name field.
 pub(crate) fn run_name(app: &mut HeadlessApp, window: WindowHandle<FoloApp>) -> String {
     drive(app, window, |this, _, cx| this.new_run.as_ref().map(|f| f.name.read(cx).text().to_string()))

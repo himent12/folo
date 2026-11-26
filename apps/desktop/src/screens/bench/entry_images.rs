@@ -42,7 +42,11 @@ impl FoloApp {
             window,
             cx,
             std::rc::Rc::new(move |this, i, _, cx| {
-                this.bench.image_sort = sorts[i.min(1)];
+                let next = sorts[i.min(1)];
+                if this.bench.image_sort != next {
+                    this.bench.image_sort = next;
+                    this.bench.selected_entry_image = None;
+                }
                 this.ensure_entry_images(&bid, &eid, cx);
                 cx.notify();
             }),

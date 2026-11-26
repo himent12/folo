@@ -366,6 +366,38 @@ fn run_until_held_pumps_everything_but_the_jobs_held_back() {
     assert_eq!(*order.borrow(), ["later", "held"]);
 }
 
+/// `pump_progress` sleeps until a background job finishes (waking immediately) and returns `false`
+/// after its timeout when every outstanding job is parked in a test hold.
+#[test]
+fn pump_progress_wakes_on_background_completion_and_times_out_when_held() {
+    let mut app = app();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let done = Rc::new(Cell::new(false));
+    let done_bg = done.clone();
+    app.update(|cx| {
+        cx.spawn(async move |cx| {
+            cx.background_executor().spawn(async move { gate.recv().ok() }).await;
+            done_bg.set(true);
+            let _ = cx;
+        })
+        .detach();
+    });
+    // First call drains the foreground spawn that submits the background job.
+    assert!(app.pump_progress(Duration::from_millis(5)));
+    assert!(!done.get());
+    // While the job is parked, `pump_progress` returns `false` without panicking.
+    assert!(!app.pump_progress(Duration::from_millis(10)));
+    assert!(!done.get());
+    // Releasing the job wakes `pump_progress` and runs its foreground continuation.
+    release.send(()).unwrap();
+    assert!(app.pump_progress(Duration::from_secs(2)));
+    assert!(done.get());
+    // Wait for the pool thread to finish decrementing `outstanding` and incrementing `completed`,
+    // then verify an idle `pump_progress` returns `false` immediately.
+    app.run_until_idle();
+    assert!(!app.pump_progress(Duration::from_millis(10)));
+}
+
 #[test]
 #[should_panic(expected = "still running")]
 fn run_until_idle_fails_loudly_on_a_stuck_background_job() {

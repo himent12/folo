@@ -174,10 +174,6 @@ impl FoloApp {
             out.push(self.delete_dialog(&target, window, cx));
             top = Some("confirm-delete");
         }
-        if let Some(names) = self.confirm_close.clone() {
-            out.push(self.close_dialog(&names, window, cx));
-            top = Some("confirm-close");
-        }
         if self.cloud.connect.is_some() {
             out.push(self.connect_dialog(window, cx));
             top = Some("cloud-connect");
@@ -193,6 +189,12 @@ impl FoloApp {
         if self.palette.is_some() {
             out.push(self.palette_view(window, cx));
             top = Some("palette");
+        }
+        // Always topmost (matching `dismiss` and `focus_in_scope`): the close confirmation sits
+        // above any open dialog, cloud confirmation, or command palette.
+        if let Some(names) = self.confirm_close.clone() {
+            out.push(self.close_dialog(&names, window, cx));
+            top = Some("confirm-close");
         }
         debug_assert_eq!(open, top.is_some(), "any_overlay names every overlay drawn here");
         self.overlay_presses.shown(top);
