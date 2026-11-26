@@ -350,7 +350,9 @@ fn reduce_rows_vec4_matches_cpu_and_propagates_nan() {
 
 #[test]
 fn detect_cached_anchors_and_subgroup_loss_match_portable() {
-    use crate::detect::{AnchorTable, BoxLossKind, ImageGt, LossSettings, TalSettings, detection_loss};
+    use crate::detect::{
+        AnchorTable, BoxLossKind, ClsLossKind, ImageGt, LossSettings, TalSettings, detection_loss,
+    };
     use folo_core::{Device, Tensor};
 
     struct ForceGuard(bool);
@@ -423,12 +425,17 @@ fn detect_cached_anchors_and_subgroup_loss_match_portable() {
             gains: [7.5, 0.5, 1.5],
             tal,
             mal_gamma,
+            cls_loss: ClsLossKind::Bce,
+            vfl_alpha: 0.75,
+            vfl_gamma: 2.0,
+            qfl_beta: 2.0,
             nwd_weight: 0.0,
             box_loss: BoxLossKind::Ciou,
             rpiou_beta: 0.5,
             rpiou_kappa: 2.0,
             rpiou_delta: 0.5,
             dfl_ot_weight,
+            dfl_crps_weight: 0.0,
         };
         let run = |portable: bool| -> Vec<f32> {
             let _g = ForceGuard::set(portable);
@@ -451,12 +458,17 @@ fn detect_cached_anchors_and_subgroup_loss_match_portable() {
         gains: [7.5, 0.5, 1.5],
         tal,
         mal_gamma: 0.0,
+        cls_loss: ClsLossKind::Bce,
+        vfl_alpha: 0.75,
+        vfl_gamma: 2.0,
+        qfl_beta: 2.0,
         nwd_weight: 0.0,
         box_loss: BoxLossKind::Ciou,
         rpiou_beta: 0.5,
         rpiou_kappa: 2.0,
         rpiou_delta: 0.5,
         dfl_ot_weight: 0.0,
+        dfl_crps_weight: 0.0,
     };
     for portable in [false, true] {
         let _g = ForceGuard::set(portable);

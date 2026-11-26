@@ -49,6 +49,8 @@ pub mod distill;
 mod terms;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_math;
 
 pub use assignment::assign_batch;
 pub use device::assign_batch_device;
@@ -56,7 +58,9 @@ pub use distill::{
     DistillConfig, DistillLoss, DistillTargets, TeacherView, distill_loss, distill_loss_with_context,
     gt_verify_weights_cpu,
 };
-pub use terms::{ciou, inner_ciou_loss, loss_with_assignment, nwd_loss, rpiou_loss, wiou_v3_loss};
+pub use terms::{
+    ciou, inner_ciou_loss, loss_with_assignment, nwd_loss, rpiou_loss, saeiou_loss, wiou_v3_loss,
+};
 
 use crate::assign::TalConfig;
 use crate::boxes::Xyxy;
@@ -95,6 +99,9 @@ pub enum BoxLossKind {
     Ciou,
     /// Rational-Focal Edge-Decoupled IoU (`R-PIoU`): `(1 - u)(1 + β·u) + κ·E² / (1 + κ·E²)`, purely algebraic.
     Rpiou,
+    /// Scale-normalized Algebraic Edge IoU (`S-AEIoU`): scale-normalized focal-IoU plus shape-weighted per-edge
+    /// inverse-sqrt penalty `0.25 · (w_x · (φ(u_x1) + φ(u_x2)) + w_y · (φ(u_y1) + φ(u_y2)))`.
+    Saeiou,
     /// Inner-CIoU (Zhang et al. 2023): CIoU with its IoU term computed on auxiliary boxes scaled by `inner_ratio`.
     InnerCiou,
     /// Wise-IoU v3 (Tong et al. 2023): distance-attended IoU loss with non-monotonic dynamic focusing (`wiou_alpha`, `wiou_delta`, `wiou_momentum`).
@@ -128,7 +135,7 @@ pub struct LossConfig {
     pub qfl_beta: f32,
     /// Scale-adaptive NWD blending weight `λ₀` in `[0, 1]` for the box loss (`0.0` = no NWD blend).
     pub nwd_weight: f32,
-    /// Box regression geometry loss (`Ciou` default, `Rpiou`, `InnerCiou`, or `WiouV3`).
+    /// Box regression geometry loss (`Ciou` default, `Rpiou`, `Saeiou`, `InnerCiou`, or `WiouV3`).
     pub box_loss: BoxLossKind,
     /// Auxiliary box scale ratio `r` in `[0.5, 1.5]` for [`BoxLossKind::InnerCiou`] (`0.7` default).
     pub inner_ratio: f32,
@@ -138,14 +145,16 @@ pub struct LossConfig {
     pub wiou_delta: f32,
     /// EMA momentum `m` in `[0, 1]` for the [`BoxLossKind::WiouV3`] running `L_IoU` mean (`0.01` default).
     pub wiou_momentum: f32,
-    /// High-IoU focusing slope `β` in `[0, 1]` for [`BoxLossKind::Rpiou`] (`0.5` default).
+    /// High-IoU focusing slope `β` in `[0, 1]` for [`BoxLossKind::Rpiou`] and [`BoxLossKind::Saeiou`] (`0.5` default).
     pub rpiou_beta: f32,
-    /// Rational edge-penalty sharpness `κ > 0` for [`BoxLossKind::Rpiou`] (`2.0` default).
+    /// Edge-penalty sharpness `κ > 0` for [`BoxLossKind::Rpiou`] and [`BoxLossKind::Saeiou`] (`2.0` default).
     pub rpiou_kappa: f32,
-    /// Grid-unit GT-size floor `δ₀ > 0` for [`BoxLossKind::Rpiou`] (`0.5` default).
+    /// Grid-unit GT-size floor `δ₀ > 0` for [`BoxLossKind::Rpiou`] and [`BoxLossKind::Saeiou`] (`0.5` default).
     pub rpiou_delta: f32,
     /// Weight `λ_ot >= 0` of the 1D optimal-transport cumulative tail-barrier term added to DFL (`0.0` = standard DFL).
     pub dfl_ot_weight: f32,
+    /// Weight `λ_crps >= 0` of the closed-form 1D excess CRPS / squared energy-distance term added to DFL (`0.0` = off).
+    pub dfl_crps_weight: f32,
 }
 
 impl Default for LossConfig {
@@ -171,6 +180,7 @@ impl Default for LossConfig {
             rpiou_kappa: 2.0,
             rpiou_delta: 0.5,
             dfl_ot_weight: 0.0,
+            dfl_crps_weight: 0.0,
         }
     }
 }
@@ -206,6 +216,12 @@ impl LossConfig {
         }
         if !(self.dfl_ot_weight.is_finite() && self.dfl_ot_weight >= 0.0) {
             return Err(format!("loss.dfl_ot_weight must be finite and >= 0, got {}", self.dfl_ot_weight));
+        }
+        if !(self.dfl_crps_weight.is_finite() && self.dfl_crps_weight >= 0.0) {
+            return Err(format!(
+                "loss.dfl_crps_weight must be finite and >= 0, got {}",
+                self.dfl_crps_weight
+            ));
         }
         if self.cls_loss != ClsLossKind::Bce && self.mal_gamma != 0.0 {
             return Err(format!(
@@ -569,8 +585,8 @@ pub(crate) fn detection_loss_for_distill_with_wiou_mean(
 /// and `reg_max` fit its kernels (`1..=64`, `2..=32`); other settings take the host path.
 pub fn device_loss_supported(box_raw: &Tensor, cfg: &LossConfig) -> bool {
     folo_gpu::detect::supported(box_raw.device())
-        && cfg.cls_loss == ClsLossKind::Bce
-        && matches!(cfg.box_loss, BoxLossKind::Ciou | BoxLossKind::Rpiou)
+        && matches!(cfg.cls_loss, ClsLossKind::Bce | ClsLossKind::Vfl | ClsLossKind::Qfl)
+        && matches!(cfg.box_loss, BoxLossKind::Ciou | BoxLossKind::Rpiou | BoxLossKind::Saeiou)
         && (1..=folo_gpu::detect::MAX_TOPK).contains(&cfg.tal.topk)
         && cfg.tal.topk2 != Some(0)
         && (2..=folo_gpu::detect::MAX_REG_MAX).contains(&cfg.reg_max)

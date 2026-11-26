@@ -147,7 +147,7 @@ fn a_scaled_ema_resumes_with_the_very_contract_it_saved() {
     // Every window the rule gives a run of up to 40,000 steps reads back to the bit.
     for steps in 1..=40_000 {
         let (decay, tau) = folo_nn::ema_for_run(steps, 0.25);
-        let c = folo_nn::EmaContract { decay, tau };
+        let c = folo_nn::EmaContract { decay, tau, power: None };
         let back: folo_nn::EmaContract = serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap();
         assert_eq!(
             (back.decay.to_bits(), back.tau.to_bits()),
@@ -155,6 +155,14 @@ fn a_scaled_ema_resumes_with_the_very_contract_it_saved() {
             "{steps} steps"
         );
     }
+    // PC-PEMA contract round-trips to the bit and legacy JSON without `power` still parses cleanly.
+    let p_c = folo_nn::EmaContract {
+        decay: folo_nn::EMA_DECAY,
+        tau: folo_nn::EMA_TAU,
+        power: Some(folo_nn::EmaPowerConfig::new(12.0)),
+    };
+    let p_back: folo_nn::EmaContract = serde_json::from_str(&serde_json::to_string(&p_c).unwrap()).unwrap();
+    assert_eq!(p_back, p_c);
     // A contract that overflows to infinity is refused when it is read, not when the EMA is restored.
     assert!(serde_json::from_str::<folo_nn::EmaContract>(r#"{"decay":0.99,"tau":1e400}"#).is_err());
 }
@@ -261,6 +269,16 @@ fn invalid_checkpoints_and_resume_mismatches() {
     let mut v2 = map.clone();
     v2.insert("folo.format".into(), "2".into());
     assert!(err(&v2, &tensors).contains("not supported"));
+    // Invalid PC-PEMA contract in `folo.ema` is rejected on open/validate.
+    for bad_ema in [
+        r#"{"decay":0.9999,"tau":2000.0,"power":{"gamma_0":-1.0,"rho":0.25,"lf_min":0.01,"t_0":0.0}}"#,
+        r#"{"decay":0.9999,"tau":2000.0,"power":{"gamma_0":6.94,"rho":0.25,"lf_min":0.0,"t_0":0.0}}"#,
+        r#"{"decay":0.9999,"tau":2000.0,"power":{"gamma_0":6.94,"rho":0.25,"lf_min":0.01,"t_0":-5.0}}"#,
+    ] {
+        let mut emap = map.clone();
+        emap.insert("folo.ema".into(), bad_ema.into());
+        assert!(err(&emap, &tensors).contains("folo.ema"));
+    }
 
     let f = rewrite(&map, &tensors).unwrap();
     // Wrong optimizer type.

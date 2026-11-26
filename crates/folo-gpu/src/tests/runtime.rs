@@ -174,7 +174,8 @@ fn pipeline_cache_hits() {
             "}\n",
         )),
     };
-    let ctx = gpu!();
+    let _shared = gpu!();
+    let Ok(ctx) = crate::GpuContext::new() else { return };
     let k1 = ctx.kernel(&ADD_ONE, Spec::new().u32("N", 1)).unwrap();
     let k2 = ctx.kernel(&ADD_ONE, Spec::new().u32("N", 1)).unwrap();
     let k3 = ctx.kernel(&ADD_ONE, Spec::new().u32("N", 2)).unwrap();

@@ -19,6 +19,36 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let b = i / na;
     let a = i % na;
     let base = (b * (4u + nc) + 4u) * na + a;
+    if (nc <= 128u) {
+        var hit = array<u32, 4>(0u, 0u, 0u, 0u);
+        var n = 0u;
+        for (var c = 0u; c < nc; c++) {
+            if (DEC[base + c * na] > conf) {
+                hit[c >> 5u] |= 1u << (c & 31u);
+                n++;
+            }
+        }
+        if (n == 0u) { return; }
+        let region = b * (1u + 3u * cap);
+        var at = atomicAdd(&OUT[region], n);
+        for (var w = 0u; w < 4u; w++) {
+            var mask = hit[w];
+            while (mask != 0u) {
+                let bit = countTrailingZeros(mask);
+                mask &= mask - 1u;
+                let c = (w << 5u) | bit;
+                if (at < cap) {
+                    let s = DEC[base + c * na];
+                    let r = region + 1u + 3u * at;
+                    atomicStore(&OUT[r], a);
+                    atomicStore(&OUT[r + 1u], c);
+                    atomicStore(&OUT[r + 2u], bitcast<u32>(s));
+                }
+                at++;
+            }
+        }
+        return;
+    }
     var n = 0u;
     for (var c = 0u; c < nc; c++) {
         if (DEC[base + c * na] > conf) { n++; }

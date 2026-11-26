@@ -2,11 +2,11 @@
 
 use folo_core::{DType, Result, Tensor};
 
-/// Overflow/underflow-safe `exp(a - b)` in `f64` for `a <= b` down to `-700.0`.
+/// Overflow/underflow-safe `exp(a - b)` in `f64` for `a <= b` down to `-700.0` (propagating `NaN`).
 #[inline(always)]
 pub(super) fn exp_neg_f64(a: f32, b: f32) -> f64 {
     let d = a as f64 - b as f64;
-    if d > -700.0 { d.exp() } else { 0.0 }
+    if d <= -700.0 { 0.0 } else { d.exp() }
 }
 
 /// Exact `O(R)` shifted `(max, sum_exp)` 1D optimal-transport cumulative tail-barrier DFL term:
@@ -154,6 +154,98 @@ pub(super) fn ot_dfl_tail(
     Tensor::custom_op("ot_dfl_tail", &[logits], out, move |g| {
         let gv = g.item::<f32>()? as f64;
         let scale = gv * (dfl_gain as f64 / tss as f64) * (ot_weight as f64);
+        let scaled: Vec<f32> = grad_unit.iter().map(|&u| (u * scale) as f32).collect();
+        Ok(vec![Some(Tensor::from_vec(scaled, shape)?.to_device(dev)?)])
+    })
+}
+
+/// Closed-form 1D excess CRPS / squared Energy Distance DFL term (`CRPS-DFL`):
+/// `(dfl_gain * crps_weight / tss) * Σ_{n, side} side_wt * Σ_{k=0..R-2} e_k²`
+/// on `p = softmax(z)` with target bins `(j, w_l, w_r = 1 - w_l)`, computing cumulative masses from both sides
+/// (`F_k = Σ_{i<=k} p_i` for `k <= j`, `S_k = Σ_{i>k} p_i` for `k > j`) so tails never cancel. Works for any `R >= 2`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn crps_dfl(
+    logits: &Tensor,
+    left_bins: &[usize],
+    left_w: &[f32],
+    side_wt: &[f32],
+    crps_weight: f32,
+    tss: f32,
+    dfl_gain: f32,
+) -> Result<Tensor> {
+    let (n, sides, r) = logits.dims3()?;
+    debug_assert_eq!(sides, 4);
+    let dev = logits.device();
+    if r < 2 || crps_weight <= 0.0 || n == 0 {
+        return Tensor::zeros_with([], DType::F32, dev);
+    }
+    let data = logits.to_vec::<f32>()?;
+    let mut grad_unit = vec![0.0f64; n * 4 * r];
+    let mut total = 0.0f64;
+    let mut p_row = vec![0.0f64; r];
+    let mut e_cdf = vec![0.0f64; r - 1];
+    let mut g_p = vec![0.0f64; r];
+    for idx in 0..n * 4 {
+        let wt = side_wt[idx] as f64;
+        if wt == 0.0 {
+            continue;
+        }
+        let j = left_bins[idx];
+        let wl = left_w[idx] as f64;
+        let wr = 1.0 - wl;
+        let row = &data[idx * r..(idx + 1) * r];
+        let m = row.iter().copied().fold(row[0], f32::max);
+        let mut z = 0.0f64;
+        for (k, &x) in row.iter().enumerate() {
+            let e = exp_neg_f64(x, m);
+            p_row[k] = e;
+            z += e;
+        }
+        for pk in p_row.iter_mut() {
+            *pk /= z;
+        }
+        let mut f_mass = 0.0f64;
+        for k in 0..=j {
+            f_mass += p_row[k];
+            if k < j {
+                e_cdf[k] = f_mass;
+            }
+        }
+        let mut s_mass = 0.0f64;
+        for k_rev in (j + 1..r).rev() {
+            s_mass += p_row[k_rev];
+            let k = k_rev - 1;
+            if k > j {
+                e_cdf[k] = -s_mass;
+            }
+        }
+        e_cdf[j] = if wl > 0.5 { wr - s_mass } else { f_mass - wl };
+
+        let mut crps_side = 0.0f64;
+        for &ek in &e_cdf {
+            crps_side += ek * ek;
+        }
+        total += wt * crps_side;
+
+        g_p[r - 1] = 0.0;
+        let mut g_acc = 0.0f64;
+        let mut gbar = 0.0f64;
+        for k in (0..r - 1).rev() {
+            g_acc += 2.0 * e_cdf[k];
+            g_p[k] = g_acc;
+            gbar += p_row[k] * g_acc;
+        }
+        let out_row = &mut grad_unit[idx * r..(idx + 1) * r];
+        for k in 0..r {
+            out_row[k] = wt * p_row[k] * (g_p[k] - gbar);
+        }
+    }
+    let out_val = ((total / tss as f64) * crps_weight as f64 * dfl_gain as f64) as f32;
+    let out = Tensor::scalar(out_val).to_device(dev)?;
+    let shape = [n, 4, r];
+    Tensor::custom_op("crps_dfl", &[logits], out, move |g| {
+        let gv = g.item::<f32>()? as f64;
+        let scale = gv * (dfl_gain as f64 / tss as f64) * (crps_weight as f64);
         let scaled: Vec<f32> = grad_unit.iter().map(|&u| (u * scale) as f32).collect();
         Ok(vec![Some(Tensor::from_vec(scaled, shape)?.to_device(dev)?)])
     })

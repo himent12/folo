@@ -299,6 +299,69 @@ pub(super) static S4_NORM: KernelDef = KernelDef {
     ),
 };
 
+/// One workgroup per matrix: computes step-0 Schatten-8 spectral preconditioning factor
+/// `inv_a = 1 / (‖A₂‖_F^(1/4) + (eps · sc) / D[i])` into `TBL[count * 9 + i]`, then forms
+/// `S₀ = delta₀·I + (gamma₀·inv_a²)·A₀ + inv_a⁴·A₂` in place into `A2` (`bm`), keeping `A0` (`am`) intact.
+pub(super) static S8_FORM_S0: KernelDef = KernelDef {
+    name: "muon_s8",
+    storage: &[Access::Read, Access::ReadWrite, Access::Read, Access::ReadWrite],
+    source: Source::Static(
+        "@group(0) @binding(1) var<storage, read> A0_4: array<vec4<f32>>;\n\
+         @group(0) @binding(2) var<storage, read_write> A2_4: array<vec4<f32>>;\n\
+         @group(0) @binding(3) var<storage, read> D: array<f32>;\n\
+         @group(0) @binding(4) var<storage, read_write> TBL: array<u32>;\n\
+         var<workgroup> red: array<f32, 256>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {\n\
+         \x20 let i = wid.y * nwg.x + wid.x;\n\
+         \x20 let count = pu(0u);\n\
+         \x20 if (i >= count) { return; }\n\
+         \x20 let q = i * 8u;\n\
+         \x20 let r = TBL[q];\n\
+         \x20 let ld_r4 = ((r + 3u) & 0xfffffffcu) >> 2u;\n\
+         \x20 let base4 = TBL[q + 4u] >> 2u;\n\
+         \x20 let n4 = r * ld_r4;\n\
+         \x20 var acc = 0.0;\n\
+         \x20 for (var e = lid; e < n4; e += 256u) {\n\
+         \x20   let v = A2_4[base4 + e];\n\
+         \x20   acc += dot(v, v);\n\
+         \x20 }\n\
+         \x20 red[lid] = acc;\n\
+         \x20 workgroupBarrier();\n\
+         \x20 for (var h = 128u; h > 0u; h >>= 1u) {\n\
+         \x20   if (lid < h) { red[lid] += red[lid + h]; }\n\
+         \x20   workgroupBarrier();\n\
+         \x20 }\n\
+         \x20 if (lid == 0u) {\n\
+         \x20   let alpha8 = sqrt(sqrt(sqrt(red[0]))) + (pf(1u) * D[count + i]) / D[i];\n\
+         \x20   let inv_a = select(1.0 / alpha8, 0.0, alpha8 == 0.0);\n\
+         \x20   TBL[count * 9u + i] = bitcast<u32>(inv_a);\n\
+         \x20   red[0] = inv_a;\n\
+         \x20 }\n\
+         \x20 workgroupBarrier();\n\
+         \x20 let ia = red[0];\n\
+         \x20 let ia2 = ia * ia;\n\
+         \x20 let g_s = pf(2u) * ia2;\n\
+         \x20 let ia4 = ia2 * ia2;\n\
+         \x20 let delta = pf(3u);\n\
+         \x20 for (var e = lid; e < n4; e += 256u) {\n\
+         \x20   let row = e / ld_r4;\n\
+         \x20   let col4 = (e - row * ld_r4) * 4u;\n\
+         \x20   var sv = A0_4[base4 + e] * g_s + A2_4[base4 + e] * ia4;\n\
+         \x20   if (row >= col4 && row < col4 + 4u) {\n\
+         \x20     sv += vec4<f32>(\n\
+         \x20       select(0.0, delta, row == col4),\n\
+         \x20       select(0.0, delta, row == col4 + 1u),\n\
+         \x20       select(0.0, delta, row == col4 + 2u),\n\
+         \x20       select(0.0, delta, row == col4 + 3u),\n\
+         \x20     );\n\
+         \x20   }\n\
+         \x20   A2_4[base4 + e] = sv;\n\
+         \x20 }\n}\n",
+    ),
+};
+
 pub(super) static GROUPED: KernelDef = KernelDef {
     name: "muon_gemm",
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite, Access::Read],
@@ -307,7 +370,7 @@ pub(super) static GROUPED: KernelDef = KernelDef {
 
 /// This module's fixed kernels, for the precompile registry (`kernels::find_def`; the gather and the update are
 /// built per layout, [`many_def_for`]).
-pub(crate) static DEFS: &[&KernelDef] = &[&NORM, &DIVIDE, &S4_NORM, &GROUPED];
+pub(crate) static DEFS: &[&KernelDef] = &[&NORM, &DIVIDE, &S4_NORM, &S8_FORM_S0, &GROUPED];
 
 /// The grouped `vec4` GEMM of one odd-quintic stage (`MODE` 0: `A = X·Xᵀ`, 1: `Bm = b·A + c·(A·A)`, 2:
 /// `X' = a·X + Bm·X`). Supports square (`BM == BN`) symmetric upper-triangle tiles for `MODE` 0/1 (skipping `Bs`
@@ -323,6 +386,9 @@ fn gen_grouped(spec: &Spec) -> String {
     let depth = spec.get_u32("DEPTH", 16);
     let dbuf = spec.get_bool("DBUF");
     let s4 = spec.get_bool("S4");
+    let s8 = spec.get_bool("S8");
+    let diag_bias = spec.get_bool("DIAG_BIAS");
+    let inplace_sr = spec.get_bool("INPLACE_SR");
     let wgx = bn / tn;
     let wgy = bm / tm;
     let threads = wgx * wgy;
@@ -584,13 +650,21 @@ fn gen_grouped(spec: &Spec) -> String {
     }
 
     if mode == 1 {
-        if s4 {
+        if s8 {
+            s.push_str(
+                "  let ia = bitcast<f32>(pr[12]); let ia2 = ia * ia;\n\
+                 \x20 let bb = pf(2u) * ia2; let cc = pf(3u);\n",
+            );
+        } else if s4 {
             s.push_str(
                 "  let ia = bitcast<f32>(pr[12]); let ia2 = ia * ia;\n\
                  \x20 let bb = pf(2u) * ia2; let cc = pf(3u) * (ia2 * ia2);\n",
             );
         } else {
             s.push_str("  let bb = pf(2u); let cc = pf(3u);\n");
+        }
+        if diag_bias {
+            s.push_str("  let dd = pf(1u);\n");
         }
     } else if mode == 2 {
         if s4 {
@@ -608,18 +682,34 @@ fn gen_grouped(spec: &Spec) -> String {
             );
             for r in 0..4 {
                 let acc = format!("acc_{bi}_{r}_{bj}");
+                let src_r = if inplace_sr { "SC[idx]" } else { "SR[idx]" };
                 let expr = match mode {
                     0 => acc,
-                    1 => format!("SR[idx] * bb + {acc} * cc"),
+                    1 => format!("{src_r} * bb + {acc} * cc"),
                     _ if s4 => format!("SR[idx] * a_s4 + {acc} * ia"),
                     _ => format!("SR[idx] * a + {acc}"),
+                };
+                let diag_stmt = if mode == 1 && diag_bias {
+                    format!(
+                        "\n        let row_i = m_base + {r}u;\n\
+                         \x20       if (diag != 0u && row_i >= n_base && row_i < n_base + 4u) {{\n\
+                         \x20         v{r} += vec4<f32>(\n\
+                         \x20           select(0.0, dd, row_i == n_base),\n\
+                         \x20           select(0.0, dd, row_i == n_base + 1u),\n\
+                         \x20           select(0.0, dd, row_i == n_base + 2u),\n\
+                         \x20           select(0.0, dd, row_i == n_base + 3u),\n\
+                         \x20         );\n\
+                         \x20       }}"
+                    )
+                } else {
+                    String::new()
                 };
                 let _ = writeln!(
                     s,
                     "      var v{r} = vec4<f32>(0.0);\n\
                      \x20     if (m_base + {r}u < M) {{\n\
                      \x20       let idx = (offC + (m_base + {r}u) * ldC + n_base) >> 2u;\n\
-                     \x20       v{r} = {expr};\n\
+                     \x20       v{r} = {expr};{diag_stmt}\n\
                      \x20       SC[idx] = select(vec4<f32>(0.0), v{r}, col_ok);\n\
                      \x20     }}"
                 );

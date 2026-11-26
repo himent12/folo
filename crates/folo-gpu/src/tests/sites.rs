@@ -439,6 +439,69 @@ fn check_edge_cases(ctx: &GpuContext, dtype: DType) {
     );
     assert_eq!(one_got[1].2, 1.0f32.to_bits());
     assert!(run_head_both(ctx, &one_cls, 2, 2, nan, dtype).is_empty(), "{dtype:?}: nan conf");
+
+    // Partial NaN in box logits must poison that decoded coordinate to NaN (not be masked by finite sibling bins).
+    let rm = 4;
+    let cls_ok = upload(ctx, &[5.0f32], dtype);
+    let mut box_bad = vec![0.0f32; 4 * rm];
+    box_bad[1] = nan; // side 0 (left) bin 1 is NaN; bins 0,2,3 and sides 1..3 are finite
+    let gbox_bad = upload(ctx, &box_bad, dtype);
+    let ganc_one = upload(ctx, &[0.5f32, 0.5, 8.0], DType::F32);
+    let out_dense = GpuTensor::empty(ctx, &[8], DType::F32).unwrap();
+    vision::detect_candidates(
+        ctx,
+        gbox_bad.raw(),
+        cls_ok.raw(),
+        ganc_one.raw(),
+        out_dense.raw(),
+        1,
+        1,
+        1,
+        rm,
+        0.25,
+        dtype,
+    )
+    .unwrap();
+    let dbits = bits(&out_dense, DType::F32);
+    assert_eq!(dbits[0], 1, "{dtype:?}: partial-NaN box candidate should emit");
+    assert!(
+        f32::from_bits(dbits[4]).is_nan(),
+        "{dtype:?}: detect x1 must be NaN, got {}",
+        f32::from_bits(dbits[4])
+    );
+    assert!(f32::from_bits(dbits[5]).is_finite(), "{dtype:?}: detect y1 should stay finite");
+
+    let sl = SiteLists { b: 1, h: 1, w: 1, nc: 1, cap: 1, fcap: 1 };
+    let t = |n| GpuTensor::empty(ctx, &[n], DType::F32).unwrap();
+    let (sites, recs, field, mark) = (t(2), t(2), t(2), t(1));
+    detect_sites::class_sites(
+        ctx,
+        cls_ok.raw(),
+        &sl,
+        0.25,
+        dtype,
+        (sites.raw(), recs.raw(), field.raw(), mark.raw()),
+    )
+    .unwrap();
+    let sout = GpuTensor::empty(ctx, &[detect_sites::HEADER_WORDS + 7], DType::F32).unwrap();
+    let dl = [DecodeLevel {
+        raw: gbox_bad.raw(),
+        sites: sites.raw(),
+        recs: recs.raw(),
+        cap: 1,
+        w: 1,
+        stride: 8.0,
+        start: 0,
+    }];
+    detect_sites::decode_sites(ctx, &dl, 1, rm, dtype, sout.raw()).unwrap();
+    let sbits = bits(&sout, DType::F32);
+    assert_eq!(sbits[0], 1, "{dtype:?}: sites partial-NaN candidate should emit");
+    assert!(
+        f32::from_bits(sbits[5]).is_nan(),
+        "{dtype:?}: sites_decode x1 must be NaN, got {}",
+        f32::from_bits(sbits[5])
+    );
+    assert!(f32::from_bits(sbits[6]).is_finite(), "{dtype:?}: sites_decode y1 should stay finite");
 }
 
 #[test]

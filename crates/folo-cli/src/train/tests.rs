@@ -152,6 +152,28 @@ fn teacher_flag_and_distill_keys() {
     assert_eq!((d.bckd_gamma, d.gt_verify), (1.5, true));
     let e = apply_sets(TrainConfig::default(), &sets(&["distill.cls_gain=1"])).unwrap_err();
     assert_eq!(e.code, "invalid_config");
+
+    // Empirically validated math winners must parse cleanly via `--set`.
+    let w = apply_sets(
+        TrainConfig::default(),
+        &sets(&[
+            "musgd.ortho=polar3_cs9",
+            "ema_mode=power",
+            "loss.box_loss=saeiou",
+            "loss.dfl_crps_weight=0.25",
+            "loss.cls_loss=vfl",
+        ]),
+    )
+    .unwrap();
+    assert_eq!(w.musgd.ortho, folo_nn::optim::MuonOrtho::Polar3Cs9);
+    assert_eq!(w.ema_mode, folo_nn::EmaMode::Power);
+    assert_eq!(w.loss.box_loss, folo_vision::loss::BoxLossKind::Saeiou);
+    assert_eq!(w.loss.dfl_crps_weight, 0.25);
+    assert_eq!(w.loss.cls_loss, folo_vision::loss::ClsLossKind::Vfl);
+    assert!(w.loss.validate_params().is_ok());
+
+    let qfl = apply_sets(TrainConfig::default(), &sets(&["loss.cls_loss=qfl"])).unwrap();
+    assert_eq!(qfl.loss.cls_loss, folo_vision::loss::ClsLossKind::Qfl);
 }
 
 /// The resume override: `--resume` with `--teacher` turns distillation on (starting values, or the run's stored

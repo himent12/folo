@@ -4,6 +4,7 @@
 //!
 //! Skips (with a note) without a hardware adapter; set `FOLO_GPU_TEST_SOFTWARE=1` to run on WARP / llvmpipe.
 
+mod math_winners;
 mod new_math;
 
 use folo_core::rng::Rng;
@@ -233,12 +234,17 @@ fn returned_stats_do_not_feed_the_backward() {
         reg_max: 16,
         gains: [cfg.box_gain, cfg.cls_gain, cfg.dfl_gain],
         mal_gamma: cfg.mal_gamma,
+        cls_loss: folo_gpu::detect::ClsLossKind::Bce,
+        vfl_alpha: cfg.vfl_alpha,
+        vfl_gamma: cfg.vfl_gamma,
+        qfl_beta: cfg.qfl_beta,
         nwd_weight: cfg.nwd_weight,
         box_loss: folo_gpu::detect::BoxLossKind::Ciou,
         rpiou_beta: cfg.rpiou_beta,
         rpiou_kappa: cfg.rpiou_kappa,
         rpiou_delta: cfg.rpiou_delta,
         dfl_ot_weight: cfg.dfl_ot_weight,
+        dfl_crps_weight: cfg.dfl_crps_weight,
         tal: folo_gpu::detect::TalSettings {
             topk: cfg.tal.topk,
             topk2: cfg.tal.topk2,

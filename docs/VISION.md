@@ -13,7 +13,7 @@ model/             FoloModel: blocks.rs (MODEL.md §2), head.rs (§6), io.rs (.f
                    predict.rs (decode and the raw prediction path), lazy.rs / lazy_gpu.rs (candidate-first head),
                    quant/ (int8 inference, §9.6), v2/ (FOLO v2-Iso clean-sheet model family)
 loss/              the detection loss: assignment.rs (host assigner), terms/ (BCE/MAL/VFL/QFL,
-                   CIoU/R-PIoU/Inner-CIoU/WIoU v3/NWD-IoU, DFL/OT-DFL), device.rs (GPU),
+                   CIoU/R-PIoU/S-AEIoU/Inner-CIoU/WIoU v3/NWD-IoU, DFL/OT-DFL/CRPS-DFL), device.rs (GPU),
                    distill/ (dense/BCKD/GT-verified distillation, §8.9)
 assign.rs          the task-aligned assigner (including eps-free TAL & NWD-IoU) and DFL target encoding
 boxes.rs, decode.rs, nms/{mod.rs, kernel.rs, topk.rs}, fusion/{mod.rs, tests.rs}   boxes and IoU, anchors and DFL decode, NMS (standard/AVX2, DIoU-NMS, Soft-NMS) / o2o top-k, cluster fusion (vote/DFL/SEBF) & ELC/DFL-consensus/DFL-repulse/DFL-CGR
@@ -95,10 +95,10 @@ A shared graph walk (`walk.rs`) drives three executors:
   logits (streaming active runs linearly with `fast_exp`) only at anchors inside at least one GT candidate mask —
   bit-identical to a full-grid decode while skipping background anchors. It then builds the loss terms from folo-core
   tensor ops (fused custom ops for the full-size BCE and gather), so gradients flow into both head branches.
-- On a GPU, when `device_loss_supported` holds (`cls_loss == Bce`, `box_loss ∈ {Ciou, Rpiou}`, `topk ∈ 1..=64`,
-  `topk2 != Some(0)`, `reg_max ∈ 2..=32`), the whole loss runs as folo-gpu kernels (`folo_gpu::detect`: assigner, fused
-  BCE, fused CIoU/R-PIoU + DFL with a hand-written backward, as one custom op) and only the reported items are read
-  back.
+- On a GPU, when `device_loss_supported` holds (`cls_loss ∈ {Bce, Vfl, Qfl}`, `box_loss ∈ {Ciou, Rpiou, Saeiou}`,
+  `topk ∈ 1..=64`, `topk2 != Some(0)`, `reg_max ∈ 2..=32`), the whole loss runs as folo-gpu kernels
+  (`folo_gpu::detect`: assigner, fused BCE/MAL/VFL/QFL classification, fused CIoU/R-PIoU/S-AEIoU + DFL/OT-DFL/CRPS-DFL
+  with a hand-written backward, as one custom op) and only the reported items are read back.
 - **Opt-in assigner, loss & distillation options (`assign.rs`, `loss/terms/`, `loss/device.rs`, `loss/distill/`):**
   all default to off:
   - *Assigner (CPU + GPU parity):* `TalConfig.eps_free` removes `eps` attenuation on small-box targets via
@@ -107,20 +107,26 @@ A shared graph walk (`walk.rs`) drives three executors:
   - *Classification terms:* `LossConfig.mal_gamma > 0` enables Matchability-Aware Loss (`p^γ · softplus(x)`
     on background negatives, unweighted BCE on positives; requires `cls_loss == Bce`; CPU + GPU fused);
     `LossConfig.cls_loss = ClsLossKind::Vfl` selects Varifocal Loss (quality-weighted `t · BCE(x, t)` on positives and
-    `vfl_alpha · p^vfl_gamma · softplus(x)` on negatives; defaults `0.75` / `2.0`, requires `mal_gamma == 0`);
-    `ClsLossKind::Qfl` selects Quality Focal Loss (`|t − p|^qfl_beta · BCE(x, t)`, default `qfl_beta = 2.0`, requires
-    `mal_gamma == 0`).
+    `vfl_alpha · p^vfl_gamma · softplus(x)` on negatives; defaults `0.75` / `2.0`, requires `mal_gamma == 0`; CPU + GPU
+    fused in `det_bce_fwd.wgsl` / `det_bce_bwd.wgsl`); `ClsLossKind::Qfl` selects Quality Focal Loss
+    (`|t − p|^qfl_beta · BCE(x, t)`, default `qfl_beta = 2.0`, requires `mal_gamma == 0`; CPU + GPU fused in
+    `det_bce_fwd.wgsl` / `det_bce_bwd.wgsl`).
   - *Box & DFL terms:* `LossConfig.box_loss` selects `Ciou` (default), `Rpiou` (purely algebraic Rational-Focal
-    Edge-Decoupled IoU: `rpiou_beta`, `rpiou_kappa`, `rpiou_delta`; CPU + GPU fused), `InnerCiou` (Inner-CIoU using
-    auxiliary boxes scaled by `inner_ratio` in `[0.5, 1.5]`, default `0.7`), or `WiouV3` (Wise-IoU v3 distance-attended
-    non-monotonic dynamic focusing: `wiou_alpha = 1.9`, `wiou_delta = 3.0`, `wiou_momentum = 0.01`, running `L_IoU_bar`
-    persisted in checkpoints as `folo.wiou_iou_mean`); `LossConfig.nwd_weight` adds the scale-adaptive NWD box blend;
-    `LossConfig.dfl_ot_weight > 0` adds an exact `O(R)` log-space 1D optimal-transport cumulative tail barrier to DFL
-    (when `reg_max > 2`: host `f64` custom op `ot_dfl_tail` on CPU, fused in `folo_gpu::detect` on GPU when
-    `device_loss_supported` holds, or host `f64` readback on the GPU fallback path when foreground anchors exist).
-    `Vfl`, `Qfl`, `InnerCiou`, and `WiouV3` run through the host-assigner + `loss_with_assignment` path (fused CPU
-    custom ops for VFL/QFL classification, device-generic tensor composites on other devices, with foreground host
-    readbacks for `InnerCiou` `atan`, `Rpiou` `f64`, and `WiouV3` mean IoU loss).
+    Edge-Decoupled IoU: `rpiou_beta`, `rpiou_kappa`, `rpiou_delta`; CPU + GPU fused), `Saeiou` (Scale-Normalized
+    Algebraic Edge IoU, `saeiou_loss`: scale-normalized focal-IoU + shape-weighted per-edge inverse-sqrt penalty
+    reusing `rpiou_beta = 0.5`, `rpiou_kappa = 2.0`, `rpiou_delta = 0.5`, zero `atan`/`exp`/exponent-split; CPU + GPU
+    fused), `InnerCiou` (Inner-CIoU using auxiliary boxes scaled by `inner_ratio` in `[0.5, 1.5]`, default `0.7`), or
+    `WiouV3` (Wise-IoU v3 distance-attended non-monotonic dynamic focusing: `wiou_alpha = 1.9`, `wiou_delta = 3.0`,
+    `wiou_momentum = 0.01`, running `L_IoU_bar` persisted in checkpoints as `folo.wiou_iou_mean`);
+    `LossConfig.nwd_weight` adds the scale-adaptive NWD box blend; `LossConfig.dfl_ot_weight > 0` adds an exact `O(R)`
+    log-space 1D optimal-transport cumulative tail barrier to DFL (when `reg_max > 2`: host `f64` custom op
+    `ot_dfl_tail` on CPU, fused in `folo_gpu::detect` on GPU when `device_loss_supported` holds, or host `f64` readback
+    on the GPU fallback path when foreground anchors exist); `LossConfig.dfl_crps_weight > 0` adds a closed-form `O(R)`
+    1D excess CRPS / squared Energy Distance term over dual-ended CDF masses `F_k` and `S_k` (any `reg_max >= 2`: host
+    `f64` custom op `crps_dfl` on CPU, fused in `det_box.wgsl` on GPU when `device_loss_supported` holds, or host `f64`
+    readback on the fallback path). `InnerCiou` and `WiouV3` run through the host-assigner + `loss_with_assignment`
+    path (device-generic tensor composites with foreground host readbacks for `InnerCiou` `atan` and `WiouV3` mean IoU
+    loss; `Vfl` and `Qfl` only fall back there when paired with `InnerCiou` / `WiouV3` or out-of-range `topk`/`reg_max`).
   - *Distillation (`loss/distill/`):* dense teacher output KD (MODEL.md §8.9, fused GPU path in `distill/fused.rs`),
     plus `DistillConfig.bckd_gamma > 0` (BCKD focal disagreement weighting `sg(|p_S − p_T|^γ)` with positive teacher
     clamping) and `DistillConfig.gt_verify` (positive-only GT-verified DFL KD gating where `IoU(b_T, g) > IoU(b_S, g) +
@@ -129,10 +135,13 @@ A shared graph walk (`walk.rs`) drives three executors:
 ## Box ops, NMS and metrics
 They work on plain slices so they are reusable everywhere: IoU / GIoU / DIoU / CIoU (`boxes::iou` computes enclosing
 boxes and overlaps in `f64` for stability on degenerate, tiny, and huge boxes; `boxes::ciou_eps` preserves the exact
-§7.2 `f32` order on valid in-range boxes `≤ 1e15` with an `f64` guard outside it), xywh↔xyxy, class-aware batched NMS
-(`nms/kernel.rs`: AVX2-vectorised SoA suppression loops on x86-64, plus opt-in `NmsKind::Diou` DIoU-NMS and
-`NmsKind::{SoftLinear, SoftGaussian { sigma }}` Soft-NMS), COCO-style mAP@0.5 and mAP@0.5:0.95 (101-point
-interpolation), precision / recall / F1 curves, confusion matrix.
+§7.2 `f32` order on valid in-range boxes `≤ 1e15` with an `f64` guard outside it), xywh↔xyxy, DFL decode (`decode.rs`:
+on `x86_64` with runtime-detected AVX2, `avx2_16` accelerates `reg_max == 16` `softmax_expectation`, `softmax_moments`,
+and `softmax_moments_and_entropy` in two 8-lane registers using degree-5 minimax `exp_neg8` with no libm calls, falling
+back to scalar on non-finite logits; `folo-vision --bench post` `decode_head` median `1.049 ms`, `TAL assign`
+`0.215 ms`), class-aware batched NMS (`nms/kernel.rs`: AVX2-vectorised SoA suppression loops on x86-64, plus opt-in
+`NmsKind::Diou` DIoU-NMS and `NmsKind::{SoftLinear, SoftGaussian { sigma }}` Soft-NMS), COCO-style mAP@0.5 and
+mAP@0.5:0.95 (101-point interpolation), precision / recall / F1 curves, confusion matrix.
 `Evaluator` (`metrics.rs`) and `CocoEval` (`cocoeval.rs`) reuse scratch buffers across images (packing sort keys into
 register-sized `(u64, u32)` tuples sorted in place without indirection) and accumulate AP in a single pass.
 [METRICS.md](METRICS.md) defines exactly how mAP is computed.
@@ -154,7 +163,9 @@ Opt-in post-processing on `o2m` NMS clusters (MODEL.md §9.4, configured via `Nm
 - **Data to step:** folo-data's `DataLoader` (seeded per epoch and sample, so batches do not depend on the worker
   count) → tensors → train-mode forward → loss → backward into a `GradAccumulator` (nominal batch 64) → schedule
   (warmup + linear / cosine, in optimizer steps), global-norm clipping, SGD / AdamW / MuSGD with `decay` / `bn` /
-  `bias` groups (`auto` picks per §8.2), EMA.
+  `bias` groups (`auto` picks per §8.2), EMA (`TrainConfig.ema_mode`: `EmaMode::Legacy` exponential ramp by default, or
+  opt-in `EmaMode::Power` `PC-PEMA` with prior shift `t_0 = 0.0` from scratch or `warmup_iters` /
+  `max(round(0.03 * total), 1)` on `--weights` transfer, stepped via `ema.update_with_lf(&self.model, lf)`).
 - **Floor Conv+BN Gauge Normalization (`train/gauge.rs`):** opt-in (`TrainConfig.gauge_norm`), applied once at setup
   when a new run starts from transferred weights (skipped on checkpoint resume) via `apply_floor_gauge_norm`. For every
   unfused, bias-free `F32` `ConvBnAct` output channel with `1e-4 < ‖W_c‖₂ < √2`, it rescales `W_c` and `running_mean`
@@ -207,7 +218,8 @@ preprocess / inference / postprocess timing split.
   fixed-capacity site lists, `conv0` on the listed windows (scattered back into a map), `conv1` and `out` at the
   candidates, then one decode of every level and one readback of the records. The dispatches do not depend on the
   candidates, and an image whose candidates overflow a list takes the dense head on the same features.
-- With DFL box fusion / DFL scoring the dense path's DFL moment/entropy ops also run on the candidates' box-logit
+- With DFL box fusion / DFL scoring, `dfl_stats_with` (`model/predict.rs`) dispatches the fused single-pass GPU kernel
+  `folo_gpu::detect::dfl_stats` (`det_dfl_stats` / `dfl_stats.wgsl`, `reg_max <= 32`) on the candidates' box-logit
   columns (all site lists are packed with the records into one `u32` buffer, so the whole readback is at most two
   transfers: one `u32` buffer and one combined `f32` stats buffer).
 
@@ -245,5 +257,5 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
 ## Tests
 The integration tests in `crates/folo-vision/tests/` are named for what they protect: `model.rs`, `model_v2.rs`,
 `loss_cases.rs`, `assign_cases.rs`, `distill.rs`, `wave7_train_algos.rs`, `nms_reference.rs`, `fusion_reference.rs`,
-`elc_postproc.rs`, `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs`, `train.rs`, `o2o.rs`, `lazy_head.rs`,
+`elc_postproc.rs`, `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs`, `train/` (`main.rs`, `ema.rs`), `o2o.rs`, `lazy_head.rs`,
 `int8.rs`, and the GPU ones (`gpu*.rs`).

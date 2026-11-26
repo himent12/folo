@@ -22,25 +22,57 @@ fn ortho_f64(m: &[f64], rows: usize, cols: usize, ortho: MuonOrtho) -> Vec<f64> 
         }
         o
     };
-    for (step, &(a, b, cc)) in ortho.schedule().iter().enumerate() {
-        let (a, b, cc) = (a as f64, b as f64, cc as f64);
-        let xt: Vec<f64> = (0..c * r).map(|k| x[(k % r) * c + k / r]).collect();
-        let am = mul(&x, &xt, r, c, r);
-        let aa = mul(&am, &am, r, r, r);
-        if step == 0 && ortho.schatten4() {
-            let a_frob = am.iter().map(|v| v * v).sum::<f64>().sqrt();
-            let alpha = a_frob.sqrt() + 1e-7 / norm;
-            let inv_a = if alpha == 0.0 { 0.0 } else { 1.0 / alpha };
-            let inv_a2 = inv_a * inv_a;
-            let inv_a4 = inv_a2 * inv_a2;
-            let bm: Vec<f64> =
-                am.iter().zip(&aa).map(|(p, q)| (b * inv_a2) * p + (cc * inv_a4) * q).collect();
-            let bx = mul(&bm, &x, r, r, c);
-            x = x.iter().zip(&bx).map(|(p, q)| (a * inv_a) * p + q * inv_a).collect();
-        } else {
-            let bm: Vec<f64> = am.iter().zip(&aa).map(|(p, q)| b * p + cc * q).collect();
-            let bx = mul(&bm, &x, r, r, c);
-            x = x.iter().zip(&bx).map(|(p, q)| a * p + q).collect();
+    if let Some(cs9) = ortho.cs9_schedule() {
+        for (step, &(gamma, delta, eta, xi, c4)) in cs9.iter().enumerate() {
+            let (gamma, delta, eta, xi, c4) = (gamma as f64, delta as f64, eta as f64, xi as f64, c4 as f64);
+            let xt: Vec<f64> = (0..c * r).map(|k| x[(k % r) * c + k / r]).collect();
+            let am = mul(&x, &xt, r, c, r);
+            let aa = mul(&am, &am, r, r, r);
+            if step == 0 {
+                let alpha8 = aa.iter().map(|v| v * v).sum::<f64>().powf(0.125) + 1e-7 / norm;
+                let inv_a = if alpha8 == 0.0 { 0.0 } else { 1.0 / alpha8 };
+                let ia2 = inv_a * inv_a;
+                let ia4 = ia2 * ia2;
+                let mut sm: Vec<f64> = am.iter().zip(&aa).map(|(p, q)| (gamma * ia2) * p + ia4 * q).collect();
+                for i in 0..r {
+                    sm[i * r + i] += delta;
+                }
+                let s2 = mul(&sm, &sm, r, r, r);
+                let bm: Vec<f64> = am.iter().zip(&s2).map(|(p, q)| (eta * ia2) * p + c4 * q).collect();
+                let bx = mul(&bm, &x, r, r, c);
+                x = x.iter().zip(&bx).map(|(p, q)| (xi * inv_a) * p + q * inv_a).collect();
+            } else {
+                let mut sm: Vec<f64> = am.iter().zip(&aa).map(|(p, q)| gamma * p + q).collect();
+                for i in 0..r {
+                    sm[i * r + i] += delta;
+                }
+                let s2 = mul(&sm, &sm, r, r, r);
+                let bm: Vec<f64> = am.iter().zip(&s2).map(|(p, q)| eta * p + c4 * q).collect();
+                let bx = mul(&bm, &x, r, r, c);
+                x = x.iter().zip(&bx).map(|(p, q)| xi * p + q).collect();
+            }
+        }
+    } else {
+        for (step, &(a, b, cc)) in ortho.schedule().iter().enumerate() {
+            let (a, b, cc) = (a as f64, b as f64, cc as f64);
+            let xt: Vec<f64> = (0..c * r).map(|k| x[(k % r) * c + k / r]).collect();
+            let am = mul(&x, &xt, r, c, r);
+            let aa = mul(&am, &am, r, r, r);
+            if step == 0 && ortho.schatten4() {
+                let a_frob = am.iter().map(|v| v * v).sum::<f64>().sqrt();
+                let alpha = a_frob.sqrt() + 1e-7 / norm;
+                let inv_a = if alpha == 0.0 { 0.0 } else { 1.0 / alpha };
+                let inv_a2 = inv_a * inv_a;
+                let inv_a4 = inv_a2 * inv_a2;
+                let bm: Vec<f64> =
+                    am.iter().zip(&aa).map(|(p, q)| (b * inv_a2) * p + (cc * inv_a4) * q).collect();
+                let bx = mul(&bm, &x, r, r, c);
+                x = x.iter().zip(&bx).map(|(p, q)| (a * inv_a) * p + q * inv_a).collect();
+            } else {
+                let bm: Vec<f64> = am.iter().zip(&aa).map(|(p, q)| b * p + cc * q).collect();
+                let bx = mul(&bm, &x, r, r, c);
+                x = x.iter().zip(&bx).map(|(p, q)| a * p + q).collect();
+            }
         }
     }
     if t { (0..rows * cols).map(|k| x[(k % cols) * rows + k / cols]).collect() } else { x }
@@ -55,7 +87,7 @@ fn polar_folo_matches_f64_and_improves_orthogonality() {
     let mut rng = Rng::seed(17);
     let shapes: [&[usize]; 4] = [&[3, 5], &[6, 2], &[4, 2, 1, 3], &[1, 6]];
     let ts: Vec<Tensor> = shapes.iter().map(|s| Tensor::randn(s.to_vec(), 0.0, 1.0, &mut rng)).collect();
-    for ortho in [MuonOrtho::Polar4, MuonOrtho::Polar5] {
+    for ortho in [MuonOrtho::Polar4, MuonOrtho::Polar5, MuonOrtho::Polar3Cs9] {
         let many = orthogonalize_many_with(&ts, ortho).unwrap();
         for (t, o) in ts.iter().zip(&many) {
             let d = t.dims().to_vec();
@@ -64,13 +96,13 @@ fn polar_folo_matches_f64_and_improves_orthogonality() {
             let scale = muon_scale(&d) as f64;
             let want: Vec<f64> = ortho_f64(&v, rows, cols, ortho).iter().map(|x| x * scale).collect();
             close(&o.to_vec::<f32>().unwrap(), &want, 2e-4);
-            // Alone, without bucket padding: Schatten-4 norm is invariant to zero-padded rows.
+            // Alone, without bucket padding: Schatten-4/8 norm is invariant to zero-padded rows.
             let one = orthogonalize_with(t, ortho).unwrap().to_vec::<f32>().unwrap();
             close(&one, &o.to_vec::<f32>().unwrap().iter().map(|&x| x as f64).collect::<Vec<_>>(), 1e-5);
         }
     }
     // Check orthogonality error ||O O^T - I||_F / sqrt(r) on a well- and moderately-conditioned 16x64 matrix:
-    // both Polar4 (12 GEMMs) and Polar5 (15 GEMMs) strictly beat NS5 (15 GEMMs).
+    // Polar4, Polar5, and Polar3Cs9 strictly beat NS5.
     let g = Tensor::randn([16, 64], 0.0, 1.0, &mut rng);
     let ortho_err = |ortho: MuonOrtho| -> f64 {
         let o = orthogonalize_with(&g, ortho).unwrap();
@@ -87,8 +119,13 @@ fn polar_folo_matches_f64_and_improves_orthogonality() {
     let e_ns5 = ortho_err(MuonOrtho::Ns5);
     let e_p4 = ortho_err(MuonOrtho::Polar4);
     let e_p5 = ortho_err(MuonOrtho::Polar5);
+    let e_cs9 = ortho_err(MuonOrtho::Polar3Cs9);
     assert!(e_p4 < e_ns5 * 0.5, "Polar4 ({e_p4:.4}) should be >2x more orthogonal than NS5 ({e_ns5:.4})");
     assert!(e_p5 < e_ns5 * 0.5, "Polar5 ({e_p5:.4}) should be >2x more orthogonal than NS5 ({e_ns5:.4})");
+    assert!(
+        e_cs9 < e_ns5 * 0.5,
+        "Polar3Cs9 ({e_cs9:.4}) should be >2x more orthogonal than NS5 ({e_ns5:.4})"
+    );
 }
 
 /// Finite matrices whose unscaled squared Frobenius norm overflows `f32::MAX` (`1×1` `2e19`, `16×16` `1e19`,
@@ -104,7 +141,7 @@ fn polar_folo_handles_frobenius_overflow_and_nan() {
     nan_data[5] = f32::NAN;
     let with_nan = Tensor::from_vec(nan_data, [4, 4]).unwrap();
     let batch = [huge_1x1, huge_16x16, huge_4x4, with_nan];
-    for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar5] {
+    for ortho in [MuonOrtho::Ns5, MuonOrtho::Polar4, MuonOrtho::Polar5, MuonOrtho::Polar3Cs9] {
         let many = orthogonalize_many_with(&batch, ortho).unwrap();
         for (idx, t) in batch.iter().enumerate() {
             let one = orthogonalize_with(t, ortho).unwrap().to_vec::<f32>().unwrap();
@@ -174,9 +211,66 @@ fn sgd_ref(p: &mut [f64], s: &mut [f64], g: &[f64], lr: f64, wd: f64) {
 /// boosted `.cls` weight at 3x the LR, and a BatchNorm weight that only takes SGD.
 #[test]
 fn musgd_matches_reference_steps() {
-    for ortho in [MuonOrtho::Polar4, MuonOrtho::Ns5, MuonOrtho::Polar5] {
+    for ortho in [MuonOrtho::Polar4, MuonOrtho::Ns5, MuonOrtho::Polar5, MuonOrtho::Polar3Cs9] {
         musgd_reference_steps(MuSgdWeights::default(), ortho);
     }
+}
+
+/// `Polar3-CS9` subnormal, single-row, rank-1, and contract round-trip / legacy compatibility.
+#[test]
+fn polar3_cs9_edge_cases_and_contract_round_trip() {
+    // Subnormal, single-row, and exact rank-1 matrices stay finite and match f64 reference.
+    let subnormal = Tensor::from_vec(vec![1e-30f32; 16], [4, 4]).unwrap();
+    let single_row = Tensor::from_vec(vec![3.0f32, -4.0, 12.0, 0.5, -2.5], [1, 5]).unwrap();
+    let rank1_data: Vec<f32> =
+        (0..8).flat_map(|i| (0..12).map(move |j| ((i + 1) * (j + 1)) as f32)).collect();
+    let rank1 = Tensor::from_vec(rank1_data, [8, 12]).unwrap();
+    for t in [&subnormal, &single_row, &rank1] {
+        let o = orthogonalize_with(t, MuonOrtho::Polar3Cs9).unwrap();
+        let got = o.to_vec::<f32>().unwrap();
+        assert!(got.iter().all(|v| v.is_finite()), "non-finite Polar3Cs9 on {:?}", t.dims());
+        let rows = t.dims()[0];
+        let cols = t.numel() / rows;
+        let v: Vec<f64> = t.to_vec::<f32>().unwrap().into_iter().map(f64::from).collect();
+        let scale = muon_scale(t.dims()) as f64;
+        let want: Vec<f64> =
+            ortho_f64(&v, rows, cols, MuonOrtho::Polar3Cs9).iter().map(|x| x * scale).collect();
+        close(&got, &want, 2e-4);
+    }
+
+    // Optimizer contract round-trip for Polar3Cs9 and legacy compatibility (Ns5 omits `muon_ortho`).
+    let w = Tensor::randn([8, 16], 0.0, 0.2, &mut Rng::seed(99)).requires_grad_();
+    let mut opt = MuSgd::with_ortho(
+        vec![ParamGroup::new("decay", vec![("w".into(), w.clone())]).lr(0.01).momentum(0.9)],
+        MuSgdWeights::default(),
+        MuonOrtho::Polar3Cs9,
+    )
+    .unwrap();
+    let c = opt.contract();
+    assert_eq!(c.muon_ortho, Some(MuonOrtho::Polar3Cs9));
+    let js = serde_json::to_string(&c).unwrap();
+    assert!(js.contains("\"polar3_cs9\""), "{js}");
+    let back: folo_nn::optim::OptimContract = serde_json::from_str(&js).unwrap();
+    assert_eq!(back.muon_ortho, Some(MuonOrtho::Polar3Cs9));
+    let mut opt2 =
+        MuSgd::new(vec![ParamGroup::new("decay", vec![("w".into(), w.clone())]).lr(0.01).momentum(0.9)])
+            .unwrap();
+    opt2.apply_contract(&back).unwrap();
+    assert_eq!(opt2.ortho(), MuonOrtho::Polar3Cs9);
+
+    // Legacy contract omitting `muon_ortho` restores as `Ns5`.
+    let leg = MuSgd::with_ortho(
+        vec![ParamGroup::new("decay", vec![("w".into(), w)]).lr(0.01).momentum(0.9)],
+        MuSgdWeights::default(),
+        MuonOrtho::Ns5,
+    )
+    .unwrap()
+    .contract();
+    assert_eq!(leg.muon_ortho, None);
+    let leg_js = serde_json::to_string(&leg).unwrap();
+    assert!(!leg_js.contains("muon_ortho"), "{leg_js}");
+    opt.apply_contract(&serde_json::from_str(&leg_js).unwrap()).unwrap();
+    assert_eq!(opt.ortho(), MuonOrtho::Ns5);
 }
 
 /// The same with other step weights (the reference's `MuSGD(muon=0.5, sgd=0.5)`): the SGD factor scales only the

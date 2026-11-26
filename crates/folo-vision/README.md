@@ -16,9 +16,9 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | `src/lib.rs` | Crate docs and the re-exports |
 | `src/model/` | `mod.rs` (`FoloModel`: construction, forward, `fuse`, `to_device`; `HeadOutput`), `blocks.rs` (`Bottleneck`, `C3k`, `C3k2`, `Sppf`, `Attention`, `PsaBlock`, `C2Psa`), `head.rs` (the detect head, and the `o2o` branch), `v2/` (FOLO v2-Iso architecture: `config.rs`, `blocks.rs` with `StemV2`/`WsQARepConv3x3`/`FoloBlock`/`HyperContext`/`FullPadGate`, `head.rs` with `LazyAlignHead`/`PeakSuppress` and opt-in `iou_out`, `iou.rs` with `iou_quality_loss` and `fuse_cls_iou_scores`, `mod.rs` with `FoloV2Model`), `io.rs` (`.folo` weight IO), `predict.rs` (decode and `predict_raw`), `lazy.rs` / `lazy_gpu.rs` (candidate-first prediction on the CPU / a GPU), `quant/` (int8 inference: `walk.rs` the quantised graph, `calib.rs` calibration and the stored `Calibration`, `exec.rs` the int8 executor on folo-core's `cpu::q8`, `fake.rs` the fake-quant reference) |
 | `src/boxes.rs` | `Xyxy` / `Cxcywh`, letterbox mapping, IoU / GIoU / DIoU / CIoU |
-| `src/decode.rs` | Anchor grids (`make_anchors`) and the DFL decode of raw head outputs |
+| `src/decode.rs` | Anchor grids (`make_anchors`) and the DFL decode of raw head outputs (including 2×8 AVX2 `reg_max == 16` fast path `avx2_16`) |
 | `src/assign.rs` | The task-aligned assigner and the DFL target encoding |
-| `src/loss/` | `mod.rs` (`detection_loss`, `LossConfig`, `ClsLossKind`, `BoxLossKind`, `dual_loss`), `assignment.rs` (host assignment), `terms/` (`mod.rs`, `cls.rs` for BCE/MAL/VFL/QFL, `box_loss.rs` for CIoU/Inner-CIoU/WIoU v3/R-PIoU/NWD, `dfl.rs` for OT-DFL), `device.rs` (the folo-gpu kernels), `distill/` (the opt-in distillation term, `fused.rs` its fused folo-gpu path, and their tests), `tests.rs` |
+| `src/loss/` | `mod.rs` (`detection_loss`, `LossConfig`, `ClsLossKind`, `BoxLossKind`, `dual_loss`), `assignment.rs` (host assignment), `terms/` (`mod.rs`, `cls.rs` for BCE/MAL/VFL/QFL, `box_loss.rs` for CIoU/Inner-CIoU/WIoU v3/R-PIoU/S-AEIoU/NWD, `dfl.rs` for OT-DFL/CRPS-DFL), `device.rs` (the folo-gpu kernels), `distill/` (the opt-in distillation term, `fused.rs` its fused folo-gpu path, and their tests), `tests.rs`, `tests_math.rs` (`S-AEIoU` and `CRPS-DFL` finite-difference gradient and edge-case tests) |
 | `src/nms/` | `mod.rs` (NMS config/pipeline and ELC / consensus / DFL-consensus / DFL-repulse / DFL-CGR post-processing), `kernel.rs` (AVX2-accelerated standard IoU NMS, DIoU-NMS, Soft-NMS, and class-aware bucketing), `topk.rs` (the NMS-free top-k of the `o2o` head), `tests.rs` |
 | `src/fusion/` | `mod.rs` (cluster box fusion after NMS — `vote`, `dfl`, `sebf` — opt-in through `NmsConfig::fusion`, and the `consensus` / `elc` / `dfl-consensus` / `dfl-repulse` / `dfl-cgr` score modes opt-in through `NmsConfig::score`), `tests.rs` |
 | `src/metrics.rs` | `Evaluator`: mAP, precision / recall / F1, PR curves, confusion matrix |
@@ -62,7 +62,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | §9.3 NMS, §9.4 Box fusion | `src/nms/` (`mod.rs`, `kernel.rs`, `topk.rs`), `src/fusion/mod.rs` |
 | §9.5 Candidate-first evaluation | `src/model/lazy.rs`, `src/model/lazy_gpu.rs` |
 | §9.6 int8 inference | `src/model/quant/`, `FoloModel::set_int8`; folo-core `src/cpu/q8/` |
-| §10 Verification plan | `tests/model.rs` (§10.1, §10.2), `tests/assign_cases.rs` and `tests/loss_cases.rs` (§10.3), `tests/train.rs` (§10.4) |
+| §10 Verification plan | `tests/model.rs` (§10.1, §10.2), `tests/assign_cases.rs` and `tests/loss_cases.rs` (§10.3), `tests/train/` (§10.4) |
 
 ## Start here
 
@@ -78,7 +78,7 @@ and [VISION.md](../../docs/VISION.md) is the tour of the implementation.
 | To do this | Touch these files |
 |---|---|
 | Change a block or a layer table | `src/model/blocks.rs` or `src/model/mod.rs`; the same change in `src/export/onnx/blocks.rs`; `tests/model.rs` (when names change, re-bless `tests/golden/folo-n-names.txt` with `FOLO_BLESS=1 cargo test -p folo-vision --test model golden_names`); the parameter count in the `src/model/mod.rs` doctest; MODEL.md §2, §4, §5 |
-| Add a training recipe key | The field and its default in `TrainConfig` (`src/train/config/mod.rs`); where it acts (`setup.rs`, `epoch.rs` or `run.rs`); `tests/train.rs`; MODEL.md §8.1. To set it over the API: `TrainConfig` in `crates/folo-api/src/runs.rs`, `TrainConfig::from_api`, and API.md |
+| Add a training recipe key | The field and its default in `TrainConfig` (`src/train/config/mod.rs`); where it acts (`setup.rs`, `epoch.rs` or `run.rs`); `tests/train/`; MODEL.md §8.1. To set it over the API: `TrainConfig` in `crates/folo-api/src/runs.rs`, `TrainConfig::from_api`, and API.md |
 | Change a loss term | `src/loss/terms/`; on a GPU, folo-gpu's `src/detect.rs`, `src/kernels/detect.rs` and the shaders `det_bce_fwd.wgsl`, `det_bce_bwd.wgsl`, `det_box.wgsl` and `detect_common.wgsl` behind `src/loss/device.rs`; `tests/loss_cases.rs` and `tests/gpu_loss/`; MODEL.md §7.4 |
 | Change the post-process | `src/nms/` (`mod.rs`, `kernel.rs`, `topk.rs`) or `src/fusion/mod.rs`; `tests/nms_reference.rs`, `tests/fusion_reference.rs`, `tests/elc_postproc.rs`, and `tests/lazy_head.rs` / `tests/gpu_lazy_head.rs` (candidate-first must equal the dense path); MODEL.md §9.3, §9.4 |
 | Change a metric | `src/metrics.rs` or `src/cocoeval.rs`; `tests/metrics_known.rs`, `tests/coco_parity.rs`, `tests/coco_full.rs`; METRICS.md |
@@ -100,15 +100,15 @@ cargo test -p folo-vision --test train       # one integration test binary
 | `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs` | The evaluator against hand-computed answers and against pycocotools |
 | `lazy_head.rs` | Candidate-first prediction on the CPU, bit for bit against the dense path |
 | `int8.rs` | int8 inference: the executor against the fake-quant reference, the same bits at every thread count, the calibration's JSON, metadata and weights fingerprint |
-| `train.rs` | The trainer on tiny synthetic sets: learning, checkpoints, bit-exact resume, the predictor on trained weights |
+| `train/` (`main.rs`, `ema.rs`) | The trainer on tiny synthetic sets: learning, checkpoints, bit-exact resume, legacy & `PC-PEMA` EMA contracts/resumes, the predictor on trained weights |
 | `distill.rs` | Distillation in the trainer: a run without a teacher pinned to its pre-distillation weights, determinism, resume with the teacher, incompatible teachers |
-| `gpu.rs`, `gpu_f16.rs`, `gpu_tensor_cores.rs`, `gpu_in_place.rs`, `gpu_plan.rs`, `gpu_lazy_head.rs`, `gpu_loss/`, `gpu_train.rs`, `gpu_amp.rs`, `gpu_distill.rs` | The same on the GPU against the CPU: forward, f16, tensor cores, forward plans, candidate-first, the loss, training, mixed precision, distillation (and its fused kernel against the tensor path) |
+| `gpu.rs`, `gpu_f16.rs`, `gpu_tensor_cores.rs`, `gpu_in_place.rs`, `gpu_plan.rs`, `gpu_lazy_head.rs`, `gpu_loss/` (`main.rs`, `new_math.rs`, `math_winners.rs`), `gpu_train.rs`, `gpu_amp.rs`, `gpu_distill.rs` | The same on the GPU against the CPU: forward, f16, tensor cores, forward plans, candidate-first & fused `dfl_stats`, the loss (including `S-AEIoU`, `CRPS-DFL`, and GPU-fused `VFL`/`QFL` parity), training, mixed precision, distillation (and its fused kernel against the tensor path) |
 
 The `gpu*.rs` tests need a hardware GPU adapter and skip with a note without one (`FOLO_GPU_TEST_SOFTWARE=1` runs
 most of them on a software adapter); `gpu_f16.rs` also skips without f16 compute, and `gpu_tensor_cores.rs` and the
 GPU tests of `gpu_amp.rs` without tensor cores. Two tests are `#[ignore]`d:
 
-- `train.rs` `overfit_eight_images`: the MODEL.md §10.4 overfit run, minutes on a desktop CPU:
+- `tests/train/main.rs` `overfit_eight_images`: the MODEL.md §10.4 overfit run, minutes on a desktop CPU:
   `cargo test --release -p folo-vision --test train -- --ignored overfit`.
 - `gpu.rs` `letterbox_on_device_splits_a_batch_above_the_buffer_limit`: uploads more than the device's buffer limit
   (about 2 GiB).

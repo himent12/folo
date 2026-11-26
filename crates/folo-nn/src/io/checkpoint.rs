@@ -227,6 +227,9 @@ pub(crate) fn validate(file: &ModelFile) -> Result<CheckpointMeta> {
     let has_ema = !ema_names.is_empty();
     let ema =
         meta.extra.contains_key("folo.ema").then(|| json::<EmaContract>(meta, "folo.ema")).transpose()?;
+    if let Some(p) = ema.as_ref().and_then(|e| e.power) {
+        p.validate().map_err(|e| Error::Metadata(format!("folo.ema: {e}")))?;
+    }
     let ema_updates = match (has_ema, ema.is_some()) {
         (false, false) => {
             if file.info("ema.__updates").is_some() {

@@ -915,6 +915,9 @@ pub(super) fn dfl_stats_with(
 ) -> Result<Tensor> {
     let _g = no_grad();
     debug_assert!(want_moments || want_ent);
+    if let Some(fused) = folo_gpu::detect::dfl_stats(box_raw, rm, want_moments, want_ent)? {
+        return Ok(fused);
+    }
     let (b, a) = (box_raw.dims()[0], box_raw.dims()[2]);
     let p = box_raw.to_dtype(DType::F32)?.reshape([b, 4, rm, a])?.softmax(2)?;
     let ent = if want_ent {

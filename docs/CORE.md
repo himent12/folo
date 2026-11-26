@@ -193,7 +193,11 @@ channel slice of a tensor) in place, so `cat` + conv never writes the concatenat
   `Exp`, `Sigmoid`, `Silu`, `Log`, `Tanh`, `Softplus`, and their backward kernels use 8-lane non-FMA division-free AVX2
   implementations on `x86_64` and 4-lane non-FMA Wasm SIMD128 implementations (plus 4-lane binary ops) on
   `wasm32 +simd128` (except `log_bwd`, which runs exact IEEE-754 `g / x`), paired with bit-exact scalar twins for all
-  non-NaN inputs (and preserving NaN payloads on single-operand ops). Omitting FMA guarantees identical bits across
+  non-NaN inputs (and preserving NaN payloads on single-operand ops). `ln_scalar` / AVX2 `ln8` (`simd_log_tanh.rs`) and
+  Wasm SIMD128 `ln4` (`wasm_simd.rs`) evaluate the degree-10 `ln(1 + f)` polynomial (`LN_C2..LN_C10`) with a
+  depth-reduced Estrin tree (`f4 = f2 * f2`, parallel degree-1 pairs `q0..q3`, then `r0`, `t3`, `r1`) instead of a
+  serial Horner chain, reducing multiply-add dependency depth while preserving exact scalar/AVX2/Wasm-SIMD128 bit
+  parity. Omitting FMA guarantees identical bits across
   contiguous/strided paths, slice boundaries, thread counts, and `avx2`-only callers such as `folo-nn`'s `BatchNorm2d`.
   The fused conv/GEMM epilogue (`silu8` / `silu_bias_inplace`) keeps its FMA formulation.
 - **Unit-stride fast paths & 8×8 AVX2 transpose (`cpu/elementwise/mod.rs`, `transpose.rs`):** `strided_update` and

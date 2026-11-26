@@ -10,7 +10,7 @@ use folo_core::rng::Rng;
 use folo_data::{DataLoader, LoaderConfig};
 use folo_nn::io::{BestState, ModelConfig, ModelFile};
 use folo_nn::optim::{AdamW, GradAccumulator, MuSgd, OptimKind, Optimizer, Sgd, StandardGroups};
-use folo_nn::{DecayKind, EmaState, GradScaler, LrSchedule, ModelEma, Module};
+use folo_nn::{DecayKind, EmaMode, EmaPowerConfig, EmaState, GradScaler, LrSchedule, ModelEma, Module};
 
 use super::events::Emitter;
 use super::teacher::Teacher;
@@ -314,10 +314,30 @@ impl Trainer {
             let mut shadow = FoloModel::new(mconf)?;
             shadow.set_classes(data.classes.clone())?;
             shadow.set_imgsz(cfg.imgsz);
-            // §8.5: a fine-tune averages over a share of its optimizer steps (a resume restores the stored values).
-            let total = cfg.epochs as u64 * n_train.div_ceil(cfg.batch).div_ceil(cfg.accumulate()) as u64;
-            let (decay, tau) = cfg.ema_params(total);
-            Some(ModelEma::with_params(place_model(shadow, device)?, &model, decay, tau)?)
+            let spe = n_train.div_ceil(cfg.batch).div_ceil(cfg.accumulate()) as u64;
+            let total = cfg.epochs as u64 * spe;
+            match cfg.ema_mode {
+                EmaMode::Legacy => {
+                    // §8.5: a fine-tune averages over a share of its optimizer steps (a resume restores the stored values).
+                    let (decay, tau) = cfg.ema_params(total);
+                    Some(ModelEma::with_params(place_model(shadow, device)?, &model, decay, tau)?)
+                }
+                EmaMode::Power => {
+                    let warmup = cfg.warmup_iters(spe);
+                    let t_0 = if !cfg.transfer {
+                        0.0
+                    } else if warmup > 0 {
+                        warmup as f64
+                    } else {
+                        (0.03 * total as f64).round().max(1.0)
+                    };
+                    Some(ModelEma::with_power(
+                        place_model(shadow, device)?,
+                        &model,
+                        EmaPowerConfig::new(t_0),
+                    )?)
+                }
+            }
         } else {
             None
         };

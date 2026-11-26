@@ -84,15 +84,19 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
 - `Optimizer::contract()` / `apply_contract()` / `state_tensors()` / `load_state()` are the `folo.optim` contract
   and `optim.*` tensors of FORMAT.md. `MuSgd::with_weights(groups, MuSgdWeights { muon, sgd })` sets MuSGD's step
   weights (MODEL.md §8.2; default 0.2 / 1.0), `MuSgd::with_ortho(groups, weights, ortho)` sets its
-  orthogonalisation schedule (`MuonOrtho::Polar4` default, `Polar5`, or legacy `Ns5`; `orthogonalize_with` /
+  orthogonalisation schedule (`MuonOrtho::Polar4` default, `Polar5`, `Polar3Cs9`, or legacy `Ns5`; `orthogonalize_with` /
   `orthogonalize_many_with` expose the schedules directly), and `MuSgd::with_ortho_and_geo(groups, weights, ortho, geo)`
   selects Conv-GeoMuon (`MuonGeoMode::Geo`: true 2-D flattened conv aspect scaling + exact zero-GEMM per-channel Polar
-  LMO for depthwise convs; default `Legacy`). Weights other than the defaults (`musgd`), schedules other than legacy
-  `Ns5` (`muon_ortho`), and non-legacy geometric modes (`muon_geo`, plus `muon_depthwise` naming the depthwise conv
-  weights when `Geo` is active) are part of its contract; `apply_contract` adopts the file's weights when present
-  (keeping the optimizer's otherwise) and restores `muon_ortho` (defaulting absent `muon_ortho` to `Ns5` so pre-Polar
-  checkpoints resume with legacy 5-step Newton–Schulz), `muon_geo` (defaulting absent `muon_geo` to `Legacy`), and the
-  depthwise parameter mask from `muon_depthwise`.
+  LMO for depthwise convs; default `Legacy`). `MuonOrtho::Polar3Cs9` (`POLAR3_CS9_COEFFS: [Cs9StepCoeffs; 3]`,
+  `cs9_schedule()`, `is_cs9()`) runs a 3-step Completed-Square Paterson–Stockmeyer degree-9 odd polynomial
+  (`S = δ·I + γ·A + A²`, `q₄(A) = ξ·I + η·A + c₄·S²`, `X' = q₄(A)·X`, 6 wide `r × c` GEMMs vs 8 in `Polar4`, total
+  degree 729) paired with zero-extra-GEMM step-0 Schatten-8 spectral rescaling
+  `α₈ = ‖A₀²‖_F^(1/4) + eps / (‖u‖_F + eps)`. Weights other than the defaults (`musgd`), schedules other than legacy
+  `Ns5` (`muon_ortho`: `"polar4"`, `"polar5"`, `"polar3_cs9"`), and non-legacy geometric modes (`muon_geo`, plus
+  `muon_depthwise` naming the depthwise conv weights when `Geo` is active) are part of its contract; `apply_contract`
+  adopts the file's weights when present (keeping the optimizer's otherwise) and restores `muon_ortho` (defaulting
+  absent `muon_ortho` to `Ns5` so pre-Polar checkpoints resume with legacy 5-step Newton–Schulz), `muon_geo`
+  (defaulting absent `muon_geo` to `Legacy`), and the depthwise parameter mask from `muon_depthwise`.
 
 ## Mixed precision (`folo_nn::amp`)
 - `GradScaler`: dynamic loss scaling as `torch.cuda.amp.GradScaler` (docs/MODEL.md §8.8): `scale()` (initially
@@ -124,7 +128,14 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   `folo.sched` (optional WSD / restart fields serialize only when set).
 - `ModelEma<M>` keeps a second instance of the model (eval mode, no grad, on the source's device), caches its tracked
   parameter and floating-buffer handles to avoid repeated module-tree walks on every step, and updates them with
-  `d = decay · (1 − exp(−updates / tau))`. On the CPU, contiguous `f32` updates run non-FMA AVX2 loops (parallelised
+  either the legacy exponential ramp `d = decay · (1 − exp(−updates / tau))` (`EmaMode::Legacy`, default) or opt-in
+  `PC-PEMA` (`EmaMode::Power`, `ModelEma::with_power(module, source, EmaPowerConfig)`). `EmaPowerConfig` holds
+  `{ gamma_0, rho, lf_min, t_0 }` (defaults `PEMA_GAMMA_0 = 6.94`, `PEMA_RHO = 0.25`, `PEMA_LF_MIN = 0.01`,
+  constructor `EmaPowerConfig::new(t_0)`, `validate()`, and `decay_at(u, lf)` computing
+  `exp((γ₀ · clamp(lf, lf_min, 1)^(-ρ) + 1) · ln(1 − 1 / (u + t₀)))`, or `0.0` when `u + t₀ <= 1`); callers drive
+  `PC-PEMA` with `ModelEma::update_with_lf(source, lf)` (`decay_at_with_lf(u, lf)`; `update` / `decay_at` use
+  `lf = 1.0`, identical in legacy mode). `EmaContract` persists `power: Option<EmaPowerConfig>` (omitted when `None`
+  so legacy `folo.ema` stays byte-identical). On the CPU, contiguous `f32` updates run non-FMA AVX2 loops (parallelised
   across tensors above `32_768` total elements — with storage-alias checking — and across `16_384`-element chunks
   inside single tensors above `65_536` elements); on the GPU, all tracked tensors update in one multi-tensor
   `a·p + b·g` call (16 per dispatch). `ModelEma::new` takes MODEL.md §8.5's 0.9999 / 2000;
@@ -166,6 +177,8 @@ See the crate docs (`cargo doc -p folo-nn --open`): a two-block model with SGD, 
 accumulation, clipping and EMA in a step loop.
 
 ## Benchmarks
-`cargo bench -p folo-nn --bench nn` reports BatchNorm train forward + backward (fused vs composite), the SGD, AdamW
-and EMA steps over a folo-n-sized parameter set, and `.folo` save / load. The GPU paths are measured on the real
-detector by `cargo bench -p folo-vision --bench gpu` (docs/BENCHMARKS.md, "FOLO on the GPU").
+`cargo bench -p folo-nn --bench nn` reports BatchNorm train forward + backward (fused vs composite), the SGD, AdamW,
+MuSGD and EMA steps over a folo-n-sized parameter set, and `.folo` save / load (reference release numbers on an RTX
+4080 SUPER host: MuSGD `Polar4` 2.64M `10.15 ms`, EMA `0.11 ms`, BN fused + SiLU `8.68 / 3.54 / 0.75 ms`). The GPU
+paths are measured on the real detector by `cargo bench -p folo-vision --bench gpu` (docs/BENCHMARKS.md, "FOLO on the
+GPU").

@@ -1,13 +1,16 @@
 //! The differentiable terms of §7.4 for a fixed assignment ([`loss_with_assignment`]):
 //! - [`cls`]: BCE, MAL, Varifocal Loss (VFL), Quality Focal Loss (QFL),
-//! - [`box_loss`]: CIoU, Inner-CIoU, Wise-IoU v3, R-PIoU, NWD,
-//! - [`dfl`]: DFL cross-entropy and 1D Optimal-Transport tail barrier (`OT-DFL`).
+//! - [`box_loss`]: CIoU, Inner-CIoU, Wise-IoU v3, R-PIoU, S-AEIoU, NWD,
+//! - [`dfl`]: DFL cross-entropy, 1D Optimal-Transport tail barrier (`OT-DFL`), and `CRPS-DFL`.
 
 mod box_loss;
 mod cls;
 mod dfl;
 
-pub use box_loss::{ciou, inner_ciou_loss, nwd_loss, rpiou_loss, wiou_v3_loss};
+#[cfg(test)]
+pub(crate) use box_loss::saeiou_box_f64;
+pub use box_loss::{ciou, inner_ciou_loss, nwd_loss, rpiou_loss, saeiou_loss, wiou_v3_loss};
+pub(crate) use dfl::crps_dfl;
 
 use folo_core::{DType, Result, Tensor};
 
@@ -15,7 +18,7 @@ use super::{BatchAssignment, BoxLossKind, LossConfig, LossItems, LossOutput, che
 use crate::assign::{bbox2dist_clamped, dfl_bins, nwd_lambda};
 use crate::decode::Anchors;
 
-use box_loss::{rpiou_from_logits, wiou_v3_loss_and_mean};
+use box_loss::{rpiou_from_logits, saeiou_from_logits, wiou_v3_loss_and_mean};
 use cls::cls_loss_sum;
 use dfl::ot_dfl_tail;
 
@@ -125,8 +128,11 @@ fn loss_impl_wiou(
     let mut bins = Vec::with_capacity(n * 8);
     let mut bin_w = Vec::with_capacity(n * 8);
     let use_ot = cfg.dfl_ot_weight > 0.0 && r > 2;
-    let mut left_bins = if use_ot { Vec::with_capacity(n * 4) } else { Vec::new() };
-    let mut side_wt = if use_ot { Vec::with_capacity(n * 4) } else { Vec::new() };
+    let use_crps = cfg.dfl_crps_weight > 0.0;
+    let need_side_meta = use_ot || use_crps;
+    let mut left_bins = if need_side_meta { Vec::with_capacity(n * 4) } else { Vec::new() };
+    let mut left_w = if use_crps { Vec::with_capacity(n * 4) } else { Vec::new() };
+    let mut side_wt = if need_side_meta { Vec::with_capacity(n * 4) } else { Vec::new() };
     for k in 0..n {
         let (i, a, c) = (asg.image[k] as usize, asg.anchor[k] as usize, asg.label[k] as usize);
         if i >= b || a >= n_a || c >= nc {
@@ -147,9 +153,12 @@ fn loss_impl_wiou(
             let (j, wl, wr) = dfl_bins(d);
             bins.extend([j as i64, j as i64 + 1]);
             bin_w.extend([wl * wt, wr * wt]);
-            if use_ot {
+            if need_side_meta {
                 left_bins.push(j);
                 side_wt.push(wt);
+            }
+            if use_crps {
+                left_w.push(wl);
             }
         }
     }
@@ -218,21 +227,39 @@ fn loss_impl_wiou(
                 mean_iou_loss = batch_mean;
                 blend_nwd(w_per)?
             }
-            BoxLossKind::Rpiou => {
+            BoxLossKind::Rpiou | BoxLossKind::Saeiou => {
+                let eval_alg = |lams_opt: Option<&[f32]>| -> Result<Tensor> {
+                    if cfg.box_loss == BoxLossKind::Rpiou {
+                        rpiou_from_logits(
+                            &logits,
+                            &pd,
+                            &tbox,
+                            &asg.score,
+                            lams_opt,
+                            tss,
+                            cfg.box_gain,
+                            cfg.rpiou_beta,
+                            cfg.rpiou_kappa,
+                            cfg.rpiou_delta,
+                        )
+                    } else {
+                        saeiou_from_logits(
+                            &logits,
+                            &pd,
+                            &tbox,
+                            &asg.score,
+                            lams_opt,
+                            tss,
+                            cfg.box_gain,
+                            cfg.rpiou_beta,
+                            cfg.rpiou_kappa,
+                            cfg.rpiou_delta,
+                        )
+                    }
+                };
                 if cfg.nwd_weight > 0.0 {
                     let lams: Vec<f32> = (0..n).map(|k| nwd_lambda(&asg.target[k], cfg.nwd_weight)).collect();
-                    let wb_rpiou = rpiou_from_logits(
-                        &logits,
-                        &pd,
-                        &tbox,
-                        &asg.score,
-                        Some(&lams),
-                        tss,
-                        cfg.box_gain,
-                        cfg.rpiou_beta,
-                        cfg.rpiou_kappa,
-                        cfg.rpiou_delta,
-                    )?;
+                    let wb_alg = eval_alg(Some(&lams))?;
                     let cs: Vec<f32> =
                         (0..n).map(|k| 12.8 / anchors.strides[asg.anchor[k] as usize]).collect();
                     let lam_t = on_dev(Tensor::from_vec(lams, [n])?)?;
@@ -241,41 +268,34 @@ fn loss_impl_wiou(
                     let wb_nwd = sum_fixed_order(&lam_t.mul(&l_nwd)?.mul(&t)?)?
                         .div_scalar(tss)?
                         .mul_scalar(cfg.box_gain)?;
-                    wb_rpiou.add(&wb_nwd)?
+                    wb_alg.add(&wb_nwd)?
                 } else {
-                    rpiou_from_logits(
-                        &logits,
-                        &pd,
-                        &tbox,
-                        &asg.score,
-                        None,
-                        tss,
-                        cfg.box_gain,
-                        cfg.rpiou_beta,
-                        cfg.rpiou_kappa,
-                        cfg.rpiou_delta,
-                    )?
+                    eval_alg(None)?
                 }
             }
         };
 
-        // DFL: cross-entropy against the two neighbouring bins, plus optional OT cumulative tail barrier.
+        // DFL: cross-entropy against the two neighbouring bins, plus optional OT tail barrier & CRPS-DFL.
         let bins = on_dev(Tensor::from_vec(bins, [n, 4, 2])?)?;
         let bin_w = on_dev(Tensor::from_vec(bin_w, [n, 4, 2])?)?;
         let picked = logits.log_softmax(2)?.gather(2, &bins)?;
         let l_dfl_ce = sum_fixed_order(&picked.mul(&bin_w)?)?.neg()?.div_scalar(tss)?;
-        let wd = if cfg.dfl_ot_weight > 0.0 && r > 2 {
-            l_dfl_ce.mul_scalar(cfg.dfl_gain)?.add(&ot_dfl_tail(
+        let mut wd = l_dfl_ce.mul_scalar(cfg.dfl_gain)?;
+        if use_ot {
+            wd =
+                wd.add(&ot_dfl_tail(&logits, &left_bins, &side_wt, cfg.dfl_ot_weight, tss, cfg.dfl_gain)?)?;
+        }
+        if use_crps {
+            wd = wd.add(&crps_dfl(
                 &logits,
                 &left_bins,
+                &left_w,
                 &side_wt,
-                cfg.dfl_ot_weight,
+                cfg.dfl_crps_weight,
                 tss,
                 cfg.dfl_gain,
-            )?)?
-        } else {
-            l_dfl_ce.mul_scalar(cfg.dfl_gain)?
-        };
+            )?)?;
+        }
         (wb, wd, mean_iou_loss)
     };
     let wc = cls_sum.div_scalar(tss)?.mul_scalar(cfg.cls_gain)?;
