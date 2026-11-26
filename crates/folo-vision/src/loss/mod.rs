@@ -59,6 +59,8 @@ mod tests_math;
 mod tests_nwd_wiou;
 #[cfg(test)]
 mod tests_siou_eiou;
+#[cfg(test)]
+mod tests_vfl_qfl;
 
 pub use assignment::assign_batch;
 pub use device::assign_batch_device;
@@ -67,10 +69,10 @@ pub use distill::{
     gt_verify_weights_cpu,
 };
 pub use terms::{
-    asymmetric_loss, ciou, eiou_loss, focaler_iou, focaler_iou_loss, inner_ciou_loss, loss_with_assignment,
-    mpdiou_loss, mpdiou_loss_with_scale, nwd_loss, nwd_loss_with_c, poly1_bce_loss, poly1_focal_loss,
-    poly1_focal_loss_with_alpha, rpiou_loss, saeiou_loss, shape_iou_loss, siou_loss, wiou_v1_loss,
-    wiou_v3_loss,
+    LossReduction, QflConfig, VflConfig, asymmetric_loss, ciou, eiou_loss, focaler_iou, focaler_iou_loss,
+    inner_ciou_loss, loss_with_assignment, mpdiou_loss, mpdiou_loss_with_scale, nwd_loss, nwd_loss_with_c,
+    poly1_bce_loss, poly1_focal_loss, poly1_focal_loss_with_alpha, quality_focal_loss, rpiou_loss,
+    saeiou_loss, shape_iou_loss, siou_loss, varifocal_loss, wiou_v1_loss, wiou_v3_loss,
 };
 
 use crate::assign::TalConfig;

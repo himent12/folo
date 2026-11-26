@@ -1,5 +1,6 @@
 //! The differentiable terms of §7.4 for a fixed assignment ([`loss_with_assignment`]):
 //! - [`cls`]: BCE, MAL, Varifocal Loss (VFL), Quality Focal Loss (QFL),
+//! - [`vfl_qfl`]: Standalone cancellation-free Varifocal Loss (VFL) and Quality Focal Loss (QFL) with reductions,
 //! - [`asl_poly`]: Asymmetric Loss (ASL), Poly-1 BCE, and Poly-1 Focal Loss,
 //! - [`box_loss`]: CIoU, Inner-CIoU, R-PIoU, S-AEIoU,
 //! - [`nwd_wiou`]: Normalized Wasserstein Distance (NWD) and Wise-IoU v1 / v3,
@@ -14,10 +15,14 @@ mod dfl;
 mod geom_loss;
 mod nwd_wiou;
 mod siou_eiou;
+mod vfl_qfl;
 
 #[cfg(test)]
 pub(crate) use asl_poly::{asl_elem_f64, poly1_bce_elem_f64, poly1_focal_elem_f64};
 pub use asl_poly::{asymmetric_loss, poly1_bce_loss, poly1_focal_loss, poly1_focal_loss_with_alpha};
+pub use vfl_qfl::{LossReduction, QflConfig, VflConfig, quality_focal_loss, varifocal_loss};
+#[cfg(test)]
+pub(crate) use vfl_qfl::{qfl_elem_f64, vfl_elem_f64};
 
 #[cfg(test)]
 pub(crate) use box_loss::saeiou_box_f64;
