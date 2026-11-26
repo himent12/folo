@@ -451,7 +451,7 @@ export default function Runs() {
               class="table runs"
               class:picking={selected.get().length > 0}
               aria-label="Runs"
-              aria-busy={!runs.data}
+              aria-busy={!runs.data && !runs.error}
               use:rowNav={{ toggle: (row: HTMLElement) => toggle(row.dataset.id ?? '') }}
             >
               {rowsOrLoading.get() ? (

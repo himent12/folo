@@ -630,9 +630,8 @@ export class MockTrainingApi extends MockServer {
       if (!provider) throw new ApiError(404, 'provider_not_found', `no cloud provider '${body.provider}'`, 'GET /api/cloud/providers lists them.');
       const value = (key: string) => (body.values[key] ?? '').trim();
       for (const f of provider.fields) if (f.required && !value(f.key)) throw new ApiError(400, 'invalid_body', `\`${f.key}\` is required to connect ${provider.name}`);
-      const url = provider.id === 'remote' ? value('url') : '';
-      if (provider.id === 'remote' && !/^https?:\/\/[^\s/]+/i.test(url)) throw new ApiError(400, 'invalid_body', '`url` must be an http:// or https:// URL');
-      const host = url.replace(/^https?:\/\//i, '').replace(/[/?#].*$/, '');
+      const remote = provider.id === 'remote' ? parseRemoteUrl(value('url')) : null;
+      const host = remote?.host ?? '';
       if (provider.fields.some((f) => f.secret && value(f.key).includes('bad')))
         throw new ApiError(
           422,
@@ -643,7 +642,6 @@ export class MockTrainingApi extends MockServer {
       const taken = new Set(this.state.connections.map((c) => c.name));
       let name = body.name?.trim() || provider.name;
       for (let k = 2; !body.name?.trim() && taken.has(name); k++) name = `${provider.name} ${k}`;
-      const local = /^(localhost|127\.|\[::1\]|10\.|192\.168\.)/i.test(host);
       const now = Date.now();
       const conn: CloudConnection = {
         id: `cc_${(hash(`${name}:${now}:${this.state.nextId++}`) & 0xffff).toString(16).padStart(4, '0')}`,
@@ -655,7 +653,7 @@ export class MockTrainingApi extends MockServer {
         balance_usd: provider.id === 'remote' ? null : 42.17,
         error: null,
         note:
-          provider.id === 'remote' && /^http:/i.test(url) && !local
+          remote && !remote.https && !remote.local
             ? 'Reached over http://: the token and the data travel unencrypted. Use https:// across networks you do not control.'
             : null,
         checked: new Date(now).toISOString(),
@@ -744,4 +742,51 @@ export class MockTrainingApi extends MockServer {
       return instanceAt(p.cloud, p.id, trainEnd(p), now) ?? instance;
     }, 500);
   }
+}
+
+/** Whether four IPv4 octets are loopback, private (RFC 1918), or link-local (RFC 3927). */
+function isLocalIpv4(a: number, b: number, c: number, d: number): boolean {
+  if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+  return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31);
+}
+
+/** Validates a Remote FOLO server URL in demo mode, matching `crates/folo-cloud/src/remote.rs` (`Server::of`). */
+function parseRemoteUrl(raw: string): { host: string; local: boolean; https: boolean } {
+  const invalid = (why: string) => new ApiError(400, 'invalid_body', `\`url\` ${why}`);
+  if (!/^[\x21-\x7e]+$/.test(raw)) throw invalid('must not contain spaces or control characters');
+  if (!/^https?:\/\//i.test(raw)) throw invalid('must start with https:// or http://');
+  if (raw.includes('?') || raw.includes('#')) throw invalid('must not have a query or a fragment');
+  if (raw.includes('\\')) throw invalid('is not a valid URL');
+  const afterScheme = raw.slice(raw.indexOf('://') + 3);
+  const slash = afterScheme.indexOf('/');
+  const authority = slash === -1 ? afterScheme : afterScheme.slice(0, slash);
+  if (!authority) throw invalid('has no host');
+  if (authority.includes('@')) throw invalid('must not contain a user name or password');
+  if (authority.endsWith(':') || authority.includes('%')) throw invalid('is not a valid URL');
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw invalid('is not a valid URL');
+  }
+  if ((parsed.protocol !== 'http:' && parsed.protocol !== 'https:') || !parsed.hostname || parsed.port === '0') {
+    throw invalid('is not a valid URL');
+  }
+  if (parsed.username || parsed.password) throw invalid('must not contain a user name or password');
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(hostname);
+  const mapped6 = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(hostname);
+  const local =
+    hostname === 'localhost' ||
+    hostname === '::1' ||
+    (ipv4 !== null && isLocalIpv4(+ipv4[1]!, +ipv4[2]!, +ipv4[3]!, +ipv4[4]!)) ||
+    (mapped6 !== null &&
+      isLocalIpv4(
+        parseInt(mapped6[1]!, 16) >> 8,
+        parseInt(mapped6[1]!, 16) & 0xff,
+        parseInt(mapped6[2]!, 16) >> 8,
+        parseInt(mapped6[2]!, 16) & 0xff,
+      )) ||
+    /^f[cd][0-9a-f]{2}:|^fe[89ab][0-9a-f]:/.test(hostname);
+  return { host: parsed.host, local, https: parsed.protocol === 'https:' };
 }

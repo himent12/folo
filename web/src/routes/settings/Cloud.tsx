@@ -382,7 +382,7 @@ export default function Cloud() {
             <p class="none">No instances. FOLO starts one per cloud run and terminates it when the run ends.</p>
           ) : (
             <>
-              <table class="table tall inst" aria-label="Cloud instances" aria-busy={!instances.data}>
+              <table class="table tall inst" aria-label="Cloud instances" aria-busy={!instances.data && !instances.error}>
                 <thead>
                   <tr>
                     <th scope="col">Instance</th>

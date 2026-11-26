@@ -476,4 +476,39 @@ describe('mock: the final fields of server PR #140', () => {
     expect(caps.tensor_cores).toMatchObject({ available: true, enabled: false });
     await expect(api.createRun({ ...c, amp: false })).resolves.toMatchObject({ config: { amp: false } });
   });
+
+  it('rejects malformed remote cloud URLs in demo mode (invalid port, credentials, query/fragment, scheme, percent-encoded host)', async () => {
+    const api = new MockApi('cloud-none', 0);
+    for (const url of [
+      'http://127.0.0.1:99999',
+      'http://127.0.0.1:0',
+      'http://127.0.0.1:',
+      'http://user:pass@10.0.0.5:7878',
+      'http://10.0.0.5:7878?token=abc',
+      'http://10.0.0.5:7878#top',
+      'ftp://10.0.0.5:7878',
+      'http://bad host:7878',
+      'http://gpu%2Dbox.example.com:7878',
+    ]) {
+      await expect(api.connectCloud({ provider: 'remote', name: '', values: { url, token: '' } })).rejects.toMatchObject({
+        status: 400,
+        code: 'invalid_body',
+      });
+    }
+    expect(await api.cloudConnections()).toEqual([]);
+
+    const local = await api.connectCloud({ provider: 'remote', name: '', values: { url: 'http://127.0.0.1:7878/api%20path', token: '' } });
+    expect(local).toMatchObject({ provider: 'remote', account: '127.0.0.1:7878', note: null });
+
+    const ipv6 = await api.connectCloud({ provider: 'remote', name: 'IPv6 Box', values: { url: 'http://[::1]:7878/', token: '' } });
+    expect(ipv6).toMatchObject({ provider: 'remote', account: '[::1]:7878', note: null });
+
+    const mapped = await api.connectCloud({ provider: 'remote', name: 'Mapped Box', values: { url: 'http://[::ffff:192.168.0.2]:7878', token: '' } });
+    expect(mapped.note).toBeNull();
+
+    for (const url of ['http://gpu.example.com:7878', 'http://172.16.example.com:7878', 'http://169.254.example.com:7878', 'http://10.example.com:7878']) {
+      const conn = await api.connectCloud({ provider: 'remote', name: url, values: { url, token: '' } });
+      expect(conn.note).toContain('unencrypted');
+    }
+  });
 });

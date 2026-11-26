@@ -509,7 +509,7 @@ export default function Models() {
           </div>
         ) : (
           <div class="scroll" class:state={!hasRows.get()}>
-          <table class="table models" aria-busy={!models.data || groupPending.get()} aria-label="Models by evaluation dataset" use:rowNav>
+          <table class="table models" aria-busy={!models.error && (!models.data || groupPending.get())} aria-label="Models by evaluation dataset" use:rowNav>
             {hasRows.get() ? (
               <thead>
                 <tr>

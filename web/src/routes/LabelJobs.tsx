@@ -239,7 +239,7 @@ export default function LabelJobs() {
                 )
               ) : (
                 <div class="scroll" class:state={!hasRows.get()}>
-                <table class="table jobs" aria-busy={!jobs.data} aria-label="Labeling jobs" use:rowNav>
+                <table class="table jobs" aria-busy={!jobs.data && !jobs.error} aria-label="Labeling jobs" use:rowNav>
                   {hasRows.get() ? (
                     <thead>
                       <tr>

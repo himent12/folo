@@ -343,7 +343,7 @@ export default function Benchmarks() {
                 )
               ) : (
                 <div class="scroll" class:state={!hasRows.get()}>
-                <table class="table benches" aria-busy={!benches.data} aria-label="Benchmarks" use:rowNav>
+                <table class="table benches" aria-busy={!benches.data && !benches.error} aria-label="Benchmarks" use:rowNav>
                   {hasRows.get() ? (
                     <thead>
                       <tr>
