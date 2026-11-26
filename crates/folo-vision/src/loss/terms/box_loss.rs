@@ -273,7 +273,7 @@ pub fn inner_ciou_loss(b1: &Tensor, b2: &Tensor, ratio: f32) -> Result<Tensor> {
 ///
 /// ```text
 /// L_IoU = 1 - IoU(b1, b2)
-/// R_WIoU = exp(((cx1 - cx2)² + (cy1 - cy2)²) / ((cw² + ch²)* + eps))
+/// R_WIoU = exp(((cx1 - cx2)² + (cy1 - cy2)²) / (cw² + ch²)*)
 /// beta = L_IoU* / max(iou_mean, 1e-4)
 /// r = beta / (delta * alpha^(beta - delta))       (detached non-monotonic focusing gain)
 /// L_WIoU_v3 = r * R_WIoU * L_IoU
@@ -367,7 +367,7 @@ pub(super) fn wiou_v3_loss_and_mean(
                     return 0.0;
                 }
                 let log_r = beta.ln() - ln_d - (beta - d64) * ln_a;
-                log_r.exp() as f32
+                log_r.min(80.0).exp() as f32
             })
             .collect();
         (Tensor::from_vec(gains, [n])?.to_device(dev)?, mean_f64 as f32)

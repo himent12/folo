@@ -592,6 +592,18 @@ fn inner_ciou_and_wiou_v3_parity_and_grad_checks() {
     assert_eq!(nwd_loss(&tiny, &tiny, &c_ok).unwrap().to_vec::<f32>().unwrap()[0], 0.0);
     assert!(nwd_loss(&tiny, &tiny, &Tensor::from_slice(&[0.0f32], [1]).unwrap()).is_err());
     assert!(nwd_loss(&tiny, &tiny, &Tensor::from_slice(&[-1.0f32], [1]).unwrap()).is_err());
+    // Finite-difference gradient check for public `nwd_loss` wrt `b1`, `b2`, and `c` on non-trivial boxes.
+    let nb1 = Tensor::from_slice(&[2.0f32, 3.0, 10.0, 12.0, 0.0, 0.0, 1.0, 1.0], [2, 4]).unwrap();
+    let nb2 = Tensor::from_slice(&[3.5f32, 2.5, 11.5, 13.0, 6.0, 7.0, 7.0, 8.0], [2, 4]).unwrap();
+    let nc = Tensor::from_slice(&[12.8f32, 8.0], [2]).unwrap();
+    let nwd_vals = nwd_loss(&nb1, &nb2, &nc).unwrap().to_vec::<f32>().unwrap();
+    assert!(nwd_vals.iter().all(|&v| v.is_finite() && v > 0.0 && v < 1.0));
+    grad_check_with(
+        |inputs| nwd_loss(&inputs[0], &inputs[1], &inputs[2])?.sum_all(),
+        &[nb1, nb2, nc],
+        &GradCheck { eps: 1e-3, atol: 1e-4, rtol: 2e-2, ..GradCheck::default() },
+    )
+    .unwrap();
 
     // Gradient descent check on WIoU v3.
     let w_pair = Tensor::from_slice(&[1.0f32, 2.0, 11.0, 14.0], [1, 4]).unwrap();

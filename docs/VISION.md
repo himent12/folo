@@ -13,7 +13,7 @@ model/             FoloModel: blocks.rs (MODEL.md §2), head.rs (§6), io.rs (.f
                    predict.rs (decode and the raw prediction path), lazy.rs / lazy_gpu.rs (candidate-first head),
                    quant/ (int8 inference, §9.6), v2/ (FOLO v2-Iso clean-sheet model family)
 loss/              the detection loss: assignment.rs (host assigner), terms/ (BCE/MAL/VFL/QFL,
-                   CIoU/R-PIoU/S-AEIoU/Inner-CIoU/NWD/WIoU v1-v3/MPDIoU/Shape-IoU/EIoU/SIoU, DFL/OT-DFL/CRPS-DFL), device.rs (GPU),
+                   CIoU/R-PIoU/S-AEIoU/Inner-CIoU/WIoU v3/NWD, DFL/OT-DFL/CRPS-DFL), device.rs (GPU),
                    distill/ (dense/BCKD/GT-verified distillation, §8.9)
 assign.rs          the task-aligned assigner (including eps-free TAL & NWD-IoU) and DFL target encoding
 boxes.rs, decode.rs, nms/{mod.rs, kernel.rs, topk.rs}, fusion/{mod.rs, tests.rs}   boxes and IoU, anchors and DFL decode, NMS (standard/AVX2, DIoU-NMS, Soft-NMS) / o2o top-k, cluster fusion (vote/DFL/SEBF) & ELC/DFL-consensus/DFL-repulse/DFL-CGR
@@ -110,32 +110,23 @@ A shared graph walk (`walk.rs`) drives three executors:
     `vfl_alpha · p^vfl_gamma · softplus(x)` on negatives; defaults `0.75` / `2.0`, requires `mal_gamma == 0`; CPU + GPU
     fused in `det_bce_fwd.wgsl` / `det_bce_bwd.wgsl`); `ClsLossKind::Qfl` selects Quality Focal Loss
     (`|t − p|^qfl_beta · BCE(x, t)`, default `qfl_beta = 2.0`, requires `mal_gamma == 0`; CPU + GPU fused in
-    `det_bce_fwd.wgsl` / `det_bce_bwd.wgsl`); `ClsLossKind::Asl` selects Asymmetric Loss (`asl_gamma_pos = 0.0`,
-    `asl_gamma_neg = 4.0`, probability margin shift `asl_clip = 0.05`, also exposed as `asymmetric_loss`);
-    `ClsLossKind::Poly1Bce` (`poly1_epsilon = 1.0`, `poly1_bce_loss`) and `ClsLossKind::Poly1Focal`
-    (`poly1_focal_gamma = 2.0`, `poly1_epsilon = 1.0`, `poly1_focal_loss` / `poly1_focal_loss_with_alpha`) add
-    first-order PolyLoss polynomial regularization (`+ ε₁ (1 - p_t)` / `+ ε₁ (1 - p_t)^(γ + 1)`), evaluated with exact
-    closed-form `f64` analytical gradients on the host path.
+    `det_bce_fwd.wgsl` / `det_bce_bwd.wgsl`).
   - *Box & DFL terms:* `LossConfig.box_loss` selects `Ciou` (default), `Rpiou` (purely algebraic Rational-Focal
     Edge-Decoupled IoU: `rpiou_beta`, `rpiou_kappa`, `rpiou_delta`; CPU + GPU fused), `Saeiou` (Scale-Normalized
     Algebraic Edge IoU, `saeiou_loss`: scale-normalized focal-IoU + shape-weighted per-edge inverse-sqrt penalty
     reusing `rpiou_beta = 0.5`, `rpiou_kappa = 2.0`, `rpiou_delta = 0.5`, zero `atan`/`exp`/exponent-split; CPU + GPU
     fused), `InnerCiou` (Inner-CIoU using auxiliary boxes scaled by `inner_ratio` in `[0.5, 1.5]`, default `0.7`),
-    `Nwd` (Normalized Wasserstein Distance `1 - exp(-sqrt(W_2²) / (nwd_c / stride))` with `nwd_c = 12.8` px,
-    `nwd_loss` / `nwd_loss_with_c`, skipping the redundant `nwd_weight` blend when `box_loss == Nwd`), `WiouV1`
-    (Wise-IoU v1 distance-attended IoU loss `R_WIoU * (1 - IoU)` with detached enclosing diagonal, `wiou_v1_loss`),
-    `WiouV3` (Wise-IoU v3 dynamic non-monotonic focusing: `wiou_alpha = 1.9`, `wiou_delta = 3.0`,
-    `wiou_momentum = 0.01`, running `L_IoU_bar` persisted in checkpoints as `folo.wiou_iou_mean`), `Mpdiou`,
-    `ShapeIou`, `Eiou`, or `Siou`; `LossConfig.nwd_weight` adds the scale-adaptive NWD box blend (using the
-    `sqrt(W_2² + 1e-6)` smoothed form matching `det_box.wgsl` for CPU/GPU parity); `LossConfig.dfl_ot_weight > 0` adds an exact `O(R)`
+    or `WiouV3` (Wise-IoU v3 dynamic non-monotonic focusing: `wiou_alpha = 1.9`, `wiou_delta = 3.0`,
+    `wiou_momentum = 0.01`, running `L_IoU_bar` persisted in checkpoints as `folo.wiou_iou_mean`);
+    `LossConfig.nwd_weight` adds the scale-adaptive NWD box blend (using the `sqrt(W_2² + 1e-6)` smoothed form
+    matching `det_box.wgsl` for CPU/GPU parity); `LossConfig.dfl_ot_weight > 0` adds an exact `O(R)`
     log-space 1D optimal-transport cumulative tail barrier to DFL (when `reg_max > 2`: host `f64` custom op
     `ot_dfl_tail` on CPU, fused in `folo_gpu::detect` on GPU when `device_loss_supported` holds, or host `f64` readback
     on the GPU fallback path when foreground anchors exist); `LossConfig.dfl_crps_weight > 0` adds a closed-form `O(R)`
     1D excess CRPS / squared Energy Distance term over dual-ended CDF masses `F_k` and `S_k` (any `reg_max >= 2`: host
     `f64` custom op `crps_dfl` on CPU, fused in `det_box.wgsl` on GPU when `device_loss_supported` holds, or host `f64`
-    readback on the fallback path). `InnerCiou`, `Nwd`, `WiouV1`, `WiouV3`, `Mpdiou`, `ShapeIou`, `Eiou`, and `Siou`
-    run through the host-assigner + `loss_with_assignment` path (closed-form `f64` analytical custom ops except
-    `InnerCiou`, which uses device-generic tensor composites with foreground host `atan` readback; `Vfl` and `Qfl` only
+    readback on the fallback path). `InnerCiou` and `WiouV3` run through the host-assigner + `loss_with_assignment`
+    path (device-generic tensor composites with foreground host `atan` / focusing-gain readback; `Vfl` and `Qfl` only
     fall back there when paired with a host-only box loss or out-of-range `topk`/`reg_max`).
   - *Distillation (`loss/distill/`):* dense teacher output KD (MODEL.md §8.9, fused GPU path in `distill/fused.rs`),
     plus `DistillConfig.bckd_gamma > 0` (BCKD focal disagreement weighting `sg(|p_S − p_T|^γ)` with positive teacher
