@@ -47,21 +47,13 @@ pub(super) fn enclosing_axis(a1: f64, a2: f64, b1: f64, b2: f64) -> (f64, f64, f
     (c, dc_da1, dc_da2)
 }
 
-/// Single-box EIoU forward `(loss, dL/d(ax1, ay1, ax2, ay2))` in `f64` (Zhang et al. 2022):
-///
-/// ```text
-/// L_EIoU = (1 - IoU) + (dcx² + dcy²) / (cw² + ch²) + (w1 - w2)² / cw² + (h1 - h2)² / ch²
-/// ```
-///
-/// where `dcx = cx1 - cx2`, `dcy = cy1 - cy2`, `w1 = max(ax2 - ax1, 0)`, `h1 = max(ay2 - ay1, 0)`,
-/// `w2 = max(bx2 - bx1, 0)`, `h2 = max(by2 - by1, 0)`, and `(cw, ch)` are the enclosing-box extents over all
-/// endpoints of `a` and `b`. Zero denominators are guarded explicitly (0 penalty and 0 gradient).
-pub(crate) fn eiou_box_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4]) {
+/// Pure EIoU geometric penalty `(dcx² + dcy²) / (cw² + ch²) + (w1 - w2)² / cw² + (h1 - h2)² / ch²`
+/// and its exact closed-form `f64` analytical gradient w.r.t. `a` (without the `1 - IoU` term).
+pub(super) fn eiou_penalty_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4]) {
     if !a.iter().chain(&b).all(|v| v.is_finite()) {
         return (f64::NAN, [f64::NAN; 4]);
     }
-    let iou = one_minus_iou_f64(a, b);
-    let mut g = iou.grad;
+    let mut g = [0.0f64; 4];
     let (ax1, ay1, ax2, ay2) = (a[0], a[1], a[2], a[3]);
     let (bx1, by1, bx2, by2) = (b[0], b[1], b[2], b[3]);
 
@@ -135,7 +127,28 @@ pub(crate) fn eiou_box_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4]) {
         pen
     };
 
-    (iou.one_minus_iou + l_dis + l_w + l_h, g)
+    (l_dis + l_w + l_h, g)
+}
+
+/// Single-box EIoU forward `(loss, dL/d(ax1, ay1, ax2, ay2))` in `f64` (Zhang et al. 2022):
+///
+/// ```text
+/// L_EIoU = (1 - IoU) + (dcx² + dcy²) / (cw² + ch²) + (w1 - w2)² / cw² + (h1 - h2)² / ch²
+/// ```
+///
+/// where `dcx = cx1 - cx2`, `dcy = cy1 - cy2`, `w1 = max(ax2 - ax1, 0)`, `h1 = max(ay2 - ay1, 0)`,
+/// `w2 = max(bx2 - bx1, 0)`, `h2 = max(by2 - by1, 0)`, and `(cw, ch)` are the enclosing-box extents over all
+/// endpoints of `a` and `b`. Zero denominators are guarded explicitly (0 penalty and 0 gradient).
+pub(crate) fn eiou_box_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4]) {
+    if !a.iter().chain(&b).all(|v| v.is_finite()) {
+        return (f64::NAN, [f64::NAN; 4]);
+    }
+    let iou = one_minus_iou_f64(a, b);
+    let (pen, gp) = eiou_penalty_f64(a, b);
+    (
+        iou.one_minus_iou + pen,
+        [iou.grad[0] + gp[0], iou.grad[1] + gp[1], iou.grad[2] + gp[2], iou.grad[3] + gp[3]],
+    )
 }
 
 /// Differentiable Efficient-IoU (EIoU) loss (Zhang et al. 2022) between rows of `b1` (predicted) and `b2`
@@ -207,32 +220,26 @@ fn sgn0(x: f64) -> f64 {
     }
 }
 
-/// Single-box SIoU forward `(loss, dL/d(ax1, ay1, ax2, ay2))` in `f64` (Gevorgyan 2022, arXiv:2205.12740):
-///
-/// ```text
-/// dx = cx2 - cx1,   dy = cy2 - cy1
-/// Lambda = 1 - 2 * sin²(arcsin(min(|dx|, |dy|) / sqrt(dx² + dy²)) - pi/4)
-///        = 2 * |dx| * |dy| / (dx² + dy²)              (exact trig identity; 0 when dx == dy == 0)
-/// gamma  = 2 - Lambda                                  (in [1, 2])
-/// rho_x  = (dx / cw)²,   rho_y = (dy / ch)²
-/// Delta  = (1 - exp(-gamma * rho_x)) + (1 - exp(-gamma * rho_y))
-/// omega_w = |w1 - w2| / max(w1, w2),   omega_h = |h1 - h2| / max(h1, h2)
-/// Omega  = (1 - exp(-omega_w))^theta + (1 - exp(-omega_h))^theta
-/// L_SIoU = (1 - IoU) + 0.5 * (Delta + Omega)
-/// ```
-///
-/// The exact algebraic identity `Lambda = 2 |dx| |dy| / (dx² + dy²)` eliminates the `arcsin` branch switch
-/// at 45° (where `Lambda` is `C^∞`-smooth with zero normal derivative) and stays numerically exact at every
-/// positive scale. On exact horizontal or vertical collinear alignment (`dx == 0` or `dy == 0`), `Lambda`
-/// has a symmetric V-shaped cusp whose symmetric subgradient (`sgn(0) = 0`) matches central finite differences.
-pub(crate) fn siou_box_f64(a: [f64; 4], b: [f64; 4], theta: f64) -> (f64, [f64; 4]) {
+/// Pure SIoU geometric penalty `0.5 * (Delta + Omega)` and its exact closed-form `f64` analytical
+/// gradient w.r.t. `a` (without the `1 - IoU` term).
+pub(super) fn siou_penalty_f64(a: [f64; 4], b: [f64; 4], theta: f64) -> (f64, [f64; 4]) {
     if !a.iter().chain(&b).all(|v| v.is_finite()) {
         return (f64::NAN, [f64::NAN; 4]);
     }
-    let iou = one_minus_iou_f64(a, b);
-    let mut g = iou.grad;
+    let mut g = [0.0f64; 4];
     let (ax1, ay1, ax2, ay2) = (a[0], a[1], a[2], a[3]);
     let (bx1, by1, bx2, by2) = (b[0], b[1], b[2], b[3]);
+
+    let w1 = (ax2 - ax1).max(0.0);
+    let h1 = (ay2 - ay1).max(0.0);
+    let w2 = (bx2 - bx1).max(0.0);
+    let h2 = (by2 - by1).max(0.0);
+    let mx = w1.max(w2);
+    let my = h1.max(h2);
+    let inv_sx = if mx > 0.0 { 1.0 / mx } else { 1.0 };
+    let inv_sy = if my > 0.0 { 1.0 / my } else { 1.0 };
+    let (w1s, w2s) = (w1 * inv_sx, w2 * inv_sx);
+    let (h1s, h2s) = (h1 * inv_sy, h2 * inv_sy);
 
     // Center displacements: dx = cx2 - cx1, dy = cy2 - cy1 (d/dax = -0.5, d/day = -0.5).
     let dx = 0.5 * ((bx1 - ax1) + (bx2 - ax2));
@@ -325,14 +332,44 @@ pub(crate) fn siou_box_f64(a: [f64; 4], b: [f64; 4], theta: f64) -> (f64, [f64; 
         let df_ds1 = 0.5 * theta * om_e.powf(theta - 1.0) * e * d_omega_ds1 * inv_s;
         (pen, df_ds1)
     };
-    let (pen_w, df_dw1) = shape_axis(iou.w1s, iou.w2s, iou.inv_sx, ax2 > ax1);
-    let (pen_h, df_dh1) = shape_axis(iou.h1s, iou.h2s, iou.inv_sy, ay2 > ay1);
+    let (pen_w, df_dw1) = shape_axis(w1s, w2s, inv_sx, ax2 > ax1);
+    let (pen_h, df_dh1) = shape_axis(h1s, h2s, inv_sy, ay2 > ay1);
     g[0] -= df_dw1;
     g[2] += df_dw1;
     g[1] -= df_dh1;
     g[3] += df_dh1;
 
-    (iou.one_minus_iou + delta_half + pen_w + pen_h, g)
+    (delta_half + pen_w + pen_h, g)
+}
+
+/// Single-box SIoU forward `(loss, dL/d(ax1, ay1, ax2, ay2))` in `f64` (Gevorgyan 2022, arXiv:2205.12740):
+///
+/// ```text
+/// dx = cx2 - cx1,   dy = cy2 - cy1
+/// Lambda = 1 - 2 * sin²(arcsin(min(|dx|, |dy|) / sqrt(dx² + dy²)) - pi/4)
+///        = 2 * |dx| * |dy| / (dx² + dy²)              (exact trig identity; 0 when dx == dy == 0)
+/// gamma  = 2 - Lambda                                  (in [1, 2])
+/// rho_x  = (dx / cw)²,   rho_y = (dy / ch)²
+/// Delta  = (1 - exp(-gamma * rho_x)) + (1 - exp(-gamma * rho_y))
+/// omega_w = |w1 - w2| / max(w1, w2),   omega_h = |h1 - h2| / max(h1, h2)
+/// Omega  = (1 - exp(-omega_w))^theta + (1 - exp(-omega_h))^theta
+/// L_SIoU = (1 - IoU) + 0.5 * (Delta + Omega)
+/// ```
+///
+/// The exact algebraic identity `Lambda = 2 |dx| |dy| / (dx² + dy²)` eliminates the `arcsin` branch switch
+/// at 45° (where `Lambda` is `C^∞`-smooth with zero normal derivative) and stays numerically exact at every
+/// positive scale. On exact horizontal or vertical collinear alignment (`dx == 0` or `dy == 0`), `Lambda`
+/// has a symmetric V-shaped cusp whose symmetric subgradient (`sgn(0) = 0`) matches central finite differences.
+pub(crate) fn siou_box_f64(a: [f64; 4], b: [f64; 4], theta: f64) -> (f64, [f64; 4]) {
+    if !a.iter().chain(&b).all(|v| v.is_finite()) {
+        return (f64::NAN, [f64::NAN; 4]);
+    }
+    let iou = one_minus_iou_f64(a, b);
+    let (pen, gp) = siou_penalty_f64(a, b, theta);
+    (
+        iou.one_minus_iou + pen,
+        [iou.grad[0] + gp[0], iou.grad[1] + gp[1], iou.grad[2] + gp[2], iou.grad[3] + gp[3]],
+    )
 }
 
 /// Differentiable Scylla-IoU (SIoU) loss (Gevorgyan 2022, arXiv:2205.12740) between rows of `b1` (predicted)

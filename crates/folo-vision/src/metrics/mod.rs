@@ -14,14 +14,25 @@
 //! class-mean F1 at IoU 0.5 (as Ultralytics reports them). `docs/METRICS.md` spells out every step and how this
 //! differs from Ultralytics' own AP.
 
+pub mod coco_scale;
 pub mod diagnostics;
 #[cfg(test)]
+mod tests_coco_tide;
+#[cfg(test)]
 mod tests_diagnostics;
+pub mod tide;
 
+pub use coco_scale::{
+    CocoScaleClassMetrics, CocoScaleDiagnostics, ScaleAreaBounds, compute_coco_scale_metrics,
+};
 pub use diagnostics::{
     CalibrationSummary, ClassPrCurve, DetectionCalibrationDiagnostics, DetectionConfusionMatrix,
     OptimalF1Point, PrCurveDiagnostics, PrCurvePoint, ReliabilityBin, compute_detection_calibration,
     compute_pr_curves, reliability_from_scores,
+};
+pub use tide::{
+    TideClassBreakdown, TideConfig, TideDiagnostics, TideErrorCounts, TideErrorImpacts,
+    compute_tide_diagnostics,
 };
 
 use crate::boxes::Xyxy;

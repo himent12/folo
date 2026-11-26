@@ -3,6 +3,8 @@
 //! - [`vfl_qfl`]: Standalone cancellation-free Varifocal Loss (VFL) and Quality Focal Loss (QFL) with reductions,
 //! - [`asl_poly`]: Asymmetric Loss (ASL), Poly-1 BCE, and Poly-1 Focal Loss,
 //! - [`box_loss`]: CIoU, Inner-CIoU, R-PIoU, S-AEIoU,
+//! - [`inner_iou`]: Generalized Inner-IoU auxiliary-box wrapper composing with IoU / GIoU / DIoU / CIoU / EIoU / SIoU / MPDIoU,
+//! - [`slide_loss`]: SlideLoss & EMA-SlideLoss adaptive hard-boundary re-weighting,
 //! - [`nwd_wiou`]: Normalized Wasserstein Distance (NWD) and Wise-IoU v1 / v3,
 //! - [`geom_loss`]: MPDIoU, Shape-IoU, and Focaler-IoU remapping,
 //! - [`piou`]: Powerful-IoU v1 (`PIoU`) and v2 (`PIoU2`) with non-monotonic attention focusing,
@@ -14,9 +16,11 @@ mod box_loss;
 mod cls;
 mod dfl;
 mod geom_loss;
+mod inner_iou;
 mod nwd_wiou;
 mod piou;
 mod siou_eiou;
+mod slide_loss;
 mod vfl_qfl;
 
 #[cfg(test)]
@@ -33,6 +37,11 @@ pub(crate) use dfl::crps_dfl;
 pub use geom_loss::{focaler_iou, focaler_iou_loss, mpdiou_loss, mpdiou_loss_with_scale, shape_iou_loss};
 #[cfg(test)]
 pub(crate) use geom_loss::{mpdiou_box_f64, shape_iou_box_f64};
+pub use inner_iou::{InnerIouBase, inner_iou, inner_iou_loss, wrap_inner_iou_loss};
+#[cfg(test)]
+pub(crate) use inner_iou::{
+    ciou_aspect_penalty_f64, inner_iou_box_f64, inner_iou_loss_box_f64, inner_one_minus_iou_f64,
+};
 #[cfg(test)]
 pub(crate) use nwd_wiou::{
     nwd_box_eps_f64, nwd_box_f64, wiou_v1_box_f64, wiou_v3_box_f64, wiou_v3_focus_gain,
@@ -44,6 +53,12 @@ pub(crate) use piou::{piou_attention_from_p_f64, piou_box_f64, piou2_box_f64};
 #[cfg(test)]
 pub(crate) use siou_eiou::{eiou_box_f64, siou_box_f64};
 pub use siou_eiou::{eiou_loss, siou_loss};
+#[cfg(test)]
+pub(crate) use slide_loss::slide_bce_elem_f64;
+pub use slide_loss::{
+    DEFAULT_SLIDE_DELTA, EmaSlideLoss, SlideLossConfig, SlideWeightKind, slide_bce_loss, slide_reweight_loss,
+    slide_weight, slide_weight_f64,
+};
 
 use folo_core::{DType, Result, Tensor};
 

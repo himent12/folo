@@ -61,13 +61,22 @@ pub use calibration::{
 };
 pub use decode::Anchors;
 pub use error::{Error, Result};
-pub use loss::{DistillConfig, ImageTargets, LossConfig, LossItems, LossOutput, detection_loss};
+pub use loss::{
+    DistillConfig, EmaSlideLoss, ImageTargets, InnerIouBase, LossConfig, LossItems, LossOutput,
+    SlideLossConfig, SlideWeightKind, detection_loss, inner_iou, inner_iou_loss, slide_bce_loss,
+    slide_reweight_loss, wrap_inner_iou_loss,
+};
 pub use metrics::{
-    CalibrationSummary, ClassPrCurve, DetectionCalibrationDiagnostics, DetectionConfusionMatrix, EvalConfig,
-    EvalReport, Evaluator, OptimalF1Point, PrCurveDiagnostics, PrCurvePoint, ReliabilityBin, Truth,
-    compute_detection_calibration, compute_pr_curves, reliability_from_scores,
+    CalibrationSummary, ClassPrCurve, CocoScaleClassMetrics, CocoScaleDiagnostics,
+    DetectionCalibrationDiagnostics, DetectionConfusionMatrix, EvalConfig, EvalReport, Evaluator,
+    OptimalF1Point, PrCurveDiagnostics, PrCurvePoint, ReliabilityBin, ScaleAreaBounds, TideClassBreakdown,
+    TideConfig, TideDiagnostics, TideErrorCounts, TideErrorImpacts, Truth, compute_coco_scale_metrics,
+    compute_detection_calibration, compute_pr_curves, compute_tide_diagnostics, reliability_from_scores,
 };
 pub use model::{FoloModel, HeadOutput, ModelConfig};
-pub use nms::{Detection, NmsConfig, NmsKind};
+pub use nms::{
+    ClusterNmsConfig, ClusterNmsEntry, ClusterScoreDecay, Detection, NmsConfig, NmsKind, batched_cluster_nms,
+    batched_fast_nms, cluster_nms, cluster_nms_detections, fast_nms, fast_nms_detections,
+};
 pub use predict::{Precision, PredictConfig, Prediction, Predictor, PreparedBatch, Timing};
 pub use train::{TrainConfig, TrainData, TrainOptions, Trainer};
