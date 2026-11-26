@@ -240,6 +240,11 @@ export default function LineChart(props: LineChartProps) {
   // Touch: a tap or a sideways scrub pins the cursor and its readout until it is tapped again, a tap lands outside
   // the chart or Escape is pressed (./pin). A mouse reads out on hover, as before.
   const pinned = signal(false);
+  // Keyboard scrubbing announces the values under the cursor. The text is written from the key handler itself, so
+  // pointer movement here or on a linked chart never produces announcements.
+  const spoken = signal('');
+  let speakSeq = 0;
+  onCleanup(() => speakSeq++);
   let gesture: TouchGesture | null = null;
   const svgEl = signal<SVGSVGElement>();
   function apply(a: PinAction) {
@@ -248,9 +253,11 @@ export default function LineChart(props: LineChartProps) {
       spoken.set('');
       cursor.set(null);
       pinned.set(false);
-    } else if (a.kind === 'set' && inPlot(a.px) && hasData.peek() && keyed.peek().length > 0) {
+    } else if (a.kind === 'set' && inPlot(a.px)) {
       const m = margin.peek();
-      cursor.set(x.peek().invert(Math.min(width.peek() - m.right, Math.max(m.left, a.px))));
+      const next = x.peek().invert(Math.min(width.peek() - m.right, Math.max(m.left, a.px)));
+      if (hoverOf(next, hasData.peek(), xExtent.peek(), keyed.peek(), p.xTitle, xFormat.peek(), x.peek()) === null) return;
+      cursor.set(next);
       pinned.set(true);
       tapHint.set(false);
     }
@@ -293,12 +300,15 @@ export default function LineChart(props: LineChartProps) {
     }
   }
   // A cursor cleared elsewhere (a synced chart, blur) is no longer pinned here, picks nothing, and drops stale speech.
+  // If data disappears while pinned, drop the pin so an invisible cursor never keeps claiming Escape.
   effect(() => {
     if (cursor.get() === null) {
       speakSeq++;
       spoken.set('');
       pinned.set(false);
       picked.set(null);
+    } else if (hover.get() === null) {
+      pinned.set(false);
     }
   });
 
@@ -383,12 +393,6 @@ export default function LineChart(props: LineChartProps) {
   // Narrow plots: the cursor's x reads out on the axis, not in the legend's note.
   const compact = computed(() => width.get() > 0 && width.get() < 480);
   const pill = computed(() => pillOf(compact.get(), hover.get(), width.get()));
-
-  // Keyboard scrubbing announces the values under the cursor. The text is written from the key handler itself, so
-  // pointer movement here or on a linked chart never produces announcements.
-  const spoken = signal('');
-  let speakSeq = 0;
-  onCleanup(() => speakSeq++);
 
   const summary = computed(() => seriesSummary(keyed.get()));
 

@@ -153,6 +153,7 @@ export default function XYChart(props: XYChartProps) {
     return best;
   };
   const pinned = signal(false);
+  const spoken = signal('');
   let gesture: TouchGesture | null = null;
   const svgEl = signal<SVGSVGElement>();
   const readoutH = signal(0);
@@ -253,7 +254,6 @@ export default function XYChart(props: XYChartProps) {
     rectCache.clear();
     if (!touchy(e) && !pinned.peek()) cursor.set(null);
   }
-  const spoken = signal('');
   function onkeydown(e: KeyboardEvent) {
     if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
     const st = stops.peek();

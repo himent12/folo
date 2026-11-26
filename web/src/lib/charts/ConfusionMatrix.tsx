@@ -294,6 +294,13 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
       pinned.set(null);
     }
   }
+  function onclick(e: MouseEvent) {
+    const at = cellCoords(e.target);
+    if (!at) return;
+    focus.set(at);
+    hovered.set(at);
+    pinned.set(at);
+  }
 
   function onkeydown(e: KeyboardEvent) {
     if (e.defaultPrevented || e.altKey) return;
@@ -503,6 +510,7 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
         onpointerout={onpointerout}
         onfocusin={onfocusin}
         onfocusout={onfocusout}
+        onclick={onclick}
       >
         <div class="row" role="row">
           <div class="corner" role="columnheader">

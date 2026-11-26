@@ -240,15 +240,45 @@ describe('LineChart touch readout', () => {
     unmount(c);
   });
 
-  it('does not arm a phantom touch pin on an empty chart', () => {
-    const { c, svg } = mountAt({ series: [], label: 'empty' }, 400);
-    svg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 200, clientY: 50, bubbles: true }));
-    svg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 200, clientY: 50, bubbles: true }));
+  it('does not arm a phantom touch pin on an empty chart or in a live chart future band, and drops the pin if data clears', () => {
+    const { c: emptyC, svg: emptySvg } = mountAt({ series: [], label: 'empty' }, 400);
+    emptySvg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 200, clientY: 50, bubbles: true }));
+    emptySvg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 200, clientY: 50, bubbles: true }));
     flushSync();
-    const esc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
-    document.dispatchEvent(esc);
+    const emptyEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    document.dispatchEvent(emptyEsc);
     flushSync();
-    expect(esc.defaultPrevented).toBe(false);
+    expect(emptyEsc.defaultPrevented).toBe(false);
+    unmount(emptyC);
+
+    // Live run with data on epochs 0..2 inside a planned domain 0..20: tapping the future region must not arm a pin.
+    const props = deep({
+      series: [{ id: 'a', label: 'mAP', color: 'red', points: [0, 1, 2].map((x) => ({ x, y: x / 10 })) }],
+      label: 'live',
+      xDomain: [0, 20] as [number, number],
+      picked: null as string | null,
+    });
+    const { target, c, svg } = mountAt(props, 400);
+    svg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 350, clientY: 50, bubbles: true }));
+    svg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 350, clientY: 50, bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.cursor')).toBeNull();
+    const futureEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    document.dispatchEvent(futureEsc);
+    flushSync();
+    expect(futureEsc.defaultPrevented).toBe(false);
+
+    // Pinning on real data then clearing the series drops the pin so Escape is no longer claimed.
+    svg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 60, clientY: 50, bubbles: true }));
+    svg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 60, clientY: 50, bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.cursor.pinned')).toBeTruthy();
+    props.series = [];
+    flushSync();
+    const goneEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    document.dispatchEvent(goneEsc);
+    flushSync();
+    expect(goneEsc.defaultPrevented).toBe(false);
     unmount(c);
   });
 });

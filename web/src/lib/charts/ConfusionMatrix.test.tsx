@@ -164,11 +164,17 @@ describe('ConfusionMatrix labels', () => {
       expect(lastCell.classList.contains('pin')).toBe(true);
       pop.remove();
 
-      // Escape clears the active pin/readout and consumes the event; pressing End on the edge cell re-activates it.
+      // Escape clears the active pin/readout and consumes the event; clicking or arrowing on the same cell re-activates it.
       const activeEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
       grid.dispatchEvent(activeEsc);
       flushSync();
       expect(activeEsc.defaultPrevented).toBe(true);
+      expect(target.querySelectorAll('.cell.pin')).toHaveLength(0);
+      lastCell.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      flushSync();
+      expect(lastCell.classList.contains('pin')).toBe(true);
+      grid.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      flushSync();
       expect(target.querySelectorAll('.cell.pin')).toHaveLength(0);
       grid.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
       flushSync();
