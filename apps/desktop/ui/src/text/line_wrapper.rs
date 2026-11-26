@@ -174,7 +174,9 @@ impl LineWrapper {
                     } else {
                         last_wrap_ix = ix;
                         width = item_width;
-                        line_has_non_whitespace = new_prev_c != ' ';
+                        if carry_indent {
+                            line_has_non_whitespace = new_prev_c != ' ';
+                        }
                     }
 
                     if carry_indent && let Some(indent) = indent {

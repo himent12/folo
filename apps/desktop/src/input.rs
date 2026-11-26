@@ -518,7 +518,8 @@ impl EntityInputHandler for TextInput {
         let last_layout = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range_utf16);
         let x = |o: usize| bounds.left() + last_layout.x_for_index(self.shown(o)) - self.scroll_x;
-        Some(Bounds::from_corners(point(x(range.start), bounds.top()), point(x(range.end), bounds.bottom())))
+        let (x1, x2) = (x(range.start), x(range.end));
+        Some(Bounds::from_corners(point(x1.min(x2), bounds.top()), point(x1.max(x2), bounds.bottom())))
     }
 
     fn character_index_for_point(
@@ -544,7 +545,7 @@ struct TextElement {
 struct PrepaintState {
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
-    selection: Option<PaintQuad>,
+    selection: Vec<PaintQuad>,
     scroll_x: Pixels,
     /// Placeholder text starts just right of the caret.
     text_dx: Pixels,
@@ -665,25 +666,27 @@ impl Element for TextElement {
         let focused = input.focus_handle.is_focused(window);
         let (selection, cursor) = if selected_range.is_empty() || empty || !focused {
             (
-                None,
+                Vec::new(),
                 Some(fill(
                     Bounds::new(point(bounds.left() + cursor_pos, caret_top), size(px(1.5), caret_h)),
                     t.accent_fill(),
                 )),
             )
         } else {
-            let x1 = line.x_for_index(selected_range.start);
-            let x2 = line.x_for_index(selected_range.end);
-            (
-                Some(fill(
-                    Bounds::from_corners(
-                        point(bounds.left() + x1.min(x2) - scroll_x, caret_top),
-                        point(bounds.left() + x1.max(x2) - scroll_x, caret_top + caret_h),
-                    ),
-                    alpha(t.accent_fill(), 0.28),
-                )),
-                None,
-            )
+            let quads = line
+                .selection_spans(selected_range)
+                .into_iter()
+                .map(|(x1, x2)| {
+                    fill(
+                        Bounds::from_corners(
+                            point(bounds.left() + x1.min(x2) - scroll_x, caret_top),
+                            point(bounds.left() + x1.max(x2) - scroll_x, caret_top + caret_h),
+                        ),
+                        alpha(t.accent_fill(), 0.28),
+                    )
+                })
+                .collect();
+            (quads, None)
         };
         let text_dx = if empty { px(4.) } else { px(0.) };
         PrepaintState { line: Some(line), cursor, selection, scroll_x, text_dx }
@@ -703,11 +706,11 @@ impl Element for TextElement {
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
         let line = prepaint.line.take().unwrap();
         let scroll_x = prepaint.scroll_x;
-        let selection = prepaint.selection.take();
+        let selection = std::mem::take(&mut prepaint.selection);
         let cursor = focus_handle.is_focused(window).then(|| prepaint.cursor.take()).flatten();
         window.with_content_mask(Some(folo_ui::ContentMask { bounds }), |window| {
-            if let Some(selection) = selection {
-                window.paint_quad(selection)
+            for quad in selection {
+                window.paint_quad(quad);
             }
             line.paint(
                 point(bounds.origin.x - scroll_x + prepaint.text_dx, bounds.origin.y),

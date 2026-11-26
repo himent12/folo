@@ -59,6 +59,32 @@ impl<'a> GraphemeCursor<'a> {
 }
 
 impl LineLayout {
+    fn run_is_rtl(&self, run_ix: usize) -> bool {
+        let Some(run) = self.runs.get(run_ix) else { return false };
+        let (Some(first), Some(last)) = (run.glyphs.first(), run.glyphs.last()) else {
+            return false;
+        };
+        if first.index != last.index {
+            return first.index > last.index;
+        }
+        // Single-cluster run (e.g. font fallback inside an RTL word): check whether an adjacent
+        // run sits in descending logical order relative to this cluster.
+        let prev_desc = self.runs[..run_ix]
+            .iter()
+            .rev()
+            .find_map(|r| r.glyphs.last().map(|g| g.index))
+            .is_some_and(|prev_ix| prev_ix > first.index);
+        let next_desc = self.runs[run_ix + 1..]
+            .iter()
+            .find_map(|r| r.glyphs.first().map(|g| g.index))
+            .is_some_and(|next_ix| next_ix < last.index);
+        prev_desc || next_desc
+    }
+
+    fn has_rtl_run(&self) -> bool {
+        (0..self.runs.len()).any(|i| self.run_is_rtl(i))
+    }
+
     /// The index of the character at `x` (`None` at or past the line's width).
     pub fn index_for_x(&self, x: Pixels) -> Option<usize> {
         if x >= self.width {
@@ -76,33 +102,135 @@ impl LineLayout {
     }
 
     /// The character boundary closest to `x` (e.g. to keep the column on up / down arrow keys).
+    /// Handles visual-order RTL and mixed bidi runs consistently with [`Self::x_for_index`].
     pub fn closest_index_for_x(&self, x: Pixels) -> usize {
-        let mut prev_index = 0;
-        let mut prev_x = px(0.);
+        if !self.has_rtl_run() {
+            let mut prev_index = 0;
+            let mut prev_x = px(0.);
 
-        for run in self.runs.iter() {
-            for glyph in run.glyphs.iter() {
-                if glyph.position.x >= x {
-                    if glyph.position.x - x < x - prev_x {
-                        return glyph.index;
+            for run in self.runs.iter() {
+                for glyph in run.glyphs.iter() {
+                    if glyph.position.x >= x {
+                        if glyph.position.x - x < x - prev_x {
+                            return glyph.index;
+                        } else {
+                            return prev_index;
+                        }
+                    }
+                    prev_index = glyph.index;
+                    prev_x = glyph.position.x;
+                }
+            }
+
+            if self.len == 1 {
+                if x > self.width / 2. {
+                    return 1;
+                } else {
+                    return 0;
+                }
+            }
+
+            return self.len;
+        }
+
+        // Collect sorted distinct logical cluster indices plus `self.len` so every cluster knows
+        // its logical end boundary.
+        let mut sorted_indices: Vec<usize> =
+            self.runs.iter().flat_map(|r| r.glyphs.iter().map(|g| g.index)).collect();
+        sorted_indices.sort_unstable();
+        sorted_indices.dedup();
+        if sorted_indices.last().copied() != Some(self.len) {
+            sorted_indices.push(self.len);
+        }
+        let next_logical = |idx: usize| -> usize {
+            let pos = sorted_indices.partition_point(|&i| i <= idx);
+            sorted_indices.get(pos).copied().unwrap_or(self.len)
+        };
+
+        let mut best: Option<(Pixels, usize)> = None;
+        let mut consider = |stop_x: Pixels, idx: usize| {
+            let dist = (stop_x - x).abs();
+            if best.is_none_or(|(best_dist, _)| dist < best_dist) {
+                best = Some((dist, idx));
+            }
+        };
+
+        for (run_ix, run) in self.runs.iter().enumerate() {
+            if run.glyphs.is_empty() {
+                continue;
+            }
+            let is_rtl = self.run_is_rtl(run_ix);
+            let run_right = self.runs[run_ix + 1..]
+                .iter()
+                .find_map(|r| r.glyphs.first().map(|g| g.position.x))
+                .unwrap_or(self.width);
+            let mut g_ix = 0;
+            while g_ix < run.glyphs.len() {
+                let cluster_idx = run.glyphs[g_ix].index;
+                let left_x = run.glyphs[g_ix].position.x;
+                let mut end = g_ix + 1;
+                while end < run.glyphs.len() && run.glyphs[end].index == cluster_idx {
+                    end += 1;
+                }
+                let right_x = run.glyphs.get(end).map_or(run_right, |g| g.position.x);
+                let end_logical = next_logical(cluster_idx);
+                if is_rtl {
+                    consider(left_x, end_logical);
+                    consider(right_x, cluster_idx);
+                } else {
+                    consider(left_x, cluster_idx);
+                    consider(right_x, end_logical);
+                }
+                g_ix = end;
+            }
+        }
+        best.map_or(self.len, |(_, idx)| idx)
+    }
+
+    /// The visual horizontal spans `(left_x, right_x)` covered by the logical byte `range`.
+    /// Returns a single span for LTR or pure-RTL ranges, and disjoint spans when a logical range
+    /// crosses bidi direction boundaries (e.g. mixed Latin and Hebrew).
+    pub fn selection_spans(&self, range: std::ops::Range<usize>) -> SmallVec<[(Pixels, Pixels); 1]> {
+        let mut spans = SmallVec::new();
+        if range.is_empty() {
+            return spans;
+        }
+        if !self.has_rtl_run() {
+            let x1 = self.x_for_index(range.start);
+            let x2 = self.x_for_index(range.end);
+            spans.push((x1.min(x2), x1.max(x2)));
+            return spans;
+        }
+        for (run_ix, run) in self.runs.iter().enumerate() {
+            if run.glyphs.is_empty() {
+                continue;
+            }
+            let run_right = self.runs[run_ix + 1..]
+                .iter()
+                .find_map(|r| r.glyphs.first().map(|g| g.position.x))
+                .unwrap_or(self.width);
+            let mut g_ix = 0;
+            while g_ix < run.glyphs.len() {
+                let cluster_idx = run.glyphs[g_ix].index;
+                let left_x = run.glyphs[g_ix].position.x;
+                let mut end = g_ix + 1;
+                while end < run.glyphs.len() && run.glyphs[end].index == cluster_idx {
+                    end += 1;
+                }
+                let right_x = run.glyphs.get(end).map_or(run_right, |g| g.position.x);
+                if range.contains(&cluster_idx) {
+                    if let Some((_, prev_right)) = spans.last_mut()
+                        && left_x <= *prev_right + px(0.5)
+                    {
+                        *prev_right = (*prev_right).max(right_x);
                     } else {
-                        return prev_index;
+                        spans.push((left_x, right_x));
                     }
                 }
-                prev_index = glyph.index;
-                prev_x = glyph.position.x;
+                g_ix = end;
             }
         }
-
-        if self.len == 1 {
-            if x > self.width / 2. {
-                return 1;
-            } else {
-                return 0;
-            }
-        }
-
-        self.len
+        spans
     }
 
     /// The x position of the character at `index` (the line's logical end past the last glyph).
@@ -115,24 +243,7 @@ impl LineLayout {
             if run.glyphs.is_empty() {
                 continue;
             }
-            let first_ix = run.glyphs.first().unwrap().index;
-            let last_ix = run.glyphs.last().unwrap().index;
-            let is_rtl = if first_ix != last_ix {
-                first_ix > last_ix
-            } else {
-                // Single-cluster run (e.g. font fallback inside an RTL word): check whether an
-                // adjacent run sits in descending logical order relative to this cluster.
-                let prev_desc = self.runs[..run_ix]
-                    .iter()
-                    .rev()
-                    .find_map(|r| r.glyphs.last().map(|g| g.index))
-                    .is_some_and(|prev_ix| prev_ix > first_ix);
-                let next_desc = self.runs[run_ix + 1..]
-                    .iter()
-                    .find_map(|r| r.glyphs.first().map(|g| g.index))
-                    .is_some_and(|next_ix| next_ix < last_ix);
-                prev_desc || next_desc
-            };
+            let is_rtl = self.run_is_rtl(run_ix);
             let run_max_ix = run.glyphs.iter().map(|g| g.index).max().unwrap_or(0);
             if max_run.is_none_or(|(prev_max, _, _)| run_max_ix >= prev_max) {
                 max_run = Some((run_max_ix, is_rtl, run.glyphs[0].position.x));

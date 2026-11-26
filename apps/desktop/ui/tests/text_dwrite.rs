@@ -323,8 +323,16 @@ fn rtl_and_bidi_runs_preserve_all_glyphs_and_visual_positions() {
         caret_xs.windows(2).all(|w| w[0] > w[1]),
         "RTL logical carets walk strictly right-to-left: {caret_xs:?}"
     );
+    // Hit-testing round-trips with caret positioning on both sides of the RTL word.
+    assert_eq!(line.closest_index_for_x(line.width), 0, "clicking right side of RTL maps to logical start");
+    assert_eq!(
+        line.closest_index_for_x(px(0.)),
+        hebrew.len(),
+        "clicking left side of RTL maps to logical end"
+    );
 
-    // Trailing RTL run ("hello שלום"): logical end sits at the left edge of the Hebrew run.
+    // Trailing RTL run ("hello שלום"): logical end sits at the left edge of the Hebrew run, and
+    // Select All covers the full visual width [0..line.width].
     let trailing_rtl = "hello שלום";
     let trailing_line = layout(&ts, regular, trailing_rtl, 14.);
     let heb_left = trailing_line
@@ -339,6 +347,10 @@ fn rtl_and_bidi_runs_preserve_all_glyphs_and_visual_positions() {
         heb_left,
         "logical end of a trailing RTL run sits at its visual left edge"
     );
+    let all_spans = trailing_line.selection_spans(0..trailing_rtl.len());
+    assert_eq!(all_spans.len(), 1, "Select All on mixed text merges into one full-width span");
+    assert_eq!(f(all_spans[0].0), 0.0);
+    assert!((f(all_spans[0].1) - f(trailing_line.width)).abs() < 0.5);
 
     // Pure Arabic ("مرحبا", 5 chars): must not collapse to a single glyph; every index is a valid
     // char boundary and visual positions advance left-to-right.

@@ -302,6 +302,32 @@ fn line_clamp_with_truncate_elides_final_line_from_actual_wrap_boundaries() {
     let ref_ellipsis = ls[2][0].mask.id;
     assert_eq!(ls[0].len() + ls[1].len(), 10, "all 10 letters must remain intact");
     assert_ne!(ls[1].last().unwrap().mask.id, ref_ellipsis, "fitting leading-space text must not be elided");
+
+    // Exact-width word followed by space + overlong word (`"aaaaaa aaaaaaaaa"` in 36 px / 3 lines):
+    // truncator wrap boundaries must match paint wrapping so line 3 stays <= 36 px and ends with `…`.
+    let (mut app, window) = open(|_, _| {
+        div()
+            .flex()
+            .flex_col()
+            .child(text_box(36.).line_clamp(3).text_ellipsis().child("aaaaaa aaaaaaaaa"))
+            .child(text_box(36.).child("…"))
+            .into_any_element()
+    });
+    let scene = draw(&mut app, window);
+    let glyphs = sprites(&scene);
+    let ls = lines(&glyphs);
+    let ref_ellipsis = ls.last().unwrap()[0].mask.id;
+    let last_text_line = &ls[ls.len() - 2];
+    assert!(
+        last_text_line.last().unwrap().bounds.right().0 <= 36.0,
+        "clamped final line must stay within 36 px, got {}",
+        last_text_line.last().unwrap().bounds.right().0
+    );
+    assert_eq!(
+        last_text_line.last().unwrap().mask.id,
+        ref_ellipsis,
+        "clamped final line must end with ellipsis"
+    );
 }
 
 #[test]

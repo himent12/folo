@@ -666,4 +666,40 @@ fn rtl_text_input_partial_selection_paints_positive_width_highlight() {
         "RTL partial selection highlight must have positive width, got {:?}",
         sel_quads[0].bounds
     );
+
+    // Select All on mixed LTR + RTL ("hello שלום") must highlight the full width including the
+    // Hebrew run, not stop at the left edge of the Hebrew run.
+    app.update(|cx| {
+        input.update(cx, |inp, cx| inp.set_text("hello שלום", cx));
+    });
+    app.frame(window.into());
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent {
+            keystroke: Keystroke::parse("ctrl-a").unwrap(),
+            is_held: false,
+        }),
+    );
+    app.frame(window.into());
+    let scene = app.scene(window.into());
+    let rightmost_glyph = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            folo_ui::Primitive::MonoSprite(s) => Some(s.bounds.right()),
+            _ => None,
+        })
+        .fold(px(0.).scale(1.0), |a, b| a.max(b));
+    let sel_right = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            folo_ui::Primitive::Quad(q) if q.background.solid == accent_sel => Some(q.bounds.right()),
+            _ => None,
+        })
+        .fold(px(0.).scale(1.0), |a, b| a.max(b));
+    assert!(
+        sel_right + px(2.).scale(1.0) >= rightmost_glyph,
+        "Select All on mixed text must cover rightmost Hebrew glyph: sel_right={sel_right:?}, rightmost_glyph={rightmost_glyph:?}"
+    );
 }
