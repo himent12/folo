@@ -3,8 +3,8 @@
  * - A model of this server: its classes against the benchmark's (matched by name; it scores 0 on the ones it lacks),
  *   how many images, and whether to run the plan's conditions.
  * - A coding agent, picked as agent labeling picks it (../label/AgentFields), with honest defaults (48 images,
- *   unchanged only) and what they mean: the score is partial (agents give no confidences; without the conditions
- *   there is no robustness), and each image is a request.
+ *   unchanged only) and what they mean: calibration is measured when the agent reports confidences, fewer images or
+ *   unchanged-only leaves the score partial, and each image is a request.
  * - Any other model: its predictions as a JSON file, checked here with the server's rules ($lib/bench/external)
  *   before anything is sent, whether it gives confidences, and how to make the file (the example script for anything
  *   but a small benchmark; the API's requests for this benchmark, copyable). The file is read and parsed once, after
@@ -200,6 +200,12 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
     const a = agent.get();
     const n = agentN.get();
     return a && Number.isInteger(n) && n > 0 ? Math.ceil((n * (1 + (agentConditions.get() ? passes.get() : 0))) / (PER_CALL[a.id] ?? 4)) : 0;
+  });
+  const agentPartialReasons = computed(() => {
+    const n = agentN.get();
+    const fewer = Number.isInteger(n) && n >= 1 && n < props.bench.images;
+    const noConds = props.bench.plan.conditions.length > 0 && !agentConditions.get();
+    return [fewer ? 'fewer images' : null, noConds ? 'unchanged images only' : null].filter(Boolean) as string[];
   });
 
   // ---------- external: the file, read and checked as it is picked ----------
@@ -624,7 +630,8 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
         ) : kind.get() === 'agent' ? (
           <>
             <p class="note lead-note">
-              The agent looks at each image and draws boxes, as agent labeling asks. Its score is partial: agents give no confidences, so calibration is not measured{agentConditions.get() ? '' : ', and on the unchanged images alone neither is robustness'}.
+              The agent looks at each image and draws boxes with confidences, so calibration is measured when it reports them.
+              {agentPartialReasons.get().length ? ` With ${agentPartialReasons.get().join(' and ')}, its score is partial.` : ''}
             </p>
             <div class="agent">
               <AgentFields

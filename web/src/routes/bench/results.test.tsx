@@ -179,10 +179,41 @@ describe("an entry's page", () => {
     await page(BenchEntry, '/benchmarks/bn_3c90/entries/be_f104');
     expect(document.querySelector('#score')).not.toBeNull();
     expect(document.querySelector('#calibration svg')).toBeNull();
+    expect(document.querySelector('#calibration .n-why')?.textContent).toMatch(/did not report confidences/);
     expect(document.querySelector('#robustness .heat')).toBeNull();
     // A measured axis takes a larger share than its plan weight, and says which is which.
     const w = document.querySelector('#score .r[data-axis="accuracy"] .c-w')!.textContent!;
     expect(w).toMatch(/^weight \d+%\d+% in the plan$/);
+  });
+
+  it('displays calibration and confidence-thresholded self-labeling for a scored agent entry (#739)', async () => {
+    const realEntries = hub.api.benchEntries.bind(hub.api);
+    const realResult = hub.api.benchResult.bind(hub.api);
+    const modelResult = await realResult('bn_3c90', 'be_f101');
+    const scoredAxes = modelResult.entry.score!.axes.map((a) => (a.axis === 'robustness' ? { ...a, value: null } : a));
+    vi.spyOn(hub.api, 'benchEntries').mockImplementation(async (id, s) =>
+      (await realEntries(id, s)).map((e) =>
+        e.id === 'be_f104' ? { ...e, scored: true, score: { ...e.score!, axes: scoredAxes } } : e,
+      ),
+    );
+    vi.spyOn(hub.api, 'benchResult').mockImplementation(async (id, eid, s) => {
+      const r = await realResult(id, eid, s);
+      if (eid !== 'be_f104') return r;
+      return {
+        ...r,
+        entry: { ...r.entry, scored: true, score: { ...r.entry.score!, axes: scoredAxes } },
+        calibration: modelResult.calibration,
+        self_labeling: modelResult.self_labeling,
+      };
+    });
+    await withWidth(async () => {
+      await page(BenchEntry, '/benchmarks/bn_3c90/entries/be_f104');
+      expect(document.querySelector('#score .r[data-axis="calibration"] .c-raw')?.textContent).toMatch(/^ECE /);
+      expect(document.querySelector('#calibration svg')).not.toBeNull();
+      expect(document.querySelector('#calibration .tone')?.textContent).toBeTruthy();
+      expect(document.querySelector('#self-labeling svg')).not.toBeNull();
+      expect(document.querySelector('#self-labeling .one')).toBeNull();
+    });
   });
 
   it('shows a running entry where it is, and a failed one why', async () => {

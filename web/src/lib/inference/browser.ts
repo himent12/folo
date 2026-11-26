@@ -3,7 +3,6 @@
 // fetched once; each model is loaded once per backend (loading parses and fuses it and, on WebGPU, compiles the
 // kernels, which takes seconds) and reused for every image. Results have /api/predict's shape plus `backend`.
 import { ApiError } from '$lib/api/client';
-import { hasFeature } from '$lib/api/queue';
 import type { Prediction, SystemInfo } from '$lib/api/types';
 import { signal } from 'fw';
 
@@ -63,16 +62,22 @@ function loadWasm(): Promise<WasmModule> {
 }
 
 /**
- * Whether `/api/system` says this Studio build includes folo-wasm (the one place that reads `web_wasm`). The server
- * speaks only for a page it serves (`servedHere`: same origin, not Vite's dev server, whose files the server cannot
- * see): there, `true` where it lists it, and `false` where a server that has the final list (it lists `run_cli`) leaves
- * it out. Anywhere else (another origin, the dev server, an older server that does not say) it is `null`, and then
- * `probeWasm` asks this page's own files: another server's runtime is not this page's.
+ * Whether a server's `features` list (from `/api/health` or `/api/system`) says this Studio build includes folo-wasm
+ * (the one place that reads `web_wasm`). The server speaks only for a page it serves (`servedHere`: same origin, not
+ * Vite's dev server, whose files the server cannot see): there, `true` where it lists `web_wasm`, and `false` where a
+ * server that has the final list (it lists `run_cli`) leaves it out. Anywhere else (another origin, the dev server, an
+ * older server that does not say) it is `null`, and then `probeWasm` asks this page's own files: another server's
+ * runtime is not this page's.
  */
+export function wasmFromFeatures(features: readonly string[] | null | undefined, servedHere = false): boolean | null {
+  if (!servedHere || !features) return null;
+  if (features.includes('web_wasm')) return true;
+  return features.includes('run_cli') ? false : null;
+}
+
+/** Same as `wasmFromFeatures`, reading `system.features`. */
 export function wasmFromSystem(system: SystemInfo | null | undefined, servedHere = false): boolean | null {
-  if (!servedHere) return null;
-  if (hasFeature(system, 'web_wasm')) return true;
-  return hasFeature(system, 'run_cli') ? false : null;
+  return wasmFromFeatures(system?.features, servedHere);
 }
 
 /** Whether the server at `serverUrl` serves this page: the same origin, in a built Studio (not Vite's dev server). */

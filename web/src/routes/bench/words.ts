@@ -414,7 +414,7 @@ export function axisWhyNot(axis: BenchAxis, e: Pick<BenchEntry, 'conditions' | '
   if (axis === 'calibration') {
     if (!e.scored)
       return e.contestant.kind === 'agent'
-        ? 'Agents give no confidences: an agent answers with the boxes it is sure of, so there is nothing to calibrate.'
+        ? 'This agent entry did not report confidences on its detections, so there is nothing to calibrate.'
         : 'It was added as a model that gives no confidences, so it was scored without them, also where its predictions carry scores.';
     return 'No detection on the unchanged images reached confidence 0.1.';
   }
