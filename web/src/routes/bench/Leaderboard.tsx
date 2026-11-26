@@ -20,6 +20,7 @@ import { href, router } from '$lib/router';
 import Button from '$lib/ui/Button';
 import CodeText from '$lib/ui/CodeText';
 import EmptyState from '$lib/ui/EmptyState';
+import Gate from '$lib/ui/Gate';
 import Ident from '$lib/ui/Ident';
 import InfoButton from '$lib/ui/InfoButton';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
@@ -44,6 +45,8 @@ export interface LeaderboardProps {
   selected?: string[];
   /** The stream is down: progress is as last heard. */
   lost?: boolean;
+  /** Why Add entry is disabled (e.g. offline or unsaved plan changes). */
+  addWhy?: string | null;
   onadd: () => void;
   onstop: (e: BenchEntry) => void;
   ondelete: (e: BenchEntry) => void;
@@ -163,9 +166,13 @@ export default function Leaderboard(props: LeaderboardProps) {
             title="No entries yet"
             description="An entry is one contestant's run of this benchmark: a model of this server, Claude Code, Codex or Antigravity looking at the images, or any other model's predictions. The first entry fixes the plan, so look over the conditions first."
             actions={() => (
-              <Button icon={Plus} onclick={props.onadd}>
-                Add entry
-              </Button>
+              <Gate reason={props.addWhy ?? null}>
+                {(why) => (
+                  <Button icon={Plus} disabled={!!why()} aria-describedby={why()} onclick={props.onadd}>
+                    Add entry
+                  </Button>
+                )}
+              </Gate>
             )}
           />
         ) : (

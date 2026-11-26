@@ -160,7 +160,7 @@ export function For<T>(props: ForProps<T>): JSX.Element {
     return { key, item, sig, idx, root, value, t };
   };
 
-  const makeFallback = (): { root: Owner; value: JSX.Element } => {
+  const makeFallback = (): { root: Owner; value: JSX.Element } | null => {
     const root = ownedRoot(parent);
     const prevOwner = swapOwner(root);
     let value: JSX.Element;
@@ -171,6 +171,10 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         raw = props.fallback;
       } finally {
         exitBranch();
+      }
+      if (raw === undefined) {
+        dispose(root);
+        return null;
       }
       value = settle(raw);
     } catch (e) {
@@ -241,9 +245,9 @@ export function For<T>(props: ForProps<T>): JSX.Element {
           outDirty = true;
           if (dropped !== null) noteDrop(dropped.err);
         }
-        if (fallback === null && props.fallback !== undefined) {
-          outDirty = true;
+        if (fallback === null && 'fallback' in props) {
           fallback = makeFallback();
+          if (fallback !== null) outDirty = true;
         }
         ran = true;
         if (outDirty) {
@@ -588,11 +592,11 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         }
         rows.length = n;
       }
-      if (n === 0 && fallback === null && props.fallback !== undefined) {
-        outDirty = true;
+      if (n === 0 && fallback === null && 'fallback' in props) {
         const root = ownedRoot(parent);
         const prevOwner = swapOwner(root);
         let value: JSX.Element;
+        let hasFallback = false;
         try {
           enterBranch(ran, false);
           let raw: JSX.Element;
@@ -601,7 +605,12 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
           } finally {
             exitBranch();
           }
-          value = settle(raw);
+          if (raw === undefined) {
+            dispose(root);
+          } else {
+            value = settle(raw);
+            hasFallback = true;
+          }
         } catch (e) {
           try {
             dispose(root);
@@ -612,7 +621,10 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         } finally {
           swapOwner(prevOwner);
         }
-        fallback = { root, value };
+        if (hasFallback) {
+          outDirty = true;
+          fallback = { root, value: value! };
+        }
       } else if (n > 0 && fallback !== null) {
         outDirty = true;
         const prevFallback = fallback;

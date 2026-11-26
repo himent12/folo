@@ -7,6 +7,7 @@ import { render, type Rendered } from '../../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { Bench, BenchImagePage } from '$lib/api/types';
+import { router } from '$lib/router';
 import {
   createExternalWorkerHandler,
   dispatchExternalWorkerMessage,
@@ -292,5 +293,94 @@ describe('AddEntryDialog worker offloading', () => {
     expect(partialReq.type === 'parse' && partialReq.ctx.imageIds).toBeNull();
     await wPartial.runAndDeliver();
     await until(() => document.querySelector('.f-state.ok'), 'partial validation succeeded');
+  });
+
+  it('guards route navigation while an external upload is pending, shows Stop sending?, and proceeds after Stop and discard', async () => {
+    router.go('/benchmarks/bn_9f03?add=external', { replace: true });
+    const { isOpen, validJson } = await mountDialog();
+    selectFile(new File([validJson], 'guarded.json', { type: 'application/json' }));
+    const worker = await until(() => spawned[0], 'worker spawned');
+    await worker.runAndDeliver();
+    await until(() => document.querySelector('.f-state.ok'), 'validated state');
+
+    // Submit without auto-answering the worker read so the send stays active.
+    const form = document.querySelector<HTMLFormElement>('dialog[open] form')!;
+    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    flushSync();
+
+    // Navigating away (e.g. Back to the entry page) is held and displays the stop confirmation.
+    router.go('/benchmarks/bn_9f03/entries/be_1');
+    flushSync();
+    expect(router.route.path).toBe('/benchmarks/bn_9f03');
+    expect(isOpen.get()).toBe(true);
+    expect(document.querySelector('dialog[open]')?.textContent).toContain('Stop sending?');
+
+    // Confirming "Stop and discard" aborts the send, closes the dialog, and completes the held navigation.
+    const stopBtn = [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find((b) => b.textContent?.trim() === 'Stop and discard')!;
+    stopBtn.click();
+    await until(() => !isOpen.get() && router.route.path === '/benchmarks/bn_9f03/entries/be_1', 'held navigation proceeded after stop');
+    expect(worker.terminated).toBe(true);
+  });
+
+  it('deletes a one-request upload and resumes held navigation if Stop and discard lands while api.start is in flight', async () => {
+    router.go('/benchmarks/bn_9f03?add=external', { replace: true });
+    const { isOpen, validJson, onstarted } = await mountDialog();
+    selectFile(new File([validJson], 'inflight-start.json', { type: 'application/json' }));
+    const worker = await until(() => spawned[0], 'worker spawned');
+    await worker.runAndDeliver();
+    await until(() => document.querySelector('.f-state.ok'), 'validated state');
+
+    const realStart = hub.api.startBenchEntry.bind(hub.api);
+    let startCalled = false;
+    let releaseStart!: () => void;
+    const gate = new Promise<void>((r) => (releaseStart = r));
+    vi.spyOn(hub.api, 'startBenchEntry').mockImplementationOnce(async (id, req) => {
+      startCalled = true;
+      await gate;
+      return realStart(id, req);
+    });
+    const delSpy = vi.spyOn(hub.api, 'deleteBenchEntry');
+
+    worker.enableAutoAnswer();
+    const form = document.querySelector<HTMLFormElement>('dialog[open] form')!;
+    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await until(() => startCalled, 'startBenchEntry in flight');
+
+    // Attempt navigation while api.start is still pending -> held with Stop sending? confirmation.
+    router.go('/benchmarks/bn_9f03/entries/be_2');
+    flushSync();
+    expect(router.route.path).toBe('/benchmarks/bn_9f03');
+    expect(document.querySelector('dialog[open]')?.textContent).toContain('Stop sending?');
+
+    const stopBtn = [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find((b) => b.textContent?.trim() === 'Stop and discard')!;
+    stopBtn.click();
+    flushSync();
+    releaseStart();
+
+    await until(() => !isOpen.get() && router.route.path === '/benchmarks/bn_9f03/entries/be_2', 'deleted entry and resumed navigation');
+    expect(delSpy).toHaveBeenCalledOnce();
+    expect(onstarted).not.toHaveBeenCalled();
+  });
+
+  it('clears the upload navigation guard before invoking onstarted so switching back to Leaderboard succeeds', async () => {
+    router.go('/benchmarks/bn_9f03?tab=conditions&add=external', { replace: true });
+    const { isOpen, validJson, onstarted } = await mountDialog();
+    onstarted.mockImplementation(() => {
+      router.go('/benchmarks/bn_9f03', { replace: true });
+    });
+    selectFile(new File([validJson], 'conditions-tab.json', { type: 'application/json' }));
+    const worker = await until(() => spawned[0], 'worker spawned');
+    await worker.runAndDeliver();
+    await until(() => document.querySelector('.f-state.ok'), 'validated state');
+
+    worker.enableAutoAnswer();
+    const form = document.querySelector<HTMLFormElement>('dialog[open] form')!;
+    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+
+    await until(() => !isOpen.get() && onstarted.mock.calls.length === 1, 'upload completed and dialog closed');
+    flushSync();
+    expect(router.route.path).toBe('/benchmarks/bn_9f03');
+    expect(router.route.query.get('tab')).toBeNull();
+    expect(document.querySelector('dialog[open]')).toBeNull();
   });
 });

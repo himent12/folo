@@ -44,7 +44,8 @@ import Skeleton from '$lib/ui/Skeleton';
 import Tabs from '$lib/ui/Tabs';
 import { toast } from '$lib/ui/toast';
 import { AgentChoice } from './label/agentChoice';
-import AddEntryDialog, { type EntryKind } from './bench/AddEntryDialog';
+import AddEntryDialog from './bench/AddEntryDialog';
+import { useAddQuery } from './bench/addQuery';
 import DesignDialog from './bench/DesignDialog';
 import EditBenchDialog from './bench/EditBenchDialog';
 import { leaderboardExport } from './bench/export';
@@ -300,8 +301,11 @@ export default function Benchmark() {
     const b = bench.get();
     return b ? boardOrder(live.entries, b.fingerprint) : live.entries;
   });
-  const addOpen = signal(untrack(() => router.route.query.get('add') !== null));
-  const addKind = signal<EntryKind>(untrack(() => ((k) => (k === 'agent' || k === 'external' ? k : 'model'))(router.route.query.get('add'))));
+  let closeAdd: () => boolean = () => true;
+  const { addOpen, addKind, openAdd } = useAddQuery(
+    () => setQuery({ add: null }),
+    () => closeAdd(),
+  );
   function started(e: BenchEntry) {
     live.putEntry(e, live.mark());
     if (tab.peek() !== 'leaderboard') setQuery({ tab: null });
@@ -412,7 +416,7 @@ export default function Benchmark() {
   // ---------- the header ----------
   const phone = new MediaQuery(media.phone, false);
   const now = new Now(() => live.lost !== null);
-  const offline = computed(() => isOffline(live.error));
+  const offline = computed(() => isOffline(live.error) || isOffline(live.resyncError));
   const addWhy = computed(() => (offline.get() ? OFFLINE_REASON : unsaved.get() ? 'Save or discard the plan’s changes first' : null));
   const designWhy = computed(() => (!bench.get() ? null : !editable.get() ? FROZEN : null));
   /** The source, linked while the server still has it; a benchmark keeps its own copy either way. */
@@ -454,7 +458,7 @@ export default function Benchmark() {
     if (!b) return [];
     const out: PageCommand[] = [];
     if (!addWhy.get())
-      out.push({ id: 'bench-add', label: 'Add entry', match: ['New entry', 'Benchmark a model'], icon: Plus, run: () => (addKind.set('model'), addOpen.set(true)) });
+      out.push({ id: 'bench-add', label: 'Add entry', match: ['New entry', 'Benchmark a model'], icon: Plus, run: () => !addWhy.peek() && openAdd('model') });
     if (comparing.get()) out.push({ id: 'bench-compare', label: 'Compare selected entries', icon: GitCompare, run: () => router.go(comparePath(b.id, selected.peek(), board.peek())) });
     if (editable.get())
       out.push({ id: 'bench-design', label: 'Design the plan with an agent', icon: Sparkles, run: () => (setQuery({ tab: 'conditions' }), designOpen.set(true)) });
@@ -477,7 +481,7 @@ export default function Benchmark() {
       icon={Plus}
       disabled={!!why()}
       aria-describedby={why()}
-      onclick={() => (addKind.set('model'), addOpen.set(true))}
+      onclick={() => !addWhy.peek() && openAdd('model')}
     >
       Add entry
     </Button>
@@ -711,7 +715,8 @@ export default function Benchmark() {
                   agents={agents.data}
                   bind:selected={selected}
                   lost={live.lost !== null}
-                  onadd={() => (addKind.set('model'), addOpen.set(true))}
+                  addWhy={addWhy.get()}
+                  onadd={() => !addWhy.peek() && openAdd('model')}
                   onstop={(e) => stopping.set(e)}
                   ondelete={(e) => removing.set(e)}
                   oncompare={() => router.go(comparePath(b().id, selected.peek(), board.peek()))}
@@ -731,6 +736,8 @@ export default function Benchmark() {
             agentsError={agents.error}
             retryAgents={() => agents.refresh()}
             choice={choice}
+            blockedReason={addWhy.get()}
+            registerClose={(fn) => (closeAdd = fn)}
             onstarted={started}
           />
           {catalog.data ? (

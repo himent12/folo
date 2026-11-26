@@ -26,7 +26,7 @@ import { planPasses } from '$lib/bench/plan';
 import { AGENT_IMAGES, IMAGES_PAGE_MAX, isEntryActive, BENCH_NAME_MAX } from '$lib/bench/rules';
 import { classColor } from '$lib/design/tokens';
 import { bytes, num } from '$lib/format';
-import { href } from '$lib/router';
+import { href, router } from '$lib/router';
 import Button from '$lib/ui/Button';
 import CommandLine from '$lib/ui/CommandLine';
 import Dialog from '$lib/ui/Dialog';
@@ -59,6 +59,10 @@ export interface AddEntryDialogProps {
   agentsError: unknown;
   retryAgents: () => void;
   choice: AgentChoice;
+  /** Page-level reason preventing starting an entry (e.g. unsaved plan edits or offline). */
+  blockedReason?: string | null;
+  /** Registers `beforeClose` so programmatic URL-driven closes respect active-upload confirmation. */
+  registerClose?: (fn: () => boolean) => void;
   /** The new entry, as the server answered (the page shows it at once). */
   onstarted: (entry: BenchEntry) => void;
 }
@@ -362,9 +366,22 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
               : null;
   });
   const shownErr = computed(() => (touched.get() ? Object.values(errs.get()).find((e) => e) : (imagesShown.get() ?? undefined)));
-  const reason = computed(() => missingWhy.get() ?? (shownErr.get() ? 'Fix the fields first' : null));
+  const whyText = computed(() => props.blockedReason ?? missingWhy.get());
+  const reason = computed(() => whyText.get() ?? (shownErr.get() ? 'Fix the fields first' : null));
 
   /** Sends the file: one request, or an open entry in parts with its bar; nothing is left behind if it fails. */
+  let pendingNav: (() => void) | null = null;
+  effect(() => {
+    if (!sending.get()) return;
+    const off = router.guard((_to, proceed) => {
+      if (!sending.peek()) return true;
+      pendingNav = proceed;
+      confirmStop.set(true);
+      return false;
+    });
+    return () => void off();
+  });
+
   async function sendFile() {
     const c = check.peek();
     if (!c?.ok) return;
@@ -372,6 +389,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
     left.set(null);
     sending.set({ sent: 0, total: c.session.total });
     const benchId = props.bench.id;
+    let resumeNav: (() => void) | null = null;
     try {
       const entry = await sendExternal(
         {
@@ -386,18 +404,32 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
         (p) => sending.set({ sent: p.sent, total: p.total }),
         abort.signal,
       );
+      sending.set(null);
+      confirmStop.set(false);
+      abort = null;
+      pendingNav = null;
       open.set(false);
       props.onstarted(entry);
     } catch (err) {
       // What the server said, and what it left: nothing (stopped and deleted), or exactly what to clean up and where.
       left.set(err instanceof ExternalSendError ? err.left : null);
-      // Stopped by the person with nothing left: the dialog closes; anything else is said in it.
-      if (abort?.signal.aborted && !left.peek()) open.set(false);
-      else error.set(err instanceof ExternalSendError ? err.cause : err);
+      // Stopped by the person with nothing left: the dialog closes (and any held Back navigation proceeds); anything else is said in it.
+      if (abort?.signal.aborted && !left.peek()) {
+        resumeNav = pendingNav;
+        pendingNav = null;
+        open.set(false);
+      } else {
+        pendingNav = null;
+        error.set(err instanceof ExternalSendError ? err.cause : err);
+      }
     } finally {
       sending.set(null);
       confirmStop.set(false);
       abort = null;
+      if (resumeNav) {
+        const go = resumeNav;
+        queueMicrotask(go);
+      }
     }
   }
   /** Closing while a large file is being sent asks first (it would discard the entry). */
@@ -406,6 +438,8 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
     confirmStop.set(true);
     return false;
   };
+  untrack(() => props.registerClose?.(beforeClose));
+  onCleanup(() => props.registerClose?.(() => true));
   const stopSending = () => abort?.abort(new DOMException('Stopped', 'AbortError'));
 
   function body(): StartBenchEntry | null {
@@ -473,7 +507,7 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
               <p class="why" role="alert">
                 Stop sending? The entry is discarded.
               </p>
-              <Button variant="ghost" onclick={() => confirmStop.set(false)}>
+              <Button variant="ghost" onclick={() => ((pendingNav = null), confirmStop.set(false))}>
                 Keep sending
               </Button>
               <Button variant="destructive" onclick={stopSending}>
@@ -482,9 +516,9 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
             </>
           ) : (
             <>
-              {missingWhy.get() ? (
+              {whyText.get() ? (
                 <p class="why" data-gate-why>
-                  {missingWhy.get()}
+                  {whyText.get()}
                 </p>
               ) : null}
               <Button variant="ghost" onclick={() => (beforeClose() ? open.set(false) : undefined)}>

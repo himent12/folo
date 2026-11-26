@@ -295,6 +295,45 @@ describe('LiveBench ordering', () => {
     expect(live.bench?.name).toBe('server-B');
     stop();
   });
+
+  it('tracks post-load resync network failures in resyncError without hiding the board, and clears on recovery', async () => {
+    const { live, stop } = mount();
+    entries.resolve([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.listed).toBe(true);
+    expect(live.error).toBeUndefined();
+    expect(live.resyncError).toBeUndefined();
+
+    // Simulate an SSE drop whose resync fails with a network error.
+    const netErr = new ApiError(0, 'network', 'Failed to fetch');
+    const spy = vi.spyOn(hub.api, 'benchEntries').mockRejectedValue(netErr);
+    handlers.connection?.('reconnecting');
+    await vi.advanceTimersByTimeAsync(RESYNC_MS + 10);
+    expect(live.bench?.name).toBe('first');
+    expect(live.error).toBeUndefined();
+    expect(live.resyncError).toBe(netErr);
+
+    // Receiving a live event or a successful resync clears resyncError.
+    spy.mockResolvedValue([]);
+    await vi.advanceTimersByTimeAsync(1100);
+    expect(live.resyncError).toBeUndefined();
+
+    // Overlapping resyncs: if an older request rejects AFTER a newer snapshot already succeeded, resyncError stays cleared.
+    const newer = deferred<BenchEntry[]>();
+    let rejectOlder!: (e: unknown) => void;
+    const olderPromise = new Promise<BenchEntry[]>((_r, rej) => (rejectOlder = rej));
+    let call = 0;
+    spy.mockImplementation(() => (++call === 1 ? olderPromise : newer.promise));
+    handlers.reconnect?.();
+    handlers.reconnect?.();
+    newer.resolve([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.resyncError).toBeUndefined();
+    rejectOlder(netErr);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.resyncError).toBeUndefined();
+    stop();
+  });
 });
 
 describe('LiveBench with the mock', () => {

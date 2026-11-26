@@ -321,6 +321,15 @@ export async function sendExternal(
   if (source.partsCount === 0) {
     const predictions = await race(source.getPredictions(signal), signal);
     const entry = await api.start({ name: o.name, contestant: { kind: 'external', scored: o.scored, predictions } });
+    if (signal?.aborted) {
+      let left: string | null = null;
+      try {
+        await api.remove(entry.id);
+      } catch {
+        left = `an entry “${o.name}” is still on the leaderboard: delete it there.`;
+      }
+      throw new ExternalSendError(signal.reason ?? new DOMException('Stopped', 'AbortError'), left);
+    }
     progress({ sent: total, total, entry });
     return entry;
   }

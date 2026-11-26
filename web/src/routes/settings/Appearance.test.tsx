@@ -337,6 +337,28 @@ describe('importing large picks and failed saves', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it('registers exactly two document.fonts loadingdone listeners while mounted and removes all of them on unmount', () => {
+    const active = new Set<EventListenerOrEventListenerObject>();
+    const fakeFonts = {
+      addEventListener: (_type: string, fn: EventListenerOrEventListenerObject) => active.add(fn),
+      removeEventListener: (_type: string, fn: EventListenerOrEventListenerObject) => active.delete(fn),
+    };
+    const prevDesc = Object.getOwnPropertyDescriptor(document, 'fonts');
+    Object.defineProperty(document, 'fonts', { configurable: true, value: fakeFonts });
+    try {
+      for (let visit = 0; visit < 3; visit++) {
+        show();
+        expect(active.size).toBe(2);
+        view!.unmount();
+        view = undefined;
+        expect(active.size).toBe(0);
+      }
+    } finally {
+      if (prevDesc) Object.defineProperty(document, 'fonts', prevDesc);
+      else Reflect.deleteProperty(document, 'fonts');
+    }
+  });
 });
 
 describe('the palette\'s theme commands', () => {

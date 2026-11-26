@@ -80,6 +80,18 @@ export function containsJsx(n: Node): boolean {
   return isJsx(bare(n)) || jsxWithin(n).length > 0;
 }
 
+/** Whether evaluating `n` directly creates JSX (outside nested function bodies). */
+export function evaluatesJsx(n: Node): boolean {
+  if (!n || typeof n !== 'object') return false;
+  if (isJsx(n)) return true;
+  if (FUNCTION_TYPES.has(n.type)) return false;
+  let found = false;
+  eachChild(n, (c) => {
+    if (!found && evaluatesJsx(c)) found = true;
+  });
+  return found;
+}
+
 /**
  * What the file's code tells about expressions that render more than text (Svelte's `{@render}`, which never joins a
  * text sequence): `snippets`, names whose every binding in the file is JSX or a function with JSX in it

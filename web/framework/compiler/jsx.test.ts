@@ -78,7 +78,7 @@ describe('expressions', () => {
     expect(code).toContain('a: "s"');
     expect(code).toContain('b: (1)');
     expect(code).toContain('get c() { return _$propMemo(this, "c", () => (d())); }');
-    expect(code).toContain('get e() { return (_tmpl$');
+    expect(code).toContain('get e() { return _$propJsx(this, "e", () => (_tmpl$');
     expect(code).toContain('children: ((v) => v)');
     expect(code).toContain('children: "text"');
     expect(code).toMatch(/children: \(\) => \(_tmpl\$\d\(\)\)/);
@@ -96,7 +96,12 @@ describe('expressions', () => {
     expect(code).toContain('get c() { return (`${p.w}px`); }');
     expect(code).toContain('d: (`${n}`)');
     expect(code).toContain('get e() { return _$propMemo(this, "e"');
-    expect(code).toMatch(/get f\(\) \{ return \(_tmpl/);
+    expect(code).toMatch(/get f\(\) \{ return _\$propJsx\(this, "f", \(\) => \(_tmpl/);
+
+    const condJsx = compile('const x = <C a={flag() ? <b /> : null} b={() => <b />} />;');
+    expect(condJsx).toContain('get a() { return _$propJsx(this, "a"');
+    expect(condJsx).toContain('b: (() =>');
+    expect(condJsx).not.toContain('propJsx(this, "b"');
   });
 
   it('booleans on non-boolean attributes stringify, as Svelte; boolean attributes drop on false', () => {

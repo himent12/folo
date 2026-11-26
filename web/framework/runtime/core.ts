@@ -16,36 +16,12 @@
 
 import { sortJobs } from './flushOrder';
 import {
-  cleanupSources,
-  linkDependency,
-  needsToRecompute,
-  prepareSources,
-  retainSources,
-  subscribeLink,
-  TRACKING,
-  unsubscribeLink,
-  type Link,
-  type Source,
-  type Target,
+  ATTACHED, cleanupSources, clearUpstreamNotified, DISPOSED, dropSourcesThrough, FRESH, HAS_ERROR,
+  linkDependency, needsToRecompute, NOTIFIED, OUTDATED, OWNING, prepareSources, retainSources, RUNNING,
+  subscribeLink, TRACKING, unsubscribeLink, unsubscribeSources, unsubscribeTarget, USER,
+  type Link, type Source, type Target,
 } from './links';
-
-const NOTIFIED = 1;
-const OUTDATED = 2;
-const RUNNING = 4;
-const DISPOSED = 8;
-const HAS_ERROR = 16;
-/** A user effect (`effect`, `onMount`): runs after the render effects of the same flush; a returned function is its cleanup. */
-const USER = 64;
-/** An effect that has not run yet. */
-const FRESH = 128;
-/** An owner linked into its parent's child list (disposed with it). */
-const ATTACHED = 256;
-/**
- * A computed that owns a subtree (a memo's branch, a list's rows). When what it reads changes it is re-evaluated in the
- * render phase at its own place (its creation order, which is document order), as Svelte runs a block before what
- * comes after it, not when the effect that reads it gets to it.
- */
-const OWNING = 512;
+export { dropSourcesThrough };
 
 export type Equals<T> = false | ((a: T, b: T) => boolean);
 export interface SignalOptions<T> {
@@ -70,6 +46,8 @@ let owner: Owner | null = null;
 /** Bumped on every write; lets an untracked computed skip a check when nothing at all changed. */
 let globalVersion = 0;
 let nextId = 0;
+let runSeq = 0;
+let activeRun = 0;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Dependency links
@@ -104,14 +82,6 @@ export function sourceMark(): unknown {
   // Every read moves its link to the tail: an unread tail (left from the previous run) means nothing was read yet.
   const tail = listener?._sources;
   return tail !== undefined && tail._v !== -1 ? tail : undefined;
-}
-
-/** Internal (text runs): drops sources up to `mark` (from `sourceMark`), keeping any links also in `keep`. */
-export function dropSourcesThrough(mark: unknown, keep?: readonly unknown[]): void {
-  const hasKeep = keep !== undefined && keep.length > 0;
-  for (let node = mark as Link | undefined; node !== undefined; node = node._ps) {
-    if (!hasKeep || !keep.includes(node)) node._v = -1;
-  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -219,9 +189,12 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
   _sources: Link | undefined = undefined;
   _fn: () => T;
   _equals: Equals<T>;
+  _onEmpty: (() => void) | undefined = undefined;
   constructor(fn: () => T, equals: Equals<T> | undefined) {
     this._fn = fn;
     this._equals = equals === undefined ? is : equals;
+    const base = owner !== null && listener instanceof ComputedNode && (listener._flags & OWNING) !== 0 && owner._parent === listener._parent && owner._id === listener._id ? owner._parent : owner;
+    this._parent = base ?? (listener instanceof ComputedNode ? listener._parent : null);
   }
   _refresh(): boolean {
     this._flags &= ~NOTIFIED;
@@ -232,33 +205,41 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     if (this._globalVersion === globalVersion) return true;
     this._globalVersion = globalVersion;
     this._flags |= RUNNING;
-    if (this._version > 0 && !needsToRecompute(this)) {
-      this._flags &= ~RUNNING;
-      return true;
-    }
-    const prevListener = listener;
-    const prevOwner = owner;
     try {
-      prepareSources(this);
-      listener = this;
-      // A computed owns nothing: effects must not be created while deriving a value.
-      owner = null;
-      const value = this._fn();
-      if (this._flags & HAS_ERROR || this._version === 0 || this._equals === false || !this._equals(this._value, value)) {
-        this._value = value;
-        this._flags &= ~HAS_ERROR;
+      if (this._version > 0 && !needsToRecompute(this)) return true;
+      const prevListener = listener;
+      const prevOwner = owner;
+      const prevRun = activeRun;
+      activeRun = ++runSeq;
+      try {
+        prepareSources(this);
+        listener = this;
+        // A computed owns nothing: effects must not be created while deriving a value.
+        owner = null;
+        const value = this._fn();
+        if (this._flags & HAS_ERROR || this._version === 0 || this._equals === false || !this._equals(this._value, value)) {
+          this._value = value;
+          this._flags &= ~HAS_ERROR;
+          this._version++;
+        }
+      } catch (err) {
+        this._value = err as T;
+        this._flags |= HAS_ERROR;
         this._version++;
+      } finally {
+        listener = prevListener;
+        owner = prevOwner;
+        activeRun = prevRun;
       }
+      cleanupSources(this);
+      return true;
     } catch (err) {
-      this._value = err as T;
-      this._flags |= HAS_ERROR;
-      this._version++;
+      this._flags |= OUTDATED;
+      this._globalVersion = -1;
+      throw err;
+    } finally {
+      this._flags &= ~RUNNING;
     }
-    listener = prevListener;
-    owner = prevOwner;
-    cleanupSources(this);
-    this._flags &= ~RUNNING;
-    return true;
   }
   _subscribe(node: Link): void {
     if (this._targets === undefined) {
@@ -276,7 +257,7 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
       // Nobody reads it any more (its branch went): a queued re-evaluation is dropped (see `_update`).
       if (this._flags & OWNING) this._flags = (this._flags & ~NOTIFIED) | OUTDATED;
       this._flags &= ~TRACKING;
-      for (let n = this._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
+      unsubscribeSources(this._sources, this._onEmpty);
     }
   }
   _notify(): void {
@@ -396,18 +377,14 @@ function cleanOwner(node: Owner): void {
   owner = null;
   let error: unknown;
   try {
-    let child = node._first;
-    node._first = node._last = null;
-    while (child !== null) {
-      const next = child._next;
-      child._prev = child._next = null;
-      child._flags &= ~ATTACHED;
+    while (node._first !== null) {
+      const child = node._first;
+      detach(child);
       try {
         disposeTree(child);
       } catch (e) {
         error ??= e;
       }
-      child = next;
     }
     const c = node._cleanups;
     if (c !== null) {
@@ -436,16 +413,27 @@ function cleanOwner(node: Owner): void {
 function disposeTree(node: Owner): void {
   if (node._flags & DISPOSED) return;
   node._flags |= DISPOSED;
+  let err: unknown;
+  let hasErr = false;
   try {
     cleanOwner(node);
-  } finally {
-    // A currently running effect still has `_sources` pointing at its tail with active `_node`/`_rb` save slots;
-    // `EffectNode._run`'s `finally` will restore those links via `cleanupSources` and unsubscribe every source.
-    if (node instanceof EffectNode && !(node._flags & RUNNING)) {
-      for (let n = node._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
-      node._sources = undefined;
+  } catch (e) {
+    err = e;
+    hasErr = true;
+  }
+  // A currently running effect still has `_sources` pointing at its tail with active `_node`/`_rb` save slots;
+  // `EffectNode._run`'s `finally` will restore those links via `cleanupSources` and unsubscribe every source.
+  if (node instanceof EffectNode && !(node._flags & RUNNING)) {
+    try {
+      unsubscribeTarget(node);
+    } catch (e) {
+      if (!hasErr) {
+        err = e;
+        hasErr = true;
+      }
     }
   }
+  if (hasErr) throw err;
 }
 
 /** Disposes an owner and everything under it, and unlinks it from its parent. */
@@ -520,21 +508,13 @@ export function isReader(fn: unknown): fn is Reader<unknown> {
   return typeof fn === 'function' && (fn as Reader<unknown>).$$r === 1;
 }
 
-/** Clears stale NOTIFIED flags on retained non-OWNING upstream computeds so later writes still propagate notifications. */
-function clearUpstreamNotified(s: Source): void {
-  if (!(s instanceof ComputedNode)) return;
-  if ((s._flags & (NOTIFIED | OWNING)) !== NOTIFIED) return;
-  s._flags &= ~NOTIFIED;
-  for (let node = s._sources; node !== undefined; node = node._ns) clearUpstreamNotified(node._s);
-}
-
 /**
  * Internal: an owning memo. Like `computed`, but what `fn` creates (DOM, effects, components) belongs to the memo:
  * it is disposed when `fn` re-runs and when the current owner goes away. Branches (`Show`, conditionals, `Key`) are
  * memos, so reading one from several places, or again, never re-creates its content. A snippet `fn` returns is
  * wrapped in a memo of its own, so a branch's content is created once and read thereafter.
  */
-export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
+export function memo<T>(fn: () => T, options?: SignalOptions<T> & { raw?: boolean }): Reader<T> {
   const parent = owner;
   let root: Owner | null = null;
   const c = new ComputedNode<T>(() => {
@@ -563,7 +543,7 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
     owner = r;
     try {
       const v = fn();
-      return (typeof v === 'function' && !isReader(v) ? memo(v as () => unknown) : v) as T;
+      return (!options?.raw && typeof v === 'function' && !isReader(v) ? memo(v as () => unknown) : v) as T;
     } catch (e) {
       if (!dead) {
         try {
@@ -579,6 +559,7 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
   c._flags |= OWNING;
   c._parent = parent;
   c._depth = parent === null ? 0 : parent._depth + 1;
+  if (options?.raw) c._onEmpty = () => { if (root !== null) { const prev = root; root = null; c._version = 0; c._globalVersion = globalVersion - 1; dispose(prev); } };
   // Created now, where it is written, as Svelte creates a block: what it renders comes before what follows it in the
   // document (component order, `createUniqueId` numbering). Untracked: whoever reads it later subscribes then. An
   // error is kept for that first read.
@@ -668,6 +649,8 @@ class EffectNode extends Owner implements Target {
     if (this._flags & DISPOSED) return;
     const prevListener = listener;
     const prevOwner = owner;
+    const prevRun = activeRun;
+    activeRun = ++runSeq;
     prepareSources(this);
     listener = this;
     owner = this;
@@ -687,16 +670,23 @@ class EffectNode extends Owner implements Target {
     } finally {
       listener = prevListener;
       owner = prevOwner;
-      cleanupSources(this);
+      activeRun = prevRun;
       this._flags &= ~RUNNING;
-      if (this._flags & DISPOSED) {
-        try {
-          cleanOwner(this);
-        } catch (e) {
-          if (!threw) throw e;
-        } finally {
-          for (let n = this._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
-          this._sources = undefined;
+      try {
+        cleanupSources(this);
+      } finally {
+        if (this._flags & DISPOSED) {
+          try {
+            cleanOwner(this);
+          } catch (e) {
+            if (!threw) throw e;
+          } finally {
+            try {
+              unsubscribeTarget(this);
+            } catch (e) {
+              if (!threw) throw e;
+            }
+          }
         }
       }
     }
@@ -929,10 +919,26 @@ export function deferEffects<T>(fn: () => T): T {
   return out;
 }
 
+/** Internal: `[stableOwner, siteKey, runId, computedKey]` for `propJsx`. */
+export function propScope(): readonly [Owner | null, object | null, number, object | null] {
+  if (owner === null) {
+    let p = listener instanceof ComputedNode ? listener._parent : null;
+    while (p !== null && (p._flags & DISPOSED) !== 0) p = p._parent;
+    return [p, null, activeRun, listener ?? null];
+  }
+  if ((owner as unknown) === listener) return [owner._parent, owner, activeRun, null];
+  if (listener instanceof ComputedNode && (listener._flags & OWNING) !== 0 && owner._parent === listener._parent && owner._id === listener._id) return [owner._parent, listener, activeRun, null];
+  return [owner, owner, activeRun, null];
+}
+
+/** Internal: maps each component's props object to its component owner (used by `propJsx`). */
+export const propOwners = new WeakMap<object, Owner>();
+
 /** Internal: creates a component's owner, runs `Comp(props)` untracked with deferred effects, with zero wrapper closures. */
 export function runComponent<P>(Comp: (props: P) => JSX.Element, props: P): JSX.Element {
   const o = new Owner();
   attach(owner, o);
+  if (props !== null && typeof props === 'object') propOwners.set(props as object, o);
   const prevOwner = owner;
   const prevListener = listener;
   const prevDeferredOwner = deferredOwner;
