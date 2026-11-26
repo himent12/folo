@@ -98,7 +98,7 @@ impl Runs {
         device: String,
     ) -> Result<Run> {
         let entry = self.register(config, dataset, weights, checkpoint, val_offset, device, None)?;
-        self.enqueue(&entry)?;
+        self.enqueue(&entry, 0)?;
         let run = entry.run();
         Ok(Run { queue_position: self.position(&run.id), ..run })
     }
@@ -209,15 +209,15 @@ impl Runs {
         if self.queue.lock().unwrap().shutdown { Err(shutting_down()) } else { Ok(()) }
     }
 
-    /// Queues `entry`. After [`Runs::shutdown`] has started (checked under the queue lock, so a run is either
-    /// queued before the shutdown drains the queue or not at all) the run is marked `stopped` instead and the
-    /// result is `503 shutting_down`. A run stopped or deleted since it was registered or restarted (it was `queued`
-    /// outside the queue, so it stopped at once) is not queued.
-    pub(super) fn enqueue(self: &Arc<Self>, entry: &Arc<RunEntry>) -> Result<()> {
+    /// Queues `entry` for `attempt`. After [`Runs::shutdown`] has started (checked under the queue lock, so a run is
+    /// either queued before the shutdown drains the queue or not at all) the run is marked `stopped` instead and the
+    /// result is `503 shutting_down`. A run stopped, deleted, already claimed (e.g. resumed on cloud), or superseded
+    /// by a newer attempt since it was registered or restarted is not queued.
+    pub(super) fn enqueue(self: &Arc<Self>, entry: &Arc<RunEntry>, attempt: u64) -> Result<()> {
         let ahead = {
             // Lock order: the run's state, then the queue (as `stop`).
             let mut st = entry.state.lock().unwrap();
-            if st.file.run.status != RunStatus::Queued || st.deleted {
+            if st.file.run.status != RunStatus::Queued || st.deleted || st.claimed || st.attempt != attempt {
                 return Ok(());
             }
             let mut q = self.queue.lock().unwrap();
@@ -228,7 +228,7 @@ impl Runs {
                 entry.log(LogLevel::Warn, "the server is shutting down; the run was not queued");
                 return Err(shutting_down());
             }
-            q.runs.push_back(QueuedRun { entry: entry.clone(), attempt: st.attempt });
+            q.runs.push_back(QueuedRun { entry: entry.clone(), attempt });
             Self::notify_queue(&q);
             q.runs.len() - 1 + usize::from(self.active.lock().unwrap().is_some())
         };

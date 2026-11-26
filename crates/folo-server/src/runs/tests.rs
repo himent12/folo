@@ -217,7 +217,7 @@ fn enqueue_after_shutdown_refuses_and_stops_the_run() {
     runs.list.write().unwrap().push(entry.clone());
 
     runs.shutdown(None);
-    let e = runs.enqueue(&entry).unwrap_err();
+    let e = runs.enqueue(&entry, 0).unwrap_err();
     assert_eq!((e.status, e.body.code.as_str()), (StatusCode::SERVICE_UNAVAILABLE, "shutting_down"));
     assert_eq!(entry.run().status, RunStatus::Stopped);
     assert!(runs.queue.lock().unwrap().runs.is_empty());
@@ -295,9 +295,9 @@ fn a_run_stopped_before_it_is_queued_stays_out_of_the_queue() {
     let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
     runs.stop(e.id()).unwrap();
     // `resume`: restart, then (after the interleaved stop) enqueue.
-    runs.restart(&e, config, None).unwrap();
+    let (_, attempt) = runs.restart(&e, config, None).unwrap();
     assert_eq!(runs.stop(e.id()).unwrap().status, RunStatus::Stopped);
-    runs.enqueue(&e).unwrap();
+    runs.enqueue(&e, attempt).unwrap();
     let run = runs.snapshot(e.id()).unwrap();
     assert_eq!((run.status, run.queue_position), (RunStatus::Stopped, None));
     assert!(!runs.busy() && !*runs.worker.lock().unwrap(), "a stopped run waits in the queue");
@@ -672,7 +672,7 @@ fn a_run_with_a_legacy_long_name_resumes() {
     let fields = serde_json::to_value(&config).unwrap().as_object().unwrap().clone();
     let (e, wanted) = runs.resume_config("run_long", &fields).unwrap();
     assert_eq!(wanted.name, name);
-    assert_eq!(runs.restart(&e, wanted, None).unwrap().name, name);
+    assert_eq!(runs.restart(&e, wanted, None).unwrap().0.name, name);
     runs.shutdown(None);
 }
 

@@ -332,15 +332,19 @@ mod tests {
         // Attempt 0 is stopped before the worker acquires the gate, then restarted into attempt 1.
         runs.stop(e.id()).unwrap();
         let cfg = e.run().config.clone();
-        runs.restart(&e, cfg.clone(), None).unwrap();
-        let attempt1 = e.state.lock().unwrap().attempt;
+        let (_, attempt1) = runs.restart(&e, cfg.clone(), None).unwrap();
         assert_eq!(attempt1, attempt0 + 1);
+
+        // A delayed `enqueue` from attempt 0 must not duplicate attempt 1 in the queue.
+        runs.enqueue(&e, attempt0).unwrap();
+        assert!(runs.queue.lock().unwrap().runs.is_empty(), "stale enqueue must not push into the queue");
+        assert!(!*runs.worker.lock().unwrap(), "stale enqueue must not start the worker");
 
         assert!(!e.claim(attempt0), "stale attempt 0 must not claim restarted attempt 1");
         assert!(e.claim(attempt1), "matching attempt 1 should claim once");
         assert!(!e.claim(attempt1), "already-claimed attempt must not be claimed twice");
 
-        // Also verify a cloud-claimed attempt cannot be claimed even with a matching attempt number.
+        // Also verify a cloud-claimed attempt cannot be enqueued locally or claimed by the local worker.
         e.state.lock().unwrap().claimed = false;
         e.state.lock().unwrap().file.run.status = folo_api::RunStatus::Stopped;
         let cloud = folo_api::RunCloud {
@@ -366,8 +370,10 @@ mod tests {
             ended_in: None,
             unanswered_since: None,
         };
-        runs.restart(&e, cfg, Some(cloud)).unwrap();
-        let attempt2 = e.state.lock().unwrap().attempt;
+        let (_, attempt2) = runs.restart(&e, cfg, Some(cloud)).unwrap();
+        runs.enqueue(&e, attempt1).unwrap();
+        runs.enqueue(&e, attempt2).unwrap();
+        assert!(runs.queue.lock().unwrap().runs.is_empty(), "cloud-claimed run must never enter local queue");
         assert!(!e.claim(attempt2), "local worker must not claim a cloud-claimed attempt");
         runs.shutdown(None);
     }
