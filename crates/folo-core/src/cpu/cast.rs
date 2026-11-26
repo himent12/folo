@@ -34,8 +34,190 @@ fn empty_storage(dtype: DType) -> CpuStorage {
 
 #[cfg(target_arch = "x86_64")]
 #[inline]
+fn has_avx2() -> bool {
+    std::is_x86_feature_detected!("avx2")
+}
+
+#[cfg(target_arch = "x86_64")]
+#[inline]
 fn has_f16c() -> bool {
     std::is_x86_feature_detected!("f16c") && std::is_x86_feature_detected!("avx")
+}
+
+/// Convert `src` (`u8`) into `dst` (`f32`) 32 elements at a time with AVX2 (`vpmovzxbd` + `vcvtdq2ps`).
+///
+/// # Safety
+/// The CPU supports AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn u8_to_f32_avx2(src: &[u8], dst: &mut [f32]) {
+    use std::arch::x86_64::*;
+    assert_eq!(src.len(), dst.len());
+    let (s32, s_rem) = src.as_chunks::<32>();
+    let (d32, d_rem) = dst.as_chunks_mut::<32>();
+    for (sc, dc) in s32.iter().zip(d32.iter_mut()) {
+        // SAFETY: `sc` is `[u8; 32]`, `dc` is `[f32; 32]`, AVX2 is enabled.
+        unsafe {
+            let p = sc.as_ptr() as *const __m128i;
+            let o = dc.as_mut_ptr();
+            let b0 = _mm_loadu_si128(p);
+            let b1 = _mm_loadu_si128(p.add(1));
+            _mm256_storeu_ps(o, _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(b0)));
+            _mm256_storeu_ps(o.add(8), _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128::<8>(b0))));
+            _mm256_storeu_ps(o.add(16), _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(b1)));
+            _mm256_storeu_ps(o.add(24), _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128::<8>(b1))));
+        }
+    }
+    let (s8, s_tail) = s_rem.as_chunks::<8>();
+    let (d8, d_tail) = d_rem.as_chunks_mut::<8>();
+    for (sc, dc) in s8.iter().zip(d8.iter_mut()) {
+        // SAFETY: `sc` is `[u8; 8]`, `dc` is `[f32; 8]`, AVX2 is enabled.
+        unsafe {
+            let b = _mm_loadl_epi64(sc.as_ptr() as *const __m128i);
+            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(b)));
+        }
+    }
+    for (d, &x) in d_tail.iter_mut().zip(s_tail) {
+        *d = x as f32;
+    }
+}
+
+/// Convert `src` (`f32`) into `dst` (`u8`) 32 elements at a time with AVX2, bitwise identical to Rust's
+/// saturating `x as u8` (truncate toward zero, clamp to `[0, 255]`, `NaN -> 0`).
+///
+/// # Safety
+/// The CPU supports AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn f32_to_u8_avx2(src: &[f32], dst: &mut [u8]) {
+    use std::arch::x86_64::*;
+    assert_eq!(src.len(), dst.len());
+    let zero = _mm256_setzero_ps();
+    let max255 = _mm256_set1_ps(255.0);
+    let perm = _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7);
+    let zero_i = _mm256_setzero_si256();
+    // `vmaxps(v, 0.0)` returns `0.0` for `NaN`, `-Inf`, and negatives (second operand wins on NaN);
+    // `vminps(_, 255.0)` then saturates `+Inf` and `> 255.0` to `255.0`, and `cvttps` truncates toward zero.
+    macro_rules! cvt8 {
+        ($ptr:expr) => {
+            _mm256_cvttps_epi32(_mm256_min_ps(_mm256_max_ps(_mm256_loadu_ps($ptr), zero), max255))
+        };
+    }
+    let (s32, s_rem) = src.as_chunks::<32>();
+    let (d32, d_rem) = dst.as_chunks_mut::<32>();
+    for (sc, dc) in s32.iter().zip(d32.iter_mut()) {
+        // SAFETY: `sc` is `[f32; 32]`, `dc` is `[u8; 32]`, AVX2 is enabled.
+        unsafe {
+            let p = sc.as_ptr();
+            let q0 = cvt8!(p);
+            let q1 = cvt8!(p.add(8));
+            let q2 = cvt8!(p.add(16));
+            let q3 = cvt8!(p.add(24));
+            let p01 = _mm256_packs_epi32(q0, q1);
+            let p23 = _mm256_packs_epi32(q2, q3);
+            let packed = _mm256_packus_epi16(p01, p23);
+            let ordered = _mm256_permutevar8x32_epi32(packed, perm);
+            _mm256_storeu_si256(dc.as_mut_ptr() as *mut __m256i, ordered);
+        }
+    }
+    let (s8, s_tail) = s_rem.as_chunks::<8>();
+    let (d8, d_tail) = d_rem.as_chunks_mut::<8>();
+    for (sc, dc) in s8.iter().zip(d8.iter_mut()) {
+        // SAFETY: `sc` is `[f32; 8]`, `dc` is `[u8; 8]`, AVX2 is enabled.
+        unsafe {
+            let q0 = cvt8!(sc.as_ptr());
+            let p0 = _mm256_packs_epi32(q0, zero_i);
+            let packed = _mm256_packus_epi16(p0, zero_i);
+            let ordered = _mm256_permutevar8x32_epi32(packed, perm);
+            _mm_storel_epi64(dc.as_mut_ptr() as *mut __m128i, _mm256_castsi256_si128(ordered));
+        }
+    }
+    for (d, &x) in d_tail.iter_mut().zip(s_tail) {
+        *d = x as u8;
+    }
+}
+
+/// Convert `src` (`u32`) into `dst` (`f32`) 16 elements at a time with AVX2, bitwise identical to `x as f32`
+/// across all `2^32` unsigned values (`(u >> 16) * 65536.0 + (u & 0xFFFF)` has a single IEEE-754 rounding).
+///
+/// # Safety
+/// The CPU supports AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn u32_to_f32_avx2(src: &[u32], dst: &mut [f32]) {
+    use std::arch::x86_64::*;
+    assert_eq!(src.len(), dst.len());
+    let mask_lo = _mm256_set1_epi32(0xFFFF);
+    let scale_hi = _mm256_set1_ps(65536.0);
+    let (s16, s_rem) = src.as_chunks::<16>();
+    let (d16, d_rem) = dst.as_chunks_mut::<16>();
+    for (sc, dc) in s16.iter().zip(d16.iter_mut()) {
+        // SAFETY: `sc` is `[u32; 16]`, `dc` is `[f32; 16]`, AVX2 is enabled.
+        unsafe {
+            let p = sc.as_ptr() as *const __m256i;
+            let u0 = _mm256_loadu_si256(p);
+            let u1 = _mm256_loadu_si256(p.add(1));
+            let lo0 = _mm256_cvtepi32_ps(_mm256_and_si256(u0, mask_lo));
+            let hi0 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_srli_epi32::<16>(u0)), scale_hi);
+            let lo1 = _mm256_cvtepi32_ps(_mm256_and_si256(u1, mask_lo));
+            let hi1 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_srli_epi32::<16>(u1)), scale_hi);
+            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_add_ps(hi0, lo0));
+            _mm256_storeu_ps(dc.as_mut_ptr().add(8), _mm256_add_ps(hi1, lo1));
+        }
+    }
+    let (s8, s_tail) = s_rem.as_chunks::<8>();
+    let (d8, d_tail) = d_rem.as_chunks_mut::<8>();
+    for (sc, dc) in s8.iter().zip(d8.iter_mut()) {
+        // SAFETY: `sc` is `[u32; 8]`, `dc` is `[f32; 8]`, AVX2 is enabled.
+        unsafe {
+            let u0 = _mm256_loadu_si256(sc.as_ptr() as *const __m256i);
+            let lo0 = _mm256_cvtepi32_ps(_mm256_and_si256(u0, mask_lo));
+            let hi0 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_srli_epi32::<16>(u0)), scale_hi);
+            _mm256_storeu_ps(dc.as_mut_ptr(), _mm256_add_ps(hi0, lo0));
+        }
+    }
+    for (d, &x) in d_tail.iter_mut().zip(s_tail) {
+        *d = x as f32;
+    }
+}
+
+fn u8_to_f32_slice(src: &[u8], dst: &mut [f32]) {
+    assert_eq!(src.len(), dst.len());
+    #[cfg(target_arch = "x86_64")]
+    if src.len() >= 8 && has_avx2() {
+        // SAFETY: AVX2 was detected above.
+        unsafe { u8_to_f32_avx2(src, dst) };
+        return;
+    }
+    for (d, &x) in dst.iter_mut().zip(src) {
+        *d = x as f32;
+    }
+}
+
+fn f32_to_u8_slice(src: &[f32], dst: &mut [u8]) {
+    assert_eq!(src.len(), dst.len());
+    #[cfg(target_arch = "x86_64")]
+    if src.len() >= 8 && has_avx2() {
+        // SAFETY: AVX2 was detected above.
+        unsafe { f32_to_u8_avx2(src, dst) };
+        return;
+    }
+    for (d, &x) in dst.iter_mut().zip(src) {
+        *d = x as u8;
+    }
+}
+
+fn u32_to_f32_slice(src: &[u32], dst: &mut [f32]) {
+    assert_eq!(src.len(), dst.len());
+    #[cfg(target_arch = "x86_64")]
+    if src.len() >= 8 && has_avx2() {
+        // SAFETY: AVX2 was detected above.
+        unsafe { u32_to_f32_avx2(src, dst) };
+        return;
+    }
+    for (d, &x) in dst.iter_mut().zip(src) {
+        *d = x as f32;
+    }
 }
 
 /// Convert `src` (`f32`) into `dst` (`f16`) using IEEE-754 round-to-nearest-even (`VCVTPS2PH`).
@@ -158,17 +340,36 @@ pub(crate) fn cast(src: &CpuStorage, layout: &Layout, dtype: DType) -> CpuStorag
             }
             CpuStorage::F16(out)
         }
+        CpuStorage::F32(v) if dtype == DType::U8 => {
+            let data: Cow<'_, [f32]> = match layout.contiguous_range() {
+                Some(r) => Cow::Borrowed(&v[r]),
+                None => Cow::Owned(elementwise::copy_strided_f32(v, layout)),
+            };
+            let mut out = vec![0u8; n];
+            if n >= PAR_MIN {
+                par_chunks(&mut out, CHUNK, &|c, chunk| {
+                    let start = c * CHUNK;
+                    f32_to_u8_slice(&data[start..start + chunk.len()], chunk);
+                });
+            } else {
+                f32_to_u8_slice(&data, &mut out);
+            }
+            if let Cow::Owned(buf) = data {
+                recycle(buf);
+            }
+            CpuStorage::U8(out)
+        }
         CpuStorage::F16(v) if dtype == DType::F32 => {
             let data = contiguous(v, layout);
             CpuStorage::F32(map_to_f32(&data, f16_to_f32_slice))
         }
         CpuStorage::U8(v) if dtype == DType::F32 => {
             let data = contiguous(v, layout);
-            CpuStorage::F32(map_to_f32(&data, |s, d| {
-                for (dst, &x) in d.iter_mut().zip(s) {
-                    *dst = x as f32;
-                }
-            }))
+            CpuStorage::F32(map_to_f32(&data, u8_to_f32_slice))
+        }
+        CpuStorage::U32(v) if dtype == DType::F32 => {
+            let data = contiguous(v, layout);
+            CpuStorage::F32(map_to_f32(&data, u32_to_f32_slice))
         }
         // Directly, not through f64: above 2^53 that would round twice.
         CpuStorage::I64(v) if dtype == DType::F32 => {
@@ -320,5 +521,139 @@ mod tests {
             panic!("expected F32");
         };
         assert_eq!(out[0].to_bits(), (big as f32).to_bits());
+    }
+
+    #[test]
+    fn u8_f32_u32_avx2_casts_match_scalar_bitwise() {
+        // 1. U8 -> F32: all 256 byte values, odd lengths 0..=65, and parallel > PAR_MIN.
+        let bytes: Vec<u8> = (0u8..=255).collect();
+        for len in [0usize, 1, 7, 8, 9, 15, 31, 32, 33, 65, 256] {
+            let mut got = vec![0f32; len];
+            u8_to_f32_slice(&bytes[..len], &mut got);
+            for (i, (&g, &b)) in got.iter().zip(&bytes[..len]).enumerate() {
+                assert_eq!(g.to_bits(), (b as f32).to_bits(), "u8->f32 len={len} at {i}");
+            }
+        }
+        let big_u8: Vec<u8> = (0..PAR_MIN + 37).map(|i| (i * 31) as u8).collect();
+        let CpuStorage::F32(got_big) = cast(
+            &CpuStorage::U8(big_u8.clone()),
+            &Layout::contiguous(Shape::new(&[big_u8.len()])),
+            DType::F32,
+        ) else {
+            panic!("expected F32");
+        };
+        for (&g, &b) in got_big.iter().zip(&big_u8) {
+            assert_eq!(g.to_bits(), (b as f32).to_bits());
+        }
+
+        // 2. F32 -> U8: NaNs, ±Inf, ±0.0, negatives, fractional truncation, saturation, tails, strided, parallel.
+        let mut f_vals = vec![
+            0.0f32,
+            -0.0,
+            -0.1,
+            -1.0,
+            -1000.0,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            -f32::NAN,
+            f32::from_bits(0x7fc0_1234),
+            f32::from_bits(0x7f80_0001),
+            0.0001,
+            0.5,
+            0.9999,
+            1.0,
+            1.9999,
+            127.5,
+            128.5,
+            254.0,
+            254.9999,
+            255.0,
+            255.0001,
+            255.9,
+            256.0,
+            1e20,
+            f32::MAX,
+            f32::INFINITY,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+        ];
+        for i in 0..45 {
+            f_vals.push(i as f32 * 6.25 - 12.3);
+        }
+        for len in [0usize, 1, 7, 8, 9, 15, 31, 32, 33, 41, f_vals.len()] {
+            let mut got = vec![0u8; len];
+            f32_to_u8_slice(&f_vals[..len], &mut got);
+            for (i, (&g, &x)) in got.iter().zip(&f_vals[..len]).enumerate() {
+                assert_eq!(g, x as u8, "f32->u8 len={len} at {i} x={x}");
+            }
+        }
+        let big_f: Vec<f32> = (0..PAR_MIN + 41).map(|i| (i % 300) as f32 - 20.5).collect();
+        let CpuStorage::U8(got_u8) =
+            cast(&CpuStorage::F32(big_f.clone()), &Layout::contiguous(Shape::new(&[big_f.len()])), DType::U8)
+        else {
+            panic!("expected U8");
+        };
+        for (&g, &x) in got_u8.iter().zip(&big_f) {
+            assert_eq!(g, x as u8);
+        }
+        let lt = Layout::contiguous(Shape::new(&[4, 9])).transpose(0, 1);
+        let CpuStorage::U8(got_t) = cast(&CpuStorage::F32(f_vals[..36].to_vec()), &lt, DType::U8) else {
+            panic!("expected U8");
+        };
+        for c in 0..9 {
+            for r in 0..4 {
+                assert_eq!(got_t[c * 4 + r], f_vals[r * 9 + c] as u8);
+            }
+        }
+
+        // 3. U32 -> F32: full 32-bit range boundaries including exact halfway ties-to-even, tails, and parallel.
+        let mut u_vals = vec![
+            0u32,
+            1,
+            0xFFFF,
+            0x1_0000,
+            0x1_0001,
+            (1u32 << 24) - 1,
+            1u32 << 24,
+            (1u32 << 24) + 1,
+            (1u32 << 24) + 2,
+            (1u32 << 24) + 3,
+            0x7FFF_FF7F,
+            0x7FFF_FF80,
+            0x7FFF_FFBF,
+            0x7FFF_FFC0,
+            0x7FFF_FFFF,
+            0x8000_0000,
+            0x8000_0001,
+            0x8000_0080,
+            0x8000_0081,
+            0x8000_0180,
+            0xFFFF_FF7F,
+            0xFFFF_FF80,
+            0xFFFF_FF81,
+            u32::MAX,
+        ];
+        let mut rng = crate::rng::Rng::seed(12345);
+        for _ in 0..50 {
+            u_vals.push((rng.next_u64() >> 17) as u32);
+        }
+        for len in [0usize, 1, 7, 8, 9, 15, 16, 17, 33, u_vals.len()] {
+            let mut got = vec![0f32; len];
+            u32_to_f32_slice(&u_vals[..len], &mut got);
+            for (i, (&g, &u)) in got.iter().zip(&u_vals[..len]).enumerate() {
+                assert_eq!(g.to_bits(), (u as f32).to_bits(), "u32->f32 len={len} at {i} u={u:#010x}");
+            }
+        }
+        let big_u32: Vec<u32> = (0..PAR_MIN + 29).map(|i| (i as u32).wrapping_mul(2_654_435_761)).collect();
+        let CpuStorage::F32(got_uf) = cast(
+            &CpuStorage::U32(big_u32.clone()),
+            &Layout::contiguous(Shape::new(&[big_u32.len()])),
+            DType::F32,
+        ) else {
+            panic!("expected F32");
+        };
+        for (&g, &u) in got_uf.iter().zip(&big_u32) {
+            assert_eq!(g.to_bits(), (u as f32).to_bits());
+        }
     }
 }

@@ -31,25 +31,85 @@ pub type TileF32 = [[f32; NR]; MR];
 /// `rows[p] + col`.
 pub(crate) type QKernel = unsafe fn(usize, *const i32, *const *const u32, usize, &mut Tile);
 
-/// The kernel in use: AVX-VNNI when the CPU has it (and `FOLO_Q8_SCALAR` is unset), else the portable one.
+/// The kernel in use: AVX-VNNI, AVX-512 VNNI (256-bit VL), exact AVX2 (`vpmaddwd`), or portable scalar.
 pub(crate) fn kernel() -> QKernel {
     static K: OnceLock<QKernel> = OnceLock::new();
-    *K.get_or_init(|| if uses_vnni() { kernel_vnni_entry as QKernel } else { kernel_scalar as QKernel })
+    *K.get_or_init(|| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if uses_avx_vnni() {
+                return kernel_vnni_entry as QKernel;
+            }
+            if uses_avx512_vnni() {
+                return kernel_avx512vnni_entry as QKernel;
+            }
+            if uses_avx2_kernel() {
+                return kernel_avx2_entry as QKernel;
+            }
+        }
+        kernel_scalar as QKernel
+    })
 }
 
-/// True when the int8 kernels run on AVX-VNNI (`vpdpbusd`), false on the portable fallback.
+/// Human-readable name of the active int8 micro-kernel (`"AVX-VNNI"`, `"AVX-512 VNNI"`, `"AVX2"`, or `"portable"`).
+pub fn kernel_name() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if uses_avx_vnni() {
+            return "AVX-VNNI";
+        }
+        if uses_avx512_vnni() {
+            return "AVX-512 VNNI";
+        }
+        if uses_avx2_kernel() {
+            return "AVX2";
+        }
+    }
+    "portable"
+}
+
+/// True when the int8 kernels run on hardware VNNI (`vpdpbusd` via AVX-VNNI or AVX-512 VNNI VL).
 pub fn uses_vnni() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| {
         #[cfg(target_arch = "x86_64")]
         {
-            uses_avx2() && std::is_x86_feature_detected!("avxvnni")
+            uses_avx_vnni() || uses_avx512_vnni()
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
             false
         }
     })
+}
+
+#[cfg(target_arch = "x86_64")]
+fn uses_avx_vnni() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var_os("FOLO_Q8_SCALAR").is_none()
+            && std::env::var_os("FOLO_Q8_NO_VNNI").is_none()
+            && std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("avxvnni")
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+fn uses_avx512_vnni() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var_os("FOLO_Q8_SCALAR").is_none()
+            && std::env::var_os("FOLO_Q8_NO_VNNI").is_none()
+            && std::is_x86_feature_detected!("avx2")
+            && std::is_x86_feature_detected!("avx512vnni")
+            && std::is_x86_feature_detected!("avx512vl")
+    })
+}
+
+#[cfg(target_arch = "x86_64")]
+fn uses_avx2_kernel() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("FOLO_Q8_SCALAR").is_none() && std::is_x86_feature_detected!("avx2"))
 }
 
 /// True when the epilogue runs its AVX2 + FMA form (unless `FOLO_Q8_SCALAR` is set).
@@ -96,10 +156,22 @@ unsafe fn kernel_vnni_entry(ks: usize, a: *const i32, rows: *const *const u32, c
     unsafe { kernel_vnni(ks, a, rows, col, acc) }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-unsafe fn kernel_vnni_entry(ks: usize, a: *const i32, rows: *const *const u32, col: usize, acc: &mut Tile) {
-    // SAFETY: forwarded.
-    unsafe { kernel_scalar(ks, a, rows, col, acc) }
+#[cfg(target_arch = "x86_64")]
+unsafe fn kernel_avx512vnni_entry(
+    ks: usize,
+    a: *const i32,
+    rows: *const *const u32,
+    col: usize,
+    acc: &mut Tile,
+) {
+    // SAFETY: selected only after detecting avx512vnni and avx512vl; the pointer contract is forwarded.
+    unsafe { kernel_avx512vnni(ks, a, rows, col, acc) }
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn kernel_avx2_entry(ks: usize, a: *const i32, rows: *const *const u32, col: usize, acc: &mut Tile) {
+    // SAFETY: selected only after detecting avx2; the pointer contract is forwarded.
+    unsafe { kernel_avx2(ks, a, rows, col, acc) }
 }
 
 /// The AVX-VNNI kernel: 12 ymm accumulators, 3 B loads and 4 weight broadcasts per K step.
@@ -139,6 +211,119 @@ unsafe fn kernel_vnni(ks: usize, a: *const i32, rows: *const *const u32, col: us
             c30 = _mm256_dpbusd_avx_epi32(c30, b0, w3);
             c31 = _mm256_dpbusd_avx_epi32(c31, b1, w3);
             c32 = _mm256_dpbusd_avx_epi32(c32, b2, w3);
+        }
+        let out = acc.as_mut_ptr() as *mut __m256i;
+        for (i, v) in [c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32].into_iter().enumerate() {
+            _mm256_storeu_si256(out.add(i), v);
+        }
+    }
+}
+
+/// The AVX-512 VNNI VL 256-bit kernel (Zen 4/5, Ice Lake, Cascade Lake, Sapphire Rapids): identical integer
+/// arithmetic to [`kernel_vnni`] via EVEX `vpdpbusd` on ymm registers.
+///
+/// # Safety
+/// As [`kernel_scalar`], and the CPU supports AVX-512 VNNI and AVX-512 VL.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,avx512vnni,avx512vl")]
+unsafe fn kernel_avx512vnni(ks: usize, a: *const i32, rows: *const *const u32, col: usize, acc: &mut Tile) {
+    use std::arch::x86_64::*;
+    let z = _mm256_setzero_si256();
+    let (mut c00, mut c01, mut c02) = (z, z, z);
+    let (mut c10, mut c11, mut c12) = (z, z, z);
+    let (mut c20, mut c21, mut c22) = (z, z, z);
+    let (mut c30, mut c31, mut c32) = (z, z, z);
+    // SAFETY: the caller guarantees `ks · MR` words at `a` and `col + NR` words at every row.
+    unsafe {
+        for p in 0..ks {
+            let bp = (*rows.add(p)).add(col) as *const __m256i;
+            let b0 = _mm256_loadu_si256(bp);
+            let b1 = _mm256_loadu_si256(bp.add(1));
+            let b2 = _mm256_loadu_si256(bp.add(2));
+            let ap = a.add(p * MR);
+            let w0 = _mm256_set1_epi32(*ap);
+            c00 = _mm256_dpbusd_epi32(c00, b0, w0);
+            c01 = _mm256_dpbusd_epi32(c01, b1, w0);
+            c02 = _mm256_dpbusd_epi32(c02, b2, w0);
+            let w1 = _mm256_set1_epi32(*ap.add(1));
+            c10 = _mm256_dpbusd_epi32(c10, b0, w1);
+            c11 = _mm256_dpbusd_epi32(c11, b1, w1);
+            c12 = _mm256_dpbusd_epi32(c12, b2, w1);
+            let w2 = _mm256_set1_epi32(*ap.add(2));
+            c20 = _mm256_dpbusd_epi32(c20, b0, w2);
+            c21 = _mm256_dpbusd_epi32(c21, b1, w2);
+            c22 = _mm256_dpbusd_epi32(c22, b2, w2);
+            let w3 = _mm256_set1_epi32(*ap.add(3));
+            c30 = _mm256_dpbusd_epi32(c30, b0, w3);
+            c31 = _mm256_dpbusd_epi32(c31, b1, w3);
+            c32 = _mm256_dpbusd_epi32(c32, b2, w3);
+        }
+        let out = acc.as_mut_ptr() as *mut __m256i;
+        for (i, v) in [c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32].into_iter().enumerate() {
+            _mm256_storeu_si256(out.add(i), v);
+        }
+    }
+}
+
+/// Exact AVX2 int8 micro-kernel for non-VNNI x86-64 CPUs: splits each 4-byte word into even (`[b0, b2]`) and
+/// odd (`[b1, b3]`) 16-bit lanes and accumulates via `_mm256_madd_epi16` (`vpmaddwd`). Zero `i16` saturation
+/// (`max |u8 * i8 + u8 * i8| = 65280 << i32::MAX`) and bitwise identical to [`kernel_scalar`] and [`kernel_vnni`]
+/// for every `u8` in `0..=255` and every `i8` in `-128..=127`.
+///
+/// # Safety
+/// As [`kernel_scalar`], and the CPU supports AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn kernel_avx2(
+    ks: usize,
+    a: *const i32,
+    rows: *const *const u32,
+    col: usize,
+    acc: &mut Tile,
+) {
+    use std::arch::x86_64::*;
+    #[inline(always)]
+    fn split_w(w: i32) -> (i32, i32) {
+        let b = w.to_le_bytes();
+        let ev = (b[0] as i8 as i16 as u16 as u32) | ((b[2] as i8 as i16 as u16 as u32) << 16);
+        let od = (b[1] as i8 as i16 as u16 as u32) | ((b[3] as i8 as i16 as u16 as u32) << 16);
+        (ev as i32, od as i32)
+    }
+    let z = _mm256_setzero_si256();
+    let m_ff = _mm256_set1_epi16(0x00FF);
+    let (mut c00, mut c01, mut c02) = (z, z, z);
+    let (mut c10, mut c11, mut c12) = (z, z, z);
+    let (mut c20, mut c21, mut c22) = (z, z, z);
+    let (mut c30, mut c31, mut c32) = (z, z, z);
+    // SAFETY: the caller guarantees `ks · MR` words at `a` and `col + NR` words at every row.
+    unsafe {
+        for p in 0..ks {
+            let ap = a.add(p * MR);
+            let (w0e, w0o) = split_w(*ap);
+            let (w1e, w1o) = split_w(*ap.add(1));
+            let (w2e, w2o) = split_w(*ap.add(2));
+            let (w3e, w3o) = split_w(*ap.add(3));
+            let bp = (*rows.add(p)).add(col) as *const __m256i;
+            macro_rules! col_step {
+                ($b:expr, $c0:ident, $c1:ident, $c2:ident, $c3:ident) => {
+                    let b_ev = _mm256_and_si256($b, m_ff);
+                    let b_od = _mm256_srli_epi16::<8>($b);
+                    $c0 = _mm256_add_epi32($c0, _mm256_madd_epi16(b_ev, _mm256_set1_epi32(w0e)));
+                    $c0 = _mm256_add_epi32($c0, _mm256_madd_epi16(b_od, _mm256_set1_epi32(w0o)));
+                    $c1 = _mm256_add_epi32($c1, _mm256_madd_epi16(b_ev, _mm256_set1_epi32(w1e)));
+                    $c1 = _mm256_add_epi32($c1, _mm256_madd_epi16(b_od, _mm256_set1_epi32(w1o)));
+                    $c2 = _mm256_add_epi32($c2, _mm256_madd_epi16(b_ev, _mm256_set1_epi32(w2e)));
+                    $c2 = _mm256_add_epi32($c2, _mm256_madd_epi16(b_od, _mm256_set1_epi32(w2o)));
+                    $c3 = _mm256_add_epi32($c3, _mm256_madd_epi16(b_ev, _mm256_set1_epi32(w3e)));
+                    $c3 = _mm256_add_epi32($c3, _mm256_madd_epi16(b_od, _mm256_set1_epi32(w3o)));
+                };
+            }
+            let b0 = _mm256_loadu_si256(bp);
+            col_step!(b0, c00, c10, c20, c30);
+            let b1 = _mm256_loadu_si256(bp.add(1));
+            col_step!(b1, c01, c11, c21, c31);
+            let b2 = _mm256_loadu_si256(bp.add(2));
+            col_step!(b2, c02, c12, c22, c32);
         }
         let out = acc.as_mut_ptr() as *mut __m256i;
         for (i, v) in [c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32].into_iter().enumerate() {

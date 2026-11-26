@@ -905,3 +905,52 @@ fn silu_q8_avx2_x4_matches_scalar_bit_for_bit() {
         }
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn kernel_avx2_matches_scalar_and_vnni_exact_including_extremes() {
+    if !std::is_x86_feature_detected!("avx2") {
+        return;
+    }
+    let mut rng = Rng::seed(0x9E37_79B9);
+    for ks in [0usize, 1, 2, 7, 16, 64] {
+        let mut a = vec![0i32; ks * MR];
+        let mut b_storage = vec![0u32; ks * (NR + 4)];
+        for (i, w) in a.iter_mut().enumerate() {
+            *w = match i % 7 {
+                // Deliberately exercise -128 and +127 alongside 255 activations (would saturate vpmaddubsw).
+                0 => i32::from_le_bytes([0x80, 0x80, 0x80, 0x80]),
+                1 => i32::from_le_bytes([0x7F, 0x7F, 0x7F, 0x7F]),
+                2 => i32::from_le_bytes([0x80, 0x7F, 0x80, 0x7F]),
+                _ => (rng.next_u64() >> 11) as i32,
+            };
+        }
+        for (i, v) in b_storage.iter_mut().enumerate() {
+            *v = match i % 5 {
+                0 => 0xFFFF_FFFF,
+                1 => 0x0000_0000,
+                2 => 0xFF00_FF00,
+                _ => (rng.next_u64() >> 9) as u32,
+            };
+        }
+        let rows: Vec<*const u32> = (0..ks).map(|p| b_storage[p * (NR + 4)..].as_ptr()).collect();
+        for col in [0usize, 1, 3] {
+            let mut want: Tile = [[0; NR]; MR];
+            let mut got_avx2: Tile = [[0; NR]; MR];
+            // SAFETY: `a` has `ks * MR` words and each row has `NR + 4 >= col + NR` words.
+            unsafe {
+                kernel_scalar(ks, a.as_ptr(), rows.as_ptr(), col, &mut want);
+                super::kernel::kernel_avx2(ks, a.as_ptr(), rows.as_ptr(), col, &mut got_avx2);
+            }
+            assert_eq!(got_avx2, want, "kernel_avx2 mismatch for ks={ks}, col={col}");
+            if super::kernel::uses_vnni() {
+                let mut got_active: Tile = [[0; NR]; MR];
+                // SAFETY: same bounds as above; active kernel validated by `kernel()`.
+                unsafe {
+                    (super::kernel::kernel())(ks, a.as_ptr(), rows.as_ptr(), col, &mut got_active);
+                }
+                assert_eq!(got_active, want, "active VNNI kernel mismatch for ks={ks}, col={col}");
+            }
+        }
+    }
+}

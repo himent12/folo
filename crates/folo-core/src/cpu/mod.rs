@@ -179,8 +179,8 @@ pub(crate) fn contiguous<'a, T: Copy + Send + Sync + Default>(
 /// Index values of an `I64`/`U32` view, validated against `size`.
 fn indices(v: &View<'_>, op: &'static str, size: usize) -> Result<Vec<usize>> {
     match cpu(v, op)? {
-        CpuStorage::I64(d) => index::to_usize(op, &elementwise::copy_strided(d, v.layout), size),
-        CpuStorage::U32(d) => index::to_usize(op, &elementwise::copy_strided(d, v.layout), size),
+        CpuStorage::I64(d) => index::to_usize_i64(op, &contiguous(d, v.layout), size),
+        CpuStorage::U32(d) => index::to_usize_u32(op, &contiguous(d, v.layout), size),
         s => Err(Error::DTypeMismatch { op, expected: DType::I64, got: s.dtype() }),
     }
 }
@@ -742,6 +742,14 @@ impl Backend for CpuBackend {
         let s3 = reduce::split3(x.shape().dims(), dim);
         let ix = indices(&idx, "index_select", s3.1)?;
         let s = cpu(&x, "index_select")?;
+        if matches!(s, CpuStorage::F32(_)) {
+            let xd = contiguous_f32(&x, "index_select")?;
+            let out = index::index_select_f32(&xd, s3, &ix);
+            if let Cow::Owned(buf) = xd {
+                recycle(buf);
+            }
+            return Ok(f32_storage(out));
+        }
         Ok(Storage::Cpu(with_cpu_storage!(s, v => {
             Element::into_storage(index::index_select(&contiguous(v, x.layout), s3, &ix))
         })))
@@ -759,6 +767,14 @@ impl Backend for CpuBackend {
         let ix = indices(&idx, "gather", s3.1)?;
         let di = idx.shape().dims()[dim];
         let s = cpu(&x, "gather")?;
+        if matches!(s, CpuStorage::F32(_)) {
+            let xd = contiguous_f32(&x, "gather")?;
+            let out = index::gather_f32(&xd, s3, &ix, di);
+            if let Cow::Owned(buf) = xd {
+                recycle(buf);
+            }
+            return Ok(f32_storage(out));
+        }
         Ok(Storage::Cpu(with_cpu_storage!(s, v => {
             Element::into_storage(index::gather(&contiguous(v, x.layout), s3, &ix, di))
         })))
