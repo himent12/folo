@@ -79,7 +79,8 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
         "bn_fused_fwd" | "bn_fused_bwd" => super::norm::fused_fits(spec),
         "arg_reduce_rows" => spec.get_u32("MODE", 0) <= 2,
         "reduce_var_rows" => super::reduce::var_rows_fits(spec),
-        "sdpa_fwd" => super::attention::sdpa_fits(spec),
+        "sdpa_fwd" | "sdpa_bwd_dkdv" | "sdpa_bwd_dq" => super::attention::sdpa_fits(spec),
+        "bias_add_silu" => super::fused_act::bias_add_silu_fits(spec),
         "muon_gemm" => super::muon::gemm_fits(spec),
         // The multi-tensor kernels (`J` tensors) are only found through their resolvers, which bound `J`.
         _ => true,
@@ -182,7 +183,55 @@ mod tests {
             ("reduce_var_cols", Spec::new().bool("VEC4", true).bool("SMALL", true)),
             (
                 "sdpa_fwd",
-                Spec::new().bool("CAUSAL", true).bool("CACHE_Q", true).u32("D_CHUNKS", 2).subgroups(true),
+                Spec::new()
+                    .bool("CAUSAL", true)
+                    .bool("HAS_MASK", true)
+                    .bool("WRITE_STATS", true)
+                    .bool("CACHE_Q", true)
+                    .u32("D_CHUNKS", 2)
+                    .subgroups(true),
+            ),
+            ("sdpa_bwd_delta", Spec::new().subgroups(true)),
+            (
+                "sdpa_bwd_dkdv",
+                Spec::new().bool("CAUSAL", true).bool("HAS_MASK", true).u32("D_CHUNKS", 4).subgroups(true),
+            ),
+            (
+                "sdpa_bwd_dq",
+                Spec::new()
+                    .bool("CAUSAL", false)
+                    .bool("HAS_MASK", true)
+                    .bool("CACHE_Q", true)
+                    .u32("D_CHUNKS", 2)
+                    .subgroups(false),
+            ),
+            ("silu_bwd", Spec::new().bool("VEC4", true).f16(true)),
+            ("gelu_bwd", Spec::new().bool("VEC4", true)),
+            ("swiglu_fwd", Spec::new().bool("VEC4", true)),
+            ("swiglu_bwd", Spec::new().bool("VEC4", true)),
+            ("bias_add_silu", Spec::new().u32("MODE", 1).bool("HAS_BIAS", true)),
+            (
+                "res_norm_fwd",
+                Spec::new()
+                    .bool("RMS", false)
+                    .bool("HAS_W", true)
+                    .bool("HAS_B", true)
+                    .bool("VEC4", true)
+                    .bool("CACHE", true)
+                    .subgroups(true),
+            ),
+            (
+                "res_norm_bwd_dx",
+                Spec::new()
+                    .bool("RMS", true)
+                    .bool("HAS_W", true)
+                    .bool("HAS_GRES", true)
+                    .bool("VEC4", true)
+                    .bool("CACHE", true),
+            ),
+            (
+                "res_norm_bwd_dwb",
+                Spec::new().bool("RMS", false).bool("NEED_W", true).bool("NEED_B", true).bool("VEC4", true),
             ),
             (
                 "group_norm_fwd",
@@ -360,6 +409,11 @@ mod tests {
             ("reduce_var_rows", Spec::new().u32("MODE", 3)),
             ("sdpa_fwd", Spec::new().u32("D_CHUNKS", 0)),
             ("sdpa_fwd", Spec::new().u32("D_CHUNKS", 5)),
+            ("sdpa_bwd_dkdv", Spec::new().u32("D_CHUNKS", 0)),
+            ("sdpa_bwd_dkdv", Spec::new().u32("D_CHUNKS", 5)),
+            ("sdpa_bwd_dq", Spec::new().u32("D_CHUNKS", 0)),
+            ("sdpa_bwd_dq", Spec::new().u32("D_CHUNKS", 5)),
+            ("bias_add_silu", Spec::new().u32("MODE", 3)),
             ("gemm", Spec::new().u32("BM", 65536)),
             ("gemm", Spec::new().u32("TM", 0)),
             (

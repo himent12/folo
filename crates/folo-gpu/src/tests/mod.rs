@@ -13,6 +13,7 @@ mod coop;
 mod coop_conv;
 mod elementwise;
 mod f16;
+mod fused_act;
 mod gemm;
 mod group_norm_sdpa;
 mod layout;
@@ -23,6 +24,7 @@ mod pool;
 mod precompile;
 mod reduce;
 mod runtime;
+mod sdpa_bwd;
 mod sites;
 mod vision;
 
