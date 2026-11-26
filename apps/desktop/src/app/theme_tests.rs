@@ -348,3 +348,95 @@ fn a_failed_file_with_a_long_name_shows_the_whole_name_and_reason() {
         assert_eq!(with_names.0 - without_names.0, names.1, "every name's glyph shows at {width}");
     }
 }
+
+/// #382 (after #375): a failed theme file with a short name and a long reason must keep the start of
+/// the reason beside the name on the first line (not wrap the entire reason onto the next line under
+/// an otherwise empty row), while still wrapping and showing every glyph unclipped.
+#[test]
+fn a_failed_file_with_a_short_name_and_long_reason_starts_beside_the_name() {
+    let dir = TestDir::new("desktop-theme-short-name-long-reason");
+    let folder = dir.path().join("a").join("themes");
+    let empty = dir.path().join("b").join("themes");
+    std::fs::create_dir_all(&folder).unwrap();
+    // A multi-word unknown top-level key long enough to force multi-line wrapping at both 960 and
+    // 1280 px: the old `flex_wrap` layout dropped the entire reason onto the line below `bad.json`.
+    let long_key = format!("invalid option {}", "with detailed reason text ".repeat(6));
+    std::fs::write(
+        folder.join("bad.json"),
+        format!(
+            r#"{{"{long_key}": true, "folo_theme": 1, "id": "short-name", "name": "Short", "mode": "dark"}}"#
+        ),
+    )
+    .unwrap();
+    let failed = Catalog::load(&folder).failed;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    let rows: Vec<(String, String)> = failed
+        .iter()
+        .map(|f| (f.file.clone(), f.error.strip_prefix("(file): ").unwrap_or(&f.error).to_string()))
+        .collect();
+    let (mut ref_app, ref_bounds) = headless(8000.);
+    let ref_win = ref_app.update(|cx| {
+        use folo_ui::{AppContext, WindowBounds, WindowOptions};
+        let options =
+            WindowOptions { window_bounds: Some(WindowBounds::Windowed(ref_bounds)), ..Default::default() };
+        cx.open_window(options, |_, cx| cx.new(|_| Reference(rows))).expect("open window")
+    });
+    let [ref_reasons, ref_names] = glyphs(&mut ref_app, ref_win.into());
+    assert!(ref_reasons.1 > 0 && ref_names.1 > 0);
+
+    for width in [960., 1280.] {
+        let (mut app, window) = settings_at(width, &folder);
+        let [with_reasons, with_names] = glyphs(&mut app, window.into());
+        let t = app.update(|cx| theme(cx));
+        // Snapshot the (x, y) positions of danger and secondary glyphs while the failed file is shown.
+        let (danger_pts, secondary_pts) = {
+            let mut d = Vec::new();
+            let mut s = Vec::new();
+            for p in &app.scene(window.into()).primitives {
+                if let folo_ui::Primitive::MonoSprite(sp) = p
+                    && sp.kind == folo_ui::SpriteKind::Glyph
+                {
+                    let pt = (f64::from(sp.bounds.origin.x) as f32, f64::from(sp.bounds.origin.y) as f32);
+                    if sp.color == t.danger_text {
+                        d.push(pt);
+                    } else if sp.color == t.text_secondary {
+                        s.push(pt);
+                    }
+                }
+            }
+            (d, s)
+        };
+        // Remove the failed file to see what the rest of the page paints.
+        drive(&mut app, window, |this, _, cx| {
+            this.themes = Catalog::load(&empty);
+            cx.notify();
+        });
+        let [without_reasons, without_names] = glyphs(&mut app, window.into());
+        assert_eq!(with_reasons.0 - without_reasons.0, ref_reasons.1, "every reason glyph shows at {width}");
+        assert_eq!(with_names.0 - without_names.0, ref_names.1, "every name glyph shows at {width}");
+        // The Settings page has no other danger glyphs when connected to mock; every danger glyph is
+        // the failed file's reason. Verify the reason wraps across multiple lines AND starts on the
+        // same first line directly to the right of every glyph of `bad.json`.
+        assert_eq!(without_reasons.1, 0, "expected no other danger glyphs on Settings");
+        let reason_top = danger_pts.iter().map(|&(_, y)| y).fold(f32::INFINITY, f32::min);
+        let reason_bottom = danger_pts.iter().map(|&(_, y)| y).fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            reason_bottom - reason_top >= 12.,
+            "long reason should wrap across multiple lines at {width}: top={reason_top}, bottom={reason_bottom}"
+        );
+        // Line height is 16 px (`ty::SM.line`); glyphs on the first line (including baseline-only
+        // punctuation like `.`) have their sprite top within `[reason_top - 2, reason_top + 12)`.
+        let on_first_line = |y: f32| y >= reason_top - 2. && y < reason_top + 12.;
+        let first_line_danger_min_x = danger_pts
+            .iter()
+            .filter(|&&(_, y)| on_first_line(y))
+            .map(|&(x, _)| x)
+            .fold(f32::INFINITY, f32::min);
+        let name_glyphs_beside_reason =
+            secondary_pts.iter().filter(|&&(x, y)| on_first_line(y) && x < first_line_danger_min_x).count();
+        assert_eq!(
+            name_glyphs_beside_reason, ref_names.1,
+            "every glyph of bad.json should sit on the same first line to the left of the reason at {width} (reason_top={reason_top}, first_line_danger_min_x={first_line_danger_min_x})"
+        );
+    }
+}

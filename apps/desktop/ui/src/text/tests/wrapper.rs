@@ -288,3 +288,38 @@ fn wrappers_from_before_fonts_were_added_are_not_reused() {
     let mut second = text_system.line_wrapper(super::dummy_font(), px(10.));
     assert_eq!((truncate(&mut first), truncate(&mut second)), (want.clone(), want));
 }
+
+#[test]
+fn wrap_and_truncate_never_split_grapheme_clusters() {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut wrapper = build_wrapper();
+
+    // "aa cafe\u{0301}s": FixedTextSystem gives 9.6 px per char, so "aa cafe\u{0301}" is 8*9.6 = 76.8 px.
+    // Must wrap at the space before "cafe\u{0301}s" (byte 3), never between 'e' and '\u{0301}' (byte 7).
+    let text = "aa cafe\u{0301}s";
+    assert_eq!(wrap(&mut wrapper, &[LineFragment::text(text)], 72.), [Boundary::new(3, 0)]);
+
+    // Across widths, hard-wrapping and truncation must always land on extended grapheme boundaries.
+    for sample in ["aaaae\u{0301}bbbb", "cafe\u{0301} cre\u{0300}me", "o\u{0302}\u{0323}abc", "😀\u{FE0F}xyz"]
+    {
+        let grapheme_starts: Vec<usize> = sample.grapheme_indices(true).map(|(i, _)| i).collect();
+        for width in [10., 20., 35., 48., 50., 55., 60., 72.] {
+            for b in wrap(&mut wrapper, &[LineFragment::text(sample)], width) {
+                assert!(
+                    grapheme_starts.contains(&b.ix),
+                    "wrap_line split grapheme in {sample:?} at width {width}: byte {} not in {grapheme_starts:?}",
+                    b.ix
+                );
+            }
+            let (cut, cut_runs) =
+                wrapper.truncate_line(sample.into(), px(width), "…", &runs(&[sample.len()]));
+            assert_covers(&cut, &cut_runs);
+            if let Some(prefix) = cut.strip_suffix('…') {
+                assert!(
+                    prefix.len() == sample.len() || grapheme_starts.contains(&prefix.len()),
+                    "truncate_line split grapheme in {sample:?} at width {width}: prefix {prefix:?}"
+                );
+            }
+        }
+    }
+}

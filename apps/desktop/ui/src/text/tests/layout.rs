@@ -190,3 +190,155 @@ fn shape_text_with_style_matches_shape_text_and_handles_empty_runs() {
         lines.iter().map(|l| l.decoration_runs().iter().map(|r| r.len).collect()).collect();
     assert_eq!(decoration_lens, [vec![2], vec![1, 1], vec![], vec![2]]);
 }
+
+#[test]
+fn shape_text_never_wraps_between_base_letter_and_combining_accent() {
+    use unicode_segmentation::UnicodeSegmentation;
+    let window = window_text_system();
+
+    // Decomposed "café" ("cafe\u{0301}") after a space: must wrap before "cafe\u{0301}", never between
+    // 'e' and '\u{0301}', and never treat '\u{0301}' as a mid-word break candidate.
+    let text = "aa cafe\u{0301}s";
+    let lines = window.shape_text(text.into(), px(16.), &runs(&[text.len()]), Some(px(72.)), None).unwrap();
+    let layout = &lines[0].layout;
+    let starts: Vec<usize> = layout
+        .wrap_boundaries()
+        .iter()
+        .map(|b| layout.unwrapped_layout.runs[b.run_ix].glyphs[b.glyph_ix].index)
+        .collect();
+    assert_eq!(starts, [3], "word breaks at the space before cafe\\u{{0301}}s, not before the accent");
+
+    // Hard-wrap inside a single long word across widths: every wrap boundary must land on a grapheme
+    // cluster boundary, even when the width cuts right between 'e' and '\u{0301}' or is narrower than
+    // a single cluster.
+    for sample in ["aaaae\u{0301}bbbb", "aa o\u{0302}\u{0323}bb", "e\u{0301}ab", "aa 😀\u{FE0F}bb"] {
+        let grapheme_starts: Vec<usize> = sample.grapheme_indices(true).map(|(i, _)| i).collect();
+        for width in [10., 20., 35., 48., 50., 55., 60.] {
+            let lines = window
+                .shape_text(sample.into(), px(16.), &runs(&[sample.len()]), Some(px(width)), None)
+                .unwrap();
+            let layout = &lines[0].layout;
+            for b in layout.wrap_boundaries() {
+                let ix = layout.unwrapped_layout.runs[b.run_ix].glyphs[b.glyph_ix].index;
+                assert!(
+                    grapheme_starts.contains(&ix),
+                    "wrap inside grapheme cluster for {sample:?} at width {width}: byte {ix} not in {grapheme_starts:?}"
+                );
+            }
+        }
+    }
+
+    // Multi-glyph shaped clusters (DirectWrite / HarfBuzz emitting base + mark with the same cluster
+    // index, or font fallback splitting base and combining mark into separate runs) must stay atomic.
+    let cluster_text = "aaae\u{0301}b";
+    let same_index_layout = crate::LineLayout {
+        font_size: px(16.),
+        width: px(50.),
+        ascent: px(12.),
+        descent: px(4.),
+        len: cluster_text.len(),
+        runs: vec![crate::ShapedRun {
+            font_id: crate::FontId(0),
+            glyphs: vec![
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(0.), px(0.)),
+                    index: 0,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(10.), px(0.)),
+                    index: 1,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(20.), px(0.)),
+                    index: 2,
+                    is_emoji: false,
+                },
+                // 'e' at 30..38, combining acute mark at same index=3 positioned at 36 (extends to 40).
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(2),
+                    position: point(px(30.), px(0.)),
+                    index: 3,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(3),
+                    position: point(px(36.), px(0.)),
+                    index: 3,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(4),
+                    position: point(px(40.), px(0.)),
+                    index: 6,
+                    is_emoji: false,
+                },
+            ],
+        }],
+    };
+    let bounds = same_index_layout.compute_wrap_boundaries(cluster_text, px(38.), None);
+    assert_eq!(bounds.as_slice(), &[WrapBoundary { run_ix: 0, glyph_ix: 3 }]);
+
+    // Fallback-split runs: 'e' in run 0 (index 3), '\u{0301}' in run 1 (index 4).
+    let split_run_layout = crate::LineLayout {
+        font_size: px(16.),
+        width: px(56.),
+        ascent: px(12.),
+        descent: px(4.),
+        len: cluster_text.len(),
+        runs: vec![
+            crate::ShapedRun {
+                font_id: crate::FontId(0),
+                glyphs: vec![
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(1),
+                        position: point(px(0.), px(0.)),
+                        index: 0,
+                        is_emoji: false,
+                    },
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(1),
+                        position: point(px(10.), px(0.)),
+                        index: 1,
+                        is_emoji: false,
+                    },
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(1),
+                        position: point(px(20.), px(0.)),
+                        index: 2,
+                        is_emoji: false,
+                    },
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(2),
+                        position: point(px(30.), px(0.)),
+                        index: 3,
+                        is_emoji: false,
+                    },
+                ],
+            },
+            crate::ShapedRun {
+                font_id: crate::FontId(1),
+                glyphs: vec![
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(3),
+                        position: point(px(40.), px(0.)),
+                        index: 4,
+                        is_emoji: false,
+                    },
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(4),
+                        position: point(px(48.), px(0.)),
+                        index: 6,
+                        is_emoji: false,
+                    },
+                ],
+            },
+        ],
+    };
+    let bounds = split_run_layout.compute_wrap_boundaries(cluster_text, px(44.), None);
+    assert_eq!(bounds.as_slice(), &[WrapBoundary { run_ix: 0, glyph_ix: 3 }]);
+}

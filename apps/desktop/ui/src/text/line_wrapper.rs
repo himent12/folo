@@ -7,6 +7,7 @@ use crate::{FontId, FontRun, Pixels, PlatformTextSystem, SharedString, TextRun, 
 use std::borrow::Cow;
 use std::iter;
 use std::sync::Arc;
+use unicode_segmentation::{Graphemes, UnicodeSegmentation};
 
 /// Wraps and truncates lines of text in one font at one size, caching each character's width.
 pub struct LineWrapper {
@@ -32,7 +33,8 @@ impl LineWrapper {
     }
 
     /// The boundaries at which `fragments` wrap at `wrap_width`. A line breaks after an ASCII space
-    /// before a word character, or before any other non-space, non-word character.
+    /// before a word character, or before any other non-space, non-word grapheme cluster, never inside
+    /// an extended grapheme cluster.
     pub fn wrap_line<'a>(
         &'a mut self,
         fragments: &'a [LineFragment],
@@ -54,10 +56,11 @@ impl LineWrapper {
                 index += candidate.len_utf8();
                 let mut new_prev_c = prev_c;
                 let item_width = match candidate {
-                    WrapBoundaryCandidate::Char { character: c } => {
-                        if c == '\n' {
+                    WrapBoundaryCandidate::Grapheme { grapheme } => {
+                        if grapheme.ends_with('\n') {
                             continue;
                         }
+                        let c = grapheme.chars().next().unwrap_or('\0');
 
                         if Self::is_word_char(c) {
                             if prev_c == ' ' && c != ' ' && first_non_whitespace_ix.is_some() {
@@ -78,7 +81,7 @@ impl LineWrapper {
 
                         new_prev_c = c;
 
-                        self.width_for_char(c)
+                        self.width_for_grapheme(grapheme)
                     }
                     WrapBoundaryCandidate::Element { width: element_width, .. } => {
                         if prev_c == ' ' && first_non_whitespace_ix.is_some() {
@@ -164,6 +167,8 @@ impl LineWrapper {
     }
 
     /// Truncates only the text string, returning `(text, was_truncated)` without touching runs.
+    /// Cuts only on extended grapheme cluster boundaries so a combining mark is never separated from
+    /// its base character.
     pub(crate) fn truncate_line_text(
         &mut self,
         line: SharedString,
@@ -172,15 +177,15 @@ impl LineWrapper {
     ) -> (SharedString, bool) {
         let mut width = px(0.);
         let suffix_width =
-            truncation_suffix.chars().map(|c| self.width_for_char(c)).fold(px(0.0), |a, x| a + x);
+            truncation_suffix.graphemes(true).map(|g| self.width_for_grapheme(g)).fold(px(0.0), |a, x| a + x);
         let mut truncate_ix = 0;
-        for (ix, c) in line.char_indices() {
+        for (ix, grapheme) in line.grapheme_indices(true) {
             if width + suffix_width < truncate_width {
                 truncate_ix = ix;
             }
 
-            let char_width = self.width_for_char(c);
-            width += char_width;
+            let grapheme_width = self.width_for_grapheme(grapheme);
+            width += grapheme_width;
 
             if width.floor() > truncate_width {
                 let mut result = String::with_capacity(truncate_ix + truncation_suffix.len());
@@ -211,6 +216,22 @@ impl LineWrapper {
         matches!(c, '-' | '_' | '.' | '\'' | '$' | '%' | '@' | '#' | '^' | '~' | ',' | '=' | ':') ||
         // `⋯` is kept at the end of the line.
         matches!(c, '⋯')
+    }
+
+    #[inline(always)]
+    fn width_for_grapheme(&mut self, grapheme: &str) -> Pixels {
+        if grapheme.len() == 1 {
+            return self.width_for_char(grapheme.as_bytes()[0] as char);
+        }
+        let mut chars = grapheme.chars();
+        if let Some(first) = chars.next()
+            && chars.next().is_none()
+        {
+            return self.width_for_char(first);
+        }
+        self.platform_text_system
+            .layout_line(grapheme, self.font_size, &[FontRun { len: grapheme.len(), font_id: self.font_id }])
+            .width
     }
 
     #[inline(always)]
@@ -285,30 +306,45 @@ impl<'a> LineFragment<'a> {
         LineFragment::Element { width, len_utf8 }
     }
 
-    fn wrap_boundary_candidates(&self) -> impl Iterator<Item = WrapBoundaryCandidate> {
-        let text = match self {
-            LineFragment::Text { text } => text,
-            LineFragment::Element { .. } => "\0",
-        };
-        text.chars().map(move |character| {
-            if let LineFragment::Element { width, len_utf8 } = self {
-                WrapBoundaryCandidate::Element { width: *width, len_utf8: *len_utf8 }
-            } else {
-                WrapBoundaryCandidate::Char { character }
+    fn wrap_boundary_candidates(&self) -> WrapBoundaryCandidates<'a> {
+        match self {
+            LineFragment::Text { text } => WrapBoundaryCandidates::Text(text.graphemes(true)),
+            LineFragment::Element { width, len_utf8 } => {
+                WrapBoundaryCandidates::Element(Some((*width, *len_utf8)))
             }
-        })
+        }
     }
 }
 
-enum WrapBoundaryCandidate {
-    Char { character: char },
+enum WrapBoundaryCandidates<'a> {
+    Text(Graphemes<'a>),
+    Element(Option<(Pixels, usize)>),
+}
+
+impl<'a> Iterator for WrapBoundaryCandidates<'a> {
+    type Item = WrapBoundaryCandidate<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            WrapBoundaryCandidates::Text(graphemes) => {
+                graphemes.next().map(|grapheme| WrapBoundaryCandidate::Grapheme { grapheme })
+            }
+            WrapBoundaryCandidates::Element(item) => {
+                item.take().map(|(width, len_utf8)| WrapBoundaryCandidate::Element { width, len_utf8 })
+            }
+        }
+    }
+}
+
+enum WrapBoundaryCandidate<'a> {
+    Grapheme { grapheme: &'a str },
     Element { width: Pixels, len_utf8: usize },
 }
 
-impl WrapBoundaryCandidate {
+impl WrapBoundaryCandidate<'_> {
     fn len_utf8(&self) -> usize {
         match self {
-            WrapBoundaryCandidate::Char { character } => character.len_utf8(),
+            WrapBoundaryCandidate::Grapheme { grapheme } => grapheme.len(),
             WrapBoundaryCandidate::Element { len_utf8: len, .. } => *len,
         }
     }

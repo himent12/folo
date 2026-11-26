@@ -4,6 +4,51 @@
 use crate::{FontId, LineLayout, LineWrapper, Pixels, Point, ShapedRun, Size, point, px};
 use smallvec::SmallVec;
 use std::sync::Arc;
+use unicode_segmentation::{GraphemeIndices, UnicodeSegmentation};
+
+/// Tracks which UAX #29 extended grapheme cluster contains each byte index in a line, with a
+/// zero-overhead fast path for ASCII-only text.
+struct GraphemeCursor<'a> {
+    text: &'a str,
+    iter: Option<GraphemeIndices<'a>>,
+    cur_start: usize,
+    next_start: Option<usize>,
+}
+
+impl<'a> GraphemeCursor<'a> {
+    fn new(text: &'a str) -> Self {
+        if text.is_ascii() {
+            return Self { text, iter: None, cur_start: 0, next_start: None };
+        }
+        let mut iter = text.grapheme_indices(true);
+        let cur_start = iter.next().map_or(0, |(i, _)| i);
+        let next_start = iter.next().map(|(i, _)| i);
+        Self { text, iter: Some(iter), cur_start, next_start }
+    }
+
+    /// The UTF-8 byte index where the extended grapheme cluster containing `byte_ix` begins.
+    fn cluster_start(&mut self, byte_ix: usize) -> usize {
+        let Some(iter) = self.iter.as_mut() else {
+            let bytes = self.text.as_bytes();
+            if byte_ix > 0 && bytes.get(byte_ix) == Some(&b'\n') && bytes.get(byte_ix - 1) == Some(&b'\r') {
+                return byte_ix - 1;
+            }
+            return byte_ix;
+        };
+        if byte_ix < self.cur_start {
+            *iter = self.text.grapheme_indices(true);
+            self.cur_start = iter.next().map_or(0, |(i, _)| i);
+            self.next_start = iter.next().map(|(i, _)| i);
+        }
+        while let Some(next) = self.next_start
+            && next <= byte_ix
+        {
+            self.cur_start = next;
+            self.next_start = iter.next().map(|(i, _)| i);
+        }
+        self.cur_start
+    }
+}
 
 impl LineLayout {
     /// The index of the character at `x` (`None` at or past the line's width).
@@ -76,8 +121,9 @@ impl LineLayout {
         None
     }
 
-    /// Where the line wraps at `wrap_width` (GPUI's rules, which differ slightly from
-    /// `LineWrapper::wrap_line`'s), at most `max_lines` lines.
+    /// Where the line wraps at `wrap_width` (GPUI's rules, kept grapheme-cluster-safe so a base
+    /// character and its combining marks or multi-glyph cluster never split across lines), at most
+    /// `max_lines` lines.
     pub(crate) fn compute_wrap_boundaries(
         &self,
         text: &str,
@@ -88,6 +134,10 @@ impl LineLayout {
         if max_lines.is_some_and(|max_lines| max_lines <= 1) {
             return boundaries;
         }
+        let mut cursor = GraphemeCursor::new(text);
+        let mut prev_cluster_start: Option<usize> = None;
+        let mut cluster_boundary = WrapBoundary { run_ix: 0, glyph_ix: 0 };
+        let mut cluster_x = px(0.);
         let mut first_non_whitespace_ix = None;
         let mut last_candidate_ix = None;
         let mut last_candidate_x = px(0.);
@@ -101,34 +151,44 @@ impl LineLayout {
             .flat_map(move |(run_ix, run)| {
                 run.glyphs.iter().enumerate().map(move |(glyph_ix, glyph)| {
                     let character = text[glyph.index..].chars().next().unwrap_or('\0');
-                    (WrapBoundary { run_ix, glyph_ix }, character, glyph.position.x)
+                    (WrapBoundary { run_ix, glyph_ix }, glyph.index, character, glyph.position.x)
                 })
             })
             .peekable();
 
-        while let Some((boundary, ch, x)) = glyphs.next() {
+        while let Some((boundary, glyph_index, ch, x)) = glyphs.next() {
             if ch == '\n' {
                 continue;
             }
 
-            if LineWrapper::is_word_char(ch) {
-                if prev_ch == ' ' && ch != ' ' && first_non_whitespace_ix.is_some() {
+            let cluster_start = cursor.cluster_start(glyph_index);
+            let same_cluster = prev_cluster_start == Some(cluster_start);
+            if !same_cluster {
+                prev_cluster_start = Some(cluster_start);
+                cluster_boundary = boundary;
+                cluster_x = x;
+
+                if LineWrapper::is_word_char(ch) {
+                    if prev_ch == ' ' && ch != ' ' && first_non_whitespace_ix.is_some() {
+                        last_candidate_ix = Some(boundary);
+                        last_candidate_x = x;
+                    }
+                } else if ch != ' ' && first_non_whitespace_ix.is_some() {
                     last_candidate_ix = Some(boundary);
                     last_candidate_x = x;
                 }
-            } else if ch != ' ' && first_non_whitespace_ix.is_some() {
-                last_candidate_ix = Some(boundary);
-                last_candidate_x = x;
+
+                if ch != ' ' && first_non_whitespace_ix.is_none() {
+                    first_non_whitespace_ix = Some(boundary);
+                }
+
+                prev_ch = ch;
             }
 
-            if ch != ' ' && first_non_whitespace_ix.is_none() {
-                first_non_whitespace_ix = Some(boundary);
-            }
-
-            let next_x = glyphs.peek().map_or(self.width, |(_, _, x)| *x);
+            let next_x = glyphs.peek().map_or(self.width, |(_, _, _, x)| *x);
             let width = next_x - last_boundary_x;
 
-            if width > wrap_width && boundary > last_boundary {
+            if width > wrap_width && cluster_boundary > last_boundary {
                 // With a line clamp, stop at the last allowed line.
                 if let Some(max_lines) = max_lines
                     && boundaries.len() >= max_lines - 1
@@ -140,12 +200,11 @@ impl LineLayout {
                     last_boundary = last_candidate_ix;
                     last_boundary_x = last_candidate_x;
                 } else {
-                    last_boundary = boundary;
-                    last_boundary_x = x;
+                    last_boundary = cluster_boundary;
+                    last_boundary_x = cluster_x;
                 }
                 boundaries.push(last_boundary);
             }
-            prev_ch = ch;
         }
 
         boundaries

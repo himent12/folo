@@ -34,6 +34,8 @@ resvg = { version = "0.45", default-features = false }
 smallvec = { version = "1.6", features = ["union"] }
 taffy = "=0.9.0"
 tiny-skia = "0.11"
+# UAX #29 extended grapheme clusters so text wrapping and truncation never split a base character from its combining marks.
+unicode-segmentation = "1"
 usvg = { version = "0.45", default-features = false }
 # PlatformDisplay::uuid: the app keeps the display's UUID string (GPUI's: v5 of the device name) in desktop.json.
 uuid = { version = "1", features = ["v5"] }
