@@ -96,4 +96,31 @@ describe('the run page', () => {
     await Promise.resolve();
     await Promise.resolve();
   });
+
+  it('resets Stop dialog state when navigating to another run and ignores late errors from the previous run', async () => {
+    const api = await open('running');
+    const runs = await api.runs();
+    const other = runs.find((r) => r.status === 'completed')!;
+    let rejectStop!: (e: Error) => void;
+    vi.spyOn(api, 'stopRun').mockImplementation(() => new Promise((_, rej) => (rejectStop = rej)));
+
+    const header = () => [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Stop');
+    await until('Stop', () => !!header());
+    header()!.click();
+    const confirm = () => [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find((b) => b.textContent?.trim() === 'Stop run');
+    await until('the confirm', () => !!confirm());
+    confirm()!.click();
+    flushSync();
+
+    // Navigate to another run while stop is still in flight: dialog must close cleanly.
+    router.route = parse(`#/runs/${other.id}`);
+    await until('other run', () => target.textContent?.includes(other.name) ?? false);
+    expect(document.querySelector('dialog[open]')).toBeNull();
+
+    // Rejecting the stale stop must not leave busy set or open any dialog on the new run.
+    rejectStop(new Error('network down'));
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(document.querySelector('dialog[open]')).toBeNull();
+  });
 });

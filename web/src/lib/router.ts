@@ -251,12 +251,22 @@ class Router {
   }
 
   #allowed(to: Route, proceed: () => void): boolean {
-    let done = false;
-    const once = () => {
-      if (!done) (done = true), proceed();
+    const guards = [...this.#guards];
+    const check = (start: number): boolean => {
+      for (let i = start; i < guards.length; i++) {
+        const g = guards[i]!;
+        if (!this.#guards.has(g)) continue;
+        let done = false;
+        const once = () => {
+          if (done) return;
+          done = true;
+          if (check(i + 1)) proceed();
+        };
+        if (!g(to, once)) return false;
+      }
+      return true;
     };
-    for (const g of this.#guards) if (!g(to, once)) return false;
-    return true;
+    return check(0);
   }
 
   #navigate(hash: string, replace = false) {

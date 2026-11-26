@@ -627,11 +627,15 @@ export function hasSetter(el: Element, name: string): boolean {
   return setters(el).has(name);
 }
 
+const XLINK_NS = 'http://www.w3.org/1999/xlink';
+
 /** Sets an attribute as Svelte does: `null`/`undefined` remove it; a non-string with a matching DOM setter is a property. */
 export function setAttribute(el: Element, name: string, value: unknown): void {
-  if (value == null) el.removeAttribute(name);
-  else if (typeof value !== 'string' && setters(el).has(name)) (el as any)[name] = value;
-  else if (name.startsWith('xlink:')) el.setAttributeNS('http://www.w3.org/1999/xlink', name, String(value));
+  if (value == null) {
+    if (name.startsWith('xlink:')) el.removeAttributeNS(XLINK_NS, name.slice(6));
+    else el.removeAttribute(name);
+  } else if (typeof value !== 'string' && setters(el).has(name)) (el as any)[name] = value;
+  else if (name.startsWith('xlink:')) el.setAttributeNS(XLINK_NS, name, String(value));
   else el.setAttribute(name, value as string);
 }
 
@@ -738,12 +742,11 @@ export function className(el: Element, fn: () => unknown, scope?: string, dirs?:
   renderEffect(() => {
     const value = clsx(fn() as ClassValue);
     const d = dirs?.();
-    if (value !== prevValue) writeClass(el, toClass(value, scope, d));
+    let dropped = false;
+    if (prevDirs !== undefined) for (const k in prevDirs) if (d === undefined || !(k in d)) { dropped = true; break; }
+    if (value !== prevValue || dropped) writeClass(el, toClass(value, scope, d));
     else if (d !== undefined) {
       for (const k in d) if (prevDirs === undefined || !d[k] !== !prevDirs[k]) el.classList.toggle(k, !!d[k]);
-      if (prevDirs !== undefined) for (const k in prevDirs) if (!(k in d) && prevDirs[k]) el.classList.remove(k);
-    } else if (prevDirs !== undefined) {
-      for (const k in prevDirs) if (prevDirs[k]) el.classList.remove(k);
     }
     prevValue = value;
     prevDirs = d;

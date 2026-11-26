@@ -189,6 +189,21 @@ export function For<T>(props: ForProps<T>): JSX.Element {
     if (row.t !== null) leaveBranch(row.t, row.value);
     dispose(row.root);
   };
+  const dropRange = (from: number, to: number): unknown => {
+    let err: unknown;
+    let hasErr = false;
+    for (let i = from; i < to; i++) {
+      try {
+        drop(rows[i]!);
+      } catch (e) {
+        if (!hasErr) {
+          hasErr = true;
+          err = e;
+        }
+      }
+    }
+    return hasErr ? { err } : null;
+  };
 
   const update = (row: Row<T>, item: T, i: number) => {
     if (row.item !== item) {
@@ -212,9 +227,10 @@ export function For<T>(props: ForProps<T>): JSX.Element {
     return untrack(() => {
       if (n === 0) {
         if (rows.length > 0) {
-          for (let i = 0; i < rows.length; i++) drop(rows[i]!);
+          const dropped = dropRange(0, rows.length) as { err: unknown } | null;
           rows = [];
           outDirty = true;
+          if (dropped !== null) throw dropped.err;
         }
         if (fallback === null && props.fallback !== undefined) {
           outDirty = true;
@@ -306,8 +322,9 @@ export function For<T>(props: ForProps<T>): JSX.Element {
       }
       if (start === n) {
         outDirty = true;
-        for (let i = n; i < prevLen; i++) drop(rows[i]!);
+        const dropped = dropRange(n, prevLen) as { err: unknown } | null;
         rows.length = n;
+        if (dropped !== null) throw dropped.err;
         const nextOut = new Array<JSX.Element>(n);
         for (let j = 0; j < n; j++) nextOut[j] = rows[j]!.value;
         ran = true;
@@ -359,7 +376,12 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         }
       } else if (start > newEnd) {
         // Pure removals.
-        for (let i = start; i <= end; i++) drop(rows[i]!);
+        const dropped = dropRange(start, end + 1) as { err: unknown } | null;
+        if (dropped !== null) {
+          rows = next;
+          outDirty = true;
+          throw dropped.err;
+        }
       } else if (start === end && start === newEnd) {
         // Single-row slot: preserve SameValueZero parity before replacing.
         if (sameKey(rows[start]!.key, keys[start])) update((next[start] = rows[start]!), list[start]!, start);
@@ -523,12 +545,22 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         }
       } else if (n < prevLen) {
         outDirty = true;
+        let dropErr: unknown;
+        let hasDropErr = false;
         for (let i = n; i < prevLen; i++) {
           const row = rows[i]!;
-          if (row.t !== null) leaveBranch(row.t, row.value);
-          dispose(row.root);
+          try {
+            if (row.t !== null) leaveBranch(row.t, row.value);
+            dispose(row.root);
+          } catch (e) {
+            if (!hasDropErr) {
+              hasDropErr = true;
+              dropErr = e;
+            }
+          }
         }
         rows.length = n;
+        if (hasDropErr) throw dropErr;
       }
       if (n === 0 && fallback === null && props.fallback !== undefined) {
         outDirty = true;

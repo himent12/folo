@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
 import { createRoot, Dynamic, effect, flush, For, mergeProps, onCleanup, signal, splitProps, type Signal } from 'fw';
-import { bindStyle, className, spread } from 'fw/internal';
+import { bindStyle, className, setAttribute, spread } from 'fw/internal';
 import { render } from '../testing';
 
 const html = (el: Element) => el.innerHTML.replace(/<!---->/g, '');
@@ -872,5 +872,66 @@ describe('Svelte attribute and prop semantics', () => {
     expect(() => flush()).not.toThrow();
     expect(div.lastElementChild?.className).toBe('after');
     unmount();
+  });
+
+  it('removes namespaced SVG xlink:* attributes in setAttribute and spread', () => {
+    const XLINK_NS = 'http://www.w3.org/1999/xlink';
+    const useEl = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    setAttribute(useEl, 'xlink:href', '#icon-a');
+    expect(useEl.getAttributeNS(XLINK_NS, 'href')).toBe('#icon-a');
+    setAttribute(useEl, 'xlink:href', null);
+    expect(useEl.hasAttributeNS(XLINK_NS, 'href')).toBe(false);
+
+    const p = signal<Record<string, unknown>>({ 'xlink:href': '#icon-b' });
+    const useEl2 = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    const stop = createRoot((d) => {
+      spread(useEl2, () => p.get());
+      return d;
+    });
+    expect(useEl2.getAttributeNS(XLINK_NS, 'href')).toBe('#icon-b');
+    p.set({});
+    flush();
+    expect(useEl2.hasAttributeNS(XLINK_NS, 'href')).toBe(false);
+    stop();
+  });
+
+  it('className restores base classes when a falsy or truthy class: directive key is dropped', () => {
+    const dirs = signal<Record<string, unknown> | undefined>({ active: false });
+    const el = document.createElement('div');
+    const stop = createRoot((d) => {
+      className(el, () => 'base active', 'fw-s', () => dirs.get() as Record<string, unknown>);
+      return d;
+    });
+    expect(el.classList.contains('base')).toBe(true);
+    expect(el.classList.contains('active')).toBe(false);
+
+    // Dropping the falsy directive must restore 'active' from the base class value.
+    dirs.set({});
+    flush();
+    expect(el.classList.contains('active')).toBe(true);
+    expect(el.classList.contains('fw-s')).toBe(true);
+
+    // Dropping a truthy directive whose token is also in base must keep it from base.
+    dirs.set({ active: true });
+    flush();
+    expect(el.classList.contains('active')).toBe(true);
+    dirs.set(undefined);
+    flush();
+    expect(el.classList.contains('active')).toBe(true);
+    expect(el.classList.contains('base')).toBe(true);
+    stop();
+  });
+
+  it('spread cleans up delegated event handlers on dispose and treats literal "on" as an attribute', () => {
+    const el = document.createElement('button') as HTMLButtonElement & { $$click?: unknown };
+    const handler = vi.fn();
+    const stop = createRoot((d) => {
+      spread(el, () => ({ onclick: handler, on: 'yes' }));
+      return d;
+    });
+    expect(el.$$click).toBe(handler);
+    expect(el.getAttribute('on')).toBe('yes');
+    stop();
+    expect(el.$$click).toBeUndefined();
   });
 });

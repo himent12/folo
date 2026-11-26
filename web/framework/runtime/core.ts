@@ -20,6 +20,7 @@ import {
   linkDependency,
   needsToRecompute,
   prepareSources,
+  retainSources,
   subscribeLink,
   TRACKING,
   unsubscribeLink,
@@ -465,7 +466,16 @@ export function createRoot<T>(fn: (dispose: () => void) => T, parent?: Owner | n
     root._parent = owner;
     root._depth = owner === null ? 0 : owner._depth + 1;
   } else attach(parent, root);
-  return runWithOwner(root, () => fn(() => dispose(root)));
+  try {
+    return runWithOwner(root, () => fn(() => dispose(root)));
+  } catch (e) {
+    try {
+      dispose(root);
+    } catch {
+      // Keep the root initializer error.
+    }
+    throw e;
+  }
 }
 
 /** Registers `fn` to run when the current owner (component, effect run, root) is disposed or re-runs. */
@@ -503,8 +513,15 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
   let root: Owner | null = null;
   const c = new ComputedNode<T>(() => {
     if (root !== null) {
-      dispose(root);
+      const prev = root;
       root = null;
+      try {
+        dispose(prev);
+      } catch (e) {
+        // `fn()` never ran, so `cleanupSources(c)` would otherwise unsubscribe every dependency and strand `c` in HAS_ERROR.
+        retainSources(c);
+        throw e;
+      }
     }
     const r = new Owner();
     // The branch stands where the memo was written, not where it was (re)created.

@@ -72,7 +72,7 @@ export function askAllWhenCut(o: {
       },
       // The first answer stays: it is still right above its lowest score, and the count still says "1,000+".
       (e: unknown) => {
-        if (ctrl.signal.aborted) return;
+        if (ctrl.signal.aborted || o.pred.peek() !== p) return;
         if (on !== 'server' && !file && noServerWeights(e)) return o.weightsMissing();
         const below = floor.peek()?.toFixed(2);
         failed = p;

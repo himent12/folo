@@ -93,6 +93,13 @@ export function cleanupSources(target: Target): void {
   target._sources = head;
 }
 
+/** Restores unread links' versions before `cleanupSources` runs, so a pre-read teardown throw keeps dependencies. */
+export function retainSources(target: Target): void {
+  for (let node = target._sources; node !== undefined; node = node._ps) {
+    if (node._v === -1) node._v = node._s._version;
+  }
+}
+
 /** Whether any source of `target` changed since it last ran (pulls computeds up to date on the way). */
 export function needsToRecompute(target: Target): boolean {
   for (let node = target._sources; node !== undefined; node = node._ns) {

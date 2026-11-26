@@ -804,4 +804,24 @@ describe('the labeling editor: reviewing', () => {
       release();
     }
   });
+
+  it('guards Ask agent against double-submit and ignores late settlement after unmount', async () => {
+    await openEditor('1');
+    let rejectPending!: (err: unknown) => void;
+    const pending = new Promise<Awaited<ReturnType<typeof hub.api.startLabeling>>>((_, rej) => {
+      rejectPending = rej;
+    });
+    const startSpy = vi.spyOn(hub.api, 'startLabeling').mockReturnValue(pending);
+    const askBtn = [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find((b) => b.textContent?.includes('Ask '))!;
+    askBtn.click();
+    askBtn.click();
+    flushSync();
+    expect(startSpy).toHaveBeenCalledTimes(1);
+
+    unmount(c!);
+    c = undefined;
+    rejectPending(new Error('network down'));
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+  });
 });

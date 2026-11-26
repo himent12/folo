@@ -14,6 +14,7 @@ import {
   signal,
   tick,
   untrack,
+  watchedSignal,
 } from './core';
 import { createComponent } from './component';
 import { compareJobs, sortJobs, type TreeNode } from './flushOrder';
@@ -582,5 +583,61 @@ describe('scheduler & component perf fast paths', () => {
       'effect:b',
     ]);
     dispose();
+  });
+
+  it('disposes partial effects, cleanups, and subscriptions when createRoot initializer throws', () => {
+    let subs = 0;
+    const s = watchedSignal(1, (on) => (subs += on ? 1 : -1));
+    const cleaned = vi.fn();
+    const runs = vi.fn();
+
+    expect(() =>
+      createRoot(() => {
+        onCleanup(cleaned);
+        renderEffect(() => runs(s.get()));
+        effect(() => runs(s.get()));
+        throw new Error('root-init-boom');
+      }),
+    ).toThrow('root-init-boom');
+
+    expect(cleaned).toHaveBeenCalledTimes(1);
+    expect(runs).toHaveBeenCalledTimes(1);
+    expect(subs).toBe(0);
+
+    s.set(2);
+    flush();
+    expect(runs).toHaveBeenCalledTimes(1);
+    expect(subs).toBe(0);
+  });
+
+  it('recovers cleanly when a memo branch cleanup throws on re-evaluation', () => {
+    const branch = signal(1);
+    let throwOnce = true;
+    const cleanups: number[] = [];
+    let read!: () => number;
+    const stop = createRoot((d) => {
+      read = memo(() => {
+        const b = branch.get();
+        onCleanup(() => {
+          cleanups.push(b);
+          if (b === 1 && throwOnce) {
+            throwOnce = false;
+            throw new Error('memo-cleanup-boom');
+          }
+        });
+        return b * 10;
+      });
+      return d;
+    });
+
+    expect(read()).toBe(10);
+    branch.set(2);
+    expect(() => read()).toThrow('memo-cleanup-boom');
+    expect(cleanups).toEqual([1]);
+
+    branch.set(3);
+    expect(read()).toBe(30);
+    stop();
+    expect(cleanups).toEqual([1, 3]);
   });
 });

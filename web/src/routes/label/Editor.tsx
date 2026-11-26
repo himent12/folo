@@ -392,6 +392,7 @@ export default function Editor(props: EditorProps) {
       (p) => p.images.find((i) => i.id === id),
       () => undefined,
     );
+    if (disposed) return;
     if (now) props.live.put([now], at);
     if (shownId !== id) return;
     const why = 'Its labels were changed from another tab or window before your mark got there, so nothing was marked.';
@@ -541,20 +542,20 @@ export default function Editor(props: EditorProps) {
   async function ask() {
     const req = props.choice.request();
     const cur = img.peek();
-    if (!cur || !req) return;
+    if (!cur || !req || asking.peek()) return;
     asking.set(true);
     status.clear();
     try {
       const job = await props.live.act(() => hub.api.startLabeling(props.job.id, { ...req, image_ids: [cur.id], note: note.peek().trim() }));
       // The job's own update is applied (`live.act`) wherever the editor is; the line only on the image that asked.
-      if (shownId !== cur.id || !open.peek()) return;
+      if (disposed || shownId !== cur.id || !open.peek()) return;
       status.info(`${props.choice.agent?.name ?? 'The agent'} is labeling this image again`, 'Its new boxes show here when it is done.');
       // After the line above: a run that has already ended (an agent that fails at once) replaces it.
       if (job.run) asked.set({ image: cur.id, started: job.run.started });
     } catch (e) {
-      if (shownId === cur.id && open.peek()) status.error(e, 'Could not ask the agent');
+      if (!disposed && shownId === cur.id && open.peek()) status.error(e, 'Could not ask the agent');
     } finally {
-      asking.set(false);
+      if (!disposed) asking.set(false);
     }
   }
 

@@ -236,6 +236,8 @@ export class LiveRun {
   #gen = 0;
   /** Bumps only on a rewind: the run's attempt (each resume starts one), for a stop's late answer. */
   #attempt = 0;
+  /** Bumps whenever the bound run view starts or tears down, so late resume/stop answers never touch another run. */
+  #viewSeq = 0;
   /** While a resumed run repeats steps it had already run: the old last step, and what the new attempt streamed. */
   #replay: { until: number; steps: Step[]; epochs: Epoch[] } | null = null;
 
@@ -249,6 +251,7 @@ export class LiveRun {
       if (hub.mode === 'connecting' || !runId) return;
       void hub.epoch;
       void this.#retry.get();
+      this.#viewSeq++;
       const api = hub.api;
       let closed = false;
       // Every request this view makes ends with it (and with the run's deletion): nothing of it answers later.
@@ -625,6 +628,7 @@ export class LiveRun {
 
       return () => {
         closed = true;
+        this.#viewSeq++;
         view.abort();
         clearTimeout(lostTimer);
         clearTimeout(syncTimer);
@@ -648,10 +652,12 @@ export class LiveRun {
    * whichever of the two comes first.
    */
   async resume(call: () => Promise<Run>): Promise<Run> {
+    const view = this.#viewSeq;
     const seq = this.#statusSeq;
     const queueSeq = this.#queueSeq;
     const cloudSeq = this.#cloudSeq;
     const r = await call();
+    if (this.#viewSeq !== view) return r;
     this.#server.set(r);
     if (this.#statusSeq === seq && this.run && !ACTIVE.includes(this.run.status)) this.#rewind();
     // Progress comes from the rewind and the stream (the response may still carry the interrupted step count); the
@@ -671,10 +677,12 @@ export class LiveRun {
    * the view now has it.
    */
   async stop(call: () => Promise<Run | null>): Promise<Run | null> {
+    const view = this.#viewSeq;
     const seq = this.#statusSeq;
     const attempt = this.#attempt;
     const before = this.run?.status;
     const r = await call();
+    if (this.#viewSeq !== view) return r;
     if (!r) return null;
     const cur = this.run ? this.#takePendingStep(this.run) : undefined;
     if (cur && (seq !== this.#statusSeq || attempt !== this.#attempt || cur.status !== before)) {
