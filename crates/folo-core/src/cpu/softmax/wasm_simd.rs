@@ -1,5 +1,7 @@
 //! WebAssembly SIMD128 (`v128`, 4-lane `f32x4`) `softmax` / `log_softmax` forward and backward kernels,
-//! bitwise identical to their scalar and AVX2 counterparts.
+//! bitwise identical to their scalar and AVX2 counterparts on all non-NaN inputs (including `±0.0`,
+//! subnormals, and `±∞`) while preserving NaN propagation semantics (WebAssembly arithmetic leaves payload
+//! selection on `NaN ∘ NaN` implementation-defined).
 
 #![cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 

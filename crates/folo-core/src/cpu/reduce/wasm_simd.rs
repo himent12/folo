@@ -1,5 +1,7 @@
 //! WebAssembly SIMD128 (`v128`, 4-lane `f32x4`) reductions and `ArgMax`/`ArgMin` kernels, bitwise identical
-//! to their scalar twins in `reduce/mod.rs` and `reduce/arg.rs`.
+//! to their scalar twins in `reduce/mod.rs` and `reduce/arg.rs` on all non-NaN inputs (including `±0.0`,
+//! subnormals, and `±∞`) while preserving NaN propagation semantics (WebAssembly arithmetic leaves payload
+//! selection on `NaN ∘ NaN` implementation-defined).
 
 #![cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 

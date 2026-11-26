@@ -446,7 +446,9 @@ mod tests {
 
     #[test]
     fn wasm_simd128_q8_kernel_and_helpers_match_scalar_exact() {
-        assert_eq!(kernel_name(), "Wasm SIMD128");
+        let expected_name =
+            if std::env::var_os("FOLO_Q8_SCALAR").is_some() { "portable" } else { "Wasm SIMD128" };
+        assert_eq!(kernel_name(), expected_name);
         let mut rng = Rng::seed(0x9E37_79B9);
         for ks in [0usize, 1, 2, 7, 16, 37] {
             let mut a = vec![0i32; ks * MR];
