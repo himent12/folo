@@ -215,3 +215,64 @@ fn steady_frame_reuses_glyph_bounds_and_empty_glyph_entries() {
         assert_eq!(a.mask.id, b.mask.id);
     }
 }
+
+#[test]
+fn line_clamp_with_truncate_keeps_multi_line_budget_in_flex_column() {
+    // Inside a stretched flex column, Taffy passes `known.width = Some(60.)` during PerformLayout;
+    // `line_clamp(2)` + `text_ellipsis()` must still keep the 2-line width budget (`120px`) instead
+    // of truncating to 1 line.
+    let (mut app, window) = open(|_, _| {
+        div()
+            .flex()
+            .flex_col()
+            .w(px(60.))
+            .text_size(px(10.))
+            .line_height(px(20.))
+            .text_color(rgb(0xffffff))
+            .line_clamp(2)
+            .text_ellipsis()
+            .child("alpha beta gamma delta")
+            .into_any_element()
+    });
+    let scene = draw(&mut app, window);
+    assert_eq!(lines(&sprites(&scene)).len(), 2, "two lines should fill before truncation");
+}
+
+#[test]
+fn negative_glyph_origin_uses_euclidean_subpixel_variant() {
+    use crate::{canvas, point};
+    // Paint directly at fractional origins (bypassing Taffy layout rounding): at scale 1.0,
+    // origin.x = -1.2 floors to -2.0 with positive Euclidean fraction +0.8 (subpixel variant 3),
+    // which must match +0.8 (variant 3) and differ from 0.0 (variant 0).
+    let (mut app, window) = open(|_, _| {
+        canvas(
+            |_, _, _| (),
+            |_, _, window, cx| {
+                let run = [TextRun {
+                    len: 1,
+                    font: font("Fixed"),
+                    color: rgb(0xffffff).into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }];
+                let line = window.text_system().shape_line("A".into(), px(10.), &run, None);
+                line.paint(point(px(-1.2), px(0.)), px(20.), window, cx).unwrap();
+                line.paint(point(px(0.8), px(0.)), px(20.), window, cx).unwrap();
+                line.paint(point(px(0.0), px(0.)), px(20.), window, cx).unwrap();
+            },
+        )
+        .w(px(60.))
+        .h(px(30.))
+        .into_any_element()
+    });
+    let scene = draw(&mut app, window);
+    let glyphs = sprites(&scene);
+    assert_eq!(glyphs.len(), 3);
+    assert_eq!(glyphs[0].bounds.origin.x.0, -2.0, "-1.2 floors to -2.0");
+    assert_eq!(
+        glyphs[0].mask.id, glyphs[1].mask.id,
+        "-1.2 and +0.8 must select the same Euclidean subpixel variant (variant 3)"
+    );
+    assert_ne!(glyphs[0].mask.id, glyphs[2].mask.id, "-1.2 must not collapse to variant 0 as `.fract()` did");
+}

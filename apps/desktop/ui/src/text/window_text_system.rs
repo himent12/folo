@@ -146,6 +146,9 @@ impl WindowTextSystem {
         let mut wrapped_lines = 0;
 
         let mut process_line = |line_text: SharedString| {
+            if line_clamp.is_some_and(|max_lines| wrapped_lines >= max_lines) {
+                return;
+            }
             font_runs.clear();
             let line_end = line_start + line_text.len();
 
@@ -209,7 +212,7 @@ impl WindowTextSystem {
                 line_clamp.map(|max_lines| max_lines.saturating_sub(wrapped_lines)),
                 font_generation,
             );
-            wrapped_lines += layout.wrap_boundaries.len();
+            wrapped_lines += layout.wrap_boundaries.len() + 1;
 
             lines.push(WrappedLine { layout, decoration_runs, text: line_text });
 
@@ -258,6 +261,9 @@ impl WindowTextSystem {
         let mut wrapped_lines = 0;
 
         let mut process_line = |line_text: SharedString| {
+            if line_clamp.is_some_and(|max_lines| wrapped_lines >= max_lines) {
+                return;
+            }
             let mut decoration_runs = SmallVec::<[DecorationRun; 2]>::new();
             let mut font_runs = SmallVec::<[FontRun; 1]>::new();
             if !line_text.is_empty() {
@@ -281,7 +287,7 @@ impl WindowTextSystem {
                 line_clamp.map(|max_lines| max_lines.saturating_sub(wrapped_lines)),
                 font_generation,
             );
-            wrapped_lines += layout.wrap_boundaries.len();
+            wrapped_lines += layout.wrap_boundaries.len() + 1;
 
             lines.push(WrappedLine { layout, decoration_runs, text: line_text });
         };

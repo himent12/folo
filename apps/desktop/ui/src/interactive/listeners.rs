@@ -117,6 +117,8 @@ impl Interactivity {
                 let source_bounds = hitbox.bounds;
                 move |source_hitbox: Option<HitboxId>, window: &Window| {
                     window.hovered.get()
+                        && window.pressed_buttons.is_empty()
+                        && window.active_drag.is_none()
                         && pending_mouse_down.borrow().is_none()
                         && match source_hitbox {
                             Some(id) => id.is_hovered(window),
@@ -126,7 +128,12 @@ impl Interactivity {
             });
             let check_is_hovered = Rc::new({
                 let hitbox = hitbox.clone();
-                move |window: &Window| pending_mouse_down.borrow().is_none() && hitbox.is_hovered(window)
+                move |window: &Window| {
+                    window.pressed_buttons.is_empty()
+                        && window.active_drag.is_none()
+                        && pending_mouse_down.borrow().is_none()
+                        && hitbox.is_hovered(window)
+                }
             });
             tooltip::register_tooltip_mouse_handlers(
                 &active_tooltip,
@@ -321,15 +328,24 @@ impl Interactivity {
                 }
             }
             let clamp_axis = |current: Pixels, delta: Pixels, max: Pixels| -> Pixels {
-                if delta == Pixels::ZERO {
+                let current = if current.0.is_finite() { current } else { Pixels::ZERO };
+                if !delta.0.is_finite() || delta == Pixels::ZERO {
                     return current;
                 }
-                let next = current + delta;
-                if max.0.is_finite() && max.0 >= 0.0 && next.0.is_finite() {
-                    let min = if max.0 == 0.0 { Pixels::ZERO } else { -max };
-                    next.clamp(min, Pixels::ZERO)
+                let min = if max.0.is_finite() && max.0 > 0.0 {
+                    -max
+                } else if max.0 == f32::INFINITY {
+                    Pixels(f32::NEG_INFINITY)
                 } else {
-                    next
+                    Pixels::ZERO
+                };
+                let next = current + delta;
+                if next.0.is_finite() {
+                    next.clamp(min, Pixels::ZERO)
+                } else if next.0.is_sign_negative() {
+                    min
+                } else {
+                    Pixels::ZERO
                 }
             };
             let moved = {

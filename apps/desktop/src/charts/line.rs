@@ -270,12 +270,17 @@ fn paint_line_chart(
         };
         let spots: Vec<(Pixels, usize)> =
             order.iter().flat_map(|&lane| sides.into_iter().map(move |lx| (lx, lane))).collect();
-        let fallback = (sides[0], m.lane.unwrap_or(2));
+        let fallback = (clamp_in(sides[0], left - px(4.), left + plot_w - w + px(4.)), m.lane.unwrap_or(2));
         let (lx, lane) = spots.into_iter().find(|&(lx, lane)| free(lx, lane)).unwrap_or(fallback);
         marker_layout.push((lx, w, lane, m));
     }
     let band = marker_layout.iter().map(|l| l.2 + 1).max().unwrap_or(0).max(spec.min_lanes) as f32 * LANE;
-    let (top_pad, bottom_pad) = if spec.axis_titles.is_some() { (26. + band, 40.) } else { (6. + band, 22.) };
+    let pow_pad = if ypow.is_some() && spec.pow_caption { label_size + 10. } else { 0. };
+    let (top_pad, bottom_pad) = if spec.axis_titles.is_some() {
+        ((26. + band).max(pow_pad), 40.)
+    } else {
+        ((6. + band).max(pow_pad), 22.)
+    };
     let plot_h = (bounds.size.height - px(top_pad) - px(bottom_pad)).max(px(0.));
     let plot = Bounds::new(point(left, bounds.top() + px(top_pad)), size(plot_w, plot_h));
     if plot_w <= px(0.) || plot_h <= px(0.) {
@@ -285,15 +290,8 @@ fn paint_line_chart(
     if let Some((xt, yt)) = spec.axis_titles {
         paint_text(window, cx, yt, point(bounds.left(), bounds.top()), t.text_tertiary, ty::SM.size, false);
         let w = text_width(window, xt, ty::SM.size);
-        paint_text(
-            window,
-            cx,
-            xt,
-            point(plot.left() + (plot.size.width - w) / 2., plot.bottom() + px(22.)),
-            t.text_tertiary,
-            ty::SM.size,
-            false,
-        );
+        let x = clamp_in(plot.left() + (plot.size.width - w) / 2., bounds.left(), bounds.right() - w);
+        paint_text(window, cx, xt, point(x, plot.bottom() + px(22.)), t.text_tertiary, ty::SM.size, false);
     }
     plot_cell.set(Some(plot));
     let sx = |x: f32| plot.left() + plot.size.width * ((x - x0) / (x1 - x0));
@@ -309,15 +307,9 @@ fn paint_line_chart(
         // The shared factor, once, above the axis labels.
         let f = format!("× 10{}", superscript(p));
         let w = text_width(window, &f, label_size);
-        paint_text(
-            window,
-            cx,
-            &f,
-            point(plot.left() - px(8.) - w, plot.top() - px(label_size + 10.)),
-            t.chart_label,
-            label_size,
-            false,
-        );
+        let px_x = (plot.left() - px(8.) - w).max(bounds.left());
+        let px_y = (plot.top() - px(label_size + 10.)).max(bounds.top());
+        paint_text(window, cx, &f, point(px_x, px_y), t.chart_label, label_size, false);
     }
     for (v, l) in yticks.iter().zip(&ylabels) {
         let y = sy(*v);
@@ -366,7 +358,7 @@ fn paint_line_chart(
             let w = text_width(window, label, annot_size);
             // At the start of the span (where "now" is): in the marker band, like the other
             // annotations, when the chart has one and lane 0 is free there; else inside the plot.
-            let lx = (fx + px(6.)).min(plot.right() - w - px(6.));
+            let lx = clamp_in(fx + px(6.), plot.left() + px(4.), plot.right() - w - px(6.));
             let in_band = band > 0.
                 && !marker_layout
                     .iter()
@@ -571,7 +563,12 @@ fn paint_line_chart(
         let data = if s.smooth > 0.0 { smoothed(&s.points, s.smooth) } else { s.points.clone() };
         if let Some(i) = nearest(&data, hx) {
             let (x, y) = data[i];
-            if !x.is_finite() || !y.is_finite() || ((x - hx).abs() > (x1 - x0) * 0.06 && s.points.len() > 1) {
+            if !x.is_finite()
+                || !y.is_finite()
+                || x < x0
+                || x > x1
+                || ((x - hx).abs() > (x1 - x0) * 0.06 && s.points.len() > 1)
+            {
                 continue;
             }
             snap_x.get_or_insert(x);

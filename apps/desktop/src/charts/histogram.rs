@@ -78,36 +78,40 @@ pub fn histogram(
                         Bounds::new(point(plot.left(), plot.bottom()), size(plot.size.width, px(1.))),
                         t.chart_axis,
                     ));
+                    let mut last_label_right: Option<Pixels> = None;
                     for (i, &c) in counts.iter().enumerate() {
                         let x = plot.left() + (bw + gap) * i as f32;
                         let h = (plot.size.height - px(16.)).max(px(0.)) * (c as f32 / max);
                         let h = if c > 0 { h.max(px(2.)).min(plot.size.height) } else { px(0.) };
                         let hot = hovered == Some(i);
                         let col = if hovered.is_some() && !hot { alpha(color, 0.45) } else { color };
-                        window.paint_quad(
-                            fill(Bounds::new(point(x, plot.bottom() - h), size(bw, h)), col).corner_radii(
-                                folo_ui::Corners {
-                                    top_left: px(2.),
-                                    top_right: px(2.),
-                                    bottom_left: px(0.),
-                                    bottom_right: px(0.),
-                                },
-                            ),
-                        );
+                        if h > px(0.) {
+                            window.paint_quad(
+                                fill(Bounds::new(point(x, plot.bottom() - h), size(bw, h)), col)
+                                    .corner_radii(folo_ui::Corners {
+                                        top_left: px(2.),
+                                        top_right: px(2.),
+                                        bottom_left: px(0.),
+                                        bottom_right: px(0.),
+                                    }),
+                            );
+                        }
                         if let Some(l) = labels.get(i) {
                             // small: category tick labels under the bars.
                             let fs = ty::XS.size;
                             let w = text_width(window, l, fs);
-                            if w < bw + gap * 2. || i % 2 == 0 {
+                            let lx = (x + bw / 2. - w / 2.).min(b.right() - w).max(b.left());
+                            if last_label_right.is_none_or(|prev| lx >= prev + px(4.)) {
                                 paint_text(
                                     window,
                                     cx,
                                     l,
-                                    point(x + bw / 2. - w / 2., plot.bottom() + px(5.)),
+                                    point(lx, plot.bottom() + px(5.)),
                                     t.chart_label,
                                     fs,
                                     false,
                                 );
+                                last_label_right = Some(lx + w);
                             }
                         }
                         if hot {

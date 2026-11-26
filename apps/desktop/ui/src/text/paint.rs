@@ -104,12 +104,10 @@ pub fn paint_line(
     let mut color = black();
     let mut current_underline: Option<(Point<Pixels>, UnderlineStyle)> = None;
     let mut current_strikethrough: Option<(Point<Pixels>, StrikethroughStyle)> = None;
-    let mut glyph_origin = point(
-        aligned_origin_x(origin, align_width.unwrap_or(layout.width), px(0.0), &align, layout, wraps.peek()),
-        origin.y,
-    );
+    let mut current_line_start_x =
+        aligned_origin_x(origin, align_width.unwrap_or(layout.width), px(0.0), &align, layout, wraps.peek());
+    let mut glyph_origin = point(current_line_start_x, origin.y);
     let mut prev_glyph_position = Point::default();
-    let mut first_glyph_x = origin.x;
     for (run_ix, run) in layout.runs.iter().enumerate() {
         if last_font_id != Some(run.font_id) {
             max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
@@ -118,12 +116,17 @@ pub fn paint_line(
 
         for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
             glyph_origin.x += glyph.position.x - prev_glyph_position.x;
-            if glyph_ix == 0 && run_ix == 0 {
-                first_glyph_x = glyph_origin.x;
-            }
 
             if wraps.peek() == Some(&&WrapBoundary { run_ix, glyph_ix }) {
                 wraps.next();
+                let next_line_start_x = aligned_origin_x(
+                    origin,
+                    align_width.unwrap_or(layout.width),
+                    glyph.position.x,
+                    &align,
+                    layout,
+                    wraps.peek(),
+                );
                 if let Some((underline_origin, underline_style)) = current_underline.as_mut() {
                     if glyph_origin.x == underline_origin.x {
                         underline_origin.x -= max_glyph_size.width.half();
@@ -133,7 +136,7 @@ pub fn paint_line(
                         glyph_origin.x - underline_origin.x,
                         underline_style,
                     );
-                    underline_origin.x = origin.x;
+                    underline_origin.x = next_line_start_x;
                     underline_origin.y += line_height;
                 }
                 if let Some((strikethrough_origin, strikethrough_style)) = current_strikethrough.as_mut() {
@@ -145,18 +148,12 @@ pub fn paint_line(
                         glyph_origin.x - strikethrough_origin.x,
                         strikethrough_style,
                     );
-                    strikethrough_origin.x = origin.x;
+                    strikethrough_origin.x = next_line_start_x;
                     strikethrough_origin.y += line_height;
                 }
 
-                glyph_origin.x = aligned_origin_x(
-                    origin,
-                    align_width.unwrap_or(layout.width),
-                    glyph.position.x,
-                    &align,
-                    layout,
-                    wraps.peek(),
-                );
+                current_line_start_x = next_line_start_x;
+                glyph_origin.x = next_line_start_x;
                 glyph_origin.y += line_height;
             }
             prev_glyph_position = glyph.position;
@@ -272,7 +269,7 @@ pub fn paint_line(
         }
     }
 
-    let mut last_line_end_x = first_glyph_x + layout.width;
+    let mut last_line_end_x = current_line_start_x + layout.width;
     if let Some(boundary) = wrap_boundaries.last() {
         let run = &layout.runs[boundary.run_ix];
         let glyph = &run.glyphs[boundary.glyph_ix];
@@ -321,10 +318,9 @@ pub fn paint_line_background(
     let mut run_start = 0;
     let mut run_end = 0;
     let mut current_background: Option<(Point<Pixels>, Hsla)> = None;
-    let mut glyph_origin = point(
-        aligned_origin_x(origin, align_width.unwrap_or(layout.width), px(0.0), &align, layout, wraps.peek()),
-        origin.y,
-    );
+    let mut current_line_start_x =
+        aligned_origin_x(origin, align_width.unwrap_or(layout.width), px(0.0), &align, layout, wraps.peek());
+    let mut glyph_origin = point(current_line_start_x, origin.y);
     let mut prev_glyph_position = Point::default();
     let mut max_glyph_size = size(px(0.), px(0.));
     let mut last_font_id: Option<FontId> = None;
@@ -339,6 +335,14 @@ pub fn paint_line_background(
 
             if wraps.peek() == Some(&&WrapBoundary { run_ix, glyph_ix }) {
                 wraps.next();
+                let next_line_start_x = aligned_origin_x(
+                    origin,
+                    align_width.unwrap_or(layout.width),
+                    glyph.position.x,
+                    &align,
+                    layout,
+                    wraps.peek(),
+                );
                 if let Some((background_origin, background_color)) = current_background.as_mut() {
                     if glyph_origin.x == background_origin.x {
                         background_origin.x -= max_glyph_size.width.half()
@@ -350,18 +354,12 @@ pub fn paint_line_background(
                         },
                         *background_color,
                     );
-                    background_origin.x = origin.x;
+                    background_origin.x = next_line_start_x;
                     background_origin.y += line_height;
                 }
 
-                glyph_origin.x = aligned_origin_x(
-                    origin,
-                    align_width.unwrap_or(layout.width),
-                    glyph.position.x,
-                    &align,
-                    layout,
-                    wraps.peek(),
-                );
+                current_line_start_x = next_line_start_x;
+                glyph_origin.x = next_line_start_x;
                 glyph_origin.y += line_height;
             }
             prev_glyph_position = glyph.position;
@@ -416,9 +414,7 @@ pub fn paint_line_background(
         }
     }
 
-    // GPUI measures the last line's end from `origin.x` here (not from the first glyph, as
-    // `paint_line` does).
-    let mut last_line_end_x = origin.x + layout.width;
+    let mut last_line_end_x = current_line_start_x + layout.width;
     if let Some(boundary) = wrap_boundaries.last() {
         let run = &layout.runs[boundary.run_ix];
         let glyph = &run.glyphs[boundary.glyph_ix];

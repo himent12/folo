@@ -376,15 +376,15 @@ impl FoloApp {
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
                 let is_open = this.menu_open == Some(key);
                 let mods = ev.keystroke.modifiers;
+                if mods.control || mods.alt || mods.platform {
+                    return;
+                }
                 match ev.keystroke.key.as_str() {
                     _ if n == 0 => return,
                     "enter" | "space" if is_open => {
                         let visible = this.menu_trigger.get().is_some() && !this.menu_trigger_clipped_out();
                         let pick = this.menu_hl.min(n - 1);
-                        this.menu_open = None;
-                        this.menu_trigger.set(None);
-                        this.menu_typeahead.clear();
-                        this.menu_typeahead.reset_scroll_anchor();
+                        this.close_menus();
                         if visible && pick != selected && !dead[pick] {
                             keys(this, pick, window, cx);
                         }
@@ -429,17 +429,13 @@ impl FoloApp {
                         this.menu_scroll.scroll_to_item(last);
                     }
                     "escape" if is_open => {
-                        this.menu_open = None;
-                        this.menu_trigger.set(None);
-                        this.menu_typeahead.clear();
+                        this.close_menus();
                     }
                     "tab" if is_open => {
-                        this.menu_open = None;
-                        this.menu_trigger.set(None);
-                        this.menu_typeahead.clear();
+                        this.close_menus();
                         return;
                     }
-                    _ if is_open && !mods.control && !mods.alt && !mods.platform => {
+                    _ if is_open => {
                         let typed = ev.keystroke.key_char.as_deref().unwrap_or(ev.keystroke.key.as_str());
                         let mut chars = typed.chars();
                         let Some(ch) = chars
@@ -521,9 +517,7 @@ impl FoloApp {
                     .on_mouse_down_out(cx.listener(move |this, ev: &folo_ui::MouseDownEvent, _, cx| {
                         let on_trigger = this.menu_trigger.get().is_some_and(|b| b.contains(&ev.position));
                         if this.menu_open == Some(key) && !on_trigger {
-                            this.menu_open = None;
-                            this.menu_trigger.set(None);
-                            this.menu_typeahead.clear();
+                            this.close_menus();
                             cx.notify();
                         }
                     }))
@@ -577,9 +571,7 @@ impl FoloApp {
                                             ))
                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                 f(this, i, window, cx);
-                                                this.menu_open = None;
-                                                this.menu_trigger.set(None);
-                                                this.menu_typeahead.clear();
+                                                this.close_menus();
                                                 cx.notify();
                                             }))
                                     })

@@ -241,18 +241,34 @@ impl Interactivity {
             scroll_to_bottom = std::mem::take(&mut state.scroll_to_bottom);
             state.scroll_to_active_item();
         }
+        let border = style.border_widths.to_pixels(window.rem_size());
+        let inner_size = size(
+            (bounds.size.width - border.left - border.right).max(px(0.)),
+            (bounds.size.height - border.top - border.bottom).max(px(0.)),
+        );
         let padding = style.padding.to_pixels(bounds.size.into(), window.rem_size());
         let padding_size = size(padding.left + padding.right, padding.top + padding.bottom);
         let padded = self.content_size + padding_size;
+        let max_axis = |content: Pixels, padded: Pixels, inner: Pixels| -> Pixels {
+            if !content.0.is_finite() || content <= px(0.) {
+                return px(0.);
+            }
+            let diff = padded - inner;
+            if !diff.0.is_finite() {
+                return px(0.);
+            }
+            round_to_two_decimals(diff).max(px(0.))
+        };
         let scroll_max = size(
-            round_to_two_decimals(padded.width - bounds.size.width).max(px(0.)),
-            round_to_two_decimals(padded.height - bounds.size.height).max(px(0.)),
+            max_axis(self.content_size.width, padded.width, inner_size.width),
+            max_axis(self.content_size.height, padded.height, inner_size.height),
         );
         self.scroll_max = scroll_max;
         let mut offset = scroll_offset.borrow_mut();
-        offset.x = offset.x.clamp(-scroll_max.width, px(0.));
-        offset.y =
-            if scroll_to_bottom { -scroll_max.height } else { offset.y.clamp(-scroll_max.height, px(0.)) };
+        let ox = if offset.x.0.is_finite() { offset.x } else { px(0.) };
+        let oy = if offset.y.0.is_finite() { offset.y } else { px(0.) };
+        offset.x = ox.clamp(-scroll_max.width, px(0.));
+        offset.y = if scroll_to_bottom { -scroll_max.height } else { oy.clamp(-scroll_max.height, px(0.)) };
         if let Some(mut state) = handle_state {
             state.max_offset = scroll_max;
         }

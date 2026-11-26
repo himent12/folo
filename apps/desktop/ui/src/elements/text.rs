@@ -100,10 +100,10 @@ impl TextLayout {
                 };
                 let (truncate_width, suffix): (Option<Pixels>, &str) = match &text_style.text_overflow {
                     Some(TextOverflow::Truncate(suffix)) => {
-                        let width = known.width.or(definite_width.map(|width| match text_style.line_clamp {
+                        let width = known.width.or(definite_width).map(|width| match text_style.line_clamp {
                             Some(max_lines) => width * max_lines as f32,
                             None => width,
-                        }));
+                        });
                         (width, suffix.as_str())
                     }
                     None => (None, ""),

@@ -268,7 +268,12 @@ impl DispatchTree {
         let key = |ix: usize| (self.tab_stops[ix].tab_index, ix);
         // GPUI looks the focused handle up by id; a handle inserted twice resolves to its last insertion.
         let anchor = focused.and_then(|id| self.tab_stops.iter().rposition(|stop| stop.focus_id == id));
-        let candidates = || (0..self.tab_stops.len()).filter(|ix| self.tab_stops[*ix].tab_stop);
+        let candidates = || {
+            (0..self.tab_stops.len()).filter(|&ix| {
+                let stop = &self.tab_stops[ix];
+                stop.tab_stop && self.tab_stops[ix + 1..].iter().all(|later| later.focus_id != stop.focus_id)
+            })
+        };
         let found = match (anchor, reverse) {
             (Some(anchor), false) => {
                 candidates().filter(|ix| key(*ix) > key(anchor)).min_by_key(|ix| key(*ix))
@@ -332,6 +337,18 @@ mod tests {
         assert_eq!(tree.next_tab_stop(Some(FocusId(99)), false), Some(FocusId(1)));
         assert_eq!(tree.next_tab_stop(Some(FocusId(99)), true), Some(FocusId(7)));
         assert_eq!(tree_with(&[(1, 0, false)]).next_tab_stop(None, false), None);
+
+        // Duplicate insertions of the same FocusHandle resolve to the last occurrence and never
+        // trap focus forward or backward.
+        let dup_split = tree_with(&[(1, 0, true), (2, 0, true), (1, 0, true)]);
+        assert_eq!(dup_split.next_tab_stop(None, false), Some(FocusId(2)));
+        assert_eq!(dup_split.next_tab_stop(Some(FocusId(2)), false), Some(FocusId(1)));
+        assert_eq!(dup_split.next_tab_stop(Some(FocusId(1)), false), Some(FocusId(2)));
+        assert_eq!(dup_split.next_tab_stop(Some(FocusId(1)), true), Some(FocusId(2)));
+
+        let dup_adj = tree_with(&[(1, 0, true), (1, 0, true), (2, 0, true)]);
+        assert_eq!(dup_adj.next_tab_stop(Some(FocusId(1)), false), Some(FocusId(2)));
+        assert_eq!(dup_adj.next_tab_stop(Some(FocusId(1)), true), Some(FocusId(2)));
     }
 
     #[test]

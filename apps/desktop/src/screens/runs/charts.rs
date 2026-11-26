@@ -649,6 +649,10 @@ impl FoloApp {
             .max(d.ips.last().map_or(0., |p| p.0));
         let end = (recorded / total.max(1.0)).clamp(0., 1.);
         let grid = grid.on_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
+            let m = &ev.keystroke.modifiers;
+            if m.control || m.alt || m.platform {
+                return;
+            }
             let by = match ev.keystroke.key.as_str() {
                 "up" => -1,
                 "down" => 1,

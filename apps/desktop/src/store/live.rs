@@ -144,11 +144,11 @@ impl RunData {
         self.metrics.epochs.last()
     }
 
-    /// Recent throughput samples (imgs/s), newest last.
+    /// Recent finite throughput samples (imgs/s), newest last.
     pub fn recent_ips(&self, n: usize) -> Vec<f32> {
         let s = &self.metrics.steps;
         let start = s.len().saturating_sub(n);
-        s[start..].iter().map(|s| s.imgs_per_s).collect()
+        s[start..].iter().map(|s| s.imgs_per_s).filter(|v| v.is_finite()).collect()
     }
 }
 

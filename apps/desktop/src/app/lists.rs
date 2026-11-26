@@ -437,6 +437,15 @@ impl FoloApp {
     fn removed_elsewhere(&mut self, id: &str, name: String, cx: &mut Context<Self>) {
         self.deleted.insert(id.to_string(), name);
         self.list_tickets.forget_detail(id);
+        self.subscriptions.remove(id);
+        *self.sub_attempt.entry(id.to_string()).or_default() += 1;
+        self.subscribing.remove(id);
+        self.stream_lost.remove(id);
+        self.history_retry.remove(id);
+        self.ds_reads.remove(id);
+        if self.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == id) {
+            self.ds_scroll_anchor = None;
+        }
         self.store.dataset.remove(id);
         self.store.images.remove(id);
         self.images_more.remove(id);
@@ -444,6 +453,16 @@ impl FoloApp {
         self.store.previews.remove(id);
         self.store.issues.remove(id);
         self.issue_reads.remove(id);
+        *self.ds_filter_cache.borrow_mut() = None;
+        *self.ds_split_counts.borrow_mut() = None;
+        let textures = self.store.images_px.forget_dataset(id);
+        if !textures.is_empty() {
+            cx.defer(move |cx| {
+                for img in textures {
+                    cx.drop_image(img, None);
+                }
+            });
+        }
         self.store.evals.remove(id);
         self.store.run_data.remove(id);
         self.store.samples.remove(id);

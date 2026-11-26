@@ -115,10 +115,7 @@ impl FoloApp {
         if self.modal_open() || self.palette.is_some() {
             return;
         }
-        self.menu_open = None;
-        self.menu_trigger.set(None);
-        self.menu_typeahead.clear();
-        self.export_open = false;
+        self.close_menus();
         let nav = format!(
             "nav-{}",
             match self.route.section() {

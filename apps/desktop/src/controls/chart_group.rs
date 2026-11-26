@@ -61,7 +61,11 @@ impl FoloApp {
                 }
             }))
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, _, cx| {
-                let big = if ev.keystroke.modifiers.shift { 10. } else { 1. };
+                let m = &ev.keystroke.modifiers;
+                if m.control || m.alt || m.platform {
+                    return;
+                }
+                let big = if m.shift { 10. } else { 1. };
                 let cur = this.cursor_mut(cursor);
                 let end = end.clamp(0.0, 1.0);
                 let at = cur.map_or(end, |c| c.min(end));

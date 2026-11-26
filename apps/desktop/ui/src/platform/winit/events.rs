@@ -268,9 +268,8 @@ impl WindowInner {
         }
 
         let already_committed = {
-            let mut state = self.state.borrow_mut();
-            state.key_text = keystroke.key_char.clone();
-            keystroke.key_char.is_some() && state.commit_text == keystroke.key_char
+            let state = &mut *self.state.borrow_mut();
+            dedupe_key_char(&mut state.key_text, &mut state.commit_text, keystroke.key_char.as_deref())
         };
         let result = self.dispatch(PlatformInput::KeyDown(KeyDownEvent {
             keystroke: keystroke.clone(),
@@ -313,10 +312,9 @@ impl WindowInner {
             }
             Ime::Commit(text) => {
                 let typed_by_key = {
-                    let mut state = self.state.borrow_mut();
+                    let state = &mut *self.state.borrow_mut();
                     let was_composing = std::mem::take(&mut state.composing);
-                    state.commit_text = Some(text.clone());
-                    !was_composing && state.key_text.as_deref() == Some(text.as_str())
+                    dedupe_ime_commit(&mut state.key_text, &mut state.commit_text, was_composing, &text)
                 };
                 // A plain key some systems also report as a commit was handled (or typed) as a key.
                 if !typed_by_key {
@@ -330,6 +328,43 @@ impl WindowInner {
                 }
             }
         }
+    }
+}
+
+/// Deduplicates a `KeyboardInput` character against a paired `Ime::Commit` in the same event batch,
+/// consuming the token on match so consecutive identical characters are never dropped.
+fn dedupe_key_char(
+    key_text: &mut Option<String>,
+    commit_text: &mut Option<String>,
+    text: Option<&str>,
+) -> bool {
+    if let Some(t) = text
+        && commit_text.as_deref() == Some(t)
+    {
+        *commit_text = None;
+        *key_text = None;
+        true
+    } else {
+        *key_text = text.map(str::to_owned);
+        false
+    }
+}
+
+/// Deduplicates an `Ime::Commit` against a paired `KeyboardInput` in the same event batch,
+/// consuming the token on match so consecutive identical characters are never dropped.
+fn dedupe_ime_commit(
+    key_text: &mut Option<String>,
+    commit_text: &mut Option<String>,
+    was_composing: bool,
+    text: &str,
+) -> bool {
+    if !was_composing && key_text.as_deref() == Some(text) {
+        *key_text = None;
+        *commit_text = None;
+        true
+    } else {
+        *commit_text = Some(text.to_owned());
+        false
     }
 }
 
@@ -516,5 +551,34 @@ mod tests {
         assert_eq!(take_cancelled_buttons(&mut pressed, &mut cancelled), vec![MouseButton::Right]);
         record_press(&mut pressed, &mut cancelled, MouseButton::Right);
         assert!(consume_release(&mut pressed, &mut cancelled, MouseButton::Right));
+    }
+
+    #[test]
+    fn consecutive_identical_chars_in_one_batch_are_not_dropped() {
+        // Key -> Commit -> Key -> Commit for typing "oo" in a single event batch.
+        let (mut key_text, mut commit_text) = (None, None);
+        let mut typed = String::new();
+        for _ in 0..2 {
+            if !dedupe_key_char(&mut key_text, &mut commit_text, Some("o")) {
+                typed.push('o');
+            }
+            if !dedupe_ime_commit(&mut key_text, &mut commit_text, false, "o") {
+                typed.push('o');
+            }
+        }
+        assert_eq!(typed, "oo");
+
+        // Commit -> Key -> Commit -> Key ordering in a single event batch.
+        let (mut key_text, mut commit_text) = (None, None);
+        let mut typed = String::new();
+        for _ in 0..2 {
+            if !dedupe_ime_commit(&mut key_text, &mut commit_text, false, "o") {
+                typed.push('o');
+            }
+            if !dedupe_key_char(&mut key_text, &mut commit_text, Some("o")) {
+                typed.push('o');
+            }
+        }
+        assert_eq!(typed, "oo");
     }
 }

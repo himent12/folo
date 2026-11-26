@@ -5,7 +5,7 @@ use smallvec::SmallVec;
 
 use crate::{
     AnyElement, App, Bounds, Element, ElementId, GlobalElementId, Hitbox, InspectorElementId,
-    InteractiveElement, Interactivity, IntoElement, LayoutId, ParentElement, Pixels, Point,
+    InteractiveElement, Interactivity, IntoElement, LayoutId, ParentElement, Pixels, Size,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, interactive::skips_children, point,
 };
 
@@ -110,10 +110,10 @@ impl Element for Div {
             if let Some(handle) = self.interactivity.tracked_scroll_handle.as_ref() {
                 handle.0.borrow_mut().child_bounds.clear();
             }
-            bounds.size
+            Size::default()
         } else {
             let mut child_min = point(Pixels::MAX, Pixels::MAX);
-            let mut child_max = Point::default();
+            let mut child_max = point(Pixels::MIN, Pixels::MIN);
             let mut handle_state =
                 self.interactivity.tracked_scroll_handle.as_ref().map(|handle| handle.0.borrow_mut());
             if let Some(state) = handle_state.as_deref_mut() {

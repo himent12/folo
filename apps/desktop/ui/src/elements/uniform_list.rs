@@ -215,13 +215,12 @@ impl Element for UniformList {
         let item_height = frame_state.item_height;
         let items_height = item_height * self.item_count as f32;
         let content_height = items_height + padding.top + padding.bottom;
-        // `Interactivity::clamp_scroll_position` adds `padding` once and subtracts `bounds.size`;
-        // include `border` here so `scroll_max` and `base_handle.max_offset` match the inner height
-        // (`items_height + padding - inner_size.height`) without double-counting padding.
+        // `Interactivity::clamp_scroll_position` adds `padding` once and subtracts `inner_size`
+        // (border-box minus border widths), so `items_height` yields `content_height - inner_size.height`.
         let content_size = Size {
             width: padded_bounds.size.width,
             height: if self.item_count > 0 && item_height > Pixels::ZERO {
-                items_height + border.top + border.bottom
+                items_height
             } else {
                 Pixels::ZERO
             },
@@ -258,14 +257,19 @@ impl Element for UniformList {
                 if let Some((ix, strategy)) = deferred_scroll {
                     let mut offset = shared_scroll_offset.borrow_mut();
                     let geometry = ListGeometry { item_height, padding, list_height, content_height };
-                    offset.y = geometry.scroll_to_item(ix, strategy, offset.y);
+                    offset.y = geometry
+                        .scroll_to_item(ix.min(item_count - 1), strategy, offset.y)
+                        .clamp(min_scroll_offset, Pixels::ZERO);
                     scroll_offset = *offset;
                 }
 
-                let first = (-(scroll_offset.y + padding.top) / item_height).floor().max(0.) as usize;
-                let last =
-                    ((list_height - scroll_offset.y - padding.top) / item_height).ceil().max(0.) as usize;
-                let visible_range = first..last.min(item_count);
+                let last = ((list_height - scroll_offset.y - padding.top) / item_height)
+                    .ceil()
+                    .max(0.)
+                    .min(item_count as f32) as usize;
+                let first =
+                    ((-(scroll_offset.y + padding.top) / item_height).floor().max(0.) as usize).min(last);
+                let visible_range = first..last;
                 let max_visible = visible_range.len();
                 if items.capacity() == 0 {
                     *items = window.take_element_scratch();

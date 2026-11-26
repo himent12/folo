@@ -348,8 +348,16 @@ impl FoloApp {
             runs.retain(|r| r.id != id);
         }
         self.changed_here(List::Runs, cx);
+        self.subscriptions.remove(id);
+        *self.sub_attempt.entry(id.to_string()).or_default() += 1;
+        self.subscribing.remove(id);
+        self.stream_lost.remove(id);
+        self.history_retry.remove(id);
         self.store.run_data.remove(id);
         self.store.samples.remove(id);
+        self.store.samples_stale.remove(id);
+        self.store.samples_refreshing.remove(id);
+        self.store.samples_refresh_error.remove(id);
         self.store.logs.remove(id);
         self.forget_history(id);
         let made: Vec<String> = self
@@ -376,7 +384,7 @@ impl FoloApp {
         self.reconcile_play_model(cx);
         self.changed_here(List::Models, cx);
         // An open select may list it, or its models: its highlight is an index into that list.
-        self.menu_open = None;
+        self.close_menus();
         self.leave_deleted();
     }
 
@@ -393,9 +401,15 @@ impl FoloApp {
             self.deleted.insert(id.to_string(), d.name.clone());
         }
         self.ds_recheck.remove(id);
+        self.ds_reads.remove(id);
+        self.list_tickets.forget_detail(id);
+        if self.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == id) {
+            self.ds_scroll_anchor = None;
+        }
         if self.inspector.as_ref().is_some_and(|i| i.dataset == id) {
             self.take_inspector(cx);
             self.inspector_return = None;
+            self.restore_pending = true;
         }
         if let Some(list) = self.store.datasets.ready_mut() {
             list.retain(|d| d.id != id);
@@ -406,9 +420,21 @@ impl FoloApp {
         self.images_more.remove(id);
         self.failed_pages.remove(id);
         self.store.previews.remove(id);
+        self.store.issues.remove(id);
+        self.issue_reads.remove(id);
+        *self.ds_filter_cache.borrow_mut() = None;
+        *self.ds_split_counts.borrow_mut() = None;
+        let textures = self.store.images_px.forget_dataset(id);
+        if !textures.is_empty() {
+            cx.defer(move |cx| {
+                for img in textures {
+                    cx.drop_image(img, None);
+                }
+            });
+        }
         // An open select may list it (New run's datasets): its highlight is an index into the list.
         // The forms hold their dataset by id, so the choice in them stays what it was.
-        self.menu_open = None;
+        self.close_menus();
         self.leave_deleted();
     }
 

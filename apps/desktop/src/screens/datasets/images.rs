@@ -337,10 +337,12 @@ impl FoloApp {
                     None,
                     window,
                     cx,
-                    act(|this, _, cx| {
+                    act(|this, w, cx| {
                         this.ds_empty_of = None;
                         this.ds_hover_tile = None;
                         this.ds_scroll_anchor = None;
+                        let fh = this.fh("ds-class", cx);
+                        w.focus(&fh);
                         cx.notify();
                     }),
                 ))
