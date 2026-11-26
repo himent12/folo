@@ -54,6 +54,8 @@ mod tests_geom;
 #[cfg(test)]
 mod tests_math;
 #[cfg(test)]
+mod tests_nwd_wiou;
+#[cfg(test)]
 mod tests_siou_eiou;
 
 pub use assignment::assign_batch;
@@ -64,7 +66,8 @@ pub use distill::{
 };
 pub use terms::{
     ciou, eiou_loss, focaler_iou, focaler_iou_loss, inner_ciou_loss, loss_with_assignment, mpdiou_loss,
-    mpdiou_loss_with_scale, nwd_loss, rpiou_loss, saeiou_loss, shape_iou_loss, siou_loss, wiou_v3_loss,
+    mpdiou_loss_with_scale, nwd_loss, nwd_loss_with_c, rpiou_loss, saeiou_loss, shape_iou_loss, siou_loss,
+    wiou_v1_loss, wiou_v3_loss,
 };
 
 use crate::assign::TalConfig;
@@ -109,7 +112,14 @@ pub enum BoxLossKind {
     Saeiou,
     /// Inner-CIoU (Zhang et al. 2023): CIoU with its IoU term computed on auxiliary boxes scaled by `inner_ratio`.
     InnerCiou,
-    /// Wise-IoU v3 (Tong et al. 2023): distance-attended IoU loss with non-monotonic dynamic focusing (`wiou_alpha`, `wiou_delta`, `wiou_momentum`).
+    /// Normalized Wasserstein Distance (Wang et al. 2021): models boxes as 2D Gaussians and computes
+    /// `1 - exp(-sqrt(W_2²) / (nwd_c / stride))`, giving smooth non-vanishing gradients for tiny and
+    /// non-overlapping boxes.
+    Nwd,
+    /// Wise-IoU v1 (Tong et al. 2023 §III-A): distance-attended IoU loss `R_WIoU * (1 - IoU)` with detached
+    /// enclosing-box diagonal `(cw² + ch²)*`.
+    WiouV1,
+    /// Wise-IoU v3 (Tong et al. 2023 §III-B): distance-attended IoU loss with non-monotonic dynamic focusing (`wiou_alpha`, `wiou_delta`, `wiou_momentum`).
     WiouV3,
     /// Minimum Point Distance IoU (Ma & Xu 2023): scale-invariant corner-distance penalty
     /// `(1 - IoU) + (d1² + d2²) / (2 * (cw² + ch² + eps))`.
@@ -152,8 +162,11 @@ pub struct LossConfig {
     pub qfl_beta: f32,
     /// Scale-adaptive NWD blending weight `λ₀` in `[0, 1]` for the box loss (`0.0` = no NWD blend).
     pub nwd_weight: f32,
-    /// Box regression geometry loss (`Ciou` default, `Rpiou`, `Saeiou`, `InnerCiou`, `WiouV3`, `Mpdiou`,
-    /// `ShapeIou`, `Eiou`, or `Siou`).
+    /// Normalization constant `C > 0` (in input pixels, divided by anchor stride) for [`BoxLossKind::Nwd`]
+    /// (`12.8` default, per Wang et al. 2021).
+    pub nwd_c: f32,
+    /// Box regression geometry loss (`Ciou` default, `Rpiou`, `Saeiou`, `InnerCiou`, `Nwd`, `WiouV1`, `WiouV3`,
+    /// `Mpdiou`, `ShapeIou`, `Eiou`, or `Siou`).
     pub box_loss: BoxLossKind,
     /// Auxiliary box scale ratio `r` in `[0.5, 1.5]` for [`BoxLossKind::InnerCiou`] (`0.7` default).
     pub inner_ratio: f32,
@@ -193,6 +206,7 @@ impl Default for LossConfig {
             vfl_gamma: 2.0,
             qfl_beta: 2.0,
             nwd_weight: 0.0,
+            nwd_c: 12.8,
             box_loss: BoxLossKind::Ciou,
             inner_ratio: 0.7,
             shape_scale: 0.0,
@@ -285,6 +299,9 @@ impl LossConfig {
                 "loss.wiou_momentum must be finite and in 0..=1, got {}",
                 self.wiou_momentum
             ));
+        }
+        if !(self.nwd_c.is_finite() && self.nwd_c > 0.0) {
+            return Err(format!("loss.nwd_c must be finite and > 0, got {}", self.nwd_c));
         }
         Ok(())
     }

@@ -361,3 +361,156 @@ fn nms_sorted_avx2_matches_naive_across_vector_lengths() {
         assert_eq!(nms_sorted(&boxes, thr, n), ref_kept, "n={n} nms_sorted mismatch");
     }
 }
+
+#[test]
+fn soft_nms_crowded_monotonicity_boundaries_ties_and_degenerate() {
+    // 1. Strict IoU threshold boundary in Linear Soft-NMS: IoU == 0.5 must NOT decay at iou_thr = 0.5.
+    let pair = [b(0.0, 0.0, 10.0, 10.0), b(0.0, 0.0, 10.0, 5.0)]; // exact IoU = 0.5
+    let at_thr = soft_nms_sorted(&pair, &[0.9, 0.8], 0.5, 0.0, None, 10);
+    assert_eq!(at_thr, vec![(0, 0.9), (1, 0.8)], "IoU == iou_thr must not decay");
+
+    // 2. Score decay monotonicity in crowded/occluded cluster (4 overlapping boxes with increasing overlap).
+    // Box 0 is the anchor [0,0,10,10]; boxes 1, 2, 3 overlap it with IoU = 1/3, 0.5, 9/11 respectively.
+    let crowd = [
+        b(0.0, 0.0, 10.0, 10.0),
+        b(5.0, 0.0, 15.0, 10.0), // IoU with 0 = 50/150 = 1/3
+        b(0.0, 0.0, 10.0, 5.0),  // IoU with 0 = 50/100 = 1/2
+        b(1.0, 0.0, 11.0, 10.0), // IoU with 0 = 90/110 = 9/11
+    ];
+    let scores = [0.95f32, 0.80, 0.80, 0.80];
+    for sigma in [None, Some(0.5f32), Some(0.25f32)] {
+        let out = soft_nms_sorted(&crowd, &scores, 0.2, 0.0, sigma, 10);
+        assert_eq!(out.len(), 4, "sigma={sigma:?}");
+        // Output must be strictly sorted descending by decayed score, and every score <= original.
+        assert!(out.windows(2).all(|w| w[0].1 >= w[1].1), "descending order broken: {out:?}");
+        for &(idx, s) in &out {
+            assert!(s <= scores[idx], "score increased for idx={idx}: {s} > {}", scores[idx]);
+        }
+        // Lower-overlap box 1 must finish strictly above higher-overlap box 3 (which overlaps 0 by 9/11).
+        let s1 = out.iter().find(|&&(i, _)| i == 1).unwrap().1;
+        let s3 = out.iter().find(|&&(i, _)| i == 3).unwrap().1;
+        assert!(s1 > s3, "monotonic decay violated (sigma={sigma:?}): s1={s1} vs s3={s3}");
+    }
+
+    // 3. Ties preserve lower input index (both initial ties and post-decay ties).
+    let tie_boxes = [b(0.0, 0.0, 10.0, 10.0), b(50.0, 0.0, 60.0, 10.0), b(100.0, 0.0, 110.0, 10.0)];
+    assert_eq!(
+        soft_nms_sorted(&tie_boxes, &[0.7, 0.7, 0.7], 0.5, 0.1, None, 10),
+        vec![(0, 0.7), (1, 0.7), (2, 0.7)]
+    );
+    // Two disjoint boxes that overlap box 0 by identical IoU = 0.5 get identical decayed scores; lower index wins.
+    let sym = [
+        b(0.0, 0.0, 10.0, 10.0),
+        b(0.0, 0.0, 10.0, 5.0),  // top half (IoU = 0.5 with box 0, 0 with box 2)
+        b(0.0, 5.0, 10.0, 10.0), // bottom half (IoU = 0.5 with box 0, 0 with box 1)
+    ];
+    let sym_lin = soft_nms_sorted(&sym, &[0.9, 0.8, 0.8], 0.4, 0.1, None, 10);
+    assert_eq!(sym_lin, vec![(0, 0.9), (1, 0.4), (2, 0.4)]);
+
+    // 4. Empty inputs, limit == 0, non-finite scores (+Inf / NaN), near-identical f64 precision, huge/degenerate boxes.
+    assert!(soft_nms_sorted(&[], &[], 0.5, 0.1, None, 10).is_empty());
+    assert!(soft_nms_sorted(&pair, &[0.9, 0.8], 0.5, 0.1, None, 0).is_empty());
+    // +Inf and NaN scores are dropped and never suppress valid detections or evict at max_candidates.
+    let dup = [b(0.0, 0.0, 10.0, 10.0), b(0.0, 0.0, 10.0, 10.0), b(0.0, 0.0, 10.0, 10.0)];
+    assert_eq!(soft_nms_sorted(&dup, &[f32::INFINITY, f32::NAN, 0.8], 0.5, 0.1, None, 10), vec![(2, 0.8)]);
+    let dets_inf = [
+        Detection { bbox: dup[0], score: f32::INFINITY, class: 0 },
+        Detection { bbox: dup[1], score: 0.8, class: 0 },
+    ];
+    let cfg_cap = NmsConfig {
+        conf: 0.25,
+        max_candidates: 1,
+        nms_kind: NmsKind::SoftGaussian { sigma: 0.5 },
+        ..NmsConfig::default()
+    };
+    let kept_inf = nms_detections(&dets_inf, &cfg_cap);
+    assert_eq!(kept_inf.len(), 1);
+    assert_eq!(kept_inf[0].score, 0.8);
+
+    // Near-identical boxes `[0,0,1,1]` and `[1e-8,0,1,1]`: f64 IoU preserves ~8e-9 instead of rounding to 0.
+    let near = [b(0.0, 0.0, 1.0, 1.0), b(1e-8, 0.0, 1.0, 1.0)];
+    let near_lin = soft_nms_sorted(&near, &[0.9, 0.8], 0.5, 0.0, None, 10);
+    assert_eq!(near_lin.len(), 2);
+    assert!((near_lin[1].1 - 8e-9).abs() < 1e-9, "near-identical f64 decay: {}", near_lin[1].1);
+
+    // Huge 1e25 identical boxes must decay properly (not overflow f32 area to NaN / IoU=0).
+    let huge = [b(0.0, 0.0, 1e25, 1e25), b(0.0, 0.0, 1e25, 1e25)];
+    assert_eq!(soft_nms_sorted(&huge, &[0.9, 0.8], 0.5, 0.01, None, 10), vec![(0, 0.9)]);
+
+    // Degenerate (point, inverted, NaN coord) boxes never produce NaN scores.
+    let messy = [
+        b(0.0, 0.0, 10.0, 10.0),
+        b(5.0, 5.0, 5.0, 5.0),
+        b(10.0, 10.0, 2.0, 2.0),
+        b(f32::NAN, 0.0, 10.0, 10.0),
+    ];
+    let messy_out = soft_nms_sorted(&messy, &[0.9, 0.7, 0.6, 0.5], 0.5, 0.1, Some(0.5), 10);
+    assert_eq!(messy_out.len(), 4);
+    assert!(messy_out.iter().all(|(_, s)| s.is_finite() && *s > 0.1));
+}
+
+#[test]
+fn diou_nms_matches_naive_reference_and_handles_edge_cases() {
+    use crate::boxes::{IouKind, iou};
+
+    // 1. Exact threshold strictness: DIoU == thr must NOT suppress.
+    // a=[0,0,8,10], b=[2,0,10,10]: IoU = 0.6, rho²/c² = 4/200 = 0.02 -> DIoU = 0.58.
+    let pair = [b(0.0, 0.0, 8.0, 10.0), b(2.0, 0.0, 10.0, 10.0)];
+    let exact_diou = iou(&pair[0], &pair[1], IouKind::Diou);
+    assert_eq!(diou_nms_sorted(&pair, exact_diou, 10), vec![0, 1], "DIoU == thr must not suppress");
+    assert_eq!(diou_nms_sorted(&pair, exact_diou - 1e-5, 10), vec![0], "DIoU > thr must suppress");
+
+    // 2. Empty, limit == 0, ties, degenerate (point / line / inverted / huge / NaN).
+    assert!(diou_nms_sorted(&[], 0.5, 10).is_empty());
+    assert!(diou_nms_sorted(&pair, 0.5, 0).is_empty());
+    let dup = [b(0.0, 0.0, 10.0, 10.0), b(0.0, 0.0, 10.0, 10.0)];
+    assert_eq!(
+        batched_nms_with_kind(&dup, &[0.7, 0.7], &[0, 0], 0.5, 0.0, 10, false, NmsKind::Diou),
+        vec![(0, 0.7)]
+    );
+
+    // 3. Seeded random crowded scenes across positive, zero, and negative DIoU thresholds,
+    //    matching a naive scalar `boxes::iou(..., IouKind::Diou)` reference bit for bit!
+    let mut s = 0xD100_BEEFu64;
+    let mut next = || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((s >> 40) as f32) / (1u64 << 24) as f32
+    };
+    for (case_idx, &thr) in [-0.25f32, 0.0, 0.35, 0.55, 0.85].iter().enumerate() {
+        let n = 45;
+        let mut boxes: Vec<Xyxy> = (0..n)
+            .map(|i| {
+                if i == 3 {
+                    b(5.0, 5.0, 5.0, 5.0) // zero-area point
+                } else if i == 7 {
+                    b(20.0, 20.0, 10.0, 10.0) // inverted
+                } else {
+                    let x = next() * 25.0;
+                    let y = next() * 25.0;
+                    b(x, y, x + 5.0 + next() * 12.0, y + 5.0 + next() * 12.0)
+                }
+            })
+            .collect();
+        boxes.push(b(f32::NAN, 0.0, 10.0, 10.0));
+        let scores: Vec<f32> = (0..boxes.len()).map(|_| (next() * 10.0).floor() / 10.0).collect();
+        let classes: Vec<u32> = (0..boxes.len()).map(|i| (i % 3) as u32).collect();
+
+        for agnostic in [false, true] {
+            let got = batched_nms_with_kind(&boxes, &scores, &classes, thr, 0.0, 20, agnostic, NmsKind::Diou);
+            // Naive reference.
+            let mut order: Vec<usize> = (0..boxes.len()).collect();
+            order.sort_by(|&i, &j| scores[j].total_cmp(&scores[i]).then(i.cmp(&j)));
+            let mut want = Vec::new();
+            for i in order {
+                let suppressed = want.iter().any(|&(k, _): &(usize, f32)| {
+                    (agnostic || classes[k] == classes[i]) && iou(&boxes[k], &boxes[i], IouKind::Diou) > thr
+                });
+                if !suppressed {
+                    want.push((i, scores[i]));
+                }
+            }
+            want.truncate(20);
+            assert_eq!(got, want, "DIoU-NMS case={case_idx} thr={thr} agnostic={agnostic}");
+        }
+    }
+}

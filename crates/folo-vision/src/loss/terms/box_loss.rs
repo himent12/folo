@@ -1,5 +1,5 @@
-//! Differentiable box regression losses: CIoU, Inner-CIoU (Zhang et al. 2023), Wise-IoU v3
-//! (Tong et al. 2023), Rational-Focal Edge-Decoupled IoU (R-PIoU), and Normalized Wasserstein Distance (NWD).
+//! Differentiable box regression losses: CIoU, Inner-CIoU (Zhang et al. 2023), Rational-Focal
+//! Edge-Decoupled IoU (R-PIoU), and Scale-normalized Algebraic Edge IoU (S-AEIoU).
 
 use folo_core::{DType, Result, Tensor, no_grad};
 
@@ -13,22 +13,6 @@ fn atan(x: &Tensor) -> Result<Tensor> {
     let out = Tensor::from_vec(v, x.shape())?.to_device(x.device())?;
     let xs = x.detach();
     Tensor::custom_op("atan", &[x], out, move |g| Ok(vec![Some(g.div(&xs.square()?.add_scalar(1.0)?)?)]))
-}
-
-/// Differentiable Normalized Wasserstein Distance loss `1 − NWD(b1, b2; c)` between rows of `b1` and `b2`
-/// (`[N, 4]`, `xyxy`), with per-row scale constant `c` (`[N]`, in the boxes' coordinate units), returning `[N]`.
-pub fn nwd_loss(b1: &Tensor, b2: &Tensor, c: &Tensor) -> Result<Tensor> {
-    let col = |b: &Tensor, k: usize| b.narrow(1, k, 1)?.squeeze(1);
-    let (ax1, ay1, ax2, ay2) = (col(b1, 0)?, col(b1, 1)?, col(b1, 2)?, col(b1, 3)?);
-    let (bx1, by1, bx2, by2) = (col(b2, 0)?, col(b2, 1)?, col(b2, 2)?, col(b2, 3)?);
-    let dcx = ax1.add(&ax2)?.sub(&bx1)?.sub(&bx2)?.mul_scalar(0.5)?;
-    let dcy = ay1.add(&ay2)?.sub(&by1)?.sub(&by2)?.mul_scalar(0.5)?;
-    let dw = ax2.sub(&ax1)?.sub(&bx2.sub(&bx1)?)?;
-    let dh = ay2.sub(&ay1)?.sub(&by2.sub(&by1)?)?;
-    let w2_sq =
-        dcx.square()?.add(&dcy.square()?)?.add(&dw.square()?.add(&dh.square()?)?.mul_scalar(0.25)?)?;
-    let dist = w2_sq.add_scalar(1e-6)?.sqrt()?;
-    dist.div(c)?.neg()?.exp()?.rsub_scalar(1.0)
 }
 
 /// Differentiable CIoU of `docs/MODEL.md` §7.2 between rows of `b1` and `b2` (`[N, 4]`, `xyxy`), as `[N]`.
@@ -173,85 +157,6 @@ pub fn inner_ciou_loss(b1: &Tensor, b2: &Tensor, ratio: f32) -> Result<Tensor> {
     };
 
     inner_iou.rsub_scalar(1.0)?.add(&rho2.div(&c2)?)?.add(&v.mul(&alpha)?)?.add(&poison)
-}
-
-/// Differentiable Wise-IoU v3 loss (Tong et al. 2023) between rows of `b1` (predicted) and `b2` (target)
-/// (`[N, 4]`, `xyxy`), returning `[N]`:
-///
-/// ```text
-/// L_IoU = 1 - IoU(b1, b2)
-/// R_WIoU = exp(((cx1 - cx2)² + (cy1 - cy2)²) / ((cw² + ch²)* + eps))
-/// beta = L_IoU* / max(iou_mean, 1e-4)
-/// r = beta / (delta * alpha^(beta - delta))       (detached non-monotonic focusing gain)
-/// L_WIoU_v3 = r * R_WIoU * L_IoU
-/// ```
-///
-/// `iou_mean` is the running exponential moving average `L_IoU_bar` across training steps (Tong et al. §III-B,
-/// initialized to `1.0`). Both the enclosing diagonal denominator `(cw² + ch²)*` and the dynamic focusing gain
-/// `r` are detached under `no_grad()` so gradients never suffer enclosing-box hindrance or outlier amplification.
-pub fn wiou_v3_loss(b1: &Tensor, b2: &Tensor, alpha: f32, delta: f32, iou_mean: f32) -> Result<Tensor> {
-    Ok(wiou_v3_loss_and_mean(b1, b2, alpha, delta, iou_mean)?.0)
-}
-
-/// [`wiou_v3_loss`] also returning the current batch's unweighted mean `L_IoU` (`None` when `N == 0`), so
-/// the trainer can update its running EMA `L_IoU_bar`.
-pub(super) fn wiou_v3_loss_and_mean(
-    b1: &Tensor,
-    b2: &Tensor,
-    alpha: f32,
-    delta: f32,
-    iou_mean: f32,
-) -> Result<(Tensor, Option<f32>)> {
-    if !alpha.is_finite() || alpha <= 1.0 {
-        return Err(invalid(format!("wiou_alpha must be finite and > 1, got {alpha}")));
-    }
-    if !delta.is_finite() || delta <= 0.0 {
-        return Err(invalid(format!("wiou_delta must be finite and > 0, got {delta}")));
-    }
-    if !iou_mean.is_finite() || iou_mean <= 0.0 {
-        return Err(invalid(format!("wiou iou_mean must be finite and > 0, got {iou_mean}")));
-    }
-    let n = check_box_pair(b1, b2, "wiou_v3_loss")?;
-    if n == 0 {
-        return Ok((Tensor::zeros_with([0], DType::F32, b1.device())?, None));
-    }
-    const EPS: f32 = 1e-7;
-    let col = |b: &Tensor, k: usize| b.narrow(1, k, 1)?.squeeze(1);
-    let (ax1, ay1, ax2, ay2) = (col(b1, 0)?, col(b1, 1)?, col(b1, 2)?, col(b1, 3)?);
-    let (bx1, by1, bx2, by2) = (col(b2, 0)?, col(b2, 1)?, col(b2, 2)?, col(b2, 3)?);
-    let poison = nonfinite_box_poison(b1, b2)?;
-    let (w1, h1) = (ax2.sub(&ax1)?.relu()?, ay2.sub(&ay1)?.relu()?);
-    let (w2, h2) = (bx2.sub(&bx1)?.relu()?, by2.sub(&by1)?.relu()?);
-    let iw = ax2.minimum(&bx2)?.sub(&ax1.maximum(&bx1)?)?.relu()?;
-    let ih = ay2.minimum(&by2)?.sub(&ay1.maximum(&by1)?)?.relu()?;
-    let inter = iw.mul(&ih)?;
-    let union = w1.mul(&h1)?.add(&w2.mul(&h2)?)?.sub(&inter)?.relu()?.add_scalar(EPS)?;
-    let l_iou = inter.div(&union)?.clamp(0.0, 1.0)?.rsub_scalar(1.0)?.add(&poison)?;
-
-    // Distance attention R_WIoU = exp(rho² / c2*) with detached enclosing diagonal c2*.
-    let dx = bx1.add(&bx2)?.sub(&ax1)?.sub(&ax2)?;
-    let dy = by1.add(&by2)?.sub(&ay1)?.sub(&ay2)?;
-    let rho2 = dx.square()?.add(&dy.square()?)?.mul_scalar(0.25)?;
-    let c2_detached = {
-        let _g = no_grad();
-        let cw = ax2.maximum(&bx2)?.sub(&ax1.minimum(&bx1)?)?.relu()?;
-        let ch = ay2.maximum(&by2)?.sub(&ay1.minimum(&by1)?)?.relu()?;
-        cw.square()?.add(&ch.square()?)?.add_scalar(EPS)?
-    };
-    let r_dist = rho2.div(&c2_detached)?.clamp(0.0, 10.0)?.exp()?;
-
-    // Non-monotonic dynamic focusing gain r = beta / (delta * alpha^(beta - delta)), completely detached.
-    let (r_focus, batch_mean) = {
-        let _g = no_grad();
-        let batch_mean = l_iou.mean_all()?.item::<f32>()?;
-        let beta = l_iou.div_scalar(iou_mean.max(1e-4))?;
-        let ln_a = alpha.ln();
-        let exponent = beta.sub_scalar(delta)?.mul_scalar(ln_a)?.clamp(-80.0, 80.0)?;
-        let denom = exponent.exp()?.mul_scalar(delta)?;
-        (beta.div(&denom)?, batch_mean)
-    };
-    let loss = r_focus.mul(&r_dist)?.mul(&l_iou)?.add(&poison)?;
-    Ok((loss, Some(batch_mean)))
 }
 
 /// Single-box `R-PIoU` forward `(loss, dL/d(ax1, ay1, ax2, ay2))` in `f64`, matching `det_box.wgsl` tie-breaking.

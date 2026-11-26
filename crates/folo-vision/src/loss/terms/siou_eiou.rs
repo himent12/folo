@@ -19,7 +19,7 @@ use crate::loss::invalid;
 /// `b1 <= b2`), while guaranteeing that inverted boxes remain enclosed (`|dcx| <= c`) so center-distance and
 /// size ratios stay bounded in `[0, 1]` without overflow even on extreme inverted coordinates.
 #[inline]
-fn enclosing_axis(a1: f64, a2: f64, b1: f64, b2: f64) -> (f64, f64, f64) {
+pub(super) fn enclosing_axis(a1: f64, a2: f64, b1: f64, b2: f64) -> (f64, f64, f64) {
     let (a_lo, a_hi) = if a1 <= a2 { (a1, a2) } else { (a2, a1) };
     let (b_lo, b_hi) = if b1 <= b2 { (b1, b2) } else { (b2, b1) };
     let c = a_hi.max(b_hi) - a_lo.min(b_lo);

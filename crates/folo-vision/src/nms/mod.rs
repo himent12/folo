@@ -320,9 +320,9 @@ fn finish(
         }
         valid.into_iter().unzip()
     } else {
-        if cfg.nms_kind.is_matrix() {
+        if cfg.nms_kind.is_soft() {
             // Drop non-finite scores (+Inf / NaN) before `max_candidates` truncation so malformed entries
-            // cannot evict valid detections from Matrix-NMS.
+            // cannot evict valid detections from Soft-NMS or Matrix-NMS.
             cands.retain(|c| c.score.is_finite());
         }
         if cands.len() > cfg.max_candidates {
