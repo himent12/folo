@@ -614,7 +614,7 @@ mod wasm_simd {
     /// 4-lane `u32x4_add`, matching `(sum + n / 2) / n` bit for bit.
     ///
     /// # Safety
-    /// `col_sum.len() == w * 4` and `dst.len() == pw * 4`.
+    /// `fx >= 1`, `ny >= 1`, `pw == w.div_ceil(fx)`, `col_sum.len() == w * 4`, and `dst.len() == pw * 4`.
     pub(super) unsafe fn box_hreduce_rgba32_simd128(
         col_sum: &[u32],
         dst: &mut [u8],
@@ -738,8 +738,9 @@ mod tests {
             (321, 217, 96, false),
             (403, 299, 96, true),
             (515, 387, 96, false),
-            // Extreme aspect ratio (prefilter on one axis only)
+            // Extreme aspect ratios (prefilter on one axis only: fx > 1, fy == 1 and fx == 1, fy > 1)
             (257, 31, 96, true),
+            (31, 257, 96, true),
             // Tiny 1x1
             (1, 1, 32, true),
         ];

@@ -118,9 +118,9 @@ impl Tensor {
 
     /// `self *= c`.
     pub fn mul_scalar_assign(&self, c: f32) -> Result<()> {
+        self.check_inplace("mul_scalar_assign")?;
+        self.check_f32("mul_scalar_assign")?;
         if self.device().is_cpu() {
-            self.check_inplace("mul_scalar_assign")?;
-            self.check_f32("mul_scalar_assign")?;
             let mut dst = self.cell().write();
             let d = dst.as_cpu_mut("mul_scalar_assign")?.as_f32_mut("mul_scalar_assign")?;
             mul_scalar_inplace(d, self.layout(), c);

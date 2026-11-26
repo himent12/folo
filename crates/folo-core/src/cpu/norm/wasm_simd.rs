@@ -259,6 +259,7 @@ pub(super) fn ln_bwd_write_wasm(
     if let Some(ref db) = db {
         assert_eq!(db.len(), n);
     }
+    let (has_w, has_dw, has_db) = (w.is_some(), dw.is_some(), db.is_some());
     let xp = x.as_ptr();
     let gp = g.as_ptr();
     let wp = w.map_or(std::ptr::null(), <[f32]>::as_ptr);
@@ -267,7 +268,7 @@ pub(super) fn ln_bwd_write_wasm(
     let dbp = db.as_deref_mut().map_or(std::ptr::null_mut(), <[f32]>::as_mut_ptr);
     // SAFETY: lengths asserted above and mutable slices are disjoint.
     let i = unsafe {
-        match (w.is_some(), dw.is_some(), db.is_some()) {
+        match (has_w, has_dw, has_db) {
             (true, true, true) => {
                 ln_bwd_write_kernel::<true, true, true>(xp, gp, wp, dxp, dwp, dbp, n, mean, rstd, c1_d, c2_d)
             }
@@ -467,6 +468,7 @@ pub(super) fn rms_bwd_write_wasm(
     if let Some(ref dw) = dw {
         assert_eq!(dw.len(), n);
     }
+    let (has_w, has_dw) = (w.is_some(), dw.is_some());
     let xp = x.as_ptr();
     let gp = g.as_ptr();
     let wp = w.map_or(std::ptr::null(), <[f32]>::as_ptr);
@@ -474,7 +476,7 @@ pub(super) fn rms_bwd_write_wasm(
     let dwp = dw.as_deref_mut().map_or(std::ptr::null_mut(), <[f32]>::as_mut_ptr);
     // SAFETY: lengths asserted above and mutable slices are disjoint.
     let i = unsafe {
-        match (w.is_some(), dw.is_some()) {
+        match (has_w, has_dw) {
             (true, true) => rms_bwd_write_kernel::<true, true>(xp, gp, wp, dxp, dwp, n, rstd, c_d),
             (true, false) => rms_bwd_write_kernel::<true, false>(xp, gp, wp, dxp, dwp, n, rstd, c_d),
             (false, true) => rms_bwd_write_kernel::<false, true>(xp, gp, wp, dxp, dwp, n, rstd, c_d),

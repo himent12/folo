@@ -30,17 +30,18 @@ fn inter_area(a: [f32; 4], b: [f32; 4]) -> f32 {
     iw * ih
 }
 
-/// Updates a host box after an opaque patch `rect = [rx1, ry1, rx2, ry2]` overwrites pixels in a `width x height`
-/// image:
-/// - Drops degenerate or fully occluded boxes.
-/// - When the patch covers the full vertical span of the box and clips one horizontal edge (or covers the full
-///   horizontal span and clips one vertical edge), trims the box cleanly to the single remaining visible strip and
-///   checks `filter`.
-/// - Otherwise (interior hole, corner bite, or split into two disjoint strips), retains the box only when the
-///   remaining visible area is at least `filter.min_area_ratio * orig_area` and `filter.keep` passes.
+/// Updates a host box after one or more opaque patches `rects` overwrite pixels in a `width x height` image.
+///
+/// Uses exact coordinate-compressed 2D rectangle subtraction over `rects` to compute both the exact remaining
+/// visible area and the tight bounding box of all un-occluded pixels:
+/// - Non-finite, degenerate, or fully occluded boxes are dropped.
+/// - Disjoint boxes are kept untouched (provided their coordinates are finite and positive-area).
+/// - Partially occluded boxes are tightened to the bounding box of their remaining visible pixels and retained
+///   only when `visible_area >= filter.min_area_ratio * orig_area` and `filter.keep(tight_w, tight_h, orig_area)`
+///   succeeds.
 fn filter_occluded_box(
     bx: &BBox,
-    rect: [f32; 4],
+    rects: &[[f32; 4]],
     width: u32,
     height: u32,
     filter: &BoxFilter,
@@ -48,8 +49,14 @@ fn filter_occluded_box(
     if width == 0 || height == 0 {
         return None;
     }
-    let (fw, fh) = (width as f32, height as f32);
     let [raw_x1, raw_y1, raw_x2, raw_y2] = bx.pixel_xyxy(width, height);
+    if !(raw_x1.is_finite() && raw_y1.is_finite() && raw_x2.is_finite() && raw_y2.is_finite()) {
+        return None;
+    }
+    if !(raw_x2 > raw_x1 && raw_y2 > raw_y1) {
+        return None;
+    }
+    let (fw, fh) = (width as f32, height as f32);
     let [x1, y1, x2, y2] =
         [raw_x1.clamp(0.0, fw), raw_y1.clamp(0.0, fh), raw_x2.clamp(0.0, fw), raw_y2.clamp(0.0, fh)];
     let (bw, bh) = (x2 - x1, y2 - y1);
@@ -57,57 +64,101 @@ fn filter_occluded_box(
         return None;
     }
     let orig_area = bw * bh;
-    let [rx1, ry1, rx2, ry2] = rect;
-    let ov = inter_area([x1, y1, x2, y2], rect);
-    if ov == 0.0 {
+
+    let mut clipped: Vec<[f32; 4]> = Vec::new();
+    for &[rx1, ry1, rx2, ry2] in rects {
+        let cx1 = rx1.max(x1);
+        let cy1 = ry1.max(y1);
+        let cx2 = rx2.min(x2);
+        let cy2 = ry2.min(y2);
+        if cx2 > cx1 && cy2 > cy1 {
+            clipped.push([cx1, cy1, cx2, cy2]);
+        }
+    }
+    if clipped.is_empty() {
         return Some(*bx);
     }
-    let visible = orig_area - ov;
-    if visible <= 0.0 {
+
+    let mut xs = Vec::with_capacity(2 + clipped.len() * 2);
+    let mut ys = Vec::with_capacity(2 + clipped.len() * 2);
+    xs.push(x1);
+    xs.push(x2);
+    ys.push(y1);
+    ys.push(y2);
+    for &[cx1, cy1, cx2, cy2] in &clipped {
+        xs.push(cx1);
+        xs.push(cx2);
+        ys.push(cy1);
+        ys.push(cy2);
+    }
+    xs.sort_by(f32::total_cmp);
+    xs.dedup();
+    ys.sort_by(f32::total_cmp);
+    ys.dedup();
+
+    let mut visible_area = 0.0f32;
+    let (mut vx1, mut vy1, mut vx2, mut vy2) =
+        (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for wx in xs.windows(2) {
+        let (gx1, gx2) = (wx[0], wx[1]);
+        let dx = gx2 - gx1;
+        if dx <= 0.0 {
+            continue;
+        }
+        for wy in ys.windows(2) {
+            let (gy1, gy2) = (wy[0], wy[1]);
+            let dy = gy2 - gy1;
+            if dy <= 0.0 {
+                continue;
+            }
+            let covered = clipped
+                .iter()
+                .any(|&[cx1, cy1, cx2, cy2]| cx1 <= gx1 && cx2 >= gx2 && cy1 <= gy1 && cy2 >= gy2);
+            if !covered {
+                visible_area += dx * dy;
+                vx1 = vx1.min(gx1);
+                vy1 = vy1.min(gy1);
+                vx2 = vx2.max(gx2);
+                vy2 = vy2.max(gy2);
+            }
+        }
+    }
+    if visible_area <= 0.0 || visible_area < filter.min_area_ratio * orig_area {
         return None;
     }
-    // Check for a clean single-edge clip where the remaining visible region is one exact rectangle.
-    let covers_y = ry1 <= y1 && ry2 >= y2;
-    let covers_x = rx1 <= x1 && rx2 >= x2;
-    let trimmed = if covers_y && rx1 <= x1 && rx2 < x2 {
-        Some([rx2, y1, x2, y2])
-    } else if covers_y && rx1 > x1 && rx2 >= x2 {
-        Some([x1, y1, rx1, y2])
-    } else if covers_x && ry1 <= y1 && ry2 < y2 {
-        Some([x1, ry2, x2, y2])
-    } else if covers_x && ry1 > y1 && ry2 >= y2 {
-        Some([x1, y1, x2, ry1])
+    let (vw, vh) = (vx2 - vx1, vy2 - vy1);
+    if !filter.keep(vw, vh, orig_area) {
+        return None;
+    }
+    if vx1 == x1 && vy1 == y1 && vx2 == x2 && vy2 == y2 {
+        Some(*bx)
     } else {
-        None
-    };
-    if let Some([nx1, ny1, nx2, ny2]) = trimmed {
-        let (nw, nh) = (nx2 - nx1, ny2 - ny1);
-        return filter
-            .keep(nw, nh, orig_area)
-            .then(|| BBox::from_pixel_xyxy(bx.class, [nx1, ny1, nx2, ny2], width, height));
+        Some(BBox::from_pixel_xyxy(bx.class, [vx1, vy1, vx2, vy2], width, height))
     }
-    // Partial interior/corner occlusion or split: check visible area ratio plus geometric filter bounds.
-    if visible < filter.min_area_ratio * orig_area {
-        return None;
-    }
-    filter.keep(bw, bh, orig_area).then_some(*bx)
 }
 
-/// Applies host-box occlusion filtering in place for an overwritten pixel rectangle `rect`.
+/// Applies host-box occlusion filtering in place for one or more overwritten pixel rectangles `rects`.
 fn apply_occlusion_to_boxes(
     boxes: &mut Vec<BBox>,
-    rect: [u32; 4],
+    rects: &[[u32; 4]],
     width: u32,
     height: u32,
     filter: &BoxFilter,
 ) {
-    if rect[2] <= rect[0] || rect[3] <= rect[1] || boxes.is_empty() {
+    if boxes.is_empty() {
         return;
     }
-    let rf = [rect[0] as f32, rect[1] as f32, rect[2] as f32, rect[3] as f32];
+    let rf: Vec<[f32; 4]> = rects
+        .iter()
+        .filter(|r| r[2] > r[0] && r[3] > r[1])
+        .map(|r| [r[0] as f32, r[1] as f32, r[2] as f32, r[3] as f32])
+        .collect();
+    if rf.is_empty() {
+        return;
+    }
     let mut write = 0usize;
     for read in 0..boxes.len() {
-        if let Some(kept) = filter_occluded_box(&boxes[read], rf, width, height, filter) {
+        if let Some(kept) = filter_occluded_box(&boxes[read], &rf, width, height, filter) {
             boxes[write] = kept;
             write += 1;
         }
@@ -142,11 +193,14 @@ pub fn cutmix_rect(s: &mut Sample, other: &Sample, rect: [u32; 4], filter: &BoxF
             .copy_from_slice(&other.image.data[row_off + byte_lo..row_off + byte_hi]);
     }
 
-    apply_occlusion_to_boxes(&mut s.boxes, [x1, y1, x2, y2], w, h, filter);
+    apply_occlusion_to_boxes(&mut s.boxes, &[[x1, y1, x2, y2]], w, h, filter);
 
     let (rx1, ry1, rx2, ry2) = (x1 as f32, y1 as f32, x2 as f32, y2 as f32);
     for b in &other.boxes {
         let [bx1, by1, bx2, by2] = b.pixel_xyxy(w, h);
+        if !(bx1.is_finite() && by1.is_finite() && bx2.is_finite() && by2.is_finite()) {
+            continue;
+        }
         let orig_w = bx2 - bx1;
         let orig_h = by2 - by1;
         if !(orig_w > 0.0 && orig_h > 0.0) {
@@ -184,10 +238,12 @@ pub fn cutmix(s: &mut Sample, other: &Sample, filter: &BoxFilter, rng: &mut Rng)
     let cut_h = ((h as f32 * cut_ratio).round() as i64).clamp(1, h as i64);
     let cx = rng.below(w as usize) as i64;
     let cy = rng.below(h as usize) as i64;
-    let x1 = (cx - cut_w / 2).clamp(0, w as i64) as u32;
-    let y1 = (cy - cut_h / 2).clamp(0, h as i64) as u32;
-    let x2 = (x1 as i64 + cut_w).min(w as i64) as u32;
-    let y2 = (y1 as i64 + cut_h).min(h as i64) as u32;
+    let half_w = cut_w / 2;
+    let half_h = cut_h / 2;
+    let x1 = (cx - half_w).clamp(0, w as i64) as u32;
+    let y1 = (cy - half_h).clamp(0, h as i64) as u32;
+    let x2 = (cx + (cut_w - half_w)).clamp(0, w as i64) as u32;
+    let y2 = (cy + (cut_h - half_h)).clamp(0, h as i64) as u32;
     let rect = [x1, y1, x2, y2];
     cutmix_rect(s, other, rect, filter);
     rect
@@ -196,11 +252,12 @@ pub fn cutmix(s: &mut Sample, other: &Sample, filter: &BoxFilter, rng: &mut Rng)
 /// Parameters for box-level [`copy_paste`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CopyPasteConfig {
-    /// Per-donor-box selection probability in `[0, 1]` (default `0.5`).
+    /// Per-donor-box selection probability in `[0, 1]` (default `0.5`). Non-positive or `NaN` values disable
+    /// pasting (no-op returning `0`).
     pub prob: f32,
-    /// Maximum allowed intersection-over-existing-box-area (`IoA`) between a pasted box and any existing box
+    /// Maximum allowed intersection-over-existing-box-area (`IoA`) between a pasted crop and any existing box
     /// in the destination sample (default `0.3`). Donor boxes that would occlude an existing object more than
-    /// this threshold are skipped.
+    /// this threshold are skipped. `NaN` fails closed and disables pasting (no-op returning `0`).
     pub max_ioa: f32,
     /// Horizontally mirror pasted crops into the mirrored x-position `[W - x2, y1, W - x1, y2]` (default `false`).
     pub flip_lr: bool,
@@ -212,11 +269,13 @@ impl Default for CopyPasteConfig {
     }
 }
 
-/// Box-level Copy-Paste augmentation: selects donor boxes from `other` with probability `cfg.prob`, rejects
-/// any paste whose overlap with an existing destination box exceeds `cfg.max_ioa` (intersection over existing
-/// box area), copies the RGB crop into `s` (horizontally mirrored via SIMD when `cfg.flip_lr` is true), and
-/// appends the pasted box to `s.boxes`. Returns the number of boxes pasted.
+/// Box-level Copy-Paste augmentation: selects donor boxes from `other` with probability `cfg.prob`, filters
+/// clipped floating-point donor boxes through `filter`, rejects any paste whose copied pixel rectangle overlaps
+/// an existing destination box by more than `cfg.max_ioa` (intersection over existing box area), copies the RGB
+/// crop into `s` (horizontally mirrored via SIMD when `cfg.flip_lr` is true), and appends the exact (mirrored if
+/// `cfg.flip_lr`) floating-point box to `s.boxes`. Returns the number of boxes pasted.
 ///
+/// Invalid config values (`!(cfg.prob > 0.0)` or `cfg.max_ioa.is_nan()`) are treated as a no-op returning `0`.
 /// Both images must have the same dimensions.
 pub fn copy_paste(
     s: &mut Sample,
@@ -233,7 +292,13 @@ pub fn copy_paste(
     assert_image_data(&s.image);
     assert_image_data(&other.image);
     let (w, h) = (s.image.width, s.image.height);
-    if w == 0 || h == 0 || other.boxes.is_empty() || cfg.prob <= 0.0 {
+    if w == 0
+        || h == 0
+        || other.boxes.is_empty()
+        || cfg.prob.is_nan()
+        || cfg.prob <= 0.0
+        || cfg.max_ioa.is_nan()
+    {
         return 0;
     }
     let (fw, fh) = (w as f32, h as f32);
@@ -246,32 +311,42 @@ pub fn copy_paste(
             continue;
         }
         let [bx1, by1, bx2, by2] = b.pixel_xyxy(w, h);
+        if !(bx1.is_finite() && by1.is_finite() && bx2.is_finite() && by2.is_finite()) {
+            continue;
+        }
         let (orig_w, orig_h) = (bx2 - bx1, by2 - by1);
         if !(orig_w > 0.0 && orig_h > 0.0) {
             continue;
         }
         let orig_area = orig_w * orig_h;
-        let sx1 = bx1.floor().clamp(0.0, fw) as u32;
-        let sy1 = by1.floor().clamp(0.0, fh) as u32;
-        let sx2 = bx2.ceil().clamp(0.0, fw) as u32;
-        let sy2 = by2.ceil().clamp(0.0, fh) as u32;
+        let (cx1, cy1, cx2, cy2) =
+            (bx1.clamp(0.0, fw), by1.clamp(0.0, fh), bx2.clamp(0.0, fw), by2.clamp(0.0, fh));
+        if !filter.keep(cx2 - cx1, cy2 - cy1, orig_area) {
+            continue;
+        }
+        // Integer pixel crop bounds, explicitly capped to `(w, h)` so `w > 2^24` rounding never exceeds `w`.
+        let sx1 = (cx1.floor().max(0.0) as u32).min(w);
+        let sy1 = (cy1.floor().max(0.0) as u32).min(h);
+        let sx2 = (cx2.ceil().max(0.0) as u32).min(w);
+        let sy2 = (cy2.ceil().max(0.0) as u32).min(h);
         if sx2 <= sx1 || sy2 <= sy1 {
             continue;
         }
-        let cw = (sx2 - sx1) as f32;
-        let ch = (sy2 - sy1) as f32;
-        if !filter.keep(cw, ch, orig_area) {
-            continue;
-        }
         let (dx1, dx2) = if cfg.flip_lr { (w - sx2, w - sx1) } else { (sx1, sx2) };
-        let dst_rect = [dx1 as f32, sy1 as f32, dx2 as f32, sy2 as f32];
+        let dst_crop = [dx1 as f32, sy1 as f32, dx2 as f32, sy2 as f32];
 
         let mut occluded = false;
         for &ex in &existing {
+            if !(ex[0].is_finite() && ex[1].is_finite() && ex[2].is_finite() && ex[3].is_finite()) {
+                continue;
+            }
             let ex_area = (ex[2] - ex[0]).max(0.0) * (ex[3] - ex[1]).max(0.0);
-            if ex_area > 0.0 && inter_area(dst_rect, ex) / ex_area > cfg.max_ioa {
-                occluded = true;
-                break;
+            if ex_area > 0.0 {
+                let ioa = inter_area(dst_crop, ex) / ex_area;
+                if ioa.is_nan() || ioa > cfg.max_ioa {
+                    occluded = true;
+                    break;
+                }
             }
         }
         if occluded {
@@ -292,8 +367,13 @@ pub fn copy_paste(
                 dst_slice.copy_from_slice(src_slice);
             }
         }
-        s.boxes.push(BBox::from_pixel_xyxy(b.class, dst_rect, w, h));
-        existing.push(dst_rect);
+        let mut new_box = BBox::from_pixel_xyxy(b.class, [cx1, cy1, cx2, cy2], w, h);
+        if cfg.flip_lr {
+            new_box.cx = 1.0 - new_box.cx;
+        }
+        let new_px = new_box.pixel_xyxy(w, h);
+        s.boxes.push(new_box);
+        existing.push(new_px);
         pasted += 1;
     }
     pasted
@@ -311,11 +391,13 @@ pub enum ErasingFill {
 /// Parameters for box-aware [`random_erasing`] (Cutout / Random Erasing).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RandomErasingConfig {
-    /// Probability of each erasing attempt (default `0.4`).
+    /// Probability of each erasing attempt (default `0.4`). Non-positive or `NaN` values disable erasing.
     pub prob: f32,
-    /// Min and max fraction of total image area per erased patch (default `[0.02, 0.2]`).
+    /// Min and max fraction of total image area per erased patch (default `[0.02, 0.2]`). Non-finite values
+    /// disable erasing (no-op returning `0`).
     pub area: [f32; 2],
     /// Min and max aspect ratio `w / h` of an erased patch, sampled log-uniformly (default `[0.3, 3.3]`).
+    /// Non-finite values disable erasing (no-op returning `0`).
     pub aspect: [f32; 2],
     /// Number of independent erasing attempts per call (default `1`).
     pub count: usize,
@@ -348,17 +430,13 @@ fn fill_random_bytes(dst: &mut [u8], rng: &mut Rng) {
     }
 }
 
-/// Erases a specific pixel rectangle `rect = [x1, y1, x2, y2]` in `s` using `fill`, and updates `s.boxes`
-/// with [`BoxFilter`] occlusion rules.
-pub fn erase_rect(s: &mut Sample, rect: [u32; 4], fill: ErasingFill, filter: &BoxFilter, rng: &mut Rng) {
-    assert_image_data(&s.image);
-    let (w, h) = (s.image.width, s.image.height);
-    let [x1, y1, x2, y2] = clamp_rect(rect, w, h);
+/// Overwrites pixels inside `rect` (already clamped to `s.image`) according to `fill`.
+fn paint_erase_rect(s: &mut Sample, rect: [u32; 4], fill: ErasingFill, rng: &mut Rng) {
+    let [x1, y1, x2, y2] = rect;
     if x2 <= x1 || y2 <= y1 {
         return;
     }
-
-    let stride = w as usize * 3;
+    let stride = s.image.width as usize * 3;
     let byte_lo = x1 as usize * 3;
     let byte_hi = x2 as usize * 3;
     let row_bytes = byte_hi - byte_lo;
@@ -386,18 +464,41 @@ pub fn erase_rect(s: &mut Sample, rect: [u32; 4], fill: ErasingFill, filter: &Bo
             }
         }
     }
+}
 
-    apply_occlusion_to_boxes(&mut s.boxes, [x1, y1, x2, y2], w, h, filter);
+/// Erases a specific pixel rectangle `rect = [x1, y1, x2, y2]` in `s` using `fill`, and updates `s.boxes`
+/// with [`BoxFilter`] occlusion rules.
+pub fn erase_rect(s: &mut Sample, rect: [u32; 4], fill: ErasingFill, filter: &BoxFilter, rng: &mut Rng) {
+    assert_image_data(&s.image);
+    let (w, h) = (s.image.width, s.image.height);
+    let clamped = clamp_rect(rect, w, h);
+    if clamped[2] <= clamped[0] || clamped[3] <= clamped[1] {
+        return;
+    }
+    paint_erase_rect(s, clamped, fill, rng);
+    apply_occlusion_to_boxes(&mut s.boxes, &[clamped], w, h, filter);
 }
 
 /// Box-aware Random Erasing (Cutout): performs up to `cfg.count` independent erasing attempts (each with
 /// probability `cfg.prob`), sampling patch area in `cfg.area` and log-uniform aspect ratio in `cfg.aspect`,
-/// filling erased pixels according to `cfg.fill`, and trimming/dropping occluded boxes through `filter`.
-/// Returns the number of patches actually erased.
+/// filling erased pixels according to `cfg.fill`, and filtering/trimming boxes against the exact union of all
+/// erased patches in this call through `filter`. Returns the number of patches actually erased.
+///
+/// Non-positive `cfg.prob`, zero `cfg.count`, or any non-finite value in `cfg.area` / `cfg.aspect` is treated
+/// as a no-op returning `0`.
 pub fn random_erasing(s: &mut Sample, cfg: &RandomErasingConfig, filter: &BoxFilter, rng: &mut Rng) -> usize {
     assert_image_data(&s.image);
     let (w, h) = (s.image.width, s.image.height);
-    if w == 0 || h == 0 || cfg.count == 0 || cfg.prob <= 0.0 {
+    if w == 0
+        || h == 0
+        || cfg.count == 0
+        || cfg.prob.is_nan()
+        || cfg.prob <= 0.0
+        || !(cfg.area[0].is_finite()
+            && cfg.area[1].is_finite()
+            && cfg.aspect[0].is_finite()
+            && cfg.aspect[1].is_finite())
+    {
         return 0;
     }
     let area_lo = cfg.area[0].clamp(0.0, 1.0);
@@ -410,7 +511,7 @@ pub fn random_erasing(s: &mut Sample, cfg: &RandomErasingConfig, filter: &BoxFil
     let log_lo = asp_lo.ln();
     let log_hi = asp_hi.ln();
     let total_area = w as f32 * h as f32;
-    let mut erased = 0usize;
+    let mut erased_rects: Vec<[u32; 4]> = Vec::new();
 
     for _ in 0..cfg.count {
         if !rng.chance(cfg.prob) {
@@ -424,13 +525,17 @@ pub fn random_erasing(s: &mut Sample, cfg: &RandomErasingConfig, filter: &BoxFil
             if ew >= 1 && eh >= 1 && ew <= w && eh <= h {
                 let x1 = rng.below((w - ew + 1) as usize) as u32;
                 let y1 = rng.below((h - eh + 1) as usize) as u32;
-                erase_rect(s, [x1, y1, x1 + ew, y1 + eh], cfg.fill, filter, rng);
-                erased += 1;
+                let rect = [x1, y1, x1 + ew, y1 + eh];
+                paint_erase_rect(s, rect, cfg.fill, rng);
+                erased_rects.push(rect);
                 break;
             }
         }
     }
-    erased
+    if !erased_rects.is_empty() {
+        apply_occlusion_to_boxes(&mut s.boxes, &erased_rects, w, h, filter);
+    }
+    erased_rects.len()
 }
 
 #[cfg(test)]
@@ -445,10 +550,12 @@ mod tests {
             boxes: vec![
                 // Fully inside patch [20, 20, 80, 80] -> dropped.
                 BBox::from_pixel_xyxy(0, [30.0, 30.0, 60.0, 60.0], 100, 100),
-                // Right half covered by patch (patch covers full y-span [20..80] >= [25..75]) -> trimmed to [10, 25, 20, 75].
+                // Right half covered by patch -> trimmed to [10, 25, 20, 75].
                 BBox::from_pixel_xyxy(1, [10.0, 25.0, 40.0, 75.0], 100, 100),
                 // Disjoint from patch -> kept untouched.
                 BBox::from_pixel_xyxy(2, [0.0, 0.0, 15.0, 15.0], 100, 100),
+                // Non-finite host box -> dropped even when disjoint or partially occluded.
+                BBox::new(9, 0.5, 0.5, f32::INFINITY, 0.4),
             ],
         };
         let donor = Sample {
@@ -484,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_paste_respects_max_ioa_and_flip_lr() {
+    fn copy_paste_respects_max_ioa_flip_lr_and_subpixel_box_filter() {
         let mut dst = Sample {
             image: Image::new(64, 64, [0, 0, 0]),
             boxes: vec![BBox::from_pixel_xyxy(0, [10.0, 10.0, 30.0, 30.0], 64, 64)],
@@ -509,18 +616,90 @@ mod tests {
         assert_eq!(dst_plain.image.pixel(40, 40), [0, 0, 255]);
         assert_eq!(dst_plain.image.pixel(15, 15), [0, 0, 0]);
 
-        // With `flip_lr = true`, [10..30] mirrors to [34..54] (no overlap!) and [40..56] mirrors to [8..24]
-        // (no overlap with [10..30] vertically since y=[40..56]). Both paste cleanly!
         let cfg_flip = CopyPasteConfig { prob: 1.0, max_ioa: 0.2, flip_lr: true };
         let n_flip = copy_paste(&mut dst, &donor, &cfg_flip, &BoxFilter::default(), &mut Rng::new(7));
         assert_eq!(n_flip, 2);
         // Marker at x=40 in [40..56) mirrors to x=64-40-1 = 23 in [8..24).
         assert_eq!(dst.image.pixel(23, 40), [0, 0, 255]);
         assert_eq!(dst.image.pixel(44, 15), [255, 0, 0]);
+
+        // Sub-2px donor box [1.75, 1.75, 3.25, 3.25] (1.5x1.5) must fail default BoxFilter (`min_px = 2.0`),
+        // not get inflated to 3x3 by integer crop rounding.
+        let mut tiny_dst = Sample { image: Image::new(8, 8, [0, 0, 0]), boxes: vec![] };
+        let tiny_donor = Sample {
+            image: Image::new(8, 8, [9, 9, 9]),
+            boxes: vec![
+                BBox::from_pixel_xyxy(0, [1.75, 1.75, 3.25, 3.25], 8, 8),
+                BBox::from_pixel_xyxy(1, [4.25, 4.25, 6.75, 6.75], 8, 8), // 2.5x2.5 -> kept with exact float coords
+            ],
+        };
+        let n_sub = copy_paste(
+            &mut tiny_dst,
+            &tiny_donor,
+            &CopyPasteConfig { prob: 1.0, max_ioa: 0.3, flip_lr: false },
+            &BoxFilter::default(),
+            &mut Rng::new(1),
+        );
+        assert_eq!(n_sub, 1);
+        assert_eq!(tiny_dst.boxes[0].class, 1);
+        let [px1, py1, px2, py2] = tiny_dst.boxes[0].pixel_xyxy(8, 8);
+        assert!(
+            (px1 - 4.25).abs() < 1e-5
+                && (py1 - 4.25).abs() < 1e-5
+                && (px2 - 6.75).abs() < 1e-5
+                && (py2 - 6.75).abs() < 1e-5
+        );
+
+        // NaN `max_ioa` / `prob` fails closed without modifying pixels or boxes.
+        let mut guard_dst = tiny_dst.clone();
+        assert_eq!(
+            copy_paste(
+                &mut guard_dst,
+                &tiny_donor,
+                &CopyPasteConfig { prob: 1.0, max_ioa: f32::NAN, flip_lr: false },
+                &BoxFilter::default(),
+                &mut Rng::new(1),
+            ),
+            0
+        );
+        assert_eq!(guard_dst, tiny_dst);
     }
 
     #[test]
-    fn random_erasing_handles_edge_sizes_and_noise_deterministically() {
+    fn random_erasing_handles_multi_patch_union_edge_sizes_and_non_finite_configs() {
+        // Multi-patch complete occlusion: three full-width patches covering rows 5..11, 10..16, and 0..6
+        // leave zero visible pixels of the full-image box and must drop its label.
+        let mut full = Sample {
+            image: Image::new(16, 16, [255, 0, 0]),
+            boxes: vec![BBox::from_pixel_xyxy(0, [0.0, 0.0, 16.0, 16.0], 16, 16)],
+        };
+        let cfg_union = RandomErasingConfig {
+            prob: 1.0,
+            area: [0.375, 0.375],
+            aspect: [8.0 / 3.0, 8.0 / 3.0],
+            count: 3,
+            fill: ErasingFill::Constant([0, 0, 0]),
+        };
+        assert_eq!(random_erasing(&mut full, &cfg_union, &BoxFilter::default(), &mut Rng::new(229)), 3);
+        assert!(full.image.data.iter().all(|&b| b == 0));
+        assert!(full.boxes.is_empty(), "fully erased box must be dropped, got {:?}", full.boxes);
+
+        // Non-finite config values are safe no-ops (never panic in `clamp`).
+        let mut probe = Sample {
+            image: Image::new(16, 16, [50, 60, 70]),
+            boxes: vec![BBox::from_pixel_xyxy(0, [2.0, 2.0, 14.0, 14.0], 16, 16)],
+        };
+        let before = probe.clone();
+        for bad in [
+            RandomErasingConfig { prob: 1.0, area: [f32::NAN, 0.2], ..Default::default() },
+            RandomErasingConfig { prob: 1.0, area: [0.02, f32::NAN], ..Default::default() },
+            RandomErasingConfig { prob: 1.0, aspect: [f32::NAN, 2.0], ..Default::default() },
+            RandomErasingConfig { prob: f32::NAN, ..Default::default() },
+        ] {
+            assert_eq!(random_erasing(&mut probe, &bad, &BoxFilter::default(), &mut Rng::new(1)), 0);
+            assert_eq!(probe, before);
+        }
+
         // 0x0 and 1x1 never panic.
         let mut empty = Sample { image: Image::new(0, 0, [0, 0, 0]), boxes: vec![] };
         assert_eq!(
@@ -528,7 +707,7 @@ mod tests {
                 &mut empty,
                 &RandomErasingConfig { prob: 1.0, ..Default::default() },
                 &BoxFilter::default(),
-                &mut Rng::new(1)
+                &mut Rng::new(1),
             ),
             0
         );

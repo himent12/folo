@@ -1,5 +1,6 @@
 //! SIMD-accelerated in-place broadcast and contiguous elementwise updates (`dst op= src`, `dst += alpha * src`,
-//! `dst *= c`) for x86_64 AVX2 and WebAssembly SIMD128, bitwise identical to scalar IEEE-754 arithmetic.
+//! `dst *= c`) for x86_64 AVX2 and WebAssembly SIMD128, bitwise identical to scalar IEEE-754 arithmetic on all
+//! non-NaN results (preserving NaN propagation).
 
 use super::{SendPtr, run_strided_rows};
 use crate::Layout;
@@ -550,5 +551,14 @@ mod tests {
             t.mul_scalar_assign(-0.375).unwrap();
         }
         check_bits(&t.to_vec::<f32>().unwrap(), &want, "mul_scalar_assign");
+
+        let ts = Tensor::from_slice(&base_a, [12, 37]).unwrap();
+        let mut want_t = base_a.clone();
+        update_slice_vs_scalar(InplaceOp::Mul, &mut want_t, 1.25);
+        {
+            let _ng = no_grad();
+            ts.t().unwrap().mul_scalar_assign(1.25).unwrap();
+        }
+        check_bits(&ts.to_vec::<f32>().unwrap(), &want_t, "mul_scalar_assign transposed");
     }
 }
