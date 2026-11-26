@@ -243,7 +243,6 @@ impl Evaluator {
     /// images matched since the last call, keeping internal scratch buffers allocated for reuse.
     pub(super) fn drain_image_records(
         &mut self,
-        img_idx: usize,
         class_dets_cb: &mut impl FnMut(usize, usize, DetRecord),
     ) -> Vec<(usize, u64)> {
         let mut nonzero_gts = Vec::new();
@@ -254,7 +253,6 @@ impl Evaluator {
                 self.gt_counts[c] = 0;
             }
             for (det_idx, rec) in self.dets[c].drain(..).enumerate() {
-                let _ = img_idx;
                 class_dets_cb(c, det_idx, rec);
             }
         }

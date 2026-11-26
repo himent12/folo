@@ -110,6 +110,24 @@ fn compute_oks_ap_perfect_partial_and_ignored_truths() {
     assert!((rep_ign.ap50 - 1.0).abs() < 1e-6, "ignored unlabeled-bbox match must not count as FP");
     assert!((rep_ign.ap50_95 - 1.0).abs() < 1e-6);
 
+    // Crowd truth absorbs multiple overlapping detections without turning the 2nd into an FP (AP == 1.0).
+    let crowd_preds = vec![
+        OksPred { keypoints: vec![[210.0, 210.0], [220.0, 220.0]], score: 0.99 },
+        OksPred { keypoints: vec![[212.0, 212.0], [222.0, 222.0]], score: 0.95 },
+        OksPred { keypoints: vec![[10.0, 10.0], [20.0, 20.0]], score: 0.80 },
+    ];
+    let crowd_truths = vec![
+        OksTruth::new(vec![Keypoint::unlabeled(), Keypoint::unlabeled()], area)
+            .with_bbox(crate::boxes::Xyxy::new(200.0, 200.0, 240.0, 240.0))
+            .with_crowd(true),
+        OksTruth::new(vec![Keypoint::visible(10.0, 10.0), Keypoint::visible(20.0, 20.0)], area),
+    ];
+    let rep_crowd =
+        compute_oks_ap(&[(crowd_preds.as_slice(), crowd_truths.as_slice())], &sigmas, Some(20)).unwrap();
+    assert_eq!(rep_crowd.num_truths, 1);
+    assert!((rep_crowd.ap50 - 1.0).abs() < 1e-6, "crowd region must absorb multiple detections");
+    assert!((rep_crowd.ap50_95 - 1.0).abs() < 1e-6);
+
     // Two images: both match at 0.50..0.65 (AP = 1.0), only img0 matches at 0.70..0.95 (recall = 0.5 -> 51/101).
     let rep = compute_oks_ap(
         &[(img0_preds.as_slice(), img0_truths.as_slice()), (img1_preds.as_slice(), img1_truths.as_slice())],

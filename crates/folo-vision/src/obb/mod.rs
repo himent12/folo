@@ -183,7 +183,11 @@ pub fn convex_polygon_area_f64(poly: &[[f64; 2]]) -> f64 {
 /// every directed edge of `clipper` (CCW), returning the deduplicated intersection polygon vertices
 /// (empty if disjoint or degenerate / zero-area).
 pub fn clip_convex_polygon_f64(subject: &[[f64; 2]], clipper: &[[f64; 2]]) -> Vec<[f64; 2]> {
-    if subject.len() < 3 || clipper.len() < 3 {
+    if subject.len() < 3
+        || clipper.len() < 3
+        || convex_polygon_area_f64(subject) == 0.0
+        || convex_polygon_area_f64(clipper) == 0.0
+    {
         return Vec::new();
     }
     let mut poly = subject.to_vec();

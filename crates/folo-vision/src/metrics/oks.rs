@@ -275,16 +275,20 @@ pub struct OksTruth {
     /// keypoints (`v == 0` for all `k`).
     #[serde(default)]
     pub bbox: Option<Xyxy>,
-    /// Mark this ground truth as ignored (e.g. crowd or out-of-area instance): matches to it are
-    /// neither true positives nor false positives, and regular truths always take priority.
+    /// Mark this ground truth as ignored (e.g. out-of-area instance): matches to it are neither true
+    /// positives nor false positives, and regular truths always take priority.
     #[serde(default)]
     pub ignore: bool,
+    /// Mark this ground truth as a COCO crowd region: implies ignored and may absorb multiple
+    /// detections without consuming the truth (matching `pycocotools/cocoeval.py`).
+    #[serde(default)]
+    pub iscrowd: bool,
 }
 
 impl OksTruth {
-    /// Construct a regular ground-truth pose instance with no bounding box and `ignore = false`.
+    /// Construct a regular ground-truth pose instance with no bounding box, `ignore = false`, and `iscrowd = false`.
     pub fn new(keypoints: Vec<Keypoint>, area: f32) -> Self {
-        Self { keypoints, area, bbox: None, ignore: false }
+        Self { keypoints, area, bbox: None, ignore: false, iscrowd: false }
     }
 
     /// Attach a bounding box (enabling COCO bounding-box ignore OKS when all keypoints are unlabeled).
@@ -296,6 +300,12 @@ impl OksTruth {
     /// Mark this instance as ignored during evaluation.
     pub fn with_ignore(mut self, ignore: bool) -> Self {
         self.ignore = ignore;
+        self
+    }
+
+    /// Mark this instance as a crowd region (implies ignored and repeatable matching).
+    pub fn with_crowd(mut self, iscrowd: bool) -> Self {
+        self.iscrowd = iscrowd;
         self
     }
 }
@@ -313,7 +323,7 @@ pub struct OksApReport {
     pub ap_per_threshold: Vec<f32>,
     /// OKS thresholds (`0.50:0.05:0.95`).
     pub thresholds: Vec<f32>,
-    /// Total labeled ground-truth instances evaluated (those with at least one `v > 0` keypoint).
+    /// Total non-ignored labeled ground-truth instances evaluated (`!ignore && !iscrowd` with at least one `v > 0` keypoint).
     pub num_truths: u64,
     /// Total finite predictions evaluated.
     pub num_preds: u64,
@@ -359,9 +369,9 @@ where
                 )));
             }
         }
-        // `(truth_idx, has_labeled_kpts)` partitioned into regular truths first, ignored truths second.
-        let mut reg_gts: Vec<(usize, bool)> = Vec::new();
-        let mut ign_gts: Vec<(usize, bool)> = Vec::new();
+        // `(truth_idx, has_labeled_kpts, iscrowd)` partitioned into regular truths first, ignored truths second.
+        let mut reg_gts: Vec<(usize, bool, bool)> = Vec::new();
+        let mut ign_gts: Vec<(usize, bool, bool)> = Vec::new();
         for (i, t) in truths.iter().enumerate() {
             if t.keypoints.len() != k_len {
                 return Err(Error::Config(format!(
@@ -384,10 +394,10 @@ where
                 }
             }
             let has_labeled = t.keypoints.iter().any(|kp| kp.visibility > 0);
-            if !t.ignore && has_labeled {
-                reg_gts.push((i, true));
+            if !t.ignore && !t.iscrowd && has_labeled {
+                reg_gts.push((i, true, false));
             } else if has_labeled || t.bbox.is_some() {
-                ign_gts.push((i, has_labeled));
+                ign_gts.push((i, has_labeled, t.iscrowd));
             }
         }
         let n_reg = reg_gts.len();
@@ -424,7 +434,7 @@ where
             })?;
         let mut sim = vec![0.0f64; sim_len];
         for (di, &pi) in pred_order.iter().enumerate() {
-            for (gi, &(ti, has_labeled)) in ordered_gts.iter().enumerate() {
+            for (gi, &(ti, has_labeled, _)) in ordered_gts.iter().enumerate() {
                 let t = &truths[ti];
                 sim[di * ng + gi] = if has_labeled {
                     oks_f64(&preds[pi].keypoints, &t.keypoints, t.area as f64, sigmas)?
@@ -446,7 +456,7 @@ where
                 let mut best = thr_cap;
                 let mut best_g = usize::MAX;
                 for (gi, &v) in row.iter().enumerate() {
-                    if gt_used[gi] {
+                    if gt_used[gi] && !ordered_gts[gi].2 {
                         continue;
                     }
                     // Prefer regular labeled truths over ignored truths (matching pycocotools).
@@ -460,7 +470,9 @@ where
                     best_g = gi;
                 }
                 if best_g != usize::MAX {
-                    gt_used[best_g] = true;
+                    if !ordered_gts[best_g].2 {
+                        gt_used[best_g] = true;
+                    }
                     if best_g < n_reg {
                         tp_bits[di] |= 1 << t_idx;
                     } else {

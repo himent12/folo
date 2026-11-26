@@ -186,9 +186,15 @@ fn oks_loss_unlabeled_instances_exact_match_and_validation() {
     let a_ok = Tensor::from_slice(&[100.0f32], [1]).unwrap();
     let l_nan = oks_loss(&p_nan, &gt1, &vis_mask, &a_ok, &sigmas, &OksLossConfig::default()).unwrap();
     assert!(l_nan.item::<f32>().unwrap().is_nan());
-    let g_nan = l_nan.backward().unwrap().get(&p_nan).unwrap().to_vec::<f32>().unwrap();
+    // Differentiate `l_nan * l_nan` so upstream gradient is itself NaN: masked keypoint stays strictly 0.0!
+    let l_sq = l_nan.mul(&l_nan).unwrap();
+    let g_nan = l_sq.backward().unwrap().get(&p_nan).unwrap().to_vec::<f32>().unwrap();
     assert!(g_nan[0].is_nan() && g_nan[1].is_nan());
-    assert_eq!((g_nan[2], g_nan[3]), (0.0, 0.0), "unlabeled keypoint must stay strictly 0.0");
+    assert_eq!(
+        (g_nan[2], g_nan[3]),
+        (0.0, 0.0),
+        "unlabeled keypoint must stay strictly 0.0 even with NaN upstream grad"
+    );
 
     // Empty k == 0 with n > 0 still validates negative areas.
     let p_k0 = Tensor::zeros_with([1, 0, 2], DType::F32, folo_core::Device::Cpu).unwrap();

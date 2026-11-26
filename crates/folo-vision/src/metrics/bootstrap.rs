@@ -349,7 +349,7 @@ where
 
     for (img_idx, (preds_ref, truths_ref)) in images.iter().enumerate() {
         matcher.add_image_ap_only(preds_ref.as_ref(), truths_ref.as_ref());
-        let nonzero = matcher.drain_image_records(img_idx, &mut |c, det_idx, rec: DetRecord| {
+        let nonzero = matcher.drain_image_records(&mut |c, det_idx, rec: DetRecord| {
             class_dets[c].push(IndexedDet { score: rec.score, img_idx, det_idx, tp: rec.tp, ig: rec.ig });
         });
         for &(c, ng) in &nonzero {

@@ -226,7 +226,7 @@ fn bootstrap_weighted_ap_matches_evaluator_on_duplicated_tied_and_coco_ignored_i
         let mut img_gts = vec![0u64; imgs.len()];
         for (img_idx, (p, t)) in imgs.iter().enumerate() {
             matcher.add_image_ap_only(p, t);
-            let nz = matcher.drain_image_records(img_idx, &mut |_c, det_idx, rec| {
+            let nz = matcher.drain_image_records(&mut |_c, det_idx, rec| {
                 dets.push(IndexedDet { score: rec.score, img_idx, det_idx, tp: rec.tp, ig: rec.ig });
             });
             for &(c, ng) in &nz {

@@ -212,14 +212,17 @@ fn oks_op(
     let need_pred = pred_kpts.requires_grad();
     let need_gt = gt_kpts.requires_grad();
 
-    if n > 0 {
-        let av_check = areas.to_vec::<f32>()?;
-        for (idx, &a) in av_check.iter().enumerate() {
+    let av = if n > 0 {
+        let av = areas.to_vec::<f32>()?;
+        for (idx, &a) in av.iter().enumerate() {
             if a.is_finite() && a < 0.0 {
                 return Err(invalid(format!("{op}: areas[{idx}] must be >= 0, got {a}")));
             }
         }
-    }
+        av
+    } else {
+        Vec::new()
+    };
 
     if n == 0 || k == 0 {
         let out_t = match reduction {
@@ -236,7 +239,6 @@ fn oks_op(
     let pv = pred_kpts.to_vec::<f32>()?;
     let gv = gt_kpts.to_vec::<f32>()?;
     let vv = visibility.to_vec::<f32>()?;
-    let av = areas.to_vec::<f32>()?;
 
     for (idx, &v) in vv.iter().enumerate() {
         if !(v.is_finite() && (v == 0.0 || v == 1.0 || v == 2.0)) {
@@ -274,6 +276,9 @@ fn oks_op(
         }
     }
 
+    let labeled_mask: Vec<bool> =
+        if need_pred || need_gt { vv.iter().map(|&v| v > 0.0).collect() } else { Vec::new() };
+
     match reduction {
         LossReduction::None => {
             let out: Vec<f32> = per_inst.iter().map(|&v| v as f32).collect();
@@ -282,14 +287,18 @@ fn oks_op(
                 let g_out = g.to_vec::<f32>()?;
                 let gp = if need_pred {
                     let mut out_g = vec![0.0f32; n * k * 2];
-                    for i in 0..n {
-                        let gi = g_out[i] as f64;
+                    for (i, &g_val) in g_out.iter().enumerate().take(n) {
+                        let gi = g_val as f64;
                         for j in 0..k {
-                            let d = grads_p[i * k + j];
+                            let flat = i * k + j;
+                            if !labeled_mask[flat] {
+                                continue;
+                            }
+                            let d = grads_p[flat];
                             if gi == 0.0 && d[0].is_finite() && d[1].is_finite() {
                                 continue;
                             }
-                            let idx2 = (i * k + j) * 2;
+                            let idx2 = flat * 2;
                             out_g[idx2] = (gi * d[0]) as f32;
                             out_g[idx2 + 1] = (gi * d[1]) as f32;
                         }
@@ -300,14 +309,18 @@ fn oks_op(
                 };
                 let gg = if need_gt {
                     let mut out_g = vec![0.0f32; n * k * 2];
-                    for i in 0..n {
-                        let gi = g_out[i] as f64;
+                    for (i, &g_val) in g_out.iter().enumerate().take(n) {
+                        let gi = g_val as f64;
                         for j in 0..k {
-                            let d = grads_p[i * k + j];
+                            let flat = i * k + j;
+                            if !labeled_mask[flat] {
+                                continue;
+                            }
+                            let d = grads_p[flat];
                             if gi == 0.0 && d[0].is_finite() && d[1].is_finite() {
                                 continue;
                             }
-                            let idx2 = (i * k + j) * 2;
+                            let idx2 = flat * 2;
                             out_g[idx2] = (-gi * d[0]) as f32;
                             out_g[idx2 + 1] = (-gi * d[1]) as f32;
                         }
@@ -339,6 +352,9 @@ fn oks_op(
                     let mut out_g = vec![0.0f32; n * k * 2];
                     if scale != 0.0 {
                         for idx in 0..(n * k) {
+                            if !labeled_mask[idx] {
+                                continue;
+                            }
                             let d = grads_p[idx];
                             if gs == 0.0 && d[0].is_finite() && d[1].is_finite() {
                                 continue;
@@ -355,6 +371,9 @@ fn oks_op(
                     let mut out_g = vec![0.0f32; n * k * 2];
                     if scale != 0.0 {
                         for idx in 0..(n * k) {
+                            if !labeled_mask[idx] {
+                                continue;
+                            }
                             let d = grads_p[idx];
                             if gs == 0.0 && d[0].is_finite() && d[1].is_finite() {
                                 continue;

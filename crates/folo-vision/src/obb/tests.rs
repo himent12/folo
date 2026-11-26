@@ -122,10 +122,12 @@ fn obb_axis_aligned_parity_collinear_degenerate_and_extreme_scales() {
     let shifted_sq = [[1e9, 1e9], [1e9 + 1.0, 1e9], [1e9 + 1.0, 1e9 + 1.0], [1e9, 1e9 + 1.0]];
     assert!((convex_polygon_area_f64(&shifted_sq) - 1.0).abs() < 1e-12);
 
-    // Touching-edge squares yield empty intersection polygon (not repeated collinear vertices).
+    // Touching-edge squares and zero-area (coincident/collinear) clippers yield empty intersection.
     let sq_left = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
     let sq_right = [[1.0, 0.0], [2.0, 0.0], [2.0, 1.0], [1.0, 1.0]];
     assert!(clip_convex_polygon_f64(&sq_left, &sq_right).is_empty());
+    assert!(clip_convex_polygon_f64(&sq_left, &[[0.5, 0.5]; 3]).is_empty());
+    assert!(clip_convex_polygon_f64(&sq_left, &[[0.0, 0.5], [0.5, 0.5], [1.0, 0.5]]).is_empty());
 
     // Negative iou_thr suppresses even disjoint boxes consistently (AABB skip disabled when iou_thr < 0).
     let dis_a = Obb::new(0.0, 0.0, 2.0, 2.0, 0.0);
