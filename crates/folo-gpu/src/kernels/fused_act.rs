@@ -229,9 +229,23 @@ fn gen_bias_residual_act(spec: &Spec) -> String {
     let mode = spec.get_u32("MODE", 2);
     let has_bias = spec.get_bool("HAS_BIAS");
     let res_mode = spec.get_u32("RES_MODE", 0);
+    let x_f32 = spec.get_bool("X_F32");
     let vec = mode != 2;
     let half = spec.is_f16();
     let pre = if half { vec_prelude_f16(vec) } else { vec_prelude(vec) };
+    let x_ty = match (vec, half && !x_f32) {
+        (true, true) => "vec4<f16>",
+        (true, false) => "vec4<f32>",
+        (false, true) => "f16",
+        (false, false) => "f32",
+    };
+    let x_load = if x_f32 && !vec {
+        "vec4<f32>(X[i])"
+    } else if x_f32 {
+        "X[i]"
+    } else {
+        "V4(X[i])"
+    };
     let bias_ty = match (mode == 1, half) {
         (true, true) => "vec4<f16>",
         (true, false) => "vec4<f32>",
@@ -249,7 +263,7 @@ fn gen_bias_residual_act(spec: &Spec) -> String {
     let post_res = if res_mode == 2 { "    v = fma(V4(RES[i]), vec4<f32>(pf(3u)), v);\n" } else { "" };
     format!(
         "{pre}{ACT_HELPERS}\n\
-         @group(0) @binding(1) var<storage, read> X: array<E>;\n\
+         @group(0) @binding(1) var<storage, read> X: array<{x_ty}>;\n\
          @group(0) @binding(2) var<storage, read> BIAS: array<{bias_ty}>;\n\
          @group(0) @binding(3) var<storage, read> RES: array<E>;\n\
          @group(0) @binding(4) var<storage, read_write> Y: array<E>;\n\
@@ -258,7 +272,7 @@ fn gen_bias_residual_act(spec: &Spec) -> String {
                  @builtin(local_invocation_index) lid: u32) {{\n\
              let i = linear_id(wid, nwg, lid, 256u);\n\
              if (i >= pu(0u)) {{ return; }}\n\
-             var v = V4(X[i]);\n\
+             var v = {x_load};\n\
          {bias_add}\
          {pre_res}\
              v = apply_fused_act4(ACT, v);\n\
@@ -460,7 +474,7 @@ pub fn bias_add_silu(
 ///
 /// Computes `y[i] = act(x[i] + bias[c] + beta * res[i])` when `ResidualMode::PreAct`,
 /// `y[i] = act(x[i] + bias[c]) + beta * res[i]` when `ResidualMode::PostAct`, or `y[i] = act(x[i] + bias[c])`
-/// when `residual` is `None` (where `c = (i / inner) % channels`).
+/// when `residual` is `None` (where `c = (i / inner) % channels`). `y` must not alias `x`, `bias`, or `residual`.
 #[allow(clippy::too_many_arguments)]
 pub fn bias_residual_act(
     ctx: &GpuContext,
@@ -474,8 +488,44 @@ pub fn bias_residual_act(
     act: FusedAct,
     dtype: DType,
 ) -> Result<()> {
+    bias_residual_act_impl(ctx, x, bias, residual, y, n, channels, inner, act, dtype, false)
+}
+
+/// [`bias_residual_act`] reading `x` as `F32` while `bias`, `residual`, and `y` use `dtype` (keeps full
+/// `F32` intermediate precision for `F16` depthwise conv epilogues).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bias_residual_act_from_f32(
+    ctx: &GpuContext,
+    x: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    residual: Option<(&wgpu::Buffer, f32, ResidualMode)>,
+    y: &wgpu::Buffer,
+    n: usize,
+    channels: usize,
+    inner: usize,
+    act: FusedAct,
+    dtype: DType,
+) -> Result<()> {
+    bias_residual_act_impl(ctx, x, bias, residual, y, n, channels, inner, act, dtype, dtype == DType::F16)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bias_residual_act_impl(
+    ctx: &GpuContext,
+    x: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    residual: Option<(&wgpu::Buffer, f32, ResidualMode)>,
+    y: &wgpu::Buffer,
+    n: usize,
+    channels: usize,
+    inner: usize,
+    act: FusedAct,
+    dtype: DType,
+    x_f32: bool,
+) -> Result<()> {
     check_dtype(ctx, dtype, "bias_residual_act")?;
-    check_buf(x, n, dtype, "bias_residual_act x")?;
+    let x_dtype = if x_f32 { DType::F32 } else { dtype };
+    check_buf(x, n, x_dtype, "bias_residual_act x")?;
     check_buf(y, n, dtype, "bias_residual_act y")?;
     if let Some(b) = bias {
         if channels == 0 || inner == 0 {
@@ -483,7 +533,8 @@ pub fn bias_residual_act(
         }
         check_buf(b, channels, dtype, "bias_residual_act bias")?;
     }
-    let (res_buf, beta, res_mode) = match residual.filter(|(_, _, m)| *m != ResidualMode::None) {
+    let active_res = residual.filter(|(_, _, m)| *m != ResidualMode::None);
+    let (res_buf, beta, res_mode) = match active_res {
         Some((rb, b, m)) => {
             check_buf(rb, n, dtype, "bias_residual_act residual")?;
             (rb, b, m)
@@ -492,6 +543,9 @@ pub fn bias_residual_act(
     };
     if n == 0 {
         return Ok(());
+    }
+    if std::iter::once(x).chain(bias).chain(active_res.map(|(rb, _, _)| rb)).any(|buf| buf == y) {
+        return Err(shape_err("bias_residual_act: output buffer must not alias x, bias, or residual"));
     }
     let (mode, units, p1, p2) = match bias {
         None if n.is_multiple_of(4) => (0u32, n / 4, 1usize, 1usize),
@@ -512,6 +566,7 @@ pub fn bias_residual_act(
             .u32("ACT", act.code())
             .u32("RES_MODE", res_mode.code())
             .bool("HAS_BIAS", bias.is_some())
+            .bool("X_F32", x_f32)
             .f16(dtype == DType::F16),
     )?;
     let p = Params::new().uz(units)?.uz(p1)?.uz(p2)?.f(beta);

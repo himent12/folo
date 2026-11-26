@@ -63,7 +63,7 @@ impl Q8MatmulDesc {
 /// Packs row-major `[n, k]` signed `i8` weights into `[n, ceil(k / 4)]` little-endian `u32` words.
 /// Trailing padding lanes in the final word of each row are set to `0`.
 pub fn pack_i8_weights(weights: &[i8], n: usize, k: usize) -> Vec<u32> {
-    assert_eq!(weights.len(), n * k, "pack_i8_weights: length mismatch");
+    assert_eq!(n.checked_mul(k), Some(weights.len()), "pack_i8_weights: length mismatch");
     let kp = k.div_ceil(4);
     let mut out = vec![0u32; n * kp];
     for row in 0..n {
@@ -228,6 +228,17 @@ fn gen_q8_gemv(spec: &Spec) -> String {
     let sg = spec.is_subgroups();
     let scale_expr =
         if grouped { "SCALES[out_n * num_groups + (kw / group_words)]" } else { "SCALES[out_n]" };
+    let (entry_sig, lane_setup) = if sg {
+        (
+            "fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(subgroup_id) row_in_wg: u32, @builtin(subgroup_invocation_id) lane: u32)",
+            "",
+        )
+    } else {
+        (
+            "fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32)",
+            "    let lane = lid & 31u;\n    let row_in_wg = lid >> 5u;\n",
+        )
+    };
     let reduce_code = if sg {
         "let total = subgroupAdd(acc);\n    if (lane == 0u && valid) {\n"
     } else {
@@ -248,13 +259,12 @@ fn gen_q8_gemv(spec: &Spec) -> String {
          @group(0) @binding(5) var<storage, read_write> Y: array<T>;\n\
          {sh_decl}\
          @compute @workgroup_size(256)\n\
-         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {{\n\
+         {entry_sig} {{\n\
              let N = pu(0u); let K = pu(1u); let kp = pu(2u);\n\
              let num_groups = pu(3u); let group_words = pu(4u);\n\
              let act_alpha = pf(5u);\n\
              let batch = wid.z;\n\
-             let lane = lid & 31u;\n\
-             let row_in_wg = lid >> 5u;\n\
+         {lane_setup}\
              let out_n = wid.x * 8u + row_in_wg;\n\
              let valid = out_n < N;\n\
              var acc = 0.0;\n\
@@ -268,7 +278,10 @@ fn gen_q8_gemv(spec: &Spec) -> String {
                      if (k0 + 1u < K) {{ av.y = f32(A[offA + k0 + 1u]); }}\n\
                      if (k0 + 2u < K) {{ av.z = f32(A[offA + k0 + 2u]); }}\n\
                      if (k0 + 3u < K) {{ av.w = f32(A[offA + k0 + 3u]); }}\n\
-                     let dq = unpack_s8x4(W[wbase + kw]) * {scale_expr};\n\
+                     var dq = unpack_s8x4(W[wbase + kw]) * {scale_expr};\n\
+                     if (k0 + 1u >= K) {{ dq.y = 0.0; }}\n\
+                     if (k0 + 2u >= K) {{ dq.z = 0.0; }}\n\
+                     if (k0 + 3u >= K) {{ dq.w = 0.0; }}\n\
                      acc += dot(av, dq);\n\
                  }}\n\
              }}\n\

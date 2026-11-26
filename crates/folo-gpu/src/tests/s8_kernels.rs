@@ -141,7 +141,7 @@ fn gemm_and_conv2d_fused_epilogues_match_cpu() {
         }
     }
 
-    // Empty M = 0 no-op.
+    // Empty M = 0 no-op, strided residual (mismatched VEC_C / VEC_R), and output-aliasing rejection.
     {
         let d = GemmDesc::new(0, 8, 8, false, false, 1);
         let rdesc = ResidualDesc::packed(0, 8, 1.0, ResidualMode::PreAct);
@@ -156,6 +156,78 @@ fn gemm_and_conv2d_fused_epilogues_match_cpu() {
             None,
         )
         .unwrap();
+
+        // Strided residual: M=6, N=8 (VEC_C=true), ldr=10 (VEC_R=false), offset=1.
+        let (m, n, k, ldr, roff) = (6usize, 8usize, 8usize, 10usize, 1usize);
+        let a = rng.vec(m * k, -0.5, 0.5);
+        let b = rng.vec(k * n, -0.5, 0.5);
+        let res = rng.vec(roff + m * ldr, -0.5, 0.5);
+        let mut ds = GemmDesc::new(m, n, k, false, false, 1);
+        ds.act = UnaryOp::Silu;
+        let rs = ResidualDesc {
+            beta: 0.5,
+            mode: ResidualMode::PostAct,
+            ldr,
+            strides: BatchStrides { offset: roff, outer: 0, inner: 0 },
+        };
+        let mut want = vec![0.0f32; m * n];
+        for r in 0..m {
+            for c in 0..n {
+                let acc: f64 = (0..k).map(|kk| a[r * k + kk] as f64 * b[kk * n + c] as f64).sum();
+                want[r * n + c] = UnaryOp::Silu.apply(acc as f32) + 0.5 * res[roff + r * ldr + c];
+            }
+        }
+        let ga = GpuTensor::from_slice(&ctx, &a, &[a.len()]).unwrap();
+        let gb = GpuTensor::from_slice(&ctx, &b, &[b.len()]).unwrap();
+        let gr = GpuTensor::from_slice(&ctx, &res, &[res.len()]).unwrap();
+        let gc = GpuTensor::empty(&ctx, &[m * n], DType::F32).unwrap();
+        gemm_epilogue(&ctx, &ds, ga.raw(), gb.raw(), None, Some((gr.raw(), &rs)), gc.raw(), None).unwrap();
+        assert_close(&gc.to_vec().unwrap(), &want, 5e-5, 2e-5, "gemm_epilogue strided res");
+
+        // Output-residual aliasing must be rejected cleanly before dispatch.
+        assert!(
+            gemm_epilogue(
+                &ctx,
+                &ds,
+                ga.raw(),
+                gb.raw(),
+                None,
+                Some((gc.raw(), &ResidualDesc::packed(m, n, 1.0, ResidualMode::PreAct))),
+                gc.raw(),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            bias_residual_act(
+                &ctx,
+                gc.raw(),
+                None,
+                Some((gr.raw(), 1.0, ResidualMode::PreAct)),
+                gc.raw(),
+                m * n,
+                1,
+                1,
+                FusedAct::Silu,
+                DType::F32
+            )
+            .is_err()
+        );
+        assert!(
+            bias_residual_act(
+                &ctx,
+                ga.raw(),
+                None,
+                Some((gc.raw(), 1.0, ResidualMode::PreAct)),
+                gc.raw(),
+                m * n,
+                1,
+                1,
+                FusedAct::Silu,
+                DType::F32
+            )
+            .is_err()
+        );
     }
 
     // Single-dispatch trace check for gemm_epilogue and conv2d_epilogue (pointwise & implicit-GEMM).
@@ -270,6 +342,60 @@ fn gemm_and_conv2d_fused_epilogues_match_cpu() {
             1e-4,
             &format!("conv2d_epilogue {cin}->{cout} {kh}x{kw} g={groups} {res_mode:?} {act:?}"),
         );
+        // Output-residual aliasing rejected cleanly.
+        assert!(
+            conv2d_epilogue(
+                &ctx,
+                &d,
+                gx.raw(),
+                gw.raw(),
+                Some(gb.raw()),
+                Some((gy.raw(), beta, res_mode)),
+                gy.raw(),
+            )
+            .is_err()
+        );
+    }
+
+    // Depthwise F16 single-rounding check: large raw conv sum (~70000, exceeds F16 max 65504) cancelled by
+    // residual (`-70000`) stays finite (~1.0), proving F32 intermediate storage before bias/residual/act.
+    if ctx.caps().shader_f16 {
+        let d = Conv2dDesc {
+            n: 1,
+            c_in: 4,
+            h: 4,
+            w: 4,
+            c_out: 4,
+            groups: 4,
+            win: Window2d::square(3, 1, 1),
+            act: UnaryOp::Identity,
+            dtype: DType::F16,
+        };
+        // Center pixels (1..3, 1..3) see 9 taps of 100 * 80 = 72000 (> F16 max 65504); bias=-36000,
+        // res=-35968 (exact in F16, ULP=32 at 2^15) -> +32.0 (would be +Inf if intermediate rounded to F16).
+        let x = vec![100.0f32; 4 * 4 * 4];
+        let wt = vec![80.0f32; 4 * 9];
+        let bias = vec![-36000.0f32; 4];
+        let res = vec![-35968.0f32; 4 * 4 * 4];
+        let gx = upload_dt(&ctx, &x, DType::F16);
+        let gw = upload_dt(&ctx, &wt, DType::F16);
+        let gb = upload_dt(&ctx, &bias, DType::F16);
+        let gr = upload_dt(&ctx, &res, DType::F16);
+        let gy = GpuTensor::empty(&ctx, &[4 * 4 * 4], DType::F16).unwrap();
+        conv2d_epilogue(
+            &ctx,
+            &d,
+            gx.raw(),
+            gw.raw(),
+            Some(gb.raw()),
+            Some((gr.raw(), 1.0, ResidualMode::PreAct)),
+            gy.raw(),
+        )
+        .unwrap();
+        let got = gy.to_vec().unwrap();
+        assert!(got.iter().all(|v| v.is_finite()), "depthwise f16 epilogue overflowed intermediate: {got:?}");
+        // Interior pixel (1, 1) of channel 0 has all 9 taps: 9*8000 - 36000 - 35968 = 32.0.
+        assert!((got[5] - 32.0).abs() < 1e-3, "depthwise f16 interior got {}", got[5]);
     }
 
     // 3. Standalone bias_residual_act (NCHW vec4, linear vec4, odd scalar; Silu/Gelu/Relu/Identity; F32 & F16).

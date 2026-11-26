@@ -259,8 +259,9 @@ fn gemm_impl(
 /// [`gemm`] with an optional fused residual epilogue (`C = act(alpha * A * B + bias + beta * res)` for
 /// [`ResidualMode::PreAct`], or `C = act(alpha * A * B + bias) + beta * res` for [`ResidualMode::PostAct`]).
 ///
-/// Runs in a single WGSL compute dispatch with zero intermediate global-memory round-trips. When `residual`
-/// is `None` or has [`ResidualMode::None`], delegates directly to [`gemm`] / [`gemm_with_config`].
+/// Runs in a single WGSL compute dispatch with zero intermediate global-memory round-trips. `c` must not alias
+/// `a`, `b`, `bias`, or `residual`. When `residual` is `None` or has [`ResidualMode::None`], delegates directly
+/// to [`gemm`] / [`gemm_with_config`].
 #[allow(clippy::too_many_arguments)]
 pub fn gemm_epilogue(
     ctx: &GpuContext,
@@ -289,6 +290,11 @@ pub fn gemm_epilogue(
     }
     if d.m == 0 || d.n == 0 || d.batch.0 == 0 {
         return Ok(());
+    }
+    if [a, b, res_buf].into_iter().chain(bias).any(|buf| buf == c) {
+        return Err(shape_err(
+            "gemm_epilogue: output buffer must not alias an input, bias, or residual buffer",
+        ));
     }
     check_buf(a, extent(&d.a, d.batch, ar, ac, d.lda)?, d.dtype, "gemm_epilogue A")?;
     check_buf(b, extent(&d.b, d.batch, br, bc, d.ldb)?, d.dtype, "gemm_epilogue B")?;

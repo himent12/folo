@@ -7,7 +7,7 @@ use super::{Conv2dDesc, conv_spec, split};
 use crate::context::GpuContext;
 use crate::error::Result;
 use crate::error::shape_err;
-use crate::kernels::fused_act::{FusedAct, bias_residual_act};
+use crate::kernels::fused_act::{FusedAct, bias_residual_act_from_f32};
 use crate::kernels::gemm::{
     self, GEMM, GEMM_EPILOGUE, GemmBias, ResidualDesc, ResidualMode, TileConfig, base_spec, check_dtype,
     gemm_params,
@@ -307,7 +307,9 @@ pub fn conv2d_cat(
 ///
 /// For pointwise 1×1 and general implicit-GEMM convolutions, fuses bias, residual add, and activation into a
 /// single WGSL compute dispatch with zero intermediate global-memory round-trips. For depthwise convolutions
-/// with a residual, supports `Identity`, `Silu`, `Gelu`, and `Relu` via [`bias_residual_act`].
+/// with a residual, keeps full `F32` intermediate accumulation before applying bias, residual, and activation
+/// (`Identity`, `Silu`, `Gelu`, or `Relu`) so `F16` outputs are rounded only once. `y` must not alias `x`,
+/// `weight`, `bias`, or `residual`.
 #[allow(clippy::too_many_arguments)]
 pub fn conv2d_epilogue(
     ctx: &GpuContext,
@@ -322,12 +324,18 @@ pub fn conv2d_epilogue(
         return conv2d(ctx, d, x, weight, bias, y);
     };
     check_dtype(ctx, d.dtype, "conv2d_epilogue")?;
-    let dense = (x, 0, d.c_in * d.h * d.w);
+    let image = prod(&[d.c_in, d.h, d.w])?;
+    let dense = (x, 0, image);
     let (oh, ow) = d.check_input_buffers(dense, weight, bias, y)?;
     let out_elems = prod(&[d.n, d.c_out, oh, ow])?;
     super::check_buf(res_buf, out_elems, d.dtype, "conv2d_epilogue residual")?;
     if out_elems == 0 {
         return Ok((oh, ow));
+    }
+    if [x, weight, res_buf].into_iter().chain(bias).any(|buf| buf == y) {
+        return Err(shape_err(
+            "conv2d_epilogue: output buffer must not alias input, weight, bias, or residual",
+        ));
     }
 
     if d.is_depthwise() {
@@ -342,11 +350,53 @@ pub fn conv2d_epilogue(
                 ));
             }
         };
-        let mut raw_desc = d.clone();
-        raw_desc.act = UnaryOp::Identity;
-        let tmp = ctx.alloc(d.dtype.bytes(out_elems))?;
-        conv2d(ctx, &raw_desc, x, weight, None, tmp.raw())?;
-        bias_residual_act(
+        let (kh, kw) = d.win.kernel;
+        let vec4_out = ow.is_multiple_of(4);
+        let tiled = d.win.stride == (1, 1)
+            && d.win.dilation == (1, 1)
+            && (DW_TILED_MIN_K as usize..=DW_TILED_MAX_K as usize).contains(&kh)
+            && (DW_TILED_MIN_K as usize..=DW_TILED_MAX_K as usize).contains(&kw)
+            && oh >= 4
+            && ow >= 4;
+        let tmp = ctx.alloc(DType::F32.bytes(out_elems))?;
+        let spec = d
+            .win
+            .spec()
+            .u32("MULT", (d.c_out / d.c_in) as u32)
+            .bool("HAS_BIAS", false)
+            .u32("ACT", UnaryOp::Identity.code())
+            .bool("TILED", tiled)
+            .bool("VEC4_OUT", vec4_out)
+            .bool("OUT_F32", d.dtype == DType::F16)
+            .f16(d.dtype == DType::F16);
+        let k = ctx.kernel(&DEPTHWISE, spec)?;
+        if tiled {
+            let tiles_x = ow.div_ceil(DW_TILE_W as usize);
+            let tiles_y = oh.div_ceil(DW_TILE_H as usize);
+            let total_tiles = prod(&[d.n, d.c_out, tiles_y, tiles_x])?;
+            let p = Params::new()
+                .uz(total_tiles)?
+                .uz(d.h)?
+                .uz(d.w)?
+                .uz(oh)?
+                .uz(ow)?
+                .uz(d.c_out)?
+                .f(0.0)
+                .uz(tiles_x)?
+                .uz(tiles_y)?;
+            ctx.dispatch(
+                &k,
+                &[x, weight, ctx.dummy(), tmp.raw()],
+                &p,
+                ctx.grid_1d(total_tiles as u64 * 64, 64)?,
+            )?;
+        } else {
+            let qw = ow.div_ceil(DW_VX as usize);
+            let total = prod(&[d.n, d.c_out, oh, qw])?;
+            let p = Params::new().uz(total)?.uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?.uz(d.c_out)?.f(0.0).uz(qw)?;
+            ctx.dispatch(&k, &[x, weight, ctx.dummy(), tmp.raw()], &p, ctx.grid_1d(total as u64, 256)?)?;
+        }
+        bias_residual_act_from_f32(
             ctx,
             tmp.raw(),
             bias,
