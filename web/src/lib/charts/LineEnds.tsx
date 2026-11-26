@@ -2,7 +2,7 @@
  * What sits at the lines' ends, inside the chart's SVG: each line's end mark (a dot, or how the run ended), the
  * direct labels with their leaders, and the best markers (the hollow ring, its pulse and its focus brackets).
  */
-import { css, For, Key } from 'fw';
+import { computed, css, For, Key } from 'fw';
 import type { Placed } from './endLabels';
 import { MORE_ID } from './endLabels';
 import { endMarkInk, LIVE_GROW } from './endMarks';
@@ -89,13 +89,8 @@ export default function LineEnds(props: LineEndsProps) {
                     ) : s().end === 'stopped' ? (
                       <rect class="end-dot" x={px() - r()} y={py() - r()} width={2 * r()} height={2 * r()} style:fill={ink()} />
                     ) : s().end === 'live' ? (
-                      <>
-                        {/* Still training: a filled lime dot with the heartbeat, StatusBadge's running mark. */}
-                        <g class="end-beat-wrap" transform={`translate(${px()},${py()})`}>
-                          <circle class="end-beat" r={r() + LIVE_GROW} />
-                        </g>
-                        <circle class="end-dot end-live" cx={px()} cy={py()} r={r() + LIVE_GROW} style:fill={endMarkInk(s().end, ink())} />
-                      </>
+                      /* Still training: a filled lime dot (its heartbeat ring is rendered by LineLiveBeats in an HTML layer). */
+                      <circle class="end-dot end-live" cx={px()} cy={py()} r={r() + LIVE_GROW} style:fill={endMarkInk(s().end, ink())} />
                     ) : (
                       <circle class="end-dot" cx={px()} cy={py()} r={r()} style:fill={ink()} />
                     )}
@@ -178,6 +173,67 @@ export default function LineEnds(props: LineEndsProps) {
   );
 }
 
+export interface LineLiveBeatsProps {
+  endDots: boolean;
+  keyed: Series[];
+  receding: boolean;
+  highlight: string | null;
+  x: (v: number) => number;
+  y: (v: number) => number;
+  width: number;
+  height: number;
+}
+
+/**
+ * Compositor-only HTML overlay for live end-mark heartbeat rings (#309): Chromium does not promote SVG child shapes to
+ * compositor layers, so animating an SVG `<circle>` triggered main-thread SVG layouts every frame. Rendering the ring
+ * in an `aria-hidden` HTML layer over `.plot` keeps the exact same visual ring purely on the compositor.
+ */
+export function LineLiveBeats(props: LineLiveBeatsProps) {
+  const live = computed(() => (props.endDots ? props.keyed.filter((s) => s.end === 'live') : []));
+  return (
+    <>
+      {live.get().length > 0 ? (
+        <div class="end-beat-layer" aria-hidden="true">
+          <For each={live.get()} key={(s) => s.id}>
+            {(s) => {
+              const p = () => s().points[s().points.length - 1];
+              const r = () => (props.receding && s().id === props.highlight ? 4 : 3) + LIVE_GROW;
+              const px = () => props.x(p()!.x);
+              const py = () => props.y(p()!.y);
+              // Match SVG `<circle r={r} stroke-width="1.5">` outer diameter (2r + 1.5 px).
+              const d = () => 2 * r() + 1.5;
+              return (
+                <>
+                  {p() &&
+                  Number.isFinite(p()!.x) &&
+                  Number.isFinite(p()!.y) &&
+                  Number.isFinite(px()) &&
+                  Number.isFinite(py()) &&
+                  px() >= 0 &&
+                  px() <= props.width &&
+                  py() >= 0 &&
+                  py() <= props.height ? (
+                    <span class="end-beat-wrap" style:transform={`translate(${px()}px, ${py()}px)`}>
+                      <span
+                        class="end-beat"
+                        style:width={`${d()}px`}
+                        style:height={`${d()}px`}
+                        style:margin-left={`${-d() / 2}px`}
+                        style:margin-top={`${-d() / 2}px`}
+                      />
+                    </span>
+                  ) : null}
+                </>
+              );
+            }}
+          </For>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 css`
   .end-dot {
     stroke: var(--plot-bg, var(--bg-panel));
@@ -190,15 +246,28 @@ css`
     stroke-linecap: round;
     filter: drop-shadow(0 0 1px var(--plot-bg, var(--bg-panel)));
   }
-  /* Still training: a filled lime dot (style:fill) whose heartbeat, a ring every 2.4 s, is StatusBadge's pulse drawn in
-     SVG; off under reduced motion, where the dot still says "now". Centered at the wrapper group's origin so the pulse
-     scales without \`transform-box: fill-box\` bbox queries. */
+  /* Still training: a filled lime dot whose heartbeat, a ring every 2.4 s, is StatusBadge's pulse drawn in an HTML
+     overlay layer over .plot so Chromium composites transform + opacity without per-frame SVG layouts; off under
+     reduced motion, where the dot still says "now". */
+  .end-beat-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+  .end-beat-wrap {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+  }
   .end-beat {
-    fill: none;
-    stroke: var(--accent-line);
-    stroke-width: 1.5;
+    display: block;
+    box-sizing: border-box;
+    border-radius: 50%;
+    border: 1.5px solid var(--accent-line);
     opacity: 0;
-    transform-origin: 0 0;
     will-change: transform, opacity;
     animation: end-beat 2.4s var(--ease-out) infinite;
   }
@@ -214,6 +283,7 @@ css`
     }
   }
   @media (prefers-reduced-motion: reduce) {
+    .end-beat-layer,
     .end-beat {
       display: none;
       animation: none;

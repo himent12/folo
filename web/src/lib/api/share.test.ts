@@ -199,6 +199,23 @@ describe('pollTogether', () => {
     stopB();
     expect(vi.getTimerCount()).toBe(0);
   });
+
+  it('arms a new group directly on setInterval without re-reading Date.now() (prevents 1ms wall-clock flake)', () => {
+    vi.useRealTimers();
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    let tickNow = 1_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => tickNow++);
+    try {
+      const a = vi.fn();
+      const stop = pollTogether(30_000, a);
+      expect(nowSpy).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(30_000);
+      expect(a).toHaveBeenCalledTimes(1);
+      stop();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
 });
 
 describe('reuse', () => {

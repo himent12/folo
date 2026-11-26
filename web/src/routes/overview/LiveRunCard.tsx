@@ -56,7 +56,8 @@ export default function LiveRunCard(props: LiveRunCardProps) {
   const scores = computed(() => (props.dataset === undefined ? null : scoresTitle(runEvalSource(props.dataset))));
 
   const runId = computed(() => props.run.id);
-  const live = new LiveRun(() => runId.get());
+  // Overview's live card does not show run logs: skip the `/logs` requests and log buffering (#309).
+  const live = new LiveRun(() => runId.get(), { logs: false });
   const run = computed(() => live.run ?? props.run);
   // The stream went quiet: what the card shows is the last known state, as of then. The status says so, the estimate
   // is qualified and the live marks (the badge's heartbeat, the line's lime end, the lime rail) stop (DESIGN_DIRECTION

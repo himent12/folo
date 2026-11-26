@@ -432,23 +432,28 @@ describe('LineChart end labels and marks', () => {
     unmount(c);
   });
 
-  it('positions the live heartbeat ring via a translated wrapper group without transform-box fill-box bbox queries', () => {
+  it('renders the live heartbeat ring in a compositor-only HTML overlay without SVG animation layout', () => {
     const series = [{ id: 'live', label: 'mAP50-95', color: 'ink', end: 'live' as const, points: pts((x) => x / 30) }];
     const { target, c } = mountAt({ series, label: 'live', endDots: true });
-    const wrap = target.querySelector('g.end-beat-wrap');
-    const beat = wrap?.querySelector('circle.end-beat');
+    // No SVG `<circle class="end-beat">` (Chromium cannot composite SVG child transforms and triggers layout every frame).
+    expect(target.querySelector('svg .end-beat')).toBeNull();
+    const layer = target.querySelector<HTMLElement>('.plot > .end-beat-layer');
+    const wrap = layer?.querySelector<HTMLElement>('span.end-beat-wrap');
+    const beat = wrap?.querySelector<HTMLElement>('span.end-beat');
     const dot = target.querySelector('circle.end-dot.end-live');
-    expect(wrap?.getAttribute('transform')).toMatch(/^translate\([^,]+,[^)]+\)$/);
+    expect(layer?.getAttribute('aria-hidden')).toBe('true');
+    expect(wrap).toBeTruthy();
     expect(beat).toBeTruthy();
-    expect(beat?.getAttribute('cx')).toBeNull();
-    expect(beat?.getAttribute('cy')).toBeNull();
     expect(dot).toBeTruthy();
-    expect(wrap?.getAttribute('transform')).toBe(`translate(${dot?.getAttribute('cx')},${dot?.getAttribute('cy')})`);
+    expect(wrap?.style.transform).toBe(`translate(${dot?.getAttribute('cx')}px, ${dot?.getAttribute('cy')}px)`);
+    expect(beat?.style.width).toBe('9.5px');
+    expect(beat?.style.height).toBe('9.5px');
 
     const cssText = readFileSync(resolve(import.meta.dirname, 'LineEnds.tsx'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
     expect(cssText).not.toContain('transform-box: fill-box');
-    expect(cssText).toContain('transform-origin: 0 0;');
+    expect(cssText).toContain('.end-beat-layer');
     expect(cssText).toContain('will-change: transform, opacity;');
+    expect(cssText).toContain('pointer-events: none;');
     unmount(c);
   });
 

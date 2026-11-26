@@ -173,7 +173,7 @@ describe('CloudPanel', () => {
   });
 
   it('says when the ledger cannot be read, and reads it again until it can', async () => {
-    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
     const answer = vi.spyOn(hub.api, 'cloudInstances').mockRejectedValue(new Error('down'));
     c = mount(CloudPanel, { target, props: { cloud: state({ phase: 'released', progress: null, ended_in: 'collecting' }), provider: 'RunPod', run: { status: 'completed' } } });
     const note = await until(() => target.querySelector('#cloud .warn-line'), 'the note');

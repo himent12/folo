@@ -22,7 +22,7 @@ import { textMeasurer } from './textWidth';
 import type { Future, Marker, Series, XMark } from './lineSeries';
 import ChartLegend from './ChartLegend';
 import ChartTooltip from './ChartTooltip';
-import LineEnds from './LineEnds';
+import LineEnds, { LineLiveBeats } from './LineEnds';
 
 export type { Future, Marker, Series, XMark };
 
@@ -772,6 +772,19 @@ export default function LineChart(props: LineChartProps) {
                 </>
               ) : null}
             </svg>
+
+            {hasData.get() ? (
+              <LineLiveBeats
+                endDots={p.endDots}
+                keyed={keyed.get()}
+                receding={receding.get()}
+                highlight={p.highlight}
+                x={x.get()}
+                y={y.get()}
+                width={width.get()}
+                height={p.height}
+              />
+            ) : null}
 
             {!hasData.get() ? (
               <p class="empty">
