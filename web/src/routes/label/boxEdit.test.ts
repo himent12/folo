@@ -142,4 +142,27 @@ describe('the keyboard: Add box, arrows and Alt+arrows', () => {
     expect(stretch(b, 1000, 1000, W, H)).toEqual(box(100, 100, W, H));
     expect(stretch(b, -1000, -1000, W, H)).toEqual(box(100, 100, 100 + MIN_SIDE, 100 + MIN_SIDE));
   });
+
+  it('guards degenerate image dimensions and oversized/inverted boxes during fit, move, nudge, stretch, and newBox', () => {
+    expect(fit(0, 480, 320, 240)).toEqual({ s: 0, ox: 0, oy: 0 });
+    expect(fit(640, -1, 320, 240)).toEqual({ s: 0, ox: 0, oy: 0 });
+    expect(toImage({ s: 0, ox: 10, oy: 20 }, 100, 100)).toEqual([0, 0]);
+
+    // Oversized / inverted boxes stay strictly inside [0, W] x [0, H] on move and nudge.
+    const oversized = box(700, -20, -10, 600, 2);
+    const moved = dragTo({ grip: { kind: 'move', index: 0 }, from: [50, 50], start: oversized, cls: 2 }, 120, 80, W, H);
+    expect(moved).toEqual(box(0, 0, W, H, 2));
+    expect(nudge(oversized, 15, -15, W, H)).toEqual(box(0, 0, W, H, 2));
+
+    // Stretch keeps x2 >= x1 and y2 >= y1 even when x1 starts past the image right edge.
+    const stretched = stretch(box(W + 10, H + 5, W + 20, H + 15), -5, -5, W, H);
+    expect(stretched.x1).toBe(W);
+    expect(stretched.x2).toBe(W);
+    expect(stretched.y1).toBe(H);
+    expect(stretched.y2).toBe(H);
+
+    // Sub-MIN_SIDE image (1x1) produces a non-negative in-bounds box.
+    const tiny = newBox(1, 1, 0);
+    expect(tiny).toEqual(box(0, 0, 1, 1, 0));
+  });
 });

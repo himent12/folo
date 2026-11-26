@@ -65,8 +65,16 @@ export default function EditCanvas(props: EditCanvasProps) {
   });
   onCleanup(cancelDrag);
   onWindow('blur', cancelDrag);
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key !== 'Escape' || !drag.peek()) return;
+    cancelDrag();
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  window.addEventListener('keydown', onKeyDown, { capture: true });
+  onCleanup(() => window.removeEventListener('keydown', onKeyDown, { capture: true }));
 
-  const place = computed(() => (cw.get() && ch.get() ? fit(props.img.width, props.img.height, cw.get(), ch.get()) : null));
+  const place = computed(() => (cw.get() > 0 && ch.get() > 0 && props.img.width > 0 && props.img.height > 0 ? fit(props.img.width, props.img.height, cw.get(), ch.get()) : null));
   effect(() => {
     scale.set(place.get()?.s ?? 0);
   });

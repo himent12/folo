@@ -328,4 +328,61 @@ describe('XYChart', () => {
       view.unmount();
     }
   });
+
+  it('ignores non-finite points, whiskers, and strip values without emitting NaN in SVG attributes', () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const view = render(
+      () => (
+        <XYChart
+          label="Non-finite resilience"
+          series={[
+            {
+              id: 'a',
+              label: 'model A',
+              color: 'var(--chart-1)',
+              points: [
+                { x: Number.NaN, y: 0.2 },
+                { x: 0.2, y: Number.POSITIVE_INFINITY },
+                { x: 0.5, y: 0.6, lo: Number.NaN, hi: Number.POSITIVE_INFINITY },
+                { x: 0.8, y: 0.9, lo: 0.7, hi: 0.95 },
+              ],
+            },
+          ]}
+          stops={[Number.NaN, 0.5, Number.POSITIVE_INFINITY, 0.8]}
+          xDomain={[0, 1]}
+          yDomain={[0, 1]}
+          xTicks={[0, 0.5, 1]}
+          yTicks={[0, 0.5, 1]}
+          strip={{
+            items: [
+              { x0: 0.45, x1: 0.55, v: Number.NaN },
+              { x0: 0.55, x1: 0.65, v: -5 },
+              { x0: 0.75, x1: 0.85, v: 4 },
+            ],
+            unit: 'detections',
+          }}
+          readout={(cur) => <span class="out">{cur() ?? 'idle'}</span>}
+          table={{ caption: 'Non-finite', head: ['x', 'y'], rows: [['0.5', '0.6']] }}
+        />
+      ),
+      target,
+    );
+    try {
+      Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: 480 });
+      target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
+      flush();
+      const svg = target.querySelector<SVGSVGElement>('svg[aria-roledescription=chart]')!;
+      expect(svg.innerHTML).not.toContain('NaN');
+      expect(svg.innerHTML).not.toContain('Infinity');
+      // Only the finite whisker (at x=0.8) should be drawn.
+      expect(target.querySelectorAll('g.whisker')).toHaveLength(1);
+      // Keyboard navigation lands on the finite stops (0.5 and 0.8).
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      flush();
+      expect(target.querySelector('.out')!.textContent).toBe('0.5');
+    } finally {
+      view.unmount();
+    }
+  });
 });

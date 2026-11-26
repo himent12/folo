@@ -557,4 +557,22 @@ describe('Settings › Cloud', () => {
       vi.useRealTimers();
     }
   });
+
+  it('deduplicates stacked error banners when both providers and connections fail, and Retry refreshes both', async () => {
+    const api = new MockApi('normal', 0);
+    const realProv = api.cloudProviders.bind(api);
+    const realConn = api.cloudConnections.bind(api);
+    let fail = true;
+    api.cloudProviders = () => (fail ? Promise.reject(new ApiError(503, 'offline', 'server down')) : realProv());
+    api.cloudConnections = () => (fail ? Promise.reject(new ApiError(503, 'offline', 'server down')) : realConn());
+    open(api);
+
+    const err = await until(() => [...target.querySelectorAll('.state')].find((e) => text(e).includes('Could not load cloud settings')), 'deduplicated cloud error');
+    // Only one error banner inside the Connections panel (not two stacked).
+    expect(target.querySelectorAll('#cloud .state')).toHaveLength(1);
+    fail = false;
+    button(err, 'Retry')!.click();
+    await until(() => target.querySelectorAll('.cx-row .cx-name').length > 0, 'connections loaded after single retry');
+    expect(target.querySelector('#cloud .state')).toBeNull();
+  });
 });

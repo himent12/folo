@@ -62,13 +62,14 @@ export function Show<T>(props: ShowProps<T>): JSX.Element {
     let v: JSX.Element;
     let t: BranchTransitions = null;
     try {
-      v = untrack(() => {
-        if (!c) return props.fallback;
-        const ch = props.children;
-        return typeof ch === 'function' && !isReader(ch)
-          ? (ch as (v: () => unknown) => JSX.Element)(keyed ? () => c : () => value.get())
-          : (ch as JSX.Element);
-      });
+      if (!c) v = props.fallback;
+      else
+        v = untrack(() => {
+          const ch = props.children;
+          return typeof ch === 'function' && !isReader(ch)
+            ? (ch as (v: () => unknown) => JSX.Element)(keyed ? () => c : () => value.get())
+            : (ch as JSX.Element);
+        });
     } finally {
       t = exitBranch();
     }
@@ -112,6 +113,15 @@ function matchesShifted<T>(rows: readonly Row<T>[], keys: readonly unknown[], ro
   for (let i = rowFrom, j = keyFrom; i <= rowTo; i++, j++) {
     const k = rows[i]!.key;
     if (!sameKey(k, keys[j]) || sameKey(k, excluded)) return false;
+  }
+  return true;
+}
+
+/** Whether `rows[from..to]` matches `keys[from..to]` element-for-element with no key equal to `ex1` or `ex2`. */
+function matchesSame<T>(rows: readonly Row<T>[], keys: readonly unknown[], from: number, to: number, ex1: unknown, ex2: unknown): boolean {
+  for (let i = from; i <= to; i++) {
+    const k = rows[i]!.key;
+    if (!sameKey(k, keys[i]) || sameKey(k, ex1) || sameKey(k, ex2)) return false;
   }
   return true;
 }
@@ -165,18 +175,16 @@ export function For<T>(props: ForProps<T>): JSX.Element {
     const prevOwner = swapOwner(root);
     let value: JSX.Element;
     try {
-      enterBranch(ran, false);
-      let raw: JSX.Element;
-      try {
-        raw = props.fallback;
-      } finally {
-        exitBranch();
-      }
-      if (raw === undefined) {
-        dispose(root);
-        return null;
-      }
-      value = settle(raw);
+      value = memo(() => {
+        enterBranch(ran, false);
+        try {
+          return props.fallback;
+        } finally {
+          exitBranch();
+        }
+      });
+      // Eagerly surface a synchronous initial error (preserving throwing-fallback recovery semantics).
+      (value as Reader<JSX.Element>)();
     } catch (e) {
       try {
         dispose(root);
@@ -360,29 +368,33 @@ export function For<T>(props: ForProps<T>): JSX.Element {
       for (let j = 0; j < start; j++) next[j] = rows[j]!;
       let end = prevLen - 1;
       let newEnd = n - 1;
-      for (;;) {
-        while (start < min && start <= end && start <= newEnd && sameKey(rows[start]!.key, keys[start])) {
-          update((next[start] = rows[start]!), list[start]!, start);
-          start++;
-        }
-        while (end >= start && newEnd >= start && sameKey(rows[end]!.key, keys[newEnd])) {
-          update((next[newEnd] = rows[end]!), list[newEnd]!, newEnd);
-          end--;
-          newEnd--;
-        }
-        // The first and last rows swapped: match them directly.
-        if (end > start && newEnd > start && sameKey(rows[start]!.key, keys[newEnd]) && sameKey(rows[end]!.key, keys[start])) {
-          update((next[newEnd] = rows[start]!), list[newEnd]!, newEnd);
-          update((next[start] = rows[end]!), list[start]!, start);
-          start++;
-          end--;
-          newEnd--;
-          continue;
-        }
-        break;
+      while (end >= start && newEnd >= start && sameKey(rows[end]!.key, keys[newEnd])) {
+        end--;
+        newEnd--;
       }
+      // Suffix matching agrees with FIFO iff every matched suffix key has identical multiplicity in the unmatched
+      // middle of `rows` and `keys`; otherwise fall back to the exact FIFO matcher across the full tail.
+      if (end < prevLen - 1 && (start <= end || start <= newEnd)) {
+        const delta = new Map<unknown, number>();
+        for (let j = start; j <= end; j++) {
+          const k = rows[j]!.key;
+          delta.set(k, (delta.get(k) ?? 0) + 1);
+        }
+        for (let j = start; j <= newEnd; j++) {
+          const k = keys[j];
+          delta.set(k, (delta.get(k) ?? 0) - 1);
+        }
+        for (let j = newEnd + 1; j < n; j++) {
+          if ((delta.get(keys[j]) ?? 0) !== 0) {
+            end = prevLen - 1;
+            newEnd = n - 1;
+            break;
+          }
+        }
+      }
+      for (let oi = end + 1, ni = newEnd + 1; ni < n; oi++, ni++) update((next[ni] = rows[oi]!), list[ni]!, ni);
       if (start > end) {
-        // Pure insertions (or everything matched in prefix/suffix/swap).
+        // Pure insertions (or everything matched in prefix/suffix).
         let built = start;
         try {
           for (let j = start; j <= newEnd; j++) {
@@ -420,6 +432,16 @@ export function For<T>(props: ForProps<T>): JSX.Element {
             throw e;
           }
         }
+      } else if (
+        end - start === newEnd - start &&
+        sameKey(rows[start]!.key, keys[newEnd]) &&
+        sameKey(rows[end]!.key, keys[start]) &&
+        matchesSame(rows, keys, start + 1, end - 1, rows[start]!.key, rows[end]!.key)
+      ) {
+        // Pure two-element swap (adjacent or end-for-end), unique swapped keys: exact FIFO parity without a map.
+        update((next[newEnd] = rows[start]!), list[newEnd]!, newEnd);
+        update((next[start] = rows[end]!), list[start]!, start);
+        for (let i = start + 1; i < end; i++) update((next[i] = rows[i]!), list[i]!, i);
       } else if (
         end - start === newEnd - start &&
         sameKey(rows[end]!.key, keys[start]) &&
@@ -596,21 +618,16 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         const root = ownedRoot(parent);
         const prevOwner = swapOwner(root);
         let value: JSX.Element;
-        let hasFallback = false;
         try {
-          enterBranch(ran, false);
-          let raw: JSX.Element;
-          try {
-            raw = props.fallback;
-          } finally {
-            exitBranch();
-          }
-          if (raw === undefined) {
-            dispose(root);
-          } else {
-            value = settle(raw);
-            hasFallback = true;
-          }
+          value = memo(() => {
+            enterBranch(ran, false);
+            try {
+              return props.fallback;
+            } finally {
+              exitBranch();
+            }
+          });
+          (value as Reader<JSX.Element>)();
         } catch (e) {
           try {
             dispose(root);
@@ -621,10 +638,8 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         } finally {
           swapOwner(prevOwner);
         }
-        if (hasFallback) {
-          outDirty = true;
-          fallback = { root, value: value! };
-        }
+        outDirty = true;
+        fallback = { root, value };
       } else if (n > 0 && fallback !== null) {
         outDirty = true;
         const prevFallback = fallback;
@@ -701,12 +716,13 @@ export function Switch(props: { fallback?: JSX.Element; children: JSX.Element })
     let v: JSX.Element;
     let t: BranchTransitions = null;
     try {
-      v = untrack(() => {
-        if (i < 0) return props.fallback;
-        const m = cases[i]!;
-        const ch = m.children;
-        return typeof ch === 'function' && !isReader(ch) ? (ch as (v: () => unknown) => JSX.Element)(() => m.when) : (ch as JSX.Element);
-      });
+      if (i < 0) v = props.fallback;
+      else
+        v = untrack(() => {
+          const m = cases[i]!;
+          const ch = m.children;
+          return typeof ch === 'function' && !isReader(ch) ? (ch as (v: () => unknown) => JSX.Element)(() => m.when) : (ch as JSX.Element);
+        });
     } finally {
       t = exitBranch();
     }
@@ -820,6 +836,7 @@ export function Portal(props: { mount?: Node; children: JSX.Element }): JSX.Elem
       }
       owned.clear();
       end.$$owned = undefined;
+      end.$$dead = true;
       start.remove();
       end.remove();
     };
@@ -827,7 +844,17 @@ export function Portal(props: { mount?: Node; children: JSX.Element }): JSX.Elem
     const child = ownedRoot(getOwner());
     const prev = swapOwner(child);
     try {
-      untrack(() => insert(mount, () => props.children, end));
+      untrack(() =>
+        insert(
+          mount,
+          () => {
+            if (cleaned) return undefined;
+            const v = props.children;
+            return cleaned ? undefined : v;
+          },
+          end,
+        ),
+      );
     } catch (e) {
       try {
         dispose(child);

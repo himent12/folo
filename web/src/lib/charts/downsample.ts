@@ -20,7 +20,7 @@ export function downsample(points: Pt[], buckets: number): Pt[] {
     let max: Pt | undefined;
     for (let i = start; i < end; i++) {
       const p = points[i] as Pt;
-      if (!Number.isFinite(p.y)) continue;
+      if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
       if (!min || p.y < min.y) min = p;
       if (!max || p.y > max.y) max = p;
     }
@@ -30,7 +30,7 @@ export function downsample(points: Pt[], buckets: number): Pt[] {
     else out.push(max, min);
   }
   const last = points[points.length - 1];
-  if (last && out[out.length - 1] !== last) out.push(last);
+  if (last && Number.isFinite(last.x) && Number.isFinite(last.y) && out[out.length - 1] !== last) out.push(last);
   return out;
 }
 

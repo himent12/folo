@@ -1,7 +1,7 @@
 // A queued run's place in the training queue, as its page reads it (servers that list `queue_control`, docs/API.md):
 // what trains ahead of it, the runs waiting in front, how long that should take (servers with `run_estimate`), whether
 // Start next is a move, and the move itself (the new order at once, the old one back on a refusal).
-import { computed, untrack } from 'fw';
+import { computed, onCleanup, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import type { LiveRun } from '$lib/api/live';
 import { settledEta } from '$lib/api/progress';
@@ -84,15 +84,26 @@ export function queueState(src: QueueSource) {
   /** Start next is a move only when something is in front (or nothing trains, and it starts at once). */
   const canStart = computed(() => place.get() !== null && (place.get()! > 1 || !ahead.get()) && !starting.get());
 
+  let mounted = true;
+  onCleanup(() => (mounted = false));
+
   /** Moves this run in the queue: the new order at once (here and in the queue list), the old one back on a refusal. */
   async function move(req: QueueRequest) {
     const cur = untrack(run);
     if (!cur) return;
     const id = cur.id;
+    const epoch = hub.epoch;
     const refresh = () => {
+      if (!mounted || hub.epoch !== epoch) return;
       void others.refresh();
+      const tok = live.queueToken?.();
       hub.api.run(id).then(
         (r) => {
+          if (!mounted || hub.epoch !== epoch) return;
+          if (tok && live.applyQueueSnapshot) {
+            live.applyQueueSnapshot(id, r, tok);
+            return;
+          }
           // Asked for while the trainer was being built: a stream that has since said the run left the queue is newer,
           // and a run that left it never goes back (no status event would correct it until the run ends).
           if (r.status === 'queued' && live.run?.status !== 'queued') return;
@@ -101,25 +112,38 @@ export function queueState(src: QueueSource) {
         () => {},
       );
     };
+    const moveTok = live.queueToken?.();
     const r = await moveQueued(
       cur,
       req,
       () => {
         const list = others.data;
         const prev = live.run?.queue_position ?? null;
-        if (list) others.set(withQueueMove(list, id, req));
-        const next = others.data?.find((x) => x.id === id)?.queue_position;
+        const optimisticList = list ? withQueueMove(list, id, req) : null;
+        if (optimisticList) others.set(optimisticList);
+        const next = optimisticList?.find((x) => x.id === id)?.queue_position ?? null;
         if (live.run?.id === id && next != null) live.run = { ...live.run, queue_position: next };
         return () => {
-          if (list) others.set(list);
-          if (live.run?.id === id) live.run = { ...live.run, queue_position: prev };
+          if (!mounted || hub.epoch !== epoch) return;
+          if (list && others.data === optimisticList) others.set(list);
+          else void others.refresh();
+          if (live.run?.id === id && next != null) {
+            const curTok = live.queueToken?.();
+            const stillOwned =
+              !moveTok ||
+              !curTok ||
+              (curTok.viewSeq === moveTok.viewSeq && curTok.statusSeq === moveTok.statusSeq && curTok.queueSeq === moveTok.queueSeq);
+            if (stillOwned && live.run.queue_position === next) live.run = { ...live.run, queue_position: prev };
+            else refresh();
+          }
         };
       },
       refresh,
       untrack(() => ahead.get()),
     );
-    if (!r) return;
-    if (live.run?.id === id) live.run = { ...live.run, queue_position: r.queue_position ?? null };
+    if (!r || !mounted || hub.epoch !== epoch) return;
+    if (moveTok && live.applyQueueSnapshot) live.applyQueueSnapshot(id, r, moveTok);
+    else if (live.run?.id === id) live.run = { ...live.run, queue_position: r.queue_position ?? null };
     void others.refresh();
   }
 

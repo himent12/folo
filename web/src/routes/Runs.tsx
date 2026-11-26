@@ -89,23 +89,31 @@ export default function Runs() {
   const queueCtl = computed(() => hasFeature(system.data, 'queue_control'));
   const waiting = computed(() => (runs.data ?? []).filter((r) => r.status === 'queued' && r.queue_position != null).length);
   const training = computed(() => runs.data?.find((r) => r.status === 'running' || r.status === 'stopping') ?? null);
+  let mounted = true;
+  onCleanup(() => (mounted = false));
   // A cloud run waits in no queue here (its hand-over is said by its status word), so it never has a place.
   const placeOf = (r: Run) => (queueCtl.get() && r.status === 'queued' && !r.cloud ? (r.queue_position ?? null) : null);
   function move(r: Run, req: QueueRequest) {
+    const epoch = hub.epoch;
     void moveQueued(
       r,
       req,
       () => {
         const list = runs.data;
-        if (list) runs.set(withQueueMove(list, r.id, req));
+        const optimistic = list ? withQueueMove(list, r.id, req) : null;
+        if (optimistic) runs.set(optimistic);
         return () => {
-          if (list) runs.set(list);
+          if (!mounted || hub.epoch !== epoch) return;
+          if (list && runs.data === optimistic) runs.set(list);
+          else void runs.refresh();
         };
       },
-      () => void runs.refresh(),
+      () => {
+        if (mounted && hub.epoch === epoch) void runs.refresh();
+      },
       training.get(),
     ).then((done) => {
-      if (done) void runs.refresh();
+      if (done && mounted && hub.epoch === epoch) void runs.refresh();
     });
   }
   /**
@@ -141,8 +149,6 @@ export default function Runs() {
   /** The waiting run Remove from queue asks about (the same confirm as on its own page). */
   const removing = signal<Run | null>(null);
   const removeBusy = signal(false);
-  let mounted = true;
-  onCleanup(() => (mounted = false));
   /** Its failure shows in the confirm, which stays open; the success toasts once it has closed. */
   const removeStatus = new DialogStatus();
   async function remove() {

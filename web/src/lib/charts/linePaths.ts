@@ -9,7 +9,7 @@ import type { Marker, Series } from './lineSeries';
 export function pathsOf(visible: Series[], curve: 'linear' | 'monotone', width: number, margin: Margin, height: number, x: Scale, y: Scale, yLog: boolean) {
   const c = curve === 'monotone' ? curveMonotoneX : curveLinear;
   const buckets = Math.max(32, Math.floor((width - margin.left - margin.right) / 1.5));
-  const ok = (p: Pt) => Number.isFinite(p.y) && (!yLog || p.y > 0);
+  const ok = (p: Pt) => Number.isFinite(p.x) && Number.isFinite(p.y) && (!yLog || p.y > 0);
   const ln = d3line<Pt>()
     .defined(ok)
     .x((p) => x(p.x))
@@ -26,7 +26,7 @@ export function pathsOf(visible: Series[], curve: 'linear' | 'monotone', width: 
       const lo = s.lower;
       const zipped = s.points.map((p, i) => ({ x: p.x, y: p.y, y0: lo[i]?.y ?? p.y }));
       const band = d3area<{ x: number; y: number; y0: number }>()
-        .defined((p) => Number.isFinite(p.y) && Number.isFinite(p.y0))
+        .defined((p) => Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.y0) && (!yLog || (p.y > 0 && p.y0 > 0)))
         .x((p) => x(p.x))
         .y0((p) => y(p.y0))
         .y1((p) => y(p.y))

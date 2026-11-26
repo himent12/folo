@@ -213,6 +213,7 @@ export default function Playground() {
     seg.set(s.kind);
     pred.set(null);
     error.set(null);
+    weightsMissing.set(false);
     hover.set(null);
     picked.set(null);
     hidden.set(new Set());
@@ -264,8 +265,9 @@ export default function Playground() {
   }
 
   function onpaste(e: ClipboardEvent) {
+    if (document.querySelector('dialog[open]') || !ranked.peek().length) return;
     const item = [...(e.clipboardData?.items ?? [])].find((i) => i.kind === 'file' && i.type.startsWith('image/'));
-    const file = item?.getAsFile();
+    const file = item?.getAsFile() ?? [...(e.clipboardData?.files ?? [])].find((f) => f.type.startsWith('image/'));
     if (!file) return;
     e.preventDefault();
     void setFile(file, 'pasted image');

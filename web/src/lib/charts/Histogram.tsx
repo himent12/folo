@@ -37,8 +37,9 @@ export default function Histogram(props: HistogramProps) {
   const width = signal(0);
   const hovered = signal<number | null>(null);
 
+  const safeCount = (c: number) => (Number.isFinite(c) && c > 0 ? c : 0);
   const m = computed(() => ({ top: p.yLabel ? 24 : 8, right: 4, bottom: 20, left: 36 }));
-  const max = computed(() => Math.max(1e-9, ...p.counts));
+  const max = computed(() => Math.max(1e-9, ...p.counts.map(safeCount)));
   const y = computed(() =>
     scaleLinear()
       .domain([0, max.get()])
@@ -56,11 +57,11 @@ export default function Histogram(props: HistogramProps) {
     const edges = p.edges;
     return p.tickLabel ? p.tickLabel(edges[i] ?? 0, edges[i + 1] ?? 0, i) : name(i);
   };
-  const total = computed(() => p.counts.reduce((a, b) => a + b, 0));
-  const firstBin = computed(() => Math.max(0, p.counts.findIndex((c) => c > 0)));
+  const total = computed(() => p.counts.reduce((a, b) => a + safeCount(b), 0));
+  const firstBin = computed(() => Math.max(0, p.counts.findIndex((c) => safeCount(c) > 0)));
   const shareOf = (c: number) => {
     const t = total.get();
-    return t ? ((c / t) * 100).toFixed(1) : '0';
+    return t ? ((safeCount(c) / t) * 100).toFixed(1) : '0';
   };
   const activeHovered = computed(() => {
     const h = hovered.get();
@@ -68,7 +69,7 @@ export default function Histogram(props: HistogramProps) {
   });
   const readout = computed(() => {
     const h = activeHovered.get();
-    return h === null ? '' : `${name(h)}: ${(p.counts[h] ?? 0).toLocaleString('en-US')} ${p.unit}, ${shareOf(p.counts[h] ?? 0)}%`;
+    return h === null ? '' : `${name(h)}: ${safeCount(p.counts[h] ?? 0).toLocaleString('en-US')} ${p.unit}, ${shareOf(p.counts[h] ?? 0)}%`;
   });
   // Every category is named while each has 34 px; past that, every k-th.
   const labelEvery = computed(() => (bw.get() > 34 ? 1 : Math.ceil(34 / Math.max(bw.get(), 1))));
@@ -80,7 +81,8 @@ export default function Histogram(props: HistogramProps) {
     const yy = y.get();
     const bs = bars.get();
     const every = labelEvery.get();
-    return p.counts.map((c, i) => {
+    return p.counts.map((raw, i) => {
+      const c = safeCount(raw);
       const h = Math.max(c > 0 ? 2 : 0, height - mm.bottom - yy(c));
       const b = bs[i] ?? { x: mm.left, w: 0 };
       const gap = Math.min(2, b.w / 6);
@@ -210,7 +212,7 @@ export default function Histogram(props: HistogramProps) {
         {activeHovered.get() !== null ? (
           <>
             <span class="t">{name(activeHovered.get()!)}</span>
-            <span class="v">{`${(p.counts[activeHovered.get()!] ?? 0).toLocaleString('en-US')} ${p.unit}`}</span>
+            <span class="v">{`${safeCount(p.counts[activeHovered.get()!] ?? 0).toLocaleString('en-US')} ${p.unit}`}</span>
             <span class="p">{`${shareOf(p.counts[activeHovered.get()!] ?? 0)}%`}</span>
           </>
         ) : (
@@ -273,7 +275,7 @@ export default function Histogram(props: HistogramProps) {
                 </>
               )}
             </Index>
-            {p.marker ? (
+            {p.marker && bars.get().length > 0 && Number.isFinite(p.marker.x) ? (
               <>
                 <line class="marker" x1={markerX()} x2={markerX()} y1={m.get().top} y2={p.height - m.get().bottom} />
                 {/* The label sits on the threshold's lower side: "tiny" names what lies left of the line. */}
@@ -305,7 +307,7 @@ export default function Histogram(props: HistogramProps) {
               {(c, i) => (
                 <tr>
                   <th scope="row">{name(i)}</th>
-                  <td>{c().toLocaleString('en-US')}</td>
+                  <td>{safeCount(c()).toLocaleString('en-US')}</td>
                   <td>{`${shareOf(c())}%`}</td>
                 </tr>
               )}

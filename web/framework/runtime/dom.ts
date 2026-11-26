@@ -31,7 +31,7 @@ export function template(html: string, svg?: 1): () => Node {
 type LeaveFn = (done: () => void) => (() => void) | void;
 type Leaving = Node & { $$leave?: LeaveFn; $$cancelLeave?: () => void };
 /** Internal: portal end marker carrying the set of nodes the portal owns (so teardown stays exact even if a marker is detached). */
-export type PortalMarker = Node & { $$owned?: Set<Node> };
+export type PortalMarker = Node & { $$owned?: Set<Node>; $$dead?: boolean };
 /** Nodes with a pending or in-flight outro: while any exist, clearing never takes the `textContent = ''` shortcut. */
 let leaving = 0;
 const activeLeaves = new Set<Leaving>();
@@ -149,6 +149,7 @@ export function insert(parent: Node, value: unknown, marker?: Node | null, initi
  * `value` is what an expression returned, so a reader it returned is read in an effect of its own.
  */
 export function insertExpression(parent: Node, value: unknown, current: Current, marker?: Node | null, unwrap?: boolean, expression?: boolean): Current {
+  if (marker != null && (marker as PortalMarker).$$dead) return [];
   while (typeof current === 'function') current = current();
   if (value === current) return current;
   const t = typeof value;
@@ -186,6 +187,7 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
     // owns what it creates) and read, like a reader an expression returned, in an effect of its own.
     if (isReader(value) && !expression) return insertExpression(parent, value(), current, marker, unwrap);
     const read = isReader(value) ? value : memo(value as () => unknown);
+    if (marker != null && (marker as PortalMarker).$$dead) return [];
     let cur: Current = current;
     renderEffect<Current>((c) => (cur = insertExpression(parent, read(), c, marker)), current);
     return () => cur;
@@ -210,7 +212,9 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
     }
     if (nonNodeAt !== -1) {
       array.length = nonNodeAt;
-      if (normalize(array, value, currentArray, unwrap, nonNodeAt, nonNodeItem)) {
+      const dynamic = normalize(array, value, currentArray, unwrap, nonNodeAt, nonNodeItem);
+      if (marker != null && (marker as PortalMarker).$$dead) return [];
+      if (dynamic) {
         // Reactive parts: resolve them in an effect of their own, so the code that built the array does not re-run.
         let cur: Current = current;
         renderEffect<Current>((c) => (cur = insertExpression(parent, array, c, marker, true)), current);

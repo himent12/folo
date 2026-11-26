@@ -745,6 +745,36 @@ export class LiveRun {
     this.run = this.#clouded(this.#placed(next, queueSeqAtStart), cloudSeqAtStart);
   }
 
+  /** Captures the current SSE sequence counters before issuing an out-of-band queue/detail request. */
+  queueToken(): { viewSeq: number; statusSeq: number; queueSeq: number } {
+    return { viewSeq: this.#viewSeq, statusSeq: this.#statusSeq, queueSeq: this.#queueSeq };
+  }
+
+  /**
+   * Applies a detail snapshot fetched for queue reconciliation (`queueState`), respecting SSE status and queue
+   * events that arrived after the request started so an older HTTP response never moves the run backwards.
+   */
+  applyQueueSnapshot(
+    id: string,
+    r: Run,
+    atStart: { viewSeq: number; statusSeq: number; queueSeq: number },
+  ) {
+    if (this.#viewSeq !== atStart.viewSeq) return;
+    const cur = this.#run.peek();
+    if (!cur || cur.id !== id) return;
+    // A stream that has since said the run left the queue is newer, and a run that left it never goes back.
+    if (r.status === 'queued' && cur.status !== 'queued') return;
+    let next: Run = {
+      ...cur,
+      status: r.status,
+      started: r.started,
+      queue_position: r.queue_position ?? null,
+      resolved: r.resolved ?? cur.resolved,
+    };
+    if (this.#statusSeq !== atStart.statusSeq && this.#lastStatus) next = { ...next, ...this.#lastStatus };
+    this.run = this.#placed(next, atStart.queueSeq);
+  }
+
   /**
    * A snapshot's queue place, corrected: a `queue` event that arrived after the request was sent is newer, and only a
    * waiting run has a place.

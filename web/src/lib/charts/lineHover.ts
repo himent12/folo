@@ -13,7 +13,7 @@ export function hoverOf(
   xFormat: (x: number) => string,
   x: Scale,
 ) {
-  if (cursor === null || cursor === undefined || !hasData) return null;
+  if (cursor === null || cursor === undefined || !Number.isFinite(cursor) || !hasData) return null;
   if (cursor < xExtent[0] || cursor > xExtent[1]) return null;
   const c = cursor as number;
   const rows = keyed
@@ -21,23 +21,25 @@ export function hoverOf(
       const pts = s.points;
       const first = pts[0];
       const last = pts[pts.length - 1];
-      if (!first || !last) return null;
+      if (!first || !last || !Number.isFinite(first.x) || !Number.isFinite(last.x)) return null;
       // A series only reads out where it has data: never its last value under a cursor past its end.
       const tol = pts.length > 1 ? (last.x - first.x) / (pts.length - 1) / 2 : 0.5;
       if (c < first.x - tol || c > last.x + tol) return null;
       const p = pts[nearest(pts, c)];
-      return p ? { s, p } : null;
+      return p && Number.isFinite(p.x) && Number.isFinite(p.y) ? { s, p } : null;
     })
     .filter((r): r is { s: Series; p: Pt } => r !== null);
   if (!rows.length) return null;
   // Title at the series with the densest sampling (closest to the cursor); rows sampled elsewhere say where.
   const ref = rows.reduce((a, b) => (Math.abs(b.p.x - c) < Math.abs(a.p.x - c) ? b : a));
+  const px = x(ref.p.x);
+  if (!Number.isFinite(px)) return null;
   const title = xTitle ? xTitle(ref.p.x) : xFormat(ref.p.x);
   const labelled = rows.map((r) => {
     const t = xTitle ? xTitle(r.p.x) : xFormat(r.p.x);
     return { ...r, at: t === title ? null : t };
   });
-  return { rows: labelled, px: x(ref.p.x), xv: ref.p.x, title };
+  return { rows: labelled, px, xv: ref.p.x, title };
 }
 
 /** The pickable series whose drawn line passes nearest (px, py), within `r` px; null for none. */
@@ -57,15 +59,38 @@ export function pickNearest(
   for (const s of visible) {
     if (!pick(s)) continue;
     const pts = s.points;
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1]!;
+    let prevValid = false;
+    for (let i = 0; i < pts.length; i++) {
       const b = pts[i]!;
-      if (!Number.isFinite(a.y) || !Number.isFinite(b.y)) continue;
-      const ax = x(a.x);
+      const bValid = Number.isFinite(b.x) && Number.isFinite(b.y);
+      if (!bValid) {
+        prevValid = false;
+        continue;
+      }
       const bx = x(b.x);
-      if (Math.max(ax, bx) < px - bd || Math.min(ax, bx) > px + bd) continue;
-      const ay = y(a.y);
       const by = y(b.y);
+      if (!Number.isFinite(bx) || !Number.isFinite(by)) {
+        prevValid = false;
+        continue;
+      }
+      if (!prevValid) {
+        // Single-point series or isolated finite point: measure distance directly to the point.
+        const next = pts[i + 1];
+        const nextValid = !!next && Number.isFinite(next.x) && Number.isFinite(next.y) && Number.isFinite(x(next.x)) && Number.isFinite(y(next.y));
+        if (!nextValid) {
+          const d = Math.hypot(px - bx, py - by);
+          if (d < bd) {
+            bd = d;
+            best = s.id;
+          }
+        }
+        prevValid = true;
+        continue;
+      }
+      const a = pts[i - 1]!;
+      const ax = x(a.x);
+      const ay = y(a.y);
+      if (Math.max(ax, bx) < px - bd || Math.min(ax, bx) > px + bd) continue;
       // Distance from the point to the segment.
       const dx = bx - ax;
       const dy = by - ay;

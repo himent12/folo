@@ -19,17 +19,17 @@ export interface Margin {
 /** A scale from data to pixels (d3's linear or log scale). */
 export type Scale = (v: number) => number;
 
-/** The x extent: the caller's domain, else the lines' first to last x (one x widened by one either side). */
+/** The x extent: the caller's domain, else the lines' finite min to max x (one x widened by one either side). */
 export function xExtentOf(xDomain: [number, number] | undefined, visible: Series[]): [number, number] {
-  if (xDomain) return xDomain;
+  if (xDomain && Number.isFinite(xDomain[0]) && Number.isFinite(xDomain[1])) return xDomain;
   let lo = Infinity;
   let hi = -Infinity;
-  for (const s of visible) {
-    const a = s.points[0];
-    const b = s.points[s.points.length - 1];
-    if (a && a.x < lo) lo = a.x;
-    if (b && b.x > hi) hi = b.x;
-  }
+  for (const s of visible)
+    for (const p of s.points) {
+      if (!Number.isFinite(p.x)) continue;
+      if (p.x < lo) lo = p.x;
+      if (p.x > hi) hi = p.x;
+    }
   if (!Number.isFinite(lo)) return [0, 1];
   return lo === hi ? [lo - 1, hi + 1] : [lo, hi];
 }
@@ -41,7 +41,7 @@ export function yExtentOf(yDomain: [number, number] | undefined, visible: Series
   let hi = -Infinity;
   for (const s of visible)
     for (const p of s.points) {
-      if (!Number.isFinite(p.y) || (yLog && p.y <= 0)) continue;
+      if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || (yLog && p.y <= 0)) continue;
       if (p.y < lo) lo = p.y;
       if (p.y > hi) hi = p.y;
     }
