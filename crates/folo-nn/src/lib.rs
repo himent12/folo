@@ -70,11 +70,14 @@ pub use ema::{
 };
 pub use error::{Error, Result};
 pub use layers::{
-    Activation, BN_EPS, BN_MOMENTUM, BatchNorm2d, Cbam, ChannelAttention, ChannelLayout, Concat, Conv2d,
-    Conv2dConfig, ConvBnAct, DropPath, Eca, GatedFfn, GluKind, Identity, LAYERSCALE_DEFAULT_INIT, LayerScale,
-    Linear, MaxPool2d, ModuleList, PowerIterationResult, RMSNORM_DEFAULT_EPS, RmsNorm, RunningStats,
-    SPECTRAL_NORM_EPS, Sequential, SpatialAttention, SpectralNorm, SpectralNormTarget, SqueezeExcitation,
-    Upsample, WS_CONV_DEFAULT_EPS, WeightStandardizedConv2d, eca_kernel_size, fuse_conv_bn, geglu, gelu_tanh,
+    Activation, BN_EPS, BN_MOMENTUM, BatchNorm2d, CONVNEXT_DEFAULT_EXPAND, CONVNEXT_DEFAULT_KERNEL,
+    CONVNEXT_DEFAULT_LAYER_SCALE, Cbam, ChannelAttention, ChannelLayout, Concat, Conv2d, Conv2dConfig,
+    ConvBnAct, ConvNeXtBlock, ConvNeXtConfig, ConvNeXtNorm, ConvNeXtNormLayer, DropBlock2d, DropPath, Eca,
+    GatedFfn, GluKind, Identity, InvertedResidual, InvertedResidualConfig, LAYERNORM_DEFAULT_EPS,
+    LAYERSCALE_DEFAULT_INIT, LayerNorm, LayerScale, Linear, MaxPool2d, ModuleList, PowerIterationResult,
+    RMSNORM_DEFAULT_EPS, RmsNorm, RunningStats, SPECTRAL_NORM_EPS, Sequential, SpatialAttention,
+    SpectralNorm, SpectralNormTarget, SqueezeExcitation, Upsample, WS_CONV_DEFAULT_EPS,
+    WeightStandardizedConv2d, dropblock_gamma, eca_kernel_size, fuse_conv_bn, geglu, gelu_tanh,
     power_iteration, spectral_norm, spectral_normalize, standardize_weight, swiglu,
 };
 pub use module::{Forward, Layer, Mode, Module, NamedTensor, TensorKind};

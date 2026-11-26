@@ -42,10 +42,12 @@ mod lion;
 mod lookahead;
 mod musgd;
 mod ortho;
+mod prodigy;
 mod radam;
 mod schedulefree;
 mod sgd;
 pub(crate) mod simd;
+mod sophia;
 
 use std::collections::HashMap;
 
@@ -74,6 +76,11 @@ pub use ortho::{
     POLAR5_COEFFS, muon_scale, muon_scale_geo, orthogonalize, orthogonalize_many, orthogonalize_many_with,
     orthogonalize_with,
 };
+pub use prodigy::{
+    PRODIGY_DEFAULT_BETA1, PRODIGY_DEFAULT_BETA2, PRODIGY_DEFAULT_D_COEF, PRODIGY_DEFAULT_D0,
+    PRODIGY_DEFAULT_EPS, PRODIGY_DEFAULT_LR, PRODIGY_DEFAULT_WEIGHT_DECAY, Prodigy, ProdigyConfig,
+    ProdigyContract, ProdigyGroupContract,
+};
 pub use radam::{
     RADAM_DEFAULT_BETA1, RADAM_DEFAULT_BETA2, RADAM_DEFAULT_EPS, RADAM_DEFAULT_LR,
     RADAM_DEFAULT_WEIGHT_DECAY, RAdam, RAdamConfig, RAdamContract, RAdamGroupContract, RAdamRectification,
@@ -85,6 +92,11 @@ pub use schedulefree::{
     ScheduleFreeGroupContract,
 };
 pub use sgd::Sgd;
+pub use sophia::{
+    HutchinsonDist, SOPHIA_DEFAULT_BETA1, SOPHIA_DEFAULT_BETA2, SOPHIA_DEFAULT_EPS, SOPHIA_DEFAULT_LR,
+    SOPHIA_DEFAULT_RHO, SOPHIA_DEFAULT_UPDATE_PERIOD, SOPHIA_DEFAULT_WEIGHT_DECAY, SophiaConfig,
+    SophiaContract, SophiaG, SophiaGroupContract,
+};
 
 use crate::module::Module;
 use crate::{BatchNorm2d, Error, Result};
@@ -663,15 +675,16 @@ fn is_no_decay_scale(name: &str, t: &Tensor) -> bool {
 }
 
 /// docs/MODEL.md §8.2's three groups, assigned by role: `decay` (conv / linear weights), `bn` (BatchNorm
-/// weights, [`crate::LayerScale::gamma`], [`crate::RmsNorm::weight`], and 1-D scale/gate parameters such as
-/// `gamma_id` and `alpha_raw`), `bias` (every tensor named `bias`: BatchNorm biases and conv / linear biases).
+/// weights, [`crate::LayerScale::gamma`], [`crate::RmsNorm::weight`], [`crate::LayerNorm::weight`], and 1-D
+/// scale/gate parameters such as `gamma_id` and `alpha_raw`), `bias` (every tensor named `bias`: BatchNorm
+/// biases, LayerNorm biases, and conv / linear biases).
 #[derive(Debug, Clone, Default)]
 pub struct StandardGroups {
     /// Weights that get weight decay.
     pub decay: Vec<(String, Tensor)>,
-    /// BatchNorm γ, [`crate::LayerScale::gamma`], [`crate::RmsNorm::weight`], and 1-D scale/gate parameters (`gamma_id`, `alpha_raw`) with no weight decay.
+    /// BatchNorm γ, [`crate::LayerScale::gamma`], [`crate::RmsNorm::weight`], [`crate::LayerNorm::weight`], and 1-D scale/gate parameters (`gamma_id`, `alpha_raw`) with no weight decay.
     pub bn: Vec<(String, Tensor)>,
-    /// Biases (BatchNorm β and layer biases).
+    /// Biases (BatchNorm β, LayerNorm β, and layer biases).
     pub bias: Vec<(String, Tensor)>,
     /// Names of depthwise conv weights (`groups > 1 && groups == in_channels == out_channels`) in `decay`.
     pub depthwise: std::collections::HashSet<String>,
@@ -679,11 +692,11 @@ pub struct StandardGroups {
 
 impl StandardGroups {
     /// Split `model`'s parameters. A parameter is `bn` if it is the `weight` of a [`BatchNorm2d`], the `gamma`
-    /// of a [`crate::LayerScale`], the `weight` of an [`crate::RmsNorm`], or a 1-D no-decay scale/gate parameter
-    /// whose last name segment is `gamma_id` or `alpha_raw`, `bias` if its last name segment is `bias`, and
-    /// `decay` otherwise. For the FOLO v1 detector this is exactly the name rule of §8.2 (`*.bn.weight` /
-    /// `*.bn.bias`, `*.out.bias` / every other weight); for FOLO v2-Iso it also protects `gamma_id` and
-    /// `alpha_raw` from weight decay and bias warmup.
+    /// of a [`crate::LayerScale`], the `weight` of an [`crate::RmsNorm`] or [`crate::LayerNorm`], or a 1-D
+    /// no-decay scale/gate parameter whose last name segment is `gamma_id` or `alpha_raw`, `bias` if its last
+    /// name segment is `bias`, and `decay` otherwise. For the FOLO v1 detector this is exactly the name rule
+    /// of §8.2 (`*.bn.weight` / `*.bn.bias`, `*.out.bias` / every other weight); for FOLO v2-Iso it also
+    /// protects `gamma_id` and `alpha_raw` from weight decay and bias warmup.
     pub fn from_module(model: &dyn Module) -> Self {
         let mut bn_ids = std::collections::HashSet::new();
         let mut dw_ids = std::collections::HashSet::new();
@@ -694,6 +707,10 @@ impl StandardGroups {
                 bn_ids.insert(ls.gamma.id());
             } else if let Some(rn) = (m as &dyn std::any::Any).downcast_ref::<crate::RmsNorm>() {
                 if let Some(w) = &rn.weight {
+                    bn_ids.insert(w.id());
+                }
+            } else if let Some(ln) = (m as &dyn std::any::Any).downcast_ref::<crate::LayerNorm>() {
+                if let Some(w) = &ln.weight {
                     bn_ids.insert(w.id());
                 }
             } else if let Some(conv) = (m as &dyn std::any::Any).downcast_ref::<crate::Conv2d>() {
