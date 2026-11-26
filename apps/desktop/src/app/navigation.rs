@@ -169,6 +169,8 @@ impl FoloApp {
         self.menu_open = None;
         self.menu_typeahead.clear();
         self.palette = None;
+        self.overlay_return = None;
+        self.verify_focus = None;
         self.run_x_fit = None;
         self.log_filter = crate::app::LogFilter::All;
         self.log_search.update(cx, |i, cx| i.set_text("", cx));

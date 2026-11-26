@@ -102,11 +102,13 @@ impl Window {
         let prepainted = Instant::now();
         self.frame_times.prepaint_us = micros_since(laid_out);
 
+        self.painting = true;
         root_element.paint(self, cx);
         self.paint_deferred_draws(cx);
         if let Some(tooltip) = tooltip_element.as_mut() {
             tooltip.paint(self, cx);
         }
+        self.painting = false;
         let painted = Instant::now();
         self.frame_times.paint_us = micros_since(prepainted);
 

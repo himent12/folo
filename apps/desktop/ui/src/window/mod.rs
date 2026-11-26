@@ -112,6 +112,8 @@ pub struct Window {
     pub(crate) dirty: Rc<Cell<bool>>,
     /// A frame is being drawn (`refresh` is ignored meanwhile, as GPUI's).
     pub(crate) drawing: bool,
+    /// Currently in the paint pass (after prepaint completed `next_frame.dispatch_tree`).
+    pub(crate) painting: bool,
     /// The last drawn frame has not been presented yet.
     pub(crate) needs_present: bool,
     /// `request_animation_frame` was called during this frame: dirty again after it.
@@ -245,6 +247,7 @@ impl Window {
             next_frame_callbacks: Rc::default(),
             dirty: Rc::new(Cell::new(false)),
             drawing: false,
+            painting: false,
             needs_present: false,
             animation_frame_requested: false,
             next_hitbox_id: 0,

@@ -4,3 +4,5 @@ mod device;
 mod page;
 mod side;
 mod stage;
+
+pub(crate) use page::filter_detections;

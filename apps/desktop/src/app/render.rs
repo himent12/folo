@@ -87,6 +87,7 @@ impl Render for FoloApp {
             }
         }
         self.narrow = window.viewport_size().width < px(1120.);
+        self.last_scale_factor = window.scale_factor();
         self.shown_mode = if window.is_fullscreen() {
             crate::window_state::WindowMode::Fullscreen
         } else if window.is_maximized() {
@@ -107,6 +108,18 @@ impl Render for FoloApp {
         // Lost the server (it was there, and the 2 s refresh can't reach it): said over the page,
         // so the page keeps its place, until it answers again.
         let lost = self.lost_banner_shown().then(|| lost_banner(&t, self.reached));
+        let verify_focus = self.verify_focus.take().map(|expected| {
+            let root = self.root_focus.clone();
+            folo_ui::canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    if expected.is_focused(window) && !window.is_focus_mounted(&expected) {
+                        window.focus(&root);
+                    }
+                },
+            )
+            .absolute()
+        });
         div()
             .id("root")
             .key_context("FoloApp")
@@ -121,7 +134,9 @@ impl Render for FoloApp {
             .on_action(cx.listener(|this, _: &OpenPalette, w, cx| this.open_palette(w, cx)))
             .on_action(cx.listener(|this, _: &NewRunAction, w, cx| {
                 if !this.modal_open() {
-                    this.palette = None;
+                    if this.palette.is_some() {
+                        this.close_palette(w, cx);
+                    }
                     this.open_new_run(None, w, cx)
                 }
             }))
@@ -154,6 +169,9 @@ impl Render for FoloApp {
             }))
             .on_action(cx.listener(|this, _: &OpenImage, w, cx| {
                 if !this.modal_open() {
+                    if this.palette.is_some() {
+                        this.close_palette(w, cx);
+                    }
                     this.pick_image(w, cx)
                 }
             }))
@@ -277,6 +295,7 @@ impl Render for FoloApp {
             }))
             .child(Self::press_tracker(cx))
             .child(Self::drag_tracker(cx))
+            .children(verify_focus)
             .child(sidebar)
             .child(
                 div()

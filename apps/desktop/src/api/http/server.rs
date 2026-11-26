@@ -1,13 +1,15 @@
 //! A local `folo serve`: finding the binary, starting it on a free port, and stopping it with the app.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::channel;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use crate::api::*;
+use ureq::unversioned::transport::{Buffers as _, Connector as _};
 
-use super::refused::Found;
+use super::refused::{ConnectedStream, Found};
 use super::transport::{BODY_LIMIT, agent, json};
 
 /// A local `folo serve` started by the app; stopped when dropped.
@@ -116,8 +118,6 @@ pub fn probe(url: &str) -> Probe {
 
 /// [`probe`] with the HTTP client's proxy given: `None` connects directly.
 pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> Probe {
-    let connect = if is_loopback(url) { Duration::from_millis(500) } else { Duration::from_secs(2) };
-    // `url()`, not the base: an address that isn't one is never sent (port 80 for ":99999").
     let health = super::HttpBackend::new(url).url("/health");
     // Nothing listens there (Windows says so only after 2 s otherwise; the connect limit below is 0.5 s).
     // Asked only when the client below connects to that address itself (ureq's own test: no proxy, or one
@@ -125,10 +125,17 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> Probe {
     // the proxy reaches. Before the client is made, which costs more than the check.
     let direct = proxy.as_ref().is_none_or(|p| health.parse().is_ok_and(|uri| p.is_no_proxy(&uri)));
     let found = if direct { super::refused::check(&health) } else { Found::Unsure };
-    if found == Found::Nothing {
+    probe_with_found(url, &health, proxy, found)
+}
+
+/// Runs the `GET /api/health` request using a pre-checked [`Found`] result (split out so tests can
+/// verify reusing an already-connected 1-slot backlog socket without fixed sleeps).
+fn probe_with_found(url: &str, health: &str, proxy: Option<ureq::Proxy>, found: Found) -> Probe {
+    if found.is_nothing() {
         return Probe::Nothing;
     }
-    let agent = ureq::Agent::config_builder()
+    let connect = if is_loopback(url) { Duration::from_millis(500) } else { Duration::from_secs(2) };
+    let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         // `folo serve` answers its health itself: a redirect is something else's (and a hop that
         // timed out connecting would look like the first one, so the request went again, #308).
@@ -137,8 +144,27 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> Probe {
         .timeout_global(Some(Duration::from_secs(10)))
         .proxy(proxy)
         .build();
-    let agent: ureq::Agent = agent.into();
-    let (answer, _) = ask_health(found, || agent.get(&health).call());
+    let (agent, retry_connect) = match found {
+        Found::Listener(Some(conn)) => {
+            // Reuse the loopback socket `refused::check` already connected (#308): no throwaway
+            // connection hits the listener's accept queue, so no second attempt is needed.
+            let connector =
+                ().chain(PreconnectedConnector::new(conn))
+                    .chain(ureq::unversioned::transport::TcpConnector::default())
+                    .chain(ureq::unversioned::transport::RustlsConnector::default());
+            (
+                ureq::Agent::with_parts(
+                    config,
+                    connector,
+                    ureq::unversioned::resolver::DefaultResolver::default(),
+                ),
+                false,
+            )
+        }
+        Found::Listener(None) => (config.into(), true),
+        Found::Unsure | Found::Nothing => (config.into(), false),
+    };
+    let (answer, _) = ask_health(retry_connect, || agent.get(health).call());
     let Ok(mut r) = answer else { return Probe::Nothing };
     // A FOLO server's health, not any web server that answers 200 (a dev server's index page).
     if r.status().is_success() && json::<Health>(r.body_mut(), BODY_LIMIT).is_ok_and(|h| h.status == "ok") {
@@ -148,21 +174,17 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> Probe {
     }
 }
 
-/// The health request (`call`), and how many times it was sent. The check's own connection, closed
-/// without a request, waits in the server's accept queue until the server takes it: with one free slot left
-/// there, this request's connection then finds the queue full (on Windows it is turned away and times out
-/// before its next attempt). So when the check saw a listener and the request could not connect, it is sent
-/// once more (the server takes its queue meanwhile) before nobody is said to be there. Only a failure to
-/// connect is tried again (#308): an answer is final, and so is a connection that was made and then reset,
-/// aborted or timed out, which a second attempt would only make wait as long again (a listener that accepts
-/// and resets after `t` cost `2t`) or send twice. The call follows no redirect (`probe_through`), so a
-/// failure to connect is always the first hop's.
+/// The health request (`call`), and how many times it was sent. When `retry_connect` is set (the
+/// listening check saw a listener but could not hand its socket over, so a closed empty connection may
+/// still occupy the last accept-queue slot) and the first attempt never connected, it is sent once more
+/// before nobody is said to be there. Only a failure to connect is tried again (#308): an answer is
+/// final, and so is a connection that was made and then reset, aborted or timed out.
 pub(super) fn ask_health<T>(
-    found: Found,
+    retry_connect: bool,
     mut call: impl FnMut() -> Result<T, ureq::Error>,
 ) -> (Result<T, ureq::Error>, u32) {
     let answer = call();
-    if found == Found::Listener && answer.as_ref().is_err_and(not_connected) {
+    if retry_connect && answer.as_ref().is_err_and(not_connected) {
         return (call(), 2);
     }
     (answer, 1)
@@ -171,6 +193,145 @@ pub(super) fn ask_health<T>(
 /// Whether a call never connected: the connect limit passed, or the client found no connection to make.
 fn not_connected(e: &ureq::Error) -> bool {
     matches!(e, ureq::Error::Timeout(ureq::Timeout::Connect) | ureq::Error::ConnectionFailed)
+}
+
+/// Hands a single already-connected loopback socket from [`super::refused::check`] into a `ureq`
+/// connector chain, falling through to [`ureq::unversioned::transport::TcpConnector`] if empty.
+#[derive(Debug)]
+struct PreconnectedConnector {
+    conn: Mutex<Option<ConnectedStream>>,
+}
+
+impl PreconnectedConnector {
+    fn new(conn: ConnectedStream) -> Self {
+        Self { conn: Mutex::new(Some(conn)) }
+    }
+}
+
+impl ureq::unversioned::transport::Connector<()> for PreconnectedConnector {
+    type Out = PreconnectedTransport;
+
+    fn connect(
+        &self,
+        details: &ureq::unversioned::transport::ConnectionDetails,
+        _chained: Option<()>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        let Some(conn) = self.conn.lock().unwrap().take() else {
+            return Ok(None);
+        };
+        if details.config.no_delay() {
+            let _ = conn.stream().set_nodelay(true);
+        }
+        let buffers = ureq::unversioned::transport::LazyBuffers::new(
+            details.config.input_buffer_size(),
+            details.config.output_buffer_size(),
+        );
+        let transport = PreconnectedTransport {
+            stream: Arc::new(conn),
+            buffers,
+            timeout_read: None,
+            timeout_write: None,
+        };
+        let handle =
+            Arc::downgrade(&transport.stream) as Weak<dyn ureq::unversioned::transport::ShutdownHandle>;
+        (details.register_shutdown)(handle)?;
+        Ok(Some(transport))
+    }
+}
+
+/// One-shot `ureq` [`Transport`](ureq::unversioned::transport::Transport) over a [`ConnectedStream`].
+#[derive(Debug)]
+struct PreconnectedTransport {
+    stream: Arc<ConnectedStream>,
+    buffers: ureq::unversioned::transport::LazyBuffers,
+    timeout_read: Option<Duration>,
+    timeout_write: Option<Duration>,
+}
+
+impl PreconnectedTransport {
+    fn apply_timeout(
+        &self,
+        cached: &mut Option<Duration>,
+        next: Option<Duration>,
+        setter: fn(&std::net::TcpStream, Option<Duration>) -> std::io::Result<()>,
+    ) -> Result<(), ureq::Error> {
+        if next != *cached {
+            setter(self.stream.stream(), next)?;
+            *cached = next;
+        }
+        Ok(())
+    }
+}
+
+impl ureq::unversioned::transport::Transport for PreconnectedTransport {
+    fn buffers(&mut self) -> &mut dyn ureq::unversioned::transport::Buffers {
+        &mut self.buffers
+    }
+
+    fn transmit_output(
+        &mut self,
+        amount: usize,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<(), ureq::Error> {
+        let timeout = timeout.for_write();
+        if timeout.after.is_zero() {
+            return Err(ureq::Error::Timeout(timeout.reason));
+        }
+        let limit = timeout.not_zero().map(|d| *d);
+        let mut cached = self.timeout_write;
+        self.apply_timeout(&mut cached, limit, std::net::TcpStream::set_write_timeout)?;
+        self.timeout_write = cached;
+        let output = &self.buffers.output()[..amount];
+        match self.stream.stream().write_all(output) {
+            Ok(()) => Ok(()),
+            Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                Err(ureq::Error::Timeout(timeout.reason))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn await_input(
+        &mut self,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<bool, ureq::Error> {
+        let timeout = timeout.for_read();
+        if timeout.after.is_zero() {
+            return Err(ureq::Error::Timeout(timeout.reason));
+        }
+        let limit = timeout.not_zero().map(|d| *d);
+        let mut cached = self.timeout_read;
+        self.apply_timeout(&mut cached, limit, std::net::TcpStream::set_read_timeout)?;
+        self.timeout_read = cached;
+        let started = Instant::now();
+        let buf = self.buffers.input_append_buf();
+        let amount = loop {
+            match self.stream.stream().read(buf) {
+                Ok(n) => break n,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {
+                    if let Some(total) = limit {
+                        let left = total.saturating_sub(started.elapsed());
+                        if left.is_zero() {
+                            return Err(ureq::Error::Timeout(timeout.reason));
+                        }
+                        self.stream.stream().set_read_timeout(Some(left))?;
+                        self.timeout_read = Some(left);
+                    }
+                }
+                Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                    return Err(ureq::Error::Timeout(timeout.reason));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
+        self.buffers.input_appended(amount);
+        Ok(amount > 0)
+    }
+
+    fn is_open(&mut self) -> bool {
+        // Single-use probe transport: never returned to a connection pool.
+        false
+    }
 }
 
 /// Make the OS stop `child` when this process exits, even if it is killed (no Drop runs then).
@@ -495,5 +656,101 @@ mod tests {
     fn spawned_server_uses_the_real_store_not_mock() {
         assert_eq!(SERVE_ARGS, ["--json", "serve", "--port", "0"]);
         assert!(!SERVE_ARGS.contains(&"--mock"));
+    }
+
+    /// #308 item 1: a server with a 1-slot accept queue that has not called `accept()` yet when
+    /// `refused::check` connects still answers `Probe::Folo` on the very first accepted connection,
+    /// with zero throwaway empty connections and no fixed sleeps.
+    #[cfg(windows)]
+    #[test]
+    fn a_server_whose_queue_the_check_filled_is_still_found() {
+        use std::io::{Read, Write};
+        fn read_head(sock: &mut std::net::TcpStream) -> String {
+            let mut req = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") && req.len() < 4096 {
+                match sock.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
+            String::from_utf8_lossy(&req).into_owned()
+        }
+        let body = r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#;
+        let health = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+
+        // 1. Strict 1-slot backlog proof: `check` connects BEFORE `accept()` is even spawned, then
+        // `probe_with_found` sends `GET /api/health` over that same queued socket.
+        let listener = super::super::refused::ports::listener(1);
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}");
+        let health_url = format!("{url}/api/health");
+        let found = super::super::refused::check(&health_url);
+        assert!(matches!(found, Found::Listener(Some(_))), "expected reusable socket");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reply = health.clone();
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else { return };
+            let head = read_head(&mut sock);
+            let _ = tx.send(head);
+            let _ = sock.write_all(&reply);
+            let _ = sock.flush();
+        });
+        assert_eq!(probe_with_found(&url, &health_url, None, found), Probe::Folo);
+        let first = rx.recv().unwrap();
+        assert!(first.starts_with("GET /api/health "), "queued socket carried health request: {first:?}");
+
+        // 2. End-to-end `probe_through`: the very first accepted connection carries `GET /api/health`.
+        let listener = super::super::refused::ports::listener(1);
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let Ok((mut sock, _)) = listener.accept() else { return };
+            let head = read_head(&mut sock);
+            let _ = tx.send(head);
+            let _ = sock.write_all(&health);
+            let _ = sock.flush();
+        });
+        assert_eq!(probe_through(&format!("http://{addr}"), None), Probe::Folo);
+        let first = rx.recv().unwrap();
+        assert!(first.starts_with("GET /api/health "), "first connection carried health request: {first:?}");
+    }
+
+    /// The probe's fallback retry (#308), with scripted answers: taken once, and only when
+    /// `retry_connect` is true and the first attempt never connected; a connection that was made
+    /// and then reset, or timed out reading, is final.
+    #[test]
+    fn only_a_connection_never_made_is_asked_again() {
+        use std::io::{Error as IoError, ErrorKind};
+        type Answer = Result<&'static str, ureq::Error>;
+        let scripted = |first: fn() -> Answer| {
+            let mut calls = 0;
+            move || {
+                calls += 1;
+                if calls == 1 { first() } else { Ok("health") }
+            }
+        };
+        let connect_timeout: fn() -> Answer = || Err(ureq::Error::Timeout(ureq::Timeout::Connect));
+        let failed: fn() -> Answer = || Err(ureq::Error::ConnectionFailed);
+        for first in [connect_timeout, failed] {
+            let (answer, calls) = ask_health(true, scripted(first));
+            assert_eq!((answer.ok(), calls), (Some("health"), 2), "fallback retry: once more");
+            let (answer, calls) = ask_health(false, scripted(first));
+            assert!(answer.is_err() && calls == 1, "no throwaway listener: no second attempt");
+        }
+        let reset: fn() -> Answer = || Err(ureq::Error::Io(IoError::from(ErrorKind::ConnectionReset)));
+        let aborted: fn() -> Answer = || Err(ureq::Error::Io(IoError::from(ErrorKind::ConnectionAborted)));
+        let refused: fn() -> Answer = || Err(ureq::Error::Io(IoError::from(ErrorKind::ConnectionRefused)));
+        let read_timeout: fn() -> Answer = || Err(ureq::Error::Timeout(ureq::Timeout::RecvResponse));
+        for first in [reset, aborted, refused, read_timeout] {
+            let (answer, calls) = ask_health(true, scripted(first));
+            assert!(answer.is_err() && calls == 1, "{:?}: one attempt", answer);
+        }
+        let (answer, calls) = ask_health(true, scripted(|| Ok("health")));
+        assert_eq!((answer.ok(), calls), (Some("health"), 1));
     }
 }
