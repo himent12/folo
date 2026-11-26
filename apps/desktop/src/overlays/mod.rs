@@ -152,6 +152,11 @@ impl FoloApp {
     pub fn overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let open = self.any_overlay();
         let mut out = Vec::new();
+        // Toasts sit above the page but beneath modal overlays so a notification from an earlier
+        // action never covers a dialog's footer buttons or intercepts its clicks.
+        if !self.toasts.is_empty() {
+            out.push(self.toasts_view(window, cx));
+        }
         // The last one pushed is on top (toasts aside: they take no presses for it).
         let mut top = None;
         if self.inspector.is_some() {
@@ -198,9 +203,6 @@ impl FoloApp {
         }
         debug_assert_eq!(open, top.is_some(), "any_overlay names every overlay drawn here");
         self.overlay_presses.shown(top);
-        if !self.toasts.is_empty() {
-            out.push(self.toasts_view(window, cx));
-        }
         out
     }
 

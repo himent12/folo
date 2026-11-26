@@ -210,3 +210,267 @@ fn demo_data_offers_no_resume_and_says_why() {
     let keys = drawn_keys(&mut app, window);
     assert!(keys.iter().any(|k| k == "run-resume"), "{keys:?}");
 }
+
+#[test]
+fn clone_config_preserves_gpu1_when_available_and_blocks_when_unavailable() {
+    use crate::api::GpuInfo;
+
+    let (mut app, window) = open();
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+
+    let mut cfg = drive(&mut app, window, |this, _, _| this.store.runs.ready().unwrap()[0].config.clone());
+    cfg.device = "gpu:1".into();
+
+    // 1. On a 2-GPU server, cloning `gpu:1` preserves `"gpu:1"` in the submitted config.
+    drive(&mut app, window, {
+        let cfg = cfg.clone();
+        move |this, w, cx| {
+            let sys = this.store.system.ready_mut().unwrap();
+            let g0 = sys.gpus[0].clone();
+            sys.gpus = vec![g0.clone(), GpuInfo { name: "RTX 4090 Secondary".into(), ..g0 }];
+            this.open_new_run_from(&cfg, None, w, cx);
+        }
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, cx| {
+        assert_eq!(this.nr_device_gone(cx), None, "gpu:1 is available on a 2-GPU server");
+        let out = this.form_config(cx).expect("form config built");
+        assert_eq!(out.device, "gpu:1", "cloned gpu:1 must not silently revert to auto");
+    });
+
+    // 1b. If the server's estimator rejects `gpu:1` with `device_not_found` (e.g. a 2-adapter
+    //     machine whose backend only initialized `gpu:0`), Start is disabled and submission blocked.
+    drive(&mut app, window, |this, w, cx| {
+        let mut cfg_est = this.form_config(cx).unwrap();
+        cfg_est.name = "estimate".into();
+        let key = serde_json::to_string(&cfg_est).unwrap();
+        this.nr_estimate =
+            Some((key, Load::Failed(crate::api::ApiError::new("device_not_found", "GPU 1 has no backend"))));
+        let why = this.nr_device_gone(cx).expect("server device_not_found blocks gpu:1");
+        assert!(why.contains("GPU 1"), "{why}");
+        this.submit_new_run(w, cx);
+        assert!(!this.new_run.as_ref().unwrap().submitting);
+    });
+
+    // 1c. Cloning valid server device aliases (`gpu`, `cuda`, `CUDA:0`, `CUDA:1`, `  CPU  `, `""`)
+    //     normalizes identically to `folo_vision::train::config::resolve_device`.
+    for (raw, expected) in [
+        ("gpu", "gpu:0"),
+        ("cuda", "gpu:0"),
+        ("CUDA:0", "gpu:0"),
+        ("  CPU  ", "cpu"),
+        ("", "auto"),
+        ("CUDA:1", "gpu:1"),
+    ] {
+        let mut alias_cfg = cfg.clone();
+        alias_cfg.device = raw.into();
+        drive(&mut app, window, move |this, w, cx| {
+            this.nr_estimate = None;
+            this.open_new_run_from(&alias_cfg, None, w, cx);
+            assert_eq!(this.nr_device_gone(cx), None, "alias `{raw}` must be recognized");
+            assert_eq!(this.form_config(cx).unwrap().device, expected, "alias `{raw}`");
+        });
+    }
+
+    // 2. On a 1-GPU server, cloning `gpu:1` flags it unavailable and blocks submission until changed.
+    let runs_before = drive(&mut app, window, |this, w, cx| {
+        let sys = this.store.system.ready_mut().unwrap();
+        sys.gpus.truncate(1);
+        this.store.last_gpu_count = Some(1);
+        this.nr_estimate = None;
+        this.nr_estimate_last = None;
+        this.open_new_run_from(&cfg, None, w, cx);
+        this.store.runs.ready().unwrap().len()
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        let why = this.nr_device_gone(cx).expect("gpu:1 unavailable on 1-GPU server");
+        assert!(why.contains("GPU 1"), "message names GPU 1: {why}");
+        assert!(this.nr_estimate.is_none(), "no estimate sent for statically unavailable device");
+        this.submit_new_run(w, cx);
+        assert!(!this.new_run.as_ref().unwrap().submitting, "submission blocked while device is unavailable");
+        // Switching to Auto clears custom_device and lifts the block.
+        this.new_run.as_mut().unwrap().pick_device(0);
+        assert_eq!(this.nr_device_gone(cx), None);
+        assert_eq!(this.form_config(cx).unwrap().device, "auto");
+        assert_eq!(this.store.runs.ready().unwrap().len(), runs_before);
+    });
+
+    // 3. Unknown device string is also flagged unavailable instead of silently falling back to auto.
+    let mut bad = cfg;
+    bad.device = "mps".into();
+    drive(&mut app, window, move |this, w, cx| {
+        this.open_new_run_from(&bad, None, w, cx);
+        let why = this.nr_device_gone(cx).expect("unknown device blocks submission");
+        assert!(why.contains("mps"), "{why}");
+        assert_eq!(this.form_config(cx).unwrap().device, "mps");
+    });
+}
+
+#[test]
+fn remote_export_offers_download_and_local_export_offers_show_in_folder() {
+    use std::sync::Arc;
+
+    use crate::api::http::HttpBackend;
+    use crate::api::{ApiResult, Backend, ExportResult};
+    use crate::app::ServerMode;
+
+    // 1. HttpBackend remote detection & download URL formatting.
+    let remote_http = HttpBackend::new("http://192.168.1.50:7878");
+    assert!(remote_http.is_remote());
+    assert_eq!(
+        remote_http.export_download_url("mdl 1", "onnx").as_deref(),
+        Some("http://192.168.1.50:7878/api/models/mdl%201/weights?format=onnx")
+    );
+    assert_eq!(
+        remote_http.export_download_url("mdl_1", "folo-f16").as_deref(),
+        Some("http://192.168.1.50:7878/api/models/mdl_1/weights?format=f16")
+    );
+    assert!(!HttpBackend::new("http://127.0.0.1:7878").is_remote());
+
+    // Minimal wrapper over MockBackend to control export path, remote flag, and download URL.
+    struct ExportStub {
+        inner: crate::api::mock::MockBackend,
+        remote: bool,
+        path: String,
+        download_url: Option<String>,
+    }
+    impl Backend for ExportStub {
+        fn describe(&self) -> String {
+            self.inner.describe()
+        }
+        fn now(&self) -> i64 {
+            self.inner.now()
+        }
+        fn health(&self) -> ApiResult<crate::api::Health> {
+            self.inner.health()
+        }
+        fn system(&self) -> ApiResult<crate::api::SystemResponse> {
+            self.inner.system()
+        }
+        fn datasets(&self) -> ApiResult<Vec<crate::api::Dataset>> {
+            self.inner.datasets()
+        }
+        fn dataset(&self, id: &str) -> ApiResult<crate::api::Dataset> {
+            self.inner.dataset(id)
+        }
+        fn images(&self, id: &str, q: &crate::api::ImageQuery) -> ApiResult<crate::api::ImagePage> {
+            self.inner.images(id, q)
+        }
+        fn image(&self, d: &str, i: &str, t: Option<u32>) -> ApiResult<crate::api::ImageData> {
+            self.inner.image(d, i, t)
+        }
+        fn models(&self) -> ApiResult<Vec<crate::api::Model>> {
+            self.inner.models()
+        }
+        fn model_eval(&self, id: &str) -> ApiResult<crate::api::ModelEval> {
+            self.inner.model_eval(id)
+        }
+        fn export_model(&self, _: &str, _: &str) -> ApiResult<ExportResult> {
+            Ok(ExportResult { path: self.path.clone(), bytes: 4096 })
+        }
+        fn is_remote(&self) -> bool {
+            self.remote
+        }
+        fn export_download_url(&self, _: &str, _: &str) -> Option<String> {
+            self.download_url.clone()
+        }
+        fn runs(&self) -> ApiResult<Vec<crate::api::Run>> {
+            self.inner.runs()
+        }
+        fn run(&self, id: &str) -> ApiResult<crate::api::Run> {
+            self.inner.run(id)
+        }
+        fn create_run(&self, c: crate::api::TrainConfig) -> ApiResult<crate::api::Run> {
+            self.inner.create_run(c)
+        }
+        fn stop_run(&self, id: &str) -> ApiResult<crate::api::Run> {
+            self.inner.stop_run(id)
+        }
+        fn delete_run(&self, id: &str) -> ApiResult<()> {
+            self.inner.delete_run(id)
+        }
+        fn delete_dataset(&self, id: &str, f: bool) -> ApiResult<()> {
+            self.inner.delete_dataset(id, f)
+        }
+        fn metrics(&self, id: &str) -> ApiResult<crate::api::RunMetrics> {
+            self.inner.metrics(id)
+        }
+        fn samples(&self, id: &str, e: Option<u32>) -> ApiResult<crate::api::RunSamples> {
+            self.inner.samples(id, e)
+        }
+        fn logs(&self, id: &str) -> ApiResult<crate::api::RunLogs> {
+            self.inner.logs(id)
+        }
+        fn events(&self, id: &str) -> ApiResult<crate::api::Subscription> {
+            self.inner.events(id)
+        }
+        fn predict(&self, req: &crate::api::PredictRequest) -> ApiResult<crate::api::PredictResponse> {
+            self.inner.predict(req)
+        }
+    }
+
+    // 2. Remote export keeps POSIX server path unmangled and offers Download (not Show in folder).
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, _, cx| {
+        this.set_backend(
+            Arc::new(ExportStub {
+                inner: crate::api::mock::MockBackend::new(4200, true),
+                remote: true,
+                path: "/srv/folo/exports/round4.onnx".into(),
+                download_url: Some("http://gpu-box:7878/api/models/m1/weights?format=onnx".into()),
+            }),
+            ServerMode::Local,
+            cx,
+        );
+        this.export_model("m1".into(), "onnx", cx);
+    });
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let toast = this.toasts.last().expect("export toast shown");
+        assert_eq!(toast.title.as_ref(), "Export complete");
+        assert!(
+            toast.body.as_deref().unwrap_or("").starts_with("/srv/folo/exports/round4.onnx"),
+            "remote POSIX path preserved verbatim: {:?}",
+            toast.body
+        );
+        assert_eq!(
+            toast.action.as_ref().map(|(lbl, _)| lbl.as_ref()),
+            Some("Download"),
+            "remote export offers Download, not Show in folder"
+        );
+    });
+
+    // 3. Local export whose output exists on disk offers Show in folder.
+    let dir = folo_test_support::TestDir::new("export-local");
+    let local_file = dir.path().join("round4.onnx");
+    std::fs::write(&local_file, b"onnx").unwrap();
+    let local_path = local_file.to_string_lossy().into_owned();
+    drive(&mut app, window, move |this, _, cx| {
+        this.toasts.clear();
+        this.set_backend(
+            Arc::new(ExportStub {
+                inner: crate::api::mock::MockBackend::new(4200, true),
+                remote: false,
+                path: local_path,
+                download_url: Some("http://127.0.0.1:7878/api/models/m1/weights?format=onnx".into()),
+            }),
+            ServerMode::Local,
+            cx,
+        );
+        this.export_model("m1".into(), "onnx", cx);
+    });
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let toast = this.toasts.last().expect("local export toast shown");
+        assert_eq!(
+            toast.action.as_ref().map(|(lbl, _)| lbl.as_ref()),
+            Some("Show in folder"),
+            "existing local export offers Show in folder"
+        );
+    });
+}

@@ -80,8 +80,8 @@ pub use connection::{Connector, Reason};
 pub use focus::focus_ring;
 pub(crate) use focus::reveal_bounds_in_scroll;
 pub use forms::{
-    ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, format_lr,
-    retry_batch, synth_errors,
+    ARCHS, BATCHES, IMGSZ, NewRunForm, SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, device_label, format_lr,
+    gpu_index, retry_batch, synth_errors,
 };
 pub use playground::{IMAGE_FORMATS, PLAY_CONF_FLOOR};
 pub use preferences::{follow_system_appearance, is_dark};

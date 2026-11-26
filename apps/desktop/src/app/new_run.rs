@@ -13,7 +13,7 @@ use crate::store::*;
 use crate::ui::*;
 
 use super::forms::{
-    ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, OPTIMIZERS, again_run_name, auto_close_mosaic, batch_index,
+    ARCHS, BATCHES, IMGSZ, NewRunForm, OPTIMIZERS, again_run_name, auto_close_mosaic, batch_index,
     carry_over, free_run_name, parse_epochs, parse_lr, run_name_error,
 };
 use super::{FoloApp, Route, RunFilter};
@@ -96,7 +96,20 @@ impl FoloApp {
                     f.custom_imgsz = Some(config.imgsz);
                 }
             }
-            f.device = DEVICES.iter().position(|d| *d == config.device).unwrap_or(0);
+            match super::forms::parse_device(&config.device) {
+                super::forms::ParsedDevice::Preset(i) => {
+                    f.device = i;
+                    f.custom_device = None;
+                }
+                super::forms::ParsedDevice::Gpu(i) => {
+                    f.device = 0;
+                    f.custom_device = Some(format!("gpu:{i}"));
+                }
+                super::forms::ParsedDevice::Unknown(s) => {
+                    f.device = 0;
+                    f.custom_device = Some(s);
+                }
+            }
             f.prefill_optimizer(config.optimizer);
             f.lr0 = config.lr0;
             let (ei, li) = (f.epochs_input.clone(), f.lr_input.clone());
@@ -339,6 +352,7 @@ impl FoloApp {
             imgsz,
             custom_imgsz: None,
             device: 0,
+            custom_device: None,
             optimizer: 0,
             optimizer_unknown: false,
             lr0: 0.01,
@@ -402,7 +416,8 @@ impl FoloApp {
             form.max_hours,
         );
         // On a cloud instance mixed precision is checked when it boots, not against this machine.
-        let amp_ok = compute.is_some() || self.amp_blocked(DEVICES[form.device]).is_none();
+        let device_val = form.device_value();
+        let amp_ok = compute.is_some() || self.amp_blocked(device_val).is_none();
         let ds = self.store.dataset_summary(&form.dataset)?;
         Some(carry_over(
             form.base.as_ref(),
@@ -414,7 +429,7 @@ impl FoloApp {
                 batch: form.batch_value(),
                 imgsz: form.imgsz_value(),
                 // The worker picks its GPU.
-                device: if compute.is_some() { "auto".into() } else { DEVICES[form.device].into() },
+                device: if compute.is_some() { "auto".into() } else { device_val.into() },
                 optimizer: OPTIMIZERS[form.optimizer],
                 lr0: form.lr0,
                 weights: form.weights.clone(),
@@ -493,6 +508,14 @@ impl FoloApp {
         }
     }
 
+    /// Stable JSON cache key for `POST /api/runs/estimate` (name normalized away).
+    fn estimate_key(&self, cx: &App) -> Option<(String, TrainConfig)> {
+        let mut config = self.form_config(cx)?;
+        config.name = "estimate".into();
+        let key = serde_json::to_string(&config).unwrap_or_default();
+        Some((key, config))
+    }
+
     /// Asks the server how long the New run form's config would take (servers with
     /// `run_estimate`), once per distinct config.
     pub fn ensure_estimate(&mut self, cx: &mut Context<Self>) {
@@ -507,6 +530,7 @@ impl FoloApp {
                 || (f.lr_invalid && f.optimizer != 0)
                 || f.optimizer_blocks().is_some()
         }) || self.compute_blocked().is_some()
+            || self.nr_device_local_gone().is_some()
         {
             // Cancel a pending ask; an unanswered key would otherwise stay "loading" for good.
             self.nr_estimate_gen += 1;
@@ -515,10 +539,7 @@ impl FoloApp {
             }
             return;
         }
-        let Some(mut config) = self.form_config(cx) else { return };
-        // The name doesn't change the estimate (and an empty one mustn't fail it).
-        config.name = "estimate".into();
-        let key = serde_json::to_string(&config).unwrap_or_default();
+        let Some((key, config)) = self.estimate_key(cx) else { return };
         if self.nr_estimate.as_ref().is_some_and(|(k, _)| *k == key) {
             return;
         }
@@ -567,7 +588,7 @@ impl FoloApp {
         let compute_blocked = self.compute_blocked().is_some();
         let dataset_blocked = self.dataset_blocked().is_some();
         let weights_gone = self.nr_weights_gone().is_some();
-        let device_gone = self.nr_device_gone().is_some();
+        let device_gone = self.nr_device_gone(cx).is_some();
         let Some(form) = self.new_run.as_mut() else { return };
         // Auto sets its own rate, so an unparsed rate entry doesn't block it.
         let lr_invalid = form.lr_invalid && form.optimizer != 0;
@@ -734,14 +755,58 @@ impl FoloApp {
         (gpus == 0).then_some("This server has no GPU: Auto and CPU train on its CPU")
     }
 
-    /// The form's device is GPU 0 on a server without one (prefilled from a run that used it, or
-    /// picked before `/system` answered): Start waits for Auto or CPU, and this says why. A cloud
-    /// run's device is its instance's, not this.
-    pub fn nr_device_gone(&self) -> Option<&'static str> {
+    /// Static check before querying `/api/runs/estimate`: GPU index past `/system`'s count, or an
+    /// unrecognized device string.
+    fn nr_device_local_gone(&self) -> Option<String> {
         let f = self.new_run.as_ref()?;
         let cloud = self.cloud_on() && f.run_on.is_some();
-        (DEVICES[f.device] == "gpu:0" && !cloud && self.nr_no_gpu().is_some())
-            .then_some("This server has no GPU: pick Auto or CPU")
+        if cloud {
+            return None;
+        }
+        let dev = f.device_value();
+        let gpus = self.store.system.ready().map(|s| s.gpus.len()).or(self.store.last_gpu_count);
+        match super::forms::parse_device(dev) {
+            super::forms::ParsedDevice::Preset(0 | 2) => None,
+            super::forms::ParsedDevice::Preset(1) if gpus == Some(0) => {
+                Some("This server has no GPU: pick Auto or CPU".into())
+            }
+            super::forms::ParsedDevice::Preset(1) => None,
+            super::forms::ParsedDevice::Gpu(_) if gpus == Some(0) => {
+                Some("This server has no GPU: pick Auto or CPU".into())
+            }
+            super::forms::ParsedDevice::Gpu(idx) if gpus.is_some_and(|n| idx >= n) => {
+                Some(format!("GPU {idx} isn't available on this server: pick Auto, GPU 0, or CPU"))
+            }
+            super::forms::ParsedDevice::Gpu(_) => None,
+            super::forms::ParsedDevice::Unknown(raw) if gpus == Some(0) => {
+                Some(format!("Device '{raw}' isn't available on this server: pick Auto or CPU"))
+            }
+            super::forms::ParsedDevice::Unknown(raw) => {
+                Some(format!("Device '{raw}' isn't available on this server: pick Auto, GPU 0, or CPU"))
+            }
+            super::forms::ParsedDevice::Preset(_) => None,
+        }
+    }
+
+    /// The form's device isn't available on this server — either statically (GPU out of range /
+    /// unknown string) or because the server's `/api/runs/estimate` rejected it with
+    /// `device_not_found` (e.g. a secondary adapter with no registered training backend). Start
+    /// waits until an available device is picked. A cloud run's device is its instance's, not this.
+    pub fn nr_device_gone(&self, cx: &App) -> Option<String> {
+        if let Some(why) = self.nr_device_local_gone() {
+            return Some(why);
+        }
+        let f = self.new_run.as_ref()?;
+        if self.cloud_on() && f.run_on.is_some() {
+            return None;
+        }
+        let (key, _) = self.estimate_key(cx)?;
+        match &self.nr_estimate {
+            Some((k, Load::Failed(e))) if *k == key && e.code == "device_not_found" => {
+                Some(e.message.clone())
+            }
+            _ => None,
+        }
     }
 }
 

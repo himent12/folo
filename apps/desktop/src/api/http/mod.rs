@@ -139,6 +139,18 @@ impl Backend for HttpBackend {
         self.post(&format!("/models/{}/export", seg(id)), &folo_api::ExportRequest { format })
     }
 
+    fn is_remote(&self) -> bool {
+        self.not_an_address.is_none() && !is_loopback(&self.base)
+    }
+
+    fn export_download_url(&self, id: &str, format: &str) -> Option<String> {
+        if self.not_an_address.is_some() {
+            return None;
+        }
+        let q = if format == "onnx" { "onnx" } else { "f16" };
+        Some(self.url(&format!("/models/{}/weights?format={q}", seg(id))))
+    }
+
     fn runs(&self) -> ApiResult<Vec<Run>> {
         self.get::<folo_api::RunList>("/runs").map(|l| l.runs)
     }

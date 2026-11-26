@@ -68,13 +68,33 @@ pub(crate) fn sort_leaderboard(rows: &mut [(BenchEntry, Option<usize>)], sort: O
     });
 }
 
-/// Formats `val - base` with `decimals` places and a semantic tone, never emitting signed zeros.
+/// Scales `v` to the exact integer represented by `format!("{v:.decimals$}")`, matching the
+/// displayed table cells so `baseline + delta` always agrees with the rounded numbers on screen.
+fn displayed_scaled(v: f32, decimals: usize) -> i64 {
+    if !v.is_finite() {
+        return 0;
+    }
+    let formatted = format!("{v:.decimals$}");
+    let neg = formatted.starts_with('-');
+    let digits: String = formatted.chars().filter(char::is_ascii_digit).collect();
+    let mag = digits.parse::<i64>().unwrap_or(0);
+    if neg { -mag } else { mag }
+}
+
+/// Formats `displayed(val) - displayed(base)` with `decimals` places and a semantic tone, never
+/// emitting signed zeros and always staying consistent with the rounded values shown in each cell.
 pub(crate) fn delta_text(val: f32, base: f32, decimals: usize) -> (String, Tone) {
-    let diff = val - base;
-    let mag = format!("{:.decimals$}", diff.abs());
-    if mag.bytes().all(|b| b == b'0' || b == b'.') {
+    let diff = displayed_scaled(val, decimals) - displayed_scaled(base, decimals);
+    let scale = 10_i64.pow(decimals as u32);
+    let abs = diff.unsigned_abs() as i64;
+    let mag = if decimals == 0 {
+        format!("{abs}")
+    } else {
+        format!("{}.{:0width$}", abs / scale, abs % scale, width = decimals)
+    };
+    if diff == 0 {
         (mag, Tone::Neutral)
-    } else if diff > 0. {
+    } else if diff > 0 {
         (format!("+{mag}"), Tone::Success)
     } else {
         (format!("−{mag}"), Tone::Danger)
@@ -802,9 +822,14 @@ mod tests {
         assert_eq!(delta_text(82.0, 75.0, 0), ("+7".to_string(), Tone::Success));
         assert_eq!(delta_text(70.0, 75.0, 0), ("−5".to_string(), Tone::Danger));
         assert_eq!(delta_text(75.3, 75.0, 0), ("0".to_string(), Tone::Neutral));
-        // Banker's rounding at exact ±0.5 rounds to 0 and must stay neutral, not "+0"/"−0".
-        assert_eq!(delta_text(75.5, 75.0, 0), ("0".to_string(), Tone::Neutral));
-        assert_eq!(delta_text(74.5, 75.0, 0), ("0".to_string(), Tone::Neutral));
+        // Displayed 96 vs 97 (96.4 vs 96.6) must report −1, never 0.
+        assert_eq!(delta_text(96.4, 96.6, 0), ("−1".to_string(), Tone::Danger));
+        assert_eq!(delta_text(96.6, 96.4, 0), ("+1".to_string(), Tone::Success));
+        // Banker's rounding at exact ±0.5 rounds displayed 75.5 -> 76 and 74.5 -> 74 against 75.
+        assert_eq!(delta_text(75.5, 75.0, 0), ("+1".to_string(), Tone::Success));
+        assert_eq!(delta_text(74.5, 75.0, 0), ("−1".to_string(), Tone::Danger));
+        // Equal displayed values stay neutral without signed zeros.
+        assert_eq!(delta_text(96.51, 96.59, 0), ("0".to_string(), Tone::Neutral));
     }
 
     #[test]

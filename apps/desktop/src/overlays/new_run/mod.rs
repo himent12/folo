@@ -13,7 +13,7 @@ use folo_ui::{
     Styled, Window, div, px,
 };
 
-use crate::app::{ARCHS, BATCHES, DEVICES, FoloApp, IMGSZ, act};
+use crate::app::{ARCHS, BATCHES, FoloApp, IMGSZ, act, device_label, gpu_index};
 use crate::theme::{Theme, radius, theme, ty};
 use crate::ui::*;
 
@@ -111,6 +111,8 @@ impl FoloApp {
             f.mixup,
             f.fliplr,
         );
+        let device_val = f.device_value().to_string();
+        let custom_device = f.custom_device.clone();
         let name_input = f.name.clone();
         let error = f.error.clone();
         let submitting = f.submitting;
@@ -143,7 +145,7 @@ impl FoloApp {
         // control before it, so keys keep working. Before the controls are built, so that one
         // draws its ring this frame.
         // A cloud run's instance checks mixed precision when it boots: nothing here gates it.
-        let amp_why = if cloud.is_some() { None } else { self.amp_blocked(DEVICES[device]) };
+        let amp_why = if cloud.is_some() { None } else { self.amp_blocked(&device_val) };
         if amp_why.is_some() && self.focus.borrow().get("nr-amp").is_some_and(|f| f.is_focused(window)) {
             // The control before it in Schedule: the learning rate, or the optimizer when Auto
             // sets the rate (the field is read-only then).
@@ -249,15 +251,39 @@ impl FoloApp {
             },
         );
         // A server without a GPU refuses gpu:0 at Start: not offered (arrow keys skip it).
-        let gpu_off = [None, self.nr_no_gpu().map(SharedString::from), None];
-        // GPU 0 still picked on such a server (prefilled from a run that had it, or picked before
-        // the server said): Start waits for Auto or CPU, and this says so under the choice.
-        let device_gone = self.nr_device_gone();
-        let device_seg = div()
-            .flex()
-            .flex_col()
-            .gap(px(6.))
-            .child(self.segmented_fill_with(
+        // A cloned device (such as gpu:1) is preserved as its own segment when available, or marked
+        // unavailable with a blocking reason until the user picks an available device.
+        let device_gone = self.nr_device_gone(cx);
+        let device_ctl = if let Some(cd) = custom_device {
+            let custom_lbl = device_label(&cd);
+            let labels = ["Auto", "GPU 0", custom_lbl.as_str(), "CPU"];
+            let off = [
+                None,
+                self.nr_no_gpu().map(SharedString::from),
+                device_gone.clone().map(SharedString::from),
+                None,
+            ];
+            self.segmented_fill_with(
+                "nr-device",
+                &labels,
+                2,
+                &off,
+                window,
+                cx,
+                Rc::new(|this, i, _, _| {
+                    if let Some(f) = this.new_run.as_mut() {
+                        match i {
+                            0 => f.pick_device(0),
+                            1 => f.pick_device(1),
+                            3 => f.pick_device(2),
+                            _ => {}
+                        }
+                    }
+                }),
+            )
+        } else {
+            let gpu_off = [None, self.nr_no_gpu().map(SharedString::from), None];
+            self.segmented_fill_with(
                 "nr-device",
                 &["Auto", "GPU 0", "CPU"],
                 device,
@@ -266,11 +292,17 @@ impl FoloApp {
                 cx,
                 Rc::new(|this, i, _, _| {
                     if let Some(f) = this.new_run.as_mut() {
-                        f.device = i;
+                        f.pick_device(i);
                     }
                 }),
-            ))
-            .when_some(device_gone, |d, why| d.child(text(ty::SM, t.danger_text).child(why)))
+            )
+        };
+        let device_seg = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(device_ctl)
+            .when_some(device_gone.clone(), |d, why| d.child(text(ty::SM, t.danger_text).child(why)))
             .into_any_element();
         // An unknown prefilled optimizer selects no segment.
         let opt_sel = if opt_unknown { OPT_LABELS.len() } else { opt };
@@ -335,9 +367,18 @@ impl FoloApp {
             };
             (kind, crate::ui::fmt_lr(a.lr0))
         });
-        // The adapter behind "GPU 0", named as the other screens name it.
-        let gpu_name =
-            self.store.system.ready().and_then(|s| s.gpus.first()).map(|g| crate::ui::short_gpu(&g.name));
+        // The adapter behind the chosen GPU (or GPU 0 for Auto), named as the other screens name it.
+        let selected_gpu_idx = gpu_index(&device_val);
+        let gpu_name = self
+            .store
+            .system
+            .ready()
+            .and_then(|s| match selected_gpu_idx {
+                Some(i) => s.gpus.get(i),
+                None if device_val == "auto" => s.gpus.first(),
+                None => None,
+            })
+            .map(|g| crate::ui::short_gpu(&g.name));
         // Section headings sit above a hairline and lead their group (stronger than field labels).
         let section = |title: &str| {
             div()
@@ -601,12 +642,14 @@ impl FoloApp {
                                 &t,
                                 "Device",
                                 device_seg,
-                                Some(match (DEVICES[device], &gpu_name) {
-                                    ("auto", Some(g)) => format!("{g} when available, else CPU"),
-                                    ("auto", None) => "GPU when available, else CPU".into(),
-                                    ("cpu", _) => "Trains on the CPU (much slower)".into(),
-                                    (_, Some(g)) => format!("GPU 0: {g}"),
-                                    (d, None) => d.to_string(),
+                                Some(match (device_val.as_str(), selected_gpu_idx, &gpu_name) {
+                                    ("auto", _, Some(g)) => format!("{g} when available, else CPU"),
+                                    ("auto", _, None) => "GPU when available, else CPU".into(),
+                                    ("cpu", _, _) => "Trains on the CPU (much slower)".into(),
+                                    (_, Some(idx), Some(g)) if device_gone.is_none() => {
+                                        format!("GPU {idx}: {g}")
+                                    }
+                                    (d, _, _) => device_label(d),
                                 }),
                             )
                             .into_any_element(),
@@ -769,7 +812,7 @@ impl FoloApp {
             epochs,
             batch: batch_val,
             imgsz: imgsz_val,
-            device,
+            device: device_val,
             amp,
             amp_why,
             epochs_bad,

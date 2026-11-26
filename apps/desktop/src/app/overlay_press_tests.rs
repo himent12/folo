@@ -503,3 +503,41 @@ fn inspector_hover_cleanup_modified_shortcuts_and_stuck_drag_release() {
         assert_eq!(this.drag.as_ref().map(|d| d.id), Some("play-iou"));
     });
 }
+
+#[test]
+fn toast_sits_beneath_new_run_dialog_at_960x620_so_submit_stays_clickable() {
+    use folo_ui::{px, size};
+
+    let (mut app, window) = open();
+    app.resize_window(window.into(), size(px(960.), px(620.)));
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+
+    let runs_before = drive(&mut app, window, |this, w, cx| {
+        this.toast(
+            crate::ui::Tone::Accent,
+            "Started shapes-s-1",
+            Some("Live metrics stream into the dashboard.".into()),
+            cx,
+        );
+        this.open_new_run(None, w, cx);
+        this.store.runs.ready().unwrap().len()
+    });
+    app.frame(window.into());
+    assert!(drive(&mut app, window, |this, _, _| this.new_run.is_some() && !this.toasts.is_empty()));
+
+    // At 960x620, the New Run footer's primary submit button sits directly over the bottom-right
+    // toast area (x=576..936, y=515..596). Clicking it must submit without dismissing the toast.
+    click(&mut app, window, (680., 564.), 1);
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.new_run.is_none(), "clicking Start/Queue training submitted despite visible toast");
+        assert_eq!(
+            this.store.runs.ready().unwrap().len(),
+            runs_before + 1,
+            "new run was created from the click"
+        );
+    });
+}

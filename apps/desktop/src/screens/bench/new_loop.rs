@@ -3,9 +3,11 @@
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
 
-use crate::api::{Bench, BenchSource};
+use crate::api::Bench;
 use crate::app::{FoloApp, act};
-use crate::bench::{LOOP_EPOCHS, LOOP_GENERATIONS, SourceChoice, SourcePick};
+use crate::bench::{
+    LOOP_EPOCHS, LOOP_GENERATIONS, SourceChoice, SourcePick, loop_pool_likely_empty, loop_pool_overlaps,
+};
 use crate::controls::Btn;
 use crate::theme::{Theme, ty};
 use crate::ui::*;
@@ -114,50 +116,68 @@ impl FoloApp {
             }),
         );
         let picked = choice.index().map(|i| &sources[i]);
-        let pool_images = picked.map(|p| p.images(crate::api::Split::Train));
+        let pool_images = picked.map(SourcePick::pool_images);
         // The benchmark's own images must stay out of training: the server leaves them out of the pool.
-        let overlaps = match (picked, &b.source) {
-            (Some(SourcePick::Dataset { id, .. }), BenchSource::Dataset { dataset_id, split }) => {
-                id == dataset_id && split.unwrap_or(crate::api::Split::Val) == crate::api::Split::Train
-            }
-            (Some(SourcePick::Job { id, .. }), BenchSource::LabelJob { job_id }) => id == job_id,
-            _ => false,
-        };
+        let overlaps = picked.is_some_and(|p| loop_pool_overlaps(b, p));
+        let likely_empty = picked.is_some_and(|p| loop_pool_likely_empty(b, p));
         let gens = LOOP_GENERATIONS[generations];
-        let note = match (teacher_i.and_then(|i| teachers.get(i)), pool_images) {
-            (None, _) if teacher_gone => "Its teacher was deleted. Pick another.".to_string(),
-            (_, None) if choice == SourceChoice::Deleted => "Its pool was deleted. Pick another.".to_string(),
-            (None, _) if !teachers.is_empty() => "Pick a teacher: it labels the pool.".to_string(),
-            (None, _) => {
+        let (note, note_color) = match (teacher_i.and_then(|i| teachers.get(i)), pool_images) {
+            (None, _) if teacher_gone => {
+                ("Its teacher was deleted. Pick another.".to_string(), t.text_secondary)
+            }
+            (_, None) if choice == SourceChoice::Deleted => {
+                ("Its pool was deleted. Pick another.".to_string(), t.text_secondary)
+            }
+            (None, _) if !teachers.is_empty() => {
+                ("Pick a teacher: it labels the pool.".to_string(), t.text_secondary)
+            }
+            (None, _) => (
                 "No model can teach yet: a teacher is trained on this benchmark's classes, in its order."
-                    .to_string()
-            }
-            (_, None) => {
+                    .to_string(),
+                t.text_secondary,
+            ),
+            (_, None) => (
                 "Add a dataset or label images in a labeling job first: the teacher labels its images."
-                    .to_string()
-            }
-            (_, Some(0)) => "That pool has no images: pick another.".to_string(),
-            (Some(m), Some(n)) => format!(
-                "{} labels {} {} by itself; a {} student trains {} epochs on those labels alone and runs here. {}{}",
-                m.name,
-                int(n),
-                if matches!(picked, Some(SourcePick::Job { .. })) {
-                    "labeled images of the job"
-                } else {
-                    "train images"
-                },
-                m.arch.as_str(),
-                LOOP_EPOCHS[epochs],
-                if gens > 1 {
-                    format!("Each student teaches the next, {gens} generations in all.")
-                } else {
-                    "One generation.".to_string()
-                },
-                if overlaps {
-                    " Images that are also in this benchmark are left out of the pool."
-                } else {
-                    ""
-                },
+                    .to_string(),
+                t.text_secondary,
+            ),
+            (_, Some(0)) => ("That pool has no images: pick another.".to_string(), t.text_secondary),
+            (Some(_), Some(n)) if likely_empty => (
+                format!(
+                    "All {} {} come from this benchmark's source and will be excluded unless files changed on disk. Pick another pool.",
+                    int(n),
+                    if matches!(picked, Some(SourcePick::Job { .. })) {
+                        "images of the job"
+                    } else {
+                        "train images"
+                    },
+                ),
+                t.warning_text,
+            ),
+            (Some(m), Some(n)) => (
+                format!(
+                    "{} labels {} {} by itself; a {} student trains {} epochs on those labels alone and runs here. {}{}",
+                    m.name,
+                    int(n),
+                    if matches!(picked, Some(SourcePick::Job { .. })) {
+                        "images of the job"
+                    } else {
+                        "train images"
+                    },
+                    m.arch.as_str(),
+                    LOOP_EPOCHS[epochs],
+                    if gens > 1 {
+                        format!("Each student teaches the next, {gens} generations in all.")
+                    } else {
+                        "One generation.".to_string()
+                    },
+                    if overlaps {
+                        " Images that are also in this benchmark are left out of the pool."
+                    } else {
+                        ""
+                    },
+                ),
+                t.text_secondary,
             ),
         };
         let bid = b.id.clone();
@@ -231,7 +251,7 @@ impl FoloApp {
                             .child(field("Generations", gen_ctl.into_any_element()))
                             .child(field("Epochs per student", ep_ctl.into_any_element())),
                     )
-                    .child(text(ty::SM, t.text_secondary).child(note))
+                    .child(text(ty::SM, note_color).child(note))
                     .when_some(error, |d, e| {
                         d.child(
                             div()

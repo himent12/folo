@@ -10,7 +10,7 @@ use folo_ui::{
 };
 
 use crate::api::RunStatus;
-use crate::app::{DEVICES, FoloApp, act};
+use crate::app::{FoloApp, act, gpu_index};
 use crate::controls::Btn;
 use crate::theme::{Theme, radius, ty};
 use crate::ui::*;
@@ -80,7 +80,7 @@ pub(super) struct NewRunSummary {
     pub(super) epochs: f32,
     pub(super) batch: u32,
     pub(super) imgsz: u32,
-    pub(super) device: usize,
+    pub(super) device: String,
     pub(super) amp: bool,
     pub(super) amp_why: Option<String>,
     pub(super) epochs_bad: bool,
@@ -159,19 +159,20 @@ impl FoloApp {
         } = form;
         self.ensure_estimate(cx);
         let images = ds.as_ref().map_or(0, |d| d.splits.train);
-        let cpu = DEVICES[device] == "cpu" && cloud.is_none();
+        let cpu = device == "cpu" && cloud.is_none();
         let compute_blocked = self.compute_blocked();
         let dataset_blocked = self.dataset_blocked().is_some();
         let weights_gone = self.nr_weights_gone().is_some();
-        let device_gone = self.nr_device_gone().is_some();
+        let device_gone = self.nr_device_gone(cx);
         // What the footer can honestly say. With the server's estimator: its answer for this
         // config; while a changed config is out, the last answer marked as updating (if it was for
-        // the same kind of device); nothing for an unparsed value, a rejected config or a deleted
-        // dataset. Servers without one: the app's own reference figures.
+        // the same kind of device); nothing for an unparsed value, unavailable device, rejected
+        // config, or deleted dataset. Servers without one: the app's own reference figures.
         enum Est {
             Server(Box<crate::api::RunEstimate>, bool),
             Pending,
             Invalid,
+            NoDevice,
             NoDataset,
             Rejected(String),
             AmpRefused(String),
@@ -183,14 +184,17 @@ impl FoloApp {
         };
         let est = if ds.is_none() {
             Est::NoDataset
-        } else if !self.store.features.iter().any(|f| f == "run_estimate") {
-            Est::Local
+        } else if device_gone.is_some() {
+            Est::NoDevice
         } else if epochs_bad
             || lr_bad
             || close_bad
+            || opt_unknown
             || self.new_run.as_ref().is_some_and(|f| f.hours_invalid && cloud.is_some())
         {
             Est::Invalid
+        } else if !self.store.features.iter().any(|f| f == "run_estimate") {
+            Est::Local
         } else if compute_blocked.is_some() {
             Est::Pending
         } else {
@@ -225,7 +229,16 @@ impl FoloApp {
             Est::Server(e, _) => e.est_peak_vram_bytes.map(|b| b as f32 / gib),
             _ => (!on_cpu).then_some(local_vram),
         };
-        let gpu = self.store.system.ready().and_then(|s| s.gpus.first().cloned());
+        let gpu = self
+            .store
+            .system
+            .ready()
+            .and_then(|s| match gpu_index(&device) {
+                Some(i) => s.gpus.get(i),
+                None if device == "auto" => s.gpus.first(),
+                None => None,
+            })
+            .cloned();
         // 0 = not reported (wgpu can't on every platform): make no claim about fitting.
         // GiB, like the estimate and every size the app shows. A cloud run's is its offer's.
         let gpu_gb = match (&cloud, &cloud_offer) {
@@ -245,6 +258,9 @@ impl FoloApp {
         let place = if on_cpu { "CPU" } else { "GPU" };
         let (headline, basis, note): (String, String, Option<String>) = match &est {
             Est::Invalid => ("No estimate while a value is invalid".into(), String::new(), None),
+            Est::NoDevice => {
+                ("No estimate for this device".into(), "Pick an available device".into(), device_gone.clone())
+            }
             Est::Pending => ("Estimating…".into(), String::new(), None),
             Est::NoDataset => ("No estimate without a dataset".into(), String::new(), None),
             Est::Rejected(msg) => (
@@ -406,9 +422,17 @@ impl FoloApp {
                 window,
                 cx,
             )
-        } else if device_gone {
+        } else if device_gone.is_some() {
             // It says why under Device.
-            self.button_disabled("nr-start", go, Btn::Primary, Some(go_icon), "Pick Auto or CPU", window, cx)
+            self.button_disabled(
+                "nr-start",
+                go,
+                Btn::Primary,
+                Some(go_icon),
+                "Pick an available device",
+                window,
+                cx,
+            )
         } else if epochs_bad || lr_bad || close_bad {
             self.button_disabled(
                 "nr-start",
