@@ -281,3 +281,167 @@ fn upsample_2x_vec4_and_native_f16_avg_pool2d() {
         assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["pool"]);
     }
 }
+
+#[test]
+fn tiled_max_pool_vec4_2x2_and_gap_fast_paths() {
+    use folo_core::backend::{Backend, Pool2dParams, View};
+    use folo_core::{DType, Layout, Shape};
+
+    let dev = dev!();
+    let ctx = crate::context_for(dev).expect("registered");
+    let has_f16 = ctx.caps().shader_f16;
+
+    // 1. Multi-tile (crossing 16x16 boundaries), partial-tile, and 1x1 stride-1 max_pool2d fwd + bwd
+    //    (tiled path for k=2..=7) including exact ties, NaN first-winner tie-breaking, and asymmetric windows.
+    for &(shape, p) in &[
+        ([2usize, 3, 20, 20], Pool2dParams { kernel: [5, 5], stride: [1, 1], padding: [2, 2] }),
+        ([1, 4, 35, 37], Pool2dParams { kernel: [5, 5], stride: [1, 1], padding: [2, 2] }),
+        ([2, 2, 17, 19], Pool2dParams { kernel: [3, 3], stride: [1, 1], padding: [1, 1] }),
+        ([1, 2, 18, 21], Pool2dParams { kernel: [7, 3], stride: [1, 1], padding: [3, 1] }),
+        ([1, 2, 1, 1], Pool2dParams { kernel: [5, 5], stride: [1, 1], padding: [2, 2] }),
+    ] {
+        let x = randn(&shape, 90 + shape[2] as u64);
+        check(
+            dev,
+            std::slice::from_ref(&x),
+            0.0,
+            0.0,
+            &format!("tiled max_pool {shape:?} {p:?}"),
+            move |v| v[0].max_pool2d_with(&p),
+        );
+    }
+
+    // Exact tie-breaking and first-NaN preservation across tile boundary (row 15..16, col 15..16).
+    let mut tie_data = vec![1.0f32; 20 * 20];
+    tie_data[15 * 20 + 17] = f32::NAN; // upper row, right col
+    tie_data[16 * 20 + 15] = f32::NAN; // lower row, left col (must NOT beat row 15 NaN)
+    tie_data[3 * 20 + 4] = 5.0;
+    tie_data[3 * 20 + 6] = 5.0; // tie in same row (leftmost wins)
+    tie_data[4 * 20 + 3] = 5.0; // tie in lower row (upper row wins)
+    let tie_t = Tensor::from_slice(&tie_data, [1, 1, 20, 20]).unwrap();
+    let sppf = Pool2dParams { kernel: [5, 5], stride: [1, 1], padding: [2, 2] };
+    // Compare both values AND argmax-routed gradients against CPU bit-for-bit.
+    let c_in = tie_t.detach().requires_grad_();
+    let g_in = tie_t.to_device(dev).unwrap().detach().requires_grad_();
+    let c_out = c_in.max_pool2d_with(&sppf).unwrap();
+    let g_out = g_in.max_pool2d_with(&sppf).unwrap();
+    assert_close_t(&g_out, &c_out, 0.0, 0.0, "tiled max_pool ties+nan fwd");
+    let grad_out = randn(&[1, 1, 20, 20], 99);
+    let c_gx = c_out.backward_with(&grad_out).unwrap().get(&c_in).unwrap().clone();
+    let g_gx = g_out.backward_with(&grad_out.to_device(dev).unwrap()).unwrap().get(&g_in).unwrap().clone();
+    assert_close_t(&g_gx, &c_gx, 1e-6, 1e-6, "tiled max_pool ties+nan bwd");
+
+    // 2. Vectorized 2x2 stride-2 avg_pool2d (fwd + bwd) and upsample_nearest2d_backward across even/odd shapes.
+    for shape in [[2usize, 4, 20, 20], [1, 3, 18, 24], [2, 3, 7, 10], [1, 2, 5, 7]] {
+        let x = randn(&shape, 110 + shape[3] as u64);
+        check(dev, std::slice::from_ref(&x), 1e-6, 1e-5, &format!("avg_pool 2x2 s2 {shape:?}"), |v| {
+            v[0].avg_pool2d(2, 2, 0)
+        });
+        check(dev, std::slice::from_ref(&x), 1e-6, 1e-5, &format!("upsample 2x2 {shape:?}"), |v| {
+            v[0].upsample_nearest2d(2)
+        });
+        if has_f16 {
+            let xf = x.to_dtype(DType::F16).unwrap();
+            let x_cpu = xf.to_dtype(DType::F32).unwrap().detach().requires_grad_();
+            let y_cpu = x_cpu.avg_pool2d(2, 2, 0).unwrap();
+            let gy = randn(y_cpu.dims(), 120 + shape[3] as u64).to_dtype(DType::F16).unwrap();
+            let gx_cpu =
+                y_cpu.backward_with(&gy.to_dtype(DType::F32).unwrap()).unwrap().get(&x_cpu).unwrap().clone();
+            let x_gpu = xf.to_device(dev).unwrap().detach().requires_grad_();
+            let y_gpu = x_gpu.avg_pool2d(2, 2, 0).unwrap();
+            assert_eq!(y_gpu.dtype(), DType::F16);
+            assert_close_t(&y_gpu.to_dtype(DType::F32).unwrap(), &y_cpu, 2e-3, 2e-3, "f16 avg 2x2 fwd");
+            let gx_gpu =
+                y_gpu.backward_with(&gy.to_device(dev).unwrap()).unwrap().get(&x_gpu).unwrap().clone();
+            assert_eq!(gx_gpu.dtype(), DType::F16);
+            assert_close_t(&gx_gpu.to_dtype(DType::F32).unwrap(), &gx_cpu, 2e-3, 2e-3, "f16 avg 2x2 bwd");
+
+            let ux_cpu = xf.to_dtype(DType::F32).unwrap().detach().requires_grad_();
+            let uy_cpu = ux_cpu.upsample_nearest2d(2).unwrap();
+            let ugy = randn(uy_cpu.dims(), 130 + shape[3] as u64).to_dtype(DType::F16).unwrap();
+            let ugx_cpu = uy_cpu
+                .backward_with(&ugy.to_dtype(DType::F32).unwrap())
+                .unwrap()
+                .get(&ux_cpu)
+                .unwrap()
+                .clone();
+            let ux_gpu = xf.to_device(dev).unwrap().detach().requires_grad_();
+            let uy_gpu = ux_gpu.upsample_nearest2d(2).unwrap();
+            let ugx_gpu =
+                uy_gpu.backward_with(&ugy.to_device(dev).unwrap()).unwrap().get(&ux_gpu).unwrap().clone();
+            assert_eq!(ugx_gpu.dtype(), DType::F16);
+            assert_close_t(
+                &ugx_gpu.to_dtype(DType::F32).unwrap(),
+                &ugx_cpu,
+                5e-3,
+                5e-3,
+                "f16 upsample 2x2 bwd",
+            );
+        }
+    }
+
+    // 3. Adaptive GAP 1x1 fwd + bwd: vec4-aligned, unaligned odd area, and split-K large plane (> 8192).
+    for shape in [[2usize, 8, 20, 20], [2, 3, 11, 13], [1, 4, 100, 100], [1, 2, 1, 1]] {
+        let x = randn(&shape, 140 + shape[2] as u64);
+        check(dev, std::slice::from_ref(&x), 1e-5, 1e-5, &format!("adaptive GAP 1x1 {shape:?}"), |v| {
+            v[0].adaptive_avg_pool2d([1, 1])
+        });
+    }
+
+    // 4. Trace dispatch verification on a fresh context.
+    let fresh = crate::GpuContext::new().unwrap();
+    let backend = crate::GpuBackend::new(fresh.clone(), dev);
+    let p2 = Pool2dParams { kernel: [2, 2], stride: [2, 2], padding: [0, 0] };
+
+    // Even 2x2 avg_pool2d fwd -> pool_2x2_s2_vec4, bwd -> avg_2x2_s2_bwd_vec4.
+    let s_even = Shape::new(&[1, 4, 16, 16]);
+    let b_even = backend.full(dev, DType::F32, s_even.numel(), 1.0).unwrap();
+    fresh.trace_begin();
+    let b_half = backend.avg_pool2d(View::new(&b_even, &Layout::contiguous(s_even.clone())), &p2).unwrap();
+    assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["pool_2x2_s2_vec4"]);
+
+    let s_half = Shape::new(&[1, 4, 8, 8]);
+    fresh.trace_begin();
+    let _ = backend
+        .avg_pool2d_backward(View::new(&b_half, &Layout::contiguous(s_half.clone())), &s_even, &p2)
+        .unwrap();
+    assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["avg_2x2_s2_bwd_vec4"]);
+
+    // Even 2x2 upsample backward -> pool_2x2_s2_vec4.
+    fresh.trace_begin();
+    let _ = backend
+        .upsample_nearest2d_backward(View::new(&b_even, &Layout::contiguous(s_even.clone())), [2, 2])
+        .unwrap();
+    assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["pool_2x2_s2_vec4"]);
+
+    // Odd-width 2x2 avg_pool2d fwd/bwd and upsample backward fall back to generic `pool`.
+    let s_odd = Shape::new(&[1, 4, 10, 10]);
+    let b_odd = backend.full(dev, DType::F32, s_odd.numel(), 1.0).unwrap();
+    fresh.trace_begin();
+    let b_odd_out = backend.avg_pool2d(View::new(&b_odd, &Layout::contiguous(s_odd.clone())), &p2).unwrap();
+    assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["pool"]);
+    let s_odd_out = Shape::new(&[1, 4, 5, 5]);
+    fresh.trace_begin();
+    let _ = backend
+        .avg_pool2d_backward(View::new(&b_odd_out, &Layout::contiguous(s_odd_out)), &s_odd, &p2)
+        .unwrap();
+    assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["pool"]);
+
+    // GAP 1x1 fwd -> reduce_rows, bwd -> adaptive_gap_bwd.
+    fresh.trace_begin();
+    let b_gap =
+        backend.adaptive_avg_pool2d(View::new(&b_even, &Layout::contiguous(s_even.clone())), [1, 1]).unwrap();
+    assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["reduce_rows"]);
+    let s_gap = Shape::new(&[1, 4, 1, 1]);
+    fresh.trace_begin();
+    let _ =
+        backend.adaptive_avg_pool2d_backward(View::new(&b_gap, &Layout::contiguous(s_gap)), &s_even).unwrap();
+    assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["adaptive_gap_bwd"]);
+
+    // Every new kernel is registered in `DEFS` for precompile.
+    assert!(
+        fresh.kernels_without_registry().is_empty(),
+        "unregistered kernels: {:?}",
+        fresh.kernels_without_registry()
+    );
+}

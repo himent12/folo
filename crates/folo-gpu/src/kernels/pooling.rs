@@ -76,10 +76,107 @@ impl Window2d {
     }
 }
 
+/// Maximum kernel dimension supported by the separable `16×16` shared-memory tiled stride-1 max-pool path.
+pub(crate) const TILED_MAX_K: usize = 7;
+
+/// Shared-memory separable `16×16` tiled stride-1 `max_pool2d` (values only, NaN-propagating).
+/// Spec: `TILED = true`, `KH` (`2..=7`), `KW` (`2..=7`), `f16` (optional).
+/// Params: 0 = total_tiles, 1 = H, 2 = W, 3 = OH, 4 = OW, 5 = -inf, 6 = PH (i32), 7 = PW (i32),
+/// 8 = tiles_x, 9 = tiles_y.
+const MAXPOOL_TILED_SRC: &str = r#"
+@group(0) @binding(1) var<storage, read> X: array<T>;
+@group(0) @binding(2) var<storage, read_write> Y: array<T>;
+
+const LOAD_H: u32 = 16u + KH - 1u;
+const LOAD_W: u32 = 16u + KW - 1u;
+const LOAD_N: u32 = LOAD_H * LOAD_W;
+const H_N: u32 = LOAD_H * 16u;
+
+var<workgroup> sh_in: array<f32, LOAD_N>;
+var<workgroup> sh_h: array<f32, H_N>;
+
+fn isnan1(v: f32) -> bool { return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u; }
+fn max_nan(a: f32, b: f32) -> f32 {
+    return select(select(max(a, b), b, isnan1(b)), a, isnan1(a));
+}
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_id) lid: vec3<u32>) {
+    let tile_id = wid.y * nwg.x + wid.x;
+    if (tile_id >= pu(0u)) { return; }
+    let h = pu(1u); let w = pu(2u); let oh = pu(3u); let ow = pu(4u);
+    let neg_inf = pf(5u);
+    let ph = i32(pu(6u)); let pw = i32(pu(7u));
+    let tiles_x = pu(8u); let tiles_y = pu(9u);
+    let tx = tile_id % tiles_x;
+    let tmp = tile_id / tiles_x;
+    let ty = tmp % tiles_y;
+    let p = tmp / tiles_y;
+    let tx0 = tx * 16u;
+    let ty0 = ty * 16u;
+    let base = p * h * w;
+    let tid = lid.y * 16u + lid.x;
+
+    for (var idx = tid; idx < LOAD_N; idx += 256u) {
+        let ly = idx / LOAD_W;
+        let lx = idx % LOAD_W;
+        let iy = i32(ty0 + ly) - ph;
+        let ix = i32(tx0 + lx) - pw;
+        if (iy >= 0 && iy < i32(h) && ix >= 0 && ix < i32(w)) {
+            sh_in[idx] = f32(X[base + u32(iy) * w + u32(ix)]);
+        } else {
+            sh_in[idx] = neg_inf;
+        }
+    }
+    workgroupBarrier();
+
+    for (var idx = tid; idx < H_N; idx += 256u) {
+        let ly = idx / 16u;
+        let lx = idx % 16u;
+        let row = ly * LOAD_W + lx;
+        var m = sh_in[row];
+        for (var kx = 1u; kx < KW; kx++) {
+            m = max_nan(m, sh_in[row + kx]);
+        }
+        sh_h[idx] = m;
+    }
+    workgroupBarrier();
+
+    let ox = tx0 + lid.x;
+    let oy = ty0 + lid.y;
+    if (oy < oh && ox < ow) {
+        var m = sh_h[lid.y * 16u + lid.x];
+        for (var ky = 1u; ky < KH; ky++) {
+            m = max_nan(m, sh_h[(lid.y + ky) * 16u + lid.x]);
+        }
+        Y[(p * oh + oy) * ow + ox] = T(m);
+    }
+}
+"#;
+
+fn gen_maxpool(spec: &Spec) -> String {
+    if spec.get_bool("TILED") {
+        MAXPOOL_TILED_SRC.into()
+    } else {
+        include_str!("../shaders/maxpool.wgsl").into()
+    }
+}
+
+/// Bounds check for precompiling `"max_pool2d"` from a kernel list (`kernels/bounds.rs`).
+pub(crate) fn maxpool_fits(spec: &Spec) -> bool {
+    if !spec.get_bool("TILED") {
+        return true;
+    }
+    let kh = spec.get_u32("KH", 0) as usize;
+    let kw = spec.get_u32("KW", 0) as usize;
+    (2..=TILED_MAX_K).contains(&kh) && (2..=TILED_MAX_K).contains(&kw)
+}
+
 static MAXPOOL: KernelDef = KernelDef {
     name: "max_pool2d",
     storage: &[Access::Read, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/maxpool.wgsl")),
+    source: Source::Generated(gen_maxpool),
 };
 
 /// `max_pool2d` over `planes = N·C` planes of `h × w`; padded positions are ignored (−∞) and NaN wins
@@ -113,6 +210,40 @@ pub fn max_pool2d(
     }
     if h > i32::MAX as usize - 2 * win.padding.0 || w > i32::MAX as usize - 2 * win.padding.1 {
         return Err(GpuError::Limit("max_pool2d: plane dimensions exceed i32 indexing".into()));
+    }
+    let tiled_geom = win.stride == (1, 1)
+        && win.dilation == (1, 1)
+        && (2..=TILED_MAX_K).contains(&win.kernel.0)
+        && (2..=TILED_MAX_K).contains(&win.kernel.1)
+        && h <= i32::MAX as usize - 64
+        && w <= i32::MAX as usize - 64;
+    if tiled_geom {
+        let (tiles_x, tiles_y) = (ow.div_ceil(16), oh.div_ceil(16));
+        if let Ok(total_tiles) = prod(&[planes, tiles_y, tiles_x])
+            && total_tiles <= u32::MAX as usize
+            && let Some(threads) = (total_tiles as u64).checked_mul(256)
+            && let Ok(grid) = ctx.grid_1d(threads, 256)
+        {
+            let spec = Spec::new()
+                .bool("TILED", true)
+                .u32("KH", win.kernel.0 as u32)
+                .u32("KW", win.kernel.1 as u32)
+                .f16(dtype == DType::F16);
+            let k = ctx.kernel(&MAXPOOL, spec)?;
+            let p = Params::new()
+                .uz(total_tiles)?
+                .uz(h)?
+                .uz(w)?
+                .uz(oh)?
+                .uz(ow)?
+                .f(f32::NEG_INFINITY)
+                .uz(win.padding.0)?
+                .uz(win.padding.1)?
+                .uz(tiles_x)?
+                .uz(tiles_y)?;
+            ctx.dispatch(&k, &[x, y], &p, grid)?;
+            return Ok((oh, ow));
+        }
     }
     let k = ctx.kernel(&MAXPOOL, win.spec().f16(dtype == DType::F16))?;
     let p = Params::new().uz(n)?.uz(h)?.uz(w)?.uz(oh)?.uz(ow)?.f(f32::NEG_INFINITY);

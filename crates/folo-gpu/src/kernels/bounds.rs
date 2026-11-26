@@ -74,6 +74,8 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
         _ if name.starts_with("tal_") || name.starts_with("det_") => {
             u("K", 0) <= MAX_TOPK && u("K2", 0) <= MAX_TOPK && u("R", 0) <= MAX_REG_MAX
         }
+        "max_pool2d" => super::pooling::maxpool_fits(spec),
+        "pool_idx" | "pool_bw_idx" => super::pool_grad::pool_tiled_fits(spec),
         "muon_gemm" => super::muon::gemm_fits(spec),
         // The multi-tensor kernels (`J` tensors) are only found through their resolvers, which bound `J`.
         _ => true,
@@ -112,6 +114,12 @@ mod tests {
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 7).u32("KW", 7).u32("MODE", 0).bool("VX4", true)),
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 99).u32("KW", 99).u32("MODE", 0)),
             ("upsample_2x_vec4", Spec::new().f16(true)),
+            ("max_pool2d", Spec::new().bool("TILED", true).u32("KH", 5).u32("KW", 5).f16(true)),
+            ("pool_idx", Spec::new().u32("MODE", 0).bool("TILED", true).u32("KH", 5).u32("KW", 5)),
+            ("pool_bw_idx", Spec::new().u32("MODE", 1).bool("TILED", true).u32("KH", 3).u32("KW", 3)),
+            ("pool_2x2_s2_vec4", Spec::new().f16(true)),
+            ("avg_2x2_s2_bwd_vec4", Spec::new().f16(true)),
+            ("adaptive_gap_bwd", Spec::new().bool("VEC4", true)),
             ("conv_split_finish", Spec::new().u32("S", 8)),
             ("gemm", Spec::new().u32("BM", 64).u32("BN", 128).u32("BK", 16).u32("TM", 4).u32("TN", 8)),
             (
@@ -219,6 +227,10 @@ mod tests {
         let bad = [
             ("conv_split_finish", Spec::new().u32("S", u32::MAX)),
             ("conv_split_finish", Spec::new().u32("S", 9)),
+            ("max_pool2d", Spec::new().bool("TILED", true).u32("KH", 8).u32("KW", 5)),
+            ("max_pool2d", Spec::new().bool("TILED", true).u32("KH", 1).u32("KW", 3)),
+            ("pool_idx", Spec::new().u32("MODE", 0).bool("TILED", true).u32("KH", 8).u32("KW", 5)),
+            ("pool_bw_idx", Spec::new().u32("MODE", 2).bool("TILED", true).u32("KH", 3).u32("KW", 3)),
             ("conv2d_depthwise", Spec::new().u32("KH", 65536).u32("KW", 65536)),
             ("conv2d_depthwise", Spec::new().u32("KH", 3).u32("KW", 3).u32("SW", 65536)),
             ("conv2d_depthwise", Spec::new().u32("KH", 3).u32("KW", 0)),

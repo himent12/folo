@@ -7,6 +7,8 @@
 //! average pooling runs in f32. Windows have no dilation; padding is at most half the kernel, so every window
 //! holds at least one real element.
 
+use super::pooling::TILED_MAX_K;
+use super::reduce::{self, ReduceOp};
 use super::{check_buf, prod};
 use crate::DType;
 use crate::context::GpuContext;
@@ -58,11 +60,280 @@ fn astart(o: u32, inp: u32, outp: u32) -> u32 { return (o * inp) / outp; }
 fn aend(o: u32, inp: u32, outp: u32) -> u32 { return ((o + 1u) * inp + outp - 1u) / outp; }
 "#;
 
+/// Shared-memory separable `16×16` tiled stride-1 `max_pool2d_indices`: bit-exact row-major tie-breaking
+/// (leftmost column, topmost row) and first-NaN preservation.
+/// Spec: `MODE = 0`, `TILED = true`, `KH` (`2..=7`), `KW` (`2..=7`), `f16` (optional).
+/// Params: 0 = total_tiles, 1 = H, 2 = W, 3 = OH, 4 = OW, 5 = -inf, 6 = PH (i32), 7 = PW (i32),
+/// 8 = tiles_x, 9 = tiles_y.
+const POOL_IDX_TILED_SRC: &str = r#"
+@group(0) @binding(1) var<storage, read> X: array<T>;
+@group(0) @binding(2) var<storage, read_write> Y: array<T>;
+@group(0) @binding(3) var<storage, read_write> YI: array<u32>;
+
+const LOAD_H: u32 = 16u + KH - 1u;
+const LOAD_W: u32 = 16u + KW - 1u;
+const LOAD_N: u32 = LOAD_H * LOAD_W;
+const H_N: u32 = LOAD_H * 16u;
+
+var<workgroup> sh_in: array<f32, LOAD_N>;
+var<workgroup> sh_in_i: array<i32, LOAD_N>;
+var<workgroup> sh_h: array<f32, H_N>;
+var<workgroup> sh_h_i: array<i32, H_N>;
+
+fn isnan1(v: f32) -> bool { return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u; }
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_id) lid: vec3<u32>) {
+    let tile_id = wid.y * nwg.x + wid.x;
+    if (tile_id >= pu(0u)) { return; }
+    let h = pu(1u); let w = pu(2u); let oh = pu(3u); let ow = pu(4u);
+    let neg_inf = pf(5u);
+    let ph = i32(pu(6u)); let pw = i32(pu(7u));
+    let tiles_x = pu(8u); let tiles_y = pu(9u);
+    let tx = tile_id % tiles_x;
+    let tmp = tile_id / tiles_x;
+    let ty = tmp % tiles_y;
+    let p = tmp / tiles_y;
+    let tx0 = tx * 16u;
+    let ty0 = ty * 16u;
+    let base = p * h * w;
+    let tid = lid.y * 16u + lid.x;
+
+    for (var idx = tid; idx < LOAD_N; idx += 256u) {
+        let ly = idx / LOAD_W;
+        let lx = idx % LOAD_W;
+        let iy = i32(ty0 + ly) - ph;
+        let ix = i32(tx0 + lx) - pw;
+        if (iy >= 0 && iy < i32(h) && ix >= 0 && ix < i32(w)) {
+            let at = iy * i32(w) + ix;
+            sh_in[idx] = f32(X[base + u32(at)]);
+            sh_in_i[idx] = at;
+        } else {
+            sh_in[idx] = neg_inf;
+            sh_in_i[idx] = -1;
+        }
+    }
+    workgroupBarrier();
+
+    for (var idx = tid; idx < H_N; idx += 256u) {
+        let ly = idx / 16u;
+        let lx = idx % 16u;
+        let row = ly * LOAD_W + lx;
+        var best = sh_in[row];
+        var bi = sh_in_i[row];
+        var has_nan = bi >= 0 && isnan1(best);
+        for (var kx = 1u; kx < KW; kx++) {
+            let vi = sh_in_i[row + kx];
+            if (vi < 0) { continue; }
+            let v = sh_in[row + kx];
+            if (bi < 0 || (!has_nan && (isnan1(v) || v > best))) {
+                best = v;
+                bi = vi;
+                has_nan = isnan1(v);
+            }
+        }
+        sh_h[idx] = best;
+        sh_h_i[idx] = bi;
+    }
+    workgroupBarrier();
+
+    let ox = tx0 + lid.x;
+    let oy = ty0 + lid.y;
+    if (oy < oh && ox < ow) {
+        let col = lid.y * 16u + lid.x;
+        var best = sh_h[col];
+        var bi = sh_h_i[col];
+        var has_nan = bi >= 0 && isnan1(best);
+        for (var ky = 1u; ky < KH; ky++) {
+            let off = (lid.y + ky) * 16u + lid.x;
+            let vi = sh_h_i[off];
+            if (vi < 0) { continue; }
+            let v = sh_h[off];
+            if (bi < 0 || (!has_nan && (isnan1(v) || v > best))) {
+                best = v;
+                bi = vi;
+                has_nan = isnan1(v);
+            }
+        }
+        let out_i = (p * oh + oy) * ow + ox;
+        Y[out_i] = T(best);
+        YI[2u * out_i] = u32(max(bi, 0));
+        YI[2u * out_i + 1u] = 0u;
+    }
+}
+"#;
+
+/// Shared-memory `16×16` tiled stride-1 `max_pool2d_backward`: loads the `(16 + KH - 1) × (16 + KW - 1)`
+/// output-gradient and argmax-index halo once per workgroup and accumulates in exact row-major `(oy, ox)` order.
+/// Spec: `MODE = 1`, `TILED = true`, `KH` (`2..=7`), `KW` (`2..=7`), `f16` (optional).
+/// Params: 0 = total_tiles, 1 = H, 2 = W, 3 = OH, 4 = OW, 5 = PH (i32), 6 = PW (i32), 7 = tiles_x, 8 = tiles_y.
+const POOL_BW_IDX_TILED_SRC: &str = r#"
+@group(0) @binding(1) var<storage, read> X: array<T>;
+@group(0) @binding(2) var<storage, read> IDX: array<u32>;
+@group(0) @binding(3) var<storage, read_write> Y: array<T>;
+
+const LOAD_H: u32 = 16u + KH - 1u;
+const LOAD_W: u32 = 16u + KW - 1u;
+const LOAD_N: u32 = LOAD_H * LOAD_W;
+
+var<workgroup> sh_idx: array<u32, LOAD_N>;
+var<workgroup> sh_g: array<f32, LOAD_N>;
+
+@compute @workgroup_size(16, 16)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_id) lid: vec3<u32>) {
+    let tile_id = wid.y * nwg.x + wid.x;
+    if (tile_id >= pu(0u)) { return; }
+    let h = pu(1u); let w = pu(2u); let oh = pu(3u); let ow = pu(4u);
+    let ph = i32(pu(5u)); let pw = i32(pu(6u));
+    let tiles_x = pu(7u); let tiles_y = pu(8u);
+    let tx = tile_id % tiles_x;
+    let tmp = tile_id / tiles_x;
+    let ty = tmp % tiles_y;
+    let p = tmp / tiles_y;
+    let tx0 = tx * 16u;
+    let ty0 = ty * 16u;
+    let gbase = p * oh * ow;
+    let tid = lid.y * 16u + lid.x;
+    let oy_base = i32(ty0) + ph - i32(KH - 1u);
+    let ox_base = i32(tx0) + pw - i32(KW - 1u);
+
+    for (var idx = tid; idx < LOAD_N; idx += 256u) {
+        let ly = idx / LOAD_W;
+        let lx = idx % LOAD_W;
+        let oy = oy_base + i32(ly);
+        let ox = ox_base + i32(lx);
+        if (oy >= 0 && oy < i32(oh) && ox >= 0 && ox < i32(ow)) {
+            let o = gbase + u32(oy) * ow + u32(ox);
+            sh_idx[idx] = IDX[2u * o];
+            sh_g[idx] = f32(X[o]);
+        } else {
+            sh_idx[idx] = 0xffffffffu;
+            sh_g[idx] = 0.0;
+        }
+    }
+    workgroupBarrier();
+
+    let ix = tx0 + lid.x;
+    let iy = ty0 + lid.y;
+    if (iy < h && ix < w) {
+        let own = iy * w + ix;
+        var acc = 0.0;
+        for (var dy = 0u; dy < KH; dy++) {
+            let row = (lid.y + dy) * LOAD_W + lid.x;
+            for (var dx = 0u; dx < KW; dx++) {
+                if (sh_idx[row + dx] == own) {
+                    acc += sh_g[row + dx];
+                }
+            }
+        }
+        Y[(p * h + iy) * w + ix] = T(acc);
+    }
+}
+"#;
+
+/// Vectorized 2×2 stride-2 reduction shared by `upsample_nearest2d_backward(2, 2)` (`scale = 1.0`) and
+/// `avg_pool2d(2, 2, 0)` (`scale = 0.25`) for even output widths and exact 2× input heights (`h == 2 * oh`):
+/// each thread reads two `vec4<T>`s (8 elements across consecutive rows) and writes one `vec2<T>`.
+/// Params: 0 = output `vec2<T>` units (`planes * oh * (ow / 2)`), 1 = `ow / 2`, 2 = `scale` (f32).
+const POOL_2X2_S2_VEC4_SRC: &str = "\
+@group(0) @binding(1) var<storage, read> X: array<vec4<T>>;\n\
+@group(0) @binding(2) var<storage, read_write> Y: array<vec2<T>>;\n\
+@compute @workgroup_size(256)\n\
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+        @builtin(local_invocation_index) lid: u32) {\n\
+    let i = linear_id(wid, nwg, lid, 256u);\n\
+    if (i >= pu(0u)) { return; }\n\
+    let w2 = pu(1u);\n\
+    let x2 = i % w2;\n\
+    let t = i / w2;\n\
+    let in0 = t * (2u * w2) + x2;\n\
+    let r0 = vec4<f32>(X[in0]);\n\
+    let r1 = vec4<f32>(X[in0 + w2]);\n\
+    let s = pf(2u);\n\
+    let a = ((((0.0 + r0.x) + r0.y) + r1.x) + r1.y) * s;\n\
+    let b = ((((0.0 + r0.z) + r0.w) + r1.z) + r1.w) * s;\n\
+    Y[i] = vec2<T>(T(a), T(b));\n\
+}\n";
+
+/// Vectorized 2×2 stride-2 `avg_pool2d_backward` for exact 2× input dims (`h == 2 * oh`, `w == 2 * ow`) and
+/// even `ow`: reads one `vec2<T>` of upstream gradients and writes two `vec4<T>`s scaled by `0.25`.
+/// Params: 0 = grad `vec2<T>` units (`planes * oh * (ow / 2)`), 1 = `ow / 2`.
+const AVG_2X2_S2_BWD_VEC4_SRC: &str = "\
+@group(0) @binding(1) var<storage, read> X: array<vec2<T>>;\n\
+@group(0) @binding(2) var<storage, read_write> Y: array<vec4<T>>;\n\
+@compute @workgroup_size(256)\n\
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+        @builtin(local_invocation_index) lid: u32) {\n\
+    let i = linear_id(wid, nwg, lid, 256u);\n\
+    if (i >= pu(0u)) { return; }\n\
+    let w2 = pu(1u);\n\
+    let x2 = i % w2;\n\
+    let t = i / w2;\n\
+    let v = vec2<f32>(X[i]) * 0.25;\n\
+    let vx = T(0.0 + v.x);\n\
+    let vy = T(0.0 + v.y);\n\
+    let v4 = vec4<T>(vx, vx, vy, vy);\n\
+    let out0 = t * (2u * w2) + x2;\n\
+    Y[out0] = v4;\n\
+    Y[out0 + w2] = v4;\n\
+}\n";
+
+/// Global average pooling (`1×1`) backward fill: broadcasts `0.0 + X[p] / f32(H * W)` across each plane,
+/// writing 16-byte `vec4<f32>` chunks when `H * W` is a multiple of 4.
+/// Spec: `VEC4` (bool). Params: 0 = output units, 1 = plane units (`H*W/4` or `H*W`), 2 = `f32(H*W)`.
+fn gen_adaptive_gap_bwd(spec: &Spec) -> String {
+    if spec.get_bool("VEC4") {
+        "@group(0) @binding(1) var<storage, read> X: array<f32>;\n\
+         @group(0) @binding(2) var<storage, read_write> Y: array<vec4<f32>>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+                 @builtin(local_invocation_index) lid: u32) {\n\
+             let i = linear_id(wid, nwg, lid, 256u);\n\
+             if (i >= pu(0u)) { return; }\n\
+             let p = i / pu(1u);\n\
+             Y[i] = vec4<f32>(0.0 + X[p] / pf(2u));\n\
+         }\n"
+        .into()
+    } else {
+        "@group(0) @binding(1) var<storage, read> X: array<f32>;\n\
+         @group(0) @binding(2) var<storage, read_write> Y: array<f32>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+                 @builtin(local_invocation_index) lid: u32) {\n\
+             let i = linear_id(wid, nwg, lid, 256u);\n\
+             if (i >= pu(0u)) { return; }\n\
+             let p = i / pu(1u);\n\
+             Y[i] = 0.0 + X[p] / pf(2u);\n\
+         }\n"
+        .into()
+    }
+}
+
+/// Bounds check for precompiling `"pool_idx"` / `"pool_bw_idx"` from a kernel list (`kernels/bounds.rs`).
+pub(crate) fn pool_tiled_fits(spec: &Spec) -> bool {
+    if !spec.get_bool("TILED") {
+        return true;
+    }
+    let mode = spec.get_u32("MODE", 0);
+    let kh = spec.get_u32("KH", 0) as usize;
+    let kw = spec.get_u32("KW", 0) as usize;
+    (mode == 0 || mode == 1) && (2..=TILED_MAX_K).contains(&kh) && (2..=TILED_MAX_K).contains(&kw)
+}
+
 /// Spec: MODE (0 max forward, 1 max backward, 2 avg forward, 3 avg backward, 4 adaptive forward, 5 adaptive
 /// backward, 6 upsample backward). Params: 0 = threads, 1 = H, 2 = W, 3 = OH, 4 = OW, 5 = KH, 6 = KW, 7 = SH,
 /// 8 = SW, 9 = PH, 10 = PW, 11 = -inf. Upsampling uses KH / KW as the scale factors.
 fn gen_pool(spec: &Spec) -> String {
     let mode = spec.get_u32("MODE", 0);
+    if spec.get_bool("TILED") {
+        return match mode {
+            0 => POOL_IDX_TILED_SRC.into(),
+            1 => POOL_BW_IDX_TILED_SRC.into(),
+            _ => unreachable!("TILED is only set for MODE 0 and 1"),
+        };
+    }
     let mut s = String::new();
     match mode {
         0 => s.push_str(
@@ -214,6 +485,21 @@ static POOL: KernelDef = KernelDef {
     storage: &[Access::Read, Access::ReadWrite],
     source: Source::Generated(gen_pool),
 };
+static POOL_2X2_S2_VEC4: KernelDef = KernelDef {
+    name: "pool_2x2_s2_vec4",
+    storage: &[Access::Read, Access::ReadWrite],
+    source: Source::Static(POOL_2X2_S2_VEC4_SRC),
+};
+static AVG_2X2_S2_BWD_VEC4: KernelDef = KernelDef {
+    name: "avg_2x2_s2_bwd_vec4",
+    storage: &[Access::Read, Access::ReadWrite],
+    source: Source::Static(AVG_2X2_S2_BWD_VEC4_SRC),
+};
+static ADAPTIVE_GAP_BWD: KernelDef = KernelDef {
+    name: "adaptive_gap_bwd",
+    storage: &[Access::Read, Access::ReadWrite],
+    source: Source::Generated(gen_adaptive_gap_bwd),
+};
 
 #[allow(clippy::too_many_arguments)]
 fn launch(
@@ -248,6 +534,24 @@ fn launch(
     ctx.dispatch(&k, bufs, &p, ctx.grid_1d(threads as u64, 256)?)
 }
 
+/// Computes the 16×16 tile grid for `planes × dim_y × dim_x`, returning `(total_tiles, tiles_x, tiles_y, grid)`
+/// when the dispatch fits `u32` and `ctx.grid_1d`.
+fn tile_grid_16(
+    ctx: &GpuContext,
+    planes: usize,
+    dim_y: usize,
+    dim_x: usize,
+) -> Option<(usize, usize, usize, [u32; 3])> {
+    let (tiles_x, tiles_y) = (dim_x.div_ceil(16), dim_y.div_ceil(16));
+    let total_tiles = prod(&[planes, tiles_y, tiles_x]).ok()?;
+    if total_tiles > u32::MAX as usize {
+        return None;
+    }
+    let threads = (total_tiles as u64).checked_mul(256)?;
+    let grid = ctx.grid_1d(threads, 256).ok()?;
+    Some((total_tiles, tiles_x, tiles_y, grid))
+}
+
 /// Max pooling of `planes` dense `h × w` planes of `dtype` (f32 or f16) into `y`, with the flat in-plane index
 /// `h * W + w` of each chosen element written as `i64` to `indices` (first maximum in window order wins; NaN
 /// wins). Returns `(OH, OW)`.
@@ -263,12 +567,47 @@ pub fn max_pool2d_indices(
 ) -> Result<(usize, usize)> {
     check_dtype(ctx, dtype, "max_pool2d")?;
     let (oh, ow) = win.output(h, w)?;
+    let in_elems = prod(&[planes, h, w])?;
     let n = prod(&[planes, oh, ow])?;
-    check_buf(x, prod(&[planes, h, w])?, dtype, "max_pool2d input")?;
+    check_buf(x, in_elems, dtype, "max_pool2d input")?;
     check_buf(y, n, dtype, "max_pool2d output")?;
     check_buf(indices, prod(&[n, 2])?, DType::F32, "max_pool2d indices")?;
-    let dims = (h, w, oh, ow);
+    if n == 0 {
+        return Ok((oh, ow));
+    }
     let half = dtype == DType::F16;
+    if win.stride == (1, 1)
+        && (2..=TILED_MAX_K).contains(&win.kernel.0)
+        && (2..=TILED_MAX_K).contains(&win.kernel.1)
+        && in_elems <= u32::MAX as usize
+        && n <= u32::MAX as usize
+        && h.checked_mul(w).is_some_and(|hw| hw <= i32::MAX as usize)
+        && h <= i32::MAX as usize - 64
+        && w <= i32::MAX as usize - 64
+        && let Some((total_tiles, tiles_x, tiles_y, grid)) = tile_grid_16(ctx, planes, oh, ow)
+    {
+        let spec = Spec::new()
+            .u32("MODE", 0)
+            .bool("TILED", true)
+            .u32("KH", win.kernel.0 as u32)
+            .u32("KW", win.kernel.1 as u32)
+            .f16(half);
+        let k = ctx.kernel(&POOL_IDX, spec)?;
+        let p = Params::new()
+            .uz(total_tiles)?
+            .uz(h)?
+            .uz(w)?
+            .uz(oh)?
+            .uz(ow)?
+            .f(f32::NEG_INFINITY)
+            .uz(win.padding.0)?
+            .uz(win.padding.1)?
+            .uz(tiles_x)?
+            .uz(tiles_y)?;
+        ctx.dispatch(&k, &[x, y, indices], &p, grid)?;
+        return Ok((oh, ow));
+    }
+    let dims = (h, w, oh, ow);
     launch(ctx, &POOL_IDX, 0, &[x, y, indices], n, dims, win.kernel, win.stride, win.padding, half)?;
     Ok((oh, ow))
 }
@@ -291,6 +630,39 @@ pub fn max_pool2d_backward(
     check_buf(indices, prod(&[n, 2])?, DType::F32, "max_pool2d_backward indices")?;
     let total = prod(&[planes, h, w])?;
     check_buf(gx, total, dtype, "max_pool2d_backward output")?;
+    if total == 0 {
+        return Ok(());
+    }
+    let half = dtype == DType::F16;
+    if win.stride == (1, 1)
+        && (2..=TILED_MAX_K).contains(&win.kernel.0)
+        && (2..=TILED_MAX_K).contains(&win.kernel.1)
+        && total <= u32::MAX as usize
+        && n <= u32::MAX as usize
+        && h.checked_mul(w).is_some_and(|hw| hw <= i32::MAX as usize)
+        && h <= i32::MAX as usize - 64
+        && w <= i32::MAX as usize - 64
+        && let Some((total_tiles, tiles_x, tiles_y, grid)) = tile_grid_16(ctx, planes, h, w)
+    {
+        let spec = Spec::new()
+            .u32("MODE", 1)
+            .bool("TILED", true)
+            .u32("KH", win.kernel.0 as u32)
+            .u32("KW", win.kernel.1 as u32)
+            .f16(half);
+        let k = ctx.kernel(&POOL_BW_IDX, spec)?;
+        let p = Params::new()
+            .uz(total_tiles)?
+            .uz(h)?
+            .uz(w)?
+            .uz(oh)?
+            .uz(ow)?
+            .uz(win.padding.0)?
+            .uz(win.padding.1)?
+            .uz(tiles_x)?
+            .uz(tiles_y)?;
+        return ctx.dispatch(&k, &[g, indices, gx], &p, grid);
+    }
     launch(
         ctx,
         &POOL_BW_IDX,
@@ -301,7 +673,7 @@ pub fn max_pool2d_backward(
         win.kernel,
         win.stride,
         win.padding,
-        dtype == DType::F16,
+        half,
     )
 }
 
@@ -317,21 +689,29 @@ pub fn avg_pool2d(
 ) -> Result<(usize, usize)> {
     check_dtype(ctx, dtype, "avg_pool2d")?;
     let (oh, ow) = win.output(h, w)?;
+    let in_elems = prod(&[planes, h, w])?;
     let n = prod(&[planes, oh, ow])?;
-    check_buf(x, prod(&[planes, h, w])?, dtype, "avg_pool2d input")?;
+    check_buf(x, in_elems, dtype, "avg_pool2d input")?;
     check_buf(y, n, dtype, "avg_pool2d output")?;
-    launch(
-        ctx,
-        &POOL,
-        2,
-        &[x, y],
-        n,
-        (h, w, oh, ow),
-        win.kernel,
-        win.stride,
-        win.padding,
-        dtype == DType::F16,
-    )?;
+    if n == 0 {
+        return Ok((oh, ow));
+    }
+    let half = dtype == DType::F16;
+    if win.kernel == (2, 2)
+        && win.stride == (2, 2)
+        && win.padding == (0, 0)
+        && h.is_multiple_of(2)
+        && w.is_multiple_of(4)
+        && in_elems <= u32::MAX as usize
+    {
+        let w2 = ow / 2;
+        let units = planes * oh * w2;
+        let k = ctx.kernel(&POOL_2X2_S2_VEC4, Spec::new().f16(half))?;
+        let p = Params::new().uz(units)?.uz(w2)?.f(0.25);
+        ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(units as u64, 256)?)?;
+        return Ok((oh, ow));
+    }
+    launch(ctx, &POOL, 2, &[x, y], n, (h, w, oh, ow), win.kernel, win.stride, win.padding, half)?;
     Ok((oh, ow))
 }
 
@@ -349,18 +729,25 @@ pub fn avg_pool2d_backward(
     check_buf(g, prod(&[planes, oh, ow])?, dtype, "avg_pool2d_backward grad")?;
     let total = prod(&[planes, h, w])?;
     check_buf(gx, total, dtype, "avg_pool2d_backward output")?;
-    launch(
-        ctx,
-        &POOL,
-        3,
-        &[g, gx],
-        total,
-        (h, w, oh, ow),
-        win.kernel,
-        win.stride,
-        win.padding,
-        dtype == DType::F16,
-    )
+    if total == 0 {
+        return Ok(());
+    }
+    let half = dtype == DType::F16;
+    if win.kernel == (2, 2)
+        && win.stride == (2, 2)
+        && win.padding == (0, 0)
+        && h == 2 * oh
+        && w == 2 * ow
+        && ow.is_multiple_of(2)
+        && total <= u32::MAX as usize
+    {
+        let w2 = ow / 2;
+        let units = planes * oh * w2;
+        let k = ctx.kernel(&AVG_2X2_S2_BWD_VEC4, Spec::new().f16(half))?;
+        let p = Params::new().uz(units)?.uz(w2)?;
+        return ctx.dispatch(&k, &[g, gx], &p, ctx.grid_1d(units as u64, 256)?);
+    }
+    launch(ctx, &POOL, 3, &[g, gx], total, (h, w, oh, ow), win.kernel, win.stride, win.padding, half)
 }
 
 /// The shader computes adaptive window bounds as `(o + 1) · in + out - 1` in `u32`; reject sizes where that wraps.
@@ -387,9 +774,16 @@ pub fn adaptive_avg_pool2d(
         return Err(shape_err("adaptive_avg_pool2d: empty plane"));
     }
     check_adaptive((h, w), (oh, ow))?;
+    let in_elems = prod(&[planes, h, w])?;
     let n = prod(&[planes, oh, ow])?;
-    check_buf(x, prod(&[planes, h, w])?, DType::F32, "adaptive_avg_pool2d input")?;
+    check_buf(x, in_elems, DType::F32, "adaptive_avg_pool2d input")?;
     check_buf(y, n, DType::F32, "adaptive_avg_pool2d output")?;
+    if n == 0 {
+        return Ok(());
+    }
+    if oh == 1 && ow == 1 && in_elems <= u32::MAX as usize {
+        return reduce::reduce_split(ctx, ReduceOp::Mean, x, y, planes, h * w, 1, DType::F32);
+    }
     launch(ctx, &POOL, 4, &[x, y], n, (h, w, oh, ow), (1, 1), (1, 1), (0, 0), false)
 }
 
@@ -408,6 +802,18 @@ pub fn adaptive_avg_pool2d_backward(
     check_buf(g, prod(&[planes, oh, ow])?, DType::F32, "adaptive_avg_pool2d_backward grad")?;
     let total = prod(&[planes, h, w])?;
     check_buf(gx, total, DType::F32, "adaptive_avg_pool2d_backward output")?;
+    if total == 0 {
+        return Ok(());
+    }
+    if oh == 1 && ow == 1 && total <= u32::MAX as usize {
+        let hw = h * w;
+        let vec4 = hw.is_multiple_of(4);
+        let units_hw = if vec4 { hw / 4 } else { hw };
+        let units = planes * units_hw;
+        let k = ctx.kernel(&ADAPTIVE_GAP_BWD, Spec::new().bool("VEC4", vec4))?;
+        let p = Params::new().uz(units)?.uz(units_hw)?.f(hw as f32);
+        return ctx.dispatch(&k, &[g, gx], &p, ctx.grid_1d(units as u64, 256)?);
+    }
     launch(ctx, &POOL, 5, &[g, gx], total, (h, w, oh, ow), (1, 1), (1, 1), (0, 0), false)
 }
 
@@ -424,12 +830,24 @@ pub fn upsample_nearest2d_backward(
 ) -> Result<()> {
     check_dtype(ctx, dtype, "upsample_nearest2d_backward")?;
     let (oh, ow) = (prod(&[h, sh])?, prod(&[w, sw])?);
-    check_buf(g, prod(&[planes, oh, ow])?, dtype, "upsample_backward grad")?;
+    let in_elems = prod(&[planes, oh, ow])?;
+    check_buf(g, in_elems, dtype, "upsample_backward grad")?;
     let total = prod(&[planes, h, w])?;
     check_buf(gx, total, dtype, "upsample_backward output")?;
+    if total == 0 {
+        return Ok(());
+    }
     let half = dtype == DType::F16;
+    if sh == 2 && sw == 2 && w.is_multiple_of(2) && in_elems <= u32::MAX as usize {
+        let w2 = w / 2;
+        let units = planes * h * w2;
+        let k = ctx.kernel(&POOL_2X2_S2_VEC4, Spec::new().f16(half))?;
+        let p = Params::new().uz(units)?.uz(w2)?.f(1.0);
+        return ctx.dispatch(&k, &[g, gx], &p, ctx.grid_1d(units as u64, 256)?);
+    }
     launch(ctx, &POOL, 6, &[g, gx], total, (h, w, oh, ow), (sh, sw), (1, 1), (0, 0), half)
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&POOL_IDX, &POOL_BW_IDX, &POOL];
+pub(crate) static DEFS: &[&KernelDef] =
+    &[&POOL_IDX, &POOL_BW_IDX, &POOL, &POOL_2X2_S2_VEC4, &AVG_2X2_S2_BWD_VEC4, &ADAPTIVE_GAP_BWD];

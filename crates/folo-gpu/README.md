@@ -26,7 +26,7 @@ and FOLO Desktop (`apps/desktop`) for local inference.
 | `src/profile.rs` | Per-kernel GPU timings (`FOLO_GPU_PROFILE=1`). |
 | `src/dtype.rs`, `src/error.rs` | Buffer element types; `GpuError`. |
 | `src/tests/` | The GPU tests (unit tests, compiled with `cargo test`; `kernel_list.rs`, `pool.rs` and `pipeline_cache.rs` also have unit tests of their own): `backend/` (the backend against folo-core's CPU backend, by area) and kernel-level files (`gemm.rs`, `conv.rs`, `coop.rs`, `elementwise.rs`, ...) plus runtime tests (`runtime.rs`, `pool.rs`, `binds.rs`, `plan.rs`, `precompile.rs`, `pipeline_cache.rs`). |
-| `benches/` | `gemm.rs`, `conv.rs`, `conv_model.rs`, `elementwise.rs`, `backend.rs`. |
+| `benches/` | `gemm.rs`, `conv.rs`, `conv_model.rs`, `elementwise.rs`, `backend.rs`, `pooling.rs`. |
 
 There is no `tests/` folder at the crate root and no `build.rs`.
 
@@ -72,8 +72,8 @@ kernels (`kd_*.wgsl`). Tests are grouped by area, not by op.
 | matmul | `matmul` | `kernels::gemm::gemm` | generated in `gemm/shader.rs` | `src/tests/backend/matmul.rs`, `src/tests/gemm.rs` |
 | conv2d and its gradients | `conv2d`, `conv2d_act`, `conv2d_backward_input`, `conv2d_backward_weight(_as)` | `kernels::conv::{conv2d, conv2d_input, conv2d_backward_input, conv2d_backward_weight_as}` | generated (`gemm/shader.rs`, `conv/`, `coop/shader.rs`); `depthwise.wgsl` | `src/tests/backend/conv.rs`, `src/tests/conv.rs`, `src/tests/coop_conv/` |
 | 1x1 conv over a concatenation | `conv2d_act_cat` | `kernels::conv::conv2d_cat` (`conv/forward.rs`, calling `gemm_cat.rs`) | generated | `src/tests/backend/conv_cat.rs` |
-| max / avg / adaptive pooling and gradients | `max_pool2d`, `max_pool2d_values` (inference, skips `i64` indices within `maxpool` limits), `avg_pool2d`, `adaptive_avg_pool2d`, their `_backward` | `kernels::pooling::max_pool2d` (values only), `kernels::pool_grad::*` | `maxpool.wgsl`; generated in `pool_grad.rs` | `src/tests/backend/pooling.rs` |
-| nearest upsampling | `upsample_nearest2d`, `upsample_nearest2d_backward` | `kernels::layout::upsample_nearest2d` (`upsample_2x_vec4` fast path for 2×2 even widths), `kernels::pool_grad::upsample_nearest2d_backward` | `upsample.wgsl`; generated | `src/tests/backend/pooling.rs` |
+| max / avg / adaptive pooling and gradients | `max_pool2d`, `max_pool2d_values` (inference, skips `i64` indices within `maxpool` limits), `avg_pool2d`, `adaptive_avg_pool2d`, their `_backward` | `kernels::pooling::max_pool2d` (values only; 16×16 separable shared-memory tiled stride-1 `2..=7`), `kernels::pool_grad::*` (16×16 tiled stride-1 max fwd/bwd, `vec4` 2×2 stride-2 avg fwd/bwd, GAP 1×1 via `reduce_split` + `adaptive_gap_bwd`) | `maxpool.wgsl`; generated in `pooling.rs`, `pool_grad.rs` | `src/tests/backend/pooling.rs` |
+| nearest upsampling | `upsample_nearest2d`, `upsample_nearest2d_backward` | `kernels::layout::upsample_nearest2d` (`upsample_2x_vec4` fast path for 2×2 even widths), `kernels::pool_grad::upsample_nearest2d_backward` (`pool_2x2_s2_vec4` fast path for 2×2 even widths) | `upsample.wgsl`; generated | `src/tests/backend/pooling.rs` |
 | index ops | `index_select`, `index_add`, `gather`, `scatter_add` | `kernels::strided::*` | generated in `strided/` | `src/tests/backend/index.rs` |
 | copies, casts, fills | `copy_strided`, `copy_into`, `cast`, `full` | `kernels::strided::*` | generated in `strided/` | `src/tests/backend/transfer.rs` |
 | train-mode BatchNorm + activation | `batch_norm_act`, `batch_norm_act_backward` | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | `bn_*.wgsl` | `src/tests/amp.rs`; folo-nn `tests/gpu/main.rs` |
@@ -126,7 +126,8 @@ cargo bench -p folo-gpu --bench gemm          # also: conv, conv_model, elementw
 - Nothing is `#[ignore]`d. Keep GPU test runs short (`AGENTS.md`): the GPU is often shared.
 - Benches: `gemm` (GFLOPS, f32 and f16, transposed, batched), `conv` (conv2d at YOLO-typical shapes), `conv_model`
   (folo-n and folo-s forward convs at batch 16), `elementwise` (bandwidth of memory-bound kernels), `backend` (a
-  YOLOv8n-shaped network on the GPU backend against the CPU backend).
+  YOLOv8n-shaped network on the GPU backend against the CPU backend), `pooling` (max/avg/adaptive pooling and 2×2
+  upsample backward).
 
 ## Further reading
 
