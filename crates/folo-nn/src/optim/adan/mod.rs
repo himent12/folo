@@ -125,6 +125,10 @@ pub struct AdanGroupContract {
     pub decoupled_wd: bool,
     /// Active step counts per parameter (aligned with `params`).
     pub param_steps: Vec<u64>,
+    /// Cumulative `prod_{j=1}^{param_step} beta1_j` per parameter (aligned with `params`) for exact
+    /// bias correction under schedules that vary `beta1`. Defaults to `betas[0]^param_step` if omitted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub beta1_prods: Vec<f64>,
 }
 
 /// Serializable contract for [`Adan`] checkpointing and bit-exact resume.
@@ -143,6 +147,13 @@ struct ParamState {
     exp_avg_sq: Tensor,
     pre_grad: Tensor,
     param_step: u64,
+    beta1_prod: f64,
+}
+
+struct PendingResume {
+    step: u64,
+    param_steps: Vec<Vec<u64>>,
+    beta1_prods: Vec<Vec<f64>>,
 }
 
 #[derive(Clone, Copy)]
@@ -167,6 +178,7 @@ pub struct Adan {
     groups: Vec<ParamGroup>,
     beta3: Vec<f64>,
     state: Vec<Vec<ParamState>>,
+    pending_resume: Option<PendingResume>,
     plan: ParamPlan,
     coefs: Vec<GroupCoef>,
     state_keys: HashSet<usize>,
@@ -201,12 +213,19 @@ impl Adan {
                 g.weight_decay,
             )?;
             validate_adan_hyperparams(&g.name, g.lr, g.momentum, g.beta2, b3, g.eps, g.weight_decay)?;
+            for (name, p) in &g.params {
+                if !p.layout().is_non_overlapping() {
+                    return Err(Error::Invalid(format!(
+                        "adan: parameter `{name}` has an overlapping/broadcast layout and cannot be updated in place"
+                    )));
+                }
+            }
         }
         let state = zero_state(&groups)?;
         let plan = ParamPlan::from_groups(&groups);
         let coefs = Vec::with_capacity(groups.len());
         let state_keys = HashSet::with_capacity(groups.iter().map(|g| g.params.len() * 4).sum());
-        Ok(Adan { groups, beta3, state, plan, coefs, state_keys, step: 0 })
+        Ok(Adan { groups, beta3, state, pending_resume: None, plan, coefs, state_keys, step: 0 })
     }
 
     /// Convenience constructor for a single `"params"` group configured by [`AdanConfig`].
@@ -305,13 +324,22 @@ impl Adan {
                         p.dtype()
                     )));
                 }
+                if !p.layout().is_non_overlapping() {
+                    return Err(Error::Invalid(format!(
+                        "adan: parameter `{name}` has an overlapping/broadcast layout and cannot be updated in place"
+                    )));
+                }
                 for (sname, buf) in [
                     ("exp_avg", &ps.exp_avg),
                     ("exp_avg_diff", &ps.exp_avg_diff),
                     ("exp_avg_sq", &ps.exp_avg_sq),
                     ("pre_grad", &ps.pre_grad),
                 ] {
-                    if buf.dtype() != DType::F32 || buf.shape() != p.shape() || buf.device() != p.device() {
+                    if buf.dtype() != DType::F32
+                        || buf.shape() != p.shape()
+                        || buf.device() != p.device()
+                        || !buf.layout().is_non_overlapping()
+                    {
                         return Err(Error::Invalid(format!(
                             "adan: parameter `{name}` ({:?} {:?}) does not match `{sname}` ({:?} {:?} {})",
                             p.dims(),
@@ -383,12 +411,15 @@ impl Adan {
             })?;
         }
         for (grp, st) in self.groups.iter().zip(&mut self.state) {
+            let b1 = grp.momentum;
             for ((_, p), ps) in grp.params.iter().zip(st) {
                 if grads.grad(p).is_some() {
                     ps.param_step = ps.param_step.saturating_add(1);
+                    ps.beta1_prod *= b1;
                 }
             }
         }
+        self.pending_resume = None;
         self.step = self.step.saturating_add(1);
         Ok(())
     }
@@ -429,14 +460,34 @@ impl Adan {
                 weight_decay: g.weight_decay,
                 decoupled_wd: g.decoupled_wd,
                 param_steps: st.iter().map(|ps| ps.param_step).collect(),
+                beta1_prods: st.iter().map(|ps| ps.beta1_prod).collect(),
             })
             .collect();
         AdanContract { groups, step: self.step }
     }
 
-    /// Validate `c` against this optimizer's parameter sets and adopt its hyperparameters and per-parameter
-    /// step counts (call before [`Adan::load_state`]).
+    /// Validate `c` against this optimizer's parameter sets, adopt its hyperparameters, and stage its
+    /// per-parameter step counts and cumulative `beta1` products (mapped by parameter name so reordered
+    /// parameter lists resume identically) to be committed atomically by [`Adan::load_state`].
     pub fn apply_contract(&mut self, c: &AdanContract) -> Result<()> {
+        if self.groups.len() != self.state.len() || self.groups.len() != self.beta3.len() {
+            return Err(Error::Load(format!(
+                "adan: group count {} does not match state {} / beta3 {}",
+                self.groups.len(),
+                self.state.len(),
+                self.beta3.len()
+            )));
+        }
+        for (g, st) in self.groups.iter().zip(&self.state) {
+            if g.params.len() != st.len() {
+                return Err(Error::Load(format!(
+                    "adan: group `{}` parameter count {} does not match state {}",
+                    g.name,
+                    g.params.len(),
+                    st.len()
+                )));
+            }
+        }
         let as_group_contracts: Vec<super::GroupContract> = c
             .groups
             .iter()
@@ -455,13 +506,24 @@ impl Adan {
             })
             .collect();
         check_param_sets(&self.groups, &as_group_contracts)?;
+
+        let mut staged_steps = Vec::with_capacity(self.groups.len());
+        let mut staged_prods = Vec::with_capacity(self.groups.len());
         for (gc, grp) in c.groups.iter().zip(&self.groups) {
-            if gc.param_steps.len() != grp.params.len() {
+            if gc.param_steps.len() != gc.params.len() {
                 return Err(Error::Load(format!(
                     "adan contract group `{}`: param_steps length {} != {} params",
                     gc.name,
                     gc.param_steps.len(),
-                    grp.params.len()
+                    gc.params.len()
+                )));
+            }
+            if !gc.beta1_prods.is_empty() && gc.beta1_prods.len() != gc.params.len() {
+                return Err(Error::Load(format!(
+                    "adan contract group `{}`: beta1_prods length {} != {} params",
+                    gc.name,
+                    gc.beta1_prods.len(),
+                    gc.params.len()
                 )));
             }
             let cur_lr = gc.current_lr.unwrap_or(gc.lr);
@@ -486,10 +548,60 @@ impl Adan {
                 gc.weight_decay,
             )
             .map_err(|e| Error::Load(e.to_string()))?;
+
+            let mut by_name: HashMap<&str, (u64, f64)> = HashMap::with_capacity(gc.params.len());
+            for (idx, pname) in gc.params.iter().enumerate() {
+                let k = gc.param_steps[idx];
+                if k > c.step {
+                    return Err(Error::Load(format!(
+                        "adan contract group `{}` param `{pname}`: param_step {k} > step {}",
+                        gc.name, c.step
+                    )));
+                }
+                let prod = if gc.beta1_prods.is_empty() {
+                    if k == 0 {
+                        1.0
+                    } else if gc.betas[0] == 0.0 {
+                        0.0
+                    } else {
+                        ((k as f64) * gc.betas[0].ln()).exp()
+                    }
+                } else {
+                    let p = gc.beta1_prods[idx];
+                    if !(p.is_finite() && (0.0..=1.0).contains(&p)) {
+                        return Err(Error::Load(format!(
+                            "adan contract group `{}` param `{pname}`: beta1_prod must be in [0, 1], got {p}",
+                            gc.name
+                        )));
+                    }
+                    if k == 0 && p != 1.0 {
+                        return Err(Error::Load(format!(
+                            "adan contract group `{}` param `{pname}`: param_step == 0 requires beta1_prod == 1.0, got {p}",
+                            gc.name
+                        )));
+                    }
+                    if k > 0 && p >= 1.0 {
+                        return Err(Error::Load(format!(
+                            "adan contract group `{}` param `{pname}`: param_step > 0 requires beta1_prod < 1.0, got {p}",
+                            gc.name
+                        )));
+                    }
+                    p
+                };
+                by_name.insert(pname.as_str(), (k, prod));
+            }
+            let mut grp_steps = Vec::with_capacity(grp.params.len());
+            let mut grp_prods = Vec::with_capacity(grp.params.len());
+            for (pname, _) in &grp.params {
+                let (k, prod) = by_name[pname.as_str()];
+                grp_steps.push(k);
+                grp_prods.push(prod);
+            }
+            staged_steps.push(grp_steps);
+            staged_prods.push(grp_prods);
         }
-        for (((g, b3), st), gc) in
-            self.groups.iter_mut().zip(&mut self.beta3).zip(&mut self.state).zip(&c.groups)
-        {
+
+        for ((g, b3), gc) in self.groups.iter_mut().zip(&mut self.beta3).zip(&c.groups) {
             g.base_lr = gc.lr;
             g.lr = gc.current_lr.unwrap_or(gc.lr);
             g.base_momentum = gc.betas[0];
@@ -499,11 +611,9 @@ impl Adan {
             g.eps = gc.eps;
             g.weight_decay = gc.weight_decay;
             g.decoupled_wd = gc.decoupled_wd;
-            for (ps, &k) in st.iter_mut().zip(&gc.param_steps) {
-                ps.param_step = k;
-            }
         }
-        self.step = c.step;
+        self.pending_resume =
+            Some(PendingResume { step: c.step, param_steps: staged_steps, beta1_prods: staged_prods });
         Ok(())
     }
 
@@ -524,23 +634,35 @@ impl Adan {
 
     /// Restore step counter and state tensors from a checkpoint map.
     ///
-    /// Missing state tensors are rejected when `step > 0` (or when `param_step > 0`), and negative finite
-    /// values in `exp_avg_sq` are rejected.
+    /// - If [`Adan::apply_contract`] was called beforehand, `step` must match the staged contract's `step`,
+    ///   and per-parameter step counts and `beta1` products are committed atomically upon success.
+    /// - When `step == 0`, missing state tensors stay zero and every parameter's active step count resets to `0`.
+    /// - When `step > 0` without a prior [`Adan::apply_contract`], all state tensors are required and every
+    ///   parameter adopts `param_step = step` and `beta1_prod = beta1^step`.
+    /// - Any negative value (including `-Inf`) in `exp_avg_sq` is rejected.
     pub fn load_state(&mut self, step: u64, state: &HashMap<String, Tensor>) -> Result<()> {
+        if let Some(ref pending) = self.pending_resume
+            && pending.step != step
+        {
+            return Err(Error::Load(format!(
+                "adan: load_state step {step} does not match applied contract step {}",
+                pending.step
+            )));
+        }
         type LoadedSlot = [Option<Tensor>; 4];
         let mut problems = Vec::new();
         let mut loaded: Vec<Vec<LoadedSlot>> = Vec::with_capacity(self.groups.len());
-        for (g, st) in self.groups.iter().zip(&self.state) {
+        let req = step > 0;
+        for g in &self.groups {
             let mut grp = Vec::with_capacity(g.params.len());
-            for ((name, p), ps) in g.params.iter().zip(st) {
-                let req = step > 0 || ps.param_step > 0;
+            for (name, p) in &g.params {
                 let m = take_state(state, name, p, "exp_avg", req, &mut problems);
                 let v = take_state(state, name, p, "exp_avg_diff", req, &mut problems);
                 let n = take_state(state, name, p, "exp_avg_sq", req, &mut problems);
                 let pg = take_state(state, name, p, "pre_grad", req, &mut problems);
                 if let Some(ref nt) = n {
                     let nv = nt.to_vec::<f32>()?;
-                    if nv.iter().any(|&val| val.is_finite() && val < 0.0) {
+                    if nv.iter().any(|&val| val < 0.0) {
                         problems.push(format!("`optim.{name}.exp_avg_sq` contains negative values"));
                     }
                 }
@@ -552,9 +674,9 @@ impl Adan {
             return Err(Error::Load(format!("adan state load failed: {}", problems.join("; "))));
         }
         let _ng = no_grad();
-        let fresh = zero_state(&self.groups)?;
-        for ((st_old, st_new), grp_loaded) in self.state.iter().zip(&fresh).zip(loaded) {
-            for ((ps_old, ps_new), [m, v, n, pg]) in st_old.iter().zip(st_new).zip(grp_loaded) {
+        let mut fresh = zero_state(&self.groups)?;
+        for (st_new, grp_loaded) in fresh.iter_mut().zip(loaded) {
+            for (ps_new, [m, v, n, pg]) in st_new.iter_mut().zip(grp_loaded) {
                 let dev = ps_new.exp_avg.device();
                 if let Some(t) = m {
                     ps_new.exp_avg.copy_from(&t.to_device(dev)?)?;
@@ -568,15 +690,32 @@ impl Adan {
                 if let Some(t) = pg {
                     ps_new.pre_grad.copy_from(&t.to_device(dev)?)?;
                 }
-                let _ = ps_old;
             }
         }
-        for (st_old, mut st_new) in self.state.iter_mut().zip(fresh) {
-            for (ps_old, ps_new) in st_old.iter_mut().zip(st_new.iter_mut()) {
-                ps_new.param_step = ps_old.param_step;
+        if let Some(pending) = self.pending_resume.take() {
+            for ((st_new, steps), prods) in fresh.iter_mut().zip(pending.param_steps).zip(pending.beta1_prods)
+            {
+                for ((ps_new, k), prod) in st_new.iter_mut().zip(steps).zip(prods) {
+                    ps_new.param_step = k;
+                    ps_new.beta1_prod = prod;
+                }
             }
-            *st_old = st_new;
+        } else {
+            for (g, st_new) in self.groups.iter().zip(&mut fresh) {
+                let prod = if step == 0 {
+                    1.0
+                } else if g.momentum == 0.0 {
+                    0.0
+                } else {
+                    ((step as f64) * g.momentum.ln()).exp()
+                };
+                for ps_new in st_new {
+                    ps_new.param_step = step;
+                    ps_new.beta1_prod = prod;
+                }
+            }
         }
+        self.state = fresh;
         self.step = step;
         Ok(())
     }
@@ -591,19 +730,30 @@ fn validate_adan_hyperparams(
     eps: f64,
     weight_decay: f64,
 ) -> Result<()> {
+    let lr_wd = lr * weight_decay;
     let ok = lr.is_finite()
         && lr >= 0.0
+        && (lr as f32).is_finite()
         && beta1.is_finite()
         && (0.0..1.0).contains(&beta1)
+        && (beta1 as f32) < 1.0
         && beta2.is_finite()
         && (0.0..1.0).contains(&beta2)
+        && (beta2 as f32) < 1.0
         && beta3.is_finite()
         && (0.0..1.0).contains(&beta3)
+        && (beta3 as f32) < 1.0
         && eps.is_finite()
         && eps > 0.0
         && (eps as f32) > 0.0
+        && (eps as f32).is_finite()
         && weight_decay.is_finite()
-        && weight_decay >= 0.0;
+        && weight_decay >= 0.0
+        && (weight_decay as f32).is_finite()
+        && lr_wd.is_finite()
+        && (lr_wd as f32).is_finite()
+        && ((1.0 - lr_wd) as f32).is_finite()
+        && ((1.0 + lr_wd) as f32).is_finite();
     if !ok {
         return Err(Error::Invalid(format!(
             "adan group `{name}`: invalid hyperparameters (lr={lr}, betas=[{beta1}, {beta2}, {beta3}], eps={eps}, wd={weight_decay})"
@@ -625,6 +775,7 @@ fn zero_state(groups: &[ParamGroup]) -> Result<Vec<Vec<ParamState>>> {
                 exp_avg_sq: Tensor::zeros_with(s, DType::F32, dev)?,
                 pre_grad: Tensor::zeros_with(s, DType::F32, dev)?,
                 param_step: 0,
+                beta1_prod: 1.0,
             });
         }
         out.push(grp);
@@ -641,7 +792,7 @@ fn bias_correction(beta: f64, k: u64) -> f64 {
 fn adan_step_one(p: &Tensor, g: &Tensor, ps: &ParamState, c: GroupCoef) -> Result<()> {
     let k = ps.param_step.saturating_add(1);
     let is_first = ps.param_step == 0;
-    let bc1 = bias_correction(c.b1, k);
+    let bc1 = 1.0 - ps.beta1_prod * c.b1;
     let bc2 = bias_correction(c.b2, k);
     let bc3 = bias_correction(c.b3, k);
     let one_m_b1 = 1.0 - c.b1;
@@ -659,6 +810,7 @@ fn adan_step_one(p: &Tensor, g: &Tensor, ps: &ParamState, c: GroupCoef) -> Resul
         let mut pgv = ps.pre_grad.to_vec::<f32>()?;
         let mut pv = p.to_vec::<f32>()?;
 
+        let bc3_sqrt = bc3.sqrt();
         for i in 0..pv.len() {
             let gi = gv[i] as f64;
             let diff = if is_first { 0.0 } else { gi - pgv[i] as f64 };
@@ -669,7 +821,7 @@ fn adan_step_one(p: &Tensor, g: &Tensor, ps: &ParamState, c: GroupCoef) -> Resul
 
             let m_hat = m_new / bc1;
             let v_hat = v_new / bc2;
-            let n_hat_sqrt = if n_new.is_nan() { f64::NAN } else { (n_new / bc3).max(0.0).sqrt() };
+            let n_hat_sqrt = n_new.sqrt() / bc3_sqrt;
             let denom = n_hat_sqrt + c.eps;
             let step_dir = (m_hat + c.b2 * v_hat) / denom;
             let theta = pv[i] as f64;
@@ -696,7 +848,15 @@ fn adan_step_one(p: &Tensor, g: &Tensor, ps: &ParamState, c: GroupCoef) -> Resul
     }
 
     // Device-generic composite path (supports GPU tensors and non-contiguous / aliased layouts).
+    // Snapshot `g32` whenever it shares storage with any destination mutated before `pre_grad`,
+    // pre-scale `u` by `sqrt(1 - beta3)` before squaring, and divide by `sqrt(bc3)` after `sqrt` so
+    // representable `exp_avg_sq` values never overflow `f32` prematurely.
     let g32 = if g.dtype() == DType::F32 { g.clone() } else { g.to_dtype(DType::F32)? };
+    let g_aliases_dest = [p, &ps.exp_avg, &ps.exp_avg_diff, &ps.exp_avg_sq]
+        .iter()
+        .any(|d| storage_key(d) == storage_key(&g32));
+    let g_save = if g_aliases_dest { g32.mul_scalar(1.0)? } else { g32.clone() };
+
     let diff = if is_first {
         Tensor::zeros_with(p.shape(), DType::F32, p.device())?
     } else {
@@ -705,9 +865,10 @@ fn adan_step_one(p: &Tensor, g: &Tensor, ps: &ParamState, c: GroupCoef) -> Resul
     let m_new = ps.exp_avg.mul_scalar(c.b1 as f32)?.add(&g32.mul_scalar(one_m_b1 as f32)?)?;
     let v_new = ps.exp_avg_diff.mul_scalar(c.b2 as f32)?.add(&diff.mul_scalar(one_m_b2 as f32)?)?;
     let u = g32.add(&diff.mul_scalar(c.b2 as f32)?)?;
-    let n_new = ps.exp_avg_sq.mul_scalar(c.b3 as f32)?.add(&u.square()?.mul_scalar(one_m_b3 as f32)?)?;
+    let u_scaled_sq = u.mul_scalar(one_m_b3.sqrt() as f32)?.square()?;
+    let n_new = ps.exp_avg_sq.mul_scalar(c.b3 as f32)?.add(&u_scaled_sq)?;
     let num = m_new.div_scalar(bc1 as f32)?.add(&v_new.mul_scalar((c.b2 / bc2) as f32)?)?;
-    let denom = n_new.div_scalar(bc3 as f32)?.sqrt()?.add_scalar(c.eps as f32)?;
+    let denom = n_new.sqrt()?.div_scalar(bc3.sqrt() as f32)?.add_scalar(c.eps as f32)?;
     let step_dir = num.div(&denom)?;
     let p_new = if c.decoupled_wd {
         p.mul_scalar(wd_scale as f32)?.sub(&step_dir.mul_scalar(c.lr as f32)?)?
@@ -719,6 +880,6 @@ fn adan_step_one(p: &Tensor, g: &Tensor, ps: &ParamState, c: GroupCoef) -> Resul
     ps.exp_avg.copy_from(&m_new)?;
     ps.exp_avg_diff.copy_from(&v_new)?;
     ps.exp_avg_sq.copy_from(&n_new)?;
-    ps.pre_grad.copy_from(&g32)?;
+    ps.pre_grad.copy_from(&g_save)?;
     Ok(())
 }

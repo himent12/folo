@@ -96,11 +96,27 @@ pub struct SgdrCycleInfo {
 }
 
 /// Step-indexed Cosine Annealing with Warm Restarts (SGDR) learning-rate schedule.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SgdrSchedule {
     config: SgdrConfig,
     step: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSgdrSchedule {
+    config: SgdrConfig,
+    step: u64,
+}
+
+impl<'de> Deserialize<'de> for SgdrSchedule {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawSgdrSchedule::deserialize(deserializer)?;
+        SgdrSchedule::at_step(raw.config, raw.step).map_err(serde::de::Error::custom)
+    }
 }
 
 impl SgdrSchedule {
@@ -201,18 +217,46 @@ impl SgdrSchedule {
     }
 
     /// Learning rate at an arbitrary `step: u64`.
+    ///
+    /// Uses half-angle squared-sine identities interpolated from the nearer endpoint (`base_lr` in the
+    /// first half of a cycle, `eta_min` using exact remaining steps `T_c - t_cur` in the second half) so
+    /// long-cycle tails keep full precision and extreme valid configs (e.g. `base_lr = f64::MAX`) never
+    /// overflow to `+Inf`.
     pub fn lr_at(&self, step: u64) -> f64 {
         let info = self.cycle_info(step);
         if info.in_warmup {
-            let frac = (info.step_in_cycle as f64) / info.cycle_len_f64;
-            return self.config.warmup_start_lr + (self.config.base_lr - self.config.warmup_start_lr) * frac;
+            let w = self.config.warmup_steps;
+            let span = self.config.base_lr - self.config.warmup_start_lr;
+            return if info.step_in_cycle <= w / 2 {
+                let frac = (info.step_in_cycle as f64) / (w as f64);
+                self.config.warmup_start_lr + span * frac
+            } else {
+                let rem_frac = ((w - info.step_in_cycle) as f64) / (w as f64);
+                self.config.base_lr - span * rem_frac
+            };
         }
         if info.step_in_cycle == 0 {
             return self.config.base_lr;
         }
-        let u = ((info.step_in_cycle as f64) / info.cycle_len_f64).clamp(0.0, 1.0);
-        let cosine = 0.5 * (1.0 + (std::f64::consts::PI * u).cos());
-        self.config.eta_min + (self.config.base_lr - self.config.eta_min) * cosine
+        let span = self.config.base_lr - self.config.eta_min;
+        let half_pi = std::f64::consts::FRAC_PI_2;
+        let t_cur = info.step_in_cycle as u128;
+        match info.cycle_len {
+            Some(len) if t_cur <= len / 2 => {
+                let s = (half_pi * (t_cur as f64 / len as f64)).sin();
+                self.config.base_lr - span * (s * s)
+            }
+            Some(len) => {
+                let rem = len - t_cur;
+                let s = (half_pi * (rem as f64 / len as f64)).sin();
+                self.config.eta_min + span * (s * s)
+            }
+            None => {
+                // `len > u128::MAX > u64::MAX >= t_cur`, so `u = t_cur / len_f64 << 0.5` is strictly in the first half.
+                let s = (half_pi * (info.step_in_cycle as f64 / info.cycle_len_f64)).sin();
+                self.config.base_lr - span * (s * s)
+            }
+        }
     }
 
     /// Relative multiplier `lr_at(step) / base_lr` in `[eta_min / base_lr, 1.0]` (or `[warmup_start_lr / base_lr, 1.0]`
@@ -348,9 +392,20 @@ mod tests {
         sched.advance();
         assert_eq!(sched.step(), 3);
 
-        // Serde round-trip & invalid config rejections.
+        // Serde round-trip & invalid config/JSON deserialization rejections.
         let json = serde_json::to_string(&sched).unwrap();
         assert_eq!(serde_json::from_str::<SgdrSchedule>(&json).unwrap(), sched);
+        for bad_json in [
+            r#"{"config":{"t_0":0},"step":0}"#,
+            r#"{"config":{"t_mult":0},"step":5}"#,
+            r#"{"config":{"base_lr":0.0},"step":0}"#,
+            r#"{"config":{"base_lr":0.1,"eta_min":0.2},"step":0}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<SgdrSchedule>(bad_json).is_err(),
+                "invalid SGDR JSON must fail deserialization: {bad_json}"
+            );
+        }
         for bad in [
             SgdrConfig { base_lr: 0.0, ..cfg },
             SgdrConfig { base_lr: -1.0, ..cfg },
@@ -364,6 +419,37 @@ mod tests {
         ] {
             assert!(bad.validate().is_err(), "{bad:?} should be rejected");
             assert!(SgdrSchedule::new(bad).is_err());
+        }
+
+        // Long-cycle tail precision (t_0 = 1e9, base_lr = 1, eta_min = 0) at final in-cycle step:
+        // sin(pi / (2 * 1e9))^2 ≈ (pi / 2e9)^2 ≈ 2.4674011002723397e-18 (must not cancel to 0.0).
+        let long_cycle = SgdrSchedule::new(SgdrConfig {
+            base_lr: 1.0,
+            eta_min: 0.0,
+            t_0: 1_000_000_000,
+            t_mult: 1,
+            warmup_steps: 0,
+            warmup_start_lr: 0.0,
+        })
+        .unwrap();
+        let tail = long_cycle.lr_at(999_999_999);
+        let want_tail = (std::f64::consts::FRAC_PI_2 / 1e9).sin().powi(2);
+        assert!((tail - want_tail).abs() <= 1e-12 * want_tail, "tail={tail:e} want={want_tail:e}");
+
+        // Extreme base_lr = f64::MAX with non-zero eta_min never overflows to +Inf.
+        let eta_min_ext = 1.5 * 2.0f64.powi(971);
+        let extreme = SgdrSchedule::new(SgdrConfig {
+            base_lr: f64::MAX,
+            eta_min: eta_min_ext,
+            t_0: 1_000_000_000,
+            t_mult: 1,
+            warmup_steps: 10,
+            warmup_start_lr: eta_min_ext,
+        })
+        .unwrap();
+        for s in [0u64, 1, 5, 9, 10, 11, 500_000_010, 1_000_000_009] {
+            let v = extreme.lr_at(s);
+            assert!(v.is_finite() && v >= eta_min_ext && v <= f64::MAX, "extreme step {s}: {v:e}");
         }
     }
 }

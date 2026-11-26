@@ -251,13 +251,17 @@ fn adan_edge_cases_validation_and_non_finite_poison() {
     assert_eq!(pa.to_vec::<f32>().unwrap(), vec![1.0, 2.0]);
     assert_eq!(opt_atomic.step_count(), 0);
 
-    // 4. Reject non-float gradient and negative exp_avg_sq on load_state.
+    // 4. Reject non-float gradient, f32-rounding beta, and negative / -Inf exp_avg_sq on load_state.
     let mut int_g = HashMap::new();
     int_g.insert(pa.id(), Tensor::zeros_with([2], DType::I64, pa.device()).unwrap());
     assert!(opt_atomic.step(&MapGrads(int_g)).is_err());
 
+    assert!(AdanConfig { betas: [1.0 - 1e-10, 0.92, 0.99], ..AdanConfig::default() }.validate().is_err());
+
     let mut bad_state: HashMap<String, Tensor> = opt_atomic.state_tensors().unwrap().into_iter().collect();
     bad_state.insert("a.exp_avg_sq".into(), Tensor::from_slice(&[-1.0f32, 0.0], [2]).unwrap());
+    assert!(opt_atomic.load_state(1, &bad_state).is_err());
+    bad_state.insert("a.exp_avg_sq".into(), Tensor::from_slice(&[f32::NEG_INFINITY, 0.0], [2]).unwrap());
     assert!(opt_atomic.load_state(1, &bad_state).is_err());
 
     // 5. Non-finite gradient propagates NaN into updated parameter.
@@ -270,4 +274,134 @@ fn adan_edge_cases_validation_and_non_finite_poison() {
         let out = pn.to_vec::<f32>().unwrap();
         assert!(out[0].is_nan() && out[1].is_finite(), "bad grad {bad}: {out:?}");
     }
+}
+
+/// Regression tests for Round 1 review findings:
+/// reordered parameter resume, broadcast-view atomic preflight, aliased `g == p` `pre_grad` snapshot,
+/// composite-path large-gradient overflow safety + CPU parity + F16 gradient, varying-`beta1` exact
+/// bias correction, and `load_state(0, empty)` / direct `load_state(step > 0)` handling.
+#[test]
+fn adan_reordered_resume_aliasing_composite_overflow_and_varying_beta1() {
+    // 1. Reordered parameter resume maps param_step and beta1_prod by parameter name.
+    let pa = Tensor::from_slice(&[1.0f32, -2.0], [2]).unwrap();
+    let pb = Tensor::from_slice(&[3.0f32, 4.0], [2]).unwrap();
+    let cfg = AdanConfig { lr: 0.05, weight_decay: 0.01, ..AdanConfig::default() };
+    let mut opt = Adan::from_params(vec![("a".into(), pa.clone()), ("b".into(), pb.clone())], cfg).unwrap();
+    let mut g1 = HashMap::new();
+    g1.insert(pa.id(), Tensor::from_slice(&[0.5f32, -0.5], [2]).unwrap());
+    opt.step(&MapGrads(g1)).unwrap(); // a has step 1, b has step 0
+
+    let contract = opt.contract();
+    let state_map: HashMap<String, Tensor> = opt.state_tensors().unwrap().into_iter().collect();
+    let pa2 = Tensor::from_vec(pa.to_vec::<f32>().unwrap(), [2]).unwrap();
+    let pb2 = Tensor::from_vec(pb.to_vec::<f32>().unwrap(), [2]).unwrap();
+    // Construct resumed optimizer in REVERSED order [b, a].
+    let mut resumed =
+        Adan::from_params(vec![("b".into(), pb2.clone()), ("a".into(), pa2.clone())], AdanConfig::default())
+            .unwrap();
+    resumed.apply_contract(&contract).unwrap();
+    resumed.load_state(contract.step, &state_map).unwrap();
+    assert_eq!(resumed.param_step(0, 0), Some(0)); // "b"
+    assert_eq!(resumed.param_step(0, 1), Some(1)); // "a"
+
+    let mut g2_orig = HashMap::new();
+    g2_orig.insert(pa.id(), Tensor::from_slice(&[-0.3f32, 0.8], [2]).unwrap());
+    g2_orig.insert(pb.id(), Tensor::from_slice(&[0.4f32, -0.2], [2]).unwrap());
+    opt.step(&MapGrads(g2_orig)).unwrap();
+
+    let mut g2_res = HashMap::new();
+    g2_res.insert(pa2.id(), Tensor::from_slice(&[-0.3f32, 0.8], [2]).unwrap());
+    g2_res.insert(pb2.id(), Tensor::from_slice(&[0.4f32, -0.2], [2]).unwrap());
+    resumed.step(&MapGrads(g2_res)).unwrap();
+    assert_eq!(pa.to_vec::<f32>().unwrap(), pa2.to_vec::<f32>().unwrap());
+    assert_eq!(pb.to_vec::<f32>().unwrap(), pb2.to_vec::<f32>().unwrap());
+
+    // Resetting an already-stepped optimizer via load_state(0, empty) succeeds and resets param_steps.
+    resumed.load_state(0, &HashMap::new()).unwrap();
+    assert_eq!(resumed.step_count(), 0);
+    assert_eq!(resumed.param_step(0, 0), Some(0));
+    assert_eq!(resumed.param_step(0, 1), Some(0));
+
+    // Contract rejecting param_step > step.
+    let mut bad_contract = contract.clone();
+    bad_contract.groups[0].param_steps[0] = bad_contract.step + 1;
+    assert!(resumed.apply_contract(&bad_contract).is_err());
+
+    // 2. Broadcast/overlapping view parameter rejected at construction AND preflight (atomic step).
+    let bcast = Tensor::from_slice(&[1.0f32], [1]).unwrap().broadcast_to([2]).unwrap();
+    assert!(Adan::from_params(vec![("bc".into(), bcast.clone())], cfg).is_err());
+
+    let p_ok = Tensor::from_slice(&[1.0f32, 2.0], [2]).unwrap();
+    let p_mut = Tensor::from_slice(&[3.0f32, 4.0], [2]).unwrap();
+    let mut opt_bcast =
+        Adan::from_params(vec![("ok".into(), p_ok.clone()), ("m".into(), p_mut.clone())], cfg).unwrap();
+    // Replace second param with a broadcast view via groups_mut to test step() preflight atomicity.
+    opt_bcast.groups_mut()[0].params[1].1 = bcast.clone();
+    let mut gb = HashMap::new();
+    gb.insert(p_ok.id(), Tensor::from_slice(&[1.0f32, 1.0], [2]).unwrap());
+    gb.insert(bcast.id(), Tensor::from_slice(&[1.0f32, 1.0], [2]).unwrap());
+    assert!(opt_bcast.step(&MapGrads(gb)).is_err());
+    assert_eq!(p_ok.to_vec::<f32>().unwrap(), vec![1.0, 2.0]);
+    assert_eq!(opt_bcast.step_count(), 0);
+
+    // 3. Aliased gradient g == p saves pre-update gradient in pre_grad (not post-update p_new).
+    let p_alias = Tensor::from_slice(&[2.0f32], [1]).unwrap();
+    let mut opt_alias = Adan::from_params(
+        vec![("w".into(), p_alias.clone())],
+        AdanConfig { lr: 0.1, weight_decay: 0.0, ..AdanConfig::default() },
+    )
+    .unwrap();
+    let mut ga = HashMap::new();
+    ga.insert(p_alias.id(), p_alias.clone());
+    opt_alias.step(&MapGrads(ga)).unwrap();
+    assert!((p_alias.to_vec::<f32>().unwrap()[0] - 1.9).abs() < 1e-5);
+    assert_eq!(opt_alias.pre_grad(0, 0).unwrap().to_vec::<f32>().unwrap(), vec![2.0]);
+
+    // 4. Composite path (transposed non-contiguous gradient) matches CPU fast path at 2e19 without Inf.
+    let p_cpu = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], [2, 2]).unwrap();
+    let p_comp = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], [2, 2]).unwrap();
+    let big_cfg = AdanConfig { lr: 0.1, weight_decay: 0.0, ..AdanConfig::default() };
+    let mut opt_cpu = Adan::from_params(vec![("w".into(), p_cpu.clone())], big_cfg).unwrap();
+    let mut opt_comp = Adan::from_params(vec![("w".into(), p_comp.clone())], big_cfg).unwrap();
+    let g_contig = Tensor::from_slice(&[2e19f32, -2e19, 2e19, -2e19], [2, 2]).unwrap();
+    let g_trans = Tensor::from_slice(&[2e19f32, 2e19, -2e19, -2e19], [2, 2]).unwrap().t().unwrap();
+    assert!(!g_trans.is_contiguous());
+    let mut mc = HashMap::new();
+    mc.insert(p_cpu.id(), g_contig);
+    let mut mt = HashMap::new();
+    mt.insert(p_comp.id(), g_trans);
+    opt_cpu.step(&MapGrads(mc)).unwrap();
+    opt_comp.step(&MapGrads(mt)).unwrap();
+    let n_comp = opt_comp.exp_avg_sq(0, 0).unwrap().to_vec::<f32>().unwrap();
+    assert!(n_comp.iter().all(|v| v.is_finite()), "composite exp_avg_sq overflowed: {n_comp:?}");
+    for (a, b) in p_cpu.to_vec::<f32>().unwrap().iter().zip(p_comp.to_vec::<f32>().unwrap()) {
+        assert!((a - b).abs() < 1e-5, "CPU vs composite mismatch at 2e19: {a} vs {b}");
+    }
+
+    // F16 gradient through composite path matches F32 CPU path.
+    let p_f16 = Tensor::from_slice(&[1.0f32, -1.0], [2]).unwrap();
+    let mut opt_f16 = Adan::from_params(vec![("w".into(), p_f16.clone())], big_cfg).unwrap();
+    let mut mf16 = HashMap::new();
+    mf16.insert(p_f16.id(), Tensor::from_slice(&[0.5f32, -0.5], [2]).unwrap().to_dtype(DType::F16).unwrap());
+    opt_f16.step(&MapGrads(mf16)).unwrap();
+    let vf16 = p_f16.to_vec::<f32>().unwrap();
+    assert!((vf16[0] - 0.9).abs() < 1e-4 && (vf16[1] - (-0.9)).abs() < 1e-4, "f16 grad: {vf16:?}");
+
+    // 5. Varying beta1 schedule (0.5 on step 1, 0.9 on step 2, constant unit gradients):
+    // Exact bc1 = 1 - 0.5 * 0.9 = 0.55 => m_hat = 1.0 => parameter reaches -0.2 (not -0.38947).
+    let pv = Tensor::from_slice(&[0.0f32], [1]).unwrap();
+    let mut opt_v = Adan::from_params(
+        vec![("w".into(), pv.clone())],
+        AdanConfig { lr: 0.1, betas: [0.5, 0.92, 0.99], eps: 1e-8, weight_decay: 0.0, decoupled_wd: true },
+    )
+    .unwrap();
+    let mut gv = HashMap::new();
+    gv.insert(pv.id(), Tensor::from_slice(&[1.0f32], [1]).unwrap());
+    opt_v.step(&MapGrads(gv)).unwrap();
+    opt_v.groups_mut()[0].momentum = 0.9;
+    let mut gv2 = HashMap::new();
+    gv2.insert(pv.id(), Tensor::from_slice(&[1.0f32], [1]).unwrap());
+    opt_v.step(&MapGrads(gv2)).unwrap();
+    let got_v = pv.to_vec::<f32>().unwrap()[0];
+    assert!((got_v - (-0.2)).abs() < 1e-5, "varying beta1 expected -0.2, got {got_v}");
 }

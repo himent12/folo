@@ -30,14 +30,14 @@ pub struct RmsNorm {
 }
 
 impl RmsNorm {
-    /// Create an [`RmsNorm`] layer with learnable unit-initialized `weight: [dim]` and stability floor `eps >= 0`.
+    /// Create an [`RmsNorm`] layer with learnable unit-initialized `weight: [dim]` and stability floor `eps > 0`.
     pub fn new(dim: usize, eps: f32) -> Result<Self> {
         validate_rmsnorm(dim, eps)?;
         let weight = Tensor::ones([dim]).requires_grad_();
         Ok(Self { weight: Some(weight), dim, eps })
     }
 
-    /// Create an [`RmsNorm`] layer without a learnable affine `weight`.
+    /// Create an [`RmsNorm`] layer without a learnable affine `weight` and stability floor `eps > 0`.
     pub fn without_affine(dim: usize, eps: f32) -> Result<Self> {
         validate_rmsnorm(dim, eps)?;
         Ok(Self { weight: None, dim, eps })
@@ -77,8 +77,8 @@ fn validate_rmsnorm(dim: usize, eps: f32) -> Result<()> {
     if dim == 0 {
         return Err(Error::Invalid("RmsNorm: dim must be >= 1, got 0".into()));
     }
-    if !(eps.is_finite() && eps >= 0.0) {
-        return Err(Error::Invalid(format!("RmsNorm: eps must be finite and >= 0, got {eps}")));
+    if !(eps.is_finite() && eps > 0.0) {
+        return Err(Error::Invalid(format!("RmsNorm: eps must be finite and > 0, got {eps}")));
     }
     Ok(())
 }
@@ -179,12 +179,23 @@ mod tests {
         assert!(sg.decay.is_empty() && sg.bias.is_empty() && sg.bn.len() == 1);
         assert_eq!(sg.bn[0].0, "weight");
 
-        // Validation rejections.
+        // Validation rejections (including eps == 0.0 to prevent subnormal 1/rstd overflow in f32).
         assert!(RmsNorm::new(0, RMSNORM_DEFAULT_EPS).is_err());
+        assert!(RmsNorm::new(1, 0.0).is_err());
+        assert!(RmsNorm::without_affine(1, 0.0).is_err());
         assert!(RmsNorm::new(4, -1e-6).is_err());
         assert!(RmsNorm::new(4, f32::NAN).is_err());
         assert!(RmsNorm::from_weight(Tensor::ones([2, 3]), RMSNORM_DEFAULT_EPS).is_err());
         assert!(norm.forward(&Tensor::zeros([2, 5])).is_err());
         assert!(norm.forward(&Tensor::scalar(1.0)).is_err());
+
+        // Subnormal input [1e-40] with positive eps stays finite in both forward and backward.
+        let tiny_norm = RmsNorm::without_affine(1, f32::MIN_POSITIVE).unwrap();
+        let tiny_x = Tensor::from_slice(&[1e-40f32], [1]).unwrap().requires_grad_();
+        let tiny_y = tiny_norm.forward(&tiny_x).unwrap();
+        assert!(tiny_y.to_vec::<f32>().unwrap()[0].is_finite());
+        let tiny_g =
+            tiny_y.sum_all().unwrap().backward().unwrap().get(&tiny_x).unwrap().to_vec::<f32>().unwrap();
+        assert!(tiny_g[0].is_finite());
     }
 }

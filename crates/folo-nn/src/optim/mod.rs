@@ -642,13 +642,13 @@ fn is_no_decay_scale(name: &str, t: &Tensor) -> bool {
 }
 
 /// docs/MODEL.md §8.2's three groups, assigned by role: `decay` (conv / linear weights), `bn` (BatchNorm
-/// weights, [`crate::LayerScale::gamma`], and 1-D scale/gate parameters such as `gamma_id` and `alpha_raw`),
-/// `bias` (every tensor named `bias`: BatchNorm biases and conv / linear biases).
+/// weights, [`crate::LayerScale::gamma`], [`crate::RmsNorm::weight`], and 1-D scale/gate parameters such as
+/// `gamma_id` and `alpha_raw`), `bias` (every tensor named `bias`: BatchNorm biases and conv / linear biases).
 #[derive(Debug, Clone, Default)]
 pub struct StandardGroups {
     /// Weights that get weight decay.
     pub decay: Vec<(String, Tensor)>,
-    /// BatchNorm γ, [`crate::LayerScale::gamma`], and 1-D scale/gate parameters (`gamma_id`, `alpha_raw`) with no weight decay.
+    /// BatchNorm γ, [`crate::LayerScale::gamma`], [`crate::RmsNorm::weight`], and 1-D scale/gate parameters (`gamma_id`, `alpha_raw`) with no weight decay.
     pub bn: Vec<(String, Tensor)>,
     /// Biases (BatchNorm β and layer biases).
     pub bias: Vec<(String, Tensor)>,
@@ -658,10 +658,11 @@ pub struct StandardGroups {
 
 impl StandardGroups {
     /// Split `model`'s parameters. A parameter is `bn` if it is the `weight` of a [`BatchNorm2d`], the `gamma`
-    /// of a [`crate::LayerScale`], or a 1-D no-decay scale/gate parameter whose last name segment is `gamma_id`
-    /// or `alpha_raw`, `bias` if its last name segment is `bias`, and `decay` otherwise. For the FOLO v1
-    /// detector this is exactly the name rule of §8.2 (`*.bn.weight` / `*.bn.bias`, `*.out.bias` / every other
-    /// weight); for FOLO v2-Iso it also protects `gamma_id` and `alpha_raw` from weight decay and bias warmup.
+    /// of a [`crate::LayerScale`], the `weight` of an [`crate::RmsNorm`], or a 1-D no-decay scale/gate parameter
+    /// whose last name segment is `gamma_id` or `alpha_raw`, `bias` if its last name segment is `bias`, and
+    /// `decay` otherwise. For the FOLO v1 detector this is exactly the name rule of §8.2 (`*.bn.weight` /
+    /// `*.bn.bias`, `*.out.bias` / every other weight); for FOLO v2-Iso it also protects `gamma_id` and
+    /// `alpha_raw` from weight decay and bias warmup.
     pub fn from_module(model: &dyn Module) -> Self {
         let mut bn_ids = std::collections::HashSet::new();
         let mut dw_ids = std::collections::HashSet::new();
