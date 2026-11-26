@@ -59,18 +59,7 @@ export function linkDependency(source: Source, target: Target): Link | undefined
     if (target._sources !== undefined) target._sources._ns = node;
     target._sources = node;
     source._node = node;
-    if (target._flags & TRACKING) {
-      try {
-        source._subscribe(node);
-      } catch (e) {
-        if (node._ps !== undefined) node._ps._ns = node._ns;
-        if (node._ns !== undefined) node._ns._ps = node._ps;
-        if (target._sources === node) target._sources = node._ps;
-        if (source._node === node) source._node = node._rb;
-        node._ps = node._ns = node._rb = undefined;
-        throw e;
-      }
-    }
+    if (target._flags & TRACKING) source._subscribe(node);
     return node;
   }
   if (node._v === -1) {
@@ -131,11 +120,11 @@ export function cleanupSources(target: Target): void {
   if (hasErr) throw err;
 }
 
-/** Unsubscribes every link in `head` (up to optional `stop`) and runs optional `after`, finishing all before rethrowing the first error. */
-export function unsubscribeSources(head: Link | undefined, after?: () => void, stop?: Link): void {
+/** Unsubscribes every link in `head` and runs optional `after`, finishing all before rethrowing the first error. */
+export function unsubscribeSources(head: Link | undefined, after?: () => void): void {
   let err: unknown;
   let hasErr = false;
-  for (let n = head; n !== stop && n !== undefined; n = n._ns) {
+  for (let n = head; n !== undefined; n = n._ns) {
     try {
       n._s._unsubscribe(n);
     } catch (e) {
