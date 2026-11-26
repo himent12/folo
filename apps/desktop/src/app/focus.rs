@@ -78,6 +78,8 @@ impl FoloApp {
         };
         if self.confirm_close.is_some() {
             has_prefix(&["close-", "dialog-close"])
+        } else if let Some(p) = &self.palette {
+            p.input.read(cx).focus_handle(cx).is_focused(window)
         } else if self.confirm_delete.is_some() {
             has_prefix(&["del-", "dialog-close"])
         } else if self.confirm_stop.is_some() {
@@ -99,8 +101,6 @@ impl FoloApp {
                 || [&f.name, &f.images].iter().any(|i| i.read(cx).focus_handle(cx).is_focused(window))
         } else if self.inspector.is_some() {
             has_prefix(&["insp-"]) || self.inspector_focus.is_focused(window)
-        } else if let Some(p) = &self.palette {
-            p.input.read(cx).focus_handle(cx).is_focused(window)
         } else {
             true
         }

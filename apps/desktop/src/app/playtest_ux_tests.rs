@@ -783,8 +783,10 @@ fn bench_inline_delete_new_loop_and_entry_inspector_keyboard_focus_and_esc() {
         assert!(this.fh(&del_key, cx).is_focused(w), "Keep restores focus to entry Delete");
     });
 
-    // 3. Loops tab: New loop focuses `bench-loop-teacher`, and Esc closes it returning to `bench-loop-new`.
+    // 3. Switching away from Leaderboard while an entry Delete confirmation is open must not let
+    // a hidden confirmation swallow Esc or strand focus on an unmounted entry button.
     drive(&mut app, window, |this, _, cx| {
+        this.bench.confirm_delete = Some((bid.into(), Some(done_id.clone())));
         this.bench.tab = BenchTab::Loops;
         cx.notify();
     });
@@ -798,12 +800,16 @@ fn bench_inline_delete_new_loop_and_entry_inspector_keyboard_focus_and_esc() {
     });
     press_key(&mut app, window, "escape", None);
     drive(&mut app, window, |this, w, cx| {
-        assert!(this.bench.new_loop.is_none());
+        assert!(this.bench.confirm_delete.is_none(), "stale hidden confirm_delete cleared");
+        assert!(
+            this.bench.new_loop.is_none(),
+            "Esc closes visible New loop form instead of being swallowed by hidden entry delete"
+        );
         assert!(this.fh("bench-loop-new", cx).is_focused(w), "Esc returns focus to New loop button");
     });
 
-    // 4. Entry image inline inspector: Esc closes the inline preview and returns focus to the tile
-    // instead of navigating away from `Route::BenchEntry`.
+    // 4. Entry image inline inspector: Esc closes a visible inline preview and returns focus to the
+    // tile instead of navigating away, while a stale selection not in the loaded page falls through.
     drive(&mut app, window, |this, w, cx| {
         this.navigate(Route::BenchEntry(bid.into(), done_id.clone()), w, cx);
     });
@@ -835,10 +841,13 @@ fn bench_inline_delete_new_loop_and_entry_inspector_keyboard_focus_and_esc() {
             "Esc stays on BenchEntry while closing inline preview"
         );
         assert!(this.fh(&tile_key, cx).is_focused(w), "Esc returns focus to inspected tile");
+        // A stale selected image id not present in the loaded page must NOT swallow Esc.
+        this.bench.selected_entry_image = Some((bid.into(), done_id.clone(), "missing-page2-img".into()));
     });
     press_key(&mut app, window, "escape", None);
     drive(&mut app, window, |this, _, _| {
-        assert_eq!(this.route, Route::Bench(bid.into()), "second Esc navigates back to benchmark");
+        assert_eq!(this.bench.selected_entry_image, None, "stale selection cleared");
+        assert_eq!(this.route, Route::Bench(bid.into()), "Esc navigates back instead of stranding focus");
     });
 }
 

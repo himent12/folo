@@ -199,7 +199,7 @@ impl FoloApp {
         let off: Vec<Option<SharedString>> = (0..n).map(|i| disabled.get(i).cloned().flatten()).collect();
         let usable: Vec<usize> = (0..n).filter(|&i| off[i].is_none()).collect();
         let (first, last) = (usable.first().copied().unwrap_or(0), usable.last().copied().unwrap_or(0));
-        let initial_hl = if selected < n && !off[selected].is_some() { selected } else { first };
+        let initial_hl = if selected < n && off[selected].is_none() { selected } else { first };
         // The usable option after (or before) `i`, staying put at the ends.
         let step_usable = usable.clone();
         let step = move |i: usize, down: bool| {

@@ -392,7 +392,9 @@ fn pump_progress_wakes_on_background_completion_and_times_out_when_held() {
     release.send(()).unwrap();
     assert!(app.pump_progress(Duration::from_secs(2)));
     assert!(done.get());
-    // Once idle, `pump_progress` returns `false` immediately.
+    // Wait for the pool thread to finish decrementing `outstanding` and incrementing `completed`,
+    // then verify an idle `pump_progress` returns `false` immediately.
+    app.run_until_idle();
     assert!(!app.pump_progress(Duration::from_millis(10)));
 }
 

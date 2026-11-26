@@ -148,7 +148,13 @@ impl FoloApp {
             window,
             cx,
             std::rc::Rc::new(|this, i, _, _| {
-                this.bench.tab = [BenchTab::Leaderboard, BenchTab::Plan, BenchTab::Loops][i.min(2)];
+                let next = [BenchTab::Leaderboard, BenchTab::Plan, BenchTab::Loops][i.min(2)];
+                if this.bench.tab != next {
+                    this.bench.tab = next;
+                    if matches!(this.bench.confirm_delete, Some((_, Some(_)))) {
+                        this.bench.confirm_delete = None;
+                    }
+                }
             }),
         );
         let description = (!b.description.is_empty())
