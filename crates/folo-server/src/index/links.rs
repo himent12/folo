@@ -24,10 +24,26 @@ fn maybe_link(meta: &std::fs::Metadata) -> bool {
     }
 }
 
+/// Returns `true` when `folo_data::guard` allows probing `p` and its parent directory.
+///
+/// Checking `p.parent()` prevents probing dangling links or missing entries inside a refused directory under
+/// `folo mcp --confine` (where `canonicalize(p)` fails for a dangling link, while `canonicalize(parent)` resolves
+/// outside the confined root and is rejected).
+fn guard_allows_probe(p: &Path) -> bool {
+    let parent_ok = p
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .is_none_or(|parent| folo_data::guard::check(parent).is_ok());
+    parent_ok && folo_data::guard::check(p).is_ok()
+}
+
 /// Returns a clear diagnostic when `p` is a symlink (or Windows directory junction) whose target cannot be
 /// resolved (missing target, symlink loop, or inaccessible target). Returns `None` for regular files/dirs,
-/// working symlinks, or paths that do not exist at all.
+/// working symlinks, paths refused by `folo_data::guard`, or paths that do not exist at all.
 pub fn dangling_link_message(p: &Path) -> Option<String> {
+    if !guard_allows_probe(p) {
+        return None;
+    }
     let meta = std::fs::symlink_metadata(p).ok()?;
     if !maybe_link(&meta) {
         return None;
@@ -74,6 +90,9 @@ pub fn enrich_dangling_symlinks(input_path: &Path, report: &mut CheckReport) {
     let mut reported_files: HashSet<PathBuf> = HashSet::new();
     let is_yolo = report.format == Format::Yolo;
     for issue in &mut report.issues {
+        if issue.message.contains(folo_data::guard::DENIED) {
+            continue;
+        }
         let Some(detail) = dangling_link_message(&issue.file) else { continue };
         let is_txt = issue.file.extension().is_some_and(|e| e.eq_ignore_ascii_case("txt"));
         if is_yolo && is_txt && matches!(issue.kind, CheckKind::MissingImage | CheckKind::BrokenLabel) {
@@ -125,25 +144,25 @@ fn enrich_yolo_dangling_symlinks(
         for cand in [images_root.join(name), root.join(name).join("images")] {
             if dangling_link_message(&cand).is_some() {
                 extra_links.insert(cand);
-            } else if cand.is_dir() {
+            } else if guard_allows_probe(&cand) && cand.is_dir() {
                 image_dirs.insert(cand);
             }
         }
         for lbl in [root.join("labels").join(name), root.join(name).join("labels")] {
             if dangling_link_message(&lbl).is_some() {
                 extra_links.insert(lbl);
-            } else if lbl.is_dir() {
+            } else if guard_allows_probe(&lbl) && lbl.is_dir() {
                 label_dirs.insert(lbl);
             }
         }
     }
-    if images_root.is_dir() && image_dirs.is_empty() {
+    if guard_allows_probe(&images_root) && images_root.is_dir() && image_dirs.is_empty() {
         image_dirs.insert(images_root);
     }
     let labels_root = root.join("labels");
     if dangling_link_message(&labels_root).is_some() {
         extra_links.insert(labels_root);
-    } else if labels_root.is_dir() {
+    } else if guard_allows_probe(&labels_root) && labels_root.is_dir() {
         label_dirs.insert(labels_root);
     }
 
@@ -154,7 +173,7 @@ fn enrich_yolo_dangling_symlinks(
         if let Some(lbl_dir) = probe.parent() {
             if dangling_link_message(lbl_dir).is_some() {
                 extra_links.insert(lbl_dir.to_path_buf());
-            } else if lbl_dir.is_dir() {
+            } else if guard_allows_probe(lbl_dir) && lbl_dir.is_dir() {
                 label_dirs.insert(lbl_dir.to_path_buf());
             }
         }
@@ -362,14 +381,15 @@ fn walk_dangling(dir: &Path, visited: &mut HashSet<PathBuf>, on_dangling: &mut i
     for p in entries {
         if let Some(msg) = dangling_link_message(&p) {
             on_dangling(&p, msg);
-        } else if p.is_dir() {
+        } else if guard_allows_probe(&p) && p.is_dir() {
             walk_dangling(&p, visited, on_dangling);
         }
     }
 }
 
 fn find_yolo_yaml(input_path: &Path, root: &Path) -> Option<PathBuf> {
-    if input_path.is_file()
+    if guard_allows_probe(input_path)
+        && input_path.is_file()
         && input_path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml"))
@@ -378,12 +398,12 @@ fn find_yolo_yaml(input_path: &Path, root: &Path) -> Option<PathBuf> {
     }
     // Check `input_path` first (handles `config/data.yaml` with `path: ../actual_data`), then `root`.
     for dir in [input_path, root] {
-        if !dir.is_dir() {
+        if !guard_allows_probe(dir) || !dir.is_dir() {
             continue;
         }
         for name in ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"] {
             let p = dir.join(name);
-            if p.is_file() {
+            if guard_allows_probe(&p) && p.is_file() {
                 return Some(p);
             }
         }
@@ -503,9 +523,7 @@ fn collect_yaml_split_dirs(
             vec![root.join(p), yaml_dir.join(p), root.join(&stripped), yaml_dir.join(&stripped)]
         };
         for cand in candidates {
-            if cand.parent().is_some_and(|parent| folo_data::guard::check(parent).is_err())
-                || folo_data::guard::check(&cand).is_err()
-            {
+            if !guard_allows_probe(&cand) {
                 continue;
             }
             if dangling_link_message(&cand).is_some() {

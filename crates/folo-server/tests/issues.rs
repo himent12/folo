@@ -227,29 +227,56 @@ async fn real_issues_are_cached_and_refreshed() {
     assert_eq!(err_code(&app(&home), get("/api/datasets/ds_none/issues")).await.1, "dataset_not_found");
 }
 
+/// Removes a dangling junction / symlink on drop even if a test assertion panics before explicit cleanup.
+struct DanglingLinkGuard(std::path::PathBuf);
+
+impl Drop for DanglingLinkGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        let _ = std::fs::remove_dir(&self.0);
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn create_dangling_link(link: &Path, scratch: &Path) -> DanglingLinkGuard {
+    #[cfg(windows)]
+    {
+        let target = scratch.join("dead-target");
+        std::fs::create_dir_all(&target).unwrap();
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/d", "/c", "mklink", "/j"])
+            .arg(link)
+            .arg(&target)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = folo_test_support::ChildGuard::new(cmd.spawn().expect("spawn mklink /j"));
+        let start = std::time::Instant::now();
+        let status = loop {
+            if let Some(st) = child.try_wait().unwrap() {
+                break st;
+            }
+            assert!(start.elapsed() < Duration::from_secs(15), "mklink /j timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(status.success(), "mklink /j failed with {status}");
+        std::fs::remove_dir(&target).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(scratch.join("dead-target"), link).unwrap();
+    }
+    DanglingLinkGuard(link.to_path_buf())
+}
+
 #[tokio::test]
 async fn real_issues_report_and_refresh_dangling_links() {
     let t = TestDir::new("issues-dangling-link");
     let (home, data) = (t.join("home"), t.join("shapes"));
     write_shapes(&data);
     let dead = data.join("images").join("train").join("dead");
-    #[cfg(windows)]
-    {
-        let target = t.join("dead-target");
-        std::fs::create_dir_all(&target).unwrap();
-        let status = std::process::Command::new("cmd")
-            .args(["/d", "/c", "mklink", "/j"])
-            .arg(&dead)
-            .arg(&target)
-            .output()
-            .expect("mklink /j");
-        assert!(status.status.success(), "mklink failed: {}", String::from_utf8_lossy(&status.stderr));
-        std::fs::remove_dir(&target).unwrap();
-    }
-    #[cfg(unix)]
-    {
-        std::os::unix::fs::symlink(t.join("dead-target"), &dead).unwrap();
-    }
+    let guard = create_dangling_link(&dead, t.path());
 
     let store = RealStore::open(home).recheck_every(Duration::ZERO);
     let app = Server::new(Arc::new(store), Options::default()).router();
@@ -265,11 +292,48 @@ async fn real_issues_report_and_refresh_dangling_links() {
     assert!(link_issue.message.contains("dangling symlink"), "{link_issue:?}");
 
     // Removing the dangling link invalidates the fingerprint and clears the issue on the next request.
-    #[cfg(windows)]
-    std::fs::remove_dir(&dead).unwrap();
-    #[cfg(unix)]
-    std::fs::remove_file(&dead).unwrap();
+    drop(guard);
 
     let after: IssuePage = ok(&app, get(&uri)).await;
     assert!(after.issues.iter().all(|i| i.file != "images/train/dead"), "{after:?}");
+}
+
+#[tokio::test]
+async fn real_issues_refresh_dangling_split_outside_manifest_and_dataset_root() {
+    let t = TestDir::new("issues-dangling-split-outside");
+    let (home, cfg_dir, data_dir, ext_dir) =
+        (t.join("home"), t.join("cfg"), t.join("data"), t.join("external"));
+    write_shapes(&data_dir);
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::create_dir_all(&ext_dir).unwrap();
+    let dead_val = ext_dir.join("val_dead");
+    let guard = create_dangling_link(&dead_val, t.path());
+
+    let yaml = cfg_dir.join("data.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            "path: ../data\ntrain: images/train\nval: {}\nnames: [circle, square, triangle]\n",
+            dead_val.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    let store = RealStore::open(home).recheck_every(Duration::ZERO);
+    let app = Server::new(Arc::new(store), Options::default()).router();
+    let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": yaml.to_str().unwrap() }))).await;
+    let uri = format!("/api/datasets/{}/issues?limit=1000", ds.id);
+    let all: IssuePage = ok(&app, get(&uri)).await;
+    assert!(
+        all.issues.iter().any(|i| i.kind == "other" && i.message.contains("dangling symlink")),
+        "expected dangling split warning in {all:?}"
+    );
+
+    // Removing the external dangling split link invalidates the fingerprint and clears the warning.
+    drop(guard);
+    let after: IssuePage = ok(&app, get(&uri)).await;
+    assert!(
+        after.issues.iter().all(|i| !(i.kind == "other" && i.message.contains("dangling symlink"))),
+        "stale dangling split issue survived removal: {after:?}"
+    );
 }

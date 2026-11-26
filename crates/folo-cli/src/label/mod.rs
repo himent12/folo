@@ -379,9 +379,56 @@ fn view(a: LabelViewArgs, out: Out) -> Result<(), CliError> {
     record["path"] = json!(folo_api::json::path(&path));
     out.record(&record);
     let text = folo_mcp::label::view_text(&r.job_id, image, &r.classes, r.to_review, 1 << 20);
+    let text = disambiguate_view_boxes(&text, &r.classes);
     out.human(text.replace("view again with from: ", "add --from "));
     out.human(format!("wrote {}", folo_api::json::path(&path)));
     Ok(())
+}
+
+/// True when any class name parses as a `u32` different from its own class index (e.g. `["circle", "0"]`).
+fn has_numeric_class_collision(classes: &[String]) -> bool {
+    classes.iter().enumerate().any(|(i, c)| c.trim().parse::<u32>().is_ok_and(|n| n as usize != i))
+}
+
+/// In CLI human output for `folo label view`, prefixes box class indices with `id:` when the job has a colliding
+/// numeric class name so every printed box token (including index `0` in `["circle", "0"]`) round-trips
+/// unambiguously back into `folo label set --box`.
+fn disambiguate_view_boxes(text: &str, classes: &[String]) -> String {
+    const HEADER: &str = "Boxes (n class-index x1,y1,x2,y2):";
+    if !has_numeric_class_collision(classes) || !text.contains(HEADER) {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut in_boxes = false;
+    for (idx, line) in text.split('\n').enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        if line == HEADER {
+            in_boxes = true;
+            out.push_str("Boxes (n class-id x1,y1,x2,y2):");
+            continue;
+        }
+        if in_boxes {
+            if let Some((num, rest)) = line.split_once(' ')
+                && let Some((cls, coords)) = rest.split_once(' ')
+                && !num.is_empty()
+                && num.bytes().all(|b| b.is_ascii_digit())
+                && !cls.is_empty()
+                && cls.bytes().all(|b| b.is_ascii_digit())
+            {
+                out.push_str(num);
+                out.push_str(" id:");
+                out.push_str(cls);
+                out.push(' ');
+                out.push_str(coords);
+                continue;
+            }
+            in_boxes = false;
+        }
+        out.push_str(line);
+    }
+    out
 }
 
 /// `usage` when `at` (the existing file `path`, resolved) is the file of an image of job `job`, or when a server
@@ -421,15 +468,28 @@ fn expect_map(flags: &[String]) -> Result<BTreeMap<String, String>, CliError> {
 
 /// Resolves a CLI class token (`CLASS` in `--box`, `--add`, `--relabel`) to its numeric class index.
 ///
-/// Accepts `#INDEX` (always treated as an explicit class index), a case-insensitive class name, or a bare numeric
-/// index. Refuses a bare number when it matches both a valid class index and a different class's name (e.g. `0`
-/// for classes `["circle", "0"]`) so numeric class names cannot silently save the wrong class.
+/// Accepts `id:INDEX` (always an explicit class index) and `name:CLASS` (always a case-insensitive class name) —
+/// colons are forbidden in class names by `folo-server`, so these prefixes never collide with any literal class
+/// name (including names starting with `#`). Also accepts a bare class name or numeric index, refusing a bare
+/// number when it matches both a valid class index and a different class's name (e.g. `0` for `["circle", "0"]`).
 fn resolve_class(s: &str, names: &[String]) -> Result<u32, CliError> {
     let s = s.trim();
-    if let Some(rest) = s.strip_prefix('#')
-        && let Ok(idx) = rest.trim().parse::<u32>()
-    {
-        return Ok(idx);
+    if let Some((prefix, val)) = s.split_once(':') {
+        let val = val.trim();
+        return match prefix.trim().to_ascii_lowercase().as_str() {
+            "id" => val.parse::<u32>().map_err(|_| {
+                usage(format!("`{s}` is not a valid class index (expected `id:N` with a whole number)"))
+            }),
+            "name" => {
+                names.iter().position(|n| n.eq_ignore_ascii_case(val)).map(|i| i as u32).ok_or_else(|| {
+                    usage(format!("`{val}` is not a class of the job (its classes: {})", names.join(", ")))
+                })
+            }
+            _ => Err(usage(format!(
+                "`{s}` is not a class of the job (use a class name, index, `id:N`, or `name:CLASS`; its classes: {})",
+                names.join(", ")
+            ))),
+        };
     }
     let by_name = names.iter().position(|n| n.eq_ignore_ascii_case(s)).map(|i| i as u32);
     let by_index = s.parse::<u32>().ok();
@@ -439,7 +499,7 @@ fn resolve_class(s: &str, names: &[String]) -> Result<u32, CliError> {
             names[idx as usize], names[name_idx as usize]
         ))
         .hint(format!(
-            "pass `#{idx}` for index {idx} (`{}`) or `#{name_idx}` for index {name_idx} (`{}`)",
+            "pass `id:{idx}` for index {idx} (`{}`) or `id:{name_idx}` / `name:{}` for index {name_idx}",
             names[idx as usize], names[name_idx as usize]
         ))),
         (_, Some(name_idx)) => Ok(name_idx),
@@ -450,7 +510,7 @@ fn resolve_class(s: &str, names: &[String]) -> Result<u32, CliError> {
     }
 }
 
-/// `folo label set`'s flags as a [`BoxEdit`]; classes may be given by index, name, or `#INDEX`.
+/// `folo label set`'s flags as a [`BoxEdit`]; classes may be given by index, name, `id:INDEX`, or `name:CLASS`.
 fn box_edit(labels: &Labels, a: &LabelSetArgs) -> Result<BoxEdit, CliError> {
     if a.expect.trim().is_empty() {
         return Err(usage(
@@ -659,19 +719,27 @@ mod tests {
     }
 
     #[test]
-    fn resolve_class_rejects_ambiguous_numeric_names_and_accepts_hash_index() {
+    fn resolve_class_disambiguates_numeric_names_and_preserves_hash_class_names() {
         let names = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
         let colliding = names(&["circle", "0"]);
         assert_eq!(resolve_class("circle", &colliding).unwrap(), 0);
         assert_eq!(resolve_class("1", &colliding).unwrap(), 1);
-        assert_eq!(resolve_class("#0", &colliding).unwrap(), 0);
-        assert_eq!(resolve_class("#1", &colliding).unwrap(), 1);
+        assert_eq!(resolve_class("id:0", &colliding).unwrap(), 0);
+        assert_eq!(resolve_class("id:1", &colliding).unwrap(), 1);
+        assert_eq!(resolve_class("name:circle", &colliding).unwrap(), 0);
+        assert_eq!(resolve_class("name:0", &colliding).unwrap(), 1);
         let err = resolve_class("0", &colliding).unwrap_err();
         assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"));
         assert!(err.message.contains("ambiguous"), "{}", err.message);
-        assert!(err.hint.as_deref().unwrap_or("").contains("#0"), "{err:?}");
-        assert!(err.hint.as_deref().unwrap_or("").contains("#1"), "{err:?}");
+        let hint = err.hint.as_deref().unwrap_or("");
+        assert!(hint.contains("id:0") && hint.contains("id:1") && hint.contains("name:0"), "{err:?}");
+
+        // Existing jobs whose class name starts with `#` keep working as literal class names.
+        let hash_named = names(&["circle", "#0"]);
+        assert_eq!(resolve_class("#0", &hash_named).unwrap(), 1);
+        assert_eq!(resolve_class("name:#0", &hash_named).unwrap(), 1);
+        assert_eq!(resolve_class("id:0", &hash_named).unwrap(), 0);
 
         // Out-of-range numeric class name resolves to its class index instead of failing as out-of-range.
         let out_of_range = names(&["circle", "5"]);
@@ -682,5 +750,14 @@ mod tests {
         let aligned = names(&["0", "1"]);
         assert_eq!(resolve_class("0", &aligned).unwrap(), 0);
         assert_eq!(resolve_class("1", &aligned).unwrap(), 1);
+
+        // CLI view output prefixes colliding numeric-job box classes with `id:` so every class round-trips.
+        let sample = "lj_1 image 1 (p0.png)\nBoxes (n class-index x1,y1,x2,y2):\n1 0 2,2,20,20\n2 1 4,4,22,22\nClasses: 0 circle, 1 0";
+        let cli_text = disambiguate_view_boxes(sample, &colliding);
+        assert!(
+            cli_text.contains("Boxes (n class-id x1,y1,x2,y2):\n1 id:0 2,2,20,20\n2 id:1 4,4,22,22\n"),
+            "{cli_text}"
+        );
+        assert_eq!(disambiguate_view_boxes(sample, &aligned), sample);
     }
 }
