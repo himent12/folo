@@ -230,4 +230,98 @@ describe('BenchCompare Escape coordination', () => {
     expect(target.querySelector('[data-missing-entries]')).toBeNull();
     expect(target.querySelector('.chips')?.contains(document.activeElement)).toBe(true);
   });
+
+  it('clears the omission notice when navigating to a clean comparison on the same benchmark', async () => {
+    const benches = await hub.api.benches();
+    let benchId = '';
+    let entries: Awaited<ReturnType<typeof hub.api.benchEntries>> = [];
+    for (const candidate of benches) {
+      const done = (await hub.api.benchEntries(candidate.id)).filter((e) => e.status === 'done');
+      if (done.length >= 3) {
+        benchId = candidate.id;
+        entries = done;
+        break;
+      }
+    }
+    expect(entries.length).toBeGreaterThanOrEqual(3);
+    const url = `#/benchmarks/${benchId}/compare?entries=${entries[0]!.id},${entries[1]!.id},be_gone,be_also_gone`;
+    history.replaceState(history.state, '', url);
+    router.route = parse(url);
+    vi.spyOn(router, 'go').mockImplementation((path) => {
+      router.route = parse(`#${path}`);
+    });
+
+    c = render(() => <BenchCompare />, target);
+    await vi.waitFor(() => {
+      flushSync();
+      const notice = target.querySelector<HTMLElement>('[data-missing-entries]');
+      if (!notice) throw new Error('waiting for plural missing-entries notice');
+      expect(notice.textContent).toContain('Omitted 2 unavailable entries');
+      expect(notice.textContent).toContain('be_gone');
+      expect(notice.textContent).toContain('be_also_gone');
+    });
+    // Mounted live region announced the omission.
+    expect(target.querySelector('[role="status"]')?.textContent).toContain('Omitted 2 unavailable entries');
+
+    // Navigating to a clean pair on the SAME benchmark must clear the old omission notice.
+    router.route = parse(`#/benchmarks/${benchId}/compare?entries=${entries[1]!.id},${entries[2]!.id}`);
+    flushSync();
+    expect(target.querySelector('[data-missing-entries]')).toBeNull();
+    expect(target.querySelectorAll('.chips .chip')).toHaveLength(2);
+  });
+
+  it('keeps an active running entry in ?entries= so it joins the comparison when SSE finishes it', async () => {
+    const benches = await hub.api.benches();
+    let benchId = '';
+    let doneEntries: Awaited<ReturnType<typeof hub.api.benchEntries>> = [];
+    let runningEntry: Awaited<ReturnType<typeof hub.api.benchEntries>>[number] | undefined;
+    for (const candidate of benches) {
+      const all = await hub.api.benchEntries(candidate.id);
+      const done = all.filter((e) => e.status === 'done');
+      const running = all.find((e) => e.status === 'running' || e.status === 'queued');
+      if (done.length >= 2 && running) {
+        benchId = candidate.id;
+        doneEntries = done;
+        runningEntry = running;
+        break;
+      }
+    }
+    expect(doneEntries.length).toBeGreaterThanOrEqual(2);
+    expect(runningEntry).toBeTruthy();
+
+    let emitEntry: ((e: Awaited<ReturnType<typeof hub.api.benchEntries>>[number]) => void) | undefined;
+    const realEvents = hub.api.benchEvents.bind(hub.api);
+    vi.spyOn(hub.api, 'benchEvents').mockImplementation((id, handlers) => {
+      emitEntry = handlers.entry;
+      return realEvents(id, handlers);
+    });
+
+    const url = `#/benchmarks/${benchId}/compare?entries=${doneEntries[0]!.id},${doneEntries[1]!.id},${runningEntry!.id}`;
+    history.replaceState(history.state, '', url);
+    router.route = parse(url);
+    const go = vi.spyOn(router, 'go').mockImplementation((path) => {
+      router.route = parse(`#${path}`);
+    });
+
+    c = render(() => <BenchCompare />, target);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelectorAll('.chips .chip')).toHaveLength(2);
+      const pendingNote = target.querySelector<HTMLElement>('[data-pending-entries]');
+      if (!pendingNote) throw new Error('waiting for pending entry note');
+      expect(pendingNote.textContent).toContain(runningEntry!.name);
+    });
+    // Running entry must NOT be pruned from `?entries=` or reported as unavailable.
+    expect(go).not.toHaveBeenCalled();
+    expect(target.querySelector('[data-missing-entries]')).toBeNull();
+
+    // When SSE delivers the finished entry with a score, it joins the comparison automatically.
+    const finishedCopy = { ...doneEntries[0]!, id: runningEntry!.id, name: runningEntry!.name };
+    emitEntry?.(finishedCopy);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelectorAll('.chips .chip')).toHaveLength(3);
+      expect(target.querySelector('[data-pending-entries]')).toBeNull();
+    });
+  });
 });

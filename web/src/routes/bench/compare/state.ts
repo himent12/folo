@@ -7,7 +7,7 @@ import { hub } from '$lib/api/index';
 import { LiveBench } from '$lib/api/liveBench';
 import { Resource } from '$lib/api/resource';
 import type { BenchEntry } from '$lib/api/types';
-import { AXES, AXIS_NAME } from '$lib/bench/rules';
+import { AXES, AXIS_NAME, isEntryActive } from '$lib/bench/rules';
 import type { XYSeries } from '$lib/charts/xy';
 import { metric, num } from '$lib/format';
 import { router } from '$lib/router';
@@ -63,24 +63,51 @@ export function compareState() {
     return { shown: all.shown.slice(0, COMPARE_MAX), missing: all.missing };
   });
   const shown = computed(() => picked.get().shown);
-  /** Unavailable entry IDs pruned from `?entries=` after the benchmark's entries loaded, announced to the user. */
+  /** In-progress entries named in `?entries=` (running or queued): kept in the URL so they join when SSE finishes them. */
+  const pending = computed(() => {
+    const missing = new Set(picked.get().missing);
+    if (!missing.size) return [];
+    return live.entries.filter((e) => missing.has(e.id) && isEntryActive(e));
+  });
+  /** Unavailable entry IDs pruned from `?entries=` after the benchmark's entries loaded, scoped to the comparison that produced them. */
   const dropped = signal<string[]>([]);
   let prevCtx = untrack(() => `${hub.epoch}:${id.get()}`);
+  let lastIdsKey = untrack(() => ids.get().join(','));
+  let prunedKey: string | null = null;
   effect(() => {
     const ctx = `${hub.epoch}:${id.get()}`;
-    if (ctx === prevCtx) return;
-    prevCtx = ctx;
-    untrack(() => dropped.set([]));
+    const key = ids.get().join(',');
+    if (ctx !== prevCtx) {
+      prevCtx = ctx;
+      lastIdsKey = key;
+      prunedKey = null;
+      untrack(() => dropped.set([]));
+      return;
+    }
+    if (key !== lastIdsKey) {
+      lastIdsKey = key;
+      if (key === prunedKey) {
+        prunedKey = null;
+      } else {
+        prunedKey = null;
+        untrack(() => dropped.set([]));
+      }
+    }
   });
   effect(() => {
     const b = bench();
     if (live.loading || live.error || !b || b.id !== id.get()) return;
     const missing = picked.get().missing;
     if (!missing.length) return;
+    const activeIds = new Set(pending.get().map((e) => e.id));
+    const unavailable = missing.filter((eid) => !activeIds.has(eid));
+    if (!unavailable.length) return;
+    const unavailableSet = new Set(unavailable);
     untrack(() => {
       if (router.route.name !== 'bench-compare' || router.location.name !== 'bench-compare' || router.location.params.id !== id.peek()) return;
-      const keep = shown.peek().map((e) => e.id);
-      dropped.set([...new Set([...dropped.peek(), ...missing])]);
+      const keep = ids.peek().filter((eid) => !unavailableSet.has(eid));
+      prunedKey = keep.join(',');
+      dropped.set([...new Set([...dropped.peek(), ...unavailable])]);
       setIds(keep);
     });
   });
@@ -245,6 +272,7 @@ export function compareState() {
     unsupported,
     picked,
     shown,
+    pending,
     dropped,
     results,
     setIds,

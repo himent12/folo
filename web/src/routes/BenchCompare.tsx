@@ -15,7 +15,7 @@ import GitCompare from '$icons/git-compare-arrows';
 import Scale from '$icons/scale';
 import Plus from '$icons/plus';
 import X from '$icons/x';
-import { css, For, Index, MediaQuery, onCleanup, onDocument, signal } from 'fw';
+import { css, effect, For, Index, MediaQuery, onCleanup, onDocument, signal, untrack } from 'fw';
 import { ApiError } from '$lib/api/index';
 import { TARGET_PRECISION } from '$lib/bench/rules';
 import XYChart from '$lib/charts/XYChart';
@@ -59,6 +59,7 @@ export default function BenchCompare() {
     unsupported,
     picked,
     shown,
+    pending,
     dropped,
     results,
     setIds,
@@ -116,6 +117,23 @@ export default function BenchCompare() {
     }
   }
   let chipsEl: HTMLDivElement | undefined;
+
+  let lastAnnouncedDropped = '';
+  effect(() => {
+    const omitted = dropped.get();
+    const keyText = omitted.join(',');
+    if (!omitted.length || keyText === lastAnnouncedDropped) {
+      if (!omitted.length) lastAnnouncedDropped = '';
+      return;
+    }
+    lastAnnouncedDropped = keyText;
+    const bName = bench()?.name;
+    untrack(() =>
+      announce(
+        `${omitted.length === 1 ? 'Omitted unavailable entry' : `Omitted ${omitted.length} unavailable entries`}: ${omitted.join(', ')}${bName ? ` (not on ${bName} or not finished)` : ''}.`,
+      ),
+    );
+  });
 
   function dismissMissing() {
     dropped.set([]);
@@ -599,7 +617,7 @@ export default function BenchCompare() {
       ) : (
         <>
           {dropped.get().length ? (
-            <p class="missing-note" role="status" data-missing-entries>
+            <div class="missing-note" data-missing-entries>
               <span>
                 {dropped.get().length === 1 ? 'Omitted unavailable entry from this comparison: ' : `Omitted ${dropped.get().length} unavailable entries from this comparison: `}
                 <For each={dropped.get()} key={(eid) => eid}>
@@ -615,6 +633,13 @@ export default function BenchCompare() {
               <Button size="sm" variant="ghost" onclick={dismissMissing}>
                 Dismiss
               </Button>
+            </div>
+          ) : null}
+          {pending.get().length ? (
+            <p class="missing-note" data-pending-entries>
+              {pending.get().length === 1
+                ? `Waiting for ${pending.get()[0]!.name} to finish — it will join this comparison automatically.`
+                : `Waiting for ${pending.get().length} entries (${pending.get().map((e) => e.name).join(', ')}) to finish — they will join automatically.`}
             </p>
           ) : null}
           {compared()}
