@@ -133,7 +133,20 @@ pub fn paint_image_with_boxes(
     reveal: bool,
     corner: f32,
 ) {
-    let rect = image_rect(bounds, w.max(1.), h.max(1.), fit, zoom, pan);
+    // Match `Window::paint_image`'s device-pixel rounding (origin floored, size ceiled) so the
+    // overlay clip mask lines up with the painted photo edges even at fractional pans/scales.
+    let scale = window.scale_factor();
+    let raw_rect = image_rect(bounds, w.max(1.), h.max(1.), fit, zoom, pan);
+    let rect = Bounds::new(
+        point(
+            px((f32::from(raw_rect.origin.x) * scale).floor() / scale),
+            px((f32::from(raw_rect.origin.y) * scale).floor() / scale),
+        ),
+        size(
+            px((f32::from(raw_rect.size.width) * scale).ceil() / scale),
+            px((f32::from(raw_rect.size.height) * scale).ceil() / scale),
+        ),
+    );
     let clip = bounds.intersect(&rect);
     window.with_content_mask(Some(folo_ui::ContentMask { bounds }), |window| {
         match img {
@@ -670,37 +683,57 @@ mod tests {
     #[test]
     fn unclipped_detections_never_paint_into_letterbox_padding() {
         use folo_ui::{
-            AppContext, Context, HeadlessApp, HeadlessOptions, IntoElement, ParentElement, Render, Styled,
-            TextBackend, WindowBounds, WindowOptions, canvas, div, rgb,
+            AppContext, Context, HeadlessApp, HeadlessOptions, IntoElement, ParentElement, Render,
+            RenderImage, Styled, TextBackend, WindowBounds, WindowOptions, canvas, div, rgb,
         };
 
-        struct View;
+        // Solid blue 100x100 photo (BGRA premultiplied: B=0xC0, G=0x40, R=0x20, A=0xFF -> 0x002040C0).
+        let mut bgra = Vec::with_capacity(100 * 100 * 4);
+        for _ in 0..(100 * 100) {
+            bgra.extend_from_slice(&[0xC0, 0x40, 0x20, 0xFF]);
+        }
+        let img = Arc::new(RenderImage::new(vec![image::Frame::new(
+            image::RgbaImage::from_raw(100, 100, bgra).expect("valid photo buffer"),
+        )]));
+
+        struct View(Arc<RenderImage>);
         impl Render for View {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 let t = crate::theme::theme(cx);
+                let img = self.0.clone();
                 let boxes = vec![
+                    // Partially outside left edge with `half_in == true`: its label chip + border paint.
                     DrawBox {
                         label: Some("circle".into()),
                         score: Some(0.95),
-                        ..DrawBox::new(0, -40., -10., 140., 110.)
+                        ..DrawBox::new(0, -10., 5., 70., 80.)
                     },
-                    DrawBox { truth: true, ..DrawBox::new(1, -20., 10., 120., 90.) },
+                    // Highlighted oversized detection crossing all four edges.
+                    DrawBox {
+                        label: Some("wide".into()),
+                        score: Some(0.88),
+                        highlight: true,
+                        ..DrawBox::new(1, -40., -10., 140., 110.)
+                    },
+                    DrawBox { truth: true, ..DrawBox::new(2, -20., 10., 120., 90.) },
                 ];
                 div().size_full().bg(rgb(0x101010)).child(
                     canvas(
                         |_, _, _| (),
                         move |b, _, window, cx| {
+                            // Fractional pan (0.75, 0.0) exercises device-pixel alignment between
+                            // `paint_image` (origin floored) and the overlay clip mask.
                             paint_image_with_boxes(
                                 &t,
                                 window,
                                 cx,
                                 b,
-                                None,
+                                Some(&img),
                                 (100., 100.),
                                 &boxes,
                                 Fit::Contain,
                                 1.0,
-                                (0., 0.),
+                                (0.75, 0.0),
                                 true,
                                 true,
                                 0.,
@@ -727,7 +760,7 @@ mod tests {
                 window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(0.), px(0.)), window_size))),
                 ..Default::default()
             };
-            cx.open_window(options, |_, cx| cx.new(|_| View)).expect("open window")
+            cx.open_window(options, |_, cx| cx.new(|_| View(img))).expect("open window")
         });
         let frame = app.frame(window.into());
         // Square 100x100 image in 400x200 Fit::Contain occupies x=100..300; padding is x=0..100 and x=300..400.
@@ -740,10 +773,16 @@ mod tests {
                 );
             }
         }
-        // Inside the photo area, image placeholder + overlays rendered.
-        let inner_non_bg = (0..200)
-            .flat_map(|y| (100..300).map(move |x| (x, y)))
-            .any(|(x, y)| frame.pixel(x, y) != 0x0010_1010);
-        assert!(inner_non_bg, "photo and clipped detections painted inside x=100..300");
+        // Inside the photo area, both the blue photo (0x0020_40C0) AND distinct box/chip overlay pixels painted.
+        let mut overlay_pixels = 0usize;
+        for y in 0..200 {
+            for x in 100..300 {
+                let p = frame.pixel(x, y);
+                if p != 0x0010_1010 && p != 0x0020_40C0 {
+                    overlay_pixels += 1;
+                }
+            }
+        }
+        assert!(overlay_pixels > 200, "box strokes and label chips painted inside photo: {overlay_pixels}");
     }
 }

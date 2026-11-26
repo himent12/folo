@@ -73,6 +73,7 @@ impl FoloApp {
                         this.sample_epoch = e;
                         this.store.samples.remove(&rid);
                         this.store.samples_stale.remove(&rid);
+                        this.store.samples_refresh_error.remove(&rid);
                         this.ensure_samples(&rid, cx);
                     }
                     cx.notify();
@@ -90,7 +91,10 @@ impl FoloApp {
             .map(|d| d.classes.clone())
             .or_else(|| self.store.dataset_summary(&r.config.dataset_id).map(|d| d.classes.clone()))
             .unwrap_or_default();
-        let samples_failed = latest > 0 && self.store.samples.get(&r.id).is_some_and(|l| l.error().is_some());
+        let refresh_failed =
+            latest > 0 && self.sample_epoch.is_none() && self.store.samples_refresh_error.contains_key(&r.id);
+        let samples_failed = latest > 0
+            && (self.store.samples.get(&r.id).is_some_and(|l| l.error().is_some()) || refresh_failed);
         let retry_anchor = match self.passing_stop("run-samples-retry", samples_failed, cx) {
             Some(fh) if !samples_failed => Some(div().track_focus(&fh)),
             _ => None,
@@ -207,23 +211,50 @@ impl FoloApp {
                 while it.peek().is_some() {
                     rows.push(div().flex().items_start().gap(px(8.)).children(it.by_ref().take(PER_ROW)));
                 }
+                let refresh_notice = refresh_failed.then(|| {
+                    let rid = r.id.clone();
+                    let retry = self.button(
+                        "run-samples-retry",
+                        "Retry",
+                        crate::controls::Btn::Secondary,
+                        Some("icons/refresh-cw.svg"),
+                        window,
+                        cx,
+                        act(move |this, _, cx| this.retry_samples(&rid, cx)),
+                    );
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(text(ty::SM, t.danger_text).child("Latest refresh failed"))
+                        .child(retry)
+                });
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(8.))
                     .p(px(16.))
                     .children(rows)
-                    // The caption says what the tiles show, view by view.
-                    .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
-                        "Epoch {epoch} · {} · {}",
-                        shown_of(samples.len(), total, images),
-                        match view {
-                            SampleView::Predictions => format!("predictions with score ≥ {conf:.2}"),
-                            SampleView::Truth => "ground-truth labels".to_string(),
-                            SampleView::Both =>
-                                format!("ground truth and predictions with score ≥ {conf:.2}"),
-                        }
-                    )))
+                    // The caption says what the tiles show, view by view (plus an inline Retry if
+                    // a background Latest refresh failed while keeping the previous tiles mounted).
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(12.))
+                            .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
+                                "Epoch {epoch} · {} · {}",
+                                shown_of(samples.len(), total, images),
+                                match view {
+                                    SampleView::Predictions => format!("predictions with score ≥ {conf:.2}"),
+                                    SampleView::Truth => "ground-truth labels".to_string(),
+                                    SampleView::Both =>
+                                        format!("ground truth and predictions with score ≥ {conf:.2}"),
+                                }
+                            )))
+                            .children(refresh_notice),
+                    )
                     .into_any_element()
             }
             Some(Load::Failed(e)) => {

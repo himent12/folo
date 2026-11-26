@@ -247,6 +247,8 @@ impl FoloApp {
         s.issues.clear();
         s.run_data.clear();
         s.samples.clear();
+        s.samples_stale.clear();
+        s.samples_refresh_error.clear();
         s.logs.clear();
         self.log_cache.clear();
         // Images that failed are asked for again (their few automatic retries may be spent).

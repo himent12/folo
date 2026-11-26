@@ -220,6 +220,7 @@ impl FoloApp {
     pub(super) fn forget_history(&mut self, id: &str) {
         self.history_tickets.retain(|(run, _), _| run != id);
         self.store.samples_stale.remove(id);
+        self.store.samples_refresh_error.remove(id);
     }
 
     /// A fresh ticket for one history request of a run; earlier tickets stop counting.
@@ -230,7 +231,11 @@ impl FoloApp {
     }
 
     pub fn ensure_samples(&mut self, id: &str, cx: &mut Context<Self>) {
-        let needs = self.store.samples.get(id).is_none_or(|l| l.needs_fetch());
+        // Recover if an in-flight initial fetch failed after a newer Epoch/Status marked it stale.
+        let stale_failed = self.sample_epoch.is_none()
+            && matches!(self.store.samples.get(id), Some(Load::Failed(_)))
+            && self.store.samples_stale.remove(id);
+        let needs = stale_failed || self.store.samples.get(id).is_none_or(|l| l.needs_fetch());
         let refresh_ready = !needs
             && self.sample_epoch.is_none()
             && matches!(self.store.samples.get(id), Some(Load::Ready(_)))
@@ -238,7 +243,10 @@ impl FoloApp {
         if needs || refresh_ready {
             if needs {
                 self.store.samples_stale.remove(id);
+                self.store.samples_refresh_error.remove(id);
                 self.store.samples.insert(id.to_string(), Load::Loading);
+            } else {
+                self.store.samples_refresh_error.remove(id);
             }
             let ticket = self.history_ticket(id, "samples");
             let (rid, key, epoch) = (id.to_string(), id.to_string(), self.sample_epoch);
@@ -249,21 +257,35 @@ impl FoloApp {
                     if this.history_tickets.get(&(key.clone(), "samples")) != Some(&ticket) {
                         return;
                     }
-                    // Keep existing tiles on a failed background refresh so live training never
-                    // collapses the grid and shifts the Logs panel below it.
-                    if refresh_ready && r.is_err() {
-                        return;
+                    match r {
+                        Ok(v) => {
+                            this.store.samples_refresh_error.remove(&key);
+                            this.store.samples.insert(key, Load::Ready(v));
+                        }
+                        Err(e) if refresh_ready => {
+                            // Keep existing tiles mounted so Logs don't jump, and record the error
+                            // so the caption offers an explicit in-place Retry for the newer epoch.
+                            this.store.samples_refresh_error.insert(key, e);
+                        }
+                        Err(e) => {
+                            this.store.samples_refresh_error.remove(&key);
+                            this.store.samples.insert(key, Load::Failed(e));
+                        }
                     }
-                    this.store.samples.insert(key, r.into());
                 },
             );
         }
     }
 
-    /// Fetch a run's validation samples again after a failed load.
+    /// Fetch a run's validation samples again after a failed load (or failed background refresh).
     pub fn retry_samples(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.store.samples.remove(id);
-        self.store.samples_stale.remove(id);
+        self.store.samples_refresh_error.remove(id);
+        if self.sample_epoch.is_none() && matches!(self.store.samples.get(id), Some(Load::Ready(_))) {
+            self.store.samples_stale.insert(id.to_string());
+        } else {
+            self.store.samples.remove(id);
+            self.store.samples_stale.remove(id);
+        }
         self.ensure_samples(id, cx);
         cx.notify();
     }

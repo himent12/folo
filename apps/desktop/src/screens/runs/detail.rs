@@ -31,13 +31,26 @@ impl FoloApp {
     }
 
     /// The last epoch with completed validation metrics (0 until the first evaluation finishes).
-    /// Active runs during epoch 1 report `r.epoch == 1` before evaluation has run; wait for the
-    /// first evaluated epoch instead of requesting epoch-0 samples prematurely.
+    /// Runs at `r.epoch == 0` (including runs seeded from a checkpoint with an inherited `best`)
+    /// and active/stopped/failed runs during epoch 1 wait for `run_data` or the first `Epoch`
+    /// event rather than prematurely requesting epoch-0 samples.
     pub(crate) fn evaluated_epoch(&self, r: &Run) -> u32 {
-        match self.store.run_data.get(&r.id).and_then(|l| l.ready()) {
-            Some(d) => d.metrics.epochs.last().map_or(0, |e| e.epoch),
-            None => r.best.as_ref().map_or(if r.status.is_active() { 0 } else { r.epoch }, |b| b.epoch),
+        if r.epoch == 0 {
+            return 0;
         }
+        if let Some(d) = self.store.run_data.get(&r.id).and_then(|l| l.ready()) {
+            return d.metrics.epochs.last().map_or(0, |e| e.epoch);
+        }
+        let from_samples = self.store.samples.get(&r.id).and_then(|l| l.ready()).map_or(0, |s| s.epoch);
+        let fallback = if r.status == RunStatus::Completed {
+            r.epoch
+        } else if r.status.is_active() {
+            // Active on epoch N means epochs 1..=N-1 finished (epoch 1 -> 0 until evaluated).
+            r.epoch.saturating_sub(1)
+        } else {
+            0
+        };
+        from_samples.max(fallback)
     }
 
     fn resume_button(&self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
