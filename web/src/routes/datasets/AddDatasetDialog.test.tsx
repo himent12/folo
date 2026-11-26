@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import type { Dataset } from '$lib/api/types';
 import { router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
 import { undescribedFields } from '$lib/ui/fieldA11y';
@@ -391,5 +392,98 @@ describe('AddDatasetDialog', () => {
     genBtn.focus();
     imagesEl.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
     expect(document.activeElement).toBe(seedEl);
+  });
+
+  it('ignores a createDataset completion after switching servers (hub.epoch change)', async () => {
+    let release!: (ds: Dataset) => void;
+    const sample = (await hub.api.datasets())[0]!;
+    vi.spyOn(hub.api, 'createDataset').mockImplementation(
+      () =>
+        new Promise<Dataset>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'folder', known: [] } });
+    flushSync();
+    const pathEl = document.querySelector<HTMLInputElement>('input[id$="-path"]')!;
+    pathEl.value = 'D:/data/shapes';
+    pathEl.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    pathEl.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    flushSync();
+
+    hub.epoch++;
+    release({ ...sample, id: 'ds_old_server' });
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+    expect(go).not.toHaveBeenCalled();
+    expect(toast.items).toEqual([]);
+    unmount(c);
+
+    // Also ignore a late createDataset completion when hub.mode entered 'connecting' before hub.epoch incremented.
+    let releaseLate!: (ds: Dataset) => void;
+    vi.spyOn(hub.api, 'createDataset').mockImplementation(
+      () =>
+        new Promise<Dataset>((resolve) => {
+          releaseLate = resolve;
+        }),
+    );
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'folder', known: [] } });
+    flushSync();
+    const pathEl2 = document.querySelector<HTMLInputElement>('input[id$="-path"]')!;
+    pathEl2.value = 'D:/data/shapes';
+    pathEl2.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    pathEl2.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    flushSync();
+    hub.mode = 'connecting';
+    releaseLate({ ...sample, id: 'ds_late_connecting' });
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+    expect(go).not.toHaveBeenCalled();
+    expect(toast.items).toEqual([]);
+  });
+
+  it('blocks dataset registration while hub.mode is connecting, including after folder preflight', async () => {
+    const create = vi.spyOn(hub.api, 'createDataset');
+    hub.mode = 'connecting';
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'folder', known: [] } });
+    flushSync();
+    const pathEl = document.querySelector<HTMLInputElement>('input[id$="-path"]')!;
+    pathEl.value = 'D:/data/shapes';
+    pathEl.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const submitBtn = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    expect(submitBtn.disabled).toBe(true);
+    pathEl.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await Promise.resolve();
+    expect(create).not.toHaveBeenCalled();
+    unmount(c);
+
+    // Also block if hub transitions to connecting while the preflight datasets() call is in flight.
+    let releasePreflight!: (list: Dataset[]) => void;
+    vi.spyOn(hub.api, 'datasets').mockImplementation(
+      () =>
+        new Promise<Dataset[]>((resolve) => {
+          releasePreflight = resolve;
+        }),
+    );
+    hub.mode = 'mock';
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'folder' } });
+    flushSync();
+    const pathEl2 = document.querySelector<HTMLInputElement>('input[id$="-path"]')!;
+    pathEl2.value = 'D:/data/shapes';
+    pathEl2.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    pathEl2.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    flushSync();
+    hub.mode = 'connecting';
+    releasePreflight([]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(create).not.toHaveBeenCalled();
   });
 });

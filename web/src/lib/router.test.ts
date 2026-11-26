@@ -132,4 +132,11 @@ describe('router parse edge cases', () => {
     expect(r.query.get('q')).toBe('why?what=1');
     expect(r.query.get('tag')).toBe('a?b');
   });
+
+  it('treats single-character non-slash hashes as not-found instead of overview', () => {
+    expect(parse('#a')).toMatchObject({ name: 'not-found', path: 'a' });
+    expect(parse('#x?tab=1')).toMatchObject({ name: 'not-found', path: 'x' });
+    expect(parse('#')).toMatchObject({ name: 'overview', path: '/' });
+    expect(parse('#?tab=1')).toMatchObject({ name: 'overview', path: '/' });
+  });
 });

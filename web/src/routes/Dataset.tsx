@@ -95,7 +95,7 @@ export default function Dataset() {
 
   const cls = computed(() => {
     const p = clsParam.get();
-    const n = p === null ? NaN : Number(p);
+    const n = p === null || p.trim() === '' ? NaN : Number(p);
     const dd = d();
     return Number.isInteger(n) && n >= 0 && (!dd || n < dd.classes.length) ? n : undefined;
   });

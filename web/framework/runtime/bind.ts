@@ -99,7 +99,8 @@ export function bindValue(el: Element, sig: Bindable<unknown>): void {
     const value = sig.get();
     if (isNumberLike(input) && value === toNumber(input.value)) return;
     if (input.type === 'date' && !value && !input.value) return;
-    if (value !== input.value) input.value = (value ?? '') as string;
+    const next = value == null ? '' : String(value);
+    if (next !== input.value) input.value = next;
   });
 }
 

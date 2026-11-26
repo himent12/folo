@@ -141,9 +141,10 @@ export default function Cloud() {
       toast.success(`Disconnected ${c.name}`);
       connections.set((connections.data ?? []).filter((x) => x.id !== c.id));
     } catch (e) {
-      if (!alive || seq !== leaveSeq || gen !== serverGen || isConnecting() || hub.epoch !== epoch) return;
-      // `409 connection_in_use` says which instance or run holds it, in the dialog.
-      leaveStatus.error(e, `Could not disconnect ${c.name}`);
+      if (!alive || gen !== serverGen || isConnecting() || hub.epoch !== epoch) return;
+      // `409 connection_in_use` says which instance or run holds it, in the dialog if still matching, else as a toast.
+      if (seq === leaveSeq && leaveOpen.peek()) leaveStatus.error(e, `Could not disconnect ${c.name}`);
+      else toast.error(e, `Could not disconnect ${c.name}`);
     } finally {
       if (alive && seq === leaveSeq) leaveBusy.set(false);
     }
@@ -223,8 +224,9 @@ export default function Cloud() {
       instances.set((instances.data ?? []).map((x) => (x.id === next.id ? next : x)));
       void runs.refresh();
     } catch (e) {
-      if (!alive || seq !== endSeq || gen !== serverGen || isConnecting() || hub.epoch !== epoch) return;
-      endStatus.error(e, 'Could not terminate the instance');
+      if (!alive || gen !== serverGen || isConnecting() || hub.epoch !== epoch) return;
+      if (seq === endSeq && endOpen.peek()) endStatus.error(e, 'Could not terminate the instance');
+      else toast.error(e, 'Could not terminate the instance');
     } finally {
       if (alive && seq === endSeq) endBusy.set(false);
     }

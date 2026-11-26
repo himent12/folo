@@ -51,7 +51,14 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
     return { condition: c?.condition ?? 'haze', severity: p?.severity ?? 3 };
   });
   const chosen = signal<{ condition: string; severity: number } | null>(null);
-  const sel = computed(() => chosen.get() ?? worst.get());
+  const sel = computed(() => {
+    const ch = chosen.get();
+    if (ch) {
+      const c = rows.get().find((x) => x.condition === ch.condition);
+      if (c?.points.some((p) => p.severity === ch.severity)) return ch;
+    }
+    return worst.get();
+  });
   // Preview's own pickers move the choice too.
   const previewCond = signal('');
   const previewSev = signal(3);
@@ -76,6 +83,36 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
   // ---- the heat table's keys: arrows move the chosen cell over the cells that ran ----
   let tableEl: HTMLTableElement | undefined;
   let previewEl: HTMLDivElement | undefined;
+  let focusedCell: HTMLElement | null = null;
+  function onfocusin(e: FocusEvent) {
+    if (e.target instanceof HTMLElement && e.target.classList.contains('cell')) focusedCell = e.target;
+  }
+  function onfocusout(e: FocusEvent) {
+    const leaving = e.target instanceof HTMLElement ? e.target : null;
+    const next = e.relatedTarget as Node | null;
+    if (next) {
+      if (!tableEl?.contains(next)) focusedCell = null;
+      return;
+    }
+    queueMicrotask(() => {
+      if (focusedCell === leaving && leaving?.isConnected && (!document.activeElement || !tableEl?.contains(document.activeElement))) {
+        focusedCell = null;
+      }
+    });
+  }
+  effect(() => {
+    void rows.get();
+    void sel.get();
+    if (!focusedCell || focusedCell.isConnected || !tableEl?.isConnected) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active !== document.documentElement && !tableEl.contains(active)) {
+      focusedCell = null;
+      return;
+    }
+    const next = tableEl.querySelector<HTMLElement>('button.cell[tabindex="0"]');
+    focusedCell = next ?? null;
+    next?.focus();
+  });
   function jumpToPreview(keyboard: boolean) {
     if (!previewEl) return;
     previewEl.scrollIntoView?.({ block: 'start' });
@@ -85,13 +122,16 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
   }
   function move(dr: number, dc: number) {
     const list = rows.peek();
+    if (!list.length) return;
     const at = sel.peek();
     let r = list.findIndex((c) => c.condition === at.condition);
+    if (r < 0) r = 0;
     let s = at.severity;
     for (let k = 0; k < 6; k++) {
       if (dr) r = Math.max(0, Math.min(list.length - 1, r + dr));
       if (dc) s = Math.max(1, Math.min(5, s + dc));
       const row = list[r]!;
+      if (!row.points.length) continue;
       if (row.points.some((p) => p.severity === s)) break;
       // Down or up into a row without that severity: its nearest one.
       if (dr && !dc) {
@@ -99,8 +139,8 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
         break;
       }
     }
-    const row = list[r]!;
-    if (!row.points.some((p) => p.severity === s)) return;
+    const row = list[r];
+    if (!row || !row.points.some((p) => p.severity === s)) return;
     chosen.set({ condition: row.condition, severity: s });
     queueMicrotask(() => tableEl?.querySelector<HTMLElement>('button.cell[tabindex="0"]')?.focus());
   }
@@ -178,6 +218,8 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
             ref={(e) => (tableEl = e)}
             aria-label="Accuracy kept by condition and severity. Arrow keys move between cells."
             onkeydown={onkeydown}
+            onfocusin={onfocusin}
+            onfocusout={onfocusout}
           >
             <thead>
               <tr>

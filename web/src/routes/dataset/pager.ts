@@ -47,6 +47,7 @@ export class ImagePager {
   #stale = new Set<number>();
   /** Bumped by `reload()`: an answer to a read made before it is dropped, even one already on its way. */
   #gen = 0;
+  #disposed = false;
   #revision = signal(0);
   #ctrl = new AbortController();
 
@@ -95,7 +96,10 @@ export class ImagePager {
 
   /** Stops pending requests (call when the filter changes). */
   dispose() {
+    this.#disposed = true;
+    this.#gen++;
     this.#ctrl.abort();
+    this.#inflight.clear();
   }
 
   get(i: number): DatasetImage | undefined {
@@ -151,10 +155,11 @@ export class ImagePager {
 
   /** The image at `i`, loading its page if needed. */
   async at(i: number): Promise<DatasetImage | undefined> {
-    if (i < 0 || (this.total !== null && i >= this.total)) return undefined;
+    if (this.#disposed || i < 0 || (this.total !== null && i >= this.total)) return undefined;
     const p = Math.floor(i / PAGE);
     const gen = this.#gen;
     const loaded = await this.#load(p);
+    if (this.#disposed) return undefined;
     const page = this.#pages.get(p);
     if (page !== undefined) {
       this.#touch(p, page);
@@ -166,10 +171,12 @@ export class ImagePager {
 
   /** Finds an image id in this filter: loaded pages, then a guess from `img_<n>` ids, then a scan. -1 if absent. */
   async find(id: string): Promise<number> {
+    if (this.#disposed) return -1;
     const hit = this.#index.get(id);
     if (hit !== undefined) {
       // A place read before the dataset changed counts once its page is read again (the id may be gone since).
       if (!this.#fresh(Math.floor(hit / PAGE))) await this.#load(Math.floor(hit / PAGE));
+      if (this.#disposed) return -1;
       const now = this.#index.get(id);
       if (now !== undefined && this.#fresh(Math.floor(now / PAGE))) return now;
     }
@@ -178,19 +185,30 @@ export class ImagePager {
       const guess = Number(n[1]) - this.splitStart;
       if (guess >= 0) {
         await this.at(guess).catch(() => undefined);
+        if (this.#disposed) return -1;
         const g = this.#index.get(id);
         if (g !== undefined && this.#fresh(Math.floor(g / PAGE))) return g;
       }
     }
-    if (this.total === null) await this.#load(0);
+    if (this.total === null) {
+      const initGen = this.#gen;
+      await this.#load(0);
+      if (this.#disposed) return -1;
+      if (initGen !== this.#gen) return this.find(id);
+      const hit0 = this.#index.get(id);
+      if (hit0 !== undefined && this.#fresh(Math.floor(hit0 / PAGE))) return hit0;
+    }
     const total = this.total ?? 0;
     for (let off = 0; off < total; off += SCAN) {
+      if (this.#disposed) return -1;
       const pages = Array.from({ length: SCAN / PAGE }, (_, k) => off / PAGE + k).filter((p) => p * PAGE < total);
       if (pages.every((p) => this.#fresh(p))) continue;
       const gen = this.#gen;
       const res = await hub.api.datasetImages(this.datasetId, this.#query(off, SCAN), this.#ctrl.signal).catch((e: unknown) => {
-        if (gen === this.#gen) throw e;
+        if (this.#disposed || gen !== this.#gen) return undefined;
+        throw e;
       });
+      if (this.#disposed) return -1;
       // A reload() meanwhile: look again in the dataset as it is now.
       if (!res || gen !== this.#gen) return this.find(id);
       const found = res.images.findIndex((im) => im.id === id);
@@ -308,6 +326,7 @@ export class ImagePager {
   }
 
   #load(p: number): Promise<DatasetImage[] | undefined> {
+    if (this.#disposed) return Promise.resolve(undefined);
     if (this.#fresh(p)) {
       const page = this.#pages.get(p)!;
       this.#touch(p, page);
@@ -320,14 +339,14 @@ export class ImagePager {
       .datasetImages(this.datasetId, this.#query(p * PAGE, PAGE), this.#ctrl.signal)
       .then(
         (res) => {
-          if (gen !== this.#gen) return undefined;
+          if (this.#disposed || gen !== this.#gen) return undefined;
           this.#failed.delete(p);
           if (this.#failed.size === 0) this.#error.set(undefined);
           this.#store(p, res.images, res.total);
           return res.images;
         },
         (e: unknown) => {
-          if (gen !== this.#gen || (e instanceof DOMException && e.name === 'AbortError')) return undefined;
+          if (this.#disposed || gen !== this.#gen || (e instanceof DOMException && e.name === 'AbortError')) return undefined;
           // A stale page that cannot be read again keeps what it showed (still stale, so Retry reads it).
           this.#failed.add(p);
           this.#error.set(e);

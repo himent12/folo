@@ -67,7 +67,9 @@ export default function Segmented<T extends string>(props: SegmentedProps<T>) {
     const options = p.options;
     const n = options.length;
     if (n === 0) return;
-    const i = options.findIndex((o) => o.value === value.get());
+    const buttons = [...root.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+    const focused = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const i = focused >= 0 ? focused : options.findIndex((o) => o.value === value.get());
     // Step over disabled options in the direction of travel.
     const step = (from: number, d: number) => {
       for (let k = 1; k <= n; k++) {

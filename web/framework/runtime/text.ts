@@ -13,7 +13,7 @@
 // of its own, and the insert that holds the fragment knows only the nodes it was given: such a run is a reader of its
 // nodes, which a split (at creation or later) extends, so that insert places, moves and removes them all.
 
-import { dropSourcesThrough, getOwner, isReader, memo, reader, renderEffect, runWithOwner, signal, sourceMark, untrack, type Owner, type Reader, type Signal } from './core';
+import { dropSourcesThrough, getOwner, isReader, memo, reader, renderEffect, runWithOwner, signal, sourceMark, trackPartReads, untrack, type Owner, type Reader, type Signal } from './core';
 import { insert } from './dom';
 
 type Part = string | (() => unknown);
@@ -83,7 +83,10 @@ function bind(node: Text, parts: Part[], owner: Owner | null, nodes: Nodes | nul
         continue;
       }
       const mark = sourceMark();
-      const raw = p();
+      let raw: unknown;
+      let kept: unknown[] | undefined;
+      if (mark !== undefined) [raw, kept] = trackPartReads(p);
+      else raw = p();
       let v = raw;
       if (isReader(raw)) {
         // A reader is looked at untracked first: if it renders more than text, the part's effect must not read it.
@@ -95,7 +98,7 @@ function bind(node: Text, parts: Part[], owner: Owner | null, nodes: Nodes | nul
         continue;
       }
       // Not text: split here.
-      dropSourcesThrough(mark);
+      dropSourcesThrough(mark, kept);
       at = i;
       content = signal<unknown>(raw);
       const before = parts.slice(0, i);

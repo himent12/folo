@@ -9,7 +9,7 @@ import Monitor from '$icons/monitor';
 import Moon from '$icons/moon';
 import Sun from '$icons/sun';
 import Upload from '$icons/upload';
-import { computed, css, effect, For, signal } from 'fw';
+import { computed, css, effect, For, onCleanup, signal } from 'fw';
 import { readThemeFile, type ImportResult, type Mode, type ParsedFile, type Theme } from '$lib/design/themes';
 import { themes as builtins } from '$lib/design/tokens';
 import { prefs, type ThemePref } from '$lib/prefs';
@@ -87,18 +87,36 @@ export default function Appearance() {
   effect(() => mode.set(prefs.theme));
   const results = signal<ImportResult[]>([]);
   let input: HTMLInputElement | undefined;
+  let importBtn: HTMLElement | undefined;
+  let themesList: HTMLUListElement | undefined;
+  let alive = true;
+  onCleanup(() => {
+    alive = false;
+  });
 
   async function imported() {
     const files = [...(input?.files ?? [])];
     if (input) input.value = '';
     if (!files.length) return;
     try {
-      results.set(await importPicked(files));
+      const next = await importPicked(files);
+      if (alive) results.set(next);
     } catch (e) {
+      if (!alive) return;
       // Each file's own problem is its result already (readThemeFile never rejects); this is the install itself.
       const why = e instanceof Error ? e.message : String(e);
       results.set(files.map((f) => ({ file: f.name, ok: false, error: `(file): couldn't import (${why})` })));
     }
+  }
+
+  function removeCustom(id: string, index: number) {
+    prefs.removeTheme(id);
+    queueMicrotask(() => {
+      if (!alive) return;
+      const buttons = themesList?.isConnected ? [...themesList.querySelectorAll<HTMLButtonElement>('button')] : [];
+      const next = buttons[Math.min(index, buttons.length - 1)] ?? importBtn?.querySelector<HTMLButtonElement>('button');
+      if (next?.isConnected) next.focus({ preventScroll: true });
+    });
   }
 
   const slot = (m: Mode) => {
@@ -127,13 +145,14 @@ export default function Appearance() {
         const pad = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
         room.set({ px: s.clientWidth - pad, font: `${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}` });
       };
-      const ro = new ResizeObserver(measure);
-      ro.observe(node);
+      const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+      ro?.observe(node);
+      if (!ro) measure();
       const fonts = typeof document !== 'undefined' ? document.fonts : undefined;
       fonts?.addEventListener?.('loadingdone', measure);
       return {
         destroy: () => {
-          ro.disconnect();
+          ro?.disconnect();
           fonts?.removeEventListener?.('loadingdone', measure);
         },
       };
@@ -182,12 +201,12 @@ export default function Appearance() {
         name="Custom themes"
         desc={<>Theme files (.json) you import, kept in this browser.</>}
         control={
-          <>
+          <span ref={(e) => (importBtn = e)}>
             <input ref={(e) => (input = e)} type="file" accept=".json,application/json" multiple hidden onchange={() => void imported()} />
             <Button icon={Upload} onclick={() => input?.click()}>
               Import theme…
             </Button>
-          </>
+          </span>
         }
         below={
           results.get().length || custom.get().length || prefs.themesUnsaved ? (
@@ -210,9 +229,9 @@ export default function Appearance() {
                 </ul>
               ) : null}
               {custom.get().length ? (
-                <ul class="themes" aria-label="Custom themes">
+                <ul class="themes" aria-label="Custom themes" ref={(e) => (themesList = e)}>
                   <For each={custom.get()} key={(t) => t.id}>
-                    {(t) => (
+                    {(t, idx) => (
                       <li class="theme">
                         <div class="t-main">
                           <p class="t-name">{t().name}</p>
@@ -227,7 +246,7 @@ export default function Appearance() {
                             </Meta>
                           </p>
                         </div>
-                        <Button size="sm" aria-label={`Remove ${t().name}`} onclick={() => prefs.removeTheme(t().id)}>
+                        <Button size="sm" aria-label={`Remove ${t().name}`} onclick={() => removeCustom(t().id, idx())}>
                           Remove
                         </Button>
                       </li>

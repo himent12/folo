@@ -141,6 +141,25 @@ describe('Settings › Appearance', () => {
     await importFiles([['amber.json', JSON.stringify({ ...night, id: 'amber', name: 'Amber', mode: 'light', base: 'paper' })]]);
     expect([...target.querySelectorAll('#appearance .themes .t-name')].map((n) => n.textContent)).toEqual(['Amber', 'Zulu']);
   });
+
+  it('moves focus cleanly to the next Remove button or Import theme button when removing custom themes', async () => {
+    show();
+    await importFiles([
+      ['amber.json', JSON.stringify({ ...night, id: 'amber', name: 'Amber' })],
+      ['zulu.json', JSON.stringify({ ...night, id: 'zulu', name: 'Zulu' })],
+    ]);
+    const removeAmber = target.querySelector<HTMLButtonElement>('button[aria-label="Remove Amber"]')!;
+    removeAmber.focus();
+    removeAmber.click();
+    flush();
+    await Promise.resolve();
+    expect(document.activeElement).toBe(target.querySelector<HTMLButtonElement>('button[aria-label="Remove Zulu"]'));
+
+    (document.activeElement as HTMLButtonElement).click();
+    flush();
+    await Promise.resolve();
+    expect(document.activeElement?.textContent?.trim()).toBe('Import theme…');
+  });
 });
 
 /** A localStorage whose writes of `key` throw while `refuse()` (storage full); reads and other keys go through. */

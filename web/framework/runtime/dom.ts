@@ -232,8 +232,8 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
 
   // A node.
   const node = value as Node;
+  if (multi) return cleanChildren(parent, current, marker, node);
   if (Array.isArray(current)) {
-    if (multi) return cleanChildren(parent, current, marker, node);
     cleanChildren(parent, current, null, node);
   } else if (current instanceof Node && (current as Leaving).$$leave !== undefined) {
     if (current.parentNode === parent) parent.insertBefore(node, current);
@@ -921,7 +921,7 @@ type StyleCached = HTMLElement & { $$style?: unknown };
  */
 export function setStyle(el: Element, value: unknown, prev: Styles | undefined, next: Styles | undefined, prevImportant?: Styles, nextImportant?: Styles): void {
   const e = el as StyleCached;
-  if (e.$$style !== value) {
+  if (!('$$style' in e) || e.$$style !== value) {
     const text = toStyle(value, next, nextImportant);
     if (text == null) el.removeAttribute('style');
     else e.style.cssText = text;

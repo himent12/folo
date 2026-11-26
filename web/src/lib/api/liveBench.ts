@@ -297,11 +297,12 @@ export class LiveBench {
     return this.#seq;
   }
 
-  /** Runs an action that answers with the benchmark (rename, a new plan) and shows its answer, unless an event was newer. */
+  /** Runs an action that answers with the benchmark (rename, a new plan) and shows its answer, unless an event or server switch was newer. */
   async act(call: () => Promise<Bench>): Promise<Bench> {
+    const epoch = hub.epoch;
     const seq = this.#benchSeq;
     const b = await call();
-    if (this.#benchSeq === seq && this.bench?.id === b.id) this.bench = b;
+    if (hub.epoch === epoch && hub.mode !== 'connecting' && this.#benchSeq === seq && this.bench?.id === b.id) this.bench = b;
     return b;
   }
 

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { Run } from '$lib/api/types';
+import { toast } from '$lib/ui/toast';
 import RemoveDialog, { runsImpact, writtenByServer } from './RemoveDialog';
 
 describe('runsImpact', () => {
@@ -42,6 +43,7 @@ describe('RemoveDialog', () => {
   beforeEach(() => {
     hub.api = new MockApi('normal', 0);
     hub.mode = 'mock';
+    toast.items = [];
     HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
       this.open = true;
     };
@@ -168,5 +170,62 @@ describe('RemoveDialog', () => {
     } finally {
       releaseHold();
     }
+  });
+
+  it('ignores deleteDataset completion when server epoch changes mid-request', async () => {
+    vi.spyOn(hub.api, 'runs').mockResolvedValue([]);
+    let finishDelete!: () => void;
+    vi.spyOn(hub.api, 'deleteDataset').mockImplementation(() => new Promise<void>((r) => (finishDelete = r)));
+    const { router } = await import('$lib/router');
+    router.go('/datasets/ds_ep', { replace: true });
+    const go = vi.spyOn(router, 'go');
+    const dataset = { id: 'ds_ep', name: 'cells', path: 'D:/data/cells' };
+    c = render(() => <RemoveDialog open dataset={dataset} />, target);
+    flushSync();
+
+    const confirmBtn = [...document.querySelectorAll<HTMLButtonElement>('dialog footer button')].find((b) => b.textContent?.includes('Remove'))!;
+    confirmBtn.click();
+    flushSync();
+
+    hub.epoch++;
+    finishDelete();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(go).not.toHaveBeenCalled();
+    expect(toast.items).toEqual([]);
+    c.unmount();
+
+    // Also ignore completion when hub.mode switches to connecting before hub.epoch increments.
+    let finishLate!: () => void;
+    vi.spyOn(hub.api, 'deleteDataset').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          finishLate = resolve;
+        }),
+    );
+    c = render(() => <RemoveDialog open dataset={dataset} />, target);
+    flushSync();
+    const confirmBtn2 = [...document.querySelectorAll<HTMLButtonElement>('dialog footer button')].find((b) => b.textContent?.includes('Remove'))!;
+    confirmBtn2.click();
+    flushSync();
+    hub.mode = 'connecting';
+    finishLate();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(go).not.toHaveBeenCalled();
+    expect(toast.items).toEqual([]);
+  });
+
+  it('disables and guards dataset removal while hub.mode is connecting', async () => {
+    const del = vi.spyOn(hub.api, 'deleteDataset');
+    hub.mode = 'connecting';
+    const dataset = { id: 'ds_conn', name: 'cells', path: 'D:/data/cells' };
+    c = render(() => <RemoveDialog open dataset={dataset} />, target);
+    flushSync();
+    const confirmBtn = [...document.querySelectorAll<HTMLButtonElement>('dialog footer button')].find((b) => b.textContent?.includes('Remove'))!;
+    expect(confirmBtn.disabled).toBe(true);
+    confirmBtn.click();
+    await Promise.resolve();
+    expect(del).not.toHaveBeenCalled();
   });
 });

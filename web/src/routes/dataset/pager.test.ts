@@ -442,4 +442,124 @@ describe('ImagePager', () => {
       stop2();
     }
   });
+
+  it('retries find() cleanly when reload() interrupts the initial page-0 load without a redundant scan', async () => {
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstGate = new Promise<void>((r) => (releaseFirst = r));
+    const secondGate = new Promise<void>((r) => (releaseSecond = r));
+    let calls = 0;
+    const api: Partial<Api> = {
+      datasetImages: async (_id, q) => {
+        calls++;
+        const my = calls;
+        if (my === 1) await firstGate;
+        if (my === 2) await secondGate;
+        const off = q.offset ?? 0;
+        const lim = q.limit ?? PAGE;
+        return {
+          total: 300,
+          images: Array.from({ length: Math.min(lim, Math.max(0, 300 - off)) }, (_, k) => ({
+            id: `alpha_${off + k}`,
+            file: `alpha_${off + k}.jpg`,
+            split: 'train' as const,
+            width: 640,
+            height: 480,
+            boxes: [],
+          })),
+        };
+      },
+    };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_reload_find', undefined, 0);
+    // Start finding an image whose name doesn't match the numeric guess: enters initial #load(0).
+    const found = pager.find('alpha_3');
+    pager.reload();
+    // Release call 1 and flush pending microtasks completely while call 2 is still pending so `total` stays null.
+    releaseFirst();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(pager.total).toBeNull();
+    releaseSecond();
+    expect(await found).toBe(3);
+    expect(calls).toBe(2);
+
+    // Cold single-page class-filtered lookup must find an image on page 0 without skipping the only fresh page.
+    let smallCalls = 0;
+    const smallApi: Partial<Api> = {
+      datasetImages: async () => {
+        smallCalls++;
+        return {
+          total: 10,
+          images: Array.from({ length: 10 }, (_, k) => ({
+            id: `img_${k}`,
+            file: `img_${k}.jpg`,
+            split: 'train' as const,
+            width: 640,
+            height: 480,
+            boxes: [],
+          })),
+        };
+      },
+    };
+    hub.api = smallApi as Api;
+    const coldClass = new ImagePager('ds_small_class', undefined, 0);
+    expect(await coldClass.find('img_3')).toBe(3);
+    expect(smallCalls).toBe(1);
+
+    // Once disposed, further find() and uncached at() calls bail out without issuing new requests.
+    const beforeDispose = calls;
+    pager.dispose();
+    expect(await pager.find('alpha_missing')).toBe(-1);
+    expect(await pager.at(250)).toBeUndefined();
+    expect(calls).toBe(beforeDispose);
+  });
+
+  it('dispose() resolves an in-flight find() scan to -1 and prevents an un-aborted page response from mutating or returning from at()', async () => {
+    let resolvePage0!: (v: { total: number; images: DatasetImage[] }) => void;
+    const img = (k: number): DatasetImage => ({
+      id: `beta_${k}`,
+      file: `beta_${k}.jpg`,
+      split: 'train',
+      width: 640,
+      height: 480,
+      boxes: [],
+    });
+
+    // Case 1: in-flight page load that ignores AbortSignal must not cache or return after dispose().
+    hub.api = {
+      datasetImages: () =>
+        new Promise((resolve) => {
+          resolvePage0 = resolve;
+        }),
+    } as unknown as Api;
+    const p1 = new ImagePager('ds_dispose_page', undefined, undefined);
+    const pendingAt = p1.at(0);
+    p1.dispose();
+    resolvePage0({ total: 10, images: [img(0)] });
+    expect(await pendingAt).toBeUndefined();
+    expect(p1.get(0)).toBeUndefined();
+    expect(p1.total).toBeNull();
+
+    // Case 2: in-flight find() scan aborted by dispose() resolves cleanly to -1 instead of rejecting with AbortError.
+    let scanCalls = 0;
+    let markScanStarted!: () => void;
+    const scanStarted = new Promise<void>((r) => (markScanStarted = r));
+    const scanApi: Partial<Api> = {
+      datasetImages: (_id, _q, signal) => {
+        scanCalls++;
+        if (scanCalls === 1) return Promise.resolve({ total: 500, images: Array.from({ length: PAGE }, (_, k) => img(k)) });
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+          markScanStarted();
+        });
+      },
+    };
+    hub.api = scanApi as Api;
+    const p2 = new ImagePager('ds_dispose_scan', undefined, 0);
+    const pendingFind = p2.find('beta_450');
+    await scanStarted;
+    expect(scanCalls).toBe(2);
+    p2.dispose();
+    expect(await pendingFind).toBe(-1);
+  });
 });

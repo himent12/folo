@@ -61,7 +61,7 @@ export function parse(hash: string): Route {
   const pathPart = qIdx < 0 ? raw : raw.slice(0, qIdx) || '/';
   const queryPart = qIdx < 0 ? '' : raw.slice(qIdx + 1);
   // `#//` is the Overview, not a page at "" ("There is no page at ."; s6-shell-5).
-  const path = pathPart.length > 1 ? pathPart.replace(/\/+$/, '') || '/' : '/';
+  const path = pathPart === '/' ? '/' : pathPart.replace(/\/+$/, '') || '/';
   const query = new URLSearchParams(queryPart);
   for (const [name, re, keys] of table) {
     const m = re.exec(path);
@@ -236,7 +236,7 @@ class Router {
   /** Navigate to an app path like `/runs/run_7d1e`. */
   go(path: string, opts: { replace?: boolean } = {}) {
     const hash = `#${path}`;
-    if (!opts.replace && location.hash === hash) return;
+    if (!this.#travelling && !opts.replace && location.hash === hash) return;
     const navigate = () => this.#settled(() => this.#navigate(hash, opts.replace));
     if (this.#allowed(parse(hash), navigate)) navigate();
   }

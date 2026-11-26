@@ -59,13 +59,15 @@ export default function RemoveDialog(props: RemoveDialogProps) {
   onCleanup(() => (mounted = false));
   /** A failed removal says so in the dialog, which stays open for another try (the toaster sits behind the modal). */
   const status = new DialogStatus();
+  const isConnecting = () => hub.mode === 'connecting';
+  const connecting = computed(isConnecting);
   /** The server's runs, read each time the dialog opens (a run may have started since). */
-  const runs = new Resource(async (s) => (open.get() ? hub.api.runs(s) : null));
+  const runs = new Resource(async (s) => (open.get() && !connecting.get() ? hub.api.runs(s) : null));
   /** The runs that trained on the dataset. */
   const used = computed(() => runs.data?.filter((r) => r.config.dataset_id === props.dataset.id) ?? null);
   const impact = computed(() => (used.get() ? runsImpact(used.get()!) : null));
   /** The server's data dir, to tell a dataset it wrote (its files can go too) from a folder of the person's own. */
-  const system = new Resource(async (s) => (open.get() ? hub.api.system(s) : null));
+  const system = new Resource(async (s) => (open.get() && !connecting.get() ? hub.api.system(s) : null));
   const ours = computed(() => writtenByServer(props.dataset.path, system.data?.data_dir));
   /** A run on any dataset is queued or training: the server deletes files only while none is (docs/API.md). */
   const busy = computed(() => !!runs.data?.some((r) => ACTIVE.has(r.status)));
@@ -80,18 +82,21 @@ export default function RemoveDialog(props: RemoveDialogProps) {
   const images = () => (props.dataset.splits ? count(props.dataset.splits.train + props.dataset.splits.val + props.dataset.splits.test, 'generated image') : 'generated images');
 
   async function remove() {
-    if (deleting.peek()) return;
+    if (deleting.peek() || isConnecting()) return;
     const d = props.dataset;
+    const epoch = hub.epoch;
     const startPath = router.location.path;
     deleting.set(true);
     try {
       const gone = files();
       await hub.api.deleteDataset(d.id, { files: gone });
+      if (hub.epoch !== epoch || isConnecting()) return;
       datasetsChanged();
       if (mounted) open.set(false);
       toast.success('Dataset removed', gone ? `${d.name} and its ${images()} were deleted.` : `${d.name} is no longer registered. Files on disk were not touched.`);
       if (mounted && router.location.path === startPath) router.go('/datasets', { replace: true });
     } catch (e) {
+      if (hub.epoch !== epoch || isConnecting()) return;
       if (mounted && open.peek()) status.error(e, 'Could not remove the dataset');
       else toast.error(e, 'Could not remove the dataset');
     } finally {
@@ -111,7 +116,7 @@ export default function RemoveDialog(props: RemoveDialogProps) {
           <Button disabled={deleting.get()} onclick={() => !deleting.peek() && open.set(false)}>
             Cancel
           </Button>
-          <Button variant="destructive" icon={Trash} loading={deleting.get()} onclick={remove}>
+          <Button variant="destructive" icon={Trash} disabled={connecting.get()} loading={deleting.get()} onclick={remove}>
             {files() ? 'Remove and delete files' : 'Remove from FOLO'}
           </Button>
         </>
