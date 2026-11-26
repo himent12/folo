@@ -88,6 +88,9 @@ pub const ALL: &[&str] = &[
     "bench-entry",
     "bench-entry+light",
     "bench-entry+bottom",
+    "bench-compare",
+    "bench-compare+light",
+    "bench-external",
     "labeling",
     "labeling+light",
     "label-job",
@@ -378,6 +381,8 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
                 app.scroll_end_pending = 60;
             }
         }
+        "bench-compare" => app.route = Route::BenchCompare("bn_3c90".into()),
+        "bench-external" => app.route = Route::Bench("bn_3c90".into()),
         "labeling" => app.route = Route::LabelJobs,
         "label-job" => app.route = Route::LabelJob("lb_4f10".into()),
         "model" => {
@@ -479,6 +484,7 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
     match screen {
         "bench-new" => app.open_new_bench(window, cx),
         "bench-loop-new" => app.open_new_loop(cx),
+        "bench-external" => app.open_external_entry("bn_3c90", window, cx),
         "bench-design" => {
             app.open_design("bn_7a04", window, cx);
             if s.has("proposal") {
@@ -615,14 +621,28 @@ fn preload_bench(app: &mut FoloApp, route: &Route) {
     app.bench.catalog = api.bench_catalog().into();
     app.bench.agents = api.label_agents().into();
     app.bench.jobs = api.label_jobs().into();
-    let (bench, entry) = match route {
-        Route::Bench(b) => (b.clone(), None),
-        Route::BenchEntry(b, e) => (b.clone(), Some(e.clone())),
+    let (bench, entry, compare) = match route {
+        Route::Bench(b) => (b.clone(), None, false),
+        Route::BenchEntry(b, e) => (b.clone(), Some(e.clone()), false),
+        Route::BenchCompare(b) => (b.clone(), None, true),
         _ => return,
     };
-    app.bench.entries.insert(bench.clone(), api.bench_entries(&bench).into());
+    let entries_res = api.bench_entries(&bench);
+    let compare_ids = if compare {
+        entries_res.as_ref().map(|l| crate::bench::default_compare_entries(l, None)).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    app.bench.entries.insert(bench.clone(), entries_res.into());
     app.bench.loops.insert(bench.clone(), api.bench_loops(&bench).into());
     app.bench.previews.insert(bench.clone(), api.bench_images(&bench, 0, 1, None).into());
+    if compare {
+        for eid in &compare_ids {
+            let key = (bench.clone(), eid.clone());
+            app.bench.results.insert(key, api.bench_result(&bench, eid).into());
+        }
+        app.bench.compare.insert(bench.clone(), compare_ids);
+    }
     if let Some(e) = entry {
         let key = (bench.clone(), e.clone());
         app.bench.results.insert(key.clone(), api.bench_result(&bench, &e).into());

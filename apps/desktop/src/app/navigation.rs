@@ -22,6 +22,8 @@ pub enum Route {
     Bench(String),
     /// An entry of a benchmark: (benchmark, entry).
     BenchEntry(String, String),
+    /// Side-by-side comparison of finished entries on a benchmark.
+    BenchCompare(String),
     Playground,
     /// Agent labeling jobs (servers with `agent_labeling`).
     LabelJobs,
@@ -64,6 +66,7 @@ impl Route {
                 }
                 Route::BenchEntry(b.to_string(), e.to_string())
             }
+            ("bench-compare", Some(id)) if valid_id(id) => Route::BenchCompare(id.to_string()),
             ("playground", None) => Route::Playground,
             ("labeling" | "label", None) => Route::LabelJobs,
             ("label", Some(id)) if valid_id(id) => Route::LabelJob(id.to_string()),
@@ -78,7 +81,9 @@ impl Route {
             Route::Datasets | Route::Dataset(_) => Section::Datasets,
             Route::Runs | Route::Run(_) => Section::Runs,
             Route::Models | Route::Model(_) => Section::Models,
-            Route::Benches | Route::Bench(_) | Route::BenchEntry(..) => Section::Benchmarks,
+            Route::Benches | Route::Bench(_) | Route::BenchEntry(..) | Route::BenchCompare(_) => {
+                Section::Benchmarks
+            }
             Route::Playground => Section::Playground,
             Route::LabelJobs | Route::LabelJob(_) => Section::Labeling,
             Route::Settings => Section::Settings,
@@ -148,7 +153,7 @@ impl FoloApp {
             return true;
         }
         match route {
-            Route::Bench(id) => self.bench.removed.contains_key(id),
+            Route::Bench(id) | Route::BenchCompare(id) => self.bench.removed.contains_key(id),
             Route::BenchEntry(b, e) => {
                 self.bench.removed.contains_key(b) || self.bench.removed.contains_key(e)
             }
@@ -203,7 +208,7 @@ impl FoloApp {
             Route::Run(_) => Some(Route::Runs),
             Route::Model(_) => Some(Route::Models),
             Route::Bench(_) => Some(Route::Benches),
-            Route::BenchEntry(b, _) => Some(Route::Bench(b.clone())),
+            Route::BenchEntry(b, _) | Route::BenchCompare(b) => Some(Route::Bench(b.clone())),
             Route::LabelJob(_) => Some(Route::LabelJobs),
             _ => None,
         }

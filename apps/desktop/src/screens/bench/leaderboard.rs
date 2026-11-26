@@ -216,7 +216,49 @@ impl FoloApp {
             .filter(|m| !model_fits(&m.classes, &b.classes))
             .map(|m| Contender::Model(m.id.clone()))
             .collect();
-        let mut run_controls = div().flex().items_center().gap(px(8.));
+        let finished_count =
+            entries.ready().map_or(0, |l| l.iter().filter(|e| crate::bench::is_comparable(e)).count());
+        let mut run_controls = div().flex().flex_wrap().items_center().justify_end().gap(px(8.));
+        let bid_cmp = b.id.clone();
+        let cmp_btn = if finished_count >= 2 {
+            self.button(
+                "bench-compare-open",
+                "Compare",
+                Btn::Secondary,
+                Some("icons/git-compare-arrows.svg"),
+                window,
+                cx,
+                act(move |this, w, cx| this.open_bench_compare(&bid_cmp, None, w, cx)),
+            )
+        } else {
+            self.button_disabled(
+                "bench-compare-open",
+                "Compare",
+                Btn::Secondary,
+                Some("icons/git-compare-arrows.svg"),
+                "Need at least two finished entries to compare",
+                window,
+                cx,
+            )
+        };
+        let bid_ext = b.id.clone();
+        let ext_open = self.bench.external.as_ref().is_some_and(|f| f.bench == b.id);
+        let ext_btn = self.button(
+            "bench-external-open",
+            "Import predictions",
+            Btn::Secondary,
+            Some("icons/file-text.svg"),
+            window,
+            cx,
+            act(move |this, w, cx| {
+                if ext_open {
+                    this.close_bench_form(crate::bench::BenchForm::External, w, cx);
+                } else {
+                    this.open_external_entry(&bid_ext, w, cx);
+                }
+            }),
+        );
+        run_controls = run_controls.child(cmp_btn).child(ext_btn);
         if !contenders.is_empty() {
             let list: Vec<Contender> = contenders.iter().chain(&unfit).cloned().collect();
             let options: Vec<(SharedString, Option<SharedString>)> =
@@ -260,8 +302,17 @@ impl FoloApp {
                     act(move |this, _, cx| this.run_bench_model(&bid, cx)),
                 )
             };
-            run_controls = run_controls.child(div().w(px(220.)).child(select)).child(run);
+            run_controls = run_controls.child(div().w(px(200.)).child(select)).child(run);
         }
+        let external_form = ext_open.then(|| self.external_entry_form(&t, b, window, cx));
+        let wrap_board = |board: AnyElement| -> AnyElement {
+            match external_form {
+                Some(form) => {
+                    div().flex().flex_col().gap(px(16.)).child(form).child(board).into_any_element()
+                }
+                None => board,
+            }
+        };
         let head_row = panel_header(&t, "Leaderboard").child(run_controls);
         let bc = BoardCols::for_width(self.content_width(window));
         let cols = move |d: folo_ui::Stateful<folo_ui::Div>| {
@@ -327,41 +378,47 @@ impl FoloApp {
                     cx,
                     act(move |this, _, cx| this.retry_bench_entries(&bid, cx)),
                 );
-                return panel(&t)
-                    .child(head_row)
-                    .child(
-                        empty_state(
-                            &t,
-                            "icons/circle-alert.svg",
-                            "The leaderboard didn't load",
-                            &e.message,
-                            Tone::Danger,
+                return wrap_board(
+                    panel(&t)
+                        .child(head_row)
+                        .child(
+                            empty_state(
+                                &t,
+                                "icons/circle-alert.svg",
+                                "The leaderboard didn't load",
+                                &e.message,
+                                Tone::Danger,
+                            )
+                            .child(retry),
                         )
-                        .child(retry),
-                    )
-                    .into_any_element();
+                        .into_any_element(),
+                );
             }
             _ => {
-                return panel(&t)
-                    .child(head_row)
-                    .children(retry_anchor)
-                    .child(head)
-                    .child(loading_rows(&t, "board", 4))
-                    .into_any_element();
+                return wrap_board(
+                    panel(&t)
+                        .child(head_row)
+                        .children(retry_anchor)
+                        .child(head)
+                        .child(loading_rows(&t, "board", 4))
+                        .into_any_element(),
+                );
             }
         };
         if list.is_empty() {
-            return panel(&t)
-                .child(head_row)
-                .children(retry_anchor)
-                .child(empty_state(
-                    &t,
-                    "icons/play.svg",
-                    "No entries yet",
-                    empty_leaderboard_copy(has_models, has_agents),
-                    Tone::Neutral,
-                ))
-                .into_any_element();
+            return wrap_board(
+                panel(&t)
+                    .child(head_row)
+                    .children(retry_anchor)
+                    .child(empty_state(
+                        &t,
+                        "icons/play.svg",
+                        "No entries yet",
+                        empty_leaderboard_copy(has_models, has_agents),
+                        Tone::Neutral,
+                    ))
+                    .into_any_element(),
+            );
         }
         // Compute official ranks from server order before applying any column sort.
         let rank = ranks(b, &list);
@@ -417,31 +474,33 @@ impl FoloApp {
             });
             div().flex().flex_wrap().items_center().gap(px(8.)).children(clear_pin).children(reset_sort)
         });
-        panel(&t)
-            .overflow_hidden()
-            .child(head_row)
-            .children(retry_anchor)
-            .child(head)
-            .children(rows)
-            .child(
-                div()
-                    .px(px(16.))
-                    .py(px(10.))
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(12.))
-                    .child(
-                        text(ty::SM, t.text_tertiary)
-                            .flex_1()
-                            .min_w(px(220.))
-                            .whitespace_normal()
-                            .child(note),
-                    )
-                    .children(footer_actions),
-            )
-            .into_any_element()
+        wrap_board(
+            panel(&t)
+                .overflow_hidden()
+                .child(head_row)
+                .children(retry_anchor)
+                .child(head)
+                .children(rows)
+                .child(
+                    div()
+                        .px(px(16.))
+                        .py(px(10.))
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.))
+                        .child(
+                            text(ty::SM, t.text_tertiary)
+                                .flex_1()
+                                .min_w(px(220.))
+                                .whitespace_normal()
+                                .child(note),
+                        )
+                        .children(footer_actions),
+                )
+                .into_any_element(),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

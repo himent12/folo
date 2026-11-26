@@ -11,7 +11,7 @@ use crate::store::Load;
 /// A benchmark route's benchmark id, if the route is one.
 pub fn route_bench(route: &Route) -> Option<&str> {
     match route {
-        Route::Bench(id) | Route::BenchEntry(id, _) => Some(id),
+        Route::Bench(id) | Route::BenchEntry(id, _) | Route::BenchCompare(id) => Some(id),
         _ => None,
     }
 }
@@ -297,6 +297,10 @@ impl FoloApp {
         }
         if !matches!(self.route, Route::Bench(_)) {
             self.bench.new_loop = None;
+            self.bench.external = None;
+        }
+        if !matches!(self.route, Route::BenchCompare(_)) {
+            self.bench.compare_all_classes = false;
         }
         if let Some((b, e, _)) = self.bench.selected_entry_image.as_ref()
             && self.route != Route::BenchEntry(b.clone(), e.clone())

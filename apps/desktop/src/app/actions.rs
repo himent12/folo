@@ -600,7 +600,7 @@ pub(super) fn stop_toast(r: &Run, dequeued: bool) -> Option<(String, Option<&'st
 
 /// The first path a file dialog answered with; `None` when it was cancelled. A dialog that could
 /// not open (off screen they are refused: `FOLO_UI_OFFSCREEN=1`) says why in a toast.
-pub(super) fn picked(
+pub(crate) fn picked(
     this: &folo_ui::WeakEntity<FoloApp>,
     answer: Result<anyhow::Result<Option<Vec<std::path::PathBuf>>>, folo_ui::oneshot::Canceled>,
     cx: &mut folo_ui::AsyncApp,

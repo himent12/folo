@@ -91,6 +91,29 @@ pub struct DesignForm {
     pub seq: u64,
 }
 
+/// "Import predictions" inline form on a benchmark's Leaderboard tab (external model contestant).
+pub struct ExternalEntryForm {
+    pub bench: String,
+    /// Bumped on every opening and file load: a late answer only touches its own form.
+    pub seq: u64,
+    pub file_path: Entity<TextInput>,
+    /// The trimmed path that produced `check` (so editing `file_path` invalidates stale checks).
+    pub checked_path: Option<String>,
+    pub name: Entity<TextInput>,
+    /// Last auto-suggested leaderboard name; if the user edits `name` away from it, rechecking preserves it.
+    pub suggested_name: Option<String>,
+    pub scored: bool,
+    /// True once the user explicitly toggled the Confidences control (stops auto-detection from overriding it).
+    pub scored_edited: bool,
+    pub reading: bool,
+    pub file_name: Option<String>,
+    pub file_bytes: u64,
+    pub check: Option<Result<super::external::CheckedExternal, String>>,
+    pub submitting: bool,
+    pub error: Option<ApiError>,
+    pub show_how: bool,
+}
+
 /// How an entry's images are ordered.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum ImageSort {
@@ -155,6 +178,11 @@ pub struct BenchState {
     pub new_bench: Option<NewBenchForm>,
     pub new_loop: Option<NewLoopForm>,
     pub design: Option<DesignForm>,
+    pub external: Option<ExternalEntryForm>,
+    /// Per benchmark: selected entry ids for Benchmark Compare (slot 0 is baseline, max 4).
+    pub compare: HashMap<String, Vec<String>>,
+    /// Whether the Compare per-class panel is expanded past the 12 hardest classes.
+    pub compare_all_classes: bool,
     /// Bumped on every form opening and every image load (their late answers check it).
     pub form_seq: u64,
     /// Events applied so far, counted; a reload remembers the count it was asked at.

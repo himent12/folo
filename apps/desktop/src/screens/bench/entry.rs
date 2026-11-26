@@ -108,9 +108,31 @@ impl FoloApp {
             e.conditions_run,
             b.plan.conditions.len(),
         );
+        let finished_count = self
+            .bench
+            .entries
+            .get(bench)
+            .and_then(|l| l.ready())
+            .map_or(0, |l| l.iter().filter(|x| crate::bench::is_comparable(x)).count());
+        let mut actions = Vec::new();
+        if crate::bench::is_comparable(&e) && finished_count >= 2 {
+            let (bid_cmp, eid_cmp) = (b.id.clone(), e.id.clone());
+            actions.push(
+                self.button(
+                    "entry-compare",
+                    "Compare",
+                    Btn::Secondary,
+                    Some("icons/git-compare-arrows.svg"),
+                    window,
+                    cx,
+                    act(move |this, w, cx| this.open_bench_compare(&bid_cmp, Some(&eid_cmp), w, cx)),
+                )
+                .into_any_element(),
+            );
+        }
         let bid = b.id.clone();
-        let back = self
-            .button(
+        actions.push(
+            self.button(
                 "entry-board",
                 "Leaderboard",
                 Btn::Secondary,
@@ -119,8 +141,9 @@ impl FoloApp {
                 cx,
                 act(move |this, w, cx| this.navigate(Route::Bench(bid.clone()), w, cx)),
             )
-            .into_any_element();
-        let header = detail_header(&t, title, subtitle, vec![back]);
+            .into_any_element(),
+        );
+        let header = detail_header(&t, title, subtitle, actions);
         if e.status != BenchEntryStatus::Done {
             let msg = match e.status {
                 BenchEntryStatus::Failed => e.error.clone().unwrap_or_else(|| "It failed.".into()),
