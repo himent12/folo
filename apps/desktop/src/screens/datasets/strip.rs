@@ -61,16 +61,17 @@ impl FoloApp {
                     .child(kpi_note(&t).child(format!("{n} {}", int(c))))
             }),
         );
-        let tile = |content: folo_ui::Div| {
-            div().flex_1().min_w_0().overflow_hidden().px(px(16.)).py(px(pad)).child(content)
-        };
         let boxes = s.map_or(0, |s| s.boxes);
         let per = boxes as f32 / total;
         let broken = s.map_or(0, |s| s.broken_labels);
         // Size the strip by actual content width (which shrinks at 1120 px when the sidebar expands),
         // not raw viewport width, so the Broken labels tile never clips at the sidebar breakpoint.
         let cw = self.content_width(window);
-        let narrow_strip = cw < 980.;
+        let narrow_strip = cw < 1000.;
+        let tile_px = if cw < 780. { 12. } else { 16. };
+        let tile = |content: folo_ui::Div| {
+            div().flex_1().min_w_0().overflow_hidden().px(px(tile_px)).py(px(pad)).child(content)
+        };
         let img_w = if cw < 780. {
             200.
         } else if narrow_strip {
@@ -80,7 +81,7 @@ impl FoloApp {
         };
         panel(&t)
             .flex()
-            .child(div().flex_none().w(px(img_w)).px(px(16.)).py(px(pad)).child(
+            .child(div().flex_none().w(px(img_w)).px(px(tile_px)).py(px(pad)).child(
                 // The split bar on the strip's first detail line (where the others' captions
                 // sit), its legend on the second: the same grid as every tile beside it.
                 stat(
@@ -122,7 +123,7 @@ impl FoloApp {
                     .id("ds-empty-tile")
                     .flex_1()
                     .min_w_0()
-                    .px(px(16.))
+                    .px(px(tile_px))
                     .py(px(pad))
                     .when(empty > 0, |d| {
                         d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active))
@@ -188,7 +189,7 @@ impl FoloApp {
                     .id("ds-broken-tile")
                     .flex_1()
                     .min_w_0()
-                    .px(px(16.))
+                    .px(px(tile_px))
                     .py(px(pad))
                     .when(broken > 0, |d| {
                         d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active))
@@ -207,10 +208,17 @@ impl FoloApp {
                                     .flex()
                                     .items_center()
                                     .gap(px(4.))
-                                    .child(icon("icons/triangle-alert.svg", 12., t.warning_solid))
+                                    .min_w_0()
+                                    .child(div().flex_none().child(icon(
+                                        "icons/triangle-alert.svg",
+                                        12.,
+                                        t.warning_solid,
+                                    )))
                                     .child(
                                         text(ty::SM, t.warning_text)
                                             .font_weight(FontWeight::MEDIUM)
+                                            .min_w_0()
+                                            .ellipsis()
                                             .child("Broken labels"),
                                     ),
                             )

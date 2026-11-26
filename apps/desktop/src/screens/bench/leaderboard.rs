@@ -23,7 +23,7 @@ use crate::ui::*;
 
 const SCORE_W: f32 = 68.;
 const AXIS_W: [f32; 5] = [74., 70., 76., 64., 64.];
-const ACTIONS_W: f32 = 112.;
+const ACTIONS_W: f32 = 132.;
 const COL_GAP: f32 = 12.;
 
 #[derive(Clone, Copy)]
@@ -40,13 +40,13 @@ struct BoardCols {
 
 impl BoardCols {
     fn for_width(content_width: f32) -> Self {
-        if content_width < 850. {
+        if content_width < 870. {
             Self {
                 rank_w: 20.,
                 entry_min_w: 112.,
                 score_w: 52.,
                 axis_w: [48., 48., 46., 44., 44.],
-                actions_w: 108.,
+                actions_w: 132.,
                 gap: 6.,
                 pad_x: 12.,
                 compact: true,

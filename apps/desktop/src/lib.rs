@@ -144,15 +144,21 @@ const VALUE_FLAGS: &[&str] = &[
 ];
 const BARE_FLAGS: &[&str] = &["--mock", "--list-scenarios", "-h", "--help", "-V", "--version"];
 
-/// Parses `--width` / `--height` (logical pixels): finite, at least 1 px and at most 16384 px
-/// (matching `folo_ui`'s headless frame limit). Rejects non-numeric, non-finite (`NaN`, `inf`),
-/// zero, negative, and out-of-range values with a clear diagnostic naming the flag.
-fn parse_window_dim(flag: &str, raw: &str) -> Result<f32, String> {
+/// Parses `--width` / `--height` (logical pixels): finite and at least 1 px. Interactive launches
+/// cap logical dimensions at 16384 px; headless launches (`--shot` / `--bench-frames`) defer the
+/// upper bound to `folo_ui`'s scale-aware device-pixel check so downscaled captures (e.g.
+/// `--width 20000 --scale 0.5`) remain valid.
+fn parse_window_dim(flag: &str, raw: &str, enforce_max: bool) -> Result<f32, String> {
     const MAX_DIM: f32 = 16384.0;
-    raw.parse::<f32>()
-        .ok()
-        .filter(|v| v.is_finite() && (1.0..=MAX_DIM).contains(v))
-        .ok_or_else(|| format!("{flag} {raw}: expected a finite number from 1 to {MAX_DIM} (see --help)"))
+    let parsed =
+        raw.parse::<f32>().ok().filter(|v| v.is_finite() && *v >= 1.0 && (!enforce_max || *v <= MAX_DIM));
+    parsed.ok_or_else(|| {
+        if enforce_max {
+            format!("{flag} {raw}: expected a finite number from 1 to {MAX_DIM} (see --help)")
+        } else {
+            format!("{flag} {raw}: expected a finite number of at least 1 (see --help)")
+        }
+    })
 }
 
 /// What is wrong with `args` (without the program name) that the app would otherwise pass over in
@@ -161,6 +167,7 @@ fn parse_window_dim(flag: &str, raw: &str) -> Result<f32, String> {
 /// or an invalid `--open` target. One stderr line each; interactive launches still open, while
 /// headless launches (`--shot` / `--bench-frames`) fail closed on invalid arguments.
 fn arg_warnings<S: AsRef<str>>(args: &[S], themes: &Catalog) -> Vec<String> {
+    let is_headless = args.iter().any(|a| matches!(a.as_ref(), "--shot" | "--bench-frames"));
     let mut out = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -182,7 +189,7 @@ fn arg_warnings<S: AsRef<str>>(args: &[S], themes: &Catalog) -> Vec<String> {
                         out.push(format!("--open {v}: not a screen (see --help)"));
                     }
                     if (a == "--width" || a == "--height")
-                        && let Err(err) = parse_window_dim(a, v)
+                        && let Err(err) = parse_window_dim(a, v, !is_headless)
                     {
                         out.push(err);
                     }
@@ -227,7 +234,7 @@ fn headless_arg_errors<S: AsRef<str>>(args: &[S]) -> Vec<String> {
                         out.push(format!("--open {v}: not a screen (see --help)"));
                     }
                     if (a == "--width" || a == "--height")
-                        && let Err(err) = parse_window_dim(a, v)
+                        && let Err(err) = parse_window_dim(a, v, false)
                     {
                         out.push(err);
                     }
@@ -290,15 +297,16 @@ pub fn run() {
         std::process::exit(2);
     }
     let scenario = arg_value(&args, "--scenario").map(str::to_string);
-    let width_arg = arg_value(&args, "--width").and_then(|w| parse_window_dim("--width", w).ok());
-    let height_arg = arg_value(&args, "--height").and_then(|h| parse_window_dim("--height", h).ok());
+    let is_headless = args.iter().any(|a| matches!(a.as_str(), "--shot" | "--bench-frames"));
+    let width_arg =
+        arg_value(&args, "--width").and_then(|w| parse_window_dim("--width", w, !is_headless).ok());
+    let height_arg =
+        arg_value(&args, "--height").and_then(|h| parse_window_dim("--height", h, !is_headless).ok());
     let width = width_arg.unwrap_or(1280.0);
     let height = height_arg.unwrap_or(800.0);
-    // The window and theme from the last launch, unless this one is for a screenshot.
-    let remember = window_state::remembers(
-        scenario.is_some(),
-        arg_value(&args, "--width").is_some() || arg_value(&args, "--height").is_some(),
-    );
+    // The window and theme from the last launch, unless this one is for a screenshot or gave a
+    // valid explicit size override (a malformed `--width` falls back to saved state).
+    let remember = window_state::remembers(scenario.is_some(), width_arg.is_some() || height_arg.is_some());
     let state_path = remember.then(window_state::path);
     let saved = state_path.as_deref().map(window_state::load).unwrap_or_default();
     let mut prefs = launch_prefs(arg_value(&args, "--theme"), &saved, &themes);
@@ -608,10 +616,27 @@ mod tests {
         for bad in ["banana", "NaN", "inf", "-100", "0", "99999"] {
             assert!(one(&["--mock", "--width", bad]).contains("--width"), "{bad}");
             assert!(one(&["--mock", "--height", bad]).contains("--height"), "{bad}");
-            assert!(parse_window_dim("--width", bad).is_err(), "{bad}");
+            assert!(parse_window_dim("--width", bad, true).is_err(), "{bad}");
         }
-        assert_eq!(parse_window_dim("--width", "1280"), Ok(1280.0));
-        assert_eq!(parse_window_dim("--height", "620"), Ok(620.0));
+        assert_eq!(parse_window_dim("--width", "1280", true), Ok(1280.0));
+        assert_eq!(parse_window_dim("--height", "620", true), Ok(620.0));
+        // Downscaled headless captures defer the device-pixel upper bound to `shot::check_size`.
+        assert!(
+            arg_warnings(&[
+                "--scenario",
+                "overview",
+                "--shot",
+                "a.png",
+                "--width",
+                "20000",
+                "--scale",
+                "0.5"
+            ])
+            .is_empty()
+        );
+        // A malformed `--width` does not disable `window_state::remembers`.
+        let bad_w = parse_window_dim("--width", "banana", true).ok();
+        assert!(window_state::remembers(false, bad_w.is_some()));
         // `--scenario --shot P`: the scenario has no value; --shot keeps its own.
         assert!(one(&["--scenario", "--shot", "a.png"]).starts_with("--scenario: missing"));
         // Every option --help lists is known.
@@ -671,6 +696,21 @@ mod tests {
         assert!(!headless_arg_errors(&["--width", "banana", "--shot", "a.png"]).is_empty());
         assert!(!headless_arg_errors(&["--width", "NaN", "--shot", "a.png"]).is_empty());
         assert!(!headless_arg_errors(&["--height", "-5", "--bench-frames", "2"]).is_empty());
+        assert!(
+            headless_arg_errors(&[
+                "--scenario",
+                "overview",
+                "--shot",
+                "a.png",
+                "--width",
+                "20000",
+                "--height",
+                "800",
+                "--scale",
+                "0.5",
+            ])
+            .is_empty()
+        );
         let combined =
             headless_arg_errors(&["--scenario", "overview+ligth", "--shot", "a.png", "--bench-frames", "1"]);
         assert!(
