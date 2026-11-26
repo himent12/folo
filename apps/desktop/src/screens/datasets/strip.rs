@@ -61,7 +61,9 @@ impl FoloApp {
                     .child(kpi_note(&t).child(format!("{n} {}", int(c))))
             }),
         );
-        let tile = |content: folo_ui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(pad)).child(content);
+        let tile = |content: folo_ui::Div| {
+            div().flex_1().min_w_0().overflow_hidden().px(px(16.)).py(px(pad)).child(content)
+        };
         let boxes = s.map_or(0, |s| s.boxes);
         let per = boxes as f32 / total;
         let broken = s.map_or(0, |s| s.broken_labels);
@@ -102,13 +104,19 @@ impl FoloApp {
                 Some(kpi_note(&t).child(format!("{per:.1} per image"))),
             )))
             .child(vline(&t))
-            .child(tile(stat(
-                &t,
-                "Classes",
-                ds.classes.len().to_string(),
-                "",
-                Some(kpi_note(&t).whitespace_nowrap().child(names_summary(&ds.classes, 24))),
-            )))
+            .child(
+                tile(stat(
+                    &t,
+                    "Classes",
+                    ds.classes.len().to_string(),
+                    "",
+                    Some(kpi_note(&t).min_w_0().w_full().ellipsis().child(names_summary(&ds.classes, 24))),
+                ))
+                .id("ds-classes-tile")
+                .when(!ds.classes.is_empty(), |d| {
+                    d.tooltip(crate::controls::tip(ds.classes.join(", "), None))
+                }),
+            )
             .child(vline(&t))
             .child({
                 // Defects are actionable: this tile filters the grid to the images in question.
@@ -118,6 +126,7 @@ impl FoloApp {
                     .id("ds-empty-tile")
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
                     .px(px(16.))
                     .py(px(pad))
                     .when(empty > 0, |d| {
@@ -178,6 +187,7 @@ impl FoloApp {
                     .id("ds-broken-tile")
                     .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
                     .px(px(16.))
                     .py(px(pad))
                     .when(broken > 0, |d| {
@@ -345,6 +355,96 @@ mod tests {
             assert_eq!(
                 how,
                 format!("Replace <dataset> with this path, quoted for your shell, then run it: {odd}")
+            );
+        }
+    }
+
+    #[test]
+    fn long_class_name_clips_inside_classes_tile() {
+        use crate::app::{DsTab, FoloApp, Route, tests::drive};
+        use crate::store::Load;
+        use folo_ui::{
+            AppContext, Bounds, HeadlessApp, HeadlessOptions, WindowBounds, WindowOptions, point, px, size,
+        };
+
+        let api = std::sync::Arc::new(crate::api::mock::MockBackend::new(4200, true));
+        let mut app =
+            HeadlessApp::new(HeadlessOptions { size: size(px(960.), px(720.)), ..Default::default() });
+        let win = app.update(|cx| {
+            cx.set_global(crate::theme::Theme::new(crate::theme::Mode::Dark));
+            let bounds = Bounds::new(point(px(0.), px(0.)), size(px(960.), px(720.)));
+            let options =
+                WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+            cx.open_window(options, |w, cx| cx.new(|cx| FoloApp::new(api, true, w, cx)))
+                .expect("open 960px window")
+        });
+        for _ in 0..3 {
+            app.frame(win.into());
+            app.run_until_idle();
+        }
+        let long_name = "circle-shaped-object-with-an-intentionally-long-class-name-for-testing";
+        drive(&mut app, win, |this, w, cx| {
+            let mut ds = this.store.datasets.ready().unwrap()[0].clone();
+            ds.classes = vec![long_name.into(), "square".into()];
+            let id = ds.id.clone();
+            if let Load::Ready(list) = &mut this.store.datasets {
+                list[0] = ds.clone();
+            }
+            this.store.dataset.insert(id.clone(), Load::Ready(ds));
+            this.ds_tab = DsTab::Statistics;
+            this.navigate(Route::Dataset(id), w, cx);
+        });
+        for _ in 0..3 {
+            app.frame(win.into());
+            app.run_until_idle();
+        }
+        let scene = app.scene(win.into());
+        // Locate the KPI strip's 4 vertical dividers (`vline`: 1 px wide, >= 60 px tall):
+        // [Images | Boxes | Classes | Empty images | Broken labels].
+        let mut dividers: Vec<_> = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                folo_ui::Primitive::Quad(q) => Some(q),
+                _ => None,
+            })
+            .filter(|q| {
+                q.bounds.size.width == px(1.).scale(1.)
+                    && q.bounds.size.height >= px(60.).scale(1.)
+                    && q.bounds.origin.y >= px(100.).scale(1.)
+                    && q.bounds.origin.y <= px(350.).scale(1.)
+            })
+            .collect();
+        dividers.sort_by(|a, b| a.bounds.origin.x.partial_cmp(&b.bounds.origin.x).unwrap());
+        assert_eq!(dividers.len(), 4, "expected 4 KPI strip dividers, got {}", dividers.len());
+        let classes_left = dividers[1].bounds.origin.x;
+        let classes_right = dividers[2].bounds.origin.x;
+        let strip_top = dividers[1].bounds.origin.y;
+        let strip_bottom = dividers[1].bounds.bottom();
+
+        // Every glyph inside the Classes tile must be clipped within `[classes_left, classes_right]`
+        // so the 70-char class name never bleeds into Empty images or Broken labels.
+        let classes_glyphs: Vec<_> = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                folo_ui::Primitive::MonoSprite(s) => Some(s),
+                _ => None,
+            })
+            .filter(|s| {
+                s.bounds.origin.y >= strip_top
+                    && s.bounds.origin.y <= strip_bottom
+                    && s.bounds.origin.x >= classes_left
+                    && s.bounds.origin.x < classes_right
+            })
+            .collect();
+        assert!(!classes_glyphs.is_empty(), "Classes tile rendered text glyphs");
+        for s in &classes_glyphs {
+            assert!(
+                s.clip.right() <= classes_right + px(1.).scale(1.),
+                "Classes tile glyph clip spills past right divider: clip={:?} divider_x={:?}",
+                s.clip,
+                classes_right
             );
         }
     }

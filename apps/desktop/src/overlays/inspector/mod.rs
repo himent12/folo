@@ -556,4 +556,152 @@ mod tests {
         // Degenerate dimensions fall back safely.
         assert_eq!(focus_box_transform(bounds, (0., 480.), (0., 0., 10., 10.)), (1.0, (0., 0.)));
     }
+
+    #[test]
+    fn clicking_stage_box_zooms_and_toggles_fit_while_drag_pans() {
+        use crate::app::tests::{drive, open};
+        use crate::viz::{Fit, image_rect};
+        use folo_ui::{
+            Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PlatformInput, point, px,
+        };
+
+        let (mut app, window) = open();
+        let (ds_id, box0, dims) = drive(&mut app, window, |this, w, cx| {
+            let ds = this.store.datasets.ready().unwrap()[0].clone();
+            this.navigate(crate::app::Route::Dataset(ds.id.clone()), w, cx);
+            this.open_inspector(ds.id.clone(), 0, w, cx);
+            (ds.id, None::<(f32, f32, f32, f32)>, (0f32, 0f32))
+        });
+        let _ = (box0, dims);
+        for _ in 0..4 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        // Locate the first box's screen center on the stage at Fit.
+        let (click_pt, stage_bounds) = drive(&mut app, window, |this, _, _| {
+            let img = this.filtered_image(&ds_id, 0).expect("dataset image loaded");
+            let b = &img.boxes[0];
+            let view = this.insp_view.get().expect("inspector stage measured");
+            let rect = image_rect(view, img.width as f32, img.height as f32, Fit::Contain, 1.0, (0., 0.));
+            let sx = f32::from(rect.size.width) / img.width as f32;
+            let sy = f32::from(rect.size.height) / img.height as f32;
+            let cx = rect.left() + px((b.x1 + b.x2) * 0.5 * sx);
+            let cy = rect.top() + px((b.y1 + b.y2) * 0.5 * sy);
+            (point(cx, cy), view)
+        });
+
+        let click = |app: &mut folo_ui::HeadlessApp, p: folo_ui::Point<folo_ui::Pixels>| {
+            app.simulate_input(
+                window.into(),
+                PlatformInput::MouseMove(MouseMoveEvent {
+                    position: p,
+                    pressed_button: None,
+                    modifiers: Modifiers::none(),
+                }),
+            );
+            app.run_until_idle();
+            app.frame(window.into());
+            app.simulate_input(
+                window.into(),
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: p,
+                    modifiers: Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+            );
+            app.run_until_idle();
+            app.frame(window.into());
+            app.simulate_input(
+                window.into(),
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: p,
+                    modifiers: Modifiers::none(),
+                    click_count: 1,
+                }),
+            );
+            app.run_until_idle();
+            app.frame(window.into());
+        };
+
+        // 1. Clicking a box at Fit zooms in and sets focused_box = Some(0).
+        click(&mut app, click_pt);
+        let (zoom1, pan1) = drive(&mut app, window, |this, _, _| {
+            let insp = this.inspector.as_ref().unwrap();
+            assert!(insp.zoom > 1.0, "clicking a canvas box zooms in (zoom={})", insp.zoom);
+            assert_eq!(insp.focused_box, Some(0));
+            (insp.zoom, insp.pan)
+        });
+
+        // 2. Dragging past the deadzone pans without toggling Fit.
+        let center = point(
+            stage_bounds.left() + stage_bounds.size.width * 0.5,
+            stage_bounds.top() + stage_bounds.size.height * 0.5,
+        );
+        let dragged = point(center.x + px(30.), center.y + px(20.));
+        app.simulate_input(
+            window.into(),
+            PlatformInput::MouseDown(MouseDownEvent {
+                button: MouseButton::Left,
+                position: center,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+        );
+        app.simulate_input(
+            window.into(),
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position: dragged,
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Modifiers::none(),
+            }),
+        );
+        app.frame(window.into());
+        app.simulate_input(
+            window.into(),
+            PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: dragged,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+            }),
+        );
+        app.frame(window.into());
+        drive(&mut app, window, |this, _, _| {
+            let insp = this.inspector.as_ref().unwrap();
+            assert_eq!(insp.zoom, zoom1, "drag keeps zoom level");
+            assert_ne!(insp.pan, pan1, "drag pans stage");
+            assert_eq!(insp.focused_box, None);
+        });
+
+        // 3. Re-clicking box 0 focuses it again, and clicking its centered position again fits back to 1x.
+        let (box0_pt, _) = drive(&mut app, window, |this, _, _| {
+            let insp = this.inspector.as_ref().unwrap();
+            let img = this.filtered_image(&ds_id, 0).unwrap();
+            let b = &img.boxes[0];
+            let view = this.insp_view.get().unwrap();
+            let rect =
+                image_rect(view, img.width as f32, img.height as f32, Fit::Contain, insp.zoom, insp.pan);
+            let sx = f32::from(rect.size.width) / img.width as f32;
+            let sy = f32::from(rect.size.height) / img.height as f32;
+            (
+                point(rect.left() + px((b.x1 + b.x2) * 0.5 * sx), rect.top() + px((b.y1 + b.y2) * 0.5 * sy)),
+                view,
+            )
+        });
+        click(&mut app, box0_pt);
+        drive(&mut app, window, |this, _, _| {
+            assert_eq!(this.inspector.as_ref().unwrap().focused_box, Some(0));
+        });
+        // Box 0 is now centered in the stage: clicking it again resets to 1.0x Fit.
+        click(&mut app, center);
+        drive(&mut app, window, |this, _, _| {
+            let insp = this.inspector.as_ref().unwrap();
+            assert_eq!(insp.zoom, 1.0, "re-clicking focused canvas box resets to Fit");
+            assert_eq!(insp.focused_box, None);
+        });
+    }
 }
