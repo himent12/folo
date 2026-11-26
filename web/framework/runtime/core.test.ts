@@ -727,5 +727,39 @@ describe('scheduler & component perf fast paths', () => {
     flush();
     expect(seen).toEqual([11, 32]);
     stop2();
+
+    // Case 3: cleanup writes to the source of an upstream NOTIFIED computed before throwing — tracked memo must requeue and recover.
+    const a3 = signal(1);
+    const b3 = signal(1);
+    const c3 = computed(() => b3.get() * 10);
+    let throw3 = true;
+    const seen3: number[] = [];
+    const stop3 = createRoot((d) => {
+      const m = memo(() => {
+        const x = a3.get();
+        const y = c3.get();
+        onCleanup(() => {
+          if (throw3) {
+            throw3 = false;
+            b3.set(3);
+            throw new Error('upstream-write-boom');
+          }
+        });
+        return x + y;
+      });
+      effect(() => {
+        seen3.push(m());
+      });
+      return d;
+    });
+    flush();
+    expect(seen3).toEqual([11]);
+
+    a3.set(2);
+    b3.set(2);
+    flush();
+    // The write to b3=3 during cleanup invalidated and requeued m, so it recovered to 2 + 30 = 32 instead of stranding in HAS_ERROR.
+    expect(seen3).toEqual([11, 32]);
+    stop3();
   });
 });

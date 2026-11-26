@@ -529,6 +529,7 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
         // `fn()` never ran, so `cleanupSources(c)` would otherwise unsubscribe every dependency and strand `c` in HAS_ERROR.
         const stale = (c._flags & OUTDATED) !== 0 || c._globalVersion !== globalVersion;
         retainSources(c, stale, clearUpstreamNotified);
+        if (stale && (c._flags & TRACKING) !== 0 && (c._flags & OUTDATED) === 0) c._notify();
         throw e;
       }
     }
@@ -696,24 +697,30 @@ function schedule(): void {
   }
 }
 
+let flushError: unknown;
+let hasFlushError = false;
+
+function recordFlushError(err: unknown): void {
+  if (!hasFlushError) {
+    hasFlushError = true;
+    flushError = err;
+  }
+}
+
 /**
  * Runs `q` in tree order, as Svelte walks its effect tree (parents before children, siblings in document order: a
- * branch created late runs at its memo's place); returns the first error.
+ * branch created late runs at its memo's place), recording the first error for the active flush.
  */
-function run(q: Job[], error: unknown): unknown {
+function run(q: Job[]): void {
   sortJobs(q);
   for (let i = 0; i < q.length; i++) {
     try {
       q[i]!._update();
     } catch (e) {
-      error ??= e;
+      recordFlushError(e);
     }
   }
-  return error;
 }
-
-let flushError: unknown;
-let hasFlushError = false;
 
 /**
  * Internal: records a cleanup error to throw after the current flush finishes reconciling the DOM.
@@ -721,10 +728,7 @@ let hasFlushError = false;
  */
 export function deferFlushError(err: unknown): void {
   if (!flushing) throw err;
-  if (!hasFlushError) {
-    hasFlushError = true;
-    flushError = err;
-  }
+  recordFlushError(err);
 }
 
 /**
@@ -743,7 +747,8 @@ export function flush(): void {
   const prevHasFlushError = hasFlushError;
   flushError = undefined;
   hasFlushError = false;
-  let error: unknown;
+  let hasErr = false;
+  let err: unknown;
   let rounds = 0;
   try {
     while (renderQueue.length > 0 || userQueue.length > 0) {
@@ -765,7 +770,7 @@ export function flush(): void {
         const q = renderQueue;
         renderQueue = renderSpare;
         try {
-          error = run(q, error);
+          run(q);
         } finally {
           if (q.length <= MAX_SPARE_QUEUE) {
             q.length = 0;
@@ -779,7 +784,7 @@ export function flush(): void {
         const u = userQueue;
         userQueue = userSpare;
         try {
-          error = run(u, error);
+          run(u);
         } finally {
           if (u.length <= MAX_SPARE_QUEUE) {
             u.length = 0;
@@ -791,14 +796,13 @@ export function flush(): void {
       }
     }
   } finally {
-    const deferred = hasFlushError;
-    const deferredErr = flushError;
+    hasErr = hasFlushError;
+    err = flushError;
     flushError = prevFlushError;
     hasFlushError = prevHasFlushError;
     flushing = false;
-    if (error === undefined && deferred) error = deferredErr;
   }
-  if (error !== undefined) throw error;
+  if (hasErr) throw err;
 }
 
 /** Resolves after pending updates have been applied to the DOM (port of `tick`). */

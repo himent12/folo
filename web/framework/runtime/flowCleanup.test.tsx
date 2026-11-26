@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // Disposal resilience tests for For and Index when a removed row's cleanup throws.
 import { describe, expect, it } from 'vitest';
-import { flush, onCleanup, signal } from './core';
+import { effect, flush, onCleanup, signal } from './core';
 import { For, Index } from './flow';
 import { render } from '../testing';
 
@@ -97,6 +97,39 @@ describe('For / Index throwing row cleanup disposal', () => {
     items.set(['a', 'e']);
     flush();
     expect(view.container.textContent).toBe('ae');
+    view.unmount();
+  });
+
+  it('reports the earlier list cleanup error rather than letting a later user effect error mask it', () => {
+    const items = signal(['a', 'b']);
+    let failRow = true;
+    const view = render(() => {
+      effect(() => {
+        if (items.get().length === 1) throw new Error('later-effect-boom');
+      });
+      return (
+        <div>
+          <For each={items.get()} key={(x) => x}>
+            {(item) => {
+              const v = item();
+              onCleanup(() => {
+                if (v === 'b' && failRow) {
+                  failRow = false;
+                  throw new Error('earlier-cleanup-boom');
+                }
+              });
+              return <span>{v}</span>;
+            }}
+          </For>
+        </div>
+      );
+    });
+    flush();
+    expect(view.container.textContent).toBe('ab');
+
+    items.set(['a']);
+    expect(() => flush()).toThrow('earlier-cleanup-boom');
+    expect(view.container.textContent).toBe('a');
     view.unmount();
   });
 });
