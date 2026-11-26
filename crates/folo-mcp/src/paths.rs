@@ -161,7 +161,7 @@ impl PathPolicy {
             pattern,
             trailing_sep: parsed.trailing_sep,
             opts: glob::MatchOptions::new(),
-            ancestors: Vec::new(),
+            visited: HashSet::new(),
             seen: HashSet::new(),
             out: Vec::new(),
         };
@@ -169,6 +169,26 @@ impl PathPolicy {
         walker.out.sort();
         Ok(walker.out)
     }
+}
+
+/// Strips a Windows drive or UNC `\\?\` verbatim prefix before `Path::components()` so `.`, `..`, and `/` are
+/// parsed identically to normal paths (while `Component::RootDir` re-canonicalizes back to `\\?\`).
+fn normalize_verbatim_for_components(p: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(s) = p.to_str() {
+            if let Some(rest) = s.strip_prefix(r"\\?\UNC\").or_else(|| s.strip_prefix(r"\\?\unc\")) {
+                return PathBuf::from(format!(r"\\{rest}"));
+            }
+            if let Some(rest) = s.strip_prefix(r"\\?\") {
+                let bytes = rest.as_bytes();
+                if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+                    return PathBuf::from(rest);
+                }
+            }
+        }
+    }
+    p.to_path_buf()
 }
 
 /// Resolves a path that failed `std::fs::canonicalize` left-to-right so symlinks and Windows junctions
@@ -179,9 +199,10 @@ fn resolve_nonexistent(p: &Path, depth: u8) -> Option<PathBuf> {
         return None;
     }
     let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let decomposed = normalize_verbatim_for_components(&abs);
     let mut cur = PathBuf::new();
     let mut missing = false;
-    for c in abs.components() {
+    for c in decomposed.components() {
         match c {
             Component::CurDir => {}
             Component::Prefix(prefix) => cur.push(prefix.as_os_str()),
@@ -206,6 +227,19 @@ fn resolve_nonexistent(p: &Path, depth: u8) -> Option<PathBuf> {
                 }
             }
             Component::Normal(part) => {
+                if part == "." {
+                    continue;
+                }
+                if part == ".." {
+                    let _ = cur.pop();
+                    if let Ok(canon) = std::fs::canonicalize(&cur) {
+                        cur = canon;
+                        missing = false;
+                    } else {
+                        missing = true;
+                    }
+                    continue;
+                }
                 cur.push(part);
                 if !missing {
                     if let Ok(canon) = std::fs::canonicalize(&cur) {
@@ -251,6 +285,27 @@ struct ParsedGlob {
     segs: Vec<Seg>,
 }
 
+/// Decodes a glob path segment whose only metacharacters are single-character bracket escapes (`[[]`, `[]]`,
+/// `[*]`, `[?]`) produced by `glob::Pattern::escape` into its literal name; returns `None` for true wildcards.
+fn unescape_glob_literal(raw: &str) -> Option<String> {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' | '?' => return None,
+            '[' => {
+                let inner = chars.next()?;
+                if !matches!(inner, '[' | ']' | '*' | '?') || chars.next() != Some(']') {
+                    return None;
+                }
+                out.push(inner);
+            }
+            other => out.push(other),
+        }
+    }
+    Some(out)
+}
+
 fn parse_glob(data_dir: &Path, pattern: &str) -> Result<ParsedGlob, Error> {
     let trailing_sep = pattern.ends_with('/') || (cfg!(windows) && pattern.ends_with('\\'));
     let mut comps = Path::new(pattern).components().peekable();
@@ -287,13 +342,16 @@ fn parse_glob(data_dir: &Path, pattern: &str) -> Result<ParsedGlob, Error> {
                 segs.push(Seg::Parent);
             }
             Component::Normal(os) => {
+                let raw = os.to_string_lossy();
+                if raw == "." {
+                    continue;
+                }
                 raw_count += 1;
                 if raw_count > MAX_GLOB_SEGMENTS {
                     return Err(invalid_arguments(format!(
                         "glob `{pattern}` has too many path segments (max {MAX_GLOB_SEGMENTS})"
                     )));
                 }
-                let raw = os.to_string_lossy();
                 if raw == ".." {
                     segs.push(Seg::Parent);
                 } else if raw == "**" {
@@ -305,10 +363,15 @@ fn parse_glob(data_dir: &Path, pattern: &str) -> Result<ParsedGlob, Error> {
                         "glob `{pattern}` is invalid: recursive wildcards must form a single path component"
                     )));
                 } else if raw.contains(['*', '?', '[']) {
-                    segs.push(Seg::Pattern(
-                        glob::Pattern::new(&raw)
-                            .map_err(|e| invalid_arguments(format!("glob `{pattern}` is invalid: {e}")))?,
-                    ));
+                    if let Some(lit) = unescape_glob_literal(&raw) {
+                        segs.push(Seg::Literal(OsString::from(lit)));
+                    } else {
+                        segs.push(Seg::Pattern(
+                            glob::Pattern::new(&raw).map_err(|e| {
+                                invalid_arguments(format!("glob `{pattern}` is invalid: {e}"))
+                            })?,
+                        ));
+                    }
                 } else {
                     segs.push(Seg::Literal(os.to_os_string()));
                 }
@@ -325,16 +388,6 @@ struct StaticBase {
     crossed_missing_dir: bool,
 }
 
-fn check_prefix_boundary(root: &Path, cur: &Path, has_prefix_or_root: bool) -> Result<(), Error> {
-    if !has_prefix_or_root {
-        outside_error(root, cur)
-    } else if cur.starts_with(root) || root.starts_with(cur) {
-        Ok(())
-    } else {
-        Err(path_outside_error(root, cur))
-    }
-}
-
 fn resolve_static_prefix(
     parsed: &ParsedGlob,
     static_segs: &[Seg],
@@ -347,7 +400,7 @@ fn resolve_static_prefix(
             match seg {
                 Seg::Literal(lit) => cur.push(lit),
                 Seg::Parent => {
-                    if !cur.exists() {
+                    if !cur.is_dir() {
                         crossed_missing_dir = true;
                     }
                     step_unconfined_parent(&mut cur);
@@ -369,7 +422,6 @@ fn resolve_static_prefix(
         let miss = !resolved.exists();
         (resolved, miss)
     };
-    check_prefix_boundary(root, &cur, parsed.has_prefix_or_root)?;
 
     let mut crossed_missing_dir = false;
     for seg in static_segs {
@@ -393,10 +445,16 @@ fn resolve_static_prefix(
                         missing = true;
                     }
                 }
-                check_prefix_boundary(root, &cur, parsed.has_prefix_or_root)?;
+                if !parsed.has_prefix_or_root {
+                    outside_error(root, &cur)?;
+                }
             }
             Seg::Parent => {
-                if missing {
+                // Reject `..` from outside `root` so `/nonexistent/../data/*.png` cannot act as an oracle.
+                if !cur.starts_with(root) {
+                    return Err(path_outside_error(root, &cur));
+                }
+                if missing || !cur.is_dir() {
                     crossed_missing_dir = true;
                 }
                 let _ = cur.pop();
@@ -406,7 +464,7 @@ fn resolve_static_prefix(
                 } else {
                     missing = true;
                 }
-                check_prefix_boundary(root, &cur, parsed.has_prefix_or_root)?;
+                outside_error(root, &cur)?;
             }
             Seg::GlobStar | Seg::Pattern(_) => unreachable!("static prefix has no wildcards"),
         }
@@ -427,15 +485,26 @@ fn step_unconfined_parent(cur: &mut PathBuf) {
     }
 }
 
-struct AncestorNode {
-    canon: PathBuf,
-    parent: Option<usize>,
+/// Under `--confine`, rejects any symlink or Windows directory junction (live or dangling) whose resolved
+/// target escapes `root`.
+fn check_link_confined(root: &Path, path: &Path) -> Result<(), Error> {
+    if std::fs::read_link(path).is_ok()
+        || std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
+    {
+        match std::fs::canonicalize(path).ok().or_else(|| resolve_nonexistent(path, 0)) {
+            Some(target) => outside_error(root, &target)?,
+            None => return Err(path_outside_error(root, path)),
+        }
+    }
+    Ok(())
 }
 
 struct Frame {
     dir: PathBuf,
     seg_idx: usize,
-    ancestor: Option<usize>,
+    /// Canonical directories on the active branch of the current `Seg::GlobStar` segment (empty outside `**`),
+    /// reclaimed automatically when each frame completes.
+    star_ancestors: Vec<PathBuf>,
 }
 
 struct GlobWalker<'a> {
@@ -443,38 +512,22 @@ struct GlobWalker<'a> {
     pattern: &'a str,
     trailing_sep: bool,
     opts: glob::MatchOptions,
-    ancestors: Vec<AncestorNode>,
+    /// Visited `(traversed_dir, seg_idx)` states, preventing redundant multi-`**` traversal while keeping
+    /// distinct symlink aliases separate.
+    visited: HashSet<(PathBuf, usize)>,
     seen: HashSet<PathBuf>,
     out: Vec<PathBuf>,
 }
 
 impl GlobWalker<'_> {
-    fn ancestors_contains(&self, mut idx: Option<usize>, canon: &Path) -> bool {
-        while let Some(i) = idx {
-            let node = &self.ancestors[i];
-            if node.canon == canon {
-                return true;
-            }
-            idx = node.parent;
-        }
-        false
-    }
-
-    fn push_ancestor(&mut self, canon: PathBuf, parent: Option<usize>) -> usize {
-        let idx = self.ancestors.len();
-        self.ancestors.push(AncestorNode { canon, parent });
-        idx
-    }
-
     /// Checks confinement (before any directory enumeration) and optional symlink-cycle protection when entering a
-    /// directory. Keeps the traversed path `next` in the returned frame so duplicate symlink aliases remain distinct
-    /// in `seen` and count toward [`MAX_BATCH`].
+    /// directory. Keeps the traversed path `next` so duplicate symlink aliases remain distinct in `seen` and count
+    /// toward [`MAX_BATCH`].
     fn enter_dir(
         &mut self,
         next: PathBuf,
-        parent_anc: Option<usize>,
-        check_cycle: bool,
-    ) -> Result<Option<(PathBuf, Option<usize>)>, Error> {
+        star_ancestors: Option<&[PathBuf]>,
+    ) -> Result<Option<(PathBuf, PathBuf)>, Error> {
         if let Some(root) = self.root {
             match std::fs::canonicalize(&next) {
                 Ok(canon) => {
@@ -482,11 +535,10 @@ impl GlobWalker<'_> {
                     if !canon.is_dir() {
                         return Ok(None);
                     }
-                    if check_cycle && self.ancestors_contains(parent_anc, &canon) {
+                    if star_ancestors.is_some_and(|anc| anc.iter().any(|a| a == &canon)) {
                         return Ok(None);
                     }
-                    let anc = self.push_ancestor(canon, parent_anc);
-                    Ok(Some((next, Some(anc))))
+                    Ok(Some((next, canon)))
                 }
                 Err(_) => {
                     match resolve_nonexistent(&next, 0) {
@@ -501,19 +553,14 @@ impl GlobWalker<'_> {
                 return Ok(None);
             }
             let Ok(canon) = std::fs::canonicalize(&next) else { return Ok(None) };
-            if check_cycle && self.ancestors_contains(parent_anc, &canon) {
+            if star_ancestors.is_some_and(|anc| anc.iter().any(|a| a == &canon)) {
                 return Ok(None);
             }
-            let anc = self.push_ancestor(canon, parent_anc);
-            Ok(Some((next, Some(anc))))
+            Ok(Some((next, canon)))
         }
     }
 
-    fn enter_parent(
-        &mut self,
-        dir: &Path,
-        parent_anc: Option<usize>,
-    ) -> Result<Option<(PathBuf, Option<usize>)>, Error> {
+    fn enter_parent(&mut self, dir: &Path) -> Result<Option<PathBuf>, Error> {
         if let Some(root) = self.root {
             let mut canon = match std::fs::canonicalize(dir) {
                 Ok(c) => c,
@@ -521,15 +568,11 @@ impl GlobWalker<'_> {
             };
             let _ = canon.pop();
             outside_error(root, &canon)?;
-            if !canon.is_dir() {
-                return Ok(None);
-            }
-            let anc = self.push_ancestor(canon.clone(), parent_anc);
-            Ok(Some((canon, Some(anc))))
+            Ok(canon.is_dir().then_some(canon))
         } else {
             let mut next = dir.to_path_buf();
             step_unconfined_parent(&mut next);
-            self.enter_dir(next, parent_anc, false)
+            Ok(next.is_dir().then_some(next))
         }
     }
 
@@ -552,17 +595,7 @@ impl GlobWalker<'_> {
                     }
                     self.out.push(canon);
                 }
-                Err(_) => {
-                    // Reject broken symlinks/junctions pointing outside `data_dir` without creating an oracle.
-                    if std::fs::read_link(&path).is_ok()
-                        || std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink())
-                    {
-                        match resolve_nonexistent(&path, 0) {
-                            Some(target) => outside_error(root, &target)?,
-                            None => return Err(path_outside_error(root, &path)),
-                        }
-                    }
-                }
+                Err(_) => check_link_confined(root, &path)?,
             }
         } else {
             if !path.is_file() {
@@ -583,9 +616,11 @@ impl GlobWalker<'_> {
     }
 
     fn run(&mut self, start_dir: PathBuf, segs: &[Seg]) -> Result<(), Error> {
-        let initial_anc = std::fs::canonicalize(&start_dir).ok().map(|c| self.push_ancestor(c, None));
-        let mut stack = vec![Frame { dir: start_dir, seg_idx: 0, ancestor: initial_anc }];
+        let mut stack = vec![Frame { dir: start_dir, seg_idx: 0, star_ancestors: Vec::new() }];
         while let Some(frame) = stack.pop() {
+            if !self.visited.insert((frame.dir.clone(), frame.seg_idx)) {
+                continue;
+            }
             if frame.seg_idx == segs.len() {
                 if !self.trailing_sep {
                     self.push_file(frame.dir)?;
@@ -598,15 +633,15 @@ impl GlobWalker<'_> {
                     let next = frame.dir.join(lit);
                     if is_last && !self.trailing_sep {
                         self.push_file(next)?;
-                    } else if let Some((dir, anc)) = self.enter_dir(next, frame.ancestor, false)? {
-                        stack.push(Frame { dir, seg_idx: frame.seg_idx + 1, ancestor: anc });
+                    } else if let Some((dir, _)) = self.enter_dir(next, None)? {
+                        stack.push(Frame { dir, seg_idx: frame.seg_idx + 1, star_ancestors: Vec::new() });
                     }
                 }
                 Seg::Parent => {
-                    if let Some((dir, anc)) = self.enter_parent(&frame.dir, frame.ancestor)?
+                    if let Some(dir) = self.enter_parent(&frame.dir)?
                         && !is_last
                     {
-                        stack.push(Frame { dir, seg_idx: frame.seg_idx + 1, ancestor: anc });
+                        stack.push(Frame { dir, seg_idx: frame.seg_idx + 1, star_ancestors: Vec::new() });
                     }
                 }
                 Seg::Pattern(pat) => {
@@ -626,8 +661,12 @@ impl GlobWalker<'_> {
                                 continue;
                             }
                             let next = frame.dir.join(name);
-                            if let Some((dir, anc)) = self.enter_dir(next, frame.ancestor, false)? {
-                                next_frames.push(Frame { dir, seg_idx: frame.seg_idx + 1, ancestor: anc });
+                            if let Some((dir, _)) = self.enter_dir(next, None)? {
+                                next_frames.push(Frame {
+                                    dir,
+                                    seg_idx: frame.seg_idx + 1,
+                                    star_ancestors: Vec::new(),
+                                });
                             }
                         }
                         for f in next_frames.into_iter().rev() {
@@ -636,12 +675,18 @@ impl GlobWalker<'_> {
                     }
                 }
                 Seg::GlobStar => {
+                    let mut star_anc = frame.star_ancestors;
+                    if star_anc.is_empty()
+                        && let Ok(canon) = std::fs::canonicalize(&frame.dir)
+                    {
+                        star_anc.push(canon);
+                    }
                     let Ok(rd) = std::fs::read_dir(&frame.dir) else {
                         if !is_last {
                             stack.push(Frame {
                                 dir: frame.dir,
                                 seg_idx: frame.seg_idx + 1,
-                                ancestor: frame.ancestor,
+                                star_ancestors: Vec::new(),
                             });
                         }
                         continue;
@@ -652,11 +697,22 @@ impl GlobWalker<'_> {
                     for name in names {
                         let next = frame.dir.join(name);
                         if next.is_dir() {
-                            if let Some((dir, anc)) = self.enter_dir(next, frame.ancestor, true)? {
-                                next_frames.push(Frame { dir, seg_idx: frame.seg_idx, ancestor: anc });
+                            if let Some((dir, canon)) = self.enter_dir(next, Some(&star_anc))? {
+                                let mut child_anc = star_anc.clone();
+                                child_anc.push(canon);
+                                next_frames.push(Frame {
+                                    dir,
+                                    seg_idx: frame.seg_idx,
+                                    star_ancestors: child_anc,
+                                });
                             }
-                        } else if is_last && !self.trailing_sep {
-                            self.push_file(next)?;
+                        } else {
+                            if let Some(root) = self.root {
+                                check_link_confined(root, &next)?;
+                            }
+                            if is_last && !self.trailing_sep {
+                                self.push_file(next)?;
+                            }
                         }
                     }
                     for f in next_frames.into_iter().rev() {
@@ -666,7 +722,7 @@ impl GlobWalker<'_> {
                         stack.push(Frame {
                             dir: frame.dir,
                             seg_idx: frame.seg_idx + 1,
-                            ancestor: frame.ancestor,
+                            star_ancestors: Vec::new(),
                         });
                     }
                 }

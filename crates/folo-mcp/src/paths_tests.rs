@@ -203,6 +203,26 @@ fn resolve_for_batch_records_missing_inside_and_rejects_missing_outside() {
             wp.resolve_for_batch("broken_escape/missing.png").err().unwrap().body.code,
             "path_outside_data_dir"
         );
+
+        // Verbatim `\\?\` `data_dir` and verbatim caller inputs must still enforce `..` and `.` confinement.
+        let verbatim_cased = std::fs::canonicalize(&cased).unwrap();
+        let vp = PathPolicy { data_dir: verbatim_cased.clone(), confine: true };
+        assert_eq!(
+            vp.resolve_for_batch("../outside_missing.png").err().unwrap().body.code,
+            "path_outside_data_dir"
+        );
+        assert_eq!(
+            vp.resolve_for_batch(r"..\outside_missing.png").err().unwrap().body.code,
+            "path_outside_data_dir"
+        );
+        let verbatim_escape = format!(r"{}\..\outside_missing.png", verbatim_cased.display());
+        assert_eq!(wp.resolve_for_batch(&verbatim_escape).err().unwrap().body.code, "path_outside_data_dir");
+        let verbatim_dot_escape = format!(r"{}\.\escape\missing.png", verbatim_cased.display());
+        assert_eq!(
+            wp.resolve_for_batch(&verbatim_dot_escape).err().unwrap().body.code,
+            "path_outside_data_dir"
+        );
+
         // Cleanup junctions before TestDir drops.
         let _ = std::fs::remove_dir(cased.join("escape"));
         let _ = std::fs::remove_dir(cased.join("broken_escape"));
@@ -230,19 +250,69 @@ fn confined_glob_enforces_boundaries_before_enumeration() {
     let abs_missing = format!("{}/nonexistent/*.png", folo_api::json::path(&outside));
     assert_eq!(p.expand_glob(&abs_missing).unwrap_err().body.code, "path_outside_data_dir");
 
-    // Directory link pointing outside is rejected before enumerating, even with a non-matching pattern.
+    // Stepping `..` through a regular file does not match sibling files, while still rejecting escapes.
+    std::fs::write(data.join("a.png"), b"x").unwrap();
+    std::fs::write(data.join("b.png"), b"x").unwrap();
+    assert!(p.expand_glob("a.png/../b.png").unwrap().is_empty());
+    assert_eq!(p.expand_glob("a.png/../../outside/*.png").unwrap_err().body.code, "path_outside_data_dir");
+
+    // `*/../**/*.png` must not mistake re-entering `sub` for a cycle after stepping back to its parent.
+    let via_parent = p.expand_glob("*/../**/*.png").unwrap();
+    assert!(
+        via_parent.iter().any(|x| x.file_name().and_then(|s| s.to_str()) == Some("a.png")),
+        "expected sub/a.png via */../**/*.png: {via_parent:?}"
+    );
+
+    // Escaped literal metacharacters in an absolute confined glob resolve inside `data_dir` without enumerating outside.
+    let meta_dir = root.join("data [v2]");
+    std::fs::create_dir_all(&meta_dir).unwrap();
+    std::fs::write(meta_dir.join("m.png"), b"x").unwrap();
+    let mp = PathPolicy { data_dir: meta_dir.clone(), confine: true };
+    let escaped_abs = format!("{}/data [[]v2[]]/*.png", folo_api::json::path(root.path()));
+    assert_eq!(mp.expand_glob(&escaped_abs).unwrap().len(), 1);
+
+    // Both live and dangling directory links pointing outside are rejected before enumerating.
     #[cfg(unix)]
     {
         std::os::unix::fs::symlink(&outside, data.join("escape_dir")).unwrap();
         assert_eq!(p.expand_glob("**/*.nope").unwrap_err().body.code, "path_outside_data_dir");
         assert_eq!(p.expand_glob("*/*.nope").unwrap_err().body.code, "path_outside_data_dir");
+        assert_eq!(p.expand_glob("**/").unwrap_err().body.code, "path_outside_data_dir");
+        std::fs::remove_file(data.join("escape_dir")).unwrap();
+
+        std::os::unix::fs::symlink(outside.join("gone"), data.join("dangling_escape")).unwrap();
+        assert_eq!(p.expand_glob("**/*.nope").unwrap_err().body.code, "path_outside_data_dir");
+        assert_eq!(p.expand_glob("**/").unwrap_err().body.code, "path_outside_data_dir");
+        std::fs::remove_file(data.join("dangling_escape")).unwrap();
+
+        // An absolute confined glob through a symlinked ancestor of `data_dir` succeeds.
+        let alias_parent = root.join("alias_parent");
+        std::os::unix::fs::symlink(root.path(), &alias_parent).unwrap();
+        let abs_via_alias = format!("{}/data/sub/*.png", folo_api::json::path(&alias_parent));
+        assert_eq!(p.expand_glob(&abs_via_alias).unwrap().len(), 1);
     }
     #[cfg(windows)]
     {
         make_junction(&data.join("escape_dir"), &outside);
         assert_eq!(p.expand_glob("**/*.nope").unwrap_err().body.code, "path_outside_data_dir");
         assert_eq!(p.expand_glob("*/*.nope").unwrap_err().body.code, "path_outside_data_dir");
+        assert_eq!(p.expand_glob("**/").unwrap_err().body.code, "path_outside_data_dir");
         let _ = std::fs::remove_dir(data.join("escape_dir"));
+
+        let gone = root.join("gone_dir");
+        std::fs::create_dir_all(&gone).unwrap();
+        make_junction(&data.join("dangling_escape"), &gone);
+        std::fs::remove_dir(&gone).unwrap();
+        assert_eq!(p.expand_glob("**/*.nope").unwrap_err().body.code, "path_outside_data_dir");
+        assert_eq!(p.expand_glob("**/").unwrap_err().body.code, "path_outside_data_dir");
+        let _ = std::fs::remove_dir(data.join("dangling_escape"));
+
+        // An absolute confined glob through a Windows junction ancestor of `data_dir` succeeds.
+        let alias_parent = root.join("alias_parent");
+        make_junction(&alias_parent, &data);
+        let abs_via_alias = format!("{}/sub/*.png", folo_api::json::path(&alias_parent));
+        assert_eq!(p.expand_glob(&abs_via_alias).unwrap().len(), 1);
+        let _ = std::fs::remove_dir(&alias_parent);
 
         // Root-relative Windows patterns are not silently treated as relative to `data_dir`.
         assert_eq!(p.expand_glob("/sub/*.png").unwrap_err().body.code, "path_outside_data_dir");

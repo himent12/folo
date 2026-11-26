@@ -129,8 +129,10 @@ impl Confinement {
             return r.clone();
         }
         let r = self.policy.check_files(files.iter().map(PathBuf::as_path)).map_err(|mut e| {
-            e.body.message =
-                format!("labeling job '{id}' has images outside the data dir: {}", e.body.message);
+            if e.body.code == "path_outside_data_dir" {
+                e.body.message =
+                    format!("labeling job '{id}' has images outside the data dir: {}", e.body.message);
+            }
             e
         });
         if r.as_ref().err().is_none_or(|e| e.body.code == "path_outside_data_dir") {
