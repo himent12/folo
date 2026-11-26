@@ -75,7 +75,7 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
             u("K", 0) <= MAX_TOPK && u("K2", 0) <= MAX_TOPK && u("R", 0) <= MAX_REG_MAX
         }
         "max_pool2d" => super::pooling::maxpool_fits(spec),
-        "pool_idx" | "pool_bw_idx" => super::pool_grad::pool_tiled_fits(spec),
+        "pool" | "pool_idx" | "pool_bw_idx" => super::pool_grad::pool_tiled_fits(name, spec),
         "muon_gemm" => super::muon::gemm_fits(spec),
         // The multi-tensor kernels (`J` tensors) are only found through their resolvers, which bound `J`.
         _ => true,
@@ -229,7 +229,13 @@ mod tests {
             ("conv_split_finish", Spec::new().u32("S", 9)),
             ("max_pool2d", Spec::new().bool("TILED", true).u32("KH", 8).u32("KW", 5)),
             ("max_pool2d", Spec::new().bool("TILED", true).u32("KH", 1).u32("KW", 3)),
+            ("max_pool2d", Spec::new().bool("TILED", true).i32("KH", 5).u32("KW", 5)),
+            ("pool", Spec::new().bool("TILED", true).u32("MODE", 0).u32("KH", 5).u32("KW", 5)),
+            ("pool", Spec::new().bool("TILED", true).u32("MODE", 2).u32("KH", 5).u32("KW", 5)),
             ("pool_idx", Spec::new().u32("MODE", 0).bool("TILED", true).u32("KH", 8).u32("KW", 5)),
+            ("pool_idx", Spec::new().u32("MODE", 1).bool("TILED", true).u32("KH", 5).u32("KW", 5)),
+            ("pool_idx", Spec::new().u32("MODE", 0).bool("TILED", true).i32("KH", 5).u32("KW", 5)),
+            ("pool_bw_idx", Spec::new().u32("MODE", 0).bool("TILED", true).u32("KH", 3).u32("KW", 3)),
             ("pool_bw_idx", Spec::new().u32("MODE", 2).bool("TILED", true).u32("KH", 3).u32("KW", 3)),
             ("conv2d_depthwise", Spec::new().u32("KH", 65536).u32("KW", 65536)),
             ("conv2d_depthwise", Spec::new().u32("KH", 3).u32("KW", 3).u32("SW", 65536)),

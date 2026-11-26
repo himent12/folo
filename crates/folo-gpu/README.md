@@ -115,7 +115,7 @@ folo-vision assert that list is empty.
 
 ```text
 cargo test -p folo-gpu                        # every kernel and the backend against CPU references
-cargo bench -p folo-gpu --bench gemm          # also: conv, conv_model, elementwise, backend
+cargo bench -p folo-gpu --bench gemm          # also: conv, conv_model, elementwise, backend, pooling
 ```
 
 - The GPU tests ask for the shared context (`gpu!()`, or `dev!()` for the backend tests) and return early, printing a

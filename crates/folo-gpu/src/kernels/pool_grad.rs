@@ -12,9 +12,9 @@ use super::reduce::{self, ReduceOp};
 use super::{check_buf, prod};
 use crate::DType;
 use crate::context::GpuContext;
-use crate::error::{Result, shape_err};
+use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::gemm::check_dtype;
-use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
+use crate::pipeline::{Access, KernelDef, Params, Source, Spec, SpecVal};
 
 /// Pooling window: kernel, stride and padding per axis `(h, w)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -311,15 +311,20 @@ fn gen_adaptive_gap_bwd(spec: &Spec) -> String {
     }
 }
 
-/// Bounds check for precompiling `"pool_idx"` / `"pool_bw_idx"` from a kernel list (`kernels/bounds.rs`).
-pub(crate) fn pool_tiled_fits(spec: &Spec) -> bool {
+/// Bounds check for precompiling `"pool"`, `"pool_idx"`, and `"pool_bw_idx"` from a kernel list
+/// (`kernels/bounds.rs`).
+pub(crate) fn pool_tiled_fits(name: &str, spec: &Spec) -> bool {
     if !spec.get_bool("TILED") {
         return true;
     }
-    let mode = spec.get_u32("MODE", 0);
-    let kh = spec.get_u32("KH", 0) as usize;
-    let kw = spec.get_u32("KW", 0) as usize;
-    (mode == 0 || mode == 1) && (2..=TILED_MAX_K).contains(&kh) && (2..=TILED_MAX_K).contains(&kw)
+    let expected_mode = match name {
+        "pool_idx" => 0,
+        "pool_bw_idx" => 1,
+        _ => return false,
+    };
+    matches!(spec.get("MODE"), Some(SpecVal::U32(m)) if m == expected_mode)
+        && matches!(spec.get("KH"), Some(SpecVal::U32(k)) if (2..=TILED_MAX_K).contains(&(k as usize)))
+        && matches!(spec.get("KW"), Some(SpecVal::U32(k)) if (2..=TILED_MAX_K).contains(&(k as usize)))
 }
 
 /// Spec: MODE (0 max forward, 1 max backward, 2 avg forward, 3 avg backward, 4 adaptive forward, 5 adaptive
@@ -328,11 +333,11 @@ pub(crate) fn pool_tiled_fits(spec: &Spec) -> bool {
 fn gen_pool(spec: &Spec) -> String {
     let mode = spec.get_u32("MODE", 0);
     if spec.get_bool("TILED") {
-        return match mode {
-            0 => POOL_IDX_TILED_SRC.into(),
-            1 => POOL_BW_IDX_TILED_SRC.into(),
-            _ => unreachable!("TILED is only set for MODE 0 and 1"),
-        };
+        match mode {
+            0 => return POOL_IDX_TILED_SRC.into(),
+            1 => return POOL_BW_IDX_TILED_SRC.into(),
+            _ => {}
+        }
     }
     let mut s = String::new();
     match mode {
@@ -575,13 +580,16 @@ pub fn max_pool2d_indices(
     if n == 0 {
         return Ok((oh, ow));
     }
+    if in_elems > u32::MAX as usize || n > i32::MAX as usize {
+        return Err(GpuError::Limit("max_pool2d: tensor exceeds u32 indexing".into()));
+    }
+    if h.checked_mul(w).is_none_or(|hw| hw > i32::MAX as usize) {
+        return Err(GpuError::Limit("max_pool2d: plane size exceeds i32 indexing".into()));
+    }
     let half = dtype == DType::F16;
     if win.stride == (1, 1)
         && (2..=TILED_MAX_K).contains(&win.kernel.0)
         && (2..=TILED_MAX_K).contains(&win.kernel.1)
-        && in_elems <= u32::MAX as usize
-        && n <= u32::MAX as usize
-        && h.checked_mul(w).is_some_and(|hw| hw <= i32::MAX as usize)
         && h <= i32::MAX as usize - 64
         && w <= i32::MAX as usize - 64
         && let Some((total_tiles, tiles_x, tiles_y, grid)) = tile_grid_16(ctx, planes, oh, ow)
@@ -633,13 +641,16 @@ pub fn max_pool2d_backward(
     if total == 0 {
         return Ok(());
     }
+    if total > u32::MAX as usize || n > i32::MAX as usize {
+        return Err(GpuError::Limit("max_pool2d_backward: tensor exceeds u32 indexing".into()));
+    }
+    if h.checked_mul(w).is_none_or(|hw| hw > i32::MAX as usize) {
+        return Err(GpuError::Limit("max_pool2d_backward: plane size exceeds i32 indexing".into()));
+    }
     let half = dtype == DType::F16;
     if win.stride == (1, 1)
         && (2..=TILED_MAX_K).contains(&win.kernel.0)
         && (2..=TILED_MAX_K).contains(&win.kernel.1)
-        && total <= u32::MAX as usize
-        && n <= u32::MAX as usize
-        && h.checked_mul(w).is_some_and(|hw| hw <= i32::MAX as usize)
         && h <= i32::MAX as usize - 64
         && w <= i32::MAX as usize - 64
         && let Some((total_tiles, tiles_x, tiles_y, grid)) = tile_grid_16(ctx, planes, h, w)

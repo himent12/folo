@@ -5,7 +5,7 @@ use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::gemm::check_dtype;
-use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
+use crate::pipeline::{Access, KernelDef, Params, Source, Spec, SpecVal};
 
 /// Window geometry shared by pooling and convolution: kernel, stride, padding and dilation per axis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,7 +97,7 @@ var<workgroup> sh_h: array<f32, H_N>;
 
 fn isnan1(v: f32) -> bool { return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u; }
 fn max_nan(a: f32, b: f32) -> f32 {
-    return select(select(max(a, b), b, isnan1(b)), a, isnan1(a));
+    return select(select(select(a, b, b > a), b, isnan1(b)), a, isnan1(a));
 }
 
 @compute @workgroup_size(16, 16)
@@ -168,9 +168,8 @@ pub(crate) fn maxpool_fits(spec: &Spec) -> bool {
     if !spec.get_bool("TILED") {
         return true;
     }
-    let kh = spec.get_u32("KH", 0) as usize;
-    let kw = spec.get_u32("KW", 0) as usize;
-    (2..=TILED_MAX_K).contains(&kh) && (2..=TILED_MAX_K).contains(&kw)
+    matches!(spec.get("KH"), Some(SpecVal::U32(k)) if (2..=TILED_MAX_K).contains(&(k as usize)))
+        && matches!(spec.get("KW"), Some(SpecVal::U32(k)) if (2..=TILED_MAX_K).contains(&(k as usize)))
 }
 
 static MAXPOOL: KernelDef = KernelDef {

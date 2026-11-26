@@ -43,9 +43,10 @@ fn main() {
     println!("adapter: {}", ctx.summary());
     let has_f16 = ctx.caps().shader_f16;
     let max_elems = 16 * 128 * 160 * 160; // 52.4M elems
+    let max_idx_elems = 16 * 128 * 80 * 80; // 13.1M elems (100 MiB for i64 indices)
     let a = ctx.alloc(DType::F32.bytes(max_elems)).unwrap();
     let b = ctx.alloc(DType::F32.bytes(max_elems)).unwrap();
-    let idx = ctx.alloc(DType::F32.bytes(max_elems * 2)).unwrap();
+    let idx = ctx.alloc(DType::F32.bytes(max_idx_elems * 2)).unwrap();
     ctx.clear(a.raw(), a.size());
     ctx.clear(b.raw(), b.size());
     ctx.clear(idx.raw(), idx.size());

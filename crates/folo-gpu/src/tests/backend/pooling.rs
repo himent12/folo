@@ -299,6 +299,7 @@ fn tiled_max_pool_vec4_2x2_and_gap_fast_paths() {
         ([2, 2, 17, 19], Pool2dParams { kernel: [3, 3], stride: [1, 1], padding: [1, 1] }),
         ([1, 2, 18, 21], Pool2dParams { kernel: [7, 3], stride: [1, 1], padding: [3, 1] }),
         ([1, 2, 1, 1], Pool2dParams { kernel: [5, 5], stride: [1, 1], padding: [2, 2] }),
+        ([1, 2, 17, 18], Pool2dParams { kernel: [2, 2], stride: [1, 1], padding: [1, 1] }), // 2*p == k
     ] {
         let x = randn(&shape, 90 + shape[2] as u64);
         check(
@@ -309,6 +310,43 @@ fn tiled_max_pool_vec4_2x2_and_gap_fast_paths() {
             &format!("tiled max_pool {shape:?} {p:?}"),
             move |v| v[0].max_pool2d_with(&p),
         );
+    }
+
+    // Multi-tile F16 tiled stride-1 max_pool2d fwd + bwd parity (crossing 16x16 tile edges).
+    if has_f16 {
+        let sppf = Pool2dParams { kernel: [5, 5], stride: [1, 1], padding: [2, 2] };
+        let xf = randn(&[2, 3, 20, 20], 95).to_dtype(DType::F16).unwrap();
+        let x_cpu = xf.to_dtype(DType::F32).unwrap().detach().requires_grad_();
+        let y_cpu = x_cpu.max_pool2d_with(&sppf).unwrap();
+        let gy = randn(y_cpu.dims(), 96).to_dtype(DType::F16).unwrap();
+        let gx_cpu =
+            y_cpu.backward_with(&gy.to_dtype(DType::F32).unwrap()).unwrap().get(&x_cpu).unwrap().clone();
+        let x_gpu = xf.to_device(dev).unwrap().detach().requires_grad_();
+        let y_gpu = x_gpu.max_pool2d_with(&sppf).unwrap();
+        assert_eq!(y_gpu.dtype(), DType::F16);
+        assert_close_t(&y_gpu.to_dtype(DType::F32).unwrap(), &y_cpu, 0.0, 0.0, "tiled f16 max_pool fwd");
+        let gx_gpu = y_gpu.backward_with(&gy.to_device(dev).unwrap()).unwrap().get(&x_gpu).unwrap().clone();
+        assert_eq!(gx_gpu.dtype(), DType::F16);
+        assert_close_t(&gx_gpu.to_dtype(DType::F32).unwrap(), &gx_cpu, 2e-3, 2e-3, "tiled f16 max_pool bwd");
+    }
+
+    // Bitwise signed-zero preservation on the tiled stride-1 value-only path:
+    // -0.0 surrounded by -inf stays -0.0, and mixed (-0.0, +0.0) / (+0.0, -0.0) ties retain the first operand.
+    {
+        let _g = folo_core::no_grad();
+        let ninf = f32::NEG_INFINITY;
+        let z_ninf =
+            Tensor::from_slice(&[ninf, ninf, ninf, ninf, -0.0, ninf, ninf, ninf, ninf], [1, 1, 3, 3])
+                .unwrap();
+        let got = z_ninf.to_device(dev).unwrap().max_pool2d(3, 1, 1).unwrap();
+        let want = z_ninf.max_pool2d(3, 1, 1).unwrap();
+        super::fixtures::assert_same(&got, &want, "tiled stride-1 max_pool_values -0.0 vs -inf bits");
+
+        let z_ties =
+            Tensor::from_slice(&[-0.0f32, 0.0, 0.0, -0.0, 0.0, -0.0, -0.0, 0.0], [1, 2, 2, 2]).unwrap();
+        let got_t = z_ties.to_device(dev).unwrap().max_pool2d(2, 1, 0).unwrap();
+        let want_t = z_ties.max_pool2d(2, 1, 0).unwrap();
+        super::fixtures::assert_same(&got_t, &want_t, "tiled stride-1 max_pool_values signed-zero ties bits");
     }
 
     // Exact tie-breaking and first-NaN preservation across tile boundary (row 15..16, col 15..16).
@@ -437,6 +475,38 @@ fn tiled_max_pool_vec4_2x2_and_gap_fast_paths() {
     let _ =
         backend.adaptive_avg_pool2d_backward(View::new(&b_gap, &Layout::contiguous(s_gap)), &s_even).unwrap();
     assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["adaptive_gap_bwd"]);
+
+    // Tiled 16x16 stride-1 max_pool2d (values-only, indexed fwd, and bwd) on [1, 4, 20, 20]:
+    // 4 planes * 2x2 tiles = 16 workgroups (vs 7 for scalar 1-D launch).
+    let s_sppf = Shape::new(&[1, 4, 20, 20]);
+    let b_sppf = backend.full(dev, DType::F32, s_sppf.numel(), 1.0).unwrap();
+    let sppf_p = Pool2dParams { kernel: [5, 5], stride: [1, 1], padding: [2, 2] };
+    fresh.trace_begin();
+    let _ =
+        backend.max_pool2d_values(View::new(&b_sppf, &Layout::contiguous(s_sppf.clone())), &sppf_p).unwrap();
+    let tr = fresh.trace_end();
+    assert_eq!(tr.len(), 1);
+    assert_eq!((tr[0].name, tr[0].groups), ("max_pool2d", [16, 1, 1]));
+
+    fresh.trace_begin();
+    let (b_mv, b_mi) =
+        backend.max_pool2d(View::new(&b_sppf, &Layout::contiguous(s_sppf.clone())), &sppf_p).unwrap();
+    let tr = fresh.trace_end();
+    assert_eq!(tr.len(), 1);
+    assert_eq!((tr[0].name, tr[0].groups), ("pool_idx", [16, 1, 1]));
+
+    fresh.trace_begin();
+    let _ = backend
+        .max_pool2d_backward(
+            View::new(&b_mv, &Layout::contiguous(s_sppf.clone())),
+            View::new(&b_mi, &Layout::contiguous(s_sppf.clone())),
+            &s_sppf,
+            &sppf_p,
+        )
+        .unwrap();
+    let tr = fresh.trace_end();
+    assert_eq!(tr.len(), 1);
+    assert_eq!((tr[0].name, tr[0].groups), ("pool_bw_idx", [16, 1, 1]));
 
     // Every new kernel is registered in `DEFS` for precompile.
     assert!(
