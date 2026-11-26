@@ -5,6 +5,8 @@
 //!   guard for non-finite batches.
 //! - `conv_bn_act.rs`: [`ConvBnAct`] (docs/MODEL.md's `Conv`) and [`fuse_conv_bn`].
 //! - `simple.rs`: [`Linear`], [`Activation`], [`MaxPool2d`], [`Upsample`], [`Concat`] and [`Identity`].
+//! - `glu.rs`: [`GatedFfn`] (`SwiGLU` / `GeGLU`), [`GluKind`], [`swiglu`], [`geglu`], and [`gelu_tanh`].
+//! - `rmsnorm.rs`: [`RmsNorm`] (Root Mean Square Layer Normalization).
 //! - `regularize.rs`: [`DropPath`] (stochastic depth) and [`LayerScale`] (per-channel residual scaling).
 //! - `spectral_norm.rs`: [`SpectralNorm`], [`power_iteration`], [`spectral_norm`], and [`spectral_normalize`].
 //! - `container.rs`: [`Sequential`] and [`ModuleList`].
@@ -13,7 +15,9 @@ mod batchnorm;
 mod container;
 mod conv;
 mod conv_bn_act;
+mod glu;
 mod regularize;
+mod rmsnorm;
 mod simple;
 mod spectral_norm;
 
@@ -21,7 +25,9 @@ pub use batchnorm::{BN_EPS, BN_MOMENTUM, BatchNorm2d, RunningStats};
 pub use container::{ModuleList, Sequential};
 pub use conv::{Conv2d, Conv2dConfig};
 pub use conv_bn_act::{ConvBnAct, fuse_conv_bn};
+pub use glu::{GatedFfn, GluKind, geglu, gelu_tanh, swiglu};
 pub use regularize::{ChannelLayout, DropPath, LAYERSCALE_DEFAULT_INIT, LayerScale};
+pub use rmsnorm::{RMSNORM_DEFAULT_EPS, RmsNorm};
 pub use simple::{Activation, Concat, Identity, Linear, MaxPool2d, Upsample};
 pub use spectral_norm::{
     PowerIterationResult, SPECTRAL_NORM_EPS, SpectralNorm, SpectralNormTarget, power_iteration,
