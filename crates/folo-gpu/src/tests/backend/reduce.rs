@@ -502,3 +502,131 @@ fn arg_reduce_rows_vec4_split_k_and_nan_ties_match_cpu() {
     }
     assert!(fresh.kernels_without_registry().is_empty());
 }
+
+#[test]
+fn reduce_var_fused_paths_and_edges_match_cpu() {
+    use super::fixtures::assert_close_t;
+    use folo_core::backend::{Backend, View};
+    use folo_core::{DType, Layout, Shape};
+
+    struct ForceGuard(bool);
+    impl ForceGuard {
+        fn set(v: bool) -> Self {
+            Self(crate::kernels::FORCE_NO_SUBGROUPS.replace(v))
+        }
+    }
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            crate::kernels::FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
+
+    let dev = dev!();
+    // Covers: cached rows (vec4 + scalar), uncached rows (single-wg & split-K vec4/scalar),
+    // small-r columns (vec4 + scalar), general (64,4) columns (vec4 + scalar), and odd/non-pow2 tails.
+    let cases: &[(&[usize], usize, &str)] = &[
+        (&[3, 4], 1, "row cached vec4 d=4"),
+        (&[4, 17], 1, "row cached scalar d=17"),
+        (&[3, 1024], 1, "row cached vec4 d=1024"),
+        (&[2, 1025], 1, "row uncached scalar d=1025"),
+        (&[2, 4100], 1, "row uncached vec4 d=4100"),
+        (&[1, 8192], 1, "row split-k vec4 d=8192"),
+        (&[2, 10007], 1, "row split-k scalar d=10007"),
+        (&[2, 5, 16], 1, "col small vec4 r=5"),
+        (&[2, 16, 12], 1, "col small vec4 r=16"),
+        (&[2, 17, 7], 1, "col small scalar r=17"),
+        (&[2, 33, 12], 1, "col general vec4 r=33"),
+        (&[2, 48, 17], 1, "col general scalar r=48"),
+    ];
+    for (i, &(shape, dim, label)) in cases.iter().enumerate() {
+        let x = randn(shape, 700 + i as u64);
+        let tol = if shape[dim] > 4000 { 1e-3 } else { 2e-4 };
+        for unbiased in [false, true] {
+            for portable in [false, true] {
+                let _fg = ForceGuard::set(portable);
+                check(
+                    dev,
+                    std::slice::from_ref(&x),
+                    tol,
+                    2e-4,
+                    &format!("var {label} unbiased={unbiased} fb={portable}"),
+                    move |v| v[0].var(dim, unbiased, false),
+                );
+            }
+        }
+    }
+
+    // Edge cases: denom == 0 (r=1, unbiased=true -> NaN), NaN / ±Inf propagation across cached, split-K, and cols.
+    let single = Tensor::from_slice(&[3.5f32, -2.0, 0.0], [3, 1]).unwrap();
+    assert_close_t(
+        &single.to_device(dev).unwrap().var(1, true, false).unwrap(),
+        &single.var(1, true, false).unwrap(),
+        0.0,
+        0.0,
+        "var r=1 unbiased NaN",
+    );
+    assert_close_t(
+        &single.to_device(dev).unwrap().var(1, false, false).unwrap(),
+        &single.var(1, false, false).unwrap(),
+        0.0,
+        0.0,
+        "var r=1 biased 0",
+    );
+    let mut sp = vec![1.0f32; 4 * 9000];
+    sp[17] = f32::NAN;
+    sp[9000 + 42] = f32::INFINITY;
+    sp[2 * 9000 + 8999] = f32::NEG_INFINITY;
+    sp[3 * 9000 + 1] = 2.0;
+    let special = Tensor::from_vec(sp, [4, 9000]).unwrap();
+    for portable in [false, true] {
+        let _fg = ForceGuard::set(portable);
+        assert_close_t(
+            &special.to_device(dev).unwrap().var(1, true, false).unwrap(),
+            &special.var(1, true, false).unwrap(),
+            1e-5,
+            1e-5,
+            &format!("var split-k special fb={portable}"),
+        );
+    }
+
+    // Split-K large-offset precision: repeating `[a - 0.125, a, a, a + 0.125]` at `a = 1_572_864` (where pair
+    // means round to `a` without a common row origin) and `1e5 + randn` on 9,000-element rows.
+    let a = 1_572_864.0f32;
+    let pat = [a - 0.125, a, a, a + 0.125];
+    let shifted_pat = Tensor::from_vec(pat.into_iter().cycle().take(8192).collect(), [1, 8192]).unwrap();
+    let shifted_rand = randn(&[2, 9000], 799).add_scalar(1e5).unwrap();
+    for portable in [false, true] {
+        let _fg = ForceGuard::set(portable);
+        let got_pat =
+            shifted_pat.to_device(dev).unwrap().var(1, false, false).unwrap().to_vec::<f32>().unwrap();
+        assert!(
+            (got_pat[0] - 0.0078125).abs() < 1e-6,
+            "split-k anchored variance fb={portable}: got {}, want 0.0078125",
+            got_pat[0]
+        );
+        assert_close_t(
+            &shifted_rand.to_device(dev).unwrap().var(1, true, false).unwrap(),
+            &shifted_rand.var(1, true, false).unwrap(),
+            2e-3,
+            2e-3,
+            &format!("var split-k 1e5 offset fb={portable}"),
+        );
+    }
+
+    // Dispatch trace check: fused single-dispatch row/col variance (and 2-dispatch split-K) instead of 5-op composite.
+    let fresh = crate::GpuContext::new().unwrap();
+    let backend = crate::GpuBackend::new(fresh.clone(), dev);
+    for (dims, dim, expect) in [
+        (vec![4usize, 256], 1usize, vec!["reduce_var_rows"]),
+        (vec![1, 16384], 1, vec!["reduce_var_rows", "reduce_var_rows"]),
+        (vec![2, 16, 12], 1, vec!["reduce_var_cols"]),
+        (vec![2, 48, 12], 1, vec!["reduce_var_cols"]),
+    ] {
+        let s = Shape::new(&dims);
+        let b = backend.full(dev, DType::F32, s.numel(), 1.0).unwrap();
+        fresh.trace_begin();
+        let _ = backend.reduce_var(View::new(&b, &Layout::contiguous(s)), dim, true).unwrap();
+        assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), expect);
+    }
+    assert!(fresh.kernels_without_registry().is_empty());
+}

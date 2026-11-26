@@ -14,6 +14,7 @@ mod coop_conv;
 mod elementwise;
 mod f16;
 mod gemm;
+mod group_norm_sdpa;
 mod layout;
 mod muon;
 mod pipeline_cache;

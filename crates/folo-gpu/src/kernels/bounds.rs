@@ -78,6 +78,8 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
         "pool" | "pool_idx" | "pool_bw_idx" => super::pool_grad::pool_tiled_fits(name, spec),
         "bn_fused_fwd" | "bn_fused_bwd" => super::norm::fused_fits(spec),
         "arg_reduce_rows" => spec.get_u32("MODE", 0) <= 2,
+        "reduce_var_rows" => super::reduce::var_rows_fits(spec),
+        "sdpa_fwd" => super::attention::sdpa_fits(spec),
         "muon_gemm" => super::muon::gemm_fits(spec),
         // The multi-tensor kernels (`J` tensors) are only found through their resolvers, which bound `J`.
         _ => true,
@@ -176,6 +178,18 @@ mod tests {
                 "arg_reduce_rows",
                 Spec::new().bool("MAX", true).u32("MODE", 1).bool("VEC4", true).subgroups(true),
             ),
+            ("reduce_var_rows", Spec::new().u32("MODE", 1).bool("VEC4", true).subgroups(true)),
+            ("reduce_var_cols", Spec::new().bool("VEC4", true).bool("SMALL", true)),
+            (
+                "sdpa_fwd",
+                Spec::new().bool("CAUSAL", true).bool("CACHE_Q", true).u32("D_CHUNKS", 2).subgroups(true),
+            ),
+            (
+                "group_norm_fwd",
+                Spec::new().bool("HAS_W", true).bool("HAS_B", true).bool("VEC4", true).bool("CACHE", true),
+            ),
+            ("gather_vec4", Spec::new().bool("IDX64", true)),
+            ("index_add_vec4", Spec::new().bool("IDX64", false)),
             ("max_pool2d", Spec::new().bool("S2_VEC4", true).f16(true)),
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 99).u32("KW", 99).u32("MODE", 0)),
             ("upsample_2x_vec4", Spec::new().f16(true)),
@@ -343,6 +357,9 @@ mod tests {
             ("bn_fused_fwd", Spec::new().u32("REGS", 16)),
             ("bn_fused_bwd", Spec::new().u32("REGS", 0)),
             ("arg_reduce_rows", Spec::new().u32("MODE", 3)),
+            ("reduce_var_rows", Spec::new().u32("MODE", 3)),
+            ("sdpa_fwd", Spec::new().u32("D_CHUNKS", 0)),
+            ("sdpa_fwd", Spec::new().u32("D_CHUNKS", 5)),
             ("gemm", Spec::new().u32("BM", 65536)),
             ("gemm", Spec::new().u32("TM", 0)),
             (
