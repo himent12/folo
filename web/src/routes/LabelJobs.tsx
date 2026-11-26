@@ -88,9 +88,13 @@ export default function LabelJobs() {
   });
   effect(() => {
     const r = router.route;
-    if (r.name !== 'label-jobs' || norm(r.query) === written) return;
-    const st = readState(r.query);
-    written = norm(r.query);
+    const loc = router.location;
+    if (r.name !== 'label-jobs' || loc.name !== 'label-jobs') return;
+    const urlState = norm(loc.query);
+    const cur = writeState({ filter: filter.peek(), q: query.peek() });
+    if (urlState === written && urlState === cur) return;
+    const st = readState(loc.query);
+    written = urlState;
     filter.set(st.filter);
     query.set(st.q);
   });

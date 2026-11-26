@@ -132,9 +132,13 @@ export default function Benchmarks() {
   });
   effect(() => {
     const r = router.route;
-    if (r.name !== 'benchmarks' || norm(r.query) === written) return;
-    const st = readState(r.query);
-    written = norm(r.query);
+    const loc = router.location;
+    if (r.name !== 'benchmarks' || loc.name !== 'benchmarks') return;
+    const urlState = norm(loc.query);
+    const cur = writeState({ filter: filter.peek(), sort: sortKey.peek(), dir: sortDir.peek(), q: query.peek() });
+    if (urlState === written && urlState === cur) return;
+    const st = readState(loc.query);
+    written = urlState;
     filter.set(st.filter);
     sortKey.set(st.sort);
     sortDir.set(st.dir);

@@ -96,38 +96,50 @@ describe('fw runtime sprint 14 hardening', () => {
   });
 
   it('handles detached or moved insert markers in appendNodes and cleanChildren without throwing NotFoundError', () => {
+    // 1. appendNodes: initial array insert with a marker already detached from `parent` (threw NotFoundError previously).
+    const hostAppend = document.createElement('div');
+    const detachedMarker = document.createComment('detached');
+    const first = document.createElement('span');
+    first.textContent = 'appended';
+    const stopAppend = createRoot((dispose) => {
+      insert(hostAppend, () => [first], detachedMarker);
+      return dispose;
+    });
+    expect(() => flush()).not.toThrow();
+    expect(hostAppend.querySelector('span')?.textContent).toBe('appended');
+    stopAppend();
+
+    // 2. cleanChildren: replacing a region after both the prior node was removed and `marker` was reparented elsewhere.
     const hostA = document.createElement('div');
     const hostB = document.createElement('div');
     const marker = document.createComment('end');
     hostA.appendChild(marker);
 
-    const items = signal<Node[] | null>([document.createElement('span')]);
+    const val = signal<Node | string | null>(document.createElement('span'));
     const stop = createRoot((dispose) => {
-      insert(hostA, () => items.get(), marker);
+      insert(hostA, () => val.get(), marker);
       return dispose;
     });
     flush();
-    expect(hostA.querySelectorAll('span')).toHaveLength(1);
+    const initialSpan = hostA.querySelector('span')!;
+    expect(initialSpan).toBeTruthy();
 
-    // Move the rendered node into another parent (leaving `marker` in `hostA`).
-    const moved = hostA.querySelector('span')!;
-    hostB.appendChild(moved);
+    // Externally detach the rendered node AND move `marker` to `hostB` so `cleanChildren` takes its `insertBefore(node, ref)` path.
+    initialSpan.remove();
+    hostB.appendChild(marker);
 
-    // Clearing the insert must not throw NotFoundError even though `marker.parentNode !== hostB`.
     expect(() => {
-      items.set(null);
+      val.set('replacement');
       flush();
     }).not.toThrow();
+    expect(hostA.textContent).toBe('replacement');
 
-    // Appending new nodes after detaching `marker` externally must also succeed cleanly.
+    // Also verify null cleanup when `marker` is detached.
     marker.remove();
-    const nextEl = document.createElement('em');
-    nextEl.textContent = 'ok';
     expect(() => {
-      items.set([nextEl]);
+      val.set(null);
       flush();
     }).not.toThrow();
-    expect(hostB.querySelector('em')?.textContent).toBe('ok');
 
     stop();
   });

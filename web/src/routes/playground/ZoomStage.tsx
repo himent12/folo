@@ -128,14 +128,46 @@ export default function ZoomStage(props: ZoomStageProps) {
     }, CLIP_FALLBACK_MS);
   }
 
-  function cancelDrag() {
-    if (!drag) return;
-    const captured = drag.captured;
-    const id = drag.id;
+  let canceledPointerId: number | null = null;
+  let cancelUpCleanup: (() => void) | null = null;
+
+  function clearCanceledPointer() {
+    canceledPointerId = null;
+    cancelUpCleanup?.();
+    cancelUpCleanup = null;
+  }
+
+  function armClickSuppress() {
+    clearSuppress();
+    suppressClick = true;
+    suppressTimer = setTimeout(clearSuppress, 0);
+  }
+
+  function cancelDrag(suppressNextUp = false) {
+    if (!drag) {
+      if (!suppressNextUp) clearCanceledPointer();
+      return;
+    }
+    const { captured, id, moved } = drag;
     drag = null;
     detachWindowDrag();
     panning.set(false);
     if (captured) releaseDragCapture(id);
+    clearCanceledPointer();
+    if (suppressNextUp && moved) {
+      canceledPointerId = id;
+      const onUp = (e: PointerEvent) => {
+        if (e.pointerId !== canceledPointerId) return;
+        clearCanceledPointer();
+        if (e.type === 'pointerup') armClickSuppress();
+      };
+      window.addEventListener('pointerup', onUp, { capture: true });
+      window.addEventListener('pointercancel', onUp, { capture: true });
+      cancelUpCleanup = () => {
+        window.removeEventListener('pointerup', onUp, { capture: true });
+        window.removeEventListener('pointercancel', onUp, { capture: true });
+      };
+    }
   }
 
   let alive = true;
@@ -143,12 +175,12 @@ export default function ZoomStage(props: ZoomStageProps) {
     alive = false;
     clearSuppress();
     clearClipTimer();
-    cancelDrag();
+    cancelDrag(false);
   });
-  onWindow('blur', cancelDrag);
+  onWindow('blur', () => cancelDrag(false));
   const onEscapeCapture = (e: KeyboardEvent) => {
     if (e.key !== 'Escape' || !drag) return;
-    cancelDrag();
+    cancelDrag(true);
     e.preventDefault();
     e.stopPropagation();
   };
@@ -181,7 +213,7 @@ export default function ZoomStage(props: ZoomStageProps) {
   }
 
   function reset(eased = true) {
-    cancelDrag();
+    cancelDrag(true);
     const wasZoomed = z.peek() > 1.001;
     if (eased && wasZoomed) {
       armReturnClip();
@@ -197,7 +229,7 @@ export default function ZoomStage(props: ZoomStageProps) {
   }
 
   function zoomAt(factor: number, px?: number, py?: number, eased = true) {
-    cancelDrag();
+    cancelDrag(true);
     const { width, height } = stageSize();
     const scale = z.peek();
     const ax = px ?? width / 2;
@@ -256,6 +288,7 @@ export default function ZoomStage(props: ZoomStageProps) {
     lastResetKey = next;
     untrack(() => {
       clearSuppress();
+      clearCanceledPointer();
       reset(false);
     });
   });
@@ -296,14 +329,11 @@ export default function ZoomStage(props: ZoomStageProps) {
     detachWindowDrag();
     panning.set(false);
     if (captured) releaseDragCapture(e.pointerId);
-    if (moved) {
-      clearSuppress();
-      suppressClick = true;
-      suppressTimer = setTimeout(clearSuppress, 0);
-    }
+    if (moved) armClickSuppress();
   }
 
   function onpointerdown(e: PointerEvent) {
+    clearCanceledPointer();
     if (drag || e.button !== 0 || z.peek() <= 1.001) return;
     if (e.target instanceof Element && e.target.closest('.zoom-hud, button, a')) return;
     const { width, height } = stageSize();

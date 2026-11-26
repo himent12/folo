@@ -124,7 +124,7 @@ export class LiveBench {
       if (!benchId) {
         this.#viewSeq++;
         this.#heard.clear();
-        this.#loaded = 0;
+        this.#loaded = ++this.#seq;
         untrack(() => {
           this.bench = undefined;
           this.entries = [];
@@ -143,7 +143,7 @@ export class LiveBench {
       void this.#retry.get();
       this.#viewSeq++;
       this.#heard.clear();
-      this.#loaded = 0;
+      this.#loaded = ++this.#seq;
       const api = hub.api;
       let closed = false;
       const view = new AbortController();
@@ -202,6 +202,9 @@ export class LiveBench {
       const gone = (e: unknown): boolean => {
         if (closed || !(e instanceof ApiError && e.status === 404)) return false;
         closed = true;
+        this.#viewSeq++;
+        this.#heard.clear();
+        this.#loaded = ++this.#seq;
         view.abort();
         clearTimeout(lostTimer);
         lostTimer = undefined;

@@ -14,6 +14,7 @@ import { MockApi } from '$lib/api/mock';
 import type { Bench, BenchEntry } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import CommandPalette from '$lib/shell/CommandPalette';
+import { buildPaletteItems } from '$lib/shell/commandPalette/providers';
 import { forgetRows, rowNav } from '$lib/ui/rowNav';
 import Benchmarks from './Benchmarks';
 import LabelJobs from './LabelJobs';
@@ -129,10 +130,17 @@ describe('Live* stores reset stale state when id becomes null and guard view swi
     flush();
     await vi.waitFor(() => expect(live.bench?.id).toBe('bn_1'));
 
-    // Start an act() on bn_1, then switch to bn_2 and back to bn_1 before it settles.
+    // Start an act() and capture a pre-switch mark() on bn_1, then switch to bn_2 and back to bn_1 before they settle.
     let resolveStale!: (b: Bench) => void;
     const staleAct = live.act(() => new Promise<Bench>((r) => (resolveStale = r)));
+    const staleMark = live.mark();
     handlers.entry?.(mkEntry('shared_e', 'stopped'));
+
+    id.set(null);
+    flush();
+    // A late mutation using a mark captured before null-id transition must NOT repopulate the cleared store.
+    live.putEntry(mkEntry('stale_after_null', 'queued'), staleMark);
+    expect(live.entries).toEqual([]);
 
     id.set('bn_2');
     flush();
@@ -141,10 +149,12 @@ describe('Live* stores reset stale state when id becomes null and guard view swi
     flush();
     await vi.waitFor(() => expect(live.bench?.id).toBe('bn_1'));
 
-    // Stale act() from the earlier bn_1 view must NOT overwrite the reloaded bn_1.
+    // Stale act() and stale pre-switch mark() from the earlier bn_1 view must NOT overwrite the reloaded bn_1.
     resolveStale(mkBench('bn_1', 'stale-overwrite'));
     await staleAct;
     expect(live.bench?.name).toBe('name-bn_1');
+    live.putEntry(mkEntry('stale_after_switch', 'queued'), staleMark);
+    expect(live.entries).toEqual([]);
 
     // #heard from the previous view was cleared, so a new action mark on `shared_e` applies cleanly.
     const mark = live.mark();
@@ -219,14 +229,107 @@ describe('Benchmarks and LabelJobs URL query-param state sync', () => {
       view.unmount();
     }
   });
+
+  it('palette New benchmark / New labeling job preserve existing list query params on same route', () => {
+    const items = buildPaletteItems({
+      pageCommands: [],
+      runs: [],
+      datasets: [],
+      models: [],
+      benches: [],
+      benchesOk: true,
+      labelJobs: [],
+      loops: [],
+      cloud: false,
+      lacksLabel: false,
+      touchOnly: false,
+      onshortcuts: () => {},
+    });
+    const benchNew = items.find((i) => i.id === 'bench-new')!;
+    const labelNew = items.find((i) => i.id === 'label-new')!;
+
+    history.replaceState(history.state, '', '#/benchmarks?source=dataset&q=coco&sort=leader&dir=desc');
+    router.route = parse('#/benchmarks?source=dataset&q=coco&sort=leader&dir=desc');
+    benchNew.run();
+    expect(router.location.name).toBe('benchmarks');
+    expect(router.location.query.get('new')).toBe('1');
+    expect(router.location.query.get('source')).toBe('dataset');
+    expect(router.location.query.get('q')).toBe('coco');
+    expect(router.location.query.get('sort')).toBe('leader');
+
+    history.replaceState(history.state, '', '#/datasets/label?status=active&q=bus');
+    router.route = parse('#/datasets/label?status=active&q=bus');
+    labelNew.run();
+    expect(router.location.name).toBe('label-jobs');
+    expect(router.location.query.get('new')).toBe('1');
+    expect(router.location.query.get('status')).toBe('active');
+    expect(router.location.query.get('q')).toBe('bus');
+  });
+
+  it('restores Benchmarks and LabelJobs filters to match the URL on Back after editing during a slow detail hold', async () => {
+    const releaseHold = router.holdWhile((to) => to.name === 'benchmark' || to.name === 'label-job');
+    try {
+      // Benchmarks: start at ?q=before, hold navigation to a detail route, edit search to `after`, then return to ?q=before.
+      history.replaceState(history.state, '', '#/benchmarks?q=before');
+      router.route = parse('#/benchmarks?q=before');
+      const bView = render(() => <Benchmarks />, target);
+      try {
+        flush();
+        const input = target.querySelector<HTMLInputElement>('input[type="search"]')!;
+        expect(input.value).toBe('before');
+
+        router.route = parse('#/benchmarks/bn_slow');
+        flush();
+        input.value = 'after';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        flush();
+        expect(input.value).toBe('after');
+
+        // Back arrives before the slow detail chunk finishes loading.
+        router.route = parse('#/benchmarks?q=before');
+        flush();
+        expect(input.value).toBe('before');
+      } finally {
+        bView.unmount();
+      }
+
+      // LabelJobs: same route-hold + edit + Back scenario.
+      history.replaceState(history.state, '', '#/datasets/label?q=before');
+      router.route = parse('#/datasets/label?q=before');
+      const lView = render(() => <LabelJobs />, target);
+      try {
+        flush();
+        const input = target.querySelector<HTMLInputElement>('input[type="search"]')!;
+        expect(input.value).toBe('before');
+
+        router.route = parse('#/datasets/label/lj_slow');
+        flush();
+        input.value = 'after';
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        flush();
+        expect(input.value).toBe('after');
+
+        router.route = parse('#/datasets/label?q=before');
+        flush();
+        expect(input.value).toBe('before');
+      } finally {
+        lView.unmount();
+      }
+    } finally {
+      releaseHold();
+    }
+  });
 });
 
 describe('ZoomStage drag cancellation and HUD keyboard focus recovery', () => {
-  it('cancels an active pan drag on window blur and Escape so panning never stays stuck, and preserves HUD focus at zoom boundaries', async () => {
+  it('cancels an active pan drag on window blur and Escape so panning never stays stuck, suppresses click on release, and preserves HUD focus at zoom boundaries', async () => {
+    const onBoxClick = vi.fn();
     const view = render(
       () => (
         <ZoomStage resetKey="img_1">
-          <div style="width: 200px; height: 200px">canvas</div>
+          <div class="det-box" style="width: 200px; height: 200px" onclick={onBoxClick}>
+            canvas
+          </div>
         </ZoomStage>
       ),
       target,
@@ -234,6 +337,7 @@ describe('ZoomStage drag cancellation and HUD keyboard focus recovery', () => {
     try {
       flush();
       const stage = target.querySelector<HTMLDivElement>('.zoom-stage')!;
+      const box = target.querySelector<HTMLDivElement>('.det-box')!;
       stage.getBoundingClientRect = () => ({ left: 0, top: 0, width: 400, height: 300, right: 400, bottom: 300, x: 0, y: 0, toJSON() {} });
       const zoomIn = target.querySelector<HTMLButtonElement>('button[aria-label="Zoom in"]')!;
       const zoomOut = target.querySelector<HTMLButtonElement>('button[aria-label="Zoom out"]')!;
@@ -244,7 +348,7 @@ describe('ZoomStage drag cancellation and HUD keyboard focus recovery', () => {
       expect(stage.classList.contains('zoomed')).toBe(true);
 
       // Start dragging past click slop, then blur window before pointerup.
-      stage.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
+      box.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 }));
       stage.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, buttons: 1, pointerId: 1, clientX: 130, clientY: 120 }));
       flush();
       expect(stage.classList.contains('panning')).toBe(true);
@@ -254,7 +358,7 @@ describe('ZoomStage drag cancellation and HUD keyboard focus recovery', () => {
       expect(stage.classList.contains('panning')).toBe(false);
 
       // A subsequent drag with a new pointerId works immediately (not blocked by stale `drag`).
-      stage.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 2, clientX: 100, clientY: 100 }));
+      box.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 2, clientX: 100, clientY: 100 }));
       stage.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, buttons: 1, pointerId: 2, clientX: 140, clientY: 120 }));
       flush();
       expect(stage.classList.contains('panning')).toBe(true);
@@ -268,11 +372,36 @@ describe('ZoomStage drag cancellation and HUD keyboard focus recovery', () => {
       expect(stage.classList.contains('panning')).toBe(false);
       expect(bubbled).not.toHaveBeenCalled();
 
+      // Releasing the mouse button over the detection box after Escape-canceled pan must NOT trigger a box click.
+      box.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerId: 2, clientX: 140, clientY: 120 }));
+      box.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      expect(onBoxClick).not.toHaveBeenCalled();
+
+      // Wheel zoom mid-drag also cancels pan and suppresses click on mouse release.
+      box.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 3, clientX: 100, clientY: 100 }));
+      stage.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, buttons: 1, pointerId: 3, clientX: 140, clientY: 120 }));
+      flush();
+      stage.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -100, clientX: 140, clientY: 120 }));
+      flush();
+      expect(stage.classList.contains('panning')).toBe(false);
+      box.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerId: 3, clientX: 140, clientY: 120 }));
+      box.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      expect(onBoxClick).not.toHaveBeenCalled();
+
+      // A normal click afterwards selects the detection box normally.
+      box.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerId: 4, clientX: 100, clientY: 100 }));
+      box.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, button: 0, pointerId: 4, clientX: 100, clientY: 100 }));
+      box.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      expect(onBoxClick).toHaveBeenCalledTimes(1);
+
       // Keyboard zoom-out back to Fit disables Zoom out and hands focus to Zoom in instead of dropping to body.
       zoomOut.focus();
       expect(document.activeElement).toBe(zoomOut);
-      zoomOut.click();
-      flush();
+      // Zoomed twice (button + wheel), click zoomOut until Fit.
+      while (!zoomOut.disabled) {
+        zoomOut.click();
+        flush();
+      }
       await Promise.resolve();
       flush();
       expect(zoomOut.disabled).toBe(true);

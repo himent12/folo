@@ -149,7 +149,7 @@ export class LiveLabelJob {
       if (!jobId) {
         this.#viewSeq++;
         this.#heard.clear();
-        this.#loaded = 0;
+        this.#loaded = ++this.#imageSeq;
         this.#cancelFrame();
         untrack(() => {
           this.job = undefined;
@@ -168,7 +168,7 @@ export class LiveLabelJob {
       void this.#retry.get();
       this.#viewSeq++;
       this.#heard.clear();
-      this.#loaded = 0;
+      this.#loaded = ++this.#imageSeq;
       const api = hub.api;
       let closed = false;
       const view = new AbortController();
@@ -246,6 +246,9 @@ export class LiveLabelJob {
       const gone = (e: unknown): boolean => {
         if (closed || !(e instanceof ApiError && e.status === 404)) return false;
         closed = true;
+        this.#viewSeq++;
+        this.#heard.clear();
+        this.#loaded = ++this.#imageSeq;
         view.abort();
         this.#cancelFrame();
         clearTimeout(lostTimer);
