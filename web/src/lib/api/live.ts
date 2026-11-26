@@ -274,11 +274,11 @@ export class LiveRun {
     const id = r?.id ?? this.#currentId;
     if (!id) return;
     if (!terminal) {
-      if (!r || this.#loading.peek() || this.#lost.peek() !== null) return;
-      if (ACTIVE.includes(r.status)) {
+      if (r && ACTIVE.includes(r.status)) {
         if (this.#endedId === id) this.#endedId = null;
         return;
       }
+      if (!r || this.#loading.peek() || this.#lost.peek() !== null) return;
       if (this.#endedId === id) return;
       this.#endedId = id;
       untrack(() => this.#onEnded?.(r, { status: r.status, error: r.error }));
@@ -576,8 +576,8 @@ export class LiveRun {
             const next = withLength({ ...this.#takePendingStep(this.run), status, error }, steps_per_epoch, epochs);
             // Only a waiting run has a place in the queue.
             this.run = status !== 'queued' && next.queue_position != null ? { ...next, queue_position: null } : next;
-          } else if (!ACTIVE.includes(status)) {
-            // Terminal SSE arrived before the initial `/run` + `/metrics` GETs finished: notify immediately.
+          } else {
+            // SSE status arrived before the initial `/run` + `/metrics` GETs finished: notify terminal immediately or clear `#endedId` on resume.
             this.#notifyEnded({ status, error });
           }
           // The trainer resolved the config by the time it reports `running` (docs/API.md): ask once for `resolved`.

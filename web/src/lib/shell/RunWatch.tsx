@@ -26,9 +26,11 @@ export default function RunWatch(): JSX.Element {
   });
   effect(() => {
     const next = runs.data;
+    const staleSince = runs.stale !== undefined ? runs.updated : null;
+    const seq = runs.committedSeq;
     untrack(() => {
       // None yet from the server in use (a reconnect drops the last one's): nothing to show for it either.
-      watched.runs = next;
+      watched.publish(next, staleSince, seq);
       if (!next) return;
       for (const e of runEnds(prev, next)) {
         const route = router.route;
@@ -38,9 +40,6 @@ export default function RunWatch(): JSX.Element {
       }
       prev = next;
     });
-  });
-  effect(() => {
-    watched.since = runs.stale !== undefined ? runs.updated : null;
   });
   return null;
 }

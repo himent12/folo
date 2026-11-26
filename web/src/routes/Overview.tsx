@@ -53,8 +53,8 @@ export default function Overview() {
   // Training card and Recent runs never say something the sidebar contradicts; this page's own list when the shell's
   // stopped refreshing. Reconciled with live SSE status transitions so the header summary, live slot, and Recent runs
   // reflect a finished or stopped run in the same frame as the stream.
-  const baseRunList = computed(() => (watched.runs && (watched.since === null || !runs.data) ? watched.runs : runs.data));
-  const runList = computed(() => effectiveRuns(baseRunList.get()));
+  const usingWatched = computed(() => !!(watched.runs && (watched.since === null || !runs.data)));
+  const runList = computed(() => effectiveRuns(usingWatched.get() ? watched.runs : runs.data, usingWatched.get() ? undefined : runs));
   const runsFailed = computed(() => !!runs.error && !runList.get());
 
   // The run training, or starting (./overview/slot): a run just started shows here at once, as it does in the sidebar.
