@@ -201,7 +201,7 @@ pub(crate) fn ln8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-fn tanh8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+pub(super) fn tanh8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let sign_bit = _mm256_set1_ps(-0.0);
     let ax = _mm256_andnot_ps(sign_bit, x);
@@ -228,7 +228,10 @@ fn tanh8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-fn tanh_bwd8(x: std::arch::x86_64::__m256, g: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+pub(super) fn tanh_bwd8(
+    x: std::arch::x86_64::__m256,
+    g: std::arch::x86_64::__m256,
+) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let ax = _mm256_andnot_ps(_mm256_set1_ps(-0.0), x);
     let t = _mm256_max_ps(_mm256_mul_ps(_mm256_set1_ps(-2.0), ax), _mm256_set1_ps(-104.0));

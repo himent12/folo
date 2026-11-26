@@ -393,7 +393,7 @@ mod wasm_simd {
         }
     }
 
-    /// Converts an RGBA row to planar `f32 * scale`, 4 pixels per iteration.
+    /// Converts an RGBA row to planar `f32 * scale`, 2×4-unrolled (8 pixels per iteration) + 4-pixel + tail.
     ///
     /// # Safety
     /// `src.len() == r.len() * 4` and `r.len() == g.len() == b.len()`.
@@ -405,33 +405,61 @@ mod wasm_simd {
         b: &mut [f32],
     ) {
         let n = r.len();
-        let chunks = n / 4;
         let zero = u8x16_splat(0);
         let vscale = f32x4_splat(scale);
         let sp = src.as_ptr();
         let rp = r.as_mut_ptr();
         let gp = g.as_mut_ptr();
         let bp = b.as_mut_ptr();
-        for i in 0..chunks {
-            // SAFETY: `i * 16 + 16 <= n * 4` and `(i * 4 + 4) <= n`.
+        let mut i = 0usize;
+        let vec8 = n / 8 * 8;
+        while i < vec8 {
+            // SAFETY: `(i + 8) * 4 <= n * 4` and `i + 8 <= n`.
             unsafe {
-                let v = v128_load(sp.add(i * 16) as *const v128);
+                let v0 = v128_load(sp.add(i * 4) as *const v128);
+                let v1 = v128_load(sp.add(i * 4 + 16) as *const v128);
+                let r0 =
+                    u8x16_shuffle::<0, 16, 16, 16, 4, 16, 16, 16, 8, 16, 16, 16, 12, 16, 16, 16>(v0, zero);
+                let g0 =
+                    u8x16_shuffle::<1, 16, 16, 16, 5, 16, 16, 16, 9, 16, 16, 16, 13, 16, 16, 16>(v0, zero);
+                let b0 =
+                    u8x16_shuffle::<2, 16, 16, 16, 6, 16, 16, 16, 10, 16, 16, 16, 14, 16, 16, 16>(v0, zero);
+                let r1 =
+                    u8x16_shuffle::<0, 16, 16, 16, 4, 16, 16, 16, 8, 16, 16, 16, 12, 16, 16, 16>(v1, zero);
+                let g1 =
+                    u8x16_shuffle::<1, 16, 16, 16, 5, 16, 16, 16, 9, 16, 16, 16, 13, 16, 16, 16>(v1, zero);
+                let b1 =
+                    u8x16_shuffle::<2, 16, 16, 16, 6, 16, 16, 16, 10, 16, 16, 16, 14, 16, 16, 16>(v1, zero);
+                v128_store(rp.add(i) as *mut v128, f32x4_mul(f32x4_convert_u32x4(r0), vscale));
+                v128_store(rp.add(i + 4) as *mut v128, f32x4_mul(f32x4_convert_u32x4(r1), vscale));
+                v128_store(gp.add(i) as *mut v128, f32x4_mul(f32x4_convert_u32x4(g0), vscale));
+                v128_store(gp.add(i + 4) as *mut v128, f32x4_mul(f32x4_convert_u32x4(g1), vscale));
+                v128_store(bp.add(i) as *mut v128, f32x4_mul(f32x4_convert_u32x4(b0), vscale));
+                v128_store(bp.add(i + 4) as *mut v128, f32x4_mul(f32x4_convert_u32x4(b1), vscale));
+            }
+            i += 8;
+        }
+        if i + 4 <= n {
+            // SAFETY: `(i + 4) * 4 <= n * 4` and `i + 4 <= n`.
+            unsafe {
+                let v = v128_load(sp.add(i * 4) as *const v128);
                 let ru =
                     u8x16_shuffle::<0, 16, 16, 16, 4, 16, 16, 16, 8, 16, 16, 16, 12, 16, 16, 16>(v, zero);
                 let gu =
                     u8x16_shuffle::<1, 16, 16, 16, 5, 16, 16, 16, 9, 16, 16, 16, 13, 16, 16, 16>(v, zero);
                 let bu =
                     u8x16_shuffle::<2, 16, 16, 16, 6, 16, 16, 16, 10, 16, 16, 16, 14, 16, 16, 16>(v, zero);
-                v128_store(rp.add(i * 4) as *mut v128, f32x4_mul(f32x4_convert_u32x4(ru), vscale));
-                v128_store(gp.add(i * 4) as *mut v128, f32x4_mul(f32x4_convert_u32x4(gu), vscale));
-                v128_store(bp.add(i * 4) as *mut v128, f32x4_mul(f32x4_convert_u32x4(bu), vscale));
+                v128_store(rp.add(i) as *mut v128, f32x4_mul(f32x4_convert_u32x4(ru), vscale));
+                v128_store(gp.add(i) as *mut v128, f32x4_mul(f32x4_convert_u32x4(gu), vscale));
+                v128_store(bp.add(i) as *mut v128, f32x4_mul(f32x4_convert_u32x4(bu), vscale));
             }
+            i += 4;
         }
-        for i in chunks * 4..n {
-            let q = i * 4;
-            r[i] = src[q] as f32 * scale;
-            g[i] = src[q + 1] as f32 * scale;
-            b[i] = src[q + 2] as f32 * scale;
+        for idx in i..n {
+            let q = idx * 4;
+            r[idx] = src[q] as f32 * scale;
+            g[idx] = src[q + 1] as f32 * scale;
+            b[idx] = src[q + 2] as f32 * scale;
         }
     }
 

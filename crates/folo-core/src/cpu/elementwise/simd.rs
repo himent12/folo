@@ -291,7 +291,7 @@ fn sigmoid8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-fn silu_op8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+pub(super) fn silu_op8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let e = exp_neg_abs8(x);
     let rec = recip_1_plus8(e);
@@ -319,7 +319,10 @@ fn sigmoid_bwd8(x: std::arch::x86_64::__m256, g: std::arch::x86_64::__m256) -> s
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-fn silu_bwd8(x: std::arch::x86_64::__m256, g: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+pub(super) fn silu_bwd8(
+    x: std::arch::x86_64::__m256,
+    g: std::arch::x86_64::__m256,
+) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let e = exp_neg_abs8(x);
     let rec = recip_1_plus8(e);

@@ -17,7 +17,7 @@ thread_local! {
 }
 
 /// Split `src[0..2 * pairs]` into `even[j] = src[2 * j]` and `odd[j] = src[2 * j + 1]`, using AVX2
-/// `vshufps` + `vpermq` when available.
+/// `vshufps` + `vpermq` or Wasm SIMD128 `i32x4_shuffle` when available.
 pub(super) fn deinterleave_f32_even_odd(src: &[f32], even: &mut [f32], odd: &mut [f32]) {
     let pairs = even.len();
     assert_eq!(odd.len(), pairs, "deinterleave_f32_even_odd: output length mismatch");
@@ -28,9 +28,37 @@ pub(super) fn deinterleave_f32_even_odd(src: &[f32], even: &mut [f32], odd: &mut
         unsafe { deinterleave_f32_even_odd_avx2(src, even, odd) };
         return;
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if pairs >= 4 {
+        deinterleave_f32_even_odd_wasm(src, even, odd);
+        return;
+    }
     for ((e, o), p) in even.iter_mut().zip(odd.iter_mut()).zip(src.as_chunks::<2>().0) {
         *e = p[0];
         *o = p[1];
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn deinterleave_f32_even_odd_wasm(src: &[f32], even: &mut [f32], odd: &mut [f32]) {
+    use std::arch::wasm32::*;
+    let pairs = even.len();
+    let vec_n = pairs / 4 * 4;
+    // SAFETY: `j + 4 <= vec_n <= pairs` and `2 * (j + 4) <= 2 * pairs <= src.len()`.
+    unsafe {
+        for j in (0..vec_n).step_by(4) {
+            let sptr = src.as_ptr().add(2 * j);
+            let lo = v128_load(sptr as *const v128);
+            let hi = v128_load(sptr.add(4) as *const v128);
+            let ev = i32x4_shuffle::<0, 2, 4, 6>(lo, hi);
+            let od = i32x4_shuffle::<1, 3, 5, 7>(lo, hi);
+            v128_store(even.as_mut_ptr().add(j) as *mut v128, ev);
+            v128_store(odd.as_mut_ptr().add(j) as *mut v128, od);
+        }
+    }
+    for j in vec_n..pairs {
+        even[j] = src[2 * j];
+        odd[j] = src[2 * j + 1];
     }
 }
 

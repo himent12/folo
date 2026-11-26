@@ -1,9 +1,11 @@
-//! Depthwise convs (groups = channels): direct kernels per output plane, with AVX2+FMA fast paths for
-//! stride-1 (ring-buffered 3×3 and general stride-1), stride-2 (even/odd AVX2 deinterleave), and stride-1/2
-//! backward kernels, Wasm SIMD128 at stride 1, and TLS scratch reuse.
+//! Depthwise convs (groups = channels): direct kernels per output plane, with AVX2+FMA and Wasm SIMD128 fast
+//! paths for stride-1 (ring-buffered 3×3 and general stride-1), stride-2 (even/odd deinterleave), and
+//! stride-1/stride-2 backward kernels, plus TLS scratch reuse.
 
 #[cfg(target_arch = "x86_64")]
 mod avx2;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm;
 
 #[cfg(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128")))]
 use std::cell::RefCell;
@@ -11,10 +13,6 @@ use std::cell::RefCell;
 use smallvec::SmallVec;
 
 use super::{ChannelEpilogue, ConvGeom, ConvInput, valid_cols};
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-use crate::backend::UnaryOp;
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-use crate::cpu::gemm::BiasAct;
 use crate::cpu::par_chunks;
 
 /// Maximum per-thread TLS scratch retained across depthwise calls (256K floats = 1 MiB).
@@ -68,73 +66,6 @@ fn dot_scalar(a: &[f32], b: &[f32]) -> f32 {
         s += v;
     }
     s
-}
-
-/// 8-lane Wasm SIMD128 dot product (2x4 accumulators), bitwise identical to [`dot_scalar`].
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn dot_wasm(a: &[f32], b: &[f32]) -> f32 {
-    use std::arch::wasm32::*;
-    assert_eq!(a.len(), b.len());
-    let (ca, ra) = a.as_chunks::<8>();
-    let (cb, rb) = b.as_chunks::<8>();
-    let mut acc = [0f32; 8];
-    // SAFETY: `as_chunks::<8>()` guarantees 8-float chunks, and `acc` is `[f32; 8]`.
-    unsafe {
-        let mut s0 = f32x4_splat(0.0);
-        let mut s1 = f32x4_splat(0.0);
-        for (x, y) in ca.iter().zip(cb) {
-            let xp = x.as_ptr();
-            let yp = y.as_ptr();
-            s0 = f32x4_add(s0, f32x4_mul(v128_load(xp as *const v128), v128_load(yp as *const v128)));
-            s1 = f32x4_add(
-                s1,
-                f32x4_mul(v128_load(xp.add(4) as *const v128), v128_load(yp.add(4) as *const v128)),
-            );
-        }
-        v128_store(acc.as_mut_ptr() as *mut v128, s0);
-        v128_store(acc.as_mut_ptr().add(4) as *mut v128, s1);
-    }
-    let mut s: f32 = ra.iter().zip(rb).map(|(x, y)| x * y).sum();
-    for v in acc {
-        s += v;
-    }
-    s
-}
-
-/// 8-wide Wasm SIMD128 row update `dst[i] += wv * src[i]`, bitwise identical to scalar `*d += wv * s`.
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn mul_add_row_wasm(dst: &mut [f32], src: &[f32], wv: f32) {
-    use std::arch::wasm32::*;
-    assert_eq!(dst.len(), src.len());
-    let w = f32x4_splat(wv);
-    let (d8, d_rem) = dst.as_chunks_mut::<8>();
-    let (s8, s_rem) = src.as_chunks::<8>();
-    for (dc, sc) in d8.iter_mut().zip(s8) {
-        // SAFETY: `dc` and `sc` are `[f32; 8]`.
-        unsafe {
-            let dp = dc.as_mut_ptr();
-            let sp = sc.as_ptr();
-            let d0 = v128_load(dp as *const v128);
-            let d1 = v128_load(dp.add(4) as *const v128);
-            let s0 = v128_load(sp as *const v128);
-            let s1 = v128_load(sp.add(4) as *const v128);
-            v128_store(dp as *mut v128, f32x4_add(d0, f32x4_mul(w, s0)));
-            v128_store(dp.add(4) as *mut v128, f32x4_add(d1, f32x4_mul(w, s1)));
-        }
-    }
-    let (d4, d_tail) = d_rem.as_chunks_mut::<4>();
-    let (s4, s_tail) = s_rem.as_chunks::<4>();
-    for (dc, sc) in d4.iter_mut().zip(s4) {
-        // SAFETY: `dc` and `sc` are `[f32; 4]`.
-        unsafe {
-            let d0 = v128_load(dc.as_ptr() as *const v128);
-            let s0 = v128_load(sc.as_ptr() as *const v128);
-            v128_store(dc.as_mut_ptr() as *mut v128, f32x4_add(d0, f32x4_mul(w, s0)));
-        }
-    }
-    for (d, &s) in d_tail.iter_mut().zip(s_tail) {
-        *d += wv * s;
-    }
 }
 
 /// Precompute `(kx * dw - pw, valid_cols)` once per kernel column (stack-backed for `kw <= 8`).
@@ -261,7 +192,7 @@ pub(in super::super) fn depthwise_forward(
     #[cfg(target_arch = "x86_64")]
     let avx2_plan = if avx2 { avx2::plan_avx2(g) } else { avx2::Avx2Plan::Fallback };
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    let wasm_pad = if !accumulate && g.p.stride == [1, 1] { wasm_pad_dims(g) } else { None };
+    let wasm_plan = wasm::plan_wasm(g);
     let total = g.n * g.o;
     let per_task = DW_TASK_OUTPUTS.div_ceil(ohw).min(total.div_ceil(4 * rayon::current_num_threads())).max(1);
     par_chunks(out, per_task * ohw, &|t, ops| {
@@ -294,10 +225,17 @@ pub(in super::super) fn depthwise_forward(
                     continue;
                 }
                 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-                if let Some((owp, wpd, pad_len)) = wasm_pad
-                    && wk.iter().all(|v| v.is_finite())
-                {
-                    depthwise_s1_wasm(xp, wk, op, g, (owp, wpd, pad_len), epi.map(|e| e.rows_from(oc)), pad);
+                if !matches!(wasm_plan, wasm::WasmPlan::Fallback) && wk.iter().all(|v| v.is_finite()) {
+                    wasm::run_wasm_plan(
+                        wasm_plan,
+                        xp,
+                        wk,
+                        op,
+                        g,
+                        accumulate,
+                        epi.map(|e| e.rows_from(oc)),
+                        pad,
+                    );
                     continue;
                 }
                 if !accumulate {
@@ -322,116 +260,6 @@ pub(in super::super) fn depthwise_forward(
         #[cfg(not(any(target_arch = "x86_64", all(target_arch = "wasm32", target_feature = "simd128"))))]
         run_ops(ops);
     });
-}
-
-/// Maximum padded plane scratch (4M floats = 16 MiB) allowed for [`depthwise_s1_wasm`] before falling back
-/// to the zero-scratch scalar path.
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-const DW_WASM_MAX_PAD: usize = 1 << 22;
-
-/// Checked `(owp, wpd, h * wpd)` for [`depthwise_s1_wasm`], or `None` if sizing overflows or exceeds
-/// [`DW_WASM_MAX_PAD`].
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn wasm_pad_dims(g: &ConvGeom) -> Option<(usize, usize, usize)> {
-    let pw = g.p.padding[1];
-    let dw = g.p.dilation[1];
-    let owp = g.ow.checked_add(3)? / 4 * 4;
-    let tap_span = dw.checked_mul(g.kw.saturating_sub(1))?.checked_add(owp)?;
-    let row_span = pw.checked_add(g.w)?;
-    let wpd = tap_span.max(row_span);
-    let pad_len = g.h.checked_mul(wpd)?;
-    (pad_len <= DW_WASM_MAX_PAD).then_some((owp, wpd, pad_len))
-}
-
-/// One output plane of a stride-1 overwriting depthwise conv with Wasm SIMD128 (`f32x4` × 4 register
-/// accumulators): pads the input plane once, computes taps in `(ky, kx)` order, and fuses `bias`,
-/// `bias + SiLU`, and `bias + ReLU` directly in `v128` registers.
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-fn depthwise_s1_wasm(
-    xp: &[f32],
-    wk: &[f32],
-    op: &mut [f32],
-    g: &ConvGeom,
-    (owp, wpd, pad_len): (usize, usize, usize),
-    epi: Option<BiasAct<'_>>,
-    pad: &mut Vec<f32>,
-) {
-    use std::arch::wasm32::*;
-    let (ph, pw) = (g.p.padding[0], g.p.padding[1]);
-    let (dh, dw) = (g.p.dilation[0], g.p.dilation[1]);
-    let (h, w, ow) = (g.h, g.w, g.ow);
-    pad.clear();
-    pad.resize(pad_len, 0.0);
-    if w > 0 {
-        for (prow, xrow) in pad.chunks_exact_mut(wpd).zip(xp.chunks_exact(w)) {
-            prow[pw..pw + w].copy_from_slice(xrow);
-        }
-    }
-    let (reg, bias) = match epi {
-        Some(e) if matches!(e.act, None | Some(UnaryOp::Silu | UnaryOp::Relu)) => {
-            (true, e.bias.map_or(0.0, |b| b[0]))
-        }
-        _ => (false, 0.0),
-    };
-    let act = epi.and_then(|e| e.act);
-    let bv = f32x4_splat(if act.is_none() && bias == 0.0 { -0.0 } else { bias });
-    let zero = f32x4_splat(0.0);
-    for oy in 0..g.oh {
-        let orow = &mut op[oy * ow..(oy + 1) * ow];
-        let mut x0 = 0;
-        while x0 < owp {
-            let nv = ((owp - x0) / 4).min(4);
-            let mut acc = [zero; 4];
-            for ky in 0..g.kh {
-                let Some(iy) =
-                    ky.checked_mul(dh).and_then(|v| oy.checked_add(v)).and_then(|v| v.checked_sub(ph))
-                else {
-                    continue;
-                };
-                if iy >= h {
-                    continue;
-                }
-                let prow = &pad[iy * wpd..(iy + 1) * wpd];
-                for kx in 0..g.kw {
-                    let wv = f32x4_splat(wk[ky * g.kw + kx]);
-                    let base = x0 + kx * dw;
-                    assert!(base + 4 * nv <= wpd);
-                    for (v, a) in acc.iter_mut().enumerate().take(nv) {
-                        // SAFETY: `base + 4 * nv <= wpd` (asserted), inside this padded row.
-                        let xv = unsafe { v128_load(prow.as_ptr().add(base + 4 * v) as *const v128) };
-                        *a = f32x4_add(*a, f32x4_mul(wv, xv));
-                    }
-                }
-            }
-            for (v, a) in acc.iter().enumerate().take(nv) {
-                let c = x0 + 4 * v;
-                let r = if !reg {
-                    *a
-                } else {
-                    let x = f32x4_add(*a, bv);
-                    match act {
-                        None => x,
-                        Some(UnaryOp::Silu) => crate::cpu::elementwise::silu4_wasm(x),
-                        Some(UnaryOp::Relu) => f32x4_pmax(zero, x),
-                        _ => unreachable!(),
-                    }
-                };
-                if c + 4 <= ow {
-                    // SAFETY: columns `c..c + 4` are inside `orow`.
-                    unsafe { v128_store(orow.as_mut_ptr().add(c) as *mut v128, r) };
-                } else if c < ow {
-                    let mut tmp = [0f32; 4];
-                    // SAFETY: `tmp` holds 4 floats.
-                    unsafe { v128_store(tmp.as_mut_ptr() as *mut v128, r) };
-                    orow[c..].copy_from_slice(&tmp[..ow - c]);
-                }
-            }
-            x0 += 4 * nv;
-        }
-    }
-    if let (false, Some(e)) = (reg, epi) {
-        e.apply(0, op);
-    }
 }
 
 /// Scalar-only depthwise forward for direct SIMD vs scalar parity tests.
@@ -506,7 +334,7 @@ pub(in super::super) fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mu
                                 }
                                 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
                                 if len >= 4 {
-                                    mul_add_row_wasm(dst, src, wv);
+                                    wasm::mul_add_row_wasm(dst, src, wv);
                                     continue;
                                 }
                                 for (xv, &gv) in dst.iter_mut().zip(src) {
@@ -519,6 +347,11 @@ pub(in super::super) fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mu
                                 if avx2 && src.len() >= 8 {
                                     // SAFETY: AVX2 was detected above.
                                     unsafe { avx2::mul_add_stride2_avx2(&mut xrow[base..], src, wv) };
+                                    continue;
+                                }
+                                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                                if src.len() >= 4 {
+                                    wasm::mul_add_stride2_wasm(&mut xrow[base..], src, wv);
                                     continue;
                                 }
                                 for (k, &gv) in src.iter().enumerate() {
@@ -584,7 +417,7 @@ pub(in super::super) fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mu
                                 }
                                 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
                                 if gs.len() >= 8 {
-                                    acc += dot_wasm(gs, xs);
+                                    acc += wasm::dot_wasm(gs, xs);
                                     continue;
                                 }
                                 acc += dot_scalar(gs, xs);
@@ -596,6 +429,11 @@ pub(in super::super) fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mu
                                 if avx2 && gs.len() >= 8 {
                                     // SAFETY: AVX2 was detected above.
                                     acc += unsafe { avx2::dot_stride2_avx2(gs, xs) };
+                                    continue;
+                                }
+                                #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                                if gs.len() >= 8 {
+                                    acc += wasm::dot_stride2_wasm(gs, xs);
                                     continue;
                                 }
                                 let vec_n = gs.len().min(xs.len() / 2) / 8 * 8;

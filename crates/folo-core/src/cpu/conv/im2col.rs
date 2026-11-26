@@ -52,7 +52,8 @@ pub(super) fn im2col_segment(
     }
 }
 
-/// Copy `dst[t] = src[2 * t]` for `t < dst.len()` using AVX2 `vshufps` + `vpermq` when available.
+/// Copy `dst[t] = src[2 * t]` for `t < dst.len()` using AVX2 `vshufps` + `vpermq` or Wasm SIMD128
+/// `i32x4_shuffle` when available.
 #[inline]
 fn copy_stride2(src: &[f32], dst: &mut [f32]) {
     let n = dst.len();
@@ -66,8 +67,34 @@ fn copy_stride2(src: &[f32], dst: &mut [f32]) {
         unsafe { copy_stride2_avx2(src, dst) };
         return;
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if n >= 4 {
+        copy_stride2_wasm(src, dst);
+        return;
+    }
     for (t, d) in dst.iter_mut().enumerate() {
         *d = src[2 * t];
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn copy_stride2_wasm(src: &[f32], dst: &mut [f32]) {
+    use std::arch::wasm32::*;
+    let n = dst.len();
+    let vec_end = (src.len() / 8).min(n / 4) * 4;
+    let mut t = 0;
+    // SAFETY: `2 * t + 8 <= src.len()` and `t + 4 <= n`.
+    unsafe {
+        while t < vec_end {
+            let p = src.as_ptr().add(2 * t);
+            let lo = v128_load(p as *const v128);
+            let hi = v128_load(p.add(4) as *const v128);
+            v128_store(dst.as_mut_ptr().add(t) as *mut v128, i32x4_shuffle::<0, 2, 4, 6>(lo, hi));
+            t += 4;
+        }
+    }
+    for tt in t..n {
+        dst[tt] = src[2 * tt];
     }
 }
 
