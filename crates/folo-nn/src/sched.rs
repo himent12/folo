@@ -505,8 +505,7 @@ impl LrSchedule {
         self.apply_to_groups(opt.groups_mut());
     }
 
-    /// Set every [`ParamGroup`]'s `lr` and `momentum` for the current iteration (also usable by standalone
-    /// optimizers such as [`crate::optim::Lion`]).
+    /// Set every [`ParamGroup`]'s `lr` and `momentum` for the current iteration.
     pub fn apply_to_groups(&self, groups: &mut [ParamGroup]) {
         let t = self.c.step;
         for g in groups {

@@ -32,83 +32,34 @@
 //! assert_eq!(opt.step_count(), 1);
 //! ```
 
-mod adafactor;
 mod adamw;
-mod adan;
 mod agc;
 mod cautious;
 mod dispatch;
 mod grads;
-mod lion;
-mod lookahead;
-mod muon;
 mod musgd;
 mod ortho;
-mod prodigy;
-mod radam;
-mod schedulefree;
 mod sgd;
 pub(crate) mod simd;
-mod sophia;
 
 use std::collections::HashMap;
 
 use folo_core::{Device, Grads, Tensor};
 use serde::{Deserialize, Serialize};
 
-pub use adafactor::{
-    ADAFACTOR_DEFAULT_CLIP_THRESHOLD, ADAFACTOR_DEFAULT_DECAY_RATE, ADAFACTOR_DEFAULT_EPS,
-    ADAFACTOR_DEFAULT_LR, Adafactor, AdafactorConfig, AdafactorContract, AdafactorGroupContract,
-    adafactor_beta2, adafactor_relative_lr,
-};
 pub use adamw::AdamW;
-pub use adan::{
-    ADAN_DEFAULT_BETA1, ADAN_DEFAULT_BETA2, ADAN_DEFAULT_BETA3, ADAN_DEFAULT_EPS, ADAN_DEFAULT_LR,
-    ADAN_DEFAULT_WEIGHT_DECAY, Adan, AdanConfig, AdanContract, AdanGroupContract,
-};
 pub use agc::{AGC_DEFAULT_CLIP_FACTOR, AGC_DEFAULT_EPS, AgcStats, clip_grad_agc_tensor};
 pub(crate) use dispatch::{
     GradRef, PAR_THRESHOLD, ParamPlan, cpu_fast, for_each_param_planned, step_many, storage_key,
 };
 pub use grads::{GradAccumulator, global_grad_norm};
-pub use lion::{
-    LION_DEFAULT_BETA1, LION_DEFAULT_BETA2, LION_DEFAULT_LR, Lion, LionContract, LionGroupContract,
-};
-pub use lookahead::{
-    LOOKAHEAD_DEFAULT_ALPHA, LOOKAHEAD_DEFAULT_K, Lookahead, LookaheadConfig, LookaheadContract,
-};
-pub use muon::{
-    MUON_AUX_DEFAULT_BETA1, MUON_AUX_DEFAULT_BETA2, MUON_AUX_DEFAULT_EPS, MUON_DEFAULT_LR,
-    MUON_DEFAULT_MOMENTUM, MUON_DEFAULT_WEIGHT_DECAY, Muon, MuonAspectScale, MuonConfig, MuonContract,
-    MuonFallback, MuonGroupContract, newton_schulz_quintic,
-};
 pub use musgd::{MUON_SCALE, MuSgd, MuSgdWeights, is_muon_group};
 pub use ortho::{
     MuonGeoMode, MuonOrtho, NS_COEFFS, NS_EPS, NS_STEPS, NS5_SCHEDULE, POLAR3_CS9_COEFFS, POLAR4_COEFFS,
     POLAR5_COEFFS, muon_scale, muon_scale_geo, orthogonalize, orthogonalize_many, orthogonalize_many_with,
     orthogonalize_with,
 };
-pub use prodigy::{
-    PRODIGY_DEFAULT_BETA1, PRODIGY_DEFAULT_BETA2, PRODIGY_DEFAULT_D_COEF, PRODIGY_DEFAULT_D0,
-    PRODIGY_DEFAULT_EPS, PRODIGY_DEFAULT_LR, PRODIGY_DEFAULT_WEIGHT_DECAY, Prodigy, ProdigyConfig,
-    ProdigyContract, ProdigyGroupContract,
-};
-pub use radam::{
-    RADAM_DEFAULT_BETA1, RADAM_DEFAULT_BETA2, RADAM_DEFAULT_EPS, RADAM_DEFAULT_LR,
-    RADAM_DEFAULT_WEIGHT_DECAY, RAdam, RAdamConfig, RAdamContract, RAdamGroupContract, RAdamRectification,
-    radam_rectification,
-};
-pub use schedulefree::{
-    SF_DEFAULT_BETA1, SF_DEFAULT_BETA2, SF_DEFAULT_EPS, SF_DEFAULT_LR, SF_DEFAULT_R,
-    SF_DEFAULT_WEIGHT_LR_POWER, ScheduleFreeAdamW, ScheduleFreeConfig, ScheduleFreeContract,
-    ScheduleFreeGroupContract,
-};
 pub use sgd::Sgd;
-pub use sophia::{
-    HutchinsonDist, SOPHIA_DEFAULT_BETA1, SOPHIA_DEFAULT_BETA2, SOPHIA_DEFAULT_EPS, SOPHIA_DEFAULT_LR,
-    SOPHIA_DEFAULT_RHO, SOPHIA_DEFAULT_UPDATE_PERIOD, SOPHIA_DEFAULT_WEIGHT_DECAY, SophiaConfig,
-    SophiaContract, SophiaG, SophiaGroupContract,
-};
 
 use crate::module::Module;
 use crate::{BatchNorm2d, Error, Result};
@@ -255,14 +206,6 @@ impl ParamGroup {
         self
     }
 
-    /// Set Lion's `(β1, β2)` (storing `β1` in `base_momentum` / `momentum` and `β2` in `beta2`).
-    pub fn lion(mut self, beta1: f64, beta2: f64) -> Self {
-        self.base_momentum = beta1;
-        self.momentum = beta1;
-        self.beta2 = beta2;
-        self
-    }
-
     /// Enable or disable decoupled weight decay (SGD / MuSGD).
     pub fn decoupled_wd(mut self, on: bool) -> Self {
         self.decoupled_wd = on;
@@ -384,7 +327,6 @@ fn group_contract<O: Optimizer + ?Sized>(o: &O) -> OptimContract {
         muon_ortho: None,
         muon_geo: None,
         muon_depthwise: Vec::new(),
-        lookahead: None,
     }
 }
 
@@ -401,12 +343,6 @@ fn apply_group_contract<O: Optimizer + ?Sized>(o: &mut O, c: &OptimContract) -> 
         return Err(Error::Load(format!(
             "checkpoint optimizer is {}, but the run uses {}",
             c.kind.as_str(),
-            kind.as_str()
-        )));
-    }
-    if c.lookahead.is_some() {
-        return Err(Error::Load(format!(
-            "folo.optim: a `{}` optimizer cannot resume a `lookahead` checkpoint",
             kind.as_str()
         )));
     }
@@ -500,10 +436,6 @@ pub struct OptimContract {
     /// Omitted when empty or in legacy mode so existing checkpoints stay byte-for-byte identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub muon_depthwise: Vec<String>,
-    /// Optional [`Lookahead`] wrapper contract. Omitted for plain optimizers so existing contracts stay
-    /// byte-for-byte identical.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lookahead: Option<LookaheadContract>,
 }
 
 /// One group of `folo.optim`. Only the fields that apply to the optimizer type are present.
@@ -687,24 +619,22 @@ fn is_no_decay_scale(name: &str, t: &Tensor) -> bool {
 }
 
 /// docs/MODEL.md §8.2's three groups, assigned by role: `decay` (conv / linear weights), `bn` (BatchNorm
-/// weights, [`crate::LayerScale::gamma`], [`crate::RmsNorm::weight`], [`crate::LayerNorm::weight`], and 1-D
-/// scale/gate parameters such as `gamma_id` and `alpha_raw`), `bias` (every tensor named `bias`: BatchNorm
-/// biases, LayerNorm biases, and conv / linear biases).
+/// weights and 1-D scale/gate parameters such as `gamma_id` and `alpha_raw`), `bias` (every tensor named
+/// `bias`: BatchNorm biases and conv / linear biases).
 #[derive(Debug, Clone, Default)]
 pub struct StandardGroups {
     /// Weights that get weight decay.
     pub decay: Vec<(String, Tensor)>,
-    /// BatchNorm γ, [`crate::LayerScale::gamma`], [`crate::RmsNorm::weight`], [`crate::LayerNorm::weight`], and 1-D scale/gate parameters (`gamma_id`, `alpha_raw`) with no weight decay.
+    /// BatchNorm γ and 1-D scale/gate parameters (`gamma_id`, `alpha_raw`) with no weight decay.
     pub bn: Vec<(String, Tensor)>,
-    /// Biases (BatchNorm β, LayerNorm β, and layer biases).
+    /// Biases (BatchNorm β and layer biases).
     pub bias: Vec<(String, Tensor)>,
     /// Names of depthwise conv weights (`groups > 1 && groups == in_channels == out_channels`) in `decay`.
     pub depthwise: std::collections::HashSet<String>,
 }
 
 impl StandardGroups {
-    /// Split `model`'s parameters. A parameter is `bn` if it is the `weight` of a [`BatchNorm2d`], the `gamma`
-    /// of a [`crate::LayerScale`], the `weight` of an [`crate::RmsNorm`] or [`crate::LayerNorm`], or a 1-D
+    /// Split `model`'s parameters. A parameter is `bn` if it is the `weight` of a [`BatchNorm2d`] or a 1-D
     /// no-decay scale/gate parameter whose last name segment is `gamma_id` or `alpha_raw`, `bias` if its last
     /// name segment is `bias`, and `decay` otherwise. For the FOLO v1 detector this is exactly the name rule
     /// of §8.2 (`*.bn.weight` / `*.bn.bias`, `*.out.bias` / every other weight); for FOLO v2-Iso it also
@@ -715,16 +645,6 @@ impl StandardGroups {
         let mut note = |m: &dyn Module| {
             if let Some(bn) = (m as &dyn std::any::Any).downcast_ref::<BatchNorm2d>() {
                 bn_ids.insert(bn.weight.id());
-            } else if let Some(ls) = (m as &dyn std::any::Any).downcast_ref::<crate::LayerScale>() {
-                bn_ids.insert(ls.gamma.id());
-            } else if let Some(rn) = (m as &dyn std::any::Any).downcast_ref::<crate::RmsNorm>() {
-                if let Some(w) = &rn.weight {
-                    bn_ids.insert(w.id());
-                }
-            } else if let Some(ln) = (m as &dyn std::any::Any).downcast_ref::<crate::LayerNorm>() {
-                if let Some(w) = &ln.weight {
-                    bn_ids.insert(w.id());
-                }
             } else if let Some(conv) = (m as &dyn std::any::Any).downcast_ref::<crate::Conv2d>() {
                 let c = conv.config();
                 if c.groups > 1 && c.groups == c.in_channels && c.groups == c.out_channels {
