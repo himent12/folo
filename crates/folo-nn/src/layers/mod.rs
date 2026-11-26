@@ -18,6 +18,8 @@
 //! - `repconv.rs`: [`RepConv`] and [`RepConvConfig`] (RepVGG multi-branch to deploy `3×3` fusion).
 //! - `rope2d.rs`: [`RoPE2d`] (2D axial Rotary Positional Embedding).
 //! - `cross_attn.rs`: [`MultiHeadCrossAttention`] and [`MultiHeadCrossAttentionConfig`].
+//! - `lora.rs`: [`LoraConfig`], [`LoraLinear`], and [`LoraConv2d`] (low-rank adaptation with weight merging).
+//! - `gem.rs`: [`GeM2d`], [`GeM2dConfig`], and [`gem_pool2d`] (learnable Generalized Mean pooling).
 //! - `container.rs`: [`Sequential`] and [`ModuleList`].
 
 mod attention;
@@ -28,7 +30,9 @@ mod conv_bn_act;
 mod convnext;
 mod cross_attn;
 mod dropblock;
+mod gem;
 mod glu;
+mod lora;
 mod mbconv;
 mod regularize;
 mod repconv;
@@ -40,6 +44,8 @@ mod spectral_norm;
 mod tests_attention;
 #[cfg(test)]
 mod tests_blocks;
+#[cfg(test)]
+mod tests_lora_gem;
 #[cfg(test)]
 mod tests_repconv_rope_attn;
 mod ws_conv;
@@ -55,7 +61,11 @@ pub use convnext::{
 };
 pub use cross_attn::{MultiHeadCrossAttention, MultiHeadCrossAttentionConfig};
 pub use dropblock::{DropBlock2d, dropblock_gamma};
+pub use gem::{
+    GEM_DEFAULT_EPS, GEM_DEFAULT_P, GEM_DEFAULT_P_MAX, GEM_DEFAULT_P_MIN, GeM2d, GeM2dConfig, gem_pool2d,
+};
 pub use glu::{GatedFfn, GluKind, geglu, gelu_tanh, swiglu};
+pub use lora::{LoraConfig, LoraConv2d, LoraLinear};
 pub use mbconv::{InvertedResidual, InvertedResidualConfig};
 pub use regularize::{ChannelLayout, DropPath, LAYERSCALE_DEFAULT_INIT, LayerScale};
 pub use repconv::{RepConv, RepConvConfig};

@@ -32,6 +32,7 @@
 //! assert_eq!(opt.step_count(), 1);
 //! ```
 
+mod adabelief;
 mod adafactor;
 mod adamw;
 mod adan;
@@ -39,6 +40,7 @@ mod agc;
 mod cautious;
 mod dispatch;
 mod grads;
+mod lamb;
 mod lion;
 mod lookahead;
 mod muon;
@@ -56,6 +58,10 @@ use std::collections::HashMap;
 use folo_core::{Device, Grads, Tensor};
 use serde::{Deserialize, Serialize};
 
+pub use adabelief::{
+    ADABELIEF_DEFAULT_BETA1, ADABELIEF_DEFAULT_BETA2, ADABELIEF_DEFAULT_EPS, ADABELIEF_DEFAULT_LR,
+    ADABELIEF_DEFAULT_WEIGHT_DECAY, AdaBelief, AdaBeliefConfig, AdaBeliefContract, AdaBeliefGroupContract,
+};
 pub use adafactor::{
     ADAFACTOR_DEFAULT_CLIP_THRESHOLD, ADAFACTOR_DEFAULT_DECAY_RATE, ADAFACTOR_DEFAULT_EPS,
     ADAFACTOR_DEFAULT_LR, Adafactor, AdafactorConfig, AdafactorContract, AdafactorGroupContract,
@@ -71,6 +77,10 @@ pub(crate) use dispatch::{
     GradRef, PAR_THRESHOLD, ParamPlan, cpu_fast, for_each_param_planned, step_many, storage_key,
 };
 pub use grads::{GradAccumulator, global_grad_norm};
+pub use lamb::{
+    LAMB_DEFAULT_BETA1, LAMB_DEFAULT_BETA2, LAMB_DEFAULT_EPS, LAMB_DEFAULT_LR, LAMB_DEFAULT_TRUST_CLIP,
+    LAMB_DEFAULT_WEIGHT_DECAY, Lamb, LambConfig, LambContract, LambGroupContract,
+};
 pub use lion::{
     LION_DEFAULT_BETA1, LION_DEFAULT_BETA2, LION_DEFAULT_LR, Lion, LionContract, LionGroupContract,
 };
