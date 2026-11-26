@@ -237,7 +237,7 @@ class Router {
   go(path: string, opts: { replace?: boolean } = {}) {
     const hash = `#${path}`;
     const curHash = opts.replace ? location.hash : location.hash || '#/';
-    if (!this.#travelling && curHash === hash && hashOf(parse(hash)) === hashOf(this.location)) return;
+    if (!this.#travelling && curHash === hash && hashOf(parse(hash)) === hashOf(this.#location.peek())) return;
     const navigate = () => this.#settled(() => this.#navigate(hash, opts.replace));
     if (this.#allowed(parse(hash), navigate)) navigate();
   }
@@ -311,7 +311,7 @@ class Router {
     // app kept places, anywhere in the history: `#travel` copes). Nothing moved: the second event of a move.
     const pos = known ?? this.#pos + 1;
     const next = parse(hash);
-    if (pos === this.#pos && hashOf(next) === hashOf(this.location)) return;
+    if (pos === this.#pos && hashOf(next) === hashOf(this.#location.peek())) return;
     const from = this.#pos;
     // A new entry is made again (the held one was left behind); an old one is travelled to.
     let syncing = true;
@@ -323,8 +323,12 @@ class Router {
       }
       this.#settled(() => (known === null ? this.#navigate(hash) : this.#travel(pos, true)));
     };
-    const ok = this.#allowed(next, proceed);
-    syncing = false;
+    let ok = false;
+    try {
+      ok = this.#allowed(next, proceed);
+    } finally {
+      syncing = false;
+    }
     if (ok || proceeded) {
       if (known === null) this.#stamp(pos);
       this.#pos = pos;

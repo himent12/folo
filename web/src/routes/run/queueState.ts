@@ -96,9 +96,14 @@ export function queueState(src: QueueSource) {
     const refresh = () => {
       if (!mounted || hub.epoch !== epoch) return;
       void others.refresh();
+      const tok = live.queueToken?.();
       hub.api.run(id).then(
         (r) => {
           if (!mounted || hub.epoch !== epoch) return;
+          if (tok && live.applyQueueSnapshot) {
+            live.applyQueueSnapshot(id, r, tok);
+            return;
+          }
           // Asked for while the trainer was being built: a stream that has since said the run left the queue is newer,
           // and a run that left it never goes back (no status event would correct it until the run ends).
           if (r.status === 'queued' && live.run?.status !== 'queued') return;
@@ -107,6 +112,7 @@ export function queueState(src: QueueSource) {
         () => {},
       );
     };
+    const moveTok = live.queueToken?.();
     const r = await moveQueued(
       cur,
       req,
@@ -131,7 +137,8 @@ export function queueState(src: QueueSource) {
       untrack(() => ahead.get()),
     );
     if (!r || !mounted || hub.epoch !== epoch) return;
-    if (live.run?.id === id) live.run = { ...live.run, queue_position: r.queue_position ?? null };
+    if (moveTok && live.applyQueueSnapshot) live.applyQueueSnapshot(id, r, moveTok);
+    else if (live.run?.id === id) live.run = { ...live.run, queue_position: r.queue_position ?? null };
     void others.refresh();
   }
 

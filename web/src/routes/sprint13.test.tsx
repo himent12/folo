@@ -1,17 +1,17 @@
 // @vitest-environment happy-dom
 // Sprint 13 Studio regression tests:
-// 1. Router navigation & guard edge cases (empty hash root no-op, replace no-op, synchronous proceed() in guard).
-// 2. Chart domain/hover/line/histogram edge cases (extreme overflow, NaN/Inf, single-point series, log bands, empty histogram marker).
+// 1. Router navigation & guard edge cases (empty hash root no-op, replace no-op without effect subscription leak, synchronous proceed() in guard).
+// 2. Chart domain/hover/line/histogram edge cases (extreme overflow, NaN/Inf, single-point series, log bands, empty histogram marker, dirty hover readout).
 // 3. Playground ZoomStage non-finite guards.
-// 4. Queue optimistic-update rollback does not clobber newer poll/live state when a move fails.
+// 4. Queue optimistic-update rollback & SSE sequencing when a detail refresh races with a live queue event.
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createRoot, flush, signal } from 'fw';
+import { createRoot, effect, flush, signal } from 'fw';
 import { render } from '../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import { LiveRun } from '$lib/api/live';
 import { Resource } from '$lib/api/resource';
 import { ApiError } from '$lib/api/client';
-import type { LiveRun } from '$lib/api/live';
 import type { Run, SystemInfo } from '$lib/api/types';
 import { logDomain, niceDomain } from '$lib/charts/domain';
 import { pickNearest } from '$lib/charts/lineHover';
@@ -22,7 +22,7 @@ import { clampPan, zoomToward } from './playground/ZoomStage';
 import { queueState } from './run/queueState';
 
 describe('Sprint 13 router navigation & guard edge cases', () => {
-  it('treats go("/", push) from empty hash and no-op replace calls without firing guards or adding entries', () => {
+  it('treats go("/", push) from empty hash and no-op replace calls without firing guards or leaking subscriptions', () => {
     history.replaceState(null, '', '/');
     router.route = parse('');
     const seen: string[] = [];
@@ -32,6 +32,9 @@ describe('Sprint 13 router navigation & guard edge cases', () => {
     });
     const pushSpy = vi.spyOn(history, 'pushState');
     const replaceSpy = vi.spyOn(history, 'replaceState');
+    let effectRuns = 0;
+    const trigger = signal(0);
+    let disposeEffect!: () => void;
     try {
       router.go('/');
       expect(seen).toEqual([]);
@@ -42,11 +45,26 @@ describe('Sprint 13 router navigation & guard edge cases', () => {
       seen.length = 0;
       replaceSpy.mockClear();
 
-      // Exact same path with replace:true is a no-op and must not re-run guards.
-      router.go('/runs', { replace: true });
+      // Calling no-op router.go(..., { replace: true }) inside an effect must NOT subscribe it to router.location.
+      createRoot((d) => {
+        disposeEffect = d;
+        effect(() => {
+          trigger.get();
+          effectRuns++;
+          router.go('/runs', { replace: true });
+        });
+      });
+      flush();
+      expect(effectRuns).toBe(1);
       expect(seen).toEqual([]);
       expect(replaceSpy).not.toHaveBeenCalled();
+
+      // Navigating elsewhere must NOT re-trigger the effect that called no-op router.go().
+      router.go('/datasets', { replace: true });
+      flush();
+      expect(effectRuns).toBe(1);
     } finally {
+      disposeEffect?.();
       unguard();
       pushSpy.mockRestore();
       replaceSpy.mockRestore();
@@ -126,7 +144,7 @@ describe('Sprint 13 charts edge cases', () => {
     expect(mixed).toBe('s');
   });
 
-  it('LineChart and Histogram render SVGs and tables cleanly with NaN/Inf/single-point/log-band/empty-marker inputs', () => {
+  it('LineChart and Histogram render SVGs, tables, and hover readouts cleanly with NaN/Inf/negative inputs', () => {
     const host = document.createElement('div');
     document.body.appendChild(host);
     const view = render(
@@ -155,12 +173,14 @@ describe('Sprint 13 charts edge cases', () => {
             xDomain={[1, 2]}
           />
           <Histogram label="Empty hist" edges={[]} counts={[]} marker={{ x: 0.5, label: 'median' }} />
-          <Histogram
-            label="Dirty hist"
-            edges={[0, 0.5, 1, 1.5]}
-            counts={[Number.NaN, -3, 4]}
-            marker={{ x: Number.NaN, label: 'bad' }}
-          />
+          <div class="dirty-hist">
+            <Histogram
+              label="Dirty hist"
+              edges={[0, 0.5, 1, 1.5]}
+              counts={[Number.NaN, -3, 4]}
+              marker={{ x: Number.NaN, label: 'bad' }}
+            />
+          </div>
         </div>
       ),
       host,
@@ -174,6 +194,19 @@ describe('Sprint 13 charts edge cases', () => {
       expect(host.querySelectorAll('svg')).toHaveLength(3);
       expect(host.innerHTML).not.toContain('NaN');
       expect(host.innerHTML).not.toContain('Infinity');
+
+      // Focus + navigate onto dirty bins (bin 0 = NaN, bin 1 = -3) and verify visible readout stays sanitized.
+      const dirtySvg = host.querySelector<SVGSVGElement>('.dirty-hist svg')!;
+      dirtySvg.dispatchEvent(new FocusEvent('focus'));
+      dirtySvg.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+      flush();
+      const readout = host.querySelector('.dirty-hist .readout')!;
+      expect(readout.textContent).toContain('0 boxes');
+      expect(readout.textContent).not.toContain('NaN');
+      dirtySvg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      flush();
+      expect(readout.textContent).toContain('0 boxes');
+      expect(readout.textContent).not.toContain('-3');
     } finally {
       view.unmount();
       host.remove();
@@ -194,25 +227,20 @@ describe('Sprint 13 ZoomStage non-finite guards', () => {
   });
 });
 
-describe('Sprint 13 queueState optimistic rollback safety', () => {
+describe('Sprint 13 queueState optimistic rollback & SSE sequencing safety', () => {
   const prevApi = hub.api;
+  const prevMode = hub.mode;
   afterEach(() => {
     hub.api = prevApi;
+    hub.mode = prevMode;
     vi.restoreAllMocks();
   });
 
-  it('does not overwrite newer poll data with stale pre-move state when move fails', async () => {
+  it('does not overwrite a newer SSE queue event when a rollback detail refresh resolves late', async () => {
     const api = new MockApi('normal', 0);
     hub.api = api;
+    hub.mode = 'mock';
     const sample = (await api.runs())[0]!;
-    let rejectMove!: (e: Error) => void;
-    vi.spyOn(api, 'moveRun').mockImplementation(
-      () =>
-        new Promise((_resolve, reject) => {
-          rejectMove = reject;
-        }),
-    );
-
     const makeQueued = (id: string, pos: number): Run => ({
       ...sample,
       id,
@@ -223,43 +251,84 @@ describe('Sprint 13 queueState optimistic rollback safety', () => {
 
     const initial = [makeQueued('r1', 1), makeQueued('r2', 2)];
     const newerPoll = [makeQueued('r1', 1), makeQueued('r2', 2), makeQueued('r3', 3)];
+
+    let rejectMove!: (e: Error) => void;
+    vi.spyOn(api, 'moveRun').mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectMove = reject;
+        }),
+    );
+
+    let emitQueue!: (ev: { position: number; waiting: number }) => void;
+    vi.spyOn(api, 'runEvents').mockImplementation((_id, handlers) => {
+      emitQueue = (ev) => handlers.queue?.(ev);
+      return () => {};
+    });
+    vi.spyOn(api, 'runMetrics').mockResolvedValue({ steps: [], epochs: [] });
+    vi.spyOn(api, 'runLogs').mockResolvedValue({ lines: [], total: 0 });
     vi.spyOn(api, 'runs').mockResolvedValue(newerPoll);
-    vi.spyOn(api, 'run').mockResolvedValue(makeQueued('r2', 3));
     vi.spyOn(api, 'system').mockResolvedValue({ features: ['queue_control'] } as unknown as SystemInfo);
 
-    const cur = signal<Run | undefined>(initial[1]);
-    const live = { run: { ...initial[1]! }, waiting: 2 } as unknown as LiveRun;
+    let runCall = 0;
+    let resolveDetailRefresh!: (r: Run) => void;
+    vi.spyOn(api, 'run').mockImplementation((id) => {
+      runCall++;
+      if (runCall === 1) return Promise.resolve(makeQueued(id, 2));
+      return new Promise((resolve) => {
+        resolveDetailRefresh = resolve;
+      });
+    });
+
     let dispose!: () => void;
+    let live!: LiveRun;
     let state!: ReturnType<typeof queueState>;
     let others!: Resource<Run[]>;
 
     createRoot((d) => {
       dispose = d;
+      live = new LiveRun(() => 'r2');
       others = new Resource(() => api.runs());
       others.set(initial);
       const sys = new Resource(() => Promise.resolve({ features: ['queue_control'] } as unknown as SystemInfo));
       sys.set({ features: ['queue_control'] } as unknown as SystemInfo);
-      state = queueState({ run: () => cur.get(), live, others, system: sys });
+      state = queueState({ run: () => live.run, live, others, system: sys });
     });
 
     try {
+      await vi.waitFor(() => {
+        flush();
+        expect(live.run?.id).toBe('r2');
+        expect(live.run?.queue_position).toBe(2);
+      });
+
       const pending = state.move({ action: 'up' });
       // Optimistic update applied immediately.
       expect(live.run?.queue_position).toBe(1);
       expect(others.data?.find((r) => r.id === 'r2')?.queue_position).toBe(1);
 
-      // A concurrent poll arrives while the move request is still in flight.
+      // While the move is in flight, a newer poll and SSE queue event (pos 3) arrive.
       others.set(newerPoll);
-      live.run = { ...live.run!, queue_position: 3 };
+      emitQueue({ position: 3, waiting: 3 });
+      expect(live.run?.queue_position).toBe(3);
 
-      // Now the move request fails: rollback must NOT clobber `newerPoll` back to `initial`!
+      // Move fails: rollback triggers detail refresh (snapping old pos 3), does NOT revert `others` to `initial`.
       rejectMove(new ApiError(500, 'err', 'server failed'));
       await pending;
+      await vi.waitFor(() => expect(resolveDetailRefresh).toBeTypeOf('function'));
+
+      // Before the detail refresh returns, another SSE queue event advances position to 4!
+      emitQueue({ position: 4, waiting: 4 });
+      expect(live.run?.queue_position).toBe(4);
+
+      // Now the stale detail refresh resolves with position 3: LiveRun sequencing MUST keep position 4!
+      resolveDetailRefresh(makeQueued('r2', 3));
+      await Promise.resolve();
       await Promise.resolve();
 
       expect(others.data).not.toBe(initial);
       expect(others.data?.length).toBe(3);
-      expect(live.run?.queue_position).toBe(3);
+      expect(live.run?.queue_position).toBe(4);
     } finally {
       dispose();
     }

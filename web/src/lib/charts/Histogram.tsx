@@ -212,7 +212,7 @@ export default function Histogram(props: HistogramProps) {
         {activeHovered.get() !== null ? (
           <>
             <span class="t">{name(activeHovered.get()!)}</span>
-            <span class="v">{`${(p.counts[activeHovered.get()!] ?? 0).toLocaleString('en-US')} ${p.unit}`}</span>
+            <span class="v">{`${safeCount(p.counts[activeHovered.get()!] ?? 0).toLocaleString('en-US')} ${p.unit}`}</span>
             <span class="p">{`${shareOf(p.counts[activeHovered.get()!] ?? 0)}%`}</span>
           </>
         ) : (

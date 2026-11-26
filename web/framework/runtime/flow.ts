@@ -367,10 +367,30 @@ export function For<T>(props: ForProps<T>): JSX.Element {
       let end = prevLen - 1;
       let newEnd = n - 1;
       while (end >= start && newEnd >= start && sameKey(rows[end]!.key, keys[newEnd])) {
-        update((next[newEnd] = rows[end]!), list[newEnd]!, newEnd);
         end--;
         newEnd--;
       }
+      // Suffix matching agrees with FIFO iff every matched suffix key has identical multiplicity in the unmatched
+      // middle of `rows` and `keys`; otherwise fall back to the exact FIFO matcher across the full tail.
+      if (end < prevLen - 1 && (start <= end || start <= newEnd)) {
+        const delta = new Map<unknown, number>();
+        for (let j = start; j <= end; j++) {
+          const k = rows[j]!.key;
+          delta.set(k, (delta.get(k) ?? 0) + 1);
+        }
+        for (let j = start; j <= newEnd; j++) {
+          const k = keys[j];
+          delta.set(k, (delta.get(k) ?? 0) - 1);
+        }
+        for (let j = newEnd + 1; j < n; j++) {
+          if ((delta.get(keys[j]) ?? 0) !== 0) {
+            end = prevLen - 1;
+            newEnd = n - 1;
+            break;
+          }
+        }
+      }
+      for (let oi = end + 1, ni = newEnd + 1; ni < n; oi++, ni++) update((next[ni] = rows[oi]!), list[ni]!, ni);
       if (start > end) {
         // Pure insertions (or everything matched in prefix/suffix).
         let built = start;

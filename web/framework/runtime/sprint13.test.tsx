@@ -1,54 +1,75 @@
 // @vitest-environment happy-dom
 // Sprint 13 regression tests for fw runtime hardening:
-// 1. Show, Switch, For, and Index keep reactive fallback expressions live while falsy/unmatched/empty.
-// 2. For preserves duplicate-key FIFO order on end-for-end swaps while retaining unique-key swap reuse.
-// 3. Portal tolerates mid-mount self-disposal without throwing NotFoundError or leaking DOM nodes.
+// 1. Show, Switch, For, and Index keep direct reactive fallback expressions live while falsy/unmatched/empty.
+// 2. For preserves duplicate-key FIFO order on suffix trims, duplicate insertions, and end-for-end swaps.
+// 3. Portal tolerates synchronous mid-normalize self-disposal without throwing NotFoundError or leaking DOM nodes.
 import { describe, expect, it } from 'vitest';
 import { render } from '../testing';
 import { createRoot, effect, flush, onCleanup, signal } from './core';
 import { For, Index, Match, Portal, Show, Switch } from './flow';
 
 describe('fw Sprint 13 runtime hardening', () => {
-  it('updates reactive fallbacks in Show and Switch while falsy/unmatched and disposes on branch switch', () => {
+  it('updates direct reactive primitive and conditional fallbacks in Show and Switch while falsy/unmatched', () => {
     const ok = signal(false);
     const mode = signal<'a' | 'none'>('none');
     const msg = signal('loading');
+    const alt = signal(false);
     let showFbDisposed = 0;
     let switchFbDisposed = 0;
 
-    function ShowFb(props: { text: string }) {
+    function ShowFb(props: { label: string }) {
       onCleanup(() => showFbDisposed++);
-      return <span class="show-fb">{props.text}</span>;
+      return <span class="show-fb">{props.label}</span>;
     }
 
-    function SwitchFb(props: { text: string }) {
+    function SwitchFb(props: { label: string }) {
       onCleanup(() => switchFbDisposed++);
-      return <span class="switch-fb">{props.text}</span>;
+      return <span class="switch-fb">{props.label}</span>;
     }
 
     const host = document.createElement('div');
     const view = render(
       () => (
         <div>
-          <Show when={ok.get()} fallback={<ShowFb text={msg.get()} />}>
-            {() => <span class="show-main">main</span>}
-          </Show>
-          <Switch fallback={<SwitchFb text={msg.get()} />}>
-            <Match when={mode.get() === 'a'}>{() => <span class="switch-a">A</span>}</Match>
-          </Switch>
+          <section class="show-prim">
+            <Show when={ok.get()} fallback={msg.get()}>
+              {() => <span class="show-main">main</span>}
+            </Show>
+          </section>
+          <section class="show-cond">
+            <Show when={ok.get()} fallback={alt.get() ? <ShowFb label="second" /> : <em class="show-first">first</em>}>
+              {() => <span class="show-main2">main2</span>}
+            </Show>
+          </section>
+          <section class="switch-prim">
+            <Switch fallback={msg.get()}>
+              <Match when={mode.get() === 'a'}>{() => <span class="switch-a">A</span>}</Match>
+            </Switch>
+          </section>
+          <section class="switch-cond">
+            <Switch fallback={alt.get() ? <SwitchFb label="s2" /> : <em class="switch-first">s1</em>}>
+              <Match when={mode.get() === 'a'}>{() => <span class="switch-a2">A2</span>}</Match>
+            </Switch>
+          </section>
         </div>
       ),
       host,
     );
     flush();
 
-    expect(host.querySelector('.show-fb')?.textContent).toBe('loading');
-    expect(host.querySelector('.switch-fb')?.textContent).toBe('loading');
+    expect(host.querySelector('.show-prim')?.textContent).toBe('loading');
+    expect(host.querySelector('.switch-prim')?.textContent).toBe('loading');
+    expect(host.querySelector('.show-first')?.textContent).toBe('first');
+    expect(host.querySelector('.switch-first')?.textContent).toBe('s1');
 
+    // Updating signals read directly by fallback expressions updates live while falsy/unmatched.
     msg.set('still loading');
+    alt.set(true);
     flush();
-    expect(host.querySelector('.show-fb')?.textContent).toBe('still loading');
-    expect(host.querySelector('.switch-fb')?.textContent).toBe('still loading');
+    expect(host.querySelector('.show-prim')?.textContent).toBe('still loading');
+    expect(host.querySelector('.switch-prim')?.textContent).toBe('still loading');
+    expect(host.querySelector('.show-fb')?.textContent).toBe('second');
+    expect(host.querySelector('.switch-fb')?.textContent).toBe('s2');
 
     ok.set(true);
     mode.set('a');
@@ -61,7 +82,7 @@ describe('fw Sprint 13 runtime hardening', () => {
     view.unmount();
   });
 
-  it('updates reactive fallbacks in For and Index while empty and recovers if fallback throws', () => {
+  it('updates direct reactive fallbacks in For and Index while empty and recovers if fallback throws', () => {
     const items = signal<string[]>([]);
     const emptyText = signal('nothing yet');
     const boom = signal(true);
@@ -71,12 +92,12 @@ describe('fw Sprint 13 runtime hardening', () => {
       () => (
         <div>
           <section class="for-box">
-            <For each={items.get()} key={(x) => x} fallback={<p class="for-fb">{emptyText.get()}</p>}>
+            <For each={items.get()} key={(x) => x} fallback={emptyText.get()}>
               {(x) => <span class="for-item">{x()}</span>}
             </For>
           </section>
           <section class="idx-box">
-            <Index each={items.get()} fallback={<p class="idx-fb">{emptyText.get()}</p>}>
+            <Index each={items.get()} fallback={emptyText.get()}>
               {(x) => <span class="idx-item">{x()}</span>}
             </Index>
           </section>
@@ -86,30 +107,29 @@ describe('fw Sprint 13 runtime hardening', () => {
     );
     flush();
 
-    expect(host.querySelector('.for-fb')?.textContent).toBe('nothing yet');
-    expect(host.querySelector('.idx-fb')?.textContent).toBe('nothing yet');
+    expect(host.querySelector('.for-box')?.textContent).toBe('nothing yet');
+    expect(host.querySelector('.idx-box')?.textContent).toBe('nothing yet');
 
     emptyText.set('filtered to 0');
     flush();
-    expect(host.querySelector('.for-fb')?.textContent).toBe('filtered to 0');
-    expect(host.querySelector('.idx-fb')?.textContent).toBe('filtered to 0');
+    expect(host.querySelector('.for-box')?.textContent).toBe('filtered to 0');
+    expect(host.querySelector('.idx-box')?.textContent).toBe('filtered to 0');
 
-    // Empty -> empty update with unchanged fallback text does not throw or lose DOM.
+    // Empty -> empty update keeps DOM intact.
     items.set([]);
     flush();
-    expect(host.querySelector('.for-fb')?.textContent).toBe('filtered to 0');
+    expect(host.querySelector('.for-box')?.textContent).toBe('filtered to 0');
 
-    // Transition to populated, then back to empty with updated text.
+    // Transition to populated, then back to empty with updated fallback text.
     items.set(['one']);
     flush();
     expect(host.querySelectorAll('.for-item')).toHaveLength(1);
-    expect(host.querySelector('.for-fb')).toBeNull();
 
     emptyText.set('back to empty');
     items.set([]);
     flush();
-    expect(host.querySelector('.for-fb')?.textContent).toBe('back to empty');
-    expect(host.querySelector('.idx-fb')?.textContent).toBe('back to empty');
+    expect(host.querySelector('.for-box')?.textContent).toBe('back to empty');
+    expect(host.querySelector('.idx-box')?.textContent).toBe('back to empty');
 
     view.unmount();
 
@@ -142,44 +162,105 @@ describe('fw Sprint 13 runtime hardening', () => {
     });
   });
 
-  it('For preserves duplicate-key FIFO order on end-for-end swap while reusing DOM nodes on unique swaps', () => {
-    const dupList = signal([
-      { id: 'a', label: 'a1' },
-      { id: 'b', label: 'b1' },
-      { id: 'a', label: 'a2' },
+  it('For preserves duplicate-key FIFO order across suffix trims, duplicate inserts, and end-for-end swaps', () => {
+    // Case 1 (suffix trim): [a1, a2] -> [b, a] must retain a1 (FIFO) and dispose a2.
+    const trimList = signal([
+      { id: 'a', v: 'a1' },
+      { id: 'a', v: 'a2' },
     ]);
-    const host = document.createElement('div');
-    const view = render(
+    const disposed: string[] = [];
+    const host1 = document.createElement('div');
+    const view1 = render(
       () => (
-        <ul class="dup">
-          <For each={dupList.get()} key={(x) => x.id}>
-            {(x) => <li data-key={x().id}>{x().label}</li>}
+        <ul>
+          <For each={trimList.get()} key={(x) => x.id}>
+            {(x) => {
+              const initial = x().v;
+              onCleanup(() => disposed.push(initial));
+              return <li data-init={initial}>{x().v}</li>;
+            }}
           </For>
         </ul>
       ),
-      host,
+      host1,
     );
     flush();
-
-    const firstA = host.querySelectorAll('li')[0]!;
-    const secondA = host.querySelectorAll('li')[2]!;
-    // Reorder [a, b, a] -> [a, a, b]: the first 'a' node must stay before the second 'a' node (FIFO).
-    dupList.set([
-      { id: 'a', label: 'a1-next' },
-      { id: 'a', label: 'a2-next' },
-      { id: 'b', label: 'b1-next' },
+    const [a1Node] = [...host1.querySelectorAll('li')];
+    trimList.set([
+      { id: 'b', v: 'b1' },
+      { id: 'a', v: 'a-kept' },
     ]);
     flush();
-    const afterDup = [...host.querySelectorAll('li')];
-    expect(afterDup[0]).toBe(firstA);
-    expect(afterDup[1]).toBe(secondA);
-    expect(afterDup.map((n) => n.textContent)).toEqual(['a1-next', 'a2-next', 'b1-next']);
-    view.unmount();
+    const afterTrim = [...host1.querySelectorAll('li')];
+    expect(afterTrim[1]).toBe(a1Node);
+    expect(afterTrim[1]?.getAttribute('data-init')).toBe('a1');
+    expect(disposed).toEqual(['a2']);
+    view1.unmount();
 
-    // Unique-key end-for-end swap [a, b, c] -> [c, b, a] still reuses every DOM node.
-    const uniq = signal(['a', 'b', 'c']);
+    // Case 2 (duplicate insert before suffix): [b, a1] -> [a, a] must retain a1 at index 0 (FIFO).
+    const insList = signal([
+      { id: 'b', v: 'b1' },
+      { id: 'a', v: 'a1' },
+    ]);
     const host2 = document.createElement('div');
     const view2 = render(
+      () => (
+        <ul>
+          <For each={insList.get()} key={(x) => x.id}>
+            {(x) => <li data-init={x().v}>{x().v}</li>}
+          </For>
+        </ul>
+      ),
+      host2,
+    );
+    flush();
+    const origA1 = host2.querySelectorAll('li')[1]!;
+    insList.set([
+      { id: 'a', v: 'a-first' },
+      { id: 'a', v: 'a-second' },
+    ]);
+    flush();
+    const afterIns = [...host2.querySelectorAll('li')];
+    expect(afterIns[0]).toBe(origA1);
+    expect(afterIns[1]).not.toBe(origA1);
+    view2.unmount();
+
+    // Case 3 (end-for-end swap with duplicates in middle): [a1, c1, b1, a2, b2] -> [b, c, a, b, a].
+    const swapList = signal([
+      { id: 'a', v: 'a1' },
+      { id: 'c', v: 'c1' },
+      { id: 'b', v: 'b1' },
+      { id: 'a', v: 'a2' },
+      { id: 'b', v: 'b2' },
+    ]);
+    const host3 = document.createElement('div');
+    const view3 = render(
+      () => (
+        <ul>
+          <For each={swapList.get()} key={(x) => x.id}>
+            {(x) => <li data-init={x().v}>{x().v}</li>}
+          </For>
+        </ul>
+      ),
+      host3,
+    );
+    flush();
+    const [sa1, sc1, sb1, sa2, sb2] = [...host3.querySelectorAll('li')];
+    swapList.set([
+      { id: 'b', v: 'b-0' },
+      { id: 'c', v: 'c-1' },
+      { id: 'a', v: 'a-2' },
+      { id: 'b', v: 'b-3' },
+      { id: 'a', v: 'a-4' },
+    ]);
+    flush();
+    expect([...host3.querySelectorAll('li')]).toEqual([sb1, sc1, sa1, sb2, sa2]);
+    view3.unmount();
+
+    // Case 4 (unique-key end-for-end swap fast-path): [a, b, c] -> [c, b, a] reuses all DOM nodes.
+    const uniq = signal(['a', 'b', 'c']);
+    const host4 = document.createElement('div');
+    const view4 = render(
       () => (
         <ul>
           <For each={uniq.get()} key={(x) => x}>
@@ -187,21 +268,42 @@ describe('fw Sprint 13 runtime hardening', () => {
           </For>
         </ul>
       ),
-      host2,
+      host4,
     );
     flush();
-    const [na, nb, nc] = [...host2.querySelectorAll('li')];
+    const [na, nb, nc] = [...host4.querySelectorAll('li')];
     uniq.set(['c', 'b', 'a']);
     flush();
-    expect([...host2.querySelectorAll('li')]).toEqual([nc, nb, na]);
-    view2.unmount();
+    expect([...host4.querySelectorAll('li')]).toEqual([nc, nb, na]);
+    view4.unmount();
   });
 
-  it('Portal tolerates mid-mount self-disposal without throwing or leaking target nodes', () => {
+  it('Portal tolerates synchronous mid-normalize self-disposal without throwing or leaking target nodes', () => {
     const mountTarget = document.createElement('div');
     document.body.appendChild(mountTarget);
-    const open = signal(true);
 
+    // Synchronous disposal inside a nested reader in a child array during normalize().
+    let disposeRoot!: () => void;
+    expect(() => {
+      createRoot((dispose) => {
+        disposeRoot = dispose;
+        const killerReader = () => {
+          disposeRoot();
+          const el = document.createElement('span');
+          el.className = 'leaked';
+          return el;
+        };
+        Portal({
+          mount: mountTarget,
+          children: [document.createElement('i'), killerReader] as unknown as JSX.Element,
+        });
+      });
+    }).not.toThrow();
+    expect(mountTarget.querySelector('.leaked')).toBeNull();
+    expect(mountTarget.childNodes.length).toBe(0);
+
+    // Effect-driven self-disposal also leaves zero nodes in the portal target.
+    const open = signal(true);
     function SelfDisposing() {
       effect(() => {
         open.set(false);

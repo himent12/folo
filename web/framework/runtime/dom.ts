@@ -187,6 +187,7 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
     // owns what it creates) and read, like a reader an expression returned, in an effect of its own.
     if (isReader(value) && !expression) return insertExpression(parent, value(), current, marker, unwrap);
     const read = isReader(value) ? value : memo(value as () => unknown);
+    if (marker != null && (marker as PortalMarker).$$dead) return [];
     let cur: Current = current;
     renderEffect<Current>((c) => (cur = insertExpression(parent, read(), c, marker)), current);
     return () => cur;
@@ -211,7 +212,9 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
     }
     if (nonNodeAt !== -1) {
       array.length = nonNodeAt;
-      if (normalize(array, value, currentArray, unwrap, nonNodeAt, nonNodeItem)) {
+      const dynamic = normalize(array, value, currentArray, unwrap, nonNodeAt, nonNodeItem);
+      if (marker != null && (marker as PortalMarker).$$dead) return [];
+      if (dynamic) {
         // Reactive parts: resolve them in an effect of their own, so the code that built the array does not re-run.
         let cur: Current = current;
         renderEffect<Current>((c) => (cur = insertExpression(parent, array, c, marker, true)), current);
