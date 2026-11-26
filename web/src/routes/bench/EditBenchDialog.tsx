@@ -2,7 +2,8 @@
  * "Edit name and description": what a benchmark is called and what it stands for (where the camera is, what makes the
  * job hard). Both can change whatever its entries; the description is what an agent reads when it designs the plan.
  */
-import { bindable, computed, createUniqueId, css, effect, signal, untrack } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, onCleanup, signal, untrack } from 'fw';
+import { hub } from '$lib/api/index';
 import type { Bench } from '$lib/api/types';
 import { benchNameError, descriptionError } from '$lib/bench/rules';
 import Button from '$lib/ui/Button';
@@ -30,9 +31,17 @@ export default function EditBenchDialog(props: EditBenchDialogProps) {
   const error = signal<unknown>(undefined);
   const touched = signal(false);
 
+  let alive = true;
+  let submitSeq = 0;
+  onCleanup(() => {
+    alive = false;
+    submitSeq++;
+  });
+
   effect(() => {
     if (!open.get()) return;
     untrack(() => {
+      submitSeq++;
       name.set(props.bench.name);
       description.set(props.bench.description);
       busy.set(false);
@@ -62,20 +71,24 @@ export default function EditBenchDialog(props: EditBenchDialogProps) {
     error.set(undefined);
     const ers = errs.peek();
     if (ers.name || ers.description || busy.peek() || unchanged.peek()) return;
+    const seq = ++submitSeq;
+    const epoch = hub.epoch;
     busy.set(true);
     try {
       await props.onsave({ name: name.peek().trim(), description: description.peek().trim() });
-      open.set(false);
+      if (alive && seq === submitSeq && hub.epoch === epoch) open.set(false);
     } catch (err) {
+      if (!alive || seq !== submitSeq || hub.epoch !== epoch) return;
       error.set(err);
     } finally {
-      busy.set(false);
+      if (alive && seq === submitSeq) busy.set(false);
     }
   }
 
   return (
     <Dialog
       bind:open={open}
+      onbeforeclose={() => !busy.peek()}
       title="Edit name and description"
       footer={() => (
         <>
@@ -84,7 +97,7 @@ export default function EditBenchDialog(props: EditBenchDialogProps) {
               {reason.get()}
             </p>
           ) : null}
-          <Button variant="ghost" onclick={() => open.set(false)}>
+          <Button variant="ghost" disabled={busy.get()} onclick={() => !busy.peek() && open.set(false)}>
             Cancel
           </Button>
           <Gate reason={reason.get()}>

@@ -50,17 +50,20 @@ export default function Segmented<T extends string>(props: SegmentedProps<T>) {
   // WAI-ARIA radiogroup roving tabindex: the active enabled option is tabbable, or the first enabled option when the
   // current value matches no enabled option so the group never drops out of the Tab order.
   const tabTarget = computed(() => {
+    if (p.disabled) return -1;
     const opts = p.options;
     const cur = opts.findIndex((o) => o.value === value.get() && !o.disabled);
     return cur >= 0 ? cur : opts.findIndex((o) => !o.disabled);
   });
 
   function select(v: T) {
+    if (p.disabled) return;
     value.set(v);
     p.onchange?.(v);
   }
 
   function onkeydown(e: KeyboardEvent) {
+    if (p.disabled) return;
     const options = p.options;
     const n = options.length;
     if (n === 0) return;

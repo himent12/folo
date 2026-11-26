@@ -51,4 +51,33 @@ describe('Segmented', () => {
     expect(radios.map((r) => r.tabIndex)).toEqual([-1, -1, 0]);
     unmount();
   });
+
+  it('ignores keyboard navigation and drops out of tab order when disabled', () => {
+    const val = signal('a');
+    let changes = 0;
+    const { container: target, unmount } = render(() => (
+      <Segmented
+        label="Group"
+        disabled
+        bind:value={val}
+        onchange={() => changes++}
+        options={[
+          { value: 'a', label: 'A' },
+          { value: 'b', label: 'B' },
+        ]}
+      />
+    ));
+    flush();
+    const radios = [...target.querySelectorAll<HTMLButtonElement>('button[role="radio"]')];
+    expect(radios.map((r) => r.tabIndex)).toEqual([-1, -1]);
+    const group = target.querySelector<HTMLElement>('[role="radiogroup"]')!;
+    group.focus();
+    for (const key of ['ArrowRight', 'ArrowLeft', 'Home', 'End']) {
+      group.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+    }
+    flush();
+    expect(val.get()).toBe('a');
+    expect(changes).toBe(0);
+    unmount();
+  });
 });

@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { flush as flushSync } from 'fw';
+import { flush as flushSync, signal } from 'fw';
 import { render as renderFw } from '../../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { HttpApi } from '$lib/api/client';
@@ -213,6 +213,36 @@ describe('ExportDialog: ONNX download (weights_onnx)', () => {
     expect(target.ownerDocument.querySelector('dialog [role="status"]')?.textContent).toBe('Downloaded shapes-n-best-f16.onnx, 2.0 KiB.');
   });
 
+  it('halves the ONNX size estimate on weights_onnx-only servers when Half precision is checked', async () => {
+    const api = new HttpApi('http://folo.test');
+    vi.spyOn(api, 'system').mockResolvedValue({ ...SYS, features: ['weights_onnx'] });
+    hub.api = api;
+    c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+    const boxes = await pickOnnx();
+    const est = () => [...target.ownerDocument.querySelectorAll('dialog .opt')][1]!.querySelector('.est')!.textContent!.trim();
+    const before = est();
+    boxes[2]!.click(); // half
+    flushSync();
+    const after = est();
+    expect(after).not.toBe(before);
+    expect(before).toMatch(/10\.3 MiB/);
+    expect(after).toMatch(/5\.1 MiB/);
+  });
+
+  it('resets stale server capabilities if system() fails on a subsequent open', async () => {
+    const api = new HttpApi('http://folo.test');
+    const sysSpy = vi.spyOn(api, 'system').mockResolvedValueOnce({ ...SYS, features: ['weights_onnx'] }).mockRejectedValueOnce(new Error('offline'));
+    hub.api = api;
+    c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+    await pickOnnx();
+    expect(target.ownerDocument.querySelectorAll('dialog input[type="checkbox"]')).toHaveLength(3);
+    // Simulate a server switch where /api/system now fails: stale weights_onnx checkboxes must clear.
+    hub.epoch++;
+    flushSync();
+    await until(() => sysSpy.mock.calls.length === 2 && target.ownerDocument.querySelectorAll('dialog input[type="checkbox"]').length === 0, 'cleared switches');
+  });
 });
 
 describe('ExportDialog: closing while the file is on its way', () => {
@@ -269,6 +299,72 @@ describe('ExportDialog: closing while the file is on its way', () => {
     d.reject(new Error('disk full'));
     await until(() => failed.mock.calls.length > 0, 'the error toast');
     expect(failed.mock.calls[0]![1]).toBe('Could not export shapes-n-best');
+  });
+
+  it('resets out of running and suppresses stale completion if hub.epoch changes mid-export', async () => {
+    const api = new HttpApi('http://folo.test');
+    const d = deferred();
+    vi.spyOn(api, 'system').mockResolvedValue(SYS);
+    vi.spyOn(api, 'f16File').mockReturnValue(d.promise);
+    const saved: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      saved.push(this.download);
+    });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x');
+    const success = vi.spyOn(toast, 'success');
+    hub.api = api;
+    c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+    (await until(() => button('Download shapes-n-best-f16.folo'), 'the download button')).click();
+    flushSync();
+    expect(dialog().textContent).toContain('Preparing');
+
+    // Server switch: dialog resets immediately to idle (not wedged in running), and stale settlement is ignored.
+    hub.epoch++;
+    flushSync();
+    expect(dialog().textContent).not.toContain('Preparing');
+    expect(target.ownerDocument.querySelector<HTMLFieldSetElement>('dialog fieldset')!.disabled).toBe(false);
+    d.resolve(new File([new Uint8Array(2048)], 'shapes-n-best-f16.folo'));
+    await new Promise((r) => setTimeout(r, 20));
+    flushSync();
+    expect(saved).toEqual([]);
+    expect(success).not.toHaveBeenCalled();
+    expect(dialog().textContent).not.toContain('Downloaded');
+  });
+
+  it('switching props.model mid-export resets the new model dialog while letting Model A finish via toast', async () => {
+    const api = new HttpApi('http://folo.test');
+    const d = deferred();
+    vi.spyOn(api, 'system').mockResolvedValue(SYS);
+    vi.spyOn(api, 'f16File').mockReturnValue(d.promise);
+    const saved: string[] = [];
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      saved.push(this.download);
+    });
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:x');
+    const success = vi.spyOn(toast, 'success');
+    hub.api = api;
+    const current = signal<Model>(model);
+    const open = signal(true);
+    c = renderFw(() => <ExportDialog model={current.get()} bind:open={open} />, target);
+    flushSync();
+    (await until(() => button('Download shapes-n-best-f16.folo'), 'Model A download')).click();
+    flushSync();
+    expect(dialog().textContent).toContain('Preparing');
+
+    // Switch to Model B while Model A is still downloading: Model B's dialog resets to idle.
+    current.set({ ...model, id: 'm_y', name: 'fasteners-s-best' });
+    flushSync();
+    expect(dialog().textContent).not.toContain('Preparing');
+    expect(button('Download fasteners-s-best-f16.folo')).toBeDefined();
+
+    // Model A settles: downloads and toasts Model A without overwriting Model B's open dialog.
+    d.resolve(new File([new Uint8Array(2048)], 'shapes-n-best-f16.folo'));
+    await until(() => saved.length > 0, 'Model A save');
+    expect(saved).toEqual(['shapes-n-best-f16.folo']);
+    expect(success).toHaveBeenCalledWith('Downloaded shapes-n-best-f16.folo', '2.0 KiB');
+    expect(dialog().textContent).not.toContain('Downloaded');
+    expect(button('Download fasteners-s-best-f16.folo')).toBeDefined();
   });
 });
 

@@ -6,7 +6,7 @@ import CircleCheck from '$icons/circle-check';
 import CircleAlert from '$icons/circle-alert';
 import Info from '$icons/info';
 import X from '$icons/x';
-import { css, cubicOut, Dynamic, fly, For } from 'fw';
+import { css, cubicOut, Dynamic, effect, fly, For, onCleanup } from 'fw';
 import { toast } from './toast';
 import { motion } from './motion';
 import Meta from './Meta';
@@ -19,6 +19,34 @@ export default function Toaster() {
   let focused = false;
   let from: HTMLElement | null = null;
   const hold = () => toast.hold(hovered || focused);
+
+  // A focused toast removed programmatically (toast.clear / key replacement) never fires focusout on DOM removal, and
+  // while its fly outro runs the dying <li> still holds document.activeElement: release hold and return focus as soon
+  // as the focused toast leaves toast.items.
+  effect(() => {
+    const items = toast.items;
+    if (!focused) return;
+    const active = document.activeElement;
+    const host = active instanceof Element && el?.contains(active) ? active.closest<HTMLElement>('[data-toast]') : null;
+    const activeId = host ? Number(host.dataset.toast) : NaN;
+    if (host && items.some((t) => t.id === activeId)) return;
+    const inDyingToast = host !== null;
+    focused = false;
+    hold();
+    if (from?.isConnected && (inDyingToast || !active || active === document.body)) {
+      from.focus({ preventScroll: true });
+    }
+    from = null;
+  });
+
+  onCleanup(() => {
+    from = null;
+    if (hovered || focused) {
+      hovered = false;
+      focused = false;
+      hold();
+    }
+  });
 
   function onfocusin(e: FocusEvent) {
     const prev = e.relatedTarget;
@@ -88,11 +116,11 @@ export default function Toaster() {
                 </p>
               ) : null}
               {t().action ? (
-                <button class="action" onmousedown={keepFocus} onclick={() => close(t().id, t().action!.run)}>
+                <button type="button" class="action" onmousedown={keepFocus} onclick={() => close(t().id, t().action!.run)}>
                   {t().action!.label}
                 </button>
               ) : null}
-              <button class="close" aria-label="Dismiss" onmousedown={keepFocus} onclick={() => close(t().id)}>
+              <button type="button" class="close" aria-label="Dismiss" onmousedown={keepFocus} onclick={() => close(t().id)}>
                 <X size={14} />
               </button>
             </li>

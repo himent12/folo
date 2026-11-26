@@ -5,13 +5,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, type Rendered } from '../../../framework/testing';
 import Toaster from './Toaster';
 
-// happy-dom's Web Animations reject when an outro is cancelled; the fly is beside the point here.
-vi.mock('fw', async (orig) => ({ ...(await orig<typeof import('fw')>()), fly: () => ({}) }));
+// happy-dom's Web Animations reject when an outro is cancelled; the fly is beside the point except when testing outros.
+const flyState = vi.hoisted(() => ({ duration: 0 }));
+vi.mock('fw', async (orig) => ({ ...(await orig<typeof import('fw')>()), fly: () => (flyState.duration ? { duration: flyState.duration } : {}) }));
 import { toast, TOAST_MS } from './toast';
 
 let c: Rendered | undefined;
 
 afterEach(() => {
+  flyState.duration = 0;
   vi.useRealTimers();
   c?.unmount();
   c = undefined;
@@ -100,6 +102,64 @@ describe('Toaster and focus', () => {
     closeB!.click();
     flushSync();
     expect(document.activeElement).toBe(closeA);
+  });
+
+  it('releases hold and restores focus when a focused toast is dismissed programmatically', () => {
+    vi.useFakeTimers();
+    const field = setup();
+    const id = toast.show({ tone: 'info', title: 'Scoped', key: 'op', timeout: 50 });
+    const other = toast.show({ tone: 'info', title: 'Other', timeout: 50 });
+    flushSync();
+    const close = document.querySelector<HTMLButtonElement>(`[data-toast="${id}"] .close`)!;
+    close.focus();
+    close.dispatchEvent(new FocusEvent('focusin', { bubbles: true, relatedTarget: field }));
+    expect(document.activeElement).toBe(close);
+
+    // Programmatic clear removes the focused toast without firing focusout.
+    toast.clear('op');
+    flushSync();
+    expect(document.activeElement).toBe(field);
+    // Hold must be released so the remaining toast resumes auto-dismissing.
+    vi.advanceTimersByTime(3000);
+    expect(toast.items.some((t) => t.id === other)).toBe(false);
+  });
+
+  it('releases hold and restores focus immediately on programmatic dismissal even while the outro keeps the row attached', () => {
+    vi.useFakeTimers();
+    flyState.duration = 160;
+    const field = setup();
+    const id = toast.show({ tone: 'info', title: 'Outro', key: 'op', timeout: 50 });
+    const other = toast.show({ tone: 'info', title: 'Other', timeout: 50 });
+    flushSync();
+    const row = document.querySelector<HTMLLIElement>(`[data-toast="${id}"]`)!;
+    // Keep the row attached in the DOM during its outro animation (as browsers do for 160 ms).
+    row.animate = (() => ({ onfinish: null, cancel() {}, finished: Promise.resolve(), currentTime: 0 })) as unknown as typeof row.animate;
+    const close = row.querySelector<HTMLButtonElement>('.close')!;
+    close.focus();
+    close.dispatchEvent(new FocusEvent('focusin', { bubbles: true, relatedTarget: field }));
+    expect(document.activeElement).toBe(close);
+
+    toast.clear('op');
+    flushSync();
+    // Row is still attached while outro runs, yet focus must already return to `field` and hold must release.
+    expect(row.isConnected).toBe(true);
+    expect(document.activeElement).toBe(field);
+    vi.advanceTimersByTime(3000);
+    expect(toast.items.some((t) => t.id === other)).toBe(false);
+  });
+
+  it('releases toast hold on unmount', () => {
+    vi.useFakeTimers();
+    setup();
+    const id = toast.show({ tone: 'info', title: 'Hold me', timeout: 50 });
+    flushSync();
+    const close = document.querySelector<HTMLButtonElement>('.toast .close')!;
+    close.focus();
+    close.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    c!.unmount();
+    c = undefined;
+    vi.advanceTimersByTime(3000);
+    expect(toast.items.some((t) => t.id === id)).toBe(false);
   });
 });
 

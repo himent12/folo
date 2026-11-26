@@ -8,7 +8,7 @@
 import Info from '$icons/info';
 import Plus from '$icons/plus';
 import TriangleAlert from '$icons/triangle-alert';
-import { bindable, computed, createUniqueId, css, effect, signal, untrack } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Split } from '$lib/api/types';
@@ -64,11 +64,19 @@ export default function NewBenchDialog(props: { open?: boolean }) {
   const busy = signal(false);
   const error = signal<unknown>(undefined);
 
+  let alive = true;
+  let submitSeq = 0;
+  onCleanup(() => {
+    alive = false;
+    submitSeq++;
+  });
+
   // Every opening starts blank, on the first dataset with validation images (else the first dataset) and its
   // validation split: the split a benchmark is honest on.
   effect(() => {
     if (!open.get()) return;
     untrack(() => {
+      submitSeq++;
       name.set('');
       description.set('');
       kind.set('dataset');
@@ -184,6 +192,9 @@ export default function NewBenchDialog(props: { open?: boolean }) {
     touched.set(true);
     error.set(undefined);
     if (Object.values(errs.peek()).some((x) => x) || reason.peek() || busy.peek()) return;
+    const seq = ++submitSeq;
+    const epoch = hub.epoch;
+    const startPath = router.location.path;
     busy.set(true);
     try {
       const created = await hub.api.createBench({
@@ -192,20 +203,23 @@ export default function NewBenchDialog(props: { open?: boolean }) {
         source: kind.peek() === 'dataset' ? { kind: 'dataset', dataset_id: datasetId.peek(), split: split.peek() } : { kind: 'label_job', job_id: jobId.peek() },
         max_images: max.peek(),
       });
+      if (hub.epoch !== epoch) return;
       // The dialog closes first: what was made is said over the benchmark's page it opens.
-      open.set(false);
+      if (alive && seq === submitSeq) open.set(false);
       toast.success('Benchmark created', `${created.name} · ${imagesText(created.images)} · the default plan`);
-      router.go(`/benchmarks/${created.id}`);
+      if (alive && seq === submitSeq && router.location.path === startPath) router.go(`/benchmarks/${created.id}`);
     } catch (err) {
+      if (!alive || seq !== submitSeq || hub.epoch !== epoch) return;
       error.set(err);
     } finally {
-      busy.set(false);
+      if (alive && seq === submitSeq) busy.set(false);
     }
   }
 
   return (
     <Dialog
       bind:open={open}
+      onbeforeclose={() => !busy.peek()}
       title="New benchmark"
       description="Freeze a set of labeled images to grade models on. It starts with the default plan of conditions, which you can change until the first entry."
       footer={() => (
@@ -215,7 +229,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
               {missing.get()}
             </p>
           ) : null}
-          <Button variant="ghost" onclick={() => open.set(false)}>
+          <Button variant="ghost" disabled={busy.get()} onclick={() => !busy.peek() && open.set(false)}>
             Cancel
           </Button>
           <Gate reason={reason.get()}>
