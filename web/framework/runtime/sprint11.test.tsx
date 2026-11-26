@@ -3,7 +3,7 @@
 // ReactiveMap/ReactiveSet keySignal re-registration after unwatched mutation, spread with nullish
 // props + style: directives, and toClass with empty-string directive key.
 import { describe, expect, it, vi } from 'vitest';
-import { computed, createRoot, effect, flush, signal, watchedSignal } from './core';
+import { computed, createRoot, effect, flush, renderEffect, signal, watchedSignal } from './core';
 import { toClass } from './dom';
 import { ReactiveMap, ReactiveSet } from './reactivity';
 import { spread } from './spread';
@@ -43,32 +43,37 @@ describe('fw Sprint 11 runtime hardening', () => {
     expect(watches).toBe(0);
   });
 
-  it('rolls back partial subscriptions on throw so earlier sources do not leak and later subscribers connect all sources', () => {
+  it('rolls back partial subscriptions on throw so watches stay balanced and both same-effect retries and new/reentrant subscribers stay live', () => {
     let firstWatches = 0;
+    let secondWatches = 0;
     let shouldThrow = false;
+    const trigger = signal(0);
     const first = watchedSignal(1, (on) => {
       firstWatches += on ? 1 : -1;
     });
     const second = watchedSignal(2, (on) => {
       if (on && shouldThrow) throw new Error('watch-boom');
+      secondWatches += on ? 1 : -1;
     });
     const third = signal(3);
     const derived = computed(() => first.get() + second.get() + third.get());
     expect(derived.peek()).toBe(6);
-    expect(firstWatches).toBe(0);
+    expect([firstWatches, secondWatches]).toEqual([0, 0]);
 
     shouldThrow = true;
+    const retrySeen: number[] = [];
     const stop1 = createRoot((dispose) => {
       effect(() => {
-        void derived.get();
+        void trigger.get();
+        retrySeen.push(derived.get());
       });
       return dispose;
     });
     expect(() => flush()).toThrow('watch-boom');
-    // Rollback unsubscribed `first` immediately and left `derived` untracked (not stuck partially subscribed).
-    expect(firstWatches).toBe(0);
+    // Rollback unsubscribed `first` and detached `second` without leaving any watch unbalanced.
+    expect([firstWatches, secondWatches]).toEqual([0, 0]);
 
-    // Even before the failed root is disposed, a second subscriber must walk and subscribe every source including `third`.
+    // 1. Even before stop1 disposes, a second subscriber walks every source, invokes `second`'s watch(true), and receives `third` updates.
     shouldThrow = false;
     const seen: number[] = [];
     const stop2 = createRoot((dispose) => {
@@ -79,15 +84,62 @@ describe('fw Sprint 11 runtime hardening', () => {
     });
     flush();
     expect(seen).toEqual([6]);
-    expect(firstWatches).toBe(1);
+    expect([firstWatches, secondWatches]).toEqual([1, 1]);
 
     third.set(20);
     flush();
     expect(seen).toEqual([6, 23]);
 
-    stop1();
+    // 2. Retriggering the original failed effect via `trigger` must subscribe cleanly (not reuse an unsubscribed link).
     stop2();
-    expect(firstWatches).toBe(0);
+    expect([firstWatches, secondWatches]).toEqual([0, 0]);
+    trigger.set(1);
+    flush();
+    expect(retrySeen).toEqual([23]);
+    expect([firstWatches, secondWatches]).toEqual([1, 1]);
+
+    third.set(30);
+    flush();
+    expect(retrySeen).toEqual([23, 33]);
+
+    stop1();
+    expect([firstWatches, secondWatches]).toEqual([0, 0]);
+
+    // 3. A reentrant subscriber created synchronously inside watch(true) before watch(true) throws stays connected to later sources.
+    let reentrantStop: (() => void) | undefined;
+    const reentrantSeen: number[] = [];
+    let spawnOnce = true;
+    const tail = signal(2);
+    const lead = watchedSignal(1, (on) => {
+      if (on && spawnOnce) {
+        spawnOnce = false;
+        reentrantStop = createRoot((dispose) => {
+          renderEffect(() => {
+            reentrantSeen.push(reentrantDerived.get());
+          });
+          return dispose;
+        });
+        throw new Error('reentrant-boom');
+      }
+    });
+    const reentrantDerived = computed(() => lead.get() + tail.get());
+    expect(reentrantDerived.peek()).toBe(3);
+
+    const stopOuter = createRoot((dispose) => {
+      effect(() => {
+        void reentrantDerived.get();
+      });
+      return dispose;
+    });
+    expect(() => flush()).toThrow('reentrant-boom');
+    expect(reentrantSeen).toEqual([3]);
+
+    tail.set(10);
+    flush();
+    expect(reentrantSeen).toEqual([3, 11]);
+
+    stopOuter();
+    reentrantStop?.();
   });
 
   it('keeps ReactiveMap and ReactiveSet keySignals registered when re-subscribed after an unwatched mutation', () => {

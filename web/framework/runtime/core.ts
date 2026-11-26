@@ -141,7 +141,7 @@ class WatchedSignalNode<T> extends SignalNode<T> {
   override _subscribe(node: Link): void {
     const first = this._targets === undefined;
     subscribeLink(this, node);
-    if (first && this._targets !== undefined) this._watch(true);
+    if (first && this._targets !== undefined) try { this._watch(true); } catch (e) { unsubscribeLink(this, node); throw e; }
   }
   override _unsubscribe(node: Link): void {
     if (this._targets === undefined) return;
@@ -242,16 +242,18 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     }
   }
   _subscribe(node: Link): void {
-    const first = this._targets === undefined;
-    subscribeLink(this, node);
-    if (!first) return;
-    this._flags |= OUTDATED | TRACKING;
-    let n = this._sources;
-    try { for (; n !== undefined; n = n._ns) n._s._subscribe(n); } catch (e) {
-      unsubscribeLink(this, node);
-      if (this._targets === undefined) { this._flags &= ~TRACKING; try { unsubscribeSources(this._sources, undefined, n); } catch {} }
-      throw e;
+    if (this._targets === undefined) {
+      this._flags |= OUTDATED | TRACKING;
+      let n = this._sources;
+      try { for (; n !== undefined; n = n._ns) n._s._subscribe(n); } catch (e) {
+        if (this._targets === undefined) {
+          this._flags &= ~(TRACKING | NOTIFIED);
+          try { unsubscribeSources(this._sources, undefined, n); } catch {}
+        }
+        throw e;
+      }
     }
+    subscribeLink(this, node);
   }
   _unsubscribe(node: Link): void {
     if (this._targets === undefined) return;

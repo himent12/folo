@@ -59,7 +59,18 @@ export function linkDependency(source: Source, target: Target): Link | undefined
     if (target._sources !== undefined) target._sources._ns = node;
     target._sources = node;
     source._node = node;
-    if (target._flags & TRACKING) source._subscribe(node);
+    if (target._flags & TRACKING) {
+      try {
+        source._subscribe(node);
+      } catch (e) {
+        if (node._ps !== undefined) node._ps._ns = node._ns;
+        if (node._ns !== undefined) node._ns._ps = node._ps;
+        if (target._sources === node) target._sources = node._ps;
+        if (source._node === node) source._node = node._rb;
+        node._ps = node._ns = node._rb = undefined;
+        throw e;
+      }
+    }
     return node;
   }
   if (node._v === -1) {
