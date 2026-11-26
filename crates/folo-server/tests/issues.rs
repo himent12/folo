@@ -239,15 +239,17 @@ impl Drop for DanglingLinkGuard {
     }
 }
 
-fn create_dangling_link(link: &Path, scratch: &Path) -> DanglingLinkGuard {
+fn create_dangling_link_to(link: &Path, target: &Path) -> DanglingLinkGuard {
+    // Construct the cleanup guard before spawning `mklink /j` so unwinding reaps `ChildGuard` first and then
+    // removes the junction before `TestDir` cleans up.
+    let guard = DanglingLinkGuard(link.to_path_buf());
     #[cfg(windows)]
     {
-        let target = scratch.join("dead-target");
-        std::fs::create_dir_all(&target).unwrap();
+        std::fs::create_dir_all(target).unwrap();
         let mut cmd = std::process::Command::new("cmd");
         cmd.args(["/d", "/c", "mklink", "/j"])
             .arg(link)
-            .arg(&target)
+            .arg(target)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -261,13 +263,17 @@ fn create_dangling_link(link: &Path, scratch: &Path) -> DanglingLinkGuard {
             std::thread::sleep(Duration::from_millis(10));
         };
         assert!(status.success(), "mklink /j failed with {status}");
-        std::fs::remove_dir(&target).unwrap();
+        std::fs::remove_dir(target).unwrap();
     }
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(scratch.join("dead-target"), link).unwrap();
+        std::os::unix::fs::symlink(target, link).unwrap();
     }
-    DanglingLinkGuard(link.to_path_buf())
+    guard
+}
+
+fn create_dangling_link(link: &Path, scratch: &Path) -> DanglingLinkGuard {
+    create_dangling_link_to(link, &scratch.join("dead-target"))
 }
 
 #[tokio::test]
@@ -302,20 +308,19 @@ async fn real_issues_report_and_refresh_dangling_links() {
 async fn real_issues_refresh_dangling_split_outside_manifest_and_dataset_root() {
     let t = TestDir::new("issues-dangling-split-outside");
     let (home, cfg_dir, data_dir, ext_dir) =
-        (t.join("home"), t.join("cfg"), t.join("data"), t.join("external"));
+        (t.join("home"), t.join("cfg").join("nested"), t.join("data"), t.join("cfg").join("external"));
     write_shapes(&data_dir);
     std::fs::create_dir_all(&cfg_dir).unwrap();
     std::fs::create_dir_all(&ext_dir).unwrap();
     let dead_val = ext_dir.join("val_dead");
-    let guard = create_dangling_link(&dead_val, t.path());
+    let guard = create_dangling_link_to(&dead_val, &t.join("dead-target-a"));
 
+    // Manifest-relative fallback (`../external/val_dead` resolves relative to `cfg/nested`, outside both
+    // `cfg/nested` and `data`).
     let yaml = cfg_dir.join("data.yaml");
     std::fs::write(
         &yaml,
-        format!(
-            "path: ../data\ntrain: images/train\nval: {}\nnames: [circle, square, triangle]\n",
-            dead_val.to_string_lossy().replace('\\', "/")
-        ),
+        "path: ../../data\ntrain: images/train\nval: ../external/val_dead\nnames: [circle, square, triangle]\n",
     )
     .unwrap();
 
@@ -325,15 +330,32 @@ async fn real_issues_refresh_dangling_split_outside_manifest_and_dataset_root() 
     let uri = format!("/api/datasets/{}/issues?limit=1000", ds.id);
     let all: IssuePage = ok(&app, get(&uri)).await;
     assert!(
-        all.issues.iter().any(|i| i.kind == "other" && i.message.contains("dangling symlink")),
-        "expected dangling split warning in {all:?}"
+        all.issues.iter().any(|i| i.kind == "other" && i.message.contains("dead-target-a")),
+        "expected initial dangling split warning in {all:?}"
     );
 
     // Removing the external dangling split link invalidates the fingerprint and clears the warning.
     drop(guard);
-    let after: IssuePage = ok(&app, get(&uri)).await;
+    let after_remove: IssuePage = ok(&app, get(&uri)).await;
     assert!(
-        after.issues.iter().all(|i| !(i.kind == "other" && i.message.contains("dangling symlink"))),
-        "stale dangling split issue survived removal: {after:?}"
+        after_remove.issues.iter().all(|i| !(i.kind == "other" && i.message.contains("dangling symlink"))),
+        "stale dangling split issue survived removal: {after_remove:?}"
+    );
+
+    // Recreating it (now pointing at a different missing target) invalidates the fingerprint and reports the new target.
+    let guard_b = create_dangling_link_to(&dead_val, &t.join("dead-target-b"));
+    let after_recreate: IssuePage = ok(&app, get(&uri)).await;
+    assert!(
+        after_recreate.issues.iter().any(|i| i.kind == "other" && i.message.contains("dead-target-b")),
+        "recreated dangling split was not detected: {after_recreate:?}"
+    );
+
+    // Retargeting the dangling link refreshes the reported target too.
+    drop(guard_b);
+    let _guard_c = create_dangling_link_to(&dead_val, &t.join("dead-target-c"));
+    let after_retarget: IssuePage = ok(&app, get(&uri)).await;
+    assert!(
+        after_retarget.issues.iter().any(|i| i.kind == "other" && i.message.contains("dead-target-c")),
+        "retargeted dangling split was not refreshed: {after_retarget:?}"
     );
 }

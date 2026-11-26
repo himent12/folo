@@ -59,6 +59,9 @@ async fn a_failed_registration_does_not_read_what_the_guard_refuses() {
         }
     }
     let forbidden_link = t.join("b").join("forbidden").join("dead");
+    // Construct the cleanup guard before creating the junction/symlink so unwinding kills/reaps `mklink` first
+    // and then removes the junction before `TestDir` drops.
+    let link_guard = LinkGuard(forbidden_link.clone());
     #[cfg(windows)]
     {
         let target = t.join("dead-target");
@@ -84,9 +87,10 @@ async fn a_failed_registration_does_not_read_what_the_guard_refuses() {
     }
     #[cfg(unix)]
     std::os::unix::fs::symlink(t.join("dead-target"), &forbidden_link).unwrap();
-    let _link_guard = LinkGuard(forbidden_link.clone());
 
     assert_eq!(folo_server::dangling_link_message(&forbidden_link), None);
+    let fp_with_link = folo_server::Fingerprint::of(std::slice::from_ref(&forbidden_link), &[]);
+    assert_eq!((fp_with_link.files, fp_with_link.bytes), (0, 0));
     let mut report = folo_data::check::CheckReport {
         root: t.join("c").join("open"),
         format: folo_data::Format::Yolo,
@@ -102,4 +106,46 @@ async fn a_failed_registration_does_not_read_what_the_guard_refuses() {
     };
     folo_server::enrich_dangling_symlinks(&t.join("c").join("open"), &mut report);
     assert!(report.issues[0].message.contains(folo_data::guard::DENIED));
+
+    // End-to-end confined registration whose manifest references a refused dangling split: `Index::build`
+    // registers cleanly without probing or emitting a dangling-link diagnostic for the refused folder.
+    let allowed_ds = t.join("d").join("allowed");
+    std::fs::create_dir_all(allowed_ds.join("images").join("train")).unwrap();
+    std::fs::create_dir_all(allowed_ds.join("labels").join("train")).unwrap();
+    image::RgbImage::from_pixel(16, 16, image::Rgb([10, 20, 30]))
+        .save(allowed_ds.join("images").join("train").join("a.png"))
+        .unwrap();
+    std::fs::write(allowed_ds.join("labels").join("train").join("a.txt"), "0 0.5 0.5 0.4 0.4\n").unwrap();
+    std::fs::write(
+        allowed_ds.join("data.yaml"),
+        "path: .\ntrain: images/train\nval: ../../b/forbidden/dead\nnames: [x]\n",
+    )
+    .unwrap();
+    let req = Request::post("/api/datasets")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "path": allowed_ds }).to_string()))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let ds: Value = serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let issues_req = Request::get(format!("/api/datasets/{}/issues?limit=100", ds["id"].as_str().unwrap()))
+        .body(Body::empty())
+        .unwrap();
+    let issues_res = app.clone().oneshot(issues_req).await.unwrap();
+    assert_eq!(issues_res.status(), StatusCode::OK);
+    let issues_body: Value =
+        serde_json::from_slice(&issues_res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(
+        issues_body["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|i| !i["message"].as_str().unwrap_or("").contains("dangling symlink")),
+        "refused forbidden link must not be probed during registration: {issues_body}"
+    );
+
+    // Fingerprinting a refused path never probes it: removing the forbidden link leaves the fingerprint identical.
+    drop(link_guard);
+    let fp_without_link = folo_server::Fingerprint::of(&[forbidden_link], &[]);
+    assert_eq!(fp_with_link, fp_without_link);
 }

@@ -59,11 +59,16 @@ impl Fingerprint {
             }
         };
         for dir in dirs {
+            if !links::guard_allows_probe(dir) {
+                continue;
+            }
             feed(dir.to_string_lossy().as_bytes());
             // A missing path is part of the fingerprint too: creating it must count as a change.
             feed(&[u8::from(dir.exists())]);
             let walk = walkdir::WalkDir::new(dir).follow_links(true).sort_by_file_name();
-            let walk = walk.into_iter().filter_entry(|e| !excluded(e.path(), exclude));
+            let walk = walk
+                .into_iter()
+                .filter_entry(|e| !excluded(e.path(), exclude) && links::guard_allows_probe(e.path()));
             for entry in walk {
                 let e = match entry {
                     Ok(e) => e,
@@ -73,6 +78,7 @@ impl Fingerprint {
                         // or retargeting a broken link invalidates the cached index and its issues.
                         if let Some(p) = err.path()
                             && !excluded(p, exclude)
+                            && links::guard_allows_probe(p)
                         {
                             let rel = p.strip_prefix(dir).unwrap_or(p);
                             feed(rel.to_string_lossy().as_bytes());
@@ -560,14 +566,24 @@ fn add_watch_dir(dirs: &mut Vec<PathBuf>, d: PathBuf) -> bool {
     true
 }
 
-/// The paths whose files make up a dataset: `base`, the dataset root and everything folo-data read it from
+/// The paths whose files make up a dataset: `base`, the dataset root, everything folo-data read it from
 /// ([`folo_data::LoadedDataset::sources`]: split folders and lists outside `base`, folders of every candidate image
-/// and label, paths that do not exist yet), minimised so no path is inside another. Sorted.
-fn watch_dirs(base: &Path, ds: &folo_data::LoadedDataset) -> Vec<PathBuf> {
+/// and label, paths that do not exist yet), and guarded YOLO diagnostic split candidates, minimised so no path is
+/// inside another. Sorted.
+fn watch_dirs(input_path: &Path, base: &Path, ds: &folo_data::LoadedDataset) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = vec![base.to_path_buf()];
     add_watch_dir(&mut dirs, resolve_dotdot(&ds.root));
     for s in &ds.sources {
-        add_watch_dir(&mut dirs, resolve_dotdot(s));
+        let abs = resolve_dotdot(s);
+        if links::guard_allows_probe(&abs) {
+            add_watch_dir(&mut dirs, abs);
+        }
+    }
+    for s in links::diagnostic_watch_paths(input_path, &ds.root, ds.format) {
+        let abs = resolve_dotdot(&std::path::absolute(&s).unwrap_or(s));
+        if links::guard_allows_probe(&abs) {
+            add_watch_dir(&mut dirs, abs);
+        }
     }
     dirs.sort();
     dirs
@@ -642,7 +658,7 @@ impl Index {
         let (ds, report, fingerprint) = loop {
             let fingerprint = Fingerprint::of(&watched, &excluded);
             let ds = folo_data::open_with(&p, &opts).map_err(|e| data_error(e, path))?;
-            let now = watch_dirs(&base, &ds);
+            let now = watch_dirs(&p, &base, &ds);
             attempt += 1;
             if now == watched || attempt == 3 {
                 // Only run the header-check pass once the watched set has stabilized so external-source datasets
@@ -650,21 +666,6 @@ impl Index {
                 let mut report = folo_data::check::check(&p, &check_opts).map_err(|e| data_error(e, path))?;
                 links::enrich_dangling_symlinks(&p, &mut report);
                 watched = now;
-                let mut watched_extra = false;
-                for issue in &report.issues {
-                    let abs = resolve_dotdot(
-                        &std::path::absolute(&issue.file).unwrap_or_else(|_| issue.file.clone()),
-                    );
-                    if add_watch_dir(&mut watched, abs) {
-                        watched_extra = true;
-                    }
-                }
-                let fingerprint = if watched_extra {
-                    watched.sort();
-                    Fingerprint::of(&watched, &excluded)
-                } else {
-                    fingerprint
-                };
                 break (ds, report, fingerprint);
             }
             watched = now;

@@ -29,7 +29,7 @@ fn maybe_link(meta: &std::fs::Metadata) -> bool {
 /// Checking `p.parent()` prevents probing dangling links or missing entries inside a refused directory under
 /// `folo mcp --confine` (where `canonicalize(p)` fails for a dangling link, while `canonicalize(parent)` resolves
 /// outside the confined root and is rejected).
-fn guard_allows_probe(p: &Path) -> bool {
+pub(crate) fn guard_allows_probe(p: &Path) -> bool {
     let parent_ok = p
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -498,6 +498,46 @@ fn split_yaml_flow_items(inner: &str) -> Vec<&str> {
     items
 }
 
+/// Candidate paths for one split entry in `yaml` (`root`-relative, `yaml_dir`-relative, and leading-`..`-stripped
+/// fallbacks), filtered by [`guard_allows_probe`].
+fn yaml_split_candidates(raw: &str, yaml_dir: &Path, root: &Path) -> Vec<PathBuf> {
+    let p = Path::new(raw);
+    let candidates: Vec<PathBuf> = if p.is_absolute() {
+        vec![p.to_path_buf()]
+    } else {
+        let stripped: PathBuf = p
+            .components()
+            .skip_while(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir))
+            .collect();
+        vec![root.join(p), yaml_dir.join(p), root.join(&stripped), yaml_dir.join(&stripped)]
+    };
+    candidates.into_iter().filter(|cand| guard_allows_probe(cand)).collect()
+}
+
+/// Guarded diagnostic split candidate paths that [`enrich_dangling_symlinks`] may inspect for a YOLO dataset,
+/// returned so [`Index::build`](super::Index::build) watches them before fingerprinting (including while absent,
+/// so creating, removing, or retargeting a manifest-relative fallback link invalidates the cached index).
+pub(crate) fn diagnostic_watch_paths(input_path: &Path, root: &Path, format: Format) -> Vec<PathBuf> {
+    if format != Format::Yolo {
+        return Vec::new();
+    }
+    let Some(yaml) = find_yolo_yaml(input_path, root) else {
+        return Vec::new();
+    };
+    if folo_data::guard::check(&yaml).is_err() {
+        return Vec::new();
+    }
+    let Ok(text) = std::fs::read_to_string(&yaml) else {
+        return Vec::new();
+    };
+    let yaml_dir = yaml.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let mut out = Vec::new();
+    for raw in parse_yaml_split_paths(&text) {
+        out.extend(yaml_split_candidates(&raw, yaml_dir, root));
+    }
+    out
+}
+
 /// Reads split paths declared in a YOLO YAML (`train`, `val`, `valid`, `test`) so custom split folders (outside
 /// `images/{train,val,test}`) are scanned for dangling symlinks too.
 fn collect_yaml_split_dirs(
@@ -512,20 +552,7 @@ fn collect_yaml_split_dirs(
     let Ok(text) = std::fs::read_to_string(yaml) else { return };
     let yaml_dir = yaml.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     for raw in parse_yaml_split_paths(&text) {
-        let p = Path::new(&raw);
-        let candidates: Vec<PathBuf> = if p.is_absolute() {
-            vec![p.to_path_buf()]
-        } else {
-            let stripped: PathBuf = p
-                .components()
-                .skip_while(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::CurDir))
-                .collect();
-            vec![root.join(p), yaml_dir.join(p), root.join(&stripped), yaml_dir.join(&stripped)]
-        };
-        for cand in candidates {
-            if !guard_allows_probe(&cand) {
-                continue;
-            }
+        for cand in yaml_split_candidates(&raw, yaml_dir, root) {
             if dangling_link_message(&cand).is_some() {
                 extra_links.insert(cand);
                 break;
