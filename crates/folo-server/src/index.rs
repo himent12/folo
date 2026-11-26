@@ -472,6 +472,35 @@ pub fn free_name(base: String, taken: impl Fn(&str) -> bool) -> String {
 use folo_data::paths::relative_to;
 pub use folo_data::paths::{lexical, normalize as absolute};
 
+/// Normalizes `p` without breaking symlink-before-`..` resolution on Unix: when `p` contains no `..`, returns
+/// `lexical(p)` untouched so symlinked dataset bases deduplicate cleanly; when `p` contains `..`, resolves existing
+/// prefixes through symlinks before popping `..` on Unix so a symlinked `data.yaml` folder with `path: ../images/birds`
+/// resolves to the link target's sibling `images/birds` / `labels/birds`.
+fn resolve_dotdot(p: &Path) -> PathBuf {
+    if !p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return lexical(p);
+    }
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                #[cfg(unix)]
+                {
+                    if let Ok(canon) = std::fs::canonicalize(&out) {
+                        out = canon;
+                    }
+                }
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// The paths whose files make up a dataset: `base`, the dataset root and everything folo-data read it from
 /// ([`folo_data::LoadedDataset::sources`]: split folders and lists outside `base`, folders of every candidate image
 /// and label, paths that do not exist yet), minimised so no path is inside another. Sorted.
@@ -483,9 +512,9 @@ fn watch_dirs(base: &Path, ds: &folo_data::LoadedDataset) -> Vec<PathBuf> {
             dirs.push(d);
         }
     };
-    add(lexical(&ds.root));
+    add(resolve_dotdot(&ds.root));
     for s in &ds.sources {
-        add(lexical(s));
+        add(resolve_dotdot(s));
     }
     dirs.sort();
     dirs
@@ -503,7 +532,7 @@ pub fn reads(path: &str, format: DatasetFormat) -> std::result::Result<Vec<PathB
     let ds = folo_data::open_with(&p, &opts).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for s in [base, ds.root].into_iter().chain(ds.sources) {
-        let s = lexical(&s);
+        let s = resolve_dotdot(&s);
         out.push(resolved(&s).map_err(|e| format!("{}: {e}", folo_data::paths::shown(&s)))?);
     }
     out.sort();
@@ -571,7 +600,7 @@ impl Index {
             }
             watched = now;
         };
-        let root = absolute(&ds.root);
+        let root = resolve_dotdot(&std::path::absolute(&ds.root).unwrap_or_else(|_| ds.root.clone()));
         let issues = report
             .issues
             .iter()
@@ -582,7 +611,10 @@ impl Index {
                     folo_data::check::Severity::Warning => IssueSeverity::Warning,
                     folo_data::check::Severity::Info => IssueSeverity::Info,
                 },
-                file: relative_to(&i.file, &root),
+                file: relative_to(
+                    &resolve_dotdot(&std::path::absolute(&i.file).unwrap_or_else(|_| i.file.clone())),
+                    &root,
+                ),
                 line: i.line.map(|l| l.min(u32::MAX as usize) as u32),
                 message: i.message.clone(),
                 fix: i.fix.clone(),
@@ -604,7 +636,8 @@ impl Index {
                     Some(s) => s,
                     None => folo_data::probe_size(&e.image).unwrap_or((0, 0)),
                 };
-                let file = relative_to(&e.image, &root);
+                let img = resolve_dotdot(&std::path::absolute(&e.image).unwrap_or_else(|_| e.image.clone()));
+                let file = relative_to(&img, &root);
                 let boxes = e
                     .boxes
                     .iter()

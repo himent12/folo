@@ -227,6 +227,61 @@ fn creating_a_label_mirror_invalidates_the_index() {
     assert_eq!(build().1, 0, "the mirror exists and has no label");
 }
 
+/// A dataset whose root is spelled with `images/images/../birds` (or `images\images\..\birds` on Windows)
+/// normalizes cleanly and invalidates its cached index when its `labels/birds` mirror is created or removed.
+#[test]
+fn dotdot_in_images_root_tracks_its_label_mirror() {
+    let dir = tmp("mirror-dotdot");
+    let ds = dir.join("images/birds");
+    std::fs::create_dir_all(ds.join("train")).unwrap();
+    std::fs::create_dir_all(dir.join("images/images")).unwrap();
+    std::fs::write(ds.join("data.yaml"), "train: train\nnames: [bird]\n").unwrap();
+    image::RgbImage::new(8, 8).save(ds.join("train/a.png")).unwrap();
+    std::fs::write(ds.join("train/a.txt"), "0 0.5 0.5 0.5 0.5\n").unwrap();
+
+    let spelled = dir.join("images").join("images").join("..").join("birds");
+    let idx = Index::build(spelled.to_str().unwrap(), DatasetFormat::Auto, &[]).unwrap();
+    assert_eq!(idx.list_images(&ImageQuery { limit: 1, ..Default::default() }).images[0].boxes.len(), 1);
+    assert!(idx.image_path("0").unwrap().is_file());
+    assert!(idx.is_fresh());
+
+    std::fs::create_dir_all(dir.join("labels/birds")).unwrap();
+    assert!(!idx.is_fresh(), "creating labels/birds must invalidate the cached index");
+    let idx2 = Index::build(spelled.to_str().unwrap(), DatasetFormat::Auto, &[]).unwrap();
+    assert_eq!(idx2.list_images(&ImageQuery { limit: 1, ..Default::default() }).images[0].boxes.len(), 0);
+}
+
+/// A `data.yaml` reached through a symlinked folder (`work/current -> releases/v7/meta`) with `path: ../images/birds`:
+/// `watch_dirs` follows the symlink before `..` (instead of collapsing `current/..` as text) so creating or removing
+/// `releases/v7/labels/birds` invalidates the cached index, and `Index::image_path` resolves the real image file.
+#[cfg(unix)]
+#[test]
+fn symlinked_yaml_folder_tracks_label_mirror_and_resolves_images() {
+    let dir = tmp("mirror-symlink-yaml");
+    let release = dir.join("releases/v7");
+    std::fs::create_dir_all(release.join("images/birds/train")).unwrap();
+    std::fs::create_dir_all(release.join("meta")).unwrap();
+    std::fs::create_dir_all(dir.join("work")).unwrap();
+    image::RgbImage::new(8, 8).save(release.join("images/birds/train/a.png")).unwrap();
+    std::fs::write(release.join("images/birds/train/a.txt"), "0 0.5 0.5 0.5 0.5\n").unwrap();
+    std::fs::write(release.join("meta/data.yaml"), "path: ../images/birds\ntrain: train\nnames: [bird]\n")
+        .unwrap();
+    std::os::unix::fs::symlink(release.join("meta"), dir.join("work/current")).unwrap();
+
+    let yaml = dir.join("work/current/data.yaml");
+    let idx = Index::build(yaml.to_str().unwrap(), DatasetFormat::Auto, &[]).unwrap();
+    assert_eq!(idx.list_images(&ImageQuery { limit: 1, ..Default::default() }).images[0].boxes.len(), 1);
+    assert!(idx.image_path("0").unwrap().is_file(), "image_path must resolve through symlink before `..`");
+    assert!(idx.is_fresh());
+
+    std::fs::create_dir_all(release.join("labels/birds")).unwrap();
+    assert!(!idx.is_fresh(), "creating releases/v7/labels/birds must invalidate the cached index");
+    let idx2 = Index::build(yaml.to_str().unwrap(), DatasetFormat::Auto, &[]).unwrap();
+    assert_eq!(idx2.list_images(&ImageQuery { limit: 1, ..Default::default() }).images[0].boxes.len(), 0);
+    std::fs::remove_dir(release.join("labels/birds")).unwrap();
+    assert!(!idx2.is_fresh(), "removing releases/v7/labels/birds must invalidate the cached index");
+}
+
 #[test]
 fn errors_map_to_api_codes() {
     let dir = tmp("errors");

@@ -235,21 +235,40 @@ impl Inner {
         if let Some(n) = &a.name {
             check_name("name", n)?;
         }
+        if self.confinement.active()
+            && self.confinement.is_remote_proxy()
+            && let Some(proxy) = &self.proxy
+        {
+            return Err(Error::new(
+                http::StatusCode::NOT_IMPLEMENTED,
+                "not_supported",
+                format!(
+                    "register_dataset with --confine is not available through remote server {}",
+                    proxy.base()
+                ),
+            )
+            .hint("run `folo mcp --confine` against a local `folo serve` sharing --data-dir, without --server, or without --confine"));
+        }
         let path = self.resolve(a.path).await?;
         let req = RegisterDataset { name: a.name, path: folo_api::json::path(&path), format: a.format };
-        // The store returns the existing dataset for a folder registered before (same canonical path).
-        let (d, existed) = self
+        // Track whether this call created a brand-new exclusive registration (`rollback` token) so a confinement
+        // failure rolls back atomically without ever deleting an already-registered or concurrently-used dataset.
+        let (d, rollback, existed) = self
             .blocking(move |s| {
                 let before: HashSet<String> = s.list_datasets()?.into_iter().map(|d| d.id).collect();
-                let d = s.register_dataset(req)?;
-                let existed = before.contains(&d.id);
-                Ok((d, existed))
+                let (d, rollback) = s.register_dataset_tracked(req)?;
+                let existed = rollback.is_none() && before.contains(&d.id);
+                Ok((d, rollback, existed))
             })
             .await?;
         // The root is inside the data dir; with --confine its contents must be too (a data.yaml or links can point
-        // elsewhere). If not, unregister it again (files are never touched); one registered earlier stays.
+        // elsewhere). If not, roll back only a fresh exclusive registration (files are never touched).
         if let Err(e) = self.ensure_dataset(&d.id).await {
-            if !existed {
+            if let Some(token) = rollback {
+                let (id, c) = (d.id.clone(), self.confinement.clone());
+                let _ = self.blocking(move |s| s.delete_dataset_if_unused(&id, &token)).await;
+                c.forget(&d.id);
+            } else if !existed && self.proxy.is_none() {
                 let (id, c) = (d.id.clone(), self.confinement.clone());
                 let _ = self.blocking(move |s| s.delete_dataset(&id)).await;
                 c.forget(&d.id);
@@ -289,7 +308,7 @@ impl Inner {
                 if proxy.is_mock() {
                     return Ok(());
                 }
-                if !is_loopback_url(proxy.base()) {
+                if !crate::confine::is_local_url(proxy.base()) {
                     return Err(Error::new(
                         http::StatusCode::NOT_IMPLEMENTED,
                         "not_supported",
@@ -362,22 +381,6 @@ impl Inner {
         );
         out(&d, summary)
     }
-}
-
-/// True when `url` targets a loopback address (`localhost`, `127.x.x.x`, or `[::1]`) on this machine.
-fn is_loopback_url(url: &str) -> bool {
-    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")).unwrap_or(url);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    let host = if let Some(after) = authority.strip_prefix('[') {
-        after.split(']').next().unwrap_or("")
-    } else {
-        authority.split(':').next().unwrap_or("")
-    };
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 #[cfg(test)]
@@ -573,11 +576,196 @@ mod tests {
 
     #[test]
     fn loopback_url_detection_covers_local_and_remote_hosts() {
-        assert!(is_loopback_url("http://127.0.0.1:7878"));
-        assert!(is_loopback_url("http://localhost:7878/api"));
-        assert!(is_loopback_url("https://[::1]:7878"));
-        assert!(!is_loopback_url("http://192.168.1.5:7878"));
-        assert!(!is_loopback_url("https://gpu.example.com:7878"));
+        assert!(crate::confine::is_local_url("http://127.0.0.1:7878"));
+        assert!(crate::confine::is_local_url("http://localhost:7878/api"));
+        assert!(crate::confine::is_local_url("https://[::1]:7878"));
+        assert!(!crate::confine::is_local_url("http://192.168.1.5:7878"));
+        assert!(!crate::confine::is_local_url("https://gpu.example.com:7878"));
+    }
+
+    #[tokio::test]
+    async fn confined_remote_proxy_allows_remote_datasets_and_refuses_remote_register() {
+        let root = folo_test_support::TestDir::new("mcp-confine-remote-datasets");
+        let remote_dir = root.join("remote_server");
+        let local_dir = root.join("local_client");
+        std::fs::create_dir_all(&remote_dir).unwrap();
+        std::fs::create_dir_all(&local_dir).unwrap();
+        std::fs::write(root.join("outside.jpg"), b"not-allowed").unwrap();
+
+        // Populate a real store on `remote_dir` (paths exist on disk outside `local_dir` — worst-case collision).
+        let remote_store = Arc::new(folo_server::RealStore::open(remote_dir).device("cpu"));
+        let ds = remote_store
+            .create_synthetic(SyntheticDataset {
+                name: "remote_shapes".into(),
+                images: 4,
+                classes: vec!["circle".into()],
+                imgsz: 64,
+                seed: 1,
+            })
+            .unwrap();
+
+        // Pair it with a non-local proxy URL so `Confinement` treats it as a separate remote host.
+        let remote_proxy = Arc::new(HttpStore::new("https://gpu.example.com:7878", None));
+        let opts = Options {
+            data_dir: local_dir.clone(),
+            read_only: false,
+            confine: true,
+            device: "cpu".into(),
+            published_weights: None,
+        };
+        let server = FoloMcp::new(remote_store.clone(), Some(remote_proxy), opts);
+
+        // Remote datasets are visible and readable rather than blanket-hidden with `path_outside_data_dir`.
+        let list = server.inner.list_datasets(PageArgs { limit: None, cursor: None }).await.unwrap();
+        assert_eq!(list.value["total"], 1, "{}", list.value);
+        let got = server.inner.get_dataset(DatasetIdArgs { dataset_id: ds.id.clone() }).await.unwrap();
+        assert_eq!(got.value["id"], ds.id);
+        let imgs = server
+            .inner
+            .list_dataset_images(ListImagesArgs {
+                dataset_id: ds.id.clone(),
+                split: None,
+                class: None,
+                include_boxes: false,
+                limit: None,
+                cursor: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(imgs.value["total"], 4);
+
+        // Registering a path on a remote server under `--confine` is refused cleanly as `not_supported`.
+        let reg_err = server
+            .inner
+            .register_dataset(RegisterArgs { path: ".".into(), name: None, format: Default::default() })
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(reg_err.body.code, "not_supported");
+
+        // Local file reads by the MCP process remain strictly confined to `local_dir`.
+        let pred_err = server
+            .inner
+            .predict(PredictArgs {
+                model_id: "m_1".into(),
+                image_path: Some("../outside.jpg".into()),
+                image_base64: None,
+                dataset_id: None,
+                image_id: None,
+                conf: 0.25,
+                iou: 0.7,
+                max_det: 10,
+            })
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(pred_err.body.code, "path_outside_data_dir");
+        remote_store.shutdown();
+    }
+
+    #[tokio::test]
+    async fn confined_local_proxy_enforces_shared_fs_and_safe_register_rollback() {
+        let root = folo_test_support::TestDir::new("mcp-confine-local-proxy-rollback");
+        let server_dir = root.join("server");
+        let other_dir = root.join("other");
+        let outside_ds = root.join("outside_ds");
+        std::fs::create_dir_all(outside_ds.join("images/train")).unwrap();
+        std::fs::create_dir_all(outside_ds.join("labels/train")).unwrap();
+        image::RgbImage::from_pixel(16, 16, image::Rgb([1, 2, 3]))
+            .save(outside_ds.join("images/train/a.png"))
+            .unwrap();
+        std::fs::write(outside_ds.join("labels/train/a.txt"), "0 0.5 0.5 0.4 0.4\n").unwrap();
+        std::fs::write(outside_ds.join("data.yaml"), "train: images/train\nnames: [box]\n").unwrap();
+
+        // Sneaky dataset inside `server_dir` whose `data.yaml` points at `outside_ds`.
+        let sneaky = server_dir.join("sneaky");
+        std::fs::create_dir_all(&sneaky).unwrap();
+        let yaml =
+            format!("path: {}\ntrain: images/train\nnames: [box]\n", folo_api::json::path(&outside_ds));
+        std::fs::write(sneaky.join("data.yaml"), yaml).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+
+        let store = Arc::new(folo_server::RealStore::open(server_dir.clone()).device("cpu"));
+        let preexisting = store
+            .register_dataset(RegisterDataset {
+                name: Some("preexisting".into()),
+                path: folo_api::json::path(&outside_ds),
+                format: Default::default(),
+            })
+            .unwrap();
+        let inside_synth = store
+            .create_synthetic(SyntheticDataset {
+                name: "inside".into(),
+                images: 4,
+                classes: vec!["circle".into()],
+                imgsz: 64,
+                seed: 2,
+            })
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let srv = folo_server::Server::new(store.clone(), Default::default());
+        let task = tokio::spawn(srv.serve(listener, async move {
+            let _ = stop_rx.await;
+        }));
+
+        // 1. Same `--data-dir`: inside dataset is visible, outside preexisting dataset is hidden, and registering
+        //    `sneaky` fails confinement and rolls back via `delete_dataset_if_unused` without removing `preexisting`.
+        let http = Arc::new(HttpStore::new(&url, None));
+        let same_dir = FoloMcp::new(
+            http.clone(),
+            Some(http.clone()),
+            Options {
+                data_dir: server_dir.clone(),
+                read_only: false,
+                confine: true,
+                device: "cpu".into(),
+                published_weights: None,
+            },
+        );
+        let listed = same_dir.inner.list_datasets(PageArgs { limit: None, cursor: None }).await.unwrap();
+        assert_eq!(listed.value["total"], 1);
+        assert_eq!(listed.value["items"][0]["id"], inside_synth.id);
+
+        let sneaky_err = same_dir
+            .inner
+            .register_dataset(RegisterArgs { path: "sneaky".into(), name: None, format: Default::default() })
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(sneaky_err.body.code, "path_outside_data_dir");
+        let on_server: Vec<String> = store.list_datasets().unwrap().into_iter().map(|d| d.id).collect();
+        assert_eq!(on_server.len(), 2, "sneaky registration must be rolled back: {on_server:?}");
+        assert!(on_server.contains(&preexisting.id), "preexisting dataset must never be removed");
+
+        // 2. Different `--data-dir` on loopback (shared filesystem): server's `server_dir` datasets stay hidden
+        //    so paths outside `other_dir` are never exposed on a shared filesystem.
+        let other_mcp = FoloMcp::new(
+            http.clone(),
+            Some(http),
+            Options {
+                data_dir: other_dir,
+                read_only: false,
+                confine: true,
+                device: "cpu".into(),
+                published_weights: None,
+            },
+        );
+        let other_list = other_mcp.inner.list_datasets(PageArgs { limit: None, cursor: None }).await.unwrap();
+        assert_eq!(other_list.value["total"], 0);
+        let err = other_mcp
+            .inner
+            .get_dataset(DatasetIdArgs { dataset_id: inside_synth.id.clone() })
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.body.code, "path_outside_data_dir");
+
+        let _ = stop_tx.send(());
+        let _ = task.await;
+        store.shutdown();
     }
 
     #[tokio::test]

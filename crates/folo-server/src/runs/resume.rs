@@ -109,6 +109,18 @@ impl Runs {
         let mut st = e.state.lock().unwrap();
         resumable(&st, &e.id)?;
         let last = e.dir.join("weights").join("last.folo");
+        let resume_epoch = if last.is_file() {
+            crate::engine::read_model_file(&last)
+                .ok()
+                .and_then(|f| f.checkpoint().map(|c| c.epoch.min(u32::MAX as u64) as u32))
+                .unwrap_or(st.file.epochs_done)
+        } else {
+            0
+        };
+        if resume_epoch < st.file.epochs_done {
+            st.file.epochs_done = resume_epoch;
+            st.file.last_metrics = None;
+        }
         st.claimed = cloud.is_some();
         // Not training from its end (or from a resume it has not trained since: it was stopped while it waited) until
         // it trains again: the first part now, the wait in the queue once it starts (`RunEntry::on_event`).
@@ -122,6 +134,7 @@ impl Runs {
             file.resumed_at = Some(at);
         }
         let r = &mut st.file.run;
+        r.epoch = r.epoch.min(resume_epoch);
         r.config.device = wanted.device;
         r.config.compute = wanted.compute;
         // `cloud` is there exactly for a cloud run: one resumed here is a run of this machine from now on (what its
@@ -138,7 +151,7 @@ impl Runs {
         st.attempt += 1;
         let attempt = st.attempt;
         e.stop.store(false, Ordering::Relaxed);
-        mark_resume(&e.metrics_path());
+        mark_resume(&e.metrics_path(), resume_epoch);
         e.persist(&st);
         e.send(RunEvent::Status(status_event(&st.file.run)));
         let run = st.file.shown();

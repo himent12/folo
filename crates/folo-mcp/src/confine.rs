@@ -26,6 +26,46 @@ use http::StatusCode;
 
 use crate::errors::Error;
 use crate::paths::PathPolicy;
+use crate::proxy::HttpStore;
+
+/// True when `url` targets this machine (loopback, unspecified bind address, `localhost`, or `*.localhost`),
+/// meaning a proxied `folo serve` may share the local filesystem with this MCP process.
+pub(crate) fn is_local_url(url: &str) -> bool {
+    let rest = match url.split_once("://") {
+        Some((scheme, after))
+            if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https") =>
+        {
+            after
+        }
+        Some(_) => return true, // non-http(s) scheme: fail closed as local
+        None => url,
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(after) = authority.strip_prefix('[') {
+        let raw = after.split(']').next().unwrap_or("");
+        // Strip IPv6 zone identifier (`%eth0` or percent-encoded `%25lo`).
+        raw.split('%').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let trimmed = host.trim_end_matches('.');
+    if trimmed.eq_ignore_ascii_case("localhost")
+        || trimmed.len() > ".localhost".len()
+            && trimmed[trimmed.len() - ".localhost".len()..].eq_ignore_ascii_case(".localhost")
+    {
+        return true;
+    }
+    match trimmed.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback() || v4.is_unspecified(),
+        Ok(std::net::IpAddr::V6(v6)) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback() || v4.is_unspecified())
+        }
+        Err(_) => false,
+    }
+}
 
 /// A labeling job's check: a hash of its image files when checked, and the result.
 type JobCheck = (u64, Result<(), Error>);
@@ -57,6 +97,9 @@ pub fn map_denied(e: Error) -> Error {
 #[derive(Clone)]
 pub struct Confinement {
     policy: PathPolicy,
+    /// Present in proxy mode (`--server`): a non-local remote server has its own separate filesystem, whereas a
+    /// local/loopback server may share this machine's filesystem and stays strictly confined to `policy.data_dir`.
+    proxy: Option<Arc<HttpStore>>,
     cache: Arc<Mutex<HashMap<String, Result<(), Error>>>>,
     /// Labeling job id -> (a hash of its image files when checked, the result).
     jobs: Arc<Mutex<HashMap<String, JobCheck>>>,
@@ -64,8 +107,8 @@ pub struct Confinement {
 
 impl Confinement {
     /// A checker for `policy` (a no-op without `confine`).
-    pub fn new(policy: PathPolicy) -> Confinement {
-        Confinement { policy, cache: Arc::default(), jobs: Arc::default() }
+    pub fn new(policy: PathPolicy, proxy: Option<Arc<HttpStore>>) -> Confinement {
+        Confinement { policy, proxy, cache: Arc::default(), jobs: Arc::default() }
     }
 
     /// True when the check does anything.
@@ -73,9 +116,17 @@ impl Confinement {
         self.policy.confine
     }
 
-    /// `Ok` when dataset `id` reads nothing outside the data dir (always without `--confine`). Blocking.
+    /// True when proxying a non-local remote server whose filesystem is separate from this machine's `--data-dir`.
+    /// Loopback / local URLs always return `false` so paths outside `--data-dir` on a shared filesystem are never
+    /// exposed even when the local server uses a different `--data-dir`.
+    pub fn is_remote_proxy(&self) -> bool {
+        self.proxy.as_ref().is_some_and(|p| !is_local_url(p.base()))
+    }
+
+    /// `Ok` when dataset `id` reads nothing outside the data dir (always without `--confine`, and for datasets
+    /// hosted on a separate non-local remote server). Blocking.
     pub fn dataset(&self, store: &dyn Store, id: &str) -> Result<(), Error> {
-        if !self.policy.confine {
+        if !self.policy.confine || self.is_remote_proxy() {
             return Ok(());
         }
         if let Some(r) = self.cache.lock().unwrap().get(id) {
@@ -88,7 +139,7 @@ impl Confinement {
     /// Used before exposing datasets in fuzzy `"did you mean ...?"` suggestions so a dataset whose
     /// manifest changed mid-session to read outside `--data-dir` is never disclosed. Blocking.
     pub fn dataset_fresh(&self, store: &dyn Store, id: &str) -> Result<(), Error> {
-        if !self.policy.confine {
+        if !self.policy.confine || self.is_remote_proxy() {
             return Ok(());
         }
         let r = self.scan(store, id).map_err(map_denied);
@@ -159,7 +210,25 @@ impl Confinement {
                 r
             }
             None => {
-                if root.is_file() {
+                // In local proxy mode `HttpStore` does not expose `Index::root` or install `folo_data::guard` in
+                // `folo serve`. Inspect the manifest locally (without decoding images) so `data.yaml`'s `path:`,
+                // external split lists, linked annotation folders, and effective `ds.root` are all verified.
+                let format = match d.format {
+                    folo_api::DatasetFormat::Auto => folo_data::Format::Auto,
+                    folo_api::DatasetFormat::Yolo => folo_data::Format::Yolo,
+                    folo_api::DatasetFormat::Coco => folo_data::Format::Coco,
+                };
+                let opts = folo_data::OpenOptions { format, verify_images: false };
+                if let Ok(ds) = folo_data::open_with(&root, &opts) {
+                    let ds_root = resolve_dotdot(&ds.root);
+                    let sources: Vec<PathBuf> = ds.sources.iter().map(|s| resolve_dotdot(s)).collect();
+                    self.policy
+                        .check_files(
+                            std::iter::once(ds_root.as_path()).chain(sources.iter().map(PathBuf::as_path)),
+                        )
+                        .map_err(|e| in_dataset(e, id))?;
+                    ds_root
+                } else if root.is_file() {
                     root.parent().unwrap_or(&root).to_path_buf()
                 } else {
                     root
@@ -207,12 +276,38 @@ impl Confinement {
     }
 }
 
+/// Normalizes `p` to an absolute path while following symlinks before `..` on Unix and collapsing `..` lexically
+/// on Windows (matching OS path resolution and `folo-server`'s `Index::build`).
+fn resolve_dotdot(p: &Path) -> PathBuf {
+    let spelled = Path::new(".").join(p);
+    let abs = std::path::absolute(&spelled).unwrap_or(spelled);
+    let mut out = PathBuf::new();
+    for c in abs.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                #[cfg(unix)]
+                {
+                    if let Ok(canon) = std::fs::canonicalize(&out) {
+                        out = canon;
+                    }
+                }
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 /// The YOLO label files of one dataset: [`folo_data::label_path_for`], except that an `images` folder
 /// at or above the dataset root counts only when the root's mirror exists (`x/labels/birds` for `x/images/birds`,
 /// `x/labels` for `x/images`). Without that mirror, labels of images below the root sit beside them (`a.txt`),
 /// matching `folo-data`'s YOLO reader.
 struct LabelPaths {
-    /// The dataset root, absolute and normalised.
+    /// The dataset root, absolute and normalised (with symlink-aware `..` resolution on Unix).
     root: PathBuf,
     /// The root has an `images` ancestor whose `labels` mirror does not exist.
     beside: bool,
@@ -220,11 +315,8 @@ struct LabelPaths {
 
 impl LabelPaths {
     fn new(root: &Path) -> Self {
-        // `.` first: a dataset named by a bare `data.yaml` has an empty root.
-        let spelled = Path::new(".").join(root);
-        let full = std::path::absolute(&spelled).unwrap_or_else(|_| spelled.clone());
-        let root = folo_data::paths::normalize(&spelled);
-        let comps: Vec<Component> = full.components().collect();
+        let resolved = resolve_dotdot(root);
+        let comps: Vec<Component> = resolved.components().collect();
         let mirror = comps.iter().rposition(|c| c.as_os_str() == std::ffi::OsStr::new("images")).map(|i| {
             let mut mirror: PathBuf = comps[..i].iter().collect();
             mirror.push("labels");
@@ -232,17 +324,18 @@ impl LabelPaths {
             mirror
         });
         let beside = mirror.as_ref().is_some_and(|m| !m.is_dir());
-        LabelPaths { root, beside }
+        LabelPaths { root: resolved, beside }
     }
 
     /// The label file of `image`. An image outside the root (or under its own `images/` subfolder) follows
     /// [`folo_data::label_path_for`].
     fn of(&self, image: &Path) -> PathBuf {
+        let resolved = resolve_dotdot(image);
         let beside = self.beside
-            && folo_data::paths::normalize(&Path::new(".").join(image)).strip_prefix(&self.root).is_ok_and(
-                |below| !below.components().any(|c| c.as_os_str() == std::ffi::OsStr::new("images")),
-            );
-        if beside { image.with_extension("txt") } else { folo_data::label_path_for(image) }
+            && resolved.strip_prefix(&self.root).is_ok_and(|below| {
+                !below.components().any(|c| c.as_os_str() == std::ffi::OsStr::new("images"))
+            });
+        if beside { resolved.with_extension("txt") } else { folo_data::label_path_for(&resolved) }
     }
 }
 
@@ -276,6 +369,62 @@ mod tests {
         std::fs::create_dir_all(&mirror).unwrap();
         let lp_mirror = LabelPaths::new(&ds);
         assert_eq!(lp_mirror.of(&ds.join("a.jpg")), mirror.join("a.txt"));
+
+        // A root spelled with `..` through a nested `images` segment (`images/images/../birds`, or
+        // `images\images\..\birds` on Windows) resolves both its mirror probe and label lookup consistently.
+        let nested_images = dir.join("images").join("images");
+        std::fs::create_dir_all(&nested_images).unwrap();
+        let dotdot_root = nested_images.join("..").join("birds");
+        let lp_dotdot = LabelPaths::new(&dotdot_root);
+        assert_eq!(lp_dotdot.of(&dotdot_root.join("a.jpg")), mirror.join("a.txt"));
+        std::fs::remove_dir(&mirror).unwrap();
+        let lp_dotdot_beside = LabelPaths::new(&dotdot_root);
+        assert_eq!(lp_dotdot_beside.of(&dotdot_root.join("a.jpg")), ds.join("a.txt"));
+
+        // On Unix, a `data.yaml` folder reached through a symlink (`work/current -> releases/v7/meta`) with
+        // `../images/birds` resolves its mirror in the link target's parent (`releases/v7/labels/birds`).
+        #[cfg(unix)]
+        {
+            let release = dir.join("releases/v7");
+            std::fs::create_dir_all(release.join("images/birds")).unwrap();
+            std::fs::create_dir_all(release.join("meta")).unwrap();
+            std::fs::create_dir_all(dir.join("work")).unwrap();
+            std::os::unix::fs::symlink(release.join("meta"), dir.join("work/current")).unwrap();
+            let linked_root = dir.join("work/current/../images/birds");
+            let linked_img = linked_root.join("a.jpg");
+            let canon_img = std::fs::canonicalize(release.join("images/birds")).unwrap().join("a.jpg");
+            let canon_mirror =
+                std::fs::canonicalize(&release).unwrap().join("labels").join("birds").join("a.txt");
+            assert_eq!(LabelPaths::new(&linked_root).of(&linked_img), canon_img.with_extension("txt"));
+            std::fs::create_dir_all(release.join("labels/birds")).unwrap();
+            assert_eq!(LabelPaths::new(&linked_root).of(&linked_img), canon_mirror);
+        }
+    }
+
+    #[test]
+    fn local_url_detection_covers_loopback_unspecified_and_remote_hosts() {
+        for local in [
+            "http://127.0.0.1:7878",
+            "HTTP://127.0.0.1:7878",
+            "http://localhost:7878/api",
+            "http://LOCALHOST.:7878",
+            "http://foo.localhost:7878",
+            "https://[::1]:7878",
+            "http://[::1%25lo]:7878",
+            "http://0.0.0.0:7878",
+            "http://[::]:7878",
+            "http://[::ffff:127.0.0.1]:7878",
+        ] {
+            assert!(is_local_url(local), "expected local: {local}");
+        }
+        for remote in [
+            "http://192.168.1.5:7878",
+            "https://gpu.example.com:7878",
+            "https://[2001:db8::1]:7878",
+            "http://notlocalhost.example.com:7878",
+        ] {
+            assert!(!is_local_url(remote), "expected remote: {remote}");
+        }
     }
 
     #[test]
@@ -382,7 +531,7 @@ mod tests {
         }
 
         let dir = folo_test_support::TestDir::new("mcp-confine-transient");
-        let c = Confinement::new(PathPolicy { data_dir: dir.to_path_buf(), confine: true });
+        let c = Confinement::new(PathPolicy { data_dir: dir.to_path_buf(), confine: true }, None);
         let store = FlakyStore { inner: folo_server::MockStore::new(), calls: AtomicUsize::new(0) };
         let id = store.list_datasets().unwrap().remove(0).id;
 

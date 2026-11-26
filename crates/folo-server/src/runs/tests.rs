@@ -103,6 +103,8 @@ fn resumed_mid_epoch_metrics_prefer_live_tail_over_discarded_steps() {
         line(RunEvent::Status(StatusEvent::new(RunStatus::Stopped, None))),
     ];
     std::fs::write(e.metrics_path(), initial.join("\n") + "\n").unwrap();
+    std::fs::create_dir_all(e.dir.join("weights")).unwrap();
+    std::fs::write(e.dir.join("weights").join("last.folo"), b"stub").unwrap();
     {
         let mut st = e.state.lock().unwrap();
         st.file.epochs_done = 1;
@@ -861,6 +863,8 @@ fn resume_marker_is_newline_safe_after_torn_last_line() {
         line(RunEvent::Step(make_step(2, 2, 9.0))),
     );
     std::fs::write(e.metrics_path(), torn).unwrap();
+    std::fs::create_dir_all(e.dir.join("weights")).unwrap();
+    std::fs::write(e.dir.join("weights").join("last.folo"), b"stub").unwrap();
     {
         let mut st = e.state.lock().unwrap();
         st.file.epochs_done = 1;
