@@ -12,7 +12,8 @@
 //! - [`calibration`]: post-hoc temperature scaling confidence calibration and ECE / MCE / Brier score metrics.
 //! - [`cocoeval`]: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) for reporting on COCO splits.
 //! - [`assign`]: the task-aligned assigner and DFL target encoding.
-//! - [`assigner`]: additional label assignment algorithms (SimOTA dynamic-`k` assignment).
+//! - [`assigner`]: additional label assignment algorithms (SimOTA dynamic-`k`, exact Hungarian / linear-sum
+//!   assignment, and [`OneToOneMatcher`]).
 //! - [`loss`]: the detection loss (BCE + CIoU + DFL) on folo-core tensors, with autograd. The assigner runs on
 //!   host copies of the detached head outputs; that read is the loss's only full-size device-to-host transfer.
 //!
@@ -48,7 +49,10 @@ pub mod train;
 pub mod val;
 
 pub use assign::{Assignment, TalConfig};
-pub use assigner::{SimOtaAssignment, SimOtaConfig, assign_simota};
+pub use assigner::{
+    ClsCostKind, HungarianResult, OneToOneAssignment, OneToOneConfig, OneToOneMatcher, SimOtaAssignment,
+    SimOtaConfig, assign_simota, hungarian_assign, hungarian_assign_f32,
+};
 pub use boxes::{Cxcywh, IouKind, Letterbox, Xyxy};
 pub use calibration::{
     CalibrationConfig, CalibrationMetrics, ClassTemperatureFit, ClasswiseCalibrationConfig,
@@ -58,7 +62,11 @@ pub use calibration::{
 pub use decode::Anchors;
 pub use error::{Error, Result};
 pub use loss::{DistillConfig, ImageTargets, LossConfig, LossItems, LossOutput, detection_loss};
-pub use metrics::{EvalConfig, EvalReport, Evaluator, Truth};
+pub use metrics::{
+    CalibrationSummary, ClassPrCurve, DetectionCalibrationDiagnostics, DetectionConfusionMatrix, EvalConfig,
+    EvalReport, Evaluator, OptimalF1Point, PrCurveDiagnostics, PrCurvePoint, ReliabilityBin, Truth,
+    compute_detection_calibration, compute_pr_curves, reliability_from_scores,
+};
 pub use model::{FoloModel, HeadOutput, ModelConfig};
 pub use nms::{Detection, NmsConfig, NmsKind};
 pub use predict::{Precision, PredictConfig, Prediction, Predictor, PreparedBatch, Timing};

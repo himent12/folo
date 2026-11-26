@@ -58,6 +58,8 @@ mod tests_math;
 #[cfg(test)]
 mod tests_nwd_wiou;
 #[cfg(test)]
+mod tests_piou;
+#[cfg(test)]
 mod tests_siou_eiou;
 #[cfg(test)]
 mod tests_vfl_qfl;
@@ -71,8 +73,9 @@ pub use distill::{
 pub use terms::{
     LossReduction, QflConfig, VflConfig, asymmetric_loss, ciou, eiou_loss, focaler_iou, focaler_iou_loss,
     inner_ciou_loss, loss_with_assignment, mpdiou_loss, mpdiou_loss_with_scale, nwd_loss, nwd_loss_with_c,
-    poly1_bce_loss, poly1_focal_loss, poly1_focal_loss_with_alpha, quality_focal_loss, rpiou_loss,
-    saeiou_loss, shape_iou_loss, siou_loss, varifocal_loss, wiou_v1_loss, wiou_v3_loss,
+    piou_attention, piou_attention_f64, piou_loss, piou2_loss, poly1_bce_loss, poly1_focal_loss,
+    poly1_focal_loss_with_alpha, quality_focal_loss, rpiou_loss, saeiou_loss, shape_iou_loss, siou_loss,
+    varifocal_loss, wiou_v1_loss, wiou_v3_loss,
 };
 
 use crate::assign::TalConfig;

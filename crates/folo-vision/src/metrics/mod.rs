@@ -14,6 +14,16 @@
 //! class-mean F1 at IoU 0.5 (as Ultralytics reports them). `docs/METRICS.md` spells out every step and how this
 //! differs from Ultralytics' own AP.
 
+pub mod diagnostics;
+#[cfg(test)]
+mod tests_diagnostics;
+
+pub use diagnostics::{
+    CalibrationSummary, ClassPrCurve, DetectionCalibrationDiagnostics, DetectionConfusionMatrix,
+    OptimalF1Point, PrCurveDiagnostics, PrCurvePoint, ReliabilityBin, compute_detection_calibration,
+    compute_pr_curves, reliability_from_scores,
+};
+
 use crate::boxes::Xyxy;
 use crate::nms::Detection;
 use rayon::prelude::*;
@@ -546,7 +556,7 @@ fn conf_grid(i: usize) -> f32 {
 
 /// IoU in f64, as pycocotools computes it (`bbIou`).
 #[inline]
-fn iou_f64(a: &Xyxy, b: &Xyxy) -> f64 {
+pub(super) fn iou_f64(a: &Xyxy, b: &Xyxy) -> f64 {
     let (ax1, ay1, ax2, ay2) = (a.x1 as f64, a.y1 as f64, a.x2 as f64, a.y2 as f64);
     let (bx1, by1, bx2, by2) = (b.x1 as f64, b.y1 as f64, b.x2 as f64, b.y2 as f64);
     let w = ax2.min(bx2) - ax1.max(bx1);
