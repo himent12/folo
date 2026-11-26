@@ -15,6 +15,9 @@
 //! - `convnext.rs`: [`LayerNorm`] and [`ConvNeXtBlock`] ([`ConvNeXtConfig`], [`ConvNeXtNorm`]).
 //! - `mbconv.rs`: [`InvertedResidual`] (MBConv) and [`InvertedResidualConfig`].
 //! - `dropblock.rs`: [`DropBlock2d`] and [`dropblock_gamma`].
+//! - `repconv.rs`: [`RepConv`] and [`RepConvConfig`] (RepVGG multi-branch to deploy `3×3` fusion).
+//! - `rope2d.rs`: [`RoPE2d`] (2D axial Rotary Positional Embedding).
+//! - `cross_attn.rs`: [`MultiHeadCrossAttention`] and [`MultiHeadCrossAttentionConfig`].
 //! - `container.rs`: [`Sequential`] and [`ModuleList`].
 
 mod attention;
@@ -23,17 +26,22 @@ mod container;
 mod conv;
 mod conv_bn_act;
 mod convnext;
+mod cross_attn;
 mod dropblock;
 mod glu;
 mod mbconv;
 mod regularize;
+mod repconv;
 mod rmsnorm;
+mod rope2d;
 mod simple;
 mod spectral_norm;
 #[cfg(test)]
 mod tests_attention;
 #[cfg(test)]
 mod tests_blocks;
+#[cfg(test)]
+mod tests_repconv_rope_attn;
 mod ws_conv;
 
 pub use attention::{Cbam, ChannelAttention, Eca, SpatialAttention, SqueezeExcitation, eca_kernel_size};
@@ -45,11 +53,14 @@ pub use convnext::{
     CONVNEXT_DEFAULT_EXPAND, CONVNEXT_DEFAULT_KERNEL, CONVNEXT_DEFAULT_LAYER_SCALE, ConvNeXtBlock,
     ConvNeXtConfig, ConvNeXtNorm, ConvNeXtNormLayer, LAYERNORM_DEFAULT_EPS, LayerNorm,
 };
+pub use cross_attn::{MultiHeadCrossAttention, MultiHeadCrossAttentionConfig};
 pub use dropblock::{DropBlock2d, dropblock_gamma};
 pub use glu::{GatedFfn, GluKind, geglu, gelu_tanh, swiglu};
 pub use mbconv::{InvertedResidual, InvertedResidualConfig};
 pub use regularize::{ChannelLayout, DropPath, LAYERSCALE_DEFAULT_INIT, LayerScale};
+pub use repconv::{RepConv, RepConvConfig};
 pub use rmsnorm::{RMSNORM_DEFAULT_EPS, RmsNorm};
+pub use rope2d::{ROPE2D_DEFAULT_BASE, RoPE2d};
 pub use simple::{Activation, Concat, Identity, Linear, MaxPool2d, Upsample};
 pub use spectral_norm::{
     PowerIterationResult, SPECTRAL_NORM_EPS, SpectralNorm, SpectralNormTarget, power_iteration,

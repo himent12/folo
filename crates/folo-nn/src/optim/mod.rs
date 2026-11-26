@@ -32,6 +32,7 @@
 //! assert_eq!(opt.step_count(), 1);
 //! ```
 
+mod adafactor;
 mod adamw;
 mod adan;
 mod agc;
@@ -40,6 +41,7 @@ mod dispatch;
 mod grads;
 mod lion;
 mod lookahead;
+mod muon;
 mod musgd;
 mod ortho;
 mod prodigy;
@@ -54,6 +56,11 @@ use std::collections::HashMap;
 use folo_core::{Device, Grads, Tensor};
 use serde::{Deserialize, Serialize};
 
+pub use adafactor::{
+    ADAFACTOR_DEFAULT_CLIP_THRESHOLD, ADAFACTOR_DEFAULT_DECAY_RATE, ADAFACTOR_DEFAULT_EPS,
+    ADAFACTOR_DEFAULT_LR, Adafactor, AdafactorConfig, AdafactorContract, AdafactorGroupContract,
+    adafactor_beta2, adafactor_relative_lr,
+};
 pub use adamw::AdamW;
 pub use adan::{
     ADAN_DEFAULT_BETA1, ADAN_DEFAULT_BETA2, ADAN_DEFAULT_BETA3, ADAN_DEFAULT_EPS, ADAN_DEFAULT_LR,
@@ -69,6 +76,11 @@ pub use lion::{
 };
 pub use lookahead::{
     LOOKAHEAD_DEFAULT_ALPHA, LOOKAHEAD_DEFAULT_K, Lookahead, LookaheadConfig, LookaheadContract,
+};
+pub use muon::{
+    MUON_AUX_DEFAULT_BETA1, MUON_AUX_DEFAULT_BETA2, MUON_AUX_DEFAULT_EPS, MUON_DEFAULT_LR,
+    MUON_DEFAULT_MOMENTUM, MUON_DEFAULT_WEIGHT_DECAY, Muon, MuonAspectScale, MuonConfig, MuonContract,
+    MuonFallback, MuonGroupContract, newton_schulz_quintic,
 };
 pub use musgd::{MUON_SCALE, MuSgd, MuSgdWeights, is_muon_group};
 pub use ortho::{
