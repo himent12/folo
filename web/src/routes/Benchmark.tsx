@@ -44,7 +44,8 @@ import Skeleton from '$lib/ui/Skeleton';
 import Tabs from '$lib/ui/Tabs';
 import { toast } from '$lib/ui/toast';
 import { AgentChoice } from './label/agentChoice';
-import AddEntryDialog, { type EntryKind } from './bench/AddEntryDialog';
+import AddEntryDialog from './bench/AddEntryDialog';
+import { useAddQuery } from './bench/addQuery';
 import DesignDialog from './bench/DesignDialog';
 import EditBenchDialog from './bench/EditBenchDialog';
 import { leaderboardExport } from './bench/export';
@@ -300,8 +301,7 @@ export default function Benchmark() {
     const b = bench.get();
     return b ? boardOrder(live.entries, b.fingerprint) : live.entries;
   });
-  const addOpen = signal(untrack(() => router.route.query.get('add') !== null));
-  const addKind = signal<EntryKind>(untrack(() => ((k) => (k === 'agent' || k === 'external' ? k : 'model'))(router.route.query.get('add'))));
+  const { addOpen, addKind, openAdd } = useAddQuery(() => setQuery({ add: null }));
   function started(e: BenchEntry) {
     live.putEntry(e, live.mark());
     if (tab.peek() !== 'leaderboard') setQuery({ tab: null });
@@ -477,7 +477,7 @@ export default function Benchmark() {
       icon={Plus}
       disabled={!!why()}
       aria-describedby={why()}
-      onclick={() => (addKind.set('model'), addOpen.set(true))}
+      onclick={() => !addWhy.peek() && openAdd('model')}
     >
       Add entry
     </Button>
@@ -711,7 +711,8 @@ export default function Benchmark() {
                   agents={agents.data}
                   bind:selected={selected}
                   lost={live.lost !== null}
-                  onadd={() => (addKind.set('model'), addOpen.set(true))}
+                  addWhy={addWhy.get()}
+                  onadd={() => !addWhy.peek() && openAdd('model')}
                   onstop={(e) => stopping.set(e)}
                   ondelete={(e) => removing.set(e)}
                   oncompare={() => router.go(comparePath(b().id, selected.peek(), board.peek()))}
@@ -731,6 +732,7 @@ export default function Benchmark() {
             agentsError={agents.error}
             retryAgents={() => agents.refresh()}
             choice={choice}
+            blockedReason={addWhy.get()}
             onstarted={started}
           />
           {catalog.data ? (

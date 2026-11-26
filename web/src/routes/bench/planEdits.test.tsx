@@ -219,7 +219,60 @@ describe('Benchmark plan concurrent save and empty-weight leave guard', () => {
     expect(weight('Overexposure').value).toBe('');
     expect(document.body.textContent).not.toContain('Changed elsewhere');
     expect(btn('Discard')).toBeDefined();
-    // An unreadable weight also gates "Add entry" so the plan cannot be frozen with invalid unsaved input.
+    // An unreadable weight also gates both the header and empty-leaderboard "Add entry" buttons and blocks submitting AddEntryDialog.
     expect(btn('Add entry', document)!.disabled).toBe(true);
+    const startSpy = vi.spyOn(hub.api, 'startBenchEntry');
+    const lbTab = [...document.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent?.includes('Leaderboard'))!;
+    lbTab.click();
+    await settle();
+    const addButtons = [...document.querySelectorAll<HTMLButtonElement>('button')].filter((b) => !b.closest('dialog') && b.textContent?.trim() === 'Add entry');
+    expect(addButtons.length).toBe(2);
+    for (const b of addButtons) {
+      expect(b.disabled).toBe(true);
+      b.click();
+    }
+    flushSync();
+    expect(document.querySelector('dialog[open]')).toBeNull();
+    // Even opening via ?add=model while unsaved must gate submission and refuse startBenchEntry.
+    router.route = parse('#/benchmarks/bn_9f03?add=model');
+    await settle();
+    const addDialog = document.querySelector<HTMLDialogElement>('dialog[open]');
+    expect(addDialog).not.toBeNull();
+    expect(addDialog!.textContent).toContain('Save or discard the plan');
+    const submitBtn = addDialog!.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    expect(submitBtn.disabled).toBe(true);
+    addDialog!.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await settle();
+    expect(startSpy).not.toHaveBeenCalled();
+  });
+
+  it('opens Add Entry reactively when ?add= is navigated to on an already-mounted benchmark and strips ?add= on close', async () => {
+    router.route = parse('#/benchmarks/bn_9f03');
+    c = render(() => <BenchmarkPage />, target);
+    flushSync();
+    await settle();
+    expect(document.querySelector('dialog[open]')).toBeNull();
+
+    // Following ?add=agent while already mounted opens Add Entry immediately on the Agent tab without reload.
+    router.go('/benchmarks/bn_9f03?add=agent', { replace: true });
+    await settle();
+    const dlg = document.querySelector<HTMLDialogElement>('dialog[open]');
+    expect(dlg).not.toBeNull();
+    const agentRadio = [...dlg!.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((r) => r.textContent?.trim() === 'Agent');
+    expect(agentRadio?.getAttribute('aria-checked')).toBe('true');
+
+    // Closing the dialog removes ?add= from the URL so reloading does not reopen it.
+    btn('Cancel', dlg!)!.click();
+    await settle();
+    expect(document.querySelector('dialog[open]')).toBeNull();
+    expect(router.route.query.get('add')).toBeNull();
+
+    // Opening via ?add=model and then navigating Back (dropping ?add=) closes the URL-opened dialog.
+    router.go('/benchmarks/bn_9f03?add=model', { replace: true });
+    await settle();
+    expect(document.querySelector('dialog[open]')).not.toBeNull();
+    router.go('/benchmarks/bn_9f03', { replace: true });
+    await settle();
+    expect(document.querySelector('dialog[open]')).toBeNull();
   });
 });

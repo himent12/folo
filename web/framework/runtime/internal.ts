@@ -3,7 +3,7 @@
 import { computed, reader } from './core';
 
 export { template, insert, attr, prop, setAttribute, setProperty, setValue, setChecked, className, toggleClass, setStyleProp, styleProp, bindStyle } from './dom';
-export { createComponent, mergeProps, bound, propMemo, derive } from './component';
+export { createComponent, mergeProps, bound, propMemo, propJsx, derive } from './component';
 export { spread } from './spread';
 export { setEvent, setDelegated, delegateEvents } from './events';
 export { ref, use, useValue, bindValue, bindChecked, bindGroup, bindOpen, bindSize, selectValue } from './bind';

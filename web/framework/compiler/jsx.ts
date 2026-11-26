@@ -15,6 +15,7 @@ import {
   bare,
   containsJsx,
   eachChild,
+  evaluatesJsx,
   hasCall,
   isComponentTag,
   isDynamic,
@@ -351,10 +352,11 @@ export class Compiler {
       else if (a.value.type === 'JSXExpressionContainer') {
         const x = a.value.expression;
         if (x.type === 'JSXEmptyExpression') this.fail(a, 'empty attribute expression');
-        if (isDynamic(x) && !containsJsx(x) && needsDerived(x)) prop([`get ${k}() { return ${this.h('propMemo')}(this, ${JSON.stringify(key)}, () => `, ...this.paren(x, svg), '); }']);
-        else if (isDynamic(x) || isJsx(bare(x))) prop([`get ${k}() { return `, ...this.paren(x, svg), '; }']);
+        if (evaluatesJsx(x)) prop([`get ${k}() { return ${this.h('propJsx')}(this, ${JSON.stringify(key)}, () => `, ...this.paren(x, svg), '); }']);
+        else if (isDynamic(x) && !containsJsx(x) && needsDerived(x)) prop([`get ${k}() { return ${this.h('propMemo')}(this, ${JSON.stringify(key)}, () => `, ...this.paren(x, svg), '); }']);
+        else if (isDynamic(x)) prop([`get ${k}() { return `, ...this.paren(x, svg), '; }']);
         else prop([`${k}: `, ...this.paren(x, svg)]);
-      } else if (isJsx(a.value)) prop([`get ${k}() { return `, ...this.jsx(a.value, svg), '; }']);
+      } else if (isJsx(a.value)) prop([`get ${k}() { return ${this.h('propJsx')}(this, ${JSON.stringify(key)}, () => `, ...this.jsx(a.value, svg), '); }']);
     }
     if (name === 'Dynamic' && this.scope) prop([`$$scope: ${JSON.stringify(this.scope)}`]);
     const kids = this.componentChildren(n, svg);

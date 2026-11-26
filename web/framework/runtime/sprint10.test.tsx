@@ -2,7 +2,7 @@
 // Sprint 10 regression tests for fw runtime: text-run shared-dependency splits, Dynamic ref forwarding,
 // bindValue stringified equality, setStyle initial undefined, and multi-node insert marker ordering.
 import { describe, expect, it } from 'vitest';
-import { flush, signal } from './core';
+import { createContext, flush, onCleanup, signal } from './core';
 import { bindValue } from './bind';
 import { insert, setStyle } from './dom';
 import { Dynamic } from './flow';
@@ -131,5 +131,67 @@ describe('fw Sprint 10 runtime hardening', () => {
     node2.textContent = 'y';
     insert(parent, node2, marker, node);
     expect([...parent.childNodes]).toEqual([lead, node2, marker]);
+  });
+
+  it('memoizes and disposes JSX props checked in conditionals without leaking unowned actions or double-mounting', () => {
+    const CTX = createContext('missing');
+    let mounts = 0;
+    let destroys = 0;
+    let ctxSeen = '';
+    const act = () => {
+      mounts++;
+      return {
+        destroy: () => {
+          destroys++;
+        },
+      };
+    };
+    function Leaf() {
+      ctxSeen = CTX.get();
+      return <em use:act>ok</em>;
+    }
+    function RowBox(props: { control?: JSX.Element; extra?: string }) {
+      CTX.set('from-row');
+      return <section data-extra={props.extra}>{props.control ? <div class="ctl">{props.control}</div> : null}</section>;
+    }
+
+    const extra = signal('a');
+    const view = render(() => <RowBox {...{ extra: extra.get() }} control={<Leaf />} />);
+    flush();
+    expect(mounts).toBe(1);
+    expect(destroys).toBe(0);
+    expect(ctxSeen).toBe('from-row');
+    expect(view.container.querySelector('.ctl em')?.textContent).toBe('ok');
+
+    view.unmount();
+    expect(destroys).toBe(1);
+
+    // Toggled branch: disposes when hidden and recreates cleanly when shown again.
+    mounts = 0;
+    destroys = 0;
+    const open = signal(false);
+    function GateBox(props: { body?: JSX.Element }) {
+      return <div>{open.get() ? <div class="body">{props.body}</div> : null}</div>;
+    }
+    function Tracked() {
+      mounts++;
+      onCleanup(() => destroys++);
+      return <span>hi</span>;
+    }
+    const view2 = render(() => <GateBox body={<Tracked />} />);
+    flush();
+    expect(mounts).toBe(0);
+    open.set(true);
+    flush();
+    expect(mounts).toBe(1);
+    expect(destroys).toBe(0);
+    open.set(false);
+    flush();
+    expect(destroys).toBe(1);
+    open.set(true);
+    flush();
+    expect(mounts).toBe(2);
+    view2.unmount();
+    expect(destroys).toBe(2);
   });
 });

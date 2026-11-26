@@ -2,7 +2,7 @@
 // getters for dynamic values (the compiler emits them), so reading `props.x` where it is used tracks it; never
 // destructure props at the top of a component (that reads them once). These helpers keep the getters intact.
 
-import { computed, runComponent, signal, untrack, type Signal } from './core';
+import { computed, getOwner, memo, onCleanup, propOwners, runComponent, runWithOwner, signal, untrack, type Reader, type Signal } from './core';
 
 /** A component: called once with its props; returns what it renders. */
 export type Component<P = Record<string, never>> = (props: P) => JSX.Element;
@@ -81,10 +81,14 @@ export function mergeProps<T extends Source[]>(...sources: T): Merged<T> {
     }
     return undefined;
   };
-  return new Proxy({} as AnyProps, {
+  const proxy: AnyProps = new Proxy({} as AnyProps, {
     get(_, key) {
       if (key === PROXY) return true;
-      return find(key)?.[key as string];
+      const s = find(key);
+      if (!s) return undefined;
+      const o = propOwners.get(proxy);
+      if (o !== undefined && !propOwners.has(s)) propOwners.set(s, o);
+      return s[key as string];
     },
     set(_, key, value) {
       const s = find(key);
@@ -106,7 +110,8 @@ export function mergeProps<T extends Source[]>(...sources: T): Merged<T> {
       const s = find(key);
       return s ? live(s, key) : undefined;
     },
-  }) as Merged<T>;
+  });
+  return proxy as Merged<T>;
 }
 
 /**
@@ -134,7 +139,7 @@ export function splitProps(props: AnyProps, ...lists: readonly PropertyKey[][]):
     });
     const rest: AnyProps = {};
     for (const key of Reflect.ownKeys(props)) {
-      if (key === MEMOS || excluded.has(key)) continue;
+      if (key === MEMOS || key === JSX_MEMOS || excluded.has(key)) continue;
       const d = descriptor(props, key)!;
       if (d.get === undefined && d.set === undefined) setDataProp(rest, key, d.value);
       else Object.defineProperty(rest, key, live(props, key, d));
@@ -171,7 +176,7 @@ export function defaults<T extends object, const D extends Partial<T>>(props: T,
   if (!isProxy(p) && !isProxy(d)) {
     const out: AnyProps = {};
     for (const key of Reflect.ownKeys(p)) {
-      if (key === MEMOS) continue;
+      if (key === MEMOS || key === JSX_MEMOS) continue;
       const dp = descriptor(p, key)!;
       const hasFallback = Object.prototype.hasOwnProperty.call(d, key);
       if (dp.get === undefined && dp.set === undefined) {
@@ -194,7 +199,7 @@ export function defaults<T extends object, const D extends Partial<T>>(props: T,
       } else Object.defineProperty(out, key, live(p, key, dp));
     }
     for (const key of Reflect.ownKeys(d)) {
-      if (key === MEMOS || Object.prototype.hasOwnProperty.call(p, key)) continue;
+      if (key === MEMOS || key === JSX_MEMOS || Object.prototype.hasOwnProperty.call(p, key)) continue;
       const dd = descriptor(d, key)!;
       if (dd.get === undefined && dd.set === undefined) setDataProp(out, key, dd.value);
       else Object.defineProperty(out, key, { configurable: true, enumerable: true, get: () => d[key as string] });
@@ -266,6 +271,7 @@ export function bindable(props: AnyProps, key: string, fallback?: unknown): Sign
 }
 
 const MEMOS = Symbol('fw.memos');
+const JSX_MEMOS = Symbol('fw.jsxMemos');
 
 /**
  * Internal: a component prop memoized as Svelte 5 memoizes non-trivial prop expressions (`$.derived`): the getter
@@ -275,6 +281,31 @@ export function propMemo(holder: object, key: string, fn: () => unknown): unknow
   let memos = (holder as Record<symbol, Record<string, ReturnType<typeof computed>> | undefined>)[MEMOS];
   if (memos === undefined) Object.defineProperty(holder, MEMOS, { value: (memos = {}) });
   return (memos[key] ??= computed(fn)).get();
+}
+
+/**
+ * Internal: a component prop whose expression directly evaluates JSX. Runs lazily inside an owning memo attached to
+ * the active owner (or the component's owner when first read inside a `computed`/`cond`), so checking `props.x ?`
+ * before rendering `{props.x}` builds the subtree once, preserves child context, and disposes cleanly on unmount.
+ */
+export function propJsx(holder: object, key: string, fn: () => unknown): unknown {
+  let memos = (holder as Record<symbol, Record<string, Reader<unknown> | undefined> | undefined>)[JSX_MEMOS];
+  if (memos === undefined) Object.defineProperty(holder, JSX_MEMOS, { value: (memos = {}) });
+  let m = memos[key];
+  if (m === undefined) {
+    const target = getOwner() ?? propOwners.get(holder) ?? null;
+    const created = runWithOwner(target, () => {
+      const r = memo(fn);
+      if (target !== null) {
+        onCleanup(() => {
+          if (memos![key] === r) memos![key] = undefined;
+        });
+      }
+      return r;
+    });
+    memos[key] = m = created;
+  }
+  return m();
 }
 
 /** Internal: a memoized spread source (`{...attrs()}` on a component), read lazily. */

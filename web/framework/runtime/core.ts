@@ -929,10 +929,14 @@ export function deferEffects<T>(fn: () => T): T {
   return out;
 }
 
+/** Internal: maps each component's props object to its component owner (used by `propJsx`). */
+export const propOwners = new WeakMap<object, Owner>();
+
 /** Internal: creates a component's owner, runs `Comp(props)` untracked with deferred effects, with zero wrapper closures. */
 export function runComponent<P>(Comp: (props: P) => JSX.Element, props: P): JSX.Element {
   const o = new Owner();
   attach(owner, o);
+  if (props !== null && typeof props === 'object') propOwners.set(props as object, o);
   const prevOwner = owner;
   const prevListener = listener;
   const prevDeferredOwner = deferredOwner;

@@ -59,6 +59,8 @@ export interface AddEntryDialogProps {
   agentsError: unknown;
   retryAgents: () => void;
   choice: AgentChoice;
+  /** Page-level reason preventing starting an entry (e.g. unsaved plan edits or offline). */
+  blockedReason?: string | null;
   /** The new entry, as the server answered (the page shows it at once). */
   onstarted: (entry: BenchEntry) => void;
 }
@@ -362,7 +364,8 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
               : null;
   });
   const shownErr = computed(() => (touched.get() ? Object.values(errs.get()).find((e) => e) : (imagesShown.get() ?? undefined)));
-  const reason = computed(() => missingWhy.get() ?? (shownErr.get() ? 'Fix the fields first' : null));
+  const whyText = computed(() => props.blockedReason ?? missingWhy.get());
+  const reason = computed(() => whyText.get() ?? (shownErr.get() ? 'Fix the fields first' : null));
 
   /** Sends the file: one request, or an open entry in parts with its bar; nothing is left behind if it fails. */
   async function sendFile() {
@@ -482,9 +485,9 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
             </>
           ) : (
             <>
-              {missingWhy.get() ? (
+              {whyText.get() ? (
                 <p class="why" data-gate-why>
-                  {missingWhy.get()}
+                  {whyText.get()}
                 </p>
               ) : null}
               <Button variant="ghost" onclick={() => (beforeClose() ? open.set(false) : undefined)}>
