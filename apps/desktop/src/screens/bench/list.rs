@@ -141,21 +141,30 @@ impl FoloApp {
             self.refresh_benches(cx);
         }
         let list = self.bench.list.ready().cloned();
-        let subtitle = match (&list, self.bench.list.error()) {
-            // What the page holds (§2 page header): how many, and how many have an entry running.
-            (Some(l), _) => {
-                let running = l.iter().filter(|b| b.active).count();
-                let images: u64 = l.iter().map(|b| b.images).sum();
-                let mut facts = vec![plural(l.len(), "benchmark")];
-                if running > 0 {
-                    facts.push(format!("{running} running"));
+        let list_err = self
+            .bench
+            .list
+            .error()
+            .or_else(|| list.is_none().then(|| self.bench_blocked_error()).flatten())
+            .cloned();
+        let subtitle = if self.bench_unsupported() {
+            "Not available on this server".to_string()
+        } else {
+            match (&list, &list_err) {
+                // What the page holds (§2 page header): how many, and how many have an entry running.
+                (Some(l), _) => {
+                    let running = l.iter().filter(|b| b.active).count();
+                    let images: u64 = l.iter().map(|b| b.images).sum();
+                    let mut facts = vec![plural(l.len(), "benchmark")];
+                    if running > 0 {
+                        facts.push(format!("{running} running"));
+                    }
+                    facts.push(counted(images, "image", "images"));
+                    facts.join(" · ")
                 }
-                facts.push(counted(images, "image", "images"));
-                facts.join(" · ")
+                (None, Some(_)) => "The benchmark list didn't load".to_string(),
+                _ => "Loading…".to_string(),
             }
-            (None, Some(_)) => "The benchmark list didn't load".to_string(),
-            _ if self.bench_unsupported() => "Not available on this server".to_string(),
-            _ => "Loading…".to_string(),
         };
         let mut actions = Vec::new();
         if self.bench_on() && self.bench.new_bench.is_none() {
@@ -177,7 +186,7 @@ impl FoloApp {
             let body = self.bench_unsupported_panel(&t, window, cx);
             return self.page_frame(&t, header, body, cx);
         }
-        if let Some(e) = self.bench.list.error().cloned() {
+        if let Some(e) = list_err {
             let err = self.error_panel(&e, "benches-retry", window, cx);
             return self.page_frame(&t, header, err, cx);
         }

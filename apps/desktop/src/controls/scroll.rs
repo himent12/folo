@@ -30,6 +30,9 @@ impl FoloApp {
                         let at = ((ev.position.y - g.top - g.thumb / 2.) / travel).clamp(0., 1.);
                         handle.set_offset(folo_ui::point(handle.offset().x, -(g.max * at)));
                     }
+                    if !handle.ptr_eq(&this.menu_scroll) {
+                        this.close_menus();
+                    }
                     if handle.ptr_eq(&this.grid_scroll.0.borrow().base_handle) {
                         this.ds_scroll_anchor = None;
                     }

@@ -27,6 +27,24 @@ impl FoloApp {
         self.store.system.ready().is_some() && !self.bench_on()
     }
 
+    /// Why benchmark capability discovery failed before `/api/bench` could be requested.
+    ///
+    /// Benchmark routes wait for `/api/system` to advertise `vision_bench`. When that request fails
+    /// before capabilities are known, `bench.list` remains `Load::Idle`; surfacing the system error
+    /// lets benchmark screens render the standard error panel (with Retry and Connection settings)
+    /// instead of hanging on a loading skeleton.
+    pub fn bench_blocked_error(&self) -> Option<&ApiError> {
+        if self.bench_on() || self.bench_unsupported() {
+            return None;
+        }
+        self.store.system.error()
+    }
+
+    /// True while benchmark capability discovery (`/api/system`) has not settled yet.
+    pub fn bench_discovering(&self) -> bool {
+        !self.bench_on() && !self.bench_unsupported() && self.store.system.error().is_none()
+    }
+
     /// Loads the benchmark list and the catalog, once each.
     pub fn ensure_benches(&mut self, cx: &mut Context<Self>) {
         if !self.bench_on() {

@@ -264,13 +264,22 @@ fn reveal(mut b: folo_ui::Bounds<Pixels>, window: &mut Window) {
     }
 }
 
+/// Whether a keyboard focus-move reveal is queued for the next prepaint.
+pub(crate) fn reveal_pending() -> bool {
+    REVEAL.with(|r| r.borrow().is_some())
+}
+
 /// Scroll `h` so `b` is visible within its viewport (clear of edge fades and the bottom key-hint
-/// strip), independent of keyboard focus rings. Runs during prepaint and schedules a follow-up
-/// frame when the scroll offset changes.
-pub(crate) fn reveal_bounds_in_scroll(b: folo_ui::Bounds<Pixels>, h: &ScrollHandle, window: &mut Window) {
+/// strip), independent of keyboard focus rings. Runs during prepaint, returns `true` if `h`'s
+/// offset actually moved, and schedules a follow-up frame when it does.
+pub(crate) fn reveal_bounds_in_scroll(
+    b: folo_ui::Bounds<Pixels>,
+    h: &ScrollHandle,
+    window: &mut Window,
+) -> bool {
     let vp = h.bounds();
     if vp.size.width <= px(0.) || vp.size.height <= px(0.) {
-        return;
+        return false;
     }
     let margin = px(8.);
     let (top_m, bottom_m) = (px(16.), px(40.));
@@ -294,8 +303,10 @@ pub(crate) fn reveal_bounds_in_scroll(b: folo_ui::Bounds<Pixels>, h: &ScrollHand
         if (f32::from(y) - f32::from(off.y)).abs() > 0.5 {
             h.set_offset(folo_ui::point(off.x, y));
             window.request_animation_frame();
+            return true;
         }
     }
+    false
 }
 
 /// Keyboard focus ring: 2 px in the focus colour, 2 px outside the control.
