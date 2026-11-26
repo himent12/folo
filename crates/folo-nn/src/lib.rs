@@ -70,11 +70,12 @@ pub use ema::{
 };
 pub use error::{Error, Result};
 pub use layers::{
-    Activation, BN_EPS, BN_MOMENTUM, BatchNorm2d, ChannelLayout, Concat, Conv2d, Conv2dConfig, ConvBnAct,
-    DropPath, GatedFfn, GluKind, Identity, LAYERSCALE_DEFAULT_INIT, LayerScale, Linear, MaxPool2d,
-    ModuleList, PowerIterationResult, RMSNORM_DEFAULT_EPS, RmsNorm, RunningStats, SPECTRAL_NORM_EPS,
-    Sequential, SpectralNorm, SpectralNormTarget, Upsample, fuse_conv_bn, geglu, gelu_tanh, power_iteration,
-    spectral_norm, spectral_normalize, swiglu,
+    Activation, BN_EPS, BN_MOMENTUM, BatchNorm2d, Cbam, ChannelAttention, ChannelLayout, Concat, Conv2d,
+    Conv2dConfig, ConvBnAct, DropPath, Eca, GatedFfn, GluKind, Identity, LAYERSCALE_DEFAULT_INIT, LayerScale,
+    Linear, MaxPool2d, ModuleList, PowerIterationResult, RMSNORM_DEFAULT_EPS, RmsNorm, RunningStats,
+    SPECTRAL_NORM_EPS, Sequential, SpatialAttention, SpectralNorm, SpectralNormTarget, SqueezeExcitation,
+    Upsample, WS_CONV_DEFAULT_EPS, WeightStandardizedConv2d, eca_kernel_size, fuse_conv_bn, geglu, gelu_tanh,
+    power_iteration, spectral_norm, spectral_normalize, standardize_weight, swiglu,
 };
 pub use module::{Forward, Layer, Mode, Module, NamedTensor, TensorKind};
 pub use power_ema::{
