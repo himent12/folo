@@ -49,3 +49,7 @@ harness = false
 [[bench]]
 name = "backend"
 harness = false
+
+[[bench]]
+name = "pooling"
+harness = false
