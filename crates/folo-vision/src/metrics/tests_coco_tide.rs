@@ -255,3 +255,59 @@ fn tide_invariants_validation_and_serde() {
     assert!(compute_tide_diagnostics(2, &images, &TideConfig { pos_iou: 1.1, bg_iou: 0.1, ..cfg }).is_err());
     assert!(compute_tide_diagnostics(1, &images, &cfg).is_err());
 }
+
+/// Regression tests for TIDE classification-vs-duplicate priority, all-FP Miss/FN oracles,
+/// multi-class pure-miss exclusion, and malformed ground-truth filtering.
+#[test]
+fn tide_and_coco_scale_regression_edge_cases() {
+    let cfg = TideConfig::default();
+
+    // 1. Class-A prediction overlaps already-matched A truth at IoU 0.67 and unmatched B truth at IoU 1.0:
+    // must classify as fixable Cls (recovering B) rather than Dup + Miss.
+    let cls_over_dup = vec![(
+        vec![
+            det(0.0, 0.0, 10.0, 10.0, 0.95, 0), // TP on class 0 GT
+            det(2.0, 0.0, 12.0, 10.0, 0.85, 0), // IoU 2/3 with class 0 GT, IoU 1.0 with unmatched class 1 GT
+        ],
+        vec![gt(0.0, 0.0, 10.0, 10.0, 0), gt(2.0, 0.0, 12.0, 10.0, 1)],
+    )];
+    let r = compute_tide_diagnostics(2, &cls_over_dup, &cfg).unwrap();
+    assert_eq!(r.counts.cls, 1, "must classify as Cls");
+    assert_eq!(r.counts.dup, 0, "must not mask Cls as Dup");
+    assert_eq!(r.counts.miss, 0, "unmatched B truth is explained by Cls");
+    assert!((r.impacts.cls - 0.5).abs() < 1e-12, "fixing Cls raises mAP from 0.5 to 1.0");
+
+    // 2. All-FP stream (1 truth + 1 disjoint FP): removing the missed truth leaves an all-FP stream
+    // with AP = 0.0, so dAP_Miss and dAP_FN must be 0.0 (never 1.0).
+    let all_fp = vec![(vec![det(100.0, 100.0, 110.0, 110.0, 0.9, 0)], vec![gt(0.0, 0.0, 10.0, 10.0, 0)])];
+    let r_fp = compute_tide_diagnostics(1, &all_fp, &cfg).unwrap();
+    assert_eq!(r_fp.map_base, 0.0);
+    assert_eq!(r_fp.impacts.miss, 0.0, "all-FP stream must not receive AP 1.0 on Miss oracle");
+    assert_eq!(r_fp.impacts.fn_impact, 0.0, "all-FP stream must not receive AP 1.0 on FN oracle");
+
+    // 3. Two classes: class 0 perfect (AP=1), class 1 pure miss (1 GT, 0 preds -> AP=0):
+    // excluding empty class 1 after Miss oracle raises mAP from 0.5 to 1.0 -> dAP_Miss = 0.5.
+    let two_cls_miss = vec![(
+        vec![det(0.0, 0.0, 10.0, 10.0, 0.9, 0)],
+        vec![gt(0.0, 0.0, 10.0, 10.0, 0), gt(50.0, 50.0, 60.0, 60.0, 1)],
+    )];
+    let r2 = compute_tide_diagnostics(2, &two_cls_miss, &cfg).unwrap();
+    assert!((r2.map_base - 0.5).abs() < 1e-12);
+    assert!((r2.impacts.miss - 0.5).abs() < 1e-12);
+
+    // 4. Malformed GTs (inverted `[10, 10, 0, 0]` and NaN GT) must be ignored and never depress AP.
+    let malformed = vec![(
+        vec![det(0.0, 0.0, 10.0, 10.0, 0.9, 0)],
+        vec![
+            gt(0.0, 0.0, 10.0, 10.0, 0),
+            gt(10.0, 10.0, 0.0, 0.0, 0),      // inverted
+            gt(f32::NAN, 0.0, 10.0, 10.0, 0), // NaN
+        ],
+    )];
+    let cs = compute_coco_scale_metrics(1, &malformed, None).unwrap();
+    assert!((cs.ap.unwrap() - 1.0).abs() < 1e-12, "malformed GTs must not depress COCO scale AP");
+    assert_eq!(cs.truths_all, 1);
+    let td = compute_tide_diagnostics(1, &malformed, &cfg).unwrap();
+    assert!((td.map_base - 1.0).abs() < 1e-12, "malformed GTs must not depress TIDE mAP");
+    assert_eq!(td.counts.miss, 0);
+}

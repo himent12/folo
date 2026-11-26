@@ -2,22 +2,26 @@
 //! with optional DIoU overlap, score decay (Linear / Gaussian SPM), and weighted-cluster box
 //! refinement.
 //!
-//! Both algorithms operate over an upper-triangular pairwise overlap matrix `X` (`i < j`,
-//! descending score order, deterministic lower-input-index tie-breaking):
+//! Both algorithms drop candidates with non-finite scores or non-finite box coordinates before
+//! sorting descending by score (deterministic lower-input-index tie-breaking):
 //!
 //! - **Fast-NMS** ([`fast_nms`], [`batched_fast_nms`], [`fast_nms_detections`]): single-pass
-//!   vectorized column-wise maximum `max_{i < j} X[i, j] <= iou_thr`. Runs in one matrix sweep
-//!   with no sequential dependency; may over-suppress chained overlaps where `A` suppresses `B`
-//!   and `B` suppresses `C`.
+//!   vectorized column-wise maximum `max_{i < j} X[i, j] <= iou_thr` in `O(m)` memory. Runs in
+//!   one sweep with no sequential dependency; may over-suppress chained overlaps where `A`
+//!   suppresses `B` and `B` suppresses `C`.
 //! - **Cluster-NMS** ([`cluster_nms`], [`batched_cluster_nms`], [`cluster_nms_detections`]):
 //!   iterative masked upper-triangular fixed-point `b^{(t)}[j] = !any_{i < j} (b^{(t-1)}[i] &&
 //!   X[i, j] > iou_thr)` converging in typically 2–4 iterations. At convergence, hard Cluster-NMS
-//!   is **provably identical** to sequential greedy NMS (and DIoU-NMS when `use_diou` is enabled).
+//!   is **provably identical** to sequential greedy NMS (and DIoU-NMS when `use_diou` is enabled);
+//!   for uncapped hard suppression (`max_iters == None`, no decay, no weighted box), executes the
+//!   equivalent `O(m)`-memory greedy fast path stopping early at `max_det`, while capped/optional
+//!   modes use compact bit-packed upper-triangular adjacency (`1 bit / pair`, checked against
+//!   overflow) and compute plain IoU on demand for surviving cluster centers (`O(m)` float memory).
 //!   Optional extensions:
 //!   - [`ClusterScoreDecay::Linear`] / [`ClusterScoreDecay::Gaussian`]: decays overlapping boxes'
 //!     scores against surviving cluster centers instead of hard-dropping.
 //!   - `weighted_box`: refines each kept cluster center as the `score * IoU`-weighted average of
-//!     its cluster members (convex combination in `f64`, ignoring non-finite member boxes).
+//!     boxes it suppressed (convex combination in `f64`).
 
 use crate::boxes::Xyxy;
 use rayon::prelude::*;
@@ -38,7 +42,7 @@ pub enum ClusterScoreDecay {
     #[default]
     None,
     /// Linear score decay (Cluster-NMS_S): multiply each box `j`'s positive score by
-    /// `prod_{i < j, kept[i], IoU(i,j) > iou_thr} (1 - IoU(i, j))` and retain scores `> score_thr`.
+    /// `prod_{i < j, kept[i], adj[i,j]} (1 - IoU(i, j))` and retain scores `> score_thr`.
     Linear,
     /// Gaussian SPM score decay: multiply each box `j`'s positive score by
     /// `prod_{i < j, kept[i], IoU(i,j) > 0} exp(-IoU(i, j)² / sigma)` and retain scores `> score_thr`.
@@ -65,10 +69,10 @@ pub struct ClusterNmsConfig {
     /// Score-decay mode (default [`ClusterScoreDecay::None`]).
     pub score_decay: ClusterScoreDecay,
     /// Enable weighted-cluster box refinement (`b'_k = sum(w_j b_j) / sum(w_j)` with
-    /// `w_j = score_j * IoU(b_k, b_j)` over cluster members) for hard Cluster-NMS.
+    /// `w_j = score_j * IoU(b_k, b_j)` over cluster members suppressed by `k`).
     pub weighted_box: bool,
-    /// Optional cap on fixed-point iterations (`None` = iterate until exact convergence, at most `m`;
-    /// `Some(1)` recovers single-pass Fast-NMS).
+    /// Optional cap on fixed-point iterations (`None` = exact convergence; `Some(1)` recovers
+    /// single-pass Fast-NMS).
     pub max_iters: Option<usize>,
 }
 
@@ -103,6 +107,15 @@ fn box_is_finite(b: &Xyxy) -> bool {
     b.x1.is_finite() && b.y1.is_finite() && b.x2.is_finite() && b.y2.is_finite()
 }
 
+fn validate_cluster_cfg(cfg: &ClusterNmsConfig, op: &str) {
+    if let ClusterScoreDecay::Gaussian { sigma } = cfg.score_decay {
+        assert!(sigma.is_finite() && sigma > 0.0, "{op}: Gaussian sigma must be finite and > 0, got {sigma}");
+    }
+    if let Some(iters) = cfg.max_iters {
+        assert!(iters > 0, "{op}: max_iters must be >= 1");
+    }
+}
+
 /// Exact collapsed `f64` DIoU (`IoU - rho² / c²`), returning `0.0` on non-finite coordinates.
 #[inline]
 fn exact_diou_f64(a: &Xyxy, b: &Xyxy) -> f64 {
@@ -130,20 +143,65 @@ fn exact_diou_f64(a: &Xyxy, b: &Xyxy) -> f64 {
     iou - dist
 }
 
-/// Filter finite scores `> score_thr` and sort indices by descending score (ties: smaller input index).
-fn sorted_valid_indices(scores: &[f32], score_thr: f32) -> Vec<usize> {
-    let mut order: Vec<usize> =
-        (0..scores.len()).filter(|&i| scores[i].is_finite() && scores[i] > score_thr).collect();
+#[inline]
+fn overlap_f64(a: &Xyxy, b: &Xyxy, use_diou: bool) -> f64 {
+    if use_diou { exact_diou_f64(a, b) } else { exact_iou_f64(a, b) }
+}
+
+/// Filter finite scores `> score_thr` and finite box coordinates, then sort descending by score
+/// (ties: smaller input index).
+fn sorted_valid_indices(boxes: &[Xyxy], scores: &[f32], score_thr: f32) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..scores.len())
+        .filter(|&i| scores[i].is_finite() && scores[i] > score_thr && box_is_finite(&boxes[i]))
+        .collect();
     order.sort_unstable_by(|&a, &b| scores[b].total_cmp(&scores[a]).then_with(|| a.cmp(&b)));
     order
 }
 
+/// Compact bit-packed strict upper-triangular adjacency matrix (`1 bit` per `(i, j)` with `i < j`).
+///
+/// Row `i` stores `m - 1 - i` bits for `j in (i + 1)..m`, total pairs `m * (m - 1) / 2` (checked
+/// against integer overflow on both 32-bit wasm32 and 64-bit targets).
+struct UpperTriBits {
+    row_offsets: Vec<usize>,
+    words: Vec<u64>,
+}
+
+impl UpperTriBits {
+    fn new(m: usize) -> Self {
+        let mut row_offsets = Vec::with_capacity(m);
+        let mut total_bits = 0usize;
+        for i in 0..m {
+            row_offsets.push(total_bits);
+            total_bits = total_bits
+                .checked_add(m - 1 - i)
+                .expect("cluster_nms: upper-triangular adjacency size overflow");
+        }
+        let n_words = total_bits.div_ceil(64);
+        Self { row_offsets, words: vec![0u64; n_words] }
+    }
+
+    #[inline]
+    fn set(&mut self, i: usize, j: usize) {
+        debug_assert!(i < j);
+        let bit = self.row_offsets[i] + (j - i - 1);
+        self.words[bit >> 6] |= 1u64 << (bit & 63);
+    }
+
+    #[inline]
+    fn get(&self, i: usize, j: usize) -> bool {
+        debug_assert!(i < j);
+        let bit = self.row_offsets[i] + (j - i - 1);
+        ((self.words[bit >> 6] >> (bit & 63)) & 1) != 0
+    }
+}
+
 /// Fast-NMS (Bolya et al., YOLACT 2019) over a single class's `boxes` and `scores`.
 ///
-/// Drops non-finite scores (`NaN`, `±Inf`) and scores `<= score_thr`, sorts descending by score
-/// (ties: lower input index), computes the upper-triangular column maximum
-/// `max_{i < j} IoU(b_i, b_j)` in one vectorized sweep, and keeps entries with `max_iou <= iou_thr`
-/// up to `limit`.
+/// Drops non-finite scores (`NaN`, `±Inf`), non-finite box coordinates, and scores `<= score_thr`,
+/// sorts descending by score (ties: lower input index), computes the upper-triangular column
+/// maximum `max_{i < j} IoU(b_i, b_j)` in one `O(m)`-memory sweep, and keeps entries with
+/// `max_iou <= iou_thr` (rank 0 always survives any finite `iou_thr`) up to `limit`.
 ///
 /// # Panics
 /// If `boxes.len() != scores.len()`.
@@ -152,19 +210,16 @@ pub fn fast_nms(boxes: &[Xyxy], scores: &[f32], iou_thr: f32, score_thr: f32, li
     if boxes.is_empty() || limit == 0 || iou_thr.is_nan() {
         return Vec::new();
     }
-    let order = sorted_valid_indices(scores, score_thr);
+    let order = sorted_valid_indices(boxes, scores, score_thr);
     let m = order.len();
     if m == 0 {
         return Vec::new();
     }
     let sorted_boxes: Vec<Xyxy> = order.iter().map(|&i| boxes[i]).collect();
     let thr = iou_thr as f64;
-    let mut max_iou = vec![0.0f64; m];
+    let mut max_iou = vec![f64::NEG_INFINITY; m];
     for i in 0..m {
         let bi = &sorted_boxes[i];
-        if !box_is_finite(bi) {
-            continue;
-        }
         for j in (i + 1)..m {
             let ov = exact_iou_f64(bi, &sorted_boxes[j]);
             if ov > max_iou[j] {
@@ -246,28 +301,22 @@ pub fn fast_nms_detections(
 
 /// Cluster-NMS (Zheng et al., 2021) over a single class's `boxes` and `scores`.
 ///
-/// Builds the strict upper-triangular overlap matrix `X[i, j]` (`i < j`), iterates the masked
-/// upper-triangular fixed point until convergence (or `cfg.max_iters`), and optionally applies
-/// [`ClusterScoreDecay`] and/or `weighted_box` refinement.
+/// Drops candidates with non-finite scores, non-finite box coordinates, or scores `<= cfg.score_thr`,
+/// sorts descending by score (ties: lower input index), solves the Cluster-NMS fixed point (using an
+/// exact `O(m)`-memory fast path for uncapped hard Cluster-NMS, and a compact bit-packed upper
+/// triangle for capped iterations / score-decay / weighted-box refinement), and returns at most
+/// `cfg.max_det` [`ClusterNmsEntry`] items.
 ///
 /// # Panics
 /// If `boxes.len() != scores.len()`, `cfg.score_decay` has non-finite or `<= 0` Gaussian `sigma`,
 /// or `cfg.max_iters == Some(0)`.
 pub fn cluster_nms(boxes: &[Xyxy], scores: &[f32], cfg: &ClusterNmsConfig) -> Vec<ClusterNmsEntry> {
     assert_eq!(boxes.len(), scores.len(), "cluster_nms: boxes/scores length mismatch");
-    if let ClusterScoreDecay::Gaussian { sigma } = cfg.score_decay {
-        assert!(
-            sigma.is_finite() && sigma > 0.0,
-            "cluster_nms: Gaussian sigma must be finite and > 0, got {sigma}"
-        );
-    }
-    if let Some(iters) = cfg.max_iters {
-        assert!(iters > 0, "cluster_nms: max_iters must be >= 1");
-    }
+    validate_cluster_cfg(cfg, "cluster_nms");
     if boxes.is_empty() || cfg.max_det == 0 || cfg.iou_thr.is_nan() {
         return Vec::new();
     }
-    let order = sorted_valid_indices(scores, cfg.score_thr);
+    let order = sorted_valid_indices(boxes, scores, cfg.score_thr);
     let m = order.len();
     if m == 0 {
         return Vec::new();
@@ -276,32 +325,36 @@ pub fn cluster_nms(boxes: &[Xyxy], scores: &[f32], cfg: &ClusterNmsConfig) -> Ve
     let sorted_scores: Vec<f32> = order.iter().map(|&i| scores[i]).collect();
     let thr = cfg.iou_thr as f64;
 
-    // Dense strict upper-triangular overlap matrix `X` (`m * m` row-major, only `i < j` populated)
-    // and plain IoU cache (needed for score decay and weighted-cluster refinement when `use_diou`).
-    let mut ov_mat = vec![0.0f64; m * m];
-    let need_plain_iou =
-        cfg.use_diou && (cfg.weighted_box || !matches!(cfg.score_decay, ClusterScoreDecay::None));
-    let mut plain_iou_mat = if need_plain_iou { vec![0.0f64; m * m] } else { Vec::new() };
-    let mut adj = vec![false; m * m];
-
-    for i in 0..m {
-        let bi = &sorted_boxes[i];
-        let bi_fin = box_is_finite(bi);
-        let row_off = i * m;
-        for j in (i + 1)..m {
-            if !bi_fin || !box_is_finite(&sorted_boxes[j]) {
+    // Fast path for exact uncapped hard Cluster-NMS (Zheng et al., Theorem 1): provably identical
+    // to sequential greedy suppression in `O(m)` memory, stopping as soon as `max_det` survive.
+    if cfg.max_iters.is_none() && matches!(cfg.score_decay, ClusterScoreDecay::None) && !cfg.weighted_box {
+        let mut suppressed = vec![false; m];
+        let mut entries = Vec::with_capacity(m.min(cfg.max_det));
+        for i in 0..m {
+            if suppressed[i] {
                 continue;
             }
-            let ov = if cfg.use_diou {
-                if need_plain_iou {
-                    plain_iou_mat[row_off + j] = exact_iou_f64(bi, &sorted_boxes[j]);
+            entries.push(ClusterNmsEntry { index: order[i], bbox: sorted_boxes[i], score: sorted_scores[i] });
+            if entries.len() == cfg.max_det {
+                break;
+            }
+            let bi = &sorted_boxes[i];
+            for j in (i + 1)..m {
+                if !suppressed[j] && overlap_f64(bi, &sorted_boxes[j], cfg.use_diou) > thr {
+                    suppressed[j] = true;
                 }
-                exact_diou_f64(bi, &sorted_boxes[j])
-            } else {
-                exact_iou_f64(bi, &sorted_boxes[j])
-            };
-            ov_mat[row_off + j] = ov;
-            adj[row_off + j] = ov > thr;
+            }
+        }
+        return entries;
+    }
+
+    // Compact bit-packed strict upper-triangular adjacency (`1 bit / pair`).
+    let mut adj = UpperTriBits::new(m);
+    for (i, bi) in sorted_boxes.iter().enumerate() {
+        for (j, bj) in sorted_boxes.iter().enumerate().skip(i + 1) {
+            if overlap_f64(bi, bj, cfg.use_diou) > thr {
+                adj.set(i, j);
+            }
         }
     }
 
@@ -312,14 +365,13 @@ pub fn cluster_nms(boxes: &[Xyxy], scores: &[f32], cfg: &ClusterNmsConfig) -> Ve
     let mut next_alive = vec![true; m];
     for _ in 0..max_iters {
         next_alive.fill(true);
-        for i in 0..m {
-            if !alive[i] {
+        for (i, &is_alive) in alive.iter().enumerate() {
+            if !is_alive {
                 continue;
             }
-            let row = &adj[i * m..(i + 1) * m];
-            for j in (i + 1)..m {
-                if row[j] {
-                    next_alive[j] = false;
+            for (j, slot) in next_alive.iter_mut().enumerate().skip(i + 1) {
+                if adj.get(i, j) {
+                    *slot = false;
                 }
             }
         }
@@ -329,13 +381,10 @@ pub fn cluster_nms(boxes: &[Xyxy], scores: &[f32], cfg: &ClusterNmsConfig) -> Ve
         std::mem::swap(&mut alive, &mut next_alive);
     }
 
-    let plain_iou = |i: usize, j: usize| -> f64 {
-        if need_plain_iou { plain_iou_mat[i * m + j] } else { ov_mat[i * m + j] }
-    };
-
     // Optional weighted-cluster box refinement for surviving centers `k`:
-    // assign each suppressed box `j` to its primary surviving owner `k < j` (highest plain IoU > thr,
-    // ties to earliest/highest-scoring `k`), then compute convex average weighted by `score_j * IoU(k, j)`.
+    // assign each suppressed box `j` to its primary surviving suppressor `k < j` (gated on
+    // `adj.get(k, j)` so DIoU suppression owns only boxes it actually suppressed, ranking eligible
+    // suppressors by highest plain IoU with ties broken toward the highest-scoring `k`).
     let refined_boxes: Option<Vec<Xyxy>> = if cfg.weighted_box {
         let mut owner = vec![usize::MAX; m];
         for j in 0..m {
@@ -344,12 +393,12 @@ pub fn cluster_nms(boxes: &[Xyxy], scores: &[f32], cfg: &ClusterNmsConfig) -> Ve
                 continue;
             }
             let mut best_k = usize::MAX;
-            let mut best_ov = thr;
+            let mut best_ov = -1.0f64;
             for (k, &is_alive) in alive.iter().enumerate().take(j) {
-                if !is_alive {
+                if !is_alive || !adj.get(k, j) {
                     continue;
                 }
-                let ov = plain_iou(k, j);
+                let ov = exact_iou_f64(&sorted_boxes[k], &sorted_boxes[j]);
                 if ov > best_ov {
                     best_ov = ov;
                     best_k = k;
@@ -359,7 +408,7 @@ pub fn cluster_nms(boxes: &[Xyxy], scores: &[f32], cfg: &ClusterNmsConfig) -> Ve
         }
         let mut out_boxes = sorted_boxes.clone();
         for k in 0..m {
-            if !alive[k] || !box_is_finite(&sorted_boxes[k]) || sorted_scores[k] <= 0.0 {
+            if !alive[k] || sorted_scores[k] <= 0.0 {
                 continue;
             }
             let mut w_sum = 0.0f64;
@@ -368,10 +417,10 @@ pub fn cluster_nms(boxes: &[Xyxy], scores: &[f32], cfg: &ClusterNmsConfig) -> Ve
             let mut sx2 = 0.0f64;
             let mut sy2 = 0.0f64;
             for j in k..m {
-                if owner[j] != k || !box_is_finite(&sorted_boxes[j]) || sorted_scores[j] <= 0.0 {
+                if owner[j] != k || sorted_scores[j] <= 0.0 {
                     continue;
                 }
-                let ov = if j == k { 1.0 } else { plain_iou(k, j) };
+                let ov = if j == k { 1.0 } else { exact_iou_f64(&sorted_boxes[k], &sorted_boxes[j]) };
                 let w = (sorted_scores[j] as f64) * ov;
                 if w > 0.0 && w.is_finite() {
                     w_sum += w;
@@ -418,9 +467,9 @@ pub fn cluster_nms(boxes: &[Xyxy], scores: &[f32], cfg: &ClusterNmsConfig) -> Ve
                 let s = sorted_scores[j];
                 let decayed = if s > 0.0 {
                     let mut factor = 1.0f64;
-                    for i in 0..j {
-                        if alive[i] && adj[i * m + j] {
-                            let iou = plain_iou(i, j);
+                    for (i, &is_alive) in alive.iter().enumerate().take(j) {
+                        if is_alive && adj.get(i, j) {
+                            let iou = exact_iou_f64(&sorted_boxes[i], &sorted_boxes[j]);
                             factor *= (1.0 - iou).max(0.0);
                         }
                     }
@@ -443,7 +492,7 @@ pub fn cluster_nms(boxes: &[Xyxy], scores: &[f32], cfg: &ClusterNmsConfig) -> Ve
                     let mut sum_sq = 0.0f64;
                     for (i, &is_alive) in alive.iter().enumerate().take(j) {
                         if is_alive {
-                            let iou = plain_iou(i, j);
+                            let iou = exact_iou_f64(&sorted_boxes[i], &sorted_boxes[j]);
                             if iou > 0.0 {
                                 sum_sq += iou * iou;
                             }
@@ -478,6 +527,7 @@ pub fn batched_cluster_nms(
 ) -> Vec<ClusterNmsEntry> {
     assert_eq!(boxes.len(), scores.len(), "batched_cluster_nms: boxes/scores length mismatch");
     assert_eq!(boxes.len(), classes.len(), "batched_cluster_nms: boxes/classes length mismatch");
+    validate_cluster_cfg(cfg, "batched_cluster_nms");
     let n = boxes.len();
     if n == 0 || cfg.max_det == 0 || cfg.iou_thr.is_nan() {
         return Vec::new();

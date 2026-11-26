@@ -9,11 +9,16 @@ use crate::metrics::{NUM_IOU_THRESHOLDS, NUM_RECALL_POINTS, Truth, iou_f64, iou_
 use crate::nms::Detection;
 
 #[inline]
-fn box_is_finite(b: &Xyxy) -> bool {
-    b.x1.is_finite() && b.y1.is_finite() && b.x2.is_finite() && b.y2.is_finite()
+fn box_is_valid(b: &Xyxy) -> bool {
+    b.x1.is_finite()
+        && b.y1.is_finite()
+        && b.x2.is_finite()
+        && b.y2.is_finite()
+        && b.x2 >= b.x1
+        && b.y2 >= b.y1
 }
 
-/// Box area `(x2 - x1) * (y2 - y1)` in `f64` (matching pycocotools).
+/// Box area `(x2 - x1) * (y2 - y1)` in `f64` (matching pycocotools for valid non-inverted boxes).
 #[inline]
 fn box_area_f64(b: &Xyxy) -> f64 {
     (b.x2 as f64 - b.x1 as f64) * (b.y2 as f64 - b.y1 as f64)
@@ -22,10 +27,10 @@ fn box_area_f64(b: &Xyxy) -> f64 {
 /// Area boundaries defining COCO's `small`, `medium`, and `large` object scale buckets.
 ///
 /// Defaults match pycocotools:
-/// - `all`: `[0, max_area]` (`max_area = 1e10 = 1e5Â²`)
-/// - `small`: `[0, small_max]` (`32Â² = 1024`)
-/// - `medium`: `[small_max, medium_max]` (`32Â²..=96Â² = 1024..=9216`)
-/// - `large`: `[medium_max, max_area]` (`96Â²..=1e5Â²`)
+/// - `all`: `[0, max_area]` (`max_area = 1e10 = 1e5²`)
+/// - `small`: `[0, small_max]` (`32² = 1024`)
+/// - `medium`: `[small_max, medium_max]` (`32²..=96² = 1024..=9216`)
+/// - `large`: `[medium_max, max_area]` (`96²..=1e5²`)
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScaleAreaBounds {
@@ -207,13 +212,13 @@ where
 
         let mut img_preds: Vec<Vec<usize>> = vec![Vec::new(); num_classes];
         for (pi, p) in preds.iter().enumerate() {
-            if p.score.is_finite() && box_is_finite(&p.bbox) {
+            if p.score.is_finite() && box_is_valid(&p.bbox) {
                 img_preds[p.class as usize].push(pi);
             }
         }
         let mut img_gts: Vec<Vec<usize>> = vec![Vec::new(); num_classes];
         for (gi, g) in truths.iter().enumerate() {
-            if !box_is_finite(&g.bbox) {
+            if !box_is_valid(&g.bbox) {
                 continue;
             }
             let area = box_area_f64(&g.bbox);

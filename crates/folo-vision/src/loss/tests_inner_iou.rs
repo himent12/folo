@@ -359,4 +359,38 @@ fn inner_iou_identities_scale_invariance_and_edge_cases() {
         let json = serde_json::to_string(&base).unwrap();
         assert_eq!(serde_json::from_str::<InnerIouBase>(&json).unwrap(), base);
     }
+
+    // Tiny ratio (1e-20) on identical unit boxes must not collapse auxiliary endpoints.
+    let unit = Tensor::from_slice(&[0.0f32, 0.0, 1.0, 1.0], [1, 4]).unwrap();
+    assert_eq!(inner_iou(&unit, &unit, 1e-20).unwrap().to_vec::<f32>().unwrap()[0], 1.0);
+    assert_eq!(
+        inner_iou_loss(&unit, &unit, InnerIouBase::Iou, 1e-20).unwrap().to_vec::<f32>().unwrap()[0],
+        0.0
+    );
+
+    // Tiny box of area 1e-20 nested inside unit box must preserve exact IoU (no 1 - (1 - IoU) cancellation).
+    let tiny_nested = Tensor::from_slice(&[0.0f32, 0.0, 1e-10, 1e-10], [1, 4]).unwrap();
+    let got_tiny = inner_iou_box_f64([0.0, 0.0, 1e-10, 1e-10], [0.0, 0.0, 1.0, 1.0], 1.0).0;
+    assert!((got_tiny - 1e-20).abs() < 1e-34, "expected 1e-20, got {got_tiny:e}");
+    let got_tiny_t = inner_iou(&tiny_nested, &unit, 1.0).unwrap().to_vec::<f32>().unwrap()[0];
+    assert!((got_tiny_t - 1e-20).abs() < 1e-25, "expected 1e-20f32, got {got_tiny_t:e}");
+
+    // Wrapper accumulates in f64 before casting to f32 (no cancellation of tiny base_loss + delta).
+    let a_wrap = Tensor::from_slice(&[0.0f32, 0.0, 10.0, 10.0], [1, 4]).unwrap();
+    let b_wrap = Tensor::from_slice(&[0.0f32, 0.0, 10.0, 10.0], [1, 4]).unwrap();
+    let tiny_base = Tensor::from_slice(&[3e-9f32], [1]).unwrap();
+    let wrapped = wrap_inner_iou_loss(&tiny_base, &a_wrap, &b_wrap, 0.7).unwrap().to_vec::<f32>().unwrap()[0];
+    assert!((wrapped - 3e-9).abs() < 1e-14, "wrapper must preserve tiny base loss, got {wrapped:e}");
+
+    // Extreme aspect ratio (w=1, h=1e8, ratio=0.5): direct EIoU/SIoU penalties preserve exact
+    // O(1e-16) center-distance gradients without O(1) `full.grad - full.grad` cancellation.
+    let a_ext = [0.0f64, 0.0, 1.0, 1e8];
+    let b_ext = [0.6f64, 0.0, 1.6, 1e8];
+    let (l_eiou, g_eiou) = inner_iou_loss_box_f64(a_ext, b_ext, InnerIouBase::Eiou, 0.5);
+    assert!(l_eiou >= 1.0 && l_eiou.is_finite());
+    let want_g0 = -0.6f64 / (1.6 * 1.6 + 1e16);
+    assert!((g_eiou[0] - want_g0).abs() <= 1e-12 * want_g0.abs(), "g_eiou[0]={} vs {want_g0}", g_eiou[0]);
+    let (l_siou, g_siou) = inner_iou_loss_box_f64(a_ext, b_ext, InnerIouBase::Siou { theta: 4.0 }, 0.5);
+    assert!(l_siou > 1.0 && l_siou.is_finite());
+    assert!(g_siou[0].is_finite() && g_siou[0] < 0.0);
 }

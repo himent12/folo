@@ -11,7 +11,9 @@
 //!            = exp(1.0 - mu)    if mu - delta < x < mu
 //!            = exp(1.0 - x)     if x >= mu
 //!   ```
-//! - [`SlideWeightKind::Smooth`] (default; C¹-smooth Hermite ramp across `(mu - delta, mu)`):
+//! - [`SlideWeightKind::Smooth`] (default; continuous everywhere, C¹-smooth across `mu - delta` via
+//!   a cubic Hermite ramp on `(mu - delta, mu)` meeting `exp(1 - x)` continuously at `x = mu` with
+//!   left slope `0` and right slope `-exp(1 - mu)`):
 //!   ```text
 //!   w(x; mu) = 1.0                                         if x <= mu - delta
 //!            = 1.0 + (exp(1.0 - mu) - 1.0) * (3t² - 2t³)   if mu - delta < x < mu, t = (x - (mu - delta)) / delta
@@ -40,8 +42,9 @@ pub const DEFAULT_SLIDE_DELTA: f32 = 0.1;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlideWeightKind {
-    /// C¹-smooth cubic Hermite ramp from `1.0` at `mu - delta` to `exp(1 - mu)` at `mu`, then
-    /// `exp(1 - x)` for `x >= mu`. Eliminates the step discontinuity at `mu - delta`.
+    /// Continuous everywhere with a cubic Hermite ramp from `1.0` at `mu - delta` (zero slope) to
+    /// `exp(1 - mu)` at `mu` (zero left slope), meeting `exp(1 - x)` continuously for `x >= mu`.
+    /// Eliminates the step discontinuity of [`SlideWeightKind::Standard`] at `mu - delta`.
     #[default]
     Smooth,
     /// Exact piecewise YOLO-FaceV2 SlideLoss: `1.0` for `x <= mu - delta`, `exp(1 - mu)` on
@@ -359,11 +362,20 @@ pub fn slide_reweight_loss(
     mu: f32,
     cfg: &SlideLossConfig,
 ) -> Result<Tensor> {
+    if !(mu.is_finite() && (0.0..=1.0).contains(&mu)) {
+        return Err(invalid(format!("slide_reweight_loss: mu must be finite and in [0, 1], got {mu}")));
+    }
+    slide_reweight_loss_opt(base_loss, ious, Some(mu), cfg)
+}
+
+fn slide_reweight_loss_opt(
+    base_loss: &Tensor,
+    ious: &Tensor,
+    mu: Option<f32>,
+    cfg: &SlideLossConfig,
+) -> Result<Tensor> {
     const OP: &str = "slide_reweight_loss";
     cfg.validate()?;
-    if !(mu.is_finite() && (0.0..=1.0).contains(&mu)) {
-        return Err(invalid(format!("{OP}: mu must be finite and in [0, 1], got {mu}")));
-    }
     check_same_f32_shape(base_loss, ious, OP, "ious")?;
 
     let dev = base_loss.device();
@@ -382,11 +394,16 @@ pub fn slide_reweight_loss(
     let lv = base_loss.to_vec::<f32>()?;
     let iv = ious.to_vec::<f32>()?;
     validate_unit_interval(&iv, OP, "iou")?;
-    let mu64 = mu as f64;
     let delta64 = cfg.delta as f64;
     let kind = cfg.weight_kind;
 
-    let weights: Vec<f64> = iv.iter().map(|&iou| slide_weight_f64(iou as f64, mu64, delta64, kind)).collect();
+    let weights: Vec<f64> = match mu {
+        Some(m) => {
+            let mu64 = m as f64;
+            iv.iter().map(|&iou| slide_weight_f64(iou as f64, mu64, delta64, kind)).collect()
+        }
+        None => iv.iter().map(|&iou| if iou.is_finite() { 1.0 } else { f64::NAN }).collect(),
+    };
 
     match cfg.reduction {
         LossReduction::None => {
@@ -556,7 +573,7 @@ impl EmaSlideLoss {
     ///
     /// - If `mask` is `Some(m)` with `m.len() != ious.len()`, returns an error.
     /// - Finite IoUs outside `[0, 1]` return an error.
-    /// - If any selected IoU is non-finite, or if no entries are selected, EMA state is left
+    /// - If any IoU in the batch is non-finite, or if no entries are selected, EMA state is left
     ///   unchanged and the current `mu` is returned.
     pub fn update_mu(&mut self, ious: &[f32], mask: Option<&[bool]>) -> Result<f32> {
         const OP: &str = "EmaSlideLoss::update_mu";
@@ -566,13 +583,13 @@ impl EmaSlideLoss {
             return Err(invalid(format!("{OP}: mask len {} != ious len {}", m.len(), ious.len())));
         }
         validate_unit_interval(ious, OP, "iou")?;
+        if !ious.iter().all(|v| v.is_finite()) {
+            return Ok(self.mu());
+        }
         let mut sum = 0.0f64;
         let mut count = 0usize;
         for (i, &iou) in ious.iter().enumerate() {
             if mask.is_none_or(|m| m[i]) {
-                if !iou.is_finite() {
-                    return Ok(self.mu());
-                }
                 sum += iou as f64;
                 count += 1;
             }
@@ -601,8 +618,8 @@ impl EmaSlideLoss {
     /// Update EMA `mu` from positive entries (`targets > 0`) and compute differentiable Slide BCE
     /// loss with the updated `mu`.
     ///
-    /// If the batch has no positive targets or contains non-finite IoUs, EMA state is preserved
-    /// cleanly; non-finite tensor entries still propagate `NaN` through the returned loss.
+    /// If the batch has no positive targets or contains any non-finite target/IoU entry, EMA state
+    /// is preserved cleanly; non-finite tensor entries still propagate `NaN` through the returned loss.
     pub fn compute_bce(&mut self, logits: &Tensor, targets: &Tensor, ious: &Tensor) -> Result<Tensor> {
         const OP: &str = "EmaSlideLoss::compute_bce";
         check_same_f32_shape(logits, targets, OP, "targets")?;
@@ -612,7 +629,9 @@ impl EmaSlideLoss {
             let iv = ious.to_vec::<f32>()?;
             validate_unit_interval(&tv, OP, "target")?;
             validate_unit_interval(&iv, OP, "iou")?;
-            if let Some(batch_mu) = positive_mean_iou(&iv, Some(&tv), OP)?
+            if iv.iter().all(|v| v.is_finite())
+                && tv.iter().all(|v| v.is_finite())
+                && let Some(batch_mu) = positive_mean_iou(&iv, Some(&tv), OP)?
                 && batch_mu.is_finite()
             {
                 self.apply_batch_mu(batch_mu);
@@ -629,6 +648,10 @@ impl EmaSlideLoss {
     }
 
     /// Update EMA `mu` from `ious` (optionally masked by `pos_mask`) and re-weight `base_loss`.
+    ///
+    /// Always validates `pos_mask` length (including on empty tensors), leaves EMA state untouched
+    /// when any IoU is non-finite or no positive entries are selected, and falls back to unweighted
+    /// `1.0` weights (preserving `NaN` propagation) until EMA `mu` is initialized.
     pub fn reweight(
         &mut self,
         base_loss: &Tensor,
@@ -637,10 +660,17 @@ impl EmaSlideLoss {
     ) -> Result<Tensor> {
         const OP: &str = "EmaSlideLoss::reweight";
         check_same_f32_shape(base_loss, ious, OP, "ious")?;
-        if ious.numel() > 0 {
+        let n = ious.numel();
+        if let Some(m) = pos_mask
+            && m.len() != n
+        {
+            return Err(invalid(format!("{OP}: mask len {} != ious len {n}", m.len())));
+        }
+        if n > 0 {
             let iv = ious.to_vec::<f32>()?;
             self.update_mu(&iv, pos_mask)?;
         }
-        slide_reweight_loss(base_loss, ious, self.mu(), &self.cfg)
+        let mu_arg = if self.initialized { Some(self.mu()) } else { None };
+        slide_reweight_loss_opt(base_loss, ious, mu_arg, &self.cfg)
     }
 }

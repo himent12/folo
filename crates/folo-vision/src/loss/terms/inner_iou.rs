@@ -19,19 +19,18 @@
 //!   seven [`InnerIouBase`] variants (computing `(1 - IoU_inner) + R_X` directly without subtracting
 //!   `1 - IoU`).
 //! - [`wrap_inner_iou_loss`]: composable wrapper `base_loss + (IoU - IoU_inner)` for any custom
-//!   differentiable `[N]` box loss tensor.
+//!   differentiable `[N]` box loss tensor, accumulating the sum in `f64` before casting to `f32`.
 //!
-//! All functions evaluate geometry in `f64` with explicit scale normalization and zero-denominator
-//! guards so identical valid boxes at any positive scale yield exact `0.0` loss and gradient,
-//! degenerate/zero-area/inverted boxes remain finite, and `NaN` / `±Inf` inputs propagate `NaN`
-//! cleanly through both forward and backward.
+//! Auxiliary overlap is evaluated directly in relative-center and extent coordinates so extreme
+//! `ratio` values (down to `1e-20`) never collapse auxiliary endpoints, and `IoU_inner` is computed
+//! directly as `inter / union` (avoiding `1 - (1 - IoU)` cancellation for tiny nested boxes).
 
 use folo_core::{DType, Error, Result, Tensor};
 use serde::{Deserialize, Serialize};
 
 use super::box_loss::check_box_pair;
 use super::geom_loss::{one_minus_iou_f64, w_max, w_min};
-use super::siou_eiou::{eiou_box_f64, enclosing_axis, siou_box_f64};
+use super::siou_eiou::{eiou_penalty_f64, enclosing_axis, siou_penalty_f64};
 use crate::loss::invalid;
 
 /// Base geometric bounding-box regression loss composed with [`inner_iou_loss`].
@@ -86,69 +85,134 @@ fn check_ratio(ratio: f32, op: &'static str) -> Result<f64> {
     Ok(ratio as f64)
 }
 
-/// Scale one `xyxy` box about its center by `ratio > 0` in `f64`.
+/// Exact scale-normalized Inner-IoU overlap evaluation in relative center/extent coordinates:
+/// returns `(iou, one_minus_iou, d(1 - IoU_inner)/d(ax1, ay1, ax2, ay2))` in `f64`.
 ///
-/// For non-inverted axes (`x2 >= x1`), uses the exact affine combination
-/// `ix1 = ca * x1 + cb * x2`, `ix2 = cb * x1 + ca * x2` with `ca = (1 + ratio)/2`,
-/// `cb = (1 - ratio)/2` (reducing bit-identically to the original box at `ratio == 1.0`).
-/// Inverted axes (`x2 < x1`) collapse to zero extent at their midpoint so scaling never flips
-/// an inverted box into positive area.
-#[inline]
-pub(crate) fn scale_box_f64(b: [f64; 4], ratio: f64) -> [f64; 4] {
-    if ratio == 1.0 {
-        return [b[0], b[1], b[2].max(b[0]), b[3].max(b[1])];
+/// Shifting the origin to `a`'s center `(cx1, cy1)` and normalizing each axis by `ratio * max(s1, s2)`
+/// avoids endpoint collapse when `ratio` is tiny (e.g. `1e-20`) while keeping exact closed-form
+/// derivatives and preserving direct `inter / union` precision for tiny nested boxes.
+fn inner_iou_core_f64(a: [f64; 4], b: [f64; 4], ratio: f64) -> (f64, f64, [f64; 4]) {
+    if !a.iter().chain(&b).all(|v| v.is_finite()) {
+        return (f64::NAN, f64::NAN, [f64::NAN; 4]);
     }
-    let ca = 0.5 * (1.0 + ratio);
-    let cb = 0.5 * (1.0 - ratio);
-    let (ix1, ix2) = if b[2] >= b[0] {
-        (ca * b[0] + cb * b[2], cb * b[0] + ca * b[2])
+    let (ax1, ay1, ax2, ay2) = (a[0], a[1], a[2], a[3]);
+    let (bx1, by1, bx2, by2) = (b[0], b[1], b[2], b[3]);
+    let w1 = (ax2 - ax1).max(0.0);
+    let h1 = (ay2 - ay1).max(0.0);
+    let w2 = (bx2 - bx1).max(0.0);
+    let h2 = (by2 - by1).max(0.0);
+    let mx = w1.max(w2);
+    let my = h1.max(h2);
+    if mx <= 0.0 || my <= 0.0 {
+        return (0.0, 1.0, [0.0; 4]);
+    }
+    let inv_mx = 1.0 / mx;
+    let inv_my = 1.0 / my;
+    let (w1s, w2s) = (w1 * inv_mx, w2 * inv_mx);
+    let (h1s, h2s) = (h1 * inv_my, h2 * inv_my);
+    let area1 = w1s * h1s;
+    let area2 = w2s * h2s;
+    if area1 + area2 <= 0.0 {
+        return (0.0, 1.0, [0.0; 4]);
+    }
+
+    // Relative center offset `(cx2 - cx1, cy2 - cy1)` divided by `(ratio * mx, ratio * my)`.
+    let dcx = 0.5 * ((bx1 - ax1) + (bx2 - ax2));
+    let dcy = 0.5 * ((by1 - ay1) + (by2 - ay2));
+    let (hw1s, hw2s) = (0.5 * w1s, 0.5 * w2s);
+    let (hh1s, hh2s) = (0.5 * h1s, 0.5 * h2s);
+
+    // Compute `dcx / (ratio * mx)` safely without underflow/overflow of `ratio * mx`.
+    let dcxs = (dcx * inv_mx) / ratio;
+    let dcys = (dcy * inv_my) / ratio;
+
+    // Shifted auxiliary intervals: A is `[-hw1s, +hw1s]`, B is `[dcxs - hw2s, dcxs + hw2s]`.
+    let ix_s = if dcxs.is_finite() { hw1s.min(dcxs + hw2s) - (-hw1s).max(dcxs - hw2s) } else { -1.0 };
+    let iy_s = if dcys.is_finite() { hh1s.min(dcys + hh2s) - (-hh1s).max(dcys - hh2s) } else { -1.0 };
+    let iws = ix_s.max(0.0);
+    let ihs = iy_s.max(0.0);
+    let inter = iws * ihs;
+    let uni = (area1 - inter).max(0.0) + area2;
+    if uni <= 0.0 {
+        return (0.0, 1.0, [0.0; 4]);
+    }
+    let iou = (inter / uni).clamp(0.0, 1.0);
+    let deficit = (area1 - inter).max(0.0) + (area2 - inter).max(0.0);
+    let one_minus_iou = deficit / uni;
+
+    if inter <= 0.0 {
+        return (0.0, 1.0, [0.0; 4]);
+    }
+
+    // Exact chain-rule derivatives of `1 - IoU_inner` w.r.t. `(ax1, ay1, ax2, ay2)`:
+    //   d(inter_s)/d(ax1) = ihs * (cb * c_rx - ca * c_lx) / (ratio * mx)
+    //   d(inter_s)/d(ax2) = ihs * (ca * c_rx - cb * c_lx) / (ratio * mx)
+    //   d(area1_s)/d(ax1) = -h1s_act / mx,  d(area1_s)/d(ax2) = +h1s_act / mx
+    // Note that in `d(1 - IoU)/da = -(uni * d(inter) - inter * d(uni)) / uni²`
+    //   = -(deficit * d(inter) - inter * (d(area1) - d(inter))) / uni²
+    //   = -((uni * d(inter) - inter * d(area1)) / uni²),
+    // keeping `deficit` and `inter` separated prevents cancellation near `IoU == 1`.
+    let c_lx = if ix_s > 0.0 { w_max(-hw1s, dcxs - hw2s) } else { 0.0 };
+    let c_rx = if ix_s > 0.0 { w_min(hw1s, dcxs + hw2s) } else { 0.0 };
+    let c_ly = if iy_s > 0.0 { w_max(-hh1s, dcys - hh2s) } else { 0.0 };
+    let c_ry = if iy_s > 0.0 { w_min(hh1s, dcys + hh2s) } else { 0.0 };
+
+    let active_x = ax2 > ax1;
+    let active_y = ay2 > ay1;
+    let h1s_act = if active_x { h1s } else { 0.0 };
+    let w1s_act = if active_y { w1s } else { 0.0 };
+
+    // Exact algebraic form of `(cb * c_r - ca * c_l) / ratio` and `(ca * c_r - cb * c_l) / ratio`:
+    //   diws_dx1 = 0.5 * (c_rx - c_lx) / ratio - 0.5 * (c_rx + c_lx)
+    //   diws_dx2 = 0.5 * (c_rx - c_lx) / ratio + 0.5 * (c_rx + c_lx)
+    // Dividing analytically eliminates `(1 ± ratio) / ratio` rounding and guarantees exact `0.0`
+    // gradient on identical boxes for every `ratio > 0` (including `0.6` and `1e-20`).
+    let (diws_dx1, diws_dx2) = if active_x {
+        let diff_x = if c_rx == c_lx { 0.0 } else { 0.5 * (c_rx - c_lx) / ratio };
+        let sum_x = 0.5 * (c_rx + c_lx);
+        (diff_x - sum_x, diff_x + sum_x)
     } else {
-        let cx = 0.5 * (b[0] + b[2]);
-        (cx, cx)
+        (0.0, 0.0)
     };
-    let (iy1, iy2) = if b[3] >= b[1] {
-        (ca * b[1] + cb * b[3], cb * b[1] + ca * b[3])
+    let (dihs_dy1, dihs_dy2) = if active_y {
+        let diff_y = if c_ry == c_ly { 0.0 } else { 0.5 * (c_ry - c_ly) / ratio };
+        let sum_y = 0.5 * (c_ry + c_ly);
+        (diff_y - sum_y, diff_y + sum_y)
     } else {
-        let cy = 0.5 * (b[1] + b[3]);
-        (cy, cy)
+        (0.0, 0.0)
     };
-    [ix1, iy1, ix2, iy2]
+
+    let inv_u2_x = -inv_mx / (uni * uni);
+    let inv_u2_y = -inv_my / (uni * uni);
+    let g = [
+        inv_u2_x * (deficit * (diws_dx1 * ihs) + inter * (2.0 * diws_dx1 * ihs + h1s_act)),
+        inv_u2_y * (deficit * (dihs_dy1 * iws) + inter * (2.0 * dihs_dy1 * iws + w1s_act)),
+        inv_u2_x * (deficit * (diws_dx2 * ihs) + inter * (2.0 * diws_dx2 * ihs - h1s_act)),
+        inv_u2_y * (deficit * (dihs_dy2 * iws) + inter * (2.0 * dihs_dy2 * iws - w1s_act)),
+    ];
+    (iou, one_minus_iou, g)
 }
 
 /// Single-box `1 - IoU_inner(ratio)` forward and exact analytical gradient w.r.t. `a` in `f64`.
 pub(crate) fn inner_one_minus_iou_f64(a: [f64; 4], b: [f64; 4], ratio: f64) -> (f64, [f64; 4]) {
-    if !a.iter().chain(&b).all(|v| v.is_finite()) {
-        return (f64::NAN, [f64::NAN; 4]);
-    }
     if ratio == 1.0 {
+        if !a.iter().chain(&b).all(|v| v.is_finite()) {
+            return (f64::NAN, [f64::NAN; 4]);
+        }
         let t = one_minus_iou_f64(a, b);
         return (t.one_minus_iou, t.grad);
     }
-    let a_in = scale_box_f64(a, ratio);
-    let b_in = scale_box_f64(b, ratio);
-    let t = one_minus_iou_f64(a_in, b_in);
-    let ca = 0.5 * (1.0 + ratio);
-    let cb = 0.5 * (1.0 - ratio);
-    let (gx1, gx2) = if a[2] > a[0] {
-        (ca * t.grad[0] + cb * t.grad[2], cb * t.grad[0] + ca * t.grad[2])
-    } else {
-        (0.0, 0.0)
-    };
-    let (gy1, gy2) = if a[3] > a[1] {
-        (ca * t.grad[1] + cb * t.grad[3], cb * t.grad[1] + ca * t.grad[3])
-    } else {
-        (0.0, 0.0)
-    };
-    (t.one_minus_iou, [gx1, gy1, gx2, gy2])
+    let (_, om, g) = inner_iou_core_f64(a, b, ratio);
+    (om, g)
 }
 
 /// Single-box `IoU_inner(ratio)` forward and exact analytical gradient w.r.t. `a` in `f64`.
 pub(crate) fn inner_iou_box_f64(a: [f64; 4], b: [f64; 4], ratio: f64) -> (f64, [f64; 4]) {
-    let (om, g) = inner_one_minus_iou_f64(a, b, ratio);
-    if !om.is_finite() {
+    let (iou, _, g) = inner_iou_core_f64(a, b, ratio);
+    if !iou.is_finite() {
         return (f64::NAN, [f64::NAN; 4]);
     }
-    ((1.0 - om).clamp(0.0, 1.0), [-g[0], -g[1], -g[2], -g[3]])
+    (iou, [-g[0], -g[1], -g[2], -g[3]])
 }
 
 /// Pure GIoU geometric penalty `(C - U) / C` and its exact analytical gradient w.r.t. `a` in `f64`,
@@ -184,7 +248,6 @@ fn giou_penalty_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4]) {
     let c_y1 = if iy > 0.0 { w_max(ay1, by1) } else { 0.0 };
     let c_y2 = if iy > 0.0 { w_min(ay2, by2) } else { 0.0 };
 
-    // d(area1 - inter)/d(ax1) = -h1 + c_x1 * ih  (scaled by 1/(cw*ch) = inv_cw * (h_s)).
     let du_da1 = (c_x1 * ihs - h1s_act) * inv_cw;
     let du_da2 = (h1s_act - c_x2 * ihs) * inv_cw;
     let du_db1 = (c_y1 * iws - w1s_act) * inv_ch;
@@ -252,7 +315,6 @@ pub(crate) fn ciou_aspect_penalty_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4
     if m1 <= 0.0 {
         return (alpha * v, [0.0; 4], alpha);
     }
-    // d(atan2(w1, h1))/dw1 = h1 / (w1² + h1²), d(atan2(w1, h1))/dh1 = -w1 / (w1² + h1²), scale-normalized.
     let inv_m1 = 1.0 / m1;
     let (w1s, h1s) = (w1 * inv_m1, h1 * inv_m1);
     let r2 = w1s * w1s + h1s * h1s; // in [1, 2]
@@ -292,7 +354,8 @@ fn mpdiou_penalty_f64(a: [f64; 4], b: [f64; 4]) -> (f64, [f64; 4]) {
 }
 
 /// Single-box generalized Inner-IoU loss forward and exact analytical gradient w.r.t. `a` in `f64`
-/// for any [`InnerIouBase`] variant.
+/// for any [`InnerIouBase`] variant, computing `(1 - IoU_inner) + R_X` directly without subtracting
+/// `1 - IoU`.
 pub(crate) fn inner_iou_loss_box_f64(
     a: [f64; 4],
     b: [f64; 4],
@@ -312,29 +375,8 @@ pub(crate) fn inner_iou_loss_box_f64(
             let (pa, ga, _) = ciou_aspect_penalty_f64(a, b);
             (pd + pa, [gd[0] + ga[0], gd[1] + ga[1], gd[2] + ga[2], gd[3] + ga[3]])
         }
-        InnerIouBase::Eiou => {
-            if ratio == 1.0 {
-                return eiou_box_f64(a, b);
-            }
-            let full = one_minus_iou_f64(a, b);
-            let (le, ge) = eiou_box_f64(a, b);
-            (
-                (le - full.one_minus_iou).max(0.0),
-                [ge[0] - full.grad[0], ge[1] - full.grad[1], ge[2] - full.grad[2], ge[3] - full.grad[3]],
-            )
-        }
-        InnerIouBase::Siou { theta } => {
-            let theta64 = theta as f64;
-            if ratio == 1.0 {
-                return siou_box_f64(a, b, theta64);
-            }
-            let full = one_minus_iou_f64(a, b);
-            let (ls, gs) = siou_box_f64(a, b, theta64);
-            (
-                (ls - full.one_minus_iou).max(0.0),
-                [gs[0] - full.grad[0], gs[1] - full.grad[1], gs[2] - full.grad[2], gs[3] - full.grad[3]],
-            )
-        }
+        InnerIouBase::Eiou => eiou_penalty_f64(a, b),
+        InnerIouBase::Siou { theta } => siou_penalty_f64(a, b, theta as f64),
         InnerIouBase::Mpdiou => mpdiou_penalty_f64(a, b),
     };
     for s in 0..4 {
@@ -437,7 +479,8 @@ pub fn inner_iou_loss(b1: &Tensor, b2: &Tensor, base: InnerIouBase, ratio: f32) 
 /// ```
 ///
 /// Replaces the `(1 - IoU)` term of any differentiable `[N]` base box loss tensor `base_loss` with
-/// `(1 - IoU_inner(ratio))`, while preserving gradients through both `base_loss` and `b1`. At
+/// `(1 - IoU_inner(ratio))`, combining terms in `f64` before casting to `f32` to avoid intermediate
+/// rounding cancellation, while preserving gradients through both `base_loss` and `b1`. At
 /// `ratio == 1.0`, the delta term is identically `0.0` with zero gradient for all finite boxes.
 pub fn wrap_inner_iou_loss(base_loss: &Tensor, b1: &Tensor, b2: &Tensor, ratio: f32) -> Result<Tensor> {
     let ratio64 = check_ratio(ratio, "wrap_inner_iou_loss")?;
@@ -468,43 +511,50 @@ pub fn wrap_inner_iou_loss(base_loss: &Tensor, b1: &Tensor, b2: &Tensor, ratio: 
     if n == 0 {
         return base_loss.add(&Tensor::zeros_with([0], DType::F32, dev)?);
     }
+    let bl = base_loss.to_vec::<f32>()?;
     let a = b1.to_vec::<f32>()?;
     let b = b2.to_vec::<f32>()?;
-    let mut delta = vec![0.0f32; n];
+    let mut out = vec![0.0f32; n];
     let mut g_box = vec![[0.0f64; 4]; n];
+    let mut nonfinite = vec![false; n];
     for i in 0..n {
         let ai = [a[4 * i] as f64, a[4 * i + 1] as f64, a[4 * i + 2] as f64, a[4 * i + 3] as f64];
         let bi = [b[4 * i] as f64, b[4 * i + 1] as f64, b[4 * i + 2] as f64, b[4 * i + 3] as f64];
         if !ai.iter().chain(&bi).all(|v| v.is_finite()) {
-            delta[i] = f32::NAN;
+            out[i] = f32::NAN;
             g_box[i] = [f64::NAN; 4];
+            nonfinite[i] = true;
             continue;
         }
         if ratio64 == 1.0 {
+            out[i] = bl[i];
             continue;
         }
-        // IoU - IoU_inner = (1 - IoU_inner) - (1 - IoU), avoiding cancellation near IoU == 1.
         let full = one_minus_iou_f64(ai, bi);
         let (om_in, g_in) = inner_one_minus_iou_f64(ai, bi, ratio64);
-        delta[i] = (om_in - full.one_minus_iou) as f32;
+        out[i] = (bl[i] as f64 + (om_in - full.one_minus_iou)) as f32;
         for s in 0..4 {
             g_box[i][s] = g_in[s] - full.grad[s];
         }
     }
-    let delta_t = Tensor::from_vec(delta, [n])?.to_device(dev)?;
-    let diff = Tensor::custom_op("inner_iou_delta", &[b1], delta_t, move |g| {
+    let out_t = Tensor::from_vec(out, [n])?.to_device(dev)?;
+    Tensor::custom_op("wrap_inner_iou_loss", &[base_loss, b1], out_t, move |g| {
         let gv = g.to_vec::<f32>()?;
-        let mut grad = vec![0.0f32; 4 * n];
+        let mut grad_base = vec![0.0f32; n];
+        let mut grad_b1 = vec![0.0f32; 4 * n];
         for i in 0..n {
             let gi = gv[i] as f64;
+            grad_base[i] = if nonfinite[i] { f32::NAN } else { gv[i] };
             if gi == 0.0 && g_box[i].iter().all(|v| v.is_finite()) {
                 continue;
             }
             for s in 0..4 {
-                grad[4 * i + s] = (gi * g_box[i][s]) as f32;
+                grad_b1[4 * i + s] = (gi * g_box[i][s]) as f32;
             }
         }
-        Ok(vec![Some(Tensor::from_vec(grad, [n, 4])?.to_device(dev)?)])
-    })?;
-    base_loss.add(&diff)
+        Ok(vec![
+            Some(Tensor::from_vec(grad_base, [n])?.to_device(dev)?),
+            Some(Tensor::from_vec(grad_b1, [n, 4])?.to_device(dev)?),
+        ])
+    })
 }

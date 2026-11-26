@@ -14,8 +14,13 @@ use crate::metrics::{NUM_RECALL_POINTS, Truth, iou_f64, recall_points};
 use crate::nms::Detection;
 
 #[inline]
-fn box_is_finite(b: &Xyxy) -> bool {
-    b.x1.is_finite() && b.y1.is_finite() && b.x2.is_finite() && b.y2.is_finite()
+fn box_is_valid(b: &Xyxy) -> bool {
+    b.x1.is_finite()
+        && b.y1.is_finite()
+        && b.x2.is_finite()
+        && b.y2.is_finite()
+        && b.x2 >= b.x1
+        && b.y2 >= b.y1
 }
 
 /// Configuration for TIDE-style error attribution ([`compute_tide_diagnostics`]).
@@ -103,7 +108,7 @@ pub struct TideErrorImpacts {
 pub struct TideClassBreakdown {
     /// Class index.
     pub class: u32,
-    /// Number of ground truths for this class.
+    /// Number of valid ground truths for this class.
     pub num_truths: u64,
     /// Number of evaluated predictions for this class.
     pub num_preds: u64,
@@ -152,17 +157,26 @@ struct TideDetRecord {
 
 /// Exact 101-point COCO-interpolated AP from a score-sorted stream of `(score, is_tp)` flags.
 ///
-/// When `original_gt > 0` and `effective_gt == 0` (every ground truth was fixed by a `Miss`/`FN`
-/// oracle), returns `1.0` per TIDE conventions.
-fn ap_101_from_stream(dets: &[(f32, usize, usize, bool)], original_gt: u64, effective_gt: u64) -> f64 {
+/// Follows TIDE (`tidecv/ap.py`):
+/// - When `effective_gt == 0` and `dets.is_empty()` (class becomes completely empty after a
+///   `Miss`/`FN` oracle removes all missed GTs with zero remaining false positives), returns `None`
+///   so the class is excluded from the oracle mAP average (and yields `1.0` if every active class
+///   became completely empty).
+/// - When `effective_gt == 0` and `!dets.is_empty()` (all-FP stream with zero positives), returns
+///   `Some(0.0)` so false positives are never rewarded with perfect AP.
+fn ap_101_from_stream(
+    dets: &[(f32, usize, usize, bool)],
+    original_gt: u64,
+    effective_gt: u64,
+) -> Option<f64> {
     if original_gt == 0 {
-        return 0.0;
+        return None;
     }
     if effective_gt == 0 {
-        return 1.0;
+        return if dets.is_empty() { None } else { Some(0.0) };
     }
     if dets.is_empty() {
-        return 0.0;
+        return Some(0.0);
     }
     let r_grid = recall_points();
     let n_gt_f = effective_gt as f64;
@@ -195,7 +209,7 @@ fn ap_101_from_stream(dets: &[(f32, usize, usize, bool)], original_gt: u64, effe
             *v = running;
         }
     }
-    bucket_max.iter().sum::<f64>() / NUM_RECALL_POINTS as f64
+    Some(bucket_max.iter().sum::<f64>() / NUM_RECALL_POINTS as f64)
 }
 
 fn sort_stream(stream: &mut [(f32, usize, usize, bool)]) {
@@ -205,6 +219,9 @@ fn sort_stream(stream: &mut [(f32, usize, usize, bool)]) {
 
 /// Compute TIDE-style detection error attribution (`Cls`, `Loc`, `Both`, `Dup`, `Bkg`, `Miss`,
 /// plus `FP` and `FN` summaries) with exact `dAP = AP_oracle - AP_base >= 0` oracle-fix impacts.
+///
+/// Malformed (non-finite or inverted) ground-truth or prediction boxes and non-finite scores are
+/// skipped cleanly before counting or matching.
 pub fn compute_tide_diagnostics<P, T>(
     num_classes: usize,
     images: &[(P, T)],
@@ -244,24 +261,26 @@ where
             }
         }
 
-        let gt_base = gt_global_matched.len();
-        let mut img_gts_by_class: Vec<Vec<usize>> = vec![Vec::new(); num_classes];
-        let mut finite_gts: Vec<usize> = Vec::with_capacity(truths.len());
+        // Only count and index valid (finite, non-inverted) ground truths.
+        let mut img_gts_by_class: Vec<Vec<(usize, usize)>> = vec![Vec::new(); num_classes];
+        let mut valid_gts: Vec<(usize, usize)> = Vec::with_capacity(truths.len());
         for (gi, g) in truths.iter().enumerate() {
+            if !box_is_valid(&g.bbox) {
+                continue;
+            }
             let cls = g.class as usize;
+            let global_id = gt_global_matched.len();
             gt_counts[cls] += 1;
             gt_global_matched.push(false);
             gt_global_class.push(cls);
             gt_explained_by_cls_or_loc.push(false);
-            if box_is_finite(&g.bbox) {
-                img_gts_by_class[cls].push(gi);
-                finite_gts.push(gi);
-            }
+            img_gts_by_class[cls].push((gi, global_id));
+            valid_gts.push((gi, global_id));
         }
 
         let mut img_preds_by_class: Vec<Vec<usize>> = vec![Vec::new(); num_classes];
         for (pi, p) in preds.iter().enumerate() {
-            if p.score.is_finite() && box_is_finite(&p.bbox) {
+            if p.score.is_finite() && box_is_valid(&p.bbox) {
                 img_preds_by_class[p.class as usize].push(pi);
             }
         }
@@ -281,25 +300,28 @@ where
             for (local_p, &pi) in p_list.iter().enumerate() {
                 let pb = &preds[pi].bbox;
                 let mut best_iou = -1.0f64;
-                let mut best_gi = None;
-                for &gi in g_list {
-                    if gt_global_matched[gt_base + gi] {
+                let mut best_global = None;
+                for &(gi, global_id) in g_list {
+                    if gt_global_matched[global_id] {
                         continue;
                     }
                     let v = iou_f64(pb, &truths[gi].bbox);
                     if v >= pos_thr && v > best_iou {
                         best_iou = v;
-                        best_gi = Some(gi);
+                        best_global = Some(global_id);
                     }
                 }
-                if let Some(gi) = best_gi {
-                    gt_global_matched[gt_base + gi] = true;
+                if let Some(global_id) = best_global {
+                    gt_global_matched[global_id] = true;
                     flags[local_p] = true;
                 }
             }
         }
 
         // Pass 2: classify every FP into mutually exclusive TIDE categories.
+        // Check qualifying unmatched wrong-class GT (`iou >= pos_thr`) before `Dup` so a fixable
+        // classification error that recovers an unmatched GT is never masked by an already-matched
+        // same-class neighbor (matching `tidecv/quantify.py`).
         for c in 0..num_classes {
             let p_list = &img_preds_by_class[c];
             let flags = &is_tp_flag[c];
@@ -309,30 +331,41 @@ where
                     TideDetKind::Tp
                 } else {
                     let mut best_same_iou = -1.0f64;
-                    let mut best_same_gi = None;
+                    let mut best_same_global = None;
+                    let mut best_other_unmatched_iou = -1.0f64;
+                    let mut best_other_unmatched_global = None;
                     let mut best_other_iou = -1.0f64;
-                    let mut best_other_gi = None;
-                    for &gi in &finite_gts {
+                    let mut best_other_global = None;
+                    for &(gi, global_id) in &valid_gts {
                         let v = iou_f64(&p.bbox, &truths[gi].bbox);
                         if truths[gi].class as usize == c {
                             if v > best_same_iou {
                                 best_same_iou = v;
-                                best_same_gi = Some(gi);
+                                best_same_global = Some(global_id);
                             }
-                        } else if v > best_other_iou {
-                            best_other_iou = v;
-                            best_other_gi = Some(gi);
+                        } else {
+                            if v > best_other_iou {
+                                best_other_iou = v;
+                                best_other_global = Some(global_id);
+                            }
+                            if !gt_global_matched[global_id] && v > best_other_unmatched_iou {
+                                best_other_unmatched_iou = v;
+                                best_other_unmatched_global = Some(global_id);
+                            }
                         }
                     }
-                    if best_same_iou >= pos_thr {
+                    if best_other_unmatched_iou >= pos_thr {
+                        let target_gt = best_other_unmatched_global.unwrap();
+                        gt_explained_by_cls_or_loc[target_gt] = true;
+                        TideDetKind::Cls { target_gt }
+                    } else if best_same_iou >= pos_thr {
                         TideDetKind::Dup
                     } else if best_same_iou >= bg_thr {
-                        let target_gt = gt_base + best_same_gi.unwrap();
+                        let target_gt = best_same_global.unwrap();
                         gt_explained_by_cls_or_loc[target_gt] = true;
                         TideDetKind::Loc { target_gt }
                     } else if best_other_iou >= pos_thr {
-                        let gi = best_other_gi.unwrap();
-                        let target_gt = gt_base + gi;
+                        let target_gt = best_other_global.unwrap();
                         gt_explained_by_cls_or_loc[target_gt] = true;
                         TideDetKind::Cls { target_gt }
                     } else if best_other_iou >= bg_thr {
@@ -369,7 +402,7 @@ where
     let mut best_cls_for_gt: Vec<Option<(f32, usize, usize)>> = vec![None; gt_global_matched.len()];
     for dets in &per_class_dets {
         for d in dets {
-            if let TideDetKind::Cls { target_gt, .. } = d.kind
+            if let TideDetKind::Cls { target_gt } = d.kind
                 && !gt_global_matched[target_gt]
             {
                 let cand = (d.score, d.image_idx, d.det_idx);
@@ -397,7 +430,16 @@ where
     let mut per_class = Vec::with_capacity(num_classes);
     let mut total_counts = TideErrorCounts::default();
     let mut sum_base = 0.0f64;
-    let mut sum_imp = TideErrorImpacts::default();
+    let mut sum_cls = 0.0f64;
+    let mut sum_loc = 0.0f64;
+    let mut sum_both = 0.0f64;
+    let mut sum_dup = 0.0f64;
+    let mut sum_bkg = 0.0f64;
+    let mut sum_fp = 0.0f64;
+    let mut sum_miss = 0.0f64;
+    let mut cnt_miss = 0usize;
+    let mut sum_fn = 0.0f64;
+    let mut cnt_fn = 0usize;
     let mut active_classes = 0usize;
 
     for c in 0..num_classes {
@@ -451,7 +493,7 @@ where
 
         let base_stream: Vec<(f32, usize, usize, bool)> =
             dets.iter().map(|d| (d.score, d.image_idx, d.det_idx, d.kind == TideDetKind::Tp)).collect();
-        let ap_base = ap_101_from_stream(&base_stream, n_gt, n_gt);
+        let ap_base = ap_101_from_stream(&base_stream, n_gt, n_gt).unwrap_or(0.0);
 
         // Oracle 1: Fix Cls (drop Cls FPs from this class, inject promoted Cls TPs targeting this class).
         let mut cls_stream: Vec<(f32, usize, usize, bool)> = dets
@@ -461,7 +503,7 @@ where
             .collect();
         cls_stream.extend_from_slice(&cls_promoted_by_class[c]);
         sort_stream(&mut cls_stream);
-        let ap_cls = ap_101_from_stream(&cls_stream, n_gt, n_gt);
+        let ap_cls = ap_101_from_stream(&cls_stream, n_gt, n_gt).unwrap_or(0.0);
 
         // Oracle 2: Fix Loc (for each unmatched GT targeted by Loc FPs, promote highest-scoring Loc FP to TP; drop other Loc FPs).
         let mut loc_claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -476,16 +518,16 @@ where
                 _ => loc_stream.push((d.score, d.image_idx, d.det_idx, d.kind == TideDetKind::Tp)),
             }
         }
-        let ap_loc = ap_101_from_stream(&loc_stream, n_gt, n_gt);
+        let ap_loc = ap_101_from_stream(&loc_stream, n_gt, n_gt).unwrap_or(0.0);
 
-        // Oracles 3â€“5 & FP: drop matching FP category.
+        // Oracles 3–5 & FP: drop matching FP category.
         let ap_drop = |drop_fn: fn(TideDetKind) -> bool| -> f64 {
             let stream: Vec<(f32, usize, usize, bool)> = dets
                 .iter()
                 .filter(|d| !drop_fn(d.kind))
                 .map(|d| (d.score, d.image_idx, d.det_idx, d.kind == TideDetKind::Tp))
                 .collect();
-            ap_101_from_stream(&stream, n_gt, n_gt)
+            ap_101_from_stream(&stream, n_gt, n_gt).unwrap_or(0.0)
         };
         let ap_both = ap_drop(|k| k == TideDetKind::Both);
         let ap_dup = ap_drop(|k| k == TideDetKind::Dup);
@@ -493,8 +535,19 @@ where
         let ap_fp = ap_drop(|k| k != TideDetKind::Tp);
 
         // Oracles 6 & FN: reduce effective GT denominator by missed / FN count.
-        let ap_miss = ap_101_from_stream(&base_stream, n_gt, n_gt.saturating_sub(counts.miss));
-        let ap_fn = ap_101_from_stream(&base_stream, n_gt, n_gt.saturating_sub(counts.fn_count));
+        // Classes that become completely empty (`effective_gt == 0 && dets.is_empty()`) return `None`
+        // and are excluded from the oracle mAP average (yielding `1.0` per-class impact if empty,
+        // while all-FP classes with `effective_gt == 0 && !dets.is_empty()` score `0.0`).
+        let ap_miss_opt = ap_101_from_stream(&base_stream, n_gt, n_gt.saturating_sub(counts.miss));
+        let ap_fn_opt = ap_101_from_stream(&base_stream, n_gt, n_gt.saturating_sub(counts.fn_count));
+        if let Some(v) = ap_miss_opt {
+            sum_miss += v;
+            cnt_miss += 1;
+        }
+        if let Some(v) = ap_fn_opt {
+            sum_fn += v;
+            cnt_fn += 1;
+        }
 
         let impacts = TideErrorImpacts {
             cls: (ap_cls - ap_base).max(0.0),
@@ -502,20 +555,18 @@ where
             both: (ap_both - ap_base).max(0.0),
             dup: (ap_dup - ap_base).max(0.0),
             bkg: (ap_bkg - ap_base).max(0.0),
-            miss: (ap_miss - ap_base).max(0.0),
+            miss: (ap_miss_opt.unwrap_or(1.0) - ap_base).max(0.0),
             fp: (ap_fp - ap_base).max(0.0),
-            fn_impact: (ap_fn - ap_base).max(0.0),
+            fn_impact: (ap_fn_opt.unwrap_or(1.0) - ap_base).max(0.0),
         };
 
         sum_base += ap_base;
-        sum_imp.cls += impacts.cls;
-        sum_imp.loc += impacts.loc;
-        sum_imp.both += impacts.both;
-        sum_imp.dup += impacts.dup;
-        sum_imp.bkg += impacts.bkg;
-        sum_imp.miss += impacts.miss;
-        sum_imp.fp += impacts.fp;
-        sum_imp.fn_impact += impacts.fn_impact;
+        sum_cls += ap_cls;
+        sum_loc += ap_loc;
+        sum_both += ap_both;
+        sum_dup += ap_dup;
+        sum_bkg += ap_bkg;
+        sum_fp += ap_fp;
         active_classes += 1;
 
         per_class.push(TideClassBreakdown {
@@ -532,17 +583,20 @@ where
         (0.0, TideErrorImpacts::default())
     } else {
         let inv = 1.0 / active_classes as f64;
+        let map_base = sum_base * inv;
+        let map_miss = if cnt_miss == 0 { 1.0 } else { sum_miss / cnt_miss as f64 };
+        let map_fn = if cnt_fn == 0 { 1.0 } else { sum_fn / cnt_fn as f64 };
         (
-            sum_base * inv,
+            map_base,
             TideErrorImpacts {
-                cls: sum_imp.cls * inv,
-                loc: sum_imp.loc * inv,
-                both: sum_imp.both * inv,
-                dup: sum_imp.dup * inv,
-                bkg: sum_imp.bkg * inv,
-                miss: sum_imp.miss * inv,
-                fp: sum_imp.fp * inv,
-                fn_impact: sum_imp.fn_impact * inv,
+                cls: (sum_cls * inv - map_base).max(0.0),
+                loc: (sum_loc * inv - map_base).max(0.0),
+                both: (sum_both * inv - map_base).max(0.0),
+                dup: (sum_dup * inv - map_base).max(0.0),
+                bkg: (sum_bkg * inv - map_base).max(0.0),
+                miss: (map_miss - map_base).max(0.0),
+                fp: (sum_fp * inv - map_base).max(0.0),
+                fn_impact: (map_fn - map_base).max(0.0),
             },
         )
     };

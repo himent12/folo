@@ -193,7 +193,7 @@ fn fast_and_cluster_nms_edge_cases_and_multiclass() {
     assert_eq!(c_messy.len(), 1);
     assert_eq!(c_messy[0].index, 3);
 
-    // Non-finite boxes never poison weighted box refinement or cause panics.
+    // Non-finite boxes are filtered during candidate selection and never consume max_det.
     let nan_box = Xyxy::new(f32::NAN, 0.0, 10.0, 10.0);
     let inv_box = Xyxy::new(10.0, 10.0, 2.0, 2.0);
     let out_nf = cluster_nms(
@@ -202,6 +202,36 @@ fn fast_and_cluster_nms_edge_cases_and_multiclass() {
         &ClusterNmsConfig { iou_thr: 0.5, weighted_box: true, ..cfg },
     );
     assert_eq!(out_nf[0].bbox, b);
+
+    let nan_first =
+        vec![Detection { bbox: nan_box, score: 0.99, class: 0 }, Detection { bbox: b, score: 0.8, class: 0 }];
+    let f_cap1 = fast_nms_detections(&nan_first, 0.5, 0.0, 1, false);
+    assert_eq!(f_cap1.len(), 1);
+    assert_eq!(f_cap1[0].bbox, b, "NaN box must not displace valid box at max_det=1 in Fast-NMS");
+    let c_cap1 = cluster_nms_detections(&nan_first, &ClusterNmsConfig { iou_thr: 0.5, max_det: 1, ..cfg });
+    assert_eq!(c_cap1.len(), 1);
+    assert_eq!(c_cap1[0].bbox, b, "NaN box must not displace valid box at max_det=1 in Cluster-NMS");
+
+    // Negative iou_thr: rank-0 candidate still survives in fast_nms (matching 1-iter cluster_nms).
+    assert_eq!(fast_nms(&[b, Xyxy::new(50.0, 50.0, 60.0, 60.0)], &[0.9, 0.8], -0.1, 0.0, 10), vec![0]);
+
+    // DIoU-weighted refinement must only assign a suppressed box to a center that actually suppressed it.
+    // b0=[0,0,10,1] (0.9), b1=[1.3,0,4.2,1] (0.8, alive), b2=[0,0,5.5,1] (0.7):
+    // IoU(b0,b2)=0.55 but DIoU(b0,b2)≈0.4999 <= 0.50 (b0 does NOT suppress b2),
+    // while DIoU(b1,b2)≈0.5273 > 0.50 (b1 DOES suppress b2). Thus b0 stays untouched and b1 refines with b2.
+    let d0 = Xyxy::new(0.0, 0.0, 10.0, 1.0);
+    let d1 = Xyxy::new(1.3, 0.0, 4.2, 1.0);
+    let d2 = Xyxy::new(0.0, 0.0, 5.5, 1.0);
+    let diou_ref = cluster_nms(
+        &[d0, d1, d2],
+        &[0.9, 0.8, 0.7],
+        &ClusterNmsConfig { iou_thr: 0.5, use_diou: true, weighted_box: true, ..cfg },
+    );
+    assert_eq!(diou_ref.len(), 2);
+    assert_eq!(diou_ref[0].index, 0);
+    assert_eq!(diou_ref[0].bbox, d0, "b0 did not suppress b2 under DIoU and must stay unchanged");
+    assert_eq!(diou_ref[1].index, 1);
+    assert_ne!(diou_ref[1].bbox, d1, "b1 suppressed b2 under DIoU and must refine toward b2");
 
     // Multi-class isolation vs class-agnostic via detection helpers.
     let dets = vec![

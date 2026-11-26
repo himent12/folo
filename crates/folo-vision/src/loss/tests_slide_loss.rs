@@ -262,4 +262,36 @@ fn slide_loss_edge_cases_and_validation() {
     assert!(EmaSlideLoss::new(cfg, -0.1, 0.0).is_err());
     assert!(EmaSlideLoss::new(cfg, 0.9, -1.0).is_err());
     assert!(EmaSlideLoss::with_initial_mu(cfg, 0.9, 0.0, 1.5).is_err());
+
+    // Partial non-finite batch (`targets=[1, 0]`, `ious=[0.8, NaN]`): `compute_bce` must preserve
+    // both `mu` and `updates` while returning NaN loss.
+    let mut ema_guard = EmaSlideLoss::with_initial_mu(cfg, 0.9, 0.0, 0.5).unwrap();
+    let lg2 = Tensor::from_slice(&[0.5f32, -0.5], [2]).unwrap();
+    let tg2 = Tensor::from_slice(&[1.0f32, 0.0], [2]).unwrap();
+    let io_nan = Tensor::from_slice(&[0.8f32, f32::NAN], [2]).unwrap();
+    let nan_loss = ema_guard.compute_bce(&lg2, &tg2, &io_nan).unwrap();
+    assert!(nan_loss.item::<f32>().unwrap().is_nan());
+    assert_eq!(ema_guard.updates(), 0, "non-finite IoU batch must not increment updates");
+    assert_eq!(ema_guard.mu(), 0.5, "non-finite IoU batch must not mutate mu");
+
+    // EmaSlideLoss::reweight: validates pos_mask on empty tensors, falls back to unweighted 1.0
+    // when uninitialized on all-negative batches, and updates EMA on positive batches.
+    let mut ema_rw =
+        EmaSlideLoss::new(SlideLossConfig { reduction: LossReduction::None, ..cfg }, 0.8, 0.0).unwrap();
+    let e0 = Tensor::zeros([0]);
+    assert!(ema_rw.reweight(&e0, &e0, Some(&[true])).is_err(), "empty tensor with non-empty mask must error");
+
+    let base_l = Tensor::from_slice(&[0.4f32, 0.8], [2]).unwrap().requires_grad_();
+    let neg_ious = Tensor::from_slice(&[0.2f32, 0.3], [2]).unwrap();
+    let rw_uninit = ema_rw.reweight(&base_l, &neg_ious, Some(&[false, false])).unwrap();
+    assert!(!ema_rw.is_initialized());
+    assert_eq!(rw_uninit.to_vec::<f32>().unwrap(), vec![0.4f32, 0.8], "uninitialized reweight must use 1.0");
+
+    let pos_ious = Tensor::from_slice(&[0.65f32, 0.75], [2]).unwrap();
+    let rw_init = ema_rw.reweight(&base_l, &pos_ious, Some(&[true, true])).unwrap();
+    assert!(ema_rw.is_initialized());
+    assert_eq!(ema_rw.updates(), 1);
+    assert!((ema_rw.mu() - 0.7).abs() < 1e-6);
+    let rw_vals = rw_init.to_vec::<f32>().unwrap();
+    assert!(rw_vals[0] > 0.4 && rw_vals[1] > 0.8, "hard-boundary samples must be upweighted: {rw_vals:?}");
 }
