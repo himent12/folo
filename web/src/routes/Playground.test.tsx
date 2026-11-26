@@ -872,7 +872,7 @@ describe('Playground: the rail (from 1024 px)', () => {
     expect(target.querySelectorAll('#pg-panel tbody tr').length).toBe(1);
   });
 
-  it('keeps keyboard focus on Lower the threshold when stepping confidence down while still empty', async () => {
+  it('keeps keyboard focus on Lower the threshold across empty-state transitions including admitting hidden detections', async () => {
     const api = new MockApi('normal', 0);
     api.imageUrl = async () => 'data:,';
     hub.api = api;
@@ -880,26 +880,59 @@ describe('Playground: the rail (from 1024 px)', () => {
     vi.spyOn(hub.api, 'predict').mockResolvedValue({
       model_id: 'm_shapes_s',
       image: { width: 640, height: 640 },
-      boxes: [{ class: 1, name: 'square', score: 0.15, x1: 120, y1: 120, x2: 200, y2: 200 }],
+      boxes: [
+        { class: 0, name: 'circle', score: 0.3, x1: 10, y1: 10, x2: 100, y2: 100 },
+        { class: 1, name: 'square', score: 0.15, x1: 120, y1: 120, x2: 200, y2: 200 },
+      ],
       timing: { preprocess_ms: 1, inference_ms: 2, postprocess_ms: 1, total_ms: 4 },
       device: 'cpu',
       cold: false,
     });
     target = document.createElement('div');
     document.body.appendChild(target);
-    router.route = parse('#/playground?model=m_shapes_s&conf=0.80');
+    router.route = parse('#/playground?model=m_shapes_s&conf=0.25');
     c = mount(Playground, { target });
     (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
-    await until(() => target.querySelector('#pg-panel p.placeholder button'), 'Lower the threshold button');
+    await until(() => target.querySelectorAll('#pg-panel tbody tr').length === 1, 'circle at conf 0.25');
 
-    const btn = target.querySelector<HTMLButtonElement>('#pg-panel p.placeholder button')!;
-    expect(text(btn)).toBe('Lower the threshold');
+    // Hide circle (0.30), then raise conf to 0.80 so both circle (hidden) and square (0.15) are below threshold.
+    tab('Classes').click();
+    flushSync();
+    target.querySelector<HTMLButtonElement>('#pg-panel ul.counts button[aria-pressed]')!.click();
+    flushSync();
+    const confInput = target.querySelector<HTMLInputElement>('.slider input[type="range"]')!;
+    confInput.value = '0.80';
+    confInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    tab('Detections').click();
+    flushSync();
+
+    const lowerBtn = () =>
+      [...target.querySelectorAll<HTMLButtonElement>('#pg-panel p.placeholder button')].find((b) => text(b) === 'Lower the threshold')!;
+    const btn = lowerBtn();
+    expect(btn).toBeDefined();
     btn.focus();
     expect(document.activeElement).toBe(btn);
+
+    // 0.80 -> 0.40 (still 0 detections at conf): same button stays mounted and focused.
     btn.click();
     flushSync();
     expect(text(target.querySelector('#pg-panel p.placeholder'))).toContain('0.40');
-    expect(target.querySelector('#pg-panel p.placeholder button')).toBe(btn);
+    expect(lowerBtn()).toBe(btn);
     expect(document.activeElement).toBe(btn);
+
+    // 0.40 -> 0.20 (admits hidden circle at 0.30, while visible square at 0.15 is still below conf):
+    // Show all classes appears beside Lower the threshold, and the exact same Lower the threshold button keeps focus.
+    btn.click();
+    flushSync();
+    expect(text(target.querySelector('#pg-panel p.placeholder'))).toContain('1 detection is hidden by the class filter');
+    expect(text(target.querySelector('#pg-panel p.placeholder'))).toContain('Show all classes');
+    expect(lowerBtn()).toBe(btn);
+    expect(document.activeElement).toBe(btn);
+
+    // 0.20 -> 0.10: visible square (0.15) now appears in the table.
+    btn.click();
+    flushSync();
+    expect(target.querySelectorAll('#pg-panel tbody tr').length).toBe(1);
   });
 });

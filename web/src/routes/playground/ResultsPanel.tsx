@@ -116,9 +116,13 @@ export default function ResultsPanel(props: ResultsPanelProps) {
       hasVisibleCandidates.get() &&
       (props.maxDet === undefined || hiddenAtConf.get() < props.maxDet),
   );
-  const emptyMode = computed<'hidden' | 'all-hidden' | 'none'>(() =>
-    hiddenAtConf.get() > 0 ? 'hidden' : props.hidden.size > 0 && !hasVisibleCandidates.get() ? 'all-hidden' : 'none',
-  );
+  const canShowAll = computed(() => !!props.onShowAll && (hiddenAtConf.get() > 0 || (props.hidden.size > 0 && !hasVisibleCandidates.get())));
+  const emptyMessage = computed(() => {
+    const n = hiddenAtConf.get();
+    if (n > 0) return `${n === 1 ? '1 detection is' : `${n} detections are`} hidden by the class filter.`;
+    if (props.hidden.size > 0 && !hasVisibleCandidates.get()) return `No detections at conf ≥ ${conf.get().toFixed(2)} — every detected class is hidden.`;
+    return `No detections at conf ≥ ${conf.get().toFixed(2)}${props.hidden.size ? ' in the visible classes' : ''}.`;
+  });
 
   return (
     <div class="results" class:rail={!!props.rail}>
@@ -177,41 +181,20 @@ export default function ResultsPanel(props: ResultsPanelProps) {
             /* Candidates are fetched down to the lowest threshold (FETCH): none means no threshold would show more. */
             <p class="placeholder">The model found nothing in this image, even at conf ≥ {FETCH.conf}.</p>
           ) : props.rows.length === 0 ? (
-            emptyMode.get() === 'hidden' ? (
-              <p class="placeholder">
-                {hiddenAtConf.get() === 1 ? '1 detection is' : `${hiddenAtConf.get()} detections are`} hidden by the class filter.{' '}
-                {props.onShowAll ? (
-                  <button type="button" class="inline" onclick={props.onShowAll}>
-                    Show all classes
-                  </button>
-                ) : null}
-                {props.onShowAll && canLower.get() ? ' · ' : null}
-                {canLower.get() ? (
-                  <button type="button" class="inline" onclick={() => conf.set(Math.max(0.01, +(conf.get() / 2).toFixed(2)))}>
-                    Lower the threshold
-                  </button>
-                ) : null}
-              </p>
-            ) : emptyMode.get() === 'all-hidden' ? (
-              <p class="placeholder">
-                No detections at conf ≥ {conf.get().toFixed(2)} — every detected class is hidden.{' '}
-                {props.onShowAll ? (
-                  <button type="button" class="inline" onclick={props.onShowAll}>
-                    Show all classes
-                  </button>
-                ) : null}
-              </p>
-            ) : (
-              <p class="placeholder">
-                No detections at conf ≥ {conf.get().toFixed(2)}
-                {props.hidden.size ? ' in the visible classes' : ''}.{' '}
-                {canLower.get() ? (
-                  <button type="button" class="inline" onclick={() => conf.set(Math.max(0.01, +(conf.get() / 2).toFixed(2)))}>
-                    Lower the threshold
-                  </button>
-                ) : null}
-              </p>
-            )
+            <p class="placeholder">
+              {emptyMessage.get()}{' '}
+              {canShowAll.get() ? (
+                <button type="button" class="inline" onclick={props.onShowAll}>
+                  Show all classes
+                </button>
+              ) : null}
+              {canShowAll.get() && canLower.get() ? ' · ' : null}
+              {canLower.get() ? (
+                <button type="button" class="inline" onclick={() => conf.set(Math.max(0.01, +(conf.get() / 2).toFixed(2)))}>
+                  Lower the threshold
+                </button>
+              ) : null}
+            </p>
           ) : (
             <>
               {summary.get() ? (
