@@ -256,6 +256,11 @@ fn run_entry(a: BenchRunArgs, out: Out) -> Result<(), CliError> {
             if a.unscored {
                 return Err(usage("--unscored is for --predictions: a model gives its confidences"));
             }
+            if let Some(n) = a.max_images
+                && !crate::cli::bounds::POSITIVE_INT.contains_u64(u64::from(n))
+            {
+                return Err(usage("--max-images must be at least 1"));
+            }
             Contestant::Model {
                 model_id,
                 max_images: a.max_images,
@@ -452,5 +457,31 @@ mod tests {
             plan(r#"{"conditions":[],"designed_by":{"agent":"claude","modle":"opus"}}"#).unwrap_err();
         assert_eq!(designer_typo.code, "usage");
         assert!(designer_typo.message.contains("modle"), "{}", designer_typo.message);
+    }
+
+    #[test]
+    fn run_entry_rejects_zero_max_images_before_opening_store_or_network() {
+        let err = run(
+            BenchCommand::Run(BenchRunArgs {
+                bench: "bn_1".into(),
+                model: Some("mdl_1".into()),
+                predictions: None,
+                name: None,
+                max_images: Some(0),
+                no_conditions: false,
+                unscored: false,
+                wait: false,
+                device: None,
+                conn: BenchServerArgs {
+                    data_dir: None,
+                    server: Some("http://127.0.0.1:9".into()),
+                    token: None,
+                },
+            }),
+            Out { json: true },
+        )
+        .unwrap_err();
+        assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"));
+        assert!(err.message.contains("--max-images"), "{}", err.message);
     }
 }

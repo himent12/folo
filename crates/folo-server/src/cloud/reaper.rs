@@ -91,16 +91,20 @@ impl Core {
         }
     }
 
-    /// [`Core::terminate_once`] until the provider confirms or `wait` has passed; the record as it is then.
+    /// [`Core::terminate_once`] until the provider confirms, shutdown halts the loop, or `wait` has passed; the
+    /// record as it is then.
     pub(crate) fn terminate_within(&self, id: &str, wait: Duration) -> Result<CloudInstance> {
         let t0 = Instant::now();
         let mut pause = self.tuning.poll;
         loop {
             let record = self.terminate_once(id)?;
-            if !record.status.is_alive() || t0.elapsed() >= wait {
+            if !record.status.is_alive() || self.halt.is_on() || t0.elapsed() >= wait {
                 return Ok(record);
             }
-            std::thread::sleep(pause.min(wait.saturating_sub(t0.elapsed())));
+            let remaining = pause.min(wait.saturating_sub(t0.elapsed()));
+            if self.halt.pause(remaining) {
+                return Ok(record);
+            }
             pause = (pause * 2).min(self.tuning.poll_max);
         }
     }
@@ -108,6 +112,9 @@ impl Core {
     /// One pass of the reaper (see the module docs).
     pub(crate) fn sweep(&self) {
         for record in self.ledger.list() {
+            if self.halt.is_on() {
+                return;
+            }
             if !record.status.is_alive() {
                 self.look_for_unseen(&record);
                 continue;
@@ -332,5 +339,89 @@ mod tests {
         assert!(!recent("yesterday", now), "a time that does not parse is not recent for ever");
         assert!(!recent(&rfc3339(now + 60.0), now), "nor is one in the future");
         assert!(recent(&rfc3339(now), now));
+    }
+
+    #[test]
+    fn terminate_within_and_sweep_exit_promptly_on_halt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct FailingTerminate {
+            calls: AtomicUsize,
+            first_called: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        }
+        impl Provider for FailingTerminate {
+            fn info(&self) -> CloudProvider {
+                CloudProvider {
+                    id: "fail".into(),
+                    name: "Failing".into(),
+                    about: String::new(),
+                    docs_url: None,
+                    fields: vec![CloudField {
+                        key: "api_key".into(),
+                        label: "Key".into(),
+                        secret: true,
+                        required: true,
+                        placeholder: None,
+                        help: None,
+                    }],
+                    provisions: true,
+                    self_terminates: false,
+                }
+            }
+            fn check(&self, _: &Values) -> folo_cloud::Result<Account> {
+                Ok(Account::default())
+            }
+            fn offers(&self, _: &Values) -> folo_cloud::Result<Vec<CloudOffer>> {
+                Ok(Vec::new())
+            }
+            fn terminate(&self, _: &Values, _: &str) -> folo_cloud::Result<()> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                if let Some(tx) = self.first_called.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                Err(folo_cloud::Error::new(folo_cloud::ErrorKind::Unavailable, "provider busy"))
+            }
+        }
+
+        let dir = folo_test_support::TestDir::new("cloud-reaper-halt");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let provider =
+            Arc::new(FailingTerminate { calls: AtomicUsize::new(0), first_called: Mutex::new(Some(tx)) });
+        let tuning = super::super::Tuning {
+            poll: Duration::from_secs(5),
+            poll_max: Duration::from_secs(10),
+            release_wait: Duration::from_secs(10),
+            ..super::super::Tuning::default()
+        };
+        let cloud = super::super::Cloud::with(&dir, vec![provider.clone()], tuning);
+        let values = [("api_key".to_string(), "key-0123456789".to_string())].into_iter().collect();
+        let conn =
+            cloud.connect(ConnectCloud { provider: "fail".into(), name: String::new(), values }).unwrap();
+        let offer = CloudOffer {
+            id: "o".into(),
+            gpu: "G".into(),
+            gpu_count: 1,
+            vram_bytes: 0,
+            price_per_hour: None,
+            region: None,
+            detail: None,
+            availability: CloudAvailability::High,
+        };
+        let inst = cloud.core.ledger.create(&conn.id, "fail", "run_1", &offer, None, None).unwrap();
+        cloud.core.ledger.update(&inst.id, |i| i.provider_ref = Some("pod-1".into())).unwrap();
+
+        let core = cloud.core.clone();
+        let id = inst.id.clone();
+        let t0 = Instant::now();
+        let handle = std::thread::spawn(move || core.terminate_within(&id, Duration::from_secs(10)));
+        rx.recv_timeout(Duration::from_secs(2)).expect("terminate_once was not invoked");
+        cloud.core.halt.set();
+        let rec = handle.join().unwrap().unwrap();
+        assert!(t0.elapsed() < Duration::from_secs(2), "terminate_within stalled for {:?}", t0.elapsed());
+        assert_eq!(rec.status, CloudInstanceStatus::Terminating);
+
+        let before = provider.calls.load(Ordering::SeqCst);
+        cloud.core.sweep();
+        assert_eq!(provider.calls.load(Ordering::SeqCst), before, "sweep must stop immediately when halted");
     }
 }

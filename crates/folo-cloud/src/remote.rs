@@ -151,6 +151,12 @@ impl Server {
         }
         let url = raw.trim_end_matches('/').to_string();
         let token = values.get(TOKEN_FIELD).unwrap_or_default().to_string();
+        if !token.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(Error::new(
+                ErrorKind::Invalid,
+                "`token` must not contain spaces or control characters",
+            ));
+        }
         Ok(Server { url, host, https, token })
     }
 
@@ -532,6 +538,12 @@ mod tests {
             assert_error(&e, ErrorKind::Invalid, "`url`");
         }
         assert_error(&Remote.check(&Values::default()).unwrap_err(), ErrorKind::Invalid, "url");
+        for bad_tok in ["tok\n2", "tok\r\nX-Inject: 1", "tok space", "tok\t2", "tok\u{2014}dash"] {
+            let e = Remote.check(&values("http://127.0.0.1:9", bad_tok)).unwrap_err();
+            assert_eq!(e.kind, ErrorKind::Invalid, "{bad_tok:?}: {e:?}");
+            assert!(e.message.contains("`token`"), "{bad_tok:?}: {}", e.message);
+            assert!(!e.message.contains(bad_tok), "{bad_tok:?}: {}", e.message);
+        }
     }
 
     #[test]

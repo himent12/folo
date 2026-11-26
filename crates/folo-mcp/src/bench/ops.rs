@@ -353,6 +353,7 @@ fn with_hint(e: Error, what: String) -> Error {
 
 /// Builds a [`BenchEntryState`] from `e` and an already-loaded (or omitted) score breakdown.
 fn state_with_result(e: BenchEntry, result: Option<BenchScoreResult>) -> BenchEntryState {
+    let summary_score = e.score.as_ref().map(|s| s.total);
     BenchEntryState {
         benchmark_id: e.bench_id,
         entry_id: e.id,
@@ -368,6 +369,7 @@ fn state_with_result(e: BenchEntry, result: Option<BenchScoreResult>) -> BenchEn
         error: e.error,
         hint: e.hint,
         result,
+        summary_score,
     }
 }
 

@@ -495,8 +495,24 @@ pub(super) fn add(slot: &Slot, entry_id: &str, predictions: Vec<BenchPrediction>
         let state = slot.live()?;
         return Err(not_open(entry_id, &state.entry(entry_id)?.entry));
     };
+    commit_add(slot, entry_id, &fill, received, emit)
+}
+
+/// Records `received` progress on `entry_id` only if the entry is still open with `fill`; if `stop`, `expire`,
+/// `finish`, or `shutdown` closed it after `fill` was unlocked, returns `409 bench_entry_not_open` without
+/// mutating the closed entry or emitting a post-terminal SSE event.
+fn commit_add(
+    slot: &Slot,
+    entry_id: &str,
+    fill: &Arc<Mutex<Filling>>,
+    received: u64,
+    emit: bool,
+) -> Result<BenchEntry> {
     let mut state = slot.live()?;
     let e = state.entry_mut(entry_id).ok_or_else(|| super::state::entry_not_found(&slot.id, entry_id))?;
+    if e.open.as_ref().is_none_or(|o| !Arc::ptr_eq(o, fill)) {
+        return Err(not_open(entry_id, &e.entry));
+    }
     e.entry.progress.done = e.entry.progress.done.max(received);
     let entry = e.entry.clone();
     if emit {
@@ -891,5 +907,43 @@ mod tests {
         );
         many[0].boxes.truncate(MAX_BOXES);
         assert!(check(&f, true, &many).is_ok());
+    }
+
+    #[test]
+    fn commit_add_rejects_closed_entry_without_mutating_or_emitting_sse() {
+        let dir = folo_test_support::TestDir::new("bench-external-commit-add-closed");
+        let f = file();
+        let fill = Arc::new(Mutex::new(Filling::new(f.clone(), true)));
+        let mut state = super::super::state::State {
+            file: f,
+            fingerprint: "fp".into(),
+            entries: Vec::new(),
+            loops: Vec::new(),
+            deleted: false,
+        };
+        let mut entry = super::super::entries::new_entry(
+            &state,
+            "ext".into(),
+            folo_api::BenchContestant::External,
+            BenchEntryStatus::Stopped,
+            2,
+            false,
+            true,
+            2,
+            Vec::new(),
+        );
+        entry.progress.done = 1;
+        let entry_id = entry.id.clone();
+        state.entries.push(super::super::state::EntryState {
+            entry,
+            cancel: Arc::new(AtomicBool::new(true)),
+            open: None,
+        });
+        let slot = Slot::new(dir.to_path_buf(), state);
+        let mut rx = slot.subscribe();
+        let err = commit_add(&slot, &entry_id, &fill, 5, true).unwrap_err();
+        assert_eq!((err.status, err.body.code.as_str()), (StatusCode::CONFLICT, "bench_entry_not_open"));
+        assert_eq!(slot.live().unwrap().entry(&entry_id).unwrap().entry.progress.done, 1);
+        assert!(rx.try_recv().is_err(), "closed entry must not emit a post-terminal SSE event");
     }
 }

@@ -399,9 +399,39 @@ impl Ledger {
         }
     }
 
+    /// Re-checks record `id` under the cloud lock and removes it only if it is still ended, unwatched, and past
+    /// [`KEEP_ENDED`]. Returns `Some` with the live representation if a concurrent update (e.g. [`Ledger::reopen`])
+    /// revived it before the lock was acquired, or if locking itself failed.
+    fn prune_if_expired(&self, id: &str, now: f64) -> Option<CloudInstance> {
+        let Ok(_lock) = self.lock() else {
+            return self.read(id).ok().map(|r| self.shown(r, now));
+        };
+        let r = self.read(id).ok()?;
+        if is_expired(&r, now) {
+            if let Err(e) = std::fs::remove_file(self.path(id))
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!("removing the ledger record {id}: {e}");
+            }
+            None
+        } else {
+            Some(self.shown(r, now))
+        }
+    }
+
     /// Every record with its cost so far: the instances that are alive, then those that ended, newest first.
     /// Records that ended more than [`KEEP_ENDED`] ago are removed on the way.
     pub fn list(&self) -> Vec<CloudInstance> {
+        self.list_inner(true)
+    }
+
+    /// Like [`Ledger::list`], without taking `cloud/.lock` or pruning expired records on disk. Safe to call while
+    /// the caller already holds `cloud/.lock` (e.g. inside `Connections::remove`).
+    pub fn list_without_pruning(&self) -> Vec<CloudInstance> {
+        self.list_inner(false)
+    }
+
+    fn list_inner(&self, prune: bool) -> Vec<CloudInstance> {
         let Ok(entries) = std::fs::read_dir(&self.dir) else { return Vec::new() };
         let now = unix_now();
         let mut out = Vec::new();
@@ -415,15 +445,10 @@ impl Ledger {
             }
             match self.read(id) {
                 // Not while the reaper still looks for its instance (a time limit can be longer than this).
-                Ok(r)
-                    if r.unseen_until.is_none()
-                        && r.instance
-                            .ended
-                            .as_deref()
-                            .and_then(parse_rfc3339)
-                            .is_some_and(|t| now - t > KEEP_ENDED.as_secs_f64()) =>
-                {
-                    self.remove(id);
+                Ok(r) if is_expired(&r, now) => {
+                    if prune && let Some(inst) = self.prune_if_expired(id, now) {
+                        out.push(inst);
+                    }
                 }
                 Ok(r) => out.push(self.shown(r, now)),
                 Err(e) => tracing::warn!("skipping {}: {}", path.display(), e.body.message),
@@ -434,6 +459,16 @@ impl Ledger {
         });
         out
     }
+}
+
+fn is_expired(r: &Record, now: f64) -> bool {
+    !r.instance.status.is_alive()
+        && r.unseen_until.is_none()
+        && r.instance
+            .ended
+            .as_deref()
+            .and_then(parse_rfc3339)
+            .is_some_and(|t| now - t > KEEP_ENDED.as_secs_f64())
 }
 
 #[cfg(test)]
@@ -731,5 +766,42 @@ mod tests {
         ledger.booted(&i.id).unwrap();
         let old: CloudInstance = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(old.id, i.id);
+    }
+
+    #[test]
+    fn prune_if_expired_preserves_reopened_instance_and_removes_expired_one() {
+        let paces = Paces { fast: Duration::from_secs(600), slow: Duration::from_secs(3600) };
+        let dir = TestDir::new("cloud-ledger-prune-toctou");
+        let cloud = dir.join("cloud");
+        let ledger = Ledger::new(&cloud, cloud.join(".lock"), Vec::new());
+        let now = unix_now().floor();
+
+        // An unseen record aged past KEEP_ENDED finishes its watch, then gets reopened concurrently before
+        // `prune_if_expired` acquires `cloud/.lock`: pruning must keep the reopened `Terminating` record.
+        let i = ledger.create("cc_1", "p", "run_1", &offer(Some(1.0)), None, None).unwrap();
+        ledger
+            .update(&i.id, |inst| inst.created = rfc3339(now - KEEP_ENDED.as_secs_f64() - 86_400.0))
+            .unwrap();
+        ledger.unseen(&i.id, now).unwrap();
+        assert!(ledger.due(&i.id, now, paces).unwrap());
+        ledger.looked(&i.id, now, Ok(())).unwrap();
+        ledger.reopen(&i.id, Some("pod-1".into())).unwrap();
+
+        let kept = ledger.prune_if_expired(&i.id, now).expect("reopened record must not be pruned");
+        assert_eq!(kept.status, CloudInstanceStatus::Terminating);
+        assert_eq!(kept.provider_ref.as_deref(), Some("pod-1"));
+        assert_eq!(ledger.get(&i.id).unwrap().status, CloudInstanceStatus::Terminating);
+
+        // An actually expired, non-reopened record is removed under the lock.
+        let j = ledger.create("cc_1", "p", "run_2", &offer(Some(1.0)), None, None).unwrap();
+        let expired = rfc3339(now - KEEP_ENDED.as_secs_f64() - 60.0);
+        ledger
+            .update(&j.id, |inst| {
+                inst.status = CloudInstanceStatus::Terminated;
+                inst.ended = Some(expired.clone());
+            })
+            .unwrap();
+        assert!(ledger.prune_if_expired(&j.id, now).is_none());
+        assert!(ledger.get(&j.id).is_err());
     }
 }

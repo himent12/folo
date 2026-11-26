@@ -369,6 +369,10 @@ impl Benches {
         for t in engine_threads.into_iter().filter(|t| t.thread().id() != me) {
             let _ = t.join();
         }
+        // Drain again in case a loop thread enqueued a model entry just before observing `closing`.
+        for job in self.engine.drain() {
+            model::finish_entry(&job.slot, &job.entry, true, Ok(None));
+        }
     }
 }
 

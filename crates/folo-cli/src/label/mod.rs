@@ -125,6 +125,9 @@ pub fn run(cmd: LabelCommand, out: Out) -> Result<(), CliError> {
             }
         }
         LabelCommand::Export(a) => {
+            if !crate::cli::bounds::LABEL_VAL_FRACTION.contains_f64(f64::from(a.val_fraction)) {
+                return Err(usage(format!("--val-fraction must be in 0..=0.5, got {}", a.val_fraction)));
+            }
             let s = open(&a.conn, true)?;
             let req = LabelDatasetRequest { name: a.name, val_fraction: a.val_fraction, seed: a.seed };
             let r = s.labels.export(&a.job, req).map_err(api_error)?;
@@ -225,6 +228,16 @@ fn open(conn: &LabelServerArgs, store: bool) -> Result<Session, CliError> {
 }
 
 fn start(a: LabelStartArgs, out: Out) -> Result<(), CliError> {
+    if let Some(batch) = a.batch
+        && !crate::cli::bounds::LABEL_BATCH.contains_u64(u64::from(batch))
+    {
+        return Err(usage(format!("--batch must be in 1..=16, got {batch}")));
+    }
+    if let Some(parallel) = a.parallel
+        && !crate::cli::bounds::LABEL_PARALLEL.contains_u64(u64::from(parallel))
+    {
+        return Err(usage(format!("--parallel must be in 1..=8, got {parallel}")));
+    }
     let s = open(&a.conn, false)?;
     let req = StartLabeling {
         agent: match a.agent {
@@ -568,6 +581,57 @@ mod tests {
                     ("D:/photos".to_string(), "D:/photos".to_string())
                 );
             }
+        }
+    }
+
+    #[test]
+    fn export_and_start_validate_bounds_upfront_without_network_io() {
+        let unreachable =
+            || LabelServerArgs { data_dir: None, server: Some("http://127.0.0.1:9".into()), token: None };
+        let out = Out { json: true };
+
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 0.51] {
+            let err = super::run(
+                LabelCommand::Export(LabelExportArgs {
+                    job: "lb_1".into(),
+                    name: None,
+                    val_fraction: bad,
+                    seed: 0,
+                    conn: unreachable(),
+                }),
+                out,
+            )
+            .unwrap_err();
+            assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"), "val_fraction={bad}");
+            assert!(err.message.contains("--val-fraction"), "{}", err.message);
+        }
+
+        for (batch, parallel, flag) in [
+            (Some(0), None, "--batch"),
+            (Some(17), None, "--batch"),
+            (None, Some(0), "--parallel"),
+            (None, Some(9), "--parallel"),
+        ] {
+            let err = super::run(
+                LabelCommand::Start(LabelStartArgs {
+                    job: "lb_1".into(),
+                    agent: AgentArg::Claude,
+                    model: None,
+                    effort: None,
+                    fast: false,
+                    images: vec![],
+                    all: false,
+                    note: String::new(),
+                    batch,
+                    parallel,
+                    wait: false,
+                    conn: unreachable(),
+                }),
+                out,
+            )
+            .unwrap_err();
+            assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"), "{flag}: {err:?}");
+            assert!(err.message.contains(flag), "{}", err.message);
         }
     }
 }

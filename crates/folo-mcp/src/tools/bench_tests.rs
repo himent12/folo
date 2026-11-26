@@ -275,6 +275,7 @@ fn an_entry_fits_the_result_limit() {
         error,
         hint: None,
         result: None,
+        summary_score: None,
     };
     let mut small = state(vec!["cat".into()], Some("no such file".into()));
     assert!(!super::bench::fit_state(&mut small));
@@ -291,6 +292,18 @@ fn an_entry_fits_the_result_limit() {
     let summary = super::bench::fitted_summary(&big, true);
     assert!(summary.chars().count() <= super::results::MAX_SUMMARY_CHARS, "{summary}");
     assert!(summary.ends_with("/entries/{entry_id} has it whole)"), "{summary}");
+
+    // Large-vocabulary benchmarks (>1000 missing classes) trim trailing `missing_classes` so `bench_entry`
+    // never fails with `413 result_too_large`.
+    let huge_classes = (0..1_500).map(|i| format!("category_name_long_{i:04}")).collect();
+    let mut huge = state(huge_classes, None);
+    assert!(json_len(&huge) > MAX_RESULT_BYTES);
+    assert!(super::bench::fit_state(&mut huge));
+    assert!(json_len(&huge) <= MAX_RESULT_BYTES - 1024, "{}", json_len(&huge));
+    assert!(!huge.missing_classes.is_empty() && huge.missing_classes.len() < 1_500);
+    let huge_summary = super::bench::fitted_summary(&huge, true);
+    assert!(huge_summary.ends_with("/entries/{entry_id} has it whole)"), "{huge_summary}");
+    assert!(super::results::out(&huge, huge_summary).is_ok());
 }
 
 /// With `--confine` every benchmark tool is refused, in process and through a server, before it touches a file or
@@ -544,4 +557,196 @@ fn a_wait_follows_an_entry_until_it_ends() {
 fn delete_benchmark_is_marked_destructive() {
     let ann = find("delete_benchmark").unwrap().tool().annotations.unwrap();
     assert_eq!(ann.destructive_hint, Some(true));
+}
+
+/// `create_benchmark` reports the benchmark's true class count (>100 from a server with larger vocabularies),
+/// matching `list_benchmarks` rather than truncating at `BenchDetail`'s 100-class preview cap.
+#[tokio::test]
+async fn create_benchmark_reports_true_num_classes_above_100() {
+    use std::io::{BufRead, Read, Write};
+
+    let home = TestDir::new("mcp-bench-105-classes");
+    let classes: Vec<String> = (0..105).map(|i| format!("cls_{i}")).collect();
+    let bench = json!({
+        "id": "bn_many",
+        "name": "many-classes",
+        "description": "",
+        "classes": classes,
+        "created": "2026-11-20T00:00:00Z",
+        "source": { "kind": "dataset", "dataset_id": "ds_1", "split": "val" },
+        "source_name": "many",
+        "images": 1,
+        "boxes": 1,
+        "class_boxes": vec![0u64; 105],
+        "plan": { "conditions": [] },
+        "seed": 0,
+        "fingerprint": "fp",
+        "entries": 0,
+        "best": null,
+        "active": false
+    });
+    let created_body = bench.to_string();
+    let listed_body = json!({ "benchmarks": [bench] }).to_string();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = std::thread::spawn(move || {
+        for (status, body) in [("201 Created", created_body.as_str()), ("200 OK", listed_body.as_str())] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut content_len = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some((k, v)) = line.split_once(':')
+                    && k.trim().eq_ignore_ascii_case("content-length")
+                {
+                    content_len = v.trim().parse().unwrap_or(0);
+                }
+            }
+            if content_len > 0 {
+                let mut discard = vec![0u8; content_len];
+                let _ = reader.read_exact(&mut discard);
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+
+    let http = Arc::new(
+        HttpStore::new(&format!("http://{addr}"), None)
+            .assume_features(vec![folo_api::FEATURE_VISION_BENCH.to_string()]),
+    );
+    let s = FoloMcp::new(http.clone(), Some(http), options(home.path()));
+    let made = ok(
+        &s,
+        "create_benchmark",
+        json!({
+            "name": "many-classes",
+            "dataset_id": "ds_1",
+            "plan": { "conditions": [] }
+        }),
+    )
+    .await;
+    assert_eq!(made["num_classes"], 105, "{made}");
+    let listed = ok(&s, "list_benchmarks", json!({})).await;
+    assert_eq!(listed["items"][0]["num_classes"], 105, "{listed}");
+    srv.join().unwrap();
+}
+
+/// `start_bench_entry` keeps the server's headline score in `BenchEntryBrief` even when fetching the separate
+/// `/result` breakdown fails after `/finish` succeeded.
+#[tokio::test]
+async fn start_bench_entry_preserves_score_when_result_fetch_fails() {
+    use std::io::{BufRead, Read, Write};
+
+    let home = TestDir::new("mcp-bench-score-fallback");
+    let pred_file = home.join("preds.jsonl");
+    std::fs::write(&pred_file, r#"{"image":"1","boxes":[]}"#).unwrap();
+
+    let open_entry = json!({
+        "id": "be_1",
+        "bench_id": "bn_1",
+        "name": "ext",
+        "contestant": { "kind": "external" },
+        "status": "running",
+        "created": "2026-11-20T00:00:00Z",
+        "finished": null,
+        "fingerprint": "fp",
+        "images": 1,
+        "conditions": false,
+        "scored": true,
+        "progress": { "done": 1, "total": 1, "condition": null, "severity": null },
+        "score": null,
+        "map50_95": null,
+        "ci95": null,
+        "speed": null,
+        "missing_classes": [],
+        "error": null,
+        "hint": null
+    })
+    .to_string();
+    let done_entry = json!({
+        "id": "be_1",
+        "bench_id": "bn_1",
+        "name": "ext",
+        "contestant": { "kind": "external" },
+        "status": "done",
+        "created": "2026-11-20T00:00:00Z",
+        "finished": "2026-11-20T00:00:01Z",
+        "fingerprint": "fp",
+        "images": 1,
+        "conditions": false,
+        "scored": true,
+        "progress": { "done": 1, "total": 1, "condition": null, "severity": null },
+        "score": { "total": 78.4, "partial": true, "axes": [] },
+        "map50_95": 0.78,
+        "ci95": [0.7, 0.85],
+        "speed": null,
+        "missing_classes": [],
+        "error": null,
+        "hint": null
+    })
+    .to_string();
+    let err_503 = r#"{"error":{"code":"internal","message":"result temporarily unavailable","hint":null}}"#;
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = std::thread::spawn(move || {
+        for (status, body) in [
+            ("201 Created", open_entry.as_str()),
+            ("200 OK", done_entry.as_str()),
+            ("503 Service Unavailable", err_503),
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut content_len = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" || line == "\n" {
+                    break;
+                }
+                if let Some((k, v)) = line.split_once(':')
+                    && k.trim().eq_ignore_ascii_case("content-length")
+                {
+                    content_len = v.trim().parse().unwrap_or(0);
+                }
+            }
+            if content_len > 0 {
+                let mut discard = vec![0u8; content_len];
+                let _ = reader.read_exact(&mut discard);
+            }
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+
+    let http = Arc::new(
+        HttpStore::new(&format!("http://{addr}"), None)
+            .assume_features(vec![folo_api::FEATURE_VISION_BENCH.to_string()]),
+    );
+    let s = FoloMcp::new(http.clone(), Some(http), options(home.path()));
+    let res = ok(
+        &s,
+        "start_bench_entry",
+        json!({
+            "benchmark_id": "bn_1",
+            "predictions_file": "preds.jsonl",
+            "name": "ext"
+        }),
+    )
+    .await;
+    srv.join().unwrap();
+    assert_eq!(res["status"], "done", "{res}");
+    assert!((res["score"].as_f64().unwrap() - 78.4).abs() < 1e-4, "{res}");
 }

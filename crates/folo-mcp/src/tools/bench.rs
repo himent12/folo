@@ -132,13 +132,13 @@ impl Inner {
             seed: a.seed,
             plan: a.plan.map(Into::into),
         };
-        let r = self.benchmarks(move |b| b.create_bench(req)).await?;
+        let r = self.benchmarks(move |b| b.create(req)).await?;
         let summary = format!(
             "{}: {} images, {} boxes, {} conditions; start_bench_entry runs a model on it",
             r.id,
             r.images,
             r.boxes,
-            r.plan.len()
+            r.plan.conditions.len()
         );
         // The summary of list_benchmarks (get_benchmark has the rest): a small schema for every session to carry.
         let made = BenchSummary {
@@ -147,7 +147,7 @@ impl Inner {
             source_name: r.source_name,
             images: r.images,
             num_classes: r.classes.len(),
-            conditions: r.plan.len(),
+            conditions: r.plan.conditions.len(),
             entries: 0,
             best: None,
             active: false,
@@ -266,8 +266,9 @@ pub(super) fn fit_detail(r: &mut BenchDetail) -> bool {
     cut
 }
 
-/// Fits an entry's state within the result limit: at most 80 classes are missing, so with short names, a short error
-/// and a short hint it always fits (the API has them whole). True when text was cut.
+/// Fits an entry's state within the result limit: shortens names, error and hint first, then trims trailing
+/// `missing_classes` entries when a large-vocabulary benchmark still exceeds the cap (the API has them whole).
+/// True when any text or list entry was cut.
 pub(super) fn fit_state(r: &mut BenchEntryState) -> bool {
     if json_len(r) <= FIT {
         return false;
@@ -278,6 +279,21 @@ pub(super) fn fit_state(r: &mut BenchEntryState) -> bool {
     }
     for text in [&mut r.error, &mut r.hint].into_iter().flatten() {
         cut |= cut_to(text, 500);
+    }
+    if json_len(r) > FIT && !r.missing_classes.is_empty() {
+        let orig = std::mem::take(&mut r.missing_classes);
+        let (mut lo, mut hi) = (0usize, orig.len());
+        while lo < hi {
+            let mid = lo + (hi - lo).div_ceil(2);
+            r.missing_classes = orig[..mid].to_vec();
+            if json_len(r) <= FIT {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        r.missing_classes = orig.into_iter().take(lo).collect();
+        cut = true;
     }
     cut
 }
