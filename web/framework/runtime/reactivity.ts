@@ -167,14 +167,12 @@ function keySignal<K>(
       if (on) {
         const same = unchanged();
         snap = MISSING;
-        if (!same) {
-          bump(s);
-        } else {
-          const cur = keys.get(k);
-          if (cur === undefined) keys.set(k, s);
-          else if (cur instanceof Set) cur.add(s);
-          else if (cur !== s) keys.set(k, new Set([cur, s]));
-        }
+        stamp = version.peek();
+        const cur = keys.get(k);
+        if (cur === undefined) keys.set(k, s);
+        else if (cur instanceof Set) cur.add(s);
+        else if (cur !== s) keys.set(k, new Set([cur, s]));
+        if (!same) bump(s);
       } else {
         stamp = version.peek();
         snap = read();

@@ -72,6 +72,7 @@ const READS = new Set<string>([
 ]);
 
 interface Shared {
+  key: string;
   promise: Promise<unknown>;
   ctrl: AbortController;
   /** Callers still waiting: the request is aborted once every one of them has given up. */
@@ -99,19 +100,24 @@ export function together<T>(fn: () => T): { value: T; key: string } {
 
 export const abortError = () => new DOMException('The operation was aborted.', 'AbortError');
 
+function drop(entry: Shared) {
+  if (joinable.get(entry.key) === entry) joinable.delete(entry.key);
+  entry.ctrl.abort();
+}
+
 function join<T>(entry: Shared, signal: AbortSignal | undefined): Promise<T> {
   const first = entry.callers++ === 0;
   entry.waiting++;
   const answer = entry.promise.then((v) => (first ? v : copy(v)) as T);
   if (!signal) return answer;
   if (signal.aborted) {
-    if (--entry.waiting === 0) entry.ctrl.abort();
+    if (--entry.waiting === 0) drop(entry);
     return Promise.reject(abortError());
   }
   return new Promise<T>((resolve, reject) => {
     const gaveUp = () => {
       reject(abortError());
-      if (--entry.waiting === 0) entry.ctrl.abort();
+      if (--entry.waiting === 0) drop(entry);
     };
     signal.addEventListener('abort', gaveUp, { once: true });
     answer.then(
@@ -161,7 +167,9 @@ export function shareApi(api: Api): Api {
           const signal = signalAt >= 0 ? (args[signalAt] as AbortSignal) : undefined;
           const key = `${name}(${args.map((a, i) => (i === signalAt ? '' : a === undefined ? '-' : JSON.stringify(a))).join(',')})`;
           scope.push(key);
+          if (signal?.aborted) return Promise.reject(abortError());
           let entry = joinable.get(key);
+          if (entry?.ctrl.signal.aborted) entry = undefined;
           if (!entry) {
             const ctrl = new AbortController();
             const call = [...args];
@@ -175,7 +183,7 @@ export function shareApi(api: Api): Api {
             }
             // Nobody may be left to see a failure (every caller gave up): never an unhandled rejection.
             promise.catch(() => {});
-            entry = { promise, ctrl, waiting: 0, callers: 0 };
+            entry = { key, promise, ctrl, waiting: 0, callers: 0 };
             joinable.set(key, entry);
             endOfTurn();
           }
@@ -274,7 +282,11 @@ export function pollTogether(every: number, tick: () => void): () => void {
   group.ticks.add(mine);
   return () => {
     group.ticks.delete(mine);
-    if (group.ticks.size === 0 && running.delete(group)) disarm(group);
+    if (group.ticks.size === 0 && running.delete(group)) {
+      disarm(group);
+      group.open = false;
+      if (groups.get(id) === group) groups.delete(id);
+    }
   };
 }
 

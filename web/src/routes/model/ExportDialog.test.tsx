@@ -474,6 +474,33 @@ describe('ExportDialog: closing while the file is on its way', () => {
     expect(dialog().textContent).not.toContain('Downloaded');
     expect(button('Download fasteners-s-best-f16.folo')).toBeDefined();
   });
+
+  it('passes an AbortSignal to hub.api.system() and aborts it on dialog close and epoch change (#309)', () => {
+    const api = new HttpApi('http://folo.test');
+    const signals: (AbortSignal | undefined)[] = [];
+    vi.spyOn(api, 'system').mockImplementation((s) => {
+      signals.push(s);
+      return new Promise(() => {});
+    });
+    hub.api = api;
+    const open = signal(true);
+    c = renderFw(() => <ExportDialog model={model} bind:open={open} />, target);
+    flushSync();
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(false);
+
+    // Server epoch change aborts the previous capability probe and starts a fresh one.
+    hub.epoch++;
+    flushSync();
+    expect(signals[0]?.aborted).toBe(true);
+    expect(signals).toHaveLength(2);
+    expect(signals[1]?.aborted).toBe(false);
+
+    // Closing the dialog aborts the in-flight probe cleanly.
+    open.set(false);
+    flushSync();
+    expect(signals[1]?.aborted).toBe(true);
+  });
 });
 
 describe('ExportDialog: the demo creates no file', () => {

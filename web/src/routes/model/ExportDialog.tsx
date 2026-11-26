@@ -85,18 +85,18 @@ export default function ExportDialog(props: ExportDialogProps) {
       capsError.set(null);
       return;
     }
-    let live = true;
+    const ctrl = new AbortController();
     capsState.set('loading');
     capsError.set(null);
-    hub.api.system().then(
+    hub.api.system(ctrl.signal).then(
       (s) => {
-        if (!live) return;
+        if (ctrl.signal.aborted) return;
         switchesOk.set(!!s.features?.includes('export_onnx_switches'));
         onnxDirect.set(!!s.features?.includes('weights_onnx'));
         capsState.set('ready');
       },
       (e) => {
-        if (!live) return;
+        if (ctrl.signal.aborted) return;
         switchesOk.set(false);
         onnxDirect.set(false);
         capsError.set(e);
@@ -104,7 +104,7 @@ export default function ExportDialog(props: ExportDialogProps) {
       },
     );
     return () => {
-      live = false;
+      ctrl.abort();
     };
   });
   /** While ONNX is chosen on a live server and `/api/system` has not answered yet, hold export so we do not fall back to writing on the server. */

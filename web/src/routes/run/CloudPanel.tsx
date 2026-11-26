@@ -10,9 +10,10 @@ import Check from '$icons/check';
 import TriangleAlert from '$icons/triangle-alert';
 import WifiOff from '$icons/wifi-off';
 import X from '$icons/x';
-import { computed, css, effect, For, signal } from 'fw';
+import { computed, css, effect, For, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
+import { pollTogether } from '$lib/api/share';
 import type { RunCloud } from '$lib/api/types';
 import { isAlive, offerLine, panelPhaseLabel, phaseIndex, phaseLabel, phaseStates, transferShare, transferText, type PhaseRun } from '$lib/cloud';
 import { ago, hoursText, timeOfDay, usd } from '$lib/format';
@@ -51,10 +52,11 @@ export default function CloudPanel(props: CloudPanelProps) {
   const unknown = computed(() => !!instanceId.get() && !own.get() && instance.error !== undefined);
   effect(() => {
     if (!unconfirmed.get() && !unknown.get()) return;
-    const t = setInterval(() => {
-      if (document.visibilityState === 'visible') void instance.refresh();
-    }, UNCONFIRMED_POLL_MS);
-    return () => clearInterval(t);
+    return pollTogether(UNCONFIRMED_POLL_MS, () => {
+      if (document.visibilityState !== 'visible' || hub.mode === 'connecting') return;
+      if (untrack(() => instance.loading || instance.refreshing)) return;
+      void instance.refresh();
+    });
   });
   const states = computed(() => phaseStates(props.cloud, props.run, provisions(), !!unconfirmed.get()));
   const share = computed(() => transferShare(props.cloud.progress));

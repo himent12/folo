@@ -151,7 +151,7 @@ export function spread(
     const si = styleImportant?.();
     if ('style' in next || sd !== undefined || si !== undefined) {
       // No `style` key but directives: `null`, as Svelte forces the call.
-      const [value, styles] = styleParts(next.style === undefined && !('style' in src) ? null : next.style, sd);
+      const [value, styles] = styleParts(next.style === undefined && !(src != null && 'style' in src) ? null : next.style, sd);
       setStyle(el, value, prevStyles, styles, prevImportant, si);
       prevStyles = styles;
       prevImportant = si;

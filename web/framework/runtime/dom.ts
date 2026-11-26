@@ -711,6 +711,7 @@ export function toClass(value: unknown, scope: string | undefined, directives?: 
   if (scope) c = c ? c + ' ' + scope : scope;
   if (directives) {
     for (const key of Object.keys(directives)) {
+      if (!key) continue;
       if (directives[key]) c = c ? c + ' ' + key : key;
       else if (c.length) {
         const len = key.length;

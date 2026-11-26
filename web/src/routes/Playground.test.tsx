@@ -935,4 +935,30 @@ describe('Playground: the rail (from 1024 px)', () => {
     flushSync();
     expect(target.querySelectorAll('#pg-panel tbody tr').length).toBe(1);
   });
+
+  it('clears a stale prediction error when the active model disappears without starting a new prediction', async () => {
+    const api = new MockApi('oom', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_s');
+    c = mount(Playground, { target });
+    const sampleBtn = await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image');
+    sampleBtn.click();
+    await until(() => target.querySelector('.notice .title')?.textContent === 'Prediction failed', 'oom notice');
+
+    // Switch to an empty server (no models) and clear the route query model so `modelId` becomes null while `source`
+    // stays set: the early-return `!id || !s || restored(...)` branch runs without calling `predict()` and must clear
+    // the stale `Prediction failed` notice.
+    const emptyApi = new MockApi('empty', 0);
+    const predictSpy = vi.spyOn(emptyApi, 'predict');
+    hub.api = emptyApi;
+    router.route = parse('#/playground');
+    hub.epoch++;
+    await until(() => target.querySelector('.notice') === null, 'stale notice cleared');
+    expect(target.querySelector('.notice')).toBeNull();
+    expect(predictSpy).not.toHaveBeenCalled();
+  });
 });

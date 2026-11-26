@@ -60,9 +60,13 @@ export class Access implements AccessWatch {
     this.#refusal.set(null);
   }
 
-  /** While refused, check again right away (e.g. once the server is reachable again after an outage) instead of waiting out the backoff or a stale pre-outage check. */
-  recheck(): void {
-    if (!this.#check || this.#refusal.peek() === null) return;
+  /**
+   * Check access right away (e.g. once the server is reachable again after an outage) instead of waiting out the
+   * backoff or a stale pre-outage check. With `force: false` (default), only runs when currently refused; with
+   * `force: true`, also verifies an unrefused session in the background (catches a server restarted with `--token`).
+   */
+  recheck(force = false): void {
+    if (!this.#check || (!force && this.#refusal.peek() === null)) return;
     const ctrl = this.#ctrl;
     this.#ctrl = null;
     ctrl?.abort();
@@ -93,12 +97,17 @@ export class Access implements AccessWatch {
     if (mine !== this.#checks) return;
     this.#out = false;
     if (answer === 'in') {
+      // A newer request already saw 401/403 while this check was in flight: defer clearing refusal / bumping `#back`
+      // until the follow-up check confirms Studio is actually let in.
+      if (this.#again) return void this.#run();
       this.#attempt = 0;
       if (this.#refusal.peek() !== null) {
         this.#refusal.set(null);
         this.#back.set(this.#back.peek() + 1);
       }
-    } else if (answer !== null) this.#refusal.set(answer);
+      return;
+    }
+    if (answer !== null) this.#refusal.set(answer);
     if (this.#again) return void this.#run();
     if (this.#refusal.peek() === null) return;
     this.#timer = setTimeout(

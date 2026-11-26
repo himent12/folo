@@ -254,6 +254,7 @@ export default function Editor(props: EditorProps) {
     selected.set(null);
     if (restoreFocus) {
       queueMicrotask(() => {
+        if (disposed || !open.peek()) return;
         const cur = body.peek();
         const btns = [...(cur?.querySelectorAll<HTMLButtonElement>('.boxes button') ?? [])];
         const addBtn = cur?.querySelector<HTMLButtonElement>('[data-add-box]');
@@ -267,6 +268,7 @@ export default function Editor(props: EditorProps) {
     const s = selected.get();
     if (s === null) return;
     queueMicrotask(() => {
+      if (disposed || !open.peek()) return;
       const list = body.peek()?.querySelector<HTMLElement>('.boxes');
       const btn = list?.querySelectorAll<HTMLButtonElement>('button')[s];
       if (!list || !btn) return;
@@ -309,10 +311,10 @@ export default function Editor(props: EditorProps) {
   const savable = computed(() => dirty.get() || (!!img.get() && img.get()!.status !== 'labeled'));
   async function save(): Promise<boolean> {
     const cur = img.peek();
-    if (!cur || saving.peek()) return false;
-    // The answer is this image's, sent with these boxes: by the time it comes another image may be open, or the
-    // boxes edited further, and neither is the answer's to change.
-    const id = cur.id;
+    if (!cur || saving.peek() || reviewing.peek()) return false;
+    // The answer is this image's, sent with these boxes: by the time it comes another image, job, or server epoch
+    // may be active, or the boxes edited further, and none is this answer's to change.
+    const id = cur.id, jobId = props.job.id, epoch = hub.epoch;
     const sent = draft.peek();
     // Made on the labels shown here: refused once the image has others (another tab, the CLI or an agent saved some
     // this editor has not shown yet), which the save would otherwise replace unseen. The revision is the newest
@@ -324,9 +326,10 @@ export default function Editor(props: EditorProps) {
     saving.set(true);
     status.clear();
     try {
-      const saved = await hub.api.updateLabelImage(props.job.id, id, sent.map(tidy), expect);
+      const saved = await hub.api.updateLabelImage(jobId, id, sent.map(tidy), expect);
+      if (disposed || props.job.id !== jobId || hub.epoch !== epoch) return false;
       props.live.put([saved], mark);
-      if (!disposed && shownId === id) {
+      if (shownId === id) {
         base.set(saved.boxes);
         elsewhere.set(false);
         if (draft.peek() === sent) draft.set(saved.boxes);
@@ -335,12 +338,12 @@ export default function Editor(props: EditorProps) {
       return true;
     } catch (e) {
       // The edits stay; the stream brings the labels saved elsewhere, as the base Discard goes back to.
-      if (disposed || shownId !== id) return false;
+      if (disposed || props.job.id !== jobId || hub.epoch !== epoch || shownId !== id) return false;
       if (!changedElsewhere(e)) status.error(e, 'Could not save the boxes');
       else status.show('info', 'Changed elsewhere while you edited', 'Its labels were saved from another tab or window first, so yours were not. Save replaces them with yours; Discard shows them.');
       return false;
     } finally {
-      saving.set(false);
+      if (!disposed) saving.set(false);
     }
   }
 
@@ -363,8 +366,8 @@ export default function Editor(props: EditorProps) {
   /** Marks the labels reviewed (and opens the next image to review) or not. */
   async function review(reviewed: boolean) {
     const cur = img.peek();
-    if (!cur || reviewing.peek()) return;
-    const jobId = props.job.id;
+    if (!cur || reviewing.peek() || saving.peek()) return;
+    const jobId = props.job.id, epoch = hub.epoch;
     // Read before the answer: under "To review" the image leaves the filter once it is reviewed.
     const next = reviewed ? nextToReview(cur.id) : null;
     // The mark is for the labels on screen (the newest image's, as in `save`): once the image has others, the server
@@ -375,24 +378,24 @@ export default function Editor(props: EditorProps) {
     status.clear();
     try {
       const saved = await hub.api.reviewLabelImage(jobId, cur.id, reviewed, expect);
-      props.live.put([saved], mark);
-      if (disposed || shownId !== cur.id || !reviewed) return;
+      if (!disposed && props.job.id === jobId && hub.epoch === epoch) props.live.put([saved], mark);
+      if (disposed || props.job.id !== jobId || hub.epoch !== epoch || shownId !== cur.id || !reviewed) return;
       if (next && atImage(jobId, cur.id)) props.onnavigate(next);
       else if (!next) status.success('Reviewed', 'Every labeled image here is reviewed.');
     } catch (e) {
-      if (!changedElsewhere(e)) { if (!disposed && shownId === cur.id) status.error(e, 'Could not mark the image'); } else if (!disposed) await reload(cur.id);
+      if (!changedElsewhere(e)) { if (!disposed && props.job.id === jobId && hub.epoch === epoch && shownId === cur.id) status.error(e, 'Could not mark the image'); } else if (!disposed && props.job.id === jobId && hub.epoch === epoch) await reload(cur.id, jobId, epoch);
     } finally {
-      reviewing.set(false);
+      if (!disposed) reviewing.set(false);
     }
   }
   /** After a refused mark: the image's labels as the server has them now (the stream may tell later), then the ask. */
-  async function reload(id: string) {
+  async function reload(id: string, jobId: string, epoch: number) {
     const at = props.live.mark();
-    const now = await hub.api.labelImages(props.job.id, { ids: [id] }).then(
+    const now = await hub.api.labelImages(jobId, { ids: [id] }).then(
       (p) => p.images.find((i) => i.id === id),
       () => undefined,
     );
-    if (disposed) return;
+    if (disposed || props.job.id !== jobId || hub.epoch !== epoch) return;
     if (now) props.live.put([now], at);
     if (shownId !== id) return;
     const why = 'Its labels were changed from another tab or window before your mark got there, so nothing was marked.';
@@ -425,15 +428,16 @@ export default function Editor(props: EditorProps) {
     const ask = leaving.peek();
     if (!ask || leaveSaving.peek()) return;
     if (keep === 'save') {
+      const jobId = props.job.id, epoch = hub.epoch, id = shownId;
       leaveSaving.set(true);
       let ok = false;
       try {
         ok = await save();
       } finally {
-        leaveSaving.set(false);
+        if (!disposed) leaveSaving.set(false);
       }
-      if (!ok || leaving.peek() !== ask) {
-        if (leaving.peek() === ask) leaving.set(null);
+      if (disposed || !ok || leaving.peek() !== ask || props.job.id !== jobId || hub.epoch !== epoch || shownId !== id) {
+        if (!disposed && leaving.peek() === ask) leaving.set(null);
         return;
       }
     }

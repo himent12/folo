@@ -157,6 +157,30 @@ describe('Access', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect([access.refusal, access.back]).toEqual([null, 1]);
   });
+
+  it('does not clear refusal or bump back on an in answer when a newer refusal queued #again (#382)', async () => {
+    const { access, asked } = held();
+    // Enter refused state.
+    access.refused(access.checks);
+    asked[0]!(401);
+    await vi.advanceTimersByTimeAsync(0);
+    expect([access.refusal, access.back]).toEqual([401, 0]);
+
+    // Backoff starts check 2; while check 2 is in flight, a request sent after check 2 started fails 401 -> queues #again.
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    expect(asked.length).toBe(2);
+    access.refused(access.checks);
+
+    // Check 2 returns stale 'in': must NOT clear refusal or bump back before follow-up check 3 confirms.
+    asked[1]!('in');
+    await vi.advanceTimersByTimeAsync(0);
+    expect([asked.length, access.refusal, access.back]).toEqual([3, 401, 0]);
+
+    // Check 3 confirms 401 -> stays refused, back untouched.
+    asked[2]!(401);
+    await vi.advanceTimersByTimeAsync(0);
+    expect([access.refusal, access.back]).toEqual([401, 0]);
+  });
 });
 
 /** Settles when `go` is called: a response held back by the test. */
@@ -424,5 +448,35 @@ describe('hub.refused with the server', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect([hub.offline, hub.refused]).toEqual([false, null]);
     expect(heads).toBeGreaterThan(headsBeforeRecovery);
+  });
+
+  it('catches a server that restarted with --token during an outage as soon as health recovers (#382)', async () => {
+    let up = true;
+    let token = true;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (!up) throw new TypeError('Failed to fetch');
+      if (url.endsWith('/api/health')) return Response.json(HEALTH);
+      if (init?.method === 'HEAD') return new Response(null, { status: token ? 200 : 401 });
+      return token ? Response.json({ datasets: [] }) : UNAUTHORIZED();
+    });
+    await hub.connect();
+    expect([hub.offline, hub.refused]).toEqual([false, null]);
+
+    // Server stops, then restarts with `--token` (health open, API 401).
+    up = false;
+    await expect(hub.api.datasets()).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect([hub.offline, hub.refused]).toEqual([true, null]);
+
+    up = true;
+    token = false;
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    await vi.advanceTimersByTimeAsync(0);
+    expect([hub.offline, hub.refused]).toEqual([true, TOKEN_WALL]);
+
+    // Server drops `--token`: access retry recovers automatically.
+    token = true;
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    expect([hub.offline, hub.refused]).toEqual([false, null]);
   });
 });

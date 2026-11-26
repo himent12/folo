@@ -342,7 +342,7 @@ class Hub {
             () => {
               if (attempt !== this.#attempt) return;
               void this.#learn(http.base, attempt, abort);
-              this.#access.recheck();
+              this.#access.recheck(true);
             },
           );
           this.#access.reset((s) => accessCheck(http.base, s));

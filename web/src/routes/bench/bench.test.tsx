@@ -929,4 +929,29 @@ describe('the list', () => {
       hub.features = null;
     }
   });
+
+  it('does not fetch or poll /api/bench/benchmarks when health lacks vision_bench (#309)', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+    const api = new MockApi('no-bench', 0);
+    const benchesSpy = vi.spyOn(api, 'benches');
+    hub.api = api;
+    hub.features = ['queue_control'];
+    try {
+      router.route = parse('#/benchmarks');
+      open(Benchmarks, {});
+      flushSync();
+      await Promise.resolve();
+      flushSync();
+      expect(text()).toContain('This server has no vision benchmarks');
+      expect(benchesSpy).not.toHaveBeenCalled();
+
+      // 10s poll ticks must also issue zero calls while unsupported.
+      vi.advanceTimersByTime(30_000);
+      await Promise.resolve();
+      expect(benchesSpy).not.toHaveBeenCalled();
+    } finally {
+      hub.features = null;
+      vi.useRealTimers();
+    }
+  });
 });

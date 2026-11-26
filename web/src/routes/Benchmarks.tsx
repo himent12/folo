@@ -75,10 +75,12 @@ export default function Benchmarks() {
   ownCreateAction();
 
   const system = new Resource((s) => hub.api.system(s));
-  // Polled: an entry running somewhere changes a benchmark's leader and its count.
-  const benches = new Resource((s) => hub.api.benches(s), { poll: 10_000 });
-  const unsupported = computed(() => cannotBench(system.data, benches.error));
-  const unavailable = computed(() => unsupported.get() || hub.lacks(BENCH_FEATURE));
+  const noBench = computed(() => hub.lacks(BENCH_FEATURE) || cannotBench(system.data));
+  // Polled: an entry running somewhere changes a benchmark's leader and its count. Skip fetching/polling once health
+  // or `/api/system` says the server lacks benchmarks (e.g. `folo serve --mock`, #309).
+  const benches = new Resource((s) => (noBench.get() ? Promise.resolve<Bench[]>([]) : hub.api.benches(s)), { poll: 10_000 });
+  const unsupported = computed(() => noBench.get() || cannotBench(system.data, benches.error));
+  const unavailable = unsupported;
 
   // `#/benchmarks?new=1` opens the dialog (the palette's "New benchmark"), both on initial mount and when navigated
   // to while already on `/benchmarks`, then strips `?new=1` so reload/Back never reopens it. Suppressed and closed

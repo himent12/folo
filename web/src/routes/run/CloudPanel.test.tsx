@@ -182,6 +182,46 @@ describe('CloudPanel', () => {
     vi.advanceTimersByTime(30_000);
     await until(() => !target.querySelector('#cloud .warn-line') && fact('Cost') === '$1.20', 'the ledger read again');
   });
+
+  it('skips unconfirmed-instance polls while connecting or while a previous poll is still in flight (#309)', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+    const prevMode = hub.mode;
+    try {
+      let calls = 0;
+      let releaseSecond!: () => void;
+      const answer = vi.spyOn(hub.api, 'cloudInstances').mockImplementation(async () => {
+        calls++;
+        if (calls === 2) {
+          await new Promise<void>((r) => (releaseSecond = r));
+        }
+        return [{ id: 'ci_1', status: 'terminating', cost_usd: 1.2, offer: state().offer, error: 'timeout' } as CloudInstance];
+      });
+      c = mount(CloudPanel, {
+        target,
+        props: { cloud: state({ phase: 'released', progress: null, ended_in: 'collecting' }), provider: 'RunPod', run: { status: 'completed' } },
+      });
+      await until(() => target.querySelector('#cloud .warn-line'), 'unconfirmed warning');
+      expect(answer).toHaveBeenCalledTimes(1);
+
+      hub.mode = 'connecting';
+      flushSync();
+      vi.advanceTimersByTime(30_000);
+      expect(answer).toHaveBeenCalledTimes(1);
+
+      hub.mode = 'mock';
+      flushSync();
+      vi.advanceTimersByTime(30_000);
+      expect(answer).toHaveBeenCalledTimes(2);
+      // Still in flight: next 30s tick must not overlap/abort it.
+      vi.advanceTimersByTime(30_000);
+      expect(answer).toHaveBeenCalledTimes(2);
+      releaseSecond();
+      await Promise.resolve();
+    } finally {
+      hub.mode = prevMode;
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('Run: a cloud run', () => {

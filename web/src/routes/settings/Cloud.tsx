@@ -14,11 +14,13 @@ import Unplug from '$icons/unplug';
 import { computed, css, effect, For, Index, onCleanup, ReactiveSet, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
+import { pollTogether } from '$lib/api/share';
 import type { CloudConnection, CloudInstance } from '$lib/api/types';
 import { INSTANCE_LABEL, isAlive, offerParts, providerName } from '$lib/cloud';
 import { ago, timeOfDay, usd } from '$lib/format';
 import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
+import { watched } from '$lib/shell/runList';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
 import EmptyState from '$lib/ui/EmptyState';
@@ -40,16 +42,17 @@ export default function Cloud() {
   const providers = new Resource((s) => hub.api.cloudProviders(s));
   const connections = new Resource((s) => hub.api.cloudConnections(s));
   const instances = new Resource((s) => hub.api.cloudInstances(s));
-  const runs = new Resource((s) => hub.api.runs(s));
+  const runs = new Resource((s) => hub.api.runs(s), { startFrom: () => watched.source });
 
   /** While an instance is alive (it costs money), its state and cost are read again every 5 s. */
   const anyAlive = computed(() => !!instances.data?.some((i) => isAlive(i.status)));
   effect(() => {
     if (!anyAlive.get()) return;
-    const t = setInterval(() => {
-      if (document.visibilityState === 'visible') void instances.refresh();
-    }, 5000);
-    return () => clearInterval(t);
+    return pollTogether(5000, () => {
+      if (document.visibilityState !== 'visible' || hub.mode === 'connecting') return;
+      if (untrack(() => instances.loading || instances.refreshing)) return;
+      void instances.refresh();
+    });
   });
 
   const runName = (id: string | null) => (id ? runs.data?.find((r) => r.id === id)?.name : undefined);
@@ -63,9 +66,17 @@ export default function Cloud() {
   let alive = true;
   /** Bumps whenever a new connection attempt starts (`hub.mode === 'connecting'`) or `hub.epoch` changes. */
   let serverGen = 0;
+  let endFocusFrame: number | null = null;
+  function cancelEndFocus() {
+    if (endFocusFrame !== null) {
+      cancelAnimationFrame(endFocusFrame);
+      endFocusFrame = null;
+    }
+  }
   onCleanup(() => {
     alive = false;
     serverGen++;
+    cancelEndFocus();
   });
   const reconnecting = computed(() => hub.mode === 'connecting');
   /** Live check (avoids TS narrowing `hub.mode` across `await`). */
@@ -158,6 +169,7 @@ export default function Cloud() {
   let endSeq = 0;
   effect(() => {
     if (!endOpen.get()) {
+      cancelEndFocus();
       endSeq++;
       endBusy.set(false);
       endStatus.clear();
@@ -172,6 +184,7 @@ export default function Cloud() {
     prevEpoch = ep;
     prevConnecting = isConnecting;
     serverGen++;
+    cancelEndFocus();
     leaveSeq++;
     endSeq++;
     checking.clear();
@@ -200,13 +213,18 @@ export default function Cloud() {
   });
   function askTerminate(i: CloudInstance) {
     if (hub.mode === 'connecting') return;
+    cancelEndFocus();
     endSeq++;
     endBusy.set(false);
     endStatus.clear();
     ending.set(i);
     endOpen.set(true);
     // The safe choice takes focus: a terminated instance cannot be had back.
-    requestAnimationFrame(() => document.querySelector<HTMLElement>('dialog[open] [data-safe]')?.focus());
+    endFocusFrame = requestAnimationFrame(() => {
+      endFocusFrame = null;
+      if (!alive || !endOpen.peek()) return;
+      document.querySelector<HTMLElement>('dialog[open] [data-safe]')?.focus();
+    });
   }
   async function terminate() {
     const i = ending.peek();
