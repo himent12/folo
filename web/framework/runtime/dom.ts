@@ -796,22 +796,58 @@ export function toStyle(value: unknown, styles?: Styles, important?: Styles): st
   return out === '' ? null : out;
 }
 
+function hasStyleValue(v: unknown): boolean {
+  return v != null && v !== '';
+}
+
 function updateStyles(el: HTMLElement, prev: Styles | undefined, next: Styles | undefined, priority?: string): void {
   if (next !== undefined) {
     for (const key in next) {
       const value = next[key];
       if ((prev === undefined ? undefined : prev[key]) !== value) {
-        if (value == null || value === '') el.style.removeProperty(key);
-        else el.style.setProperty(key, value as string, priority);
+        if (!hasStyleValue(value)) el.style.removeProperty(key);
+        else el.style.setProperty(key, String(value), priority);
       }
     }
   }
   // Keys a style object no longer has (or all keys when a style object transitions to `''`).
   if (prev !== undefined) {
     for (const key in prev) {
-      if ((next === undefined || !(key in next)) && prev[key] != null && prev[key] !== '') el.style.removeProperty(key);
+      if ((next === undefined || !(key in next)) && hasStyleValue(prev[key])) el.style.removeProperty(key);
     }
   }
+}
+
+/** Reconciles overlapping normal and `!important` keys by effective value and priority. */
+function updateStyleMap(
+  el: HTMLElement,
+  prev: Styles | undefined,
+  next: Styles | undefined,
+  prevImportant: Styles | undefined,
+  nextImportant: Styles | undefined,
+): void {
+  const seen = new Set<string>();
+  const check = (key: string) => {
+    if (seen.has(key)) return;
+    seen.add(key);
+    const pImp = prevImportant?.[key];
+    const pVal = hasStyleValue(pImp) ? pImp : prev?.[key];
+    const pPri = hasStyleValue(pImp) ? 'important' : '';
+    const nImp = nextImportant?.[key];
+    const nVal = hasStyleValue(nImp) ? nImp : next?.[key];
+    const nPri = hasStyleValue(nImp) ? 'important' : '';
+    const had = hasStyleValue(pVal);
+    const has = hasStyleValue(nVal);
+    if (!has) {
+      if (had) el.style.removeProperty(key);
+    } else if (!had || pVal !== nVal || pPri !== nPri) {
+      el.style.setProperty(key, String(nVal), nPri || undefined);
+    }
+  };
+  if (next !== undefined) for (const k in next) check(k);
+  if (prev !== undefined) for (const k in prev) check(k);
+  if (nextImportant !== undefined) for (const k in nextImportant) check(k);
+  if (prevImportant !== undefined) for (const k in prevImportant) check(k);
 }
 
 type StyleCached = HTMLElement & { $$style?: unknown };
@@ -830,8 +866,11 @@ export function setStyle(el: Element, value: unknown, prev: Styles | undefined, 
     e.$$style = value;
     return;
   }
-  if (next || prev) updateStyles(e, prev, next);
-  if (nextImportant || prevImportant) updateStyles(e, prevImportant, nextImportant, 'important');
+  if (!prevImportant && !nextImportant) {
+    if (next || prev) updateStyles(e, prev, next);
+  } else {
+    updateStyleMap(e, prev, next, prevImportant, nextImportant);
+  }
 }
 
 /** Internal: sets one static `style:prop={value}` directive without an effect (ignores `null`/`undefined`/`''`). */

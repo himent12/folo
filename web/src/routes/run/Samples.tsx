@@ -66,21 +66,25 @@ export default function Samples(props: SamplesProps) {
   // step, and an unmemoised prop read would refetch on each one.
   const rid = computed(() => props.runId);
   const done = computed(() => props.epochsDone);
-  // Epochs are 1-based (docs/API.md); 'latest' is the last finished one.
-  const epoch = computed(() => (pick.get() === 'latest' ? done.get() : Number(pick.get())));
+  // Epochs are 1-based (docs/API.md); 'latest' (or a pick past `done` after a rewind) resolves to the last finished one.
+  const epoch = computed(() => {
+    const n = done.get();
+    const p = pick.get();
+    return p === 'latest' || Number(p) > n ? n : Number(p);
+  });
   const samples = new Resource((s) => (done.get() > 0 ? hub.api.runSamples(rid.get(), epoch.get(), s) : Promise.resolve(null)));
 
-  // A resumed run can rewind below a previously picked epoch: fall back to 'latest' rather than requesting a gone epoch.
+  // A resumed run can rewind below a previously picked epoch: fall back to 'latest' so the picker matches `epoch`.
   effect(() => {
     const n = done.get();
     const p = pick.peek();
     if (p !== 'latest' && Number(p) > n) pick.set('latest');
   });
-  // Close the inspector if the loaded epoch has fewer samples than the open index.
+  // Close the inspector when samples clear (rewind to 0 / server switch) or shrink below the open index.
   effect(() => {
-    const list = samples.data?.samples;
     const cur = open.get();
-    if (cur !== null && list !== undefined && cur >= list.length) open.set(null);
+    if (cur === null) return;
+    if (cur >= (samples.data?.samples.length ?? 0)) open.set(null);
   });
 
   const options = computed(() => {

@@ -78,6 +78,20 @@ describe('BenchCompare Escape coordination', () => {
     flushSync();
     expect(firstChip.getAttribute('aria-pressed')).toBe('true');
 
+    // Escape while an open info popover is present must NOT unpin the chip.
+    const pop = document.createElement('div');
+    pop.className = 'info-pop open';
+    document.body.appendChild(pop);
+    try {
+      const popEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      document.dispatchEvent(popEsc);
+      flushSync();
+      expect(popEsc.defaultPrevented).toBe(false);
+      expect(firstChip.getAttribute('aria-pressed')).toBe('true');
+    } finally {
+      pop.remove();
+    }
+
     // Clean Escape unpins the chip.
     const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
     document.dispatchEvent(esc);

@@ -763,7 +763,7 @@ describe('Playground: the rail (from 1024 px)', () => {
     expect([...rail.querySelectorAll('.slider')].length).toBe(2);
   });
 
-  it('clears predicting state and inspection filters when clearing an image mid-prediction', async () => {
+  it('clears predicting state and ignores late resolution when clearing an image mid-prediction', async () => {
     const api = new MockApi('normal', 0);
     api.imageUrl = async () => 'data:,';
     let resolvePredict!: (p: Awaited<ReturnType<MockApi['predict']>>) => void;
@@ -787,7 +787,7 @@ describe('Playground: the rail (from 1024 px)', () => {
     expect(target.querySelector('.t-sk')).toBeNull();
     expect(text(target.querySelector('section[aria-labelledby="pg-timing"]'))).toContain('Timing appears after a run.');
 
-    // Late resolution of the aborted prediction must stay ignored.
+    // Late resolution of the aborted prediction must stay ignored (timing remains in its empty state).
     resolvePredict({
       model_id: 'm_hard_s',
       image: { width: 640, height: 480 },
@@ -799,5 +799,6 @@ describe('Playground: the rail (from 1024 px)', () => {
     await new Promise((r) => setTimeout(r, 0));
     flushSync();
     expect(target.querySelector('.t-sk')).toBeNull();
+    expect(text(target.querySelector('section[aria-labelledby="pg-timing"]'))).toContain('Timing appears after a run.');
   });
 });

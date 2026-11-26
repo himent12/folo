@@ -144,7 +144,8 @@ describe('Samples epoch and inspector bounds', () => {
       expect(document.querySelector<HTMLDialogElement>('dialog[open]')).not.toBeNull();
     });
 
-    // Run rewinds to epoch 5 with only 1 sample: picker falls back to latest and out-of-bounds inspector closes.
+    // Run rewinds to epoch 5 with only 1 sample: must never request gone epoch 10, resets picker to latest, and closes out-of-bounds inspector.
+    spy.mockClear();
     epochsDone.set(5);
     await vi.waitFor(() => {
       flushSync();
@@ -152,7 +153,19 @@ describe('Samples epoch and inspector bounds', () => {
       expect(target.querySelectorAll('.cell').length).toBe(1);
       expect(document.querySelector<HTMLDialogElement>('dialog[open]')).toBeNull();
     });
-    expect(spy.mock.calls.at(-1)?.[1]).toBe(5);
+    expect(spy.mock.calls.map((call) => call[1])).toEqual([5]);
+
+    // Open the remaining sample (index 0), then rewind all the way to 0 completed epochs: inspector must close instead of showing "Sample 1 of 0".
+    target.querySelectorAll<HTMLButtonElement>('.cell')[0]!.click();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector<HTMLDialogElement>('dialog[open]')).not.toBeNull();
+    });
+    epochsDone.set(0);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector<HTMLDialogElement>('dialog[open]')).toBeNull();
+    });
     c.unmount();
   });
 });

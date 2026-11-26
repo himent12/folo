@@ -326,18 +326,22 @@ export default function Playground() {
   /** A picked file that was refused as weights (not a .folo), or that the runtime could not load; cleared on a new pick. */
   const badFile = signal<{ name: string; why: string | null } | null>(null);
 
+  const weightPickSeq = new Map<string, number>();
+
   async function pickWeights(e: Event & { currentTarget: HTMLInputElement }) {
     const input = e.currentTarget;
     const f = input.files?.[0];
     input.value = '';
     const id = modelId.peek();
     if (!f || !id) return;
+    const seq = (weightPickSeq.get(id) ?? 0) + 1;
+    weightPickSeq.set(id, seq);
     // Refused before it becomes this model's weights: the server's (or the request for a file) stay in place.
     if (!(await looksLikeFolo(f))) {
-      if (!destroyed && modelId.peek() === id) badFile.set({ name: f.name, why: null });
+      if (!destroyed && weightPickSeq.get(id) === seq && modelId.peek() === id) badFile.set({ name: f.name, why: null });
       return;
     }
-    if (destroyed) return;
+    if (destroyed || weightPickSeq.get(id) !== seq) return;
     if (modelId.peek() === id) badFile.set(null);
     localWeights.set(new Map(localWeights.peek()).set(id, f));
   }

@@ -151,6 +151,8 @@ export default function Editor(props: EditorProps) {
       hovered.set(null);
       if (shownId !== null) {
         shownId = null;
+        base.set([]);
+        draft.set([]);
         selected.set(null);
         note.set('');
         asked.set(null);
