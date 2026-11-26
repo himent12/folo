@@ -6,7 +6,7 @@ use super::bilinear::{
     vblend_rgb_to_rgba32_scalar, warp_hinterp_interior_to_rgb, warp_hinterp_interior_to_rgb_scalar,
 };
 use super::box_filter::{box_hreduce_u32_to_u8, box_hreduce_u32_to_u8_scalar, sum_rows_u8_to_u32};
-use super::hsv_fused::{HsvTables, warp_interior_to_planar_fused, warp_interior_to_planar_fused_scalar};
+use super::hsv::{HsvTables, warp_interior_to_planar_fused, warp_interior_to_planar_fused_scalar};
 use super::planar::{
     copy_flip_lr_row, copy_flip_lr_row_scalar, flip_lr_row, flip_lr_row_scalar, luma_to_rgb,
     luma_to_rgb_scalar, mixup_blend_u8, mixup_blend_u8_scalar, rgb_to_planar_f32_div255,

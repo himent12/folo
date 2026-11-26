@@ -1,6 +1,7 @@
 //! Bit-exact AVX2 RGB deinterleaving (`RGB u8` → planar `u8`, planar `f32`, packed `RGB0 u32`), horizontal row flip,
 //! mixup blending, and `RGBA`/`L8` → `RGB` decode conversions.
 
+use super::DIV255_LUT;
 #[cfg(target_arch = "x86_64")]
 use super::{INV255_HI, INV255_LO, has_avx2, has_avx2_fma};
 
@@ -106,15 +107,15 @@ pub(crate) fn rgb_to_planar_f32_div255_scalar(
     if flip_lr {
         for (x, px) in src.as_chunks::<3>().0.iter().enumerate() {
             let d = w - 1 - x;
-            r[d] = px[0] as f32 / 255.0;
-            g[d] = px[1] as f32 / 255.0;
-            b[d] = px[2] as f32 / 255.0;
+            r[d] = DIV255_LUT[px[0] as usize];
+            g[d] = DIV255_LUT[px[1] as usize];
+            b[d] = DIV255_LUT[px[2] as usize];
         }
     } else {
         for (x, px) in src.as_chunks::<3>().0.iter().enumerate() {
-            r[x] = px[0] as f32 / 255.0;
-            g[x] = px[1] as f32 / 255.0;
-            b[x] = px[2] as f32 / 255.0;
+            r[x] = DIV255_LUT[px[0] as usize];
+            g[x] = DIV255_LUT[px[1] as usize];
+            b[x] = DIV255_LUT[px[2] as usize];
         }
     }
 }
@@ -353,6 +354,67 @@ pub(crate) unsafe fn interleave_rgb16_avx2(r: __m128i, g: __m128i, b: __m128i, d
     }
 }
 
+/// Deinterleaves 32 RGB pixels (96 bytes starting at `src`) into three 32-byte vectors `(R, G, B)`.
+///
+/// # Safety
+/// `src` must point to at least 96 readable bytes, and the CPU must support AVX2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+pub(crate) unsafe fn deinterleave_rgb32_avx2(src: *const u8) -> (__m256i, __m256i, __m256i) {
+    let (a, b, c) = unsafe {
+        (
+            _mm256_loadu_si256(src as *const __m256i),
+            _mm256_loadu_si256(src.add(32) as *const __m256i),
+            _mm256_loadu_si256(src.add(64) as *const __m256i),
+        )
+    };
+    // Low 128-bit lane holds pixels 0..16 (bytes 0..48); high 128-bit lane holds pixels 16..32 (bytes 48..96).
+    let c0 = _mm256_permute2x128_si256::<0x30>(a, b);
+    let c1 = _mm256_permute2x128_si256::<0x21>(a, c);
+    let c2 = _mm256_permute2x128_si256::<0x30>(b, c);
+    let mr0 = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+        0, 3, 6, 9, 12, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    ));
+    let mr1 = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+        -1, -1, -1, -1, -1, -1, 2, 5, 8, 11, 14, -1, -1, -1, -1, -1,
+    ));
+    let mr2 = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1, 4, 7, 10, 13,
+    ));
+    let mg0 = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+        1, 4, 7, 10, 13, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    ));
+    let mg1 = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+        -1, -1, -1, -1, -1, 0, 3, 6, 9, 12, 15, -1, -1, -1, -1, -1,
+    ));
+    let mg2 = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 5, 8, 11, 14,
+    ));
+    let mb0 = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+        2, 5, 8, 11, 14, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+    ));
+    let mb1 = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+        -1, -1, -1, -1, -1, 1, 4, 7, 10, 13, -1, -1, -1, -1, -1, -1,
+    ));
+    let mb2 = _mm256_broadcastsi128_si256(_mm_setr_epi8(
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 0, 3, 6, 9, 12, 15,
+    ));
+    let r = _mm256_or_si256(
+        _mm256_or_si256(_mm256_shuffle_epi8(c0, mr0), _mm256_shuffle_epi8(c1, mr1)),
+        _mm256_shuffle_epi8(c2, mr2),
+    );
+    let g = _mm256_or_si256(
+        _mm256_or_si256(_mm256_shuffle_epi8(c0, mg0), _mm256_shuffle_epi8(c1, mg1)),
+        _mm256_shuffle_epi8(c2, mg2),
+    );
+    let b = _mm256_or_si256(
+        _mm256_or_si256(_mm256_shuffle_epi8(c0, mb0), _mm256_shuffle_epi8(c1, mb1)),
+        _mm256_shuffle_epi8(c2, mb2),
+    );
+    (r, g, b)
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn rgb_to_planar_u8_avx2(src: &[u8], r: &mut [u8], g: &mut [u8], b: &mut [u8], flip_lr: bool) {
@@ -360,7 +422,26 @@ unsafe fn rgb_to_planar_u8_avx2(src: &[u8], r: &mut [u8], g: &mut [u8], b: &mut 
     let sp = src.as_ptr();
     let (rp, gp, bp) = (r.as_mut_ptr(), g.as_mut_ptr(), b.as_mut_ptr());
     let rev16 = _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    let rev16_256 = _mm256_broadcastsi128_si256(rev16);
     let mut x = 0usize;
+    while x + 32 <= w {
+        // SAFETY: `x + 32 <= w`, so `sp.add(x * 3)` has 96 readable bytes and `rp/gp/bp` have 32 writable bytes.
+        let (mut vr, mut vg, mut vb) = unsafe { deinterleave_rgb32_avx2(sp.add(x * 3)) };
+        let dst_x = if flip_lr {
+            vr = _mm256_shuffle_epi8(_mm256_permute2x128_si256::<0x01>(vr, vr), rev16_256);
+            vg = _mm256_shuffle_epi8(_mm256_permute2x128_si256::<0x01>(vg, vg), rev16_256);
+            vb = _mm256_shuffle_epi8(_mm256_permute2x128_si256::<0x01>(vb, vb), rev16_256);
+            w - x - 32
+        } else {
+            x
+        };
+        unsafe {
+            _mm256_storeu_si256(rp.add(dst_x) as *mut __m256i, vr);
+            _mm256_storeu_si256(gp.add(dst_x) as *mut __m256i, vg);
+            _mm256_storeu_si256(bp.add(dst_x) as *mut __m256i, vb);
+        }
+        x += 32;
+    }
     while x + 16 <= w {
         // SAFETY: `x + 16 <= w`, so `sp.add(x * 3)` has 48 readable bytes and `rp/gp/bp` have 16 writable bytes.
         let (mut vr, mut vg, mut vb) = unsafe { deinterleave_rgb16_avx2(sp.add(x * 3)) };
@@ -396,6 +477,25 @@ unsafe fn rgb_to_planar_f32_scale_avx2(src: &[u8], r: &mut [f32], g: &mut [f32],
     let (rp, gp, bp) = (r.as_mut_ptr(), g.as_mut_ptr(), b.as_mut_ptr());
     let vscale = _mm256_set1_ps(scale);
     let mut x = 0usize;
+    while x + 32 <= w {
+        // SAFETY: `x + 32 <= w`, so 96 bytes are readable from `sp` and 32 `f32`s are writable at `x`.
+        let (vr, vg, vb) = unsafe { deinterleave_rgb32_avx2(sp.add(x * 3)) };
+        for (v, dp) in [(vr, rp), (vg, gp), (vb, bp)] {
+            let v0 = _mm256_castsi256_si128(v);
+            let v1 = _mm256_extracti128_si256::<1>(v);
+            let f0 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v0)), vscale);
+            let f1 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128::<8>(v0))), vscale);
+            let f2 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v1)), vscale);
+            let f3 = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128::<8>(v1))), vscale);
+            unsafe {
+                _mm256_storeu_ps(dp.add(x), f0);
+                _mm256_storeu_ps(dp.add(x + 8), f1);
+                _mm256_storeu_ps(dp.add(x + 16), f2);
+                _mm256_storeu_ps(dp.add(x + 24), f3);
+            }
+        }
+        x += 32;
+    }
     while x + 16 <= w {
         // SAFETY: `x + 16 <= w`, so 48 bytes are readable from `sp` and 16 `f32`s are writable at `x`.
         let (vr, vg, vb) = unsafe { deinterleave_rgb16_avx2(sp.add(x * 3)) };
@@ -432,7 +532,35 @@ unsafe fn rgb_to_planar_f32_div255_avx2_fma(
     let vhi = _mm256_set1_ps(INV255_HI);
     let vlo = _mm256_set1_ps(INV255_LO);
     let rev16 = _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    let rev16_256 = _mm256_broadcastsi128_si256(rev16);
     let mut x = 0usize;
+    while x + 32 <= w {
+        // SAFETY: `x + 32 <= w`, so 96 bytes are readable from `sp` and 32 `f32`s are writable at `dst_x`.
+        let (mut vr, mut vg, mut vb) = unsafe { deinterleave_rgb32_avx2(sp.add(x * 3)) };
+        let dst_x = if flip_lr {
+            vr = _mm256_shuffle_epi8(_mm256_permute2x128_si256::<0x01>(vr, vr), rev16_256);
+            vg = _mm256_shuffle_epi8(_mm256_permute2x128_si256::<0x01>(vg, vg), rev16_256);
+            vb = _mm256_shuffle_epi8(_mm256_permute2x128_si256::<0x01>(vb, vb), rev16_256);
+            w - x - 32
+        } else {
+            x
+        };
+        for (v, dp) in [(vr, rp), (vg, gp), (vb, bp)] {
+            let v0 = _mm256_castsi256_si128(v);
+            let v1 = _mm256_extracti128_si256::<1>(v);
+            let f0 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v0));
+            let f1 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128::<8>(v0)));
+            let f2 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v1));
+            let f3 = _mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128::<8>(v1)));
+            unsafe {
+                _mm256_storeu_ps(dp.add(dst_x), _mm256_fmadd_ps(f0, vhi, _mm256_mul_ps(f0, vlo)));
+                _mm256_storeu_ps(dp.add(dst_x + 8), _mm256_fmadd_ps(f1, vhi, _mm256_mul_ps(f1, vlo)));
+                _mm256_storeu_ps(dp.add(dst_x + 16), _mm256_fmadd_ps(f2, vhi, _mm256_mul_ps(f2, vlo)));
+                _mm256_storeu_ps(dp.add(dst_x + 24), _mm256_fmadd_ps(f3, vhi, _mm256_mul_ps(f3, vlo)));
+            }
+        }
+        x += 32;
+    }
     while x + 16 <= w {
         // SAFETY: `x + 16 <= w`, so 48 bytes are readable from `sp` and 16 `f32`s are writable at `dst_x`.
         let (mut vr, mut vg, mut vb) = unsafe { deinterleave_rgb16_avx2(sp.add(x * 3)) };
@@ -458,9 +586,9 @@ unsafe fn rgb_to_planar_f32_div255_avx2_fma(
     }
     while x < w {
         let d = if flip_lr { w - 1 - x } else { x };
-        r[d] = src[x * 3] as f32 / 255.0;
-        g[d] = src[x * 3 + 1] as f32 / 255.0;
-        b[d] = src[x * 3 + 2] as f32 / 255.0;
+        r[d] = DIV255_LUT[src[x * 3] as usize];
+        g[d] = DIV255_LUT[src[x * 3 + 1] as usize];
+        b[d] = DIV255_LUT[src[x * 3 + 2] as usize];
         x += 1;
     }
 }
@@ -479,7 +607,43 @@ pub(crate) unsafe fn rgb_to_planar_f32_div255_avx2(
     let (rp, gp, bp) = (r.as_mut_ptr(), g.as_mut_ptr(), b.as_mut_ptr());
     let v255 = _mm256_set1_ps(255.0);
     let rev16 = _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    let rev16_256 = _mm256_broadcastsi128_si256(rev16);
     let mut x = 0usize;
+    while x + 32 <= w {
+        // SAFETY: `x + 32 <= w`, so 96 bytes are readable from `sp` and 32 `f32`s are writable at `dst_x`.
+        let (mut vr, mut vg, mut vb) = unsafe { deinterleave_rgb32_avx2(sp.add(x * 3)) };
+        let dst_x = if flip_lr {
+            vr = _mm256_shuffle_epi8(_mm256_permute2x128_si256::<0x01>(vr, vr), rev16_256);
+            vg = _mm256_shuffle_epi8(_mm256_permute2x128_si256::<0x01>(vg, vg), rev16_256);
+            vb = _mm256_shuffle_epi8(_mm256_permute2x128_si256::<0x01>(vb, vb), rev16_256);
+            w - x - 32
+        } else {
+            x
+        };
+        for (v, dp) in [(vr, rp), (vg, gp), (vb, bp)] {
+            let v0 = _mm256_castsi256_si128(v);
+            let v1 = _mm256_extracti128_si256::<1>(v);
+            unsafe {
+                _mm256_storeu_ps(
+                    dp.add(dst_x),
+                    _mm256_div_ps(_mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v0)), v255),
+                );
+                _mm256_storeu_ps(
+                    dp.add(dst_x + 8),
+                    _mm256_div_ps(_mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128::<8>(v0))), v255),
+                );
+                _mm256_storeu_ps(
+                    dp.add(dst_x + 16),
+                    _mm256_div_ps(_mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(v1)), v255),
+                );
+                _mm256_storeu_ps(
+                    dp.add(dst_x + 24),
+                    _mm256_div_ps(_mm256_cvtepi32_ps(_mm256_cvtepu8_epi32(_mm_srli_si128::<8>(v1))), v255),
+                );
+            }
+        }
+        x += 32;
+    }
     while x + 16 <= w {
         // SAFETY: `x + 16 <= w`, so 48 bytes are readable from `sp` and 16 `f32`s are writable at `dst_x`.
         let (mut vr, mut vg, mut vb) = unsafe { deinterleave_rgb16_avx2(sp.add(x * 3)) };
@@ -503,9 +667,9 @@ pub(crate) unsafe fn rgb_to_planar_f32_div255_avx2(
     }
     while x < w {
         let d = if flip_lr { w - 1 - x } else { x };
-        r[d] = src[x * 3] as f32 / 255.0;
-        g[d] = src[x * 3 + 1] as f32 / 255.0;
-        b[d] = src[x * 3 + 2] as f32 / 255.0;
+        r[d] = DIV255_LUT[src[x * 3] as usize];
+        g[d] = DIV255_LUT[src[x * 3 + 1] as usize];
+        b[d] = DIV255_LUT[src[x * 3 + 2] as usize];
         x += 1;
     }
 }

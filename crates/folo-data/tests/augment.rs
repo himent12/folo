@@ -229,6 +229,86 @@ fn an_empty_mosaic_is_empty() {
     assert_eq!((m.image.width, m.image.height, m.image.data.len()), (0, 0, 0));
 }
 
+/// Edge-case coverage: 1x1 and odd-sized images, empty labels, out-of-bounds mosaic box containment,
+/// grayscale/RGBA PNG decoding through `DataLoader`, and deterministic seeded RNG invariants.
+#[test]
+fn edge_sizes_empty_labels_oob_mosaic_and_formats_end_to_end() {
+    use folo_data::{DataLoader, Image, LoaderConfig, Sample, decode};
+    use std::sync::Arc;
+
+    // 1. Out-of-bounds box in quadrant 0 must stay inside quadrant 0 (never bleed past xc/yc).
+    let mut parts: Vec<Sample> = (0..4)
+        .map(|k| Sample { image: Image::new(32, 32, [(k * 50) as u8, 20, 40]), boxes: vec![] })
+        .collect();
+    parts[0].boxes.push(BBox::new(0, 0.9, 0.9, 0.6, 0.6)); // extends to 1.2 in both axes
+    let mut rng_peek = Rng::new(17);
+    let xc = rng_peek.uniform(64.0 * 0.5, 64.0 * 1.5) as i64;
+    let yc = rng_peek.uniform(64.0 * 0.5, 64.0 * 1.5) as i64;
+    let m = mosaic4([&parts[0], &parts[1], &parts[2], &parts[3]], 64, &mut Rng::new(17));
+    assert_eq!(m.boxes.len(), 1);
+    let [_, _, x2, y2] = m.boxes[0].pixel_xyxy(128, 128);
+    assert!(
+        x2 <= xc as f32 + 1e-4 && y2 <= yc as f32 + 1e-4,
+        "box bled past quadrant ({xc},{yc}): {x2},{y2}"
+    );
+
+    // 2. 1x1, odd sizes, and empty labels survive letterbox, mosaic, affine, and DataLoader cleanly.
+    let mut odd_samples: Vec<Sample> = [(1u32, 1u32), (1, 3), (3, 1), (17, 19), (33, 65)]
+        .into_iter()
+        .enumerate()
+        .map(|(k, (w, h))| Sample {
+            image: Image::new(w, h, [(k * 40 + 10) as u8, 80, 160]),
+            boxes: if k % 2 == 0 { vec![] } else { vec![BBox::new(0, 0.5, 0.5, 0.5, 0.5)] },
+        })
+        .collect();
+
+    // 3. Grayscale (L8) and RGBA8 PNGs decode cleanly into upright RGB and flow through DataLoader.
+    let encode_png = |buf: &[u8], w: u32, h: u32, ct: image::ExtendedColorType| {
+        use image::ImageEncoder;
+        let mut out = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut out).write_image(buf, w, h, ct).unwrap();
+        out
+    };
+    let luma_img =
+        decode(&encode_png(&[10, 50, 90, 130, 170, 210], 3, 2, image::ExtendedColorType::L8)).unwrap();
+    assert_eq!(luma_img.pixel(2, 1), [210, 210, 210]);
+    let rgba_img = decode(&encode_png(
+        &[11, 22, 33, 255, 44, 55, 66, 0, 77, 88, 99, 128],
+        3,
+        1,
+        image::ExtendedColorType::Rgba8,
+    ))
+    .unwrap();
+    assert_eq!(rgba_img.pixel(1, 0), [44, 55, 66]);
+    odd_samples.push(Sample { image: luma_img, boxes: vec![] });
+    odd_samples.push(Sample { image: rgba_img, boxes: vec![BBox::new(0, 0.5, 0.5, 0.6, 0.8)] });
+
+    for s in &odd_samples {
+        let (lb, _) = letterbox_sample(s, 32, 32, &LetterboxOptions::default());
+        assert_eq!((lb.image.width, lb.image.height), (32, 32));
+    }
+
+    let ds: Arc<dyn folo_data::Dataset> =
+        Arc::new(InMemoryDataset { samples: odd_samples, classes: vec!["x".into()], split: Split::Train });
+    let aug = AugmentConfig { degrees: 8.0, shear: 2.0, mixup: 0.5, flipud: 0.5, ..AugmentConfig::default() };
+    for &u8_images in &[true, false] {
+        let base = LoaderConfig {
+            batch_size: 4,
+            imgsz: 32,
+            workers: 0,
+            seed: 99,
+            augment: Some(aug),
+            u8_images,
+            ..LoaderConfig::default()
+        };
+        let l0 = DataLoader::new(ds.clone(), base.clone()).unwrap();
+        let l2 = DataLoader::new(ds.clone(), LoaderConfig { workers: 2, ..base }).unwrap();
+        let b0: Vec<_> = l0.epoch(0).map(|b| b.unwrap()).collect();
+        let b2: Vec<_> = l2.epoch(0).map(|b| b.unwrap()).collect();
+        assert_eq!(b0, b2, "odd/empty/L8/RGBA determinism u8={u8_images}");
+    }
+}
+
 /// Fused mixup + HSV + flip + planar DataLoader path matches `TrainTransform::apply` bit-for-bit
 /// across both mosaic+mixup and non-mosaic+mixup (and both `u8` and `f32` batches).
 #[test]

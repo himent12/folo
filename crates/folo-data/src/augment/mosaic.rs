@@ -53,19 +53,19 @@ pub(crate) fn mosaic_plane<'a>(parts: [&'a Sample; 4], s: u32, rng: &mut Rng) ->
         };
         if x2a > x1a && y2a > y1a {
             tiles.push(Tile { img: &part.image, dst: [x1a, y1a, x2a, y2a], src: [x1b, y1b] });
-        }
-        let (padw, padh) = ((x1a - x1b) as f32, (y1a - y1b) as f32);
-        let csf = cs as f32;
-        for b in &part.boxes {
-            let [x1, y1, x2, y2] = b.pixel_xyxy(part.image.width, part.image.height);
-            let c = [
-                (x1 + padw).clamp(0.0, csf),
-                (y1 + padh).clamp(0.0, csf),
-                (x2 + padw).clamp(0.0, csf),
-                (y2 + padh).clamp(0.0, csf),
-            ];
-            if c[2] > c[0] && c[3] > c[1] {
-                boxes.push(BBox::from_pixel_xyxy(b.class, c, cs as u32, cs as u32));
+            let (padw, padh) = ((x1a - x1b) as f32, (y1a - y1b) as f32);
+            let (tx0, ty0, tx1, ty1) = (x1a as f32, y1a as f32, x2a as f32, y2a as f32);
+            for b in &part.boxes {
+                let [x1, y1, x2, y2] = b.pixel_xyxy(part.image.width, part.image.height);
+                let c = [
+                    (x1 + padw).clamp(tx0, tx1),
+                    (y1 + padh).clamp(ty0, ty1),
+                    (x2 + padw).clamp(tx0, tx1),
+                    (y2 + padh).clamp(ty0, ty1),
+                ];
+                if c[2] > c[0] && c[3] > c[1] {
+                    boxes.push(BBox::from_pixel_xyxy(b.class, c, cs as u32, cs as u32));
+                }
             }
         }
     }

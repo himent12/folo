@@ -3,6 +3,7 @@
 use super::{ROUND, SHIFT, WONE};
 #[cfg(target_arch = "x86_64")]
 use super::{interp_pair_avx2, pack_4_rgb0_u8_avx2, pack_8_i32_to_u64_avx2, transpose_8_rgb0_i32_avx2};
+use crate::simd::DIV255_LUT;
 #[cfg(target_arch = "x86_64")]
 use crate::simd::{INV255_HI, INV255_LO, has_avx2, has_avx2_fma};
 #[cfg(target_arch = "x86_64")]
@@ -138,9 +139,9 @@ pub(crate) unsafe fn hinterp_taps_to_planar_f32_div255(
         let k = x0[x] as usize * 4;
         let wx = wx[x];
         let iwx = WONE - wx;
-        r[x] = (((v[k] * iwx + v[k + 4] * wx + ROUND) >> SHIFT) as u8) as f32 / 255.0;
-        g[x] = (((v[k + 1] * iwx + v[k + 5] * wx + ROUND) >> SHIFT) as u8) as f32 / 255.0;
-        b[x] = (((v[k + 2] * iwx + v[k + 6] * wx + ROUND) >> SHIFT) as u8) as f32 / 255.0;
+        r[x] = DIV255_LUT[((v[k] * iwx + v[k + 4] * wx + ROUND) >> SHIFT) as u8 as usize];
+        g[x] = DIV255_LUT[((v[k + 1] * iwx + v[k + 5] * wx + ROUND) >> SHIFT) as u8 as usize];
+        b[x] = DIV255_LUT[((v[k + 2] * iwx + v[k + 6] * wx + ROUND) >> SHIFT) as u8 as usize];
     }
 }
 
@@ -442,9 +443,9 @@ unsafe fn hinterp_taps_to_planar_f32_div255_avx2_fma(
         let k = x0[x] as usize * 4;
         let wx = wx[x];
         let iwx = WONE - wx;
-        r[x] = (((v[k] * iwx + v[k + 4] * wx + ROUND) >> SHIFT) as u8) as f32 / 255.0;
-        g[x] = (((v[k + 1] * iwx + v[k + 5] * wx + ROUND) >> SHIFT) as u8) as f32 / 255.0;
-        b[x] = (((v[k + 2] * iwx + v[k + 6] * wx + ROUND) >> SHIFT) as u8) as f32 / 255.0;
+        r[x] = DIV255_LUT[((v[k] * iwx + v[k + 4] * wx + ROUND) >> SHIFT) as u8 as usize];
+        g[x] = DIV255_LUT[((v[k + 1] * iwx + v[k + 5] * wx + ROUND) >> SHIFT) as u8 as usize];
+        b[x] = DIV255_LUT[((v[k + 2] * iwx + v[k + 6] * wx + ROUND) >> SHIFT) as u8 as usize];
         x += 1;
     }
 }

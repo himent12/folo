@@ -6,7 +6,7 @@
 
 pub(crate) mod bilinear;
 pub(crate) mod box_filter;
-pub(crate) mod hsv_fused;
+pub(crate) mod hsv;
 pub(crate) mod planar;
 #[cfg(test)]
 mod tests;
@@ -163,6 +163,17 @@ pub(crate) fn has_avx2_fma() -> bool {
     static AVX2_FMA: OnceLock<bool> = OnceLock::new();
     *AVX2_FMA.get_or_init(|| std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma"))
 }
+
+/// Exact IEEE-754 `i as f32 / 255.0` lookup table for division-free scalar planar `f32` conversion.
+pub(crate) const DIV255_LUT: [f32; 256] = {
+    let mut t = [0.0f32; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        t[i] = i as f32 / 255.0;
+        i += 1;
+    }
+    t
+};
 
 /// Exact two-term FMA reciprocal of `255.0` (`INV255_HI + INV255_LO ≈ 1/255` to ~48 bits, both positive).
 ///

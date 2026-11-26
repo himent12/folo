@@ -124,7 +124,9 @@ pub(crate) unsafe fn interp_pair_avx2(
     };
     let t0 = _mm256_permute2x128_si256::<0x20>(a, b);
     let t1 = _mm256_permute2x128_si256::<0x31>(a, b);
-    let w = _mm256_setr_epi32(wx0, wx0, wx0, 0, wx1, wx1, wx1, 0);
+    // Lane 3 of every column in `v` is 0, so `diff[3] == diff[7] == 0` and broadcasting `wx0`/`wx1` across all 4
+    // lanes of each 128-bit half gives identical bits with 2 instructions instead of 6 scalar inserts.
+    let w = _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(_mm_set1_epi32(wx0)), _mm_set1_epi32(wx1));
     let diff = _mm256_sub_epi32(t1, t0);
     let prod = _mm256_mullo_epi32(diff, w);
     let sum = _mm256_add_epi32(_mm256_add_epi32(_mm256_slli_epi32::<11>(t0), prod), vround);
@@ -199,6 +201,25 @@ unsafe fn vblend_rgb_to_rgba32_avx2(top: &[u8], bot: &[u8], wy: u32, dst: &mut [
     let weights = _mm256_set1_epi32((iwy as u16 as u32 | ((wy16 as u16 as u32) << 16)) as i32);
     let rgb_to_rgb0 = _mm_setr_epi8(0, 1, 2, -1, 3, 4, 5, -1, 6, 7, 8, -1, 9, 10, 11, -1);
     let mut c = 0usize;
+    // 2x unrolled (8 pixels/iter): 16-byte load at `(c + 4) * 3` needs `(c + 4) * 3 + 16 <= cols * 3` => `c + 10 <= cols`.
+    while c + 10 <= cols {
+        // SAFETY: `(c + 4) * 3 + 16 <= top.len()` and `(c + 8) * 4 <= dst.len()`.
+        unsafe {
+            let t0 = _mm_shuffle_epi8(_mm_loadu_si128(tp.add(c * 3) as *const __m128i), rgb_to_rgb0);
+            let b0 = _mm_shuffle_epi8(_mm_loadu_si128(bp.add(c * 3) as *const __m128i), rgb_to_rgb0);
+            let t1 = _mm_shuffle_epi8(_mm_loadu_si128(tp.add(c * 3 + 12) as *const __m128i), rgb_to_rgb0);
+            let b1 = _mm_shuffle_epi8(_mm_loadu_si128(bp.add(c * 3 + 12) as *const __m128i), rgb_to_rgb0);
+            let v01 = _mm256_madd_epi16(_mm256_cvtepu8_epi16(_mm_unpacklo_epi8(t0, b0)), weights);
+            let v23 = _mm256_madd_epi16(_mm256_cvtepu8_epi16(_mm_unpackhi_epi8(t0, b0)), weights);
+            let v45 = _mm256_madd_epi16(_mm256_cvtepu8_epi16(_mm_unpacklo_epi8(t1, b1)), weights);
+            let v67 = _mm256_madd_epi16(_mm256_cvtepu8_epi16(_mm_unpackhi_epi8(t1, b1)), weights);
+            _mm256_storeu_si256(dp.add(c * 4) as *mut __m256i, v01);
+            _mm256_storeu_si256(dp.add(c * 4 + 8) as *mut __m256i, v23);
+            _mm256_storeu_si256(dp.add(c * 4 + 16) as *mut __m256i, v45);
+            _mm256_storeu_si256(dp.add(c * 4 + 24) as *mut __m256i, v67);
+        }
+        c += 8;
+    }
     // 16-byte load at `c * 3` requires `c * 3 + 16 <= cols * 3`, i.e. `c + 6 <= cols`.
     while c + 6 <= cols {
         // SAFETY: `c * 3 + 16 <= top.len()` and `(c + 4) * 4 <= dst.len()`.
@@ -235,6 +256,22 @@ unsafe fn vshift_rgb_to_rgba32_avx2(src: &[u8], dst: &mut [u32], cols: usize) {
     let dp = dst.as_mut_ptr();
     let rgb_to_rgb0 = _mm_setr_epi8(0, 1, 2, -1, 3, 4, 5, -1, 6, 7, 8, -1, 9, 10, 11, -1);
     let mut c = 0usize;
+    while c + 10 <= cols {
+        // SAFETY: `(c + 4) * 3 + 16 <= src.len()` and `(c + 8) * 4 <= dst.len()`.
+        unsafe {
+            let s0 = _mm_shuffle_epi8(_mm_loadu_si128(sp.add(c * 3) as *const __m128i), rgb_to_rgb0);
+            let s1 = _mm_shuffle_epi8(_mm_loadu_si128(sp.add(c * 3 + 12) as *const __m128i), rgb_to_rgb0);
+            let v01 = _mm256_slli_epi32::<11>(_mm256_cvtepu8_epi32(s0));
+            let v23 = _mm256_slli_epi32::<11>(_mm256_cvtepu8_epi32(_mm_srli_si128::<8>(s0)));
+            let v45 = _mm256_slli_epi32::<11>(_mm256_cvtepu8_epi32(s1));
+            let v67 = _mm256_slli_epi32::<11>(_mm256_cvtepu8_epi32(_mm_srli_si128::<8>(s1)));
+            _mm256_storeu_si256(dp.add(c * 4) as *mut __m256i, v01);
+            _mm256_storeu_si256(dp.add(c * 4 + 8) as *mut __m256i, v23);
+            _mm256_storeu_si256(dp.add(c * 4 + 16) as *mut __m256i, v45);
+            _mm256_storeu_si256(dp.add(c * 4 + 24) as *mut __m256i, v67);
+        }
+        c += 8;
+    }
     while c + 6 <= cols {
         // SAFETY: `c * 3 + 16 <= src.len()` and `(c + 4) * 4 <= dst.len()`.
         unsafe {

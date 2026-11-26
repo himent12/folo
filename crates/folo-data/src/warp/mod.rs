@@ -17,7 +17,7 @@ use crate::par::{for_bands, for_rows};
 use crate::simd::bilinear::{
     vblend_rgb_to_rgba32, vshift_rgb_to_rgba32, warp_general_interior_to_rgb, warp_hinterp_interior_to_rgb,
 };
-use crate::simd::hsv_fused::{HsvTables, rgb_row_to_planar_fused, warp_interior_to_planar_fused};
+use crate::simd::hsv::{HsvTables, rgb_row_to_planar_fused, warp_interior_to_planar_fused};
 use crate::simd::{PlanarDst, PlanarRow, assert_image_data, for_planar_bands};
 
 /// A 2x3 affine matrix `[a, b, c, d, e, f]` mapping `(x, y)` to `(a x + b y + c, d x + e y + f)`.
@@ -642,6 +642,32 @@ impl PlaneRowCache {
             self.v.ensure(cols * 4);
         }
         let top_direct = plane.row_ref_direct(iy, lo, n);
+        if wy == 0 {
+            if top_direct.is_none() && self.top_key != Some((iy, lo, n)) {
+                if self.bot_key == Some((iy, lo, n)) {
+                    std::mem::swap(&mut self.top, &mut self.bot);
+                    std::mem::swap(&mut self.top_key, &mut self.bot_key);
+                } else {
+                    let top = self.top.ensure(n);
+                    plane.row(iy, lo, top);
+                    self.top_key = Some((iy, lo, n));
+                }
+            }
+            let top = top_direct.unwrap_or_else(|| &self.top[..n]);
+            vshift_rgb_to_rgba32(top, &mut self.v[..cols * 4]);
+            self.v_key = Some(key);
+            return &self.v[..cols * 4];
+        }
+        let bot_direct = plane.row_ref_direct(iy + 1, lo, n);
+        // Preserve a cached `top` row that is now needed as `bot` (e.g. when `flip_ud` or `e < 0` steps upward)
+        // before overwriting `top`.
+        if bot_direct.is_none()
+            && self.top_key == Some((iy + 1, lo, n))
+            && self.bot_key != Some((iy + 1, lo, n))
+        {
+            std::mem::swap(&mut self.top, &mut self.bot);
+            std::mem::swap(&mut self.top_key, &mut self.bot_key);
+        }
         if top_direct.is_none() && self.top_key != Some((iy, lo, n)) {
             if self.bot_key == Some((iy, lo, n)) {
                 std::mem::swap(&mut self.top, &mut self.bot);
@@ -652,22 +678,10 @@ impl PlaneRowCache {
                 self.top_key = Some((iy, lo, n));
             }
         }
-        if wy == 0 {
-            let top = top_direct.unwrap_or_else(|| &self.top[..n]);
-            vshift_rgb_to_rgba32(top, &mut self.v[..cols * 4]);
-            self.v_key = Some(key);
-            return &self.v[..cols * 4];
-        }
-        let bot_direct = plane.row_ref_direct(iy + 1, lo, n);
         if bot_direct.is_none() && self.bot_key != Some((iy + 1, lo, n)) {
-            if top_direct.is_some() && self.top_key == Some((iy + 1, lo, n)) {
-                std::mem::swap(&mut self.top, &mut self.bot);
-                std::mem::swap(&mut self.top_key, &mut self.bot_key);
-            } else {
-                let bot = self.bot.ensure(n);
-                plane.row(iy + 1, lo, bot);
-                self.bot_key = Some((iy + 1, lo, n));
-            }
+            let bot = self.bot.ensure(n);
+            plane.row(iy + 1, lo, bot);
+            self.bot_key = Some((iy + 1, lo, n));
         }
         let top = top_direct.unwrap_or_else(|| &self.top[..n]);
         let bot = bot_direct.unwrap_or_else(|| &self.bot[..n]);

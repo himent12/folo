@@ -1,6 +1,6 @@
 //! The training transform: mosaic → affine → mixup → HSV → flips, ending at `imgsz x imgsz`.
 
-use super::geometry::{long_side_dims, random_affine_matrix, transform_boxes};
+use super::geometry::{long_side_dims, random_affine_matrix, transform_boxes_in_place};
 use super::hsv::{HsvTables, random_hsv_tables};
 use super::mosaic::{mixup_weight, mosaic_plane};
 use super::{AugmentConfig, flip_lr, flip_ud, mixup, mosaic_affine, random_hsv};
@@ -12,7 +12,7 @@ use crate::image::{Image, Sample};
 use crate::letterbox::{Letterbox, LetterboxOptions, PAD_VALUE, letterbox_sample};
 use crate::ram_cache::Entry as RamEntry;
 use crate::rng::Rng;
-use crate::simd::hsv_fused::rgb_row_to_planar_fused;
+use crate::simd::hsv::rgb_row_to_planar_fused;
 use crate::simd::planar::mixup_blend_u8_into;
 use crate::simd::{PlanarDst, for_planar_bands};
 use crate::warp::{Plane, PlaneTiles, Tile, warp_plane, warp_plane_fused};
@@ -295,33 +295,27 @@ impl TrainTransform {
 
         if self.mosaic && rng.chance(cfg.mosaic) {
             let ids = [index, rng.below(len), rng.below(len), rng.below(len)];
-            let mut parts = Vec::with_capacity(4);
-            let (mut primary, mut orig_size) = (index, [0, 0]);
-            for (k, &i) in ids.iter().enumerate() {
-                let f = fetch(i)?;
-                if k == 0 {
-                    (primary, orig_size) = (f.index(), f.orig_size());
-                }
-                parts.push(f.into_resized_long_side(s));
-            }
-            let (plane, raw_boxes) = mosaic_plane(
+            let p0 = fetch(ids[0])?;
+            let (primary, orig_size) = (p0.index(), p0.orig_size());
+            let parts = [
+                p0.into_resized_long_side(s),
+                fetch(ids[1])?.into_resized_long_side(s),
+                fetch(ids[2])?.into_resized_long_side(s),
+                fetch(ids[3])?.into_resized_long_side(s),
+            ];
+            let (plane, mut boxes) = mosaic_plane(
                 [parts[0].sample(), parts[1].sample(), parts[2].sample(), parts[3].sample()],
                 s,
                 rng,
             );
             let m = random_affine_matrix(plane.width, plane.height, s, s, cfg, rng);
-            let mut boxes = if m.is_identity() && (plane.width, plane.height) == (s, s) {
-                raw_boxes
-            } else {
-                transform_boxes(&raw_boxes, plane.width, plane.height, &m, s, s, &cfg.box_filter())
-            };
+            let is_id = m.is_identity() && (plane.width, plane.height) == (s, s);
+            if !is_id {
+                transform_boxes_in_place(&mut boxes, plane.width, plane.height, &m, s, s, &cfg.box_filter());
+            }
             let letterbox = Letterbox::identity(s, s);
             if self.mosaic && rng.chance(cfg.mixup) {
-                let img = if m.is_identity() && (plane.width, plane.height) == (s, s) {
-                    plane.render()
-                } else {
-                    warp_plane(&plane, &m, s, s)
-                };
+                let img = if is_id { plane.render() } else { warp_plane(&plane, &m, s, s) };
                 for p in parts {
                     p.recycle();
                 }
@@ -345,7 +339,7 @@ impl TrainTransform {
             let orig_size = f.orig_size();
             let out_index = f.index();
             let lb_img = Letterbox::compute(src.image.width, src.image.height, s, s, &opts);
-            let (lb_boxes, letterbox): (Vec<BBox>, _) = if [src.image.width, src.image.height] == orig_size {
+            let (mut boxes, letterbox): (Vec<BBox>, _) = if [src.image.width, src.image.height] == orig_size {
                 (src.boxes.iter().map(|b| lb_img.map_box(b)).collect(), lb_img)
             } else {
                 let orig = Letterbox::compute(orig_size[0], orig_size[1], s, s, &opts);
@@ -367,13 +361,12 @@ impl TrainTransform {
                 Tile { img: tile_img, dst: [left, top, left + rw as i64, top + rh as i64], src: [0, 0] };
             let plane = Plane { width: s, height: s, fill: [PAD_VALUE; 3], tiles: PlaneTiles::single(tile) };
             let m = random_affine_matrix(s, s, s, s, cfg, rng);
-            let mut boxes = if m.is_identity() {
-                lb_boxes
-            } else {
-                transform_boxes(&lb_boxes, s, s, &m, s, s, &cfg.box_filter())
-            };
+            let is_id = m.is_identity();
+            if !is_id {
+                transform_boxes_in_place(&mut boxes, s, s, &m, s, s, &cfg.box_filter());
+            }
             if self.mosaic && rng.chance(cfg.mixup) {
-                let img = if m.is_identity() { plane.render() } else { warp_plane(&plane, &m, s, s) };
+                let img = if is_id { plane.render() } else { warp_plane(&plane, &m, s, s) };
                 if let Some(r) = resized_opt {
                     buffers::recycle(r.data);
                 }
@@ -445,16 +438,15 @@ impl TrainTransform {
         let s = self.imgsz;
         if self.mosaic && rng.chance(cfg.mosaic) {
             let ids = [index, rng.below(len), rng.below(len), rng.below(len)];
-            let mut parts = Vec::with_capacity(4);
-            let (mut primary, mut orig_size) = (index, [0, 0]);
-            for (k, &i) in ids.iter().enumerate() {
-                let f = fetch(i)?;
-                if k == 0 {
-                    (primary, orig_size) = (f.index(), f.orig_size());
-                }
-                // The identity for a pre-resized sample.
-                parts.push(f.into_resized_long_side(s));
-            }
+            let p0 = fetch(ids[0])?;
+            let (primary, orig_size) = (p0.index(), p0.orig_size());
+            // The identity for a pre-resized sample.
+            let parts = [
+                p0.into_resized_long_side(s),
+                fetch(ids[1])?.into_resized_long_side(s),
+                fetch(ids[2])?.into_resized_long_side(s),
+                fetch(ids[3])?.into_resized_long_side(s),
+            ];
             let sample = mosaic_affine(
                 [parts[0].sample(), parts[1].sample(), parts[2].sample(), parts[3].sample()],
                 s,
@@ -472,7 +464,7 @@ impl TrainTransform {
             let orig_size = f.orig_size();
             let out_index = f.index();
             let lb_img = Letterbox::compute(src.image.width, src.image.height, s, s, &opts);
-            let (lb_boxes, letterbox): (Vec<BBox>, _) = if [src.image.width, src.image.height] == orig_size {
+            let (mut boxes, letterbox): (Vec<BBox>, _) = if [src.image.width, src.image.height] == orig_size {
                 (src.boxes.iter().map(|b| lb_img.map_box(b)).collect(), lb_img)
             } else {
                 let orig = Letterbox::compute(orig_size[0], orig_size[1], s, s, &opts);
@@ -494,10 +486,11 @@ impl TrainTransform {
                 Tile { img: tile_img, dst: [left, top, left + rw as i64, top + rh as i64], src: [0, 0] };
             let plane = Plane { width: s, height: s, fill: [PAD_VALUE; 3], tiles: PlaneTiles::single(tile) };
             let m = random_affine_matrix(s, s, s, s, cfg, rng);
-            let (image, boxes) = if m.is_identity() {
-                (plane.render(), lb_boxes)
+            let image = if m.is_identity() {
+                plane.render()
             } else {
-                (warp_plane(&plane, &m, s, s), transform_boxes(&lb_boxes, s, s, &m, s, s, &cfg.box_filter()))
+                transform_boxes_in_place(&mut boxes, s, s, &m, s, s, &cfg.box_filter());
+                warp_plane(&plane, &m, s, s)
             };
             if let Some(r) = resized_opt {
                 buffers::recycle(r.data);
