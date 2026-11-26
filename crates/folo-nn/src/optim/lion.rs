@@ -14,14 +14,14 @@
 //! `beta2 ∈ [0, 1)`, `weight_decay >= 0`); a parameter with no gradient in a step is skipped completely (no
 //! weight decay and no state update), matching [`super::AdamW`] and [`super::Sgd`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use folo_core::{DType, Device, Tensor, no_grad};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    GradSource, ParamGroup, ParamPlan, check_param_sets, cpu_fast, for_each_param_planned, take_state,
-    validate_groups,
+    GradSource, ParamGroup, ParamPlan, check_param_sets, cpu_fast, for_each_param_planned, storage_key,
+    take_state, validate_groups,
 };
 use crate::{Error, Result};
 
@@ -69,6 +69,7 @@ pub struct Lion {
     state: Vec<Vec<Tensor>>,
     plan: ParamPlan,
     coefs: Vec<Coef>,
+    state_keys: HashSet<usize>,
     step: u64,
 }
 
@@ -89,7 +90,8 @@ impl Lion {
         let state = zero_state(&groups)?;
         let plan = ParamPlan::from_groups(&groups);
         let coefs = Vec::with_capacity(groups.len());
-        Ok(Lion { groups, state, plan, coefs, step: 0 })
+        let state_keys = HashSet::with_capacity(groups.iter().map(|g| g.params.len()).sum());
+        Ok(Lion { groups, state, plan, coefs, state_keys, step: 0 })
     }
 
     /// Convenience constructor for a single `"params"` group with explicit Lion hyperparameters.
@@ -126,23 +128,74 @@ impl Lion {
 
     /// Perform one Lion optimization step over every parameter that has a gradient in `grads`.
     ///
-    /// Validates all group hyperparameters and incoming gradient shapes before mutating any parameter or
-    /// momentum buffer.
+    /// Validates all group hyperparameters, parameter/state alignment, and incoming gradient shapes/devices/dtypes
+    /// before mutating any parameter or momentum buffer.
     pub fn step(&mut self, grads: &dyn GradSource) -> Result<()> {
         validate_lion_step_groups(&self.groups)?;
-        for grp in &self.groups {
-            for (name, p) in &grp.params {
-                if let Some(g) = grads.grad(p)
-                    && g.shape() != p.shape()
-                {
+        if self.groups.len() != self.state.len() {
+            return Err(Error::Invalid(format!(
+                "lion: group count {} does not match allocated state {}",
+                self.groups.len(),
+                self.state.len()
+            )));
+        }
+        self.state_keys.clear();
+        for (grp, st) in self.groups.iter().zip(&self.state) {
+            if grp.params.len() != st.len() {
+                return Err(Error::Invalid(format!(
+                    "lion: group `{}` parameter count {} does not match state {}",
+                    grp.name,
+                    grp.params.len(),
+                    st.len()
+                )));
+            }
+            for ((name, p), m) in grp.params.iter().zip(st) {
+                if p.dtype() != DType::F32 {
                     return Err(Error::Invalid(format!(
-                        "lion: gradient of `{name}` is {:?}, parameter is {:?}",
-                        g.dims(),
-                        p.dims()
+                        "lion: parameter `{name}` is {}, expected f32",
+                        p.dtype()
                     )));
+                }
+                if p.shape() != m.shape() || p.device() != m.device() {
+                    return Err(Error::Invalid(format!(
+                        "lion: parameter `{name}` ({:?} on {:?}) does not match state ({:?} on {:?})",
+                        p.dims(),
+                        p.device(),
+                        m.dims(),
+                        m.device()
+                    )));
+                }
+                self.state_keys.insert(storage_key(m));
+                if let Some(g) = grads.grad(p) {
+                    if g.shape() != p.shape() {
+                        return Err(Error::Invalid(format!(
+                            "lion: gradient of `{name}` is {:?}, parameter is {:?}",
+                            g.dims(),
+                            p.dims()
+                        )));
+                    }
+                    if g.device() != p.device() {
+                        return Err(Error::Invalid(format!(
+                            "lion: gradient of `{name}` is on {:?}, parameter is on {:?}",
+                            g.device(),
+                            p.device()
+                        )));
+                    }
+                    if !g.dtype().is_float() {
+                        return Err(Error::Invalid(format!(
+                            "lion: gradient of `{name}` has non-float dtype {}",
+                            g.dtype()
+                        )));
+                    }
                 }
             }
         }
+        // Serialize if any parameter or incoming gradient aliases any allocated momentum buffer so parallel
+        // workers can never deadlock acquiring read/write locks on cross-aliased `exp_avg` buffers.
+        let aliases_state = self.groups.iter().flat_map(|g| &g.params).any(|(_, p)| {
+            self.state_keys.contains(&storage_key(p))
+                || grads.grad(p).is_some_and(|g| self.state_keys.contains(&storage_key(g)))
+        });
         self.plan.sync(&self.groups);
         self.coefs.clear();
         self.coefs.extend(self.groups.iter().map(|g| {
@@ -157,11 +210,21 @@ impl Lion {
             }
         }));
         let (groups, state, plan, coefs) = (&self.groups, &self.state, &self.plan, &self.coefs);
-        for_each_param_planned(plan, groups, grads, |gi, pi| {
-            let (_, p) = &groups[gi].params[pi];
-            let Some(g) = grads.grad(p) else { return Ok(()) };
-            update(p, g, &state[gi][pi], &coefs[gi])
-        })?;
+        if aliases_state {
+            let _g = no_grad();
+            for (gi, grp) in groups.iter().enumerate() {
+                for (pi, (_, p)) in grp.params.iter().enumerate() {
+                    let Some(g) = grads.grad(p) else { continue };
+                    update(p, g, &state[gi][pi], &coefs[gi])?;
+                }
+            }
+        } else {
+            for_each_param_planned(plan, groups, grads, |gi, pi| {
+                let (_, p) = &groups[gi].params[pi];
+                let Some(g) = grads.grad(p) else { return Ok(()) };
+                update(p, g, &state[gi][pi], &coefs[gi])
+            })?;
+        }
         self.step += 1;
         Ok(())
     }
@@ -372,8 +435,8 @@ fn update(p: &Tensor, g: &Tensor, m: &Tensor, c: &Coef) -> Result<()> {
     }
     let mut g_f32 = g.to_dtype(DType::F32)?;
     if p.same_storage(&g_f32) || m.same_storage(&g_f32) {
-        // Snapshot aliased gradient before mutating `p` or `m`.
-        g_f32 = g_f32.add_scalar(0.0)?;
+        // Snapshot aliased gradient before mutating `p` or `m` (preserving `-0.0` sign bits).
+        g_f32 = g_f32.mul_scalar(1.0)?;
     }
     let c_t = m.mul_scalar(c.b1)?.add(&g_f32.mul_scalar(c.one_minus_b1)?)?;
     // Bit-identical to `sign_nan_preserving` on all IEEE-754 f32 values (finite, ±0, ±Inf, NaN) with zero host readbacks.
@@ -381,7 +444,8 @@ fn update(p: &Tensor, g: &Tensor, m: &Tensor, c: &Coef) -> Result<()> {
     let neg = c_t.lt_scalar(0.0)?;
     let s_raw = pos.sub(&neg)?;
     let nonzero = pos.add(&neg)?;
-    let zero_or_nan = c_t.mul_scalar(0.0)?;
+    // Adding `+0.0` canonicalizes `-0.0 * 0.0 = -0.0` to `+0.0` while keeping `NaN + 0.0 = NaN`.
+    let zero_or_nan = c_t.mul_scalar(0.0)?.add_scalar(0.0)?;
     let s = nonzero.where_cond(&s_raw, &zero_or_nan)?;
     if let Some(d) = c.decay {
         p.mul_scalar_assign(d)?;
@@ -612,5 +676,83 @@ mod tests {
             opt_a.exp_avg(0, 0).unwrap().to_vec::<f32>().unwrap(),
             opt_b.exp_avg(0, 0).unwrap().to_vec::<f32>().unwrap()
         );
+    }
+
+    #[test]
+    fn lion_signed_zero_cross_alias_and_preflight_safety() {
+        // 1. Signed-zero (-0.0) bitwise parity between CPU fast path and non-contiguous generic path.
+        let fast = Tensor::from_slice(&[-0.0f32, -0.0, 0.0, -0.0], [2, 2]).unwrap().requires_grad_();
+        let slow_base = Tensor::zeros([2, 2]);
+        let slow_t = slow_base.t().unwrap();
+        {
+            let _g = no_grad();
+            slow_t.copy_from(&fast.detach()).unwrap();
+        }
+        let slow = slow_t.requires_grad_();
+        assert!(!slow.is_contiguous());
+        let mut opt_f = Lion::from_params(vec![("w".into(), fast.clone())], 0.1, 0.9, 0.99, 0.0).unwrap();
+        let mut opt_s = Lion::from_params(vec![("w".into(), slow.clone())], 0.1, 0.9, 0.99, 0.0).unwrap();
+        let neg_zero_state = HashMap::from([(
+            "w.exp_avg".to_string(),
+            Tensor::from_slice(&[-0.0f32, -0.0, -0.0, 0.0], [2, 2]).unwrap(),
+        )]);
+        opt_f.load_state(1, &neg_zero_state).unwrap();
+        opt_s.load_state(1, &neg_zero_state).unwrap();
+        let gz = [-0.0f32, -0.0, -0.0, -0.0];
+        opt_f.step(&grads_of(&fast, &gz)).unwrap();
+        opt_s.step(&grads_of(&slow, &gz)).unwrap();
+        let fv = fast.to_vec::<f32>().unwrap();
+        let sv = slow.to_vec::<f32>().unwrap();
+        assert_eq!(fv[0].to_bits(), (-0.0f32).to_bits());
+        for (a, b) in fv.iter().zip(&sv) {
+            assert_eq!(a.to_bits(), b.to_bits(), "signed-zero parity mismatch: {a:?} vs {b:?}");
+        }
+
+        // 2. Cross-aliased exp_avg gradients above PAR_THRESHOLD must serialize cleanly (no deadlock).
+        let n = 40_000usize; // 2 * 40,000 = 80,000 >= PAR_THRESHOLD (65,536)
+        let p0 = Tensor::full([n], 1.0f32).requires_grad_();
+        let p1 = Tensor::full([n], -1.0f32).requires_grad_();
+        let mut opt_alias = Lion::from_params(
+            vec![("p0".into(), p0.clone()), ("p1".into(), p1.clone())],
+            0.1,
+            0.9,
+            0.99,
+            0.0,
+        )
+        .unwrap();
+        let init_state = HashMap::from([
+            ("p0.exp_avg".to_string(), Tensor::full([n], 0.5f32)),
+            ("p1.exp_avg".to_string(), Tensor::full([n], -0.25f32)),
+        ]);
+        opt_alias.load_state(1, &init_state).unwrap();
+        let mut cross_grads = Grads::default();
+        cross_grads.insert(&p0, opt_alias.exp_avg(0, 1).unwrap().clone());
+        cross_grads.insert(&p1, opt_alias.exp_avg(0, 0).unwrap().clone());
+        opt_alias.step(&cross_grads).unwrap();
+        // Serial order: p0 sees m0=0.5, g0=m1=-0.25 -> c0 = 0.425 > 0 -> p0 = 0.9, m0' = 0.4925;
+        // then p1 sees m1=-0.25, g1=m0'=0.4925 -> c1 = -0.225 + 0.04925 < 0 -> p1 = -0.9.
+        assert!((p0.to_vec::<f32>().unwrap()[0] - 0.9).abs() < 1e-6);
+        assert!((p1.to_vec::<f32>().unwrap()[0] - (-0.9)).abs() < 1e-6);
+
+        // 3. Atomic preflight: bad second gradient (non-float I64) leaves first parameter & step untouched.
+        let pa = Tensor::from_slice(&[2.0f32, 3.0], [2]).unwrap().requires_grad_();
+        let pb = Tensor::from_slice(&[4.0f32, 5.0], [2]).unwrap().requires_grad_();
+        let mut opt_pre =
+            Lion::from_params(vec![("a".into(), pa.clone()), ("b".into(), pb.clone())], 0.1, 0.9, 0.99, 0.1)
+                .unwrap();
+        let mut bad_grads = Grads::default();
+        bad_grads.insert(&pa, Tensor::from_slice(&[1.0f32, -1.0], [2]).unwrap());
+        bad_grads.insert(&pb, Tensor::zeros_with([2], DType::I64, Device::Cpu).unwrap());
+        assert!(opt_pre.step(&bad_grads).is_err());
+        assert_eq!(pa.to_vec::<f32>().unwrap(), [2.0, 3.0]);
+        assert_eq!(opt_pre.exp_avg(0, 0).unwrap().to_vec::<f32>().unwrap(), [0.0, 0.0]);
+        assert_eq!(opt_pre.step_count(), 0);
+
+        // 4. Structural mutation via groups_mut() is rejected cleanly instead of panicking on state indexing.
+        opt_pre.groups_mut()[0].params.push(("extra".into(), Tensor::zeros([2]).requires_grad_()));
+        assert!(opt_pre.step(&Grads::default()).is_err());
+        opt_pre.groups_mut()[0].params.pop();
+        opt_pre.groups_mut()[0].params[0].1 = Tensor::zeros([3]).requires_grad_();
+        assert!(opt_pre.step(&Grads::default()).is_err());
     }
 }

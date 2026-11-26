@@ -266,6 +266,19 @@ fn lion_drop_path_and_layer_scale_gpu_match_cpu() {
     close(&p_g, &p_c, 1e-6, 1e-6, "lion gpu param parity");
     close(opt_g.exp_avg(0, 0).unwrap(), opt_c.exp_avg(0, 0).unwrap(), 1e-6, 1e-6, "lion gpu exp_avg parity");
 
+    // Atomic wrong-device gradient preflight on GPU: second param's CPU grad leaves first param untouched.
+    let p0_before = p_g.to_vec::<f32>().unwrap();
+    let p1_g = Tensor::ones([4, 8]).to_device(dev).unwrap().detach().requires_grad_();
+    let mut opt_pre =
+        Lion::from_params(vec![("a".into(), p_g.clone()), ("b".into(), p1_g.clone())], 0.1, 0.9, 0.99, 0.1)
+            .unwrap();
+    let mut bad_dev = folo_core::Grads::default();
+    bad_dev.insert(&p_g, Tensor::ones([4, 8]).to_device(dev).unwrap());
+    bad_dev.insert(&p1_g, Tensor::ones([4, 8])); // wrong device (CPU)
+    assert!(opt_pre.step(&bad_dev).is_err());
+    assert_eq!(p_g.to_vec::<f32>().unwrap(), p0_before);
+    assert_eq!(opt_pre.step_count(), 0);
+
     // 2. DropPath and LayerScale forward + backward GPU vs CPU parity.
     let x_c = Tensor::randn([6, 4, 3, 3], 0.0, 1.0, &mut rng).requires_grad_();
     let x_g = x_c.to_device(dev).unwrap().detach().requires_grad_();

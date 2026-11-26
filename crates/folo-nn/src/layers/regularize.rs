@@ -107,10 +107,12 @@ impl Forward for DropPath {
         };
         let mut mask_shape = vec![1usize; dims.len()];
         mask_shape[0] = batch;
-        let mut mask = Tensor::from_vec(mask_vals, mask_shape)?.to_device(x.device())?;
-        if mask.dtype() != x.dtype() {
-            mask = mask.to_dtype(x.dtype())?;
+        let mask = Tensor::from_vec(mask_vals, mask_shape)?.to_device(x.device())?;
+        if x.dtype() == DType::F16 && inv_keep > 65_504.0 {
+            // Avoid casting an inv_keep > F16::MAX to +Inf before multiplying (which would turn kept 0.0 into NaN).
+            return Ok(x.to_dtype(DType::F32)?.mul(&mask)?.to_dtype(DType::F16)?);
         }
+        let mask = if mask.dtype() != x.dtype() { mask.to_dtype(x.dtype())? } else { mask };
         Ok(x.mul(&mask)?)
     }
 }
@@ -234,15 +236,15 @@ impl Forward for LayerScale {
                 s
             }
         };
-        let gamma = if self.gamma.dtype() == DType::F32
+        let scale = self.gamma.reshape(scale_shape)?;
+        if self.gamma.dtype() == DType::F32
             && x.dtype() == DType::F16
             && folo_core::autocast_dtype() == Some(DType::F16)
         {
-            self.gamma.to_dtype(DType::F16)?
-        } else {
-            self.gamma.clone()
-        };
-        let scale = gamma.reshape(scale_shape)?;
+            // Multiply in F32 under F16 autocast so broadcast-sum gradients into the F32 master `gamma`
+            // accumulate in F32 without overflowing F16::MAX on large spatial planes.
+            return Ok(x.to_dtype(DType::F32)?.mul(&scale)?.to_dtype(DType::F16)?);
+        }
         Ok(x.mul(&scale)?)
     }
 }
@@ -389,5 +391,58 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn drop_path_and_layer_scale_f16_edge_cases() {
+        // 1. DropPath with inv_keep > F16::MAX (65504): kept 0.0 must stay 0.0 (never NaN) and small kept values stay finite.
+        let x_f16 =
+            Tensor::from_slice(&[0.0f32, 1e-4, 0.0, 1e-4], [2, 2]).unwrap().to_dtype(DType::F16).unwrap();
+        let dp = DropPath::try_new(0.99999, 1).unwrap();
+        let mut saw_kept = false;
+        for seed in 0..200_000u64 {
+            dp.reseed(seed);
+            let mut probe = Rng::seed(seed);
+            let k0 = probe.bernoulli(1.0 - 0.99999f64);
+            let k1 = probe.bernoulli(1.0 - 0.99999f64);
+            if k0 || k1 {
+                let y = dp.forward(&x_f16).unwrap();
+                assert_eq!(y.dtype(), DType::F16);
+                let vals = y.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap();
+                assert!(
+                    vals.iter().all(|v| v.is_finite()),
+                    "unexpected non-finite F16 DropPath output: {vals:?}"
+                );
+                if k0 {
+                    assert_eq!(vals[0], 0.0, "kept 0.0 must not become NaN");
+                    assert!((vals[1] - 10.0).abs() < 0.2, "kept 1e-4 * 1e5 ~= 10, got {}", vals[1]);
+                }
+                if k1 {
+                    assert_eq!(vals[2], 0.0, "kept 0.0 must not become NaN");
+                    assert!((vals[3] - 10.0).abs() < 0.2, "kept 1e-4 * 1e5 ~= 10, got {}", vals[3]);
+                }
+                saw_kept = true;
+                break;
+            }
+        }
+        assert!(saw_kept, "expected to find a seed that keeps at least one sample");
+
+        // 2. LayerScale with F32 master gamma under F16 autocast must keep dL/dgamma finite above F16::MAX (65504).
+        let ls = LayerScale::new(1, 1.0).unwrap();
+        let x = Tensor::ones([1, 1, 256, 256]).to_dtype(DType::F16).unwrap().requires_grad_();
+        let (y_dtype, dgamma) = {
+            let _ac = folo_core::autocast();
+            let y = ls.forward(&x).unwrap();
+            let dt = y.dtype();
+            let loss = y.to_dtype(DType::F32).unwrap().sum_all().unwrap();
+            let grads = loss.backward().unwrap();
+            let dg = grads.get(&ls.gamma).unwrap().item::<f32>().unwrap();
+            (dt, dg)
+        };
+        assert_eq!(y_dtype, DType::F16);
+        assert!(
+            dgamma.is_finite() && (dgamma - 65_536.0).abs() < 1.0,
+            "expected finite 65536.0, got {dgamma}"
+        );
     }
 }
