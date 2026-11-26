@@ -1,6 +1,5 @@
 //! Copies, casts and elementwise kernels.
 
-mod activations;
 mod cat;
 mod inplace_simd;
 mod simd;
@@ -29,10 +28,6 @@ use crate::backend::{BinaryOp, UnaryOp};
 use crate::cpu::{par_chunks, par_for};
 use crate::layout::RowPlan;
 
-pub use activations::{
-    gelu, gelu_backward, gelu_backward_slice, gelu_slice, silu_backward_slice, swiglu, swiglu_backward,
-    swiglu_backward_slice, swiglu_slice,
-};
 pub(crate) use cat::cat_contiguous_slices;
 pub(crate) use inplace_simd::{InplaceOp, binary_inplace, mul_scalar_inplace};
 

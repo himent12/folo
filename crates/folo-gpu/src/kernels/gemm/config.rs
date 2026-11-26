@@ -17,48 +17,6 @@ pub enum GemmBias {
     Col,
 }
 
-/// How an optional residual tensor is fused into a GEMM / conv epilogue.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ResidualMode {
-    /// No residual tensor is read.
-    #[default]
-    None,
-    /// `C = act(alpha * A * B + bias + beta * residual)`.
-    PreAct,
-    /// `C = act(alpha * A * B + bias) + beta * residual`.
-    PostAct,
-}
-
-impl ResidualMode {
-    pub(crate) fn code(self) -> u32 {
-        match self {
-            ResidualMode::None => 0,
-            ResidualMode::PreAct => 1,
-            ResidualMode::PostAct => 2,
-        }
-    }
-}
-
-/// Layout and scale for an optional residual matrix fused into the GEMM epilogue (`M × N`, row-major).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ResidualDesc {
-    /// Scale applied to the residual operand.
-    pub beta: f32,
-    /// Whether the residual is added before or after the activation.
-    pub mode: ResidualMode,
-    /// Leading dimension (row stride in elements) of the residual matrix (`>= N`).
-    pub ldr: usize,
-    /// Batch addressing of the residual matrix.
-    pub strides: BatchStrides,
-}
-
-impl ResidualDesc {
-    /// A packed contiguous `[batch, m, n]` residual with scale `beta` and epilogue position `mode`.
-    pub fn packed(m: usize, n: usize, beta: f32, mode: ResidualMode) -> Self {
-        Self { beta, mode, ldr: n, strides: BatchStrides::packed(m.saturating_mul(n)) }
-    }
-}
-
 /// Element offset plus strides for a two-level batch index `(b1, b2)`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BatchStrides {
