@@ -117,7 +117,7 @@ fn sigmoid_bwd4(x: v128, g: v128) -> v128 {
 
 /// `g * silu'(x)` on four lanes, bitwise identical to `silu_bwd_scalar(x, g)`.
 #[inline(always)]
-fn silu_bwd4(x: v128, g: v128) -> v128 {
+pub(super) fn silu_bwd4(x: v128, g: v128) -> v128 {
     let e = exp_neg_abs4(x);
     let rec = recip_1_plus4(e);
     let zero = f32x4_splat(0.0);
@@ -168,7 +168,7 @@ pub(crate) fn ln4(x: v128) -> v128 {
 
 /// `tanh(x)` on four lanes, division-free and bitwise identical to `tanh_scalar`.
 #[inline(always)]
-fn tanh4(x: v128) -> v128 {
+pub(super) fn tanh4(x: v128) -> v128 {
     let sign_bit = f32x4_splat(-0.0);
     let ax = f32x4_abs(x);
     let sign = v128_and(sign_bit, x);
@@ -190,7 +190,7 @@ fn tanh4(x: v128) -> v128 {
 
 /// `g * sech^2(x)` on four lanes, bitwise identical to `g * tanh_deriv_scalar(x)`.
 #[inline(always)]
-fn tanh_bwd4(x: v128, g: v128) -> v128 {
+pub(super) fn tanh_bwd4(x: v128, g: v128) -> v128 {
     let ax = f32x4_abs(x);
     let t = f32x4_pmax(f32x4_splat(-104.0), f32x4_mul(f32x4_splat(-2.0), ax));
     let e = exp_clamped4(t);

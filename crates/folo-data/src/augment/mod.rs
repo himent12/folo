@@ -6,27 +6,40 @@
 //!
 //! - `geometry.rs`: random affine, flips, [`resize_long_side`] and the box transform ([`transform_boxes`],
 //!   [`BoxFilter`]).
+//! - `blur.rs`: separable [`box_blur`], [`gaussian_blur`], and [`random_blur`].
+//! - `grid_mask.rs`: box-aware [`grid_mask`] and [`random_grid_mask`].
+//! - `perspective.rs`: 3×3 [`Homography`], [`warp_perspective`], [`transform_boxes_perspective`], and
+//!   [`random_perspective`].
 //! - `hsv.rs`: HSV colour jitter ([`random_hsv`], [`apply_hsv`]). `mosaic.rs`: [`mosaic4`], [`mosaic_affine`] and
 //!   [`mixup`].
 //! - `occlusion.rs`: box-aware [`cutmix`], [`copy_paste`], and [`random_erasing`].
 //! - `pipeline.rs`: [`TrainTransform`], the training transform.
 //! - This file: [`AugmentConfig`], the parameters (`TrainConfig.augment` in docs/API.md).
 
+mod blur;
 mod geometry;
+mod grid_mask;
 mod hsv;
 mod mosaic;
 mod occlusion;
+mod perspective;
 mod pipeline;
 
+pub use blur::{BlurConfig, BlurKind, box_blur, gaussian_blur, random_blur};
 pub use geometry::{
     BoxFilter, affine_sample, flip_lr, flip_ud, random_affine, random_affine_matrix, resize_long_side,
     transform_boxes,
 };
+pub use grid_mask::{GridMaskConfig, grid_mask, random_grid_mask};
 pub use hsv::{apply_hsv, random_hsv};
 pub use mosaic::{mixup, mosaic_affine, mosaic4};
 pub use occlusion::{
     CopyPasteConfig, ErasingFill, RandomErasingConfig, copy_paste, cutmix, cutmix_rect, erase_rect,
     random_erasing,
+};
+pub use perspective::{
+    Homography, PerspectiveConfig, perspective_sample, random_perspective, random_perspective_homography,
+    transform_boxes_perspective, warp_perspective,
 };
 pub use pipeline::{Fetched, TrainTransform, Transformed};
 pub(crate) use pipeline::{FetchedSample, ProducedMeta};

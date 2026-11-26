@@ -43,7 +43,10 @@ mod softmax;
 #[cfg(test)]
 mod winograd_tests;
 
-pub use elementwise::{SILU_MAX_REL_ERR, fast_exp, silu, silu_backward};
+pub use elementwise::{
+    SILU_MAX_REL_ERR, fast_exp, gelu, gelu_backward, gelu_backward_slice, gelu_slice, silu, silu_backward,
+    silu_backward_slice, swiglu, swiglu_backward, swiglu_backward_slice, swiglu_slice,
+};
 pub(crate) use pool_alloc::{alloc_filled, alloc_uninit, alloc_zeroed, recycle};
 pub use pool_alloc::{buffer_cache_bytes, clear_buffer_cache, poison_uninit, set_buffer_cache_limit};
 
