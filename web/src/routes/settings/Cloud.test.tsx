@@ -207,13 +207,30 @@ describe('Settings › Cloud', () => {
     expect(text(row)).toContain('stops by');
     button(row, 'Terminate')!.click();
     const d = await until(() => dialog(), 'the dialog');
-    // What happens to the run is said before it does.
-    expect(text(d.querySelector('header p'))).toContain('fasteners-l');
+    // What happens to the run is said before it does, without falsely claiming immediate shutdown.
+    const desc = text(d.querySelector('header p'));
+    expect(desc).toContain('fasteners-l');
+    expect(desc).toContain('Billing continues until RunPod confirms it is stopped');
+    expect(desc).not.toContain('is shut down now');
     await until(() => document.activeElement?.hasAttribute('data-safe'), 'the safe button focused');
     button(d.querySelector('footer')!, 'Terminate')!.click();
     await until(() => toast.items.length, 'the toast');
     expect(toast.items[0]).toMatchObject({ tone: 'info', title: 'Terminating the RTX 4090' });
     await until(() => text(target.querySelector('table.inst tbody tr .st')) === 'Terminating', 'the new state');
+  });
+
+  it('frames Terminate on an already-terminating instance as a retry where billing may continue', async () => {
+    open(new MockApi('cloud-trouble', 0));
+    const row = await until(() => target.querySelector('table.inst tbody tr'), 'the unconfirmed instance');
+    expect(text(row.querySelector('.st'))).toBe('Terminating');
+    button(row, 'Terminate')!.click();
+    const d = await until(() => dialog(), 'the retry terminate dialog');
+    expect(text(d.querySelector('header h2'))).toBe('Retry termination?');
+    const desc = text(d.querySelector('header p'));
+    expect(desc).toContain('asks RunPod again to terminate the RTX 4090');
+    expect(desc).toContain('Billing may continue until RunPod confirms it is stopped');
+    expect(desc).not.toContain('is shut down now');
+    expect(button(d.querySelector('footer')!, 'Cancel')).toBeDefined();
   });
 
   // s6-shell review (round 1): providers of the wrong shape left "No cloud connected" with a disabled Connect and no word.

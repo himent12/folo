@@ -109,8 +109,28 @@ class Toasts {
   }
   #id = 0;
   #timers = new Map<number, ReturnType<typeof setTimeout>>();
+  /** Remaining auto-dismiss time per toast id (ms) so hover/focus pauses instead of truncating fresh toasts. */
+  #remaining = new Map<number, number>();
+  /** Timestamp (`Date.now()`) when the toast's active timer started. */
+  #startedAt = new Map<number, number>();
   /** While the pointer or focus is in the stack: no timers run and nothing is evicted (a held toast stays put). */
   #held = false;
+
+  #startTimer(id: number, ms: number) {
+    clearTimeout(this.#timers.get(id));
+    this.#startedAt.set(id, Date.now());
+    this.#timers.set(
+      id,
+      setTimeout(() => this.dismiss(id), ms),
+    );
+  }
+
+  #dropState(id: number) {
+    clearTimeout(this.#timers.get(id));
+    this.#timers.delete(id);
+    this.#remaining.delete(id);
+    this.#startedAt.delete(id);
+  }
 
   show(t: Omit<Toast, 'id' | 'timeout'> & { timeout?: number }): number {
     const id = ++this.#id;
@@ -118,8 +138,14 @@ class Toasts {
     const toast: Toast = { timeout, ...t, id };
     // The toast it replaces: the last report of the same action, or one saying the very same thing.
     for (const old of this.items) if ((t.key !== undefined && old.key === t.key) || same(t, old)) this.dismiss(old.id);
+    if (!this.#held && this.items.length >= 4) {
+      for (const evicted of this.items.slice(0, this.items.length - 3)) this.#dropState(evicted.id);
+    }
     this.items = this.#held ? [...this.items, toast] : [...this.items.slice(-3), toast];
-    if (toast.timeout > 0 && !this.#held) this.#timers.set(id, setTimeout(() => this.dismiss(id), toast.timeout));
+    if (toast.timeout > 0) {
+      this.#remaining.set(id, toast.timeout);
+      if (!this.#held) this.#startTimer(id, toast.timeout);
+    }
     return id;
   }
 
@@ -142,8 +168,7 @@ class Toasts {
   }
 
   dismiss(id: number) {
-    clearTimeout(this.#timers.get(id));
-    this.#timers.delete(id);
+    this.#dropState(id);
     this.items = this.items.filter((t) => t.id !== id);
   }
 
@@ -152,11 +177,30 @@ class Toasts {
     if (on === this.#held) return;
     this.#held = on;
     if (on) {
+      const now = Date.now();
+      for (const t of this.items) {
+        if (t.timeout <= 0) continue;
+        const started = this.#startedAt.get(t.id);
+        const prev = this.#remaining.get(t.id) ?? t.timeout;
+        const left = started !== undefined ? Math.max(0, prev - Math.max(0, now - started)) : prev;
+        this.#remaining.set(t.id, left);
+        this.#startedAt.delete(t.id);
+      }
       for (const t of this.#timers.values()) clearTimeout(t);
       this.#timers.clear();
     } else {
-      this.items = this.items.slice(-4);
-      for (const t of this.items) if (t.timeout > 0) this.#timers.set(t.id, setTimeout(() => this.dismiss(t.id), 2500));
+      const kept = this.items.slice(-4);
+      const keptIds = new Set(kept.map((t) => t.id));
+      for (const t of this.items) if (!keptIds.has(t.id)) this.#dropState(t.id);
+      this.items = kept;
+      for (const t of this.items) {
+        if (t.timeout <= 0) continue;
+        const left = this.#remaining.get(t.id) ?? t.timeout;
+        const floor = Math.min(t.timeout, 2500);
+        const delay = Math.max(floor, left);
+        this.#remaining.set(t.id, delay);
+        this.#startTimer(t.id, delay);
+      }
     }
   }
 }

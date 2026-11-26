@@ -182,11 +182,19 @@ export default function Cloud() {
     leaveStatus.clear();
     endStatus.clear();
   });
+  const activeRunName = (id: string | null) => {
+    const r = id ? runs.data?.find((x) => x.id === id) : undefined;
+    return r && (r.status === 'running' || r.status === 'queued' || r.status === 'stopping') ? r.name : undefined;
+  };
   const endText = computed(() => {
     const i = ending.get();
     if (!i) return '';
-    const run = runName(i.run_id);
-    const own = `The ${i.offer.gpu} at ${provName(i.provider)} is shut down now.`;
+    const run = activeRunName(i.run_id);
+    const prov = provName(i.provider);
+    const own =
+      i.status === 'terminating'
+        ? `FOLO asks ${prov} again to terminate the ${i.offer.gpu}. Billing may continue until ${prov} confirms it is stopped.`
+        : `FOLO asks ${prov} to terminate the ${i.offer.gpu}. Billing continues until ${prov} confirms it is stopped.`;
     return run ? `${own} Its run ${run} fails; the checkpoints already copied to this machine stay.` : own;
   });
   function askTerminate(i: CloudInstance) {
@@ -210,7 +218,8 @@ export default function Cloud() {
       const next = await hub.api.terminateCloudInstance(i.id);
       if (!alive || gen !== serverGen || isConnecting() || hub.epoch !== epoch) return;
       if (seq === endSeq) endOpen.set(false);
-      toast.info(next.status === 'terminated' ? `Terminated the ${i.offer.gpu}` : `Terminating the ${i.offer.gpu}`, runName(i.run_id) ? `${runName(i.run_id)} fails; its copied checkpoints stay.` : undefined);
+      const run = activeRunName(i.run_id);
+      toast.info(next.status === 'terminated' ? `Terminated the ${i.offer.gpu}` : `Terminating the ${i.offer.gpu}`, run ? `${run} fails; its copied checkpoints stay.` : undefined);
       instances.set((instances.data ?? []).map((x) => (x.id === next.id ? next : x)));
       void runs.refresh();
     } catch (e) {
@@ -517,14 +526,14 @@ export default function Cloud() {
 
       <Dialog
         bind:open={endOpen}
-        title="Terminate this instance?"
+        title={ending.get()?.status === 'terminating' ? 'Retry termination?' : 'Terminate this instance?'}
         description={endText.get()}
         size="sm"
         status={endStatus}
         footer={() => (
           <>
             <Button data-safe onclick={() => endOpen.set(false)}>
-              Keep it running
+              {ending.get()?.status === 'terminating' ? 'Cancel' : 'Keep it running'}
             </Button>
             <Button variant="destructive" icon={Power} loading={endBusy.get()} disabled={reconnecting.get()} onclick={terminate}>
               Terminate

@@ -447,8 +447,9 @@ export function runNewState() {
    * its memory, so nothing can be checked); null on the CPU, where GPU memory does not apply.
    */
   const vramFit = computed(() => (!memShown.get() ? null : !gpuMem.get() ? ('unknown' as const) : noFit.get() ? ('no' as const) : ('fits' as const)));
+  const estHigh = computed(() => (estReady.get() ? shown.get().hi : null));
   // The time limit follows the estimate's high end until it is set by hand.
-  effect(() => cloudPick.follow(estReady.get() ? shown.get().hi : null));
+  effect(() => cloudPick.follow(estHigh.get()));
   const cloudCost = computed(() => cloudCostOf(onCloud.get(), cloudPick, served.get(), shown.get()));
 
   // Settings forecast not to fit: the one primary becomes the change that fits ("Use batch 8"), chosen by lib/oom's

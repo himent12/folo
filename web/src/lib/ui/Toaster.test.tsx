@@ -200,4 +200,45 @@ describe('Toast timing and announcement', () => {
     expect(document.querySelector('.toaster ol')?.hasAttribute('aria-live')).toBe(false);
     expect([...document.querySelectorAll('.toast')].map((t) => t.getAttribute('role'))).toEqual(['status', 'alert']);
   });
+
+  it('pauses and resumes remaining time on hover instead of cutting a fresh error toast to 2.5 s', async () => {
+    vi.useFakeTimers();
+    setup();
+    await Promise.resolve();
+    const id = toast.error(new Error('boom'), 'Run failed');
+    flushSync();
+    const section = document.querySelector<HTMLElement>('.toaster')!;
+    // 100 ms elapse, user hovers for 400 ms, then leaves.
+    vi.advanceTimersByTime(100);
+    section.dispatchEvent(new PointerEvent('pointerenter', { bubbles: false }));
+    vi.advanceTimersByTime(400);
+    section.dispatchEvent(new PointerEvent('pointerleave', { bubbles: false }));
+
+    // After 2.5 s (and even 15 s) the fresh 20 s error toast must still be visible.
+    vi.advanceTimersByTime(15_000);
+    expect(toast.items.some((t) => t.id === id)).toBe(true);
+
+    // Dismisses once the remaining ~19.9 s elapse.
+    vi.advanceTimersByTime(4900);
+    expect(toast.items.some((t) => t.id === id)).toBe(false);
+  });
+
+  it('keeps at least a 2.5 s reading grace window when unhovering a nearly-expired toast', async () => {
+    vi.useFakeTimers();
+    setup();
+    await Promise.resolve();
+    const id = toast.info('Saved');
+    flushSync();
+    const section = document.querySelector<HTMLElement>('.toaster')!;
+    // 5.5 s of 6 s elapse, then hover and leave.
+    vi.advanceTimersByTime(5500);
+    section.dispatchEvent(new PointerEvent('pointerenter', { bubbles: false }));
+    vi.advanceTimersByTime(500);
+    section.dispatchEvent(new PointerEvent('pointerleave', { bubbles: false }));
+
+    vi.advanceTimersByTime(2000);
+    expect(toast.items.some((t) => t.id === id)).toBe(true);
+    vi.advanceTimersByTime(600);
+    expect(toast.items.some((t) => t.id === id)).toBe(false);
+  });
 });
