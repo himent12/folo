@@ -43,6 +43,7 @@ pub mod detect_sites;
 pub mod distill;
 pub mod elementwise;
 pub mod ew;
+pub mod fused_act;
 pub mod gemm;
 pub mod gemm_cat;
 pub mod group_norm;
@@ -54,6 +55,7 @@ pub mod optim;
 pub mod pool_grad;
 pub mod pooling;
 pub mod reduce;
+pub mod residual_norm;
 pub mod softmax_bwd;
 pub mod strided;
 pub mod vision;
@@ -90,6 +92,7 @@ pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
         distill::DEFS,
         elementwise::DEFS,
         ew::DEFS,
+        fused_act::DEFS,
         gemm::DEFS,
         group_norm::DEFS,
         layer_norm::DEFS,
@@ -100,6 +103,7 @@ pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
         pool_grad::DEFS,
         pooling::DEFS,
         reduce::DEFS,
+        residual_norm::DEFS,
         softmax_bwd::DEFS,
         strided::DEFS,
         vision::DEFS,

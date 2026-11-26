@@ -1,19 +1,22 @@
-//! Tiled fused Scaled Dot-Product Attention (`O = softmax(scale * Q @ K^T [+ causal]) @ V`) in WGSL.
+//! Tiled fused Scaled Dot-Product Attention forward and backward (`O = softmax(scale * Q @ K^T [+ mask] [+ causal]) @ V`)
+//! in WGSL without materializing the `[B, Sq, Sk]` attention matrix in global memory.
 //!
-//! Computes attention in a single dispatch without materializing the `[B, Sq, Sk]` attention matrix in global
-//! memory (FlashAttention-style online Milakov-Gimelshein softmax):
-//! - Workgroup size: 1D `256` threads = `8` rows of `32` lanes (`ty = sgid`, `tx = lane` on 32-wide subgroup
-//!   adapters, guaranteeing every row maps cleanly onto one hardware subgroup without relying on 2D workgroup
-//!   swizzle order; `ty = lid >> 5`, `tx = lid & 31` on the portable shared-memory fallback).
-//! - Each workgroup computes `BR = 16` query rows (2 rows per 32-lane row group) and up to `128` output
-//!   head-dim columns (`D_CHUNKS` in `1..=4` register slots per row), tiling keys/values in `BC = 32` blocks
-//!   with `33`-padded shared memory (`<= 11.5 KB`, zero bank conflicts, safe under WebGPU's 16 KB limit).
-//! - For `D <= 64`, `Q` is loaded into shared memory once before the KV loop (`CACHE_Q = true`); larger `D`
-//!   streams `Q` in 32-wide chunks across arbitrary `D` (including `D > 128` via `d_tiles`).
-//! - When `CAUSAL` is true, KV tiles strictly past the workgroup's maximum query row are skipped (uniform
-//!   early exit) and masked positions are isolated from future `NaN`/`Inf` values in `V`.
+//! - **Forward** (`sdpa_forward`, `sdpa_forward_masked`): FlashAttention-style online Milakov-Gimelshein softmax.
+//!   Workgroup size is 1D `256` threads = `8` rows of `32` lanes (`ty = sgid`, `tx = lane` on 32-wide subgroup
+//!   adapters; `ty = lid >> 5`, `tx = lid & 31` on the portable fallback). Each workgroup computes `BR = 16` query
+//!   rows (2 rows per 32-lane row group) and up to `128` output head-dim columns (`D_CHUNKS` in `1..=4`), tiling
+//!   keys/values in `BC = 32` blocks with `33`-padded shared memory (`<= 14.5 KB`, WebGPU-safe). Supports optional
+//!   additive `f32` masks (`[b, sq, sk]` or broadcast `[1, sq, sk]`), causal masking with uniform tile early-exit
+//!   and NaN/Inf isolation, optional `lse [b, sq]` output for training, and `F32` / `F16` storage.
+//! - **Backward** (`sdpa_backward`, in [`backward`]): FlashAttention-2 style 3-kernel tiled backward (`sdpa_bwd_delta`,
+//!   `sdpa_bwd_dkdv`, `sdpa_bwd_dq`) with zero atomics and zero `[B, Sq, Sk]` global memory, matching forward
+//!   causal + additive mask semantics, non-multiple tile sizes, and numerical stability guards.
+
+pub mod backward;
 
 use std::fmt::Write as _;
+
+pub use backward::sdpa_backward;
 
 use super::{check_buf, prod, use_subgroups};
 use crate::DType;
@@ -22,83 +25,96 @@ use crate::error::{GpuError, Result, shape_err};
 use crate::kernels::gemm::check_dtype;
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 
-/// Query rows per workgroup.
-const BR: usize = 16;
+/// Query rows per workgroup in forward and `dQ` backward.
+pub(crate) const BR: usize = 16;
 /// Max output head-dim columns per workgroup (`4 * 32`).
-const BD_TILE: usize = 128;
+pub(crate) const BD_TILE: usize = 128;
 /// Max head dim where `Q` stays resident in shared memory across all KV tiles.
-const CACHE_Q_MAX_D: usize = 64;
+pub(crate) const CACHE_Q_MAX_D: usize = 64;
 
-/// Bounds check for precompiling `"sdpa_fwd"` from a kernel list (`kernels/bounds.rs`).
+/// Optional additive `f32` attention mask added to `scale * Q @ K^T` before softmax.
+///
+/// Entries equal to `-inf` mask out the corresponding `(q, k)` pair (isolating that position from `NaN`/`Inf`
+/// values in `K`/`V` and contributing zero gradient on backward).
+#[derive(Clone, Copy, Debug)]
+pub struct SdpaMask<'a> {
+    /// Dense row-major `f32` mask buffer of shape `[b, sq, sk]` (`batched == true`) or `[1, sq, sk]` (`false`).
+    pub buf: &'a wgpu::Buffer,
+    /// `true` when each batch/head item has its own `[sq, sk]` mask slice; `false` when shared across `b`.
+    pub batched: bool,
+}
+
+/// Validates optional `mask` buffer size and u32 indexing, returning `(buf, batch_stride)`.
+pub(crate) fn check_mask<'a>(
+    ctx: &'a GpuContext,
+    mask: Option<SdpaMask<'a>>,
+    (b, sq, sk): (usize, usize, usize),
+    op: &'static str,
+) -> Result<(&'a wgpu::Buffer, usize)> {
+    let Some(m) = mask else {
+        return Ok((ctx.dummy(), 0));
+    };
+    let slice = prod(&[sq, sk])?;
+    let elems = if m.batched { prod(&[b, slice])? } else { slice };
+    check_buf(m.buf, elems, DType::F32, op)?;
+    if elems > u32::MAX as usize {
+        return Err(GpuError::Limit(format!("{op}: mask exceeds u32 indexing")));
+    }
+    Ok((m.buf, if m.batched { slice } else { 0 }))
+}
+
+/// Bounds check for precompiling `"sdpa_fwd"`, `"sdpa_bwd_dkdv"`, and `"sdpa_bwd_dq"` from a kernel list.
 pub(crate) fn sdpa_fits(spec: &Spec) -> bool {
     (1..=4).contains(&spec.get_u32("D_CHUNKS", 1))
 }
 
-/// Generates the tiled online-softmax SDPA forward shader.
-/// Spec: `CAUSAL` (bool), `CACHE_Q` (bool), `D_CHUNKS` (`1..=4`), `f16` (bool), `subgroups` (bool).
-/// Params: 0 = `total_blocks`, 1 = `sq`, 2 = `sk`, 3 = `d`, 4 = `q_tiles`, 5 = `d_tiles`,
-/// 6 = `scale` (f32), 7 = `neg_inf` (f32).
-fn gen_sdpa_fwd(spec: &Spec) -> String {
-    let causal = spec.get_bool("CAUSAL");
-    let cache_q = spec.get_bool("CACHE_Q");
-    let d_chunks = spec.get_u32("D_CHUNKS", 1).clamp(1, 4);
-    let sg = spec.is_subgroups();
-    let q_stride = if cache_q { 65u32 } else { 33u32 };
-    let q_elems = 16u32 * q_stride;
-
-    let mut s = String::with_capacity(6144);
-    let _ = writeln!(
-        s,
-        "@group(0) @binding(1) var<storage, read> Q: array<T>;\n\
-         @group(0) @binding(2) var<storage, read> K: array<T>;\n\
-         @group(0) @binding(3) var<storage, read> V: array<T>;\n\
-         @group(0) @binding(4) var<storage, read_write> O: array<T>;\n\
-         var<workgroup> sh_q: array<f32, {q_elems}>;\n\
-         var<workgroup> sh_kv: array<f32, 1056>;\n\
-         var<workgroup> sh_p: array<f32, 512>;"
-    );
-    if !sg {
-        s.push_str("var<workgroup> sh_red: array<f32, 256>;\n");
-    }
-    s.push_str(
-        "fn isnan1(v: f32) -> bool { return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u; }\n\
-         fn max_nan(a: f32, b: f32) -> f32 {\n\
-         \x20 return select(select(select(a, b, b > a), b, isnan1(b)), a, isnan1(a));\n\
-         }\n",
-    );
-    if sg {
+/// Emits shared WGSL helpers (`isnan1`, `max_nan`, and 32-lane `row_max32`/`row_sum32` reductions).
+pub(crate) fn push_row_helpers(s: &mut String, sg: bool, need_max: bool) {
+    s.push_str("fn isnan1(v: f32) -> bool { return (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u; }\n");
+    if need_max {
         s.push_str(
-            "fn row_max32(ty: u32, tx: u32, v: f32, neg_inf: f32) -> f32 {\n\
-             \x20 let is_n = isnan1(v);\n\
-             \x20 let mask = subgroupBallot(is_n).x;\n\
-             \x20 let nan_lane = select(0u, firstTrailingBit(mask), mask != 0u);\n\
-             \x20 return select(subgroupMax(select(v, neg_inf, is_n)), subgroupShuffle(v, nan_lane), mask != 0u);\n\
-             }\n\
-             fn row_sum32(ty: u32, tx: u32, v: f32) -> f32 {\n\
-             \x20 return subgroupAdd(v);\n\
+            "fn max_nan(a: f32, b: f32) -> f32 {\n\
+             \x20 return select(select(select(a, b, b > a), b, isnan1(b)), a, isnan1(a));\n\
              }\n",
         );
+    }
+    if sg {
+        if need_max {
+            s.push_str(
+                "fn row_max32(ty: u32, tx: u32, v: f32, neg_inf: f32) -> f32 {\n\
+                 \x20 let is_n = isnan1(v);\n\
+                 \x20 let mask = subgroupBallot(is_n).x;\n\
+                 \x20 let nan_lane = select(0u, firstTrailingBit(mask), mask != 0u);\n\
+                 \x20 return select(subgroupMax(select(v, neg_inf, is_n)), subgroupShuffle(v, nan_lane), mask != 0u);\n\
+                 }\n",
+            );
+        }
+        s.push_str("fn row_sum32(ty: u32, tx: u32, v: f32) -> f32 { return subgroupAdd(v); }\n");
     } else {
+        if need_max {
+            s.push_str(
+                "fn row_max32(ty: u32, tx: u32, v: f32, neg_inf: f32) -> f32 {\n\
+                 \x20 let base = ty * 32u;\n\
+                 \x20 sh_red[base + tx] = v;\n\
+                 \x20 workgroupBarrier();\n\
+                 \x20 if (tx < 16u) { sh_red[base + tx] = max_nan(sh_red[base + tx], sh_red[base + tx + 16u]); }\n\
+                 \x20 workgroupBarrier();\n\
+                 \x20 if (tx < 8u) { sh_red[base + tx] = max_nan(sh_red[base + tx], sh_red[base + tx + 8u]); }\n\
+                 \x20 workgroupBarrier();\n\
+                 \x20 if (tx < 4u) { sh_red[base + tx] = max_nan(sh_red[base + tx], sh_red[base + tx + 4u]); }\n\
+                 \x20 workgroupBarrier();\n\
+                 \x20 if (tx < 2u) { sh_red[base + tx] = max_nan(sh_red[base + tx], sh_red[base + tx + 2u]); }\n\
+                 \x20 workgroupBarrier();\n\
+                 \x20 if (tx == 0u) { sh_red[base] = max_nan(sh_red[base], sh_red[base + 1u]); }\n\
+                 \x20 workgroupBarrier();\n\
+                 \x20 let res = sh_red[base];\n\
+                 \x20 workgroupBarrier();\n\
+                 \x20 return res;\n\
+                 }\n",
+            );
+        }
         s.push_str(
-            "fn row_max32(ty: u32, tx: u32, v: f32, neg_inf: f32) -> f32 {\n\
-             \x20 let base = ty * 32u;\n\
-             \x20 sh_red[base + tx] = v;\n\
-             \x20 workgroupBarrier();\n\
-             \x20 if (tx < 16u) { sh_red[base + tx] = max_nan(sh_red[base + tx], sh_red[base + tx + 16u]); }\n\
-             \x20 workgroupBarrier();\n\
-             \x20 if (tx < 8u) { sh_red[base + tx] = max_nan(sh_red[base + tx], sh_red[base + tx + 8u]); }\n\
-             \x20 workgroupBarrier();\n\
-             \x20 if (tx < 4u) { sh_red[base + tx] = max_nan(sh_red[base + tx], sh_red[base + tx + 4u]); }\n\
-             \x20 workgroupBarrier();\n\
-             \x20 if (tx < 2u) { sh_red[base + tx] = max_nan(sh_red[base + tx], sh_red[base + tx + 2u]); }\n\
-             \x20 workgroupBarrier();\n\
-             \x20 if (tx == 0u) { sh_red[base] = max_nan(sh_red[base], sh_red[base + 1u]); }\n\
-             \x20 workgroupBarrier();\n\
-             \x20 let res = sh_red[base];\n\
-             \x20 workgroupBarrier();\n\
-             \x20 return res;\n\
-             }\n\
-             fn row_sum32(ty: u32, tx: u32, v: f32) -> f32 {\n\
+            "fn row_sum32(ty: u32, tx: u32, v: f32) -> f32 {\n\
              \x20 let base = ty * 32u;\n\
              \x20 sh_red[base + tx] = v;\n\
              \x20 workgroupBarrier();\n\
@@ -118,7 +134,10 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
              }\n",
         );
     }
+}
 
+/// Emits `@compute @workgroup_size(256) fn main(...)` header defining `ty` (`0..8`) and `tx` (`0..32`).
+pub(crate) fn push_main_header(s: &mut String, sg: bool) {
     s.push_str("@compute @workgroup_size(256)\n");
     if sg {
         s.push_str(
@@ -136,6 +155,44 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
              \x20 let tx = lid & 31u;\n",
         );
     }
+}
+
+/// Generates the tiled online-softmax SDPA forward shader.
+/// Spec: `CAUSAL`, `HAS_MASK`, `WRITE_LSE`, `CACHE_Q`, `D_CHUNKS` (`1..=4`), `f16`, `subgroups`.
+/// Params: 0 = `total_blocks`, 1 = `sq`, 2 = `sk`, 3 = `d`, 4 = `q_tiles`, 5 = `d_tiles`,
+/// 6 = `scale` (f32), 7 = `neg_inf` (f32), 8 = `mask_b_stride`.
+fn gen_sdpa_fwd(spec: &Spec) -> String {
+    let causal = spec.get_bool("CAUSAL");
+    let has_mask = spec.get_bool("HAS_MASK");
+    let write_lse = spec.get_bool("WRITE_LSE");
+    let cache_q = spec.get_bool("CACHE_Q");
+    let d_chunks = spec.get_u32("D_CHUNKS", 1).clamp(1, 4);
+    let sg = spec.is_subgroups();
+    let q_stride = if cache_q { 65u32 } else { 33u32 };
+    let q_elems = 16u32 * q_stride;
+
+    let mut s = String::with_capacity(7168);
+    let _ = writeln!(
+        s,
+        "@group(0) @binding(1) var<storage, read> Q: array<T>;\n\
+         @group(0) @binding(2) var<storage, read> K: array<T>;\n\
+         @group(0) @binding(3) var<storage, read> V: array<T>;\n\
+         @group(0) @binding(4) var<storage, read> MASK: array<f32>;\n\
+         @group(0) @binding(5) var<storage, read_write> O: array<T>;\n\
+         @group(0) @binding(6) var<storage, read_write> LSE: array<f32>;\n\
+         var<workgroup> sh_q: array<f32, {q_elems}>;\n\
+         var<workgroup> sh_kv: array<f32, 1056>;\n\
+         var<workgroup> sh_p: array<f32, 512>;"
+    );
+    if has_mask {
+        s.push_str("var<workgroup> sh_valid: array<u32, 512>;\n");
+    }
+    if !sg {
+        s.push_str("var<workgroup> sh_red: array<f32, 256>;\n");
+    }
+    push_row_helpers(&mut s, sg, true);
+    push_main_header(&mut s, sg);
+
     s.push_str(
         "  let block_id = wid.y * nwg.x + wid.x;\n\
          \x20 if (block_id >= pu(0u)) { return; }\n\
@@ -146,12 +203,14 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
          \x20 let d_tiles = pu(5u);\n\
          \x20 let scale = pf(6u);\n\
          \x20 let neg_inf = pf(7u);\n\
+         \x20 let mask_b_stride = pu(8u);\n\
          \x20 let q_tile = block_id % q_tiles;\n\
          \x20 let tmp = block_id / q_tiles;\n\
          \x20 let d_tile = tmp % d_tiles;\n\
          \x20 let b = tmp / d_tiles;\n\
          \x20 let q_base = b * sq * d;\n\
          \x20 let kv_base = b * sk * d;\n\
+         \x20 let mask_base = b * mask_b_stride;\n\
          \x20 let q0_tile = q_tile * 16u;\n\
          \x20 let d_out_base = d_tile * 128u;\n\
          \x20 let r0 = ty;\n\
@@ -161,7 +220,6 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
     );
 
     if cache_q {
-        // Load [16, D] (D <= 64) once into sh_q[16 * 65]: 256 threads load 16 * 64 = 1024 floats (4 per thread).
         s.push_str(
             "  for (var i = lid; i < 1024u; i += 256u) {\n\
              \x20   let qr = i >> 6u;\n\
@@ -237,23 +295,40 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
          \x20   }\n",
     );
 
-    // Mask and online softmax update for r0 and r1.
     s.push_str("    let k_col = k0 + tx;\n");
     if causal {
         s.push_str(
-            "    let valid_k0 = q_row0 < sq && k_col < sk && k_col <= q_row0;\n\
-             \x20   let valid_k1 = q_row1 < sq && k_col < sk && k_col <= q_row1;\n",
+            "    var valid_k0 = q_row0 < sq && k_col < sk && k_col <= q_row0;\n\
+             \x20   var valid_k1 = q_row1 < sq && k_col < sk && k_col <= q_row1;\n",
         );
     } else {
         s.push_str(
-            "    let valid_k0 = q_row0 < sq && k_col < sk;\n\
-             \x20   let valid_k1 = q_row1 < sq && k_col < sk;\n",
+            "    var valid_k0 = q_row0 < sq && k_col < sk;\n\
+             \x20   var valid_k1 = q_row1 < sq && k_col < sk;\n",
         );
     }
-    s.push_str(
-        "    s0 = select(neg_inf, s0 * scale, valid_k0);\n\
-         \x20   s1 = select(neg_inf, s1 * scale, valid_k1);\n",
-    );
+    if has_mask {
+        s.push_str(
+            "    var sc0 = neg_inf;\n\
+             \x20   if (valid_k0) {\n\
+             \x20     let mv0 = MASK[mask_base + q_row0 * sk + k_col];\n\
+             \x20     if (mv0 == neg_inf) { valid_k0 = false; } else { sc0 = s0 * scale + mv0; }\n\
+             \x20   }\n\
+             \x20   var sc1 = neg_inf;\n\
+             \x20   if (valid_k1) {\n\
+             \x20     let mv1 = MASK[mask_base + q_row1 * sk + k_col];\n\
+             \x20     if (mv1 == neg_inf) { valid_k1 = false; } else { sc1 = s1 * scale + mv1; }\n\
+             \x20   }\n\
+             \x20   s0 = sc0; s1 = sc1;\n\
+             \x20   sh_valid[r0 * 32u + tx] = select(0u, 1u, valid_k0);\n\
+             \x20   sh_valid[r1 * 32u + tx] = select(0u, 1u, valid_k1);\n",
+        );
+    } else {
+        s.push_str(
+            "    s0 = select(neg_inf, s0 * scale, valid_k0);\n\
+             \x20   s1 = select(neg_inf, s1 * scale, valid_k1);\n",
+        );
+    }
 
     for (r_idx, (r_var, s_var, vk_var, m_var, l_var)) in
         [(0, ("r0", "s0", "valid_k0", "m0", "l0")), (1, ("r1", "s1", "valid_k1", "m1", "l1"))]
@@ -294,7 +369,6 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
     s.push_str("    workgroupBarrier();\n");
     s.push_str("    let k_len = min(32u, sk - k0);\n");
 
-    // Accumulate O += P_norm @ V for each active output head-dim chunk.
     for c in 0..d_chunks {
         let off = c * 32;
         let _ = write!(
@@ -315,7 +389,13 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
              \x20       for (var kc = 0u; kc < k_len; kc += 1u) {{\n\
              \x20         let vv = sh_kv[kc * 33u + tx];\n"
         );
-        if causal {
+        if has_mask {
+            let _ = write!(
+                s,
+                "         if (sh_valid[r0 * 32u + kc] != 0u) {{ o0_{c} = fma(sh_p[r0 * 32u + kc], vv, o0_{c}); }}\n\
+                 \x20         if (sh_valid[r1 * 32u + kc] != 0u) {{ o1_{c} = fma(sh_p[r1 * 32u + kc], vv, o1_{c}); }}\n"
+            );
+        } else if causal {
             let _ = write!(
                 s,
                 "         if (k0 + kc <= q_row0) {{ o0_{c} = fma(sh_p[r0 * 32u + kc], vv, o0_{c}); }}\n\
@@ -332,13 +412,25 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
     }
     s.push_str("  }\n");
 
-    // `o` is already normalized for valid finite `l > 0`; propagate NaN when `l == 0` or non-finite.
+    // `o` is already normalized for valid finite `l > 0`; all-masked rows (`m == -inf && l == 0`) yield 0 and
+    // `LSE = -inf`; genuine `NaN` / non-finite `l` propagates `NaN`.
     s.push_str(
         "  let ok0 = l0 > 0.0 && (bitcast<u32>(l0) & 0x7fffffffu) < 0x7f800000u;\n\
          \x20 let ok1 = l1 > 0.0 && (bitcast<u32>(l1) & 0x7fffffffu) < 0x7f800000u;\n\
-         \x20 let fin0 = select(1.0 / l0, 1.0, ok0);\n\
-         \x20 let fin1 = select(1.0 / l1, 1.0, ok1);\n",
+         \x20 let all_m0 = m0 == neg_inf && l0 == 0.0;\n\
+         \x20 let all_m1 = m1 == neg_inf && l1 == 0.0;\n\
+         \x20 let fin0 = select(select(1.0 / l0, 0.0, all_m0), 1.0, ok0);\n\
+         \x20 let fin1 = select(select(1.0 / l1, 0.0, all_m1), 1.0, ok1);\n",
     );
+    if write_lse {
+        s.push_str(
+            "  if (d_tile == 0u && tx == 0u) {\n\
+             \x20   let lse_base = b * sq;\n\
+             \x20   if (q_row0 < sq) { LSE[lse_base + q_row0] = select(m0 + log(l0), neg_inf, all_m0); }\n\
+             \x20   if (q_row1 < sq) { LSE[lse_base + q_row1] = select(m1 + log(l1), neg_inf, all_m1); }\n\
+             \x20 }\n",
+        );
+    }
     for c in 0..d_chunks {
         let off = c * 32;
         let _ = write!(
@@ -359,10 +451,11 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
 use Access::{Read as R, ReadWrite as RW};
 
 static SDPA_FWD: KernelDef =
-    KernelDef { name: "sdpa_fwd", storage: &[R, R, R, RW], source: Source::Generated(gen_sdpa_fwd) };
+    KernelDef { name: "sdpa_fwd", storage: &[R, R, R, R, RW, RW], source: Source::Generated(gen_sdpa_fwd) };
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&SDPA_FWD];
+pub(crate) static DEFS: &[&KernelDef] =
+    &[&SDPA_FWD, &backward::SDPA_BWD_DELTA, &backward::SDPA_BWD_DKDV, &backward::SDPA_BWD_DQ];
 
 /// Tiled fused Scaled Dot-Product Attention forward: `O = softmax(scale * Q @ K^T [+ causal]) @ V`.
 ///
@@ -379,6 +472,27 @@ pub fn sdpa_forward(
     k: &wgpu::Buffer,
     v: &wgpu::Buffer,
     out: &wgpu::Buffer,
+    dims: (usize, usize, usize, usize),
+    scale: f32,
+    causal: bool,
+    dtype: DType,
+) -> Result<()> {
+    sdpa_forward_masked(ctx, q, k, v, None, out, None, dims, scale, causal, dtype)
+}
+
+/// Tiled fused SDPA forward with optional additive `mask` and optional `lse [b, sq]` (`F32`) output for training.
+///
+/// When `lse` is `Some`, writes per-query log-sum-exp (`m + ln(l)`, or `-inf` for all-masked rows) for
+/// [`sdpa_backward`]. All-masked query rows produce zeros in `out`.
+#[allow(clippy::too_many_arguments)]
+pub fn sdpa_forward_masked(
+    ctx: &GpuContext,
+    q: &wgpu::Buffer,
+    k: &wgpu::Buffer,
+    v: &wgpu::Buffer,
+    mask: Option<SdpaMask<'_>>,
+    out: &wgpu::Buffer,
+    lse: Option<&wgpu::Buffer>,
     (b, sq, sk, d): (usize, usize, usize, usize),
     scale: f32,
     causal: bool,
@@ -387,10 +501,15 @@ pub fn sdpa_forward(
     check_dtype(ctx, dtype, "sdpa_forward")?;
     let q_elems = prod(&[b, sq, d])?;
     let kv_elems = prod(&[b, sk, d])?;
+    let q_rows = prod(&[b, sq])?;
     check_buf(q, q_elems, dtype, "sdpa q")?;
     check_buf(k, kv_elems, dtype, "sdpa k")?;
     check_buf(v, kv_elems, dtype, "sdpa v")?;
     check_buf(out, q_elems, dtype, "sdpa out")?;
+    if let Some(l) = lse {
+        check_buf(l, q_rows, DType::F32, "sdpa lse")?;
+    }
+    let (mask_buf, mask_b_stride) = check_mask(ctx, mask, (b, sq, sk), "sdpa_forward")?;
     if q_elems == 0 {
         return Ok(());
     }
@@ -412,6 +531,8 @@ pub fn sdpa_forward(
         &SDPA_FWD,
         Spec::new()
             .bool("CAUSAL", causal)
+            .bool("HAS_MASK", mask.is_some())
+            .bool("WRITE_LSE", lse.is_some())
             .bool("CACHE_Q", cache_q)
             .u32("D_CHUNKS", d_chunks)
             .f16(dtype == DType::F16)
@@ -425,8 +546,11 @@ pub fn sdpa_forward(
         .uz(q_tiles)?
         .uz(d_tiles)?
         .f(scale)
-        .f(f32::NEG_INFINITY);
-    ctx.dispatch(&kern, &[q, k, v, out], &p, ctx.grid_1d(total_blocks as u64 * 256, 256)?)
+        .f(f32::NEG_INFINITY)
+        .uz(mask_b_stride)?;
+    let dummy_lse = lse.is_none().then(|| ctx.alloc(4)).transpose()?;
+    let lse_buf = lse.unwrap_or_else(|| dummy_lse.as_ref().unwrap().raw());
+    ctx.dispatch(&kern, &[q, k, v, mask_buf, out, lse_buf], &p, ctx.grid_1d(total_blocks as u64 * 256, 256)?)
 }
 
 #[cfg(test)]
@@ -435,14 +559,36 @@ mod tests {
 
     #[test]
     fn sdpa_portable_emits_no_subgroup_tokens() {
-        for (causal, cache_q, chunks) in [(false, true, 1), (true, true, 2), (true, false, 4)] {
+        for (causal, has_mask, write_lse, cache_q, chunks) in
+            [(false, false, false, true, 1), (true, true, true, true, 2), (true, true, false, false, 4)]
+        {
             let spec = Spec::new()
                 .bool("CAUSAL", causal)
+                .bool("HAS_MASK", has_mask)
+                .bool("WRITE_LSE", write_lse)
                 .bool("CACHE_Q", cache_q)
                 .u32("D_CHUNKS", chunks)
                 .subgroups(false);
             let wgsl = crate::pipeline::render(&SDPA_FWD, &spec);
-            assert!(!wgsl.contains("subgroup"), "portable sdpa emitted subgroup token:\n{wgsl}");
+            assert!(!wgsl.contains("subgroup"), "portable sdpa_fwd emitted subgroup token:\n{wgsl}");
+        }
+        let delta_wgsl = crate::pipeline::render(&backward::SDPA_BWD_DELTA, &Spec::new().subgroups(false));
+        assert!(!delta_wgsl.contains("subgroup"), "portable sdpa_bwd_delta emitted subgroup token");
+        for (def, name) in
+            [(&backward::SDPA_BWD_DKDV, "sdpa_bwd_dkdv"), (&backward::SDPA_BWD_DQ, "sdpa_bwd_dq")]
+        {
+            for (causal, has_mask, cache_q, chunks) in [(false, false, true, 1), (true, true, false, 4)] {
+                let mut spec = Spec::new()
+                    .bool("CAUSAL", causal)
+                    .bool("HAS_MASK", has_mask)
+                    .u32("D_CHUNKS", chunks)
+                    .subgroups(false);
+                if name == "sdpa_bwd_dq" {
+                    spec = spec.bool("CACHE_Q", cache_q);
+                }
+                let wgsl = crate::pipeline::render(def, &spec);
+                assert!(!wgsl.contains("subgroup"), "portable {name} emitted subgroup token:\n{wgsl}");
+            }
         }
     }
 }
