@@ -14,20 +14,31 @@
 //! class-mean F1 at IoU 0.5 (as Ultralytics reports them). `docs/METRICS.md` spells out every step and how this
 //! differs from Ultralytics' own AP.
 
+pub mod bootstrap;
 pub mod coco_scale;
+pub mod confusion_view;
 pub mod curve_sweep;
 pub mod diagnostics;
+pub mod oks;
+#[cfg(test)]
+mod tests_bootstrap;
 #[cfg(test)]
 mod tests_coco_tide;
 #[cfg(test)]
 mod tests_curve_sweep;
 #[cfg(test)]
 mod tests_diagnostics;
+#[cfg(test)]
+mod tests_oks;
 pub mod tide;
 
+pub use bootstrap::{
+    BootstrapConfig, BootstrapMapReport, ClassBootstrapCi, ConfidenceInterval, compute_bootstrap_map,
+};
 pub use coco_scale::{
     CocoScaleClassMetrics, CocoScaleDiagnostics, ScaleAreaBounds, compute_coco_scale_metrics,
 };
+pub use confusion_view::{ClassConfusionMetrics, ConfusionPair, NormalizedConfusionView};
 pub use curve_sweep::{
     BinningStrategy, CalibrationReport, CalibrationReportConfig, ClassConfidenceSweep, ConfidenceSweepConfig,
     ConfidenceSweepDiagnostics, ConfidenceSweepPoint, DetectionCalibrationReport, compute_calibration_report,
@@ -37,6 +48,10 @@ pub use diagnostics::{
     CalibrationSummary, ClassPrCurve, DetectionCalibrationDiagnostics, DetectionConfusionMatrix,
     OptimalF1Point, PrCurveDiagnostics, PrCurvePoint, ReliabilityBin, compute_detection_calibration,
     compute_pr_curves, reliability_from_scores,
+};
+pub use oks::{
+    COCO_KEYPOINT_SIGMAS, Keypoint, KeypointVisibility, OksApReport, OksPred, OksTruth, compute_oks_ap, oks,
+    oks_f64, oks_matrix,
 };
 pub use tide::{
     TideClassBreakdown, TideConfig, TideDiagnostics, TideErrorCounts, TideErrorImpacts,
@@ -136,10 +151,10 @@ fn outside_coco_area(b: &Xyxy) -> bool {
 /// A detection as stored for AP: its score and, per IoU threshold, whether it was a true positive (bit `t` of `tp`)
 /// or is ignored (bit `t` of `ig`, only with [`EvalConfig::coco_compatible`]). Neither means a false positive.
 #[derive(Clone, Copy, Debug)]
-struct DetRecord {
-    score: f32,
-    tp: u16,
-    ig: u16,
+pub(super) struct DetRecord {
+    pub(super) score: f32,
+    pub(super) tp: u16,
+    pub(super) ig: u16,
 }
 
 /// Accumulates per-image matches; see the module docs.
@@ -444,6 +459,11 @@ impl Evaluator {
         for (a, b) in self.confusion.iter_mut().zip(other.confusion) {
             *a += b;
         }
+    }
+
+    /// Consume the evaluator and return its per-class matched detection records and ground-truth counts.
+    pub(super) fn into_matched_records(self) -> (Vec<Vec<DetRecord>>, Vec<u64>) {
+        (self.dets, self.gt_counts)
     }
 
     /// Compute the report. Does not consume the accumulated state, so it can be called again after more images.

@@ -34,6 +34,9 @@ mod cluster;
 mod kernel;
 mod matrix;
 mod topk;
+pub use crate::obb::{
+    ObbDetection, RotatedNmsConfig, batched_rotated_nms, rotated_nms, rotated_nms_detections,
+};
 pub use cluster::{
     ClusterNmsConfig, ClusterNmsEntry, ClusterScoreDecay, batched_cluster_nms, batched_fast_nms, cluster_nms,
     cluster_nms_detections, fast_nms, fast_nms_detections,

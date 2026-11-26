@@ -7,6 +7,8 @@
 //! - [`inner_iou`]: Generalized Inner-IoU auxiliary-box wrapper composing with IoU / GIoU / DIoU / CIoU / EIoU / SIoU / MPDIoU,
 //! - [`slide_loss`]: SlideLoss & EMA-SlideLoss adaptive hard-boundary re-weighting,
 //! - [`nwd_wiou`]: Normalized Wasserstein Distance (NWD) and Wise-IoU v1 / v3,
+//! - [`ohem`]: Online Hard Example Mining (OHEM) differentiable hard-example loss selector,
+//! - [`oks`]: Differentiable COCO Object Keypoint Similarity (`oks_similarity`, `oks_loss`),
 //! - [`prob_iou`]: Gaussian-box regression losses (`ProbIoU` `L_1` / `L_2`, `GWD`, `KLD`),
 //! - [`geom_loss`]: MPDIoU, Shape-IoU, and Focaler-IoU remapping,
 //! - [`piou`]: Powerful-IoU v1 (`PIoU`) and v2 (`PIoU2`) with non-monotonic attention focusing,
@@ -20,6 +22,8 @@ mod dfl;
 mod geom_loss;
 mod inner_iou;
 mod nwd_wiou;
+mod ohem;
+mod oks;
 mod piou;
 mod prob_iou;
 mod seesaw;
@@ -57,6 +61,10 @@ pub(crate) use nwd_wiou::{
     nwd_box_eps_f64, nwd_box_f64, wiou_v1_box_f64, wiou_v3_box_f64, wiou_v3_focus_gain,
 };
 pub use nwd_wiou::{nwd_loss, nwd_loss_with_c, wiou_v1_loss, wiou_v3_loss};
+pub use ohem::{OhemBudget, OhemConfig, OhemLoss, OhemSelection, ohem_select};
+#[cfg(test)]
+pub(crate) use oks::oks_instance_f64;
+pub use oks::{DEFAULT_OKS_EPS, OksLossConfig, oks_loss, oks_similarity};
 pub use piou::{piou_attention, piou_attention_f64, piou_loss, piou2_loss};
 #[cfg(test)]
 pub(crate) use piou::{piou_attention_from_p_f64, piou_box_f64, piou2_box_f64};
