@@ -285,6 +285,16 @@ fn multipart(fields: &[(&str, String)], image: &[u8]) -> Result<(String, Vec<u8>
     Ok((format!("multipart/form-data; boundary={boundary}"), body))
 }
 
+/// Rejects an empty or dot-only (`"."` / `".."`) URL path segment with the same `<kind>_not_found` error that
+/// an embedded store returns, instead of interpolating a malformed path that hits `404 route_not_found` or
+/// resolves to the parent collection route.
+pub(crate) fn check_segment(kind: &str, id: &str) -> Result<(), Error> {
+    if id.is_empty() || matches!(id, "." | "..") {
+        return Err(Error::not_found(kind, id));
+    }
+    Ok(())
+}
+
 impl Store for HttpStore {
     fn is_mock(&self) -> bool {
         if let Some(mock) = self.probe.state.lock().unwrap_or_else(|e| e.into_inner()).mock {
@@ -323,10 +333,12 @@ impl Store for HttpStore {
     }
 
     fn get_dataset(&self, id: &str) -> Result<Dataset, Error> {
+        check_segment("dataset", id)?;
         self.get(&format!("/datasets/{}", encode(id)))
     }
 
     fn list_images(&self, id: &str, q: &ImageQuery) -> Result<ImagePage, Error> {
+        check_segment("dataset", id)?;
         let mut path =
             format!("/datasets/{}/images?offset={}&limit={}", encode(id), q.offset, q.limit.min(1000));
         if let Some(s) = q.split {
@@ -339,6 +351,7 @@ impl Store for HttpStore {
     }
 
     fn list_issues(&self, id: &str, q: &IssueQuery) -> Result<IssuePage, Error> {
+        check_segment("dataset", id)?;
         let mut path =
             format!("/datasets/{}/issues?offset={}&limit={}", encode(id), q.offset, q.limit.min(1000));
         if let Some(k) = &q.kind {
@@ -351,6 +364,8 @@ impl Store for HttpStore {
     }
 
     fn image(&self, id: &str, image_id: &str, thumb: Option<u32>) -> Result<ImageData, Error> {
+        check_segment("dataset", id)?;
+        check_segment("image", image_id)?;
         let mut path = format!("/datasets/{}/images/{}", encode(id), encode(image_id));
         if let Some(t) = thumb {
             path.push_str(&format!("?thumb={t}"));
@@ -361,14 +376,17 @@ impl Store for HttpStore {
     }
 
     fn delete_dataset(&self, id: &str) -> Result<(), Error> {
+        check_segment("dataset", id)?;
         self.delete(&format!("/datasets/{}", encode(id)))
     }
 
     fn delete_dataset_if_unused(&self, id: &str, token: &str) -> Result<(), Error> {
+        check_segment("dataset", id)?;
         self.delete(&format!("/datasets/{}?rollback={}", encode(id), encode(token)))
     }
 
     fn delete_dataset_files(&self, id: &str) -> Result<(), Error> {
+        check_segment("dataset", id)?;
         self.delete(&format!("/datasets/{}?files=true", encode(id)))
     }
 
@@ -377,15 +395,18 @@ impl Store for HttpStore {
     }
 
     fn get_model(&self, id: &str) -> Result<Model, Error> {
+        check_segment("model", id)?;
         self.get(&format!("/models/{}", encode(id)))
     }
 
     fn model_eval(&self, id: &str) -> Result<ModelEval, Error> {
+        check_segment("model", id)?;
         self.get(&format!("/models/{}/eval", encode(id)))
     }
 
     fn export_model(&self, id: &str, spec: ExportSpec) -> Result<ExportResult, Error> {
         folo_server::store::check_export(&spec)?;
+        check_segment("model", id)?;
         // An older server accepts the switches and ignores them, which would export the defaults silently.
         if spec.onnx.any() && !self.has_feature(FEATURE_EXPORT_ONNX_SWITCHES)? {
             return Err(Error::new(
@@ -420,14 +441,17 @@ impl Store for HttpStore {
     }
 
     fn get_run(&self, id: &str) -> Result<Run, Error> {
+        check_segment("run", id)?;
         self.get(&format!("/runs/{}", encode(id)))
     }
 
     fn stop_run(&self, id: &str) -> Result<Run, Error> {
+        check_segment("run", id)?;
         self.client.post_empty(&format!("/runs/{}/stop", encode(id))).map_err(store_error)
     }
 
     fn move_run(&self, id: &str, mv: QueueMove) -> Result<Run, Error> {
+        check_segment("run", id)?;
         let body = match mv {
             QueueMove::To(p) => QueueRequest { action: None, position: Some(p) },
             QueueMove::Top => action(QueueAction::Top),
@@ -440,10 +464,12 @@ impl Store for HttpStore {
     }
 
     fn delete_run(&self, id: &str) -> Result<(), Error> {
+        check_segment("run", id)?;
         self.delete(&format!("/runs/{}", encode(id)))
     }
 
     fn run_metrics(&self, id: &str, q: &MetricsQuery) -> Result<RunMetrics, Error> {
+        check_segment("run", id)?;
         let mut path = format!("/runs/{}/metrics?every={}", encode(id), q.every.max(1));
         if let Some(s) = q.after_step {
             path.push_str(&format!("&after_step={s}"));
@@ -455,11 +481,13 @@ impl Store for HttpStore {
     }
 
     fn run_samples(&self, id: &str, epoch: Option<u32>) -> Result<RunSamples, Error> {
+        check_segment("run", id)?;
         let q = epoch.map_or(String::new(), |e| format!("?epoch={e}"));
         self.get(&format!("/runs/{}/samples{q}", encode(id)))
     }
 
     fn run_logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs, Error> {
+        check_segment("run", id)?;
         let mut path = format!("/runs/{}/logs?limit={}", encode(id), q.limit.clamp(1, 5000));
         if let Some(a) = q.after {
             path.push_str(&format!("&after={a}"));
@@ -526,14 +554,17 @@ impl Store for HttpStore {
     }
 
     fn check_cloud(&self, id: &str) -> Result<CloudConnection, Error> {
+        check_segment("connection", id)?;
         self.client.post_empty(&format!("/cloud/connections/{}/check", encode(id))).map_err(store_error)
     }
 
     fn disconnect_cloud(&self, id: &str) -> Result<(), Error> {
+        check_segment("connection", id)?;
         self.delete(&format!("/cloud/connections/{}", encode(id)))
     }
 
     fn cloud_offers(&self, id: &str, refresh: bool) -> Result<CloudOfferList, Error> {
+        check_segment("connection", id)?;
         self.get(&format!("/cloud/connections/{}/offers?refresh={refresh}", encode(id)))
     }
 
@@ -542,6 +573,7 @@ impl Store for HttpStore {
     }
 
     fn terminate_instance(&self, id: &str) -> Result<CloudInstance, Error> {
+        check_segment("instance", id)?;
         self.client.delete_json(&format!("/cloud/instances/{}", encode(id))).map_err(store_error)
     }
 }

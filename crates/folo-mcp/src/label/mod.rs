@@ -83,7 +83,7 @@ impl Labels {
     pub fn job(&self, id: &str) -> Result<LabelJob, Error> {
         match self.via()? {
             Via::Here(l) => l.get(id),
-            Via::Http(h) => get(h, &job_path(id, "")),
+            Via::Http(h) => get(h, &job_path(id, "")?),
         }
     }
 
@@ -99,7 +99,7 @@ impl Labels {
     pub fn delete(&self, id: &str) -> Result<(), Error> {
         match self.via()? {
             Via::Here(l) => l.delete(id),
-            Via::Http(h) => h.client().delete(&job_path(id, "")).map_err(store_error),
+            Via::Http(h) => h.client().delete(&job_path(id, "")?).map_err(store_error),
         }
     }
 
@@ -109,7 +109,7 @@ impl Labels {
             Via::Here(l) => l.add_folder(id, path),
             Via::Http(h) => {
                 let body = ImportLabelImages { path: path.to_string() };
-                h.client().post(&job_path(id, "/images"), &body).map_err(store_error)
+                h.client().post(&job_path(id, "/images")?, &body).map_err(store_error)
             }
         }
     }
@@ -130,7 +130,7 @@ impl Labels {
                 if filtered && !h.has_feature(folo_api::FEATURE_LABEL_IMAGE_FILTERS)? {
                     return filter_here(h, id, q);
                 }
-                let mut path = images_path(id, q.status, q.offset, q.limit);
+                let mut path = images_path(id, q.status, q.offset, q.limit)?;
                 if let Some(r) = q.reviewed {
                     path.push_str(&format!("&reviewed={r}"));
                 }
@@ -151,7 +151,7 @@ impl Labels {
         match self.via()? {
             Via::Here(l) => l.image(id, image_id, Some(thumb)),
             Via::Http(h) => {
-                let path = format!("{}?thumb={thumb}", image_path(id, image_id));
+                let path = format!("{}?thumb={thumb}", image_path(id, image_id)?);
                 let (_, bytes) = h.client().get_bytes(&path).map_err(store_error)?;
                 Ok(ImageData { content_type: "image/jpeg", bytes, immutable: false })
             }
@@ -162,7 +162,7 @@ impl Labels {
     pub fn update_image(&self, id: &str, image_id: &str, req: UpdateLabelImage) -> Result<LabelImage, Error> {
         match self.via()? {
             Via::Here(l) => l.update_image(id, image_id, req),
-            Via::Http(h) => h.client().put_json(&image_path(id, image_id), &req).map_err(store_error),
+            Via::Http(h) => h.client().put_json(&image_path(id, image_id)?, &req).map_err(store_error),
         }
     }
 
@@ -175,7 +175,7 @@ impl Labels {
         match self.via()? {
             Via::Here(l) => l.review(id, req).map(Some),
             Via::Http(h) if h.has_feature(folo_api::FEATURE_LABEL_REVISIONS)? => {
-                h.client().post(&job_path(id, "/review"), req).map(Some).map_err(store_error)
+                h.client().post(&job_path(id, "/review")?, req).map(Some).map_err(store_error)
             }
             Via::Http(_) => Ok(None),
         }
@@ -190,7 +190,7 @@ impl Labels {
                 if req.fast {
                     fast_offered(&get::<LabelAgentList>(h, "/label/agents")?.agents, &req)?;
                 }
-                h.client().post(&job_path(id, "/start"), &req).map_err(store_error)
+                h.client().post(&job_path(id, "/start")?, &req).map_err(store_error)
             }
         }
     }
@@ -199,7 +199,7 @@ impl Labels {
     pub fn stop(&self, id: &str) -> Result<LabelJob, Error> {
         match self.via()? {
             Via::Here(l) => l.stop(id),
-            Via::Http(h) => h.client().post_empty(&job_path(id, "/stop")).map_err(store_error),
+            Via::Http(h) => h.client().post_empty(&job_path(id, "/stop")?).map_err(store_error),
         }
     }
 
@@ -208,7 +208,7 @@ impl Labels {
         match self.via()? {
             Via::Here(l) => l.logs(id, limit),
             Via::Http(h) => {
-                Ok(get::<RunLogs>(h, &format!("{}?limit={}", job_path(id, "/logs"), limit.max(1)))?.lines)
+                Ok(get::<RunLogs>(h, &format!("{}?limit={}", job_path(id, "/logs")?, limit.max(1)))?.lines)
             }
         }
     }
@@ -218,7 +218,7 @@ impl Labels {
         match self {
             Labels::Store(s) => s.label_dataset(id, req),
             Labels::Local(_) => Err(Error::internal("a dataset is registered through a store")),
-            Labels::Http(h) => h.client().post(&job_path(id, "/dataset"), &req).map_err(store_error),
+            Labels::Http(h) => h.client().post(&job_path(id, "/dataset")?, &req).map_err(store_error),
         }
     }
 
@@ -274,12 +274,12 @@ pub fn looks_absolute(p: &str) -> bool {
 }
 
 /// `/label/jobs/{id}/images?offset=…&limit=…[&status=…]`.
-fn images_path(id: &str, status: Option<LabelImageStatus>, offset: u64, limit: u64) -> String {
-    let mut path = format!("{}?offset={offset}&limit={limit}", job_path(id, "/images"));
+fn images_path(id: &str, status: Option<LabelImageStatus>, offset: u64, limit: u64) -> Result<String, Error> {
+    let mut path = format!("{}?offset={offset}&limit={limit}", job_path(id, "/images")?);
     if let Some(s) = status {
         path.push_str(&format!("&status={}", s.as_str()));
     }
-    path
+    Ok(path)
 }
 
 /// Images per request of [`filter_here`] (small in tests, so they cross page boundaries).
@@ -295,7 +295,7 @@ fn filter_here(h: &HttpStore, id: &str, q: &LabelImageQuery) -> Result<LabelImag
     let (mut read, mut total, mut found) = (0u64, 0u64, 0usize);
     let mut images = Vec::new();
     loop {
-        let page: LabelImagePage = get(h, &images_path(id, q.status, read, FALLBACK_PAGE))?;
+        let page: LabelImagePage = get(h, &images_path(id, q.status, read, FALLBACK_PAGE)?)?;
         let n = page.images.len() as u64;
         read += n;
         for i in page.images {
@@ -322,12 +322,15 @@ fn get<T: serde::de::DeserializeOwned>(h: &HttpStore, path: &str) -> Result<T, E
 }
 
 /// `/label/jobs/{id}{rest}`.
-fn job_path(id: &str, rest: &str) -> String {
-    format!("/label/jobs/{}{rest}", encode(id))
+fn job_path(id: &str, rest: &str) -> Result<String, Error> {
+    crate::proxy::check_segment("label_job", id)?;
+    Ok(format!("/label/jobs/{}{rest}", encode(id)))
 }
 
-fn image_path(id: &str, image_id: &str) -> String {
-    format!("/label/jobs/{}/images/{}", encode(id), encode(image_id))
+fn image_path(id: &str, image_id: &str) -> Result<String, Error> {
+    let base = job_path(id, "")?;
+    crate::proxy::check_segment("image", image_id)?;
+    Ok(format!("{base}/images/{}", encode(image_id)))
 }
 
 #[cfg(test)]

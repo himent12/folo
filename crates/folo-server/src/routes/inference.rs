@@ -43,12 +43,12 @@ async fn parse_multipart(mut mp: Multipart) -> Result<PredictInput> {
     }
     let model_id =
         model_id.filter(|m| !m.is_empty()).ok_or_else(|| field_err("model_id", "missing or empty"))?;
-    let source = resolve_multipart_source(image, dataset_id, image_id)?;
+    let source = resolve_predict_source(image, dataset_id, image_id)?;
     Ok(PredictInput { model_id, source, conf, iou, max_det })
 }
 
-/// Validates and selects the single image source of a multipart `POST /api/predict` request.
-fn resolve_multipart_source(
+/// Validates and selects the single image source of a `POST /api/predict` request (multipart or JSON).
+fn resolve_predict_source(
     image: Option<Vec<u8>>,
     dataset_id: Option<String>,
     image_id: Option<String>,
@@ -71,6 +71,25 @@ fn resolve_multipart_source(
             Err(field_err("image", "missing or empty (send a file, or dataset_id + image_id)"))
         }
     }
+}
+
+fn parse_json_predict(r: PredictRequest) -> Result<PredictInput> {
+    if r.model_id.trim().is_empty() {
+        return Err(field_err("model_id", "missing or empty"));
+    }
+    if r.dataset_id.trim().is_empty() || r.image_id.trim().is_empty() {
+        return Err(field_err(
+            "dataset_id",
+            "dataset_id and image_id must both be non-empty when predicting on a dataset image",
+        ));
+    }
+    Ok(PredictInput {
+        model_id: r.model_id,
+        source: PredictSource::Dataset { dataset_id: r.dataset_id, image_id: r.image_id },
+        conf: r.conf,
+        iou: r.iou,
+        max_det: r.max_det,
+    })
 }
 
 fn check_thresholds(p: &PredictInput) -> Result<()> {
@@ -98,13 +117,7 @@ pub(super) async fn predict(State(st): State<AppState>, req: Request) -> Result<
         parse_multipart(mp).await?
     } else {
         let ApiJson(r) = ApiJson::<PredictRequest>::from_request(req, &st).await?;
-        PredictInput {
-            model_id: r.model_id,
-            source: PredictSource::Dataset { dataset_id: r.dataset_id, image_id: r.image_id },
-            conf: r.conf,
-            iou: r.iou,
-            max_det: r.max_det,
-        }
+        parse_json_predict(r)?
     };
     check_thresholds(&input)?;
     Ok(Json(blocking(&st, move |s| s.predict(input)).await?).into_response())
@@ -120,13 +133,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn multipart_source_rejects_conflicting_empty_and_partial_sources() {
+    fn multipart_and_json_predict_reject_blank_conflicting_empty_and_partial_sources() {
         assert!(matches!(
-            resolve_multipart_source(Some(vec![1, 2, 3]), None, None).unwrap(),
+            resolve_predict_source(Some(vec![1, 2, 3]), None, None).unwrap(),
             PredictSource::Upload(b) if b == [1, 2, 3]
         ));
         assert!(matches!(
-            resolve_multipart_source(None, Some("ds_1".into()), Some("0".into())).unwrap(),
+            resolve_predict_source(None, Some("ds_1".into()), Some("0".into())).unwrap(),
             PredictSource::Dataset { dataset_id, image_id } if dataset_id == "ds_1" && image_id == "0"
         ));
 
@@ -141,9 +154,51 @@ mod tests {
             (None, Some("ds_1".into()), Some("".into()), "must both be non-empty"),
             (None, None, None, "missing or empty"),
         ] {
-            let err = resolve_multipart_source(image, ds, im).unwrap_err();
+            let err = resolve_predict_source(image, ds, im).unwrap_err();
             assert_eq!((err.status, err.body.code.as_str()), (StatusCode::BAD_REQUEST, "invalid_body"));
             assert!(err.body.message.contains(expected), "{err}");
         }
+
+        // JSON `POST /api/predict` rejects blank `model_id`, `dataset_id`, and `image_id` with `400 invalid_body`
+        // identically to multipart instead of falling through to `404 *_not_found`.
+        for (model_id, dataset_id, image_id) in [
+            ("", "ds_1", "0"),
+            ("   ", "ds_1", "0"),
+            ("m_1", "", "0"),
+            ("m_1", "   ", "0"),
+            ("m_1", "ds_1", ""),
+            ("m_1", "ds_1", "   "),
+        ] {
+            let req = PredictRequest {
+                model_id: model_id.into(),
+                dataset_id: dataset_id.into(),
+                image_id: image_id.into(),
+                conf: 0.25,
+                iou: 0.7,
+                max_det: 100,
+            };
+            let err = parse_json_predict(req).unwrap_err();
+            assert_eq!(
+                (err.status, err.body.code.as_str()),
+                (StatusCode::BAD_REQUEST, "invalid_body"),
+                "{model_id:?}/{dataset_id:?}/{image_id:?}"
+            );
+        }
+
+        // Non-blank padded IDs keep their exact spelling so JSON HTTP matches embedded MCP lookup semantics.
+        let padded = parse_json_predict(PredictRequest {
+            model_id: " m_1 ".into(),
+            dataset_id: " ds_1 ".into(),
+            image_id: " 0 ".into(),
+            conf: 0.25,
+            iou: 0.7,
+            max_det: 100,
+        })
+        .unwrap();
+        assert_eq!(padded.model_id, " m_1 ");
+        assert!(matches!(
+            padded.source,
+            PredictSource::Dataset { dataset_id, image_id } if dataset_id == " ds_1 " && image_id == " 0 "
+        ));
     }
 }
