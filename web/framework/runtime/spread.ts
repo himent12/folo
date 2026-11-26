@@ -82,7 +82,7 @@ export function spread(
       const hasAttr = key.startsWith('xlink:') ? el.hasAttributeNS(XLINK_NS, key.slice(6)) : el.hasAttribute(key);
       if (value === prev[key] && !(value === undefined && hasAttr)) continue;
       if (key.length > 2 && key[0] === 'o' && key[1] === 'n') {
-        const { type, capture } = eventOf(key.slice(2));
+        const { type, capture } = eventOf(key.slice(2).toLowerCase());
         if (!capture && DELEGATED.has(type)) {
           if (value == null) {
             const prevHandler = delegated.get(type);

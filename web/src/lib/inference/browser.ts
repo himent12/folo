@@ -167,12 +167,18 @@ export class BrowserEngine {
   /** Most recently decoded image pixels, reused when re-running inference on the same image. */
   #lastImage: { key: string; data: ImageData } | null = null;
   #runtimeReady = false;
+  /** Monotonic sequence for predict/dispose so superseded requests never overwrite `phase` or `info`. */
+  #requestSeq = 0;
 
   /** `load` provides the folo-wasm module and `decode` an image's pixels (tests pass fakes). */
   constructor(
     readonly load: () => Promise<WasmModule> = loadWasm,
     readonly decode: (image: Blob) => Promise<ImageData> = toImageData,
   ) {}
+
+  #setPhase(phase: Phase, seq: number, signal?: AbortSignal) {
+    if (seq === this.#requestSeq && !signal?.aborted) this.phase = phase;
+  }
 
   /** Releases cached decoded pixels and the reusable decode canvas backing surface. */
   clearImageCache() {
@@ -182,6 +188,7 @@ export class BrowserEngine {
 
   /** Frees all cached detectors and releases temporary image, canvas, and download references. */
   dispose() {
+    this.#requestSeq++;
     for (const e of this.#detectors.values()) {
       e.evicted = true;
       this.#release(e);
@@ -211,20 +218,22 @@ export class BrowserEngine {
     /** Aborted when a newer request replaces this one: it stops before decoding and before detecting. */
     signal?: AbortSignal;
   }): Promise<Prediction> {
-    const entry = this.#detector(req);
+    const reqSeq = ++this.#requestSeq;
+    const entry = this.#detector(req, reqSeq);
     entry.users++;
     const superseded = () => {
       if (req.signal?.aborted) throw new DOMException('Superseded', 'AbortError');
     };
     try {
       const det = await entry.detector;
-      this.phase = 'ready';
-      // Requests replaced while the detector loaded all wake here: only the latest decodes and runs.
+      // Requests replaced while the detector loaded all wake here: only the latest advances phase, decodes and runs.
       superseded();
+      this.#setPhase('ready', reqSeq, req.signal);
       const pixels = await this.#pixels(req, superseded);
       superseded();
       const p = await det.detect(pixels, undefined, undefined, req.options);
-      this.info = det.info();
+      superseded();
+      if (reqSeq === this.#requestSeq) this.info = det.info();
       return p;
     } finally {
       entry.users--;
@@ -253,7 +262,7 @@ export class BrowserEngine {
     return data;
   }
 
-  #detector(req: { modelId: string; file: File | null; download: () => Promise<ArrayBuffer>; tag?: string | null; backend: Backend }): Entry {
+  #detector(req: { modelId: string; file: File | null; download: () => Promise<ArrayBuffer>; tag?: string | null; backend: Backend; signal?: AbortSignal }, reqSeq: number): Entry {
     // One detector per model, weights source (and version) and backend: the same file picked for two models loads
     // twice, since a detector stamps its model id on every result; retrained weights (a run's last.folo changes
     // every epoch) load again.
@@ -262,21 +271,25 @@ export class BrowserEngine {
     const key = `${req.modelId}|${req.file ? `file#${fileId(req.file)}` : `server:${req.tag ?? ''}`}|${req.backend}`;
     const hit = cacheable ? this.#detectors.get(key) : undefined;
     if (hit) {
-      // Most recently used last.
+      // Most recently used last; track the latest waiting request so phase transitions stay accurate.
+      hit.latestSeq = reqSeq;
+      hit.latestSignal = req.signal;
       this.#detectors.delete(key);
       this.#detectors.set(key, hit);
       return hit;
     }
+    // Uncached: born evicted, so it is freed as soon as its request is done.
+    const entry: Entry = { detector: null!, users: 0, evicted: !cacheable, latestSeq: reqSeq, latestSignal: req.signal };
     const detector = (async () => {
-      if (!this.#runtimeReady) this.phase = 'runtime';
+      if (!this.#runtimeReady) this.#setPhase('runtime', entry.latestSeq, entry.latestSignal);
       const m = await this.load();
       this.#runtimeReady = true;
-      this.phase = 'weights';
+      this.#setPhase('weights', entry.latestSeq, entry.latestSignal);
       const dl = req.file ? null : this.#acquireDownload(req);
       let bytes: Uint8Array | null = null;
       try {
         bytes = new Uint8Array(await (req.file ? req.file.arrayBuffer() : dl!.bytes));
-        this.phase = 'compile';
+        this.#setPhase('compile', entry.latestSeq, entry.latestSignal);
         const loading = m.FoloDetector.load(bytes, { backend: req.backend, modelId: req.modelId });
         // Drop this closure's reference so the temporary weights buffer can be collected as soon as wasm finishes loading.
         bytes = null;
@@ -286,8 +299,7 @@ export class BrowserEngine {
         if (dl) this.#releaseDownload(dl);
       }
     })();
-    // Uncached: born evicted, so it is freed as soon as its request is done.
-    const entry: Entry = { detector, users: 0, evicted: !cacheable };
+    entry.detector = detector;
     if (!cacheable) return entry;
     this.#detectors.set(key, entry);
     detector.catch(() => {
@@ -343,6 +355,8 @@ interface Entry {
   /** Requests using it right now: an evicted detector is freed only when they are done. */
   users: number;
   evicted: boolean;
+  latestSeq: number;
+  latestSignal?: AbortSignal;
 }
 
 /** A stable identity per picked file (two files can share name, size and time). */

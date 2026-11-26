@@ -65,6 +65,14 @@ describe('expressions', () => {
     expect(code).toContain('(flag ? 1 : 2)');
   });
 
+  it('memoizes nested conditional and logical branches and avoids leaking falsy static && operands', () => {
+    const nested = compile('const x = <div>{a() && (b() ? <b /> : <i />)}{c() ? (d() && <span />) : null}</div>;');
+    expect(nested.match(/_\$cond\(/g)?.length).toBe(4);
+    const staticAnd = compile('const x = <div>{n && <i />}{m && label()}</div>;');
+    expect(staticAnd).toMatch(/\(\(n\) \? _tmpl\$\d+\(\) : null\)/);
+    expect(staticAnd).toContain('((m) ? (label()) : null)');
+  });
+
   it('delegates common events and listens to others', () => {
     const code = compile('const x = <div onclick={f} onscroll={g} onkeydowncapture={h} />;');
     expect(code).toContain('.$$click = (f)');

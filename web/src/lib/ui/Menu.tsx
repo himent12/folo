@@ -178,7 +178,7 @@ export default function Menu(props: MenuProps) {
     const clamped = Math.min(active.peek(), items.length - 1);
     if (clamped !== active.peek()) active.set(clamped);
     void tick().then(() => {
-      if (!open.peek()) return;
+      if (!alive || !open.peek()) return;
       const menuEl = list.peek();
       if (!menuEl) return;
       if (document.activeElement && menuEl.contains(document.activeElement)) return;
@@ -189,6 +189,12 @@ export default function Menu(props: MenuProps) {
 
   effect(() => {
     if (!open.get() || phone.current) return;
+    if (p.fixed) {
+      place();
+      void tick().then(() => {
+        if (alive && open.peek() && !phone.current) place();
+      });
+    }
     const away = (e: PointerEvent) => {
       const r = root.get();
       if (r && !r.contains(e.target as Node)) hide(false);

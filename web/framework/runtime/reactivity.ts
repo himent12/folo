@@ -333,19 +333,45 @@ const KEYWORDS = new Set(['all', 'print', 'screen', 'and', 'or', 'not', 'only'])
  */
 export class MediaQuery {
   #mql: MediaQueryList | null;
-  #subscribe: () => void;
+  #version: Signal<number>;
+  #last: boolean;
+  #subscribed = false;
   /** `fallback` is accepted for parity with Svelte (it only matters for server rendering). */
   constructor(query: string, _fallback?: boolean) {
     const text = /\(.+\)/.test(query) || query.split(/[\s,]+/).some((k) => KEYWORDS.has(k.trim())) ? query : `(${query})`;
     const mql = (this.#mql = typeof matchMedia === 'function' ? matchMedia(text) : null);
-    this.#subscribe = createSubscriber((update) => {
-      mql?.addEventListener('change', update);
-      return () => mql?.removeEventListener('change', update);
-    });
+    this.#last = mql?.matches ?? false;
+    let stop: (() => void) | undefined;
+    const version = (this.#version = watchedSignal(0, (on) => {
+      if (on) {
+        this.#subscribed = true;
+        const onChange = () => {
+          this.#last = mql?.matches ?? false;
+          bump(version);
+        };
+        mql?.addEventListener('change', onChange);
+        stop = () => mql?.removeEventListener('change', onChange);
+        if (mql && mql.matches !== this.#last) {
+          this.#last = mql.matches;
+          bump(version);
+        }
+      } else {
+        this.#subscribed = false;
+        const s = stop;
+        stop = undefined;
+        s?.();
+        this.#last = mql?.matches ?? false;
+      }
+    }));
   }
   get current(): boolean {
-    this.#subscribe();
-    return this.#mql?.matches ?? false;
+    const value = this.#mql?.matches ?? false;
+    if (!this.#subscribed && value !== this.#last) {
+      this.#last = value;
+      bump(this.#version);
+    }
+    if (isTracking()) this.#version.get();
+    return value;
   }
   get(): boolean {
     return this.current;

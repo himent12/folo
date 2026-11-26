@@ -122,6 +122,8 @@ export class LiveLabelJob {
   #retry = signal(0);
   /** Every `job` event bumps it: a snapshot or an action's answer older than the latest event is not applied. */
   #jobSeq = 0;
+  /** Bumps whenever the bound job view starts or tears down so late `act()` answers never cross job/server switches. */
+  #viewSeq = 0;
   /** The loads in flight: when each was sent (on the `#imageSeq` clock) and the image changes heard since. */
   #inflight = new Set<{ sent: number; changes: Map<string, LabelImage | null> }>();
   /**
@@ -147,6 +149,7 @@ export class LiveLabelJob {
       if (hub.mode === 'connecting' || !jobId) return;
       void hub.epoch;
       void this.#retry.get();
+      this.#viewSeq++;
       const api = hub.api;
       let closed = false;
       const view = new AbortController();
@@ -336,6 +339,7 @@ export class LiveLabelJob {
 
       return () => {
         closed = true;
+        this.#viewSeq++;
         view.abort();
         this.#cancelFrame();
         clearTimeout(lostTimer);
@@ -350,11 +354,13 @@ export class LiveLabelJob {
     this.#retry.set((n) => n + 1);
   }
 
-  /** Runs an action that answers with the job (start, stop, edit) and shows its answer, unless an event was newer. */
+  /** Runs an action that answers with the job (start, stop, edit) and shows its answer, unless an event or server/job switch was newer. */
   async act(call: () => Promise<LabelJob>): Promise<LabelJob> {
+    const epoch = hub.epoch;
+    const view = this.#viewSeq;
     const seq = this.#jobSeq;
     const job = await call();
-    if (this.#jobSeq === seq && this.job?.id === job.id) this.job = job;
+    if (hub.epoch === epoch && hub.mode !== 'connecting' && this.#viewSeq === view && this.#jobSeq === seq && this.job?.id === job.id) this.job = job;
     return job;
   }
 

@@ -73,6 +73,7 @@ export function compareState() {
   });
 
   function setIds(next: string[]) {
+    if (router.location.name !== 'bench-compare' || router.location.params.id !== id.peek()) return;
     router.go(`/benchmarks/${encodeURIComponent(id.peek())}/compare${next.length ? `?entries=${next.map(encodeURIComponent).join(',')}` : ''}`, { replace: true });
   }
   const candidates = computed(() => {

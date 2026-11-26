@@ -268,6 +268,62 @@ describe('BrowserEngine', () => {
     await new Promise((res) => setTimeout(res, 0));
     expect(w.freed).toEqual(['m1:1:cpu', 'm1:1:cpu']);
   });
+
+  it('does not let a superseded model load clobber active phase or info, while same-model image switches still update phase', async () => {
+    const w = fakeWasm();
+    const e = new BrowserEngine(async () => w.mod, pixels);
+    let releaseM1!: () => void;
+    let releaseM2!: () => void;
+    const holdM1 = new Promise<void>((r) => (releaseM1 = r));
+    const holdM2 = new Promise<void>((r) => (releaseM2 = r));
+
+    const c1 = new AbortController();
+    const p1 = e.predict({
+      ...req('m1', null, 'cpu', 1),
+      signal: c1.signal,
+      download: async () => (await holdM1, new Uint8Array([1]).buffer),
+    });
+    // Switch to m2 (webgpu) while m1 is still downloading; m1 is aborted.
+    c1.abort();
+    const p2 = e.predict({
+      ...req('m2', null, 'webgpu', 2),
+      download: async () => (await holdM2, new Uint8Array([2]).buffer),
+    });
+    await Promise.resolve();
+    expect(e.phase).toBe('weights');
+
+    // Old m1 finishes its download/load first: it must reject as AbortError and MUST NOT mark engine ready or write m1's info.
+    releaseM1();
+    await expect(p1).rejects.toMatchObject({ name: 'AbortError' });
+    expect(e.phase).toBe('weights');
+    expect(e.info).toBeNull();
+
+    // Active m2 finishes: phase becomes ready and info reflects m2 (webgpu).
+    releaseM2();
+    expect((await p2).model_id).toBe('m2');
+    expect(e.phase).toBe('ready');
+    expect(e.info?.backend).toBe('webgpu');
+
+    // Image switch on the same in-flight model m3: aborting first image must not block the second image from updating phase.
+    let releaseM3!: () => void;
+    const holdM3 = new Promise<void>((r) => (releaseM3 = r));
+    const imgA = new AbortController();
+    const runA = e.predict({
+      ...req('m3', null, 'cpu', 3),
+      signal: imgA.signal,
+      download: async () => (await holdM3, new Uint8Array([3]).buffer),
+    });
+    imgA.abort();
+    const runB = e.predict({
+      ...req('m3', null, 'cpu', 3),
+      download: async () => (await holdM3, new Uint8Array([3]).buffer),
+    });
+    releaseM3();
+    await expect(runA).rejects.toMatchObject({ name: 'AbortError' });
+    expect((await runB).model_id).toBe('m3');
+    expect(e.phase).toBe('ready');
+    expect(e.info?.backend).toBe('cpu');
+  });
 });
 
 describe('is the in-browser runtime in this build (DOGFOOD-3 S5)', () => {

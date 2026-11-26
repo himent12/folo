@@ -4,7 +4,7 @@ import Download from '$icons/download';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Target from '$icons/target';
-import { computed, css, effect, For, MediaQuery, signal, untrack } from 'fw';
+import { computed, css, effect, For, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Bench } from '$lib/api/types';
@@ -179,10 +179,19 @@ export default function Benchmarks() {
   const phone = new MediaQuery(media.phone, false);
   const searchEl = signal<HTMLInputElement | undefined>(undefined);
   const liveNote = signal('');
+  let alive = true;
+  let noteSeq = 0;
+  onCleanup(() => {
+    alive = false;
+    noteSeq++;
+  });
   function announce(message: string) {
+    const seq = ++noteSeq;
     if (liveNote.peek() === message) {
       liveNote.set('');
-      queueMicrotask(() => liveNote.set(message));
+      queueMicrotask(() => {
+        if (alive && seq === noteSeq) liveNote.set(message);
+      });
     } else {
       liveNote.set(message);
     }
@@ -220,7 +229,11 @@ export default function Benchmarks() {
     query.set('');
     filter.set('all');
     announce('Cleared benchmark filters.');
-    queueMicrotask(() => searchEl.peek()?.focus());
+    queueMicrotask(() => {
+      if (!alive) return;
+      const input = searchEl.peek();
+      if (input && input.isConnected && !input.disabled) input.focus();
+    });
   }
 
   return (

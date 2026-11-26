@@ -296,6 +296,47 @@ describe('LiveLabelJob ordering', () => {
     stop();
   });
 
+  it('ignores a stale act() answer after switching jobs or server epoch', async () => {
+    const currentId = { value: 'lb_1' };
+    let bumpId!: () => void;
+    let live!: LiveLabelJob;
+    const stop = root(() => {
+      const idSig = (() => {
+        // Use hub.epoch or reactive switch via getter by mounting with signal-like trigger.
+        return currentId;
+      })();
+      void idSig;
+      live = new LiveLabelJob(() => currentId.value);
+    });
+    bumpId = () => {
+      hub.epoch += 1;
+    };
+    flushSync();
+    page.resolve({ total: 0, images: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.job?.id).toBe('lb_1');
+
+    const stale = deferred<LabelJob>();
+    const acting = live.act(() => stale.promise);
+
+    // Switch to another server epoch and job lb_2 before the old action settles.
+    currentId.value = 'lb_2';
+    snapshot = { ...job('idle'), id: 'lb_2', name: 'job-2' };
+    page = deferred<LabelImagePage>();
+    bumpId();
+    flushSync();
+    page.resolve({ total: 0, images: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.job?.id).toBe('lb_2');
+
+    // Old lb_1 action settles late: must not clobber lb_2.
+    stale.resolve({ ...job('running'), id: 'lb_1', name: 'job-1' });
+    await acting;
+    expect(live.job?.id).toBe('lb_2');
+    expect(live.job?.status).toBe('idle');
+    stop();
+  });
+
   // Stress s3-live: deleted in another tab, the job's page stayed on "Reconnecting" over the last known job for good.
   it('notices a job deleted elsewhere: a dropped stream whose job answers 404 shows it gone, and the stream closes', async () => {
     const closes = vi.fn();

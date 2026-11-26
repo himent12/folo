@@ -109,6 +109,30 @@ describe('Menu', () => {
     unmount(c);
     target.remove();
   });
+
+  it('unmounting an open menu while focus recovery is pending does not throw or steal focus', async () => {
+    const target = document.createElement('div');
+    const outside = document.createElement('button');
+    outside.textContent = 'Outside';
+    document.body.append(target, outside);
+    const items = signal([
+      { label: 'One', onclick: () => {} },
+      { label: 'Two', onclick: () => {} },
+    ]);
+    const c = render(() => <Menu label="More actions" items={items.get()} />, target);
+    target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!.click();
+    flushSync();
+    await tick();
+    // Queue focus-recovery tick by shrinking items, then immediately unmount and focus an outside control.
+    items.set([{ label: 'One', onclick: () => {} }]);
+    flushSync();
+    unmount(c);
+    outside.focus();
+    await tick();
+    expect(document.activeElement).toBe(outside);
+    target.remove();
+    outside.remove();
+  });
 });
 
 describe('Menu order', () => {
@@ -316,5 +340,53 @@ describe('Menu placed on the viewport (fixed)', () => {
     // More room above: from the window's top edge down to the button.
     const low = window.innerHeight - 140;
     expect(await openAt(low, tall)).toEqual({ top: '8px', max: `${low - 6 - 8}px` });
+  });
+
+  it('positions a fixed menu when media query switches from phone sheet to desktop popover while open', async () => {
+    let isPhone = true;
+    const listeners = new Set<() => void>();
+    const mm = vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => ({
+      get matches() {
+        return isPhone;
+      },
+      media: query,
+      addEventListener: (_: string, fn: () => void) => listeners.add(fn),
+      removeEventListener: (_: string, fn: () => void) => listeners.delete(fn),
+    }) as unknown as MediaQueryList);
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      const r = { top: 120, bottom: 156, left: 900, right: 936, width: 36, height: 36, x: 900, y: 120 };
+      return { ...r, toJSON: () => r } as DOMRect;
+    });
+    const heights = (['offsetHeight', 'scrollHeight', 'clientHeight'] as const).map((k) =>
+      vi.spyOn(HTMLElement.prototype, k, 'get').mockImplementation(function (this: HTMLElement) {
+        return this.getAttribute('role') === 'menu' ? 100 : 0;
+      }),
+    );
+    try {
+      const items = [{ label: 'Open model', href: '#/m' }, { label: 'Delete', danger: true, onclick: () => {} }];
+      const c = mount(Menu, { target, props: { label: 'Actions', items, fixed: true } });
+      target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]')!.click();
+      flushSync();
+      await tick();
+      expect(target.querySelector('dialog [role="menu"]')).not.toBeNull();
+
+      // Switch media query from phone to desktop while open (without a separate resize event closing it).
+      isPhone = false;
+      for (const fn of listeners) fn();
+      flushSync();
+      await tick();
+      flushSync();
+      const desktopMenu = target.querySelector<HTMLElement>('.list.fixed[role="menu"]')!;
+      expect(desktopMenu).not.toBeNull();
+      expect(desktopMenu.style.top).toBe(`${120 + 36 + 6}px`);
+      unmount(c);
+    } finally {
+      target.remove();
+      rect.mockRestore();
+      for (const s of heights) s.mockRestore();
+      mm.mockRestore();
+    }
   });
 });

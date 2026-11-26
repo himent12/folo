@@ -72,7 +72,8 @@ export default function Benchmark() {
   // `?tab=loops&loop=…` (the loops' first links) opens the loop's own page.
   effect(() => {
     const l = router.route.query.get('loop');
-    if (l && id.get()) router.go(`/benchmarks/${encodeURIComponent(id.get())}/loops/${encodeURIComponent(l)}`, { replace: true });
+    if (l && id.get() && router.route.name === 'benchmark' && router.location.name === 'benchmark')
+      router.go(`/benchmarks/${encodeURIComponent(id.get())}/loops/${encodeURIComponent(l)}`, { replace: true });
   });
 
   const system = new Resource((s) => hub.api.system(s));
@@ -94,6 +95,7 @@ export default function Benchmark() {
 
   /** Replaces query params (null removes one) without adding history entries. */
   function setQuery(patch: Record<string, string | null>) {
+    if (router.location.name !== 'benchmark' || router.location.params.id !== id.peek()) return;
     const q = new URLSearchParams(router.route.query);
     for (const [k, v] of Object.entries(patch)) {
       if (v === null) q.delete(k);
@@ -322,19 +324,19 @@ export default function Benchmark() {
   const stopBusy = signal(false);
   const stopStatus = new DialogStatus();
   async function stopEntry() {
-    const b = bench.peek();
-    const e = stopping.peek();
+    const b = bench.peek(), e = stopping.peek();
     if (!b || !e || stopBusy.peek()) return;
-    const targetId = e.id;
+    const benchId = b.id, targetId = e.id, epoch = hub.epoch, mark = live.mark();
     stopBusy.set(true);
-    const mark = live.mark();
     try {
-      live.putEntry(await hub.api.stopBenchEntry(b.id, targetId), mark);
-      if (mounted && stopping.peek()?.id === targetId) stopping.set(null);
+      const stopped = await hub.api.stopBenchEntry(benchId, targetId);
+      const same = mounted && bench.peek()?.id === benchId && hub.epoch === epoch;
+      if (same) live.putEntry(stopped, mark);
+      if (same && stopping.peek()?.id === targetId) stopping.set(null);
     } catch (err) {
-      if (mounted && stopping.peek()?.id === targetId) stopStatus.error(err, 'Could not stop the entry');
-      // page-level: the stop confirm is closed or unmounted.
-      else toast.error(err, 'Could not stop the entry');
+      if (mounted && bench.peek()?.id === benchId && hub.epoch === epoch && stopping.peek()?.id === targetId) stopStatus.error(err, 'Could not stop the entry');
+      // page-level: the stop confirm is closed, unmounted, or on another benchmark.
+      else if (hub.epoch === epoch) toast.error(err, 'Could not stop the entry');
     } finally {
       stopBusy.set(false);
     }
@@ -343,21 +345,21 @@ export default function Benchmark() {
   const removeBusy = signal(false);
   const removeStatus = new DialogStatus();
   async function removeEntry() {
-    const b = bench.peek();
-    const e = removing.peek();
+    const b = bench.peek(), e = removing.peek();
     if (!b || !e || removeBusy.peek()) return;
-    const targetId = e.id;
+    const benchId = b.id, targetId = e.id, epoch = hub.epoch;
     removeBusy.set(true);
     try {
-      await hub.api.deleteBenchEntry(b.id, targetId);
-      live.dropEntry(targetId);
-      if (mounted && removing.peek()?.id === targetId) removing.set(null);
-      // page-level: its confirm dialog has closed on the line above.
-      toast.success(`Deleted ${e.name}`, 'Its result is gone from the leaderboard. The model and its files were not touched.');
+      await hub.api.deleteBenchEntry(benchId, targetId);
+      const same = mounted && bench.peek()?.id === benchId && hub.epoch === epoch;
+      if (same) live.dropEntry(targetId);
+      if (same && removing.peek()?.id === targetId) removing.set(null);
+      // page-level: its confirm dialog closed above or moved off this benchmark.
+      if (hub.epoch === epoch) toast.success(`Deleted ${e.name}`, 'Its result is gone from the leaderboard. The model and its files were not touched.');
     } catch (err) {
-      if (mounted && removing.peek()?.id === targetId) removeStatus.error(err, 'Could not delete the entry');
-      // page-level: the delete confirm is closed or unmounted.
-      else toast.error(err, 'Could not delete the entry');
+      if (mounted && bench.peek()?.id === benchId && hub.epoch === epoch && removing.peek()?.id === targetId) removeStatus.error(err, 'Could not delete the entry');
+      // page-level: the delete confirm is closed, unmounted, or on another benchmark.
+      else if (hub.epoch === epoch) toast.error(err, 'Could not delete the entry');
     } finally {
       removeBusy.set(false);
     }
@@ -387,15 +389,15 @@ export default function Benchmark() {
   async function remove() {
     const b = bench.peek();
     if (!b || deleteBusy.peek()) return;
-    const startPath = router.location.path;
+    const benchId = b.id, epoch = hub.epoch, startPath = router.location.path;
     deleteBusy.set(true);
     try {
-      await hub.api.deleteBench(b.id);
-      if (mounted) deleteOpen.set(false);
+      await hub.api.deleteBench(benchId);
+      if (mounted && bench.peek()?.id === benchId && hub.epoch === epoch) deleteOpen.set(false);
       toast.success(`Deleted ${b.name}`, 'Its images, entries and loops are gone. Models, runs and datasets were not touched.');
-      if (mounted && router.location.path === startPath) router.go('/benchmarks', { replace: true });
+      if (mounted && router.location.path === startPath && hub.epoch === epoch) router.go('/benchmarks', { replace: true });
     } catch (e) {
-      if (mounted && deleteOpen.peek()) deleteStatus.error(e, 'Could not delete the benchmark');
+      if (mounted && bench.peek()?.id === benchId && hub.epoch === epoch && deleteOpen.peek()) deleteStatus.error(e, 'Could not delete the benchmark');
       else toast.error(e, 'Could not delete the benchmark');
     } finally {
       deleteBusy.set(false);

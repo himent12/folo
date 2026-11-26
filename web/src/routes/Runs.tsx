@@ -225,10 +225,15 @@ export default function Runs() {
   const choosing = computed(() => picking.get() || selected.get().length > 0);
   const searchEl = signal<HTMLInputElement | undefined>(undefined);
   const liveNote = signal('');
+  let noteSeq = 0;
+  onCleanup(() => noteSeq++);
   function announce(message: string) {
+    const seq = ++noteSeq;
     if (liveNote.peek() === message) {
       liveNote.set('');
-      queueMicrotask(() => liveNote.set(message));
+      queueMicrotask(() => {
+        if (mounted && seq === noteSeq) liveNote.set(message);
+      });
     } else {
       liveNote.set(message);
     }
@@ -243,6 +248,7 @@ export default function Runs() {
     query.set('');
     announce('Cleared run filters.');
     queueMicrotask(() => {
+      if (!mounted) return;
       const input = searchEl.peek();
       if (input && input.isConnected && !input.disabled) input.focus();
     });

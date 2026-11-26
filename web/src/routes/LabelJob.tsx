@@ -166,19 +166,22 @@ export default function LabelJob() {
     const req = choice.request();
     const cur = job.peek();
     if (!cur || !req || starting.peek()) return;
+    const jobId = cur.id;
+    const epoch = hub.epoch;
     const fromAgain = againOpen.peek();
     starting.set(true);
     startError.set(undefined);
     try {
       // After the saves asked before it, with the field's latest text: the run uses what the field says.
       if (!(await instructions.save())) return;
-      const jobId = cur.id;
+      if (!mounted || job.peek()?.id !== jobId || hub.epoch !== epoch) return;
       await live.act(() => hub.api.startLabeling(jobId, { ...req, scope }));
-      if (mounted) againOpen.set(false);
+      if (mounted && job.peek()?.id === jobId && hub.epoch === epoch) againOpen.set(false);
     } catch (e) {
+      const sameJob = mounted && job.peek()?.id === jobId && hub.epoch === epoch;
       // In its dialog when asked from one, else in the panel under the button.
-      if (mounted && fromAgain && againOpen.peek()) againStatus.error(e, 'Could not start the agent');
-      else if (mounted) startError.set(e);
+      if (sameJob && fromAgain && againOpen.peek()) againStatus.error(e, 'Could not start the agent');
+      else if (sameJob) startError.set(e);
       else toast.error(e, 'Could not start the agent');
     } finally {
       starting.set(false);
@@ -191,13 +194,14 @@ export default function LabelJob() {
   async function stop() {
     const cur = job.peek();
     if (!cur || stopBusy.peek()) return;
-    stopBusy.set(true);
     const jobId = cur.id;
+    const epoch = hub.epoch;
+    stopBusy.set(true);
     try {
       await live.act(() => hub.api.stopLabeling(jobId));
-      if (mounted) stopOpen.set(false);
+      if (mounted && job.peek()?.id === jobId && hub.epoch === epoch) stopOpen.set(false);
     } catch (e) {
-      if (mounted && stopOpen.peek()) stopStatus.error(e, 'Could not stop the agent');
+      if (mounted && job.peek()?.id === jobId && hub.epoch === epoch && stopOpen.peek()) stopStatus.error(e, 'Could not stop the agent');
       else toast.error(e, 'Could not stop the agent');
     } finally {
       stopBusy.set(false);
@@ -215,15 +219,17 @@ export default function LabelJob() {
   async function remove() {
     const cur = job.peek();
     if (!cur || deleteBusy.peek()) return;
+    const jobId = cur.id;
+    const epoch = hub.epoch;
     const startPath = router.location.path;
     deleteBusy.set(true);
     try {
-      await hub.api.deleteLabelJob(cur.id);
-      if (mounted) deleteOpen.set(false);
+      await hub.api.deleteLabelJob(jobId);
+      if (mounted && job.peek()?.id === jobId && hub.epoch === epoch) deleteOpen.set(false);
       toast.success(`Deleted ${cur.name}`, 'Images from folders and datasets made from it were not touched.');
-      if (mounted && router.location.path === startPath) router.go('/datasets/label', { replace: true });
+      if (mounted && router.location.path === startPath && hub.epoch === epoch) router.go('/datasets/label', { replace: true });
     } catch (e) {
-      if (mounted && deleteOpen.peek()) deleteStatus.error(e, 'Could not delete the job');
+      if (mounted && job.peek()?.id === jobId && hub.epoch === epoch && deleteOpen.peek()) deleteStatus.error(e, 'Could not delete the job');
       else toast.error(e, 'Could not delete the job');
     } finally {
       deleteBusy.set(false);
