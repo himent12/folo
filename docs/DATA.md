@@ -220,13 +220,15 @@ keeps one, as the YOLO reader drops duplicate label lines.
 | `close_mosaic` | 10 | mosaic and mixup are off for the last N epochs, at most half of the run (`min(N, floor(epochs / 2))`; needs `LoaderConfig::epochs`) |
 | `min_box_px`, `min_area_ratio`, `max_aspect` | 2, 0.1, 100 | boxes narrower than 2 px, keeping < 10 % of their area, or thinner than 1:100 after a geometric op are dropped |
 
-`TrainTransform` runs, per sample: mosaic (4 images resized to long side `s`) or letterbox to `s x s` → random affine
-(centre, rotate + scale, shear, translate) to `s x s` → mixup → HSV (integer hexcone HSV with LUTs) → flips. The
-mosaic and its affine run as one step (`mosaic_affine`, bit for bit `random_affine` of `mosaic4`): the warp reads the
-four tiles where they lie on the `2s x 2s` canvas instead of painting the canvas first (with rotation or shear the
-canvas is painted and warped as before). HSV uses explicit 256-bit AVX2 kernels on CPUs with AVX2 (packed `max`
-lookups and exact division-free `/ 255` and `/ 65280` integer arithmetic), matching the scalar per-pixel kernel on all
-2^24 colours. Inside `DataLoader`, workers write straight into their disjoint planar batch slots, fusing warp (or
+`TrainTransform` runs, per sample: mosaic (4 images resized to long side `s`, with each image's boxes clipped to its
+visible tile on the `2s x 2s` canvas) or letterbox to `s x s` → random affine (centre, rotate + scale, shear,
+translate) to `s x s` → mixup → HSV (integer hexcone HSV) → flips. The mosaic and its affine run as one step
+(`mosaic_affine`, bit for bit `random_affine` of `mosaic4`): the warp reads the four tiles where they lie on the
+`2s x 2s` canvas instead of painting the canvas first (with rotation or shear the canvas is painted and warped as
+before). HSV uses gather-free 256-bit AVX2 kernels on CPUs with AVX2 (exact IEEE-754 reciprocals, linear gain scaling,
+byte-packed sector dispatch, and exact division-free `/ 255` and `/ 65280` integer arithmetic), matching the scalar
+per-pixel kernel on all 2^24 colours. Inside `DataLoader`, workers write straight into their disjoint planar batch
+slots, fusing warp (or
 letterbox), HSV, flips and planar `u8`/`f32` conversion in a single L1-resident row pass without allocating an
 intermediate warp output HWC buffer or a separate collator copy pass (when mixup triggers, it blends two
 materialised `imgsz x imgsz` interleaved images before running the fused HSV, flips and planar pass; every path stays

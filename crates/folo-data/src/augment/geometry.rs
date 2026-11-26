@@ -62,7 +62,7 @@ pub fn transform_boxes(
     height: u32,
     filter: &BoxFilter,
 ) -> Vec<BBox> {
-    if boxes.is_empty() || width == 0 || height == 0 {
+    if boxes.is_empty() || width == 0 || height == 0 || m.inverse().is_none() {
         return Vec::new();
     }
     let mut out = Vec::with_capacity(boxes.len());
@@ -184,7 +184,7 @@ pub(crate) fn transform_boxes_in_place(
     if boxes.is_empty() {
         return;
     }
-    if width == 0 || height == 0 {
+    if width == 0 || height == 0 || m.inverse().is_none() {
         boxes.clear();
         return;
     }
@@ -497,8 +497,20 @@ mod tests {
         let mut got = boxes.clone();
         transform_boxes_in_place(&mut got, 100, 100, &m, 64, 64, &BoxFilter::default());
         assert_eq!(got, want);
-        let mut zero_out = boxes;
+        let mut zero_out = boxes.clone();
         transform_boxes_in_place(&mut zero_out, 100, 100, &m, 0, 64, &BoxFilter::default());
         assert!(zero_out.is_empty());
+        // Singular affine collapses the image to border padding and must drop all boxes, even when its
+        // collapsed diagonal bounding box would otherwise have positive width and height.
+        let singular = Affine([0.0, 1.0, 0.0, 0.0, 1.0, 0.0]);
+        assert!(singular.inverse().is_none());
+        assert!(transform_boxes(&boxes, 100, 100, &singular, 64, 64, &perm).is_empty());
+        let mut sing_in_place = boxes.clone();
+        transform_boxes_in_place(&mut sing_in_place, 100, 100, &singular, 64, 64, &perm);
+        assert!(sing_in_place.is_empty());
+        let sample = Sample { image: Image::new(32, 32, [200, 10, 20]), boxes };
+        let warped = affine_sample(&sample, &singular, 32, 32, &perm);
+        assert!(warped.boxes.is_empty());
+        assert!(warped.image.data.iter().all(|&b| b == PAD_VALUE));
     }
 }

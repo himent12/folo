@@ -12,8 +12,8 @@ use crate::warp::{Plane, PlaneTiles, Tile};
 ///
 /// The centre is drawn from `[s/2, 3s/2)` in both axes; image 0 goes top-left of it, 1 top-right, 2 bottom-left and
 /// 3 bottom-right, each cropped by the canvas edge. Inputs are normally pre-resized so their long side is `s`. Boxes
-/// are offset and clipped to the canvas; follow with an affine (as [`crate::TrainTransform`] does) to get back to
-/// `s x s` and to drop boxes that became too small.
+/// are offset and clipped to each image's visible tile on the canvas; follow with an affine (as
+/// [`crate::TrainTransform`] does) to get back to `s x s` and to drop boxes that became too small.
 pub fn mosaic4(parts: [&Sample; 4], s: u32, rng: &mut Rng) -> Sample {
     let (plane, boxes) = mosaic_plane(parts, s, rng);
     Sample { image: plane.render(), boxes }

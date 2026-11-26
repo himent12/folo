@@ -1,9 +1,10 @@
 //! HSV colour jitter with integer hexcone HSV and lookup tables.
 //!
-//! The arithmetic is integer only, so it has one exact result per pixel. On CPUs with AVX2, explicit 256-bit SIMD
-//! kernels (`crate::simd::hsv_fused`) compute 8 pixels at a time using packed `max_lut` gathers and exact division-free
-//! `/ 255` and `/ 65280` identities, both standalone ([`apply_hsv`]) and fused into the L1 planar pipeline. Tests check
-//! AVX2 against the scalar per-pixel reference on all 2^24 colours.
+//! The arithmetic is integer only, so it has one exact result per pixel. On CPUs with AVX2, gather-free 256-bit SIMD
+//! kernels (`crate::simd::hsv`) compute 8 pixels at a time using exact IEEE-754 reciprocals, linear gain scaling,
+//! byte-packed sector dispatch, and exact division-free `/ 255` and `/ 65280` identities, both standalone
+//! ([`apply_hsv`]) and fused into the L1 planar pipeline. Tests check AVX2 against the scalar per-pixel reference on
+//! all 2^24 colours.
 
 use crate::image::Image;
 use crate::par::for_bands;
