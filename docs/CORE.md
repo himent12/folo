@@ -242,23 +242,23 @@ these kernels:
   also whether the input, padded copy and output each fit one allocation (`isize::MAX` bytes), on 32-bit
   targets too) and writes u8 C4 codes or `f32` NCHW. A micro-kernel computes 4 output channels × 24 output
   pixels in i32: AVX-VNNI `vpdpbusd` (u8 × s8, 4 products per lane, no saturation) when the CPU has
-  `avxvnni` (and AVX2, FMA), detected at run time, else portable scalar code with the same sums. 1×1 stride-1 convs read
-  the input planes in place; other convs read a padded, phase-split copy of each image's rows (`image_rows`, padding
-  with the zero point and rounding each channel group's phase block up to a 64-byte / 16-`u32` multiple to reduce
+  `avxvnni` (and AVX2, FMA), AVX-512 VNNI VL (`avx512vnni` + `avx512vl`) where supported, exact AVX2 `vpmaddwd`, Wasm SIMD128, detected at run time, else portable scalar code with the same sums. On x86-64 with AVX2 + FMA, `fused.rs` + `fused_epi.rs` execute each task's L1-blocked `(c_tile, g, chunk)` tile loop and epilogue inside a single `#[target_feature]` function (zero per-tile `vzeroupper`, zero indirect calls, direct strided 1×1 K-loop, and contiguous slice copies for non-contiguous cross-row chunks). 1×1 stride-1 convs read
+  the input planes in place; other convs read a padded, phase-split copy of each image's rows (`rows.rs`: `image_rows`, padding
+  with the zero point, parallelised across channel groups and row bands for few-group high-resolution layers, and rounding each channel group's phase block up to a 64-byte / 16-`u32` multiple to reduce
   cache-line false sharing across parallel `fill` workers) so each output pixel's taps are contiguous columns. The epilogue (`(acc − corr) · scale + bias` as one
   FMA, SiLU, the residual as one FMA, requantise) is the same `f32` operations in the scalar and AVX2 code, so
   results are bit-identical across kernels and thread counts; the AVX2 form runs on any CPU with AVX2 and FMA
   (`FOLO_Q8_SCALAR=1` turns off both vector paths). Its SiLU (`q8::silu_q8`) is a division-free, bit-exact scalar and
   AVX2 `x / (1 + e^{−x})` using base-2 range reduction (`1.5·2^23 + 127` magic rounding, single-shift `2^n`), a
-  degree-5 minimax `2^f` polynomial, and a bit-hack seed + 4-FMA factored Householder-6 reciprocal (`< 2e-7` hybrid
+  degree-5 Estrin-form minimax `2^f` polynomial evaluated in register-spill-free 2-vector pairs (`silu_q8_avx2_x2`), and a bit-hack seed + 4-FMA factored Householder-6 reciprocal (`< 2.5e-7` hybrid
   error on `[-86, 86]`); the specialised AVX2 epilogue writes contiguous 24-pixel tiles directly to the C4 output
   (for both 1×1 and within-row `k×k` chunks), packing four channels' codes with saturating `packs` / `packus` and
   one byte shuffle. Work is split into (image, pixel block, channel block) tasks: capped at `3 · threads`, none
-  under `2¹⁸` multiply-adds (and small convs below the serial floor run without waking the pool). An image whose
+  under `2¹⁸` multiply-adds (and small convs below the serial floor run without waking the pool), with a heuristic that rounds multi-task pixel blocks to even chunk counts (192-byte / 3-cache-line multiples on contiguous planes) to reduce output-plane false sharing. An image whose
   input fits in 384 KiB (a core's L2) is split by channel blocks first, so tasks write whole output planes; pixel
   blocks of a few 24-column chunks would share cache lines with their neighbours on every plane. Bigger inputs
   are split by pixel blocks first, so each task reads its own part once. `q8::stem_u8` runs 3-channel `u8` `[R, G, B, 0]`
-  stems directly in L1-resident rotating row strips with AVX2 even/odd de-interleaving.
+  stems directly in L1-resident rotating row strips with AVX2 even/odd de-interleaving and a fused per-row x86-64 tile pass.
 - **Others.** AVX2-vectorised `quantize` / `dequantize` (4 channels per C4 word read) between `f32` NCHW and C4
   codes, separable AVX2 max pooling on codes (`max` of bytes; exact since the grid is monotonic, reusing a thread-local
   scratch buffer for small serial planes below `MIN_POOLED`, a single pooled `ScratchWords` for larger serial planes,

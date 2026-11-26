@@ -101,7 +101,7 @@ pub fn uses_vnni() -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn uses_avx_vnni() -> bool {
+pub(super) fn uses_avx_vnni() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| {
         std::env::var_os("FOLO_Q8_SCALAR").is_none()
@@ -112,7 +112,7 @@ fn uses_avx_vnni() -> bool {
 }
 
 #[cfg(target_arch = "x86_64")]
-fn uses_avx512_vnni() -> bool {
+pub(super) fn uses_avx512_vnni() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| {
         std::env::var_os("FOLO_Q8_SCALAR").is_none()
