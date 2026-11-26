@@ -306,3 +306,103 @@ fn a_server_without_benchmarks_registers_nothing() {
     let after: Value = client.get("/datasets").unwrap();
     assert_eq!(after, before);
 }
+
+/// Concurrent `folo bench create --data` calls where one fails on an empty split and another succeeds on a valid
+/// split must never unregister the successful benchmark's source dataset.
+#[test]
+fn concurrent_bench_create_keeps_successful_source_registered() {
+    let t = TestDir::new("cli-bench-concurrent");
+    let home = t.join("home");
+    let (_serve, url, client) = serve(&home, &[]);
+
+    for round in 0..4 {
+        let data = t.join(format!("data_{round}"));
+        let mut synth = folo();
+        synth.args(["dataset", "synth"]).arg(&data).args([
+            "--images",
+            "8",
+            "--imgsz",
+            "64",
+            "--val-frac",
+            "0.5",
+            "--seed",
+            "13",
+        ]);
+        let (code, _, err) = run(synth);
+        assert_eq!(code, 0, "round {round} synth: {err}");
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let spawn_create = |name: String, split: &'static str, b: std::sync::Arc<std::sync::Barrier>| {
+            let data = data.clone();
+            let url = url.clone();
+            std::thread::spawn(move || {
+                b.wait();
+                bench(
+                    &["create", &name, "--data", data.to_str().unwrap(), "--split", split, "--plan", PLAN],
+                    &["--server", url.as_str()],
+                )
+            })
+        };
+
+        let h_test = spawn_create(format!("Round{round} test"), "test", barrier.clone());
+        let h_val = spawn_create(format!("Round{round} val"), "val", barrier);
+        let (test_code, test_rec, test_err) = h_test.join().unwrap();
+        let (val_code, val_rec, val_err) = h_val.join().unwrap();
+
+        assert_eq!(test_code, 1, "round {round} test should fail: {test_rec:?} {test_err}");
+        assert_eq!(s(&test_rec.last().unwrap()["error"]["code"]), "invalid_dataset", "{test_rec:?}");
+        assert_eq!(val_code, 0, "round {round} val should succeed: {val_rec:?} {val_err}");
+
+        let bench_rec = val_rec.last().unwrap();
+        let ds_id = s(&bench_rec["source"]["dataset_id"]);
+        let ds: Value = client
+            .get(&format!("/datasets/{ds_id}"))
+            .unwrap_or_else(|e| panic!("round {round}: source dataset {ds_id} disappeared: {e}"));
+        assert_eq!(s(&ds["id"]), ds_id);
+    }
+}
+
+/// Malformed `--server` URLs (including scheme-only `http://`) fail upfront with exit 2 (`usage`), not a
+/// `server_unreachable` network error, across `bench`, `label`, and `mcp`, and never echo rejected credentials.
+#[test]
+fn invalid_server_urls_fail_with_usage_error() {
+    for (bad, secret) in [
+        ("http://", None),
+        ("https://", None),
+        ("http:///", None),
+        ("http://:7878", None),
+        ("http://127.0.0.1:0", None),
+        ("http://127.0.0.1:99999", None),
+        ("http://[::1", None),
+        ("http://user:s3cretpass@127.0.0.1:7878", Some("s3cretpass")),
+        ("http://127.0.0.1:7878?token=s3crettok", Some("s3crettok")),
+    ] {
+        let (b_code, b_rec, b_err) = bench(&["list"], &["--server", bad]);
+        assert_eq!(b_code, 2, "bench --server {bad:?}: {b_rec:?} {b_err}");
+        let e = &b_rec.last().unwrap()["error"];
+        assert_eq!(s(&e["code"]), "usage", "bench --server {bad:?}: {e}");
+        if let Some(sec) = secret {
+            assert!(!e.to_string().contains(sec) && !b_err.contains(sec), "bench leaked secret: {e} {b_err}");
+        }
+
+        let mut lbl = folo();
+        lbl.args(["label", "jobs", "--server", bad, "--json"]);
+        let (code, stdout, stderr) = run(lbl);
+        assert_eq!(code, 2, "label --server {bad:?}: {stdout} {stderr}");
+        let lbl_err: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+        assert_eq!(s(&lbl_err["error"]["code"]), "usage", "label --server {bad:?}: {lbl_err}");
+        if let Some(sec) = secret {
+            assert!(!stdout.contains(sec) && !stderr.contains(sec), "label leaked secret: {stdout} {stderr}");
+        }
+
+        let mut mcp = folo();
+        mcp.args(["mcp", "--server", bad]);
+        let (code, stdout, stderr) = run(mcp);
+        assert_eq!(code, 2, "mcp --server {bad:?}: stdout={stdout} stderr={stderr}");
+        assert!(stdout.is_empty(), "mcp stdout must stay empty on error: {stdout}");
+        assert!(stderr.contains("--server"), "mcp stderr: {stderr}");
+        if let Some(sec) = secret {
+            assert!(!stderr.contains(sec), "mcp leaked secret: {stderr}");
+        }
+    }
+}

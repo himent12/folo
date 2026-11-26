@@ -177,6 +177,15 @@ impl Store for RealStore {
         self.register(req.name.map_or(Naming::Default, Naming::Given), requested_path(&req.path)?, req.format)
     }
 
+    fn register_dataset_tracked(&self, req: RegisterDataset) -> Result<(Dataset, Option<String>)> {
+        self.register_tracked(
+            req.name.map_or(Naming::Default, Naming::Given),
+            requested_path(&req.path)?,
+            req.format,
+            true,
+        )
+    }
+
     fn create_synthetic(&self, req: SyntheticDataset) -> Result<Dataset> {
         let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_body", m);
         if req.name.trim().is_empty() {
@@ -294,6 +303,10 @@ impl Store for RealStore {
         // Exclusive (briefly), so no run is admitted for the dataset while its identity changes (`RealStore::files`).
         let _files = self.files.write().unwrap_or_else(|p| p.into_inner());
         self.unregister(id)
+    }
+
+    fn delete_dataset_if_unused(&self, id: &str, token: &str) -> Result<()> {
+        self.unregister_if_unused(id, token)
     }
 
     fn delete_dataset_files(&self, id: &str) -> Result<()> {

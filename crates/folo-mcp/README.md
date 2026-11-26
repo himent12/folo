@@ -15,6 +15,7 @@ server from the `folo mcp` flags, `folo describe` includes the tool schemas, `fo
 |---|---|
 | `src/lib.rs` | `Options` (the flags), `Backend` (`Real`, `Mock`, `Proxy`), `build`, `serve_stdio`, `describe_tools` |
 | `src/server.rs` | `FoloMcp`, the rmcp `ServerHandler`: initialization `instructions` (tailored to `--read-only`), `tools/list` and `tools/call` (with fuzzy tool-name suggestions), resources and subscriptions (with doc/entity suggestions and bounded batch-cache reads), prompts, logging, stopping the session's runs on exit |
+| `src/stdio.rs` | `ErrorIdWriter`: outgoing stdio frame wrapper ensuring `-32600` invalid-request error responses include `"id":null` per docs/MCP.md |
 | `src/batch_cache.rs` | `BatchCache`: bounded LRU cache of recent `predict_batch` payloads served at `folo://predictions/{batch_id}` |
 | `src/tools/` | The tools; see below |
 | `src/types.rs` | Argument and result types only MCP has (paging, summaries, `run_status` extras); everything else is a folo-api type. `src/types/label.rs`: those of the labeling tools (`PxBox`, compact jobs, images and views); `src/types/bench.rs`: the compact benchmark results (catalog, summaries, a benchmark with its leaderboard, an entry's state and score) |

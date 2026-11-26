@@ -921,6 +921,72 @@ fn check_coco_reconciles_boxes_against_real_image_dimensions() {
     assert_eq!((st["boxes"].as_u64(), st["empty_images"].as_u64()), (Some(1), Some(1)), "{st}");
 }
 
+/// `folo dataset convert` fails loudly on corrupt, missing-`images`, or dangling-symlink COCO splits without
+/// publishing partial output, while still allowing a root-level heuristic file like `coco_predictions.json`.
+#[test]
+fn convert_refuses_corrupt_coco_split_annotation_file() {
+    let t = TestDir::new("cli-convert-corrupt-coco");
+    let src = t.join("synthetic");
+    let (code, _, stderr) = folo(&[
+        "dataset",
+        "synth",
+        s(&src),
+        "--images",
+        "8",
+        "--imgsz",
+        "64",
+        "--val-frac",
+        "0.5",
+        "--seed",
+        "13",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let coco = t.join("coco");
+    assert_eq!(folo(&["dataset", "convert", s(&src), s(&coco), "--to", "coco"]).0, 0);
+    let orig_val = std::fs::read(coco.join("annotations/instances_val.json")).unwrap();
+    let assert_refused = |out: &Path, file: &str, needle: &str| {
+        let (code, stdout, _) = folo(&["dataset", "convert", s(&coco), s(out), "--to", "yolo", "--json"]);
+        let err = &json_lines(&stdout).pop().unwrap()["error"];
+        assert_eq!((code, err["code"].as_str()), (1, Some("invalid_dataset")), "{err}");
+        let msg = err["message"].as_str().unwrap();
+        assert!(msg.contains(file) && msg.contains(needle), "got: {msg}");
+        assert!(!out.exists(), "must not publish partial output: {}", out.display());
+    };
+
+    // 1. Corrupt JSON and 2. valid JSON missing `images` in annotations/instances_val.json.
+    std::fs::write(coco.join("annotations/instances_val.json"), "{\"images\":[").unwrap();
+    assert_refused(&t.join("out_bad_json"), "annotations/instances_val.json", "invalid JSON");
+    std::fs::write(coco.join("annotations/instances_val.json"), "{}").unwrap();
+    assert_refused(&t.join("out_no_images"), "annotations/instances_val.json", "no `images` array");
+
+    // 3. Valid annotations + root `coco_predictions.json` detections array still converts cleanly.
+    std::fs::write(coco.join("annotations/instances_val.json"), &orig_val).unwrap();
+    std::fs::write(
+        coco.join("coco_predictions.json"),
+        r#"[{"image_id":1,"category_id":1,"bbox":[0,0,10,10],"score":0.9}]"#,
+    )
+    .unwrap();
+    let ok_out = t.join("out_with_preds");
+    let (code, stdout, stderr) =
+        folo(&["dataset", "convert", s(&coco), s(&ok_out), "--to", "yolo", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(json_lines(&stdout)[0]["splits"], serde_json::json!({ "train": 4, "val": 4, "test": 0 }));
+
+    // 4. Dangling annotation symlink (or dangling split dir link) fails loudly with no partial output.
+    let val_ann = coco.join("annotations/instances_val.json");
+    std::fs::remove_file(&val_ann).unwrap();
+    if try_file_symlink(&t.join("missing_val.json"), &val_ann) {
+        assert_refused(&t.join("out_dangling_file"), "annotations/instances_val.json", "dangling symlink");
+    } else {
+        std::fs::write(&val_ann, &orig_val).unwrap();
+        let doomed = t.join("doomed_split");
+        std::fs::create_dir(&doomed).unwrap();
+        let _link = DirLink::new(&doomed, coco.join("test"));
+        std::fs::remove_dir(&doomed).unwrap();
+        assert_refused(&t.join("out_dangling_dir"), "test", "dangling symlink");
+    }
+}
+
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
 fn folo_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));

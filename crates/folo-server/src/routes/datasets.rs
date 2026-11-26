@@ -20,12 +20,23 @@ pub(super) async fn list_datasets(State(st): State<AppState>) -> Result<Json<Dat
     Ok(Json(DatasetList { datasets }))
 }
 
+/// Response header on `POST /api/datasets` carrying the per-registration rollback token when this request inserted
+/// a brand-new registration (omitted when returning an already-registered dataset).
+const HEADER_DATASET_ROLLBACK: header::HeaderName =
+    header::HeaderName::from_static("x-folo-dataset-rollback");
+
 pub(super) async fn register_dataset(
     State(st): State<AppState>,
     ApiJson(req): ApiJson<RegisterDataset>,
 ) -> Result<Response> {
-    let ds = blocking(&st, move |s| s.register_dataset(req)).await?;
-    Ok((StatusCode::CREATED, Json(ds)).into_response())
+    let (ds, rollback) = blocking(&st, move |s| s.register_dataset_tracked(req)).await?;
+    let mut res = (StatusCode::CREATED, Json(ds)).into_response();
+    if let Some(token) = rollback
+        && let Ok(val) = HeaderValue::from_str(&token)
+    {
+        res.headers_mut().insert(HEADER_DATASET_ROLLBACK, val);
+    }
+    Ok(res)
 }
 
 pub(super) async fn create_synthetic(
@@ -48,6 +59,9 @@ pub(super) struct DeleteParams {
     /// Also delete the dataset's folder (only one the server wrote under `<data dir>/datasets`).
     #[serde(default)]
     files: bool,
+    /// Per-registration rollback token from `x-folo-dataset-rollback`: unregister only if this exact registration
+    /// is still exclusive and unreferenced by any training run or benchmark (`409 dataset_in_use` otherwise).
+    rollback: Option<String>,
 }
 
 pub(super) async fn delete_dataset(
@@ -55,7 +69,28 @@ pub(super) async fn delete_dataset(
     ApiPath(id): ApiPath<String>,
     ApiQuery(p): ApiQuery<DeleteParams>,
 ) -> Result<StatusCode> {
-    blocking(&st, move |s| if p.files { s.delete_dataset_files(&id) } else { s.delete_dataset(&id) }).await?;
+    if p.files && p.rollback.is_some() {
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_query",
+            "files=true and rollback cannot be combined",
+        ));
+    }
+    if let Some(ref token) = p.rollback
+        && token.is_empty()
+    {
+        return Err(Error::new(StatusCode::BAD_REQUEST, "invalid_query", "rollback token must not be empty"));
+    }
+    blocking(&st, move |s| {
+        if p.files {
+            s.delete_dataset_files(&id)
+        } else if let Some(token) = p.rollback {
+            s.delete_dataset_if_unused(&id, &token)
+        } else {
+            s.delete_dataset(&id)
+        }
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

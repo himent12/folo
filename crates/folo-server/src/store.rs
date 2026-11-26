@@ -502,6 +502,12 @@ pub trait Store: Send + Sync + 'static {
     fn list_datasets(&self) -> Result<Vec<Dataset>>;
     /// Registers a folder on disk.
     fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset>;
+    /// Registers a folder on disk and returns `(dataset, rollback_token)` where `rollback_token` is `Some` iff this
+    /// call created a brand-new exclusive registration that may be rolled back via [`Store::delete_dataset_if_unused`].
+    /// Defaults to `(register_dataset, None)` when ownership is not tracked.
+    fn register_dataset_tracked(&self, req: RegisterDataset) -> Result<(Dataset, Option<String>)> {
+        self.register_dataset(req).map(|ds| (ds, None))
+    }
     /// Generates a synthetic dataset.
     fn create_synthetic(&self, req: SyntheticDataset) -> Result<Dataset>;
     /// One dataset with stats.
@@ -514,6 +520,16 @@ pub trait Store: Send + Sync + 'static {
     fn image(&self, id: &str, image_id: &str, thumb: Option<u32>) -> Result<ImageData>;
     /// Unregisters a dataset (never deletes files).
     fn delete_dataset(&self, id: &str) -> Result<()>;
+    /// Unregisters `id` only if its active registration matches `token`, has not been shared with another
+    /// registration, and is not referenced by any training run or benchmark (`409 dataset_in_use` otherwise).
+    /// Defaults to refusing so stores that cannot prove exclusivity never unregister a live dataset.
+    fn delete_dataset_if_unused(&self, id: &str, token: &str) -> Result<()> {
+        let _ = token;
+        Err(crate::error::Error::conflict(
+            "dataset_in_use",
+            format!("dataset '{id}' cannot be verified unused"),
+        ))
+    }
     /// Unregisters a dataset and deletes its folder, which must be one this server wrote under `<data dir>/datasets`
     /// (a generated sample set, a labeling job's export, an upload); any other is `400 invalid_query`.
     fn delete_dataset_files(&self, id: &str) -> Result<()> {

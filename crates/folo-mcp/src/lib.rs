@@ -34,6 +34,7 @@ pub mod proxy;
 mod render;
 mod resources;
 mod server;
+mod stdio;
 mod tools;
 pub mod types;
 
@@ -127,9 +128,9 @@ pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
         Backend::Real => FoloMcp::new(Arc::new(open_real_store(&opts)), None, opts),
         Backend::Mock => FoloMcp::new(Arc::new(MockStore::new()), None, opts),
         Backend::Proxy { url, token } => {
-            if !url.starts_with("http://") && !url.starts_with("https://") {
+            if let Err(why) = folo_client::check_base_url(&url) {
                 return Err(format!(
-                    "--server (or FOLO_SERVER) must be the http:// or https:// URL of a `folo serve`, got `{url}`"
+                    "--server (or FOLO_SERVER) must be a valid http:// or https:// URL of a `folo serve` ({why})"
                 ));
             }
             let http = Arc::new(proxy::HttpStore::new(&url, token.as_deref()));
@@ -146,7 +147,8 @@ pub async fn serve_stdio(
     server: FoloMcp,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<(), String> {
-    let running = match server.clone().serve(rmcp::transport::stdio()).await {
+    let transport = (tokio::io::stdin(), stdio::ErrorIdWriter::new(tokio::io::stdout()));
+    let running = match server.clone().serve(transport).await {
         Ok(r) => Some(r),
         // The client went away (or never spoke) before the lifecycle started: nothing to clean up.
         Err(ServerInitializeError::ConnectionClosed(_)) => None,

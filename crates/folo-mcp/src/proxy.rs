@@ -284,6 +284,19 @@ impl Store for HttpStore {
         self.post("/datasets", &req)
     }
 
+    fn register_dataset_tracked(&self, req: RegisterDataset) -> Result<(Dataset, Option<String>), Error> {
+        let (headers, ds) = self.client.post_with_headers("/datasets", &req).map_err(store_error)?;
+        // Only servers that emit `x-folo-dataset-rollback` both confirm ownership of this exact registration and
+        // support `DELETE /api/datasets/{id}?rollback=<token>`; older servers omit it so callers never send an
+        // unsafe unconditional rollback delete.
+        let token = headers
+            .get("x-folo-dataset-rollback")
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+        Ok((ds, token))
+    }
+
     fn create_synthetic(&self, req: SyntheticDataset) -> Result<Dataset, Error> {
         self.post("/datasets/synthetic", &req)
     }
@@ -328,6 +341,10 @@ impl Store for HttpStore {
 
     fn delete_dataset(&self, id: &str) -> Result<(), Error> {
         self.delete(&format!("/datasets/{}", encode(id)))
+    }
+
+    fn delete_dataset_if_unused(&self, id: &str, token: &str) -> Result<(), Error> {
+        self.delete(&format!("/datasets/{}?rollback={}", encode(id), encode(token)))
     }
 
     fn delete_dataset_files(&self, id: &str) -> Result<(), Error> {

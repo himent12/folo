@@ -452,6 +452,25 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
 }
 
 #[test]
+fn invalid_request_returns_32600_with_null_id() {
+    let mut c = spawn(&["--mock"], None);
+    init_old(&mut c);
+    c.send(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+
+    // Well-formed JSON that is not a valid JSON-RPC message must answer -32600 with explicit `"id": null`.
+    c.send(&json!({}));
+    let err = c.invalid_request_error();
+    assert_eq!(err["jsonrpc"], "2.0", "{err}");
+    assert_eq!(err.get("id"), Some(&Value::Null), "expected explicit id: null in {err}");
+    assert_eq!(err["error"]["code"], -32600, "{err}");
+
+    // Subsequent requests continue working normally, and `finish()` verifies every stdout line has a valid shape.
+    let ping = c.result("ping", json!({}));
+    assert!(ping.is_object(), "{ping}");
+    c.finish();
+}
+
+#[test]
 fn revision_2025_11_25() {
     let dir = tmp_dir("old");
     let mut c = spawn(&["--mock", "--data-dir", dir.to_str().unwrap()], None);

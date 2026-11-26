@@ -7,7 +7,6 @@
 
 mod print;
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -100,9 +99,9 @@ fn open(conn: &BenchServerArgs, device: Option<&str>) -> Result<Session, CliErro
         Session { benchmarks: Benchmarks::Http(h.clone()), store: h, local: None }
     };
     if let Some(url) = &conn.server {
-        if !url.starts_with("http://") && !url.starts_with("https://") {
+        if let Err(why) = folo_client::check_base_url(url) {
             return Err(usage(format!(
-                "--server (or FOLO_SERVER) must be the http:// or https:// URL of a `folo serve`, got `{url}`"
+                "--server (or FOLO_SERVER) must be a valid http:// or https:// URL of a `folo serve` ({why})"
             )));
         }
         return Ok(http(url));
@@ -151,13 +150,10 @@ fn create(a: BenchCreateArgs, out: Out) -> Result<(), CliError> {
             let path = crate::label::paths(&[path], a.conn.server.is_some())?.remove(0);
             // Not a dataset registered for a benchmark that cannot be made.
             s.benchmarks.check().map_err(api_error)?;
-            let before: HashSet<String> =
-                s.store.list_datasets().map_err(api_error)?.into_iter().map(|d| d.id).collect();
             let req = RegisterDataset { name: None, path, format: DatasetFormat::Auto };
-            let ds = s.store.register_dataset(req).map_err(api_error)?;
-            let newly_registered = !before.contains(&ds.id);
+            let (ds, rollback) = s.store.register_dataset_tracked(req).map_err(api_error)?;
             let id = ds.id.clone();
-            registered_ds = Some((ds, newly_registered));
+            registered_ds = Some((ds, rollback));
             BenchSource::Dataset { dataset_id: id, split }
         }
         (_, _, Some(job_id)) => BenchSource::LabelJob { job_id },
@@ -175,11 +171,12 @@ fn create(a: BenchCreateArgs, out: Out) -> Result<(), CliError> {
         Ok(r) => r,
         Err(e) => {
             // If `--data` just registered a dataset and the server definitively refused to create the benchmark
-            // (e.g. an empty requested split), unregister it again (never deleting files).
+            // (e.g. an empty requested split), unregister it only if this exact registration is still exclusive
+            // and unreferenced (never deleting files).
             if e.status.is_client_error()
-                && let Some((ds, true)) = &registered_ds
+                && let Some((ds, Some(token))) = &registered_ds
             {
-                let _ = s.store.delete_dataset(&ds.id);
+                let _ = s.store.delete_dataset_if_unused(&ds.id, token);
             }
             return Err(api_error(e));
         }

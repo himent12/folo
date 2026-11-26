@@ -121,17 +121,31 @@ struct Entry {
     /// set, and unregistering sets it before deleting the caches, so an indexer or thumbnail still in flight never
     /// recreates the cache of a deleted dataset.
     deleted: Mutex<bool>,
+    /// True when this entry already existed before this session, was created by a non-registration path, or was
+    /// returned to a second caller by deduplicated `register_dataset`. While `true`, `delete_dataset_if_unused`
+    /// refuses to unregister it so concurrent callers never delete each other's source dataset.
+    shared: AtomicBool,
+    /// Per-registration rollback token issued only for freshly created `register_dataset_tracked` entries.
+    /// Prevents a delayed rollback from deleting a replacement registration that reused a tombstoned dataset id.
+    rollback_token: Option<String>,
 }
 
 impl Entry {
     fn new(reg: Registration, state: State) -> Entry {
+        Self::with_rollback(reg, state, None)
+    }
+
+    fn with_rollback(reg: Registration, state: State, rollback_token: Option<String>) -> Entry {
         let id = reg.id.clone();
+        let shared = rollback_token.is_none();
         Entry {
             id,
             reg: Mutex::new(reg),
             slot: Mutex::new(Slot { state, checked: Instant::now(), checking: false }),
             ready: Condvar::new(),
             deleted: Mutex::new(false),
+            shared: AtomicBool::new(shared),
+            rollback_token,
         }
     }
 
