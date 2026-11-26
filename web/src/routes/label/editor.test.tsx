@@ -754,4 +754,54 @@ describe('the labeling editor: reviewing', () => {
     flushSync();
     expect(router.route.path).toBe('/runs');
   });
+
+  it('disables Discard changes in the leave dialog once Save is in flight', async () => {
+    await openEditor('1');
+    const answer = deferred<LabelImage>();
+    vi.spyOn(hub.api, 'updateLabelImage').mockReturnValue(answer.promise);
+    click(inEditor('Add box'));
+    key('j');
+    expect(asking()).toBeDefined();
+    const leaveBtn = (label: string) => [...asking()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === label)!;
+    expect(leaveBtn('Discard changes').disabled).toBe(false);
+    click(leaveBtn('Save'));
+    // Discard must be disabled while Save is pending so it cannot leave while the draft is still being saved.
+    expect(leaveBtn('Discard changes').disabled).toBe(true);
+    leaveBtn('Discard changes').click();
+    flushSync();
+    expect(router.route.query.get('image')).toBe('1');
+    const one = (await hub.api.labelImages('lb_7c21', { limit: 1 })).images[0]!;
+    answer.resolve({ ...one, status: 'labeled', source: 'manual', boxes: [{ class: 0, x1: 10, y1: 10, x2: 50, y2: 50 }] });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBe('2');
+    });
+  });
+
+  it('does not override navigation to /runs when delete settles while router.holdWhile holds the labeling route', async () => {
+    await openEditor('1');
+    const del = deferred<void>();
+    vi.spyOn(hub.api, 'deleteLabelImage').mockReturnValue(del.promise);
+    click(inEditor('Remove image'));
+    const removeDlg = [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].find((d) =>
+      d.querySelector('h2')?.textContent?.startsWith('Remove '),
+    );
+    click([...removeDlg!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Remove image'));
+
+    // Hold displayed route on label-job (as App.tsx does while /runs chunk loads), leaving Editor mounted.
+    const release = router.holdWhile((to) => to.name === 'runs');
+    try {
+      router.go('/runs', { replace: true });
+      flushSync();
+      expect(router.location.path).toBe('/runs');
+      expect(router.route.name).toBe('label-job');
+
+      del.resolve();
+      await new Promise((r) => setTimeout(r, 0));
+      flushSync();
+      expect(router.location.path).toBe('/runs');
+    } finally {
+      release();
+    }
+  });
 });
