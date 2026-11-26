@@ -93,12 +93,53 @@ fn discard_if_empty(run_dir: &Path, out: Out) {
     }
 }
 
+/// Validates an explicit `--name` before opening the dataset or creating any folder under `--project`.
+/// Must be a single safe folder name under the current OS's path rules (no empty/blank value, control
+/// characters, path separators, or `.` / `..`, plus Windows-forbidden characters, trailing dot/space, and `NUL`
+/// on Windows). Preserves the exact spelling on valid names so `--resume` config checks keep matching.
+pub(super) fn check_run_name(raw: &str) -> Result<String, CliError> {
+    let bad = |msg: String| {
+        CliError::new(ExitCode::Usage, "invalid_config", msg)
+            .hint("pass a single folder name for --name (e.g. --name shapes-n); use --project for the parent folder")
+    };
+    if raw.chars().any(char::is_control) {
+        return Err(bad("--name must not contain line breaks or other control characters".into()));
+    }
+    if raw.trim().is_empty() {
+        return Err(bad("--name must not be empty".into()));
+    }
+    let mut components = Path::new(raw).components();
+    let is_single_normal =
+        matches!(components.next(), Some(std::path::Component::Normal(_))) && components.next().is_none();
+    if !is_single_normal || raw.contains('/') {
+        return Err(bad(format!(
+            "--name `{raw}` must be a single folder name without path separators, `.`, or `..`"
+        )));
+    }
+    #[cfg(windows)]
+    {
+        if raw.contains(['\\', ':'])
+            || raw.bytes().any(|b| matches!(b, b'<' | b'>' | b'"' | b'|' | b'?' | b'*'))
+        {
+            return Err(bad(format!("--name `{raw}` contains characters Windows forbids in folder names")));
+        }
+        if raw.ends_with(['.', ' ']) {
+            return Err(bad(format!("--name `{raw}` must not end with a dot or space on Windows")));
+        }
+        if raw.eq_ignore_ascii_case("nul") {
+            return Err(bad(format!("--name `{raw}` uses the reserved Windows device name NUL")));
+        }
+    }
+    Ok(raw.to_string())
+}
+
 fn start(
     args: &TrainArgs,
     out: Out,
     stop: Arc<AtomicBool>,
     nb: Arc<AtomicU64>,
 ) -> Result<(Trainer, PathBuf, RunClaim), CliError> {
+    let explicit_name = args.name.as_deref().map(check_run_name).transpose()?;
     let data_arg = args.data.as_deref().expect("clap requires --data without --resume");
     let (ds, ds_name) = open_dataset(data_arg, crate::dataset::format_of(args.format))?;
     let mut weights = None;
@@ -123,7 +164,7 @@ fn start(
         args.model.clone()
     };
     let suffix = arch.strip_prefix("folo-").unwrap_or(&arch).to_string();
-    let name = args.name.clone().unwrap_or_else(|| format!("{ds_name}-{suffix}"));
+    let name = explicit_name.unwrap_or_else(|| format!("{ds_name}-{suffix}"));
     let mut base = config_of(args, name.clone(), absolute(data_arg), arch, weights_head);
     if let Some(t) = &args.teacher {
         // Resolved now for the error and its `folo weights pull` hint; the trainer resolves it again (and on resume).

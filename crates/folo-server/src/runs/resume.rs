@@ -81,9 +81,9 @@ impl Runs {
             );
             return Err(err);
         }
-        self.restart(e, wanted, None)?;
-        self.enqueue(e)?;
-        Ok(self.record(e))
+        let (_, attempt) = self.restart(e, wanted, None)?;
+        self.enqueue(e, attempt)?;
+        self.record(e)
     }
 
     /// Resumes run `e` on a cloud connection with `wanted` ([`Runs::resume_config`]; `compute` set): queued again
@@ -94,17 +94,18 @@ impl Runs {
         wanted: TrainConfig,
         cloud: RunCloud,
     ) -> Result<Run> {
-        self.restart(e, wanted, Some(cloud))
+        let (run, _) = self.restart(e, wanted, Some(cloud))?;
+        Ok(run)
     }
 
     /// Queues run `e` again with `wanted`'s `device` and `compute` (and `cloud`, for a cloud run), unless it became
-    /// active since [`Runs::resume_config`] looked at it.
+    /// active since [`Runs::resume_config`] looked at it. Returns the updated record and the new `attempt` number.
     pub(super) fn restart(
         &self,
         e: &Arc<RunEntry>,
         wanted: TrainConfig,
         cloud: Option<RunCloud>,
-    ) -> Result<Run> {
+    ) -> Result<(Run, u64)> {
         let mut st = e.state.lock().unwrap();
         resumable(&st, &e.id)?;
         let last = e.dir.join("weights").join("last.folo");
@@ -132,7 +133,10 @@ impl Runs {
         r.error_code = None;
         r.eta_s = None;
         st.tail.clear();
+        st.outcome = None;
+        st.interrupted = false;
         st.attempt += 1;
+        let attempt = st.attempt;
         e.stop.store(false, Ordering::Relaxed);
         mark_resume(&e.metrics_path());
         e.persist(&st);
@@ -147,7 +151,7 @@ impl Runs {
                 "no epoch finished before; starting over".to_string()
             },
         );
-        Ok(run)
+        Ok((run, attempt))
     }
 }
 

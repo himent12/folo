@@ -239,10 +239,11 @@ impl RunEntry {
         }
     }
 
-    /// Takes a queued run for execution: false when it was stopped or deleted while it waited.
-    pub(super) fn claim(&self) -> bool {
+    /// Takes a queued run for execution: false when it was stopped, deleted, already claimed (e.g. resumed on
+    /// cloud), or superseded by a newer resume attempt while it waited for the device gate.
+    pub(super) fn claim(&self, attempt: u64) -> bool {
         let mut st = self.state.lock().unwrap();
-        if st.file.run.status != RunStatus::Queued || st.deleted {
+        if st.file.run.status != RunStatus::Queued || st.deleted || st.claimed || st.attempt != attempt {
             return false;
         }
         st.claimed = true;

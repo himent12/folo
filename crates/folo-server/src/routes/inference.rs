@@ -41,13 +41,36 @@ async fn parse_multipart(mut mp: Multipart) -> Result<PredictInput> {
             _ => {}
         }
     }
-    let model_id = model_id.ok_or_else(|| field_err("model_id", "missing"))?;
-    let source = match (image, dataset_id, image_id) {
-        (Some(bytes), _, _) if !bytes.is_empty() => PredictSource::Upload(bytes),
-        (_, Some(dataset_id), Some(image_id)) => PredictSource::Dataset { dataset_id, image_id },
-        _ => return Err(field_err("image", "missing or empty (send a file, or dataset_id + image_id)")),
-    };
+    let model_id =
+        model_id.filter(|m| !m.is_empty()).ok_or_else(|| field_err("model_id", "missing or empty"))?;
+    let source = resolve_multipart_source(image, dataset_id, image_id)?;
     Ok(PredictInput { model_id, source, conf, iou, max_det })
+}
+
+/// Validates and selects the single image source of a multipart `POST /api/predict` request.
+fn resolve_multipart_source(
+    image: Option<Vec<u8>>,
+    dataset_id: Option<String>,
+    image_id: Option<String>,
+) -> Result<PredictSource> {
+    match (image, dataset_id, image_id) {
+        (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(field_err(
+            "image",
+            "cannot be combined with dataset_id or image_id (send either a file or dataset_id + image_id)",
+        )),
+        (Some(bytes), None, None) if !bytes.is_empty() => Ok(PredictSource::Upload(bytes)),
+        (Some(_), None, None) => Err(field_err("image", "must not be empty")),
+        (None, Some(ds), Some(im)) if !ds.is_empty() && !im.is_empty() => {
+            Ok(PredictSource::Dataset { dataset_id: ds, image_id: im })
+        }
+        (None, Some(_), _) | (None, _, Some(_)) => Err(field_err(
+            "dataset_id",
+            "dataset_id and image_id must both be non-empty when predicting on a dataset image",
+        )),
+        (None, None, None) => {
+            Err(field_err("image", "missing or empty (send a file, or dataset_id + image_id)"))
+        }
+    }
 }
 
 fn check_thresholds(p: &PredictInput) -> Result<()> {
@@ -90,4 +113,37 @@ pub(super) async fn predict(State(st): State<AppState>, req: Request) -> Result<
 pub(super) async fn predict_stream() -> Error {
     Error::not_implemented("streaming inference over WebSocket")
         .hint("use POST /api/predict per frame for now")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multipart_source_rejects_conflicting_empty_and_partial_sources() {
+        assert!(matches!(
+            resolve_multipart_source(Some(vec![1, 2, 3]), None, None).unwrap(),
+            PredictSource::Upload(b) if b == [1, 2, 3]
+        ));
+        assert!(matches!(
+            resolve_multipart_source(None, Some("ds_1".into()), Some("0".into())).unwrap(),
+            PredictSource::Dataset { dataset_id, image_id } if dataset_id == "ds_1" && image_id == "0"
+        ));
+
+        for (image, ds, im, expected) in [
+            (Some(vec![1]), Some("ds_1".into()), Some("0".into()), "cannot be combined"),
+            (Some(vec![]), Some("ds_1".into()), Some("0".into()), "cannot be combined"),
+            (Some(vec![1]), Some("ds_1".into()), None, "cannot be combined"),
+            (Some(vec![]), None, None, "must not be empty"),
+            (None, Some("ds_1".into()), None, "must both be non-empty"),
+            (None, None, Some("0".into()), "must both be non-empty"),
+            (None, Some("".into()), Some("0".into()), "must both be non-empty"),
+            (None, Some("ds_1".into()), Some("".into()), "must both be non-empty"),
+            (None, None, None, "missing or empty"),
+        ] {
+            let err = resolve_multipart_source(image, ds, im).unwrap_err();
+            assert_eq!((err.status, err.body.code.as_str()), (StatusCode::BAD_REQUEST, "invalid_body"));
+            assert!(err.body.message.contains(expected), "{err}");
+        }
+    }
 }

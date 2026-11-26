@@ -14,7 +14,8 @@ use super::Progress;
 use super::arguments::check_unit;
 use super::dispatch::join;
 use super::results::{
-    MAX_NAME_CHARS, MAX_RESULT_BYTES, Output, json_len, out, page_of, short, summary_classes,
+    MAX_NAME_CHARS, MAX_RESULT_BYTES, Output, json_len, out, page_of_window, page_window, short,
+    summary_classes,
 };
 use crate::batch_cache::MAX_BATCH_BYTES;
 use crate::errors::{Error, invalid_arguments};
@@ -29,6 +30,7 @@ const MAX_FAILURES: usize = 50;
 
 impl Inner {
     pub(super) async fn list_models(&self, a: PageArgs) -> Result<Output, Error> {
+        let (offset, limit) = page_window(a.cursor.as_deref(), a.limit)?;
         let all = self.blocking(|s| s.list_models()).await?;
         let items: Vec<ModelSummary> = all
             .into_iter()
@@ -48,7 +50,7 @@ impl Inner {
                 about: m.about,
             })
             .collect();
-        let page = page_of(items, a.cursor.as_deref(), a.limit)?;
+        let page = page_of_window(items, offset, limit);
         let summary = format!("{} of {} models", page.items.len(), page.total);
         out(&page, summary)
     }
@@ -56,6 +58,11 @@ impl Inner {
     pub(super) async fn val(&self, a: ValArgs, progress: &mut Progress) -> Result<Output, Error> {
         check_unit("conf", a.conf)?;
         check_unit("iou", a.iou)?;
+        if let Some(s) = a.imgsz
+            && (!s.is_multiple_of(32) || !(32..=4096).contains(&s))
+        {
+            return Err(invalid_arguments(format!("imgsz must be a multiple of 32 in 32..=4096, got {s}")));
+        }
         self.ensure_dataset(&a.dataset_id).await?;
         progress.report(0.0, Some(1.0), false).await;
         let req = ValRequest {
@@ -88,6 +95,9 @@ impl Inner {
     }
 
     pub(super) async fn predict(&self, a: PredictArgs) -> Result<Output, Error> {
+        if a.model_id.trim().is_empty() {
+            return Err(invalid_arguments("model_id must not be empty"));
+        }
         check_unit("conf", a.conf)?;
         check_unit("iou", a.iou)?;
         if !(1..=300).contains(&a.max_det) {
@@ -100,13 +110,24 @@ impl Inner {
                 file = Some(folo_api::json::path(&p));
                 let paths = self.paths.clone();
                 let read = move || read_image(&paths.resolve(&p)?);
-                PredictSource::Upload(tokio::task::spawn_blocking(read).await.map_err(join)??)
+                let bytes = tokio::task::spawn_blocking(read).await.map_err(join)??;
+                if bytes.is_empty() {
+                    return Err(invalid_arguments("image must not be empty"));
+                }
+                PredictSource::Upload(bytes)
             }
             (None, Some(b64), None, None) => {
                 let decode = move || decode_image_base64(&b64, MAX_IMAGE_BYTES);
-                PredictSource::Upload(tokio::task::spawn_blocking(decode).await.map_err(join)??)
+                let bytes = tokio::task::spawn_blocking(decode).await.map_err(join)??;
+                if bytes.is_empty() {
+                    return Err(invalid_arguments("image must not be empty"));
+                }
+                PredictSource::Upload(bytes)
             }
             (None, None, Some(dataset_id), Some(image_id)) => {
+                if dataset_id.trim().is_empty() || image_id.trim().is_empty() {
+                    return Err(invalid_arguments("dataset_id and image_id must not be empty"));
+                }
                 self.ensure_dataset(&dataset_id).await?;
                 PredictSource::Dataset { dataset_id, image_id }
             }
@@ -152,9 +173,8 @@ impl Inner {
     ) -> Result<Output, Error> {
         check_unit("conf", a.conf)?;
         check_unit("iou", a.iou)?;
-        let model_id = a.model_id.clone();
-        let model = self.blocking(move |s| s.get_model(&model_id)).await?;
-        let paths: Vec<(String, BatchPath)> = match (a.paths, a.glob) {
+        // Validate input source shape and bounds before hitting the store or proxy server.
+        let batch_input = match (a.paths, a.glob) {
             (Some(paths), None) => {
                 if paths.len() > MAX_BATCH {
                     return Err(too_many_inputs(format!("{} paths given, at most {MAX_BATCH}", paths.len())));
@@ -162,6 +182,15 @@ impl Inner {
                 if paths.is_empty() {
                     return Err(invalid_arguments("paths must not be empty"));
                 }
+                Ok(paths)
+            }
+            (None, Some(g)) => Err(g),
+            _ => return Err(invalid_arguments("give exactly one of paths or glob")),
+        };
+        let model_id = a.model_id.clone();
+        let model = self.blocking(move |s| s.get_model(&model_id)).await?;
+        let paths: Vec<(String, BatchPath)> = match batch_input {
+            Ok(paths) => {
                 let policy = self.paths.clone();
                 let resolve = move || {
                     paths
@@ -171,7 +200,7 @@ impl Inner {
                 };
                 tokio::task::spawn_blocking(resolve).await.map_err(join)??
             }
-            (None, Some(g)) => {
+            Err(g) => {
                 let paths = self.paths.clone();
                 let found =
                     tokio::task::spawn_blocking(move || paths.expand_glob(&g)).await.map_err(join)??;
@@ -180,7 +209,6 @@ impl Inner {
                 }
                 found.into_iter().map(|p| (folo_api::json::path(&p), BatchPath::Ready(p))).collect()
             }
-            _ => return Err(invalid_arguments("give exactly one of paths or glob")),
         };
         let started = Instant::now();
         let total = paths.len() as f64;
@@ -288,7 +316,7 @@ impl Inner {
     }
 }
 
-/// Reads an image file for inference (at most 64 MiB).
+/// Reads an image file for inference (non-empty, at most 64 MiB).
 fn read_image(path: &Path) -> Result<Vec<u8>, Error> {
     let meta = std::fs::metadata(path).map_err(|_| {
         Error::new(
@@ -303,7 +331,12 @@ fn read_image(path: &Path) -> Result<Vec<u8>, Error> {
     if meta.len() > MAX_IMAGE_BYTES {
         return Err(too_large(&folo_api::json::path(path)));
     }
-    std::fs::read(path).map_err(|e| Error::internal(format!("reading {}: {e}", folo_api::json::path(path))))
+    let bytes = std::fs::read(path)
+        .map_err(|e| Error::internal(format!("reading {}: {e}", folo_api::json::path(path))))?;
+    if bytes.is_empty() {
+        return Err(invalid_arguments("image must not be empty"));
+    }
+    Ok(bytes)
 }
 
 /// `payload_too_large` for an image over [`MAX_IMAGE_BYTES`], `what` being a file or the argument.
@@ -330,4 +363,206 @@ pub(super) fn decode_image_base64(b64: &str, max: u64) -> Result<Vec<u8>, Error>
         return Err(too_large("image_base64"));
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::Options;
+    use crate::proxy::HttpStore;
+    use crate::server::FoloMcp;
+    use folo_server::Store;
+
+    /// `list_models`, `list_runs`, `list_label_jobs`, `list_benchmarks`, `val`, and `predict_batch` validate
+    /// paging and argument ranges before hitting the store or proxy server, keeping embedded and `--server`
+    /// error codes identical even when the server is unreachable.
+    #[tokio::test]
+    async fn tools_validate_paging_and_args_before_proxy_access() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_bg = Arc::clone(&hits);
+        let accept = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                hits_bg.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        let http = Arc::new(HttpStore::new(&url, None));
+        let home = folo_test_support::TestDir::new("mcp-upfront-validation");
+        let opts = Options {
+            data_dir: home.to_path_buf(),
+            read_only: false,
+            confine: false,
+            device: "cpu".into(),
+            published_weights: None,
+        };
+        let server = FoloMcp::new(http.clone(), Some(http), opts);
+
+        let bad_page = || PageArgs { limit: Some(0), cursor: None };
+        let bad_cursor = || PageArgs { limit: Some(10), cursor: Some("bogus".into()) };
+        assert_eq!(server.inner.list_models(bad_page()).await.err().unwrap().body.code, "invalid_arguments");
+        assert_eq!(
+            server.inner.list_models(bad_cursor()).await.err().unwrap().body.code,
+            "invalid_arguments"
+        );
+        assert_eq!(
+            server
+                .inner
+                .list_runs(ListRunsArgs { status: None, limit: Some(0), cursor: None })
+                .await
+                .err()
+                .unwrap()
+                .body
+                .code,
+            "invalid_arguments"
+        );
+        assert_eq!(
+            server.inner.list_label_jobs(bad_page()).await.err().unwrap().body.code,
+            "invalid_arguments"
+        );
+        assert_eq!(
+            server.inner.list_benchmarks(bad_page()).await.err().unwrap().body.code,
+            "invalid_arguments"
+        );
+
+        // `val` rejects bad `imgsz` before touching the proxy.
+        let val_err = server
+            .inner
+            .val(
+                ValArgs {
+                    model_id: "m_1".into(),
+                    dataset_id: "ds_1".into(),
+                    split: folo_api::Split::Val,
+                    imgsz: Some(33),
+                    conf: 0.001,
+                    iou: 0.7,
+                },
+                &mut Progress::none(),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(val_err.body.code, "invalid_arguments");
+
+        // `predict_batch` rejects empty paths, both paths+glob, or neither before looking up `model_id`.
+        for (paths, glob) in
+            [(Some(vec![]), None), (None, None), (Some(vec!["a.jpg".into()]), Some("*.jpg".into()))]
+        {
+            let err = server
+                .inner
+                .predict_batch(
+                    PredictBatchArgs { model_id: "m_missing".into(), paths, glob, conf: 0.25, iou: 0.7 },
+                    &mut Progress::none(),
+                )
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(err.body.code, "invalid_arguments");
+        }
+
+        // `predict` rejects blank `model_id`, empty `image_base64`, and blank `dataset_id`/`image_id`
+        // identically on both embedded and proxied backends before reading files or hitting the store.
+        let embedded = FoloMcp::new(
+            Arc::new(folo_server::MockStore::new()),
+            None,
+            Options {
+                data_dir: home.to_path_buf(),
+                read_only: false,
+                confine: false,
+                device: "cpu".into(),
+                published_weights: None,
+            },
+        );
+        for backend in [&server, &embedded] {
+            for args in [
+                PredictArgs {
+                    model_id: "   ".into(),
+                    image_path: None,
+                    image_base64: Some("AAAA".into()),
+                    dataset_id: None,
+                    image_id: None,
+                    conf: 0.25,
+                    iou: 0.7,
+                    max_det: 10,
+                },
+                PredictArgs {
+                    model_id: "m_1".into(),
+                    image_path: None,
+                    image_base64: Some("".into()),
+                    dataset_id: None,
+                    image_id: None,
+                    conf: 0.25,
+                    iou: 0.7,
+                    max_det: 10,
+                },
+                PredictArgs {
+                    model_id: "m_1".into(),
+                    image_path: None,
+                    image_base64: None,
+                    dataset_id: Some("  ".into()),
+                    image_id: Some("img_1".into()),
+                    conf: 0.25,
+                    iou: 0.7,
+                    max_det: 10,
+                },
+            ] {
+                let err = backend.inner.predict(args).await.err().unwrap();
+                assert_eq!(err.body.code, "invalid_arguments");
+            }
+        }
+
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "invalid arguments must never hit the proxy server");
+        accept.abort();
+        let _ = accept.await;
+
+        // `predict_batch` records the same `invalid_arguments` failure code for a zero-byte file across both
+        // embedded and proxied backends (never hitting the server with an empty multipart `image`).
+        let empty_img = home.join("empty.jpg");
+        std::fs::write(&empty_img, b"").unwrap();
+        let model_id = folo_server::MockStore::new().list_models().unwrap()[0].id.clone();
+        let mock_server =
+            folo_server::Server::new(Arc::new(folo_server::MockStore::new()), Default::default());
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_url = format!("http://{}", http_listener.local_addr().unwrap());
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let http_task = tokio::spawn(mock_server.serve(http_listener, async move {
+            let _ = stop_rx.await;
+        }));
+        let proxied_live = FoloMcp::new(
+            Arc::new(HttpStore::new(&http_url, None)),
+            Some(Arc::new(HttpStore::new(&http_url, None))),
+            Options {
+                data_dir: home.to_path_buf(),
+                read_only: false,
+                confine: false,
+                device: "cpu".into(),
+                published_weights: None,
+            },
+        );
+        for backend in [&embedded, &proxied_live] {
+            let res = backend
+                .inner
+                .predict_batch(
+                    PredictBatchArgs {
+                        model_id: model_id.clone(),
+                        paths: Some(vec![empty_img.to_string_lossy().into_owned()]),
+                        glob: None,
+                        conf: 0.25,
+                        iou: 0.7,
+                    },
+                    &mut Progress::none(),
+                )
+                .await
+                .unwrap();
+            let failed = res.value["failed"].as_array().unwrap();
+            assert_eq!(failed.len(), 1);
+            assert_eq!(failed[0]["code"], "invalid_arguments");
+        }
+        let _ = stop_tx.send(());
+        let _ = http_task.await;
+    }
 }

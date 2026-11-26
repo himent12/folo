@@ -105,17 +105,24 @@ pub(super) fn fit_page<T: Serialize>(
         bytes += n;
         page.push(item);
     }
-    let end = offset + page.len() as u64;
+    let end = offset.saturating_add(page.len() as u64);
     Page { next_cursor: (end < total).then(|| cursor_at(end)), total, items: page }
 }
 
+/// A page of an in-memory list for an already validated `(offset, limit)` window from [`page_window`].
+pub(super) fn page_of_window<T: Serialize>(all: Vec<T>, offset: u64, limit: u64) -> Page<T> {
+    let total = all.len() as u64;
+    let skip = usize::try_from(offset).unwrap_or(usize::MAX);
+    fit_page(all.into_iter().skip(skip), offset, limit, total)
+}
+
 /// A page of an in-memory list.
+#[cfg(test)]
 pub(super) fn page_of<T: Serialize>(
     all: Vec<T>,
     cursor: Option<&str>,
     limit: Option<u32>,
 ) -> Result<Page<T>, Error> {
     let (offset, limit) = page_window(cursor, limit)?;
-    let total = all.len() as u64;
-    Ok(fit_page(all.into_iter().skip(offset as usize), offset, limit, total))
+    Ok(page_of_window(all, offset, limit))
 }

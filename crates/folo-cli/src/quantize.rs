@@ -39,6 +39,14 @@ pub fn quantize(args: QuantizeArgs, out: Out) -> Result<(), CliError> {
     {
         return Err(usage("--images and --batch must be at least 1".into()));
     }
+    if let Some(imgsz) = args.imgsz
+        && !bounds::INFER_IMGSZ.contains_u64(u64::from(imgsz))
+    {
+        return Err(usage(format!(
+            "--imgsz {imgsz} must be a multiple of 32 in 32..={}",
+            bounds::INFER_IMGSZ_MAX
+        )));
+    }
     let path = crate::weights::resolve(&args.model)?;
     let file = ModelFile::open(&path).map_err(|e| crate::infer::weights_error("quantize", &path, e))?;
     let model = open_cpu(&file)?;
@@ -132,4 +140,33 @@ fn write(
 fn open_cpu(file: &ModelFile) -> Result<FoloModel, CliError> {
     let cpu = resolve_device("cpu").map_err(|e| engine_error("quantize", e))?;
     FoloModel::from_file_for_inference(file, cpu, Precision::F32.dtype()).map_err(nn_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn quantize_rejects_invalid_imgsz_before_opening_model_or_dataset() {
+        for bad in [0, 31, 33, 8224] {
+            let args = QuantizeArgs {
+                model: PathBuf::from("nonexistent.folo"),
+                data: "nonexistent-dataset".into(),
+                split: SplitArg::Train,
+                images: 8,
+                seed: 0,
+                method: QuantMethodArg::Percentile,
+                tail: 1e-4,
+                imgsz: Some(bad),
+                batch: 4,
+                workers: None,
+                output: None,
+            };
+            let err = quantize(args, Out { json: false }).unwrap_err();
+            assert_eq!((err.exit, err.code.as_str()), (ExitCode::Usage, "usage"), "imgsz {bad}: {err:?}");
+            assert!(err.message.contains("--imgsz"), "{}", err.message);
+        }
+    }
 }

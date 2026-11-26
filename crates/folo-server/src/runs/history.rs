@@ -316,6 +316,9 @@ impl Runs {
         // Under the state lock (which every status change holds while it sends), so the initial status and the
         // first event received are in order.
         let st = e.state.lock().unwrap();
+        if st.deleted {
+            return Err(crate::error::Error::not_found("run", id));
+        }
         let events = e.tx.subscribe();
         Ok(Subscription { initial: status_event(&st.file.run), events })
     }
@@ -326,6 +329,9 @@ impl Runs {
         let e = self.get(id)?;
         let (initial, frames) = {
             let st = e.state.lock().unwrap();
+            if st.deleted {
+                return Err(crate::error::Error::not_found("run", id));
+            }
             (status_event(&st.file.run), e.sse_tx.subscribe())
         };
         let weak = Arc::downgrade(&e);
@@ -351,6 +357,9 @@ impl Runs {
         loop {
             let (attempt, tail, epochs_done, waiting_resume) = {
                 let st = e.state.lock().unwrap();
+                if st.deleted {
+                    return Err(crate::error::Error::not_found("run", id));
+                }
                 (st.attempt, st.tail.clone(), st.file.epochs_done, st.file.resumed_at.is_some())
             };
             let m = {
@@ -359,7 +368,11 @@ impl Runs {
             };
             // If the run resumed while `metrics.jsonl` was read, `tail` belongs to the previous attempt;
             // re-read so steps from two attempts are never mixed.
-            if e.state.lock().unwrap().attempt == attempt {
+            let st = e.state.lock().unwrap();
+            if st.deleted {
+                return Err(crate::error::Error::not_found("run", id));
+            }
+            if st.attempt == attempt {
                 return Ok(m);
             }
         }
@@ -369,7 +382,14 @@ impl Runs {
     /// without allocating `LogLine` strings for them.
     pub fn logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs> {
         let e = self.get(id)?;
-        Ok(read_logs(&e.dir.join("log.jsonl"), q))
+        if e.state.lock().unwrap().deleted {
+            return Err(crate::error::Error::not_found("run", id));
+        }
+        let logs = read_logs(&e.dir.join("log.jsonl"), q);
+        if logs.total == 0 && e.state.lock().unwrap().deleted {
+            return Err(crate::error::Error::not_found("run", id));
+        }
+        Ok(logs)
     }
 }
 

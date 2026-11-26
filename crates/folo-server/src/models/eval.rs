@@ -235,6 +235,21 @@ fn evaluate(path: &Path, dataset: &DatasetRef, device: Device) -> Result<ModelEv
     })
 }
 
+/// Validates `POST /api/val` thresholds and `imgsz` (`400 invalid_body`) before opening models, datasets, or the GPU.
+pub fn check_val_params(imgsz: Option<u32>, conf: f32, iou: f32) -> Result<()> {
+    let bad = |msg: String| Error::new(StatusCode::BAD_REQUEST, "invalid_body", msg);
+    let unit = |x: f32| (0.0..=1.0).contains(&x); // false for NaN
+    if !unit(conf) || !unit(iou) {
+        return Err(bad(format!("conf and iou must be in 0..=1, got conf {conf} iou {iou}")));
+    }
+    if let Some(s) = imgsz
+        && (!s.is_multiple_of(32) || !(32..=4096).contains(&s))
+    {
+        return Err(bad(format!("imgsz must be a multiple of 32 in 32..=4096, got {s}")));
+    }
+    Ok(())
+}
+
 /// `POST /api/val`: validates the weights of `m` on `split` of `dataset` at `imgsz` (the model's own size when
 /// `None`) with NMS thresholds `conf` / `iou` (the rest of MODEL.md §8.7's validation settings), at `precision`
 /// (f16 only where the device computes in it).
@@ -249,16 +264,7 @@ pub fn val(
     device: Device,
     precision: folo_vision::Precision,
 ) -> Result<ValReport> {
-    let bad = |msg: String| Error::new(StatusCode::BAD_REQUEST, "invalid_body", msg);
-    let unit = |x: f32| (0.0..=1.0).contains(&x); // false for NaN
-    if !unit(conf) || !unit(iou) {
-        return Err(bad(format!("conf and iou must be in 0..=1, got conf {conf} iou {iou}")));
-    }
-    if let Some(s) = imgsz
-        && (!s.is_multiple_of(32) || !(32..=4096).contains(&s))
-    {
-        return Err(bad(format!("imgsz must be a multiple of 32 in 32..=4096, got {s}")));
-    }
+    check_val_params(imgsz, conf, iou)?;
     let t0 = std::time::Instant::now();
     let model = engine::open_model(&m.path, device, precision)?;
     let ds = open_for(&model, dataset)?;
@@ -330,5 +336,46 @@ pub fn eval_of(r: &folo_vision::EvalReport) -> ModelEval {
         split_fallback: None,
         confusion_conf: Some(r.confusion.conf),
         confusion_iou: Some(r.confusion.iou),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Store as _;
+    use folo_api::{Split, ValRequest};
+    use folo_test_support::TestDir;
+
+    /// `RealStore::val` rejects invalid `conf`/`iou`/`imgsz` with `400 invalid_body` before looking up
+    /// `model_id` or `dataset_id` (matching `MockStore::val`).
+    #[test]
+    fn real_store_val_validates_params_before_lookup() {
+        let dir = TestDir::new("real-val-upfront");
+        let store = crate::RealStore::open(dir.to_path_buf()).device("cpu");
+        for (imgsz, conf, iou) in [
+            (None, -0.1, 0.7),
+            (None, f32::NAN, 0.7),
+            (None, 0.001, 1.5),
+            (Some(33), 0.001, 0.7),
+            (Some(0), 0.001, 0.7),
+            (Some(4128), 0.001, 0.7),
+        ] {
+            let err = store
+                .val(ValRequest {
+                    model_id: "m_missing".into(),
+                    dataset_id: "ds_missing".into(),
+                    split: Split::Val,
+                    imgsz,
+                    conf,
+                    iou,
+                })
+                .unwrap_err();
+            assert_eq!(
+                (err.status, err.body.code.as_str()),
+                (StatusCode::BAD_REQUEST, "invalid_body"),
+                "({imgsz:?}, {conf}, {iou}): {err}"
+            );
+        }
+        store.shutdown();
     }
 }

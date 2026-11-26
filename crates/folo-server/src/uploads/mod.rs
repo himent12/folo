@@ -246,18 +246,39 @@ impl Uploads {
         Duration::from_millis(self.idle_ms.load(Ordering::Relaxed))
     }
 
-    /// `400 invalid_body` for a request no session can be made of: a blank name, a dataset format for a model, a
-    /// fingerprint over [`MAX_FINGERPRINT_CHARS`].
-    pub fn check(req: &CreateUpload) -> Result<()> {
+    /// `400 invalid_body` for an invalid upload target (`name` or `kind`/`format`), checked before looking up an
+    /// existing persisted fingerprint so legacy keys in `uploads.json` remain reachable while malformed requests
+    /// are still refused.
+    pub fn check_target(req: &CreateUpload) -> Result<()> {
         let bad = |m: &str| Error::new(StatusCode::BAD_REQUEST, "invalid_body", m);
-        if req.name.trim().is_empty() {
+        let name = req.name.trim();
+        if name.is_empty() {
             return Err(bad("name must not be empty"));
+        }
+        if name.chars().any(char::is_control) {
+            return Err(bad("name must not contain line breaks or other control characters"));
         }
         if req.kind == UploadKind::Model && req.format != DatasetFormat::Auto {
             return Err(bad("format only applies to kind dataset"));
         }
-        if req.fingerprint.as_ref().is_some_and(|f| f.chars().count() > MAX_FINGERPRINT_CHARS) {
-            return Err(bad(&format!("fingerprint is longer than {MAX_FINGERPRINT_CHARS} characters")));
+        Ok(())
+    }
+
+    /// `400 invalid_body` for a request no session can be made of: a blank or control-character name,
+    /// a dataset format for a model, or a blank, control-character, or overlong fingerprint.
+    pub fn check(req: &CreateUpload) -> Result<()> {
+        Self::check_target(req)?;
+        let bad = |m: &str| Error::new(StatusCode::BAD_REQUEST, "invalid_body", m);
+        if let Some(fp) = req.fingerprint.as_deref() {
+            if fp.trim().is_empty() {
+                return Err(bad("fingerprint must not be empty"));
+            }
+            if fp.chars().any(char::is_control) {
+                return Err(bad("fingerprint must not contain line breaks or other control characters"));
+            }
+            if fp.chars().count() > MAX_FINGERPRINT_CHARS {
+                return Err(bad(&format!("fingerprint is longer than {MAX_FINGERPRINT_CHARS} characters")));
+            }
         }
         Ok(())
     }

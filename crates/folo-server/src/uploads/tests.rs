@@ -209,3 +209,49 @@ fn unpack_guard_prevents_pipe_deadlock_on_panic() {
         _ => panic!("expected Finish::Failed after unpacker panic"),
     }
 }
+
+/// `Uploads::check` rejects blank/control-char names and blank/control-char/overlong fingerprints,
+/// while preserving exact (untrimmed) fingerprints on storage and lookup for backwards compatibility.
+#[test]
+fn check_rejects_bad_names_and_blank_or_control_fingerprints() {
+    let dir = TestDir::new("uploads-check-validation");
+    // Pre-populate `uploads.json` as an earlier version might have written both `"fp"` and `" fp "`.
+    std::fs::write(
+        dir.join("uploads.json"),
+        serde_json::json!([
+            { "kind": "model", "fingerprint": "fp", "id": "m_trimmed" },
+            { "kind": "model", "fingerprint": " fp ", "id": "m_padded" }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let uploads = Uploads::open(dir.path());
+
+    for bad_name in ["", "   ", "bad\nname", "bad\tname"] {
+        let err = Uploads::check(&create_req(UploadKind::Model, bad_name)).unwrap_err();
+        assert_eq!((err.status, err.body.code.as_str()), (StatusCode::BAD_REQUEST, "invalid_body"));
+    }
+
+    let padded_overlong = format!(" {} ", "f".repeat(super::MAX_FINGERPRINT_CHARS - 1));
+    for bad_fp in
+        ["", "   ", "fp\n1", "fp\r1", &"f".repeat(super::MAX_FINGERPRINT_CHARS + 1), &padded_overlong]
+    {
+        let mut req = create_req(UploadKind::Model, "ok");
+        req.fingerprint = Some(bad_fp.into());
+        let err = Uploads::check(&req).unwrap_err();
+        assert_eq!((err.status, err.body.code.as_str()), (StatusCode::BAD_REQUEST, "invalid_body"));
+    }
+
+    // Exact fingerprint lookup keeps `"fp"` and `" fp "` distinct across upgrades.
+    assert_eq!(uploads.known(UploadKind::Model, "fp").as_deref(), Some("m_trimmed"));
+    assert_eq!(uploads.known(UploadKind::Model, " fp ").as_deref(), Some("m_padded"));
+
+    let mut req = create_req(UploadKind::Model, "  ok  ");
+    req.fingerprint = Some("  fp-exact  ".into());
+    let u = uploads.create(&req).unwrap();
+    let done = uploads.finish(&u.id).unwrap();
+    assert_eq!(done.name(), "ok");
+    assert_eq!(done.fingerprint(), Some("  fp-exact  "));
+    drop(done);
+    uploads.shutdown();
+}
