@@ -11,7 +11,7 @@ import ArrowRight from '$icons/arrow-right';
 import { css, For } from 'fw';
 import { runProgress } from '$lib/api/progress';
 import type { Run } from '$lib/api/types';
-import { ago, metric } from '$lib/format';
+import { ago, date, metric } from '$lib/format';
 import { failureCause } from '$lib/oom';
 import { href, router } from '$lib/router';
 import Button from '$lib/ui/Button';
@@ -67,7 +67,7 @@ export default function RecentRuns(props: RecentRunsProps) {
                 <th class="r" style:width="128px">
                   Best mAP50-95
                 </th>
-                <th class="r hide-sm c-created" style:width="88px">
+                <th class="r hide-sm c-created" style:width="112px">
                   Created
                 </th>
               </tr>
@@ -162,7 +162,9 @@ export default function RecentRuns(props: RecentRunsProps) {
                       </div>
                     </td>
                     <td class="r num">{r().best ? metric(r().best!.map50_95) : <NoValue />}</td>
-                    <td class="r faint hide-sm c-created">{ago(r().created)}</td>
+                    <td class="r num faint hide-sm c-created" title={date(r().created)}>
+                      {ago(r().created)}
+                    </td>
                   </tr>
                 )}
               </For>
@@ -187,7 +189,7 @@ css`
       display: none;
     }
   }
-  @container (max-width: 539.98px) {
+  @container (max-width: 559.98px) {
     .c-created {
       display: none;
     }
