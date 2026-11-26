@@ -67,34 +67,30 @@ impl FoloApp {
         let boxes = s.map_or(0, |s| s.boxes);
         let per = boxes as f32 / total;
         let broken = s.map_or(0, |s| s.broken_labels);
-        let narrow_strip = window.viewport_size().width < px(1120.);
+        // Size the strip by actual content width (which shrinks at 1120 px when the sidebar expands),
+        // not raw viewport width, so the Broken labels tile never clips at the sidebar breakpoint.
+        let cw = self.content_width(window);
+        let narrow_strip = cw < 980.;
+        let img_w = if cw < 780. {
+            200.
+        } else if narrow_strip {
+            244.
+        } else {
+            300.
+        };
         panel(&t)
             .flex()
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(if narrow_strip { 244. } else { 300. }))
-                    .px(px(16.))
-                    .py(px(pad))
-                    .child(
-                        // The split bar on the strip's first detail line (where the others' captions
-                        // sit), its legend on the second: the same grid as every tile beside it.
-                        stat(
-                            &t,
-                            "Images",
-                            int(ds.splits.total()),
-                            "",
-                            Some(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(6.))
-                                    .child(detail_line(split_bar))
-                                    .child(legend),
-                            ),
-                        ),
-                    ),
-            )
+            .child(div().flex_none().w(px(img_w)).px(px(16.)).py(px(pad)).child(
+                // The split bar on the strip's first detail line (where the others' captions
+                // sit), its legend on the second: the same grid as every tile beside it.
+                stat(
+                    &t,
+                    "Images",
+                    int(ds.splits.total()),
+                    "",
+                    Some(div().flex().flex_col().gap(px(6.)).child(detail_line(split_bar)).child(legend)),
+                ),
+            ))
             .child(vline(&t))
             .child(tile(stat(
                 &t,
@@ -300,8 +296,10 @@ fn severity_detail(t: &crate::theme::Theme, c: &crate::api::IssueCounts) -> folo
     let n = |k: u64, one: &str, many: &str| format!("{k} {}", if k == 1 { one } else { many });
     div()
         .flex()
+        .flex_wrap()
         .items_center()
-        .gap(px(4.))
+        .gap_x(px(4.))
+        .gap_y(px(2.))
         .min_w_0()
         .when(c.error > 0, |d| {
             d.child(
@@ -325,7 +323,7 @@ fn copy_cmd(t: &crate::theme::Theme, label: &'static str) -> folo_ui::Div {
         .items_center()
         .gap(px(4.))
         .min_w_0()
-        .child(text(ty::SM, t.text_secondary).whitespace_nowrap().child(label))
+        .child(text(ty::SM, t.text_secondary).min_w_0().ellipsis().child(label))
         .child(div().flex_none().child(icon("icons/copy.svg", 12., t.text_secondary)))
 }
 

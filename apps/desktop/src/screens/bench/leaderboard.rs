@@ -9,7 +9,8 @@ use folo_ui::{
 
 use super::cells::{name_with_badges, num_cell};
 use super::format::{
-    agent_name, axis_short, axis_text, contestant_line, entry_frac, partial_why, pct, ranks, score_text,
+    agent_name, axis_compact, axis_short, axis_text, contestant_line, entry_frac, partial_why, pct, ranks,
+    score_text,
 };
 use crate::api::{Bench, BenchAxis, BenchEntry, BenchEntryStatus, Label};
 use crate::app::{FoloApp, Route, act};
@@ -24,6 +25,46 @@ const SCORE_W: f32 = 68.;
 const AXIS_W: [f32; 5] = [74., 70., 76., 64., 64.];
 const ACTIONS_W: f32 = 112.;
 const COL_GAP: f32 = 12.;
+
+#[derive(Clone, Copy)]
+struct BoardCols {
+    rank_w: f32,
+    entry_min_w: f32,
+    score_w: f32,
+    axis_w: [f32; 5],
+    actions_w: f32,
+    gap: f32,
+    pad_x: f32,
+    compact: bool,
+}
+
+impl BoardCols {
+    fn for_width(content_width: f32) -> Self {
+        if content_width < 850. {
+            Self {
+                rank_w: 20.,
+                entry_min_w: 112.,
+                score_w: 52.,
+                axis_w: [48., 48., 46., 44., 44.],
+                actions_w: 108.,
+                gap: 6.,
+                pad_x: 12.,
+                compact: true,
+            }
+        } else {
+            Self {
+                rank_w: 24.,
+                entry_min_w: 160.,
+                score_w: SCORE_W,
+                axis_w: AXIS_W,
+                actions_w: ACTIONS_W,
+                gap: COL_GAP,
+                pad_x: 16.,
+                compact: false,
+            }
+        }
+    }
+}
 
 /// Sort column key for a benchmark axis.
 pub(crate) fn axis_key(a: BenchAxis) -> &'static str {
@@ -222,7 +263,10 @@ impl FoloApp {
             run_controls = run_controls.child(div().w(px(220.)).child(select)).child(run);
         }
         let head_row = panel_header(&t, "Leaderboard").child(run_controls);
-        let cols = |d: folo_ui::Stateful<folo_ui::Div>| d.flex().items_center().gap(px(COL_GAP)).px(px(16.));
+        let bc = BoardCols::for_width(self.content_width(window));
+        let cols = move |d: folo_ui::Stateful<folo_ui::Div>| {
+            d.flex().items_center().gap(px(bc.gap)).px(px(bc.pad_x))
+        };
         let sort = self.bench.leaderboard_sort;
         let score_th = self.sort_th_on(
             sort,
@@ -230,21 +274,22 @@ impl FoloApp {
             "bench-sort",
             "score",
             "Score",
-            SCORE_W,
+            bc.score_w,
             true,
             window,
             cx,
         );
         let axis_ths: Vec<AnyElement> = BenchAxis::ALL
             .iter()
-            .zip(AXIS_W)
+            .zip(bc.axis_w)
             .map(|(a, w)| {
+                let label = if bc.compact { axis_compact(*a) } else { axis_short(*a) };
                 self.sort_th_on(
                     sort,
                     |app| &mut app.bench.leaderboard_sort,
                     "bench-sort",
                     axis_key(*a),
-                    axis_short(*a),
+                    label,
                     w,
                     true,
                     window,
@@ -255,16 +300,16 @@ impl FoloApp {
         let head = div()
             .flex()
             .items_center()
-            .gap(px(COL_GAP))
-            .px(px(16.))
+            .gap(px(bc.gap))
+            .px(px(bc.pad_x))
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            .child(num_cell(24., th(&t, "#")))
-            .child(th(&t, "Entry").flex_1().min_w(px(160.)))
+            .child(num_cell(bc.rank_w, th(&t, "#")))
+            .child(th(&t, "Entry").flex_1().min_w(px(bc.entry_min_w)))
             .child(score_th)
             .children(axis_ths)
-            .child(div().w(px(ACTIONS_W)).flex_none());
+            .child(div().w(px(bc.actions_w)).flex_none());
         let retry_anchor = match self.passing_stop("bench-board-retry", entries.error().is_some(), cx) {
             Some(fh) if entries.error().is_none() => Some(div().track_focus(&fh)),
             _ => None,
@@ -333,7 +378,7 @@ impl FoloApp {
             .cloned();
         let rows: Vec<AnyElement> = ranked
             .iter()
-            .map(|(e, rank)| self.leaderboard_row(&t, b, e, *rank, pinned.as_ref(), cols, window, cx))
+            .map(|(e, rank)| self.leaderboard_row(&t, b, e, *rank, pinned.as_ref(), bc, cols, window, cx))
             .collect();
         let note = "Axes on the score's 0–100 scale. Partial entries ran a part of the benchmark or missed an axis; they rank after complete ones.";
         let footer_actions = (pinned.is_some() || sort.is_some()).then(|| {
@@ -407,14 +452,16 @@ impl FoloApp {
         e: &BenchEntry,
         rank: Option<usize>,
         pinned: Option<&BenchEntry>,
+        bc: BoardCols,
         cols: impl Fn(folo_ui::Stateful<folo_ui::Div>) -> folo_ui::Stateful<folo_ui::Div>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = *t;
         // The entry column's width: what the number columns, their gaps and the row padding leave.
-        let fixed_w = 24. + SCORE_W + AXIS_W.iter().sum::<f32>() + ACTIONS_W;
-        let name_w = (self.content_width(window) - fixed_w - 8. * COL_GAP - 42.).clamp(120., 640.);
+        let fixed_w = bc.rank_w + bc.score_w + bc.axis_w.iter().sum::<f32>() + bc.actions_w;
+        let name_w = (self.content_width(window) - fixed_w - 8. * bc.gap - 2. * bc.pad_x - 10.)
+            .clamp(bc.entry_min_w, 640.);
         let key = format!("bench-entry-{}", e.id);
         let done = e.status == BenchEntryStatus::Done;
         let failed = e.status == BenchEntryStatus::Failed;
@@ -656,14 +703,21 @@ impl FoloApp {
             .when(!err_expanded, |d| d.border_b_1().border_color(t.line_subtle))
             .when(clickable, |d| d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active)))
             .child(num_cell(
-                24.,
+                bc.rank_w,
                 text(ty::SM, t.text_tertiary).tnum().child(rank.map_or("–".to_string(), |r| r.to_string())),
             ))
             .child(
-                div().flex_1().min_w(px(160.)).flex().flex_col().gap(px(2.)).child(name_line).child(detail),
+                div()
+                    .flex_1()
+                    .min_w(px(bc.entry_min_w))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(name_line)
+                    .child(detail),
             )
-            .child(num_cell(SCORE_W, score))
-            .children(BenchAxis::ALL.iter().zip(AXIS_W).map(|(a, w)| {
+            .child(num_cell(bc.score_w, score))
+            .children(BenchAxis::ALL.iter().zip(bc.axis_w).map(|(a, w)| {
                 let v = axis_of(e, *a);
                 let main =
                     text(ty::SM, if faded || v.is_none() { t.text_tertiary } else { t.text_secondary })
@@ -681,7 +735,7 @@ impl FoloApp {
             }))
             .child(
                 div()
-                    .w(px(ACTIONS_W))
+                    .w(px(bc.actions_w))
                     .flex_none()
                     .flex()
                     .justify_end()

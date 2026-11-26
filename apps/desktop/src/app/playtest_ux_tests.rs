@@ -922,3 +922,6 @@ mod playtest_r7_tests;
 
 #[path = "sprint8_tests.rs"]
 mod sprint8_tests;
+
+#[path = "playtest_r8_tests.rs"]
+mod playtest_r8_tests;

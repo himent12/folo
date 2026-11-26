@@ -144,11 +144,22 @@ const VALUE_FLAGS: &[&str] = &[
 ];
 const BARE_FLAGS: &[&str] = &["--mock", "--list-scenarios", "-h", "--help", "-V", "--version"];
 
+/// Parses `--width` / `--height` (logical pixels): finite, at least 1 px and at most 16384 px
+/// (matching `folo_ui`'s headless frame limit). Rejects non-numeric, non-finite (`NaN`, `inf`),
+/// zero, negative, and out-of-range values with a clear diagnostic naming the flag.
+fn parse_window_dim(flag: &str, raw: &str) -> Result<f32, String> {
+    const MAX_DIM: f32 = 16384.0;
+    raw.parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite() && (1.0..=MAX_DIM).contains(v))
+        .ok_or_else(|| format!("{flag} {raw}: expected a finite number from 1 to {MAX_DIM} (see --help)"))
+}
+
 /// What is wrong with `args` (without the program name) that the app would otherwise pass over in
-/// silence: an unknown option, an option missing its value, a theme that is no mode and no theme of
-/// `themes`, a scenario with an unknown screen or modifier, or an invalid `--open` target. One
-/// stderr line each; interactive launches still open, while headless launches (`--shot` /
-/// `--bench-frames`) fail closed on invalid scenario or `--open` requests.
+/// silence: an unknown option, an option missing its value, an invalid `--width`/`--height`, a
+/// theme that is no mode and no theme of `themes`, a scenario with an unknown screen or modifier,
+/// or an invalid `--open` target. One stderr line each; interactive launches still open, while
+/// headless launches (`--shot` / `--bench-frames`) fail closed on invalid arguments.
 fn arg_warnings<S: AsRef<str>>(args: &[S], themes: &Catalog) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -170,6 +181,11 @@ fn arg_warnings<S: AsRef<str>>(args: &[S], themes: &Catalog) -> Vec<String> {
                     if a == "--open" && v != "new-run" && app::Route::parse(v).is_none() {
                         out.push(format!("--open {v}: not a screen (see --help)"));
                     }
+                    if (a == "--width" || a == "--height")
+                        && let Err(err) = parse_window_dim(a, v)
+                    {
+                        out.push(err);
+                    }
                     i += 2;
                     continue;
                 }
@@ -184,8 +200,8 @@ fn arg_warnings<S: AsRef<str>>(args: &[S], themes: &Catalog) -> Vec<String> {
 }
 
 /// Errors that must fail a headless capture or benchmark (`--shot` or `--bench-frames`) before a
-/// frame is rendered, so an invalid `--scenario`, `--open`, or conflicting headless mode never
-/// silently produces a default PNG or suppresses a conflict diagnostic.
+/// frame is rendered, so an invalid `--scenario`, `--open`, `--width`/`--height`, or conflicting
+/// headless mode never silently produces a default PNG or suppresses a conflict diagnostic.
 fn headless_arg_errors<S: AsRef<str>>(args: &[S]) -> Vec<String> {
     let has_shot = args.iter().any(|a| a.as_ref() == "--shot");
     let has_bench = args.iter().any(|a| a.as_ref() == "--bench-frames");
@@ -209,6 +225,11 @@ fn headless_arg_errors<S: AsRef<str>>(args: &[S]) -> Vec<String> {
                     }
                     if a == "--open" && v != "new-run" && app::Route::parse(v).is_none() {
                         out.push(format!("--open {v}: not a screen (see --help)"));
+                    }
+                    if (a == "--width" || a == "--height")
+                        && let Err(err) = parse_window_dim(a, v)
+                    {
+                        out.push(err);
                     }
                     i += 2;
                     continue;
@@ -269,8 +290,10 @@ pub fn run() {
         std::process::exit(2);
     }
     let scenario = arg_value(&args, "--scenario").map(str::to_string);
-    let width: f32 = arg_value(&args, "--width").and_then(|w| w.parse().ok()).unwrap_or(1280.0);
-    let height: f32 = arg_value(&args, "--height").and_then(|h| h.parse().ok()).unwrap_or(800.0);
+    let width_arg = arg_value(&args, "--width").and_then(|w| parse_window_dim("--width", w).ok());
+    let height_arg = arg_value(&args, "--height").and_then(|h| parse_window_dim("--height", h).ok());
+    let width = width_arg.unwrap_or(1280.0);
+    let height = height_arg.unwrap_or(800.0);
     // The window and theme from the last launch, unless this one is for a screenshot.
     let remember = window_state::remembers(
         scenario.is_some(),
@@ -581,6 +604,14 @@ mod tests {
         assert!(one(&["--open", "bench-entry:abc/"]).contains("not a screen"));
         assert!(one(&["--sever", "http://127.0.0.1:1"]).contains("unknown option"));
         assert!(one(&["--mock", "--server"]).contains("missing its value"));
+        // Malformed or non-finite `--width` / `--height` are diagnosed on interactive startup too.
+        for bad in ["banana", "NaN", "inf", "-100", "0", "99999"] {
+            assert!(one(&["--mock", "--width", bad]).contains("--width"), "{bad}");
+            assert!(one(&["--mock", "--height", bad]).contains("--height"), "{bad}");
+            assert!(parse_window_dim("--width", bad).is_err(), "{bad}");
+        }
+        assert_eq!(parse_window_dim("--width", "1280"), Ok(1280.0));
+        assert_eq!(parse_window_dim("--height", "620"), Ok(620.0));
         // `--scenario --shot P`: the scenario has no value; --shot keeps its own.
         assert!(one(&["--scenario", "--shot", "a.png"]).starts_with("--scenario: missing"));
         // Every option --help lists is known.
@@ -637,6 +668,9 @@ mod tests {
         assert!(!headless_arg_errors(&["--theme", "--shot", "a.png"]).is_empty());
         assert!(!headless_arg_errors(&["--bench-frames", "2", "--shot-time"]).is_empty());
         assert!(!headless_arg_errors(&["--bench-frames", "2", "--server"]).is_empty());
+        assert!(!headless_arg_errors(&["--width", "banana", "--shot", "a.png"]).is_empty());
+        assert!(!headless_arg_errors(&["--width", "NaN", "--shot", "a.png"]).is_empty());
+        assert!(!headless_arg_errors(&["--height", "-5", "--bench-frames", "2"]).is_empty());
         let combined =
             headless_arg_errors(&["--scenario", "overview+ligth", "--shot", "a.png", "--bench-frames", "1"]);
         assert!(

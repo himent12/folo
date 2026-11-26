@@ -248,18 +248,21 @@ impl FoloApp {
             .px(px(16.))
             .pb(px(12.))
             .flex()
+            .flex_wrap()
             .items_center()
             .justify_between()
             .gap(px(12.))
-            .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
-                "{} of {} images · click any image to inspect · dashed: truth · solid: detections{}",
-                int(page.images.len() as u64),
-                int(page.total),
-                if e.scored { images_shown(&page, accuracy) } else { String::new() },
-            )))
+            .child(text(ty::SM, t.text_tertiary).tnum().flex_1().min_w(px(220.)).whitespace_normal().child(
+                format!(
+                    "{} of {} images · click any image to inspect · dashed: truth · solid: detections{}",
+                    int(page.images.len() as u64),
+                    int(page.total),
+                    if e.scored { images_shown(&page, accuracy) } else { String::new() },
+                ),
+            ))
             .when_some(more_error, |d, err| d.child(text(ty::SM, t.danger_text).child(err.message)))
             .when(more, |d| {
-                d.child(if loading_more {
+                d.child(div().flex_none().child(if loading_more {
                     self.button_disabled(
                         "entry-img-more",
                         "Loading…",
@@ -279,7 +282,7 @@ impl FoloApp {
                         cx,
                         act(move |this, _, cx| this.more_entry_images(&bid, &eid, cx)),
                     )
-                })
+                }))
             });
         panel(&t)
             .child(header)
