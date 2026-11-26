@@ -68,6 +68,7 @@ export default function XYChart(props: XYChartProps) {
     () => (p.stops ? p.stops.slice() : [...new Set(p.series.flatMap((s) => s.points.filter((q) => q.y !== null).map((q) => q.x)))]).sort((a, b) => a - b),
     { equals: sameNums },
   );
+  const hasStops = computed(() => stops.get().length > 0);
   const m = computed(
     () => {
       const strip = p.strip;
@@ -194,11 +195,17 @@ export default function XYChart(props: XYChartProps) {
       }
     }
   }
-  // A cursor cleared elsewhere drops the pin state and stale speech too.
+  // A cursor cleared elsewhere drops the pin state and stale speech too; if stops shrink/empty beneath a cursor, drop it so an invisible pin never keeps claiming Escape.
   effect(() => {
-    if (cursor.get() === null) {
+    const c = cursor.get();
+    const st = stops.get();
+    if (c === null) {
       spoken.set('');
       pinned.set(false);
+    } else if (!st.includes(c)) {
+      spoken.set('');
+      pinned.set(false);
+      cursor.set(null);
     }
   });
   effect(() => {
@@ -284,7 +291,9 @@ export default function XYChart(props: XYChartProps) {
   const keyless = new MediaQuery(`${media.phone}, (hover: none) and (pointer: coarse)`, false);
   const tapHint = signal(typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches && claimOnce(TAP_HINT_KEY));
   const hint = computed(() =>
-    chartHint({ reading: cursor.get() !== null, keyFocus: keyFocus.get() && !keyless.current, tap: tapHint.get() }),
+    hasStops.get()
+      ? chartHint({ reading: cursor.get() !== null, keyFocus: keyFocus.get() && !keyless.current, tap: tapHint.get() })
+      : null,
   );
   function onfocus() {
     try {
@@ -409,8 +418,8 @@ export default function XYChart(props: XYChartProps) {
             height={p.height}
             role="group"
             aria-roledescription="chart"
-            aria-label={`${p.label}. Focus and use the arrow keys to read it point by point.`}
-            tabindex={0}
+            aria-label={hasStops.get() ? `${p.label}. Focus and use the arrow keys to read it point by point.` : p.label}
+            tabindex={hasStops.get() ? 0 : -1}
             onpointerenter={onpointerenter}
             onpointermove={onpointermove}
             onpointerleave={onpointerleave}
@@ -540,7 +549,13 @@ export default function XYChart(props: XYChartProps) {
                       const c = cursor.get();
                       return c === null ? undefined : at(s(), c);
                     };
-                    return <>{q() && q()!.y !== null ? <circle class="dot" cx={x.get()(q()!.x)} cy={y.get()(clampY(q()!.y!))} r="4" style:fill={inkOf(s())} /> : null}</>;
+                    return (
+                      <>
+                        {q() && q()!.y !== null ? (
+                          <circle class="dot" cx={x.get()(q()!.x)} cy={y.get()(clampY(q()!.y!))} r="4" style:fill={receded(s()) ? 'var(--chart-context)' : inkOf(s())} />
+                        ) : null}
+                      </>
+                    );
                   }}
                 </For>
               </>

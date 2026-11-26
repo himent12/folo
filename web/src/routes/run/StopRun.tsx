@@ -4,7 +4,7 @@
  * shows in the dialog, which stays open for Retry; a success closes it and toasts.
  */
 import CircleStop from '$icons/circle-stop';
-import { signal } from 'fw';
+import { onCleanup, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { runsChanged } from '$lib/api/runs';
 import type { Run } from '$lib/api/types';
@@ -64,20 +64,24 @@ export interface StopRunProps {
 export default function StopRun(props: StopRunProps) {
   const busy = signal(false);
   const status = new DialogStatus();
+  let mounted = true;
+  onCleanup(() => (mounted = false));
 
   async function stop() {
     const cur = props.run;
-    if (!cur) return;
+    if (!cur || busy.peek()) return;
+    const targetId = cur.id;
     busy.set(true);
     try {
-      const r = await hub.api.stopRun(cur.id);
+      const r = await hub.api.stopRun(targetId);
       runsChanged();
-      props.onclose();
-      // page-level: the confirm closed on the line above.
+      if (mounted && props.run?.id === targetId) props.onclose();
+      // page-level: the confirm closed on the line above (or the page left while stopping).
       stoppedToast(r, finishedEpochs(cur));
-      props.onstopped?.(r);
+      if (mounted) props.onstopped?.(r);
     } catch (e) {
-      status.error(e, 'Could not stop the run');
+      if (mounted && props.run?.id === targetId) status.error(e, 'Could not stop the run');
+      else toast.error(e, 'Could not stop the run');
     } finally {
       busy.set(false);
     }
@@ -87,13 +91,16 @@ export default function StopRun(props: StopRunProps) {
     <Dialog
       open={!!props.run}
       onclose={props.onclose}
+      onbeforeclose={() => !busy.peek()}
       title={props.run ? `Stop ${props.run.name}?` : ''}
       description={props.run ? stopDescription(props.run, finishedEpochs(props.run)) : undefined}
       size="sm"
       status={status}
       footer={() => (
         <>
-          <Button onclick={props.onclose}>Keep training</Button>{' '}
+          <Button disabled={busy.get()} onclick={() => !busy.peek() && props.onclose()}>
+            Keep training
+          </Button>{' '}
           <Button variant="destructive" icon={CircleStop} loading={busy.get()} onclick={stop}>
             Stop run
           </Button>

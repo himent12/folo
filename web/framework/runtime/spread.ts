@@ -21,7 +21,7 @@ export function spread(
   el: Element,
   props: object | (() => object),
   scope?: string,
-  dirs?: () => Record<string, unknown>,
+  dirs?: () => Record<string, unknown> | undefined,
   styleDirs?: () => Record<string, unknown>,
   styleImportant?: () => Record<string, unknown>,
 ): void {
@@ -44,10 +44,19 @@ export function spread(
     for (const key in src) if (!SKIP.has(key)) next[key] = src[key];
     for (const key in prev) if (!(key in next)) next[key] = undefined;
     const d = dirs?.();
-    if (!classSet || 'class' in next || d !== undefined) {
+    if (!classSet || 'class' in next || d !== undefined || prevDirs !== undefined) {
       // A `class` key that went is `undefined` here: its classes go, the scope class and directives stay on.
       const cls = clsx(next.class as ClassValue);
-      if (!classSet || cls !== prevClass) {
+      let dropped = false;
+      if (prevDirs !== undefined) {
+        for (const k in prevDirs) {
+          if (d === undefined || !(k in d)) {
+            dropped = true;
+            break;
+          }
+        }
+      }
+      if (!classSet || cls !== prevClass || dropped) {
         const c = toClass(cls, scope, d);
         if (c === null) el.removeAttribute('class');
         else if (el.namespaceURI === 'http://www.w3.org/1999/xhtml') (el as HTMLElement).className = c;
@@ -113,8 +122,10 @@ export function spread(
         continue;
       }
       const name = el.namespaceURI === 'http://www.w3.org/1999/xhtml' ? (propName(key) ?? key) : key;
-      if (value == null) el.removeAttribute(key);
-      else if (typeof value !== 'string' && hasSetter(el, name)) (el as any)[name] = value;
+      if (value == null) {
+        if (typeof prev[key] === 'boolean' && hasSetter(el, name)) (el as any)[name] = false;
+        el.removeAttribute(key);
+      } else if (typeof value !== 'string' && hasSetter(el, name)) (el as any)[name] = value;
       else if (typeof value !== 'function') setAttribute(el, name, value);
     }
     prev = next;

@@ -253,4 +253,79 @@ describe('XYChart', () => {
     expect(live.textContent).toBe('');
     synced.unmount();
   });
+
+  it('disables keyboard tab stop and hint when stops is empty, clears stale pins if stops disappear, and dims receded cursor dots', () => {
+    const stopsSig = signal<number[]>([]);
+    const highlightSig = signal<string | null>(null);
+    const series = [
+      ...SERIES,
+      {
+        id: 'b',
+        label: 'model B',
+        color: 'var(--chart-2)',
+        points: [
+          { x: 0, y: 0.4 },
+          { x: 0.5, y: 0.7 },
+          { x: 1, y: 0.8 },
+        ],
+      },
+    ];
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const view = render(
+      () => (
+        <XYChart
+          label="Comparison"
+          series={series}
+          stops={stopsSig.get()}
+          highlight={highlightSig.get()}
+          xDomain={[0, 1]}
+          yDomain={[0, 1]}
+          xTicks={[0, 0.5, 1]}
+          yTicks={[0, 0.5, 1]}
+          readout={(cur, hint) => <span class="out">{cur() !== null ? `x=${cur()}` : (hint() ?? 'idle')}</span>}
+          table={{ caption: 'Compare', head: ['x', 'y'], rows: [['0', '0.2']] }}
+        />
+      ),
+      target,
+    );
+    try {
+      Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: 480 });
+      target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
+      flush();
+      const svg = target.querySelector<SVGSVGElement>('svg[aria-roledescription=chart]')!;
+      expect(svg.getAttribute('tabindex')).toBe('-1');
+      expect(svg.getAttribute('aria-label')).toBe('Comparison');
+      svg.matches = ((sel: string) => sel === ':focus-visible') as unknown as typeof svg.matches;
+      svg.dispatchEvent(new FocusEvent('focus'));
+      flush();
+      expect(target.querySelector('.out')!.textContent).toBe('idle');
+
+      // Populate stops, pin via touch, and highlight 'a' so 'b' recedes.
+      stopsSig.set([0, 0.5, 1]);
+      highlightSig.set('a');
+      flush();
+      expect(svg.getAttribute('tabindex')).toBe('0');
+      expect(svg.getAttribute('aria-label')).toContain('arrow keys');
+      svg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 240, clientY: 80, bubbles: true }));
+      svg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 240, clientY: 80, bubbles: true }));
+      flush();
+      expect(target.querySelector('.cursor.pinned')).toBeTruthy();
+      const dots = [...target.querySelectorAll<SVGCircleElement>('circle.dot')];
+      expect(dots).toHaveLength(2);
+      expect(dots[0]!.style.fill).toBe('var(--chart-1)');
+      expect(dots[1]!.style.fill).toBe('var(--chart-context)');
+
+      // Emptying stops drops the cursor and pin so Escape is no longer claimed.
+      stopsSig.set([]);
+      flush();
+      expect(target.querySelector('.cursor')).toBeNull();
+      const esc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+      document.dispatchEvent(esc);
+      flush();
+      expect(esc.defaultPrevented).toBe(false);
+    } finally {
+      view.unmount();
+    }
+  });
 });

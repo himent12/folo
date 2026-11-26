@@ -5,12 +5,13 @@
  * shows in the dialog, which stays open for Retry; a success closes it and toasts.
  */
 import Trash from '$icons/trash-2';
-import { computed, effect, signal } from 'fw';
+import { computed, effect, onCleanup, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { modelsChanged } from '$lib/api/models';
 import { runsChanged } from '$lib/api/runs';
 import type { Model, Run } from '$lib/api/types';
 import { prefs } from '$lib/prefs';
+import { router } from '$lib/router';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
 import { DialogStatus } from '$lib/ui/feedback';
@@ -27,6 +28,8 @@ export interface DeleteRunProps {
 export default function DeleteRun(props: DeleteRunProps) {
   const busy = signal(false);
   const status = new DialogStatus();
+  let mounted = true;
+  onCleanup(() => (mounted = false));
   /** The models list fetched for this opening; undefined until it arrives (or when it fails). */
   const models = signal<readonly Model[] | undefined>(undefined);
   const runId = computed(() => props.run?.id ?? null);
@@ -47,20 +50,23 @@ export default function DeleteRun(props: DeleteRunProps) {
 
   async function remove() {
     const r = props.run;
-    if (!r) return;
+    if (!r || busy.peek()) return;
+    const targetId = r.id;
+    const startPath = router.location.path;
     const known = models.peek();
     const gone = known ? runModels(r, known).length : undefined;
     busy.set(true);
     try {
-      await hub.api.deleteRun(r.id);
+      await hub.api.deleteRun(targetId);
       runsChanged();
-      props.onclose();
-      // page-level: the confirm closed on the line above.
-      toast.success(`Deleted ${r.name}`, gone ? `Its weights and ${gone === 1 ? 'model are' : `${gone} models are`} gone too.` : undefined);
       modelsChanged();
-      props.ondeleted?.(r);
+      if (mounted && props.run?.id === targetId) props.onclose();
+      // page-level: the confirm closed on the line above (or the page left while deleting).
+      toast.success(`Deleted ${r.name}`, gone ? `Its weights and ${gone === 1 ? 'model are' : `${gone} models are`} gone too.` : undefined);
+      if (mounted && router.location.path === startPath) props.ondeleted?.(r);
     } catch (e) {
-      status.error(e, 'Could not delete the run');
+      if (mounted && props.run?.id === targetId) status.error(e, 'Could not delete the run');
+      else toast.error(e, 'Could not delete the run');
     } finally {
       busy.set(false);
     }
@@ -70,13 +76,16 @@ export default function DeleteRun(props: DeleteRunProps) {
     <Dialog
       open={!!props.run}
       onclose={props.onclose}
+      onbeforeclose={() => !busy.peek()}
       title={props.run ? `Delete ${props.run.name}?` : ''}
       description={words.get()?.description}
       size="sm"
       status={status}
       footer={() => (
         <>
-          <Button onclick={props.onclose}>Cancel</Button>{' '}
+          <Button disabled={busy.get()} onclick={() => !busy.peek() && props.onclose()}>
+            Cancel
+          </Button>{' '}
           <Button variant="destructive" icon={Trash} loading={busy.get()} onclick={remove}>
             {words.get()?.button ?? 'Delete run'}
           </Button>

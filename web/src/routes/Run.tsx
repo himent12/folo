@@ -21,7 +21,7 @@ import Copy from '$icons/copy';
 import Play from '$icons/play';
 import RotateCcw from '$icons/rotate-ccw';
 import CloudUpload from '$icons/cloud-upload';
-import { computed, css, effect, MediaQuery, signal, untrack } from 'fw';
+import { computed, css, effect, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { LiveRun } from '$lib/api/live';
 import { modelsResource } from '$lib/api/models';
@@ -240,32 +240,38 @@ export default function Run() {
   const stopOpen = signal(false);
   const deleteOpen = signal(false);
   const busy = signal(false);
+  let mounted = true;
+  onCleanup(() => (mounted = false));
   // A confirm that fails says so in its dialog, which stays open for Retry (the toaster sits behind the modal); one
   // that succeeds closes it and the page says what happened.
   const stopStatus = new DialogStatus();
 
   async function stop() {
     const cur = run.peek();
-    if (!cur) return;
+    if (!cur || busy.peek()) return;
+    const wasRemoving = removing.peek();
+    const startPath = router.location.path;
     busy.set(true);
     try {
-      if (removing.peek()) {
+      if (wasRemoving) {
         // A run that never started is deleted (it leaves the list); a resumed one stops with what it trained.
         const r = await live.stop(() => removeQueued(cur));
-        stopOpen.set(false);
+        if (mounted) stopOpen.set(false);
         removedToast(cur);
-        if (!r) router.go('/runs', { replace: true });
+        if (!r && mounted && router.location.path === startPath) router.go('/runs', { replace: true });
         return;
       }
       // The run as the view now has it: the stream may have said it ended while the stop was on its way.
       const r = await live.stop(() => hub.api.stopRun(cur.id));
       runsChanged();
       if (!r) return;
-      stopOpen.set(false);
+      if (mounted) stopOpen.set(false);
       // The checkpoint is the last finished epoch's: none before the first one ends.
       stoppedToast(r, untrack(() => epochsDone.get()));
     } catch (e) {
-      stopStatus.error(e, removing.peek() ? 'Could not remove the run from the queue' : 'Could not stop the run');
+      const msg = wasRemoving ? 'Could not remove the run from the queue' : 'Could not stop the run';
+      if (mounted && stopOpen.peek()) stopStatus.error(e, msg);
+      else toast.error(e, msg);
     } finally {
       busy.set(false);
     }
@@ -339,7 +345,7 @@ export default function Run() {
   // page-level: Resume is a header and palette action, never inside a dialog.
   async function resume() {
     const cur = run.peek();
-    if (!cur) return;
+    if (!cur || resuming.peek()) return;
     resuming.set(true);
     try {
       const id = cur.id;
@@ -706,13 +712,16 @@ export default function Run() {
 
           <Dialog
             bind:open={stopOpen}
+            onbeforeclose={() => !busy.peek()}
             title={removing.get() ? removeTitle(R().name) : `Stop ${R().name}?`}
             description={removing.get() ? removeDescription(R()) : stopDescription(R(), epochsDone.get())}
             size="sm"
             status={stopStatus}
             footer={() => (
               <>
-                <Button onclick={() => stopOpen.set(false)}>{removing.get() ? 'Keep it queued' : handover.get() ? 'Keep going' : 'Keep training'}</Button>
+                <Button disabled={busy.get()} onclick={() => !busy.peek() && stopOpen.set(false)}>
+                  {removing.get() ? 'Keep it queued' : handover.get() ? 'Keep going' : 'Keep training'}
+                </Button>
                 <Button variant="destructive" icon={removing.get() ? X : CircleStop} loading={busy.get()} onclick={stop}>
                   {removing.get() ? REMOVE_LABEL : 'Stop run'}
                 </Button>

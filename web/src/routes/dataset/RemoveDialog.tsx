@@ -7,7 +7,7 @@
  */
 import TriangleAlert from '$icons/triangle-alert';
 import Trash from '$icons/trash-2';
-import { bindable, computed, css, effect, signal, untrack } from 'fw';
+import { bindable, computed, css, effect, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Run } from '$lib/api/types';
@@ -55,6 +55,8 @@ export function runsImpact(used: readonly Pick<Run, 'name' | 'status'>[]): { los
 export default function RemoveDialog(props: RemoveDialogProps) {
   const open = bindable(props, 'open', false);
   const deleting = signal(false);
+  let mounted = true;
+  onCleanup(() => (mounted = false));
   /** A failed removal says so in the dialog, which stays open for another try (the toaster sits behind the modal). */
   const status = new DialogStatus();
   /** The server's runs, read each time the dialog opens (a run may have started since). */
@@ -78,17 +80,20 @@ export default function RemoveDialog(props: RemoveDialogProps) {
   const images = () => (props.dataset.splits ? count(props.dataset.splits.train + props.dataset.splits.val + props.dataset.splits.test, 'generated image') : 'generated images');
 
   async function remove() {
+    if (deleting.peek()) return;
     const d = props.dataset;
+    const startPath = router.location.path;
     deleting.set(true);
     try {
       const gone = files();
       await hub.api.deleteDataset(d.id, { files: gone });
       datasetsChanged();
-      open.set(false);
+      if (mounted) open.set(false);
       toast.success('Dataset removed', gone ? `${d.name} and its ${images()} were deleted.` : `${d.name} is no longer registered. Files on disk were not touched.`);
-      router.go('/datasets', { replace: true });
+      if (mounted && router.location.path === startPath) router.go('/datasets', { replace: true });
     } catch (e) {
-      status.error(e, 'Could not remove the dataset');
+      if (mounted && open.peek()) status.error(e, 'Could not remove the dataset');
+      else toast.error(e, 'Could not remove the dataset');
     } finally {
       deleting.set(false);
     }
@@ -97,12 +102,15 @@ export default function RemoveDialog(props: RemoveDialogProps) {
   return (
     <Dialog
       bind:open={open}
+      onbeforeclose={() => !deleting.peek()}
       title={`Remove ${props.dataset.name} from FOLO?`}
       size="sm"
       status={status}
       footer={() => (
         <>
-          <Button onclick={() => open.set(false)}>Cancel</Button>
+          <Button disabled={deleting.get()} onclick={() => !deleting.peek() && open.set(false)}>
+            Cancel
+          </Button>
           <Button variant="destructive" icon={Trash} loading={deleting.get()} onclick={remove}>
             {files() ? 'Remove and delete files' : 'Remove from FOLO'}
           </Button>

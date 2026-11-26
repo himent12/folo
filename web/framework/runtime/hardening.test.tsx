@@ -853,4 +853,124 @@ describe('runtime action, spread, transition, deep, and unmount hardening', () =
     expect(el.parentNode).toBe(root2);
     unmount2();
   });
+
+  it('aborts intro-only and orphaned bidirectional transition intros on unmount without breaking local intro->outro handoff', async () => {
+    type StubAnim = { onfinish: (() => void) | null; cancel: ReturnType<typeof vi.fn>; currentTime: number; effect: unknown; opts?: KeyframeAnimationOptions };
+    const stub = (list: StubAnim[]) => (_k: Keyframe[], opts?: KeyframeAnimationOptions) => {
+      const a: StubAnim = { onfinish: null, cancel: vi.fn(), currentTime: 0, effect: {}, opts };
+      list.push(a);
+      return a;
+    };
+    const mountShow = (el: HTMLElement, flags: number, tick?: (t: number) => void) => {
+      const show = signal(false);
+      const root = document.createElement('div');
+      const unmount = rawRender(
+        () => (
+          <Show when={show.get()}>
+            {() => {
+              transition(el, () => ({ duration: 100, css: (t) => `opacity: ${t}`, tick }), undefined, flags);
+              return el;
+            }}
+          </Show>
+        ),
+        root,
+      );
+      flush();
+      return { show, root, unmount };
+    };
+
+    // 1. Intro-only (flags = 1) and bidirectional (flags = 3) unmounted before microtask: tick and animate never run.
+    for (const flags of [1, 3]) {
+      const el = document.createElement('div');
+      const anims: StubAnim[] = [];
+      const tick = vi.fn();
+      const onEnd = vi.fn();
+      (el as unknown as { animate: ReturnType<typeof stub> }).animate = stub(anims);
+      el.addEventListener('introend', onEnd);
+      const { show, unmount } = mountShow(el, flags, tick);
+      show.set(true);
+      flush();
+      unmount();
+      await Promise.resolve();
+      expect(anims).toHaveLength(0);
+      expect(tick).not.toHaveBeenCalled();
+      expect(onEnd).not.toHaveBeenCalled();
+    }
+
+    // 2. Bidirectional (flags = 3) already started: parent unmount aborts the running intro animation.
+    const el2 = document.createElement('div');
+    const anims2: StubAnim[] = [];
+    (el2 as unknown as { animate: ReturnType<typeof stub> }).animate = stub(anims2);
+    const { show: show2, unmount: unmount2 } = mountShow(el2, 3);
+    show2.set(true);
+    flush();
+    await Promise.resolve();
+    expect(anims2).toHaveLength(1);
+    unmount2();
+    await Promise.resolve();
+    expect(anims2[0]!.cancel).toHaveBeenCalled();
+
+    // 3. Local intro->outro handoff: outro reads intro progress, cancels intro, and removes the node on finish.
+    const el3 = document.createElement('div');
+    const anims3: StubAnim[] = [];
+    (el3 as unknown as { animate: ReturnType<typeof stub> }).animate = stub(anims3);
+    const { show: show3, root: root3, unmount: unmount3 } = mountShow(el3, 3);
+    show3.set(true);
+    flush();
+    await Promise.resolve();
+    anims3[0]!.onfinish!(); // intro delay done -> starts intro main animation (anims3[1])
+    anims3[1]!.currentTime = 50;
+    show3.set(false);
+    flush();
+    expect(el3.parentNode).toBe(root3);
+    await Promise.resolve(); // outro delay anim created (anims3[2])
+    anims3[2]!.onfinish!(); // hands off from t=0.5 -> cancels intro, starts 50ms outro (anims3[3])
+    expect(anims3[1]!.cancel).toHaveBeenCalled();
+    expect(anims3[3]!.opts?.duration).toBe(50);
+    anims3[3]!.onfinish!();
+    expect(el3.parentNode).toBeNull();
+    unmount3();
+  });
+
+  it('spread cleans up dropped class: directive keys (preserving base classes) and resets removed boolean properties', () => {
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    const propsSig = signal<Record<string, unknown>>({ class: 'base active', indeterminate: true, disabled: true });
+    const dirsSig = signal<Record<string, unknown> | undefined>({ active: true, extra: true });
+    const stop = createRoot((d) => {
+      spread(input, () => propsSig.get(), 'fw-s', () => dirsSig.get());
+      return d;
+    });
+    flush();
+    expect(input.indeterminate).toBe(true);
+    expect(input.disabled).toBe(true);
+    expect(input.classList.contains('active')).toBe(true);
+    expect(input.classList.contains('extra')).toBe(true);
+
+    // Dropping a directive key removes extra, resets removed booleans, and preserves base `active` when `active` drops.
+    dirsSig.set({});
+    propsSig.set({ class: 'base active' });
+    flush();
+    expect(input.indeterminate).toBe(false);
+    expect(input.disabled).toBe(false);
+    expect(input.classList.contains('extra')).toBe(false);
+    expect(input.classList.contains('active')).toBe(true);
+    expect(input.classList.contains('fw-s')).toBe(true);
+    stop();
+
+    // Without a `class` key in props, dirs transitioning to undefined still removes prior directive classes.
+    const bare = document.createElement('div');
+    const bareDirs = signal<Record<string, unknown> | undefined>({ active: true });
+    const stopBare = createRoot((d) => {
+      spread(bare, () => ({}), undefined, () => bareDirs.get());
+      return d;
+    });
+    flush();
+    expect(bare.classList.contains('active')).toBe(true);
+    bareDirs.set(undefined);
+    flush();
+    expect(bare.classList.contains('active')).toBe(false);
+    expect(bare.hasAttribute('class')).toBe(false);
+    stopBare();
+  });
 });

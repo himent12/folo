@@ -101,8 +101,11 @@ export function compareState() {
   const hovered = signal<string | null>(null);
   const pinned = signal<string | null>(null);
   effect(() => {
-    const p = pinned.get();
-    if (p !== null && !shown.get().some((e) => e.id === p)) pinned.set(null);
+    const cur = shown.get();
+    const p = pinned.peek();
+    if (p !== null && !cur.some((e) => e.id === p)) pinned.set(null);
+    const h = hovered.peek();
+    if (h !== null && !cur.some((e) => e.id === h)) hovered.set(null);
   });
   const highlight = computed(() => [hovered.get(), pinned.get()].find((x) => x !== null && shown.get().some((e) => e.id === x)) ?? null);
 
