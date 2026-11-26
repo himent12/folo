@@ -135,7 +135,7 @@ impl FoloApp {
         self.play_pred_pending = false;
         self.play_pred_dim = false;
         self.play_pred_for = None;
-        self.play_hover = None;
+        self.clear_play_hover();
         self.play_zoom = 1.0;
         self.play_pan = (0., 0.);
         self.run_predict(cx);
@@ -163,7 +163,7 @@ impl FoloApp {
             self.play_pred_pending = false;
             self.play_pred_dim = false;
             self.play_pred_for = None;
-            self.play_hover = None;
+            self.clear_play_hover();
             self.play_image.take().map(|p| p.image)
         } else {
             None
@@ -236,7 +236,7 @@ impl FoloApp {
         self.play_open_seq += 1;
         if self.play_model.as_deref() != Some(id.as_str()) {
             self.play_class = None;
-            self.play_hover = None;
+            self.clear_play_hover();
         }
         self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
         self.play_model = Some(id);
@@ -300,7 +300,7 @@ impl FoloApp {
         self.play_pred_for = None;
         self.play_pred_pending = false;
         self.play_pred_dim = false;
-        self.play_hover = None;
+        self.clear_play_hover();
         self.play_class = None;
     }
 
@@ -312,11 +312,17 @@ impl FoloApp {
         self.run_predict(cx);
     }
 
+    /// Clears Playground box hover state and its source ownership.
+    pub(crate) fn clear_play_hover(&mut self) {
+        self.play_hover = None;
+        self.play_hover_from_stage = false;
+    }
+
     /// Sets the Playground threshold, refetching when it drops below what was fetched (filtering
     /// is local only above that floor).
     pub fn set_play_conf(&mut self, conf: f32, cx: &mut Context<Self>) {
         self.play_conf = conf;
-        self.play_hover = None;
+        self.clear_play_hover();
         if conf < self.play_fetched_floor - 1e-6 {
             self.run_predict(cx);
         }
@@ -340,7 +346,7 @@ impl FoloApp {
         // Same image and model (an IoU change): keep showing the old boxes until the new ones land.
         if self.play_pred_for.as_ref() != Some(&key) {
             self.play_pred = Load::Loading;
-            self.play_hover = None;
+            self.clear_play_hover();
         }
         self.play_pred_seq += 1;
         self.play_pred_pending = true;
@@ -387,7 +393,7 @@ impl FoloApp {
         self.play_pred_for = Some(key);
         self.play_pred_pending = false;
         self.play_pred_dim = false;
-        self.play_hover = None;
+        self.clear_play_hover();
     }
 
     /// Why Open image can't run now, if it can't: the model list failed (with the runs list too:

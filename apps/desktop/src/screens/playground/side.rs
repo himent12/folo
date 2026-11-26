@@ -289,7 +289,7 @@ impl FoloApp {
                     act(|this, _, cx| {
                         this.play_boxes = !this.play_boxes;
                         if !this.play_boxes {
-                            this.play_hover = None;
+                            this.clear_play_hover();
                         }
                         cx.notify();
                     }),
@@ -348,7 +348,7 @@ impl FoloApp {
                             cx,
                             act(move |this, w, cx| {
                                 this.play_class = None;
-                                this.play_hover = None;
+                                this.clear_play_hover();
                                 if distinct_above < 2 {
                                     this.focus_key("play-boxes", w, cx);
                                 }
@@ -371,7 +371,7 @@ impl FoloApp {
                                 act(move |this, w, cx| {
                                     let clearing = this.play_class == Some(cid);
                                     this.play_class = if clearing { None } else { Some(cid) };
-                                    this.play_hover = None;
+                                    this.clear_play_hover();
                                     if clearing && distinct_above < 2 {
                                         this.focus_key("play-boxes", w, cx);
                                     } else if clearing && cnt == 0 {
@@ -404,7 +404,7 @@ impl FoloApp {
                         cx,
                         act(move |this, w, cx| {
                             this.play_class = None;
-                            this.play_hover = None;
+                            this.clear_play_hover();
                             let target = if distinct_above >= 2 { "play-class-all" } else { "play-boxes" };
                             this.focus_key(target, w, cx);
                             cx.notify();
@@ -442,12 +442,13 @@ impl FoloApp {
                             .active(|s| s.bg(t.bg_active))
                             .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                                 if *h {
+                                    this.play_hover_from_stage = false;
                                     if this.play_hover != Some(i) {
                                         this.play_hover = Some(i);
                                         cx.notify();
                                     }
-                                } else if this.play_hover == Some(i) {
-                                    this.play_hover = None;
+                                } else if !this.play_hover_from_stage && this.play_hover == Some(i) {
+                                    this.clear_play_hover();
                                     cx.notify();
                                 }
                             }))
@@ -487,6 +488,7 @@ impl FoloApp {
                             window,
                             cx,
                             act(move |this, _, cx| {
+                                this.play_hover_from_stage = false;
                                 this.play_hover = if this.play_hover == Some(i) { None } else { Some(i) };
                                 cx.notify();
                             }),

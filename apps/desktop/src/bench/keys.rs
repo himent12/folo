@@ -68,7 +68,7 @@ impl FoloApp {
         {
             let (bid, eid) = (bid.clone(), eid.clone());
             self.bench.selected_entry_image = None;
-            self.bench.scroll_entry_preview = false;
+            self.bench.entry_image_reveal = None;
             let entry_ready = self.bench.list.ready().is_some_and(|l| l.iter().any(|b| b.id == bid))
                 && self
                     .bench
@@ -86,6 +86,7 @@ impl FoloApp {
                     .and_then(|x| x.page.ready())
                     .is_some_and(|p| p.images.iter().any(|im| im.image.id == img_id));
             if visible {
+                self.bench.entry_image_reveal = Some(crate::bench::EntryImageReveal::Tile(img_id.clone()));
                 let key = if self.bench_image_failed(&bid, &img_id, None) {
                     format!("eimg-retry-{img_id}")
                 } else {

@@ -757,8 +757,11 @@ fn hovering_downward_across_playground_and_inspector_rows_preserves_highlight() 
         app.run_until_idle();
     }
 
-    // Scan vertically in Playground's right-hand rail (x = 1120) to locate row 0, then move
-    // directly downward by one row height (29 px) into row 1 without leaving the list.
+    // Scan vertically in Playground's right-hand rail (x = 1120) to locate row 0, then verify:
+    // 1. Hovering a detection box on the stage and moving directly onto row 0 preserves `Some(0)`
+    //    (stage exit must not overwrite row hover ownership).
+    // 2. Moving directly downward from row 0 to row 1 preserves `Some(1)`.
+    // 3. Hovering a box on the stage and leaving the stage to empty chrome clears `play_hover`.
     let mut row0_y = None;
     for y in (200..780).step_by(14) {
         move_to(&mut app, window, 1120., y as f32);
@@ -768,11 +771,42 @@ fn hovering_downward_across_playground_and_inspector_rows_preserves_highlight() 
         }
     }
     let y0 = row0_y.expect("located Playground detection row 0");
+
+    let mut stage_hit = None;
+    'scan: for y in (160..700).step_by(24) {
+        for x in (280..860).step_by(24) {
+            move_to(&mut app, window, x as f32, y as f32);
+            if drive(&mut app, window, |this, _, _| this.play_hover.is_some() && this.play_hover_from_stage) {
+                stage_hit = Some((x as f32, y as f32));
+                break 'scan;
+            }
+        }
+    }
+    let (sx, sy) = stage_hit.expect("located a detection box on Playground stage");
+    move_to(&mut app, window, 1120., y0);
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| (this.play_hover, this.play_hover_from_stage)),
+        (Some(0), false),
+        "moving directly from Playground stage to row 0 preserves row 0 hover"
+    );
+
     move_to(&mut app, window, 1120., y0 + 29.);
     assert_eq!(
         drive(&mut app, window, |this, _, _| this.play_hover),
         Some(1),
         "moving directly down from det-0 to det-1 preserves play_hover == Some(1)"
+    );
+
+    move_to(&mut app, window, sx, sy);
+    assert!(
+        drive(&mut app, window, |this, _, _| this.play_hover.is_some() && this.play_hover_from_stage),
+        "re-entering stage box assigns stage hover ownership"
+    );
+    move_to(&mut app, window, 260., 70.);
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| (this.play_hover, this.play_hover_from_stage)),
+        (None, false),
+        "leaving stage to empty area clears stage-owned hover"
     );
 
     // Same invariant in the Image Inspector's box list: find an image with >= 2 boxes, locate

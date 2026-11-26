@@ -205,12 +205,19 @@ pub struct BenchState {
     pub plan_preview_sev: HashMap<(String, String), u8>,
     /// Entry image currently expanded in the Entry Images detail panel: `(bench_id, entry_id, image_id)`.
     pub selected_entry_image: Option<(String, String, String)>,
-    /// Scroll the expanded entry image preview into view on its next prepaint (pointer and keyboard).
-    pub scroll_entry_preview: bool,
+    /// One-shot scroll reveal target for the Entry Images panel (pointer and keyboard).
+    pub entry_image_reveal: Option<EntryImageReveal>,
     /// Scroll handle for the entry image preview's detections / ground-truth details rail.
     pub entry_inspect_scroll: ScrollHandle,
     /// Hide dashed ground-truth boxes in the expanded Entry Image inspector.
     pub entry_inspect_hide_truth: bool,
     /// Hide solid prediction boxes in the expanded Entry Image inspector.
     pub entry_inspect_hide_preds: bool,
+}
+
+/// One-shot scroll reveal target for the Entry Images panel (works in pointer and keyboard mode).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EntryImageReveal {
+    Preview,
+    Tile(String),
 }

@@ -10,7 +10,7 @@ use folo_ui::{
 use super::format::images_shown;
 use crate::api::{Bench, BenchAccuracy, BenchEntry, BenchEntryImage};
 use crate::app::{FoloApp, act};
-use crate::bench::ImageSort;
+use crate::bench::{EntryImageReveal, ImageSort};
 use crate::controls::Btn;
 use crate::screens::image_canvas;
 use crate::store::Load;
@@ -46,7 +46,7 @@ impl FoloApp {
                 if this.bench.image_sort != next {
                     this.bench.image_sort = next;
                     this.bench.selected_entry_image = None;
-                    this.bench.scroll_entry_preview = false;
+                    this.bench.entry_image_reveal = None;
                 }
                 this.ensure_entry_images(&bid, &eid, cx);
                 cx.notify();
@@ -110,6 +110,14 @@ impl FoloApp {
             selected_id.as_deref().and_then(|sid| page.images.iter().position(|im| im.image.id == sid));
         let inspector =
             selected_idx.map(|idx| self.entry_image_detail(&t, b, e, &page.images, idx, window, cx));
+        let reveal_tile = match self.bench.entry_image_reveal.take() {
+            Some(EntryImageReveal::Tile(id)) => Some(id),
+            other => {
+                self.bench.entry_image_reveal = other;
+                None
+            }
+        };
+        let page_scroll = self.page_scroll.clone();
         let tiles: Vec<AnyElement> = page
             .images
             .iter()
@@ -175,10 +183,10 @@ impl FoloApp {
                             let target = (bid.clone(), eid.clone(), iid.clone());
                             if this.bench.selected_entry_image.as_ref() == Some(&target) {
                                 this.bench.selected_entry_image = None;
-                                this.bench.scroll_entry_preview = false;
+                                this.bench.entry_image_reveal = None;
                             } else {
                                 this.bench.selected_entry_image = Some(target);
-                                this.bench.scroll_entry_preview = true;
+                                this.bench.entry_image_reveal = Some(EntryImageReveal::Preview);
                                 this.bench.entry_inspect_scroll.set_offset(folo_ui::point(px(0.), px(0.)));
                                 let fh = this.fh("eimg-prev", cx);
                                 w.focus(&fh);
@@ -190,8 +198,11 @@ impl FoloApp {
                 };
                 let ok = im.missed == 0 && im.wrong == 0;
                 let caption_text = entry_image_caption(im);
+                let should_reveal = reveal_tile.as_deref() == Some(im.image.id.as_str());
+                let tile_scroll = page_scroll.clone();
                 div()
                     .id(SharedString::from(format!("eimg-{}", im.image.id)))
+                    .relative()
                     .w(px(152.))
                     .flex_none()
                     .flex()
@@ -207,6 +218,20 @@ impl FoloApp {
                         },
                         None,
                     ))
+                    .when(should_reveal, |d| {
+                        d.child(
+                            folo_ui::canvas(
+                                move |b, window, _| {
+                                    crate::app::reveal_bounds_in_scroll(b, &tile_scroll, window)
+                                },
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                        )
+                    })
                     .child(frame)
                     .when_some(retry_stop, |d, fh| d.child(div().track_focus(&fh)))
                     .child(
@@ -362,7 +387,7 @@ impl FoloApp {
             cx,
             act(move |this, w, cx| {
                 this.bench.selected_entry_image = None;
-                this.bench.scroll_entry_preview = false;
+                this.bench.entry_image_reveal = Some(EntryImageReveal::Tile(close_img_id.clone()));
                 let key = if this.bench_image_failed(&close_bid, &close_img_id, None) {
                     format!("eimg-retry-{close_img_id}")
                 } else {
@@ -565,7 +590,13 @@ impl FoloApp {
             .child(preds_chip)
             .child(close);
 
-        let should_scroll = std::mem::take(&mut self.bench.scroll_entry_preview);
+        let should_scroll = match self.bench.entry_image_reveal.take() {
+            Some(EntryImageReveal::Preview) => true,
+            other => {
+                self.bench.entry_image_reveal = other;
+                false
+            }
+        };
         let page_scroll = self.page_scroll.clone();
         div()
             .relative()
@@ -715,37 +746,55 @@ mod tests {
         app.frame(window.into());
         assert!(bottom_y > 400., "page overflows vertically at 960×620 (bottom_y={bottom_y})");
 
-        // Pointer-click the bottom gallery area (leaves keyboard mode `kb == false`) or simulate a
-        // pointer open of the last tile: `scroll_entry_preview` must scroll `page_scroll` UP even
-        // without focus rings painted.
-        let click_pos = point(px(140.), px(520.));
-        app.simulate_input(
-            window.into(),
-            PlatformInput::MouseDown(MouseDownEvent {
-                button: MouseButton::Left,
-                position: click_pos,
-                modifiers: Modifiers::default(),
-                click_count: 1,
-                first_mouse: false,
-            }),
-        );
-        app.simulate_input(
-            window.into(),
-            PlatformInput::MouseUp(MouseUpEvent {
-                button: MouseButton::Left,
-                position: click_pos,
-                modifiers: Modifiers::default(),
-                click_count: 1,
-            }),
-        );
-        // Ensure the last image with 16 boxes is selected with pointer mode (`kb == false`) and
-        // `scroll_entry_preview = true` if the click hit padding between tiles.
-        drive(&mut app, window, |this, _, cx| {
-            assert!(!this.kb, "pointer interaction keeps kb == false");
-            this.bench.selected_entry_image = Some((bid.into(), eid.clone(), last_img.clone()));
-            this.bench.scroll_entry_preview = true;
-            this.bench.entry_inspect_scroll.set_offset(point(px(0.), px(0.)));
-            cx.notify();
+        // Helper to send a real pointer click (leaves keyboard mode `kb == false`).
+        let click_at = |app: &mut folo_ui::HeadlessApp, w: folo_ui::WindowHandle<FoloApp>, x: f32, y: f32| {
+            let pos = point(px(x), px(y));
+            app.simulate_input(
+                w.into(),
+                PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: pos,
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+            );
+            app.simulate_input(
+                w.into(),
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: pos,
+                    modifiers: Modifiers::default(),
+                    click_count: 1,
+                }),
+            );
+        };
+
+        // Pointer-click the last tile in the bottom row (leaves keyboard mode `kb == false`):
+        // scan right-to-left across the bottom row so the first hit is the rightmost tile
+        // (`last_img`, since 12 tiles fill rows of 3 or 4 evenly), exercising the real tile click
+        // handler without manually mutating selection or reveal state.
+        let mut clicked_tile = None;
+        for &cy in &[460., 500., 420.] {
+            for &cx_pos in &[840., 760., 680., 600., 520., 440., 360.] {
+                click_at(&mut app, window, cx_pos, cy);
+                if drive(&mut app, window, |this, _, _| this.bench.selected_entry_image.is_some()) {
+                    clicked_tile = Some((cx_pos, cy));
+                    break;
+                }
+            }
+            if clicked_tile.is_some() {
+                break;
+            }
+        }
+        let (tile_x, tile_y) = clicked_tile.expect("pointer click hit a tile in the bottom row");
+        drive(&mut app, window, |this, _, _| {
+            assert!(!this.kb, "pointer click keeps kb == false");
+            assert_eq!(
+                this.bench.selected_entry_image,
+                Some((bid.into(), eid.clone(), last_img.clone())),
+                "pointer click on bottom-right tile opens its inline preview"
+            );
         });
         app.frame(window.into());
         assert!(
@@ -804,9 +853,74 @@ mod tests {
             drive(&mut app, window, |this, _, _| f32::from(-this.bench.entry_inspect_scroll.offset().y));
         assert_eq!(at_home, 0., "Home returns details rail to top");
 
+        // Closing the preview in pointer mode (via Esc while `kb == false`) must reveal the
+        // destination tile at the bottom of the gallery instead of leaving it offscreen.
+        drive(&mut app, window, |this, _, _| this.kb = false);
+        send_key(&mut app, window, "escape");
+        drive(&mut app, window, |this, _, _| {
+            assert!(!this.kb, "Esc in pointer mode keeps kb == false");
+            assert_eq!(this.bench.selected_entry_image, None, "Esc closes preview");
+        });
+        assert!(
+            app.wants_frame(window.into()),
+            "closing preview via Esc schedules follow-up frame to reveal destination tile"
+        );
+        app.frame(window.into());
+        let after_esc_y = drive(&mut app, window, |this, _, _| f32::from(-this.page_scroll.offset().y));
+        assert!(
+            after_esc_y > revealed_y + 100.,
+            "Esc in pointer mode scrolls page back down to destination tile (revealed={revealed_y}, after_esc={after_esc_y})"
+        );
+
+        // Round-trip via pointer click on the tile again, then pointer-click on Close preview:
+        // must also reveal the destination tile at the bottom while staying in pointer mode.
+        drive(&mut app, window, |this, _, cx| {
+            let max_y = this.page_scroll.max_offset().height;
+            this.page_scroll.set_offset(point(px(0.), -max_y));
+            cx.notify();
+        });
+        app.frame(window.into());
+        click_at(&mut app, window, tile_x, tile_y);
+        app.frame(window.into());
+        app.frame(window.into());
+        drive(&mut app, window, |this, _, _| {
+            assert_eq!(
+                this.bench.selected_entry_image,
+                Some((bid.into(), eid.clone(), last_img.clone())),
+                "second pointer click reopens last tile preview"
+            );
+        });
+        // Click the Close preview icon button at the top-right of the revealed preview bar.
+        let mut closed_by_click = false;
+        for &cy in &[76., 84., 92., 100.] {
+            for &cx_pos in &[900., 892., 884., 908., 914.] {
+                click_at(&mut app, window, cx_pos, cy);
+                if drive(&mut app, window, |this, _, _| this.bench.selected_entry_image.is_none()) {
+                    closed_by_click = true;
+                    break;
+                }
+            }
+            if closed_by_click {
+                break;
+            }
+        }
+        assert!(closed_by_click, "pointer click hit Close preview button");
+        app.frame(window.into());
+        assert!(
+            app.wants_frame(window.into()),
+            "Close preview click schedules follow-up frame to reveal destination tile"
+        );
+        app.frame(window.into());
+        let after_close_y = drive(&mut app, window, |this, _, _| f32::from(-this.page_scroll.offset().y));
+        assert!(
+            after_close_y > revealed_y + 100.,
+            "Close preview click scrolls page back down to destination tile (revealed={revealed_y}, after_close={after_close_y})"
+        );
+
         // External deletion removes the entry from `bench.entries` while keeping cached `entry_images`:
         // pressing Esc must clear the stale selection and navigate back to `Route::Bench(bid)`.
         drive(&mut app, window, |this, _, cx| {
+            this.bench.selected_entry_image = Some((bid.into(), eid.clone(), last_img.clone()));
             if let Some(list) = this.bench.entries.get_mut(bid).and_then(|l| l.ready_mut()) {
                 list.retain(|e| e.id != eid);
             }

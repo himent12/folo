@@ -264,8 +264,7 @@ pub(crate) fn reveal_bounds_in_scroll(b: folo_ui::Bounds<Pixels>, h: &ScrollHand
     };
     if dy != px(0.) {
         let off = h.offset();
-        // Clamp only against top (0) here; prepaint clamps against the freshly laid-out max_offset.
-        let y = (off.y - dy).min(px(0.));
+        let y = (off.y - dy).clamp(-h.max_offset().height, px(0.));
         if (f32::from(y) - f32::from(off.y)).abs() > 0.5 {
             h.set_offset(folo_ui::point(off.x, y));
             window.request_animation_frame();
