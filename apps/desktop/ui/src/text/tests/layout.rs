@@ -436,3 +436,52 @@ fn shape_text_never_wraps_between_base_letter_and_combining_accent() {
         }
     }
 }
+
+#[test]
+fn x_and_font_id_for_index_handle_visual_order_rtl_glyphs() {
+    // Visual left-to-right order for "אבג" (bytes 0..2, 2..4, 4..6): indices arrive 4, 2, 0.
+    let layout = crate::LineLayout {
+        font_size: px(16.),
+        width: px(30.),
+        ascent: px(12.),
+        descent: px(4.),
+        len: 6,
+        runs: vec![
+            crate::ShapedRun {
+                font_id: crate::FontId(1),
+                glyphs: vec![
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(3),
+                        position: point(px(0.), px(0.)),
+                        index: 4,
+                        is_emoji: false,
+                    },
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(2),
+                        position: point(px(10.), px(0.)),
+                        index: 2,
+                        is_emoji: false,
+                    },
+                ],
+            },
+            crate::ShapedRun {
+                font_id: crate::FontId(2),
+                glyphs: vec![crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(20.), px(0.)),
+                    index: 0,
+                    is_emoji: false,
+                }],
+            },
+        ],
+    };
+    assert_eq!(layout.x_for_index(0), px(20.));
+    assert_eq!(layout.x_for_index(1), px(10.));
+    assert_eq!(layout.x_for_index(2), px(10.));
+    assert_eq!(layout.x_for_index(4), px(0.));
+    assert_eq!(layout.x_for_index(6), px(30.));
+    assert_eq!(layout.font_id_for_index(0), Some(crate::FontId(2)));
+    assert_eq!(layout.font_id_for_index(2), Some(crate::FontId(1)));
+    assert_eq!(layout.font_id_for_index(4), Some(crate::FontId(1)));
+    assert_eq!(layout.font_id_for_index(6), None);
+}

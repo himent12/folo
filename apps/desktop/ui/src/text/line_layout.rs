@@ -106,27 +106,37 @@ impl LineLayout {
     }
 
     /// The x position of the character at `index` (the line's width past the last glyph).
+    /// Handles visual-order RTL runs by picking the glyph with the smallest `glyph.index >= index`.
     pub fn x_for_index(&self, index: usize) -> Pixels {
+        let mut best: Option<(usize, Pixels)> = None;
         for run in &self.runs {
             for glyph in &run.glyphs {
-                if glyph.index >= index {
+                if glyph.index == index {
                     return glyph.position.x;
+                }
+                if glyph.index > index && best.is_none_or(|(best_ix, _)| glyph.index < best_ix) {
+                    best = Some((glyph.index, glyph.position.x));
                 }
             }
         }
-        self.width
+        best.map_or(self.width, |(_, x)| x)
     }
 
     /// The font of the glyph at `index`.
+    /// Handles visual-order RTL runs by picking the glyph with the smallest `glyph.index >= index`.
     pub fn font_id_for_index(&self, index: usize) -> Option<FontId> {
+        let mut best: Option<(usize, FontId)> = None;
         for run in &self.runs {
             for glyph in &run.glyphs {
-                if glyph.index >= index {
+                if glyph.index == index {
                     return Some(run.font_id);
+                }
+                if glyph.index > index && best.is_none_or(|(best_ix, _)| glyph.index < best_ix) {
+                    best = Some((glyph.index, run.font_id));
                 }
             }
         }
-        None
+        best.map(|(_, font_id)| font_id)
     }
 
     /// Where the line wraps at `wrap_width` (GPUI's rules, kept grapheme-cluster-safe so a base
@@ -175,7 +185,7 @@ impl LineLayout {
                 cluster_boundary = boundary;
                 cluster_x = x;
 
-                let ch = text[cluster_start..].chars().next().unwrap_or('\0');
+                let ch = text.get(cluster_start..).and_then(|s| s.chars().next()).unwrap_or('\0');
                 if LineWrapper::is_word_char(ch) {
                     if prev_ch == ' ' && ch != ' ' && first_non_whitespace_ix.is_some() {
                         last_candidate_ix = Some(boundary);

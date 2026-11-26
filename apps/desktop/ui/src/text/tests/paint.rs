@@ -391,3 +391,108 @@ fn vertically_culled_lines_skip_glyphs_but_preserve_decorations() {
         .unwrap();
     assert_eq!(inf_rec.glyphs().len(), 4);
 }
+
+#[test]
+fn out_of_order_bidi_glyph_indices_preserve_colors_and_backgrounds() {
+    let window = window_text_system();
+    let red = crate::red();
+    let blue = crate::blue();
+    let green = crate::green();
+    let layout = crate::LineLayout {
+        font_size: px(16.),
+        width: px(30.),
+        ascent: px(12.),
+        descent: px(4.),
+        len: 6,
+        runs: vec![crate::ShapedRun {
+            font_id: crate::FontId(0),
+            glyphs: vec![
+                // Index jumps 4 -> 0 -> 2 (visual bidi reordering across two decoration runs: 0..4 and 4..6).
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(3),
+                    position: point(px(0.), px(0.)),
+                    index: 4,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(10.), px(0.)),
+                    index: 0,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(2),
+                    position: point(px(20.), px(0.)),
+                    index: 2,
+                    is_emoji: false,
+                },
+            ],
+        }],
+    };
+    let decorations = [
+        crate::DecorationRun {
+            len: 4,
+            color: red,
+            background_color: Some(green),
+            underline: None,
+            strikethrough: None,
+        },
+        crate::DecorationRun {
+            len: 2,
+            color: blue,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        },
+    ];
+    let mut rec = Recorder::default();
+    crate::paint_line(
+        point(px(0.), px(0.)),
+        &layout,
+        px(20.),
+        TextAlign::Left,
+        None,
+        &decorations,
+        &[],
+        &window,
+        everywhere(),
+        &mut rec,
+    )
+    .unwrap();
+    let colors: Vec<crate::Hsla> = rec
+        .0
+        .iter()
+        .filter_map(|op| match op {
+            Op::Glyph { color, .. } => Some(*color),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        colors,
+        [blue, red, red],
+        "rewinding decoration cursor paints every bidi glyph in its run ink"
+    );
+
+    let mut bg_rec = Recorder::default();
+    crate::paint_line_background(
+        point(px(0.), px(0.)),
+        &layout,
+        px(20.),
+        TextAlign::Left,
+        None,
+        &decorations,
+        &[],
+        &window,
+        &mut bg_rec,
+    )
+    .unwrap();
+    let bgs: Vec<(Pixels, Pixels, crate::Hsla)> = bg_rec
+        .0
+        .iter()
+        .filter_map(|op| match op {
+            Op::Background { bounds, color } => Some((bounds.origin.x, bounds.size.width, *color)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bgs, [(px(10.), px(20.), green)], "background rewind covers the 0..4 span at x=10..30");
+}

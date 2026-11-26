@@ -347,9 +347,10 @@ fn rtl_filename_with_english_reason_wraps_and_keeps_both_inks() {
     assert_eq!(wrapped.len(), 1);
     let line = &wrapped[0];
 
-    // Glyphs are in visual left-to-right order (non-decreasing x) even for an RTL paragraph, so
-    // wrapping triggers and nothing clips past wrap_w.
+    // Glyphs start cleanly at x=0 (never -epsilon) and are in ascending visual left-to-right order,
+    // so wrapping triggers and nothing clips past wrap_w.
     let xs: Vec<Pixels> = line.runs().iter().flat_map(|r| r.glyphs.iter().map(|g| g.position.x)).collect();
+    assert_eq!(xs.first().copied(), Some(px(0.)), "line must start at exact x=0: {xs:?}");
     assert!(xs.windows(2).all(|w| w[0] <= w[1]), "expected non-decreasing visual x positions: {xs:?}");
     assert!(!line.wrap_boundaries().is_empty(), "long reason after RTL filename must wrap");
 
@@ -368,14 +369,53 @@ fn rtl_filename_with_english_reason_wraps_and_keeps_both_inks() {
     )
     .unwrap();
 
-    // Count non-space glyphs in each ink against the two standalone single-run layouts.
-    let name_count = rec.glyphs.iter().filter(|(_, c)| *c == name_color).count();
-    let error_count = rec.glyphs.iter().filter(|(_, c)| *c == error_color).count();
-    assert!(name_count >= 7, "all filename glyphs (אx.json) must keep name_color, got {name_count}");
-    assert!(error_count >= 60, "all reason glyphs must keep error_color, got {error_count}");
+    // Every glyph from `file` (including 'א' at byte 0 and "x.json ") must paint in `name_color`,
+    // and every glyph from `reason` in `error_color`.
+    let expected_name =
+        line.runs().iter().flat_map(|r| r.glyphs.iter()).filter(|g| g.index < file.len()).count();
+    let expected_error =
+        line.runs().iter().flat_map(|r| r.glyphs.iter()).filter(|g| g.index >= file.len()).count();
+    let name_glyphs: Vec<_> = rec.glyphs.iter().filter(|(_, c)| *c == name_color).collect();
+    let error_glyphs: Vec<_> = rec.glyphs.iter().filter(|(_, c)| *c == error_color).collect();
+    assert_eq!(name_glyphs.len(), expected_name, "all filename glyphs (including א) must keep name_color");
+    assert_eq!(error_glyphs.len(), expected_error, "all reason glyphs must keep error_color");
+    // Row order: LTR paragraph base direction puts the entire filename and the start of the reason
+    // on row 0 (same baseline y), and wraps the continuation of the reason onto later rows.
+    let first_y = name_glyphs[0].0.y;
+    assert!(
+        name_glyphs.iter().all(|(p, _)| p.y == first_y),
+        "RTL filename must sit on the first visual row: {name_glyphs:?}"
+    );
+    assert!(
+        error_glyphs.iter().any(|(p, _)| p.y == first_y),
+        "reason must begin on row 0 beside the filename"
+    );
+    assert!(error_glyphs.iter().any(|(p, _)| p.y > first_y), "long reason must wrap onto subsequent rows");
     let max_x = rec.glyphs.iter().map(|(p, _)| p.x).fold(px(0.), Pixels::max);
     assert!(
         max_x <= wrap_w + px(12.),
         "wrapped glyphs must stay within wrap_w ({wrap_w:?}), max_x={max_x:?}"
+    );
+
+    // Pure RTL text keeps distinct caret positions for every character boundary and starts at x=0.
+    let rtl = wts.shape_line(
+        "אבג".into(),
+        px(14.),
+        &[TextRun {
+            len: "אבג".len(),
+            font: geist(400.),
+            color: name_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    );
+    let rtl_xs: Vec<Pixels> = rtl.runs.iter().flat_map(|r| r.glyphs.iter().map(|g| g.position.x)).collect();
+    assert_eq!(rtl_xs.first().copied(), Some(px(0.)), "RTL line must start at exact x=0: {rtl_xs:?}");
+    let positions = [rtl.x_for_index(0), rtl.x_for_index(2), rtl.x_for_index(4), rtl.x_for_index(6)];
+    assert!(
+        positions[0] != positions[1] && positions[1] != positions[2] && positions[2] != positions[3],
+        "RTL caret positions must be distinct: {positions:?}"
     );
 }
