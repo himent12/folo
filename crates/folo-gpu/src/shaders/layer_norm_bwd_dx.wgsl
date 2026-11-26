@@ -1,10 +1,10 @@
-// Backward `dx` kernel for LayerNorm (`!RMS`) and RMSNorm (`RMS`) over dense f32 `[outer, d]`, one workgroup per row.
-// `layer_norm.rs` prepends `vec_prelude(VEC4)`, `CACHE_ROW`, `LANE_HELPERS`, reduction helpers, and `@compute fn main`.
+// Backward `dx` kernel for LayerNorm (`!RMS`) and RMSNorm (`RMS`) over dense `[outer, d]` (`F32` or `F16` activations, `F32` params/stats).
+// `layer_norm.rs` prepends `vec_prelude` / `vec_prelude_f16`, `param_f32_prelude`, `CACHE_ROW`, `LANE_HELPERS`, reduction helpers, and `@compute fn main`.
 // Params: 0 = rows (`outer`), 1 = units (`d / 4` when `VEC4` else `d`), 2 = `inv_d`.
 // Bindings: 1 = X, 2 = G, 3 = W, 4 = MEAN, 5 = RSTD, 6 = DX.
 @group(0) @binding(1) var<storage, read> X: array<E>;
 @group(0) @binding(2) var<storage, read> G: array<E>;
-@group(0) @binding(3) var<storage, read> W: array<E>;
+@group(0) @binding(3) var<storage, read> W: array<PF>;
 @group(0) @binding(4) var<storage, read> MEAN: array<f32>;
 @group(0) @binding(5) var<storage, read> RSTD: array<f32>;
 @group(0) @binding(6) var<storage, read_write> DX: array<E>;
@@ -40,38 +40,30 @@ fn norm_bwd_dx_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u3
         var s2 = 0.0;
         var s3 = 0.0;
         if (h0) {
-            var xv = V4(X[base + i0]);
-            if (!RMS) { xv -= vec4<f32>(mean); }
-            xh0 = xv * rstd;
+            xh0 = norm_xh(V4(X[base + i0]), mean, rstd);
             gw0 = V4(G[base + i0]);
-            if (HAS_W) { gw0 *= V4(W[i0]); }
+            if (HAS_W) { gw0 *= PF4(W[i0]); }
             s2 += lane_sum(gw0 * xh0);
             if (!RMS) { s1 += lane_sum(gw0); s3 += lane_sum(xh0); }
         }
         if (h1) {
-            var xv = V4(X[base + i1]);
-            if (!RMS) { xv -= vec4<f32>(mean); }
-            xh1 = xv * rstd;
+            xh1 = norm_xh(V4(X[base + i1]), mean, rstd);
             gw1 = V4(G[base + i1]);
-            if (HAS_W) { gw1 *= V4(W[i1]); }
+            if (HAS_W) { gw1 *= PF4(W[i1]); }
             s2 += lane_sum(gw1 * xh1);
             if (!RMS) { s1 += lane_sum(gw1); s3 += lane_sum(xh1); }
         }
         if (h2) {
-            var xv = V4(X[base + i2]);
-            if (!RMS) { xv -= vec4<f32>(mean); }
-            xh2 = xv * rstd;
+            xh2 = norm_xh(V4(X[base + i2]), mean, rstd);
             gw2 = V4(G[base + i2]);
-            if (HAS_W) { gw2 *= V4(W[i2]); }
+            if (HAS_W) { gw2 *= PF4(W[i2]); }
             s2 += lane_sum(gw2 * xh2);
             if (!RMS) { s1 += lane_sum(gw2); s3 += lane_sum(xh2); }
         }
         if (h3) {
-            var xv = V4(X[base + i3]);
-            if (!RMS) { xv -= vec4<f32>(mean); }
-            xh3 = xv * rstd;
+            xh3 = norm_xh(V4(X[base + i3]), mean, rstd);
             gw3 = V4(G[base + i3]);
-            if (HAS_W) { gw3 *= V4(W[i3]); }
+            if (HAS_W) { gw3 *= PF4(W[i3]); }
             s2 += lane_sum(gw3 * xh3);
             if (!RMS) { s1 += lane_sum(gw3); s3 += lane_sum(xh3); }
         }
@@ -100,11 +92,9 @@ fn norm_bwd_dx_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u3
     var s3 = 0.0;
     if (valid) {
         for (var i = lid; i < units; i += 256u) {
-            var xv = V4(X[base + i]);
-            if (!RMS) { xv -= vec4<f32>(mean); }
-            let xh = xv * rstd;
+            let xh = norm_xh(V4(X[base + i]), mean, rstd);
             var gw = V4(G[base + i]);
-            if (HAS_W) { gw *= V4(W[i]); }
+            if (HAS_W) { gw *= PF4(W[i]); }
             s2 += lane_sum(gw * xh);
             if (!RMS) { s1 += lane_sum(gw); s3 += lane_sum(xh); }
         }
@@ -113,9 +103,9 @@ fn norm_bwd_dx_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u3
         let c_d = reduce_sum1(lid, sgid, lane, s2) * inv_d;
         if (!valid) { return; }
         for (var i = lid; i < units; i += 256u) {
-            let xh = V4(X[base + i]) * rstd;
+            let xh = norm_xh(V4(X[base + i]), 0.0, rstd);
             var gw = V4(G[base + i]);
-            if (HAS_W) { gw *= V4(W[i]); }
+            if (HAS_W) { gw *= PF4(W[i]); }
             DX[base + i] = OUT(rstd * (gw - xh * c_d));
         }
     } else {
@@ -124,9 +114,9 @@ fn norm_bwd_dx_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u3
         let c2_d = sums.y * inv_d;
         let c1_adj = sums.x * inv_d - (sums.z * inv_d) * c2_d;
         for (var i = lid; i < units; i += 256u) {
-            let xh = (V4(X[base + i]) - vec4<f32>(mean)) * rstd;
+            let xh = norm_xh(V4(X[base + i]), mean, rstd);
             var gw = V4(G[base + i]);
-            if (HAS_W) { gw *= V4(W[i]); }
+            if (HAS_W) { gw *= PF4(W[i]); }
             DX[base + i] = OUT(rstd * (gw - (vec4<f32>(c1_adj) + xh * c2_d)));
         }
     }

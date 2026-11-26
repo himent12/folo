@@ -24,6 +24,8 @@ mod pool;
 mod precompile;
 mod reduce;
 mod runtime;
+mod s8_kernels;
+mod s8_rope_select_q8;
 mod sdpa_bwd;
 mod sites;
 mod vision;

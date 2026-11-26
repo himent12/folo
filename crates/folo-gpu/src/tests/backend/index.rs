@@ -146,7 +146,10 @@ fn gather_index_add_vec4_and_direct_backwards_match_cpu() {
             &xs,
         )
         .unwrap();
-    assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["clear", "scatter_add"]);
+    assert_eq!(
+        fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(),
+        vec!["clear", "scatter_add_vec4"]
+    );
 
     // Direct kernel test for out-of-range / negative I64 and out-of-range U32 indices on `gather_vec4` /
     // `index_add_vec4` (`inner = 4`): bad lanes must produce 0 in `gather` and be skipped in `index_add`.
@@ -198,6 +201,41 @@ fn gather_index_add_vec4_and_direct_backwards_match_cpu() {
     .unwrap();
     let got_ia: Vec<f32> = bytemuck::pod_collect_to_vec(&fresh.read(ia_out.raw(), 0, 16 * 4).unwrap());
     assert_eq!(got_ia, vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+
+    // Direct `scatter_add_vec4` test with collisions and out-of-range I64 & U32 indices (`inner = 4`).
+    let sa_out = fresh.upload(bytemuck::cast_slice(&[0.0f32; 16])).unwrap();
+    let sa_src =
+        fresh.upload(bytemuck::cast_slice(&[1.0f32, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0])).unwrap();
+    let sa_idx_i64: Vec<i64> = vec![0, -1, 2, 1i64 << 33, 0, 3, 2, 4];
+    let sa_idx_buf = fresh.upload(bytemuck::cast_slice(&sa_idx_i64)).unwrap();
+    crate::kernels::strided::scatter_add(
+        &fresh,
+        sa_out.raw(),
+        (1, 4, 4),
+        crate::kernels::strided::Indices { buf: sa_idx_buf.raw(), i64: true, len: 8 },
+        2,
+        sa_src.raw(),
+    )
+    .unwrap();
+    let got_sa: Vec<f32> = bytemuck::pod_collect_to_vec(&fresh.read(sa_out.raw(), 0, 16 * 4).unwrap());
+    assert_eq!(
+        got_sa,
+        vec![11.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 33.0, 0.0, 0.0, 20.0, 0.0, 0.0]
+    );
+    let sa_out_u = fresh.upload(bytemuck::cast_slice(&[0.0f32; 16])).unwrap();
+    let sa_idx_u32: Vec<u32> = vec![1, 4, u32::MAX, 2];
+    let sa_idx_u_buf = fresh.upload(bytemuck::cast_slice(&sa_idx_u32)).unwrap();
+    crate::kernels::strided::scatter_add(
+        &fresh,
+        sa_out_u.raw(),
+        (1, 4, 4),
+        crate::kernels::strided::Indices { buf: sa_idx_u_buf.raw(), i64: false, len: 4 },
+        1,
+        sa_src.raw(),
+    )
+    .unwrap();
+    let got_sau: Vec<f32> = bytemuck::pod_collect_to_vec(&fresh.read(sa_out_u.raw(), 0, 16 * 4).unwrap());
+    assert_eq!(got_sau, vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0]);
 
     // Backend validation on direct backward hooks: invalid grad dtype (U32), wrong idx rank (no panic),
     // mismatched grad shape, and invalid idx dtype even when output shape is empty.

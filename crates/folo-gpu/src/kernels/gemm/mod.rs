@@ -21,7 +21,9 @@ mod config;
 mod shader;
 
 pub(crate) use config::check_config;
-pub use config::{BatchStrides, GemmBias, GemmDesc, TileConfig, pick_config, pick_config_conv};
+pub use config::{
+    BatchStrides, GemmBias, GemmDesc, ResidualDesc, ResidualMode, TileConfig, pick_config, pick_config_conv,
+};
 pub(crate) use shader::gen_gemm;
 
 use super::check_buf;
@@ -55,6 +57,13 @@ pub(crate) static GEMM_CAT: KernelDef = KernelDef {
 /// [`GEMM`] as the forward conv at listed output pixels (`CONV_MODE` 1 with `SITES`; binding 5 is the list).
 pub(crate) static GEMM_SITES: KernelDef = KernelDef {
     name: "gemm_sites",
+    storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite, Access::Read],
+    source: Source::Generated(gen_gemm),
+};
+
+/// [`GEMM`] with a fused residual operand at binding 5 (`RES_MODE` 1 = pre-activation, 2 = post-activation).
+pub(crate) static GEMM_EPILOGUE: KernelDef = KernelDef {
+    name: "gemm_epilogue",
     storage: &[Access::Read, Access::Read, Access::Read, Access::ReadWrite, Access::Read],
     source: Source::Generated(gen_gemm),
 };
@@ -247,5 +256,110 @@ fn gemm_impl(
     ctx.dispatch(&k, &[a, b, bias_buf, c], &gemm_params(d)?, groups)
 }
 
+/// [`gemm`] with an optional fused residual epilogue (`C = act(alpha * A * B + bias + beta * res)` for
+/// [`ResidualMode::PreAct`], or `C = act(alpha * A * B + bias) + beta * res` for [`ResidualMode::PostAct`]).
+///
+/// Runs in a single WGSL compute dispatch with zero intermediate global-memory round-trips. When `residual`
+/// is `None` or has [`ResidualMode::None`], delegates directly to [`gemm`] / [`gemm_with_config`].
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_epilogue(
+    ctx: &GpuContext,
+    d: &GemmDesc,
+    a: &wgpu::Buffer,
+    b: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    residual: Option<(&wgpu::Buffer, &ResidualDesc)>,
+    c: &wgpu::Buffer,
+    cfg: Option<TileConfig>,
+) -> Result<()> {
+    let Some((res_buf, res)) = residual.filter(|(_, r)| r.mode != ResidualMode::None) else {
+        return gemm_impl(ctx, d, a, b, bias, c, cfg);
+    };
+    check_dtype(ctx, d.dtype, "gemm_epilogue")?;
+    if let Some(cfg) = cfg {
+        check_config(ctx, cfg)?;
+    }
+    let (ar, ac) = if d.trans_a { (d.k, d.m) } else { (d.m, d.k) };
+    let (br, bc) = if d.trans_b { (d.n, d.k) } else { (d.k, d.n) };
+    if d.lda < ac || d.ldb < bc || d.ldc < d.n || res.ldr < d.n {
+        return Err(shape_err(format!("gemm_epilogue: leading dimensions too small in {d:?}, {res:?}")));
+    }
+    if d.batch.1 == 0 {
+        return Err(shape_err("gemm_epilogue: inner batch count must be non-zero"));
+    }
+    if d.m == 0 || d.n == 0 || d.batch.0 == 0 {
+        return Ok(());
+    }
+    check_buf(a, extent(&d.a, d.batch, ar, ac, d.lda)?, d.dtype, "gemm_epilogue A")?;
+    check_buf(b, extent(&d.b, d.batch, br, bc, d.ldb)?, d.dtype, "gemm_epilogue B")?;
+    check_buf(c, extent(&d.c, d.batch, d.m, d.n, d.ldc)?, d.dtype, "gemm_epilogue C")?;
+    check_buf(res_buf, extent(&res.strides, d.batch, d.m, d.n, res.ldr)?, d.dtype, "gemm_epilogue residual")?;
+    let bias_len = match d.bias {
+        GemmBias::None => 0,
+        GemmBias::Row => d.m,
+        GemmBias::Col => d.n,
+    };
+    let bias_buf = match (d.bias, bias) {
+        (GemmBias::None, _) => ctx.dummy(),
+        (_, Some(bb)) => {
+            check_buf(
+                bb,
+                extent(&d.bias_strides, d.batch, 1, bias_len, bias_len)?,
+                d.dtype,
+                "gemm_epilogue bias",
+            )?;
+            bb
+        }
+        (_, None) => return Err(shape_err("gemm_epilogue: bias kind set but no bias buffer")),
+    };
+    let cfg = match cfg {
+        Some(cfg) => cfg,
+        None => {
+            let cfg = pick_config(ctx, d);
+            check_config(ctx, cfg)?;
+            cfg
+        }
+    };
+    let vec_a = d.lda.is_multiple_of(4)
+        && d.a.aligned4()
+        && if d.trans_a { d.m.is_multiple_of(4) } else { d.k.is_multiple_of(4) };
+    let vec_b = d.ldb.is_multiple_of(4)
+        && d.b.aligned4()
+        && if d.trans_b { d.k.is_multiple_of(4) } else { d.n.is_multiple_of(4) };
+    let vec_c = d.ldc.is_multiple_of(4) && d.c.aligned4() && d.n.is_multiple_of(4);
+    let vec_r = res.ldr.is_multiple_of(4) && res.strides.aligned4() && d.n.is_multiple_of(4);
+    let check = !d.m.is_multiple_of(cfg.bm as usize)
+        || !d.n.is_multiple_of(cfg.bn as usize)
+        || !d.k.is_multiple_of(cfg.bk as usize);
+    let spec = base_spec(d, cfg)
+        .bool("VEC_A", vec_a)
+        .bool("VEC_B", vec_b)
+        .bool("VEC_C", vec_c)
+        .bool("VEC_R", vec_r)
+        .u32("RES_MODE", res.mode.code())
+        .bool("TRANS_A", d.trans_a)
+        .bool("TRANS_B", d.trans_b)
+        .bool("CHECK", check)
+        .u32("CONV_MODE", 0);
+    let k = ctx.kernel(&GEMM_EPILOGUE, spec)?;
+    let groups = [
+        d.n.div_ceil(cfg.bn as usize) as u32,
+        d.m.div_ceil(cfg.bm as usize) as u32,
+        d.batch
+            .0
+            .checked_mul(d.batch.1)
+            .and_then(|b| u32::try_from(b).ok())
+            .ok_or_else(|| GpuError::Limit("gemm_epilogue batch too large".into()))?,
+    ];
+    let p = gemm_params(d)?
+        .at(38)
+        .f(res.beta)
+        .uz(res.ldr)?
+        .uz(res.strides.offset)?
+        .uz(res.strides.outer)?
+        .uz(res.strides.inner)?;
+    ctx.dispatch(&k, &[a, b, bias_buf, c, res_buf], &p, groups)
+}
+
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&GEMM, &GEMM_CAT, &GEMM_SITES];
+pub(crate) static DEFS: &[&KernelDef] = &[&GEMM, &GEMM_CAT, &GEMM_SITES, &GEMM_EPILOGUE];

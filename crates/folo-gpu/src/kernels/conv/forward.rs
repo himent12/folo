@@ -7,7 +7,11 @@ use super::{Conv2dDesc, conv_spec, split};
 use crate::context::GpuContext;
 use crate::error::Result;
 use crate::error::shape_err;
-use crate::kernels::gemm::{self, GEMM, GemmBias, TileConfig, base_spec, check_dtype, gemm_params};
+use crate::kernels::fused_act::{FusedAct, bias_residual_act};
+use crate::kernels::gemm::{
+    self, GEMM, GEMM_EPILOGUE, GemmBias, ResidualDesc, ResidualMode, TileConfig, base_spec, check_dtype,
+    gemm_params,
+};
 use crate::kernels::gemm_cat::{CatPart, MAX_CAT_PARTS, gemm_cat};
 use crate::kernels::{coop, prod};
 use crate::pipeline::Params;
@@ -294,5 +298,117 @@ pub fn conv2d_cat(
     let g = d.gemm_view(oh, ow, bias.is_some());
     debug_assert_eq!(g.ldb, hw);
     gemm_cat(ctx, &g, weight, &cat, bias, y, None)?;
+    Ok((oh, ow))
+}
+
+/// `y = epilogue(conv2d(x, weight) + bias, beta * residual)` with activation [`Conv2dDesc::act`] (`Identity`,
+/// `Silu`, `Gelu`, `Relu`, etc.) and optional residual fusion ([`ResidualMode::PreAct`] or
+/// [`ResidualMode::PostAct`]).
+///
+/// For pointwise 1×1 and general implicit-GEMM convolutions, fuses bias, residual add, and activation into a
+/// single WGSL compute dispatch with zero intermediate global-memory round-trips. For depthwise convolutions
+/// with a residual, supports `Identity`, `Silu`, `Gelu`, and `Relu` via [`bias_residual_act`].
+#[allow(clippy::too_many_arguments)]
+pub fn conv2d_epilogue(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    x: &wgpu::Buffer,
+    weight: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    residual: Option<(&wgpu::Buffer, f32, ResidualMode)>,
+    y: &wgpu::Buffer,
+) -> Result<(usize, usize)> {
+    let Some((res_buf, beta, res_mode)) = residual.filter(|(_, _, m)| *m != ResidualMode::None) else {
+        return conv2d(ctx, d, x, weight, bias, y);
+    };
+    check_dtype(ctx, d.dtype, "conv2d_epilogue")?;
+    let dense = (x, 0, d.c_in * d.h * d.w);
+    let (oh, ow) = d.check_input_buffers(dense, weight, bias, y)?;
+    let out_elems = prod(&[d.n, d.c_out, oh, ow])?;
+    super::check_buf(res_buf, out_elems, d.dtype, "conv2d_epilogue residual")?;
+    if out_elems == 0 {
+        return Ok((oh, ow));
+    }
+
+    if d.is_depthwise() {
+        let act = match d.act {
+            UnaryOp::Identity => FusedAct::Identity,
+            UnaryOp::Silu => FusedAct::Silu,
+            UnaryOp::Gelu => FusedAct::Gelu,
+            UnaryOp::Relu => FusedAct::Relu,
+            _ => {
+                return Err(shape_err(
+                    "conv2d_epilogue: depthwise residual supports Identity, Silu, Gelu, or Relu",
+                ));
+            }
+        };
+        let mut raw_desc = d.clone();
+        raw_desc.act = UnaryOp::Identity;
+        let tmp = ctx.alloc(d.dtype.bytes(out_elems))?;
+        conv2d(ctx, &raw_desc, x, weight, None, tmp.raw())?;
+        bias_residual_act(
+            ctx,
+            tmp.raw(),
+            bias,
+            Some((res_buf, beta, res_mode)),
+            y,
+            out_elems,
+            d.c_out,
+            oh * ow,
+            act,
+            d.dtype,
+        )?;
+        return Ok((oh, ow));
+    }
+
+    let (kh, kw) = d.win.kernel;
+    let k_dim = d.c_in / d.groups * kh * kw;
+    let hw_out = oh * ow;
+    let cout_g = d.c_out / d.groups;
+    let g = d.gemm_view(oh, ow, bias.is_some());
+    let res_desc = ResidualDesc { beta, mode: res_mode, ldr: hw_out, strides: g.c };
+
+    if d.is_pointwise() {
+        let cfg = gemm::pick_config_conv(ctx, &g);
+        gemm::gemm_epilogue(ctx, &g, weight, x, bias, Some((res_buf, &res_desc)), y, Some(cfg))?;
+        return Ok((oh, ow));
+    }
+
+    let cfg = gemm::pick_config_conv(ctx, &g);
+    gemm::check_config(ctx, cfg)?;
+    let (gx, gy, batch) =
+        (hw_out.div_ceil(cfg.bn as usize), cout_g.div_ceil(cfg.bm as usize), d.n * d.groups);
+    let check = !g.m.is_multiple_of(cfg.bm as usize)
+        || !g.n.is_multiple_of(cfg.bn as usize)
+        || !g.k.is_multiple_of(cfg.bk as usize);
+    let vec_a = k_dim.is_multiple_of(4);
+    let vec_c = hw_out.is_multiple_of(4);
+    let spec = base_spec(&g, cfg)
+        .bool("VEC_A", vec_a)
+        .bool("VEC_B", false)
+        .bool("VEC_C", vec_c)
+        .bool("VEC_R", vec_c)
+        .u32("RES_MODE", res_mode.code())
+        .bool("TRANS_A", false)
+        .bool("TRANS_B", false)
+        .bool("CHECK", check)
+        .u32("CONV_MODE", 1)
+        .bool("SPLIT", false)
+        .bool("OUT_F32", false);
+    let kernel = ctx.kernel(&GEMM_EPILOGUE, conv_spec(spec, d))?;
+    let p = gemm_params(&g)?
+        .at(24)
+        .uz(d.h)?
+        .uz(d.w)?
+        .uz(oh)?
+        .uz(ow)?
+        .at(38)
+        .f(beta)
+        .uz(hw_out)?
+        .uz(g.c.offset)?
+        .uz(g.c.outer)?
+        .uz(g.c.inner)?;
+    let groups = [gx as u32, gy as u32, u32::try_from(batch).unwrap_or(u32::MAX)];
+    ctx.dispatch(&kernel, &[weight, x, bias.unwrap_or(ctx.dummy()), y, res_buf], &p, groups)?;
     Ok((oh, ow))
 }

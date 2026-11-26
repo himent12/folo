@@ -872,6 +872,9 @@ fn scatter_add_impl(
     if mode == 0 && fast::try_index_add_vec4(ctx, out, (outer, d, inner), idx, src, n)? {
         return Ok(());
     }
+    if mode == 1 && fast::try_scatter_add_vec4(ctx, out, (outer, d, inner), idx, l, src, n)? {
+        return Ok(());
+    }
     let k = ctx.kernel(&SCATTER_ADD, Spec::new().u32("MODE", mode).bool("IDX64", idx.i64))?;
     let p = Params::new().uz(n)?.uz(d)?.uz(inner)?.uz(l)?;
     ctx.dispatch(&k, &[src, idx.buf, out], &p, ctx.grid_1d(n as u64, 256)?)
@@ -903,6 +906,7 @@ pub(crate) static DEFS: &[&KernelDef] = &[
     fast::FAST_DEFS[5],
     fast::FAST_DEFS[6],
     fast::FAST_DEFS[7],
+    fast::FAST_DEFS[8],
 ];
 
 #[cfg(test)]

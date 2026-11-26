@@ -13,8 +13,32 @@ use super::{check_buf, vec_prelude, vec_prelude_f16};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
-use crate::kernels::gemm::check_dtype;
+use crate::kernels::gemm::{ResidualMode, check_dtype};
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
+
+/// Activation supported by [`bias_residual_act`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FusedAct {
+    /// `x`
+    Identity,
+    /// `x * sigmoid(x)`
+    Silu,
+    /// Tanh-approximation GELU matching [`super::elementwise::UnaryOp::Gelu`].
+    Gelu,
+    /// `max(x, 0)` (NaN-ignoring, matching Rust `f32::max`).
+    Relu,
+}
+
+impl FusedAct {
+    pub(crate) fn code(self) -> u32 {
+        match self {
+            FusedAct::Identity => 0,
+            FusedAct::Silu => 1,
+            FusedAct::Gelu => 2,
+            FusedAct::Relu => 3,
+        }
+    }
+}
 
 fn prelude(spec: &Spec) -> &'static str {
     let vec = spec.get_bool("VEC4");
@@ -49,6 +73,23 @@ fn tanh_safe4(x: vec4<f32>) -> vec4<f32> {
         x,
         isnan4(x),
     );
+}
+fn gelu4(x: vec4<f32>) -> vec4<f32> {
+    let k = 0.7978845608028654;
+    let c = 0.044715;
+    let inner = k * (x + c * x * x * x);
+    return 0.5 * x * (vec4<f32>(1.0) + tanh_safe4(inner));
+}
+fn relu4(x: vec4<f32>) -> vec4<f32> {
+    return select(max(x, vec4<f32>(0.0)), vec4<f32>(0.0), isnan4(x));
+}
+fn apply_fused_act4(act: u32, x: vec4<f32>) -> vec4<f32> {
+    switch act {
+        case 1u: { return silu4(x); }
+        case 2u: { return gelu4(x); }
+        case 3u: { return relu4(x); }
+        default: { return x; }
+    }
 }
 fn gelu_deriv4(x: vec4<f32>) -> vec4<f32> {
     // For |x| >= 10, |u| >= 43.6 so sech^2(u) < 1e-37 in f32; saturate directly to avoid x^3 overflow.
@@ -182,6 +223,56 @@ pub(crate) fn bias_add_silu_fits(spec: &Spec) -> bool {
     spec.get_u32("MODE", 2) <= 2
 }
 
+/// Layout-specialized fused bias + optional residual + activation (`Identity`, `Silu`, `Gelu`, `Relu`).
+/// Params: 0 = `units`, 1 = `channels` (or `ch_u` in MODE 1), 2 = `inner_u` / `inner`, 3 = `beta`.
+fn gen_bias_residual_act(spec: &Spec) -> String {
+    let mode = spec.get_u32("MODE", 2);
+    let has_bias = spec.get_bool("HAS_BIAS");
+    let res_mode = spec.get_u32("RES_MODE", 0);
+    let vec = mode != 2;
+    let half = spec.is_f16();
+    let pre = if half { vec_prelude_f16(vec) } else { vec_prelude(vec) };
+    let bias_ty = match (mode == 1, half) {
+        (true, true) => "vec4<f16>",
+        (true, false) => "vec4<f32>",
+        (false, true) => "f16",
+        (false, false) => "f32",
+    };
+    let bias_add = if !has_bias {
+        ""
+    } else if mode == 1 {
+        "    v += vec4<f32>(BIAS[i % pu(1u)]);\n"
+    } else {
+        "    v += vec4<f32>(f32(BIAS[(i / pu(2u)) % pu(1u)]));\n"
+    };
+    let pre_res = if res_mode == 1 { "    v = fma(V4(RES[i]), vec4<f32>(pf(3u)), v);\n" } else { "" };
+    let post_res = if res_mode == 2 { "    v = fma(V4(RES[i]), vec4<f32>(pf(3u)), v);\n" } else { "" };
+    format!(
+        "{pre}{ACT_HELPERS}\n\
+         @group(0) @binding(1) var<storage, read> X: array<E>;\n\
+         @group(0) @binding(2) var<storage, read> BIAS: array<{bias_ty}>;\n\
+         @group(0) @binding(3) var<storage, read> RES: array<E>;\n\
+         @group(0) @binding(4) var<storage, read_write> Y: array<E>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+                 @builtin(local_invocation_index) lid: u32) {{\n\
+             let i = linear_id(wid, nwg, lid, 256u);\n\
+             if (i >= pu(0u)) {{ return; }}\n\
+             var v = V4(X[i]);\n\
+         {bias_add}\
+         {pre_res}\
+             v = apply_fused_act4(ACT, v);\n\
+         {post_res}\
+             Y[i] = OUT(v);\n\
+         }}\n"
+    )
+}
+
+/// Bounds check for precompiling `"bias_residual_act"` (`kernels/bounds.rs`).
+pub(crate) fn bias_residual_act_fits(spec: &Spec) -> bool {
+    spec.get_u32("MODE", 2) <= 2 && spec.get_u32("RES_MODE", 0) <= 2 && spec.get_u32("ACT", 0) <= 3
+}
+
 use Access::{Read as R, ReadWrite as RW};
 
 static SILU_BWD: KernelDef = KernelDef {
@@ -206,9 +297,15 @@ static SWIGLU_BWD: KernelDef = KernelDef {
 };
 static BIAS_ADD_SILU: KernelDef =
     KernelDef { name: "bias_add_silu", storage: &[R, R, RW], source: Source::Generated(gen_bias_add_silu) };
+static BIAS_RESIDUAL_ACT: KernelDef = KernelDef {
+    name: "bias_residual_act",
+    storage: &[R, R, R, RW],
+    source: Source::Generated(gen_bias_residual_act),
+};
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&SILU_BWD, &GELU_BWD, &SWIGLU_FWD, &SWIGLU_BWD, &BIAS_ADD_SILU];
+pub(crate) static DEFS: &[&KernelDef] =
+    &[&SILU_BWD, &GELU_BWD, &SWIGLU_FWD, &SWIGLU_BWD, &BIAS_ADD_SILU, &BIAS_RESIDUAL_ACT];
 
 fn check_len(n: usize, op: &'static str) -> Result<(bool, usize)> {
     let vec = n.is_multiple_of(4);
@@ -357,4 +454,66 @@ pub fn bias_add_silu(
     )?;
     let p = Params::new().uz(units)?.uz(p1)?.uz(p2)?;
     ctx.dispatch(&k, &[x, bias.unwrap_or(ctx.dummy()), y], &p, ctx.grid_1d(units as u64, 256)?)
+}
+
+/// Fused `vec4` bias-add + optional residual + activation (`Identity`, `Silu`, `Gelu`, `Relu`) for `F32` / `F16`.
+///
+/// Computes `y[i] = act(x[i] + bias[c] + beta * res[i])` when `ResidualMode::PreAct`,
+/// `y[i] = act(x[i] + bias[c]) + beta * res[i]` when `ResidualMode::PostAct`, or `y[i] = act(x[i] + bias[c])`
+/// when `residual` is `None` (where `c = (i / inner) % channels`).
+#[allow(clippy::too_many_arguments)]
+pub fn bias_residual_act(
+    ctx: &GpuContext,
+    x: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    residual: Option<(&wgpu::Buffer, f32, ResidualMode)>,
+    y: &wgpu::Buffer,
+    n: usize,
+    channels: usize,
+    inner: usize,
+    act: FusedAct,
+    dtype: DType,
+) -> Result<()> {
+    check_dtype(ctx, dtype, "bias_residual_act")?;
+    check_buf(x, n, dtype, "bias_residual_act x")?;
+    check_buf(y, n, dtype, "bias_residual_act y")?;
+    if let Some(b) = bias {
+        if channels == 0 || inner == 0 {
+            return Err(shape_err("bias_residual_act: channels and inner must be non-zero"));
+        }
+        check_buf(b, channels, dtype, "bias_residual_act bias")?;
+    }
+    let (res_buf, beta, res_mode) = match residual.filter(|(_, _, m)| *m != ResidualMode::None) {
+        Some((rb, b, m)) => {
+            check_buf(rb, n, dtype, "bias_residual_act residual")?;
+            (rb, b, m)
+        }
+        None => (ctx.dummy(), 0.0, ResidualMode::None),
+    };
+    if n == 0 {
+        return Ok(());
+    }
+    let (mode, units, p1, p2) = match bias {
+        None if n.is_multiple_of(4) => (0u32, n / 4, 1usize, 1usize),
+        None => (2u32, n, 1usize, 1usize),
+        Some(_) if n.is_multiple_of(4) && inner.is_multiple_of(4) => (0u32, n / 4, channels, inner / 4),
+        Some(_) if n.is_multiple_of(4) && inner == 1 && channels.is_multiple_of(4) => {
+            (1u32, n / 4, channels / 4, 1usize)
+        }
+        Some(_) => (2u32, n, channels, inner),
+    };
+    if units > u32::MAX as usize {
+        return Err(GpuError::Limit("bias_residual_act: length exceeds u32 indexing".into()));
+    }
+    let k = ctx.kernel(
+        &BIAS_RESIDUAL_ACT,
+        Spec::new()
+            .u32("MODE", mode)
+            .u32("ACT", act.code())
+            .u32("RES_MODE", res_mode.code())
+            .bool("HAS_BIAS", bias.is_some())
+            .f16(dtype == DType::F16),
+    )?;
+    let p = Params::new().uz(units)?.uz(p1)?.uz(p2)?.f(beta);
+    ctx.dispatch(&k, &[x, bias.unwrap_or(ctx.dummy()), res_buf, y], &p, ctx.grid_1d(units as u64, 256)?)
 }

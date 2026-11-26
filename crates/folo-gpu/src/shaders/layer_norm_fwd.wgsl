@@ -1,18 +1,18 @@
-// Forward LayerNorm (`!RMS`) / RMSNorm (`RMS`) over dense f32 `[outer, d]`, one 256-thread workgroup per row.
-// `layer_norm.rs` prepends `vec_prelude(VEC4)`, `CACHE_ROW`, `LANE_HELPERS`, reduction helpers, and `@compute fn main`.
+// Forward LayerNorm (`!RMS`) / RMSNorm (`RMS`) over dense `[outer, d]` (`F32` or `F16` activations, `F32` params/stats).
+// `layer_norm.rs` prepends `vec_prelude` / `vec_prelude_f16`, `param_f32_prelude`, `CACHE_ROW`, `LANE_HELPERS`, reduction helpers, and `@compute fn main`.
 // Params: 0 = rows (`outer`), 1 = units (`d / 4` when `VEC4` else `d`), 2 = `inv_d`, 3 = `eps`, 4 = `sqrt(eps)`.
 // Bindings: 1 = X, 2 = W, 3 = B, 4 = Y, 5 = MEAN (LayerNorm; scratch for RMS), 6 = RSTD.
 @group(0) @binding(1) var<storage, read> X: array<E>;
-@group(0) @binding(2) var<storage, read> W: array<E>;
-@group(0) @binding(3) var<storage, read> B: array<E>;
+@group(0) @binding(2) var<storage, read> W: array<PF>;
+@group(0) @binding(3) var<storage, read> B: array<PF>;
 @group(0) @binding(4) var<storage, read_write> Y: array<E>;
 @group(0) @binding(5) var<storage, read_write> MEAN: array<f32>;
 @group(0) @binding(6) var<storage, read_write> RSTD: array<f32>;
 
 fn apply_affine(xh: vec4<f32>, idx: u32) -> E {
     var v = xh;
-    if (HAS_W) { v *= V4(W[idx]); }
-    if (HAS_B) { v += V4(B[idx]); }
+    if (HAS_W) { v *= PF4(W[idx]); }
+    if (HAS_B) { v += PF4(B[idx]); }
     return OUT(v);
 }
 

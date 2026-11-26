@@ -54,8 +54,11 @@ pub mod norm;
 pub mod optim;
 pub mod pool_grad;
 pub mod pooling;
+pub mod q8_matmul;
 pub mod reduce;
 pub mod residual_norm;
+pub mod rope;
+pub mod select;
 pub mod softmax_bwd;
 pub mod strided;
 pub mod vision;
@@ -102,8 +105,11 @@ pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
         optim::DEFS,
         pool_grad::DEFS,
         pooling::DEFS,
+        q8_matmul::DEFS,
         reduce::DEFS,
         residual_norm::DEFS,
+        rope::DEFS,
+        select::DEFS,
         softmax_bwd::DEFS,
         strided::DEFS,
         vision::DEFS,

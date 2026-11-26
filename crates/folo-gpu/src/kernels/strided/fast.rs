@@ -342,6 +342,57 @@ fn gen_index_add_vec4(spec: &Spec) -> String {
     s
 }
 
+/// Vectorized `scatter_add` for `F32` with `inner % 4 == 0`: each thread loads one `vec4<f32>` from `SRC`
+/// and 4 indices (`vec4<u32>` for `U32`, two `vec4<u32>`s for `I64`) from `IDX`, then performs atomic float
+/// adds for each valid lane into `Y`.
+/// Spec: `IDX64` (bool). Params: 0 = `vec4` units (`n / 4`), 1 = `d`, 2 = `inner / 4`, 3 = `di`.
+fn gen_scatter_add_vec4(spec: &Spec) -> String {
+    let idx64 = spec.get_bool("IDX64");
+    let load_idx = if idx64 {
+        "  let a = IDX[2u * t];\n\
+         \x20 let b = IDX[2u * t + 1u];\n\
+         \x20 let i0 = select(BAD, a.x, a.y == 0u && a.x < size);\n\
+         \x20 let i1 = select(BAD, a.z, a.w == 0u && a.z < size);\n\
+         \x20 let i2 = select(BAD, b.x, b.y == 0u && b.x < size);\n\
+         \x20 let i3 = select(BAD, b.z, b.w == 0u && b.z < size);\n"
+    } else {
+        "  let iv = IDX[t];\n\
+         \x20 let i0 = select(BAD, iv.x, iv.x < size);\n\
+         \x20 let i1 = select(BAD, iv.y, iv.y < size);\n\
+         \x20 let i2 = select(BAD, iv.z, iv.z < size);\n\
+         \x20 let i3 = select(BAD, iv.w, iv.w < size);\n"
+    };
+    format!(
+        "@group(0) @binding(1) var<storage, read> SRC: array<vec4<f32>>;\n\
+         @group(0) @binding(2) var<storage, read> IDX: array<vec4<u32>>;\n\
+         @group(0) @binding(3) var<storage, read_write> Y: array<atomic<u32>>;\n\
+         const BAD: u32 = 0xffffffffu;\n\
+         fn add(i: u32, v: f32) {{\n\
+         \x20 var old = atomicLoad(&Y[i]);\n\
+         \x20 loop {{\n\
+         \x20   let r = atomicCompareExchangeWeak(&Y[i], old, bitcast<u32>(bitcast<f32>(old) + v));\n\
+         \x20   if (r.exchanged) {{ break; }}\n\
+         \x20   old = r.old_value;\n\
+         \x20 }}\n}}\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {{\n\
+         \x20 let t = linear_id(wid, nwg, lid, 256u);\n\
+         \x20 if (t >= pu(0u)) {{ return; }}\n\
+         \x20 let size = pu(1u); let inner4 = pu(2u); let di = pu(3u);\n\
+         \x20 let j4 = t % inner4; let o = (t / inner4) / di;\n\
+         \x20 let inner = inner4 * 4u;\n\
+         \x20 let base = o * size * inner + j4 * 4u;\n\
+         {load_idx}\
+         \x20 let s4 = SRC[t];\n\
+         \x20 if (i0 != BAD) {{ add(base + i0 * inner, s4.x); }}\n\
+         \x20 if (i1 != BAD) {{ add(base + i1 * inner + 1u, s4.y); }}\n\
+         \x20 if (i2 != BAD) {{ add(base + i2 * inner + 2u, s4.z); }}\n\
+         \x20 if (i3 != BAD) {{ add(base + i3 * inner + 3u, s4.w); }}\n\
+         }}\n"
+    )
+}
+
 static GATHER_VEC4: KernelDef = KernelDef {
     name: "gather_vec4",
     storage: &[Access::Read, Access::Read, Access::ReadWrite],
@@ -351,6 +402,11 @@ static INDEX_ADD_VEC4: KernelDef = KernelDef {
     name: "index_add_vec4",
     storage: &[Access::Read, Access::Read, Access::ReadWrite],
     source: Source::Generated(gen_index_add_vec4),
+};
+static SCATTER_ADD_VEC4: KernelDef = KernelDef {
+    name: "scatter_add_vec4",
+    storage: &[Access::Read, Access::Read, Access::ReadWrite],
+    source: Source::Generated(gen_scatter_add_vec4),
 };
 
 pub(super) static FAST_DEFS: &[&KernelDef] = &[
@@ -362,6 +418,7 @@ pub(super) static FAST_DEFS: &[&KernelDef] = &[
     &CAST_U8_VEC4,
     &GATHER_VEC4,
     &INDEX_ADD_VEC4,
+    &SCATTER_ADD_VEC4,
 ];
 
 /// Elements per 16-byte `vec4<u32>`.
@@ -574,6 +631,32 @@ pub(super) fn try_index_add_vec4(
     let units = n / 4;
     let k = ctx.kernel(&INDEX_ADD_VEC4, Spec::new().bool("IDX64", idx.i64))?;
     let p = Params::new().uz(units)?.uz(d)?.uz(inner4)?.uz(idx.len)?;
+    ctx.dispatch(&k, &[src, idx.buf, out], &p, ctx.grid_1d(units as u64, 256)?)?;
+    Ok(true)
+}
+
+/// Attempts the `vec4<f32>` `scatter_add` fast path for `inner % 4 == 0`; returns `Ok(true)` if dispatched.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn try_scatter_add_vec4(
+    ctx: &GpuContext,
+    out: &wgpu::Buffer,
+    (outer, d, inner): (usize, usize, usize),
+    idx: Indices<'_>,
+    di: usize,
+    src: &wgpu::Buffer,
+    n: usize,
+) -> Result<bool> {
+    if d == 0 || !inner.is_multiple_of(4) {
+        return Ok(false);
+    }
+    let out_elems = super::prod(&[outer, d, inner])?;
+    if out_elems > u32::MAX as usize || n > u32::MAX as usize {
+        return Ok(false);
+    }
+    let inner4 = inner / 4;
+    let units = n / 4;
+    let k = ctx.kernel(&SCATTER_ADD_VEC4, Spec::new().bool("IDX64", idx.i64))?;
+    let p = Params::new().uz(units)?.uz(d)?.uz(inner4)?.uz(di)?;
     ctx.dispatch(&k, &[src, idx.buf, out], &p, ctx.grid_1d(units as u64, 256)?)?;
     Ok(true)
 }
