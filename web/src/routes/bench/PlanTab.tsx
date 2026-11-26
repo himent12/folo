@@ -37,6 +37,8 @@ export interface PlanTabProps {
   /** The plan was saved elsewhere (another tab) under these unsaved edits. */
   elsewhere: boolean;
   dirty: boolean;
+  /** An active condition's weight field holds no valid number (e.g. cleared) even if the saved draft is unchanged. */
+  hasUnreadable?: boolean;
   saving: boolean;
   onsave: () => void;
   ondiscard: () => void;
@@ -206,18 +208,18 @@ export default function PlanTab(props: PlanTabProps) {
           <Panel
             title="Plan"
             meta={`${plan.get().conditions.length} of ${props.catalog.conditions.length} conditions · ${planPasses(plan.get())} severities`}
-            class={props.editable && props.dirty ? 'unsaved-plan' : ''}
+            class={props.editable && (props.dirty || props.saving) ? 'unsaved-plan' : ''}
             pad="none"
             actions={() => (
               <>
                 {props.editable ? (
                   <>
-                    {props.dirty ? (
+                    {props.dirty || props.saving ? (
                       <>
                         <span class="unsaved" data-gate-why>
                           Unsaved changes
                         </span>
-                        <Button variant="ghost" size="sm" onclick={props.ondiscard}>
+                        <Button variant="ghost" size="sm" disabled={props.saving} onclick={props.ondiscard}>
                           Discard
                         </Button>
                         <Gate reason={error() ? 'Fix the plan first' : null}>
@@ -229,13 +231,20 @@ export default function PlanTab(props: PlanTabProps) {
                         </Gate>
                       </>
                     ) : (
-                      <Gate reason={props.designWhy}>
-                        {(why) => (
-                          <Button size="sm" icon={Sparkles} disabled={!!why()} aria-describedby={why()} onclick={props.ondesign}>
-                            Design with an agent
+                      <>
+                        {props.hasUnreadable ? (
+                          <Button variant="ghost" size="sm" onclick={props.ondiscard}>
+                            Discard
                           </Button>
-                        )}
-                      </Gate>
+                        ) : null}
+                        <Gate reason={props.designWhy}>
+                          {(why) => (
+                            <Button size="sm" icon={Sparkles} disabled={!!why()} aria-describedby={why()} onclick={props.ondesign}>
+                              Design with an agent
+                            </Button>
+                          )}
+                        </Gate>
+                      </>
                     )}
                   </>
                 ) : null}
