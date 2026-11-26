@@ -181,12 +181,107 @@ unsafe fn u32_to_f32_avx2(src: &[u32], dst: &mut [f32]) {
     }
 }
 
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn u8_to_f32_wasm(src: &[u8], dst: &mut [f32]) {
+    use std::arch::wasm32::*;
+    assert_eq!(src.len(), dst.len());
+    let (s16, s_rem) = src.as_chunks::<16>();
+    let (d16, d_rem) = dst.as_chunks_mut::<16>();
+    for (sc, dc) in s16.iter().zip(d16.iter_mut()) {
+        // SAFETY: `sc` is `[u8; 16]` and `dc` is `[f32; 16]`.
+        unsafe {
+            let b = v128_load(sc.as_ptr() as *const v128);
+            let lo16 = u16x8_extend_low_u8x16(b);
+            let hi16 = u16x8_extend_high_u8x16(b);
+            let o = dc.as_mut_ptr();
+            v128_store(o as *mut v128, f32x4_convert_u32x4(u32x4_extend_low_u16x8(lo16)));
+            v128_store(o.add(4) as *mut v128, f32x4_convert_u32x4(u32x4_extend_high_u16x8(lo16)));
+            v128_store(o.add(8) as *mut v128, f32x4_convert_u32x4(u32x4_extend_low_u16x8(hi16)));
+            v128_store(o.add(12) as *mut v128, f32x4_convert_u32x4(u32x4_extend_high_u16x8(hi16)));
+        }
+    }
+    for (d, &x) in d_rem.iter_mut().zip(s_rem) {
+        *d = x as f32;
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn f32_to_u8_wasm(src: &[f32], dst: &mut [u8]) {
+    use std::arch::wasm32::*;
+    assert_eq!(src.len(), dst.len());
+    let zero = f32x4_splat(0.0);
+    let max255 = f32x4_splat(255.0);
+    let (s16, s_rem) = src.as_chunks::<16>();
+    let (d16, d_rem) = dst.as_chunks_mut::<16>();
+    for (sc, dc) in s16.iter().zip(d16.iter_mut()) {
+        // SAFETY: `sc` is `[f32; 16]` and `dc` is `[u8; 16]`.
+        unsafe {
+            let p = sc.as_ptr();
+            let q0 = i32x4_trunc_sat_f32x4(f32x4_pmin(max255, f32x4_pmax(zero, v128_load(p as *const v128))));
+            let q1 = i32x4_trunc_sat_f32x4(f32x4_pmin(
+                max255,
+                f32x4_pmax(zero, v128_load(p.add(4) as *const v128)),
+            ));
+            let q2 = i32x4_trunc_sat_f32x4(f32x4_pmin(
+                max255,
+                f32x4_pmax(zero, v128_load(p.add(8) as *const v128)),
+            ));
+            let q3 = i32x4_trunc_sat_f32x4(f32x4_pmin(
+                max255,
+                f32x4_pmax(zero, v128_load(p.add(12) as *const v128)),
+            ));
+            let p01 = i16x8_narrow_i32x4(q0, q1);
+            let p23 = i16x8_narrow_i32x4(q2, q3);
+            v128_store(dc.as_mut_ptr() as *mut v128, u8x16_narrow_i16x8(p01, p23));
+        }
+    }
+    for (d, &x) in d_rem.iter_mut().zip(s_rem) {
+        *d = x as u8;
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+fn u32_to_f32_wasm(src: &[u32], dst: &mut [f32]) {
+    use std::arch::wasm32::*;
+    assert_eq!(src.len(), dst.len());
+    let (s8, s_rem) = src.as_chunks::<8>();
+    let (d8, d_rem) = dst.as_chunks_mut::<8>();
+    for (sc, dc) in s8.iter().zip(d8.iter_mut()) {
+        // SAFETY: `sc` is `[u32; 8]` and `dc` is `[f32; 8]`.
+        unsafe {
+            let p = sc.as_ptr();
+            let o = dc.as_mut_ptr();
+            v128_store(o as *mut v128, f32x4_convert_u32x4(v128_load(p as *const v128)));
+            v128_store(o.add(4) as *mut v128, f32x4_convert_u32x4(v128_load(p.add(4) as *const v128)));
+        }
+    }
+    let (s4, s_tail) = s_rem.as_chunks::<4>();
+    let (d4, d_tail) = d_rem.as_chunks_mut::<4>();
+    for (sc, dc) in s4.iter().zip(d4.iter_mut()) {
+        // SAFETY: `sc` is `[u32; 4]` and `dc` is `[f32; 4]`.
+        unsafe {
+            v128_store(
+                dc.as_mut_ptr() as *mut v128,
+                f32x4_convert_u32x4(v128_load(sc.as_ptr() as *const v128)),
+            );
+        }
+    }
+    for (d, &x) in d_tail.iter_mut().zip(s_tail) {
+        *d = x as f32;
+    }
+}
+
 fn u8_to_f32_slice(src: &[u8], dst: &mut [f32]) {
     assert_eq!(src.len(), dst.len());
     #[cfg(target_arch = "x86_64")]
     if src.len() >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above.
         unsafe { u8_to_f32_avx2(src, dst) };
+        return;
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if src.len() >= 16 {
+        u8_to_f32_wasm(src, dst);
         return;
     }
     for (d, &x) in dst.iter_mut().zip(src) {
@@ -202,6 +297,11 @@ fn f32_to_u8_slice(src: &[f32], dst: &mut [u8]) {
         unsafe { f32_to_u8_avx2(src, dst) };
         return;
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if src.len() >= 16 {
+        f32_to_u8_wasm(src, dst);
+        return;
+    }
     for (d, &x) in dst.iter_mut().zip(src) {
         *d = x as u8;
     }
@@ -213,6 +313,11 @@ fn u32_to_f32_slice(src: &[u32], dst: &mut [f32]) {
     if src.len() >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above.
         unsafe { u32_to_f32_avx2(src, dst) };
+        return;
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if src.len() >= 4 {
+        u32_to_f32_wasm(src, dst);
         return;
     }
     for (d, &x) in dst.iter_mut().zip(src) {

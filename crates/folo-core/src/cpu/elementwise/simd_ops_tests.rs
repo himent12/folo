@@ -85,6 +85,10 @@ fn scalar_unary_ref(op: UnaryOp, v: f32) -> f32 {
         DivScalar(c) => v / c,
         MaxScalar(c) => max_num(v, c),
         MinScalar(c) => min_num(v, c),
+        Floor => v.floor(),
+        Ceil => v.ceil(),
+        Round => v.round(),
+        Sign => sign(v),
         _ => unreachable!(),
     }
 }
@@ -93,6 +97,7 @@ fn scalar_unary_bwd_ref(op: UnaryOp, x: f32, g: f32) -> f32 {
     use UnaryOp::*;
     match op {
         Neg | RSubScalar(_) => -g,
+        Abs => g * sign(x),
         AddScalar(_) => g,
         MulScalar(c) => g * c,
         DivScalar(c) => g / c,
@@ -200,6 +205,10 @@ fn avx2_unary_ops_bit_exact_across_edges_tails_and_layouts() {
         MinScalar(0.0),
         MinScalar(-0.0),
         MinScalar(f32::NAN),
+        Floor,
+        Ceil,
+        Round,
+        Sign,
     ];
 
     let xs = edge_f32_values();
@@ -237,10 +246,75 @@ fn avx2_unary_ops_bit_exact_across_edges_tails_and_layouts() {
     let n_par = PAR_MIN + 29;
     let x_par: Vec<f32> = (0..n_par).map(|i| xs[i % xs.len()]).collect();
     let l_par = Layout::contiguous(Shape::new(&[n_par]));
-    for op in [Relu, LeakyRelu(0.1), Hardswish, Clamp(-1.0, 1.0), Sqrt, Rsqrt, Recip] {
+    for op in
+        [Relu, LeakyRelu(0.1), Hardswish, Clamp(-1.0, 1.0), Sqrt, Rsqrt, Recip, Floor, Ceil, Round, Sign]
+    {
         let got = unary(op, &x_par, &l_par);
         for i in 0..n_par {
             assert_bits_or_nan(got[i], scalar_unary_ref(op, x_par[i]), &format!("par {op:?} i={i}"));
+        }
+    }
+
+    // Exhaustive `round` / `floor` / `ceil` / `sign` IEEE-754 boundary values (ties away from zero,
+    // `0.5 - 2^-25`, `1.5 ± ulp`, `2^22 ± 0.5`, `2^23 ± 0.5`, `2^24`, `±0.0`, subnormals, `±Inf`, NaNs).
+    let mut round_edges = vec![
+        0.0f32,
+        -0.0,
+        f32::from_bits(1),
+        -f32::from_bits(1),
+        f32::MIN_POSITIVE,
+        -f32::MIN_POSITIVE,
+        f32::from_bits(0x3eff_fffe),
+        f32::from_bits(0x3eff_ffff),  // 0.5 - 2^-25 -> must round to +0.0
+        -f32::from_bits(0x3eff_ffff), // must round to -0.0
+        0.5,
+        -0.5,
+        f32::from_bits(0x3f00_0001),
+        -f32::from_bits(0x3f00_0001),
+        1.0 - f32::EPSILON * 0.5,
+        -(1.0 - f32::EPSILON * 0.5),
+        1.0,
+        -1.0,
+        f32::from_bits(0x3fbf_ffff), // 1.5 - 2^-23
+        -f32::from_bits(0x3fbf_ffff),
+        1.5,
+        -1.5,
+        2.5,
+        -2.5,
+        4_194_303.0 + 0.25,
+        4_194_303.5,
+        4_194_303.0 + 0.75,
+        4_194_304.0,
+        4_194_304.5,
+        -4_194_304.5,
+        8_388_607.0,
+        8_388_607.5,
+        -8_388_607.5,
+        8_388_608.0,
+        -8_388_608.0,
+        8_388_609.0,
+        -8_388_609.0,
+        16_777_216.0,
+        -16_777_216.0,
+        f32::MAX,
+        f32::MIN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        -f32::NAN,
+    ];
+    while round_edges.len() % 16 != 13 {
+        round_edges.push((round_edges.len() as f32) * 0.25 - 10.5);
+    }
+    let l_re = Layout::contiguous(Shape::new(&[round_edges.len()]));
+    for op in [Floor, Ceil, Round, Sign] {
+        let got = unary(op, &round_edges, &l_re);
+        for (i, (&g, &x)) in got.iter().zip(&round_edges).enumerate() {
+            assert_bits_or_nan(
+                g,
+                scalar_unary_ref(op, x),
+                &format!("edge {op:?} i={i} x={x} ({:#010x})", x.to_bits()),
+            );
         }
     }
 }
@@ -250,6 +324,7 @@ fn avx2_unary_backward_bit_exact_across_edges_and_broadcasts() {
     use UnaryOp::*;
     let ops = [
         Neg,
+        Abs,
         AddScalar(1.0),
         MulScalar(-2.5),
         RSubScalar(4.0),

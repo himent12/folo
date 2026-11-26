@@ -14,6 +14,10 @@ pub(super) fn duplicate_row2(src: &[f32], dst: &mut [f32]) {
         // SAFETY: AVX2 was detected above.
         return unsafe { duplicate_row2_avx2(src, dst) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if src.len() >= 4 {
+        return super::wasm_simd::duplicate_row2_wasm(src, dst);
+    }
     for (d, &v) in dst.as_chunks_mut::<2>().0.iter_mut().zip(src) {
         d[0] = v;
         d[1] = v;
@@ -52,6 +56,10 @@ fn upsample2x2_plane(xp: &[f32], h: usize, w: usize, o: &mut [f32]) {
     if has_avx2() {
         // SAFETY: AVX2 was detected above.
         return unsafe { upsample2x2_plane_avx2(xp, h, w, o) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if w >= 4 {
+        return super::wasm_simd::upsample2x2_plane_wasm(xp, h, w, o);
     }
     for y in 0..h {
         let src = &xp[y * w..(y + 1) * w];
@@ -107,6 +115,10 @@ fn upsample2x2_bwd_plane(gs: &[f32], h: usize, w: usize, gp: &mut [f32]) {
     if has_avx2() {
         // SAFETY: AVX2 was detected above.
         return unsafe { upsample2x2_bwd_plane_avx2(gs, h, w, gp) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if w >= 4 {
+        return super::wasm_simd::upsample2x2_bwd_plane_wasm(gs, h, w, gp);
     }
     for y in 0..h {
         let r0 = &gs[2 * y * ow..(2 * y + 1) * ow];

@@ -22,6 +22,8 @@ mod silu;
 mod stem;
 #[cfg(test)]
 mod tests;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm_simd;
 
 pub use conv::{
     MAX_PAD, MAX_REDUCTION, MAX_STRIDE, QConv, QOut, conv, conv_per_channel, conv_size, out_size,
@@ -150,6 +152,10 @@ fn quantize_group(p0: &[f32], p1: &[f32], p2: &[f32], p3: &[f32], gs: [Grid; 4],
         // SAFETY: AVX2 and FMA were detected; slices have at least `out.len()` elements (asserted above).
         return unsafe { quantize_group_avx2(p0, p1, p2, p3, gs, out) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if kernel::uses_wasm_simd() {
+        return wasm_simd::quantize_group_wasm(p0, p1, p2, p3, gs, out);
+    }
     for i in 0..out.len() {
         out[i] = u32::from_le_bytes([
             gs[0].quantize(p0[i]),
@@ -230,6 +236,10 @@ pub(super) fn deinterleave_even_odd(src: &[u32], even: &mut [u32], odd: &mut [u3
     if kernel::uses_avx2() {
         // SAFETY: AVX2 was detected; bounds checked inside.
         return unsafe { deinterleave_even_odd_avx2(src, even, odd, pad) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if kernel::uses_wasm_simd() {
+        return wasm_simd::deinterleave_even_odd_wasm(src, even, odd, pad);
     }
     deinterleave_even_odd_scalar(src, even, odd, pad);
 }
@@ -394,6 +404,10 @@ fn dequantize_group(
         // SAFETY: AVX2 and FMA were detected; slice lengths asserted above.
         return unsafe { dequantize_group_avx2(src, gs, p0, p1, p2, p3) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if kernel::uses_wasm_simd() {
+        return wasm_simd::dequantize_group_wasm(src, gs, p0, p1, p2, p3);
+    }
     for i in 0..src.len() {
         let w = src[i];
         p0[i] = gs[0].dequantize(w as u8);
@@ -535,6 +549,10 @@ fn max_pool_plane(src: &[u32], h: usize, w: usize, r: usize, tmp: &mut [u32], o:
     if kernel::uses_avx2() {
         // SAFETY: AVX2 was detected; buffer lengths asserted above.
         return unsafe { max_pool_plane_avx2(src, h, w, r, tmp, o) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if kernel::uses_wasm_simd() {
+        return wasm_simd::max_pool_plane_wasm(src, h, w, r, tmp, o);
     }
     for y in 0..h {
         let row = &src[y * w..(y + 1) * w];
@@ -695,6 +713,10 @@ fn upsample2_plane(src: &[u32], h: usize, w: usize, o: &mut [u32]) {
     if kernel::uses_avx2() {
         // SAFETY: AVX2 was detected; buffer lengths asserted above.
         return unsafe { upsample2_plane_avx2(src, h, w, o) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if kernel::uses_wasm_simd() {
+        return wasm_simd::upsample2_plane_wasm(src, h, w, o);
     }
     for y in 0..h {
         let srow = &src[y * w..(y + 1) * w];

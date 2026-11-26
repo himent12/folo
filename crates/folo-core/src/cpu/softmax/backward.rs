@@ -16,6 +16,10 @@ fn sum_block(g: &[f32]) -> f32 {
         // SAFETY: AVX2 was detected above.
         return unsafe { sum_block_avx2(g) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if g.len() >= 16 {
+        return super::wasm_simd::sum_block_wasm(g);
+    }
     let mut acc = [0f32; 16];
     let (gc, gr) = g.as_chunks::<16>();
     for c in gc {
@@ -54,6 +58,10 @@ fn dot_block(g: &[f32], y: &[f32]) -> f32 {
     if has_avx2() {
         // SAFETY: AVX2 was detected above.
         return unsafe { dot_block_avx2(g, y) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if g.len() >= 16 {
+        return super::wasm_simd::dot_block_wasm(g, y);
     }
     let mut acc = [0f32; 16];
     let (gc, gr) = g.as_chunks::<16>();
@@ -121,6 +129,10 @@ fn softmax_bwd_row(y: &[f32], g: &[f32], out: &mut [f32], log: bool) {
     if has_avx2() {
         // SAFETY: AVX2 was detected above.
         return unsafe { softmax_bwd_row_apply_avx2(y, g, out, red, log) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if y.len() >= 8 {
+        return super::wasm_simd::softmax_bwd_row_apply_wasm(y, g, out, red, log);
     }
     if log {
         for ((o, &yv), &gv) in out.iter_mut().zip(y).zip(g) {
@@ -197,6 +209,11 @@ unsafe fn softmax_bwd_col_tile(
     if has_avx2() {
         // SAFETY: AVX2 was detected; caller guarantees disjoint column strip.
         return unsafe { softmax_bwd_col_tile_avx2(y, g, dst_base, d, inner, c0, tw, log) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if tw >= 4 {
+        // SAFETY: caller guarantees disjoint column strip.
+        return unsafe { super::wasm_simd::softmax_bwd_col_tile_wasm(y, g, dst_base, d, inner, c0, tw, log) };
     }
     let mut red = [0f32; COL_TILE];
     if log {

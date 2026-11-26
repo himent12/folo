@@ -4,6 +4,8 @@ mod arg;
 #[cfg(test)]
 mod tests;
 mod topk;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm_simd;
 
 pub(crate) use arg::reduce_arg;
 pub(crate) use topk::topk;
@@ -89,6 +91,10 @@ pub(crate) fn sum_slice(x: &[f32]) -> f32 {
         // SAFETY: AVX2 was detected above.
         return unsafe { sum_slice_avx2(x) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len() >= 16 {
+        return wasm_simd::sum_slice_wasm(x);
+    }
     sum_slice_scalar(x)
 }
 
@@ -137,6 +143,11 @@ pub(crate) fn col_sum_slice(dst: &mut [f32], src: &[f32]) {
     if dst.len() >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above.
         unsafe { col_sum_avx2(dst, src) };
+        return;
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if dst.len() >= 4 {
+        wasm_simd::col_sum_wasm(dst, src);
         return;
     }
     for (acc, &v) in dst.iter_mut().zip(src) {
@@ -203,6 +214,10 @@ pub(crate) fn sum_sq_slice(x: &[f32]) -> f32 {
     if x.len() >= 16 && has_avx2_fma() {
         // SAFETY: AVX2 and FMA were detected above.
         return unsafe { sum_sq_slice_avx2_fma(x) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len() >= 16 {
+        return wasm_simd::sum_sq_slice_wasm(x);
     }
     sum_sq_slice_scalar(x)
 }
@@ -271,6 +286,10 @@ pub(crate) fn sum_sq_diff_slice(x: &[f32], mean: f32) -> f32 {
         // SAFETY: AVX2 and FMA were detected above.
         return unsafe { sum_sq_diff_slice_avx2_fma(x, mean) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if x.len() >= 16 {
+        return wasm_simd::sum_sq_diff_slice_wasm(x, mean);
+    }
     sum_sq_diff_slice_scalar(x, mean)
 }
 
@@ -323,6 +342,11 @@ fn col_sq_diff_slice(dst: &mut [f32], row: &[f32], mean: &[f32]) {
         unsafe { col_sq_diff_avx2_fma(dst, row, mean) };
         return;
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if dst.len() >= 4 {
+        wasm_simd::col_sq_diff_wasm(dst, row, mean);
+        return;
+    }
     for ((acc, &v), &m) in dst.iter_mut().zip(row).zip(mean) {
         let df = v - m;
         *acc += df * df;
@@ -352,7 +376,7 @@ pub(crate) fn tree_combine(mut v: Vec<f32>, comb: impl Fn(f32, f32) -> f32) -> O
     v.pop()
 }
 
-fn combine(op: ReduceOp, a: f32, b: f32) -> f32 {
+pub(super) fn combine(op: ReduceOp, a: f32, b: f32) -> f32 {
     match op {
         ReduceOp::Sum => a + b,
         ReduceOp::Max => {
@@ -372,7 +396,7 @@ fn combine(op: ReduceOp, a: f32, b: f32) -> f32 {
     }
 }
 
-fn identity(op: ReduceOp) -> f32 {
+pub(super) fn identity(op: ReduceOp) -> f32 {
     match op {
         ReduceOp::Sum => 0.0,
         ReduceOp::Max => f32::NEG_INFINITY,
@@ -383,7 +407,7 @@ fn identity(op: ReduceOp) -> f32 {
 
 /// 16-lane scalar twin of [`minmax_slice_avx2`]: exact IEEE-754 NaN propagation and signed-zero order.
 #[inline]
-fn minmax_slice_scalar(op: ReduceOp, x: &[f32]) -> f32 {
+pub(super) fn minmax_slice_scalar(op: ReduceOp, x: &[f32]) -> f32 {
     let id = identity(op);
     let mut acc = [id; 16];
     let (chunks, rest) = x.as_chunks::<16>();
@@ -495,6 +519,10 @@ fn reduce_block(op: ReduceOp, x: &[f32]) -> f32 {
                 // SAFETY: AVX2 was detected above.
                 return unsafe { minmax_slice_avx2(op, x) };
             }
+            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            if x.len() >= 16 {
+                return wasm_simd::minmax_slice_wasm(op, x);
+            }
             minmax_slice_scalar(op, x)
         }
         _ => unreachable!("arg reductions use reduce_arg"),
@@ -578,6 +606,11 @@ pub(crate) fn reduce_f32(op: ReduceOp, x: &[f32], (outer, d, inner): (usize, usi
                     if dst.len() >= 8 && has_avx2() {
                         // SAFETY: AVX2 was detected above.
                         unsafe { col_minmax_avx2(op, dst, row) };
+                        continue;
+                    }
+                    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+                    if dst.len() >= 4 {
+                        wasm_simd::col_minmax_wasm(op, dst, row);
                         continue;
                     }
                     for (acc, &v) in dst.iter_mut().zip(row) {

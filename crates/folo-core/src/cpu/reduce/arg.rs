@@ -10,10 +10,10 @@ use crate::cpu::elementwise::SendPtr;
 use crate::cpu::{CHUNK, PAR_MIN, par_for};
 
 /// Column strip width for `inner > 1` arg-reductions (`256 * (4 + 4) = 2 KiB` in L1, zero heap allocs).
-const ARG_COL_TILE: usize = 256;
+pub(super) const ARG_COL_TILE: usize = 256;
 
 #[inline(always)]
-fn better(max: bool, v: f32, best: f32) -> bool {
+pub(super) fn better(max: bool, v: f32, best: f32) -> bool {
     if best.is_nan() {
         false
     } else if v.is_nan() {
@@ -138,6 +138,10 @@ fn arg_row(max: bool, row: &[f32]) -> i64 {
     if row.len() >= 16 && row.len() <= i32::MAX as usize && has_avx2() {
         // SAFETY: AVX2 detected and `16 <= row.len() <= i32::MAX`.
         return unsafe { arg_row_avx2(max, row) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if row.len() >= 16 && row.len() <= i32::MAX as usize {
+        return super::wasm_simd::arg_row_wasm(max, row);
     }
     arg_row_scalar(max, row)
 }
@@ -275,6 +279,10 @@ fn arg_col_tile(max: bool, src: &[f32], dst: &mut [i64], d: usize, inner: usize,
     if dst.len() >= 8 && d <= i32::MAX as usize && has_avx2() {
         // SAFETY: AVX2 detected, `dst.len() <= ARG_COL_TILE`, and `d <= i32::MAX`.
         return unsafe { arg_col_tile_avx2(max, src, dst, d, inner, c0) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if dst.len() >= 4 && d <= i32::MAX as usize {
+        return super::wasm_simd::arg_col_tile_wasm(max, src, dst, d, inner, c0);
     }
     arg_col_tile_scalar(max, src, dst, d, inner, c0);
 }

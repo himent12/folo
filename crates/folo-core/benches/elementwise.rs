@@ -42,6 +42,10 @@ fn main() {
         bench("sqrt", n, iters, || xp.sqrt().unwrap());
         bench("rsqrt", n, iters, || xp.rsqrt().unwrap());
         bench("recip", n, iters, || xp.recip().unwrap());
+        bench("floor", n, iters, || x.floor().unwrap());
+        bench("ceil", n, iters, || x.ceil().unwrap());
+        bench("round", n, iters, || x.round().unwrap());
+        bench("sign", n, iters, || x.sign().unwrap());
         bench("add (contig)", n, iters, || x.add(&y).unwrap());
         bench("add (bc row)", n, iters, || x.add(&b_row).unwrap());
         bench("add (bc col)", n, iters, || x.add(&b_col).unwrap());

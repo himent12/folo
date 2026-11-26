@@ -125,6 +125,10 @@ fn pack_rgb0_slice(r: &[f32], g: &[f32], b: &[f32], out: &mut [u32]) {
         // SAFETY: AVX2 and FMA were detected; slice lengths asserted above.
         return unsafe { pack_rgb0_slice_avx2(r, g, b, out) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if super::kernel::uses_wasm_simd() {
+        return super::wasm_simd::pack_rgb0_slice_wasm(r, g, b, out);
+    }
     for i in 0..out.len() {
         out[i] = u32::from_le_bytes([f32_to_pixel_u8(r[i]), f32_to_pixel_u8(g[i]), f32_to_pixel_u8(b[i]), 0]);
     }

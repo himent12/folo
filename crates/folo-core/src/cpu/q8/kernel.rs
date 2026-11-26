@@ -31,7 +31,8 @@ pub type TileF32 = [[f32; NR]; MR];
 /// `rows[p] + col`.
 pub(crate) type QKernel = unsafe fn(usize, *const i32, *const *const u32, usize, &mut Tile);
 
-/// The kernel in use: AVX-VNNI, AVX-512 VNNI (256-bit VL), exact AVX2 (`vpmaddwd`), or portable scalar.
+/// The kernel in use: AVX-VNNI, AVX-512 VNNI (256-bit VL), exact AVX2 (`vpmaddwd`), Wasm SIMD128
+/// (`i32x4_dot_i16x8`), or portable scalar.
 pub(crate) fn kernel() -> QKernel {
     static K: OnceLock<QKernel> = OnceLock::new();
     *K.get_or_init(|| {
@@ -47,11 +48,16 @@ pub(crate) fn kernel() -> QKernel {
                 return kernel_avx2_entry as QKernel;
             }
         }
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        if uses_wasm_simd() {
+            return super::wasm_simd::kernel_wasm_simd128 as QKernel;
+        }
         kernel_scalar as QKernel
     })
 }
 
-/// Human-readable name of the active int8 micro-kernel (`"AVX-VNNI"`, `"AVX-512 VNNI"`, `"AVX2"`, or `"portable"`).
+/// Human-readable name of the active int8 micro-kernel (`"AVX-VNNI"`, `"AVX-512 VNNI"`, `"AVX2"`,
+/// `"Wasm SIMD128"`, or `"portable"`).
 pub fn kernel_name() -> &'static str {
     #[cfg(target_arch = "x86_64")]
     {
@@ -65,7 +71,18 @@ pub fn kernel_name() -> &'static str {
             return "AVX2";
         }
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if uses_wasm_simd() {
+        return "Wasm SIMD128";
+    }
     "portable"
+}
+
+/// True when the Wasm SIMD128 int8 kernels and C4 helpers are enabled (unless `FOLO_Q8_SCALAR` is set).
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+pub(crate) fn uses_wasm_simd() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| std::env::var_os("FOLO_Q8_SCALAR").is_none())
 }
 
 /// True when the int8 kernels run on hardware VNNI (`vpdpbusd` via AVX-VNNI or AVX-512 VNNI VL).

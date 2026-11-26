@@ -135,7 +135,7 @@ fn softplus_bwd4(x: v128, g: v128) -> v128 {
 
 /// `ln(x)` on four lanes, division-free and bitwise identical to `ln_scalar`.
 #[inline(always)]
-fn ln4(x: v128) -> v128 {
+pub(crate) fn ln4(x: v128) -> v128 {
     let is_sub = f32x4_lt(x, f32x4_splat(f32::MIN_POSITIVE));
     let x_norm = v128_bitselect(f32x4_mul(x, f32x4_splat(SUBNORMAL_SCALE)), x, is_sub);
     let exp_adj = v128_and(is_sub, i32x4_splat(-24));
@@ -448,20 +448,20 @@ pub(super) fn tanh_bias_inplace(v: &mut [f32], bias: f32) {
 
 /// IEEE-754 `f32::max` (`maxNum`: non-NaN wins; `if a > b || b.is_nan() { a } else { b }`).
 #[inline(always)]
-fn max4_exact(a: v128, b: v128) -> v128 {
+pub(super) fn max4_exact(a: v128, b: v128) -> v128 {
     let a_wins = v128_or(f32x4_gt(a, b), f32x4_ne(b, b));
     v128_bitselect(a, b, a_wins)
 }
 
 /// IEEE-754 `f32::min` (`minNum`: non-NaN wins; `if a < b || b.is_nan() { a } else { b }`).
 #[inline(always)]
-fn min4_exact(a: v128, b: v128) -> v128 {
+pub(super) fn min4_exact(a: v128, b: v128) -> v128 {
     let a_wins = v128_or(f32x4_lt(a, b), f32x4_ne(b, b));
     v128_bitselect(a, b, a_wins)
 }
 
 #[inline]
-fn run_bin_vv(
+pub(super) fn run_bin_vv(
     a: &[f32],
     b: &[f32],
     out: &mut [f32],
@@ -504,7 +504,7 @@ fn run_bin_vv(
 }
 
 #[inline]
-fn run_bin_vs(
+pub(super) fn run_bin_vs(
     a: &[f32],
     b: f32,
     out: &mut [f32],
@@ -538,7 +538,7 @@ fn run_bin_vs(
 }
 
 #[inline]
-fn run_bin_sv(
+pub(super) fn run_bin_sv(
     a: f32,
     b: &[f32],
     out: &mut [f32],
@@ -571,43 +571,96 @@ fn run_bin_sv(
     }
 }
 
-/// Vectorized contiguous/unit-stride `(1, 1)` slice kernel for hot binary ops (`Add`/`Sub`/`Mul`/`Div`/`Maximum`/`Minimum`).
+#[inline(always)]
+fn mask_f32(b: bool) -> f32 {
+    if b { 1.0 } else { 0.0 }
+}
+
+/// Vectorized contiguous/unit-stride `(1, 1)` slice kernel for arithmetic, min/max, and comparisons.
 pub(super) fn binary_vv(op: BinaryOp, a: &[f32], b: &[f32], out: &mut [f32]) {
+    let one = f32x4_splat(1.0);
     match op {
         BinaryOp::Add => run_bin_vv(a, b, out, |x, y| f32x4_add(x, y), |x, y| x + y),
         BinaryOp::Sub => run_bin_vv(a, b, out, |x, y| f32x4_sub(x, y), |x, y| x - y),
         BinaryOp::Mul => run_bin_vv(a, b, out, |x, y| f32x4_mul(x, y), |x, y| x * y),
         BinaryOp::Div => run_bin_vv(a, b, out, |x, y| f32x4_div(x, y), |x, y| x / y),
-        BinaryOp::Maximum => run_bin_vv(a, b, out, max4_exact, f32::max),
-        BinaryOp::Minimum => run_bin_vv(a, b, out, min4_exact, f32::min),
+        BinaryOp::Maximum => run_bin_vv(a, b, out, max4_exact, super::max_num),
+        BinaryOp::Minimum => run_bin_vv(a, b, out, min4_exact, super::min_num),
+        BinaryOp::Eq => run_bin_vv(a, b, out, |x, y| v128_and(f32x4_eq(x, y), one), |x, y| mask_f32(x == y)),
+        BinaryOp::Ne => run_bin_vv(a, b, out, |x, y| v128_and(f32x4_ne(x, y), one), |x, y| mask_f32(x != y)),
+        BinaryOp::Gt => run_bin_vv(a, b, out, |x, y| v128_and(f32x4_gt(x, y), one), |x, y| mask_f32(x > y)),
+        BinaryOp::Ge => run_bin_vv(a, b, out, |x, y| v128_and(f32x4_ge(x, y), one), |x, y| mask_f32(x >= y)),
+        BinaryOp::Lt => run_bin_vv(a, b, out, |x, y| v128_and(f32x4_lt(x, y), one), |x, y| mask_f32(x < y)),
+        BinaryOp::Le => run_bin_vv(a, b, out, |x, y| v128_and(f32x4_le(x, y), one), |x, y| mask_f32(x <= y)),
         _ => unreachable!("binary_vv called for non-SIMD binary op"),
     }
 }
 
-/// Vectorized broadcast-`b` `(1, 0)` slice kernel for hot binary ops.
+/// Vectorized broadcast-`b` `(1, 0)` slice kernel for arithmetic, min/max, and comparisons.
 pub(super) fn binary_vs(op: BinaryOp, a: &[f32], b: f32, out: &mut [f32]) {
+    let one = f32x4_splat(1.0);
     match op {
         BinaryOp::Add => run_bin_vs(a, b, out, |x, y| f32x4_add(x, y), |x, y| x + y),
         BinaryOp::Sub => run_bin_vs(a, b, out, |x, y| f32x4_sub(x, y), |x, y| x - y),
         BinaryOp::Mul => run_bin_vs(a, b, out, |x, y| f32x4_mul(x, y), |x, y| x * y),
         BinaryOp::Div => run_bin_vs(a, b, out, |x, y| f32x4_div(x, y), |x, y| x / y),
-        BinaryOp::Maximum => run_bin_vs(a, b, out, max4_exact, f32::max),
-        BinaryOp::Minimum => run_bin_vs(a, b, out, min4_exact, f32::min),
+        BinaryOp::Maximum => run_bin_vs(a, b, out, max4_exact, super::max_num),
+        BinaryOp::Minimum => run_bin_vs(a, b, out, min4_exact, super::min_num),
+        BinaryOp::Eq => run_bin_vs(a, b, out, |x, y| v128_and(f32x4_eq(x, y), one), |x, y| mask_f32(x == y)),
+        BinaryOp::Ne => run_bin_vs(a, b, out, |x, y| v128_and(f32x4_ne(x, y), one), |x, y| mask_f32(x != y)),
+        BinaryOp::Gt => run_bin_vs(a, b, out, |x, y| v128_and(f32x4_gt(x, y), one), |x, y| mask_f32(x > y)),
+        BinaryOp::Ge => run_bin_vs(a, b, out, |x, y| v128_and(f32x4_ge(x, y), one), |x, y| mask_f32(x >= y)),
+        BinaryOp::Lt => run_bin_vs(a, b, out, |x, y| v128_and(f32x4_lt(x, y), one), |x, y| mask_f32(x < y)),
+        BinaryOp::Le => run_bin_vs(a, b, out, |x, y| v128_and(f32x4_le(x, y), one), |x, y| mask_f32(x <= y)),
         _ => unreachable!("binary_vs called for non-SIMD binary op"),
     }
 }
 
-/// Vectorized broadcast-`a` `(0, 1)` slice kernel for hot binary ops.
+/// Vectorized broadcast-`a` `(0, 1)` slice kernel for arithmetic, min/max, and comparisons.
 pub(super) fn binary_sv(op: BinaryOp, a: f32, b: &[f32], out: &mut [f32]) {
+    let one = f32x4_splat(1.0);
     match op {
         BinaryOp::Add => run_bin_sv(a, b, out, |x, y| f32x4_add(x, y), |x, y| x + y),
         BinaryOp::Sub => run_bin_sv(a, b, out, |x, y| f32x4_sub(x, y), |x, y| x - y),
         BinaryOp::Mul => run_bin_sv(a, b, out, |x, y| f32x4_mul(x, y), |x, y| x * y),
         BinaryOp::Div => run_bin_sv(a, b, out, |x, y| f32x4_div(x, y), |x, y| x / y),
-        BinaryOp::Maximum => run_bin_sv(a, b, out, max4_exact, f32::max),
-        BinaryOp::Minimum => run_bin_sv(a, b, out, min4_exact, f32::min),
+        BinaryOp::Maximum => run_bin_sv(a, b, out, max4_exact, super::max_num),
+        BinaryOp::Minimum => run_bin_sv(a, b, out, min4_exact, super::min_num),
+        BinaryOp::Eq => run_bin_sv(a, b, out, |x, y| v128_and(f32x4_eq(x, y), one), |x, y| mask_f32(x == y)),
+        BinaryOp::Ne => run_bin_sv(a, b, out, |x, y| v128_and(f32x4_ne(x, y), one), |x, y| mask_f32(x != y)),
+        BinaryOp::Gt => run_bin_sv(a, b, out, |x, y| v128_and(f32x4_gt(x, y), one), |x, y| mask_f32(x > y)),
+        BinaryOp::Ge => run_bin_sv(a, b, out, |x, y| v128_and(f32x4_ge(x, y), one), |x, y| mask_f32(x >= y)),
+        BinaryOp::Lt => run_bin_sv(a, b, out, |x, y| v128_and(f32x4_lt(x, y), one), |x, y| mask_f32(x < y)),
+        BinaryOp::Le => run_bin_sv(a, b, out, |x, y| v128_and(f32x4_le(x, y), one), |x, y| mask_f32(x <= y)),
         _ => unreachable!("binary_sv called for non-SIMD binary op"),
     }
+}
+
+/// Dispatch all Wasm SIMD128 binary ops (arithmetic, min/max, comparisons); returns `None` for `Pow`/`Atan2`.
+pub(super) fn try_binary_wasm(
+    op: BinaryOp,
+    a: &[f32],
+    la: &crate::Layout,
+    b: &[f32],
+    lb: &crate::Layout,
+) -> Option<Vec<f32>> {
+    use BinaryOp::*;
+    let scalar: fn(f32, f32) -> f32 = match op {
+        Add => |a, b| a + b,
+        Sub => |a, b| a - b,
+        Mul => |a, b| a * b,
+        Div => |a, b| a / b,
+        Maximum => super::max_num,
+        Minimum => super::min_num,
+        Eq => |a, b| mask_f32(a == b),
+        Ne => |a, b| mask_f32(a != b),
+        Gt => |a, b| mask_f32(a > b),
+        Ge => |a, b| mask_f32(a >= b),
+        Lt => |a, b| mask_f32(a < b),
+        Le => |a, b| mask_f32(a <= b),
+        Pow | Atan2 => return None,
+    };
+    Some(binary_map2(op, a, la, b, lb, scalar))
 }
 
 /// Dispatch a hot binary op (`Add`/`Sub`/`Mul`/`Div`/`Maximum`/`Minimum`) across contiguous, unit-stride,

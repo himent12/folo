@@ -118,4 +118,22 @@ fn run() {
         });
         println!("  {name:<44}: {bwd_ms:8.3} ms");
     }
+
+    // 5. Top-k selection (detection & classification shapes)
+    for &(name, rows, d, k, largest) in &[
+        ("topk [64, 8400] k=100 max", 64usize, 8400usize, 100usize, true),
+        ("topk [64, 8400] k=300 max", 64, 8400, 300, true),
+        ("topk [1024, 1024] k=1 max", 1024, 1024, 1, true),
+        ("topk [1024, 1024] k=32 max", 1024, 1024, 32, true),
+        ("topk [64, 8400] k=100 min", 64, 8400, 100, false),
+    ] {
+        let x = Tensor::randn([rows, d], 0.0, 1.0, &mut rng);
+        let ms = {
+            let _g = no_grad();
+            bench_median(budget, || {
+                black_box(x.topk(k, largest).unwrap());
+            })
+        };
+        println!("  {name:<44}: {ms:8.3} ms");
+    }
 }

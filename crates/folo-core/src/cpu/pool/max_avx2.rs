@@ -68,6 +68,10 @@ pub(super) fn max_row_s1(row: &[f32], kw: usize, dst: &mut [f32]) {
         // SAFETY: AVX2 was detected above; bounds asserted above.
         return unsafe { max_row_s1_avx2(row, kw, dst) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if ow >= 4 {
+        return super::wasm_simd::max_row_s1_wasm(row, kw, dst);
+    }
     for (ox, d) in dst.iter_mut().enumerate() {
         let mut m = row[ox];
         for t in 1..kw {
@@ -115,6 +119,10 @@ pub(super) fn max_pairs(row: &[f32], dst: &mut [f32]) {
         // SAFETY: AVX2 was detected above; bounds asserted above.
         return unsafe { max_pairs_avx2(row, dst) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if dst.len() >= 4 {
+        return super::wasm_simd::max_pairs_wasm(row, dst);
+    }
     for (d, pair) in dst.iter_mut().zip(row.as_chunks::<2>().0) {
         let mut m = pair[0];
         step_val(&mut m, pair[1]);
@@ -158,6 +166,10 @@ pub(super) fn max_cols(rv: &[f32], ow: usize, kh: usize, dst: &mut [f32]) {
     if ow >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above; bounds asserted above.
         return unsafe { max_cols_avx2(rv, ow, kh, dst) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if ow >= 4 {
+        return super::wasm_simd::max_cols_wasm(rv, ow, kh, dst);
     }
     dst.copy_from_slice(&rv[..ow]);
     for t in 1..kh {
@@ -217,6 +229,10 @@ pub(super) fn max_row_idx_s1(
     if ow >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above; bounds asserted above.
         return unsafe { max_row_idx_s1_avx2(row, row_idx, kw, row_base, dst_v, dst_i) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if ow >= 4 {
+        return super::wasm_simd::max_row_idx_s1_wasm(row, row_idx, kw, row_base, dst_v, dst_i);
     }
     for ox in 0..ow {
         let mut m = row[ox];
@@ -293,6 +309,10 @@ pub(super) fn max_pairs_idx(
     if ow >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above; bounds asserted above.
         return unsafe { max_pairs_idx_avx2(row, row_idx, row_base, dst_v, dst_i) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if ow >= 4 {
+        return super::wasm_simd::max_pairs_idx_wasm(row, row_idx, row_base, dst_v, dst_i);
     }
     for ox in 0..ow {
         let mut m = row[2 * ox];
@@ -372,6 +392,10 @@ pub(super) fn max_cols_idx(
     if ow >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above; bounds asserted above.
         return unsafe { max_cols_idx_avx2(rv, ri, ow, kh, dst_v, dst_i) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if ow >= 4 {
+        return super::wasm_simd::max_cols_idx_wasm(rv, ri, ow, kh, dst_v, dst_i);
     }
     for ox in 0..ow {
         let mut m = rv[ox];

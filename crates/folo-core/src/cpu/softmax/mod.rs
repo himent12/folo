@@ -15,6 +15,8 @@
 mod backward;
 #[cfg(test)]
 mod tests;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm_simd;
 
 pub(crate) use backward::softmax_backward;
 
@@ -100,6 +102,10 @@ fn row_max_and_nan(src: &[f32]) -> (f32, bool) {
         // SAFETY: AVX2 was detected above.
         return unsafe { row_max_and_nan_avx2(src) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if src.len() >= 8 {
+        return wasm_simd::row_max_and_nan_wasm(src);
+    }
     let mut m = f32::NEG_INFINITY;
     let mut any_nan = false;
     for &v in src {
@@ -165,6 +171,10 @@ fn sum_exp_shifted(src: &[f32], m: f32) -> f32 {
         // SAFETY: AVX2 was detected above.
         return unsafe { sum_exp_shifted_avx2(src, m) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if src.len() >= 16 {
+        return wasm_simd::sum_exp_shifted_wasm(src, m);
+    }
     let mut acc = [0f32; 16];
     let (chunks, rest) = src.as_chunks::<16>();
     for c in chunks {
@@ -209,6 +219,10 @@ fn exp_shifted_and_sum(src: &[f32], dst: &mut [f32], m: f32) -> f32 {
     if has_avx2() {
         // SAFETY: AVX2 was detected above.
         return unsafe { exp_shifted_and_sum_avx2(src, dst, m) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if src.len() >= 16 {
+        return wasm_simd::exp_shifted_and_sum_wasm(src, dst, m);
     }
     let mut acc = [0f32; 16];
     let (sc, sr) = src.as_chunks::<16>();
@@ -262,6 +276,10 @@ fn write_log_softmax_row(src: &[f32], dst: &mut [f32], m: f32, ls: f32) {
         // SAFETY: AVX2 was detected above.
         return unsafe { write_log_softmax_row_avx2(src, dst, m, ls) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if src.len() >= 8 {
+        return wasm_simd::write_log_softmax_row_wasm(src, dst, m, ls);
+    }
     for (y, &v) in dst.iter_mut().zip(src) {
         *y = (v - m) - ls;
     }
@@ -296,6 +314,10 @@ fn scale_inplace(dst: &mut [f32], inv: f32) {
         // SAFETY: AVX2 was detected above.
         return unsafe { scale_inplace_avx2(dst, inv) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if dst.len() >= 8 {
+        return wasm_simd::scale_inplace_wasm(dst, inv);
+    }
     for y in dst.iter_mut() {
         *y *= inv;
     }
@@ -327,6 +349,10 @@ fn write_exp_scaled_row(src: &[f32], dst: &mut [f32], m: f32, inv: f32) {
     if has_avx2() {
         // SAFETY: AVX2 was detected above.
         return unsafe { write_exp_scaled_row_avx2(src, dst, m, inv) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if src.len() >= 8 {
+        return wasm_simd::write_exp_scaled_row_wasm(src, dst, m, inv);
     }
     for (y, &v) in dst.iter_mut().zip(src) {
         *y = fast_exp(v - m) * inv;
@@ -433,6 +459,11 @@ unsafe fn softmax_col_tile(
     if has_avx2() {
         // SAFETY: AVX2 was detected; caller guarantees disjoint column strip.
         return unsafe { softmax_col_tile_avx2(src, dst_base, d, inner, c0, tw, log) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if tw >= 4 {
+        // SAFETY: caller guarantees disjoint column strip.
+        return unsafe { wasm_simd::softmax_col_tile_wasm(src, dst_base, d, inner, c0, tw, log) };
     }
     let mut m = [f32::NEG_INFINITY; COL_TILE];
     for r in 0..d {

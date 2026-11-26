@@ -138,6 +138,10 @@ fn quantize_row(row: &[f32], dst: &mut [i8]) -> f32 {
         // SAFETY: `uses_avx2()` checked AVX2 support above.
         return unsafe { quantize_row_avx2(row, dst) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if row.len() >= 16 && super::kernel::uses_wasm_simd() {
+        return super::wasm_simd::quantize_row_wasm(row, dst);
+    }
     quantize_row_scalar(row, dst)
 }
 

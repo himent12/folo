@@ -4,6 +4,8 @@ mod max_avx2;
 #[cfg(test)]
 mod tests;
 mod upsample;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+mod wasm_simd;
 
 use max_avx2::{
     max_cols, max_cols_idx, max_pairs, max_pairs_idx, max_row_idx_s1, max_row_s1, step_idx, step_val,
@@ -32,6 +34,10 @@ fn row_add(dst: &mut [f32], src: &[f32]) {
     if has_avx2() {
         // SAFETY: AVX2 was detected above.
         return unsafe { row_add_avx2(dst, src) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if dst.len() >= 4 {
+        return wasm_simd::row_add_wasm(dst, src);
     }
     for (d, &s) in dst.iter_mut().zip(src) {
         *d += s;
@@ -64,6 +70,10 @@ fn row_add_scaled(dst: &mut [f32], src: &[f32], scale: f32) {
     if has_avx2() {
         // SAFETY: AVX2 was detected above.
         return unsafe { row_add_scaled_avx2(dst, src, scale) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if dst.len() >= 4 {
+        return wasm_simd::row_add_scaled_wasm(dst, src, scale);
     }
     for (d, &s) in dst.iter_mut().zip(src) {
         *d += s * scale;
@@ -98,6 +108,10 @@ fn row_scale(dst: &mut [f32], scale: f32) {
         // SAFETY: AVX2 was detected above.
         return unsafe { row_scale_avx2(dst, scale) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if dst.len() >= 4 {
+        return wasm_simd::row_scale_wasm(dst, scale);
+    }
     for d in dst.iter_mut() {
         *d *= scale;
     }
@@ -127,6 +141,10 @@ fn row_add_scalar(dst: &mut [f32], v: f32) {
     if dst.len() >= 8 && has_avx2() {
         // SAFETY: AVX2 was detected above.
         return unsafe { row_add_scalar_avx2(dst, v) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if dst.len() >= 4 {
+        return wasm_simd::row_add_scalar_wasm(dst, v);
     }
     for d in dst.iter_mut() {
         *d += v;
@@ -158,6 +176,10 @@ fn sum_pairs(src: &[f32], dst: &mut [f32]) {
     if has_avx2() {
         // SAFETY: AVX2 was detected above.
         return unsafe { sum_pairs_avx2(src, dst) };
+    }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if dst.len() >= 4 {
+        return wasm_simd::sum_pairs_wasm(src, dst);
     }
     for (i, d) in dst.iter_mut().enumerate() {
         *d = src[2 * i] + src[2 * i + 1];
