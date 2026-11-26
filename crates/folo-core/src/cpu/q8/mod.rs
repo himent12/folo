@@ -16,8 +16,13 @@
 //! - `tests.rs`: everything against a scalar integer reference.
 
 mod conv;
+#[cfg(target_arch = "x86_64")]
+mod fused;
+#[cfg(target_arch = "x86_64")]
+mod fused_epi;
 mod kernel;
 mod quant;
+mod rows;
 mod silu;
 mod stem;
 #[cfg(test)]

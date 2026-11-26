@@ -33,6 +33,8 @@ fn fast_silu_accuracy_and_extremes() {
     assert_eq!(silu_q8(0.0).to_bits(), 0.0f32.to_bits());
     assert_eq!(silu_q8(-0.0).to_bits(), (-0.0f32).to_bits());
     assert_eq!(silu_q8(f32::MAX), f32::MAX);
+    assert_eq!(silu_q8(f32::INFINITY), f32::INFINITY);
+    assert!(silu_q8(f32::NEG_INFINITY).abs() < 1e-30);
     assert!(silu_q8(f32::MIN).abs() < 1e-30);
     assert!(silu_q8(-200.0).abs() < 1e-30);
     assert!(silu_q8(f32::NAN).is_nan());
@@ -339,4 +341,88 @@ fn stem_u8_rejects_overflowing_output_extent_before_writes() {
         );
     }));
     assert!(res.is_err(), "overflowing n * oh * ow must panic before touching raw output pointers");
+}
+
+#[test]
+fn fused_conv_noncontiguous_and_rowband_fill_match_exact_reference() {
+    let mut rng = Rng::seed(7009);
+    // Exercise non-contiguous cross-row writes/residual reads (`ow = 1, 20, 40` < or crossing `NR = 24`)
+    // and row-band parallel `image_rows` (`groups < threads`, `hq >= 16`, `body.len() >= 16384`).
+    for &(n, c, o, h, w, k, s, pad, silu, has_res, f32_out) in &[
+        (1usize, 8usize, 8usize, 5usize, 1usize, 3usize, 1usize, 1usize, true, true, false),
+        (1, 8, 8, 5, 1, 3, 1, 1, false, true, true),
+        (2, 12, 12, 20, 20, 3, 1, 1, true, true, false),
+        (1, 12, 12, 20, 20, 3, 1, 1, false, false, true),
+        (1, 16, 16, 40, 40, 3, 2, 1, true, true, false),
+        (1, 8, 8, 96, 96, 3, 2, 1, true, false, false), // groups=2, hq=49, body=2*4*2401=19208 >= 16384 -> row-band par
+        (1, 8, 8, 128, 128, 3, 1, 1, true, false, false), // groups=2, hq=130, body=33824 >= 16384 -> row-band par
+        (1, 16, 16, 25, 29, 1, 1, 0, true, true, false),  // Pointwise1x1 single-part with residual + tail
+        (1, 16, 16, 25, 29, 1, 1, 0, false, true, true),  // Pointwise1x1 f32 out with residual + tail
+    ] {
+        let hw = h * w;
+        let taps = k * k;
+        let (oh, ow) = q8::out_size(h, w, k, s, pad).unwrap();
+        let ohw = oh * ow;
+        let in_g: Vec<Grid> = (0..c).map(|i| Grid::from_range(-0.4 - 0.05 * i as f32, 2.5)).collect();
+        let out_g: Vec<Grid> = (0..o).map(|i| Grid::from_range(-0.5, 3.0 + 0.1 * i as f32)).collect();
+        let res_g: Vec<Grid> = (0..o).map(|i| Grid::from_range(-1.0, 2.0 + 0.05 * i as f32)).collect();
+        let in_z: Vec<u8> = in_g.iter().map(|g| g.zero).collect();
+        let xf: Vec<f32> = (0..n * c * hw).map(|_| rng.uniform(-1.0, 2.5)).collect();
+        let mut xq = alloc(n, c, hw);
+        quantize_per_channel(&xf, n, c, hw, &in_g, &mut xq);
+        let rf: Vec<f32> = (0..n * o * ohw).map(|_| rng.uniform(-1.0, 2.0)).collect();
+        let mut rq = alloc(n, o, ohw);
+        quantize_per_channel(&rf, n, o, ohw, &res_g, &mut rq);
+        let wt: Vec<f32> = (0..o * c * taps).map(|_| rng.uniform(-0.3, 0.3)).collect();
+        let bias: Vec<f32> = (0..o).map(|_| rng.uniform(-0.5, 0.5)).collect();
+        let cv = QConv::new(&wt, &bias, (o, c, k), s, pad, silu, &in_g);
+        let vx = C4 { data: &xq, offset: 0, img_stride: (c / 4) * hw, c, zero: in_z[0] };
+        let vr = C4 { data: &rq, offset: 0, img_stride: (o / 4) * ohw, c: o, zero: res_g[0].zero };
+        let res_arg = has_res.then_some((vr, res_g.as_slice()));
+
+        // Thread-count determinism (1 vs 8 threads, exercising both serial and row-band parallel paths).
+        if f32_out {
+            let mut out1 = vec![0f32; n * o * ohw];
+            let mut out8 = vec![0f32; n * o * ohw];
+            pool(1).install(|| {
+                conv_per_channel(&[vx], &[&in_z], n, h, w, &cv, res_arg, QOut::F32 { data: &mut out1 });
+            });
+            pool(8).install(|| {
+                conv_per_channel(&[vx], &[&in_z], n, h, w, &cv, res_arg, QOut::F32 { data: &mut out8 });
+            });
+            assert!(
+                out1.iter().zip(&out8).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "f32 mismatch ({n},{c}->{o},{h}x{w},k{k}s{s})"
+            );
+        } else {
+            let mut out1 = alloc(n, o, ohw);
+            let mut out8 = alloc(n, o, ohw);
+            pool(1).install(|| {
+                conv_per_channel(
+                    &[vx],
+                    &[&in_z],
+                    n,
+                    h,
+                    w,
+                    &cv,
+                    res_arg,
+                    QOut::U8PerChannel { data: &mut out1, grids: &out_g },
+                );
+            });
+            pool(8).install(|| {
+                conv_per_channel(
+                    &[vx],
+                    &[&in_z],
+                    n,
+                    h,
+                    w,
+                    &cv,
+                    res_arg,
+                    QOut::U8PerChannel { data: &mut out8, grids: &out_g },
+                );
+            });
+            let words = n * (o / 4) * ohw;
+            assert_eq!(&out1[..words], &out8[..words], "u8 mismatch ({n},{c}->{o},{h}x{w},k{k}s{s})");
+        }
+    }
 }

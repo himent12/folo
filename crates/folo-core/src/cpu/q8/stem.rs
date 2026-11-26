@@ -198,47 +198,70 @@ pub fn stem_u8(x_rgb0: &[u32], n: usize, h: usize, w: usize, stem: &QStem, out: 
     let n_ohw = n.checked_mul(ohw).expect("q8::stem_u8: n * oh * ow overflow");
     let u8_need = n_ohw.checked_mul(og).expect("q8::stem_u8: u8 output size overflow");
     let f32_need = n_ohw.checked_mul(stem.o).expect("q8::stem_u8: f32 output size overflow");
-    let (qptr, fptr, out_grids): (OutPtr<u32>, OutPtr<f32>, Option<Vec<super::Grid>>) = match out {
+    type GroupGrid = ([f32; MR], [i32; MR]);
+    const STACK_OG: usize = 64;
+    let mut out_stack: [GroupGrid; STACK_OG] = [([0.0; MR], [0; MR]); STACK_OG];
+    let out_heap: Vec<GroupGrid>;
+    let (qptr, fptr, is_u8, group_out): (OutPtr<u32>, OutPtr<f32>, bool, &[GroupGrid]) = match out {
         QOut::U8 { data, grid } => {
             assert!(data.len() >= u8_need, "q8::stem_u8: u8 output too short");
-            (OutPtr(data.as_mut_ptr()), OutPtr(std::ptr::null_mut()), Some(vec![grid; stem.o]))
+            let pair = ([grid.inv(); MR], [grid.zero as i32; MR]);
+            let slice: &[GroupGrid] = if og <= STACK_OG {
+                out_stack[..og].fill(pair);
+                &out_stack[..og]
+            } else {
+                out_heap = vec![pair; og];
+                &out_heap
+            };
+            (OutPtr(data.as_mut_ptr()), OutPtr(std::ptr::null_mut()), true, slice)
         }
         QOut::U8PerChannel { data, grids } => {
             assert!(data.len() >= u8_need, "q8::stem_u8: u8 output too short");
             assert_eq!(grids.len(), stem.o, "q8::stem_u8: output grids length");
-            (OutPtr(data.as_mut_ptr()), OutPtr(std::ptr::null_mut()), Some(grids.to_vec()))
+            let pair_of = |g: usize| {
+                (
+                    [
+                        grids[4 * g].inv(),
+                        grids[4 * g + 1].inv(),
+                        grids[4 * g + 2].inv(),
+                        grids[4 * g + 3].inv(),
+                    ],
+                    [
+                        grids[4 * g].zero as i32,
+                        grids[4 * g + 1].zero as i32,
+                        grids[4 * g + 2].zero as i32,
+                        grids[4 * g + 3].zero as i32,
+                    ],
+                )
+            };
+            let slice: &[GroupGrid] = if og <= STACK_OG {
+                for (g, dst) in out_stack[..og].iter_mut().enumerate() {
+                    *dst = pair_of(g);
+                }
+                &out_stack[..og]
+            } else {
+                out_heap = (0..og).map(pair_of).collect();
+                &out_heap
+            };
+            (OutPtr(data.as_mut_ptr()), OutPtr(std::ptr::null_mut()), true, slice)
         }
         QOut::F32 { data } => {
             assert!(data.len() >= f32_need, "q8::stem_u8: f32 output too short");
-            (OutPtr(std::ptr::null_mut()), OutPtr(data.as_mut_ptr()), None)
+            (OutPtr(std::ptr::null_mut()), OutPtr(data.as_mut_ptr()), false, &[])
         }
     };
     if n_ohw == 0 {
         return;
     }
     let kern = kernel();
+    #[cfg(target_arch = "x86_64")]
+    let fused_isa = super::fused::active_isa();
     let (k, s, p, ks) = (stem.k, stem.stride, stem.pad, stem.ks);
     let strip_w = ow.checked_next_multiple_of(NR).expect("q8::stem_u8: strip_w overflow");
     let strip_len = ks.checked_mul(strip_w).expect("q8::stem_u8: strip buffer overflow");
     let chunks = ow.div_ceil(NR);
     let zero_corr = [0i32; MR];
     let resw = [0u32; NR];
-    let group_out: Vec<([f32; MR], [i32; MR])> = match &out_grids {
-        Some(gs) => (0..og)
-            .map(|g| {
-                (
-                    [gs[4 * g].inv(), gs[4 * g + 1].inv(), gs[4 * g + 2].inv(), gs[4 * g + 3].inv()],
-                    [
-                        gs[4 * g].zero as i32,
-                        gs[4 * g + 1].zero as i32,
-                        gs[4 * g + 2].zero as i32,
-                        gs[4 * g + 3].zero as i32,
-                    ],
-                )
-            })
-            .collect(),
-        None => Vec::new(),
-    };
     let threads = rayon::current_num_threads();
     let total_rows = n.checked_mul(oh).expect("q8::stem_u8: n * oh overflow");
     let band = (total_rows / (2 * threads).max(1)).max(4);
@@ -313,11 +336,35 @@ pub fn stem_u8(x_rgb0: &[u32], n: usize, h: usize, w: usize, stem: &QStem, out: 
                     row_ptrs[3 * ky + 1] = ev_ptr;
                     row_ptrs[3 * ky + 2] = unsafe { od_ptr.add(1) };
                 }
+                #[cfg(target_arch = "x86_64")]
+                if let Some(isa) = fused_isa {
+                    // SAFETY: `isa` matches `active_isa()`; row `oy` of `img` is disjointly owned by this band.
+                    unsafe {
+                        super::fused::run_stem_row(
+                            isa,
+                            &stem.a,
+                            &stem.scale,
+                            &stem.bias,
+                            og,
+                            ow,
+                            ohw,
+                            img,
+                            oy,
+                            stem.silu,
+                            is_u8,
+                            &row_ptrs,
+                            group_out,
+                            qptr.0,
+                            fptr.0,
+                        );
+                    }
+                    continue;
+                }
                 for chunk in 0..chunks {
                     let col = chunk * NR;
                     let cols = NR.min(ow - col);
                     for g in 0..og {
-                        let out_kind = if out_grids.is_some() {
+                        let out_kind = if is_u8 {
                             let (inv, zero) = &group_out[g];
                             Out::U8 { inv, zero }
                         } else {
@@ -334,7 +381,7 @@ pub fn stem_u8(x_rgb0: &[u32], n: usize, h: usize, w: usize, stem: &QStem, out: 
                         let panel = stem.a[g * ks * MR..].as_ptr();
                         // SAFETY: `panel` has `ks * MR` words; each strip has `strip_w >= col + NR` words.
                         unsafe { kern(ks, panel, row_ptrs.as_ptr(), col, &mut acc) };
-                        if out_grids.is_some() {
+                        if is_u8 {
                             let at = (img * og + g) * ohw + oy * ow + col;
                             if cols == NR {
                                 // SAFETY: disjoint `NR`-word output slice owned by this task.
@@ -394,7 +441,7 @@ pub fn stem_u8(x_rgb0: &[u32], n: usize, h: usize, w: usize, stem: &QStem, out: 
                 let col = chunk * NR;
                 let cols = NR.min(ow - col);
                 for g in 0..og {
-                    let out_kind = if out_grids.is_some() {
+                    let out_kind = if is_u8 {
                         let (inv, zero) = &group_out[g];
                         Out::U8 { inv, zero }
                     } else {
@@ -411,7 +458,7 @@ pub fn stem_u8(x_rgb0: &[u32], n: usize, h: usize, w: usize, stem: &QStem, out: 
                     let panel = stem.a[g * ks * MR..].as_ptr();
                     // SAFETY: `panel` has `ks * MR` words; each strip has `strip_w >= col + NR` words.
                     unsafe { kern(ks, panel, row_ptrs.as_ptr(), col, &mut acc) };
-                    if out_grids.is_some() {
+                    if is_u8 {
                         let at = (img * og + g) * ohw + oy * ow + col;
                         if cols == NR {
                             // SAFETY: disjoint output row owned by this task.
