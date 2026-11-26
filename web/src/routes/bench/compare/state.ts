@@ -2,7 +2,7 @@
 // entries compared (from the URL), their results, their slots (hue and shape), the legend's highlight and every
 // derived table and series. Call it in the component's body: its effects and resources follow the component's life.
 
-import { computed, effect, signal } from 'fw';
+import { computed, effect, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { LiveBench } from '$lib/api/liveBench';
 import { Resource } from '$lib/api/resource';
@@ -63,6 +63,27 @@ export function compareState() {
     return { shown: all.shown.slice(0, COMPARE_MAX), missing: all.missing };
   });
   const shown = computed(() => picked.get().shown);
+  /** Unavailable entry IDs pruned from `?entries=` after the benchmark's entries loaded, announced to the user. */
+  const dropped = signal<string[]>([]);
+  let prevCtx = untrack(() => `${hub.epoch}:${id.get()}`);
+  effect(() => {
+    const ctx = `${hub.epoch}:${id.get()}`;
+    if (ctx === prevCtx) return;
+    prevCtx = ctx;
+    untrack(() => dropped.set([]));
+  });
+  effect(() => {
+    const b = bench();
+    if (live.loading || live.error || !b || b.id !== id.get()) return;
+    const missing = picked.get().missing;
+    if (!missing.length) return;
+    untrack(() => {
+      if (router.route.name !== 'bench-compare' || router.location.name !== 'bench-compare' || router.location.params.id !== id.peek()) return;
+      const keep = shown.peek().map((e) => e.id);
+      dropped.set([...new Set([...dropped.peek(), ...missing])]);
+      setIds(keep);
+    });
+  });
   const results = new BenchResults(
     () => id.get() || null,
     () => shown.get(),
@@ -224,6 +245,7 @@ export function compareState() {
     unsupported,
     picked,
     shown,
+    dropped,
     results,
     setIds,
     candidates,

@@ -189,4 +189,45 @@ describe('BenchCompare Escape coordination', () => {
     expect(target.querySelectorAll('.chips .chip')).toHaveLength(3);
     expect(target.querySelectorAll('.iv li.dim')).toHaveLength(0);
   });
+
+  it('prunes unavailable entry IDs from ?entries= and shows a dismissible notice when 2+ valid entries remain', async () => {
+    const benches = await hub.api.benches();
+    let benchId = '';
+    let entries: Awaited<ReturnType<typeof hub.api.benchEntries>> = [];
+    for (const candidate of benches) {
+      const done = (await hub.api.benchEntries(candidate.id)).filter((e) => e.status === 'done');
+      if (done.length >= 2) {
+        benchId = candidate.id;
+        entries = done;
+        break;
+      }
+    }
+    expect(entries.length).toBeGreaterThanOrEqual(2);
+    const url = `#/benchmarks/${benchId}/compare?entries=${entries[0]!.id},${entries[1]!.id},be_gone`;
+    history.replaceState(history.state, '', url);
+    router.route = parse(url);
+    const go = vi.spyOn(router, 'go').mockImplementation((path) => {
+      router.route = parse(`#${path}`);
+    });
+
+    c = render(() => <BenchCompare />, target);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelectorAll('.chips .chip')).toHaveLength(2);
+      const notice = target.querySelector<HTMLElement>('[data-missing-entries]');
+      if (!notice) throw new Error('waiting for missing-entries notice');
+      expect(notice.textContent).toContain('be_gone');
+      expect(notice.textContent).toContain('Omitted unavailable entry');
+    });
+    expect(go).toHaveBeenCalledWith(`/benchmarks/${benchId}/compare?entries=${entries[0]!.id},${entries[1]!.id}`, { replace: true });
+
+    // Dismissing hides the notice and moves focus into the chips group instead of stranding on document.body.
+    const dismiss = target.querySelector<HTMLButtonElement>('[data-missing-entries] button')!;
+    dismiss.focus();
+    dismiss.click();
+    flushSync();
+    await Promise.resolve();
+    expect(target.querySelector('[data-missing-entries]')).toBeNull();
+    expect(target.querySelector('.chips')?.contains(document.activeElement)).toBe(true);
+  });
 });

@@ -92,18 +92,18 @@ export function section(name: RouteName): string {
 const PAGE_KEYS = new Set(['mock', 'scenario']);
 
 /**
- * Where a path URL Studio was opened at belongs (`/datasets` → `/#/datasets`): the server answers any path with the
- * app, which routes by hash only. A known route's path moves into the hash with its query (`/runs/new?from=run_a` →
- * `/#/runs/new?from=run_a`), the page's own keys (`?mock=1`) stay in the page's query, and a hash route already there
- * wins (`/datasets#/runs` → `/#/runs`). Null when nothing needs to change: the app's root, or a path that is no route
- * (a missing file). `base` is the app's base path. Exported for tests.
+ * Where a path URL Studio was opened at belongs (`/datasets` → `/#/datasets`): the server answers any non-API path
+ * with the app, which routes by hash only. Any path under `base` (other than root or `index.html`) moves into the
+ * hash with its query (`/runs/new?from=run_a` → `/#/runs/new?from=run_a`, `/run/missing` → `/#/run/missing`, where
+ * the router renders Not Found), the page's own keys (`?mock=1`) stay in the page's query, and a hash route already
+ * there wins (`/datasets#/runs` → `/#/runs`). Null when nothing needs to change: the app's root, `index.html`, or a
+ * path outside `base`. Exported for tests.
  */
 export function hashUrl(loc: { pathname: string; search: string; hash: string }, base = '/'): string | null {
   if (!loc.pathname.startsWith(base)) return null;
-  const rest = loc.pathname.slice(base.length).replace(/\/+$/, '');
+  const rest = loc.pathname.slice(base.length).replace(/^\/+|\/+$/g, '');
   if (!rest || rest === 'index.html') return null;
   const path = `/${rest}`;
-  if (parse(`#${path}`).name === 'not-found') return null;
   if (loc.hash && loc.hash !== '#') return `${base}${loc.search}${loc.hash}`;
   const page = new URLSearchParams();
   const route = new URLSearchParams();

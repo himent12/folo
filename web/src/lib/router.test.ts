@@ -92,16 +92,22 @@ describe('hashUrl (a path URL opened directly, DOGFOOD-3 S5)', () => {
     expect(at('/datasets', '', '#/runs?ids=a')).toBe('/#/runs?ids=a');
   });
 
-  it('leaves the root, index.html and paths that are no route alone', () => {
+  it('leaves the root and index.html alone, and moves unknown direct paths into the hash for Not Found', () => {
     expect(at('/')).toBeNull();
+    expect(at('///')).toBeNull();
     expect(at('/', '', '#/runs')).toBeNull();
     expect(at('/index.html')).toBeNull();
-    expect(at('/favicon.svg')).toBeNull();
-    expect(at('/nope/nope')).toBeNull();
+    expect(at('/run/definitely-missing')).toBe('/#/run/definitely-missing');
+    expect(parse(at('/run/definitely-missing')!.slice(1))).toMatchObject({ name: 'not-found', path: '/run/definitely-missing' });
+    expect(at('/run/definitely-missing', '?mock=1&foo=bar')).toBe('/?mock=1#/run/definitely-missing?foo=bar');
+    expect(at('/nope/nope')).toBe('/#/nope/nope');
+    expect(at('/nope/nope', '', '#/runs')).toBe('/#/runs');
+    expect(at('/favicon.svg')).toBe('/#/favicon.svg');
   });
 
   it('works under a base path', () => {
     expect(hashUrl({ pathname: '/studio/runs', search: '', hash: '' }, '/studio/')).toBe('/studio/#/runs');
+    expect(hashUrl({ pathname: '/studio/nope', search: '', hash: '' }, '/studio/')).toBe('/studio/#/nope');
     expect(hashUrl({ pathname: '/other/runs', search: '', hash: '' }, '/studio/')).toBeNull();
   });
 });
