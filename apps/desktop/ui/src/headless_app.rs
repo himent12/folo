@@ -240,4 +240,19 @@ impl HeadlessApp {
         self.platform.set_appearance(appearance);
         self.run_until_idle();
     }
+
+    /// Resizes `window` to `size` (logical px), delivering the platform resize callback as a real
+    /// OS resize does so layout, framebuffer, and resize listeners run on the next frame.
+    #[track_caller]
+    pub fn resize_window(&mut self, window: AnyWindowHandle, size: Size<Pixels>) {
+        self.app
+            .update(|cx| {
+                cx.update_window(window, |_, window, cx| {
+                    let scale = window.scale_factor();
+                    window.platform_window.resize(size);
+                    window.on_resize(size, scale, cx);
+                })
+            })
+            .expect("resize_window: the window is not open");
+    }
 }

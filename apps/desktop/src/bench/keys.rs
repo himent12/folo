@@ -68,12 +68,23 @@ impl FoloApp {
         {
             let (bid, eid) = (bid.clone(), eid.clone());
             self.bench.selected_entry_image = None;
-            let visible = self
-                .bench
-                .entry_images
-                .get(&(bid.clone(), eid))
-                .and_then(|x| x.page.ready())
-                .is_some_and(|p| p.images.iter().any(|im| im.image.id == img_id));
+            self.bench.scroll_entry_preview = false;
+            let entry_ready = self.bench.list.ready().is_some_and(|l| l.iter().any(|b| b.id == bid))
+                && self
+                    .bench
+                    .entries
+                    .get(&bid)
+                    .and_then(|l| l.ready())
+                    .and_then(|l| l.iter().find(|e| e.id == eid))
+                    .is_some_and(|e| e.status == crate::api::BenchEntryStatus::Done)
+                && self.bench.results.get(&(bid.clone(), eid.clone())).is_some_and(|l| l.ready().is_some());
+            let visible = entry_ready
+                && self
+                    .bench
+                    .entry_images
+                    .get(&(bid.clone(), eid))
+                    .and_then(|x| x.page.ready())
+                    .is_some_and(|p| p.images.iter().any(|im| im.image.id == img_id));
             if visible {
                 let key = if self.bench_image_failed(&bid, &img_id, None) {
                     format!("eimg-retry-{img_id}")

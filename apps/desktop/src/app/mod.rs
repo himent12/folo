@@ -81,6 +81,7 @@ use crate::ui::*;
 pub(crate) use connection::persistable_server_url;
 pub use connection::{Connector, Reason};
 pub use focus::focus_ring;
+pub(crate) use focus::reveal_bounds_in_scroll;
 pub use forms::{
     ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, format_lr,
     retry_batch, synth_errors,

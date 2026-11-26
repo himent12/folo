@@ -238,6 +238,41 @@ fn reveal(mut b: folo_ui::Bounds<Pixels>, window: &mut Window) {
     }
 }
 
+/// Scroll `h` so `b` is visible within its viewport (clear of edge fades and the bottom key-hint
+/// strip), independent of keyboard focus rings. Runs during prepaint and schedules a follow-up
+/// frame when the scroll offset changes.
+pub(crate) fn reveal_bounds_in_scroll(b: folo_ui::Bounds<Pixels>, h: &ScrollHandle, window: &mut Window) {
+    let vp = h.bounds();
+    if vp.size.width <= px(0.) || vp.size.height <= px(0.) {
+        return;
+    }
+    let margin = px(8.);
+    let (top_m, bottom_m) = (px(16.), px(40.));
+    let tall = b.size.height + top_m + bottom_m > vp.size.height;
+    let dy = if b.top() - top_m < vp.top() && !tall {
+        b.top() - top_m - vp.top()
+    } else if tall {
+        if b.top() - top_m < vp.top() || b.top() + margin > vp.bottom() - margin * 4. {
+            b.top() - top_m - vp.top()
+        } else {
+            px(0.)
+        }
+    } else if b.bottom() + bottom_m > vp.bottom() {
+        b.bottom() + bottom_m - vp.bottom()
+    } else {
+        px(0.)
+    };
+    if dy != px(0.) {
+        let off = h.offset();
+        // Clamp only against top (0) here; prepaint clamps against the freshly laid-out max_offset.
+        let y = (off.y - dy).min(px(0.));
+        if (f32::from(y) - f32::from(off.y)).abs() > 0.5 {
+            h.set_offset(folo_ui::point(off.x, y));
+            window.request_animation_frame();
+        }
+    }
+}
+
 /// Keyboard focus ring: 2 px in the focus colour, 2 px outside the control.
 pub fn focus_ring(t: &Theme, radius: f32) -> folo_ui::Div {
     let off = tsize::FOCUS_OFFSET + tsize::FOCUS_RING;

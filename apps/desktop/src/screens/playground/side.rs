@@ -441,9 +441,13 @@ impl FoloApp {
                             .hover(|s| s.bg(t.bg_hover))
                             .active(|s| s.bg(t.bg_active))
                             .on_hover(cx.listener(move |this, h: &bool, _, cx| {
-                                let next = if *h { Some(i) } else { None };
-                                if this.play_hover != next {
-                                    this.play_hover = next;
+                                if *h {
+                                    if this.play_hover != Some(i) {
+                                        this.play_hover = Some(i);
+                                        cx.notify();
+                                    }
+                                } else if this.play_hover == Some(i) {
+                                    this.play_hover = None;
                                     cx.notify();
                                 }
                             }))
