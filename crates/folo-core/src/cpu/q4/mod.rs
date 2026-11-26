@@ -348,6 +348,9 @@ pub(crate) fn dot_q4_f32_scalar(w: &[Q4Block], x: &[f32]) -> f32 {
 
 /// Dequantizing dot product between `Q4Block` weights `w` and `f32` activations `x`.
 ///
+/// Each 32-element block accumulates `Σ q[i] * x[i]` in `f32` before multiplying by `blk.scale`, so extreme
+/// `x` values near `f32::MAX` may overflow the unscaled inner sum even when `blk.scale < 1`.
+///
 /// # Panics
 /// If `w.len() < x.len().div_ceil(BLOCK_SIZE)`.
 pub fn dot_q4_f32(w: &[Q4Block], x: &[f32]) -> f32 {
@@ -376,12 +379,16 @@ pub(crate) fn dot_q4_q8_scalar(w: &[Q4Block], x: &[Q8Block]) -> f32 {
             let q1 = (byte >> 4) as i32 - 8;
             isum += q0 * xb.qs[j] as i32 + q1 * xb.qs[j + PACKED_BLOCK_BYTES] as i32;
         }
-        acc += (isum as f32) * (wb.scale * xb.scale);
+        // Multiply by `wb.scale` then `xb.scale` (rather than `wb.scale * xb.scale` first) so small
+        // non-zero blocks do not prematurely underflow to zero.
+        acc += ((isum as f32) * wb.scale) * xb.scale;
     }
     acc
 }
 
 /// Integer-accelerated dot product between quantized `Q4Block` weights and `Q8Block` activations.
+///
+/// Requires each [`Q8Block::sum`] to equal `Σ_i qs[i]` (as produced by [`quantize_q8_blocks`]).
 ///
 /// # Panics
 /// If `w.len() != x.len()`.

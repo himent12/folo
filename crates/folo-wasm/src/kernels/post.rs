@@ -86,7 +86,7 @@ fn box_iou_scalar(a: [f32; 4], b: [f32; 4]) -> f32 {
     let iw = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
     let ih = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
     let inter = iw * ih;
-    let union = aw * ah + bw * bh - inter;
+    let union = (aw * ah - inter) + bw * bh;
     if union > 0.0 && union.is_finite() { inter / union } else { 0.0 }
 }
 
@@ -152,7 +152,7 @@ pub fn box_iou_matrix(boxes_a: &[[f32; 4]], boxes_b: &[[f32; 4]], out: &mut [f32
             let iw = (a[2].min(bx2[j]) - a[0].max(bx1[j])).max(0.0);
             let ih = (a[3].min(by2[j]) - a[1].max(by1[j])).max(0.0);
             let inter = iw * ih;
-            let union = area_a + ab - inter;
+            let union = (area_a - inter) + ab;
             row[j] = if union > 0.0 && union.is_finite() { inter / union } else { 0.0 };
         }
     }
@@ -195,7 +195,7 @@ mod wasm_simd {
     /// 4-lane minimax `exp(x)` accurate to `< 1e-6` relative error on `[-88, 88]`, flushing underflow to `0.0`.
     #[inline(always)]
     fn fast_exp4(x: v128) -> v128 {
-        let xc = f32x4_pmin(f32x4_splat(88.722_84), f32x4_pmax(f32x4_splat(-104.0), x));
+        let xc = f32x4_pmin(f32x4_splat(89.0), f32x4_pmax(f32x4_splat(-104.0), x));
         let magic = f32x4_splat(12_582_912.0);
         let n = f32x4_sub(f32x4_add(f32x4_mul(xc, f32x4_splat(core::f32::consts::LOG2_E)), magic), magic);
         let r = f32x4_sub(
@@ -318,7 +318,7 @@ mod wasm_simd {
                 let iw = f32x4_pmax(zero, f32x4_sub(f32x4_pmin(ax2, x2), f32x4_pmax(ax1, x1)));
                 let ih = f32x4_pmax(zero, f32x4_sub(f32x4_pmin(ay2, y2), f32x4_pmax(ay1, y1)));
                 let inter = f32x4_mul(iw, ih);
-                let union = f32x4_sub(f32x4_add(vaa, ab), inter);
+                let union = f32x4_add(f32x4_sub(vaa, inter), ab);
                 let valid =
                     v128_and(f32x4_gt(ab, zero), v128_and(f32x4_gt(union, zero), f32x4_lt(union, inf)));
                 let iou = v128_bitselect(f32x4_div(inter, union), zero, valid);
@@ -334,7 +334,7 @@ mod wasm_simd {
             let iw = (a[2].min(bx2[j]) - a[0].max(bx1[j])).max(0.0);
             let ih = (a[3].min(by2[j]) - a[1].max(by1[j])).max(0.0);
             let inter = iw * ih;
-            let union = area_a + ab - inter;
+            let union = (area_a - inter) + ab;
             out[j] = if union > 0.0 && union.is_finite() { inter / union } else { 0.0 };
         }
     }
@@ -380,7 +380,7 @@ mod wasm_simd {
                 let iw = f32x4_pmax(zero, f32x4_sub(f32x4_pmin(qx2, x2), f32x4_pmax(qx1, x1)));
                 let ih = f32x4_pmax(zero, f32x4_sub(f32x4_pmin(qy2, y2), f32x4_pmax(qy1, y1)));
                 let inter = f32x4_mul(iw, ih);
-                let union = f32x4_sub(f32x4_add(vaq, ab), inter);
+                let union = f32x4_add(f32x4_sub(vaq, inter), ab);
                 let ok =
                     v128_and(v128_and(finite, pos), v128_and(f32x4_gt(union, zero), f32x4_lt(union, inf)));
                 let iou = v128_bitselect(f32x4_div(inter, union), zero, ok);
@@ -423,20 +423,34 @@ mod tests {
             }
         }
 
-        // Shift invariance and NaN propagation.
-        let base = [1.0f32, -2.5, 0.3, 4.2, -0.7];
-        let shifted: Vec<f32> = base.iter().map(|&v| v - 500.0).collect();
+        // Exact shift invariance (dyadic logits and shift so `x - 512.0` introduces zero input rounding),
+        // plus NaN and +/-Inf propagation.
+        let base = [1.0f32, -2.5, 0.25, 4.25, -0.75];
+        let shifted: Vec<f32> = base.iter().map(|&v| v - 512.0).collect();
         let (mut a, mut b) = ([0.0f32; 5], [0.0f32; 5]);
         softmax_rows(&base, 1, 5, &mut a);
         softmax_rows(&shifted, 1, 5, &mut b);
         for (x, y) in a.iter().zip(&b) {
-            assert!((x - y).abs() <= 1e-6);
+            assert!((x - y).abs() <= 1e-6, "shift mismatch: {x} vs {y}");
         }
 
         let with_nan = [1.0f32, f32::NAN, 2.0, 3.0, 4.0];
         let mut nan_out = [0.0f32; 5];
         softmax_rows(&with_nan, 1, 5, &mut nan_out);
         assert!(nan_out.iter().all(|v| v.is_nan()));
+
+        let all_neg_inf = [f32::NEG_INFINITY; 5];
+        let mut neg_inf_out = [0.0f32; 5];
+        softmax_rows(&all_neg_inf, 1, 5, &mut neg_inf_out);
+        assert!(neg_inf_out.iter().all(|v| v.is_nan()));
+
+        let with_pos_inf = [0.0f32, f32::INFINITY, 1.0, -1.0, 2.0];
+        let mut pos_inf_out = [0.0f32; 5];
+        softmax_rows(&with_pos_inf, 1, 5, &mut pos_inf_out);
+        assert!(pos_inf_out[1].is_nan());
+        assert!(
+            pos_inf_out[0] == 0.0 && pos_inf_out[2] == 0.0 && pos_inf_out[3] == 0.0 && pos_inf_out[4] == 0.0
+        );
     }
 
     #[test]
@@ -478,6 +492,15 @@ mod tests {
         assert_eq!(mat[5], 0.0);
         // Degenerate / NaN rows are all zeros.
         assert!(mat[2 * b.len()..].iter().all(|&v| v == 0.0));
+
+        // Huge finite identical box (`area = 2e38`) must yield IoU 1.0 without union overflow.
+        let huge = [[0.0f32, 0.0, 2e19, 1e19]];
+        let mut huge_mat = [0.0f32; 1];
+        let mut huge_o2m = [0.0f32; 1];
+        box_iou_matrix(&huge, &huge, &mut huge_mat);
+        box_iou_one_to_many(huge[0], &huge, &mut huge_o2m);
+        assert!((huge_mat[0] - 1.0).abs() < 1e-6);
+        assert!((huge_o2m[0] - 1.0).abs() < 1e-6);
 
         // Empty slices.
         let mut empty = Vec::new();

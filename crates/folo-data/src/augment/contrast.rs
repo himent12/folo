@@ -243,7 +243,7 @@ struct TileAxis {
 fn tile_interp_axis(len: usize, grid: usize) -> TileAxis {
     let mut bounds = Vec::with_capacity(grid + 1);
     for t in 0..=grid {
-        bounds.push(t * len / grid);
+        bounds.push(((t as u128 * len as u128) / grid as u128) as usize);
     }
     let centers: Vec<f64> = (0..grid).map(|t| 0.5 * (bounds[t] + bounds[t + 1]) as f64).collect();
     let mut t0 = Vec::with_capacity(len);
@@ -486,6 +486,11 @@ mod tests {
             }
         }
         clahe(&mut small, &ClaheConfig { tile_grid: [8, 8], ..cfg });
+        // Wide-strip tile boundaries must not overflow 32-bit `usize` (`t * len / grid`).
+        let wide_ax = tile_interp_axis(70_000, 62_000);
+        assert_eq!(wide_ax.bounds.first().copied(), Some(0));
+        assert_eq!(wide_ax.bounds.last().copied(), Some(70_000));
+        assert!(wide_ax.bounds.windows(2).all(|w| w[0] <= w[1]));
         let mut empty = Image { width: 0, height: 0, data: Vec::new() };
         clahe(&mut empty, &cfg);
     }

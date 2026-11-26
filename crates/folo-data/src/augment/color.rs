@@ -153,10 +153,9 @@ pub fn adjust_contrast(img: &mut Image, factor: f32) {
     }
     let mean = sum_luma as f64 / (w as u64 * h as u64) as f64;
     let f = factor as f64;
-    let offset = mean * (1.0 - f);
     let mut lut = [0u8; 256];
     for (v, slot) in lut.iter_mut().enumerate() {
-        *slot = (v as f64 * f + offset).round().clamp(0.0, 255.0) as u8;
+        *slot = (mean + (v as f64 - mean) * f).round().clamp(0.0, 255.0) as u8;
     }
     apply_single_lut(img, &lut);
 }
@@ -173,14 +172,12 @@ pub fn adjust_saturation(img: &mut Image, factor: f32) {
     if stride == 0 || h == 0 || !factor.is_finite() || factor < 0.0 || factor == 1.0 {
         return;
     }
-    let inv = 1.0 - factor;
     for_bands(&mut img.data[..h * stride], stride, |_, band| {
         for px in band.as_chunks_mut::<3>().0 {
             let y = luma_bt601(px[0], px[1], px[2]) as f32;
-            let bias = y * inv;
-            px[0] = (px[0] as f32 * factor + bias).round().clamp(0.0, 255.0) as u8;
-            px[1] = (px[1] as f32 * factor + bias).round().clamp(0.0, 255.0) as u8;
-            px[2] = (px[2] as f32 * factor + bias).round().clamp(0.0, 255.0) as u8;
+            px[0] = (y + (px[0] as f32 - y) * factor).round().clamp(0.0, 255.0) as u8;
+            px[1] = (y + (px[1] as f32 - y) * factor).round().clamp(0.0, 255.0) as u8;
+            px[2] = (y + (px[2] as f32 - y) * factor).round().clamp(0.0, 255.0) as u8;
         }
     });
 }
@@ -189,9 +186,12 @@ pub fn adjust_saturation(img: &mut Image, factor: f32) {
 /// returning `true` when jitter was applied.
 ///
 /// Bounding boxes are preserved and clamped to `[0, 1]` (dropping non-finite or degenerate boxes). Invalid
-/// configs or `rng.chance(cfg.prob) == false` are no-ops returning `false`.
+/// configs, all-zero jitter radii, or `rng.chance(cfg.prob) == false` are no-ops returning `false`.
 pub fn color_jitter(sample: &mut Sample, cfg: &ColorJitterConfig, rng: &mut Rng) -> bool {
-    if cfg.validate().is_err() || !rng.chance(cfg.prob) {
+    if cfg.validate().is_err()
+        || (cfg.brightness == 0.0 && cfg.contrast == 0.0 && cfg.saturation == 0.0)
+        || !rng.chance(cfg.prob)
+    {
         return false;
     }
     clamp_and_filter_boxes(&mut sample.boxes, sample.image.width, sample.image.height, None);
@@ -275,10 +275,12 @@ mod tests {
         assert!(first[0] == first[1] && first[1] == first[2]);
         assert!(flat.data.as_chunks::<3>().0.iter().all(|&px| px == first));
 
-        // Uniform grey stays bit-exact under contrast and saturation changes.
+        // Uniform grey stays bit-exact under contrast and saturation changes, even at huge factors.
         let mut solid = Image::new(7, 5, [111, 111, 111]);
         adjust_contrast(&mut solid, 1.8);
+        adjust_contrast(&mut solid, 1e18);
         adjust_saturation(&mut solid, 2.5);
+        adjust_saturation(&mut solid, 1e8);
         assert!(solid.data.as_chunks::<3>().0.iter().all(|&px| px == [111, 111, 111]));
 
         // 1x1 and 0x0 and invalid factors never panic.

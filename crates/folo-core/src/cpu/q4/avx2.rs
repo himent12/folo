@@ -328,8 +328,8 @@ pub(super) unsafe fn dot_q4_q8_avx2(w: &[Q4Block], x: &[Q8Block]) -> f32 {
         let prod16 = _mm256_maddubs_epi16(u_q4, s_q8);
         let prod32 = _mm256_madd_epi16(prod16, ones16);
         let biased = hsum_epi32(prod32);
-        let exact = biased - 8 * xb.sum;
-        acc += (exact as f32) * (wb.scale * xb.scale);
+        let exact = biased.wrapping_sub(8i32.wrapping_mul(xb.sum));
+        acc += ((exact as f32) * wb.scale) * xb.scale;
     }
     acc
 }

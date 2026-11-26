@@ -101,15 +101,16 @@ fn max_pool2d_plane_scalar(
     dst: &mut [f32],
 ) {
     let ([kh, kw], [sh, sw], [ph, pw]) = (spec.kernel, spec.stride, spec.padding);
+    let (hi, wi) = (h as isize, w as isize);
     for oy in 0..oh {
         let y0 = (oy * sh) as isize - ph as isize;
-        let iy0 = y0.max(0) as usize;
-        let iy1 = (y0 + kh as isize).min(h as isize).max(0) as usize;
+        let iy0 = y0.clamp(0, hi) as usize;
+        let iy1 = (y0 + kh as isize).clamp(0, hi) as usize;
         let drow = &mut dst[oy * ow..(oy + 1) * ow];
         for (ox, slot) in drow.iter_mut().enumerate() {
             let x0 = (ox * sw) as isize - pw as isize;
-            let ix0 = x0.max(0) as usize;
-            let ix1 = (x0 + kw as isize).min(w as isize).max(0) as usize;
+            let ix0 = x0.clamp(0, wi) as usize;
+            let ix1 = (x0 + kw as isize).clamp(0, wi) as usize;
             let mut m = f32::NEG_INFINITY;
             let mut init = false;
             for iy in iy0..iy1 {
@@ -187,16 +188,17 @@ fn avg_pool2d_plane_scalar(
 ) {
     let ([kh, kw], [sh, sw], [ph, pw]) = (spec.kernel, spec.stride, spec.padding);
     let full_denom = (kh * kw) as f32;
+    let (hi, wi) = (h as isize, w as isize);
     for oy in 0..oh {
         let y0 = (oy * sh) as isize - ph as isize;
-        let iy0 = y0.max(0) as usize;
-        let iy1 = (y0 + kh as isize).min(h as isize).max(0) as usize;
+        let iy0 = y0.clamp(0, hi) as usize;
+        let iy1 = (y0 + kh as isize).clamp(0, hi) as usize;
         let valid_h = iy1 - iy0;
         let drow = &mut dst[oy * ow..(oy + 1) * ow];
         for (ox, slot) in drow.iter_mut().enumerate() {
             let x0 = (ox * sw) as isize - pw as isize;
-            let ix0 = x0.max(0) as usize;
-            let ix1 = (x0 + kw as isize).min(w as isize).max(0) as usize;
+            let ix0 = x0.clamp(0, wi) as usize;
+            let ix1 = (x0 + kw as isize).clamp(0, wi) as usize;
             let mut sum = 0.0f32;
             for iy in iy0..iy1 {
                 let srow = &src[iy * w..(iy + 1) * w];
@@ -266,17 +268,18 @@ mod wasm_simd {
         dst: &mut [f32],
     ) {
         let ([kh, kw], [sh, _], [ph, pw]) = (spec.kernel, spec.stride, spec.padding);
+        let (hi, wi) = (h as isize, w as isize);
         let x_interior_lo = pw.min(ow);
-        let x_interior_hi = w.saturating_add(pw).saturating_sub(kw).saturating_add(1).min(ow);
+        let x_interior_hi = w.saturating_add(pw).checked_sub(kw).map_or(0, |v| (v + 1).min(ow));
         for oy in 0..oh {
             let y0 = (oy * sh) as isize - ph as isize;
-            let iy0 = y0.max(0) as usize;
-            let iy1 = (y0 + kh as isize).min(h as isize).max(0) as usize;
+            let iy0 = y0.clamp(0, hi) as usize;
+            let iy1 = (y0 + kh as isize).clamp(0, hi) as usize;
             let drow = &mut dst[oy * ow..(oy + 1) * ow];
             let scalar_at = |ox: usize| -> f32 {
                 let x0 = ox as isize - pw as isize;
-                let ix0 = x0.max(0) as usize;
-                let ix1 = (x0 + kw as isize).min(w as isize).max(0) as usize;
+                let ix0 = x0.clamp(0, wi) as usize;
+                let ix1 = (x0 + kw as isize).clamp(0, wi) as usize;
                 let mut m = f32::NEG_INFINITY;
                 let mut init = false;
                 for iy in iy0..iy1 {
@@ -342,16 +345,18 @@ mod wasm_simd {
                     let a1 = v128_load(p0.add(4) as *const v128);
                     let b0 = v128_load(p1 as *const v128);
                     let b1 = v128_load(p1.add(4) as *const v128);
-                    let s0 =
-                        f32x4_add(u32x4_shuffle::<0, 2, 4, 6>(a0, a1), u32x4_shuffle::<1, 3, 5, 7>(a0, a1));
-                    let s1 =
-                        f32x4_add(u32x4_shuffle::<0, 2, 4, 6>(b0, b1), u32x4_shuffle::<1, 3, 5, 7>(b0, b1));
-                    v128_store(drow.as_mut_ptr().add(ox) as *mut v128, f32x4_mul(f32x4_add(s0, s1), q));
+                    let e0 = u32x4_shuffle::<0, 2, 4, 6>(a0, a1);
+                    let o0 = u32x4_shuffle::<1, 3, 5, 7>(a0, a1);
+                    let e1 = u32x4_shuffle::<0, 2, 4, 6>(b0, b1);
+                    let o1 = u32x4_shuffle::<1, 3, 5, 7>(b0, b1);
+                    // Accumulate in exact row-major scalar order `(((e0 + o0) + e1) + o1)` for bit-exact parity.
+                    let sum = f32x4_add(f32x4_add(f32x4_add(e0, o0), e1), o1);
+                    v128_store(drow.as_mut_ptr().add(ox) as *mut v128, f32x4_mul(sum, q));
                     ox += 4;
                 }
             }
             for x in ox..ow {
-                drow[x] = ((r0[2 * x] + r0[2 * x + 1]) + (r1[2 * x] + r1[2 * x + 1])) * 0.25;
+                drow[x] = (((r0[2 * x] + r0[2 * x + 1]) + r1[2 * x]) + r1[2 * x + 1]) * 0.25;
             }
         }
     }
@@ -367,18 +372,19 @@ mod wasm_simd {
     ) {
         let ([kh, kw], [sh, _], [ph, pw]) = (spec.kernel, spec.stride, spec.padding);
         let full_denom = (kh * kw) as f32;
+        let (hi, wi) = (h as isize, w as isize);
         let x_interior_lo = pw.min(ow);
-        let x_interior_hi = w.saturating_add(pw).saturating_sub(kw).saturating_add(1).min(ow);
+        let x_interior_hi = w.saturating_add(pw).checked_sub(kw).map_or(0, |v| (v + 1).min(ow));
         for oy in 0..oh {
             let y0 = (oy * sh) as isize - ph as isize;
-            let iy0 = y0.max(0) as usize;
-            let iy1 = (y0 + kh as isize).min(h as isize).max(0) as usize;
+            let iy0 = y0.clamp(0, hi) as usize;
+            let iy1 = (y0 + kh as isize).clamp(0, hi) as usize;
             let valid_h = iy1 - iy0;
             let drow = &mut dst[oy * ow..(oy + 1) * ow];
             let scalar_at = |ox: usize| -> f32 {
                 let x0 = ox as isize - pw as isize;
-                let ix0 = x0.max(0) as usize;
-                let ix1 = (x0 + kw as isize).min(w as isize).max(0) as usize;
+                let ix0 = x0.clamp(0, wi) as usize;
+                let ix1 = (x0 + kw as isize).clamp(0, wi) as usize;
                 let mut sum = 0.0f32;
                 for iy in iy0..iy1 {
                     let srow = &src[iy * w..(iy + 1) * w];
@@ -502,5 +508,32 @@ mod tests {
         avg_pool2d_nchw(&ones, [1, 1, 2, 2], &s_pad, &mut incl);
         assert!(excl.iter().all(|&v| (v - 4.0).abs() < 1e-6));
         assert!(incl.iter().all(|&v| (v - 16.0 / 9.0).abs() < 1e-5));
+
+        // Fully padded windows (`padding > kernel` on 1x1) must never trap or underflow.
+        let one_px = [3.0f32];
+        let mut full_pad_spec = Pool2dSpec::new([1, 1], [1, 1], [2, 2]);
+        let [foh, fow] = full_pad_spec.output_hw(1, 1).unwrap();
+        assert_eq!([foh, fow], [5, 5]);
+        let mut max_fp = vec![0.0f32; foh * fow];
+        max_pool2d_nchw(&one_px, [1, 1, 1, 1], &full_pad_spec, &mut max_fp);
+        assert_eq!(max_fp[12], 3.0);
+        assert!(max_fp.iter().enumerate().all(|(i, &v)| i == 12 || v == f32::NEG_INFINITY));
+        let mut avg_fp = vec![-1.0f32; foh * fow];
+        avg_pool2d_nchw(&one_px, [1, 1, 1, 1], &full_pad_spec, &mut avg_fp);
+        assert_eq!(avg_fp[12], 3.0);
+        assert!(avg_fp.iter().enumerate().all(|(i, &v)| i == 12 || v == 0.0));
+        full_pad_spec.count_include_pad = true;
+        avg_pool2d_nchw(&one_px, [1, 1, 1, 1], &full_pad_spec, &mut avg_fp);
+        assert_eq!(avg_fp[12], 3.0);
+        assert!(avg_fp.iter().enumerate().all(|(i, &v)| i == 12 || v == 0.0));
+
+        // 2x2 stride-2 avg_pool preserves exact left-to-right row-major addition order (even under cancellation).
+        let cancel = [
+            1e20f32, 1.0, 1e20, 1.0, 1e20, 1.0, 1e20, 1.0, // row 0 (4 SIMD lanes)
+            -1e20, 1.0, -1e20, 1.0, -1e20, 1.0, -1e20, 1.0, // row 1
+        ];
+        let mut cancel_out = [0.0f32; 4];
+        avg_pool2d_nchw(&cancel, [1, 1, 2, 8], &Pool2dSpec::new([2, 2], [2, 2], [0, 0]), &mut cancel_out);
+        assert_eq!(cancel_out, [0.25, 0.25, 0.25, 0.25]);
     }
 }

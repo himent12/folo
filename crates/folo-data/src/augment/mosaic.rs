@@ -123,12 +123,13 @@ impl MixUpConfig {
     }
 }
 
-/// Samples `Gamma(shape, 1)` deterministically using Marsaglia–Tsang's method.
-fn sample_gamma(shape: f64, rng: &mut Rng) -> f64 {
+/// Samples `ln(Gamma(shape, 1))` deterministically using Marsaglia–Tsang's method so tiny `shape` values
+/// never underflow to zero before Beta normalization.
+fn sample_log_gamma(shape: f64, rng: &mut Rng) -> f64 {
     if shape < 1.0 {
-        let g = sample_gamma(shape + 1.0, rng);
+        let log_g = sample_log_gamma(shape + 1.0, rng);
         let u = (1.0 - rng.f64()).max(f64::MIN_POSITIVE);
-        return g * u.powf(1.0 / shape);
+        return log_g + u.ln() / shape;
     }
     let d = shape - 1.0 / 3.0;
     let c = (1.0 / (9.0 * d)).sqrt();
@@ -141,30 +142,38 @@ fn sample_gamma(shape: f64, rng: &mut Rng) -> f64 {
         let v3 = v * v * v;
         let u = 1.0 - rng.f64();
         let x2 = x * x;
-        if u < 1.0 - 0.0331 * x2 * x2 {
-            return d * v3;
-        }
-        if u.ln() < 0.5 * x2 + d * (1.0 - v3 + v3.ln()) {
-            return d * v3;
+        if u < 1.0 - 0.0331 * x2 * x2 || u.ln() < 0.5 * x2 + d * (1.0 - v3 + v3.ln()) {
+            return (d * v3).ln();
         }
     }
 }
 
-/// Samples a symmetric `Beta(alpha, alpha)` weight in `[0.0, 1.0]` deterministically.
+/// Samples a symmetric `Beta(alpha, alpha)` weight in `[0.0, 1.0]` deterministically in log-space.
 fn sample_beta_sym(alpha: f32, rng: &mut Rng) -> f32 {
     let a = alpha as f64;
-    let x = sample_gamma(a, rng);
-    let y = sample_gamma(a, rng);
-    let sum = x + y;
-    if sum > 0.0 && sum.is_finite() { (x / sum).clamp(0.0, 1.0) as f32 } else { 0.5 }
+    let lx = sample_log_gamma(a, rng);
+    let ly = sample_log_gamma(a, rng);
+    let diff = lx - ly;
+    if diff.is_nan() {
+        return 0.5;
+    }
+    let r = if diff >= 0.0 {
+        1.0 / (1.0 + (-diff).exp())
+    } else {
+        let e = diff.exp();
+        e / (1.0 + e)
+    };
+    r.clamp(0.0, 1.0) as f32
 }
 
 /// Blends `other` into `s` with an explicit weight `ratio ∈ [0, 1]` (`s = ratio * s + (1 - ratio) * other`),
 /// preserves boxes from both samples, clamps out-of-bounds boxes to `[0, 1]`, and drops degenerate,
 /// non-finite, or `filter`-rejected boxes.
 ///
-/// When `ratio == 1.0`, only host boxes are kept (clamped/sanitised); when `ratio == 0.0`, only donor boxes
-/// are kept. Both images must have the same dimensions.
+/// Pixel blending and endpoint box selection both use the rounded 8-bit fixed-point weight
+/// `wa = (ratio.clamp(0, 1) * 256).round()`: when `wa == 256` (`ratio >= 255.5 / 256`), only host pixels and
+/// clamped host boxes are kept; when `wa == 0` (`ratio < 0.5 / 256`), only donor pixels and clamped donor
+/// boxes are kept. Both images must have the same dimensions.
 ///
 /// # Panics
 /// If image dimensions do not match or image buffers are shorter than `width * height * 3`.
@@ -192,7 +201,9 @@ pub fn mixup_with_ratio(s: &mut Sample, other: &Sample, ratio: f32, filter: Opti
 }
 
 /// Deterministic `Beta(cfg.alpha, cfg.alpha)` MixUp blending `other` into `s` with box clamping and optional
-/// [`BoxFilter`] filtering. Returns the sampled blend weight `r ∈ [0, 1]` (`1.0` no-op if `cfg` is invalid).
+/// [`BoxFilter`] filtering. Returns the unrounded sampled blend weight `r ∈ [0, 1]` (`1.0` no-op if `cfg` is
+/// invalid); pixel blending and endpoint box selection use the rounded 8-bit weight described in
+/// [`mixup_with_ratio`].
 ///
 /// Both images must have the same dimensions.
 pub fn mixup_beta(s: &mut Sample, other: &Sample, cfg: &MixUpConfig, rng: &mut Rng) -> f32 {
@@ -297,6 +308,15 @@ mod tests {
         let mut rng = Rng::new(123);
         let mean: f64 = (0..2000).map(|_| sample_beta_sym(0.5, &mut rng) as f64).sum::<f64>() / 2000.0;
         assert!((mean - 0.5).abs() < 0.05, "unexpected Beta(0.5, 0.5) mean {mean}");
+
+        // Tiny alpha concentrates near endpoints (0 and 1) with no artificial underflow spike at 0.5.
+        let mut rng_tiny = Rng::new(123);
+        let tiny_samples: Vec<f32> = (0..2000).map(|_| sample_beta_sym(0.0005, &mut rng_tiny)).collect();
+        let mid_count = tiny_samples.iter().filter(|&&v| (0.1..0.9).contains(&v)).count();
+        assert!(
+            mid_count < 40,
+            "expected Beta(0.0005, 0.0005) near endpoints, got {mid_count}/2000 in (0.1, 0.9)"
+        );
 
         // Invalid alpha is a no-op returning 1.0.
         for bad_alpha in [0.0f32, -2.0, f32::NAN, f32::INFINITY] {

@@ -88,8 +88,8 @@ fn bilinear_axis(in_len: usize, out_len: usize, align_corners: bool) -> Bilinear
         let real = if align_corners { o as f64 * scale } else { (o as f64 + 0.5) * scale - 0.5 };
         let clamped = real.clamp(0.0, last as f64);
         let lo = clamped.floor() as usize;
-        let hi = (lo + 1).min(last);
         let frac = (clamped - lo as f64) as f32;
+        let hi = if frac == 0.0 { lo } else { (lo + 1).min(last) };
         i0.push(lo);
         i1.push(hi);
         w.push(frac);
@@ -330,10 +330,15 @@ mod tests {
             assert!((up[12 + x] - (expected_row0[x] + 8.0)).abs() < 1e-6);
         }
 
-        // 1x1 -> 3x3 and empty tensors.
+        // 1x1 -> 3x3, aligned extreme endpoints (`[-f32::MAX, f32::MAX]` must not yield NaN), and empty tensors.
         let mut up1 = vec![0.0f32; 9];
         upsample_bilinear2d_nchw(&[-1.25], [1, 1, 1, 1], [3, 3], true, &mut up1);
         assert!(up1.iter().all(|&v| v == -1.25));
+        let extreme = [-f32::MAX, f32::MAX];
+        let mut ext_out = [0.0f32; 3];
+        upsample_bilinear2d_nchw(&extreme, [1, 1, 1, 2], [1, 3], true, &mut ext_out);
+        assert_eq!(ext_out[0], -f32::MAX);
+        assert_eq!(ext_out[2], f32::MAX);
         let mut empty = Vec::new();
         upsample_bilinear2d_nchw(&[], [0, 2, 4, 4], [8, 8], false, &mut empty);
     }

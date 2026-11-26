@@ -118,6 +118,14 @@ fn q8_blocks_and_dot_q4_q8_match_scalar_bit_exact() {
         dot_q4_q8(&extreme_w, &extreme_x).to_bits(),
         dot_q4_q8_scalar(&extreme_w, &extreme_x).to_bits()
     );
+
+    // Tiny non-zero blocks (`1e-22`) must not prematurely underflow `wb.scale * xb.scale` to zero.
+    let tiny_v = [1e-22f32; BLOCK_SIZE];
+    let tiny_w = quantize_q4(&tiny_v);
+    let tiny_x = quantize_q8_blocks(&tiny_v);
+    let tiny_dot = dot_q4_q8(&tiny_w, &tiny_x);
+    assert!(tiny_dot > 0.0 && tiny_dot.is_finite(), "expected non-zero subnormal dot, got {tiny_dot}");
+    assert_eq!(tiny_dot.to_bits(), dot_q4_q8_scalar(&tiny_w, &tiny_x).to_bits());
 }
 
 #[test]
