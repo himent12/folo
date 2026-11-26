@@ -181,6 +181,7 @@ export default function XYChart(props: XYChartProps) {
   const inPlot = (px: number) => px >= m.peek().left - 8 && px <= width.peek() - m.peek().right + 8;
   function apply(a: PinAction) {
     if (a.kind === 'clear') {
+      spoken.set('');
       cursor.set(null);
       pinned.set(false);
     } else if (a.kind === 'set' && inPlot(a.px)) {
@@ -189,6 +190,10 @@ export default function XYChart(props: XYChartProps) {
       tapHint.set(false);
     }
   }
+  // A cursor cleared elsewhere drops the pin state too.
+  effect(() => {
+    if (cursor.get() === null) pinned.set(false);
+  });
   effect(() => {
     if (!pinned.get()) return;
     const outside = (e: PointerEvent) => {
@@ -196,7 +201,10 @@ export default function XYChart(props: XYChartProps) {
       if (svg && !svg.contains(e.target as Node)) apply({ kind: 'clear' });
     };
     const esc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') apply({ kind: 'clear' });
+      if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('dialog[open]')) {
+        e.preventDefault();
+        apply({ kind: 'clear' });
+      }
     };
     document.addEventListener('pointerdown', outside, true);
     document.addEventListener('keydown', esc);
@@ -209,6 +217,7 @@ export default function XYChart(props: XYChartProps) {
     rectCache.clear();
   }
   function onpointerdown(e: PointerEvent) {
+    spoken.set('');
     if (!touchy(e)) return;
     rectCache.clear();
     const { px, py } = local(e);
@@ -225,6 +234,7 @@ export default function XYChart(props: XYChartProps) {
     gesture = null;
   }
   function onpointermove(e: PointerEvent) {
+    spoken.set('');
     const { px, py } = local(e);
     if (touchy(e)) {
       if (gesture) apply(gesture.move(px, py));
@@ -239,6 +249,7 @@ export default function XYChart(props: XYChartProps) {
   }
   const spoken = signal('');
   function onkeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
     const st = stops.peek();
     if (!st.length) return;
     const c = cursor.peek();
@@ -249,7 +260,11 @@ export default function XYChart(props: XYChartProps) {
     else if (e.key === 'Home') j = 0;
     else if (e.key === 'End') j = st.length - 1;
     else if (e.key === 'Escape') {
+      if (c === null && !pinned.peek()) return;
+      e.preventDefault();
       cursor.set(null);
+      pinned.set(false);
+      spoken.set('');
       return;
     } else return;
     e.preventDefault();
@@ -399,6 +414,7 @@ export default function XYChart(props: XYChartProps) {
             onkeydown={onkeydown}
             onfocus={onfocus}
             onblur={() => {
+              spoken.set('');
               keyFocus.set(false);
               if (!pinned.peek()) cursor.set(null);
             }}

@@ -117,4 +117,64 @@ describe('XYChart', () => {
       c.unmount();
     }
   });
+
+  it('ignores modifier-held arrows, consumes Escape only while active, and clears speech on blur/pointermove', () => {
+    const { target, c, svg } = mount();
+    try {
+      const live = target.querySelector('[aria-live]')!;
+      const altLeft = new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true });
+      svg.dispatchEvent(altLeft);
+      flush();
+      expect(altLeft.defaultPrevented).toBe(false);
+      expect(target.querySelector('.out')!.textContent).toBe('idle');
+
+      const idleEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      svg.dispatchEvent(idleEsc);
+      flush();
+      expect(idleEsc.defaultPrevented).toBe(false);
+
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      flush();
+      expect(target.querySelector('.out')!.textContent).toBe('x=0');
+      expect(live.textContent).not.toBe('');
+
+      const activeEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      svg.dispatchEvent(activeEsc);
+      flush();
+      expect(activeEsc.defaultPrevented).toBe(true);
+      expect(target.querySelector('.out')!.textContent).toBe('idle');
+      expect(live.textContent).toBe('');
+
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+      flush();
+      expect(live.textContent).not.toBe('');
+      svg.dispatchEvent(new FocusEvent('blur'));
+      flush();
+      expect(live.textContent).toBe('');
+      expect(target.querySelector('.out')!.textContent).toBe('idle');
+
+      // Touch-pinned cursor clears on Escape with defaultPrevented, but ignores Escape behind an open dialog.
+      svg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 200, clientY: 80, bubbles: true }));
+      svg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 200, clientY: 80, bubbles: true }));
+      flush();
+      expect(target.querySelector('.cursor.pinned')).toBeTruthy();
+      const dlg = document.createElement('dialog');
+      dlg.setAttribute('open', '');
+      document.body.appendChild(dlg);
+      const blockedEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+      document.dispatchEvent(blockedEsc);
+      flush();
+      expect(blockedEsc.defaultPrevented).toBe(false);
+      expect(target.querySelector('.cursor.pinned')).toBeTruthy();
+      dlg.remove();
+
+      const esc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+      document.dispatchEvent(esc);
+      flush();
+      expect(esc.defaultPrevented).toBe(true);
+      expect(target.querySelector('.cursor')).toBeNull();
+    } finally {
+      c.unmount();
+    }
+  });
 });

@@ -18,7 +18,7 @@ import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
 import ChevronsLeft from '$icons/chevrons-left';
 import ChevronsRight from '$icons/chevrons-right';
-import { computed, createUniqueId, css, defaults, effect, Index, onCleanup, signal, tick } from 'fw';
+import { computed, createUniqueId, css, defaults, effect, Index, onCleanup, signal, tick, untrack } from 'fw';
 import { classColor } from '$lib/design/tokens';
 import { prefs } from '$lib/prefs';
 import { overviewGeometry, overviewHit, overviewWindow, pageFit, pageRange } from './cmOverview';
@@ -101,6 +101,18 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
 
   const names = computed(() => [...p.classes, 'background']);
   const n = computed(() => names.get().length);
+  // Keep the roving tab stop and active readout inside the grid if the class list shrinks.
+  effect(() => {
+    const max = Math.max(0, n.get() - 1);
+    untrack(() => {
+      const f = focus.peek();
+      if (f.r > max || f.c > max) focus.set({ r: Math.min(f.r, max), c: Math.min(f.c, max) });
+      const h = hovered.peek();
+      if (h && (h.r > max || h.c > max)) hovered.set(null);
+      const pin = pinned.peek();
+      if (pin && (pin.r > max || pin.c > max)) pinned.set(null);
+    });
+  });
   const rowSums = computed(() => p.matrix.map((row) => row.reduce((a, b) => a + b, 0)));
   const norm = (r: number, c: number) => {
     const s = rowSums.get()[r] ?? 0;
@@ -260,15 +272,28 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
   }
 
   function onkeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented || e.altKey) return;
     const max = n.peek() - 1;
     let { r, c } = focus.peek();
-    if (e.key === 'ArrowRight') c = Math.min(max, c + 1);
-    else if (e.key === 'ArrowLeft') c = Math.max(0, c - 1);
-    else if (e.key === 'ArrowDown') r = Math.min(max, r + 1);
-    else if (e.key === 'ArrowUp') r = Math.max(0, r - 1);
-    else if (e.key === 'Home') c = 0;
-    else if (e.key === 'End') c = max;
-    else return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (e.key === 'Escape') {
+      if (mod || (pinned.peek() === null && hovered.peek() === null)) return;
+      e.preventDefault();
+      pinned.set(null);
+      hovered.set(null);
+      return;
+    }
+    if (!mod && e.key === 'ArrowRight') c = Math.min(max, c + 1);
+    else if (!mod && e.key === 'ArrowLeft') c = Math.max(0, c - 1);
+    else if (!mod && e.key === 'ArrowDown') r = Math.min(max, r + 1);
+    else if (!mod && e.key === 'ArrowUp') r = Math.max(0, r - 1);
+    else if (e.key === 'Home') {
+      c = 0;
+      if (mod) r = 0;
+    } else if (e.key === 'End') {
+      c = max;
+      if (mod) r = max;
+    } else return;
     e.preventDefault();
     focus.set({ r, c });
     root.querySelector<HTMLElement>(`[data-r="${r}"][data-c="${c}"]`)?.focus();

@@ -6,7 +6,7 @@
  * outside or Escape (./pin). Keyboard: arrow keys, Home and End.
  */
 import { scaleLinear } from 'd3-scale';
-import { computed, css, defaults, effect, Index, signal } from 'fw';
+import { computed, css, defaults, effect, Index, signal, untrack } from 'fw';
 import { ticks as niceTicks } from './downsample';
 import { binAt, categoryBars, edgeX } from './histogram';
 import { TouchGesture, type PinAction } from './pin';
@@ -115,6 +115,17 @@ export default function Histogram(props: HistogramProps) {
       }
     }
   }
+  // Clear an out-of-bounds bin selection if the histogram's bin count shrinks.
+  effect(() => {
+    const n = p.counts.length;
+    untrack(() => {
+      const h = hovered.peek();
+      if (h !== null && h >= n) {
+        hovered.set(null);
+        pinned.set(false);
+      }
+    });
+  });
   effect(() => {
     if (!pinned.get()) return;
     const outside = (e: PointerEvent) => {
@@ -122,7 +133,10 @@ export default function Histogram(props: HistogramProps) {
       if (svg && !svg.contains(e.target as Node)) apply({ kind: 'clear' });
     };
     const esc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') apply({ kind: 'clear' });
+      if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('dialog[open]')) {
+        e.preventDefault();
+        apply({ kind: 'clear' });
+      }
     };
     document.addEventListener('pointerdown', outside, true);
     document.addEventListener('keydown', esc);
@@ -166,15 +180,19 @@ export default function Histogram(props: HistogramProps) {
     if (!touchy(e) && !pinned.peek()) hovered.set(null);
   }
   function onkeydown(e: KeyboardEvent) {
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey) return;
     const n = p.counts.length;
     if (!n) return;
-    const i = hovered.peek() ?? firstBin.peek();
-    let j = i;
-    if (e.key === 'ArrowRight') j = Math.min(n - 1, i + 1);
-    else if (e.key === 'ArrowLeft') j = Math.max(0, i - 1);
+    const cur = hovered.peek();
+    const step = e.shiftKey ? 5 : 1;
+    let j: number;
+    if (e.key === 'ArrowRight') j = cur === null ? firstBin.peek() : Math.min(n - 1, cur + step);
+    else if (e.key === 'ArrowLeft') j = cur === null ? n - 1 : Math.max(0, cur - step);
     else if (e.key === 'Home') j = 0;
     else if (e.key === 'End') j = n - 1;
     else if (e.key === 'Escape') {
+      if (cur === null && !pinned.peek()) return;
+      e.preventDefault();
       hovered.set(null);
       pinned.set(false);
       return;

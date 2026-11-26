@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { flush as flushSync } from 'fw';
+import { flush as flushSync, signal } from 'fw';
 import { afterEach, describe, expect, it } from 'vitest';
 import { render as mountFw, type Rendered } from '../../../framework/testing';
 import Histogram, { type HistogramProps } from './Histogram.tsx';
@@ -68,5 +68,60 @@ describe('Histogram', () => {
     svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
     flushSync();
     expect(readout()).toBe('100 boxes');
+  });
+
+  it('consumes Escape only while active, re-enters cleanly on arrows after Escape, ignores modifier arrows, and clears out-of-bounds selection when bins shrink', () => {
+    const counts = signal([0, 30, 50, 20]);
+    const edges = signal([0, 0.02, 0.05, 0.1, 1]);
+    const proto = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 400 });
+    try {
+      target = document.createElement('div');
+      document.body.appendChild(target);
+      c = mountFw(() => <Histogram edges={edges.get()} counts={counts.get()} label="Box sizes" unit="boxes" />, target);
+      window.dispatchEvent(new Event('resize'));
+      target.querySelector('.hist')?.dispatchEvent(new Event('resize'));
+      flushSync();
+    } finally {
+      if (proto) Object.defineProperty(HTMLElement.prototype, 'clientWidth', proto);
+      else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+    }
+
+    const svg = target.querySelector<SVGElement>('svg[aria-roledescription=chart]')!;
+    // Idle Escape does not preventDefault.
+    const idleEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    svg.dispatchEvent(idleEsc);
+    flushSync();
+    expect(idleEsc.defaultPrevented).toBe(false);
+
+    // Modifier-held arrow is ignored.
+    const altLeft = new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true });
+    svg.dispatchEvent(altLeft);
+    flushSync();
+    expect(altLeft.defaultPrevented).toBe(false);
+    expect(readout()).toBe('100 boxes');
+
+    // ArrowRight from idle lands on the first non-empty bin (30 boxes) without skipping it.
+    svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(readout()).toContain('30 boxes');
+
+    // Escape while active consumes the event.
+    const activeEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    svg.dispatchEvent(activeEsc);
+    flushSync();
+    expect(activeEsc.defaultPrevented).toBe(true);
+    expect(readout()).toBe('100 boxes');
+
+    // ArrowLeft from idle lands on the last bin (20 boxes).
+    svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(readout()).toContain('20 boxes');
+
+    // Shrinking the bin count below the hovered index clears the selection instead of reading out of bounds.
+    edges.set([0, 0.5, 1]);
+    counts.set([10, 15]);
+    flushSync();
+    expect(readout()).toBe('25 boxes');
   });
 });

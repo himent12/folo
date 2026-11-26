@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { flush as flushSync } from 'fw';
+import { flush as flushSync, signal } from 'fw';
 import { describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
 import ConfusionMatrix, { type ConfusionMatrixApi, type ConfusionMatrixProps } from './ConfusionMatrix';
@@ -115,6 +115,72 @@ describe('ConfusionMatrix labels', () => {
       target.remove();
       vi.restoreAllMocks();
       vi.useRealTimers();
+    }
+  });
+
+  it('supports Ctrl+Home/Ctrl+End, consumes Escape only while pinned/hovered, ignores Alt+Arrow, and clamps roving focus when classes shrink', () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const classes = signal(['cat', 'dog', 'bird']);
+    const matrix = signal([
+      [8, 1, 0, 1],
+      [1, 7, 1, 1],
+      [0, 1, 9, 0],
+      [1, 0, 0, 0],
+    ]);
+    const r = render(() => <ConfusionMatrix classes={classes.get()} matrix={matrix.get()} minCell={32} />, target);
+    try {
+      flushSync();
+      const grid = target.querySelector<HTMLElement>('.cm')!;
+
+      // Alt+ArrowLeft is ignored so browser back navigation is never hijacked.
+      const altLeft = new KeyboardEvent('keydown', { key: 'ArrowLeft', altKey: true, bubbles: true, cancelable: true });
+      grid.dispatchEvent(altLeft);
+      flushSync();
+      expect(altLeft.defaultPrevented).toBe(false);
+
+      // Idle Escape is not consumed.
+      const idleEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      grid.dispatchEvent(idleEsc);
+      flushSync();
+      expect(idleEsc.defaultPrevented).toBe(false);
+
+      // Ctrl+End jumps to the bottom-right corner cell (3, 3) and pins it on focus.
+      grid.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', ctrlKey: true, bubbles: true, cancelable: true }));
+      flushSync();
+      const lastCell = target.querySelector<HTMLElement>('[data-r="3"][data-c="3"]')!;
+      expect(lastCell.tabIndex).toBe(0);
+      lastCell.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      flushSync();
+      expect(lastCell.classList.contains('pin')).toBe(true);
+
+      // Escape clears the active pin/readout and consumes the event.
+      const activeEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      grid.dispatchEvent(activeEsc);
+      flushSync();
+      expect(activeEsc.defaultPrevented).toBe(true);
+      expect(target.querySelectorAll('.cell.pin')).toHaveLength(0);
+
+      // Shrinking the class list clamps roving focus back inside the new grid so a tabbable cell always exists.
+      lastCell.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      flushSync();
+      classes.set(['cat']);
+      matrix.set([
+        [5, 1],
+        [0, 0],
+      ]);
+      flushSync();
+      expect(target.querySelector<HTMLElement>('[data-r="1"][data-c="1"]')!.tabIndex).toBe(0);
+      expect(target.querySelectorAll('.cell[tabindex="0"]')).toHaveLength(1);
+      expect(target.querySelectorAll('.cell.pin')).toHaveLength(0);
+
+      // Ctrl+Home jumps back to (0, 0).
+      grid.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', ctrlKey: true, bubbles: true, cancelable: true }));
+      flushSync();
+      expect(target.querySelector<HTMLElement>('[data-r="0"][data-c="0"]')!.tabIndex).toBe(0);
+    } finally {
+      r.unmount();
+      target.remove();
     }
   });
 });
