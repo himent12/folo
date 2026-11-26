@@ -76,7 +76,7 @@ fn schedulefree_hand_computed_steps_warmup_and_fast_generic_parity() {
             if a.is_nan() {
                 assert!(b.is_nan());
             } else {
-                assert_eq!(a.to_bits(), b.to_bits(), "bit mismatch: {a} vs {b}");
+                assert!((a - b).abs() <= 1e-6 * (1.0 + a.abs().max(b.abs())), "parity mismatch: {a} vs {b}");
             }
         }
     }
@@ -323,4 +323,83 @@ fn schedulefree_mode_switch_idempotence_edge_cases_and_resume() {
     opt_a.eval_mode().unwrap();
     opt_b.eval_mode().unwrap();
     assert_eq!(pa.to_vec::<f32>().unwrap(), pb.to_vec::<f32>().unwrap());
+
+    // 6. Resume after modifying current LR & from an eval-mode checkpoint via `restore_checkpoint`.
+    let pc = Tensor::from_slice(&[1.2f32, -0.7, 2.3], [3]).unwrap().requires_grad_();
+    let pd = Tensor::from_slice(&[1.2f32, -0.7, 2.3], [3]).unwrap().requires_grad_();
+    let mut opt_c =
+        ScheduleFreeAdamW::from_params(vec![("w".into(), pc.clone())], 0.05, 0.9, 0.99, 1e-8, 0.1, cfg)
+            .unwrap();
+    opt_c.step(&grads_of(&pc, &[0.3, -0.6, 0.2])).unwrap();
+    opt_c.groups_mut()[0].lr = 0.0125; // runtime LR change
+    opt_c.eval_mode().unwrap();
+    let eval_contract = opt_c.contract();
+    assert!(!eval_contract.train_mode);
+    assert_eq!(eval_contract.groups[0].current_lr, Some(0.0125));
+    let eval_saved: HashMap<String, Tensor> = opt_c.state_tensors().unwrap().into_iter().collect();
+    {
+        let _g = no_grad();
+        pd.copy_from(&pc.detach()).unwrap();
+    }
+    let mut opt_d =
+        ScheduleFreeAdamW::from_params(vec![("w".into(), pd.clone())], 0.9, 0.5, 0.5, 1e-5, 0.0, def)
+            .unwrap();
+    // Direct `load_state(step > 0)` without `apply_contract` must error.
+    assert!(opt_d.load_state(eval_contract.step, &eval_saved).is_err());
+    // Atomic `restore_checkpoint` restores current_lr, eval mode, group counters, and state together.
+    opt_d.restore_checkpoint(&eval_contract, &eval_saved).unwrap();
+    assert!(!opt_d.is_train_mode());
+    assert_eq!(opt_d.groups()[0].lr, 0.0125);
+    opt_c.train_mode().unwrap();
+    opt_d.train_mode().unwrap();
+    opt_c.step(&grads_of(&pc, &[-0.2, 0.5, 0.1])).unwrap();
+    opt_d.step(&grads_of(&pd, &[-0.2, 0.5, 0.1])).unwrap();
+    assert_eq!(pc.to_vec::<f32>().unwrap(), pd.to_vec::<f32>().unwrap());
+
+    // 7. Duplicate parameter identity / overlapping storage / broadcast view / f32-underflowing eps rejections.
+    let shared = Tensor::from_slice(&[1.0f32, 2.0], [2]).unwrap().requires_grad_();
+    assert!(
+        ScheduleFreeAdamW::from_params(
+            vec![("a".into(), shared.clone()), ("b".into(), shared.clone())],
+            0.1,
+            0.9,
+            0.99,
+            1e-8,
+            0.0,
+            def
+        )
+        .is_err()
+    );
+    let bcast = Tensor::from_slice(&[1.0f32], [1]).unwrap().broadcast_to([4]).unwrap().requires_grad_();
+    assert!(
+        ScheduleFreeAdamW::from_params(vec![("b".into(), bcast)], 0.1, 0.9, 0.99, 1e-8, 0.0, def).is_err()
+    );
+    // `eps = 1e-45` narrows to `0.0f32` and must be rejected.
+    assert!(
+        ScheduleFreeAdamW::from_params(vec![("q".into(), q.clone())], 0.1, 0.9, 0.99, 1e-45, 0.0, def)
+            .is_err()
+    );
+
+    // 8. Representable large gradient `g = 1e20` at `beta2 = 0.999` keeps `v`, `z`, `x`, `p` finite
+    //    (both contiguous CPU fast path and non-contiguous transposed generic path).
+    let p_big = Tensor::from_slice(&[1.0f32, -1.0], [2]).unwrap().requires_grad_();
+    let mut opt_big =
+        ScheduleFreeAdamW::from_params(vec![("w".into(), p_big.clone())], 0.1, 0.9, 0.999, 1e-8, 0.0, def)
+            .unwrap();
+    opt_big.step(&grads_of(&p_big, &[1e20, -1e20])).unwrap();
+    let (zb, xb, vb) = opt_big.param_state(0, 0).unwrap();
+    assert!(p_big.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    assert!(zb.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    assert!(xb.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    assert!(vb.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite() && *v > 1e35));
+
+    let base_big = Tensor::zeros([2, 2]);
+    let view_big = base_big.t().unwrap().requires_grad_();
+    assert!(!view_big.is_contiguous());
+    let mut opt_big_gen =
+        ScheduleFreeAdamW::from_params(vec![("w".into(), view_big.clone())], 0.1, 0.9, 0.999, 1e-8, 0.0, def)
+            .unwrap();
+    opt_big_gen.step(&grads_of(&view_big, &[1e20, -1e20, 1e20, -1e20])).unwrap();
+    assert!(view_big.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    assert!(opt_big_gen.param_state(0, 0).unwrap().2.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
 }

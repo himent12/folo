@@ -1,21 +1,28 @@
-//! Karras-style Power-Law EMA decay schedule (Karras et al., CVPR 2024, EDM2):
+//! Power-Law EMA decay schedules:
 //!
-//! ```text
-//! decay(step) = min(1 - (1 + step / t0)^(-gamma), max_decay)
-//! ```
-//!
-//! Evaluated cancellation-free in `f64` via `-(-gamma * (step / t0).ln_1p()).exp_m1()`, preserving full
-//! 53-bit precision for both tiny `step / t0` and huge step counts.
+//! 1. [`PowerLawEmaSchedule`]: inverse-power decay ramp
+//!    ```text
+//!    decay(step) = min(1 - (1 + step / t0)^(-gamma), max_decay)
+//!    ```
+//!    evaluated cancellation-free via `-(-gamma * (step / t0).ln_1p()).exp_m1()`.
+//! 2. [`Edm2PowerEmaSchedule`]: Karras et al. (CVPR 2024, EDM2 `phema.py`) exact power-function EMA
+//!    recurrence
+//!    ```text
+//!    decay(step) = (1 - 1 / (step + t0))^(gamma + 1)    for step + t0 > 1, else 0
+//!    ```
+//!    whose discrete impulse-response profile has asymptotic relative width
+//!    `sigma_rel = [(gamma + 1)(gamma + 3)]^(-1/2)` (inverted via `gamma = hypot(1, 1 / sigma_rel) - 2`).
 
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
 
-/// Default Karras-style Power-Law EMA exponent (`gamma = 6.94`, corresponding to relative width
-/// `sigma_rel ≈ 0.113`).
-pub const POWER_LAW_EMA_DEFAULT_GAMMA: f64 = 6.94;
-/// Default Karras-style Power-Law EMA warmup scale `t0 = 10.0`.
+/// Default inverse-power EMA ramp exponent (`gamma = 1.0`, harmonic incoming weight `1 / (1 + step / t0)`).
+pub const POWER_LAW_EMA_DEFAULT_GAMMA: f64 = 1.0;
+/// Default inverse-power EMA ramp scale `t0 = 10.0`.
 pub const POWER_LAW_EMA_DEFAULT_T0: f64 = 10.0;
+/// Default EDM2 power-function EMA exponent (`gamma = 6.94`, relative width `sigma_rel ≈ 0.113`).
+pub const EDM2_EMA_DEFAULT_GAMMA: f64 = 6.94;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,10 +37,11 @@ fn default_max_decay() -> f64 {
     1.0
 }
 
-/// Karras-style Power-Law EMA decay schedule: `decay(step) = min(1 - (1 + step / t0)^(-gamma), max_decay)`.
+/// Inverse-power EMA decay schedule: `decay(step) = min(1 - (1 + step / t0)^(-gamma), max_decay)`.
 ///
 /// At `step == 0`, returns `0.0`; as `step -> infinity`, approaches `max_decay` (default `1.0`)
-/// monotonically with polynomial tail decay governed by `gamma > 0` and time scale `t0 > 0`.
+/// monotonically with incoming weight `(1 + step / t0)^(-gamma)`. For Karras et al. (2024) EDM2
+/// relative-width parameterization (`sigma_rel`), see [`Edm2PowerEmaSchedule`].
 ///
 /// Deserialization validates all invariants (`t0 > 0`, `gamma > 0`, `max_decay in (0, 1]`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -59,13 +67,13 @@ impl Default for PowerLawEmaSchedule {
 }
 
 impl PowerLawEmaSchedule {
-    /// Construct an uncapped Karras-style Power-Law EMA schedule (`max_decay = 1.0`) with scale `t0 > 0`
-    /// and exponent `gamma > 0`.
+    /// Construct an uncapped inverse-power EMA schedule (`max_decay = 1.0`) with scale `t0 > 0` and
+    /// exponent `gamma > 0`.
     pub fn new(t0: f64, gamma: f64) -> Result<Self> {
         Self::with_max_decay(t0, gamma, 1.0)
     }
 
-    /// Construct a Karras-style Power-Law EMA schedule capped at `max_decay in (0, 1]`.
+    /// Construct an inverse-power EMA schedule capped at `max_decay in (0, 1]`.
     pub fn with_max_decay(t0: f64, gamma: f64, max_decay: f64) -> Result<Self> {
         if !(t0.is_finite() && t0 > 0.0) {
             return Err(Error::Invalid(format!("PowerLawEmaSchedule: t0 must be finite and > 0, got {t0}")));
@@ -81,25 +89,6 @@ impl PowerLawEmaSchedule {
             )));
         }
         Ok(Self { t0, gamma, max_decay })
-    }
-
-    /// Construct from Karras et al. (2024) relative profile width `sigma_rel in (0, 1 / sqrt(3))`,
-    /// solving `sigma_rel = [(gamma + 1)(gamma + 3)]^(-1/2)` for `gamma = sqrt(1 + sigma_rel^-2) - 2`.
-    pub fn from_relative_width(t0: f64, sigma_rel: f64) -> Result<Self> {
-        let max_sigma = 1.0 / 3.0f64.sqrt();
-        if !(sigma_rel.is_finite() && sigma_rel > 0.0 && sigma_rel < max_sigma) {
-            return Err(Error::Invalid(format!(
-                "PowerLawEmaSchedule: sigma_rel must be finite and in (0, 1/sqrt(3)), got {sigma_rel}"
-            )));
-        }
-        let inv_s = 1.0 / sigma_rel;
-        let gamma = (1.0 + inv_s * inv_s).sqrt() - 2.0;
-        if !(gamma.is_finite() && gamma > 0.0) {
-            return Err(Error::Invalid(format!(
-                "PowerLawEmaSchedule: sigma_rel {sigma_rel} yields non-positive/non-finite gamma {gamma}"
-            )));
-        }
-        Self::new(t0, gamma)
     }
 
     /// Time-scale / warmup constant `t0 > 0`.
@@ -120,12 +109,6 @@ impl PowerLawEmaSchedule {
         self.max_decay
     }
 
-    /// Asymptotic relative profile width `sigma_rel = [(gamma + 1)(gamma + 3)]^(-1/2)`.
-    #[inline]
-    pub fn relative_width(&self) -> f64 {
-        1.0 / ((self.gamma + 1.0) * (self.gamma + 3.0)).sqrt()
-    }
-
     /// Compute the EMA decay `min(1 - (1 + step / t0)^(-gamma), max_decay)` at `step`.
     #[inline]
     pub fn decay_at(&self, step: u64) -> f64 {
@@ -139,9 +122,115 @@ impl PowerLawEmaSchedule {
     }
 }
 
-/// Evaluate Karras-style Power-Law EMA decay `1 - (1 + step / t0)^(-gamma)` directly.
+/// Evaluate inverse-power EMA decay `1 - (1 + step / t0)^(-gamma)` directly.
 pub fn power_law_ema_decay(step: u64, t0: f64, gamma: f64) -> Result<f64> {
     Ok(PowerLawEmaSchedule::new(t0, gamma)?.decay_at(step))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Edm2PowerEmaScheduleRaw {
+    gamma: f64,
+    #[serde(default)]
+    t0: f64,
+}
+
+/// Karras et al. (CVPR 2024, EDM2 `phema.py`) power-function EMA decay schedule:
+///
+/// ```text
+/// decay(step) = (1 - 1 / (step + t0))^(gamma + 1)    for step + t0 > 1, else 0
+/// ```
+///
+/// Its discrete impulse-response profile over `1..=T` (with `t0 = 0`) has asymptotic relative standard
+/// deviation `sigma_rel = [(gamma + 1)(gamma + 3)]^(-1/2)`.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "Edm2PowerEmaScheduleRaw")]
+pub struct Edm2PowerEmaSchedule {
+    gamma: f64,
+    t0: f64,
+}
+
+impl TryFrom<Edm2PowerEmaScheduleRaw> for Edm2PowerEmaSchedule {
+    type Error = Error;
+
+    fn try_from(raw: Edm2PowerEmaScheduleRaw) -> Result<Self> {
+        Self::new(raw.gamma, raw.t0)
+    }
+}
+
+impl Default for Edm2PowerEmaSchedule {
+    fn default() -> Self {
+        Self { gamma: EDM2_EMA_DEFAULT_GAMMA, t0: 0.0 }
+    }
+}
+
+impl Edm2PowerEmaSchedule {
+    /// Construct an EDM2 power-function EMA schedule with exponent `gamma > 0` and prior shift `t0 >= 0`.
+    pub fn new(gamma: f64, t0: f64) -> Result<Self> {
+        if !(gamma.is_finite() && gamma > 0.0) {
+            return Err(Error::Invalid(format!(
+                "Edm2PowerEmaSchedule: gamma must be finite and > 0, got {gamma}"
+            )));
+        }
+        if !(t0.is_finite() && t0 >= 0.0) {
+            return Err(Error::Invalid(format!(
+                "Edm2PowerEmaSchedule: t0 must be finite and >= 0, got {t0}"
+            )));
+        }
+        Ok(Self { gamma, t0 })
+    }
+
+    /// Construct from Karras et al. (2024) relative profile width `sigma_rel in (0, 1 / sqrt(3))`,
+    /// solving `sigma_rel = [(gamma + 1)(gamma + 3)]^(-1/2)` via overflow-safe
+    /// `gamma = hypot(1, 1 / sigma_rel) - 2`.
+    pub fn from_relative_width(sigma_rel: f64, t0: f64) -> Result<Self> {
+        let max_sigma = 1.0 / 3.0f64.sqrt();
+        if !(sigma_rel.is_finite() && sigma_rel > 0.0 && sigma_rel < max_sigma) {
+            return Err(Error::Invalid(format!(
+                "Edm2PowerEmaSchedule: sigma_rel must be finite and in (0, 1/sqrt(3)), got {sigma_rel}"
+            )));
+        }
+        let inv_s = 1.0 / sigma_rel;
+        let gamma = 1.0_f64.hypot(inv_s) - 2.0;
+        if !(gamma.is_finite() && gamma > 0.0) {
+            return Err(Error::Invalid(format!(
+                "Edm2PowerEmaSchedule: sigma_rel {sigma_rel} yields non-positive/non-finite gamma {gamma}"
+            )));
+        }
+        Self::new(gamma, t0)
+    }
+
+    /// Power-function exponent `gamma > 0`.
+    #[inline]
+    pub fn gamma(&self) -> f64 {
+        self.gamma
+    }
+
+    /// Prior shift `t0 >= 0`.
+    #[inline]
+    pub fn t0(&self) -> f64 {
+        self.t0
+    }
+
+    /// Asymptotic relative profile width `sigma_rel = [(gamma + 1)(gamma + 3)]^(-1/2)` (overflow-safe).
+    #[inline]
+    pub fn relative_width(&self) -> f64 {
+        1.0 / ((self.gamma + 1.0).sqrt() * (self.gamma + 3.0).sqrt())
+    }
+
+    /// Compute the EDM2 decay `(1 - 1 / (step + t0))^(gamma + 1)` for `step >= 1` (`0.0` if `step + t0 <= 1`).
+    #[inline]
+    pub fn decay_at(&self, step: u64) -> f64 {
+        if step == 0 {
+            return 0.0;
+        }
+        let denom = step as f64 + self.t0;
+        if denom <= 1.0 {
+            return 0.0;
+        }
+        let d = ((self.gamma + 1.0) * (-1.0 / denom).ln_1p()).exp();
+        if d.is_finite() { d.clamp(0.0, 1.0) } else { 0.0 }
+    }
 }
 
 #[cfg(test)]
@@ -180,12 +269,6 @@ mod tests {
         let extreme = PowerLawEmaSchedule::with_max_decay(1e-300, 5.0, 0.9999).unwrap();
         assert_eq!(extreme.decay_at(u64::MAX), 0.9999);
 
-        // EDM2 relative-width inversion round-trip.
-        for &sigma_rel in &[0.05f64, 0.10, 0.25, 0.5] {
-            let s = PowerLawEmaSchedule::from_relative_width(20.0, sigma_rel).unwrap();
-            assert!((s.relative_width() - sigma_rel).abs() < 1e-12);
-        }
-
         // Integration with ModelEma::update_with_power_law.
         let mut rng = Rng::seed(5);
         let src = Conv2d::new(Conv2dConfig::new(2, 3, 1), &mut rng);
@@ -216,12 +299,60 @@ mod tests {
             serde_json::from_str::<PowerLawEmaSchedule>(r#"{"t0": 10.0, "gamma": 2.0, "max_decay": 1.1}"#)
                 .is_err()
         );
-        assert!(PowerLawEmaSchedule::from_relative_width(10.0, 0.0).is_err());
-        assert!(PowerLawEmaSchedule::from_relative_width(10.0, 0.6).is_err());
         assert!(PowerLawEmaSchedule::new(f64::NAN, 2.0).is_err());
         assert!(PowerLawEmaSchedule::new(10.0, f64::INFINITY).is_err());
         assert!(ema.update_with_decay(&src, f64::NAN).is_err());
         assert!(ema.update_with_decay(&src, 1.1).is_err());
         assert!(ema.update_with_decay(&src, -0.01).is_err());
+    }
+
+    #[test]
+    fn edm2_power_ema_impulse_response_matches_relative_width() {
+        // Verify that the discrete impulse response of `Edm2PowerEmaSchedule` has empirical relative
+        // standard deviation `Std[t / T]` matching `sigma_rel` (Karras et al. CVPR 2024, EDM2 phema.py).
+        let steps = 2000usize;
+        for &sigma_rel in &[0.05f64, 0.10, 0.15] {
+            let sched = Edm2PowerEmaSchedule::from_relative_width(sigma_rel, 0.0).unwrap();
+            assert!((sched.relative_width() - sigma_rel).abs() < 1e-12);
+            // Roll out exact impulse-response weights w[k] for samples at t = 1..=steps.
+            let mut weights = vec![0.0f64; steps];
+            for t in 1..=steps {
+                let b = sched.decay_at(t as u64);
+                for w in &mut weights[..t - 1] {
+                    *w *= b;
+                }
+                weights[t - 1] = 1.0 - b;
+            }
+            let sum_w: f64 = weights.iter().sum();
+            assert!((sum_w - 1.0).abs() < 1e-12, "weights must sum to 1, got {sum_w}");
+            let mean: f64 =
+                weights.iter().enumerate().map(|(i, &w)| w * ((i + 1) as f64 / steps as f64)).sum();
+            let var: f64 = weights
+                .iter()
+                .enumerate()
+                .map(|(i, &w)| {
+                    let x = (i + 1) as f64 / steps as f64 - mean;
+                    w * x * x
+                })
+                .sum();
+            let empirical_sigma_rel = var.sqrt() / mean;
+            assert!(
+                (empirical_sigma_rel - sigma_rel).abs() < 1e-3,
+                "EDM2 impulse relative width (std/mean) for sigma_rel={sigma_rel}: empirical={empirical_sigma_rel}"
+            );
+        }
+
+        // Extreme sigma_rel = 1e-200 does not overflow `hypot` or `relative_width`.
+        let ultra = Edm2PowerEmaSchedule::from_relative_width(1e-200, 0.0).unwrap();
+        assert!(ultra.gamma().is_finite() && ultra.relative_width().is_finite());
+
+        // Serde round-trip & validation.
+        let s = Edm2PowerEmaSchedule::new(6.94, 10.0).unwrap();
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(serde_json::from_str::<Edm2PowerEmaSchedule>(&json).unwrap(), s);
+        assert!(Edm2PowerEmaSchedule::from_relative_width(0.0, 0.0).is_err());
+        assert!(Edm2PowerEmaSchedule::from_relative_width(0.6, 0.0).is_err());
+        assert!(Edm2PowerEmaSchedule::new(0.0, 0.0).is_err());
+        assert!(Edm2PowerEmaSchedule::new(5.0, -1.0).is_err());
     }
 }

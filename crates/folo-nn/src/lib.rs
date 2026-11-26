@@ -76,7 +76,8 @@ pub use layers::{
 };
 pub use module::{Forward, Layer, Mode, Module, NamedTensor, TensorKind};
 pub use power_ema::{
-    POWER_LAW_EMA_DEFAULT_GAMMA, POWER_LAW_EMA_DEFAULT_T0, PowerLawEmaSchedule, power_law_ema_decay,
+    EDM2_EMA_DEFAULT_GAMMA, Edm2PowerEmaSchedule, POWER_LAW_EMA_DEFAULT_GAMMA, POWER_LAW_EMA_DEFAULT_T0,
+    PowerLawEmaSchedule, power_law_ema_decay,
 };
 pub use sched::{
     DEFAULT_ONE_CYCLE_DIV_FACTOR, DEFAULT_ONE_CYCLE_PCT_START, DEFAULT_POLY_POWER, DEFAULT_RESTART_CYCLES,

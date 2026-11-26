@@ -336,12 +336,23 @@ impl<M: Module> ModelEma<M> {
         self.update_with_decay(source, d)
     }
 
-    /// Fold the current `source` weights into the average using a Karras-style [`crate::PowerLawEmaSchedule`]
+    /// Fold the current `source` weights into the average using a [`crate::PowerLawEmaSchedule`]
     /// evaluated at `updates + 1`.
     pub fn update_with_power_law(
         &mut self,
         source: &dyn Module,
         schedule: &crate::PowerLawEmaSchedule,
+    ) -> Result<()> {
+        let d = schedule.decay_at(self.updates + 1);
+        self.update_with_decay(source, d)
+    }
+
+    /// Fold the current `source` weights into the average using a Karras et al. (2024)
+    /// [`crate::Edm2PowerEmaSchedule`] evaluated at `updates + 1`.
+    pub fn update_with_edm2_power_law(
+        &mut self,
+        source: &dyn Module,
+        schedule: &crate::Edm2PowerEmaSchedule,
     ) -> Result<()> {
         let d = schedule.decay_at(self.updates + 1);
         self.update_with_decay(source, d)
