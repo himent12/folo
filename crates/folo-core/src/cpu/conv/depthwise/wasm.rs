@@ -71,7 +71,7 @@ pub(super) fn plan_wasm(g: &ConvGeom) -> WasmPlan {
     WasmPlan::Fallback
 }
 
-/// Dispatch the chosen Wasm SIMD128 depthwise plan.
+/// Dispatch the chosen overwriting Wasm SIMD128 depthwise plan.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_wasm_plan(
     plan: WasmPlan,
@@ -79,16 +79,13 @@ pub(super) fn run_wasm_plan(
     wk: &[f32],
     op: &mut [f32],
     g: &ConvGeom,
-    accumulate: bool,
     epi: Option<BiasAct<'_>>,
     pad: &mut Vec<f32>,
 ) {
     match plan {
-        WasmPlan::K3S1 { owp, wpd } => depthwise_k3s1_wasm(xp, wk, op, g, owp, wpd, accumulate, epi, pad),
-        WasmPlan::S1 { owp, wpd, pad_len } => {
-            depthwise_s1_wasm(xp, wk, op, g, owp, wpd, pad_len, accumulate, epi, pad)
-        }
-        WasmPlan::S2 { owp, pairs } => depthwise_s2_wasm(xp, wk, op, g, owp, pairs, accumulate, epi, pad),
+        WasmPlan::K3S1 { owp, wpd } => depthwise_k3s1_wasm(xp, wk, op, g, owp, wpd, epi, pad),
+        WasmPlan::S1 { owp, wpd, pad_len } => depthwise_s1_wasm(xp, wk, op, g, owp, wpd, pad_len, epi, pad),
+        WasmPlan::S2 { owp, pairs } => depthwise_s2_wasm(xp, wk, op, g, owp, pairs, epi, pad),
         WasmPlan::Fallback => unreachable!(),
     }
 }
@@ -219,29 +216,6 @@ pub(super) fn mul_add_stride2_wasm(dst: &mut [f32], src: &[f32], wv: f32) {
     }
 }
 
-/// Initialise up to 4 Wasm SIMD128 accumulators (`0.0`, or loaded from `orow` when `accumulate`).
-#[inline]
-fn init_acc_wasm(orow: &[f32], x0: usize, nv: usize, accumulate: bool) -> [v128; 4] {
-    let mut acc = [f32x4_splat(0.0); 4];
-    if accumulate {
-        let ow = orow.len();
-        for (v, a) in acc.iter_mut().enumerate().take(nv) {
-            let c = x0 + 4 * v;
-            if c + 4 <= ow {
-                // SAFETY: `c + 4 <= ow == orow.len()`.
-                *a = unsafe { v128_load(orow.as_ptr().add(c) as *const v128) };
-            } else {
-                let mut tmp = [0f32; 4];
-                let len = ow.saturating_sub(c).min(4);
-                tmp[..len].copy_from_slice(&orow[c..c + len]);
-                // SAFETY: `tmp` holds 4 floats.
-                *a = unsafe { v128_load(tmp.as_ptr() as *const v128) };
-            }
-        }
-    }
-    acc
-}
-
 /// Apply in-register bias + optional SiLU/ReLU and store `nv` `f32x4` vectors (`x0..x0 + 4 * nv`) into `orow`.
 #[inline]
 fn store_epi_wasm(
@@ -281,8 +255,8 @@ fn store_epi_wasm(
     }
 }
 
-/// Specialized 3×3 stride-1 dilation-1 depthwise conv using a 3-row sliding ring buffer (`3 * wpd` floats)
-/// with unrolled interior rows and in-register bias + SiLU/ReLU epilogue.
+/// Specialized 3×3 stride-1 dilation-1 overwriting depthwise conv using a 3-row sliding ring buffer (`3 * wpd`
+/// floats) with unrolled interior rows and in-register bias + SiLU/ReLU epilogue.
 #[allow(clippy::too_many_arguments)]
 fn depthwise_k3s1_wasm(
     xp: &[f32],
@@ -291,7 +265,6 @@ fn depthwise_k3s1_wasm(
     g: &ConvGeom,
     owp: usize,
     wpd: usize,
-    accumulate: bool,
     epi: Option<BiasAct<'_>>,
     pad: &mut Vec<f32>,
 ) {
@@ -323,6 +296,7 @@ fn depthwise_k3s1_wasm(
     ];
 
     assert!(owp + 2 <= wpd && pw + w <= wpd && xp.len() >= h * w && op.len() >= g.oh * ow);
+    let zero = f32x4_splat(0.0);
 
     for oy in 0..g.oh {
         let iys = [
@@ -347,7 +321,7 @@ fn depthwise_k3s1_wasm(
             let mut x0 = 0;
             while x0 < owp {
                 let nv = ((owp - x0) / 4).min(4);
-                let mut acc = init_acc_wasm(orow, x0, nv, accumulate);
+                let mut acc = [zero; 4];
                 // SAFETY: `x0 + 4 * nv + 2 <= owp + 2 <= wpd` for all three padded ring rows.
                 unsafe {
                     for (v, a) in acc.iter_mut().enumerate().take(nv) {
@@ -376,7 +350,7 @@ fn depthwise_k3s1_wasm(
             let mut x0 = 0;
             while x0 < owp {
                 let nv = ((owp - x0) / 4).min(4);
-                let mut acc = init_acc_wasm(orow, x0, nv, accumulate);
+                let mut acc = [zero; 4];
                 for (ky, iy) in iys.into_iter().enumerate() {
                     let Some(iy) = iy else { continue };
                     let prow = &pad[(iy % 3) * wpd..(iy % 3 + 1) * wpd];
@@ -401,7 +375,8 @@ fn depthwise_k3s1_wasm(
     }
 }
 
-/// General stride-1 Wasm SIMD128 depthwise conv with TLS padded-plane reuse and in-register bias + SiLU/ReLU.
+/// General stride-1 overwriting Wasm SIMD128 depthwise conv with TLS padded-plane reuse and in-register bias
+/// + SiLU/ReLU.
 #[allow(clippy::too_many_arguments)]
 fn depthwise_s1_wasm(
     xp: &[f32],
@@ -411,7 +386,6 @@ fn depthwise_s1_wasm(
     owp: usize,
     wpd: usize,
     pad_len: usize,
-    accumulate: bool,
     epi: Option<BiasAct<'_>>,
     pad: &mut Vec<f32>,
 ) {
@@ -433,12 +407,13 @@ fn depthwise_s1_wasm(
     };
     let act = epi.and_then(|e| e.act);
     let bv = f32x4_splat(if act.is_none() && bias == 0.0 { -0.0 } else { bias });
+    let zero = f32x4_splat(0.0);
     for oy in 0..g.oh {
         let orow = &mut op[oy * ow..(oy + 1) * ow];
         let mut x0 = 0;
         while x0 < owp {
             let nv = ((owp - x0) / 4).min(4);
-            let mut acc = init_acc_wasm(orow, x0, nv, accumulate);
+            let mut acc = [zero; 4];
             for ky in 0..g.kh {
                 let Some(iy) =
                     ky.checked_mul(dh).and_then(|v| oy.checked_add(v)).and_then(|v| v.checked_sub(ph))
@@ -469,8 +444,8 @@ fn depthwise_s1_wasm(
     }
 }
 
-/// Stride-2 (`stride[1] == 2`) Wasm SIMD128 depthwise conv: pads each input row and deinterleaves it into
-/// contiguous even and odd phase rows so every kernel tap is a contiguous 4-float `v128_load`.
+/// Stride-2 (`stride[1] == 2`) overwriting Wasm SIMD128 depthwise conv: pads each input row and deinterleaves
+/// it into contiguous even and odd phase rows so every kernel tap is a contiguous 4-float `v128_load`.
 #[allow(clippy::too_many_arguments)]
 fn depthwise_s2_wasm(
     xp: &[f32],
@@ -479,7 +454,6 @@ fn depthwise_s2_wasm(
     g: &ConvGeom,
     owp: usize,
     pairs: usize,
-    accumulate: bool,
     epi: Option<BiasAct<'_>>,
     pad: &mut Vec<f32>,
 ) {
@@ -506,13 +480,14 @@ fn depthwise_s2_wasm(
     };
     let act = epi.and_then(|e| e.act);
     let bv = f32x4_splat(if act.is_none() && bias == 0.0 { -0.0 } else { bias });
+    let zero = f32x4_splat(0.0);
 
     for oy in 0..g.oh {
         let orow = &mut op[oy * ow..(oy + 1) * ow];
         let mut x0 = 0;
         while x0 < owp {
             let nv = ((owp - x0) / 4).min(4);
-            let mut acc = init_acc_wasm(orow, x0, nv, accumulate);
+            let mut acc = [zero; 4];
             for ky in 0..g.kh {
                 let Some(iy) = oy
                     .checked_mul(sh)

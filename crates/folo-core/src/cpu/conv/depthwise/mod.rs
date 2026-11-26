@@ -192,7 +192,7 @@ pub(in super::super) fn depthwise_forward(
     #[cfg(target_arch = "x86_64")]
     let avx2_plan = if avx2 { avx2::plan_avx2(g) } else { avx2::Avx2Plan::Fallback };
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    let wasm_plan = wasm::plan_wasm(g);
+    let wasm_plan = if !accumulate { wasm::plan_wasm(g) } else { wasm::WasmPlan::Fallback };
     let total = g.n * g.o;
     let per_task = DW_TASK_OUTPUTS.div_ceil(ohw).min(total.div_ceil(4 * rayon::current_num_threads())).max(1);
     par_chunks(out, per_task * ohw, &|t, ops| {
@@ -226,16 +226,7 @@ pub(in super::super) fn depthwise_forward(
                 }
                 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
                 if !matches!(wasm_plan, wasm::WasmPlan::Fallback) && wk.iter().all(|v| v.is_finite()) {
-                    wasm::run_wasm_plan(
-                        wasm_plan,
-                        xp,
-                        wk,
-                        op,
-                        g,
-                        accumulate,
-                        epi.map(|e| e.rows_from(oc)),
-                        pad,
-                    );
+                    wasm::run_wasm_plan(wasm_plan, xp, wk, op, g, epi.map(|e| e.rows_from(oc)), pad);
                     continue;
                 }
                 if !accumulate {

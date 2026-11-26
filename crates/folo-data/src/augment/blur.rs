@@ -113,7 +113,7 @@ pub fn box_blur(img: &mut Image, radius: u32) {
             dst_row[d + 2] = ((sum[2] + half) / k) as u8;
             if x + 1 < w {
                 let rem_x = x.saturating_sub(r) * 3;
-                let add_x = (x + 1 + r).min(w - 1) * 3;
+                let add_x = x.saturating_add(1).saturating_add(r).min(w - 1) * 3;
                 sum[0] = sum[0] + src_row[add_x] as u64 - src_row[rem_x] as u64;
                 sum[1] = sum[1] + src_row[add_x + 1] as u64 - src_row[rem_x + 1] as u64;
                 sum[2] = sum[2] + src_row[add_x + 2] as u64 - src_row[rem_x + 2] as u64;
@@ -134,14 +134,14 @@ pub fn box_blur(img: &mut Image, radius: u32) {
             }
         }
         let first_in = y0.saturating_sub(r);
-        let last_in = (y0 + r).min(h - 1);
+        let last_in = y0.saturating_add(r).min(h - 1);
         for sy in first_in..=last_in {
             let srow = &tmp_ref[sy * stride..(sy + 1) * stride];
             for (acc, &v) in col_sum.iter_mut().zip(srow) {
                 *acc += v as u64;
             }
         }
-        let bot_clamped = (y0 + r).saturating_sub(h - 1) as u64;
+        let bot_clamped = y0.saturating_add(r).saturating_sub(h - 1) as u64;
         if bot_clamped > 0 {
             let row_last = &tmp_ref[(h - 1) * stride..h * stride];
             for (acc, &v) in col_sum.iter_mut().zip(row_last) {
@@ -157,7 +157,7 @@ pub fn box_blur(img: &mut Image, radius: u32) {
             if bi + 1 < band_rows {
                 let y = y0 + bi;
                 let rem_y = y.saturating_sub(r);
-                let add_y = (y + 1 + r).min(h - 1);
+                let add_y = y.saturating_add(1).saturating_add(r).min(h - 1);
                 let rem_row = &tmp_ref[rem_y * stride..(rem_y + 1) * stride];
                 let add_row = &tmp_ref[add_y * stride..(add_y + 1) * stride];
                 for ((acc, &a), &r_v) in col_sum.iter_mut().zip(add_row).zip(rem_row) {
@@ -169,15 +169,23 @@ pub fn box_blur(img: &mut Image, radius: u32) {
     buffers::recycle(tmp);
 }
 
-/// Builds a normalised symmetric 1D Gaussian kernel of length `2 * radius + 1`.
-fn gaussian_kernel_1d(radius: usize, sigma: f64) -> Vec<f64> {
-    let len = radius * 2 + 1;
-    let inv_2s2 = 0.5 / (sigma * sigma);
+/// Builds a normalised symmetric 1D Gaussian kernel of effective radius `eff_r <= radius`, clamping beyond
+/// `39 * sigma` where `exp(-d^2 / (2 * sigma^2)) == 0.0` in `f64` and converting offsets to `f64` before
+/// squaring so large radii never overflow `isize` or `usize` on 32-bit targets.
+fn gaussian_kernel_1d(radius: usize, sigma: f64) -> (usize, Vec<f64>) {
+    // Beyond 39 * sigma, `d^2 / (2 * sigma^2) > 760 > -ln(f64::MIN_POSITIVE_SUBNORMAL)`, so weights are exact 0.
+    let support = (sigma * 39.0).ceil();
+    let eff_r =
+        if support.is_finite() && support < radius as f64 { support.max(0.0) as usize } else { radius };
+    let len =
+        eff_r.checked_mul(2).and_then(|v| v.checked_add(1)).expect("gaussian_blur: kernel length overflow");
+    let denom = 2.0 * sigma * sigma;
+    let inv_2s2 = if denom.is_finite() && denom > 0.0 { 1.0 / denom } else { 0.0 };
     let mut k = vec![0.0f64; len];
     let mut sum = 0.0f64;
     for (i, slot) in k.iter_mut().enumerate() {
-        let d = i as isize - radius as isize;
-        let w = (-(d * d) as f64 * inv_2s2).exp();
+        let d = i as f64 - eff_r as f64;
+        let w = (-(d * d) * inv_2s2).exp();
         *slot = w;
         sum += w;
     }
@@ -185,7 +193,7 @@ fn gaussian_kernel_1d(radius: usize, sigma: f64) -> Vec<f64> {
     for w in &mut k {
         *w *= inv;
     }
-    k
+    (eff_r, k)
 }
 
 /// Applies an in-place separable 2D Gaussian blur with replicate borders.
@@ -199,8 +207,10 @@ pub fn gaussian_blur(img: &mut Image, radius: u32, sigma: f32) {
     if w == 0 || h == 0 || radius == 0 || !sigma.is_finite() || sigma <= 0.0 {
         return;
     }
-    let r = radius as usize;
-    let kernel = gaussian_kernel_1d(r, sigma as f64);
+    let (r, kernel) = gaussian_kernel_1d(radius as usize, sigma as f64);
+    if r == 0 {
+        return;
+    }
     let stride = w * 3;
     let total = h * stride;
 
@@ -212,7 +222,7 @@ pub fn gaussian_blur(img: &mut Image, radius: u32, sigma: f32) {
         for x in 0..w {
             let (mut sr, mut sg, mut sb) = (0.0f64, 0.0f64, 0.0f64);
             for (ki, &wt) in kernel.iter().enumerate() {
-                let sx = (x as isize + ki as isize - r as isize).clamp(0, w as isize - 1) as usize * 3;
+                let sx = (x as i64 + ki as i64 - r as i64).clamp(0, w as i64 - 1) as usize * 3;
                 sr += src_row[sx] as f64 * wt;
                 sg += src_row[sx + 1] as f64 * wt;
                 sb += src_row[sx + 2] as f64 * wt;
@@ -229,7 +239,7 @@ pub fn gaussian_blur(img: &mut Image, radius: u32, sigma: f32) {
     for_rows(&mut img.data[..total], stride, |y, dst_row| {
         let mut acc = vec![0.0f64; stride];
         for (ki, &wt) in kernel.iter().enumerate() {
-            let sy = (y as isize + ki as isize - r as isize).clamp(0, h as isize - 1) as usize;
+            let sy = (y as i64 + ki as i64 - r as i64).clamp(0, h as i64 - 1) as usize;
             let srow = &tmp_ref[sy * stride..(sy + 1) * stride];
             for (a, &v) in acc.iter_mut().zip(srow) {
                 *a += v as f64 * wt;
@@ -368,6 +378,14 @@ mod tests {
             gaussian_blur(&mut c, r, s);
             assert_eq!(c.data, orig.data);
         }
+        // Large radius (exceeding sqrt(i32::MAX) = 46_340) must not overflow on 32-bit targets and must
+        // preserve uniform pixels cleanly.
+        let mut tiny = Image::new(1, 1, [77, 133, 211]);
+        gaussian_blur(&mut tiny, 46_341, 1.0);
+        assert_eq!(tiny.pixel(0, 0), [77, 133, 211]);
+        let mut tiny_box = Image::new(1, 1, [77, 133, 211]);
+        box_blur(&mut tiny_box, 46_341);
+        assert_eq!(tiny_box.pixel(0, 0), [77, 133, 211]);
     }
 
     #[test]

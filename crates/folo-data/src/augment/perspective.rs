@@ -19,6 +19,7 @@ const WBITS: u32 = 11;
 const WONE: u32 = 1 << WBITS;
 const WSHIFT: u32 = 2 * WBITS;
 const WHALF: u32 = 1 << (WSHIFT - 1);
+const HORIZON_EPS: f64 = 1e-12;
 
 /// A 3×3 projective matrix in row-major order `[h00, h01, h02, h10, h11, h12, h20, h21, h22]` mapping `(x, y)`
 /// to `(u / w, v / w)` with `u = h00*x + h01*y + h02`, `v = h10*x + h11*y + h12`, `w = h20*x + h21*y + h22`.
@@ -54,30 +55,59 @@ impl Homography {
         Homography(out)
     }
 
+    /// Returns this matrix divided by its positive max-entry norm (`max_i |h_i|`), preserving both the exact
+    /// projective transform and the sign of `w`, or `None` if all entries are zero or any entry is non-finite.
+    pub fn normalized(&self) -> Option<Homography> {
+        let mut scale = 0.0f64;
+        for &v in &self.0 {
+            if !v.is_finite() {
+                return None;
+            }
+            scale = scale.max(v.abs());
+        }
+        if scale == 0.0 {
+            return None;
+        }
+        let out = self.0.map(|v| v / scale);
+        out.iter().all(|v| v.is_finite()).then_some(Homography(out))
+    }
+
     /// Determinant of the 3×3 matrix.
     pub fn det(&self) -> f64 {
         let [a, b, c, d, e, f, g, h, i] = self.0;
         a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
     }
 
-    /// The exact matrix inverse, or `None` when singular or non-finite.
+    /// The exact matrix inverse (scale-invariant singularity check on the max-norm normalized matrix), or `None`
+    /// when singular or non-finite.
     pub fn inverse(&self) -> Option<Homography> {
-        let [a, b, c, d, e, f, g, h, i] = self.0;
-        let det = self.det();
+        let mut scale = 0.0f64;
+        for &v in &self.0 {
+            if !v.is_finite() {
+                return None;
+            }
+            scale = scale.max(v.abs());
+        }
+        if scale == 0.0 {
+            return None;
+        }
+        let hn = Homography(self.0.map(|v| v / scale));
+        let [a, b, c, d, e, f, g, h, i] = hn.0;
+        let det = hn.det();
         if !det.is_finite() || det.abs() < 1e-12 {
             return None;
         }
         let inv_det = 1.0 / det;
         let out = [
-            (e * i - f * h) * inv_det,
-            (c * h - b * i) * inv_det,
-            (b * f - c * e) * inv_det,
-            (f * g - d * i) * inv_det,
-            (a * i - c * g) * inv_det,
-            (c * d - a * f) * inv_det,
-            (d * h - e * g) * inv_det,
-            (b * g - a * h) * inv_det,
-            (a * e - b * d) * inv_det,
+            (e * i - f * h) * inv_det / scale,
+            (c * h - b * i) * inv_det / scale,
+            (b * f - c * e) * inv_det / scale,
+            (f * g - d * i) * inv_det / scale,
+            (a * i - c * g) * inv_det / scale,
+            (c * d - a * f) * inv_det / scale,
+            (d * h - e * g) * inv_det / scale,
+            (b * g - a * h) * inv_det / scale,
+            (a * e - b * d) * inv_det / scale,
         ];
         out.iter().all(|v| v.is_finite()).then_some(Homography(out))
     }
@@ -89,12 +119,13 @@ impl Homography {
         (h00 * x + h01 * y + h02, h10 * x + h11 * y + h12, h20 * x + h21 * y + h22)
     }
 
-    /// Projects `(x, y)` to `(u / w, v / w)`, returning `None` if `w <= 1e-12` (on or behind the horizon) or
-    /// non-finite.
+    /// Projects `(x, y)` to `(u / w, v / w)`, returning `None` if `w` is on or behind the horizon (relative to
+    /// the positive max-entry scale of `self`) or non-finite.
     #[inline]
     pub fn apply(&self, x: f64, y: f64) -> Option<(f64, f64)> {
-        let (u, v, w) = self.apply_homogeneous(x, y);
-        if !w.is_finite() || w <= 1e-12 {
+        let hn = self.normalized()?;
+        let (u, v, w) = hn.apply_homogeneous(x, y);
+        if !w.is_finite() || w <= HORIZON_EPS {
             return None;
         }
         let (px, py) = (u / w, v / w);
@@ -103,12 +134,15 @@ impl Homography {
 
     /// Whether this is numerically the identity (up to uniform positive scaling).
     pub fn is_identity(&self) -> bool {
-        let s = self.0[8];
-        if !s.is_finite() || s <= 1e-12 {
+        let Some(hn) = self.normalized() else {
+            return false;
+        };
+        let s = hn.0[8];
+        if s <= HORIZON_EPS {
             return false;
         }
         let inv = 1.0 / s;
-        self.0.iter().zip(Homography::IDENTITY.0).all(|(a, b)| (a * inv - b).abs() < 1e-9)
+        hn.0.iter().zip(Homography::IDENTITY.0).all(|(a, b)| (a * inv - b).abs() < 1e-9)
     }
 
     /// Solves for the unique homography (`h22 = 1`) mapping the 4 source points `src` to `dst`, or `None` if
@@ -209,7 +243,7 @@ pub fn warp_perspective(src: &Image, h: &Homography, width: u32, height: u32, bo
     let h_out = height as usize;
     let stride = w * 3;
     let mut out = buffers::scratch(h_out * stride);
-    let Some(inv) = h.inverse() else {
+    let Some(inv) = h.normalized().and_then(|hn| hn.inverse()).and_then(|im| im.normalized()) else {
         let mut img = Image { width, height, data: out };
         img.fill_rect(0, 0, width as i64, height as i64, border);
         return img;
@@ -230,7 +264,7 @@ pub fn warp_perspective(src: &Image, h: &Homography, width: u32, height: u32, bo
         let mut v = m10 * 0.5 + m11 * yc + m12;
         let mut ww = m20 * 0.5 + m21 * yc + m22;
         for px in row.as_chunks_mut::<3>().0.iter_mut() {
-            if !ww.is_finite() || ww <= 1e-12 {
+            if !ww.is_finite() || ww <= HORIZON_EPS {
                 *px = border;
             } else {
                 let inv_w = 1.0 / ww;
@@ -373,8 +407,8 @@ fn clip_quad_to_canvas(quad: [(f64, f64); 4], fw: f64, fh: f64) -> Option<(f64, 
 
 /// Transforms normalised boxes of a `src_w × src_h` image through `h` into normalised boxes of `width × height`.
 ///
-/// Boxes with any corner on/behind the horizon (`w <= 1e-6`), degenerate area, or clipped visibility failing
-/// `filter` are dropped.
+/// Boxes with any corner on/behind the horizon (`w <= 1e-12` on the max-norm normalized homography), degenerate
+/// area, or clipped visibility failing `filter` are dropped.
 pub fn transform_boxes_perspective(
     boxes: &[BBox],
     src_w: u32,
@@ -384,7 +418,13 @@ pub fn transform_boxes_perspective(
     height: u32,
     filter: &BoxFilter,
 ) -> Vec<BBox> {
-    if boxes.is_empty() || src_w == 0 || src_h == 0 || width == 0 || height == 0 || h.inverse().is_none() {
+    if boxes.is_empty() || src_w == 0 || src_h == 0 || width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let Some(hn) = h.normalized() else {
+        return Vec::new();
+    };
+    if hn.inverse().and_then(|im| im.normalized()).is_none() {
         return Vec::new();
     }
     let (fw, fh) = (width as f64, height as f64);
@@ -402,8 +442,8 @@ pub fn transform_boxes_perspective(
         let mut quad = [(0.0f64, 0.0f64); 4];
         let mut ok = true;
         for (slot, (cx, cy)) in quad.iter_mut().zip(corners) {
-            let (u, v, w) = h.apply_homogeneous(cx, cy);
-            if !w.is_finite() || w <= 1e-6 {
+            let (u, v, w) = hn.apply_homogeneous(cx, cy);
+            if !w.is_finite() || w <= HORIZON_EPS {
                 ok = false;
                 break;
             }
@@ -434,9 +474,24 @@ pub fn transform_boxes_perspective(
     out
 }
 
+/// Returns `true` when the ordered 4-vertex quadrilateral is strictly convex (all 4 consecutive edge cross
+/// products share the same positive orientation).
+fn quad_is_strictly_convex(q: [(f64, f64); 4]) -> bool {
+    for i in 0..4 {
+        let a = q[i];
+        let b = q[(i + 1) % 4];
+        let c = q[(i + 2) % 4];
+        let cross = (b.0 - a.0) * (c.1 - b.1) - (b.1 - a.1) * (c.0 - b.0);
+        if !(cross.is_finite() && cross > 1e-9) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Samples a deterministic well-conditioned corner-jitter homography mapping `[0, src_w] × [0, src_h]` into
-/// `[0, out_w] × [0, out_h]`. Every source corner moves inward by at most `distortion * out_side` (`<= 0.45`),
-/// guaranteeing a strictly convex destination quadrilateral with `w > 0` across the whole image.
+/// `[0, out_w] × [0, out_h]`. Retries rejected / concave corner draws up to 8 times before falling back to
+/// the exact source-to-output scale homography so the source image is never silently cropped.
 pub fn random_perspective_homography(
     src_w: u32,
     src_h: u32,
@@ -454,13 +509,21 @@ pub fn random_perspective_homography(
     let dx = d * ow;
     let dy = d * oh;
     let src = [(0.0, 0.0), (sw, 0.0), (sw, sh), (0.0, sh)];
-    let dst = [
-        (rng.uniform(0.0, dx as f32) as f64, rng.uniform(0.0, dy as f32) as f64),
-        (ow - rng.uniform(0.0, dx as f32) as f64, rng.uniform(0.0, dy as f32) as f64),
-        (ow - rng.uniform(0.0, dx as f32) as f64, oh - rng.uniform(0.0, dy as f32) as f64),
-        (rng.uniform(0.0, dx as f32) as f64, oh - rng.uniform(0.0, dy as f32) as f64),
-    ];
-    Homography::from_quad_correspondence(src, dst).unwrap_or(Homography::IDENTITY)
+    for _ in 0..8 {
+        let dst = [
+            (rng.uniform(0.0, dx as f32) as f64, rng.uniform(0.0, dy as f32) as f64),
+            (ow - rng.uniform(0.0, dx as f32) as f64, rng.uniform(0.0, dy as f32) as f64),
+            (ow - rng.uniform(0.0, dx as f32) as f64, oh - rng.uniform(0.0, dy as f32) as f64),
+            (rng.uniform(0.0, dx as f32) as f64, oh - rng.uniform(0.0, dy as f32) as f64),
+        ];
+        if !quad_is_strictly_convex(dst) {
+            continue;
+        }
+        if let Some(h) = Homography::from_quad_correspondence(src, dst) {
+            return h;
+        }
+    }
+    Homography::from_affine(&Affine::scale(ow / sw, oh / sh))
 }
 
 /// Warps `sample` by `h` into `width × height`, projecting and clipping boxes via [`transform_boxes_perspective`].
@@ -616,5 +679,30 @@ mod tests {
         assert_eq!(a.boxes, b.boxes);
         assert!(PerspectiveConfig { distortion: 0.5, ..Default::default() }.validate().is_err());
         assert!(PerspectiveConfig { prob: -0.1, ..Default::default() }.validate().is_err());
+
+        // 5. High distortion (0.45) with downscaling (128x96 -> 64x48, seed 11) must retry concave draws /
+        // scale cleanly rather than falling back to IDENTITY and cropping out boxes in the right half.
+        let mut rect_img = Image::new(128, 96, [10, 10, 10]);
+        rect_img.fill_rect(80, 40, 100, 60, [240, 20, 30]);
+        let rect_sample = Sample {
+            image: rect_img,
+            boxes: vec![BBox::from_pixel_xyxy(0, [80.0, 40.0, 100.0, 60.0], 128, 96)],
+        };
+        let high_cfg = PerspectiveConfig { prob: 1.0, distortion: 0.45 };
+        for seed in 0..32u64 {
+            let warped = random_perspective(&rect_sample, 64, 48, &high_cfg, &filter, &mut Rng::new(seed));
+            assert_eq!(warped.boxes.len(), 1, "seed={seed} dropped valid box");
+        }
+
+        // 6. Positively rescaled homographies (1e13 * H and 1e-13 * H) must agree identically with H for
+        // both pixels and boxes.
+        let base_h = Homography([1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        let ref_out = perspective_sample(&s, &base_h, 32, 32, &filter);
+        for scale in [1e13f64, 1e-13] {
+            let scaled = Homography(base_h.0.map(|v| v * scale));
+            let got_out = perspective_sample(&s, &scaled, 32, 32, &filter);
+            assert_eq!(got_out.image.data, ref_out.image.data, "scale={scale} pixels diverged");
+            assert_eq!(got_out.boxes, ref_out.boxes, "scale={scale} boxes diverged");
+        }
     }
 }
