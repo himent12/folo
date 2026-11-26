@@ -163,15 +163,16 @@ impl FoloApp {
         let compute_blocked = self.compute_blocked();
         let dataset_blocked = self.dataset_blocked().is_some();
         let weights_gone = self.nr_weights_gone().is_some();
-        let device_gone = self.nr_device_gone();
+        let device_gone = self.nr_device_gone(cx);
         // What the footer can honestly say. With the server's estimator: its answer for this
         // config; while a changed config is out, the last answer marked as updating (if it was for
-        // the same kind of device); nothing for an unparsed value, a rejected config or a deleted
-        // dataset. Servers without one: the app's own reference figures.
+        // the same kind of device); nothing for an unparsed value, unavailable device, rejected
+        // config, or deleted dataset. Servers without one: the app's own reference figures.
         enum Est {
             Server(Box<crate::api::RunEstimate>, bool),
             Pending,
             Invalid,
+            NoDevice,
             NoDataset,
             Rejected(String),
             AmpRefused(String),
@@ -183,14 +184,17 @@ impl FoloApp {
         };
         let est = if ds.is_none() {
             Est::NoDataset
-        } else if !self.store.features.iter().any(|f| f == "run_estimate") {
-            Est::Local
+        } else if device_gone.is_some() {
+            Est::NoDevice
         } else if epochs_bad
             || lr_bad
             || close_bad
+            || opt_unknown
             || self.new_run.as_ref().is_some_and(|f| f.hours_invalid && cloud.is_some())
         {
             Est::Invalid
+        } else if !self.store.features.iter().any(|f| f == "run_estimate") {
+            Est::Local
         } else if compute_blocked.is_some() {
             Est::Pending
         } else {
@@ -229,7 +233,11 @@ impl FoloApp {
             .store
             .system
             .ready()
-            .and_then(|s| gpu_index(&device).and_then(|i| s.gpus.get(i)).or_else(|| s.gpus.first()))
+            .and_then(|s| match gpu_index(&device) {
+                Some(i) => s.gpus.get(i),
+                None if device == "auto" => s.gpus.first(),
+                None => None,
+            })
             .cloned();
         // 0 = not reported (wgpu can't on every platform): make no claim about fitting.
         // GiB, like the estimate and every size the app shows. A cloud run's is its offer's.
@@ -250,6 +258,9 @@ impl FoloApp {
         let place = if on_cpu { "CPU" } else { "GPU" };
         let (headline, basis, note): (String, String, Option<String>) = match &est {
             Est::Invalid => ("No estimate while a value is invalid".into(), String::new(), None),
+            Est::NoDevice => {
+                ("No estimate for this device".into(), "Pick an available device".into(), device_gone.clone())
+            }
             Est::Pending => ("Estimating…".into(), String::new(), None),
             Est::NoDataset => ("No estimate without a dataset".into(), String::new(), None),
             Est::Rejected(msg) => (

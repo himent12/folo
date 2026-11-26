@@ -245,11 +245,11 @@ fn new_run_offers_gpu_0_only_on_a_server_that_has_a_gpu() {
     // Start says why and nothing is sent until Auto or CPU is picked.
     drive(&mut app, window, |this, w, cx| {
         this.new_run.as_mut().unwrap().device = 1;
-        assert!(this.nr_device_gone().is_some_and(|why| why.contains("pick Auto or CPU")));
+        assert!(this.nr_device_gone(cx).is_some_and(|why| why.contains("pick Auto or CPU")));
         this.submit_new_run(w, cx);
         assert!(!this.new_run.as_ref().unwrap().submitting, "nothing is sent");
         this.new_run.as_mut().unwrap().device = 2;
-        assert_eq!(this.nr_device_gone(), None);
+        assert_eq!(this.nr_device_gone(cx), None);
     });
     // The dialog draws with it.
     app.frame(window.into());

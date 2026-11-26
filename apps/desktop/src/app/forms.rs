@@ -87,20 +87,57 @@ impl NewRunForm {
     }
 }
 
-/// GPU adapter index for a device string like `"gpu:1"`.
+/// Parsed device string matching `folo_vision::train::config::resolve_device` (aliases, case,
+/// and surrounding whitespace).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParsedDevice {
+    /// One of [`DEVICES`]: `0 = auto`, `1 = gpu:0`, `2 = cpu`.
+    Preset(usize),
+    /// A non-zero GPU adapter index (`gpu:<n>` or `cuda:<n>` for `n > 0`), canonicalized to `gpu:<n>`.
+    Gpu(usize),
+    /// An unrecognized device string preserved verbatim so the user sees it and picks a replacement.
+    Unknown(String),
+}
+
+/// Parses a device string the same way the training backend does (`auto`/`""`, `cpu`,
+/// `gpu`/`cuda`/`gpu:0`/`cuda:0`, `gpu:<n>`/`cuda:<n>`, case-insensitive, trimmed).
+pub fn parse_device(raw: &str) -> ParsedDevice {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" | "" => ParsedDevice::Preset(0),
+        "gpu" | "cuda" => ParsedDevice::Preset(1),
+        "cpu" => ParsedDevice::Preset(2),
+        other => {
+            let idx = other
+                .strip_prefix("gpu:")
+                .or_else(|| other.strip_prefix("cuda:"))
+                .and_then(|n| n.parse::<usize>().ok());
+            match idx {
+                Some(0) => ParsedDevice::Preset(1),
+                Some(i) => ParsedDevice::Gpu(i),
+                None => ParsedDevice::Unknown(raw.trim().to_string()),
+            }
+        }
+    }
+}
+
+/// GPU adapter index for a device string (`"gpu"`, `"cuda"`, `"gpu:1"`, `"CUDA:0"`).
 pub fn gpu_index(device: &str) -> Option<usize> {
-    device.strip_prefix("gpu:")?.parse().ok()
+    match parse_device(device) {
+        ParsedDevice::Preset(1) => Some(0),
+        ParsedDevice::Gpu(i) => Some(i),
+        _ => None,
+    }
 }
 
 /// Human-readable label for a device string (`"auto"` -> `"Auto"`, `"gpu:1"` -> `"GPU 1"`).
 pub fn device_label(device: &str) -> String {
-    match device {
-        "auto" => "Auto".into(),
-        "cpu" => "CPU".into(),
-        d => match gpu_index(d) {
-            Some(i) => format!("GPU {i}"),
-            None => d.to_string(),
-        },
+    match parse_device(device) {
+        ParsedDevice::Preset(0) => "Auto".into(),
+        ParsedDevice::Preset(1) => "GPU 0".into(),
+        ParsedDevice::Preset(2) => "CPU".into(),
+        ParsedDevice::Preset(_) => device.to_string(),
+        ParsedDevice::Gpu(i) => format!("GPU {i}"),
+        ParsedDevice::Unknown(s) => s,
     }
 }
 

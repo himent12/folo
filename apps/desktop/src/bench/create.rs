@@ -16,11 +16,12 @@ pub enum SourcePick {
         name: String,
         splits: Splits,
     },
-    /// A labeling job's labeled images.
+    /// A labeling job's labeled images (for benchmarks) and total images (for loop pools).
     Job {
         id: String,
         name: String,
         labeled: u64,
+        images: u64,
     },
 }
 
@@ -66,7 +67,7 @@ impl SourcePick {
         }
     }
 
-    /// How many images it holds (a dataset in `split`).
+    /// How many images it holds (a dataset in `split`; for a labeling job, its labeled images).
     pub fn images(&self, split: Split) -> u64 {
         match self {
             SourcePick::Dataset { splits, .. } => match split {
@@ -75,6 +76,15 @@ impl SourcePick {
                 Split::Test => splits.test,
             },
             SourcePick::Job { labeled, .. } => *labeled,
+        }
+    }
+
+    /// How many images a self-improvement loop pool reads from this source (a dataset's `train`
+    /// split, or all images of a labeling job including unlabeled/pending ones).
+    pub fn pool_images(&self) -> u64 {
+        match self {
+            SourcePick::Dataset { splits, .. } => splits.train,
+            SourcePick::Job { images, .. } => *images,
         }
     }
 
@@ -112,10 +122,14 @@ impl FoloApp {
             name: d.name.clone(),
             splits: d.splits,
         });
-        let jobs =
-            self.bench.jobs.ready().into_iter().flatten().filter(|j| j.counts.labeled > 0).map(|j| {
-                SourcePick::Job { id: j.id.clone(), name: j.name.clone(), labeled: j.counts.labeled }
-            });
+        let jobs = self.bench.jobs.ready().into_iter().flatten().filter(|j| j.counts.labeled > 0).map(|j| {
+            SourcePick::Job {
+                id: j.id.clone(),
+                name: j.name.clone(),
+                labeled: j.counts.labeled,
+                images: j.counts.images,
+            }
+        });
         datasets.chain(jobs).collect()
     }
 
@@ -305,9 +319,10 @@ mod tests {
             BenchSource::Dataset { dataset_id: "ds_1".into(), split: Some(Split::Test) }
         );
         // A labeling job has no splits: its labeled images, whatever split the form shows.
-        let job = SourcePick::Job { id: "lb_1".into(), name: "rejects".into(), labeled: 120 };
+        let job = SourcePick::Job { id: "lb_1".into(), name: "rejects".into(), labeled: 120, images: 150 };
         assert_eq!(job.suggested_name(Split::Val), "rejects");
         assert_eq!(job.images(Split::Test), 120);
+        assert_eq!(job.pool_images(), 150);
         assert_eq!(job.source(Split::Val), BenchSource::LabelJob { job_id: "lb_1".into() });
     }
 }

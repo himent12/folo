@@ -235,28 +235,65 @@ fn clone_config_preserves_gpu1_when_available_and_blocks_when_unavailable() {
     });
     app.frame(window.into());
     drive(&mut app, window, |this, _, cx| {
-        assert_eq!(this.nr_device_gone(), None, "gpu:1 is available on a 2-GPU server");
+        assert_eq!(this.nr_device_gone(cx), None, "gpu:1 is available on a 2-GPU server");
         let out = this.form_config(cx).expect("form config built");
         assert_eq!(out.device, "gpu:1", "cloned gpu:1 must not silently revert to auto");
     });
+
+    // 1b. If the server's estimator rejects `gpu:1` with `device_not_found` (e.g. a 2-adapter
+    //     machine whose backend only initialized `gpu:0`), Start is disabled and submission blocked.
+    drive(&mut app, window, |this, w, cx| {
+        let mut cfg_est = this.form_config(cx).unwrap();
+        cfg_est.name = "estimate".into();
+        let key = serde_json::to_string(&cfg_est).unwrap();
+        this.nr_estimate =
+            Some((key, Load::Failed(crate::api::ApiError::new("device_not_found", "GPU 1 has no backend"))));
+        let why = this.nr_device_gone(cx).expect("server device_not_found blocks gpu:1");
+        assert!(why.contains("GPU 1"), "{why}");
+        this.submit_new_run(w, cx);
+        assert!(!this.new_run.as_ref().unwrap().submitting);
+    });
+
+    // 1c. Cloning valid server device aliases (`gpu`, `cuda`, `CUDA:0`, `CUDA:1`, `  CPU  `, `""`)
+    //     normalizes identically to `folo_vision::train::config::resolve_device`.
+    for (raw, expected) in [
+        ("gpu", "gpu:0"),
+        ("cuda", "gpu:0"),
+        ("CUDA:0", "gpu:0"),
+        ("  CPU  ", "cpu"),
+        ("", "auto"),
+        ("CUDA:1", "gpu:1"),
+    ] {
+        let mut alias_cfg = cfg.clone();
+        alias_cfg.device = raw.into();
+        drive(&mut app, window, move |this, w, cx| {
+            this.nr_estimate = None;
+            this.open_new_run_from(&alias_cfg, None, w, cx);
+            assert_eq!(this.nr_device_gone(cx), None, "alias `{raw}` must be recognized");
+            assert_eq!(this.form_config(cx).unwrap().device, expected, "alias `{raw}`");
+        });
+    }
 
     // 2. On a 1-GPU server, cloning `gpu:1` flags it unavailable and blocks submission until changed.
     let runs_before = drive(&mut app, window, |this, w, cx| {
         let sys = this.store.system.ready_mut().unwrap();
         sys.gpus.truncate(1);
         this.store.last_gpu_count = Some(1);
+        this.nr_estimate = None;
+        this.nr_estimate_last = None;
         this.open_new_run_from(&cfg, None, w, cx);
         this.store.runs.ready().unwrap().len()
     });
     app.frame(window.into());
     drive(&mut app, window, |this, w, cx| {
-        let why = this.nr_device_gone().expect("gpu:1 unavailable on 1-GPU server");
+        let why = this.nr_device_gone(cx).expect("gpu:1 unavailable on 1-GPU server");
         assert!(why.contains("GPU 1"), "message names GPU 1: {why}");
+        assert!(this.nr_estimate.is_none(), "no estimate sent for statically unavailable device");
         this.submit_new_run(w, cx);
         assert!(!this.new_run.as_ref().unwrap().submitting, "submission blocked while device is unavailable");
         // Switching to Auto clears custom_device and lifts the block.
         this.new_run.as_mut().unwrap().pick_device(0);
-        assert_eq!(this.nr_device_gone(), None);
+        assert_eq!(this.nr_device_gone(cx), None);
         assert_eq!(this.form_config(cx).unwrap().device, "auto");
         assert_eq!(this.store.runs.ready().unwrap().len(), runs_before);
     });
@@ -266,7 +303,7 @@ fn clone_config_preserves_gpu1_when_available_and_blocks_when_unavailable() {
     bad.device = "mps".into();
     drive(&mut app, window, move |this, w, cx| {
         this.open_new_run_from(&bad, None, w, cx);
-        let why = this.nr_device_gone().expect("unknown device blocks submission");
+        let why = this.nr_device_gone(cx).expect("unknown device blocks submission");
         assert!(why.contains("mps"), "{why}");
         assert_eq!(this.form_config(cx).unwrap().device, "mps");
     });

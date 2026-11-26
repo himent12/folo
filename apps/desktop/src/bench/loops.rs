@@ -23,10 +23,11 @@ pub fn loop_pool_overlaps(b: &Bench, picked: &SourcePick) -> bool {
     }
 }
 
-/// Whether `picked` is the benchmark's own source with no images left after excluding `b`'s frozen
-/// set (the server excludes benchmark images from the loop pool and rejects an empty pool).
-pub fn loop_pool_exhausted(b: &Bench, picked: &SourcePick) -> bool {
-    loop_pool_overlaps(b, picked) && picked.images(Split::Train) <= b.images
+/// Whether `picked` comes from the same source frozen into `b` and has no more pool images than
+/// `b` already froze. Used to avoid picking a likely-empty pool by default and to warn the user;
+/// the server remains authoritative (e.g. if files were replaced in place with different content).
+pub fn loop_pool_likely_empty(b: &Bench, picked: &SourcePick) -> bool {
+    loop_pool_overlaps(b, picked) && picked.pool_images() <= b.images
 }
 
 impl FoloApp {
@@ -75,9 +76,8 @@ impl FoloApp {
         // usable source. Neither its own labeling job nor its own train-split benchmark dataset when
         // every image is already in the benchmark would leave any pool images.
         let sources = self.bench_sources();
-        let usable = |s: &SourcePick| {
-            s.images(Split::Train) > 0 && b.as_ref().is_none_or(|b| !loop_pool_exhausted(b, s))
-        };
+        let usable =
+            |s: &SourcePick| s.pool_images() > 0 && b.as_ref().is_none_or(|b| !loop_pool_likely_empty(b, s));
         let own = b.as_ref().and_then(|b| match &b.source {
             BenchSource::Dataset { dataset_id, .. } => Some(SourceId::Dataset(dataset_id.clone())),
             BenchSource::LabelJob { .. } => None,
@@ -105,7 +105,6 @@ impl FoloApp {
         let sources = self.bench_sources();
         let choice = self.source_choice(&sources, self.bench.new_loop.as_ref().and_then(|f| f.pool.as_ref()));
         let teacher_gone = self.loop_teacher_deleted();
-        let bench_obj = self.bench.list.ready().and_then(|l| l.iter().find(|x| x.id == bench)).cloned();
         let Some(f) = self.bench.new_loop.as_mut() else { return };
         if f.submitting {
             return;
@@ -127,11 +126,8 @@ impl FoloApp {
             SourceChoice::Deleted => return refuse(f, "Its pool was deleted: pick another", cx),
         };
         // Start is off then; Ctrl+Enter says why instead of sending what the server turns down.
-        if pool.images(Split::Train) == 0 {
+        if pool.pool_images() == 0 {
             return refuse(f, "That pool has no images: pick another", cx);
-        }
-        if bench_obj.as_ref().is_some_and(|b| loop_pool_exhausted(b, pool)) {
-            return refuse(f, "Every image in that pool is already in this benchmark: pick another", cx);
         }
         let req = StartBenchLoop {
             name: None,
@@ -255,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn a_train_split_benchmark_avoids_exhausted_default_pool_and_blocks_submission() {
+    fn a_train_split_benchmark_avoids_overlapping_default_pool_and_job_pending_images_stay_usable() {
         use crate::api::Split;
 
         let (mut app, window) = open();
@@ -266,7 +262,8 @@ mod tests {
         app.run_until_idle();
         app.frame(window.into());
 
-        // Build a benchmark that freezes all train images of the first dataset.
+        // 1. A benchmark freezing all train images of the first dataset must not default New loop
+        //    to that same train split.
         let ds0_id = drive(&mut app, window, |this, _, cx| {
             let ds0 = this.store.datasets.ready().unwrap()[0].clone();
             let mut b = this.bench.list.ready().unwrap()[0].clone();
@@ -282,19 +279,11 @@ mod tests {
                 Some(SourceId::Dataset(ds0.id.clone())),
                 "must not default to a train split completely frozen into the benchmark"
             );
-            // Manually picking the exhausted pool must refuse submission and mark it exhausted.
+            // Manually selecting that pool still marks it likely-empty for warning copy, while
+            // letting the server perform the authoritative content-hash check.
             this.bench.new_loop.as_mut().unwrap().pool = Some(SourceId::Dataset(ds0.id.clone()));
-            this.submit_new_loop("bn_train_full", cx);
-            let f = this.bench.new_loop.as_ref().unwrap();
-            assert!(!f.submitting, "exhausted pool must not submit");
-            assert!(
-                f.error.as_ref().is_some_and(|e| e.message.contains("already in this benchmark")),
-                "error explains why pool is exhausted: {:?}",
-                f.error
-            );
             ds0.id
         });
-        // Render the form with the exhausted pool selected: Start loop must be disabled (not focusable).
         drive(&mut app, window, |this, _, cx| {
             this.bench.tab = crate::bench::BenchTab::Loops;
             this.focus.borrow_mut().clear();
@@ -303,21 +292,40 @@ mod tests {
         app.frame(window.into());
         drive(&mut app, window, |this, _, _| {
             assert!(
-                !this.focus.borrow().contains_key("bench-loop-start"),
-                "Start loop button must be disabled when pool is exhausted"
+                this.focus.borrow().contains_key("bench-loop-start"),
+                "Start loop stays available so the server can run the authoritative content-hash check"
             );
-            // If extra train images are added later, the pool is no longer exhausted.
             let b = this.bench.list.ready().unwrap().iter().find(|b| b.id == "bn_train_full").unwrap();
             let mut pick = this
                 .bench_sources()
                 .into_iter()
                 .find(|s| s.id() == SourceId::Dataset(ds0_id.clone()))
                 .unwrap();
-            assert!(super::loop_pool_exhausted(b, &pick));
+            assert!(super::loop_pool_likely_empty(b, &pick));
             if let crate::bench::SourcePick::Dataset { splits, .. } = &mut pick {
                 splits.train += 10;
             }
-            assert!(!super::loop_pool_exhausted(b, &pick));
+            assert!(!super::loop_pool_likely_empty(b, &pick));
+
+            // 2. A labeling job with 10 labeled (frozen in benchmark) and 5 pending (15 total)
+            //    is NOT likely-empty because the server loops over all 15 job images.
+            let mut jb = b.clone();
+            jb.source = BenchSource::LabelJob { job_id: "lb_partial".into() };
+            jb.images = 10;
+            let partial_job = crate::bench::SourcePick::Job {
+                id: "lb_partial".into(),
+                name: "partial".into(),
+                labeled: 10,
+                images: 15,
+            };
+            assert!(!super::loop_pool_likely_empty(&jb, &partial_job));
+            let full_job = crate::bench::SourcePick::Job {
+                id: "lb_partial".into(),
+                name: "full".into(),
+                labeled: 10,
+                images: 10,
+            };
+            assert!(super::loop_pool_likely_empty(&jb, &full_job));
         });
     }
 }

@@ -253,7 +253,7 @@ impl FoloApp {
         // A server without a GPU refuses gpu:0 at Start: not offered (arrow keys skip it).
         // A cloned device (such as gpu:1) is preserved as its own segment when available, or marked
         // unavailable with a blocking reason until the user picks an available device.
-        let device_gone = self.nr_device_gone();
+        let device_gone = self.nr_device_gone(cx);
         let device_ctl = if let Some(cd) = custom_device {
             let custom_lbl = device_label(&cd);
             let labels = ["Auto", "GPU 0", custom_lbl.as_str(), "CPU"];
@@ -373,7 +373,11 @@ impl FoloApp {
             .store
             .system
             .ready()
-            .and_then(|s| selected_gpu_idx.and_then(|i| s.gpus.get(i)).or_else(|| s.gpus.first()))
+            .and_then(|s| match selected_gpu_idx {
+                Some(i) => s.gpus.get(i),
+                None if device_val == "auto" => s.gpus.first(),
+                None => None,
+            })
             .map(|g| crate::ui::short_gpu(&g.name));
         // Section headings sit above a hairline and lead their group (stronger than field labels).
         let section = |title: &str| {
