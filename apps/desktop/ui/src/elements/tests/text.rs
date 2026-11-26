@@ -284,6 +284,24 @@ fn line_clamp_with_truncate_elides_final_line_from_actual_wrap_boundaries() {
         ellipsis_id,
         "newline-clamped line 2 must end with ellipsis"
     );
+
+    // Leading spaces must not trigger hanging-indent over-counting: `"  abcdefghij"` fits in 2
+    // lines of 36 px (`"  abcd"` + `"efghij"`) with all 10 letters intact and no ellipsis.
+    let (mut app, window) = open(|_, _| {
+        div()
+            .flex()
+            .flex_col()
+            .child(text_box(36.).line_clamp(2).text_ellipsis().child("  abcdefghij"))
+            .child(text_box(36.).child("…"))
+            .into_any_element()
+    });
+    let scene = draw(&mut app, window);
+    let glyphs = sprites(&scene);
+    let ls = lines(&glyphs);
+    assert_eq!(ls.len(), 3, "2 lines of text + 1 reference ellipsis line");
+    let ref_ellipsis = ls[2][0].mask.id;
+    assert_eq!(ls[0].len() + ls[1].len(), 10, "all 10 letters must remain intact");
+    assert_ne!(ls[1].last().unwrap().mask.id, ref_ellipsis, "fitting leading-space text must not be elided");
 }
 
 #[test]

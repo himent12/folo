@@ -43,6 +43,15 @@ impl LineWrapper {
         fragments: &'a [LineFragment],
         wrap_width: Pixels,
     ) -> impl Iterator<Item = Boundary> + 'a {
+        self.wrap_line_inner(fragments, wrap_width, true)
+    }
+
+    fn wrap_line_inner<'a>(
+        &'a mut self,
+        fragments: &'a [LineFragment],
+        wrap_width: Pixels,
+        carry_indent: bool,
+    ) -> impl Iterator<Item = Boundary> + 'a {
         let mut width = px(0.);
         let mut first_non_whitespace_ix = None;
         let mut line_has_non_whitespace = false;
@@ -151,7 +160,9 @@ impl LineWrapper {
                 width += item_width;
                 prev_c = new_prev_c;
                 if width > wrap_width && ix > last_wrap_ix {
-                    if let (None, Some(first_non_whitespace_ix)) = (indent, first_non_whitespace_ix) {
+                    if carry_indent
+                        && let (None, Some(first_non_whitespace_ix)) = (indent, first_non_whitespace_ix)
+                    {
                         indent = Some(Self::MAX_INDENT.min((first_non_whitespace_ix - last_wrap_ix) as u32));
                     }
 
@@ -166,7 +177,7 @@ impl LineWrapper {
                         line_has_non_whitespace = new_prev_c != ' ';
                     }
 
-                    if let Some(indent) = indent {
+                    if carry_indent && let Some(indent) = indent {
                         width += self.width_for_char(' ') * indent as f32;
                     }
 
@@ -230,8 +241,12 @@ impl LineWrapper {
         let (result, truncated) =
             self.truncate_multiline_text(text, wrap_width, max_lines, truncation_suffix);
         if truncated {
-            let runs = runs_after_truncation(&result, truncation_suffix, runs);
-            (result, Cow::Owned(runs))
+            if result.is_empty() {
+                (result, Cow::Owned(Vec::new()))
+            } else {
+                let runs = runs_after_truncation(&result, truncation_suffix, runs);
+                (result, Cow::Owned(runs))
+            }
         } else {
             (result, Cow::Borrowed(runs))
         }
@@ -259,7 +274,10 @@ impl LineWrapper {
             let has_more = paragraphs.peek().is_some();
             let remaining = max_lines - lines_used;
             let fragments = [LineFragment::text(para)];
-            let boundaries: Vec<Boundary> = self.wrap_line(&fragments, wrap_width).take(remaining).collect();
+            // Match `LineLayout::compute_wrap_boundaries`, which does not carry leading-space
+            // hanging indentation onto wrapped UI lines.
+            let boundaries: Vec<Boundary> =
+                self.wrap_line_inner(&fragments, wrap_width, false).take(remaining).collect();
             let overflow_in_para = boundaries.len() >= remaining;
             let overflow_after_para =
                 !overflow_in_para && lines_used + boundaries.len() + 1 == max_lines && has_more;

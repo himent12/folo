@@ -672,14 +672,13 @@ impl Element for TextElement {
                 )),
             )
         } else {
+            let x1 = line.x_for_index(selected_range.start);
+            let x2 = line.x_for_index(selected_range.end);
             (
                 Some(fill(
                     Bounds::from_corners(
-                        point(bounds.left() + line.x_for_index(selected_range.start) - scroll_x, caret_top),
-                        point(
-                            bounds.left() + line.x_for_index(selected_range.end) - scroll_x,
-                            caret_top + caret_h,
-                        ),
+                        point(bounds.left() + x1.min(x2) - scroll_x, caret_top),
+                        point(bounds.left() + x1.max(x2) - scroll_x, caret_top + caret_h),
                     ),
                     alpha(t.accent_fill(), 0.28),
                 )),

@@ -105,21 +105,69 @@ impl LineLayout {
         self.len
     }
 
-    /// The x position of the character at `index` (the line's width past the last glyph).
-    /// Handles visual-order RTL runs by picking the glyph with the smallest `glyph.index >= index`.
+    /// The x position of the character at `index` (the line's logical end past the last glyph).
+    /// Handles visual-order RTL runs: for an RTL run, logical `index` maps to the visual right edge
+    /// of its cluster, and an index past the end of a trailing RTL run maps to its visual left edge.
     pub fn x_for_index(&self, index: usize) -> Pixels {
         let mut best: Option<(usize, Pixels)> = None;
-        for run in &self.runs {
-            for glyph in &run.glyphs {
+        let mut max_run: Option<(usize, bool, Pixels)> = None;
+        for (run_ix, run) in self.runs.iter().enumerate() {
+            if run.glyphs.is_empty() {
+                continue;
+            }
+            let first_ix = run.glyphs.first().unwrap().index;
+            let last_ix = run.glyphs.last().unwrap().index;
+            let is_rtl = if first_ix != last_ix {
+                first_ix > last_ix
+            } else {
+                // Single-cluster run (e.g. font fallback inside an RTL word): check whether an
+                // adjacent run sits in descending logical order relative to this cluster.
+                let prev_desc = self.runs[..run_ix]
+                    .iter()
+                    .rev()
+                    .find_map(|r| r.glyphs.last().map(|g| g.index))
+                    .is_some_and(|prev_ix| prev_ix > first_ix);
+                let next_desc = self.runs[run_ix + 1..]
+                    .iter()
+                    .find_map(|r| r.glyphs.first().map(|g| g.index))
+                    .is_some_and(|next_ix| next_ix < last_ix);
+                prev_desc || next_desc
+            };
+            let run_max_ix = run.glyphs.iter().map(|g| g.index).max().unwrap_or(0);
+            if max_run.is_none_or(|(prev_max, _, _)| run_max_ix >= prev_max) {
+                max_run = Some((run_max_ix, is_rtl, run.glyphs[0].position.x));
+            }
+            let run_right = self.runs[run_ix + 1..]
+                .iter()
+                .find_map(|r| r.glyphs.first().map(|g| g.position.x))
+                .unwrap_or(self.width);
+            for (glyph_ix, glyph) in run.glyphs.iter().enumerate() {
+                let next_x = run.glyphs.get(glyph_ix + 1).map_or(run_right, |g| g.position.x);
+                let edge_x = if is_rtl {
+                    // For RTL, logical start of a cluster is the visual right edge of its last
+                    // glyph in visual order.
+                    if run.glyphs.get(glyph_ix + 1).is_some_and(|g| g.index == glyph.index) {
+                        continue;
+                    }
+                    next_x
+                } else {
+                    glyph.position.x
+                };
                 if glyph.index == index {
-                    return glyph.position.x;
+                    return edge_x;
                 }
                 if glyph.index > index && best.is_none_or(|(best_ix, _)| glyph.index < best_ix) {
-                    best = Some((glyph.index, glyph.position.x));
+                    best = Some((glyph.index, edge_x));
                 }
             }
         }
-        best.map_or(self.width, |(_, x)| x)
+        if let Some((_, x)) = best {
+            return x;
+        }
+        if let Some((_, true, left_x)) = max_run {
+            return left_x;
+        }
+        self.width
     }
 
     /// The font of the glyph at `index`.

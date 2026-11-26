@@ -475,11 +475,14 @@ fn x_and_font_id_for_index_handle_visual_order_rtl_glyphs() {
             },
         ],
     };
-    assert_eq!(layout.x_for_index(0), px(20.));
-    assert_eq!(layout.x_for_index(1), px(10.));
-    assert_eq!(layout.x_for_index(2), px(10.));
-    assert_eq!(layout.x_for_index(4), px(0.));
-    assert_eq!(layout.x_for_index(6), px(30.));
+    // RTL logical caret positions walk right-to-left: logical start (0) is the visual right edge
+    // (30 px), intermediate boundaries sit between clusters (20 px, 10 px), and logical end (6) is
+    // the visual left edge (0 px).
+    assert_eq!(layout.x_for_index(0), px(30.));
+    assert_eq!(layout.x_for_index(1), px(20.));
+    assert_eq!(layout.x_for_index(2), px(20.));
+    assert_eq!(layout.x_for_index(4), px(10.));
+    assert_eq!(layout.x_for_index(6), px(0.));
     assert_eq!(layout.font_id_for_index(0), Some(crate::FontId(2)));
     assert_eq!(layout.font_id_for_index(2), Some(crate::FontId(1)));
     assert_eq!(layout.font_id_for_index(4), Some(crate::FontId(1)));

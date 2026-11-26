@@ -521,6 +521,28 @@ fn modified_arrows_do_not_activate_segmented_tabs_or_charts_and_narrow_charts_re
         .collect();
     let chart_sprites: Vec<_> = mono.iter().filter(|s| s.bounds.origin.y < px(160.0).scale(1.0)).collect();
     assert!(!chart_sprites.is_empty(), "narrow line chart must have positive plot_h and paint labels");
+    // With `readout = false`, the cursor chip quad (`height == 16`) must be painted and stay inside
+    // `[0..140]`.
+    let chip_quads: Vec<_> = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            folo_ui::Primitive::Quad(q)
+                if q.bounds.size.height == px(16.0).scale(1.0)
+                    && q.bounds.origin.y < px(160.0).scale(1.0) =>
+            {
+                Some(q)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chip_quads.len(), 1, "narrow line chart with readout=false must paint its cursor chip");
+    assert!(
+        chip_quads[0].bounds.origin.x >= px(-1.0).scale(1.0)
+            && chip_quads[0].bounds.right() <= px(141.0).scale(1.0),
+        "cursor chip escaped 140 px width: {:?}",
+        chip_quads[0].bounds
+    );
     for s in &mono {
         assert!(
             s.bounds.origin.x >= px(-1.0).scale(1.0) && s.bounds.right() <= px(141.0).scale(1.0),
@@ -549,6 +571,8 @@ impl folo_ui::Render for ChartClampView {
         );
         lc.x_range = Some((0.0, 10.0));
         lc.height = 160.;
+        lc.readout = false;
+        lc.x_name = "epoch";
         lc.pow_caption = true;
         lc.axis_titles = Some(("Training epoch number", "Rate"));
         lc.future = Some((2.0, "ETA 2h 15m remaining".into()));
@@ -571,4 +595,75 @@ impl folo_ui::Render for ChartClampView {
         );
         div().size_full().flex().flex_col().child(crate::charts::line_chart(&t, lc)).child(hist)
     }
+}
+
+#[test]
+fn rtl_text_input_partial_selection_paints_positive_width_highlight() {
+    use folo_ui::{Entity, Focusable, IntoElement, ParentElement, Styled, div};
+
+    struct RtlInputView(Entity<crate::input::TextInput>);
+    impl folo_ui::Render for RtlInputView {
+        fn render(&mut self, _: &mut folo_ui::Window, cx: &mut folo_ui::Context<Self>) -> impl IntoElement {
+            let t = crate::theme::theme(cx);
+            div().size_full().bg(t.bg_panel).p(px(8.)).child(self.0.clone())
+        }
+    }
+
+    let mut app = HeadlessApp::new(HeadlessOptions { size: size(px(240.), px(60.)), ..Default::default() });
+    let (window, input) = app.update(|cx| {
+        cx.set_global(Theme::new(Mode::Dark));
+        crate::input::bind_keys(cx);
+        let input = cx.new(|cx| crate::input::TextInput::new("", cx));
+        let input_for_view = input.clone();
+        let w = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(folo_ui::Bounds::new(
+                        point(px(0.), px(0.)),
+                        size(px(240.), px(60.)),
+                    ))),
+                    ..Default::default()
+                },
+                |_, cx| cx.new(|_| RtlInputView(input_for_view)),
+            )
+            .unwrap();
+        (w, input)
+    });
+    app.update(|cx| {
+        input.update(cx, |inp, cx| {
+            inp.set_text("שלום", cx);
+        });
+        cx.update_window(window.into(), |_, w, cx| {
+            let fh = input.read(cx).focus_handle(cx);
+            w.focus(&fh);
+        })
+        .unwrap();
+    });
+    app.frame(window.into());
+    for spec in ["home", "shift-right", "shift-right"] {
+        app.simulate_input(
+            window.into(),
+            PlatformInput::KeyDown(KeyDownEvent {
+                keystroke: Keystroke::parse(spec).unwrap(),
+                is_held: false,
+            }),
+        );
+        app.frame(window.into());
+    }
+    let scene = app.scene(window.into());
+    let accent_sel = crate::theme::alpha(Theme::new(Mode::Dark).accent_fill(), 0.28);
+    let sel_quads: Vec<_> = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            folo_ui::Primitive::Quad(q) if q.background.solid == accent_sel => Some(q),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sel_quads.len(), 1, "focused RTL partial selection must paint one highlight quad");
+    assert!(
+        sel_quads[0].bounds.size.width > px(0.).scale(1.0),
+        "RTL partial selection highlight must have positive width, got {:?}",
+        sel_quads[0].bounds
+    );
 }

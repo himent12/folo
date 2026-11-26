@@ -314,6 +314,31 @@ fn rtl_and_bidi_runs_preserve_all_glyphs_and_visual_positions() {
     let xs: Vec<f32> = glyphs.iter().map(|g| f(g.position.x)).collect();
     assert!(xs.windows(2).all(|w| w[0] < w[1]), "visual positions must strictly increase: {xs:?}");
     assert!(line.width > px(0.));
+    // RTL caret geometry: logical start (0) is the right edge, logical end (8) is the left edge,
+    // and logical offsets 0, 2, 4, 6, 8 walk strictly right-to-left so selections span the right glyphs.
+    let caret_xs: Vec<f32> = [0, 2, 4, 6, hebrew.len()].iter().map(|&ix| f(line.x_for_index(ix))).collect();
+    assert_eq!(caret_xs[0], f(line.width), "RTL logical start sits at the right edge: {caret_xs:?}");
+    assert_eq!(caret_xs[4], 0.0, "RTL logical end sits at the left edge: {caret_xs:?}");
+    assert!(
+        caret_xs.windows(2).all(|w| w[0] > w[1]),
+        "RTL logical carets walk strictly right-to-left: {caret_xs:?}"
+    );
+
+    // Trailing RTL run ("hello שלום"): logical end sits at the left edge of the Hebrew run.
+    let trailing_rtl = "hello שלום";
+    let trailing_line = layout(&ts, regular, trailing_rtl, 14.);
+    let heb_left = trailing_line
+        .runs
+        .iter()
+        .flat_map(|r| r.glyphs.iter())
+        .find(|g| g.index >= 6)
+        .map(|g| f(g.position.x))
+        .unwrap();
+    assert_eq!(
+        f(trailing_line.x_for_index(trailing_rtl.len())),
+        heb_left,
+        "logical end of a trailing RTL run sits at its visual left edge"
+    );
 
     // Pure Arabic ("مرحبا", 5 chars): must not collapse to a single glyph; every index is a valid
     // char boundary and visual positions advance left-to-right.
