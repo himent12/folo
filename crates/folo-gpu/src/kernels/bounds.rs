@@ -27,7 +27,7 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
         "conv2d_depthwise" => super::conv::depthwise_fits(spec),
         "conv2d_depthwise_grad" => super::conv::depthwise_grad_fits(spec),
         "conv_split_finish" => super::conv::split_fits(spec),
-        "gemm" | "gemm_cat" => {
+        "gemm" | "gemm_cat" | "gemm_epilogue" => {
             let cfg = super::gemm::TileConfig {
                 bm: spec.get_u32("BM", 128),
                 bn: spec.get_u32("BN", 128),
@@ -35,7 +35,10 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
                 tm: spec.get_u32("TM", 8),
                 tn: spec.get_u32("TN", 8),
             };
-            cfg.valid() && cat_fits(spec) && (1..=cfg.bk).contains(&spec.get_u32("WG_RUN", cfg.bk.min(16)))
+            cfg.valid()
+                && cat_fits(spec)
+                && spec.get_u32("RES_MODE", 0) <= 2
+                && (1..=cfg.bk).contains(&spec.get_u32("WG_RUN", cfg.bk.min(16)))
         }
         "coop_gemm" | "coop_gemm_cat" => {
             let cfg = super::coop::CoopConfig {
@@ -81,6 +84,8 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
         "reduce_var_rows" => super::reduce::var_rows_fits(spec),
         "sdpa_fwd" | "sdpa_bwd_dkdv" | "sdpa_bwd_dq" => super::attention::sdpa_fits(spec),
         "bias_add_silu" => super::fused_act::bias_add_silu_fits(spec),
+        "bias_residual_act" => super::fused_act::bias_residual_act_fits(spec),
+        "where_select_vec4" | "where_select_scalar" => super::select::where_select_fits(spec),
         "muon_gemm" => super::muon::gemm_fits(spec),
         // The multi-tensor kernels (`J` tensors) are only found through their resolvers, which bound `J`.
         _ => true,
@@ -210,6 +215,36 @@ mod tests {
             ("swiglu_fwd", Spec::new().bool("VEC4", true)),
             ("swiglu_bwd", Spec::new().bool("VEC4", true)),
             ("bias_add_silu", Spec::new().u32("MODE", 1).bool("HAS_BIAS", true)),
+            (
+                "bias_residual_act",
+                Spec::new().u32("MODE", 0).u32("ACT", 2).u32("RES_MODE", 1).bool("HAS_BIAS", true),
+            ),
+            ("where_select_vec4", Spec::new().u32("MC", 0).u32("MA", 2).u32("MB", 3).bool("COND_U8", true)),
+            ("where_select_scalar", Spec::new().u32("MC", 1).u32("MA", 0).u32("MB", 0)),
+            (
+                "rope2d_table",
+                Spec::new().bool("INTERLEAVED", true).bool("BACKWARD", false).bool("VEC4", true),
+            ),
+            (
+                "rope2d_trig",
+                Spec::new().bool("INTERLEAVED", false).bool("BACKWARD", true).bool("VEC4", false),
+            ),
+            ("q8_matmul", Spec::new().u32("ACT", 8).bool("HAS_BIAS", true).bool("GROUPED", true)),
+            (
+                "q8_gemv",
+                Spec::new().u32("ACT", 11).bool("HAS_BIAS", true).bool("GROUPED", false).subgroups(true),
+            ),
+            ("scatter_add_vec4", Spec::new().bool("IDX64", true)),
+            (
+                "gemm_epilogue",
+                Spec::new()
+                    .u32("BM", 64)
+                    .u32("BN", 64)
+                    .u32("BK", 16)
+                    .u32("TM", 4)
+                    .u32("TN", 4)
+                    .u32("RES_MODE", 2),
+            ),
             (
                 "res_norm_fwd",
                 Spec::new()
@@ -414,6 +449,20 @@ mod tests {
             ("sdpa_bwd_dq", Spec::new().u32("D_CHUNKS", 0)),
             ("sdpa_bwd_dq", Spec::new().u32("D_CHUNKS", 5)),
             ("bias_add_silu", Spec::new().u32("MODE", 3)),
+            ("bias_residual_act", Spec::new().u32("MODE", 0).u32("ACT", 4)),
+            ("bias_residual_act", Spec::new().u32("MODE", 0).u32("RES_MODE", 3)),
+            ("where_select_vec4", Spec::new().u32("MC", 4)),
+            ("where_select_scalar", Spec::new().u32("MB", 4)),
+            (
+                "gemm_epilogue",
+                Spec::new()
+                    .u32("BM", 64)
+                    .u32("BN", 64)
+                    .u32("BK", 16)
+                    .u32("TM", 4)
+                    .u32("TN", 4)
+                    .u32("RES_MODE", 3),
+            ),
             ("gemm", Spec::new().u32("BM", 65536)),
             ("gemm", Spec::new().u32("TM", 0)),
             (

@@ -11,11 +11,25 @@
 //! 2. `norm_bwd_dwb` / `norm_bwd_single`: coalesced `(32, 8)` column reduction over `outer` for `dweight` and
 //!    `dbias`, with split-K when `outer` is large and column tiles are few, finishing via `reduce::reduce_as`.
 
-use super::{check_buf, prod, reduce, use_subgroups, vec_prelude};
+use super::{check_buf, prod, reduce, use_subgroups, vec_prelude, vec_prelude_f16};
 use crate::DType;
 use crate::context::GpuContext;
 use crate::error::Result;
+use crate::kernels::gemm::check_dtype;
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
+
+fn act_prelude(spec: &Spec) -> &'static str {
+    let vec = spec.get_bool("VEC4");
+    if spec.is_f16() { vec_prelude_f16(vec) } else { vec_prelude(vec) }
+}
+
+fn param_f32_prelude(vec: bool) -> &'static str {
+    if vec {
+        "alias PF = vec4<f32>;\nfn PF4(x: PF) -> vec4<f32> { return x; }\nfn PFOUT(v: vec4<f32>) -> PF { return v; }\n"
+    } else {
+        "alias PF = f32;\nfn PF4(x: PF) -> vec4<f32> { return vec4<f32>(x); }\nfn PFOUT(v: vec4<f32>) -> PF { return v.x; }\n"
+    }
+}
 
 /// Max per-row units (`d / 4` when `VEC4`, else `d`) cached in per-thread registers (4 units × 256 threads).
 const NORM_ROW_CACHE_MAX: usize = 1024;
@@ -161,6 +175,15 @@ fn is_finite1(x: f32) -> bool {
 fn is_inf1(x: f32) -> bool {
     return (bitcast<u32>(x) & 0x7fffffffu) == 0x7f800000u;
 }
+fn norm_xh(x: vec4<f32>, mean: f32, rstd: f32) -> vec4<f32> {
+    if (rstd > 0.0 && rstd < 1e-30) {
+        let xs = ldexp(x, vec4<i32>(-96i));
+        let ms = select(vec4<f32>(ldexp(mean, -96i)), vec4<f32>(0.0), RMS);
+        return (xs - ms) * ldexp(rstd, 96i);
+    }
+    let xc = select(x - vec4<f32>(mean), x, RMS);
+    return xc * rstd;
+}
 "#;
 
 const NORM_FWD_BODY: &str = include_str!("../shaders/layer_norm_fwd.wgsl");
@@ -201,20 +224,21 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
 }
 "#;
 
-/// Coalesced `(32, 8)` column reduction for `dweight` and/or `dbias`.
+/// Coalesced `(32, 8)` column reduction for `F32` `dweight` and/or `dbias` over `X`/`G` (`F32` or `F16`).
 /// Params: 0 = outer, 1 = units_d (`d / 4` when VEC4 else `d`), 2 = col_groups (`ceil(units_d / 32)`),
 /// 3 = splits, 4 = chunk_rows (`ceil(outer / splits)`).
 fn gen_bwd_dwb(spec: &Spec, two_out: bool) -> String {
     let vec = spec.get_bool("VEC4");
-    let pre = vec_prelude(vec);
+    let pre = act_prelude(spec);
+    let pf = param_f32_prelude(vec);
     let body = if two_out {
         r#"
 @group(0) @binding(1) var<storage, read> X: array<E>;
 @group(0) @binding(2) var<storage, read> G: array<E>;
 @group(0) @binding(3) var<storage, read> MEAN: array<f32>;
 @group(0) @binding(4) var<storage, read> RSTD: array<f32>;
-@group(0) @binding(5) var<storage, read_write> DW: array<E>;
-@group(0) @binding(6) var<storage, read_write> DB: array<E>;
+@group(0) @binding(5) var<storage, read_write> DW: array<PF>;
+@group(0) @binding(6) var<storage, read_write> DB: array<PF>;
 
 var<workgroup> sh_w: array<vec4<f32>, 256>;
 var<workgroup> sh_b: array<vec4<f32>, 256>;
@@ -239,9 +263,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         for (var o = start + lid.y; o < end; o += 8u) {
             let idx = o * units + col;
             let gv = V4(G[idx]);
-            var xv = V4(X[idx]);
-            if (!RMS) { xv -= vec4<f32>(MEAN[o]); }
-            aw += gv * (xv * RSTD[o]);
+            var mean = 0.0;
+            if (!RMS) { mean = MEAN[o]; }
+            aw += gv * norm_xh(V4(X[idx]), mean, RSTD[o]);
             ab += gv;
         }
     }
@@ -254,8 +278,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
                + ((sh_w[128u + lid.x] + sh_w[160u + lid.x]) + (sh_w[192u + lid.x] + sh_w[224u + lid.x]));
         let sb = ((sh_b[lid.x] + sh_b[32u + lid.x]) + (sh_b[64u + lid.x] + sh_b[96u + lid.x]))
                + ((sh_b[128u + lid.x] + sh_b[160u + lid.x]) + (sh_b[192u + lid.x] + sh_b[224u + lid.x]));
-        DW[sidx * units + col] = OUT(sw);
-        DB[sidx * units + col] = OUT(sb);
+        DW[sidx * units + col] = PFOUT(sw);
+        DB[sidx * units + col] = PFOUT(sb);
     }
 }
 "#
@@ -266,7 +290,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
 @group(0) @binding(2) var<storage, read> G: array<E>;
 @group(0) @binding(3) var<storage, read> MEAN: array<f32>;
 @group(0) @binding(4) var<storage, read> RSTD: array<f32>;
-@group(0) @binding(5) var<storage, read_write> OUTB: array<E>;
+@group(0) @binding(5) var<storage, read_write> OUTB: array<PF>;
 
 var<workgroup> sh_v: array<vec4<f32>, 256>;
 
@@ -290,9 +314,9 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
             let idx = o * units + col;
             let gv = V4(G[idx]);
             if (MODE == 0u) {
-                var xv = V4(X[idx]);
-                if (!RMS) { xv -= vec4<f32>(MEAN[o]); }
-                acc += gv * (xv * RSTD[o]);
+                var mean = 0.0;
+                if (!RMS) { mean = MEAN[o]; }
+                acc += gv * norm_xh(V4(X[idx]), mean, RSTD[o]);
             } else {
                 acc += gv;
             }
@@ -304,34 +328,38 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     if (lid.y == 0u && valid) {
         let sv = ((sh_v[lid.x] + sh_v[32u + lid.x]) + (sh_v[64u + lid.x] + sh_v[96u + lid.x]))
                + ((sh_v[128u + lid.x] + sh_v[160u + lid.x]) + (sh_v[192u + lid.x] + sh_v[224u + lid.x]));
-        OUTB[sidx * units + col] = OUT(sv);
+        OUTB[sidx * units + col] = PFOUT(sv);
     }
 }
 "#
     };
-    format!("{pre}{body}")
+    format!("{pre}{pf}{LANE_HELPERS}{body}")
 }
 
 fn gen_fwd(s: &Spec) -> String {
-    let pre = vec_prelude(s.get_bool("VEC4"));
+    let vec = s.get_bool("VEC4");
+    let pre = act_prelude(s);
+    let pf = param_f32_prelude(vec);
     let cache = s.get_bool("CACHE");
     let (red, entry) = if s.is_subgroups() {
         (REDUCE_HELPERS_SUBGROUPS, NORM_FWD_ENTRY_SG)
     } else {
         (REDUCE_HELPERS_PORTABLE, NORM_FWD_ENTRY_PORTABLE)
     };
-    format!("{pre}const CACHE_ROW: bool = {cache};\n{LANE_HELPERS}{red}{NORM_FWD_BODY}{entry}")
+    format!("{pre}{pf}const CACHE_ROW: bool = {cache};\n{LANE_HELPERS}{red}{NORM_FWD_BODY}{entry}")
 }
 
 fn gen_bwd_dx(s: &Spec) -> String {
-    let pre = vec_prelude(s.get_bool("VEC4"));
+    let vec = s.get_bool("VEC4");
+    let pre = act_prelude(s);
+    let pf = param_f32_prelude(vec);
     let cache = s.get_bool("CACHE");
     let (red, entry) = if s.is_subgroups() {
         (REDUCE_HELPERS_SUBGROUPS, NORM_BWD_DX_ENTRY_SG)
     } else {
         (REDUCE_HELPERS_PORTABLE, NORM_BWD_DX_ENTRY_PORTABLE)
     };
-    format!("{pre}const CACHE_ROW: bool = {cache};\n{LANE_HELPERS}{red}{NORM_BWD_DX_BODY}{entry}")
+    format!("{pre}{pf}const CACHE_ROW: bool = {cache};\n{LANE_HELPERS}{red}{NORM_BWD_DX_BODY}{entry}")
 }
 
 use Access::{Read as R, ReadWrite as RW};
@@ -371,9 +399,10 @@ fn dwb_split_plan(outer: usize, units_d: usize) -> (usize, usize) {
     (splits, chunk)
 }
 
-/// Fused LayerNorm forward over dense f32 `[outer, d]`, writing `y [outer, d]`, `mean [outer]`, `rstd [outer]`.
+/// Fused LayerNorm forward over dense `[outer, d]` (`F32` or `F16` activations, `F32` params/stats),
+/// writing `y [outer, d]`, `mean [outer]`, `rstd [outer]`.
 #[allow(clippy::too_many_arguments)]
-pub fn layer_norm_forward(
+pub fn layer_norm_forward_dtype(
     ctx: &GpuContext,
     x: &wgpu::Buffer,
     weight: Option<&wgpu::Buffer>,
@@ -384,10 +413,12 @@ pub fn layer_norm_forward(
     outer: usize,
     d: usize,
     eps: f32,
+    dtype: DType,
 ) -> Result<()> {
+    check_dtype(ctx, dtype, "layer_norm_forward")?;
     let total = prod(&[outer, d])?;
-    check_buf(x, total, DType::F32, "layer_norm input")?;
-    check_buf(y, total, DType::F32, "layer_norm output")?;
+    check_buf(x, total, dtype, "layer_norm input")?;
+    check_buf(y, total, dtype, "layer_norm output")?;
     check_buf(mean, outer, DType::F32, "layer_norm mean")?;
     check_buf(rstd, outer, DType::F32, "layer_norm rstd")?;
     if let Some(w) = weight {
@@ -409,6 +440,7 @@ pub fn layer_norm_forward(
             .bool("HAS_B", bias.is_some())
             .bool("VEC4", vec4)
             .bool("CACHE", units <= NORM_ROW_CACHE_MAX)
+            .f16(dtype == DType::F16)
             .subgroups(use_subgroups(ctx)),
     )?;
     let p = Params::new().uz(outer)?.uz(units)?.f((1.0 / d as f64) as f32).f(eps).f(eps.sqrt());
@@ -420,9 +452,27 @@ pub fn layer_norm_forward(
     )
 }
 
-/// Fused RMSNorm forward over dense f32 `[outer, d]`, writing `y [outer, d]` and `rstd [outer]`.
+/// Fused LayerNorm forward over dense f32 `[outer, d]`, writing `y [outer, d]`, `mean [outer]`, `rstd [outer]`.
 #[allow(clippy::too_many_arguments)]
-pub fn rms_norm_forward(
+pub fn layer_norm_forward(
+    ctx: &GpuContext,
+    x: &wgpu::Buffer,
+    weight: Option<&wgpu::Buffer>,
+    bias: Option<&wgpu::Buffer>,
+    y: &wgpu::Buffer,
+    mean: &wgpu::Buffer,
+    rstd: &wgpu::Buffer,
+    outer: usize,
+    d: usize,
+    eps: f32,
+) -> Result<()> {
+    layer_norm_forward_dtype(ctx, x, weight, bias, y, mean, rstd, outer, d, eps, DType::F32)
+}
+
+/// Fused RMSNorm forward over dense `[outer, d]` (`F32` or `F16` activations, `F32` params/stats),
+/// writing `y [outer, d]` and `rstd [outer]`.
+#[allow(clippy::too_many_arguments)]
+pub fn rms_norm_forward_dtype(
     ctx: &GpuContext,
     x: &wgpu::Buffer,
     weight: Option<&wgpu::Buffer>,
@@ -431,10 +481,12 @@ pub fn rms_norm_forward(
     outer: usize,
     d: usize,
     eps: f32,
+    dtype: DType,
 ) -> Result<()> {
+    check_dtype(ctx, dtype, "rms_norm_forward")?;
     let total = prod(&[outer, d])?;
-    check_buf(x, total, DType::F32, "rms_norm input")?;
-    check_buf(y, total, DType::F32, "rms_norm output")?;
+    check_buf(x, total, dtype, "rms_norm input")?;
+    check_buf(y, total, dtype, "rms_norm output")?;
     check_buf(rstd, outer, DType::F32, "rms_norm rstd")?;
     if let Some(w) = weight {
         check_buf(w, d, DType::F32, "rms_norm weight")?;
@@ -452,6 +504,7 @@ pub fn rms_norm_forward(
             .bool("HAS_B", false)
             .bool("VEC4", vec4)
             .bool("CACHE", units <= NORM_ROW_CACHE_MAX)
+            .f16(dtype == DType::F16)
             .subgroups(use_subgroups(ctx)),
     )?;
     let p = Params::new().uz(outer)?.uz(units)?.f((1.0 / d as f64) as f32).f(eps).f(eps.sqrt());
@@ -465,7 +518,23 @@ pub fn rms_norm_forward(
     )
 }
 
-/// Shared implementation for LayerNorm (`!rms`) and RMSNorm (`rms`) backward.
+/// Fused RMSNorm forward over dense f32 `[outer, d]`, writing `y [outer, d]` and `rstd [outer]`.
+#[allow(clippy::too_many_arguments)]
+pub fn rms_norm_forward(
+    ctx: &GpuContext,
+    x: &wgpu::Buffer,
+    weight: Option<&wgpu::Buffer>,
+    y: &wgpu::Buffer,
+    rstd: &wgpu::Buffer,
+    outer: usize,
+    d: usize,
+    eps: f32,
+) -> Result<()> {
+    rms_norm_forward_dtype(ctx, x, weight, y, rstd, outer, d, eps, DType::F32)
+}
+
+/// Shared implementation for LayerNorm (`!rms`) and RMSNorm (`rms`) backward (`F32` or `F16` activations,
+/// `F32` parameters, statistics, and parameter gradients).
 #[allow(clippy::too_many_arguments)]
 fn norm_backward_impl(
     ctx: &GpuContext,
@@ -480,12 +549,14 @@ fn norm_backward_impl(
     dbias: Option<&wgpu::Buffer>,
     outer: usize,
     d: usize,
+    dtype: DType,
 ) -> Result<()> {
     let op = if rms { "rms_norm_backward" } else { "layer_norm_backward" };
+    check_dtype(ctx, dtype, op)?;
     let total = prod(&[outer, d])?;
-    check_buf(x, total, DType::F32, op)?;
-    check_buf(grad, total, DType::F32, op)?;
-    check_buf(dx, total, DType::F32, op)?;
+    check_buf(x, total, dtype, op)?;
+    check_buf(grad, total, dtype, op)?;
+    check_buf(dx, total, dtype, op)?;
     check_buf(rstd, outer, DType::F32, op)?;
     if let Some(m) = mean {
         check_buf(m, outer, DType::F32, op)?;
@@ -510,6 +581,7 @@ fn norm_backward_impl(
     }
     let vec4 = d.is_multiple_of(4);
     let units = if vec4 { d / 4 } else { d };
+    let half = dtype == DType::F16;
     let mean_buf = mean.unwrap_or(ctx.dummy());
     let k_dx = ctx.kernel(
         &NORM_BWD_DX,
@@ -518,6 +590,7 @@ fn norm_backward_impl(
             .bool("HAS_W", weight.is_some())
             .bool("VEC4", vec4)
             .bool("CACHE", units <= NORM_ROW_CACHE_MAX)
+            .f16(half)
             .subgroups(use_subgroups(ctx)),
     )?;
     let p_dx = Params::new().uz(outer)?.uz(units)?.f((1.0 / d as f64) as f32);
@@ -539,7 +612,7 @@ fn norm_backward_impl(
 
     match (dweight, dbias) {
         (Some(dw), Some(db)) => {
-            let k = ctx.kernel(&NORM_BWD_DWB, Spec::new().bool("RMS", rms).bool("VEC4", vec4))?;
+            let k = ctx.kernel(&NORM_BWD_DWB, Spec::new().bool("RMS", rms).bool("VEC4", vec4).f16(half))?;
             if splits == 1 {
                 ctx.dispatch(&k, &[x, grad, mean_buf, rstd, dw, db], &p_dwb, grid)?;
             } else {
@@ -568,8 +641,10 @@ fn norm_backward_impl(
             }
         }
         (Some(dw), None) => {
-            let k =
-                ctx.kernel(&NORM_BWD_PARAM, Spec::new().bool("RMS", rms).bool("VEC4", vec4).u32("MODE", 0))?;
+            let k = ctx.kernel(
+                &NORM_BWD_PARAM,
+                Spec::new().bool("RMS", rms).bool("VEC4", vec4).u32("MODE", 0).f16(half),
+            )?;
             if splits == 1 {
                 ctx.dispatch(&k, &[x, grad, mean_buf, rstd, dw], &p_dwb, grid)?;
             } else {
@@ -587,8 +662,10 @@ fn norm_backward_impl(
             }
         }
         (None, Some(db)) => {
-            let k =
-                ctx.kernel(&NORM_BWD_PARAM, Spec::new().bool("RMS", rms).bool("VEC4", vec4).u32("MODE", 1))?;
+            let k = ctx.kernel(
+                &NORM_BWD_PARAM,
+                Spec::new().bool("RMS", rms).bool("VEC4", vec4).u32("MODE", 1).f16(half),
+            )?;
             if splits == 1 {
                 ctx.dispatch(&k, &[x, grad, mean_buf, rstd, db], &p_dwb, grid)?;
             } else {
@@ -610,6 +687,25 @@ fn norm_backward_impl(
     Ok(())
 }
 
+/// Fused LayerNorm backward over dense `[outer, d]` (`F32` or `F16` activations, `F32` params/stats/grads).
+#[allow(clippy::too_many_arguments)]
+pub fn layer_norm_backward_dtype(
+    ctx: &GpuContext,
+    x: &wgpu::Buffer,
+    grad: &wgpu::Buffer,
+    weight: Option<&wgpu::Buffer>,
+    mean: &wgpu::Buffer,
+    rstd: &wgpu::Buffer,
+    dx: &wgpu::Buffer,
+    dweight: Option<&wgpu::Buffer>,
+    dbias: Option<&wgpu::Buffer>,
+    outer: usize,
+    d: usize,
+    dtype: DType,
+) -> Result<()> {
+    norm_backward_impl(ctx, false, x, grad, weight, Some(mean), rstd, dx, dweight, dbias, outer, d, dtype)
+}
+
 /// Fused LayerNorm backward over dense f32 `[outer, d]`, writing `dx` and optional `dweight` / `dbias`.
 #[allow(clippy::too_many_arguments)]
 pub fn layer_norm_backward(
@@ -625,7 +721,24 @@ pub fn layer_norm_backward(
     outer: usize,
     d: usize,
 ) -> Result<()> {
-    norm_backward_impl(ctx, false, x, grad, weight, Some(mean), rstd, dx, dweight, dbias, outer, d)
+    layer_norm_backward_dtype(ctx, x, grad, weight, mean, rstd, dx, dweight, dbias, outer, d, DType::F32)
+}
+
+/// Fused RMSNorm backward over dense `[outer, d]` (`F32` or `F16` activations, `F32` params/stats/grads).
+#[allow(clippy::too_many_arguments)]
+pub fn rms_norm_backward_dtype(
+    ctx: &GpuContext,
+    x: &wgpu::Buffer,
+    grad: &wgpu::Buffer,
+    weight: Option<&wgpu::Buffer>,
+    rstd: &wgpu::Buffer,
+    dx: &wgpu::Buffer,
+    dweight: Option<&wgpu::Buffer>,
+    outer: usize,
+    d: usize,
+    dtype: DType,
+) -> Result<()> {
+    norm_backward_impl(ctx, true, x, grad, weight, None, rstd, dx, dweight, None, outer, d, dtype)
 }
 
 /// Fused RMSNorm backward over dense f32 `[outer, d]`, writing `dx` and optional `dweight`.
@@ -641,7 +754,7 @@ pub fn rms_norm_backward(
     outer: usize,
     d: usize,
 ) -> Result<()> {
-    norm_backward_impl(ctx, true, x, grad, weight, None, rstd, dx, dweight, None, outer, d)
+    rms_norm_backward_dtype(ctx, x, grad, weight, rstd, dx, dweight, outer, d, DType::F32)
 }
 
 #[cfg(test)]

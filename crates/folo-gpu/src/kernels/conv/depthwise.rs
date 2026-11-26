@@ -20,12 +20,13 @@ fn gen_depthwise_tiled(spec: &Spec) -> String {
     let g = |name: &str| spec.get_u32(name, 1);
     let (kh, kw) = (g("KH"), g("KW"));
     let vec4_out = spec.get_bool("VEC4_OUT");
+    let out_t = if spec.get_bool("OUT_F32") { "f32" } else { "T" };
     let sh_h = DW_TILE_H + kh - 1;
     let sh_w = DW_TILE_W + kw - 1;
     let sh_stride = if sh_w.is_multiple_of(4) { sh_w + 1 } else { sh_w };
     let sh_elems = sh_h * sh_w;
     let sh_total = sh_h * sh_stride;
-    let y_ty = if vec4_out { "vec4<T>" } else { "T" };
+    let y_ty = if vec4_out { format!("vec4<{out_t}>") } else { out_t.to_string() };
     let span = DW_VX + kw - 1;
     let mut s = UNARY_FN.to_string();
     let _ = writeln!(
@@ -100,22 +101,24 @@ fn gen_depthwise_tiled(spec: &Spec) -> String {
     }
     s.push_str("  var b = 0.0;\n  if (HAS_BIAS) { b = f32(BIAS[co]); }\n  let alpha = pf(6u);\n");
     if vec4_out {
-        s.push_str(
+        let _ = writeln!(
+            s,
             "  let v = vec4<f32>(\n\
              \x20   unary1(ACT, acc0 + b, alpha),\n\
              \x20   unary1(ACT, acc1 + b, alpha),\n\
              \x20   unary1(ACT, acc2 + b, alpha),\n\
              \x20   unary1(ACT, acc3 + b, alpha),\n\
              \x20 );\n\
-             \x20 Y[(nc * oh + oy) * (ow / 4u) + (ox0 / 4u)] = vec4<T>(v);\n}\n",
+             \x20 Y[(nc * oh + oy) * (ow / 4u) + (ox0 / 4u)] = vec4<{out_t}>(v);\n}}"
         );
     } else {
-        s.push_str(
+        let _ = writeln!(
+            s,
             "  let out = (nc * oh + oy) * ow + ox0;\n\
-             \x20 Y[out] = T(unary1(ACT, acc0 + b, alpha));\n\
-             \x20 if (ox0 + 1u < ow) { Y[out + 1u] = T(unary1(ACT, acc1 + b, alpha)); }\n\
-             \x20 if (ox0 + 2u < ow) { Y[out + 2u] = T(unary1(ACT, acc2 + b, alpha)); }\n\
-             \x20 if (ox0 + 3u < ow) { Y[out + 3u] = T(unary1(ACT, acc3 + b, alpha)); }\n}\n",
+             \x20 Y[out] = {out_t}(unary1(ACT, acc0 + b, alpha));\n\
+             \x20 if (ox0 + 1u < ow) {{ Y[out + 1u] = {out_t}(unary1(ACT, acc1 + b, alpha)); }}\n\
+             \x20 if (ox0 + 2u < ow) {{ Y[out + 2u] = {out_t}(unary1(ACT, acc2 + b, alpha)); }}\n\
+             \x20 if (ox0 + 3u < ow) {{ Y[out + 3u] = {out_t}(unary1(ACT, acc3 + b, alpha)); }}\n}}"
         );
     }
     s
@@ -128,6 +131,7 @@ fn gen_depthwise(spec: &Spec) -> String {
     let g = |name: &str| spec.get_u32(name, 1);
     let (kh, kw, sw, dh, dw) = (g("KH"), g("KW"), g("SW"), g("DH"), g("DW"));
     let vec4_out = spec.get_bool("VEC4_OUT");
+    let out_t = if spec.get_bool("OUT_F32") { "f32" } else { "T" };
     // Input columns the DW_VX outputs of a row read: (DW_VX - 1) · SW + (KW - 1) · DW + 1.
     let span = (DW_VX - 1) * sw + (kw - 1) * dw + 1;
     let mut taps = String::from(
@@ -178,7 +182,8 @@ fn gen_depthwise(spec: &Spec) -> String {
 ",
     );
     if vec4_out {
-        taps.push_str(
+        let _ = writeln!(
+            taps,
             "    let alpha = pf(6u);\n\
              \x20   let v = vec4<f32>(\n\
              \x20       unary1(ACT, (*acc)[0] + b, alpha),\n\
@@ -186,13 +191,13 @@ fn gen_depthwise(spec: &Spec) -> String {
              \x20       unary1(ACT, (*acc)[2] + b, alpha),\n\
              \x20       unary1(ACT, (*acc)[3] + b, alpha),\n\
              \x20   );\n\
-             \x20   Y[out / 4u] = vec4<T>(v);\n",
+             \x20   Y[out / 4u] = vec4<{out_t}>(v);"
         );
     } else {
         for v in 0..DW_VX {
             let _ = writeln!(
                 taps,
-                "    if (ox0 + {v}u < ow) {{ Y[out + {v}u] = T(unary1(ACT, (*acc)[{v}] + b, pf(6u))); }}"
+                "    if (ox0 + {v}u < ow) {{ Y[out + {v}u] = {out_t}(unary1(ACT, (*acc)[{v}] + b, pf(6u))); }}"
             );
         }
     }
@@ -200,7 +205,7 @@ fn gen_depthwise(spec: &Spec) -> String {
         "}
 ",
     );
-    let y_ty = if vec4_out { "vec4<T>" } else { "T" };
+    let y_ty = if vec4_out { format!("vec4<{out_t}>") } else { out_t.to_string() };
     let body = include_str!("../../shaders/depthwise.wgsl").replace(
         "var<storage, read_write> Y: array<T>;",
         &format!("var<storage, read_write> Y: array<{y_ty}>;"),
