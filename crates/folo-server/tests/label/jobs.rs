@@ -441,6 +441,22 @@ async fn export_rejects_changed_and_corrupt_source_images() {
     assert_eq!(ds.splits, Splits { train: 1, val: 0, test: 0 });
     let after_job: LabelJob = ok(app, get(&format!("/api/label/jobs/{}", job.id))).await;
     assert_eq!(after_job.dataset_id.as_deref(), Some(ds.id.as_str()));
+
+    // 6. Agent labeling also verifies the source digest before sending to the agent: swapping in a different
+    // same-sized image fails that image instead of saving the swapped image's boxes under the original digest.
+    let body2 = json!({ "name": "shapes-agent", "classes": ["box"], "path": photos.to_string_lossy() });
+    let job2: LabelJob = ok(app, post("/api/label/jobs", body2)).await;
+    std::fs::write(&img_path, &other_same_size).unwrap();
+    ok::<LabelJob>(app, post(&format!("/api/label/jobs/{}/start", job2.id), json!({ "agent": "claude" })))
+        .await;
+    let finished = idle(app, &job2.id).await;
+    assert_eq!((finished.counts.labeled, finished.counts.failed), (0, 1), "{finished:?}");
+    let page2 = images(app, &job2.id, "").await;
+    assert!(
+        page2.images[0].error.as_deref().is_some_and(|m| m.contains("changed on disk")),
+        "{:?}",
+        page2.images[0]
+    );
 }
 
 #[tokio::test]

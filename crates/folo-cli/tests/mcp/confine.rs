@@ -502,8 +502,16 @@ fn confined_proxy_refuses_synthetic_dataset_outside_data_dir() {
         .spawn()
         .unwrap()
         .into();
-    let mut first = String::new();
-    BufReader::new(serve.stdout.take().unwrap()).read_line(&mut first).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stdout = serve.stdout.take().unwrap();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = BufReader::new(stdout).read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let first = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("folo serve did not report its listening address within 30 s");
     let url = serde_json::from_str::<Value>(&first).unwrap()["url"].as_str().unwrap().to_string();
 
     // Different --data-dir: refused before the server writes or registers anything.

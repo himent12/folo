@@ -561,7 +561,7 @@ fn probe_folder_files(
                 wave_slots.push(Slot::Probe(idx));
             }
         }
-        let probed: Vec<Option<((u32, u32), String)>> = to_probe
+        let mut probed: Vec<Option<((u32, u32), String)>> = to_probe
             .par_iter()
             .map(|(p, _)| {
                 let size = folo_data::probe_size(p).ok()?;
@@ -577,13 +577,10 @@ fn probe_folder_files(
                 }
                 Slot::Probe(i) => {
                     let (path, name) = to_probe[i].take().expect("unique probe index");
-                    match probed[i].as_ref() {
-                        Some(&(size, ref sha256)) => staged.push(Candidate {
-                            name,
-                            source: Source::Folder(path),
-                            sha256: sha256.clone(),
-                            size,
-                        }),
+                    match probed[i].take() {
+                        Some((size, sha256)) => {
+                            staged.push(Candidate { name, source: Source::Folder(path), sha256, size })
+                        }
                         None => {
                             skipped.push(SkippedImage { file: name, reason: "not a readable image".into() })
                         }

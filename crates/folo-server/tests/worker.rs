@@ -204,13 +204,19 @@ async fn a_checkpoint_continues_on_another_server_and_history_has_cursors() {
     assert!(ok::<RunList>(&app_b, get("/api/runs")).await.runs.is_empty(), "refused requests leave no run");
 
     // On B: a new run that continues at epoch 2 (the step numbers too) and completes.
-    let (status, body) = send(&app_b, with(json!({ "checkpoint": model.id }))).await;
+    // Even if the request asks for a different epoch count (5), the queued response immediately reports the
+    // checkpoint's real schedule (2 epochs).
+    let (status, body) = send(&app_b, with(json!({ "checkpoint": model.id, "epochs": 5 }))).await;
     assert_eq!(status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&body));
     let cont: Run = serde_json::from_slice(&body).unwrap();
-    assert_eq!(cont.status, RunStatus::Queued);
+    assert_eq!((cont.status, cont.epochs), (RunStatus::Queued, 2));
     let dir = t.join("b").join("runs").join(&cont.id);
     let done = wait_run(&app_b, &cont.id, |r| !r.status.is_active()).await;
-    assert_eq!((done.status, done.epoch, done.step), (RunStatus::Completed, 2, 6), "{done:?}");
+    assert_eq!(
+        (done.status, done.epoch, done.epochs, done.step),
+        (RunStatus::Completed, 2, 2, 6),
+        "{done:?}"
+    );
     let m: RunMetrics = ok(&app_b, get(&format!("/api/runs/{}/metrics", cont.id))).await;
     assert_eq!((steps(&m), epochs(&m)), ((4..=6).collect::<Vec<_>>(), vec![2]));
     let log: RunLogs = ok(&app_b, get(&format!("/api/runs/{}/logs", cont.id))).await;

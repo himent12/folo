@@ -21,7 +21,7 @@ use crate::engine::{self, engine_error};
 use crate::error::{Error, Result};
 use crate::index::{data_error, decode_image, read_image_with, requested_path, write_atomic};
 use crate::label::Labeler;
-use crate::runs::run_model_id;
+use crate::runs::{CheckpointSnapshot, run_model_id};
 use crate::store::{
     ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
     Store, Subscription, Weights, WeightsFormat, weights_file_name,
@@ -352,7 +352,11 @@ impl Store for RealStore {
             ));
         }
         let m = self.model(checkpoint)?;
-        let file = engine::read_model_file(&m.path)?;
+        // Stage a private snapshot of the checkpoint first, validate that exact snapshot, and hand the staged file
+        // to `start_run` so an active trainer updating `last.folo` cannot swap a completed checkpoint underneath
+        // admission.
+        let staged = stage_checkpoint(&self.data_dir, &m.path)?;
+        let file = engine::read_model_file(staged.path())?;
         let Some(ckpt) = file.checkpoint() else {
             return Err(Error::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -364,6 +368,28 @@ impl Store for RealStore {
         let ckpt_cfg = serde_json::from_value::<folo_vision::TrainConfig>(ckpt.train.clone()).ok();
         let done = ckpt.epoch;
         let total = ckpt_cfg.as_ref().map_or(ckpt.sched.epochs, |c| ckpt.sched.epochs.min(c.epochs as u64));
+        if done > i64::MAX as u64 {
+            return Err(Error::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_weights",
+                format!(
+                    "checkpoint '{checkpoint}' ({}) has an out-of-range epoch count ({done})",
+                    m.model.name
+                ),
+            ));
+        }
+        if ckpt.best.fitness.is_some()
+            && (ckpt.best.epoch < 0 || done == 0 || (ckpt.best.epoch as u64) >= done)
+        {
+            return Err(Error::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_weights",
+                format!(
+                    "checkpoint '{checkpoint}' ({}) has inconsistent best epoch {} for {done} completed epoch(s)",
+                    m.model.name, ckpt.best.epoch
+                ),
+            ));
+        }
         if done >= total {
             return Err(Error::conflict(
                 "run_not_resumable",
@@ -376,7 +402,9 @@ impl Store for RealStore {
         }
         if done > 0
             && ckpt.best.fitness.is_some()
-            && ckpt_cfg.as_ref().is_some_and(|c| (done as i64 - 1) - ckpt.best.epoch >= c.patience as i64)
+            && ckpt_cfg
+                .as_ref()
+                .is_some_and(|c| (done as i64 - 1).saturating_sub(ckpt.best.epoch) >= c.patience as i64)
         {
             return Err(Error::conflict(
                 "run_not_resumable",
@@ -388,7 +416,12 @@ impl Store for RealStore {
             )
             .hint("start a new run with `weights` set to this model to train further"));
         }
-        self.start_run(config, Some(&m.path))
+        let snapshot = CheckpointSnapshot {
+            staged: staged.path(),
+            origin: &m.path,
+            epochs: u32::try_from(total).ok().filter(|&e| e > 0),
+        };
+        self.start_run(config, Some(snapshot))
     }
 
     fn resume_run(&self, id: &str, fields: &serde_json::Map<String, serde_json::Value>) -> Result<Run> {
@@ -657,6 +690,38 @@ impl Store for RealStore {
         self.runs.shutdown(Some(SHUTDOWN_WAIT));
         self.throughput.flush();
     }
+}
+
+/// Private staged copy of a checkpoint file under `<data_dir>/runs/`, removed automatically on drop.
+struct StagedCheckpoint(PathBuf);
+
+impl StagedCheckpoint {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for StagedCheckpoint {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Copies `src` into a fresh private staging file under `<data_dir>/runs/` so admission validates the exact
+/// snapshot that `Runs::register` copies into the new run folder.
+fn stage_checkpoint(data_dir: &Path, src: &Path) -> Result<StagedCheckpoint> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let runs_dir = data_dir.join("runs");
+    std::fs::create_dir_all(&runs_dir)
+        .map_err(|e| Error::internal(format!("creating {}: {e}", runs_dir.display())))?;
+    let pid = std::process::id();
+    let path = runs_dir.join(format!(".ckpt-stage-{pid}-{}.folo", SEQ.fetch_add(1, Ordering::Relaxed)));
+    if let Err(e) = std::fs::copy(src, &path) {
+        let _ = std::fs::remove_file(&path);
+        return Err(Error::io(format!("copying {} to {}: {e}", src.display(), path.display())));
+    }
+    Ok(StagedCheckpoint(path))
 }
 
 /// Claims `dir`, the new folder of a sample set ([`folo_data::unfinished::claim`]). Refused when another writer (such

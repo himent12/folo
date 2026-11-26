@@ -34,6 +34,7 @@
 mod entry;
 mod history;
 mod queue;
+pub use queue::CheckpointSnapshot;
 mod registry;
 mod resume;
 mod train;

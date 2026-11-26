@@ -191,7 +191,7 @@ impl Run<'_> {
                 active.in_call.insert(id.clone());
                 let r = state.record(&id).expect("an image of the run is not removed without leaving it");
                 self.job.emit(LabelEvent::Image(state.image(r)));
-                taken.push((id, self.job.image_path(r), (r.width, r.height)));
+                taken.push((id, self.job.image_path(r), (r.width, r.height), r.sha256.clone()));
             }
             taken
         };
@@ -200,8 +200,8 @@ impl Run<'_> {
         }
         let (mut batch, mut outcomes) = (Batch::default(), Vec::new());
         let side = self.plan.agent.image_side();
-        for (id, path, size) in taken {
-            match agent_jpeg(&path, side) {
+        for (id, path, size, sha256) in taken {
+            match agent_jpeg_verified(&path, side, size, sha256.as_deref()) {
                 Ok(image) => {
                     batch.ids.push(id);
                     batch.sizes.push(ImageSize { sent: image.size(), file: size });
@@ -475,6 +475,39 @@ impl AgentImage {
 /// ([`Agent::image_side`]), JPEG.
 pub fn agent_jpeg(path: &Path, side: u32) -> Result<AgentImage, String> {
     agent_jpeg_of(folo_data::read_image(path).map_err(|e| e.to_string())?, side)
+}
+
+/// Like [`agent_jpeg`], reading `path` once and checking that the image sent to the agent still matches its
+/// recorded dimensions and SHA-256 digest (when present), so a file swapped on disk after import is never
+/// labeled under another image's identity.
+fn agent_jpeg_verified(
+    path: &Path,
+    side: u32,
+    expected_size: (u32, u32),
+    expected_sha256: Option<&str>,
+) -> Result<AgentImage, String> {
+    folo_data::guard::check(path).map_err(|e| e.to_string())?;
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if folo_data::jpeg_truncated(&bytes) {
+        return Err(format!("{}: truncated JPEG (missing end-of-image marker)", path.display()));
+    }
+    let decoded = folo_data::decode(&bytes).map_err(|e| e.to_string())?;
+    if (decoded.width, decoded.height) != expected_size {
+        return Err(format!(
+            "{} changed size on disk: expected {}x{}, found {}x{}",
+            path.display(),
+            expected_size.0,
+            expected_size.1,
+            decoded.width,
+            decoded.height
+        ));
+    }
+    if let Some(expected) = expected_sha256
+        && super::dataset::sha256_bytes(&bytes) != expected
+    {
+        return Err(format!("{} changed on disk since it was added to the job", path.display()));
+    }
+    agent_jpeg_of(decoded, side)
 }
 
 /// A decoded image as an agent gets it ([`agent_jpeg`]): at most `side` pixels on its long side, JPEG.
