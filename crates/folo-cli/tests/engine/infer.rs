@@ -322,3 +322,238 @@ fn train_with_bare_data_yaml_derives_parent_folder_name() {
     );
     assert!(project.join("pebbles-n").is_dir());
 }
+
+/// A failing `folo export` leaves neither a half-written output file nor any `.tmp` files behind.
+#[test]
+fn failed_export_leaves_no_partial_output_or_temp_files() {
+    let tiny = tiny_run();
+    let best = tiny.run.join("weights/best.folo");
+    let root = TestDir::new("cli-export-clean-fail");
+    let out_dir = root.join("out");
+    std::fs::create_dir_all(&out_dir).unwrap();
+
+    // 1. Failing ONNX export (`--head o2o` on an `o2m` model) must leave the output directory completely empty.
+    let onnx_out = out_dir.join("bad-o2o.onnx");
+    let (code, lines, _) = folo(&[
+        "export",
+        "--json",
+        "--model",
+        s(&best),
+        "--format",
+        "onnx",
+        "--head",
+        "o2o",
+        "--output",
+        s(&onnx_out),
+    ]);
+    assert_ne!(code, 0);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_config", "{lines:?}");
+    assert!(!onnx_out.exists(), "failed export must not create target file");
+    assert_eq!(std::fs::read_dir(&out_dir).unwrap().count(), 0, "failed export left temp files behind");
+
+    // 2. Corrupt tensor payload (header intact, tensor data truncated) fails cleanly without leaving target or `.tmp`.
+    let corrupt = root.join("corrupt.folo");
+    let mut bytes = std::fs::read(&best).unwrap();
+    let header_len = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    bytes.truncate(8 + header_len + 16);
+    std::fs::write(&corrupt, &bytes).unwrap();
+    let folo_out = out_dir.join("from-corrupt.folo");
+    let (code, lines, _) = folo(&["export", "--json", "--model", s(&corrupt), "--output", s(&folo_out)]);
+    assert_eq!(code, 1);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_weights", "{lines:?}");
+    assert!(!folo_out.exists());
+    assert_eq!(std::fs::read_dir(&out_dir).unwrap().count(), 0, "corrupt export left temp files behind");
+}
+
+/// `folo val --coco` / `--save-json` accepts a split JSON declaring a valid subset of the dataset's categories
+/// when the model matches the dataset's full class order, and fails fast *before* inference (and without creating
+/// `--save-json`'s directory) on empty categories, undeclared annotation category IDs, mismatched model class
+/// order, empty splits, or malformed COCO JSON (#422).
+#[test]
+fn val_coco_subset_categories_and_fail_fast_validation() {
+    let tiny = tiny_run();
+    let best = tiny.run.join("weights/best.folo");
+    let root = TestDir::new("cli-val-coco-failfast");
+
+    // Convert the 2-class (`circle`, `square`) synthetic dataset to COCO.
+    let coco = root.join("coco");
+    let (code, _, stderr) = folo(&["dataset", "convert", s(&tiny.data), s(&coco), "--to", "coco", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+
+    // Build a COCO copy whose `instances_val.json` declares ONLY the second category (`square`, id 2) while
+    // `instances_train.json` declares both `circle` (1) and `square` (2).
+    let subset = root.join("coco_subset");
+    let (code, _, stderr) =
+        folo(&["dataset", "convert", s(&tiny.data), s(&subset), "--to", "coco", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let val_path = subset.join("annotations/instances_val.json");
+    let mut val_doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&val_path).unwrap()).unwrap();
+    let square_id = val_doc["categories"].as_array().unwrap().iter().find(|c| c["name"] == "square").unwrap()
+        ["id"]
+        .as_u64()
+        .unwrap();
+    val_doc["categories"].as_array_mut().unwrap().retain(|c| c["id"].as_u64() == Some(square_id));
+    val_doc["annotations"].as_array_mut().unwrap().retain(|a| a["category_id"].as_u64() == Some(square_id));
+    std::fs::write(&val_path, val_doc.to_string()).unwrap();
+
+    // 1. Valid subset split with matching model class order (`["circle", "square"]`) succeeds and writes only
+    //    `square_id` detections.
+    let dets_out = root.join("subset_eval/dets.json");
+    let (code, lines, stderr) = folo(&[
+        "val",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(&subset),
+        "--workers",
+        "1",
+        "--coco",
+        "--save-json",
+        s(&dets_out),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let coco_block = &lines[0]["coco"];
+    assert!(coco_block.is_object(), "{lines:?}");
+    let written: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(&dets_out).unwrap()).unwrap();
+    assert!(
+        written.iter().all(|d| d["category_id"].as_u64() == Some(square_id)),
+        "subset val must only write detections for categories declared in the split: {written:?}"
+    );
+
+    // 2. Model whose class order differs (`["square", "circle"]`) fails fast before creating `--save-json` dir.
+    let swapped = root.join("swapped.folo");
+    std::fs::copy(&best, &swapped).unwrap();
+    insert_meta_keys(&swapped, &[("folo.classes", r#"["square","circle"]"#)]);
+    let refused_swap = root.join("refused_swap/dets.json");
+    let (code, lines, _) = folo(&[
+        "val",
+        "--json",
+        "--model",
+        s(&swapped),
+        "--data",
+        s(&subset),
+        "--workers",
+        "1",
+        "--coco",
+        "--save-json",
+        s(&refused_swap),
+    ]);
+    assert_eq!(code, 1);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_dataset", "{lines:?}");
+    assert!(!refused_swap.parent().unwrap().exists(), "must fail before creating --save-json dir");
+
+    // 3. Empty `categories: []` fails fast before inference and before creating `--save-json` dir.
+    let bad_empty = root.join("coco_empty_cats");
+    let (code, _, stderr) =
+        folo(&["dataset", "convert", s(&tiny.data), s(&bad_empty), "--to", "coco", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let p = bad_empty.join("annotations/instances_val.json");
+    let mut doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    doc["categories"] = serde_json::json!([]);
+    doc["annotations"] = serde_json::json!([]);
+    std::fs::write(&p, doc.to_string()).unwrap();
+    let refused_empty = root.join("refused_empty/dets.json");
+    let (code, lines, _) = folo(&[
+        "val",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(&bad_empty),
+        "--workers",
+        "1",
+        "--coco",
+        "--save-json",
+        s(&refused_empty),
+    ]);
+    assert_eq!(code, 1);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_dataset", "{lines:?}");
+    assert!(!refused_empty.parent().unwrap().exists());
+
+    // 4. Annotation referencing an undeclared `category_id` fails fast before inference.
+    let bad_undecl = root.join("coco_undeclared_cat");
+    let (code, _, stderr) =
+        folo(&["dataset", "convert", s(&tiny.data), s(&bad_undecl), "--to", "coco", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let p = bad_undecl.join("annotations/instances_val.json");
+    let mut doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+    doc["categories"].as_array_mut().unwrap().retain(|c| c["id"].as_u64() == Some(square_id));
+    // Keep annotations from both classes (including the removed category id), or inject an undeclared id.
+    let first_img_id = doc["images"][0]["id"].as_u64().unwrap();
+    doc["annotations"].as_array_mut().unwrap().push(serde_json::json!({
+        "id": 9999,
+        "image_id": first_img_id,
+        "category_id": 999,
+        "bbox": [4, 4, 10, 10],
+        "area": 100.0,
+        "iscrowd": 0
+    }));
+    std::fs::write(&p, doc.to_string()).unwrap();
+    let refused_undecl = root.join("refused_undecl/dets.json");
+    let (code, lines, _) = folo(&[
+        "val",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(&bad_undecl),
+        "--workers",
+        "1",
+        "--coco",
+        "--save-json",
+        s(&refused_undecl),
+    ]);
+    assert_eq!(code, 1);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_dataset", "{lines:?}");
+    assert!(!refused_undecl.parent().unwrap().exists());
+
+    // 5. Conflicting category names across splits (train calls id 1 "ring", val calls id 1 "circle") fail fast
+    //    with `invalid_dataset` even when val declares every category and matches the model's names.
+    let bad_conflict = root.join("coco_cat_conflict");
+    let (code, _, stderr) =
+        folo(&["dataset", "convert", s(&tiny.data), s(&bad_conflict), "--to", "coco", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let train_p = bad_conflict.join("annotations/instances_train.json");
+    let train_text = std::fs::read_to_string(&train_p).unwrap().replace("\"circle\"", "\"ring\"");
+    std::fs::write(&train_p, train_text).unwrap();
+    let refused_conflict = root.join("refused_conflict/dets.json");
+    let (code, lines, _) = folo(&[
+        "val",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(&bad_conflict),
+        "--workers",
+        "1",
+        "--coco",
+        "--save-json",
+        s(&refused_conflict),
+    ]);
+    assert_eq!(code, 1);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_dataset", "{lines:?}");
+    assert!(!refused_conflict.parent().unwrap().exists());
+
+    // 6. Empty split (`--split test` with no test images) fails fast with `invalid_dataset` and no folder created.
+    let refused_split = root.join("refused_split/dets.json");
+    let (code, lines, _) = folo(&[
+        "val",
+        "--json",
+        "--model",
+        s(&best),
+        "--data",
+        s(&coco),
+        "--split",
+        "test",
+        "--workers",
+        "1",
+        "--save-json",
+        s(&refused_split),
+    ]);
+    assert_eq!(code, 1);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_dataset", "{lines:?}");
+    assert!(!refused_split.parent().unwrap().exists());
+}

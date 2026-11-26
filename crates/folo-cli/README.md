@@ -23,12 +23,12 @@ and two constants, so tests can parse commands with the real parser; every comma
 | `src/mcp.rs` | `folo mcp`: picks the folo-mcp backend (embedded, `--mock`, `--server`) and runs it on stdio |
 | `src/doctor.rs` | `folo doctor`: host, GPU adapters, the adapter FOLO picks, the Studio build |
 | `src/train/` | `folo train` and `folo stop`: `mod.rs` (flags, run folder, trainer), `config.rs` (`--set`), `resume.rs` (`--resume`), `progress.rs` (live view, JSON lines, summary), `stop.rs` (stop file, the run folder's marker and lock, Ctrl+C), `tests.rs` |
-| `src/infer.rs` | `folo val`, `folo predict` and `folo export` |
+| `src/infer/` | `folo val`, `folo predict` and `folo export`: `mod.rs` (shared model/arg helpers, `val`, `export`), `predict.rs` (`predict`, recursive image walking, `--save` checks and atomic saving) |
 | `src/quantize.rs` | `folo quantize`: int8 calibration on sample dataset images, writing fused `f32` weights with `folo.quant` metadata |
 | `src/output_file.rs` | The file `export` and `quantize` write: a temporary name, then one move to a free name (`folo_nn::io::publish_new`) |
-| `src/coco.rs` | `val --coco` / `--save-json`: pycocotools-exact evaluation and COCO results files |
+| `src/coco.rs` | `val --coco` / `--save-json`: upfront category validation (including strict subset splits), pycocotools-exact evaluation and COCO results files |
 | `src/draw.rs` | Annotated images for `predict --save` (class colours, a built-in digit font) |
-| `src/dataset.rs` | `folo dataset check \| stats \| synth \| convert`, on folo-data |
+| `src/dataset/` | `folo dataset check \| stats \| synth \| convert`, on folo-data: `mod.rs` (`stats`, `convert`, shared helpers), `check.rs` (`check`, dangling symlink diagnostics, COCO size-mismatch reconciliation), `synth.rs` (`synth`, atomic sibling-staging and rollback) |
 | `src/weights/` | `folo weights list \| pull` and published-name resolution (`mod.rs`); `download.rs` fetches a release over HTTPS, else with `gh` |
 | `src/cloud.rs` | `folo cloud ...` on the data dir, through `folo_server::cloud` |
 | `src/label/` | `folo label ...`: `mod.rs` opens the data dir's `folo serve` (or `--server`, else the data dir's labeler in this process, holding its lock; the store only for `export`) and runs folo-mcp's labeling operations (`folo_mcp::label::Labels`) with CLI hints; `print.rs` is the human output |
@@ -47,10 +47,10 @@ From the `Command` enum in `src/cli.rs` and the `run` match in `src/main.rs`.
 | `doctor` | `src/doctor.rs` |
 | `train` | `src/train/mod.rs` |
 | `stop` | `src/train/stop.rs` (`request_stop`) |
-| `val`, `predict`, `export` | `src/infer.rs` |
+| `val`, `predict`, `export` | `src/infer/` (`mod.rs`, `predict.rs`) |
 | `quantize` | `src/quantize.rs` |
 | `bench catalog \| list \| create \| show \| delete \| run \| status \| stop` | `src/bench/`, on folo-mcp's `bench` module |
-| `dataset check \| stats \| synth \| convert` | `src/dataset.rs` |
+| `dataset check \| stats \| synth \| convert` | `src/dataset/` (`mod.rs`, `check.rs`, `synth.rs`) |
 | `weights list \| pull` | `src/weights/mod.rs`, `src/weights/download.rs` |
 | `cloud providers \| connect \| connections \| check \| disconnect \| offers \| instances \| terminate` | `src/cloud.rs` |
 | `label agents \| jobs \| create \| add \| start \| stop \| status \| images \| view \| set \| review \| export` | `src/label/`, on folo-mcp's `label` module |
@@ -80,7 +80,7 @@ From the `Command` enum in `src/cli.rs` and the `run` match in `src/main.rs`.
 2. `run` in `src/main.rs`: which function each subcommand calls.
 3. `Out` and `CliError` in `src/output.rs`: how every command reports results and failures.
 4. `engine_error` in `src/engine.rs`: how engine errors get their code, exit code and hint.
-5. `train` in `src/train/mod.rs` or `val` / `predict` in `src/infer.rs`: a full command on the engine.
+5. `train` in `src/train/mod.rs` or `val` / `predict` in `src/infer/`: a full command on the engine.
 6. `acquire` in `src/serve_lock.rs`, then `src/serve.rs` and `src/mcp.rs`: who owns a data dir.
 
 ## Common changes
@@ -89,7 +89,7 @@ From the `Command` enum in `src/cli.rs` and the `run` match in `src/main.rs`.
 |---|---|
 | Add a top-level command | A variant of `Command` and its `Args` struct (doc comment on every field) in `src/cli.rs`; a module in `src/` declared in `src/main.rs` and an arm in `run`; a `--json` test in `tests/cli.rs` (or a topic file in `tests/`); the Commands table of [docs/CLI.md](../../docs/CLI.md) |
 | Add a flag | The field and its doc comment in the `*Args` struct in `src/cli.rs` (the help text is `folo describe`'s); the command's module; docs/CLI.md. For `train`, `train_defaults_match_the_api` in `src/main.rs` compares defaults with the API's `TrainConfig` |
-| Add a `dataset`, `weights` or `cloud` subcommand | The variant in `DatasetCommand`, `WeightsCommand` or `CloudCommand` (`src/cli.rs`); the match in `src/dataset.rs`, `src/weights/mod.rs` or `src/cloud.rs`; `tests/dataset.rs`, `tests/weights.rs` or `tests/cloud.rs`; docs/CLI.md |
+| Add a `dataset`, `weights` or `cloud` subcommand | The variant in `DatasetCommand`, `WeightsCommand` or `CloudCommand` (`src/cli.rs`); the match in `src/dataset/mod.rs`, `src/weights/mod.rs` or `src/cloud.rs`; `tests/dataset.rs`, `tests/weights.rs` or `tests/cloud.rs`; docs/CLI.md |
 | Add an error code | A `c(code, status, exit, meaning)` entry in `CODES` (`crates/folo-api/src/codes.rs`); `CliError::new(ExitCode::<exit>, "<code>", ...)` where it fails. `tests/codes.rs` fails when a code is missing from `CODES` or exits with another code |
 | Change what `folo describe` prints | `src/describe.rs`; the `describe_covers_every_command` and `help_states_the_computed_defaults` tests in `src/main.rs` |
 

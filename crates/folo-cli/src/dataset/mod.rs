@@ -1,27 +1,29 @@
 //! `folo dataset check | stats | synth | convert`, on top of folo-data.
+//!
+//! - `mod.rs`: command dispatch, `stats`, `convert`, and shared error / path helpers.
+//! - `check.rs`: `folo dataset check` (dangling symlink diagnostics, COCO declared-vs-actual dimension
+//!   reconciliation, severity filtering and human/JSON formatting).
+//! - `synth.rs`: `folo dataset synth` (atomic sibling-staging for new folders and clean-on-failure rollback for
+//!   pre-existing empty folders).
 
-use std::io::{IsTerminal, Write};
+mod check;
+mod synth;
+
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use folo_data::check::{CheckKind, CheckOptions, CheckReport, Severity};
-use folo_data::synthetic::{SyntheticConfig, shapes_for, write_yolo_with_progress};
-use folo_data::{DataError, DatasetStats, Format, Histogram, ImageFormat, LoadedDataset, OpenOptions};
+use folo_data::{DataError, DatasetStats, Format, Histogram, LoadedDataset, OpenOptions};
 use serde_json::{Value, json};
 
-use crate::cli::{
-    CheckArgs, ConvertArgs, DatasetCommand, FormatArg, SeverityArg, StatsArgs, SynthArgs, SynthImageFormat,
-    TargetFormatArg,
-};
+use crate::cli::{ConvertArgs, DatasetCommand, FormatArg, StatsArgs, TargetFormatArg};
 use crate::output::{CliError, ExitCode, Out};
 
 /// Runs a `folo dataset` subcommand.
 pub fn run(cmd: DatasetCommand, out: Out) -> Result<(), CliError> {
     match cmd {
-        DatasetCommand::Check(a) => check(a, out),
+        DatasetCommand::Check(a) => check::check(a, out),
         DatasetCommand::Stats(a) => stats(a, out),
-        DatasetCommand::Synth(a) => synth(a, out),
+        DatasetCommand::Synth(a) => synth::synth(a, out),
         DatasetCommand::Convert(a) => convert(a, out),
     }
 }
@@ -34,7 +36,7 @@ pub(crate) fn format_of(f: FormatArg) -> Format {
     }
 }
 
-fn format_name(f: Format) -> &'static str {
+pub(super) fn format_name(f: Format) -> &'static str {
     match f {
         Format::Auto => "auto",
         Format::Yolo => "yolo",
@@ -43,14 +45,24 @@ fn format_name(f: Format) -> &'static str {
 }
 
 /// Maps a folo-data error to the CLI's codes and exit codes.
-fn data_error(e: DataError, path: &Path) -> CliError {
+pub(super) fn data_error(e: DataError, path: &Path) -> CliError {
     match e {
-        DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => CliError::new(
-            ExitCode::NotFound,
-            "path_not_found",
-            format!("{} does not exist", folo_api::json::path(path)),
-        )
-        .hint("pass a dataset folder, a data.yaml or a COCO instances .json"),
+        DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(detail) = check::dangling_link_message(path) {
+                return CliError::new(
+                    ExitCode::NotFound,
+                    "path_not_found",
+                    format!("{}: {detail}", folo_api::json::path(path)),
+                )
+                .hint("fix the symlink target or pass the real dataset path");
+            }
+            CliError::new(
+                ExitCode::NotFound,
+                "path_not_found",
+                format!("{} does not exist", folo_api::json::path(path)),
+            )
+            .hint("pass a dataset folder, a data.yaml or a COCO instances .json")
+        }
         // An output folder that `folo_data::unfinished::claim` refused: another writer's, or not empty.
         DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::AlreadyExists => {
             output_exists(path, true)
@@ -75,10 +87,10 @@ fn data_error(e: DataError, path: &Path) -> CliError {
 
 /// Maps a folo-data error from writing an output dataset (`synth`, `convert`) so a missing output drive or parent
 /// reports an output-path hint instead of the missing *input* dataset hint.
-fn output_data_error(e: DataError, out_dir: &Path) -> CliError {
+pub(super) fn output_data_error(e: DataError, out_dir: &Path) -> CliError {
     match e {
         DataError::Io { path: err_path, source } if source.kind() == std::io::ErrorKind::NotFound => {
-            if err_path.starts_with(out_dir) {
+            if err_path.starts_with(out_dir) || out_dir.starts_with(&err_path) {
                 CliError::new(
                     ExitCode::NotFound,
                     "path_not_found",
@@ -203,12 +215,13 @@ fn check_convert_output_outside(output: &Path, input: &Path, ds: &LoadedDataset)
     Ok(())
 }
 
-/// Refuses an output folder that exists and is not empty (or is a file).
-fn ensure_empty_output(dir: &Path) -> Result<(), CliError> {
+/// Refuses an output folder that exists and is not empty (or is a file / symlink to something non-directory).
+pub(super) fn ensure_empty_output(dir: &Path) -> Result<(), CliError> {
     let busy = if dir.is_dir() {
         std::fs::read_dir(dir).map(|mut rd| rd.next().is_some()).unwrap_or(true)
     } else {
-        dir.exists()
+        // Also refuse a dangling symlink in `dir`'s place rather than silently racing or failing late.
+        dir.exists() || std::fs::symlink_metadata(dir).is_ok()
     };
     if busy {
         return Err(output_exists(dir, dir.join(folo_data::unfinished::MARKER).exists()));
@@ -217,7 +230,7 @@ fn ensure_empty_output(dir: &Path) -> Result<(), CliError> {
 }
 
 /// `output_exists` for `dir`; `unfinished` when it holds another writer's marker.
-fn output_exists(dir: &Path, unfinished: bool) -> CliError {
+pub(super) fn output_exists(dir: &Path, unfinished: bool) -> CliError {
     CliError::new(
         ExitCode::Runtime,
         "output_exists",
@@ -231,12 +244,12 @@ fn output_exists(dir: &Path, unfinished: bool) -> CliError {
 }
 
 /// `p` relative to `root` with `/` separators, or `p` as is when it is outside `root`.
-fn rel(p: &Path, root: &Path) -> String {
+pub(super) fn rel(p: &Path, root: &Path) -> String {
     // The server names issue files the same way (GET /api/datasets/{id}/issues).
     folo_data::paths::relative_to(p, root)
 }
 
-fn splits_json(s: [usize; 3]) -> Value {
+pub(super) fn splits_json(s: [usize; 3]) -> Value {
     json!({ "train": s[0], "val": s[1], "test": s[2] })
 }
 
@@ -395,269 +408,6 @@ fn stats_table(name: &str, ds: &LoadedDataset, s: &DatasetStats) -> Vec<String> 
     l
 }
 
-// ---- check -------------------------------------------------------------------------------------------------------
-
-fn issue_json(i: &folo_data::check::CheckIssue, root: &Path, with_fix: bool) -> Value {
-    // The same object as `GET /api/datasets/{id}/issues` (folo_api::DatasetIssue), plus `fix`.
-    let mut v = json!({
-        "kind": i.kind,
-        "severity": i.severity(),
-        "file": rel(&i.file, root),
-        "line": i.line,
-        "message": i.message,
-    });
-    if with_fix && let Some(f) = &i.fix {
-        v["fix"] = json!(f);
-    }
-    v
-}
-
-fn check(args: CheckArgs, out: Out) -> Result<(), CliError> {
-    let t0 = Instant::now();
-    let opts = CheckOptions { format: format_of(args.format), decode: !args.headers_only };
-    let report = folo_data::check::check(&args.path, &opts).map_err(|e| data_error(e, &args.path))?;
-    let secs = t0.elapsed().as_secs_f64();
-    let (errors, warnings, infos) =
-        (report.count(Severity::Error), report.count(Severity::Warning), report.count(Severity::Info));
-    let total = errors + warnings + infos;
-    let by_kind: serde_json::Map<String, Value> =
-        report.counts().into_iter().map(|(k, n)| (k.as_str().to_string(), json!(n))).collect();
-    let json_min = args.min_severity.unwrap_or(SeverityArg::Info);
-    let human_min = args.min_severity.unwrap_or(SeverityArg::Warning);
-    let issues: Vec<Value> = report
-        .issues
-        .iter()
-        .filter(|i| severity_allows(json_min, i.severity()))
-        .map(|i| issue_json(i, &report.root, args.fix_dry_run))
-        .collect();
-    let filtered_out = report.issues.len().saturating_sub(issues.len());
-    out.record(&json!({
-        "path": folo_api::json::path(&args.path),
-        "root": folo_api::json::path(&report.root),
-        "format": format_name(report.format),
-        "classes": report.classes,
-        "images": report.images(),
-        "splits": splits_json(report.splits),
-        "clean": report.is_clean(),
-        "min_severity": severity_arg_name(json_min),
-        "counts": {
-            "error": errors,
-            "warning": warnings,
-            "info": infos,
-            "total": total,
-            "by_kind": by_kind,
-        },
-        "filtered_out": filtered_out,
-        "issues": issues,
-        "seconds": secs,
-    }));
-    for line in check_lines(&report, args.fix_dry_run, human_min, secs) {
-        out.human(line);
-    }
-    if report.is_clean() {
-        return Ok(());
-    }
-    Err(CliError::new(
-        ExitCode::Runtime,
-        "dataset_issues",
-        format!("{} has {errors} error(s) and {warnings} warning(s)", folo_api::json::path(&args.path)),
-    )
-    .hint(if args.fix_dry_run {
-        "nothing was changed; the `fix` of each issue says what a cleanup would do"
-    } else {
-        "see the issues above; --fix-dry-run shows what a cleanup would change"
-    }))
-}
-
-/// `Severity` in `SeverityArg` order (0 error, 1 warning, 2 info).
-fn severity_rank(s: Severity) -> u8 {
-    match s {
-        Severity::Error => 0,
-        Severity::Warning => 1,
-        Severity::Info => 2,
-    }
-}
-
-/// Whether an issue of severity `actual` passes a `--min-severity` threshold of `min`.
-fn severity_allows(min: SeverityArg, actual: Severity) -> bool {
-    let cutoff = match min {
-        SeverityArg::Error => 0,
-        SeverityArg::Warning => 1,
-        SeverityArg::Info => 2,
-    };
-    severity_rank(actual) <= cutoff
-}
-
-fn severity_arg_name(s: SeverityArg) -> &'static str {
-    match s {
-        SeverityArg::Error => "error",
-        SeverityArg::Warning => "warning",
-        SeverityArg::Info => "info",
-    }
-}
-
-fn check_lines(r: &CheckReport, fixes: bool, min_severity: SeverityArg, secs: f64) -> Vec<String> {
-    const SHOWN: usize = 200;
-    let mut l = vec![format!(
-        "checked {} images ({}, {}) in {secs:.1}s",
-        r.images(),
-        format_name(r.format),
-        folo_api::json::path(&r.root)
-    )];
-    let listed: Vec<_> = r.issues.iter().filter(|i| severity_allows(min_severity, i.severity())).collect();
-    if !listed.is_empty() {
-        l.push(String::new());
-    }
-    for i in listed.iter().take(SHOWN) {
-        let at = match i.line {
-            Some(n) => format!("{}:{n}", rel(&i.file, &r.root)),
-            None => rel(&i.file, &r.root),
-        };
-        let sev = match i.severity() {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-            Severity::Info => "info",
-        };
-        l.push(format!("{sev:<8} {:<17} {at}  {}", i.kind.as_str(), i.message));
-        if fixes && let Some(f) = &i.fix {
-            l.push(format!("{:26}would {f}", ""));
-        }
-    }
-    if listed.len() > SHOWN {
-        l.push(format!("... {} more (--json lists every issue)", listed.len() - SHOWN));
-    }
-    let errors = r.count(Severity::Error);
-    let warnings = r.count(Severity::Warning);
-    let infos = r.count(Severity::Info);
-    let empty = r.counts().get(&CheckKind::EmptyImage).copied().unwrap_or(0);
-    l.push(String::new());
-    let summary: Vec<String> = r
-        .counts()
-        .into_iter()
-        .filter(|(k, _)| *k != CheckKind::EmptyImage)
-        .map(|(k, n)| format!("{n} {}", k.as_str()))
-        .collect();
-    if r.is_clean() {
-        l.push(format!("clean: 0 error(s), 0 warning(s), {infos} info(s)"));
-    } else {
-        l.push(format!("{errors} error(s), {warnings} warning(s), {infos} info(s): {}", summary.join(", ")));
-    }
-    if min_severity == SeverityArg::Error && warnings > 0 {
-        l.push(format!("({warnings} warning(s) hidden by --min-severity error)"));
-    }
-    if empty > 0 {
-        if min_severity == SeverityArg::Info {
-            l.push(format!(
-                "{empty} empty image(s) without boxes (background images; fine unless unintended)"
-            ));
-        } else {
-            l.push(format!(
-                "{empty} empty image(s) without boxes (background images; pass --min-severity info to list them)"
-            ));
-        }
-    }
-    l
-}
-
-// ---- synth -------------------------------------------------------------------------------------------------------
-
-/// Throttled progress output: `--json` records, or a `\r` line on an interactive stderr.
-struct Progress {
-    out: Out,
-    total: usize,
-    tty: bool,
-    last: Mutex<Option<Instant>>,
-}
-
-impl Progress {
-    fn update(&self, done: usize) {
-        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
-        let now = Instant::now();
-        let due = last.is_none_or(|t| now.duration_since(t) >= Duration::from_millis(200));
-        if !(due || done == self.total) {
-            return;
-        }
-        *last = Some(now);
-        self.out.record(&json!({ "event": "progress", "done": done, "total": self.total }));
-        if !self.out.json && self.tty {
-            let pct = 100.0 * done as f64 / self.total.max(1) as f64;
-            let mut e = std::io::stderr().lock();
-            let _ = write!(e, "\rgenerating {done}/{} images ({pct:.0}%)", self.total);
-            if done == self.total {
-                let _ = write!(e, "\r{:60}\r", "");
-            }
-            let _ = e.flush();
-        }
-    }
-}
-
-fn synth(args: SynthArgs, out: Out) -> Result<(), CliError> {
-    if !crate::cli::bounds::SYNTH_IMAGES.contains_u64(args.images) {
-        return Err(CliError::new(ExitCode::Usage, "usage", "--images must be in 1..=1000000"));
-    }
-    if !crate::cli::bounds::SYNTH_IMGSZ.contains_u64(u64::from(args.imgsz)) {
-        return Err(CliError::new(ExitCode::Usage, "usage", "--imgsz must be in 32..=8192"));
-    }
-    let names: Vec<String> = args.classes.iter().map(|c| c.trim().to_string()).collect();
-    let classes = shapes_for(&names).map_err(|e| data_error(e, &args.out_dir))?;
-    let cfg = SyntheticConfig {
-        images: args.images as usize,
-        classes: classes.clone(),
-        names: names.clone(),
-        imgsz: args.imgsz,
-        seed: args.seed,
-        val_fraction: args.val_frac,
-        vary_aspect: args.vary_aspect,
-        ..Default::default()
-    };
-    ensure_empty_output(&args.out_dir)?;
-    cfg.check().map_err(|e| data_error(e, &args.out_dir))?;
-    let format = match args.image_format {
-        SynthImageFormat::Jpeg => ImageFormat::Jpeg(90),
-        SynthImageFormat::Png => ImageFormat::Png,
-    };
-    let t0 = Instant::now();
-    let progress =
-        Progress { out, total: cfg.images, tty: std::io::stderr().is_terminal(), last: Mutex::new(None) };
-    let claim =
-        folo_data::unfinished::claim(&args.out_dir).map_err(|e| output_data_error(e, &args.out_dir))?;
-    let written = write_yolo_with_progress(&cfg, claim, format, |d| progress.update(d))
-        .map_err(|e| output_data_error(e, &args.out_dir))?;
-    let secs = t0.elapsed().as_secs_f64();
-    let [train, val] = written.splits;
-    out.record(&json!({
-        "event": "done",
-        "path": folo_api::json::path(&written.root),
-        "yaml": folo_api::json::path(&written.yaml),
-        "images": cfg.images,
-        "splits": splits_json([train, val, 0]),
-        "boxes": written.boxes,
-        "classes": names,
-        "shapes": classes,
-        "imgsz": cfg.imgsz,
-        "seed": cfg.seed,
-        "seconds": secs,
-    }));
-    out.human(format!(
-        "wrote {} images ({train} train / {val} val, {} boxes) to {} in {secs:.1}s",
-        cfg.images,
-        written.boxes,
-        folo_api::json::path(&written.root)
-    ));
-    let mapping: Vec<String> = names
-        .iter()
-        .zip(&classes)
-        .map(|(n, s)| if n.eq_ignore_ascii_case(s) { n.clone() } else { format!("{n} ({s})") })
-        .collect();
-    out.human(format!("  classes  {}", mapping.join(", ")));
-    out.human(format!("  yaml     {}", folo_api::json::path(&written.yaml)));
-    out.human(folo_api::json::cli_command(
-        "next: folo dataset stats {dataset}",
-        &[("dataset", &args.out_dir)],
-    ));
-    Ok(())
-}
-
 // ---- convert -----------------------------------------------------------------------------------------------------
 
 fn convert(args: ConvertArgs, out: Out) -> Result<(), CliError> {
@@ -732,28 +482,6 @@ mod tests {
         assert_eq!(truncate_class_name("héllo_wörld", 5), "héll…");
         assert_eq!(truncate_class_name("abc", 1), "…");
         assert_eq!(truncate_class_name("abc", 0), "");
-    }
-
-    #[test]
-    fn severity_filter_orders_error_warning_info() {
-        assert_eq!(severity_arg_name(SeverityArg::Error), "error");
-        assert_eq!(severity_arg_name(SeverityArg::Warning), "warning");
-        assert_eq!(severity_arg_name(SeverityArg::Info), "info");
-
-        // Error threshold: only errors pass.
-        assert!(severity_allows(SeverityArg::Error, Severity::Error));
-        assert!(!severity_allows(SeverityArg::Error, Severity::Warning));
-        assert!(!severity_allows(SeverityArg::Error, Severity::Info));
-
-        // Warning threshold: errors and warnings pass; info is filtered.
-        assert!(severity_allows(SeverityArg::Warning, Severity::Error));
-        assert!(severity_allows(SeverityArg::Warning, Severity::Warning));
-        assert!(!severity_allows(SeverityArg::Warning, Severity::Info));
-
-        // Info threshold: every severity passes.
-        assert!(severity_allows(SeverityArg::Info, Severity::Error));
-        assert!(severity_allows(SeverityArg::Info, Severity::Warning));
-        assert!(severity_allows(SeverityArg::Info, Severity::Info));
     }
 
     #[test]
