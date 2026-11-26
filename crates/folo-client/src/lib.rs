@@ -279,7 +279,8 @@ impl Client {
                     code: "bad_request".into(),
                     message: format!("{}: {}", self.base, self.scrub(&e.to_string())),
                     hint: Some(
-                        "check the server URL and token (they must not contain spaces or control characters)"
+                        "check the server URL and token (the URL must not contain spaces or control characters, \
+                         and the token must be a valid HTTP header value)"
                             .into(),
                     ),
                 },

@@ -498,9 +498,11 @@ pub(super) fn add(slot: &Slot, entry_id: &str, predictions: Vec<BenchPrediction>
     commit_add(slot, entry_id, &fill, received, emit)
 }
 
-/// Records `received` progress on `entry_id` only if the entry is still open with `fill`; if `stop`, `expire`,
-/// `finish`, or `shutdown` closed it after `fill` was unlocked, returns `409 bench_entry_not_open` without
-/// mutating the closed entry or emitting a post-terminal SSE event.
+/// Records `received` progress on `entry_id` only if the entry is still open with `fill`.
+///
+/// If a concurrent `finish` already consumed and scored the records added under `fill`, returns the `Done` entry
+/// without mutating it or emitting a stale progress SSE event. If `stop`, `expire`, or `shutdown` closed the entry,
+/// returns `409 bench_entry_not_open` without mutating it or emitting a post-terminal SSE event.
 fn commit_add(
     slot: &Slot,
     entry_id: &str,
@@ -511,6 +513,9 @@ fn commit_add(
     let mut state = slot.live()?;
     let e = state.entry_mut(entry_id).ok_or_else(|| super::state::entry_not_found(&slot.id, entry_id))?;
     if e.open.as_ref().is_none_or(|o| !Arc::ptr_eq(o, fill)) {
+        if e.entry.status == BenchEntryStatus::Done {
+            return Ok(e.entry.clone());
+        }
         return Err(not_open(entry_id, &e.entry));
     }
     e.entry.progress.done = e.entry.progress.done.max(received);
@@ -945,5 +950,20 @@ mod tests {
         assert_eq!((err.status, err.body.code.as_str()), (StatusCode::CONFLICT, "bench_entry_not_open"));
         assert_eq!(slot.live().unwrap().entry(&entry_id).unwrap().entry.progress.done, 1);
         assert!(rx.try_recv().is_err(), "closed entry must not emit a post-terminal SSE event");
+
+        // When a concurrent `finish` consumed the records added under `fill` and marked the entry `Done` before
+        // `commit_add` resumed, return the `Done` entry as accepted without mutating progress or emitting a stale
+        // SSE event.
+        {
+            let mut st = slot.live().unwrap();
+            let e = st.entry_mut(&entry_id).unwrap();
+            e.entry.status = BenchEntryStatus::Done;
+            e.entry.progress.done = 2;
+        }
+        let done = commit_add(&slot, &entry_id, &fill, 5, true).unwrap();
+        assert_eq!(done.status, BenchEntryStatus::Done);
+        assert_eq!(done.progress.done, 2);
+        assert_eq!(slot.live().unwrap().entry(&entry_id).unwrap().entry.progress.done, 2);
+        assert!(rx.try_recv().is_err(), "finished entry must not emit a stale progress SSE event");
     }
 }

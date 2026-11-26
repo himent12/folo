@@ -151,10 +151,10 @@ impl Server {
         }
         let url = raw.trim_end_matches('/').to_string();
         let token = values.get(TOKEN_FIELD).unwrap_or_default().to_string();
-        if !token.bytes().all(|b| b.is_ascii_graphic()) {
+        if !token.is_empty() && http::HeaderValue::from_str(&format!("Bearer {token}")).is_err() {
             return Err(Error::new(
                 ErrorKind::Invalid,
-                "`token` must not contain spaces or control characters",
+                "`token` is not a valid HTTP header value (must not contain control characters)",
             ));
         }
         Ok(Server { url, host, https, token })
@@ -538,12 +538,22 @@ mod tests {
             assert_error(&e, ErrorKind::Invalid, "`url`");
         }
         assert_error(&Remote.check(&Values::default()).unwrap_err(), ErrorKind::Invalid, "url");
-        for bad_tok in ["tok\n2", "tok\r\nX-Inject: 1", "tok space", "tok\t2", "tok\u{2014}dash"] {
+        for bad_tok in ["tok\n2", "tok\r\nX-Inject: 1", "tok\0nul", "tok\x7fdel", "tok\x1besc"] {
             let e = Remote.check(&values("http://127.0.0.1:9", bad_tok)).unwrap_err();
             assert_eq!(e.kind, ErrorKind::Invalid, "{bad_tok:?}: {e:?}");
             assert!(e.message.contains("`token`"), "{bad_tok:?}: {}", e.message);
             assert!(!e.message.contains(bad_tok), "{bad_tok:?}: {}", e.message);
         }
+        // Existing remote connections with an interior space in `--token` remain valid HTTP header values.
+        let spaced = "my secret token";
+        let f = Fixture::serve(vec![health("0.1.0"), system(ONE_GPU, Some(ON_GPU), ALL_FEATURES)]);
+        let account = Remote.check(&values(&f.base(), spaced)).unwrap();
+        assert_eq!(account.label.as_deref(), Some("127.0.0.1"));
+        assert_eq!(f.requests()[1].header("authorization"), Some(format!("Bearer {spaced}").as_str()));
+        assert_eq!(
+            Remote.fixed_endpoint(&values(&f.base(), spaced)).map(|e| e.token),
+            Some(spaced.to_string())
+        );
     }
 
     #[test]

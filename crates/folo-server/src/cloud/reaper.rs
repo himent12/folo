@@ -111,6 +111,9 @@ impl Core {
 
     /// One pass of the reaper (see the module docs).
     pub(crate) fn sweep(&self) {
+        if self.halt.is_on() {
+            return;
+        }
         for record in self.ledger.list() {
             if self.halt.is_on() {
                 return;
