@@ -271,8 +271,8 @@ async fn mock_run_estimates() {
     assert_eq!(from_weights.basis.arch, expected.basis.arch);
     let weights_cli = from_weights.cli.unwrap();
     assert!(
-        weights_cli.contains("--weights ") && !weights_cli.contains("--arch "),
-        "CLI command with --weights omits --arch: {weights_cli}"
+        weights_cli.contains("--weights ") && !weights_cli.contains("--model "),
+        "CLI command with --weights omits --model: {weights_cli}"
     );
     // Mock rejects unavailable local GPU ordinals and invalid augmentation probabilities like the real server.
     err(
@@ -299,13 +299,13 @@ async fn mock_run_estimates() {
             err(&app, post_json(path, typo), StatusCode::UNPROCESSABLE_ENTITY, "invalid_body").await;
         }
     }
-    err(
-        &app,
-        post_json("/api/runs/estimate", json!({ "dataset_id": "ds_5a1e", "resume_run_id": "run_1" })),
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "invalid_body",
-    )
-    .await;
+    for control in [
+        json!({ "dataset_id": "ds_5a1e", "resume_run_id": "run_1" }),
+        json!({ "dataset_id": "ds_5a1e", "checkpoint": "m_31aa" }),
+    ] {
+        err(&app, post_json("/api/runs/estimate", control), StatusCode::UNPROCESSABLE_ENTITY, "invalid_body")
+            .await;
+    }
     // A name too long is the run's error only: New run keeps its estimate while the name is being typed.
     let long = json!({ "dataset_id": "ds_5a1e", "name": "n".repeat(65) });
     let _: RunEstimate = ok(&app, post_json("/api/runs/estimate", long.clone())).await;

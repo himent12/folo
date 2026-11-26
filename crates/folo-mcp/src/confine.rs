@@ -153,18 +153,32 @@ impl Confinement {
         }
         let root = PathBuf::from(&d.path);
         self.policy.check_files([root.as_path()]).map_err(|e| in_dataset(e, id))?;
-        let base = if root.is_file() { root.parent().unwrap_or(&root).to_path_buf() } else { root };
-        let labels = LabelPaths::new(&base);
+        let base = match store.dataset_root(id)? {
+            Some(r) => {
+                self.policy.check_files([r.as_path()]).map_err(|e| in_dataset(e, id))?;
+                r
+            }
+            None => {
+                if root.is_file() {
+                    root.parent().unwrap_or(&root).to_path_buf()
+                } else {
+                    root
+                }
+            }
+        };
+        let yolo_labels = (d.format == folo_api::DatasetFormat::Yolo).then(|| LabelPaths::new(&base));
         let mut offset = 0;
         loop {
             let q = ImageQuery { split: None, offset, limit: WALK_PAGE, class: None };
             let page = store.list_images(id, &q)?;
             let n = page.images.len() as u64;
-            let mut files = Vec::with_capacity(page.images.len() * 2);
+            let mut files = Vec::with_capacity(page.images.len() * if yolo_labels.is_some() { 2 } else { 1 });
             for im in &page.images {
                 let f = Path::new(&im.file);
                 let img = if f.is_absolute() { f.to_path_buf() } else { base.join(f) };
-                files.push(labels.of(&img));
+                if let Some(labels) = &yolo_labels {
+                    files.push(labels.of(&img));
+                }
                 files.push(img);
             }
             self.policy.check_files(files.iter().map(PathBuf::as_path)).map_err(|e| in_dataset(e, id))?;
@@ -193,10 +207,10 @@ impl Confinement {
     }
 }
 
-/// The YOLO label files of one dataset: [`folo_data::dataset::yolo::label_path_for`], except that an `images` folder
+/// The YOLO label files of one dataset: [`folo_data::label_path_for`], except that an `images` folder
 /// at or above the dataset root counts only when the root's mirror exists (`x/labels/birds` for `x/images/birds`,
 /// `x/labels` for `x/images`). Without that mirror, labels of images below the root sit beside them (`a.txt`),
-/// matching `folo_data::dataset::yolo::LabelPaths`.
+/// matching `folo-data`'s YOLO reader.
 struct LabelPaths {
     /// The dataset root, absolute and normalised.
     root: PathBuf,
@@ -222,38 +236,14 @@ impl LabelPaths {
     }
 
     /// The label file of `image`. An image outside the root (or under its own `images/` subfolder) follows
-    /// [`label_path_for`].
+    /// [`folo_data::label_path_for`].
     fn of(&self, image: &Path) -> PathBuf {
         let beside = self.beside
             && folo_data::paths::normalize(&Path::new(".").join(image)).strip_prefix(&self.root).is_ok_and(
                 |below| !below.components().any(|c| c.as_os_str() == std::ffi::OsStr::new("images")),
             );
-        if beside { image.with_extension("txt") } else { label_path_for(image) }
+        if beside { image.with_extension("txt") } else { folo_data::label_path_for(image) }
     }
-}
-
-/// The YOLO label path for an image: the last `images` directory component (never the filename itself) becomes
-/// `labels` and the extension becomes `.txt`. Matches `folo_data::dataset::yolo::label_path_for`.
-fn label_path_for(image: &Path) -> PathBuf {
-    let mut count = 0usize;
-    let mut last_images = None;
-    for (i, c) in image.components().enumerate() {
-        count = i + 1;
-        if c.as_os_str() == std::ffi::OsStr::new("images") {
-            last_images = Some(i);
-        }
-    }
-    let replace = last_images.filter(|&pos| pos + 1 < count);
-    let mut out = PathBuf::with_capacity(image.as_os_str().len() + 8);
-    for (i, c) in image.components().enumerate() {
-        if Some(i) == replace {
-            out.push("labels");
-        } else {
-            out.push(c.as_os_str());
-        }
-    }
-    out.set_extension("txt");
-    out
 }
 
 fn in_dataset(mut e: Error, id: &str) -> Error {

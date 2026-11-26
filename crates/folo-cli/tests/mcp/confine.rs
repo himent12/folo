@@ -416,3 +416,63 @@ fn confined_mcp_allows_beside_image_labels_under_images_data_dir() {
     assert_eq!(page["items"][0]["boxes"].as_array().unwrap().len(), 1);
     c.finish();
 }
+
+/// Direct `data.yaml` registration with a `path:` override resolves images and beside-image labels from the
+/// effective dataset root (`Index.root`), not the registration folder: an unrelated `labels/ds/` mirror outside
+/// `--data-dir` must not cause the valid `path: nested` dataset to be rejected.
+#[test]
+fn confined_mcp_uses_effective_yaml_root_and_ignores_coco_sidecars() {
+    let root = folo_test_support::TestDir::new("mcp-confine-yaml-path-and-coco");
+    let data = root.join("images");
+    let ds = data.join("ds");
+    let nested = ds.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3])).save(nested.join("a.jpg")).unwrap();
+    std::fs::write(nested.join("a.txt"), "0 0.5 0.5 0.4 0.4\n").unwrap();
+    std::fs::write(nested.join("list.txt"), "a.jpg\n").unwrap();
+    std::fs::write(ds.join("data.yaml"), "path: nested\ntrain: list.txt\nnames: [box]\n").unwrap();
+    // An unrelated outside mirror for `images/ds` (NOT for `images/ds/nested`).
+    std::fs::create_dir_all(root.join("labels/ds")).unwrap();
+    std::fs::write(root.join("labels/ds/a.txt"), "0 0.5 0.5 0.9 0.9\n").unwrap();
+
+    // A COCO dataset under `<root>/images/coco` with an unrelated outside `labels/coco` mirror (and, on Unix, an
+    // unused `.txt` symlink beside the image pointing outside `--data-dir`). COCO reads annotations JSON, not
+    // YOLO `.txt` sidecars.
+    let coco = data.join("coco");
+    std::fs::create_dir_all(coco.join("annotations")).unwrap();
+    std::fs::create_dir_all(coco.join("train")).unwrap();
+    image::RgbImage::from_pixel(8, 8, image::Rgb([2, 3, 4])).save(coco.join("train/a.jpg")).unwrap();
+    std::fs::write(
+        coco.join("annotations/instances_train.json"),
+        json!({
+            "images": [{ "id": 1, "file_name": "a.jpg", "width": 8, "height": 8 }],
+            "annotations": [{ "id": 1, "image_id": 1, "category_id": 1, "bbox": [1, 1, 4, 4], "area": 16, "iscrowd": 0 }],
+            "categories": [{ "id": 1, "name": "box" }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("labels/coco/train")).unwrap();
+    std::fs::write(root.join("labels/coco/train/a.txt"), "0 0.5 0.5 0.9 0.9\n").unwrap();
+    #[cfg(unix)]
+    {
+        std::fs::write(root.join("outside.txt"), "0 0.5 0.5 0.9 0.9\n").unwrap();
+        std::os::unix::fs::symlink(root.join("outside.txt"), coco.join("train/a.txt")).unwrap();
+    }
+
+    let mut c = spawn(&["--confine", "--data-dir", data.to_str().unwrap()], None);
+    init_old(&mut c);
+
+    let yolo_reg = c.ok("register_dataset", json!({ "path": "ds/data.yaml" }));
+    let yolo_id = yolo_reg["id"].as_str().unwrap().to_string();
+    let yolo_page = c.ok("list_dataset_images", json!({ "dataset_id": yolo_id, "include_boxes": true }));
+    assert_eq!(yolo_page["total"], 1);
+    assert_eq!(yolo_page["items"][0]["boxes"].as_array().unwrap().len(), 1);
+
+    let coco_reg = c.ok("register_dataset", json!({ "path": "coco" }));
+    let coco_id = coco_reg["id"].as_str().unwrap().to_string();
+    let coco_page = c.ok("list_dataset_images", json!({ "dataset_id": coco_id, "include_boxes": true }));
+    assert_eq!(coco_page["total"], 1);
+    assert_eq!(coco_page["items"][0]["boxes"].as_array().unwrap().len(), 1);
+    c.finish();
+}

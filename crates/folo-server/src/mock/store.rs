@@ -733,4 +733,11 @@ impl Store for MockStore {
     fn val(&self, req: folo_api::ValRequest) -> Result<folo_api::ValReport> {
         val::val(self, req)
     }
+
+    fn dataset_root(&self, id: &str) -> Result<Option<std::path::PathBuf>> {
+        Ok(match &*self.dataset(id)? {
+            DatasetEntry::Disk(_, idx) => Some(idx.root.clone()),
+            DatasetEntry::Proc { .. } => None,
+        })
+    }
 }

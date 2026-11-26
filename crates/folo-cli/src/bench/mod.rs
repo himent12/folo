@@ -426,5 +426,9 @@ mod tests {
         let top_typo = plan(r#"{"condtions":[]}"#).unwrap_err();
         assert_eq!(top_typo.code, "usage");
         assert!(top_typo.message.contains("condtions"), "{}", top_typo.message);
+        let designer_typo =
+            plan(r#"{"conditions":[],"designed_by":{"agent":"claude","modle":"opus"}}"#).unwrap_err();
+        assert_eq!(designer_typo.code, "usage");
+        assert!(designer_typo.message.contains("modle"), "{}", designer_typo.message);
     }
 }
