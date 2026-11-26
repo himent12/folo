@@ -5,11 +5,86 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use folo_api::BBox;
+use sha2::{Digest, Sha256};
 
 use crate::util::Rng;
 
 /// The provenance line of a dataset made from a labeling job.
 pub const PROVENANCE: &str = "# made with FOLO agent labeling";
+
+/// Lowercase hex SHA-256 of `bytes`.
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
+    hex_digest(&Sha256::digest(bytes))
+}
+
+/// Lowercase hex SHA-256 of the file at `path`, streamed without buffering the whole file in memory.
+pub(crate) fn sha256_file(path: &Path) -> std::io::Result<String> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex_digest(&hasher.finalize()))
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Why writing a labeling job's dataset failed.
+#[derive(Debug)]
+pub enum WriteError {
+    /// A source image disappeared from disk before it could be read.
+    Missing(PathBuf),
+    /// A source image could not be decoded (corrupt or truncated).
+    Unreadable { file: String, path: PathBuf, reason: String },
+    /// A source image's decoded dimensions no longer match what was stored when it was added.
+    DimensionsChanged { file: String, path: PathBuf, expected: (u32, u32), actual: (u32, u32) },
+    /// A source image's bytes changed on disk since it was added to the job (even with matching dimensions).
+    ContentChanged { file: String, path: PathBuf },
+    /// A filesystem read or write error.
+    Io(std::io::Error),
+}
+
+impl From<std::io::Error> for WriteError {
+    fn from(e: std::io::Error) -> Self {
+        WriteError::Io(e)
+    }
+}
+
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteError::Missing(p) => write!(f, "{} is no longer on disk", p.display()),
+            WriteError::Unreadable { file, path, reason } => {
+                write!(f, "'{file}' ({}) cannot be decoded: {reason}", path.display())
+            }
+            WriteError::DimensionsChanged { file, path, expected, actual } => write!(
+                f,
+                "'{file}' ({}) changed size on disk: expected {}x{}, found {}x{}",
+                path.display(),
+                expected.0,
+                expected.1,
+                actual.0,
+                actual.1
+            ),
+            WriteError::ContentChanged { file, path } => {
+                write!(f, "'{file}' ({}) changed on disk since it was added", path.display())
+            }
+            WriteError::Io(e) => write!(f, "{e}"),
+        }
+    }
+}
 
 /// A labeled image to write.
 pub struct Item {
@@ -17,6 +92,8 @@ pub struct Item {
     pub source: PathBuf,
     /// Its name in the dataset (stems unique).
     pub file: String,
+    /// SHA-256 hex digest recorded when the image was added (`None` for older jobs or non-job callers).
+    pub sha256: Option<String>,
     pub width: u32,
     pub height: u32,
     /// Its boxes, pixel `xyxy`.
@@ -29,7 +106,8 @@ pub fn val_count(n: usize, val_fraction: f32) -> usize {
 }
 
 /// Writes `items` into `dir` (which exists and is empty): a seeded shuffle, the first [`val_count`] images to
-/// `val`, the rest to `train`; the files copied byte for byte, one label file per image (an empty one for an image
+/// `val`, the rest to `train`; each file is read once, verified as a readable image matching its stored size (and
+/// SHA-256 when recorded), and written byte for byte with one label file per image (an empty one for an image
 /// without boxes) and a `data.yaml` naming `classes`, whose first line is `provenance` (a `#` comment saying what
 /// made it). Returns `[train, val]` image counts.
 pub fn write(
@@ -39,7 +117,7 @@ pub fn write(
     val_fraction: f32,
     seed: u64,
     provenance: &str,
-) -> std::io::Result<[usize; 2]> {
+) -> std::result::Result<[usize; 2], WriteError> {
     let mut order: Vec<usize> = (0..items.len()).collect();
     let mut rng = Rng::new(seed);
     for i in (1..order.len()).rev() {
@@ -55,7 +133,44 @@ pub fn write(
         std::fs::create_dir_all(&labels)?;
         for &i in part {
             let item = &items[i];
-            std::fs::copy(&item.source, images.join(&item.file))?;
+            let bytes = std::fs::read(&item.source).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    WriteError::Missing(item.source.clone())
+                } else {
+                    WriteError::Io(e)
+                }
+            })?;
+            if folo_data::jpeg_truncated(&bytes) {
+                return Err(WriteError::Unreadable {
+                    file: item.file.clone(),
+                    path: item.source.clone(),
+                    reason: "truncated JPEG (missing end-of-image marker)".into(),
+                });
+            }
+            let decoded = folo_data::decode(&bytes).map_err(|err| {
+                let reason = match err {
+                    folo_data::DataError::Image { message, .. } => message,
+                    other => other.to_string(),
+                };
+                WriteError::Unreadable { file: item.file.clone(), path: item.source.clone(), reason }
+            })?;
+            if (decoded.width, decoded.height) != (item.width, item.height) {
+                return Err(WriteError::DimensionsChanged {
+                    file: item.file.clone(),
+                    path: item.source.clone(),
+                    expected: (item.width, item.height),
+                    actual: (decoded.width, decoded.height),
+                });
+            }
+            if let Some(expected) = &item.sha256
+                && sha256_bytes(&bytes) != *expected
+            {
+                return Err(WriteError::ContentChanged {
+                    file: item.file.clone(),
+                    path: item.source.clone(),
+                });
+            }
+            std::fs::write(images.join(&item.file), &bytes)?;
             let stem = Path::new(&item.file).file_stem().unwrap_or_default().to_string_lossy();
             std::fs::write(labels.join(format!("{stem}.txt")), label_text(item))?;
         }
@@ -114,6 +229,7 @@ mod tests {
         let item = Item {
             source: PathBuf::new(),
             file: "a.jpg".into(),
+            sha256: None,
             width: 200,
             height: 100,
             boxes: vec![
@@ -140,6 +256,7 @@ mod tests {
                 Item {
                     source: path,
                     file: format!("img{i}.png"),
+                    sha256: None,
                     width: 32,
                     height: 24,
                     // Every third image is a background image.
@@ -188,7 +305,8 @@ mod tests {
             .unwrap();
         let out = dir.join("out");
         std::fs::create_dir_all(&out).unwrap();
-        let items = [Item { source, file: "only.png".into(), width: 8, height: 8, boxes: vec![] }];
+        let items =
+            [Item { source, file: "only.png".into(), sha256: None, width: 8, height: 8, boxes: vec![] }];
         assert_eq!(write(&out, &["a".to_string()], &items, 0.5, 0, PROVENANCE).unwrap(), [1, 0]);
         assert!(!out.join("images/val").exists());
         let ds = folo_data::open(&out).unwrap();

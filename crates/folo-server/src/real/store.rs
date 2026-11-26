@@ -352,13 +352,41 @@ impl Store for RealStore {
             ));
         }
         let m = self.model(checkpoint)?;
-        if engine::read_model_file(&m.path)?.checkpoint().is_none() {
+        let file = engine::read_model_file(&m.path)?;
+        let Some(ckpt) = file.checkpoint() else {
             return Err(Error::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_weights",
                 format!("model '{checkpoint}' ({}) has no training state to continue", m.model.name),
             )
             .hint("name a full checkpoint (a run's last.folo), or start a new run with `weights` set to the model"));
+        };
+        let ckpt_cfg = serde_json::from_value::<folo_vision::TrainConfig>(ckpt.train.clone()).ok();
+        let done = ckpt.epoch;
+        let total = ckpt_cfg.as_ref().map_or(ckpt.sched.epochs, |c| ckpt.sched.epochs.min(c.epochs as u64));
+        if done >= total {
+            return Err(Error::conflict(
+                "run_not_resumable",
+                format!(
+                    "checkpoint '{checkpoint}' ({}) already completed ({done}/{total} epochs)",
+                    m.model.name
+                ),
+            )
+            .hint("start a new run with `weights` set to this model to train further"));
+        }
+        if done > 0
+            && ckpt.best.fitness.is_some()
+            && ckpt_cfg.as_ref().is_some_and(|c| (done as i64 - 1) - ckpt.best.epoch >= c.patience as i64)
+        {
+            return Err(Error::conflict(
+                "run_not_resumable",
+                format!(
+                    "checkpoint '{checkpoint}' ({}) already stopped early after epoch {done} (best epoch {})",
+                    m.model.name,
+                    ckpt.best.epoch + 1
+                ),
+            )
+            .hint("start a new run with `weights` set to this model to train further"));
         }
         self.start_run(config, Some(&m.path))
     }

@@ -140,6 +140,18 @@ async fn a_checkpoint_continues_on_another_server_and_history_has_cursors() {
     assert_eq!(two.lines, full.lines[full.lines.len() - 2..]);
     let first: RunLogs = ok(&app_a, logs("?after=0&limit=3")).await;
     assert_eq!(first.lines, full.lines[..3]);
+    assert_eq!(first.total, total);
+    // Paginated cursor polling advances by `after + lines.len()` (not `total`, which stays the full log length).
+    let mut cursor = 0u64;
+    let mut paged = Vec::new();
+    while cursor < total {
+        let page: RunLogs = ok(&app_a, logs(&format!("?after={cursor}&limit=1"))).await;
+        assert_eq!(page.total, total);
+        assert_eq!(page.lines.len(), 1);
+        cursor += page.lines.len() as u64;
+        paged.extend(page.lines);
+    }
+    assert_eq!(paged, full.lines);
     assert!(ok::<RunLogs>(&app_a, logs(&format!("?after={}", total + 10))).await.lines.is_empty());
     let tail: RunLogs = ok(&app_a, logs("?limit=2")).await;
     assert_eq!((tail.lines.as_slice(), tail.total), (two.lines.as_slice(), total));
@@ -205,6 +217,18 @@ async fn a_checkpoint_continues_on_another_server_and_history_has_cursors() {
     assert!(log.lines.iter().any(|l| l.message.starts_with("continuing the training state of")), "{log:?}");
     assert!(done.model_id.is_some());
     assert!(std::fs::read(dir.join("weights").join("last.folo")).unwrap() != ckpt, "trained on");
+
+    // Continuing a checkpoint that already completed its schedule is refused with 409 run_not_resumable
+    // (whether the request asks for the same or more epochs), and leaves no bogus run behind.
+    let completed_last = format!("m_{}-last", cont.id.trim_start_matches("run_"));
+    for epochs in [2, 3] {
+        let mut body = tiny(&ds_b.id, epochs);
+        body.as_object_mut().unwrap().insert("checkpoint".into(), json!(completed_last));
+        let e = err(&app_b, post_json("/api/runs", body), StatusCode::CONFLICT, "run_not_resumable").await;
+        assert!(e.message.contains("already completed"), "{}", e.message);
+        assert!(e.hint.as_deref().is_some_and(|h| h.contains("weights")), "{e:?}");
+    }
+    assert_eq!(ok::<RunList>(&app_b, get("/api/runs")).await.runs.len(), 1);
 }
 
 #[tokio::test]

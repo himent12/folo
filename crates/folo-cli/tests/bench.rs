@@ -223,14 +223,38 @@ fn bench_through_a_folo_serve() {
     fixture(&t.join("shapes"), &home);
     let (_serve, url, client) = serve(&home, &[]);
 
+    // Invalid create arguments fail before registering `--data`, and a source-level refusal rolls back a
+    // newly registered dataset instead of leaving it behind.
+    let shapes = t.join("shapes");
+    let srv = ["--server", url.as_str()];
+    for (label, extra, exit, code) in [
+        ("max-images 0", vec!["--max-images", "0"], 2, "usage"),
+        (
+            "bad plan severity",
+            vec!["--plan", r#"{"conditions":[{"condition":"haze","severities":[0]}]}"#],
+            2,
+            "usage",
+        ),
+        ("empty test split", vec!["--split", "test"], 1, "invalid_dataset"),
+    ] {
+        let mut args = vec!["create", "invalid", "--data", shapes.to_str().unwrap()];
+        args.extend(extra);
+        let e = error(&args, &srv, exit);
+        assert_eq!(s(&e["code"]), code, "{label}: {e}");
+        let listed: Value = client.get("/datasets").unwrap();
+        assert_eq!(
+            listed["datasets"].as_array().unwrap().len(),
+            0,
+            "{label} must not leave a registered dataset behind: {listed}"
+        );
+    }
+
     // The data dir's server is found through its lock.
     let d = ["--data-dir", home.to_str().unwrap()];
-    let shapes = t.join("shapes");
     let made = ok(&["create", "shapes", "--data", shapes.to_str().unwrap(), "--plan", PLAN], &d);
     let b = s(&made["id"]).to_string();
 
     // The entry lives in the server: `run` returns at once, `status --wait` follows it by id.
-    let srv = ["--server", url.as_str()];
     let e = error(&["run", &b, "--model", "shapes", "--device", "cpu"], &srv, 2);
     assert!(s(&e["message"]).contains("--device"), "{e}");
     let started = ok(&["run", &b, "--model", "shapes"], &srv);

@@ -524,6 +524,7 @@ fn teach(job: &LoopJob, g: u32, teacher: &Graded) -> Result<Option<String>> {
         .map(|(im, boxes)| dataset::Item {
             source: im.path.clone(),
             file: unique_file_name(&im.file, &mut taken),
+            sha256: None,
             width: im.width,
             height: im.height,
             boxes: (*boxes).clone(),

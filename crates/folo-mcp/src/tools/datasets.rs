@@ -275,6 +275,38 @@ impl Inner {
         if a.classes.len() > 80 || a.classes.iter().any(|c| c.chars().count() > 64) {
             return Err(invalid_arguments("classes must hold at most 80 names of at most 64 characters"));
         }
+        // In proxy mode with --confine, `folo serve` writes synthetic datasets under its own `<data_dir>/datasets`:
+        // refuse before generating when that folder is outside this MCP process's --data-dir (mock servers generate
+        // procedural `mock://` datasets and report `data_dir: None`).
+        if self.confinement.active()
+            && let Some(proxy) = &self.proxy
+        {
+            let proxy = proxy.clone();
+            let paths = self.paths.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), Error> {
+                let sys = proxy.system()?;
+                if let Some(remote_dir) = sys.data_dir {
+                    let target = std::path::Path::new(&remote_dir).join("datasets");
+                    paths.check_dir_inside(&target).map_err(|mut e| {
+                        if e.body.code == "path_outside_data_dir" {
+                            e.body.message = format!(
+                                "the proxied folo serve writes synthetic datasets under {}, which is outside --data-dir {}",
+                                folo_api::json::path(&target),
+                                folo_api::json::path(&paths.data_dir)
+                            );
+                            e.body.hint = Some(
+                                "pass the server's --data-dir to `folo mcp --confine --server ...`, run `folo mcp --confine` without --server, or restart without --confine"
+                                    .into(),
+                            );
+                        }
+                        e
+                    })?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(super::join)??;
+        }
         let total = a.images as f64;
         progress.report(0.0, Some(total), false).await;
         let req = SyntheticDataset {
@@ -285,6 +317,15 @@ impl Inner {
             seed: a.seed,
         };
         let d = self.blocking(move |s| s.create_synthetic(req)).await?;
+        // Defense-in-depth: if the server placed the dataset outside --data-dir anyway (e.g. a symlink or an older
+        // server omitting `data_dir` in `/api/system`), clean up what this call just created before returning the error.
+        if let Err(e) = self.ensure_dataset(&d.id).await {
+            let (id, c) = (d.id.clone(), self.confinement.clone());
+            let _ =
+                self.blocking(move |s| s.delete_dataset_files(&id).or_else(|_| s.delete_dataset(&id))).await;
+            c.forget(&d.id);
+            return Err(e);
+        }
         progress.report(total, Some(total), true).await;
         let summary = format!(
             "created {} ({}): {} train / {} val images, classes {}",

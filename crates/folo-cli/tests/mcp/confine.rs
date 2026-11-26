@@ -476,3 +476,63 @@ fn confined_mcp_uses_effective_yaml_root_and_ignores_coco_sidecars() {
     assert_eq!(coco_page["items"][0]["boxes"].as_array().unwrap().len(), 1);
     c.finish();
 }
+
+/// A confined MCP proxy whose `--data-dir` differs from the proxied `folo serve`'s must refuse
+/// `create_synthetic_dataset` before generating or registering anything outside its sandbox; when the two share
+/// `--data-dir`, generation succeeds and the returned dataset is immediately usable.
+#[test]
+fn confined_proxy_refuses_synthetic_dataset_outside_data_dir() {
+    use super::harness::folo_cmd;
+    use folo_test_support::ChildGuard;
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let root = folo_test_support::TestDir::new("mcp-confine-proxy-synth");
+    let server_dir = root.join("server");
+    let other_dir = root.join("other");
+    std::fs::create_dir_all(&server_dir).unwrap();
+    std::fs::create_dir_all(&other_dir).unwrap();
+
+    let mut serve: ChildGuard = folo_cmd()
+        .args(["serve", "--device", "cpu", "--port", "0", "--json", "--data-dir"])
+        .arg(&server_dir)
+        .env("RUST_LOG", "warn")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let mut first = String::new();
+    BufReader::new(serve.stdout.take().unwrap()).read_line(&mut first).unwrap();
+    let url = serde_json::from_str::<Value>(&first).unwrap()["url"].as_str().unwrap().to_string();
+
+    // Different --data-dir: refused before the server writes or registers anything.
+    let mut c = spawn(&["--server", &url, "--confine", "--data-dir", other_dir.to_str().unwrap()], None);
+    init_old(&mut c);
+    let e = c.tool_error(
+        "create_synthetic_dataset",
+        json!({ "name": "blocked", "images": 4, "imgsz": 64 }),
+        "path_outside_data_dir",
+    );
+    assert!(e["message"].as_str().unwrap().contains("outside"), "{e}");
+    c.finish();
+
+    let client = folo_client::Client::new(&url);
+    let ds_list: Value = client.get("/datasets").unwrap();
+    assert_eq!(ds_list["datasets"].as_array().unwrap().len(), 0, "server must not register blocked dataset");
+    assert!(!server_dir.join("datasets").exists(), "server must not write files for blocked dataset");
+
+    // Same --data-dir: succeeds and the returned dataset is immediately visible and readable.
+    let mut c = spawn(&["--server", &url, "--confine", "--data-dir", server_dir.to_str().unwrap()], None);
+    init_old(&mut c);
+    let created = c.ok("create_synthetic_dataset", json!({ "name": "allowed", "images": 4, "imgsz": 64 }));
+    let id = created["id"].as_str().unwrap().to_string();
+    let got = c.ok("get_dataset", json!({ "dataset_id": id }));
+    assert_eq!(got["id"], id);
+    let listed = c.ok("list_datasets", json!({}));
+    assert_eq!(listed["total"], 1);
+    c.finish();
+
+    let _ = serve.kill();
+    let _ = serve.wait();
+}

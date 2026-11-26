@@ -459,9 +459,10 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
   docs/FORMAT.md): epoch, optimizer, schedule, EMA and RNG, as `folo train --resume` does. The file is copied
   into the new run as its `weights/last.folo`; the body's other fields are the run's `config` as usual and should
   be those of the run that wrote the checkpoint (the trainer takes its settings from the checkpoint). Errors:
-  `model_not_found`, `422 invalid_weights` (the file has no training state), `400 invalid_body` (together with
-  `resume_run_id` or `weights`). This is how a cloud control plane resumes a run on a fresh worker: it uploads
-  the checkpoint (`/api/uploads`) and names it here.
+  `model_not_found`, `422 invalid_weights` (the file has no training state), `409 run_not_resumable` (the
+  checkpoint already completed its training schedule or stopped early; start a new run with `weights` instead),
+  `400 invalid_body` (together with `resume_run_id` or `weights`). This is how a cloud control plane resumes a run on
+  a fresh worker: it uploads the checkpoint (`/api/uploads`) and names it here.
   **Cloud runs** (feature `cloud`, docs/CLOUD.md): with `"compute": { "connection_id", "offer_id", "max_hours"? ,
   "disk_gb"? }` the run trains on that cloud connection instead of this machine. It is checked like any run plus:
   `connection_not_found`, `offer_not_found`, `400 invalid_config` (`max_hours` outside `0.25..=720`, `disk_gb`
@@ -527,9 +528,10 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
   the run's log history (the trainer's lines, the server's, and one per finished epoch: `epoch 3/5: loss 3.214,
   mAP50-95 0.073, 15.2 s`), most recent `limit` lines (default 500, clamped to 1..5000), oldest first. `total` counts
   every line of the log (feature `run_cursors`; left out when it is 0, so a missing `total` reads as 0, as
-  from older servers), and `after=<n>` answers the lines after
-  the first `n` instead (the oldest `limit` of them), so `after=<total of the last answer>` polls for new lines
-  without missing or repeating one. The lines are
+  from older servers). Without `after`, the answer holds the newest `limit` lines ending at `total`, so a poller
+  starts at `after=<total>`. With `after=<n>`, the answer holds up to `limit` oldest lines after the first `n` while
+  `total` still reports the full log length; advance the cursor to `after = <n> + lines.len()` (not `total`, which
+  skips unread lines whenever `limit` caps a page) and continue while `<n> + lines.len() < total`. The lines are
   the same as the SSE `log` events, so a dashboard opened mid-run loads this and then appends live events. The
   shape is stable (the MCP proxy uses it, docs/MCP.md).
 - `GET /api/runs/{id}/events` → SSE stream. Each SSE `event:` name is the payload type, `data:` is its JSON:
@@ -1076,9 +1078,12 @@ exported more than once.
   the job's classes. `pending` and `failed` images are left out; a labeled image without boxes is a background
   image (an empty label file). The images are shuffled with `seed` and `round(n · val_fraction)` of them go to
   `val` (`val_fraction` in `0..=0.5`, else `400 invalid_body`; at least one image always stays in `train`).
-  `name` defaults to the job's. `400 invalid_dataset` when no image is labeled, `404 image_not_found` when a
-  labeled image added from a folder is no longer on disk (the message counts them and names one; nothing is
-  written), `409 label_job_active` while a run is active. While the dataset is written the job cannot be changed, deleted or given to an agent, and its
+  `name` defaults to the job's. Each labeled image is read once, decoded and checked against its stored size (and
+  its content SHA-256 recorded when it was added) before the dataset is registered: `400 invalid_dataset` when no
+  image is labeled or a source image changed on disk since it was added (dimensions or bytes differ), `422
+  image_decode_failed` when a source image is corrupt or truncated, `404 image_not_found` when a labeled image added
+  from a folder is no longer on disk (the message counts them and names one; on any failure nothing is written or
+  registered and `dataset_id` stays unchanged), `409 label_job_active` while a run is active. While the dataset is written the job cannot be changed, deleted or given to an agent, and its
   images cannot be edited or removed (`409 label_job_active`); images can still be added (they are not part of
   that dataset). The job keeps existing and remembers the dataset as `dataset_id`; exporting again makes
   another dataset.
