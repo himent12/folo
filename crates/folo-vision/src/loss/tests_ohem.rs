@@ -151,26 +151,47 @@ fn ohem_empty_non_finite_serde_and_validation() {
     let grads = sel.loss.backward().unwrap();
     assert_eq!(grads.get(&empty).unwrap().numel(), 0);
 
-    // Non-finite loss (NaN) sorts first and propagates NaN rather than being hidden.
-    let with_nan = Tensor::from_slice(&[1.0f32, f32::NAN, 2.0, 3.0], [4]).unwrap();
-    let sel_nan = ohem_select(
-        &with_nan,
+    // Non-finite loss (both +NaN and negative quiet NaN from 0.0/0.0, plus +Inf/-Inf) sorts
+    // deterministically: NaNs first by ascending index, then +Inf, then finite, then -Inf.
+    let neg_nan = f32::from_bits(0xffc0_0000);
+    let with_nans = Tensor::from_slice(&[1.0f32, neg_nan, 2.0, f32::NAN, f32::INFINITY, 3.0], [6]).unwrap();
+    let sel_nan1 = ohem_select(
+        &with_nans,
         None,
         &OhemConfig { budget: OhemBudget::TopK(1), min_kept: 0, reduction: LossReduction::Mean },
     )
     .unwrap();
-    assert_eq!(sel_nan.selected_indices, vec![1]);
-    assert!(sel_nan.loss.item::<f32>().unwrap().is_nan());
+    assert_eq!(sel_nan1.selected_indices, vec![1], "negative NaN must not be dropped and ties by index");
+    assert!(sel_nan1.loss.item::<f32>().unwrap().is_nan());
 
-    // Serde round-trip.
-    let ohem = OhemLoss::new(OhemConfig {
-        budget: OhemBudget::NegPosRatio { ratio: 3.0, min_neg: 4 },
-        min_kept: 2,
-        reduction: LossReduction::Sum,
-    })
+    let sel_nan3 = ohem_select(
+        &with_nans,
+        None,
+        &OhemConfig { budget: OhemBudget::TopK(3), min_kept: 0, reduction: LossReduction::Sum },
+    )
     .unwrap();
-    let json = serde_json::to_string(&ohem).unwrap();
-    assert_eq!(serde_json::from_str::<OhemLoss>(&json).unwrap(), ohem);
+    assert_eq!(sel_nan3.selected_indices, vec![1, 3, 4], "both NaNs then +Inf");
+
+    // Serde round-trip for ALL three OhemBudget variants (including default Fraction) & invalid JSON rejection.
+    for cfg_case in [
+        OhemConfig::default(),
+        OhemConfig { budget: OhemBudget::TopK(8), min_kept: 1, reduction: LossReduction::Mean },
+        OhemConfig { budget: OhemBudget::Fraction(0.3), min_kept: 2, reduction: LossReduction::None },
+        OhemConfig {
+            budget: OhemBudget::NegPosRatio { ratio: 3.0, min_neg: 4 },
+            min_kept: 2,
+            reduction: LossReduction::Sum,
+        },
+    ] {
+        let cfg_json = serde_json::to_string(&cfg_case).unwrap();
+        assert_eq!(serde_json::from_str::<OhemConfig>(&cfg_json).unwrap(), cfg_case);
+        let ohem = OhemLoss::new(cfg_case).unwrap();
+        let json = serde_json::to_string(&ohem).unwrap();
+        assert_eq!(serde_json::from_str::<OhemLoss>(&json).unwrap(), ohem);
+    }
+    let invalid_ohem_json =
+        r#"{"cfg":{"budget":{"kind":"fraction","value":1.5},"min_kept":0,"reduction":"mean"}}"#;
+    assert!(serde_json::from_str::<OhemLoss>(invalid_ohem_json).is_err());
 
     // Invalid configs and mismatched mask rejected.
     for bad in [

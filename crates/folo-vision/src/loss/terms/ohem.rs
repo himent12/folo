@@ -24,7 +24,7 @@ use crate::loss::invalid;
 
 /// Selection budget controlling how many hard examples are mined from the candidate pool.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum OhemBudget {
     /// Keep at most the `k` hardest candidates from the mining pool.
     TopK(usize),
@@ -130,10 +130,18 @@ pub struct OhemSelection {
     pub num_mined: usize,
 }
 
-/// Normalize `-0.0` to `+0.0` so signed zeroes tie-break deterministically by ascending index.
+/// Canonicalize all NaNs (both positive and negative quiet/signaling NaNs) to positive canonical
+/// `f32::NAN` so every NaN sorts ahead of `+Inf` and all finite values under `total_cmp` and
+/// tie-breaks deterministically by ascending flat index, and normalize `-0.0` to `+0.0`.
 #[inline]
 fn canonical_loss_key(v: f32) -> f32 {
-    if v == 0.0 { 0.0 } else { v }
+    if v.is_nan() {
+        f32::NAN
+    } else if v == 0.0 {
+        0.0
+    } else {
+        v
+    }
 }
 
 /// Differentiable Online Hard Example Mining (OHEM) loss selector over a per-element `F32` loss tensor.
@@ -256,8 +264,22 @@ pub fn ohem_select(
     Ok(OhemSelection { loss, selected_indices: selected, num_positives, num_mined })
 }
 
+#[derive(Deserialize)]
+struct RawOhemLoss {
+    cfg: OhemConfig,
+}
+
+impl TryFrom<RawOhemLoss> for OhemLoss {
+    type Error = String;
+
+    fn try_from(raw: RawOhemLoss) -> std::result::Result<Self, Self::Error> {
+        Self::new(raw.cfg).map_err(|e| e.to_string())
+    }
+}
+
 /// Reusable Online Hard Example Mining (OHEM) loss wrapper holding a validated [`OhemConfig`].
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawOhemLoss")]
 pub struct OhemLoss {
     cfg: OhemConfig,
 }

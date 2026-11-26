@@ -140,12 +140,12 @@ fn next_bounded(state: &mut u64, bound: usize) -> usize {
 
 /// Pre-matched detection tagged with its originating image and per-image order for exact tie preservation.
 #[derive(Clone, Copy, Debug)]
-struct IndexedDet {
-    score: f32,
-    img_idx: usize,
-    det_idx: usize,
-    tp: u16,
-    ig: u16,
+pub(super) struct IndexedDet {
+    pub(super) score: f32,
+    pub(super) img_idx: usize,
+    pub(super) det_idx: usize,
+    pub(super) tp: u16,
+    pub(super) ig: u16,
 }
 
 /// Evaluate exact 101-point COCO AP across all 10 IoU thresholds for one class given per-image
@@ -155,7 +155,7 @@ struct IndexedDet {
 /// order: single detections with unique `(score, img_idx)` apply multiplicity `w` in `O(1)` (proven
 /// identical under the backward suffix-max precision envelope), while tied-score runs within the
 /// same image replay `0..w` copies in exact `(copy, det_idx)` order.
-fn class_ap_weighted(
+pub(super) fn class_ap_weighted(
     sorted_dets: &[IndexedDet],
     counts: &[u32],
     n_gt: u64,
@@ -341,24 +341,21 @@ where
         });
     }
 
-    // Match each image once using Evaluator's exact per-image matching kernel.
-    let mut img_gt_counts: Vec<Vec<u64>> = vec![vec![0u64; num_classes]; num_images];
+    // Match each image once using a single scratch-reusing AP-only Evaluator (no confusion matrix).
+    let mut img_nonzero_gts: Vec<Vec<(usize, u64)>> = Vec::with_capacity(num_images);
     let mut class_dets: Vec<Vec<IndexedDet>> = vec![Vec::new(); num_classes];
     let mut total_gt_counts = vec![0u64; num_classes];
+    let mut matcher = Evaluator::new_ap_only(num_classes, cfg.eval.clone());
 
     for (img_idx, (preds_ref, truths_ref)) in images.iter().enumerate() {
-        let mut ev = Evaluator::with_config(num_classes, cfg.eval.clone());
-        ev.add_image(preds_ref.as_ref(), truths_ref.as_ref());
-        let (dets_per_class, gts_per_class): (Vec<Vec<DetRecord>>, Vec<u64>) = ev.into_matched_records();
-        for (c, (dets_c, n_gt)) in dets_per_class.into_iter().zip(gts_per_class).enumerate() {
-            img_gt_counts[img_idx][c] = n_gt;
-            total_gt_counts[c] += n_gt;
-            let dst = &mut class_dets[c];
-            dst.reserve(dets_c.len());
-            for (det_idx, rec) in dets_c.into_iter().enumerate() {
-                dst.push(IndexedDet { score: rec.score, img_idx, det_idx, tp: rec.tp, ig: rec.ig });
-            }
+        matcher.add_image_ap_only(preds_ref.as_ref(), truths_ref.as_ref());
+        let nonzero = matcher.drain_image_records(img_idx, &mut |c, det_idx, rec: DetRecord| {
+            class_dets[c].push(IndexedDet { score: rec.score, img_idx, det_idx, tp: rec.tp, ig: rec.ig });
+        });
+        for &(c, ng) in &nonzero {
+            total_gt_counts[c] += ng;
         }
+        img_nonzero_gts.push(nonzero);
     }
 
     // Sort each class's detections once by (score DESC, img_idx ASC, det_idx ASC).
@@ -406,43 +403,47 @@ where
         .into_par_iter()
         .map(|rep_idx| {
             let mut rng = seed ^ ((rep_idx as u64).wrapping_add(1).wrapping_mul(0xD1B5_4A32_D192_ED03));
-            let _ = splitmix64(&mut rng);
+            rng = splitmix64(&mut rng);
             let mut counts = vec![0u32; num_images];
+            let mut sampled_imgs = Vec::with_capacity(num_images);
             for _ in 0..num_images {
                 let idx = next_bounded(&mut rng, num_images);
+                if counts[idx] == 0 {
+                    sampled_imgs.push(idx);
+                }
                 counts[idx] += 1;
+            }
+
+            // Accumulate per-class GT counts sparsely over sampled images and their present classes.
+            let mut rep_gt = vec![0u64; num_classes];
+            let mut active_classes = Vec::new();
+            for &img_idx in &sampled_imgs {
+                let w = counts[img_idx] as u64;
+                for &(c, ng) in &img_nonzero_gts[img_idx] {
+                    if rep_gt[c] == 0 {
+                        active_classes.push(c);
+                    }
+                    rep_gt[c] += w * ng;
+                }
             }
 
             let mut map_per_iou = [0.0f64; NUM_IOU_THRESHOLDS];
             let mut class_ap50 = vec![None; num_classes];
             let mut class_ap50_95 = vec![None; num_classes];
-            let mut active = 0usize;
 
-            for c in 0..num_classes {
-                if total_gt_counts[c] == 0 {
-                    continue;
-                }
-                let mut n_gt_b = 0u64;
-                for (img_idx, &w) in counts.iter().enumerate() {
-                    if w > 0 {
-                        n_gt_b += w as u64 * img_gt_counts[img_idx][c];
-                    }
-                }
-                if n_gt_b == 0 {
-                    continue;
-                }
-                let ap = class_ap_weighted(&class_dets[c], &counts, n_gt_b, &recall_pts);
+            for &c in &active_classes {
+                let ap = class_ap_weighted(&class_dets[c], &counts, rep_gt[c], &recall_pts);
                 for t in 0..NUM_IOU_THRESHOLDS {
                     map_per_iou[t] += ap[t];
                 }
                 class_ap50[c] = Some(ap[0]);
                 class_ap50_95[c] = Some(ap.iter().sum::<f64>() / NUM_IOU_THRESHOLDS as f64);
-                active += 1;
             }
 
-            if active > 0 {
+            if !active_classes.is_empty() {
+                let inv = 1.0 / active_classes.len() as f64;
                 for v in &mut map_per_iou {
-                    *v /= active as f64;
+                    *v *= inv;
                 }
             }
             RepResult { map_per_iou, class_ap50, class_ap50_95 }

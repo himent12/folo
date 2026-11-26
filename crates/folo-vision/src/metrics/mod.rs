@@ -212,6 +212,55 @@ impl Evaluator {
         }
     }
 
+    /// An AP-only evaluator for per-image matching (skips allocating the `(C + 1)^2` confusion matrix).
+    pub(super) fn new_ap_only(num_classes: usize, cfg: EvalConfig) -> Self {
+        Self {
+            num_classes,
+            cfg,
+            thresholds: iou_thresholds(),
+            num_images: 0,
+            num_preds: 0,
+            dets: vec![Vec::new(); num_classes],
+            gt_counts: vec![0; num_classes],
+            confusion: Vec::new(),
+            pred_order: Vec::new(),
+            gt_order: Vec::new(),
+            ious: Vec::new(),
+            gt_matched: Vec::new(),
+            tp_bits: Vec::new(),
+            ig_bits: Vec::new(),
+            pairs: Vec::new(),
+            pred_used: Vec::new(),
+        }
+    }
+
+    /// Match one image for AP without updating the confusion matrix, reusing all scratch buffers.
+    pub(super) fn add_image_ap_only(&mut self, preds: &[Detection], truths: &[Truth]) {
+        self.add_image_inner(preds, truths, false);
+    }
+
+    /// Drain matched per-class detection records and nonzero `(class, gt_count)` pairs from the
+    /// images matched since the last call, keeping internal scratch buffers allocated for reuse.
+    pub(super) fn drain_image_records(
+        &mut self,
+        img_idx: usize,
+        class_dets_cb: &mut impl FnMut(usize, usize, DetRecord),
+    ) -> Vec<(usize, u64)> {
+        let mut nonzero_gts = Vec::new();
+        for c in 0..self.num_classes {
+            let ng = self.gt_counts[c];
+            if ng > 0 {
+                nonzero_gts.push((c, ng));
+                self.gt_counts[c] = 0;
+            }
+            for (det_idx, rec) in self.dets[c].drain(..).enumerate() {
+                let _ = img_idx;
+                class_dets_cb(c, det_idx, rec);
+            }
+        }
+        nonzero_gts
+    }
+
     /// Number of classes.
     pub fn num_classes(&self) -> usize {
         self.num_classes
@@ -228,6 +277,10 @@ impl Evaluator {
     /// # Panics
     /// If a class index is `>= num_classes`.
     pub fn add_image(&mut self, preds: &[Detection], truths: &[Truth]) {
+        self.add_image_inner(preds, truths, true);
+    }
+
+    fn add_image_inner(&mut self, preds: &[Detection], truths: &[Truth], with_confusion: bool) {
         let nc = self.num_classes;
         for p in preds {
             assert!((p.class as usize) < nc, "Evaluator: prediction class {} >= num_classes {nc}", p.class);
@@ -236,7 +289,9 @@ impl Evaluator {
             assert!((t.class as usize) < nc, "Evaluator: truth class {} >= num_classes {nc}", t.class);
         }
         self.num_images += 1;
-        self.update_confusion(preds, truths);
+        if with_confusion {
+            self.update_confusion(preds, truths);
+        }
 
         // One in-place sort per image over packed register keys (zero indirection, zero allocation;
         // trailing input index preserves exact input order on ties).
@@ -459,11 +514,6 @@ impl Evaluator {
         for (a, b) in self.confusion.iter_mut().zip(other.confusion) {
             *a += b;
         }
-    }
-
-    /// Consume the evaluator and return its per-class matched detection records and ground-truth counts.
-    pub(super) fn into_matched_records(self) -> (Vec<Vec<DetRecord>>, Vec<u64>) {
-        (self.dets, self.gt_counts)
     }
 
     /// Compute the report. Does not consume the accumulated state, so it can be called again after more images.

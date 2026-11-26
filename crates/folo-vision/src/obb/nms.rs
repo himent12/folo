@@ -44,8 +44,8 @@ impl Default for RotatedNmsConfig {
 }
 
 #[inline]
-fn aabbs_overlap(a: &[f64; 4], b: &[f64; 4]) -> bool {
-    a[2] > b[0] && b[2] > a[0] && a[3] > b[1] && b[3] > a[1]
+fn center_extents_may_overlap(a: &[f64; 4], b: &[f64; 4]) -> bool {
+    (a[0] - b[0]).abs() <= a[2] + b[2] && (a[1] - b[1]).abs() <= a[3] + b[3]
 }
 
 /// Greedy single-set rotated NMS over pre-filtered candidate indices already sorted by descending
@@ -55,7 +55,8 @@ fn rotated_nms_sorted_indices(boxes: &[Obb], order: &[usize], iou_thr: f64, max_
     if m == 0 || max_det == 0 {
         return Vec::new();
     }
-    let aabbs: Vec<[f64; 4]> = order.iter().map(|&idx| boxes[idx].aabb_f64()).collect();
+    let ce: Vec<[f64; 4]> = order.iter().map(|&idx| boxes[idx].aabb_center_extent_f64()).collect();
+    let allow_aabb_skip = iou_thr >= 0.0;
     let mut suppressed = vec![false; m];
     let mut kept = Vec::with_capacity(m.min(max_det));
 
@@ -69,12 +70,12 @@ fn rotated_nms_sorted_indices(boxes: &[Obb], order: &[usize], iou_thr: f64, max_
             break;
         }
         let bi = &boxes[bi_idx];
-        let ab_i = &aabbs[i];
+        let ce_i = &ce[i];
         for j in (i + 1)..m {
             if suppressed[j] {
                 continue;
             }
-            if !aabbs_overlap(ab_i, &aabbs[j]) {
+            if allow_aabb_skip && !center_extents_may_overlap(ce_i, &ce[j]) {
                 continue;
             }
             if obb_iou_f64(bi, &boxes[order[j]]) > iou_thr {

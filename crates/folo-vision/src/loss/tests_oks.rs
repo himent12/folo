@@ -163,6 +163,39 @@ fn oks_loss_unlabeled_instances_exact_match_and_validation() {
     assert_eq!(l_empty.item::<f32>().unwrap(), 0.0);
     assert_eq!(l_empty.backward().unwrap().get(&empty_p).unwrap().numel(), 0);
 
+    // Masked (v == 0) keypoints MUST receive strictly 0.0 gradient even when area == 0 (eps == 0),
+    // area is NaN, or another labeled keypoint is NaN.
+    let vis_mask = Tensor::from_slice(&[2.0f32, 0.0], [1, 2]).unwrap();
+    let gt1 = Tensor::from_slice(&[0.0f32, 0.0, 10.0, 10.0], [1, 2, 2]).unwrap();
+    let p_zero_area = Tensor::from_slice(&[3.0f32, 4.0, 12.0, 15.0], [1, 2, 2]).unwrap().requires_grad_();
+    let a_zero = Tensor::from_slice(&[0.0f32], [1]).unwrap();
+    let l_zero = oks_loss(
+        &p_zero_area,
+        &gt1,
+        &vis_mask,
+        &a_zero,
+        &sigmas,
+        &OksLossConfig { eps: 0.0, reduction: LossReduction::Mean },
+    )
+    .unwrap();
+    assert_eq!(l_zero.item::<f32>().unwrap(), 0.0);
+    let g_zero = l_zero.backward().unwrap().get(&p_zero_area).unwrap().to_vec::<f32>().unwrap();
+    assert_eq!(g_zero, vec![0.0, 0.0, 0.0, 0.0]);
+
+    let p_nan = Tensor::from_slice(&[f32::NAN, 4.0, 12.0, 15.0], [1, 2, 2]).unwrap().requires_grad_();
+    let a_ok = Tensor::from_slice(&[100.0f32], [1]).unwrap();
+    let l_nan = oks_loss(&p_nan, &gt1, &vis_mask, &a_ok, &sigmas, &OksLossConfig::default()).unwrap();
+    assert!(l_nan.item::<f32>().unwrap().is_nan());
+    let g_nan = l_nan.backward().unwrap().get(&p_nan).unwrap().to_vec::<f32>().unwrap();
+    assert!(g_nan[0].is_nan() && g_nan[1].is_nan());
+    assert_eq!((g_nan[2], g_nan[3]), (0.0, 0.0), "unlabeled keypoint must stay strictly 0.0");
+
+    // Empty k == 0 with n > 0 still validates negative areas.
+    let p_k0 = Tensor::zeros_with([1, 0, 2], DType::F32, folo_core::Device::Cpu).unwrap();
+    let v_k0 = Tensor::zeros_with([1, 0], DType::F32, folo_core::Device::Cpu).unwrap();
+    let a_neg1 = Tensor::from_slice(&[-5.0f32], [1]).unwrap();
+    assert!(oks_loss(&p_k0, &p_k0, &v_k0, &a_neg1, &[], &OksLossConfig::default()).is_err());
+
     // Validation errors.
     let bad_vis = Tensor::from_slice(&[3.0f32, 0.0, 0.0, 0.0, 0.0, 0.0], [3, 2]).unwrap();
     assert!(oks_loss(&pred, &gt, &bad_vis, &areas, &sigmas, &OksLossConfig::default()).is_err());

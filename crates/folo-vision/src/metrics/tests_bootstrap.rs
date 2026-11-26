@@ -190,3 +190,77 @@ fn bootstrap_map_parity_determinism_and_ci_properties() {
     );
     assert!(compute_bootstrap_map(1, &images, &cfg95).is_err()); // class 1 out of bounds for num_classes = 1
 }
+
+#[test]
+fn bootstrap_weighted_ap_matches_evaluator_on_duplicated_tied_and_coco_ignored_images() {
+    use super::bootstrap::{IndexedDet, class_ap_weighted};
+    use super::recall_points;
+
+    // 3 images featuring intra-image score ties (TP + FP at 0.80), cross-image score ties (0.80),
+    // and COCO-ignored boxes (inverted / huge area > 1e10 under EvalConfig::coco()).
+    let imgs: Vec<(Vec<Detection>, Vec<Truth>)> = vec![
+        (
+            vec![
+                det(0.0, 0.0, 10.0, 10.0, 0.80, 0),
+                det(50.0, 50.0, 60.0, 60.0, 0.80, 0), // intra-image tie FP
+                det(20.0, 20.0, 10.0, 10.0, 0.95, 0), // inverted -> COCO-ignored FP
+            ],
+            vec![truth(0.0, 0.0, 10.0, 10.0, 0)],
+        ),
+        (
+            vec![
+                det(0.0, 0.0, 10.0, 10.0, 0.80, 0), // cross-image tie TP
+                det(1.0, 0.0, 11.0, 10.0, 0.60, 0), // partial overlap
+            ],
+            vec![
+                truth(0.0, 0.0, 10.0, 10.0, 0),
+                truth(500.0, 500.0, 400.0, 400.0, 0), // inverted -> COCO-ignored GT
+            ],
+        ),
+        (vec![det(0.0, 0.0, 9.0, 10.0, 0.90, 0)], vec![truth(0.0, 0.0, 10.0, 10.0, 0)]),
+    ];
+
+    for eval_cfg in [EvalConfig::default(), EvalConfig::coco()] {
+        let mut matcher = Evaluator::new_ap_only(1, eval_cfg.clone());
+        let mut dets: Vec<IndexedDet> = Vec::new();
+        let mut img_gts = vec![0u64; imgs.len()];
+        for (img_idx, (p, t)) in imgs.iter().enumerate() {
+            matcher.add_image_ap_only(p, t);
+            let nz = matcher.drain_image_records(img_idx, &mut |_c, det_idx, rec| {
+                dets.push(IndexedDet { score: rec.score, img_idx, det_idx, tp: rec.tp, ig: rec.ig });
+            });
+            for &(c, ng) in &nz {
+                if c == 0 {
+                    img_gts[img_idx] = ng;
+                }
+            }
+        }
+        dets.sort_unstable_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.img_idx.cmp(&b.img_idx))
+                .then_with(|| a.det_idx.cmp(&b.det_idx))
+        });
+
+        let rpts = recall_points();
+        for counts in [[3u32, 0, 2], [2, 3, 1], [0, 4, 0], [1, 1, 1]] {
+            let mut ref_ev = Evaluator::with_config(1, eval_cfg.clone());
+            let mut n_gt = 0u64;
+            for (img_idx, &w) in counts.iter().enumerate() {
+                n_gt += w as u64 * img_gts[img_idx];
+                for _ in 0..w {
+                    ref_ev.add_image(&imgs[img_idx].0, &imgs[img_idx].1);
+                }
+            }
+            let ref_rep = ref_ev.compute();
+            let got_ap = class_ap_weighted(&dets, &counts, n_gt, &rpts);
+            for (t, &ap_t) in got_ap.iter().enumerate() {
+                assert_eq!(
+                    ap_t as f32, ref_rep.map_per_iou[t],
+                    "mismatch for coco={} counts={counts:?} thr_idx={t}: got={ap_t} ref={}",
+                    eval_cfg.coco_compatible, ref_rep.map_per_iou[t]
+                );
+            }
+        }
+    }
+}

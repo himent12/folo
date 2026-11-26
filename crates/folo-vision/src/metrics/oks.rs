@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
 use crate::metrics::{NUM_IOU_THRESHOLDS, NUM_RECALL_POINTS, iou_thresholds, recall_points};
 
@@ -136,6 +137,8 @@ pub fn oks_f64(pred: &[[f32; 2]], gt: &[Keypoint], area: f64, sigmas: &[f32]) ->
 
     let mut sum = 0.0f64;
     let mut n_vis = 0usize;
+    let sqrt_area = area.sqrt();
+    let two_sqrt2 = 2.0 * std::f64::consts::SQRT_2;
     for ((p, g), &s) in pred.iter().zip(gt).zip(sigmas) {
         if g.visibility == 0 {
             continue;
@@ -144,18 +147,58 @@ pub fn oks_f64(pred: &[[f32; 2]], gt: &[Keypoint], area: f64, sigmas: &[f32]) ->
         if !(px.is_finite() && py.is_finite() && gx.is_finite() && gy.is_finite()) {
             return Ok(0.0);
         }
-        let s64 = s as f64;
-        let denom = 8.0 * area * s64 * s64;
-        if !(denom.is_finite() && denom > 0.0) {
+        let scale_k = two_sqrt2 * (sqrt_area * s as f64);
+        if !(scale_k.is_finite() && scale_k > 0.0) {
             return Ok(0.0);
         }
-        let dx = px - gx;
-        let dy = py - gy;
-        let e = (dx * dx + dy * dy) / denom;
+        let ux = (px - gx) / scale_k;
+        let uy = (py - gy) / scale_k;
+        let e = ux * ux + uy * uy;
         sum += (-e).exp();
         n_vis += 1;
     }
     if n_vis == 0 { Ok(0.0) } else { Ok((sum / n_vis as f64).clamp(0.0, 1.0)) }
+}
+
+/// COCO zero-labeled-keypoint OKS against an instance's bounding box (expanded by 1x box size on
+/// each side per `pycocotools/cocoeval.py` lines 208-215).
+fn oks_unlabeled_bbox_f64(pred: &[[f32; 2]], bbox: &Xyxy, area: f64, sigmas: &[f32]) -> f64 {
+    if pred.is_empty() || area <= 0.0 || !area.is_finite() {
+        return 0.0;
+    }
+    if !(bbox.x1.is_finite() && bbox.y1.is_finite() && bbox.x2.is_finite() && bbox.y2.is_finite()) {
+        return 0.0;
+    }
+    let bx1 = bbox.x1 as f64;
+    let by1 = bbox.y1 as f64;
+    let bx2 = bbox.x2 as f64;
+    let by2 = bbox.y2 as f64;
+    let bw = (bx2 - bx1).max(0.0);
+    let bh = (by2 - by1).max(0.0);
+    let x0 = bx1 - bw;
+    let x1 = bx2 + bw;
+    let y0 = by1 - bh;
+    let y1 = by2 + bh;
+    let sqrt_area = area.sqrt();
+    let two_sqrt2 = 2.0 * std::f64::consts::SQRT_2;
+
+    let mut sum = 0.0f64;
+    for (p, &s) in pred.iter().zip(sigmas) {
+        let (px, py) = (p[0] as f64, p[1] as f64);
+        if !(px.is_finite() && py.is_finite()) {
+            return 0.0;
+        }
+        let scale_k = two_sqrt2 * (sqrt_area * s as f64);
+        if !(scale_k.is_finite() && scale_k > 0.0) {
+            return 0.0;
+        }
+        let dx = (x0 - px).max(0.0) + (px - x1).max(0.0);
+        let dy = (y0 - py).max(0.0) + (py - y1).max(0.0);
+        let ux = dx / scale_k;
+        let uy = dy / scale_k;
+        sum += (-(ux * ux + uy * uy)).exp();
+    }
+    (sum / pred.len() as f64).clamp(0.0, 1.0)
 }
 
 /// Compute COCO Object Keypoint Similarity in `f32` (delegates to [`oks_f64`]).
@@ -166,7 +209,44 @@ pub fn oks(pred: &[[f32; 2]], gt: &[Keypoint], area: f32, sigmas: &[f32]) -> Res
 /// Pairwise OKS matrix, row-major `[preds.len(), gts.len()]`, where each `gts[j]` is `(keypoints, area)`.
 pub fn oks_matrix(preds: &[&[[f32; 2]]], gts: &[(&[Keypoint], f32)], sigmas: &[f32]) -> Result<Vec<f32>> {
     validate_sigmas(sigmas, "oks_matrix")?;
-    let mut out = Vec::with_capacity(preds.len() * gts.len());
+    let k_len = sigmas.len();
+    for (i, p) in preds.iter().enumerate() {
+        if p.len() != k_len {
+            return Err(Error::Config(format!(
+                "oks_matrix: preds[{i}] length {} != sigmas length {k_len}",
+                p.len()
+            )));
+        }
+    }
+    for (j, &(g, area)) in gts.iter().enumerate() {
+        if g.len() != k_len {
+            return Err(Error::Config(format!(
+                "oks_matrix: gts[{j}] length {} != sigmas length {k_len}",
+                g.len()
+            )));
+        }
+        if !(area.is_finite() && area >= 0.0) {
+            return Err(Error::Config(format!(
+                "oks_matrix: gts[{j}] area must be finite and >= 0, got {area}"
+            )));
+        }
+        for (ki, kp) in g.iter().enumerate() {
+            if kp.visibility > 2 {
+                return Err(Error::Config(format!(
+                    "oks_matrix: gts[{j}][{ki}].visibility must be 0, 1, or 2, got {}",
+                    kp.visibility
+                )));
+            }
+        }
+    }
+    let total = preds
+        .len()
+        .checked_mul(gts.len())
+        .filter(|&n| n.checked_mul(std::mem::size_of::<f32>()).is_some_and(|b| b <= isize::MAX as usize))
+        .ok_or_else(|| {
+            Error::Config(format!("oks_matrix: matrix size {} x {} overflows", preds.len(), gts.len()))
+        })?;
+    let mut out = Vec::with_capacity(total);
     for p in preds {
         for &(g, area) in gts {
             out.push(oks_f64(p, g, area as f64, sigmas)? as f32);
@@ -191,6 +271,33 @@ pub struct OksTruth {
     pub keypoints: Vec<Keypoint>,
     /// Object scale area `s^2`.
     pub area: f32,
+    /// Optional bounding box for COCO-style ignore matching when this instance has zero labeled
+    /// keypoints (`v == 0` for all `k`).
+    #[serde(default)]
+    pub bbox: Option<Xyxy>,
+    /// Mark this ground truth as ignored (e.g. crowd or out-of-area instance): matches to it are
+    /// neither true positives nor false positives, and regular truths always take priority.
+    #[serde(default)]
+    pub ignore: bool,
+}
+
+impl OksTruth {
+    /// Construct a regular ground-truth pose instance with no bounding box and `ignore = false`.
+    pub fn new(keypoints: Vec<Keypoint>, area: f32) -> Self {
+        Self { keypoints, area, bbox: None, ignore: false }
+    }
+
+    /// Attach a bounding box (enabling COCO bounding-box ignore OKS when all keypoints are unlabeled).
+    pub fn with_bbox(mut self, bbox: Xyxy) -> Self {
+        self.bbox = Some(bbox);
+        self
+    }
+
+    /// Mark this instance as ignored during evaluation.
+    pub fn with_ignore(mut self, ignore: bool) -> Self {
+        self.ignore = ignore;
+        self
+    }
 }
 
 /// COCO-style keypoint Average Precision summary across OKS thresholds `0.50:0.05:0.95`.
@@ -215,9 +322,13 @@ pub struct OksApReport {
 /// Compute COCO-style keypoint AP (`AP@50`, `AP@75`, `AP@50:95`) across a slice of `(preds, truths)`
 /// images using greedy per-image OKS matching and 101-point COCO recall interpolation.
 ///
-/// Ground truths with zero labeled keypoints are ignored (not counted in `num_truths`). Predictions
-/// with non-finite scores are skipped. `max_dets_per_image` defaults to COCO's `20` when `Some(20)`
-/// or uncapped when `None`.
+/// Regular labeled truths (`!ignore && any(v > 0)`) are matched first; ignored truths (`ignore == true`
+/// or zero labeled keypoints) are sorted afterward so regular matches always take priority, and
+/// predictions matching an ignored truth are excluded from both TP and FP counts (matching
+/// `pycocotools/cocoeval.py`). For a zero-labeled truth with `bbox: Some(b)`, OKS is computed
+/// against the COCO expanded bounding box; zero-labeled truths without a `bbox` cannot be spatially
+/// matched and are skipped (predictions overlapping such unboxed people are not ignored).
+/// Predictions with non-finite scores are skipped.
 pub fn compute_oks_ap<P, T>(
     images: &[(P, T)],
     sigmas: &[f32],
@@ -232,7 +343,8 @@ where
     let recall_pts = recall_points();
     let k_len = sigmas.len();
 
-    let mut records: Vec<(f32, usize, usize, u16)> = Vec::new();
+    // `(score, img_idx, pred_idx, tp_bits, ig_bits)`
+    let mut records: Vec<(f32, usize, usize, u16, u16)> = Vec::new();
     let mut num_truths = 0u64;
 
     for (img_idx, (preds_ref, truths_ref)) in images.iter().enumerate() {
@@ -247,7 +359,9 @@ where
                 )));
             }
         }
-        let mut active_gts = Vec::new();
+        // `(truth_idx, has_labeled_kpts)` partitioned into regular truths first, ignored truths second.
+        let mut reg_gts: Vec<(usize, bool)> = Vec::new();
+        let mut ign_gts: Vec<(usize, bool)> = Vec::new();
         for (i, t) in truths.iter().enumerate() {
             if t.keypoints.len() != k_len {
                 return Err(Error::Config(format!(
@@ -269,11 +383,17 @@ where
                     )));
                 }
             }
-            if t.keypoints.iter().any(|kp| kp.visibility > 0) {
-                active_gts.push(i);
+            let has_labeled = t.keypoints.iter().any(|kp| kp.visibility > 0);
+            if !t.ignore && has_labeled {
+                reg_gts.push((i, true));
+            } else if has_labeled || t.bbox.is_some() {
+                ign_gts.push((i, has_labeled));
             }
         }
-        num_truths += active_gts.len() as u64;
+        let n_reg = reg_gts.len();
+        num_truths += n_reg as u64;
+        let mut ordered_gts = reg_gts;
+        ordered_gts.extend(ign_gts);
 
         let mut pred_order: Vec<usize> = (0..preds.len()).filter(|&i| preds[i].score.is_finite()).collect();
         pred_order
@@ -283,26 +403,41 @@ where
         }
 
         let np = pred_order.len();
-        let ng = active_gts.len();
+        let ng = ordered_gts.len();
         if np == 0 {
             continue;
         }
         if ng == 0 {
             for &pi in &pred_order {
-                records.push((preds[pi].score, img_idx, pi, 0));
+                records.push((preds[pi].score, img_idx, pi, 0, 0));
             }
             continue;
         }
 
-        let mut sim = vec![0.0f64; np * ng];
+        let sim_len = np
+            .checked_mul(ng)
+            .filter(|&n| n.checked_mul(std::mem::size_of::<f64>()).is_some_and(|b| b <= isize::MAX as usize))
+            .ok_or_else(|| {
+                Error::Config(format!(
+                    "compute_oks_ap: image {img_idx} similarity matrix {np} x {ng} overflows"
+                ))
+            })?;
+        let mut sim = vec![0.0f64; sim_len];
         for (di, &pi) in pred_order.iter().enumerate() {
-            for (gi, &ti) in active_gts.iter().enumerate() {
-                sim[di * ng + gi] =
-                    oks_f64(&preds[pi].keypoints, &truths[ti].keypoints, truths[ti].area as f64, sigmas)?;
+            for (gi, &(ti, has_labeled)) in ordered_gts.iter().enumerate() {
+                let t = &truths[ti];
+                sim[di * ng + gi] = if has_labeled {
+                    oks_f64(&preds[pi].keypoints, &t.keypoints, t.area as f64, sigmas)?
+                } else if let Some(ref bb) = t.bbox {
+                    oks_unlabeled_bbox_f64(&preds[pi].keypoints, bb, t.area as f64, sigmas)
+                } else {
+                    0.0
+                };
             }
         }
 
         let mut tp_bits = vec![0u16; np];
+        let mut ig_bits = vec![0u16; np];
         for (t_idx, &thr) in thresholds.iter().enumerate() {
             let thr_cap = thr.min(1.0 - 1e-10);
             let mut gt_used = vec![false; ng];
@@ -311,7 +446,14 @@ where
                 let mut best = thr_cap;
                 let mut best_g = usize::MAX;
                 for (gi, &v) in row.iter().enumerate() {
-                    if gt_used[gi] || v < best {
+                    if gt_used[gi] {
+                        continue;
+                    }
+                    // Prefer regular labeled truths over ignored truths (matching pycocotools).
+                    if best_g < n_reg && gi >= n_reg {
+                        break;
+                    }
+                    if v < best {
                         continue;
                     }
                     best = v;
@@ -319,13 +461,17 @@ where
                 }
                 if best_g != usize::MAX {
                     gt_used[best_g] = true;
-                    tp_bits[di] |= 1 << t_idx;
+                    if best_g < n_reg {
+                        tp_bits[di] |= 1 << t_idx;
+                    } else {
+                        ig_bits[di] |= 1 << t_idx;
+                    }
                 }
             }
         }
 
         for (di, &pi) in pred_order.iter().enumerate() {
-            records.push((preds[pi].score, img_idx, pi, tp_bits[di]));
+            records.push((preds[pi].score, img_idx, pi, tp_bits[di], ig_bits[di]));
         }
     }
 
@@ -349,7 +495,7 @@ where
     let mut cur_b = [0usize; NUM_IOU_THRESHOLDS];
     let mut bucket_max = [[0.0f64; NUM_RECALL_POINTS]; NUM_IOU_THRESHOLDS];
 
-    for &(_, _, _, bits) in &records {
+    for &(_, _, _, bits, ig) in &records {
         for t in 0..NUM_IOU_THRESHOLDS {
             if (bits >> t) & 1 == 1 {
                 tp_c[t] += 1;
@@ -364,7 +510,7 @@ where
                 if p > bucket_max[t][b] {
                     bucket_max[t][b] = p;
                 }
-            } else {
+            } else if (ig >> t) & 1 == 0 {
                 fp_c[t] += 1;
             }
         }

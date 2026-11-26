@@ -57,6 +57,10 @@ impl OksLossConfig {
 /// Evaluate one instance's OKS loss `1 - OKS` (or similarity `OKS` when `return_similarity` is true)
 /// and exact `f64` partial derivatives w.r.t. predicted `(x, y)` coordinates.
 ///
+/// Unlabeled keypoints (`vis[k] <= 0.0`) always receive strictly `[0.0, 0.0]` gradient, even when
+/// `area` or a labeled keypoint coordinate is non-finite. When `area == 0.0` and `eps == 0.0`
+/// (finite zero effective area), returns `0.0` with zero gradients to match [`crate::metrics::oks_f64`].
+///
 /// Returns `(value, num_labeled, d_val_d_pred)` where `d_val_d_gt = -d_val_d_pred`.
 pub(crate) fn oks_instance_f64(
     pred: &[[f64; 2]],
@@ -74,12 +78,22 @@ pub(crate) fn oks_instance_f64(
         return (0.0, 0, grad);
     }
     let eff_area = area + eps;
-    if !(eff_area.is_finite() && eff_area > 0.0) {
-        return (f64::NAN, n_vis, vec![[f64::NAN; 2]; k_len]);
+    if !eff_area.is_finite() || eff_area < 0.0 {
+        for k in 0..k_len {
+            if vis[k] > 0.0 {
+                grad[k] = [f64::NAN, f64::NAN];
+            }
+        }
+        return (f64::NAN, n_vis, grad);
+    }
+    if eff_area == 0.0 {
+        return (0.0, n_vis, grad);
     }
     let inv_n = 1.0 / (n_vis as f64);
     let mut sum = 0.0f64;
     let sign = if return_similarity { -1.0 } else { 1.0 };
+    let sqrt_area = eff_area.sqrt();
+    let two_sqrt2 = 2.0 * std::f64::consts::SQRT_2;
 
     for k in 0..k_len {
         if vis[k] <= 0.0 {
@@ -88,23 +102,34 @@ pub(crate) fn oks_instance_f64(
         let (px, py) = (pred[k][0], pred[k][1]);
         let (gx, gy) = (gt[k][0], gt[k][1]);
         if !(px.is_finite() && py.is_finite() && gx.is_finite() && gy.is_finite()) {
-            return (f64::NAN, n_vis, vec![[f64::NAN; 2]; k_len]);
+            for j in 0..k_len {
+                if vis[j] > 0.0 {
+                    grad[j] = [f64::NAN, f64::NAN];
+                }
+            }
+            return (f64::NAN, n_vis, grad);
         }
-        let s = sigmas[k];
-        let denom = 8.0 * eff_area * s * s;
-        if !(denom.is_finite() && denom > 0.0) {
-            return (f64::NAN, n_vis, vec![[f64::NAN; 2]; k_len]);
+        // Compute scaled displacement u = d / sqrt(8 * eff_area * s^2) in stages so large finite
+        // areas (up to f64::MAX) never overflow `8.0 * eff_area`.
+        let scale_k = two_sqrt2 * (sqrt_area * sigmas[k]);
+        if !(scale_k.is_finite() && scale_k > 0.0) {
+            for j in 0..k_len {
+                if vis[j] > 0.0 {
+                    grad[j] = [f64::NAN, f64::NAN];
+                }
+            }
+            return (f64::NAN, n_vis, grad);
         }
         let dx = px - gx;
         let dy = py - gy;
-        let d2 = dx * dx + dy * dy;
-        let e = d2 / denom;
+        let (ux, uy) = (dx / scale_k, dy / scale_k);
+        let e = ux * ux + uy * uy;
         let exp_neg_e = (-e).exp();
         let term = if return_similarity { exp_neg_e } else { -(-e).exp_m1() };
         sum += term;
         if exp_neg_e > 0.0 {
-            let coeff = sign * inv_n * exp_neg_e * (2.0 / denom);
-            grad[k] = [coeff * dx, coeff * dy];
+            let coeff = sign * inv_n * exp_neg_e * (2.0 / scale_k);
+            grad[k] = [coeff * ux, coeff * uy];
         }
     }
 
@@ -187,6 +212,15 @@ fn oks_op(
     let need_pred = pred_kpts.requires_grad();
     let need_gt = gt_kpts.requires_grad();
 
+    if n > 0 {
+        let av_check = areas.to_vec::<f32>()?;
+        for (idx, &a) in av_check.iter().enumerate() {
+            if a.is_finite() && a < 0.0 {
+                return Err(invalid(format!("{op}: areas[{idx}] must be >= 0, got {a}")));
+            }
+        }
+    }
+
     if n == 0 || k == 0 {
         let out_t = match reduction {
             LossReduction::None => Tensor::zeros_with([n], DType::F32, dev)?,
@@ -207,11 +241,6 @@ fn oks_op(
     for (idx, &v) in vv.iter().enumerate() {
         if !(v.is_finite() && (v == 0.0 || v == 1.0 || v == 2.0)) {
             return Err(invalid(format!("{op}: visibility[{idx}] must be 0, 1, or 2, got {v}")));
-        }
-    }
-    for (idx, &a) in av.iter().enumerate() {
-        if a.is_finite() && a < 0.0 {
-            return Err(invalid(format!("{op}: areas[{idx}] must be >= 0, got {a}")));
         }
     }
 

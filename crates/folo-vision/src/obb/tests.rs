@@ -109,6 +109,28 @@ fn obb_axis_aligned_parity_collinear_degenerate_and_extreme_scales() {
     let huge_a = Obb::new(1e7, -1e7, 1e25, 1e25, 0.3);
     let huge_b = Obb::new(1e7, -1e7, 1e25, 1e25, 0.3 + FRAC_PI_4);
     assert!((obb_iou_f64(&huge_a, &huge_b) - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+
+    // Small extent at large coordinate offset (cx ± ex would absorb ex in naive world AABB!):
+    // scalar IoU, matrix IoU, and rotated NMS must all agree.
+    for far in [Obb::new(1e20, 0.0, 1.0, 1.0, 0.0), Obb::new(1.0, 1.0, 2e-25, 2e-25, 0.0)] {
+        assert_eq!(obb_iou(&far, &far), 1.0);
+        assert_eq!(obb_iou_matrix(&[far], &[far]), vec![1.0]);
+        assert_eq!(rotated_nms(&[far, far], &[0.9, 0.8], 0.5, 0.1, 10), vec![0]);
+    }
+
+    // Translated polygon area at (1e9, 1e9) must not lose precision to shoelace cancellation.
+    let shifted_sq = [[1e9, 1e9], [1e9 + 1.0, 1e9], [1e9 + 1.0, 1e9 + 1.0], [1e9, 1e9 + 1.0]];
+    assert!((convex_polygon_area_f64(&shifted_sq) - 1.0).abs() < 1e-12);
+
+    // Touching-edge squares yield empty intersection polygon (not repeated collinear vertices).
+    let sq_left = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let sq_right = [[1.0, 0.0], [2.0, 0.0], [2.0, 1.0], [1.0, 1.0]];
+    assert!(clip_convex_polygon_f64(&sq_left, &sq_right).is_empty());
+
+    // Negative iou_thr suppresses even disjoint boxes consistently (AABB skip disabled when iou_thr < 0).
+    let dis_a = Obb::new(0.0, 0.0, 2.0, 2.0, 0.0);
+    let dis_b = Obb::new(100.0, 100.0, 2.0, 2.0, 0.0);
+    assert_eq!(rotated_nms(&[dis_a, dis_b], &[0.9, 0.8], -0.1, 0.1, 10), vec![0]);
 }
 
 #[test]

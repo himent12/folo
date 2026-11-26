@@ -128,9 +128,12 @@ impl Obb {
         ]
     }
 
-    /// Tight axis-aligned bounding box enclosing this [`Obb`] in `f64` as `[min_x, min_y, max_x, max_y]`.
+    /// Center and projected AABB half-extents `[cx, cy, ex, ey]` in `f64`.
+    ///
+    /// Comparing `|cx_a - cx_b| > ex_a + ex_b` avoids catastrophic `cx ± ex` absorption when a small
+    /// box sits at a large coordinate offset (e.g. `cx = 1e20, w = 1.0` or `cx = 1.0, w = 2e-25`).
     #[inline]
-    pub(crate) fn aabb_f64(&self) -> [f64; 4] {
+    pub(crate) fn aabb_center_extent_f64(&self) -> [f64; 4] {
         let cx = self.cx as f64;
         let cy = self.cy as f64;
         let hw = 0.5 * (self.w as f64).max(0.0);
@@ -138,6 +141,13 @@ impl Obb {
         let (s, c) = (self.theta_rad as f64).sin_cos();
         let ex = hw * c.abs() + hh * s.abs();
         let ey = hw * s.abs() + hh * c.abs();
+        [cx, cy, ex, ey]
+    }
+
+    /// Tight axis-aligned bounding box enclosing this [`Obb`] in `f64` as `[min_x, min_y, max_x, max_y]`.
+    #[inline]
+    pub(crate) fn aabb_f64(&self) -> [f64; 4] {
+        let [cx, cy, ex, ey] = self.aabb_center_extent_f64();
         [cx - ex, cy - ey, cx + ex, cy + ey]
     }
 
@@ -149,16 +159,20 @@ impl Obb {
     }
 }
 
-/// Unsigned area of a simple polygon given as vertices in order, via the shoelace formula in `f64`.
+/// Unsigned area of a simple polygon given as vertices in order, via the translation-invariant
+/// shoelace formula relative to `poly[0]` in `f64` (avoids catastrophic cancellation for polygons
+/// far from the origin).
 #[inline]
 pub fn convex_polygon_area_f64(poly: &[[f64; 2]]) -> f64 {
     let n = poly.len();
     if n < 3 {
         return 0.0;
     }
+    let origin = poly[0];
     let mut sum = 0.0f64;
-    let mut prev = poly[n - 1];
-    for &cur in poly {
+    let mut prev = [poly[n - 1][0] - origin[0], poly[n - 1][1] - origin[1]];
+    for &cur_raw in poly {
+        let cur = [cur_raw[0] - origin[0], cur_raw[1] - origin[1]];
         sum += prev[0] * cur[1] - cur[0] * prev[1];
         prev = cur;
     }
@@ -166,8 +180,8 @@ pub fn convex_polygon_area_f64(poly: &[[f64; 2]]) -> f64 {
 }
 
 /// General Sutherland–Hodgman convex polygon intersection in `f64`: clips `subject` (CCW) against
-/// every directed edge of `clipper` (CCW), returning the intersection polygon vertices (empty if
-/// disjoint or degenerate).
+/// every directed edge of `clipper` (CCW), returning the deduplicated intersection polygon vertices
+/// (empty if disjoint or degenerate / zero-area).
 pub fn clip_convex_polygon_f64(subject: &[[f64; 2]], clipper: &[[f64; 2]]) -> Vec<[f64; 2]> {
     if subject.len() < 3 || clipper.len() < 3 {
         return Vec::new();
@@ -215,7 +229,21 @@ pub fn clip_convex_polygon_f64(subject: &[[f64; 2]], clipper: &[[f64; 2]]) -> Ve
         }
         std::mem::swap(&mut poly, &mut next);
     }
-    poly
+
+    // Deduplicate consecutive and closing coincident vertices, and discard zero-area degeneracies.
+    let mut dedup: Vec<[f64; 2]> = Vec::with_capacity(poly.len());
+    for pt in poly {
+        if dedup.last().is_none_or(|&last| last != pt) {
+            dedup.push(pt);
+        }
+    }
+    if dedup.len() > 1 && dedup.first() == dedup.last() {
+        dedup.pop();
+    }
+    if dedup.len() < 3 || convex_polygon_area_f64(&dedup) == 0.0 {
+        return Vec::new();
+    }
+    dedup
 }
 
 /// Stack-allocated Sutherland–Hodgman half-plane clip for a single axis-aligned boundary:
@@ -331,10 +359,10 @@ fn obb_overlap_normalized_f64(a: &Obb, b: &Obb) -> (f64, f64, f64, f64) {
     let hw2 = 0.5 * sw2;
     let hh2 = 0.5 * sh2;
 
-    // Fast AABB reject in `a`'s local frame.
+    // Fast AABB reject in `a`'s local frame using symmetric center-delta comparison.
     let ex2 = hw2 * cos_d.abs() + hh2 * sin_d.abs();
     let ey2 = hw2 * sin_d.abs() + hh2 * cos_d.abs();
-    if lcx + ex2 <= -hw1 || lcx - ex2 >= hw1 || lcy + ey2 <= -hh1 || lcy - ey2 >= hh1 {
+    if lcx.abs() >= hw1 + ex2 || lcy.abs() >= hh1 + ey2 {
         return (0.0, area_a, area_b, scale);
     }
 
@@ -395,19 +423,30 @@ pub fn obb_iou(a: &Obb, b: &Obb) -> f32 {
 }
 
 /// Pairwise rotated IoU matrix, row-major `[a.len(), b.len()]`: `out[i * b.len() + j] = obb_iou(&a[i], &b[j])`.
+///
+/// # Panics
+/// If `a.len() * b.len()` overflows `usize` or exceeds addressable allocation size.
 pub fn obb_iou_matrix(a: &[Obb], b: &[Obb]) -> Vec<f32> {
-    let mut out = vec![0.0f32; a.len() * b.len()];
+    let total = a
+        .len()
+        .checked_mul(b.len())
+        .filter(|&n| {
+            n.checked_mul(std::mem::size_of::<f32>()).is_some_and(|bytes| bytes <= isize::MAX as usize)
+        })
+        .expect("obb_iou_matrix: output size overflows");
+    let mut out = vec![0.0f32; total];
     if b.is_empty() {
         return out;
     }
-    let aabbs_b: Vec<[f64; 4]> = b.iter().map(Obb::aabb_f64).collect();
+    let ce_b: Vec<[f64; 4]> = b.iter().map(Obb::aabb_center_extent_f64).collect();
     let compute_row = |(ra, orow): (&Obb, &mut [f32])| {
         if !ra.is_finite() || ra.w <= 0.0 || ra.h <= 0.0 {
             return;
         }
-        let ab_a = ra.aabb_f64();
-        for ((o, rb), ab_b) in orow.iter_mut().zip(b).zip(&aabbs_b) {
-            if ab_a[2] <= ab_b[0] || ab_b[2] <= ab_a[0] || ab_a[3] <= ab_b[1] || ab_b[3] <= ab_a[1] {
+        let ce_a = ra.aabb_center_extent_f64();
+        for ((o, rb), ce_b) in orow.iter_mut().zip(b).zip(&ce_b) {
+            if (ce_a[0] - ce_b[0]).abs() > ce_a[2] + ce_b[2] || (ce_a[1] - ce_b[1]).abs() > ce_a[3] + ce_b[3]
+            {
                 *o = 0.0;
             } else {
                 *o = obb_iou(ra, rb);

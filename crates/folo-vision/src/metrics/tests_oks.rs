@@ -42,12 +42,19 @@ fn oks_visibility_exact_values_and_scale_invariance() {
     assert_eq!(oks_f64(&pred, &all_unlabeled, area, &sigmas).unwrap(), 0.0);
     assert_eq!(oks_f64(&pred, &gt, 0.0, &sigmas).unwrap(), 0.0);
 
-    // Pairwise matrix matches scalar oks.
+    // Exact match remains 1.0 at extreme upper (1e308) and lower (1e-300) finite areas without overflow.
+    let exact_pred = [[10.0, 20.0], [30.0, 30.0], [0.0, 0.0]];
+    assert_eq!(oks_f64(&exact_pred, &gt, 1e308, &[0.026, 0.026, 0.026]).unwrap(), 1.0);
+    assert_eq!(oks_f64(&exact_pred, &gt, 1e-300, &[0.026, 0.026, 0.026]).unwrap(), 1.0);
+
+    // Pairwise matrix matches scalar oks and validates even when one side is empty.
     let m = oks_matrix(&[&pred[..]], &[(&gt[..], area as f32), (&all_unlabeled[..], area as f32)], &sigmas)
         .unwrap();
     assert_eq!(m.len(), 2);
     assert!((m[0] as f64 - want).abs() < 1e-6);
     assert_eq!(m[1], 0.0);
+    assert!(oks_matrix(&[&pred[..2]], &[], &sigmas).is_err());
+    assert!(oks_matrix(&[], &[(&gt[..], -1.0f32)], &sigmas).is_err());
 
     // Validation catches mismatched lengths, bad sigmas, negative area, invalid visibility.
     assert!(oks_f64(&pred[..2], &gt, area, &sigmas).is_err());
@@ -67,17 +74,15 @@ fn compute_oks_ap_perfect_partial_and_ignored_truths() {
 
     let img0_preds = vec![OksPred { keypoints: vec![[10.0, 10.0], [20.0, 20.0]], score: 0.95 }];
     let img0_truths = vec![
-        OksTruth { keypoints: vec![Keypoint::visible(10.0, 10.0), Keypoint::occluded(20.0, 20.0)], area },
-        // Unlabeled truth must be ignored and not counted in num_truths.
-        OksTruth { keypoints: vec![Keypoint::unlabeled(), Keypoint::unlabeled()], area },
+        OksTruth::new(vec![Keypoint::visible(10.0, 10.0), Keypoint::occluded(20.0, 20.0)], area),
+        // Unlabeled truth without bbox is skipped and not counted in num_truths.
+        OksTruth::new(vec![Keypoint::unlabeled(), Keypoint::unlabeled()], area),
     ];
 
     let img1_preds =
         vec![OksPred { keypoints: vec![[10.0 + dx_mid, 10.0], [20.0 + dx_mid, 20.0]], score: 0.85 }];
-    let img1_truths = vec![OksTruth {
-        keypoints: vec![Keypoint::visible(10.0, 10.0), Keypoint::visible(20.0, 20.0)],
-        area,
-    }];
+    let img1_truths =
+        vec![OksTruth::new(vec![Keypoint::visible(10.0, 10.0), Keypoint::visible(20.0, 20.0)], area)];
 
     // Perfect single-image check.
     let rep_perf =
@@ -87,6 +92,23 @@ fn compute_oks_ap_perfect_partial_and_ignored_truths() {
     assert!((rep_perf.ap50 - 1.0).abs() < 1e-6);
     assert!((rep_perf.ap75 - 1.0).abs() < 1e-6);
     assert!((rep_perf.ap50_95 - 1.0).abs() < 1e-6);
+
+    // COCO unlabeled-person ignore behavior: high-scoring pose inside an unlabeled person's bbox
+    // followed by a lower-scoring perfect match to a labeled person must be ignored (AP == 1.0, not 0.5).
+    let ign_preds = vec![
+        OksPred { keypoints: vec![[210.0, 210.0], [220.0, 220.0]], score: 0.99 },
+        OksPred { keypoints: vec![[10.0, 10.0], [20.0, 20.0]], score: 0.80 },
+    ];
+    let ign_truths = vec![
+        OksTruth::new(vec![Keypoint::unlabeled(), Keypoint::unlabeled()], area)
+            .with_bbox(crate::boxes::Xyxy::new(200.0, 200.0, 240.0, 240.0)),
+        OksTruth::new(vec![Keypoint::visible(10.0, 10.0), Keypoint::visible(20.0, 20.0)], area),
+    ];
+    let rep_ign =
+        compute_oks_ap(&[(ign_preds.as_slice(), ign_truths.as_slice())], &sigmas, Some(20)).unwrap();
+    assert_eq!(rep_ign.num_truths, 1);
+    assert!((rep_ign.ap50 - 1.0).abs() < 1e-6, "ignored unlabeled-bbox match must not count as FP");
+    assert!((rep_ign.ap50_95 - 1.0).abs() < 1e-6);
 
     // Two images: both match at 0.50..0.65 (AP = 1.0), only img0 matches at 0.70..0.95 (recall = 0.5 -> 51/101).
     let rep = compute_oks_ap(
