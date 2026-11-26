@@ -58,7 +58,10 @@ export function compareState() {
   const live = new LiveBench(() => id.get() || null);
   const bench = () => live.bench;
   const unsupported = computed(() => cannotBench(system.data, live.error));
-  const picked = computed(() => compareShown(ids.get().slice(0, COMPARE_MAX), live.entries));
+  const picked = computed(() => {
+    const all = compareShown(ids.get(), live.entries);
+    return { shown: all.shown.slice(0, COMPARE_MAX), missing: all.missing };
+  });
   const shown = computed(() => picked.get().shown);
   const results = new BenchResults(
     () => id.get() || null,
@@ -73,8 +76,8 @@ export function compareState() {
     router.go(`/benchmarks/${encodeURIComponent(id.peek())}/compare${next.length ? `?entries=${next.map(encodeURIComponent).join(',')}` : ''}`, { replace: true });
   }
   const candidates = computed(() => {
-    const now = ids.get();
-    return live.entries.filter((e) => finished(e) && !now.includes(e.id));
+    const now = new Set(shown.get().map((e) => e.id));
+    return live.entries.filter((e) => finished(e) && !now.has(e.id));
   });
 
   /** Entries graded on an earlier version of the benchmark: never the best of a row, never in the intervals' verdict. */
@@ -140,7 +143,10 @@ export function compareState() {
       key === 'accuracy' ? shown.get().map((e, i) => (o[i] ? null : e.ci95)) : null,
     );
   };
-  const makeBaseline = (eid: string) => setIds([eid, ...ids.peek().filter((x) => x !== eid)]);
+  const makeBaseline = (eid: string) => {
+    const current = shown.peek().map((e) => e.id);
+    setIds([eid, ...current.filter((x) => x !== eid)]);
+  };
 
   // ---- mAP intervals ----
   const ivDomain = computed(() => intervalDomain(shown.get().flatMap((e) => (e.ci95 ? [e.ci95] : []))));
@@ -209,7 +215,6 @@ export function compareState() {
 
   return {
     id,
-    ids,
     live,
     bench,
     unsupported,

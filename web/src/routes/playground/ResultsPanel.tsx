@@ -30,12 +30,14 @@ export interface ResultsPanelProps {
   classCount?: number;
   classList?: () => JSX.Element;
   showAllButton?: () => JSX.Element;
+  onShowAll?: () => void;
   rows: { b: Det; i: number }[];
   predicting: boolean;
   notice: 'file' | 'error' | null;
   json: unknown;
   pred: Prediction | null;
   conf?: number;
+  maxDet?: number;
   hidden: Set<number>;
   tbody?: HTMLTableSectionElement | undefined;
   tabRow: number | null;
@@ -106,6 +108,22 @@ export default function ResultsPanel(props: ResultsPanelProps) {
     }
   }
 
+  const hiddenAtConf = computed(() => props.result?.boxes.length ?? 0);
+  const hasVisibleCandidates = computed(() => !props.hidden.size || !!props.pred?.boxes.some((b) => !props.hidden.has(b.class)));
+  const canLower = computed(
+    () =>
+      conf.get() > 0.05 &&
+      hasVisibleCandidates.get() &&
+      (props.maxDet === undefined || hiddenAtConf.get() < props.maxDet),
+  );
+  const canShowAll = computed(() => !!props.onShowAll && (hiddenAtConf.get() > 0 || (props.hidden.size > 0 && !hasVisibleCandidates.get())));
+  const emptyMessage = computed(() => {
+    const n = hiddenAtConf.get();
+    if (n > 0) return `${n === 1 ? '1 detection is' : `${n} detections are`} hidden by the class filter.`;
+    if (props.hidden.size > 0 && !hasVisibleCandidates.get()) return `No detections at conf ≥ ${conf.get().toFixed(2)} — every detected class is hidden.`;
+    return `No detections at conf ≥ ${conf.get().toFixed(2)}${props.hidden.size ? ' in the visible classes' : ''}.`;
+  });
+
   return (
     <div class="results" class:rail={!!props.rail}>
       <Dynamic component={props.rail ? Bare : Panel} pad="none">
@@ -164,9 +182,14 @@ export default function ResultsPanel(props: ResultsPanelProps) {
             <p class="placeholder">The model found nothing in this image, even at conf ≥ {FETCH.conf}.</p>
           ) : props.rows.length === 0 ? (
             <p class="placeholder">
-              No detections at conf ≥ {conf.get().toFixed(2)}
-              {props.hidden.size ? ' in the visible classes' : ''}.{' '}
-              {conf.get() > 0.05 ? (
+              {emptyMessage.get()}{' '}
+              {canShowAll.get() ? (
+                <button type="button" class="inline" onclick={props.onShowAll}>
+                  Show all classes
+                </button>
+              ) : null}
+              {canShowAll.get() && canLower.get() ? ' · ' : null}
+              {canLower.get() ? (
                 <button type="button" class="inline" onclick={() => conf.set(Math.max(0.01, +(conf.get() / 2).toFixed(2)))}>
                   Lower the threshold
                 </button>

@@ -662,6 +662,7 @@ export default function Playground() {
       classCount={counts.get().length}
       classList={classList}
       showAllButton={showAllButton}
+      onShowAll={() => hidden.set(new Set())}
       result={result.get()}
       bind:tab={tab}
       rows={rows.get()}
@@ -670,6 +671,7 @@ export default function Playground() {
       json={json.get()}
       pred={pred.get()}
       bind:conf={conf}
+      maxDet={maxDet.get()}
       hidden={hidden.get()}
       bind:tbody={tbody}
       tabRow={tabRow.get()}

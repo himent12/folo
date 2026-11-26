@@ -53,7 +53,6 @@ export default function BenchCompare() {
   const phone = new MediaQuery(media.phone, false);
   const {
     id,
-    ids,
     live,
     bench,
     unsupported,
@@ -132,7 +131,9 @@ export default function BenchCompare() {
 
   function addEntry(eid: string) {
     const entry = candidates.peek().find((x) => x.id === eid);
-    setIds([...ids.peek(), eid]);
+    const current = shown.peek().map((x) => x.id);
+    if (current.length >= COMPARE_MAX || current.includes(eid)) return;
+    setIds([...current, eid]);
     if (entry) announce(`Added ${entry.name} to comparison.`);
     // Adding the 4th entry (or last candidate) unmounts the adder <select>: move keyboard focus to the new chip.
     queueMicrotask(() => {
@@ -147,7 +148,7 @@ export default function BenchCompare() {
   function removeEntry(eid: string, index: number) {
     const entry = shown.peek().find((x) => x.id === eid);
     const label = entry ? labelOf(entry) : '';
-    setIds(ids.peek().filter((x) => x !== eid));
+    setIds(shown.peek().map((x) => x.id).filter((x) => x !== eid));
     if (label) announce(`Removed ${label} from comparison.`);
     // The Remove button unmounts with its chip: move keyboard focus to a neighbouring chip, the adder, or the heading.
     queueMicrotask(() => {
@@ -189,8 +190,7 @@ export default function BenchCompare() {
     }
     if (k.toLowerCase() === 'b') {
       const shownIds = list.map((x) => x.id);
-      const extra = ids.peek().filter((x) => !shownIds.includes(x));
-      setIds([...shownIds.slice(1), shownIds[0]!, ...extra]);
+      setIds([...shownIds.slice(1), shownIds[0]!]);
       const nextBase = list[1];
       if (nextBase) announce(`Baseline set to ${labelOf(nextBase)}.`);
       return true;
@@ -563,7 +563,7 @@ export default function BenchCompare() {
             </span>
           )}
         </For>{' '}
-        {ids.get().length < COMPARE_MAX && candidates.get().length ? adder() : null}
+        {shown.get().length < COMPARE_MAX && candidates.get().length ? adder() : null}
       </div>{' '}
       <p class="sr-only" role="status" aria-live="polite">
         {liveNote.get()}

@@ -72,9 +72,19 @@ export default function App(props: AppProps) {
     flush();
   };
 
+  const isStalePaletteOpen = () => {
+    const paletteEl = document.querySelector<HTMLDialogElement>('dialog.palette');
+    return paletteOpen.peek() && !!paletteEl && !paletteEl.open;
+  };
+
   const openPalette = () => {
     closeShortcuts();
+    if (isStalePaletteOpen()) {
+      paletteOpen.set(false);
+      flush();
+    }
     paletteOpen.set(true);
+    if (paletteComp.peek()) flush();
   };
 
   const openShortcuts = () => {
@@ -115,10 +125,14 @@ export default function App(props: AppProps) {
     const forget = installEntryMemory(() => screen.peek().path);
     const uninstall = installShortcuts({
       palette: () => {
-        const opening = !paletteOpen.peek();
-        if (opening) closeShortcuts();
-        else pendingQuery = '';
-        paletteOpen.set(opening);
+        // Native <dialog> sets `el.open = false` synchronously on Escape before firing its queued `close` event:
+        // if Ctrl+K lands in that window while `paletteOpen` is still true, reopen instead of toggling closed.
+        if (isStalePaletteOpen() || !paletteOpen.peek()) {
+          openPalette();
+        } else {
+          pendingQuery = '';
+          paletteOpen.set(false);
+        }
       },
       shortcuts: openShortcuts,
       // Only preload on a real G-chord (guarded in installShortcuts against typing, modifiers, open dialogs, and singleKeys off).

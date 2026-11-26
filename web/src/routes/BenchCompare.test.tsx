@@ -99,4 +99,50 @@ describe('BenchCompare Escape coordination', () => {
     expect(esc.defaultPrevented).toBe(true);
     expect(firstChip.getAttribute('aria-pressed')).toBe('false');
   });
+
+  it('keeps the Add entry picker available when invalid entry IDs fill URL slots and prunes them on add', async () => {
+    const benches = await hub.api.benches();
+    let benchId = '';
+    let entries: Awaited<ReturnType<typeof hub.api.benchEntries>> = [];
+    for (const candidate of benches) {
+      const done = (await hub.api.benchEntries(candidate.id)).filter((e) => e.status === 'done');
+      if (done.length >= 3) {
+        benchId = candidate.id;
+        entries = done;
+        break;
+      }
+    }
+    expect(entries.length).toBeGreaterThanOrEqual(3);
+
+    // One valid entry plus three invalid IDs (4 total URL tokens): picker must still show and adding must succeed.
+    const url = `#/benchmarks/${benchId}/compare?entries=${entries[0]!.id},missing1,missing2,missing3`;
+    history.replaceState(history.state, '', url);
+    router.route = parse(url);
+    const go = vi.spyOn(router, 'go').mockImplementation((path) => {
+      router.route = parse(`#${path}`);
+    });
+
+    c = render(() => <BenchCompare />, target);
+    let adder!: HTMLSelectElement;
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelectorAll('.chips .chip')).toHaveLength(1);
+      const sel = target.querySelector<HTMLSelectElement>('.add select');
+      if (!sel) throw new Error('expected Add entry picker');
+      adder = sel;
+    });
+
+    adder.value = entries[1]!.id;
+    adder.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(go).toHaveBeenCalledWith(`/benchmarks/${benchId}/compare?entries=${entries[0]!.id},${entries[1]!.id}`, { replace: true });
+    expect(target.querySelectorAll('.chips .chip')).toHaveLength(2);
+    expect(target.querySelector<HTMLSelectElement>('.add select')).not.toBeNull();
+
+    // Two valid entries plus two invalid IDs also keep the Add entry picker available.
+    router.route = parse(`#/benchmarks/${benchId}/compare?entries=${entries[0]!.id},${entries[1]!.id},missing1,missing2`);
+    flushSync();
+    expect(target.querySelectorAll('.chips .chip')).toHaveLength(2);
+    expect(target.querySelector<HTMLSelectElement>('.add select')).not.toBeNull();
+  });
 });

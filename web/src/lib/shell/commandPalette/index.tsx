@@ -55,8 +55,11 @@ export default function CommandPalette(props: CommandPaletteProps) {
   const closePalette = () => {
     data.cancelFetches();
     data.clearPending();
+    const fn = restore;
+    restore = null;
     if (el?.open) el.close();
     if (open.peek()) open.set(false);
+    fn?.();
   };
 
   // A press outside the box closes it, unless it is the second click of the double-click that opened it (ui/backdrop).
@@ -232,13 +235,19 @@ export default function CommandPalette(props: CommandPaletteProps) {
       ref={(e) => (el = e)}
       class="palette"
       aria-label="Command palette"
+      oncancel={(e) => {
+        // Close synchronously on Escape so a rapid Ctrl+K before the browser's queued `close` event reopens immediately.
+        e.preventDefault();
+        closePalette();
+      }}
       onclose={() => {
         if (el?.open) return;
         data.cancelFetches();
         data.clearPending();
         open.set(false);
-        restore?.();
+        const fn = restore;
         restore = null;
+        fn?.();
       }}
       onpointerdown={backdrop.onpointerdown}
       onmousedown={backdrop.onmousedown}
