@@ -66,7 +66,7 @@ fn scalar_unary_ref(op: UnaryOp, v: f32) -> f32 {
         Rsqrt => 1.0 / v.sqrt(),
         Recip => 1.0 / v,
         Square => v * v,
-        Relu => v.max(0.0),
+        Relu => max_num(v, 0.0),
         LeakyRelu(a) => {
             if v > 0.0 {
                 v
@@ -75,7 +75,7 @@ fn scalar_unary_ref(op: UnaryOp, v: f32) -> f32 {
             }
         }
         Hardswish => v * (v + 3.0).clamp(0.0, 6.0) * (1.0 / 6.0),
-        Clamp(lo, hi) => v.max(lo).min(hi),
+        Clamp(lo, hi) => min_num(max_num(v, lo), hi),
         PowScalar(2.0) => v * v,
         PowScalar(0.5) => v.sqrt(),
         AddScalar(c) => v + c,
@@ -83,8 +83,8 @@ fn scalar_unary_ref(op: UnaryOp, v: f32) -> f32 {
         RSubScalar(c) => c - v,
         RDivScalar(c) => c / v,
         DivScalar(c) => v / c,
-        MaxScalar(c) => v.max(c),
-        MinScalar(c) => v.min(c),
+        MaxScalar(c) => max_num(v, c),
+        MinScalar(c) => min_num(v, c),
         _ => unreachable!(),
     }
 }
@@ -156,8 +156,8 @@ fn scalar_binary_ref(op: BinaryOp, a: f32, b: f32) -> f32 {
         Sub => a - b,
         Mul => a * b,
         Div => a / b,
-        Maximum => a.max(b),
-        Minimum => a.min(b),
+        Maximum => max_num(a, b),
+        Minimum => min_num(a, b),
         Eq => mask(a == b),
         Ne => mask(a != b),
         Gt => mask(a > b),
@@ -368,20 +368,37 @@ fn avx2_binary_ops_bit_exact_across_all_pairs_and_layouts() {
         f32::NAN,
         f32::from_bits(0x7fc0_1111),
     ];
-    let mut a_all = Vec::with_capacity(atoms.len() * atoms.len() + 3);
-    let mut b_all = Vec::with_capacity(atoms.len() * atoms.len() + 3);
+    let mut a_all = Vec::with_capacity(atoms.len() * atoms.len() + 11);
+    let mut b_all = Vec::with_capacity(atoms.len() * atoms.len() + 11);
     for &x in &atoms {
         for &y in &atoms {
             a_all.push(x);
             b_all.push(y);
         }
     }
-    // Add 3 elements so length = 103 (mod 16 == 7 -> exercises 16-wide, 8-wide? wait 103 = 6*16 + 7; add 8 -> 111 = 6*16 + 8 + 7).
+    // Add 11 elements so length = 111 (6 * 16 + 8 + 7, exercising 16-wide, 8-wide, and 7-lane tail).
     for k in 0..11 {
         a_all.push((k as f32) - 5.0);
         b_all.push(2.0 - (k as f32) * 0.5);
     }
     assert_eq!(a_all.len() % 16, 15);
+    // Explicit literal-bit assertions for the tie-to-right-operand signed-zero rule across SIMD and tail lanes.
+    let pz = 0.0f32.to_bits();
+    let nz = (-0.0f32).to_bits();
+    let sz_a = [0.0f32, -0.0, 0.0, -0.0, 0.0, -0.0, 0.0, -0.0, 0.0, -0.0];
+    let sz_b = [-0.0f32, 0.0, -0.0, 0.0, -0.0, 0.0, -0.0, 0.0, -0.0, 0.0];
+    let l_sz = Layout::contiguous(Shape::new(&[sz_a.len()]));
+    let max_sz = binary(Maximum, &sz_a, &l_sz, &sz_b, &l_sz);
+    let min_sz = binary(Minimum, &sz_a, &l_sz, &sz_b, &l_sz);
+    let relu_sz = unary(UnaryOp::Relu, &sz_a, &l_sz);
+    let clamp_sz = unary(UnaryOp::Clamp(-0.0, 0.0), &sz_a, &l_sz);
+    for i in 0..sz_a.len() {
+        let want_tie = if i % 2 == 0 { nz } else { pz };
+        assert_eq!(max_sz[i].to_bits(), want_tie, "Maximum signed-zero tie at {i}");
+        assert_eq!(min_sz[i].to_bits(), want_tie, "Minimum signed-zero tie at {i}");
+        assert_eq!(relu_sz[i].to_bits(), pz, "Relu signed-zero at {i}");
+        assert_eq!(clamp_sz[i].to_bits(), pz, "Clamp(-0.0, +0.0) signed-zero at {i}");
+    }
     let l_all = Layout::contiguous(Shape::new(&[a_all.len()]));
 
     let (rows, cols, stride) = (3usize, 19usize, 23usize);
@@ -506,6 +523,31 @@ fn avx2_where3_f32_and_u8_bit_exact_across_all_stride_combos() {
             "where3_u8 contig len={len}"
         );
     }
+
+    // Transposed / general non-unit inner stride and empty layout for both F32 and U8 masks.
+    let l_trans = Layout::new(Shape::new(&[cols, rows]), vec![1, stride].into(), 2);
+    let l_step = Layout::new(Shape::new(&[rows, 11]), vec![stride, 2].into(), 1);
+    for l_gen in [&l_trans, &l_step] {
+        let got_f = where3_f32(&cf, l_gen, &a, l_gen, &b, l_gen);
+        let ref_f = where3(&cf, l_gen, &a, l_gen, &b, l_gen, |v| v != 0.0);
+        assert_eq!(
+            got_f.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            ref_f.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "where3_f32 general stride {:?}",
+            l_gen.strides()
+        );
+        let got_u = where3_u8(&cu, l_gen, &a, l_gen, &b, l_gen);
+        let ref_u = where3(&cu, l_gen, &a, l_gen, &b, l_gen, |v| v != 0);
+        assert_eq!(
+            got_u.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            ref_u.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "where3_u8 general stride {:?}",
+            l_gen.strides()
+        );
+    }
+    let l_empty = Layout::new(Shape::new(&[0, cols]), vec![cols, 1].into(), 5);
+    assert!(where3_f32(&[], &l_empty, &[], &l_empty, &[], &l_empty).is_empty());
+    assert!(where3_u8(&[], &l_empty, &[], &l_empty, &[], &l_empty).is_empty());
 
     let n_par = PAR_MIN + 27;
     let cf_p: Vec<f32> = (0..n_par).map(|i| cf[i % cf.len()]).collect();

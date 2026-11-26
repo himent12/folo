@@ -672,6 +672,20 @@ pub(crate) fn where3_u8(c: &[u8], lc: &Layout, a: &[f32], la: &Layout, b: &[f32]
     }
 }
 
+/// `maxNum` with explicit tie-to-right-operand semantics (`if a > b || b.is_nan() { a } else { b }`),
+/// matching AVX2 `vmaxps`, Wasm `max4_exact`, and `f32::max` lowering across scalar and SIMD paths.
+#[inline(always)]
+pub(super) fn max_num(a: f32, b: f32) -> f32 {
+    if a > b || b.is_nan() { a } else { b }
+}
+
+/// `minNum` with explicit tie-to-right-operand semantics (`if a < b || b.is_nan() { a } else { b }`),
+/// matching AVX2 `vminps`, Wasm `min4_exact`, and `f32::min` lowering across scalar and SIMD paths.
+#[inline(always)]
+pub(super) fn min_num(a: f32, b: f32) -> f32 {
+    if a < b || b.is_nan() { a } else { b }
+}
+
 const LOG2E: f32 = std::f32::consts::LOG2_E;
 
 /// `e^x` to about 1 ulp over the whole finite range (including subnormal results), written so loops over it
@@ -745,7 +759,7 @@ pub(crate) fn bias_act_inplace(op: Option<UnaryOp>, bias: f32, v: &mut [f32]) {
     match op {
         None => go(v, bias, |x| x),
         Some(UnaryOp::Silu) => simd::silu_bias_inplace(v, bias),
-        Some(UnaryOp::Relu) => go(v, bias, |x| x.max(0.0)),
+        Some(UnaryOp::Relu) => go(v, bias, |x| max_num(x, 0.0)),
         Some(UnaryOp::Sigmoid) => simd::sigmoid_bias_inplace(v, bias),
         Some(UnaryOp::Tanh) => simd_log_tanh::tanh_bias_inplace(v, bias),
         Some(UnaryOp::LeakyRelu(a)) => go(v, bias, |x| if x > 0.0 { x } else { a * x }),
@@ -814,11 +828,11 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
         Erf => map1(x, lx, erf),
         Sigmoid => map1_slice(x, lx, simd::sigmoid_slice, simd::sigmoid_scalar),
         Silu => map1_slice(x, lx, simd::silu_slice, simd::silu_scalar),
-        Relu => map1(x, lx, |v| v.max(0.0)),
+        Relu => map1(x, lx, |v| max_num(v, 0.0)),
         LeakyRelu(a) => map1(x, lx, move |v| if v > 0.0 { v } else { a * v }),
         Hardswish => map1(x, lx, |v| v * (v + 3.0).clamp(0.0, 6.0) * (1.0 / 6.0)),
         Softplus => map1_slice(x, lx, simd_log_tanh::softplus_slice, simd_log_tanh::softplus_scalar),
-        Clamp(lo, hi) => map1(x, lx, move |v| v.max(lo).min(hi)),
+        Clamp(lo, hi) => map1(x, lx, move |v| min_num(max_num(v, lo), hi)),
         PowScalar(p) => {
             if p == 2.0 {
                 map1(x, lx, |v| v * v)
@@ -833,8 +847,8 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
         RSubScalar(c) => map1(x, lx, move |v| c - v),
         RDivScalar(c) => map1(x, lx, move |v| c / v),
         DivScalar(c) => map1(x, lx, move |v| v / c),
-        MaxScalar(c) => map1(x, lx, move |v| v.max(c)),
-        MinScalar(c) => map1(x, lx, move |v| v.min(c)),
+        MaxScalar(c) => map1(x, lx, move |v| max_num(v, c)),
+        MinScalar(c) => map1(x, lx, move |v| min_num(v, c)),
         Floor => map1(x, lx, f32::floor),
         Ceil => map1(x, lx, f32::ceil),
         Round => map1(x, lx, f32::round),
@@ -969,8 +983,8 @@ pub(crate) fn binary(op: BinaryOp, a: &[f32], la: &Layout, b: &[f32], lb: &Layou
         Mul => map2(a, la, b, lb, |a, b| a * b),
         Div => map2(a, la, b, lb, |a, b| a / b),
         Pow => map2(a, la, b, lb, f32::powf),
-        Maximum => map2(a, la, b, lb, f32::max),
-        Minimum => map2(a, la, b, lb, f32::min),
+        Maximum => map2(a, la, b, lb, max_num),
+        Minimum => map2(a, la, b, lb, min_num),
         Atan2 => map2(a, la, b, lb, f32::atan2),
         Eq => map2(a, la, b, lb, |a, b| mask(a == b)),
         Ne => map2(a, la, b, lb, |a, b| mask(a != b)),

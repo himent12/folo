@@ -8,9 +8,9 @@
 
 use std::arch::x86_64::*;
 
-use super::fill_rows;
 use super::simd::has_avx2;
 use super::simd_binary::{map2_avx2, max8_exact, min8_exact};
+use super::{fill_rows, max_num, min_num};
 use crate::Layout;
 use crate::backend::UnaryOp;
 use crate::cpu::pool_alloc::alloc_uninit;
@@ -200,7 +200,7 @@ pub(super) fn try_unary_avx2(op: UnaryOp, x: &[f32], lx: &Layout) -> Option<Vec<
         Rsqrt => go!(v => _mm256_div_ps(_mm256_set1_ps(1.0), _mm256_sqrt_ps(v)), s => 1.0 / s.sqrt()),
         Recip => go!(v => _mm256_div_ps(_mm256_set1_ps(1.0), v), s => 1.0 / s),
         Square => go!(v => _mm256_mul_ps(v, v), s => s * s),
-        Relu => go!(v => _mm256_max_ps(v, _mm256_setzero_ps()), s => s.max(0.0)),
+        Relu => go!(v => _mm256_max_ps(v, _mm256_setzero_ps()), s => max_num(s, 0.0)),
         LeakyRelu(a) => go_p1!(
             a, av,
             v => _mm256_blendv_ps(_mm256_mul_ps(av, v), v, _mm256_cmp_ps::<_CMP_GT_OQ>(v, _mm256_setzero_ps())),
@@ -212,18 +212,18 @@ pub(super) fn try_unary_avx2(op: UnaryOp, x: &[f32], lx: &Layout) -> Option<Vec<
                 #[target_feature(enable = "avx2")]
                 unsafe fn slice(src: &[f32], dst: &mut [f32], lo: f32, hi: f32) {
                     let (vlo, vhi) = (_mm256_set1_ps(lo), _mm256_set1_ps(hi));
-                    avx2_unary_loop!(src, dst, v => _mm256_min_ps(_mm256_max_ps(v, vlo), vhi), s => s.max(lo).min(hi));
+                    avx2_unary_loop!(src, dst, v => _mm256_min_ps(_mm256_max_ps(v, vlo), vhi), s => min_num(max_num(s, lo), hi));
                 }
                 // SAFETY: `has_avx2()` checked above.
-                Some(map1_avx2(x, lx, |s, o| unsafe { slice(s, o, lo, hi) }, |s| s.max(lo).min(hi)))
+                Some(map1_avx2(x, lx, |s, o| unsafe { slice(s, o, lo, hi) }, |s| min_num(max_num(s, lo), hi)))
             } else {
                 #[target_feature(enable = "avx2")]
                 unsafe fn slice(src: &[f32], dst: &mut [f32], lo: f32, hi: f32) {
                     let (vlo, vhi) = (_mm256_set1_ps(lo), _mm256_set1_ps(hi));
-                    avx2_unary_loop!(src, dst, v => min8_exact(max8_exact(v, vlo), vhi), s => s.max(lo).min(hi));
+                    avx2_unary_loop!(src, dst, v => min8_exact(max8_exact(v, vlo), vhi), s => min_num(max_num(s, lo), hi));
                 }
                 // SAFETY: `has_avx2()` checked above.
-                Some(map1_avx2(x, lx, |s, o| unsafe { slice(s, o, lo, hi) }, |s| s.max(lo).min(hi)))
+                Some(map1_avx2(x, lx, |s, o| unsafe { slice(s, o, lo, hi) }, |s| min_num(max_num(s, lo), hi)))
             }
         }
         PowScalar(2.0) => go!(v => _mm256_mul_ps(v, v), s => s * s),
@@ -235,16 +235,16 @@ pub(super) fn try_unary_avx2(op: UnaryOp, x: &[f32], lx: &Layout) -> Option<Vec<
         DivScalar(c) => go_p1!(c, cv, v => _mm256_div_ps(v, cv), s => s / c),
         MaxScalar(c) => {
             if fast_minmax_scalar(c) {
-                go_p1!(c, cv, v => _mm256_max_ps(v, cv), s => s.max(c))
+                go_p1!(c, cv, v => _mm256_max_ps(v, cv), s => max_num(s, c))
             } else {
-                go_p1!(c, cv, v => max8_exact(v, cv), s => s.max(c))
+                go_p1!(c, cv, v => max8_exact(v, cv), s => max_num(s, c))
             }
         }
         MinScalar(c) => {
             if fast_minmax_scalar(c) {
-                go_p1!(c, cv, v => _mm256_min_ps(v, cv), s => s.min(c))
+                go_p1!(c, cv, v => _mm256_min_ps(v, cv), s => min_num(s, c))
             } else {
-                go_p1!(c, cv, v => min8_exact(v, cv), s => s.min(c))
+                go_p1!(c, cv, v => min8_exact(v, cv), s => min_num(s, c))
             }
         }
         _ => None,
@@ -327,7 +327,8 @@ pub(super) fn try_unary_backward_avx2(
             sx, sg => if sx > 0.0 { sg } else { a * sg }
         ),
         Hardswish => go2!(vx, vg => hardswish_bwd8(vx, vg); sx, sg => hardswish_bwd_scalar(sx, sg)),
-        Clamp(lo, hi) => Some(clamp_bwd_avx2(x, lx, g, lg, lo, hi)),
+        // SAFETY: `has_avx2()` checked above.
+        Clamp(lo, hi) => Some(unsafe { clamp_bwd_avx2(x, lx, g, lg, lo, hi) }),
         MaxScalar(c) => go2_p1!(
             c, cv,
             vx, vg => _mm256_and_ps(vg, _mm256_cmp_ps::<_CMP_GE_OQ>(vx, cv));
@@ -342,7 +343,9 @@ pub(super) fn try_unary_backward_avx2(
     }
 }
 
-fn clamp_bwd_avx2(x: &[f32], lx: &Layout, g: &[f32], lg: &Layout, lo: f32, hi: f32) -> Vec<f32> {
+/// # Safety
+/// Caller must ensure `has_avx2()` is true.
+unsafe fn clamp_bwd_avx2(x: &[f32], lx: &Layout, g: &[f32], lg: &Layout, lo: f32, hi: f32) -> Vec<f32> {
     #[target_feature(enable = "avx2")]
     unsafe fn vv(a: &[f32], b: &[f32], out: &mut [f32], lo: f32, hi: f32) {
         let (vlo, vhi) = (_mm256_set1_ps(lo), _mm256_set1_ps(hi));
@@ -428,7 +431,7 @@ pub(super) fn try_bias_act_inplace_avx2(op: Option<UnaryOp>, bias: f32, v: &mut 
             #[target_feature(enable = "avx2")]
             unsafe fn go(v: &mut [f32], bias: f32) {
                 let zero = _mm256_setzero_ps();
-                avx2_bias_inplace_loop!(v, bias, x => _mm256_max_ps(x, zero), s => s.max(0.0));
+                avx2_bias_inplace_loop!(v, bias, x => _mm256_max_ps(x, zero), s => max_num(s, 0.0));
             }
             // SAFETY: `has_avx2()` checked above.
             unsafe { go(v, bias) };

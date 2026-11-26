@@ -63,7 +63,7 @@ method. `src/autograd.rs` only walks the graph.
 
 ```text
 cargo test -p folo-core                       # unit tests in src/, tests/*.rs and the doctests; no GPU needed
-cargo bench -p folo-core --bench gemm         # also: conv, conv_infer, conv_wgrad, index, q8_infer
+cargo bench -p folo-core --bench gemm         # also: conv, conv_infer, conv_wgrad, index, q8_infer, elementwise
 ```
 
 Nothing in this crate is `#[ignore]`d. The GPU backend is checked against this crate's CPU backend in folo-gpu's own

@@ -8,7 +8,7 @@
 use std::arch::x86_64::*;
 
 use super::simd::has_avx2;
-use super::{fill_rows, where3};
+use super::{fill_rows, max_num, min_num, where3};
 use crate::Layout;
 use crate::backend::BinaryOp;
 use crate::cpu::pool_alloc::alloc_uninit;
@@ -232,8 +232,8 @@ pub(super) fn try_binary_avx2(
         Sub => go2!(vx, vy => _mm256_sub_ps(vx, vy); sx, sy => sx - sy),
         Mul => go2!(vx, vy => _mm256_mul_ps(vx, vy); sx, sy => sx * sy),
         Div => go2!(vx, vy => _mm256_div_ps(vx, vy); sx, sy => sx / sy),
-        Maximum => go2!(vx, vy => max8_exact(vx, vy); sx, sy => sx.max(sy)),
-        Minimum => go2!(vx, vy => min8_exact(vx, vy); sx, sy => sx.min(sy)),
+        Maximum => go2!(vx, vy => max8_exact(vx, vy); sx, sy => max_num(sx, sy)),
+        Minimum => go2!(vx, vy => min8_exact(vx, vy); sx, sy => min_num(sx, sy)),
         Eq => go2!(
             vx, vy => _mm256_and_ps(_mm256_cmp_ps::<_CMP_EQ_OQ>(vx, vy), _mm256_set1_ps(1.0));
             sx, sy => mask_f32(sx == sy)
