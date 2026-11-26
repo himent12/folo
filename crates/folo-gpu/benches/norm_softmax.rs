@@ -7,7 +7,10 @@ use std::time::Instant;
 use folo_core::rng::Rng;
 use folo_core::{Device, Tensor, no_grad};
 use folo_gpu::kernels::conv::{self, Conv2dDesc};
+use folo_gpu::kernels::norm::{self, BnAct, BnDesc, BnRunning};
+use folo_gpu::kernels::optim::{self, ManyItem, OptimUpdate};
 use folo_gpu::kernels::pooling::Window2d;
+use folo_gpu::kernels::reduce;
 use folo_gpu::{DType, GpuContext, UnaryOp};
 
 fn time_dev(dev: Device, mut f: impl FnMut()) -> f64 {
@@ -205,6 +208,156 @@ fn main() {
                 s * 1e3,
                 d.flops().unwrap() / s / 1e9
             );
+            let gx = ctx.alloc(es * (n * c * h * w) as u64).unwrap();
+            let sb = time_ctx(&ctx, || {
+                conv::conv2d_backward_input(&ctx, &d, y.raw(), wt.raw(), gx.raw()).unwrap();
+            });
+            println!(
+                "{:<48} {:>9.3} {:>10.0}",
+                format!("{pfx}bwd_in {name}"),
+                sb * 1e3,
+                d.flops().unwrap() / sb / 1e9
+            );
         }
+    }
+
+    // Train-mode BatchNorm2d + SiLU forward & backward across YOLO shapes (fused & multi-chunk)
+    println!();
+    println!("{:<48} {:>9} {:>10}", "batch_norm + silu", "ms", "GB/s");
+    for &dt in dtypes {
+        let pfx = if dt == DType::F16 { "f16 " } else { "" };
+        let eb = dt.size() as f64;
+        for &(label, n, c, h, w) in &[
+            ("bn [16,512,20,20]", 16usize, 512usize, 20usize, 20usize),
+            ("bn [16,256,20,20]", 16, 256, 20, 20),
+            ("bn [8,256,20,20]", 8, 256, 20, 20),
+            ("bn [4,256,40,40]", 4, 256, 40, 40),
+            ("bn [16,128,40,40]", 16, 128, 40, 40),
+            ("bn [16,64,80,80]", 16, 64, 80, 80),
+            ("bn [4,64,21,21] odd", 4, 64, 21, 21),
+        ] {
+            let elems = n * c * h * w;
+            let bytes = elems as f64 * eb;
+            let x = ctx.alloc(dt.bytes(elems)).unwrap();
+            let y = ctx.alloc(dt.bytes(elems)).unwrap();
+            let g = ctx.alloc(dt.bytes(elems)).unwrap();
+            let dx = ctx.alloc(dt.bytes(elems)).unwrap();
+            let wt = ctx.alloc(DType::F32.bytes(c)).unwrap();
+            let b = ctx.alloc(DType::F32.bytes(c)).unwrap();
+            let mean = ctx.alloc(DType::F32.bytes(c)).unwrap();
+            let inv = ctx.alloc(DType::F32.bytes(c)).unwrap();
+            let rm = ctx.alloc(DType::F32.bytes(c)).unwrap();
+            let rv = ctx.alloc(DType::F32.bytes(c)).unwrap();
+            let dw = ctx.alloc(DType::F32.bytes(c)).unwrap();
+            let db = ctx.alloc(DType::F32.bytes(c)).unwrap();
+            for buf in [&x, &g, &wt, &b, &rm, &rv] {
+                ctx.clear(buf.raw(), buf.size());
+            }
+            let desc = BnDesc { n, c, hw: h * w, act: BnAct::Silu, dtype: dt };
+            let sf = time_ctx(&ctx, || {
+                let run = BnRunning { mean: rm.raw(), var: rv.raw(), momentum: 0.03 };
+                norm::batch_norm_forward(
+                    &ctx,
+                    &desc,
+                    x.raw(),
+                    wt.raw(),
+                    b.raw(),
+                    1e-3,
+                    Some(run),
+                    y.raw(),
+                    mean.raw(),
+                    inv.raw(),
+                )
+                .unwrap();
+            });
+            println!(
+                "{:<48} {:>9.4} {:>10.1}",
+                format!("{pfx}{label} fwd"),
+                sf * 1e3,
+                2.0 * bytes / sf / 1e9
+            );
+            let sb = time_ctx(&ctx, || {
+                norm::batch_norm_backward(
+                    &ctx,
+                    &desc,
+                    x.raw(),
+                    g.raw(),
+                    wt.raw(),
+                    b.raw(),
+                    mean.raw(),
+                    inv.raw(),
+                    dx.raw(),
+                    dw.raw(),
+                    db.raw(),
+                )
+                .unwrap();
+            });
+            println!(
+                "{:<48} {:>9.4} {:>10.1}",
+                format!("{pfx}{label} bwd"),
+                sb * 1e3,
+                3.0 * bytes / sb / 1e9
+            );
+        }
+    }
+
+    // Arg-reduce rows (inner == 1) and mixed-alignment AdamW many
+    println!();
+    println!("{:<48} {:>9} {:>10}", "arg_reduce / mixed optim", "ms", "GB/s");
+    for &(label, rows, r) in &[
+        ("argmax [8400, 80]", 8400usize, 80usize),
+        ("argmax [4096, 1024]", 4096, 1024),
+        ("argmax [64, 8400]", 64, 8400),
+        ("argmax [1, 65536]", 1, 65536),
+    ] {
+        let x = ctx.alloc(DType::F32.bytes(rows * r)).unwrap();
+        let y = ctx.alloc(DType::F32.bytes(rows * 2)).unwrap();
+        ctx.clear(x.raw(), x.size());
+        let s = time_ctx(&ctx, || {
+            reduce::arg_reduce(&ctx, true, x.raw(), y.raw(), rows, r, 1).unwrap();
+        });
+        let bytes = (rows * r * 4 + rows * 8) as f64;
+        println!("{:<48} {:>9.4} {:>10.1}", label, s * 1e3, bytes / s / 1e9);
+    }
+
+    {
+        // Mixed-alignment 16-tensor AdamW chunk: 15 x 1Mi f32 weights + 1 x 3-element bias
+        let lens: Vec<usize> = (0..15).map(|_| 1usize << 20).chain([3]).collect();
+        let total: usize = lens.iter().sum();
+        let ps: Vec<_> = lens.iter().map(|&n| ctx.alloc(DType::F32.bytes(n)).unwrap()).collect();
+        let gs: Vec<_> = lens.iter().map(|&n| ctx.alloc(DType::F32.bytes(n)).unwrap()).collect();
+        let s0s: Vec<_> = lens.iter().map(|&n| ctx.alloc(DType::F32.bytes(n)).unwrap()).collect();
+        let s1s: Vec<_> = lens.iter().map(|&n| ctx.alloc(DType::F32.bytes(n)).unwrap()).collect();
+        for b in ps.iter().chain(&gs).chain(&s0s).chain(&s1s) {
+            ctx.clear(b.raw(), b.size());
+        }
+        let items: Vec<_> = (0..lens.len())
+            .map(|i| ManyItem {
+                p: ps[i].raw(),
+                g: gs[i].raw(),
+                s0: Some(s0s[i].raw()),
+                s1: Some(s1s[i].raw()),
+                n: lens[i],
+            })
+            .collect();
+        let adamw = OptimUpdate::AdamW {
+            decay: Some(0.9999),
+            beta1: 0.9,
+            one_minus_beta1: 0.1,
+            beta2: 0.999,
+            one_minus_beta2: 0.001,
+            step_size: 1e-3,
+            bc2_sqrt: 0.99,
+            eps: 1e-8,
+        };
+        let s = time_ctx(&ctx, || {
+            optim::optimizer_step_many(&ctx, &adamw, &items).unwrap();
+        });
+        println!(
+            "{:<48} {:>9.4} {:>10.1}",
+            "adamw_many mixed (15x1Mi + 3)",
+            s * 1e3,
+            7.0 * (total * 4) as f64 / s / 1e9
+        );
     }
 }

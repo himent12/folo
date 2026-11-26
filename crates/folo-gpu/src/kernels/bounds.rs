@@ -76,6 +76,8 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
         }
         "max_pool2d" => super::pooling::maxpool_fits(spec),
         "pool" | "pool_idx" | "pool_bw_idx" => super::pool_grad::pool_tiled_fits(name, spec),
+        "bn_fused_fwd" | "bn_fused_bwd" => super::norm::fused_fits(spec),
+        "arg_reduce_rows" => spec.get_u32("MODE", 0) <= 2,
         "muon_gemm" => super::muon::gemm_fits(spec),
         // The multi-tensor kernels (`J` tensors) are only found through their resolvers, which bound `J`.
         _ => true,
@@ -142,6 +144,39 @@ mod tests {
                 Spec::new().u32("KH", 7).u32("KW", 7).u32("MODE", 1).bool("VEC4", true).subgroups(true),
             ),
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 7).u32("KW", 7).u32("MODE", 0).bool("VX4", true)),
+            (
+                "conv2d_depthwise_grad",
+                Spec::new()
+                    .u32("KH", 5)
+                    .u32("KW", 5)
+                    .u32("SH", 1)
+                    .u32("SW", 1)
+                    .u32("DH", 1)
+                    .u32("DW", 1)
+                    .u32("MODE", 0)
+                    .bool("TILED", true)
+                    .bool("VEC4_OUT", true),
+            ),
+            (
+                "conv2d_depthwise_grad",
+                Spec::new()
+                    .u32("KH", 3)
+                    .u32("KW", 3)
+                    .u32("SH", 2)
+                    .u32("SW", 2)
+                    .u32("DH", 1)
+                    .u32("DW", 1)
+                    .u32("MODE", 0)
+                    .bool("S2", true)
+                    .bool("VEC2_OUT", true),
+            ),
+            ("bn_fused_fwd", Spec::new().u32("REGS", 4).bool("VEC4", true).subgroups(true)),
+            ("bn_fused_bwd", Spec::new().u32("REGS", 8).bool("VEC4", true).subgroups(false)),
+            (
+                "arg_reduce_rows",
+                Spec::new().bool("MAX", true).u32("MODE", 1).bool("VEC4", true).subgroups(true),
+            ),
+            ("max_pool2d", Spec::new().bool("S2_VEC4", true).f16(true)),
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 99).u32("KW", 99).u32("MODE", 0)),
             ("upsample_2x_vec4", Spec::new().f16(true)),
             ("max_pool2d", Spec::new().bool("TILED", true).u32("KH", 5).u32("KW", 5).f16(true)),
@@ -285,6 +320,29 @@ mod tests {
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 8).u32("KW", 8).u32("MODE", 1)),
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 8).u32("KW", 8).u32("MODE", 0).bool("VX4", true)),
             ("conv2d_depthwise_grad", Spec::new().u32("KH", 0).u32("KW", 3).u32("MODE", 0).bool("VX4", true)),
+            (
+                "conv2d_depthwise_grad",
+                Spec::new()
+                    .u32("KH", 8)
+                    .u32("KW", 3)
+                    .u32("SH", 1)
+                    .u32("SW", 1)
+                    .u32("MODE", 0)
+                    .bool("TILED", true),
+            ),
+            (
+                "conv2d_depthwise_grad",
+                Spec::new()
+                    .u32("KH", 3)
+                    .u32("KW", 3)
+                    .u32("SH", 1)
+                    .u32("SW", 1)
+                    .u32("MODE", 0)
+                    .bool("S2", true),
+            ),
+            ("bn_fused_fwd", Spec::new().u32("REGS", 16)),
+            ("bn_fused_bwd", Spec::new().u32("REGS", 0)),
+            ("arg_reduce_rows", Spec::new().u32("MODE", 3)),
             ("gemm", Spec::new().u32("BM", 65536)),
             ("gemm", Spec::new().u32("TM", 0)),
             (

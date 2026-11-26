@@ -23,6 +23,8 @@
 //! 3. `bn_bwd_dx`: `dx = w · invstd · (dz − db / n − x̂ · dw / n)` per element, `vec4` when `H·W` is a multiple
 //!    of 4.
 
+mod fused;
+
 #[cfg(test)]
 pub(crate) use super::FORCE_NO_SUBGROUPS;
 use super::{check_buf, prod, use_subgroups, vec_prelude, vec_prelude_f16};
@@ -30,9 +32,11 @@ use crate::DType;
 use crate::context::GpuContext;
 use crate::error::{GpuError, Result, shape_err};
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
+pub(crate) use fused::fused_fits;
+use fused::{FUSED_BWD, FUSED_BWD_BUFFERS, FUSED_FWD, FUSED_MAX_UNITS};
 
-const COMMON: &str = include_str!("../shaders/bn_common.wgsl");
-const WELFORD: &str = include_str!("../shaders/bn_welford.wgsl");
+pub(super) const COMMON: &str = include_str!("../../shaders/bn_common.wgsl");
+const WELFORD: &str = include_str!("../../shaders/bn_welford.wgsl");
 
 const STATS_MAIN_SUBGROUPS: &str = r#"
 var<workgroup> wn: array<f32, 8>;
@@ -233,13 +237,13 @@ pub struct BnRunning<'a> {
 }
 
 /// The element prelude of the passes: f32 or f16 storage (`spec.is_f16()`), scalar or vec4.
-fn prelude(spec: &Spec) -> &'static str {
+pub(super) fn prelude(spec: &Spec) -> &'static str {
     let vec = spec.get_bool("VEC4");
     if spec.is_f16() { vec_prelude_f16(vec) } else { vec_prelude(vec) }
 }
 
 fn gen_stats(spec: &Spec) -> String {
-    let body = include_str!("../shaders/bn_stats.wgsl");
+    let body = include_str!("../../shaders/bn_stats.wgsl");
     if spec.get_bool("SUBGROUPS") {
         format!("{}{COMMON}{body}{STATS_MAIN_SUBGROUPS}", prelude(spec))
     } else {
@@ -376,7 +380,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
 "#;
 
 fn gen_finalize(spec: &Spec) -> String {
-    let body = include_str!("../shaders/bn_finalize.wgsl");
+    let body = include_str!("../../shaders/bn_finalize.wgsl");
     if spec.is_subgroups() {
         format!("{COMMON}{body}{FINALIZE_MAIN_SUBGROUPS}")
     } else {
@@ -385,23 +389,23 @@ fn gen_finalize(spec: &Spec) -> String {
 }
 
 fn gen_apply(spec: &Spec) -> String {
-    format!("{}{COMMON}{}", prelude(spec), include_str!("../shaders/bn_apply.wgsl"))
+    format!("{}{COMMON}{}", prelude(spec), include_str!("../../shaders/bn_apply.wgsl"))
 }
 
 fn gen_bwd_reduce(spec: &Spec) -> String {
-    let body = include_str!("../shaders/bn_bwd_reduce.wgsl");
+    let body = include_str!("../../shaders/bn_bwd_reduce.wgsl");
     let main = if spec.get_bool("SUBGROUPS") { BWD_REDUCE_MAIN_SUBGROUPS } else { BWD_REDUCE_MAIN_PORTABLE };
     format!("{}{COMMON}{body}{main}", prelude(spec))
 }
 
 fn gen_bwd_finalize(spec: &Spec) -> String {
-    let body = include_str!("../shaders/bn_bwd_finalize.wgsl");
+    let body = include_str!("../../shaders/bn_bwd_finalize.wgsl");
     let main = if spec.is_subgroups() { BWD_FINALIZE_MAIN_SUBGROUPS } else { BWD_FINALIZE_MAIN_PORTABLE };
     format!("{COMMON}{body}{main}")
 }
 
 fn gen_bwd_dx(spec: &Spec) -> String {
-    format!("{}{COMMON}{}", prelude(spec), include_str!("../shaders/bn_bwd_dx.wgsl"))
+    format!("{}{COMMON}{}", prelude(spec), include_str!("../../shaders/bn_bwd_dx.wgsl"))
 }
 
 use Access::{Read as R, ReadWrite as RW};
@@ -497,11 +501,41 @@ pub fn batch_norm_forward(
     let (vec, units) = d.elementwise(total);
     let (hw_u, m_u) = if vec { (d.hw / 4, m / 4) } else { (d.hw, m) };
     let (chunks, len) = plan(m_u, d.c, vec);
+    let half = d.dtype == DType::F16;
+    let sg = use_subgroups(ctx);
+    let mom = running.as_ref().map_or(0.0, |r| r.momentum);
+    let unbias = if m > 1 { m as f64 / (m as f64 - 1.0) } else { 1.0 };
+    let (rm, rv) = running.as_ref().map_or((ctx.dummy(), ctx.dummy()), |r| (r.mean, r.var));
+
+    if m_u <= FUSED_MAX_UNITS && (chunks == 1 || d.c >= 32) {
+        let regs = if m_u <= 256 * 4 { 4u32 } else { 8u32 };
+        let k = ctx.kernel(
+            &FUSED_FWD,
+            Spec::new()
+                .u32("ACT", d.act.code())
+                .bool("VEC4", vec)
+                .bool("RUNNING", running.is_some())
+                .u32("REGS", regs)
+                .f16(half)
+                .subgroups(sg),
+        )?;
+        let p = Params::new()
+            .uz(d.c)?
+            .uz(hw_u)?
+            .uz(m_u)?
+            .at(5)
+            .uz(256 / hw_u)?
+            .uz(256 % hw_u)?
+            .f(eps)
+            .f(1.0 - mom)
+            .f(mom)
+            .f(mom * unbias as f32);
+        return ctx.dispatch(&k, &[x, w, b, y, mean, invstd, rm, rv], &p, [d.c as u32, 1, 1]);
+    }
+
     let part = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 3])?))?;
     let coef = ctx.alloc(DType::F32.bytes(4 * d.c))?;
 
-    let half = d.dtype == DType::F16;
-    let sg = use_subgroups(ctx);
     let k = ctx.kernel(
         &STATS,
         Spec::new().u32("ACT", 0).bool("VEC4", vec).bool("SUBGROUPS", sg).f16(half).subgroups(sg),
@@ -515,14 +549,11 @@ pub fn batch_norm_forward(
 
     let k =
         ctx.kernel(&FINALIZE, Spec::new().u32("ACT", 0).bool("RUNNING", running.is_some()).subgroups(sg))?;
-    let mom = running.as_ref().map_or(0.0, |r| r.momentum);
-    let unbias = if m > 1 { m as f64 / (m as f64 - 1.0) } else { 1.0 };
     let p = Params::new().uz(d.c)?.uz(chunks)?.f(eps).f(1.0 - mom).f(mom).f(mom * unbias as f32);
-    let (rm, rv) = running.as_ref().map_or((ctx.dummy(), ctx.dummy()), |r| (r.mean, r.var));
     ctx.dispatch(&k, &[part.raw(), w, b, mean, invstd, coef.raw(), rm, rv], &p, [d.c as u32, 1, 1])?;
 
     let k = ctx.kernel(&APPLY, Spec::new().u32("ACT", d.act.code()).bool("VEC4", vec).f16(half))?;
-    let p = Params::new().uz(units)?.uz(d.c)?.uz(d.hw)?;
+    let p = Params::new().uz(units)?.uz(d.c)?.uz(hw_u)?;
     ctx.dispatch(&k, &[x, coef.raw(), y], &p, ctx.grid_1d(units as u64, 256)?)
 }
 
@@ -554,11 +585,26 @@ pub fn batch_norm_backward(
     let (vec, units) = d.elementwise(total);
     let (hw_u, m_u) = if vec { (d.hw / 4, m / 4) } else { (d.hw, m) };
     let (chunks, len) = plan(m_u, d.c, vec);
-    let part = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 2])?))?;
-    let coef = ctx.alloc(DType::F32.bytes(6 * d.c))?;
     let act = d.act.code();
     let half = d.dtype == DType::F16;
     let sg = use_subgroups(ctx);
+    let inv_m = (1.0 / m as f64) as f32;
+
+    if m_u <= FUSED_MAX_UNITS
+        && ctx.caps().max_storage_buffers >= FUSED_BWD_BUFFERS
+        && (chunks == 1 || d.c >= 32)
+    {
+        let regs = if m_u <= 256 * 4 { 4u32 } else { 8u32 };
+        let k = ctx.kernel(
+            &FUSED_BWD,
+            Spec::new().u32("ACT", act).bool("VEC4", vec).u32("REGS", regs).f16(half).subgroups(sg),
+        )?;
+        let p = Params::new().uz(d.c)?.uz(hw_u)?.uz(m_u)?.f(inv_m).at(5).uz(256 / hw_u)?.uz(256 % hw_u)?;
+        return ctx.dispatch(&k, &[x, g, mean, invstd, w, b, dx, dw, db], &p, [d.c as u32, 1, 1]);
+    }
+
+    let part = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 2])?))?;
+    let coef = ctx.alloc(DType::F32.bytes(6 * d.c))?;
 
     let k = ctx.kernel(
         &BWD_REDUCE,
@@ -568,13 +614,14 @@ pub fn batch_norm_backward(
     ctx.dispatch(&k, &[x, g, mean, invstd, w, b, part.raw()], &p, [chunks as u32, d.c as u32, 1])?;
 
     let k = ctx.kernel(&BWD_FINALIZE, Spec::new().u32("ACT", 0).subgroups(sg))?;
-    let p = Params::new().uz(d.c)?.uz(chunks)?.f((1.0 / m as f64) as f32);
+    let p = Params::new().uz(d.c)?.uz(chunks)?.f(inv_m);
     ctx.dispatch(&k, &[part.raw(), mean, invstd, w, b, dw, db, coef.raw()], &p, [d.c as u32, 1, 1])?;
 
     let k = ctx.kernel(&BWD_DX, Spec::new().u32("ACT", act).bool("VEC4", vec).f16(half))?;
-    let p = Params::new().uz(units)?.uz(d.c)?.uz(d.hw)?;
+    let p = Params::new().uz(units)?.uz(d.c)?.uz(hw_u)?;
     ctx.dispatch(&k, &[x, g, coef.raw(), dx], &p, ctx.grid_1d(units as u64, 256)?)
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&STATS, &FINALIZE, &APPLY, &BWD_REDUCE, &BWD_FINALIZE, &BWD_DX];
+pub(crate) static DEFS: &[&KernelDef] =
+    &[&STATS, &FINALIZE, &APPLY, &FUSED_FWD, &BWD_REDUCE, &BWD_FINALIZE, &BWD_DX, &FUSED_BWD];

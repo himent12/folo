@@ -381,27 +381,29 @@ pub fn optimizer_step_many(ctx: &GpuContext, u: &OptimUpdate, items: &[ManyItem<
     if mode == 2 && ns != 2 {
         return Err(crate::error::shape_err("optimizer_step: AdamW needs exp_avg and exp_avg_sq"));
     }
-    let live: Vec<&ManyItem<'_>> = items.iter().filter(|it| it.n > 0).collect();
-    for chunk in live.chunks(j_max) {
-        let vec4 = chunk.iter().all(|it| it.n.is_multiple_of(4));
-        let spec = Spec::new()
-            .u32("MODE", mode)
-            .bool("FLAG", flag)
-            .bool("NESTEROV", nesterov)
-            .bool("VEC4", vec4)
-            .u32("J", chunk.len() as u32)
-            .u32("NS", ns as u32);
-        let k = ctx.kernel(many_def(ns as u32, chunk.len()), spec)?;
-        let units: Vec<usize> = chunk.iter().map(|it| if vec4 { it.n / 4 } else { it.n }).collect();
-        let (p, groups) = many_params(base.clone(), &units)?;
-        let mut bufs: Vec<&wgpu::Buffer> = Vec::with_capacity(chunk.len() * per);
-        for it in chunk {
-            bufs.push(it.p);
-            bufs.push(it.g);
-            bufs.extend(it.s0);
-            bufs.extend(it.s1);
+    let (aligned, unaligned): (Vec<&ManyItem<'_>>, Vec<&ManyItem<'_>>) =
+        items.iter().filter(|it| it.n > 0).partition(|it| it.n.is_multiple_of(4));
+    for (vec4, group) in [(true, aligned), (false, unaligned)] {
+        for chunk in group.chunks(j_max) {
+            let spec = Spec::new()
+                .u32("MODE", mode)
+                .bool("FLAG", flag)
+                .bool("NESTEROV", nesterov)
+                .bool("VEC4", vec4)
+                .u32("J", chunk.len() as u32)
+                .u32("NS", ns as u32);
+            let k = ctx.kernel(many_def(ns as u32, chunk.len()), spec)?;
+            let units: Vec<usize> = chunk.iter().map(|it| if vec4 { it.n / 4 } else { it.n }).collect();
+            let (p, groups) = many_params(base.clone(), &units)?;
+            let mut bufs: Vec<&wgpu::Buffer> = Vec::with_capacity(chunk.len() * per);
+            for it in chunk {
+                bufs.push(it.p);
+                bufs.push(it.g);
+                bufs.extend(it.s0);
+                bufs.extend(it.s1);
+            }
+            ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
         }
-        ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
     }
     Ok(())
 }
@@ -649,17 +651,21 @@ pub fn scale_many(
         check_buf(x, n, DType::F32, "scale input")?;
     }
     let j_max = MANY.min((ctx.caps().max_storage_buffers as usize).saturating_sub(2)).max(1);
-    let live: Vec<(&wgpu::Buffer, usize)> = xs.iter().copied().filter(|x| x.1 > 0).collect();
-    for chunk in live.chunks(j_max) {
-        let vec4 = chunk.iter().all(|x| x.1.is_multiple_of(4));
-        let k = ctx
-            .kernel(many_def(6, chunk.len()), Spec::new().u32("J", chunk.len() as u32).bool("VEC4", vec4))?;
-        let units: Vec<usize> = chunk.iter().map(|x| if vec4 { x.1 / 4 } else { x.1 }).collect();
-        let (p, groups) = many_params(Params::new().u(0), &units)?;
-        let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|x| x.0).collect();
-        bufs.push(f1);
-        bufs.push(f2);
-        ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
+    let (aligned, unaligned): (Vec<_>, Vec<_>) =
+        xs.iter().copied().filter(|x| x.1 > 0).partition(|x| x.1.is_multiple_of(4));
+    for (vec4, group) in [(true, aligned), (false, unaligned)] {
+        for chunk in group.chunks(j_max) {
+            let k = ctx.kernel(
+                many_def(6, chunk.len()),
+                Spec::new().u32("J", chunk.len() as u32).bool("VEC4", vec4),
+            )?;
+            let units: Vec<usize> = chunk.iter().map(|x| if vec4 { x.1 / 4 } else { x.1 }).collect();
+            let (p, groups) = many_params(Params::new().u(0), &units)?;
+            let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|x| x.0).collect();
+            bufs.push(f1);
+            bufs.push(f2);
+            ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
+        }
     }
     Ok(())
 }
@@ -682,19 +688,21 @@ pub fn unscale_check_many(
     for &(x, n) in xs {
         check_buf(x, n, DType::F32, "unscale_check input")?;
     }
-    let live: Vec<(&wgpu::Buffer, usize)> = xs.iter().copied().filter(|x| x.1 > 0).collect();
+    let (aligned, unaligned): (Vec<_>, Vec<_>) =
+        xs.iter().copied().filter(|x| x.1 > 0).partition(|x| x.1.is_multiple_of(4));
     let sg = use_subgroups(ctx);
-    for chunk in live.chunks(j_max) {
-        let vec4 = chunk.iter().all(|x| x.1.is_multiple_of(4));
-        let k = ctx.kernel(
-            many_def(3, chunk.len()),
-            Spec::new().u32("J", chunk.len() as u32).bool("VEC4", vec4).subgroups(sg),
-        )?;
-        let units: Vec<usize> = chunk.iter().map(|x| if vec4 { x.1 / 4 } else { x.1 }).collect();
-        let (p, groups) = many_params(Params::new().u(0).f(factor), &units)?;
-        let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|x| x.0).collect();
-        bufs.push(flag);
-        ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
+    for (vec4, group) in [(true, aligned), (false, unaligned)] {
+        for chunk in group.chunks(j_max) {
+            let k = ctx.kernel(
+                many_def(3, chunk.len()),
+                Spec::new().u32("J", chunk.len() as u32).bool("VEC4", vec4).subgroups(sg),
+            )?;
+            let units: Vec<usize> = chunk.iter().map(|x| if vec4 { x.1 / 4 } else { x.1 }).collect();
+            let (p, groups) = many_params(Params::new().u(0).f(factor), &units)?;
+            let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|x| x.0).collect();
+            bufs.push(flag);
+            ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
+        }
     }
     Ok(())
 }

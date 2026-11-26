@@ -633,6 +633,63 @@ pub fn conv2d_backward_input(
     }
     let (hw_in, hw_out, khkw) = (d.h * d.w, oh * ow, kh * kw);
     if d.is_depthwise() {
+        let tiled = d.win.stride == (1, 1)
+            && d.win.dilation == (1, 1)
+            && (super::depthwise::DW_TILED_MIN_K as usize..=super::depthwise::DW_TILED_MAX_K as usize)
+                .contains(&kh)
+            && (super::depthwise::DW_TILED_MIN_K as usize..=super::depthwise::DW_TILED_MAX_K as usize)
+                .contains(&kw)
+            && d.h >= 64
+            && d.w >= 64
+            && total <= u32::MAX as usize;
+        if tiled {
+            let tiles_x = d.w.div_ceil(super::depthwise::DW_TILE_W as usize);
+            let tiles_y = d.h.div_ceil(super::depthwise::DW_TILE_H as usize);
+            if let Ok(total_tiles) = prod(&[d.n, d.c_in, tiles_y, tiles_x])
+                && total_tiles <= u32::MAX as usize
+                && let Ok(grid) = ctx.grid_1d(total_tiles as u64 * 64, 64)
+            {
+                let spec = d
+                    .win
+                    .spec()
+                    .u32("MULT", (d.c_out / d.c_in) as u32)
+                    .u32("MODE", 0)
+                    .bool("TILED", true)
+                    .bool("VEC4_OUT", d.w.is_multiple_of(4))
+                    .f16(dt == DType::F16);
+                let k = ctx.kernel(&DEPTHWISE_GRAD, spec)?;
+                let p = Params::new()
+                    .uz(total_tiles)?
+                    .uz(d.h)?
+                    .uz(d.w)?
+                    .uz(oh)?
+                    .uz(ow)?
+                    .uz(d.c_in)?
+                    .uz(tiles_x)?
+                    .uz(tiles_y)?;
+                return ctx.dispatch(&k, &[grad, weight, gx], &p, grid);
+            }
+        }
+        let s2 = d.win.stride == (2, 2)
+            && d.win.dilation == (1, 1)
+            && khkw <= super::weight_grad::MAX_DEPTHWISE_TAPS
+            && total <= u32::MAX as usize;
+        if s2 {
+            let bh = d.h.div_ceil(2);
+            let bw = d.w.div_ceil(2);
+            let inv = prod(&[d.n, d.c_in, bh, bw])?;
+            let spec = d
+                .win
+                .spec()
+                .u32("MULT", (d.c_out / d.c_in) as u32)
+                .u32("MODE", 0)
+                .bool("S2", true)
+                .bool("VEC2_OUT", d.w.is_multiple_of(2))
+                .f16(dt == DType::F16);
+            let k = ctx.kernel(&DEPTHWISE_GRAD, spec)?;
+            let p = Params::new().uz(inv)?.uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?.uz(d.c_in)?.uz(bh)?.uz(bw)?;
+            return ctx.dispatch(&k, &[grad, weight, gx], &p, ctx.grid_1d(inv as u64, 256)?);
+        }
         let vx4 = d.win.stride == (1, 1)
             && d.win.dilation == (1, 1)
             && khkw <= super::weight_grad::MAX_DEPTHWISE_TAPS
@@ -643,6 +700,7 @@ pub fn conv2d_backward_input(
             .u32("MULT", (d.c_out / d.c_in) as u32)
             .u32("MODE", 0)
             .bool("VX4", vx4)
+            .bool("VEC4_OUT", vx4 && d.w.is_multiple_of(4))
             .f16(dt == DType::F16);
         let k = ctx.kernel(&DEPTHWISE_GRAD, spec)?;
         if vx4 {

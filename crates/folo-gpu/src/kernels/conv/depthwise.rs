@@ -217,39 +217,278 @@ pub(super) static DEPTHWISE: KernelDef = KernelDef {
     source: Source::Generated(gen_depthwise),
 };
 
-/// Direct depthwise kernels: input gradient (`MODE` 0: 4-px unrolled fast path when `VX4`, or general loop
-/// fallback) and weight-gradient partials (`MODE` 1: one workgroup per output channel and pixel chunk, `VEC4`
-/// 4-column input reuse when `SW == 1, DW == 1, OW % 4 == 0`, 1-barrier 32-wide subgroup reduction or batched
-/// `vec4` portable tree fallback).
+/// Shared-memory 16×16 tiled stride-1 depthwise input gradient (`MODE = 0, TILED = true`):
+/// loads each output channel's `(16 + KH - 1) × (16 + KW - 1)` gradient halo once into workgroup memory and
+/// writes 4 adjacent input gradients per thread (`vec4<T>` when `VEC4_OUT` is true).
+/// Params: 0 = total_tiles, 1 = H, 2 = W, 3 = OH, 4 = OW, 5 = C_in, 6 = tiles_x, 7 = tiles_y.
+fn gen_depthwise_grad_tiled(spec: &Spec) -> String {
+    let g = |name: &str| spec.get_u32(name, 1);
+    let (kh, kw) = (g("KH"), g("KW"));
+    let vec4_out = spec.get_bool("VEC4_OUT");
+    let sh_h = DW_TILE_H + kh - 1;
+    let sh_w = DW_TILE_W + kw - 1;
+    let sh_stride = if sh_w.is_multiple_of(4) { sh_w + 1 } else { sh_w };
+    let sh_elems = sh_h * sh_w;
+    let sh_total = sh_h * sh_stride;
+    let gx_ty = if vec4_out { "vec4<T>" } else { "T" };
+    let span = DW_VX + kw - 1;
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "@group(0) @binding(1) var<storage, read> G: array<T>;\n\
+         @group(0) @binding(2) var<storage, read> Wt: array<T>;\n\
+         @group(0) @binding(3) var<storage, read_write> GX: array<{gx_ty}>;\n\
+         var<workgroup> sh: array<f32, {sh_total}>;\n\
+         @compute @workgroup_size(4, 16)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_id) tid: vec3<u32>) {{\n\
+         \x20 let lid = tid.y * 4u + tid.x;\n\
+         \x20 let g = wid.y * nwg.x + wid.x;\n\
+         \x20 let total_tiles = pu(0u);\n\
+         \x20 let h = pu(1u); let w = pu(2u); let oh = i32(pu(3u)); let ow = i32(pu(4u)); let cin = pu(5u);\n\
+         \x20 let tiles_x = pu(6u); let tiles_y = pu(7u);\n\
+         \x20 let valid_tile = g < total_tiles;\n\
+         \x20 let tx_tile = g % tiles_x; let t = g / tiles_x; let ty_tile = t % tiles_y; let nc = t / tiles_y;\n\
+         \x20 let ci = nc % cin; let n = nc / cin;\n\
+         \x20 let tile_x = tx_tile * {DW_TILE_W}u; let tile_y = ty_tile * {DW_TILE_H}u;\n\
+         \x20 let oy0 = i32(tile_y) + PH - i32(KH - 1u); let ox0 = i32(tile_x) + PW - i32(KW - 1u);\n\
+         \x20 let iy = tile_y + tid.y;\n\
+         \x20 let ix0 = tile_x + tid.x * 4u;\n\
+         \x20 let ox_base = i32(ix0) + PW - i32(KW - 1u);\n\
+         \x20 var acc0 = 0.0; var acc1 = 0.0; var acc2 = 0.0; var acc3 = 0.0;\n\
+         \x20 for (var m = 0u; m < MULT; m++) {{\n\
+         \x20   let co = ci * MULT + m;\n\
+         \x20   let gbase = (n * cin * MULT + co) * u32(oh) * u32(ow);\n\
+         \x20   for (var idx = lid; idx < {sh_elems}u; idx += 64u) {{\n\
+         \x20     let sy = idx / {sh_w}u;\n\
+         \x20     let sx = idx - sy * {sh_w}u;\n\
+         \x20     let oy = oy0 + i32(sy);\n\
+         \x20     let ox = ox0 + i32(sx);\n\
+         \x20     var v = 0.0;\n\
+         \x20     if (valid_tile && oy >= 0 && oy < oh && ox >= 0 && ox < ow) {{\n\
+         \x20       v = f32(G[gbase + u32(oy) * u32(ow) + u32(ox)]);\n\
+         \x20     }}\n\
+         \x20     sh[sy * {sh_stride}u + sx] = v;\n\
+         \x20   }}\n\
+         \x20   workgroupBarrier();\n\
+         \x20   if (valid_tile && iy < h && ix0 < w) {{\n\
+         \x20     let wbase = co * {kh}u * {kw}u;"
+    );
+    for t in 0..kh * kw {
+        let _ = writeln!(s, "      let w{t} = f32(Wt[wbase + {t}u]);");
+    }
+    s.push_str("      let sx0 = tid.x * 4u;\n");
+    for j in 0..span {
+        let _ = writeln!(s, "      let vg{j} = ox_base + {j} >= 0 && ox_base + {j} < ow;");
+    }
+    for ky in 0..kh {
+        let sy_off = kh - 1 - ky;
+        let _ = writeln!(
+            s,
+            "      {{ let oy = i32(iy) + PH - {ky};\n\
+             \x20       if (oy >= 0 && oy < oh) {{\n\
+             \x20         let row_off = (tid.y + {sy_off}u) * {sh_stride}u + sx0;"
+        );
+        for j in 0..span {
+            let _ = writeln!(s, "          let g{j} = sh[row_off + {j}u];");
+        }
+        for v in 0..DW_VX {
+            for kx in 0..kw {
+                let gi = v + kw - 1 - kx;
+                let wt = ky * kw + kx;
+                let _ = writeln!(s, "          acc{v} = select(acc{v}, fma(g{gi}, w{wt}, acc{v}), vg{gi});");
+            }
+        }
+        s.push_str("        }\n      }\n");
+    }
+    s.push_str(
+        "    }\n\
+         \x20   if (m + 1u < MULT) { workgroupBarrier(); }\n\
+         \x20 }\n\
+         \x20 if (!valid_tile || iy >= h || ix0 >= w) { return; }\n",
+    );
+    if vec4_out {
+        s.push_str(
+            "  GX[(nc * h + iy) * (w / 4u) + (ix0 / 4u)] = vec4<T>(T(acc0), T(acc1), T(acc2), T(acc3));\n}\n",
+        );
+    } else {
+        s.push_str(
+            "  let out = (nc * h + iy) * w + ix0;\n\
+             \x20 GX[out] = T(acc0);\n\
+             \x20 if (ix0 + 1u < w) { GX[out + 1u] = T(acc1); }\n\
+             \x20 if (ix0 + 2u < w) { GX[out + 2u] = T(acc2); }\n\
+             \x20 if (ix0 + 3u < w) { GX[out + 3u] = T(acc3); }\n}\n",
+        );
+    }
+    s
+}
+
+/// Phase-unrolled stride-2 dilation-1 depthwise input gradient (`MODE = 0, S2 = true`):
+/// each thread computes a 2×2 input block `(2·by + py, 2·bx + px)` by loading the shared `G` phase window once
+/// and emitting only the compile-time in-phase taps (zero modulo/divide branches). Writes `vec2<T>` per row when
+/// `W % 2 == 0` (`VEC2_OUT`).
+/// Params: 0 = invocations (`N·C_in·ceil(H/2)·ceil(W/2)`), 1 = H, 2 = W, 3 = OH, 4 = OW, 5 = C_in,
+/// 6 = `ceil(H/2)`, 7 = `ceil(W/2)`.
+fn gen_depthwise_grad_s2(spec: &Spec) -> String {
+    let (kh, kw) = (spec.get_u32("KH", 1), spec.get_u32("KW", 1));
+    let (ph, pw) = (spec.get_u32("PH", 0) as i32, spec.get_u32("PW", 0) as i32);
+    let vec2_out = spec.get_bool("VEC2_OUT");
+    let gx_ty = if vec2_out { "vec2<T>" } else { "T" };
+
+    // Collect the exact (dy, dx) G offsets relative to (by, bx) touched by each of the 4 input phases.
+    let mut dys = Vec::new();
+    let mut dxs = Vec::new();
+    let mut taps_for = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for py in 0..2i32 {
+        for px in 0..2i32 {
+            let pid = (py * 2 + px) as usize;
+            for ky in 0..kh {
+                let ny = py + ph - ky as i32;
+                if (ny & 1) != 0 {
+                    continue;
+                }
+                let dy = ny >> 1;
+                if !dys.contains(&dy) {
+                    dys.push(dy);
+                }
+                for kx in 0..kw {
+                    let nx = px + pw - kx as i32;
+                    if (nx & 1) != 0 {
+                        continue;
+                    }
+                    let dx = nx >> 1;
+                    if !dxs.contains(&dx) {
+                        dxs.push(dx);
+                    }
+                    taps_for[pid].push((dy, dx, ky * kw + kx));
+                }
+            }
+        }
+    }
+    // Sort `dys` descending so each phase visits `ky` in strictly ascending order (matching CPU / general GPU
+    // tap accumulation order and avoiding spurious intermediate overflow on cancelling extreme weights).
+    dys.sort_unstable_by(|a, b| b.cmp(a));
+    dxs.sort_unstable();
+
+    let mut s = String::new();
+    let _ = writeln!(
+        s,
+        "@group(0) @binding(1) var<storage, read> G: array<T>;\n\
+         @group(0) @binding(2) var<storage, read> Wt: array<T>;\n\
+         @group(0) @binding(3) var<storage, read_write> GX: array<{gx_ty}>;\n\
+         fn ld_g(row: u32, ox: i32, ow: i32) -> f32 {{\n\
+         \x20 let v = f32(G[row + u32(clamp(ox, 0, ow - 1))]);\n\
+         \x20 return select(0.0, v, ox >= 0 && ox < ow);\n\
+         }}\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {{\n\
+         \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+         \x20 if (i >= pu(0u)) {{ return; }}\n\
+         \x20 let h = pu(1u); let w = pu(2u); let oh = i32(pu(3u)); let ow = i32(pu(4u)); let cin = pu(5u);\n\
+         \x20 let bh = pu(6u); let bw = pu(7u);\n\
+         \x20 let bx = i % bw; let t = i / bw; let by = t % bh; let nc = t / bh; let ci = nc % cin; let n = nc / cin;\n\
+         \x20 var a0 = 0.0; var a1 = 0.0; var a2 = 0.0; var a3 = 0.0;"
+    );
+    for (xi, &dx) in dxs.iter().enumerate() {
+        let _ = writeln!(s, "  let ox{xi} = i32(bx) + ({dx}); let vx{xi} = ox{xi} >= 0 && ox{xi} < ow;");
+    }
+    let _ = writeln!(
+        s,
+        "  for (var m = 0u; m < MULT; m++) {{\n\
+         \x20   let co = ci * MULT + m;\n\
+         \x20   let gbase = (n * cin * MULT + co) * u32(oh) * u32(ow);\n\
+         \x20   let wbase = co * {kh}u * {kw}u;"
+    );
+    for t in 0..kh * kw {
+        let _ = writeln!(s, "    let w{t} = f32(Wt[wbase + {t}u]);");
+    }
+    for (yi, &dy) in dys.iter().enumerate() {
+        let _ = writeln!(
+            s,
+            "    {{ let oy = i32(by) + ({dy}); if (oy >= 0 && oy < oh) {{ let row = gbase + u32(oy) * u32(ow);"
+        );
+        for (xi, &dx) in dxs.iter().enumerate() {
+            // Only load (dy, dx) if at least one phase tap uses it.
+            if taps_for.iter().any(|ts| ts.iter().any(|&(ty, tx, _)| ty == dy && tx == dx)) {
+                let _ = writeln!(s, "      let g{yi}_{xi} = ld_g(row, ox{xi}, ow);");
+            }
+        }
+        for (pid, ts) in taps_for.iter().enumerate() {
+            for &(ty, tx, wt) in ts {
+                if ty == dy {
+                    let xi = dxs.iter().position(|&d| d == tx).expect("present");
+                    let _ =
+                        writeln!(s, "      a{pid} = select(a{pid}, fma(g{yi}_{xi}, w{wt}, a{pid}), vx{xi});");
+                }
+            }
+        }
+        s.push_str("    } }\n");
+    }
+    s.push_str("  }\n  let iy0 = by * 2u; let ix0 = bx * 2u;\n");
+    if vec2_out {
+        s.push_str(
+            "  let w2 = w / 2u;\n\
+             \x20 GX[(nc * h + iy0) * w2 + bx] = vec2<T>(T(a0), T(a1));\n\
+             \x20 if (iy0 + 1u < h) { GX[(nc * h + iy0 + 1u) * w2 + bx] = vec2<T>(T(a2), T(a3)); }\n}\n",
+        );
+    } else {
+        s.push_str(
+            "  let r0 = (nc * h + iy0) * w + ix0;\n\
+             \x20 GX[r0] = T(a0);\n\
+             \x20 if (ix0 + 1u < w) { GX[r0 + 1u] = T(a1); }\n\
+             \x20 if (iy0 + 1u < h) {\n\
+             \x20   let r1 = r0 + w;\n\
+             \x20   GX[r1] = T(a2);\n\
+             \x20   if (ix0 + 1u < w) { GX[r1 + 1u] = T(a3); }\n\
+             \x20 }\n}\n",
+        );
+    }
+    s
+}
+
+/// Direct depthwise kernels: input gradient (`MODE` 0: 16×16 tiled stride-1 `TILED`, phase-unrolled stride-2
+/// `S2`, 4-px unrolled `VX4`, or general loop fallback) and weight-gradient partials (`MODE` 1: one workgroup
+/// per output channel and pixel chunk, `VEC4` 4-column input reuse when `SW == 1, DW == 1, OW % 4 == 0`,
+/// 1-barrier 32-wide subgroup reduction or batched `vec4` portable tree fallback).
 fn gen_depthwise_grad(spec: &Spec) -> String {
     let (kh, kw) = (spec.get_u32("KH", 1), spec.get_u32("KW", 1));
     let mut s = String::new();
     if spec.get_u32("MODE", 0) == 0 {
+        if spec.get_bool("TILED") {
+            return gen_depthwise_grad_tiled(spec);
+        }
+        if spec.get_bool("S2") {
+            return gen_depthwise_grad_s2(spec);
+        }
         if spec.get_bool("VX4") {
+            let vec4_out = spec.get_bool("VEC4_OUT");
+            let gx_ty = if vec4_out { "vec4<T>" } else { "T" };
             // Params: 0 = invocations (N·C_in·H·QW), 1 = H, 2 = W, 3 = OH, 4 = OW, 5 = C_in, 6 = QW.
             let span = DW_VX + kw.saturating_sub(1);
-            s.push_str(
+            let _ = write!(
+                s,
                 "@group(0) @binding(1) var<storage, read> G: array<T>;\n\
                  @group(0) @binding(2) var<storage, read> Wt: array<T>;\n\
-                 @group(0) @binding(3) var<storage, read_write> GX: array<T>;\n\
-                 fn ld_g(row: u32, ox: i32, ow: i32) -> f32 {\n\
+                 @group(0) @binding(3) var<storage, read_write> GX: array<{gx_ty}>;\n\
+                 fn ld_g(row: u32, ox: i32, ow: i32) -> f32 {{\n\
                  \x20 let v = f32(G[row + u32(clamp(ox, 0, ow - 1))]);\n\
                  \x20 return select(0.0, v, ox >= 0 && ox < ow);\n\
-                 }\n\
+                 }}\n\
                  @compute @workgroup_size(256)\n\
                  fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
-                 \x20       @builtin(local_invocation_index) lid: u32) {\n\
+                 \x20       @builtin(local_invocation_index) lid: u32) {{\n\
                  \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
-                 \x20 if (i >= pu(0u)) { return; }\n\
+                 \x20 if (i >= pu(0u)) {{ return; }}\n\
                  \x20 let h = pu(1u); let w = pu(2u); let oh = pu(3u); let ow = pu(4u); let cin = pu(5u); let qw = pu(6u);\n\
                  \x20 let q = i % qw; let t = i / qw; let iy = t % h; let nc = t / h; let ci = nc % cin; let n = nc / cin;\n\
                  \x20 let ix0 = q * 4u;\n\
                  \x20 let ox_base = i32(ix0) + PW - i32(KW - 1u);\n\
                  \x20 var acc0 = 0.0; var acc1 = 0.0; var acc2 = 0.0; var acc3 = 0.0;\n\
-                 \x20 for (var m = 0u; m < MULT; m++) {\n\
+                 \x20 for (var m = 0u; m < MULT; m++) {{\n\
                  \x20   let co = ci * MULT + m;\n\
                  \x20   let gbase = (n * cin * MULT + co) * oh * ow;\n\
-                 \x20   let wbase = co * KH * KW;\n",
+                 \x20   let wbase = co * KH * KW;\n"
             );
             for t in 0..kh * kw {
                 let _ = writeln!(s, "    let w{t} = f32(Wt[wbase + {t}u]);");
@@ -275,14 +514,18 @@ fn gen_depthwise_grad(spec: &Spec) -> String {
                 }
                 s.push_str("    } }\n");
             }
-            s.push_str(
-                "  }\n\
-                 \x20 let out_base = (nc * h + iy) * w + ix0;\n\
-                 \x20 GX[out_base] = T(acc0);\n\
-                 \x20 if (ix0 + 1u < w) { GX[out_base + 1u] = T(acc1); }\n\
-                 \x20 if (ix0 + 2u < w) { GX[out_base + 2u] = T(acc2); }\n\
-                 \x20 if (ix0 + 3u < w) { GX[out_base + 3u] = T(acc3); }\n}\n",
-            );
+            if vec4_out {
+                s.push_str("  }\n  GX[i] = vec4<T>(T(acc0), T(acc1), T(acc2), T(acc3));\n}\n");
+            } else {
+                s.push_str(
+                    "  }\n\
+                     \x20 let out_base = (nc * h + iy) * w + ix0;\n\
+                     \x20 GX[out_base] = T(acc0);\n\
+                     \x20 if (ix0 + 1u < w) { GX[out_base + 1u] = T(acc1); }\n\
+                     \x20 if (ix0 + 2u < w) { GX[out_base + 2u] = T(acc2); }\n\
+                     \x20 if (ix0 + 3u < w) { GX[out_base + 3u] = T(acc3); }\n}\n",
+                );
+            }
             return s;
         }
         // Params: 0 = input elements, 1 = H, 2 = W, 3 = OH, 4 = OW, 5 = C_in.
@@ -510,13 +753,35 @@ pub(super) fn forward_fits(spec: &Spec) -> bool {
     kh * kw <= MAX_LISTED_TAPS && kh * (span + u64::from(DW_VX) * kw) <= MAX_LISTED_LINES
 }
 
-/// Whether a kernel list may ask for [`DEPTHWISE_GRAD`] with `spec`: `MODE` 0 (loops for any kernel, or
-/// unrolled `VX4` within `max_taps`) or `MODE` 1 (every tap unrolled) within `max_taps`.
+/// Whether a kernel list may ask for [`DEPTHWISE_GRAD`] with `spec`: `MODE` 0 (`TILED` stride-1 `2..=7`,
+/// `S2` stride-2 within `max_taps`, unrolled `VX4` within `max_taps`, or general loop) or `MODE` 1 (every tap
+/// unrolled) within `max_taps`.
 pub(super) fn grad_fits(spec: &Spec, max_taps: usize) -> bool {
-    let taps = u64::from(spec.get_u32("KH", 1)) * u64::from(spec.get_u32("KW", 1));
+    let kh = u64::from(spec.get_u32("KH", 1));
+    let kw = u64::from(spec.get_u32("KW", 1));
+    let taps = kh * kw;
     let in_range = (1..=max_taps as u64).contains(&taps);
     match spec.get_u32("MODE", 0) {
-        0 => !spec.get_bool("VX4") || in_range,
+        0 => {
+            if spec.get_bool("TILED") {
+                let ok_k = |k: u64| (u64::from(DW_TILED_MIN_K)..=u64::from(DW_TILED_MAX_K)).contains(&k);
+                let (sh, sw, dh, dw) = (
+                    spec.get_u32("SH", 1),
+                    spec.get_u32("SW", 1),
+                    spec.get_u32("DH", 1),
+                    spec.get_u32("DW", 1),
+                );
+                return ok_k(kh) && ok_k(kw) && sh == 1 && sw == 1 && dh == 1 && dw == 1;
+            }
+            if spec.get_bool("S2") {
+                return in_range
+                    && spec.get_u32("SH", 2) == 2
+                    && spec.get_u32("SW", 2) == 2
+                    && spec.get_u32("DH", 1) == 1
+                    && spec.get_u32("DW", 1) == 1;
+            }
+            !spec.get_bool("VX4") || in_range
+        }
         1 => in_range,
         _ => false,
     }
