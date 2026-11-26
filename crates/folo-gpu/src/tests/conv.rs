@@ -353,6 +353,34 @@ fn conv_depthwise() {
         cf16.dtype = DType::F16;
         run(&cf16, bias, None, 130 + i as u64);
     }
+
+    // Padded border taps must be skipped even when weights contain +Inf (0 * +Inf must not contaminate
+    // padded outputs with NaN). Use c_in = c_out = groups = 2 so `is_depthwise()` routes to the tiled kernel.
+    let ctx = gpu!();
+    for (h, w) in [(4usize, 4usize), (4usize, 5usize)] {
+        let d = desc(1, 2, h, w, 2, 2, Window2d::square(3, 1, 1));
+        assert!(d.is_depthwise());
+        let x = vec![1.0f32; 2 * h * w];
+        let gx = GpuTensor::from_slice(&ctx, &x, &[x.len()]).unwrap();
+        for (tap, label) in [(1usize, "top-center"), (3usize, "left-center")] {
+            let mut wt = vec![0.0f32; 2 * 9];
+            wt[tap] = f32::INFINITY;
+            wt[9 + tap] = f32::INFINITY;
+            let want = cpu_conv(&d, &x, &wt, None);
+            let gw = GpuTensor::from_slice(&ctx, &wt, &[wt.len()]).unwrap();
+            let gy = GpuTensor::empty(&ctx, &[want.len()], DType::F32).unwrap();
+            conv::conv2d(&ctx, &d, gx.raw(), gw.raw(), None, gy.raw()).unwrap();
+            let got = gy.to_vec().unwrap();
+            assert_eq!(got.len(), want.len());
+            for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+                assert!(
+                    (g.is_infinite() && w.is_infinite() && g.is_sign_positive() == w.is_sign_positive())
+                        || (g == 0.0 && w == 0.0),
+                    "depthwise tiled {h}x{w} non-finite {label} tap mismatch at {i}: got={g}, want={w}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

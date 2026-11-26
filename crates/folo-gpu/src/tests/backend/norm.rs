@@ -153,7 +153,8 @@ fn layer_norm_and_rms_norm_edge_cases() {
                 assert!((b - want).abs() < 1e-5, "portable={portable} rms[{i}]={b} want={want}");
             }
         }
-        // 1e38 finite sum overflow guard in LayerNorm mean.
+        // 1e38 finite sum overflow guard in LayerNorm mean: constant rows and mixed-sign rows
+        // (where separate partial sums overflow to +Inf and -Inf and would cancel to NaN).
         for val in [1e37f32, 1e38f32, -1e38f32] {
             let huge = Tensor::from_vec(vec![val; 8], [1, 8]).unwrap().to_device(dev).unwrap();
             let yh = huge.layer_norm(None, None, 1e-5).unwrap().to_vec::<f32>().unwrap();
@@ -162,6 +163,22 @@ fn layer_norm_and_rms_norm_edge_cases() {
                 "portable={portable} val={val:e} huge const LN: {yh:?}"
             );
         }
+        let mixed_cases: &[(&[f32], &str)] = &[
+            (&[1e38, 1e38, 1e38, 1e38, -1e38, -1e38, -1e38, -1e38], "8x +-1e38"),
+            (&[2e38, 2e38, -2e38, -2e38], "4x +-2e38"),
+            (&[1.5e38, 1.5e38, 1.5e38, -1.5e38, -1.5e38, -1.5e38], "6x scalar +-1.5e38"),
+        ];
+        for &(vals, label) in mixed_cases {
+            let cpu = Tensor::from_slice(vals, [1, vals.len()]).unwrap();
+            let want = cpu.layer_norm(None, None, 0.0).unwrap();
+            let got = cpu.to_device(dev).unwrap().layer_norm(None, None, 0.0).unwrap();
+            assert_close_t(&got, &want, 1e-5, 1e-5, &format!("mixed huge LN {label} portable={portable}"));
+        }
+        let uncached_mixed: Vec<f32> = (0..4100).map(|i| if i < 2050 { 1e37 } else { -1e37 }).collect();
+        let cpu = Tensor::from_vec(uncached_mixed, [1, 4100]).unwrap();
+        let want = cpu.layer_norm(None, None, 0.0).unwrap();
+        let got = cpu.to_device(dev).unwrap().layer_norm(None, None, 0.0).unwrap();
+        assert_close_t(&got, &want, 1e-5, 1e-5, &format!("uncached mixed huge LN portable={portable}"));
     }
 
     // 4. NaN and +Inf propagation match CPU.
@@ -264,4 +281,43 @@ fn softmax_backward_fused_paths_match_cpu() {
 
     let ctx = crate::GpuContext::shared().unwrap();
     assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
+}
+
+#[test]
+fn norm_and_softmax_backward_backend_validation() {
+    use folo_core::backend::{Backend, View};
+    use folo_core::{Device, Layout, Shape};
+
+    let Some(ctx) = crate::tests::ctx() else {
+        return;
+    };
+    let backend = crate::GpuBackend::new(ctx.clone(), Device::Gpu(0));
+    let f32_s = backend.full(Device::Gpu(0), DType::F32, 8, 1.0).unwrap();
+    let u32_s = backend.full(Device::Gpu(0), DType::U32, 8, 1.0).unwrap();
+    let l2x4 = Layout::contiguous(Shape::from([2, 4]));
+    let l2x3 = Layout::contiguous(Shape::from([2, 3]));
+    let l_oob = Layout::new(Shape::from([2, 4]), vec![4, 1].into(), 4);
+    let x = View::new(&f32_s, &l2x4);
+    let x_u32 = View::new(&u32_s, &l2x4);
+    let x_bad_shape = View::new(&f32_s, &l2x3);
+    let x_oob = View::new(&f32_s, &l_oob);
+
+    // Invalid eps rejected on both forward ops.
+    for bad_eps in [-1e-5, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        assert!(backend.layer_norm(x, None, None, bad_eps).is_err(), "LN eps={bad_eps}");
+        assert!(backend.rms_norm(x, None, bad_eps).is_err(), "RMS eps={bad_eps}");
+    }
+    // Integer dtype rejected on norm and softmax_backward.
+    assert!(backend.layer_norm(x_u32, None, None, 1e-5).is_err());
+    assert!(backend.rms_norm(x_u32, None, 1e-5).is_err());
+    assert!(backend.softmax_backward(x_u32, x_u32, 1, false).is_err());
+    // Out-of-bounds view rejected by check_fits.
+    assert!(backend.layer_norm(x_oob, None, None, 1e-5).is_err());
+    assert!(backend.rms_norm(x_oob, None, 1e-5).is_err());
+    assert!(backend.softmax_backward(x_oob, x, 1, false).is_err());
+    assert!(backend.softmax_backward(x, x_oob, 1, false).is_err());
+    // softmax_backward rejects invalid dim, shape mismatch, and dtype mismatch.
+    assert!(backend.softmax_backward(x, x, 2, false).is_err());
+    assert!(backend.softmax_backward(x, x_bad_shape, 1, false).is_err());
+    assert!(backend.softmax_backward(x, x_u32, 1, false).is_err());
 }

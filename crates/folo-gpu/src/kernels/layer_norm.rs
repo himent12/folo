@@ -28,6 +28,7 @@ const REDUCE_HELPERS_SUBGROUPS: &str = r#"
 var<workgroup> sh_a: array<f32, 8>;
 var<workgroup> sh_b: array<f32, 8>;
 var<workgroup> sh_c: array<f32, 8>;
+var<workgroup> sh_u: vec2<f32>;
 
 fn reduce_sum_max(lid: u32, sgid: u32, lane: u32, s: f32, mx: f32) -> vec2<f32> {
     let rs = subgroupAdd(s);
@@ -38,16 +39,16 @@ fn reduce_sum_max(lid: u32, sgid: u32, lane: u32, s: f32, mx: f32) -> vec2<f32> 
         sh_b[sg] = rm;
     }
     workgroupBarrier();
-    var vs = sh_a[lane & 7u];
-    var vm = sh_b[lane & 7u];
-    vs += subgroupShuffleXor(vs, 4u);
-    vm = max(vm, subgroupShuffleXor(vm, 4u));
-    vs += subgroupShuffleXor(vs, 2u);
-    vm = max(vm, subgroupShuffleXor(vm, 2u));
-    vs += subgroupShuffleXor(vs, 1u);
-    vm = max(vm, subgroupShuffleXor(vm, 1u));
-    workgroupBarrier();
-    return vec2<f32>(vs, vm);
+    if (lid == 0u) {
+        let vs = ((sh_a[0] + sh_a[1]) + (sh_a[2] + sh_a[3]))
+               + ((sh_a[4] + sh_a[5]) + (sh_a[6] + sh_a[7]));
+        let vm = max(
+            max(max(sh_b[0], sh_b[1]), max(sh_b[2], sh_b[3])),
+            max(max(sh_b[4], sh_b[5]), max(sh_b[6], sh_b[7])),
+        );
+        sh_u = vec2<f32>(vs, vm);
+    }
+    return workgroupUniformLoad(&sh_u);
 }
 
 fn reduce_sum1(lid: u32, sgid: u32, lane: u32, s: f32) -> f32 {
@@ -94,6 +95,7 @@ const REDUCE_HELPERS_PORTABLE: &str = r#"
 var<workgroup> sh_a: array<f32, 256>;
 var<workgroup> sh_b: array<f32, 256>;
 var<workgroup> sh_c: array<f32, 256>;
+var<workgroup> sh_u: vec2<f32>;
 
 fn reduce_sum_max(lid: u32, sgid: u32, lane: u32, s: f32, mx: f32) -> vec2<f32> {
     sh_a[lid] = s;
@@ -106,9 +108,10 @@ fn reduce_sum_max(lid: u32, sgid: u32, lane: u32, s: f32, mx: f32) -> vec2<f32> 
         }
         workgroupBarrier();
     }
-    let res = vec2<f32>(sh_a[0], sh_b[0]);
-    workgroupBarrier();
-    return res;
+    if (lid == 0u) {
+        sh_u = vec2<f32>(sh_a[0], sh_b[0]);
+    }
+    return workgroupUniformLoad(&sh_u);
 }
 
 fn reduce_sum1(lid: u32, sgid: u32, lane: u32, s: f32) -> f32 {
@@ -670,6 +673,12 @@ mod tests {
         ] {
             let wgsl = crate::pipeline::render(def, &spec);
             assert!(!wgsl.contains("subgroup"), "portable {} emitted subgroup token:\n{wgsl}", def.name);
+            if def.name == "norm_fwd" {
+                assert!(
+                    wgsl.contains("workgroupUniformLoad"),
+                    "norm_fwd portable must return uniform reduction via workgroupUniformLoad"
+                );
+            }
         }
     }
 }

@@ -54,14 +54,14 @@ fn norm_fwd_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) 
             if (h3) { s += lane_sum(v3); am = max(am, lane_amax(v3)); }
             let sm = reduce_sum_max(lid, sgid, lane, s, am);
             mean = sm.x * inv_d;
-            let raw_inf = is_inf1(sm.x) && sm.y > 0.0 && is_finite1(sm.y);
-            if (raw_inf) {
+            let raw_nonfinite = !is_finite1(sm.x) && sm.y > 0.0 && is_finite1(sm.y);
+            if (raw_nonfinite) {
                 var ss = 0.0;
-                if (h0) { ss += lane_sum(ldexp(v0, vec4<i32>(-24))); }
-                if (h1) { ss += lane_sum(ldexp(v1, vec4<i32>(-24))); }
-                if (h2) { ss += lane_sum(ldexp(v2, vec4<i32>(-24))); }
-                if (h3) { ss += lane_sum(ldexp(v3, vec4<i32>(-24))); }
-                mean = ldexp(reduce_sum1(lid, sgid, lane, ss) * inv_d, 24i);
+                if (h0) { ss += lane_sum(ldexp(v0, vec4<i32>(-32))); }
+                if (h1) { ss += lane_sum(ldexp(v1, vec4<i32>(-32))); }
+                if (h2) { ss += lane_sum(ldexp(v2, vec4<i32>(-32))); }
+                if (h3) { ss += lane_sum(ldexp(v3, vec4<i32>(-32))); }
+                mean = ldexp(reduce_sum1(lid, sgid, lane, ss) * inv_d, 32i);
             }
             if (h0) { v0 -= vec4<f32>(mean); }
             if (h1) { v1 -= vec4<f32>(mean); }
@@ -132,15 +132,15 @@ fn norm_fwd_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) 
         }
         let sm = reduce_sum_max(lid, sgid, lane, s, am);
         mean = sm.x * inv_d;
-        let raw_inf = is_inf1(sm.x) && sm.y > 0.0 && is_finite1(sm.y);
-        if (raw_inf) {
+        let raw_nonfinite = !is_finite1(sm.x) && sm.y > 0.0 && is_finite1(sm.y);
+        if (raw_nonfinite) {
             var ss = 0.0;
             if (valid) {
                 for (var i = lid; i < units; i += 256u) {
-                    ss += lane_sum(ldexp(V4(X[base + i]), vec4<i32>(-24)));
+                    ss += lane_sum(ldexp(V4(X[base + i]), vec4<i32>(-32)));
                 }
             }
-            mean = ldexp(reduce_sum1(lid, sgid, lane, ss) * inv_d, 24i);
+            mean = ldexp(reduce_sum1(lid, sgid, lane, ss) * inv_d, 32i);
         }
     }
 

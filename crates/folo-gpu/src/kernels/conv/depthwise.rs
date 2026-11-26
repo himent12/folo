@@ -72,19 +72,31 @@ fn gen_depthwise_tiled(spec: &Spec) -> String {
         let _ = writeln!(s, "  let w{t} = f32(Wt[wbase + {t}u]);");
     }
     s.push_str(
-        "  var acc0 = 0.0; var acc1 = 0.0; var acc2 = 0.0; var acc3 = 0.0;\n  let sx0 = tid.x * 4u;\n",
+        "  var acc0 = 0.0; var acc1 = 0.0; var acc2 = 0.0; var acc3 = 0.0;\n\
+         \x20 let sx0 = tid.x * 4u;\n\
+         \x20 let ix_base = i32(ox0) - PW;\n",
     );
+    for j in 0..span {
+        let _ = writeln!(s, "  let vx{j} = ix_base + {j} >= 0 && ix_base + {j} < w;");
+    }
     for ky in 0..kh {
-        let _ = writeln!(s, "  {{ let row_off = (tid.y + {ky}u) * {sh_stride}u + sx0;");
+        let _ = writeln!(
+            s,
+            "  {{ let iy = i32(oy) - PH + {ky};\n\
+             \x20   if (iy >= 0 && iy < h) {{\n\
+             \x20     let row_off = (tid.y + {ky}u) * {sh_stride}u + sx0;"
+        );
         for j in 0..span {
-            let _ = writeln!(s, "    let x{j} = sh[row_off + {j}u];");
+            let _ = writeln!(s, "      let x{j} = sh[row_off + {j}u];");
         }
         for v in 0..DW_VX {
             for kx in 0..kw {
-                let _ = writeln!(s, "    acc{v} = fma(x{}, w{}, acc{v});", v + kx, ky * kw + kx);
+                let j = v + kx;
+                let wt = ky * kw + kx;
+                let _ = writeln!(s, "      acc{v} = select(acc{v}, fma(x{j}, w{wt}, acc{v}), vx{j});");
             }
         }
-        s.push_str("  }\n");
+        s.push_str("    }\n  }\n");
     }
     s.push_str("  var b = 0.0;\n  if (HAS_BIAS) { b = f32(BIAS[co]); }\n  let alpha = pf(6u);\n");
     if vec4_out {
