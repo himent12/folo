@@ -9,6 +9,7 @@
 //! - [`nms`]: class-aware batched NMS and the full detector post-process.
 //! - [`fusion`]: cluster box fusion after NMS (docs/MODEL.md §9.4), opt-in through [`NmsConfig`].
 //! - [`metrics`]: COCO-style mAP, precision / recall / F1, PR curves and a confusion matrix (`docs/METRICS.md`).
+//! - [`calibration`]: post-hoc temperature scaling confidence calibration and ECE / MCE / Brier score metrics.
 //! - [`cocoeval`]: the full pycocotools `COCOeval` (crowd regions, area buckets, AR) for reporting on COCO splits.
 //! - [`assign`]: the task-aligned assigner and DFL target encoding.
 //! - [`loss`]: the detection loss (BCE + CIoU + DFL) on folo-core tensors, with autograd. The assigner runs on
@@ -29,6 +30,7 @@
 
 pub mod assign;
 pub mod boxes;
+pub mod calibration;
 pub mod cocoeval;
 pub mod decode;
 mod error;
@@ -45,6 +47,7 @@ pub mod val;
 
 pub use assign::{Assignment, TalConfig};
 pub use boxes::{Cxcywh, IouKind, Letterbox, Xyxy};
+pub use calibration::{CalibrationConfig, CalibrationMetrics, TemperatureFit, TemperatureScaler};
 pub use decode::Anchors;
 pub use error::{Error, Result};
 pub use loss::{DistillConfig, ImageTargets, LossConfig, LossItems, LossOutput, detection_loss};
