@@ -296,6 +296,7 @@ impl FoloApp {
                 act(|this, _, cx| {
                     this.play_zoom = 1.0;
                     this.play_pan = (0., 0.);
+                    this.play_drag = None;
                     cx.notify();
                 }),
             ))
@@ -439,6 +440,7 @@ impl FoloApp {
                             new_zoom,
                         );
                         this.play_zoom = new_zoom;
+                        this.play_drag = None;
                         w.prevent_default();
                         cx.stop_propagation();
                         cx.notify();
@@ -451,6 +453,10 @@ impl FoloApp {
                         }),
                     )
                     .on_mouse_up(
+                        folo_ui::MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.play_drag = None),
+                    )
+                    .on_mouse_up_out(
                         folo_ui::MouseButton::Left,
                         cx.listener(|this, _, _, _| this.play_drag = None),
                     )

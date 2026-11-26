@@ -427,6 +427,10 @@ impl FoloApp {
                                 .hover(|s| s.bg(t.bg_hover))
                                 .active(|s| s.bg(t.bg_active))
                                 .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, w, cx| {
+                                    let m = &ev.keystroke.modifiers;
+                                    if m.control || m.alt || m.platform || m.shift {
+                                        return;
+                                    }
                                     let target = match ev.keystroke.key.as_str() {
                                         "down" => next_id.as_deref(),
                                         "up" => prev_id.as_deref(),

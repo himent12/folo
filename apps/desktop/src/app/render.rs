@@ -67,6 +67,7 @@ impl Render for FoloApp {
             self.window_activations = activations;
             match &self.route {
                 Route::Overview | Route::Datasets => {
+                    self.refresh_list_if_idle(super::lists::List::Datasets, cx);
                     self.ds_recheck.extend(
                         self.store
                             .dataset
@@ -273,6 +274,7 @@ impl Render for FoloApp {
                     let d = if m.shift { 128. } else { 32. };
                     let zoomed = this.play_zoom > 1.0;
                     let clamp_play_pan = |this: &mut Self| {
+                        this.play_drag = None;
                         if let (Some(b), Some(img)) = (this.play_view.get(), this.play_image.as_ref()) {
                             this.play_pan = crate::viz::clamp_pan(
                                 b,
@@ -307,6 +309,7 @@ impl Render for FoloApp {
                         "0" => {
                             this.play_zoom = 1.0;
                             this.play_pan = (0., 0.);
+                            this.play_drag = None;
                         }
                         _ => return,
                     }

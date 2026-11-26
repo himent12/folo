@@ -379,8 +379,12 @@ impl FoloApp {
             if !more
                 && failed_page.is_none()
                 && self.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == id)
+                && let Some(prev) = self.ds_scroll_anchor.take().and_then(|a| a.focus_from)
+                && !self.any_overlay()
+                && prev.is_focused(window)
             {
-                self.ds_scroll_anchor = None;
+                self.verify_focus = None;
+                window.focus(&self.root_focus);
             }
             // A dataset with no image at all is not a filter that matched nothing.
             let (icon, title, body, show_reset) = if ds.splits.total() == 0 {
@@ -638,11 +642,17 @@ impl FoloApp {
                         // Arrow keys walk the grid; the list scrolls the target row into view.
                         let nav_ds = ds_id.clone();
                         let el = el.on_key_down(cx.listener(move |this, ev: &KeyDownEvent, w, cx| {
+                            let m = &ev.keystroke.modifiers;
+                            if m.control || m.alt || m.platform || m.shift {
+                                return;
+                            }
                             let target = match ev.keystroke.key.as_str() {
                                 "left" => idx.checked_sub(1),
                                 "right" => Some(idx + 1),
                                 "up" => idx.checked_sub(cols),
                                 "down" => Some(idx + cols),
+                                "home" if idx > 0 => Some(0),
+                                "end" if idx + 1 < count => Some(count - 1),
                                 _ => return,
                             };
                             cx.stop_propagation();

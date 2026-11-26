@@ -434,7 +434,7 @@ pub struct FoloApp {
     /// Focus to restore when the palette, a dialog or the stop confirmation closes.
     overlay_return: Option<overlay_state::OverlayReturn>,
     /// Restored focus handle to verify once the closing frame prepaints (falls back to `root_focus` if unmounted).
-    verify_focus: Option<FocusHandle>,
+    pub(crate) verify_focus: Option<FocusHandle>,
     /// Where focus was before the inspector opened, restored on close.
     inspector_return: Option<FocusHandle>,
     pub hist_hover: HashMap<&'static str, f32>,

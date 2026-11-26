@@ -116,7 +116,7 @@ pub fn line_chart(t: &Theme, spec: LineChart) -> AnyElement {
                 |_, _, _| (),
                 move |bounds, _, window, cx| {
                     let mut spec = spec;
-                    ease(&mut spec, window);
+                    ease(&mut spec, window, cx.background_executor().now());
                     paint_line_chart(&t, &spec, bounds, &cell_paint, window, cx)
                 },
             )

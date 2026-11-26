@@ -135,11 +135,14 @@ impl FoloApp {
                 window,
                 cx,
                 act(|this, _, cx| {
+                    let mut was_dragging = false;
                     if let Some(i) = this.inspector.as_mut() {
                         i.zoom = 1.0;
                         i.pan = (0., 0.);
+                        was_dragging = i.drag_from.take().is_some();
                         i.focused_box = None;
                     }
+                    super::stage::interrupt_stage_drag(was_dragging);
                     cx.notify();
                 }),
             ))

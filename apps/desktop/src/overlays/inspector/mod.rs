@@ -112,10 +112,14 @@ impl FoloApp {
         }
     }
 
-    pub(super) fn inspector_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn inspector_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let t = theme(cx);
         self.land_inspector(cx);
-        let insp = self.inspector.as_ref().unwrap();
+        let insp = self.inspector.as_ref()?;
         let ds_id = insp.dataset.clone();
         let n = self.filtered_indices(&ds_id).len();
         // Its image not in yet (the list still arriving, or a later page failed): never fall back
@@ -126,7 +130,7 @@ impl FoloApp {
         let index = insp.index.min(n - 1);
         let (zoom, pan, hover, focused_box, show_boxes, show_labels) =
             (insp.zoom, insp.pan, insp.hover_box, insp.focused_box, insp.boxes, insp.labels);
-        let Some(meta) = self.filtered_image(&ds_id, index).cloned() else { return div().into_any_element() };
+        let meta = self.filtered_image(&ds_id, index)?.clone();
         let (class, empty) = (self.class_filter(&ds_id), self.empty_only(&ds_id));
         let query = self.img_query(&ds_id).to_string();
         let sort = self.img_sort(&ds_id);
@@ -160,7 +164,16 @@ impl FoloApp {
                     .map(|j| n_labels + j)
             });
         let hover = if self.kb { focused.or(hover) } else { hover.or(focused) }.or(focused_box);
-        let classes = self.store.dataset_summary(&ds_id).map(|d| d.classes.clone()).unwrap_or_default();
+        // Prefer the retained per-dataset record over `store.datasets` so an open inspector keeps
+        // the class table matching its retained image boxes until closing triggers the deferred reload.
+        let classes = self
+            .store
+            .dataset
+            .get(&ds_id)
+            .and_then(|l| l.ready())
+            .or_else(|| self.store.dataset_summary(&ds_id))
+            .map(|d| d.classes.clone())
+            .unwrap_or_default();
         let img = self
             .image(&ds_id, &meta.id, ImgKind::Full, cx)
             .or_else(|| self.image(&ds_id, &meta.id, ImgKind::Thumb, cx));
@@ -250,7 +263,7 @@ impl FoloApp {
             cx,
         );
         // Fades in like the dialogs and palette (160 ms; none under Reduce motion).
-        crate::ui::appear(
+        Some(crate::ui::appear(
             div()
                 .absolute()
                 .top_0()
@@ -288,7 +301,7 @@ impl FoloApp {
                         .child(div().flex_1().min_h_0().flex().child(stage).child(side)),
                 ),
             "inspector-in",
-        )
+        ))
     }
 
     fn inspector_waiting(
@@ -297,7 +310,7 @@ impl FoloApp {
         ds_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Option<AnyElement> {
         if let Some(failed) = self.failed_image_page(ds_id).cloned() {
             let retry_id = ds_id.to_string();
             let msg = format!(
@@ -347,38 +360,44 @@ impl FoloApp {
                 )
                 .child(text(ty::SM, t.text_secondary).whitespace_normal().child(msg))
                 .child(div().flex().justify_end().gap(px(8.)).child(close).child(retry));
-            return div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .child(self.scrim(
-                    t,
-                    "insp-scrim",
-                    window,
-                    cx,
-                    act(|this, w, cx| this.close_inspector(w, cx)),
-                ))
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(card),
-                )
-                .into_any_element();
+            return Some(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(self.scrim(
+                        t,
+                        "insp-scrim",
+                        window,
+                        cx,
+                        act(|this, w, cx| this.close_inspector(w, cx)),
+                    ))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(card),
+                    )
+                    .into_any_element(),
+            );
         }
-        // Still loading the image list (or the filter emptied it): keep the scrim up.
+        // Still loading the image list (or the filter emptied it): auto-close with no scrim when
+        // loading is done so the page underneath accepts clicks immediately.
         if self.store.images.get(ds_id).is_some_and(|l| !l.is_loading()) && !self.images_pending(ds_id) {
-            self.take_inspector(cx);
+            self.close_inspector(window, cx);
+            return None;
         }
         // The page's scrim (it takes the clicks, and a click there closes, as Esc does).
-        self.scrim(t, "insp-scrim", window, cx, act(|this, w, cx| this.close_inspector(w, cx)))
-            .into_any_element()
+        Some(
+            self.scrim(t, "insp-scrim", window, cx, act(|this, w, cx| this.close_inspector(w, cx)))
+                .into_any_element(),
+        )
     }
 
     fn inspector_key_down(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -391,11 +410,13 @@ impl FoloApp {
         let zoomed = self.inspector.as_ref().is_some_and(|i| i.zoom > 1.0);
         let d = if mods.shift { 128. } else { 32. };
         let pan = |this: &mut Self, dx: f32, dy: f32| {
+            let mut was_dragging = false;
             if let Some(i) = this.inspector.as_mut() {
                 i.pan = (i.pan.0 + dx, i.pan.1 + dy);
-                i.drag_from = None;
+                was_dragging = i.drag_from.take().is_some();
                 i.focused_box = None;
             }
+            stage::interrupt_stage_drag(was_dragging);
         };
         match ev.keystroke.key.as_str() {
             "left" if zoomed => pan(self, d, 0.),
@@ -407,12 +428,14 @@ impl FoloApp {
             "+" | "=" => self.zoom_by(1.4, cx),
             "-" => self.zoom_by(1.0 / 1.4, cx),
             "0" => {
+                let mut was_dragging = false;
                 if let Some(i) = self.inspector.as_mut() {
                     i.zoom = 1.0;
                     i.pan = (0., 0.);
-                    i.drag_from = None;
+                    was_dragging = i.drag_from.take().is_some();
                     i.focused_box = None;
                 }
+                stage::interrupt_stage_drag(was_dragging);
             }
             k if k.eq_ignore_ascii_case("b") => self.toggle_inspector_boxes(cx),
             k if k.eq_ignore_ascii_case("l") => self.toggle_inspector_labels(cx),
@@ -459,7 +482,7 @@ impl FoloApp {
     ) {
         let bounds = self.insp_view.get();
         let Some(insp) = self.inspector.as_mut() else { return };
-        insp.drag_from = None;
+        stage::interrupt_stage_drag(insp.drag_from.take().is_some());
         insp.hover_from_stage = false;
         if insp.focused_box == Some(box_idx) && insp.zoom > 1.0 {
             insp.zoom = 1.0;
@@ -494,10 +517,11 @@ impl FoloApp {
             i.want = Some(id);
             i.zoom = 1.0;
             i.pan = (0., 0.);
-            i.drag_from = None;
+            let was_dragging = i.drag_from.take().is_some();
             i.hover_box = None;
             i.hover_from_stage = false;
             i.focused_box = None;
+            stage::interrupt_stage_drag(was_dragging);
             cx.notify();
             return;
         }
@@ -508,10 +532,11 @@ impl FoloApp {
             i.index = ((i.index as i32 + d).rem_euclid(n as i32)) as usize;
             i.zoom = 1.0;
             i.pan = (0., 0.);
-            i.drag_from = None;
+            let was_dragging = i.drag_from.take().is_some();
             i.hover_box = None;
             i.hover_from_stage = false;
             i.focused_box = None;
+            stage::interrupt_stage_drag(was_dragging);
             cx.notify();
         }
     }
@@ -519,8 +544,9 @@ impl FoloApp {
     pub fn zoom_by(&mut self, f: f32, cx: &mut Context<Self>) {
         if let Some(i) = self.inspector.as_mut() {
             (i.zoom, i.pan) = crate::viz::zoom_step(i.zoom, i.pan, f);
-            i.drag_from = None;
+            let was_dragging = i.drag_from.take().is_some();
             i.focused_box = None;
+            stage::interrupt_stage_drag(was_dragging);
             cx.notify();
         }
     }
@@ -760,6 +786,47 @@ mod tests {
                 insp.hover_from_stage,
                 insp.hover_box.is_some(),
                 "hover_from_stage stays synced with pointer hit after returning to Fit"
+            );
+        });
+
+        // 5. Two scroll-wheel zoom ticks during a held left-button press on a box must latch drag
+        // interruption so releasing at the press point never fires a stray box click.
+        app.simulate_input(
+            window.into(),
+            PlatformInput::MouseDown(MouseDownEvent {
+                button: MouseButton::Left,
+                position: box0_pt,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+        );
+        for _ in 0..2 {
+            app.simulate_input(
+                window.into(),
+                PlatformInput::ScrollWheel(folo_ui::ScrollWheelEvent {
+                    position: box0_pt,
+                    delta: folo_ui::ScrollDelta::Pixels(point(px(0.), px(60.))),
+                    modifiers: Modifiers::none(),
+                    touch_phase: folo_ui::TouchPhase::Moved,
+                }),
+            );
+        }
+        app.simulate_input(
+            window.into(),
+            PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: box0_pt,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+            }),
+        );
+        app.frame(window.into());
+        drive(&mut app, window, |this, _, _| {
+            let insp = this.inspector.as_ref().unwrap();
+            assert_eq!(
+                insp.focused_box, None,
+                "two wheel events during a held press must keep box click suppressed on release"
             );
         });
     }

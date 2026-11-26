@@ -297,22 +297,22 @@ impl FoloApp {
     }
 
     pub fn close_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Whether closing the inspector will trigger (or join) a dataset record recheck on this page.
-        let recheck_pending = self.inspector.as_ref().is_some_and(|i| {
-            i.sample.is_none()
-                && self.route == super::Route::Dataset(i.dataset.clone())
-                && (self.ds_recheck.contains(&i.dataset) || self.ds_reads.contains_key(&i.dataset))
+        // Resolve the last-inspected dataset grid tile and arm `ds_scroll_anchor` BEFORE calling
+        // `take_inspector`, because `take_inspector` can synchronously run `forget_dataset_contents`
+        // when a deferred invalidation removed `store.dataset`.
+        let grid_target = self.inspector.as_ref().and_then(|i| {
+            if i.sample.is_some() || self.route != super::Route::Dataset(i.dataset.clone()) {
+                return None;
+            }
+            let meta = self.filtered_image(&i.dataset, i.index)?.clone();
+            let recheck_pending =
+                self.ds_recheck.contains(&i.dataset) || self.ds_reads.contains_key(&i.dataset);
+            Some((i.dataset.clone(), i.index, meta, recheck_pending))
         });
-        let closed = self.take_inspector(cx);
         let opener = self.inspector_return.take();
-        // Opened from the dataset's grid: back on the image it showed last (scrolled into view and
-        // focused), not on the tile it was opened from (←/→ may have walked far from it).
-        let last =
-            closed.filter(|i| i.sample.is_none() && self.route == super::Route::Dataset(i.dataset.clone()));
-        if let Some(i) = last
-            && let Some(meta) = self.filtered_image(&i.dataset, i.index).cloned()
-        {
-            self.grid_scroll.scroll_to_item(i.index / self.grid_cols(), folo_ui::ScrollStrategy::Center);
+        if let Some((dataset, index, meta, recheck_pending)) = grid_target {
+            let row = index / self.grid_cols();
+            self.grid_scroll.scroll_to_item(row, folo_ui::ScrollStrategy::Center);
             let fh = self.fh(format!("tile-{}", meta.id), cx);
             window.focus(&fh);
             if recheck_pending {
@@ -320,19 +320,28 @@ impl FoloApp {
                 // resolves, and remember the focus handle so a later page never steals focus from
                 // an overlay or control opened in the meantime.
                 self.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
-                    dataset: i.dataset,
+                    dataset,
                     file: meta.file,
                     split: meta.split,
+                    fallback_row: row,
                     intra_row: 0.,
                     strategy: Some(folo_ui::ScrollStrategy::Center),
                     pending_recheck: true,
                     focus_from: Some(fh),
                 });
             }
+            self.take_inspector(cx);
         } else {
+            self.take_inspector(cx);
             match opener {
-                Some(fh) => window.focus(&fh),
-                None => window.focus(&self.root_focus),
+                Some(fh) if window.is_focus_mounted(&fh) => {
+                    window.focus(&fh);
+                    self.verify_focus = Some(fh);
+                }
+                _ => {
+                    self.verify_focus = None;
+                    window.focus(&self.root_focus);
+                }
             }
         }
         cx.notify();
@@ -499,6 +508,124 @@ mod tests {
         assert!(
             drive(&mut app, window, |this, w, _| this.root_focus.is_focused(w)),
             "in-flight replacement of positional det-* row falls back to root_focus"
+        );
+    }
+
+    #[test]
+    fn inspector_close_falls_back_when_opener_unmounted_and_tile_preserves_alt_left() {
+        let (mut app, window) = open();
+        app.update(|cx| {
+            crate::app::bind_keys(cx);
+            crate::input::bind_keys(cx);
+        });
+        // Navigate Overview -> Dataset so Back (Alt+Left) has history to return to.
+        drive(&mut app, window, |this, w, cx| this.navigate(Route::Dataset("ds_8f2c".into()), w, cx));
+        for _ in 0..3 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        // Focus a non-first tile and press Alt+Left: modified arrow must NOT be swallowed by tile nav.
+        let tile_id = drive(&mut app, window, |this, w, cx| {
+            let id = this.filtered_image("ds_8f2c", 2).expect("tile 2").id.clone();
+            this.focus_key(&format!("tile-{id}"), w, cx);
+            id
+        });
+        app.frame(window.into());
+        assert!(drive(&mut app, window, |this, w, cx| this.fh(format!("tile-{tile_id}"), cx).is_focused(w)));
+        app.simulate_input(
+            window.into(),
+            folo_ui::PlatformInput::KeyDown(folo_ui::KeyDownEvent {
+                keystroke: folo_ui::Keystroke {
+                    modifiers: folo_ui::Modifiers { alt: true, ..Default::default() },
+                    key: "left".into(),
+                    key_char: None,
+                },
+                is_held: false,
+            }),
+        );
+        app.frame(window.into());
+        assert_eq!(
+            drive(&mut app, window, |this, _, _| this.route.clone()),
+            Route::Overview,
+            "Alt+Left on a focused dataset tile triggers Back navigation instead of tile navigation"
+        );
+
+        // Opening the inspector from a handle that then unmounts (e.g. live-mini disappearing)
+        // must fall back cleanly to `root_focus` when the inspector closes.
+        drive(&mut app, window, |this, w, cx| {
+            this.focus_key("live-mini", w, cx);
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            this.open_sample("ds_8f2c".into(), "img_00001".into(), "run_7b1a".into(), w, cx);
+            for r in this.store.runs.ready_mut().unwrap() {
+                if r.status == RunStatus::Running {
+                    r.status = RunStatus::Completed;
+                }
+            }
+            cx.notify();
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.close_inspector(w, cx));
+        app.frame(window.into());
+        assert!(
+            drive(&mut app, window, |this, w, _| this.root_focus.is_focused(w)),
+            "closing inspector with unmounted opener falls back to root_focus"
+        );
+
+        // Auto-closing the inspector during render when its image list finishes empty must NOT
+        // mount a stale scrim: the underlying page must accept the very first click immediately
+        // with zero extra redraws before pointer down.
+        let btn_pos = folo_ui::point(folo_ui::px(1050.), folo_ui::px(73.));
+        drive(&mut app, window, |this, w, cx| {
+            this.server_mode = crate::app::ServerMode::Local;
+            this.navigate(Route::Datasets, w, cx);
+        });
+        app.frame(window.into());
+        // Position the pointer on Generate synthetic before opening and auto-closing the inspector.
+        app.simulate_input(
+            window.into(),
+            folo_ui::PlatformInput::MouseMove(folo_ui::MouseMoveEvent {
+                position: btn_pos,
+                pressed_button: None,
+                modifiers: Default::default(),
+            }),
+        );
+        drive(&mut app, window, |this, w, cx| {
+            this.store.images.insert("ds_empty_auto".into(), crate::store::Load::Ready(Vec::new()));
+            this.open_inspector("ds_empty_auto".into(), 0, w, cx);
+        });
+        // One single frame triggers `inspector_waiting` auto-close; dispatch down/up directly
+        // against that exact frame with no intermediate hover frame.
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, _| {
+            assert!(this.inspector.is_none(), "empty completed list auto-closed inspector");
+            assert!(!this.any_overlay(), "no overlay reported after auto-close");
+            assert!(this.root_focus.is_focused(w), "auto-close restored focus cleanly");
+        });
+        app.simulate_input(
+            window.into(),
+            folo_ui::PlatformInput::MouseDown(folo_ui::MouseDownEvent {
+                button: folo_ui::MouseButton::Left,
+                position: btn_pos,
+                modifiers: Default::default(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+        );
+        app.simulate_input(
+            window.into(),
+            folo_ui::PlatformInput::MouseUp(folo_ui::MouseUpEvent {
+                button: folo_ui::MouseButton::Left,
+                position: btn_pos,
+                modifiers: Default::default(),
+                click_count: 1,
+            }),
+        );
+        app.frame(window.into());
+        assert!(
+            drive(&mut app, window, |this, _, _| this.synth.is_some()),
+            "underlying page button accepts the very first click after inspector auto-close"
         );
     }
 }

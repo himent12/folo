@@ -22,6 +22,14 @@ thread_local! {
     static STAGE_PANNED: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Latches `STAGE_PANNED` when an active drag is interrupted (e.g. by wheel zoom or `0`/Fit), so
+/// multiple interrupting events during the same held press never re-enable box clicking on release.
+pub(super) fn interrupt_stage_drag(was_dragging: bool) {
+    if was_dragging {
+        STAGE_PANNED.with(|p| p.set(true));
+    }
+}
+
 impl FoloApp {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn inspector_stage(
@@ -111,8 +119,9 @@ impl FoloApp {
                 // Zoom about the cursor: keep the image point under it fixed.
                 insp.pan = zoom_about(b, dims, insp.zoom, insp.pan, ev.position, new_zoom);
                 insp.zoom = new_zoom;
-                insp.drag_from = None;
+                let was_dragging = insp.drag_from.take().is_some();
                 insp.focused_box = None;
+                interrupt_stage_drag(was_dragging);
                 w.prevent_default();
                 cx.stop_propagation();
                 cx.notify();
@@ -144,6 +153,17 @@ impl FoloApp {
                 cx.listener(|this, _, _, cx| {
                     if let Some(insp) = this.inspector.as_mut() {
                         insp.drag_from = None;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    STAGE_PANNED.with(|p| p.set(false));
+                    if let Some(insp) = this.inspector.as_mut()
+                        && insp.drag_from.take().is_some()
+                    {
                         cx.notify();
                     }
                 }),

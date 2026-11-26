@@ -367,6 +367,27 @@ impl FoloApp {
         self.ensure_core(cx);
     }
 
+    /// Periodic 5 s background poll of the lists: shares in-flight deduplication with window-
+    /// activation refreshes so a slow background fetch is never duplicated while still pending.
+    pub(super) fn poll_lists(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.store.datasets, Load::Failed(_)) {
+            self.retry_list(List::Datasets, cx);
+        } else if matches!(self.store.datasets, Load::Ready(_)) {
+            self.refresh_list_if_idle(List::Datasets, cx);
+        }
+        if matches!(self.store.models, Load::Failed(_)) {
+            self.retry_list(List::Models, cx);
+        } else if matches!(self.store.models, Load::Ready(_)) {
+            self.refresh_list_if_idle(List::Models, cx);
+        }
+        if matches!(self.store.runs, Load::Failed(_)) {
+            self.retry_list(List::Runs, cx);
+        } else if matches!(self.store.runs, Load::Ready(_)) {
+            self.refresh_list_if_idle(List::Runs, cx);
+        }
+        self.ensure_core(cx);
+    }
+
     /// A run's stream said it ended (completed, failed or stopped). The event carries only the
     /// status: its model, end time and final numbers are in the run list, read again now (not at
     /// the next 5 s refresh, which left a finished run with only Delete and a duration still

@@ -597,6 +597,7 @@ fn non_default_sort_and_retryable_later_page_preserve_scroll_anchor() {
             dataset: ID.into(),
             file: "deleted.jpg".into(),
             split: crate::api::Split::Val,
+            fallback_row: 0,
             intra_row: 0.,
             strategy: None,
             pending_recheck: false,
@@ -608,4 +609,332 @@ fn non_default_sort_and_retryable_later_page_preserve_scroll_anchor() {
     drive(&mut app, window, |this, _, _| {
         assert!(this.ds_scroll_anchor.is_none(), "empty completed grid clears stale scroll anchor");
     });
+}
+
+/// #382: when the exact anchored file was removed externally during a paged reload, the grid falls
+/// back to the clamped previous row instead of snapping all the way back to row 0 (batch 1).
+#[test]
+fn deleted_anchor_file_falls_back_to_clamped_row_instead_of_row_zero() {
+    let api = Arc::new(MockBackend::new(4200, true).with_paged_splits(ID, 10_000, 60));
+    let (mut app, window) = on_its_page(api);
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_split = Some(crate::api::Split::Val);
+        cx.notify();
+    });
+    frames(&mut app, window);
+
+    let (expected_row, item_h) = drive(&mut app, window, |this, _, cx| {
+        let item_h = f32::from(this.grid_scroll.0.borrow().last_item_height.expect("row height"));
+        let fallback_row = 4usize;
+        this.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
+            dataset: ID.into(),
+            file: "images/val/deleted_externally.jpg".into(),
+            split: crate::api::Split::Val,
+            fallback_row,
+            intra_row: 12.,
+            strategy: None,
+            pending_recheck: false,
+            focus_from: None,
+        });
+        cx.notify();
+        (fallback_row, item_h)
+    });
+    frames(&mut app, window);
+
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.ds_scroll_anchor.is_none(), "anchor consumed after fallback restore");
+        let got_y = f32::from(-this.grid_scroll.0.borrow().base_handle.offset().y);
+        let max_y = f32::from(this.grid_scroll.0.borrow().base_handle.max_offset().height);
+        let want_y = (expected_row as f32 * item_h + 12.).min(max_y);
+        assert!(
+            got_y > 0. && (got_y - want_y).abs() <= 2.0,
+            "grid stayed near fallback row {expected_row} (got_y={got_y}, want_y={want_y}, max_y={max_y})"
+        );
+    });
+
+    // When the inspected tile is deleted externally while closing over a recheck, focus resolves to
+    // a surviving tile in the fallback row (never stranded on an unmounted tile handle).
+    let rep_id = drive(&mut app, window, |this, w, cx| {
+        let cols = this.grid_cols();
+        let fallback_row = 2usize;
+        let indices = this.filtered_indices(ID);
+        let all = this.store.images.get(ID).and_then(|l| l.ready()).unwrap();
+        let rep_id = all[indices[fallback_row * cols]].id.clone();
+        let stale_fh = this.fh("tile-deleted-last", cx);
+        w.focus(&stale_fh);
+        this.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
+            dataset: ID.into(),
+            file: "images/val/deleted_last.jpg".into(),
+            split: crate::api::Split::Val,
+            fallback_row,
+            intra_row: 0.,
+            strategy: Some(folo_ui::ScrollStrategy::Center),
+            pending_recheck: false,
+            focus_from: Some(stale_fh),
+        });
+        cx.notify();
+        rep_id
+    });
+    frames(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        assert!(
+            this.fh(format!("tile-{rep_id}"), cx).is_focused(w),
+            "deleted inspected tile focuses a surviving tile in the fallback row"
+        );
+    });
+
+    // If the user moved focus to another control before the reload finished, fallback preserves it.
+    drive(&mut app, window, |this, w, cx| {
+        let stale_fh = this.fh("tile-deleted-other", cx);
+        this.focus_key("ds-back", w, cx);
+        this.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
+            dataset: ID.into(),
+            file: "images/val/deleted_other.jpg".into(),
+            split: crate::api::Split::Val,
+            fallback_row: 2,
+            intra_row: 0.,
+            strategy: Some(folo_ui::ScrollStrategy::Center),
+            pending_recheck: false,
+            focus_from: Some(stale_fh),
+        });
+        cx.notify();
+    });
+    frames(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        assert!(
+            this.fh("ds-back", cx).is_focused(w),
+            "fallback restore must not steal focus once user moved to another control"
+        );
+    });
+}
+
+/// #382: window activation and periodic polls share in-flight deduplication, and fresher list
+/// summaries invalidate stale `store.dataset` entries instead of being shadowed by them.
+#[test]
+fn window_activation_on_datasets_refreshes_list_deduplicated_and_updates_summary() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Datasets, w, cx));
+    frames(&mut app, window);
+
+    // Hold the activation `datasets` fetch and cross both a second focus bounce AND a periodic
+    // poll tick (`poll_lists`): neither may launch a duplicate concurrent `datasets` fetch.
+    let list_first = api.hold("datasets");
+    let list_second = api.hold("datasets");
+    app.platform().set_active(false);
+    app.platform().set_active(true);
+    wait_for_held(&mut app, window, &list_first, true, "first datasets refresh");
+
+    app.platform().set_active(false);
+    app.platform().set_active(true);
+    app.update(|cx| window.update(cx, |this, _, cx| this.poll_lists(cx)).unwrap());
+    frames_holding_one(&mut app, window);
+    assert!(
+        !list_second.is_held(),
+        "focus bounce and periodic poll must not launch a duplicate datasets fetch while held"
+    );
+    drop((list_first, list_second));
+    app.run_until_idle();
+    frames(&mut app, window);
+
+    // When `store.dataset` holds fresher split counts than `store.datasets`, `datasets_subtitle`
+    // reflects the fresher record immediately without waiting for the next list poll.
+    drive(&mut app, window, |this, _, _| {
+        let list = this.store.datasets.ready().expect("datasets loaded").clone();
+        let before = this.datasets_subtitle(&list);
+        let mut updated =
+            this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("dataset loaded");
+        updated.splits.train += 50;
+        this.store.dataset.insert(ID.into(), Load::Ready(updated));
+        let after = this.datasets_subtitle(&list);
+        assert_ne!(before, after, "datasets subtitle reflects fresher store.dataset counts");
+    });
+
+    // Conversely, when a newer `GET /api/datasets` summary arrives with changed counts, stale
+    // `store.dataset` records are invalidated rather than shadowing the fresh list summary.
+    drive(&mut app, window, |this, _, cx| {
+        let mut stale = this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("dataset loaded");
+        stale.splits.train = 111;
+        this.store.dataset.insert(ID.into(), Load::Ready(stale));
+        let mut fresh_list = this.store.datasets.ready().expect("datasets list").clone();
+        let entry = fresh_list.iter_mut().find(|d| d.id == ID).expect("target dataset");
+        entry.splits.train = 777;
+        let ticket = this.list_tickets.ask();
+        this.list_tickets.installed(super::lists::List::Datasets, ticket);
+        this.install_datasets(fresh_list, ticket, cx);
+        let current = this.store.datasets.ready().unwrap().iter().find(|d| d.id == ID).unwrap();
+        assert_eq!(
+            this.effective_dataset(current).splits.train,
+            777,
+            "stale store.dataset record must not shadow a newer datasets list summary"
+        );
+    });
+}
+
+/// PR #711 Round 2: detail records carry `revision: Some(...)` while `GET /api/datasets` returns
+/// `revision: None`; polling the unchanged list must NOT evict `store.dataset` or `store.images`.
+/// Also verify both out-of-order list/detail arrival orders reconcile via shared ticket order.
+#[test]
+fn detail_revision_does_not_thrash_on_list_poll_and_reconciles_out_of_order_responses() {
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = on_its_page(api.clone());
+
+    // 1. Detail has `revision: Some("rev-1")`, list has `revision: None`: polling the unchanged
+    // list must keep `store.dataset` and `store.images` intact (no 5 s reload thrash).
+    drive(&mut app, window, |this, _, cx| {
+        let mut detail = this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("detail");
+        detail.revision = Some("rev-1".into());
+        this.sync_dataset_summary(&detail);
+        this.store.dataset.insert(ID.into(), Load::Ready(detail));
+        let summary_rev = this.store.dataset_summary(ID).and_then(|d| d.revision.clone());
+        assert!(summary_rev.is_none(), "sync_dataset_summary must not copy detail revision into list");
+        this.poll_lists(cx);
+    });
+    frames(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.dataset.get(ID).and_then(|l| l.ready()).is_some(), "detail kept across poll");
+        assert!(this.store.images.get(ID).and_then(|l| l.ready()).is_some(), "images kept across poll");
+    });
+
+    // 2. Arrival order A: initial detail request is held while a newer list arrives with updated
+    // splits; when the older detail later arrives it must NOT overwrite the newer list summary.
+    let held_detail = api.hold("dataset");
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                this.store.dataset.remove(ID);
+                this.ensure_dataset_record(ID, cx);
+            })
+            .unwrap()
+    });
+    wait_for_held(&mut app, window, &held_detail, false, "older detail");
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                let mut newer_list = this.store.datasets.ready().expect("datasets").clone();
+                let entry = newer_list.iter_mut().find(|d| d.id == ID).unwrap();
+                entry.splits.train += 123;
+                let ticket = this.list_tickets.ask();
+                this.list_tickets.installed(super::lists::List::Datasets, ticket);
+                this.install_datasets(newer_list, ticket, cx);
+            })
+            .unwrap()
+    });
+    let expected_train = app.update(|cx| {
+        window.update(cx, |this, _, _| this.store.dataset_summary(ID).unwrap().splits.train).unwrap()
+    });
+    drop(held_detail);
+    app.run_until_idle();
+    drive(&mut app, window, |this, _, _| {
+        let current = this.store.dataset_summary(ID).unwrap();
+        assert_eq!(
+            this.effective_dataset(current).splits.train,
+            expected_train,
+            "older held detail must not overwrite newer datasets summary"
+        );
+    });
+
+    // 3. Arrival order B: an older list response arriving AFTER a newer detail installed must NOT
+    // evict the newer detail or regress its summary fields.
+    drive(&mut app, window, |this, _, cx| {
+        let older_list_ticket = this.list_tickets.ask();
+        let mut stale_list = this.store.datasets.ready().expect("datasets").clone();
+        stale_list.iter_mut().find(|d| d.id == ID).unwrap().splits.train = 5;
+
+        let newer_detail_ticket = this.list_tickets.ask();
+        let mut newer_detail = this.store.dataset_summary(ID).unwrap().clone();
+        newer_detail.splits.train = 999;
+        this.list_tickets.note_detail(ID, newer_detail_ticket);
+        this.sync_dataset_summary(&newer_detail);
+        this.store.dataset.insert(ID.into(), Load::Ready(newer_detail));
+
+        this.install_datasets(stale_list, older_list_ticket, cx);
+        assert_eq!(
+            this.store.dataset.get(ID).and_then(|l| l.ready()).map(|d| d.splits.train),
+            Some(999),
+            "older list response must not evict newer detail record"
+        );
+        assert_eq!(
+            this.store.dataset_summary(ID).map(|d| d.splits.train),
+            Some(999),
+            "older list response must not regress summary past newer detail record"
+        );
+    });
+}
+
+/// #308 item 6: rendering a live-run screen into two independent headless apps at 1.5x DPI with
+/// chart easing active on the executor clock produces byte-for-byte identical framebuffers, and the
+/// intermediate 80 ms frame visibly differs from both the initial and settled frames.
+#[test]
+fn headless_run_live_render_is_byte_identical_across_runs() {
+    use crate::api::{RunEvent, RunStatus};
+    use crate::theme::{Mode, Theme};
+    use folo_ui::{AppContext, Bounds, HeadlessOptions, WindowBounds, WindowOptions, point, px, size};
+    use std::time::Duration;
+
+    let _reduce_motion = crate::ui::override_reduce_motion_for_test(false);
+
+    let render_once = || {
+        // 40 steps stays well below `EASE_MAX_POINTS` (512) so appending a step enters `charts/ease.rs`.
+        let api = Arc::new(MockBackend::new(40, true));
+        let mut app = HeadlessApp::new(HeadlessOptions { scale_factor: 1.5, ..Default::default() });
+        let window = app.update(|cx| {
+            cx.set_global(Theme::new(Mode::Dark));
+            let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1280.), px(800.)));
+            let options =
+                WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+            cx.open_window(options, |window, cx| cx.new(|cx| FoloApp::new(api.clone(), true, window, cx)))
+                .expect("open window")
+        });
+        drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+        let run_id = drive(&mut app, window, |this, w, cx| {
+            let id = this
+                .store
+                .runs
+                .ready()
+                .expect("runs loaded")
+                .iter()
+                .find(|r| r.status == RunStatus::Running)
+                .expect("running fixture run")
+                .id
+                .clone();
+            this.navigate(Route::Run(id.clone()), w, cx);
+            id
+        });
+        frames(&mut app, window);
+        let initial = app.frame(window.into()).pixels.clone();
+
+        // Append a visible loss jump so chart easing animates over 240 ms on the executor clock.
+        drive(&mut app, window, |this, _, cx| {
+            let run = this.store.run(&run_id).expect("live run fixture loaded");
+            assert_eq!(run.status, RunStatus::Running);
+            let hist = this.store.run_data.get(&run_id).and_then(|l| l.ready()).expect("history loaded");
+            assert!(!hist.metrics.steps.is_empty() && hist.metrics.steps.len() < 512);
+            let mut next = *hist.metrics.steps.last().unwrap();
+            next.step += 1;
+            next.loss.box_ *= 0.25;
+            next.loss.cls *= 0.25;
+            next.loss.dfl *= 0.25;
+            next.loss.total *= 0.25;
+            this.store.apply(&run_id, RunEvent::Step(next));
+            cx.notify();
+        });
+        app.frame(window.into());
+        app.advance_clock(Duration::from_millis(80));
+        let mid = app.frame(window.into()).pixels.clone();
+        app.advance_clock(Duration::from_millis(300));
+        let settled = app.frame(window.into()).pixels.clone();
+        (initial, mid, settled)
+    };
+    let (init_a, mid_a, settled_a) = render_once();
+    let (init_b, mid_b, settled_b) = render_once();
+    assert!(!mid_a.is_empty());
+    assert_ne!(mid_a, init_a, "80 ms frame must visibly advance from initial frame");
+    assert_ne!(mid_a, settled_a, "80 ms frame must be mid-ease before settling at 300 ms");
+    assert_eq!(init_a, init_b, "initial 1.5x headless run-live renders must be byte-for-byte identical");
+    assert_eq!(mid_a, mid_b, "mid-ease 1.5x headless run-live renders must be byte-for-byte identical");
+    assert_eq!(
+        settled_a, settled_b,
+        "settled 1.5x headless run-live renders must be byte-for-byte identical"
+    );
 }

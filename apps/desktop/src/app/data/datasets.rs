@@ -36,6 +36,9 @@ pub struct DatasetScrollAnchor {
     pub dataset: String,
     pub file: String,
     pub split: Split,
+    /// Row index captured with the anchor, used as a clamped fallback if the exact file was
+    /// removed externally so large paged grids stay in the same region instead of snapping to row 0.
+    pub fallback_row: usize,
     /// Pixel scroll offset within the anchor row (`0..row_h`) when captured from a scrolled grid.
     pub intra_row: f32,
     /// Pending `scroll_to_item` strategy (for example from closing the inspector right before a
@@ -125,83 +128,170 @@ impl FoloApp {
         // card keeping what it shows until the answer. Only an answer about the dataset replaces it
         // (a connection blip leaves a healthy card healthy); back from a failure, its images reload.
         // Never under an open inspector: the read waits until it closes ([`FoloApp::take_inspector`]).
-        if !self.inspecting(id)
-            && self.ds_recheck.remove(id)
-            && self.store.dataset.get(id).is_some_and(|l| !l.is_loading())
+        if !self.inspecting(id) && self.ds_recheck.contains(id) {
+            if !self.store.dataset.contains_key(id) {
+                self.ds_recheck.remove(id);
+                self.forget_dataset_contents(id, cx);
+            } else if self.store.dataset.get(id).is_some_and(|l| !l.is_loading()) {
+                self.ds_recheck.remove(id);
+                let ticket = self.ds_read_ticket(id);
+                let order = self.list_tickets.start_detail(id);
+                let (a, b) = (id.to_string(), id.to_string());
+                self.fetch(
+                    cx,
+                    move |api| api.dataset(&a),
+                    move |this, r, cx| {
+                        this.list_tickets.finish_detail(&b, Some(order));
+                        // A newer read was asked for since (another Retry or visit): its answer stands.
+                        if !this.ds_read_done(&b, ticket) {
+                            return;
+                        }
+                        // Cleared since (another server): this answer is about what was there.
+                        if this.store.dataset.get(&b).is_none_or(|l| l.is_loading()) {
+                            return;
+                        }
+                        // A newer per-dataset detail (e.g. from paging revalidation) already
+                        // installed: ignore this older recheck response (Ok or Err).
+                        if order < this.list_tickets.detail_ticket(&b) {
+                            if !this.ds_recheck.contains(&b)
+                                && this
+                                    .ds_scroll_anchor
+                                    .as_ref()
+                                    .is_some_and(|a| a.dataset == b && a.pending_recheck)
+                            {
+                                this.ds_scroll_anchor = None;
+                            }
+                            return;
+                        }
+                        match r {
+                            Ok(d) => {
+                                // A newer `GET /api/datasets` list already installed different summary
+                                // fields after this detail read started: discard this stale detail and
+                                // queue a fresh read instead of regressing the summary.
+                                if order
+                                    < this.list_tickets.list_installed(super::super::lists::List::Datasets)
+                                    && this
+                                        .store
+                                        .dataset_summary(&b)
+                                        .is_some_and(|s| super::super::lists::dataset_summary_changed(s, &d))
+                                {
+                                    this.ds_recheck.insert(b);
+                                    return;
+                                }
+                                // Back from a failure, or its contents changed: the images, their labels and
+                                // their pixels are read again (image ids are positions, docs/API.md).
+                                let deferred_paging = this
+                                    .failed_pages
+                                    .get(&b)
+                                    .is_some_and(|f| f.error.code == "dataset_changed");
+                                if this.store.dataset.get(&b).and_then(|l| l.ready()) != Some(&d) {
+                                    // An inspector opened on it since: all stays, read again when it closes.
+                                    if this.inspecting(&b) {
+                                        this.ds_recheck.insert(b);
+                                        return;
+                                    }
+                                    this.forget_dataset_contents(&b, cx);
+                                } else if deferred_paging && !this.inspecting(&b) {
+                                    // Paging had been deferred under an inspector; resume now that it closed.
+                                    this.retry_failed_image_page(&b, cx);
+                                } else if this
+                                    .ds_scroll_anchor
+                                    .as_ref()
+                                    .is_some_and(|a| a.dataset == b && a.pending_recheck)
+                                {
+                                    // Record unchanged: no image reload will run, so drop only a
+                                    // speculative anchor captured on inspector close (never an anchor
+                                    // already committed to an in-progress paged reload).
+                                    this.ds_scroll_anchor = None;
+                                }
+                                this.list_tickets.note_detail(&b, order);
+                                this.sync_dataset_summary(&d);
+                                this.store.dataset.insert(b, Load::Ready(d));
+                            }
+                            Err(e)
+                                if e.code == "dataset_not_found"
+                                    || crate::screens::dataset_problem(&e).is_some() =>
+                            {
+                                // The same under an open inspector: its record and list stay until it closes.
+                                if this.inspecting(&b) {
+                                    this.ds_recheck.insert(b);
+                                    return;
+                                }
+                                if this.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == b) {
+                                    this.ds_scroll_anchor = None;
+                                }
+                                this.list_tickets.note_detail(&b, order);
+                                this.store.dataset.insert(b, Load::Failed(e));
+                            }
+                            Err(_) => {
+                                if this
+                                    .ds_scroll_anchor
+                                    .as_ref()
+                                    .is_some_and(|a| a.dataset == b && a.pending_recheck)
+                                {
+                                    this.ds_scroll_anchor = None;
+                                }
+                            }
+                        }
+                    },
+                );
+            }
+        }
+        if self.store.dataset.get(id).is_none_or(|l| l.needs_fetch())
+            && !(self.inspecting(id) && self.ds_recheck.contains(id))
         {
+            self.store.dataset.insert(id.to_string(), Load::Loading);
             let ticket = self.ds_read_ticket(id);
+            let order = self.list_tickets.start_detail(id);
             let (a, b) = (id.to_string(), id.to_string());
             self.fetch(
                 cx,
                 move |api| api.dataset(&a),
                 move |this, r, cx| {
-                    // A newer read was asked for since (another Retry or visit): its answer stands.
-                    if !this.ds_read_done(&b, ticket) {
-                        return;
-                    }
-                    // Cleared since (another server): this answer is about what was there.
-                    if this.store.dataset.get(&b).is_none_or(|l| l.is_loading()) {
-                        return;
-                    }
-                    match r {
-                        Ok(d) => {
-                            // Back from a failure, or its contents changed: the images, their labels and
-                            // their pixels are read again (image ids are positions, docs/API.md).
-                            if this.store.dataset.get(&b).and_then(|l| l.ready()) != Some(&d) {
-                                // An inspector opened on it since: all stays, read again when it closes.
+                    this.list_tickets.finish_detail(&b, Some(order));
+                    if this.ds_read_done(&b, ticket) {
+                        if order < this.list_tickets.detail_ticket(&b) {
+                            if !this.ds_recheck.contains(&b)
+                                && this
+                                    .ds_scroll_anchor
+                                    .as_ref()
+                                    .is_some_and(|a| a.dataset == b && a.pending_recheck)
+                            {
+                                this.ds_scroll_anchor = None;
+                            }
+                            return;
+                        }
+                        if let Ok(d) = &r {
+                            if order < this.list_tickets.list_installed(super::super::lists::List::Datasets)
+                                && this
+                                    .store
+                                    .dataset_summary(&b)
+                                    .is_some_and(|s| super::super::lists::dataset_summary_changed(s, d))
+                            {
+                                this.store.dataset.remove(&b);
                                 if this.inspecting(&b) {
                                     this.ds_recheck.insert(b);
-                                    return;
+                                } else {
+                                    this.ds_recheck.remove(&b);
+                                    this.forget_dataset_contents(&b, cx);
                                 }
-                                this.forget_dataset_contents(&b, cx);
-                            } else if this
-                                .ds_scroll_anchor
-                                .as_ref()
-                                .is_some_and(|a| a.dataset == b && a.pending_recheck)
-                            {
-                                // Record unchanged: no image reload will run, so drop only a
-                                // speculative anchor captured on inspector close (never an anchor
-                                // already committed to an in-progress paged reload).
-                                this.ds_scroll_anchor = None;
-                            }
-                            this.store.dataset.insert(b, Load::Ready(d));
-                        }
-                        Err(e)
-                            if e.code == "dataset_not_found"
-                                || crate::screens::dataset_problem(&e).is_some() =>
-                        {
-                            // The same under an open inspector: its record and list stay until it closes.
-                            if this.inspecting(&b) {
-                                this.ds_recheck.insert(b);
                                 return;
                             }
-                            if this.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == b) {
-                                this.ds_scroll_anchor = None;
-                            }
-                            this.store.dataset.insert(b, Load::Failed(e));
+                            this.list_tickets.note_detail(&b, order);
+                            this.sync_dataset_summary(d);
+                        } else if let Err(e) = &r
+                            && (e.code == "dataset_not_found" || crate::screens::dataset_problem(e).is_some())
+                        {
+                            this.list_tickets.note_detail(&b, order);
                         }
-                        Err(_) => {
-                            if this
+                        if !this.ds_recheck.contains(&b)
+                            && this
                                 .ds_scroll_anchor
                                 .as_ref()
                                 .is_some_and(|a| a.dataset == b && a.pending_recheck)
-                            {
-                                this.ds_scroll_anchor = None;
-                            }
+                        {
+                            this.ds_scroll_anchor = None;
                         }
-                    }
-                },
-            );
-        }
-        if self.store.dataset.get(id).is_none_or(|l| l.needs_fetch()) {
-            self.store.dataset.insert(id.to_string(), Load::Loading);
-            let ticket = self.ds_read_ticket(id);
-            let (a, b) = (id.to_string(), id.to_string());
-            self.fetch(
-                cx,
-                move |api| api.dataset(&a),
-                move |this, r, _| {
-                    if this.ds_read_done(&b, ticket) {
                         this.store.dataset.insert(b, r.into());
                     }
                 },
@@ -397,6 +487,7 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) {
         let req_id = id.clone();
+        let order = self.list_tickets.ask();
         self.fetch(
             cx,
             move |api| api.dataset(&req_id),
@@ -410,6 +501,9 @@ impl FoloApp {
                     .get(&id)
                     .and_then(|l| l.ready())
                     .is_some_and(|l| l.len() == offset as usize);
+                let waiting_sample =
+                    this.inspector.as_ref().is_some_and(|i| i.dataset == id && i.want.is_some());
+                let defer_for_inspector = this.inspecting(&id) && !waiting_sample;
                 match r {
                     Ok(fresh)
                         if still_aligned
@@ -417,15 +511,73 @@ impl FoloApp {
                             && fresh.revision == cached.revision
                             && fresh == cached =>
                     {
-                        this.store.dataset.insert(id.clone(), Load::Ready(fresh));
-                        this.load_images_from(id, generation, offset, attempt, cx);
+                        let superseded = order < this.list_tickets.detail_ticket(&id)
+                            || (order
+                                < this.list_tickets.list_installed(super::super::lists::List::Datasets)
+                                && this.store.dataset_summary(&id).is_some_and(|s| {
+                                    super::super::lists::dataset_summary_changed(s, &fresh)
+                                }));
+                        if superseded {
+                            if defer_for_inspector {
+                                this.images_more.remove(&id);
+                                this.failed_pages.insert(
+                                    id.clone(),
+                                    FailedImagePage {
+                                        offset,
+                                        error: ApiError::new(
+                                            "dataset_changed",
+                                            "Dataset changed on disk while inspecting",
+                                        ),
+                                    },
+                                );
+                                this.ds_recheck.insert(id);
+                            } else {
+                                this.ds_recheck.remove(&id);
+                                this.forget_dataset_contents(&id, cx);
+                                this.store.dataset.remove(&id);
+                                this.ensure_dataset(&id, cx);
+                            }
+                        } else {
+                            this.list_tickets.note_detail(&id, order);
+                            this.sync_dataset_summary(&fresh);
+                            this.store.dataset.insert(id.clone(), Load::Ready(fresh));
+                            this.load_images_from(id, generation, offset, attempt, cx);
+                        }
                     }
                     Ok(fresh) => {
-                        // Files changed on disk or the server dropped revision tracking:
-                        // discard stale prefix + decoded images and reload from page zero.
-                        this.forget_dataset_contents(&id, cx);
-                        this.store.dataset.insert(id.clone(), Load::Ready(fresh));
-                        this.ensure_dataset(&id, cx);
+                        if defer_for_inspector {
+                            this.images_more.remove(&id);
+                            this.failed_pages.insert(
+                                id.clone(),
+                                FailedImagePage {
+                                    offset,
+                                    error: ApiError::new(
+                                        "dataset_changed",
+                                        "Dataset changed on disk while inspecting",
+                                    ),
+                                },
+                            );
+                            this.ds_recheck.insert(id);
+                        } else {
+                            let superseded = order < this.list_tickets.detail_ticket(&id)
+                                || (order
+                                    < this.list_tickets.list_installed(super::super::lists::List::Datasets)
+                                    && this.store.dataset_summary(&id).is_some_and(|s| {
+                                        super::super::lists::dataset_summary_changed(s, &fresh)
+                                    }));
+                            // Files changed on disk or the server dropped revision tracking:
+                            // discard stale prefix + decoded images and reload from page zero.
+                            this.ds_recheck.remove(&id);
+                            this.forget_dataset_contents(&id, cx);
+                            if superseded {
+                                this.store.dataset.remove(&id);
+                            } else {
+                                this.list_tickets.note_detail(&id, order);
+                                this.sync_dataset_summary(&fresh);
+                                this.store.dataset.insert(id.clone(), Load::Ready(fresh));
+                            }
+                            this.ensure_dataset(&id, cx);
+                        }
                     }
                     Err(e)
                         if still_aligned
@@ -533,6 +685,7 @@ impl FoloApp {
             dataset: id.to_string(),
             file: meta.file.clone(),
             split: meta.split,
+            fallback_row: target_row,
             intra_row,
             strategy,
             pending_recheck: false,
@@ -578,6 +731,40 @@ impl FoloApp {
         });
         let Some((pos, tile_id)) = found else {
             if !still_incomplete {
+                let fallback_tile = if !indices.is_empty() {
+                    let rows = indices.len().div_ceil(cols);
+                    let row = anchor.fallback_row.min(rows - 1);
+                    if anchor.fallback_row > 0 || anchor.intra_row > 0. || anchor.strategy.is_some() {
+                        if let Some(strategy) = anchor.strategy {
+                            self.grid_scroll.scroll_to_item(row, strategy);
+                        } else {
+                            let clamped_intra = anchor.intra_row.min((row_h - 1.).max(0.));
+                            let target_y = row as f32 * row_h + clamped_intra;
+                            let mut scroll = self.grid_scroll.0.borrow_mut();
+                            scroll.deferred_scroll_to_item = None;
+                            scroll
+                                .base_handle
+                                .set_offset(folo_ui::point(folo_ui::px(0.), -folo_ui::px(target_y)));
+                        }
+                    }
+                    let slot = (row * cols).min(indices.len() - 1);
+                    all.get(indices[slot]).map(|m| m.id.clone())
+                } else {
+                    None
+                };
+                if let Some(prev) = anchor.focus_from.as_ref()
+                    && !self.any_overlay()
+                    && (prev.is_focused(window) || self.root_focus.is_focused(window))
+                {
+                    if let Some(rep_id) = fallback_tile {
+                        let fh = self.fh(format!("tile-{rep_id}"), cx);
+                        window.focus(&fh);
+                        self.verify_focus = Some(fh);
+                    } else {
+                        self.verify_focus = None;
+                        window.focus(&self.root_focus);
+                    }
+                }
                 self.ds_scroll_anchor = None;
             }
             return;

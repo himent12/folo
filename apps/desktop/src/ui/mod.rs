@@ -32,6 +32,8 @@ pub use metric::{
     KPI_HEADLINE, KPI_UNIT, KPI_VALUE, baseline_lift, detail_line, duration_metric, kpi_label, kpi_note, kv,
     metric, metric_pair, stat_at, stat_sized,
 };
+#[cfg(test)]
+pub(crate) use motion::override_reduce_motion_for_test;
 pub use motion::{appear, os_prefers_reduced_motion, reduce_motion, set_reduce_motion};
 pub use scroll::{ThumbGeo, paint_thumb, scroll_edges};
 pub use status::{
