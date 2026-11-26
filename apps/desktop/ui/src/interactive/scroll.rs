@@ -100,17 +100,19 @@ impl ScrollHandle {
     pub fn children_count(&self) -> usize {
         self.0.borrow().child_bounds.len()
     }
+}
 
-    /// Applies a pending `scroll_to_item` against last frame's child bounds (GPUI's
-    /// `scroll_to_active_item`; a child that does not exist yet keeps the request for later).
-    pub(crate) fn scroll_to_active_item(&self) {
-        let mut state = self.0.borrow_mut();
-        let Some((index, strategy)) = state.active_item else { return };
-        let Some(bounds) = state.child_bounds.get(index).copied() else { return };
-        let container = state.bounds;
-        let overflow = state.overflow;
+impl ScrollHandleState {
+    /// Applies a pending `scroll_to_item` against the current container bounds, overflow, and child
+    /// bounds (GPUI's `scroll_to_active_item`; a child that does not exist yet keeps the request
+    /// for later).
+    pub(crate) fn scroll_to_active_item(&mut self) {
+        let Some((index, strategy)) = self.active_item else { return };
+        let Some(bounds) = self.child_bounds.get(index).copied() else { return };
+        let container = self.bounds;
+        let overflow = self.overflow;
         {
-            let mut offset = state.offset.borrow_mut();
+            let mut offset = self.offset.borrow_mut();
             match strategy {
                 ScrollToStrategy::FirstVisible => {
                     if overflow.y == Overflow::Scroll {
@@ -121,7 +123,11 @@ impl ScrollHandle {
                         }
                     }
                 }
-                ScrollToStrategy::Top => offset.y = container.top() - bounds.top(),
+                ScrollToStrategy::Top => {
+                    if overflow.y == Overflow::Scroll {
+                        offset.y = container.top() - bounds.top();
+                    }
+                }
             }
             if overflow.x == Overflow::Scroll {
                 if bounds.left() + offset.x < container.left() {
@@ -131,6 +137,6 @@ impl ScrollHandle {
                 }
             }
         }
-        state.active_item = None;
+        self.active_item = None;
     }
 }

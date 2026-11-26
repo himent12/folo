@@ -272,3 +272,168 @@ fn the_double_click_that_closed_a_dialog_does_not_reach_a_breadcrumb() {
     click(&mut app, window, (crumb, super::titlebar::TITLEBAR / 2.), 2);
     assert_eq!(route(&mut app), page, "the rest of that double-click is not the crumb's");
 }
+
+#[test]
+fn inspector_hover_cleanup_modified_shortcuts_and_stuck_drag_release() {
+    use folo_ui::{
+        Bounds, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, PlatformInput, point,
+        px, size,
+    };
+
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Dataset("ds_8f2c".into()), w, cx);
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+
+    drive(&mut app, window, |this, w, cx| {
+        this.open_inspector("ds_8f2c".into(), 0, w, cx);
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+
+    let (stage, img_dims, box0_center) = drive(&mut app, window, |this, _, _| {
+        let b = this.insp_view.get().expect("inspector stage painted");
+        let meta = this.filtered_image("ds_8f2c", 0).expect("image 0 loaded");
+        let dims = (meta.width as f32, meta.height as f32);
+        let bx = &meta.boxes[0];
+        let rect = crate::viz::image_rect(b, dims.0, dims.1, crate::viz::Fit::Contain, 1.0, (0., 0.));
+        let cx_ = rect.left() + rect.size.width * ((bx.x1 + bx.x2) * 0.5 / dims.0);
+        let cy_ = rect.top() + rect.size.height * ((bx.y1 + bx.y2) * 0.5 / dims.1);
+        (b, dims, point(cx_, cy_))
+    });
+    let _ = img_dims;
+
+    // 1. Hovering a box on the stage sets stage hover, and leaving the stage clears it.
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: box0_center,
+            pressed_button: None,
+            ..Default::default()
+        }),
+    );
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert!(insp.hover_box.is_some(), "hovering a box on the stage highlights it");
+        assert!(insp.hover_from_stage);
+    });
+    // Move pointer off the stage into the header bar.
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: point(stage.left() + px(10.), px(32.)),
+            pressed_button: None,
+            ..Default::default()
+        }),
+    );
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert_eq!(insp.hover_box, None, "leaving the stage clears stage box hover");
+        assert!(!insp.hover_from_stage);
+    });
+
+    // 2. Modified shortcuts (Ctrl+0, Alt+Left, Ctrl+-) must not hijack zoom/pan/step.
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent { keystroke: Keystroke::parse("=").unwrap(), is_held: false }),
+    );
+    app.frame(window.into());
+    let zoomed_before = drive(&mut app, window, |this, _, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert!(insp.zoom > 1.0);
+        (insp.zoom, insp.pan, insp.index)
+    });
+    for key in ["ctrl-0", "alt-left", "ctrl--"] {
+        app.simulate_input(
+            window.into(),
+            PlatformInput::KeyDown(KeyDownEvent {
+                keystroke: Keystroke::parse(key).unwrap(),
+                is_held: false,
+            }),
+        );
+        app.frame(window.into());
+    }
+    drive(&mut app, window, |this, _, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert_eq!((insp.zoom, insp.pan, insp.index), zoomed_before, "modified keys ignored by inspector");
+    });
+
+    // 3. Inspector drag clears if MouseMove arrives without MouseButton::Left pressed.
+    let mid = point(stage.left() + stage.size.width * 0.5, stage.top() + stage.size.height * 0.5);
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: mid,
+            click_count: 1,
+            ..Default::default()
+        }),
+    );
+    app.frame(window.into());
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: point(mid.x + px(20.), mid.y + px(10.)),
+            pressed_button: Some(MouseButton::Left),
+            ..Default::default()
+        }),
+    );
+    app.frame(window.into());
+    let panned = drive(&mut app, window, |this, _, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert!(insp.drag_from.is_some());
+        insp.pan
+    });
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: point(mid.x + px(80.), mid.y + px(40.)),
+            pressed_button: None,
+            ..Default::default()
+        }),
+    );
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert!(insp.drag_from.is_none(), "released drag clears on MouseMove");
+        assert_eq!(insp.pan, panned, "pan does not jump after button release");
+    });
+
+    // 4. Slider drag guards against zero-width bounds (no NaN) and clears on unpressed MouseMove.
+    drive(&mut app, window, |this, _, _| {
+        this.drag = Some(super::Drag { id: "play-conf" });
+        this.slider_bounds
+            .borrow_mut()
+            .insert("play-conf", Bounds::new(point(px(10.), px(10.)), size(px(0.), px(16.))));
+    });
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: point(px(50.), px(18.)),
+            pressed_button: Some(MouseButton::Left),
+            ..Default::default()
+        }),
+    );
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.play_conf.is_finite(), "zero-width slider drag must never write NaN");
+    });
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: point(px(60.), px(18.)),
+            pressed_button: None,
+            ..Default::default()
+        }),
+    );
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.drag.is_none(), "slider drag clears when MouseMove has no left button");
+    });
+}

@@ -17,7 +17,7 @@ use std::{
 };
 
 use crate::{
-    AnyTooltip, App, AsyncApp, Bounds, DispatchPhase, MouseDownEvent, MouseMoveEvent, Pixels,
+    AnyTooltip, App, AsyncApp, Bounds, DispatchPhase, HitboxId, MouseDownEvent, MouseMoveEvent, Pixels,
     ScrollWheelEvent, Task, TooltipId, Window, interactive::TooltipBuilder,
 };
 
@@ -30,6 +30,8 @@ pub(crate) enum ActiveTooltip {
     WaitingForShow {
         /// The timer (dropping it cancels the show).
         _task: Task<()>,
+        /// The element's latest prepainted hitbox, refreshed each frame so the timer checks live occlusion.
+        source_hitbox: Option<HitboxId>,
     },
     /// Shown.
     Visible {
@@ -41,6 +43,9 @@ pub(crate) enum ActiveTooltip {
 /// The shared state cell of one element's tooltip.
 pub(crate) type TooltipState = Rc<RefCell<Option<ActiveTooltip>>>;
 
+/// Checks whether a tooltip's source element is still hovered during prepaint or when its show timer fires.
+pub(crate) type PrepaintHoverCheck = Rc<dyn Fn(Option<HitboxId>, &Window) -> bool>;
+
 /// Hides the tooltip (redrawing if it was shown).
 fn clear_active_tooltip(active_tooltip: &TooltipState, window: &mut Window) {
     if let Some(ActiveTooltip::Visible { .. }) = active_tooltip.borrow_mut().take() {
@@ -49,23 +54,34 @@ fn clear_active_tooltip(active_tooltip: &TooltipState, window: &mut Window) {
 }
 
 /// Asks the window to show the tooltip this frame if it is visible; returns its request id.
-pub(crate) fn set_tooltip_on_window(active_tooltip: &TooltipState, window: &mut Window) -> Option<TooltipId> {
-    let tooltip = match active_tooltip.borrow().as_ref() {
+/// Also refreshes the source hitbox on a pending show timer so occlusion/movement during the delay
+/// is observed when the timer fires.
+pub(crate) fn set_tooltip_on_window(
+    active_tooltip: &TooltipState,
+    source_hitbox: Option<HitboxId>,
+    window: &mut Window,
+) -> Option<TooltipId> {
+    let tooltip = match active_tooltip.borrow_mut().as_mut() {
         Some(ActiveTooltip::Visible { tooltip }) => tooltip.clone(),
-        _ => return None,
+        Some(ActiveTooltip::WaitingForShow { source_hitbox: slot, .. }) => {
+            *slot = source_hitbox;
+            return None;
+        }
+        None => return None,
     };
-    Some(window.set_tooltip(tooltip))
+    Some(window.set_tooltip_for(tooltip, source_hitbox))
 }
 
 /// Registers the tooltip's mouse listeners for this frame (GPUI's `register_tooltip_mouse_handlers`).
-/// `check_is_hovered` tests the element's hitbox; `check_is_hovered_during_prepaint` tests its bounds
-/// (hitboxes are not final during prepaint).
+/// `check_is_hovered` tests the element's hitbox; `check_is_hovered_during_prepaint` tests the
+/// current frame's hit test for the element's hitbox (respecting occlusion, clipping and resizes).
 pub(crate) fn register_tooltip_mouse_handlers(
     active_tooltip: &TooltipState,
     tooltip_id: Option<TooltipId>,
+    source_hitbox: HitboxId,
     build_tooltip: TooltipBuilder,
     check_is_hovered: Rc<dyn Fn(&Window) -> bool>,
-    check_is_hovered_during_prepaint: Rc<dyn Fn(&Window) -> bool>,
+    check_is_hovered_during_prepaint: PrepaintHoverCheck,
     window: &mut Window,
 ) {
     window.on_mouse_event({
@@ -73,6 +89,7 @@ pub(crate) fn register_tooltip_mouse_handlers(
         move |_: &MouseMoveEvent, phase, window, cx| {
             handle_tooltip_mouse_move(
                 &active_tooltip,
+                source_hitbox,
                 &build_tooltip,
                 &check_is_hovered,
                 &check_is_hovered_during_prepaint,
@@ -102,11 +119,13 @@ pub(crate) fn register_tooltip_mouse_handlers(
 
 /// A mouse move: start the show timer when the element becomes hovered (bubble phase), cancel it when
 /// the mouse leaves before it fires, hide the tooltip when it leaves after.
+#[allow(clippy::too_many_arguments)]
 fn handle_tooltip_mouse_move(
     active_tooltip: &TooltipState,
+    source_hitbox: HitboxId,
     build_tooltip: &TooltipBuilder,
     check_is_hovered: &Rc<dyn Fn(&Window) -> bool>,
-    check_is_hovered_during_prepaint: &Rc<dyn Fn(&Window) -> bool>,
+    check_is_hovered_during_prepaint: &PrepaintHoverCheck,
     phase: DispatchPhase,
     window: &mut Window,
     cx: &mut App,
@@ -146,12 +165,20 @@ fn handle_tooltip_mouse_move(
             cx.background_executor().timer(TOOLTIP_SHOW_DELAY).await;
             let Some(active_tooltip) = weak_tooltip.upgrade() else { return };
             let _ = handle.update(cx, |_, window, cx| {
+                let latest_hitbox = match active_tooltip.borrow().as_ref() {
+                    Some(ActiveTooltip::WaitingForShow { source_hitbox, .. }) => *source_hitbox,
+                    _ => return,
+                };
+                if !check_is_hovered(latest_hitbox, window) {
+                    *active_tooltip.borrow_mut() = None;
+                    return;
+                }
                 let view = build_tooltip(window, cx);
                 // The callback is stored in the state too: weak for the same reason.
                 let state = weak_tooltip.clone();
                 let check_visible_and_update: crate::interactive::TooltipVisibility =
-                    Rc::new(move |bounds, window, _cx| {
-                        check_visible_and_update(&state, &check_is_hovered, bounds, window)
+                    Rc::new(move |bounds, source_hitbox, window, _cx| {
+                        check_visible_and_update(&state, &check_is_hovered, bounds, source_hitbox, window)
                     });
                 let tooltip =
                     AnyTooltip { view, mouse_position: window.mouse_position(), check_visible_and_update };
@@ -160,21 +187,23 @@ fn handle_tooltip_mouse_move(
             });
         }
     });
-    *active_tooltip.borrow_mut() = Some(ActiveTooltip::WaitingForShow { _task: task });
+    *active_tooltip.borrow_mut() =
+        Some(ActiveTooltip::WaitingForShow { _task: task, source_hitbox: Some(source_hitbox) });
 }
 
 /// Called by the window at each prepaint of a shown tooltip: hides it once its element is not hovered.
 fn check_visible_and_update(
     active_tooltip: &Weak<RefCell<Option<ActiveTooltip>>>,
-    check_is_hovered: &Rc<dyn Fn(&Window) -> bool>,
+    check_is_hovered: &PrepaintHoverCheck,
     _tooltip_bounds: Bounds<Pixels>,
+    source_hitbox: Option<HitboxId>,
     window: &mut Window,
 ) -> bool {
     let Some(active_tooltip) = active_tooltip.upgrade() else { return false };
     let active_tooltip = &active_tooltip;
     let visible = matches!(active_tooltip.borrow().as_ref(), Some(ActiveTooltip::Visible { .. }));
-    if visible && !check_is_hovered(window) {
-        clear_active_tooltip(active_tooltip, window);
+    if visible && !check_is_hovered(source_hitbox, window) {
+        drop(active_tooltip.borrow_mut().take());
     }
     active_tooltip.borrow().is_some()
 }

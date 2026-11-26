@@ -155,10 +155,12 @@ pub(crate) struct CursorStyleRequest {
 /// A tooltip an element asked for this frame (`set_tooltip`).
 #[derive(Clone)]
 pub(crate) struct TooltipRequest {
-    /// The hitbox it belongs to.
+    /// The tooltip request's id.
     pub(crate) id: TooltipId,
     /// What to show and where.
     pub(crate) tooltip: AnyTooltip,
+    /// The source element's hitbox id for this frame, so occlusion, clipping and resizes hide it.
+    pub(crate) source_hitbox: Option<HitboxId>,
 }
 
 /// A tooltip request's id in its frame.

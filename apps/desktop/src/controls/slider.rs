@@ -51,7 +51,9 @@ impl FoloApp {
                     window.focus(&this.fh(key, cx));
                     this.drag = Some(Drag { id: key });
                     let b = this.slider_bounds.borrow().get(key).copied();
-                    if let Some(b) = b {
+                    if let Some(b) = b
+                        && b.size.width > px(0.)
+                    {
                         let frac = ((ev.position.x - b.left()) / b.size.width).clamp(0.0, 1.0);
                         this.set_slider(key, frac, cx);
                     }

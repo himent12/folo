@@ -104,7 +104,12 @@ impl Element for Div {
         // and tracked scroll handles (`child_bounds`); skip the per-child bounds query otherwise.
         let needs_content_size =
             self.interactivity.scroll_offset.is_some() || self.interactivity.tracked_scroll_handle.is_some();
-        let content_size = if !needs_content_size || request_layout.child_layout_ids.is_empty() {
+        let content_size = if !needs_content_size {
+            bounds.size
+        } else if request_layout.child_layout_ids.is_empty() {
+            if let Some(handle) = self.interactivity.tracked_scroll_handle.as_ref() {
+                handle.0.borrow_mut().child_bounds.clear();
+            }
             bounds.size
         } else {
             let mut child_min = point(Pixels::MAX, Pixels::MAX);
@@ -124,9 +129,6 @@ impl Element for Div {
             }
             (child_max - child_min).into()
         };
-        if let Some(handle) = self.interactivity.tracked_scroll_handle.as_ref() {
-            handle.scroll_to_active_item();
-        }
 
         let children = &mut self.children;
         let hitbox = self.interactivity.prepaint(

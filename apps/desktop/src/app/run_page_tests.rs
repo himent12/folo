@@ -462,3 +462,78 @@ fn empty_run_log_hides_clear_and_copy_and_reset_clears_log_search_on_backend_swi
         assert_eq!(this.log_search.read(cx).text(), "");
     });
 }
+
+#[test]
+fn failed_run_samples_and_logs_offer_retry_and_recover() {
+    use crate::api::ApiError;
+    use crate::app::Route;
+    use crate::store::Load;
+    use folo_ui::{KeyDownEvent, Keystroke, PlatformInput};
+
+    let (mut app, window) = open();
+    let id = "run_52e8";
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Run(id.into()), w, cx));
+    app.frame(window.into());
+    app.run_until_idle();
+
+    // Inject transient load failures for both samples and logs while holding new fetches so the
+    // failure panels render cleanly.
+    drive(&mut app, window, |this, _, cx| {
+        this.hold_loading = true;
+        this.store
+            .samples
+            .insert(id.into(), Load::Failed(ApiError::new("server_unreachable", "samples timeout")));
+        this.store.logs.insert(id.into(), Load::Failed(ApiError::new("server_unreachable", "logs timeout")));
+        this.focus.borrow_mut().clear();
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let drawn = this.focus.borrow();
+        assert!(drawn.contains_key("run-samples-retry"), "failed samples card offers Retry button");
+        assert!(drawn.contains_key("run-logs-retry"), "failed logs card offers Retry button");
+    });
+
+    // Activating Retry on samples reloads them and settles back to Ready.
+    drive(&mut app, window, |this, w, cx| {
+        this.hold_loading = false;
+        this.focus_key("run-samples-retry", w, cx);
+    });
+    app.frame(window.into());
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent {
+            keystroke: Keystroke::parse("enter").unwrap(),
+            is_held: false,
+        }),
+    );
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(
+            this.store.samples.get(id).is_some_and(|l| l.ready().is_some()),
+            "samples Retry reloaded from backend"
+        );
+    });
+
+    // Activating Retry on logs reloads them and settles back to Ready.
+    drive(&mut app, window, |this, w, cx| this.focus_key("run-logs-retry", w, cx));
+    app.frame(window.into());
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent {
+            keystroke: Keystroke::parse("enter").unwrap(),
+            is_held: false,
+        }),
+    );
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(
+            this.store.logs.get(id).is_some_and(|l| l.ready().is_some()),
+            "logs Retry reloaded from backend"
+        );
+    });
+}

@@ -105,6 +105,11 @@ impl FoloApp {
         if let Some(Load::Ready(hist)) = self.store.logs.get(&r.id) {
             self.log_cache.ensure(&r.id, self.store.log_rev, &hist.lines, filter, &query);
         }
+        let logs_failed = self.store.logs.get(&r.id).is_some_and(|l| l.error().is_some());
+        let retry_anchor = match self.passing_stop("run-logs-retry", logs_failed, cx) {
+            Some(fh) if !logs_failed => Some(div().track_focus(&fh)),
+            _ => None,
+        };
         let (notice, copy_btn, warns, errors, body) = match self.store.logs.get(&r.id) {
             Some(Load::Ready(hist)) => {
                 let total_in_buf = hist.lines.len();
@@ -279,16 +284,34 @@ impl FoloApp {
                     .into_any_element();
                 (notice, copy_btn, warns, errors, scroll)
             }
-            Some(Load::Failed(e)) => (
-                None,
-                None,
-                0,
-                0,
-                div()
-                    .p(px(16.))
-                    .child(text(ty::SM, t.danger_text).child(e.message.clone()))
-                    .into_any_element(),
-            ),
+            Some(Load::Failed(e)) => {
+                let msg = e.message.clone();
+                let rid = r.id.clone();
+                let retry = self.button(
+                    "run-logs-retry",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.retry_logs(&rid, cx)),
+                );
+                (
+                    None,
+                    None,
+                    0,
+                    0,
+                    div()
+                        .p(px(16.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.))
+                        .child(text(ty::SM, t.danger_text).flex_1().min_w_0().whitespace_normal().child(msg))
+                        .child(retry)
+                        .into_any_element(),
+                )
+            }
             _ => (None, None, 0, 0, loading_rows(&t, "logs", 8).into_any_element()),
         };
         // Follow the tail; scrolling up pauses it, scrolling back to the bottom resumes. Decided
@@ -388,6 +411,7 @@ impl FoloApp {
                     .child(div().flex().items_center().gap(px(12.)).child(follow).children(copy_btn)),
             )
             .child(toolbar)
+            .children(retry_anchor)
             .when_some(notice, |d, msg| {
                 d.child(
                     div()

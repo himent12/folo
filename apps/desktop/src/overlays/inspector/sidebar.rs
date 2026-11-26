@@ -68,11 +68,12 @@ impl FoloApp {
                     .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                         if let Some(insp) = this.inspector.as_mut() {
                             if *h {
+                                insp.hover_from_stage = false;
                                 if insp.hover_box != Some(i) {
                                     insp.hover_box = Some(i);
                                     cx.notify();
                                 }
-                            } else if insp.hover_box == Some(i) {
+                            } else if !insp.hover_from_stage && insp.hover_box == Some(i) {
                                 insp.hover_box = None;
                                 cx.notify();
                             }
@@ -144,11 +145,12 @@ impl FoloApp {
                     .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                         if let Some(insp) = this.inspector.as_mut() {
                             if *h {
+                                insp.hover_from_stage = false;
                                 if insp.hover_box != Some(idx) {
                                     insp.hover_box = Some(idx);
                                     cx.notify();
                                 }
-                            } else if insp.hover_box == Some(idx) {
+                            } else if !insp.hover_from_stage && insp.hover_box == Some(idx) {
                                 insp.hover_box = None;
                                 cx.notify();
                             }

@@ -275,6 +275,7 @@ pub struct Inspector {
     pub pan: (f32, f32),
     pub drag_from: Option<(folo_ui::Point<Pixels>, (f32, f32))>,
     pub hover_box: Option<usize>,
+    pub hover_from_stage: bool,
     /// Box zoomed onto via clicking a label/prediction row (clicking again resets to fit).
     pub focused_box: Option<usize>,
     /// Whether bounding boxes are drawn on the stage (`B` toggles).

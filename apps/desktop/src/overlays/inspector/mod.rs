@@ -384,12 +384,16 @@ impl FoloApp {
     fn inspector_key_down(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
         let mods = &ev.keystroke.modifiers;
         let plain = !mods.control && !mods.alt && !mods.platform;
+        if !plain {
+            return;
+        }
         // Zoomed in, arrows pan (Shift: further); otherwise ←/→ browse. Page Up/Down always browse.
         let zoomed = self.inspector.as_ref().is_some_and(|i| i.zoom > 1.0);
         let d = if mods.shift { 128. } else { 32. };
         let pan = |this: &mut Self, dx: f32, dy: f32| {
             if let Some(i) = this.inspector.as_mut() {
                 i.pan = (i.pan.0 + dx, i.pan.1 + dy);
+                i.drag_from = None;
                 i.focused_box = None;
             }
         };
@@ -406,11 +410,12 @@ impl FoloApp {
                 if let Some(i) = self.inspector.as_mut() {
                     i.zoom = 1.0;
                     i.pan = (0., 0.);
+                    i.drag_from = None;
                     i.focused_box = None;
                 }
             }
-            k if plain && k.eq_ignore_ascii_case("b") => self.toggle_inspector_boxes(cx),
-            k if plain && k.eq_ignore_ascii_case("l") => self.toggle_inspector_labels(cx),
+            k if k.eq_ignore_ascii_case("b") => self.toggle_inspector_boxes(cx),
+            k if k.eq_ignore_ascii_case("l") => self.toggle_inspector_labels(cx),
             _ => return,
         }
         cx.stop_propagation();
@@ -423,6 +428,7 @@ impl FoloApp {
             i.boxes = !i.boxes;
             if !i.boxes {
                 i.hover_box = None;
+                i.hover_from_stage = false;
                 i.focused_box = None;
             }
             cx.notify();
@@ -453,6 +459,8 @@ impl FoloApp {
     ) {
         let bounds = self.insp_view.get();
         let Some(insp) = self.inspector.as_mut() else { return };
+        insp.drag_from = None;
+        insp.hover_from_stage = false;
         if insp.focused_box == Some(box_idx) && insp.zoom > 1.0 {
             insp.zoom = 1.0;
             insp.pan = (0., 0.);
@@ -486,7 +494,9 @@ impl FoloApp {
             i.want = Some(id);
             i.zoom = 1.0;
             i.pan = (0., 0.);
+            i.drag_from = None;
             i.hover_box = None;
+            i.hover_from_stage = false;
             i.focused_box = None;
             cx.notify();
             return;
@@ -498,7 +508,9 @@ impl FoloApp {
             i.index = ((i.index as i32 + d).rem_euclid(n as i32)) as usize;
             i.zoom = 1.0;
             i.pan = (0., 0.);
+            i.drag_from = None;
             i.hover_box = None;
+            i.hover_from_stage = false;
             i.focused_box = None;
             cx.notify();
         }
@@ -507,6 +519,7 @@ impl FoloApp {
     pub fn zoom_by(&mut self, f: f32, cx: &mut Context<Self>) {
         if let Some(i) = self.inspector.as_mut() {
             (i.zoom, i.pan) = crate::viz::zoom_step(i.zoom, i.pan, f);
+            i.drag_from = None;
             i.focused_box = None;
             cx.notify();
         }

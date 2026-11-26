@@ -137,6 +137,11 @@ impl TextInput {
         self.content.clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn last_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.last_bounds
+    }
+
     /// An offset in the content as an offset in the text on screen (the bullets of a masked field).
     fn shown(&self, offset: usize) -> usize {
         if self.masked { masked_offset(&self.content, offset) } else { offset }
@@ -279,7 +284,11 @@ impl TextInput {
 
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.is_selecting {
-            self.select_to(self.index_for_mouse_position(event.position), cx);
+            if event.pressed_button == Some(MouseButton::Left) {
+                self.select_to(self.index_for_mouse_position(event.position), cx);
+            } else {
+                self.is_selecting = false;
+            }
         }
     }
 
@@ -309,6 +318,7 @@ impl TextInput {
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
+        self.selection_reversed = false;
         cx.notify()
     }
 
@@ -456,6 +466,7 @@ impl EntityInputHandler for TextInput {
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
+        self.selection_reversed = false;
         self.marked_range.take();
         self.changed(cx);
     }
@@ -483,6 +494,7 @@ impl EntityInputHandler for TextInput {
                 range.start + utf16_to_utf8(new_text, r.start)..range.start + utf16_to_utf8(new_text, r.end)
             })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+        self.selection_reversed = false;
         self.changed(cx);
     }
 
@@ -506,8 +518,11 @@ impl EntityInputHandler for TextInput {
         _: &mut Context<Self>,
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
+        if self.content.is_empty() {
+            return Some(0);
+        }
         let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = self.unshown(last_layout.index_for_x(point.x - line_point.x)?);
+        let utf8_index = self.unshown(last_layout.index_for_x(line_point.x + self.scroll_x)?);
         Some(self.offset_to_utf16(utf8_index))
     }
 }
@@ -680,6 +695,7 @@ impl Element for TextElement {
         let line = prepaint.line.take().unwrap();
         let scroll_x = prepaint.scroll_x;
         let selection = prepaint.selection.take();
+        let cursor = focus_handle.is_focused(window).then(|| prepaint.cursor.take()).flatten();
         window.with_content_mask(Some(folo_ui::ContentMask { bounds }), |window| {
             if let Some(selection) = selection {
                 window.paint_quad(selection)
@@ -691,12 +707,10 @@ impl Element for TextElement {
                 cx,
             )
             .unwrap();
+            if let Some(cursor) = cursor {
+                window.paint_quad(cursor);
+            }
         });
-        if focus_handle.is_focused(window)
-            && let Some(cursor) = prepaint.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
         self.input.update(cx, |input, _| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
