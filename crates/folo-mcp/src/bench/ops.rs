@@ -577,6 +577,34 @@ fn parse_record(
             raw.boxes.len()
         )));
     }
+    for (i, b) in raw.boxes.iter().enumerate() {
+        if ![b.x1, b.y1, b.x2, b.y2].iter().all(|v| v.is_finite()) {
+            return Err(bad(format!(
+                "line {n} (image '{}'), box {}: a coordinate is not a finite number",
+                raw.image,
+                i + 1
+            )));
+        }
+        if !b.score.is_finite() {
+            return Err(bad(format!(
+                "line {n} (image '{}'), box {}: score is not a finite number",
+                raw.image,
+                i + 1
+            )));
+        }
+        if b.x2 < b.x1 || b.y2 < b.y1 {
+            return Err(bad(format!(
+                "line {n} (image '{}'), box {}: x2 {} or y2 {} is less than x1 {} or y1 {}",
+                raw.image,
+                i + 1,
+                b.x2,
+                b.y2,
+                b.x1,
+                b.y1
+            ))
+            .hint("a box is its corners in pixels: top-left (x1, y1), bottom-right (x2, y2), not x, y, width, height"));
+        }
+    }
     Ok(BenchPrediction {
         image: raw.image,
         condition: raw.condition,

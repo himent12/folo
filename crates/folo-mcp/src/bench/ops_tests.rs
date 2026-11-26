@@ -929,3 +929,31 @@ fn left_hint_names_each_status_accurately() {
         assert!(text.contains(expected), "{status:?} -> {text}");
     }
 }
+
+/// Non-finite box coordinates (such as `1e100` overflowing `f32`) are caught before HTTP serialization so direct
+/// and proxied runs report the same actionable error naming the line, image and box (never `invalid type: null`).
+#[test]
+fn non_finite_coordinates_report_same_actionable_error_in_direct_and_proxy_modes() {
+    with_server("mcp-bench-non-finite-parity", |url, id, dir| {
+        let file = dir.join("overflow.jsonl");
+        std::fs::write(
+            &file,
+            "{\"image\":\"1\",\"boxes\":[{\"class\":0,\"score\":0.5,\"x1\":1e100,\"y1\":0,\"x2\":3,\"y2\":3}]}\n\
+             {\"image\":\"2\",\"boxes\":[]}\n",
+        )
+        .unwrap();
+        let via_http = http(url)
+            .submit_in(id, "overflow".into(), true, &file, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        assert_eq!(via_http.body.code, "invalid_arguments", "{via_http:?}");
+        assert!(
+            via_http.body.message.contains("line 1")
+                && via_http.body.message.contains("image '1'")
+                && via_http.body.message.contains("box 1")
+                && via_http.body.message.contains("not a finite number"),
+            "{via_http:?}"
+        );
+        // No orphaned entry was created on the server.
+        assert!(http(url).entries(id).unwrap().is_empty());
+    });
+}

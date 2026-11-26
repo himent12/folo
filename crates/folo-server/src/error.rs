@@ -165,12 +165,28 @@ impl Error {
 pub struct ApiJson<T>(pub T);
 
 /// A raw request body (an upload part) whose rejection is our error envelope.
+///
+/// Requires `Content-Type: application/octet-stream` (case-insensitive media type, optional parameters allowed)
+/// before reading the body, returning `415 unsupported_media_type` when missing or mismatched.
 pub struct ApiBytes(pub axum::body::Bytes);
 
 impl<S: Send + Sync> FromRequest<S> for ApiBytes {
     type Rejection = Error;
 
     async fn from_request(req: axum::extract::Request, state: &S) -> Result<ApiBytes> {
+        let ok_type = req
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(';').next())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/octet-stream"));
+        if !ok_type {
+            return Err(Error::new(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "unsupported_media_type",
+                "expected request with `Content-Type: application/octet-stream`",
+            ));
+        }
         Ok(ApiBytes(axum::body::Bytes::from_request(req, state).await?))
     }
 }
