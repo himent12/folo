@@ -135,6 +135,11 @@ pub fn orthogonal(shape: impl Into<Shape>, gain: f64, rng: &mut Rng) -> Result<T
     let total = rows.checked_mul(cols).ok_or_else(|| {
         Error::Invalid(format!("init::orthogonal: element count overflow for shape {shape}"))
     })?;
+    if total.checked_mul(std::mem::size_of::<f64>()).is_none_or(|bytes| bytes > isize::MAX as usize) {
+        return Err(Error::Invalid(format!(
+            "init::orthogonal: workspace byte size overflow for shape {shape}"
+        )));
+    }
     let transposed = rows < cols;
     let (m, n) = if transposed { (cols, rows) } else { (rows, cols) };
 
@@ -463,6 +468,7 @@ mod tests {
         assert!(orthogonal([4, 0], 1.0, &mut rng).is_err());
         assert!(orthogonal([0, 4, 3, 3], 1.0, &mut rng).is_err());
         assert!(orthogonal([2, usize::MAX / 2, 2], 1.0, &mut rng).is_err());
+        assert!(orthogonal([2, usize::MAX / 2], 1.0, &mut rng).is_err());
         assert!(orthogonal([4, 4], f64::NAN, &mut rng).is_err());
         assert!(orthogonal([4, 4], f64::INFINITY, &mut rng).is_err());
         assert!(orthogonal([4, 4], f64::NEG_INFINITY, &mut rng).is_err());

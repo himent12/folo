@@ -542,9 +542,23 @@ mod tests {
         assert!(
             MuSgd::new(vec![ParamGroup::new("decay", vec![("w".into(), p.clone())]).cautious(true)]).is_err()
         );
-        let mut musgd = MuSgd::new(vec![ParamGroup::new("decay", vec![("w".into(), p.clone())])]).unwrap();
+        let p2 = Tensor::from_slice(&[3.0f32, 4.0], [2]).unwrap().requires_grad_();
+        let mut musgd = MuSgd::new(vec![
+            ParamGroup::new("decay", vec![("w".into(), p.clone())]).lr(0.01),
+            ParamGroup::new("bias", vec![("b".into(), p2.clone())]).lr(0.01),
+        ])
+        .unwrap();
+        // Mutating cautious=true after construction must be rejected by step() without mutating state.
+        musgd.groups_mut()[1].cautious = true;
+        assert!(musgd.step(&grads_for(&p2, &[1.0, -1.0])).is_err());
+        assert_eq!(musgd.step_count(), 0);
+        assert_eq!(p2.to_vec::<f32>().unwrap(), [3.0, 4.0]);
+        musgd.groups_mut()[1].cautious = false;
+        // Rejecting cautious=true in group 1 of a MuSgd contract must be atomic (group 0 lr stays untouched).
         let mut bad_contract = musgd.contract();
-        bad_contract.groups[0].cautious = true;
+        bad_contract.groups[0].lr = 0.5;
+        bad_contract.groups[1].cautious = true;
         assert!(musgd.apply_contract(&bad_contract).is_err());
+        assert_eq!(musgd.groups()[0].base_lr, 0.01);
     }
 }

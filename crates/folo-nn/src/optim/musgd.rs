@@ -616,6 +616,11 @@ impl Optimizer for MuSgd {
     }
 
     fn step(&mut self, grads: &dyn GradSource) -> Result<()> {
+        if self.sgd.groups().iter().any(|g| g.cautious) {
+            return Err(Error::Invalid(
+                "MuSgd does not support cautious update masking (use Sgd or AdamW)".into(),
+            ));
+        }
         self.ensure_buffers()?;
         self.muon_step(grads)?;
         if self.weights.sgd == 1.0 {

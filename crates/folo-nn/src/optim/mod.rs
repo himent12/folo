@@ -392,6 +392,16 @@ fn apply_group_contract<O: Optimizer + ?Sized>(o: &mut O, c: &OptimContract) -> 
             }
         }
     }
+    if kind == OptimKind::MuSgd {
+        for gc in &c.groups {
+            if gc.cautious {
+                return Err(Error::Load(format!(
+                    "folo.optim group `{}`: `cautious` is only supported for `sgd` and `adamw`",
+                    gc.name
+                )));
+            }
+        }
+    }
     for (g, gc) in o.groups_mut().iter_mut().zip(&c.groups) {
         gc.apply_to(g, kind)?;
     }
