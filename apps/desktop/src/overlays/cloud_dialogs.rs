@@ -28,10 +28,19 @@ impl FoloApp {
             (f.provider, f.fields.clone(), f.name.clone(), f.submitting, f.error.clone());
         let Some(p) = providers.get(chosen).cloned() else { return div().into_any_element() };
         let names: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
-        let provider_seg = self.segmented_fill(
+        let provider_disabled: Vec<Option<folo_ui::SharedString>> = providers
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                (submitting && i != chosen)
+                    .then(|| folo_ui::SharedString::from("Wait for the current check to finish"))
+            })
+            .collect();
+        let provider_seg = self.segmented_fill_with(
             "cc-provider",
             &names,
             chosen,
+            &provider_disabled,
             window,
             cx,
             Rc::new(|this, i, _, cx| this.set_connect_provider(i, cx)),

@@ -513,6 +513,11 @@ impl FoloApp {
     /// Chooses the provider: a fresh input per field (masked for secrets), the name's placeholder
     /// its name. Nothing typed for the previous provider is kept.
     pub fn set_connect_provider(&mut self, i: usize, cx: &mut Context<Self>) {
+        // Keep the provider locked while a credential check is in flight so a delayed answer
+        // cannot land on a different provider's fields.
+        if self.cloud.connect.as_ref().is_some_and(|f| f.submitting) {
+            return;
+        }
         let Some(p) = self.cloud.providers.ready().and_then(|ps| ps.get(i)).cloned() else { return };
         let fields = p
             .fields
@@ -573,12 +578,20 @@ impl FoloApp {
         form.submitting = true;
         form.error = None;
         let form_id = form.id;
+        let submitted_provider = form.provider;
         cx.notify();
         self.fetch(
             cx,
             move |api| api.connect_cloud(&req),
             move |this, r, cx| {
-                let Some(form) = this.cloud.connect.as_mut().filter(|f| f.id == form_id) else { return };
+                let Some(form) = this
+                    .cloud
+                    .connect
+                    .as_mut()
+                    .filter(|f| f.id == form_id && f.provider == submitted_provider)
+                else {
+                    return;
+                };
                 match r {
                     Ok(c) => {
                         this.cloud.connect = None;

@@ -667,6 +667,9 @@ impl FoloApp {
                             // The next New run starts from these choices.
                             this.new_run_last = this.new_run.as_ref().map(|f| (f.arch, f.imgsz, f.epochs));
                             this.new_run = None;
+                            this.menu_open = None;
+                            this.menu_typeahead.clear();
+                            this.export_open = false;
                             this.overlay_return = None;
                             let prev = std::mem::replace(&mut this.route, Route::Run(id));
                             this.history.push(prev);

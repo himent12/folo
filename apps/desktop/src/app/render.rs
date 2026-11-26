@@ -180,6 +180,10 @@ impl Render for FoloApp {
                 if this.confirm_close.is_some() {
                     return;
                 }
+                if this.menu_open.take().is_some() {
+                    this.menu_typeahead.clear();
+                    cx.notify();
+                }
                 if this.cloud.connect.is_some() {
                     this.submit_connect(w, cx);
                 } else if this.new_run.is_some() {
@@ -193,6 +197,7 @@ impl Render for FoloApp {
             }))
             .on_action(cx.listener(|this, _: &FocusNext, w, cx| {
                 this.menu_open = None;
+                this.menu_typeahead.clear();
                 this.export_open = false;
                 this.kb = true;
                 this.cycle_focus(true, w, cx);
@@ -200,6 +205,7 @@ impl Render for FoloApp {
             }))
             .on_action(cx.listener(|this, _: &FocusPrev, w, cx| {
                 this.menu_open = None;
+                this.menu_typeahead.clear();
                 this.export_open = false;
                 this.kb = true;
                 this.cycle_focus(false, w, cx);
@@ -228,21 +234,31 @@ impl Render for FoloApp {
                     cx.notify();
                 }
                 let m = &ev.keystroke.modifiers;
-                // Page Up / Down scroll the page about a screen (less 32 px, so a line of context
-                // stays) whenever the focused control didn't use them: a chart group keeps its one
-                // Tab stop and the page still pages.
+                // Page Up / Down scroll the active scrollable container about a screen (less 32 px,
+                // so a line of context stays) whenever the focused control didn't use them: an open
+                // scrollable dialog's body, Playground's side rail, or the page itself.
                 if matches!(ev.keystroke.key.as_str(), "pageup" | "pagedown")
-                    && !this.modal_open()
                     && this.palette.is_none()
+                    && this.inspector.is_none()
+                    && this.menu_open.is_none()
+                    && !this.export_open
                     && !(m.control || m.alt || m.platform || m.shift)
                 {
-                    let s = &this.page_scroll;
+                    let s = if this.modal_open() {
+                        &this.dialog_scroll
+                    } else if this.route == Route::Playground {
+                        &this.play_side_scroll
+                    } else {
+                        &this.page_scroll
+                    };
                     let (y, max) = (-s.offset().y, s.max_offset().height);
-                    let page = (s.bounds().size.height - px(32.)).max(px(32.));
-                    let to = if ev.keystroke.key == "pageup" { y - page } else { y + page };
-                    s.set_offset(folo_ui::point(s.offset().x, -to.clamp(px(0.), max)));
-                    cx.stop_propagation();
-                    cx.notify();
+                    if max > px(0.) {
+                        let page = (s.bounds().size.height - px(32.)).max(px(32.));
+                        let to = if ev.keystroke.key == "pageup" { y - page } else { y + page };
+                        s.set_offset(folo_ui::point(s.offset().x, -to.clamp(px(0.), max)));
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
                     return;
                 }
                 if this.route == Route::Playground
@@ -305,6 +321,7 @@ impl Render for FoloApp {
                     .flex()
                     .flex_col()
                     .child(titlebar)
+                    .children(lost)
                     // The page's region anchor for F6 (not a Tab stop itself).
                     .child(
                         div()
@@ -314,7 +331,6 @@ impl Render for FoloApp {
                             .min_h_0()
                             .relative()
                             .child(page)
-                            .children(lost)
                             .when_some(key_hint, |d, h| {
                                 d.child(key_hint_strip(&t, h).absolute().left_0().right_0().bottom_0())
                             }),
@@ -342,25 +358,23 @@ impl Render for FoloApp {
 }
 
 /// "Lost connection to folo serve, retrying…" (or, for a server that never answered, "Can't reach
-/// folo serve, retrying…"): a slim pill over the top of the page area, which moves nothing under it.
-fn lost_banner(t: &Theme, reached: bool) -> folo_ui::Div {
-    div().absolute().top(px(8.)).left_0().right_0().flex().justify_center().child(
-        div()
-            .id("lost-connection")
-            .occlude()
-            .h(px(28.))
-            .px(px(12.))
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .rounded_full()
-            .bg(t.bg_overlay)
-            .border_1()
-            .border_color(t.line_strong)
-            .shadow(t.shadow_lg())
-            .child(crate::ui::icon("icons/refresh-cw.svg", 14., t.warning_solid))
-            .child(crate::ui::text(ty::SM, t.text_secondary).whitespace_nowrap().child(lost_text(reached))),
-    )
+/// folo serve, retrying…"): a slim in-flow strip directly beneath the title bar so it never covers
+/// or intercepts page header actions at any window width.
+fn lost_banner(t: &Theme, reached: bool) -> folo_ui::Stateful<folo_ui::Div> {
+    div()
+        .id("lost-connection")
+        .flex_none()
+        .h(px(30.))
+        .px(px(16.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(8.))
+        .bg(t.warning_muted)
+        .border_b_1()
+        .border_color(crate::theme::alpha(t.warning_solid, 0.35))
+        .child(crate::ui::icon("icons/refresh-cw.svg", 14., t.warning_solid))
+        .child(crate::ui::text(ty::SM, t.warning_text).whitespace_nowrap().child(lost_text(reached)))
 }
 
 /// The pill's words: nothing was lost if the server never answered.
