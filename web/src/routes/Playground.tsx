@@ -532,14 +532,23 @@ export default function Playground() {
     return truth.get() && s?.kind === 'dataset' ? s.img.boxes : [];
   });
 
-  const json = computed(() =>
-    predictionJson(pred.get(), !!result.get(), kept.get(), {
-      conf: conf.get(),
-      iou: iou.get(),
-      maxDet: maxDet.get(),
-      o2o: o2o.get(),
-    }),
-  );
+  const json = computed(() => {
+    const h = hidden.get();
+    const cls = classes.get();
+    const hiddenClasses = h.size ? [...h].sort((a, b) => a - b).map((c) => cls[c] ?? String(c)) : undefined;
+    return predictionJson(
+      pred.get(),
+      !!result.get(),
+      rows.get().map((r) => r.b),
+      {
+        conf: conf.get(),
+        iou: iou.get(),
+        maxDet: maxDet.get(),
+        o2o: o2o.get(),
+        hiddenClasses,
+      },
+    );
+  });
 
   function toggleClass(c: number) {
     const next = new Set(hidden.peek());

@@ -133,6 +133,22 @@ describe("an entry's page", () => {
       const lead = document.querySelector('#robustness .lead')!.textContent!;
       expect(lead).toMatch(/stronger a cell’s shade, the more it lost/);
       expect(lead).not.toMatch(/darker|lighter/i);
+      // Narrow-viewport preview jump strip mirrors the chosen heat cell and scrolls/focuses the preview anchor.
+      const jump = document.querySelector('#robustness .preview-jump')!;
+      expect(jump).not.toBeNull();
+      const distCell = document.querySelector<HTMLButtonElement>('#robustness button.cell[aria-label^="Distance, severity 3:"]')!;
+      expect(distCell).not.toBeNull();
+      distCell.click();
+      flushSync();
+      expect(jump.querySelector('[role="status"]')?.textContent).toMatch(/Preview: Distance · severity 3/);
+      const previewAnchor = document.querySelector<HTMLDivElement>('#robustness .preview-anchor')!;
+      const scrollSpy = vi.fn();
+      previewAnchor.scrollIntoView = scrollSpy;
+      const viewPreview = button(/^View preview$/, jump)!;
+      viewPreview.click();
+      flushSync();
+      expect(scrollSpy).toHaveBeenCalledWith({ block: 'start' });
+      expect(previewAnchor.contains(document.activeElement)).toBe(true);
       // Its charts announce a row at every stop.
       for (const s of speak('#self-labeling')) expect(s).toMatch(/^From [01]\.\d+ up: [\d,]+ labels?, \d+% right/);
       for (const s of speak('#calibration')) expect(s).toMatch(/\d/);

@@ -377,6 +377,7 @@ describe('the job page', () => {
     expect(primaries()).toHaveLength(1);
     expect(button('Create dataset')?.disabled).toBe(true);
     expect(text()).toMatch(/Create dataset: label an image first/);
+    expect(document.querySelector('.work')?.classList.contains('review-first')).toBe(false);
   });
 
   it('before the first answer of a run: a line that the agent is working, and for how long', async () => {
@@ -401,6 +402,8 @@ describe('the job page', () => {
     expect(primaries()).toHaveLength(1);
     expect(text()).toMatch(/Tokens and cost as reported by the agent/);
     expect(button('Label all again')).toBeTruthy();
+    // On narrow screens, review-ready jobs put the review queue ahead of the agent panel.
+    expect(document.querySelector('.work')?.classList.contains('review-first')).toBe(true);
     // How far review has got: in the header, and as filters.
     await vi.waitFor(() => {
       flushSync();
@@ -417,6 +420,7 @@ describe('the job page', () => {
     // v-models-label N5: the fix reads as a sentence and its command is code.
     expect(document.querySelector('.note code')?.textContent).toBe('claude');
     expect(button('Try again')?.className).toMatch(/primary/);
+    expect(document.querySelector('.work')?.classList.contains('review-first')).toBe(false);
   });
 
   it('on a server that cannot label: one calm state', async () => {

@@ -246,4 +246,53 @@ describe('Playground: confidence summary and quick JSON copy', () => {
       'aria-live failure status',
     );
   });
+
+  it('excludes class-filtered detections from both the JSON tab and Copy JSON', async () => {
+    const writeText = vi.fn(async (_text: string) => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+
+    await openWithPredictions();
+
+    // Open Classes tab (rail layout) and hide `circle` (2 of the 3 boxes).
+    const classesTab = target.querySelector<HTMLButtonElement>('#pg-classes')!;
+    expect(classesTab).not.toBeNull();
+    classesTab.click();
+    flushSync();
+
+    const circleToggle = [...target.querySelectorAll<HTMLButtonElement>('#pg-panel button')].find((b) => b.textContent?.includes('circle'))!;
+    expect(circleToggle).not.toBeNull();
+    circleToggle.click();
+    flushSync();
+
+    // Switch to JSON tab and verify only the visible `square` detection is rendered, with filter.hidden_classes.
+    const jsonTab = target.querySelector<HTMLButtonElement>('#pg-json')!;
+    jsonTab.click();
+    flushSync();
+    const jsonTextContent = target.querySelector('#pg-panel pre, #pg-panel code')?.textContent ?? '';
+    expect(jsonTextContent).toContain('"hidden_classes"');
+    expect(jsonTextContent).toContain('"square"');
+    expect(jsonTextContent).not.toContain('"name": "circle"');
+
+    // Copy JSON exports the same filtered payload and announces the visible count.
+    const copyBtn = target.querySelector<HTMLButtonElement>('button[aria-label="Copy detections JSON"]')!;
+    copyBtn.click();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(writeText).toHaveBeenCalledTimes(1);
+    });
+    const parsed = JSON.parse(writeText.mock.calls[0]?.[0] as string) as {
+      boxes: { name: string }[];
+      filter: { hidden_classes?: string[] };
+    };
+    expect(parsed.boxes.map((b) => b.name)).toEqual(['square']);
+    expect(parsed.filter.hidden_classes).toEqual(['circle']);
+
+    await until(
+      () => [...target.querySelectorAll('[role="status"]')].find((el) => el.textContent?.includes('Copied 1 detection as JSON')),
+      'filtered aria-live copy status',
+    );
+  });
 });

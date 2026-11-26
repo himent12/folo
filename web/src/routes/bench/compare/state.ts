@@ -6,6 +6,7 @@ import { computed, effect, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { LiveBench } from '$lib/api/liveBench';
 import { Resource } from '$lib/api/resource';
+import type { BenchEntry } from '$lib/api/types';
 import { AXES, AXIS_NAME } from '$lib/bench/rules';
 import type { XYSeries } from '$lib/charts/xy';
 import { metric, num } from '$lib/format';
@@ -28,6 +29,25 @@ export interface Row {
   values: (number | null)[];
   fmt: (v: number) => string;
   d: number;
+}
+
+/**
+ * Distinct, human-readable labels for compared entries (accessible names, chart readouts, phone baseline picker).
+ * Unique names stay as-is; colliding names add "earlier version" and/or score, falling back to entry id if still identical.
+ */
+export function entryLabels(shown: readonly BenchEntry[], old: readonly boolean[]): Map<string, string> {
+  const nameCounts = new Map<string, number>();
+  for (const e of shown) nameCounts.set(e.name, (nameCounts.get(e.name) ?? 0) + 1);
+  const draft = shown.map((e, i) => {
+    if ((nameCounts.get(e.name) ?? 0) <= 1) return { id: e.id, label: e.name };
+    const parts = [old[i] ? 'earlier version' : null, e.score ? `score ${scoreText(e.score.total)}` : null].filter(Boolean);
+    return { id: e.id, label: parts.length ? `${e.name} · ${parts.join(' · ')}` : `${e.name} · ${e.id}` };
+  });
+  const labelCounts = new Map<string, number>();
+  for (const d of draft) labelCounts.set(d.label, (labelCounts.get(d.label) ?? 0) + 1);
+  const out = new Map<string, string>();
+  for (const d of draft) out.set(d.id, (labelCounts.get(d.label) ?? 0) > 1 ? `${d.label} (${d.id})` : d.label);
+  return out;
 }
 
 export function compareState() {
@@ -57,6 +77,14 @@ export function compareState() {
     return live.entries.filter((e) => finished(e) && !now.includes(e.id));
   });
 
+  /** Entries graded on an earlier version of the benchmark: never the best of a row, never in the intervals' verdict. */
+  const old = computed(() => {
+    const b = bench();
+    return shown.get().map((e) => !!b && stale(e, b.fingerprint));
+  });
+  const labels = computed(() => entryLabels(shown.get(), old.get()));
+  const labelOf = (e: BenchEntry) => labels.get().get(e.id) ?? e.name;
+
   // Colours follow the entry, not its place: removing one never repaints the others (RunCompare). Kept from one shown
   // list to the next in a computed (legacy: an effect after the render, so a change painted twice).
   let lastSlots: Record<string, number> = {};
@@ -64,7 +92,7 @@ export function compareState() {
   const slotOf = (eid: string) => slots.get()[eid] ?? Math.max(0, shown.get().findIndex((e) => e.id === eid));
   const color = (eid: string) => `var(--chart-${SLOTS[slotOf(eid)] ?? 1})`;
   const fill = (eid: string) => `var(--chart-fill-${SLOTS[slotOf(eid)] ?? 1})`;
-  const keys = computed<DotKey[]>(() => shown.get().map((e) => ({ id: e.id, name: e.name, color: color(e.id), shape: SHAPES[slotOf(e.id)] ?? 'circle' })));
+  const keys = computed<DotKey[]>(() => shown.get().map((e) => ({ id: e.id, name: labelOf(e), color: color(e.id), shape: SHAPES[slotOf(e.id)] ?? 'circle' })));
 
   // The legend: hover or focus a chip to bring its entry forward everywhere; a click keeps it there.
   const hovered = signal<string | null>(null);
@@ -103,11 +131,6 @@ export function compareState() {
         d: a === 'accuracy' ? 3 : 2,
       })),
     ];
-  });
-  /** Entries graded on an earlier version of the benchmark: never the best of a row, never in the intervals' verdict. */
-  const old = computed(() => {
-    const b = bench();
-    return shown.get().map((e) => !!b && stale(e, b.fingerprint));
   });
   const best = (key: string, values: (number | null)[], d: number) => {
     const o = old.get();
@@ -148,7 +171,7 @@ export function compareState() {
       return [
         {
           id: e.id,
-          label: e.name,
+          label: labelOf(e),
           color: color(e.id),
           pattern: SLOT_PATTERN[slotOf(e.id)],
           points: c.bins.filter((b) => b.count > 0).map((b) => ({ x: b.confidence!, y: b.precision!, r: 3.5, hollow: b.count < 0.05 * n })),
@@ -165,7 +188,7 @@ export function compareState() {
       const s = res.get()[i]?.self_labeling;
       if (!s) return [];
       const pts = labelTradeoff(s.curve);
-      return [{ id: e.id, label: e.name, color: color(e.id), pattern: SLOT_PATTERN[slotOf(e.id)], points: pts, dots: pts.length === 1, line: pts.length > 1 }];
+      return [{ id: e.id, label: labelOf(e), color: color(e.id), pattern: SLOT_PATTERN[slotOf(e.id)], points: pts, dots: pts.length === 1, line: pts.length > 1 }];
     }),
   );
   const slMarks = computed(() =>
@@ -209,6 +232,7 @@ export function compareState() {
     nameOf,
     rows,
     old,
+    labelOf,
     best,
     makeBaseline,
     ivDomain,

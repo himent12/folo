@@ -113,6 +113,16 @@ function atRest(el: Element | null): boolean {
   return !el || el === document.body || (el instanceof HTMLElement && (el.id === 'content' || el.hasAttribute('data-route-focus')));
 }
 
+/** True when a native Popover API popover or fallback `.info-pop.open` is open on the page. */
+function hasOpenPopover(): boolean {
+  if (document.querySelector('.info-pop.open')) return true;
+  try {
+    return !!document.querySelector('[popover]:popover-open');
+  } catch {
+    return false;
+  }
+}
+
 export function installShortcuts(h: ShortcutHandlers): () => void {
   let pendingG = 0;
   let chordTimer: ReturnType<typeof setTimeout> | undefined;
@@ -184,7 +194,7 @@ export function installShortcuts(h: ShortcutHandlers): () => void {
     }
     if (e.key === 'Escape') {
       const back = backPath(router.route);
-      if (back && atRest(document.activeElement) && !document.querySelector('[aria-expanded="true"][aria-haspopup]')) {
+      if (back && atRest(document.activeElement) && !hasOpenPopover() && !document.querySelector('[aria-expanded="true"][aria-haspopup]')) {
         e.preventDefault();
         router.go(back);
       }

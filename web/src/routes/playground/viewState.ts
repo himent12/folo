@@ -147,20 +147,21 @@ export function confidenceSummary(rows: readonly { b: Pick<Det, 'score'> }[]): C
   };
 }
 
-/** Structured payload shown in the Playground's JSON tab. */
+/** Structured payload shown in the Playground's JSON tab and copied via Copy JSON (matches visible detections). */
 export function predictionJson(
   pred: Prediction | null,
   hasResult: boolean,
   kept: readonly Det[],
-  filter: { conf: number; iou: number; maxDet: number; o2o: boolean },
+  filter: { conf: number; iou: number; maxDet: number; o2o: boolean; hiddenClasses?: readonly string[] },
 ) {
   if (!pred || !hasResult) return null;
+  const baseFilter = filter.o2o ? { conf: filter.conf, max_det: filter.maxDet } : { conf: filter.conf, iou: filter.iou, max_det: filter.maxDet };
   return {
     model_id: pred.model_id,
     image: pred.image,
     boxes: kept.map((b) => ({ class: b.class, name: b.name, score: b.score, x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2 })),
     timing: pred.timing,
     device: pred.device,
-    filter: filter.o2o ? { conf: filter.conf, max_det: filter.maxDet } : { conf: filter.conf, iou: filter.iou, max_det: filter.maxDet },
+    filter: filter.hiddenClasses?.length ? { ...baseFilter, hidden_classes: [...filter.hiddenClasses] } : baseFilter,
   };
 }

@@ -8,7 +8,6 @@ import NoValue from '$lib/ui/NoValue';
 import Panel from '$lib/ui/Panel';
 import Select from '$lib/ui/Select';
 import { diffAsPrinted } from '../charts';
-import { scoreText } from '../words';
 import type { Row } from './state';
 
 export interface SideBySideProps {
@@ -16,6 +15,8 @@ export interface SideBySideProps {
   rows: Row[];
   /** Entries graded on an earlier benchmark fingerprint (never marked best or diffed). */
   old: boolean[];
+  /** Distinct, human-readable label for each entry (disambiguates colliding names). */
+  labelOf: (e: BenchEntry) => string;
   best: (key: string, values: (number | null)[], d: number) => Set<number>;
   makeBaseline: (eid: string) => void;
   /** Renders the slot colour/pattern swatch for an entry id. */
@@ -24,15 +25,7 @@ export interface SideBySideProps {
 
 export default function SideBySide(props: SideBySideProps) {
   const baseId = `${createUniqueId()}-base`;
-  const baselineOptions = computed(() => {
-    const counts = new Map<string, number>();
-    for (const e of props.shown) counts.set(e.name, (counts.get(e.name) ?? 0) + 1);
-    return props.shown.map((e, i) => {
-      if ((counts.get(e.name) ?? 0) <= 1) return { value: e.id, label: e.name };
-      const parts = [props.old[i] ? 'earlier version' : null, e.score ? `score ${scoreText(e.score.total)}` : null].filter(Boolean);
-      return { value: e.id, label: `${e.name} · ${parts.length ? parts.join(' · ') : e.id}` };
-    });
-  });
+  const baselineOptions = computed(() => props.shown.map((e) => ({ value: e.id, label: props.labelOf(e) })));
   let tableEl: HTMLTableElement | undefined;
   /** A value's difference from the baseline's, unless either is graded on an earlier version. */
   const diffOf = (row: () => Row, v: () => number, i: number) =>
@@ -108,7 +101,7 @@ export default function SideBySide(props: SideBySideProps) {
                       {i() === 0 ? (
                         'Baseline'
                       ) : (
-                        <button type="button" class="swap" aria-label={`Make baseline: ${e().name}`} onclick={() => swapBaseline(e().id)}>
+                        <button type="button" class="swap" aria-label={`Make baseline: ${props.labelOf(e())}`} onclick={() => swapBaseline(e().id)}>
                           Make baseline
                         </button>
                       )}

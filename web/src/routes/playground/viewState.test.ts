@@ -94,6 +94,24 @@ describe('playground/viewState', () => {
 
     const o2mJson = predictionJson(samplePred, true, samplePred.boxes, { conf: 0.25, iou: 0.7, maxDet: 300, o2o: false });
     expect(o2mJson?.filter).toEqual({ conf: 0.25, iou: 0.7, max_det: 300 });
+
+    const filteredJson = predictionJson(
+      samplePred,
+      true,
+      samplePred.boxes.filter((b) => b.class !== 0),
+      { conf: 0.25, iou: 0.7, maxDet: 300, o2o: false, hiddenClasses: ['circle'] },
+    );
+    expect(filteredJson?.filter).toEqual({ conf: 0.25, iou: 0.7, max_det: 300, hidden_classes: ['circle'] });
+    expect(filteredJson?.boxes.map((b) => b.name)).toEqual(['square', 'square']);
+
+    const emptyHidden = predictionJson(samplePred, true, samplePred.boxes, {
+      conf: 0.25,
+      iou: 0.7,
+      maxDet: 300,
+      o2o: false,
+      hiddenClasses: [],
+    });
+    expect('hidden_classes' in (emptyHidden?.filter ?? {})).toBe(false);
   });
 
   it('summarizes live confidence distribution across high, medium, and low buckets', () => {
