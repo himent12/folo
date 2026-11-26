@@ -24,8 +24,10 @@ use serde::de::DeserializeOwned;
 
 /// Largest response body read into memory (images, metric histories, one part of a download).
 pub const MAX_BODY: u64 = 256 * 1024 * 1024;
-/// Largest error response body read into memory on a non-2xx streamed range request.
+/// Largest error response body read into memory on a non-2xx response.
 const MAX_ERROR_BODY: u64 = 1024 * 1024;
+/// Shortest token blanked out of error messages (shorter strings would shred ordinary words).
+const MIN_SECRET_CHARS: usize = 8;
 /// Chunk size used when streaming a `Range` response directly to a writer.
 const STREAM_CHUNK: usize = 64 * 1024;
 
@@ -186,12 +188,26 @@ impl Client {
         format!("{}/api{path}", self.base)
     }
 
+    fn scrub(&self, text: &str) -> String {
+        match &self.token {
+            Some(t) if t.chars().count() >= MIN_SECRET_CHARS => text.replace(t.as_str(), "[redacted]"),
+            _ => text.to_string(),
+        }
+    }
+
+    fn check_deadline(&self) -> Result<()> {
+        if self.deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(self.unreachable("request deadline exceeded"));
+        }
+        Ok(())
+    }
+
     fn unreachable(&self, e: impl std::fmt::Display) -> Error {
         Error {
             status: None,
             error: ApiError {
                 code: UNREACHABLE.into(),
-                message: format!("{}: {e}", self.base),
+                message: format!("{}: {}", self.base, self.scrub(&e.to_string())),
                 hint: Some("is `folo serve` running there, and reachable from this machine?".into()),
             },
         }
@@ -212,25 +228,44 @@ impl Client {
         }
     }
 
-    /// Reads an answer: status, headers and body, whatever the status.
+    /// Reads an answer: status, headers and body, whatever the status. Non-2xx bodies are capped at
+    /// [`MAX_ERROR_BODY`] so a huge proxy error page cannot exhaust memory or hide the HTTP status.
     fn read(
         &self,
         res: std::result::Result<http::Response<ureq::Body>, ureq::Error>,
     ) -> Result<(StatusCode, HeaderMap, Vec<u8>)> {
         let res = res.map_err(|e| self.unreachable(e))?;
         let (status, headers) = (res.status(), res.headers().clone());
-        let bytes =
-            res.into_body().with_config().limit(MAX_BODY).read_to_vec().map_err(|e| self.unreachable(e))?;
+        let bytes = if status.is_success() {
+            res.into_body().with_config().limit(MAX_BODY).read_to_vec().map_err(|e| self.unreachable(e))?
+        } else {
+            let mut bytes = Vec::new();
+            let mut limited = std::io::Read::take(res.into_body().into_reader(), MAX_ERROR_BODY);
+            let _ = std::io::Read::read_to_end(&mut limited, &mut bytes);
+            bytes
+        };
         Ok((status, headers, bytes))
     }
 
     /// The error of a non-2xx answer: its envelope, or (an answer that is not FOLO's, e.g. a proxy's page) the
-    /// start of its text under the code `bad_gateway`.
+    /// start of its text under the code `bad_gateway`. Any echoed bearer token is scrubbed before truncation.
     fn failure(&self, status: StatusCode, bytes: &[u8]) -> Error {
         let error = match serde_json::from_slice::<ErrorBody>(bytes) {
-            Ok(b) => b.error,
+            Ok(mut b) => {
+                // Never forward a remote `error.code` that echoes our bearer token (of any length), while
+                // keeping known FOLO error codes intact.
+                if let Some(t) = &self.token
+                    && folo_api::codes::find(&b.error.code).is_none()
+                    && b.error.code.contains(t.as_str())
+                {
+                    b.error.code = NOT_FOLO.into();
+                }
+                b.error.message = self.scrub(&b.error.message);
+                b.error.hint = b.error.hint.map(|h| self.scrub(&h));
+                b.error
+            }
             Err(_) => {
-                let text = String::from_utf8_lossy(bytes);
+                let text = self.scrub(&String::from_utf8_lossy(bytes));
                 let text = folo_api::codes::cap(text.trim(), 200);
                 let what = if text.is_empty() { String::new() } else { format!(": {text}") };
                 ApiError {
@@ -257,7 +292,7 @@ impl Client {
             status: Some(StatusCode::BAD_GATEWAY),
             error: ApiError {
                 code: "bad_gateway".into(),
-                message: format!("unexpected response from {}: {e}", self.base),
+                message: format!("unexpected response from {}: {}", self.base, self.scrub(&e.to_string())),
                 hint: Some("the server may be a different FOLO version".into()),
             },
         })
@@ -265,12 +300,14 @@ impl Client {
 
     /// `GET /api{path}`, parsed.
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.check_deadline()?;
         let (_, b) = self.finish(self.auth(self.agent.get(self.url(path))).call())?;
         self.parse(&b)
     }
 
     /// `GET /api{path}` as bytes with the answer's headers (images).
     pub fn get_bytes(&self, path: &str) -> Result<(HeaderMap, Vec<u8>)> {
+        self.check_deadline()?;
         self.finish(self.auth(self.agent.get(self.url(path))).call())
     }
 
@@ -282,12 +319,14 @@ impl Client {
 
     /// `POST /api{path}` without a body, parsed.
     pub fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.check_deadline()?;
         let (_, b) = self.finish(self.auth(self.agent.post(self.url(path))).send_empty())?;
         self.parse(&b)
     }
 
     /// `POST /api{path}` with `body` as `content_type` (multipart forms), parsed.
     pub fn send<T: DeserializeOwned>(&self, path: &str, content_type: &str, body: &[u8]) -> Result<T> {
+        self.check_deadline()?;
         let req = self.auth(self.agent.post(self.url(path))).header(CONTENT_TYPE, content_type);
         let (_, b) = self.finish(req.send(body))?;
         self.parse(&b)
@@ -295,6 +334,7 @@ impl Client {
 
     /// `PUT /api{path}` with `body` as `application/octet-stream` (an upload part), parsed.
     pub fn put<T: DeserializeOwned>(&self, path: &str, body: &[u8]) -> Result<T> {
+        self.check_deadline()?;
         let req = self.auth(self.agent.put(self.url(path))).header(CONTENT_TYPE, "application/octet-stream");
         let (_, b) = self.finish(req.send(body))?;
         self.parse(&b)
@@ -302,6 +342,7 @@ impl Client {
 
     /// `PUT /api{path}` with a JSON body, parsed.
     pub fn put_json<B: Serialize + ?Sized, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+        self.check_deadline()?;
         let json = serde_json::to_vec(body).expect("request bodies serialize");
         let req = self.auth(self.agent.put(self.url(path))).header(CONTENT_TYPE, "application/json");
         let (_, b) = self.finish(req.send(&json[..]))?;
@@ -310,11 +351,13 @@ impl Client {
 
     /// `DELETE /api{path}`.
     pub fn delete(&self, path: &str) -> Result<()> {
+        self.check_deadline()?;
         self.finish(self.auth(self.agent.delete(self.url(path))).call()).map(|_| ())
     }
 
     /// `DELETE /api{path}` of an endpoint that answers with a body (`DELETE /api/cloud/instances/{id}`), parsed.
     pub fn delete_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.check_deadline()?;
         let (_, b) = self.finish(self.auth(self.agent.delete(self.url(path))).call())?;
         self.parse(&b)
     }
@@ -348,9 +391,20 @@ impl Client {
         if stop() {
             return Err(StreamError::Stopped);
         }
+        if range.is_empty() {
+            return Err(StreamError::Http(Error {
+                status: Some(StatusCode::BAD_REQUEST),
+                error: ApiError {
+                    code: "bad_request".into(),
+                    message: format!("{}: empty byte range {}..{}", self.base, range.start, range.end),
+                    hint: None,
+                },
+            }));
+        }
+        self.check_deadline().map_err(StreamError::Http)?;
         let mut req = self
             .auth(self.agent.get(self.url(path)))
-            .header(RANGE, format!("bytes={}-{}", range.start, range.end.saturating_sub(1)));
+            .header(RANGE, format!("bytes={}-{}", range.start, range.end - 1));
         if let Some(etag) = etag {
             req = req.header(IF_MATCH, etag);
         }
@@ -747,5 +801,64 @@ mod tests {
             assert!(!err.is_transient(), "{err:?}");
             assert!(!target_hit.load(Ordering::Relaxed), "redirect target must not be contacted");
         });
+    }
+
+    #[test]
+    fn non_2xx_error_bodies_are_capped_tokens_scrubbed_and_expired_deadlines_never_send() {
+        use std::io::{Read, Write};
+
+        const SECRET: &str = "tok_secret_1234567890";
+        let c = Client::new("http://127.0.0.1:9").token(SECRET);
+
+        // Echoed bearer token is scrubbed from FOLO error envelopes (including arbitrary `error.code`) and raw
+        // proxy bodies (even across the 200-char truncation cut).
+        let env = format!(
+            r#"{{"error":{{"code":"err_{SECRET}","message":"bad token {SECRET}","hint":"check {SECRET}"}}}}"#
+        );
+        let e = c.failure(StatusCode::UNAUTHORIZED, env.as_bytes());
+        assert_eq!(e.code(), NOT_FOLO, "{e:?}");
+        assert!(!e.error.message.contains(SECRET) && e.error.message.contains("[redacted]"), "{e:?}");
+        assert!(
+            e.error.hint.as_deref().is_some_and(|h| !h.contains(SECRET) && h.contains("[redacted]")),
+            "{e:?}"
+        );
+        let raw = format!("{} {SECRET}", "x".repeat(195));
+        let e = c.failure(StatusCode::BAD_GATEWAY, raw.as_bytes());
+        assert!(!e.error.message.contains(&SECRET[..8]), "{e:?}");
+
+        // Empty byte range is rejected locally without touching the network.
+        let mut out = Vec::new();
+        let err = c.get_range_to("/m/weights", 5..5, None, &mut out, || false).unwrap_err();
+        assert!(
+            matches!(err, StreamError::Http(e) if e.status == Some(StatusCode::BAD_REQUEST) && !e.is_transient())
+        );
+
+        // Already-expired deadline fails immediately without contacting the server.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now);
+        let expired = Client::new(&format!("http://{addr}")).until(past);
+        let e = expired.post_empty::<serde_json::Value>("/runs").unwrap_err();
+        assert!(e.is_unreachable());
+        assert!(listener.accept().is_err(), "expired deadline must not connect");
+
+        // Huge non-2xx body on normal JSON call is bounded and preserves the real non-transient HTTP status.
+        listener.set_nonblocking(false).unwrap();
+        let huge_len = (MAX_ERROR_BODY as usize) + 64 * 1024;
+        let srv = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 512];
+            let _ = s.read(&mut buf);
+            let mut resp =
+                format!("HTTP/1.1 403 Forbidden\r\nContent-Length: {huge_len}\r\nConnection: close\r\n\r\n")
+                    .into_bytes();
+            resp.resize(resp.len() + huge_len, b'e');
+            let _ = s.write_all(&resp);
+        });
+        let e = Client::new(&format!("http://{addr}")).get::<serde_json::Value>("/health").unwrap_err();
+        srv.join().unwrap();
+        assert_eq!(e.status, Some(StatusCode::FORBIDDEN));
+        assert!(!e.is_transient());
     }
 }

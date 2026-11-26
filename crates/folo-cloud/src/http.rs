@@ -23,6 +23,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Largest answer read (a page of pods, the GPU catalog).
 const MAX_BODY: u64 = 16 * 1024 * 1024;
+/// Largest error body read on a non-2xx answer (keeps memory bounded and preserves HTTP status).
+const MAX_ERROR_BODY: u64 = 1024 * 1024;
 /// Requests sent at most for one call when the provider answers a retryable status (`429`, or idempotent `502`/`503`/`504`).
 const MAX_ATTEMPTS: u32 = 3;
 /// Longest single wait before a retry, whatever `Retry-After` asks for.
@@ -93,10 +95,13 @@ impl Reply {
 }
 
 impl Api {
-    /// A client of the API `service` names (e.g. `RunPod`).
+    /// A client of the API `service` names (e.g. `RunPod`). Never follows HTTP redirects so bearer keys and
+    /// request payloads (such as worker tokens) cannot be forwarded to an unexpected host.
     pub fn new(service: &'static str) -> Api {
         let agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            .max_redirects(0)
+            .max_redirects_will_error(false)
             .timeout_connect(Some(CONNECT_TIMEOUT))
             .timeout_global(Some(REQUEST_TIMEOUT))
             .build()
@@ -124,7 +129,7 @@ impl Api {
         let mut waited = Duration::ZERO;
         let mut attempt = 1;
         loop {
-            let res = self.send(&method, url, key, body).map_err(|e| self.unavailable(e))?;
+            let res = self.send(&method, url, key, body).map_err(|e| self.unavailable(e, key))?;
             let status = res.status().as_u16();
             if should_retry(&method, status)
                 && attempt < MAX_ATTEMPTS
@@ -135,12 +140,20 @@ impl Api {
                 attempt += 1;
                 continue;
             }
-            let body = res
-                .into_body()
-                .with_config()
-                .limit(MAX_BODY)
-                .read_to_vec()
-                .map_err(|e| self.unavailable(e))?;
+            let body = if (200..300).contains(&status) {
+                res.into_body()
+                    .with_config()
+                    .limit(MAX_BODY)
+                    .read_to_vec()
+                    .map_err(|e| self.unavailable(e, key))?
+            } else {
+                // Bound non-2xx error bodies so a huge proxy error page never exhausts memory or masks a
+                // 401/403/400 status behind `Unavailable`.
+                let mut bytes = Vec::new();
+                let mut limited = std::io::Read::take(res.into_body().into_reader(), MAX_ERROR_BODY);
+                let _ = std::io::Read::read_to_end(&mut limited, &mut bytes);
+                bytes
+            };
             let secrets = vec![key.to_string()];
             return Ok(Reply { status, body, service: self.service, secrets });
         }
@@ -164,10 +177,11 @@ impl Api {
         }
     }
 
-    fn unavailable(&self, e: ureq::Error) -> Error {
+    fn unavailable(&self, e: ureq::Error, key: &str) -> Error {
+        let why = crate::scrub(&e.to_string(), [key]);
         Error::new(
             ErrorKind::Unavailable,
-            format!("{} does not answer ({e}); check this machine's internet connection", self.service),
+            format!("{} does not answer ({why}); check this machine's internet connection", self.service),
         )
     }
 }
@@ -578,5 +592,20 @@ mod tests {
         let e = reply.json::<serde_json::Value>().unwrap_err();
         assert_eq!(e.kind, ErrorKind::Unavailable);
         assert!(e.message.starts_with("Test answered something unexpected"), "{}", e.message);
+    }
+
+    #[test]
+    fn api_does_not_follow_redirects_and_caps_error_bodies() {
+        let target = Fixture::serve(vec![Answer::json(200, r#"{"leaked":true}"#)]);
+        let redirect = Fixture::serve(vec![Answer::empty(302).header("Location", &target.url("/steal"))]);
+        let reply = Api::new("Test").get(&redirect.url("/pods"), "rpa_SECRET_KEY").unwrap();
+        assert_eq!(reply.status, 302);
+        assert!(target.requests().is_empty(), "redirect target must not be contacted");
+
+        let huge_401 = "x".repeat(MAX_ERROR_BODY as usize + 64 * 1024);
+        let f = Fixture::serve(vec![Answer::json(401, huge_401)]);
+        let reply = Api::new("Test").get(&f.url("/pods"), "rpa_SECRET_KEY").unwrap();
+        assert_eq!(reply.status, 401);
+        assert_eq!(reply.body.len(), MAX_ERROR_BODY as usize);
     }
 }

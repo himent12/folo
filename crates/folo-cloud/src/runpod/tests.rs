@@ -482,6 +482,58 @@ fn find_follows_pages_and_skips_terminated_namesakes() {
     let paths: Vec<String> = f.requests().into_iter().map(|r| r.path).collect();
     assert_eq!(paths, ["/v2/pods?limit=100", "/v2/pods?limit=100&cursor=c%202"]);
     assert_key_only_in_headers(&f);
+
+    // Duplicate pod IDs across pages are deduplicated cleanly.
+    let f = Fixture::serve(vec![
+        Answer::json(
+            200,
+            r#"{"pods":[{"id":"a1","name":"folo-x","status":"RUNNING"}],"pagination":{"nextCursor":"c1"}}"#,
+        ),
+        Answer::json(
+            200,
+            r#"{"pods":[{"id":"a1","name":"folo-x","status":"RUNNING"},{"id":"b2","name":"folo-x","status":"RUNNING"}],"pagination":{"nextCursor":null}}"#,
+        ),
+    ]);
+    assert_eq!(runpod(&f).find(&values(), "folo-x").unwrap(), ["a1", "b2"]);
+
+    // An unaddressable live match (invalid/missing pod ID) fails with `Unavailable` so the reaper keeps retrying
+    // instead of concluding no live pod exists.
+    let f = Fixture::serve(vec![Answer::json(
+        200,
+        r#"{"pods":[{"id":"../bad","name":"folo-x","status":"RUNNING"}],"pagination":{"nextCursor":null}}"#,
+    )]);
+    assert_error(&runpod(&f).find(&values(), "folo-x").unwrap_err(), ErrorKind::Unavailable, "invalid id");
+
+    // A pagination cursor cycle fails with `Unavailable` so the reaper retries rather than treating a partial
+    // listing as exhaustive.
+    let f = Fixture::serve(vec![
+        Answer::json(
+            200,
+            r#"{"pods":[{"id":"a1","name":"folo-x","status":"RUNNING"}],"pagination":{"nextCursor":"c1"}}"#,
+        ),
+        Answer::json(
+            200,
+            r#"{"pods":[{"id":"b2","name":"folo-x","status":"RUNNING"}],"pagination":{"nextCursor":"c2"}}"#,
+        ),
+        Answer::json(
+            200,
+            r#"{"pods":[{"id":"c3","name":"folo-x","status":"RUNNING"}],"pagination":{"nextCursor":"c1"}}"#,
+        ),
+    ]);
+    assert_error(
+        &runpod(&f).find(&values(), "folo-x").unwrap_err(),
+        ErrorKind::Unavailable,
+        "repeated pagination cursor",
+    );
+    assert_eq!(f.requests().len(), 3, "must stop on repeated cursor cycle");
+
+    // Non-finite numeric strings (e.g. "NaN" / "inf") in GraphQL balance are dropped rather than poisoning JSON.
+    let f = Fixture::serve(vec![
+        Answer::json(200, NO_PODS),
+        Answer::json(200, r#"{"data":{"myself":{"email":"u@example.com","clientBalance":"NaN"}}}"#),
+    ]);
+    let acct = runpod(&f).check(&values()).unwrap();
+    assert_eq!(acct.balance_usd, None);
 }
 
 #[test]

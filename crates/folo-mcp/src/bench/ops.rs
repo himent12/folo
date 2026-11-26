@@ -481,11 +481,31 @@ fn records_of_unless<'a, R: BufRead + 'a>(
                     return Some(Err(bad(format!("reading line {n}: {e}"))));
                 }
             }
+            // If line 1 starts with a 3-byte UTF-8 BOM and has not reached `\n` yet, budget up to 3 extra bytes so
+            // a BOM-prefixed record at exactly `MAX_RECORD_BYTES` (with optional `\r\n`) is not truncated and an
+            // overlong BOM-prefixed line cannot pass as `<= MAX_RECORD_BYTES` and split into two lines.
+            if n == 1 && !line.ends_with(b"\n") && line.starts_with(b"\xEF\xBB\xBF") {
+                if let Some(flag) = stop
+                    && let Err(e) = check_interrupt(flag)
+                {
+                    return Some(Err(e));
+                }
+                if let Err(e) = (&mut reader).take(3).read_until(b'\n', &mut line) {
+                    if let Some(flag) = stop
+                        && let Err(ie) = check_interrupt(flag)
+                    {
+                        return Some(Err(ie));
+                    }
+                    return Some(Err(bad(format!("reading line {n}: {e}"))));
+                }
+            }
             // A `\r` is a line ending only before a `\n`: at the end of the file it is one more byte of the line.
             let body = match line.strip_suffix(b"\n") {
                 Some(b) => b.strip_suffix(b"\r").unwrap_or(b),
                 None => &line,
             };
+            // Strip a UTF-8 BOM on line 1 (e.g. files written with UTF-8-SIG on Windows) before length/prefix checks.
+            let body = if n == 1 { body.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(body) } else { body };
             // Judged before a blank line is skipped: the rest of a long line must not pass as the next line.
             let long = body.len() > MAX_RECORD_BYTES;
             let text = body.trim_ascii();
@@ -495,6 +515,35 @@ fn records_of_unless<'a, R: BufRead + 'a>(
             return Some(parse_record(text, long, n, &bad));
         }
     })
+}
+
+/// Strict JSONL record input that rejects unknown/misspelled fields (such as `confidence` instead of `score`,
+/// which would otherwise silently default to `1.0`).
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PredictionInput {
+    image: String,
+    #[serde(default)]
+    condition: Option<String>,
+    #[serde(default)]
+    severity: Option<u8>,
+    boxes: Vec<DetectionInput>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DetectionInput {
+    class: u32,
+    #[serde(default = "default_score_one")]
+    score: f32,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+}
+
+fn default_score_one() -> f32 {
+    1.0
 }
 
 /// The record on line `n` of a file of predictions (`text`, trimmed; `cut` when the line was longer than can be read).
@@ -521,14 +570,30 @@ fn parse_record(
     if v.get("predictions").is_some() {
         return Err(not_a_record());
     }
-    let r: BenchPrediction = serde_json::from_value(v).map_err(|e| bad(format!("line {n}: {e}")))?;
-    if r.boxes.len() > MAX_BOXES {
+    let raw: PredictionInput = serde_json::from_value(v).map_err(|e| bad(format!("line {n}: {e}")))?;
+    if raw.boxes.len() > MAX_BOXES {
         return Err(bad(format!(
             "line {n} has {} boxes; a record carries at most {MAX_BOXES}",
-            r.boxes.len()
+            raw.boxes.len()
         )));
     }
-    Ok(r)
+    Ok(BenchPrediction {
+        image: raw.image,
+        condition: raw.condition,
+        severity: raw.severity,
+        boxes: raw
+            .boxes
+            .into_iter()
+            .map(|b| folo_api::BenchDetection {
+                class: b.class,
+                score: b.score,
+                x1: b.x1,
+                y1: b.y1,
+                x2: b.x2,
+                y2: b.y2,
+            })
+            .collect(),
+    })
 }
 
 /// The next part of `records`: whole records, at most `limits.records` of them, `limits.boxes` boxes and

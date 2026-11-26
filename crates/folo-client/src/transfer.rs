@@ -327,6 +327,7 @@ fn fetch(
     'version: for _ in 0..=RESTARTS {
         let mut file = std::fs::File::create(tmp).map_err(TransferError::Io)?;
         let mut etag: Option<String> = None;
+        let mut expected_total: Option<u64> = None;
         let mut done = 0u64;
         // The end of the next request when it is the whole rest (decided after the first part, tried once).
         let mut rest: Option<u64> = whole.take();
@@ -335,9 +336,11 @@ fn fetch(
                 return Err(TransferError::Stopped);
             }
             let asked = std::time::Instant::now();
+            // Never send an empty `If-Match:` header if the first part had no ETag.
+            let if_match = etag.as_deref().filter(|e| !e.is_empty());
             let answer = match rest.take() {
                 Some(end) => {
-                    match client.get_range_to(path, done..end, etag.as_deref(), &mut file, ctl.stop) {
+                    match client.get_range_to(path, done..end, if_match, &mut file, ctl.stop) {
                         Ok(p) => Ok(p),
                         // Too much for one request on this link after all: discard any partial bytes written and
                         // continue in parts from `done`.
@@ -350,13 +353,17 @@ fn fetch(
                         Err(StreamError::Io(e)) => Err(TransferError::Io(e)),
                     }
                 }
-                None => {
-                    fetch_part(client, path, done..done + PART_BYTES, etag.as_deref(), &mut file, done, ctl)
-                }
+                None => fetch_part(client, path, done..done + PART_BYTES, if_match, &mut file, done, ctl),
             };
             let part = match answer {
                 Ok(p) => p,
                 Err(TransferError::Failed(e)) if e.status == Some(StatusCode::PRECONDITION_FAILED) => {
+                    continue 'version;
+                }
+                // File shrank to `<= done` while another part was fetched without `412`: start over.
+                Err(TransferError::Failed(e))
+                    if e.status == Some(StatusCode::RANGE_NOT_SATISFIABLE) && done > 0 =>
+                {
                     continue 'version;
                 }
                 // An empty file has no first byte to ask for.
@@ -365,9 +372,12 @@ fn fetch(
                 {
                     let (headers, bytes) = retry(ctl, || client.get_bytes(path))?;
                     file.write_all(&bytes).map_err(TransferError::Io)?;
+                    file.sync_all().map_err(TransferError::Io)?;
+                    let len = bytes.len() as u64;
+                    (ctl.progress)(TransferProgress { done_bytes: len, total_bytes: len });
                     let etag =
                         headers.get(http::header::ETAG).and_then(|v| v.to_str().ok()).unwrap_or_default();
-                    return Ok(Downloaded { bytes: bytes.len() as u64, etag: etag.to_string() });
+                    return Ok(Downloaded { bytes: len, etag: etag.to_string() });
                 }
                 Err(e) => return Err(e),
             };
@@ -377,6 +387,20 @@ fn fetch(
                     "a range of the file came back empty",
                 )));
             }
+            // Guard against a proxy/server that ignored `If-Match` and served bytes from a newer version: if
+            // the file's total length or ETag changed (including appearing or disappearing) mid-download,
+            // restart from byte 0 rather than splicing bytes from two different versions.
+            if let Some(prev_total) = expected_total
+                && part.total != prev_total
+            {
+                continue 'version;
+            }
+            if let Some(prev_etag) = etag.as_deref()
+                && part.etag != prev_etag
+            {
+                continue 'version;
+            }
+            expected_total.get_or_insert(part.total);
             let first = done == 0;
             done += part.written;
             (ctl.progress)(TransferProgress { done_bytes: done, total_bytes: part.total });
@@ -525,5 +549,62 @@ mod tests {
 
         assert!(matches!(result, Err(TransferError::Stopped)));
         assert!(elapsed < Duration::from_secs(2), "pause waited {elapsed:?} despite stop signal");
+    }
+
+    #[test]
+    fn download_restarts_when_etag_changes_mid_transfer_and_omits_empty_if_match() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Attempt 1: part 1 serves 4 bytes of a 10-byte file with ETag "v1", part 2 ignores If-Match and
+        // serves remaining 6 bytes with ETag "v2". Attempt 2: part 1 serves 4 bytes of "v2" (no ETag header
+        // tested separately below), part 2 serves 6 bytes of "v2".
+        let responses = vec![
+            // Download 1: ETag changes `"v1"` -> `"v2"` mid-transfer -> restarts and writes clean v2.
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/10\r\nETag: \"v1\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\nAAAA".to_vec(),
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-9/10\r\nETag: \"v2\"\r\nContent-Length: 6\r\nConnection: close\r\n\r\nBBBBBB".to_vec(),
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/10\r\nETag: \"v2\"\r\nContent-Length: 10\r\nConnection: close\r\n\r\nCCCCCCCCCC".to_vec(),
+            // Download 2: no ETag on part 1, then `"v2"` appears on part 2 (same total) -> restarts rather than
+            // publishing mixed bytes under `"v2"`, and part 2 must NOT send an empty `If-Match:` header.
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/8\r\nContent-Length: 4\r\nConnection: close\r\n\r\n1111".to_vec(),
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-7/8\r\nETag: \"v2\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\n2222".to_vec(),
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-7/8\r\nETag: \"v2\"\r\nContent-Length: 8\r\nConnection: close\r\n\r\n33334444".to_vec(),
+        ];
+        let seen_reqs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen_srv = seen_reqs.clone();
+        let srv = std::thread::spawn(move || {
+            for resp in responses {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 1024];
+                let n = s.read(&mut buf).unwrap_or(0);
+                seen_srv.lock().unwrap().push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let _ = s.write_all(&resp);
+            }
+        });
+
+        let dir = folo_test_support::TestDir::new("client-download-version-check");
+        let client = Client::new(&format!("http://{addr}"));
+        let stop = || false;
+
+        let dest1 = dir.join("m1.folo");
+        let mut ctl = Control { progress: &mut |_| {}, stop: &stop, backoff: Duration::from_millis(1) };
+        let got1 = download(&client, "/m/weights", &dest1, &mut ctl).unwrap();
+        assert_eq!(got1, Downloaded { bytes: 10, etag: "\"v2\"".into() });
+        assert_eq!(std::fs::read(&dest1).unwrap(), b"CCCCCCCCCC");
+
+        let dest2 = dir.join("m2.folo");
+        let mut ctl = Control { progress: &mut |_| {}, stop: &stop, backoff: Duration::from_millis(1) };
+        let got2 = download(&client, "/m/weights", &dest2, &mut ctl).unwrap();
+        assert_eq!(got2, Downloaded { bytes: 8, etag: "\"v2\"".into() });
+        assert_eq!(std::fs::read(&dest2).unwrap(), b"33334444");
+
+        srv.join().unwrap();
+        let reqs = seen_reqs.lock().unwrap();
+        assert!(
+            !reqs[4].to_ascii_lowercase().contains("if-match:"),
+            "must not send empty If-Match header: {}",
+            reqs[4]
+        );
     }
 }

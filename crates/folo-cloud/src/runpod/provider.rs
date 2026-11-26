@@ -1,7 +1,7 @@
 //! [`RunPod`] as a [`Provider`]: check a connection, list offers, launch a pod, look it up, find it by name and
 //! terminate it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use folo_api::{CloudField, CloudOffer, CloudProvider};
 
@@ -195,15 +195,33 @@ impl Provider for RunPod {
         let key = api_key(values)?;
         // The API has no filter by name: list every pod and look.
         let mut ids = Vec::new();
+        let mut seen_ids = HashSet::new();
+        let mut seen_cursors = HashSet::new();
         let mut cursor: Option<String> = None;
         for _ in 0..MAX_PAGES {
             let page = self.pods(key, cursor.as_deref())?;
-            ids.extend(
-                page.pods.into_iter().filter(|p| p.name == name && p.status != "TERMINATED").map(|p| p.id),
-            );
+            for p in page.pods {
+                if p.name == name && p.status != "TERMINATED" {
+                    if check_pod_id(&p.id).is_err() {
+                        return Err(Error::new(
+                            ErrorKind::Unavailable,
+                            "RunPod listed a live pod with an invalid id",
+                        ));
+                    }
+                    if seen_ids.insert(p.id.clone()) {
+                        ids.push(p.id);
+                    }
+                }
+            }
             match page.pagination.next_cursor.filter(|c| !c.is_empty()) {
-                Some(next) if cursor.as_ref() != Some(&next) => cursor = Some(next),
-                _ => return Ok(ids),
+                Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
+                Some(_) => {
+                    return Err(Error::new(
+                        ErrorKind::Unavailable,
+                        "RunPod returned a repeated pagination cursor while listing pods",
+                    ));
+                }
+                None => return Ok(ids),
             }
         }
         Err(Error::new(ErrorKind::Unavailable, format!("RunPod listed more than {MAX_PAGES} pages of pods")))

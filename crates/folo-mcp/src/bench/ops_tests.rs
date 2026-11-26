@@ -34,6 +34,16 @@ fn a_file_of_predictions_is_json_lines_of_records() {
     assert!(e.body.message.contains("line 2") && e.body.message.contains("boxes"), "{e:?}");
     let missing = read_predictions(Path::new("no/such/predictions.jsonl")).err().unwrap();
     assert_eq!(missing.body.code, "path_not_found");
+    // UTF-8 BOM on line 1 (common from Windows editors/PowerShell) is accepted cleanly.
+    let bom = format!("\u{FEFF}{}\n{}\n", r("1"), r("2"));
+    assert_eq!(records(&bom).unwrap().len(), 2);
+    // Misspelled keys in records or boxes fail loudly instead of silently falling back to defaults.
+    let typo_box = r#"{"image":"1","boxes":[{"class":0,"confidence":0.4,"x1":1,"y1":2,"x2":3,"y2":4}]}"#;
+    let e = records(typo_box).unwrap_err();
+    assert!(e.body.message.contains("line 1") && e.body.message.contains("confidence"), "{e:?}");
+    let typo_rec = r#"{"image":"1","cond":"haze","boxes":[]}"#;
+    let e = records(typo_rec).unwrap_err();
+    assert!(e.body.message.contains("line 1") && e.body.message.contains("cond"), "{e:?}");
 }
 
 /// A line is judged after at most [`MAX_RECORD_BYTES`] and its line ending: no more of it is read, what is left of
@@ -68,6 +78,19 @@ fn a_long_line_is_refused_before_it_is_read_whole() {
     // A `\r` with no `\n` after it is a byte of the line: a record of the limit plus one at the end of the file is over.
     assert!(records(&format!("{exact}\r")).unwrap_err().body.message.contains("longer"));
     assert_eq!(records(&format!("{}\r", r#"{"image":"1","boxes":[]}"#)).unwrap().len(), 1);
+    // BOM-prefixed line 1 obeys the exact same `MAX_RECORD_BYTES` boundary for EOF, LF, CRLF, and overlong lines.
+    for ending in ["", "\n", "\r\n"] {
+        assert_eq!(records(&format!("\u{FEFF}{exact}{ending}")).unwrap().len(), 1, "bom {ending:?}");
+    }
+    for ending in ["", "\n", "\r\n"] {
+        assert!(
+            records(&format!("\u{FEFF}{over}{ending}")).unwrap_err().body.message.contains("longer"),
+            "bom over {ending:?}"
+        );
+    }
+    assert!(records(&format!("\u{FEFF}{exact}\r")).unwrap_err().body.message.contains("longer"));
+    let bom_padded = format!("\u{FEFF}{}{{\"image\":\"1\",\"boxes\":[]}}\n", " ".repeat(MAX_RECORD_BYTES));
+    assert!(records(&bom_padded).is_err(), "overlong BOM-prefixed whitespace line must not split");
 }
 
 /// A record over the server's limit per record is refused where it is read, so no part can pass a part's limit.

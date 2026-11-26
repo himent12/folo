@@ -306,7 +306,13 @@ pub fn ranked<'a>(entries: &[&'a BenchEntry], fingerprint: &str) -> Vec<&'a Benc
         _ => 3,
     };
     let total = |e: &BenchEntry| e.score.as_ref().map_or(0.0, |s| s.total);
-    let age = |a: &BenchEntry, b: &BenchEntry| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id));
+    // Compare by parsed millisecond timestamp (not raw string: `...00.500Z` < `...00Z` in ASCII because '.' < 'Z').
+    let age = |a: &BenchEntry, b: &BenchEntry| {
+        parse_rfc3339_millis(&a.created)
+            .cmp(&parse_rfc3339_millis(&b.created))
+            .then_with(|| a.created.cmp(&b.created))
+            .then_with(|| a.id.cmp(&b.id))
+    };
     let mut order: Vec<&BenchEntry> = entries.to_vec();
     order.sort_by(|a, b| {
         group(a).cmp(&group(b)).then_with(|| {
@@ -383,7 +389,11 @@ impl Slot {
         let now = rfc3339(unix_now());
         let mut entries = Vec::new();
         let mut closed_entries = Vec::new();
-        for (path, head) in read_all::<EntryHead>(&dir.join("entries")) {
+        for (path, head) in
+            canonical_by_id("benchmark entry", read_all::<EntryHead>(&dir.join("entries")), |h| {
+                h.entry.id.as_str()
+            })
+        {
             if head.version != VERSION {
                 tracing::warn!(
                     "skipping {}: version {} is not one this server reads",
@@ -407,10 +417,13 @@ impl Slot {
             }
             entries.push(EntryState { entry, cancel: Arc::new(AtomicBool::new(false)), open: None });
         }
-        entries.sort_by(|a, b| (&a.entry.created, &a.entry.id).cmp(&(&b.entry.created, &b.entry.id)));
+        // By time, not by text: one made before `created` had milliseconds has none.
+        entries.sort_by_cached_key(|e| (parse_rfc3339_millis(&e.entry.created), e.entry.id.clone()));
         let mut loops = Vec::new();
         let mut closed_loops = Vec::new();
-        for (path, f) in read_all::<LoopFile>(&dir.join("loops")) {
+        for (path, f) in
+            canonical_by_id("benchmark loop", read_all::<LoopFile>(&dir.join("loops")), |f| f.lp.id.as_str())
+        {
             if f.version != VERSION {
                 tracing::warn!(
                     "skipping {}: version {} is not one this server reads",
@@ -613,6 +626,22 @@ fn remove(path: &Path) -> Result<()> {
     }
 }
 
+/// Keeps only canonical `<id>.json` files: backup copies (e.g. `be_1.bak.json`) are logged and skipped without
+/// touching them so they can neither create duplicate entries nor resurrect deleted ones whose canonical file was
+/// removed.
+fn canonical_by_id<T>(kind: &str, items: Vec<(PathBuf, T)>, id_of: impl Fn(&T) -> &str) -> Vec<(PathBuf, T)> {
+    let mut out = Vec::with_capacity(items.len());
+    for (path, item) in items {
+        let id = id_of(&item);
+        if path.file_stem().and_then(|s| s.to_str()) == Some(id) {
+            out.push((path, item));
+        } else {
+            tracing::warn!("skipping non-canonical {kind} file {} (id '{id}')", path.display());
+        }
+    }
+    out
+}
+
 /// Every `*.json` file in `dir` that parses as `T` (the others are logged and skipped, never overwritten).
 fn read_all<T: serde::de::DeserializeOwned>(dir: &Path) -> Vec<(PathBuf, T)> {
     let mut out = Vec::new();
@@ -787,5 +816,57 @@ mod tests {
         bytes.images[0].sha256 = "cd".into();
         assert_ne!(fingerprint(&bytes), fp);
         assert_eq!(a.class_boxes(), [0, 1]);
+    }
+
+    #[test]
+    fn ranked_compares_mixed_precision_timestamps_and_load_deduplicates_backup_files() {
+        use BenchEntryStatus as S;
+        // `.500Z` sorts before `Z` as raw ASCII ('.' < 'Z'), so string comparison wrongly ranks the newer entry
+        // as older on a tie; millisecond parsing must put the earlier second (`...00Z`) first.
+        let mut earlier = entry("be_earlier", S::Done, Some((50.0, false)));
+        earlier.created = "2026-11-09T00:00:00Z".into();
+        let mut later = entry("be_later", S::Done, Some((50.0, false)));
+        later.created = "2026-11-09T00:00:00.500Z".into();
+        assert_eq!(
+            ranked(&[&later, &earlier], "").iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            ["be_earlier", "be_later"]
+        );
+
+        // A backup JSON copy in `entries/` with the same id must not create duplicate entries or clobber the
+        // canonical `be_1.json` on load.
+        let dir = folo_test_support::TestDir::new("bench-state-dedup");
+        let bdir = dir.join("bn_1");
+        std::fs::create_dir_all(bdir.join("entries")).unwrap();
+        std::fs::write(bdir.join("bench.json"), serde_json::to_vec(&file()).unwrap()).unwrap();
+        let done_entry = EntryFile {
+            version: VERSION,
+            entry: entry("be_1", S::Done, Some((80.0, false))),
+            result: None,
+            images: vec![],
+        };
+        let stale_backup = EntryFile {
+            version: VERSION,
+            entry: entry("be_1", S::Running, None),
+            result: None,
+            images: vec![],
+        };
+        std::fs::write(bdir.join("entries").join("be_1.json"), serde_json::to_vec(&done_entry).unwrap())
+            .unwrap();
+        std::fs::write(
+            bdir.join("entries").join("be_1.bak.json"),
+            serde_json::to_vec(&stale_backup).unwrap(),
+        )
+        .unwrap();
+
+        let slot = Slot::load(bdir.clone()).unwrap();
+        {
+            let state = slot.lock();
+            assert_eq!(state.entries.len(), 1);
+            assert_eq!(state.entries[0].entry.status, S::Done, "canonical be_1.json must win over backup");
+        }
+        // Deleting canonical `be_1.json` while `be_1.bak.json` remains must not resurrect `be_1` on reload.
+        std::fs::remove_file(bdir.join("entries").join("be_1.json")).unwrap();
+        let reloaded = Slot::load(bdir).unwrap();
+        assert!(reloaded.lock().entries.is_empty(), "backup file must not resurrect deleted entry");
     }
 }

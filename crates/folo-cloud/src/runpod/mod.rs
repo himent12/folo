@@ -350,13 +350,14 @@ struct Myself {
     client_balance: Option<f64>,
 }
 
-/// A number that may arrive as a JSON number, a numeric string or `null`.
+/// A finite number that may arrive as a JSON number, a numeric string or `null`.
 fn number<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Option<f64>, D::Error> {
-    Ok(match serde_json::Value::deserialize(d)? {
+    let val = match serde_json::Value::deserialize(d)? {
         serde_json::Value::Number(n) => n.as_f64(),
         serde_json::Value::String(s) => s.trim().parse().ok(),
         _ => None,
-    })
+    };
+    Ok(val.filter(|v| v.is_finite()))
 }
 
 #[cfg(test)]
