@@ -284,6 +284,18 @@ impl Store for HttpStore {
         self.post("/datasets", &req)
     }
 
+    fn register_dataset_tracked(&self, req: RegisterDataset) -> Result<(Dataset, bool), Error> {
+        let (headers, ds) = self.client.post_with_headers("/datasets", &req).map_err(store_error)?;
+        // Only servers that emit `x-folo-dataset-created: true` both confirm ownership and support
+        // `DELETE /api/datasets/{id}?if_unused=true`; older servers default to `false` so callers never send an
+        // unsafe unconditional rollback delete.
+        let created = headers
+            .get("x-folo-dataset-created")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+        Ok((ds, created))
+    }
+
     fn create_synthetic(&self, req: SyntheticDataset) -> Result<Dataset, Error> {
         self.post("/datasets/synthetic", &req)
     }
@@ -328,6 +340,10 @@ impl Store for HttpStore {
 
     fn delete_dataset(&self, id: &str) -> Result<(), Error> {
         self.delete(&format!("/datasets/{}", encode(id)))
+    }
+
+    fn delete_dataset_if_unused(&self, id: &str) -> Result<(), Error> {
+        self.delete(&format!("/datasets/{}?if_unused=true", encode(id)))
     }
 
     fn delete_dataset_files(&self, id: &str) -> Result<(), Error> {

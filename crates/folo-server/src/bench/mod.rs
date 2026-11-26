@@ -83,6 +83,8 @@ pub struct Benches {
     datasets: PathBuf,
     /// In creation order (shared with the sweeper of open entries).
     benches: Arc<RwLock<Vec<Arc<Slot>>>>,
+    /// Dataset ids currently being snapshotted by in-flight [`Benches::create`] calls (reference counts).
+    creating_datasets: std::sync::Mutex<std::collections::HashMap<String, usize>>,
     engine: Arc<Engine>,
     /// The model worker's thread and the sweeper's (open external entries that expire).
     worker: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
@@ -145,6 +147,7 @@ impl Benches {
             thumbs: data_dir.join("cache").join("thumbs"),
             datasets: data_dir.join("datasets"),
             benches,
+            creating_datasets: std::sync::Mutex::default(),
             engine,
             worker: std::sync::Mutex::new(threads),
             threads: std::sync::Mutex::default(),

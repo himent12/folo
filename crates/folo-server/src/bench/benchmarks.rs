@@ -50,11 +50,56 @@ pub fn check_create(
     Ok((name, description, max, plan))
 }
 
+/// Tracks an in-flight [`Benches::create`] referencing a dataset id so conditional dataset cleanup cannot
+/// unregister the dataset while a benchmark is still gathering or writing it.
+struct CreatingDatasetGuard<'a> {
+    map: &'a std::sync::Mutex<std::collections::HashMap<String, usize>>,
+    dataset_id: String,
+}
+
+impl<'a> CreatingDatasetGuard<'a> {
+    fn new(map: &'a std::sync::Mutex<std::collections::HashMap<String, usize>>, dataset_id: String) -> Self {
+        *map.lock().unwrap_or_else(|p| p.into_inner()).entry(dataset_id.clone()).or_insert(0) += 1;
+        Self { map, dataset_id }
+    }
+}
+
+impl Drop for CreatingDatasetGuard<'_> {
+    fn drop(&mut self) {
+        let mut guard = self.map.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(count) = guard.get_mut(&self.dataset_id) {
+            if *count <= 1 {
+                guard.remove(&self.dataset_id);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
+}
+
 impl Benches {
+    /// Returns `true` when any existing benchmark or in-flight [`Benches::create`] references `dataset_id`.
+    /// Checks in-flight creations before persisted benchmarks so a creation finishing concurrently cannot slip
+    /// between the two checks.
+    pub(crate) fn references_dataset(&self, dataset_id: &str) -> bool {
+        if self.creating_datasets.lock().unwrap_or_else(|p| p.into_inner()).contains_key(dataset_id) {
+            return true;
+        }
+        self.benches.read().unwrap().iter().any(|slot| {
+            matches!(&slot.lock().file.source, BenchSource::Dataset { dataset_id: id, .. } if id == dataset_id)
+        })
+    }
+
     /// `POST /api/bench/benchmarks`: copies the source's images and truth into a new benchmark.
     pub fn create(&self, store: &dyn Store, req: CreateBench) -> Result<Bench> {
         let (name, description, max, plan) =
             check_create(&req.name, &req.description, req.max_images, req.seed, req.plan.as_ref())?;
+        let _creating = match &req.source {
+            BenchSource::Dataset { dataset_id, .. } => {
+                Some(CreatingDatasetGuard::new(&self.creating_datasets, dataset_id.clone()))
+            }
+            BenchSource::LabelJob { .. } => None,
+        };
         let source = source::gather(store, &req.source, Split::Val, true)?;
         let what = match &req.source {
             BenchSource::Dataset { .. } => format!(

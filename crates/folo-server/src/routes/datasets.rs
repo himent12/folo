@@ -20,12 +20,17 @@ pub(super) async fn list_datasets(State(st): State<AppState>) -> Result<Json<Dat
     Ok(Json(DatasetList { datasets }))
 }
 
+/// Response header on `POST /api/datasets` reporting whether this request inserted a new registration (`true`) or
+/// returned an already-registered dataset (`false`).
+const HEADER_DATASET_CREATED: header::HeaderName = header::HeaderName::from_static("x-folo-dataset-created");
+
 pub(super) async fn register_dataset(
     State(st): State<AppState>,
     ApiJson(req): ApiJson<RegisterDataset>,
 ) -> Result<Response> {
-    let ds = blocking(&st, move |s| s.register_dataset(req)).await?;
-    Ok((StatusCode::CREATED, Json(ds)).into_response())
+    let (ds, created) = blocking(&st, move |s| s.register_dataset_tracked(req)).await?;
+    let flag = HeaderValue::from_static(if created { "true" } else { "false" });
+    Ok((StatusCode::CREATED, [(HEADER_DATASET_CREATED, flag)], Json(ds)).into_response())
 }
 
 pub(super) async fn create_synthetic(
@@ -48,6 +53,10 @@ pub(super) struct DeleteParams {
     /// Also delete the dataset's folder (only one the server wrote under `<data dir>/datasets`).
     #[serde(default)]
     files: bool,
+    /// Unregister only if this dataset was freshly registered in this session, has not been shared with another
+    /// registration, and is not referenced by any training run or benchmark (`409 dataset_in_use` otherwise).
+    #[serde(default)]
+    if_unused: bool,
 }
 
 pub(super) async fn delete_dataset(
@@ -55,7 +64,23 @@ pub(super) async fn delete_dataset(
     ApiPath(id): ApiPath<String>,
     ApiQuery(p): ApiQuery<DeleteParams>,
 ) -> Result<StatusCode> {
-    blocking(&st, move |s| if p.files { s.delete_dataset_files(&id) } else { s.delete_dataset(&id) }).await?;
+    if p.files && p.if_unused {
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_query",
+            "files=true and if_unused=true cannot be combined",
+        ));
+    }
+    blocking(&st, move |s| {
+        if p.files {
+            s.delete_dataset_files(&id)
+        } else if p.if_unused {
+            s.delete_dataset_if_unused(&id)
+        } else {
+            s.delete_dataset(&id)
+        }
+    })
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -137,6 +137,20 @@ impl Client {
         }
     }
 
+    /// The next error response with no request id or `"id": null` (e.g. `-32600 Invalid request`).
+    pub(super) fn invalid_request_error(&mut self) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let v = self.recv(deadline);
+            if v.get("error").is_some() && v.get("id").is_none_or(Value::is_null) {
+                return v;
+            }
+            if v.get("method").is_some() && v.get("id").is_none() {
+                self.notes.push(v);
+            }
+        }
+    }
+
     fn request_with(&mut self, method: &str, params: Value, meta: Value) -> Value {
         let id = self.start(method, params, meta);
         self.response(id)

@@ -196,9 +196,9 @@ pub(crate) fn paths(paths: &[String], remote: bool) -> Result<Vec<String>, CliEr
 fn open(conn: &LabelServerArgs, store: bool) -> Result<Session, CliError> {
     let http = |url: &str| Labels::Http(Arc::new(HttpStore::new(url, conn.token.as_deref())));
     if let Some(url) = &conn.server {
-        if !url.starts_with("http://") && !url.starts_with("https://") {
+        if let Err(why) = folo_client::check_base_url(url) {
             return Err(usage(format!(
-                "--server (or FOLO_SERVER) must be the http:// or https:// URL of a `folo serve`, got `{url}`"
+                "--server (or FOLO_SERVER) must be the http:// or https:// URL of a `folo serve`, got `{url}` ({why})"
             )));
         }
         let data_dir = conn.data_dir.clone().unwrap_or_else(crate::default_data_dir);

@@ -130,6 +130,59 @@ impl std::fmt::Debug for Client {
     }
 }
 
+/// Validates that `url` is a well-formed `http://` or `https://` base URL with a non-empty host, optional
+/// numeric port (`1..=65535`), no embedded credentials, no query or fragment, and no spaces or control characters.
+pub fn check_base_url(url: &str) -> std::result::Result<(), String> {
+    if !url.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err("URL must not contain spaces or control characters".into());
+    }
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .ok_or_else(|| "URL must start with http:// or https://".to_string())?;
+    if rest.contains('?') || rest.contains('#') {
+        return Err("URL must not contain a query or fragment".into());
+    }
+    let authority = rest.split('/').next().unwrap_or_default();
+    if authority.contains('@') {
+        return Err("URL must not contain embedded credentials".into());
+    }
+    let (host, port) = if let Some(after_open) = authority.strip_prefix('[') {
+        let (h, tail) =
+            after_open.split_once(']').ok_or_else(|| "URL has an invalid IPv6 host".to_string())?;
+        if h.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err("URL has an invalid IPv6 host".into());
+        }
+        let port = match tail {
+            "" => None,
+            s => Some(s.strip_prefix(':').ok_or_else(|| "URL has an invalid host or port".to_string())?),
+        };
+        (h, port)
+    } else if let Some((h, p)) = authority.split_once(':') {
+        (h, Some(p))
+    } else {
+        (authority, None)
+    };
+    if host.is_empty() || host.contains(['[', ']']) {
+        return Err("URL is missing a host".into());
+    }
+    if let Some(p) = port {
+        let valid_port = (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse::<u16>().ok())
+            .flatten()
+            .is_some_and(|n| n > 0);
+        if !valid_port {
+            return Err("URL has an invalid port".into());
+        }
+    }
+    let probe = format!("{}/api/health", url.trim_end_matches('/'));
+    let uri = http::Uri::try_from(probe.as_str()).map_err(|_| "URL is not a valid HTTP URI".to_string())?;
+    if uri.host().is_none_or(str::is_empty) {
+        return Err("URL is missing a host".into());
+    }
+    Ok(())
+}
+
 /// Percent-encodes one path segment or query value.
 pub fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -315,6 +368,19 @@ impl Client {
     pub fn post<B: Serialize + ?Sized, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         let json = serde_json::to_vec(body).expect("request bodies serialize");
         self.send(path, "application/json", &json)
+    }
+
+    /// `POST /api{path}` with a JSON body, returning response headers and the parsed body.
+    pub fn post_with_headers<B: Serialize + ?Sized, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<(HeaderMap, T)> {
+        self.check_deadline()?;
+        let json = serde_json::to_vec(body).expect("request bodies serialize");
+        let req = self.auth(self.agent.post(self.url(path))).header(CONTENT_TYPE, "application/json");
+        let (headers, b) = self.finish(req.send(&json[..]))?;
+        Ok((headers, self.parse(&b)?))
     }
 
     /// `POST /api{path}` without a body, parsed.
@@ -860,5 +926,42 @@ mod tests {
         srv.join().unwrap();
         assert_eq!(e.status, Some(StatusCode::FORBIDDEN));
         assert!(!e.is_transient());
+    }
+
+    #[test]
+    fn check_base_url_validates_host_port_and_forbids_userinfo_or_query() {
+        for ok in [
+            "http://127.0.0.1:7878",
+            "http://127.0.0.1:7878/",
+            "https://folo.example.com",
+            "https://folo.example.com:8443/prefix/",
+            "http://localhost:7878",
+            "http://[::1]:7878",
+        ] {
+            assert!(check_base_url(ok).is_ok(), "{ok:?} should be valid");
+        }
+        for bad in [
+            "",
+            "127.0.0.1:7878",
+            "ftp://127.0.0.1:7878",
+            "http://",
+            "https://",
+            "http:///",
+            "http:///api",
+            "http://:7878",
+            "http://127.0.0.1:",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:70000",
+            "http://127.0.0.1:abc",
+            "http://[::1",
+            "http://[not-ipv6]:7878",
+            "http://[::1]junk:7878",
+            "http://user:pass@127.0.0.1:7878",
+            "http://127.0.0.1:7878?token=abc",
+            "http://127.0.0.1:7878#frag",
+            "http://127.0.0.1:7878 bad",
+        ] {
+            assert!(check_base_url(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 }

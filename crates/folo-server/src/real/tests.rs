@@ -642,3 +642,66 @@ fn delete_dataset_files_checks_registry_loaded_before_lookup() {
     assert_eq!(err.body.code, "internal", "expected unread-registry error, not not_found: {err:?}");
     store.shutdown();
 }
+
+#[test]
+fn delete_dataset_if_unused_protects_shared_and_referenced_datasets() {
+    let t = TestDir::new("real-delete-if-unused");
+    let home = t.join("home");
+    let data = t.join("yolo");
+    std::fs::create_dir_all(data.join("images/train")).unwrap();
+    std::fs::create_dir_all(data.join("labels/train")).unwrap();
+    image::RgbImage::from_pixel(32, 32, image::Rgb([100, 150, 200]))
+        .save(data.join("images/train/a.png"))
+        .unwrap();
+    std::fs::write(data.join("labels/train/a.txt"), "0 0.5 0.5 0.4 0.4\n").unwrap();
+    let req = || RegisterDataset {
+        name: None,
+        path: data.to_string_lossy().into_owned(),
+        format: DatasetFormat::Auto,
+    };
+
+    let store = RealStore::open(home.clone());
+    // 1. Exclusive newly registered dataset with no users can be rolled back cleanly.
+    let (ds1, created1) = store.register_dataset_tracked(req()).unwrap();
+    assert!(created1);
+    store.delete_dataset_if_unused(&ds1.id).unwrap();
+    assert!(store.list_datasets().unwrap().is_empty());
+
+    // 2. A second registration marks the entry shared so `delete_dataset_if_unused` refuses with 409.
+    let (ds2, created2) = store.register_dataset_tracked(req()).unwrap();
+    assert!(created2);
+    let (ds2_again, created2_again) = store.register_dataset_tracked(req()).unwrap();
+    assert!(!created2_again);
+    assert_eq!(ds2_again.id, ds2.id);
+    let err = store.delete_dataset_if_unused(&ds2.id).unwrap_err();
+    assert_eq!(err.body.code, "dataset_in_use", "{err:?}");
+    assert!(store.get_dataset(&ds2.id).is_ok());
+    store.delete_dataset(&ds2.id).unwrap();
+
+    // 3. A newly registered dataset referenced by a benchmark is protected even without a second registration.
+    let (ds3, created3) = store.register_dataset_tracked(req()).unwrap();
+    assert!(created3);
+    let bench_req = folo_api::CreateBench {
+        name: "b".into(),
+        description: String::new(),
+        source: folo_api::BenchSource::Dataset {
+            dataset_id: ds3.id.clone(),
+            split: Some(folo_api::Split::Train),
+        },
+        max_images: Some(1),
+        seed: 0,
+        plan: Some(folo_api::BenchPlan { conditions: vec![], rationale: None, designed_by: None }),
+    };
+    let _bench = store.benches().unwrap().create(&store, bench_req).unwrap();
+    let err = store.delete_dataset_if_unused(&ds3.id).unwrap_err();
+    assert_eq!(err.body.code, "dataset_in_use", "{err:?}");
+    assert!(store.get_dataset(&ds3.id).is_ok());
+
+    // 4. Datasets persisted across a restart are treated as existing (shared) and never deleted by rollback.
+    store.shutdown();
+    drop(store);
+    let reopened = RealStore::open(home);
+    let err = reopened.delete_dataset_if_unused(&ds3.id).unwrap_err();
+    assert_eq!(err.body.code, "dataset_in_use", "{err:?}");
+    reopened.shutdown();
+}

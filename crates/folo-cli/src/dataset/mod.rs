@@ -410,12 +410,43 @@ fn stats_table(name: &str, ds: &LoadedDataset, s: &DatasetStats) -> Vec<String> 
 
 // ---- convert -----------------------------------------------------------------------------------------------------
 
+/// Whole COCO split annotation files that `folo-data` could not parse or read as COCO (`invalid JSON` or missing
+/// `images` array) and therefore dropped without incrementing `skipped_images`.
+fn unreadable_coco_splits(ds: &LoadedDataset) -> Vec<&folo_data::Issue> {
+    if ds.format != Format::Coco {
+        return Vec::new();
+    }
+    ds.report
+        .issues
+        .iter()
+        .filter(|i| {
+            i.kind == folo_data::IssueKind::BrokenLabel
+                && (i.message.starts_with("invalid JSON:")
+                    || i.message == "no `images` array: not a COCO file")
+        })
+        .collect()
+}
+
 fn convert(args: ConvertArgs, out: Out) -> Result<(), CliError> {
     let to = match args.to {
         TargetFormatArg::Yolo => Format::Yolo,
         TargetFormatArg::Coco => Format::Coco,
     };
     let ds = open(&args.input, format_of(args.from))?;
+    let bad_splits = unreadable_coco_splits(&ds);
+    if !bad_splits.is_empty() {
+        let first = bad_splits[0];
+        let mut msg = format!("{}: {}", rel(&first.path, &ds.root), first.message);
+        if bad_splits.len() > 1 {
+            msg.push_str(&format!(" (+{} more unreadable annotation file(s))", bad_splits.len() - 1));
+        }
+        return Err(CliError::new(ExitCode::Runtime, "invalid_dataset", msg).hint(
+            folo_api::json::cli_command(
+                "fix the corrupt annotation file; run `folo dataset check {dataset}` to inspect all issues",
+                &[("dataset", &args.input)],
+            ),
+        ));
+    }
     check_convert_output_outside(&args.output, &args.input, &ds)?;
     ensure_empty_output(&args.output)?;
     let skipped = ds.report.skipped_images() + ds.report.skipped_label_images();

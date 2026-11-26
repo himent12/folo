@@ -921,6 +921,58 @@ fn check_coco_reconciles_boxes_against_real_image_dimensions() {
     assert_eq!((st["boxes"].as_u64(), st["empty_images"].as_u64()), (Some(1), Some(1)), "{st}");
 }
 
+/// `folo dataset convert` fails loudly (instead of silently dropping a split) when a COCO split annotation file is
+/// corrupt JSON or lacks an `images` array, and writes no partial output directory.
+#[test]
+fn convert_refuses_corrupt_coco_split_annotation_file() {
+    let t = TestDir::new("cli-convert-corrupt-coco");
+    let src = t.join("synthetic");
+    let (code, _, stderr) = folo(&[
+        "dataset",
+        "synth",
+        s(&src),
+        "--images",
+        "8",
+        "--imgsz",
+        "64",
+        "--val-frac",
+        "0.5",
+        "--seed",
+        "13",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let coco = t.join("coco");
+    let (code, _, stderr) = folo(&["dataset", "convert", s(&src), s(&coco), "--to", "coco"]);
+    assert_eq!(code, 0, "{stderr}");
+
+    // Case 1: truncated/invalid JSON in instances_val.json.
+    std::fs::write(coco.join("annotations/instances_val.json"), "{\"images\":[").unwrap();
+    let out1 = t.join("converted_bad_json");
+    let (code, stdout, _) = folo(&["dataset", "convert", s(&coco), s(&out1), "--to", "yolo", "--json"]);
+    let err = &json_lines(&stdout).pop().unwrap()["error"];
+    assert_eq!((code, err["code"].as_str()), (1, Some("invalid_dataset")), "{err}");
+    let msg = err["message"].as_str().unwrap();
+    assert!(
+        msg.contains("annotations/instances_val.json") && msg.contains("invalid JSON"),
+        "expected filename and parse error: {msg}"
+    );
+    assert!(!out1.exists(), "must not publish a partial output dataset");
+
+    // Case 2: valid JSON but missing `images` array (not a COCO file).
+    std::fs::write(coco.join("annotations/instances_val.json"), "{}").unwrap();
+    let out2 = t.join("converted_no_images");
+    let (code, stdout, _) = folo(&["dataset", "convert", s(&coco), s(&out2), "--to", "yolo", "--json"]);
+    let err = &json_lines(&stdout).pop().unwrap()["error"];
+    assert_eq!((code, err["code"].as_str()), (1, Some("invalid_dataset")), "{err}");
+    let msg = err["message"].as_str().unwrap();
+    assert!(
+        msg.contains("annotations/instances_val.json") && msg.contains("no `images` array"),
+        "expected filename and missing-images error: {msg}"
+    );
+    assert!(!out2.exists(), "must not publish a partial output dataset");
+}
+
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
 fn folo_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));
