@@ -26,14 +26,33 @@ export const NOT_FOLO = 'This address answered, but not as a FOLO server.';
 export const TOKEN_WALL = "This server needs a token (folo serve --token), which Studio can't send.";
 
 /**
+ * Probes `HEAD /api/runs` with `cache: 'no-store'` so browsers and proxies cannot serve stale auth responses across
+ * token changes or server restarts. If a reverse proxy rejects `HEAD` (`405`/`501`), falls back to a no-store `GET`
+ * and cancels the response body immediately.
+ */
+async function probeRuns(base: string, signal: AbortSignal): Promise<number> {
+  const res = await fetch(`${base}/api/runs`, { method: 'HEAD', cache: 'no-store', signal });
+  if (res.status !== 405 && res.status !== 501) return res.status;
+  const get = await fetch(`${base}/api/runs`, {
+    method: 'GET',
+    cache: 'no-store',
+    headers: { accept: 'application/json' },
+    signal,
+  });
+  void get.body?.cancel?.().catch(() => {});
+  return get.status;
+}
+
+/**
  * Whether the FOLO server at `base` refuses Studio's requests (a token wall or a proxy refusing access).
  * `GET /api/health` is the one path `folo serve --token` (and many auth proxies) leave open, so its answer cannot
- * tell; a `HEAD` of the runs list (what Studio polls anyway, without the body) can: `401` is the token wall, `403` is
- * a refusal. No answer is not a wall: the requests that follow will find the server gone.
+ * tell; a `HEAD` of the runs list (what Studio polls anyway, without the body, falling back to `GET` on `405`/`501`)
+ * can: `401` is the token wall, `403` is a refusal. No answer is not a wall: the requests that follow will find the
+ * server gone.
  */
 export async function tokenWall(base: string, signal: AbortSignal): Promise<401 | 403 | null> {
   try {
-    const { status } = await fetch(`${base}/api/runs`, { method: 'HEAD', signal });
+    const status = await probeRuns(base, signal);
     return status === 401 || status === 403 ? status : null;
   } catch (e) {
     if (signal.aborted) throw e;
@@ -48,14 +67,15 @@ export const NO_WALL = 200;
 export const REFUSES_ACCESS = 'This server refuses access (403).';
 
 /**
- * What the token check (`HEAD /api/runs`, as `tokenWall`) says about the server in use letting Studio in: `'in'` for a
- * 2xx, the status for a 401 or 403 (refused), null when it cannot tell (no answer, a timeout, any other status).
+ * What the token check (`HEAD /api/runs`, falling back to `GET` on `405`/`501`, as `tokenWall`) says about the server
+ * in use letting Studio in: `'in'` for a 2xx, the status for a 401 or 403 (refused), null when it cannot tell (no
+ * answer, a timeout, any other status).
  */
 export type AccessAnswer = 'in' | 401 | 403 | null;
 
 export async function accessCheck(base: string, signal: AbortSignal): Promise<AccessAnswer> {
   try {
-    const { status } = await fetch(`${base}/api/runs`, { method: 'HEAD', signal });
+    const status = await probeRuns(base, signal);
     return status >= 200 && status < 300 ? 'in' : status === 401 || status === 403 ? status : null;
   } catch {
     return null;
@@ -76,7 +96,7 @@ export function refusedWords(status: 401 | 403): string {
 export function earlyTokenWall(base: string, signal: AbortSignal): { answer: Promise<boolean | null>; cancel: () => void } {
   const mine = new AbortController();
   let out = true;
-  const answer = fetch(`${base}/api/runs`, { method: 'HEAD', signal: AbortSignal.any([signal, mine.signal]) }).then(
+  const answer = fetch(`${base}/api/runs`, { method: 'HEAD', cache: 'no-store', signal: AbortSignal.any([signal, mine.signal]) }).then(
     (r) => {
       out = false;
       return r.status === 401 ? true : r.status === NO_WALL ? false : null;

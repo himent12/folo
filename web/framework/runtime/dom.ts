@@ -714,6 +714,7 @@ export function toClass(value: unknown, scope: string | undefined, directives?: 
       if (directives[key]) c = c ? c + ' ' + key : key;
       else if (c.length) {
         const len = key.length;
+        if (!len) continue;
         let a = 0;
         while ((a = c.indexOf(key, a)) >= 0) {
           const b = a + len;

@@ -424,7 +424,11 @@ export default function Playground() {
     const file = localWeights.get().get(id ?? '');
     void retryTick.get();
     if (!id || !s || untrack(() => restored(id, s, on))) {
-      untrack(() => predicting.set(false));
+      untrack(() => {
+        predicting.set(false);
+        error.set(null);
+        weightsMissing.set(false);
+      });
       return;
     }
     const ctrl = new AbortController();

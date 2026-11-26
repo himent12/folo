@@ -82,6 +82,28 @@ describe('shareApi', () => {
     await vi.advanceTimersByTimeAsync(10);
     await expect(b).resolves.toEqual([{ id: 'a', n: 1 }]);
   });
+
+  it('evicts a same-turn aborted shared read so a later caller in the same turn starts a live request (#309)', async () => {
+    const { api, calls } = counting();
+    const s = shareApi(api);
+    const first = new AbortController();
+    const second = new AbortController();
+    const a = together(() => s.runs(first.signal)).value;
+    // First caller aborts synchronously before the turn ends.
+    first.abort();
+    await expect(a).rejects.toThrow('aborted');
+    // Second caller in the exact same turn must start a fresh request, not inherit AbortError.
+    const b = together(() => s.runs(second.signal)).value;
+    expect(calls).toEqual(['runs', 'runs']);
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(b).resolves.toEqual([{ id: 'a', n: 2 }]);
+
+    // An already-aborted signal must reject immediately without issuing a request or poisoning the turn.
+    const already = new AbortController();
+    already.abort();
+    await expect(together(() => s.runs(already.signal)).value).rejects.toThrow('aborted');
+    expect(calls).toEqual(['runs', 'runs']);
+  });
 });
 
 describe('Resource sharing', () => {
@@ -162,6 +184,20 @@ describe('pollTogether', () => {
     vi.advanceTimersByTime(1);
     expect(c).toHaveBeenCalledOnce();
     stopC();
+  });
+
+  it('does not attach a same-turn poller to a dead group after the first poller unsubscribes (#309)', () => {
+    const a = vi.fn();
+    const b = vi.fn();
+    const stopA = pollTogether(50, a);
+    stopA();
+    const stopB = pollTogether(50, b);
+    expect(vi.getTimerCount()).toBe(1);
+    vi.advanceTimersByTime(100);
+    expect(a).not.toHaveBeenCalled();
+    expect(b).toHaveBeenCalledTimes(2);
+    stopB();
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

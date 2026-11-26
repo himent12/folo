@@ -6,7 +6,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
+import { Resource } from '$lib/api/resource';
+import { watched } from '$lib/shell/runList';
 import { toast } from '$lib/ui/toast';
+import { createRoot } from 'fw';
 import { render } from '../../../framework/testing';
 import Cloud from './Cloud';
 
@@ -484,5 +487,74 @@ describe('Settings › Cloud', () => {
     expect(urlInput.getAttribute('aria-invalid')).toBe('true');
     expect(dialog()).toBe(d);
     expect(target.querySelectorAll('.cx-row .cx-name')).toHaveLength(0);
+  });
+
+  it('reuses watched.source for runs, skips overlapping or connecting instance polls, and cancels terminate focus rAF on unmount (#309)', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+    const prevSource = watched.source;
+    let disposeSource: (() => void) | undefined;
+    try {
+      const api = new MockApi('cloud-training', 0);
+      const runsSpy = vi.spyOn(api, 'runs');
+      hub.api = api;
+      // Prime watched.source (as RunWatch does in the shell).
+      disposeSource = createRoot((dispose) => {
+        watched.source = new Resource((s) => hub.api.runs(s));
+        return dispose;
+      });
+      flushSync();
+      await vi.waitFor(() => {
+        flushSync();
+        expect(watched.source?.data).toBeDefined();
+      });
+      expect(runsSpy).toHaveBeenCalledTimes(1);
+
+      // Hold the second cloudInstances poll open so we can verify no overlapping poll fires.
+      let releasePoll!: () => void;
+      const realInst = api.cloudInstances.bind(api);
+      let instCalls = 0;
+      const instSpy = vi.spyOn(api, 'cloudInstances').mockImplementation(async () => {
+        instCalls++;
+        if (instCalls === 2) {
+          await new Promise<void>((r) => (releasePoll = r));
+        }
+        return realInst();
+      });
+
+      open(api);
+      await until(() => target.querySelector('table.inst tbody tr'), 'live instance row');
+      // Started from watched.source: zero additional GET /api/runs!
+      expect(runsSpy).toHaveBeenCalledTimes(1);
+      expect(instSpy).toHaveBeenCalledTimes(1);
+
+      // Tick while connecting -> skipped.
+      hub.mode = 'connecting';
+      flushSync();
+      vi.advanceTimersByTime(5000);
+      expect(instSpy).toHaveBeenCalledTimes(1);
+
+      // Back to mock -> first poll fires and stays in flight; next tick skips while in flight.
+      hub.mode = 'mock';
+      flushSync();
+      vi.advanceTimersByTime(5000);
+      expect(instSpy).toHaveBeenCalledTimes(2);
+      vi.advanceTimersByTime(5000);
+      expect(instSpy).toHaveBeenCalledTimes(2);
+      releasePoll();
+      await Promise.resolve();
+
+      // askTerminate schedules rAF; unmounting immediately cancels it so it never steals focus.
+      const cancelRaf = vi.spyOn(globalThis, 'cancelAnimationFrame');
+      const row = target.querySelector('table.inst tbody tr')!;
+      button(row, 'Terminate')!.click();
+      flushSync();
+      unmount(c!);
+      c = undefined;
+      expect(cancelRaf).toHaveBeenCalled();
+    } finally {
+      disposeSource?.();
+      watched.source = prevSource;
+      vi.useRealTimers();
+    }
   });
 });

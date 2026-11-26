@@ -935,4 +935,37 @@ describe('Playground: the rail (from 1024 px)', () => {
     flushSync();
     expect(target.querySelectorAll('#pg-panel tbody tr').length).toBe(1);
   });
+
+  it('clears a stale prediction error when switching to a model whose session result is restored', async () => {
+    // Seed a cached session result for m_shapes_n on sample 0 before opening Playground on failing m_shapes_s.
+    const api = new MockApi('oom', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_s');
+    c = mount(Playground, { target });
+    const sampleBtn = await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image');
+    sampleBtn.click();
+    await until(() => target.querySelector('.notice .title')?.textContent === 'Prediction failed', 'oom notice');
+
+    // Cache a valid session result for m_shapes_n on the current source, then switch model to m_shapes_n.
+    const cur = session.get()!;
+    session.set({
+      ...cur,
+      pred: {
+        model_id: 'm_shapes_n',
+        image: { width: 640, height: 640 },
+        boxes: [{ class: 0, name: 'circle', score: 0.9, x1: 10, y1: 10, x2: 100, y2: 100 }],
+        timing: { preprocess_ms: 1, inference_ms: 2, postprocess_ms: 1, total_ms: 4 },
+        device: 'cpu',
+        cold: false,
+      },
+    });
+    const useSmaller = [...target.querySelectorAll<HTMLButtonElement>('.notice button')].find((b) => b.textContent?.includes('Use shapes-n-best'))!;
+    useSmaller.click();
+    await until(() => target.querySelector('.notice') === null, 'stale notice cleared');
+    expect(target.querySelector('.notice')).toBeNull();
+  });
 });

@@ -9,7 +9,7 @@ import OfflineNotice from '$lib/shell/OfflineNotice';
 import ConnectionPanel from '../../routes/settings/ConnectionPanel';
 import { render } from '../../../framework/testing';
 import { ApiError } from './client';
-import { isHealth, NOT_FOLO, refusal, REFUSES_ACCESS, TOKEN_WALL } from './handshake';
+import { accessCheck, earlyTokenWall, isHealth, NOT_FOLO, refusal, REFUSES_ACCESS, TOKEN_WALL, tokenWall } from './handshake';
 import { CONNECT_TIMEOUT, hub, TOKEN_GRACE } from './index';
 import { PROBE_DELAYS } from './reach';
 
@@ -450,4 +450,46 @@ describe('the first handshake with an address that answers', () => {
       c.unmount();
     });
   }
+
+  it('sends cache: no-store on auth probes and falls back to GET when a proxy rejects HEAD with 405 or 501 (#382)', async () => {
+    for (const rejectStatus of [405, 501] as const) {
+      for (const [getStatus, expectedWall, expectedAccess] of [
+        [200, null, 'in'],
+        [401, 401, 401],
+        [403, 403, 403],
+      ] as const) {
+        const calls: Array<{ method?: string; cache?: RequestCache }> = [];
+        let cancelled = 0;
+        vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+          calls.push({ method: init?.method, cache: init?.cache });
+          if (init?.method === 'HEAD') return new Response(null, { status: rejectStatus });
+          const body = new ReadableStream({
+            cancel() {
+              cancelled++;
+            },
+          });
+          return new Response(body, { status: getStatus });
+        });
+        const ctrl = new AbortController();
+        expect(await tokenWall('http://folo.test', ctrl.signal)).toBe(expectedWall);
+        expect(await accessCheck('http://folo.test', ctrl.signal)).toBe(expectedAccess);
+        expect(calls).toEqual([
+          { method: 'HEAD', cache: 'no-store' },
+          { method: 'GET', cache: 'no-store' },
+          { method: 'HEAD', cache: 'no-store' },
+          { method: 'GET', cache: 'no-store' },
+        ]);
+        expect(cancelled).toBe(2);
+      }
+    }
+
+    const earlyInits: RequestInit[] = [];
+    vi.stubGlobal('fetch', async (_url: string, init?: RequestInit) => {
+      if (init) earlyInits.push(init);
+      return new Response(null, { status: 200 });
+    });
+    const early = earlyTokenWall('http://folo.test', new AbortController().signal);
+    expect(await early.answer).toBe(false);
+    expect(earlyInits[0]?.cache).toBe('no-store');
+  });
 });

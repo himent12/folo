@@ -858,4 +858,28 @@ describe('the labeling editor: reviewing', () => {
       closeSpy.mockRestore();
     }
   });
+
+  it('ignores stale save and review settlements after hub.epoch changes and blocks concurrent save/review', async () => {
+    await openEditor('1', 'lb_51d0');
+    const saveGate = deferred<Awaited<ReturnType<typeof hub.api.updateLabelImage>>>();
+    vi.spyOn(hub.api, 'updateLabelImage').mockReturnValue(saveGate.promise);
+    const reviewSpy = vi.spyOn(hub.api, 'reviewLabelImage');
+
+    // Make an edit and start Save; concurrent review attempt while Save is in flight is blocked.
+    click(inEditor('Add box'));
+    click(inEditor('Save'));
+    flushSync();
+    key('Enter');
+    flushSync();
+    expect(reviewSpy).not.toHaveBeenCalled();
+
+    // Server epoch switches before Save settles: late settlement must not stamp status or overwrite live state.
+    const one = (await hub.api.labelImages('lb_51d0', { ids: ['1'] })).images[0]!;
+    hub.epoch++;
+    flushSync();
+    saveGate.resolve({ ...one, status: 'labeled', source: 'manual', reviewed: true });
+    await new Promise((r) => setTimeout(r, 10));
+    flushSync();
+    expect(editor()?.textContent ?? '').not.toContain('Saved');
+  });
 });

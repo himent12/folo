@@ -242,13 +242,14 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     }
   }
   _subscribe(node: Link): void {
-    if (this._targets === undefined) {
+    const first = this._targets === undefined;
+    subscribeLink(this, node);
+    if (first) {
       this._flags |= OUTDATED | TRACKING;
       // First subscriber: subscribe to the sources too (a computed nobody watches holds no subscriptions, so it can be
       // garbage collected with whatever created it).
       for (let n = this._sources; n !== undefined; n = n._ns) n._s._subscribe(n);
     }
-    subscribeLink(this, node);
   }
   _unsubscribe(node: Link): void {
     if (this._targets === undefined) return;
