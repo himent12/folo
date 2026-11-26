@@ -838,3 +838,55 @@ fn bootstrap_sparse_tp_matches_reference_with_all_fp_and_non_monotonic_tp() {
         );
     }
 }
+
+#[test]
+fn calibration_floor_boundaries_and_extremes() {
+    // All detections strictly below CALIBRATION_FLOOR (0.1): calibration is not measured (`None`) and the entry
+    // is partial, even when `scored` is true.
+    let below_floor = vec![Sample {
+        truths: vec![t(0, 0.0, 0.0, 10.0, 10.0)],
+        detections: vec![d(0, 0.09, 0.0, 0.0, 10.0, 10.0), d(0, 0.0, 50.0, 50.0, 60.0, 60.0)],
+    }];
+    let ev = evaluate(&below_floor, 1, true, 0);
+    assert_eq!(ev.calibration, None);
+    let sc = score(&ev, None, true);
+    assert!(sc.partial && sc.axes[3].value.is_none());
+
+    // Exact boundary at 0.1 enters bin 1 ([0.1, 0.2)); exact 1.0 enters bin 9 ([0.9, 1.0]).
+    let boundary = vec![Sample {
+        truths: vec![t(0, 0.0, 0.0, 10.0, 10.0)],
+        detections: vec![
+            d(0, 1.0, 0.0, 0.0, 10.0, 10.0),   // right at 1.0 -> |1.0 - 1.0| = 0
+            d(0, 0.1, 50.0, 50.0, 60.0, 60.0), // wrong at 0.1 -> |0.1 - 0.0| = 0.1
+        ],
+    }];
+    let cal = evaluate(&boundary, 1, true, 0).calibration.unwrap();
+    assert_eq!(cal.detections, 2);
+    assert_eq!((cal.bins[1].count, cal.bins[9].count), (1, 1));
+    assert!(close(cal.ece, 0.05), "{}", cal.ece);
+
+    // Perfect calibration: two detections at 0.5, one right and one wrong -> bin mean 0.5, precision 0.5 -> ECE 0.
+    let perfect = vec![Sample {
+        truths: vec![t(0, 0.0, 0.0, 10.0, 10.0)],
+        detections: vec![
+            d(0, 0.5, 0.0, 0.0, 10.0, 10.0),   // right
+            d(0, 0.5, 50.0, 50.0, 60.0, 60.0), // wrong
+        ],
+    }];
+    let ev = evaluate(&perfect, 1, true, 0);
+    let cal = ev.calibration.as_ref().unwrap();
+    assert!(close(cal.ece, 0.0), "{}", cal.ece);
+    let sc = score(&ev, None, true);
+    assert!(!sc.partial && close(sc.axes[3].value.unwrap(), 1.0));
+
+    // Completely overconfident false positives at 1.0 -> ECE 1.0, calibration axis 0.0.
+    let overconfident = vec![Sample {
+        truths: vec![t(0, 0.0, 0.0, 10.0, 10.0)],
+        detections: vec![d(0, 1.0, 50.0, 50.0, 60.0, 60.0)],
+    }];
+    let ev = evaluate(&overconfident, 1, true, 0);
+    let cal = ev.calibration.as_ref().unwrap();
+    assert!(close(cal.ece, 1.0), "{}", cal.ece);
+    let sc = score(&ev, None, true);
+    assert!(!sc.partial && close(sc.axes[3].value.unwrap(), 0.0));
+}

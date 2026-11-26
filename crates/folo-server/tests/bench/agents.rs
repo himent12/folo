@@ -8,7 +8,7 @@ use folo_test_support::TestDir;
 use serde_json::json;
 
 use super::harness::{
-    Step, axis, bench, dataset, delete, ended, err, fixture, get, ok, paid, post, put, send, small_plan,
+    Step, axis, bench, dataset, delete, ended, err, fixture, get, ok, page, paid, post, put, send, small_plan,
 };
 
 #[tokio::test(flavor = "multi_thread")]
@@ -25,14 +25,16 @@ async fn agent_entries_follow_the_labeling_policy() {
     let entries = format!("/api/bench/benchmarks/{}/entries", b.id);
     let agent = json!({ "contestant": { "kind": "agent", "agent": "claude" } });
 
-    // Defaults: the first 48 images (here all 4), unchanged only, unscored; usage summed over the calls.
+    // Defaults: the first 48 images (here all 4), unchanged only; starts requesting confidences (`scored: true`),
+    // and falls back to `scored: false` when the default scripted reply omits confidences.
     let e: BenchEntry = ok(app, post(&entries, agent.clone())).await;
-    assert_eq!((e.name.as_str(), e.images, e.conditions, e.scored), ("Claude Code (small)", 4, false, false));
+    assert_eq!((e.name.as_str(), e.images, e.conditions, e.scored), ("Claude Code (small)", 4, false, true));
     assert!(
         matches!(&e.contestant, BenchContestant::Agent { agent: LabelAgentId::Claude, model: Some(m), effort: LabelEffort::Medium } if m == "small")
     );
     let done = ended(app, &b.id, &e.id).await;
     assert_eq!(done.status, BenchEntryStatus::Done, "{done:?}");
+    assert!(!done.scored, "legacy reply without confidences falls back to unscored");
     let usage = done.usage.unwrap();
     assert_eq!((usage.calls, usage.input_tokens, usage.output_tokens), (2, 2000, 100));
     let score = done.score.unwrap();
@@ -41,10 +43,15 @@ async fn agent_entries_follow_the_labeling_policy() {
             && axis(&score, BenchAxis::Calibration).is_none()
             && axis(&score, BenchAxis::Robustness).is_none()
     );
-    // Asked as agent labeling asks: the classes, the description as the instructions, two images a call.
+    // Asked with the benchmark confidence prompt/schema, the classes, description, and two images per call.
     let prompts = f.agent.prompts.lock().unwrap().clone();
     assert_eq!(prompts.len(), 2);
     assert_eq!(prompts[0], ("Classes: circle, square\nInstructions: Count the shapes.\n2 images follow, in order: image 1 (64 x 64 pixels), image 2 (64 x 64 pixels).".to_string(), 2));
+    assert_eq!(f.agent.systems.lock().unwrap()[0], folo_server::label::prompt::BENCH_SYSTEM);
+    assert_eq!(
+        f.agent.schemas.lock().unwrap()[0]["properties"]["images"]["items"]["properties"]["boxes"]["items"]["minItems"],
+        json!(6)
+    );
     let gallery: BenchEntryImagePage = ok(app, get(&format!("{entries}/{}/images", e.id))).await;
     assert!(gallery.images.iter().all(|i| i.detections.len() == 1 && i.detections[0].score == 1.0));
 
@@ -215,4 +222,187 @@ async fn designing_a_plan_with_an_agent() {
     );
     err(app, post(&uri, json!({ "agent": "codex" })), StatusCode::NOT_IMPLEMENTED, "not_supported").await;
     err(app, post(&uri, json!({ "agent": "robot" })), StatusCode::UNPROCESSABLE_ENTITY, "invalid_body").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_entries_score_confidences_and_calibration_with_fallbacks() {
+    let t = TestDir::new("bench-agent-conf");
+    let f = fixture(&t.join("home"));
+    let app = &f.app;
+    let ds = dataset(app, "shapes", 20).await;
+    // Empty condition plan so a full-image agent entry with confidences is complete (not partial).
+    let b = bench(
+        app,
+        json!({
+            "name": "clean-only",
+            "description": "Find circles and squares.",
+            "source": { "kind": "dataset", "dataset_id": ds.id },
+            "plan": { "conditions": [] }
+        }),
+    )
+    .await;
+    let imgs = page(app, &b.id, "").await.images;
+    assert_eq!(imgs.len(), 4);
+    let class_name = |c: u32| b.classes[c as usize].clone();
+    let entries = format!("/api/bench/benchmarks/{}/entries", b.id);
+    let run_agent = json!({ "contestant": { "kind": "agent", "agent": "claude" } });
+
+    // Helper: turn one image's ground-truth boxes into scored 6-item boxes or object boxes at `conf`.
+    let truth_boxes = |im: &BenchImage, conf: f32| -> Vec<serde_json::Value> {
+        im.boxes.iter().map(|bx| json!([class_name(bx.class), bx.x1, bx.y1, bx.x2, bx.y2, conf])).collect()
+    };
+    let obj_boxes = |im: &BenchImage, conf: f32| -> Vec<serde_json::Value> {
+        im.boxes
+            .iter()
+            .map(|bx| json!({ "label": class_name(bx.class), "box": [bx.x1, bx.y1, bx.x2, bx.y2], "confidence": conf }))
+            .collect()
+    };
+
+    // 1a. Single-batch (max_images: 2) exact hand-worked ECE & calibration verification (mixing 6-item list
+    // boxes on image 1 with object boxes carrying `confidence` on image 2).
+    // Expected ECE over (N_right at 0.90 + 1 wrong at 0.40):
+    //   bin 9 ([0.9, 1.0]): N_right items, mean conf 0.9, prec 1.0 -> |0.9 - 1.0| = 0.1
+    //   bin 4 ([0.4, 0.5)): 1 item, mean conf 0.4, prec 0.0 -> |0.4 - 0.0| = 0.4
+    //   ECE = (N_right * 0.1 + 1 * 0.4) / (N_right + 1).
+    let mut img1_boxes = truth_boxes(&imgs[0], 0.9);
+    // 1x1 box of the opposite class at (0,0)-(2,2) cannot match a shape in this image of that class unless one
+    // sits at (0,0)-(2,2); check explicitly so the test is 100% deterministic.
+    let wrong_box = (0..62)
+        .find_map(|y| {
+            let cand = (0.0f32, y as f32, 2.0f32, (y + 2) as f32);
+            let overlaps = imgs[0].boxes.iter().any(|bx| {
+                bx.class == 0 && cand.0 < bx.x2 && cand.2 > bx.x1 && cand.1 < bx.y2 && cand.3 > bx.y1
+            });
+            (!overlaps).then_some(cand)
+        })
+        .expect("free 2x2 patch exists");
+    img1_boxes.push(json!([class_name(0), wrong_box.0, wrong_box.1, wrong_box.2, wrong_box.3, 0.4]));
+    let n_right = (imgs[0].boxes.len() + imgs[1].boxes.len()) as f64;
+    assert!(n_right >= 1.0);
+    let reply_scored = json!({
+        "images": [
+            { "image": 1, "boxes": img1_boxes },
+            { "image": 2, "boxes": obj_boxes(&imgs[1], 0.9) }
+        ]
+    });
+    f.agent.script(vec![Step::Reply(reply_scored.to_string())]);
+    let e: BenchEntry = ok(
+        app,
+        post(&entries, json!({ "contestant": { "kind": "agent", "agent": "claude" }, "max_images": 2 })),
+    )
+    .await;
+    assert!(e.scored);
+    let done = ended(app, &b.id, &e.id).await;
+    assert_eq!(done.status, BenchEntryStatus::Done, "{done:?}");
+    assert!(done.scored);
+    let res: BenchResult = ok(app, get(&format!("{entries}/{}/result", e.id))).await;
+    let cal = res.calibration.as_ref().expect("calibration measured for scored agent");
+    let expected_ece = (n_right * 0.1 + 0.4) / (n_right + 1.0);
+    assert_eq!(cal.detections as usize, imgs[0].boxes.len() + imgs[1].boxes.len() + 1);
+    assert!((cal.ece as f64 - expected_ece).abs() < 1e-5, "ece={} expected={expected_ece}", cal.ece);
+    let score = done.score.as_ref().unwrap();
+    let cal_axis = axis(score, BenchAxis::Calibration).expect("calibration axis populated");
+    assert!((cal_axis as f64 - (1.0 - expected_ece)).abs() < 1e-5, "cal_axis={cal_axis}");
+    assert_eq!(res.self_labeling.curve.len(), 101, "scored agent gets full 101-point self-labeling curve");
+    assert!((res.accuracy.map50_95 - 1.0).abs() < 1e-5, "perfect truth boxes ranked above 0.4 FP");
+    let gallery: BenchEntryImagePage = ok(app, get(&format!("{entries}/{}/images", e.id))).await;
+    assert!(gallery.images[0].detections.iter().all(|d| (d.score - 0.9).abs() < 1e-5));
+
+    // 1b. Complete (all 4 images, empty plan) with real confidences -> NOT partial!
+    let uniform_scored = json!({
+        "images": [
+            { "image": 1, "boxes": [["circle", 4, 4, 24, 24, 0.8]] },
+            { "image": 2, "boxes": [["square", 4, 4, 24, 24, 0.6]] }
+        ]
+    });
+    f.agent.script(vec![Step::Reply(uniform_scored.to_string()), Step::Reply(uniform_scored.to_string())]);
+    let e: BenchEntry = ok(app, post(&entries, run_agent.clone())).await;
+    let done = ended(app, &b.id, &e.id).await;
+    assert_eq!(done.status, BenchEntryStatus::Done);
+    assert!(done.scored);
+    assert!(!done.score.as_ref().unwrap().partial, "complete agent entry with confidences is not partial");
+    assert!(axis(done.score.as_ref().unwrap(), BenchAxis::Calibration).is_some());
+
+    // 2. Mixed confidences (one box with confidence, one legacy 5-item box without) -> falls back to unscored
+    // so constant 1.0 fallback scores never fabricate a calibration axis.
+    let reply_mixed = json!({
+        "images": [
+            { "image": 1, "boxes": [["circle", 4, 4, 24, 24, 0.85], ["square", 28, 28, 56, 56]] },
+            { "image": 2, "boxes": [["circle", 4, 4, 24, 24, 0.75]] }
+        ]
+    });
+    f.agent.script(vec![Step::Reply(reply_mixed.to_string())]);
+    let e: BenchEntry = ok(
+        app,
+        post(&entries, json!({ "contestant": { "kind": "agent", "agent": "claude" }, "max_images": 2 })),
+    )
+    .await;
+    let done = ended(app, &b.id, &e.id).await;
+    assert_eq!(done.status, BenchEntryStatus::Done);
+    assert!(!done.scored, "mixed replies must fall back to unscored");
+    let res: BenchResult = ok(app, get(&format!("{entries}/{}/result", e.id))).await;
+    assert_eq!(res.calibration, None);
+    assert_eq!(res.self_labeling.curve.len(), 1);
+    assert!(done.score.as_ref().unwrap().partial);
+    let gallery: BenchEntryImagePage = ok(app, get(&format!("{entries}/{}/images", e.id))).await;
+    assert!(gallery.images.iter().flat_map(|i| &i.detections).all(|d| d.score == 1.0));
+
+    // 3. Malformed / out-of-range confidences alongside valid ones: bad boxes are dropped, valid ones kept and calibrated.
+    let reply_malformed = json!({
+        "images": [
+            { "image": 1, "boxes": [["circle", 4, 4, 24, 24, 1.5], ["circle", 4, 4, 24, 24, -0.2], ["circle", 4, 4, 24, 24, "high"], ["circle", 4, 4, 24, 24, 0.7]] },
+            { "image": 2, "boxes": [["square", 4, 4, 24, 24, 0.8]] }
+        ]
+    });
+    f.agent.script(vec![Step::Reply(reply_malformed.to_string())]);
+    let e: BenchEntry = ok(
+        app,
+        post(&entries, json!({ "contestant": { "kind": "agent", "agent": "claude" }, "max_images": 2 })),
+    )
+    .await;
+    let done = ended(app, &b.id, &e.id).await;
+    assert_eq!(done.status, BenchEntryStatus::Done);
+    assert!(done.scored);
+    let res: BenchResult = ok(app, get(&format!("{entries}/{}/result", e.id))).await;
+    assert_eq!(
+        res.calibration.as_ref().unwrap().detections,
+        2,
+        "only the 2 valid detections enter calibration"
+    );
+
+    // 4. All detections below CALIBRATION_FLOOR (0.1): entry stays scored, calibration is None, partial is true.
+    let reply_below_floor = json!({
+        "images": [
+            { "image": 1, "boxes": [["circle", 4, 4, 24, 24, 0.05]] },
+            { "image": 2, "boxes": [["square", 4, 4, 24, 24, 0.0]] }
+        ]
+    });
+    f.agent.script(vec![Step::Reply(reply_below_floor.to_string())]);
+    let e: BenchEntry = ok(
+        app,
+        post(&entries, json!({ "contestant": { "kind": "agent", "agent": "claude" }, "max_images": 2 })),
+    )
+    .await;
+    let done = ended(app, &b.id, &e.id).await;
+    assert_eq!(done.status, BenchEntryStatus::Done);
+    assert!(done.scored);
+    assert!(done.score.as_ref().unwrap().partial);
+    let res: BenchResult = ok(app, get(&format!("{entries}/{}/result", e.id))).await;
+    assert_eq!(res.calibration, None);
+    assert_eq!(res.self_labeling.curve.len(), 101);
+
+    // 5. Zero detections across every image: calibration is None and partial is true (never fabricated).
+    let reply_empty = json!({ "images": [{ "image": 1, "boxes": [] }, { "image": 2, "boxes": [] }] });
+    f.agent.script(vec![Step::Reply(reply_empty.to_string())]);
+    let e: BenchEntry = ok(
+        app,
+        post(&entries, json!({ "contestant": { "kind": "agent", "agent": "claude" }, "max_images": 2 })),
+    )
+    .await;
+    let done = ended(app, &b.id, &e.id).await;
+    assert_eq!(done.status, BenchEntryStatus::Done);
+    assert!(done.scored);
+    assert!(done.score.as_ref().unwrap().partial);
+    let res: BenchResult = ok(app, get(&format!("{entries}/{}/result", e.id))).await;
+    assert_eq!(res.calibration, None);
 }

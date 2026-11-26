@@ -476,6 +476,7 @@ pub fn finish_entry(
     match outcome {
         Ok(Some((graded, speed))) => {
             entry.status = BenchEntryStatus::Done;
+            entry.scored = graded.scored;
             entry.progress.done = entry.progress.total;
             entry.progress.condition = None;
             entry.progress.severity = None;

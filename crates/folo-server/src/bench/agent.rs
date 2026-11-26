@@ -1,8 +1,11 @@
-//! Agent entries: a coding agent (Claude Code, Codex, Antigravity) asked for the boxes of a benchmark's images exactly as agent
-//! labeling asks for them ([`crate::label::prompt`]: the same system prompt, the benchmark's classes and its
-//! description as the instructions, the same reply checks), with the same batching, parallelism and failure
-//! policy as a labeling run. Agents are IO-bound, so every agent entry has a thread of its own and never waits
-//! for the model queue.
+//! Agent entries: a coding agent (Claude Code, Codex, Antigravity) asked for the boxes and calibrated confidences
+//! of a benchmark's images ([`crate::label::prompt::BENCH_SYSTEM`]: the benchmark's classes and its description as
+//! the instructions, the same reply checks, batching, parallelism and failure policy as a labeling run). When the
+//! agent reports valid confidences on its detections, the entry is graded as scored (populating the calibration axis
+//! and confidence-thresholded self-labeling curve); if an agent omits confidences on any detection (legacy or mixed
+//! replies), the entry falls back cleanly to unscored grading so fallback constant scores never fabricate
+//! calibration. Agents are IO-bound, so every agent entry has a thread of its own and never waits for the model
+//! queue.
 //!
 //! **Failures.** A call that cannot be made (the CLI missing or signed out, an unknown model, a rate limit) ends
 //! the entry at once, as it ends a labeling run, and so do three calls in a row that time out or return garbage.
@@ -64,8 +67,8 @@ struct Run<'a> {
     passes: Vec<Option<(Condition, u8)>>,
     schema: serde_json::Value,
     queue: Mutex<VecDeque<Unit>>,
-    /// Per pass, per image: the detections, once answered.
-    answers: Mutex<Vec<Vec<Option<Vec<BenchDetection>>>>>,
+    /// Per pass, per image: the parsed detections (with optional reported confidences), once answered.
+    answers: Mutex<Vec<Vec<Option<Vec<prompt::ScoredBox>>>>>,
     /// Images whose call failed, with the first reason.
     failed: Mutex<(usize, Option<String>)>,
     soft_failures: AtomicU32,
@@ -89,7 +92,7 @@ pub fn run(job: AgentJob, closing: &AtomicBool) {
     let run = Run {
         job: &job,
         file: &file,
-        schema: prompt::reply_schema(&file.classes),
+        schema: prompt::bench_reply_schema(&file.classes),
         answers: Mutex::new(vec![vec![None; job.images]; passes.len()]),
         passes,
         queue: Mutex::new(units),
@@ -185,7 +188,7 @@ impl Run<'_> {
         let sent: Vec<(u32, u32)> = sizes.iter().map(|s| s.sent).collect();
         let text = prompt::user_prompt(&self.file.classes, &self.file.description, "", &sent);
         let request = AgentRequest {
-            system: prompt::SYSTEM,
+            system: prompt::BENCH_SYSTEM,
             prompt: &text,
             images: &jpegs,
             schema: &self.schema,
@@ -197,7 +200,7 @@ impl Run<'_> {
         };
         let mut usage = LabelUsage::default();
         // `Some(labels per image)` on a reply that was read, `Err(why)` when the images failed, `None` untouched.
-        let read = |text: &str| prompt::parse_reply(text, &self.file.classes, &sizes);
+        let read = |text: &str| prompt::parse_scored_reply(text, &self.file.classes, &sizes);
         // Every unreadable reply counts towards the cutoff, as in a labeling run.
         let on = |event: Event<'_>| {
             if let Event::Unreadable(why) = event {
@@ -243,7 +246,7 @@ impl Run<'_> {
     fn settle(
         &self,
         unit: &Unit,
-        result: Option<std::result::Result<Vec<Option<prompt::Labels>>, String>>,
+        result: Option<std::result::Result<Vec<Option<prompt::ScoredLabels>>, String>>,
         usage: &LabelUsage,
     ) {
         let mut answered = 0u64;
@@ -260,22 +263,8 @@ impl Run<'_> {
                 for (&i, labels) in unit.images.iter().zip(labels) {
                     answered += 1;
                     // As a labeling run judges an image: one left out, or whose every box was dropped, failed.
-                    match prompt::image_answer(labels) {
-                        Ok(l) => {
-                            answers[unit.pass][i] = Some(
-                                l.boxes
-                                    .iter()
-                                    .map(|b| BenchDetection {
-                                        class: b.class,
-                                        score: 1.0,
-                                        x1: b.x1,
-                                        y1: b.y1,
-                                        x2: b.x2,
-                                        y2: b.y2,
-                                    })
-                                    .collect(),
-                            )
-                        }
+                    match prompt::scored_image_answer(labels) {
+                        Ok(l) => answers[unit.pass][i] = Some(l.boxes),
                         Err(why) => {
                             let mut f = self.failed.lock().unwrap();
                             f.0 += 1;
@@ -330,6 +319,7 @@ impl Run<'_> {
             .hint("start the entry again; a smaller max_images costs less to try"));
         }
         let answers = std::mem::take(&mut *self.answers.lock().unwrap());
+        let scored = answers_scored(&answers);
         let mut clean = Vec::new();
         let mut variants = Vec::new();
         for (pass, answers) in self.passes.iter().zip(answers) {
@@ -342,7 +332,23 @@ impl Run<'_> {
                         Some((c, s)) => conditions::moved_boxes(*c, *s, im.width, im.height, &im.boxes)
                             .expect("planned severities are valid"),
                     };
-                    Sample { truths, detections: dets.unwrap_or_default() }
+                    let detections = dets
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|b| BenchDetection {
+                            class: b.bbox.class,
+                            score: if scored {
+                                b.confidence.expect("every box has a confidence when scored")
+                            } else {
+                                1.0
+                            },
+                            x1: b.bbox.x1,
+                            y1: b.bbox.y1,
+                            x2: b.bbox.x2,
+                            y2: b.bbox.y2,
+                        })
+                        .collect();
+                    Sample { truths, detections }
                 })
                 .collect();
             match pass {
@@ -355,7 +361,7 @@ impl Run<'_> {
             && (self.job.conditions || self.file.plan.conditions.is_empty());
         let spec = results::Spec {
             classes: self.file.classes.len(),
-            scored: false,
+            scored,
             plan: &self.file.plan,
             seed: self.file.seed,
             complete,
@@ -364,9 +370,24 @@ impl Run<'_> {
     }
 }
 
+/// Whether an agent entry's collected answers should be graded as scored (with confidences): true only when no
+/// detection omitted a confidence. If an agent omits confidence on any detection (legacy or mixed replies), the
+/// whole entry falls back to unscored grading so fallback `1.0` constants never fabricate calibration scores or
+/// skew AP/self-labeling rankings. When there are zero detections across every pass, `folo-bench` reports
+/// `calibration: None` and `partial: true` regardless, matching model entries that find nothing.
+fn answers_scored(answers: &[Vec<Option<Vec<prompt::ScoredBox>>>]) -> bool {
+    answers.iter().flat_map(|pass| pass.iter().flatten()).flatten().all(|b| b.confidence.is_some())
+}
+
 #[cfg(test)]
 mod tests {
+    use folo_api::BBox;
+
     use super::*;
+
+    fn box_with(confidence: Option<f32>) -> prompt::ScoredBox {
+        prompt::ScoredBox { bbox: BBox { class: 0, x1: 0.0, y1: 0.0, x2: 10.0, y2: 10.0 }, confidence }
+    }
 
     #[test]
     fn a_few_failures_are_allowed() {
@@ -374,5 +395,24 @@ mod tests {
         assert_eq!(allowed_failures(48), 1);
         assert_eq!(allowed_failures(100), 2);
         assert_eq!(allowed_failures(500), 10);
+    }
+
+    #[test]
+    fn answers_scored_requires_confidence_on_every_detection() {
+        // All detections report confidences -> scored.
+        let scored = vec![vec![Some(vec![box_with(Some(0.9)), box_with(Some(0.4))]), Some(vec![])]];
+        assert!(answers_scored(&scored));
+        // Zero detections across all images (or failed images left None) -> scored (calibration is None in scorer).
+        let empty = vec![vec![Some(vec![]), None]];
+        assert!(answers_scored(&empty));
+        // Legacy omitted confidences -> unscored.
+        let legacy = vec![vec![Some(vec![box_with(None)])]];
+        assert!(!answers_scored(&legacy));
+        // Mixed confidences across images or passes -> unscored so fallback 1.0 never corrupts calibration.
+        let mixed = vec![
+            vec![Some(vec![box_with(Some(0.85))])],
+            vec![Some(vec![box_with(Some(0.7)), box_with(None)])],
+        ];
+        assert!(!answers_scored(&mixed));
     }
 }

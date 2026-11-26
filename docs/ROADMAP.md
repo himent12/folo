@@ -65,11 +65,10 @@ are the order the project was built in; what is open is marked `[ ]` or `[~]`, m
   tools, docs/LABELING.md; #165, #423). Next: the same screen in FOLO Desktop
 
 - [x] vision benchmarks: a frozen set of labeled images plus a plan of stress conditions, any vision model as a
-  contestant (FOLO models, Claude Code / Codex / Antigravity, external predictions), a five-axis score with exact
-  definitions, agent-designed plans, and self-improvement loops (`crates/folo-bench`, `/api/bench`, Benchmarks in
-  Studio and FOLO Desktop, `folo bench`, MCP tools; docs/BENCH.md). Next: external predictions and Compare in FOLO
-  Desktop; confidences from agents (so they get a calibration axis); generated images as a benchmark source; masks and
-  keypoints
+  contestant (FOLO models, Claude Code / Codex / Antigravity with calibrated confidences, external predictions), a
+  five-axis score with exact definitions, agent-designed plans, and self-improvement loops (`crates/folo-bench`,
+  `/api/bench`, Benchmarks in Studio and FOLO Desktop, `folo bench`, MCP tools; docs/BENCH.md). Next: external
+  predictions and Compare in FOLO Desktop; generated images as a benchmark source; masks and keypoints
 
 - [x] cloud compute: training runs on a rented GPU (RunPod) or on another FOLO server, as ordinary runs of this
   server (`TrainConfig.compute`, `/api/cloud`, `folo cloud`, Settings → Cloud and Run on in Studio and Desktop;
