@@ -942,3 +942,51 @@ fn tooltip_hides_when_occluded_or_moved_and_pending_timer_respects_occlusion() {
     assert!(quads_of(&mut app, window, color(9)).is_empty(), "moved source hides its tooltip");
     assert_eq!(drops.get(), 2);
 }
+
+#[test]
+fn cursor_exit_while_dragging_preserves_pressed_button_and_clears_hover() {
+    let seen: Rc<RefCell<Vec<Option<MouseButton>>>> = Rc::default();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, {
+        let seen = seen.clone();
+        move |_, _| {
+            let seen = seen.clone();
+            div()
+                .size_full()
+                .child(div().id("btn").w(px(60.)).h(px(30.)).bg(color(1)).hover(|s| s.bg(color(2))))
+                .child(
+                    crate::canvas(
+                        |_, _, _| {},
+                        move |_, (), window, _| {
+                            let seen = seen.clone();
+                            window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, _| {
+                                if phase == crate::DispatchPhase::Capture {
+                                    seen.borrow_mut().push(ev.pressed_button);
+                                }
+                            });
+                        },
+                    )
+                    .size_0(),
+                )
+                .into_any_element()
+        }
+    });
+
+    mouse_move(&mut app, window, 10., 10.);
+    mouse_down(&mut app, window, 10., 10.);
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(2)).len(), 1, "hovered before exit");
+
+    // Simulate cursor exit while Left is still held (winit CursorLeft -> hover_status_change(false)).
+    seen.borrow_mut().clear();
+    with_window(&mut app, window, |w, cx| w.on_hover_status_change(false, cx));
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(1)).len(), 1, "hover style cleared on exit");
+    assert_eq!(*seen.borrow(), vec![Some(MouseButton::Left)], "synthetic exit move keeps Left pressed");
+
+    // Re-entering and releasing Left updates pressed state so subsequent exit reports None.
+    with_window(&mut app, window, |w, cx| w.on_hover_status_change(true, cx));
+    mouse_up(&mut app, window, 10., 10.);
+    seen.borrow_mut().clear();
+    with_window(&mut app, window, |w, cx| w.on_hover_status_change(false, cx));
+    assert_eq!(*seen.borrow(), vec![None], "after release, exit move reports no pressed button");
+}

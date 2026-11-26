@@ -128,6 +128,8 @@ pub struct Window {
     pub(crate) group_hitboxes: GroupHitboxes,
     /// The mouse position (window logical px).
     pub(crate) mouse_position: Point<Pixels>,
+    /// Mouse buttons currently pressed (in press order), so hover-exit events preserve active drags.
+    pub(crate) pressed_buttons: SmallVec<[crate::MouseButton; 4]>,
     /// The hovered hitboxes for `mouse_position` (against `rendered_frame`, or `next_frame` during paint).
     pub(crate) mouse_hit_test: HitTest,
     /// Modifier keys held.
@@ -255,6 +257,7 @@ impl Window {
             tooltip_bounds: None,
             group_hitboxes: GroupHitboxes::default(),
             mouse_position: platform_window.mouse_position(),
+            pressed_buttons: SmallVec::new(),
             mouse_hit_test: HitTest::default(),
             modifiers: platform_window.modifiers(),
             active: Rc::new(Cell::new(platform_window.is_active())),

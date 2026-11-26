@@ -436,4 +436,70 @@ fn inspector_hover_cleanup_modified_shortcuts_and_stuck_drag_release() {
     drive(&mut app, window, |this, _, _| {
         assert!(this.drag.is_none(), "slider drag clears when MouseMove has no left button");
     });
+
+    // 5. Dragging a slider out of the window and back in with Left still held must NOT cancel the
+    //    drag or prematurely trigger Playground IoU prediction on cursor exit.
+    drive(&mut app, window, |this, w, cx| {
+        this.close_inspector(w, cx);
+        this.navigate(Route::Playground, w, cx);
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    let iou_bounds = drive(&mut app, window, |this, _, _| {
+        this.slider_bounds.borrow().get("play-iou").copied().expect("play-iou slider laid out")
+    });
+    let y_iou = iou_bounds.top() + iou_bounds.size.height * 0.5;
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(iou_bounds.left() + iou_bounds.size.width * 0.3, y_iou),
+            click_count: 1,
+            ..Default::default()
+        }),
+    );
+    app.frame(window.into());
+    let seq_before_exit = drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.drag.as_ref().map(|d| d.id), Some("play-iou"));
+        this.play_pred_seq
+    });
+    // Cursor exits the window with Left still held (exact winit CursorLeft sequence).
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseExited(folo_ui::MouseExitEvent {
+            position: point(iou_bounds.left() + iou_bounds.size.width * 0.3, y_iou),
+            pressed_button: Some(MouseButton::Left),
+            ..Default::default()
+        }),
+    );
+    app.set_window_hovered(window.into(), false);
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(
+            this.drag.as_ref().map(|d| d.id),
+            Some("play-iou"),
+            "slider drag stays active when pointer leaves window with Left held"
+        );
+        assert_eq!(this.play_pred_seq, seq_before_exit, "IoU prediction must not fire before release");
+    });
+    // Pointer re-enters window with Left still held and drags further right.
+    app.set_window_hovered(window.into(), true);
+    let iou_before_reentry = drive(&mut app, window, |this, _, _| this.play_iou);
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: point(iou_bounds.left() + iou_bounds.size.width * 0.8, y_iou),
+            pressed_button: Some(MouseButton::Left),
+            ..Default::default()
+        }),
+    );
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(
+            this.play_iou > iou_before_reentry,
+            "re-entering with Left held continues tracking the slider drag"
+        );
+        assert_eq!(this.drag.as_ref().map(|d| d.id), Some("play-iou"));
+    });
 }
