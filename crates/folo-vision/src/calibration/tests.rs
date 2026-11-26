@@ -521,4 +521,8 @@ fn classwise_multilabel_exact_recovery_and_multiclass_metrics() {
     assert!(multiclass_calibration_metrics(&[0.5, 0.5], 1, &[0], 5).is_err());
     assert!(multiclass_calibration_metrics(&[0.5, 0.5], 2, &[2], 5).is_err());
     assert!(multiclass_calibration_metrics(&[f32::NAN, 0.5], 2, &[0], 5).is_err());
+    // Unnormalized rows (not valid probability distributions) must be rejected.
+    assert!(multiclass_calibration_metrics(&[1.0, 1.0, 1.0, 1.0], 4, &[0], 5).is_err());
+    assert!(multiclass_calibration_metrics(&[0.2, 0.2, 0.2], 3, &[0], 5).is_err());
+    assert!(multiclass_calibration_metrics(&[0.0, 0.0], 2, &[0], 5).is_err());
 }

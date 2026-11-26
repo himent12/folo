@@ -116,6 +116,21 @@ fn asl_neg_f64(x: f64, p: f64, q: f64, gamma_neg: f64, clip: f64) -> (f64, f64) 
     (loss, grad)
 }
 
+/// Cancellation-free evaluation of `A(r, s, eps) = s + eps * r = (s - r) + (1 + eps) * r`,
+/// where `r = 1 - p_t` (`q` for positives, `p` for negatives) and `s = -ln(1 - r) = softplus(∓x)`.
+///
+/// For small `r <= 1e-3`, evaluates `-ln(1 - r) - r = r^2 * (1/2 + r/3 + r^2/4 + ...)` directly so
+/// `epsilon = -1.0` never cancels representable `O(r^2)` values at large logits (e.g. `x = 40`).
+#[inline]
+fn poly1_inner_f64(r: f64, s: f64, eps: f64) -> f64 {
+    let rem = if r <= 1e-3 {
+        r * r * (0.5 + r * (1.0 / 3.0 + r * (0.25 + r * (0.2 + r * (1.0 / 6.0 + r / 7.0)))))
+    } else {
+        s - r
+    };
+    rem + (1.0 + eps) * r
+}
+
 /// Exact single-element Poly-1 BCE `(loss, dL/dx)` in `f64`:
 /// `t * (softplus(-x) + eps * q) + (1 - t) * (softplus(x) + eps * p)`.
 #[inline]
@@ -125,9 +140,17 @@ pub(crate) fn poly1_bce_elem_f64(x: f64, t: f64, eps: f64) -> (f64, f64) {
     }
     let p = sigmoid_f64(x);
     let q = sigmoid_f64(-x);
-    let (l_pos, g_pos) =
-        if t == 0.0 { (0.0, 0.0) } else { (softplus_f64(-x) + eps * q, -q * (1.0 + eps * p)) };
-    let (l_neg, g_neg) = if t == 1.0 { (0.0, 0.0) } else { (softplus_f64(x) + eps * p, p * (1.0 + eps * q)) };
+    let one_plus_eps = 1.0 + eps;
+    let (l_pos, g_pos) = if t == 0.0 {
+        (0.0, 0.0)
+    } else {
+        (poly1_inner_f64(q, softplus_f64(-x), eps), -q * (q + one_plus_eps * p))
+    };
+    let (l_neg, g_neg) = if t == 1.0 {
+        (0.0, 0.0)
+    } else {
+        (poly1_inner_f64(p, softplus_f64(x), eps), p * (p + one_plus_eps * q))
+    };
     let loss = (if t == 0.0 { 0.0 } else { t * l_pos }) + (if t == 1.0 { 0.0 } else { (1.0 - t) * l_neg });
     let grad = (if t == 0.0 { 0.0 } else { t * g_pos }) + (if t == 1.0 { 0.0 } else { (1.0 - t) * g_neg });
     (loss, grad)
@@ -145,21 +168,22 @@ pub(crate) fn poly1_focal_elem_f64(x: f64, t: f64, gamma: f64, eps: f64) -> (f64
     }
     let p = sigmoid_f64(x);
     let q = sigmoid_f64(-x);
+    let one_plus_eps = 1.0 + eps;
     let (l_pos, g_pos) = if t == 0.0 || q == 0.0 {
         (0.0, 0.0)
     } else {
-        let s_pos = softplus_f64(-x);
+        let a_pos = poly1_inner_f64(q, softplus_f64(-x), eps);
         let qg = q.powf(gamma);
-        let p_s = if p == 0.0 { 0.0 } else { p * s_pos };
-        (qg * (s_pos + eps * q), -qg * (gamma * p_s + q * (1.0 + eps * (gamma + 1.0) * p)))
+        let p_a = if p == 0.0 { 0.0 } else { p * a_pos };
+        (qg * a_pos, -qg * (gamma * p_a + q * (q + one_plus_eps * p)))
     };
     let (l_neg, g_neg) = if t == 1.0 || p == 0.0 {
         (0.0, 0.0)
     } else {
-        let s_neg = softplus_f64(x);
+        let a_neg = poly1_inner_f64(p, softplus_f64(x), eps);
         let pg = p.powf(gamma);
-        let q_s = if q == 0.0 { 0.0 } else { q * s_neg };
-        (pg * (s_neg + eps * p), pg * (gamma * q_s + p * (1.0 + eps * (gamma + 1.0) * q)))
+        let q_a = if q == 0.0 { 0.0 } else { q * a_neg };
+        (pg * a_neg, pg * (gamma * q_a + p * (p + one_plus_eps * q)))
     };
     let loss = (if t == 0.0 { 0.0 } else { t * l_pos }) + (if t == 1.0 { 0.0 } else { (1.0 - t) * l_neg });
     let grad = (if t == 0.0 { 0.0 } else { t * g_pos }) + (if t == 1.0 { 0.0 } else { (1.0 - t) * g_neg });
@@ -337,7 +361,8 @@ where
 {
     let dev = x.device();
     let row = x.dims().last().copied().unwrap_or(1).max(1);
-    let mut order: Vec<usize> = (0..idx.len()).filter(|&k| t[k] > 0.0).collect();
+    // Preserve all non-zero and non-finite target scores so `NaN` / `-Inf` targets propagate through `eval`.
+    let mut order: Vec<usize> = (0..idx.len()).filter(|&k| t[k] != 0.0).collect();
     order.sort_unstable_by_key(|&k| idx[k]);
     let pos: Vec<usize> = order.iter().map(|&k| idx[k]).collect();
     let pos_t: Vec<f32> = order.iter().map(|&k| t[k]).collect();

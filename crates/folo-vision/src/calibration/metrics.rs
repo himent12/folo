@@ -240,12 +240,16 @@ pub fn classwise_calibration_metrics(
 
 /// Compute top-1 ECE, MCE, accuracy, multiclass Brier score, and multiclass NLL for row-major
 /// `[N, num_classes]` probability rows and integer class labels `labels[i] < num_classes`.
+///
+/// Each row must be a valid probability distribution: every entry finite in `[0, 1]` and the `f64` row
+/// sum within `1e-4` of `1.0` (accommodating `f32` softmax rounding).
 pub fn multiclass_calibration_metrics(
     probs: &[f32],
     num_classes: usize,
     labels: &[usize],
     num_bins: usize,
 ) -> Result<MulticlassCalibrationMetrics> {
+    const ROW_SUM_TOL: f64 = 1e-4;
     if num_classes < 2 {
         return Err(Error::Config(format!(
             "multiclass_calibration_metrics: num_classes must be >= 2, got {num_classes}"
@@ -281,18 +285,25 @@ pub fn multiclass_calibration_metrics(
         }
         let mut best_c = 0usize;
         let mut best_p = -1.0f32;
+        let mut row_sum = 0.0f64;
         for (c, &pf) in row.iter().enumerate() {
             if !(pf.is_finite() && (0.0..=1.0).contains(&pf)) {
                 return Err(Error::Config(format!(
                     "multiclass_calibration_metrics: prob[{i}, {c}] must be finite and in [0, 1], got {pf}"
                 )));
             }
+            row_sum += pf as f64;
             if pf > best_p {
                 best_p = pf;
                 best_c = c;
             }
             let d = pf as f64 - if c == y { 1.0 } else { 0.0 };
             brier_sum += d * d;
+        }
+        if (row_sum - 1.0).abs() > ROW_SUM_TOL {
+            return Err(Error::Config(format!(
+                "multiclass_calibration_metrics: row {i} probabilities sum to {row_sum}, expected 1.0 ± {ROW_SUM_TOL}"
+            )));
         }
         let ok = best_c == y;
         if ok {

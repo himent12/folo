@@ -246,7 +246,41 @@ fn edge_cases_extreme_logits_and_non_finite_safety() {
         }
     }
 
-    // 3. Empty tensors.
+    // 3. Cancellation-free relative precision at epsilon = -1.0 for large logits (x = ±40):
+    // For x = 40, t = 1: r = sigmoid(-40) ≈ 4.248354e-18, true loss = -ln(1 - r) - r = r^2 / 2 + r^3 / 3 + ...,
+    // true grad = -r^2 (both normal non-zero f32 values ~9.02e-36 and ~-1.80e-35).
+    let r40 = (-40.0f64).exp() / (1.0 + (-40.0f64).exp());
+    let ref_bce_loss = 0.5 * r40 * r40 * (1.0 + (2.0 / 3.0) * r40);
+    let ref_bce_grad = -(r40 * r40);
+    let (got_l, got_g) = poly1_bce_elem_f64(40.0, 1.0, -1.0);
+    assert!(
+        (got_l - ref_bce_loss).abs() <= 1e-12 * ref_bce_loss,
+        "poly1_bce eps=-1 x=40 loss: got={got_l:e} ref={ref_bce_loss:e}"
+    );
+    assert!(
+        (got_g - ref_bce_grad).abs() <= 1e-12 * ref_bce_grad.abs(),
+        "poly1_bce eps=-1 x=40 grad: got={got_g:e} ref={ref_bce_grad:e}"
+    );
+    let (got_l_neg, got_g_neg) = poly1_bce_elem_f64(-40.0, 0.0, -1.0);
+    assert!((got_l_neg - ref_bce_loss).abs() <= 1e-12 * ref_bce_loss);
+    assert!((got_g_neg - (-ref_bce_grad)).abs() <= 1e-12 * ref_bce_grad.abs());
+
+    // Poly-1 Focal at epsilon = -1, gamma = 1, x = 20, t = 1: loss = r * (r^2 / 2 + ...), grad = -r^3 * (1 + p / 2 + ...).
+    let r20 = (-20.0f64).exp() / (1.0 + (-20.0f64).exp());
+    let p20 = 1.0 - r20;
+    let ref_fl_loss = r20 * (0.5 * r20 * r20 + r20.powi(3) / 3.0);
+    let ref_fl_grad = -r20 * (p20 * (0.5 * r20 * r20 + r20.powi(3) / 3.0) + r20 * r20);
+    let (fl_l, fl_g) = poly1_focal_elem_f64(20.0, 1.0, 1.0, -1.0);
+    assert!(
+        (fl_l - ref_fl_loss).abs() <= 1e-12 * ref_fl_loss,
+        "poly1_focal eps=-1 loss: {fl_l:e} vs {ref_fl_loss:e}"
+    );
+    assert!(
+        (fl_g - ref_fl_grad).abs() <= 1e-12 * ref_fl_grad.abs(),
+        "poly1_focal eps=-1 grad: {fl_g:e} vs {ref_fl_grad:e}"
+    );
+
+    // 4. Empty tensors.
     let empty = Tensor::zeros([0, 4]);
     assert_eq!(asymmetric_loss(&empty, &empty, 0.0, 4.0, 0.05).unwrap().dims(), &[0, 4]);
     assert_eq!(poly1_bce_loss(&empty, &empty, 1.0).unwrap().dims(), &[0, 4]);
@@ -379,6 +413,41 @@ fn detection_loss_asl_and_polyloss_parity_grad_check_and_config() {
                 &GradCheck { eps: 2e-3, atol: 2e-3, rtol: 2e-2, max_checks: 16, seed: 19 },
             )
             .unwrap();
+        }
+    }
+
+    // Non-finite logits (-Inf, +Inf, NaN) and non-finite target scores (NaN, -Inf) must poison BOTH
+    // forward and backward identically on fused and composite paths for Asl, Poly1Bce, and Poly1Focal.
+    for kind in [ClsLossKind::Asl, ClsLossKind::Poly1Bce, ClsLossKind::Poly1Focal] {
+        let cfg = LossConfig {
+            reg_max: 4,
+            box_gain: 0.0,
+            dfl_gain: 0.0,
+            cls_gain: 1.0,
+            cls_loss: kind,
+            ..LossConfig::default()
+        };
+        for bad_logit in [f32::NEG_INFINITY, f32::INFINITY, f32::NAN] {
+            let mut cv = vec![0.0f32; 2 * sa];
+            cv[1] = bad_logit; // background position
+            let c_bad = Tensor::from_vec(cv, [1, 2, sa]).unwrap().requires_grad_();
+            for fused in [true, false] {
+                let out = loss_impl(&sbox, &c_bad, &small_anchors, &sasg, &cfg, fused).unwrap();
+                assert!(out.items.cls.is_nan(), "{kind:?} fused={fused} bad_logit={bad_logit}: loss not NaN");
+                let g = out.total.backward().unwrap().get(&c_bad).unwrap().to_vec::<f32>().unwrap();
+                assert!(g[1].is_nan(), "{kind:?} fused={fused} bad_logit={bad_logit}: grad[1] not NaN");
+            }
+        }
+        for bad_score in [f32::NAN, f32::NEG_INFINITY] {
+            let mut bad_asg = sasg.clone();
+            bad_asg.score[0] = bad_score;
+            let c_ok = scls.detach().requires_grad_();
+            for fused in [true, false] {
+                let out = loss_impl(&sbox, &c_ok, &small_anchors, &bad_asg, &cfg, fused).unwrap();
+                assert!(out.items.cls.is_nan(), "{kind:?} fused={fused} bad_score={bad_score}: loss not NaN");
+                let g = out.total.backward().unwrap().get(&c_ok).unwrap().to_vec::<f32>().unwrap();
+                assert!(g[0].is_nan(), "{kind:?} fused={fused} bad_score={bad_score}: grad[0] not NaN");
+            }
         }
     }
 
