@@ -18,7 +18,10 @@ use tower::ServiceExt;
 #[tokio::test]
 async fn a_failed_registration_does_not_read_what_the_guard_refuses() {
     assert!(folo_data::guard::install(|p: &Path| {
-        !p.components().any(|c| c.as_os_str() == "forbidden")
+        let in_confined_root = p.components().any(|c| c.as_os_str() == "confined_root");
+        let in_confined_parent = p.components().any(|c| c.as_os_str() == "confined_parent");
+        (!in_confined_parent || in_confined_root)
+            && !p.components().any(|c| c.as_os_str() == "forbidden")
             && p.file_name().is_none_or(|n| n != "custom.yaml")
     }));
     let t = TestDir::new("confined-diagnostics");
@@ -66,10 +69,11 @@ async fn a_failed_registration_does_not_read_what_the_guard_refuses() {
     {
         let target = t.join("dead-target");
         std::fs::create_dir_all(&target).unwrap();
+        let win = |p: &Path| p.to_string_lossy().replace('/', "\\");
         let mut cmd = std::process::Command::new("cmd");
         cmd.args(["/d", "/c", "mklink", "/j"])
-            .arg(&forbidden_link)
-            .arg(&target)
+            .arg(win(&forbidden_link))
+            .arg(win(&target))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -142,6 +146,59 @@ async fn a_failed_registration_does_not_read_what_the_guard_refuses() {
             .iter()
             .all(|i| !i["message"].as_str().unwrap_or("").contains("dangling symlink")),
         "refused forbidden link must not be probed during registration: {issues_body}"
+    );
+
+    // A denied descendant under an allowed watch root is never enumerated or hashed by `Fingerprint::of`.
+    let denied_sub = allowed_ds.join("forbidden");
+    std::fs::create_dir_all(&denied_sub).unwrap();
+    let fp_before_denied = folo_server::Fingerprint::of(std::slice::from_ref(&allowed_ds), &[]);
+    std::fs::write(denied_sub.join("secret.txt"), "top-secret-contents").unwrap();
+    let fp_after_denied = folo_server::Fingerprint::of(std::slice::from_ref(&allowed_ds), &[]);
+    assert_eq!(
+        fp_before_denied, fp_after_denied,
+        "denied descendant must not affect allowed root fingerprint"
+    );
+
+    // Multi-level absent path under a refused folder is also rejected without probing.
+    let deep_missing = t.join("b").join("forbidden").join("missing_a").join("missing_b");
+    let fp_deep = folo_server::Fingerprint::of(&[deep_missing], &[]);
+    assert_eq!((fp_deep.files, fp_deep.bytes, fp_deep.hash.as_str()), (0, 0, "cbf29ce484222325"));
+
+    // A dataset registered directly at a confinement root (allowed itself while its parent `confined_parent` is
+    // refused) still fingerprints its files and refreshes when labels change.
+    let confined_root = t.join("confined_parent").join("confined_root");
+    std::fs::create_dir_all(confined_root.join("images").join("train")).unwrap();
+    std::fs::create_dir_all(confined_root.join("labels").join("train")).unwrap();
+    image::RgbImage::from_pixel(16, 16, image::Rgb([40, 50, 60]))
+        .save(confined_root.join("images").join("train").join("a.png"))
+        .unwrap();
+    let lbl = confined_root.join("labels").join("train").join("a.txt");
+    std::fs::write(&lbl, "0 0.5 0.5 0.4 0.4\n").unwrap();
+    std::fs::write(confined_root.join("data.yaml"), "path: .\ntrain: images/train\nnames: [x]\n").unwrap();
+    let fp_root = folo_server::Fingerprint::of(std::slice::from_ref(&confined_root), &[]);
+    assert!(fp_root.files >= 3, "confinement root must be fingerprinted: {fp_root:?}");
+    let req = Request::post("/api/datasets")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({ "path": confined_root }).to_string()))
+        .unwrap();
+    let res = app.clone().oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::CREATED);
+    let root_ds: Value =
+        serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let root_issues_uri = format!("/api/datasets/{}/issues?limit=100", root_ds["id"].as_str().unwrap());
+    let before_res =
+        app.clone().oneshot(Request::get(&root_issues_uri).body(Body::empty()).unwrap()).await.unwrap();
+    let before_body: Value =
+        serde_json::from_slice(&before_res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(before_body["total"], 0, "{before_body}");
+    std::fs::write(&lbl, "99 0.5 0.5 0.4 0.4\n").unwrap();
+    let after_res =
+        app.clone().oneshot(Request::get(&root_issues_uri).body(Body::empty()).unwrap()).await.unwrap();
+    let after_body: Value =
+        serde_json::from_slice(&after_res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(
+        after_body["issues"].as_array().unwrap().iter().any(|i| i["kind"] == "class_overflow"),
+        "editing a dataset at the confinement root must invalidate its fingerprint: {after_body}"
     );
 
     // Fingerprinting a refused path never probes it: removing the forbidden link leaves the fingerprint identical.

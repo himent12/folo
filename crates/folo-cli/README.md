@@ -28,7 +28,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 | `src/output_file.rs` | The file `export` and `quantize` write: a temporary name, then one move to a free name (`folo_nn::io::publish_new`) |
 | `src/coco.rs` | `val --coco` / `--save-json`: upfront category validation (including strict subset splits), pycocotools-exact evaluation and COCO results files |
 | `src/draw.rs` | Annotated images for `predict --save` (class colours, a built-in digit font) |
-| `src/dataset/` | `folo dataset check \| stats \| synth \| convert`, on folo-data: `mod.rs` (`stats`, `convert`, shared helpers), `check.rs` (`check`, dangling symlink diagnostics, COCO size-mismatch reconciliation), `synth.rs` (`synth`, atomic sibling-staging and rollback) |
+| `src/dataset/` | `folo dataset check \| stats \| synth \| convert`, on folo-data: `mod.rs` (`stats`, `convert`, shared helpers), `check.rs` (`check`, COCO size-mismatch reconciliation, delegating dangling symlink diagnostics to `folo_server::index::links`), `synth.rs` (`synth`, atomic sibling-staging and rollback) |
 | `src/weights/` | `folo weights list \| pull` and published-name resolution (`mod.rs`); `download.rs` fetches a release over HTTPS, else with `gh` |
 | `src/cloud.rs` | `folo cloud ...` on the data dir, through `folo_server::cloud` |
 | `src/label/` | `folo label ...`: `mod.rs` opens the data dir's `folo serve` (or `--server`, else the data dir's labeler in this process, holding its lock; the store only for `export`) and runs folo-mcp's labeling operations (`folo_mcp::label::Labels`) with CLI hints; `print.rs` is the human output |

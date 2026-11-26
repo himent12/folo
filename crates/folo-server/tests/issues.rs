@@ -246,10 +246,11 @@ fn create_dangling_link_to(link: &Path, target: &Path) -> DanglingLinkGuard {
     #[cfg(windows)]
     {
         std::fs::create_dir_all(target).unwrap();
+        let win = |p: &Path| p.to_string_lossy().replace('/', "\\");
         let mut cmd = std::process::Command::new("cmd");
         cmd.args(["/d", "/c", "mklink", "/j"])
-            .arg(link)
-            .arg(target)
+            .arg(win(link))
+            .arg(win(target))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
@@ -357,5 +358,53 @@ async fn real_issues_refresh_dangling_split_outside_manifest_and_dataset_root() 
     assert!(
         after_retarget.issues.iter().any(|i| i.kind == "other" && i.message.contains("dead-target-c")),
         "retargeted dangling split was not refreshed: {after_retarget:?}"
+    );
+}
+
+#[tokio::test]
+async fn real_issues_refresh_external_mirrored_label_dangling_link_for_empty_split() {
+    let t = TestDir::new("issues-dangling-ext-mirror-label");
+    let (home, cfg_dir, data_dir, ext_root) =
+        (t.join("home"), t.join("cfg").join("nested"), t.join("data"), t.join("cfg").join("external"));
+    write_shapes(&data_dir);
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    // Empty external validation image folder whose mirrored `labels/val` folder holds a dangling `.txt` link.
+    let ext_img_val = ext_root.join("images").join("val");
+    let ext_lbl_val = ext_root.join("labels").join("val");
+    std::fs::create_dir_all(&ext_img_val).unwrap();
+    std::fs::create_dir_all(&ext_lbl_val).unwrap();
+    let dead_lbl = ext_lbl_val.join("bad.txt");
+    let guard = create_dangling_link_to(&dead_lbl, &t.join("lbl-target-a"));
+
+    let yaml = cfg_dir.join("data.yaml");
+    std::fs::write(
+        &yaml,
+        "path: ../../data\ntrain: images/train\nval: ../external/images/val\nnames: [circle, square, triangle]\n",
+    )
+    .unwrap();
+
+    let store = RealStore::open(home).recheck_every(Duration::ZERO);
+    let app = Server::new(Arc::new(store), Options::default()).router();
+    let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": yaml.to_str().unwrap() }))).await;
+    let uri = format!("/api/datasets/{}/issues?limit=1000", ds.id);
+    let all: IssuePage = ok(&app, get(&uri)).await;
+    assert!(
+        all.issues.iter().any(|i| i.kind == "broken_label" && i.message.contains("lbl-target-a")),
+        "expected broken_label for external mirrored label dir in {all:?}"
+    );
+
+    // Removing the dangling link clears the issue, and recreating it with a new target refreshes again.
+    drop(guard);
+    let cleared: IssuePage = ok(&app, get(&uri)).await;
+    assert!(
+        cleared.issues.iter().all(|i| i.kind != "broken_label"),
+        "stale mirrored label issue survived removal: {cleared:?}"
+    );
+
+    let _guard_b = create_dangling_link_to(&dead_lbl, &t.join("lbl-target-b"));
+    let recreated: IssuePage = ok(&app, get(&uri)).await;
+    assert!(
+        recreated.issues.iter().any(|i| i.kind == "broken_label" && i.message.contains("lbl-target-b")),
+        "recreated mirrored label link was not refreshed: {recreated:?}"
     );
 }

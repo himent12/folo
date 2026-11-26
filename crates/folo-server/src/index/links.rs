@@ -24,17 +24,36 @@ fn maybe_link(meta: &std::fs::Metadata) -> bool {
     }
 }
 
-/// Returns `true` when `folo_data::guard` allows probing `p` and its parent directory.
+/// Returns `true` when `folo_data::guard` allows probing `p`.
 ///
-/// Checking `p.parent()` prevents probing dangling links or missing entries inside a refused directory under
-/// `folo mcp --confine` (where `canonicalize(p)` fails for a dangling link, while `canonicalize(parent)` resolves
-/// outside the confined root and is rejected).
+/// For resolvable paths (`canonicalize(p).is_ok()`), trusts `folo_data::guard::check(p)` directly so a dataset
+/// registered at the confinement root itself (whose parent is outside the root) stays allowed. For unresolvable
+/// paths (dangling symlinks or multi-level absent paths that `folo_data::guard` lets through because
+/// `canonicalize` fails), normalizes `..` and walks up to the nearest resolvable ancestor, requiring every
+/// checked ancestor to pass `folo_data::guard::check`.
 pub(crate) fn guard_allows_probe(p: &Path) -> bool {
-    let parent_ok = p
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .is_none_or(|parent| folo_data::guard::check(parent).is_ok());
-    parent_ok && folo_data::guard::check(p).is_ok()
+    if !folo_data::guard::installed() {
+        return true;
+    }
+    if folo_data::guard::check(p).is_err() {
+        return false;
+    }
+    if std::fs::canonicalize(p).is_ok() {
+        return true;
+    }
+    let abs = super::resolve_dotdot(&std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+    for anc in abs.ancestors().skip(1) {
+        if anc.as_os_str().is_empty() {
+            break;
+        }
+        if folo_data::guard::check(anc).is_err() {
+            return false;
+        }
+        if std::fs::canonicalize(anc).is_ok() {
+            return true;
+        }
+    }
+    false
 }
 
 /// Returns a clear diagnostic when `p` is a symlink (or Windows directory junction) whose target cannot be
@@ -533,7 +552,15 @@ pub(crate) fn diagnostic_watch_paths(input_path: &Path, root: &Path, format: For
     let yaml_dir = yaml.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let mut out = Vec::new();
     for raw in parse_yaml_split_paths(&text) {
-        out.extend(yaml_split_candidates(&raw, yaml_dir, root));
+        for cand in yaml_split_candidates(&raw, yaml_dir, root) {
+            let probe = folo_data::label_path_for(&cand.join("probe.jpg"));
+            if let Some(lbl_dir) = probe.parent()
+                && guard_allows_probe(lbl_dir)
+            {
+                out.push(lbl_dir.to_path_buf());
+            }
+            out.push(cand);
+        }
     }
     out
 }

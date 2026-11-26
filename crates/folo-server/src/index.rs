@@ -65,59 +65,73 @@ impl Fingerprint {
             feed(dir.to_string_lossy().as_bytes());
             // A missing path is part of the fingerprint too: creating it must count as a change.
             feed(&[u8::from(dir.exists())]);
-            let walk = walkdir::WalkDir::new(dir).follow_links(true).sort_by_file_name();
-            let walk = walk
-                .into_iter()
-                .filter_entry(|e| !excluded(e.path(), exclude) && links::guard_allows_probe(e.path()));
-            for entry in walk {
-                let e = match entry {
-                    Ok(e) => e,
-                    Err(err) => {
-                        // A dangling symlink, broken Windows junction, or symlink loop makes `follow_links`
-                        // yield `Err`: fold its path and link target into the fingerprint so adding, removing,
-                        // or retargeting a broken link invalidates the cached index and its issues.
-                        if let Some(p) = err.path()
-                            && !excluded(p, exclude)
-                            && links::guard_allows_probe(p)
-                        {
-                            let rel = p.strip_prefix(dir).unwrap_or(p);
-                            feed(rel.to_string_lossy().as_bytes());
-                            feed(b"!");
-                            feed(&[u8::from(std::fs::symlink_metadata(p).is_ok())]);
-                            if let Ok(target) = std::fs::read_link(p) {
-                                feed(target.to_string_lossy().as_bytes());
-                            }
-                            feed(b"\0");
-                        }
-                        continue;
-                    }
-                };
-                if e.file_type().is_dir() {
-                    // Folders count by name: creating an empty one can change the dataset (a `path:` or split
-                    // folder that did not exist yet).
-                    let rel = e.path().strip_prefix(dir).unwrap_or(e.path());
-                    feed(rel.to_string_lossy().as_bytes());
-                    feed(b"/");
-                    continue;
-                }
-                if !e.file_type().is_file() {
-                    continue;
-                }
-                let Ok(md) = e.metadata() else { continue };
-                let mtime = md
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_nanos());
-                let rel = e.path().strip_prefix(dir).unwrap_or(e.path());
-                feed(rel.to_string_lossy().as_bytes());
-                feed(&md.len().to_le_bytes());
-                feed(&mtime.to_le_bytes());
-                files += 1;
-                bytes += md.len();
-            }
+            let mut visited = std::collections::HashSet::new();
+            fingerprint_walk(dir, dir, exclude, &mut visited, &mut feed, &mut files, &mut bytes);
         }
         Fingerprint { files, bytes, hash: format!("{h:016x}") }
+    }
+}
+
+/// Recursively hashes `cur` under `root`, checking `excluded` and [`links::guard_allows_probe`] *before* opening
+/// or enumerating any directory so `folo mcp --confine` never calls `read_dir` on a refused descendant.
+fn fingerprint_walk(
+    root: &Path,
+    cur: &Path,
+    exclude: &[PathBuf],
+    visited: &mut std::collections::HashSet<PathBuf>,
+    feed: &mut impl FnMut(&[u8]),
+    files: &mut u64,
+    bytes: &mut u64,
+) {
+    if excluded(cur, exclude) || !links::guard_allows_probe(cur) {
+        return;
+    }
+    match std::fs::metadata(cur) {
+        Ok(md) if md.is_dir() => {
+            // Folders count by name: creating an empty one can change the dataset (a `path:` or split folder
+            // that did not exist yet).
+            let rel = cur.strip_prefix(root).unwrap_or(cur);
+            feed(rel.to_string_lossy().as_bytes());
+            feed(b"/");
+            if let Ok(canon) = std::fs::canonicalize(cur)
+                && !visited.insert(canon)
+            {
+                return;
+            }
+            let Ok(rd) = std::fs::read_dir(cur) else { return };
+            let mut children: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+            children.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+            for child in children {
+                fingerprint_walk(root, &child, exclude, visited, feed, files, bytes);
+            }
+        }
+        Ok(md) if md.is_file() => {
+            let mtime = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            let rel = cur.strip_prefix(root).unwrap_or(cur);
+            feed(rel.to_string_lossy().as_bytes());
+            feed(&md.len().to_le_bytes());
+            feed(&mtime.to_le_bytes());
+            *files += 1;
+            *bytes += md.len();
+        }
+        Ok(_) => {}
+        Err(_) => {
+            // A dangling symlink, broken Windows junction, symlink loop, or missing watched path: fold its path,
+            // link existence, and link target into the fingerprint so creating, removing, or retargeting it
+            // invalidates the cached index and its issues.
+            let rel = cur.strip_prefix(root).unwrap_or(cur);
+            feed(rel.to_string_lossy().as_bytes());
+            feed(b"!");
+            feed(&[u8::from(std::fs::symlink_metadata(cur).is_ok())]);
+            if let Ok(target) = std::fs::read_link(cur) {
+                feed(target.to_string_lossy().as_bytes());
+            }
+            feed(b"\0");
+        }
     }
 }
 
