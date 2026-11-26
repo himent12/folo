@@ -3,9 +3,11 @@
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
 
-use crate::api::{Bench, BenchSource};
+use crate::api::Bench;
 use crate::app::{FoloApp, act};
-use crate::bench::{LOOP_EPOCHS, LOOP_GENERATIONS, SourceChoice, SourcePick};
+use crate::bench::{
+    LOOP_EPOCHS, LOOP_GENERATIONS, SourceChoice, SourcePick, loop_pool_exhausted, loop_pool_overlaps,
+};
 use crate::controls::Btn;
 use crate::theme::{Theme, ty};
 use crate::ui::*;
@@ -116,13 +118,8 @@ impl FoloApp {
         let picked = choice.index().map(|i| &sources[i]);
         let pool_images = picked.map(|p| p.images(crate::api::Split::Train));
         // The benchmark's own images must stay out of training: the server leaves them out of the pool.
-        let overlaps = match (picked, &b.source) {
-            (Some(SourcePick::Dataset { id, .. }), BenchSource::Dataset { dataset_id, split }) => {
-                id == dataset_id && split.unwrap_or(crate::api::Split::Val) == crate::api::Split::Train
-            }
-            (Some(SourcePick::Job { id, .. }), BenchSource::LabelJob { job_id }) => id == job_id,
-            _ => false,
-        };
+        let overlaps = picked.is_some_and(|p| loop_pool_overlaps(b, p));
+        let exhausted = picked.is_some_and(|p| loop_pool_exhausted(b, p));
         let gens = LOOP_GENERATIONS[generations];
         let note = match (teacher_i.and_then(|i| teachers.get(i)), pool_images) {
             (None, _) if teacher_gone => "Its teacher was deleted. Pick another.".to_string(),
@@ -137,6 +134,9 @@ impl FoloApp {
                     .to_string()
             }
             (_, Some(0)) => "That pool has no images: pick another.".to_string(),
+            (_, Some(_)) if exhausted => {
+                "Every image in this pool is already in this benchmark: pick another pool.".to_string()
+            }
             (Some(m), Some(n)) => format!(
                 "{} labels {} {} by itself; a {} student trains {} epochs on those labels alone and runs here. {}{}",
                 m.name,
@@ -168,6 +168,16 @@ impl FoloApp {
                 Btn::Primary,
                 Some("icons/repeat.svg"),
                 "Starting the loop",
+                window,
+                cx,
+            )
+        } else if exhausted {
+            self.button_disabled(
+                "bench-loop-start",
+                "Start loop",
+                Btn::Primary,
+                Some("icons/repeat.svg"),
+                "Every image in this pool is already in this benchmark",
                 window,
                 cx,
             )
@@ -231,7 +241,7 @@ impl FoloApp {
                             .child(field("Generations", gen_ctl.into_any_element()))
                             .child(field("Epochs per student", ep_ctl.into_any_element())),
                     )
-                    .child(text(ty::SM, t.text_secondary).child(note))
+                    .child(text(ty::SM, if exhausted { t.danger_text } else { t.text_secondary }).child(note))
                     .when_some(error, |d, e| {
                         d.child(
                             div()

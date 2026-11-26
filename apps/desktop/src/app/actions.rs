@@ -503,21 +503,35 @@ impl FoloApp {
         let req_id = id.clone();
         self.fetch(
             cx,
-            move |api| api.export_model(&req_id, format),
+            move |api| {
+                let res = api.export_model(&req_id, format)?;
+                // Only offer "Show in folder" when talking to a local server whose output path
+                // actually exists on this machine; remote or forwarded servers offer Download.
+                let local_file = !api.is_remote() && std::path::Path::new(&res.path).exists();
+                let download_url = (!local_file).then(|| api.export_download_url(&req_id, format)).flatten();
+                Ok((res, local_file, download_url))
+            },
             move |this, r, cx| {
                 this.exporting.remove(&(id, format));
                 match r {
-                    Ok(res) => {
+                    Ok((res, local_file, download_url)) => {
                         let (v, u) = bytes(res.bytes);
-                        let path = res.path.clone();
-                        this.toast_with(
-                            Tone::Success,
-                            "Export complete",
-                            Some(format!("{} · {v} {u}", display_path(&res.path)).into()),
+                        let shown_path = if local_file { display_path(&res.path) } else { res.path.clone() };
+                        let action = if local_file {
+                            let path = res.path.clone();
                             Some((
                                 "Show in folder".into(),
                                 act(move |_, _, cx| cx.reveal_path(std::path::Path::new(&path))),
-                            )),
+                            ))
+                        } else {
+                            download_url
+                                .map(|url| ("Download".into(), act(move |_, _, cx| cx.open_url(&url))))
+                        };
+                        this.toast_with(
+                            Tone::Success,
+                            "Export complete",
+                            Some(format!("{shown_path} · {v} {u}").into()),
+                            action,
                             cx,
                         );
                     }

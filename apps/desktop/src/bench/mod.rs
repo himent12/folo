@@ -16,6 +16,7 @@ mod stream;
 pub use create::{SourceChoice, SourceId, SourcePick};
 pub use images::preview_severity;
 pub use keys::BenchForm;
+pub use loops::{loop_pool_exhausted, loop_pool_overlaps};
 pub use run::model_fits;
 pub use state::{
     BENCH_SPLITS, BenchListFilter, BenchState, BenchTab, Contender, ENTRY_IMAGES_PAGE, EntryImageReveal,

@@ -74,6 +74,34 @@ impl NewRunForm {
     pub fn imgsz_value(&self) -> u32 {
         self.custom_imgsz.unwrap_or(IMGSZ[self.imgsz])
     }
+
+    /// The selected device: a preserved non-preset value (e.g. `gpu:1`) from a cloned run, else the preset.
+    pub fn device_value(&self) -> &str {
+        self.custom_device.as_deref().unwrap_or(DEVICES[self.device])
+    }
+
+    /// Picks preset device `i` of [`DEVICES`] (also clears any cloned custom device).
+    pub fn pick_device(&mut self, i: usize) {
+        self.device = i;
+        self.custom_device = None;
+    }
+}
+
+/// GPU adapter index for a device string like `"gpu:1"`.
+pub fn gpu_index(device: &str) -> Option<usize> {
+    device.strip_prefix("gpu:")?.parse().ok()
+}
+
+/// Human-readable label for a device string (`"auto"` -> `"Auto"`, `"gpu:1"` -> `"GPU 1"`).
+pub fn device_label(device: &str) -> String {
+    match device {
+        "auto" => "Auto".into(),
+        "cpu" => "CPU".into(),
+        d => match gpu_index(d) {
+            Some(i) => format!("GPU {i}"),
+            None => d.to_string(),
+        },
+    }
 }
 
 /// The index of `o` in [`OPTIMIZERS`], `None` for one the picker does not offer (`Optimizer::Unknown`).
@@ -198,6 +226,8 @@ pub struct NewRunForm {
     /// Non-preset image size carried over from a cloned/retried run until another choice is picked.
     pub custom_imgsz: Option<u32>,
     pub device: usize,
+    /// Non-preset device (e.g. `gpu:1`) carried over from a cloned/retried run until another choice is picked.
+    pub custom_device: Option<String>,
     pub optimizer: usize,
     /// Prefilled from a run whose optimizer this build does not know: no optimizer is selected, and the form
     /// does not start until one is picked ([`NewRunForm::optimizer_blocks`]).

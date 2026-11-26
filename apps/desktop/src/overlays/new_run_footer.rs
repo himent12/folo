@@ -10,7 +10,7 @@ use folo_ui::{
 };
 
 use crate::api::RunStatus;
-use crate::app::{DEVICES, FoloApp, act};
+use crate::app::{FoloApp, act, gpu_index};
 use crate::controls::Btn;
 use crate::theme::{Theme, radius, ty};
 use crate::ui::*;
@@ -80,7 +80,7 @@ pub(super) struct NewRunSummary {
     pub(super) epochs: f32,
     pub(super) batch: u32,
     pub(super) imgsz: u32,
-    pub(super) device: usize,
+    pub(super) device: String,
     pub(super) amp: bool,
     pub(super) amp_why: Option<String>,
     pub(super) epochs_bad: bool,
@@ -159,11 +159,11 @@ impl FoloApp {
         } = form;
         self.ensure_estimate(cx);
         let images = ds.as_ref().map_or(0, |d| d.splits.train);
-        let cpu = DEVICES[device] == "cpu" && cloud.is_none();
+        let cpu = device == "cpu" && cloud.is_none();
         let compute_blocked = self.compute_blocked();
         let dataset_blocked = self.dataset_blocked().is_some();
         let weights_gone = self.nr_weights_gone().is_some();
-        let device_gone = self.nr_device_gone().is_some();
+        let device_gone = self.nr_device_gone();
         // What the footer can honestly say. With the server's estimator: its answer for this
         // config; while a changed config is out, the last answer marked as updating (if it was for
         // the same kind of device); nothing for an unparsed value, a rejected config or a deleted
@@ -225,7 +225,12 @@ impl FoloApp {
             Est::Server(e, _) => e.est_peak_vram_bytes.map(|b| b as f32 / gib),
             _ => (!on_cpu).then_some(local_vram),
         };
-        let gpu = self.store.system.ready().and_then(|s| s.gpus.first().cloned());
+        let gpu = self
+            .store
+            .system
+            .ready()
+            .and_then(|s| gpu_index(&device).and_then(|i| s.gpus.get(i)).or_else(|| s.gpus.first()))
+            .cloned();
         // 0 = not reported (wgpu can't on every platform): make no claim about fitting.
         // GiB, like the estimate and every size the app shows. A cloud run's is its offer's.
         let gpu_gb = match (&cloud, &cloud_offer) {
@@ -406,9 +411,17 @@ impl FoloApp {
                 window,
                 cx,
             )
-        } else if device_gone {
+        } else if device_gone.is_some() {
             // It says why under Device.
-            self.button_disabled("nr-start", go, Btn::Primary, Some(go_icon), "Pick Auto or CPU", window, cx)
+            self.button_disabled(
+                "nr-start",
+                go,
+                Btn::Primary,
+                Some(go_icon),
+                "Pick an available device",
+                window,
+                cx,
+            )
         } else if epochs_bad || lr_bad || close_bad {
             self.button_disabled(
                 "nr-start",

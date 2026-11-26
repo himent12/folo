@@ -112,6 +112,14 @@ pub trait Backend: Send + Sync + 'static {
     fn models(&self) -> ApiResult<Vec<Model>>;
     fn model_eval(&self, id: &str) -> ApiResult<ModelEval>;
     fn export_model(&self, id: &str, format: &str) -> ApiResult<ExportResult>;
+    /// Whether this backend talks to a server on another machine (its filesystem paths are not local).
+    fn is_remote(&self) -> bool {
+        false
+    }
+    /// HTTP download URL for an exported model (`GET /api/models/{id}/weights?format=f16|onnx`).
+    fn export_download_url(&self, _id: &str, _format: &str) -> Option<String> {
+        None
+    }
 
     fn runs(&self) -> ApiResult<Vec<Run>>;
     #[allow(dead_code)]

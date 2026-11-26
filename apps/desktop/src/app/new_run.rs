@@ -96,7 +96,16 @@ impl FoloApp {
                     f.custom_imgsz = Some(config.imgsz);
                 }
             }
-            f.device = DEVICES.iter().position(|d| *d == config.device).unwrap_or(0);
+            match DEVICES.iter().position(|d| *d == config.device) {
+                Some(i) => {
+                    f.device = i;
+                    f.custom_device = None;
+                }
+                None => {
+                    f.device = 0;
+                    f.custom_device = Some(config.device.clone());
+                }
+            }
             f.prefill_optimizer(config.optimizer);
             f.lr0 = config.lr0;
             let (ei, li) = (f.epochs_input.clone(), f.lr_input.clone());
@@ -339,6 +348,7 @@ impl FoloApp {
             imgsz,
             custom_imgsz: None,
             device: 0,
+            custom_device: None,
             optimizer: 0,
             optimizer_unknown: false,
             lr0: 0.01,
@@ -402,7 +412,8 @@ impl FoloApp {
             form.max_hours,
         );
         // On a cloud instance mixed precision is checked when it boots, not against this machine.
-        let amp_ok = compute.is_some() || self.amp_blocked(DEVICES[form.device]).is_none();
+        let device_val = form.device_value();
+        let amp_ok = compute.is_some() || self.amp_blocked(device_val).is_none();
         let ds = self.store.dataset_summary(&form.dataset)?;
         Some(carry_over(
             form.base.as_ref(),
@@ -414,7 +425,7 @@ impl FoloApp {
                 batch: form.batch_value(),
                 imgsz: form.imgsz_value(),
                 // The worker picks its GPU.
-                device: if compute.is_some() { "auto".into() } else { DEVICES[form.device].into() },
+                device: if compute.is_some() { "auto".into() } else { device_val.into() },
                 optimizer: OPTIMIZERS[form.optimizer],
                 lr0: form.lr0,
                 weights: form.weights.clone(),
@@ -507,6 +518,7 @@ impl FoloApp {
                 || (f.lr_invalid && f.optimizer != 0)
                 || f.optimizer_blocks().is_some()
         }) || self.compute_blocked().is_some()
+            || self.nr_device_gone().is_some()
         {
             // Cancel a pending ask; an unanswered key would otherwise stay "loading" for good.
             self.nr_estimate_gen += 1;
@@ -734,14 +746,31 @@ impl FoloApp {
         (gpus == 0).then_some("This server has no GPU: Auto and CPU train on its CPU")
     }
 
-    /// The form's device is GPU 0 on a server without one (prefilled from a run that used it, or
-    /// picked before `/system` answered): Start waits for Auto or CPU, and this says why. A cloud
-    /// run's device is its instance's, not this.
-    pub fn nr_device_gone(&self) -> Option<&'static str> {
+    /// The form's device isn't available on this server (e.g. GPU 0 on a CPU-only server, GPU 1 on
+    /// a single-GPU server, or an unknown device cloned from another machine): Start waits until an
+    /// available device is picked. A cloud run's device is its instance's, not this.
+    pub fn nr_device_gone(&self) -> Option<String> {
         let f = self.new_run.as_ref()?;
         let cloud = self.cloud_on() && f.run_on.is_some();
-        (DEVICES[f.device] == "gpu:0" && !cloud && self.nr_no_gpu().is_some())
-            .then_some("This server has no GPU: pick Auto or CPU")
+        if cloud {
+            return None;
+        }
+        let dev = f.device_value();
+        if dev == "auto" || dev == "cpu" {
+            return None;
+        }
+        let gpus = self.store.system.ready().map(|s| s.gpus.len()).or(self.store.last_gpu_count);
+        match super::forms::gpu_index(dev) {
+            Some(_) if gpus == Some(0) => Some("This server has no GPU: pick Auto or CPU".into()),
+            Some(idx) if gpus.is_some_and(|n| idx >= n) => {
+                Some(format!("GPU {idx} isn't available on this server: pick Auto, GPU 0, or CPU"))
+            }
+            Some(_) => None,
+            None if gpus == Some(0) => {
+                Some(format!("Device '{dev}' isn't available on this server: pick Auto or CPU"))
+            }
+            None => Some(format!("Device '{dev}' isn't available on this server: pick Auto, GPU 0, or CPU")),
+        }
     }
 }
 
