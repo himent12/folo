@@ -26,12 +26,63 @@ pub struct HungarianResult {
     pub total_cost: f64,
 }
 
+/// Error-free double-double (`hi + lo`, ~106-bit significand via Knuth's TwoSum) used for dual
+/// potentials `u`, `v`, `minv`, and `delta` in [`hungarian_assign`] so mixed-magnitude cost rows
+/// spanning up to ~`10^31` never suffer catastrophic cancellation in dual updates.
+#[derive(Clone, Copy, Debug)]
+struct Dd {
+    hi: f64,
+    lo: f64,
+}
+
+impl Dd {
+    const ZERO: Self = Self { hi: 0.0, lo: 0.0 };
+    const INFINITY: Self = Self { hi: f64::INFINITY, lo: 0.0 };
+
+    #[inline]
+    const fn from_f64(x: f64) -> Self {
+        Self { hi: x, lo: 0.0 }
+    }
+
+    #[inline]
+    fn two_sum(a: f64, b: f64) -> (f64, f64) {
+        let s = a + b;
+        let bb = s - a;
+        let e = (a - (s - bb)) + (b - bb);
+        (s, e)
+    }
+
+    #[inline]
+    fn add(self, rhs: Self) -> Self {
+        let (s, e) = Self::two_sum(self.hi, rhs.hi);
+        let lo = e + self.lo + rhs.lo;
+        let (hi, lo) = Self::two_sum(s, lo);
+        Self { hi, lo }
+    }
+
+    #[inline]
+    fn sub(self, rhs: Self) -> Self {
+        self.add(Self { hi: -rhs.hi, lo: -rhs.lo })
+    }
+
+    #[inline]
+    fn lt(self, rhs: Self) -> bool {
+        self.hi < rhs.hi || (self.hi == rhs.hi && self.lo < rhs.lo)
+    }
+}
+
 /// Solve the exact minimum-cost linear-sum assignment problem for a row-major `rows × cols` cost matrix.
 ///
 /// Matches `k = rows.min(cols)` distinct `(row, col)` pairs minimizing `sum costs[row * cols + col]`
 /// in `O(k² · max(rows, cols))` time and `O(rows + cols)` auxiliary memory.
 ///
 /// Ties are broken deterministically (preferring smaller indices under strict `<` comparisons).
+///
+/// **Numerical precision:** dual potentials and slacks are maintained in double-double (`~106`-bit)
+/// arithmetic (preserving ~31 decimal digits of dynamic range across augmenting paths). Costs whose
+/// magnitude exceeds `1e150` are divided by a positive normal divisor (`max_abs / 1e100`) to prevent
+/// overflow without subnormal underflow, and `total_cost` is always summed from the original unscaled
+/// entries.
 ///
 /// # Errors
 /// Returns [`Error::Config`] if `rows * cols` overflows, `costs.len() != rows * cols`, or any entry
@@ -68,56 +119,45 @@ pub fn hungarian_assign(costs: &[f64], rows: usize, cols: usize) -> Result<Hunga
     let transposed = rows > cols;
     let (n, m) = if transposed { (cols, rows) } else { (rows, cols) };
 
-    // Positive rescaling when magnitudes are extreme prevents `cost - u[i] - v[j]` overflow in `f64`
-    // while preserving the exact ordering of every permutation.
-    let scale = if max_abs > 1e100 { 1.0 / max_abs } else { 1.0 };
+    // Positive normal divisor when magnitudes exceed 1e150 prevents `cost - u[i] - v[j]` overflow in `f64`
+    // without subnormal underflow (even at `f64::MAX`) and without row-shift absorption of small entries.
+    let inv_div = if max_abs > 1e150 { Some(max_abs / 1e100) } else { None };
 
-    // Row-minimum shift: when n <= m every row is matched exactly once, so subtracting min_j c(i, j)
-    // is an exact equivalence that keeps reduced costs non-negative and improves conditioning.
-    let mut row_min = vec![0.0f64; n];
-    for (i, rmin) in row_min.iter_mut().enumerate() {
-        let mut best = f64::INFINITY;
-        for j in 0..m {
-            let v = if transposed { costs[j * cols + i] } else { costs[i * cols + j] } * scale;
-            if v < best {
-                best = v;
-            }
-        }
-        *rmin = best;
-    }
-
-    let mut u = vec![0.0f64; n + 1];
-    let mut v = vec![0.0f64; m + 1];
+    let mut u = vec![Dd::ZERO; n + 1];
+    let mut v = vec![Dd::ZERO; m + 1];
     let mut p = vec![0usize; m + 1];
     let mut way = vec![0usize; m + 1];
-    let mut minv = vec![0.0f64; m + 1];
+    let mut minv = vec![Dd::ZERO; m + 1];
     let mut used = vec![false; m + 1];
 
     for i in 1..=n {
         p[0] = i;
         let mut j0 = 0usize;
-        minv.fill(f64::INFINITY);
+        minv.fill(Dd::INFINITY);
         used.fill(false);
 
         loop {
             used[j0] = true;
             let i0 = p[j0];
             let r = i0 - 1;
-            let r_shift = row_min[r];
             let u_i0 = u[i0];
-            let mut delta = f64::INFINITY;
+            let mut delta = Dd::INFINITY;
             let mut j1 = 0usize;
 
             for j in 1..=m {
                 if !used[j] {
                     let c = j - 1;
                     let raw = if transposed { costs[c * cols + r] } else { costs[r * cols + c] };
-                    let cur = (raw * scale - r_shift) - u_i0 - v[j];
-                    if cur < minv[j] {
+                    let scaled = match inv_div {
+                        Some(d) => raw / d,
+                        None => raw,
+                    };
+                    let cur = Dd::from_f64(scaled).sub(u_i0).sub(v[j]);
+                    if cur.lt(minv[j]) {
                         minv[j] = cur;
                         way[j] = j0;
                     }
-                    if minv[j] < delta {
+                    if minv[j].lt(delta) {
                         delta = minv[j];
                         j1 = j;
                     }
@@ -126,10 +166,10 @@ pub fn hungarian_assign(costs: &[f64], rows: usize, cols: usize) -> Result<Hunga
 
             for j in 0..=m {
                 if used[j] {
-                    u[p[j]] += delta;
-                    v[j] -= delta;
+                    u[p[j]] = u[p[j]].add(delta);
+                    v[j] = v[j].sub(delta);
                 } else {
-                    minv[j] -= delta;
+                    minv[j] = minv[j].sub(delta);
                 }
             }
 
@@ -482,7 +522,16 @@ impl OneToOneMatcher {
             })
             .collect();
 
-        let mut cost_matrix = vec![0.0f64; n_q * n_valid];
+        let matrix_len = n_q.checked_mul(n_valid).ok_or_else(|| {
+            Error::Config(format!("one_to_one: Q ({n_q}) * valid_gts ({n_valid}) overflows"))
+        })?;
+        let max_elems = (isize::MAX as usize) / std::mem::size_of::<f64>();
+        if matrix_len > max_elems {
+            return Err(Error::Config(format!(
+                "one_to_one: cost matrix of size {n_q} x {n_valid} exceeds allocation limit"
+            )));
+        }
+        let mut cost_matrix = vec![0.0f64; matrix_len];
         for q in 0..n_q {
             let p_box = &pd_bboxes[q];
             let p_c = pd_cxcywh[q];

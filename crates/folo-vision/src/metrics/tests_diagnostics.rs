@@ -75,18 +75,25 @@ fn confusion_matrix_matching_background_normalization_and_merge() {
     let rn = cm.row_normalized();
     for (r, row) in rn.iter().enumerate() {
         let sum: f64 = row.iter().sum();
-        if cm.counts[r].iter().sum::<u64>() > 0 {
+        if cm.counts()[r].iter().sum::<u64>() > 0 {
             assert!((sum - 1.0).abs() < 1e-12);
         }
     }
     let cn = cm.col_normalized();
     for c in 0..=2 {
-        let col_sum: u64 = cm.counts.iter().map(|row| row[c]).sum();
+        let col_sum: u64 = cm.counts().iter().map(|row| row[c]).sum();
         let norm_sum: f64 = cn.iter().map(|row| row[c]).sum();
         if col_sum > 0 {
             assert!((norm_sum - 1.0).abs() < 1e-12);
         }
     }
+
+    // Serde round-trip succeeds on valid matrix and rejects malformed shapes/thresholds.
+    let json = serde_json::to_string(&cm).unwrap();
+    assert_eq!(serde_json::from_str::<DetectionConfusionMatrix>(&json).unwrap(), cm);
+    let malformed = r#"{"num_classes":1,"conf_thresh":0.25,"iou_thresh":0.5,"counts":[]}"#;
+    assert!(serde_json::from_str::<DetectionConfusionMatrix>(malformed).is_err());
+    assert!(DetectionConfusionMatrix::new(usize::MAX, 0.5, 0.25).is_err());
 
     // Validation checks.
     assert!(DetectionConfusionMatrix::new(2, -0.1, 0.25).is_err());
@@ -188,6 +195,40 @@ fn pr_curve_monotonic_envelope_ap_consistency_and_optimal_f1() {
     assert!((tied_diag.per_class[0].best_f1.f1 - 2.0 / 3.0).abs() < 1e-12);
     assert_eq!(tied_diag.per_class[0].best_f1.tp, 1);
     assert_eq!(tied_diag.per_class[0].best_f1.fp, 1);
+
+    // Exact integer F1 tie-break: 2 GTs; at 0.9: 1 TP + 3 FP -> F1 = 2/6 = 1/3; at 0.5: 2 TP + 8 FP -> F1 = 4/12 = 1/3.
+    // Must prefer the HIGHER threshold 0.9 despite floating-point rounding!
+    let f1_tie_img = [(
+        vec![
+            det(0.0, 0.0, 10.0, 10.0, 0.9, 0),    // TP 1
+            det(100.0, 0.0, 110.0, 10.0, 0.9, 0), // FP 1
+            det(120.0, 0.0, 130.0, 10.0, 0.9, 0), // FP 2
+            det(140.0, 0.0, 150.0, 10.0, 0.9, 0), // FP 3
+            det(20.0, 0.0, 30.0, 10.0, 0.5, 0),   // TP 2
+            det(160.0, 0.0, 170.0, 10.0, 0.5, 0), // FP 4
+            det(180.0, 0.0, 190.0, 10.0, 0.5, 0), // FP 5
+            det(200.0, 0.0, 210.0, 10.0, 0.5, 0), // FP 6
+            det(220.0, 0.0, 230.0, 10.0, 0.5, 0), // FP 7
+            det(240.0, 0.0, 250.0, 10.0, 0.5, 0), // FP 8
+        ],
+        vec![truth(0.0, 0.0, 10.0, 10.0, 0), truth(20.0, 0.0, 30.0, 10.0, 0)],
+    )];
+    let f1_tie_diag = compute_pr_curves(1, 0.5, &f1_tie_img).unwrap();
+    assert_eq!(f1_tie_diag.per_class[0].best_f1.conf_thresh, 0.9);
+    assert!((f1_tie_diag.per_class[0].best_f1.f1 - 1.0 / 3.0).abs() < 1e-12);
+
+    // Zero-TP and negative-score cases: counts agree with returned threshold and no-GT classes retain points.
+    let fp_only = [(
+        vec![det(50.0, 50.0, 60.0, 60.0, 0.9, 0), det(70.0, 70.0, 80.0, 80.0, -0.2, 1)],
+        vec![truth(0.0, 0.0, 10.0, 10.0, 0)],
+    )];
+    let fp_diag = compute_pr_curves(2, 0.5, &fp_only).unwrap();
+    assert_eq!(fp_diag.per_class[0].best_f1.conf_thresh, 0.0);
+    assert_eq!(fp_diag.per_class[0].best_f1.fp, 1);
+    assert_eq!(fp_diag.per_class[0].best_f1.fn_count, 1);
+    assert_eq!(fp_diag.per_class[1].num_preds, 1);
+    assert_eq!(fp_diag.per_class[1].points.len(), 1);
+    assert_eq!(fp_diag.per_class[1].points[0].confidence, -0.2);
 }
 
 #[test]
@@ -239,4 +280,9 @@ fn detection_calibration_reliability_ece_mce_brier() {
     assert!(reliability_from_scores(&[1.2], &[true], 5).is_err());
     assert!(reliability_from_scores(&[-0.1], &[false], 5).is_err());
     assert!(reliability_from_scores(&[0.5], &[], 5).is_err());
+    // Negative and >1 detection scores must be symmetrically rejected by `compute_detection_calibration`.
+    let neg_img = [(vec![det(0.0, 0.0, 10.0, 10.0, -0.1, 0)], vec![truth(0.0, 0.0, 10.0, 10.0, 0)])];
+    assert!(compute_detection_calibration(1, 0.5, 0.0, 5, &neg_img).is_err());
+    let over_img = [(vec![det(0.0, 0.0, 10.0, 10.0, 1.2, 0)], vec![truth(0.0, 0.0, 10.0, 10.0, 0)])];
+    assert!(compute_detection_calibration(1, 0.5, 0.0, 5, &over_img).is_err());
 }

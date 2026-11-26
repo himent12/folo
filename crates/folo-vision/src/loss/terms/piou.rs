@@ -7,22 +7,24 @@
 //!   P       = 0.25 * ((|ax1 - bx1| + |ax2 - bx2|) / w_t + (|ay1 - by1| + |ay2 - by2|) / h_t)
 //!   L_PIoU  = (1 - IoU) + (1 - exp(-P²))
 //!   ```
-//! - **PIoU v2** ([`piou2_loss`]): applies a detached non-monotonic attention focusing factor
+//! - **PIoU v2** ([`piou2_loss`]): applies FOLO's detached non-monotonic attention focusing factor
 //!   `u(lambda * q) = 3 * (lambda * q) * exp(-(lambda * q)²)` over anchor quality `q = exp(-P)` (with
 //!   hyperparameter `lambda > 0`, paper default `1.3`):
 //!   ```text
 //!   L_PIoU2 = u(lambda * q)* * L_PIoU
 //!   ```
-//!   Detaching `u(lambda * q)*` ensures every non-identical box receives a strict descent direction toward
-//!   the target (never repelling high-`P` boxes toward `P -> +inf` where `u -> 0`) while peaking gradient
+//!   Unlike reference implementations that differentiate through `u`, FOLO detaches `u(lambda * q)*`
+//!   (matching [`super::wiou_v3_loss`]) so non-saturated boxes always receive a descent gradient toward the
+//!   target (never repelling high-`P` boxes toward `P -> +inf` where `u -> 0`) while peaking gradient
 //!   attention on medium-quality anchors around `q = 1 / (lambda * sqrt(2))`.
 //!
 //! Both losses share the scale-normalized `1 - IoU` base term from [`super::geom_loss`] and guard all
 //! target side lengths and exponential tails explicitly so that:
 //! - identical valid boxes at any positive scale yield exact `0.0` loss and `0.0` gradient,
-//! - every term is strictly scale-invariant across `1e-30..1e30`,
-//! - degenerate (zero-area, collinear, nested, disjoint, inverted, extreme-scale) boxes produce finite
-//!   losses and gradients with zero `NaN` or `±Inf`,
+//! - every term is strictly scale-invariant across normal `f32` scales (`1e-30..1e30`),
+//! - degenerate (zero-area, collinear, nested, disjoint, inverted) boxes produce finite losses and gradients
+//!   in `f64` (distant boxes with `P >= 30` saturate cleanly to `f(P) = 1`, `f'(P) = 0`; subnormal targets
+//!   with `w_t < 1e-38` can still overflow the final `f32` gradient cast),
 //! - `NaN` and `±Inf` inputs propagate `NaN` cleanly through both forward and backward.
 
 use folo_core::{DType, Result, Tensor};
@@ -46,20 +48,16 @@ fn sgn0(x: f64) -> f64 {
     }
 }
 
-/// Non-monotonic PIoU v2 attention focusing factor `u(lambda * q) = 3 * x * exp(-x²)` where `x = lambda * q`,
-/// `q = exp(-P)` in `(0, 1]`, and `lambda > 0`.
+/// Non-monotonic PIoU v2 attention focusing factor `u(lambda * q) = 3 * x * exp(-x²)` in `f64`, where
+/// `x = lambda * q` for anchor quality `q = exp(-P)` in `[0, 1]` and focusing hyperparameter `lambda > 0`.
 ///
 /// Peaks at `x = 1 / sqrt(2)` with maximum value `3 / sqrt(2 * e) ≈ 1.2866`, decaying smoothly toward `0`
-/// for both low-quality outliers (`q -> 0`) and extreme `x >> 1`.
+/// for both low-quality outliers (`q -> 0`) and extreme `x >> 1`. Returns `NaN` on invalid inputs.
 #[inline]
-pub fn piou_attention_f64(p: f64, lambda: f64) -> f64 {
-    if !(p.is_finite() && p >= 0.0 && lambda.is_finite() && lambda > 0.0) {
-        if p == f64::INFINITY && lambda.is_finite() && lambda > 0.0 {
-            return 0.0;
-        }
+pub fn piou_attention_f64(q: f64, lambda: f64) -> f64 {
+    if !(q.is_finite() && (0.0..=1.0).contains(&q) && lambda.is_finite() && lambda > 0.0) {
         return f64::NAN;
     }
-    let q = (-p).exp();
     if q == 0.0 {
         return 0.0;
     }
@@ -70,18 +68,23 @@ pub fn piou_attention_f64(p: f64, lambda: f64) -> f64 {
     3.0 * x * (-x * x).exp()
 }
 
+/// Internal `P`-domain helper evaluating [`piou_attention_f64`] at `q = exp(-P)` for `P >= 0` (including `+Inf`).
+#[inline]
+pub(crate) fn piou_attention_from_p_f64(p: f64, lambda: f64) -> f64 {
+    if p == f64::INFINITY && lambda.is_finite() && lambda > 0.0 {
+        return 0.0;
+    }
+    if !(p.is_finite() && p >= 0.0 && lambda.is_finite() && lambda > 0.0) {
+        return f64::NAN;
+    }
+    piou_attention_f64((-p).exp(), lambda)
+}
+
 /// Non-monotonic PIoU v2 attention focusing factor `u(lambda * q) = 3 * (lambda * q) * exp(-(lambda * q)²)`
 /// for anchor quality `q = exp(-P)` in `[0, 1]` and focusing hyperparameter `lambda > 0` (paper default `1.3`).
 #[inline]
 pub fn piou_attention(q: f32, lambda: f32) -> f32 {
-    if !(q.is_finite() && (0.0..=1.0).contains(&q) && lambda.is_finite() && lambda > 0.0) {
-        return f32::NAN;
-    }
-    let x = (lambda as f64) * (q as f64);
-    if x >= EXP_SQ_CUTOFF {
-        return 0.0;
-    }
-    (3.0 * x * (-x * x).exp()) as f32
+    piou_attention_f64(q as f64, lambda as f64) as f32
 }
 
 /// Single-box Powerful-IoU v1 forward `(loss, dL/d(ax1, ay1, ax2, ay2), P)` in `f64` (Liu et al. 2024):
@@ -155,7 +158,7 @@ pub(crate) fn piou2_box_f64(a: [f64; 4], b: [f64; 4], lambda: f64) -> (f64, [f64
     if !l1.is_finite() {
         return (f64::NAN, [f64::NAN; 4], f64::NAN);
     }
-    let u = piou_attention_f64(p, lambda);
+    let u = piou_attention_from_p_f64(p, lambda);
     if !u.is_finite() {
         return (f64::NAN, [f64::NAN; 4], f64::NAN);
     }

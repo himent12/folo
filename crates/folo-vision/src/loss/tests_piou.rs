@@ -4,7 +4,10 @@
 //! `u(lambda * q)` verification; scale invariance across 24 orders of magnitude; `Tensor`-level
 //! `grad_check_with`; optimization convergence from disjoint boxes; and `NaN`/`±Inf`/invalid-param safety.
 
-use super::terms::{piou_attention, piou_attention_f64, piou_box_f64, piou_loss, piou2_box_f64, piou2_loss};
+use super::terms::{
+    piou_attention, piou_attention_f64, piou_attention_from_p_f64, piou_box_f64, piou_loss, piou2_box_f64,
+    piou2_loss,
+};
 use folo_core::Tensor;
 use folo_core::testing::{GradCheck, grad_check_with};
 
@@ -91,19 +94,27 @@ fn piou_v2_attention_focusing_and_detached_fd_grad_check() {
     // Peak of u(x) = 3 * x * exp(-x²) occurs at x = 1 / sqrt(2) with peak value 3 / sqrt(2 * e).
     let q_peak = 1.0 / (lambda * std::f64::consts::SQRT_2);
     let p_peak = -q_peak.ln();
-    let u_peak = piou_attention_f64(p_peak, lambda);
+    let u_peak = piou_attention_f64(q_peak, lambda);
     let want_peak = 3.0 / (2.0 * std::f64::consts::E).sqrt();
     assert!((u_peak - want_peak).abs() < 1e-14, "u_peak {u_peak} vs {want_peak}");
+    assert!((piou_attention_from_p_f64(p_peak, lambda) - want_peak).abs() < 1e-14);
+    // `piou_attention` and `piou_attention_f64` agree on the exact same quality domain `q in [0, 1]`.
+    for q in [0.0f32, 0.25, q_peak as f32, 0.75, 1.0] {
+        assert!((piou_attention(q, 1.3) as f64 - piou_attention_f64(q as f64, 1.3)).abs() < 1e-6);
+    }
     // Non-monotonic: peak strictly exceeds both high-quality (P -> 0, q -> 1) and low-quality (P = 3).
-    let u_high_q = piou_attention_f64(0.0, lambda);
-    let u_low_q = piou_attention_f64(3.0, lambda);
+    let u_high_q = piou_attention_from_p_f64(0.0, lambda);
+    let u_low_q = piou_attention_from_p_f64(3.0, lambda);
     assert!(
         u_peak > u_high_q && u_peak > u_low_q,
         "attention must be non-monotonic: {u_high_q}, {u_peak}, {u_low_q}"
     );
     // Extreme outlier decays smoothly to 0 without NaN/Inf.
-    assert_eq!(piou_attention_f64(1e6, lambda), 0.0);
-    assert_eq!(piou_attention_f64(f64::INFINITY, lambda), 0.0);
+    assert_eq!(piou_attention_from_p_f64(1e6, lambda), 0.0);
+    assert_eq!(piou_attention_from_p_f64(f64::INFINITY, lambda), 0.0);
+    assert_eq!(piou_attention_f64(0.0, lambda), 0.0);
+    assert!(piou_attention_f64(-0.1, lambda).is_nan());
+    assert!(piou_attention_f64(1.1, lambda).is_nan());
     assert!((piou_attention(q_peak as f32, 1.3) - want_peak as f32).abs() < 1e-6);
 
     let cases: [([f64; 4], [f64; 4]); 8] = [
@@ -122,7 +133,7 @@ fn piou_v2_attention_focusing_and_detached_fd_grad_check() {
             let (l1, g1, p) = piou_box_f64(a, b);
             let (l2, g2, u) = piou2_box_f64(a, b, lam);
             assert!(l2.is_finite() && l2 >= 0.0, "piou2 case {idx} lam {lam}: bad loss {l2}");
-            assert!((u - piou_attention_f64(p, lam)).abs() < 1e-15);
+            assert!((u - piou_attention_from_p_f64(p, lam)).abs() < 1e-15);
             assert!((l2 - u * l1).abs() <= 1e-14 + 1e-14 * l2.abs());
             for c in 0..4 {
                 assert!((g2[c] - u * g1[c]).abs() <= 1e-14 + 1e-14 * g2[c].abs());

@@ -40,7 +40,7 @@ pub(crate) use nwd_wiou::{
 pub use nwd_wiou::{nwd_loss, nwd_loss_with_c, wiou_v1_loss, wiou_v3_loss};
 pub use piou::{piou_attention, piou_attention_f64, piou_loss, piou2_loss};
 #[cfg(test)]
-pub(crate) use piou::{piou_box_f64, piou2_box_f64};
+pub(crate) use piou::{piou_attention_from_p_f64, piou_box_f64, piou2_box_f64};
 #[cfg(test)]
 pub(crate) use siou_eiou::{eiou_box_f64, siou_box_f64};
 pub use siou_eiou::{eiou_loss, siou_loss};

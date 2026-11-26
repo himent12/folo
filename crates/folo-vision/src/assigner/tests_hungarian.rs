@@ -137,11 +137,31 @@ fn hungarian_tie_breaking_extremes_and_validation() {
     assert_eq!(hungarian_assign(&[], 5, 0).unwrap().pairs, Vec::<(usize, usize)>::new());
     assert_eq!(hungarian_assign(&[], 0, 0).unwrap().total_cost, 0.0);
 
-    // Extreme magnitudes (~1e200) must not overflow in `cost - u - v`.
+    // Extreme magnitudes (~1e200 and f64::MAX) must not overflow in `cost - u - v`.
     let huge = vec![3e200, 1e200, 2e200, 1e200, 5e200, 4e200]; // 2x3: opt is (0,1)+(1,0) = 2e200
     let r_huge = hungarian_assign(&huge, 2, 3).unwrap();
     assert_eq!(r_huge.pairs, vec![(0, 1), (1, 0)]);
     assert!((r_huge.total_cost - 2e200).abs() <= 1e186);
+
+    // Regression: large negative entry in row 2 must NOT absorb small differences (1 vs 0).
+    let mixed = vec![
+        9e17, 9e17, 9e17, 1e17, // row 0 -> col 3 (1e17)
+        -1e17, 9e17, 9e17, 9e17, // row 1 -> col 0 (-1e17)
+        -1e16, 1.0, 0.0, 9e17, // row 2 -> col 2 (0.0), NOT col 1 (1.0)
+    ];
+    let r_mixed = hungarian_assign(&mixed, 3, 4).unwrap();
+    assert_eq!(r_mixed.pairs, vec![(0, 3), (1, 0), (2, 2)]);
+    assert_eq!(r_mixed.total_cost, 0.0);
+
+    // Regression: extreme scale (1e308) with tiny negative entry (-1e-20) must preserve -1e-20 (both orientations).
+    let wide_ext = vec![0.0, -1e-20, 0.0, 0.0, 0.0, 1e308]; // 2x3: opt is (0,1)+(1,0) = -1e-20
+    let r_we = hungarian_assign(&wide_ext, 2, 3).unwrap();
+    assert_eq!(r_we.pairs, vec![(0, 1), (1, 0)]);
+    assert_eq!(r_we.total_cost, -1e-20);
+    let tall_ext = vec![0.0, 0.0, -1e-20, 0.0, 0.0, 1e308]; // 3x2: opt is (1,0)+(0,1) = -1e-20
+    let r_te = hungarian_assign(&tall_ext, 3, 2).unwrap();
+    assert_eq!(r_te.pairs, vec![(0, 1), (1, 0)]);
+    assert_eq!(r_te.total_cost, -1e-20);
 
     // f32 wrapper parity.
     let f32_costs = [4.0f32, 1.0, 3.0, 2.0, 0.0, 5.0, 3.0, 2.0, 2.0];

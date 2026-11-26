@@ -24,6 +24,47 @@ fn box_is_finite(b: &Xyxy) -> bool {
     b.x1.is_finite() && b.y1.is_finite() && b.x2.is_finite() && b.y2.is_finite()
 }
 
+/// Wire format for validated [`DetectionConfusionMatrix`] deserialization.
+#[derive(Deserialize)]
+struct RawDetectionConfusionMatrix {
+    num_classes: usize,
+    conf_thresh: f32,
+    iou_thresh: f32,
+    counts: Vec<Vec<u64>>,
+}
+
+impl TryFrom<RawDetectionConfusionMatrix> for DetectionConfusionMatrix {
+    type Error = String;
+
+    fn try_from(raw: RawDetectionConfusionMatrix) -> std::result::Result<Self, Self::Error> {
+        if !(raw.iou_thresh.is_finite() && (0.0..=1.0).contains(&raw.iou_thresh)) {
+            return Err(format!(
+                "DetectionConfusionMatrix: iou_thresh must be finite and in [0, 1], got {}",
+                raw.iou_thresh
+            ));
+        }
+        if !(raw.conf_thresh.is_finite() && (0.0..=1.0).contains(&raw.conf_thresh)) {
+            return Err(format!(
+                "DetectionConfusionMatrix: conf_thresh must be finite and in [0, 1], got {}",
+                raw.conf_thresh
+            ));
+        }
+        let dim = raw
+            .num_classes
+            .checked_add(1)
+            .ok_or_else(|| "DetectionConfusionMatrix: num_classes + 1 overflows".to_string())?;
+        if raw.counts.len() != dim || raw.counts.iter().any(|row| row.len() != dim) {
+            return Err(format!("DetectionConfusionMatrix: counts must be a {dim} x {dim} square matrix"));
+        }
+        Ok(Self {
+            num_classes: raw.num_classes,
+            conf_thresh: raw.conf_thresh,
+            iou_thresh: raw.iou_thresh,
+            counts: raw.counts,
+        })
+    }
+}
+
 /// Detection confusion matrix with a background row and column at index `num_classes`.
 ///
 /// Layout: `counts[pred_class][truth_class]`, where:
@@ -38,6 +79,7 @@ fn box_is_finite(b: &Xyxy) -> bool {
 /// with deterministic tie-breaking by descending prediction score, ascending truth index, then ascending
 /// prediction index.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawDetectionConfusionMatrix")]
 pub struct DetectionConfusionMatrix {
     /// Number of foreground object classes `C`; matrix dimension is `(C + 1) × (C + 1)`.
     pub num_classes: usize,
@@ -46,7 +88,7 @@ pub struct DetectionConfusionMatrix {
     /// Minimum IoU for a prediction-truth match (`iou >= iou_thresh`).
     pub iou_thresh: f32,
     /// Row-major `(C + 1) × (C + 1)` count table indexed as `counts[pred][truth]`.
-    pub counts: Vec<Vec<u64>>,
+    counts: Vec<Vec<u64>>,
 }
 
 impl DetectionConfusionMatrix {
@@ -63,8 +105,16 @@ impl DetectionConfusionMatrix {
                 "DetectionConfusionMatrix: conf_thresh must be finite and in [0, 1], got {conf_thresh}"
             )));
         }
-        let dim = num_classes + 1;
+        let dim = num_classes
+            .checked_add(1)
+            .ok_or_else(|| Error::Config("DetectionConfusionMatrix: num_classes + 1 overflows".into()))?;
         Ok(Self { num_classes, conf_thresh, iou_thresh, counts: vec![vec![0u64; dim]; dim] })
+    }
+
+    /// Read-only view of the `(num_classes + 1) × (num_classes + 1)` count matrix `counts[pred][truth]`.
+    #[inline]
+    pub fn counts(&self) -> &[Vec<u64>] {
+        &self.counts
     }
 
     /// Build a confusion matrix directly from a slice of `(preds, truths)` image pairs.
@@ -358,10 +408,14 @@ struct MatchedDet {
 
 /// Per-image, per-class greedy IoU matching (descending score order, ties by input order) returning
 /// per-class matched detections and ground-truth counts.
+///
+/// When `validate_unit_scores` is `true`, every finite detection score (even below `conf_thresh`) is
+/// validated to lie in `[0, 1]` before applying the confidence filter.
 fn match_images_by_class<P, T>(
     num_classes: usize,
     iou_thresh: f32,
-    conf_thresh: f32,
+    conf_thresh: Option<f32>,
+    validate_unit_scores: bool,
     images: &[(P, T)],
 ) -> Result<(Vec<Vec<MatchedDet>>, Vec<u64>)>
 where
@@ -373,9 +427,11 @@ where
             "diagnostics: iou_thresh must be finite and in [0, 1], got {iou_thresh}"
         )));
     }
-    if !(conf_thresh.is_finite() && (0.0..=1.0).contains(&conf_thresh)) {
+    if let Some(ct) = conf_thresh
+        && !(ct.is_finite() && (0.0..=1.0).contains(&ct))
+    {
         return Err(Error::Config(format!(
-            "diagnostics: conf_thresh must be finite and in [0, 1], got {conf_thresh}"
+            "diagnostics: conf_thresh must be finite and in [0, 1], got {ct}"
         )));
     }
 
@@ -393,6 +449,12 @@ where
                     p.class
                 )));
             }
+            if validate_unit_scores && (!p.score.is_finite() || !(0.0..=1.0).contains(&p.score)) {
+                return Err(Error::Config(format!(
+                    "diagnostics: image {img_idx} pred[{i}].score must be finite and in [0, 1], got {}",
+                    p.score
+                )));
+            }
         }
         for (i, t) in truths.iter().enumerate() {
             if (t.class as usize) >= num_classes {
@@ -405,7 +467,8 @@ where
 
         let mut img_preds: Vec<Vec<usize>> = vec![Vec::new(); num_classes];
         for (pi, p) in preds.iter().enumerate() {
-            if p.score.is_finite() && p.score >= conf_thresh && box_is_finite(&p.bbox) {
+            let passes_conf = conf_thresh.is_none_or(|ct| p.score >= ct);
+            if p.score.is_finite() && passes_conf && box_is_finite(&p.bbox) {
                 img_preds[p.class as usize].push(pi);
             }
         }
@@ -468,7 +531,8 @@ where
     P: AsRef<[Detection]>,
     T: AsRef<[Truth]>,
 {
-    let (mut per_class_dets, gt_counts) = match_images_by_class(num_classes, iou_thresh, 0.0, images)?;
+    let (mut per_class_dets, gt_counts) =
+        match_images_by_class(num_classes, iou_thresh, None, false, images)?;
     let r_grid = recall_points();
 
     let mut per_class = Vec::with_capacity(num_classes);
@@ -488,14 +552,33 @@ where
 
         let n_p = dets.len();
         if n_gt == 0 || n_p == 0 {
+            let points: Vec<PrCurvePoint> = dets
+                .iter()
+                .map(|d| PrCurvePoint {
+                    confidence: d.score,
+                    recall: 0.0,
+                    precision: 0.0,
+                    precision_envelope: 0.0,
+                    f1: 0.0,
+                })
+                .collect();
+            let fp_at_zero = dets.iter().filter(|d| d.score >= 0.0).count() as u64;
             per_class.push(ClassPrCurve {
                 class: c as u32,
                 num_truths: n_gt,
                 num_preds: n_p as u64,
                 ap_continuous: 0.0,
                 ap_101: 0.0,
-                best_f1: OptimalF1Point { fn_count: n_gt, ..OptimalF1Point::default() },
-                points: Vec::new(),
+                best_f1: OptimalF1Point {
+                    conf_thresh: 0.0,
+                    f1: 0.0,
+                    precision: 0.0,
+                    recall: 0.0,
+                    tp: 0,
+                    fp: fp_at_zero,
+                    fn_count: n_gt,
+                },
+                points,
             });
             if n_gt > 0 {
                 active_classes += 1;
@@ -515,7 +598,7 @@ where
             }
             let prec = tp as f64 / (tp + fp) as f64;
             let rec = tp as f64 / n_gt_f;
-            let f1 = if prec + rec > 0.0 { 2.0 * prec * rec / (prec + rec) } else { 0.0 };
+            let f1 = if tp > 0 { (2.0 * tp as f64) / (tp + fp + n_gt) as f64 } else { 0.0 };
             points.push(PrCurvePoint {
                 confidence: d.score,
                 recall: rec,
@@ -559,9 +642,19 @@ where
         let ap_101 = ap_101_sum / NUM_RECALL_POINTS as f64;
 
         // Exact optimal F1 over all unique score thresholds `score >= c` (evaluated at the end of each
-        // equal-score run so tied detections are always thresholded together). Prefer higher `conf_thresh`
-        // on exact F1 ties by updating only on strictly greater F1 (since scores descend).
-        let mut best_f1 = OptimalF1Point { fn_count: n_gt, ..OptimalF1Point::default() };
+        // equal-score run so tied detections are always thresholded together). Compare F1 via exact u128
+        // cross-products of `tp / (tp + fp + n_gt)` so ties are broken strictly in favor of higher
+        // `conf_thresh` without floating-point rounding drift.
+        let fp_at_zero = dets.iter().filter(|d| !d.is_tp && d.score >= 0.0).count() as u64;
+        let mut best_f1 = OptimalF1Point {
+            conf_thresh: 0.0,
+            f1: 0.0,
+            precision: 0.0,
+            recall: 0.0,
+            tp: 0,
+            fp: fp_at_zero,
+            fn_count: n_gt,
+        };
         let mut cur_tp = 0u64;
         let mut cur_fp = 0u64;
         for (idx, d) in dets.iter().enumerate() {
@@ -571,11 +664,15 @@ where
                 cur_fp += 1;
             }
             let is_run_end = idx + 1 == n_p || dets[idx + 1].score != d.score;
-            if is_run_end {
-                let prec = cur_tp as f64 / (cur_tp + cur_fp) as f64;
-                let rec = cur_tp as f64 / n_gt_f;
-                let f1 = if prec + rec > 0.0 { 2.0 * prec * rec / (prec + rec) } else { 0.0 };
-                if f1 > best_f1.f1 {
+            if is_run_end && cur_tp > 0 {
+                let cur_num = cur_tp as u128;
+                let cur_den = (cur_tp + cur_fp + n_gt) as u128;
+                let best_num = best_f1.tp as u128;
+                let best_den = (best_f1.tp + best_f1.fp + n_gt) as u128;
+                if best_f1.tp == 0 || cur_num * best_den > best_num * cur_den {
+                    let prec = cur_tp as f64 / (cur_tp + cur_fp) as f64;
+                    let rec = cur_tp as f64 / n_gt_f;
+                    let f1 = (2.0 * cur_tp as f64) / (cur_tp + cur_fp + n_gt) as f64;
                     best_f1 = OptimalF1Point {
                         conf_thresh: d.score,
                         f1,
@@ -783,7 +880,8 @@ where
     if num_bins == 0 {
         return Err(Error::Config("compute_detection_calibration: num_bins must be >= 1".into()));
     }
-    let (per_class_dets, _) = match_images_by_class(num_classes, iou_thresh, conf_thresh, images)?;
+    let (per_class_dets, _) =
+        match_images_by_class(num_classes, iou_thresh, Some(conf_thresh), true, images)?;
 
     let mut all_scores = Vec::new();
     let mut all_tp = Vec::new();
