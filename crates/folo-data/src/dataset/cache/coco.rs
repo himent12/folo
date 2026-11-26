@@ -97,6 +97,7 @@ pub(crate) fn encode(a: &Annotations, stamps: &[Stamp]) -> Option<Vec<u8>> {
     for s in stamps {
         e.stamp(*s);
     }
+    e.u64(a.skipped_image_rows as u64);
     e.len(a.issues.len());
     for i in &a.issues {
         e.u8(kind_code(i.kind));
@@ -155,6 +156,7 @@ pub(crate) fn decode(bytes: &[u8], stamps: &[Stamp]) -> Option<Annotations> {
             return None;
         }
     }
+    let skipped_image_rows = usize::try_from(d.u64()?).ok()?;
     let mut issues = Vec::new();
     for _ in 0..d.len(17)? {
         let kind = code_kind(d.u8()?)?;
@@ -198,5 +200,5 @@ pub(crate) fn decode(bytes: &[u8], stamps: &[Stamp]) -> Option<Annotations> {
         }
         splits.push(SplitAnnotations { split, path, files, images });
     }
-    d.is_empty().then_some(Annotations { issues, classes, other_files, splits })
+    d.is_empty().then_some(Annotations { issues, skipped_image_rows, classes, other_files, splits })
 }

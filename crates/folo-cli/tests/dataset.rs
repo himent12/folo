@@ -517,6 +517,222 @@ fn interrupted_convert_folder_reports_dataset_unfinished() {
     }
 }
 
+/// `folo dataset convert` counts only skipped images in `skipped_images`, not broken non-image COCO entries
+/// (like a malformed category or an annotation without `image_id`).
+#[test]
+fn convert_does_not_count_non_image_coco_broken_labels_as_skipped_images() {
+    let t = TestDir::new("cli-convert-skipped");
+    let src = synth(&t, "src", &["--val-frac", "0.25", "--image-format", "png"]);
+    let img_a = src.join("images/train/000000.png");
+    let img_b = src.join("images/train/000001.png");
+
+    // Case 1: only non-image broken entries (bad category + annotation without `image_id`) -> 0 skipped images.
+    let coco1 = t.join("coco_non_image_broken");
+    std::fs::create_dir_all(coco1.join("images/train")).unwrap();
+    std::fs::create_dir_all(coco1.join("annotations")).unwrap();
+    std::fs::copy(&img_a, coco1.join("images/train/a.png")).unwrap();
+    let doc1 = serde_json::json!({
+        "images": [{ "id": 1, "file_name": "a.png", "width": 96, "height": 96 }],
+        "annotations": [
+            { "id": 1, "image_id": 1, "category_id": 1, "bbox": [10, 10, 20, 20], "iscrowd": 0 },
+            { "id": 2, "category_id": 1, "bbox": [10, 10, 20, 20], "iscrowd": 0 }
+        ],
+        "categories": [
+            { "id": 1, "name": "circle" },
+            { "name": "missing_id" }
+        ]
+    });
+    std::fs::write(coco1.join("annotations/instances_train.json"), doc1.to_string()).unwrap();
+
+    let out1 = t.join("out1");
+    let (code, stdout, stderr) = folo(&["dataset", "convert", s(&coco1), s(&out1), "--to", "yolo", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let v1 = &json_lines(&stdout)[0];
+    assert_eq!(v1["splits"], serde_json::json!({ "train": 1, "val": 0, "test": 0 }));
+    assert_eq!(
+        v1["skipped_images"], 0,
+        "non-image broken COCO entries must not inflate skipped_images: {v1}"
+    );
+
+    // Case 2: add a second image whose own annotation has a broken bbox plus a malformed `images[]` row missing `id`
+    // -> exactly 2 skipped images (still excluding the bad category and annotation without `image_id`).
+    let coco2 = t.join("coco_with_skipped_images");
+    std::fs::create_dir_all(coco2.join("images/train")).unwrap();
+    std::fs::create_dir_all(coco2.join("annotations")).unwrap();
+    std::fs::copy(&img_a, coco2.join("images/train/a.png")).unwrap();
+    std::fs::copy(&img_b, coco2.join("images/train/b.png")).unwrap();
+    let doc2 = serde_json::json!({
+        "images": [
+            { "id": 1, "file_name": "a.png", "width": 96, "height": 96 },
+            { "id": 2, "file_name": "b.png", "width": 96, "height": 96 },
+            { "file_name": "missing_id.png", "width": 96, "height": 96 }
+        ],
+        "annotations": [
+            { "id": 1, "image_id": 1, "category_id": 1, "bbox": [10, 10, 20, 20], "iscrowd": 0 },
+            { "id": 2, "category_id": 1, "bbox": [10, 10, 20, 20], "iscrowd": 0 },
+            { "id": 3, "image_id": 2, "category_id": 1, "bbox": [10, 10, -5, 20], "iscrowd": 0 }
+        ],
+        "categories": [
+            { "id": 1, "name": "circle" },
+            { "name": "missing_id" }
+        ]
+    });
+    std::fs::write(coco2.join("annotations/instances_train.json"), doc2.to_string()).unwrap();
+
+    let out2 = t.join("out2");
+    let (code, stdout, stderr) = folo(&["dataset", "convert", s(&coco2), s(&out2), "--to", "yolo", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let v2 = &json_lines(&stdout)[0];
+    assert_eq!(v2["splits"], serde_json::json!({ "train": 1, "val": 0, "test": 0 }));
+    assert_eq!(v2["skipped_images"], 2, "skipped image row + broken-annotation image only: {v2}");
+}
+
+/// A directory link (junction on Windows, symlink elsewhere) removed on drop so `TestDir` cleans up cleanly.
+struct DirLink(PathBuf);
+
+impl DirLink {
+    fn new(target: &Path, link: PathBuf) -> Self {
+        #[cfg(windows)]
+        {
+            let native = |p: &Path| p.to_string_lossy().replace('/', "\\");
+            let ok = Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(native(&link))
+                .arg(native(target))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+            assert!(ok, "mklink /J {} -> {}", link.display(), target.display());
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, &link).unwrap();
+        }
+        DirLink(link)
+    }
+}
+
+impl Drop for DirLink {
+    fn drop(&mut self) {
+        if std::fs::remove_dir(&self.0).is_err() {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+}
+
+/// `folo dataset convert` refuses an output inside (or equal to / containing) the input dataset or any of its
+/// image/source folders, including through `..`, symlinks/junctions, and YOLO `path:` indirection.
+#[test]
+fn convert_refuses_output_inside_input_dataset_or_image_folder() {
+    let t = TestDir::new("cli-convert-inside");
+    let ds = t.join("ds");
+    let (code, _, stderr) = folo(&["dataset", "synth", s(&ds), "--images", "4", "--imgsz", "32", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let mut targets = vec![
+        ds.clone(),
+        t.path().to_path_buf(),
+        ds.join("images"),
+        ds.join("images/out"),
+        ds.join("images/train/out"),
+        ds.join("nested_out"),
+        t.join("scratch/../ds/images/out"),
+    ];
+    if cfg!(windows) {
+        targets.push(t.join("DS/IMAGES/out"));
+    }
+    for target in targets {
+        let (code, stdout, _) = folo(&["dataset", "convert", s(&ds), s(&target), "--to", "coco", "--json"]);
+        let err = &json_lines(&stdout).pop().unwrap()["error"];
+        assert_eq!((code, err["code"].as_str()), (2, Some("usage")), "{}: {err}", target.display());
+        assert!(err["hint"].as_str().unwrap().contains("outside"), "{err}");
+    }
+    assert!(!ds.join("images/out").exists(), "must not create output inside input");
+    assert!(!ds.join("nested_out").exists(), "must not create output inside input");
+
+    // Symlink / junction into `ds/images`: `alias/out` writes into `ds/images/out` on every OS, and on Unix
+    // `alias/../out` resolves `alias` before `..` and writes into `ds/out` (Windows resolves `..` lexically before
+    // junctions, so `alias/../out` resolves to `<t>/out` outside `ds`).
+    let alias = t.join("alias");
+    let _link = DirLink::new(&ds.join("images"), alias.clone());
+    let via_link_in = alias.join("out");
+    let (code, stdout, _) = folo(&["dataset", "convert", s(&ds), s(&via_link_in), "--to", "coco", "--json"]);
+    let err = &json_lines(&stdout).pop().unwrap()["error"];
+    assert_eq!((code, err["code"].as_str()), (2, Some("usage")), "{err}");
+    assert!(!ds.join("images/out").exists(), "link/out must not write inside ds/images");
+    #[cfg(unix)]
+    {
+        let via_link_up = alias.join("../out");
+        let (code, stdout, _) =
+            folo(&["dataset", "convert", s(&ds), s(&via_link_up), "--to", "coco", "--json"]);
+        let err = &json_lines(&stdout).pop().unwrap()["error"];
+        assert_eq!((code, err["code"].as_str()), (2, Some("usage")), "{err}");
+        assert!(!ds.join("out").exists(), "symlink/../out must not write inside ds");
+    }
+
+    // YOLO `path:` pointing to another folder still protects the supplied config folder too.
+    let config = t.join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("data.yaml"),
+        "path: ../ds\ntrain: images/train\nval: images/val\nnames: [circle, square, triangle]\n",
+    )
+    .unwrap();
+    for out_path in [config.join("out"), ds.join("from_config_out")] {
+        let (code, stdout, _) =
+            folo(&["dataset", "convert", s(&config), s(&out_path), "--to", "coco", "--json"]);
+        let err = &json_lines(&stdout).pop().unwrap()["error"];
+        assert_eq!((code, err["code"].as_str()), (2, Some("usage")), "{}: {err}", out_path.display());
+        assert!(!out_path.exists());
+    }
+
+    // Even when the target already exists as an empty folder inside the input, refuse it and leave it empty.
+    let empty_inside = ds.join("images/empty_out");
+    std::fs::create_dir_all(&empty_inside).unwrap();
+    let (code, stdout, _) = folo(&["dataset", "convert", s(&ds), s(&empty_inside), "--to", "yolo", "--json"]);
+    let err = &json_lines(&stdout).pop().unwrap()["error"];
+    assert_eq!((code, err["code"].as_str()), (2, Some("usage")), "{err}");
+    assert!(std::fs::read_dir(&empty_inside).unwrap().next().is_none());
+
+    // Bare `data.yaml` from inside `ds` converting to `images/out` is refused too.
+    let out = folo_cmd()
+        .args(["dataset", "convert", "data.yaml", "images/out", "--to", "coco", "--json"])
+        .current_dir(&ds)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let err = &json_lines(&stdout).pop().unwrap()["error"];
+    assert_eq!((out.status.code(), err["code"].as_str()), (Some(2), Some("usage")), "{err}");
+    assert!(!ds.join("images/out").exists());
+}
+
+/// On Windows, `synth` and `convert` to a nonexistent drive report `path_not_found` with an output-path hint
+/// rather than the missing-input-dataset hint.
+#[cfg(windows)]
+#[test]
+fn synth_and_convert_to_missing_drive_give_output_path_hint() {
+    let Some(drive) = ('D'..='Z').rev().find(|d| !Path::new(&format!("{d}:\\")).exists()) else {
+        return;
+    };
+    let bad_out = format!("{drive}:/folo-no-such-drive/out");
+    let (code, stdout, _) = folo(&["dataset", "synth", &bad_out, "--images", "2", "--imgsz", "32", "--json"]);
+    let err = &json_lines(&stdout).pop().unwrap()["error"];
+    assert_eq!((code, err["code"].as_str()), (3, Some("path_not_found")), "{err}");
+    let hint = err["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("output") && !hint.contains("data.yaml"), "synth hint: {err}");
+
+    let t = TestDir::new("cli-convert-bad-drive");
+    let ds = t.join("ds");
+    let (code, _, stderr) = folo(&["dataset", "synth", s(&ds), "--images", "4", "--imgsz", "32", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, stdout, _) = folo(&["dataset", "convert", s(&ds), &bad_out, "--to", "coco", "--json"]);
+    let err = &json_lines(&stdout).pop().unwrap()["error"];
+    assert_eq!((code, err["code"].as_str()), (3, Some("path_not_found")), "{err}");
+    let hint = err["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("output") && !hint.contains("data.yaml"), "convert hint: {err}");
+}
+
 /// A `folo` command with the on-disk caches off (`FOLO_NO_CACHE`), so tests never write into the user's home.
 fn folo_cmd() -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_folo"));

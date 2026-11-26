@@ -144,8 +144,8 @@ pub(crate) fn open_jsons(
     let ann = super::cache::coco::load_or_read(&settings, &jsons, wanted, || {
         read_annotations(root, &jsons, wanted)
     })?;
-    let Annotations { issues, classes, other_files, splits } = ann;
-    let mut report = LoadReport { issues };
+    let Annotations { issues, skipped_image_rows, classes, other_files, splits } = ann;
+    let mut report = LoadReport::from_issues(issues, skipped_image_rows);
     let mut deps: std::collections::BTreeSet<PathBuf> = std::iter::once(root.to_path_buf()).collect();
     deps.extend(other_files);
     let mut by_split: BTreeMap<Split, Vec<Candidate>> = BTreeMap::new();
@@ -198,6 +198,8 @@ pub(crate) fn open_jsons(
 pub(crate) struct Annotations {
     /// The issues found in the files, in order.
     pub issues: Vec<super::Issue>,
+    /// Malformed entries in COCO `images` arrays dropped before candidate building.
+    pub skipped_image_rows: usize,
     /// Class names, by category id.
     pub classes: Vec<String>,
     /// Files of the splits not wanted (read for their categories only).
@@ -238,6 +240,7 @@ pub(crate) fn read_annotations(
     wanted: &[Split],
 ) -> Result<Annotations> {
     let mut report = LoadReport::default();
+    let mut skipped_image_rows = 0usize;
     let mut categories: BTreeMap<u64, String> = BTreeMap::new();
     let mut parsed = Vec::with_capacity(jsons.len());
     // Files of the splits not wanted, read for their categories only (every file's count for the class ids).
@@ -290,6 +293,7 @@ pub(crate) fn read_annotations(
             match im {
                 ParsedImage::Valid { id, file_name, declared } => imgs.push((id, file_name, declared)),
                 ParsedImage::Bad(msg) => {
+                    skipped_image_rows += 1;
                     report.push(
                         IssueKind::BrokenLabel,
                         &path,
@@ -400,7 +404,7 @@ pub(crate) fn read_annotations(
         let files = p.images.into_iter().map(|(_, file, _)| file).collect();
         splits.push(SplitAnnotations { split: p.split, path: p.path, files, images });
     }
-    Ok(Annotations { issues: report.issues, classes, other_files, splits })
+    Ok(Annotations { issues: report.issues, skipped_image_rows, classes, other_files, splits })
 }
 
 /// Picks the folder the JSON's `file_name`s are relative to by probing a few images.

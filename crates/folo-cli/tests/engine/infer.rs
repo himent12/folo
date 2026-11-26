@@ -249,3 +249,76 @@ fn predict_val_and_export_reject_invalid_args_before_opening_model() {
         assert!(e["message"].as_str().unwrap().contains(flag), "{args:?}: {e}");
     }
 }
+
+/// Passing an existing directory as `--model` reports that it is a directory (`usage`, exit 2) rather than
+/// `model_not_found` ("does not exist").
+#[test]
+fn model_directory_reports_directory_not_missing() {
+    let root = TestDir::new("cli-model-is-dir");
+    let dir = root.join("weights_folder");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cases: &[&[&str]] = &[
+        &["predict", "--json", "--model", s(&dir), "a.jpg"],
+        &["val", "--json", "--model", s(&dir), "--data", "none"],
+        &["export", "--json", "--model", s(&dir)],
+    ];
+    for args in cases {
+        let (code, lines, stderr) = folo(args);
+        let e = &lines.last().unwrap_or_else(|| panic!("{args:?}: {stderr}"))["error"];
+        assert_eq!((code, e["code"].as_str()), (2, Some("usage")), "{args:?}: {e}");
+        let msg = e["message"].as_str().unwrap();
+        assert!(msg.contains("directory") && !msg.contains("does not exist"), "{args:?}: {e}");
+    }
+}
+
+/// Opening a dataset as a bare `data.yaml` in `folo train` derives the run name from its parent folder instead of
+/// falling back to literal `dataset`.
+#[test]
+fn train_with_bare_data_yaml_derives_parent_folder_name() {
+    let root = TestDir::new("cli-bare-yaml-train");
+    let ds = root.join("pebbles");
+    let cfg = folo_data::synthetic::SyntheticConfig {
+        images: 4,
+        classes: vec!["circle".into()],
+        imgsz: 64,
+        seed: 7,
+        vary_aspect: false,
+        val_fraction: 0.25,
+        ..Default::default()
+    };
+    folo_data::synthetic::write_yolo(&cfg, &ds, folo_data::ImageFormat::Png).unwrap();
+    let project = root.join("runs");
+    let out = super::folo_cmd()
+        .args([
+            "train",
+            "--json",
+            "--data",
+            "data.yaml",
+            "--imgsz",
+            "64",
+            "--batch",
+            "2",
+            "--epochs",
+            "1",
+            "--workers",
+            "1",
+            "--device",
+            "cpu",
+            "--project",
+            s(&project),
+        ])
+        .current_dir(&ds)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(out.status.code(), Some(0), "stdout: {stdout}\nstderr: {stderr}");
+    let lines: Vec<serde_json::Value> = stdout.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let done = lines.last().unwrap();
+    assert_eq!(done["event"], "done", "{done}");
+    assert!(
+        done["run_dir"].as_str().is_some_and(|p| p.ends_with("/pebbles-n")),
+        "expected parent folder name in run_dir, not dataset-n: {done}"
+    );
+    assert!(project.join("pebbles-n").is_dir());
+}

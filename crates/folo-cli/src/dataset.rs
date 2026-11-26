@@ -1,7 +1,7 @@
 //! `folo dataset check | stats | synth | convert`, on top of folo-data.
 
 use std::io::{IsTerminal, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -73,6 +73,136 @@ fn data_error(e: DataError, path: &Path) -> CliError {
     }
 }
 
+/// Maps a folo-data error from writing an output dataset (`synth`, `convert`) so a missing output drive or parent
+/// reports an output-path hint instead of the missing *input* dataset hint.
+fn output_data_error(e: DataError, out_dir: &Path) -> CliError {
+    match e {
+        DataError::Io { path: err_path, source } if source.kind() == std::io::ErrorKind::NotFound => {
+            if err_path.starts_with(out_dir) {
+                CliError::new(
+                    ExitCode::NotFound,
+                    "path_not_found",
+                    format!("cannot create {}: {source}", folo_api::json::path(&err_path)),
+                )
+                .hint("check that the output drive and parent path exist and are writable")
+            } else {
+                CliError::new(
+                    ExitCode::NotFound,
+                    "path_not_found",
+                    format!("{} does not exist", folo_api::json::path(&err_path)),
+                )
+                .hint("an input file disappeared while writing; run `folo dataset check` on the input")
+            }
+        }
+        other => data_error(other, out_dir),
+    }
+}
+
+/// Canonical path of `p`, resolving each existing prefix with filesystem semantics before applying any subsequent
+/// `..` (so `<symlink>/../out` resolves `<symlink>` first instead of collapsing `<symlink>/..` lexically), and
+/// keeping any remaining non-existent suffix components. Returns `None` when not even an ancestor root exists.
+fn canonical_target(p: &Path) -> Option<PathBuf> {
+    let p = if p.as_os_str().is_empty() { Path::new(".") } else { p };
+    let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let mut cur = PathBuf::new();
+    let mut missing = false;
+    for c in abs.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::Prefix(prefix) => {
+                // Wait for RootDir before canonicalising so drive-relative `D:` is never resolved to cwd.
+                cur.push(prefix.as_os_str());
+            }
+            std::path::Component::RootDir => {
+                cur.push(std::path::Component::RootDir);
+                if let Ok(canon) = std::fs::canonicalize(&cur) {
+                    cur = canon;
+                    missing = false;
+                } else {
+                    missing = true;
+                }
+            }
+            std::path::Component::ParentDir => {
+                if !missing {
+                    if let Ok(canon) = std::fs::canonicalize(cur.join("..")) {
+                        cur = canon;
+                    } else {
+                        let _ = cur.pop();
+                        missing = true;
+                    }
+                } else {
+                    let _ = cur.pop();
+                    if let Ok(canon) = std::fs::canonicalize(&cur) {
+                        cur = canon;
+                        missing = false;
+                    }
+                }
+            }
+            std::path::Component::Normal(part) => {
+                cur.push(part);
+                if !missing {
+                    if let Ok(canon) = std::fs::canonicalize(&cur) {
+                        cur = canon;
+                    } else {
+                        missing = true;
+                    }
+                }
+            }
+        }
+    }
+    if cur.as_os_str().is_empty() {
+        return None;
+    }
+    if missing && !cur.ancestors().skip(1).any(Path::exists) {
+        return None;
+    }
+    Some(cur)
+}
+
+/// Refuses a `convert` output inside (or containing) the input dataset, its supplied folder, or any of its source
+/// folders, so converted images are never written into the input and picked up on its next open.
+fn check_convert_output_outside(output: &Path, input: &Path, ds: &LoadedDataset) -> Result<(), CliError> {
+    let Some(dir) = canonical_target(output) else {
+        return Ok(());
+    };
+    let input_dir: PathBuf = if input.is_dir() {
+        input.to_path_buf()
+    } else {
+        let abs = folo_data::paths::normalize(input);
+        abs.parent().map_or(abs.clone(), Path::to_path_buf)
+    };
+    let mut dirs: Vec<(&Path, PathBuf)> = Vec::new();
+    for p in ds.sources.iter().map(PathBuf::as_path).chain([ds.root.as_path(), input_dir.as_path()]) {
+        if p.is_dir()
+            && let Ok(canon) = std::fs::canonicalize(p)
+        {
+            dirs.push((p, canon));
+        }
+    }
+    // Prefer the deepest (most specific) input folder that contains `output`, e.g. `ds/images/train` over `ds`.
+    dirs.sort_by_key(|(_, c)| std::cmp::Reverse(c.components().count()));
+    let out_shown = folo_api::json::path(output);
+    for (raw, src) in dirs {
+        let src_shown = folo_api::json::path(raw);
+        let message = if dir.starts_with(&src) {
+            let rel = if dir == src { "is" } else { "is inside" };
+            format!(
+                "output {out_shown} {rel} the input dataset folder {src_shown}: converting into the input would \
+                 mix output files into it"
+            )
+        } else if src.starts_with(&dir) {
+            format!(
+                "the input dataset folder {src_shown} is inside output {out_shown}: pick a separate output folder"
+            )
+        } else {
+            continue;
+        };
+        return Err(CliError::new(ExitCode::Usage, "usage", message)
+            .hint("pick an output folder outside the input dataset"));
+    }
+    Ok(())
+}
+
 /// Refuses an output folder that exists and is not empty (or is a file).
 fn ensure_empty_output(dir: &Path) -> Result<(), CliError> {
     let busy = if dir.is_dir() {
@@ -116,18 +246,13 @@ fn open(path: &Path, format: Format) -> Result<LoadedDataset, CliError> {
     folo_data::open_with(path, &OpenOptions { format, verify_images: true }).map_err(|e| data_error(e, path))
 }
 
-fn dataset_name(path: &Path) -> String {
-    let p = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let p = if p.is_file() { p.parent().map(Path::to_path_buf).unwrap_or(p) } else { p };
-    p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dataset".into())
-}
-
 fn stats(args: StatsArgs, out: Out) -> Result<(), CliError> {
     let ds = open(&args.path, format_of(args.format))?;
     let stats = ds.stats();
     let skipped = ds.report.skipped_images();
+    let name = crate::engine::dataset_name(&args.path);
     out.record(&json!({
-        "name": dataset_name(&args.path),
+        "name": name,
         "path": folo_api::json::path(&args.path),
         "root": folo_api::json::path(&ds.root),
         "format": format_name(ds.format),
@@ -136,7 +261,7 @@ fn stats(args: StatsArgs, out: Out) -> Result<(), CliError> {
         "skipped_images": skipped,
         "stats": stats,
     }));
-    for line in stats_table(&dataset_name(&args.path), &ds, &stats) {
+    for line in stats_table(&name, &ds, &stats) {
         out.human(line);
     }
     Ok(())
@@ -494,9 +619,10 @@ fn synth(args: SynthArgs, out: Out) -> Result<(), CliError> {
     let t0 = Instant::now();
     let progress =
         Progress { out, total: cfg.images, tty: std::io::stderr().is_terminal(), last: Mutex::new(None) };
-    let claim = folo_data::unfinished::claim(&args.out_dir).map_err(|e| data_error(e, &args.out_dir))?;
+    let claim =
+        folo_data::unfinished::claim(&args.out_dir).map_err(|e| output_data_error(e, &args.out_dir))?;
     let written = write_yolo_with_progress(&cfg, claim, format, |d| progress.update(d))
-        .map_err(|e| data_error(e, &args.out_dir))?;
+        .map_err(|e| output_data_error(e, &args.out_dir))?;
     let secs = t0.elapsed().as_secs_f64();
     let [train, val] = written.splits;
     out.record(&json!({
@@ -539,14 +665,15 @@ fn convert(args: ConvertArgs, out: Out) -> Result<(), CliError> {
         TargetFormatArg::Yolo => Format::Yolo,
         TargetFormatArg::Coco => Format::Coco,
     };
-    ensure_empty_output(&args.output)?;
     let ds = open(&args.input, format_of(args.from))?;
-    let skipped = ds.report.skipped_images() + ds.report.broken_labels();
+    check_convert_output_outside(&args.output, &args.input, &ds)?;
+    ensure_empty_output(&args.output)?;
+    let skipped = ds.report.skipped_images() + ds.report.skipped_label_images();
     let t0 = Instant::now();
     let done = folo_data::convert::convert(&ds, &args.output, to).map_err(|e| match e {
         // The input cannot be written in that format (no images, or only test images for YOLO): not a usage error.
         DataError::Config(m) => CliError::new(ExitCode::Runtime, "invalid_dataset", m),
-        e => data_error(e, &args.output),
+        e => output_data_error(e, &args.output),
     })?;
     let secs = t0.elapsed().as_secs_f64();
     out.record(&json!({
@@ -627,5 +754,33 @@ mod tests {
         assert!(severity_allows(SeverityArg::Info, Severity::Error));
         assert!(severity_allows(SeverityArg::Info, Severity::Warning));
         assert!(severity_allows(SeverityArg::Info, Severity::Info));
+    }
+
+    #[test]
+    fn output_data_error_gives_output_hint_for_missing_output_path_and_input_hint_for_missing_input() {
+        let out_dir = Path::new("Z:/no-such-drive/out");
+        let missing_out = DataError::Io {
+            path: out_dir.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "the system cannot find the path specified",
+            ),
+        };
+        let err = output_data_error(missing_out, out_dir);
+        assert_eq!(err.exit, ExitCode::NotFound);
+        assert_eq!(err.code, "path_not_found");
+        let hint = err.hint.as_deref().unwrap_or("");
+        assert!(hint.contains("output"), "expected output-path hint, got: {hint}");
+        assert!(!hint.contains("data.yaml"), "must not emit input-dataset hint: {hint}");
+
+        let vanished_input = DataError::Io {
+            path: PathBuf::from("ds/images/train/a.png"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "not found"),
+        };
+        let err = output_data_error(vanished_input, out_dir);
+        assert_eq!(err.exit, ExitCode::NotFound);
+        assert_eq!(err.code, "path_not_found");
+        assert!(err.message.contains("ds/images/train/a.png"), "{}", err.message);
+        assert!(err.hint.as_deref().unwrap_or("").contains("input"), "{:?}", err.hint);
     }
 }
