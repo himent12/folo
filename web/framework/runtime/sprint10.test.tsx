@@ -2,7 +2,7 @@
 // Sprint 10 regression tests for fw runtime: text-run shared-dependency splits, Dynamic ref forwarding,
 // bindValue stringified equality, setStyle initial undefined, and multi-node insert marker ordering.
 import { describe, expect, it } from 'vitest';
-import { createContext, flush, onCleanup, signal } from './core';
+import { computed, createContext, flush, onCleanup, signal } from './core';
 import { bindValue } from './bind';
 import { defaults, mergeProps, splitProps } from './component';
 import { insert, setStyle } from './dom';
@@ -454,5 +454,104 @@ describe('fw Sprint 10 runtime hardening', () => {
     expect([mounts, destroys]).toEqual([1, 0]);
     v5.unmount();
     expect(destroys).toBe(1);
+  });
+
+  it('preserves sibling cleanups on unmount, recovers computeds after throwing propJsx cleanup, and handles chained/nested ternary conds', () => {
+    // 1. Sibling cleanups must not be skipped when unsubscribing an earlier JSX prop triggers _onEmpty teardown.
+    let siblingCleanups = 0;
+    function Leaf() {
+      onCleanup(() => siblingCleanups++);
+      return <span>leaf</span>;
+    }
+    function SiblingHost(props: { slot: JSX.Element }) {
+      return (
+        <>
+          <div>{props.slot}</div>
+          <div>{props.slot}</div>
+          <Leaf />
+        </>
+      );
+    }
+    const v1 = render(() => <SiblingHost slot={<Leaf />} />);
+    flush();
+    expect(v1.container.querySelectorAll('span')).toHaveLength(3);
+    v1.unmount();
+    expect(siblingCleanups).toBe(3);
+
+    // 2. A throwing cleanup on a hidden JSX prop must not leave a reading computed stuck in RUNNING.
+    const open = signal(true);
+    let throwOnce = true;
+    function FlakyLeaf() {
+      onCleanup(() => {
+        if (throwOnce) {
+          throwOnce = false;
+          throw new Error('cleanup boom');
+        }
+      });
+      return <em>flaky</em>;
+    }
+    function CompHost(props: { slot: JSX.Element }) {
+      const val = computed(() => (open.get() ? props.slot : null));
+      return <div>{val.get()}</div>;
+    }
+    const v2 = render(() => <CompHost slot={<FlakyLeaf />} />);
+    flush();
+    expect(v2.container.querySelector('em')?.textContent).toBe('flaky');
+    open.set(false);
+    expect(() => flush()).toThrow('cleanup boom');
+    open.set(true);
+    expect(() => flush()).not.toThrow();
+    expect(v2.container.querySelector('em')?.textContent).toBe('flaky');
+    v2.unmount();
+
+    // 3. Chained else-if and directly nested ternaries anchor their conds to the enclosing owner, never a disposed branch root.
+    let mounts = 0;
+    let destroys = 0;
+    function Tracked() {
+      mounts++;
+      onCleanup(() => destroys++);
+      return <i>ok</i>;
+    }
+    const a = signal(false);
+    const showBody = signal(true);
+    function ElseIfHost(props: { body?: JSX.Element }) {
+      return <div>{a.get() ? <span>A</span> : props.body ? <b>{props.body}</b> : null}</div>;
+    }
+    const v3 = render(() => <ElseIfHost body={showBody.get() ? <Tracked /> : null} />);
+    flush();
+    expect([mounts, destroys]).toEqual([1, 0]);
+    a.set(true);
+    flush();
+    expect([mounts, destroys]).toEqual([1, 1]);
+    a.set(false);
+    flush();
+    expect([mounts, destroys]).toEqual([2, 1]);
+    showBody.set(false);
+    flush();
+    expect([mounts, destroys]).toEqual([2, 2]);
+    showBody.set(true);
+    flush();
+    expect([mounts, destroys]).toEqual([3, 2]);
+    expect(v3.container.querySelector('b i')?.textContent).toBe('ok');
+    v3.unmount();
+    expect(destroys).toBe(3);
+
+    mounts = 0;
+    destroys = 0;
+    const outer = signal(true);
+    function DirectNested(props: { body?: JSX.Element }) {
+      return <div>{outer.get() ? (props.body ? <b>{props.body}</b> : null) : null}</div>;
+    }
+    const v4 = render(() => <DirectNested body={<Tracked />} />);
+    flush();
+    expect([mounts, destroys]).toEqual([1, 0]);
+    outer.set(false);
+    flush();
+    expect([mounts, destroys]).toEqual([1, 1]);
+    outer.set(true);
+    flush();
+    expect([mounts, destroys]).toEqual([2, 1]);
+    v4.unmount();
+    expect(destroys).toBe(2);
   });
 });

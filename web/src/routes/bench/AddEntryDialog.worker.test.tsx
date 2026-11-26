@@ -321,4 +321,44 @@ describe('AddEntryDialog worker offloading', () => {
     await until(() => !isOpen.get() && router.route.path === '/benchmarks/bn_9f03/entries/be_1', 'held navigation proceeded after stop');
     expect(worker.terminated).toBe(true);
   });
+
+  it('deletes a one-request upload and resumes held navigation if Stop and discard lands while api.start is in flight', async () => {
+    router.go('/benchmarks/bn_9f03?add=external', { replace: true });
+    const { isOpen, validJson, onstarted } = await mountDialog();
+    selectFile(new File([validJson], 'inflight-start.json', { type: 'application/json' }));
+    const worker = await until(() => spawned[0], 'worker spawned');
+    await worker.runAndDeliver();
+    await until(() => document.querySelector('.f-state.ok'), 'validated state');
+
+    const realStart = hub.api.startBenchEntry.bind(hub.api);
+    let startCalled = false;
+    let releaseStart!: () => void;
+    const gate = new Promise<void>((r) => (releaseStart = r));
+    vi.spyOn(hub.api, 'startBenchEntry').mockImplementationOnce(async (id, req) => {
+      startCalled = true;
+      await gate;
+      return realStart(id, req);
+    });
+    const delSpy = vi.spyOn(hub.api, 'deleteBenchEntry');
+
+    worker.enableAutoAnswer();
+    const form = document.querySelector<HTMLFormElement>('dialog[open] form')!;
+    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await until(() => startCalled, 'startBenchEntry in flight');
+
+    // Attempt navigation while api.start is still pending -> held with Stop sending? confirmation.
+    router.go('/benchmarks/bn_9f03/entries/be_2');
+    flushSync();
+    expect(router.route.path).toBe('/benchmarks/bn_9f03');
+    expect(document.querySelector('dialog[open]')?.textContent).toContain('Stop sending?');
+
+    const stopBtn = [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find((b) => b.textContent?.trim() === 'Stop and discard')!;
+    stopBtn.click();
+    flushSync();
+    releaseStart();
+
+    await until(() => !isOpen.get() && router.route.path === '/benchmarks/bn_9f03/entries/be_2', 'deleted entry and resumed navigation');
+    expect(delSpy).toHaveBeenCalledOnce();
+    expect(onstarted).not.toHaveBeenCalled();
+  });
 });

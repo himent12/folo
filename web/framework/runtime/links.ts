@@ -79,10 +79,19 @@ export function prepareSources(target: Target): void {
 export function cleanupSources(target: Target): void {
   let node = target._sources;
   let head: Link | undefined;
+  let err: unknown;
+  let hasErr = false;
   while (node !== undefined) {
     const prev = node._ps;
     if (node._v === -1) {
-      node._s._unsubscribe(node);
+      try {
+        node._s._unsubscribe(node);
+      } catch (e) {
+        if (!hasErr) {
+          hasErr = true;
+          err = e;
+        }
+      }
       if (prev !== undefined) prev._ns = node._ns;
       if (node._ns !== undefined) node._ns._ps = prev;
     } else head = node;
@@ -91,6 +100,15 @@ export function cleanupSources(target: Target): void {
     node = prev;
   }
   target._sources = head;
+  if (hasErr) throw err;
+}
+
+/** Internal (text runs): drops sources up to `mark` (from `sourceMark`), keeping any links also in `keep`. */
+export function dropSourcesThrough(mark: unknown, keep?: readonly unknown[]): void {
+  const hasKeep = keep !== undefined && keep.length > 0;
+  for (let node = mark as Link | undefined; node !== undefined; node = node._ps) {
+    if (!hasKeep || !keep.includes(node)) node._v = -1;
+  }
 }
 
 /**

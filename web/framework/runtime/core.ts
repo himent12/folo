@@ -15,7 +15,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { sortJobs } from './flushOrder';
-import { cleanupSources, linkDependency, needsToRecompute, prepareSources, retainSources, subscribeLink, TRACKING, unsubscribeLink, type Link, type Source, type Target } from './links';
+import { cleanupSources, dropSourcesThrough, linkDependency, needsToRecompute, prepareSources, retainSources, subscribeLink, TRACKING, unsubscribeLink, type Link, type Source, type Target } from './links';
+export { dropSourcesThrough };
 
 const NOTIFIED = 1;
 const OUTDATED = 2;
@@ -94,14 +95,6 @@ export function sourceMark(): unknown {
   // Every read moves its link to the tail: an unread tail (left from the previous run) means nothing was read yet.
   const tail = listener?._sources;
   return tail !== undefined && tail._v !== -1 ? tail : undefined;
-}
-
-/** Internal (text runs): drops sources up to `mark` (from `sourceMark`), keeping any links also in `keep`. */
-export function dropSourcesThrough(mark: unknown, keep?: readonly unknown[]): void {
-  const hasKeep = keep !== undefined && keep.length > 0;
-  for (let node = mark as Link | undefined; node !== undefined; node = node._ps) {
-    if (!hasKeep || !keep.includes(node)) node._v = -1;
-  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -213,7 +206,8 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
   constructor(fn: () => T, equals: Equals<T> | undefined) {
     this._fn = fn;
     this._equals = equals === undefined ? is : equals;
-    this._parent = owner ?? (listener instanceof ComputedNode ? listener._parent : null);
+    const base = owner !== null && listener instanceof ComputedNode && (listener._flags & OWNING) !== 0 && owner._parent === listener._parent && owner._id === listener._id ? owner._parent : owner;
+    this._parent = base ?? (listener instanceof ComputedNode ? listener._parent : null);
   }
   _refresh(): boolean {
     this._flags &= ~NOTIFIED;
@@ -251,8 +245,11 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     listener = prevListener;
     owner = prevOwner;
     activeRun = prevRun;
-    cleanupSources(this);
-    this._flags &= ~RUNNING;
+    try {
+      cleanupSources(this);
+    } finally {
+      this._flags &= ~RUNNING;
+    }
     return true;
   }
   _subscribe(node: Link): void {
@@ -392,18 +389,14 @@ function cleanOwner(node: Owner): void {
   owner = null;
   let error: unknown;
   try {
-    let child = node._first;
-    node._first = node._last = null;
-    while (child !== null) {
-      const next = child._next;
-      child._prev = child._next = null;
-      child._flags &= ~ATTACHED;
+    while (node._first !== null) {
+      const child = node._first;
+      detach(child);
       try {
         disposeTree(child);
       } catch (e) {
         error ??= e;
       }
-      child = next;
     }
     const c = node._cleanups;
     if (c !== null) {
@@ -687,16 +680,19 @@ class EffectNode extends Owner implements Target {
       listener = prevListener;
       owner = prevOwner;
       activeRun = prevRun;
-      cleanupSources(this);
       this._flags &= ~RUNNING;
-      if (this._flags & DISPOSED) {
-        try {
-          cleanOwner(this);
-        } catch (e) {
-          if (!threw) throw e;
-        } finally {
-          for (let n = this._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
-          this._sources = undefined;
+      try {
+        cleanupSources(this);
+      } finally {
+        if (this._flags & DISPOSED) {
+          try {
+            cleanOwner(this);
+          } catch (e) {
+            if (!threw) throw e;
+          } finally {
+            for (let n = this._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
+            this._sources = undefined;
+          }
         }
       }
     }
@@ -931,7 +927,11 @@ export function deferEffects<T>(fn: () => T): T {
 
 /** Internal: `[stableOwner, siteKey, runId]` for `propJsx`. */
 export function propScope(): readonly [Owner | null, object | null, number] {
-  if (owner === null) return [listener instanceof ComputedNode ? listener._parent : null, null, activeRun];
+  if (owner === null) {
+    let p = listener instanceof ComputedNode ? listener._parent : null;
+    while (p !== null && (p._flags & DISPOSED) !== 0) p = p._parent;
+    return [p, null, activeRun];
+  }
   if ((owner as unknown) === listener) return [owner._parent, owner, activeRun];
   if (listener instanceof ComputedNode && (listener._flags & OWNING) !== 0 && owner._parent === listener._parent && owner._id === listener._id) return [owner._parent, listener, activeRun];
   return [owner, owner, activeRun];
