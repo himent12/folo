@@ -3,8 +3,7 @@
 
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Render, SharedString, Styled,
-    Window, div, px,
+    Context, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Window, div, px,
 };
 
 use crate::theme::{Theme, theme, ty};
@@ -60,14 +59,32 @@ impl Render for FoloApp {
             self.open_new_run(None, window, cx);
         }
         // Back to the window (its labels edited in another app, say): the dataset whose page is shown
-        // is read again, and an open inspector's once it closes; not one whose read is on its way.
+        // (or every loaded dataset card on Overview / Datasets) is read again, and an open
+        // inspector's once it closes; not one whose read is on its way.
         // The window counts its activations, so one between two frames is not lost.
         let activations = window.window_activations();
         if activations != self.window_activations {
             self.window_activations = activations;
-            let page = if let Route::Dataset(id) = &self.route { Some(id.clone()) } else { None };
-            let open = self.inspector.as_ref().map(|i| i.dataset.clone());
-            self.ds_recheck.extend(page.into_iter().chain(open).filter(|id| !self.ds_reads.contains_key(id)));
+            match &self.route {
+                Route::Overview | Route::Datasets => {
+                    self.ds_recheck.extend(
+                        self.store
+                            .dataset
+                            .iter()
+                            .filter(|(id, l)| !l.is_loading() && !self.ds_reads.contains_key(id.as_str()))
+                            .map(|(id, _)| id.clone()),
+                    );
+                }
+                Route::Dataset(id) if !self.ds_reads.contains_key(id) => {
+                    self.ds_recheck.insert(id.clone());
+                }
+                _ => {}
+            }
+            if let Some(id) = self.inspector.as_ref().map(|i| &i.dataset)
+                && !self.ds_reads.contains_key(id)
+            {
+                self.ds_recheck.insert(id.clone());
+            }
         }
         self.narrow = window.viewport_size().width < px(1120.);
         self.shown_mode = if window.is_fullscreen() {
@@ -236,9 +253,6 @@ impl Render for FoloApp {
                 }
             }))
             .capture_any_mouse_down(self.leave_kb(cx))
-            .on_mouse_move(cx.listener(Self::on_drag_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_drag_end))
             .on_drop(cx.listener(|this, paths: &folo_ui::ExternalPaths, w, cx| {
                 this.play_drop_hover = false;
                 // A dialog or the inspector is up: don't navigate out from under it.
@@ -262,6 +276,7 @@ impl Render for FoloApp {
                 }
             }))
             .child(Self::press_tracker(cx))
+            .child(Self::drag_tracker(cx))
             .child(sidebar)
             .child(
                 div()

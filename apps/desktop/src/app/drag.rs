@@ -2,11 +2,44 @@
 //! image pans.
 
 use folo_ui::point;
-use folo_ui::{Context, MouseMoveEvent, MouseUpEvent, Window, px};
+use folo_ui::{
+    AnyElement, Context, DispatchPhase, IntoElement, MouseButton, MouseMoveEvent, MouseUpEvent, Styled,
+    Window, canvas, px,
+};
 
 use super::FoloApp;
 
 impl FoloApp {
+    /// Window-wide drag and pointer-motion listener: receives move and release events even while an
+    /// `.occlude()` overlay (a dialog card, scrim, or inspector) covers `root`, so dialog sliders
+    /// and scrollbars drag smoothly across and outside their tracks.
+    pub(crate) fn drag_tracker(cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity().downgrade();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let move_view = view.clone();
+                window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = move_view.update(cx, |this: &mut Self, cx| {
+                            this.on_drag_move(ev, window, cx);
+                        });
+                    }
+                });
+                let up_view = view.clone();
+                window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture && ev.button == MouseButton::Left {
+                        let _ = up_view.update(cx, |this: &mut Self, cx| {
+                            this.on_drag_end(ev, window, cx);
+                        });
+                    }
+                });
+            },
+        )
+        .absolute()
+        .into_any_element()
+    }
+
     // ---------- sliders ----------
 
     pub fn on_drag_move(&mut self, ev: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {

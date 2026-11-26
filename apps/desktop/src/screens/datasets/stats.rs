@@ -123,6 +123,7 @@ impl FoloApp {
                             }
                             this.ds_tab = crate::app::DsTab::Images;
                             this.ds_hover_tile = None;
+                            this.ds_scroll_anchor = None;
                             this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
                             // Move focus off the disappearing Statistics bar onto a persistent
                             // control on the Images tab so keyboard Tab continues smoothly.

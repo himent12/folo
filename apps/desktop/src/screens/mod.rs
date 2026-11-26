@@ -51,6 +51,8 @@ pub fn detail_header(
     actions: Vec<AnyElement>,
 ) -> Div {
     div()
+        .w_full()
+        .min_w_0()
         .flex()
         .items_start()
         .justify_between()
@@ -60,10 +62,13 @@ pub fn detail_header(
             div()
                 .flex()
                 .flex_col()
+                .flex_1()
                 .gap(px(4.))
                 .min_w_0()
-                .child(div().h(px(ty::XL.line)).flex().items_center().min_w_0().child(title))
-                .child(div().text_color(t.text_secondary).text_size(px(ty::SM.size)).child(subtitle)),
+                .child(div().h(px(ty::XL.line)).w_full().flex().items_center().min_w_0().child(title))
+                .child(
+                    div().text_color(t.text_secondary).text_size(px(ty::SM.size)).min_w_0().child(subtitle),
+                ),
         )
         .child(
             div()
@@ -248,6 +253,7 @@ impl FoloApp {
         s.images_px.forget_failed();
         self.images_more.clear();
         self.failed_pages.clear();
+        self.ds_scroll_anchor = None;
         // The throughput table reloads too (a probe in flight keeps its own state), and the cloud.
         self.throughput = Load::Idle;
         self.clear_cloud();

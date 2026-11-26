@@ -6,9 +6,9 @@ mod datasets;
 mod images;
 mod streams;
 
-pub(crate) use datasets::FailedImagePage;
 #[cfg(test)]
 pub(crate) use datasets::IMAGE_PAGE;
+pub(crate) use datasets::{DatasetScrollAnchor, FailedImagePage};
 
 use folo_ui::Context;
 

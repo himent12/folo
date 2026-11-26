@@ -234,6 +234,7 @@ impl FoloApp {
             self.ds_img_sort = ImageSort::Default;
         }
         self.ds_hover_tile = None;
+        self.ds_scroll_anchor = None;
         self.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
         cx.notify();
     }
@@ -393,6 +394,7 @@ impl FoloApp {
         // Short windows (the 620 px minimum): gaps tighten, so the first image row starts high.
         let short = window.viewport_size().height < px(700.);
         let title = div()
+            .w_full()
             .flex()
             .items_center()
             .gap(px(10.))

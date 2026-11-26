@@ -64,19 +64,24 @@ impl FoloApp {
         };
         let now = self.store.api.now();
         let mut title = div()
+            .w_full()
             .flex()
             .items_center()
             .gap(px(10.))
             .min_w_0()
-            .child(text(ty::XL, t.text_primary).ellipsis().child(e.name.clone()))
-            .child(status_badge_of(
+            .child(text(ty::XL, t.text_primary).min_w_0().ellipsis().child(e.name.clone()))
+            .child(div().flex_none().child(status_badge_of(
                 &t,
                 StatusKind::of_entry(e.status),
                 e.status.label(),
                 format!("entry-{}", e.id),
-            ));
+            )));
         if e.score.as_ref().is_some_and(|s| s.partial) {
-            title = title.child(partial_badge(&t, partial_why(&e, &b), format!("entry-partial-{}", e.id)));
+            title = title.child(div().flex_none().child(partial_badge(
+                &t,
+                partial_why(&e, &b),
+                format!("entry-partial-{}", e.id),
+            )));
         }
         let finished = e
             .finished

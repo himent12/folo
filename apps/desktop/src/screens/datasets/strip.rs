@@ -161,6 +161,7 @@ impl FoloApp {
                                     this.ds_class = None;
                                 }
                                 this.ds_tab = DsTab::Images;
+                                this.ds_scroll_anchor = None;
                                 this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
                                 cx.notify();
                             }

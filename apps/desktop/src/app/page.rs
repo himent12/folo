@@ -69,6 +69,7 @@ impl FoloApp {
                     .child(
                         div()
                             .w_full()
+                            .min_w_0()
                             .max_w(px(crate::theme::layout::DESKTOP_CONTENT_MAX))
                             .mx_auto()
                             .flex()
