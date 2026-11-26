@@ -39,6 +39,9 @@ pub(super) fn im2col_segment(
     if stride == 1 && sw == 1 && hi > lo {
         let s = (ix0 + lo as isize) as usize;
         dst[lo..hi].copy_from_slice(&row[s..s + (hi - lo)]);
+    } else if stride == 1 && sw == 2 && hi > lo {
+        let s = (ix0 + lo as isize * 2) as usize;
+        copy_stride2(&row[s..], &mut dst[lo..hi]);
     } else {
         for t in lo..hi {
             dst[t * stride] = row[(ix0 + t as isize * sw) as usize];
@@ -46,6 +49,51 @@ pub(super) fn im2col_segment(
     }
     for t in hi..len {
         dst[t * stride] = 0.0;
+    }
+}
+
+/// Copy `dst[t] = src[2 * t]` for `t < dst.len()` using AVX2 `vshufps` + `vpermq` when available.
+#[inline]
+fn copy_stride2(src: &[f32], dst: &mut [f32]) {
+    let n = dst.len();
+    if n == 0 {
+        return;
+    }
+    debug_assert!(src.len() >= 2 * n - 1);
+    #[cfg(target_arch = "x86_64")]
+    if n >= 8 && std::is_x86_feature_detected!("avx2") {
+        // SAFETY: AVX2 was detected above; `n >= 8`.
+        unsafe { copy_stride2_avx2(src, dst) };
+        return;
+    }
+    for (t, d) in dst.iter_mut().enumerate() {
+        *d = src[2 * t];
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn copy_stride2_avx2(src: &[f32], dst: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = dst.len();
+    // Each vector step reads 16 floats (`src[2*t..2*t + 16]`), so stop while `2 * t + 16 <= src.len()`.
+    let vec_end = (src.len() / 16).min(n / 8) * 8;
+    let mut t = 0;
+    // SAFETY: `2 * t + 16 <= src.len()` and `t + 8 <= n`.
+    unsafe {
+        while t < vec_end {
+            let p = src.as_ptr().add(2 * t);
+            let lo = _mm256_loadu_ps(p);
+            let hi = _mm256_loadu_ps(p.add(8));
+            let even = _mm256_castsi256_ps(_mm256_permute4x64_epi64::<0xD8>(_mm256_castps_si256(
+                _mm256_shuffle_ps::<0x88>(lo, hi),
+            )));
+            _mm256_storeu_ps(dst.as_mut_ptr().add(t), even);
+            t += 8;
+        }
+    }
+    for tt in t..n {
+        dst[tt] = src[2 * tt];
     }
 }
 
@@ -99,5 +147,25 @@ impl Operand for PlaneRows<'_> {
 
     fn pack_panels(&self, o0: usize, w: usize, k0: usize, kc: usize, dst: &mut [f32]) {
         pack_rows_into_panels(w, kc, dst, |kk| &self.planes[k0 + kk][o0..o0 + w]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_stride2_matches_scalar_across_lengths_and_tight_src() {
+        for n in 0..=40usize {
+            let min_len = if n == 0 { 0 } else { 2 * n - 1 };
+            for extra in [0usize, 1, 5] {
+                let src: Vec<f32> = (0..min_len + extra).map(|i| i as f32 * 0.25 - 7.5).collect();
+                let mut got = vec![-999.0f32; n];
+                copy_stride2(&src, &mut got);
+                for (t, &v) in got.iter().enumerate() {
+                    assert_eq!(v.to_bits(), src[2 * t].to_bits(), "n={n} extra={extra} t={t}");
+                }
+            }
+        }
     }
 }

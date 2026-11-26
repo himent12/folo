@@ -93,7 +93,7 @@ fn run() {
     println!(
         "q8_infer: folo-n convs, {threads} threads, {}, int8 {} vs f32, medians of {ROUNDS} alternated rounds",
         if silu { "SiLU" } else { "identity" },
-        if q8::uses_vnni() { "AVX-VNNI" } else { "portable" }
+        q8::kernel_name()
     );
     println!("{:<6} {:>24} {:>6} {:>9} {:>9} {:>7}", "group", "shape", "calls", "f32 ms", "int8 ms", "ratio");
     let _g = no_grad();
