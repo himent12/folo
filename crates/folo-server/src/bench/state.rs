@@ -389,13 +389,15 @@ impl Slot {
         let now = rfc3339(unix_now());
         let mut entries = Vec::new();
         let mut closed_entries = Vec::new();
-        for (_, head) in dedup_by_id("benchmark entry", read_all::<EntryHead>(&dir.join("entries")), |h| {
-            h.entry.id.as_str()
-        }) {
+        for (path, head) in
+            canonical_by_id("benchmark entry", read_all::<EntryHead>(&dir.join("entries")), |h| {
+                h.entry.id.as_str()
+            })
+        {
             if head.version != VERSION {
                 tracing::warn!(
-                    "skipping entry {}: version {} is not one this server reads",
-                    head.entry.id,
+                    "skipping {}: version {} is not one this server reads",
+                    path.display(),
                     head.version
                 );
                 continue;
@@ -419,13 +421,13 @@ impl Slot {
         entries.sort_by_cached_key(|e| (parse_rfc3339_millis(&e.entry.created), e.entry.id.clone()));
         let mut loops = Vec::new();
         let mut closed_loops = Vec::new();
-        for (_, f) in
-            dedup_by_id("benchmark loop", read_all::<LoopFile>(&dir.join("loops")), |f| f.lp.id.as_str())
+        for (path, f) in
+            canonical_by_id("benchmark loop", read_all::<LoopFile>(&dir.join("loops")), |f| f.lp.id.as_str())
         {
             if f.version != VERSION {
                 tracing::warn!(
-                    "skipping loop {}: version {} is not one this server reads",
-                    f.lp.id,
+                    "skipping {}: version {} is not one this server reads",
+                    path.display(),
                     f.version
                 );
                 continue;
@@ -624,22 +626,17 @@ fn remove(path: &Path) -> Result<()> {
     }
 }
 
-/// Keeps one item per `id`: when a backup copy (e.g. `be_1.bak.json`) sits next to the canonical `<id>.json`,
-/// prefers `<id>.json`, else the lexically first path, and logs the skipped duplicates without touching them.
-fn dedup_by_id<T>(kind: &str, mut items: Vec<(PathBuf, T)>, id_of: impl Fn(&T) -> &str) -> Vec<(PathBuf, T)> {
-    items.sort_by(|(pa, a), (pb, b)| {
-        let exact_a = pa.file_stem().and_then(|s| s.to_str()) == Some(id_of(a));
-        let exact_b = pb.file_stem().and_then(|s| s.to_str()) == Some(id_of(b));
-        exact_b.cmp(&exact_a).then_with(|| pa.cmp(pb))
-    });
-    let mut seen = std::collections::HashSet::new();
+/// Keeps only canonical `<id>.json` files: backup copies (e.g. `be_1.bak.json`) are logged and skipped without
+/// touching them so they can neither create duplicate entries nor resurrect deleted ones whose canonical file was
+/// removed.
+fn canonical_by_id<T>(kind: &str, items: Vec<(PathBuf, T)>, id_of: impl Fn(&T) -> &str) -> Vec<(PathBuf, T)> {
     let mut out = Vec::with_capacity(items.len());
     for (path, item) in items {
-        let id = id_of(&item).to_string();
-        if seen.insert(id.clone()) {
+        let id = id_of(&item);
+        if path.file_stem().and_then(|s| s.to_str()) == Some(id) {
             out.push((path, item));
         } else {
-            tracing::warn!("skipping duplicate {kind} '{id}' in {}", path.display());
+            tracing::warn!("skipping non-canonical {kind} file {} (id '{id}')", path.display());
         }
     }
     out
@@ -861,9 +858,15 @@ mod tests {
         )
         .unwrap();
 
-        let slot = Slot::load(bdir).unwrap();
-        let state = slot.lock();
-        assert_eq!(state.entries.len(), 1);
-        assert_eq!(state.entries[0].entry.status, S::Done, "canonical be_1.json must win over backup");
+        let slot = Slot::load(bdir.clone()).unwrap();
+        {
+            let state = slot.lock();
+            assert_eq!(state.entries.len(), 1);
+            assert_eq!(state.entries[0].entry.status, S::Done, "canonical be_1.json must win over backup");
+        }
+        // Deleting canonical `be_1.json` while `be_1.bak.json` remains must not resurrect `be_1` on reload.
+        std::fs::remove_file(bdir.join("entries").join("be_1.json")).unwrap();
+        let reloaded = Slot::load(bdir).unwrap();
+        assert!(reloaded.lock().entries.is_empty(), "backup file must not resurrect deleted entry");
     }
 }

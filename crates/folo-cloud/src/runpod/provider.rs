@@ -211,7 +211,13 @@ impl Provider for RunPod {
             }
             match page.pagination.next_cursor.filter(|c| !c.is_empty()) {
                 Some(next) if seen_cursors.insert(next.clone()) => cursor = Some(next),
-                _ => return Ok(ids),
+                Some(_) => {
+                    return Err(Error::new(
+                        ErrorKind::Unavailable,
+                        "RunPod returned a repeated pagination cursor while listing pods",
+                    ));
+                }
+                None => return Ok(ids),
             }
         }
         Err(Error::new(ErrorKind::Unavailable, format!("RunPod listed more than {MAX_PAGES} pages of pods")))

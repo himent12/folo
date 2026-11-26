@@ -68,14 +68,32 @@ pub fn check_base_url(url: &str) -> Result<()> {
     if authority.contains('@') {
         return Err(invalid("must not contain a user name or password"));
     }
-    let host = if let Some(after_open) = authority.strip_prefix('[') {
-        let (h, _) = after_open.split_once(']').ok_or_else(|| invalid("has an invalid IPv6 host"))?;
-        h
+    let (host, port) = if let Some(after_open) = authority.strip_prefix('[') {
+        let (h, tail) = after_open.split_once(']').ok_or_else(|| invalid("has an invalid IPv6 host"))?;
+        if h.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(invalid("has an invalid IPv6 host"));
+        }
+        let port = match tail {
+            "" => None,
+            s => Some(s.strip_prefix(':').ok_or_else(|| invalid("has an invalid host or port"))?),
+        };
+        (h, port)
+    } else if let Some((h, p)) = authority.split_once(':') {
+        (h, Some(p))
     } else {
-        authority.split(':').next().unwrap_or_default()
+        (authority, None)
     };
-    if host.is_empty() {
+    if host.is_empty() || host.contains(['[', ']']) {
         return Err(invalid("has no host"));
+    }
+    if let Some(p) = port {
+        let valid_port = (!p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| p.parse::<u16>().ok())
+            .flatten()
+            .is_some_and(|n| n > 0);
+        if !valid_port {
+            return Err(invalid("has an invalid port"));
+        }
     }
     Ok(())
 }
@@ -284,6 +302,12 @@ mod tests {
             "https://:8080/folo",
             "https://[]/folo",
             "https://[::1/folo",
+            "https://[::1]junk/folo",
+            "https://[not-ipv6]/folo",
+            "https://example.com:abc/folo",
+            "https://example.com:0/folo",
+            "https://example.com:99999/folo",
+            "https://example.com:/folo",
             "https://user:pass@example.com/folo",
             "https://example.com/folo?token=secret",
             "https://example.com/folo#frag",

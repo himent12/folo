@@ -78,6 +78,19 @@ fn a_long_line_is_refused_before_it_is_read_whole() {
     // A `\r` with no `\n` after it is a byte of the line: a record of the limit plus one at the end of the file is over.
     assert!(records(&format!("{exact}\r")).unwrap_err().body.message.contains("longer"));
     assert_eq!(records(&format!("{}\r", r#"{"image":"1","boxes":[]}"#)).unwrap().len(), 1);
+    // BOM-prefixed line 1 obeys the exact same `MAX_RECORD_BYTES` boundary for EOF, LF, CRLF, and overlong lines.
+    for ending in ["", "\n", "\r\n"] {
+        assert_eq!(records(&format!("\u{FEFF}{exact}{ending}")).unwrap().len(), 1, "bom {ending:?}");
+    }
+    for ending in ["", "\n", "\r\n"] {
+        assert!(
+            records(&format!("\u{FEFF}{over}{ending}")).unwrap_err().body.message.contains("longer"),
+            "bom over {ending:?}"
+        );
+    }
+    assert!(records(&format!("\u{FEFF}{exact}\r")).unwrap_err().body.message.contains("longer"));
+    let bom_padded = format!("\u{FEFF}{}{{\"image\":\"1\",\"boxes\":[]}}\n", " ".repeat(MAX_RECORD_BYTES));
+    assert!(records(&bom_padded).is_err(), "overlong BOM-prefixed whitespace line must not split");
 }
 
 /// A record over the server's limit per record is refused where it is read, so no part can pass a part's limit.

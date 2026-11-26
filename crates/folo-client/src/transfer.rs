@@ -360,6 +360,12 @@ fn fetch(
                 Err(TransferError::Failed(e)) if e.status == Some(StatusCode::PRECONDITION_FAILED) => {
                     continue 'version;
                 }
+                // File shrank to `<= done` while another part was fetched without `412`: start over.
+                Err(TransferError::Failed(e))
+                    if e.status == Some(StatusCode::RANGE_NOT_SATISFIABLE) && done > 0 =>
+                {
+                    continue 'version;
+                }
                 // An empty file has no first byte to ask for.
                 Err(TransferError::Failed(e))
                     if e.status == Some(StatusCode::RANGE_NOT_SATISFIABLE) && done == 0 =>
@@ -382,15 +388,14 @@ fn fetch(
                 )));
             }
             // Guard against a proxy/server that ignored `If-Match` and served bytes from a newer version: if
-            // the file's total length or ETag changed mid-download, restart from byte 0 rather than splicing
-            // bytes from two different versions.
+            // the file's total length or ETag changed (including appearing or disappearing) mid-download,
+            // restart from byte 0 rather than splicing bytes from two different versions.
             if let Some(prev_total) = expected_total
                 && part.total != prev_total
             {
                 continue 'version;
             }
-            if let Some(prev_etag) = etag.as_deref().filter(|e| !e.is_empty())
-                && !part.etag.is_empty()
+            if let Some(prev_etag) = etag.as_deref()
                 && part.etag != prev_etag
             {
                 continue 'version;
@@ -399,12 +404,10 @@ fn fetch(
             let first = done == 0;
             done += part.written;
             (ctl.progress)(TransferProgress { done_bytes: done, total_bytes: part.total });
-            if etag.as_deref().is_none_or(str::is_empty) && !part.etag.is_empty() {
-                etag = Some(part.etag);
-            }
+            let version = etag.get_or_insert(part.etag);
             if done >= part.total {
                 file.sync_all().map_err(TransferError::Io)?;
-                return Ok(Downloaded { bytes: done, etag: etag.unwrap_or_default() });
+                return Ok(Downloaded { bytes: done, etag: version.clone() });
             }
             let (got, took) = (part.written, asked.elapsed());
             if first && rest_fits(part.total - done, got, took) {
@@ -558,12 +561,15 @@ mod tests {
         // serves remaining 6 bytes with ETag "v2". Attempt 2: part 1 serves 4 bytes of "v2" (no ETag header
         // tested separately below), part 2 serves 6 bytes of "v2".
         let responses = vec![
+            // Download 1: ETag changes `"v1"` -> `"v2"` mid-transfer -> restarts and writes clean v2.
             b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/10\r\nETag: \"v1\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\nAAAA".to_vec(),
             b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-9/10\r\nETag: \"v2\"\r\nContent-Length: 6\r\nConnection: close\r\n\r\nBBBBBB".to_vec(),
             b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/10\r\nETag: \"v2\"\r\nContent-Length: 10\r\nConnection: close\r\n\r\nCCCCCCCCCC".to_vec(),
-            // Second download: no ETag on part 1 -> part 2 must NOT send an empty `If-Match:` header.
+            // Download 2: no ETag on part 1, then `"v2"` appears on part 2 (same total) -> restarts rather than
+            // publishing mixed bytes under `"v2"`, and part 2 must NOT send an empty `If-Match:` header.
             b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-3/8\r\nContent-Length: 4\r\nConnection: close\r\n\r\n1111".to_vec(),
-            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-7/8\r\nContent-Length: 4\r\nConnection: close\r\n\r\n2222".to_vec(),
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-7/8\r\nETag: \"v2\"\r\nContent-Length: 4\r\nConnection: close\r\n\r\n2222".to_vec(),
+            b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-7/8\r\nETag: \"v2\"\r\nContent-Length: 8\r\nConnection: close\r\n\r\n33334444".to_vec(),
         ];
         let seen_reqs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let seen_srv = seen_reqs.clone();
@@ -590,8 +596,8 @@ mod tests {
         let dest2 = dir.join("m2.folo");
         let mut ctl = Control { progress: &mut |_| {}, stop: &stop, backoff: Duration::from_millis(1) };
         let got2 = download(&client, "/m/weights", &dest2, &mut ctl).unwrap();
-        assert_eq!(got2, Downloaded { bytes: 8, etag: String::new() });
-        assert_eq!(std::fs::read(&dest2).unwrap(), b"11112222");
+        assert_eq!(got2, Downloaded { bytes: 8, etag: "\"v2\"".into() });
+        assert_eq!(std::fs::read(&dest2).unwrap(), b"33334444");
 
         srv.join().unwrap();
         let reqs = seen_reqs.lock().unwrap();

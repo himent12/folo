@@ -481,6 +481,24 @@ fn records_of_unless<'a, R: BufRead + 'a>(
                     return Some(Err(bad(format!("reading line {n}: {e}"))));
                 }
             }
+            // If line 1 starts with a 3-byte UTF-8 BOM and has not reached `\n` yet, budget up to 3 extra bytes so
+            // a BOM-prefixed record at exactly `MAX_RECORD_BYTES` (with optional `\r\n`) is not truncated and an
+            // overlong BOM-prefixed line cannot pass as `<= MAX_RECORD_BYTES` and split into two lines.
+            if n == 1 && !line.ends_with(b"\n") && line.starts_with(b"\xEF\xBB\xBF") {
+                if let Some(flag) = stop
+                    && let Err(e) = check_interrupt(flag)
+                {
+                    return Some(Err(e));
+                }
+                if let Err(e) = (&mut reader).take(3).read_until(b'\n', &mut line) {
+                    if let Some(flag) = stop
+                        && let Err(ie) = check_interrupt(flag)
+                    {
+                        return Some(Err(ie));
+                    }
+                    return Some(Err(bad(format!("reading line {n}: {e}"))));
+                }
+            }
             // A `\r` is a line ending only before a `\n`: at the end of the file it is one more byte of the line.
             let body = match line.strip_suffix(b"\n") {
                 Some(b) => b.strip_suffix(b"\r").unwrap_or(b),

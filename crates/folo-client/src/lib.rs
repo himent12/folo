@@ -252,6 +252,14 @@ impl Client {
     fn failure(&self, status: StatusCode, bytes: &[u8]) -> Error {
         let error = match serde_json::from_slice::<ErrorBody>(bytes) {
             Ok(mut b) => {
+                // Never forward a remote `error.code` that echoes our bearer token (of any length), while
+                // keeping known FOLO error codes intact.
+                if let Some(t) = &self.token
+                    && folo_api::codes::find(&b.error.code).is_none()
+                    && b.error.code.contains(t.as_str())
+                {
+                    b.error.code = NOT_FOLO.into();
+                }
                 b.error.message = self.scrub(&b.error.message);
                 b.error.hint = b.error.hint.map(|h| self.scrub(&h));
                 b.error
@@ -798,18 +806,17 @@ mod tests {
     #[test]
     fn non_2xx_error_bodies_are_capped_tokens_scrubbed_and_expired_deadlines_never_send() {
         use std::io::{Read, Write};
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicBool, Ordering};
 
         const SECRET: &str = "tok_secret_1234567890";
         let c = Client::new("http://127.0.0.1:9").token(SECRET);
 
-        // Echoed bearer token is scrubbed from both FOLO error envelopes and raw proxy bodies (even across the
-        // 200-char truncation cut).
+        // Echoed bearer token is scrubbed from FOLO error envelopes (including arbitrary `error.code`) and raw
+        // proxy bodies (even across the 200-char truncation cut).
         let env = format!(
-            r#"{{"error":{{"code":"unauthorized","message":"bad token {SECRET}","hint":"check {SECRET}"}}}}"#
+            r#"{{"error":{{"code":"err_{SECRET}","message":"bad token {SECRET}","hint":"check {SECRET}"}}}}"#
         );
         let e = c.failure(StatusCode::UNAUTHORIZED, env.as_bytes());
+        assert_eq!(e.code(), NOT_FOLO, "{e:?}");
         assert!(!e.error.message.contains(SECRET) && e.error.message.contains("[redacted]"), "{e:?}");
         assert!(
             e.error.hint.as_deref().is_some_and(|h| !h.contains(SECRET) && h.contains("[redacted]")),
@@ -829,14 +836,12 @@ mod tests {
         // Already-expired deadline fails immediately without contacting the server.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let hit = Arc::new(AtomicBool::new(false));
-        let hit_srv = hit.clone();
         listener.set_nonblocking(true).unwrap();
-        let expired = Client::new(&format!("http://{addr}")).until(Instant::now() - Duration::from_secs(1));
+        let past = Instant::now().checked_sub(Duration::from_secs(1)).unwrap_or_else(Instant::now);
+        let expired = Client::new(&format!("http://{addr}")).until(past);
         let e = expired.post_empty::<serde_json::Value>("/runs").unwrap_err();
         assert!(e.is_unreachable());
         assert!(listener.accept().is_err(), "expired deadline must not connect");
-        assert!(!hit_srv.load(Ordering::Relaxed));
 
         // Huge non-2xx body on normal JSON call is bounded and preserves the real non-transient HTTP status.
         listener.set_nonblocking(false).unwrap();
