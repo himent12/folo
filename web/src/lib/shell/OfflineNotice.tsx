@@ -7,8 +7,9 @@
  * (next to the phone top bar's Settings icon). It goes when the server answers again; the sidebar footer then says
  * Connected.
  */
+import TriangleAlert from '$icons/triangle-alert';
 import WifiOff from '$icons/wifi-off';
-import { computed, css, signal } from 'fw';
+import { computed, css, effect, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { href, router } from '$lib/router';
 
@@ -17,9 +18,28 @@ export default function OfflineNotice() {
   /** Latched refusal wording across the synchronous clear at the start of `hub.connect()`, so copy never flickers. */
   const lastRefused = signal<string | null>(null);
   const onSettings = computed(() => router.route.name === 'settings');
-  const visible = computed(() => hub.offline || retrying.get());
+  const demoErr = computed(() => hub.demoError !== null);
+  // Prioritize slow demo load over `hub.offline` so a stalled retry (or `?mock=1&scenario=error`) still offers Reload.
+  const demoSlow = computed(() => !demoErr.get() && hub.demoSlow);
+  const demoReload = computed(() => demoErr.get() || demoSlow.get());
+  const visible = computed(() => hub.offline || demoReload.get() || retrying.get());
   const refused = computed(() => hub.refused ?? (retrying.get() ? lastRefused.get() : null));
+  let slotEl: HTMLDivElement | undefined;
   let retryBtn: HTMLButtonElement | undefined;
+  let reloadBtn: HTMLButtonElement | undefined;
+  let reloadFocused = false;
+
+  const focusFallback = () =>
+    slotEl?.closest('header')?.querySelector<HTMLElement>(':scope > .actions button, :scope > .actions a[href]') ?? document.getElementById('content');
+
+  // If the demo chunk finishes while the top-bar Reload button holds focus, hand focus to a stable control instead of body.
+  effect(() => {
+    if (!demoReload.get() && reloadFocused) {
+      reloadFocused = false;
+      const active = document.activeElement;
+      if (!active || active === document.body || active === reloadBtn) focusFallback()?.focus();
+    }
+  });
 
   async function retry() {
     if (retrying.peek()) return;
@@ -31,9 +51,7 @@ export default function OfflineNotice() {
       /* hub.connect handles connection errors internally */
     } finally {
       const hadFocus = !!retryBtn && document.activeElement === retryBtn;
-      const fallback = hadFocus
-        ? (retryBtn?.closest('header')?.querySelector<HTMLElement>(':scope > .actions button, :scope > .actions a[href]') ?? document.getElementById('content'))
-        : null;
+      const fallback = hadFocus ? focusFallback() : null;
       retrying.set(false);
       lastRefused.set(null);
       // If recovery hid the notice while Retry held keyboard focus, hand focus to a stable control instead of body.
@@ -42,34 +60,63 @@ export default function OfflineNotice() {
   }
 
   return (
-    <div class="slot">
-      <div class="notice" class:idle={!visible.get()}>
+    <div class="slot" ref={(el) => (slotEl = el)}>
+      <div class="notice" class:idle={!visible.get()} class:bad={demoErr.get()}>
         <span class="msg" role="status">
           {visible.get() ? (
-            <>
-              <WifiOff size={14} strokeWidth={2} aria-hidden="true" />
-              <span class="long">{refused.get() ? `${refused.get()} Retrying…` : "Can't reach folo serve. Retrying…"}</span>
-              <span class="short">{refused.get() ? 'Not connected' : 'Offline'}</span>
-            </>
+            demoErr.get() ? (
+              <>
+                <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" />
+                <span class="long">Demo data failed to load.</span>
+                <span class="short">Demo failed</span>
+              </>
+            ) : demoSlow.get() ? (
+              <>
+                <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" />
+                <span class="long">Demo data is taking a while to load.</span>
+                <span class="short">Loading demo…</span>
+              </>
+            ) : (
+              <>
+                <WifiOff size={14} strokeWidth={2} aria-hidden="true" />
+                <span class="long">{refused.get() ? `${refused.get()} Retrying…` : "Can't reach folo serve. Retrying…"}</span>
+                <span class="short">{refused.get() ? 'Not connected' : 'Offline'}</span>
+              </>
+            )
           ) : null}
         </span>
         {visible.get() ? (
           <span class="actions">
-            <button
-              ref={(el) => (retryBtn = el)}
-              type="button"
-              class="action"
-              aria-disabled={retrying.get() || undefined}
-              aria-busy={retrying.get() || undefined}
-              onclick={() => void retry()}
-            >
-              {retrying.get() ? 'Retrying…' : 'Retry'}
-            </button>
-            {!onSettings.get() ? (
-              <a class="action settings-link" href={href('/settings?section=connection')}>
-                Settings
-              </a>
-            ) : null}
+            {demoReload.get() ? (
+              <button
+                ref={(el) => (reloadBtn = el)}
+                type="button"
+                class="action"
+                onfocus={() => (reloadFocused = true)}
+                onblur={() => (reloadFocused = false)}
+                onclick={() => location.reload()}
+              >
+                Reload
+              </button>
+            ) : (
+              <>
+                <button
+                  ref={(el) => (retryBtn = el)}
+                  type="button"
+                  class="action"
+                  aria-disabled={retrying.get() || undefined}
+                  aria-busy={retrying.get() || undefined}
+                  onclick={() => void retry()}
+                >
+                  {retrying.get() ? 'Retrying…' : 'Retry'}
+                </button>
+                {!onSettings.get() ? (
+                  <a class="action settings-link" href={href('/settings?section=connection')}>
+                    Settings
+                  </a>
+                ) : null}
+              </>
+            )}
           </span>
         ) : null}
       </div>
@@ -115,6 +162,9 @@ css`
   .msg :global(svg) {
     flex-shrink: 0;
     color: var(--warning-text);
+  }
+  .notice.bad .msg :global(svg) {
+    color: var(--danger-text);
   }
   .long,
   .short {

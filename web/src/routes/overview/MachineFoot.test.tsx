@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // The live panel's foot: only the run's own GPU, never another adapter's load beside it, and none for a cloud run,
 // whose machine this server has no readings of (review round 1, findings 1).
-import { flush } from 'fw';
+import { flush, signal } from 'fw';
 import { render } from '../../../framework/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
@@ -16,6 +16,8 @@ afterEach(() => {
   c?.unmount();
   c = undefined;
   target?.remove();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 async function mount(edit: (r: Run) => Run): Promise<{ sys: SystemInfo }> {
@@ -63,10 +65,50 @@ describe('MachineFoot', () => {
     expect(el.textContent).not.toMatch(/GPU/);
   });
 
-  it("has no foot for a cloud run: this server has no readings of the rented machine", async () => {
-    await mount((r) => ({ ...r, cloud: { provider: 'runpod' } as unknown as Run['cloud'] }));
-    await new Promise((ok) => setTimeout(ok, 50));
+  it("has no foot for a cloud run and does not poll /api/system (issue #309)", async () => {
+    vi.useFakeTimers();
+    const api = new MockApi('normal', 0);
+    const run = { ...(await api.runs()).find((r) => r.status === 'running')!, cloud: { provider: 'runpod' } as unknown as Run['cloud'] };
+    const sysSpy = vi.spyOn(api, 'system');
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = render(() => <MachineFoot run={run} />, target);
+    flush();
+
+    await vi.advanceTimersByTimeAsync(6500);
     flush();
     expect(target.querySelector('.foot')).toBeNull();
+    expect(sysSpy).not.toHaveBeenCalled();
+  });
+
+  it('stops polling /api/system when the active run switches from local to cloud', async () => {
+    vi.useFakeTimers();
+    const api = new MockApi('normal', 0);
+    const localRun = (await api.runs()).find((r) => r.status === 'running')!;
+    const cloudRun = { ...localRun, cloud: { provider: 'runpod' } as unknown as Run['cloud'] };
+    const sysSpy = vi.spyOn(api, 'system');
+    hub.api = api;
+    hub.mode = 'mock';
+    const active = signal<Run>(localRun);
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = render(() => <MachineFoot run={active.get()} />, target);
+    flush();
+
+    await vi.advanceTimersByTimeAsync(2100);
+    flush();
+    expect(target.querySelector('.foot')).not.toBeNull();
+    const callsBeforeSwitch = sysSpy.mock.calls.length;
+    expect(callsBeforeSwitch).toBeGreaterThanOrEqual(2);
+
+    active.set(cloudRun);
+    flush();
+    expect(target.querySelector('.foot')).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(6500);
+    flush();
+    expect(sysSpy.mock.calls.length).toBe(callsBeforeSwitch);
   });
 });

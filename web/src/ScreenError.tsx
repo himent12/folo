@@ -11,7 +11,50 @@ import { mainNav, settingsNav } from '$lib/shell/nav';
 import Page from '$lib/shell/Page';
 import Button from '$lib/ui/Button';
 import ErrorState from '$lib/ui/ErrorState';
+import { isChunkEvalError } from '$lib/chunkError';
 import type { ScreenName, Screens } from './routes';
+
+/** Removes `?mock` and `?scenario` from a Studio URL while keeping the path, other query params, and hash route. */
+export function leaveDemoUrl(currentHref: string): string {
+  const to = new URL(currentHref);
+  to.searchParams.delete('mock');
+  to.searchParams.delete('scenario');
+  return to.href;
+}
+
+/**
+ * The screen shown when the built-in demo (`?mock=1`) chunk threw while evaluating: browsers cache module evaluation
+ * errors per URL, so retrying the import cannot recover and only a full reload (or leaving demo mode) can.
+ */
+export function DemoError(props: { error: unknown }) {
+  const nav = computed(() => {
+    const s = section(router.route.name);
+    return [...mainNav, settingsNav].find((n) => n.id === s);
+  });
+  effect(() => {
+    const n = nav.get();
+    setCrumbs(n ? { label: n.label, path: n.path } : { label: 'Error' });
+  });
+  return (
+    <Page title={nav.get()?.label ?? 'FOLO Studio'}>
+      <ErrorState
+        error={props.error instanceof Error ? props.error : new Error(String(props.error))}
+        title="Could not load demo data"
+        hint="The built-in demo module failed to start. Reload the page to try again, or leave demo data to connect to a server."
+        actions={
+          <>
+            <Button size="sm" variant="primary" icon={RotateCw} onclick={() => location.reload()}>
+              Reload
+            </Button>
+            <Button size="sm" onclick={() => location.assign(leaveDemoUrl(location.href))}>
+              Leave demo data
+            </Button>
+          </>
+        }
+      />
+    </Page>
+  );
+}
 
 /**
  * The screen of a route whose screen threw while it was created (data of a shape it did not expect, a bug): the page
@@ -72,6 +115,10 @@ export default function ScreenError(props: { screens: Screens }) {
     return [...mainNav, settingsNav].find((n) => n.id === s);
   });
   const failure = computed(() => props.screens.failure(name.get()));
+  const evalFailed = computed(() => {
+    const f = failure.get();
+    return f ? isChunkEvalError(f.error) : false;
+  });
   const replaced = signal(false);
   effect(() => {
     const n = nav.get();
@@ -89,6 +136,17 @@ export default function ScreenError(props: { screens: Screens }) {
           error={new Error('This page runs an older version of Studio than the one the server now serves.')}
           title="Studio was updated"
           hint="Reload the page to use the new version."
+          actions={
+            <Button size="sm" variant="primary" icon={RotateCw} onclick={() => location.reload()}>
+              Reload
+            </Button>
+          }
+        />
+      ) : evalFailed.get() ? (
+        <ErrorState
+          error={failure.get()?.error}
+          title="This screen could not be loaded"
+          hint="The screen's module failed to start. Reload the page to try again."
           actions={
             <Button size="sm" variant="primary" icon={RotateCw} onclick={() => location.reload()}>
               Reload

@@ -15,10 +15,15 @@ import Progress from '$lib/ui/Progress';
 import { runGpu } from './device';
 
 export default function MachineFoot(props: { run: Run; system?: Resource<SystemInfo> }) {
+  // A cloud run trains on a rented machine whose readings this server does not have, so skip polling `/api/system`.
+  return <>{props.run.cloud ? null : <LocalMachineFoot run={props.run} system={props.system} />}</>;
+}
+
+function LocalMachineFoot(props: { run: Run; system?: Resource<SystemInfo> }) {
   // Its first reading is the page's when that one is out or just answered (the same request, a few ms apart on a load).
   const sys = new Resource((s) => hub.api.system(s), { poll: 2000, startFrom: () => props.system });
   /** Live readings only: once the server stops answering the foot goes, rather than show a stale load. */
-  const info = computed(() => (sys.stale === undefined && !props.run.cloud ? sys.data : undefined));
+  const info = computed(() => (sys.stale === undefined ? sys.data : undefined));
   // The run's own GPU (./device) only: none for a CPU run (asked for or resolved from auto) or when it cannot be told,
   // rather than another adapter's load beside this run.
   const gpu = computed(() => {

@@ -14,7 +14,7 @@ import { toast } from '$lib/ui/toast';
 import App from './App';
 import * as RunScreen from './routes/Run';
 import { Screens, type ScreenModule, type ScreenName } from './routes';
-import { entryScript } from './ScreenError';
+import { entryScript, leaveDemoUrl } from './ScreenError';
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -57,6 +57,8 @@ afterEach(() => {
   c?.unmount();
   c = undefined;
   target.remove();
+  hub.demoError = null;
+  hub.demoSlow = false;
   for (const t of toast.items) toast.dismiss(t.id);
   vi.restoreAllMocks();
   router.route = parse('#/');
@@ -203,6 +205,35 @@ describe('a screen whose chunk fails to load', () => {
     await until(() => main().querySelector('[role="alert"]'), 'the error');
     expect(router.route.name).toBe('model');
     expect(main().querySelector('.fake')).toBeNull();
+  });
+
+  it('offers Reload instead of Retry when a lazy route chunk throws while evaluating', async () => {
+    const screens = new Screens((name) =>
+      name === 'models' ? () => Promise.reject(new SyntaxError('Unexpected token <')) : undefined,
+    );
+    router.route = parse('#/models');
+    c = render(() => <App screens={screens} />, target);
+    await until(() => main().querySelector('[role="alert"]'), 'the eval error');
+    expect(main().querySelector('.title')?.textContent).toBe('This screen could not be loaded');
+    expect(main().textContent).toContain('Unexpected token <');
+    const buttons = [...main().querySelectorAll('button')].map((b) => b.textContent?.trim());
+    expect(buttons).toEqual(['Reload']);
+  });
+
+  it('shows a recoverable DemoError with Reload and Leave demo data when the built-in demo chunk fails to evaluate', async () => {
+    hub.mode = 'connecting';
+    hub.demoError = new ReferenceError('mockInit is not defined');
+    const screens = new Screens((name) => (name === 'overview' ? () => Promise.resolve(screen('the overview')) : undefined));
+    router.route = parse('#/');
+    c = render(() => <App screens={screens} />, target);
+    await until(() => main().querySelector('[role="alert"]'), 'the demo error');
+    expect(main().querySelector('.title')?.textContent).toBe('Could not load demo data');
+    expect(main().textContent).toContain('mockInit is not defined');
+    const buttons = [...main().querySelectorAll('button')].map((b) => b.textContent?.trim());
+    expect(buttons).toEqual(['Reload', 'Leave demo data']);
+    const conn = target.querySelector('.conn')!;
+    expect(conn.querySelector('.label')?.textContent ?? conn.getAttribute('aria-label')).toBe('Demo failed');
+    expect(leaveDemoUrl('http://localhost:5173/?mock=1&scenario=error&keep=yes#/runs')).toBe('http://localhost:5173/?keep=yes#/runs');
   });
 });
 
@@ -459,11 +490,11 @@ describe('G-chord indicator, guarded/staggered route preloading, and lazy Shortc
     }
   });
 
-  it('lazy-loads ShortcutsDialog on first open, caches it across close/reopen, and retries after failure', async () => {
+  it('lazy-loads ShortcutsDialog on first open, caches it across close/reopen, and retries after a fetch failure', async () => {
     let attempts = 0;
     const loadShortcuts = vi.fn(async () => {
       attempts++;
-      if (attempts === 1) throw new TypeError('offline');
+      if (attempts === 1) throw new TypeError('Failed to fetch dynamically imported module');
       return {
         default: (p: { open?: boolean }) => {
           const open = bindable(p, 'open', false);
@@ -486,12 +517,14 @@ describe('G-chord indicator, guarded/staggered route preloading, and lazy Shortc
     expect(loadShortcuts).not.toHaveBeenCalled();
     expect(target.querySelector('.lazy-shortcuts')).toBeNull();
 
-    // First attempt fails cleanly with an error toast and resets so a retry works.
+    // First attempt fails with a transient fetch error (no Reload needed) and resets so a retry works.
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
     await settle();
     expect(loadShortcuts).toHaveBeenCalledTimes(1);
     expect(target.querySelector('.lazy-shortcuts')).toBeNull();
-    expect(toast.items.some((t) => t.tone === 'error' && t.title === 'Could not load keyboard shortcuts')).toBe(true);
+    const errToast = toast.items.find((t) => t.tone === 'error' && t.title === 'Could not load keyboard shortcuts');
+    expect(errToast).toBeDefined();
+    expect(errToast?.action).toBeUndefined();
 
     // Second attempt loads, clears the error toast, and opens the dialog; closing and reopening reuses the cached chunk.
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
@@ -534,6 +567,27 @@ describe('G-chord indicator, guarded/staggered route preloading, and lazy Shortc
     await until(() => target.querySelector('.lazy-shortcuts'), 'cached shortcuts component');
     expect(target.querySelector('.lazy-shortcuts')?.getAttribute('data-open')).toBe('false');
   });
+
+  it('offers Reload on the error toast when lazy ShortcutsDialog or CommandPalette fails to evaluate', async () => {
+    const loadShortcuts = vi.fn(async () => {
+      throw new SyntaxError('Unexpected token <');
+    });
+    const loadPalette = vi.fn(async () => {
+      throw new ReferenceError('paletteInit is not defined');
+    });
+    const screens = new Screens((name) => (name === 'overview' ? () => Promise.resolve(screen('the overview')) : undefined));
+    router.route = parse('#/');
+    c = render(() => <App screens={screens} loadShortcuts={loadShortcuts} loadPalette={loadPalette} />, target);
+    await until(() => main().querySelector('.fake'), 'the overview');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+    await until(() => toast.items.some((t) => t.key === 'shortcuts'), 'shortcuts eval error toast');
+    expect(toast.items.find((t) => t.key === 'shortcuts')?.action?.label).toBe('Reload');
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+    await until(() => toast.items.some((t) => t.key === 'palette'), 'palette eval error toast');
+    expect(toast.items.find((t) => t.key === 'palette')?.action?.label).toBe('Reload');
+  });
 });
 
 describe('lazy CommandPalette', () => {
@@ -547,11 +601,11 @@ describe('lazy CommandPalette', () => {
     };
   });
 
-  it('defers loading until first Ctrl+K, retries after failure, and caches across close/reopen via Cmd+K and header button', async () => {
+  it('defers loading until first Ctrl+K, retries after fetch failure, and caches across close/reopen via Cmd+K and header button', async () => {
     let attempts = 0;
     const loadPalette = vi.fn(async () => {
       attempts++;
-      if (attempts === 1) throw new TypeError('offline');
+      if (attempts === 1) throw new TypeError('Failed to fetch dynamically imported module');
       return {
         default: (p: { open?: boolean; onshortcuts: () => void; takeInitialQuery?: () => string }) => {
           const open = bindable(p, 'open', false);
@@ -574,9 +628,10 @@ describe('lazy CommandPalette', () => {
     expect(loadPalette).not.toHaveBeenCalled();
     expect(target.querySelector('.lazy-palette')).toBeNull();
 
-    // First Ctrl+K attempt fails cleanly with an error toast and resets so a retry works.
+    // First Ctrl+K attempt fails with a transient fetch error (no Reload needed) and resets so a retry works.
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
     await until(() => toast.items.some((t) => t.tone === 'error' && t.title === 'Could not load command palette'), 'error toast');
+    expect(toast.items.find((t) => t.key === 'palette')?.action).toBeUndefined();
     expect(loadPalette).toHaveBeenCalledTimes(1);
     expect(target.querySelector('.lazy-palette')).toBeNull();
 

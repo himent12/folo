@@ -7,6 +7,7 @@
 // to load shows an error with Retry (ScreenError), and the screen once any later try brings it in.
 import { computed, createRoot, css, Dynamic, effect, getOwner, Key, onCleanup, onMount, signal, tick, untrack, type Component } from 'fw';
 import { hub } from '$lib/api/index';
+import { isChunkEvalError } from '$lib/chunkError';
 import { applyTheme } from '$lib/design/applyTheme';
 import { retryFailedStyles } from '$lib/failedStyles';
 import { prefs } from '$lib/prefs';
@@ -24,10 +25,10 @@ import SidebarLive from '$lib/shell/SidebarLive';
 import TabBar from '$lib/shell/TabBar';
 import Topbar from '$lib/shell/Topbar';
 import Toaster from '$lib/ui/Toaster';
-import { toast } from '$lib/ui/toast';
+import { errorDetail, toast } from '$lib/ui/toast';
 import { screens as appScreens, type Screens } from './routes';
 import NotFound from './routes/NotFound';
-import ScreenError, { ScreenCrash } from './ScreenError';
+import ScreenError, { DemoError, ScreenCrash } from './ScreenError';
 
 type Screen = { path: string | null; comp: Component<Record<string, never>> | null };
 type CommandPaletteModule = { default: Component<CommandPaletteProps> };
@@ -141,7 +142,17 @@ export default function App(props: AppProps) {
         if (!mounted || !paletteOpen.peek()) return;
         pendingQuery = '';
         paletteOpen.set(false);
-        toast.error(e, 'Could not load command palette', { key: 'palette' });
+        if (isChunkEvalError(e)) {
+          toast.show({
+            tone: 'error',
+            title: 'Could not load command palette',
+            detail: errorDetail(e),
+            action: { label: 'Reload', run: () => location.reload() },
+            key: 'palette',
+          });
+        } else {
+          toast.error(e, 'Could not load command palette', { key: 'palette' });
+        }
       },
     );
   });
@@ -195,7 +206,17 @@ export default function App(props: AppProps) {
         shortcutsLoad = null;
         if (!mounted || !shortcutsOpen.peek()) return;
         shortcutsOpen.set(false);
-        toast.error(e, 'Could not load keyboard shortcuts', { key: 'shortcuts' });
+        if (isChunkEvalError(e)) {
+          toast.show({
+            tone: 'error',
+            title: 'Could not load keyboard shortcuts',
+            detail: errorDetail(e),
+            action: { label: 'Reload', run: () => location.reload() },
+            key: 'shortcuts',
+          });
+        } else {
+          toast.error(e, 'Could not load keyboard shortcuts', { key: 'shortcuts' });
+        }
       },
     );
   });
@@ -207,8 +228,10 @@ export default function App(props: AppProps) {
 
   /** Whether the URL's route `to` waits for its screen's chunk (neither loaded nor failed yet). */
   const waiting = (to: Route) => to.name !== 'not-found' && screens.screenOf(to.name) === undefined && !screens.failure(to.name);
-  /** A route whose chunk could not be loaded: the error, with Retry. */
+  /** A route whose chunk could not be loaded: the error, with Retry (or Reload for eval errors / updates). */
   const failed: Component<Record<string, never>> = () => <ScreenError screens={screens} />;
+  /** Built-in demo (`?mock=1`) chunk threw while evaluating: recoverable error state with Reload. */
+  const demoFailed: Component<Record<string, never>> = () => <DemoError error={hub.demoError} />;
   /**
    * The screen, or the error it threw while it was created (ScreenCrash), so `main` never keeps the one before; what it
    * built until then is disposed, so none of its effects run.
@@ -230,13 +253,14 @@ export default function App(props: AppProps) {
   let last: Screen = NONE;
   // Until then the route on display (`router.route`, what screens read) stays the one of the screen on display; with
   // none on display yet (startup), it follows the URL.
-  onCleanup(router.holdWhile((to) => last.path !== null && waiting(to)));
+  onCleanup(router.holdWhile((to) => last.path !== null && hub.demoError === null && waiting(to)));
   const screen = computed(
     () => {
       // The URL's route: its chunk is fetched (a failed one is tried again by Retry, or by any other request).
       const to = router.location;
       if (to.name !== 'not-found' && waiting(to)) void screens.preload(to.name).catch(() => {});
       const r = router.route;
+      if (hub.demoError !== null) return (last = { path: r.path, comp: demoFailed });
       if (r.name === 'not-found') return (last = { path: r.path, comp: NotFound });
       const comp = screens.screenOf(r.name);
       if (comp !== undefined) return (last = { path: r.path, comp });
@@ -278,7 +302,7 @@ export default function App(props: AppProps) {
       return at === null || at === document.body || !!mainEl?.contains(at);
     };
     const newPage = path !== null && isNewPage(shownPath, path);
-    const recovered = shownComp === failed && comp !== failed && focusFree();
+    const recovered = (shownComp === failed || shownComp === demoFailed) && comp !== failed && comp !== demoFailed && focusFree();
     shownComp = comp;
     if (path === null || (!newPage && !recovered)) return;
     shownPath = path;

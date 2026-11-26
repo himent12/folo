@@ -136,21 +136,44 @@ css`
   .mark :global(.bad) {
     color: var(--danger-text);
   }
-  /* The agent has the image now: the live dot, with the heartbeat that lasts exactly as long as the call. */
+  /* The agent has the image now: the live dot, with a compositor-only pseudo-element heartbeat (transform + opacity)
+     that lasts exactly as long as the call and avoids per-frame main-thread style recalculation. */
   .dot {
+    position: relative;
     width: 6px;
     height: 6px;
     border-radius: 50%;
     background: var(--accent-solid);
-    --pulse: var(--accent-line);
-    animation: live-pulse 2.4s var(--ease-out) infinite;
+  }
+  .dot::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: var(--accent-line);
+    pointer-events: none;
+    will-change: transform, opacity;
+    animation: label-tile-pulse 2.4s var(--ease-out) infinite;
+  }
+  @keyframes label-tile-pulse {
+    0% {
+      opacity: 0.55;
+      transform: scale(1);
+    }
+    33%,
+    100% {
+      opacity: 0;
+      transform: scale(2.33);
+    }
   }
   :global([data-theme='light']) .dot {
     background: var(--accent-line);
   }
   @media (prefers-reduced-motion: reduce) {
-    .dot {
+    .dot::after {
+      content: none;
       animation: none;
+      will-change: auto;
     }
   }
 `;
