@@ -815,6 +815,9 @@ pub fn gather(
     if n == 0 {
         return Ok(());
     }
+    if fast::try_gather_op_vec4(ctx, elem, x, (outer, d, inner), idx, di, out, n)? {
+        return Ok(());
+    }
     let spec = Spec::new().u32("EB", eb_of(elem)).u32("MODE", 2).u32("RANK", 0).bool("IDX64", idx.i64);
     let k = ctx.kernel(&MOVE, spec)?;
     let p = Params::new().uz(n)?.uz(d)?.uz(inner)?.uz(di)?;
@@ -866,6 +869,9 @@ fn scatter_add_impl(
     if n == 0 {
         return Ok(());
     }
+    if mode == 0 && fast::try_index_add_vec4(ctx, out, (outer, d, inner), idx, src, n)? {
+        return Ok(());
+    }
     let k = ctx.kernel(&SCATTER_ADD, Spec::new().u32("MODE", mode).bool("IDX64", idx.i64))?;
     let p = Params::new().uz(n)?.uz(d)?.uz(inner)?.uz(l)?;
     ctx.dispatch(&k, &[src, idx.buf, out], &p, ctx.grid_1d(n as u64, 256)?)
@@ -895,6 +901,8 @@ pub(crate) static DEFS: &[&KernelDef] = &[
     fast::FAST_DEFS[3],
     fast::FAST_DEFS[4],
     fast::FAST_DEFS[5],
+    fast::FAST_DEFS[6],
+    fast::FAST_DEFS[7],
 ];
 
 #[cfg(test)]

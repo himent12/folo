@@ -4,7 +4,7 @@
 use folo_core::backend::{Conv2dParams, UnaryOp, View};
 use folo_core::{DType as CoreDType, Error, Result, Shape, Storage};
 
-use super::convert::{Core, bn_act, kdt, nchw, strided_of};
+use super::convert::{Core, bn_act, f32_only, kdt, nchw, split3, strided_of};
 use super::{BACKEND_NAME, GpuBackend};
 use crate::error::GpuError;
 use crate::kernels::conv::{Conv2dDesc, ConvInput};
@@ -13,7 +13,7 @@ use crate::kernels::ew::{self, EwInput, EwOp};
 use crate::kernels::gemm::{self, BatchStrides, GemmDesc};
 use crate::kernels::norm::BnDesc;
 use crate::kernels::pooling::Window2d;
-use crate::kernels::strided::{self, Elem, Strided};
+use crate::kernels::strided::{self, Elem, Indices, Strided};
 use crate::profile;
 
 /// `(transposed, leading dimension)` of a `rows × cols` matrix with strides `(rs, cs)` as the GEMM can
@@ -184,5 +184,62 @@ impl GpuBackend {
             }
         }
         Ok(Some(()))
+    }
+
+    /// Direct zero-cleared `index_select` backward (skips the extra `full` + `copy_strided` of the default).
+    pub(super) fn run_index_select_backward(
+        &self,
+        grad: View<'_>,
+        dim: usize,
+        idx: View<'_>,
+        input_shape: &Shape,
+    ) -> Result<Storage> {
+        let op = "index_select_backward";
+        f32_only(&grad, op)?;
+        self.check_fits(&grad, op)?;
+        self.check_fits(&idx, op)?;
+        if dim >= input_shape.rank() {
+            return Err(Error::DimOutOfRange { op, dim: dim as isize, rank: input_shape.rank() });
+        }
+        let (outer, d, inner) = split3(input_shape.dims(), dim);
+        let len = input_shape.numel();
+        let out = self.alloc(CoreDType::F32, len)?;
+        if len > 0 {
+            self.ctx.clear(out.raw(), Elem::F32.buffer_bytes(len).core()?);
+            let (id, i64) = self.indices(&idx, op)?;
+            let gd = self.dense(&grad)?;
+            let ix = Indices { buf: id.raw(), i64, len: idx.layout.numel() };
+            strided::index_add(&self.ctx, out.raw(), (outer, d, inner), ix, gd.raw()).core()?;
+        }
+        Ok(self.wrap(CoreDType::F32, len, out))
+    }
+
+    /// Direct zero-cleared `gather` backward (skips the extra `full` + `copy_strided` of the default).
+    pub(super) fn run_gather_backward(
+        &self,
+        grad: View<'_>,
+        dim: usize,
+        idx: View<'_>,
+        input_shape: &Shape,
+    ) -> Result<Storage> {
+        let op = "gather_backward";
+        f32_only(&grad, op)?;
+        self.check_fits(&grad, op)?;
+        self.check_fits(&idx, op)?;
+        if dim >= input_shape.rank() {
+            return Err(Error::DimOutOfRange { op, dim: dim as isize, rank: input_shape.rank() });
+        }
+        let (outer, d, inner) = split3(input_shape.dims(), dim);
+        let di = idx.shape().dims()[dim];
+        let len = input_shape.numel();
+        let out = self.alloc(CoreDType::F32, len)?;
+        if len > 0 {
+            self.ctx.clear(out.raw(), Elem::F32.buffer_bytes(len).core()?);
+            let (id, i64) = self.indices(&idx, op)?;
+            let gd = self.dense(&grad)?;
+            let ix = Indices { buf: id.raw(), i64, len: idx.layout.numel() };
+            strided::scatter_add(&self.ctx, out.raw(), (outer, d, inner), ix, di, gd.raw()).core()?;
+        }
+        Ok(self.wrap(CoreDType::F32, len, out))
     }
 }

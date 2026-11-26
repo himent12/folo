@@ -8,9 +8,13 @@
 //! is always f32, so an f16 reduction or softmax accumulates in f32 and rounds once on the store.
 
 mod arg;
+mod var;
 
 pub use arg::arg_reduce;
 use arg::{ARG, ARG_ROWS};
+pub use var::reduce_var;
+pub(crate) use var::var_rows_fits;
+use var::{VAR_COLS, VAR_ROWS};
 
 use super::{check_buf, prod, use_subgroups};
 use crate::DType;
@@ -847,7 +851,8 @@ pub fn topk(
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] = &[&ROWS, &COLS, &SOFTMAX, &ARG, &ARG_ROWS, &SOFTMAX_COLS, &TOPK];
+pub(crate) static DEFS: &[&KernelDef] =
+    &[&ROWS, &COLS, &SOFTMAX, &ARG, &ARG_ROWS, &SOFTMAX_COLS, &TOPK, &VAR_ROWS, &VAR_COLS];
 
 #[cfg(test)]
 mod tests {

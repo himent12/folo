@@ -34,6 +34,7 @@
 //! `pooling.rs` (max pooling; its [`pooling::Window2d`] also describes conv windows). `bounds.rs` limits what a
 //! kernel list may ask a generator for.
 
+pub mod attention;
 pub(crate) mod bounds;
 pub mod conv;
 pub mod coop;
@@ -44,6 +45,7 @@ pub mod elementwise;
 pub mod ew;
 pub mod gemm;
 pub mod gemm_cat;
+pub mod group_norm;
 pub mod layer_norm;
 pub mod layout;
 pub mod muon;
@@ -80,6 +82,7 @@ pub(crate) fn find_def(name: &str, spec: &Spec) -> Option<&'static KernelDef> {
 /// Every fixed kernel definition.
 pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
     [
+        attention::DEFS,
         conv::DEFS,
         coop::DEFS,
         detect::DEFS,
@@ -88,6 +91,7 @@ pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
         elementwise::DEFS,
         ew::DEFS,
         gemm::DEFS,
+        group_norm::DEFS,
         layer_norm::DEFS,
         layout::DEFS,
         muon::DEFS,

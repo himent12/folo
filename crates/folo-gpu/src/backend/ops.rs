@@ -234,6 +234,10 @@ impl Backend for GpuBackend {
         Ok(self.wrap(dtype, n, out))
     }
 
+    fn reduce_var(&self, x: View<'_>, dim: usize, unbiased: bool) -> Result<Storage> {
+        self.run_reduce_var(x, dim, unbiased)
+    }
+
     fn softmax(&self, x: View<'_>, dim: usize, log: bool) -> Result<Storage> {
         let _p = profile::scope(|| format!("softmax {:?}", x.shape().dims()));
         let n = x.layout.numel();
@@ -579,6 +583,20 @@ impl Backend for GpuBackend {
         let ob = self.buf(&View::new(&out, &lo))?;
         strided::scatter_add(&self.ctx, ob, (outer, d, inner), ix, di, sd.raw()).core()?;
         Ok(out)
+    }
+
+    fn index_select_backward(
+        &self,
+        grad: View<'_>,
+        dim: usize,
+        idx: View<'_>,
+        shape: &Shape,
+    ) -> Result<Storage> {
+        self.run_index_select_backward(grad, dim, idx, shape)
+    }
+
+    fn gather_backward(&self, grad: View<'_>, dim: usize, idx: View<'_>, shape: &Shape) -> Result<Storage> {
+        self.run_gather_backward(grad, dim, idx, shape)
     }
 
     fn topk(&self, x: View<'_>, k: usize, largest: bool) -> Result<(Storage, Storage)> {

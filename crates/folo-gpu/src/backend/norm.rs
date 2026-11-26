@@ -5,7 +5,7 @@ use folo_core::{DType as CoreDType, Error, Result, Storage};
 
 use super::GpuBackend;
 use super::convert::{Core, kdt, split3};
-use crate::kernels::{layer_norm, softmax_bwd};
+use crate::kernels::{layer_norm, reduce, softmax_bwd};
 use crate::profile;
 
 /// Requires `v` to hold `F32` storage.
@@ -273,5 +273,23 @@ impl GpuBackend {
             .core()?;
         }
         Ok(self.wrap(dtype, n, out))
+    }
+
+    pub(super) fn run_reduce_var(&self, x: View<'_>, dim: usize, unbiased: bool) -> Result<Storage> {
+        let op = "reduce_var";
+        require_f32(&x, op)?;
+        self.check_fits(&x, op)?;
+        if dim >= x.shape().rank() {
+            return Err(Error::DimOutOfRange { op, dim: dim as isize, rank: x.shape().rank() });
+        }
+        let (outer, r, inner) = split3(x.shape().dims(), dim);
+        let _p = profile::scope(|| format!("reduce_var {:?} dim {dim}", x.shape().dims()));
+        let n = outer * inner;
+        let out = self.alloc(CoreDType::F32, n)?;
+        if n > 0 {
+            let xd = self.dense(&x)?;
+            reduce::reduce_var(&self.ctx, xd.raw(), out.raw(), (outer, r, inner), unbiased).core()?;
+        }
+        Ok(self.wrap(CoreDType::F32, n, out))
     }
 }
