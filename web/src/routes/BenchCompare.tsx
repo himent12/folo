@@ -118,6 +118,19 @@ export default function BenchCompare() {
     if (entry) announce(next ? `Pinned ${entry.name} to front.` : `Unpinned ${entry.name}.`);
   }
 
+  function addEntry(eid: string) {
+    const entry = candidates.peek().find((x) => x.id === eid);
+    setIds([...ids.peek(), eid]);
+    if (entry) announce(`Added ${entry.name} to comparison.`);
+    // Adding the 4th entry (or last candidate) unmounts the adder <select>: move keyboard focus to the new chip.
+    queueMicrotask(() => {
+      if (document.activeElement && document.activeElement !== document.body && chipsEl?.contains(document.activeElement)) return;
+      const buttons = [...(chipsEl?.querySelectorAll<HTMLButtonElement>('button.ck') ?? [])];
+      const target = buttons.find((b) => b.dataset.entryId === eid) ?? buttons.at(-1);
+      target?.focus();
+    });
+  }
+
   function removeEntry(eid: string, index: number) {
     const entry = shown.peek().find((x) => x.id === eid);
     setIds(ids.peek().filter((x) => x !== eid));
@@ -190,7 +203,7 @@ export default function BenchCompare() {
         onchange={(ev) => {
           const el = ev.currentTarget as HTMLSelectElement;
           const v = el.value;
-          if (v) setIds([...ids.peek(), v]);
+          if (v) addEntry(v);
           el.value = '';
         }}
       >
@@ -498,6 +511,7 @@ export default function BenchCompare() {
               <button
                 type="button"
                 class="ck"
+                data-entry-id={e().id}
                 aria-pressed={pinned.get() === e().id}
                 aria-keyshortcuts={keyPrefs.singleKeys && shown.get().length >= 2 ? String(i() + 1) : undefined}
                 title={pinned.get() === e().id ? 'Let it fall back' : 'Keep it in front'}

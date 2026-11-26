@@ -11,7 +11,7 @@ import Sparkles from '$icons/sparkles';
 import Square from '$icons/square';
 import Trash from '$icons/trash-2';
 import WifiOff from '$icons/wifi-off';
-import { computed, css, effect, For, MediaQuery, onWindow, signal, untrack } from 'fw';
+import { computed, css, effect, For, MediaQuery, onDocument, onWindow, signal, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { LiveBench } from '$lib/api/liveBench';
 import { lastKnown, Now } from '$lib/api/freshness';
@@ -21,10 +21,12 @@ import { clonePlan, samePlan, editedPlanError, planCondition, unreadableWeight }
 import { isEntryActive, isLoopActive, planEditable } from '$lib/bench/rules';
 import { media } from '$lib/design/tokens';
 import { ago, date, num } from '$lib/format';
+import { isTyping } from '$lib/keys';
 import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
 import { pageCommands, type PageCommand } from '$lib/shell/pageCommands';
+import { gChord } from '$lib/shell/shortcuts';
 import { exportTableCsv, exportTableJson } from '$lib/tableExport';
 import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
@@ -238,6 +240,27 @@ export default function Benchmark() {
     selected.set([]);
     (document.getElementById(`bn-tab-${tab.peek()}`) ?? document.querySelector<HTMLElement>('h1[data-route-focus]'))?.focus();
   }
+  // Escape clears Compare selection before global Escape navigates back to /benchmarks (never intercepting G-chord or popovers).
+  const hasOpenPopover = () => {
+    try {
+      return !!document.querySelector('[popover]:popover-open');
+    } catch {
+      return false;
+    }
+  };
+  onDocument('keydown', (e) => {
+    const onCheckbox = e.target instanceof HTMLInputElement && e.target.type === 'checkbox';
+    if (e.key !== 'Escape' || e.repeat || e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || (!onCheckbox && isTyping(e))) return;
+    if (tab.peek() !== 'leaderboard' || !selected.peek().length) return;
+    if (gChord.peek() || hasOpenPopover() || document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"], #folo-tooltip[data-show], .info-pop.open')) return;
+    e.preventDefault();
+    selected.set([]);
+    queueMicrotask(() => {
+      if (!document.activeElement || document.activeElement === document.body) {
+        document.querySelector<HTMLElement>('h1[data-route-focus]')?.focus();
+      }
+    });
+  });
   /** The entries as the leaderboard shows them (one graded on an earlier version after the current ones): Compare's order. */
   const board = computed(() => {
     const b = bench.get();

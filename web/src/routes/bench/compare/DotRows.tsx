@@ -61,6 +61,7 @@ export default function DotRows(props: DotRowsProps) {
   const read = computed(() => props.rows.find((r) => r.key === pointed.get()));
   const say = (r: DotRow) => `${r.name}: ${props.keys.map((k, i) => `${k.name} ${r.values[i] == null ? 'not run' : props.format(r.values[i]!)}`).join(', ')}`;
   const spoken = signal('');
+  let listEl: HTMLUListElement | undefined;
   function onkeydown(e: KeyboardEvent) {
     const rows = props.rows;
     if (!rows.length) return;
@@ -71,12 +72,15 @@ export default function DotRows(props: DotRowsProps) {
     else if (e.key === 'Home') j = 0;
     else if (e.key === 'End') j = rows.length - 1;
     else if (e.key === 'Escape') {
+      if (i >= 0) e.preventDefault();
       pointed.set(null);
+      spoken.set('');
       return;
     } else return;
     e.preventDefault();
     pointed.set(rows[j]!.key);
     spoken.set(say(rows[j]!));
+    listEl?.children[j]?.scrollIntoView?.({ block: 'nearest' });
   }
   /** Painted last: the entry kept in front. */
   const order = computed(() => {
@@ -124,7 +128,7 @@ export default function DotRows(props: DotRowsProps) {
           </For>
         </span>
       </div>
-      <ul>
+      <ul ref={(el) => (listEl = el)}>
         <For each={props.rows} key={(r) => r.key}>
           {(r) => (
             <li class="row" class:on={pointed.get() === r().key} onpointerenter={() => pointed.set(r().key)} onpointerleave={() => pointed.set(null)}>

@@ -146,12 +146,16 @@ export default function Editor(props: EditorProps) {
   }
   effect(() => {
     const cur = img.get();
-    if (!cur) return;
+    if (!cur) {
+      hovered.set(null);
+      return;
+    }
     if (cur.id !== shownId) {
       shownId = cur.id;
       base.set(cur.boxes);
       draft.set(cur.boxes);
       selected.set(null);
+      hovered.set(null);
       note.set('');
       asked.set(null);
       status.clear();
@@ -162,6 +166,7 @@ export default function Editor(props: EditorProps) {
         base.set(cur.boxes);
         draft.set(cur.boxes);
         selected.set(null);
+        hovered.set(null);
         untrack(forget);
       } else if (!saving.get()) {
         // Not this editor's own save on its way (its answer sets `base`): someone else's.
@@ -216,9 +221,38 @@ export default function Editor(props: EditorProps) {
   function removeBox() {
     const s = selected.peek();
     if (s === null || locked.peek()) return;
+    const root = body.peek();
+    const active = document.activeElement;
+    const restoreFocus =
+      active instanceof Node &&
+      !!(root?.querySelector('.boxes')?.contains(active) || root?.querySelector('.sel')?.contains(active));
     edit(draft.peek().filter((_, i) => i !== s));
     selected.set(null);
+    if (restoreFocus) {
+      queueMicrotask(() => {
+        const cur = body.peek();
+        const btns = [...(cur?.querySelectorAll<HTMLButtonElement>('.boxes button') ?? [])];
+        const addBtn = cur?.querySelector<HTMLButtonElement>('[data-add-box]');
+        const next = btns[Math.min(s, btns.length - 1)] ?? (addBtn && !addBtn.disabled ? addBtn : null) ?? cur?.closest('dialog');
+        next?.focus();
+      });
+    }
   }
+  // Keep the selected box visible inside `.boxes` only (never `scrollIntoView`, which scrolls `dialog .body` mid-drag on phones).
+  effect(() => {
+    const s = selected.get();
+    if (s === null) return;
+    queueMicrotask(() => {
+      const list = body.peek()?.querySelector<HTMLElement>('.boxes');
+      const btn = list?.querySelectorAll<HTMLButtonElement>('button')[s];
+      if (!list || !btn) return;
+      const lr = list.getBoundingClientRect();
+      const br = btn.getBoundingClientRect();
+      if (lr.height <= 0 || br.height <= 0) return;
+      if (br.top < lr.top) list.scrollTop += br.top - lr.top;
+      else if (br.bottom > lr.bottom) list.scrollTop += br.bottom - lr.bottom;
+    });
+  });
   /** Add box: a box of the class used last in the middle of the image, selected (the keyboard's way to draw one). */
   function addBox() {
     const cur = img.peek();
@@ -645,7 +679,7 @@ export default function Editor(props: EditorProps) {
                     <span class:off={!canRedo.get() || !!locked.get()} use:tooltip={redoTip.get()}>
                       <Button variant="ghost" size="sm" icon={Redo} aria-label="Redo" disabled={!canRedo.get() || !!locked.get()} onclick={() => undo(true)} />
                     </span>
-                    <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} onclick={addBox}>
+                    <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} data-add-box onclick={addBox}>
                       Add box
                     </Button>
                   </span>

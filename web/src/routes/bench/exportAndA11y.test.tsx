@@ -6,6 +6,7 @@ import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { Bench, BenchEntry } from '$lib/api/types';
 import { parse, router } from '$lib/router';
+import { gChord } from '$lib/shell/shortcuts';
 import { toast } from '$lib/ui/toast';
 import Benchmark from '../Benchmark';
 import BenchCompare from '../BenchCompare';
@@ -51,6 +52,7 @@ afterEach(() => {
 });
 
 function mountRoute<P extends object>(comp: Component<P>, route: string) {
+  history.replaceState(history.state, '', route);
   router.route = parse(route);
   const Comp = comp as Component<Record<string, unknown>>;
   view = render(() => <Comp />, target);
@@ -295,5 +297,141 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
       expect(staleJson.measures[0]!.values[1]!.delta).toBeNull();
       expect(staleJson.measures[0]!.values[1]!.delta_printed).toBeNull();
     }
+  });
+
+  it('announces added entries, restores focus when BenchCompare reaches max entries, switches baseline via phone picker, and keeps DotRows Escape scoped', async () => {
+    vi.spyOn(router, 'go').mockImplementation((path) => {
+      router.route = parse(`#${path}`);
+    });
+    const entries = (await hub.api.benchEntries('bn_3c90')).filter((e) => e.status === 'done' && e.score);
+    expect(entries.length).toBeGreaterThanOrEqual(4);
+    const [e0, e1, e2, e3] = entries;
+    mountRoute(BenchCompare, `#/benchmarks/bn_3c90/compare?entries=${e0!.id},${e1!.id},${e2!.id}`);
+    await settle(18);
+
+    // Adding the 4th entry unmounts the adder <select>: announce it and move focus to the new chip's pin button.
+    const adder = target.querySelector<HTMLSelectElement>('select[aria-label="Add an entry to the comparison"]')!;
+    expect(adder).not.toBeNull();
+    adder.focus();
+    adder.value = e3!.id;
+    adder.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    await Promise.resolve();
+    expect(target.querySelector('select[aria-label="Add an entry to the comparison"]')).toBeNull();
+    expect(document.activeElement?.getAttribute('data-entry-id')).toBe(e3!.id);
+    expect(target.querySelector('.sr-only[role="status"]')?.textContent).toContain(`Added ${e3!.name} to comparison.`);
+
+    // Phone baseline picker in SideBySide disambiguates colliding entry names (be_f100 & be_f101 are both `fasteners-s-v1`), changes baseline, and announces it.
+    const baseSelect = target.querySelector<HTMLSelectElement>('.sbs-base select')!;
+    expect(baseSelect).not.toBeNull();
+    const baseOptionLabels = [...baseSelect.options].map((o) => o.textContent);
+    expect(baseOptionLabels.some((l) => l?.includes('fasteners-s-v1 · earlier version'))).toBe(true);
+    expect(baseOptionLabels.some((l) => l?.includes('fasteners-s-v1 · score'))).toBe(true);
+    expect(new Set(baseOptionLabels).size).toBe(baseOptionLabels.length);
+    expect(baseSelect.value).toBe(e0!.id);
+    baseSelect.value = e2!.id;
+    baseSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    await Promise.resolve();
+    expect(baseSelect.value).toBe(e2!.id);
+    expect(target.querySelector('.sr-only[role="status"]')?.textContent).toContain(`Baseline set to ${e2!.name}.`);
+
+    // Pin entry 1, wait for the newly added entry's results to load, then focus a DotRows chart:
+    // ArrowDown scrolls and points a row; first Escape clears only the row, second Escape unpins.
+    await settle(6);
+    const firstPin = target.querySelector<HTMLButtonElement>('button.ck')!;
+    firstPin.click();
+    flushSync();
+    expect(firstPin.getAttribute('aria-pressed')).toBe('true');
+
+    const dots = target.querySelector<HTMLElement>('.dots[role="group"]')!;
+    expect(dots).not.toBeNull();
+    const firstDotRow = dots.querySelector<HTMLElement>('li.row')!;
+    const scrollSpy = vi.fn();
+    firstDotRow.scrollIntoView = scrollSpy;
+    dots.focus();
+    dots.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(firstDotRow.classList.contains('on')).toBe(true);
+    expect(scrollSpy).toHaveBeenCalledWith({ block: 'nearest' });
+
+    const firstEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    dots.dispatchEvent(firstEsc);
+    flushSync();
+    expect(firstEsc.defaultPrevented).toBe(true);
+    expect(firstDotRow.classList.contains('on')).toBe(false);
+    // Pinned chip must still be pinned because DotRows consumed the first Escape.
+    expect(firstPin.getAttribute('aria-pressed')).toBe('true');
+
+    const secondEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    dots.dispatchEvent(secondEsc);
+    flushSync();
+    expect(secondEsc.defaultPrevented).toBe(true);
+    expect(firstPin.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('clears Benchmark leaderboard Compare selection on Escape (including from checkboxes), respects popovers & G-chords, and restores focus to h1[data-route-focus]', async () => {
+    mountRoute(Benchmark, '#/benchmarks/bn_3c90');
+    await settle(18);
+
+    // Without a selection, Escape is not intercepted by Benchmark.
+    const idleEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    document.dispatchEvent(idleEsc);
+    expect(idleEsc.defaultPrevented).toBe(false);
+
+    const boxes = [...target.querySelectorAll<HTMLInputElement>('table.board tbody input[type="checkbox"]')];
+    expect(boxes.length).toBeGreaterThanOrEqual(2);
+    boxes[0]!.click();
+    boxes[1]!.click();
+    flushSync();
+    expect(target.querySelector('button[aria-label="Clear selection"]')).not.toBeNull();
+
+    // Active G-chord: Escape cancels G-chord instead of clearing Compare selection.
+    gChord.set(true);
+    try {
+      const chordEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      boxes[1]!.dispatchEvent(chordEsc);
+      flushSync();
+      expect(chordEsc.defaultPrevented).toBe(false);
+      expect(target.querySelector('button[aria-label="Clear selection"]')).not.toBeNull();
+    } finally {
+      gChord.set(false);
+    }
+
+    // Open fallback or native popover: Escape dismisses the popover instead of clearing selection.
+    const pop = document.createElement('div');
+    pop.className = 'info-pop open';
+    document.body.appendChild(pop);
+    try {
+      const popEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      boxes[1]!.dispatchEvent(popEsc);
+      flushSync();
+      expect(popEsc.defaultPrevented).toBe(false);
+      expect(target.querySelector('button[aria-label="Clear selection"]')).not.toBeNull();
+    } finally {
+      pop.remove();
+    }
+
+    // Pressing Escape directly on a focused leaderboard checkbox clears the selection.
+    boxes[1]!.focus();
+    const boxEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    boxes[1]!.dispatchEvent(boxEsc);
+    flushSync();
+    expect(boxEsc.defaultPrevented).toBe(true);
+    expect(target.querySelector('button[aria-label="Clear selection"]')).toBeNull();
+
+    // Selecting again, focusing the Clear button, and pressing Escape restores focus to h1[data-route-focus] (atRest for a second Escape).
+    boxes[0]!.click();
+    boxes[1]!.click();
+    flushSync();
+    const clearBtn = target.querySelector<HTMLButtonElement>('button[aria-label="Clear selection"]')!;
+    clearBtn.focus();
+    const clearEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    clearBtn.dispatchEvent(clearEsc);
+    flushSync();
+    await Promise.resolve();
+    expect(clearEsc.defaultPrevented).toBe(true);
+    expect(target.querySelector('button[aria-label="Clear selection"]')).toBeNull();
+    expect(document.activeElement).toBe(target.querySelector('h1[data-route-focus]'));
   });
 });
