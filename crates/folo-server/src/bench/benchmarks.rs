@@ -252,31 +252,51 @@ impl Benches {
         let plan = req.plan.as_ref().map(folo_bench::check_plan).transpose().map_err(invalid)?;
         let slot = self.slot(id)?;
         let mut state = slot.live()?;
-        if plan.is_some()
-            && let Some(e) = state.frozen_by()
-        {
-            return Err(Error::conflict(
-                "bench_frozen",
-                format!(
-                    "benchmark '{id}' has a {} entry ('{}'): its plan is fixed while it has done or active entries \
-                     (entries compare only on one plan)",
-                    status_name(e.status),
-                    e.name
-                ),
-            )
-            .hint("delete its done entries and stop its active ones first, or make a new benchmark with this plan"));
+        if plan.is_some() {
+            if let Some(e) = state.frozen_by() {
+                return Err(Error::conflict(
+                    "bench_frozen",
+                    format!(
+                        "benchmark '{id}' has a {} entry ('{}'): its plan is fixed while it has done or active \
+                         entries (entries compare only on one plan)",
+                        status_name(e.status),
+                        e.name
+                    ),
+                )
+                .hint(
+                    "delete its done entries and stop its active ones first, or make a new benchmark with this \
+                     plan",
+                ));
+            }
+            if let Some(lp) = state.active_loop() {
+                return Err(Error::conflict(
+                    "bench_frozen",
+                    format!(
+                        "benchmark '{id}' has an active loop ('{}'): its plan is fixed while a loop is running",
+                        lp.name
+                    ),
+                )
+                .hint("stop the loop first (POST …/loops/{loop_id}/stop), or make a new benchmark with this plan"));
+            }
         }
+        let mut next = state.file.clone();
         if let Some(name) = name {
-            state.file.name = name;
+            next.name = name;
         }
         if let Some(d) = description {
-            state.file.description = d;
+            next.description = d;
         }
-        if let Some(plan) = plan {
-            state.file.plan = plan;
-            state.fingerprint = state::fingerprint(&state.file);
+        let next_fp = if let Some(plan) = plan {
+            next.plan = plan;
+            Some(state::fingerprint(&next))
+        } else {
+            None
+        };
+        slot.save_file(&state, &next)?;
+        state.file = next;
+        if let Some(fp) = next_fp {
+            state.fingerprint = fp;
         }
-        slot.save(&state)?;
         slot.emit_bench(&state);
         Ok(state.bench())
     }
@@ -372,4 +392,80 @@ pub(super) fn bench_image(im: &ImageRecord, variant: Option<(Condition, u8)>) ->
             .map_err(|e| Error::new(StatusCode::BAD_REQUEST, "invalid_query", e.to_string()))?,
     };
     Ok(BenchImage { id: im.id.clone(), file: im.file.clone(), width: im.width, height: im.height, boxes })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+
+    use folo_api::{
+        BenchLoop, BenchLoopStatus, BenchPlan, BenchPlanCondition, BenchSource, Split, StartBenchLoop,
+    };
+    use folo_test_support::TestDir;
+
+    use super::*;
+    use crate::bench::state::{BenchFile, LoopState, VERSION};
+
+    #[test]
+    fn update_plan_is_frozen_by_active_loop_even_without_entries() {
+        let dir = TestDir::new("bench-update-active-loop");
+        let bdir = dir.join("bench").join("bn_loopfreeze");
+        std::fs::create_dir_all(&bdir).unwrap();
+        let file = BenchFile {
+            version: VERSION,
+            id: "bn_loopfreeze".into(),
+            name: "b".into(),
+            description: String::new(),
+            classes: vec!["circle".into()],
+            created: "2026-11-26T00:00:00Z".into(),
+            source: BenchSource::Dataset { dataset_id: "ds_1".into(), split: Some(Split::Val) },
+            source_name: "shapes".into(),
+            plan: BenchPlan { conditions: Vec::new(), rationale: None, designed_by: None },
+            seed: 0,
+            images: Vec::new(),
+        };
+        std::fs::write(bdir.join("bench.json"), serde_json::to_vec(&file).unwrap()).unwrap();
+        let benches = Benches::open(dir.path(), None);
+        let slot = benches.slot("bn_loopfreeze").unwrap();
+        let config: StartBenchLoop = serde_json::from_value(serde_json::json!({
+            "teacher": "m_1",
+            "pool": { "kind": "dataset", "dataset_id": "ds_1", "split": "train" },
+            "student": { "epochs": 1 }
+        }))
+        .unwrap();
+        slot.lock().loops.push(LoopState {
+            lp: BenchLoop {
+                id: "bl_1".into(),
+                bench_id: "bn_loopfreeze".into(),
+                name: "loop 1".into(),
+                status: BenchLoopStatus::Running,
+                phase: None,
+                created: "2026-11-26T00:00:00Z".into(),
+                finished: None,
+                config,
+                generations: Vec::new(),
+                verdict: None,
+                error: None,
+                hint: None,
+            },
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        let new_plan = BenchPlan {
+            conditions: vec![BenchPlanCondition {
+                condition: "haze".into(),
+                severities: vec![1],
+                weight: 1.0,
+                why: None,
+            }],
+            rationale: None,
+            designed_by: None,
+        };
+        let err = benches
+            .update("bn_loopfreeze", UpdateBench { name: None, description: None, plan: Some(new_plan) })
+            .unwrap_err();
+        assert_eq!(err.body.code, "bench_frozen");
+        assert!(err.body.message.contains("active loop"), "{}", err.body.message);
+        benches.shutdown();
+    }
 }

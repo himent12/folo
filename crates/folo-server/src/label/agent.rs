@@ -321,7 +321,14 @@ pub struct Output {
     pub stderr: String,
 }
 
-/// What a pipe has delivered so far, read on a thread of its own.
+/// Maximum stdout kept from one agent child process (excess bytes are drained so the child never blocks on a full
+/// pipe, while preventing a runaway process from exhausting server memory).
+const MAX_STDOUT_BYTES: usize = 16 * 1024 * 1024;
+/// Maximum stderr kept from one agent child process (kept as a trailing window so [`last_line`] still sees the
+/// final diagnostic line even after megabytes of noisy output).
+const MAX_STDERR_BYTES: usize = 1024 * 1024;
+
+/// What a pipe has delivered so far, read on a thread of its own with a memory bound.
 #[derive(Default)]
 struct Piped {
     bytes: Mutex<Vec<u8>>,
@@ -330,13 +337,30 @@ struct Piped {
 }
 
 impl Piped {
-    fn read(mut pipe: impl Read + Send + 'static) -> Arc<Piped> {
+    fn read(mut pipe: impl Read + Send + 'static, max_bytes: usize, keep_tail: bool) -> Arc<Piped> {
         let piped = Arc::new(Piped::default());
         let out = piped.clone();
         std::thread::spawn(move || {
             let mut chunk = [0u8; 16 * 1024];
             while let Ok(n @ 1..) = pipe.read(&mut chunk) {
-                out.bytes.lock().unwrap().extend_from_slice(&chunk[..n]);
+                let mut bytes = out.bytes.lock().unwrap();
+                if keep_tail {
+                    if n >= max_bytes {
+                        bytes.clear();
+                        bytes.extend_from_slice(&chunk[n - max_bytes..n]);
+                    } else {
+                        let overflow = bytes.len().saturating_add(n).saturating_sub(max_bytes);
+                        if overflow > 0 {
+                            bytes.drain(..overflow);
+                        }
+                        bytes.extend_from_slice(&chunk[..n]);
+                    }
+                } else {
+                    let room = max_bytes.saturating_sub(bytes.len());
+                    if room > 0 {
+                        bytes.extend_from_slice(&chunk[..n.min(room)]);
+                    }
+                }
             }
             out.ended.store(true, Ordering::Release);
         });
@@ -419,8 +443,8 @@ fn run_to_end(
         // A child that exits early closes the pipe; its exit status tells the story, not the write error.
         std::thread::spawn(move || drop(pipe.write_all(&bytes)));
     }
-    let stdout = Piped::read(child.stdout.take().expect("stdout is piped"));
-    let stderr = Piped::read(child.stderr.take().expect("stderr is piped"));
+    let stdout = Piped::read(child.stdout.take().expect("stdout is piped"), MAX_STDOUT_BYTES, false);
+    let stderr = Piped::read(child.stderr.take().expect("stderr is piped"), MAX_STDERR_BYTES, true);
     let deadline = Instant::now() + timeout;
     // The child's exit status and when it was seen.
     let mut exited: Option<(bool, Instant)> = None;
@@ -596,5 +620,19 @@ mod tests {
         assert!(matches!(r.err(), Some(AgentError::Unavailable(m)) if m.contains("folo-no-such-agent-cli")));
         let cli = Cli::new("folo-no-such-agent-cli", "FOLO_TEST_NO_SUCH_AGENT_BIN");
         assert!(cli.version().is_none() && cli.path().is_err());
+    }
+
+    #[test]
+    fn piped_bounds_stdout_head_and_stderr_tail_while_draining() {
+        let head = Piped::read(std::io::Cursor::new(b"abcdefghij".to_vec()), 4, false);
+        let tail = Piped::read(std::io::Cursor::new(b"noise\nmore noise\nfinal error\n".to_vec()), 12, true);
+        let t0 = Instant::now();
+        while !(head.ended() && tail.ended()) {
+            assert!(t0.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(head.text(), "abcd");
+        assert_eq!(tail.text(), "final error\n");
+        assert_eq!(last_line(&tail.text()).as_deref(), Some("final error"));
     }
 }

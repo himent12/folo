@@ -64,7 +64,7 @@ pub struct Inner {
     /// `uri -> (fingerprint, revision)` of run snapshots.
     revisions: Mutex<HashMap<String, (u64, u64)>>,
     /// Legacy (`resources/subscribe`) watchers by URI.
-    legacy_subs: Mutex<HashMap<String, AbortHandle>>,
+    pub(crate) legacy_subs: Mutex<HashMap<String, AbortHandle>>,
 }
 
 impl Inner {
@@ -281,26 +281,26 @@ impl FoloMcp {
         }
     }
 
-    /// Stops runs this session started that are still active (client disconnect or shutdown signal).
+    /// Stops runs this session started that are still active and aborts any legacy subscriptions (client
+    /// disconnect or shutdown signal).
     pub async fn stop_session_runs(&self) {
         let ids = std::mem::take(&mut *self.inner.created_runs.lock().unwrap());
-        if ids.is_empty() {
-            return;
-        }
-        let _ = self
-            .inner
-            .blocking(move |s| {
-                for id in ids {
-                    if s.get_run(&id).is_ok_and(|r| r.status.is_active()) {
-                        match s.stop_run(&id) {
-                            Ok(_) => tracing::info!(run = %id, "stopped run on disconnect"),
-                            Err(e) => tracing::warn!(run = %id, "could not stop run: {e}"),
+        if !ids.is_empty() {
+            let _ = self
+                .inner
+                .blocking(move |s| {
+                    for id in ids {
+                        if s.get_run(&id).is_ok_and(|r| r.status.is_active()) {
+                            match s.stop_run(&id) {
+                                Ok(_) => tracing::info!(run = %id, "stopped run on disconnect"),
+                                Err(e) => tracing::warn!(run = %id, "could not stop run: {e}"),
+                            }
                         }
                     }
-                }
-                Ok(())
-            })
-            .await;
+                    Ok(())
+                })
+                .await;
+        }
         for (_, h) in self.inner.legacy_subs.lock().unwrap().drain() {
             h.abort();
         }

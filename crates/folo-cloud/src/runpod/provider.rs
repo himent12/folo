@@ -53,9 +53,11 @@ impl Provider for RunPod {
 
     fn check(&self, values: &Values) -> Result<Account> {
         let key = api_key(values)?;
-        if let Some(url) = values.get(WORKER_BASE_URL_FIELD) {
-            bootstrap::check_base_url(url)?;
-        }
+        // Validate the resolved worker download base URL (whether from the connection field or
+        // `FOLO_CLOUD_WORKER_BASE_URL`) before probing so embedded credentials or malformed URLs are never
+        // requested or echoed into the persisted account note.
+        let base_url = crate::worker_base_url(values, env!("CARGO_PKG_VERSION"));
+        bootstrap::check_base_url(&base_url)?;
         // Listing pods needs what FOLO needs: a key that works and may see pods.
         let reply = self.api.get(&format!("{}/pods?limit=1", self.rest), key)?;
         if !reply.is_success() {
@@ -64,7 +66,6 @@ impl Provider for RunPod {
         // Best effort: a working key is a working connection, also when GraphQL does not answer.
         let mut account = self.account(key).unwrap_or_default();
         // A connection whose instances cannot install FOLO works, and every run on it would fail: say so here.
-        let base_url = crate::worker_base_url(values, env!("CARGO_PKG_VERSION"));
         account.note = self.download_problem(&base_url).map(|p| sentence(&p));
         Ok(account)
     }
@@ -137,8 +138,8 @@ impl Provider for RunPod {
             entrypoint: ["/bin/bash", "-c"],
             cmd: [&script],
         };
-        // The worker's token is in the request too, and a refusal may quote what it refused.
-        let reply = self.api.post(&format!("{}/pods", self.rest), key, &body)?.without(&spec.token);
+        // The worker's token is in the request too, and both transport errors and refusals must scrub it.
+        let reply = self.api.post_with_secrets(&format!("{}/pods", self.rest), key, &body, &[&spec.token])?;
         match reply.status {
             200..=299 => {
                 let pod: Pod = reply.json()?;

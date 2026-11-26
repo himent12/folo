@@ -419,7 +419,8 @@ fn graded(job: &LoopJob, g: u32, m: &Model) -> Result<Option<Graded>> {
         }
     };
     job.generation(g, |row| row.entry_id = Some(entry_id.clone()));
-    // Waits for the entry; a stop of the loop stops it.
+    // Waits for the entry; a stop of the loop stops it once.
+    let mut stopping = false;
     loop {
         let status = job.slot.lock().entry(&entry_id).map(|e| e.entry.clone());
         let entry = status.map_err(|_| failed(format!("entry '{entry_id}' of the loop was deleted")))?;
@@ -449,15 +450,19 @@ fn graded(job: &LoopJob, g: u32, m: &Model) -> Result<Option<Graded>> {
                 ))
                 .hint("see the entry; start a new loop once it can run"));
             }
-            BenchEntryStatus::Stopped if job.cancelled() => return Ok(None),
+            BenchEntryStatus::Stopped if stopping || job.cancelled() => return Ok(None),
             BenchEntryStatus::Stopped => {
                 return Err(failed(format!(
                     "the benchmark entry of model '{}' ({entry_id}) was stopped",
                     m.id
                 )));
             }
-            _ if job.cancelled() => {
+            _ if job.cancelled() && !stopping => {
+                stopping = true;
                 let _ = super::stop_entry_in(&job.engine, &job.slot, &entry_id);
+                if job.engine.closing.load(Ordering::SeqCst) {
+                    return Ok(None);
+                }
             }
             _ => {}
         }
@@ -581,7 +586,7 @@ fn train(job: &LoopJob, g: u32, dataset: &str) -> Result<Option<Model>> {
                     })?;
                     Ok(Some(job.store()?.get_model(&model_id)?))
                 }
-                _ if stopping => Ok(None),
+                _ if stopping || job.cancelled() => Ok(None),
                 RunStatus::Stopped => Err(failed(format!(
                     "the training run '{}' of generation {g} was stopped before it finished",
                     run.id

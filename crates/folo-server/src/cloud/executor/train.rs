@@ -16,7 +16,9 @@ impl Exec {
     pub(super) fn train(&mut self, client: &Client) -> std::result::Result<Outcome, Halt> {
         let run_id = self.private.run_id.clone().expect("a training cloud run has a worker run");
         let t = self.core.tuning.clone();
-        let mut stop_sent: Option<Instant> = None;
+        let mut stop_requested_at: Option<Instant> = None;
+        let mut stop_acked = false;
+        let mut stop_warned = false;
         let mut time_up = false;
         let mut wait = t.poll;
         let (mut unreachable, mut gone): (Option<Instant>, Option<Instant>) = (None, None);
@@ -32,7 +34,7 @@ impl Exec {
                 return Err(self.lost_by_hand());
             }
             let stopping = self.entry.stop_requested() || self.entry.run().status == RunStatus::Stopping;
-            if stop_sent.is_none() && (stopping || self.past_deadline()) {
+            if stop_requested_at.is_none() && (stopping || self.past_deadline()) {
                 time_up = !stopping;
                 if time_up {
                     self.entry.log(
@@ -40,10 +42,19 @@ impl Exec {
                         format!("the time limit of {} is up; stopping the worker's run", self.hours()),
                     );
                 }
-                self.stop_worker_run(client, &run_id);
-                stop_sent = Some(Instant::now());
+                stop_requested_at = Some(Instant::now());
             }
-            if stop_sent.is_some_and(|s| s.elapsed() >= t.lost_grace) {
+            // Retry delivering `/stop` until the worker acknowledges it (or replies `run_not_active`), so a
+            // transient network drop during the first stop request never leaves the GPU training until
+            // `lost_grace` expires.
+            if stop_requested_at.is_some() && !stop_acked {
+                let attempts = if stop_warned { 1 } else { ATTEMPTS };
+                stop_acked = self.stop_worker_run(client, &run_id, attempts, !stop_warned)?;
+                if !stop_acked {
+                    stop_warned = true;
+                }
+            }
+            if stop_requested_at.is_some_and(|s| s.elapsed() >= t.lost_grace) {
                 // A worker that has not answered for most of that time has nothing to collect from: the run is lost
                 // with its instance (a time limit that ended while nothing followed the run, and the instance
                 // with it). Half the grace, not all of it: the silence is noticed a poll after the stop was sent.
@@ -78,6 +89,13 @@ impl Exec {
                         let _ = self.core.ledger.booted(id);
                     }
                     (wait, unreachable, gone) = (t.poll, None, None);
+                    // If the worker just came back and `/stop` was never delivered, send it immediately.
+                    if stop_requested_at.is_some() && !stop_acked {
+                        stop_acked = self.stop_worker_run(client, &run_id, 1, !stop_warned)?;
+                        if !stop_acked {
+                            stop_warned = true;
+                        }
+                    }
                 }
                 Err(e) if e.code() == "run_not_found" => {
                     return Err(failed(
@@ -167,22 +185,30 @@ impl Exec {
         }
     }
 
-    /// Asks the worker to stop its run (retried; a run that ended meanwhile is fine).
-    fn stop_worker_run(&self, client: &Client, run_id: &str) {
-        for attempt in 1..=ATTEMPTS {
+    /// Asks the worker to stop its run (retried up to `attempts`; a run that ended meanwhile is fine). Returns
+    /// `Ok(true)` once the worker acknowledged the stop or reported `run_not_active`, `Ok(false)` if delivery failed.
+    fn stop_worker_run(
+        &self,
+        client: &Client,
+        run_id: &str,
+        attempts: u32,
+        log_error: bool,
+    ) -> std::result::Result<bool, Halt> {
+        for attempt in 1..=attempts {
             match client.post_empty::<Run>(&format!("/runs/{}/stop", encode(run_id))) {
-                Ok(_) => return,
-                Err(e) if e.code() == "run_not_active" => return,
-                Err(e) if e.is_transient() && attempt < ATTEMPTS => {
-                    if self.wait(self.core.tuning.poll).is_err() {
-                        return;
-                    }
+                Ok(_) => return Ok(true),
+                Err(e) if e.code() == "run_not_active" => return Ok(true),
+                Err(e) if e.is_transient() && attempt < attempts => {
+                    self.wait(self.core.tuning.poll)?;
                 }
                 Err(e) => {
-                    self.entry.log(LogLevel::Warn, format!("asking the worker to stop the run: {e}"));
-                    return;
+                    if log_error {
+                        self.entry.log(LogLevel::Warn, format!("asking the worker to stop the run: {e}"));
+                    }
+                    return Ok(false);
                 }
             }
         }
+        Ok(false)
     }
 }

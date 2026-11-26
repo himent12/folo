@@ -196,8 +196,25 @@ fn did_you_mean<'a>(key: &str, known: &[&'a str]) -> Option<&'a str> {
     closest_match(key, known)
 }
 
-/// The first argument (dotted path for nested objects) that `schema` does not declare, as an `invalid_arguments`
-/// error naming the accepted ones.
+/// The object schema for items of an array schema `s` (directly, via `$ref`, or inside `anyOf`/`oneOf`/`allOf`).
+fn array_item_schema<'a>(s: &'a JsonObject, root: &'a JsonObject) -> Option<&'a JsonObject> {
+    if let Some(items) = s.get("items").and_then(Value::as_object) {
+        return object_schema(items, root);
+    }
+    if let Some(r) = s.get("$ref").and_then(Value::as_str) {
+        let name = r.rsplit('/').next()?;
+        let defs = root.get("$defs").or_else(|| root.get("definitions"))?.as_object()?;
+        return array_item_schema(defs.get(name)?.as_object()?, root);
+    }
+    ["anyOf", "oneOf", "allOf"]
+        .iter()
+        .filter_map(|k| s.get(*k)?.as_array())
+        .flatten()
+        .find_map(|b| array_item_schema(b.as_object()?, root))
+}
+
+/// The first argument (dotted path for nested objects and arrays of objects) that `schema` does not declare, as
+/// an `invalid_arguments` error naming the accepted ones.
 pub(super) fn unknown_argument(tool: &str, schema: &JsonObject, args: &JsonObject) -> Option<Error> {
     fn walk(
         prefix: &str,
@@ -216,6 +233,15 @@ pub(super) fn unknown_argument(tool: &str, schema: &JsonObject, args: &JsonObjec
                         && let Some(found) = walk(&path, os, root, inner)
                     {
                         return Some(found);
+                    }
+                    if let (Value::Array(items), Some(item_os)) = (val, array_item_schema(ps, root)) {
+                        for (idx, item) in items.iter().enumerate() {
+                            if let Value::Object(inner) = item
+                                && let Some(found) = walk(&format!("{path}[{idx}]"), item_os, root, inner)
+                            {
+                                return Some(found);
+                            }
+                        }
                     }
                 }
                 Some(_) => {}

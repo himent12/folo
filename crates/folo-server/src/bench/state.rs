@@ -289,6 +289,11 @@ impl State {
             .map(|e| &e.entry)
             .find(|e| e.status == BenchEntryStatus::Done || e.status.is_active())
     }
+
+    /// An active loop, if any (freezes plan edits even between generations or before generation 0's entry starts).
+    pub fn active_loop(&self) -> Option<&BenchLoop> {
+        self.loops.iter().map(|l| &l.lp).find(|l| l.status.is_active())
+    }
 }
 
 /// The leaderboard's order of `entries` (given in creation order) of a benchmark whose fingerprint is
@@ -504,12 +509,13 @@ impl Slot {
         self.dir.join("loops").join(format!("{id}.json"))
     }
 
-    /// Writes `bench.json` (atomically), unless the benchmark was deleted.
-    pub fn save(&self, state: &State) -> Result<()> {
+    /// Writes `file` as `bench.json` (atomically), unless the benchmark was deleted (used to persist an updated
+    /// snapshot before mutating in-memory state).
+    pub fn save_file(&self, state: &State, file: &BenchFile) -> Result<()> {
         if state.deleted {
             return Ok(());
         }
-        write_json(&self.dir.join("bench.json"), &state.file)
+        write_json(&self.dir.join("bench.json"), file)
     }
 
     /// Writes an entry's file, with its result and per-image outcomes once it is done (`parts`).

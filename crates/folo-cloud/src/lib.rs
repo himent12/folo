@@ -109,13 +109,21 @@ pub fn worker_download(base_url: &str) -> WorkerDownload {
 pub(crate) const MIN_SECRET_CHARS: usize = 8;
 
 /// `text`, made for a person (an error message, a log line, a name shown) from what a provider or a server
-/// answered, with every one of `secrets` of at least [`MIN_SECRET_CHARS`] characters replaced by `[redacted]`.
-/// Never applied to a value that is used again (an id, a reference): those are kept as they came.
-pub(crate) fn scrub<'a>(text: &str, secrets: impl IntoIterator<Item = &'a str>) -> String {
-    secrets
-        .into_iter()
-        .filter(|s| s.chars().count() >= MIN_SECRET_CHARS)
-        .fold(text.to_string(), |t, s| t.replace(s, "[redacted]"))
+/// answered, with every one of `secrets` of at least [`MIN_SECRET_CHARS`] characters (both raw and
+/// percent-encoded) replaced by `[redacted]`. Never applied to a value that is used again (an id, a reference):
+/// those are kept as they came.
+pub fn scrub<'a>(text: &str, secrets: impl IntoIterator<Item = &'a str>) -> String {
+    secrets.into_iter().filter(|s| s.chars().count() >= MIN_SECRET_CHARS).fold(
+        text.to_string(),
+        |mut t, s| {
+            t = t.replace(s, "[redacted]");
+            let encoded = folo_client::encode(s);
+            if encoded != s {
+                t = t.replace(&encoded, "[redacted]");
+            }
+            t
+        },
+    )
 }
 
 /// What went wrong with a provider request, by who has to act.
@@ -467,5 +475,17 @@ mod tests {
             worker_base_url: "https://x".into(),
         };
         assert!(!format!("{spec:?}").contains("s3cret"));
+    }
+
+    #[test]
+    fn scrub_redacts_raw_and_percent_encoded_secrets() {
+        let token = "tok_a+b/c=1234";
+        let encoded = folo_client::encode(token);
+        assert_ne!(encoded, token);
+        let msg = format!("bad key {token} at ?t={encoded} and short=1234567");
+        let scrubbed = scrub(&msg, [token, "1234567"]);
+        assert!(!scrubbed.contains(token), "{scrubbed}");
+        assert!(!scrubbed.contains(&encoded), "{scrubbed}");
+        assert_eq!(scrubbed, "bad key [redacted] at ?t=[redacted] and short=1234567");
     }
 }
