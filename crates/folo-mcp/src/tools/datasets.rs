@@ -250,6 +250,14 @@ impl Inner {
             .hint("run `folo mcp --confine` against a local `folo serve` sharing --data-dir, without --server, or without --confine"));
         }
         let path = self.resolve(a.path).await?;
+        // In confined local proxy mode, validate the manifest and every referenced file under MCP's read guard
+        // BEFORE sending `POST /api/datasets` so an unguarded `folo serve` never opens outside files while indexing.
+        if self.confinement.active() && self.proxy.is_some() {
+            let (c, p, fmt) = (self.confinement.clone(), path.clone(), a.format);
+            tokio::task::spawn_blocking(move || c.pre_register_local(&p, fmt))
+                .await
+                .map_err(|e| Error::internal(format!("confinement task failed: {e}")))??;
+        }
         let req = RegisterDataset { name: a.name, path: folo_api::json::path(&path), format: a.format };
         // Track whether this call created a brand-new exclusive registration (`rollback` token) so a confinement
         // failure rolls back atomically without ever deleting an already-registered or concurrently-used dataset.
@@ -702,11 +710,9 @@ mod tests {
         std::fs::write(sneaky.join("data.yaml"), yaml).unwrap();
         std::fs::create_dir_all(&other_dir).unwrap();
 
-        let store = Arc::new(
-            folo_server::RealStore::open(server_dir.clone())
-                .device("cpu")
-                .recheck_every(std::time::Duration::ZERO),
-        );
+        // Keep the default 5-second `recheck_every` so the test exercises manifest edits inside the server's
+        // recheck window (not `Duration::ZERO`).
+        let store = Arc::new(folo_server::RealStore::open(server_dir.clone()).device("cpu"));
         let preexisting = store
             .register_dataset(RegisterDataset {
                 name: Some("preexisting".into()),
@@ -758,11 +764,14 @@ mod tests {
             .unwrap();
         assert_eq!(sneaky_err.body.code, "path_outside_data_dir");
         let on_server: Vec<String> = store.list_datasets().unwrap().into_iter().map(|d| d.id).collect();
-        assert_eq!(on_server.len(), 2, "sneaky registration must be rolled back: {on_server:?}");
+        assert_eq!(on_server.len(), 2, "sneaky registration must be rejected before indexing: {on_server:?}");
         assert!(on_server.contains(&preexisting.id), "preexisting dataset must never be removed");
+        let cached_count = std::fs::read_dir(server_dir.join("cache").join("datasets")).unwrap().count();
+        assert_eq!(cached_count, 2, "folo serve must never build an index for sneaky");
 
-        // 2. Manifest edited mid-session on the local server changes `Dataset.revision` and invalidates the
-        //    cached `Ok(())` verdict immediately.
+        // 2. Manifest edited mid-session on the local server must invalidate the cached `Ok(())` verdict
+        //    immediately even inside the server's default 5-second recheck window (for both `get_dataset` and
+        //    `train`), before `folo serve` has even bumped `Dataset.revision`.
         let edited_yaml = std::path::Path::new(&inside_synth.path).join("data.yaml");
         std::fs::write(
             &edited_yaml,
@@ -776,6 +785,10 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(after_edit.body.code, "path_outside_data_dir");
+        let train_args =
+            serde_json::json!({ "dataset_id": inside_synth.id, "epochs": 1 }).as_object().unwrap().clone();
+        let train_err = same_dir.inner.train(train_args).await.err().unwrap();
+        assert_eq!(train_err.body.code, "path_outside_data_dir");
 
         // 3. Different `--data-dir` on loopback (shared filesystem): server's `server_dir` datasets stay hidden
         //    so paths outside `other_dir` are never exposed on a shared filesystem.

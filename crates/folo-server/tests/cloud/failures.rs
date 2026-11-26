@@ -406,3 +406,74 @@ fn a_stop_retries_delivery_after_a_transient_worker_outage() {
     assert!(t0.elapsed() < Duration::from_secs(15), "stop retry waited too long: {:?}", t0.elapsed());
     assert_eq!(cloud.live(), 0);
 }
+
+#[test]
+fn cloud_recovery_heals_torn_logs_and_metrics_before_appending() {
+    no_gpu();
+    let t = TestDir::new("cloud-torn-recovery");
+    let home = t.join("home");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&home, &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+
+    // 1. Active training recovery: append torn trailing lines to both `metrics.jsonl` and `log.jsonl` before
+    //    reopening; recovery must heal both files so the restart log and epoch-2 metrics parse cleanly.
+    cloud.hold_epochs(true);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
+    until("epoch 1 here", || run_of(&store, &run.id).best);
+    drop(store);
+    let run_dir = home.join("runs").join(&run.id);
+    let lock = run_dir.join("cloud.lock");
+    until("the run let go", || std::fs::File::open(&lock).ok()?.try_lock().ok());
+
+    {
+        use std::io::Write;
+        let mut mf = std::fs::OpenOptions::new().append(true).open(run_dir.join("metrics.jsonl")).unwrap();
+        mf.write_all(br#"{"event":"step","epoch":2,"step":3"#).unwrap();
+        let mut lf = std::fs::OpenOptions::new().append(true).open(run_dir.join("log.jsonl")).unwrap();
+        lf.write_all(br#"{"t":"2026-01-01T00:00:00Z","level":"info","message":"torn"#).unwrap();
+    }
+
+    let store = plane(&home, &cloud, fast());
+    until("the run followed again", || {
+        logged(&store, &run.id, "following the run on its worker again").then_some(())
+    });
+    cloud.hold_epochs(false);
+    let done = finished(&store, &run.id);
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&store, &run.id));
+    let m = store.run_metrics(&run.id, &MetricsQuery::default()).unwrap();
+    assert_eq!((steps(&m), epochs(&m)), ((1..=4).collect::<Vec<_>>(), vec![1, 2]));
+    assert!(logged(&store, &run.id, "following the run on its worker again"));
+
+    // 2. Early-return recovery (`outcome` already collected, only release left): a torn trailing line in
+    //    `log.jsonl` must still be healed before release logs instance termination.
+    cloud.hold_epochs(true);
+    let run2 = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
+    until("run2 epoch 1 here", || run_of(&store, &run2.id).best);
+    drop(store);
+    let run2_dir = home.join("runs").join(&run2.id);
+    let lock2 = run2_dir.join("cloud.lock");
+    until("run2 let go", || std::fs::File::open(&lock2).ok()?.try_lock().ok());
+    let state_path = run2_dir.join("cloud.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    state["outcome"] = json!({ "status": "completed", "error": null, "code": null });
+    std::fs::write(&state_path, state.to_string()).unwrap();
+    {
+        use std::io::Write;
+        let mut lf = std::fs::OpenOptions::new().append(true).open(run2_dir.join("log.jsonl")).unwrap();
+        lf.write_all(br#"{"t":"2026-01-01T00:00:00Z","level":"info","message":"torn-before-release"#)
+            .unwrap();
+    }
+
+    let store = plane(&home, &cloud, fast());
+    let done2 = finished(&store, &run2.id);
+    assert_eq!(done2.status, RunStatus::Completed, "{:?}", log_of(&store, &run2.id));
+    assert!(
+        logged(&store, &run2.id, "terminating the instance"),
+        "release log must not be swallowed by torn line: {:?}",
+        log_of(&store, &run2.id)
+    );
+    assert_eq!(cloud.live(), 0);
+}

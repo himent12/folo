@@ -129,7 +129,8 @@ impl Runs {
         });
         mark_resume(&e.metrics_path(), resume_epoch);
         let retained = super::history::read_metrics(&e.metrics_path());
-        if resume_epoch < st.file.epochs_done {
+        let prev_epochs_done = st.file.epochs_done;
+        if resume_epoch != prev_epochs_done {
             st.file.epochs_done = resume_epoch;
             st.file.last_metrics = retained
                 .epochs
@@ -150,20 +151,21 @@ impl Runs {
             file.resumed_at = Some(at);
         }
         let r = &mut st.file.run;
-        r.epoch = r.epoch.min(resume_epoch);
+        r.epoch = resume_epoch;
         r.step = if resume_epoch == 0 {
             0
         } else {
             retained
                 .steps
                 .last()
+                .filter(|s| s.epoch == resume_epoch)
                 .map(|s| s.step)
                 .unwrap_or_else(|| u64::from(resume_epoch).saturating_mul(r.steps_per_epoch))
         };
         if resume_epoch == 0 {
             r.best = None;
-        } else if r.best.is_some_and(|b| b.epoch > resume_epoch) {
-            let mut best: Option<BestEpoch> = None;
+        } else {
+            let mut best = r.best.filter(|b| b.epoch <= resume_epoch);
             for ep in &retained.epochs {
                 if best.is_none_or(|b| ep.val.map50_95 > b.map50_95) {
                     best = Some(BestEpoch { epoch: ep.epoch, map50_95: ep.val.map50_95 });

@@ -288,6 +288,15 @@ fn symlinked_yaml_folder_tracks_label_mirror_and_resolves_images() {
     assert_eq!(idx2.list_images(&ImageQuery { limit: 1, ..Default::default() }).images[0].boxes.len(), 0);
     std::fs::remove_dir(release.join("labels/birds")).unwrap();
     assert!(!idx2.is_fresh(), "removing releases/v7/labels/birds must invalidate the cached index");
+
+    // Passing a `symlink/../target` path directly to `preflight`, `reads`, and `Index::build` must also resolve
+    // through the symlink before popping `..` instead of collapsing lexically into a missing sibling.
+    let via_parent = work.join("current").join("..").join("meta").join("data.yaml");
+    preflight(via_parent.to_str().unwrap(), DatasetFormat::Auto).unwrap();
+    let r = reads(via_parent.to_str().unwrap(), DatasetFormat::Auto).unwrap();
+    assert!(!r.is_empty());
+    let idx_via = Index::build(via_parent.to_str().unwrap(), DatasetFormat::Auto, &[]).unwrap();
+    assert_eq!(idx_via.images.len(), 1);
 }
 
 #[test]

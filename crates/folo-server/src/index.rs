@@ -22,8 +22,9 @@ pub const MAX_CLASSES: usize = 4096;
 
 /// Bumped whenever the cached [`Index`] layout or its derivation changes, so old caches are rebuilt. 6: empty YOLO
 /// split paths are unset. 7: folo-data reads COCO splits, float category ids and crowd flags, and labels below a
-/// folder called `images`, differently.
-pub const INDEX_VERSION: u32 = 7;
+/// folder called `images`, differently. 8: symlink-preserving `..` normalization for dataset roots, image paths,
+/// and watched folders.
+pub const INDEX_VERSION: u32 = 8;
 
 /// A cheap summary of every file under a dataset's folders: count, total size and a hash of each file's relative
 /// path, size and modification time (and of each folder's name). Adding, removing, renaming or editing a file, or
@@ -414,7 +415,7 @@ fn images_under(dir: &Path, budget: usize) -> usize {
 /// [`Index::build`] checks it first; registration checks it before it takes the file lease, so a folder that is not
 /// a dataset never holds up a dataset deletion.
 pub fn preflight(path: &str, format: DatasetFormat) -> Result<()> {
-    let p = absolute(Path::new(path));
+    let p = resolve_input_path(path);
     if !p.exists() {
         return Err(data_error(
             folo_data::DataError::Io { path: p.clone(), source: std::io::ErrorKind::NotFound.into() },
@@ -519,6 +520,12 @@ fn resolve_dotdot(p: &Path) -> PathBuf {
     out
 }
 
+/// Resolves `path` to an absolute path while preserving Unix symlink-before-`..` semantics.
+fn resolve_input_path(path: &str) -> PathBuf {
+    let raw = Path::new(path);
+    resolve_dotdot(&std::path::absolute(raw).unwrap_or_else(|_| raw.to_path_buf()))
+}
+
 /// The paths whose files make up a dataset: `base`, the dataset root and everything folo-data read it from
 /// ([`folo_data::LoadedDataset::sources`]: split folders and lists outside `base`, folders of every candidate image
 /// and label, paths that do not exist yet), minimised so no path is inside another. Sorted.
@@ -544,7 +551,7 @@ fn watch_dirs(base: &Path, ds: &folo_data::LoadedDataset) -> Vec<PathBuf> {
 /// reading the images. An error when they cannot all be known: the description cannot be read, or one of them
 /// cannot be resolved or (a folder) listed. A link to a single file is not followed beyond the folder holding it.
 pub fn reads(path: &str, format: DatasetFormat) -> std::result::Result<Vec<PathBuf>, String> {
-    let p = absolute(Path::new(path));
+    let p = resolve_input_path(path);
     let base = if p.is_file() { p.parent().unwrap_or(&p).to_path_buf() } else { p.clone() };
     let opts = folo_data::OpenOptions { format: data_format(format), verify_images: false };
     let ds = folo_data::open_with(&p, &opts).map_err(|e| e.to_string())?;
@@ -590,8 +597,7 @@ impl Index {
     /// `exclude` is passed to [`Fingerprint::of`].
     pub fn build(path: &str, format: DatasetFormat, exclude: &[PathBuf]) -> Result<Index> {
         let excluded: Vec<PathBuf> = exclude.iter().map(|x| absolute(x)).collect();
-        let raw_p = Path::new(path);
-        let p = resolve_dotdot(&std::path::absolute(raw_p).unwrap_or_else(|_| raw_p.to_path_buf()));
+        let p = resolve_input_path(path);
         // A folder that is not a dataset is said as that before anything walks it: the fingerprint below stats every
         // file under `base`, which takes minutes for a drive or a system folder.
         preflight(path, format)?;

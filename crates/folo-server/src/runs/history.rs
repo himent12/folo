@@ -503,6 +503,7 @@ pub(super) fn reconcile(file: &mut RunFile, dir: &Path) {
     }
     let metrics_path = dir.join("metrics.jsonl");
     super::ensure_trailing_newline(&metrics_path);
+    super::ensure_trailing_newline(&dir.join("log.jsonl"));
     let m = read_metrics(&metrics_path);
     let ckpt = crate::engine::read_model_file(&dir.join("weights").join("last.folo"))
         .ok()
@@ -693,7 +694,7 @@ mod tests {
 
         // Case 2: real `weights/last.folo` synced at epoch 1 (best = 0.40), while `metrics.jsonl` mirrored
         // epochs 1..3 (best = epoch 2 at 0.85) + partial epoch 4 (step 7).
-        let e2 = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
+        let e2 = runs.register(config.clone(), dataset.clone(), None, None, 0, "cpu".into(), None).unwrap();
         let lines2 = [
             record(RunEvent::Step(make_step(1, 1, 3.0))),
             record(RunEvent::Step(make_step(1, 2, 2.6))),
@@ -717,7 +718,7 @@ mod tests {
             st.file.run.started = Some(now());
             e2.finish(&mut st, RunStatus::Failed, Some("instance lost".into()));
         }
-        let (resumed2, _) = runs.restart(&e2, config, None).unwrap();
+        let (resumed2, _) = runs.restart(&e2, config.clone(), None).unwrap();
         assert_eq!(resumed2.epoch, 1);
         assert_eq!(resumed2.step, 2, "step must roll back to epoch 1's last retained step");
         assert_eq!(resumed2.best, Some(BestEpoch { epoch: 1, map50_95: 0.40 }));
@@ -728,12 +729,39 @@ mod tests {
         // A subsequent resumed epoch 2 with 0.55 beats the rolled-back epoch 1 (0.40) and becomes the new best.
         e2.on_event(&RunEvent::Epoch(make_epoch_with_map(2, 0.55)));
         assert_eq!(e2.run().best, Some(BestEpoch { epoch: 2, map50_95: 0.55 }));
+
+        // Case 3: synced `weights/last.folo` is AHEAD of mirrored local history (history has epoch 1 at 0.40,
+        // checkpoint is at epoch 2 with best = 0.80 at epoch 2). Resume must advance epoch/step/best to the
+        // checkpoint boundary instead of leaving progress and best behind the checkpoint it loads.
+        let e3 = runs.register(config.clone(), dataset, None, None, 10, "cpu".into(), None).unwrap();
+        let lines3 = [
+            record(RunEvent::Step(make_step(1, 1, 3.0))),
+            record(RunEvent::Step(make_step(1, 10, 2.2))),
+            record(RunEvent::Epoch(make_epoch_with_map(1, 0.40))),
+        ];
+        std::fs::write(e3.metrics_path(), lines3.join("\n") + "\n").unwrap();
+        write_valid_checkpoint(&e3.dir.join("weights").join("last.folo"), 2, 1, 0.80);
+        {
+            let mut st = e3.state.lock().unwrap();
+            st.file.epochs_done = 1;
+            st.file.run.epoch = 1;
+            st.file.run.step = 10;
+            st.file.run.steps_per_epoch = 10;
+            st.file.run.best = Some(BestEpoch { epoch: 1, map50_95: 0.40 });
+            st.file.run.started = Some(now());
+            e3.finish(&mut st, RunStatus::Failed, Some("instance lost".into()));
+        }
+        let (resumed3, _) = runs.restart(&e3, config, None).unwrap();
+        assert_eq!(resumed3.epoch, 2, "epoch must match checkpoint ahead of local history");
+        assert_eq!(resumed3.step, 20, "step must match checkpoint epoch * steps_per_epoch");
+        assert_eq!(resumed3.best, Some(BestEpoch { epoch: 2, map50_95: 0.80 }));
+        assert_eq!(e3.state.lock().unwrap().file.epochs_done, 2);
         runs.shutdown(None);
     }
 
-    /// Reconciling after a crash that left a torn trailing line in `metrics.jsonl` heals the trailing newline so
-    /// subsequent appends parse cleanly while ignoring the torn fragment; `ensure_trailing_newline` also heals
-    /// `metrics.jsonl` and `log.jsonl` for recovered cloud runs (which bypass local `reconcile`).
+    /// Reconciling after a crash that left torn trailing lines in `metrics.jsonl` and `log.jsonl` heals both
+    /// trailing newlines so startup interruption warnings and subsequent metric appends parse cleanly while
+    /// ignoring the torn fragments.
     #[test]
     fn reconcile_and_cloud_recovery_heal_torn_trailing_lines_before_appends() {
         let dir = TestDir::new("history-torn-reconcile");
@@ -753,6 +781,15 @@ mod tests {
             record(RunEvent::Epoch(make_epoch(1))),
         );
         std::fs::write(e.metrics_path(), torn).unwrap();
+        std::fs::write(
+            e.dir.join("log.jsonl"),
+            concat!(
+                r#"{"t":"2026-01-01T00:00:00Z","level":"info","message":"before-crash"}"#,
+                "\n",
+                r#"{"t":"torn"#,
+            ),
+        )
+        .unwrap();
         {
             let mut st = e.state.lock().unwrap();
             st.file.run.status = RunStatus::Running;
@@ -761,7 +798,8 @@ mod tests {
         }
         runs.shutdown(None);
 
-        // Reopen triggers `reconcile`, which must ignore the torn line and ensure a trailing newline.
+        // Reopen triggers `reconcile`, which must heal both `metrics.jsonl` and `log.jsonl` before `Runs::open`
+        // appends its interruption warning.
         let reopened = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
         let e2: Arc<RunEntry> = reopened.get(e.id()).unwrap();
         assert_eq!(e2.run().epoch, 1);
@@ -769,8 +807,13 @@ mod tests {
         let m = reopened.metrics(e2.id(), &MetricsQuery::default()).unwrap();
         assert_eq!(m.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
         assert_eq!(m.steps[1].loss.total, 1.9);
+        let logs = reopened.logs(e2.id(), &LogsQuery::last(10)).unwrap();
+        let msgs: Vec<&str> = logs.lines.iter().map(|l| l.message.as_str()).collect();
+        assert_eq!(msgs.len(), 2, "both pre-crash log and restart warning must parse cleanly: {msgs:?}");
+        assert_eq!(msgs[0], "before-crash");
+        assert!(msgs[1].contains("server stopped"), "expected restart warning, got {:?}", msgs[1]);
 
-        // Cloud recovery path calls `ensure_trailing_newline` on both `metrics.jsonl` and `log.jsonl`.
+        // Direct check of `ensure_trailing_newline` on torn metrics and log files with real newlines.
         let cloud_metrics = dir.join("cloud_metrics.jsonl");
         let cloud_log = dir.join("cloud_log.jsonl");
         std::fs::write(
@@ -780,7 +823,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             &cloud_log,
-            r#"{"t":"2026-01-01T00:00:00Z","level":"info","message":"ok"}\n{"t":"torn"#,
+            concat!(r#"{"t":"2026-01-01T00:00:00Z","level":"info","message":"ok"}"#, "\n", r#"{"t":"torn"#,),
         )
         .unwrap();
         crate::runs::ensure_trailing_newline(&cloud_metrics);
@@ -790,7 +833,7 @@ mod tests {
         let cm = read_metrics(&cloud_metrics);
         assert_eq!(cm.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
         let cl = read_logs(&cloud_log, &LogsQuery::last(10));
-        assert_eq!(cl.lines.last().unwrap().message, "recovered");
+        assert_eq!(cl.lines.iter().map(|l| l.message.as_str()).collect::<Vec<_>>(), ["ok", "recovered"]);
         reopened.shutdown(None);
     }
 }

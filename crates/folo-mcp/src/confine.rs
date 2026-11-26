@@ -124,9 +124,19 @@ pub(crate) fn is_local_url(url: &str) -> bool {
     }
 }
 
-/// Cached confinement verdict for one dataset id: optional `(path, revision)` tag (used in proxy mode so a
-/// manifest or file change on the separate `folo serve` immediately invalidates a cached `Ok(())`) and result.
-type DatasetVerdict = (Option<(String, String)>, Result<(), Error>);
+/// Local-proxy cache validator: binds a cached verdict to the dataset's path, server revision, and an on-disk
+/// [`folo_server::Fingerprint`] over its watched directories so ordinary manifest/file edits invalidate the
+/// verdict immediately even within `folo serve`'s 5-second recheck window.
+#[derive(Clone)]
+struct ProxyTag {
+    path: String,
+    revision: Option<String>,
+    watched: Vec<PathBuf>,
+    fingerprint: folo_server::Fingerprint,
+}
+
+/// Cached confinement verdict for one dataset id: optional [`ProxyTag`] (used in local proxy mode) and result.
+type DatasetVerdict = (Option<ProxyTag>, Result<(), Error>);
 
 /// A labeling job's check: a hash of its image files when checked, and the result.
 type JobCheck = (u64, Result<(), Error>);
@@ -209,9 +219,65 @@ impl Confinement {
         Ok(absent)
     }
 
+    /// Validates a local dataset path BEFORE `POST /api/datasets` is sent to a local `folo serve` in confined
+    /// proxy mode, so an unguarded server never opens files outside `--data-dir` while building an index.
+    /// No-op outside confined local real proxy mode. Blocking.
+    pub fn pre_register_local(&self, path: &Path, format: folo_api::DatasetFormat) -> Result<(), Error> {
+        if !self.policy.confine {
+            return Ok(());
+        }
+        let Some(proxy) = &self.proxy else {
+            return Ok(());
+        };
+        if proxy.is_mock() || self.is_verified_remote_proxy()? {
+            return Ok(());
+        }
+        if matches!(
+            std::fs::symlink_metadata(path),
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound
+        ) {
+            return Ok(());
+        }
+        self.policy.check_existing_inside(path)?;
+        if path.is_dir() {
+            for manifest in ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"] {
+                self.policy.check_path_if_present(&path.join(manifest))?;
+            }
+        }
+        let fmt = match format {
+            folo_api::DatasetFormat::Auto => folo_data::Format::Auto,
+            folo_api::DatasetFormat::Yolo => folo_data::Format::Yolo,
+            folo_api::DatasetFormat::Coco => folo_data::Format::Coco,
+        };
+        let opts = folo_data::OpenOptions { format: fmt, verify_images: false };
+        let ds = match folo_data::open_with(path, &opts) {
+            Ok(ds) => ds,
+            Err(e) if e.to_string().contains(folo_data::guard::DENIED) => {
+                return Err(Error::new(
+                    StatusCode::FORBIDDEN,
+                    "path_outside_data_dir",
+                    format!("cannot verify dataset manifest locally: {e}"),
+                )
+                .hint("`folo mcp --confine` only reads inside --data-dir; copy the files there or restart without --confine"));
+            }
+            Err(folo_data::DataError::Format(_) | folo_data::DataError::Unfinished(_)) => return Ok(()),
+            Err(e) => {
+                return Err(Error::new(
+                    StatusCode::FORBIDDEN,
+                    "path_outside_data_dir",
+                    format!("cannot verify dataset manifest locally: {e}"),
+                )
+                .hint("`folo mcp --confine` only reads inside --data-dir; copy the files there or restart without --confine"));
+            }
+        };
+        self.verify_loaded_dataset(path, format, &ds, "")?;
+        Ok(())
+    }
+
     /// `Ok` when dataset `id` reads nothing outside the data dir (always without `--confine`, and for datasets
-    /// hosted on a verified separate remote server). In local proxy mode, cached verdicts are keyed by the
-    /// server's current `(path, revision)` so manifest changes on `folo serve` immediately trigger a fresh scan.
+    /// hosted on a verified separate remote server). In local proxy mode, cached verdicts are verified against an
+    /// on-disk [`folo_server::Fingerprint`] over the dataset's watched directories on every call so
+    /// manifest changes invalidate cached `Ok(())` immediately without waiting for `folo serve`'s recheck window.
     /// Blocking.
     pub fn dataset(&self, store: &dyn Store, id: &str) -> Result<(), Error> {
         if !self.policy.confine {
@@ -222,12 +288,17 @@ impl Confinement {
         }
         if self.proxy.is_some() {
             let d = store.get_dataset(id)?;
-            if let Some(rev) = &d.revision
-                && let Some((Some((cached_path, cached_rev)), verdict)) = self.cache.lock().unwrap().get(id)
-                && cached_path == &d.path
-                && cached_rev == rev
+            if d.path.starts_with("mock://") {
+                return Ok(());
+            }
+            let cached = self.cache.lock().unwrap().get(id).cloned();
+            if let Some((Some(tag), verdict)) = cached
+                && tag.path == d.path
+                && tag.revision == d.revision
+                && !tag.watched.is_empty()
+                && folo_server::Fingerprint::of(&tag.watched, &[]) == tag.fingerprint
             {
-                return verdict.clone();
+                return verdict;
             }
             return self.scan_and_cache(store, id, Some(d));
         }
@@ -268,23 +339,35 @@ impl Confinement {
                 }
             },
         };
-        let tag = d.revision.as_ref().map(|rev| (d.path.clone(), rev.clone()));
-        let r = self.scan(store, id, &d).map_err(map_denied);
+        let res = self.scan(store, id, &d).map_err(map_denied);
         // Only cache definitive confinement verdicts (allowed, or explicitly outside the data dir).
         // Unknown datasets and transient store/IO errors are never cached so recovery works without a restart.
-        match &r {
-            Ok(()) => {
+        match &res {
+            Ok(watched) => {
+                let tag = watched.as_ref().map(|w| ProxyTag {
+                    path: d.path.clone(),
+                    revision: d.revision.clone(),
+                    watched: w.clone(),
+                    fingerprint: folo_server::Fingerprint::of(w, &[]),
+                });
                 self.cache.lock().unwrap().insert(id.to_string(), (tag, Ok(())));
+                Ok(())
             }
             Err(e) if e.body.code == "path_outside_data_dir" => {
+                let tag = self.proxy.is_some().then(|| {
+                    let w = vec![PathBuf::from(&d.path)];
+                    let fingerprint = folo_server::Fingerprint::of(&w, &[]);
+                    ProxyTag { path: d.path.clone(), revision: d.revision.clone(), watched: w, fingerprint }
+                });
                 self.cache.lock().unwrap().insert(id.to_string(), (tag, Err(e.clone())));
+                Err(e.clone())
             }
             Err(e) if e.body.code == "dataset_not_found" => {
                 self.cache.lock().unwrap().remove(id);
+                Err(e.clone())
             }
-            Err(_) => {}
+            Err(e) => Err(e.clone()),
         }
-        r
     }
 
     /// `Ok` when every image of labeling job `id` is inside the data dir (always without `--confine`; through a
@@ -324,18 +407,80 @@ impl Confinement {
         self.cache.lock().unwrap().remove(id);
     }
 
-    fn scan(&self, store: &dyn Store, id: &str, d: &folo_api::Dataset) -> Result<(), Error> {
+    fn verify_loaded_dataset(
+        &self,
+        root: &Path,
+        format: folo_api::DatasetFormat,
+        ds: &folo_data::LoadedDataset,
+        id: &str,
+    ) -> Result<(PathBuf, Vec<PathBuf>), Error> {
+        let wrap = |e: Error| if id.is_empty() { e } else { in_dataset(e, id) };
+        if let Some(denied) = ds.report.issues.iter().find(|i| i.message.contains(folo_data::guard::DENIED)) {
+            return Err(wrap(Error::new(
+                StatusCode::FORBIDDEN,
+                "path_outside_data_dir",
+                denied.message.clone(),
+            )));
+        }
+        let ds_root = resolve_dotdot(&ds.root);
+        self.policy.check_existing_inside(&ds_root).map_err(&wrap)?;
+        let root_dir = if root.is_file() { root.parent().unwrap_or(root) } else { root };
+        let mut watched = vec![root_dir.to_path_buf(), ds_root.clone()];
+        for s in &ds.sources {
+            let resolved = resolve_dotdot(s);
+            self.policy.check_path_if_present(&resolved).map_err(&wrap)?;
+            watched.push(resolved);
+        }
+        let is_yolo = format == folo_api::DatasetFormat::Yolo
+            || (format == folo_api::DatasetFormat::Auto && ds.format == folo_data::Format::Yolo);
+        let yolo_labels = is_yolo.then(|| LabelPaths::new(&ds_root));
+        for split in folo_data::Split::ALL {
+            for entry in ds.split(split).entries() {
+                self.policy.check_path_if_present(&entry.image).map_err(&wrap)?;
+                if let Some(lbl) = &entry.label {
+                    self.policy.check_path_if_present(lbl).map_err(&wrap)?;
+                }
+                if let Some(labels) = &yolo_labels {
+                    self.policy.check_path_if_present(&labels.of(&entry.image)).map_err(&wrap)?;
+                    self.policy
+                        .check_path_if_present(&folo_data::label_path_for(&entry.image))
+                        .map_err(&wrap)?;
+                }
+            }
+        }
+        for issue in &ds.report.issues {
+            self.policy.check_path_if_present(&issue.path).map_err(&wrap)?;
+        }
+        if is_yolo {
+            for rel in ["classes.txt", "labels/classes.txt"] {
+                self.policy.check_path_if_present(&ds_root.join(rel)).map_err(&wrap)?;
+                if root_dir != ds_root {
+                    self.policy.check_path_if_present(&root_dir.join(rel)).map_err(&wrap)?;
+                }
+            }
+        }
+        watched.sort();
+        watched.dedup();
+        Ok((ds_root, watched))
+    }
+
+    fn scan(
+        &self,
+        store: &dyn Store,
+        id: &str,
+        d: &folo_api::Dataset,
+    ) -> Result<Option<Vec<PathBuf>>, Error> {
         if d.path.starts_with("mock://") {
-            return Ok(());
+            return Ok(None);
         }
         let root = PathBuf::from(&d.path);
         // Fail closed if `root` cannot be canonicalized locally (permission denied, container/other mount) or
         // resolves outside `--data-dir`.
         self.policy.check_existing_inside(&root).map_err(|e| in_dataset(e, id))?;
-        let base = match store.dataset_root(id)? {
+        let (base, watched) = match store.dataset_root(id)? {
             Some(r) => {
                 self.policy.check_existing_inside(&r).map_err(|e| in_dataset(e, id))?;
-                r
+                (r, None)
             }
             None => {
                 // In local proxy mode `HttpStore` does not expose `Index::root` or run `folo_data::guard` inside
@@ -358,32 +503,8 @@ impl Confinement {
                         id,
                     )
                 })?;
-                if let Some(denied) =
-                    ds.report.issues.iter().find(|i| i.message.contains(folo_data::guard::DENIED))
-                {
-                    return Err(in_dataset(
-                        Error::new(StatusCode::FORBIDDEN, "path_outside_data_dir", denied.message.clone()),
-                        id,
-                    ));
-                }
-                let ds_root = resolve_dotdot(&ds.root);
-                self.policy.check_existing_inside(&ds_root).map_err(|e| in_dataset(e, id))?;
-                for s in &ds.sources {
-                    let resolved = resolve_dotdot(s);
-                    self.policy.check_path_if_present(&resolved).map_err(|e| in_dataset(e, id))?;
-                }
-                for split in folo_data::Split::ALL {
-                    for entry in ds.split(split).entries() {
-                        self.policy.check_path_if_present(&entry.image).map_err(|e| in_dataset(e, id))?;
-                        if let Some(lbl) = &entry.label {
-                            self.policy.check_path_if_present(lbl).map_err(|e| in_dataset(e, id))?;
-                        }
-                    }
-                }
-                for issue in &ds.report.issues {
-                    self.policy.check_path_if_present(&issue.path).map_err(|e| in_dataset(e, id))?;
-                }
-                ds_root
+                let (ds_root, watched) = self.verify_loaded_dataset(&root, d.format, &ds, id)?;
+                (ds_root, Some(watched))
             }
         };
         // Check YOLO class-name sidecar files (`classes.txt`, `labels/classes.txt`), which are omitted from
@@ -444,7 +565,7 @@ impl Confinement {
             let n = page.issues.len() as u64;
             offset += n;
             if n == 0 || offset >= page.total {
-                return Ok(());
+                return Ok(watched);
             }
         }
     }
