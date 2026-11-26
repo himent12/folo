@@ -7,6 +7,7 @@
  * and the condition at that severity on a benchmark image (./Preview). The table is one keyboard stop: the arrows
  * move the cell, which is the choice.
  */
+import ChevronDown from '$icons/chevron-down';
 import { computed, css, effect, For, signal } from 'fw';
 import type { Bench, BenchCatalog, BenchEntry, BenchResult } from '$lib/api/types';
 import { GROUP_NAME, SEVERITIES } from '$lib/bench/rules';
@@ -14,6 +15,7 @@ import XYChart from '$lib/charts/XYChart';
 import type { XYSeries } from '$lib/charts/xy';
 import { metric, num } from '$lib/format';
 import { prefs } from '$lib/prefs';
+import Button from '$lib/ui/Button';
 import Panel from '$lib/ui/Panel';
 import { byWorstKept, severityDomain, severityPoints } from '../charts';
 import { heatLabelHigh, heatShare } from '../heat';
@@ -73,6 +75,14 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
 
   // ---- the heat table's keys: arrows move the chosen cell over the cells that ran ----
   let tableEl: HTMLTableElement | undefined;
+  let previewEl: HTMLDivElement | undefined;
+  function jumpToPreview(keyboard: boolean) {
+    if (!previewEl) return;
+    previewEl.scrollIntoView?.({ block: 'start' });
+    const heading = previewEl.querySelector<HTMLElement>('h2, h3') ?? previewEl;
+    if (!heading.hasAttribute('tabindex')) heading.setAttribute('tabindex', '-1');
+    heading.focus({ preventScroll: true, ...(keyboard ? {} : { focusVisible: false }) });
+  }
   function move(dr: number, dc: number) {
     const list = rows.peek();
     const at = sel.peek();
@@ -240,6 +250,16 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
             </tfoot>
           </table>
         </div>
+        {props.catalog ? (
+          <div class="preview-jump">
+            <span class="pj-text" role="status" aria-live="polite">
+              Preview: <span class="pj-val">{nameOf(previewCond.get() || sel.get().condition)}</span> · severity <span class="num">{previewSev.get()}</span>
+            </span>
+            <Button size="sm" variant="ghost" iconRight={ChevronDown} onclick={(e) => jumpToPreview(e.detail === 0)}>
+              View preview
+            </Button>
+          </div>
+        ) : null}
         {rob.get().conditions.length < props.bench.plan.conditions.length ? (
           <p class="lead note">
             It ran {rob.get().conditions.length} of the plan’s {props.bench.plan.conditions.length} conditions: the axis is over those.
@@ -276,7 +296,9 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
           />
         </Panel>
         {props.catalog ? (
-          <Preview bench={props.bench} catalog={props.catalog} bind:condition={previewCond} bind:severity={previewSev} />
+          <div ref={(el) => (previewEl = el)} class="preview-anchor">
+            <Preview bench={props.bench} catalog={props.catalog} bind:condition={previewCond} bind:severity={previewSev} />
+          </div>
         ) : null}
       </div>
     </div>
@@ -461,9 +483,38 @@ css`
   .hint {
     color: var(--text-secondary);
   }
+  .preview-jump {
+    display: none;
+  }
+  .preview-anchor {
+    scroll-margin-top: calc(44px + var(--space-1));
+    min-width: 0;
+  }
+  @media (pointer: coarse) {
+    .preview-anchor {
+      scroll-margin-top: calc(52px + var(--space-1));
+    }
+  }
   @media (max-width: 1023px) {
     .rob {
       grid-template-columns: minmax(0, 1fr);
+    }
+    /* Below 1024 px the preview sits below the chart; surface the active cell and a direct jump under the heat table. */
+    .preview-jump {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+      padding: var(--space-2) var(--space-4);
+      border-top: 1px solid var(--line-subtle);
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
+      color: var(--text-secondary);
+    }
+    .pj-val {
+      color: var(--text-primary);
+      font-weight: var(--weight-medium);
     }
   }
   /* Phones: the cells narrow to their numbers; the group under the name. */

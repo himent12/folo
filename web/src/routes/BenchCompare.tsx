@@ -75,6 +75,7 @@ export default function BenchCompare() {
     nameOf,
     rows,
     old,
+    labelOf,
     best,
     makeBaseline,
     ivDomain,
@@ -107,15 +108,16 @@ export default function BenchCompare() {
 
   function setBaseline(eid: string) {
     const entry = shown.peek().find((x) => x.id === eid);
+    const label = entry ? labelOf(entry) : '';
     makeBaseline(eid);
-    if (entry) announce(`Baseline set to ${entry.name}.`);
+    if (label) announce(`Baseline set to ${label}.`);
   }
 
   function togglePin(eid: string) {
     const entry = shown.peek().find((x) => x.id === eid);
     const next = pinned.peek() === eid ? null : eid;
     pinned.set(next);
-    if (entry) announce(next ? `Pinned ${entry.name} to front.` : `Unpinned ${entry.name}.`);
+    if (entry) announce(next ? `Pinned ${labelOf(entry)} to front.` : `Unpinned ${labelOf(entry)}.`);
   }
 
   function addEntry(eid: string) {
@@ -133,8 +135,9 @@ export default function BenchCompare() {
 
   function removeEntry(eid: string, index: number) {
     const entry = shown.peek().find((x) => x.id === eid);
+    const label = entry ? labelOf(entry) : '';
     setIds(ids.peek().filter((x) => x !== eid));
-    if (entry) announce(`Removed ${entry.name} from comparison.`);
+    if (label) announce(`Removed ${label} from comparison.`);
     // The Remove button unmounts with its chip: move keyboard focus to a neighbouring chip, the adder, or the heading.
     queueMicrotask(() => {
       const buttons = [...(chipsEl?.querySelectorAll<HTMLButtonElement>('button.ck') ?? [])];
@@ -177,7 +180,7 @@ export default function BenchCompare() {
       const extra = ids.peek().filter((x) => !shownIds.includes(x));
       setIds([...shownIds.slice(1), shownIds[0]!, ...extra]);
       const nextBase = list[1];
-      if (nextBase) announce(`Baseline set to ${nextBase.name}.`);
+      if (nextBase) announce(`Baseline set to ${labelOf(nextBase)}.`);
       return true;
     }
     return false;
@@ -259,7 +262,7 @@ export default function BenchCompare() {
           </ul>
         </Callout>
       ) : null}{' '}
-      <SideBySide shown={shown.get()} rows={rows.get()} old={old.get()} best={best} makeBaseline={setBaseline} keyMark={key} />{' '}
+      <SideBySide shown={shown.get()} rows={rows.get()} old={old.get()} labelOf={labelOf} best={best} makeBaseline={setBaseline} keyMark={key} />{' '}
       <Panel title="mAP50-95 with 95% intervals" meta="unchanged images">
         {ivDomain.get() ? (
           <>
@@ -360,7 +363,7 @@ export default function BenchCompare() {
                 head: ['Entry', 'ECE', 'Detections'],
                 rows: shown.get().flatMap((e, i) => {
                   const c = res.get()[i]?.calibration;
-                  return c ? [[e.name, num(c.ece, 3), num(c.detections)]] : [];
+                  return c ? [[labelOf(e), num(c.ece, 3), num(c.detections)]] : [];
                 }),
               }}
             />
@@ -412,7 +415,7 @@ export default function BenchCompare() {
               head: ['Entry', 'Threshold t*', 'Objects at 90%', 'Labels right'],
               rows: shown.get().flatMap((e, i) => {
                 const s = res.get()[i]?.self_labeling;
-                return s ? [[e.name, s.threshold !== null ? conf(s.threshold) : '—', pct(s.recall, 0), pct(s.precision, 0)]] : [];
+                return s ? [[labelOf(e), s.threshold !== null ? conf(s.threshold) : '—', pct(s.recall, 0), pct(s.precision, 0)]] : [];
               }),
             }}
           />{' '}
@@ -512,6 +515,7 @@ export default function BenchCompare() {
                 type="button"
                 class="ck"
                 data-entry-id={e().id}
+                aria-label={labelOf(e()) !== e().name ? labelOf(e()) : undefined}
                 aria-pressed={pinned.get() === e().id}
                 aria-keyshortcuts={keyPrefs.singleKeys && shown.get().length >= 2 ? String(i() + 1) : undefined}
                 title={pinned.get() === e().id ? 'Let it fall back' : 'Keep it in front'}
@@ -525,13 +529,13 @@ export default function BenchCompare() {
                 {e().score!.partial ? <span class="st">{' · partial'}</span> : null}
                 {bench() && stale(e(), bench()!.fingerprint) ? <span class="st">{' · earlier version'}</span> : null}
               </span>{' '}
-              <a class="act" href={href(`/benchmarks/${bench()?.id}/entries/${e().id}`)} aria-label={`Open ${e().name}`} title="Open its result">
+              <a class="act" href={href(`/benchmarks/${bench()?.id}/entries/${e().id}`)} aria-label={`Open ${labelOf(e())}`} title="Open its result">
                 <ArrowUpRight size={14} />
               </a>{' '}
               <button
                 type="button"
                 class="act rm"
-                aria-label={`Remove ${e().name}`}
+                aria-label={`Remove ${labelOf(e())}`}
                 title="Remove from the comparison"
                 onclick={() => removeEntry(e().id, i())}
               >

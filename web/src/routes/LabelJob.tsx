@@ -422,7 +422,7 @@ export default function LabelJob() {
               </>
             )}
           >
-            <div class="work">
+            <div class="work" class:review-first={datasetNext.get()}>
               <div class="main">
                 <ImagesArea
                   jobId={j().id}
@@ -560,7 +560,8 @@ css`
     text-decoration-color: var(--line-strong);
     text-underline-offset: 3px;
   }
-  /* Below 1024 px one column: the agent first (the work), then the images, then the log. */
+  /* Below 1024 px one column: the agent first while labeling is still needed; once everything is labeled (review-first),
+     images and the review filter lead so the review queue starts above the fold, with the agent below. */
   @media (max-width: 1023px) {
     .work {
       grid-template-columns: minmax(0, 1fr);
@@ -568,7 +569,7 @@ css`
     .rail {
       display: contents;
     }
-    .agent {
+    .work:not(.review-first) .agent {
       order: -1;
     }
     .logs {

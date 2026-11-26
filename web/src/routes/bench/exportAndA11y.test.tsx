@@ -13,6 +13,7 @@ import BenchCompare from '../BenchCompare';
 import Benchmarks from '../Benchmarks';
 import Models from '../Models';
 import { diffAsPrinted } from './charts';
+import { entryLabels } from './compare/state';
 import { compareExport, leaderboardExport } from './export';
 
 let target: HTMLElement;
@@ -151,15 +152,22 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     expect(colHeaders.length).toBe(4);
     expect(rowHeaders.length).toBeGreaterThanOrEqual(6);
 
-    // WCAG 2.5.3 Label in Name: accessible name starts with visible "Make baseline"
-    const swapBtn = target.querySelector<HTMLButtonElement>(`button.swap[aria-label="Make baseline: ${e1!.name}"]`)!;
+    // WCAG 2.5.3 Label in Name: accessible name starts with visible "Make baseline" and disambiguates colliding names
+    const bench = await hub.api.bench('bn_3c90');
+    const labels = entryLabels(
+      [e0!, e1!, e2!],
+      [e0!, e1!, e2!].map((e) => e.fingerprint !== bench.fingerprint),
+    );
+    const e1Label = labels.get(e1!.id)!;
+    const e2Label = labels.get(e2!.id)!;
+    const swapBtn = target.querySelector<HTMLButtonElement>(`button.swap[aria-label="Make baseline: ${e1Label}"]`)!;
     expect(swapBtn).not.toBeNull();
     swapBtn.focus();
     swapBtn.click();
     flushSync();
     await Promise.resolve();
     expect(target.querySelector('table.cmp')?.contains(document.activeElement)).toBe(true);
-    expect(target.querySelector('.sr-only[role="status"]')?.textContent).toContain(`Baseline set to ${e1!.name}`);
+    expect(target.querySelector('.sr-only[role="status"]')?.textContent).toContain(`Baseline set to ${e1Label}`);
 
     // Export CSV and JSON from BenchCompare
     await clickMenuItem('Export comparison', 'Export CSV');
@@ -172,13 +180,13 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     expect(parsed.entries).toHaveLength(3);
 
     // Removing a chip moves keyboard focus to a neighbouring chip's pin button
-    const removeBtn = target.querySelector<HTMLButtonElement>(`button.rm[aria-label="Remove ${e2!.name}"]`)!;
+    const removeBtn = target.querySelector<HTMLButtonElement>(`button.rm[aria-label="Remove ${e2Label}"]`)!;
     removeBtn.focus();
     removeBtn.click();
     flushSync();
     await Promise.resolve();
     expect(document.activeElement?.classList.contains('ck')).toBe(true);
-    expect(target.querySelector('.sr-only[role="status"]')?.textContent).toContain(`Removed ${e2!.name}`);
+    expect(target.querySelector('.sr-only[role="status"]')?.textContent).toContain(`Removed ${e2Label}`);
   });
 
   it('keeps BenchCompare keyboard shortcuts working at phone widths when the Export menu is closed', async () => {
@@ -433,5 +441,63 @@ describe('Benchmarks, BenchCompare, and Models export & a11y', () => {
     expect(clearEsc.defaultPrevented).toBe(true);
     expect(target.querySelector('button[aria-label="Clear selection"]')).toBeNull();
     expect(document.activeElement).toBe(target.querySelector('h1[data-route-focus]'));
+  });
+
+  it('disambiguates colliding entry names across BenchCompare controls, DotRows readouts, and identical-score edge cases', async () => {
+    // Unit check for entryLabels(): unique names stay plain, collisions add version/score, identical formatted labels fall back to id.
+    const mk = (id: string, name: string, total: number): BenchEntry =>
+      ({ id, name, score: { total, axes: [], partial: false } }) as unknown as BenchEntry;
+    const labels = entryLabels(
+      [mk('be_1', 'dup', 82.41), mk('be_2', 'dup', 82.44), mk('be_3', 'dup', 79.1), mk('be_4', 'solo', 90.0)],
+      [false, false, true, false],
+    );
+    expect(labels.get('be_1')).toBe('dup · score 82.4 (be_1)');
+    expect(labels.get('be_2')).toBe('dup · score 82.4 (be_2)');
+    expect(labels.get('be_3')).toBe('dup · earlier version · score 79.1');
+    expect(labels.get('be_4')).toBe('solo');
+
+    // Integration check with mock colliding entries be_f101 & be_f100 (both named `fasteners-s-v1`).
+    mountRoute(BenchCompare, '#/benchmarks/bn_3c90/compare?entries=be_f101,be_f100,be_f102');
+    await settle(18);
+
+    const pinLabels = [...target.querySelectorAll<HTMLButtonElement>('.chips .chip button.ck')].map(
+      (b) => b.getAttribute('aria-label') ?? b.textContent?.trim(),
+    );
+    const openLabels = [...target.querySelectorAll<HTMLAnchorElement>('.chips .chip a.act')].map((a) => a.getAttribute('aria-label'));
+    const removeLabels = [...target.querySelectorAll<HTMLButtonElement>('.chips .chip button.rm')].map((b) => b.getAttribute('aria-label'));
+    const swapLabels = [...target.querySelectorAll<HTMLButtonElement>('table.cmp button.swap')].map((b) => b.getAttribute('aria-label'));
+
+    expect(new Set(pinLabels).size).toBe(3);
+    expect(new Set(openLabels).size).toBe(3);
+    expect(new Set(removeLabels).size).toBe(3);
+    expect(swapLabels.some((l) => l?.startsWith('Make baseline: fasteners-s-v1 · earlier version'))).toBe(true);
+    // WCAG 2.5.3: disambiguated pin button accessible names still start with the visible entry name.
+    expect(pinLabels[0]?.startsWith('fasteners-s-v1 · score ')).toBe(true);
+    expect(pinLabels[1]?.startsWith('fasteners-s-v1 · earlier version')).toBe(true);
+
+    // DotRows polite live readout distinguishes the two `fasteners-s-v1` entries.
+    const dots = target.querySelector<HTMLElement>('.dots[role="group"]')!;
+    dots.focus();
+    dots.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+    flushSync();
+    const spoken = dots.querySelector('[aria-live]')?.textContent ?? '';
+    expect(spoken).toContain('fasteners-s-v1 · score ');
+    expect(spoken).toContain('fasteners-s-v1 · earlier version');
+
+    // Two current-fingerprint entries with the same name and separated intervals use disambiguated labels in the mAP verdict.
+    view?.unmount();
+    view = undefined;
+    const origEntries = hub.api.benchEntries.bind(hub.api);
+    vi.spyOn(hub.api, 'benchEntries').mockImplementation(async (id, s) => {
+      const list = await origEntries(id, s);
+      return list.map((e) =>
+        e.id === 'be_f102' ? { ...e, name: 'fasteners-s-v1', map50_95: 0.3, ci95: [0.25, 0.35] as [number, number] } : e,
+      );
+    });
+    mountRoute(BenchCompare, '#/benchmarks/bn_3c90/compare?entries=be_f101,be_f102');
+    await settle(18);
+    const verdictText = target.querySelector('.verdict')?.textContent ?? '';
+    expect(verdictText).toContain('fasteners-s-v1 · score ');
+    expect((verdictText.match(/fasteners-s-v1 · score /g) ?? []).length).toBe(2);
   });
 });

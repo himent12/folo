@@ -109,6 +109,32 @@ describe('Escape on a detail page', () => {
     b.focus();
     key('Escape', {}, b);
     expect(go).not.toHaveBeenCalled();
+    b.remove();
+
+    // An open fallback info popover keeps Escape from navigating back even when focus is at rest.
+    const pop = document.createElement('div');
+    pop.className = 'info-pop open';
+    document.body.appendChild(pop);
+    key('Escape');
+    expect(go).not.toHaveBeenCalled();
+    pop.remove();
+
+    // A native Popover API popover (:popover-open) also keeps Escape from navigating back.
+    const nativePop = document.createElement('div');
+    nativePop.setAttribute('popover', 'auto');
+    document.body.appendChild(nativePop);
+    const origQs = document.querySelector.bind(document);
+    const qsSpy = vi.spyOn(document, 'querySelector').mockImplementation((sel: string) =>
+      sel === '[popover]:popover-open' ? nativePop : origQs(sel),
+    );
+    try {
+      key('Escape');
+      expect(go).not.toHaveBeenCalled();
+    } finally {
+      qsSpy.mockRestore();
+      nativePop.remove();
+    }
+
     route.mockRestore();
     go.mockRestore();
   });
