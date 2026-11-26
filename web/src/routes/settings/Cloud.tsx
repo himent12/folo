@@ -11,7 +11,7 @@ import Power from '$icons/power';
 import RefreshCw from '$icons/refresh-cw';
 import TriangleAlert from '$icons/triangle-alert';
 import Unplug from '$icons/unplug';
-import { computed, css, effect, For, Index, signal } from 'fw';
+import { computed, css, effect, For, Index, onCleanup, ReactiveSet, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { CloudConnection, CloudInstance } from '$lib/api/types';
@@ -60,6 +60,11 @@ export default function Cloud() {
   /** Terminations the provider has not confirmed: each one may still be billed. */
   const unconfirmed = computed(() => instances.data?.filter((i) => i.status === 'terminating' && i.error) ?? []);
 
+  let alive = true;
+  onCleanup(() => {
+    alive = false;
+  });
+
   // ---- connect ----
   const connecting = signal(false);
   function connected(c: CloudConnection) {
@@ -68,17 +73,21 @@ export default function Cloud() {
   }
 
   // ---- check ----
-  const checking = signal<string | null>(null);
+  const checking = new ReactiveSet<string>();
   async function check(c: CloudConnection) {
-    checking.set(c.id);
+    if (checking.has(c.id)) return;
+    const epoch = hub.epoch;
+    checking.add(c.id);
     try {
       const next = await hub.api.checkCloudConnection(c.id);
+      if (!alive || hub.epoch !== epoch) return;
       connections.set((connections.data ?? []).map((x) => (x.id === next.id ? next : x)));
     } catch (e) {
+      if (!alive || hub.epoch !== epoch) return;
       // page-level: Check is a row action, no dialog is open.
       toast.error(e, `Could not check ${c.name}`);
     } finally {
-      checking.set(null);
+      if (alive && hub.epoch === epoch) checking.delete(c.id);
     }
   }
 
@@ -100,18 +109,21 @@ export default function Cloud() {
   }
   async function disconnect() {
     const c = leaving.peek();
-    if (!c) return;
+    if (!c || leaveBusy.peek()) return;
+    const epoch = hub.epoch;
     leaveBusy.set(true);
     try {
       await hub.api.disconnectCloud(c.id);
+      if (!alive || hub.epoch !== epoch) return;
       leaveOpen.set(false);
       toast.success(`Disconnected ${c.name}`);
       connections.set((connections.data ?? []).filter((x) => x.id !== c.id));
     } catch (e) {
+      if (!alive || hub.epoch !== epoch) return;
       // `409 connection_in_use` says which instance or run holds it, in the dialog.
       leaveStatus.error(e, `Could not disconnect ${c.name}`);
     } finally {
-      leaveBusy.set(false);
+      if (alive && hub.epoch === epoch) leaveBusy.set(false);
     }
   }
 
@@ -120,6 +132,17 @@ export default function Cloud() {
   const endOpen = signal(false);
   const endBusy = signal(false);
   const endStatus = new DialogStatus();
+  let prevEpoch = hub.epoch;
+  effect(() => {
+    const ep = hub.epoch;
+    if (ep === prevEpoch) return;
+    prevEpoch = ep;
+    checking.clear();
+    leaveBusy.set(false);
+    endBusy.set(false);
+    leaveOpen.set(false);
+    endOpen.set(false);
+  });
   const endText = computed(() => {
     const i = ending.get();
     if (!i) return '';
@@ -135,18 +158,21 @@ export default function Cloud() {
   }
   async function terminate() {
     const i = ending.peek();
-    if (!i) return;
+    if (!i || endBusy.peek()) return;
+    const epoch = hub.epoch;
     endBusy.set(true);
     try {
       const next = await hub.api.terminateCloudInstance(i.id);
+      if (!alive || hub.epoch !== epoch) return;
       endOpen.set(false);
       toast.info(next.status === 'terminated' ? `Terminated the ${i.offer.gpu}` : `Terminating the ${i.offer.gpu}`, runName(i.run_id) ? `${runName(i.run_id)} fails; its copied checkpoints stay.` : undefined);
       instances.set((instances.data ?? []).map((x) => (x.id === next.id ? next : x)));
       void runs.refresh();
     } catch (e) {
+      if (!alive || hub.epoch !== epoch) return;
       endStatus.error(e, 'Could not terminate the instance');
     } finally {
-      endBusy.set(false);
+      if (alive && hub.epoch === epoch) endBusy.set(false);
     }
   }
 
@@ -268,7 +294,7 @@ export default function Cloud() {
                         )}
                       </span>
                       <span class="cx-acts">
-                        <Button size="sm" icon={RefreshCw} loading={checking.get() === c().id} onclick={() => check(c())}>
+                        <Button size="sm" icon={RefreshCw} loading={checking.has(c().id)} onclick={() => check(c())}>
                           {bad() ? 'Check again' : 'Check'}
                         </Button>
                         <Button size="sm" variant="danger" icon={Unplug} onclick={() => askDisconnect(c())}>

@@ -28,6 +28,7 @@ export class Reach implements Reachability {
   #probing = false;
   #attempt = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
+  #ctrl: AbortController | null = null;
 
   /** True while the server in use does not answer (confirmed by a probe). */
   get offline(): boolean {
@@ -38,12 +39,15 @@ export class Reach implements Reachability {
     return this.#back.get();
   }
 
-  /** The server in use changed: forget any outage; `probe` checks the new one (null: no server, e.g. the mock). */
+  /** The server in use changed: forget any outage; cancel any probe still out; `probe` checks the new one (null: no server, e.g. the mock). */
   reset(probe: Probe | null): void {
     this.#gen++;
     this.#probe = probe;
     this.#probing = false;
     this.#attempt = 0;
+    const ctrl = this.#ctrl;
+    this.#ctrl = null;
+    ctrl?.abort();
     clearTimeout(this.#timer);
     this.#timer = undefined;
     this.#offline.set(false);
@@ -51,9 +55,12 @@ export class Reach implements Reachability {
   }
 
   ok(): void {
-    // An answer settles any suspicion: a probe still out is moot, whatever it ends with.
+    // An answer settles any suspicion: a probe still out is cancelled and moot, whatever it ends with.
     this.#gen++;
     this.#probing = false;
+    const ctrl = this.#ctrl;
+    this.#ctrl = null;
+    ctrl?.abort();
     this.#settle(true);
     if (!this.#offline.peek()) return;
     this.#attempt = 0;
@@ -73,13 +80,17 @@ export class Reach implements Reachability {
     const probe = this.#probe;
     if (!probe) return;
     const gen = this.#gen;
+    const ctrl = new AbortController();
+    this.#ctrl = ctrl;
     this.#probing = true;
     try {
-      await probe(AbortSignal.timeout(PROBE_TIMEOUT));
+      await probe(AbortSignal.any([ctrl.signal, AbortSignal.timeout(PROBE_TIMEOUT)]));
+      if (this.#ctrl === ctrl) this.#ctrl = null;
       if (gen !== this.#gen) return;
       this.#probing = false;
       this.ok();
     } catch {
+      if (this.#ctrl === ctrl) this.#ctrl = null;
       if (gen !== this.#gen) return;
       this.#probing = false;
       this.#offline.set(true);

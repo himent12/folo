@@ -233,4 +233,63 @@ describe('Settings › Cloud', () => {
     await until(() => !text(target).includes('Could not load the cloud providers'), 'the error to go');
     await until(() => button(target, 'Connect') && !button(target, 'Connect')!.disabled, 'Connect enabled');
   });
+
+  it('tracks Check busy state independently per connection when two checks run concurrently', async () => {
+    const api = new MockApi('normal', 0);
+    const list = await api.cloudConnections();
+    const first = list[0]!;
+    const second = { ...first, id: 'cc_second', name: 'Remote Box', provider: 'remote' };
+    api.cloudConnections = async () => [first, second];
+    const gates = new Map<string, () => void>();
+    vi.spyOn(api, 'checkCloudConnection').mockImplementation(
+      (id) =>
+        new Promise((resolve) => {
+          gates.set(id, () => resolve(id === first.id ? { ...first, balance_usd: 11 } : { ...second, balance_usd: 22 }));
+        }),
+    );
+    open(api);
+    await until(() => target.querySelectorAll('.cx-row .cx-name').length === 2, 'two connections');
+    const rows = [...target.querySelectorAll<HTMLElement>('.cx-row')];
+    const btnA = button(rows[0]!, 'Check')!;
+    const btnB = button(rows[1]!, 'Check')!;
+    btnA.click();
+    btnB.click();
+    flushSync();
+    expect(btnA.getAttribute('aria-busy')).toBe('true');
+    expect(btnB.getAttribute('aria-busy')).toBe('true');
+    // First check finishes: second button must remain busy until its own check finishes.
+    gates.get(first.id)!();
+    await until(() => btnA.getAttribute('aria-busy') !== 'true', 'first check finished');
+    expect(btnB.getAttribute('aria-busy')).toBe('true');
+    gates.get(second.id)!();
+    await until(() => btnB.getAttribute('aria-busy') !== 'true', 'second check finished');
+  });
+
+  it('ignores a stale ConnectDialog submission after switching providers or closing the dialog', async () => {
+    const api = new MockApi('normal', 0);
+    let rejectConnect!: (e: Error) => void;
+    vi.spyOn(api, 'connectCloud').mockImplementation(
+      () =>
+        new Promise((_, no) => {
+          rejectConnect = no;
+        }),
+    );
+    open(api);
+    await until(() => target.querySelector('#cloud header .btn'), 'Connect');
+    button(target, 'Connect')!.click();
+    const d = await until(() => dialog()?.querySelector('input[type="password"]') && dialog(), 'the dialog');
+    type(d.querySelector<HTMLInputElement>('input[type="password"]')!, 'rpa_in_flight');
+    d.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    flushSync();
+    // Switch provider while RunPod connectCloud is still in flight.
+    [...d.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((r) => text(r) === 'Remote FOLO server')!.click();
+    flushSync();
+    // Late rejection from the superseded RunPod submit must not pollute Remote FOLO server's form.
+    rejectConnect(new ApiError(422, 'cloud_auth_failed', 'bad runpod key'));
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+    expect(d.querySelector('.msg.error')).toBeNull();
+    expect(d.querySelector('.err')).toBeNull();
+  });
 });

@@ -5,6 +5,8 @@
 // STREAM_SILENCE) is aborted and reopened like a dropped one, and the reopening asks for a resync (`reconnect`). A
 // stream the server ended, an error status and a failed request are all reopened with exponential backoff.
 
+import type { AccessWatch } from './access';
+import type { Reachability } from './reach';
 import type { BenchEventMap, LabelEventMap, RunEventMap } from './types';
 
 /** Handlers for a stream whose payloads are `M`, keyed by the SSE `event:` name, plus the connection's own. */
@@ -75,6 +77,11 @@ export function sseParser(emit: (name: string, data: string) => void): (chunk: s
   };
 }
 
+export interface StreamWatch {
+  reach?: Reachability;
+  access?: AccessWatch;
+}
+
 /**
  * Opens `url` and hands the JSON payload of each event named in `events` to its handler. Other event names are ignored
  * (servers may add some). Returns the function that closes it.
@@ -85,6 +92,7 @@ export function openEventStream<M>(
   handlers: EventHandlers<M>,
   backoff: Backoff = defaultBackoff,
   silence: number = STREAM_SILENCE_MS,
+  watch?: StreamWatch,
 ): () => void {
   const wanted = new Set<string>(events);
   let closed = false;
@@ -109,21 +117,22 @@ export function openEventStream<M>(
   };
 
   // The connection is gone (ended, failed, refused or silent): say so and open another after the backoff.
-  const drop = () => {
+  const drop = (notifyReachFailed = true) => {
     if (closed) return;
     const old = ctrl;
     ctrl = null;
     old?.abort();
     clearTimeout(watchdog);
     hadError = true;
+    if (notifyReachFailed) watch?.reach?.failed();
     handlers.connection?.('reconnecting');
     clearTimeout(timer);
     timer = setTimeout(() => void connect(), backoff.delay(attempt++));
   };
-  const watch = () => {
+  const checkSilence = () => {
     const idle = Date.now() - heard;
     if (idle >= silence) drop();
-    else watchdog = setTimeout(watch, silence - idle);
+    else watchdog = setTimeout(checkSilence, silence - idle);
   };
 
   const connect = async () => {
@@ -132,7 +141,8 @@ export function openEventStream<M>(
     ctrl = my;
     heard = Date.now();
     clearTimeout(watchdog);
-    watchdog = setTimeout(watch, silence);
+    watchdog = setTimeout(checkSilence, silence);
+    const seen = watch?.access?.checks ?? 0;
     let res: Response;
     try {
       res = await fetch(url, { headers: { accept: 'text/event-stream' }, cache: 'no-store', signal: my.signal });
@@ -141,6 +151,14 @@ export function openEventStream<M>(
       return;
     }
     if (ctrl !== my) return void res.body?.cancel().catch(() => {});
+    // A 401 or 403 reached the server (or its auth proxy) and was refused: let Access confirm whether Studio is still
+    // let in instead of probing health as an outage (health stays open under `folo serve --token`).
+    if (res.status === 401 || res.status === 403) {
+      res.body?.cancel().catch(() => {});
+      watch?.reach?.ok();
+      watch?.access?.refused(seen);
+      return drop(false);
+    }
     // An error status, or an answer that is not an event stream (a proxy's page): as EventSource, a failed connection.
     if (!res.ok || !res.body || !(res.headers.get('content-type') ?? '').includes('text/event-stream')) {
       res.body?.cancel().catch(() => {});
@@ -148,6 +166,7 @@ export function openEventStream<M>(
     }
     heard = Date.now();
     attempt = 0;
+    watch?.reach?.ok();
     handlers.connection?.('open');
     if (hadError) {
       hadError = false;

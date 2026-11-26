@@ -196,9 +196,12 @@ const noop = () => {};
 function toKeyframe(css: string): Keyframe {
   const keyframe: Keyframe = {};
   for (const part of css.split(';')) {
-    const [property, value] = part.split(':');
-    if (!property || value === undefined) break;
-    keyframe[property.trim().replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())] = value.trim();
+    const colon = part.indexOf(':');
+    if (colon <= 0) continue;
+    const property = part.slice(0, colon).trim();
+    if (!property) continue;
+    const value = part.slice(colon + 1).trim();
+    keyframe[property.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())] = value;
   }
   return keyframe;
 }
@@ -234,6 +237,7 @@ function animate(el: Element, options: TransitionConfig, counterpart: Animation 
     }
     animation = el.animate(first, { duration: delay, fill: 'forwards' });
     animation.onfinish = () => {
+      if (aborted) return;
       animation!.cancel();
       const t1 = counterpart?.t() ?? 1 - t2;
       counterpart?.abort();
@@ -250,6 +254,7 @@ function animate(el: Element, options: TransitionConfig, counterpart: Animation 
       if (duration > 0) getT = () => t1 + delta * easing((animation!.currentTime as number) / duration);
       animation = el.animate(frames, { duration, fill: 'forwards' });
       animation.onfinish = () => {
+        if (aborted) return;
         getT = () => t2;
         tick?.(t2, 1 - t2);
         finish();

@@ -6,7 +6,7 @@
  */
 import ExternalLink from '$icons/external-link';
 import PlugZap from '$icons/plug-zap';
-import { bindable, computed, createUniqueId, css, effect, For, signal, tick, untrack, type Signal } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, For, onCleanup, signal, tick, untrack, type Signal } from 'fw';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { CloudConnection, CloudField, CloudProvider } from '$lib/api/types';
@@ -67,8 +67,16 @@ export default function ConnectDialog(props: ConnectDialogProps) {
     },
   });
 
-  /** Back to an empty form: every value dropped, the secrets with them. */
+  let alive = true;
+  let submitSeq = 0;
+  onCleanup(() => {
+    alive = false;
+    submitSeq++;
+  });
+
+  /** Back to an empty form: every value dropped, the secrets with them, any in-flight submit superseded. */
   function reset() {
+    submitSeq++;
     values.set({});
     name.set('');
     fieldErrors.set({});
@@ -80,7 +88,7 @@ export default function ConnectDialog(props: ConnectDialogProps) {
   });
 
   /** Focus on a field's input (the dialog has opened, or a submit found it wrong). */
-  const focusField = (key: string) => void tick().then(() => document.getElementById(`${uid}-${key}`)?.focus());
+  const focusField = (key: string) => void tick().then(() => alive && document.getElementById(`${uid}-${key}`)?.focus());
   // On open, the first thing to type (the API key, a server's URL), not the dialog: four Tabs less (shell F18).
   effect(() => {
     if (open.get()) untrack(() => provider.get()?.fields[0] && focusField(provider.get()!.fields[0]!.key));
@@ -101,6 +109,8 @@ export default function ConnectDialog(props: ConnectDialogProps) {
     const missing = Object.fromEntries(p.fields.filter((f) => f.required && !typed[f.key]?.trim()).map((f) => [f.key, `Enter the ${inSentence(f)}.`]));
     showErrors(missing);
     if (Object.keys(missing).length) return;
+    const seq = ++submitSeq;
+    const epoch = hub.epoch;
     busy.set(true);
     try {
       const conn = await hub.api.connectCloud({
@@ -108,11 +118,13 @@ export default function ConnectDialog(props: ConnectDialogProps) {
         name: name.peek().trim(),
         values: Object.fromEntries(p.fields.map((f) => [f.key, typed[f.key]?.trim() ?? ''])),
       });
+      if (!alive || seq !== submitSeq || hub.epoch !== epoch) return;
       // The dialog closes first: the new row says the rest.
       open.set(false);
       toast.success(`Connected ${p.name}`);
       props.onconnected(conn);
     } catch (err) {
+      if (!alive || seq !== submitSeq || hub.epoch !== epoch) return;
       const field = err instanceof ApiError && err.code === 'invalid_body' ? p.fields.find((f) => err.message.includes(`\`${f.key}\``)) : undefined;
       const secret = firstSecret.peek();
       // A rejected credential is said at its field; one left empty (an optional token the server needs after all) is
@@ -122,7 +134,7 @@ export default function ConnectDialog(props: ConnectDialogProps) {
       else if (field && err instanceof ApiError) showErrors({ [field.key]: fieldMessage(field, err.message) });
       else failure.set(err);
     } finally {
-      busy.set(false);
+      if (alive && seq === submitSeq) busy.set(false);
     }
   }
 

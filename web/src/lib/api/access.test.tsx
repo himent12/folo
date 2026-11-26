@@ -109,6 +109,20 @@ describe('Access', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect([access.refusal, asked.length]).toEqual([null, 2]);
   });
+
+  it('aborts an in-flight accessCheck signal immediately on reset()', () => {
+    const access = new Access();
+    const signals: AbortSignal[] = [];
+    access.reset((s) => {
+      signals.push(s);
+      return new Promise<AccessAnswer>(() => {});
+    });
+    access.refused(access.checks);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(false);
+    access.reset(null);
+    expect(signals[0]!.aborted).toBe(true);
+  });
 });
 
 /** Settles when `go` is called: a response held back by the test. */
@@ -298,5 +312,83 @@ describe('hub.refused with the server', () => {
     list.go();
     expect(await older).toEqual([]);
     expect(hub.offline).toBe(false);
+  });
+
+  it('surfaces a 401 or 403 on an SSE stream as hub.refused without false health-outage probing', async () => {
+    let streamStatus = 200;
+    let headStatus = 200;
+    let healths = 0;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/api/health')) {
+        healths++;
+        return Response.json(HEALTH);
+      }
+      if (init?.method === 'HEAD') return new Response(null, { status: headStatus });
+      if (url.endsWith('/events')) {
+        if (streamStatus !== 200) return new Response('', { status: streamStatus });
+        return new Response(new ReadableStream({ start: () => {} }), { headers: { 'content-type': 'text/event-stream' } });
+      }
+      return Response.json({});
+    });
+    await hub.connect();
+    const healthAfterConnect = healths;
+
+    streamStatus = 401;
+    headStatus = 401;
+    const close = hub.api.runEvents('r1', {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect([hub.offline, hub.refused, healths - healthAfterConnect]).toEqual([true, TOKEN_WALL, 0]);
+    close();
+
+    // Recover access, then verify 403 on SSE reports REFUSES_ACCESS.
+    headStatus = 200;
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    expect([hub.offline, hub.refused]).toEqual([false, null]);
+
+    streamStatus = 403;
+    headStatus = 403;
+    const close2 = hub.api.runEvents('r2', {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect([hub.offline, hub.refused, healths - healthAfterConnect]).toEqual([true, REFUSES_ACCESS, 0]);
+    close2();
+  });
+
+  it('rechecks access immediately when recovering from a server outage while refused', async () => {
+    let up = true;
+    let token = true;
+    let heads = 0;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (!up) throw new TypeError('Failed to fetch');
+      if (url.endsWith('/api/health')) return Response.json(HEALTH);
+      if (init?.method === 'HEAD') {
+        heads++;
+        return new Response(null, { status: token ? 200 : 401 });
+      }
+      return token ? Response.json({ datasets: [] }) : UNAUTHORIZED();
+    });
+    await hub.connect();
+    // Server refuses access (401) and enters backoff.
+    token = false;
+    await expect(hub.api.datasets()).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect([hub.offline, hub.refused]).toEqual([true, TOKEN_WALL]);
+    // Advance through initial access retries so access is sitting in its 5 s backoff.
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]! + PROBE_DELAYS[1]!);
+    expect(hub.refused).toBe(TOKEN_WALL);
+
+    // Server goes offline completely, then restarts without --token.
+    up = false;
+    await expect(hub.api.datasets()).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect([hub.offline, hub.refused]).toEqual([true, null]);
+
+    up = true;
+    token = true;
+    const headsBeforeRecovery = heads;
+    // Reach recovers at PROBE_DELAYS[0] (2 s) and triggers Access.recheck() immediately instead of waiting 5 s.
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    await vi.advanceTimersByTimeAsync(0);
+    expect([hub.offline, hub.refused]).toEqual([false, null]);
+    expect(heads).toBeGreaterThan(headsBeforeRecovery);
   });
 });

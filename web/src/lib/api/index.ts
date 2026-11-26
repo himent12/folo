@@ -14,7 +14,7 @@ import { retryFailedStyles } from '$lib/failedStyles';
 import { prefs } from '$lib/prefs';
 import { Access } from './access';
 import { ApiError, HttpApi, type Api } from './client';
-import { accessCheck, earlyTokenWall, featuresOf, isHealth, NOT_FOLO, refusal, refusedWords, TOKEN_WALL, tokenWall } from './handshake';
+import { accessCheck, earlyTokenWall, featuresOf, isHealth, NOT_FOLO, refusal, refusedWords, REFUSES_ACCESS, TOKEN_WALL, tokenWall } from './handshake';
 import { PROBE_DELAYS, PROBE_TIMEOUT, Reach, type Reachability } from './reach';
 import { shareApi, unshare } from './share';
 import type { Scenario } from './mock/scenario';
@@ -271,7 +271,10 @@ class Hub {
         if (attempt !== this.#attempt) return;
         const was = this.#reach.offline;
         this.#reach.ok();
-        if (was) void this.#learn(http.base, attempt, ctrl.signal);
+        if (was) {
+          void this.#learn(http.base, attempt, ctrl.signal);
+          this.#access.recheck();
+        }
       },
       failed: () => void (attempt === this.#attempt && this.#reach.failed()),
     };
@@ -324,13 +327,17 @@ class Hub {
           if (attempt !== this.#attempt) return;
           if (!isHealth(h)) throw new ApiError(200, 'not_folo', NOT_FOLO);
           const left = Math.max(0, CONNECT_TIMEOUT - (performance.now() - started));
-          let walled = await within(early.answer, TOKEN_GRACE);
+          const earlyResult = await within(early.answer, TOKEN_GRACE);
           if (attempt !== this.#attempt) return;
-          if (walled === null) {
+          let wall: 401 | 403 | null;
+          if (earlyResult === null) {
             early.cancel();
-            walled = await tokenWall(http.base, AbortSignal.any([abort, AbortSignal.timeout(left)]));
+            wall = await tokenWall(http.base, AbortSignal.any([abort, AbortSignal.timeout(left)]));
+          } else {
+            wall = earlyResult ? 401 : null;
           }
-          if (walled) throw new ApiError(401, 'token_wall', TOKEN_WALL);
+          if (wall === 401) throw new ApiError(401, 'token_wall', TOKEN_WALL);
+          if (wall === 403) throw new ApiError(403, 'forbidden', REFUSES_ACCESS);
           if (attempt !== this.#attempt) return;
           this.api = http;
           // Any HTTP answer, whatever its status or body, says the server is there: only a request that reached
@@ -359,7 +366,7 @@ class Hub {
           early?.cancel();
         }
         if (attempt !== this.#attempt) return;
-        await new Promise((next) => setTimeout(next, PROBE_DELAYS[Math.min(i, PROBE_DELAYS.length - 1)]));
+        await pause(PROBE_DELAYS[Math.min(i, PROBE_DELAYS.length - 1)]!, abort);
         if (attempt !== this.#attempt) return;
       }
     } finally {

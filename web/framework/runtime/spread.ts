@@ -36,6 +36,8 @@ export function spread(
     listeners.clear();
   });
   let classSet = false;
+  let prevClass: string | undefined;
+  let prevDirs: Record<string, unknown> | undefined;
   renderEffect(() => {
     const src = (typeof props === 'function' ? (props as () => object)() : props) as Record<string, unknown>;
     const next: Record<string, unknown> = {};
@@ -44,14 +46,18 @@ export function spread(
     const d = dirs?.();
     if (!classSet || 'class' in next || d !== undefined) {
       // A `class` key that went is `undefined` here: its classes go, the scope class and directives stay on.
-      const value = next.class;
-      if (!classSet || value !== prev.class || d !== undefined) {
-        const c = toClass(clsx(value as ClassValue), scope, d);
+      const cls = clsx(next.class as ClassValue);
+      if (!classSet || cls !== prevClass) {
+        const c = toClass(cls, scope, d);
         if (c === null) el.removeAttribute('class');
         else if (el.namespaceURI === 'http://www.w3.org/1999/xhtml') (el as HTMLElement).className = c;
         else el.setAttribute('class', c);
         classSet = true;
+        prevClass = cls;
+      } else if (d !== undefined) {
+        for (const k in d) if (prevDirs === undefined || !d[k] !== !prevDirs[k]) el.classList.toggle(k, !!d[k]);
       }
+      prevDirs = d;
     }
     for (const key in next) {
       if (key === 'class') continue;

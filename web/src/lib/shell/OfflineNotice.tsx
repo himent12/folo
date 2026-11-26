@@ -9,7 +9,7 @@
  */
 import TriangleAlert from '$icons/triangle-alert';
 import WifiOff from '$icons/wifi-off';
-import { computed, css, effect, signal } from 'fw';
+import { computed, css, effect, onCleanup, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { href, router } from '$lib/router';
 
@@ -28,6 +28,10 @@ export default function OfflineNotice() {
   let retryBtn: HTMLButtonElement | undefined;
   let reloadBtn: HTMLButtonElement | undefined;
   let reloadFocused = false;
+  let alive = true;
+  onCleanup(() => {
+    alive = false;
+  });
 
   const focusFallback = () =>
     slotEl?.closest('header')?.querySelector<HTMLElement>(':scope > .actions button, :scope > .actions a[href]') ?? document.getElementById('content');
@@ -50,6 +54,7 @@ export default function OfflineNotice() {
     } catch {
       /* hub.connect handles connection errors internally */
     } finally {
+      if (!alive) return;
       const hadFocus = !!retryBtn && document.activeElement === retryBtn;
       const fallback = hadFocus ? focusFallback() : null;
       retrying.set(false);

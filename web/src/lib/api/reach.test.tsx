@@ -117,11 +117,25 @@ describe('Reach', () => {
     expect(await reach.suspect()).toBe(false);
     expect(probes).toBe(2);
 
-    // A probe that hangs: any request that answers meanwhile settles the suspicion as up.
-    reach.reset(() => new Promise(() => {}));
+    // A probe that hangs: any request that answers meanwhile settles the suspicion as up and aborts the probe signal.
+    const signals: AbortSignal[] = [];
+    reach.reset((s) => {
+      signals.push(s);
+      return new Promise(() => {});
+    });
     const hung = reach.suspect();
+    expect(signals).toHaveLength(1);
+    expect(signals[0]!.aborted).toBe(false);
     reach.ok();
+    expect(signals[0]!.aborted).toBe(true);
     expect(await hung).toBe(true);
+
+    // Resetting while a probe is in flight aborts its signal too.
+    reach.failed();
+    expect(signals).toHaveLength(2);
+    expect(signals[1]!.aborted).toBe(false);
+    reach.reset(null);
+    expect(signals[1]!.aborted).toBe(true);
   });
 });
 
@@ -207,6 +221,41 @@ describe('hub.offline with the server', () => {
     expect(held()).toEqual([false, false]);
     stop();
     view.unmount();
+  });
+
+  it('brings Studio back online when a weights download or tag HEAD answers, and flags mid-body download failures', async () => {
+    let up = true;
+    let breakBody = false;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (!up) throw new TypeError('Failed to fetch');
+      if (url.endsWith('/api/health')) return Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
+      if (url.endsWith('/api/runs') && init?.method === 'HEAD') return new Response(null, { status: 200 });
+      if (url.includes('/weights') && init?.method === 'HEAD') return new Response(null, { status: 200, headers: { etag: '"v1"' } });
+      if (url.includes('/weights')) {
+        if (breakBody) {
+          const r = new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+          vi.spyOn(r, 'arrayBuffer').mockRejectedValue(new TypeError('network reset'));
+          return r;
+        }
+        return new Response(new Uint8Array([1, 2, 3]), { status: 200 });
+      }
+      return Response.json({});
+    });
+    await hub.connect();
+    // Drive offline via a failed request.
+    up = false;
+    await expect(hub.api.datasets()).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hub.offline).toBe(true);
+
+    // Server comes back and a weights HEAD answers -> reach.ok() brings hub online immediately.
+    up = true;
+    expect(await hub.api.modelWeightsTag('m1')).toBe('"v1"');
+    expect(hub.offline).toBe(false);
+
+    // Mid-body failure during modelWeights triggers reach.failed() and throws ApiError(network).
+    breakBody = true;
+    await expect(hub.api.modelWeights('m1')).rejects.toMatchObject({ status: 0, code: 'network' });
   });
 });
 

@@ -5,6 +5,7 @@ import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { TrainConfig } from '$lib/api/types';
 import { parse, router } from '$lib/router';
+import { toast } from '$lib/ui/toast';
 import { render } from '../../../framework/testing';
 import Settings from '../Settings';
 import Throughput from './Throughput';
@@ -160,5 +161,31 @@ describe('Settings › Throughput', () => {
     hub.api = new MockApi('normal', 0);
     c = mount(Settings, { target });
     await until(() => target.querySelector('#throughput .tp-row'), 'the Throughput panel');
+  });
+
+  it('ignores a stale benchmark completion after unmount or server epoch change', async () => {
+    toast.items = [];
+    const api = new MockApi('normal', 0);
+    hub.api = api;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const real = api.benchmark.bind(api);
+    vi.spyOn(api, 'benchmark').mockImplementation(async (b) => {
+      await gate;
+      return real(b);
+    });
+    c = mount(Throughput, { target, props: { benchmark: true } });
+    await until(() => target.querySelector('.tp-row'), 'the rows');
+    measureBtn()!.click();
+    flushSync();
+    expect(measureBtn()!.getAttribute('aria-busy')).toBe('true');
+    // Reconnect (epoch bumps) before benchmark finishes -> resets busy state and drops stale toast.
+    hub.epoch++;
+    flushSync();
+    expect(measureBtn()!.getAttribute('aria-busy')).toBeNull();
+    release();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(toast.items).toEqual([]);
   });
 });

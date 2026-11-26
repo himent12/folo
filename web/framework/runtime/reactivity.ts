@@ -59,10 +59,12 @@ export function deep<T>(value: T): T {
       const had = Object.prototype.hasOwnProperty.call(t, prop);
       const old = t[prop];
       if (isArray && prop === 'length') {
-        const oldLen = (t as unknown as unknown[]).length;
-        (t as unknown as unknown[]).length = v as number;
-        if (oldLen !== v) {
-          for (let i = v as number; i < oldLen; i++) {
+        const arr = t as unknown as unknown[];
+        const oldLen = arr.length;
+        arr.length = v as number;
+        const nextLen = arr.length;
+        if (oldLen !== nextLen) {
+          for (let i = nextLen; i < oldLen; i++) {
             const s = keys.get(String(i));
             if (s) bump(s);
           }
@@ -88,7 +90,7 @@ export function deep<T>(value: T): T {
       return true;
     },
     deleteProperty(t, prop) {
-      if (!(prop in t)) return true;
+      if (!Object.prototype.hasOwnProperty.call(t, prop)) return true;
       delete t[prop];
       const s = keys.get(prop);
       if (s) bump(s);

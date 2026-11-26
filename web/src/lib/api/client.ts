@@ -348,17 +348,10 @@ export class HttpApi implements Api {
     if (res.status === 401 || res.status === 403) this.access?.refused(seen);
   }
 
-  /** An event stream whose opening and dropping also tell `reach` whether the server is there. */
+  /** An event stream whose opening, dropping, and 401/403 refusals also update `reach` and `access`. */
   #stream<M>(url: string, events: readonly (keyof M & string)[], handlers: EventHandlers<M>): () => void {
-    const reach = this.reach;
-    if (!reach) return openEventStream(url, events, handlers);
-    const own = handlers.connection as ((state: 'open' | 'reconnecting') => void) | undefined;
-    const connection = (state: 'open' | 'reconnecting') => {
-      if (state === 'open') reach.ok();
-      else reach.failed();
-      own?.(state);
-    };
-    return openEventStream(url, events, { ...handlers, connection } as EventHandlers<M>);
+    const watch = this.reach || this.access ? { reach: this.reach, access: this.access } : undefined;
+    return openEventStream(url, events, handlers, undefined, undefined, watch);
   }
 
   async #req<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
@@ -653,8 +646,17 @@ export class HttpApi implements Api {
       this.reach?.failed();
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
     }
-    if (res.ok) return res.arrayBuffer();
+    this.reach?.ok();
     this.#answered(res, seen);
+    if (res.ok) {
+      try {
+        return await res.arrayBuffer();
+      } catch (e) {
+        if (e instanceof DOMException && e.name === 'AbortError') throw e;
+        this.reach?.failed();
+        throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
+      }
+    }
     const err = ((await res.json().catch(() => undefined)) as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
     throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download the model (HTTP ${res.status}).`, err?.hint);
   }
@@ -680,19 +682,27 @@ export class HttpApi implements Api {
       this.reach?.failed();
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
     }
+    this.reach?.ok();
+    this.#answered(res, seen);
     if (!res.ok) {
-      this.#answered(res, seen);
       const err = ((await res.json().catch(() => undefined)) as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
       throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download ${what} (HTTP ${res.status}).`, err?.hint);
     }
     const name = attachmentName(res.headers.get('content-disposition')) ?? fallback;
-    return new File([await res.blob()], name, { type: 'application/octet-stream' });
+    try {
+      return new File([await res.blob()], name, { type: 'application/octet-stream' });
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') throw e;
+      this.reach?.failed();
+      throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
+    }
   }
 
   async modelWeightsTag(id: string, signal?: AbortSignal) {
     const seen = this.access?.checks ?? 0;
     try {
       const res = await fetch(`${this.base}/api/models/${encodeURIComponent(id)}/weights?format=f16`, { method: 'HEAD', signal });
+      this.reach?.ok();
       this.#answered(res, seen);
       return res.ok ? res.headers.get('etag') : null;
     } catch {
