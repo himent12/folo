@@ -123,11 +123,18 @@ pub fn orthogonal(shape: impl Into<Shape>, gain: f64, rng: &mut Rng) -> Result<T
     if dims.contains(&0) {
         return Err(Error::Invalid(format!("init::orthogonal: zero dimension in shape {shape}")));
     }
-    if !gain.is_finite() {
-        return Err(Error::Invalid(format!("init::orthogonal: gain must be finite, got {gain}")));
+    if !(gain.is_finite() && (gain as f32).is_finite()) {
+        return Err(Error::Invalid(format!(
+            "init::orthogonal: gain must be finite in f32 range, got {gain}"
+        )));
     }
     let rows = dims[0];
-    let cols: usize = dims[1..].iter().product();
+    let cols = dims[1..].iter().try_fold(1usize, |acc, &d| acc.checked_mul(d)).ok_or_else(|| {
+        Error::Invalid(format!("init::orthogonal: flattened size overflow for shape {shape}"))
+    })?;
+    let total = rows.checked_mul(cols).ok_or_else(|| {
+        Error::Invalid(format!("init::orthogonal: element count overflow for shape {shape}"))
+    })?;
     let transposed = rows < cols;
     let (m, n) = if transposed { (cols, rows) } else { (rows, cols) };
 
@@ -137,7 +144,7 @@ pub fn orthogonal(shape: impl Into<Shape>, gain: f64, rng: &mut Rng) -> Result<T
     let q = householder_qr_thin_q(&mut a, m, n, gain);
 
     let out: Vec<f32> = if transposed {
-        let mut t = vec![0.0f32; rows * cols];
+        let mut t = vec![0.0f32; total];
         for i in 0..m {
             for j in 0..n {
                 t[j * m + i] = q[i * n + j] as f32;
@@ -147,6 +154,11 @@ pub fn orthogonal(shape: impl Into<Shape>, gain: f64, rng: &mut Rng) -> Result<T
     } else {
         q.into_iter().map(|v| v as f32).collect()
     };
+    if !out.iter().all(|v| v.is_finite()) {
+        return Err(Error::Invalid(format!(
+            "init::orthogonal: gain {gain} overflowed f32 output for shape {shape}"
+        )));
+    }
     Ok(Tensor::from_vec(out, shape)?)
 }
 
@@ -168,10 +180,9 @@ fn householder_qr_thin_q(a: &mut [f64], m: usize, n: usize, gain: f64) -> Vec<f6
             r_diag[k] = 0.0;
             continue;
         }
-        let inv_scale = 1.0 / scale;
         let mut sum_sq = 0.0f64;
         for i in k..m {
-            let s = a[i * n + k] * inv_scale;
+            let s = a[i * n + k] / scale;
             sum_sq += s * s;
         }
         let norm = scale * sum_sq.sqrt();
@@ -422,26 +433,39 @@ mod tests {
             }
         }
 
-        // 2. Rank-deficient / zero matrix still produces exact Q^T Q == I_n.
+        // 2. Rank-deficient (zero matrix AND linearly dependent non-zero columns) still produces exact Q^T Q == I_n.
         let mut zeros = vec![0.0f64; m * n];
         let q_zero = householder_qr_thin_q(&mut zeros, m, n, 1.0);
-        for i in 0..n {
-            for j in 0..n {
-                let mut dot = 0.0;
-                for row in 0..m {
-                    dot += q_zero[row * n + i] * q_zero[row * n + j];
+        let mut rank1 = vec![0.0f64; m * n];
+        for row in 0..m {
+            let base = (row + 1) as f64;
+            for col in 0..n {
+                rank1[row * n + col] = base * (col + 1) as f64;
+            }
+        }
+        let q_rank1 = householder_qr_thin_q(&mut rank1, m, n, 1.0);
+        for (label, q_mat) in [("zero", &q_zero), ("rank1", &q_rank1)] {
+            for i in 0..n {
+                for j in 0..n {
+                    let mut dot = 0.0;
+                    for row in 0..m {
+                        dot += q_mat[row * n + i] * q_mat[row * n + j];
+                    }
+                    let want = if i == j { 1.0 } else { 0.0 };
+                    assert!((dot - want).abs() < 1e-13, "{label}-matrix Q^T Q[{i},{j}] = {dot} vs {want}");
                 }
-                let want = if i == j { 1.0 } else { 0.0 };
-                assert!((dot - want).abs() < 1e-14, "zero-matrix Q^T Q[{i},{j}] = {dot} vs {want}");
             }
         }
 
-        // 3. Invalid shapes and non-finite gains are rejected.
+        // 3. Invalid shapes, overflowing products, and non-finite / f32-overflowing gains are rejected.
         assert!(orthogonal([], 1.0, &mut rng).is_err());
         assert!(orthogonal([8], 1.0, &mut rng).is_err());
         assert!(orthogonal([4, 0], 1.0, &mut rng).is_err());
         assert!(orthogonal([0, 4, 3, 3], 1.0, &mut rng).is_err());
+        assert!(orthogonal([2, usize::MAX / 2, 2], 1.0, &mut rng).is_err());
         assert!(orthogonal([4, 4], f64::NAN, &mut rng).is_err());
         assert!(orthogonal([4, 4], f64::INFINITY, &mut rng).is_err());
+        assert!(orthogonal([4, 4], f64::NEG_INFINITY, &mut rng).is_err());
+        assert!(orthogonal([1, 1], 1e40, &mut rng).is_err());
     }
 }

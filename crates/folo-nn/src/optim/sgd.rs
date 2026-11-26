@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use folo_core::backend::OptimStep;
 use folo_core::{DType, Device, Tensor};
 
-use super::cautious::{cautious_mask_and_scale, sgd_coupled_cautious_slice, sgd_decoupled_cautious_slice};
+use super::cautious::{
+    cautious_mask_and_scale_tensor, sgd_coupled_cautious_slice, sgd_decoupled_cautious_slice,
+};
 use super::simd::{sgd_coupled_slice, sgd_decoupled_slice};
 use super::{
     GradSource, OptimKind, Optimizer, ParamGroup, ParamPlan, cpu_fast, for_each_param_planned, step_many,
@@ -99,7 +101,7 @@ impl Sgd {
             step_many("sgd", groups, grads, sgd, state)?
         };
         if done.as_ref().is_none_or(|d| d.iter().any(|&v| !v)) {
-            for_each_param_planned(plan, groups, |gi, pi| {
+            for_each_param_planned(plan, groups, grads, |gi, pi| {
                 if done.as_ref().is_some_and(|d| d[gi]) {
                     return Ok(());
                 }
@@ -217,25 +219,31 @@ fn update_decoupled(
     } else {
         g.clone()
     };
-    let (u_eff, step_lr) = if cautious_update {
-        let (mask, scale) = cautious_mask_and_scale(&u, &g)?;
-        (u.mul(&mask)?, lr * scale)
+    let (u_eff, scale_t) = if cautious_update {
+        let (mask, scale) = cautious_mask_and_scale_tensor(&u, &g)?;
+        (u.mul(&mask)?, Some(scale))
     } else {
-        (u, lr)
+        (u, None)
     };
-    if wd_step != 0.0 {
+    let decay = if wd_step != 0.0 {
         if cautious_wd {
-            let mask = u_eff.mul(p)?.gt(&Tensor::zeros_with([], DType::F32, p.device())?)?;
-            let decay = p.mul(&mask)?.mul_scalar(wd_step)?;
-            p.add_scaled_assign(&u_eff, -step_lr)?;
-            p.add_scaled_assign(&decay, -1.0)?;
+            let cond = u_eff.mul(p)?.gt_scalar(0.0)?;
+            let zero = p.zeros_like()?;
+            Some(cond.where_cond(&p.mul_scalar(wd_step)?, &zero)?)
         } else {
-            let decay = p.mul_scalar(wd_step)?;
-            p.add_scaled_assign(&u_eff, -step_lr)?;
-            p.add_scaled_assign(&decay, -1.0)?;
+            Some(p.mul_scalar(wd_step)?)
         }
     } else {
-        p.add_scaled_assign(&u_eff, -step_lr)?;
+        None
+    };
+    if let Some(scale) = scale_t {
+        let neg_lr = scale.mul_scalar(-lr)?;
+        p.add_assign(&u_eff.mul(&neg_lr)?)?;
+    } else {
+        p.add_scaled_assign(&u_eff, -lr)?;
+    }
+    if let Some(decay) = decay {
+        p.add_scaled_assign(&decay, -1.0)?;
     }
     Ok(())
 }
@@ -297,8 +305,9 @@ fn update(
         d_grad.clone()
     };
     if cautious_update {
-        let (mask, scale) = cautious_mask_and_scale(&u, &d_grad)?;
-        p.add_scaled_assign(&u.mul(&mask)?, -(lr * scale))?;
+        let (mask, scale) = cautious_mask_and_scale_tensor(&u, &d_grad)?;
+        let neg_lr = scale.mul_scalar(-lr)?;
+        p.add_assign(&u.mul(&mask)?.mul(&neg_lr)?)?;
     } else {
         p.add_scaled_assign(&u, -lr)?;
     }

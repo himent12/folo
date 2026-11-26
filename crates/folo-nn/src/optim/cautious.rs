@@ -1,9 +1,10 @@
 //! Cautious update masking (Liang et al. 2024, "Cautious Optimizers: Improving Training with One Line of Code",
 //! arXiv:2411.16085) for [`super::AdamW`] and [`super::Sgd`].
 //!
-//! Given a proposed update direction `u` (e.g. momentum / AdamW ratio) and the current gradient `g`, cautious
-//! masking zeroes coordinates whose update disagrees in sign with `g` and rescales active coordinates by the
-//! inverse active fraction:
+//! Given a proposed update direction `u` (e.g. momentum / AdamW ratio) and the reference gradient `g` (the raw
+//! gradient for `AdamW` and decoupled `Sgd`, or the L2-regularized gradient `d = g + wd * p` for coupled `Sgd`),
+//! cautious masking zeroes coordinates whose update disagrees in sign with `g` and rescales active coordinates
+//! by the inverse active fraction:
 //! ```text
 //! mask_i   = 1 if (u_i > 0 && g_i > 0) || (u_i < 0 && g_i < 0) else 0
 //! active   = sum_i mask_i
@@ -11,28 +12,32 @@
 //! u_eff_i  = alpha * (u_i * mask_i)
 //! ```
 //! Because every active coordinate satisfies `u_i * g_i > 0`, the effective direction guarantees
-//! `<u_eff, g> >= 0` (Lyapunov descent) even when momentum overshoots, while preserving the exact `0.0 * NaN = NaN`
-//! propagation contract of the tensor path.
+//! `<u_eff, g> >= 0` (Lyapunov descent on the unregularized loss for `AdamW` / decoupled `Sgd`, and on the
+//! L2-regularized objective for coupled `Sgd`) even when momentum overshoots, while preserving the exact
+//! `0.0 * NaN = NaN` propagation contract of the tensor path.
 
-use folo_core::{Result, Tensor};
+use folo_core::{DType, Result, Tensor};
 
 #[inline]
 fn same_sign(u: f32, g: f32) -> bool {
     (u > 0.0 && g > 0.0) || (u < 0.0 && g < 0.0)
 }
 
-/// Generic (any-device / non-contiguous) cautious sign-agreement mask `mask_i in {0, 1}` and rescaling factor
-/// `n / max(active, 1)`.
-pub(super) fn cautious_mask_and_scale(u: &Tensor, g: &Tensor) -> Result<(Tensor, f32)> {
+/// Generic (any-device / non-contiguous) cautious sign-agreement mask `mask_i in {0, 1}` and on-device rank-0
+/// rescaling factor `n / max(active, 1)` with zero host readbacks (safe on browser WebGPU and native GPU).
+pub(super) fn cautious_mask_and_scale_tensor(u: &Tensor, g: &Tensor) -> Result<(Tensor, Tensor)> {
+    let dev = u.device();
     let n = u.numel();
     if n == 0 {
-        return Ok((u.zeros_like()?, 1.0));
+        return Ok((u.zeros_like()?, Tensor::full_with([], 1.0, DType::F32, dev)?));
     }
     let pos = u.gt_scalar(0.0)?.mul(&g.gt_scalar(0.0)?)?;
     let neg = u.lt_scalar(0.0)?.mul(&g.lt_scalar(0.0)?)?;
     let mask = pos.add(&neg)?;
-    let active = mask.sum_all()?.item::<f32>()? as f64;
-    let scale = (n as f64 / active.max(1.0)) as f32;
+    let one = Tensor::full_with([], 1.0, DType::F32, dev)?;
+    let active = mask.sum_all()?.maximum(&one)?;
+    let n_t = Tensor::full_with([], n as f64, DType::F32, dev)?;
+    let scale = n_t.div(&active)?;
     Ok((mask, scale))
 }
 
@@ -72,8 +77,8 @@ pub(super) fn adamw_cautious_slice(
         }
     }
 
-    let scale = (n as f64 / active.max(1) as f64) as f32;
-    let neg_step = -(step_size * scale);
+    let scale = (n as f32) / (active.max(1) as f32);
+    let neg_step = scale * (-step_size);
     for (((pi, &gi), &mi), &vi) in p.iter_mut().zip(g).zip(m.iter()).zip(v.iter()) {
         if let Some(d) = decay {
             *pi *= d;
@@ -81,7 +86,7 @@ pub(super) fn adamw_cautious_slice(
         let denom = vi.sqrt() / bc2_sqrt + eps;
         let u = mi / denom;
         let mask = if same_sign(u, gi) { 1.0f32 } else { 0.0f32 };
-        *pi += neg_step * (u * mask);
+        *pi += (u * mask) * neg_step;
     }
 }
 
@@ -115,13 +120,13 @@ pub(super) fn sgd_coupled_cautious_slice(
                     active += 1;
                 }
             }
-            let scale = (n as f64 / active.max(1) as f64) as f32;
-            let neg_lr = -(lr * scale);
+            let scale = (n as f32) / (active.max(1) as f32);
+            let neg_lr = scale * (-lr);
             for ((pi, &gi), &bi) in p.iter_mut().zip(g).zip(b.iter()) {
                 let d = if has_wd { gi + wd * *pi } else { gi };
                 let u = if nesterov { d + mu * bi } else { bi };
                 let mask = if same_sign(u, d) { 1.0f32 } else { 0.0f32 };
-                *pi += neg_lr * (u * mask);
+                *pi += (u * mask) * neg_lr;
             }
         }
         _ => {
@@ -132,12 +137,12 @@ pub(super) fn sgd_coupled_cautious_slice(
                     active += 1;
                 }
             }
-            let scale = (n as f64 / active.max(1) as f64) as f32;
-            let neg_lr = -(lr * scale);
+            let scale = (n as f32) / (active.max(1) as f32);
+            let neg_lr = scale * (-lr);
             for (pi, &gi) in p.iter_mut().zip(g) {
                 let d = if has_wd { gi + wd * *pi } else { gi };
                 let mask = if same_sign(d, d) { 1.0f32 } else { 0.0f32 };
-                *pi += neg_lr * (d * mask);
+                *pi += (d * mask) * neg_lr;
             }
         }
     }
@@ -173,8 +178,8 @@ pub(super) fn sgd_decoupled_cautious_slice(
                     active += 1;
                 }
             }
-            let scale = (n as f64 / active.max(1) as f64) as f32;
-            let neg_lr = -(lr * scale);
+            let scale = (n as f32) / (active.max(1) as f32);
+            let neg_lr = scale * (-lr);
             for ((pi, &gi), &bi) in p.iter_mut().zip(g).zip(b.iter()) {
                 let u = if nesterov { gi + mu * bi } else { bi };
                 let mask = if same_sign(u, gi) { 1.0f32 } else { 0.0f32 };
@@ -188,7 +193,7 @@ pub(super) fn sgd_decoupled_cautious_slice(
                 } else {
                     0.0
                 };
-                *pi += neg_lr * u_m;
+                *pi += u_m * neg_lr;
                 if has_wd {
                     *pi += -decay;
                 }
@@ -201,8 +206,8 @@ pub(super) fn sgd_decoupled_cautious_slice(
                     active += 1;
                 }
             }
-            let scale = (n as f64 / active.max(1) as f64) as f32;
-            let neg_lr = -(lr * scale);
+            let scale = (n as f32) / (active.max(1) as f32);
+            let neg_lr = scale * (-lr);
             for (pi, &gi) in p.iter_mut().zip(g) {
                 let mask = if same_sign(gi, gi) { 1.0f32 } else { 0.0f32 };
                 let u_m = gi * mask;
@@ -215,7 +220,7 @@ pub(super) fn sgd_decoupled_cautious_slice(
                 } else {
                     0.0
                 };
-                *pi += neg_lr * u_m;
+                *pi += u_m * neg_lr;
                 if has_wd {
                     *pi += -decay;
                 }
@@ -228,7 +233,7 @@ pub(super) fn sgd_decoupled_cautious_slice(
 mod tests {
     use folo_core::{Grads, Tensor, no_grad};
 
-    use crate::optim::{AdamW, OptimContract, OptimKind, Optimizer, ParamGroup, Sgd};
+    use crate::optim::{AdamW, MuSgd, OptimContract, OptimKind, Optimizer, ParamGroup, Sgd};
 
     fn grads_for(p: &Tensor, v: &[f32]) -> Grads {
         let mut g = Grads::default();
@@ -304,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn cautious_sgd_lyapunov_descent_and_edge_cases() {
+    fn cautious_sgd_lyapunov_descent_coupled_l2_and_edge_cases() {
         // 1. Lyapunov descent: momentum strongly disagrees on 3 of 4 coords so standard SGD moves uphill
         // (<p_old - p_new, g> < 0), while Cautious SGD guarantees descent (<p_old - p_new, g> > 0).
         let p_caut = Tensor::from_slice(&[0.0f32; 4], [4]).unwrap().requires_grad_();
@@ -323,7 +328,7 @@ mod tests {
         .unwrap();
 
         let g1 = [10.0f32, 10.0, 10.0, 1.0];
-        let g2 = [-0.5f32, -0.5, -0.5, 1.0]; // flips 3 large-momentum coords!
+        let g2 = [-0.5f32, -0.5, -0.5, 1.0];
         opt_caut.step(&grads_for(&p_caut, &g1)).unwrap();
         opt_std.step(&grads_for(&p_std, &g1)).unwrap();
         let before_caut = p_caut.to_vec::<f32>().unwrap();
@@ -337,15 +342,55 @@ mod tests {
         let dot_caut: f64 = (0..4).map(|i| (before_caut[i] - after_caut[i]) as f64 * g2[i] as f64).sum();
         assert!(dot_std < 0.0, "standard SGD should overshoot uphill here, got {dot_std}");
         assert!(dot_caut > 0.0, "cautious SGD must guarantee descent, got {dot_caut}");
-        // Masked coords 0, 1, 2 stayed exact; active coord 3 scaled by 4/1 = 4.0.
         for i in 0..3 {
             assert_eq!(after_caut[i], before_caut[i], "masked coord {i} must not move");
         }
-        // Momentum buffer still updated unconditionally: b[0] = 0.9 * 10.0 + (-0.5) = 8.5.
         let buf = opt_caut.momentum_buffer(0, 0).unwrap().to_vec::<f32>().unwrap();
         assert!((buf[0] - 8.5).abs() < 1e-6);
 
-        // 2. active == 0 (all coords reversed): no NaN, parameter untouched (except weight decay if any).
+        // 2. Coupled L2 SGD compares u against regularized gradient d = g + wd * p (even when raw g disagrees).
+        // p = [10.0, 10.0], wd = 1.0, g = [-2.0, -2.0] => d = [+8.0, +8.0] > 0 while raw g < 0.
+        // Step 1 sets b = +8.0, u = +8.0, which agrees with d > 0 -> both active, parameter decreases.
+        let p_l2 = Tensor::from_slice(&[10.0f32, 10.0], [2]).unwrap().requires_grad_();
+        let mut opt_l2 = Sgd::new(vec![
+            ParamGroup::new("w", vec![("w".into(), p_l2.clone())])
+                .lr(0.1)
+                .momentum(0.5)
+                .nesterov(false)
+                .weight_decay(1.0)
+                .cautious(true),
+        ])
+        .unwrap();
+        opt_l2.step(&grads_for(&p_l2, &[-2.0, -2.0])).unwrap();
+        let v_l2 = p_l2.to_vec::<f32>().unwrap();
+        assert!((v_l2[0] - 9.2).abs() < 1e-6 && (v_l2[1] - 9.2).abs() < 1e-6, "coupled L2: {v_l2:?}");
+
+        // 3. Momentum == 0 (both coupled and decoupled without cautious_wd) exercises the nomom arms.
+        for decoupled in [false, true] {
+            let p_nm = Tensor::from_slice(&[2.0f32, -3.0], [2]).unwrap().requires_grad_();
+            let grp = ParamGroup::new("w", vec![("w".into(), p_nm.clone())])
+                .lr(0.1)
+                .momentum(0.0)
+                .weight_decay(0.05)
+                .decoupled_wd(decoupled)
+                .cautious(true);
+            let mut opt_nm = Sgd::new(vec![grp]).unwrap();
+            // Zero gradient on coord 1 -> active = 1, scale = 2.0 on coord 0.
+            opt_nm.step(&grads_for(&p_nm, &[1.0, 0.0])).unwrap();
+            let v = p_nm.to_vec::<f32>().unwrap();
+            if decoupled {
+                // coord 0: 2.0 - (0.1 * 2.0) * 1.0 - (0.1 * 0.05) * 2.0 = 1.79; coord 1: -3.0 - 0.005 * (-3.0) = -2.985
+                assert!(
+                    (v[0] - 1.79).abs() < 1e-6 && (v[1] - (-2.985)).abs() < 1e-6,
+                    "decoupled nomom: {v:?}"
+                );
+            } else {
+                // coupled: d = [1.1, -0.15], both non-zero -> active = 2, scale = 1.0 -> [1.89, -2.985]
+                assert!((v[0] - 1.89).abs() < 1e-6 && (v[1] - (-2.985)).abs() < 1e-6, "coupled nomom: {v:?}");
+            }
+        }
+
+        // 4. active == 0 (all coords reversed): no NaN, parameter untouched.
         let p_zero = Tensor::from_slice(&[2.0f32, -3.0], [2]).unwrap().requires_grad_();
         let mut opt_z = Sgd::new(vec![
             ParamGroup::new("w", vec![("w".into(), p_zero.clone())])
@@ -360,7 +405,7 @@ mod tests {
         opt_z.step(&grads_for(&p_zero, &[-0.1, 0.1])).unwrap();
         assert_eq!(p_zero.to_vec::<f32>().unwrap(), mid, "all-disagree step must leave params unchanged");
 
-        // 3. Subnormal tiny gradients (1e-25 * 1e-25 underflows f32 product to 0, but sign check stays exact).
+        // 5. Subnormal tiny gradients (1e-25 * 1e-25 underflows f32 product to 0, but sign check stays exact).
         let p_tiny = Tensor::from_slice(&[1.0f32, 1.0], [2]).unwrap().requires_grad_();
         let mut opt_tiny = AdamW::new(vec![
             ParamGroup::new("w", vec![("w".into(), p_tiny.clone())])
@@ -374,7 +419,7 @@ mod tests {
         let v_tiny = p_tiny.to_vec::<f32>().unwrap();
         assert!(v_tiny[0] < 1.0 && v_tiny[1] > 1.0, "tiny gradients must stay active: {v_tiny:?}");
 
-        // 4. NaN propagation is preserved (not masked away).
+        // 6. NaN propagation is preserved (not masked away).
         let p_nan = Tensor::from_slice(&[1.0f32, 2.0], [2]).unwrap().requires_grad_();
         let mut opt_nan =
             AdamW::new(vec![ParamGroup::new("w", vec![("w".into(), p_nan.clone())]).lr(0.1).cautious(true)])
@@ -383,7 +428,7 @@ mod tests {
         let vn = p_nan.to_vec::<f32>().unwrap();
         assert!(vn[0].is_nan() && vn[1].is_finite(), "NaN must propagate: {vn:?}");
 
-        // 5. Empty [0] tensor succeeds cleanly.
+        // 7. Empty [0] tensor succeeds cleanly.
         let p_empty = Tensor::zeros([0]).requires_grad_();
         let mut opt_e = AdamW::new(vec![
             ParamGroup::new("w", vec![("w".into(), p_empty.clone())]).lr(0.1).cautious(true),
@@ -398,9 +443,9 @@ mod tests {
         let g1: Vec<f32> = (0..6).map(|i| (i as f32 - 2.5) * 0.4).collect();
         let g2: Vec<f32> = vec![-0.1, 0.2, 0.0, -0.05, 0.3, -0.2];
 
-        let make_pair = || {
-            let fast = Tensor::from_slice(&vals, [2, 3]).unwrap().requires_grad_();
-            let base = Tensor::from_slice(&vals, [3, 2]).unwrap();
+        let make_pair = |v: &[f32]| {
+            let fast = Tensor::from_slice(v, [2, 3]).unwrap().requires_grad_();
+            let base = Tensor::from_slice(v, [3, 2]).unwrap();
             let base_t = base.t().unwrap();
             {
                 let _g = no_grad();
@@ -413,7 +458,7 @@ mod tests {
 
         // Test Cautious AdamW, Cautious coupled SGD (Nesterov), and Cautious decoupled + cautious_wd SGD.
         for mode in 0..3 {
-            let (fast, slow) = make_pair();
+            let (fast, slow) = make_pair(&vals);
             let mk = |t: &Tensor| {
                 let g = ParamGroup::new("decay", vec![("w".into(), t.clone())])
                     .lr(0.05)
@@ -442,7 +487,33 @@ mod tests {
             }
         }
 
-        // Contract serde: default cautious=false omits key; cautious=true round-trips for AdamW and SGD.
+        // Masked +Inf with cautious + cautious_wd must match bitwise between contiguous slice & strided tensor.
+        let inf_vals = [f32::INFINITY, -f32::INFINITY, 1.0, -2.0, 0.5, 3.0];
+        let inf_grad = [0.0f32, 0.0, 0.5, -0.5, 0.0, 1.0];
+        let (fast_inf, slow_inf) = make_pair(&inf_vals);
+        let mk_inf = |t: &Tensor| {
+            ParamGroup::new("decay", vec![("w".into(), t.clone())])
+                .lr(0.05)
+                .momentum(0.0)
+                .weight_decay(0.1)
+                .decoupled_wd(true)
+                .cautious_wd(true)
+                .cautious(true)
+        };
+        let mut opt_fi = Sgd::new(vec![mk_inf(&fast_inf)]).unwrap();
+        let mut opt_si = Sgd::new(vec![mk_inf(&slow_inf)]).unwrap();
+        opt_fi.step(&grads_for(&fast_inf, &inf_grad)).unwrap();
+        opt_si.step(&grads_for(&slow_inf, &inf_grad)).unwrap();
+        let (xf, xs) = (fast_inf.to_vec::<f32>().unwrap(), slow_inf.to_vec::<f32>().unwrap());
+        assert_eq!(
+            xf.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            xs.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "masked +Inf cautious_wd mismatch: {xf:?} vs {xs:?}"
+        );
+        assert!(xf[0].is_infinite() && xf[0].is_sign_positive());
+
+        // Contract serde: default cautious=false omits key; cautious=true round-trips for AdamW and SGD;
+        // MuSgd rejects cautious=true both in constructor and in apply_contract.
         let p = Tensor::from_slice(&[1.0f32, 2.0], [2]).unwrap().requires_grad_();
         let opt_default = AdamW::new(vec![ParamGroup::new("w", vec![("w".into(), p.clone())])]).unwrap();
         let json_default = serde_json::to_string(&opt_default.contract()).unwrap();
@@ -467,5 +538,13 @@ mod tests {
             opt2.apply_contract(&parsed).unwrap();
             assert!(opt2.groups()[0].cautious, "{kind:?} apply_contract must restore cautious=true");
         }
+
+        assert!(
+            MuSgd::new(vec![ParamGroup::new("decay", vec![("w".into(), p.clone())]).cautious(true)]).is_err()
+        );
+        let mut musgd = MuSgd::new(vec![ParamGroup::new("decay", vec![("w".into(), p.clone())])]).unwrap();
+        let mut bad_contract = musgd.contract();
+        bad_contract.groups[0].cautious = true;
+        assert!(musgd.apply_contract(&bad_contract).is_err());
     }
 }

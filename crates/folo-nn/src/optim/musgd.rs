@@ -103,6 +103,11 @@ impl MuSgd {
         geo: MuonGeoMode,
     ) -> Result<Self> {
         weights.validate()?;
+        if groups.iter().any(|g| g.cautious) {
+            return Err(Error::Invalid(
+                "MuSgd does not support cautious update masking (use Sgd or AdamW)".into(),
+            ));
+        }
         if geo == MuonGeoMode::Geo {
             Self::validate_depthwise(&groups)?;
         }

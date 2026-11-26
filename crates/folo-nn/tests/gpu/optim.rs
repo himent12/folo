@@ -168,3 +168,78 @@ fn agc_and_swa_gpu_parity_and_device_mismatch_safety() {
     swa_gpu.update(&live_cpu).unwrap();
     assert_eq!(swa_gpu.num_averaged(), 5);
 }
+
+#[test]
+fn cautious_optim_gpu_parity_and_large_cross_group_alias_order() {
+    let dev = gpu!();
+
+    // 1. GPU vs CPU parity for Cautious AdamW, Cautious coupled SGD, and Cautious decoupled+cautious_wd SGD
+    // across step 1 (all active), step 2 (partial sign flips), and step 3 (all masked, active == 0).
+    let init = [1.0f32, -2.0, 0.5, 3.0, -1.5, 2.5];
+    let g1 = [2.0f32, -2.0, 3.0, -1.0, 1.5, -2.5];
+    let g2 = [0.4f32, 0.2, 0.8, 0.3, -0.1, -0.5]; // mixed agreement / flips
+    let g3 = [-0.05f32, 0.05, -0.05, 0.05, -0.05, 0.05]; // opposite to accumulated momentum -> active == 0
+
+    for mode in 0..3 {
+        let p_c = Tensor::from_slice(&init, [2, 3]).unwrap().requires_grad_();
+        let p_g = p_c.to_device(dev).unwrap().detach().requires_grad_();
+        let mk = |p: &Tensor| {
+            let g = ParamGroup::new("decay", vec![("w".into(), p.clone())])
+                .lr(0.05)
+                .momentum(0.9)
+                .weight_decay(0.02)
+                .nesterov(false)
+                .cautious(true);
+            if mode == 2 { g.decoupled_wd(true).cautious_wd(true) } else { g }
+        };
+        let (mut opt_c, mut opt_g): (Box<dyn Optimizer>, Box<dyn Optimizer>) = if mode == 0 {
+            (Box::new(AdamW::new(vec![mk(&p_c)]).unwrap()), Box::new(AdamW::new(vec![mk(&p_g)]).unwrap()))
+        } else {
+            (Box::new(Sgd::new(vec![mk(&p_c)]).unwrap()), Box::new(Sgd::new(vec![mk(&p_g)]).unwrap()))
+        };
+        for g in [&g1, &g2, &g3] {
+            let gt = Tensor::from_slice(g, [2, 3]).unwrap();
+            let mut gc = folo_core::Grads::default();
+            gc.insert(&p_c, gt.clone());
+            let mut gg = folo_core::Grads::default();
+            gg.insert(&p_g, gt.to_device(dev).unwrap());
+            opt_c.step(&gc).unwrap();
+            opt_g.step(&gg).unwrap();
+            close(&p_g, &p_c, 1e-5, 1e-5, &format!("cautious mode {mode}"));
+        }
+    }
+
+    // 2. Large (>= PAR_THRESHOLD = 65,536 elements) cross-group storage alias with a cautious group:
+    // group 1's gradient aliases group 0's parameter storage, so canonical order must hold on both CPU & GPU.
+    let n = 40_000usize; // 2 * 40,000 = 80,000 >= 65,536
+    let v0: Vec<f32> = (0..n).map(|i| ((i % 7) as f32 - 3.0) * 0.25).collect();
+    let v1: Vec<f32> = (0..n).map(|i| ((i % 5) as f32 - 2.0) * 0.3).collect();
+    let g0_v: Vec<f32> = (0..n).map(|i| if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+
+    let p0_c = Tensor::from_vec(v0.clone(), [n]).unwrap().requires_grad_();
+    let p1_c = Tensor::from_vec(v1.clone(), [n]).unwrap().requires_grad_();
+    let p0_g = p0_c.to_device(dev).unwrap().detach().requires_grad_();
+    let p1_g = p1_c.to_device(dev).unwrap().detach().requires_grad_();
+
+    let mk_alias = |p0: &Tensor, p1: &Tensor| {
+        Sgd::new(vec![
+            ParamGroup::new("g0", vec![("p0".into(), p0.clone())]).lr(0.1).momentum(0.0).cautious(true),
+            ParamGroup::new("g1", vec![("p1".into(), p1.clone())]).lr(0.1).momentum(0.0),
+        ])
+        .unwrap()
+    };
+    let mut opt_c = mk_alias(&p0_c, &p1_c);
+    let mut opt_g = mk_alias(&p0_g, &p1_g);
+    let g0_t = Tensor::from_vec(g0_v, [n]).unwrap();
+    let mut gc = folo_core::Grads::default();
+    gc.insert(&p0_c, g0_t.clone());
+    gc.insert(&p1_c, p0_c.detach());
+    let mut gg = folo_core::Grads::default();
+    gg.insert(&p0_g, g0_t.to_device(dev).unwrap());
+    gg.insert(&p1_g, p0_g.detach());
+
+    opt_c.step(&gc).unwrap();
+    opt_g.step(&gg).unwrap();
+    close(&p0_g, &p0_c, 1e-6, 1e-6, "large cautious cross-alias p0");
+    close(&p1_g, &p1_c, 1e-6, 1e-6, "large cautious cross-alias p1");
+}

@@ -53,15 +53,49 @@ impl ParamPlan {
     }
 }
 
-/// Run `f` for every `(group index, param index)` in `plan`, in parallel when the step is large. `f` runs under
-/// `no_grad` on whichever thread executes it.
-pub(crate) fn for_each_param_planned<F>(plan: &ParamPlan, groups: &[ParamGroup], f: F) -> Result<()>
+/// True when any two parameters with gradients share storage, any incoming gradient aliases any updated
+/// parameter's storage, or any updated parameter lives off the CPU (where sequential submission preserves
+/// strict canonical group order on the device queue).
+fn needs_serial_order(groups: &[ParamGroup], grads: &dyn GradSource) -> bool {
+    let total_params: usize = groups.iter().map(|g| g.params.len()).sum();
+    let mut written = HashSet::with_capacity(total_params);
+    for grp in groups {
+        for (_, p) in &grp.params {
+            if grads.grad(p).is_none() {
+                continue;
+            }
+            if !p.device().is_cpu() || !written.insert(storage_key(p)) {
+                return true;
+            }
+        }
+    }
+    for grp in groups {
+        for (_, p) in &grp.params {
+            if let Some(g) = grads.grad(p)
+                && written.contains(&storage_key(g))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Run `f` for every `(group index, param index)` in `plan`, in parallel on the CPU when the step is large
+/// and no storage aliases across parameters or gradients (otherwise serially in strict canonical group order).
+/// `f` runs under `no_grad` on whichever thread executes it.
+pub(crate) fn for_each_param_planned<F>(
+    plan: &ParamPlan,
+    groups: &[ParamGroup],
+    grads: &dyn GradSource,
+    f: F,
+) -> Result<()>
 where
     F: Fn(usize, usize) -> Result<()> + Sync,
 {
     use rayon::prelude::*;
     let total: usize = groups.iter().flat_map(|g| &g.params).map(|(_, t)| t.numel()).sum();
-    if total < PAR_THRESHOLD {
+    if total < PAR_THRESHOLD || needs_serial_order(groups, grads) {
         let _g = folo_core::no_grad();
         for &(gi, pi) in &plan.items {
             f(gi, pi)?;

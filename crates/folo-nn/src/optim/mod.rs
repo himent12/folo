@@ -127,8 +127,10 @@ pub struct ParamGroup {
     pub decoupled_wd: bool,
     /// Cautious decoupled weight decay: apply decoupled decay only where `u · p > 0`.
     pub cautious_wd: bool,
-    /// Opt-in Cautious update masking (Liang et al. 2024): mask updates where momentum and gradient disagree in
-    /// sign and rescale active entries by `n / max(active, 1)` (default `false`; supported by [`AdamW`] and [`Sgd`]).
+    /// Opt-in Cautious update masking (Liang et al. 2024): mask updates where the update direction and reference
+    /// gradient disagree in sign (`g` for [`AdamW`] and decoupled [`Sgd`]; L2-regularized `g + wd · p` for
+    /// coupled [`Sgd`]) and rescale active entries by `n / max(active, 1)` (default `false`; supported by
+    /// [`AdamW`] and [`Sgd`], rejected by [`MuSgd`]).
     pub cautious: bool,
     /// Per-parameter depthwise conv mask (`groups > 1 && groups == in_channels == out_channels`), aligned with
     /// `params` (empty means all false). Used by `MuSgd`'s `Conv-GeoMuon` depthwise Polar LMO.
@@ -479,7 +481,7 @@ impl GroupContract {
             eps: (!sgd).then_some(g.eps),
             decoupled_wd: sgd && g.decoupled_wd,
             cautious_wd: sgd && g.cautious_wd,
-            cautious: g.cautious,
+            cautious: kind != OptimKind::MuSgd && g.cautious,
         }
     }
 
@@ -489,6 +491,12 @@ impl GroupContract {
         g.weight_decay = self.weight_decay;
         match kind {
             OptimKind::Sgd | OptimKind::MuSgd => {
+                if kind == OptimKind::MuSgd && self.cautious {
+                    return Err(Error::Load(format!(
+                        "folo.optim group `{}`: `cautious` is only supported for `sgd` and `adamw`",
+                        self.name
+                    )));
+                }
                 g.base_momentum = self.momentum.ok_or_else(|| missing("momentum"))?;
                 g.nesterov = self.nesterov.ok_or_else(|| missing("nesterov"))?;
                 g.decoupled_wd = self.decoupled_wd;

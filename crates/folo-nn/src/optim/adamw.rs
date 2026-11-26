@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use folo_core::backend::OptimStep;
 use folo_core::{DType, Tensor};
 
-use super::cautious::{adamw_cautious_slice, cautious_mask_and_scale};
+use super::cautious::{adamw_cautious_slice, cautious_mask_and_scale_tensor};
 use super::simd::adamw_slice;
 use super::{
     GradSource, OptimKind, Optimizer, ParamGroup, ParamPlan, cpu_fast, for_each_param_planned, step_many,
@@ -153,8 +153,9 @@ fn update(p: &Tensor, g: &Tensor, m: &Tensor, v: &Tensor, c: &Coef) -> Result<()
     let denom = v.sqrt()?.div_scalar(c.bc2_sqrt)?.add_scalar(c.eps)?;
     let u = m.div(&denom)?;
     if c.cautious {
-        let (mask, scale) = cautious_mask_and_scale(&u, &g)?;
-        p.add_scaled_assign(&u.mul(&mask)?, -(c.step_size * scale))?;
+        let (mask, scale) = cautious_mask_and_scale_tensor(&u, &g)?;
+        let neg_step = scale.mul_scalar(-c.step_size)?;
+        p.add_assign(&u.mul(&mask)?.mul(&neg_step)?)?;
     } else {
         p.add_scaled_assign(&u, -c.step_size)?;
     }
@@ -212,7 +213,7 @@ impl Optimizer for AdamW {
             step_many("adamw", groups, grads, adamw, |gi, pi| vec![&state[gi][pi].0, &state[gi][pi].1])?
         };
         if done.as_ref().is_none_or(|d| d.iter().any(|&v| !v)) {
-            for_each_param_planned(plan, groups, |gi, pi| {
+            for_each_param_planned(plan, groups, grads, |gi, pi| {
                 if done.as_ref().is_some_and(|d| d[gi]) {
                     return Ok(());
                 }
