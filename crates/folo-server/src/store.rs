@@ -715,6 +715,12 @@ pub trait Store: Send + Sync + 'static {
         let _ = (id, image_id);
         Err(crate::error::Error::not_implemented("reading dataset files"))
     }
+    /// Effective root folder of dataset `id` (`Index.root`, which honors a YOLO `data.yaml`'s `path:` override)
+    /// when known in this process (`None` for mock procedural datasets or remote proxy stores).
+    fn dataset_root(&self, id: &str) -> Result<Option<std::path::PathBuf>> {
+        let _ = id;
+        Ok(None)
+    }
 
     /// Called once when the server shuts down: stop background work (the real store stops the active run at a
     /// batch boundary, keeping its last checkpoint, drops upload sessions and leaves cloud runs to their workers).

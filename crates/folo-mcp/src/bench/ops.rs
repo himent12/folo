@@ -18,8 +18,13 @@ use serde_json::Value;
 
 use super::Benchmarks;
 use super::hints::ENTRY_COMMANDS;
-use crate::errors::{Error, invalid_arguments};
+use crate::errors::Error;
 use crate::types::bench::*;
+
+/// Front-end-neutral `invalid_arguments` error: [`super::hints::decorate`] supplies the MCP or CLI hint.
+fn invalid_arguments(message: impl Into<String>) -> Error {
+    Error::new(StatusCode::BAD_REQUEST, "invalid_arguments", message)
+}
 
 /// Most boxes in one part of a file of predictions sent to the server (about 15 MB of JSON; a request takes 64 MiB).
 pub const MAX_PART_BOXES: usize = 200_000;

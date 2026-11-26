@@ -542,6 +542,10 @@ impl Store for RealStore {
         self.entry(id)?.current()?.image_path(image_id)
     }
 
+    fn dataset_root(&self, id: &str) -> Result<Option<PathBuf>> {
+        Ok(Some(self.entry(id)?.current()?.root.clone()))
+    }
+
     fn create_upload(&self, req: CreateUpload) -> Result<UploadCreated> {
         Uploads::check(&req)?;
         if let Some(existing) = req.fingerprint.as_deref().and_then(|f| self.uploaded(req.kind, f)) {

@@ -293,10 +293,26 @@ impl MockStore {
         if c.optimizer == folo_api::Optimizer::Unknown {
             return bad("optimizer", "unknown value (this build knows auto, sgd, adamw and musgd)");
         }
-        let gpu_ok = c.device.strip_prefix("gpu:").is_some_and(|n| n.parse::<u32>().is_ok());
-        if !(c.device == "auto" || c.device == "cpu" || gpu_ok) {
+        let gpu_ordinal = c.device.strip_prefix("gpu:").and_then(|n| n.parse::<u32>().ok());
+        if !(c.device == "auto" || c.device == "cpu" || gpu_ordinal.is_some()) {
             return bad("device", "must be auto, cpu or gpu:<n>");
         }
+        if c.compute.is_none()
+            && let Some(n) = gpu_ordinal
+            && n != 0
+        {
+            return Err(Error::new(
+                StatusCode::NOT_FOUND,
+                "device_not_found",
+                format!("gpu:{n} does not exist (this mock server has only gpu:0)"),
+            )
+            .hint("use auto, cpu or gpu:0"));
+        }
+        folo_vision::TrainConfig::from_api(c)
+            .and_then(|v| {
+                v.augment.validate().map_err(|e| folo_vision::Error::Config(format!("augment: {e}")))
+            })
+            .map_err(crate::engine::engine_error)?;
         if let Some(w) = &c.weights {
             self.get_model(w)?;
         }

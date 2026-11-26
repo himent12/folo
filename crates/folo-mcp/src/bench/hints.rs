@@ -47,9 +47,12 @@ pub fn decorate(mut e: Error, front: Front) -> Error {
                 "`folo weights pull NAME` makes published weights a model; the models are those Studio lists"
             }),
             // Only when the error has none: a failed submit's hint says what became of its entry.
-            "invalid_arguments" | "invalid_body" if !mcp && e.body.hint.is_none() => {
-                Some("see `folo bench <command> --help`")
-            }
+            "invalid_arguments" if e.body.hint.is_none() => Some(if mcp {
+                "check the tool's inputSchema (tools/list)"
+            } else {
+                "see `folo bench <command> --help`"
+            }),
+            "invalid_body" if !mcp && e.body.hint.is_none() => Some("see `folo bench <command> --help`"),
             _ => None,
         }
     };
@@ -121,5 +124,13 @@ mod tests {
         let plain = Error::new(StatusCode::NOT_FOUND, "bench_entry_not_found", "no entry")
             .hint("GET /api/bench/benchmarks/{id}/entries lists its entries");
         assert_eq!(decorate(plain, Front::Mcp).body.hint.unwrap(), "get_benchmark lists its entries");
+
+        // Front-end-neutral `invalid_arguments` from bench ops gets each front end's own hint (never MCP's on CLI).
+        let cli_arg =
+            decorate(Error::new(StatusCode::BAD_REQUEST, "invalid_arguments", "bad line"), Front::Cli);
+        assert_eq!(cli_arg.body.hint.as_deref(), Some("see `folo bench <command> --help`"));
+        let mcp_arg =
+            decorate(Error::new(StatusCode::BAD_REQUEST, "invalid_arguments", "bad line"), Front::Mcp);
+        assert_eq!(mcp_arg.body.hint.as_deref(), Some("check the tool's inputSchema (tools/list)"));
     }
 }

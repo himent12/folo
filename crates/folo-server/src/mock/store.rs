@@ -66,9 +66,12 @@ impl Store for MockStore {
         Ok(self.throughput.table(&throughput::gpu(), &[throughput::gpu(), throughput::cpu()]))
     }
 
-    fn estimate_run(&self, config: TrainConfig) -> Result<RunEstimate> {
+    fn estimate_run(&self, mut config: TrainConfig) -> Result<RunEstimate> {
         let ds = self.dataset(&config.dataset_id)?;
         self.validate(&config)?;
+        if let Some(w) = &config.weights {
+            config.arch = self.get_model(w)?.arch;
+        }
         let splits = ds.meta().splits;
         if ds.meta().classes.is_empty() || splits.train == 0 {
             return Err(Error::new(
@@ -729,5 +732,12 @@ impl Store for MockStore {
 
     fn val(&self, req: folo_api::ValRequest) -> Result<folo_api::ValReport> {
         val::val(self, req)
+    }
+
+    fn dataset_root(&self, id: &str) -> Result<Option<std::path::PathBuf>> {
+        Ok(match &*self.dataset(id)? {
+            DatasetEntry::Disk(_, idx) => Some(idx.root.clone()),
+            DatasetEntry::Proc { .. } => None,
+        })
     }
 }
