@@ -687,6 +687,9 @@ export function className(el: Element, fn: () => unknown, scope?: string, dirs?:
     if (value !== prevValue) writeClass(el, toClass(value, scope, d));
     else if (d !== undefined) {
       for (const k in d) if (prevDirs === undefined || !d[k] !== !prevDirs[k]) el.classList.toggle(k, !!d[k]);
+      if (prevDirs !== undefined) for (const k in prevDirs) if (!(k in d) && prevDirs[k]) el.classList.remove(k);
+    } else if (prevDirs !== undefined) {
+      for (const k in prevDirs) if (prevDirs[k]) el.classList.remove(k);
     }
     prevValue = value;
     prevDirs = d;
@@ -793,16 +796,22 @@ export function toStyle(value: unknown, styles?: Styles, important?: Styles): st
   return out === '' ? null : out;
 }
 
-function updateStyles(el: HTMLElement, prev: Styles | undefined, next: Styles, priority?: string): void {
-  for (const key in next) {
-    const value = next[key];
-    if ((prev === undefined ? undefined : prev[key]) !== value) {
-      if (value == null) el.style.removeProperty(key);
-      else el.style.setProperty(key, value as string, priority);
+function updateStyles(el: HTMLElement, prev: Styles | undefined, next: Styles | undefined, priority?: string): void {
+  if (next !== undefined) {
+    for (const key in next) {
+      const value = next[key];
+      if ((prev === undefined ? undefined : prev[key]) !== value) {
+        if (value == null || value === '') el.style.removeProperty(key);
+        else el.style.setProperty(key, value as string, priority);
+      }
     }
   }
-  // Keys a style object no longer has (directives always have the same keys).
-  if (prev !== undefined) for (const key in prev) if (!(key in next) && prev[key] != null) el.style.removeProperty(key);
+  // Keys a style object no longer has (or all keys when a style object transitions to `''`).
+  if (prev !== undefined) {
+    for (const key in prev) {
+      if ((next === undefined || !(key in next)) && prev[key] != null && prev[key] !== '') el.style.removeProperty(key);
+    }
+  }
 }
 
 type StyleCached = HTMLElement & { $$style?: unknown };
@@ -821,8 +830,8 @@ export function setStyle(el: Element, value: unknown, prev: Styles | undefined, 
     e.$$style = value;
     return;
   }
-  if (next) updateStyles(e, prev, next);
-  if (nextImportant) updateStyles(e, prevImportant, nextImportant, 'important');
+  if (next || prev) updateStyles(e, prev, next);
+  if (nextImportant || prevImportant) updateStyles(e, prevImportant, nextImportant, 'important');
 }
 
 /** Internal: sets one static `style:prop={value}` directive without an effect (ignores `null`/`undefined`/`''`). */

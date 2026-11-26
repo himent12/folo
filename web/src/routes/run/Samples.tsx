@@ -70,6 +70,19 @@ export default function Samples(props: SamplesProps) {
   const epoch = computed(() => (pick.get() === 'latest' ? done.get() : Number(pick.get())));
   const samples = new Resource((s) => (done.get() > 0 ? hub.api.runSamples(rid.get(), epoch.get(), s) : Promise.resolve(null)));
 
+  // A resumed run can rewind below a previously picked epoch: fall back to 'latest' rather than requesting a gone epoch.
+  effect(() => {
+    const n = done.get();
+    const p = pick.peek();
+    if (p !== 'latest' && Number(p) > n) pick.set('latest');
+  });
+  // Close the inspector if the loaded epoch has fewer samples than the open index.
+  effect(() => {
+    const list = samples.data?.samples;
+    const cur = open.get();
+    if (cur !== null && list !== undefined && cur >= list.length) open.set(null);
+  });
+
   const options = computed(() => {
     const n = props.epochsDone;
     return [

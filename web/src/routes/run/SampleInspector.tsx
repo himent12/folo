@@ -42,7 +42,8 @@ export function imageFileName(datasetId: string, imageId: string): Promise<strin
   const key = `${datasetId}/${imageId}`;
   let p = names.get(key);
   if (!p) {
-    const at = Number(imageId.replace(/^\D+/, ''));
+    const digits = imageId.replace(/^\D+/, '');
+    const at = digits !== '' ? Number(digits) : NaN;
     const cache = names;
     p = Number.isFinite(at)
       ? api.datasetImages(datasetId, { offset: at, limit: 1 }).then(

@@ -727,4 +727,34 @@ describe('Svelte attribute and prop semantics', () => {
     expect(container.firstElementChild!.textContent).toBe('once');
     unmount();
   });
+
+  it('clears inline styles when a style object transitions to an empty string or empty property value', () => {
+    const active = signal(true);
+    const val = signal<string | undefined>('12px');
+    const { container, unmount } = render(() => (
+      <div
+        class="box"
+        style={active.get() ? { color: 'red', paddingLeft: val.get() } : ''}
+      />
+    ));
+    const el = container.querySelector<HTMLDivElement>('.box')!;
+    expect(el.style.color).toBe('red');
+    expect(el.style.paddingLeft).toBe('12px');
+
+    val.set('');
+    flush();
+    expect(el.style.paddingLeft).toBe('');
+    expect(el.style.color).toBe('red');
+
+    active.set(false);
+    flush();
+    expect(el.style.color).toBe('');
+
+    active.set(true);
+    val.set('8px');
+    flush();
+    expect(el.style.color).toBe('red');
+    expect(el.style.paddingLeft).toBe('8px');
+    unmount();
+  });
 });

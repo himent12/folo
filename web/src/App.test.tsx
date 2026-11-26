@@ -909,4 +909,43 @@ describe('lazy CommandPalette', () => {
     expect(router.route.name).toBe('settings');
     expect(document.activeElement).toBe(main());
   });
+
+  it('cancels superseded focus frames on rapid route transitions and cleans up on unmount', async () => {
+    const frames: { id: number; cb: FrameRequestCallback; cancelled: boolean }[] = [];
+    let nextId = 0;
+    const cancelSpy = vi.spyOn(globalThis, 'cancelAnimationFrame').mockImplementation((id: number) => {
+      const f = frames.find((x) => x.id === id);
+      if (f) f.cancelled = true;
+    });
+    vi.spyOn(globalThis, 'requestAnimationFrame').mockImplementation((cb) => {
+      const id = ++nextId;
+      frames.push({ id, cb, cancelled: false });
+      return id;
+    });
+    const screens = new Screens((name) =>
+      name === 'overview'
+        ? () => Promise.resolve({ default: () => <h1 tabindex={-1} data-route-focus>Overview</h1> })
+        : name === 'models'
+          ? () => Promise.resolve({ default: () => <h1 tabindex={-1} data-route-focus>Models</h1> })
+          : undefined,
+    );
+    router.route = parse('#/');
+    c = render(() => <App screens={screens} />, target);
+    await until(() => main().querySelector('h1')?.textContent === 'Overview', 'Overview');
+
+    router.route = parse('#/models');
+    await until(() => main().querySelector('h1')?.textContent === 'Models' && frames.length >= 1, 'Models focus frame');
+    const firstFrame = frames.at(-1)!;
+    // Rapidly navigate back to Overview before Models' rAF runs: Models' rAF is cancelled.
+    router.route = parse('#/');
+    await until(() => main().querySelector('h1')?.textContent === 'Overview' && frames.length >= 2, 'Overview focus frame');
+    expect(firstFrame.cancelled).toBe(true);
+    expect(cancelSpy).toHaveBeenCalledWith(firstFrame.id);
+
+    // Unmounting before the second frame runs cancels it too.
+    const secondFrame = frames.at(-1)!;
+    c.unmount();
+    c = undefined;
+    expect(secondFrame.cancelled).toBe(true);
+  });
 });

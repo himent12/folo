@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import SampleInspector, { imageFileName } from './SampleInspector';
+import Samples from './Samples';
 
 let target: HTMLElement;
 afterEach(() => target?.remove());
@@ -93,5 +94,65 @@ describe('imageFileName', () => {
     hub.api = b;
     expect(await imageFileName('ds_x', 'img_3')).toBe('other.jpg');
     expect([fromA.mock.calls.length, fromB.mock.calls.length]).toEqual([1, 1]);
+  });
+
+  it('returns null without querying offset 0 for non-numeric image ids', async () => {
+    const api = new MockApi('normal', 0);
+    const spy = vi.spyOn(api, 'datasetImages');
+    hub.api = api;
+    expect(await imageFileName('ds_x', 'no_digits')).toBeNull();
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe('Samples epoch and inspector bounds', () => {
+  it('resets a picked epoch past epochsDone back to latest and closes the inspector if samples shrink', async () => {
+    const api = new MockApi('normal', 0);
+    hub.api = api;
+    hub.mode = 'mock';
+    const runs = await hub.api.runs();
+    const done = runs.find((r) => r.status === 'completed' && r.config.dataset_id === 'ds_shapes')!;
+    const full = await hub.api.runSamples(done.id, 10);
+    const spy = vi.spyOn(hub.api, 'runSamples').mockImplementation(async (_id, ep) => ({
+      epoch: ep ?? 1,
+      samples: ep === 5 ? full.samples.slice(0, 1) : full.samples.slice(0, 4),
+    }));
+    vi.spyOn(hub.api, 'imageUrl').mockResolvedValue('data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
+    const epochsDone = signal(10);
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
+      this.open = true;
+    };
+    const c = render(() => <Samples runId={done.id} classes={['circle', 'square', 'triangle']} epochsDone={epochsDone.get()} />, target);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelectorAll('.cell').length).toBe(4);
+    });
+    // Pick epoch 10, wait for its samples, then open sample index 2.
+    const sel = target.querySelector<HTMLSelectElement>('select[aria-label="Epoch"]')!;
+    sel.value = '10';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(spy.mock.calls.some((call) => call[1] === 10)).toBe(true);
+      expect(target.querySelectorAll('.cell').length).toBe(4);
+    });
+    target.querySelectorAll<HTMLButtonElement>('.cell')[2]!.click();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector<HTMLDialogElement>('dialog[open]')).not.toBeNull();
+    });
+
+    // Run rewinds to epoch 5 with only 1 sample: picker falls back to latest and out-of-bounds inspector closes.
+    epochsDone.set(5);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(sel.value).toBe('latest');
+      expect(target.querySelectorAll('.cell').length).toBe(1);
+      expect(document.querySelector<HTMLDialogElement>('dialog[open]')).toBeNull();
+    });
+    expect(spy.mock.calls.at(-1)?.[1]).toBe(5);
+    c.unmount();
   });
 });

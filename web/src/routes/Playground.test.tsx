@@ -762,4 +762,42 @@ describe('Playground: the rail (from 1024 px)', () => {
     expect([...rail.querySelectorAll('.no-nms span')].map((s) => text(s))).toEqual(['Overlap (IoU)', 'Not used · end-to-end model']);
     expect([...rail.querySelectorAll('.slider')].length).toBe(2);
   });
+
+  it('clears predicting state and inspection filters when clearing an image mid-prediction', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    let resolvePredict!: (p: Awaited<ReturnType<MockApi['predict']>>) => void;
+    const pending = new Promise<Awaited<ReturnType<MockApi['predict']>>>((r) => (resolvePredict = r));
+    hub.api = api;
+    hub.mode = 'mock';
+    vi.spyOn(hub.api, 'predict').mockReturnValueOnce(pending);
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s');
+    c = mount(Playground, { target });
+
+    // Start a prediction on a sample image: timing panel enters the loading skeleton state.
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => target.querySelector('.t-sk'), 'predicting skeleton');
+
+    // Clear the image while prediction is still in flight: predicting must reset immediately (no stuck skeleton).
+    const clearBtn = target.querySelector<HTMLButtonElement>('button[aria-label="Clear image"]')!;
+    clearBtn.click();
+    flushSync();
+    expect(target.querySelector('.t-sk')).toBeNull();
+    expect(text(target.querySelector('section[aria-labelledby="pg-timing"]'))).toContain('Timing appears after a run.');
+
+    // Late resolution of the aborted prediction must stay ignored.
+    resolvePredict({
+      model_id: 'm_hard_s',
+      image: { width: 640, height: 480 },
+      boxes: [],
+      timing: { preprocess_ms: 1, inference_ms: 2, postprocess_ms: 1, total_ms: 4 },
+      device: 'cpu',
+      cold: false,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(target.querySelector('.t-sk')).toBeNull();
+  });
 });
