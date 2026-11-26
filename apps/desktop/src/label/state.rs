@@ -116,6 +116,9 @@ pub struct LabelState {
     /// Whether a box/review mutation is currently in flight.
     pub mutating: bool,
     pub mutating_seq: u64,
+    /// Pending auto-advance target `(job_id, from_image_id, next_image_id)` cleared if the user
+    /// manually selects or steps to another image while an Approve PUT is in flight.
+    pub pending_advance: Option<(String, String, String)>,
     /// Inline error banner inside the review workspace (e.g. `409 label_boxes_changed`).
     pub review_error: Option<ApiError>,
 
@@ -185,6 +188,7 @@ impl Default for LabelState {
             stage_view: Rc::new(Cell::new(None)),
             mutating: false,
             mutating_seq: 0,
+            pending_advance: None,
             review_error: None,
             agent_id: None,
             model_idx: 0,

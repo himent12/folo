@@ -17,18 +17,33 @@ pub fn route_label(route: &Route) -> Option<&str> {
     }
 }
 
-/// Longest suffix of `snapshot` that matches a prefix of `buffered` (by timestamp, level, and
-/// message), so replaying live SSE lines over a reloaded history never duplicates overlapping tails.
-pub(crate) fn suffix_prefix_overlap(snapshot: &[LogLine], buffered: &[LogLine]) -> usize {
+/// Merges `buffered` live SSE log lines onto `snapshot` without duplicating lines already present
+/// in `snapshot`'s tail (whether the snapshot overlaps a prefix of `buffered` or is ahead of it).
+pub(crate) fn merge_log_lines(snapshot: &mut Vec<LogLine>, buffered: Vec<LogLine>) {
+    if buffered.is_empty() {
+        return;
+    }
+    let eq = |a: &LogLine, b: &LogLine| a.t == b.t && a.level == b.level && a.message == b.message;
+    // 1. If the entire buffered slice already appears in the snapshot tail, snapshot is ahead.
+    let tail_start = snapshot.len().saturating_sub(buffered.len().saturating_add(64));
+    let tail = &snapshot[tail_start..];
+    if buffered.len() <= tail.len()
+        && tail.windows(buffered.len()).any(|w| w.iter().zip(&buffered).all(|(a, b)| eq(a, b)))
+    {
+        return;
+    }
+    // 2. Otherwise drop the longest suffix of `snapshot` matching a prefix of `buffered`.
     let max_k = snapshot.len().min(buffered.len());
+    let mut overlap = 0;
     for k in (1..=max_k).rev() {
-        let tail = &snapshot[snapshot.len() - k..];
-        let head = &buffered[..k];
-        if tail.iter().zip(head).all(|(a, b)| a.t == b.t && a.level == b.level && a.message == b.message) {
-            return k;
+        let s_tail = &snapshot[snapshot.len() - k..];
+        let b_head = &buffered[..k];
+        if s_tail.iter().zip(b_head).all(|(a, b)| eq(a, b)) {
+            overlap = k;
+            break;
         }
     }
-    0
+    snapshot.extend(buffered.into_iter().skip(overlap));
 }
 
 /// Cache namespace for decoded labeling images inside `store.images_px`.
@@ -186,8 +201,7 @@ impl FoloApp {
                 let buffered = this.label.pending_log_events.remove(&key).unwrap_or_default();
                 match r {
                     Ok(mut res) => {
-                        let overlap = suffix_prefix_overlap(&res.lines, &buffered);
-                        res.lines.extend(buffered.into_iter().skip(overlap));
+                        merge_log_lines(&mut res.lines, buffered);
                         if res.lines.len() > 500 {
                             let drop_n = res.lines.len() - 500;
                             res.lines.drain(..drop_n);
@@ -398,13 +412,14 @@ impl FoloApp {
     }
 
     /// Upserts a job snapshot into `self.label.jobs` (ignoring jobs deleted in this session) and
-    /// advances `jobs_seq` so an older in-flight `GET /api/label/jobs` cannot erase or revert it.
+    /// advances `jobs_seq` when the list is already loaded so an older in-flight `GET /api/label/jobs`
+    /// cannot erase or revert a client-side mutation.
     pub(super) fn upsert_label_job(&mut self, job: LabelJob) {
         if self.label.removed.contains(&job.id) {
             return;
         }
-        self.label.jobs_seq += 1;
         if let Some(list) = self.label.jobs.ready_mut() {
+            self.label.jobs_seq += 1;
             match list.iter_mut().find(|j| j.id == job.id) {
                 Some(slot) => *slot = job,
                 None => list.insert(0, job),
@@ -413,13 +428,19 @@ impl FoloApp {
     }
 
     /// Applies an authoritative SSE `LabelEvent::Job` snapshot and bumps its per-job event sequence
-    /// so older HTTP responses cannot regress it.
+    /// so older HTTP responses cannot regress it, without bumping `jobs_seq` (so an initial
+    /// `GET /api/label/jobs` load or list refresh is never discarded and still merges this job).
     pub(super) fn upsert_label_job_from_event(&mut self, job: LabelJob) {
         if self.label.removed.contains(&job.id) {
             return;
         }
         *self.label.job_event_seq.entry(job.id.clone()).or_insert(0) += 1;
-        self.upsert_label_job(job);
+        if let Some(list) = self.label.jobs.ready_mut() {
+            match list.iter_mut().find(|j| j.id == job.id) {
+                Some(slot) => *slot = job,
+                None => list.insert(0, job),
+            }
+        }
     }
 
     /// Clears `selected_box` if a live update changed the box array of the currently selected image.

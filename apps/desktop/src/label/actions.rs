@@ -187,6 +187,7 @@ impl FoloApp {
 
     /// Selects a specific image in the review workspace, resetting box selection and zoom.
     pub fn select_label_image(&mut self, image_id: String, cx: &mut Context<Self>) {
+        self.label.pending_advance = None;
         if self.label.selected_image.as_deref() != Some(image_id.as_str()) {
             self.label.selected_image = Some(image_id);
             self.label.selected_box = None;
@@ -363,6 +364,8 @@ impl FoloApp {
         let lgen = self.label.epoch;
         let seen_img_seq =
             self.label.image_event_seq.get(&(job_id.to_string(), image_id.to_string())).copied().unwrap_or(0);
+        self.label.pending_advance =
+            advance_to.as_ref().map(|next| (job_id.to_string(), image_id.to_string(), next.clone()));
         self.label.review_error = None;
         let jid = job_id.to_string();
         let iid = image_id.to_string();
@@ -380,6 +383,12 @@ impl FoloApp {
                     this.label.mutating = false;
                 }
                 let on_job = route_label(&this.route) == Some(jid2.as_str());
+                let still_pending_advance = advance_to.as_ref().is_some_and(|next| {
+                    this.label.pending_advance.as_ref() == Some(&(jid2.clone(), iid2.clone(), next.clone()))
+                });
+                if still_pending_advance {
+                    this.label.pending_advance = None;
+                }
                 match r {
                     Ok(updated) => {
                         let cur_img_seq = this
@@ -413,7 +422,8 @@ impl FoloApp {
                                 }
                             }
                             if let Some(next_id) = advance_to
-                                && this.label.selected_image.as_deref() == Some(iid2.as_str())
+                                && (still_pending_advance
+                                    || this.label.selected_image.as_deref() == Some(iid2.as_str()))
                             {
                                 this.select_label_image(next_id, cx);
                             }
@@ -569,7 +579,7 @@ impl FoloApp {
                         let name = job.name.clone();
                         let active = job.status.is_active();
                         let cur_seq = this.label.job_event_seq.get(&jid2).copied().unwrap_or(0);
-                        if cur_seq == seen_job_seq || !active {
+                        if cur_seq == seen_job_seq {
                             this.upsert_label_job(job);
                         }
                         this.reload_label_images(&jid2, cx);
@@ -609,7 +619,7 @@ impl FoloApp {
                 match r {
                     Ok(job) => {
                         let cur_seq = this.label.job_event_seq.get(&jid2).copied().unwrap_or(0);
-                        if cur_seq == seen_job_seq || !job.status.is_active() {
+                        if cur_seq == seen_job_seq {
                             this.upsert_label_job(job);
                         }
                         this.toast(Tone::Neutral, "Stopping labeling run", None, cx);

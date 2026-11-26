@@ -107,7 +107,11 @@ impl FoloApp {
                         let id = job.id.clone();
                         let title = job.name.clone();
                         let n_cls = job.classes.len();
+                        let had_list = this.label.jobs.ready().is_some();
                         this.upsert_label_job(job);
+                        if !had_list {
+                            this.refresh_label_jobs(cx);
+                        }
                         if mine {
                             this.label.new_job = None;
                             this.route_pending = Some(Route::LabelJob(id));
@@ -207,7 +211,7 @@ impl FoloApp {
                         let added_n = res.added.len();
                         let skipped_n = res.skipped.len();
                         let cur_seq = this.label.job_event_seq.get(&job_id).copied().unwrap_or(0);
-                        if cur_seq == seen_job_seq || !res.job.status.is_active() {
+                        if cur_seq == seen_job_seq {
                             this.upsert_label_job(res.job);
                         }
                         this.reload_label_images(&job_id, cx);
