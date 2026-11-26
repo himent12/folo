@@ -1,12 +1,11 @@
 //! Single-dispatch register-cached train-mode BatchNorm forward and backward kernels: each channel's
 //! 256-thread workgroup reads `X` (and `G` in backward) once into explicit register slots (`REGS` = 4 or 8),
-//! reduces statistics / parameter gradients across the workgroup (1-barrier 32-wide subgroup reduction or
-//! portable shared-memory tree fallback), and writes `Y` / `DX` directly from registers without intermediate
-//! `PART` / `K` buffers.
+//! reduces statistics / parameter gradients across the workgroup (32-wide `subgroupAdd` or portable shared-memory
+//! tree fallback), and writes `Y` / `DX` directly from registers without intermediate `PART` / `K` buffers.
 
 use std::fmt::Write as _;
 
-use super::{COMMON, WELFORD, prelude};
+use super::{COMMON, prelude};
 use crate::pipeline::{Access, KernelDef, Source, Spec};
 
 /// Minimum storage buffers needed by [`FUSED_BWD`] (9: X, G, MEAN, INVSTD, W, B, DX, DW, DB).
@@ -21,24 +20,32 @@ pub(crate) fn fused_fits(spec: &Spec) -> bool {
 }
 
 /// Single-dispatch register-cached train-mode BatchNorm forward: loads each channel's `X` once into explicit
-/// scalar/vec4 register slots (`REGS` = 4 or 8), accumulates 4-lane Welford stats, merges across the 256-thread
-/// workgroup (1-barrier 32-wide Chan `subgroupShuffleDown` or portable `bn_tree_merge`), writes `MEAN`,
-/// `INVSTD`, optional running stats, and normalizes + activates directly from registers into `Y`.
+/// scalar/vec4 register slots (`REGS` = 4 or 8), runs a workgroup-anchored two-pass reduction in registers
+/// (channel anchor `base` -> exact shifted mean `mean_delta = sum(x - base) / M` -> exact centered variance
+/// `sum(((x - base) - mean_delta)^2) / M` via `subgroupAdd` or portable tree, avoiding both catastrophic
+/// cancellation and Welford running-mean rounding on high-offset inputs), writes `MEAN`, `INVSTD`, optional
+/// running stats, and normalizes + activates directly from registers into `Y`.
 /// Grid: `(C, 1, 1)`. Params: 0 = C, 1 = hw_units, 2 = m_units, 5 = 256 / hw_units, 6 = 256 % hw_units,
 /// 7 = eps, 8 = 1 - momentum, 9 = momentum, 10 = momentum · n / (n - 1).
 fn gen_fused_fwd(spec: &Spec) -> String {
     let regs = spec.get_u32("REGS", 4).clamp(1, 8);
     let sg = spec.is_subgroups();
+    let vec4 = spec.get_bool("VEC4");
+    let half = spec.is_f16();
     let mut s = String::new();
     s.push_str(prelude(spec));
     s.push_str(COMMON);
-    if !sg {
-        s.push_str(WELFORD);
+    if sg {
+        s.push_str(
+            "var<workgroup> wbase: f32;\n\
+             var<workgroup> ws: array<f32, 8>;\n\
+             var<workgroup> wq: array<f32, 8>;\n",
+        );
     } else {
         s.push_str(
-            "var<workgroup> wn: array<f32, 8>;\n\
-             var<workgroup> wm: array<f32, 8>;\n\
-             var<workgroup> wq: array<f32, 8>;\n",
+            "var<workgroup> wbase: f32;\n\
+             var<workgroup> wmd: f32;\n\
+             var<workgroup> ws: array<f32, 256>;\n",
         );
     }
     s.push_str(
@@ -62,155 +69,180 @@ fn gen_fused_fwd(spec: &Spec) -> String {
             "fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {\n",
         );
     }
-    s.push_str(
+    let mf_expr = if vec4 { "f32(m_u) * 4.0" } else { "f32(m_u)" };
+    let _ = write!(
+        s,
         "  let c = wid.x;\n\
          \x20 let channels = pu(0u);\n\
          \x20 let hw = pu(1u);\n\
          \x20 let m_u = pu(2u);\n\
-         \x20 var k = 0.0;\n\
-         \x20 var m4 = vec4<f32>(0.0);\n\
-         \x20 var q4 = vec4<f32>(0.0);\n\
-         \x20 var w = bn_walk_start(0u, lid, hw);\n",
+         \x20 let m_f = {mf_expr};\n\
+         \x20 var w = bn_walk_start(0u, lid, hw);\n"
     );
     for r in 0..regs {
         let _ = writeln!(s, "  var v{r}: E;");
     }
     for r in 0..regs {
-        let _ = writeln!(
-            s,
-            "  if (w.e < m_u) {{\n\
-             \x20   let idx = (w.n * channels + c) * hw + w.i;\n\
-             \x20   v{r} = X[idx];\n\
-             \x20   let xv = V4(v{r});\n\
-             \x20   k += 1.0;\n\
-             \x20   let inv_k = 1.0 / k;\n\
-             \x20   if (VEC) {{\n\
-             \x20     let d = xv - m4;\n\
-             \x20     m4 += d * inv_k;\n\
-             \x20     q4 += d * (xv - m4);\n\
-             \x20   }} else {{\n\
-             \x20     let d = xv.x - m4.x;\n\
-             \x20     m4.x += d * inv_k;\n\
-             \x20     q4.x += d * (xv.x - m4.x);\n\
-             \x20   }}\n\
-             \x20 }}"
-        );
+        let _ = writeln!(s, "  if (w.e < m_u) {{ v{r} = X[(w.n * channels + c) * hw + w.i]; }}");
         if r + 1 < regs {
             s.push_str("  bn_walk_next(&w, hw);\n");
         }
     }
     s.push_str(
-        "  var na = 0.0;\n\
-         \x20 var ma = 0.0;\n\
-         \x20 var qa = 0.0;\n\
-         \x20 if (k > 0.0) {\n\
-         \x20   if (!VEC) {\n\
-         \x20     na = k; ma = m4.x; qa = q4.x;\n\
-         \x20   } else {\n\
-         \x20     let d01 = m4.y - m4.x;\n\
-         \x20     let m01 = m4.x + 0.5 * d01;\n\
-         \x20     let q01 = q4.x + q4.y + (0.5 * k * d01) * d01;\n\
-         \x20     let d23 = m4.w - m4.z;\n\
-         \x20     let m23 = m4.z + 0.5 * d23;\n\
-         \x20     let q23 = q4.z + q4.w + (0.5 * k * d23) * d23;\n\
-         \x20     let d_all = m23 - m01;\n\
-         \x20     na = 4.0 * k;\n\
-         \x20     ma = m01 + 0.5 * d_all;\n\
-         \x20     qa = q01 + q23 + (k * d_all) * d_all;\n\
-         \x20   }\n\
-         \x20 }\n",
+        "  if (lid == 0u) {\n\
+         \x20   let x0 = V4(v0).x;\n\
+         \x20   wbase = select(0.0, x0, abs(x0) <= 3.4028234e38);\n\
+         \x20 }\n\
+         \x20 workgroupBarrier();\n\
+         \x20 let base = wbase;\n",
     );
+    // For F32, subtract `base` in place into `v{r}` before the reduction barrier so Pass 2 sees the already-
+    // shifted values (zero extra registers, avoids driver fast-math reassociation of `(x - base) - mean_delta`
+    // into `x - (base + mean_delta)`). F16 inputs fit in 11 mantissa bits (<= 65504), so `f32` already has
+    // 13 guard bits and we keep `v{r}` packed in `vec4<f16>`/`f16` registers.
+    if vec4 {
+        s.push_str("  var s4 = vec4<f32>(0.0);\n");
+        for r in 0..regs {
+            let off = r * 256;
+            if half {
+                let _ = writeln!(s, "  if (lid + {off}u < m_u) {{ s4 += V4(v{r}) - base; }}");
+            } else {
+                let _ = writeln!(s, "  if (lid + {off}u < m_u) {{ v{r} = v{r} - base; s4 += v{r}; }}");
+            }
+        }
+        s.push_str("  let s_t = (s4.x + s4.y) + (s4.z + s4.w);\n");
+    } else {
+        s.push_str("  var s_t = 0.0;\n");
+        for r in 0..regs {
+            let off = r * 256;
+            if half {
+                let _ = writeln!(s, "  if (lid + {off}u < m_u) {{ s_t += V4(v{r}).x - base; }}");
+            } else {
+                let _ = writeln!(s, "  if (lid + {off}u < m_u) {{ v{r} = v{r} - base; s_t += v{r}; }}");
+            }
+        }
+    }
     if sg {
         s.push_str(
-            "  for (var off = 16u; off > 0u; off = off >> 1u) {\n\
-             \x20   let nb = subgroupShuffleDown(na, off);\n\
-             \x20   let mb = subgroupShuffleDown(ma, off);\n\
-             \x20   let qb = subgroupShuffleDown(qa, off);\n\
-             \x20   if (lane < off) {\n\
-             \x20     if (na == 0.0) {\n\
-             \x20       na = nb; ma = mb; qa = qb;\n\
-             \x20     } else if (nb > 0.0) {\n\
-             \x20       let n = na + nb;\n\
-             \x20       let d = mb - ma;\n\
-             \x20       let delta = d * (nb / n);\n\
-             \x20       ma += delta;\n\
-             \x20       qa += qb + d * (delta * na);\n\
-             \x20       na = n;\n\
-             \x20     }\n\
-             \x20   }\n\
-             \x20 }\n\
+            "  let rs = subgroupAdd(s_t);\n\
              \x20 let sg = min(sgid, 7u);\n\
-             \x20 if (lane == 0u) { wn[sg] = na; wm[sg] = ma; wq[sg] = qa; }\n\
+             \x20 if (lane == 0u) { ws[sg] = rs; }\n\
              \x20 workgroupBarrier();\n\
-             \x20 if (lid == 0u) {\n\
-             \x20   var fa = wn[0]; var fm = wm[0]; var fq = wq[0];\n\
-             \x20   for (var i = 1u; i < 8u; i += 1u) {\n\
-             \x20     let nb = wn[i];\n\
-             \x20     if (fa == 0.0) {\n\
-             \x20       fa = nb; fm = wm[i]; fq = wq[i];\n\
-             \x20     } else if (nb > 0.0) {\n\
-             \x20       let n = fa + nb;\n\
-             \x20       let d = wm[i] - fm;\n\
-             \x20       let delta = d * (nb / n);\n\
-             \x20       fm += delta;\n\
-             \x20       fq += wq[i] + d * (delta * fa);\n\
-             \x20       fa = n;\n\
-             \x20     }\n\
-             \x20   }\n\
-             \x20   let var_b = max(fq / fa, 0.0);\n\
-             \x20   let inv = 1.0 / sqrt(var_b + pf(7u));\n\
-             \x20   MEAN[c] = fm;\n\
-             \x20   INVSTD[c] = inv;\n\
-             \x20   if (RUNNING) {\n\
-             \x20     RM[c] = RM[c] * pf(8u) + pf(9u) * fm;\n\
-             \x20     RV[c] = RV[c] * pf(8u) + pf(10u) * var_b;\n\
-             \x20   }\n\
-             \x20   wm[0] = fm;\n\
-             \x20   wq[0] = inv;\n\
-             \x20 }\n\
-             \x20 workgroupBarrier();\n",
+             \x20 let sum_s = ((ws[0] + ws[1]) + (ws[2] + ws[3])) + ((ws[4] + ws[5]) + (ws[6] + ws[7]));\n\
+             \x20 let mean_delta = sum_s / m_f;\n",
         );
     } else {
         s.push_str(
-            "  wn[lid] = na; wm[lid] = ma; wq[lid] = qa;\n\
+            "  ws[lid] = s_t;\n\
              \x20 workgroupBarrier();\n\
-             \x20 bn_tree_merge(lid);\n\
-             \x20 if (lid == 0u) {\n\
-             \x20   let fm = wm[0];\n\
-             \x20   let var_b = max(wq[0] / wn[0], 0.0);\n\
-             \x20   let inv = 1.0 / sqrt(var_b + pf(7u));\n\
-             \x20   MEAN[c] = fm;\n\
-             \x20   INVSTD[c] = inv;\n\
-             \x20   if (RUNNING) {\n\
-             \x20     RM[c] = RM[c] * pf(8u) + pf(9u) * fm;\n\
-             \x20     RV[c] = RV[c] * pf(8u) + pf(10u) * var_b;\n\
-             \x20   }\n\
-             \x20   wq[0] = inv;\n\
+             \x20 for (var step = 128u; step > 0u; step >>= 1u) {\n\
+             \x20   if (lid < step) { ws[lid] += ws[lid + step]; }\n\
+             \x20   workgroupBarrier();\n\
              \x20 }\n\
-             \x20 workgroupBarrier();\n",
+             \x20 if (lid == 0u) { wmd = ws[0] / m_f; }\n\
+             \x20 workgroupBarrier();\n\
+             \x20 let mean_delta = wmd;\n",
+        );
+    }
+    if vec4 {
+        s.push_str("  var q4 = vec4<f32>(0.0);\n");
+        for r in 0..regs {
+            let off = r * 256;
+            if half {
+                let _ = writeln!(
+                    s,
+                    "  if (lid + {off}u < m_u) {{ let d = (V4(v{r}) - base) - mean_delta; q4 = fma(d, d, q4); }}"
+                );
+            } else {
+                let _ = writeln!(
+                    s,
+                    "  if (lid + {off}u < m_u) {{ let d = v{r} - mean_delta; q4 = fma(d, d, q4); }}"
+                );
+            }
+        }
+        s.push_str("  let q_t = (q4.x + q4.y) + (q4.z + q4.w);\n");
+    } else {
+        s.push_str("  var q_t = 0.0;\n");
+        for r in 0..regs {
+            let off = r * 256;
+            if half {
+                let _ = writeln!(
+                    s,
+                    "  if (lid + {off}u < m_u) {{ let d = (V4(v{r}).x - base) - mean_delta; q_t = fma(d, d, q_t); }}"
+                );
+            } else {
+                let _ = writeln!(
+                    s,
+                    "  if (lid + {off}u < m_u) {{ let d = v{r} - mean_delta; q_t = fma(d, d, q_t); }}"
+                );
+            }
+        }
+    }
+    if sg {
+        s.push_str(
+            "  let rq = subgroupAdd(q_t);\n\
+             \x20 if (lane == 0u) { wq[sg] = rq; }\n\
+             \x20 workgroupBarrier();\n\
+             \x20 let sum_q = ((wq[0] + wq[1]) + (wq[2] + wq[3])) + ((wq[4] + wq[5]) + (wq[6] + wq[7]));\n",
+        );
+    } else {
+        s.push_str(
+            "  ws[lid] = q_t;\n\
+             \x20 workgroupBarrier();\n\
+             \x20 for (var step = 128u; step > 0u; step >>= 1u) {\n\
+             \x20   if (lid < step) { ws[lid] += ws[lid + step]; }\n\
+             \x20   workgroupBarrier();\n\
+             \x20 }\n\
+             \x20 let sum_q = ws[0];\n",
         );
     }
     s.push_str(
-        "  let mean_c = wm[0];\n\
-         \x20 let inv_c = wq[0];\n\
+        "  let mean_c = base + mean_delta;\n\
+         \x20 let var_raw = sum_q / m_f;\n\
+         \x20 let var_b = select(var_raw, 0.0, var_raw < 0.0);\n\
+         \x20 let inv_c = 1.0 / sqrt(var_b + pf(7u));\n\
+         \x20 if (lid == 0u) {\n\
+         \x20   MEAN[c] = mean_c;\n\
+         \x20   INVSTD[c] = inv_c;\n\
+         \x20   if (RUNNING) {\n\
+         \x20     RM[c] = RM[c] * pf(8u) + pf(9u) * mean_c;\n\
+         \x20     RV[c] = RV[c] * pf(8u) + pf(10u) * var_b;\n\
+         \x20   }\n\
+         \x20 }\n\
          \x20 let w_c = W[c];\n\
          \x20 let b_c = B[c];\n\
          \x20 w = bn_walk_start(0u, lid, hw);\n",
     );
     for r in 0..regs {
-        let _ = writeln!(
-            s,
-            "  if (w.e < m_u) {{\n\
-             \x20   let idx = (w.n * channels + c) * hw + w.i;\n\
-             \x20   if (VEC) {{\n\
-             \x20     let xh = (V4(v{r}) - mean_c) * inv_c;\n\
-             \x20     Y[idx] = OUT(bn_act(xh * w_c + b_c));\n\
-             \x20   }} else {{\n\
-             \x20     let xh = (V4(v{r}).x - mean_c) * inv_c;\n\
-             \x20     Y[idx] = OUT(vec4<f32>(bn_act_f32(xh * w_c + b_c)));\n\
-             \x20   }}\n\
-             \x20 }}"
-        );
+        if vec4 {
+            let xh = if half {
+                format!("(V4(v{r}) - mean_c) * inv_c")
+            } else {
+                format!("(v{r} - mean_delta) * inv_c")
+            };
+            let _ = writeln!(
+                s,
+                "  if (w.e < m_u) {{\n\
+                 \x20   let idx = (w.n * channels + c) * hw + w.i;\n\
+                 \x20   let xh = {xh};\n\
+                 \x20   Y[idx] = OUT(bn_act(xh * w_c + b_c));\n\
+                 \x20 }}"
+            );
+        } else {
+            let xh = if half {
+                format!("(V4(v{r}).x - mean_c) * inv_c")
+            } else {
+                format!("(v{r} - mean_delta) * inv_c")
+            };
+            let _ = writeln!(
+                s,
+                "  if (w.e < m_u) {{\n\
+                 \x20   let idx = (w.n * channels + c) * hw + w.i;\n\
+                 \x20   let xh = {xh};\n\
+                 \x20   Y[idx] = OUT(vec4<f32>(bn_act_f32(xh * w_c + b_c)));\n\
+                 \x20 }}"
+            );
+        }
         if r + 1 < regs {
             s.push_str("  bn_walk_next(&w, hw);\n");
         }

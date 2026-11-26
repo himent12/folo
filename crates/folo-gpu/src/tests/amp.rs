@@ -537,12 +537,63 @@ fn batch_norm_fused_single_dispatch_parity_and_trace() {
         }
     }
 
+    // High-offset F32 inputs (`1e7 ± 1`, REGS=8 boundary at 8192 elems/ch) must keep exact variance and invstd
+    // without Welford running-mean rounding drift, including on asymmetric fractional-mean blocks.
+    {
+        let c = 32usize;
+        let hw = 8192usize;
+        let mut data = vec![0.0f32; c * hw];
+        let pattern = [-1.0f32, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0];
+        for ch in 0..c {
+            let base = 10_000_000.0f32;
+            for (blk, &delta) in pattern.iter().enumerate() {
+                let d = if ch == 1 && blk == 0 {
+                    // Asymmetric channel with fractional mean (7 of 8 blocks at +1, 1 at -1 -> var = 7/16).
+                    -1.0
+                } else if ch == 1 {
+                    1.0
+                } else {
+                    delta
+                };
+                data[ch * hw + blk * 1024..ch * hw + (blk + 1) * 1024].fill(base + d);
+            }
+        }
+        let x = Tensor::from_vec(data, [1, c, 1, hw]).unwrap().to_device(dev).unwrap();
+        let w = Tensor::ones([c]).to_device(dev).unwrap();
+        let b = Tensor::zeros([c]).to_device(dev).unwrap();
+        let out = x.batch_norm_act_train(&w, &b, 1e-3, None, None).unwrap().unwrap();
+        let mean_v = out.mean.to_vec::<f32>().unwrap();
+        let inv_v = out.invstd.to_vec::<f32>().unwrap();
+        let y_v = out.y.to_vec::<f32>().unwrap();
+        let want_inv0 = 1.0f32 / (1.0f32 + 1e-3).sqrt();
+        assert_eq!(mean_v[0], 10_000_000.0, "high-offset exact mean");
+        assert!(
+            (inv_v[0] - want_inv0).abs() < 1e-6,
+            "high-offset invstd: got {}, want {want_inv0}",
+            inv_v[0]
+        );
+        assert!((y_v[0] + want_inv0).abs() < 1e-5, "high-offset y[0]: got {}, want {}", y_v[0], -want_inv0);
+        // Channel 1: var = 7/16 = 0.4375.
+        let want_inv1 = 1.0f32 / (0.4375f32 + 1e-3).sqrt();
+        assert!(
+            (inv_v[1] - want_inv1).abs() < 1e-5,
+            "high-offset asymmetric invstd: got {}, want {want_inv1}",
+            inv_v[1]
+        );
+    }
+
     // Dispatch trace on a fresh context: fused single-dispatch for REGS=4/8 vs 3-pass multi-chunk above 2048 units.
+    // `bn_fused_bwd` requires 9 storage bindings; adapters capped at 8 fall back to the 3-dispatch backward path.
     let fresh = crate::GpuContext::new().unwrap();
     let backend = crate::GpuBackend::new(fresh.clone(), dev);
+    let fused_bwd_trace = if fresh.caps().max_storage_buffers >= 9 {
+        vec!["bn_fused_bwd"]
+    } else {
+        vec!["bn_bwd_reduce", "bn_bwd_finalize", "bn_bwd_dx"]
+    };
     for (dims, expect_fwd, expect_bwd) in [
-        ([4usize, 32, 8, 8], vec!["bn_fused_fwd"], vec!["bn_fused_bwd"]),
-        ([16, 32, 20, 20], vec!["bn_fused_fwd"], vec!["bn_fused_bwd"]),
+        ([4usize, 32, 8, 8], vec!["bn_fused_fwd"], fused_bwd_trace.clone()),
+        ([16, 32, 20, 20], vec!["bn_fused_fwd"], fused_bwd_trace),
         (
             [16, 64, 40, 40],
             vec!["bn_stats", "bn_finalize", "bn_apply"],

@@ -512,5 +512,28 @@ fn depthwise_backward_input_tiled_s2_and_vx4_parity() {
         assert_eq!(gv[h * w_dim - 1], want, "stride={stride} ch0 corner: {}", gv[h * w_dim - 1]);
         assert_eq!(gv[2 * h * w_dim - 1], want, "stride={stride} ch1 corner: {}", gv[2 * h * w_dim - 1]);
     }
+
+    // Stride-2 tap accumulation must preserve ascending (ky, kx) order so cancelling extreme weights do not
+    // overflow mid-sum: at input pixel (2, 2) of [1, 2, 5, 5] with 3x3 s2 p0, corner weights [A, -A, A, 0]
+    // sum as ((0 + A) - A) + A + 0 = A rather than (A + 0) + A - A = +inf.
+    {
+        let a = 2.0f32.powi(127);
+        let mut wv = vec![0.0f32; 2 * 9];
+        for ch in 0..2 {
+            let b = ch * 9;
+            wv[b] = a;
+            wv[b + 2] = -a;
+            wv[b + 6] = a;
+        }
+        let wt = Tensor::from_vec(wv, [2, 1, 3, 3]).unwrap();
+        let x = Tensor::zeros([1, 2, 5, 5]);
+        let xg = x.to_device(dev).unwrap().detach().requires_grad_();
+        let yg = xg.conv2d(&wt.to_device(dev).unwrap(), None, 2, 0, 1, 2).unwrap();
+        let gy = Tensor::ones(yg.dims());
+        let gv =
+            yg.backward_with(&gy.to_device(dev).unwrap()).unwrap().get(&xg).unwrap().to_vec::<f32>().unwrap();
+        assert_eq!(gv[2 * 5 + 2], a, "s2 tap order ch0 (2,2): got {}", gv[2 * 5 + 2]);
+        assert_eq!(gv[25 + 2 * 5 + 2], a, "s2 tap order ch1 (2,2): got {}", gv[25 + 2 * 5 + 2]);
+    }
     assert!(ctx.kernels_without_registry().is_empty());
 }

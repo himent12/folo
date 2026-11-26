@@ -1,7 +1,7 @@
 //! Arg-reductions (`argmax` / `argmin`) over dense f32 `[outer, r, inner]`:
-//! - Contiguous rows (`inner == 1`, `r >= 32`): 256-thread workgroup-parallel `vec4` + 1-barrier 32-wide
-//!   subgroup reduction (or portable shared-memory tree fallback), with 2-pass split-K when few rows have long
-//!   `r`.
+//! - Contiguous rows (`inner == 1` above the dispatch threshold `r >= 256 || (!r.is_multiple_of(4) && r >= 128) || (outer < 256 && r >= 64)`):
+//!   256-thread workgroup-parallel `vec4` + 1-barrier 32-wide subgroup reduction (or portable shared-memory tree
+//!   fallback), with 2-pass split-K when few rows have long `r`.
 //! - General (`inner > 1` or tiny `r`): one coalesced thread per output column (`shaders/arg_reduce.wgsl`).
 
 use super::split_plan;

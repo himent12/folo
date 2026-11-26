@@ -365,7 +365,9 @@ fn gen_depthwise_grad_s2(spec: &Spec) -> String {
             }
         }
     }
-    dys.sort_unstable();
+    // Sort `dys` descending so each phase visits `ky` in strictly ascending order (matching CPU / general GPU
+    // tap accumulation order and avoiding spurious intermediate overflow on cancelling extreme weights).
+    dys.sort_unstable_by(|a, b| b.cmp(a));
     dxs.sort_unstable();
 
     let mut s = String::new();
@@ -386,17 +388,20 @@ fn gen_depthwise_grad_s2(spec: &Spec) -> String {
          \x20 let h = pu(1u); let w = pu(2u); let oh = i32(pu(3u)); let ow = i32(pu(4u)); let cin = pu(5u);\n\
          \x20 let bh = pu(6u); let bw = pu(7u);\n\
          \x20 let bx = i % bw; let t = i / bw; let by = t % bh; let nc = t / bh; let ci = nc % cin; let n = nc / cin;\n\
-         \x20 var a0 = 0.0; var a1 = 0.0; var a2 = 0.0; var a3 = 0.0;\n\
-         \x20 for (var m = 0u; m < MULT; m++) {{\n\
+         \x20 var a0 = 0.0; var a1 = 0.0; var a2 = 0.0; var a3 = 0.0;"
+    );
+    for (xi, &dx) in dxs.iter().enumerate() {
+        let _ = writeln!(s, "  let ox{xi} = i32(bx) + ({dx}); let vx{xi} = ox{xi} >= 0 && ox{xi} < ow;");
+    }
+    let _ = writeln!(
+        s,
+        "  for (var m = 0u; m < MULT; m++) {{\n\
          \x20   let co = ci * MULT + m;\n\
          \x20   let gbase = (n * cin * MULT + co) * u32(oh) * u32(ow);\n\
          \x20   let wbase = co * {kh}u * {kw}u;"
     );
     for t in 0..kh * kw {
         let _ = writeln!(s, "    let w{t} = f32(Wt[wbase + {t}u]);");
-    }
-    for (xi, &dx) in dxs.iter().enumerate() {
-        let _ = writeln!(s, "    let ox{xi} = i32(bx) + ({dx}); let vx{xi} = ox{xi} >= 0 && ox{xi} < ow;");
     }
     for (yi, &dy) in dys.iter().enumerate() {
         let _ = writeln!(

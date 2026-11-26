@@ -36,7 +36,7 @@ pub(crate) use fused::fused_fits;
 use fused::{FUSED_BWD, FUSED_BWD_BUFFERS, FUSED_FWD, FUSED_MAX_UNITS};
 
 pub(super) const COMMON: &str = include_str!("../../shaders/bn_common.wgsl");
-pub(super) const WELFORD: &str = include_str!("../../shaders/bn_welford.wgsl");
+const WELFORD: &str = include_str!("../../shaders/bn_welford.wgsl");
 
 const STATS_MAIN_SUBGROUPS: &str = r#"
 var<workgroup> wn: array<f32, 8>;

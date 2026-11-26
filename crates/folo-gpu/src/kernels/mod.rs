@@ -17,14 +17,14 @@
 //! Modules used by the folo-core backend:
 //! - `ew.rs`: strided elementwise ops (unary and their gradients, binary, comparisons, `where`).
 //! - `strided/`: strided gathers and scatters, fills, casts, tiled transpose and index ops for every dtype.
-//! - `reduce.rs`: reductions, arg-reductions, softmax and top-k (also the tensor wrapper's reduce and softmax).
+//! - `reduce/`: reductions, arg-reductions, softmax and top-k (also the tensor wrapper's reduce and softmax).
 //! - `gemm/`: the tiled GEMM descriptors/config (`config.rs`), WGSL generator (`shader.rs`) and dispatch (`mod.rs`);
 //!   `gemm_cat.rs`: GEMMs whose `B` is a concatenation read in place.
 //! - `conv/`: conv2d forward, gradients, split-K, depthwise and per-site convs.
 //! - `coop/`: tensor-core (cooperative-matrix) f16 GEMM and conv.
 //! - `pool_grad.rs`: pooling with folo-core's semantics and the pooling and upsampling gradients.
 //! - `layout.rs`: permute, concat, nearest upsampling and f32 / f16 casts (upsampling for the backend too).
-//! - `norm.rs`: train-mode BatchNorm + activation; `optim.rs`: fused optimizer updates, clipping and
+//! - `norm/`: train-mode BatchNorm + activation; `optim.rs`: fused optimizer updates, clipping and
 //!   unscaling; `muon.rs`: MuSGD's Muon step.
 //! - `vision.rs`: letterboxing and detection-head candidates; `detect.rs`: the assigner and detection loss;
 //!   `detect_sites.rs`: candidate-first detection.
