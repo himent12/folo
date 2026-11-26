@@ -768,6 +768,44 @@ impl ServerHandler for FoloMcp {
     ) -> Result<GetPromptResponse, McpError> {
         prompts::get(&self.inner, request).await.map(Into::into)
     }
+
+    async fn on_custom_request(
+        &self,
+        request: rmcp::model::CustomRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::CustomResult, McpError> {
+        // `rmcp` falls through to `CustomRequest` when a recognized MCP method arrives with malformed `params`
+        // (for example `tools/call` with `"arguments":[]`). Report `-32602 Invalid params` when the method is
+        // implemented for this request's protocol revision, and `-32601 Method not found` otherwise.
+        let protocol_version = context.protocol_version();
+        let requested_version = context.meta.protocol_version();
+        let legacy =
+            protocol_version.as_ref().is_some_and(|v| v.as_str() < ProtocolVersion::V_2026_07_28.as_str())
+                && !requested_version
+                    .as_ref()
+                    .is_some_and(|v| v.as_str() >= ProtocolVersion::V_2026_07_28.as_str());
+        let known = matches!(
+            request.method.as_str(),
+            "logging/setLevel"
+                | "tools/list"
+                | "tools/call"
+                | "resources/list"
+                | "resources/templates/list"
+                | "resources/read"
+                | "prompts/list"
+                | "prompts/get"
+        ) || (legacy
+            && matches!(
+                request.method.as_str(),
+                "initialize" | "ping" | "resources/subscribe" | "resources/unsubscribe"
+            ))
+            || (!legacy && matches!(request.method.as_str(), "server/discover" | "subscriptions/listen"));
+        if known {
+            Err(McpError::invalid_params(format!("invalid params for {}", request.method), None))
+        } else {
+            Err(McpError::new(rmcp::model::ErrorCode::METHOD_NOT_FOUND, request.method, None))
+        }
+    }
 }
 
 #[cfg(test)]

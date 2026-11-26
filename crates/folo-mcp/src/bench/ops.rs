@@ -223,7 +223,15 @@ impl Benchmarks {
         stop: &AtomicBool,
     ) -> Result<BenchEntry, Error> {
         let shown = folo_api::json::path(path);
-        self.submit_records(id, name, scored, &shown, read_predictions_unless(path, stop)?, limits, stop)
+        self.submit_records(
+            id,
+            name,
+            scored,
+            &shown,
+            read_predictions_unless(path, scored, stop)?,
+            limits,
+            stop,
+        )
     }
 
     /// [`Benchmarks::submit_in`] of `records` (`shown` names where they come from).
@@ -426,11 +434,12 @@ pub fn read_predictions(
 /// Ctrl+C during a blocked pipe read whose next line is blank never starts another read.
 fn read_predictions_unless<'a>(
     path: &Path,
+    scored: bool,
     stop: &'a AtomicBool,
 ) -> Result<impl Iterator<Item = Result<BenchPrediction, Error>> + 'a, Error> {
     check_interrupt(stop)?;
     let (file, shown) = open_predictions_file(path)?;
-    Ok(records_of_unless(BufReader::new(file), shown, Some(stop)))
+    Ok(records_of_unless(BufReader::new(file), shown, scored, Some(stop)))
 }
 
 fn open_predictions_file(path: &Path) -> Result<(std::fs::File, String), Error> {
@@ -449,13 +458,14 @@ fn records_of<'a, R: BufRead + 'a>(
     reader: R,
     shown: String,
 ) -> impl Iterator<Item = Result<BenchPrediction, Error>> + 'a {
-    records_of_unless(reader, shown, None)
+    records_of_unless(reader, shown, true, None)
 }
 
 /// [`records_of`], checking `stop` before every line read (including after skipping a blank line).
 fn records_of_unless<'a, R: BufRead + 'a>(
     mut reader: R,
     shown: String,
+    scored: bool,
     stop: Option<&'a AtomicBool>,
 ) -> impl Iterator<Item = Result<BenchPrediction, Error>> + 'a {
     let mut n = 0usize;
@@ -512,7 +522,7 @@ fn records_of_unless<'a, R: BufRead + 'a>(
             if text.is_empty() && !long {
                 continue;
             }
-            return Some(parse_record(text, long, n, &bad));
+            return Some(parse_record(text, long, n, scored, &bad));
         }
     })
 }
@@ -551,6 +561,7 @@ fn parse_record(
     text: &[u8],
     cut: bool,
     n: usize,
+    scored: bool,
     bad: &dyn Fn(String) -> Error,
 ) -> Result<BenchPrediction, Error> {
     let not_a_record = || {
@@ -585,7 +596,7 @@ fn parse_record(
                 i + 1
             )));
         }
-        if !b.score.is_finite() {
+        if scored && !b.score.is_finite() {
             return Err(bad(format!(
                 "line {n} (image '{}'), box {}: score is not a finite number",
                 raw.image,
@@ -614,7 +625,9 @@ fn parse_record(
             .into_iter()
             .map(|b| folo_api::BenchDetection {
                 class: b.class,
-                score: b.score,
+                // Unscored contestants ignore confidences (graded as 1.0); normalize upfront so non-finite
+                // ignored scores never serialize as JSON `null` over HTTP.
+                score: if scored { b.score } else { 1.0 },
                 x1: b.x1,
                 y1: b.y1,
                 x2: b.x2,

@@ -707,9 +707,25 @@ async fn upload_parts_require_octet_stream_media_type() {
         ok(&app, bare("GET", &format!("/api/uploads/{}", u.id)), StatusCode::OK).await;
     assert_eq!((after_missing.part, after_missing.received_bytes), (0, 0));
 
-    // Case-insensitive media type with optional parameters is accepted.
+    // Malformed parameter (unterminated quote) and duplicate conflicting headers -> 415 and no state advance.
+    let bad_param = Request::put(&uri)
+        .header(header::CONTENT_TYPE, "application/octet-stream; charset=\"binary")
+        .body(Body::from(b"x".to_vec()))
+        .unwrap();
+    err(&app, bad_param, StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type").await;
+
+    let dup_headers = Request::put(&uri)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_TYPE, "text/plain")
+        .body(Body::from(b"x".to_vec()))
+        .unwrap();
+    err(&app, dup_headers, StatusCode::UNSUPPORTED_MEDIA_TYPE, "unsupported_media_type").await;
+    let after_bad: Upload = ok(&app, bare("GET", &format!("/api/uploads/{}", u.id)), StatusCode::OK).await;
+    assert_eq!((after_bad.part, after_bad.received_bytes), (0, 0));
+
+    // Case-insensitive media type with valid RFC 9110 parameters (including quoted semicolon) is accepted.
     let valid = Request::put(&uri)
-        .header(header::CONTENT_TYPE, "Application/Octet-Stream; charset=binary")
+        .header(header::CONTENT_TYPE, "Application/Octet-Stream; charset=binary; name=\"a;b\"")
         .body(Body::from(b"x".to_vec()))
         .unwrap();
     let accepted: Upload = ok(&app, valid, StatusCode::OK).await;

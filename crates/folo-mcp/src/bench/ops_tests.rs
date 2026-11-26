@@ -884,7 +884,7 @@ fn interrupt_during_blank_line_stops_before_next_read() {
     let reads = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
     let reader = BufReader::new(BlankPipe { reads: reads.clone(), stop: stop.clone() });
-    let mut it = records_of_unless(reader, "pipe".into(), Some(&stop));
+    let mut it = records_of_unless(reader, "pipe".into(), true, Some(&stop));
     let err = it.next().unwrap().unwrap_err();
     assert_eq!(err.body.code, "interrupted", "{err:?}");
     assert_eq!(reads.load(Ordering::Relaxed), 1);
@@ -955,5 +955,17 @@ fn non_finite_coordinates_report_same_actionable_error_in_direct_and_proxy_modes
         );
         // No orphaned entry was created on the server.
         assert!(http(url).entries(id).unwrap().is_empty());
+
+        // Unscored submissions normalize ignored scores (including non-finite `1e100`) to `1.0` over HTTP.
+        let unscored = dir.join("unscored_score_overflow.jsonl");
+        let mut lines = vec![
+            r#"{"image":"1","boxes":[{"class":0,"score":1e100,"x1":0,"y1":0,"x2":3,"y2":3}]}"#.to_string(),
+        ];
+        lines.extend((2..=4).map(|i| format!(r#"{{"image":"{i}","boxes":[]}}"#)));
+        std::fs::write(&unscored, lines.join("\n")).unwrap();
+        let entry = http(url)
+            .submit_in(id, "unscored".into(), false, &unscored, THREE, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(entry.status, BenchEntryStatus::Done);
     });
 }
