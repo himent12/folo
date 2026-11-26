@@ -457,9 +457,14 @@ fn graded(job: &LoopJob, g: u32, m: &Model) -> Result<Option<Graded>> {
                     m.id
                 )));
             }
-            _ if job.cancelled() && !stopping => {
-                stopping = true;
-                let _ = super::stop_entry_in(&job.engine, &job.slot, &entry_id);
+            _ if job.cancelled() => {
+                if !stopping {
+                    match super::stop_entry_in(&job.engine, &job.slot, &entry_id) {
+                        Ok(_) => stopping = true,
+                        Err(e) if e.body.code == "bench_entry_not_active" => stopping = true,
+                        Err(e) => return Err(e),
+                    }
+                }
                 if job.engine.closing.load(Ordering::SeqCst) {
                     return Ok(None);
                 }
@@ -600,9 +605,11 @@ fn train(job: &LoopJob, g: u32, dataset: &str) -> Result<Option<Model>> {
                 .hint("GET /api/runs/{id}/logs says why")),
             };
         }
-        if job.cancelled() && !stopping {
-            stopping = true;
-            let _ = job.store()?.stop_run(&run.id);
+        if job.cancelled() {
+            if !stopping {
+                stopping = true;
+                let _ = job.store()?.stop_run(&run.id);
+            }
             // The server is shutting down: its runs are stopped by it, nothing to wait for here.
             if job.engine.closing.load(Ordering::SeqCst) {
                 return Ok(None);

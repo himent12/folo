@@ -177,12 +177,12 @@ impl Engine {
         self.ready.notify_all();
     }
 
-    /// Takes entry `entry` of benchmark `bench` out of the queue, when it still waits there.
-    pub fn unqueue(&self, bench: &str, entry: &str) -> bool {
+    /// Takes entry `entry` of benchmark `bench` out of the queue, when it still waits there, returning the job so
+    /// the caller can re-queue it if persisting the cancellation fails.
+    pub fn unqueue(&self, bench: &str, entry: &str) -> Option<Job> {
         let mut q = self.queue.lock().unwrap();
-        let before = q.len();
-        q.retain(|j| !(j.slot.id == bench && j.entry == entry));
-        q.len() != before
+        let pos = q.iter().position(|j| j.slot.id == bench && j.entry == entry)?;
+        q.remove(pos)
     }
 
     /// Every job still waiting (the server shuts down).

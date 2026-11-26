@@ -44,30 +44,43 @@ impl Exec {
                 }
                 stop_requested_at = Some(Instant::now());
             }
-            // Retry delivering `/stop` until the worker acknowledges it (or replies `run_not_active`), so a
-            // transient network drop during the first stop request never leaves the GPU training until
-            // `lost_grace` expires.
-            if stop_requested_at.is_some() && !stop_acked {
-                let attempts = if stop_warned { 1 } else { ATTEMPTS };
-                stop_acked = self.stop_worker_run(client, &run_id, attempts, !stop_warned)?;
+            if let Some(requested_at) = stop_requested_at {
+                let stop_deadline = requested_at + t.lost_grace;
+                if Instant::now() >= stop_deadline {
+                    // A worker that has not answered for most of that time has nothing to collect from: the run is
+                    // lost with its instance (a time limit that ended while nothing followed the run, and the
+                    // instance with it). Half the grace, not all of it: the silence is noticed a poll after the
+                    // stop was sent.
+                    if unreachable.is_some_and(|u| u.elapsed() >= t.lost_grace / 2) {
+                        return Err(failed(
+                            "cloud_instance_lost",
+                            "the worker stopped answering before the run could be stopped and collected; the \
+                             weights copied so far stay (resume the run to continue from them)",
+                        ));
+                    }
+                    // Check the worker's terminal status one final time so a run that completed or failed right
+                    // as the grace window closed is not misreported as `Stopped`.
+                    if let Ok(Some(end)) = self.mirror(client, &run_id) {
+                        if self.entry.run().cloud.is_some_and(|c| c.unanswered_since.is_some()) {
+                            self.entry.update_cloud(|c| c.unanswered_since = None);
+                        }
+                        break Some(end);
+                    }
+                    self.entry
+                        .log(LogLevel::Warn, "the worker's run did not stop in time; collecting what it has");
+                    break None;
+                }
+                // Retry delivering `/stop` until the worker acknowledges it (or replies `run_not_active`),
+                // bounded by `stop_deadline` so a transient outage never leaves the GPU training until
+                // `lost_grace` expires nor delays checking the worker's terminal status past the deadline.
                 if !stop_acked {
-                    stop_warned = true;
+                    let attempts = if stop_warned { 1 } else { ATTEMPTS };
+                    stop_acked =
+                        self.stop_worker_run(client, &run_id, attempts, stop_deadline, !stop_warned)?;
+                    if !stop_acked {
+                        stop_warned = true;
+                    }
                 }
-            }
-            if stop_requested_at.is_some_and(|s| s.elapsed() >= t.lost_grace) {
-                // A worker that has not answered for most of that time has nothing to collect from: the run is lost
-                // with its instance (a time limit that ended while nothing followed the run, and the instance
-                // with it). Half the grace, not all of it: the silence is noticed a poll after the stop was sent.
-                if unreachable.is_some_and(|u| u.elapsed() >= t.lost_grace / 2) {
-                    return Err(failed(
-                        "cloud_instance_lost",
-                        "the worker stopped answering before the run could be stopped and collected; the weights \
-                         copied so far stay (resume the run to continue from them)",
-                    ));
-                }
-                self.entry
-                    .log(LogLevel::Warn, "the worker's run did not stop in time; collecting what it has");
-                break None;
             }
             let mirrored = self.mirror(client, &run_id);
             // The worker answered: no silence is said any more, also one a process before this one recorded (the run
@@ -89,11 +102,18 @@ impl Exec {
                         let _ = self.core.ledger.booted(id);
                     }
                     (wait, unreachable, gone) = (t.poll, None, None);
-                    // If the worker just came back and `/stop` was never delivered, send it immediately.
-                    if stop_requested_at.is_some() && !stop_acked {
-                        stop_acked = self.stop_worker_run(client, &run_id, 1, !stop_warned)?;
-                        if !stop_acked {
-                            stop_warned = true;
+                    // If the worker just came back and `/stop` was never delivered, send it immediately within the
+                    // remaining grace window.
+                    if let Some(requested_at) = stop_requested_at
+                        && !stop_acked
+                    {
+                        let stop_deadline = requested_at + t.lost_grace;
+                        if Instant::now() < stop_deadline {
+                            stop_acked =
+                                self.stop_worker_run(client, &run_id, 1, stop_deadline, !stop_warned)?;
+                            if !stop_acked {
+                                stop_warned = true;
+                            }
                         }
                     }
                 }
@@ -185,13 +205,15 @@ impl Exec {
         }
     }
 
-    /// Asks the worker to stop its run (retried up to `attempts`; a run that ended meanwhile is fine). Returns
-    /// `Ok(true)` once the worker acknowledged the stop or reported `run_not_active`, `Ok(false)` if delivery failed.
+    /// Asks the worker to stop its run (retried up to `attempts` while before `deadline`; a run that ended
+    /// meanwhile is fine). Returns `Ok(true)` once the worker acknowledged the stop or reported `run_not_active`,
+    /// `Ok(false)` if delivery failed.
     fn stop_worker_run(
         &self,
         client: &Client,
         run_id: &str,
         attempts: u32,
+        deadline: Instant,
         log_error: bool,
     ) -> std::result::Result<bool, Halt> {
         for attempt in 1..=attempts {
@@ -199,7 +221,14 @@ impl Exec {
                 Ok(_) => return Ok(true),
                 Err(e) if e.code() == "run_not_active" => return Ok(true),
                 Err(e) if e.is_transient() && attempt < attempts => {
-                    self.wait(self.core.tuning.poll)?;
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        if log_error {
+                            self.entry.log(LogLevel::Warn, format!("asking the worker to stop the run: {e}"));
+                        }
+                        return Ok(false);
+                    }
+                    self.wait(self.core.tuning.poll.min(remaining))?;
                 }
                 Err(e) => {
                     if log_error {

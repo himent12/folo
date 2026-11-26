@@ -10,7 +10,7 @@ use super::super::agent::{AgentError, AgentReply, Failure, Output, last_line};
 /// `item.completed` items of type `error` are warnings, e.g. about a config key this version does not know.)
 ///
 /// What a completed turn used is counted whether or not there is a reply: a failure carries it.
-pub(super) fn parse(out: &Output) -> Result<AgentReply, AgentError> {
+pub(in crate::label) fn parse(out: &Output) -> Result<AgentReply, AgentError> {
     let (mut text, mut failure) = (None, None);
     for event in out.stdout.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()) {
         match event["type"].as_str() {

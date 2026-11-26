@@ -53,9 +53,12 @@ impl Provider for RunPod {
 
     fn check(&self, values: &Values) -> Result<Account> {
         let key = api_key(values)?;
-        // Validate the resolved worker download base URL (whether from the connection field or
-        // `FOLO_CLOUD_WORKER_BASE_URL`) before probing so embedded credentials or malformed URLs are never
-        // requested or echoed into the persisted account note.
+        // Validate any explicit connection field AND the resolved worker download base URL (which may come from
+        // `FOLO_CLOUD_WORKER_BASE_URL`) before probing so malformed or credential-bearing URLs are never requested
+        // or echoed into the persisted account note.
+        if let Some(url) = values.get(WORKER_BASE_URL_FIELD) {
+            bootstrap::check_base_url(url)?;
+        }
         let base_url = crate::worker_base_url(values, env!("CARGO_PKG_VERSION"));
         bootstrap::check_base_url(&base_url)?;
         // Listing pods needs what FOLO needs: a key that works and may see pods.
