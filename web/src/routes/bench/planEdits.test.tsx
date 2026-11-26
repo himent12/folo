@@ -132,11 +132,23 @@ describe('Benchmark plan concurrent save and empty-weight leave guard', () => {
     expect(btn('Save plan', dialog!)!.disabled).toBe(true);
   });
 
-  it('engages the unsaved-plan leave guard when clearing a weight is the only edit', async () => {
+  it('engages the unsaved-plan leave guard and offers Discard when clearing a weight is the only edit', async () => {
     await openPlan();
     typeInput(weight('Low light'), '');
     expect(weight('Low light').getAttribute('aria-invalid')).toBe('true');
 
+    // Toolbar offers Discard to restore the cleared field (and keeps Design with an agent on offer).
+    expect(btn('Discard')).toBeDefined();
+    expect(btn('Save plan')).toBeUndefined();
+    expect(btn('Design with an agent')).toBeDefined();
+    btn('Discard')!.click();
+    flushSync();
+    expect(weight('Low light').value).toBe('1');
+    expect(weight('Low light').getAttribute('aria-invalid')).toBeNull();
+    expect(btn('Discard')).toBeUndefined();
+
+    // Clearing again engages the leave guard rather than silently navigating away.
+    typeInput(weight('Low light'), '');
     router.go('/runs');
     flushSync();
     const dialog = document.querySelector<HTMLDialogElement>('dialog[open]');
@@ -145,10 +157,67 @@ describe('Benchmark plan concurrent save and empty-weight leave guard', () => {
     expect(btn('Save plan', dialog!)!.disabled).toBe(true);
     expect(router.route.path).toBe('/benchmarks/bn_9f03');
 
-    // Dismissing returns the user to the invalid field; Discard clears it and proceeds.
+    // Discard changes clears the invalid input and proceeds.
     btn('Discard changes', dialog!)!.click();
     await settle();
     expect(document.querySelector('dialog[open]')).toBeNull();
     expect(router.route.path).toBe('/runs');
+  });
+
+  it('clears a stale elsewhere warning when our save replaces another tab’s plan while a concurrent edit is made', async () => {
+    await openPlan();
+    typeInput(weight('Low light'), '2');
+
+    // Another tab saves Haze = 4, raising the conflict warning.
+    const b = await hub.api.bench('bn_9f03');
+    const real = hub.api.updateBench.bind(hub.api);
+    await real('bn_9f03', {
+      plan: { ...b.plan, conditions: b.plan.conditions.map((c) => (c.condition === 'haze' ? { ...c, weight: 4 } : c)) },
+    });
+    await settle();
+    expect(document.body.textContent).toContain('Changed elsewhere while you edited');
+
+    // Save our plan (replacing the other tab's), and edit Overexposure while saving.
+    let releaseSave!: () => void;
+    const held = new Promise<void>((r) => (releaseSave = r));
+    vi.spyOn(hub.api, 'updateBench').mockImplementationOnce(async (id, req) => {
+      await held;
+      return real(id, req);
+    });
+    btn('Save plan')!.click();
+    flushSync();
+    typeInput(weight('Overexposure'), '3');
+    releaseSave();
+    await settle();
+
+    // The server now holds our save (Low light = 2), so the stale conflict warning must clear while Overexposure = 3 stays unsaved.
+    expect(weight('Overexposure').value).toBe('3');
+    expect(document.body.textContent).toContain('Unsaved changes');
+    expect(document.body.textContent).not.toContain('Changed elsewhere');
+  });
+
+  it('adopts an external plan update on a clean editor without false conflict, and does not show elsewhere when unreadable matches server', async () => {
+    await openPlan();
+    const b = await hub.api.bench('bn_9f03');
+    // Clean editor: another tab saves Haze = 4 -> adopted silently, no conflict, no dirty bar.
+    await hub.api.updateBench('bn_9f03', {
+      plan: { ...b.plan, conditions: b.plan.conditions.map((c) => (c.condition === 'haze' ? { ...c, weight: 4 } : c)) },
+    });
+    await settle();
+    expect(weight('Haze').value).toBe('4');
+    expect(document.body.textContent).not.toContain('Changed elsewhere');
+    expect(btn('Save plan')).toBeUndefined();
+
+    // Edit Low light = 2 and clear Overexposure, then another tab saves the exact same Low light = 2 (dirty becomes false, hasUnreadable stays true).
+    typeInput(weight('Low light'), '2');
+    typeInput(weight('Overexposure'), '');
+    const b2 = await hub.api.bench('bn_9f03');
+    await hub.api.updateBench('bn_9f03', {
+      plan: { ...b2.plan, conditions: b2.plan.conditions.map((c) => (c.condition === 'low_light' ? { ...c, weight: 2 } : c)) },
+    });
+    await settle();
+    expect(weight('Overexposure').value).toBe('');
+    expect(document.body.textContent).not.toContain('Changed elsewhere');
+    expect(btn('Discard')).toBeDefined();
   });
 });

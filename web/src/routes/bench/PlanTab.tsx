@@ -37,6 +37,8 @@ export interface PlanTabProps {
   /** The plan was saved elsewhere (another tab) under these unsaved edits. */
   elsewhere: boolean;
   dirty: boolean;
+  /** An active condition's weight field holds no valid number (e.g. cleared) even if the saved draft is unchanged. */
+  hasUnreadable?: boolean;
   saving: boolean;
   onsave: () => void;
   ondiscard: () => void;
@@ -229,13 +231,20 @@ export default function PlanTab(props: PlanTabProps) {
                         </Gate>
                       </>
                     ) : (
-                      <Gate reason={props.designWhy}>
-                        {(why) => (
-                          <Button size="sm" icon={Sparkles} disabled={!!why()} aria-describedby={why()} onclick={props.ondesign}>
-                            Design with an agent
+                      <>
+                        {props.hasUnreadable ? (
+                          <Button variant="ghost" size="sm" onclick={props.ondiscard}>
+                            Discard
                           </Button>
-                        )}
-                      </Gate>
+                        ) : null}
+                        <Gate reason={props.designWhy}>
+                          {(why) => (
+                            <Button size="sm" icon={Sparkles} disabled={!!why()} aria-describedby={why()} onclick={props.ondesign}>
+                              Design with an agent
+                            </Button>
+                          )}
+                        </Gate>
+                      </>
                     )}
                   </>
                 ) : null}

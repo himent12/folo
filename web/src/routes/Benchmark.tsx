@@ -126,22 +126,25 @@ export default function Benchmark() {
   // one that comes while it saves is another tab's (told by what it holds, not by when it comes).
   let sent: BenchPlan | null = null;
   let shownKey = '';
+  let shownPlan: BenchPlan | null = null;
   effect(() => {
     const key = planKey.get();
     if (!key || key === shownKey) return;
     untrack(() => {
       const b = bench.get()!;
-      if (!shownKey.startsWith(`${b.id}:`) || !unsaved.get()) {
+      const hadEdits = shownPlan !== null && (!samePlan(draft.get(), shownPlan) || hasUnreadable.get() || sent !== null);
+      if (!shownKey.startsWith(`${b.id}:`) || !hadEdits) {
         draft.set(clonePlan(b.plan));
         // Replaced from the server: what was typed is for a plan no longer shown.
         typed.set({});
         elsewhere.set(false);
-      } else if (!(sent && samePlan(b.plan, sent))) elsewhere.set(true);
+      } else if (dirty.get() && !(sent && samePlan(b.plan, sent))) elsewhere.set(true);
       shownKey = key;
+      shownPlan = clonePlan(b.plan);
     });
   });
   effect(() => {
-    if (!unsaved.get()) untrack(() => elsewhere.set(false));
+    if (!dirty.get()) untrack(() => elsewhere.set(false));
   });
   effect(() => {
     void id.get();
@@ -186,15 +189,17 @@ export default function Benchmark() {
       if (!samePlan(now.plan, saved)) {
         // Another tab saved after this save landed (its event came before this answer): the server holds that plan, so
         // the edits stay edits and the page says so, here and at every Save plan.
-        if (unsaved.peek()) elsewhere.set(true);
+        if (dirty.peek()) elsewhere.set(true);
         // page-level: the save did land, then was replaced; Plan saved would say the wrong thing.
         toast.info('Plan saved, then changed elsewhere', 'Another tab or window saved its plan after yours. Save plan replaces it with yours; Discard shows it.');
         // Not saved as it stands: the leave dialog stays on the page rather than leave the edits behind.
         return false;
       }
-      // Mark this saved plan as already seen so the upcoming planKey effect flush does not mistake our own save for
-      // another tab's update after `sent` clears in `finally`.
+      // Server now holds our own saved plan: clear any prior conflict and mark it seen so the upcoming planKey flush
+      // does not mistake our save for another tab's update after `sent` clears in `finally`.
+      elsewhere.set(false);
       shownKey = `${benchId}:${JSON.stringify(now.plan)}`;
+      shownPlan = clonePlan(now.plan);
       if (!samePlan(draft.peek(), plan) || hasUnreadable.peek()) {
         // Edits were made while this save was in flight: keep them in the draft and leave them marked unsaved.
         // page-level: the plan's own Save, outside any dialog.
@@ -672,6 +677,7 @@ export default function Benchmark() {
                       error={planWhy.get()}
                       elsewhere={elsewhere.get()}
                       dirty={dirty.get()}
+                      hasUnreadable={hasUnreadable.get()}
                       saving={saving.get()}
                       onsave={() => void savePlan()}
                       ondiscard={discard}
