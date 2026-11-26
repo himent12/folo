@@ -123,8 +123,13 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let gate = V4(GATE[i]);
     let up = V4(UP[i]);
     let grad = V4(G[i]);
+    let d_silu = silu_deriv4(gate);
     DUP[i] = OUT(grad * silu4(gate));
-    DGATE[i] = OUT(grad * up * silu_deriv4(gate));
+    // When |d_silu| < 1, apply it to the larger factor first so `grad * up` cannot spuriously overflow.
+    let grad_bigger = abs(grad) >= abs(up);
+    let p_shrink = select(grad * (up * d_silu), (grad * d_silu) * up, grad_bigger);
+    let p_direct = (grad * up) * d_silu;
+    DGATE[i] = OUT(select(p_direct, p_shrink, abs(d_silu) < vec4<f32>(1.0)));
 }
 "#;
 

@@ -415,6 +415,29 @@ fn residual_add_norm_forward_and_backward_match_cpu() {
         }
     }
 
+    // SwiGLU backward intermediate overflow guard: `grad = up = 1e20, gate = -40` must stay finite (~-1.657e24).
+    {
+        let gate_o = [-40.0f32, -40.0, -40.0, -40.0];
+        let up_o = [1e20f32, 1e10, 1e30, -1e20];
+        let g_o = [1e20f32, 1e30, 1e10, 1e20];
+        let gg_t = GpuTensor::from_slice(&ctx, &gate_o, &[4]).unwrap();
+        let gu_t = GpuTensor::from_slice(&ctx, &up_o, &[4]).unwrap();
+        let gr_t = GpuTensor::from_slice(&ctx, &g_o, &[4]).unwrap();
+        let gdg = GpuTensor::empty(&ctx, &[4], DType::F32).unwrap();
+        let gdu = GpuTensor::empty(&ctx, &[4], DType::F32).unwrap();
+        swiglu_backward(&ctx, gg_t.raw(), gu_t.raw(), gr_t.raw(), gdg.raw(), gdu.raw(), 4, DType::F32)
+            .unwrap();
+        let want_dg: Vec<f32> = gate_o
+            .iter()
+            .zip(&up_o)
+            .zip(&g_o)
+            .map(|((&ga, &u), &gr)| ((gr as f64) * (u as f64) * cpu_silu_deriv(ga as f64)) as f32)
+            .collect();
+        let got_dg = gdg.to_vec().unwrap();
+        assert!(got_dg.iter().all(|v| v.is_finite()), "swiglu_bwd overflowed: {got_dg:?}");
+        assert_close(&got_dg, &want_dg, 1e19, 1e-4, "swiglu_bwd 1e20*1e20 guard");
+    }
+
     // F16 residual_add_norm forward + backward parity when supported.
     if ctx.caps().shader_f16 {
         let (outer, d) = (6, 32);
@@ -482,6 +505,181 @@ fn residual_add_norm_forward_and_backward_match_cpu() {
         assert_close(&gdh.to_vec().unwrap(), &dh_ref, 5e-3, 5e-3, "res_norm f16 dh");
         assert_close(&gdw.to_vec().unwrap(), &dw_ref, 8e-3, 8e-3, "res_norm f16 dw");
         assert_close(&gdb.to_vec().unwrap(), &db_ref, 5e-3, 5e-3, "res_norm f16 db");
+    }
+
+    // Extreme-magnitude forward + backward stability for residual_add_layer_norm & residual_add_rms_norm:
+    // 1. Centering overflow guard on `[3e38, 3e38, -3e38]` (cached scalar & uncached streaming).
+    // 2. Large constant row `1e31` with small `eps = 1e-20` (`rstd = 1e10`, must not overflow `ldexp(rstd, 96)`).
+    // 3. `1e20` and `1e-23` alternating rows with `eps = 0`.
+    for portable in [false, true] {
+        let _fg = ForceGuard::set(portable);
+        // [3e38, 3e38, -3e38] -> [1/sqrt(2), 1/sqrt(2), -sqrt(2)]
+        let vals3 = [3e38f32, 3e38, -3e38];
+        let zeros3 = [0.0f32; 3];
+        let gx = GpuTensor::from_slice(&ctx, &vals3, &[3]).unwrap();
+        let gr = GpuTensor::from_slice(&ctx, &zeros3, &[3]).unwrap();
+        let gh = GpuTensor::empty(&ctx, &[3], DType::F32).unwrap();
+        let gy = GpuTensor::empty(&ctx, &[3], DType::F32).unwrap();
+        let gm = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        let grs = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        residual_add_layer_norm_forward(
+            &ctx,
+            gx.raw(),
+            gr.raw(),
+            None,
+            None,
+            gh.raw(),
+            gy.raw(),
+            gm.raw(),
+            grs.raw(),
+            1,
+            3,
+            1e-5,
+            DType::F32,
+        )
+        .unwrap();
+        let s2 = std::f32::consts::SQRT_2;
+        assert_close(
+            &gy.to_vec().unwrap(),
+            &[1.0 / s2, 1.0 / s2, -s2],
+            1e-5,
+            1e-5,
+            &format!("res_ln 3e38 cached p={portable}"),
+        );
+
+        // Uncached streaming `[3e38, 3e38, -3e38]` repeated (`d = 1026 > 1024`).
+        let vals_u: Vec<f32> = (0..1026).map(|i| if i % 3 == 2 { -3e38 } else { 3e38 }).collect();
+        let zeros_u = vec![0.0f32; 1026];
+        let gxu = GpuTensor::from_slice(&ctx, &vals_u, &[1026]).unwrap();
+        let gru = GpuTensor::from_slice(&ctx, &zeros_u, &[1026]).unwrap();
+        let ghu = GpuTensor::empty(&ctx, &[1026], DType::F32).unwrap();
+        let gyu = GpuTensor::empty(&ctx, &[1026], DType::F32).unwrap();
+        residual_add_layer_norm_forward(
+            &ctx,
+            gxu.raw(),
+            gru.raw(),
+            None,
+            None,
+            ghu.raw(),
+            gyu.raw(),
+            gm.raw(),
+            grs.raw(),
+            1,
+            1026,
+            1e-5,
+            DType::F32,
+        )
+        .unwrap();
+        let want_u: Vec<f32> = (0..1026).map(|i| if i % 3 == 2 { -s2 } else { 1.0 / s2 }).collect();
+        assert_close(
+            &gyu.to_vec().unwrap(),
+            &want_u,
+            1e-4,
+            1e-4,
+            &format!("res_ln 3e38 uncached p={portable}"),
+        );
+
+        // Constant `1e31` with `eps = 1e-20`: forward `y = 0`, backward `dh = rstd * (g - mean(g))`, `dw = 0`, all finite.
+        let c1e31 = [1e31f32; 4];
+        let z4 = [0.0f32; 4];
+        let g4 = [1.0f32, -1.0, 2.0, -2.0];
+        let gx4 = GpuTensor::from_slice(&ctx, &c1e31, &[4]).unwrap();
+        let gr4 = GpuTensor::from_slice(&ctx, &z4, &[4]).unwrap();
+        let ggy4 = GpuTensor::from_slice(&ctx, &g4, &[4]).unwrap();
+        let gh4 = GpuTensor::empty(&ctx, &[4], DType::F32).unwrap();
+        let gy4 = GpuTensor::empty(&ctx, &[4], DType::F32).unwrap();
+        let gdh4 = GpuTensor::empty(&ctx, &[4], DType::F32).unwrap();
+        let gdw4 = GpuTensor::empty(&ctx, &[4], DType::F32).unwrap();
+        residual_add_layer_norm_forward(
+            &ctx,
+            gx4.raw(),
+            gr4.raw(),
+            None,
+            None,
+            gh4.raw(),
+            gy4.raw(),
+            gm.raw(),
+            grs.raw(),
+            1,
+            4,
+            1e-20,
+            DType::F32,
+        )
+        .unwrap();
+        residual_add_layer_norm_backward(
+            &ctx,
+            gh4.raw(),
+            ggy4.raw(),
+            None,
+            None,
+            gm.raw(),
+            grs.raw(),
+            gdh4.raw(),
+            Some(gdw4.raw()),
+            None,
+            1,
+            4,
+            DType::F32,
+        )
+        .unwrap();
+        assert_close(&gy4.to_vec().unwrap(), &[0.0; 4], 1e-6, 1e-6, &format!("res_ln 1e31 y p={portable}"));
+        assert_close(
+            &gdh4.to_vec().unwrap(),
+            &[1e10, -1e10, 2e10, -2e10],
+            1e5,
+            1e-4,
+            &format!("res_ln 1e31 dh p={portable}"),
+        );
+        assert_close(&gdw4.to_vec().unwrap(), &[0.0; 4], 1e-6, 1e-6, &format!("res_ln 1e31 dw p={portable}"));
+
+        // `1e20` and `1e-23` alternating with `eps = 0` for both LayerNorm and RMSNorm.
+        for vals in [[1e20f32, -1e20, 1e20, -1e20], [1e-23, -1e-23, 1e-23, -1e-23]] {
+            let tx = GpuTensor::from_slice(&ctx, &vals, &[4]).unwrap();
+            residual_add_layer_norm_forward(
+                &ctx,
+                tx.raw(),
+                gr4.raw(),
+                None,
+                None,
+                gh4.raw(),
+                gy4.raw(),
+                gm.raw(),
+                grs.raw(),
+                1,
+                4,
+                0.0,
+                DType::F32,
+            )
+            .unwrap();
+            assert_close(
+                &gy4.to_vec().unwrap(),
+                &[1.0, -1.0, 1.0, -1.0],
+                1e-5,
+                1e-5,
+                &format!("res_ln ext p={portable}"),
+            );
+            residual_add_rms_norm_forward(
+                &ctx,
+                tx.raw(),
+                gr4.raw(),
+                None,
+                gh4.raw(),
+                gy4.raw(),
+                grs.raw(),
+                1,
+                4,
+                0.0,
+                DType::F32,
+            )
+            .unwrap();
+            assert_close(
+                &gy4.to_vec().unwrap(),
+                &[1.0, -1.0, 1.0, -1.0],
+                1e-5,
+                1e-5,
+                &format!("res_rms ext p={portable}"),
+            );
+        }
     }
 
     assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());

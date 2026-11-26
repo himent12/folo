@@ -22,16 +22,17 @@ use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 /// Key/value rows per workgroup in `sdpa_bwd_dkdv`.
 const BC_BWD: usize = 16;
 
-/// Generates `sdpa_bwd_delta`: packs `STATS[row] = vec2(LSE[row], dot(dO[row], O[row]))`.
-/// Params: 0 = `total_rows` (`b * sq`), 1 = `d`.
+/// Generates `sdpa_bwd_delta`: packs `BWD_STATS[row] = vec4(row_max, inv_row_sum, dot(dO[row], O[row]), 0.0)`
+/// from forward `FWD_STATS[row] = vec2(row_max, row_sum)`.
+/// Params: 0 = `total_rows` (`b * sq`), 1 = `d`, 2 = `neg_inf` (f32).
 fn gen_sdpa_bwd_delta(spec: &Spec) -> String {
     let sg = spec.is_subgroups();
     let mut s = String::with_capacity(2048);
     s.push_str(
         "@group(0) @binding(1) var<storage, read> O: array<T>;\n\
          @group(0) @binding(2) var<storage, read> DO: array<T>;\n\
-         @group(0) @binding(3) var<storage, read> LSE: array<f32>;\n\
-         @group(0) @binding(4) var<storage, read_write> STATS: array<vec2<f32>>;\n",
+         @group(0) @binding(3) var<storage, read> FWD_STATS: array<vec2<f32>>;\n\
+         @group(0) @binding(4) var<storage, read_write> STATS: array<vec4<f32>>;\n",
     );
     if !sg {
         s.push_str("var<workgroup> sh_red: array<f32, 256>;\n");
@@ -42,6 +43,7 @@ fn gen_sdpa_bwd_delta(spec: &Spec) -> String {
         "  let block_id = wid.y * nwg.x + wid.x;\n\
          \x20 let total_rows = pu(0u);\n\
          \x20 let d = pu(1u);\n\
+         \x20 let neg_inf = pf(2u);\n\
          \x20 let row = block_id * 8u + ty;\n\
          \x20 var acc = 0.0;\n\
          \x20 if (row < total_rows) {\n\
@@ -52,7 +54,10 @@ fn gen_sdpa_bwd_delta(spec: &Spec) -> String {
          \x20 }\n\
          \x20 let delta = row_sum32(ty, tx, acc);\n\
          \x20 if (row < total_rows && tx == 0u) {\n\
-         \x20   STATS[row] = vec2<f32>(LSE[row], delta);\n\
+         \x20   let fs = FWD_STATS[row];\n\
+         \x20   let all_m = fs.x == neg_inf && fs.y == 0.0;\n\
+         \x20   let inv_l = select(1.0 / fs.y, 0.0, all_m);\n\
+         \x20   STATS[row] = vec4<f32>(fs.x, inv_l, delta, 0.0);\n\
          \x20 }\n\
          }\n",
     );
@@ -75,7 +80,7 @@ fn gen_sdpa_bwd_dkdv(spec: &Spec) -> String {
          @group(0) @binding(2) var<storage, read> K: array<T>;\n\
          @group(0) @binding(3) var<storage, read> V: array<T>;\n\
          @group(0) @binding(4) var<storage, read> DO: array<T>;\n\
-         @group(0) @binding(5) var<storage, read> STATS: array<vec2<f32>>;\n\
+         @group(0) @binding(5) var<storage, read> STATS: array<vec4<f32>>;\n\
          @group(0) @binding(6) var<storage, read> MASK: array<f32>;\n\
          @group(0) @binding(7) var<storage, read_write> DK: array<T>;\n\
          @group(0) @binding(8) var<storage, read_write> DV: array<T>;\n\
@@ -187,10 +192,11 @@ fn gen_sdpa_bwd_dkdv(spec: &Spec) -> String {
          \x20     workgroupBarrier();\n\
          \x20   }\n\
          \x20   let q_row = q0 + tx;\n\
-         \x20   var st = vec2<f32>(neg_inf, 0.0);\n\
+         \x20   var st = vec4<f32>(neg_inf, 0.0, 0.0, 0.0);\n\
          \x20   if (q_row < sq) { st = STATS[stats_base + q_row]; }\n\
-         \x20   let lse_q = st.x;\n\
-         \x20   let delta_q = st.y;\n",
+         \x20   let m_q = st.x;\n\
+         \x20   let inv_l_q = st.y;\n\
+         \x20   let delta_q = st.z;\n",
     );
 
     if causal {
@@ -220,16 +226,16 @@ fn gen_sdpa_bwd_dkdv(spec: &Spec) -> String {
                 "       let mv = MASK[mask_base + q_row * sk + {k_var}];\n\
                  \x20       if (mv == neg_inf) {{\n\
                  \x20         {v_var} = false;\n\
-                 \x20       }} else if (lse_q != neg_inf) {{\n\
-                 \x20         p = exp({s_var} * scale + mv - lse_q);\n\
+                 \x20       }} else if (m_q != neg_inf) {{\n\
+                 \x20         p = exp({s_var} * scale + mv - m_q) * inv_l_q;\n\
                  \x20         ds = p * ({dp_var} - delta_q) * scale;\n\
                  \x20       }}\n"
             );
         } else {
             let _ = write!(
                 s,
-                "       if (lse_q != neg_inf) {{\n\
-                 \x20         p = exp({s_var} * scale - lse_q);\n\
+                "       if (m_q != neg_inf) {{\n\
+                 \x20         p = exp({s_var} * scale - m_q) * inv_l_q;\n\
                  \x20         ds = p * ({dp_var} - delta_q) * scale;\n\
                  \x20       }}\n"
             );
@@ -372,7 +378,7 @@ fn gen_sdpa_bwd_dq(spec: &Spec) -> String {
          @group(0) @binding(2) var<storage, read> K: array<T>;\n\
          @group(0) @binding(3) var<storage, read> V: array<T>;\n\
          @group(0) @binding(4) var<storage, read> DO: array<T>;\n\
-         @group(0) @binding(5) var<storage, read> STATS: array<vec2<f32>>;\n\
+         @group(0) @binding(5) var<storage, read> STATS: array<vec4<f32>>;\n\
          @group(0) @binding(6) var<storage, read> MASK: array<f32>;\n\
          @group(0) @binding(7) var<storage, read_write> DQ: array<T>;\n\
          var<workgroup> sh_q: array<f32, {q_elems}>;\n\
@@ -415,12 +421,12 @@ fn gen_sdpa_bwd_dq(spec: &Spec) -> String {
          \x20 let r1 = ty + 8u;\n\
          \x20 let q_row0 = q0_tile + r0;\n\
          \x20 let q_row1 = q0_tile + r1;\n\
-         \x20 var st0 = vec2<f32>(neg_inf, 0.0);\n\
-         \x20 var st1 = vec2<f32>(neg_inf, 0.0);\n\
+         \x20 var st0 = vec4<f32>(neg_inf, 0.0, 0.0, 0.0);\n\
+         \x20 var st1 = vec4<f32>(neg_inf, 0.0, 0.0, 0.0);\n\
          \x20 if (q_row0 < sq) { st0 = STATS[stats_base + q_row0]; }\n\
          \x20 if (q_row1 < sq) { st1 = STATS[stats_base + q_row1]; }\n\
-         \x20 let lse0 = st0.x; let delta0 = st0.y;\n\
-         \x20 let lse1 = st1.x; let delta1 = st1.y;\n",
+         \x20 let m0 = st0.x; let inv_l0 = st0.y; let delta0 = st0.z;\n\
+         \x20 let m1 = st1.x; let inv_l1 = st1.y; let delta1 = st1.z;\n",
     );
 
     if cache_q {
@@ -550,9 +556,9 @@ fn gen_sdpa_bwd_dq(spec: &Spec) -> String {
              \x20   var v1 = q_row1 < sq && k_col < sk;\n",
         );
     }
-    for (r_var, q_var, v_var, s_var, dp_var, lse_var, del_var) in [
-        ("r0", "q_row0", "v0", "s0", "dp0", "lse0", "delta0"),
-        ("r1", "q_row1", "v1", "s1", "dp1", "lse1", "delta1"),
+    for (r_var, q_var, v_var, s_var, dp_var, m_var, inv_l_var, del_var) in [
+        ("r0", "q_row0", "v0", "s0", "dp0", "m0", "inv_l0", "delta0"),
+        ("r1", "q_row1", "v1", "s1", "dp1", "m1", "inv_l1", "delta1"),
     ] {
         let _ = write!(
             s,
@@ -566,16 +572,16 @@ fn gen_sdpa_bwd_dq(spec: &Spec) -> String {
                 "       let mv = MASK[mask_base + {q_var} * sk + k_col];\n\
                  \x20       if (mv == neg_inf) {{\n\
                  \x20         {v_var} = false;\n\
-                 \x20       }} else if ({lse_var} != neg_inf) {{\n\
-                 \x20         let p = exp({s_var} * scale + mv - {lse_var});\n\
+                 \x20       }} else if ({m_var} != neg_inf) {{\n\
+                 \x20         let p = exp({s_var} * scale + mv - {m_var}) * {inv_l_var};\n\
                  \x20         ds = p * ({dp_var} - {del_var}) * scale;\n\
                  \x20       }}\n"
             );
         } else {
             let _ = write!(
                 s,
-                "       if ({lse_var} != neg_inf) {{\n\
-                 \x20         let p = exp({s_var} * scale - {lse_var});\n\
+                "       if ({m_var} != neg_inf) {{\n\
+                 \x20         let p = exp({s_var} * scale - {m_var}) * {inv_l_var};\n\
                  \x20         ds = p * ({dp_var} - {del_var}) * scale;\n\
                  \x20       }}\n"
             );
@@ -668,8 +674,9 @@ pub(super) static SDPA_BWD_DQ: KernelDef = KernelDef {
 /// Tiled fused Scaled Dot-Product Attention backward: computes `dQ [b, sq, d]`, `dK [b, sk, d]`, and `dV [b, sk, d]`
 /// matching [`super::sdpa_forward_masked`].
 ///
-/// Requires the saved forward output `o [b, sq, d]` and per-query log-sum-exp `lse [b, sq]` (`F32`), plus upstream
-/// gradient `do_grad [b, sq, d]`. Optional additive `mask` and `causal` must match the forward pass.
+/// Requires the saved forward output `o [b, sq, d]` and per-query forward stats `stats [b, sq, 2]` (`F32`,
+/// `(row_max, row_sum)` written by [`super::sdpa_forward_masked`]), plus upstream gradient `do_grad [b, sq, d]`.
+/// Optional additive `mask` and `causal` must match the forward pass.
 #[allow(clippy::too_many_arguments)]
 pub fn sdpa_backward(
     ctx: &GpuContext,
@@ -677,7 +684,7 @@ pub fn sdpa_backward(
     k: &wgpu::Buffer,
     v: &wgpu::Buffer,
     o: &wgpu::Buffer,
-    lse: &wgpu::Buffer,
+    stats: &wgpu::Buffer,
     do_grad: &wgpu::Buffer,
     mask: Option<SdpaMask<'_>>,
     dq: &wgpu::Buffer,
@@ -692,18 +699,22 @@ pub fn sdpa_backward(
     let q_elems = prod(&[b, sq, d])?;
     let kv_elems = prod(&[b, sk, d])?;
     let q_rows = prod(&[b, sq])?;
+    let stats_elems = prod(&[q_rows, 2])?;
     check_buf(q, q_elems, dtype, "sdpa_backward q")?;
     check_buf(k, kv_elems, dtype, "sdpa_backward k")?;
     check_buf(v, kv_elems, dtype, "sdpa_backward v")?;
     check_buf(o, q_elems, dtype, "sdpa_backward o")?;
-    check_buf(lse, q_rows, DType::F32, "sdpa_backward lse")?;
+    check_buf(stats, stats_elems, DType::F32, "sdpa_backward stats")?;
     check_buf(do_grad, q_elems, dtype, "sdpa_backward do")?;
     check_buf(dq, q_elems, dtype, "sdpa_backward dq")?;
     check_buf(dk, kv_elems, dtype, "sdpa_backward dk")?;
     check_buf(dv, kv_elems, dtype, "sdpa_backward dv")?;
     let (mask_buf, mask_b_stride) = check_mask(ctx, mask, (b, sq, sk), "sdpa_backward")?;
 
-    if b == 0 || d == 0 {
+    if d == 0 {
+        return Err(shape_err("sdpa_backward: head dim d must be non-zero"));
+    }
+    if b == 0 {
         return Ok(());
     }
     if sq == 0 {
@@ -733,14 +744,14 @@ pub fn sdpa_backward(
         return Err(GpuError::Limit("sdpa_backward: dispatch exceeds u32 block count".into()));
     }
 
-    // 1. Precompute packed `STATS[b, sq] = vec2(lse, dot(dO, O))`.
-    let stats_bytes = prod(&[q_rows, 8])? as u64;
+    // 1. Precompute packed `BWD_STATS[b, sq] = vec4(row_max, inv_row_sum, dot(dO, O), 0.0)`.
+    let stats_bytes = prod(&[q_rows, 16])? as u64;
     let stats_buf = ctx.alloc(stats_bytes)?;
     let k_delta = ctx.kernel(&SDPA_BWD_DELTA, Spec::new().f16(half).subgroups(sg))?;
-    let p_delta = Params::new().uz(q_rows)?.uz(d)?;
+    let p_delta = Params::new().uz(q_rows)?.uz(d)?.f(f32::NEG_INFINITY);
     ctx.dispatch(
         &k_delta,
-        &[o, do_grad, lse, stats_buf.raw()],
+        &[o, do_grad, stats, stats_buf.raw()],
         &p_delta,
         ctx.grid_1d(delta_blocks as u64 * 256, 256)?,
     )?;

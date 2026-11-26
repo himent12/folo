@@ -45,7 +45,7 @@ fn is_inf1(x: f32) -> bool {
     return (bitcast<u32>(x) & 0x7fffffffu) == 0x7f800000u;
 }
 fn norm_xh(x: vec4<f32>, mean: f32, rstd: f32) -> vec4<f32> {
-    if (abs(mean) > 1e30 || (rstd > 0.0 && rstd < 1e-30)) {
+    if (rstd > 0.0 && rstd < 1e-30) {
         let xs = ldexp(x, vec4<i32>(-96i));
         let ms = select(vec4<f32>(ldexp(mean, -96i)), vec4<f32>(0.0), RMS);
         return (xs - ms) * ldexp(rstd, 96i);

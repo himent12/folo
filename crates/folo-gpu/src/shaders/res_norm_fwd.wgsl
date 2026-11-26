@@ -10,6 +10,8 @@
 @group(0) @binding(7) var<storage, read_write> MEAN: array<f32>;
 @group(0) @binding(8) var<storage, read_write> RSTD: array<f32>;
 
+var<workgroup> sh_anchor: f32;
+
 fn apply_affine(xh: vec4<f32>, idx: u32) -> E {
     var v = xh;
     if (HAS_W) { v *= PF4(W[idx]); }
@@ -46,16 +48,37 @@ fn res_norm_fwd_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u
             if (h2) { s += lane_sum(v2); am = max(am, lane_amax(v2)); }
             if (h3) { s += lane_sum(v3); am = max(am, lane_amax(v3)); }
             let sm = reduce_sum_max(lid, sgid, lane, s, am);
-            mean = sm.x * inv_d;
-            let raw_nonfinite = !is_finite1(sm.x) && sm.y > 0.0 && is_finite1(sm.y);
-            if (raw_nonfinite) {
+            let huge_range = (!is_finite1(sm.x) || sm.y > 1e30) && sm.y > 0.0 && is_finite1(sm.y);
+            if (huge_range) {
+                let sv = vec4<i32>(-96i);
+                if (lid == 0u) { var a = 0.0; if (valid) { a = ldexp(v0.x, -96i); } sh_anchor = a; }
+                let a_s = workgroupUniformLoad(&sh_anchor);
+                let asv = vec4<f32>(a_s);
                 var ss = 0.0;
-                if (h0) { ss += lane_sum(ldexp(v0, vec4<i32>(-32))); }
-                if (h1) { ss += lane_sum(ldexp(v1, vec4<i32>(-32))); }
-                if (h2) { ss += lane_sum(ldexp(v2, vec4<i32>(-32))); }
-                if (h3) { ss += lane_sum(ldexp(v3, vec4<i32>(-32))); }
-                mean = ldexp(reduce_sum1(lid, sgid, lane, ss) * inv_d, 32i);
+                if (h0) { v0 = ldexp(v0, sv) - asv; ss += lane_sum(v0); }
+                if (h1) { v1 = ldexp(v1, sv) - asv; ss += lane_sum(v1); }
+                if (h2) { v2 = ldexp(v2, sv) - asv; ss += lane_sum(v2); }
+                if (h3) { v3 = ldexp(v3, sv) - asv; ss += lane_sum(v3); }
+                let md_s = reduce_sum1(lid, sgid, lane, ss) * inv_d;
+                let mdsv = vec4<f32>(md_s);
+                var sq_s = 0.0;
+                if (h0) { v0 -= mdsv; sq_s += lane_sum(v0 * v0); }
+                if (h1) { v1 -= mdsv; sq_s += lane_sum(v1 * v1); }
+                if (h2) { v2 -= mdsv; sq_s += lane_sum(v2 * v2); }
+                if (h3) { v3 -= mdsv; sq_s += lane_sum(v3 * v3); }
+                let var_s = reduce_sum1(lid, sgid, lane, sq_s) * inv_d;
+                let zero_var = var_s == 0.0;
+                let inv_rms_s = select(inverseSqrt(var_s), inverseSqrt(eps), zero_var);
+                let rstd_h = select(ldexp(inv_rms_s, -96i), inv_rms_s, zero_var);
+                if (!valid) { return; }
+                if (lid == 0u) { MEAN[row] = ldexp(a_s + md_s, 96i); RSTD[row] = rstd_h; }
+                if (h0) { Y[base + i0] = apply_affine(v0 * inv_rms_s, i0); }
+                if (h1) { Y[base + i1] = apply_affine(v1 * inv_rms_s, i1); }
+                if (h2) { Y[base + i2] = apply_affine(v2 * inv_rms_s, i2); }
+                if (h3) { Y[base + i3] = apply_affine(v3 * inv_rms_s, i3); }
+                return;
             }
+            mean = sm.x * inv_d;
             if (h0) { v0 -= vec4<f32>(mean); }
             if (h1) { v1 -= vec4<f32>(mean); }
             if (h2) { v2 -= vec4<f32>(mean); }
@@ -125,17 +148,41 @@ fn res_norm_fwd_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u
             }
         }
         let sm = reduce_sum_max(lid, sgid, lane, s, am);
-        mean = sm.x * inv_d;
-        let raw_nonfinite = !is_finite1(sm.x) && sm.y > 0.0 && is_finite1(sm.y);
-        if (raw_nonfinite) {
+        let huge_range = (!is_finite1(sm.x) || sm.y > 1e30) && sm.y > 0.0 && is_finite1(sm.y);
+        if (huge_range) {
+            let sv = vec4<i32>(-96i);
+            if (lid == 0u) { var a = 0.0; if (valid) { a = ldexp(V4(H[base]).x, -96i); } sh_anchor = a; }
+            let a_s = workgroupUniformLoad(&sh_anchor);
+            let asv = vec4<f32>(a_s);
+            let no_reassoc = vec4<u32>(select(0u, 1u, rows == 0xffffffffu));
             var ss = 0.0;
             if (valid) {
                 for (var i = lid; i < units; i += 256u) {
-                    ss += lane_sum(ldexp(V4(H[base + i]), vec4<i32>(-32)));
+                    ss += lane_sum(ldexp(V4(H[base + i]), sv) - asv);
                 }
             }
-            mean = ldexp(reduce_sum1(lid, sgid, lane, ss) * inv_d, 32i);
+            let md_s = reduce_sum1(lid, sgid, lane, ss) * inv_d;
+            let mdsv = vec4<f32>(md_s);
+            var sq_s = 0.0;
+            if (valid) {
+                for (var i = lid; i < units; i += 256u) {
+                    let c = bitcast<vec4<f32>>(bitcast<vec4<u32>>(ldexp(V4(H[base + i]), sv) - asv) | no_reassoc) - mdsv;
+                    sq_s += lane_sum(c * c);
+                }
+            }
+            let var_s = reduce_sum1(lid, sgid, lane, sq_s) * inv_d;
+            let zero_var = var_s == 0.0;
+            let inv_rms_s = select(inverseSqrt(var_s), inverseSqrt(eps), zero_var);
+            let rstd_h = select(ldexp(inv_rms_s, -96i), inv_rms_s, zero_var);
+            if (!valid) { return; }
+            if (lid == 0u) { MEAN[row] = ldexp(a_s + md_s, 96i); RSTD[row] = rstd_h; }
+            for (var i = lid; i < units; i += 256u) {
+                let c = bitcast<vec4<f32>>(bitcast<vec4<u32>>(ldexp(V4(H[base + i]), sv) - asv) | no_reassoc) - mdsv;
+                Y[base + i] = apply_affine(c * inv_rms_s, i);
+            }
+            return;
         }
+        mean = sm.x * inv_d;
     }
     var sq = 0.0; var dam = 0.0;
     if (valid) {

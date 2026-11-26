@@ -7,7 +7,7 @@
 //!   rows (2 rows per 32-lane row group) and up to `128` output head-dim columns (`D_CHUNKS` in `1..=4`), tiling
 //!   keys/values in `BC = 32` blocks with `33`-padded shared memory (`<= 14.5 KB`, WebGPU-safe). Supports optional
 //!   additive `f32` masks (`[b, sq, sk]` or broadcast `[1, sq, sk]`), causal masking with uniform tile early-exit
-//!   and NaN/Inf isolation, optional `lse [b, sq]` output for training, and `F32` / `F16` storage.
+//!   and NaN/Inf isolation, optional `stats [b, sq, 2]` (`(row_max, row_sum)`) output for training, and `F32` / `F16` storage.
 //! - **Backward** (`sdpa_backward`, in [`backward`]): FlashAttention-2 style 3-kernel tiled backward (`sdpa_bwd_delta`,
 //!   `sdpa_bwd_dkdv`, `sdpa_bwd_dq`) with zero atomics and zero `[B, Sq, Sk]` global memory, matching forward
 //!   causal + additive mask semantics, non-multiple tile sizes, and numerical stability guards.
@@ -158,13 +158,13 @@ pub(crate) fn push_main_header(s: &mut String, sg: bool) {
 }
 
 /// Generates the tiled online-softmax SDPA forward shader.
-/// Spec: `CAUSAL`, `HAS_MASK`, `WRITE_LSE`, `CACHE_Q`, `D_CHUNKS` (`1..=4`), `f16`, `subgroups`.
+/// Spec: `CAUSAL`, `HAS_MASK`, `WRITE_STATS`, `CACHE_Q`, `D_CHUNKS` (`1..=4`), `f16`, `subgroups`.
 /// Params: 0 = `total_blocks`, 1 = `sq`, 2 = `sk`, 3 = `d`, 4 = `q_tiles`, 5 = `d_tiles`,
 /// 6 = `scale` (f32), 7 = `neg_inf` (f32), 8 = `mask_b_stride`.
 fn gen_sdpa_fwd(spec: &Spec) -> String {
     let causal = spec.get_bool("CAUSAL");
     let has_mask = spec.get_bool("HAS_MASK");
-    let write_lse = spec.get_bool("WRITE_LSE");
+    let write_stats = spec.get_bool("WRITE_STATS");
     let cache_q = spec.get_bool("CACHE_Q");
     let d_chunks = spec.get_u32("D_CHUNKS", 1).clamp(1, 4);
     let sg = spec.is_subgroups();
@@ -179,7 +179,7 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
          @group(0) @binding(3) var<storage, read> V: array<T>;\n\
          @group(0) @binding(4) var<storage, read> MASK: array<f32>;\n\
          @group(0) @binding(5) var<storage, read_write> O: array<T>;\n\
-         @group(0) @binding(6) var<storage, read_write> LSE: array<f32>;\n\
+         @group(0) @binding(6) var<storage, read_write> STATS: array<vec2<f32>>;\n\
          var<workgroup> sh_q: array<f32, {q_elems}>;\n\
          var<workgroup> sh_kv: array<f32, 1056>;\n\
          var<workgroup> sh_p: array<f32, 512>;"
@@ -413,7 +413,7 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
     s.push_str("  }\n");
 
     // `o` is already normalized for valid finite `l > 0`; all-masked rows (`m == -inf && l == 0`) yield 0 and
-    // `LSE = -inf`; genuine `NaN` / non-finite `l` propagates `NaN`.
+    // `STATS = (-inf, 0.0)`; genuine `NaN` / non-finite `l` propagates `NaN`.
     s.push_str(
         "  let ok0 = l0 > 0.0 && (bitcast<u32>(l0) & 0x7fffffffu) < 0x7f800000u;\n\
          \x20 let ok1 = l1 > 0.0 && (bitcast<u32>(l1) & 0x7fffffffu) < 0x7f800000u;\n\
@@ -422,12 +422,12 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
          \x20 let fin0 = select(select(1.0 / l0, 0.0, all_m0), 1.0, ok0);\n\
          \x20 let fin1 = select(select(1.0 / l1, 0.0, all_m1), 1.0, ok1);\n",
     );
-    if write_lse {
+    if write_stats {
         s.push_str(
             "  if (d_tile == 0u && tx == 0u) {\n\
-             \x20   let lse_base = b * sq;\n\
-             \x20   if (q_row0 < sq) { LSE[lse_base + q_row0] = select(m0 + log(l0), neg_inf, all_m0); }\n\
-             \x20   if (q_row1 < sq) { LSE[lse_base + q_row1] = select(m1 + log(l1), neg_inf, all_m1); }\n\
+             \x20   let st_base = b * sq;\n\
+             \x20   if (q_row0 < sq) { STATS[st_base + q_row0] = vec2<f32>(m0, l0); }\n\
+             \x20   if (q_row1 < sq) { STATS[st_base + q_row1] = vec2<f32>(m1, l1); }\n\
              \x20 }\n",
         );
     }
@@ -480,10 +480,12 @@ pub fn sdpa_forward(
     sdpa_forward_masked(ctx, q, k, v, None, out, None, dims, scale, causal, dtype)
 }
 
-/// Tiled fused SDPA forward with optional additive `mask` and optional `lse [b, sq]` (`F32`) output for training.
+/// Tiled fused SDPA forward with optional additive `mask` and optional `stats [b, sq, 2]` (`F32`) output for
+/// training (`2 * b * sq` floats storing `(row_max, row_sum)` per query row).
 ///
-/// When `lse` is `Some`, writes per-query log-sum-exp (`m + ln(l)`, or `-inf` for all-masked rows) for
-/// [`sdpa_backward`]. All-masked query rows produce zeros in `out`.
+/// Storing `(row_max, row_sum)` separately avoids `f32` precision loss in `row_max + ln(row_sum)` under large
+/// uniform logit shifts. All-masked query rows produce zeros in `out` and `(-inf, 0.0)` in `stats`. Rejects
+/// `d == 0` when `stats` is requested.
 #[allow(clippy::too_many_arguments)]
 pub fn sdpa_forward_masked(
     ctx: &GpuContext,
@@ -492,7 +494,7 @@ pub fn sdpa_forward_masked(
     v: &wgpu::Buffer,
     mask: Option<SdpaMask<'_>>,
     out: &wgpu::Buffer,
-    lse: Option<&wgpu::Buffer>,
+    stats: Option<&wgpu::Buffer>,
     (b, sq, sk, d): (usize, usize, usize, usize),
     scale: f32,
     causal: bool,
@@ -502,14 +504,18 @@ pub fn sdpa_forward_masked(
     let q_elems = prod(&[b, sq, d])?;
     let kv_elems = prod(&[b, sk, d])?;
     let q_rows = prod(&[b, sq])?;
+    let stats_elems = prod(&[q_rows, 2])?;
     check_buf(q, q_elems, dtype, "sdpa q")?;
     check_buf(k, kv_elems, dtype, "sdpa k")?;
     check_buf(v, kv_elems, dtype, "sdpa v")?;
     check_buf(out, q_elems, dtype, "sdpa out")?;
-    if let Some(l) = lse {
-        check_buf(l, q_rows, DType::F32, "sdpa lse")?;
+    if let Some(st) = stats {
+        check_buf(st, stats_elems, DType::F32, "sdpa stats")?;
     }
     let (mask_buf, mask_b_stride) = check_mask(ctx, mask, (b, sq, sk), "sdpa_forward")?;
+    if stats.is_some() && d == 0 {
+        return Err(shape_err("sdpa_forward_masked: head dim d must be non-zero when saving training stats"));
+    }
     if q_elems == 0 {
         return Ok(());
     }
@@ -532,7 +538,7 @@ pub fn sdpa_forward_masked(
         Spec::new()
             .bool("CAUSAL", causal)
             .bool("HAS_MASK", mask.is_some())
-            .bool("WRITE_LSE", lse.is_some())
+            .bool("WRITE_STATS", stats.is_some())
             .bool("CACHE_Q", cache_q)
             .u32("D_CHUNKS", d_chunks)
             .f16(dtype == DType::F16)
@@ -548,9 +554,14 @@ pub fn sdpa_forward_masked(
         .f(scale)
         .f(f32::NEG_INFINITY)
         .uz(mask_b_stride)?;
-    let dummy_lse = lse.is_none().then(|| ctx.alloc(4)).transpose()?;
-    let lse_buf = lse.unwrap_or_else(|| dummy_lse.as_ref().unwrap().raw());
-    ctx.dispatch(&kern, &[q, k, v, mask_buf, out, lse_buf], &p, ctx.grid_1d(total_blocks as u64 * 256, 256)?)
+    let dummy_stats = stats.is_none().then(|| ctx.alloc(8)).transpose()?;
+    let stats_buf = stats.unwrap_or_else(|| dummy_stats.as_ref().unwrap().raw());
+    ctx.dispatch(
+        &kern,
+        &[q, k, v, mask_buf, out, stats_buf],
+        &p,
+        ctx.grid_1d(total_blocks as u64 * 256, 256)?,
+    )
 }
 
 #[cfg(test)]
@@ -559,13 +570,13 @@ mod tests {
 
     #[test]
     fn sdpa_portable_emits_no_subgroup_tokens() {
-        for (causal, has_mask, write_lse, cache_q, chunks) in
+        for (causal, has_mask, write_stats, cache_q, chunks) in
             [(false, false, false, true, 1), (true, true, true, true, 2), (true, true, false, false, 4)]
         {
             let spec = Spec::new()
                 .bool("CAUSAL", causal)
                 .bool("HAS_MASK", has_mask)
-                .bool("WRITE_LSE", write_lse)
+                .bool("WRITE_STATS", write_stats)
                 .bool("CACHE_Q", cache_q)
                 .u32("D_CHUNKS", chunks)
                 .subgroups(false);

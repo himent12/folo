@@ -238,7 +238,7 @@ fn tiled_sdpa_backward_matches_cpu() {
             for portable in [false, true] {
                 let _fg = ForceGuard::set(portable);
                 let go = GpuTensor::empty(&ctx, &[b * sq * d], DType::F32).unwrap();
-                let glse = GpuTensor::empty(&ctx, &[b * sq], DType::F32).unwrap();
+                let gstats = GpuTensor::empty(&ctx, &[b * sq * 2], DType::F32).unwrap();
                 sdpa_forward_masked(
                     &ctx,
                     gq.raw(),
@@ -246,7 +246,7 @@ fn tiled_sdpa_backward_matches_cpu() {
                     gv.raw(),
                     None,
                     go.raw(),
-                    Some(glse.raw()),
+                    Some(gstats.raw()),
                     (b, sq, sk, d),
                     scale,
                     causal,
@@ -255,7 +255,21 @@ fn tiled_sdpa_backward_matches_cpu() {
                 .unwrap();
                 let tag = format!("{label} causal={causal} portable={portable}");
                 assert_close(&go.to_vec().unwrap(), &o_ref, 2e-4, 2e-4, &format!("sdpa o {tag}"));
-                assert_close(&glse.to_vec().unwrap(), &lse_ref, 2e-4, 2e-4, &format!("sdpa lse {tag}"));
+                let got_lse: Vec<f32> = gstats
+                    .to_vec()
+                    .unwrap()
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| {
+                        if c[0] == f32::NEG_INFINITY && c[1] == 0.0 {
+                            f32::NEG_INFINITY
+                        } else {
+                            c[0] + c[1].ln()
+                        }
+                    })
+                    .collect();
+                assert_close(&got_lse, &lse_ref, 2e-4, 2e-4, &format!("sdpa lse {tag}"));
 
                 let gdq = GpuTensor::empty(&ctx, &[b * sq * d], DType::F32).unwrap();
                 let gdk = GpuTensor::empty(&ctx, &[b * sk * d], DType::F32).unwrap();
@@ -266,7 +280,7 @@ fn tiled_sdpa_backward_matches_cpu() {
                     gk.raw(),
                     gv.raw(),
                     go.raw(),
-                    glse.raw(),
+                    gstats.raw(),
                     gdo.raw(),
                     None,
                     gdq.raw(),
@@ -326,7 +340,7 @@ fn tiled_sdpa_additive_mask_and_stability() {
         for portable in [false, true] {
             let _fg = ForceGuard::set(portable);
             let go = GpuTensor::empty(&ctx, &[b * sq * d], DType::F32).unwrap();
-            let glse = GpuTensor::empty(&ctx, &[b * sq], DType::F32).unwrap();
+            let gstats = GpuTensor::empty(&ctx, &[b * sq * 2], DType::F32).unwrap();
             sdpa_forward_masked(
                 &ctx,
                 gq.raw(),
@@ -334,7 +348,7 @@ fn tiled_sdpa_additive_mask_and_stability() {
                 gv.raw(),
                 smask,
                 go.raw(),
-                Some(glse.raw()),
+                Some(gstats.raw()),
                 (b, sq, sk, d),
                 scale,
                 causal,
@@ -343,12 +357,24 @@ fn tiled_sdpa_additive_mask_and_stability() {
             .unwrap();
             let tag = format!("mask batched={batched} causal={causal} d={d} portable={portable}");
             let got_o = go.to_vec().unwrap();
-            let got_lse = glse.to_vec().unwrap();
+            let raw_st = gstats.to_vec().unwrap();
+            let got_lse: Vec<f32> = raw_st
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| {
+                    if c[0] == f32::NEG_INFINITY && c[1] == 0.0 {
+                        f32::NEG_INFINITY
+                    } else {
+                        c[0] + c[1].ln()
+                    }
+                })
+                .collect();
             assert_close(&got_o, &o_ref, 3e-4, 3e-4, &format!("o {tag}"));
             assert_close(&got_lse, &lse_ref, 3e-4, 3e-4, &format!("lse {tag}"));
-            // All-masked row 3 must have exact 0 output and -inf LSE.
+            // All-masked row 3 must have exact 0 output and (-inf, 0.0) stats.
             assert!(got_o[3 * d..4 * d].iter().all(|&x| x == 0.0), "all-masked O non-zero: {tag}");
-            assert_eq!(got_lse[3], f32::NEG_INFINITY, "all-masked LSE != -inf: {tag}");
+            assert_eq!((raw_st[6], raw_st[7]), (f32::NEG_INFINITY, 0.0), "all-masked stats: {tag}");
 
             let gdq = GpuTensor::empty(&ctx, &[b * sq * d], DType::F32).unwrap();
             let gdk = GpuTensor::empty(&ctx, &[b * sk * d], DType::F32).unwrap();
@@ -359,7 +385,7 @@ fn tiled_sdpa_additive_mask_and_stability() {
                 gk.raw(),
                 gv.raw(),
                 go.raw(),
-                glse.raw(),
+                gstats.raw(),
                 gdo.raw(),
                 smask,
                 gdq.raw(),
@@ -406,7 +432,7 @@ fn tiled_sdpa_additive_mask_and_stability() {
     let gdo = GpuTensor::from_slice(&ctx, &do_g, &[sq * d]).unwrap();
     let gm = GpuTensor::from_slice(&ctx, &mask, &[sq * sk]).unwrap();
     let go = GpuTensor::empty(&ctx, &[sq * d], DType::F32).unwrap();
-    let glse = GpuTensor::empty(&ctx, &[sq], DType::F32).unwrap();
+    let gstats = GpuTensor::empty(&ctx, &[sq * 2], DType::F32).unwrap();
     let gdq = GpuTensor::empty(&ctx, &[sq * d], DType::F32).unwrap();
     let gdk = GpuTensor::empty(&ctx, &[sk * d], DType::F32).unwrap();
     let gdv = GpuTensor::empty(&ctx, &[sk * d], DType::F32).unwrap();
@@ -418,7 +444,7 @@ fn tiled_sdpa_additive_mask_and_stability() {
         gv.raw(),
         sm,
         go.raw(),
-        Some(glse.raw()),
+        Some(gstats.raw()),
         (b, sq, sk, d),
         0.25,
         false,
@@ -431,7 +457,7 @@ fn tiled_sdpa_additive_mask_and_stability() {
         gk.raw(),
         gv.raw(),
         go.raw(),
-        glse.raw(),
+        gstats.raw(),
         gdo.raw(),
         sm,
         gdq.raw(),
@@ -456,6 +482,56 @@ fn tiled_sdpa_additive_mask_and_stability() {
     assert!(gdk.to_vec().unwrap()[8 * d..].iter().all(|&x| x == 0.0), "masked dK should be zero");
     assert!(gdv.to_vec().unwrap()[8 * d..].iter().all(|&x| x == 0.0), "masked dV should be zero");
 
+    // 2b. Huge uniform additive shift (`[1e8, 1e8]`): separate `(row_max, row_sum)` stats preserve exact
+    //     `0.5` softmax probabilities where a combined `f32` LSE `1e8 + ln(2)` would round to `1e8`.
+    {
+        let gq_s = GpuTensor::from_slice(&ctx, &[0.0f32], &[1]).unwrap();
+        let gk_s = GpuTensor::from_slice(&ctx, &[0.0f32, 0.0], &[2]).unwrap();
+        let gv_s = GpuTensor::from_slice(&ctx, &[1.0f32, 3.0], &[2]).unwrap();
+        let gdo_s = GpuTensor::from_slice(&ctx, &[1.0f32], &[1]).unwrap();
+        let gm_s = GpuTensor::from_slice(&ctx, &[1e8f32, 1e8], &[2]).unwrap();
+        let go_s = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        let gst_s = GpuTensor::empty(&ctx, &[2], DType::F32).unwrap();
+        let gdq_s = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        let gdk_s = GpuTensor::empty(&ctx, &[2], DType::F32).unwrap();
+        let gdv_s = GpuTensor::empty(&ctx, &[2], DType::F32).unwrap();
+        let sm_s = Some(SdpaMask { buf: gm_s.raw(), batched: false });
+        sdpa_forward_masked(
+            &ctx,
+            gq_s.raw(),
+            gk_s.raw(),
+            gv_s.raw(),
+            sm_s,
+            go_s.raw(),
+            Some(gst_s.raw()),
+            (1, 1, 2, 1),
+            1.0,
+            false,
+            DType::F32,
+        )
+        .unwrap();
+        sdpa_backward(
+            &ctx,
+            gq_s.raw(),
+            gk_s.raw(),
+            gv_s.raw(),
+            go_s.raw(),
+            gst_s.raw(),
+            gdo_s.raw(),
+            sm_s,
+            gdq_s.raw(),
+            gdk_s.raw(),
+            gdv_s.raw(),
+            (1, 1, 2, 1),
+            1.0,
+            false,
+            DType::F32,
+        )
+        .unwrap();
+        assert_close(&go_s.to_vec().unwrap(), &[2.0], 1e-6, 1e-6, "sdpa 1e8 shift O");
+        assert_close(&gdv_s.to_vec().unwrap(), &[0.5, 0.5], 1e-6, 1e-6, "sdpa 1e8 shift dV");
+    }
+
     // 3. Finite-difference gradient check on GPU SDPA backward (with both causal + additive mask).
     let (b, sq, sk, d) = (1, 5, 6, 8);
     let q = rng.vec(sq * d, -0.8, 0.8);
@@ -470,7 +546,7 @@ fn tiled_sdpa_additive_mask_and_stability() {
     let gdo = GpuTensor::from_slice(&ctx, &do_g, &[sq * d]).unwrap();
     let gm = GpuTensor::from_slice(&ctx, &mask, &[sq * sk]).unwrap();
     let go = GpuTensor::empty(&ctx, &[sq * d], DType::F32).unwrap();
-    let glse = GpuTensor::empty(&ctx, &[sq], DType::F32).unwrap();
+    let gstats = GpuTensor::empty(&ctx, &[sq * 2], DType::F32).unwrap();
     let gdq = GpuTensor::empty(&ctx, &[sq * d], DType::F32).unwrap();
     let gdk = GpuTensor::empty(&ctx, &[sk * d], DType::F32).unwrap();
     let gdv = GpuTensor::empty(&ctx, &[sk * d], DType::F32).unwrap();
@@ -482,7 +558,7 @@ fn tiled_sdpa_additive_mask_and_stability() {
         gv.raw(),
         sm,
         go.raw(),
-        Some(glse.raw()),
+        Some(gstats.raw()),
         (b, sq, sk, d),
         scale,
         true,
@@ -495,7 +571,7 @@ fn tiled_sdpa_additive_mask_and_stability() {
         gk.raw(),
         gv.raw(),
         go.raw(),
-        glse.raw(),
+        gstats.raw(),
         gdo.raw(),
         sm,
         gdq.raw(),
@@ -538,8 +614,8 @@ fn tiled_sdpa_additive_mask_and_stability() {
         assert!((dv_got[idx] - num_v).abs() < 2e-3, "sdpa fd dv[{idx}]: got {}, fd {num_v}", dv_got[idx]);
     }
 
-    // 4. Empty `sq == 0` zeroes `dK` and `dV`; `sk == 0` returns Err; `F16` backward parity when supported.
-    let dummy = GpuTensor::from_slice(&ctx, &[1.0], &[1]).unwrap();
+    // 4. Empty `sq == 0` zeroes `dK` and `dV`; `sk == 0` and `d == 0` (training) return Err; `F16` backward parity.
+    let dummy = GpuTensor::from_slice(&ctx, &[1.0; 2], &[2]).unwrap();
     let gdk0 = GpuTensor::from_slice(&ctx, &[9.0; 8], &[8]).unwrap();
     let gdv0 = GpuTensor::from_slice(&ctx, &[8.0; 8], &[8]).unwrap();
     sdpa_backward(
@@ -562,6 +638,42 @@ fn tiled_sdpa_additive_mask_and_stability() {
     .unwrap();
     assert_eq!(gdk0.to_vec().unwrap(), vec![0.0; 8]);
     assert_eq!(gdv0.to_vec().unwrap(), vec![0.0; 8]);
+    assert!(
+        sdpa_forward_masked(
+            &ctx,
+            dummy.raw(),
+            dummy.raw(),
+            dummy.raw(),
+            None,
+            dummy.raw(),
+            Some(dummy.raw()),
+            (1, 1, 2, 0),
+            1.0,
+            false,
+            DType::F32,
+        )
+        .is_err()
+    );
+    assert!(
+        sdpa_backward(
+            &ctx,
+            dummy.raw(),
+            dummy.raw(),
+            dummy.raw(),
+            dummy.raw(),
+            dummy.raw(),
+            dummy.raw(),
+            None,
+            dummy.raw(),
+            dummy.raw(),
+            dummy.raw(),
+            (1, 1, 2, 0),
+            1.0,
+            false,
+            DType::F32,
+        )
+        .is_err()
+    );
     assert!(
         sdpa_backward(
             &ctx,
@@ -598,7 +710,7 @@ fn tiled_sdpa_additive_mask_and_stability() {
         let gv = GpuTensor::from_f16(&ctx, &to_f16(&v), &[b * sk * d]).unwrap();
         let gdo = GpuTensor::from_f16(&ctx, &to_f16(&do_g), &[b * sq * d]).unwrap();
         let go = GpuTensor::empty(&ctx, &[b * sq * d], DType::F16).unwrap();
-        let glse = GpuTensor::empty(&ctx, &[b * sq], DType::F32).unwrap();
+        let gstats = GpuTensor::empty(&ctx, &[b * sq * 2], DType::F32).unwrap();
         let gdq = GpuTensor::empty(&ctx, &[b * sq * d], DType::F16).unwrap();
         let gdk = GpuTensor::empty(&ctx, &[b * sk * d], DType::F16).unwrap();
         let gdv = GpuTensor::empty(&ctx, &[b * sk * d], DType::F16).unwrap();
@@ -609,7 +721,7 @@ fn tiled_sdpa_additive_mask_and_stability() {
             gv.raw(),
             None,
             go.raw(),
-            Some(glse.raw()),
+            Some(gstats.raw()),
             (b, sq, sk, d),
             scale,
             true,
@@ -622,7 +734,7 @@ fn tiled_sdpa_additive_mask_and_stability() {
             gk.raw(),
             gv.raw(),
             go.raw(),
-            glse.raw(),
+            gstats.raw(),
             gdo.raw(),
             None,
             gdq.raw(),

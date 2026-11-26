@@ -186,7 +186,7 @@ mod tests {
                 Spec::new()
                     .bool("CAUSAL", true)
                     .bool("HAS_MASK", true)
-                    .bool("WRITE_LSE", true)
+                    .bool("WRITE_STATS", true)
                     .bool("CACHE_Q", true)
                     .u32("D_CHUNKS", 2)
                     .subgroups(true),
