@@ -1,9 +1,13 @@
 //! Pooling and nearest upsampling on contiguous NCHW planes.
 
+mod max_avx2;
 #[cfg(test)]
 mod tests;
 mod upsample;
 
+use max_avx2::{
+    max_cols, max_cols_idx, max_pairs, max_pairs_idx, max_row_idx_s1, max_row_s1, step_idx, step_val,
+};
 use upsample::duplicate_row2;
 pub(crate) use upsample::{upsample_nearest2d, upsample_nearest2d_backward};
 
@@ -12,6 +16,7 @@ use rayon::prelude::*;
 use super::{PAR_MIN, alloc_uninit, alloc_zeroed};
 use crate::backend::Pool2dParams;
 use crate::cpu::par_chunks;
+use crate::cpu::reduce::sum_slice;
 
 #[cfg(target_arch = "x86_64")]
 #[inline(always)]
@@ -115,6 +120,36 @@ fn row_scale_avx2(dst: &mut [f32], scale: f32) {
     }
 }
 
+/// `dst[i] += v` in place.
+#[inline]
+fn row_add_scalar(dst: &mut [f32], v: f32) {
+    #[cfg(target_arch = "x86_64")]
+    if dst.len() >= 8 && has_avx2() {
+        // SAFETY: AVX2 was detected above.
+        return unsafe { row_add_scalar_avx2(dst, v) };
+    }
+    for d in dst.iter_mut() {
+        *d += v;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+fn row_add_scalar_avx2(dst: &mut [f32], v: f32) {
+    use std::arch::x86_64::*;
+    let vv = _mm256_set1_ps(v);
+    let (dc, dr) = dst.as_chunks_mut::<8>();
+    for d in dc {
+        // SAFETY: `d` is 8 floats.
+        unsafe {
+            _mm256_storeu_ps(d.as_mut_ptr(), _mm256_add_ps(_mm256_loadu_ps(d.as_ptr()), vv));
+        }
+    }
+    for d in dr {
+        *d += v;
+    }
+}
+
 /// `dst[i] = src[2*i] + src[2*i + 1]` for `i < dst.len()` (`src.len() >= 2 * dst.len()`).
 #[inline]
 fn sum_pairs(src: &[f32], dst: &mut [f32]) {
@@ -186,6 +221,89 @@ pub(crate) fn max_pool2d(
     let [kh, kw] = p.kernel;
     let [sh, sw] = p.stride;
     let [ph, pw] = p.padding;
+    let extent = |o: usize, s: usize, k: usize| (o - 1).checked_mul(s)?.checked_add(k);
+    let bound = |n: usize| n.saturating_mul(2).saturating_add(PAD_SLACK);
+    if let (Some(hp), Some(wp)) = (extent(oh, sh, kh), extent(ow, sw, kw))
+        && hp <= bound(h)
+        && wp <= bound(w)
+        && h.checked_mul(w).is_some_and(|hw| hw <= i32::MAX as usize)
+    {
+        let h_eff = h.min(hp.saturating_sub(ph));
+        let w_eff = w.min(wp.saturating_sub(pw));
+        let mut row_idx = vec![-1i32; wp];
+        if w_eff > 0 {
+            for (xx, d) in row_idx[pw..pw + w_eff].iter_mut().enumerate() {
+                *d = xx as i32;
+            }
+        }
+        let work = |(row, rv, ri): &mut (Vec<f32>, Vec<f32>, Vec<i32>),
+                    (pl, (o, ix)): (usize, (&mut [f32], &mut [i64]))| {
+            let xp = &x[pl * h * w..(pl + 1) * h * w];
+            row.clear();
+            row.resize(wp, f32::NEG_INFINITY);
+            rv.clear();
+            rv.resize(hp * ow, f32::NEG_INFINITY);
+            ri.clear();
+            ri.resize(hp * ow, -1i32);
+            for yy in 0..h_eff {
+                if w_eff > 0 {
+                    row[pw..pw + w_eff].copy_from_slice(&xp[yy * w..yy * w + w_eff]);
+                }
+                let base = (yy * w) as i32;
+                let dst_v = &mut rv[(yy + ph) * ow..(yy + ph + 1) * ow];
+                let dst_i = &mut ri[(yy + ph) * ow..(yy + ph + 1) * ow];
+                if sw == 1 {
+                    max_row_idx_s1(row, &row_idx, kw, base, dst_v, dst_i);
+                } else if sw == 2 && kw == 2 {
+                    max_pairs_idx(row, &row_idx, base, dst_v, dst_i);
+                } else {
+                    for ox in 0..ow {
+                        let mut m = row[ox * sw];
+                        let mut mi = row_idx[ox * sw];
+                        for t in 1..kw {
+                            step_idx(&mut m, &mut mi, row[ox * sw + t], row_idx[ox * sw + t]);
+                        }
+                        dst_v[ox] = m;
+                        dst_i[ox] = if mi >= 0 { base + mi } else { -1 };
+                    }
+                }
+            }
+            for oy in 0..oh {
+                let r0 = oy * sh * ow;
+                max_cols_idx(
+                    &rv[r0..],
+                    &ri[r0..],
+                    ow,
+                    kh,
+                    &mut o[oy * ow..(oy + 1) * ow],
+                    &mut ix[oy * ow..(oy + 1) * ow],
+                );
+            }
+        };
+        if out.len() >= PAR_MIN && np > 1 {
+            let per_task = (POOL_TASK / (oh * ow)).max(1);
+            out.par_chunks_mut(per_task * oh * ow)
+                .zip(idx.par_chunks_mut(per_task * oh * ow))
+                .enumerate()
+                .for_each_init(
+                    || (Vec::new(), Vec::new(), Vec::new()),
+                    |scratch, (t, (oc, ic))| {
+                        for (c, (o, ix)) in
+                            oc.chunks_exact_mut(oh * ow).zip(ic.chunks_exact_mut(oh * ow)).enumerate()
+                        {
+                            work(scratch, (t * per_task + c, (o, ix)));
+                        }
+                    },
+                );
+        } else {
+            let mut scratch = (Vec::new(), Vec::new(), Vec::new());
+            for (pl, (o, ix)) in out.chunks_exact_mut(oh * ow).zip(idx.chunks_exact_mut(oh * ow)).enumerate()
+            {
+                work(&mut scratch, (pl, (o, ix)));
+            }
+        }
+        return (out, idx);
+    }
     // Window ranges along each axis (clipped to the input; padding never wins). `o * s + k <= n + 2 * pad`
     // (the output size), so nothing overflows, also for a window wider than `isize::MAX`.
     let range = |o: usize, s: usize, pad: usize, k: usize, n: usize| {
@@ -226,8 +344,15 @@ pub(crate) fn max_pool2d(
             }
         }
     };
-    let planes = out.par_chunks_mut(oh * ow).zip(idx.par_chunks_mut(oh * ow)).enumerate();
-    planes.for_each_init(|| (Vec::new(), Vec::new()), work);
+    if out.len() >= PAR_MIN && np > 1 {
+        let planes = out.par_chunks_mut(oh * ow).zip(idx.par_chunks_mut(oh * ow)).enumerate();
+        planes.for_each_init(|| (Vec::new(), Vec::new()), work);
+    } else {
+        let mut scratch = (Vec::new(), Vec::new());
+        for (pl, (o, ix)) in out.chunks_exact_mut(oh * ow).zip(idx.chunks_exact_mut(oh * ow)).enumerate() {
+            work(&mut scratch, (pl, (o, ix)));
+        }
+    }
     (out, idx)
 }
 
@@ -236,8 +361,8 @@ pub(crate) fn max_pool2d(
 /// The same two passes, over rows padded with `-inf`: a window's first element (padding or not) starts its
 /// running best, and each next one replaces it under [`beats`]. Padding then never changes a value: `-inf`
 /// never beats anything, and a `-inf` start is replaced by the first real element unless every real element
-/// is `-inf` too, the same bits. With every window the same width, each pass is a select over whole rows that
-/// the compiler vectorises. Planes are grouped into tasks of about [`POOL_TASK`] outputs.
+/// is `-inf` too, the same bits. Both passes use bit-exact AVX2 primitives (`sw == 1`, `sw == 2 && kw == 2`,
+/// and vertical `max_cols`). Planes are grouped into tasks of about [`POOL_TASK`] outputs when above [`PAR_MIN`].
 ///
 /// A padded extent more than [`PAD_SLACK`] past twice the input's (a window far larger than the plane), or an
 /// empty plane, runs [`max_pool2d`] instead and drops the indices: its clipped windows never visit the padding.
@@ -260,14 +385,9 @@ pub(crate) fn max_pool2d_values(
         (Some(hp), Some(wp)) if h != 0 && w != 0 && hp <= bound(h) && wp <= bound(w) => (hp, wp),
         _ => return max_pool2d(x, (np, h, w), p, [oh, ow]).0,
     };
+    let h_eff = h.min(hp.saturating_sub(ph));
+    let w_eff = w.min(wp.saturating_sub(pw));
     let mut out = alloc_uninit(np * oh * ow);
-    // One step of the scan: `a` replaces `b` if it beats it (`b` is never the empty start here).
-    #[inline(always)]
-    fn step(b: &mut f32, a: f32) {
-        if a > *b || a.is_nan() && !b.is_nan() {
-            *b = a;
-        }
-    }
     let work = |(row, rv): &mut (Vec<f32>, Vec<f32>), (pl, o): (usize, &mut [f32])| {
         let xp = &x[pl * h * w..(pl + 1) * h * w];
         // The padding columns stay `-inf`; every row overwrites the same real columns.
@@ -276,46 +396,53 @@ pub(crate) fn max_pool2d_values(
         // Row results of every padded row (padding rows are all `-inf`).
         rv.clear();
         rv.resize(hp * ow, f32::NEG_INFINITY);
-        for yy in 0..h.min(hp.saturating_sub(ph)) {
-            let n = w.min(wp.saturating_sub(pw));
-            row[pw..pw + n].copy_from_slice(&xp[yy * w..yy * w + n]);
-            let r = &mut rv[(yy + ph) * ow..(yy + ph + 1) * ow];
-            for (ox, b) in r.iter_mut().enumerate() {
-                *b = row[ox * sw];
+        for yy in 0..h_eff {
+            if w_eff > 0 {
+                row[pw..pw + w_eff].copy_from_slice(&xp[yy * w..yy * w + w_eff]);
             }
-            for t in 1..kw {
+            let r = &mut rv[(yy + ph) * ow..(yy + ph + 1) * ow];
+            if sw == 1 {
+                max_row_s1(row, kw, r);
+            } else if sw == 2 && kw == 2 {
+                max_pairs(row, r);
+            } else {
                 for (ox, b) in r.iter_mut().enumerate() {
-                    step(b, row[ox * sw + t]);
+                    let mut m = row[ox * sw];
+                    for t in 1..kw {
+                        step_val(&mut m, row[ox * sw + t]);
+                    }
+                    *b = m;
                 }
             }
         }
         for (oy, orow) in o.chunks_exact_mut(ow).enumerate() {
-            orow.copy_from_slice(&rv[oy * sh * ow..(oy * sh + 1) * ow]);
-            for t in 1..kh {
-                let src = &rv[(oy * sh + t) * ow..(oy * sh + t + 1) * ow];
-                for (b, &a) in orow.iter_mut().zip(src) {
-                    step(b, a);
-                }
-            }
+            max_cols(&rv[oy * sh * ow..], ow, kh, orow);
         }
     };
-    let per_task = (POOL_TASK / (oh * ow)).max(1);
-    out.par_chunks_mut(per_task * oh * ow).enumerate().for_each_init(
-        || (Vec::new(), Vec::new()),
-        |scratch, (t, chunk)| {
-            for (c, o) in chunk.chunks_exact_mut(oh * ow).enumerate() {
-                work(scratch, (t * per_task + c, o));
-            }
-        },
-    );
+    if out.len() >= PAR_MIN && np > 1 {
+        let per_task = (POOL_TASK / (oh * ow)).max(1);
+        out.par_chunks_mut(per_task * oh * ow).enumerate().for_each_init(
+            || (Vec::new(), Vec::new()),
+            |scratch, (t, chunk)| {
+                for (c, o) in chunk.chunks_exact_mut(oh * ow).enumerate() {
+                    work(scratch, (t * per_task + c, o));
+                }
+            },
+        );
+    } else {
+        let mut scratch = (Vec::new(), Vec::new());
+        for (pl, o) in out.chunks_exact_mut(oh * ow).enumerate() {
+            work(&mut scratch, (pl, o));
+        }
+    }
     out
 }
 
-/// Outputs per task of [`max_pool2d_values`] (a few microseconds of work).
+/// Elements per parallel task of the pooling and upsampling kernels (a few microseconds of work).
 pub(super) const POOL_TASK: usize = 1 << 12;
 
-/// How far [`max_pool2d_values`]'s padded rows and columns may exceed twice the input's before it falls back to
-/// the clipped scan (every detector pool pads by at most a few elements).
+/// How far padded pooling scratch extents may exceed twice the input's before falling back to the clipped scan
+/// (every detector pool pads by at most a few elements).
 const PAD_SLACK: usize = 16;
 
 pub(crate) fn max_pool2d_backward(g: &[f32], idx: &[i64], (np, h, w): Planes, ohw: usize) -> Vec<f32> {
@@ -367,7 +494,9 @@ pub(crate) fn avg_pool2d(x: &[f32], (np, h, w): Planes, p: &Pool2dParams, [oh, o
             rv.clear();
             rv.resize(hp * ow, 0.0);
             for yy in 0..h_eff {
-                row[pw..pw + w_eff].copy_from_slice(&xp[yy * w..yy * w + w_eff]);
+                if w_eff > 0 {
+                    row[pw..pw + w_eff].copy_from_slice(&xp[yy * w..yy * w + w_eff]);
+                }
                 let r = &mut rv[(yy + ph) * ow..(yy + ph + 1) * ow];
                 if sw == 1 {
                     r.copy_from_slice(&row[..ow]);
@@ -466,7 +595,9 @@ pub(crate) fn avg_pool2d_backward(
     let range = |o: usize, s: usize, pad: usize, k: usize, n: usize| {
         (o * s).saturating_sub(pad)..(o * s + k).saturating_sub(pad).min(n)
     };
-    let xs: Vec<_> = (0..ow).map(|ox| range(ox, sw, pw, kw, w)).collect();
+    let fast_dup2 = sw == 2 && kw == 2 && pw == 0 && 2 * ow == w;
+    let xs: Vec<_> =
+        if fast_dup2 || sw == 1 { Vec::new() } else { (0..ow).map(|ox| range(ox, sw, pw, kw, w)).collect() };
     let ys: Vec<_> = (0..oh).map(|oy| range(oy, sh, ph, kh, h)).collect();
     let work = |rv: &mut Vec<f32>, (pl, gp): (usize, &mut [f32])| {
         let gs = &g[pl * oh * ow..(pl + 1) * oh * ow];
@@ -481,8 +612,26 @@ pub(crate) fn avg_pool2d_backward(
         for yy in 0..h {
             let rrow = &rv[yy * ow..(yy + 1) * ow];
             let gprow = &mut gp[yy * w..(yy + 1) * w];
-            if sw == 2 && kw == 2 && pw == 0 && 2 * ow == w {
+            if fast_dup2 {
                 duplicate_row2(rrow, gprow);
+            } else if sw == 1 {
+                // Clamp `t` to taps that intersect `[0, w)` (at most `w + ow - 1` iterations even for huge `kw`),
+                // visiting `ox` in ascending order for every `xx` to match the scalar scatter bit for bit.
+                let t_lo = pw.saturating_sub(ow - 1);
+                let t_hi = kw.min(w.saturating_add(pw));
+                for t in (t_lo..t_hi).rev() {
+                    let (ox_start, ox_end, xx_start) = if t >= pw {
+                        let d = t - pw;
+                        (0, ow.min(w.saturating_sub(d)), d)
+                    } else {
+                        let d = pw - t;
+                        (d, ow.min(w.saturating_add(d)), 0)
+                    };
+                    if ox_start < ox_end {
+                        let len = ox_end - ox_start;
+                        row_add(&mut gprow[xx_start..xx_start + len], &rrow[ox_start..ox_start + len]);
+                    }
+                }
             } else {
                 for (ox, xr) in xs.iter().enumerate() {
                     let v = rrow[ox];
@@ -514,47 +663,162 @@ fn adaptive_range(i: usize, input: usize, output: usize) -> std::ops::Range<usiz
     (i * input / output)..((i + 1) * input).div_ceil(output)
 }
 
+#[cold]
+fn adaptive_bin_mean_f64(
+    xp: &[f32],
+    w: usize,
+    ys: std::ops::Range<usize>,
+    xs: std::ops::Range<usize>,
+) -> f32 {
+    let denom = (ys.len() * xs.len()) as f64;
+    let mut s = 0.0f64;
+    for yy in ys {
+        for &v in &xp[yy * w + xs.start..yy * w + xs.end] {
+            s += v as f64;
+        }
+    }
+    (s / denom) as f32
+}
+
 pub(crate) fn adaptive_avg_pool2d(x: &[f32], (np, h, w): Planes, [oh, ow]: [usize; 2]) -> Vec<f32> {
     let mut out = alloc_uninit(np * oh * ow);
     if out.is_empty() || h * w == 0 {
         return out;
     }
-    par_chunks(&mut out, oh * ow, &|pl, o| {
-        let xp = &x[pl * h * w..(pl + 1) * h * w];
-        for oy in 0..oh {
-            let ys = adaptive_range(oy, h, oh);
-            for ox in 0..ow {
-                let xs = adaptive_range(ox, w, ow);
-                let mut s = 0f32;
-                for yy in ys.clone() {
-                    s += xp[yy * w + xs.start..yy * w + xs.end].iter().sum::<f32>();
+    if oh == 1 && ow == 1 {
+        let inv = 1.0 / (h * w) as f32;
+        let run = |pl: usize, o: &mut f32| {
+            let xp = &x[pl * h * w..(pl + 1) * h * w];
+            let s = sum_slice(xp);
+            *o = if s.is_finite() { s * inv } else { adaptive_bin_mean_f64(xp, w, 0..h, 0..w) };
+        };
+        if x.len() >= PAR_MIN && np > 1 {
+            let per_task = (POOL_TASK / (h * w)).max(1);
+            par_chunks(&mut out, per_task, &|t, chunk| {
+                for (c, o) in chunk.iter_mut().enumerate() {
+                    run(t * per_task + c, o);
                 }
-                o[oy * ow + ox] = s / (ys.len() * xs.len()) as f32;
+            });
+        } else {
+            for (pl, o) in out.iter_mut().enumerate() {
+                run(pl, o);
             }
         }
-    });
+        return out;
+    }
+    let y_ranges: Vec<_> = (0..oh).map(|oy| adaptive_range(oy, h, oh)).collect();
+    let x_ranges: Vec<_> = (0..ow).map(|ox| adaptive_range(ox, w, ow)).collect();
+    let work = |row_sum: &mut Vec<f32>, (pl, o): (usize, &mut [f32])| {
+        let xp = &x[pl * h * w..(pl + 1) * h * w];
+        row_sum.resize(w, 0.0);
+        for (oy, ys) in y_ranges.iter().enumerate() {
+            row_sum.copy_from_slice(&xp[ys.start * w..(ys.start + 1) * w]);
+            for yy in (ys.start + 1)..ys.end {
+                row_add(row_sum, &xp[yy * w..(yy + 1) * w]);
+            }
+            let orow = &mut o[oy * ow..(oy + 1) * ow];
+            let ylen = ys.len();
+            for (ox, xs) in x_ranges.iter().enumerate() {
+                let s = if xs.len() >= 16 {
+                    sum_slice(&row_sum[xs.start..xs.end])
+                } else {
+                    row_sum[xs.start..xs.end].iter().sum()
+                };
+                orow[ox] = if s.is_finite() {
+                    s / (ylen * xs.len()) as f32
+                } else {
+                    adaptive_bin_mean_f64(xp, w, ys.clone(), xs.clone())
+                };
+            }
+        }
+    };
+    if x.len() >= PAR_MIN && np > 1 {
+        let per_task = (POOL_TASK / (h * w)).max(1);
+        out.par_chunks_mut(per_task * oh * ow).enumerate().for_each_init(Vec::new, |row_sum, (t, chunk)| {
+            for (c, o) in chunk.chunks_exact_mut(oh * ow).enumerate() {
+                work(row_sum, (t * per_task + c, o));
+            }
+        });
+    } else {
+        let mut row_sum = Vec::new();
+        for (pl, o) in out.chunks_exact_mut(oh * ow).enumerate() {
+            work(&mut row_sum, (pl, o));
+        }
+    }
     out
 }
 
 pub(crate) fn adaptive_avg_pool2d_backward(g: &[f32], (np, h, w): Planes, [oh, ow]: [usize; 2]) -> Vec<f32> {
-    let mut gx = alloc_zeroed(np * h * w);
-    if gx.is_empty() {
+    if np * h * w == 0 {
+        return alloc_uninit(0);
+    }
+    if oh == 0 || ow == 0 {
+        return alloc_zeroed(np * h * w);
+    }
+    if oh == 1 && ow == 1 {
+        let mut gx = alloc_uninit(np * h * w);
+        let inv = 1.0 / (h * w) as f32;
+        let run = |pl: usize, gp: &mut [f32]| {
+            gp.fill(g[pl] * inv);
+        };
+        if gx.len() >= PAR_MIN && np > 1 {
+            let per_task = (POOL_TASK / (h * w)).max(1);
+            par_chunks(&mut gx, per_task * h * w, &|t, chunk| {
+                for (c, gp) in chunk.chunks_exact_mut(h * w).enumerate() {
+                    run(t * per_task + c, gp);
+                }
+            });
+        } else {
+            for (pl, gp) in gx.chunks_exact_mut(h * w).enumerate() {
+                run(pl, gp);
+            }
+        }
         return gx;
     }
-    par_chunks(&mut gx, h * w, &|pl, gp| {
+    let mut gx = alloc_zeroed(np * h * w);
+    let y_ranges: Vec<_> = (0..oh).map(|oy| adaptive_range(oy, h, oh)).collect();
+    let x_ranges: Vec<_> = (0..ow).map(|ox| adaptive_range(ox, w, ow)).collect();
+    let disjoint_x = x_ranges.windows(2).all(|p| p[0].end <= p[1].start);
+    let work = |row_g: &mut Vec<f32>, (pl, gp): (usize, &mut [f32])| {
         let gs = &g[pl * oh * ow..(pl + 1) * oh * ow];
-        for oy in 0..oh {
-            let ys = adaptive_range(oy, h, oh);
-            for ox in 0..ow {
-                let xs = adaptive_range(ox, w, ow);
-                let v = gs[oy * ow + ox] / (ys.len() * xs.len()) as f32;
+        if disjoint_x {
+            row_g.resize(w, 0.0);
+            for (oy, ys) in y_ranges.iter().enumerate() {
+                let ylen = ys.len();
+                let grow = &gs[oy * ow..(oy + 1) * ow];
+                for (ox, xs) in x_ranges.iter().enumerate() {
+                    row_g[xs.start..xs.end].fill(grow[ox] / (ylen * xs.len()) as f32);
+                }
                 for yy in ys.clone() {
-                    for d in &mut gp[yy * w + xs.start..yy * w + xs.end] {
-                        *d += v;
+                    row_add(&mut gp[yy * w..(yy + 1) * w], row_g);
+                }
+            }
+        } else {
+            // Overlapping horizontal bins: scatter in exact `(oy, ox)` order so cancellations match directly.
+            for (oy, ys) in y_ranges.iter().enumerate() {
+                let ylen = ys.len();
+                let grow = &gs[oy * ow..(oy + 1) * ow];
+                for (ox, xs) in x_ranges.iter().enumerate() {
+                    let v = grow[ox] / (ylen * xs.len()) as f32;
+                    for yy in ys.clone() {
+                        row_add_scalar(&mut gp[yy * w + xs.start..yy * w + xs.end], v);
                     }
                 }
             }
         }
-    });
+    };
+    if gx.len() >= PAR_MIN && np > 1 {
+        let per_task = (POOL_TASK / (h * w)).max(1);
+        gx.par_chunks_mut(per_task * h * w).enumerate().for_each_init(Vec::new, |row_g, (t, chunk)| {
+            for (c, gp) in chunk.chunks_exact_mut(h * w).enumerate() {
+                work(row_g, (t * per_task + c, gp));
+            }
+        });
+    } else {
+        let mut row_g = Vec::new();
+        for (pl, gp) in gx.chunks_exact_mut(h * w).enumerate() {
+            work(&mut row_g, (pl, gp));
+        }
+    }
     gx
 }

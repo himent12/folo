@@ -48,3 +48,7 @@ harness = false
 [[bench]]
 name = "elementwise"
 harness = false
+
+[[bench]]
+name = "pool"
+harness = false

@@ -845,3 +845,63 @@ fn parallel_max_pool_and_cacheline_padded_image_rows_match_reference() {
         assert_eq!(out1[..(o / 4) * oh * ow], out4[..(o / 4) * oh * ow], "conv s={s} c={c} {h}x{w}");
     }
 }
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn silu_q8_avx2_x4_matches_scalar_bit_for_bit() {
+    if !(std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")) {
+        return;
+    }
+    let mut vals: Vec<f32> = (-200..=200).map(|i| i as f32 * 0.5).collect();
+    vals.extend([
+        0.0,
+        -0.0,
+        1e-20,
+        -1e-20,
+        -88.0,
+        -88.5,
+        -1000.0,
+        88.0,
+        124.0,
+        1000.0,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+        f32::from_bits(0x7fc0_1234),
+    ]);
+    while !vals.len().is_multiple_of(32) {
+        vals.push(0.37);
+    }
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn run_x4(src: &[f32]) -> Vec<f32> {
+        use std::arch::x86_64::*;
+        let mut dst = vec![0f32; src.len()];
+        for (sc, dc) in src.as_chunks::<32>().0.iter().zip(dst.as_chunks_mut::<32>().0.iter_mut()) {
+            // SAFETY: chunks are 32 floats and AVX2+FMA are enabled.
+            unsafe {
+                let x = [
+                    _mm256_loadu_ps(sc.as_ptr()),
+                    _mm256_loadu_ps(sc.as_ptr().add(8)),
+                    _mm256_loadu_ps(sc.as_ptr().add(16)),
+                    _mm256_loadu_ps(sc.as_ptr().add(24)),
+                ];
+                let y = super::silu::silu_q8_avx2_x4(x);
+                _mm256_storeu_ps(dc.as_mut_ptr(), y[0]);
+                _mm256_storeu_ps(dc.as_mut_ptr().add(8), y[1]);
+                _mm256_storeu_ps(dc.as_mut_ptr().add(16), y[2]);
+                _mm256_storeu_ps(dc.as_mut_ptr().add(24), y[3]);
+            }
+        }
+        dst
+    }
+    // SAFETY: `uses_avx2()` verified AVX2 and FMA support.
+    let got = unsafe { run_x4(&vals) };
+    for (&x, &y) in vals.iter().zip(&got) {
+        let want = silu_q8(x);
+        if want.is_nan() {
+            assert!(y.is_nan(), "x={x}: expected NaN, got {y}");
+        } else {
+            assert_eq!(y.to_bits(), want.to_bits(), "x={x} ({:#010x})", x.to_bits());
+        }
+    }
+}

@@ -9,8 +9,10 @@
 
 use std::sync::OnceLock;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", test))]
 pub(crate) use super::silu::silu_q8_avx2;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use super::silu::silu_q8_avx2_x4;
 use super::silu::{maxps, minps, silu_q8};
 
 /// Output channels per tile: one C4 group.
@@ -394,48 +396,118 @@ impl Epi<'_> {
                 Some((rs, rz)) if HAS_RES => (*rs, *rz),
                 _ => ([0.0; MR], [0; MR]),
             };
+            let vcorr = [
+                _mm256_set1_epi32(self.corr[0]),
+                _mm256_set1_epi32(self.corr[1]),
+                _mm256_set1_epi32(self.corr[2]),
+                _mm256_set1_epi32(self.corr[3]),
+            ];
+            let vscale = [
+                _mm256_set1_ps(self.scale[0]),
+                _mm256_set1_ps(self.scale[1]),
+                _mm256_set1_ps(self.scale[2]),
+                _mm256_set1_ps(self.scale[3]),
+            ];
+            let vbias = [
+                _mm256_set1_ps(self.bias[0]),
+                _mm256_set1_ps(self.bias[1]),
+                _mm256_set1_ps(self.bias[2]),
+                _mm256_set1_ps(self.bias[3]),
+            ];
+            let vinv = [
+                _mm256_set1_ps(inv_arr[0]),
+                _mm256_set1_ps(inv_arr[1]),
+                _mm256_set1_ps(inv_arr[2]),
+                _mm256_set1_ps(inv_arr[3]),
+            ];
+            let vrs = [
+                _mm256_set1_ps(rs_arr[0]),
+                _mm256_set1_ps(rs_arr[1]),
+                _mm256_set1_ps(rs_arr[2]),
+                _mm256_set1_ps(rs_arr[3]),
+            ];
+            let vrz = [
+                _mm256_set1_epi32(rz_arr[0]),
+                _mm256_set1_epi32(rz_arr[1]),
+                _mm256_set1_epi32(rz_arr[2]),
+                _mm256_set1_epi32(rz_arr[3]),
+            ];
             let mask_ff = _mm256_set1_epi32(0xFF);
             for k in 0..NR / 8 {
-                let w = if HAS_RES {
-                    _mm256_loadu_si256(res.add(8 * k) as *const __m256i)
-                } else {
-                    _mm256_setzero_si256()
-                };
-                let mut v = [_mm256_setzero_si256(); MR];
-                for (r, vr) in v.iter_mut().enumerate() {
-                    let a = _mm256_loadu_si256(acc[r].as_ptr().add(8 * k) as *const __m256i);
-                    let t = _mm256_cvtepi32_ps(_mm256_sub_epi32(a, _mm256_set1_epi32(self.corr[r])));
-                    let mut y =
-                        _mm256_fmadd_ps(t, _mm256_set1_ps(self.scale[r]), _mm256_set1_ps(self.bias[r]));
-                    if SILU {
-                        y = silu_q8_avx2(y);
-                    }
-                    if HAS_RES {
-                        let shifted = match r {
-                            0 => w,
-                            1 => _mm256_srli_epi32::<8>(w),
-                            2 => _mm256_srli_epi32::<16>(w),
-                            _ => _mm256_srli_epi32::<24>(w),
-                        };
-                        let b = _mm256_and_si256(shifted, mask_ff);
-                        let d = _mm256_cvtepi32_ps(_mm256_sub_epi32(b, _mm256_set1_epi32(rz_arr[r])));
-                        y = _mm256_fmadd_ps(_mm256_set1_ps(rs_arr[r]), d, y);
-                    }
-                    if OUT_U8 {
-                        let y = _mm256_min_ps(
-                            _mm256_max_ps(_mm256_mul_ps(y, _mm256_set1_ps(inv_arr[r])), lo),
-                            hi,
-                        );
-                        *vr = _mm256_cvtps_epi32(y);
-                    } else {
-                        _mm256_storeu_ps(f[r].as_mut_ptr().add(8 * k), y);
-                    }
+                let mut y = [
+                    _mm256_fmadd_ps(
+                        _mm256_cvtepi32_ps(_mm256_sub_epi32(
+                            _mm256_loadu_si256(acc[0].as_ptr().add(8 * k) as *const __m256i),
+                            vcorr[0],
+                        )),
+                        vscale[0],
+                        vbias[0],
+                    ),
+                    _mm256_fmadd_ps(
+                        _mm256_cvtepi32_ps(_mm256_sub_epi32(
+                            _mm256_loadu_si256(acc[1].as_ptr().add(8 * k) as *const __m256i),
+                            vcorr[1],
+                        )),
+                        vscale[1],
+                        vbias[1],
+                    ),
+                    _mm256_fmadd_ps(
+                        _mm256_cvtepi32_ps(_mm256_sub_epi32(
+                            _mm256_loadu_si256(acc[2].as_ptr().add(8 * k) as *const __m256i),
+                            vcorr[2],
+                        )),
+                        vscale[2],
+                        vbias[2],
+                    ),
+                    _mm256_fmadd_ps(
+                        _mm256_cvtepi32_ps(_mm256_sub_epi32(
+                            _mm256_loadu_si256(acc[3].as_ptr().add(8 * k) as *const __m256i),
+                            vcorr[3],
+                        )),
+                        vscale[3],
+                        vbias[3],
+                    ),
+                ];
+                if SILU {
+                    y = silu_q8_avx2_x4(y);
+                }
+                if HAS_RES {
+                    let w = _mm256_loadu_si256(res.add(8 * k) as *const __m256i);
+                    let b0 = _mm256_and_si256(w, mask_ff);
+                    let b1 = _mm256_and_si256(_mm256_srli_epi32::<8>(w), mask_ff);
+                    let b2 = _mm256_and_si256(_mm256_srli_epi32::<16>(w), mask_ff);
+                    let b3 = _mm256_srli_epi32::<24>(w);
+                    y[0] = _mm256_fmadd_ps(vrs[0], _mm256_cvtepi32_ps(_mm256_sub_epi32(b0, vrz[0])), y[0]);
+                    y[1] = _mm256_fmadd_ps(vrs[1], _mm256_cvtepi32_ps(_mm256_sub_epi32(b1, vrz[1])), y[1]);
+                    y[2] = _mm256_fmadd_ps(vrs[2], _mm256_cvtepi32_ps(_mm256_sub_epi32(b2, vrz[2])), y[2]);
+                    y[3] = _mm256_fmadd_ps(vrs[3], _mm256_cvtepi32_ps(_mm256_sub_epi32(b3, vrz[3])), y[3]);
                 }
                 if OUT_U8 {
-                    let p01 = _mm256_adds_epi16(_mm256_packs_epi32(v[0], v[1]), z01);
-                    let p23 = _mm256_adds_epi16(_mm256_packs_epi32(v[2], v[3]), z23);
+                    let v0 = _mm256_cvtps_epi32(_mm256_min_ps(
+                        _mm256_max_ps(_mm256_mul_ps(y[0], vinv[0]), lo),
+                        hi,
+                    ));
+                    let v1 = _mm256_cvtps_epi32(_mm256_min_ps(
+                        _mm256_max_ps(_mm256_mul_ps(y[1], vinv[1]), lo),
+                        hi,
+                    ));
+                    let v2 = _mm256_cvtps_epi32(_mm256_min_ps(
+                        _mm256_max_ps(_mm256_mul_ps(y[2], vinv[2]), lo),
+                        hi,
+                    ));
+                    let v3 = _mm256_cvtps_epi32(_mm256_min_ps(
+                        _mm256_max_ps(_mm256_mul_ps(y[3], vinv[3]), lo),
+                        hi,
+                    ));
+                    let p01 = _mm256_adds_epi16(_mm256_packs_epi32(v0, v1), z01);
+                    let p23 = _mm256_adds_epi16(_mm256_packs_epi32(v2, v3), z23);
                     let bytes = _mm256_shuffle_epi8(_mm256_packus_epi16(p01, p23), transpose);
                     _mm256_storeu_si256(q.add(8 * k) as *mut __m256i, bytes);
+                } else {
+                    _mm256_storeu_ps(f[0].as_mut_ptr().add(8 * k), y[0]);
+                    _mm256_storeu_ps(f[1].as_mut_ptr().add(8 * k), y[1]);
+                    _mm256_storeu_ps(f[2].as_mut_ptr().add(8 * k), y[2]);
+                    _mm256_storeu_ps(f[3].as_mut_ptr().add(8 * k), y[3]);
                 }
             }
         }
@@ -540,46 +612,78 @@ impl Epi<'_> {
                 Some((rs, rz)) if HAS_RES => (*rs, *rz),
                 _ => ([0.0; MR], [0; MR]),
             };
+            let vbias = [
+                _mm256_set1_ps(self.bias[0]),
+                _mm256_set1_ps(self.bias[1]),
+                _mm256_set1_ps(self.bias[2]),
+                _mm256_set1_ps(self.bias[3]),
+            ];
+            let vinv = [
+                _mm256_set1_ps(inv_arr[0]),
+                _mm256_set1_ps(inv_arr[1]),
+                _mm256_set1_ps(inv_arr[2]),
+                _mm256_set1_ps(inv_arr[3]),
+            ];
+            let vrs = [
+                _mm256_set1_ps(rs_arr[0]),
+                _mm256_set1_ps(rs_arr[1]),
+                _mm256_set1_ps(rs_arr[2]),
+                _mm256_set1_ps(rs_arr[3]),
+            ];
+            let vrz = [
+                _mm256_set1_epi32(rz_arr[0]),
+                _mm256_set1_epi32(rz_arr[1]),
+                _mm256_set1_epi32(rz_arr[2]),
+                _mm256_set1_epi32(rz_arr[3]),
+            ];
             let mask_ff = _mm256_set1_epi32(0xFF);
             for k in 0..NR / 8 {
-                let w = if HAS_RES {
-                    _mm256_loadu_si256(res.add(8 * k) as *const __m256i)
-                } else {
-                    _mm256_setzero_si256()
-                };
-                let mut v = [_mm256_setzero_si256(); MR];
-                for (r, vr) in v.iter_mut().enumerate() {
-                    let t = _mm256_loadu_ps(tile[r].as_ptr().add(8 * k));
-                    let mut y = _mm256_add_ps(t, _mm256_set1_ps(self.bias[r]));
-                    if SILU {
-                        y = silu_q8_avx2(y);
-                    }
-                    if HAS_RES {
-                        let shifted = match r {
-                            0 => w,
-                            1 => _mm256_srli_epi32::<8>(w),
-                            2 => _mm256_srli_epi32::<16>(w),
-                            _ => _mm256_srli_epi32::<24>(w),
-                        };
-                        let b = _mm256_and_si256(shifted, mask_ff);
-                        let d = _mm256_cvtepi32_ps(_mm256_sub_epi32(b, _mm256_set1_epi32(rz_arr[r])));
-                        y = _mm256_fmadd_ps(_mm256_set1_ps(rs_arr[r]), d, y);
-                    }
-                    if OUT_U8 {
-                        let y = _mm256_min_ps(
-                            _mm256_max_ps(_mm256_mul_ps(y, _mm256_set1_ps(inv_arr[r])), lo),
-                            hi,
-                        );
-                        *vr = _mm256_cvtps_epi32(y);
-                    } else {
-                        _mm256_storeu_ps(f[r].as_mut_ptr().add(8 * k), y);
-                    }
+                let mut y = [
+                    _mm256_add_ps(_mm256_loadu_ps(tile[0].as_ptr().add(8 * k)), vbias[0]),
+                    _mm256_add_ps(_mm256_loadu_ps(tile[1].as_ptr().add(8 * k)), vbias[1]),
+                    _mm256_add_ps(_mm256_loadu_ps(tile[2].as_ptr().add(8 * k)), vbias[2]),
+                    _mm256_add_ps(_mm256_loadu_ps(tile[3].as_ptr().add(8 * k)), vbias[3]),
+                ];
+                if SILU {
+                    y = silu_q8_avx2_x4(y);
+                }
+                if HAS_RES {
+                    let w = _mm256_loadu_si256(res.add(8 * k) as *const __m256i);
+                    let b0 = _mm256_and_si256(w, mask_ff);
+                    let b1 = _mm256_and_si256(_mm256_srli_epi32::<8>(w), mask_ff);
+                    let b2 = _mm256_and_si256(_mm256_srli_epi32::<16>(w), mask_ff);
+                    let b3 = _mm256_srli_epi32::<24>(w);
+                    y[0] = _mm256_fmadd_ps(vrs[0], _mm256_cvtepi32_ps(_mm256_sub_epi32(b0, vrz[0])), y[0]);
+                    y[1] = _mm256_fmadd_ps(vrs[1], _mm256_cvtepi32_ps(_mm256_sub_epi32(b1, vrz[1])), y[1]);
+                    y[2] = _mm256_fmadd_ps(vrs[2], _mm256_cvtepi32_ps(_mm256_sub_epi32(b2, vrz[2])), y[2]);
+                    y[3] = _mm256_fmadd_ps(vrs[3], _mm256_cvtepi32_ps(_mm256_sub_epi32(b3, vrz[3])), y[3]);
                 }
                 if OUT_U8 {
-                    let p01 = _mm256_adds_epi16(_mm256_packs_epi32(v[0], v[1]), z01);
-                    let p23 = _mm256_adds_epi16(_mm256_packs_epi32(v[2], v[3]), z23);
+                    let v0 = _mm256_cvtps_epi32(_mm256_min_ps(
+                        _mm256_max_ps(_mm256_mul_ps(y[0], vinv[0]), lo),
+                        hi,
+                    ));
+                    let v1 = _mm256_cvtps_epi32(_mm256_min_ps(
+                        _mm256_max_ps(_mm256_mul_ps(y[1], vinv[1]), lo),
+                        hi,
+                    ));
+                    let v2 = _mm256_cvtps_epi32(_mm256_min_ps(
+                        _mm256_max_ps(_mm256_mul_ps(y[2], vinv[2]), lo),
+                        hi,
+                    ));
+                    let v3 = _mm256_cvtps_epi32(_mm256_min_ps(
+                        _mm256_max_ps(_mm256_mul_ps(y[3], vinv[3]), lo),
+                        hi,
+                    ));
+                    let p01 = _mm256_adds_epi16(_mm256_packs_epi32(v0, v1), z01);
+                    let p23 = _mm256_adds_epi16(_mm256_packs_epi32(v2, v3), z23);
                     let bytes = _mm256_shuffle_epi8(_mm256_packus_epi16(p01, p23), transpose);
                     _mm256_storeu_si256(q.add(8 * k) as *mut __m256i, bytes);
+                } else {
+                    _mm256_storeu_ps(f[0].as_mut_ptr().add(8 * k), y[0]);
+                    _mm256_storeu_ps(f[1].as_mut_ptr().add(8 * k), y[1]);
+                    _mm256_storeu_ps(f[2].as_mut_ptr().add(8 * k), y[2]);
+                    _mm256_storeu_ps(f[3].as_mut_ptr().add(8 * k), y[3]);
                 }
             }
         }
