@@ -566,13 +566,12 @@ mod tests {
         };
 
         let (mut app, window) = open();
-        let (ds_id, box0, dims) = drive(&mut app, window, |this, w, cx| {
+        let ds_id = drive(&mut app, window, |this, w, cx| {
             let ds = this.store.datasets.ready().unwrap()[0].clone();
             this.navigate(crate::app::Route::Dataset(ds.id.clone()), w, cx);
             this.open_inspector(ds.id.clone(), 0, w, cx);
-            (ds.id, None::<(f32, f32, f32, f32)>, (0f32, 0f32))
+            ds.id
         });
-        let _ = (box0, dims);
         for _ in 0..4 {
             app.frame(window.into());
             app.run_until_idle();
@@ -677,7 +676,8 @@ mod tests {
             assert_eq!(insp.focused_box, None);
         });
 
-        // 3. Re-clicking box 0 focuses it again, and clicking its centered position again fits back to 1x.
+        // 3. Dragging past 4 px and returning to the press point before releasing must NOT
+        // trigger click-to-zoom.
         let (box0_pt, _) = drive(&mut app, window, |this, _, _| {
             let insp = this.inspector.as_ref().unwrap();
             let img = this.filtered_image(&ds_id, 0).unwrap();
@@ -692,9 +692,63 @@ mod tests {
                 view,
             )
         });
+        app.simulate_input(
+            window.into(),
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position: box0_pt,
+                pressed_button: None,
+                modifiers: Modifiers::none(),
+            }),
+        );
+        app.frame(window.into());
+        app.simulate_input(
+            window.into(),
+            PlatformInput::MouseDown(MouseDownEvent {
+                button: MouseButton::Left,
+                position: box0_pt,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+        );
+        app.simulate_input(
+            window.into(),
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position: point(box0_pt.x + px(24.), box0_pt.y),
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Modifiers::none(),
+            }),
+        );
+        app.simulate_input(
+            window.into(),
+            PlatformInput::MouseMove(MouseMoveEvent {
+                position: box0_pt,
+                pressed_button: Some(MouseButton::Left),
+                modifiers: Modifiers::none(),
+            }),
+        );
+        app.simulate_input(
+            window.into(),
+            PlatformInput::MouseUp(MouseUpEvent {
+                button: MouseButton::Left,
+                position: box0_pt,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+            }),
+        );
+        app.frame(window.into());
+        drive(&mut app, window, |this, _, _| {
+            let insp = this.inspector.as_ref().unwrap();
+            assert_eq!(insp.focused_box, None, "drag-out-and-back must not trigger click-to-zoom");
+        });
+
+        // 4. Re-clicking box 0 focuses it again, and clicking its centered position again fits back
+        // to 1x while keeping stage hover synchronized with the pointer.
         click(&mut app, box0_pt);
         drive(&mut app, window, |this, _, _| {
-            assert_eq!(this.inspector.as_ref().unwrap().focused_box, Some(0));
+            let insp = this.inspector.as_ref().unwrap();
+            assert_eq!(insp.focused_box, Some(0));
+            assert_eq!(insp.hover_from_stage, insp.hover_box.is_some());
         });
         // Box 0 is now centered in the stage: clicking it again resets to 1.0x Fit.
         click(&mut app, center);
@@ -702,6 +756,11 @@ mod tests {
             let insp = this.inspector.as_ref().unwrap();
             assert_eq!(insp.zoom, 1.0, "re-clicking focused canvas box resets to Fit");
             assert_eq!(insp.focused_box, None);
+            assert_eq!(
+                insp.hover_from_stage,
+                insp.hover_box.is_some(),
+                "hover_from_stage stays synced with pointer hit after returning to Fit"
+            );
         });
     }
 }

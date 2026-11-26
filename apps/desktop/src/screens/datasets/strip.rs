@@ -126,14 +126,14 @@ impl FoloApp {
                     .id("ds-empty-tile")
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
                     .px(px(16.))
                     .py(px(pad))
                     .when(empty > 0, |d| {
                         d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active))
                     })
                     .when(on, |d| d.bg(t.bg_selected))
-                    .child(stat(
+                    // Clip tile contents inside the focusable wrapper so `bind`'s exterior focus ring is never clipped.
+                    .child(div().min_w_0().w_full().overflow_hidden().child(stat(
                         &t,
                         "Empty images",
                         int(empty),
@@ -150,7 +150,7 @@ impl FoloApp {
                         } else {
                             kpi_note(&t).child("every image has labels")
                         }),
-                    ));
+                    )));
                 if empty > 0 {
                     self.bind(
                         el,
@@ -187,14 +187,14 @@ impl FoloApp {
                     .id("ds-broken-tile")
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
                     .px(px(16.))
                     .py(px(pad))
                     .when(broken > 0, |d| {
                         d.cursor_pointer().hover(|s| s.bg(t.bg_hover)).active(|s| s.bg(t.bg_active))
                     })
                     .when(broken > 0, |d| d.tooltip(crate::controls::tip(broken_tip(), None)))
-                    .child(if broken > 0 {
+                    // Clip tile contents inside the focusable wrapper so `bind`'s exterior focus ring is never clipped.
+                    .child(div().min_w_0().w_full().overflow_hidden().child(if broken > 0 {
                         // Actionable: a warning, not one more inventory count.
                         div()
                             .flex()
@@ -233,7 +233,7 @@ impl FoloApp {
                             "",
                             Some(div().child(text(ty::SM, t.success_text).child("all labels valid"))),
                         )
-                    });
+                    }));
                 if broken > 0 {
                     let (cmd, how) = check_command(&ds.path);
                     self.bind(
@@ -386,18 +386,29 @@ mod tests {
         drive(&mut app, win, |this, w, cx| {
             let mut ds = this.store.datasets.ready().unwrap()[0].clone();
             ds.classes = vec![long_name.into(), "square".into()];
+            if let Some(stats) = ds.stats.as_mut() {
+                stats.empty_images = 2;
+            }
             let id = ds.id.clone();
             if let Load::Ready(list) = &mut this.store.datasets {
                 list[0] = ds.clone();
             }
             this.store.dataset.insert(id.clone(), Load::Ready(ds));
             this.ds_tab = DsTab::Statistics;
+            this.kb = true;
+            this.focus_key("ds-empty-tile", w, cx);
             this.navigate(Route::Dataset(id), w, cx);
         });
         for _ in 0..3 {
             app.frame(win.into());
             app.run_until_idle();
         }
+        drive(&mut app, win, |this, w, cx| {
+            this.kb = true;
+            this.focus_key("ds-empty-tile", w, cx);
+            cx.notify();
+        });
+        app.frame(win.into());
         let scene = app.scene(win.into());
         // Locate the KPI strip's 4 vertical dividers (`vline`: 1 px wide, >= 60 px tall):
         // [Images | Boxes | Classes | Empty images | Broken labels].
@@ -439,6 +450,12 @@ mod tests {
             })
             .collect();
         assert!(!classes_glyphs.is_empty(), "Classes tile rendered text glyphs");
+        // With ellipsis active, the 70-char class name is truncated to far fewer glyphs than its full length.
+        assert!(
+            classes_glyphs.len() < 45,
+            "Classes tile should ellipsize long class name rather than painting all 70+ glyphs (got {})",
+            classes_glyphs.len()
+        );
         for s in &classes_glyphs {
             assert!(
                 s.clip.right() <= classes_right + px(1.).scale(1.),
@@ -447,5 +464,30 @@ mod tests {
                 classes_right
             );
         }
+
+        // Actionable Empty images tile keeps its keyboard focus ring visible outside the tile bounds
+        // (not clipped away by an outer `overflow_hidden`).
+        let focus_color = crate::theme::Theme::new(crate::theme::Mode::Dark).focus;
+        // `folo-ui` emits a hollow focus ring as 4 thin border-band quads (top, right, bottom, left).
+        let ring_quads: Vec<_> = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                folo_ui::Primitive::Quad(q)
+                    if q.border_color == focus_color
+                        && q.bounds.origin.y < strip_top
+                        && q.bounds.bottom() > strip_bottom =>
+                {
+                    Some(q.clip)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ring_quads.len(), 4, "ds-empty-tile focus ring should emit all 4 edge bands");
+        assert!(
+            ring_quads.iter().any(|c| c.origin.y < strip_top && c.size.height > px(0.).scale(1.))
+                && ring_quads.iter().any(|c| c.bottom() > strip_bottom && c.size.height > px(0.).scale(1.)),
+            "ds-empty-tile focus ring top and bottom edges must paint unclipped outside the tile: {ring_quads:?}"
+        );
     }
 }

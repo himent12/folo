@@ -814,14 +814,14 @@ impl FoloApp {
 }
 
 /// Architecture caption for the New Run dialog: name, parameter count, and GFLOPs scaled quadratically
-/// from the 640 px reference to the selected `imgsz`.
+/// from the `docs/MODEL.md` 640 px reference to the selected `imgsz`.
 fn arch_caption(arch: usize, imgsz: u32) -> String {
     const SPECS: [(&str, &str, f32); 5] = [
-        ("nano", "2.63 M", 6.6),
-        ("small", "9.42 M", 21.5),
-        ("medium", "20.1 M", 48.0),
-        ("large", "43.7 M", 104.0),
-        ("extra large", "68.2 M", 165.0),
+        ("nano", "2.62 M", 6.54),
+        ("small", "9.46 M", 21.59),
+        ("medium", "20.1 M", 68.10),
+        ("large", "25.4 M", 87.15),
+        ("extra large", "57.0 M", 195.27),
     ];
     let idx = arch.min(SPECS.len() - 1);
     let (size_name, params, gflops_640) = SPECS[idx];
@@ -837,10 +837,12 @@ mod tests {
 
     #[test]
     fn arch_caption_scales_gflops_with_image_size() {
-        assert_eq!(arch_caption(0, 640), "folo-n, nano · 2.63 M params · 6.6 GFLOPs at 640 px");
-        assert_eq!(arch_caption(0, 64), "folo-n, nano · 2.63 M params · 0.1 GFLOPs at 64 px");
-        assert_eq!(arch_caption(0, 1024), "folo-n, nano · 2.63 M params · 16.9 GFLOPs at 1024 px");
-        assert_eq!(arch_caption(3, 640), "folo-l, large · 43.7 M params · 104 GFLOPs at 640 px");
-        assert_eq!(arch_caption(4, 1024), "folo-x, extra large · 68.2 M params · 422 GFLOPs at 1024 px");
+        assert_eq!(arch_caption(0, 640), "folo-n, nano · 2.62 M params · 6.5 GFLOPs at 640 px");
+        assert_eq!(arch_caption(0, 64), "folo-n, nano · 2.62 M params · 0.1 GFLOPs at 64 px");
+        assert_eq!(arch_caption(0, 1024), "folo-n, nano · 2.62 M params · 16.7 GFLOPs at 1024 px");
+        assert_eq!(arch_caption(2, 640), "folo-m, medium · 20.1 M params · 68.1 GFLOPs at 640 px");
+        assert_eq!(arch_caption(3, 640), "folo-l, large · 25.4 M params · 87.2 GFLOPs at 640 px");
+        assert_eq!(arch_caption(4, 640), "folo-x, extra large · 57.0 M params · 195 GFLOPs at 640 px");
+        assert_eq!(arch_caption(4, 1024), "folo-x, extra large · 57.0 M params · 500 GFLOPs at 1024 px");
     }
 }

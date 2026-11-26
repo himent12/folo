@@ -86,6 +86,9 @@ impl FoloApp {
             let k = if missed_w.is_some() { n.saturating_sub(1) } else { n };
             ((w - px(6.) - missed_w.unwrap_or_default()).max(px(0.)) / k.max(1) as f32 - px(2.)).max(px(0.))
         });
+        // Keep header and body horizontal cell padding identical (and zero when columns are very
+        // narrow) so high class counts never widen the header past the body rows.
+        let cell_px = if col_w.is_some_and(|w| w <= px(4.)) { px(0.) } else { px(1.) };
         let header_row = div().flex().pl(px(LABEL_W)).child(
             div()
                 .relative()
@@ -123,7 +126,7 @@ impl FoloApp {
                     };
                     div()
                         .id(SharedString::from(format!("cm-col-{i}")))
-                        .px(px(2.))
+                        .px(cell_px)
                         .map(|d| {
                             if i == n - 1 {
                                 let d = d.ml(px(6.));
@@ -215,7 +218,8 @@ impl FoloApp {
                     div()
                         .id(SharedString::from(format!("cm-{r}-{c}")))
                         .h(cell_h)
-                        .p(px(1.))
+                        .py(px(1.))
+                        .px(cell_px)
                         .map(|d| {
                             if c == n - 1 {
                                 let d = d.ml(px(6.));
@@ -598,6 +602,31 @@ mod tests {
             missed_quads.len() >= n_classes,
             "expected >= {n_classes} wide filled Missed cells for {mid}, got {}",
             missed_quads.len()
+        );
+        // Missed column cells stay inside the 960 px viewport, and the Missed heading glyphs sit
+        // directly above the Missed column rather than overflowing right or overlapping class labels.
+        let col_left = missed_quads[0].bounds.origin.x;
+        let col_right = missed_quads[0].bounds.right();
+        assert!(col_right <= px(960.).scale(1.), "Missed column stayed inside 960 px viewport");
+        let first_row_top =
+            missed_quads.iter().map(|q| q.bounds.origin.y).min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap();
+        let header_glyphs = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                folo_ui::Primitive::MonoSprite(s) => Some(s),
+                _ => None,
+            })
+            .filter(|s| {
+                s.bounds.origin.y >= first_row_top - px(28.).scale(1.)
+                    && s.bounds.origin.y < first_row_top
+                    && s.bounds.origin.x >= col_left - px(4.).scale(1.)
+                    && s.bounds.right() <= col_right + px(4.).scale(1.)
+            })
+            .count();
+        assert!(
+            header_glyphs >= 6,
+            "Missed heading (6 glyphs) must align above the Missed column (got {header_glyphs})"
         );
     }
 }
