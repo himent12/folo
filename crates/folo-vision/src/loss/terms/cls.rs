@@ -6,8 +6,11 @@ use folo_core::cpu::fast_exp;
 use folo_core::{DType, Result, Tensor, no_grad};
 use rayon::prelude::*;
 
+use super::asl_poly::{
+    asl_elem_f64, asymmetric_loss, poly1_bce_elem_f64, poly1_focal_elem_f64, sparse_cls_sum,
+};
 use super::sum_fixed_order;
-use crate::loss::ClsLossKind;
+use crate::loss::{ClsLossKind, LossConfig};
 
 /// Rows per parallel task of the CPU fused classification sums.
 const PAR_ROWS: usize = 8;
@@ -262,18 +265,19 @@ fn focal_cls_sum_cpu(
 
 /// Compute the unnormalised classification loss sum over `[B, nc, A]` logits using either the fused CPU
 /// custom ops or the device-generic composite of `folo-core` tensor ops.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn cls_loss_sum(
     cls_raw: &Tensor,
     idx_cls: Vec<usize>,
     scores: &[f32],
-    cls_loss: ClsLossKind,
-    mal_gamma: f32,
-    vfl_alpha: f32,
-    vfl_gamma: f32,
-    qfl_beta: f32,
+    cfg: &LossConfig,
     fused: bool,
 ) -> Result<Tensor> {
+    let cls_loss = cfg.cls_loss;
+    let mal_gamma = cfg.mal_gamma;
+    let vfl_alpha = cfg.vfl_alpha;
+    let vfl_gamma = cfg.vfl_gamma;
+    let qfl_beta = cfg.qfl_beta;
+
     if fused {
         return match cls_loss {
             ClsLossKind::Bce if mal_gamma <= 0.0 => bce_sum_cpu(cls_raw, idx_cls, scores.to_vec()),
@@ -304,24 +308,79 @@ pub(super) fn cls_loss_sum(
                 FocalPosRule::Qfl { beta: qfl_beta },
                 "qfl_with_logits_sum",
             ),
+            ClsLossKind::Asl => {
+                let (gp, gn, m) = (cfg.asl_gamma_pos as f64, cfg.asl_gamma_neg as f64, cfg.asl_clip as f64);
+                sparse_cls_sum(cls_raw, idx_cls, scores.to_vec(), "asl_with_logits_sum", move |x, t| {
+                    asl_elem_f64(x, t, gp, gn, m)
+                })
+            }
+            ClsLossKind::Poly1Bce => {
+                let eps = cfg.poly1_epsilon as f64;
+                sparse_cls_sum(cls_raw, idx_cls, scores.to_vec(), "poly1_bce_with_logits_sum", move |x, t| {
+                    poly1_bce_elem_f64(x, t, eps)
+                })
+            }
+            ClsLossKind::Poly1Focal => {
+                let (gamma, eps) = (cfg.poly1_focal_gamma as f64, cfg.poly1_epsilon as f64);
+                sparse_cls_sum(
+                    cls_raw,
+                    idx_cls,
+                    scores.to_vec(),
+                    "poly1_focal_with_logits_sum",
+                    move |x, t| poly1_focal_elem_f64(x, t, gamma, eps),
+                )
+            }
         };
     }
 
     let (b, nc, n_a) = cls_raw.dims3()?;
     let dev = cls_raw.device();
+
+    // ASL composite path builds dense target tensor and delegates to `asymmetric_loss` so the margin shift
+    // clamp `p_m = max(p - m, 0)` avoids `0^(gamma - 1)` backward hazards for fractional `0 < gamma_neg < 1`.
+    if cls_loss == ClsLossKind::Asl {
+        let dense_t = {
+            let _g = no_grad();
+            let zeros = Tensor::zeros_with([b * nc * n_a], DType::F32, dev)?;
+            if idx_cls.is_empty() {
+                zeros.reshape([b, nc, n_a])?
+            } else {
+                let idx = Tensor::from_vec(
+                    idx_cls.into_iter().map(|i| i as i64).collect::<Vec<_>>(),
+                    [scores.len()],
+                )?
+                .to_device(dev)?;
+                let vals = Tensor::from_slice(scores, [scores.len()])?.to_device(dev)?;
+                zeros.index_add(0, &idx, &vals)?.reshape([b, nc, n_a])?
+            }
+        };
+        let loss = asymmetric_loss(cls_raw, &dense_t, cfg.asl_gamma_pos, cfg.asl_gamma_neg, cfg.asl_clip)?;
+        return sum_fixed_order(&loss.sum(2, false)?);
+    }
+
     let (neg_scale, neg_gamma, filter_pos) = match cls_loss {
         ClsLossKind::Bce => (1.0f32, mal_gamma, mal_gamma > 0.0),
         ClsLossKind::Vfl => (vfl_alpha, vfl_gamma, true),
         ClsLossKind::Qfl => (1.0f32, qfl_beta, true),
+        ClsLossKind::Poly1Bce => (1.0f32, 0.0, true),
+        ClsLossKind::Poly1Focal => (1.0f32, cfg.poly1_focal_gamma, true),
+        ClsLossKind::Asl => unreachable!(),
     };
-    // Evaluates `scale * sigmoid(x)^gamma * softplus(x)` as `scale * exp(-gamma * softplus(-x)) * softplus(x)`
-    // so fractional `0 < gamma < 1` never hits `0^(gamma - 1) = inf` in `powf` backward when `sigmoid(x)` underflows.
+    let poly_eps = cfg.poly1_epsilon;
+    // Evaluates `scale * sigmoid(x)^gamma * (softplus(x) + eps * sigmoid(x))` using
+    // `exp(-gamma * softplus(-x))` so fractional `0 < gamma < 1` never hits `0^(gamma - 1) = inf` in `powf`.
     let neg_composite = |x: &Tensor| -> Result<Tensor> {
+        let inner = match cls_loss {
+            ClsLossKind::Poly1Bce | ClsLossKind::Poly1Focal if poly_eps != 0.0 => {
+                x.softplus()?.add(&x.sigmoid()?.mul_scalar(poly_eps)?)?
+            }
+            _ => x.softplus()?,
+        };
         let base = if neg_gamma > 0.0 {
             let log_p = x.neg()?.softplus()?;
-            log_p.mul_scalar(-neg_gamma)?.exp()?.mul(&x.softplus()?)?
+            log_p.mul_scalar(-neg_gamma)?.exp()?.mul(&inner)?
         } else {
-            x.softplus()?
+            inner
         };
         if neg_scale == 1.0 { Ok(base) } else { base.mul_scalar(neg_scale) }
     };
@@ -348,11 +407,11 @@ pub(super) fn cls_loss_sum(
     };
     let neg_base = neg_composite(cls_raw)?;
     let dense = sum_fixed_order(&neg_base.mul(&bg_mask)?.sum(2, false)?)?;
-    let bce_fg = x_fg.softplus()?.sub(&x_fg.mul(&t_pos)?)?;
     let pos_terms = match cls_loss {
-        ClsLossKind::Bce => bce_fg,
-        ClsLossKind::Vfl => bce_fg.mul(&t_pos)?,
+        ClsLossKind::Bce => x_fg.softplus()?.sub(&x_fg.mul(&t_pos)?)?,
+        ClsLossKind::Vfl => x_fg.softplus()?.sub(&x_fg.mul(&t_pos)?)?.mul(&t_pos)?,
         ClsLossKind::Qfl => {
+            let bce_fg = x_fg.softplus()?.sub(&x_fg.mul(&t_pos)?)?;
             if qfl_beta == 0.0 {
                 bce_fg
             } else {
@@ -367,6 +426,22 @@ pub(super) fn cls_loss_sum(
                 weight.mul(&bce_fg)?
             }
         }
+        ClsLossKind::Poly1Bce | ClsLossKind::Poly1Focal => {
+            let neg_x = x_fg.neg()?;
+            let pos_inner = if poly_eps != 0.0 {
+                neg_x.softplus()?.add(&neg_x.sigmoid()?.mul_scalar(poly_eps)?)?
+            } else {
+                neg_x.softplus()?
+            };
+            let pos_part = if neg_gamma > 0.0 {
+                x_fg.softplus()?.mul_scalar(-neg_gamma)?.exp()?.mul(&pos_inner)?
+            } else {
+                pos_inner
+            };
+            let neg_part = neg_composite(&x_fg)?;
+            t_pos.mul(&pos_part)?.add(&t_pos.rsub_scalar(1.0)?.mul(&neg_part)?)?
+        }
+        ClsLossKind::Asl => unreachable!(),
     };
     dense.add(&sum_fixed_order(&pos_terms)?)
 }

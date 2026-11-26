@@ -110,7 +110,12 @@ A shared graph walk (`walk.rs`) drives three executors:
     `vfl_alpha · p^vfl_gamma · softplus(x)` on negatives; defaults `0.75` / `2.0`, requires `mal_gamma == 0`; CPU + GPU
     fused in `det_bce_fwd.wgsl` / `det_bce_bwd.wgsl`); `ClsLossKind::Qfl` selects Quality Focal Loss
     (`|t − p|^qfl_beta · BCE(x, t)`, default `qfl_beta = 2.0`, requires `mal_gamma == 0`; CPU + GPU fused in
-    `det_bce_fwd.wgsl` / `det_bce_bwd.wgsl`).
+    `det_bce_fwd.wgsl` / `det_bce_bwd.wgsl`); `ClsLossKind::Asl` selects Asymmetric Loss (`asl_gamma_pos = 0.0`,
+    `asl_gamma_neg = 4.0`, probability margin shift `asl_clip = 0.05`, also exposed as `asymmetric_loss`);
+    `ClsLossKind::Poly1Bce` (`poly1_epsilon = 1.0`, `poly1_bce_loss`) and `ClsLossKind::Poly1Focal`
+    (`poly1_focal_gamma = 2.0`, `poly1_epsilon = 1.0`, `poly1_focal_loss` / `poly1_focal_loss_with_alpha`) add
+    first-order PolyLoss polynomial regularization (`+ ε₁ (1 - p_t)` / `+ ε₁ (1 - p_t)^(γ + 1)`), evaluated with exact
+    closed-form `f64` analytical gradients on the host path.
   - *Box & DFL terms:* `LossConfig.box_loss` selects `Ciou` (default), `Rpiou` (purely algebraic Rational-Focal
     Edge-Decoupled IoU: `rpiou_beta`, `rpiou_kappa`, `rpiou_delta`; CPU + GPU fused), `Saeiou` (Scale-Normalized
     Algebraic Edge IoU, `saeiou_loss`: scale-normalized focal-IoU + shape-weighted per-edge inverse-sqrt penalty
