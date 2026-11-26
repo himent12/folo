@@ -163,3 +163,94 @@ fn rms_norm_forward_and_backward_match_f64_reference() {
         }
     }
 }
+
+#[test]
+fn norm_backward_all_param_combos_tails_and_grad_check() {
+    use crate::Tensor;
+    use crate::rng::Rng;
+
+    // Exercise all (w, dw, db) specializations across 0, <8, 8, 9..15, 16, 17, 33 lengths.
+    for &d in &[1usize, 7, 8, 9, 15, 16, 17, 32, 33] {
+        let outer = 3usize;
+        let x: Vec<f32> = (0..outer * d).map(|i| ((i as f32) * 0.31).sin() * 1.7 + 0.2).collect();
+        let g: Vec<f32> = (0..outer * d).map(|i| ((i as f32) * 0.19).cos() * 1.1).collect();
+        let w: Vec<f32> = (0..d).map(|j| 0.8 + ((j as f32) * 0.13).sin() * 0.3).collect();
+        let b: Vec<f32> = (0..d).map(|j| ((j as f32) * 0.09).cos() * 0.2).collect();
+        let (_, mean, rstd_ln) = layer_norm(&x, Some(&w), Some(&b), outer, d, 1e-5);
+        let (_, rstd_rms) = rms_norm(&x, Some(&w), outer, d, 1e-5);
+
+        for has_w in [false, true] {
+            let wo = has_w.then_some(w.as_slice());
+            for need_w in [false, true] {
+                for need_b in [false, true] {
+                    let (dx, dw, db) =
+                        layer_norm_backward(&x, &g, wo, &mean, &rstd_ln, outer, d, need_w, need_b);
+                    assert_eq!(dx.len(), outer * d);
+                    assert_eq!(dw.is_some(), need_w);
+                    assert_eq!(db.is_some(), need_b);
+                    // Direct parity check against `ln_bwd_write_scalar` on row 0.
+                    let (c1, c2) =
+                        ln_bwd_coeffs_row(&x[..d], &g[..d], wo, mean[0], rstd_ln[0], 1.0 / d as f32, false);
+                    let mut ref_dx = vec![0.0f32; d];
+                    let mut ref_dw = need_w.then(|| vec![0.0f32; d]);
+                    let mut ref_db = need_b.then(|| vec![0.0f32; d]);
+                    ln_bwd_write_scalar(
+                        &x[..d],
+                        &g[..d],
+                        wo,
+                        &mut ref_dx,
+                        ref_dw.as_deref_mut(),
+                        ref_db.as_deref_mut(),
+                        mean[0],
+                        rstd_ln[0],
+                        c1,
+                        c2,
+                    );
+                    assert_close(
+                        &dx[..d],
+                        &ref_dx,
+                        1e-5,
+                        &format!("ln_bwd_write dx d={d} w={has_w} dw={need_w} db={need_b}"),
+                    );
+                }
+                let (dx, dw) = rms_norm_backward(&x, &g, wo, &rstd_rms, outer, d, need_w);
+                assert_eq!(dx.len(), outer * d);
+                assert_eq!(dw.is_some(), need_w);
+                let c_d = super::rms::rms_bwd_c_row_for_test(&x[..d], &g[..d], wo, rstd_rms[0]) / d as f32;
+                let mut ref_dx = vec![0.0f32; d];
+                let mut ref_dw = need_w.then(|| vec![0.0f32; d]);
+                super::rms::rms_bwd_write_scalar_for_test(
+                    &x[..d],
+                    &g[..d],
+                    wo,
+                    &mut ref_dx,
+                    ref_dw.as_deref_mut(),
+                    rstd_rms[0],
+                    c_d,
+                );
+                assert_close(
+                    &dx[..d],
+                    &ref_dx,
+                    1e-5,
+                    &format!("rms_bwd_write dx d={d} w={has_w} dw={need_w}"),
+                );
+            }
+        }
+    }
+
+    // Finite-difference grad_check on both aligned (32) and ragged (23) widths.
+    let mut rng = Rng::seed(404);
+    for &d in &[23usize, 32] {
+        let x = Tensor::randn([3, d], 0.0, 1.0, &mut rng).requires_grad_();
+        let w = Tensor::randn([d], 1.0, 0.2, &mut rng).requires_grad_();
+        let b = Tensor::randn([d], 0.0, 0.2, &mut rng).requires_grad_();
+        crate::testing::grad_check(
+            |v| v[0].layer_norm(Some(&v[1]), Some(&v[2]), 1e-5),
+            &[x.clone(), w.clone(), b.clone()],
+        )
+        .unwrap();
+        crate::testing::grad_check(|v| v[0].layer_norm(None, None, 1e-5), std::slice::from_ref(&x)).unwrap();
+        crate::testing::grad_check(|v| v[0].rms_norm(Some(&v[1]), 1e-5), &[x.clone(), w]).unwrap();
+        crate::testing::grad_check(|v| v[0].rms_norm(None, 1e-5), &[x]).unwrap();
+    }
+}

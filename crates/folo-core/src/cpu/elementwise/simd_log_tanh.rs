@@ -154,7 +154,7 @@ pub(crate) fn softplus_scalar(x: f32) -> f32 {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
-fn ln8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+pub(crate) fn ln8(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
     use std::arch::x86_64::*;
     let is_sub = _mm256_cmp_ps::<_CMP_LT_OQ>(x, _mm256_set1_ps(f32::MIN_POSITIVE));
     let x_norm = _mm256_blendv_ps(x, _mm256_mul_ps(x, _mm256_set1_ps(SUBNORMAL_SCALE)), is_sub);

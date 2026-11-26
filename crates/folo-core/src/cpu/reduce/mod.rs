@@ -1,9 +1,11 @@
 //! Reductions and top-k over one dimension of a contiguous tensor viewed as `[outer, d, inner]`.
 
+mod arg;
 #[cfg(test)]
 mod tests;
 mod topk;
 
+pub(crate) use arg::reduce_arg;
 pub(crate) use topk::topk;
 
 use rayon::prelude::*;
@@ -11,14 +13,14 @@ use rayon::prelude::*;
 use super::elementwise::SendPtr;
 use super::{CHUNK, PAR_MIN};
 use crate::backend::ReduceOp;
-use crate::cpu::{par_chunks, par_for};
+use crate::cpu::par_for;
 
 /// Column strip width for `inner > 1` variance reduction (1 KiB per stack accumulator, zero heap allocs).
 const VAR_COL_TILE: usize = 256;
 
 #[cfg(target_arch = "x86_64")]
 #[inline]
-fn has_avx2() -> bool {
+pub(super) fn has_avx2() -> bool {
     std::is_x86_feature_detected!("avx2")
 }
 
@@ -674,42 +676,6 @@ pub(crate) fn reduce_var_f32(
         for t in 0..total_tiles {
             do_tile(t);
         }
-    }
-    out
-}
-
-pub(crate) fn reduce_arg(max: bool, x: &[f32], (outer, d, inner): (usize, usize, usize)) -> Vec<i64> {
-    let mut out = vec![0i64; outer * inner];
-    let better = |v: f32, best: f32| {
-        if best.is_nan() {
-            false
-        } else if v.is_nan() {
-            true
-        } else if max {
-            v > best
-        } else {
-            v < best
-        }
-    };
-    let row = |(o, dst): (usize, &mut [i64])| {
-        let src = &x[o * d * inner..(o + 1) * d * inner];
-        for (j, slot) in dst.iter_mut().enumerate() {
-            let mut bi = 0usize;
-            let mut best = src[j];
-            for r in 1..d {
-                let v = src[r * inner + j];
-                if better(v, best) {
-                    best = v;
-                    bi = r;
-                }
-            }
-            *slot = bi as i64;
-        }
-    };
-    if outer * d * inner >= PAR_MIN {
-        par_chunks(&mut out, inner.max(1), &|i, c| row((i, c)));
-    } else {
-        out.chunks_mut(inner.max(1)).enumerate().for_each(row);
     }
     out
 }

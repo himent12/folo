@@ -52,3 +52,7 @@ harness = false
 [[bench]]
 name = "pool"
 harness = false
+
+[[bench]]
+name = "norm_softmax_q8"
+harness = false

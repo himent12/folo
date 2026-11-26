@@ -147,3 +147,68 @@ fn softmax_backward_preserves_reduce_block_precision_on_long_rows() {
     let gx_prob = softmax_backward(&y_prob, &g, (1, n, 1), false);
     assert_eq!(gx_prob[n - 1], 0.0, "blocked dot should be 1.0, giving 1*(1 - 1) = 0");
 }
+
+#[test]
+fn softmax_col_tile_edge_widths_nonfinite_and_grad_check() {
+    use crate::Tensor;
+    use crate::rng::Rng;
+
+    // Non-finite columns (+inf, all -inf, NaN) across 16-wide, 8-wide, and tail widths.
+    for &inner in &[1usize, 7, 8, 15, 16, 17, 31, 32, 33, 255, 256, 275] {
+        let d = 7usize;
+        let mut x: Vec<f32> = (0..d * inner).map(|i| ((i as f32) * 0.19).sin() * 3.0).collect();
+        // Column 0: all -inf; last column: contains NaN; middle column (if >= 10): +inf.
+        for r in 0..d {
+            x[r * inner] = f32::NEG_INFINITY;
+        }
+        x[2 * inner + (inner - 1)] = f32::NAN;
+        if inner >= 10 {
+            x[3 * inner + 9] = f32::INFINITY;
+        }
+        for log in [false, true] {
+            let y = softmax(&x, (1, d, inner), log);
+            let want = ref_softmax(&x, (1, d, inner), log);
+            for r in 0..d {
+                for c in 0..inner {
+                    let idx = r * inner + c;
+                    if want[idx].is_nan() {
+                        assert!(y[idx].is_nan(), "expected NaN at ({r},{c}) inner={inner} log={log}");
+                    } else if want[idx].is_infinite() {
+                        assert_eq!(
+                            y[idx].to_bits(),
+                            want[idx].to_bits(),
+                            "inf mismatch ({r},{c}) inner={inner} log={log}: {} vs {}",
+                            y[idx],
+                            want[idx]
+                        );
+                    } else {
+                        let scale = 1.0 + want[idx].abs();
+                        assert!(
+                            (y[idx] - want[idx]).abs() <= 2e-5 * scale,
+                            "col mismatch ({r},{c}) inner={inner} log={log}: {} vs {}",
+                            y[idx],
+                            want[idx]
+                        );
+                    }
+                }
+            }
+            for r in 0..d {
+                assert!(y[r * inner].is_nan(), "all -inf col must be NaN (inner={inner}, log={log})");
+                assert!(
+                    y[r * inner + (inner - 1)].is_nan(),
+                    "NaN col must propagate (inner={inner}, log={log})"
+                );
+            }
+            if inner >= 10 && !log {
+                assert!(y[3 * inner + 9].is_nan());
+                assert_eq!(y[9], 0.0);
+            }
+        }
+    }
+
+    // Finite-difference grad_check for column-tiled softmax & log_softmax (ragged width > 16).
+    let mut rng = Rng::seed(303);
+    let x = Tensor::randn([2, 6, 19], 0.0, 1.0, &mut rng).requires_grad_();
+    crate::testing::grad_check(|v| v[0].softmax(1), std::slice::from_ref(&x)).unwrap();
+    crate::testing::grad_check(|v| v[0].log_softmax(1), &[x]).unwrap();
+}

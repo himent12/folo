@@ -327,6 +327,24 @@ fn rms_bwd_c_row(x: &[f32], g: &[f32], w: Option<&[f32]>, rstd: f32, par: bool) 
     tree_combine(parts, |a, b| a + b).unwrap_or(0.0)
 }
 
+#[cfg(test)]
+pub(super) fn rms_bwd_c_row_for_test(x: &[f32], g: &[f32], w: Option<&[f32]>, rstd: f32) -> f32 {
+    rms_bwd_c_row(x, g, w, rstd, false)
+}
+
+#[cfg(test)]
+pub(super) fn rms_bwd_write_scalar_for_test(
+    x: &[f32],
+    g: &[f32],
+    w: Option<&[f32]>,
+    dx: &mut [f32],
+    dw: Option<&mut [f32]>,
+    rstd: f32,
+    c_d: f32,
+) {
+    rms_bwd_write_scalar(x, g, w, dx, dw, rstd, c_d);
+}
+
 #[inline]
 fn rms_bwd_write_scalar(
     x: &[f32],
@@ -351,6 +369,67 @@ fn rms_bwd_write_scalar(
     }
 }
 
+/// Const-specialised, branchless 16-wide AVX2+FMA RmsNorm backward write loop.
+///
+/// # Safety
+/// The CPU supports AVX2 and FMA; `x`, `g`, `dx` hold `n` floats; when `HAS_W`/`HAS_DW` are true, `w`/`dw`
+/// point to `n` valid floats respectively and `dx`/`dw` do not alias.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn rms_bwd_write_kernel<const HAS_W: bool, const HAS_DW: bool>(
+    x: *const f32,
+    g: *const f32,
+    w: *const f32,
+    dx: *mut f32,
+    dw: *mut f32,
+    n: usize,
+    rstd: f32,
+    c_d: f32,
+) -> usize {
+    use std::arch::x86_64::*;
+    let vr = _mm256_set1_ps(rstd);
+    let vc = _mm256_set1_ps(c_d);
+    let mut i = 0usize;
+    // SAFETY: loops check `i + 16 <= n` / `i + 8 <= n`, pointer validity is guaranteed by caller, AVX2+FMA enabled.
+    unsafe {
+        while i + 16 <= n {
+            let xh0 = _mm256_mul_ps(_mm256_loadu_ps(x.add(i)), vr);
+            let xh1 = _mm256_mul_ps(_mm256_loadu_ps(x.add(i + 8)), vr);
+            let gv0 = _mm256_loadu_ps(g.add(i));
+            let gv1 = _mm256_loadu_ps(g.add(i + 8));
+            let (gw0, gw1) = if HAS_W {
+                (
+                    _mm256_mul_ps(gv0, _mm256_loadu_ps(w.add(i))),
+                    _mm256_mul_ps(gv1, _mm256_loadu_ps(w.add(i + 8))),
+                )
+            } else {
+                (gv0, gv1)
+            };
+            _mm256_storeu_ps(dx.add(i), _mm256_mul_ps(vr, _mm256_fnmadd_ps(xh0, vc, gw0)));
+            _mm256_storeu_ps(dx.add(i + 8), _mm256_mul_ps(vr, _mm256_fnmadd_ps(xh1, vc, gw1)));
+            if HAS_DW {
+                let dwp = dw.add(i);
+                _mm256_storeu_ps(dwp, _mm256_fmadd_ps(gv0, xh0, _mm256_loadu_ps(dwp)));
+                _mm256_storeu_ps(dwp.add(8), _mm256_fmadd_ps(gv1, xh1, _mm256_loadu_ps(dwp.add(8))));
+            }
+            i += 16;
+        }
+        if i + 8 <= n {
+            let xh = _mm256_mul_ps(_mm256_loadu_ps(x.add(i)), vr);
+            let gv = _mm256_loadu_ps(g.add(i));
+            let gw = if HAS_W { _mm256_mul_ps(gv, _mm256_loadu_ps(w.add(i))) } else { gv };
+            _mm256_storeu_ps(dx.add(i), _mm256_mul_ps(vr, _mm256_fnmadd_ps(xh, vc, gw)));
+            if HAS_DW {
+                let dwp = dw.add(i);
+                _mm256_storeu_ps(dwp, _mm256_fmadd_ps(gv, xh, _mm256_loadu_ps(dwp)));
+            }
+            i += 8;
+        }
+    }
+    i
+}
+
 /// # Safety
 /// The CPU supports AVX2 and FMA.
 #[cfg(target_arch = "x86_64")]
@@ -364,7 +443,6 @@ unsafe fn rms_bwd_write_avx2_fma(
     rstd: f32,
     c_d: f32,
 ) {
-    use std::arch::x86_64::*;
     let n = x.len();
     assert_eq!(g.len(), n);
     assert_eq!(dx.len(), n);
@@ -374,27 +452,20 @@ unsafe fn rms_bwd_write_avx2_fma(
     if let Some(ref dw) = dw {
         assert_eq!(dw.len(), n);
     }
-    let mut i = 0usize;
-    // SAFETY: loops check `i + 8 <= n`, all slices have length `n`, and AVX2+FMA are enabled.
-    unsafe {
-        let vr = _mm256_set1_ps(rstd);
-        let vc = _mm256_set1_ps(c_d);
-        while i + 8 <= n {
-            let xh = _mm256_mul_ps(_mm256_loadu_ps(x.as_ptr().add(i)), vr);
-            let gv = _mm256_loadu_ps(g.as_ptr().add(i));
-            let gw = match w {
-                Some(w) => _mm256_mul_ps(gv, _mm256_loadu_ps(w.as_ptr().add(i))),
-                None => gv,
-            };
-            let dxv = _mm256_mul_ps(vr, _mm256_fnmadd_ps(xh, vc, gw));
-            _mm256_storeu_ps(dx.as_mut_ptr().add(i), dxv);
-            if let Some(ref mut dw) = dw {
-                let cur = _mm256_loadu_ps(dw.as_ptr().add(i));
-                _mm256_storeu_ps(dw.as_mut_ptr().add(i), _mm256_fmadd_ps(gv, xh, cur));
-            }
-            i += 8;
+    let xp = x.as_ptr();
+    let gp = g.as_ptr();
+    let wp = w.map_or(std::ptr::null(), <[f32]>::as_ptr);
+    let dxp = dx.as_mut_ptr();
+    let dwp = dw.as_deref_mut().map_or(std::ptr::null_mut(), <[f32]>::as_mut_ptr);
+    // SAFETY: lengths asserted above, mutable slices are disjoint by Rust aliasing rules, AVX2+FMA enabled.
+    let i = unsafe {
+        match (w.is_some(), dw.is_some()) {
+            (true, true) => rms_bwd_write_kernel::<true, true>(xp, gp, wp, dxp, dwp, n, rstd, c_d),
+            (true, false) => rms_bwd_write_kernel::<true, false>(xp, gp, wp, dxp, dwp, n, rstd, c_d),
+            (false, true) => rms_bwd_write_kernel::<false, true>(xp, gp, wp, dxp, dwp, n, rstd, c_d),
+            (false, false) => rms_bwd_write_kernel::<false, false>(xp, gp, wp, dxp, dwp, n, rstd, c_d),
         }
-    }
+    };
     if i < n {
         rms_bwd_write_scalar(
             &x[i..],
