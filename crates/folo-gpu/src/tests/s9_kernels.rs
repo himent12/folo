@@ -476,16 +476,18 @@ fn cpu_gelu(x: f64) -> f64 {
 }
 
 fn cpu_gelu_deriv(x: f64) -> f64 {
-    if x.abs() >= 10.0 {
+    if x.abs() >= 11.0 {
         return if x > 0.0 { 1.0 } else { 0.0 };
     }
     let k = (2.0f64 / std::f64::consts::PI).sqrt();
     let c = 0.044715f64;
     let u = k * (x + c * x * x * x);
-    let t = u.tanh();
-    let sech2 = 1.0 - t * t;
+    let e = (-2.0 * u.abs()).exp();
+    let inv = 1.0 / (1.0 + e);
+    let one_plus_t = if u >= 0.0 { 2.0 * inv } else { 2.0 * e * inv };
+    let sech2 = 4.0 * e * inv * inv;
     let du = k * (1.0 + 3.0 * c * x * x);
-    0.5 * (1.0 + t + x * sech2 * du)
+    0.5 * (one_plus_t + x * sech2 * du)
 }
 
 #[test]
@@ -553,11 +555,11 @@ fn fused_geglu_and_swiglu_match_cpu_and_finite_diff() {
     }
 
     // Overflow guard + tail precision for GeGLU backward:
-    // 1. `grad = up = 1e20, gate = -6` stays finite.
+    // 1. `grad = up = 1e20, gate = -6` and `gate = -10` stay finite and accurate.
     // 2. `gate = -5.5, up = 1024, grad = 1024` preserves the representable tail gradient (`~ -0.0490`) in F32 & F16.
-    let gate_o = [-6.0f32, -6.0, -6.0, -5.5];
-    let up_o = [1e20f32, 1e10, 1e30, 1024.0];
-    let g_o = [1e20f32, 1e30, 1e10, 1024.0];
+    let gate_o = [-6.0f32, -10.0, -6.0, -5.5];
+    let up_o = [1e20f32, 1e20, 1e30, 1024.0];
+    let g_o = [1e20f32, 1e20, 1e10, 1024.0];
     let t_gate = GpuTensor::from_slice(&ctx, &gate_o, &[4]).unwrap();
     let t_up = GpuTensor::from_slice(&ctx, &up_o, &[4]).unwrap();
     let t_g = GpuTensor::from_slice(&ctx, &g_o, &[4]).unwrap();
@@ -566,6 +568,8 @@ fn fused_geglu_and_swiglu_match_cpu_and_finite_diff() {
     geglu_backward(&ctx, t_gate.raw(), t_up.raw(), t_g.raw(), t_dg.raw(), t_du.raw(), 4, DType::F32).unwrap();
     let got_dg = t_dg.to_vec().unwrap();
     assert!(got_dg.iter().all(|v| v.is_finite()), "geglu_bwd overflowed: {got_dg:?}");
+    let want_g10 = (1e20f64 * 1e20 * cpu_gelu_deriv(-10.0)) as f32;
+    assert_close(&got_dg[1..2], &[want_g10], 1e-1, 1e-3, "geglu_bwd -10.0 tail f32");
     let want_tail = (1024.0f64 * 1024.0 * cpu_gelu_deriv(-5.5)) as f32;
     assert_close(&got_dg[3..4], &[want_tail], 1e-4, 1e-3, "geglu_bwd -5.5 tail f32");
     if ctx.caps().shader_f16 {

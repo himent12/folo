@@ -69,15 +69,9 @@ fn silu_deriv4(x: vec4<f32>) -> vec4<f32> {
     let mid = s + x * s * (vec4<f32>(1.0) - s);
     return select(select(mid, vec4<f32>(0.0), big_neg), vec4<f32>(1.0), big_pos);
 }
-fn tanh_safe4(x: vec4<f32>) -> vec4<f32> {
-    return select(
-        select(tanh(clamp(x, vec4<f32>(-9.0), vec4<f32>(9.0))), sign(x), abs(x) >= vec4<f32>(9.0)),
-        x,
-        isnan4(x),
-    );
-}
 fn gelu4(x: vec4<f32>) -> vec4<f32> {
-    let sat = (abs(x) >= vec4<f32>(10.0)) & !isnan4(x);
+    // For |x| >= 11, 2|u| >= 112.5 so exp(-2|u|) == 0 in IEEE f32 (even subnormals); saturate to avoid x^3 overflow.
+    let sat = (abs(x) >= vec4<f32>(11.0)) & !isnan4(x);
     let xc = select(x, vec4<f32>(0.0), sat);
     let k = 0.7978845608028654;
     let c = 0.044715;
@@ -100,9 +94,9 @@ fn apply_fused_act4(act: u32, x: vec4<f32>) -> vec4<f32> {
     }
 }
 fn gelu_deriv4(x: vec4<f32>) -> vec4<f32> {
-    // For |x| >= 10, |u| >= 43.6 so sech^2(u) < 1e-37 in f32; saturate directly to avoid x^3 overflow.
+    // For |x| >= 11, 2|u| >= 112.5 so exp(-2|u|) underflows below f32 min subnormal; saturate to avoid x^3 overflow.
     // Using e = exp(-2|u|) avoids catastrophic cancellation in both (1 + tanh(u)) and (1 - tanh^2(u)) for |u| >= 9.
-    let sat = (abs(x) >= vec4<f32>(10.0)) & !isnan4(x);
+    let sat = (abs(x) >= vec4<f32>(11.0)) & !isnan4(x);
     let xc = select(x, vec4<f32>(0.0), sat);
     let k = 0.7978845608028654;
     let c = 0.044715;

@@ -61,17 +61,14 @@ fn key_f16_bits(hbits: u32) -> u32 {
 }
 
 fn before(ka: u32, ia: u32, kb: u32, ib: u32) -> bool {
-    if (ka != kb) {
-        if (LARGEST) { return ka > kb; }
-        return ka < kb;
-    }
-    return ia < ib;
+    let val_lt = select((ka < kb), (ka > kb), LARGEST);
+    return select((ia < ib), val_lt, (ka != kb));
 }
 
 fn better_slot(ka: u32, ia: u32, kb: u32, ib: u32) -> bool {
-    if (ia == TOPK_EMPTY) { return false; }
-    if (ib == TOPK_EMPTY) { return true; }
-    return before(ka, ia, kb, ib);
+    let real_cmp = before(ka, ia, kb, ib);
+    let b_empty = ib == TOPK_EMPTY;
+    return select(select(real_cmp, true, b_empty), false, (ia == TOPK_EMPTY));
 }
 "#;
 
@@ -287,15 +284,20 @@ fn gen_select(spec: &Spec) -> String {
                  let rows = pu(0u); let d = pu(1u); let k = pu(2u);\n\
                  let valid = row < rows;\n\
                  let base = row * d;\n\
+                 let n_chunks = (d + 255u) / 256u;\n\
                  let sg = min(sgid, 7u);\n\
                  var pk = 0u; var pi = TOPK_EMPTY;\n\
                  for (var j = 0u; j < k; j++) {{\n\
                      var bk = 0u; var bi = TOPK_EMPTY;\n\
                      if (valid) {{\n\
-                         for (var i = lid; i < d; i += 256u) {{\n\
-                             let ki = read_x_key(base + i);\n\
-                             if (j > 0u && !before(pk, pi, ki, i)) {{ continue; }}\n\
-                             if (bi == TOPK_EMPTY || before(ki, i, bk, bi)) {{ bk = ki; bi = i; }}\n\
+                         for (var c = 0u; c < n_chunks; c += 1u) {{\n\
+                             let i = c * 256u + lid;\n\
+                             if (i < d) {{\n\
+                                 let ki = read_x_key(base + i);\n\
+                                 if (j == 0u || before(pk, pi, ki, i)) {{\n\
+                                     if (bi == TOPK_EMPTY || before(ki, i, bk, bi)) {{ bk = ki; bi = i; }}\n\
+                                 }}\n\
+                             }}\n\
                          }}\n\
                      }}\n\
                      for (var off = 16u; off > 0u; off = off >> 1u) {{\n\
@@ -317,7 +319,7 @@ fn gen_select(spec: &Spec) -> String {
                          I[2u * (row * k + j)] = pi;\n\
                          I[2u * (row * k + j) + 1u] = 0u;\n\
                      }}\n\
-                     if (j + 1u < k) {{ workgroupBarrier(); }}\n\
+                     workgroupBarrier();\n\
                  }}\n\
              }}\n"
         )
@@ -337,14 +339,19 @@ fn gen_select(spec: &Spec) -> String {
                  let rows = pu(0u); let d = pu(1u); let k = pu(2u);\n\
                  let valid = row < rows;\n\
                  let base = row * d;\n\
+                 let n_chunks = (d + 255u) / 256u;\n\
                  var pk = 0u; var pi = TOPK_EMPTY;\n\
                  for (var j = 0u; j < k; j++) {{\n\
                      var bk = 0u; var bi = TOPK_EMPTY;\n\
                      if (valid) {{\n\
-                         for (var i = lid; i < d; i += 256u) {{\n\
-                             let ki = read_x_key(base + i);\n\
-                             if (j > 0u && !before(pk, pi, ki, i)) {{ continue; }}\n\
-                             if (bi == TOPK_EMPTY || before(ki, i, bk, bi)) {{ bk = ki; bi = i; }}\n\
+                         for (var c = 0u; c < n_chunks; c += 1u) {{\n\
+                             let i = c * 256u + lid;\n\
+                             if (i < d) {{\n\
+                                 let ki = read_x_key(base + i);\n\
+                                 if (j == 0u || before(pk, pi, ki, i)) {{\n\
+                                     if (bi == TOPK_EMPTY || before(ki, i, bk, bi)) {{ bk = ki; bi = i; }}\n\
+                                 }}\n\
+                             }}\n\
                          }}\n\
                      }}\n\
                      sh_k[lid] = bk; sh_i[lid] = bi;\n\
@@ -364,7 +371,7 @@ fn gen_select(spec: &Spec) -> String {
                          I[2u * (row * k + j)] = pi;\n\
                          I[2u * (row * k + j) + 1u] = 0u;\n\
                      }}\n\
-                     if (j + 1u < k) {{ workgroupBarrier(); }}\n\
+                     workgroupBarrier();\n\
                  }}\n\
              }}\n"
         )

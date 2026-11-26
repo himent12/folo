@@ -185,7 +185,7 @@ fn gen_q4_matmul(_spec: &Spec) -> String {
                      acc2 = fma(vec4<f32>(As[kk][rm + 2u]), bv, acc2);\n\
                      acc3 = fma(vec4<f32>(As[kk][rm + 3u]), bv, acc3);\n\
                  }}\n\
-                 if (blk + 1u < bpr) {{ workgroupBarrier(); }}\n\
+                 workgroupBarrier();\n\
              }}\n\
              let col0 = n0 + tx * 4u;\n\
              var bv_bias = vec4<f32>(0.0);\n\
