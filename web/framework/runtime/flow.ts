@@ -3,7 +3,7 @@
 
 import { computed, createRoot, dispose, getOwner, isReader, memo, onCleanup, ownedRoot, owning, reader, signal, swapOwner, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
 import { createComponent, splitProps } from './component';
-import { insert, setLeave } from './dom';
+import { clearLeaves, insert } from './dom';
 import { spread } from './spread';
 import { enterBranch, exitBranch, leaveBranch, type BranchTransitions } from './transition';
 
@@ -706,7 +706,7 @@ export function Portal(props: { mount?: Node; children: JSX.Element }): JSX.Elem
       if (parent === null) return;
       for (let n = start.nextSibling; n !== null && n !== end; ) {
         const next: ChildNode | null = n.nextSibling;
-        setLeave(n, undefined);
+        clearLeaves(n);
         parent.removeChild(n);
         n = next;
       }

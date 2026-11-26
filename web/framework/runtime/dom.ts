@@ -28,16 +28,38 @@ export function template(html: string, svg?: 1): () => Node {
 // ---------------------------------------------------------------------------------------------------------------------
 // Outros: a node can ask to leave later (an outro transition); `insert` then lets it finish before removing it.
 
-type Leaving = Node & { $$leave?: (done: () => void) => void };
-/** Nodes with a pending `$$leave`: while any exist, clearing never takes the `textContent = ''` shortcut. */
+type LeaveFn = (done: () => void) => (() => void) | void;
+type Leaving = Node & { $$leave?: LeaveFn; $$cancelLeave?: () => void };
+/** Nodes with a pending or in-flight outro: while any exist, clearing never takes the `textContent = ''` shortcut. */
 let leaving = 0;
+const activeLeaves = new Set<Leaving>();
 
-/** Internal: `node` will run `fn(done)` instead of being removed at once. */
-export function setLeave(node: Node, fn: ((done: () => void) => void) | undefined): void {
+/** Internal: `node` will run `fn(done)` instead of being removed at once. Passing `undefined` cancels any pending or active outro. */
+export function setLeave(node: Node, fn: LeaveFn | undefined): void {
   const n = node as Leaving;
-  if (n.$$leave && !fn) leaving--;
-  else if (!n.$$leave && fn) leaving++;
+  if (!fn) {
+    if (n.$$leave !== undefined) {
+      n.$$leave = undefined;
+      activeLeaves.delete(n);
+      leaving--;
+    }
+    n.$$cancelLeave?.();
+    return;
+  }
+  n.$$cancelLeave?.();
+  if (n.$$leave === undefined) {
+    leaving++;
+    activeLeaves.add(n);
+  }
   n.$$leave = fn;
+}
+
+/** Internal: cancels every pending or started outro on `root` and its descendants (called on root/portal teardown). */
+export function clearLeaves(root: Node): void {
+  if (leaving === 0) return;
+  for (const n of activeLeaves) {
+    if (n === root || root.contains(n)) setLeave(n, undefined);
+  }
 }
 
 function removeNode(node: Node): void {
@@ -45,20 +67,44 @@ function removeNode(node: Node): void {
   const leave = n.$$leave;
   if (leave !== undefined) {
     n.$$leave = undefined;
-    let finished = false;
-    const finish = () => {
-      if (finished) return;
-      finished = true;
+    let done = false;
+    let cancelled = false;
+    let stop: (() => void) | void;
+    const release = () => {
+      n.$$cancelLeave = undefined;
+      activeLeaves.delete(n);
       leaving--;
+    };
+    const cancel = () => {
+      if (done || cancelled) return;
+      cancelled = true;
+      release();
+      const s = stop;
+      stop = undefined;
+      if (typeof s === 'function') s();
+    };
+    const finish = () => {
+      if (done || cancelled) return;
+      done = true;
+      release();
       n.parentNode?.removeChild(n);
     };
+    n.$$cancelLeave = cancel;
     try {
-      leave(finish);
+      stop = leave(finish);
+      if (cancelled && typeof stop === 'function') {
+        const s = stop;
+        stop = undefined;
+        s();
+      }
     } catch (e) {
       finish();
       throw e;
     }
-  } else n.parentNode?.removeChild(n);
+  } else {
+    n.$$cancelLeave?.();
+    n.parentNode?.removeChild(n);
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

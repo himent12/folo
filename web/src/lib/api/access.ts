@@ -60,9 +60,12 @@ export class Access implements AccessWatch {
     this.#refusal.set(null);
   }
 
-  /** While refused, check again right away (e.g. once the server is reachable again after an outage) instead of waiting out the backoff. */
+  /** While refused, check again right away (e.g. once the server is reachable again after an outage) instead of waiting out the backoff or a stale pre-outage check. */
   recheck(): void {
-    if (!this.#check || this.#refusal.peek() === null || this.#out) return;
+    if (!this.#check || this.#refusal.peek() === null) return;
+    const ctrl = this.#ctrl;
+    this.#ctrl = null;
+    ctrl?.abort();
     clearTimeout(this.#timer);
     this.#timer = undefined;
     this.#attempt = 0;

@@ -12,8 +12,9 @@ export interface Reachability {
 }
 
 /** A health check of the server in use: resolves when it answers at all (any HTTP status, any body), rejects only when
- * nothing answered. */
-export type Probe = (signal: AbortSignal) => Promise<unknown>;
+ * nothing answered. May call `answered()` as soon as response headers arrive so recovery does not wait on the body
+ * and the probe's own signal is not aborted while the body is still being read. */
+export type Probe = (signal: AbortSignal, answered: () => void) => Promise<unknown>;
 
 /** Waits between probes while offline: soon at first, then every 5 s. */
 export const PROBE_DELAYS = [2000, 3000, 5000];
@@ -24,6 +25,7 @@ export class Reach implements Reachability {
   #offline = signal(false);
   #back = signal(0);
   #probe: Probe | null = null;
+  #onBack: (() => void) | null = null;
   #gen = 0;
   #probing = false;
   #attempt = 0;
@@ -40,9 +42,10 @@ export class Reach implements Reachability {
   }
 
   /** The server in use changed: forget any outage; cancel any probe still out; `probe` checks the new one (null: no server, e.g. the mock). */
-  reset(probe: Probe | null): void {
+  reset(probe: Probe | null, onBack?: () => void): void {
     this.#gen++;
     this.#probe = probe;
+    this.#onBack = onBack ?? null;
     this.#probing = false;
     this.#attempt = 0;
     const ctrl = this.#ctrl;
@@ -68,6 +71,7 @@ export class Reach implements Reachability {
     this.#timer = undefined;
     this.#offline.set(false);
     this.#back.set(this.#back.peek() + 1);
+    this.#onBack?.();
   }
 
   failed(): void {
@@ -83,8 +87,13 @@ export class Reach implements Reachability {
     const ctrl = new AbortController();
     this.#ctrl = ctrl;
     this.#probing = true;
+    const answered = () => {
+      if (gen !== this.#gen) return;
+      if (this.#ctrl === ctrl) this.#ctrl = null;
+      this.ok();
+    };
     try {
-      await probe(AbortSignal.any([ctrl.signal, AbortSignal.timeout(PROBE_TIMEOUT)]));
+      await probe(AbortSignal.any([ctrl.signal, AbortSignal.timeout(PROBE_TIMEOUT)]), answered);
       if (this.#ctrl === ctrl) this.#ctrl = null;
       if (gen !== this.#gen) return;
       this.#probing = false;

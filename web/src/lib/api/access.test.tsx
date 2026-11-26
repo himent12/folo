@@ -123,6 +123,40 @@ describe('Access', () => {
     access.reset(null);
     expect(signals[0]!.aborted).toBe(true);
   });
+
+  it('recheck() supersedes an in-flight pre-outage check and clears refusal as soon as the fresh check lets Studio in', async () => {
+    const access = new Access();
+    const signals: AbortSignal[] = [];
+    const answers: ((a: AccessAnswer) => void)[] = [];
+    access.reset((s) => {
+      signals.push(s);
+      return new Promise<AccessAnswer>((resolve) => answers.push(resolve));
+    });
+    // First check refuses with 401 -> enters backoff and starts check 2 after PROBE_DELAYS[0].
+    access.refused(access.checks);
+    answers[0]!(401);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(access.refusal).toBe(401);
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    // Check 2 is now hung in flight (`#out === true`).
+    expect(signals).toHaveLength(2);
+    expect(signals[1]!.aborted).toBe(false);
+
+    // Server recovers from outage -> recheck() must abort hung check 2 and immediately start check 3.
+    access.recheck();
+    expect(signals[1]!.aborted).toBe(true);
+    expect(signals).toHaveLength(3);
+    expect(signals[2]!.aborted).toBe(false);
+
+    // Late answer from aborted check 2 is ignored; check 3 answering 'in' clears refusal.
+    answers[1]!(401);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(access.refusal).toBe(401);
+
+    answers[2]!('in');
+    await vi.advanceTimersByTimeAsync(0);
+    expect([access.refusal, access.back]).toEqual([null, 1]);
+  });
 });
 
 /** Settles when `go` is called: a response held back by the test. */

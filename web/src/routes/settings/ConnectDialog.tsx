@@ -100,10 +100,12 @@ export default function ConnectDialog(props: ConnectDialogProps) {
     if (first) focusField(first.key);
   }
 
+  const isConnecting = () => hub.mode === 'connecting';
+
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     const p = provider.peek();
-    if (!p || busy.peek()) return;
+    if (!p || busy.peek() || isConnecting()) return;
     failure.set(undefined);
     const typed = values.peek();
     const missing = Object.fromEntries(p.fields.filter((f) => f.required && !typed[f.key]?.trim()).map((f) => [f.key, `Enter the ${inSentence(f)}.`]));
@@ -118,13 +120,14 @@ export default function ConnectDialog(props: ConnectDialogProps) {
         name: name.peek().trim(),
         values: Object.fromEntries(p.fields.map((f) => [f.key, typed[f.key]?.trim() ?? ''])),
       });
-      if (!alive || seq !== submitSeq || hub.epoch !== epoch) return;
-      // The dialog closes first: the new row says the rest.
-      open.set(false);
+      if (!alive || isConnecting() || hub.epoch !== epoch) return;
+      // The POST committed credentials on the current server: always reconcile the connections list and announce it,
+      // even if the user closed the dialog or switched providers while it was in flight; only close the matching session.
+      if (seq === submitSeq) open.set(false);
       toast.success(`Connected ${p.name}`);
       props.onconnected(conn);
     } catch (err) {
-      if (!alive || seq !== submitSeq || hub.epoch !== epoch) return;
+      if (!alive || seq !== submitSeq || isConnecting() || hub.epoch !== epoch) return;
       const field = err instanceof ApiError && err.code === 'invalid_body' ? p.fields.find((f) => err.message.includes(`\`${f.key}\``)) : undefined;
       const secret = firstSecret.peek();
       // A rejected credential is said at its field; one left empty (an optional token the server needs after all) is
@@ -148,7 +151,7 @@ export default function ConnectDialog(props: ConnectDialogProps) {
           <Button variant="ghost" onclick={() => open.set(false)}>
             Cancel
           </Button>
-          <Button variant="primary" type="submit" form={`${uid}-form`} icon={PlugZap} loading={busy.get()}>
+          <Button variant="primary" type="submit" form={`${uid}-form`} icon={PlugZap} loading={busy.get()} disabled={hub.mode === 'connecting'}>
             Connect
           </Button>
         </>

@@ -292,4 +292,161 @@ describe('Settings › Cloud', () => {
     expect(d.querySelector('.msg.error')).toBeNull();
     expect(d.querySelector('.err')).toBeNull();
   });
+
+  it('reconciles a committed ConnectDialog POST even after switching providers without closing the replacement form', async () => {
+    const api = new MockApi('normal', 0);
+    const realConnect = api.connectCloud.bind(api);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    vi.spyOn(api, 'connectCloud').mockImplementation(async (req) => {
+      await gate;
+      return realConnect(req);
+    });
+    open(api);
+    await until(() => target.querySelector('#cloud header .btn'), 'Connect');
+    button(target, 'Connect')!.click();
+    const d = await until(() => dialog()?.querySelector('input[type="password"]') && dialog(), 'the dialog');
+    type(d.querySelector<HTMLInputElement>('input[type="password"]')!, 'rpa_deferred_ok');
+    d.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    flushSync();
+    // Switch provider while RunPod POST is still in flight.
+    [...d.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((r) => text(r) === 'Remote FOLO server')!.click();
+    flushSync();
+    const urlInput = d.querySelector<HTMLInputElement>('input[type="text"]')!;
+    type(urlInput, 'http://10.0.0.9:7878');
+
+    // RunPod POST succeeds on the current server: new row appears and toast fires, while Remote FOLO dialog stays open.
+    release();
+    await until(() => [...target.querySelectorAll('.cx-name')].map(text).includes('RunPod 2'), 'committed connection row');
+    expect(toast.items[0]).toMatchObject({ tone: 'success', title: 'Connected RunPod' });
+    expect(dialog()).toBe(d);
+    expect(urlInput.value).toBe('http://10.0.0.9:7878');
+  });
+
+  it('isolates Disconnect and Terminate confirmation sessions when dialogs switch while a mutation is in flight', async () => {
+    const api = new MockApi('normal', 0);
+    const base = (await api.cloudConnections())[0]!;
+    const connB = { ...base, id: 'cc_b', name: 'Server B', provider: 'remote' };
+    const connC = { ...base, id: 'cc_c', name: 'Server C', provider: 'remote' };
+    api.cloudConnections = async () => [base, connB, connC];
+    const discGates = new Map<string, { ok: () => void; fail: (e: Error) => void }>();
+    vi.spyOn(api, 'disconnectCloud').mockImplementation(
+      (id) =>
+        new Promise<void>((resolve, reject) => {
+          discGates.set(id, { ok: () => resolve(), fail: reject });
+        }),
+    );
+
+    const instList = await api.cloudInstances();
+    const instA = { ...instList[0]!, id: 'ci_a', name: 'pod-a', status: 'running' as const };
+    const instB = { ...instList[0]!, id: 'ci_b', name: 'pod-b', status: 'running' as const };
+    api.cloudInstances = async () => [instA, instB];
+    const termGates = new Map<string, { ok: () => void; fail: (e: Error) => void }>();
+    vi.spyOn(api, 'terminateCloudInstance').mockImplementation(
+      (id) =>
+        new Promise((resolve, reject) => {
+          termGates.set(id, {
+            ok: () => resolve({ ...(id === instA.id ? instA : instB), status: 'terminating' }),
+            fail: reject,
+          });
+        }),
+    );
+
+    open(api);
+    await until(() => target.querySelectorAll('.cx-row .cx-name').length === 3, 'three connections');
+
+    // Start disconnecting RunPod (base), dismiss dialog, then open Disconnect for Server B.
+    const rows = () => [...target.querySelectorAll<HTMLElement>('.cx-row')];
+    button(rows()[0]!, 'Disconnect')!.click();
+    let d = await until(() => dialog(), 'disconnect dialog A');
+    button(d.querySelector('footer')!, 'Disconnect')!.click();
+    flushSync();
+    button(d.querySelector('footer')!, 'Cancel')!.click();
+    flushSync();
+
+    button(rows()[1]!, 'Disconnect')!.click();
+    d = await until(() => dialog(), 'disconnect dialog B');
+    expect(text(d.querySelector('header'))).toContain('Disconnect Server B?');
+
+    // RunPod disconnect succeeds: removes RunPod from the list without closing Server B's dialog.
+    discGates.get(base.id)!.ok();
+    await until(() => ![...target.querySelectorAll('.cx-name')].map(text).includes('RunPod'), 'RunPod removed');
+    expect(dialog()).toBe(d);
+    expect(text(d.querySelector('header'))).toContain('Disconnect Server B?');
+
+    // Start disconnecting Server B, dismiss, open Server C, then fail Server B -> error must NOT appear in Server C's dialog.
+    button(d.querySelector('footer')!, 'Disconnect')!.click();
+    flushSync();
+    button(d.querySelector('footer')!, 'Cancel')!.click();
+    flushSync();
+    button(rows().find((r) => text(r).includes('Server C'))!, 'Disconnect')!.click();
+    d = await until(() => dialog(), 'disconnect dialog C');
+    discGates.get(connB.id)!.fail(new ApiError(409, 'connection_in_use', 'Server B busy'));
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+    expect(d.querySelector('[role="alert"] [data-notice]')).toBeNull();
+    button(d.querySelector('footer')!, 'Cancel')!.click();
+    flushSync();
+
+    // Same session isolation for Terminate on two live instances.
+    await until(() => target.querySelectorAll('table.inst tbody tr').length === 2, 'two live instances');
+    const instRows = () => [...target.querySelectorAll<HTMLElement>('table.inst tbody tr')];
+    button(instRows()[0]!, 'Terminate')!.click();
+    d = await until(() => dialog(), 'terminate dialog A');
+    button(d.querySelector('footer')!, 'Terminate')!.click();
+    flushSync();
+    button(d.querySelector('footer')!, 'Keep it running')!.click();
+    flushSync();
+    button(instRows()[1]!, 'Terminate')!.click();
+    d = await until(() => dialog(), 'terminate dialog B');
+    termGates.get(instA.id)!.ok();
+    await until(() => text(instRows()[0]!.querySelector('.st')) === 'Terminating', 'inst A terminating');
+    expect(dialog()).toBe(d);
+  });
+
+  it('disables server-bound actions, closes ConnectDialog, and invalidates pending work when reconnecting to another server', async () => {
+    const api = new MockApi('cloud-training', 0);
+    const live = (await api.cloudInstances())[0]!;
+    let finishTerminate!: () => void;
+    vi.spyOn(api, 'terminateCloudInstance').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishTerminate = () => resolve({ ...live, status: 'terminating' });
+        }),
+    );
+    open(api);
+    const row = await until(() => [...target.querySelectorAll('table.inst tbody tr')].find((r) => button(r, 'Terminate')), 'live instance');
+    // Start a Terminate mutation and also open ConnectDialog later.
+    button(row, 'Terminate')!.click();
+    const d = await until(() => dialog(), 'terminate dialog');
+    button(d.querySelector('footer')!, 'Terminate')!.click();
+    flushSync();
+
+    // Deferred hub.connect() switches hub.mode to 'connecting' while keeping the old api until handshake succeeds.
+    hub.mode = 'connecting';
+    flushSync();
+    expect(dialog()).toBeNull();
+    expect(button(target, 'Connect')!.disabled).toBe(true);
+    expect(button(target, 'Check')!.disabled).toBe(true);
+    expect(button(target, 'Disconnect')!.disabled).toBe(true);
+    expect(button(row, 'Terminate')!.disabled).toBe(true);
+
+    // Late Terminate completion from previous server A is ignored.
+    finishTerminate();
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+    expect(toast.items).toEqual([]);
+    expect(text(row.querySelector('.st'))).toBe('Running');
+
+    // Also verify ConnectDialog closes across a server epoch change and does not reopen.
+    hub.mode = 'mock';
+    flushSync();
+    button(target, 'Connect')!.click();
+    await until(() => dialog(), 'connect dialog');
+    hub.epoch++;
+    flushSync();
+    expect(dialog()).toBeNull();
+  });
 });

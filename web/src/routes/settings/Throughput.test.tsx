@@ -188,4 +188,39 @@ describe('Settings › Throughput', () => {
     await Promise.resolve();
     expect(toast.items).toEqual([]);
   });
+
+  it('disables Measure now and invalidates an in-flight benchmark while hub.mode is connecting', async () => {
+    toast.items = [];
+    const api = new MockApi('normal', 0);
+    hub.api = api;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const real = api.benchmark.bind(api);
+    const spy = vi.spyOn(api, 'benchmark').mockImplementation(async (b) => {
+      await gate;
+      return real(b);
+    });
+    c = mount(Throughput, { target, props: { benchmark: true } });
+    await until(() => target.querySelector('.tp-row'), 'the rows');
+
+    // Start measuring on server A, then start connecting to unreachable server B (hub.mode -> 'connecting').
+    measureBtn()!.click();
+    flushSync();
+    expect(measureBtn()!.getAttribute('aria-busy')).toBe('true');
+
+    hub.mode = 'connecting';
+    flushSync();
+    expect(measureBtn()!.disabled).toBe(true);
+    expect(measureBtn()!.getAttribute('aria-busy')).toBeNull();
+    // Clicking while connecting must not send another benchmark to server A.
+    measureBtn()!.click();
+    expect(spy).toHaveBeenCalledTimes(1);
+
+    // Server A's deferred benchmark finishing while connecting must be ignored.
+    release();
+    await Promise.resolve();
+    await Promise.resolve();
+    flushSync();
+    expect(toast.items).toEqual([]);
+  });
 });

@@ -263,19 +263,10 @@ class Hub {
       await new Promise<void>((settled) => void this.#useMock('forced', attempt, ctrl.signal, settled));
       return;
     }
-    // Only this connection's requests and streams (the probe's too: it asks through `http`) say whether its server
-    // answers: an answer that comes late to one sent before (to an address changed since) changes nothing. One that ends
-    // an outage asks what the server can do now.
+    // Only this connection's requests and streams say whether its server answers: an answer that comes late to one sent
+    // before (to an address changed since) changes nothing. Outage recovery hooks run via `Reach.reset`'s `onBack`.
     const reach: Reachability = {
-      ok: () => {
-        if (attempt !== this.#attempt) return;
-        const was = this.#reach.offline;
-        this.#reach.ok();
-        if (was) {
-          void this.#learn(http.base, attempt, ctrl.signal);
-          this.#access.recheck();
-        }
-      },
+      ok: () => void (attempt === this.#attempt && this.#reach.ok()),
       failed: () => void (attempt === this.#attempt && this.#reach.failed()),
     };
     const http = new HttpApi(prefs.serverUrl, reach, this.#access);
@@ -341,11 +332,18 @@ class Hub {
           if (attempt !== this.#attempt) return;
           this.api = http;
           // Any HTTP answer, whatever its status or body, says the server is there: only a request that reached
-          // nothing fails the probe.
-          this.#reach.reset((s) =>
-            http.health(s).catch((e: unknown) => {
-              if (!(e instanceof ApiError) || e.status === 0) throw e;
-            }),
+          // nothing fails the probe. Wire `answered` as its reachability `ok` so receiving headers recovers Studio
+          // immediately without aborting the probe's own response body stream before `res.text()` finishes.
+          this.#reach.reset(
+            (s, answered) =>
+              new HttpApi(http.base, { ok: answered, failed: () => {} }, this.#access).health(s).catch((e: unknown) => {
+                if (!(e instanceof ApiError) || e.status === 0) throw e;
+              }),
+            () => {
+              if (attempt !== this.#attempt) return;
+              void this.#learn(http.base, attempt, abort);
+              this.#access.recheck();
+            },
           );
           this.#access.reset((s) => accessCheck(http.base, s));
           this.version = h.version;

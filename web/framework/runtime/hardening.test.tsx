@@ -801,4 +801,56 @@ describe('runtime action, spread, transition, deep, and unmount hardening', () =
     expect(leavingEl?.$$leave).toBeUndefined();
     expect(container.childNodes.length).toBe(0);
   });
+
+  it('unmounting a root cancels started outros so reused DOM nodes are never removed from another root', async () => {
+    const anims: { onfinish: (() => void) | null; cancel: ReturnType<typeof vi.fn>; currentTime: number; effect: unknown }[] = [];
+    const el = document.createElement('div');
+    el.textContent = 'reusable';
+    (el as unknown as { animate: () => unknown }).animate = () => {
+      const a = { onfinish: null as (() => void) | null, cancel: vi.fn(), currentTime: 0, effect: {} };
+      anims.push(a);
+      return a;
+    };
+
+    const show = signal(true);
+    const root1 = document.createElement('div');
+    const unmount1 = rawRender(
+      () => (
+        <Show when={show.get()}>
+          {() => {
+            transition(el, () => ({ duration: 120, css: (t) => `opacity: ${t}` }), undefined, 2);
+            return el;
+          }}
+        </Show>
+      ),
+      root1,
+    );
+    flush();
+    expect(el.parentNode).toBe(root1);
+
+    // Hide the branch so the outro starts (el stays in root1 while animating out).
+    show.set(false);
+    flush();
+    await Promise.resolve();
+    expect(anims).toHaveLength(1);
+    const delayFinish = anims[0]!.onfinish!;
+    delayFinish();
+    expect(anims).toHaveLength(2);
+    const outroFinish = anims[1]!.onfinish!;
+    expect(el.inert).toBe(true);
+
+    // Unmount root1 before the outro finishes, then render the same DOM node into root2.
+    unmount1();
+    expect(anims[1]!.cancel).toHaveBeenCalled();
+    expect(el.inert).toBe(false);
+
+    const root2 = document.createElement('div');
+    const unmount2 = rawRender(() => el, root2);
+    expect(el.parentNode).toBe(root2);
+
+    // Even if the old outro animation's finish callback runs late, it must not remove el from root2.
+    outroFinish();
+    expect(el.parentNode).toBe(root2);
+    unmount2();
+  });
 });

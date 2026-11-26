@@ -226,13 +226,18 @@ describe('hub.offline with the server', () => {
   it('brings Studio back online when a weights download or tag HEAD answers, and flags mid-body download failures', async () => {
     let up = true;
     let breakBody = false;
+    let healthProbes = 0;
     vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
       if (!up) throw new TypeError('Failed to fetch');
-      if (url.endsWith('/api/health')) return Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
+      if (url.endsWith('/api/health')) {
+        healthProbes++;
+        return Response.json({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
+      }
       if (url.endsWith('/api/runs') && init?.method === 'HEAD') return new Response(null, { status: 200 });
       if (url.includes('/weights') && init?.method === 'HEAD') return new Response(null, { status: 200, headers: { etag: '"v1"' } });
       if (url.includes('/weights')) {
         if (breakBody) {
+          up = false;
           const r = new Response(new Uint8Array([1, 2, 3]), { status: 200 });
           vi.spyOn(r, 'arrayBuffer').mockRejectedValue(new TypeError('network reset'));
           return r;
@@ -253,9 +258,60 @@ describe('hub.offline with the server', () => {
     expect(await hub.api.modelWeightsTag('m1')).toBe('"v1"');
     expect(hub.offline).toBe(false);
 
-    // Mid-body failure during modelWeights triggers reach.failed() and throws ApiError(network).
+    // Mid-body failure during modelWeights triggers reach.failed() -> health probe runs and marks hub offline.
+    const probesBefore = healthProbes;
     breakBody = true;
     await expect(hub.api.modelWeights('m1')).rejects.toMatchObject({ status: 0, code: 'network' });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hub.offline).toBe(true);
+    // Flip server back up and confirm a probe recovers it (healthProbes increased).
+    up = true;
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    expect(hub.offline).toBe(false);
+    expect(healthProbes).toBeGreaterThan(probesBefore);
+  });
+
+  it('does not self-abort a successful health probe before its response body is read', async () => {
+    let up = true;
+    const probeSignals: AbortSignal[] = [];
+    let bodyReads = 0;
+    let bodyAborts = 0;
+    vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+      if (!up) throw new TypeError('Failed to fetch');
+      if (url.endsWith('/api/health')) {
+        const signal = init?.signal;
+        if (signal) probeSignals.push(signal);
+        const body = JSON.stringify({ status: 'ok', version: '0.1.0', api: 'v1', mock: false });
+        const r = new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
+        // Simulate real Fetch where aborting the signal after headers arrive cancels the body stream.
+        vi.spyOn(r, 'text').mockImplementation(async () => {
+          bodyReads++;
+          if (signal?.aborted) {
+            bodyAborts++;
+            throw new DOMException('aborted', 'AbortError');
+          }
+          return body;
+        });
+        return r;
+      }
+      if (init?.method === 'HEAD') return new Response(null, { status: 200 });
+      return Response.json({ datasets: [] });
+    });
+    await hub.connect();
+    up = false;
+    await expect(hub.api.datasets()).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hub.offline).toBe(true);
+
+    up = true;
+    const before = probeSignals.length;
+    const readsBefore = bodyReads;
+    await vi.advanceTimersByTimeAsync(PROBE_DELAYS[0]!);
+    expect(hub.offline).toBe(false);
+    expect(probeSignals.length).toBeGreaterThanOrEqual(before + 1);
+    expect(bodyReads).toBeGreaterThan(readsBefore);
+    expect(bodyAborts).toBe(0);
+    expect(probeSignals.slice(before).every((s) => !s.aborted)).toBe(true);
   });
 });
 
