@@ -59,6 +59,7 @@ mod layers;
 mod module;
 pub mod optim;
 mod sched;
+mod swa;
 
 pub use amp::{AmpContract, GradScaler, ScaleUpdate, unscale_, usable_scale};
 pub use ema::{
@@ -72,6 +73,8 @@ pub use layers::{
 };
 pub use module::{Forward, Layer, Mode, Module, NamedTensor, TensorKind};
 pub use sched::{
-    DEFAULT_RESTART_CYCLES, DEFAULT_RESTART_MULT, DecayKind, LrSchedule, SchedContract, SchedUnit,
-    WARMUP_FLOOR, WSD_DEFAULT_DECAY_FRACTION, WsdTail, warmup_iters, warmup_iters_floor,
+    DEFAULT_ONE_CYCLE_DIV_FACTOR, DEFAULT_ONE_CYCLE_PCT_START, DEFAULT_POLY_POWER, DEFAULT_RESTART_CYCLES,
+    DEFAULT_RESTART_MULT, DecayKind, LrSchedule, SchedContract, SchedUnit, WARMUP_FLOOR,
+    WSD_DEFAULT_DECAY_FRACTION, WsdTail, warmup_iters, warmup_iters_floor,
 };
+pub use swa::SwaModel;

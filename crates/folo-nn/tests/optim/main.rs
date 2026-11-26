@@ -3,6 +3,7 @@
 mod ema;
 mod grads;
 mod muon;
+mod sched_math;
 mod step;
 
 use folo_core::{Grads, Tensor};
