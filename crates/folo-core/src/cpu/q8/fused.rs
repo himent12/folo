@@ -3,7 +3,7 @@
 //!
 //! Running the entire `(c_tile, g, chunk)` task loop inside a single `#[target_feature]` function eliminates
 //! per-tile `vzeroupper` transitions, Windows x64 ABI `xmm6..xmm15` save/restore overhead, indirect calls,
-//! per-tile 8-way epilogue dispatch, `r.rows` pointer-table loads on 1×1 single-part and 3×3 stride-1 convs,
+//! per-tile 8-way epilogue dispatch, `r.rows` pointer-table loads on single-part 1×1 convs,
 //! and 24-iteration `pix` scatter loops on non-contiguous `3×3` chunks.
 //!
 //! Each K-loop stores its 12 finished `i32` accumulators into a 32-byte aligned L1 buffer ([`AlignedTile`])
@@ -88,18 +88,17 @@ macro_rules! define_fused_isa {
                 let (mut c10, mut c11, mut c12) = (z, z, z);
                 let (mut c20, mut c21, mut c22) = (z, z, z);
                 let (mut c30, mut c31, mut c32) = (z, z, z);
-                // SAFETY: caller guarantees `ks` planes of stride `hw` with `col + NR` readable words.
+                // SAFETY: caller guarantees `ks` planes of stride `hw` with `col + NR` readable words in each
+                // plane (within `ks * hw + SLACK`). Indexing `p * hw + col` keeps every pointer strictly in bounds.
                 unsafe {
-                    let mut bp = base.add(col);
-                    let mut ap = a;
-                    for _ in 0..ks {
+                    for p in 0..ks {
+                        let bp = base.add(p * hw + col);
                         let b0 = _mm256_loadu_si256(bp as *const __m256i);
                         let b1 = _mm256_loadu_si256(bp.add(8) as *const __m256i);
                         let b2 = _mm256_loadu_si256(bp.add(16) as *const __m256i);
+                        let ap = a.add(p * MR);
                         define_fused_isa!(@dp $dp_mode, b0, b1, b2, ap,
                             c00, c01, c02, c10, c11, c12, c20, c21, c22, c30, c31, c32);
-                        bp = bp.add(hw);
-                        ap = ap.add(MR);
                     }
                     let out = acc.0.as_mut_ptr() as *mut __m256i;
                     _mm256_store_si256(out, c00);

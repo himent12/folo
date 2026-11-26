@@ -29,7 +29,14 @@ fn fast_silu_accuracy_and_extremes() {
         max_rel = max_rel.max(err);
         assert!(err <= 2e-6, "silu_q8({x}) = {got}, want {want}, rel {err:e}");
     }
-    assert!(max_rel <= 1e-6, "max_rel {max_rel:e} exceeded 1e-6");
+    assert!(max_rel <= 2.5e-7, "max_rel {max_rel:e} exceeded 2.5e-7");
+    // Pin peak-error boundary inputs (worst hybrid error ~2.01e-7 near 0x3fc8_331e and reduced f = ±0.5).
+    for x in [f32::from_bits(0x3fc8_331e), 0.5 / std::f32::consts::LOG2_E, -0.5 / std::f32::consts::LOG2_E] {
+        let want = x as f64 / (1.0 + (-(x as f64)).exp());
+        let got = silu_q8(x) as f64;
+        let err = (got - want).abs() / want.abs().max(1.0);
+        assert!(err <= 2.5e-7, "silu_q8({x}) = {got}, want {want}, err {err:e}");
+    }
     assert_eq!(silu_q8(0.0).to_bits(), 0.0f32.to_bits());
     assert_eq!(silu_q8(-0.0).to_bits(), (-0.0f32).to_bits());
     assert_eq!(silu_q8(f32::MAX), f32::MAX);
@@ -343,21 +350,135 @@ fn stem_u8_rejects_overflowing_output_extent_before_writes() {
     assert!(res.is_err(), "overflowing n * oh * ow must panic before touching raw output pointers");
 }
 
+/// Independent scalar integer reference for single- or multi-part per-channel conv (matches the exact
+/// integer sums, `TileF32` part folding, bias, `silu_q8`, residual FMA, and `Grid::quantize` order).
+#[allow(clippy::too_many_arguments)]
+fn ref_conv_parts(
+    parts_q: &[(&[u32], &[Grid])],
+    n: usize,
+    h: usize,
+    w: usize,
+    wt: &[f32],
+    bias: &[f32],
+    (o, k, s, pad): (usize, usize, usize, usize),
+    silu: bool,
+    decouple: bool,
+    res: Option<(&[u32], &[Grid])>,
+    out_grids: &[Grid],
+) -> (Vec<u32>, Vec<f32>) {
+    let hw = h * w;
+    let taps = k * k;
+    let (oh, ow) = q8::out_size(h, w, k, s, pad).unwrap();
+    let ohw = oh * ow;
+    let cin: usize = parts_q.iter().map(|(_, gs)| gs.len()).sum();
+    let part_slices: Vec<(usize, Vec<Grid>)> = if decouple && parts_q.len() > 1 {
+        let mut ch0 = 0;
+        parts_q
+            .iter()
+            .map(|(_, gs)| {
+                let start = ch0;
+                ch0 += gs.len();
+                (start, gs.to_vec())
+            })
+            .collect()
+    } else {
+        vec![(0, parts_q.iter().flat_map(|(_, gs)| gs.iter().copied()).collect())]
+    };
+    let packed_parts: Vec<_> = part_slices
+        .into_iter()
+        .map(|(ch0, gs)| {
+            let pc = gs.len();
+            let mut folded = Vec::with_capacity(o * pc * taps);
+            for oc in 0..o {
+                let base = (oc * cin + ch0) * taps;
+                for (ic, g) in gs.iter().enumerate() {
+                    folded.extend(wt[base + ic * taps..base + (ic + 1) * taps].iter().map(|&v| v * g.scale));
+                }
+            }
+            let (qw, sw) = quantize_weights(&folded, o);
+            (ch0, gs, qw, sw)
+        })
+        .collect();
+    let input_byte = |img: usize, ci: usize, p: usize| -> u8 {
+        let mut off = 0;
+        for (buf, gs) in parts_q {
+            if ci < off + gs.len() {
+                let j = ci - off;
+                let per_img = (gs.len() / 4) * hw;
+                return buf[img * per_img + (j / 4) * hw + p].to_le_bytes()[j % 4];
+            }
+            off += gs.len();
+        }
+        unreachable!()
+    };
+    let mut qout = vec![0u32; n * (o / 4) * ohw];
+    let mut fout = vec![0f32; n * o * ohw];
+    let single = packed_parts.len() == 1;
+    for img in 0..n {
+        for oc in 0..o {
+            for oy in 0..oh {
+                for ox in 0..ow {
+                    let mut yv = 0.0f32;
+                    for (ch0, gs, qw, sw) in &packed_parts {
+                        let pc = gs.len();
+                        let mut acc = 0i64;
+                        let mut corr = 0i64;
+                        for (ic, g) in gs.iter().enumerate() {
+                            for ky in 0..k {
+                                for kx in 0..k {
+                                    let wq = qw[(oc * pc + ic) * taps + ky * k + kx] as i64;
+                                    let y = (oy * s + ky) as isize - pad as isize;
+                                    let x = (ox * s + kx) as isize - pad as isize;
+                                    let v = if y < 0 || x < 0 || y >= h as isize || x >= w as isize {
+                                        g.zero
+                                    } else {
+                                        input_byte(img, ch0 + ic, y as usize * w + x as usize)
+                                    };
+                                    acc += wq * v as i64;
+                                    corr += wq * g.zero as i64;
+                                }
+                            }
+                        }
+                        let diff = (acc - corr) as i32 as f32;
+                        yv = if single { diff.mul_add(sw[oc], bias[oc]) } else { diff.mul_add(sw[oc], yv) };
+                    }
+                    if !single {
+                        yv += bias[oc];
+                    }
+                    if silu {
+                        yv = silu_q8(yv);
+                    }
+                    let pos = oy * ow + ox;
+                    if let Some((rbuf, rgs)) = res {
+                        let b = rbuf[(img * (o / 4) + oc / 4) * ohw + pos].to_le_bytes()[oc % 4];
+                        yv = rgs[oc].scale.mul_add((b as i32 - rgs[oc].zero as i32) as f32, yv);
+                    }
+                    fout[(img * o + oc) * ohw + pos] = yv;
+                    qout[(img * (o / 4) + oc / 4) * ohw + pos] |=
+                        (out_grids[oc].quantize(yv) as u32) << (8 * (oc % 4));
+                }
+            }
+        }
+    }
+    (qout, fout)
+}
+
 #[test]
 fn fused_conv_noncontiguous_and_rowband_fill_match_exact_reference() {
     let mut rng = Rng::seed(7009);
-    // Exercise non-contiguous cross-row writes/residual reads (`ow = 1, 20, 40` < or crossing `NR = 24`)
-    // and row-band parallel `image_rows` (`groups < threads`, `hq >= 16`, `body.len() >= 16384`).
-    for &(n, c, o, h, w, k, s, pad, silu, has_res, f32_out) in &[
-        (1usize, 8usize, 8usize, 5usize, 1usize, 3usize, 1usize, 1usize, true, true, false),
-        (1, 8, 8, 5, 1, 3, 1, 1, false, true, true),
-        (2, 12, 12, 20, 20, 3, 1, 1, true, true, false),
-        (1, 12, 12, 20, 20, 3, 1, 1, false, false, true),
-        (1, 16, 16, 40, 40, 3, 2, 1, true, true, false),
-        (1, 8, 8, 96, 96, 3, 2, 1, true, false, false), // groups=2, hq=49, body=2*4*2401=19208 >= 16384 -> row-band par
-        (1, 8, 8, 128, 128, 3, 1, 1, true, false, false), // groups=2, hq=130, body=33824 >= 16384 -> row-band par
-        (1, 16, 16, 25, 29, 1, 1, 0, true, true, false),  // Pointwise1x1 single-part with residual + tail
-        (1, 16, 16, 25, 29, 1, 1, 0, false, true, true),  // Pointwise1x1 f32 out with residual + tail
+    // Exercise non-contiguous cross-row writes/residual reads (`ow = 1, 20, 40`), Pointwise1x1 past-SLACK
+    // boundary (`1x73` -> final `col = 72 > SLACK = 64`), and row-band parallel `image_rows` (`s = 1` & `s = 2`).
+    for &(n, c, o, h, w, k, s, pad, silu, has_res, f32_out, check_ref) in &[
+        (1usize, 8usize, 8usize, 5usize, 1usize, 3usize, 1usize, 1usize, true, true, false, true),
+        (1, 8, 8, 5, 1, 3, 1, 1, false, true, true, true),
+        (1, 8, 8, 1, 73, 1, 1, 0, true, true, false, true), // Pointwise1x1 final col=72 > SLACK=64
+        (2, 12, 12, 20, 20, 3, 1, 1, true, true, false, true),
+        (1, 12, 12, 20, 20, 3, 1, 1, false, false, true, true),
+        (1, 16, 16, 40, 40, 3, 2, 1, true, true, false, true),
+        (1, 8, 8, 96, 96, 3, 2, 1, true, false, false, true), // groups=2, hq=49, body=19208 >= 16384 -> row-band par
+        (1, 8, 8, 128, 128, 3, 1, 1, true, false, false, false), // groups=2, hq=130, body=33824 >= 16384 -> row-band par
+        (1, 16, 16, 25, 29, 1, 1, 0, true, true, false, true),   // Pointwise1x1 u8 + silu + residual + tail
+        (1, 16, 16, 25, 29, 1, 1, 0, false, true, true, true),   // Pointwise1x1 f32 + residual + tail
     ] {
         let hw = h * w;
         let taps = k * k;
@@ -379,8 +500,22 @@ fn fused_conv_noncontiguous_and_rowband_fill_match_exact_reference() {
         let vx = C4 { data: &xq, offset: 0, img_stride: (c / 4) * hw, c, zero: in_z[0] };
         let vr = C4 { data: &rq, offset: 0, img_stride: (o / 4) * ohw, c: o, zero: res_g[0].zero };
         let res_arg = has_res.then_some((vr, res_g.as_slice()));
+        let expected = check_ref.then(|| {
+            ref_conv_parts(
+                &[(&xq, &in_g)],
+                n,
+                h,
+                w,
+                &wt,
+                &bias,
+                (o, k, s, pad),
+                silu,
+                false,
+                has_res.then_some((rq.as_slice(), res_g.as_slice())),
+                &out_g,
+            )
+        });
 
-        // Thread-count determinism (1 vs 8 threads, exercising both serial and row-band parallel paths).
         if f32_out {
             let mut out1 = vec![0f32; n * o * ohw];
             let mut out8 = vec![0f32; n * o * ohw];
@@ -392,8 +527,14 @@ fn fused_conv_noncontiguous_and_rowband_fill_match_exact_reference() {
             });
             assert!(
                 out1.iter().zip(&out8).all(|(a, b)| a.to_bits() == b.to_bits()),
-                "f32 mismatch ({n},{c}->{o},{h}x{w},k{k}s{s})"
+                "f32 thread mismatch ({n},{c}->{o},{h}x{w},k{k}s{s})"
             );
+            if let Some((_, want_f)) = &expected {
+                assert!(
+                    out1.iter().zip(want_f).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "f32 scalar-ref mismatch ({n},{c}->{o},{h}x{w},k{k}s{s})"
+                );
+            }
         } else {
             let mut out1 = alloc(n, o, ohw);
             let mut out8 = alloc(n, o, ohw);
@@ -422,7 +563,84 @@ fn fused_conv_noncontiguous_and_rowband_fill_match_exact_reference() {
                 );
             });
             let words = n * (o / 4) * ohw;
-            assert_eq!(&out1[..words], &out8[..words], "u8 mismatch ({n},{c}->{o},{h}x{w},k{k}s{s})");
+            assert_eq!(&out1[..words], &out8[..words], "u8 thread mismatch ({n},{c}->{o},{h}x{w},k{k}s{s})");
+            if let Some((want_q, _)) = &expected {
+                assert_eq!(
+                    &out1[..words],
+                    want_q.as_slice(),
+                    "u8 scalar-ref mismatch ({n},{c}->{o},{h}x{w},k{k}s{s})"
+                );
+            }
         }
+    }
+
+    // Decoupled multi-part `run_multi_spec` bit-exact against scalar integer reference (k=1 and k=3, non-contiguous, with residual).
+    for &(h, w, k, pad, silu) in &[(13usize, 20usize, 3usize, 1usize, true), (9, 29, 1, 0, false)] {
+        let (n, c0, c1, o) = (2, 8, 8, 8);
+        let hw = h * w;
+        let g0: Vec<Grid> = (0..c0).map(|i| Grid { scale: 0.003 + 0.0004 * i as f32, zero: 25 }).collect();
+        let g1: Vec<Grid> = (0..c1).map(|i| Grid { scale: 0.04 + 0.005 * i as f32, zero: 85 }).collect();
+        let out_g: Vec<Grid> = (0..o).map(|i| Grid::from_range(-0.4, 3.0 + 0.1 * i as f32)).collect();
+        let res_g: Vec<Grid> = (0..o).map(|i| Grid::from_range(-0.8, 2.0 + 0.1 * i as f32)).collect();
+        let z0: Vec<u8> = g0.iter().map(|g| g.zero).collect();
+        let z1: Vec<u8> = g1.iter().map(|g| g.zero).collect();
+        let mut x0 = alloc(n, c0, hw);
+        let mut x1 = alloc(n, c1, hw);
+        let mut rq = alloc(n, o, hw);
+        let x0f: Vec<f32> = (0..n * c0 * hw).map(|_| rng.uniform(-0.1, 0.4)).collect();
+        let x1f: Vec<f32> = (0..n * c1 * hw).map(|_| rng.uniform(-2.0, 5.0)).collect();
+        let rf: Vec<f32> = (0..n * o * hw).map(|_| rng.uniform(-1.0, 2.0)).collect();
+        quantize_per_channel(&x0f, n, c0, hw, &g0, &mut x0);
+        quantize_per_channel(&x1f, n, c1, hw, &g1, &mut x1);
+        quantize_per_channel(&rf, n, o, hw, &res_g, &mut rq);
+        let wt: Vec<f32> = (0..o * (c0 + c1) * k * k).map(|_| rng.uniform(-0.4, 0.4)).collect();
+        let bias: Vec<f32> = (0..o).map(|_| rng.uniform(-0.5, 0.5)).collect();
+        let cv = QConv::new_parts(&wt, &bias, (o, c0 + c1, k), 1, pad, silu, &[&g0, &g1], true);
+        assert_eq!(cv.num_parts(), 2);
+        let (want_q, want_f) = ref_conv_parts(
+            &[(&x0, &g0), (&x1, &g1)],
+            n,
+            h,
+            w,
+            &wt,
+            &bias,
+            (o, k, 1, pad),
+            silu,
+            true,
+            Some((&rq, &res_g)),
+            &out_g,
+        );
+        let v0 = C4 { data: &x0, offset: 0, img_stride: (c0 / 4) * hw, c: c0, zero: z0[0] };
+        let v1 = C4 { data: &x1, offset: 0, img_stride: (c1 / 4) * hw, c: c1, zero: z1[0] };
+        let vr = C4 { data: &rq, offset: 0, img_stride: (o / 4) * hw, c: o, zero: res_g[0].zero };
+        let mut got_q = alloc(n, o, hw);
+        let mut got_f = vec![0f32; n * o * hw];
+        pool(4).install(|| {
+            conv_per_channel(
+                &[v0, v1],
+                &[&z0, &z1],
+                n,
+                h,
+                w,
+                &cv,
+                Some((vr, res_g.as_slice())),
+                QOut::U8PerChannel { data: &mut got_q, grids: &out_g },
+            );
+            conv_per_channel(
+                &[v0, v1],
+                &[&z0, &z1],
+                n,
+                h,
+                w,
+                &cv,
+                Some((vr, res_g.as_slice())),
+                QOut::F32 { data: &mut got_f },
+            );
+        });
+        assert_eq!(&got_q[..want_q.len()], want_q.as_slice(), "multi-part u8 mismatch (k={k})");
+        assert!(
+            got_f.iter().zip(&want_f).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "multi-part f32 mismatch (k={k})"
+        );
     }
 }

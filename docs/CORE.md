@@ -250,11 +250,11 @@ these kernels:
   results are bit-identical across kernels and thread counts; the AVX2 form runs on any CPU with AVX2 and FMA
   (`FOLO_Q8_SCALAR=1` turns off both vector paths). Its SiLU (`q8::silu_q8`) is a division-free, bit-exact scalar and
   AVX2 `x / (1 + e^{−x})` using base-2 range reduction (`1.5·2^23 + 127` magic rounding, single-shift `2^n`), a
-  degree-5 Estrin-form minimax `2^f` polynomial evaluated in register-spill-free 2-vector pairs (`silu_q8_avx2_x2`), and a bit-hack seed + 4-FMA factored Householder-6 reciprocal (`< 2e-7` hybrid
+  degree-5 Estrin-form minimax `2^f` polynomial evaluated in register-spill-free 2-vector pairs (`silu_q8_avx2_x2`), and a bit-hack seed + 4-FMA factored Householder-6 reciprocal (`< 2.5e-7` hybrid
   error on `[-86, 86]`); the specialised AVX2 epilogue writes contiguous 24-pixel tiles directly to the C4 output
   (for both 1×1 and within-row `k×k` chunks), packing four channels' codes with saturating `packs` / `packus` and
   one byte shuffle. Work is split into (image, pixel block, channel block) tasks: capped at `3 · threads`, none
-  under `2¹⁸` multiply-adds (and small convs below the serial floor run without waking the pool), with multi-task pixel blocks rounded to even chunk counts (192-byte / 3-cache-line boundaries) to avoid output-plane false sharing. An image whose
+  under `2¹⁸` multiply-adds (and small convs below the serial floor run without waking the pool), with a heuristic that rounds multi-task pixel blocks to even chunk counts (192-byte / 3-cache-line multiples on contiguous planes) to reduce output-plane false sharing. An image whose
   input fits in 384 KiB (a core's L2) is split by channel blocks first, so tasks write whole output planes; pixel
   blocks of a few 24-column chunks would share cache lines with their neighbours on every plane. Bigger inputs
   are split by pixel blocks first, so each task reads its own part once. `q8::stem_u8` runs 3-channel `u8` `[R, G, B, 0]`

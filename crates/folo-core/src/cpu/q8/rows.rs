@@ -20,6 +20,97 @@ unsafe impl Sync for Rows {}
 // SAFETY: as above.
 unsafe impl Send for Rows {}
 
+/// Fill rows `i0..i1` of a single-phase (`s == 1`) padded plane into the disjoint band slice
+/// `dst_band[0..(i1 - i0) * wq]`.
+#[allow(clippy::too_many_arguments)]
+fn fill_s1_band(
+    src: &[u32],
+    zw: u32,
+    h: usize,
+    w: usize,
+    p: usize,
+    hq: usize,
+    wq: usize,
+    i0: usize,
+    i1: usize,
+    dst_band: &mut [u32],
+) {
+    debug_assert_eq!(dst_band.len(), (i1 - i0) * wq);
+    let top_end = p.min(i1);
+    if i0 < top_end {
+        dst_band[..(top_end - i0) * wq].fill(zw);
+    }
+    let mid_start = i0.max(p);
+    let mid_end = i1.min(p + h);
+    let lp = p.min(wq);
+    let copy_len = w.min(wq - lp);
+    for i in mid_start..mid_end {
+        let y = i - p;
+        let srow = &src[y * w..(y + 1) * w];
+        let bi = i - i0;
+        let drow = &mut dst_band[bi * wq..(bi + 1) * wq];
+        drow[..lp].fill(zw);
+        drow[lp..lp + copy_len].copy_from_slice(&srow[..copy_len]);
+        drow[lp + copy_len..].fill(zw);
+    }
+    let bot_start = i0.max((p + h).min(hq));
+    if bot_start < i1 {
+        dst_band[(bot_start - i0) * wq..].fill(zw);
+    }
+}
+
+/// Fill rows `i0..i1` of all four `s == 2` phase planes into four strictly disjoint per-phase band slices
+/// `bands[a * 2 + b]` (each of length `(i1 - i0) * wq`), reading `src` top-to-bottom in one sequential pass.
+#[allow(clippy::too_many_arguments)]
+fn fill_s2_band(
+    src: &[u32],
+    zw: u32,
+    h: usize,
+    w: usize,
+    p: usize,
+    wq: usize,
+    i0: usize,
+    i1: usize,
+    mut bands: [&mut [u32]; 4],
+) {
+    let band_len = (i1 - i0) * wq;
+    debug_assert!(bands.iter().all(|b| b.len() == band_len));
+    let [b00, b01, b10, b11] = &mut bands;
+    for i in i0..i1 {
+        let bi = i - i0;
+        for (a, (p0, p1)) in [(0usize, (&mut **b00, &mut **b01)), (1usize, (&mut **b10, &mut **b11))] {
+            let d0 = &mut p0[bi * wq..(bi + 1) * wq];
+            let d1 = &mut p1[bi * wq..(bi + 1) * wq];
+            let y = (2 * i + a) as isize - p as isize;
+            if y < 0 || y >= h as isize {
+                d0.fill(zw);
+                d1.fill(zw);
+                continue;
+            }
+            let srow = &src[y as usize * w..(y as usize + 1) * w];
+            if p == 1 {
+                d0[0] = zw;
+                let pairs = (wq - 1).min(w.div_ceil(2));
+                super::deinterleave_even_odd(srow, &mut d1[..pairs], &mut d0[1..1 + pairs], zw);
+                d0[1 + pairs..].fill(zw);
+                for (j, d) in d1.iter_mut().enumerate().skip(pairs) {
+                    let x = 2 * j;
+                    *d = if x < w { srow[x] } else { zw };
+                }
+            } else if p == 0 {
+                super::deinterleave_even_odd(srow, d0, d1, zw);
+            } else {
+                for j in 0..wq {
+                    let x0 = (2 * j) as isize - p as isize;
+                    let x1 = x0 + 1;
+                    d0[j] = if x0 < 0 || x0 >= w as isize { zw } else { srow[x0 as usize] };
+                    d1[j] = if x1 < 0 || x1 >= w as isize { zw } else { srow[x1 as usize] };
+                }
+            }
+        }
+    }
+}
+
 pub(super) fn image_rows(xs: &[C4<'_>], img: usize, h: usize, w: usize, cv: &QConv) -> Rows {
     let hw = h * w;
     if cv.pointwise() {
@@ -78,88 +169,35 @@ pub(super) fn image_rows(xs: &[C4<'_>], img: usize, h: usize, w: usize, cv: &QCo
         let base = x.offset + img * x.img_stride;
         srcs.extend((0..x.c / 4).map(|g| &x.data[base + g * hw..base + (g + 1) * hw]));
     }
-    let fill_rows = |g: usize, dst: &mut [u32], i0: usize, i1: usize| {
+    let zero_word = |g: usize| {
+        u32::from_le_bytes([cv.zeros[4 * g], cv.zeros[4 * g + 1], cv.zeros[4 * g + 2], cv.zeros[4 * g + 3]])
+    };
+    let fill_group = |g: usize, dst: &mut [u32]| {
         let src = srcs[g];
-        let zw = u32::from_le_bytes([
-            cv.zeros[4 * g],
-            cv.zeros[4 * g + 1],
-            cv.zeros[4 * g + 2],
-            cv.zeros[4 * g + 3],
-        ]);
+        let zw = zero_word(g);
         if s == 1 {
-            // Single phase `(0, 0)`: branchless row copies + padding fills (10× faster than per-pixel bounds).
-            let d = &mut dst[..plane];
-            let top_end = p.min(i1);
-            if i0 < top_end {
-                d[i0 * wq..top_end * wq].fill(zw);
-            }
-            let mid_start = i0.max(p);
-            let mid_end = i1.min(p + h);
-            let lp = p.min(wq);
-            let copy_len = w.min(wq - lp);
-            for i in mid_start..mid_end {
-                let y = i - p;
-                let srow = &src[y * w..(y + 1) * w];
-                let drow = &mut d[i * wq..(i + 1) * wq];
-                drow[..lp].fill(zw);
-                drow[lp..lp + copy_len].copy_from_slice(&srow[..copy_len]);
-                drow[lp + copy_len..].fill(zw);
-            }
-            let bot_start = i0.max((p + h).min(hq));
-            if bot_start < i1 {
-                d[bot_start * wq..i1 * wq].fill(zw);
-            }
+            fill_s1_band(src, zw, h, w, p, hq, wq, 0, hq, &mut dst[..plane]);
             return;
         }
         if s == 2 && phases.len() == 4 {
-            // All 4 stride-2 phases: read `src` top-to-bottom in one sequential pass (`a = 0` then `a = 1` per
-            // output row `i`), dealing both column phases with AVX2 de-interleaving.
-            let p_off = [slot[0] * plane, slot[1] * plane, slot[2] * plane, slot[3] * plane];
-            for i in i0..i1 {
-                for a in 0..2 {
-                    let (p0_off, p1_off) = (p_off[a * 2], p_off[a * 2 + 1]);
-                    let y = (2 * i + a) as isize - p as isize;
-                    if y < 0 || y >= h as isize {
-                        dst[p0_off + i * wq..p0_off + (i + 1) * wq].fill(zw);
-                        dst[p1_off + i * wq..p1_off + (i + 1) * wq].fill(zw);
-                        continue;
-                    }
-                    let srow = &src[y as usize * w..(y as usize + 1) * w];
-                    let (d0, d1) = if p0_off < p1_off {
-                        let (left, right) = dst.split_at_mut(p1_off);
-                        (&mut left[p0_off + i * wq..p0_off + (i + 1) * wq], &mut right[i * wq..(i + 1) * wq])
-                    } else {
-                        let (left, right) = dst.split_at_mut(p0_off);
-                        (&mut right[i * wq..(i + 1) * wq], &mut left[p1_off + i * wq..p1_off + (i + 1) * wq])
-                    };
-                    if p == 1 {
-                        d0[0] = zw;
-                        let pairs = (wq - 1).min(w.div_ceil(2));
-                        super::deinterleave_even_odd(srow, &mut d1[..pairs], &mut d0[1..1 + pairs], zw);
-                        d0[1 + pairs..].fill(zw);
-                        for (j, d) in d1.iter_mut().enumerate().skip(pairs) {
-                            let x = 2 * j;
-                            *d = if x < w { srow[x] } else { zw };
-                        }
-                    } else if p == 0 {
-                        super::deinterleave_even_odd(srow, d0, d1, zw);
-                    } else {
-                        for j in 0..wq {
-                            let x0 = (2 * j) as isize - p as isize;
-                            let x1 = x0 + 1;
-                            d0[j] = if x0 < 0 || x0 >= w as isize { zw } else { srow[x0 as usize] };
-                            d1[j] = if x1 < 0 || x1 >= w as isize { zw } else { srow[x1 as usize] };
-                        }
-                    }
-                }
-            }
+            // Split `dst[..4 * plane]` into four disjoint phase slices, then order them by `slot[0..4]`.
+            let (p0, rest) = dst[..4 * plane].split_at_mut(plane);
+            let (p1, rest) = rest.split_at_mut(plane);
+            let (p2, p3) = rest.split_at_mut(plane);
+            let mut slots: [Option<&mut [u32]>; 4] = [Some(p0), Some(p1), Some(p2), Some(p3)];
+            let bands = [
+                slots[slot[0]].take().unwrap(),
+                slots[slot[1]].take().unwrap(),
+                slots[slot[2]].take().unwrap(),
+                slots[slot[3]].take().unwrap(),
+            ];
+            fill_s2_band(src, zw, h, w, p, wq, 0, hq, bands);
             return;
         }
         for (si, &ph) in phases.iter().enumerate() {
             let (a, b) = (ph / s, ph % s);
             let d = &mut dst[si * plane..(si + 1) * plane];
-            for i in i0..i1 {
-                let drow = &mut d[i * wq..(i + 1) * wq];
+            for (i, drow) in d.chunks_exact_mut(wq).enumerate() {
                 let y = (s * i + a) as isize - p as isize;
                 if y < 0 || y >= h as isize {
                     drow.fill(zw);
@@ -179,26 +217,40 @@ pub(super) fn image_rows(xs: &[C4<'_>], img: usize, h: usize, w: usize, cv: &QCo
     if body.len() >= par_words && threads > 1 {
         if groups < threads && hq >= 16 && (s == 1 || (s == 2 && phases.len() == 4)) {
             // Split each channel group across row bands so few-group high-res layers (e.g. 16->32 k3s2 320x320)
-            // fan out across all threads instead of leaving most cores idle.
+            // fan out across all threads instead of leaving most cores idle. Each task constructs strictly
+            // disjoint `&mut [u32]` slices covering only its own `[i0..i1)` rows per phase.
             let rb = threads.div_ceil(groups).min(hq / 8).max(1);
             let row_step = hq.div_ceil(rb);
             let bands = hq.div_ceil(row_step);
             let bptr = OutPtr(body.as_mut_ptr());
             let bptr = &bptr;
+            let s2_slots =
+                if s == 2 && phases.len() == 4 { [slot[0], slot[1], slot[2], slot[3]] } else { [0; 4] };
             crate::cpu::par_for(groups * bands, &|t| {
                 let (g, b) = (t / bands, t % bands);
                 let i0 = b * row_step;
                 let i1 = (i0 + row_step).min(hq);
-                // SAFETY: `(g, b)` writes only rows `i0..i1` of group `g`'s phase planes, disjoint from every
-                // other `(g', b')` task inside `body`.
-                let dst = unsafe { std::slice::from_raw_parts_mut(bptr.at(g * per_g), per_g) };
-                fill_rows(g, dst, i0, i1);
+                let len = (i1 - i0) * wq;
+                let src = srcs[g];
+                let zw = zero_word(g);
+                if s == 1 {
+                    // SAFETY: `(g, b)` exclusively owns `g * per_g + i0 * wq..+len` inside `body`.
+                    let band = unsafe { std::slice::from_raw_parts_mut(bptr.at(g * per_g + i0 * wq), len) };
+                    fill_s1_band(src, zw, h, w, p, hq, wq, i0, i1, band);
+                } else {
+                    // SAFETY: `s2_slots` is a permutation of `0..4`, so the 4 phase ranges for `(g, b)` are
+                    // pairwise disjoint and disjoint from every other `(g', b')` task inside `body`.
+                    let phase_bands = s2_slots.map(|sl| unsafe {
+                        std::slice::from_raw_parts_mut(bptr.at(g * per_g + sl * plane + i0 * wq), len)
+                    });
+                    fill_s2_band(src, zw, h, w, p, wq, i0, i1, phase_bands);
+                }
             });
         } else {
-            crate::cpu::par_chunks(body, per_g, &|g, dst| fill_rows(g, dst, 0, hq));
+            crate::cpu::par_chunks(body, per_g, &fill_group);
         }
     } else {
-        body.chunks_mut(per_g).enumerate().for_each(|(g, d)| fill_rows(g, d, 0, hq));
+        body.chunks_mut(per_g).enumerate().for_each(|(g, d)| fill_group(g, d));
     }
     let base = buf.as_ptr();
     let mut rows = Vec::with_capacity(cv.ks);

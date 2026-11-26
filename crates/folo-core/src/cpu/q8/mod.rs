@@ -7,9 +7,12 @@
 //! buffer an activation lives in has [`SLACK`] words after its last plane: the kernel reads whole 24-column
 //! tiles and drops the columns past a plane.
 //!
-//! - `silu.rs`: bit-exact division-free minimax fast SiLU (`silu_q8`, scalar and AVX2).
-//! - `kernel.rs`: the 4 × 24 micro-kernel (VNNI and portable), L1 `TileF32` part accumulator, and per-channel
-//!   epilogue (dequantise, bias, SiLU, residual, requantise), the same bits on both paths.
+//! - `silu.rs`: bit-exact division-free Estrin degree-5 fast SiLU (`silu_q8`, scalar and AVX2).
+//! - `kernel.rs`: the 4 × 24 micro-kernel (VNNI, AVX-512 VNNI VL, AVX2, and portable), L1 `TileF32` part
+//!   accumulator, and per-channel epilogue (dequantise, bias, SiLU, residual, requantise), the same bits on all paths.
+//! - `fused.rs` + `fused_epi.rs`: fused x86-64 L1-blocked tile-block drivers and zero-spill epilogues for `conv`,
+//!   `conv_per_channel`, and `stem_u8`.
+//! - `rows.rs`: input row-pointer preparation and row-band parallelised padded phase copies (`image_rows`).
 //! - `stem.rs`: direct `u8` RGB0-to-C4 AVX-VNNI stem ([`QStem`], [`stem_u8`], [`pack_f32_to_rgb0_u8`]).
 //! - `conv.rs`: packed weights ([`QConv`]) and the conv drivers ([`conv`], [`conv_per_channel`]).
 //! - this file: grids, C4 views, AVX2-vectorised packing from and to `f32`, max pools and upsamples on codes.

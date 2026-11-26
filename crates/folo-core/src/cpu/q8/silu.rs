@@ -5,14 +5,14 @@
 //!    `n = z - magic` rounds to nearest-even and `bits(z) << 23` yields `2^n` in a single shift (zero `vroundps`,
 //!    zero `vcvtps2dq`, zero `vpaddd`).
 //! 2. Economised degree-5 minimax polynomial for `2^f` on `f ∈ [-0.5, 0.5]` evaluated in Estrin form (3-stage
-//!    parallel FMA tree, 40% shorter critical path than Horner, relative error `< 1e-7`, `2^0 = 1`).
+//!    parallel FMA tree, 40% shorter critical path than Horner, relative error `< 2e-7`, `2^0 = 1`).
 //! 3. Deterministic IEEE-754 bit-hack reciprocal seed `0x7EF3_11C3 - bits(1 + e)` followed by a 4-FMA factored
 //!    Householder-6 step `r = r0 · (1 + e0) · (1 + e0^2 + e0^4)` (`e0 = 1 - d·r0`, truncation error `e0^6 <= 1.66e-8`,
 //!    exact `r(1.0) == 1.0` and `r(2.0) == 0.5`, 33% lower latency than 3 Newton-Raphson steps), achieving
-//!    `< 2e-7` hybrid error (`|err| / max(1, |ref|)`) with ZERO `vdivps` and ZERO platform-divergent `rcpps`.
+//!    `< 2.5e-7` hybrid error (`|err| / max(1, |ref|)`) with ZERO `vdivps` and ZERO platform-divergent `rcpps`.
 //!
 //! Scalar and AVX2 paths execute the exact same IEEE-754 FMA/mul/add/sub/integer operations in the same order,
-//! producing bit-identical results across CPUs.
+//! producing bit-identical results on all non-NaN inputs across CPUs (and preserving NaN classification on NaN inputs).
 
 /// `max(a, b)` as `vmaxps` computes it (`b` when either is NaN).
 #[inline(always)]
@@ -41,8 +41,9 @@ const MAGIC_EXP: f32 = 12_583_039.0;
 /// Bit-hack reciprocal seed constant (`max |1 - d·r0| ≈ 0.05051`, exact `r(1.0) == 1.0` & `r(2.0) == 0.5`).
 const RECIP_MAGIC: u32 = 0x7EF3_11C3;
 
-/// The epilogue's SiLU, `x / (1 + e^{−x})`, division-free and bit-exact between scalar and AVX2 (`|err| / max(1, |ref|) < 2e-7`
-/// on `[-86, 86]`, finite at extremes, `silu_q8(0.0) == 0.0`, `silu_q8(-0.0) == -0.0`, NaN stays NaN).
+/// The epilogue's SiLU, `x / (1 + e^{−x})`, division-free and bit-exact between scalar and AVX2 on all non-NaN
+/// inputs (`|err| / max(1, |ref|) < 2.5e-7` on `[-86, 86]`, finite at extremes, `silu_q8(0.0) == 0.0`,
+/// `silu_q8(-0.0) == -0.0`, `silu_q8(+∞) == +∞`, NaN stays NaN).
 #[inline]
 pub fn silu_q8(x: f32) -> f32 {
     let x = maxps(-88.0, x);

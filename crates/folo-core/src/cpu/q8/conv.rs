@@ -324,8 +324,9 @@ pub(super) fn plan(
     };
     let per_img = want.div_ceil(n);
     let align_ch = |cb: usize| {
-        // `NR = 24` words = 96 bytes = 1.5 cache lines; rounding multi-task chunk blocks up to an even count
-        // puts every task boundary on a 192-byte (3-cache-line) boundary, eliminating output-plane false sharing.
+        // Heuristic: `NR = 24` words = 96 bytes = 1.5 cache lines; rounding multi-task chunk blocks up to an even
+        // count aligns contiguous (e.g. 1×1) task boundaries to 192-byte (3-cache-line) multiples and reduces
+        // output-plane false sharing.
         if cb < chunks && !cb.is_multiple_of(2) { (cb + 1).min(chunks) } else { cb }
     };
     if input <= SPLIT_CHANNELS_MAX {
