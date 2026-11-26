@@ -124,7 +124,7 @@ impl Exec {
         synced: Synced,
     ) -> std::result::Result<(), Halt> {
         let run = self.entry.run();
-        let name = format!("{} ({})", run.name, run.id);
+        let name = worker_run_name(&run.name, &run.id);
         let mut body = serde_json::to_value(&run.config).expect("configs serialize");
         let fields = body.as_object_mut().expect("a config is an object");
         fields.remove("compute");
@@ -183,5 +183,51 @@ impl Exec {
                 }
             }
         }
+    }
+}
+
+/// Builds the worker-side run name (`<name> (<run id>)`) capped to [`crate::store::MAX_RUN_NAME_CHARS`]
+/// while preserving the `(<run id>)` suffix so lost-answer recovery uniquely identifies the run.
+fn worker_run_name(run_name: &str, run_id: &str) -> String {
+    let max = crate::store::MAX_RUN_NAME_CHARS;
+    let suffix = format!(" ({run_id})");
+    let suffix_chars = suffix.chars().count();
+    if suffix_chars >= max {
+        return run_id.chars().take(max).collect();
+    }
+    let room = max - suffix_chars;
+    let prefix: String = run_name.chars().take(room).collect();
+    let trimmed = prefix.trim_end();
+    if trimmed.is_empty() { run_id.chars().take(max).collect() } else { format!("{trimmed}{suffix}") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::worker_run_name;
+    use crate::store::MAX_RUN_NAME_CHARS;
+
+    #[test]
+    fn worker_run_name_respects_limit_and_preserves_run_id() {
+        assert_eq!(worker_run_name("shapes-n", "run_123456"), "shapes-n (run_123456)");
+
+        // 53-, 54-, and 64-character names (ASCII and multi-byte UTF-8) all stay within MAX_RUN_NAME_CHARS
+        // while keeping the exact ` (<run_id>)` suffix for lost-answer deduplication.
+        for name in ["x".repeat(53), "x".repeat(54), "x".repeat(64), "é".repeat(64)] {
+            let out = worker_run_name(&name, "run_12345678");
+            assert!(out.chars().count() <= MAX_RUN_NAME_CHARS, "{out} len={}", out.chars().count());
+            assert!(out.ends_with(" (run_12345678)"), "must preserve run id suffix: {out}");
+        }
+
+        // Trailing space at the truncation boundary is trimmed cleanly without leaving double spaces.
+        let spaced = format!("{} {}", "a".repeat(48), "b".repeat(15));
+        let out = worker_run_name(&spaced, "run_12345678");
+        assert!(out.chars().count() <= MAX_RUN_NAME_CHARS);
+        assert!(!out.contains("  ("), "must not leave double spaces before suffix: {out}");
+        assert!(out.ends_with(" (run_12345678)"));
+
+        // Pathologically long run id still never exceeds MAX_RUN_NAME_CHARS.
+        let long_id = "r".repeat(MAX_RUN_NAME_CHARS + 10);
+        let out = worker_run_name("run", &long_id);
+        assert_eq!(out.chars().count(), MAX_RUN_NAME_CHARS);
     }
 }

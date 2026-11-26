@@ -648,18 +648,24 @@ impl Store for RealStore {
 
     fn complete_upload(&self, id: &str) -> Result<Uploaded> {
         let done = self.uploads.finish(id)?;
-        let (made, uploaded) = match done.kind() {
+        let (made, content, uploaded) = match done.kind() {
             UploadKind::Dataset => {
                 let d = self.adopt_dataset(&done)?;
-                (d.id.clone(), Uploaded { dataset: Some(d), model: None })
+                let content = self
+                    .entry(&d.id)
+                    .ok()
+                    .and_then(|e| e.current().ok())
+                    .map(|idx| super::uploads::dataset_content_tag(&idx.fingerprint));
+                (d.id.clone(), content, Uploaded { dataset: Some(d), model: None })
             }
             UploadKind::Model => {
                 let m = self.adopt_model(&done)?;
-                (m.id.clone(), Uploaded { dataset: None, model: Some(m) })
+                let content = self.model(&m.id).ok().and_then(|r| super::uploads::model_content_tag(&r.path));
+                (m.id.clone(), content, Uploaded { dataset: None, model: Some(m) })
             }
         };
         if let Some(fingerprint) = done.fingerprint() {
-            self.uploads.remember(done.kind(), fingerprint, &made);
+            self.uploads.remember(done.kind(), fingerprint, &made, content);
         }
         tracing::info!(upload = %id, made = %made, "upload completed");
         Ok(uploaded)

@@ -201,7 +201,73 @@ impl Benches {
             .enumerate()
             .map(|(k, (&i, file))| {
                 let im = &gathered.images[i];
-                let bytes = std::fs::read(&im.path).map_err(|e| io_error("reading", &im.path, e))?;
+                let bytes = std::fs::read(&im.path).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        Error::new(
+                            StatusCode::NOT_FOUND,
+                            "image_not_found",
+                            format!("image '{}' ({}) is no longer on disk", im.file, im.path.display()),
+                        )
+                        .hint("restore the missing image file, or remove it from the source")
+                    } else {
+                        io_error("reading", &im.path, e)
+                    }
+                })?;
+                let digest = sha256(&bytes);
+                if folo_data::jpeg_truncated(&bytes) {
+                    return Err(Error::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "image_decode_failed",
+                        format!(
+                            "image '{}' ({}) cannot be decoded: truncated JPEG (missing end-of-image marker)",
+                            im.file,
+                            im.path.display()
+                        ),
+                    )
+                    .hint("restore the original image file, or remove the corrupt image from the source"));
+                }
+                let decoded = folo_data::decode(&bytes).map_err(|err| {
+                    let reason = match err {
+                        folo_data::DataError::Image { message, .. } => message,
+                        other => other.to_string(),
+                    };
+                    Error::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "image_decode_failed",
+                        format!("image '{}' ({}) cannot be decoded: {reason}", im.file, im.path.display()),
+                    )
+                    .hint("restore the original image file, or remove the corrupt image from the source")
+                })?;
+                if (decoded.width, decoded.height) != (im.width, im.height) {
+                    return Err(Error::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_dataset",
+                        format!(
+                            "image '{}' ({}) changed size on disk: expected {}x{}, found {}x{}",
+                            im.file,
+                            im.path.display(),
+                            im.width,
+                            im.height,
+                            decoded.width,
+                            decoded.height
+                        ),
+                    )
+                    .hint("restore the original image, or remove it from the source, add the new image and label it again"));
+                }
+                if let Some(expected) = &im.sha256
+                    && digest != *expected
+                {
+                    return Err(Error::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_dataset",
+                        format!(
+                            "labeled image '{}' ({}) changed on disk since it was added to the job",
+                            im.file,
+                            im.path.display()
+                        ),
+                    )
+                    .hint("restore the original image, or remove it from the job, add the new image and label it again"));
+                }
                 let to = images_dir.join(file);
                 std::fs::write(&to, &bytes).map_err(|e| io_error("writing", &to, e))?;
                 Ok(ImageRecord {
@@ -210,7 +276,7 @@ impl Benches {
                     width: im.width,
                     height: im.height,
                     bytes: bytes.len() as u64,
-                    sha256: sha256(&bytes),
+                    sha256: digest,
                     boxes: source::clip_truth(&im.boxes, classes, (im.width, im.height)),
                 })
             })

@@ -7,7 +7,7 @@ use folo_api::{Dataset, Model, UploadKind, Uploaded};
 
 use crate::error::{Error, Result};
 use crate::models::file_model_id;
-use crate::store::{Store, WeightsFormat, weights_file_name};
+use crate::store::{WeightsFormat, weights_file_name};
 use crate::uploads::Finished;
 use crate::util::slug;
 
@@ -15,16 +15,34 @@ use super::RealStore;
 use super::datasets::Naming;
 
 impl RealStore {
-    /// What the finished upload of `kind` with `fingerprint` became, while it still exists (the dataset registered,
-    /// the model listed).
+    /// What the finished upload of `kind` with `fingerprint` became, while it still exists AND its on-disk content
+    /// still matches what was adopted (bypassing the dataset recheck window so a modified worker copy is never
+    /// silently reused).
     pub(super) fn uploaded(&self, kind: UploadKind, fingerprint: &str) -> Option<Uploaded> {
-        let id = self.uploads.known(kind, fingerprint)?;
+        let known = self.uploads.known(kind, fingerprint)?;
         match kind {
             UploadKind::Dataset => {
-                self.get_dataset(&id).ok().map(|d| Uploaded { dataset: Some(d), model: None })
+                let e = self.entry(&known.id).ok()?;
+                let idx = self.fresh_index(&e).ok()?;
+                let live = crate::index::Fingerprint::of(&idx.watched, &idx.excluded);
+                if live != idx.fingerprint {
+                    return None;
+                }
+                if let Some(expected) = known.content.as_deref()
+                    && dataset_content_tag(&live) != expected
+                {
+                    return None;
+                }
+                Some(Uploaded { dataset: Some(Self::meta(&e.reg(), Some(&idx))), model: None })
             }
             UploadKind::Model => {
-                self.model(&id).ok().map(|m| Uploaded { dataset: None, model: Some(m.model) })
+                let m = self.model(&known.id).ok()?;
+                if let Some(expected) = known.content.as_deref()
+                    && model_content_tag(&m.path).as_deref() != Some(expected)
+                {
+                    return None;
+                }
+                Some(Uploaded { dataset: None, model: Some(m.model) })
             }
         }
     }
@@ -89,6 +107,16 @@ fn wrapped_archive(e: Error, dir: &Path) -> Error {
         "pack what '{inner}' holds (data.yaml, images/ + labels/, or annotations/) at the archive's top level and \
          upload it again"
     ))
+}
+
+/// Stable content tag for an adopted dataset upload, matching the files/bytes/hash of its [`crate::index::Fingerprint`].
+pub(super) fn dataset_content_tag(fp: &crate::index::Fingerprint) -> String {
+    format!("{}:{}:{}", fp.files, fp.bytes, fp.hash)
+}
+
+/// Stable content tag for an adopted model upload (SHA-256 hex digest of the `.folo` file).
+pub(super) fn model_content_tag(path: &Path) -> Option<String> {
+    crate::label::dataset::sha256_file(path).ok()
 }
 
 /// Moves every entry of `from` into the folder `to` (renames: both are in the data dir).

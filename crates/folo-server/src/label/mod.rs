@@ -113,6 +113,8 @@ pub struct JobImage {
     pub file: String,
     /// Where the file is.
     pub path: PathBuf,
+    /// SHA-256 hex digest recorded when the image was added (`None` for older jobs).
+    pub sha256: Option<String>,
     /// Width after EXIF orientation.
     pub width: u32,
     /// Height.
