@@ -17,18 +17,15 @@ use super::{data_error, format_name, format_of, rel, splits_json};
 /// Returns `true` when `meta` indicates a symlink or (on Windows) a reparse point such as a directory junction,
 /// avoiding extra `read_link` syscalls on regular files and folders.
 fn maybe_link(meta: &std::fs::Metadata) -> bool {
-    if meta.file_type().is_symlink() {
-        return true;
-    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
         const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-        (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        meta.file_type().is_symlink() || (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
     }
     #[cfg(not(windows))]
     {
-        false
+        meta.file_type().is_symlink()
     }
 }
 
@@ -351,6 +348,18 @@ fn enrich_yolo_dangling_symlinks(
         });
     }
 
+    // Also probe the label path of any image reported as `EmptyImage` ("no label file ...") so dangling label
+    // symlinks referenced through `.txt` image lists or direct image paths in `data.yaml` are never missed.
+    for issue in &report.issues {
+        if issue.kind == CheckKind::EmptyImage && issue.message.starts_with("no label file") {
+            for cand in [folo_data::label_path_for(&issue.file), issue.file.with_extension("txt")] {
+                if let Some(msg) = dangling_link_message(&cand) {
+                    dangling_labels.push((cand, msg));
+                }
+            }
+        }
+    }
+
     // Suppress bogus `EmptyImage` ("no label file (background image)") emitted when an image's label file is a
     // dangling symlink.
     if !dangling_labels.is_empty() {
@@ -414,16 +423,42 @@ fn matches_dangling_label(image: &Path, dangling_labels: &HashSet<PathBuf>) -> b
     dangling_labels.contains(&beside)
 }
 
-/// Scans COCO `annotations/` and root/split directories for dangling `.json` or directory symlinks that
-/// `coco::find_jsons` skips because `p.is_file()` is false for dangling links.
+/// Scans COCO `annotations/` and root/split directories for dangling annotation `.json` or directory symlinks
+/// matching `folo-data`'s COCO discovery rules (`instances*.json`, ignoring `captions*` / `person_keypoints*` and
+/// unrelated root JSON files).
 fn enrich_coco_dangling_symlinks(report: &mut CheckReport, reported_files: &mut HashSet<PathBuf>) {
     let root = &report.root;
-    let mut dirs = vec![root.to_path_buf(), root.join("annotations")];
-    for sub in ["train", "val", "valid", "test"] {
-        dirs.push(root.join(sub));
-    }
+    let ann_dir = root.join("annotations");
     let mut found: Vec<(PathBuf, String)> = Vec::new();
-    for dir in dirs {
+    if let Some(msg) = dangling_link_message(&ann_dir) {
+        found.push((ann_dir.clone(), msg));
+    } else if let Ok(rd) = std::fs::read_dir(&ann_dir) {
+        let entries: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")))
+            .collect();
+        let has_instances = entries
+            .iter()
+            .any(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("instances")));
+        for p in entries {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let relevant = if has_instances {
+                name.starts_with("instances")
+            } else {
+                !name.starts_with("captions") && !name.starts_with("person_keypoints")
+            };
+            if relevant && let Some(msg) = dangling_link_message(&p) {
+                found.push((p, msg));
+            }
+        }
+    }
+
+    let mut other_dirs = vec![root.to_path_buf()];
+    for sub in ["train", "val", "valid", "test"] {
+        other_dirs.push(root.join(sub));
+    }
+    for dir in other_dirs {
         if let Some(msg) = dangling_link_message(&dir) {
             found.push((dir, msg));
             continue;
@@ -431,10 +466,13 @@ fn enrich_coco_dangling_symlinks(report: &mut CheckReport, reported_files: &mut 
         let Ok(rd) = std::fs::read_dir(&dir) else { continue };
         for entry in rd.flatten() {
             let p = entry.path();
-            if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json"))
-                && let Some(msg) = dangling_link_message(&p)
-            {
-                found.push((p, msg));
+            if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+                if (name.contains("coco") || name.starts_with("instances") || name.contains("annotations"))
+                    && let Some(msg) = dangling_link_message(&p)
+                {
+                    found.push((p, msg));
+                }
             }
         }
     }

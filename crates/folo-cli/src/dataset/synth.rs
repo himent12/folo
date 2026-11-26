@@ -198,7 +198,30 @@ fn rename_dir_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
         }
         Err(err)
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        use std::ffi::{CString, c_char, c_int, c_uint};
+        use std::os::unix::ffi::OsStrExt;
+        unsafe extern "C" {
+            fn renamex_np(from: *const c_char, to: *const c_char, flags: c_uint) -> c_int;
+        }
+        const RENAME_EXCL: c_uint = 0x0000_0004;
+        let to_c = |p: &Path| CString::new(p.as_os_str().as_bytes()).map_err(std::io::Error::from);
+        let (old, new) = (to_c(from)?, to_c(to)?);
+        // SAFETY: both pointers are NUL-terminated C strings alive across the call; return value is checked.
+        if unsafe { renamex_np(old.as_ptr(), new.as_ptr(), RENAME_EXCL) } == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if matches!(err.kind(), std::io::ErrorKind::Unsupported | std::io::ErrorKind::InvalidInput) {
+            if std::fs::symlink_metadata(to).is_ok() {
+                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+            }
+            return std::fs::rename(from, to);
+        }
+        Err(err)
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         if std::fs::symlink_metadata(to).is_ok() {
             return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
