@@ -26,7 +26,7 @@
 //! priority service tier (`service_tier`, what Codex calls Fast), which the catalog says which models offer.
 
 mod catalog;
-mod parse;
+pub(in crate::label) mod parse;
 #[cfg(test)]
 mod tests;
 

@@ -108,14 +108,70 @@ pub fn worker_download(base_url: &str) -> WorkerDownload {
 /// keys and tokens are far longer.
 pub(crate) const MIN_SECRET_CHARS: usize = 8;
 
+/// Replaces occurrences of ASCII percent-encoded `encoded` in `text` with `"[redacted]"`, matching the two hex
+/// digits of each `%XX` escape case-insensitively while keeping literal credential characters case-sensitive.
+fn replace_percent_encoded(text: &str, encoded: &str) -> String {
+    let hay = text.as_bytes();
+    let pat = encoded.as_bytes();
+    if pat.is_empty() || hay.len() < pat.len() {
+        return text.to_string();
+    }
+    let matches_at = |start: usize| -> bool {
+        let mut j = 0;
+        while j < pat.len() {
+            if pat[j] == b'%' && j + 2 < pat.len() {
+                if hay[start + j] != b'%'
+                    || !hay[start + j + 1].eq_ignore_ascii_case(&pat[j + 1])
+                    || !hay[start + j + 2].eq_ignore_ascii_case(&pat[j + 2])
+                {
+                    return false;
+                }
+                j += 3;
+            } else {
+                if hay[start + j] != pat[j] {
+                    return false;
+                }
+                j += 1;
+            }
+        }
+        true
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut i = 0;
+    while i + pat.len() <= hay.len() {
+        if matches_at(i) {
+            out.push_str(&text[copied..i]);
+            out.push_str("[redacted]");
+            i += pat.len();
+            copied = i;
+        } else {
+            i += 1;
+        }
+    }
+    if copied == 0 {
+        return text.to_string();
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
 /// `text`, made for a person (an error message, a log line, a name shown) from what a provider or a server
-/// answered, with every one of `secrets` of at least [`MIN_SECRET_CHARS`] characters replaced by `[redacted]`.
-/// Never applied to a value that is used again (an id, a reference): those are kept as they came.
-pub(crate) fn scrub<'a>(text: &str, secrets: impl IntoIterator<Item = &'a str>) -> String {
-    secrets
-        .into_iter()
-        .filter(|s| s.chars().count() >= MIN_SECRET_CHARS)
-        .fold(text.to_string(), |t, s| t.replace(s, "[redacted]"))
+/// answered, with every one of `secrets` of at least [`MIN_SECRET_CHARS`] characters (both raw and
+/// percent-encoded with any hex-escape casing) replaced by `[redacted]`. Never applied to a value that is used
+/// again (an id, a reference): those are kept as they came.
+pub fn scrub<'a>(text: &str, secrets: impl IntoIterator<Item = &'a str>) -> String {
+    secrets.into_iter().filter(|s| s.chars().count() >= MIN_SECRET_CHARS).fold(
+        text.to_string(),
+        |mut t, s| {
+            t = t.replace(s, "[redacted]");
+            let encoded = folo_client::encode(s);
+            if encoded != s {
+                t = replace_percent_encoded(&t, &encoded);
+            }
+            t
+        },
+    )
 }
 
 /// What went wrong with a provider request, by who has to act.
@@ -467,5 +523,29 @@ mod tests {
             worker_base_url: "https://x".into(),
         };
         assert!(!format!("{spec:?}").contains("s3cret"));
+    }
+
+    #[test]
+    fn scrub_redacts_raw_and_percent_encoded_secrets() {
+        let token = "tok_Ab+C/d=1234";
+        let encoded = folo_client::encode(token);
+        assert_ne!(encoded, token);
+        let lower_escapes = "tok_Ab%2bC%2fd%3d1234";
+        let mixed_escapes = "tok_Ab%2BC%2fd%3D1234";
+        let wrong_case_cred = "tok_ab%2bC%2fd%3d1234";
+        let msg = format!(
+            "raw={token} upper={encoded} lower={lower_escapes} mixed={mixed_escapes} other={wrong_case_cred} short=1234567"
+        );
+        let scrubbed = scrub(&msg, [token, "1234567"]);
+        assert!(!scrubbed.contains(token), "{scrubbed}");
+        assert!(!scrubbed.contains(&encoded), "{scrubbed}");
+        assert!(!scrubbed.contains(lower_escapes), "{scrubbed}");
+        assert!(!scrubbed.contains(mixed_escapes), "{scrubbed}");
+        assert_eq!(
+            scrubbed,
+            format!(
+                "raw=[redacted] upper=[redacted] lower=[redacted] mixed=[redacted] other={wrong_case_cred} short=1234567"
+            )
+        );
     }
 }

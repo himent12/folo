@@ -376,3 +376,33 @@ fn the_deadline_stops_the_run_and_releases_its_instance() {
     assert!(logged(&store, &run.id, "the time limit of 2.0 s"), "{:?}", log_of(&store, &run.id));
     assert_eq!(cloud.live(), 0);
 }
+
+#[test]
+fn a_stop_retries_delivery_after_a_transient_worker_outage() {
+    no_gpu();
+    let t = TestDir::new("cloud-stop-retry");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, Tuning { lost_grace: Duration::from_secs(30), ..fast() });
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    cloud.hold_epochs(true);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 5)).unwrap();
+    until("the first checkpoint copied", || run_of(&store, &run.id).cloud.and_then(|c| c.synced));
+
+    // Cut the worker right before requesting stop so the initial `/runs/{id}/stop` burst fails.
+    cloud.gates.down.store(true, Ordering::SeqCst);
+    store.stop_run(&run.id).unwrap();
+    until("initial stop attempt failed", || {
+        logged(&store, &run.id, "asking the worker to stop the run").then_some(())
+    });
+
+    // Bring the worker back and unhold epochs: the control plane must retry `/stop` immediately and end Stopped
+    // well before `lost_grace` (30 s) rather than letting the worker train to completion or timing out.
+    cloud.gates.down.store(false, Ordering::SeqCst);
+    cloud.hold_epochs(false);
+    let t0 = std::time::Instant::now();
+    let done = finished(&store, &run.id);
+    assert_eq!(done.status, RunStatus::Stopped, "{:?}", log_of(&store, &run.id));
+    assert!(t0.elapsed() < Duration::from_secs(15), "stop retry waited too long: {:?}", t0.elapsed());
+    assert_eq!(cloud.live(), 0);
+}

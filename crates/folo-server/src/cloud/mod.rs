@@ -337,7 +337,8 @@ impl Cloud {
             Ok(p) => p.check(&stored.values()),
             Err(e) => Err(folo_cloud::Error::new(folo_cloud::ErrorKind::Invalid, e.body.message)),
         };
-        let stored = self.core.connections.update(id, |c| c.checked(result))?;
+        let info = self.core.provider(&stored.provider).ok().map(|p| p.info());
+        let stored = self.core.connections.update(id, |c| c.checked(result, info.as_ref()))?;
         Ok(self.api(&stored))
     }
 

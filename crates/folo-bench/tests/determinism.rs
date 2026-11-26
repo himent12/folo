@@ -65,3 +65,21 @@ fn scores_do_not_depend_on_the_thread_count() {
     assert_reproducible("evaluate", &|| score::evaluate(&samples, 3, true, 7));
     assert_reproducible("map", &|| score::map(&samples, 3, true));
 }
+
+#[test]
+fn all_conditions_handle_edge_image_sizes_deterministically() {
+    for (w, h) in [(1, 1), (1, 17), (17, 1), (2, 2), (3, 5), (5, 3)] {
+        let img = RgbImage::from_fn(w, h, |x, y| {
+            image::Rgb([((x * 37) % 256) as u8, ((y * 53) % 256) as u8, (((x + y) * 19) % 256) as u8])
+        });
+        let boxes = vec![BBox { class: 0, x1: 0.0, y1: 0.0, x2: w as f32, y2: h as f32 }];
+        for c in Condition::ALL {
+            for severity in 1..=5 {
+                let first = conditions::apply(c, severity, &img, &boxes, 42).unwrap();
+                let second = conditions::apply(c, severity, &img, &boxes, 42).unwrap();
+                assert_eq!(first.0.dimensions(), (w, h), "{} s{severity} on {w}x{h}", c.id());
+                assert_eq!(first, second, "{} s{severity} on {w}x{h} must be deterministic", c.id());
+            }
+        }
+    }
+}

@@ -115,7 +115,11 @@ fn secret(key: &str, source: &str, stdin_used: &mut bool) -> Result<String, CliE
             .lock()
             .read_line(&mut line)
             .map_err(|e| CliError::new(ExitCode::Runtime, "io_error", format!("reading stdin: {e}")))?;
-        return Ok(line.trim_end_matches(['\r', '\n']).to_string());
+        let val = line.trim_end_matches(['\r', '\n']).to_string();
+        if val.trim().is_empty() {
+            return Err(usage(format!("--secret {key}: stdin was empty")));
+        }
+        return Ok(val);
     }
     Err(usage(format!(
         "--secret {key} takes env:VAR or - (stdin), not the secret itself: a command line is visible to other \
@@ -134,11 +138,16 @@ fn connect(args: CloudConnectArgs, out: Out) -> Result<(), CliError> {
                 "`{key}` is a secret: pass it with --secret {key}=env:VAR or --secret {key}=-"
             )));
         }
-        values.insert(key.to_string(), value.to_string());
+        if values.insert(key.to_string(), value.to_string()).is_some() {
+            return Err(usage(format!("`{key}` was given more than once")));
+        }
     }
     let mut stdin_used = false;
     for s in &args.secret {
         let (key, source) = pair("--secret", s)?;
+        if values.contains_key(key) {
+            return Err(usage(format!("`{key}` was given more than once")));
+        }
         values.insert(key.to_string(), secret(key, source, &mut stdin_used)?);
     }
     let req = ConnectCloud { provider: args.provider, name: args.name, values };
@@ -347,5 +356,25 @@ mod tests {
             let e = pair("--secret", given).unwrap_err();
             assert!(!e.message.contains("rpa_SECRET") && e.message.contains("KEY="), "{}", e.message);
         }
+    }
+
+    #[test]
+    fn connect_rejects_duplicate_fields_across_set_and_secret() {
+        let dir = folo_test_support::TestDir::new("cli-cloud-dup");
+        let base = |set: Vec<&str>, secret: Vec<&str>| CloudConnectArgs {
+            provider: "remote".into(),
+            name: String::new(),
+            set: set.into_iter().map(String::from).collect(),
+            secret: secret.into_iter().map(String::from).collect(),
+            dir: CloudDirArgs { data_dir: Some(dir.to_path_buf()) },
+        };
+        let out = Out { json: true };
+        let e = connect(base(vec!["url=http://a", "url=http://b"], vec![]), out).unwrap_err();
+        assert_eq!((e.exit, e.code.as_str()), (ExitCode::Usage, "usage"));
+        assert!(e.message.contains("more than once"), "{}", e.message);
+
+        let e = connect(base(vec!["url=http://a"], vec!["url=env:FOLO_CLI_TEST_DUP"]), out).unwrap_err();
+        assert_eq!((e.exit, e.code.as_str()), (ExitCode::Usage, "usage"));
+        assert!(e.message.contains("more than once"), "{}", e.message);
     }
 }

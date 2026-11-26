@@ -83,20 +83,35 @@ impl Stored {
         }
     }
 
-    /// Records a check's result: the account when it passed, the error when it did not.
-    pub fn checked(&mut self, result: std::result::Result<Account, folo_cloud::Error>) {
+    /// Values of fields marked secret by `provider` (or unknown to it), used for defense-in-depth scrubbing.
+    fn secret_values(&self, provider: Option<&CloudProvider>) -> Vec<String> {
+        let plain = |key: &str| {
+            provider.and_then(|p| p.fields.iter().find(|f| f.key == key)).is_some_and(|f| !f.secret)
+        };
+        self.values.iter().filter(|(k, _)| !plain(k)).map(|(_, v)| v.clone()).collect()
+    }
+
+    /// Records a check's result: the account when it passed, the error when it did not. Scrubs stored secret
+    /// values as defense-in-depth so no provider error, account label or note can persist a credential.
+    pub fn checked(
+        &mut self,
+        result: std::result::Result<Account, folo_cloud::Error>,
+        provider: Option<&CloudProvider>,
+    ) {
+        let secrets = self.secret_values(provider);
+        let scrub = |s: String| folo_cloud::scrub(&s, secrets.iter().map(String::as_str));
         self.checked = Some(rfc3339(unix_now()));
         match result {
             Ok(a) => {
                 self.status = CloudConnectionStatus::Ok;
-                self.account = a.label;
+                self.account = a.label.map(scrub);
                 self.balance_usd = a.balance_usd;
-                self.note = a.note;
+                self.note = a.note.map(scrub);
                 self.error = None;
             }
             Err(e) => {
                 self.status = CloudConnectionStatus::Error;
-                self.error = Some(e.message);
+                self.error = Some(scrub(e.message));
             }
         }
     }
@@ -217,7 +232,7 @@ impl Connections {
                 checked: None,
                 values: values.as_map().clone(),
             };
-            c.checked(Ok(account));
+            c.checked(Ok(account), Some(provider));
             file.connections.push(c.clone());
             Ok(c)
         })
@@ -320,5 +335,45 @@ mod tests {
             b"{ nope",
             "never overwritten"
         );
+    }
+
+    #[test]
+    fn checked_redacts_stored_secret_values_without_touching_plain_fields() {
+        let p = provider();
+        let mut stored = Stored {
+            id: "cc_1".into(),
+            provider: p.id.clone(),
+            name: "Prov".into(),
+            created: "2026-11-26T00:00:00Z".into(),
+            status: CloudConnectionStatus::Ok,
+            account: None,
+            balance_usd: None,
+            error: None,
+            note: None,
+            checked: None,
+            values: BTreeMap::from([
+                ("api_key".into(), "rpa_SUPER_SECRET+KEY/99".into()),
+                ("region".into(), "eu-west-region-1".into()),
+            ]),
+        };
+        stored.checked(
+            Ok(Account {
+                label: Some("eu-west-region-1 / rpa_SUPER_SECRET+KEY/99".into()),
+                balance_usd: Some(5.0),
+                note: Some(format!("note {}", folo_client::encode("rpa_SUPER_SECRET+KEY/99"))),
+            }),
+            Some(&p),
+        );
+        assert_eq!(stored.account.as_deref(), Some("eu-west-region-1 / [redacted]"));
+        assert_eq!(stored.note.as_deref(), Some("note [redacted]"));
+
+        stored.checked(
+            Err(folo_cloud::Error::new(
+                folo_cloud::ErrorKind::Auth,
+                "rejected rpa_SUPER_SECRET+KEY/99 in eu-west-region-1",
+            )),
+            Some(&p),
+        );
+        assert_eq!(stored.error.as_deref(), Some("rejected [redacted] in eu-west-region-1"));
     }
 }

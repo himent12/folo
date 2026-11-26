@@ -7,14 +7,16 @@ use crate::errors::Error;
 use crate::server::Inner;
 use crate::types::*;
 
+fn status_word<T: serde::Serialize>(v: T) -> String {
+    serde_json::to_value(v).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+}
+
 impl Inner {
     pub(super) async fn cloud_connections(&self, _: NoArgs) -> Result<Output, Error> {
         let connections = self.blocking(|s| s.cloud_connections()).await?;
         let names: Vec<String> = connections
             .iter()
-            .map(|c| {
-                format!("{} ({}, {})", c.id, c.provider, serde_json::to_value(c.status).unwrap_or_default())
-            })
+            .map(|c| format!("{} ({}, {})", c.id, c.provider, status_word(c.status)))
             .collect();
         let summary = match names.len() {
             0 => "no cloud connections; make one in Studio, Desktop or with `folo cloud connect`".to_string(),
@@ -45,7 +47,7 @@ impl Inner {
 
     pub(super) async fn cloud_terminate(&self, a: InstanceIdArgs) -> Result<Output, Error> {
         let i = self.blocking(move |s| s.terminate_instance(&a.instance_id)).await?;
-        let status = serde_json::to_value(i.status).unwrap_or_default();
+        let status = status_word(i.status);
         let summary = match &i.error {
             Some(e) => format!("{}: {status} ({e}; FOLO retries)", i.id),
             None => format!("{}: {status}", i.id),

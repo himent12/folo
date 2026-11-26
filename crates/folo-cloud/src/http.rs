@@ -4,8 +4,8 @@
 //!
 //! Keys travel only in the `Authorization` header, never in a URL, so a transport error (which may quote the URL)
 //! cannot carry one, and a key a provider echoes in an answer is blanked out of every message made from it,
-//! however the body spells it ([`Reply::scrub`]; so is any other credential the request carried,
-//! [`Reply::without`]). The body itself is read as it came: the ids in it are used again.
+//! however the body spells it ([`Reply::scrub`]; so is any other credential the request carried via
+//! [`Api::post_with_secrets`]). The body itself is read as it came: the ids in it are used again.
 
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -47,8 +47,9 @@ pub(crate) struct Reply {
     pub status: u16,
     pub body: Vec<u8>,
     service: &'static str,
-    /// The credentials the request carried: the key, and what [`Reply::without`] adds. Text read out of the body
-    /// (decoded, so whatever its spelling) goes through [`Reply::scrub`] before it becomes a message.
+    /// The credentials the request carried: the key, and any extra secrets passed to [`Api::post_with_secrets`].
+    /// Text read out of the body (decoded, so whatever its spelling) goes through [`Reply::scrub`] before it
+    /// becomes a message.
     secrets: Vec<String>,
 }
 
@@ -67,13 +68,6 @@ impl Reply {
     /// A `2xx` answer.
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
-    }
-
-    /// The answer of a request that also carried `secret` (another credential, e.g. a worker's token): no message
-    /// made from the answer repeats it ([`Reply::scrub`]).
-    pub fn without(mut self, secret: &str) -> Reply {
-        self.secrets.push(secret.to_string());
-        self
     }
 
     /// `text` for a person, read out of the body (decoded), with every credential the request carried blanked out
@@ -111,25 +105,44 @@ impl Api {
 
     /// `GET url`.
     pub fn get(&self, url: &str, key: &str) -> Result<Reply> {
-        self.call(Method::GET, url, key, None)
+        self.call(Method::GET, url, key, None, &[])
     }
 
     /// `POST url` with `body` as JSON.
     pub fn post<B: Serialize + ?Sized>(&self, url: &str, key: &str, body: &B) -> Result<Reply> {
+        self.post_with_secrets(url, key, body, &[])
+    }
+
+    /// `POST url` with `body` as JSON, also scrubbing `extra_secrets` from transport errors and the reply.
+    pub fn post_with_secrets<B: Serialize + ?Sized>(
+        &self,
+        url: &str,
+        key: &str,
+        body: &B,
+        extra_secrets: &[&str],
+    ) -> Result<Reply> {
         let json = serde_json::to_vec(body).expect("request bodies serialize");
-        self.call(Method::POST, url, key, Some(&json))
+        self.call(Method::POST, url, key, Some(&json), extra_secrets)
     }
 
     /// `DELETE url`.
     pub fn delete(&self, url: &str, key: &str) -> Result<Reply> {
-        self.call(Method::DELETE, url, key, None)
+        self.call(Method::DELETE, url, key, None, &[])
     }
 
-    fn call(&self, method: Method, url: &str, key: &str, body: Option<&[u8]>) -> Result<Reply> {
+    fn call(
+        &self,
+        method: Method,
+        url: &str,
+        key: &str,
+        body: Option<&[u8]>,
+        extra_secrets: &[&str],
+    ) -> Result<Reply> {
         let mut waited = Duration::ZERO;
         let mut attempt = 1;
         loop {
-            let res = self.send(&method, url, key, body).map_err(|e| self.unavailable(e, key))?;
+            let res =
+                self.send(&method, url, key, body).map_err(|e| self.unavailable(e, key, extra_secrets))?;
             let status = res.status().as_u16();
             if should_retry(&method, status)
                 && attempt < MAX_ATTEMPTS
@@ -145,7 +158,7 @@ impl Api {
                     .with_config()
                     .limit(MAX_BODY)
                     .read_to_vec()
-                    .map_err(|e| self.unavailable(e, key))?
+                    .map_err(|e| self.unavailable(e, key, extra_secrets))?
             } else {
                 // Bound non-2xx error bodies so a huge proxy error page never exhausts memory or masks a
                 // 401/403/400 status behind `Unavailable`.
@@ -154,7 +167,9 @@ impl Api {
                 let _ = std::io::Read::read_to_end(&mut limited, &mut bytes);
                 bytes
             };
-            let secrets = vec![key.to_string()];
+            let mut secrets = Vec::with_capacity(1 + extra_secrets.len());
+            secrets.push(key.to_string());
+            secrets.extend(extra_secrets.iter().map(|s| (*s).to_string()));
             return Ok(Reply { status, body, service: self.service, secrets });
         }
     }
@@ -177,8 +192,8 @@ impl Api {
         }
     }
 
-    fn unavailable(&self, e: ureq::Error, key: &str) -> Error {
-        let why = crate::scrub(&e.to_string(), [key]);
+    fn unavailable(&self, e: ureq::Error, key: &str, extra_secrets: &[&str]) -> Error {
+        let why = crate::scrub(&e.to_string(), std::iter::once(key).chain(extra_secrets.iter().copied()));
         Error::new(
             ErrorKind::Unavailable,
             format!("{} does not answer ({why}); check this machine's internet connection", self.service),
@@ -607,5 +622,30 @@ mod tests {
         let reply = Api::new("Test").get(&f.url("/pods"), "rpa_SECRET_KEY").unwrap();
         assert_eq!(reply.status, 401);
         assert_eq!(reply.body.len(), MAX_ERROR_BODY as usize);
+    }
+
+    #[test]
+    fn post_with_secrets_redacts_extra_secrets_in_reply_and_transport_errors() {
+        let key = "rpa_KEY_SECRET_1234";
+        let worker_tok = "wrk_TOKEN+SECRET/5678";
+        let f =
+            Fixture::serve(vec![Answer::json(400, format!(r#"{{"error":"bad {worker_tok} and {key}"}}"#))]);
+        let reply = Api::new("Test")
+            .post_with_secrets(&f.url("/pods"), key, &serde_json::json!({}), &[worker_tok])
+            .unwrap();
+        let text = reply.scrub(&String::from_utf8_lossy(&reply.body));
+        assert!(!text.contains(worker_tok) && !text.contains(key), "{text}");
+
+        // Even a transport error before any reply is created scrubs `extra_secrets` (including percent-encoded).
+        let err = Api::new("Test")
+            .post_with_secrets(
+                &Fixture::hang_up().url(&format!("/pods?t={}", folo_client::encode(worker_tok))),
+                key,
+                &serde_json::json!({}),
+                &[worker_tok],
+            )
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Unavailable);
+        assert!(!err.message.contains(worker_tok) && !err.message.contains(&folo_client::encode(worker_tok)));
     }
 }

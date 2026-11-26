@@ -213,14 +213,19 @@ impl Parts<'_, '_> {
             };
             attempt += 1;
             pause(self.ctl, &mut wait)?;
+            let expected_bytes = self.sent.saturating_add(self.buf.len() as u64);
             match self.client.get::<Upload>(&format!("/uploads/{}", self.id)) {
-                Ok(u) if u.part == n + 1 => return Ok(()),
-                Ok(u) if u.part == n => {}
+                Ok(u) if u.part == n + 1 && u.received_bytes == expected_bytes => return Ok(()),
+                Ok(u) if u.part == n && u.received_bytes == self.sent => {}
                 Ok(u) => {
-                    let message = format!(
-                        "the server expects part {} of the upload, the stream is at part {n}",
-                        u.part
-                    );
+                    let message = if u.part == n + 1 || u.part == n {
+                        format!(
+                            "the server has {} bytes at part {} of the upload, expected {} (or {})",
+                            u.received_bytes, u.part, expected_bytes, self.sent
+                        )
+                    } else {
+                        format!("the server expects part {} of the upload, the stream is at part {n}", u.part)
+                    };
                     return Err(TransferError::Failed(Error {
                         status: Some(StatusCode::CONFLICT),
                         error: ApiError {
@@ -606,5 +611,95 @@ mod tests {
             "must not send empty If-Match header: {}",
             reqs[4]
         );
+    }
+
+    #[test]
+    fn get_range_to_rejects_truncated_200_content_length() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            // Advertise 10 bytes via Content-Length on 200 OK, then close after only 4 bytes.
+            let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nConnection: close\r\n\r\nABCD");
+        });
+
+        let client = Client::new(&format!("http://{addr}"));
+        let mut out = Vec::new();
+        let err = client.get_range_to("/m/weights", 0..10, None, &mut out, || false).unwrap_err();
+        srv.join().unwrap();
+        match err {
+            crate::StreamError::Http(e) => {
+                assert!(
+                    e.status == Some(StatusCode::BAD_GATEWAY) || e.code() == crate::UNREACHABLE,
+                    "unexpected error: {e:?}"
+                );
+            }
+            other => panic!("expected Http error on truncated 200 body, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upload_part_retry_rejects_received_bytes_mismatch() {
+        use std::io::{Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let srv = std::thread::spawn(move || {
+            // 1. PUT /api/uploads/u_1/parts/0 -> 503 transient failure.
+            // 2. GET /api/uploads/u_1 -> server claims part 1, but wrong received_bytes (1 instead of 4)!
+            let wrong = serde_json::to_string(&Upload {
+                id: "u_1".into(),
+                kind: folo_api::UploadKind::Model,
+                name: "m".into(),
+                part: 1,
+                received_bytes: 1,
+                max_part_bytes: 4,
+                expires: "2099-01-01T00:00:00Z".into(),
+            })
+            .unwrap();
+            let responses = [
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"error\":{\"code\":\"internal\",\"message\":\"busy\"}}".to_string(),
+                format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{wrong}"),
+            ];
+            for resp in responses {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 2048];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(resp.as_bytes());
+            }
+        });
+
+        let client = Client::new(&format!("http://{addr}"));
+        let stop = || false;
+        let mut ctl = Control { progress: &mut |_| {}, stop: &stop, backoff: Duration::from_millis(1) };
+        let session = Upload {
+            id: "u_1".into(),
+            kind: folo_api::UploadKind::Model,
+            name: "m".into(),
+            part: 0,
+            received_bytes: 0,
+            max_part_bytes: 4,
+            expires: "2099-01-01T00:00:00Z".into(),
+        };
+        let req = CreateUpload {
+            kind: folo_api::UploadKind::Model,
+            name: "m".into(),
+            format: folo_api::DatasetFormat::Auto,
+            fingerprint: None,
+            bytes: Some(4),
+        };
+        let err = send(&client, &session, &req, |w| w.write_all(b"ABCD"), &mut ctl).unwrap_err();
+        srv.join().unwrap();
+        match err {
+            TransferError::Failed(e) => {
+                assert_eq!(e.code(), "upload_conflict", "{e:?}");
+                assert!(e.error.message.contains("bytes"), "{e:?}");
+            }
+            other => panic!("expected upload_conflict on received_bytes mismatch, got {other:?}"),
+        }
     }
 }

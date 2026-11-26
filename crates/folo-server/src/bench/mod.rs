@@ -264,17 +264,20 @@ impl Benches {
         let slot = self.slot(id)?;
         let mut state = slot.live()?;
         let bench = state.file.id.clone();
-        let l = state.lp_mut(loop_id).ok_or_else(|| state::loop_not_found(&bench, loop_id))?;
-        match l.lp.status {
+        let status =
+            state.lp(loop_id).map(|l| l.lp.status).map_err(|_| state::loop_not_found(&bench, loop_id))?;
+        match status {
             BenchLoopStatus::Running => {
-                l.lp.status = BenchLoopStatus::Stopping;
-                l.cancel.store(true, Ordering::Relaxed);
-                let lp = l.lp.clone();
+                let mut lp = state.lp(loop_id)?.lp.clone();
+                lp.status = BenchLoopStatus::Stopping;
                 slot.save_loop(&state, &lp)?;
+                let l = state.lp_mut(loop_id).expect("checked above");
+                l.lp = lp.clone();
+                l.cancel.store(true, Ordering::SeqCst);
                 slot.emit(BenchEvent::Loop(Box::new(lp.clone())));
                 Ok(lp)
             }
-            BenchLoopStatus::Stopping => Ok(l.lp.clone()),
+            BenchLoopStatus::Stopping => Ok(state.lp(loop_id)?.lp.clone()),
             _ => Err(Error::conflict("bench_loop_not_active", format!("loop '{loop_id}' has already ended"))
                 .hint("nothing to stop; GET …/loops/{loop_id} has how it came out")),
         }

@@ -519,3 +519,87 @@ async fn predict_batch_confined_strips_verbatim_paths_and_records_missing_in_fai
         .unwrap();
     assert_eq!(err.body.code, "path_outside_data_dir");
 }
+
+#[tokio::test]
+async fn unknown_argument_checks_nested_array_of_objects_with_suggestion() {
+    let store = std::sync::Arc::new(folo_server::MockStore::new());
+    let home = folo_test_support::TestDir::new("mcp-nested-array-arg");
+    let opts = crate::Options {
+        data_dir: home.to_path_buf(),
+        read_only: false,
+        confine: false,
+        device: "cpu".into(),
+        published_weights: None,
+    };
+    let server = crate::server::FoloMcp::new(store, None, opts);
+    let def = find("create_benchmark").unwrap();
+    let mut p = Progress::none();
+    let err = server
+        .inner
+        .call(
+            def,
+            json!({
+                "name": "b",
+                "dataset_id": "ds_1",
+                "plan": {
+                    "conditions": [{ "condition": "haze", "severities": [1], "wieght": 2.0 }]
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+            &mut p,
+        )
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.body.code, "invalid_arguments");
+    assert!(err.body.message.contains("plan.conditions[0].wieght"), "{}", err.body.message);
+    assert!(err.body.message.contains("did you mean `weight`"), "{}", err.body.message);
+}
+
+#[tokio::test]
+async fn stop_session_runs_aborts_legacy_subscriptions_without_created_runs() {
+    let store = std::sync::Arc::new(folo_server::MockStore::new());
+    let home = folo_test_support::TestDir::new("mcp-stop-legacy-subs");
+    let opts = crate::Options {
+        data_dir: home.to_path_buf(),
+        read_only: false,
+        confine: false,
+        device: "cpu".into(),
+        published_weights: None,
+    };
+    let server = crate::server::FoloMcp::new(store, None, opts);
+    let task = tokio::spawn(async {
+        std::future::pending::<()>().await;
+    });
+    let abort_check = task.abort_handle();
+    server.inner.legacy_subs.lock().unwrap().insert("folo://runs/r_1/status".into(), task.abort_handle());
+    assert!(server.inner.created_runs.lock().unwrap().is_empty());
+
+    server.stop_session_runs().await;
+
+    assert!(server.inner.legacy_subs.lock().unwrap().is_empty());
+    // Yield once so the aborted task observes cancellation.
+    tokio::task::yield_now().await;
+    assert!(abort_check.is_finished(), "legacy subscription task must be aborted on disconnect");
+}
+
+#[tokio::test]
+async fn cloud_connections_summary_omits_json_quotes_around_status() {
+    let store = std::sync::Arc::new(folo_server::MockStore::new());
+    let home = folo_test_support::TestDir::new("mcp-cloud-summary");
+    let opts = crate::Options {
+        data_dir: home.to_path_buf(),
+        read_only: false,
+        confine: false,
+        device: "cpu".into(),
+        published_weights: None,
+    };
+    let server = crate::server::FoloMcp::new(store, None, opts);
+    let def = find("cloud_connections").unwrap();
+    let mut p = Progress::none();
+    let out = server.inner.call(def, serde_json::Map::new(), &mut p).await.unwrap();
+    assert!(!out.summary.contains("\"ok\""), "status must not be JSON-quoted: {}", out.summary);
+    assert!(!out.summary.contains("\"error\""), "status must not be JSON-quoted: {}", out.summary);
+}

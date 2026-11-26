@@ -612,11 +612,14 @@ impl Taps {
 /// `[i, i + 1) · n_in / n_out`, partial pixels weighted by their coverage. Input coordinate `x` lands on output
 /// coordinate `x · n_out / n_in` exactly.
 pub(crate) fn area_taps(n_in: usize, n_out: usize) -> Taps {
+    if n_in == 0 || n_out == 0 {
+        return Taps { start: Vec::new(), off: vec![0], w: Vec::new() };
+    }
     let scale = n_in as f64 / n_out as f64;
     let mut t = Taps { start: Vec::with_capacity(n_out), off: vec![0], w: Vec::new() };
     for i in 0..n_out {
         let (a, b) = (i as f64 * scale, ((i + 1) as f64 * scale).min(n_in as f64));
-        let j0 = a.floor() as usize;
+        let j0 = (a.floor() as usize).min(n_in - 1);
         let j1 = (b.ceil() as usize).clamp(j0 + 1, n_in);
         t.start.push(j0);
         for j in j0..j1 {
@@ -630,6 +633,9 @@ pub(crate) fn area_taps(n_in: usize, n_out: usize) -> Taps {
 
 /// Bilinear interpolation from `n_in` to `n_out` pixels (pixel centres aligned, edges clamped).
 pub(crate) fn bilinear_taps(n_in: usize, n_out: usize) -> Taps {
+    if n_in == 0 || n_out == 0 {
+        return Taps { start: Vec::new(), off: vec![0], w: Vec::new() };
+    }
     let scale = n_in as f64 / n_out as f64;
     let mut t = Taps { start: Vec::with_capacity(n_out), off: vec![0], w: Vec::new() };
     for i in 0..n_out {

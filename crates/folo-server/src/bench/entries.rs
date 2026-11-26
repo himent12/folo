@@ -64,16 +64,23 @@ pub(super) fn stop_entry_in(engine: &Engine, slot: &Slot, id: &str) -> Result<Be
     let mut state = slot.live()?;
     let e = state.entry(id)?;
     let mut entry = e.entry.clone();
+    let mut unqueued: Option<model::Job> = None;
     let ends = if e.open.is_some() {
         entry.status = BenchEntryStatus::Stopped;
         true
     } else {
         match e.entry.status {
-            BenchEntryStatus::Queued if engine.unqueue(&slot.id, id) => {
-                entry.status = BenchEntryStatus::Stopped;
-                true
+            BenchEntryStatus::Queued => {
+                if let Some(job) = engine.unqueue(&slot.id, id) {
+                    unqueued = Some(job);
+                    entry.status = BenchEntryStatus::Stopped;
+                    true
+                } else {
+                    entry.status = BenchEntryStatus::Stopping;
+                    false
+                }
             }
-            BenchEntryStatus::Queued | BenchEntryStatus::Running => {
+            BenchEntryStatus::Running => {
                 entry.status = BenchEntryStatus::Stopping;
                 false
             }
@@ -90,7 +97,12 @@ pub(super) fn stop_entry_in(engine: &Engine, slot: &Slot, id: &str) -> Result<Be
     if ends {
         entry.finished = Some(rfc3339(unix_now()));
     }
-    slot.save_entry(&state, &entry, None)?;
+    if let Err(err) = slot.save_entry(&state, &entry, None) {
+        if let Some(job) = unqueued {
+            engine.push(job);
+        }
+        return Err(err);
+    }
     let e = state.entry_mut(id).expect("looked up above, under the same lock");
     e.cancel.store(true, Ordering::SeqCst);
     if let Some(fill) = e.open.take() {

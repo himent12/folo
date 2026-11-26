@@ -17,7 +17,9 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use folo_api::{ApiError, ErrorBody};
-use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_MATCH, RANGE};
+use http::header::{
+    AUTHORIZATION, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_MATCH, RANGE,
+};
 use http::{HeaderMap, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -501,7 +503,24 @@ impl Client {
                         )
                     })?,
             ),
-            _ if range.start == 0 => None,
+            _ if range.start == 0 => {
+                let encoded = headers
+                    .get(CONTENT_ENCODING)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| !v.trim().is_empty() && !v.trim().eq_ignore_ascii_case("identity"));
+                if encoded {
+                    None
+                } else if let Some(cl) = headers.get(CONTENT_LENGTH) {
+                    let len = cl.to_str().ok().and_then(parse_ascii_u64).ok_or_else(|| {
+                        StreamError::Http(
+                            self.failure(StatusCode::BAD_GATEWAY, b"invalid Content-Length header"),
+                        )
+                    })?;
+                    Some((len, len))
+                } else {
+                    None
+                }
+            }
             _ => {
                 return Err(StreamError::Http(
                     self.failure(StatusCode::BAD_GATEWAY, b"the server ignored the Range header"),
@@ -538,18 +557,24 @@ impl Client {
             if let Some((expected_len, _)) = declared
                 && written > expected_len
             {
-                return Err(StreamError::Http(
-                    self.failure(StatusCode::BAD_GATEWAY, b"206 body exceeded Content-Range length"),
-                ));
+                let msg: &[u8] = if status == StatusCode::PARTIAL_CONTENT {
+                    b"206 body exceeded Content-Range length"
+                } else {
+                    b"response body exceeded Content-Length"
+                };
+                return Err(StreamError::Http(self.failure(StatusCode::BAD_GATEWAY, msg)));
             }
             out.write_all(&buf[..n]).map_err(StreamError::Io)?;
         }
         let total = match declared {
             Some((expected_len, total)) => {
                 if written != expected_len {
-                    return Err(StreamError::Http(
-                        self.failure(StatusCode::BAD_GATEWAY, b"206 body length did not match Content-Range"),
-                    ));
+                    let msg: &[u8] = if status == StatusCode::PARTIAL_CONTENT {
+                        b"206 body length did not match Content-Range"
+                    } else {
+                        b"response body length did not match Content-Length"
+                    };
+                    return Err(StreamError::Http(self.failure(StatusCode::BAD_GATEWAY, msg)));
                 }
                 total
             }
@@ -557,6 +582,11 @@ impl Client {
         };
         Ok(StreamedPart { written, total, etag })
     }
+}
+
+fn parse_ascii_u64(s: &str) -> Option<u64> {
+    let s = s.trim();
+    (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<u64>().ok()).flatten()
 }
 
 /// Parses `Content-Range: bytes <start>-<end>/<total>`, requiring `<start> == expected_start` and
@@ -569,10 +599,7 @@ fn parse_content_range(header: &str, expected_start: u64) -> Option<(u64, u64)> 
     }
     let (range_part, total_part) = spec.trim().split_once('/')?;
     let (start_part, end_part) = range_part.trim().split_once('-')?;
-    let parse_u64 = |s: &str| {
-        let s = s.trim();
-        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<u64>().ok()).flatten()
-    };
+    let parse_u64 = parse_ascii_u64;
     let start = parse_u64(start_part)?;
     let end = parse_u64(end_part)?;
     let total = parse_u64(total_part)?;
