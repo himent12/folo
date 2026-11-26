@@ -2,7 +2,7 @@
 import FolderOpen from '$icons/folder-open';
 import Sparkles from '$icons/sparkles';
 import Tags from '$icons/tags';
-import { bindable, computed, createUniqueId, css, effect, onCleanup, signal } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, flush, onCleanup, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { CreateDataset } from '$lib/api/types';
 import { count, duration, num } from '$lib/format';
@@ -168,6 +168,29 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     if (w) toast.info(`Still ${w.what[0]!.toLowerCase()}${w.what.slice(1)}`, 'It goes on in the background. A note here will say when it is done.');
   }
 
+  function focusFirstInvalid() {
+    const e = errs.peek();
+    const order =
+      mode.peek() === 'folder'
+        ? ([
+            ['path', `${uid}-path`],
+            ['name', `${uid}-name`],
+          ] as const)
+        : ([
+            ['name', `${uid}-sname`],
+            ['classes', `${uid}-classes`],
+            ['images', `${uid}-images`],
+            ['seed', `${uid}-seed`],
+          ] as const);
+    const bad = order.find(([k]) => !!e[k]);
+    if (!bad) return;
+    const el = document.getElementById(bad[1]);
+    if (el instanceof HTMLElement && el.isConnected && !el.hasAttribute('disabled')) {
+      el.focus();
+      el.scrollIntoView?.({ block: 'nearest' });
+    }
+  }
+
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     if (mode.get() === 'synthetic' && classDraft.get().trim()) {
@@ -176,7 +199,12 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     }
     touched.set(true);
     error.set(undefined);
-    if (!valid.get() || busy.get()) return;
+    if (busy.get()) return;
+    if (!valid.get()) {
+      flush();
+      focusFirstInvalid();
+      return;
+    }
     const m = mode.get();
     const images = sImages.get() ?? 0;
     const what = m === 'folder' ? `Reading ${folderName.get()}` : `Generating ${count(images, 'image')}`;

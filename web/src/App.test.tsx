@@ -889,4 +889,24 @@ describe('lazy CommandPalette', () => {
       HTMLDialogElement.prototype.close = origClose;
     }
   });
+
+  it('focuses #content on Skip to content without mutating the hash route to NotFound', async () => {
+    const screens = new Screens((name) => (name === 'settings' ? () => Promise.resolve(screen('the settings')) : undefined));
+    history.replaceState(history.state, '', '#/settings');
+    router.route = parse('#/settings');
+    c = render(() => <App screens={screens} />, target);
+    await until(() => main().querySelector('.fake'), 'settings screen');
+
+    const skip = target.querySelector<HTMLAnchorElement>('a.skip')!;
+    expect(skip).not.toBeNull();
+    skip.focus();
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    skip.dispatchEvent(click);
+    flush();
+
+    expect(click.defaultPrevented).toBe(true);
+    expect(location.hash).toBe('#/settings');
+    expect(router.route.name).toBe('settings');
+    expect(document.activeElement).toBe(main());
+  });
 });

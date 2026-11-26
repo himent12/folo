@@ -443,4 +443,27 @@ describe('Logs: search, copy visible, static tokens, and single-reflow pin', () 
     expect(target.querySelector('.empty')).toBeNull();
     expect(document.activeElement).toBe(target.querySelector('.log'));
   });
+
+  it('returns keyboard focus to the log container when Follow is activated and unmounts', () => {
+    const log = new AppendLog<LogLine>();
+    log.push(...Array.from({ length: 40 }, (_, i) => line(i + 1)));
+    c = render(() => <Logs log={log} version={0} live={false} />, target);
+    flushSync();
+
+    const boxEl = target.querySelector<HTMLDivElement>('.log')!;
+    Object.defineProperty(boxEl, 'scrollHeight', { value: 800, configurable: true });
+    Object.defineProperty(boxEl, 'clientHeight', { value: 200, configurable: true });
+    boxEl.scrollTop = 0;
+    boxEl.dispatchEvent(new Event('scroll'));
+    flushSync();
+
+    const followBtn = target.querySelector<HTMLButtonElement>('.jump button')!;
+    expect(followBtn).not.toBeNull();
+    followBtn.focus();
+    followBtn.click();
+    flushSync();
+
+    expect(target.querySelector('.jump')).toBeNull();
+    expect(document.activeElement).toBe(boxEl);
+  });
 });
