@@ -393,3 +393,26 @@ fn confined_mcp_does_not_open_bench_folder_at_startup() {
 
     assert!(canary.is_dir(), "`folo mcp --confine` must not touch `<data_dir>/bench/` at startup");
 }
+
+/// When `--data-dir` (or an ancestor) is named `images` and no outside `labels/` mirror exists, `folo-data` reads
+/// YOLO labels beside the images inside the dataset; `--confine` must follow the same rule and allow the dataset.
+#[test]
+fn confined_mcp_allows_beside_image_labels_under_images_data_dir() {
+    let root = folo_test_support::TestDir::new("mcp-confine-beside-labels");
+    let data = root.join("images");
+    let ds = data.join("ds");
+    std::fs::create_dir_all(&ds).unwrap();
+    image::RgbImage::from_pixel(8, 8, image::Rgb([1, 2, 3])).save(ds.join("a.jpg")).unwrap();
+    std::fs::write(ds.join("a.txt"), "0 0.5 0.5 0.4 0.4\n").unwrap();
+    std::fs::write(ds.join("list.txt"), "a.jpg\n").unwrap();
+    std::fs::write(ds.join("data.yaml"), "train: list.txt\nnames: [box]\n").unwrap();
+
+    let mut c = spawn(&["--confine", "--data-dir", data.to_str().unwrap()], None);
+    init_old(&mut c);
+    let reg = c.ok("register_dataset", json!({ "path": "ds" }));
+    let id = reg["id"].as_str().unwrap().to_string();
+    let page = c.ok("list_dataset_images", json!({ "dataset_id": id, "include_boxes": true }));
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["items"][0]["boxes"].as_array().unwrap().len(), 1);
+    c.finish();
+}

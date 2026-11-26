@@ -48,8 +48,57 @@ fn string_field(fields: &serde_json::Map<String, serde_json::Value>, key: &str) 
     }
 }
 
+/// Allowed top-level keys of [`TrainConfig`] in `POST /api/runs` and `POST /api/runs/estimate`.
+const TRAIN_CONFIG_FIELDS: &[&str] = &[
+    "name",
+    "dataset_id",
+    "arch",
+    "epochs",
+    "batch",
+    "imgsz",
+    "device",
+    "optimizer",
+    "lr0",
+    "weights",
+    "augment",
+    "seed",
+    "amp",
+    "head",
+    "compute",
+];
+/// Extra top-level control keys accepted only by `POST /api/runs` (not `/api/runs/estimate`).
+const RUN_CONTROL_FIELDS: &[&str] = &["checkpoint", "resume_run_id"];
+/// Allowed keys of [`folo_api::Augment`].
+const AUGMENT_FIELDS: &[&str] = &["mosaic", "mixup", "hsv", "fliplr", "scale", "translate", "close_mosaic"];
+/// Allowed keys of [`folo_api::Compute`].
+const COMPUTE_FIELDS: &[&str] = &["connection_id", "offer_id", "max_hours", "disk_gb"];
+
+/// Rejects keys in `obj` that are not in `allowed` (or `extra`), so misspelled training settings fail with `422
+/// invalid_body` instead of silently falling back to defaults.
+fn check_known_keys(
+    prefix: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+    extra: &[&str],
+) -> Result<()> {
+    for key in obj.keys() {
+        if !allowed.contains(&key.as_str()) && !extra.contains(&key.as_str()) {
+            let expected: Vec<&str> = allowed.iter().chain(extra.iter()).copied().collect();
+            let qual = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
+            return Err(body_error(format!(
+                "unknown field `{qual}`, expected one of {}",
+                expected.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", ")
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The fields of a `POST /api/runs` or `POST /api/runs/estimate` body, with the check both make before its types.
-fn run_fields(body: serde_json::Value) -> Result<serde_json::Map<String, serde_json::Value>> {
+fn run_fields(
+    body: serde_json::Value,
+    allow_run_controls: bool,
+) -> Result<serde_json::Map<String, serde_json::Value>> {
     let serde_json::Value::Object(fields) = body else {
         return Err(body_error("expected a JSON object"));
     };
@@ -63,6 +112,14 @@ fn run_fields(body: serde_json::Value) -> Result<serde_json::Map<String, serde_j
         )
         .hint("train with a teacher from the CLI: folo train --teacher <weights> (docs/CLI.md)"));
     }
+    let extra = if allow_run_controls { RUN_CONTROL_FIELDS } else { &[] };
+    check_known_keys("", &fields, TRAIN_CONFIG_FIELDS, extra)?;
+    if let Some(serde_json::Value::Object(aug)) = fields.get("augment") {
+        check_known_keys("augment", aug, AUGMENT_FIELDS, &[])?;
+    }
+    if let Some(serde_json::Value::Object(comp)) = fields.get("compute") {
+        check_known_keys("compute", comp, COMPUTE_FIELDS, &[])?;
+    }
     Ok(fields)
 }
 
@@ -72,7 +129,7 @@ pub(super) async fn create_run(
     State(st): State<AppState>,
     ApiJson(body): ApiJson<serde_json::Value>,
 ) -> Result<Response> {
-    let mut fields = run_fields(body)?;
+    let mut fields = run_fields(body, true)?;
     let checkpoint = string_field(&fields, "checkpoint")?;
     let resume = string_field(&fields, "resume_run_id")?;
     if checkpoint.is_some() {
@@ -110,7 +167,7 @@ pub(super) async fn estimate_run(
     State(st): State<AppState>,
     ApiJson(body): ApiJson<serde_json::Value>,
 ) -> Result<Json<RunEstimate>> {
-    let fields = run_fields(body)?;
+    let fields = run_fields(body, false)?;
     let config: TrainConfig =
         serde_json::from_value(serde_json::Value::Object(fields)).map_err(body_error)?;
     Ok(Json(blocking(&st, move |s| s.estimate_run(config)).await?))
@@ -420,5 +477,33 @@ mod tests {
         assert!(matches!(rx2.recv().await, Err(broadcast::error::RecvError::Closed)));
         assert!(matches!(rx3.recv().await, Err(broadcast::error::RecvError::Closed)));
         runs.shutdown(None);
+    }
+
+    /// Keeps the strict unknown-field allowlists in sync with `folo_api::{TrainConfig, Augment, Compute}`.
+    #[test]
+    fn run_field_allowlists_match_api_structs() {
+        let mut cfg: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1"}"#).unwrap();
+        cfg.compute = Some(folo_api::Compute {
+            connection_id: "cc_1".into(),
+            offer_id: "off_1".into(),
+            max_hours: 1.0,
+            disk_gb: Some(50),
+        });
+        let val = serde_json::to_value(&cfg).unwrap();
+        let top = val.as_object().unwrap();
+        assert_eq!(top.len(), TRAIN_CONFIG_FIELDS.len(), "top-level TrainConfig fields drifted: {top:?}");
+        for k in top.keys() {
+            assert!(TRAIN_CONFIG_FIELDS.contains(&k.as_str()), "missing TrainConfig field `{k}`");
+        }
+        let aug = top["augment"].as_object().unwrap();
+        assert_eq!(aug.len(), AUGMENT_FIELDS.len(), "Augment fields drifted: {aug:?}");
+        for k in aug.keys() {
+            assert!(AUGMENT_FIELDS.contains(&k.as_str()), "missing Augment field `{k}`");
+        }
+        let comp = top["compute"].as_object().unwrap();
+        assert_eq!(comp.len(), COMPUTE_FIELDS.len(), "Compute fields drifted: {comp:?}");
+        for k in comp.keys() {
+            assert!(COMPUTE_FIELDS.contains(&k.as_str()), "missing Compute field `{k}`");
+        }
     }
 }

@@ -153,6 +153,8 @@ impl Confinement {
         }
         let root = PathBuf::from(&d.path);
         self.policy.check_files([root.as_path()]).map_err(|e| in_dataset(e, id))?;
+        let base = if root.is_file() { root.parent().unwrap_or(&root).to_path_buf() } else { root };
+        let labels = LabelPaths::new(&base);
         let mut offset = 0;
         loop {
             let q = ImageQuery { split: None, offset, limit: WALK_PAGE, class: None };
@@ -161,8 +163,8 @@ impl Confinement {
             let mut files = Vec::with_capacity(page.images.len() * 2);
             for im in &page.images {
                 let f = Path::new(&im.file);
-                let img = if f.is_absolute() { f.to_path_buf() } else { root.join(f) };
-                files.push(label_path(&img));
+                let img = if f.is_absolute() { f.to_path_buf() } else { base.join(f) };
+                files.push(labels.of(&img));
                 files.push(img);
             }
             self.policy.check_files(files.iter().map(PathBuf::as_path)).map_err(|e| in_dataset(e, id))?;
@@ -191,17 +193,67 @@ impl Confinement {
     }
 }
 
-/// The YOLO label of an image: the last `images` component becomes `labels`, the extension `.txt` (the reader's
-/// convention, docs/DATA.md).
-fn label_path(img: &Path) -> PathBuf {
-    let comps: Vec<Component> = img.components().collect();
-    let idx = comps.iter().rposition(|c| c.as_os_str() == "images");
-    let mut p = PathBuf::new();
-    for (i, c) in comps.iter().enumerate() {
-        p.push(if Some(i) == idx { "labels".as_ref() } else { c.as_os_str() });
+/// The YOLO label files of one dataset: [`folo_data::dataset::yolo::label_path_for`], except that an `images` folder
+/// at or above the dataset root counts only when the root's mirror exists (`x/labels/birds` for `x/images/birds`,
+/// `x/labels` for `x/images`). Without that mirror, labels of images below the root sit beside them (`a.txt`),
+/// matching `folo_data::dataset::yolo::LabelPaths`.
+struct LabelPaths {
+    /// The dataset root, absolute and normalised.
+    root: PathBuf,
+    /// The root has an `images` ancestor whose `labels` mirror does not exist.
+    beside: bool,
+}
+
+impl LabelPaths {
+    fn new(root: &Path) -> Self {
+        // `.` first: a dataset named by a bare `data.yaml` has an empty root.
+        let spelled = Path::new(".").join(root);
+        let full = std::path::absolute(&spelled).unwrap_or_else(|_| spelled.clone());
+        let root = folo_data::paths::normalize(&spelled);
+        let comps: Vec<Component> = full.components().collect();
+        let mirror = comps.iter().rposition(|c| c.as_os_str() == std::ffi::OsStr::new("images")).map(|i| {
+            let mut mirror: PathBuf = comps[..i].iter().collect();
+            mirror.push("labels");
+            mirror.extend(&comps[i + 1..]);
+            mirror
+        });
+        let beside = mirror.as_ref().is_some_and(|m| !m.is_dir());
+        LabelPaths { root, beside }
     }
-    p.set_extension("txt");
-    p
+
+    /// The label file of `image`. An image outside the root (or under its own `images/` subfolder) follows
+    /// [`label_path_for`].
+    fn of(&self, image: &Path) -> PathBuf {
+        let beside = self.beside
+            && folo_data::paths::normalize(&Path::new(".").join(image)).strip_prefix(&self.root).is_ok_and(
+                |below| !below.components().any(|c| c.as_os_str() == std::ffi::OsStr::new("images")),
+            );
+        if beside { image.with_extension("txt") } else { label_path_for(image) }
+    }
+}
+
+/// The YOLO label path for an image: the last `images` directory component (never the filename itself) becomes
+/// `labels` and the extension becomes `.txt`. Matches `folo_data::dataset::yolo::label_path_for`.
+fn label_path_for(image: &Path) -> PathBuf {
+    let mut count = 0usize;
+    let mut last_images = None;
+    for (i, c) in image.components().enumerate() {
+        count = i + 1;
+        if c.as_os_str() == std::ffi::OsStr::new("images") {
+            last_images = Some(i);
+        }
+    }
+    let replace = last_images.filter(|&pos| pos + 1 < count);
+    let mut out = PathBuf::with_capacity(image.as_os_str().len() + 8);
+    for (i, c) in image.components().enumerate() {
+        if Some(i) == replace {
+            out.push("labels");
+        } else {
+            out.push(c.as_os_str());
+        }
+    }
+    out.set_extension("txt");
+    out
 }
 
 fn in_dataset(mut e: Error, id: &str) -> Error {
@@ -216,10 +268,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn labels_follow_the_last_images_component() {
-        let p = label_path(Path::new("/d/images/x/images/train/a.jpg"));
-        assert_eq!(p, Path::new("/d/images/x/labels/train/a.txt"));
-        assert_eq!(label_path(Path::new("/d/a.jpg")), Path::new("/d/a.txt"));
+    fn labels_follow_yolo_beside_images_and_mirror_rules() {
+        let dir = folo_test_support::TestDir::new("mcp-confine-label-paths");
+        // Dataset below an `images` ancestor with NO `labels` mirror: labels sit beside images.
+        let ds = dir.join("images").join("birds");
+        std::fs::create_dir_all(&ds).unwrap();
+        let lp = LabelPaths::new(&ds);
+        assert_eq!(lp.of(&ds.join("a.jpg")), ds.join("a.txt"));
+        // An `images/` subfolder inside the dataset still maps to `labels/` inside the dataset.
+        assert_eq!(
+            lp.of(&ds.join("images").join("train").join("a.jpg")),
+            ds.join("labels").join("train").join("a.txt")
+        );
+
+        // Once the mirror `<dir>/labels/birds` exists, labels resolve through the mirror instead of beside.
+        let mirror = dir.join("labels").join("birds");
+        std::fs::create_dir_all(&mirror).unwrap();
+        let lp_mirror = LabelPaths::new(&ds);
+        assert_eq!(lp_mirror.of(&ds.join("a.jpg")), mirror.join("a.txt"));
     }
 
     #[test]

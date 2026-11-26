@@ -249,6 +249,63 @@ async fn mock_run_estimates() {
     err(&app, post_json("/api/runs/estimate", distill), StatusCode::BAD_REQUEST, "invalid_config").await;
     let amp = json!({ "dataset_id": "ds_5a1e", "device": "cpu", "amp": true });
     err(&app, post_json("/api/runs/estimate", amp), StatusCode::NOT_IMPLEMENTED, "not_supported").await;
+    // Fine-tuning with weights of another architecture adopts the weights' arch for the estimate.
+    let models: ModelList = ok(&app, get("/api/models")).await;
+    let non_nano =
+        models.models.iter().find(|m| m.arch != Arch::N).expect("mock catalog has non-nano models");
+    let nano: RunEstimate =
+        ok(&app, post_json("/api/runs/estimate", json!({ "dataset_id": "ds_5a1e", "arch": "folo-n" }))).await;
+    let expected: RunEstimate =
+        ok(&app, post_json("/api/runs/estimate", json!({ "dataset_id": "ds_5a1e", "arch": non_nano.arch })))
+            .await;
+    assert_ne!(nano.est_total_s, expected.est_total_s, "fixture architectures must have distinct estimates");
+    let from_weights: RunEstimate = ok(
+        &app,
+        post_json(
+            "/api/runs/estimate",
+            json!({ "dataset_id": "ds_5a1e", "arch": "folo-n", "weights": non_nano.id }),
+        ),
+    )
+    .await;
+    assert_eq!(from_weights.est_total_s, expected.est_total_s);
+    assert_eq!(from_weights.basis.arch, expected.basis.arch);
+    let weights_cli = from_weights.cli.unwrap();
+    assert!(
+        weights_cli.contains("--weights ") && !weights_cli.contains("--arch "),
+        "CLI command with --weights omits --arch: {weights_cli}"
+    );
+    // Mock rejects unavailable local GPU ordinals and invalid augmentation probabilities like the real server.
+    err(
+        &app,
+        post_json("/api/runs/estimate", json!({ "dataset_id": "ds_5a1e", "device": "gpu:1" })),
+        StatusCode::NOT_FOUND,
+        "device_not_found",
+    )
+    .await;
+    err(
+        &app,
+        post_json("/api/runs/estimate", json!({ "dataset_id": "ds_5a1e", "augment": { "mosaic": -1.0 } })),
+        StatusCode::BAD_REQUEST,
+        "invalid_config",
+    )
+    .await;
+    // Misspelled config keys fail loudly with 422 invalid_body on both /api/runs and /api/runs/estimate.
+    for path in ["/api/runs/estimate", "/api/runs"] {
+        for typo in [
+            json!({ "dataset_id": "ds_5a1e", "batch_size": 4 }),
+            json!({ "dataset_id": "ds_5a1e", "augment": { "mosiac": 0.0 } }),
+            json!({ "dataset_id": "ds_5a1e", "compute": { "connection_id": "cc_1", "offer_id": "o_1", "max_hour": 1.0 } }),
+        ] {
+            err(&app, post_json(path, typo), StatusCode::UNPROCESSABLE_ENTITY, "invalid_body").await;
+        }
+    }
+    err(
+        &app,
+        post_json("/api/runs/estimate", json!({ "dataset_id": "ds_5a1e", "resume_run_id": "run_1" })),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_body",
+    )
+    .await;
     // A name too long is the run's error only: New run keeps its estimate while the name is being typed.
     let long = json!({ "dataset_id": "ds_5a1e", "name": "n".repeat(65) });
     let _: RunEstimate = ok(&app, post_json("/api/runs/estimate", long.clone())).await;
