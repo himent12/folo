@@ -456,16 +456,16 @@ pub fn reliability_diagnostics_from_scores(
     let n = scores.len();
     let mut brier_sum = 0.0f64;
     let mut bias_sum = 0.0f64;
-    for (&sf, &tp) in scores.iter().zip(is_tp) {
-        let p = sf as f64;
-        let y = if tp { 1.0 } else { 0.0 };
-        let d = p - y;
-        brier_sum += d * d;
-        bias_sum += d;
-    }
 
     let bins = match binning {
         BinningStrategy::EqualWidth => {
+            for (&sf, &tp) in scores.iter().zip(is_tp) {
+                let p = sf as f64;
+                let y = if tp { 1.0 } else { 0.0 };
+                let d = p - y;
+                brier_sum += d * d;
+                bias_sum += d;
+            }
             let m_f = num_bins as f64;
             let edges: Vec<f64> =
                 (0..=num_bins).map(|b| if b == num_bins { 1.0 } else { b as f64 / m_f }).collect();
@@ -503,7 +503,7 @@ pub fn reliability_diagnostics_from_scores(
                     .collect()
             } else {
                 // Group identical scores into atomic runs so tied confidence values are never split across
-                // bins, making equal-mass metrics strictly permutation-invariant.
+                // bins and Brier / signed-bias sums are bitwise permutation-invariant on pre-matched inputs.
                 let mut pairs: Vec<(f64, bool)> =
                     scores.iter().zip(is_tp).map(|(&s, &tp)| (s as f64, tp)).collect();
                 pairs.sort_unstable_by(|a, b| a.0.total_cmp(&b.0));
@@ -525,6 +525,13 @@ pub fn reliability_diagnostics_from_scores(
                     } else {
                         runs.push(ScoreRun { score, count: 1, tp: usize::from(is_pos) });
                     }
+                }
+                for r in &runs {
+                    let tp = r.tp as f64;
+                    let fp = (r.count - r.tp) as f64;
+                    let d_tp = r.score - 1.0;
+                    brier_sum += tp * (d_tp * d_tp) + fp * (r.score * r.score);
+                    bias_sum += r.score * r.count as f64 - tp;
                 }
 
                 let target_bins = num_bins.min(runs.len());
@@ -640,8 +647,12 @@ fn make_bin(lower: f64, upper: f64, tp: usize, fp: usize, sum_conf: f64) -> Reli
 }
 
 /// Compute pooled and per-class detection calibration diagnostics (equal-width ECE/MCE or equal-mass
-/// ACE/MCE, Brier score, signed bias, overconfidence error, and Static Calibration Error `SCE`) directly
-/// from `(preds, truths)` images.
+/// adaptive binning, equal-bin-weight error, Brier score, signed bias, overconfidence error, and class-wise
+/// SCE under `EqualWidth`) directly from `(preds, truths)` images.
+///
+/// Detections are matched per image and class in descending score order (ties broken by input order, matching
+/// COCO / [`crate::metrics::compute_detection_calibration`]); permutation invariance of
+/// [`BinningStrategy::EqualMass`] applies to the resulting pre-matched `(score, is_tp)` pairs.
 pub fn compute_calibration_report<P, T>(
     num_classes: usize,
     cfg: &CalibrationReportConfig,

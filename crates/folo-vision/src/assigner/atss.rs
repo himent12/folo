@@ -327,8 +327,11 @@ pub fn assign_atss(
                 max_iou = iou;
             }
         }
-        let (mean, var) = if min_iou == max_iou {
-            (min_iou, 0.0)
+        let raw_thresh = if min_iou == max_iou {
+            min_iou
+        } else if m == 2 && !cfg.unbiased_std {
+            // For two candidates with population std, mean + std == (a + b)/2 + |a - b|/2 == max(a, b) identically.
+            max_iou
         } else {
             let ref_iou = min_iou;
             let mean = ref_iou + cands.iter().map(|&(_, iou)| iou - ref_iou).sum::<f64>() / m as f64;
@@ -341,9 +344,9 @@ pub fn assign_atss(
                 })
                 .sum::<f64>()
                 / denom;
-            (mean, var)
+            mean + var.sqrt()
         };
-        let thresh = (mean + var.sqrt()).max(min_thr);
+        let thresh = raw_thresh.max(min_thr);
         out.iou_thresholds[g] = thresh;
 
         for &(a, iou) in &cands {

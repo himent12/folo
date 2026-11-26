@@ -354,35 +354,21 @@ impl SeesawLoss {
 
     /// Update cumulative class counts with `targets` (matching Wang et al. CVPR 2021) and compute Seesaw Loss.
     ///
-    /// Validates `logits` and `targets` before mutating counts so an error leaves internal state unchanged.
+    /// Evaluates the loss against staged counts and commits the updated counts only on success so any error
+    /// (invalid config, mismatched shapes, or backend failure) leaves internal state unchanged.
     pub fn forward(&mut self, logits: &Tensor, targets: &[usize]) -> Result<Tensor> {
-        if logits.dtype() != DType::F32 {
-            return Err(Error::DTypeMismatch {
-                op: "seesaw_loss",
-                expected: DType::F32,
-                got: logits.dtype(),
-            });
-        }
-        let (n, c) = logits.dims2().map_err(|_| {
-            invalid(format!("seesaw_loss: logits must be rank 2 [N, C], got {}", logits.shape()))
-        })?;
-        if c != self.counts.len() {
-            return Err(invalid(format!(
-                "SeesawLoss::forward: logits classes {c} != tracker num_classes {}",
-                self.counts.len()
-            )));
-        }
-        if targets.len() != n {
-            return Err(invalid(format!("seesaw_loss: targets length {} != N ({n})", targets.len())));
-        }
+        let c = self.counts.len();
         for (i, &y) in targets.iter().enumerate() {
             if y >= c {
                 return Err(invalid(format!("seesaw_loss: targets[{i}] = {y} >= C ({c})")));
             }
         }
+        let mut staged = self.counts.clone();
         for &y in targets {
-            self.counts[y] += 1.0;
+            staged[y] += 1.0;
         }
-        seesaw_loss(logits, targets, &self.counts, &self.cfg)
+        let loss = seesaw_loss(logits, targets, &staged, &self.cfg)?;
+        self.counts = staged;
+        Ok(loss)
     }
 }

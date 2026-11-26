@@ -130,6 +130,13 @@ fn atss_handles_empty_degenerate_disjoint_and_nonfinite() {
         (0..9).map(|i| Xyxy::new(i as f32 * 0.5, 0.0, i as f32 * 0.5 + 4.0, 9.0)).collect();
     let tie9 = assign_atss(&tie9_anchors, &[9], &[Xyxy::new(0.0, 0.0, 9.0, 9.0)], &[0], 1, &cfg).unwrap();
     assert_eq!(tie9.num_fg, 9, "exact 4/9 IoU tie across 9 candidates must keep all 9");
+
+    // Two-anchor population pool: GT [0,0,6,1] with anchors [0,0,3,1] (IoU=0.5) and [0,0,5,1] (IoU=5/6).
+    // Mathematically mean + pop_std == max_iou == 5/6; must keep anchor 1 without 1-ULP overshoot.
+    let pair_anchors = [Xyxy::new(0.0, 0.0, 3.0, 1.0), Xyxy::new(0.0, 0.0, 5.0, 1.0)];
+    let pair = assign_atss(&pair_anchors, &[2], &[Xyxy::new(0.0, 0.0, 6.0, 1.0)], &[0], 1, &cfg).unwrap();
+    assert_eq!(pair.num_fg, 1, "two-anchor pool must keep the max-IoU anchor");
+    assert!(pair.fg_mask[1] && !pair.fg_mask[0]);
 }
 
 #[test]
@@ -167,6 +174,8 @@ fn gmm_1d_bimodal_separation_and_tail_safety() {
     // unrepresentable variance spreads (`[0.0, 1e160]`) return Error::Config instead of NaN/Inf.
     let huge_const = fit_gmm_1d_two_component(&[1e308, 1e308], 20, 1e-6, 1e-6).unwrap();
     assert!(huge_const.pos_mean == 1e308 && huge_const.log_likelihood.is_finite());
+    let huge_var = fit_gmm_1d_two_component(&[1.0], 20, 1e-6, 1e308).unwrap();
+    assert!(huge_var.log_likelihood.is_finite(), "singleton with var_floor=1e308 must stay finite");
     assert!(fit_gmm_1d_two_component(&[0.0, 1e160], 20, 1e-6, 1e-6).is_err());
 }
 

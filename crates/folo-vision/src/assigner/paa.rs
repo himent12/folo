@@ -148,7 +148,7 @@ pub struct Gmm1dResult {
 #[inline]
 fn log_gaussian_1d(x: f64, mu: f64, var: f64) -> f64 {
     let diff = x - mu;
-    -0.5 * ((2.0 * std::f64::consts::PI * var).ln() + (diff * diff) / var)
+    -0.5 * ((2.0 * std::f64::consts::PI).ln() + var.ln() + (diff * diff) / var)
 }
 
 /// Numerically stable `ln(exp(a) + exp(b))`.
@@ -237,6 +237,9 @@ pub fn fit_gmm_1d_two_component(
     if n == 1 {
         let x0 = scores[0];
         let ll = log_gaussian_1d(x0, x0, var_floor);
+        if !ll.is_finite() {
+            return Err(Error::Config("fit_gmm_1d_two_component: log-likelihood overflows f64".into()));
+        }
         return Ok(Gmm1dResult {
             pos_mean: x0,
             neg_mean: x0,

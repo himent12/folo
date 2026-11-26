@@ -174,6 +174,15 @@ fn seesaw_tensor_grad_check_and_stateful_tracker() {
     assert_eq!(custom.counts(), &[10.0, 3.0, 2.0]);
     custom.reset();
     assert_eq!(custom.counts(), &[1.0, 1.0, 1.0]);
+
+    // A deserialized invalid config must fail forward() without mutating counts.
+    let mut bad_tracker: SeesawLoss = serde_json::from_str(
+        r#"{"cfg":{"p":-1.0,"q":2.0,"eps":1e-6,"detach_compensation":true,"reduction":"mean"},"counts":[1.0,1.0]}"#,
+    )
+    .unwrap();
+    let z2 = Tensor::from_slice(&[0.5f32, -0.5], [1, 2]).unwrap();
+    assert!(bad_tracker.forward(&z2, &[0]).is_err());
+    assert_eq!(bad_tracker.counts(), &[1.0, 1.0]);
 }
 
 #[test]
