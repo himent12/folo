@@ -261,14 +261,13 @@ impl Uploads {
             return Err(bad("format only applies to kind dataset"));
         }
         if let Some(fp) = req.fingerprint.as_deref() {
-            let trimmed = fp.trim();
-            if trimmed.is_empty() {
+            if fp.trim().is_empty() {
                 return Err(bad("fingerprint must not be empty"));
             }
-            if trimmed.chars().any(char::is_control) {
+            if fp.chars().any(char::is_control) {
                 return Err(bad("fingerprint must not contain line breaks or other control characters"));
             }
-            if trimmed.chars().count() > MAX_FINGERPRINT_CHARS {
+            if fp.chars().count() > MAX_FINGERPRINT_CHARS {
                 return Err(bad(&format!("fingerprint is longer than {MAX_FINGERPRINT_CHARS} characters")));
             }
         }
@@ -299,7 +298,7 @@ impl Uploads {
             kind: req.kind,
             name: req.name.trim().to_string(),
             format: req.format,
-            fingerprint: req.fingerprint.as_deref().map(|f| f.trim().to_string()),
+            fingerprint: req.fingerprint.clone(),
             dir: guard.disarm(),
             state: Mutex::new(progress),
         });

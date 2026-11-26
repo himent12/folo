@@ -625,9 +625,7 @@ impl Store for RealStore {
 
     fn create_upload(&self, req: CreateUpload) -> Result<UploadCreated> {
         Uploads::check(&req)?;
-        if let Some(existing) =
-            req.fingerprint.as_deref().map(str::trim).and_then(|f| self.uploaded(req.kind, f))
-        {
+        if let Some(existing) = req.fingerprint.as_deref().and_then(|f| self.uploaded(req.kind, f)) {
             return Ok(UploadCreated { upload: None, existing: Some(existing) });
         }
         Ok(UploadCreated { upload: Some(self.uploads.create(&req)?), existing: None })

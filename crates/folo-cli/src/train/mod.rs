@@ -94,7 +94,8 @@ fn discard_if_empty(run_dir: &Path, out: Out) {
 }
 
 /// Validates an explicit `--name` before opening the dataset or creating any folder under `--project`.
-/// Must be a single safe folder name (no empty/blank value, control characters, path separators, `.` / `..`, or `:`).
+/// Must be a single safe folder name under the current OS's path rules (no empty/blank value, control
+/// characters, path separators, or `.` / `..`, plus Windows-forbidden characters and `NUL` on Windows).
 pub(super) fn check_run_name(raw: &str) -> Result<String, CliError> {
     let bad = |msg: String| {
         CliError::new(ExitCode::Usage, "invalid_config", msg)
@@ -107,20 +108,25 @@ pub(super) fn check_run_name(raw: &str) -> Result<String, CliError> {
     if name.is_empty() {
         return Err(bad("--name must not be empty".into()));
     }
-    if matches!(name, "." | "..") || name.contains(['/', '\\', ':']) {
+    let mut components = Path::new(name).components();
+    let is_single_normal =
+        matches!(components.next(), Some(std::path::Component::Normal(_))) && components.next().is_none();
+    if !is_single_normal || name.contains('/') {
         return Err(bad(format!(
-            "--name `{name}` must be a single folder name (no `/`, `\\`, `:`, `.`, or `..`)"
+            "--name `{name}` must be a single folder name without path separators, `.`, or `..`"
         )));
     }
     #[cfg(windows)]
     {
-        if name.bytes().any(|b| matches!(b, b'<' | b'>' | b'"' | b'|' | b'?' | b'*')) {
+        if name.contains(['\\', ':'])
+            || name.bytes().any(|b| matches!(b, b'<' | b'>' | b'"' | b'|' | b'?' | b'*'))
+        {
             return Err(bad(format!("--name `{name}` contains characters Windows forbids in folder names")));
         }
         if name.ends_with('.') {
             return Err(bad(format!("--name `{name}` must not end with a dot on Windows")));
         }
-        if name.trim_end_matches(['.', ' ']).eq_ignore_ascii_case("nul") {
+        if name.eq_ignore_ascii_case("nul") {
             return Err(bad(format!("--name `{name}` uses the reserved Windows device name NUL")));
         }
     }

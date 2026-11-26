@@ -486,6 +486,9 @@ fn server_cli_commands_train_the_servers_config() {
         let crate::cli::Command::Train(args) = cli.command else { panic!("not train: {}", cmd.cli) };
         assert_eq!(args.data.as_deref(), Some(data), "{}", cmd.cli);
         assert_eq!(args.weights.as_deref(), weights, "{}", cmd.cli);
+        if let Some(name) = args.name.as_deref() {
+            super::check_run_name(name).unwrap_or_else(|e| panic!("{}: {e:?}", cmd.cli));
+        }
         // Read as the server reads the registered dataset (runs/mod.rs `data_format`).
         let want_format = match format {
             folo_api::DatasetFormat::Auto => folo_data::Format::Auto,
@@ -502,14 +505,28 @@ fn server_cli_commands_train_the_servers_config() {
     }
 }
 
-/// `--name` rejects blank values, control characters, path separators, `.`/`..`, and `:` before creating any
-/// directory under `--project`, while keeping ordinary names (including spaces, quotes, and leading dashes).
+/// `--name` rejects blank values, control characters, path separators, and `.`/`..` (plus Windows-forbidden
+/// characters and `NUL` on Windows) before creating any directory under `--project`, while keeping valid
+/// single-component names under the current OS's rules (including `baseline:aug2` on Unix, spaces, quotes,
+/// and leading dashes).
 #[test]
 fn check_run_name_blocks_traversal_and_blank_names() {
     for ok in ["shapes-n", "  shapes-n  ", "my run 'two'", "--amp", "v1.0"] {
         assert_eq!(super::check_run_name(ok).unwrap(), ok.trim(), "{ok}");
     }
-    for bad in ["", "   ", ".", "..", "../escape", "sub/run", r"sub\run", "a:stream", "a\nb", "a\0b"] {
+    #[cfg(unix)]
+    {
+        use clap::Parser;
+        // Names with `:` are valid single path components on Unix and are emitted verbatim by `folo-server`.
+        assert_eq!(super::check_run_name("baseline:aug2").unwrap(), "baseline:aug2");
+        let mut api: folo_api::TrainConfig = serde_json::from_value(json!({ "dataset_id": "ds_1" })).unwrap();
+        api.name = "baseline:aug2".into();
+        let cmd = folo_server::cli::train_command(&api, "/tmp/data", folo_api::DatasetFormat::Auto, None);
+        let cli = crate::cli::Cli::try_parse_from(&cmd.argv).unwrap();
+        let crate::cli::Command::Train(args) = cli.command else { panic!("not train") };
+        assert_eq!(super::check_run_name(args.name.as_deref().unwrap()).unwrap(), "baseline:aug2");
+    }
+    for bad in ["", "   ", ".", "..", "../escape", "sub/run", "a\nb", "a\0b"] {
         let err = super::check_run_name(bad).unwrap_err();
         assert_eq!(
             (err.exit, err.code.as_str()),
@@ -518,7 +535,7 @@ fn check_run_name_blocks_traversal_and_blank_names() {
         );
     }
     #[cfg(windows)]
-    for bad in ["bad<name>", "trailing.", "NUL"] {
+    for bad in [r"sub\run", "a:stream", "baseline:aug2", "bad<name>", "trailing.", "NUL"] {
         let err = super::check_run_name(bad).unwrap_err();
         assert_eq!(
             (err.exit, err.code.as_str()),

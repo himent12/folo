@@ -95,6 +95,9 @@ impl Inner {
     }
 
     pub(super) async fn predict(&self, a: PredictArgs) -> Result<Output, Error> {
+        if a.model_id.trim().is_empty() {
+            return Err(invalid_arguments("model_id must not be empty"));
+        }
         check_unit("conf", a.conf)?;
         check_unit("iou", a.iou)?;
         if !(1..=300).contains(&a.max_det) {
@@ -107,13 +110,24 @@ impl Inner {
                 file = Some(folo_api::json::path(&p));
                 let paths = self.paths.clone();
                 let read = move || read_image(&paths.resolve(&p)?);
-                PredictSource::Upload(tokio::task::spawn_blocking(read).await.map_err(join)??)
+                let bytes = tokio::task::spawn_blocking(read).await.map_err(join)??;
+                if bytes.is_empty() {
+                    return Err(invalid_arguments("image must not be empty"));
+                }
+                PredictSource::Upload(bytes)
             }
             (None, Some(b64), None, None) => {
                 let decode = move || decode_image_base64(&b64, MAX_IMAGE_BYTES);
-                PredictSource::Upload(tokio::task::spawn_blocking(decode).await.map_err(join)??)
+                let bytes = tokio::task::spawn_blocking(decode).await.map_err(join)??;
+                if bytes.is_empty() {
+                    return Err(invalid_arguments("image must not be empty"));
+                }
+                PredictSource::Upload(bytes)
             }
             (None, None, Some(dataset_id), Some(image_id)) => {
+                if dataset_id.trim().is_empty() || image_id.trim().is_empty() {
+                    return Err(invalid_arguments("dataset_id and image_id must not be empty"));
+                }
                 self.ensure_dataset(&dataset_id).await?;
                 PredictSource::Dataset { dataset_id, image_id }
             }
@@ -442,6 +456,57 @@ mod tests {
                 .err()
                 .unwrap();
             assert_eq!(err.body.code, "invalid_arguments");
+        }
+
+        // `predict` rejects blank `model_id`, empty `image_base64`, and blank `dataset_id`/`image_id`
+        // identically on both embedded and proxied backends before reading files or hitting the store.
+        let embedded = FoloMcp::new(
+            Arc::new(folo_server::MockStore::new()),
+            None,
+            Options {
+                data_dir: home.to_path_buf(),
+                read_only: false,
+                confine: false,
+                device: "cpu".into(),
+                published_weights: None,
+            },
+        );
+        for backend in [&server, &embedded] {
+            for args in [
+                PredictArgs {
+                    model_id: "   ".into(),
+                    image_path: None,
+                    image_base64: Some("AAAA".into()),
+                    dataset_id: None,
+                    image_id: None,
+                    conf: 0.25,
+                    iou: 0.7,
+                    max_det: 10,
+                },
+                PredictArgs {
+                    model_id: "m_1".into(),
+                    image_path: None,
+                    image_base64: Some("".into()),
+                    dataset_id: None,
+                    image_id: None,
+                    conf: 0.25,
+                    iou: 0.7,
+                    max_det: 10,
+                },
+                PredictArgs {
+                    model_id: "m_1".into(),
+                    image_path: None,
+                    image_base64: None,
+                    dataset_id: Some("  ".into()),
+                    image_id: Some("img_1".into()),
+                    conf: 0.25,
+                    iou: 0.7,
+                    max_det: 10,
+                },
+            ] {
+                let err = backend.inner.predict(args).await.err().unwrap();
+                assert_eq!(err.body.code, "invalid_arguments");
+            }
         }
 
         assert_eq!(hits.load(Ordering::SeqCst), 0, "invalid arguments must never hit the proxy server");
