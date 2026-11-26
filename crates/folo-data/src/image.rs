@@ -25,11 +25,16 @@ impl std::fmt::Debug for Image {
 impl Image {
     /// A `width x height` image filled with one colour.
     pub fn new(width: u32, height: u32, fill: [u8; 3]) -> Self {
-        let n = width as usize * height as usize;
+        let total = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(3))
+            .expect("image dimensions overflow");
         let data = if fill[0] == fill[1] && fill[1] == fill[2] {
-            vec![fill[0]; n * 3]
+            vec![fill[0]; total]
         } else {
-            fill.iter().copied().cycle().take(n * 3).collect()
+            let mut buf = vec![0u8; total];
+            fill_rgb_pattern(&mut buf, fill);
+            buf
         };
         Image { width, height, data }
     }
@@ -71,11 +76,19 @@ impl Image {
     pub fn fill_rect(&mut self, x0: i64, y0: i64, x1: i64, y1: i64, p: [u8; 3]) {
         let (w, h) = (self.width as i64, self.height as i64);
         let (x0, x1, y0, y1) = (x0.clamp(0, w), x1.clamp(0, w), y0.clamp(0, h), y1.clamp(0, h));
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
         let stride = self.stride();
+        let x0b = x0 as usize * 3;
+        let x1b = x1 as usize * 3;
+        let is_grey = p[0] == p[1] && p[1] == p[2];
         for y in y0..y1 {
-            let row = &mut self.data[y as usize * stride..][x0 as usize * 3..x1 as usize * 3];
-            for px in row.as_chunks_mut::<3>().0.iter_mut() {
-                px.copy_from_slice(&p);
+            let row = &mut self.data[y as usize * stride..][x0b..x1b];
+            if is_grey {
+                row.fill(p[0]);
+            } else {
+                fill_rgb_pattern(row, p);
             }
         }
     }
@@ -171,6 +184,29 @@ impl Image {
             }
         }
         Image { width: ow as u32, height: oh as u32, data: out }
+    }
+}
+
+/// Fills an interleaved RGB slice with one colour using doubling `copy_within` (`memcpy`) for non-grey fills.
+#[inline]
+fn fill_rgb_pattern(buf: &mut [u8], fill: [u8; 3]) {
+    let n = buf.len();
+    if n < 3 {
+        return;
+    }
+    if fill[0] == fill[1] && fill[1] == fill[2] {
+        buf.fill(fill[0]);
+        return;
+    }
+    let seed_len = n.min(48);
+    for px in buf[..seed_len].as_chunks_mut::<3>().0.iter_mut() {
+        *px = fill;
+    }
+    let mut filled = seed_len - (seed_len % 3);
+    while filled < n {
+        let chunk = filled.min(n - filled);
+        buf.copy_within(0..chunk, filled);
+        filled += chunk;
     }
 }
 
@@ -767,5 +803,37 @@ mod tests {
             }
         }
         assert!(decode_png(&encode(&grid(), ImageFormat::Jpeg(90)).unwrap()).is_none());
+    }
+
+    #[test]
+    fn non_grey_fill_and_inverted_fill_rect_edge_cases() {
+        for &(w, h) in &[(0u32, 0u32), (1, 1), (3, 1), (1, 3), (17, 19), (65, 33)] {
+            let img = Image::new(w, h, [11, 122, 233]);
+            assert_eq!(img.data.len(), w as usize * h as usize * 3);
+            assert!(img.data.as_chunks::<3>().0.iter().all(|&px| px == [11, 122, 233]), "{w}x{h}");
+        }
+        let mut img = Image::new(10, 8, [5, 6, 7]);
+        let orig = img.clone();
+        // Inverted or out-of-bounds rects are no-ops without panicking.
+        img.fill_rect(8, 2, 3, 6, [255, 0, 0]);
+        img.fill_rect(2, 6, 8, 2, [255, 0, 0]);
+        img.fill_rect(-10, -5, -1, 4, [255, 0, 0]);
+        img.fill_rect(20, 2, 30, 6, [255, 0, 0]);
+        assert_eq!(img, orig);
+        // Valid clipped grey and non-grey fills.
+        img.fill_rect(-2, 1, 4, 3, [90, 90, 90]);
+        img.fill_rect(6, 5, 15, 12, [10, 20, 30]);
+        for y in 0..8 {
+            for x in 0..10 {
+                let want = if x < 4 && (1..3).contains(&y) {
+                    [90, 90, 90]
+                } else if x >= 6 && y >= 5 {
+                    [10, 20, 30]
+                } else {
+                    [5, 6, 7]
+                };
+                assert_eq!(img.pixel(x, y), want, "({x},{y})");
+            }
+        }
     }
 }

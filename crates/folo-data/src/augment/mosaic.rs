@@ -12,8 +12,8 @@ use crate::warp::{Plane, PlaneTiles, Tile};
 ///
 /// The centre is drawn from `[s/2, 3s/2)` in both axes; image 0 goes top-left of it, 1 top-right, 2 bottom-left and
 /// 3 bottom-right, each cropped by the canvas edge. Inputs are normally pre-resized so their long side is `s`. Boxes
-/// are offset and clipped to the canvas; follow with an affine (as [`crate::TrainTransform`] does) to get back to
-/// `s x s` and to drop boxes that became too small.
+/// are offset and clipped to each image's visible tile on the canvas; follow with an affine (as
+/// [`crate::TrainTransform`] does) to get back to `s x s` and to drop boxes that became too small.
 pub fn mosaic4(parts: [&Sample; 4], s: u32, rng: &mut Rng) -> Sample {
     let (plane, boxes) = mosaic_plane(parts, s, rng);
     Sample { image: plane.render(), boxes }
@@ -53,19 +53,19 @@ pub(crate) fn mosaic_plane<'a>(parts: [&'a Sample; 4], s: u32, rng: &mut Rng) ->
         };
         if x2a > x1a && y2a > y1a {
             tiles.push(Tile { img: &part.image, dst: [x1a, y1a, x2a, y2a], src: [x1b, y1b] });
-        }
-        let (padw, padh) = ((x1a - x1b) as f32, (y1a - y1b) as f32);
-        let csf = cs as f32;
-        for b in &part.boxes {
-            let [x1, y1, x2, y2] = b.pixel_xyxy(part.image.width, part.image.height);
-            let c = [
-                (x1 + padw).clamp(0.0, csf),
-                (y1 + padh).clamp(0.0, csf),
-                (x2 + padw).clamp(0.0, csf),
-                (y2 + padh).clamp(0.0, csf),
-            ];
-            if c[2] > c[0] && c[3] > c[1] {
-                boxes.push(BBox::from_pixel_xyxy(b.class, c, cs as u32, cs as u32));
+            let (padw, padh) = ((x1a - x1b) as f32, (y1a - y1b) as f32);
+            let (tx0, ty0, tx1, ty1) = (x1a as f32, y1a as f32, x2a as f32, y2a as f32);
+            for b in &part.boxes {
+                let [x1, y1, x2, y2] = b.pixel_xyxy(part.image.width, part.image.height);
+                let c = [
+                    (x1 + padw).clamp(tx0, tx1),
+                    (y1 + padh).clamp(ty0, ty1),
+                    (x2 + padw).clamp(tx0, tx1),
+                    (y2 + padh).clamp(ty0, ty1),
+                ];
+                if c[2] > c[0] && c[3] > c[1] {
+                    boxes.push(BBox::from_pixel_xyxy(b.class, c, cs as u32, cs as u32));
+                }
             }
         }
     }

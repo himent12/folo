@@ -160,42 +160,54 @@ impl Letterbox {
         let rows = RowResizer::new(img, rw as u32, rh as u32);
         let (r, rest) = dst.split_at_mut(plane);
         let (g, b) = rest.split_at_mut(plane);
+        let right = left + rw;
+        if top > 0 {
+            let top_len = top * ow;
+            r[..top_len].fill(pad);
+            g[..top_len].fill(pad);
+            b[..top_len].fill(pad);
+        }
+        let bot_off = (top + rh) * ow;
+        if bot_off < plane {
+            r[bot_off..].fill(pad);
+            g[bot_off..].fill(pad);
+            b[bot_off..].fill(pad);
+        }
+        let top_off = top * ow;
+        let (ra, ga, ba) = (&mut r[top_off..bot_off], &mut g[top_off..bot_off], &mut b[top_off..bot_off]);
         let band = |y0: usize, r: &mut [f32], g: &mut [f32], b: &mut [f32]| {
             let mut scratch = rows.band_scratch();
             for (i, ((r, g), b)) in
                 r.chunks_exact_mut(ow).zip(g.chunks_exact_mut(ow)).zip(b.chunks_exact_mut(ow)).enumerate()
             {
-                let y = y0 + i;
-                if y < top || y >= top + rh {
-                    r.fill(pad);
-                    g.fill(pad);
-                    b.fill(pad);
-                    continue;
+                if left > 0 {
+                    r[..left].fill(pad);
+                    g[..left].fill(pad);
+                    b[..left].fill(pad);
                 }
-                r[..left].fill(pad);
-                r[left + rw..].fill(pad);
-                g[..left].fill(pad);
-                g[left + rw..].fill(pad);
-                b[..left].fill(pad);
-                b[left + rw..].fill(pad);
+                if right < ow {
+                    r[right..].fill(pad);
+                    g[right..].fill(pad);
+                    b[right..].fill(pad);
+                }
                 rows.row_planar_f32_scale(
-                    y - top,
+                    y0 + i,
                     scale,
-                    &mut r[left..left + rw],
-                    &mut g[left..left + rw],
-                    &mut b[left..left + rw],
+                    &mut r[left..right],
+                    &mut g[left..right],
+                    &mut b[left..right],
                     &mut scratch,
                 );
             }
         };
         let band_rows = (64 * 1024 / (12 * ow)).max(1);
-        if crate::par::is_serial() || 12 * plane < 64 * 1024 {
-            band(0, r, g, b);
+        if crate::par::is_serial() || 12 * ra.len() < 64 * 1024 {
+            band(0, ra, ga, ba);
         } else {
             let n = band_rows * ow;
-            r.par_chunks_mut(n)
-                .zip(g.par_chunks_mut(n))
-                .zip(b.par_chunks_mut(n))
+            ra.par_chunks_mut(n)
+                .zip(ga.par_chunks_mut(n))
+                .zip(ba.par_chunks_mut(n))
                 .enumerate()
                 .for_each(|(t, ((r, g), b))| band(t * band_rows, r, g, b));
         }
@@ -211,8 +223,23 @@ impl Letterbox {
         }
         let (left, top, rw, rh) = self.checked_window();
         let rows = RowResizer::new(img, rw as u32, rh as u32);
+        let right = left + rw;
+        let top_off = top * ow;
+        let bot_off = (top + rh) * ow;
         match dst {
             PlanarDst::U8 { r, g, b } => {
+                if top_off > 0 {
+                    r[..top_off].fill(pad_value);
+                    g[..top_off].fill(pad_value);
+                    b[..top_off].fill(pad_value);
+                }
+                if bot_off < plane {
+                    r[bot_off..].fill(pad_value);
+                    g[bot_off..].fill(pad_value);
+                    b[bot_off..].fill(pad_value);
+                }
+                let (ra, ga, ba) =
+                    (&mut r[top_off..bot_off], &mut g[top_off..bot_off], &mut b[top_off..bot_off]);
                 let band = |y0: usize, r: &mut [u8], g: &mut [u8], b: &mut [u8]| {
                     let mut scratch = rows.band_scratch();
                     for (i, ((r, g), b)) in r
@@ -221,42 +248,51 @@ impl Letterbox {
                         .zip(b.chunks_exact_mut(ow))
                         .enumerate()
                     {
-                        let y = y0 + i;
-                        if y < top || y >= top + rh {
-                            r.fill(pad_value);
-                            g.fill(pad_value);
-                            b.fill(pad_value);
-                            continue;
+                        if left > 0 {
+                            r[..left].fill(pad_value);
+                            g[..left].fill(pad_value);
+                            b[..left].fill(pad_value);
                         }
-                        r[..left].fill(pad_value);
-                        r[left + rw..].fill(pad_value);
-                        g[..left].fill(pad_value);
-                        g[left + rw..].fill(pad_value);
-                        b[..left].fill(pad_value);
-                        b[left + rw..].fill(pad_value);
+                        if right < ow {
+                            r[right..].fill(pad_value);
+                            g[right..].fill(pad_value);
+                            b[right..].fill(pad_value);
+                        }
                         rows.row_planar_u8(
-                            y - top,
-                            &mut r[left..left + rw],
-                            &mut g[left..left + rw],
-                            &mut b[left..left + rw],
+                            y0 + i,
+                            &mut r[left..right],
+                            &mut g[left..right],
+                            &mut b[left..right],
                             &mut scratch,
                         );
                     }
                 };
                 let band_rows = (64 * 1024 / (3 * ow)).max(1);
-                if crate::par::is_serial() || 3 * plane < 64 * 1024 {
-                    band(0, r, g, b);
+                if crate::par::is_serial() || 3 * ra.len() < 64 * 1024 {
+                    band(0, ra, ga, ba);
                 } else {
                     let n = band_rows * ow;
-                    r.par_chunks_mut(n)
-                        .zip(g.par_chunks_mut(n))
-                        .zip(b.par_chunks_mut(n))
+                    ra.par_chunks_mut(n)
+                        .zip(ga.par_chunks_mut(n))
+                        .zip(ba.par_chunks_mut(n))
                         .enumerate()
                         .for_each(|(t, ((r, g), b))| band(t * band_rows, r, g, b));
                 }
             }
             PlanarDst::F32Div255 { r, g, b } => {
                 let pad = pad_value as f32 / 255.0;
+                if top_off > 0 {
+                    r[..top_off].fill(pad);
+                    g[..top_off].fill(pad);
+                    b[..top_off].fill(pad);
+                }
+                if bot_off < plane {
+                    r[bot_off..].fill(pad);
+                    g[bot_off..].fill(pad);
+                    b[bot_off..].fill(pad);
+                }
+                let (ra, ga, ba) =
+                    (&mut r[top_off..bot_off], &mut g[top_off..bot_off], &mut b[top_off..bot_off]);
                 let band = |y0: usize, r: &mut [f32], g: &mut [f32], b: &mut [f32]| {
                     let mut scratch = rows.band_scratch();
                     for (i, ((r, g), b)) in r
@@ -265,36 +301,33 @@ impl Letterbox {
                         .zip(b.chunks_exact_mut(ow))
                         .enumerate()
                     {
-                        let y = y0 + i;
-                        if y < top || y >= top + rh {
-                            r.fill(pad);
-                            g.fill(pad);
-                            b.fill(pad);
-                            continue;
+                        if left > 0 {
+                            r[..left].fill(pad);
+                            g[..left].fill(pad);
+                            b[..left].fill(pad);
                         }
-                        r[..left].fill(pad);
-                        r[left + rw..].fill(pad);
-                        g[..left].fill(pad);
-                        g[left + rw..].fill(pad);
-                        b[..left].fill(pad);
-                        b[left + rw..].fill(pad);
+                        if right < ow {
+                            r[right..].fill(pad);
+                            g[right..].fill(pad);
+                            b[right..].fill(pad);
+                        }
                         rows.row_planar_f32_div255(
-                            y - top,
-                            &mut r[left..left + rw],
-                            &mut g[left..left + rw],
-                            &mut b[left..left + rw],
+                            y0 + i,
+                            &mut r[left..right],
+                            &mut g[left..right],
+                            &mut b[left..right],
                             &mut scratch,
                         );
                     }
                 };
                 let band_rows = (64 * 1024 / (12 * ow)).max(1);
-                if crate::par::is_serial() || 12 * plane < 64 * 1024 {
-                    band(0, r, g, b);
+                if crate::par::is_serial() || 12 * ra.len() < 64 * 1024 {
+                    band(0, ra, ga, ba);
                 } else {
                     let n = band_rows * ow;
-                    r.par_chunks_mut(n)
-                        .zip(g.par_chunks_mut(n))
-                        .zip(b.par_chunks_mut(n))
+                    ra.par_chunks_mut(n)
+                        .zip(ga.par_chunks_mut(n))
+                        .zip(ba.par_chunks_mut(n))
                         .enumerate()
                         .for_each(|(t, ((r, g), b))| band(t * band_rows, r, g, b));
                 }
@@ -319,25 +352,34 @@ impl Letterbox {
         let (left, top, rw, rh) = self.checked_window();
         let pad_word = u32::from_le_bytes([pad_value, pad_value, pad_value, 0]);
         let rows = RowResizer::new(img, rw as u32, rh as u32);
+        let right = left + rw;
+        let top_off = top * ow;
+        let bot_off = (top + rh) * ow;
+        if top_off > 0 {
+            dst[..top_off].fill(pad_word);
+        }
+        if bot_off < plane {
+            dst[bot_off..].fill(pad_word);
+        }
+        let active = &mut dst[top_off..bot_off];
         let band = |y0: usize, out: &mut [u32]| {
             let mut scratch = rows.band_scratch();
             for (i, drow) in out.chunks_exact_mut(ow).enumerate() {
-                let y = y0 + i;
-                if y < top || y >= top + rh {
-                    drow.fill(pad_word);
-                    continue;
+                if left > 0 {
+                    drow[..left].fill(pad_word);
                 }
-                drow[..left].fill(pad_word);
-                drow[left + rw..].fill(pad_word);
-                rows.row_rgb0_u32(y - top, &mut drow[left..left + rw], &mut scratch);
+                if right < ow {
+                    drow[right..].fill(pad_word);
+                }
+                rows.row_rgb0_u32(y0 + i, &mut drow[left..right], &mut scratch);
             }
         };
         let band_rows = (64 * 1024 / (4 * ow)).max(1);
-        if crate::par::is_serial() || 4 * plane < 64 * 1024 {
-            band(0, dst);
+        if crate::par::is_serial() || 4 * active.len() < 64 * 1024 {
+            band(0, active);
         } else {
             let n = band_rows * ow;
-            dst.par_chunks_mut(n).enumerate().for_each(|(t, o)| band(t * band_rows, o));
+            active.par_chunks_mut(n).enumerate().for_each(|(t, o)| band(t * band_rows, o));
         }
     }
 

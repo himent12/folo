@@ -111,6 +111,12 @@ pub fn resize_plan(src_w: u32, src_h: u32, width: u32, height: u32) -> ResizePla
 
 /// Resizes `src` to `width x height` with bilinear filtering.
 pub fn resize(src: &Image, width: u32, height: u32) -> Image {
+    assert!(width > 0 && height > 0 && src.width > 0 && src.height > 0, "resize to or from an empty image");
+    let fx = (src.width / width).max(1);
+    let fy = (src.height / height).max(1);
+    if (fx >= 2 || fy >= 2) && src.width == fx * width && src.height == fy * height {
+        return box_downsample(src, fx, fy);
+    }
     let mut dst = crate::buffers::scratch(width as usize * height as usize * 3);
     resize_into(src, &mut dst, width as usize * 3, 0, width, height);
     Image { width, height, data: dst }
@@ -202,6 +208,16 @@ impl<'a> RowResizer<'a> {
         }
         let fx = (src.width / width).max(1);
         let fy = (src.height / height).max(1);
+        // Integer box prefilter for large reductions.
+        let filtered = (fx >= 2 || fy >= 2).then(|| box_downsample(src, fx, fy));
+        if let Some(ref f) = filtered
+            && src.width == fx * width
+            && src.height == fy * height
+            && f.width == width
+            && f.height == height
+        {
+            return RowResizer { src, filtered, plan: None, width: width as usize };
+        }
         let (pw, ph, ext_w, ext_h) = if fx >= 2 || fy >= 2 {
             (
                 src.width.div_ceil(fx),
@@ -227,8 +243,6 @@ impl<'a> RowResizer<'a> {
             fill_taps(height, ph, ext_h, y0, Some(y1), wy);
         }
         let plan = RowPlan { taps, width: w, height: h };
-        // Integer box prefilter for large reductions.
-        let filtered = (fx >= 2 || fy >= 2).then(|| box_downsample(src, fx, fy));
         let sw = filtered.as_ref().unwrap_or(src).width as usize;
         assert!(plan.x0().iter().all(|&k| (k as usize) < sw), "resize tap out of source bounds");
         RowResizer { src, filtered, plan: Some(plan), width: w }
@@ -277,7 +291,8 @@ impl<'a> RowResizer<'a> {
     pub(crate) fn row_with_scratch(&self, y: usize, out: &mut [u8], scratch: &mut RowScratch) {
         let out = &mut out[..self.width * 3];
         let Some(plan) = &self.plan else {
-            out.copy_from_slice(&self.src.data[y * out.len()..(y + 1) * out.len()]);
+            let s = self.filtered.as_ref().unwrap_or(self.src);
+            out.copy_from_slice(&s.data[y * out.len()..(y + 1) * out.len()]);
             return;
         };
         let v = self.fill_v(y, plan, scratch);
@@ -296,8 +311,9 @@ impl<'a> RowResizer<'a> {
         scratch: &mut RowScratch,
     ) {
         let Some(plan) = &self.plan else {
+            let s = self.filtered.as_ref().unwrap_or(self.src);
             let stride = self.width * 3;
-            rgb_to_planar_u8(&self.src.data[y * stride..(y + 1) * stride], r, g, b, false);
+            rgb_to_planar_u8(&s.data[y * stride..(y + 1) * stride], r, g, b, false);
             return;
         };
         let v = self.fill_v(y, plan, scratch);
@@ -317,8 +333,9 @@ impl<'a> RowResizer<'a> {
         scratch: &mut RowScratch,
     ) {
         let Some(plan) = &self.plan else {
+            let s = self.filtered.as_ref().unwrap_or(self.src);
             let stride = self.width * 3;
-            rgb_to_planar_f32_scale(&self.src.data[y * stride..(y + 1) * stride], r, g, b, scale);
+            rgb_to_planar_f32_scale(&s.data[y * stride..(y + 1) * stride], r, g, b, scale);
             return;
         };
         let v = self.fill_v(y, plan, scratch);
@@ -337,8 +354,9 @@ impl<'a> RowResizer<'a> {
         scratch: &mut RowScratch,
     ) {
         let Some(plan) = &self.plan else {
+            let s = self.filtered.as_ref().unwrap_or(self.src);
             let stride = self.width * 3;
-            rgb_to_planar_f32_div255(&self.src.data[y * stride..(y + 1) * stride], r, g, b, false);
+            rgb_to_planar_f32_div255(&s.data[y * stride..(y + 1) * stride], r, g, b, false);
             return;
         };
         let v = self.fill_v(y, plan, scratch);
@@ -350,8 +368,9 @@ impl<'a> RowResizer<'a> {
     #[inline]
     pub(crate) fn row_rgb0_u32(&self, y: usize, dst: &mut [u32], scratch: &mut RowScratch) {
         let Some(plan) = &self.plan else {
+            let s = self.filtered.as_ref().unwrap_or(self.src);
             let stride = self.width * 3;
-            rgb_to_rgb0_u32(&self.src.data[y * stride..(y + 1) * stride], dst);
+            rgb_to_rgb0_u32(&s.data[y * stride..(y + 1) * stride], dst);
             return;
         };
         let v = self.fill_v(y, plan, scratch);
@@ -626,5 +645,57 @@ mod tests {
             let p2 = r2.filtered.as_ref().expect("2x+ downscale uses prefilter").data.as_ptr();
             assert_eq!(p1, p2, "RowResizer drop should recycle the prefilter buffer into the pool");
         });
+    }
+
+    #[test]
+    fn exact_integer_downscale_fast_path_matches_bilinear_reference() {
+        for &(sw, sh, dw, dh) in
+            &[(2u32, 2u32, 1u32, 1u32), (6, 4, 3, 2), (64, 36, 32, 18), (96, 60, 32, 20), (130, 62, 65, 31)]
+        {
+            let mut img = Image::new(sw, sh, [0, 0, 0]);
+            for (i, v) in img.data.iter_mut().enumerate() {
+                *v = (i.wrapping_mul(2654435761) >> 11) as u8;
+            }
+            let got = resize(&img, dw, dh);
+            let plan = resize_plan(sw, sh, dw, dh);
+            let pre = box_downsample(&img, plan.prefilter[0], plan.prefilter[1]);
+            assert_eq!(got, pre, "exact downscale {sw}x{sh} -> {dw}x{dh}");
+            // Verify RowResizer planar & rgb0 outputs match `got` bit for bit.
+            let rows = RowResizer::new(&img, dw, dh);
+            assert!(rows.plan.is_none(), "exact integer downscale should skip tap interpolation");
+            let mut scratch = rows.band_scratch();
+            let w = dw as usize;
+            let (mut r8, mut g8, mut b8) = (vec![0u8; w], vec![0u8; w], vec![0u8; w]);
+            let (mut rf, mut gf, mut bf) = (vec![0f32; w], vec![0f32; w], vec![0f32; w]);
+            let (mut rs, mut gs, mut bs) = (vec![0f32; w], vec![0f32; w], vec![0f32; w]);
+            let mut rgb0 = vec![0u32; w];
+            for y in 0..dh as usize {
+                rows.row_planar_u8(y, &mut r8, &mut g8, &mut b8, &mut scratch);
+                rows.row_planar_f32_div255(y, &mut rf, &mut gf, &mut bf, &mut scratch);
+                rows.row_planar_f32_scale(y, 1.0 / 255.0, &mut rs, &mut gs, &mut bs, &mut scratch);
+                rows.row_rgb0_u32(y, &mut rgb0, &mut scratch);
+                for x in 0..w {
+                    let px = got.pixel(x as u32, y as u32);
+                    assert_eq!([r8[x], g8[x], b8[x]], px);
+                    assert_eq!(
+                        [rf[x].to_bits(), gf[x].to_bits(), bf[x].to_bits()],
+                        [
+                            (px[0] as f32 / 255.0).to_bits(),
+                            (px[1] as f32 / 255.0).to_bits(),
+                            (px[2] as f32 / 255.0).to_bits()
+                        ]
+                    );
+                    assert_eq!(
+                        [rs[x].to_bits(), gs[x].to_bits(), bs[x].to_bits()],
+                        [
+                            (px[0] as f32 * (1.0 / 255.0)).to_bits(),
+                            (px[1] as f32 * (1.0 / 255.0)).to_bits(),
+                            (px[2] as f32 * (1.0 / 255.0)).to_bits()
+                        ]
+                    );
+                    assert_eq!(rgb0[x], u32::from_le_bytes([px[0], px[1], px[2], 0]));
+                }
+            }
+        }
     }
 }

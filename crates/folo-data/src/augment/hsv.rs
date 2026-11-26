@@ -1,15 +1,16 @@
 //! HSV colour jitter with integer hexcone HSV and lookup tables.
 //!
-//! The arithmetic is integer only, so it has one exact result per pixel. On CPUs with AVX2, explicit 256-bit SIMD
-//! kernels (`crate::simd::hsv_fused`) compute 8 pixels at a time using packed `max_lut` gathers and exact division-free
-//! `/ 255` and `/ 65280` identities, both standalone ([`apply_hsv`]) and fused into the L1 planar pipeline. Tests check
-//! AVX2 against the scalar per-pixel reference on all 2^24 colours.
+//! The arithmetic is integer only, so it has one exact result per pixel. On CPUs with AVX2, gather-free 256-bit SIMD
+//! kernels (`crate::simd::hsv`) compute 8 pixels at a time using exact IEEE-754 reciprocals, linear gain scaling,
+//! byte-packed sector dispatch, and exact division-free `/ 255` and `/ 65280` identities, both standalone
+//! ([`apply_hsv`]) and fused into the L1 planar pipeline. Tests check AVX2 against the scalar per-pixel reference on
+//! all 2^24 colours.
 
 use crate::image::Image;
 use crate::par::for_bands;
 use crate::rng::Rng;
-pub(crate) use crate::simd::hsv_fused::HsvTables;
-use crate::simd::hsv_fused::hsv_row_inplace;
+pub(crate) use crate::simd::hsv::HsvTables;
+use crate::simd::hsv::hsv_row_inplace;
 
 /// Random HSV jitter as in YOLO: hue shifts by `U(-1, 1) * gains[0]` of a full turn, saturation and value scale by
 /// `1 + U(-1, 1) * gains[1|2]`. Draws exactly three numbers from `rng`.
@@ -17,8 +18,18 @@ pub fn random_hsv(img: &mut Image, gains: [f32; 3], rng: &mut Rng) {
     let Some(t) = random_hsv_tables(gains, rng) else {
         return;
     };
+    apply_hsv_tables(img, &t);
+}
+
+#[inline]
+fn apply_hsv_tables(img: &mut Image, t: &HsvTables) {
     let stride = img.stride();
-    for_bands(&mut img.data, stride, |_, band| hsv_row_inplace(band, &t));
+    let h = img.height as usize;
+    if stride == 0 || h == 0 {
+        return;
+    }
+    crate::simd::assert_image_data(img);
+    for_bands(&mut img.data[..h * stride], stride, |_, band| hsv_row_inplace(band, t));
 }
 
 /// Draws the three RNG numbers of [`random_hsv`] and builds the precomputed [`HsvTables`] (`None` if no-op).
@@ -36,17 +47,14 @@ pub fn apply_hsv(img: &mut Image, hue_turns: f32, sat_gain: f32, val_gain: f32) 
     let Some(t) = HsvTables::new(hue_turns, sat_gain, val_gain) else {
         return;
     };
-    let stride = img.stride();
-    for_bands(&mut img.data, stride, |_, band| hsv_row_inplace(band, &t));
+    apply_hsv_tables(img, &t);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::simd::PlanarRow;
-    use crate::simd::hsv_fused::{
-        hsv_row_inplace_scalar, rgb_row_hsv_to_planar_scalar, rgb_row_to_planar_fused,
-    };
+    use crate::simd::hsv::{hsv_row_inplace_scalar, rgb_row_hsv_to_planar_scalar, rgb_row_to_planar_fused};
 
     fn all_colours() -> Image {
         let mut img = Image::new(64, 64, [0, 0, 0]);
@@ -198,7 +206,7 @@ mod tests {
         } else {
             1024 + (((r - g) * 256 * rd) >> 16)
         };
-        h = (h + t.shift).rem_euclid(crate::simd::hsv_fused::HUE_CIRCLE);
+        h = (h + t.shift).rem_euclid(crate::simd::hsv::HUE_CIRCLE);
         let s0 = ((delta * 255 * recip(max) + (1 << 15)) >> 16).min(255);
         let s = t.slut[s0 as usize] as i32;
         let sector = h >> 8;
@@ -239,5 +247,69 @@ mod tests {
                 assert_eq!(got_fast, expected);
             }
         }
+    }
+
+    /// Exercises gather-free AVX2 HSV on edge gains (exact halfway `0.5 - 2^-25`, huge `>256`, negative, `0.0`,
+    /// `inf`, `NaN`) and odd widths across normal, zero-sat, and fused planar paths.
+    #[test]
+    fn gather_free_edge_gains_and_zero_sat_match_reference_bit_exact() {
+        let near_half = f32::from_bits(0x3eff_ffff); // 0.5 - 2^-25: forces fallback `!fast` rounding path
+        let cases = [
+            (0.0, near_half, 1.0),
+            (0.125, 1.0, near_half),
+            (0.3, 0.0, 1.35),
+            (0.3, 0.0, near_half),
+            (0.2, 300.0, 0.5),
+            (0.2, -0.5, 2.0),
+            (0.4, f32::INFINITY, 1.2),
+            (0.4, 1.2, f32::NAN),
+            (0.5, 0.5, 1.5),
+        ];
+        for &(hue, sg, vg) in &cases {
+            let Some(t) = HsvTables::new(hue, sg, vg) else { continue };
+            for &w in &[0usize, 1, 7, 15, 16, 17, 31, 32, 33, 65] {
+                let mut row = Vec::with_capacity(w * 3);
+                for k in 0..w {
+                    row.extend_from_slice(&[
+                        ((k * 37 + 1) & 255) as u8,
+                        ((k * 73 + 17) & 255) as u8,
+                        ((k * 131 + 5) & 255) as u8,
+                    ]);
+                }
+                let expected: Vec<u8> =
+                    row.as_chunks::<3>().0.iter().flat_map(|&px| apply_pixel_div_ref(&t, px)).collect();
+                let mut got = row.clone();
+                hsv_row_inplace(&mut got, &t);
+                assert_eq!(got, expected, "inplace hue={hue} sg={sg} vg={vg} w={w}");
+
+                for flip_lr in [false, true] {
+                    let (mut er, mut eg, mut eb) = (vec![0u8; w], vec![0u8; w], vec![0u8; w]);
+                    let (mut gr, mut gg, mut gb) = (vec![0u8; w], vec![0u8; w], vec![0u8; w]);
+                    rgb_row_hsv_to_planar_scalar(
+                        &row,
+                        &t,
+                        flip_lr,
+                        &mut PlanarRow::U8 { r: &mut er, g: &mut eg, b: &mut eb },
+                    );
+                    rgb_row_to_planar_fused(
+                        &row,
+                        Some(&t),
+                        flip_lr,
+                        &mut PlanarRow::U8 { r: &mut gr, g: &mut gg, b: &mut gb },
+                    );
+                    assert_eq!(
+                        (&gr, &gg, &gb),
+                        (&er, &eg, &eb),
+                        "fused u8 sg={sg} vg={vg} w={w} flip={flip_lr}"
+                    );
+                }
+            }
+        }
+        // Empty image is a safe no-op; oversized image leaves trailing bytes untouched.
+        let mut empty = Image { width: 0, height: 4, data: Vec::new() };
+        apply_hsv(&mut empty, 0.2, 1.5, 0.8);
+        let mut oversized = Image { width: 1, height: 1, data: vec![200, 100, 50, 77, 88, 99] };
+        apply_hsv(&mut oversized, 0.0, 0.0, 1.0);
+        assert_eq!(oversized.data, vec![200, 200, 200, 77, 88, 99]);
     }
 }

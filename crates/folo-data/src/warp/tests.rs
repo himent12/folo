@@ -243,3 +243,45 @@ fn parallel_matches_serial() {
     let b = crate::par::serial(|| warp_affine(&img, &m, 640, 640, [114; 3]));
     assert_eq!(a, b);
 }
+
+#[test]
+fn warp_rows_fused_reverse_row_cache_and_paired_general_match_reference() {
+    // Multi-tile mosaic with `flip_ud = true` exercises downward `iy` stepping through `PlaneRowCache::prepare`.
+    let a = pattern(33, 29);
+    let b = pattern(27, 31);
+    let c = pattern(19, 23);
+    let d = pattern(1, 1);
+    let mut tiles = PlaneTiles::new();
+    tiles.push(Tile { img: &a, dst: [0, 0, 33, 29], src: [0, 0] });
+    tiles.push(Tile { img: &b, dst: [33, 0, 60, 29], src: [0, 2] });
+    tiles.push(Tile { img: &c, dst: [14, 29, 33, 52], src: [0, 0] });
+    tiles.push(Tile { img: &d, dst: [33, 29, 34, 30], src: [0, 0] });
+    let plane = Plane { width: 64, height: 64, fill: [114; 3], tiles };
+    let m_upright =
+        Affine::translate(-32.0, -32.0).then(&Affine::scale(0.85, 0.9)).then(&Affine::translate(30.0, 28.0));
+    let m_rot = Affine::translate(-32.0, -32.0)
+        .then(&Affine::rotate(19.0))
+        .then(&Affine::shear(3.0, -2.0))
+        .then(&Affine::translate(31.0, 29.0));
+    for m in [m_upright, m_rot] {
+        for &(ow, oh) in &[(1u32, 1u32), (5, 7), (17, 19), (63, 49)] {
+            let mut ref_img = warp_plane(&plane, &m, ow, oh);
+            let stride = ref_img.stride();
+            let h = oh as usize;
+            for y in 0..h / 2 {
+                let (top, bot) = ref_img.data.split_at_mut((h - 1 - y) * stride);
+                top[y * stride..(y + 1) * stride].swap_with_slice(&mut bot[..stride]);
+            }
+            let area = ow as usize * oh as usize;
+            let mut want = vec![0u8; 3 * area];
+            for (i, px) in ref_img.data.as_chunks::<3>().0.iter().enumerate() {
+                want[i] = px[0];
+                want[area + i] = px[1];
+                want[2 * area + i] = px[2];
+            }
+            let mut got = vec![0xEEu8; 3 * area];
+            warp_plane_fused(&plane, &m, ow, oh, None, true, false, &mut PlanarDst::from_u8(&mut got, area));
+            assert_eq!(got, want, "{ow}x{oh} {m:?}");
+        }
+    }
+}

@@ -27,8 +27,12 @@ impl Default for BoxFilter {
 impl BoxFilter {
     /// Whether a box of `w x h` pixels survives, given the area it would have had unclipped.
     pub fn keep(&self, w: f32, h: f32, unclipped_area: f32) -> bool {
-        w > self.min_px
+        w > 0.0
+            && h > 0.0
+            && w > self.min_px
             && h > self.min_px
+            && unclipped_area.is_finite()
+            && unclipped_area > 0.0
             && w * h >= self.min_area_ratio * unclipped_area
             && (w / h).max(h / w) < self.max_aspect
     }
@@ -58,58 +62,183 @@ pub fn transform_boxes(
     height: u32,
     filter: &BoxFilter,
 ) -> Vec<BBox> {
-    if boxes.is_empty() {
+    if boxes.is_empty() || width == 0 || height == 0 || m.inverse().is_none() {
         return Vec::new();
+    }
+    let mut out = Vec::with_capacity(boxes.len());
+    transform_boxes_into(boxes, src_w, src_h, m, width, height, filter, &mut out);
+    out
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn transform_box_axis(
+    bx: &BBox,
+    src_w: u32,
+    src_h: u32,
+    a: f64,
+    c: f64,
+    e: f64,
+    f: f64,
+    area_scale: f32,
+    width: u32,
+    height: u32,
+    fw: f32,
+    fh: f32,
+    filter: &BoxFilter,
+) -> Option<BBox> {
+    let [x1, y1, x2, y2] = bx.pixel_xyxy(src_w, src_h);
+    if !(x2 > x1 && y2 > y1) {
+        return None;
+    }
+    let u1 = (a * x1 as f64 + c) as f32;
+    let u2 = (a * x2 as f64 + c) as f32;
+    let v1 = (e * y1 as f64 + f) as f32;
+    let v2 = (e * y2 as f64 + f) as f32;
+    let (lx, hx) = (u1.min(u2), u1.max(u2));
+    let (ly, hy) = (v1.min(v2), v1.max(v2));
+    let (cx1, cy1, cx2, cy2) = (lx.clamp(0.0, fw), ly.clamp(0.0, fh), hx.clamp(0.0, fw), hy.clamp(0.0, fh));
+    let unclipped = (x2 - x1) * (y2 - y1) * area_scale;
+    filter
+        .keep(cx2 - cx1, cy2 - cy1, unclipped)
+        .then(|| BBox::from_pixel_xyxy(bx.class, [cx1, cy1, cx2, cy2], width, height))
+}
+
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn transform_box_general(
+    bx: &BBox,
+    src_w: u32,
+    src_h: u32,
+    [a, b, c, d, e, f]: [f64; 6],
+    area_scale: f32,
+    width: u32,
+    height: u32,
+    fw: f32,
+    fh: f32,
+    filter: &BoxFilter,
+) -> Option<BBox> {
+    let [x1, y1, x2, y2] = bx.pixel_xyxy(src_w, src_h);
+    if !(x2 > x1 && y2 > y1) {
+        return None;
+    }
+    let (x1d, y1d, x2d, y2d) = (x1 as f64, y1 as f64, x2 as f64, y2 as f64);
+    let (ax1, ax2, by1, by2) = (a * x1d, a * x2d, b * y1d, b * y2d);
+    let (dx1, dx2, ey1, ey2) = (d * x1d, d * x2d, e * y1d, e * y2d);
+    let u0 = (ax1 + by1 + c) as f32;
+    let u1 = (ax2 + by1 + c) as f32;
+    let u2 = (ax1 + by2 + c) as f32;
+    let u3 = (ax2 + by2 + c) as f32;
+    let v0 = (dx1 + ey1 + f) as f32;
+    let v1 = (dx2 + ey1 + f) as f32;
+    let v2 = (dx1 + ey2 + f) as f32;
+    let v3 = (dx2 + ey2 + f) as f32;
+    let lx = u0.min(u1).min(u2).min(u3);
+    let hx = u0.max(u1).max(u2).max(u3);
+    let ly = v0.min(v1).min(v2).min(v3);
+    let hy = v0.max(v1).max(v2).max(v3);
+    let (cx1, cy1, cx2, cy2) = (lx.clamp(0.0, fw), ly.clamp(0.0, fh), hx.clamp(0.0, fw), hy.clamp(0.0, fh));
+    let unclipped = (x2 - x1) * (y2 - y1) * area_scale;
+    filter
+        .keep(cx2 - cx1, cy2 - cy1, unclipped)
+        .then(|| BBox::from_pixel_xyxy(bx.class, [cx1, cy1, cx2, cy2], width, height))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transform_boxes_into(
+    boxes: &[BBox],
+    src_w: u32,
+    src_h: u32,
+    m: &Affine,
+    width: u32,
+    height: u32,
+    filter: &BoxFilter,
+    out: &mut Vec<BBox>,
+) {
+    let [a, b, c, d, e, f] = m.0;
+    let area_scale = m.det().abs() as f32;
+    let (fw, fh) = (width as f32, height as f32);
+    if b == 0.0 && d == 0.0 {
+        for bx in boxes {
+            if let Some(t) =
+                transform_box_axis(bx, src_w, src_h, a, c, e, f, area_scale, width, height, fw, fh, filter)
+            {
+                out.push(t);
+            }
+        }
+        return;
+    }
+    for bx in boxes {
+        if let Some(t) =
+            transform_box_general(bx, src_w, src_h, m.0, area_scale, width, height, fw, fh, filter)
+        {
+            out.push(t);
+        }
+    }
+}
+
+/// Transforms `boxes` in place without allocating a second `Vec<BBox>`.
+pub(crate) fn transform_boxes_in_place(
+    boxes: &mut Vec<BBox>,
+    src_w: u32,
+    src_h: u32,
+    m: &Affine,
+    width: u32,
+    height: u32,
+    filter: &BoxFilter,
+) {
+    if boxes.is_empty() {
+        return;
+    }
+    if width == 0 || height == 0 || m.inverse().is_none() {
+        boxes.clear();
+        return;
     }
     let [a, b, c, d, e, f] = m.0;
     let area_scale = m.det().abs() as f32;
     let (fw, fh) = (width as f32, height as f32);
-    let mut out = Vec::with_capacity(boxes.len());
+    let mut write = 0usize;
     if b == 0.0 && d == 0.0 {
-        // Axis-aligned scale + translate (the default training augmentation with degrees == 0 and shear == 0):
-        // x and y decouple, so 2 transforms per axis give the exact same corners as the 4-corner loop.
-        for bx in boxes {
-            let [x1, y1, x2, y2] = bx.pixel_xyxy(src_w, src_h);
-            let u1 = (a * x1 as f64 + c) as f32;
-            let u2 = (a * x2 as f64 + c) as f32;
-            let v1 = (e * y1 as f64 + f) as f32;
-            let v2 = (e * y2 as f64 + f) as f32;
-            let (lx, hx) = (u1.min(u2), u1.max(u2));
-            let (ly, hy) = (v1.min(v2), v1.max(v2));
-            let (cx1, cy1, cx2, cy2) =
-                (lx.clamp(0.0, fw), ly.clamp(0.0, fh), hx.clamp(0.0, fw), hy.clamp(0.0, fh));
-            let unclipped = (x2 - x1) * (y2 - y1) * area_scale;
-            if filter.keep(cx2 - cx1, cy2 - cy1, unclipped) {
-                out.push(BBox::from_pixel_xyxy(bx.class, [cx1, cy1, cx2, cy2], width, height));
+        for read in 0..boxes.len() {
+            if let Some(t) = transform_box_axis(
+                &boxes[read],
+                src_w,
+                src_h,
+                a,
+                c,
+                e,
+                f,
+                area_scale,
+                width,
+                height,
+                fw,
+                fh,
+                filter,
+            ) {
+                boxes[write] = t;
+                write += 1;
             }
         }
-        return out;
-    }
-    for bx in boxes {
-        let [x1, y1, x2, y2] = bx.pixel_xyxy(src_w, src_h);
-        let (x1d, y1d, x2d, y2d) = (x1 as f64, y1 as f64, x2 as f64, y2 as f64);
-        let (ax1, ax2, by1, by2) = (a * x1d, a * x2d, b * y1d, b * y2d);
-        let (dx1, dx2, ey1, ey2) = (d * x1d, d * x2d, e * y1d, e * y2d);
-        let u0 = (ax1 + by1 + c) as f32;
-        let u1 = (ax2 + by1 + c) as f32;
-        let u2 = (ax1 + by2 + c) as f32;
-        let u3 = (ax2 + by2 + c) as f32;
-        let v0 = (dx1 + ey1 + f) as f32;
-        let v1 = (dx2 + ey1 + f) as f32;
-        let v2 = (dx1 + ey2 + f) as f32;
-        let v3 = (dx2 + ey2 + f) as f32;
-        let lx = u0.min(u1).min(u2).min(u3);
-        let hx = u0.max(u1).max(u2).max(u3);
-        let ly = v0.min(v1).min(v2).min(v3);
-        let hy = v0.max(v1).max(v2).max(v3);
-        let (cx1, cy1, cx2, cy2) =
-            (lx.clamp(0.0, fw), ly.clamp(0.0, fh), hx.clamp(0.0, fw), hy.clamp(0.0, fh));
-        let unclipped = (x2 - x1) * (y2 - y1) * area_scale;
-        if filter.keep(cx2 - cx1, cy2 - cy1, unclipped) {
-            out.push(BBox::from_pixel_xyxy(bx.class, [cx1, cy1, cx2, cy2], width, height));
+    } else {
+        for read in 0..boxes.len() {
+            if let Some(t) = transform_box_general(
+                &boxes[read],
+                src_w,
+                src_h,
+                m.0,
+                area_scale,
+                width,
+                height,
+                fw,
+                fh,
+                filter,
+            ) {
+                boxes[write] = t;
+                write += 1;
+            }
         }
     }
-    out
+    boxes.truncate(write);
 }
 
 /// Builds the YOLO-style random affine for a `src_w x src_h` input rendered into `out_w x out_h`: centre, rotate and
@@ -166,8 +295,12 @@ pub(crate) fn random_affine_plane(
 /// Mirrors a sample left to right in place.
 pub fn flip_lr(s: &mut Sample) {
     let stride = s.image.stride();
-    for row in s.image.data.chunks_exact_mut(stride) {
-        crate::simd::planar::flip_lr_row(row);
+    let h = s.image.height as usize;
+    if stride > 0 && h > 0 {
+        crate::simd::assert_image_data(&s.image);
+        crate::par::for_rows(&mut s.image.data[..h * stride], stride, |_, row| {
+            crate::simd::planar::flip_lr_row(row);
+        });
     }
     for b in &mut s.boxes {
         b.cx = 1.0 - b.cx;
@@ -330,5 +463,69 @@ mod tests {
             flip_ud(&mut s);
         });
         assert!(truncated.is_err());
+    }
+
+    #[test]
+    fn flip_lr_and_box_filter_edge_cases() {
+        // Zero-width/zero-height images do not panic in `flip_lr`.
+        for (w, h) in [(0u32, 0u32), (0, 5), (5, 0)] {
+            let mut s = Sample {
+                image: Image { width: w, height: h, data: Vec::new() },
+                boxes: vec![BBox::new(0, 0.25, 0.5, 0.2, 0.2)],
+            };
+            flip_lr(&mut s);
+            assert!((s.boxes[0].cx - 0.75).abs() < 1e-6);
+        }
+        // Oversized backing buffer leaves trailing bytes untouched; truncated panics.
+        let mut oversized = Sample {
+            image: Image { width: 2, height: 1, data: vec![1, 2, 3, 4, 5, 6, 9, 9, 9] },
+            boxes: vec![],
+        };
+        flip_lr(&mut oversized);
+        assert_eq!(oversized.image.data, vec![4, 5, 6, 1, 2, 3, 9, 9, 9]);
+        let truncated = std::panic::catch_unwind(|| {
+            let mut s =
+                Sample { image: Image { width: 4, height: 2, data: vec![1, 2, 3, 4, 5, 6] }, boxes: vec![] };
+            flip_lr(&mut s);
+        });
+        assert!(truncated.is_err());
+        // Permissive BoxFilter (`min_px == 0.0`) still rejects zero-area, negative, and NaN inputs.
+        let perm = BoxFilter { min_px: 0.0, min_area_ratio: 0.0, max_aspect: 1e9 };
+        assert!(!perm.keep(0.0, 10.0, 100.0));
+        assert!(!perm.keep(10.0, 0.0, 100.0));
+        assert!(!perm.keep(10.0, 10.0, 0.0));
+        assert!(!perm.keep(10.0, 10.0, f32::NAN));
+        assert!(!perm.keep(10.0, 10.0, -1.0));
+        assert!(perm.keep(1.0, 1.0, 1.0));
+        // Invertible shear must not expand a zero-width or inverted annotation into a positive-area box.
+        let shear = Affine([1.0, 1.0, -32.0, 0.0, 1.0, 0.0]);
+        let degenerate = vec![BBox::new(0, 0.5, 0.5, 0.0, 0.5), BBox::new(1, 0.5, 0.5, -0.2, -0.2)];
+        assert!(transform_boxes(&degenerate, 64, 64, &shear, 64, 64, &BoxFilter::default()).is_empty());
+        assert!(transform_boxes(&degenerate, 64, 64, &shear, 64, 64, &perm).is_empty());
+        let mut degen_in_place = degenerate;
+        transform_boxes_in_place(&mut degen_in_place, 64, 64, &shear, 64, 64, &BoxFilter::default());
+        assert!(degen_in_place.is_empty());
+        // `transform_boxes_in_place` matches `transform_boxes` bit for bit and handles zero output size.
+        let boxes = vec![BBox::new(0, 0.5, 0.5, 0.3, 0.4), BBox::new(1, 0.99, 0.99, 0.01, 0.01)];
+        let m = Affine::rotate(11.0).then(&Affine::translate(20.0, 10.0));
+        let want = transform_boxes(&boxes, 100, 100, &m, 64, 64, &BoxFilter::default());
+        let mut got = boxes.clone();
+        transform_boxes_in_place(&mut got, 100, 100, &m, 64, 64, &BoxFilter::default());
+        assert_eq!(got, want);
+        let mut zero_out = boxes.clone();
+        transform_boxes_in_place(&mut zero_out, 100, 100, &m, 0, 64, &BoxFilter::default());
+        assert!(zero_out.is_empty());
+        // Singular affine collapses the image to border padding and must drop all boxes, even when its
+        // collapsed diagonal bounding box would otherwise have positive width and height.
+        let singular = Affine([0.0, 1.0, 0.0, 0.0, 1.0, 0.0]);
+        assert!(singular.inverse().is_none());
+        assert!(transform_boxes(&boxes, 100, 100, &singular, 64, 64, &perm).is_empty());
+        let mut sing_in_place = boxes.clone();
+        transform_boxes_in_place(&mut sing_in_place, 100, 100, &singular, 64, 64, &perm);
+        assert!(sing_in_place.is_empty());
+        let sample = Sample { image: Image::new(32, 32, [200, 10, 20]), boxes };
+        let warped = affine_sample(&sample, &singular, 32, 32, &perm);
+        assert!(warped.boxes.is_empty());
+        assert!(warped.image.data.iter().all(|&b| b == PAD_VALUE));
     }
 }
