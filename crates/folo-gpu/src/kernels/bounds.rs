@@ -217,6 +217,8 @@ mod tests {
             ("swiglu_bwd", Spec::new().bool("VEC4", true)),
             ("geglu_fwd", Spec::new().bool("VEC4", true)),
             ("geglu_bwd", Spec::new().bool("VEC4", true)),
+            ("geglu_bwd_dgate", Spec::new().bool("VEC4", true)),
+            ("geglu_bwd_dup", Spec::new().bool("VEC4", true)),
             ("q4_matmul", Spec::new().u32("ACT", 8).bool("HAS_BIAS", true)),
             ("q4_gemv", Spec::new().u32("ACT", 11).bool("HAS_BIAS", true).subgroups(true)),
             (

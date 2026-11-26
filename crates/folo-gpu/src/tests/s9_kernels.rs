@@ -300,6 +300,17 @@ fn batched_topk_all_paths_and_deterministic_ties_match_cpu() {
         }
     }
 
+    // F16 distinct NaN payload ordering: raw bit order `[0x7e01, 0x7e02]` must select index 1 for largest=true.
+    if ctx.caps().shader_f16 {
+        let nan_pair = [half::f16::from_bits(0x7e01), half::f16::from_bits(0x7e02)];
+        let gx_nan = GpuTensor::from_f16(&ctx, &nan_pair, &[2]).unwrap();
+        let gv_nan = GpuTensor::empty(&ctx, &[1], DType::F16).unwrap();
+        let gi_nan = ctx.alloc(8).unwrap();
+        let desc = BatchedTopkDesc { outer: 1, dim_len: 2, inner: 1, k: 1, largest: true, dtype: DType::F16 };
+        batched_topk(&ctx, &desc, gx_nan.raw(), gv_nan.raw(), gi_nan.raw()).unwrap();
+        assert_eq!(read_i64(&ctx, gi_nan.raw(), 1), vec![1]);
+    }
+
     // Validation & empty k == 0 no-op.
     let empty_d = BatchedTopkDesc { outer: 2, dim_len: 8, inner: 1, k: 0, largest: true, dtype: DType::F32 };
     let dummy_x = GpuTensor::zeros(&ctx, &[16], DType::F32).unwrap();
@@ -541,10 +552,12 @@ fn fused_geglu_and_swiglu_match_cpu_and_finite_diff() {
         }
     }
 
-    // Overflow guard for GeGLU backward: `grad = up = 1e20, gate = -6` stays finite.
-    let gate_o = [-6.0f32, -6.0, -6.0, -6.0];
-    let up_o = [1e20f32, 1e10, 1e30, -1e20];
-    let g_o = [1e20f32, 1e30, 1e10, 1e20];
+    // Overflow guard + tail precision for GeGLU backward:
+    // 1. `grad = up = 1e20, gate = -6` stays finite.
+    // 2. `gate = -5.5, up = 1024, grad = 1024` preserves the representable tail gradient (`~ -0.0490`) in F32 & F16.
+    let gate_o = [-6.0f32, -6.0, -6.0, -5.5];
+    let up_o = [1e20f32, 1e10, 1e30, 1024.0];
+    let g_o = [1e20f32, 1e30, 1e10, 1024.0];
     let t_gate = GpuTensor::from_slice(&ctx, &gate_o, &[4]).unwrap();
     let t_up = GpuTensor::from_slice(&ctx, &up_o, &[4]).unwrap();
     let t_g = GpuTensor::from_slice(&ctx, &g_o, &[4]).unwrap();
@@ -553,6 +566,27 @@ fn fused_geglu_and_swiglu_match_cpu_and_finite_diff() {
     geglu_backward(&ctx, t_gate.raw(), t_up.raw(), t_g.raw(), t_dg.raw(), t_du.raw(), 4, DType::F32).unwrap();
     let got_dg = t_dg.to_vec().unwrap();
     assert!(got_dg.iter().all(|v| v.is_finite()), "geglu_bwd overflowed: {got_dg:?}");
+    let want_tail = (1024.0f64 * 1024.0 * cpu_gelu_deriv(-5.5)) as f32;
+    assert_close(&got_dg[3..4], &[want_tail], 1e-4, 1e-3, "geglu_bwd -5.5 tail f32");
+    if ctx.caps().shader_f16 {
+        let f16_gate = GpuTensor::from_f16(&ctx, &to_f16(&[-5.5; 4]), &[4]).unwrap();
+        let f16_up = GpuTensor::from_f16(&ctx, &to_f16(&[1024.0; 4]), &[4]).unwrap();
+        let f16_g = GpuTensor::from_f16(&ctx, &to_f16(&[1024.0; 4]), &[4]).unwrap();
+        let f16_dg = GpuTensor::empty(&ctx, &[4], DType::F16).unwrap();
+        let f16_du = GpuTensor::empty(&ctx, &[4], DType::F16).unwrap();
+        geglu_backward(
+            &ctx,
+            f16_gate.raw(),
+            f16_up.raw(),
+            f16_g.raw(),
+            f16_dg.raw(),
+            f16_du.raw(),
+            4,
+            DType::F16,
+        )
+        .unwrap();
+        assert_close(&f16_dg.to_vec().unwrap(), &[want_tail; 4], 5e-4, 5e-3, "geglu_bwd -5.5 tail f16");
+    }
 
     // Finite-difference gradient check for BOTH SwiGLU and GeGLU (both dgate and dup).
     let n = 12;

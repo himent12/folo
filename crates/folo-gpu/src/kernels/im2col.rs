@@ -329,6 +329,20 @@ fn validate_im2col(
     if x_elems > u32::MAX as usize || col_elems > u32::MAX as usize {
         return Err(GpuError::Limit(format!("{op}: tensor exceeds u32 indexing")));
     }
+    let max_i32 = i32::MAX as usize;
+    let h_span = d.h.saturating_add(d.win.padding.0.saturating_mul(2)).saturating_add(16);
+    let w_span = d.w.saturating_add(d.win.padding.1.saturating_mul(2)).saturating_add(16);
+    let oh_span = oh
+        .saturating_add(16)
+        .saturating_mul(d.win.stride.0)
+        .saturating_add(d.win.kernel.0.saturating_mul(d.win.dilation.0));
+    let ow_span = ow
+        .saturating_add(16)
+        .saturating_mul(d.win.stride.1)
+        .saturating_add(d.win.kernel.1.saturating_mul(d.win.dilation.1));
+    if h_span > max_i32 || w_span > max_i32 || oh_span > max_i32 || ow_span > max_i32 {
+        return Err(GpuError::Limit(format!("{op}: plane dimensions exceed i32 indexing")));
+    }
     Ok((oh, ow, x_elems, col_elems))
 }
 

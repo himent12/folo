@@ -1,14 +1,15 @@
 //! WGSL batched arbitrary-axis `topk` (`F32` and `F16`) with deterministic CPU-matching tie-breaking.
 //!
 //! Views a dense tensor along axis `dim` as `[outer, d, inner]` and selects the `k` largest (or smallest) values
-//! and their `i64` indices along the middle axis into `[outer, k, inner]` outputs, ordered by exact
-//! `f32::total_cmp` (descending when `largest`, ascending otherwise; `-0.0` ties with `+0.0`, broken by lower
-//! index — identical to `folo-core` CPU `topk`):
+//! and their `i64` indices along the middle axis into `[outer, k, inner]` outputs, ordered by exact IEEE total
+//! order (`-NaN < -inf < ... < -0 == +0 < ... < inf < NaN`, descending when `largest`, ascending otherwise;
+//! ties broken by lower index — identical to `folo-core` CPU `topk`):
 //! - **Contiguous `d <= 512` (`inner == 1`)**: single-pass 256-thread workgroup Batcher bitonic sort in shared
 //!   memory.
 //! - **Contiguous 2-stage parallel block merge (`inner == 1`, `d > 512`, `k <= 64`, `tiles * k <= 512`)**:
-//!   each 512-element tile extracts its local top-`k` in parallel via bitonic sort, then a second workgroup-per-row
-//!   bitonic merge produces the final global top-`k` with a single full read of `X`.
+//!   each 512-element tile extracts its local top-`k` into a single interleaved `(key, orig_idx)` candidate buffer
+//!   (keeping every pipeline within 4 storage bindings), then a second workgroup-per-row bitonic merge produces
+//!   the final global top-`k` with a single full read of `X`.
 //! - **Contiguous multi-pass selection (`inner == 1`, large `d` / large `k`)**: workgroup-parallel `k`-pass
 //!   selection with 32-wide subgroup reduction (or portable shared-memory tree fallback).
 //! - **Strided axis (`inner > 1`)**: coalesced per-column dispatch across `inner` with single-pass register-sorted
@@ -49,9 +50,14 @@ pub struct BatchedTopkDesc {
 const TOPK_COMMON: &str = r#"
 const TOPK_EMPTY: u32 = 0xffffffffu;
 
-fn key_bits(bits: u32) -> u32 {
+fn key_f32_bits(bits: u32) -> u32 {
     let b = select(bits, 0u, bits == 0x80000000u);
     return select(b ^ 0x80000000u, ~b, (b >> 31u) == 1u);
+}
+
+fn key_f16_bits(hbits: u32) -> u32 {
+    let b = select(hbits, 0u, hbits == 0x8000u);
+    return select(b ^ 0x8000u, (~b) & 0xffffu, (b >> 15u) == 1u);
 }
 
 fn before(ka: u32, ia: u32, kb: u32, ib: u32) -> bool {
@@ -69,14 +75,25 @@ fn better_slot(ka: u32, ia: u32, kb: u32, ib: u32) -> bool {
 }
 "#;
 
-/// Storage helpers so F32 preserves raw `u32` bits (NaN payloads, `-0.0`) while F16 widens to `f32` for keying.
+/// Storage helpers: both F32 and F16 read `X` as raw `array<u32>` so IEEE NaN payloads and signed zeros are
+/// keyed bit-exact without driver `f16 -> f32` NaN canonicalization.
 fn value_io(is_f16: bool) -> &'static str {
     if is_f16 {
-        "alias ST = f16;\n\
-         fn read_key(v: f16) -> u32 { return key_bits(bitcast<u32>(f32(v))); }\n"
+        "alias V_ST = f16;\n\
+         fn read_x_key(idx: u32) -> u32 {\n\
+             let word = X[idx >> 1u];\n\
+             let hbits = (word >> ((idx & 1u) * 16u)) & 0xffffu;\n\
+             return key_f16_bits(hbits);\n\
+         }\n\
+         fn read_x_val(idx: u32) -> f16 {\n\
+             let word = X[idx >> 1u];\n\
+             let pair = unpack2x16float(word);\n\
+             return f16(select(pair.x, pair.y, (idx & 1u) == 1u));\n\
+         }\n"
     } else {
-        "alias ST = u32;\n\
-         fn read_key(v: u32) -> u32 { return key_bits(v); }\n"
+        "alias V_ST = u32;\n\
+         fn read_x_key(idx: u32) -> u32 { return key_f32_bits(X[idx]); }\n\
+         fn read_x_val(idx: u32) -> u32 { return X[idx]; }\n"
     }
 }
 
@@ -110,9 +127,10 @@ const BITONIC_SORT_LOOP: &str = r#"
 fn gen_bitonic(spec: &Spec) -> String {
     let io = value_io(spec.is_f16());
     format!(
-        "{TOPK_COMMON}{io}\n\
-         @group(0) @binding(1) var<storage, read> X: array<ST>;\n\
-         @group(0) @binding(2) var<storage, read_write> V: array<ST>;\n\
+        "{TOPK_COMMON}\n\
+         @group(0) @binding(1) var<storage, read> X: array<u32>;\n\
+         {io}\
+         @group(0) @binding(2) var<storage, read_write> V: array<V_ST>;\n\
          @group(0) @binding(3) var<storage, read_write> I: array<u32>;\n\
          var<workgroup> sh_k: array<u32, 512>;\n\
          var<workgroup> sh_i: array<u32, 512>;\n\
@@ -127,12 +145,12 @@ fn gen_bitonic(spec: &Spec) -> String {
              while (n_pad < d) {{ n_pad = n_pad << 1u; }}\n\
              let i0 = lid;\n\
              if (i0 < n_pad) {{\n\
-                 if (valid && i0 < d) {{ sh_k[i0] = read_key(X[base + i0]); sh_i[i0] = i0; }}\n\
+                 if (valid && i0 < d) {{ sh_k[i0] = read_x_key(base + i0); sh_i[i0] = i0; }}\n\
                  else {{ sh_k[i0] = 0u; sh_i[i0] = TOPK_EMPTY; }}\n\
              }}\n\
              let i1 = lid + 256u;\n\
              if (i1 < n_pad) {{\n\
-                 if (valid && i1 < d) {{ sh_k[i1] = read_key(X[base + i1]); sh_i[i1] = i1; }}\n\
+                 if (valid && i1 < d) {{ sh_k[i1] = read_x_key(base + i1); sh_i[i1] = i1; }}\n\
                  else {{ sh_k[i1] = 0u; sh_i[i1] = TOPK_EMPTY; }}\n\
              }}\n\
              workgroupBarrier();\n\
@@ -140,7 +158,7 @@ fn gen_bitonic(spec: &Spec) -> String {
              if (!valid) {{ return; }}\n\
              for (var j = lid; j < k; j += 256u) {{\n\
                  let idx = sh_i[j];\n\
-                 V[row * k + j] = X[base + idx];\n\
+                 V[row * k + j] = read_x_val(base + idx);\n\
                  I[2u * (row * k + j)] = idx;\n\
                  I[2u * (row * k + j) + 1u] = 0u;\n\
              }}\n\
@@ -148,15 +166,16 @@ fn gen_bitonic(spec: &Spec) -> String {
     )
 }
 
-/// Stage 1 of 2-stage parallel block top-k: each 512-element tile extracts its local top-`k` `(key, orig_idx)`.
+/// Stage 1 of 2-stage parallel block top-k: each 512-element tile extracts its local top-`k` into interleaved
+/// `CAND[2*slot] = key`, `CAND[2*slot + 1] = orig_idx` (2 storage bindings total).
 /// Params: 0 = `outer`, 1 = `d`, 2 = `k`, 3 = `tiles`.
 fn gen_stage1(spec: &Spec) -> String {
     let io = value_io(spec.is_f16());
     format!(
-        "{TOPK_COMMON}{io}\n\
-         @group(0) @binding(1) var<storage, read> X: array<ST>;\n\
-         @group(0) @binding(2) var<storage, read_write> CAND_K: array<u32>;\n\
-         @group(0) @binding(3) var<storage, read_write> CAND_I: array<u32>;\n\
+        "{TOPK_COMMON}\n\
+         @group(0) @binding(1) var<storage, read> X: array<u32>;\n\
+         {io}\
+         @group(0) @binding(2) var<storage, read_write> CAND: array<u32>;\n\
          var<workgroup> sh_k: array<u32, 512>;\n\
          var<workgroup> sh_i: array<u32, 512>;\n\
          @compute @workgroup_size(256)\n\
@@ -171,34 +190,36 @@ fn gen_stage1(spec: &Spec) -> String {
              let start = tile * 512u;\n\
              let n_pad = 512u;\n\
              let g0 = start + lid;\n\
-             if (valid && g0 < d) {{ sh_k[lid] = read_key(X[base + g0]); sh_i[lid] = g0; }}\n\
+             if (valid && g0 < d) {{ sh_k[lid] = read_x_key(base + g0); sh_i[lid] = g0; }}\n\
              else {{ sh_k[lid] = 0u; sh_i[lid] = TOPK_EMPTY; }}\n\
              let g1 = start + lid + 256u;\n\
-             if (valid && g1 < d) {{ sh_k[lid + 256u] = read_key(X[base + g1]); sh_i[lid + 256u] = g1; }}\n\
+             if (valid && g1 < d) {{ sh_k[lid + 256u] = read_x_key(base + g1); sh_i[lid + 256u] = g1; }}\n\
              else {{ sh_k[lid + 256u] = 0u; sh_i[lid + 256u] = TOPK_EMPTY; }}\n\
              workgroupBarrier();\n\
              {BITONIC_SORT_LOOP}\
              if (!valid) {{ return; }}\n\
              let out_base = g * k;\n\
              if (lid < k) {{\n\
-                 CAND_K[out_base + lid] = sh_k[lid];\n\
-                 CAND_I[out_base + lid] = sh_i[lid];\n\
+                 let slot = out_base + lid;\n\
+                 CAND[2u * slot] = sh_k[lid];\n\
+                 CAND[2u * slot + 1u] = sh_i[lid];\n\
              }}\n\
          }}\n"
     )
 }
 
-/// Stage 2 of 2-stage parallel block top-k: merges `tiles * k <= 512` candidates per row and gathers final `V` & `I`.
+/// Stage 2 of 2-stage parallel block top-k: merges `tiles * k <= 512` interleaved candidates per row and gathers
+/// final `V` & `I` (4 storage bindings total: `X`, `CAND`, `V`, `I`).
 /// Params: 0 = `outer`, 1 = `d`, 2 = `k`, 3 = `n_cand` (`tiles * k`).
 fn gen_stage2(spec: &Spec) -> String {
     let io = value_io(spec.is_f16());
     format!(
-        "{TOPK_COMMON}{io}\n\
-         @group(0) @binding(1) var<storage, read> X: array<ST>;\n\
-         @group(0) @binding(2) var<storage, read> CAND_K: array<u32>;\n\
-         @group(0) @binding(3) var<storage, read> CAND_I: array<u32>;\n\
-         @group(0) @binding(4) var<storage, read_write> V: array<ST>;\n\
-         @group(0) @binding(5) var<storage, read_write> I: array<u32>;\n\
+        "{TOPK_COMMON}\n\
+         @group(0) @binding(1) var<storage, read> X: array<u32>;\n\
+         {io}\
+         @group(0) @binding(2) var<storage, read> CAND: array<u32>;\n\
+         @group(0) @binding(3) var<storage, read_write> V: array<V_ST>;\n\
+         @group(0) @binding(4) var<storage, read_write> I: array<u32>;\n\
          var<workgroup> sh_k: array<u32, 512>;\n\
          var<workgroup> sh_i: array<u32, 512>;\n\
          @compute @workgroup_size(256)\n\
@@ -212,13 +233,23 @@ fn gen_stage2(spec: &Spec) -> String {
              while (n_pad < n_cand) {{ n_pad = n_pad << 1u; }}\n\
              let i0 = lid;\n\
              if (i0 < n_pad) {{\n\
-                 if (valid && i0 < n_cand) {{ sh_k[i0] = CAND_K[cbase + i0]; sh_i[i0] = CAND_I[cbase + i0]; }}\n\
-                 else {{ sh_k[i0] = 0u; sh_i[i0] = TOPK_EMPTY; }}\n\
+                 if (valid && i0 < n_cand) {{\n\
+                     let s0 = cbase + i0;\n\
+                     sh_k[i0] = CAND[2u * s0];\n\
+                     sh_i[i0] = CAND[2u * s0 + 1u];\n\
+                 }} else {{\n\
+                     sh_k[i0] = 0u; sh_i[i0] = TOPK_EMPTY;\n\
+                 }}\n\
              }}\n\
              let i1 = lid + 256u;\n\
              if (i1 < n_pad) {{\n\
-                 if (valid && i1 < n_cand) {{ sh_k[i1] = CAND_K[cbase + i1]; sh_i[i1] = CAND_I[cbase + i1]; }}\n\
-                 else {{ sh_k[i1] = 0u; sh_i[i1] = TOPK_EMPTY; }}\n\
+                 if (valid && i1 < n_cand) {{\n\
+                     let s1 = cbase + i1;\n\
+                     sh_k[i1] = CAND[2u * s1];\n\
+                     sh_i[i1] = CAND[2u * s1 + 1u];\n\
+                 }} else {{\n\
+                     sh_k[i1] = 0u; sh_i[i1] = TOPK_EMPTY;\n\
+                 }}\n\
              }}\n\
              workgroupBarrier();\n\
              {BITONIC_SORT_LOOP}\
@@ -226,7 +257,7 @@ fn gen_stage2(spec: &Spec) -> String {
              let xbase = row * d;\n\
              if (lid < k) {{\n\
                  let idx = sh_i[lid];\n\
-                 V[row * k + lid] = X[xbase + idx];\n\
+                 V[row * k + lid] = read_x_val(xbase + idx);\n\
                  I[2u * (row * k + lid)] = idx;\n\
                  I[2u * (row * k + lid) + 1u] = 0u;\n\
              }}\n\
@@ -241,9 +272,10 @@ fn gen_select(spec: &Spec) -> String {
     let sg = spec.is_subgroups();
     if sg {
         format!(
-            "{TOPK_COMMON}{io}\n\
-             @group(0) @binding(1) var<storage, read> X: array<ST>;\n\
-             @group(0) @binding(2) var<storage, read_write> V: array<ST>;\n\
+            "{TOPK_COMMON}\n\
+             @group(0) @binding(1) var<storage, read> X: array<u32>;\n\
+             {io}\
+             @group(0) @binding(2) var<storage, read_write> V: array<V_ST>;\n\
              @group(0) @binding(3) var<storage, read_write> I: array<u32>;\n\
              var<workgroup> sh_k: array<u32, 8>;\n\
              var<workgroup> sh_i: array<u32, 8>;\n\
@@ -261,7 +293,7 @@ fn gen_select(spec: &Spec) -> String {
                      var bk = 0u; var bi = TOPK_EMPTY;\n\
                      if (valid) {{\n\
                          for (var i = lid; i < d; i += 256u) {{\n\
-                             let ki = read_key(X[base + i]);\n\
+                             let ki = read_x_key(base + i);\n\
                              if (j > 0u && !before(pk, pi, ki, i)) {{ continue; }}\n\
                              if (bi == TOPK_EMPTY || before(ki, i, bk, bi)) {{ bk = ki; bi = i; }}\n\
                          }}\n\
@@ -281,7 +313,7 @@ fn gen_select(spec: &Spec) -> String {
                      }}\n\
                      pk = rk; pi = ri;\n\
                      if (lid == 0u && valid) {{\n\
-                         V[row * k + j] = X[base + pi];\n\
+                         V[row * k + j] = read_x_val(base + pi);\n\
                          I[2u * (row * k + j)] = pi;\n\
                          I[2u * (row * k + j) + 1u] = 0u;\n\
                      }}\n\
@@ -291,9 +323,10 @@ fn gen_select(spec: &Spec) -> String {
         )
     } else {
         format!(
-            "{TOPK_COMMON}{io}\n\
-             @group(0) @binding(1) var<storage, read> X: array<ST>;\n\
-             @group(0) @binding(2) var<storage, read_write> V: array<ST>;\n\
+            "{TOPK_COMMON}\n\
+             @group(0) @binding(1) var<storage, read> X: array<u32>;\n\
+             {io}\
+             @group(0) @binding(2) var<storage, read_write> V: array<V_ST>;\n\
              @group(0) @binding(3) var<storage, read_write> I: array<u32>;\n\
              var<workgroup> sh_k: array<u32, 256>;\n\
              var<workgroup> sh_i: array<u32, 256>;\n\
@@ -309,7 +342,7 @@ fn gen_select(spec: &Spec) -> String {
                      var bk = 0u; var bi = TOPK_EMPTY;\n\
                      if (valid) {{\n\
                          for (var i = lid; i < d; i += 256u) {{\n\
-                             let ki = read_key(X[base + i]);\n\
+                             let ki = read_x_key(base + i);\n\
                              if (j > 0u && !before(pk, pi, ki, i)) {{ continue; }}\n\
                              if (bi == TOPK_EMPTY || before(ki, i, bk, bi)) {{ bk = ki; bi = i; }}\n\
                          }}\n\
@@ -327,7 +360,7 @@ fn gen_select(spec: &Spec) -> String {
                      }}\n\
                      pk = sh_k[0]; pi = sh_i[0];\n\
                      if (lid == 0u && valid) {{\n\
-                         V[row * k + j] = X[base + pi];\n\
+                         V[row * k + j] = read_x_val(base + pi);\n\
                          I[2u * (row * k + j)] = pi;\n\
                          I[2u * (row * k + j) + 1u] = 0u;\n\
                      }}\n\
@@ -346,9 +379,10 @@ fn gen_cols(spec: &Spec) -> String {
     let small_k = spec.get_bool("SMALL_K");
     if small_k {
         format!(
-            "{TOPK_COMMON}{io}\n\
-             @group(0) @binding(1) var<storage, read> X: array<ST>;\n\
-             @group(0) @binding(2) var<storage, read_write> V: array<ST>;\n\
+            "{TOPK_COMMON}\n\
+             @group(0) @binding(1) var<storage, read> X: array<u32>;\n\
+             {io}\
+             @group(0) @binding(2) var<storage, read_write> V: array<V_ST>;\n\
              @group(0) @binding(3) var<storage, read_write> I: array<u32>;\n\
              @compute @workgroup_size(256)\n\
              fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
@@ -363,7 +397,7 @@ fn gen_cols(spec: &Spec) -> String {
                  var ti: array<u32, {COL_REG_MAX_K}>;\n\
                  for (var j = 0u; j < k; j++) {{ tk[j] = 0u; ti[j] = TOPK_EMPTY; }}\n\
                  for (var r = 0u; r < d; r++) {{\n\
-                     let kr = read_key(X[xbase + r * inner]);\n\
+                     let kr = read_x_key(xbase + r * inner);\n\
                      if (better_slot(kr, r, tk[k - 1u], ti[k - 1u])) {{\n\
                          var pos = k - 1u;\n\
                          while (pos > 0u && better_slot(kr, r, tk[pos - 1u], ti[pos - 1u])) {{\n\
@@ -379,7 +413,7 @@ fn gen_cols(spec: &Spec) -> String {
                  for (var j = 0u; j < k; j++) {{\n\
                      let idx = ti[j];\n\
                      let dst = obase + j * inner;\n\
-                     V[dst] = X[xbase + idx * inner];\n\
+                     V[dst] = read_x_val(xbase + idx * inner);\n\
                      I[2u * dst] = idx;\n\
                      I[2u * dst + 1u] = 0u;\n\
                  }}\n\
@@ -387,9 +421,10 @@ fn gen_cols(spec: &Spec) -> String {
         )
     } else {
         format!(
-            "{TOPK_COMMON}{io}\n\
-             @group(0) @binding(1) var<storage, read> X: array<ST>;\n\
-             @group(0) @binding(2) var<storage, read_write> V: array<ST>;\n\
+            "{TOPK_COMMON}\n\
+             @group(0) @binding(1) var<storage, read> X: array<u32>;\n\
+             {io}\
+             @group(0) @binding(2) var<storage, read_write> V: array<V_ST>;\n\
              @group(0) @binding(3) var<storage, read_write> I: array<u32>;\n\
              @compute @workgroup_size(256)\n\
              fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
@@ -405,13 +440,13 @@ fn gen_cols(spec: &Spec) -> String {
                  for (var j = 0u; j < k; j++) {{\n\
                      var bk = 0u; var bi = TOPK_EMPTY;\n\
                      for (var r = 0u; r < d; r++) {{\n\
-                         let kr = read_key(X[xbase + r * inner]);\n\
+                         let kr = read_x_key(xbase + r * inner);\n\
                          if (j > 0u && !before(pk, pi, kr, r)) {{ continue; }}\n\
                          if (bi == TOPK_EMPTY || before(kr, r, bk, bi)) {{ bk = kr; bi = r; }}\n\
                      }}\n\
                      pk = bk; pi = bi;\n\
                      let dst = obase + j * inner;\n\
-                     V[dst] = X[xbase + pi * inner];\n\
+                     V[dst] = read_x_val(xbase + pi * inner);\n\
                      I[2u * dst] = pi;\n\
                      I[2u * dst + 1u] = 0u;\n\
                  }}\n\
@@ -425,9 +460,9 @@ use Access::{Read as R, ReadWrite as RW};
 static BTOPK_BITONIC: KernelDef =
     KernelDef { name: "btopk_bitonic", storage: &[R, RW, RW], source: Source::Generated(gen_bitonic) };
 static BTOPK_STAGE1: KernelDef =
-    KernelDef { name: "btopk_stage1", storage: &[R, RW, RW], source: Source::Generated(gen_stage1) };
+    KernelDef { name: "btopk_stage1", storage: &[R, RW], source: Source::Generated(gen_stage1) };
 static BTOPK_STAGE2: KernelDef =
-    KernelDef { name: "btopk_stage2", storage: &[R, R, R, RW, RW], source: Source::Generated(gen_stage2) };
+    KernelDef { name: "btopk_stage2", storage: &[R, R, RW, RW], source: Source::Generated(gen_stage2) };
 static BTOPK_SELECT: KernelDef =
     KernelDef { name: "btopk_select", storage: &[R, RW, RW], source: Source::Generated(gen_select) };
 static BTOPK_COLS: KernelDef =
@@ -438,7 +473,7 @@ pub(crate) static DEFS: &[&KernelDef] =
     &[&BTOPK_BITONIC, &BTOPK_STAGE1, &BTOPK_STAGE2, &BTOPK_SELECT, &BTOPK_COLS];
 
 /// Dispatches batched arbitrary-axis `topk` over `[outer, dim_len, inner]` into `values` (`dtype`) and `indices`
-/// (`i64`, two `u32` words per element), with deterministic `f32::total_cmp` ordering and ascending-index ties.
+/// (`i64`, two `u32` words per element), with deterministic IEEE total ordering and ascending-index ties.
 pub fn batched_topk(
     ctx: &GpuContext,
     d: &BatchedTopkDesc,
@@ -452,7 +487,8 @@ pub fn batched_topk(
     }
     let in_elems = prod(&[d.outer, d.dim_len, d.inner])?;
     let out_elems = prod(&[d.outer, d.k, d.inner])?;
-    check_buf(x, in_elems, d.dtype, "batched_topk input")?;
+    let x_words = if d.dtype == DType::F16 { in_elems.div_ceil(2) } else { in_elems };
+    check_buf(x, x_words, DType::F32, "batched_topk input")?;
     check_buf(values, out_elems, d.dtype, "batched_topk values")?;
     check_buf(indices, prod(&[out_elems, 2])?, DType::F32, "batched_topk indices")?;
     if out_elems == 0 {
@@ -476,27 +512,23 @@ pub fn batched_topk(
         let n_cand = tiles.saturating_mul(d.k);
         if d.k <= STAGE_MAX_K && n_cand <= BITONIC_MAX {
             let total_tiles = prod(&[d.outer, tiles])?;
-            let total_cand = prod(&[d.outer, n_cand])?;
-            let cand_k = ctx.alloc(DType::F32.bytes(total_cand))?;
-            let cand_i = ctx.alloc(DType::F32.bytes(total_cand))?;
+            let cand_words = prod(&[d.outer, n_cand, 2])?;
+            if cand_words <= u32::MAX as usize {
+                let cand = ctx.alloc(DType::F32.bytes(cand_words))?;
 
-            let k1 = ctx.kernel(&BTOPK_STAGE1, Spec::new().bool("LARGEST", d.largest).f16(f16))?;
-            let p1 = Params::new().uz(d.outer)?.uz(d.dim_len)?.uz(d.k)?.uz(tiles)?;
-            ctx.dispatch(
-                &k1,
-                &[x, cand_k.raw(), cand_i.raw()],
-                &p1,
-                ctx.grid_1d(total_tiles as u64 * 256, 256)?,
-            )?;
+                let k1 = ctx.kernel(&BTOPK_STAGE1, Spec::new().bool("LARGEST", d.largest).f16(f16))?;
+                let p1 = Params::new().uz(d.outer)?.uz(d.dim_len)?.uz(d.k)?.uz(tiles)?;
+                ctx.dispatch(&k1, &[x, cand.raw()], &p1, ctx.grid_1d(total_tiles as u64 * 256, 256)?)?;
 
-            let k2 = ctx.kernel(&BTOPK_STAGE2, Spec::new().bool("LARGEST", d.largest).f16(f16))?;
-            let p2 = Params::new().uz(d.outer)?.uz(d.dim_len)?.uz(d.k)?.uz(n_cand)?;
-            return ctx.dispatch(
-                &k2,
-                &[x, cand_k.raw(), cand_i.raw(), values, indices],
-                &p2,
-                ctx.grid_1d(d.outer as u64 * 256, 256)?,
-            );
+                let k2 = ctx.kernel(&BTOPK_STAGE2, Spec::new().bool("LARGEST", d.largest).f16(f16))?;
+                let p2 = Params::new().uz(d.outer)?.uz(d.dim_len)?.uz(d.k)?.uz(n_cand)?;
+                return ctx.dispatch(
+                    &k2,
+                    &[x, cand.raw(), values, indices],
+                    &p2,
+                    ctx.grid_1d(d.outer as u64 * 256, 256)?,
+                );
+            }
         }
         let k = ctx.kernel(
             &BTOPK_SELECT,

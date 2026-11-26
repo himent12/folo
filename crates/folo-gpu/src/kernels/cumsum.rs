@@ -32,7 +32,7 @@ fn gen_cumsum_rows_block(spec: &Spec) -> String {
     let y_cast = |expr: &str| if y_f32 { expr.to_string() } else { format!("T({expr})") };
     let out0 = if exclusive { y_cast("sh[i0]") } else { y_cast("sh[i0] + v0") };
     let out1 = if exclusive { y_cast("sh[i1]") } else { y_cast("sh[i1] + v1") };
-    let sum_write = if write_sums { "    if (lid == 0u && valid) { SUMS[g] = block_total; }\n" } else { "" };
+    let sum_write = if write_sums { "        if (valid) { SUMS[g] = sh[511u]; }\n" } else { "" };
     format!(
         "@group(0) @binding(1) var<storage, read> X: array<T>;\n\
          @group(0) @binding(2) var<storage, read_write> Y: array<{y_ty}>;\n\
@@ -70,9 +70,10 @@ fn gen_cumsum_rows_block(spec: &Spec) -> String {
                  offset = offset << 1u;\n\
                  workgroupBarrier();\n\
              }}\n\
-             let block_total = sh[511u];\n\
+             if (lid == 0u) {{\n\
          {sum_write}\
-             if (lid == 0u) {{ sh[511u] = 0.0; }}\n\
+                 sh[511u] = 0.0;\n\
+             }}\n\
              workgroupBarrier();\n\
              // Blelloch downsweep.\n\
              for (var stride = 1u; stride < 512u; stride = stride << 1u) {{\n\
