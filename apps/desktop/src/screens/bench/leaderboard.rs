@@ -40,12 +40,13 @@ pub(crate) fn axis_key(a: BenchAxis) -> &'static str {
 pub(crate) fn entry_metric(e: &BenchEntry, key: &str) -> Option<f32> {
     let score = e.score.as_ref()?;
     match key {
-        "score" => Some(score.total),
+        "score" => score.total.is_finite().then_some(score.total),
         k => BenchAxis::ALL
             .iter()
             .find(|a| axis_key(**a) == k)
             .and_then(|a| score.axes.iter().find(|x| x.axis == *a))
             .and_then(|x| x.value)
+            .filter(|v| v.is_finite())
             .map(|v| (v * 100.).clamp(0., 100.)),
     }
 }
@@ -812,6 +813,21 @@ mod tests {
         sort_leaderboard(&mut rows, Some(("accuracy", false)));
         let ids: Vec<&str> = rows.iter().map(|(e, _)| e.id.as_str()).collect();
         assert_eq!(ids, ["b", "a", "c", "d"]);
+
+        // Non-finite scores (NaN / Inf) must sort last with unmeasured entries in both directions.
+        let mut bad = vec![
+            (dummy_entry("nan", BenchEntryStatus::Done, Some(f32::NAN), Some(f32::NAN), Some(0.5)), Some(1)),
+            (dummy_entry("inf", BenchEntryStatus::Done, Some(f32::INFINITY), Some(0.8), Some(0.5)), Some(2)),
+            (dummy_entry("ok", BenchEntryStatus::Done, Some(75.0), Some(0.75), Some(0.5)), Some(3)),
+        ];
+        sort_leaderboard(&mut bad, Some(("score", true)));
+        assert_eq!(bad[0].0.id, "ok", "finite score must outrank NaN/Inf descending");
+        sort_leaderboard(&mut bad, Some(("score", false)));
+        assert_eq!(bad[0].0.id, "ok", "finite score must sort before NaN/Inf ascending");
+        sort_leaderboard(&mut bad, Some(("accuracy", true)));
+        assert_eq!(bad[0].0.id, "inf");
+        assert_eq!(bad[1].0.id, "ok");
+        assert_eq!(bad[2].0.id, "nan");
     }
 
     #[test]

@@ -267,13 +267,15 @@ impl TextInput {
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus_handle);
-        self.is_selecting = true;
         if event.modifiers.shift {
+            self.is_selecting = true;
             self.select_to(self.index_for_mouse_position(event.position), cx);
         } else if event.click_count >= 2 {
+            self.is_selecting = false;
             self.move_to(0, cx);
             self.select_to(self.content.len(), cx);
         } else {
+            self.is_selecting = true;
             self.move_to(self.index_for_mouse_position(event.position), cx)
         }
     }
@@ -377,7 +379,9 @@ impl TextInput {
     }
 
     fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
-        self.offset_from_utf16(range_utf16.start)..self.offset_from_utf16(range_utf16.end)
+        let a = self.offset_from_utf16(range_utf16.start);
+        let b = self.offset_from_utf16(range_utf16.end);
+        a.min(b)..a.max(b)
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
@@ -463,9 +467,12 @@ impl EntityInputHandler for TextInput {
             .map(|r| self.range_from_utf16(r))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
-        self.selected_range = range.start + new_text.len()..range.start + new_text.len();
+        let clean = one_line(new_text);
+        if range.is_empty() && clean.is_empty() && self.marked_range.is_none() {
+            return;
+        }
+        self.content = (self.content[0..range.start].to_owned() + &clean + &self.content[range.end..]).into();
+        self.selected_range = range.start + clean.len()..range.start + clean.len();
         self.selection_reversed = false;
         self.marked_range.take();
         self.changed(cx);
@@ -484,16 +491,18 @@ impl EntityInputHandler for TextInput {
             .map(|r| self.range_from_utf16(r))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
-        self.content =
-            (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..]).into();
-        self.marked_range = (!new_text.is_empty()).then(|| range.start..range.start + new_text.len());
-        // The IME's selection is relative to the composed text, so convert it against `new_text`.
+        let clean = one_line(new_text);
+        self.content = (self.content[0..range.start].to_owned() + &clean + &self.content[range.end..]).into();
+        self.marked_range = (!clean.is_empty()).then(|| range.start..range.start + clean.len());
+        // The IME's selection is relative to the composed text, so convert it against `clean`.
         self.selected_range = new_selected_range_utf16
             .as_ref()
             .map(|r| {
-                range.start + utf16_to_utf8(new_text, r.start)..range.start + utf16_to_utf8(new_text, r.end)
+                let a = utf16_to_utf8(&clean, r.start);
+                let b = utf16_to_utf8(&clean, r.end);
+                range.start + a.min(b)..range.start + a.max(b)
             })
-            .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
+            .unwrap_or_else(|| range.start + clean.len()..range.start + clean.len());
         self.selection_reversed = false;
         self.changed(cx);
     }

@@ -29,24 +29,32 @@ pub fn sparkline_in(
     canvas(
         |_, _, _| (),
         move |b, _, window, _| {
-            if values.len() < 2 {
+            let finite: Vec<f32> = values.iter().copied().filter(|v| v.is_finite()).collect();
+            if finite.len() < 2 {
                 return;
             }
-            let (lo, hi) = range.unwrap_or_else(|| {
-                values.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)))
-            });
+            let (lo, hi) =
+                range.filter(|(a, b)| a.is_finite() && b.is_finite() && b > a).unwrap_or_else(|| {
+                    finite
+                        .iter()
+                        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &v| (lo.min(v), hi.max(v)))
+                });
             let span = (hi - lo).max(1e-6);
             let inset = px(3.);
             let w = b.size.width - inset * 2.;
             let h = b.size.height - inset * 2.;
-            let n = values.len();
-            let pts: Vec<Point<Pixels>> = values
+            if w <= px(0.) || h <= px(0.) {
+                return;
+            }
+            let n = finite.len();
+            let pts: Vec<Point<Pixels>> = finite
                 .iter()
                 .enumerate()
                 .map(|(i, &v)| {
+                    let t_y = ((v - lo) / span).clamp(0.0, 1.0);
                     point(
                         b.left() + inset + w * (i as f32 / (n - 1) as f32),
-                        b.top() + inset + h * (1.0 - (v - lo) / span),
+                        b.top() + inset + h * (1.0 - t_y),
                     )
                 })
                 .collect();

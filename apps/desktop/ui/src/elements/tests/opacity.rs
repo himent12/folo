@@ -187,3 +187,68 @@ fn a_finished_opacity_animation_lands_on_its_last_value_and_stops() {
     });
     assert_eq!(quad, Some(0.5));
 }
+
+#[test]
+fn zero_duration_and_exact_completion_animations_stay_finite_and_stop() {
+    // 1. Zero-duration one-shot finishes immediately on the first frame without NaN or infinite ticks.
+    let (mut app, window) = open_sized(size(px(40.), px(40.)), 1.0, |_, _| {
+        div()
+            .size_full()
+            .child(div().size(px(20.)).bg(hsla(0., 0., 0., 1.)).with_opacity_animation(
+                "zero",
+                Animation::new(Duration::ZERO),
+                |p| p * 0.4,
+            ))
+            .into_any_element()
+    });
+    app.frame(window);
+    assert!(!app.wants_frame(window), "zero-duration one-shot must not keep requesting frames");
+    let alpha = app.scene(window).primitives.iter().find_map(|p| match p {
+        crate::Primitive::Quad(q) => Some(q.background.solid.a),
+        _ => None,
+    });
+    assert_eq!(alpha, Some(0.4));
+
+    // 2. Exact duration completion (`elapsed == duration`) finishes on that tick without a trailing frame.
+    let (mut app, window) = open_sized(size(px(40.), px(40.)), 1.0, |_, _| {
+        div()
+            .size_full()
+            .child(div().size(px(20.)).bg(hsla(0., 0., 0., 1.)).with_opacity_animation(
+                "exact",
+                Animation::new(Duration::from_millis(100)),
+                |p| p * 0.6,
+            ))
+            .into_any_element()
+    });
+    app.frame(window);
+    assert!(app.wants_frame(window));
+    app.advance_clock(Duration::from_millis(100));
+    app.frame(window);
+    assert!(!app.wants_frame(window), "exact completion at duration stops requesting frames");
+    let alpha = app.scene(window).primitives.iter().find_map(|p| match p {
+        crate::Primitive::Quad(q) => Some(q.background.solid.a),
+        _ => None,
+    });
+    assert_eq!(alpha, Some(0.6));
+
+    // 3. Non-finite easing/animator output is sanitized to finite opacity.
+    let (mut app, window) = open_sized(size(px(40.), px(40.)), 1.0, |_, _| {
+        div()
+            .size_full()
+            .child(div().size(px(20.)).bg(hsla(0., 0., 0., 1.)).with_opacity_animation(
+                "nan",
+                Animation::new(Duration::from_millis(50)),
+                |_| f32::NAN,
+            ))
+            .into_any_element()
+    });
+    app.frame(window);
+    app.advance_clock(Duration::from_millis(50));
+    app.frame(window);
+    assert!(!app.wants_frame(window));
+    let alpha = app.scene(window).primitives.iter().find_map(|p| match p {
+        crate::Primitive::Quad(q) => Some(q.background.solid.a),
+        _ => None,
+    });
+    assert_eq!(alpha, Some(1.0));
+}

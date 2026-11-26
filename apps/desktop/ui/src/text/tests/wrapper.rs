@@ -344,3 +344,20 @@ fn wrap_and_truncate_never_split_grapheme_clusters() {
         }
     }
 }
+
+#[test]
+fn wrap_updates_prev_char_on_wrap_and_truncation_covers_exact_run_boundary() {
+    let mut wrapper = build_wrapper();
+    // FixedTextSystem uses 9.6 px per char, so 30 px fits 3 chars.
+    // "ab cdefg": 'c' overflows at byte 3, wrapping to "cdefg"; 'd' must NOT see stale prev_c == ' '
+    // and split between 'c' and 'd' (byte 4). It must hard-wrap after 3 chars ("cde" | "fg", byte 6).
+    assert_eq!(
+        wrap(&mut wrapper, &[LineFragment::text("ab cdefg")], 30.),
+        [Boundary::new(3, 0), Boundary::new(6, 0)]
+    );
+
+    // When runs total exactly `truncate_at`, the ellipsis is still covered by the last run.
+    let cut = runs_after_truncation("abcd…", "…", &runs(&[4]));
+    assert_covers("abcd…", &cut);
+    assert_eq!(cut.iter().map(|r| r.len).collect::<Vec<_>>(), vec![7]);
+}

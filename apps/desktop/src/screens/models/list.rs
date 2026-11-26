@@ -333,10 +333,12 @@ impl FoloApp {
                 let next = match ev.keystroke.key.as_str() {
                     "down" => i + 1,
                     "up" if i > 0 => i - 1,
+                    "home" if i > 0 => 0,
+                    "end" if i + 1 < ids_k.len() => ids_k.len() - 1,
                     _ => return,
                 };
                 if let Some(id) = ids_k.get(next) {
-                    this.focus_key(&format!("model-row-{id}"), w, cx);
+                    this.focus_key_and_reveal(&format!("model-row-{id}"), w, cx);
                     cx.stop_propagation();
                 }
             }))

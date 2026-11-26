@@ -144,6 +144,7 @@ impl LineWrapper {
                 };
 
                 width += item_width;
+                prev_c = new_prev_c;
                 if width > wrap_width && ix > last_wrap_ix {
                     if let (None, Some(first_non_whitespace_ix)) = (indent, first_non_whitespace_ix) {
                         indent = Some(Self::MAX_INDENT.min((first_non_whitespace_ix - last_wrap_ix) as u32));
@@ -164,8 +165,6 @@ impl LineWrapper {
 
                     return Some(Boundary::new(last_wrap_ix, indent.unwrap_or(0)));
                 }
-
-                prev_c = new_prev_c;
             }
         })
     }
@@ -316,15 +315,20 @@ impl LineWrapper {
 /// the suffix and the rest dropped), GPUI's `update_runs_after_truncation` on a copy.
 pub(crate) fn runs_after_truncation(result: &str, ellipsis: &str, runs: &[TextRun]) -> Vec<TextRun> {
     let mut runs = runs.to_vec();
-    let mut truncate_at = result.len() - ellipsis.len();
+    let mut truncate_at = result.len().saturating_sub(ellipsis.len());
+    let mut extended = false;
     for (run_index, run) in runs.iter_mut().enumerate() {
         if run.len <= truncate_at {
             truncate_at -= run.len;
         } else {
             run.len = truncate_at + ellipsis.len();
             runs.truncate(run_index + 1);
+            extended = true;
             break;
         }
+    }
+    if !extended && let Some(last) = runs.last_mut() {
+        last.len += truncate_at + ellipsis.len();
     }
     runs
 }

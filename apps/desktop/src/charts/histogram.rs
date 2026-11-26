@@ -71,7 +71,9 @@ pub fn histogram(
                     let gap =
                         if n > 1 && plot.size.width >= px(5.) * n as f32 - px(4.) { px(4.) } else { px(0.) };
                     let bw = ((plot.size.width - gap * (n as f32 - 1.)) / n as f32).max(px(0.));
-                    let hovered = hover.map(|f| (f * n as f32) as usize);
+                    let hovered = hover
+                        .filter(|f| f.is_finite() && (0.0..=1.0).contains(f))
+                        .map(|f| ((f * n as f32).floor() as usize).min(n - 1));
                     window.paint_quad(fill(
                         Bounds::new(point(plot.left(), plot.bottom()), size(plot.size.width, px(1.))),
                         t.chart_axis,

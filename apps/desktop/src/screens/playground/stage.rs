@@ -27,7 +27,7 @@ impl FoloApp {
             // The side panel offers validation images only from a dataset that has val samples.
             let samples =
                 self.play_sample_dataset().is_some_and(|ds_id| match self.store.images.get(&ds_id) {
-                    Some(Load::Ready(v)) => !super::side::pick_val_samples(v, 1).is_empty(),
+                    Some(Load::Ready(v)) => !super::samples::pick_val_samples(v, 1).is_empty(),
                     Some(Load::Failed(_)) => false,
                     _ => true,
                 });
@@ -470,9 +470,13 @@ impl FoloApp {
                             }
                         }
                         let Some(b) = bounds_cell.get() else { return };
-                        let (x, y) =
-                            to_image(b, dims, Fit::Contain, this.play_zoom, this.play_pan, ev.position);
-                        let hit = hit_box(&hover_boxes, x, y);
+                        let hit = if b.contains(&ev.position) {
+                            let (x, y) =
+                                to_image(b, dims, Fit::Contain, this.play_zoom, this.play_pan, ev.position);
+                            hit_box(&hover_boxes, x, y)
+                        } else {
+                            None
+                        };
                         if hit != this.play_hover || (hit.is_some() && !this.play_hover_from_stage) {
                             this.play_hover = hit;
                             this.play_hover_from_stage = hit.is_some();

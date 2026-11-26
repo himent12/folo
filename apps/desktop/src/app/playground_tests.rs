@@ -852,3 +852,102 @@ fn hovering_downward_across_playground_and_inspector_rows_preserves_highlight() 
         "moving directly down from first inspector label row ({first_id}) to next row preserves hover (got {second:?})"
     );
 }
+
+#[test]
+fn playground_shortcuts_iou_noop_detection_keys_and_stage_margin_hover() {
+    use folo_ui::{KeyDownEvent, Keystroke, MouseMoveEvent, PlatformInput, point, px};
+
+    let (mut app, window) = open();
+    let _ = stage_an_image(&mut app, window);
+    app.frame(window.into());
+
+    // 1. Playground zoom shortcuts must be ignored while a Select dropdown is open.
+    drive(&mut app, window, |this, _, cx| {
+        this.menu_open = Some("play-model");
+        cx.notify();
+    });
+    app.frame(window.into());
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent { keystroke: Keystroke::parse("=").unwrap(), is_held: false }),
+    );
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, cx| {
+        assert_eq!(this.play_zoom, 1.0, "zoom shortcut ignored while select menu is open");
+        this.menu_open = None;
+        cx.notify();
+    });
+    app.frame(window.into());
+
+    // 2. Pressing Left on `play-iou` when already at its minimum (0.30) does not trigger a redundant predict.
+    let seq_before = drive(&mut app, window, |this, w, cx| {
+        this.play_iou = 0.30;
+        this.focus_key("play-iou", w, cx);
+        this.play_pred_seq
+    });
+    app.frame(window.into());
+    app.simulate_input(
+        window.into(),
+        PlatformInput::KeyDown(KeyDownEvent { keystroke: Keystroke::parse("left").unwrap(), is_held: false }),
+    );
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.play_pred_seq, seq_before, "no-op IoU arrow at min must not re-run predict");
+    });
+
+    // 3. Detection list rows (`det-*`) support Down / End / Home / Up keyboard navigation.
+    let n_vis = drive(&mut app, window, |this, w, cx| {
+        let n = this
+            .play_pred
+            .ready()
+            .map(|p| {
+                crate::screens::playground::filter_detections(&p.boxes, this.play_conf, this.play_class).len()
+            })
+            .unwrap_or(0);
+        if n >= 2 {
+            this.focus_key("det-0", w, cx);
+        }
+        n
+    });
+    assert!(n_vis >= 2, "demo playground prediction has >= 2 visible detections");
+    app.frame(window.into());
+    for (key, expected) in
+        [("down", "det-1".to_string()), ("end", format!("det-{}", n_vis - 1)), ("home", "det-0".to_string())]
+    {
+        app.simulate_input(
+            window.into(),
+            PlatformInput::KeyDown(KeyDownEvent {
+                keystroke: Keystroke::parse(key).unwrap(),
+                is_held: false,
+            }),
+        );
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            assert!(this.fh(expected.clone(), cx).is_focused(w), "{key} focused {expected}");
+        });
+    }
+
+    // 4. Moving into the 16 px dark margin outside the painted stage `inner` bounds when zoomed
+    //    clears `play_hover` instead of hitting a clipped-off box.
+    let margin_pt = drive(&mut app, window, |this, _, cx| {
+        this.play_zoom = 3.0;
+        this.play_hover = Some(0);
+        this.play_hover_from_stage = true;
+        cx.notify();
+        let inner = this.play_view.get().expect("play_view painted");
+        point(inner.left() - px(8.), inner.top() + inner.size.height * 0.5)
+    });
+    app.frame(window.into());
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: margin_pt,
+            pressed_button: None,
+            ..Default::default()
+        }),
+    );
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.play_hover, None, "hovering outside clipped stage inner clears play_hover");
+    });
+}

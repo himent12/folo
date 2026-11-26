@@ -400,6 +400,91 @@ fn a_failed_list_keeps_its_error_while_it_is_asked_again() {
     });
 }
 
+#[test]
+fn runs_and_models_tables_support_arrow_home_end_and_bench_delete_clears_ui_state() {
+    use folo_ui::{KeyDownEvent, Keystroke, PlatformInput};
+
+    let (mut app, window) = super::tests::open();
+    // 1. Runs list keyboard Down / End / Home navigation.
+    let run_ids = drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Runs, w, cx);
+        let ids: Vec<String> = this.store.runs.ready().unwrap().iter().map(|r| r.id.clone()).collect();
+        ids
+    });
+    app.frame(window.into());
+    assert!(run_ids.len() >= 2);
+    drive(&mut app, window, |this, w, cx| this.focus_key(&format!("run-row-{}", run_ids[0]), w, cx));
+    app.frame(window.into());
+    for (key, target) in
+        [("end", format!("run-row-{}", run_ids.last().unwrap())), ("home", format!("run-row-{}", run_ids[0]))]
+    {
+        app.simulate_input(
+            window.into(),
+            PlatformInput::KeyDown(KeyDownEvent {
+                keystroke: Keystroke::parse(key).unwrap(),
+                is_held: false,
+            }),
+        );
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            assert!(this.fh(target.clone(), cx).is_focused(w), "runs {key} focused {target}");
+        });
+    }
+
+    // 2. Models list keyboard End / Home navigation (ordered by rendered groups).
+    let model_ids = drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Models, w, cx);
+        let models = this.store.models.ready().unwrap();
+        let groups = crate::screens::models::group_models(&this.store, models, this.models_sort);
+        groups.iter().flat_map(|g| g.rows.iter()).map(|m| m.id.clone()).collect::<Vec<_>>()
+    });
+    app.frame(window.into());
+    assert!(model_ids.len() >= 2);
+    drive(&mut app, window, |this, w, cx| this.focus_key(&format!("model-row-{}", model_ids[0]), w, cx));
+    app.frame(window.into());
+    for (key, target) in [
+        ("end", format!("model-row-{}", model_ids.last().unwrap())),
+        ("home", format!("model-row-{}", model_ids[0])),
+    ] {
+        app.simulate_input(
+            window.into(),
+            PlatformInput::KeyDown(KeyDownEvent {
+                keystroke: Keystroke::parse(key).unwrap(),
+                is_held: false,
+            }),
+        );
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            assert!(this.fh(target.clone(), cx).is_focused(w), "models {key} focused {target}");
+        });
+    }
+
+    // 3. Deleting a benchmark clears pinned_entry, expanded_errors, plan_preview_sev and selected_entry_image.
+    let bench_id = drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Benches, w, cx);
+        this.ensure_benches(cx);
+        String::new()
+    });
+    let _ = bench_id;
+    app.frame(window.into());
+    app.run_until_idle();
+    let bench_id = drive(&mut app, window, |this, _, _| this.bench.list.ready().unwrap()[0].id.clone());
+    drive(&mut app, window, |this, _, cx| {
+        this.bench.pinned_entry = Some((bench_id.clone(), "e1".into()));
+        this.bench.expanded_errors.insert((bench_id.clone(), "e1".into()));
+        this.bench.plan_preview_sev.insert((bench_id.clone(), "low_light".into()), 3);
+        this.bench.selected_entry_image = Some((bench_id.clone(), "e1".into(), "img1".into()));
+        this.bench.confirm_delete = Some((bench_id.clone(), None));
+        this.confirm_bench_delete(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.bench.pinned_entry, None);
+        assert!(this.bench.expanded_errors.is_empty());
+        assert!(this.bench.plan_preview_sev.is_empty());
+        assert_eq!(this.bench.selected_entry_image, None);
+    });
+}
+
 /// Still failing, the newer error replaces the one shown, without the loading state in between.
 #[test]
 fn a_failed_list_asked_again_shows_the_newer_error() {

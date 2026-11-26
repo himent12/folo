@@ -267,6 +267,7 @@ impl Render for FoloApp {
                     && this.play_image.is_some()
                     && !this.modal_open()
                     && this.palette.is_none()
+                    && this.menu_open.is_none()
                     && !(m.control || m.alt || m.platform)
                 {
                     let d = if m.shift { 128. } else { 32. };
@@ -309,6 +310,7 @@ impl Render for FoloApp {
                         }
                         _ => return,
                     }
+                    cx.stop_propagation();
                     cx.notify();
                 }
             }))

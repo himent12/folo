@@ -33,7 +33,12 @@ impl FoloApp {
         self.slider_ranges.borrow_mut().insert(key, (min, max));
         let fh = self.fh(key, cx);
         let ring = self.ring(&fh, window);
-        let f = ((value - min) / (max - min)).clamp(0.0, 1.0);
+        let span = max - min;
+        let f = if span.is_finite() && span > 0.0 && value.is_finite() {
+            ((value - min) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let store = self.slider_bounds.clone();
         let fill_color = t.accent_fill();
         div()
@@ -65,8 +70,11 @@ impl FoloApp {
                 if m.control || m.alt || m.platform {
                     return;
                 }
+                if !span.is_finite() || span <= 0.0 {
+                    return;
+                }
                 let big = m.shift;
-                let s = step / (max - min) * if big { 10.0 } else { 1.0 };
+                let s = step / span * if big { 10.0 } else { 1.0 };
                 let next = match ev.keystroke.key.as_str() {
                     "left" | "down" => Some(f - s),
                     "right" | "up" => Some(f + s),
@@ -75,8 +83,9 @@ impl FoloApp {
                     _ => None,
                 };
                 if let Some(n) = next {
+                    let prev_iou = this.play_iou;
                     this.set_slider(key, n.clamp(0.0, 1.0), cx);
-                    if key == "play-iou" {
+                    if key == "play-iou" && (this.play_iou - prev_iou).abs() > f32::EPSILON {
                         this.run_predict(cx);
                     }
                     cx.stop_propagation();

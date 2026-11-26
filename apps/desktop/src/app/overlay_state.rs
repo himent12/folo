@@ -222,6 +222,10 @@ impl FoloApp {
     pub fn ask_delete(&mut self, target: super::DeleteTarget, window: &mut Window, cx: &mut Context<Self>) {
         self.remember_focus(window, cx);
         self.palette = None;
+        self.menu_open = None;
+        self.menu_trigger.set(None);
+        self.menu_typeahead.clear();
+        self.export_open = false;
         self.confirm_delete = Some(target);
         self.delete_files = false;
         let fh = self.fh("del-cancel", cx);
@@ -237,6 +241,10 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) {
         self.ds_scroll_anchor = None;
+        self.menu_open = None;
+        self.menu_trigger.set(None);
+        self.menu_typeahead.clear();
+        self.export_open = false;
         self.inspector = Some(Inspector {
             dataset,
             index,

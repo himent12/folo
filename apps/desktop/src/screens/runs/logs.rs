@@ -316,19 +316,20 @@ impl FoloApp {
         };
         // Follow the tail; scrolling up pauses it, scrolling back to the bottom resumes. Decided
         // only when the offset moved, so a reflow (a wrapped line after a resize) doesn't pause it.
-        if self.log_run.as_deref() != Some(r.id.as_str()) {
+        let switched = self.log_run.as_deref() != Some(r.id.as_str());
+        if switched {
             self.log_run = Some(r.id.clone());
             self.log_follow = true;
             self.log_last_y = -self.log_scroll.offset().y;
         }
         let (y, max) = (-self.log_scroll.offset().y, self.log_scroll.max_offset().height);
-        if y != self.log_last_y {
+        if !switched && y != self.log_last_y {
             // Tighter than one keyboard line (21 px), so a single Up press pauses following.
             self.log_follow = max - y < px(8.);
             self.log_last_y = y;
         }
         let rev = self.store.log_rev;
-        if self.log_follow && (rev != self.log_seen || max - y >= px(8.)) {
+        if self.log_follow && (switched || rev != self.log_seen || max - y >= px(8.)) {
             self.log_scroll.scroll_to_bottom();
         }
         self.log_seen = rev;

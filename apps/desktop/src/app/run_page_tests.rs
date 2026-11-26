@@ -537,3 +537,53 @@ fn failed_run_samples_and_logs_offer_retry_and_recover() {
         );
     });
 }
+
+#[test]
+fn switching_to_another_cached_runs_logs_scrolls_to_bottom() {
+    use crate::api::{LogLevel, LogLine, RunLogs};
+    use crate::app::Route;
+    use folo_ui::px;
+
+    let (mut app, window) = open();
+    let (run_a, run_b) = drive(&mut app, window, |this, _, _| {
+        let runs = this.store.runs.ready().unwrap();
+        (runs[0].id.clone(), runs[1].id.clone())
+    });
+    let mk_logs = |prefix: &str, n: usize| RunLogs {
+        lines: (0..n)
+            .map(|i| LogLine {
+                t: format!("2026-11-10T10:{:02}:{:02}Z", i / 60, i % 60),
+                level: LogLevel::Info,
+                message: format!("{prefix} line {i}"),
+            })
+            .collect(),
+        total: n as u64,
+    };
+
+    // Pre-populate both runs' logs so switching from A to B does not change `store.log_rev`.
+    drive(&mut app, window, |this, w, cx| {
+        this.store.install_logs(&run_a, Ok(mk_logs("A", 3)));
+        this.store.install_logs(&run_b, Ok(mk_logs("B", 120)));
+        this.navigate(Route::Run(run_a.clone()), w, cx);
+    });
+    for _ in 0..3 {
+        app.frame(window.into());
+        app.run_until_idle();
+    }
+
+    // Switch to already-cached run B (much taller log): must follow and scroll to its bottom.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Run(run_b.clone()), w, cx);
+    });
+    for _ in 0..4 {
+        app.frame(window.into());
+        app.run_until_idle();
+    }
+    drive(&mut app, window, |this, _, _| {
+        let max = this.log_scroll.max_offset().height;
+        let y = -this.log_scroll.offset().y;
+        assert!(max > px(100.), "run B logs overflow the scroll box: max={max:?}");
+        assert!(this.log_follow, "switching runs re-enables log follow");
+        assert!(max - y < px(8.), "run B logs scrolled to bottom (y={y:?}, max={max:?})");
+    });
+}

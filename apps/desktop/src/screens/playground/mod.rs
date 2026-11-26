@@ -2,6 +2,7 @@
 
 mod device;
 mod page;
+mod samples;
 mod side;
 mod stage;
 

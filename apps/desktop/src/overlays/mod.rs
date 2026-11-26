@@ -286,7 +286,22 @@ impl FoloApp {
                     .size_full()
                     .bg(t.bg_scrim)
                     .occlude()
-                    .capture_any_mouse_down(Self::guard_presses(cx))
+                    .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                        if !this.overlay_presses.admits(ev.click_count) {
+                            cx.stop_propagation();
+                            return;
+                        }
+                        // A click on the scrim while a popover/dropdown is open closes only the
+                        // popover first (matching Esc), rather than dismissing the whole dialog.
+                        if this.menu_open.is_some() || this.export_open {
+                            this.menu_open = None;
+                            this.menu_trigger.set(None);
+                            this.menu_typeahead.clear();
+                            this.export_open = false;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _, w, cx| {
@@ -337,6 +352,7 @@ impl FoloApp {
                             div()
                                 .id(id)
                                 .w(px(width))
+                                .max_w(folo_ui::relative(0.94))
                                 .max_h(folo_ui::relative(0.92))
                                 .occlude()
                                 .capture_any_mouse_down(Self::guard_presses(cx))

@@ -269,18 +269,26 @@ impl<E: IntoElement + 'static> IntoElement for OpacityAnimationElement<E> {
     }
 }
 
-/// The eased progress of `animation` after `elapsed`, and whether it has finished (GPUI's rule: past the
-/// end a one-shot animation stays at 1 and is done; a repeating one wraps).
+/// The eased progress of `animation` after `elapsed`, and whether it has finished (GPUI's rule: at or past
+/// the end a one-shot animation stays at 1 and is done; a repeating one wraps).
 pub(crate) fn progress(animation: &Animation, elapsed: Duration) -> (f32, bool) {
-    let mut delta = elapsed.as_secs_f32() / animation.duration.as_secs_f32();
+    let duration = animation.duration.as_secs_f32();
+    if !duration.is_finite() || duration <= 0.0 {
+        let eased = (animation.easing)(1.0);
+        return (if eased.is_finite() { eased } else { 1.0 }, animation.oneshot);
+    }
+    let mut delta = elapsed.as_secs_f32() / duration;
     let mut done = false;
-    if delta > 1.0 {
+    if !delta.is_finite() || delta >= 1.0 {
         if animation.oneshot {
             done = true;
             delta = 1.0;
-        } else {
+        } else if delta.is_finite() {
             delta %= 1.0;
+        } else {
+            delta = 0.0;
         }
     }
-    ((animation.easing)(delta), done)
+    let eased = (animation.easing)(delta.clamp(0.0, 1.0));
+    (if eased.is_finite() { eased } else { 1.0 }, done)
 }

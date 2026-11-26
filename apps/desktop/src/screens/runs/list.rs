@@ -304,10 +304,12 @@ impl FoloApp {
                         let next = match ev.keystroke.key.as_str() {
                             "down" => i + 1,
                             "up" if i > 0 => i - 1,
+                            "home" if i > 0 => 0,
+                            "end" if i + 1 < ids_up.len() => ids_up.len() - 1,
                             _ => return,
                         };
                         if let Some(id) = ids_up.get(next) {
-                            this.focus_key(&format!("run-row-{id}"), w, cx);
+                            this.focus_key_and_reveal(&format!("run-row-{id}"), w, cx);
                             cx.stop_propagation();
                         }
                     }))
@@ -638,6 +640,7 @@ fn run_trend(t: &crate::theme::Theme, values: Vec<f32>, epochs: u32, live: bool)
     const H: f32 = 20.;
     // The sparkline insets its line 3 px on every side.
     const INSET: f32 = 3.;
+    let values: Vec<f32> = values.into_iter().filter(|v| v.is_finite()).collect();
     let n = values.len();
     if n < 2 {
         return div().h(px(H)).into_any_element();
@@ -646,7 +649,8 @@ fn run_trend(t: &crate::theme::Theme, values: Vec<f32>, epochs: u32, live: bool)
     let span = (epochs.max(n as u32) - 1).max(1) as f32;
     let w = 2. * INSET + (TREND_W - 2. * INSET) * ((n - 1) as f32 / span);
     let last = values[n - 1];
-    let end = (w - INSET, INSET + (H - 2. * INSET) * (1. - last / hi));
+    let frac = (last / hi).clamp(0.0, 1.0);
+    let end = (w - INSET, INSET + (H - 2. * INSET) * (1. - frac));
     div()
         .relative()
         .w(px(TREND_W))

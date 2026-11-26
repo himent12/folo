@@ -541,3 +541,44 @@ fn toast_sits_beneath_new_run_dialog_at_960x620_so_submit_stays_clickable() {
         );
     });
 }
+
+#[test]
+fn clicking_dialog_scrim_with_open_select_closes_only_the_dropdown() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| {
+        this.open_new_run(None, w, cx);
+        this.menu_open = Some("nr-ds");
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.new_run.is_some());
+        assert_eq!(this.menu_open, Some("nr-ds"));
+    });
+
+    // First click on the backdrop closes only the open dropdown, leaving New run open.
+    click(&mut app, window, BACKDROP, 1);
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.menu_open, None, "dropdown closed by scrim click");
+        assert!(this.new_run.is_some(), "dialog stays open until a second scrim click");
+    });
+
+    // Second click on the backdrop dismisses the dialog itself.
+    click(&mut app, window, BACKDROP, 1);
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.new_run.is_none(), "second scrim click dismisses the dialog");
+    });
+
+    // Opening the inspector clears any open dropdown/export popover.
+    drive(&mut app, window, |this, w, cx| {
+        this.menu_open = Some("play-model");
+        this.export_open = true;
+        this.open_inspector("ds_8f2c".into(), 0, w, cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.menu_open, None);
+        assert!(!this.export_open);
+    });
+}

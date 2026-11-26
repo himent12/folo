@@ -3,13 +3,21 @@
 use std::sync::Arc;
 
 /// EMA smoothing with TensorBoard-style debiasing so the start isn't pulled toward zero.
+/// Non-finite points are skipped so a single `NaN`/`Inf` never poisons the rest of the curve.
 pub fn ema(points: &[(f32, f32)], w: f32) -> Vec<(f32, f32)> {
+    let w = if w.is_finite() { w.clamp(0.0, 0.999_999) } else { 0.0 };
     let mut last = 0.0;
+    let mut k = 0i32;
     let mut out = Vec::with_capacity(points.len());
-    for (i, &(x, y)) in points.iter().enumerate() {
+    for &(x, y) in points {
+        if !x.is_finite() || !y.is_finite() {
+            continue;
+        }
+        k = k.saturating_add(1);
         last = last * w + (1.0 - w) * y;
-        let debias = 1.0 - w.powi(i as i32 + 1);
-        out.push((x, last / debias));
+        let debias = 1.0 - w.powi(k);
+        let value = if debias > 0.0 { last / debias } else { y };
+        out.push((x, value));
     }
     out
 }
@@ -18,27 +26,31 @@ pub fn ema(points: &[(f32, f32)], w: f32) -> Vec<(f32, f32)> {
 /// survive downsampling, and the series' last point, so the line ends (and its end mark sits)
 /// where the data does.
 fn envelope(points: &[(f32, f32)], x0: f32, x1: f32, columns: usize) -> Vec<(f32, f32)> {
-    if points.len() <= columns * 2 || x1 <= x0 {
-        return points.to_vec();
+    if columns == 0 || !x0.is_finite() || !x1.is_finite() || x1 <= x0 || points.len() <= columns * 2 {
+        return points.iter().copied().filter(|p| p.0.is_finite() && p.1.is_finite()).collect();
     }
     let mut out = Vec::with_capacity(columns * 2);
     let span = x1 - x0;
     let mut i = 0;
     for c in 0..columns {
         let end = x0 + span * (c + 1) as f32 / columns as f32;
-        let start = i;
+        let mut seen = false;
         let (mut lo, mut hi) = ((0.0, f32::INFINITY), (0.0, f32::NEG_INFINITY));
-        while i < points.len() && (points[i].0 <= end || c == columns - 1) {
+        while i < points.len() && (!points[i].0.is_finite() || points[i].0 <= end || c == columns - 1) {
             let p = points[i];
+            i += 1;
+            if !p.0.is_finite() || !p.1.is_finite() {
+                continue;
+            }
+            seen = true;
             if p.1 < lo.1 {
                 lo = p;
             }
             if p.1 > hi.1 {
                 hi = p;
             }
-            i += 1;
         }
-        if i > start {
+        if seen {
             if lo.0 <= hi.0 {
                 out.push(lo);
                 if hi != lo {
@@ -50,7 +62,7 @@ fn envelope(points: &[(f32, f32)], x0: f32, x1: f32, columns: usize) -> Vec<(f32
             }
         }
     }
-    if let Some(&last) = points.last()
+    if let Some(last) = points.iter().rev().copied().find(|p| p.0.is_finite() && p.1.is_finite())
         && out.last() != Some(&last)
     {
         out.push(last);
@@ -141,5 +153,28 @@ mod tests {
         let b = Arc::new(vec![(0.0, 1.0), (1.0, 3.0)]);
         assert!(!Arc::ptr_eq(&s1, &smoothed(&b, 0.5)));
         assert!(!Arc::ptr_eq(&s1, &smoothed(&a, 0.9)));
+    }
+
+    #[test]
+    fn ema_and_envelope_skip_non_finite_values() {
+        let pts = vec![(0.0, 2.0), (1.0, f32::NAN), (2.0, f32::INFINITY), (3.0, 6.0)];
+        let s = ema(&pts, 0.5);
+        assert_eq!(s.len(), 2);
+        assert!(s.iter().all(|p| p.0.is_finite() && p.1.is_finite()));
+        assert!((s[0].1 - 2.0).abs() < 1e-4);
+        assert!(ema(&[(0.0, 3.0), (1.0, 5.0)], 1.0).iter().all(|p| p.1.is_finite()));
+        assert!(ema(&[(0.0, 3.0), (1.0, 5.0)], f32::NAN).iter().all(|p| p.1.is_finite()));
+
+        // Envelope column containing only NaN must not emit (+/-Infinity) sentinels.
+        let mut dense: Vec<(f32, f32)> = (0..400).map(|i| (i as f32, 1.0)).collect();
+        for p in &mut dense[100..200] {
+            p.1 = f32::NAN;
+        }
+        dense[399].1 = f32::INFINITY;
+        let env = envelope(&dense, 0.0, 399.0, 20);
+        assert!(!env.is_empty());
+        assert!(env.iter().all(|p| p.0.is_finite() && p.1.is_finite()));
+        assert_eq!(env.last(), Some(&(398.0, 1.0)));
+        assert!(envelope(&dense, 0.0, 399.0, 0).iter().all(|p| p.1.is_finite()));
     }
 }
