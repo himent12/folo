@@ -472,29 +472,47 @@ pub fn free_name(base: String, taken: impl Fn(&str) -> bool) -> String {
 use folo_data::paths::relative_to;
 pub use folo_data::paths::{lexical, normalize as absolute};
 
+/// Pops one `ParentDir` (`..`) component onto `out` safely: preserves root (`/`, `C:\`), preserves leading `..`
+/// segments on relative paths (`../../a`), and resolves symlinks before popping on Unix.
+fn push_parent(out: &mut PathBuf) {
+    use std::path::Component;
+    #[cfg(unix)]
+    {
+        if !out.as_os_str().is_empty()
+            && !matches!(out.components().next_back(), Some(Component::ParentDir))
+            && let Ok(canon) = std::fs::canonicalize(&*out)
+        {
+            *out = canon;
+        }
+    }
+    match out.components().next_back() {
+        Some(Component::Normal(_)) => {
+            let _ = out.pop();
+        }
+        Some(Component::RootDir | Component::Prefix(_)) => {}
+        None | Some(Component::ParentDir | Component::CurDir) => out.push(".."),
+    }
+}
+
 /// Normalizes `p` without breaking symlink-before-`..` resolution on Unix: when `p` contains no `..`, returns
 /// `lexical(p)` untouched so symlinked dataset bases deduplicate cleanly; when `p` contains `..`, resolves existing
 /// prefixes through symlinks before popping `..` on Unix so a symlinked `data.yaml` folder with `path: ../images/birds`
 /// resolves to the link target's sibling `images/birds` / `labels/birds`.
 fn resolve_dotdot(p: &Path) -> PathBuf {
-    if !p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    use std::path::Component;
+    let has_parent = p
+        .components()
+        .any(|c| matches!(c, Component::ParentDir) || matches!(c, Component::Normal(s) if s == ".."));
+    if !has_parent {
         return lexical(p);
     }
     let mut out = PathBuf::new();
     for c in p.components() {
         match c {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                #[cfg(unix)]
-                {
-                    if let Ok(canon) = std::fs::canonicalize(&out) {
-                        out = canon;
-                    }
-                }
-                if !out.pop() {
-                    out.push("..");
-                }
-            }
+            Component::CurDir => {}
+            Component::ParentDir => push_parent(&mut out),
+            Component::Normal(s) if s == "." => {}
+            Component::Normal(s) if s == ".." => push_parent(&mut out),
             other => out.push(other),
         }
     }
@@ -572,7 +590,8 @@ impl Index {
     /// `exclude` is passed to [`Fingerprint::of`].
     pub fn build(path: &str, format: DatasetFormat, exclude: &[PathBuf]) -> Result<Index> {
         let excluded: Vec<PathBuf> = exclude.iter().map(|x| absolute(x)).collect();
-        let p = absolute(Path::new(path));
+        let raw_p = Path::new(path);
+        let p = resolve_dotdot(&std::path::absolute(raw_p).unwrap_or_else(|_| raw_p.to_path_buf()));
         // A folder that is not a dataset is said as that before anything walks it: the fingerprint below stats every
         // file under `base`, which takes minutes for a drive or a system folder.
         preflight(path, format)?;

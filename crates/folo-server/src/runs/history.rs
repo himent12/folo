@@ -571,11 +571,46 @@ mod tests {
         .unwrap()
     }
 
-    fn make_epoch(epoch: u32) -> Epoch {
+    fn make_epoch_with_map(epoch: u32, map50_95: f32) -> Epoch {
         serde_json::from_str(&format!(
-            r#"{{"epoch":{epoch},"train_loss":{{"box":1,"cls":1,"dfl":1,"total":3}},"val":{{"map50":0.1,"map50_95":0.05,"precision":0.1,"recall":0.1,"per_class":[]}},"duration_s":1}}"#
+            r#"{{"epoch":{epoch},"train_loss":{{"box":1,"cls":1,"dfl":1,"total":3}},"val":{{"map50":0.1,"map50_95":{map50_95},"precision":0.1,"recall":0.1,"per_class":[]}},"duration_s":1}}"#
         ))
         .unwrap()
+    }
+
+    fn make_epoch(epoch: u32) -> Epoch {
+        make_epoch_with_map(epoch, 0.05)
+    }
+
+    fn write_valid_checkpoint(path: &Path, epoch: u64, best_epoch_zero_based: i64, best_fitness: f64) {
+        use folo_core::rng::Rng;
+        use folo_nn::io::{
+            BestState, CheckpointParts, FileKind, Metadata, ModelConfig, RngState, save_checkpoint,
+        };
+        use folo_nn::optim::{Sgd, StandardGroups};
+        use folo_nn::{DecayKind, Linear, LrSchedule};
+        let mut rng = Rng::seed(0);
+        let model = Linear::new(2, 2, true, &mut rng);
+        let sg = StandardGroups::from_module(&model);
+        let optim = Sgd::new(sg.into_groups(0.01, 0.9, 5e-4)).unwrap();
+        let sched = LrSchedule::new(DecayKind::Cosine, 5, 2, 0.01, 0.0, 0.1, 0.8).unwrap();
+        let meta =
+            Metadata::new(FileKind::Checkpoint, ModelConfig::new("n", 1).unwrap(), vec!["box".into()], 64)
+                .unwrap();
+        let rng_state = RngState { seed: 0, streams: [("data".to_string(), Rng::seed(0))].into() };
+        let train_cfg = serde_json::json!({ "epochs": 5 });
+        let parts = CheckpointParts {
+            model: &model,
+            ema: None,
+            optimizer: &optim,
+            schedule: &sched,
+            rng: &rng_state,
+            epoch,
+            best: BestState { fitness: Some(best_fitness), epoch: best_epoch_zero_based },
+            train_config: &train_cfg,
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        save_checkpoint(path, &meta, &parts).unwrap();
     }
 
     fn record(ev: RunEvent) -> String {
@@ -616,10 +651,11 @@ mod tests {
         assert_eq!(after.epochs.iter().map(|e| e.epoch).collect::<Vec<_>>(), [1, 2]);
     }
 
-    /// Cloud resume where `weights/last.folo` is behind mirrored `metrics.jsonl` (e.g. instance died before
-    /// copying epoch 2-3): `resume` boundary truncates lost epochs and clamps `run.epoch` to the checkpoint epoch.
+    /// Cloud resume where `weights/last.folo` is absent OR lags mirrored `metrics.jsonl` (e.g. instance died
+    /// after mirroring epochs 2–3 while `last.folo` is still at epoch 1): `resume` truncates lost epochs and
+    /// restores `run.epoch`, `run.step`, and `run.best` from the synced checkpoint and retained history.
     #[test]
-    fn cloud_resume_truncates_metrics_past_synced_checkpoint_epoch() {
+    fn cloud_resume_truncates_metrics_and_rolls_back_best_and_step_to_checkpoint() {
         let dir = TestDir::new("history-cloud-resume");
         let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
         let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"cloud"}"#).unwrap();
@@ -630,34 +666,76 @@ mod tests {
             format: DatasetFormat::Yolo,
             classes: vec![],
         };
-        let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
+
+        // Case 1: no `weights/last.folo` synced -> restarts from epoch 0, clearing step and best.
+        let e = runs.register(config.clone(), dataset.clone(), None, None, 0, "cpu".into(), None).unwrap();
         let lines = [
             record(RunEvent::Step(make_step(1, 1, 3.0))),
-            record(RunEvent::Epoch(make_epoch(1))),
+            record(RunEvent::Epoch(make_epoch_with_map(1, 0.40))),
             record(RunEvent::Step(make_step(2, 2, 2.0))),
-            record(RunEvent::Epoch(make_epoch(2))),
+            record(RunEvent::Epoch(make_epoch_with_map(2, 0.85))),
             record(RunEvent::Step(make_step(3, 3, 1.5))),
         ];
         std::fs::write(e.metrics_path(), lines.join("\n") + "\n").unwrap();
-        // No `weights/last.folo` was synced before the cloud instance died -> resuming starts over at epoch 0.
         {
             let mut st = e.state.lock().unwrap();
             st.file.epochs_done = 2;
             st.file.run.epoch = 2;
+            st.file.run.step = 3;
+            st.file.run.best = Some(BestEpoch { epoch: 2, map50_95: 0.85 });
             st.file.run.started = Some(now());
             e.finish(&mut st, RunStatus::Failed, Some("instance lost".into()));
         }
-        let (resumed, _) = runs.restart(&e, config, None).unwrap();
-        assert_eq!(resumed.epoch, 0, "resuming without weights/last.folo restarts from epoch 0");
+        let (resumed, _) = runs.restart(&e, config.clone(), None).unwrap();
+        assert_eq!((resumed.epoch, resumed.step, resumed.best), (0, 0, None));
         let m = runs.metrics(e.id(), &MetricsQuery::default()).unwrap();
         assert!(m.steps.is_empty() && m.epochs.is_empty(), "lost cloud epochs must be hidden on resume");
+
+        // Case 2: real `weights/last.folo` synced at epoch 1 (best = 0.40), while `metrics.jsonl` mirrored
+        // epochs 1..3 (best = epoch 2 at 0.85) + partial epoch 4 (step 7).
+        let e2 = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
+        let lines2 = [
+            record(RunEvent::Step(make_step(1, 1, 3.0))),
+            record(RunEvent::Step(make_step(1, 2, 2.6))),
+            record(RunEvent::Epoch(make_epoch_with_map(1, 0.40))),
+            record(RunEvent::Step(make_step(2, 3, 2.0))),
+            record(RunEvent::Step(make_step(2, 4, 1.8))),
+            record(RunEvent::Epoch(make_epoch_with_map(2, 0.85))),
+            record(RunEvent::Step(make_step(3, 5, 1.6))),
+            record(RunEvent::Step(make_step(3, 6, 1.5))),
+            record(RunEvent::Epoch(make_epoch_with_map(3, 0.60))),
+            record(RunEvent::Step(make_step(4, 7, 1.4))),
+        ];
+        std::fs::write(e2.metrics_path(), lines2.join("\n") + "\n").unwrap();
+        write_valid_checkpoint(&e2.dir.join("weights").join("last.folo"), 1, 0, 0.40);
+        {
+            let mut st = e2.state.lock().unwrap();
+            st.file.epochs_done = 3;
+            st.file.run.epoch = 3;
+            st.file.run.step = 7;
+            st.file.run.best = Some(BestEpoch { epoch: 2, map50_95: 0.85 });
+            st.file.run.started = Some(now());
+            e2.finish(&mut st, RunStatus::Failed, Some("instance lost".into()));
+        }
+        let (resumed2, _) = runs.restart(&e2, config, None).unwrap();
+        assert_eq!(resumed2.epoch, 1);
+        assert_eq!(resumed2.step, 2, "step must roll back to epoch 1's last retained step");
+        assert_eq!(resumed2.best, Some(BestEpoch { epoch: 1, map50_95: 0.40 }));
+        let m2 = runs.metrics(e2.id(), &MetricsQuery::default()).unwrap();
+        assert_eq!(m2.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
+        assert_eq!(m2.epochs.iter().map(|ep| ep.epoch).collect::<Vec<_>>(), [1]);
+
+        // A subsequent resumed epoch 2 with 0.55 beats the rolled-back epoch 1 (0.40) and becomes the new best.
+        e2.on_event(&RunEvent::Epoch(make_epoch_with_map(2, 0.55)));
+        assert_eq!(e2.run().best, Some(BestEpoch { epoch: 2, map50_95: 0.55 }));
         runs.shutdown(None);
     }
 
     /// Reconciling after a crash that left a torn trailing line in `metrics.jsonl` heals the trailing newline so
-    /// subsequent appends (such as recovered cloud mirroring) parse cleanly while ignoring the torn fragment.
+    /// subsequent appends parse cleanly while ignoring the torn fragment; `ensure_trailing_newline` also heals
+    /// `metrics.jsonl` and `log.jsonl` for recovered cloud runs (which bypass local `reconcile`).
     #[test]
-    fn reconcile_heals_torn_trailing_line_before_subsequent_appends() {
+    fn reconcile_and_cloud_recovery_heal_torn_trailing_lines_before_appends() {
         let dir = TestDir::new("history-torn-reconcile");
         let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"torn"}"#).unwrap();
         let dataset = DatasetRef {
@@ -691,6 +769,28 @@ mod tests {
         let m = reopened.metrics(e2.id(), &MetricsQuery::default()).unwrap();
         assert_eq!(m.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
         assert_eq!(m.steps[1].loss.total, 1.9);
+
+        // Cloud recovery path calls `ensure_trailing_newline` on both `metrics.jsonl` and `log.jsonl`.
+        let cloud_metrics = dir.join("cloud_metrics.jsonl");
+        let cloud_log = dir.join("cloud_log.jsonl");
+        std::fs::write(
+            &cloud_metrics,
+            format!("{}\n{{\"event\":\"step\"", record(RunEvent::Step(make_step(1, 1, 3.0)))),
+        )
+        .unwrap();
+        std::fs::write(
+            &cloud_log,
+            r#"{"t":"2026-01-01T00:00:00Z","level":"info","message":"ok"}\n{"t":"torn"#,
+        )
+        .unwrap();
+        crate::runs::ensure_trailing_newline(&cloud_metrics);
+        crate::runs::ensure_trailing_newline(&cloud_log);
+        append_line(&cloud_metrics, &record(RunEvent::Step(make_step(1, 2, 2.2))));
+        append_line(&cloud_log, r#"{"t":"2026-01-01T00:00:01Z","level":"info","message":"recovered"}"#);
+        let cm = read_metrics(&cloud_metrics);
+        assert_eq!(cm.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2]);
+        let cl = read_logs(&cloud_log, &LogsQuery::last(10));
+        assert_eq!(cl.lines.last().unwrap().message, "recovered");
         reopened.shutdown(None);
     }
 }

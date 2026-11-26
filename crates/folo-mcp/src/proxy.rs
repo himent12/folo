@@ -32,6 +32,8 @@ struct ProbeState {
     generation: u64,
     mock: Option<bool>,
     features: Option<Vec<String>>,
+    /// Cached `data_dir` reported by `GET /api/system` (`Some(None)` means the server explicitly omitted it).
+    data_dir: Option<Option<String>>,
     /// True while one caller is probing `/api/health` (and `/api/system` for legacy servers) for `features`.
     features_in_flight: bool,
     #[cfg(test)]
@@ -112,6 +114,7 @@ impl HttpStore {
         s.generation = s.generation.wrapping_add(1);
         s.mock = None;
         s.features = None;
+        s.data_dir = None;
         self.probe.ready.notify_all();
     }
 
@@ -120,6 +123,30 @@ impl HttpStore {
     pub(crate) fn assume_features(self, features: Vec<String>) -> HttpStore {
         self.probe.state.lock().unwrap_or_else(|e| e.into_inner()).features = Some(features);
         self
+    }
+
+    /// This store, taking `data_dir` as the server's `/api/system` `data_dir` (tests: remote proxy confinement).
+    #[cfg(test)]
+    pub(crate) fn assume_data_dir(self, data_dir: Option<String>) -> HttpStore {
+        self.probe.state.lock().unwrap_or_else(|e| e.into_inner()).data_dir = Some(data_dir);
+        self
+    }
+
+    /// The server's `data_dir` from `GET /api/system`, cached once on success (never caching transient errors).
+    pub(crate) fn remote_data_dir(&self) -> Result<Option<String>, Error> {
+        let start_gen = {
+            let s = self.probe.state.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(dir) = &s.data_dir {
+                return Ok(dir.clone());
+            }
+            s.generation
+        };
+        let dir = self.system()?.data_dir;
+        let mut s = self.probe.state.lock().unwrap_or_else(|e| e.into_inner());
+        if s.generation == start_gen {
+            s.data_dir = Some(dir.clone());
+        }
+        Ok(dir)
     }
 
     /// Calls `GET /api/health` and updates the shared cache on success if `generation` has not been cleared

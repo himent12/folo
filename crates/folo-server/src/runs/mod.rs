@@ -203,7 +203,7 @@ pub(crate) fn append_line(path: &Path, line: &str) {
 /// Ensures an existing non-empty JSONL file ends with `\n`, appending one if a crash left a torn trailing line so
 /// subsequent appends (e.g., recovered cloud mirroring or resumed training) never glue onto a partial record.
 /// Called only when no writer is concurrently appending to `path`.
-pub(super) fn ensure_trailing_newline(path: &Path) {
+pub(crate) fn ensure_trailing_newline(path: &Path) {
     let mut f = match std::fs::OpenOptions::new().read(true).append(true).open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,

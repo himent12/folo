@@ -45,6 +45,10 @@ impl Exec {
             Some(e) => e.token,
             None => self.private.token.clone().unwrap_or_default(),
         };
+        // Repair any torn trailing line left by a crash while mirroring before appending recovered logs/metrics
+        // (this thread already holds `self._lock`, so no other writer is active on these files).
+        crate::runs::ensure_trailing_newline(&self.entry.metrics_path());
+        crate::runs::ensure_trailing_newline(&self.dir.join("log.jsonl"));
         self.entry.log(
             LogLevel::Info,
             "this server restarted: following the run on its worker again and fetching what it missed",

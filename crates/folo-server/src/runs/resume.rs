@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use axum::http::StatusCode;
-use folo_api::{LogLevel, Run, RunCloud, RunEvent, RunStatus, TrainConfig};
+use folo_api::{BestEpoch, LogLevel, Run, RunCloud, RunEvent, RunStatus, TrainConfig};
 
 use crate::engine;
 use crate::error::{Error, Result};
@@ -109,17 +109,33 @@ impl Runs {
         let mut st = e.state.lock().unwrap();
         resumable(&st, &e.id)?;
         let last = e.dir.join("weights").join("last.folo");
+        let ckpt = if last.is_file() {
+            crate::engine::read_model_file(&last).ok().and_then(|f| f.checkpoint().map(|c| (c.epoch, c.best)))
+        } else {
+            None
+        };
         let resume_epoch = if last.is_file() {
-            crate::engine::read_model_file(&last)
-                .ok()
-                .and_then(|f| f.checkpoint().map(|c| c.epoch.min(u32::MAX as u64) as u32))
-                .unwrap_or(st.file.epochs_done)
+            ckpt.map_or(st.file.epochs_done, |(ep, _)| ep.min(u32::MAX as u64) as u32)
         } else {
             0
         };
+        let ckpt_best = ckpt.and_then(|(_, b)| {
+            let f = b.fitness.map(|v| v as f32)?;
+            if !f.is_finite() {
+                return None;
+            }
+            let ep = b.epoch.saturating_add(1).clamp(1, i64::from(u32::MAX)) as u32;
+            (ep <= resume_epoch).then_some(BestEpoch { epoch: ep, map50_95: f })
+        });
+        mark_resume(&e.metrics_path(), resume_epoch);
+        let retained = super::history::read_metrics(&e.metrics_path());
         if resume_epoch < st.file.epochs_done {
             st.file.epochs_done = resume_epoch;
-            st.file.last_metrics = None;
+            st.file.last_metrics = retained
+                .epochs
+                .last()
+                .filter(|ep| ep.epoch == resume_epoch)
+                .map(|ep| super::entry::model_metrics(&ep.val));
         }
         st.claimed = cloud.is_some();
         // Not training from its end (or from a resume it has not trained since: it was stopped while it waited) until
@@ -135,6 +151,31 @@ impl Runs {
         }
         let r = &mut st.file.run;
         r.epoch = r.epoch.min(resume_epoch);
+        r.step = if resume_epoch == 0 {
+            0
+        } else {
+            retained
+                .steps
+                .last()
+                .map(|s| s.step)
+                .unwrap_or_else(|| u64::from(resume_epoch).saturating_mul(r.steps_per_epoch))
+        };
+        if resume_epoch == 0 {
+            r.best = None;
+        } else if r.best.is_some_and(|b| b.epoch > resume_epoch) {
+            let mut best: Option<BestEpoch> = None;
+            for ep in &retained.epochs {
+                if best.is_none_or(|b| ep.val.map50_95 > b.map50_95) {
+                    best = Some(BestEpoch { epoch: ep.epoch, map50_95: ep.val.map50_95 });
+                }
+            }
+            if let Some(cb) = ckpt_best
+                && best.is_none_or(|b| cb.map50_95 > b.map50_95)
+            {
+                best = Some(cb);
+            }
+            r.best = best;
+        }
         r.config.device = wanted.device;
         r.config.compute = wanted.compute;
         // `cloud` is there exactly for a cloud run: one resumed here is a run of this machine from now on (what its
@@ -151,7 +192,6 @@ impl Runs {
         st.attempt += 1;
         let attempt = st.attempt;
         e.stop.store(false, Ordering::Relaxed);
-        mark_resume(&e.metrics_path(), resume_epoch);
         e.persist(&st);
         e.send(RunEvent::Status(status_event(&st.file.run)));
         let run = st.file.shown();

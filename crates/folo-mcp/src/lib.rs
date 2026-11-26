@@ -118,9 +118,10 @@ pub(crate) fn open_real_store(opts: &Options) -> RealStore {
 
 /// Builds the server for `backend`.
 pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
-    // With --confine, the dataset reader refuses files outside the data dir (embedded mode; in proxy mode
-    // `folo serve` reads the datasets).
-    if opts.confine && !matches!(backend, Backend::Proxy { .. }) {
+    // With --confine, install the process-wide read guard for every backend (including proxy mode, where
+    // local-proxy confinement inspects manifests locally with `folo_data::open_with`) so this process itself
+    // never opens dataset files outside `--data-dir`.
+    if opts.confine {
         let policy = paths::PathPolicy { data_dir: opts.data_dir.clone(), confine: true };
         confine::install_read_guard(&policy).map_err(|e| e.body.message)?;
     }

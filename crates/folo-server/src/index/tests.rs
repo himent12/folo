@@ -251,6 +251,14 @@ fn dotdot_in_images_root_tracks_its_label_mirror() {
     assert_eq!(idx2.list_images(&ImageQuery { limit: 1, ..Default::default() }).images[0].boxes.len(), 0);
 }
 
+#[test]
+fn resolve_dotdot_preserves_root_and_leading_relative_parents() {
+    assert_eq!(resolve_dotdot(Path::new("../../a/b/../c")), PathBuf::from("../../a/c"));
+    let root_dotdot = if cfg!(windows) { Path::new(r"C:\..\a") } else { Path::new("/../a") };
+    let expected_root = if cfg!(windows) { PathBuf::from(r"C:\a") } else { PathBuf::from("/a") };
+    assert_eq!(resolve_dotdot(root_dotdot), expected_root);
+}
+
 /// A `data.yaml` reached through a symlinked folder (`work/current -> releases/v7/meta`) with `path: ../images/birds`:
 /// `watch_dirs` follows the symlink before `..` (instead of collapsing `current/..` as text) so creating or removing
 /// `releases/v7/labels/birds` invalidates the cached index, and `Index::image_path` resolves the real image file.

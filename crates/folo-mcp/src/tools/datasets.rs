@@ -236,7 +236,7 @@ impl Inner {
             check_name("name", n)?;
         }
         if self.confinement.active()
-            && self.confinement.is_remote_proxy()
+            && self.confinement.has_non_local_proxy_url()
             && let Some(proxy) = &self.proxy
         {
             return Err(Error::new(
@@ -593,7 +593,7 @@ mod tests {
         std::fs::write(root.join("outside.jpg"), b"not-allowed").unwrap();
 
         // Populate a real store on `remote_dir` (paths exist on disk outside `local_dir` — worst-case collision).
-        let remote_store = Arc::new(folo_server::RealStore::open(remote_dir).device("cpu"));
+        let remote_store = Arc::new(folo_server::RealStore::open(remote_dir.clone()).device("cpu"));
         let ds = remote_store
             .create_synthetic(SyntheticDataset {
                 name: "remote_shapes".into(),
@@ -604,8 +604,12 @@ mod tests {
             })
             .unwrap();
 
-        // Pair it with a non-local proxy URL so `Confinement` treats it as a separate remote host.
-        let remote_proxy = Arc::new(HttpStore::new("https://gpu.example.com:7878", None));
+        // Pair it with a non-local proxy URL whose `/api/system` reports a remote `data_dir` that does not exist
+        // locally so `Confinement` verifies it as a separate remote host.
+        let remote_proxy = Arc::new(
+            HttpStore::new("https://gpu.example.com:7878", None)
+                .assume_data_dir(Some("/nonexistent/remote-gpu-server/folo".into())),
+        );
         let opts = Options {
             data_dir: local_dir.clone(),
             read_only: false,
@@ -613,7 +617,7 @@ mod tests {
             device: "cpu".into(),
             published_weights: None,
         };
-        let server = FoloMcp::new(remote_store.clone(), Some(remote_proxy), opts);
+        let server = FoloMcp::new(remote_store.clone(), Some(remote_proxy), opts.clone());
 
         // Remote datasets are visible and readable rather than blanket-hidden with `path_outside_data_dir`.
         let list = server.inner.list_datasets(PageArgs { limit: None, cursor: None }).await.unwrap();
@@ -660,6 +664,19 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(pred_err.body.code, "path_outside_data_dir");
+
+        // A non-loopback LAN IP (`192.168.1.5`) whose `/api/system` `data_dir` EXISTS on this local filesystem
+        // (e.g. a local `folo serve` reached via its LAN interface) fails closed and stays strictly confined.
+        let lan_proxy = Arc::new(
+            HttpStore::new("http://192.168.1.5:7878", None)
+                .assume_data_dir(Some(folo_api::json::path(&remote_dir))),
+        );
+        let lan_server = FoloMcp::new(remote_store.clone(), Some(lan_proxy), opts);
+        let lan_list = lan_server.inner.list_datasets(PageArgs { limit: None, cursor: None }).await.unwrap();
+        assert_eq!(lan_list.value["total"], 0, "local LAN server with existing data_dir must stay confined");
+        let lan_err =
+            lan_server.inner.get_dataset(DatasetIdArgs { dataset_id: ds.id.clone() }).await.err().unwrap();
+        assert_eq!(lan_err.body.code, "path_outside_data_dir");
         remote_store.shutdown();
     }
 
@@ -685,7 +702,11 @@ mod tests {
         std::fs::write(sneaky.join("data.yaml"), yaml).unwrap();
         std::fs::create_dir_all(&other_dir).unwrap();
 
-        let store = Arc::new(folo_server::RealStore::open(server_dir.clone()).device("cpu"));
+        let store = Arc::new(
+            folo_server::RealStore::open(server_dir.clone())
+                .device("cpu")
+                .recheck_every(std::time::Duration::ZERO),
+        );
         let preexisting = store
             .register_dataset(RegisterDataset {
                 name: Some("preexisting".into()),
@@ -740,7 +761,23 @@ mod tests {
         assert_eq!(on_server.len(), 2, "sneaky registration must be rolled back: {on_server:?}");
         assert!(on_server.contains(&preexisting.id), "preexisting dataset must never be removed");
 
-        // 2. Different `--data-dir` on loopback (shared filesystem): server's `server_dir` datasets stay hidden
+        // 2. Manifest edited mid-session on the local server changes `Dataset.revision` and invalidates the
+        //    cached `Ok(())` verdict immediately.
+        let edited_yaml = std::path::Path::new(&inside_synth.path).join("data.yaml");
+        std::fs::write(
+            &edited_yaml,
+            format!("path: {}\ntrain: images/train\nnames: [box]\n", folo_api::json::path(&outside_ds)),
+        )
+        .unwrap();
+        let after_edit = same_dir
+            .inner
+            .get_dataset(DatasetIdArgs { dataset_id: inside_synth.id.clone() })
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(after_edit.body.code, "path_outside_data_dir");
+
+        // 3. Different `--data-dir` on loopback (shared filesystem): server's `server_dir` datasets stay hidden
         //    so paths outside `other_dir` are never exposed on a shared filesystem.
         let other_mcp = FoloMcp::new(
             http.clone(),

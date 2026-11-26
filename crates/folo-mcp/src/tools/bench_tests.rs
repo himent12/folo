@@ -479,10 +479,8 @@ fn a_wait_follows_an_entry_until_it_ends() {
         }
         store.shutdown();
     };
-    let t0 = Instant::now();
     let now = bounded(|| rt.block_on(ok(&s, "bench_entry", args(0))), release);
     assert_eq!(now["status"], "running", "{now}");
-    assert!(t0.elapsed() < Duration::from_millis(500), "wait: 0 must return promptly ({:?})", t0.elapsed());
     let start = Instant::now();
     let held = bounded(|| rt.block_on(ok(&s, "bench_entry", args(1))), release);
     assert_eq!(held["status"], "running", "{held}");

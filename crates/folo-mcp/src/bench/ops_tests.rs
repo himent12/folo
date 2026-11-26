@@ -443,13 +443,15 @@ fn forward(mut client: std::net::TcpStream, upstream: &str, hook: &dyn Fn(&str) 
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let mut chunk = [0u8; 4096];
     let ok = loop {
-        let Some(rem) = deadline.checked_duration_since(std::time::Instant::now()) else {
+        let Some(rem) = deadline.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero())
+        else {
             break false;
         };
         let _ = server.set_read_timeout(Some(rem));
         match server.read(&mut chunk) {
             Ok(0) => break true,
             Ok(n) => answer.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => break false,
         }
     };

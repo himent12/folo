@@ -115,6 +115,50 @@ impl PathPolicy {
         }
     }
 
+    /// With `confine`, fails closed with `path_outside_data_dir` unless `path` can be canonicalized locally and
+    /// lies inside the canonical data dir. Used where an unresolvable path (permission denied, separate mount
+    /// namespace) must never bypass confinement.
+    pub fn check_existing_inside(&self, path: &Path) -> Result<PathBuf, Error> {
+        let root = self.canonical_root()?;
+        if !self.confine {
+            return Ok(path.to_path_buf());
+        }
+        let canon = std::fs::canonicalize(path).map_err(|_| path_outside_error(&root, path))?;
+        outside_error(&root, &canon)?;
+        Ok(canon)
+    }
+
+    /// With `confine`, checks `path` whenever an entry exists at `path` (including dangling symlinks or
+    /// unreadable symlink targets, detected via `symlink_metadata`), failing closed unless its resolved target
+    /// lies inside the canonical data dir. Truly absent paths (`NotFound`) are skipped.
+    pub fn check_path_if_present(&self, path: &Path) -> Result<(), Error> {
+        if !self.confine {
+            return Ok(());
+        }
+        let root = self.canonical_root()?;
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {
+                if let Ok(canon) = std::fs::canonicalize(path) {
+                    outside_error(&root, &canon)
+                } else {
+                    match resolve_nonexistent(path, 0) {
+                        Some(target) => outside_error(&root, &target),
+                        None => Err(path_outside_error(&root, path)),
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            // PermissionDenied or other metadata errors on an existing parent/entry fail closed.
+            Err(_) => {
+                if let Ok(canon) = std::fs::canonicalize(path) {
+                    outside_error(&root, &canon)
+                } else {
+                    Err(path_outside_error(&root, path))
+                }
+            }
+        }
+    }
+
     /// With `confine`, checks that every existing path in `files` resolves (symlinks and junctions followed) inside
     /// the data dir. Paths that cannot be resolved (missing, or not a valid name on this OS) are skipped: they cannot
     /// be read either.
