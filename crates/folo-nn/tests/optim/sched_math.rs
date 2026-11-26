@@ -1,7 +1,6 @@
 //! Exact analytical, numerical, contract-serde, and determinism tests for:
-//! - [`DecayKind::Polynomial`] and [`DecayKind::OneCycle`] (Smith & Topin 2019),
-//! - Adaptive Gradient Clipping (`clip_grad_agc`), and
-//! - Stochastic Weight Averaging (`SwaModel`).
+//! - [`DecayKind::Polynomial`] and [`DecayKind::OneCycle`] (Smith & Topin 2019), and
+//! - Adaptive Gradient Clipping (`clip_grad_agc`).
 
 use folo_core::{Tensor, rng::Rng};
 use folo_nn::optim::{
@@ -9,7 +8,7 @@ use folo_nn::optim::{
 };
 use folo_nn::{
     Conv2d, Conv2dConfig, DEFAULT_ONE_CYCLE_DIV_FACTOR, DEFAULT_ONE_CYCLE_PCT_START, DecayKind, Forward,
-    LrSchedule, Module, SchedContract, SwaModel,
+    LrSchedule, Module, SchedContract,
 };
 
 #[test]
@@ -163,19 +162,16 @@ fn one_cycle_schedule_phases_inverse_momentum_and_serde() {
 }
 
 #[test]
-fn agc_one_cycle_and_swa_training_loop_determinism() {
+fn agc_and_one_cycle_training_loop_determinism() {
     let run_once = || -> Vec<f32> {
         let mut rng = Rng::seed(2026);
         let conv = Conv2d::new(Conv2dConfig::new(3, 6, 3).padding(1), &mut rng);
-        let mut swa =
-            SwaModel::new(Conv2d::new(Conv2dConfig::new(3, 6, 3).padding(1), &mut Rng::seed(999)), &conv)
-                .unwrap();
         let groups = StandardGroups::from_module(&conv).into_groups(0.05, 0.95, 1e-4);
         let mut opt = Sgd::new(groups).unwrap();
         let mut sched = LrSchedule::with_warmup_iters(DecayKind::OneCycle, 6, 1, 1e-3, 0, 0.0, 0.85).unwrap();
         let mut acc = GradAccumulator::new(&conv.parameters());
 
-        for step in 0..6 {
+        for _ in 0..6 {
             let x = Tensor::rand_uniform([2, 3, 8, 8], -1.0, 1.0, &mut rng);
             let loss = conv.forward(&x).unwrap().square().unwrap().mean_all().unwrap();
             acc.add(&loss.backward().unwrap()).unwrap();
@@ -184,18 +180,14 @@ fn agc_one_cycle_and_swa_training_loop_determinism() {
             assert_eq!(stats.total_units, 6);
             assert!(stats.max_ratio.is_finite());
             opt.step(&acc).unwrap();
-            if step >= 3 {
-                swa.update(&conv).unwrap();
-            }
             sched.advance();
             acc.zero();
         }
-        assert_eq!(swa.num_averaged(), 3);
-        swa.module().weight.to_vec::<f32>().unwrap()
+        conv.weight.to_vec::<f32>().unwrap()
     };
 
     let a = run_once();
     let b = run_once();
-    assert_eq!(a, b, "AGC + OneCycle + SWA training loop must be bitwise deterministic");
+    assert_eq!(a, b, "AGC + OneCycle training loop must be bitwise deterministic");
     assert!(a.iter().all(|v| v.is_finite()));
 }

@@ -59,7 +59,6 @@ pub(super) fn detection_loss_device_with_assignment(
         ClsLossKind::Bce => folo_gpu::detect::ClsLossKind::Bce,
         ClsLossKind::Vfl => folo_gpu::detect::ClsLossKind::Vfl,
         ClsLossKind::Qfl => folo_gpu::detect::ClsLossKind::Qfl,
-        other => unreachable!("device_loss_supported excludes {other:?}"),
     };
     let box_loss = match cfg.box_loss {
         BoxLossKind::Ciou => folo_gpu::detect::BoxLossKind::Ciou,

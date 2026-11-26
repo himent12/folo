@@ -50,29 +50,7 @@ mod terms;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-mod tests_asl_poly;
-#[cfg(test)]
-mod tests_geom;
-#[cfg(test)]
-mod tests_inner_iou;
-#[cfg(test)]
 mod tests_math;
-#[cfg(test)]
-mod tests_nwd_wiou;
-#[cfg(test)]
-mod tests_ohem;
-#[cfg(test)]
-mod tests_oks;
-#[cfg(test)]
-mod tests_piou;
-#[cfg(test)]
-mod tests_seesaw_prob_iou;
-#[cfg(test)]
-mod tests_siou_eiou;
-#[cfg(test)]
-mod tests_slide_loss;
-#[cfg(test)]
-mod tests_vfl_qfl;
 
 pub use assignment::assign_batch;
 pub use device::assign_batch_device;
@@ -81,15 +59,7 @@ pub use distill::{
     gt_verify_weights_cpu,
 };
 pub use terms::{
-    DEFAULT_OKS_EPS, DEFAULT_SLIDE_DELTA, EmaSlideLoss, GwdTransform, InnerIouBase, LossReduction,
-    OhemBudget, OhemConfig, OhemLoss, OhemSelection, OksLossConfig, QflConfig, SeesawConfig, SeesawLoss,
-    SlideLossConfig, SlideWeightKind, VflConfig, asymmetric_loss, ciou, eiou_loss, focaler_iou,
-    focaler_iou_loss, gwd_loss, inner_ciou_loss, inner_iou, inner_iou_loss, kld_loss, loss_with_assignment,
-    mpdiou_loss, mpdiou_loss_with_scale, nwd_loss, nwd_loss_with_c, ohem_select, oks_loss, oks_similarity,
-    piou_attention, piou_attention_f64, piou_loss, piou2_loss, poly1_bce_loss, poly1_focal_loss,
-    poly1_focal_loss_with_alpha, prob_iou, prob_iou_l2_loss, prob_iou_loss, quality_focal_loss, rpiou_loss,
-    saeiou_loss, seesaw_loss, shape_iou_loss, siou_loss, slide_bce_loss, slide_reweight_loss, slide_weight,
-    slide_weight_f64, varifocal_loss, wiou_v1_loss, wiou_v3_loss, wrap_inner_iou_loss,
+    ciou, inner_ciou_loss, loss_with_assignment, nwd_loss, rpiou_loss, saeiou_loss, wiou_v3_loss,
 };
 
 use crate::assign::TalConfig;
@@ -118,13 +88,6 @@ pub enum ClsLossKind {
     Vfl,
     /// Quality Focal Loss (Li et al. 2020): `|t − p|^qfl_beta · BCE(x, t)` across both positives and negatives.
     Qfl,
-    /// Asymmetric Loss (Ridnik et al. ICCV 2021): decoupled positive/negative focusing (`asl_gamma_pos`,
-    /// `asl_gamma_neg`) with probability margin shift `p_m = max(p - asl_clip, 0)`.
-    Asl,
-    /// Poly-1 BCE Loss (Leng et al. ICLR 2022): `BCE(x, t) + poly1_epsilon · (t(1 - p) + (1 - t)p)`.
-    Poly1Bce,
-    /// Poly-1 Focal Loss (Leng et al. ICLR 2022): `t · (1 - p)^γ (-ln p + ε₁(1 - p)) + (1 - t) · p^γ (-ln(1 - p) + ε₁ p)`.
-    Poly1Focal,
 }
 
 /// Which box regression geometry loss [`detection_loss`] uses.
@@ -141,27 +104,8 @@ pub enum BoxLossKind {
     Saeiou,
     /// Inner-CIoU (Zhang et al. 2023): CIoU with its IoU term computed on auxiliary boxes scaled by `inner_ratio`.
     InnerCiou,
-    /// Normalized Wasserstein Distance (Wang et al. 2021): models boxes as 2D Gaussians and computes
-    /// `1 - exp(-sqrt(W_2²) / (nwd_c / stride))`, giving smooth non-vanishing gradients for tiny and
-    /// non-overlapping boxes.
-    Nwd,
-    /// Wise-IoU v1 (Tong et al. 2023 §III-A): distance-attended IoU loss `R_WIoU * (1 - IoU)` with detached
-    /// enclosing-box diagonal `(cw² + ch²)*`.
-    WiouV1,
     /// Wise-IoU v3 (Tong et al. 2023 §III-B): distance-attended IoU loss with non-monotonic dynamic focusing (`wiou_alpha`, `wiou_delta`, `wiou_momentum`).
     WiouV3,
-    /// Minimum Point Distance IoU (Ma & Xu 2023): scale-invariant corner-distance penalty
-    /// `(1 - IoU) + (d1² + d2²) / (2 * (cw² + ch² + eps))`.
-    Mpdiou,
-    /// Shape-IoU (Zhang & Zhang 2023): GT aspect-weighted center distance plus shape-value penalty
-    /// (`shape_scale` in `[0, 2]`).
-    ShapeIou,
-    /// Efficient-IoU (Zhang et al. 2022): center-distance penalty plus decoupled width and height penalties
-    /// `(1 - IoU) + (dcx² + dcy²) / (cw² + ch²) + (w1 - w2)² / cw² + (h1 - h2)² / ch²`.
-    Eiou,
-    /// Scylla-IoU (Gevorgyan 2022): direction-aware angle cost `Lambda`, angle-modulated distance cost `Delta`,
-    /// and shape cost `Omega` with exponent `siou_theta` in `[2, 6]` (default `4.0`).
-    Siou,
 }
 
 /// Loss hyper-parameters. Defaults are `docs/MODEL.md` §7.4's.
@@ -181,7 +125,7 @@ pub struct LossConfig {
     /// Matchability-Aware Loss (MAL) background focal exponent (`0.0` = plain BCE). When `> 0`, negatives use
     /// `p^γ · softplus(x)` while positives keep 100% unweighted BCE.
     pub mal_gamma: f32,
-    /// Classification loss family ([`ClsLossKind::Bce`] default; opt-in `Vfl`, `Qfl`, `Asl`, `Poly1Bce`, or `Poly1Focal`).
+    /// Classification loss family ([`ClsLossKind::Bce`] default; opt-in `Vfl` or `Qfl`).
     pub cls_loss: ClsLossKind,
     /// Negative weight `α > 0` for [`ClsLossKind::Vfl`] (`0.75` default).
     pub vfl_alpha: f32,
@@ -189,30 +133,12 @@ pub struct LossConfig {
     pub vfl_gamma: f32,
     /// Focal exponent `β` (`0` or `>= 1`) for [`ClsLossKind::Qfl`] (`2.0` default).
     pub qfl_beta: f32,
-    /// Positive focusing exponent `γ_+ >= 0` for [`ClsLossKind::Asl`] (`0.0` default).
-    pub asl_gamma_pos: f32,
-    /// Negative focusing exponent `γ_- >= 0` for [`ClsLossKind::Asl`] (`4.0` default).
-    pub asl_gamma_neg: f32,
-    /// Probability margin shift `m in [0, 1)` for [`ClsLossKind::Asl`] (`0.05` default).
-    pub asl_clip: f32,
-    /// First-order polynomial coefficient `ε₁ >= -1` for [`ClsLossKind::Poly1Bce`] and [`ClsLossKind::Poly1Focal`] (`1.0` default).
-    pub poly1_epsilon: f32,
-    /// Focusing exponent `γ >= 0` for [`ClsLossKind::Poly1Focal`] (`2.0` default).
-    pub poly1_focal_gamma: f32,
     /// Scale-adaptive NWD blending weight `λ₀` in `[0, 1]` for the box loss (`0.0` = no NWD blend).
     pub nwd_weight: f32,
-    /// Normalization constant `C > 0` (in input pixels, divided by anchor stride) for [`BoxLossKind::Nwd`]
-    /// (`12.8` default, per Wang et al. 2021).
-    pub nwd_c: f32,
-    /// Box regression geometry loss (`Ciou` default, `Rpiou`, `Saeiou`, `InnerCiou`, `Nwd`, `WiouV1`, `WiouV3`,
-    /// `Mpdiou`, `ShapeIou`, `Eiou`, or `Siou`).
+    /// Box regression geometry loss (`Ciou` default, `Rpiou`, `Saeiou`, `InnerCiou`, or `WiouV3`).
     pub box_loss: BoxLossKind,
     /// Auxiliary box scale ratio `r` in `[0.5, 1.5]` for [`BoxLossKind::InnerCiou`] (`0.7` default).
     pub inner_ratio: f32,
-    /// Scale factor `s` in `[0, 2]` for [`BoxLossKind::ShapeIou`] (`0.0` default; `0.5..=1.5` for small-object sensitivity).
-    pub shape_scale: f32,
-    /// Shape-cost exponent `theta` in `[2, 6]` for [`BoxLossKind::Siou`] (`4.0` default).
-    pub siou_theta: f32,
     /// Non-monotonic focusing base `α > 1` for [`BoxLossKind::WiouV3`] (`1.9` default).
     pub wiou_alpha: f32,
     /// Non-monotonic focusing pivot `δ > 0` for [`BoxLossKind::WiouV3`] (`3.0` default).
@@ -244,17 +170,9 @@ impl Default for LossConfig {
             vfl_alpha: 0.75,
             vfl_gamma: 2.0,
             qfl_beta: 2.0,
-            asl_gamma_pos: 0.0,
-            asl_gamma_neg: 4.0,
-            asl_clip: 0.05,
-            poly1_epsilon: 1.0,
-            poly1_focal_gamma: 2.0,
             nwd_weight: 0.0,
-            nwd_c: 12.8,
             box_loss: BoxLossKind::Ciou,
             inner_ratio: 0.7,
-            shape_scale: 0.0,
-            siou_theta: 4.0,
             wiou_alpha: 1.9,
             wiou_delta: 3.0,
             wiou_momentum: 0.01,
@@ -320,35 +238,11 @@ impl LossConfig {
         if !(self.qfl_beta.is_finite() && (self.qfl_beta == 0.0 || self.qfl_beta >= 1.0)) {
             return Err(format!("loss.qfl_beta must be finite and 0 or >= 1, got {}", self.qfl_beta));
         }
-        if !(self.asl_gamma_pos.is_finite() && self.asl_gamma_pos >= 0.0) {
-            return Err(format!("loss.asl_gamma_pos must be finite and >= 0, got {}", self.asl_gamma_pos));
-        }
-        if !(self.asl_gamma_neg.is_finite() && self.asl_gamma_neg >= 0.0) {
-            return Err(format!("loss.asl_gamma_neg must be finite and >= 0, got {}", self.asl_gamma_neg));
-        }
-        if !(self.asl_clip.is_finite() && (0.0..1.0).contains(&self.asl_clip)) {
-            return Err(format!("loss.asl_clip must be finite and in [0, 1), got {}", self.asl_clip));
-        }
-        if !(self.poly1_epsilon.is_finite() && self.poly1_epsilon >= -1.0) {
-            return Err(format!("loss.poly1_epsilon must be finite and >= -1, got {}", self.poly1_epsilon));
-        }
-        if !(self.poly1_focal_gamma.is_finite() && self.poly1_focal_gamma >= 0.0) {
-            return Err(format!(
-                "loss.poly1_focal_gamma must be finite and >= 0, got {}",
-                self.poly1_focal_gamma
-            ));
-        }
         if !(self.inner_ratio.is_finite() && (0.5..=1.5).contains(&self.inner_ratio)) {
             return Err(format!(
                 "loss.inner_ratio must be finite and in 0.5..=1.5, got {}",
                 self.inner_ratio
             ));
-        }
-        if !(self.shape_scale.is_finite() && (0.0..=2.0).contains(&self.shape_scale)) {
-            return Err(format!("loss.shape_scale must be finite and in 0..=2, got {}", self.shape_scale));
-        }
-        if !(self.siou_theta.is_finite() && (2.0..=6.0).contains(&self.siou_theta)) {
-            return Err(format!("loss.siou_theta must be finite and in 2..=6, got {}", self.siou_theta));
         }
         if !(self.wiou_alpha.is_finite() && self.wiou_alpha > 1.0) {
             return Err(format!("loss.wiou_alpha must be finite and > 1, got {}", self.wiou_alpha));
@@ -361,9 +255,6 @@ impl LossConfig {
                 "loss.wiou_momentum must be finite and in 0..=1, got {}",
                 self.wiou_momentum
             ));
-        }
-        if !(self.nwd_c.is_finite() && self.nwd_c > 0.0) {
-            return Err(format!("loss.nwd_c must be finite and > 0, got {}", self.nwd_c));
         }
         Ok(())
     }

@@ -1,82 +1,16 @@
 //! The differentiable terms of §7.4 for a fixed assignment ([`loss_with_assignment`]):
 //! - [`cls`]: BCE, MAL, Varifocal Loss (VFL), Quality Focal Loss (QFL),
-//! - [`vfl_qfl`]: Standalone cancellation-free Varifocal Loss (VFL) and Quality Focal Loss (QFL) with reductions,
-//! - [`seesaw`]: Seesaw Loss for long-tailed detection/classification with dynamic mitigation & compensation,
-//! - [`asl_poly`]: Asymmetric Loss (ASL), Poly-1 BCE, and Poly-1 Focal Loss,
-//! - [`box_loss`]: CIoU, Inner-CIoU, R-PIoU, S-AEIoU,
-//! - [`inner_iou`]: Generalized Inner-IoU auxiliary-box wrapper composing with IoU / GIoU / DIoU / CIoU / EIoU / SIoU / MPDIoU,
-//! - [`slide_loss`]: SlideLoss & EMA-SlideLoss adaptive hard-boundary re-weighting,
-//! - [`nwd_wiou`]: Normalized Wasserstein Distance (NWD) and Wise-IoU v1 / v3,
-//! - [`ohem`]: Online Hard Example Mining (OHEM) differentiable hard-example loss selector,
-//! - [`oks`]: Differentiable COCO Object Keypoint Similarity (`oks_similarity`, `oks_loss`),
-//! - [`prob_iou`]: Gaussian-box regression losses (`ProbIoU` `L_1` / `L_2`, `GWD`, `KLD`),
-//! - [`geom_loss`]: MPDIoU, Shape-IoU, and Focaler-IoU remapping,
-//! - [`piou`]: Powerful-IoU v1 (`PIoU`) and v2 (`PIoU2`) with non-monotonic attention focusing,
-//! - [`siou_eiou`]: EIoU (Efficient-IoU) and SIoU (Scylla-IoU),
+//! - [`box_loss`]: CIoU, Inner-CIoU, Wise-IoU v3, R-PIoU, S-AEIoU, NWD,
 //! - [`dfl`]: DFL cross-entropy, 1D Optimal-Transport tail barrier (`OT-DFL`), and `CRPS-DFL`.
 
-mod asl_poly;
 mod box_loss;
 mod cls;
 mod dfl;
-mod geom_loss;
-mod inner_iou;
-mod nwd_wiou;
-mod ohem;
-mod oks;
-mod piou;
-mod prob_iou;
-mod seesaw;
-mod siou_eiou;
-mod slide_loss;
-mod vfl_qfl;
-
-#[cfg(test)]
-pub(crate) use asl_poly::{asl_elem_f64, poly1_bce_elem_f64, poly1_focal_elem_f64};
-pub use asl_poly::{asymmetric_loss, poly1_bce_loss, poly1_focal_loss, poly1_focal_loss_with_alpha};
-pub use prob_iou::{GwdTransform, gwd_loss, kld_loss, prob_iou, prob_iou_l2_loss, prob_iou_loss};
-#[cfg(test)]
-pub(crate) use prob_iou::{gwd_box_f64, kld_box_f64, prob_iou_l1_box_f64, prob_iou_l2_box_f64};
-#[cfg(test)]
-pub(crate) use seesaw::seesaw_row_f64;
-pub use seesaw::{SeesawConfig, SeesawLoss, seesaw_loss};
-pub use vfl_qfl::{LossReduction, QflConfig, VflConfig, quality_focal_loss, varifocal_loss};
-#[cfg(test)]
-pub(crate) use vfl_qfl::{qfl_elem_f64, vfl_elem_f64};
 
 #[cfg(test)]
 pub(crate) use box_loss::saeiou_box_f64;
-pub use box_loss::{ciou, inner_ciou_loss, rpiou_loss, saeiou_loss};
+pub use box_loss::{ciou, inner_ciou_loss, nwd_loss, rpiou_loss, saeiou_loss, wiou_v3_loss};
 pub(crate) use dfl::crps_dfl;
-pub use geom_loss::{focaler_iou, focaler_iou_loss, mpdiou_loss, mpdiou_loss_with_scale, shape_iou_loss};
-#[cfg(test)]
-pub(crate) use geom_loss::{mpdiou_box_f64, shape_iou_box_f64};
-pub use inner_iou::{InnerIouBase, inner_iou, inner_iou_loss, wrap_inner_iou_loss};
-#[cfg(test)]
-pub(crate) use inner_iou::{
-    ciou_aspect_penalty_f64, inner_iou_box_f64, inner_iou_loss_box_f64, inner_one_minus_iou_f64,
-};
-#[cfg(test)]
-pub(crate) use nwd_wiou::{
-    nwd_box_eps_f64, nwd_box_f64, wiou_v1_box_f64, wiou_v3_box_f64, wiou_v3_focus_gain,
-};
-pub use nwd_wiou::{nwd_loss, nwd_loss_with_c, wiou_v1_loss, wiou_v3_loss};
-pub use ohem::{OhemBudget, OhemConfig, OhemLoss, OhemSelection, ohem_select};
-#[cfg(test)]
-pub(crate) use oks::oks_instance_f64;
-pub use oks::{DEFAULT_OKS_EPS, OksLossConfig, oks_loss, oks_similarity};
-pub use piou::{piou_attention, piou_attention_f64, piou_loss, piou2_loss};
-#[cfg(test)]
-pub(crate) use piou::{piou_attention_from_p_f64, piou_box_f64, piou2_box_f64};
-#[cfg(test)]
-pub(crate) use siou_eiou::{eiou_box_f64, siou_box_f64};
-pub use siou_eiou::{eiou_loss, siou_loss};
-#[cfg(test)]
-pub(crate) use slide_loss::slide_bce_elem_f64;
-pub use slide_loss::{
-    DEFAULT_SLIDE_DELTA, EmaSlideLoss, SlideLossConfig, SlideWeightKind, slide_bce_loss, slide_reweight_loss,
-    slide_weight, slide_weight_f64,
-};
 
 use folo_core::{DType, Result, Tensor};
 
@@ -84,12 +18,9 @@ use super::{BatchAssignment, BoxLossKind, LossConfig, LossItems, LossOutput, che
 use crate::assign::{bbox2dist_clamped, dfl_bins, nwd_lambda};
 use crate::decode::Anchors;
 
-use box_loss::{rpiou_from_logits, saeiou_from_logits};
+use box_loss::{nwd_blend_loss_eps, rpiou_from_logits, saeiou_from_logits, wiou_v3_loss_and_mean};
 use cls::cls_loss_sum;
 use dfl::ot_dfl_tail;
-use geom_loss::{mpdiou_from_logits, shape_iou_from_logits};
-use nwd_wiou::{nwd_blend_loss_eps, nwd_from_logits, wiou_v1_from_logits, wiou_v3_from_logits};
-use siou_eiou::{eiou_from_logits, siou_from_logits};
 
 /// Sum of every element as a rank-0 tensor, in an order that does not depend on thread scheduling: long inputs are
 /// summed in rows of 4096 (each row serially), then the row sums the same way.
@@ -280,41 +211,15 @@ fn loss_impl_wiou(
         let wb = match cfg.box_loss {
             BoxLossKind::Ciou => blend_nwd(ciou(&pd, &tb)?.rsub_scalar(1.0)?)?,
             BoxLossKind::InnerCiou => blend_nwd(inner_ciou_loss(&pd, &tb, cfg.inner_ratio)?)?,
-            BoxLossKind::Nwd
-            | BoxLossKind::WiouV1
-            | BoxLossKind::WiouV3
-            | BoxLossKind::Rpiou
-            | BoxLossKind::Saeiou
-            | BoxLossKind::Mpdiou
-            | BoxLossKind::ShapeIou
-            | BoxLossKind::Eiou
-            | BoxLossKind::Siou => {
-                let mut eval_direct = |lams_opt: Option<&[f32]>| -> Result<Tensor> {
+            BoxLossKind::WiouV3 => {
+                let (w_per, batch_mean) =
+                    wiou_v3_loss_and_mean(&pd, &tb, cfg.wiou_alpha, cfg.wiou_delta, wiou_iou_mean)?;
+                mean_iou_loss = batch_mean;
+                blend_nwd(w_per)?
+            }
+            BoxLossKind::Rpiou | BoxLossKind::Saeiou => {
+                let eval_direct = |lams_opt: Option<&[f32]>| -> Result<Tensor> {
                     match cfg.box_loss {
-                        BoxLossKind::Nwd => {
-                            let cs: Vec<f32> =
-                                (0..n).map(|k| cfg.nwd_c / anchors.strides[asg.anchor[k] as usize]).collect();
-                            nwd_from_logits(&logits, &pd, &tbox, &cs, &asg.score, lams_opt, tss, cfg.box_gain)
-                        }
-                        BoxLossKind::WiouV1 => {
-                            wiou_v1_from_logits(&logits, &pd, &tbox, &asg.score, lams_opt, tss, cfg.box_gain)
-                        }
-                        BoxLossKind::WiouV3 => {
-                            let (loss, batch_mean) = wiou_v3_from_logits(
-                                &logits,
-                                &pd,
-                                &tbox,
-                                &asg.score,
-                                lams_opt,
-                                tss,
-                                cfg.box_gain,
-                                cfg.wiou_alpha,
-                                cfg.wiou_delta,
-                                wiou_iou_mean,
-                            )?;
-                            mean_iou_loss = batch_mean;
-                            Ok(loss)
-                        }
                         BoxLossKind::Rpiou => rpiou_from_logits(
                             &logits,
                             &pd,
@@ -339,36 +244,10 @@ fn loss_impl_wiou(
                             cfg.rpiou_kappa,
                             cfg.rpiou_delta,
                         ),
-                        BoxLossKind::Mpdiou => {
-                            mpdiou_from_logits(&logits, &pd, &tbox, &asg.score, lams_opt, tss, cfg.box_gain)
-                        }
-                        BoxLossKind::ShapeIou => shape_iou_from_logits(
-                            &logits,
-                            &pd,
-                            &tbox,
-                            &asg.score,
-                            lams_opt,
-                            tss,
-                            cfg.box_gain,
-                            cfg.shape_scale,
-                        ),
-                        BoxLossKind::Eiou => {
-                            eiou_from_logits(&logits, &pd, &tbox, &asg.score, lams_opt, tss, cfg.box_gain)
-                        }
-                        BoxLossKind::Siou => siou_from_logits(
-                            &logits,
-                            &pd,
-                            &tbox,
-                            &asg.score,
-                            lams_opt,
-                            tss,
-                            cfg.box_gain,
-                            cfg.siou_theta,
-                        ),
                         _ => unreachable!(),
                     }
                 };
-                if cfg.nwd_weight > 0.0 && cfg.box_loss != BoxLossKind::Nwd {
+                if cfg.nwd_weight > 0.0 {
                     let lams: Vec<f32> = (0..n).map(|k| nwd_lambda(&asg.target[k], cfg.nwd_weight)).collect();
                     let wb_alg = eval_direct(Some(&lams))?;
                     let cs: Vec<f32> =

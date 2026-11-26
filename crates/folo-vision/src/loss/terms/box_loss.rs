@@ -1,5 +1,6 @@
-//! Differentiable box regression losses: CIoU, Inner-CIoU (Zhang et al. 2023), Rational-Focal
-//! Edge-Decoupled IoU (R-PIoU), and Scale-normalized Algebraic Edge IoU (S-AEIoU).
+//! Differentiable box regression losses: CIoU, Inner-CIoU (Zhang et al. 2023), Wise-IoU v3
+//! (Tong et al. 2023), Rational-Focal Edge-Decoupled IoU (R-PIoU), Scale-normalized Algebraic Edge IoU
+//! (S-AEIoU), and Normalized Wasserstein Distance (NWD).
 
 use folo_core::{DType, Result, Tensor, no_grad};
 
@@ -13,6 +14,114 @@ fn atan(x: &Tensor) -> Result<Tensor> {
     let out = Tensor::from_vec(v, x.shape())?.to_device(x.device())?;
     let xs = x.detach();
     Tensor::custom_op("atan", &[x], out, move |g| Ok(vec![Some(g.div(&xs.square()?.add_scalar(1.0)?)?)]))
+}
+
+/// Single-box exact Normalized Wasserstein Distance forward `(loss, dL/da, dL/dc)` in `f64`
+/// (Wang et al. 2021): `W_2² = ((ax1 - bx1)² + (ay1 - by1)² + (ax2 - bx2)² + (ay2 - by2)²) / 2`,
+/// `L_NWD = 1 - exp(-sqrt(W_2²) / c)`. By antisymmetry `dL/db = -dL/da`.
+fn nwd_box_f64(a: [f64; 4], b: [f64; 4], c: f64) -> (f64, [f64; 4], f64) {
+    if !a.iter().chain(&b).all(|v| v.is_finite()) || !c.is_finite() || c <= 0.0 {
+        return (f64::NAN, [f64::NAN; 4], f64::NAN);
+    }
+    let (dx1, dy1, dx2, dy2) = (a[0] - b[0], a[1] - b[1], a[2] - b[2], a[3] - b[3]);
+    let m = dx1.abs().max(dy1.abs()).max(dx2.abs()).max(dy2.abs());
+    if m == 0.0 {
+        return (0.0, [0.0; 4], 0.0);
+    }
+    if !m.is_finite() {
+        return (f64::NAN, [f64::NAN; 4], f64::NAN);
+    }
+    let inv_m = 1.0 / m;
+    let (ux1, uy1, ux2, uy2) = (dx1 * inv_m, dy1 * inv_m, dx2 * inv_m, dy2 * inv_m);
+    let r = (0.5 * (ux1 * ux1 + uy1 * uy1 + ux2 * ux2 + uy2 * uy2)).sqrt();
+    let u = (m * r) / c;
+    let loss = -(-u).exp_m1();
+    let e = (-u).exp();
+    let (coeff, grad_c) = if e == 0.0 { (0.0, 0.0) } else { (e / (2.0 * c * r), -(e * u) / c) };
+    (loss, [coeff * ux1, coeff * uy1, coeff * ux2, coeff * uy2], grad_c)
+}
+
+/// GPU-parity smoothed NWD blend `1 - exp(-sqrt(W_2² + 1e-6) / c)` used by [`super::loss_with_assignment`]
+/// for `nwd_weight > 0` blends, matching `det_box.wgsl` / `detect_common.wgsl`.
+pub(super) fn nwd_blend_loss_eps(b1: &Tensor, b2: &Tensor, c: &Tensor) -> Result<Tensor> {
+    let col = |b: &Tensor, k: usize| b.narrow(1, k, 1)?.squeeze(1);
+    let (ax1, ay1, ax2, ay2) = (col(b1, 0)?, col(b1, 1)?, col(b1, 2)?, col(b1, 3)?);
+    let (bx1, by1, bx2, by2) = (col(b2, 0)?, col(b2, 1)?, col(b2, 2)?, col(b2, 3)?);
+    let dcx = ax1.add(&ax2)?.sub(&bx1)?.sub(&bx2)?.mul_scalar(0.5)?;
+    let dcy = ay1.add(&ay2)?.sub(&by1)?.sub(&by2)?.mul_scalar(0.5)?;
+    let dw = ax2.sub(&ax1)?.sub(&bx2.sub(&bx1)?)?;
+    let dh = ay2.sub(&ay1)?.sub(&by2.sub(&by1)?)?;
+    let w2_sq =
+        dcx.square()?.add(&dcy.square()?)?.add(&dw.square()?.add(&dh.square()?)?.mul_scalar(0.25)?)?;
+    let dist = w2_sq.add_scalar(1e-6)?.sqrt()?;
+    dist.div(c)?.neg()?.exp()?.rsub_scalar(1.0)
+}
+
+/// Differentiable Normalized Wasserstein Distance loss `1 − NWD(b1, b2; c)` between rows of `b1` and `b2`
+/// (`[N, 4]`, `xyxy`), with per-row scale constant `c` (`[N]`, finite and `> 0`), returning `[N]`.
+pub fn nwd_loss(b1: &Tensor, b2: &Tensor, c: &Tensor) -> Result<Tensor> {
+    let n = check_box_pair(b1, b2, "nwd_loss")?;
+    if c.dtype() != DType::F32 {
+        return Err(folo_core::Error::DTypeMismatch { op: "nwd_loss", expected: DType::F32, got: c.dtype() });
+    }
+    if c.device() != b1.device() {
+        return Err(folo_core::Error::DeviceMismatch { op: "nwd_loss", lhs: b1.device(), rhs: c.device() });
+    }
+    if c.dims() != [n] {
+        return Err(invalid(format!("nwd_loss: c must have shape [{n}], got {}", c.shape())));
+    }
+    let dev = b1.device();
+    if n == 0 {
+        return Tensor::zeros_with([0], DType::F32, dev);
+    }
+    let cv = c.to_vec::<f32>()?;
+    for (i, &ci) in cv.iter().enumerate() {
+        if !ci.is_finite() || ci <= 0.0 {
+            return Err(invalid(format!("nwd_loss: c[{i}] must be finite and > 0, got {ci}")));
+        }
+    }
+    let av = b1.to_vec::<f32>()?;
+    let bv = b2.to_vec::<f32>()?;
+    let mut out = vec![0.0f32; n];
+    let mut ga_rows = vec![[0.0f64; 4]; n];
+    let mut gc_rows = vec![0.0f64; n];
+    for i in 0..n {
+        let a = [av[4 * i] as f64, av[4 * i + 1] as f64, av[4 * i + 2] as f64, av[4 * i + 3] as f64];
+        let b = [bv[4 * i] as f64, bv[4 * i + 1] as f64, bv[4 * i + 2] as f64, bv[4 * i + 3] as f64];
+        let (lv, ga, gc) = nwd_box_f64(a, b, cv[i] as f64);
+        out[i] = lv as f32;
+        ga_rows[i] = ga;
+        gc_rows[i] = gc;
+    }
+    let out_t = Tensor::from_vec(out, [n])?.to_device(dev)?;
+    let (req_a, req_b, req_c) = (b1.requires_grad(), b2.requires_grad(), c.requires_grad());
+    Tensor::custom_op("nwd_loss", &[b1, b2, c], out_t, move |g| {
+        let gv = g.to_vec::<f32>()?;
+        let mut ga = req_a.then(|| vec![0.0f32; 4 * n]);
+        let mut gb = req_b.then(|| vec![0.0f32; 4 * n]);
+        let mut gc = req_c.then(|| vec![0.0f32; n]);
+        for i in 0..n {
+            let gi = gv[i] as f64;
+            if let Some(dst) = ga.as_mut() {
+                for s in 0..4 {
+                    dst[4 * i + s] = (gi * ga_rows[i][s]) as f32;
+                }
+            }
+            if let Some(dst) = gb.as_mut() {
+                for s in 0..4 {
+                    dst[4 * i + s] = (-gi * ga_rows[i][s]) as f32;
+                }
+            }
+            if let Some(dst) = gc.as_mut() {
+                dst[i] = (gi * gc_rows[i]) as f32;
+            }
+        }
+        Ok(vec![
+            ga.map(|v| Tensor::from_vec(v, [n, 4])?.to_device(dev)).transpose()?,
+            gb.map(|v| Tensor::from_vec(v, [n, 4])?.to_device(dev)).transpose()?,
+            gc.map(|v| Tensor::from_vec(v, [n])?.to_device(dev)).transpose()?,
+        ])
+    })
 }
 
 /// Differentiable CIoU of `docs/MODEL.md` §7.2 between rows of `b1` and `b2` (`[N, 4]`, `xyxy`), as `[N]`.
@@ -157,6 +266,114 @@ pub fn inner_ciou_loss(b1: &Tensor, b2: &Tensor, ratio: f32) -> Result<Tensor> {
     };
 
     inner_iou.rsub_scalar(1.0)?.add(&rho2.div(&c2)?)?.add(&v.mul(&alpha)?)?.add(&poison)
+}
+
+/// Differentiable Wise-IoU v3 loss (Tong et al. 2023) between rows of `b1` (predicted) and `b2` (target)
+/// (`[N, 4]`, `xyxy`), returning `[N]`:
+///
+/// ```text
+/// L_IoU = 1 - IoU(b1, b2)
+/// R_WIoU = exp(((cx1 - cx2)² + (cy1 - cy2)²) / (cw² + ch²)*)
+/// beta = L_IoU* / max(iou_mean, 1e-4)
+/// r = beta / (delta * alpha^(beta - delta))       (detached non-monotonic focusing gain)
+/// L_WIoU_v3 = r * R_WIoU * L_IoU
+/// ```
+///
+/// `iou_mean` is the running exponential moving average `L_IoU_bar` across training steps (Tong et al. §III-B,
+/// initialized to `1.0`). Both the enclosing diagonal denominator `(cw² + ch²)*` and the dynamic focusing gain
+/// `r` are detached under `no_grad()` so gradients never suffer enclosing-box hindrance or outlier amplification.
+pub fn wiou_v3_loss(b1: &Tensor, b2: &Tensor, alpha: f32, delta: f32, iou_mean: f32) -> Result<Tensor> {
+    Ok(wiou_v3_loss_and_mean(b1, b2, alpha, delta, iou_mean)?.0)
+}
+
+/// [`wiou_v3_loss`] also returning the current batch's unweighted mean `L_IoU` (`None` when `N == 0`), so
+/// the trainer can update its running EMA `L_IoU_bar`.
+pub(super) fn wiou_v3_loss_and_mean(
+    b1: &Tensor,
+    b2: &Tensor,
+    alpha: f32,
+    delta: f32,
+    iou_mean: f32,
+) -> Result<(Tensor, Option<f32>)> {
+    if !alpha.is_finite() || alpha <= 1.0 {
+        return Err(invalid(format!("wiou_alpha must be finite and > 1, got {alpha}")));
+    }
+    if !delta.is_finite() || delta <= 0.0 {
+        return Err(invalid(format!("wiou_delta must be finite and > 0, got {delta}")));
+    }
+    if !iou_mean.is_finite() || iou_mean <= 0.0 {
+        return Err(invalid(format!("wiou iou_mean must be finite and > 0, got {iou_mean}")));
+    }
+    let n = check_box_pair(b1, b2, "wiou_v3_loss")?;
+    if n == 0 {
+        return Ok((Tensor::zeros_with([0], DType::F32, b1.device())?, None));
+    }
+    let dev = b1.device();
+    let col = |b: &Tensor, k: usize| b.narrow(1, k, 1)?.squeeze(1);
+    let (ax1, ay1, ax2, ay2) = (col(b1, 0)?, col(b1, 1)?, col(b1, 2)?, col(b1, 3)?);
+    let (bx1, by1, bx2, by2) = (col(b2, 0)?, col(b2, 1)?, col(b2, 2)?, col(b2, 3)?);
+    let poison = nonfinite_box_poison(b1, b2)?;
+    let (w1, h1) = (ax2.sub(&ax1)?.relu()?, ay2.sub(&ay1)?.relu()?);
+    let (w2, h2) = (bx2.sub(&bx1)?.relu()?, by2.sub(&by1)?.relu()?);
+    let iw = ax2.minimum(&bx2)?.sub(&ax1.maximum(&bx1)?)?.relu()?;
+    let ih = ay2.minimum(&by2)?.sub(&ay1.maximum(&by1)?)?.relu()?;
+    let inter = iw.mul(&ih)?;
+    // Scale-invariant IoU without an additive epsilon in the denominator so tiny identical boxes give exact 0.0.
+    let raw_union = w1.mul(&h1)?.add(&w2.mul(&h2)?)?.sub(&inter)?.relu()?;
+    let pos_union = raw_union.gt_scalar(0.0)?;
+    let safe_union = pos_union.where_cond(&raw_union, &raw_union.ones_like()?)?;
+    let iou = pos_union.where_cond(&inter.div(&safe_union)?, &raw_union.zeros_like()?)?.clamp(0.0, 1.0)?;
+    let l_iou = iou.rsub_scalar(1.0)?.add(&poison)?;
+
+    // Distance attention R_WIoU = exp(rho² / c2*) with detached scale-invariant enclosing diagonal c2*.
+    let dx = bx1.add(&bx2)?.sub(&ax1)?.sub(&ax2)?;
+    let dy = by1.add(&by2)?.sub(&ay1)?.sub(&ay2)?;
+    let rho2 = dx.square()?.add(&dy.square()?)?.mul_scalar(0.25)?;
+    let c2_detached = {
+        let _g = no_grad();
+        let cw = ax2.maximum(&bx2)?.sub(&ax1.minimum(&bx1)?)?.relu()?;
+        let ch = ay2.maximum(&by2)?.sub(&ay1.minimum(&by1)?)?.relu()?;
+        cw.square()?.add(&ch.square()?)?
+    };
+    let pos_c2 = {
+        let _g = no_grad();
+        c2_detached.gt_scalar(0.0)?
+    };
+    let safe_c2 = {
+        let _g = no_grad();
+        pos_c2.where_cond(&c2_detached, &c2_detached.ones_like()?)?
+    };
+    let r_dist = pos_c2.where_cond(&rho2.div(&safe_c2)?, &rho2.zeros_like()?)?.clamp(0.0, 10.0)?.exp()?;
+
+    // Non-monotonic dynamic focusing gain r = beta / (delta * alpha^(beta - delta)), evaluated in log-space
+    // in f64 (completely detached) so large outlier beta monotonically attenuates toward 0 without overflow.
+    let (r_focus, batch_mean) = {
+        let _g = no_grad();
+        let l_vals = l_iou.to_vec::<f32>()?;
+        let mean_f64: f64 = l_vals.iter().map(|&v| v as f64).sum::<f64>() / n as f64;
+        let denom_iou = (iou_mean as f64).max(1e-4);
+        let (a64, d64) = (alpha as f64, delta as f64);
+        let ln_a = a64.ln();
+        let ln_d = d64.ln();
+        let gains: Vec<f32> = l_vals
+            .iter()
+            .map(|&li| {
+                let li = li as f64;
+                if !li.is_finite() {
+                    return f32::NAN;
+                }
+                let beta = li / denom_iou;
+                if beta <= 0.0 {
+                    return 0.0;
+                }
+                let log_r = beta.ln() - ln_d - (beta - d64) * ln_a;
+                log_r.min(80.0).exp() as f32
+            })
+            .collect();
+        (Tensor::from_vec(gains, [n])?.to_device(dev)?, mean_f64 as f32)
+    };
+    let loss = r_focus.mul(&r_dist)?.mul(&l_iou)?.add(&poison)?;
+    Ok((loss, Some(batch_mean)))
 }
 
 /// Single-box `R-PIoU` forward `(loss, dL/d(ax1, ay1, ax2, ay2))` in `f64`, matching `det_box.wgsl` tie-breaking.

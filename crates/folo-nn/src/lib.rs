@@ -58,10 +58,7 @@ pub mod io;
 mod layers;
 mod module;
 pub mod optim;
-mod power_ema;
 mod sched;
-mod sgdr;
-mod swa;
 
 pub use amp::{AmpContract, GradScaler, ScaleUpdate, unscale_, usable_scale};
 pub use ema::{
@@ -70,26 +67,12 @@ pub use ema::{
 };
 pub use error::{Error, Result};
 pub use layers::{
-    Activation, BN_EPS, BN_MOMENTUM, BatchNorm2d, CONVNEXT_DEFAULT_EXPAND, CONVNEXT_DEFAULT_KERNEL,
-    CONVNEXT_DEFAULT_LAYER_SCALE, Cbam, ChannelAttention, ChannelLayout, Concat, Conv2d, Conv2dConfig,
-    ConvBnAct, ConvNeXtBlock, ConvNeXtConfig, ConvNeXtNorm, ConvNeXtNormLayer, DropBlock2d, DropPath, Eca,
-    GatedFfn, GluKind, Identity, InvertedResidual, InvertedResidualConfig, LAYERNORM_DEFAULT_EPS,
-    LAYERSCALE_DEFAULT_INIT, LayerNorm, LayerScale, Linear, MaxPool2d, ModuleList, MultiHeadCrossAttention,
-    MultiHeadCrossAttentionConfig, PowerIterationResult, RMSNORM_DEFAULT_EPS, ROPE2D_DEFAULT_BASE, RepConv,
-    RepConvConfig, RmsNorm, RoPE2d, RunningStats, SPECTRAL_NORM_EPS, Sequential, SpatialAttention,
-    SpectralNorm, SpectralNormTarget, SqueezeExcitation, Upsample, WS_CONV_DEFAULT_EPS,
-    WeightStandardizedConv2d, dropblock_gamma, eca_kernel_size, fuse_conv_bn, geglu, gelu_tanh,
-    power_iteration, spectral_norm, spectral_normalize, standardize_weight, swiglu,
+    Activation, BN_EPS, BN_MOMENTUM, BatchNorm2d, Concat, Conv2d, Conv2dConfig, ConvBnAct, Identity, Linear,
+    MaxPool2d, ModuleList, RunningStats, Sequential, Upsample, fuse_conv_bn,
 };
 pub use module::{Forward, Layer, Mode, Module, NamedTensor, TensorKind};
-pub use power_ema::{
-    EDM2_EMA_DEFAULT_GAMMA, Edm2PowerEmaSchedule, POWER_LAW_EMA_DEFAULT_GAMMA, POWER_LAW_EMA_DEFAULT_T0,
-    PowerLawEmaSchedule, power_law_ema_decay,
-};
 pub use sched::{
     DEFAULT_ONE_CYCLE_DIV_FACTOR, DEFAULT_ONE_CYCLE_PCT_START, DEFAULT_POLY_POWER, DEFAULT_RESTART_CYCLES,
     DEFAULT_RESTART_MULT, DecayKind, LrSchedule, SchedContract, SchedUnit, WARMUP_FLOOR,
     WSD_DEFAULT_DECAY_FRACTION, WsdTail, warmup_iters, warmup_iters_floor,
 };
-pub use sgdr::{SgdrConfig, SgdrCycleInfo, SgdrSchedule};
-pub use swa::SwaModel;

@@ -30,22 +30,13 @@ use crate::model::HeadMode;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-mod cluster;
 mod kernel;
 mod matrix;
 mod topk;
-pub use crate::obb::{
-    ObbDetection, RotatedNmsConfig, batched_rotated_nms, rotated_nms, rotated_nms_detections,
-};
-pub use cluster::{
-    ClusterNmsConfig, ClusterNmsEntry, ClusterScoreDecay, batched_cluster_nms, batched_fast_nms, cluster_nms,
-    cluster_nms_detections, fast_nms, fast_nms_detections,
-};
 pub use kernel::{
     batched_nms, batched_nms_with_kind, diou_nms_sorted, diou_nms_sorted_with_owner, nms_sorted,
     nms_sorted_with_owner, soft_nms_sorted,
 };
-pub(crate) use matrix::exact_iou_f64;
 pub use matrix::matrix_nms_sorted;
 pub use topk::{topk_candidates, topk_detections};
 
@@ -915,5 +906,3 @@ pub fn postprocess_with_inputs(
 
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
-mod tests_cluster;

@@ -14,50 +14,6 @@
 //! class-mean F1 at IoU 0.5 (as Ultralytics reports them). `docs/METRICS.md` spells out every step and how this
 //! differs from Ultralytics' own AP.
 
-pub mod bootstrap;
-pub mod coco_scale;
-pub mod confusion_view;
-pub mod curve_sweep;
-pub mod diagnostics;
-pub mod oks;
-#[cfg(test)]
-mod tests_bootstrap;
-#[cfg(test)]
-mod tests_coco_tide;
-#[cfg(test)]
-mod tests_curve_sweep;
-#[cfg(test)]
-mod tests_diagnostics;
-#[cfg(test)]
-mod tests_oks;
-pub mod tide;
-
-pub use bootstrap::{
-    BootstrapConfig, BootstrapMapReport, ClassBootstrapCi, ConfidenceInterval, compute_bootstrap_map,
-};
-pub use coco_scale::{
-    CocoScaleClassMetrics, CocoScaleDiagnostics, ScaleAreaBounds, compute_coco_scale_metrics,
-};
-pub use confusion_view::{ClassConfusionMetrics, ConfusionPair, NormalizedConfusionView};
-pub use curve_sweep::{
-    BinningStrategy, CalibrationReport, CalibrationReportConfig, ClassConfidenceSweep, ConfidenceSweepConfig,
-    ConfidenceSweepDiagnostics, ConfidenceSweepPoint, DetectionCalibrationReport, compute_calibration_report,
-    compute_confidence_sweep, reliability_diagnostics_from_scores,
-};
-pub use diagnostics::{
-    CalibrationSummary, ClassPrCurve, DetectionCalibrationDiagnostics, DetectionConfusionMatrix,
-    OptimalF1Point, PrCurveDiagnostics, PrCurvePoint, ReliabilityBin, compute_detection_calibration,
-    compute_pr_curves, reliability_from_scores,
-};
-pub use oks::{
-    COCO_KEYPOINT_SIGMAS, Keypoint, KeypointVisibility, OksApReport, OksPred, OksTruth, compute_oks_ap, oks,
-    oks_f64, oks_matrix,
-};
-pub use tide::{
-    TideClassBreakdown, TideConfig, TideDiagnostics, TideErrorCounts, TideErrorImpacts,
-    compute_tide_diagnostics,
-};
-
 use crate::boxes::Xyxy;
 use crate::nms::Detection;
 use rayon::prelude::*;
@@ -151,10 +107,10 @@ fn outside_coco_area(b: &Xyxy) -> bool {
 /// A detection as stored for AP: its score and, per IoU threshold, whether it was a true positive (bit `t` of `tp`)
 /// or is ignored (bit `t` of `ig`, only with [`EvalConfig::coco_compatible`]). Neither means a false positive.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct DetRecord {
-    pub(super) score: f32,
-    pub(super) tp: u16,
-    pub(super) ig: u16,
+struct DetRecord {
+    score: f32,
+    tp: u16,
+    ig: u16,
 }
 
 /// Accumulates per-image matches; see the module docs.
@@ -212,53 +168,6 @@ impl Evaluator {
         }
     }
 
-    /// An AP-only evaluator for per-image matching (skips allocating the `(C + 1)^2` confusion matrix).
-    pub(super) fn new_ap_only(num_classes: usize, cfg: EvalConfig) -> Self {
-        Self {
-            num_classes,
-            cfg,
-            thresholds: iou_thresholds(),
-            num_images: 0,
-            num_preds: 0,
-            dets: vec![Vec::new(); num_classes],
-            gt_counts: vec![0; num_classes],
-            confusion: Vec::new(),
-            pred_order: Vec::new(),
-            gt_order: Vec::new(),
-            ious: Vec::new(),
-            gt_matched: Vec::new(),
-            tp_bits: Vec::new(),
-            ig_bits: Vec::new(),
-            pairs: Vec::new(),
-            pred_used: Vec::new(),
-        }
-    }
-
-    /// Match one image for AP without updating the confusion matrix, reusing all scratch buffers.
-    pub(super) fn add_image_ap_only(&mut self, preds: &[Detection], truths: &[Truth]) {
-        self.add_image_inner(preds, truths, false);
-    }
-
-    /// Drain matched per-class detection records and nonzero `(class, gt_count)` pairs from the
-    /// images matched since the last call, keeping internal scratch buffers allocated for reuse.
-    pub(super) fn drain_image_records(
-        &mut self,
-        class_dets_cb: &mut impl FnMut(usize, usize, DetRecord),
-    ) -> Vec<(usize, u64)> {
-        let mut nonzero_gts = Vec::new();
-        for c in 0..self.num_classes {
-            let ng = self.gt_counts[c];
-            if ng > 0 {
-                nonzero_gts.push((c, ng));
-                self.gt_counts[c] = 0;
-            }
-            for (det_idx, rec) in self.dets[c].drain(..).enumerate() {
-                class_dets_cb(c, det_idx, rec);
-            }
-        }
-        nonzero_gts
-    }
-
     /// Number of classes.
     pub fn num_classes(&self) -> usize {
         self.num_classes
@@ -275,10 +184,6 @@ impl Evaluator {
     /// # Panics
     /// If a class index is `>= num_classes`.
     pub fn add_image(&mut self, preds: &[Detection], truths: &[Truth]) {
-        self.add_image_inner(preds, truths, true);
-    }
-
-    fn add_image_inner(&mut self, preds: &[Detection], truths: &[Truth], with_confusion: bool) {
         let nc = self.num_classes;
         for p in preds {
             assert!((p.class as usize) < nc, "Evaluator: prediction class {} >= num_classes {nc}", p.class);
@@ -287,9 +192,7 @@ impl Evaluator {
             assert!((t.class as usize) < nc, "Evaluator: truth class {} >= num_classes {nc}", t.class);
         }
         self.num_images += 1;
-        if with_confusion {
-            self.update_confusion(preds, truths);
-        }
+        self.update_confusion(preds, truths);
 
         // One in-place sort per image over packed register keys (zero indirection, zero allocation;
         // trailing input index preserves exact input order on ties).
@@ -643,7 +546,7 @@ fn conf_grid(i: usize) -> f32 {
 
 /// IoU in f64, as pycocotools computes it (`bbIou`).
 #[inline]
-pub(super) fn iou_f64(a: &Xyxy, b: &Xyxy) -> f64 {
+fn iou_f64(a: &Xyxy, b: &Xyxy) -> f64 {
     let (ax1, ay1, ax2, ay2) = (a.x1 as f64, a.y1 as f64, a.x2 as f64, a.y2 as f64);
     let (bx1, by1, bx2, by2) = (b.x1 as f64, b.y1 as f64, b.x2 as f64, b.y2 as f64);
     let w = ax2.min(bx2) - ax1.max(bx1);
