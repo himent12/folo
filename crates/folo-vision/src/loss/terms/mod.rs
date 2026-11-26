@@ -5,6 +5,7 @@
 //! - [`box_loss`]: CIoU, Inner-CIoU, R-PIoU, S-AEIoU,
 //! - [`nwd_wiou`]: Normalized Wasserstein Distance (NWD) and Wise-IoU v1 / v3,
 //! - [`geom_loss`]: MPDIoU, Shape-IoU, and Focaler-IoU remapping,
+//! - [`piou`]: Powerful-IoU v1 (`PIoU`) and v2 (`PIoU2`) with non-monotonic attention focusing,
 //! - [`siou_eiou`]: EIoU (Efficient-IoU) and SIoU (Scylla-IoU),
 //! - [`dfl`]: DFL cross-entropy, 1D Optimal-Transport tail barrier (`OT-DFL`), and `CRPS-DFL`.
 
@@ -14,6 +15,7 @@ mod cls;
 mod dfl;
 mod geom_loss;
 mod nwd_wiou;
+mod piou;
 mod siou_eiou;
 mod vfl_qfl;
 
@@ -36,6 +38,9 @@ pub(crate) use nwd_wiou::{
     nwd_box_eps_f64, nwd_box_f64, wiou_v1_box_f64, wiou_v3_box_f64, wiou_v3_focus_gain,
 };
 pub use nwd_wiou::{nwd_loss, nwd_loss_with_c, wiou_v1_loss, wiou_v3_loss};
+pub use piou::{piou_attention, piou_attention_f64, piou_loss, piou2_loss};
+#[cfg(test)]
+pub(crate) use piou::{piou_box_f64, piou2_box_f64};
 #[cfg(test)]
 pub(crate) use siou_eiou::{eiou_box_f64, siou_box_f64};
 pub use siou_eiou::{eiou_loss, siou_loss};
