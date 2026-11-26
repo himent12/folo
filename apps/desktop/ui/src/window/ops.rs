@@ -139,6 +139,13 @@ impl Window {
         self.focus.filter(|id| cx.focus_handles.handles.read().contains_key(id))
     }
 
+    /// Whether `handle` was painted into the current frame's dispatch tree (during paint, the
+    /// prepainted next frame; otherwise the last rendered frame).
+    pub fn is_focus_mounted(&self, handle: &FocusHandle) -> bool {
+        let frame = if self.painting { &self.next_frame } else { &self.rendered_frame };
+        frame.dispatch_tree.focusable_node_id(handle.id).is_some()
+    }
+
     /// Moves focus to the next tab stop of the rendered frame (wrapping).
     pub fn focus_next(&mut self) {
         if let Some(id) = self.rendered_frame.dispatch_tree.next_tab_stop(self.focus, false) {

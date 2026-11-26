@@ -825,29 +825,38 @@ connection: close
         assert_eq!(probe_through(&url, None), Probe::Nothing);
     }
 
-    /// A server whose accept queue has one free slot: the refused-at-once check's connection, closed
-    /// without a request, takes it until the server accepts it, and the probe's own connection then finds
-    /// the queue full (Windows turns it away; it times out). The check saw a listener, so the probe tries
-    /// once more and finds the server, which took its queue meanwhile (here 200 ms in, inside the first
-    /// attempt's half second). With one attempt the app said nobody was there and started its own server.
-    /// On a loaded machine this can pass without the second attempt (the check unsure, or a pause before
-    /// the probe): `only_a_connection_never_made_is_asked_again` pins the rule itself.
+    /// #308 item 1: a server with a 1-slot accept queue that waits longer than the 500 ms connect limit
+    /// (here 700 ms) before accepting still answers `Probe::Folo` on the very first connection, with zero
+    /// throwaway empty connections from the listening check.
     #[cfg(windows)]
     #[test]
     fn a_server_whose_queue_the_check_filled_is_still_found() {
+        use std::io::{Read, Write};
         let health = json("200 OK", r#"{ "status": "ok", "version": "0.1.0", "mock": false }"#);
         let listener = super::refused::ports::listener(1);
-        let (url, requests) = canned_server_on(listener, std::time::Duration::from_millis(200), vec![health]);
-        assert_eq!(super::server::probe_through(&url, None), Probe::Folo);
-        assert!(requests.recv().unwrap().starts_with("GET /api/health "));
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(700));
+            let Ok((mut sock, _)) = listener.accept() else { return };
+            let mut buf = [0u8; 4096];
+            let n = sock.read(&mut buf).unwrap_or(0);
+            let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+            if n > 0 {
+                let _ = sock.write_all(&health);
+                let _ = sock.flush();
+            }
+        });
+        assert_eq!(super::server::probe_through(&format!("http://{addr}"), None), Probe::Folo);
+        let first = rx.recv().unwrap();
+        assert!(first.starts_with("GET /api/health "), "first connection carried health request: {first:?}");
     }
 
-    /// The probe's second attempt (#308), with scripted answers: taken once, and only when the check saw a
-    /// listener and the first attempt never connected; a connection that was made and then reset, or
+    /// The probe's fallback retry (#308), with scripted answers: taken once, and only when `retry_connect`
+    /// is true and the first attempt never connected; a connection that was made and then reset, or
     /// timed out reading, is final (a listener that resets after `t` cost `2t`, and a request was sent twice).
     #[test]
     fn only_a_connection_never_made_is_asked_again() {
-        use super::refused::Found;
         use super::server::ask_health;
         use std::io::{Error as IoError, ErrorKind};
         type Answer = Result<&'static str, ureq::Error>;
@@ -861,20 +870,20 @@ connection: close
         let connect_timeout: fn() -> Answer = || Err(ureq::Error::Timeout(ureq::Timeout::Connect));
         let failed: fn() -> Answer = || Err(ureq::Error::ConnectionFailed);
         for first in [connect_timeout, failed] {
-            let (answer, calls) = ask_health(Found::Listener, scripted(first));
-            assert_eq!((answer.ok(), calls), (Some("health"), 2), "a queue the check filled: once more");
-            let (answer, calls) = ask_health(Found::Unsure, scripted(first));
-            assert!(answer.is_err() && calls == 1, "the check saw no listener: no second attempt");
+            let (answer, calls) = ask_health(true, scripted(first));
+            assert_eq!((answer.ok(), calls), (Some("health"), 2), "fallback retry: once more");
+            let (answer, calls) = ask_health(false, scripted(first));
+            assert!(answer.is_err() && calls == 1, "no throwaway listener: no second attempt");
         }
         let reset: fn() -> Answer = || Err(ureq::Error::Io(IoError::from(ErrorKind::ConnectionReset)));
         let aborted: fn() -> Answer = || Err(ureq::Error::Io(IoError::from(ErrorKind::ConnectionAborted)));
         let refused: fn() -> Answer = || Err(ureq::Error::Io(IoError::from(ErrorKind::ConnectionRefused)));
         let read_timeout: fn() -> Answer = || Err(ureq::Error::Timeout(ureq::Timeout::RecvResponse));
         for first in [reset, aborted, refused, read_timeout] {
-            let (answer, calls) = ask_health(Found::Listener, scripted(first));
+            let (answer, calls) = ask_health(true, scripted(first));
             assert!(answer.is_err() && calls == 1, "{:?}: one attempt", answer);
         }
-        let (answer, calls) = ask_health(Found::Listener, scripted(|| Ok("health")));
+        let (answer, calls) = ask_health(true, scripted(|| Ok("health")));
         assert_eq!((answer.ok(), calls), (Some("health"), 1));
     }
 

@@ -15,25 +15,16 @@
 //!
 //! A server that listens but whose accept queue is full answers with a reset, which reads as refused here:
 //! the app then starts its own `folo serve`, and the data dir's one-owner rule (`serve.lock`) makes the app
-//! connect to the server that owns it. A queue with one free slot left goes the other way: the check's
-//! connection, accepted by the system and closed without a request, holds that slot until the server takes
-//! it, so the probe's own connection right after finds the queue full (on Windows it is turned away and
-//! times out waiting for its next attempt). So when the check saw a listener ([`Found::Listener`]) and the
-//! probe then could not connect, the probe tries once more before it says nobody is there
-//! (`server::ask_health`; only a failure to connect, never a connection that was made and then reset).
-//!
-//! Two corners stay (#308). The second attempt gets its own half-second connect limit, so a server that
-//! stops listening between the check and the probe (usually about a millisecond apart, longer on a loaded
-//! machine) can take up to about 1.0 s to be found gone instead of 0.5 s, when both attempts wait out their
-//! limit (Windows turns a connection away only after its SYN retries; one refused at once ends sooner). And
-//! the check's connection is not handed to the probe: on a listener whose accept queue has exactly one
-//! free slot and that takes nothing from it for longer than both attempts, both time out connecting and the
-//! app says nobody is there. A `folo serve` asks for a queue of 128 (tokio's listener, through mio, on
-//! Windows), but it binds its port before it opens its store and only accepts after: during a slow store
-//! open, other connections can fill all but one slot. Reusing the check's socket for the health request
-//! would close that, but it would need the HTTP client to take a socket it did not open.
+//! connect to the server that owns it. When a connection to one of the loopback addresses succeeds, the check
+//! switches that socket back to blocking mode and hands it to [`super::server::probe_through`] inside
+//! [`Found::Listener`] (#308): the HTTP health probe sends `GET /api/health` over that same socket instead of
+//! closing a throwaway connection and opening a second one. That removes the extra connection on every probe
+//! and fixes the one-free-slot backlog corner where a closed empty connection held the last slot while the
+//! probe's second connection timed out. Only if switching the socket back to blocking mode fails (returning
+//! `Found::Listener(None)`) does `server::ask_health` fall back to its single connect-failure retry.
 
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::fmt;
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 /// How long the whole check may take (the module docs say what it bounds). A refused loopback connection
@@ -41,15 +32,64 @@ use std::time::{Duration, Instant};
 /// under the probe's own 0.5 s.
 pub const DEADLINE: Duration = Duration::from_millis(100);
 
+/// A loopback TCP connection established by [`check`], handed to the health probe so it does not open a
+/// second connection.
+pub struct ConnectedStream {
+    /// Declared first so the socket closes before `_wsa` releases Winsock.
+    stream: TcpStream,
+    #[cfg(windows)]
+    _wsa: win::Wsa,
+}
+
+impl ConnectedStream {
+    /// The underlying connected TCP socket (in blocking mode).
+    pub fn stream(&self) -> &TcpStream {
+        &self.stream
+    }
+}
+
+impl fmt::Debug for ConnectedStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectedStream").field("peer", &self.stream.peer_addr().ok()).finish()
+    }
+}
+
+impl ureq::unversioned::transport::ShutdownHandle for ConnectedStream {
+    fn shutdown(&self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
 /// What [`check`] found at an address.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Found {
     /// Every address refused a connection by the deadline: no server answers there.
     Nothing,
-    /// A connection to one of the addresses was accepted: something listens there.
-    Listener,
+    /// A connection to one of the addresses was accepted: something listens there. Carries the established
+    /// blocking socket when it could be switched back to blocking mode (`None` if not, in which case the
+    /// probe opens its own socket with one connect-failure retry).
+    Listener(Option<ConnectedStream>),
     /// Neither is certain (the cases [`check`] lists).
     Unsure,
+}
+
+impl Found {
+    /// Whether [`check`] proved nothing listens on any loopback address.
+    pub fn is_nothing(&self) -> bool {
+        matches!(self, Found::Nothing)
+    }
+
+    /// Whether [`check`] connected to a listener (carrying its socket or not).
+    #[cfg(test)]
+    pub fn is_listener(&self) -> bool {
+        matches!(self, Found::Listener(_))
+    }
+
+    /// Whether [`check`] left the answer to the normal probe.
+    #[cfg(test)]
+    pub fn is_unsure(&self) -> bool {
+        matches!(self, Found::Unsure)
+    }
 }
 
 /// Whether every address `url` names is on this machine and refused a TCP connection just now
@@ -104,32 +144,56 @@ fn connect_all(addrs: &[SocketAddr], deadline: Instant, now: &dyn Fn() -> Instan
     if addrs.len() > FD_SETSIZE as usize || now() >= deadline {
         return Found::Unsure;
     }
-    // Declared first, so dropped last: every socket is closed before Winsock is released.
-    let Some(_wsa) = win::Wsa::start() else { return Found::Unsure };
+    let Some(wsa) = win::Wsa::start() else { return Found::Unsure };
     let mut pending: Vec<win::Socket> = Vec::with_capacity(addrs.len());
     for addr in addrs {
         match win::start_connect(addr, deadline, now) {
             win::Started::Pending(s) => pending.push(s),
             win::Started::Refused => {}
-            win::Started::Connected => return Found::Listener,
-            win::Started::Other => return Found::Unsure,
+            win::Started::Connected(s) => {
+                // Close any earlier pending sockets while `wsa` is still alive, then hand `s` + `wsa` out.
+                drop(pending);
+                return Found::Listener(into_connected(s, wsa));
+            }
+            win::Started::Other => {
+                drop(pending);
+                return Found::Unsure;
+            }
         }
     }
-    wait(pending, deadline, now)
+    wait(pending, wsa, deadline, now)
+}
+
+/// Switches a connected Winsock socket back to blocking mode and wraps it with its [`win::Wsa`] guard.
+#[cfg(windows)]
+fn into_connected(s: win::Socket, wsa: win::Wsa) -> Option<ConnectedStream> {
+    use std::os::windows::io::FromRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{FIONBIO, ioctlsocket};
+    let mut non_blocking = 0u32;
+    // SAFETY: `s` is our live connected socket; `non_blocking` outlives the call.
+    if unsafe { ioctlsocket(s.0, FIONBIO, &mut non_blocking) } != 0 {
+        drop(s);
+        return None;
+    }
+    // SAFETY: `s` is a live connected TCP socket in blocking mode; ownership transfers to `TcpStream`, and
+    // `ConnectedStream` drops `stream` before `_wsa`.
+    let stream = unsafe { TcpStream::from_raw_socket(s.into_raw() as u64) };
+    Some(ConnectedStream { stream, _wsa: wsa })
 }
 
 /// Waits on the connections `pending` (started without blocking, at most `FD_SETSIZE`):
 /// [`Found::Nothing`] once every one was refused, if that is before `deadline` (on the clock `now`);
-/// [`Found::Listener`] as soon as one connected; [`Found::Unsure`] as soon as one failed some other way, or
-/// at `deadline` with one still unanswered.
+/// [`Found::Listener`] as soon as one connected (carrying that socket); [`Found::Unsure`] as soon as one
+/// failed some other way, or at `deadline` with one still unanswered.
 #[cfg(windows)]
-fn wait(mut pending: Vec<win::Socket>, deadline: Instant, now: &dyn Fn() -> Instant) -> Found {
+fn wait(mut pending: Vec<win::Socket>, wsa: win::Wsa, deadline: Instant, now: &dyn Fn() -> Instant) -> Found {
     use windows_sys::Win32::Networking::WinSock::{
         FD_SET, SO_ERROR, SOCKET_ERROR, SOL_SOCKET, TIMEVAL, WSAECONNREFUSED, getsockopt, select,
     };
     while !pending.is_empty() {
         let left = deadline.saturating_duration_since(now());
         if left.is_zero() {
+            drop(pending);
             return Found::Unsure;
         }
         let mut connected = FD_SET::default();
@@ -147,6 +211,7 @@ fn wait(mut pending: Vec<win::Socket>, deadline: Instant, now: &dyn Fn() -> Inst
         // `wait`; the first argument is ignored by Winsock.
         let ready = unsafe { select(0, std::ptr::null_mut(), &mut connected, &mut failed, &wait) };
         if ready < 0 {
+            drop(pending);
             return Found::Unsure;
         }
         // Nothing answered in the time asked: the loop gives up at the deadline (a wait can end a little
@@ -156,7 +221,11 @@ fn wait(mut pending: Vec<win::Socket>, deadline: Instant, now: &dyn Fn() -> Inst
         }
         // On return each set holds only its ready sockets. A connection that completed: someone listens.
         if connected.fd_count > 0 {
-            return Found::Listener;
+            let raw = connected.fd_array[0];
+            let won = pending.iter().position(|p| p.0 == raw).map(|i| pending.swap_remove(i));
+            // Close every other pending socket before handing `wsa` out (or dropping it).
+            drop(pending);
+            return Found::Listener(won.and_then(|s| into_connected(s, wsa)));
         }
         for &s in &failed.fd_array[..failed.fd_count as usize] {
             let mut error = 0i32;
@@ -165,6 +234,7 @@ fn wait(mut pending: Vec<win::Socket>, deadline: Instant, now: &dyn Fn() -> Inst
             let got =
                 unsafe { getsockopt(s, SOL_SOCKET, SO_ERROR, (&mut error as *mut i32).cast(), &mut len) };
             if got == SOCKET_ERROR || error != WSAECONNREFUSED {
+                drop(pending);
                 return Found::Unsure;
             }
             pending.retain(|p| p.0 != s);
@@ -228,7 +298,6 @@ mod win {
 
     impl Socket {
         /// The socket, no longer closed by this guard (its new owner closes it).
-        #[cfg(test)]
         pub fn into_raw(self) -> SOCKET {
             let s = self.0;
             std::mem::forget(self);
@@ -297,7 +366,7 @@ mod win {
         /// Refused at once.
         Refused,
         /// Connected at once: something listens.
-        Connected,
+        Connected(Socket),
         /// Anything else (failed otherwise, the option not there, the deadline passed).
         Other,
     }
@@ -350,7 +419,7 @@ mod win {
             #[cfg(test)]
             CONNECTS.with(|c| c.set(c.get() + 1));
             if connect(s.0, name, len) != SOCKET_ERROR {
-                return Started::Connected;
+                return Started::Connected(s);
             }
             match WSAGetLastError() {
                 WSAEWOULDBLOCK => Started::Pending(s),
@@ -431,9 +500,12 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let found = check(&format!("http://127.0.0.1:{port}/api/health"));
-        // Seen as a listener where the check runs (Windows); unsure elsewhere.
-        let expected = if cfg!(windows) { Found::Listener } else { Found::Unsure };
-        assert_eq!(found, expected);
+        // Seen as a listener carrying its socket where the check runs (Windows); unsure elsewhere.
+        if cfg!(windows) {
+            assert!(matches!(found, Found::Listener(Some(_))), "{found:?}");
+        } else {
+            assert!(found.is_unsure(), "{found:?}");
+        }
     }
 
     /// The limit of the closed-port checks below: generous for a loaded machine (a refusal without SYN
@@ -446,7 +518,7 @@ mod tests {
     #[test]
     fn a_closed_loopback_port_is_refused_at_once() {
         use ports::closed_port;
-        let refused = |url: String| check_within(&url, TEST_LIMIT) == Found::Nothing;
+        let refused = |url: String| check_within(&url, TEST_LIMIT).is_nothing();
         let v4 = closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
         assert!(refused(format!("http://127.0.0.1:{}/api/health", v4.port)));
 
@@ -455,7 +527,7 @@ mod tests {
             assert!(refused(format!("http://[::1]:{}", v6.port)));
             let listener = std::net::TcpListener::bind("[::1]:0").expect("IPv6 loopback works: bound above");
             let port = listener.local_addr().unwrap().port();
-            assert_eq!(check_within(&format!("http://[::1]:{port}"), TEST_LIMIT), Found::Listener);
+            assert!(check_within(&format!("http://[::1]:{port}"), TEST_LIMIT).is_listener());
         }
 
         // `localhost` names both loopback addresses: one port reserved on both, neither listening.
@@ -478,7 +550,7 @@ mod tests {
     fn a_connection_unanswered_at_the_deadline_is_not_refused() {
         use std::os::windows::io::IntoRawSocket;
         let closed = ports::closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
-        let _wsa = win::Wsa::start().unwrap();
+        let wsa = win::Wsa::start().unwrap();
         let mut pending = Vec::new();
         // Refused at once, or later, in the wait.
         let addr = SocketAddr::from(([127, 0, 0, 1], closed.port));
@@ -491,7 +563,7 @@ mod tests {
         pending.push(win::Socket(listener.into_raw_socket() as usize));
         let limit = Duration::from_millis(50);
         let t = Instant::now();
-        assert_eq!(wait(pending, t + limit, &Instant::now), Found::Unsure);
+        assert!(wait(pending, wsa, t + limit, &Instant::now).is_unsure());
         let took = t.elapsed();
         assert!(took >= limit, "{took:?}: gave up before the deadline");
         // It ends (with nothing to end it, the wait would last for ever); generous for a loaded machine.
@@ -508,21 +580,22 @@ mod tests {
         let other = ports::closed_port("127.0.0.1:0".parse().unwrap()).unwrap();
         let addr = SocketAddr::from(([127, 0, 0, 1], closed.port));
         let addr2 = SocketAddr::from(([127, 0, 0, 1], other.port));
-        assert_eq!(connect_all(&[addr], Instant::now(), &Instant::now), Found::Unsure);
-        assert_eq!(check_within(&format!("http://127.0.0.1:{}", closed.port), Duration::ZERO), Found::Unsure);
-        assert_eq!(connect_all(&[addr, addr2], Instant::now() + TEST_LIMIT, &Instant::now), Found::Nothing);
+        assert!(connect_all(&[addr], Instant::now(), &Instant::now).is_unsure());
+        assert!(check_within(&format!("http://127.0.0.1:{}", closed.port), Duration::ZERO).is_unsure());
+        assert!(connect_all(&[addr, addr2], Instant::now() + TEST_LIMIT, &Instant::now).is_nothing());
 
         let start = Instant::now();
         let deadline = start + TEST_LIMIT;
         let before = win::connects();
         let clock = || if win::connects() > before { deadline } else { start };
-        assert_eq!(connect_all(&[addr, addr2], deadline, &clock), Found::Unsure);
+        assert!(connect_all(&[addr, addr2], deadline, &clock).is_unsure());
         assert_eq!(win::connects() - before, 1, "a connection started after the deadline");
 
         // Every connection refused, but only known after the deadline: not a refusal.
-        let _wsa = win::Wsa::start().unwrap();
-        assert_eq!(wait(Vec::new(), deadline, &|| deadline), Found::Unsure);
-        assert_eq!(wait(Vec::new(), deadline, &|| start), Found::Nothing);
+        let wsa = win::Wsa::start().unwrap();
+        assert!(wait(Vec::new(), wsa, deadline, &|| deadline).is_unsure());
+        let wsa = win::Wsa::start().unwrap();
+        assert!(wait(Vec::new(), wsa, deadline, &|| start).is_nothing());
     }
 
     /// A Winsock start-up that failed is not released: that `WSACleanup` would release another user's.
@@ -570,7 +643,7 @@ mod tests {
     fn anything_else_is_left_to_the_probe() {
         // Another machine (TEST-NET-1: never connected to), a name, and things that aren't addresses.
         for url in ["http://192.0.2.1:7878", "http://folo.example:7878", "abc def", "", "http://"] {
-            assert_eq!(check(url), Found::Unsure, "{url}");
+            assert!(check(url).is_unsure(), "{url}");
         }
     }
 }

@@ -375,8 +375,9 @@ fn dataset_images_search_sort_reset_and_clickable_class_balance_bars() {
         cx.notify();
     });
     let stats_keys = drawn_keys(&mut app, window);
-    assert!(stats_keys.iter().any(|k| k == "ds-class-bar-0"), "{stats_keys:?}");
-    drive(&mut app, window, |this, w, cx| this.focus_key("ds-class-bar-0", w, cx));
+    let bar0 = format!("ds-class-bar-{ds_id}-0");
+    assert!(stats_keys.iter().any(|k| k == &bar0), "{stats_keys:?}");
+    drive(&mut app, window, |this, w, cx| this.focus_key(&bar0, w, cx));
     app.frame(window.into());
     press_enter(&mut app, window);
     drive(&mut app, window, |this, w, cx| {

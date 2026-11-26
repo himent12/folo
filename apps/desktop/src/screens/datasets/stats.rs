@@ -46,7 +46,7 @@ impl FoloApp {
                 let c = s.class_counts.get(i).copied().unwrap_or(0);
                 let selected = active_class == Some(i as u32);
                 let clickable = c > 0 || selected;
-                let key = format!("ds-class-bar-{i}");
+                let key = format!("ds-class-bar-{}-{i}", ds.id);
                 let tip_text = if selected {
                     format!("Showing {name} · click to show all images")
                 } else if c == 0 {

@@ -1,13 +1,15 @@
 //! A local `folo serve`: finding the binary, starting it on a free port, and stopping it with the app.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::channel;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use crate::api::*;
+use ureq::unversioned::transport::{Buffers as _, Connector as _};
 
-use super::refused::Found;
+use super::refused::{ConnectedStream, Found};
 use super::transport::{BODY_LIMIT, agent, json};
 
 /// A local `folo serve` started by the app; stopped when dropped.
@@ -125,10 +127,10 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> Probe {
     // the proxy reaches. Before the client is made, which costs more than the check.
     let direct = proxy.as_ref().is_none_or(|p| health.parse().is_ok_and(|uri| p.is_no_proxy(&uri)));
     let found = if direct { super::refused::check(&health) } else { Found::Unsure };
-    if found == Found::Nothing {
+    if found.is_nothing() {
         return Probe::Nothing;
     }
-    let agent = ureq::Agent::config_builder()
+    let config = ureq::Agent::config_builder()
         .http_status_as_error(false)
         // `folo serve` answers its health itself: a redirect is something else's (and a hop that
         // timed out connecting would look like the first one, so the request went again, #308).
@@ -137,8 +139,27 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> Probe {
         .timeout_global(Some(Duration::from_secs(10)))
         .proxy(proxy)
         .build();
-    let agent: ureq::Agent = agent.into();
-    let (answer, _) = ask_health(found, || agent.get(&health).call());
+    let (agent, retry_connect) = match found {
+        Found::Listener(Some(conn)) => {
+            // Reuse the loopback socket `refused::check` already connected (#308): no throwaway
+            // connection hits the listener's accept queue, so no second attempt is needed.
+            let connector =
+                ().chain(PreconnectedConnector::new(conn))
+                    .chain(ureq::unversioned::transport::TcpConnector::default())
+                    .chain(ureq::unversioned::transport::RustlsConnector::default());
+            (
+                ureq::Agent::with_parts(
+                    config,
+                    connector,
+                    ureq::unversioned::resolver::DefaultResolver::default(),
+                ),
+                false,
+            )
+        }
+        Found::Listener(None) => (config.into(), true),
+        Found::Unsure | Found::Nothing => (config.into(), false),
+    };
+    let (answer, _) = ask_health(retry_connect, || agent.get(&health).call());
     let Ok(mut r) = answer else { return Probe::Nothing };
     // A FOLO server's health, not any web server that answers 200 (a dev server's index page).
     if r.status().is_success() && json::<Health>(r.body_mut(), BODY_LIMIT).is_ok_and(|h| h.status == "ok") {
@@ -148,21 +169,17 @@ pub(super) fn probe_through(url: &str, proxy: Option<ureq::Proxy>) -> Probe {
     }
 }
 
-/// The health request (`call`), and how many times it was sent. The check's own connection, closed
-/// without a request, waits in the server's accept queue until the server takes it: with one free slot left
-/// there, this request's connection then finds the queue full (on Windows it is turned away and times out
-/// before its next attempt). So when the check saw a listener and the request could not connect, it is sent
-/// once more (the server takes its queue meanwhile) before nobody is said to be there. Only a failure to
-/// connect is tried again (#308): an answer is final, and so is a connection that was made and then reset,
-/// aborted or timed out, which a second attempt would only make wait as long again (a listener that accepts
-/// and resets after `t` cost `2t`) or send twice. The call follows no redirect (`probe_through`), so a
-/// failure to connect is always the first hop's.
+/// The health request (`call`), and how many times it was sent. When `retry_connect` is set (the
+/// listening check saw a listener but could not hand its socket over, so a closed empty connection may
+/// still occupy the last accept-queue slot) and the first attempt never connected, it is sent once more
+/// before nobody is said to be there. Only a failure to connect is tried again (#308): an answer is
+/// final, and so is a connection that was made and then reset, aborted or timed out.
 pub(super) fn ask_health<T>(
-    found: Found,
+    retry_connect: bool,
     mut call: impl FnMut() -> Result<T, ureq::Error>,
 ) -> (Result<T, ureq::Error>, u32) {
     let answer = call();
-    if found == Found::Listener && answer.as_ref().is_err_and(not_connected) {
+    if retry_connect && answer.as_ref().is_err_and(not_connected) {
         return (call(), 2);
     }
     (answer, 1)
@@ -171,6 +188,145 @@ pub(super) fn ask_health<T>(
 /// Whether a call never connected: the connect limit passed, or the client found no connection to make.
 fn not_connected(e: &ureq::Error) -> bool {
     matches!(e, ureq::Error::Timeout(ureq::Timeout::Connect) | ureq::Error::ConnectionFailed)
+}
+
+/// Hands a single already-connected loopback socket from [`super::refused::check`] into a `ureq`
+/// connector chain, falling through to [`ureq::unversioned::transport::TcpConnector`] if empty.
+#[derive(Debug)]
+struct PreconnectedConnector {
+    conn: Mutex<Option<ConnectedStream>>,
+}
+
+impl PreconnectedConnector {
+    fn new(conn: ConnectedStream) -> Self {
+        Self { conn: Mutex::new(Some(conn)) }
+    }
+}
+
+impl ureq::unversioned::transport::Connector<()> for PreconnectedConnector {
+    type Out = PreconnectedTransport;
+
+    fn connect(
+        &self,
+        details: &ureq::unversioned::transport::ConnectionDetails,
+        _chained: Option<()>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        let Some(conn) = self.conn.lock().unwrap().take() else {
+            return Ok(None);
+        };
+        if details.config.no_delay() {
+            let _ = conn.stream().set_nodelay(true);
+        }
+        let buffers = ureq::unversioned::transport::LazyBuffers::new(
+            details.config.input_buffer_size(),
+            details.config.output_buffer_size(),
+        );
+        let transport = PreconnectedTransport {
+            stream: Arc::new(conn),
+            buffers,
+            timeout_read: None,
+            timeout_write: None,
+        };
+        let handle =
+            Arc::downgrade(&transport.stream) as Weak<dyn ureq::unversioned::transport::ShutdownHandle>;
+        (details.register_shutdown)(handle)?;
+        Ok(Some(transport))
+    }
+}
+
+/// One-shot `ureq` [`Transport`](ureq::unversioned::transport::Transport) over a [`ConnectedStream`].
+#[derive(Debug)]
+struct PreconnectedTransport {
+    stream: Arc<ConnectedStream>,
+    buffers: ureq::unversioned::transport::LazyBuffers,
+    timeout_read: Option<Duration>,
+    timeout_write: Option<Duration>,
+}
+
+impl PreconnectedTransport {
+    fn apply_timeout(
+        &self,
+        cached: &mut Option<Duration>,
+        next: Option<Duration>,
+        setter: fn(&std::net::TcpStream, Option<Duration>) -> std::io::Result<()>,
+    ) -> Result<(), ureq::Error> {
+        if next != *cached {
+            setter(self.stream.stream(), next)?;
+            *cached = next;
+        }
+        Ok(())
+    }
+}
+
+impl ureq::unversioned::transport::Transport for PreconnectedTransport {
+    fn buffers(&mut self) -> &mut dyn ureq::unversioned::transport::Buffers {
+        &mut self.buffers
+    }
+
+    fn transmit_output(
+        &mut self,
+        amount: usize,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<(), ureq::Error> {
+        let timeout = timeout.for_write();
+        if timeout.after.is_zero() {
+            return Err(ureq::Error::Timeout(timeout.reason));
+        }
+        let limit = timeout.not_zero().map(|d| *d);
+        let mut cached = self.timeout_write;
+        self.apply_timeout(&mut cached, limit, std::net::TcpStream::set_write_timeout)?;
+        self.timeout_write = cached;
+        let output = &self.buffers.output()[..amount];
+        match self.stream.stream().write_all(output) {
+            Ok(()) => Ok(()),
+            Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                Err(ureq::Error::Timeout(timeout.reason))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn await_input(
+        &mut self,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<bool, ureq::Error> {
+        let timeout = timeout.for_read();
+        if timeout.after.is_zero() {
+            return Err(ureq::Error::Timeout(timeout.reason));
+        }
+        let limit = timeout.not_zero().map(|d| *d);
+        let mut cached = self.timeout_read;
+        self.apply_timeout(&mut cached, limit, std::net::TcpStream::set_read_timeout)?;
+        self.timeout_read = cached;
+        let started = Instant::now();
+        let buf = self.buffers.input_append_buf();
+        let amount = loop {
+            match self.stream.stream().read(buf) {
+                Ok(n) => break n,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {
+                    if let Some(total) = limit {
+                        let left = total.saturating_sub(started.elapsed());
+                        if left.is_zero() {
+                            return Err(ureq::Error::Timeout(timeout.reason));
+                        }
+                        self.stream.stream().set_read_timeout(Some(left))?;
+                        self.timeout_read = Some(left);
+                    }
+                }
+                Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                    return Err(ureq::Error::Timeout(timeout.reason));
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
+        self.buffers.input_appended(amount);
+        Ok(amount > 0)
+    }
+
+    fn is_open(&mut self) -> bool {
+        // Single-use probe transport: never returned to a connection pool.
+        false
+    }
 }
 
 /// Make the OS stop `child` when this process exits, even if it is killed (no Drop runs then).

@@ -433,7 +433,9 @@ pub struct FoloApp {
     /// Focus target of the inspector so its keys (arrows, +/-, 0, Esc) work as soon as it opens.
     pub inspector_focus: FocusHandle,
     /// Focus to restore when the palette, a dialog or the stop confirmation closes.
-    overlay_return: Option<FocusHandle>,
+    overlay_return: Option<overlay_state::OverlayReturn>,
+    /// Restored focus handle to verify once the closing frame prepaints (falls back to `root_focus` if unmounted).
+    verify_focus: Option<FocusHandle>,
     /// Where focus was before the inspector opened, restored on close.
     inspector_return: Option<FocusHandle>,
     pub hist_hover: HashMap<&'static str, f32>,
@@ -617,6 +619,8 @@ pub struct FoloApp {
     pub restore_pending: bool,
     /// The window is below 1120 px wide (16 px page gutters); set each render.
     pub narrow: bool,
+    /// Last rendered display scale factor (for device-pixel progress thresholds in `drain_streams`).
+    pub(crate) last_scale_factor: f32,
     /// The window's activations seen by the last render: one more (each return to the window) reads
     /// the dataset shown, or inspected, again.
     pub window_activations: u64,
@@ -821,6 +825,7 @@ impl FoloApp {
             inspector: None,
             inspector_focus: cx.focus_handle(),
             overlay_return: None,
+            verify_focus: None,
             inspector_return: None,
             hist_hover: HashMap::new(),
             run_filter: RunFilter::All,
@@ -919,6 +924,7 @@ impl FoloApp {
             synth_seq: 0,
             restore_pending: false,
             narrow: false,
+            last_scale_factor: 1.5,
             window_activations: 0,
             confirm_stop: None,
             confirm_delete: None,

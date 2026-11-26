@@ -4,12 +4,20 @@
 
 use std::time::Duration;
 
-use folo_ui::{App, AppContext, Context, Focusable, ScrollHandle, SharedString, Window};
+use folo_ui::{App, AppContext, Context, FocusHandle, Focusable, ScrollHandle, SharedString, Window};
 
 use crate::input::{InputEvent, TextInput};
 use crate::ui::*;
 
-use super::{Action, FoloApp, Inspector, Palette, Toast};
+use super::{Action, FoloApp, Inspector, Palette, Route, Toast};
+
+/// Focus target remembered before an overlay opened, with enough page context to reject stale or
+/// positionally shifted targets when the overlay closes.
+pub(super) struct OverlayReturn {
+    handle: FocusHandle,
+    route: Route,
+    play_pred_seq: u64,
+}
 
 /// How long a toast shows before it leaves by itself (not counting time hovered or focused): a
 /// toast with an action gets long enough to read it and reach the button.
@@ -128,16 +136,41 @@ impl FoloApp {
         cx.notify();
     }
 
-    /// Remember the focused control before an overlay takes focus.
+    /// Remember the focused control before an overlay takes focus. When another overlay is already
+    /// open and a pre-overlay return target is saved, keep it so overlay-to-overlay hand-offs
+    /// (e.g. Command Palette → New run / Delete) never clobber the page control with a dying
+    /// overlay's own focus handle.
     pub fn remember_focus(&mut self, window: &Window, cx: &App) {
-        self.overlay_return = window.focused(cx);
+        if self.any_overlay() && self.overlay_return.is_some() {
+            return;
+        }
+        self.overlay_return = window.focused(cx).map(|handle| OverlayReturn {
+            handle,
+            route: self.route.clone(),
+            play_pred_seq: self.play_pred_seq,
+        });
     }
 
-    /// Give focus back to whatever had it before the overlay opened.
+    /// Give focus back to whatever had it before the overlay opened, falling back to `root_focus`
+    /// if the route changed, positional Playground detection rows (`det-*`) shifted while the
+    /// overlay was open, or the remembered handle is no longer mounted in the frame.
     pub fn restore_focus(&mut self, window: &mut Window) {
-        match self.overlay_return.take() {
-            Some(fh) => window.focus(&fh),
-            None => window.focus(&self.root_focus),
+        let Some(ret) = self.overlay_return.take() else {
+            self.verify_focus = None;
+            window.focus(&self.root_focus);
+            return;
+        };
+        let shifted_det = ret.route == Route::Playground
+            && self.play_pred_seq != ret.play_pred_seq
+            && self.focus.borrow().iter().any(|(k, fh)| fh.id == ret.handle.id && k.starts_with("det-"));
+        if ret.route == self.route && !shifted_det && window.is_focus_mounted(&ret.handle) {
+            window.focus(&ret.handle);
+            // Re-verify once this closing frame prepaints in case the remembered control vanished on
+            // the same tick that closed the overlay (e.g. confirming Stop, Disconnect, or Terminate).
+            self.verify_focus = Some(ret.handle);
+        } else {
+            self.verify_focus = None;
+            window.focus(&self.root_focus);
         }
     }
 
@@ -299,9 +332,118 @@ impl FoloApp {
 
 #[cfg(test)]
 mod tests {
+    use crate::api::RunStatus;
+    use crate::app::Route;
+    use crate::app::tests::{drive, open};
+
     #[test]
     fn every_toast_expires_and_action_toasts_last_longer() {
         let (plain, action) = (super::toast_ttl(false), super::toast_ttl(true));
         assert!(action > plain && action.as_secs() >= 10 && action.as_secs() <= 15, "{action:?}");
+    }
+
+    #[test]
+    fn overlay_handoff_preserves_page_focus_and_falls_back_when_control_vanishes_or_shifts() {
+        let (mut app, window) = open();
+        app.update(|cx| {
+            crate::app::bind_keys(cx);
+            crate::input::bind_keys(cx);
+        });
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::Runs, w, cx);
+            this.focus_key("runs-new", w, cx);
+        });
+        app.frame(window.into());
+
+        // 1. Opening palette then chaining directly into ask_delete must preserve `runs-new`,
+        // never clobbering `overlay_return` with the dropped palette input handle.
+        drive(&mut app, window, |this, w, cx| {
+            this.open_palette(w, cx);
+            this.ask_delete(crate::app::DeleteTarget::Run("run_52e8".into()), w, cx);
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.dismiss(w, cx));
+        app.frame(window.into());
+        assert!(
+            drive(&mut app, window, |this, w, cx| this.fh("runs-new", cx).is_focused(w)),
+            "dismissing chained overlay restores original pre-palette control"
+        );
+
+        // 2. If the remembered control disappears while the overlay is open (e.g. live-mini
+        // vanishes when the running job finishes), closing the overlay falls back to `root_focus`
+        // instead of stranding focus on an unmounted handle.
+        drive(&mut app, window, |this, w, cx| {
+            this.focus_key("live-mini", w, cx);
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            this.open_palette(w, cx);
+            for r in this.store.runs.ready_mut().unwrap() {
+                if r.status == RunStatus::Running {
+                    r.status = RunStatus::Completed;
+                }
+            }
+            cx.notify();
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.close_palette(w, cx));
+        app.frame(window.into());
+        assert!(
+            drive(&mut app, window, |this, w, _| this.root_focus.is_focused(w)),
+            "unmounted live-mini falls back cleanly to root_focus"
+        );
+
+        // 3. If a control disappears on the very same tick that closes a dialog (post-prepaint
+        // verification), focus falls back to `root_focus` in that same frame.
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::Settings, w, cx);
+        });
+        app.frame(window.into());
+        app.run_until_idle();
+        app.frame(window.into());
+        let conn_id = drive(&mut app, window, |this, w, cx| {
+            let id = this.cloud.connections.ready().unwrap()[0].id.clone();
+            this.focus_key(&format!("cloud-disc-{id}"), w, cx);
+            id
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            this.ask_disconnect(conn_id.clone(), w, cx);
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, _, cx| {
+            this.cloud.disconnect = None;
+            this.cloud.connections.ready_mut().unwrap().retain(|c| c.id != conn_id);
+            this.restore_pending = true;
+            cx.notify();
+        });
+        app.frame(window.into());
+        assert!(
+            drive(&mut app, window, |this, w, _| this.root_focus.is_focused(w)),
+            "same-tick removed control falls back to root_focus after prepaint verification"
+        );
+
+        // 4. On Playground, if positional detection rows (`det-*`) change predictions while the
+        // palette is open, closing the palette falls back to `root_focus` instead of focusing a
+        // shifted detection at the old index.
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::Playground, w, cx);
+        });
+        app.frame(window.into());
+        app.run_until_idle();
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            let fh = this.fh("det-0", cx);
+            w.focus(&fh);
+            this.open_palette(w, cx);
+            this.play_pred_seq += 1;
+        });
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| this.close_palette(w, cx));
+        app.frame(window.into());
+        assert!(
+            drive(&mut app, window, |this, w, _| this.root_focus.is_focused(w)),
+            "shifted positional det-* index falls back to root_focus"
+        );
     }
 }

@@ -243,5 +243,8 @@ fn tab_order_and_focus_on_mouse_down() {
     with_window(&mut app, window, |window, cx| {
         assert!(handles[3].is_focused(window));
         assert!(!handles[0].contains_focused(window, cx));
+        assert!(window.is_focus_mounted(&handles[0]));
+        let orphan = cx.focus_handle();
+        assert!(!window.is_focus_mounted(&orphan));
     });
 }
