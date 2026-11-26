@@ -35,9 +35,11 @@
 //! kernel list may ask a generator for.
 
 pub mod attention;
+pub mod batched_topk;
 pub(crate) mod bounds;
 pub mod conv;
 pub mod coop;
+pub mod cumsum;
 pub mod detect;
 pub mod detect_sites;
 pub mod distill;
@@ -47,6 +49,7 @@ pub mod fused_act;
 pub mod gemm;
 pub mod gemm_cat;
 pub mod group_norm;
+pub mod im2col;
 pub mod layer_norm;
 pub mod layout;
 pub mod muon;
@@ -54,6 +57,7 @@ pub mod norm;
 pub mod optim;
 pub mod pool_grad;
 pub mod pooling;
+pub mod q4_matmul;
 pub mod q8_matmul;
 pub mod reduce;
 pub mod residual_norm;
@@ -88,8 +92,10 @@ pub(crate) fn find_def(name: &str, spec: &Spec) -> Option<&'static KernelDef> {
 pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
     [
         attention::DEFS,
+        batched_topk::DEFS,
         conv::DEFS,
         coop::DEFS,
+        cumsum::DEFS,
         detect::DEFS,
         detect_sites::DEFS,
         distill::DEFS,
@@ -98,6 +104,7 @@ pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
         fused_act::DEFS,
         gemm::DEFS,
         group_norm::DEFS,
+        im2col::DEFS,
         layer_norm::DEFS,
         layout::DEFS,
         muon::DEFS,
@@ -105,6 +112,7 @@ pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
         optim::DEFS,
         pool_grad::DEFS,
         pooling::DEFS,
+        q4_matmul::DEFS,
         q8_matmul::DEFS,
         reduce::DEFS,
         residual_norm::DEFS,

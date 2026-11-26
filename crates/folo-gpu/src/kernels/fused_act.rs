@@ -5,6 +5,8 @@
 //!   cubic/hyperbolic overflow for large `|x|`.
 //! - [`swiglu_forward`] / [`swiglu_backward`]: fused single-pass `y = silu(gate) * up` and `(dgate, dup)` without
 //!   materializing intermediate tensors.
+//! - [`geglu_forward`] / [`geglu_backward`]: fused single-pass `y = gelu(gate) * up` and `(dgate, dup)` without
+//!   materializing intermediate tensors.
 //! - [`bias_add_silu`]: layout-specialized `vec4` `y = silu(x + bias[(i / inner) % channels])` with a single scalar
 //!   splat per `vec4` when `inner % 4 == 0` (NCHW conv outputs), a coalesced `vec4` bias load when
 //!   `inner == 1 && channels % 4 == 0` (linear/MLP layers), and a scalar fallback otherwise.
@@ -67,18 +69,18 @@ fn silu_deriv4(x: vec4<f32>) -> vec4<f32> {
     let mid = s + x * s * (vec4<f32>(1.0) - s);
     return select(select(mid, vec4<f32>(0.0), big_neg), vec4<f32>(1.0), big_pos);
 }
-fn tanh_safe4(x: vec4<f32>) -> vec4<f32> {
-    return select(
-        select(tanh(clamp(x, vec4<f32>(-9.0), vec4<f32>(9.0))), sign(x), abs(x) >= vec4<f32>(9.0)),
-        x,
-        isnan4(x),
-    );
-}
 fn gelu4(x: vec4<f32>) -> vec4<f32> {
+    // For |x| >= 11, 2|u| >= 112.5 so exp(-2|u|) == 0 in IEEE f32 (even subnormals); saturate to avoid x^3 overflow.
+    let sat = (abs(x) >= vec4<f32>(11.0)) & !isnan4(x);
+    let xc = select(x, vec4<f32>(0.0), sat);
     let k = 0.7978845608028654;
     let c = 0.044715;
-    let inner = k * (x + c * x * x * x);
-    return 0.5 * x * (vec4<f32>(1.0) + tanh_safe4(inner));
+    let u = k * (xc + c * xc * xc * xc);
+    let e = exp(-2.0 * abs(u));
+    let inv = vec4<f32>(1.0) / (vec4<f32>(1.0) + e);
+    let one_plus_t = select(2.0 * e * inv, 2.0 * inv, u >= vec4<f32>(0.0));
+    let mid = 0.5 * xc * one_plus_t;
+    return select(mid, select(vec4<f32>(0.0), x, x > vec4<f32>(0.0)), sat);
 }
 fn relu4(x: vec4<f32>) -> vec4<f32> {
     return select(max(x, vec4<f32>(0.0)), vec4<f32>(0.0), isnan4(x));
@@ -92,17 +94,20 @@ fn apply_fused_act4(act: u32, x: vec4<f32>) -> vec4<f32> {
     }
 }
 fn gelu_deriv4(x: vec4<f32>) -> vec4<f32> {
-    // For |x| >= 10, |u| >= 43.6 so sech^2(u) < 1e-37 in f32; saturate directly to avoid x^3 overflow.
-    let sat = (abs(x) >= vec4<f32>(10.0)) & !isnan4(x);
+    // For |x| >= 11, 2|u| >= 112.5 so exp(-2|u|) underflows below f32 min subnormal; saturate to avoid x^3 overflow.
+    // Using e = exp(-2|u|) avoids catastrophic cancellation in both (1 + tanh(u)) and (1 - tanh^2(u)) for |u| >= 9.
+    let sat = (abs(x) >= vec4<f32>(11.0)) & !isnan4(x);
     let xc = select(x, vec4<f32>(0.0), sat);
     let k = 0.7978845608028654;
     let c = 0.044715;
     let x2 = xc * xc;
     let u = k * (xc + c * x2 * xc);
-    let t = tanh_safe4(u);
-    let sech2 = vec4<f32>(1.0) - t * t;
+    let e = exp(-2.0 * abs(u));
+    let inv = vec4<f32>(1.0) / (vec4<f32>(1.0) + e);
+    let one_plus_t = select(2.0 * e * inv, 2.0 * inv, u >= vec4<f32>(0.0));
+    let sech2 = 4.0 * e * inv * inv;
     let du = k * (vec4<f32>(1.0) + (3.0 * c) * x2);
-    let mid = 0.5 * (vec4<f32>(1.0) + t + xc * sech2 * du);
+    let mid = 0.5 * (one_plus_t + xc * sech2 * du);
     return select(mid, select(vec4<f32>(0.0), vec4<f32>(1.0), x > vec4<f32>(0.0)), sat);
 }
 "#;
@@ -171,6 +176,81 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
     let p_shrink = select(grad * (up * d_silu), (grad * d_silu) * up, grad_bigger);
     let p_direct = (grad * up) * d_silu;
     DGATE[i] = OUT(select(p_direct, p_shrink, abs(d_silu) < vec4<f32>(1.0)));
+}
+"#;
+
+const GEGLU_FWD_BODY: &str = r#"
+@group(0) @binding(1) var<storage, read> GATE: array<E>;
+@group(0) @binding(2) var<storage, read> UP: array<E>;
+@group(0) @binding(3) var<storage, read_write> Y: array<E>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let i = linear_id(wid, nwg, lid, 256u);
+    if (i >= pu(0u)) { return; }
+    Y[i] = OUT(gelu4(V4(GATE[i])) * V4(UP[i]));
+}
+"#;
+
+const GEGLU_BWD_BODY: &str = r#"
+@group(0) @binding(1) var<storage, read> GATE: array<E>;
+@group(0) @binding(2) var<storage, read> UP: array<E>;
+@group(0) @binding(3) var<storage, read> G: array<E>;
+@group(0) @binding(4) var<storage, read_write> DGATE: array<E>;
+@group(0) @binding(5) var<storage, read_write> DUP: array<E>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let i = linear_id(wid, nwg, lid, 256u);
+    if (i >= pu(0u)) { return; }
+    let gate = V4(GATE[i]);
+    let up = V4(UP[i]);
+    let grad = V4(G[i]);
+    let d_gelu = gelu_deriv4(gate);
+    DUP[i] = OUT(grad * gelu4(gate));
+    // When |d_gelu| < 1, apply it to the larger factor first so `grad * up` cannot spuriously overflow.
+    let grad_bigger = abs(grad) >= abs(up);
+    let p_shrink = select(grad * (up * d_gelu), (grad * d_gelu) * up, grad_bigger);
+    let p_direct = (grad * up) * d_gelu;
+    DGATE[i] = OUT(select(p_direct, p_shrink, abs(d_gelu) < vec4<f32>(1.0)));
+}
+"#;
+
+const GEGLU_BWD_DGATE_BODY: &str = r#"
+@group(0) @binding(1) var<storage, read> GATE: array<E>;
+@group(0) @binding(2) var<storage, read> UP: array<E>;
+@group(0) @binding(3) var<storage, read> G: array<E>;
+@group(0) @binding(4) var<storage, read_write> DGATE: array<E>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let i = linear_id(wid, nwg, lid, 256u);
+    if (i >= pu(0u)) { return; }
+    let gate = V4(GATE[i]);
+    let up = V4(UP[i]);
+    let grad = V4(G[i]);
+    let d_gelu = gelu_deriv4(gate);
+    let grad_bigger = abs(grad) >= abs(up);
+    let p_shrink = select(grad * (up * d_gelu), (grad * d_gelu) * up, grad_bigger);
+    let p_direct = (grad * up) * d_gelu;
+    DGATE[i] = OUT(select(p_direct, p_shrink, abs(d_gelu) < vec4<f32>(1.0)));
+}
+"#;
+
+const GEGLU_BWD_DUP_BODY: &str = r#"
+@group(0) @binding(1) var<storage, read> GATE: array<E>;
+@group(0) @binding(2) var<storage, read> G: array<E>;
+@group(0) @binding(3) var<storage, read_write> DUP: array<E>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_index) lid: u32) {
+    let i = linear_id(wid, nwg, lid, 256u);
+    if (i >= pu(0u)) { return; }
+    DUP[i] = OUT(V4(G[i]) * gelu4(V4(GATE[i])));
 }
 "#;
 
@@ -309,6 +389,26 @@ static SWIGLU_BWD: KernelDef = KernelDef {
     storage: &[R, R, R, RW, RW],
     source: Source::Generated(|s| format!("{}{ACT_HELPERS}{SWIGLU_BWD_BODY}", prelude(s))),
 };
+static GEGLU_FWD: KernelDef = KernelDef {
+    name: "geglu_fwd",
+    storage: &[R, R, RW],
+    source: Source::Generated(|s| format!("{}{ACT_HELPERS}{GEGLU_FWD_BODY}", prelude(s))),
+};
+static GEGLU_BWD: KernelDef = KernelDef {
+    name: "geglu_bwd",
+    storage: &[R, R, R, RW, RW],
+    source: Source::Generated(|s| format!("{}{ACT_HELPERS}{GEGLU_BWD_BODY}", prelude(s))),
+};
+static GEGLU_BWD_DGATE: KernelDef = KernelDef {
+    name: "geglu_bwd_dgate",
+    storage: &[R, R, R, RW],
+    source: Source::Generated(|s| format!("{}{ACT_HELPERS}{GEGLU_BWD_DGATE_BODY}", prelude(s))),
+};
+static GEGLU_BWD_DUP: KernelDef = KernelDef {
+    name: "geglu_bwd_dup",
+    storage: &[R, R, RW],
+    source: Source::Generated(|s| format!("{}{ACT_HELPERS}{GEGLU_BWD_DUP_BODY}", prelude(s))),
+};
 static BIAS_ADD_SILU: KernelDef =
     KernelDef { name: "bias_add_silu", storage: &[R, R, RW], source: Source::Generated(gen_bias_add_silu) };
 static BIAS_RESIDUAL_ACT: KernelDef = KernelDef {
@@ -318,8 +418,18 @@ static BIAS_RESIDUAL_ACT: KernelDef = KernelDef {
 };
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).
-pub(crate) static DEFS: &[&KernelDef] =
-    &[&SILU_BWD, &GELU_BWD, &SWIGLU_FWD, &SWIGLU_BWD, &BIAS_ADD_SILU, &BIAS_RESIDUAL_ACT];
+pub(crate) static DEFS: &[&KernelDef] = &[
+    &SILU_BWD,
+    &GELU_BWD,
+    &SWIGLU_FWD,
+    &SWIGLU_BWD,
+    &GEGLU_FWD,
+    &GEGLU_BWD,
+    &GEGLU_BWD_DGATE,
+    &GEGLU_BWD_DUP,
+    &BIAS_ADD_SILU,
+    &BIAS_RESIDUAL_ACT,
+];
 
 fn check_len(n: usize, op: &'static str) -> Result<(bool, usize)> {
     let vec = n.is_multiple_of(4);
@@ -421,6 +531,69 @@ pub fn swiglu_backward(
     let k = ctx.kernel(&SWIGLU_BWD, Spec::new().bool("VEC4", vec).f16(dtype == DType::F16))?;
     let p = Params::new().uz(units)?;
     ctx.dispatch(&k, &[gate, up, grad, dgate, dup], &p, ctx.grid_1d(units as u64, 256)?)
+}
+
+/// Fused `vec4` GeGLU forward: `y[i] = gelu(gate[i]) * up[i]` for `n` elements (`F32` or `F16`).
+pub fn geglu_forward(
+    ctx: &GpuContext,
+    gate: &wgpu::Buffer,
+    up: &wgpu::Buffer,
+    y: &wgpu::Buffer,
+    n: usize,
+    dtype: DType,
+) -> Result<()> {
+    check_dtype(ctx, dtype, "geglu_forward")?;
+    check_buf(gate, n, dtype, "geglu_forward gate")?;
+    check_buf(up, n, dtype, "geglu_forward up")?;
+    check_buf(y, n, dtype, "geglu_forward y")?;
+    if n == 0 {
+        return Ok(());
+    }
+    if y == gate || y == up {
+        return Err(shape_err("geglu_forward: output buffer must not alias gate or up"));
+    }
+    let (vec, units) = check_len(n, "geglu_forward")?;
+    let k = ctx.kernel(&GEGLU_FWD, Spec::new().bool("VEC4", vec).f16(dtype == DType::F16))?;
+    let p = Params::new().uz(units)?;
+    ctx.dispatch(&k, &[gate, up, y], &p, ctx.grid_1d(units as u64, 256)?)
+}
+
+/// Fused `vec4` GeGLU backward: writes both `dgate` and `dup` in one pass for `n` elements (`F32` or `F16`).
+#[allow(clippy::too_many_arguments)]
+pub fn geglu_backward(
+    ctx: &GpuContext,
+    gate: &wgpu::Buffer,
+    up: &wgpu::Buffer,
+    grad: &wgpu::Buffer,
+    dgate: &wgpu::Buffer,
+    dup: &wgpu::Buffer,
+    n: usize,
+    dtype: DType,
+) -> Result<()> {
+    check_dtype(ctx, dtype, "geglu_backward")?;
+    check_buf(gate, n, dtype, "geglu_backward gate")?;
+    check_buf(up, n, dtype, "geglu_backward up")?;
+    check_buf(grad, n, dtype, "geglu_backward grad")?;
+    check_buf(dgate, n, dtype, "geglu_backward dgate")?;
+    check_buf(dup, n, dtype, "geglu_backward dup")?;
+    if n == 0 {
+        return Ok(());
+    }
+    if dgate == dup || [gate, up, grad].iter().any(|&src| src == dgate || src == dup) {
+        return Err(shape_err("geglu_backward: output buffers must be distinct from inputs and each other"));
+    }
+    let (vec, units) = check_len(n, "geglu_backward")?;
+    let spec = Spec::new().bool("VEC4", vec).f16(dtype == DType::F16);
+    let p = Params::new().uz(units)?;
+    let grid = ctx.grid_1d(units as u64, 256)?;
+    if ctx.device().is_some_and(|dev| dev.limits().max_storage_buffers_per_shader_stage < 5) {
+        let k_dg = ctx.kernel(&GEGLU_BWD_DGATE, spec.clone())?;
+        ctx.dispatch(&k_dg, &[gate, up, grad, dgate], &p, grid)?;
+        let k_du = ctx.kernel(&GEGLU_BWD_DUP, spec)?;
+        return ctx.dispatch(&k_du, &[gate, grad, dup], &p, grid);
+    }
+    let k = ctx.kernel(&GEGLU_BWD, spec)?;
+    ctx.dispatch(&k, &[gate, up, grad, dgate, dup], &p, grid)
 }
 
 /// Fused `vec4` bias-add + SiLU: `y[i] = silu(x[i] + bias[(i / inner) % channels])` (`F32` or `F16`).

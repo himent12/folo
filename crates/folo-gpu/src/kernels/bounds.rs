@@ -85,6 +85,7 @@ pub(crate) fn precompilable(name: &str, spec: &Spec) -> bool {
         "sdpa_fwd" | "sdpa_bwd_dkdv" | "sdpa_bwd_dq" => super::attention::sdpa_fits(spec),
         "bias_add_silu" => super::fused_act::bias_add_silu_fits(spec),
         "bias_residual_act" => super::fused_act::bias_residual_act_fits(spec),
+        "im2col_tiled" => super::im2col::im2col_tiled_fits(spec),
         "where_select_vec4" | "where_select_scalar" => super::select::where_select_fits(spec),
         "muon_gemm" => super::muon::gemm_fits(spec),
         // The multi-tensor kernels (`J` tensors) are only found through their resolvers, which bound `J`.
@@ -214,6 +215,22 @@ mod tests {
             ("gelu_bwd", Spec::new().bool("VEC4", true)),
             ("swiglu_fwd", Spec::new().bool("VEC4", true)),
             ("swiglu_bwd", Spec::new().bool("VEC4", true)),
+            ("geglu_fwd", Spec::new().bool("VEC4", true)),
+            ("geglu_bwd", Spec::new().bool("VEC4", true)),
+            ("geglu_bwd_dgate", Spec::new().bool("VEC4", true)),
+            ("geglu_bwd_dup", Spec::new().bool("VEC4", true)),
+            ("q4_matmul", Spec::new().u32("ACT", 8).bool("HAS_BIAS", true)),
+            ("q4_gemv", Spec::new().u32("ACT", 11).bool("HAS_BIAS", true).subgroups(true)),
+            (
+                "cumsum_rows_block",
+                Spec::new().bool("EXCLUSIVE", false).bool("WRITE_SUMS", true).bool("Y_F32", true),
+            ),
+            ("btopk_bitonic", Spec::new().bool("LARGEST", true).f16(true)),
+            ("btopk_cols", Spec::new().bool("LARGEST", false).bool("SMALL_K", true)),
+            (
+                "im2col_tiled",
+                Spec::new().u32("KH", 3).u32("KW", 3).u32("SH", 2).u32("SW", 2).u32("DH", 1).u32("DW", 1),
+            ),
             ("bias_add_silu", Spec::new().u32("MODE", 1).bool("HAS_BIAS", true)),
             (
                 "bias_residual_act",
@@ -451,6 +468,14 @@ mod tests {
             ("bias_add_silu", Spec::new().u32("MODE", 3)),
             ("bias_residual_act", Spec::new().u32("MODE", 0).u32("ACT", 4)),
             ("bias_residual_act", Spec::new().u32("MODE", 0).u32("RES_MODE", 3)),
+            (
+                "im2col_tiled",
+                Spec::new().u32("KH", 15).u32("KW", 15).u32("SH", 2).u32("SW", 2).u32("DH", 2).u32("DW", 2),
+            ),
+            (
+                "im2col_tiled",
+                Spec::new().u32("KH", 0).u32("KW", 3).u32("SH", 1).u32("SW", 1).u32("DH", 1).u32("DW", 1),
+            ),
             ("where_select_vec4", Spec::new().u32("MC", 4)),
             ("where_select_scalar", Spec::new().u32("MB", 4)),
             (
