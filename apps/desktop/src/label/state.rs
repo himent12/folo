@@ -141,8 +141,13 @@ pub struct LabelState {
     pub busy: HashSet<String>,
     pub removed: HashSet<String>,
     /// Per-job monotonic counter bumped on every live SSE `LabelEvent::Job` so stale HTTP
-    /// responses (`/start`, `/stop`, list refresh) never regress a newer streamed job state.
+    /// responses (`/start`, `/stop`, `/images` import, list refresh) never regress a newer streamed job state.
     pub job_event_seq: HashMap<String, u64>,
+    /// Per-(job, image) monotonic counter bumped on live SSE `LabelEvent::Image` so a delayed PUT
+    /// response never overwrites newer boxes received over SSE.
+    pub image_event_seq: HashMap<(String, String), u64>,
+    /// Monotonic ticket for `GET /api/label/jobs` list refreshes and job-list mutations.
+    pub jobs_seq: u64,
     pub form_seq: u64,
     pub images_seq: u64,
     pub images_reqs: HashMap<String, u64>,
@@ -197,6 +202,8 @@ impl Default for LabelState {
             busy: HashSet::new(),
             removed: HashSet::new(),
             job_event_seq: HashMap::new(),
+            image_event_seq: HashMap::new(),
+            jobs_seq: 0,
             form_seq: 0,
             images_seq: 0,
             images_reqs: HashMap::new(),

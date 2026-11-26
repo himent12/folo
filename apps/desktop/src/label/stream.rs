@@ -84,6 +84,7 @@ impl FoloApp {
                     self.upsert_label_job_from_event(*job);
                 }
                 LabelEvent::Image(img) => {
+                    *self.label.image_event_seq.entry((id.clone(), img.id.clone())).or_insert(0) += 1;
                     if self.label.images_reqs.contains_key(&id) {
                         self.label
                             .pending_image_events
@@ -136,6 +137,7 @@ impl FoloApp {
 
         if ended {
             self.label.events = None;
+            self.refresh_label_jobs(cx);
         }
         if reload {
             self.reload_label_images(&id, cx);
@@ -171,15 +173,25 @@ impl FoloApp {
                 if this.label.subscribing.as_deref() == Some(id.as_str()) {
                     this.label.subscribing = None;
                 }
-                if let Ok(sub) = r
-                    && route_label(&this.route) == Some(id.as_str())
-                {
-                    // Subscribe first, then snapshot images + logs + job summary so events arriving
-                    // during the reload buffer and reconcile cleanly with zero gap.
-                    this.label.events = Some((id.clone(), sub));
-                    this.reload_label_images(&id, cx);
-                    this.reload_label_logs(&id, cx);
-                    this.refresh_label_jobs(cx);
+                match r {
+                    Ok(sub) if route_label(&this.route) == Some(id.as_str()) => {
+                        // Subscribe first, then snapshot images + logs + job summary so events arriving
+                        // during the reload buffer and reconcile cleanly with zero gap.
+                        this.label.events = Some((id.clone(), sub));
+                        this.reload_label_images(&id, cx);
+                        this.reload_label_logs(&id, cx);
+                        this.refresh_label_jobs(cx);
+                    }
+                    Err(e) if e.code == "label_job_not_found" || e.status == Some(404) => {
+                        this.label.jobs_seq += 1;
+                        if let Some(list) = this.label.jobs.ready_mut() {
+                            list.retain(|j| j.id != id);
+                        }
+                        this.label.images.remove(&id);
+                        this.label.logs.remove(&id);
+                        this.refresh_label_jobs(cx);
+                    }
+                    _ => {}
                 }
             },
         );

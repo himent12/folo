@@ -17,6 +17,20 @@ pub fn route_label(route: &Route) -> Option<&str> {
     }
 }
 
+/// Longest suffix of `snapshot` that matches a prefix of `buffered` (by timestamp, level, and
+/// message), so replaying live SSE lines over a reloaded history never duplicates overlapping tails.
+pub(crate) fn suffix_prefix_overlap(snapshot: &[LogLine], buffered: &[LogLine]) -> usize {
+    let max_k = snapshot.len().min(buffered.len());
+    for k in (1..=max_k).rev() {
+        let tail = &snapshot[snapshot.len() - k..];
+        let head = &buffered[..k];
+        if tail.iter().zip(head).all(|(a, b)| a.t == b.t && a.level == b.level && a.message == b.message) {
+            return k;
+        }
+    }
+    0
+}
+
 /// Cache namespace for decoded labeling images inside `store.images_px`.
 pub(super) fn label_img_namespace(job_id: &str) -> String {
     format!("label:{job_id}")
@@ -90,18 +104,21 @@ impl FoloApp {
         }
     }
 
-    /// Reloads the labeling jobs list in place without regressing jobs updated by newer SSE events.
+    /// Reloads the labeling jobs list in place without dropping newly created jobs or regressing
+    /// jobs updated by newer SSE events.
     pub fn refresh_label_jobs(&mut self, cx: &mut Context<Self>) {
         if !self.label_on() {
             return;
         }
-        let lgen = self.label.epoch;
+        self.label.jobs_seq += 1;
+        let seq = self.label.jobs_seq;
+        let epoch = self.label.epoch;
         let seen_seqs = self.label.job_event_seq.clone();
         self.fetch(
             cx,
             |api| api.label_jobs(),
             move |this, r, _| {
-                if this.label.epoch != lgen {
+                if this.label.epoch != epoch || this.label.jobs_seq != seq {
                     return;
                 }
                 match r {
@@ -169,14 +186,8 @@ impl FoloApp {
                 let buffered = this.label.pending_log_events.remove(&key).unwrap_or_default();
                 match r {
                     Ok(mut res) => {
-                        for line in buffered {
-                            let dup = res.lines.last().is_some_and(|l| {
-                                l.t == line.t && l.level == line.level && l.message == line.message
-                            });
-                            if !dup {
-                                res.lines.push(line);
-                            }
-                        }
+                        let overlap = suffix_prefix_overlap(&res.lines, &buffered);
+                        res.lines.extend(buffered.into_iter().skip(overlap));
                         if res.lines.len() > 500 {
                             let drop_n = res.lines.len() - 500;
                             res.lines.drain(..drop_n);
@@ -213,9 +224,11 @@ impl FoloApp {
                     let mut all = Vec::new();
                     let mut offset = 0u32;
                     let mut expected_total: Option<u64> = None;
+                    let mut pages = 0u32;
                     let mut shifted = false;
                     loop {
                         let page = api.label_images(&jid, offset, 1000)?;
+                        pages += 1;
                         match expected_total {
                             None => expected_total = Some(page.total),
                             Some(prev) if prev != page.total && attempt == 0 => {
@@ -232,19 +245,20 @@ impl FoloApp {
                         }
                     }
                     if !shifted {
-                        return Ok(all);
+                        return Ok((all, pages));
                     }
                 }
-                Ok(Vec::new())
+                Ok((Vec::new(), 0))
             },
-            move |this, r, _| {
+            move |this, r, cx| {
                 if this.label.epoch != lgen || this.label.images_reqs.get(&key) != Some(&seq) {
                     return;
                 }
                 this.label.images_reqs.remove(&key);
                 let buffered = this.label.pending_image_events.remove(&key).unwrap_or_default();
+                let saw_removed = buffered.iter().any(|e| matches!(e, PendingImageEvent::Removed(_)));
                 match r {
-                    Ok(mut imgs) => {
+                    Ok((mut imgs, pages)) => {
                         for ev in buffered {
                             match ev {
                                 PendingImageEvent::Updated(im) => {
@@ -271,6 +285,9 @@ impl FoloApp {
                         this.label.images.insert(key.clone(), Load::Ready(imgs));
                         if on_this_job {
                             this.reconcile_selected_label_image(&key);
+                        }
+                        if pages > 1 && saw_removed {
+                            this.reload_label_images(&key, cx);
                         }
                     }
                     Err(e) => {
@@ -328,6 +345,7 @@ impl FoloApp {
     /// in-flight callbacks from before the reset cannot write into the fresh state.
     pub fn clear_label(&mut self) {
         let epoch = self.label.epoch + 1;
+        let jobs_seq = self.label.jobs_seq;
         let form_seq = self.label.form_seq;
         let images_seq = self.label.images_seq;
         let logs_seq = self.label.logs_seq;
@@ -335,6 +353,7 @@ impl FoloApp {
         let starting_seq = self.label.starting_seq;
         self.label = LabelState {
             epoch,
+            jobs_seq,
             form_seq,
             images_seq,
             logs_seq,
@@ -378,11 +397,13 @@ impl FoloApp {
         }
     }
 
-    /// Upserts a job snapshot into `self.label.jobs` (ignoring jobs deleted in this session).
+    /// Upserts a job snapshot into `self.label.jobs` (ignoring jobs deleted in this session) and
+    /// advances `jobs_seq` so an older in-flight `GET /api/label/jobs` cannot erase or revert it.
     pub(super) fn upsert_label_job(&mut self, job: LabelJob) {
         if self.label.removed.contains(&job.id) {
             return;
         }
+        self.label.jobs_seq += 1;
         if let Some(list) = self.label.jobs.ready_mut() {
             match list.iter_mut().find(|j| j.id == job.id) {
                 Some(slot) => *slot = job,

@@ -464,7 +464,17 @@ fn review_round1_regressions_revision_binding_ctrl_enter_filmstrip_and_monotonic
         assert!(!f.submitting, "Add folder form was not submitted behind the menu");
     });
 
-    // 5. clear_label() advances generation so Retry isolates prior in-flight callbacks.
+    // 5. clear_label() advances generation so Retry isolates prior in-flight callbacks, and
+    // suffix_prefix_overlap deduplicates overlapping multi-line SSE log tails.
+    let line = |m: &str| crate::api::LogLine {
+        t: "2026-01-01T00:00:00Z".into(),
+        level: crate::api::LogLevel::Info,
+        message: m.into(),
+    };
+    let snap = vec![line("a"), line("b"), line("c")];
+    let buf = vec![line("b"), line("c"), line("d")];
+    assert_eq!(crate::label::suffix_prefix_overlap(&snap, &buf), 2);
+    assert_eq!(crate::label::suffix_prefix_overlap(&snap, &[line("x")]), 0);
     let (g0, g1) = drive(&mut app, window, |this, _, _| {
         let g0 = this.label.epoch;
         this.clear_label();

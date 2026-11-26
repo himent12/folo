@@ -187,6 +187,7 @@ impl FoloApp {
         let job_id = form.job.clone();
         let seq = form.seq;
         let lgen = self.label.epoch;
+        let seen_job_seq = self.label.job_event_seq.get(&job_id).copied().unwrap_or(0);
         let req = ImportLabelImages { path };
         let jid = job_id.clone();
         cx.notify();
@@ -205,7 +206,10 @@ impl FoloApp {
                         }
                         let added_n = res.added.len();
                         let skipped_n = res.skipped.len();
-                        this.upsert_label_job(res.job);
+                        let cur_seq = this.label.job_event_seq.get(&job_id).copied().unwrap_or(0);
+                        if cur_seq == seen_job_seq || !res.job.status.is_active() {
+                            this.upsert_label_job(res.job);
+                        }
                         this.reload_label_images(&job_id, cx);
                         let body =
                             if skipped_n > 0 { Some(format!("{skipped_n} skipped").into()) } else { None };
@@ -298,6 +302,7 @@ impl FoloApp {
                         if let Some(jobs) = this.label.jobs.ready_mut()
                             && let Some(job) = jobs.iter_mut().find(|j| j.id == job_id)
                         {
+                            this.label.jobs_seq += 1;
                             job.dataset_id = Some(ds_id.clone());
                         }
                         this.refresh_label_jobs(cx);

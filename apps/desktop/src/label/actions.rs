@@ -361,6 +361,8 @@ impl FoloApp {
         self.label.mutating_seq += 1;
         let mseq = self.label.mutating_seq;
         let lgen = self.label.epoch;
+        let seen_img_seq =
+            self.label.image_event_seq.get(&(job_id.to_string(), image_id.to_string())).copied().unwrap_or(0);
         self.label.review_error = None;
         let jid = job_id.to_string();
         let iid = image_id.to_string();
@@ -380,23 +382,34 @@ impl FoloApp {
                 let on_job = route_label(&this.route) == Some(jid2.as_str());
                 match r {
                     Ok(updated) => {
+                        let cur_img_seq = this
+                            .label
+                            .image_event_seq
+                            .get(&(jid2.clone(), iid2.clone()))
+                            .copied()
+                            .unwrap_or(0);
+                        let fresh = cur_img_seq == seen_img_seq;
                         let new_rev = label_box_revision(&updated.boxes);
                         let new_len = updated.boxes.len();
-                        this.upsert_label_image(&jid2, updated);
+                        if fresh {
+                            this.upsert_label_image(&jid2, updated);
+                        }
                         this.refresh_label_jobs(cx);
                         if on_job {
-                            if clear_box {
-                                if this.label.selected_box.as_ref().is_some_and(|s| s.image_id == iid2) {
-                                    this.label.selected_box = None;
-                                    this.label.hover_box = None;
-                                }
-                            } else if let Some(sel) = this.label.selected_box.as_mut()
-                                && sel.image_id == iid2
-                            {
-                                if sel.index < new_len {
-                                    sel.revision = new_rev;
-                                } else {
-                                    this.label.selected_box = None;
+                            if fresh {
+                                if clear_box {
+                                    if this.label.selected_box.as_ref().is_some_and(|s| s.image_id == iid2) {
+                                        this.label.selected_box = None;
+                                        this.label.hover_box = None;
+                                    }
+                                } else if let Some(sel) = this.label.selected_box.as_mut()
+                                    && sel.image_id == iid2
+                                {
+                                    if sel.index < new_len {
+                                        sel.revision = new_rev;
+                                    } else {
+                                        this.label.selected_box = None;
+                                    }
                                 }
                             }
                             if let Some(next_id) = advance_to
@@ -630,6 +643,7 @@ impl FoloApp {
                 this.label.busy.remove(&jid2);
                 match r {
                     Ok(()) => {
+                        this.label.jobs_seq += 1;
                         this.label.removed.insert(jid2.clone());
                         if let Some(list) = this.label.jobs.ready_mut() {
                             list.retain(|j| j.id != jid2);
