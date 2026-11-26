@@ -493,3 +493,137 @@ describe('LabelJob editor history', () => {
     expect(info).not.toHaveBeenCalled();
   });
 });
+
+describe('the labeling editor: unsaved draft while another tab starts relabeling (playtest R11)', () => {
+  function captureStream() {
+    const real = hub.api.labelEvents.bind(hub.api);
+    let onImage: ((img: LabelImage) => void) | undefined;
+    vi.spyOn(hub.api, 'labelEvents').mockImplementation((id, h) => {
+      onImage = h.image;
+      return real(id, h);
+    });
+    return { send: (img: LabelImage) => onImage?.(img) };
+  }
+
+  const promptBtn = (label: string) =>
+    [...(asking()?.querySelectorAll<HTMLButtonElement>('button') ?? [])].find((b) => b.textContent?.trim() === label);
+  const dismissPrompt = () => {
+    click(asking()!.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!);
+    expect(asking()).toBeUndefined();
+  };
+
+  it('asks before discarding unsaved boxes on Close, Esc, J/K, route leave, and beforeunload while locked, and lets Save work once unlocked', async () => {
+    const sse = captureStream();
+    await openEditor('5', 'lb_51d0');
+    const orig = (await hub.api.labelImages('lb_51d0', { ids: ['5'] })).images[0]!;
+    const before = boxCount();
+    expect(before).toBeGreaterThan(0);
+
+    // Delete one box without saving.
+    const firstBox = editor()!.querySelector<HTMLButtonElement>('.boxes button')!;
+    click(firstBox);
+    key('Delete');
+    expect(boxCount()).toBe(before - 1);
+
+    // Another tab starts relabeling: SSE marks image 5 as `labeling` (locked).
+    sse.send({ ...orig, status: 'labeling' });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(editor()!.textContent).toContain('The agent is labeling this image');
+    });
+    expect(boxCount()).toBe(before - 1);
+    expect(inEditor('Save')!.disabled).toBe(true);
+    expect(footer()).not.toContain('saves them');
+
+    // Ctrl+S and Enter must not save while locked.
+    const saveSpy = vi.spyOn(hub.api, 'updateLabelImage');
+    key('s', { ctrlKey: true });
+    key('Enter');
+    expect(saveSpy).not.toHaveBeenCalled();
+
+    // 1. Close button asks instead of silently closing.
+    click(editor()!.querySelector<HTMLButtonElement>('header button[aria-label="Close"]')!);
+    expect(asking()).toBeDefined();
+    expect(asking()!.textContent).toContain('The agent is labeling this image right now');
+    expect(promptBtn('Save')!.disabled).toBe(true);
+    expect(promptBtn('Discard changes')!.disabled).toBe(false);
+    dismissPrompt();
+    expect(router.route.query.get('image')).toBe('5');
+    expect(boxCount()).toBe(before - 1);
+
+    // 2. Esc (native dialog cancel) asks and dismissing keeps draft.
+    editor()!.dispatchEvent(new Event('cancel', { cancelable: true }));
+    flushSync();
+    expect(asking()).toBeDefined();
+    expect(promptBtn('Save')!.disabled).toBe(true);
+    dismissPrompt();
+    expect(boxCount()).toBe(before - 1);
+
+    // 3. J and K ask and dismissing keeps draft on image 5.
+    key('j');
+    expect(asking()).toBeDefined();
+    expect(promptBtn('Save')!.disabled).toBe(true);
+    dismissPrompt();
+    expect(router.route.query.get('image')).toBe('5');
+    key('k');
+    expect(asking()).toBeDefined();
+    dismissPrompt();
+    expect(router.route.query.get('image')).toBe('5');
+
+    // 4. Route navigation (as browser Back triggers router.guard) asks and dismissing keeps draft.
+    router.go('/datasets/label/lb_51d0');
+    flushSync();
+    expect(asking()).toBeDefined();
+    expect(promptBtn('Save')!.disabled).toBe(true);
+    dismissPrompt();
+    expect(router.route.query.get('image')).toBe('5');
+    expect(boxCount()).toBe(before - 1);
+
+    // 5. beforeunload still warns while locked with unsaved edits.
+    const unload = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(unload);
+    expect(unload.defaultPrevented).toBe(true);
+
+    // 6. Agent finishes and releases the image: Save becomes enabled and saves the user's draft boxes cleanly.
+    sse.send({ ...orig, status: 'labeled' });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(inEditor('Save')!.disabled).toBe(false);
+    });
+    click(inEditor('Save'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(saveSpy).toHaveBeenCalledTimes(1);
+      expect(footer()).not.toContain('Unsaved changes');
+    });
+    expect(saveSpy.mock.calls[0]![2]).toHaveLength(before - 1);
+  });
+
+  it('explicitly discarding from the prompt while locked navigates away without saving', async () => {
+    const sse = captureStream();
+    await openEditor('5', 'lb_51d0');
+    const orig = (await hub.api.labelImages('lb_51d0', { ids: ['5'] })).images[0]!;
+    const before = boxCount();
+    click(editor()!.querySelector<HTMLButtonElement>('.boxes button')!);
+    key('Delete');
+    expect(boxCount()).toBe(before - 1);
+
+    sse.send({ ...orig, status: 'labeling' });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(editor()!.textContent).toContain('The agent is labeling this image');
+    });
+    const saveSpy = vi.spyOn(hub.api, 'updateLabelImage');
+
+    // Click Close -> prompt appears -> click Discard changes -> closes editor and leaves image 5.
+    click(editor()!.querySelector<HTMLButtonElement>('header button[aria-label="Close"]')!);
+    expect(asking()).toBeDefined();
+    click(promptBtn('Discard changes'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBeNull();
+    });
+    expect(asking()).toBeUndefined();
+    expect(saveSpy).not.toHaveBeenCalled();
+  });
+});

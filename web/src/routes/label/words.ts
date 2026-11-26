@@ -104,3 +104,15 @@ export function imageState(img: LabelImage): string {
   const state = img.reviewed ? `${by}, reviewed` : by;
   return img.error ? `${state}. Last ask failed: ${img.error}` : state;
 }
+
+/** What the editor's unsaved-changes dialog says: warns when the agent holds the image or another tab saved it. */
+export function leaveDescription(file: string | undefined, locked: boolean, elsewhere: boolean): string {
+  const base = `${file ?? 'This image'} has boxes you have not saved.`;
+  if (locked) {
+    return `${base} The agent is labeling this image right now, so Save is unavailable until it finishes. Stay to save once it is done, or discard your changes.`;
+  }
+  if (elsewhere) {
+    return `${base} Its labels were also saved from another tab or window while you edited: Save replaces them with yours; Discard keeps those.`;
+  }
+  return base;
+}
