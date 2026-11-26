@@ -187,3 +187,91 @@ fn reduce_var_matches_f64_reference_across_shapes_and_edges() {
         }
     }
 }
+
+#[test]
+fn reduce_arg_avx2_matches_scalar_across_shapes_ties_and_nans() {
+    let ref_arg = |max: bool, x: &[f32], (outer, d, inner): (usize, usize, usize)| -> Vec<i64> {
+        let mut out = vec![0i64; outer * inner];
+        if out.is_empty() || d <= 1 {
+            return out;
+        }
+        for o in 0..outer {
+            let src = &x[o * d * inner..(o + 1) * d * inner];
+            for j in 0..inner {
+                let mut bi = 0usize;
+                let mut best = src[j];
+                for r in 1..d {
+                    let v = src[r * inner + j];
+                    let better = if best.is_nan() {
+                        false
+                    } else if v.is_nan() {
+                        true
+                    } else if max {
+                        v > best
+                    } else {
+                        v < best
+                    };
+                    if better {
+                        best = v;
+                        bi = r;
+                    }
+                }
+                out[o * inner + j] = bi as i64;
+            }
+        }
+        out
+    };
+
+    // Zero-length, d==1, row (inner==1), column (inner>1) including ragged, tile-boundary, and parallel shapes.
+    let shapes = [
+        (0, 5, 3),
+        (2, 1, 7),
+        (3, 1, 1),
+        (4, 15, 1),
+        (4, 16, 1),
+        (4, 17, 1),
+        (4, 33, 1),
+        (64, 577, 1),
+        (1, 19, 17),
+        (1, 37, 256),
+        (1, 37, 257),
+        (1, 80, 600), // outer==1 parallel column-tiled
+        (3, 29, 275),
+    ];
+    for &(outer, d, inner) in &shapes {
+        let mut x: Vec<f32> = (0..outer * d * inner).map(|i| (((i * 29) % 23) as f32) - 11.0).collect();
+        // Inject ties, -0.0/+0.0, ±inf, and NaNs in early/mid/tail positions.
+        if !x.is_empty() && d >= 16 {
+            let last = x.len() - 1;
+            x[0] = -0.0;
+            x[inner] = 0.0;
+            x[7 * inner] = f32::INFINITY;
+            x[9 * inner] = f32::NEG_INFINITY;
+            x[last] = f32::from_bits(0x7fc0_0001);
+            if d > 16 {
+                x[16 * inner] = f32::from_bits(0x7fc0_0002);
+            }
+            if inner > 17 {
+                x[3 * inner + 5] = f32::NAN;
+                x[8 * inner + 5] = f32::from_bits(0xffc0_0007);
+                x[2 * inner + 17] = -0.0;
+                x[4 * inner + 17] = 0.0;
+            }
+        }
+        for max in [true, false] {
+            let got = reduce_arg(max, &x, (outer, d, inner));
+            let want = ref_arg(max, &x, (outer, d, inner));
+            assert_eq!(got, want, "reduce_arg max={max} shape=({outer},{d},{inner})");
+        }
+    }
+
+    // Multiple NaNs in different AVX2 lanes of a single row: the smallest index MUST always win.
+    for (p1, p2) in [(0, 1), (5, 10), (15, 16), (2, 31), (19, 35)] {
+        let mut row = vec![1.0f32; 37];
+        row[p1] = f32::from_bits(0x7fc0_0011);
+        row[p2] = f32::from_bits(0xffc0_0022);
+        for max in [true, false] {
+            assert_eq!(reduce_arg(max, &row, (1, 37, 1)), vec![p1 as i64], "first NaN ({p1},{p2})");
+        }
+    }
+}

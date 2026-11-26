@@ -8,6 +8,7 @@
 //! The `wq − ow` extra columns per output row are computed and dropped.
 
 use super::kernel::{Epi, MR, NR, Out, Tile, TileF32, accumulate_part_f32, kernel};
+pub use super::quant::quantize_weights;
 use super::{C4, Grid, SLACK, recycle, words};
 
 /// One independently-quantised K-slice of a [`QConv`] (1 part for ordinary convs; `P` parts when concatenated
@@ -92,24 +93,6 @@ pub fn conv_size(
     let input = n.checked_mul(c).zip(h.checked_mul(w)).and_then(|(a, b)| a.checked_mul(b));
     let output = n.checked_mul(o).zip(oh.checked_mul(ow)).and_then(|(a, b)| a.checked_mul(b));
     (fits(copy) && fits(input) && fits(output)).then_some((oh, ow))
-}
-
-/// Symmetric per-output-channel s8 weights of `w` (`[o, K]` row-major): `w[r, k] ≈ scale[r] · q[r, k]`, `q` in
-/// `-127..=127` (`round(w / scale)`, ties away from zero). Returns `(q, scale)`.
-pub fn quantize_weights(w: &[f32], o: usize) -> (Vec<i8>, Vec<f32>) {
-    let k = w.len() / o.max(1);
-    let mut q = vec![0i8; w.len()];
-    let mut scales = vec![0f32; o];
-    for r in 0..o {
-        let row = &w[r * k..(r + 1) * k];
-        let m = row.iter().fold(0f32, |a, &v| a.max(v.abs()));
-        let s = if m > 0.0 { m / 127.0 } else { 1.0 };
-        scales[r] = s;
-        for (d, &v) in q[r * k..(r + 1) * k].iter_mut().zip(row) {
-            *d = (v / s).round().clamp(-127.0, 127.0) as i8;
-        }
-    }
-    (q, scales)
 }
 
 /// Pack one K-slice covering input channels `ch0..ch0 + pc` into [`PartWeights`].

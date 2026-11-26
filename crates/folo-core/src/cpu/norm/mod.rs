@@ -586,6 +586,84 @@ fn ln_bwd_write_scalar(
     }
 }
 
+/// Const-specialised, branchless 16-wide AVX2+FMA LayerNorm backward write loop.
+///
+/// # Safety
+/// The CPU supports AVX2 and FMA; `x`, `g`, `dx` hold `n` floats; when `HAS_W`/`HAS_DW`/`HAS_DB` are true,
+/// `w`/`dw`/`db` point to `n` valid floats respectively and `dx`/`dw`/`db` do not alias each other.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn ln_bwd_write_kernel<const HAS_W: bool, const HAS_DW: bool, const HAS_DB: bool>(
+    x: *const f32,
+    g: *const f32,
+    w: *const f32,
+    dx: *mut f32,
+    dw: *mut f32,
+    db: *mut f32,
+    n: usize,
+    mean: f32,
+    rstd: f32,
+    c1_d: f32,
+    c2_d: f32,
+) -> usize {
+    use std::arch::x86_64::*;
+    let vm = _mm256_set1_ps(mean);
+    let vr = _mm256_set1_ps(rstd);
+    let vc1 = _mm256_set1_ps(c1_d);
+    let vc2 = _mm256_set1_ps(c2_d);
+    let mut i = 0usize;
+    // SAFETY: loops check `i + 16 <= n` / `i + 8 <= n`, pointer validity is guaranteed by caller, AVX2+FMA enabled.
+    unsafe {
+        while i + 16 <= n {
+            let xh0 = _mm256_mul_ps(_mm256_sub_ps(_mm256_loadu_ps(x.add(i)), vm), vr);
+            let xh1 = _mm256_mul_ps(_mm256_sub_ps(_mm256_loadu_ps(x.add(i + 8)), vm), vr);
+            let gv0 = _mm256_loadu_ps(g.add(i));
+            let gv1 = _mm256_loadu_ps(g.add(i + 8));
+            let (gw0, gw1) = if HAS_W {
+                (
+                    _mm256_mul_ps(gv0, _mm256_loadu_ps(w.add(i))),
+                    _mm256_mul_ps(gv1, _mm256_loadu_ps(w.add(i + 8))),
+                )
+            } else {
+                (gv0, gv1)
+            };
+            let adj0 = _mm256_fmadd_ps(xh0, vc2, vc1);
+            let adj1 = _mm256_fmadd_ps(xh1, vc2, vc1);
+            _mm256_storeu_ps(dx.add(i), _mm256_mul_ps(vr, _mm256_sub_ps(gw0, adj0)));
+            _mm256_storeu_ps(dx.add(i + 8), _mm256_mul_ps(vr, _mm256_sub_ps(gw1, adj1)));
+            if HAS_DW {
+                let dwp = dw.add(i);
+                _mm256_storeu_ps(dwp, _mm256_fmadd_ps(gv0, xh0, _mm256_loadu_ps(dwp)));
+                _mm256_storeu_ps(dwp.add(8), _mm256_fmadd_ps(gv1, xh1, _mm256_loadu_ps(dwp.add(8))));
+            }
+            if HAS_DB {
+                let dbp = db.add(i);
+                _mm256_storeu_ps(dbp, _mm256_add_ps(_mm256_loadu_ps(dbp), gv0));
+                _mm256_storeu_ps(dbp.add(8), _mm256_add_ps(_mm256_loadu_ps(dbp.add(8)), gv1));
+            }
+            i += 16;
+        }
+        if i + 8 <= n {
+            let xh = _mm256_mul_ps(_mm256_sub_ps(_mm256_loadu_ps(x.add(i)), vm), vr);
+            let gv = _mm256_loadu_ps(g.add(i));
+            let gw = if HAS_W { _mm256_mul_ps(gv, _mm256_loadu_ps(w.add(i))) } else { gv };
+            let adj = _mm256_fmadd_ps(xh, vc2, vc1);
+            _mm256_storeu_ps(dx.add(i), _mm256_mul_ps(vr, _mm256_sub_ps(gw, adj)));
+            if HAS_DW {
+                let dwp = dw.add(i);
+                _mm256_storeu_ps(dwp, _mm256_fmadd_ps(gv, xh, _mm256_loadu_ps(dwp)));
+            }
+            if HAS_DB {
+                let dbp = db.add(i);
+                _mm256_storeu_ps(dbp, _mm256_add_ps(_mm256_loadu_ps(dbp), gv));
+            }
+            i += 8;
+        }
+    }
+    i
+}
+
 /// # Safety
 /// The CPU supports AVX2 and FMA.
 #[cfg(target_arch = "x86_64")]
@@ -603,7 +681,6 @@ unsafe fn ln_bwd_write_avx2_fma(
     c1_d: f32,
     c2_d: f32,
 ) {
-    use std::arch::x86_64::*;
     let n = x.len();
     assert_eq!(g.len(), n);
     assert_eq!(dx.len(), n);
@@ -616,34 +693,41 @@ unsafe fn ln_bwd_write_avx2_fma(
     if let Some(ref db) = db {
         assert_eq!(db.len(), n);
     }
-    let mut i = 0usize;
-    // SAFETY: loops check `i + 8 <= n`, all slices have length `n`, and AVX2+FMA are enabled.
-    unsafe {
-        let vm = _mm256_set1_ps(mean);
-        let vr = _mm256_set1_ps(rstd);
-        let vc1 = _mm256_set1_ps(c1_d);
-        let vc2 = _mm256_set1_ps(c2_d);
-        while i + 8 <= n {
-            let xh = _mm256_mul_ps(_mm256_sub_ps(_mm256_loadu_ps(x.as_ptr().add(i)), vm), vr);
-            let gv = _mm256_loadu_ps(g.as_ptr().add(i));
-            let gw = match w {
-                Some(w) => _mm256_mul_ps(gv, _mm256_loadu_ps(w.as_ptr().add(i))),
-                None => gv,
-            };
-            let adj = _mm256_fmadd_ps(xh, vc2, vc1);
-            let dxv = _mm256_mul_ps(vr, _mm256_sub_ps(gw, adj));
-            _mm256_storeu_ps(dx.as_mut_ptr().add(i), dxv);
-            if let Some(ref mut dw) = dw {
-                let cur = _mm256_loadu_ps(dw.as_ptr().add(i));
-                _mm256_storeu_ps(dw.as_mut_ptr().add(i), _mm256_fmadd_ps(gv, xh, cur));
+    let xp = x.as_ptr();
+    let gp = g.as_ptr();
+    let wp = w.map_or(std::ptr::null(), <[f32]>::as_ptr);
+    let dxp = dx.as_mut_ptr();
+    let dwp = dw.as_deref_mut().map_or(std::ptr::null_mut(), <[f32]>::as_mut_ptr);
+    let dbp = db.as_deref_mut().map_or(std::ptr::null_mut(), <[f32]>::as_mut_ptr);
+    // SAFETY: lengths asserted above, mutable slices are disjoint by Rust aliasing rules, AVX2+FMA enabled.
+    let i = unsafe {
+        match (w.is_some(), dw.is_some(), db.is_some()) {
+            (true, true, true) => {
+                ln_bwd_write_kernel::<true, true, true>(xp, gp, wp, dxp, dwp, dbp, n, mean, rstd, c1_d, c2_d)
             }
-            if let Some(ref mut db) = db {
-                let cur = _mm256_loadu_ps(db.as_ptr().add(i));
-                _mm256_storeu_ps(db.as_mut_ptr().add(i), _mm256_add_ps(cur, gv));
+            (true, true, false) => {
+                ln_bwd_write_kernel::<true, true, false>(xp, gp, wp, dxp, dwp, dbp, n, mean, rstd, c1_d, c2_d)
             }
-            i += 8;
+            (true, false, true) => {
+                ln_bwd_write_kernel::<true, false, true>(xp, gp, wp, dxp, dwp, dbp, n, mean, rstd, c1_d, c2_d)
+            }
+            (true, false, false) => ln_bwd_write_kernel::<true, false, false>(
+                xp, gp, wp, dxp, dwp, dbp, n, mean, rstd, c1_d, c2_d,
+            ),
+            (false, true, true) => {
+                ln_bwd_write_kernel::<false, true, true>(xp, gp, wp, dxp, dwp, dbp, n, mean, rstd, c1_d, c2_d)
+            }
+            (false, true, false) => ln_bwd_write_kernel::<false, true, false>(
+                xp, gp, wp, dxp, dwp, dbp, n, mean, rstd, c1_d, c2_d,
+            ),
+            (false, false, true) => ln_bwd_write_kernel::<false, false, true>(
+                xp, gp, wp, dxp, dwp, dbp, n, mean, rstd, c1_d, c2_d,
+            ),
+            (false, false, false) => ln_bwd_write_kernel::<false, false, false>(
+                xp, gp, wp, dxp, dwp, dbp, n, mean, rstd, c1_d, c2_d,
+            ),
         }
-    }
+    };
     if i < n {
         ln_bwd_write_scalar(
             &x[i..],

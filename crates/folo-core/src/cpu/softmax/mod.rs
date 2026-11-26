@@ -18,7 +18,9 @@ mod tests;
 
 pub(crate) use backward::softmax_backward;
 
-use super::elementwise::{SendPtr, fast_exp};
+#[cfg(target_arch = "x86_64")]
+use super::elementwise::ln8;
+use super::elementwise::{SendPtr, fast_exp, ln_scalar};
 use super::{PAR_MIN, alloc_uninit, par_chunks, par_for};
 
 /// Rows up to this length fit in L1 (16 KiB) and take the exact two-pass kernel.
@@ -454,7 +456,7 @@ unsafe fn softmax_col_tile(
         }
         let mut ls = [0f32; COL_TILE];
         for j in 0..tw {
-            ls[j] = s[j].ln();
+            ls[j] = ln_scalar(s[j]);
         }
         for r in 0..d {
             let srow = &src[r * inner + c0..r * inner + c0 + tw];
@@ -502,24 +504,50 @@ unsafe fn softmax_col_tile_avx2(
 ) {
     use std::arch::x86_64::*;
     let mut m = [f32::NEG_INFINITY; COL_TILE];
-    let v_end = tw / 8 * 8;
+    let v16 = tw / 16 * 16;
+    let v8 = tw / 8 * 8;
     for r in 0..d {
         let srow = &src[r * inner + c0..r * inner + c0 + tw];
         let mut j = 0;
-        while j < v_end {
-            // SAFETY: `j + 8 <= tw <= COL_TILE`.
-            unsafe {
-                let v = _mm256_loadu_ps(srow.as_ptr().add(j));
-                let cur = _mm256_loadu_ps(m.as_ptr().add(j));
-                _mm256_storeu_ps(m.as_mut_ptr().add(j), _mm256_max_ps(v, cur));
+        // SAFETY: `j + 16 <= v16 <= tw <= COL_TILE` and `j + 8 <= v8 <= tw`.
+        unsafe {
+            while j < v16 {
+                let sp = srow.as_ptr().add(j);
+                let mp = m.as_mut_ptr().add(j);
+                _mm256_storeu_ps(mp, _mm256_max_ps(_mm256_loadu_ps(sp), _mm256_loadu_ps(mp)));
+                _mm256_storeu_ps(
+                    mp.add(8),
+                    _mm256_max_ps(_mm256_loadu_ps(sp.add(8)), _mm256_loadu_ps(mp.add(8))),
+                );
+                j += 16;
             }
-            j += 8;
+            if j < v8 {
+                let mp = m.as_mut_ptr().add(j);
+                _mm256_storeu_ps(
+                    mp,
+                    _mm256_max_ps(_mm256_loadu_ps(srow.as_ptr().add(j)), _mm256_loadu_ps(mp)),
+                );
+            }
         }
-        for jj in v_end..tw {
+        for jj in v8..tw {
             m[jj] = m[jj].max(srow[jj]);
         }
     }
-    for a in &mut m[..tw] {
+    // Replace non-finite column maxima with `+0.0` (matches `if !a.is_finite() { *a = 0.0; }`).
+    let sign_bit = _mm256_set1_ps(-0.0);
+    let pos_inf = _mm256_set1_ps(f32::INFINITY);
+    let mut j = 0;
+    // SAFETY: `j + 8 <= v8 <= tw <= COL_TILE`.
+    unsafe {
+        while j < v8 {
+            let mp = m.as_mut_ptr().add(j);
+            let mv = _mm256_loadu_ps(mp);
+            let finite = _mm256_cmp_ps::<_CMP_LT_OQ>(_mm256_andnot_ps(sign_bit, mv), pos_inf);
+            _mm256_storeu_ps(mp, _mm256_and_ps(mv, finite));
+            j += 8;
+        }
+    }
+    for a in &mut m[v8..tw] {
         if !a.is_finite() {
             *a = 0.0;
         }
@@ -529,34 +557,75 @@ unsafe fn softmax_col_tile_avx2(
         for r in 0..d {
             let srow = &src[r * inner + c0..r * inner + c0 + tw];
             let mut j = 0;
-            while j < v_end {
-                // SAFETY: `j + 8 <= tw <= COL_TILE`.
-                unsafe {
+            // SAFETY: `j + 16 <= v16 <= tw <= COL_TILE` and `j + 8 <= v8 <= tw`.
+            unsafe {
+                while j < v16 {
+                    let sp = srow.as_ptr().add(j);
+                    let mp = m.as_ptr().add(j);
+                    let ap = s.as_mut_ptr().add(j);
+                    let e0 = fast_exp8(_mm256_sub_ps(_mm256_loadu_ps(sp), _mm256_loadu_ps(mp)));
+                    let e1 = fast_exp8(_mm256_sub_ps(_mm256_loadu_ps(sp.add(8)), _mm256_loadu_ps(mp.add(8))));
+                    _mm256_storeu_ps(ap, _mm256_add_ps(_mm256_loadu_ps(ap), e0));
+                    _mm256_storeu_ps(ap.add(8), _mm256_add_ps(_mm256_loadu_ps(ap.add(8)), e1));
+                    j += 16;
+                }
+                if j < v8 {
+                    let ap = s.as_mut_ptr().add(j);
                     let e = fast_exp8(_mm256_sub_ps(
                         _mm256_loadu_ps(srow.as_ptr().add(j)),
                         _mm256_loadu_ps(m.as_ptr().add(j)),
                     ));
-                    let acc = _mm256_add_ps(_mm256_loadu_ps(s.as_ptr().add(j)), e);
-                    _mm256_storeu_ps(s.as_mut_ptr().add(j), acc);
+                    _mm256_storeu_ps(ap, _mm256_add_ps(_mm256_loadu_ps(ap), e));
                 }
-                j += 8;
             }
-            for jj in v_end..tw {
+            for jj in v8..tw {
                 s[jj] += fast_exp(srow[jj] - m[jj]);
             }
         }
         let mut ls = [0f32; COL_TILE];
-        for j in 0..tw {
-            ls[j] = s[j].ln();
+        let mut j = 0;
+        // SAFETY: `j + 16 <= v16 <= tw <= COL_TILE` and `j + 8 <= v8 <= tw`.
+        unsafe {
+            while j < v16 {
+                let sp = s.as_ptr().add(j);
+                let lp = ls.as_mut_ptr().add(j);
+                let l0 = ln8(_mm256_loadu_ps(sp));
+                let l1 = ln8(_mm256_loadu_ps(sp.add(8)));
+                _mm256_storeu_ps(lp, l0);
+                _mm256_storeu_ps(lp.add(8), l1);
+                j += 16;
+            }
+            if j < v8 {
+                _mm256_storeu_ps(ls.as_mut_ptr().add(j), ln8(_mm256_loadu_ps(s.as_ptr().add(j))));
+            }
+        }
+        for jj in v8..tw {
+            ls[jj] = ln_scalar(s[jj]);
         }
         for r in 0..d {
             let srow = &src[r * inner + c0..r * inner + c0 + tw];
             // SAFETY: caller guarantees disjoint ownership of `c0..c0 + tw` in row `r`.
             let dptr = unsafe { dst_base.add(r * inner + c0) };
             let mut j = 0;
-            while j < v_end {
-                // SAFETY: `j + 8 <= tw <= COL_TILE`.
-                unsafe {
+            // SAFETY: `j + 16 <= v16 <= tw <= COL_TILE` and `j + 8 <= v8 <= tw`.
+            unsafe {
+                while j < v16 {
+                    let sp = srow.as_ptr().add(j);
+                    let mp = m.as_ptr().add(j);
+                    let lp = ls.as_ptr().add(j);
+                    let y0 = _mm256_sub_ps(
+                        _mm256_sub_ps(_mm256_loadu_ps(sp), _mm256_loadu_ps(mp)),
+                        _mm256_loadu_ps(lp),
+                    );
+                    let y1 = _mm256_sub_ps(
+                        _mm256_sub_ps(_mm256_loadu_ps(sp.add(8)), _mm256_loadu_ps(mp.add(8))),
+                        _mm256_loadu_ps(lp.add(8)),
+                    );
+                    _mm256_storeu_ps(dptr.add(j), y0);
+                    _mm256_storeu_ps(dptr.add(j + 8), y1);
+                    j += 16;
+                }
+                if j < v8 {
                     let y = _mm256_sub_ps(
                         _mm256_sub_ps(
                             _mm256_loadu_ps(srow.as_ptr().add(j)),
@@ -566,9 +635,8 @@ unsafe fn softmax_col_tile_avx2(
                     );
                     _mm256_storeu_ps(dptr.add(j), y);
                 }
-                j += 8;
             }
-            for jj in v_end..tw {
+            for jj in v8..tw {
                 // SAFETY: `jj < tw`.
                 unsafe { *dptr.add(jj) = (srow[jj] - m[jj]) - ls[jj] };
             }
@@ -579,20 +647,31 @@ unsafe fn softmax_col_tile_avx2(
             // SAFETY: caller guarantees disjoint ownership of `c0..c0 + tw` in row `r`.
             let dptr = unsafe { dst_base.add(r * inner + c0) };
             let mut j = 0;
-            while j < v_end {
-                // SAFETY: `j + 8 <= tw <= COL_TILE`.
-                unsafe {
+            // SAFETY: `j + 16 <= v16 <= tw <= COL_TILE` and `j + 8 <= v8 <= tw`.
+            unsafe {
+                while j < v16 {
+                    let sp = srow.as_ptr().add(j);
+                    let mp = m.as_ptr().add(j);
+                    let ap = s.as_mut_ptr().add(j);
+                    let e0 = fast_exp8(_mm256_sub_ps(_mm256_loadu_ps(sp), _mm256_loadu_ps(mp)));
+                    let e1 = fast_exp8(_mm256_sub_ps(_mm256_loadu_ps(sp.add(8)), _mm256_loadu_ps(mp.add(8))));
+                    _mm256_storeu_ps(dptr.add(j), e0);
+                    _mm256_storeu_ps(dptr.add(j + 8), e1);
+                    _mm256_storeu_ps(ap, _mm256_add_ps(_mm256_loadu_ps(ap), e0));
+                    _mm256_storeu_ps(ap.add(8), _mm256_add_ps(_mm256_loadu_ps(ap.add(8)), e1));
+                    j += 16;
+                }
+                if j < v8 {
+                    let ap = s.as_mut_ptr().add(j);
                     let e = fast_exp8(_mm256_sub_ps(
                         _mm256_loadu_ps(srow.as_ptr().add(j)),
                         _mm256_loadu_ps(m.as_ptr().add(j)),
                     ));
                     _mm256_storeu_ps(dptr.add(j), e);
-                    let acc = _mm256_add_ps(_mm256_loadu_ps(s.as_ptr().add(j)), e);
-                    _mm256_storeu_ps(s.as_mut_ptr().add(j), acc);
+                    _mm256_storeu_ps(ap, _mm256_add_ps(_mm256_loadu_ps(ap), e));
                 }
-                j += 8;
             }
-            for jj in v_end..tw {
+            for jj in v8..tw {
                 let e = fast_exp(srow[jj] - m[jj]);
                 // SAFETY: `jj < tw`.
                 unsafe { *dptr.add(jj) = e };
@@ -600,22 +679,52 @@ unsafe fn softmax_col_tile_avx2(
             }
         }
         let mut inv = [0f32; COL_TILE];
-        for j in 0..tw {
-            inv[j] = 1.0 / s[j];
+        let one = _mm256_set1_ps(1.0);
+        let mut j = 0;
+        // SAFETY: `j + 16 <= v16 <= tw <= COL_TILE` and `j + 8 <= v8 <= tw`.
+        unsafe {
+            while j < v16 {
+                let sp = s.as_ptr().add(j);
+                let ip = inv.as_mut_ptr().add(j);
+                _mm256_storeu_ps(ip, _mm256_div_ps(one, _mm256_loadu_ps(sp)));
+                _mm256_storeu_ps(ip.add(8), _mm256_div_ps(one, _mm256_loadu_ps(sp.add(8))));
+                j += 16;
+            }
+            if j < v8 {
+                _mm256_storeu_ps(
+                    inv.as_mut_ptr().add(j),
+                    _mm256_div_ps(one, _mm256_loadu_ps(s.as_ptr().add(j))),
+                );
+            }
+        }
+        for jj in v8..tw {
+            inv[jj] = 1.0 / s[jj];
         }
         for r in 0..d {
             // SAFETY: caller guarantees disjoint ownership of `c0..c0 + tw` in row `r`.
             let dptr = unsafe { dst_base.add(r * inner + c0) };
             let mut j = 0;
-            while j < v_end {
-                // SAFETY: `j + 8 <= tw <= COL_TILE`.
-                unsafe {
-                    let y = _mm256_mul_ps(_mm256_loadu_ps(dptr.add(j)), _mm256_loadu_ps(inv.as_ptr().add(j)));
-                    _mm256_storeu_ps(dptr.add(j), y);
+            // SAFETY: `j + 16 <= v16 <= tw <= COL_TILE` and `j + 8 <= v8 <= tw`.
+            unsafe {
+                while j < v16 {
+                    let ip = inv.as_ptr().add(j);
+                    let dp = dptr.add(j);
+                    _mm256_storeu_ps(dp, _mm256_mul_ps(_mm256_loadu_ps(dp), _mm256_loadu_ps(ip)));
+                    _mm256_storeu_ps(
+                        dp.add(8),
+                        _mm256_mul_ps(_mm256_loadu_ps(dp.add(8)), _mm256_loadu_ps(ip.add(8))),
+                    );
+                    j += 16;
                 }
-                j += 8;
+                if j < v8 {
+                    let dp = dptr.add(j);
+                    _mm256_storeu_ps(
+                        dp,
+                        _mm256_mul_ps(_mm256_loadu_ps(dp), _mm256_loadu_ps(inv.as_ptr().add(j))),
+                    );
+                }
             }
-            for (jj, &iv) in inv.iter().enumerate().take(tw).skip(v_end) {
+            for (jj, &iv) in inv.iter().enumerate().take(tw).skip(v8) {
                 // SAFETY: `jj < tw`.
                 unsafe { *dptr.add(jj) *= iv };
             }

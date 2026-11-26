@@ -28,6 +28,9 @@ pub use simd::SILU_MAX_REL_ERR;
 pub(crate) use simd::{exp_scalar, silu_bias_inplace};
 #[cfg(target_arch = "x86_64")]
 pub(crate) use simd::{exp8, silu8};
+pub(crate) use simd_log_tanh::ln_scalar;
+#[cfg(target_arch = "x86_64")]
+pub(crate) use simd_log_tanh::ln8;
 pub(crate) use transpose::{
     copy_strided_f32, copy_strided_f32_into, copy_strided_f32_into_slice, transpose_f32_2d,
     transpose_f32_2d_serial,

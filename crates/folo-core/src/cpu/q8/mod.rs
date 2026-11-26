@@ -17,6 +17,7 @@
 
 mod conv;
 mod kernel;
+mod quant;
 mod silu;
 mod stem;
 #[cfg(test)]
@@ -24,9 +25,10 @@ mod tests;
 
 pub use conv::{
     MAX_PAD, MAX_REDUCTION, MAX_STRIDE, QConv, QOut, conv, conv_per_channel, conv_size, out_size,
-    quantize_weights, should_decouple_parts,
+    should_decouple_parts,
 };
 pub use kernel::uses_vnni;
+pub use quant::quantize_weights;
 pub use silu::silu_q8;
 pub use stem::{PIXEL_SCALE, QStem, pack_f32_to_rgb0_u8, stem_u8};
 
