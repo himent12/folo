@@ -200,10 +200,16 @@ fn read_classes(run_dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Recovers full [`folo_api::ValMetrics`] (including `per_class` rows and `best_f1_conf`) for an unchanged
-/// pre-resume best epoch from `run_dir/metrics.jsonl`, since a checkpoint's header stores only the four scalar
-/// headline metrics.
+/// Recovers `per_class` rows (and missing `best_f1_conf`) for an unchanged pre-resume best epoch from
+/// `run_dir/metrics.jsonl`, since a checkpoint's header stores only the four scalar headline metrics. Preserves
+/// the checkpoint's scalar metrics, rejects records with a conflicting `best_f1_conf`, and leaves `per_class`
+/// empty when duplicate matching epoch records disagree.
 pub(super) fn recover_best_metrics(s: &TrainSummary, run_dir: &Path) -> Option<folo_api::ValMetrics> {
+    #[derive(serde::Deserialize)]
+    struct EventTag<'a> {
+        #[serde(borrow)]
+        event: std::borrow::Cow<'a, str>,
+    }
     let cur = s.best_metrics.clone();
     let Some((best_epoch, best_fitness)) = s.best else {
         return cur;
@@ -215,34 +221,64 @@ pub(super) fn recover_best_metrics(s: &TrainSummary, run_dir: &Path) -> Option<f
         return cur;
     };
     let close = |a: f32, b: f32| (a as f64 - b as f64).abs() <= 1e-5;
-    let mut recovered: Option<folo_api::ValMetrics> = None;
+    let mut matched: Option<folo_api::ValMetrics> = None;
+    let mut ambiguous = false;
     for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
         let trimmed = line.trim();
-        if !trimmed.contains("\"epoch\"") {
+        let Ok(tag) = serde_json::from_str::<EventTag<'_>>(trimmed) else { continue };
+        if tag.event != "epoch" {
             continue;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) else { continue };
-        if v.get("event").and_then(|e| e.as_str()) != Some("epoch") {
-            continue;
-        }
-        let Ok(ep) = serde_json::from_value::<folo_api::Epoch>(v) else { continue };
+        let Ok(ep) = serde_json::from_str::<folo_api::Epoch>(trimmed) else { continue };
         if ep.epoch != best_epoch || ep.val.per_class.is_empty() {
             continue;
         }
         if ((ep.val.map50_95 as f64) - best_fitness).abs() > 1e-5 {
             continue;
         }
-        if let Some(ref m) = cur
-            && !(close(ep.val.map50, m.map50)
+        if let Some(ref m) = cur {
+            if !(close(ep.val.map50, m.map50)
                 && close(ep.val.map50_95, m.map50_95)
                 && close(ep.val.precision, m.precision)
                 && close(ep.val.recall, m.recall))
-        {
-            continue;
+            {
+                continue;
+            }
+            if let (Some(a), Some(b)) = (ep.val.best_f1_conf, m.best_f1_conf)
+                && !close(a, b)
+            {
+                continue;
+            }
         }
-        recovered = Some(ep.val);
+        match &matched {
+            None => matched = Some(ep.val),
+            Some(prev) => {
+                let conf_same = match (prev.best_f1_conf, ep.val.best_f1_conf) {
+                    (Some(a), Some(b)) => close(a, b),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if prev.per_class != ep.val.per_class || !conf_same {
+                    ambiguous = true;
+                    break;
+                }
+            }
+        }
     }
-    recovered.or(cur)
+    if ambiguous {
+        return cur;
+    }
+    match (cur, matched) {
+        (Some(mut m), Some(rec)) => {
+            m.per_class = rec.per_class;
+            if m.best_f1_conf.is_none() {
+                m.best_f1_conf = rec.best_f1_conf;
+            }
+            Some(m)
+        }
+        (None, Some(rec)) => Some(rec),
+        (cur, None) => cur,
+    }
 }
 
 #[cfg(test)]
@@ -282,11 +318,11 @@ mod tests {
             duration_s: 1.2,
         };
         let ep2 = Epoch { epoch: 2, val: sample_val(0.20, vec![]), ..ep1.clone() };
-        let mut content = serde_json::to_string(&event_record(&RunEvent::Epoch(ep1))).unwrap();
+        let mut content = serde_json::to_string(&event_record(&RunEvent::Epoch(ep1.clone()))).unwrap();
         content.push('\n');
         content.push_str(&serde_json::to_string(&event_record(&RunEvent::Epoch(ep2))).unwrap());
         content.push('\n');
-        std::fs::write(dir.join("metrics.jsonl"), content).unwrap();
+        std::fs::write(dir.join("metrics.jsonl"), &content).unwrap();
 
         // Resumed summary carries scalar metrics from the checkpoint header with empty `per_class`.
         let resumed_scalars = ValMetrics {
@@ -297,10 +333,19 @@ mod tests {
             best_f1_conf: None,
             per_class: Vec::new(),
         };
-        let summary = sample_summary(Some((1, 0.30)), Some(resumed_scalars));
+        let summary = sample_summary(Some((1, 0.30)), Some(resumed_scalars.clone()));
         let recovered = recover_best_metrics(&summary, dir.path()).unwrap();
         assert_eq!(recovered.per_class, rows);
         assert_eq!(recovered.best_f1_conf, Some(0.42));
+
+        // Conflicting `best_f1_conf` on the summary rejects the log record and preserves checkpoint scalars.
+        let conflict_conf = sample_summary(
+            Some((1, 0.30)),
+            Some(ValMetrics { best_f1_conf: Some(0.88), ..resumed_scalars.clone() }),
+        );
+        let kept = recover_best_metrics(&conflict_conf, dir.path()).unwrap();
+        assert!(kept.per_class.is_empty());
+        assert_eq!(kept.best_f1_conf, Some(0.88));
 
         // Mismatched fitness never pulls stale rows from an unrelated attempt.
         let mismatch = sample_summary(
@@ -313,6 +358,20 @@ mod tests {
             }),
         );
         assert!(recover_best_metrics(&mismatch, dir.path()).unwrap().per_class.is_empty());
+
+        // Duplicate matching epoch records with differing class rows are ambiguous: leave `per_class` empty.
+        let alt_rows = vec![
+            ClassMetrics { class: 0, map50: 0.2, map50_95: 0.15, precision: 0.4, recall: 0.5 },
+            ClassMetrics { class: 1, map50: 0.8, map50_95: 0.45, precision: 0.8, recall: 0.9 },
+        ];
+        let ep1_alt = Epoch { val: sample_val(0.30, alt_rows), ..ep1 };
+        let mut dup = content;
+        dup.push_str(&serde_json::to_string(&event_record(&RunEvent::Epoch(ep1_alt))).unwrap());
+        dup.push('\n');
+        std::fs::write(dir.join("metrics.jsonl"), dup).unwrap();
+        let ambiguous = recover_best_metrics(&summary, dir.path()).unwrap();
+        assert!(ambiguous.per_class.is_empty());
+        assert_eq!(ambiguous.best_f1_conf, None);
 
         // Missing `metrics.jsonl` falls back to the trainer's summary cleanly.
         let empty = TestDir::new("cli-recover-best-metrics-missing");

@@ -217,20 +217,19 @@ async fn a_checkpoint_continues_on_another_server_and_history_has_cursors() {
         (RunStatus::Completed, 2, 2, 6),
         "{done:?}"
     );
+    let m: RunMetrics = ok(&app_b, get(&format!("/api/runs/{}/metrics", cont.id))).await;
+    assert_eq!((steps(&m), epochs(&m)), ((4..=6).collect::<Vec<_>>(), vec![2]));
     // `Run.best` must stay consistent with the checkpoint's recorded best epoch (a tying epoch 2 must not
     // overwrite epoch 1 as best).
     let final_ckpt = folo_nn::io::ModelFile::open(dir.join("weights").join("last.folo")).unwrap();
     let ckpt_best = final_ckpt.checkpoint().unwrap().best;
     let done_best = done.best.expect("completed run has best");
     assert_eq!(done_best.epoch, (ckpt_best.epoch + 1) as u32, "API best epoch must match checkpoint");
-    if let Some(prev) = stopped.best {
-        let ep2 = ok::<RunMetrics>(&app_b, get(&format!("/api/runs/{}/metrics", cont.id))).await;
-        if ep2.epochs[0].val.map50_95 <= prev.map50_95 {
-            assert_eq!(done_best.epoch, prev.epoch, "tying epoch 2 must not overwrite imported best epoch");
-        }
+    if let Some(prev) = stopped.best
+        && m.epochs[0].val.map50_95 <= prev.map50_95
+    {
+        assert_eq!(done_best.epoch, prev.epoch, "tying epoch 2 must not overwrite imported best epoch");
     }
-    let m: RunMetrics = ok(&app_b, get(&format!("/api/runs/{}/metrics", cont.id))).await;
-    assert_eq!((steps(&m), epochs(&m)), ((4..=6).collect::<Vec<_>>(), vec![2]));
     let log: RunLogs = ok(&app_b, get(&format!("/api/runs/{}/logs", cont.id))).await;
     assert!(log.lines.iter().any(|l| l.message.starts_with("continuing the training state of")), "{log:?}");
     assert!(done.model_id.is_some());

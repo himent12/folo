@@ -74,16 +74,22 @@ fn resolve_predict_source(
 }
 
 fn parse_json_predict(r: PredictRequest) -> Result<PredictInput> {
-    let model_id = r.model_id.trim().to_string();
-    if model_id.is_empty() {
+    if r.model_id.trim().is_empty() {
         return Err(field_err("model_id", "missing or empty"));
     }
-    let source = resolve_predict_source(
-        None,
-        Some(r.dataset_id.trim().to_string()),
-        Some(r.image_id.trim().to_string()),
-    )?;
-    Ok(PredictInput { model_id, source, conf: r.conf, iou: r.iou, max_det: r.max_det })
+    if r.dataset_id.trim().is_empty() || r.image_id.trim().is_empty() {
+        return Err(field_err(
+            "dataset_id",
+            "dataset_id and image_id must both be non-empty when predicting on a dataset image",
+        ));
+    }
+    Ok(PredictInput {
+        model_id: r.model_id,
+        source: PredictSource::Dataset { dataset_id: r.dataset_id, image_id: r.image_id },
+        conf: r.conf,
+        iou: r.iou,
+        max_det: r.max_det,
+    })
 }
 
 fn check_thresholds(p: &PredictInput) -> Result<()> {
@@ -178,5 +184,21 @@ mod tests {
                 "{model_id:?}/{dataset_id:?}/{image_id:?}"
             );
         }
+
+        // Non-blank padded IDs keep their exact spelling so JSON HTTP matches embedded MCP lookup semantics.
+        let padded = parse_json_predict(PredictRequest {
+            model_id: " m_1 ".into(),
+            dataset_id: " ds_1 ".into(),
+            image_id: " 0 ".into(),
+            conf: 0.25,
+            iou: 0.7,
+            max_det: 100,
+        })
+        .unwrap();
+        assert_eq!(padded.model_id, " m_1 ");
+        assert!(matches!(
+            padded.source,
+            PredictSource::Dataset { dataset_id, image_id } if dataset_id == " ds_1 " && image_id == " 0 "
+        ));
     }
 }
