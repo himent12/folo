@@ -125,6 +125,8 @@ impl FoloApp {
                 p.query = q.to_string();
                 p.selected = 0;
                 p.shown.clear();
+                // Bring the newly selected first result back into view if the list was scrolled down.
+                p.scroll.set_offset(folo_ui::point(folo_ui::px(0.), folo_ui::px(0.)));
             }
             cx.notify();
         });
@@ -165,6 +167,9 @@ impl FoloApp {
     /// (e.g. Command Palette → New run / Delete) never clobber the page control with a dying
     /// overlay's own focus handle.
     pub fn remember_focus(&mut self, window: &Window, cx: &App) {
+        self.menu_open = None;
+        self.menu_typeahead.clear();
+        self.export_open = false;
         if self.any_overlay() && self.overlay_return.is_some() {
             return;
         }
