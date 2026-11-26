@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 // A tile says what a person did to its image: "Edited" (boxes saved by hand) and "Reviewed" (checked) are two facts,
 // and an image can be both (v-models-label N4: saving by hand reviews it, and its tile said only "Edited").
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { flush } from 'fw';
 import { afterEach, describe, expect, it } from 'vitest';
 import { render } from '../../../framework/testing';
@@ -37,5 +39,24 @@ describe('LabelTile', () => {
     flush();
     expect([...target.querySelectorAll('.mark')].map((m) => m.textContent?.trim())).toEqual(marks);
     view.unmount();
+  });
+
+  it('animates the live labeling dot with a compositor-only pseudo-element pulse and removes box-shadow live-pulse', () => {
+    hub.api = { labelImageUrl: async () => 'data:,' } as unknown as Api;
+    const target = document.createElement('div');
+    const view = render(() => <LabelTile img={img({ status: 'labeling' })} jobId="lb_1" classes={['bolt']} boxes density="m" />, target);
+    flush();
+    expect(target.querySelector('.mark.live .dot')).not.toBeNull();
+    view.unmount();
+
+    const tileCss = readFileSync(resolve(import.meta.dirname, 'LabelTile.tsx'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(tileCss).not.toContain('live-pulse');
+    expect(tileCss).toContain('.dot::after');
+    expect(tileCss).toContain('@keyframes label-tile-pulse');
+    expect(tileCss).toContain('will-change: transform, opacity');
+    expect(tileCss).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*content: none/);
+
+    const baseCss = readFileSync(resolve(import.meta.dirname, '../../lib/design/base.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    expect(baseCss).not.toContain('@keyframes live-pulse');
   });
 });

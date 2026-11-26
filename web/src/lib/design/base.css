@@ -231,20 +231,6 @@ a.ident:hover {
   }
 }
 
-/* The live heartbeat (a running run's dot: ui/StatusBadge, shell/SidebarLive): one ring leaves the dot and fades over
-   the first 0.8 s of every 2.4 s, then the dot rests, so "live" reads as a calm signal and never as a blinking light.
-   The dot itself and every value hold still. `--pulse` is the ring's colour. Components turn it off under reduced
-   motion (`animation: none`); the ringed dot and the word still say "running". */
-@keyframes live-pulse {
-  0% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--pulse) 55%, transparent);
-  }
-  33%,
-  100% {
-    box-shadow: 0 0 0 4px transparent;
-  }
-}
-
 /* Tooltip (see ui/tooltip.ts). It is a manual popover (the top layer, so it draws above an open modal dialog that
    holds its anchor): the popover's UA box (centred, bordered, scrolling) is reset to the tooltip's own. */
 .folo-tooltip {

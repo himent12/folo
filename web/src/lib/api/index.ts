@@ -9,6 +9,7 @@
 // is slow or not there is offline, never demo data). Screens read `hub.api` and never care which one it is.
 
 import { computed, signal } from 'fw';
+import { isChunkEvalError } from '$lib/chunkError';
 import { retryFailedStyles } from '$lib/failedStyles';
 import { prefs } from '$lib/prefs';
 import { Access } from './access';
@@ -106,6 +107,10 @@ class Hub {
   /** A connect has had no answer yet, past SLOW_CONNECT or a failed check: offline while it keeps asking. */
   #unreachable = signal(false);
   #refused = signal<string | null>(null);
+  /** Non-null when the built-in demo (`?mock=1`) chunk threw while evaluating: only a reload can recover. */
+  #demoError = signal<unknown>(null);
+  /** True while the built-in demo (`?mock=1`) chunk is taking longer than SLOW_CONNECT to load. */
+  #demoSlow = signal(false);
   #version = signal<string | null>(null);
   #features = signal<readonly string[] | null>(null);
   #serverMock = signal<boolean | null>(null);
@@ -192,6 +197,20 @@ class Hub {
     const refusal = this.#reach.offline ? null : this.#access.refusal;
     return this.#refused.get() ?? (refusal ? refusedWords(refusal) : null);
   }
+  /** Evaluation error from the built-in demo (`?mock=1`) chunk, or null. Browsers cache eval errors until reload. */
+  get demoError(): unknown {
+    return this.#demoError.get();
+  }
+  set demoError(v: unknown) {
+    this.#demoError.set(v);
+  }
+  /** True while the built-in demo (`?mock=1`) chunk has been loading longer than SLOW_CONNECT without settling. */
+  get demoSlow(): boolean {
+    return this.#demoSlow.get();
+  }
+  set demoSlow(v: boolean) {
+    this.#demoSlow.set(v);
+  }
   /** Bumps each time the server answers again after an outage, or lets Studio in again: Resources in error or holding
    * data refetch. */
   get back(): number {
@@ -233,6 +252,8 @@ class Hub {
     this.mode = 'connecting';
     this.#unreachable.set(false);
     this.#refused.set(null);
+    this.#demoError.set(null);
+    this.#demoSlow.set(false);
     this.#reach.reset(null);
     this.#access.reset(null);
     this.#asks++;
@@ -348,30 +369,57 @@ class Hub {
 
   /**
    * Switches to the mock: at once when its module is loaded (as the Svelte hub does), else once it is. Its module comes
-   * from the server like any chunk: while it cannot be loaded, Studio is offline and tries again (PROBE_DELAYS); a newer
-   * connect (`abort`) cancels the wait before the next try.
+   * from the server like any chunk: while a fetch fails, Studio is offline and tries again (PROBE_DELAYS); if the module
+   * throws while evaluated (cached by the browser's module map), retries cannot help so Studio reports `demoError` and
+   * stops; if the fetch hangs past `SLOW_CONNECT`, Studio reports `demoSlow` while still waiting.
    */
   async #useMock(reason: 'forced', attempt: number, abort: AbortSignal, settled: () => void) {
+    let slow: ReturnType<typeof setTimeout> | undefined;
+    const clearSlow = () => {
+      clearTimeout(slow);
+      slow = undefined;
+    };
+    abort.addEventListener('abort', clearSlow, { once: true });
     try {
       let m = mockModule;
       for (let i = 0; !m; i++) {
+        slow = setTimeout(() => {
+          if (attempt !== this.#attempt) return;
+          this.#demoSlow.set(true);
+          settled();
+        }, SLOW_CONNECT);
         try {
           m = await loadMock();
-        } catch {
+        } catch (e) {
+          clearSlow();
           if (attempt !== this.#attempt) return;
+          if (isChunkEvalError(e)) {
+            this.#demoSlow.set(false);
+            this.#unreachable.set(false);
+            this.#demoError.set(e);
+            settled();
+            return;
+          }
+          this.#demoSlow.set(false);
           this.#unreachable.set(true);
           settled();
           await pause(PROBE_DELAYS[Math.min(i, PROBE_DELAYS.length - 1)]!, abort);
+        } finally {
+          clearSlow();
         }
         if (attempt !== this.#attempt) return;
       }
       this.#unreachable.set(false);
+      this.#demoSlow.set(false);
+      this.#demoError.set(null);
       if (!(unshare(this.#api.peek()) instanceof m.MockApi)) this.api = new m.MockApi(scenario);
       this.version = '0.1.0';
       this.reason = reason;
       this.mode = 'mock';
       this.epoch++;
     } finally {
+      abort.removeEventListener('abort', clearSlow);
+      clearSlow();
       settled();
     }
   }

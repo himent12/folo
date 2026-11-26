@@ -57,6 +57,8 @@ afterEach(() => {
   c?.unmount();
   c = undefined;
   target.remove();
+  hub.demoError = null;
+  hub.demoSlow = false;
   for (const t of toast.items) toast.dismiss(t.id);
   vi.restoreAllMocks();
   router.route = parse('#/');
@@ -203,6 +205,34 @@ describe('a screen whose chunk fails to load', () => {
     await until(() => main().querySelector('[role="alert"]'), 'the error');
     expect(router.route.name).toBe('model');
     expect(main().querySelector('.fake')).toBeNull();
+  });
+
+  it('offers Reload instead of Retry when a lazy route chunk throws while evaluating', async () => {
+    const screens = new Screens((name) =>
+      name === 'models' ? () => Promise.reject(new SyntaxError('Unexpected token <')) : undefined,
+    );
+    router.route = parse('#/models');
+    c = render(() => <App screens={screens} />, target);
+    await until(() => main().querySelector('[role="alert"]'), 'the eval error');
+    expect(main().querySelector('.title')?.textContent).toBe('This screen could not be loaded');
+    expect(main().textContent).toContain('Unexpected token <');
+    const buttons = [...main().querySelectorAll('button')].map((b) => b.textContent?.trim());
+    expect(buttons).toEqual(['Reload']);
+  });
+
+  it('shows a recoverable DemoError with Reload when the built-in demo chunk fails to evaluate', async () => {
+    hub.mode = 'connecting';
+    hub.demoError = new ReferenceError('mockInit is not defined');
+    const screens = new Screens((name) => (name === 'overview' ? () => Promise.resolve(screen('the overview')) : undefined));
+    router.route = parse('#/');
+    c = render(() => <App screens={screens} />, target);
+    await until(() => main().querySelector('[role="alert"]'), 'the demo error');
+    expect(main().querySelector('.title')?.textContent).toBe('Could not load demo data');
+    expect(main().textContent).toContain('mockInit is not defined');
+    const buttons = [...main().querySelectorAll('button')].map((b) => b.textContent?.trim());
+    expect(buttons).toEqual(['Reload']);
+    const conn = target.querySelector('.conn')!;
+    expect(conn.querySelector('.label')?.textContent ?? conn.getAttribute('aria-label')).toBe('Demo failed');
   });
 });
 
@@ -491,7 +521,9 @@ describe('G-chord indicator, guarded/staggered route preloading, and lazy Shortc
     await settle();
     expect(loadShortcuts).toHaveBeenCalledTimes(1);
     expect(target.querySelector('.lazy-shortcuts')).toBeNull();
-    expect(toast.items.some((t) => t.tone === 'error' && t.title === 'Could not load keyboard shortcuts')).toBe(true);
+    const errToast = toast.items.find((t) => t.tone === 'error' && t.title === 'Could not load keyboard shortcuts');
+    expect(errToast).toBeDefined();
+    expect(errToast?.action?.label).toBe('Reload');
 
     // Second attempt loads, clears the error toast, and opens the dialog; closing and reopening reuses the cached chunk.
     window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));

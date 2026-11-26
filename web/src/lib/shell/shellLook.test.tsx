@@ -30,6 +30,8 @@ afterEach(() => {
   target?.remove();
   watched.runs = undefined;
   watched.since = null;
+  hub.demoError = null;
+  hub.demoSlow = false;
   prefs.sidebarCollapsed = false;
   prefs.useTheme('dark');
   prefs.useTheme('light');
@@ -205,6 +207,21 @@ describe('the sidebar foot', () => {
     const shell = mount(() => <ConnectionStatus collapsed={false} />);
     expect(shell.querySelector('.conn .line')!.textContent).toBe('Demo data · v0.1.0');
     expect(shell.querySelector('.conn .label')!.textContent).toBe('Demo data');
+  });
+
+  it('says Demo failed or Loading demo… instead of Server offline when demo chunk loading fails or stalls', () => {
+    hub.mode = 'connecting';
+    hub.demoSlow = true;
+    const shell = mount(() => <ConnectionStatus collapsed={false} />);
+    expect(shell.querySelector('.conn .label')!.textContent).toBe('Loading demo…');
+    expect(shell.querySelector('.conn .ver')).toBeNull();
+
+    hub.demoSlow = false;
+    hub.demoError = new SyntaxError('bad demo');
+    flush();
+    expect(shell.querySelector('.conn .label')!.textContent).toBe('Demo failed');
+    expect(shell.querySelector('.conn')!.classList.contains('offline')).toBe(true);
+    expect(shell.querySelector('.conn .ver')).toBeNull();
   });
 });
 

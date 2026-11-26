@@ -14,6 +14,8 @@ afterEach(() => {
   view = undefined;
   target?.remove();
   target = undefined;
+  hub.demoError = null;
+  hub.demoSlow = false;
   vi.restoreAllMocks();
 });
 
@@ -167,5 +169,31 @@ describe('OfflineNotice', () => {
     await Promise.resolve();
     flush();
     expect(el.querySelector('.long')?.textContent).toBe('This server refuses access (403). Retrying…');
+  });
+
+  it('shows a recoverable Reload action for demo evaluation errors and slow demo loads', () => {
+    vi.spyOn(hub, 'offline', 'get').mockReturnValue(false);
+    router.route = parse('#/');
+    const el = mount();
+    expect(el.querySelector('.notice')?.classList.contains('idle')).toBe(true);
+
+    hub.demoSlow = true;
+    flush();
+    expect(el.querySelector('.notice')?.classList.contains('idle')).toBe(false);
+    expect(el.querySelector('.long')?.textContent).toBe('Demo data is taking a while to load.');
+    expect(el.querySelector('.short')?.textContent).toBe('Loading demo…');
+    expect([...el.querySelectorAll('.actions .action')].map((a) => a.textContent?.trim())).toEqual(['Reload']);
+
+    hub.demoError = new SyntaxError('bad demo chunk');
+    hub.demoSlow = false;
+    flush();
+    expect(el.querySelector('.notice')?.classList.contains('bad')).toBe(true);
+    expect(el.querySelector('.long')?.textContent).toBe('Demo data failed to load.');
+    expect(el.querySelector('.short')?.textContent).toBe('Demo failed');
+    expect([...el.querySelectorAll('.actions .action')].map((a) => a.textContent?.trim())).toEqual(['Reload']);
+
+    hub.demoError = null;
+    flush();
+    expect(el.querySelector('.notice')?.classList.contains('idle')).toBe(true);
   });
 });

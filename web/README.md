@@ -78,7 +78,7 @@ server shows that offline state: start `folo serve`, or open `http://localhost:5
 | `src/firstScreen.ts` | Starts fetching the first screen's chunk before the rest of the app has run |
 | `src/App.tsx` | The shell (sidebar, top bar, tab bar, palette, shortcuts, toasts, run watch) and the current screen |
 | `src/routes.ts` | The route table: which file in `src/routes/` renders each route; each screen is a chunk of its own |
-| `src/ScreenError.tsx` | A screen whose chunk failed to load: Retry, or "Studio was updated" with Reload; `ScreenCrash`, a screen that threw while created |
+| `src/ScreenError.tsx` | A screen whose chunk failed to load: Retry, or Reload when the module failed to evaluate or "Studio was updated"; `DemoError`, when the demo chunk threw while evaluating; `ScreenCrash`, a screen that threw while created |
 | `src/routes/` | The screens (table below); each screen's parts in the folder beside it |
 | `src/lib/api/` | `index.ts` (`hub`: live server or mock), `client.ts` (the `Api` interface and `HttpApi`), `types.ts` + `types/` (docs/API.md's types, by resource), `resource.ts`, `sse.ts`, `live*.ts`, `reach.ts`, `handshake.ts`, `upload.ts`, `mock/` (including `label.ts`, `labelAgents.ts`, `labelSim.ts`) |
 | `src/lib/router.ts` | The hash router (`router`, `href`, `RouteName`) |
@@ -89,7 +89,7 @@ server shows that offline state: start `folo serve`, or open `http://localhost:5
 | `src/lib/inference/` | `browser.ts`: FOLO models in this browser through folo-wasm, on WebGPU or the wasm CPU |
 | `src/lib/bench/` | Vision benchmarks' rules, score functions, and external prediction validation (`external.ts`, `externalParse.ts`, `externalWorker.ts`), shared by the screens and the mock |
 | `src/lib/design/` | `tokens.css` and `tokens.ts` (generated from `design/tokens.json`, never edited by hand: every built-in theme's palette too), `themes.ts` (custom theme files checked, themes resolved and listed), `applyTheme.ts` (a theme onto `<html>`), `base.css`, `classInk.ts` |
-| `src/lib/*.ts` | Shared rules and wording: `failedStyles.ts` (stylesheets that failed to load, loaded again before the next chunk), `format.ts`, `prefs.ts` (preferences in localStorage: the mode, each mode's theme, the custom themes in `folo.themes`), `keys.ts`, `tableExport.ts` (CSV/JSON table export with RFC-4180 quoting and spreadsheet formula neutralization), `trainCli.ts`, `throughput.ts`, `cloud.ts`, `label.ts`, ... |
+| `src/lib/*.ts` | Shared rules and wording: `chunkError.ts` (retryable chunk fetch vs reload-only evaluation errors), `failedStyles.ts` (stylesheets that failed to load, loaded again before the next chunk), `format.ts`, `prefs.ts` (preferences in localStorage: the mode, each mode's theme, the custom themes in `folo.themes`), `keys.ts`, `tableExport.ts` (CSV/JSON table export with RFC-4180 quoting and spreadsheet formula neutralization), `trainCli.ts`, `throughput.ts`, `cloud.ts`, `label.ts`, ... |
 | `framework/` | fw, the UI framework: [framework/README.md](framework/README.md) |
 | `public/` | Copied as is into `dist/`: `favicon.svg`, and `folo-wasm/` once `scripts/build-wasm.sh` has built it |
 | `scripts/` | `tokens.mjs` with `themes.mjs` (the built-in themes resolved), `lint-spacing.mjs`, `builtCss.mjs` (the build's CSS check), `shoot.mjs` with `scenes.mjs` and `scenes/` (screenshots and QA), `load-faults.mjs` (recovery from a stylesheet or the mock that failed to load), `parity.mjs`, `perf.mjs` with `perfWire.mjs` (what went over the network by a moment), `entries.mjs`, `png.mjs`, the smoke tests |
