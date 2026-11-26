@@ -7,16 +7,21 @@
 //! - `geometry.rs`: random affine, flips, [`resize_long_side`] and the box transform ([`transform_boxes`],
 //!   [`BoxFilter`]).
 //! - `blur.rs`: separable [`box_blur`], [`gaussian_blur`], and [`random_blur`].
+//! - `color.rs`: RGB colour jitter ([`adjust_brightness`], [`adjust_contrast`], [`adjust_saturation`],
+//!   [`color_jitter`]) and [`clamp_and_filter_boxes`].
+//! - `contrast.rs`: global [`auto_contrast`] / [`random_auto_contrast`] and local [`clahe`] / [`random_clahe`].
 //! - `grid_mask.rs`: box-aware [`grid_mask`] and [`random_grid_mask`].
 //! - `perspective.rs`: 3×3 [`Homography`], [`warp_perspective`], [`transform_boxes_perspective`], and
 //!   [`random_perspective`].
-//! - `hsv.rs`: HSV colour jitter ([`random_hsv`], [`apply_hsv`]). `mosaic.rs`: [`mosaic4`], [`mosaic_affine`] and
-//!   [`mixup`].
+//! - `hsv.rs`: HSV colour jitter ([`random_hsv`], [`apply_hsv`]). `mosaic.rs`: [`mosaic4`], [`mosaic_affine`],
+//!   [`mixup`], [`mixup_with_ratio`], and [`mixup_beta`].
 //! - `occlusion.rs`: box-aware [`cutmix`], [`copy_paste`], and [`random_erasing`].
 //! - `pipeline.rs`: [`TrainTransform`], the training transform.
 //! - This file: [`AugmentConfig`], the parameters (`TrainConfig.augment` in docs/API.md).
 
 mod blur;
+mod color;
+mod contrast;
 mod geometry;
 mod grid_mask;
 mod hsv;
@@ -26,13 +31,20 @@ mod perspective;
 mod pipeline;
 
 pub use blur::{BlurConfig, BlurKind, box_blur, gaussian_blur, random_blur};
+pub use color::{
+    ColorJitterConfig, adjust_brightness, adjust_contrast, adjust_saturation, clamp_and_filter_boxes,
+    color_jitter,
+};
+pub use contrast::{
+    AutoContrastConfig, ClaheConfig, ClaheSpace, auto_contrast, clahe, random_auto_contrast, random_clahe,
+};
 pub use geometry::{
     BoxFilter, affine_sample, flip_lr, flip_ud, random_affine, random_affine_matrix, resize_long_side,
     transform_boxes,
 };
 pub use grid_mask::{GridMaskConfig, grid_mask, random_grid_mask};
 pub use hsv::{apply_hsv, random_hsv};
-pub use mosaic::{mixup, mosaic_affine, mosaic4};
+pub use mosaic::{MixUpConfig, mixup, mixup_beta, mixup_with_ratio, mosaic_affine, mosaic4};
 pub use occlusion::{
     CopyPasteConfig, ErasingFill, RandomErasingConfig, copy_paste, cutmix, cutmix_rect, erase_rect,
     random_erasing,
