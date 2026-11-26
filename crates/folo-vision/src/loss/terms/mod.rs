@@ -18,7 +18,7 @@ use super::{BatchAssignment, BoxLossKind, LossConfig, LossItems, LossOutput, che
 use crate::assign::{bbox2dist_clamped, dfl_bins, nwd_lambda};
 use crate::decode::Anchors;
 
-use box_loss::{rpiou_from_logits, saeiou_from_logits, wiou_v3_loss_and_mean};
+use box_loss::{nwd_blend_loss_eps, rpiou_from_logits, saeiou_from_logits, wiou_v3_loss_and_mean};
 use cls::cls_loss_sum;
 use dfl::ot_dfl_tail;
 
@@ -200,7 +200,7 @@ fn loss_impl_wiou(
                 let cs: Vec<f32> = (0..n).map(|k| 12.8 / anchors.strides[asg.anchor[k] as usize]).collect();
                 let lam_t = on_dev(Tensor::from_vec(lams, [n])?)?;
                 let c_t = on_dev(Tensor::from_vec(cs, [n])?)?;
-                let l_nwd = nwd_loss(&pd, &tb, &c_t)?;
+                let l_nwd = nwd_blend_loss_eps(&pd, &tb, &c_t)?;
                 lam_t.rsub_scalar(1.0)?.mul(&l_base)?.add(&lam_t.mul(&l_nwd)?)?
             } else {
                 l_base
@@ -254,7 +254,7 @@ fn loss_impl_wiou(
                         (0..n).map(|k| 12.8 / anchors.strides[asg.anchor[k] as usize]).collect();
                     let lam_t = on_dev(Tensor::from_vec(lams, [n])?)?;
                     let c_t = on_dev(Tensor::from_vec(cs, [n])?)?;
-                    let l_nwd = nwd_loss(&pd, &tb, &c_t)?;
+                    let l_nwd = nwd_blend_loss_eps(&pd, &tb, &c_t)?;
                     let wb_nwd = sum_fixed_order(&lam_t.mul(&l_nwd)?.mul(&t)?)?
                         .div_scalar(tss)?
                         .mul_scalar(cfg.box_gain)?;

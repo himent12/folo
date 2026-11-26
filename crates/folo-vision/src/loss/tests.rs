@@ -573,6 +573,26 @@ fn inner_ciou_and_wiou_v3_parity_and_grad_checks() {
     assert!(wiou_v3_loss(&ok2, &ok1, 1.9, 3.0, 1.0).is_err());
     assert!(wiou_v3_loss(&ok2, &ok2, 1.9, 3.0, 0.0).is_err());
 
+    // Scale-invariant tiny identical boxes give exact 0.0 for both WIoU v3 and public NWD,
+    // extreme WIoU v3 outlier beta monotonically attenuates to 0, and public NWD rejects c <= 0.
+    let tiny = Tensor::from_slice(&[0.0f32, 0.0, 1e-3, 1e-3], [1, 4]).unwrap();
+    assert_eq!(wiou_v3_loss(&tiny, &tiny, 1.9, 3.0, 1.0).unwrap().to_vec::<f32>().unwrap()[0], 0.0);
+    let huge_outlier = wiou_v3_loss(
+        &Tensor::from_slice(&[0.0f32, 0.0, 1.0, 1.0], [1, 4]).unwrap(),
+        &Tensor::from_slice(&[10.0f32, 10.0, 11.0, 11.0], [1, 4]).unwrap(),
+        1.9,
+        3.0,
+        1e-4,
+    )
+    .unwrap()
+    .to_vec::<f32>()
+    .unwrap()[0];
+    assert!(huge_outlier.is_finite() && huge_outlier < 1e-10, "outlier must attenuate: {huge_outlier}");
+    let c_ok = Tensor::from_slice(&[12.8f32], [1]).unwrap();
+    assert_eq!(nwd_loss(&tiny, &tiny, &c_ok).unwrap().to_vec::<f32>().unwrap()[0], 0.0);
+    assert!(nwd_loss(&tiny, &tiny, &Tensor::from_slice(&[0.0f32], [1]).unwrap()).is_err());
+    assert!(nwd_loss(&tiny, &tiny, &Tensor::from_slice(&[-1.0f32], [1]).unwrap()).is_err());
+
     // Gradient descent check on WIoU v3.
     let w_pair = Tensor::from_slice(&[1.0f32, 2.0, 11.0, 14.0], [1, 4]).unwrap();
     let w_target = Tensor::from_slice(&[2.5f32, 3.0, 13.0, 15.0], [1, 4]).unwrap();
