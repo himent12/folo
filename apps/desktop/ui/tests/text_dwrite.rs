@@ -297,3 +297,100 @@ fn an_unknown_family_falls_back_to_the_system_ui_font() {
     let ui = ts.font_id(&font(".SystemUIFont")).unwrap();
     assert_eq!(layout(&ts, id, "fallback", 13.).width, layout(&ts, ui, "fallback", 13.).width);
 }
+
+#[test]
+fn rtl_and_bidi_runs_preserve_all_glyphs_and_visual_positions() {
+    let ts = system();
+    let regular = ts.font_id(&geist(400.)).unwrap();
+
+    // Pure Hebrew ("שלום", 4 chars = 8 UTF-8 bytes at offsets 0, 2, 4, 6): all 4 glyphs present in
+    // visual left-to-right order (ascending x, descending logical byte indices).
+    let hebrew = "שלום";
+    let line = layout(&ts, regular, hebrew, 14.);
+    let glyphs: Vec<_> = line.runs.iter().flat_map(|r| r.glyphs.iter()).collect();
+    assert_eq!(glyphs.len(), 4, "all 4 Hebrew letters must be shaped: {glyphs:?}");
+    let indices: Vec<usize> = glyphs.iter().map(|g| g.index).collect();
+    assert_eq!(indices, vec![6, 4, 2, 0], "RTL glyphs map to descending logical UTF-8 byte offsets");
+    let xs: Vec<f32> = glyphs.iter().map(|g| f(g.position.x)).collect();
+    assert!(xs.windows(2).all(|w| w[0] < w[1]), "visual positions must strictly increase: {xs:?}");
+    assert!(line.width > px(0.));
+    // RTL caret geometry: logical start (0) is the right edge, logical end (8) is the left edge,
+    // and logical offsets 0, 2, 4, 6, 8 walk strictly right-to-left so selections span the right glyphs.
+    let caret_xs: Vec<f32> = [0, 2, 4, 6, hebrew.len()].iter().map(|&ix| f(line.x_for_index(ix))).collect();
+    assert_eq!(caret_xs[0], f(line.width), "RTL logical start sits at the right edge: {caret_xs:?}");
+    assert_eq!(caret_xs[4], 0.0, "RTL logical end sits at the left edge: {caret_xs:?}");
+    assert!(
+        caret_xs.windows(2).all(|w| w[0] > w[1]),
+        "RTL logical carets walk strictly right-to-left: {caret_xs:?}"
+    );
+    // Hit-testing round-trips with caret positioning on both sides of the RTL word.
+    assert_eq!(line.closest_index_for_x(line.width), 0, "clicking right side of RTL maps to logical start");
+    assert_eq!(
+        line.closest_index_for_x(px(0.)),
+        hebrew.len(),
+        "clicking left side of RTL maps to logical end"
+    );
+
+    // Trailing RTL run ("hello שלום"): logical end sits at the left edge of the Hebrew run, and
+    // Select All covers the full visual width [0..line.width].
+    let trailing_rtl = "hello שלום";
+    let trailing_line = layout(&ts, regular, trailing_rtl, 14.);
+    let heb_left = trailing_line
+        .runs
+        .iter()
+        .flat_map(|r| r.glyphs.iter())
+        .find(|g| g.index >= 6)
+        .map(|g| f(g.position.x))
+        .unwrap();
+    assert_eq!(
+        f(trailing_line.x_for_index(trailing_rtl.len())),
+        heb_left,
+        "logical end of a trailing RTL run sits at its visual left edge"
+    );
+    let all_spans = trailing_line.selection_spans(0..trailing_rtl.len());
+    assert_eq!(all_spans.len(), 1, "Select All on mixed text merges into one full-width span");
+    assert_eq!(f(all_spans[0].0), 0.0);
+    assert!((f(all_spans[0].1) - f(trailing_line.width)).abs() < 0.5);
+    // Clicking the left half of 'ם' (leftmost Hebrew glyph) reaches logical end (14), while
+    // clicking the right half of the preceding space reaches byte 6.
+    assert_eq!(
+        trailing_line.closest_index_for_x(px(heb_left + 0.5)),
+        trailing_rtl.len(),
+        "clicking left half of leftmost Hebrew glyph reaches logical end"
+    );
+    assert_eq!(
+        trailing_line.closest_index_for_x(px(heb_left - 0.5)),
+        6,
+        "clicking right half of space before Hebrew reaches byte 6"
+    );
+
+    // Pure Arabic ("مرحبا", 5 chars): must not collapse to a single glyph; every index is a valid
+    // char boundary and visual positions advance left-to-right.
+    let arabic = "مرحبا";
+    let line = layout(&ts, regular, arabic, 14.);
+    let glyphs: Vec<_> = line.runs.iter().flat_map(|r| r.glyphs.iter()).collect();
+    assert!(glyphs.len() >= 4, "Arabic word must retain its shaped glyphs, got {glyphs:?}");
+    assert!(
+        glyphs.iter().all(|g| g.index < arabic.len() && arabic.is_char_boundary(g.index)),
+        "Arabic glyph indices must be valid char boundaries"
+    );
+    let xs: Vec<f32> = glyphs.iter().map(|g| f(g.position.x)).collect();
+    assert!(xs.windows(2).all(|w| w[0] <= w[1]), "Arabic visual positions advance left-to-right: {xs:?}");
+    assert!(line.width > px(0.));
+
+    // Mixed LTR + RTL + LTR ("hello שלום world"): all 16 characters shaped, Hebrew middle run has
+    // all 4 logical offsets (6, 8, 10, 12) in visual order [12, 10, 8, 6], and x increases monotonically.
+    let mixed = "hello שלום world";
+    let line = layout(&ts, regular, mixed, 14.);
+    let glyphs: Vec<_> = line.runs.iter().flat_map(|r| r.glyphs.iter()).collect();
+    assert_eq!(glyphs.len(), mixed.chars().count(), "mixed bidi text must keep every character");
+    assert!(
+        glyphs.iter().all(|g| g.index < mixed.len() && mixed.is_char_boundary(g.index)),
+        "every mixed bidi glyph index must be a UTF-8 char boundary"
+    );
+    let hebrew_indices: Vec<usize> =
+        glyphs.iter().map(|g| g.index).filter(|&ix| (6..14).contains(&ix)).collect();
+    assert_eq!(hebrew_indices, vec![12, 10, 8, 6], "embedded Hebrew run is laid out visually RTL");
+    let xs: Vec<f32> = glyphs.iter().map(|g| f(g.position.x)).collect();
+    assert!(xs.windows(2).all(|w| w[0] < w[1]), "mixed bidi visual x must strictly increase: {xs:?}");
+}

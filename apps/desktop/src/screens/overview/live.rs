@@ -41,11 +41,16 @@ impl FoloApp {
         let best = r.best;
         // Every KPI gets a second line, as on the run's dashboard: throughput's recent average and
         // the time spent so far.
-        let ips_avg = self.store.run_data.get(&r.id).and_then(|l| l.ready()).and_then(|d| {
-            let s = &d.metrics.steps;
-            let n = s.len().min(120);
-            (n > 0).then(|| s[s.len() - n..].iter().map(|x| x.imgs_per_s).sum::<f32>() / n as f32)
-        });
+        let recent_ips = self
+            .store
+            .run_data
+            .get(&r.id)
+            .and_then(|l| l.ready())
+            .map(|d| d.recent_ips(120))
+            .unwrap_or_default();
+        let ips_avg =
+            (!recent_ips.is_empty()).then(|| recent_ips.iter().sum::<f32>() / recent_ips.len() as f32);
+        let ips_latest = recent_ips.last().copied();
         let elapsed = crate::screens::runs::duration_of(r, self.store.api.now())
             .map(|d| format!("{} elapsed", time::duration(d)));
         let (chart, legend_el, ips, map_now) = match data {
@@ -134,7 +139,12 @@ impl FoloApp {
                     window,
                     cx,
                 );
-                (chart, legend_el, step.map(|s| s.imgs_per_s), epoch.map(|e| e.val.map50_95))
+                (
+                    chart,
+                    legend_el,
+                    step.map(|s| s.imgs_per_s).filter(|v| v.is_finite()).or(ips_latest),
+                    epoch.map(|e| e.val.map50_95),
+                )
             }
             None => (
                 div().h(px(hero_h + 16.)).child(skeleton(&t, "ov-charts")).into_any_element(),

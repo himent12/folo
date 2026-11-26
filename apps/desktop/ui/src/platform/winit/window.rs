@@ -3,6 +3,7 @@
 
 use super::chrome::Chrome;
 use super::display::WinitDisplay;
+use super::events::ImeBatchState;
 use super::mouse::{ClickState, FileDropTracker, cursor_icon};
 use super::present::{clamp_damage, copy_rects, trace_first_present};
 use crate::{
@@ -72,12 +73,8 @@ pub(crate) struct WindowState {
     /// The next present must copy the whole frame (resize, expose, new surface).
     pub full_present: bool,
     pub surface_size: (u32, u32),
-    /// An IME composition is in progress.
-    pub composing: bool,
-    /// What the last key press typed and the last IME commit, this batch (one keystroke reported both
-    /// ways inserts once).
-    pub key_text: Option<String>,
-    pub commit_text: Option<String>,
+    /// IME composition and same-batch key/commit deduplication state.
+    pub ime: ImeBatchState,
     pub ime_allowed: bool,
     pub cursor: Option<CursorStyle>,
     pub closed: bool,
@@ -194,9 +191,7 @@ impl WindowInner {
                 frame_interval: Duration::from_micros(16_667),
                 full_present: true,
                 surface_size: (0, 0),
-                composing: false,
-                key_text: None,
-                commit_text: None,
+                ime: ImeBatchState::default(),
                 ime_allowed: false,
                 cursor: None,
                 closed: false,

@@ -123,7 +123,7 @@ impl Element for Anchored {
             return;
         }
         let mut child_min = point(Pixels::MAX, Pixels::MAX);
-        let mut child_max = Point::default();
+        let mut child_max = point(Pixels::MIN, Pixels::MIN);
         for child_layout_id in &request_layout.child_layout_ids {
             let child_bounds = window.layout_bounds(*child_layout_id);
             child_min = child_min.min(&child_bounds.origin);

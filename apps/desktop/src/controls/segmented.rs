@@ -107,6 +107,10 @@ impl FoloApp {
             // Its edge is what marks it, as on inputs and selects beside it: line.control.
             .border_color(t.line_control)
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
+                let m = &ev.keystroke.modifiers;
+                if n == 0 || m.control || m.alt || m.platform {
+                    return;
+                }
                 // Steps to the next option that can be chosen in that direction, wrapping (also from
                 // a selection that is itself disabled).
                 let ok = |i: &usize| usable.contains(i);

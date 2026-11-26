@@ -75,13 +75,13 @@ impl FoloApp {
     pub fn playground(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let no_models_hdr = self.store.models.ready().is_some_and(|m| m.is_empty());
-        let open = if self.store.models.ready().is_some_and(|m| m.is_empty()) {
+        let open = if let Some(why) = self.open_image_blocked() {
             self.button_disabled(
                 "play-open",
                 "Open image",
                 Btn::Secondary,
                 Some("icons/image-up.svg"),
-                "Train a model first",
+                why,
                 window,
                 cx,
             )

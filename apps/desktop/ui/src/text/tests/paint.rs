@@ -496,3 +496,86 @@ fn out_of_order_bidi_glyph_indices_preserve_colors_and_backgrounds() {
         .collect();
     assert_eq!(bgs, [(px(10.), px(20.), green)], "background rewind covers the 0..4 span at x=10..30");
 }
+
+#[test]
+fn right_and_center_aligned_decorations_align_with_each_visual_line() {
+    let window = window_text_system();
+    let white = Hsla { h: 0., s: 0., l: 1., a: 1. };
+    let blue = Hsla { h: 0.6, s: 1., l: 0.5, a: 1. };
+    let ul = UnderlineStyle { color: Some(blue), thickness: px(1.), wavy: false };
+    let st = StrikethroughStyle { color: Some(blue), thickness: px(1.) };
+
+    // 1. Single-line right-aligned background: "ab" (width 19.2px) in a 100px box sits at 80.8..100.0.
+    let mut single_run = run(2, white);
+    single_run.background_color = Some(blue);
+    single_run.underline = Some(ul);
+    let single = window.shape_text("ab".into(), px(16.), &[single_run], None, None).unwrap();
+    let mut bg_rec = Recorder::default();
+    crate::paint_line_background(
+        point(px(0.), px(0.)),
+        &single[0].layout.unwrapped_layout,
+        px(20.),
+        TextAlign::Right,
+        Some(px(100.)),
+        &single[0].decoration_runs,
+        &single[0].layout.wrap_boundaries,
+        &window,
+        &mut bg_rec,
+    )
+    .unwrap();
+    let bgs: Vec<_> = bg_rec
+        .0
+        .iter()
+        .filter_map(|op| match op {
+            Op::Background { bounds, .. } => Some((bounds.origin.x.0, bounds.size.width.0)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bgs.len(), 1);
+    assert!((bgs[0].0 - 80.8).abs() < 0.05 && (bgs[0].1 - 19.2).abs() < 0.05, "got {bgs:?}");
+
+    // 2. Wrapped right-aligned underline + strikethrough + background across two lines:
+    // "aa bbb cccc" wrapped at 72px -> line 1 "aa bbb " (67.2px -> x=32.8..100), line 2 "cccc" (38.4px -> x=61.6..100).
+    let mut wrapped_run = run(11, white);
+    wrapped_run.background_color = Some(blue);
+    wrapped_run.underline = Some(ul);
+    wrapped_run.strikethrough = Some(st);
+    let wrapped =
+        window.shape_text("aa bbb cccc".into(), px(16.), &[wrapped_run], Some(px(72.)), None).unwrap();
+    assert_eq!(wrapped[0].layout.wrap_boundaries.len(), 1);
+    let mut fg_rec = Recorder::default();
+    crate::paint_line(
+        point(px(0.), px(0.)),
+        &wrapped[0].layout.unwrapped_layout,
+        px(20.),
+        TextAlign::Right,
+        Some(px(100.)),
+        &wrapped[0].decoration_runs,
+        &wrapped[0].layout.wrap_boundaries,
+        &window,
+        everywhere(),
+        &mut fg_rec,
+    )
+    .unwrap();
+    let uls: Vec<_> = fg_rec
+        .0
+        .iter()
+        .filter_map(|op| match op {
+            Op::Underline { x, width, .. } => Some((*x, *width)),
+            _ => None,
+        })
+        .collect();
+    let sts: Vec<_> = fg_rec
+        .0
+        .iter()
+        .filter_map(|op| match op {
+            Op::Strikethrough { x, width, .. } => Some((*x, *width)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(uls.len(), 2);
+    assert!((uls[0].0 - 32.8).abs() < 0.05 && (uls[0].1 - 67.2).abs() < 0.05, "line1 ul={uls:?}");
+    assert!((uls[1].0 - 61.6).abs() < 0.05 && (uls[1].1 - 38.4).abs() < 0.05, "line2 ul={uls:?}");
+    assert_eq!(sts.len(), 2);
+    assert!((sts[1].0 - 61.6).abs() < 0.05 && (sts[1].1 - 38.4).abs() < 0.05, "line2 st={sts:?}");
+}

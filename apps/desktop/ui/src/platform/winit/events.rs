@@ -133,8 +133,7 @@ impl WindowInner {
     pub fn end_batch(&self) {
         let events = {
             let mut state = self.state.borrow_mut();
-            state.key_text = None;
-            state.commit_text = None;
+            state.ime.end_batch();
             let position = state.mouse_position;
             state.file_drops.flush(position)
         };
@@ -267,18 +266,14 @@ impl WindowInner {
             return;
         }
 
-        let already_committed = {
-            let mut state = self.state.borrow_mut();
-            state.key_text = keystroke.key_char.clone();
-            keystroke.key_char.is_some() && state.commit_text == keystroke.key_char
-        };
+        let already_committed = self.state.borrow_mut().ime.on_key_char(keystroke.key_char.as_deref());
         let result = self.dispatch(PlatformInput::KeyDown(KeyDownEvent {
             keystroke: keystroke.clone(),
             is_held: event.repeat,
         }));
         // GPUI's rule: a key the app did not handle types its text, if the system's rules say the
         // modifiers held type characters (Shift; Option on macOS; AltGr).
-        let composing = self.state.borrow().composing;
+        let composing = self.state.borrow().ime.composing;
         if result.propagate
             && !composing
             && !already_committed
@@ -295,12 +290,12 @@ impl WindowInner {
             Ime::Preedit(text, cursor) => {
                 if text.is_empty() {
                     // The composition was cleared (before a commit, or cancelled).
-                    if std::mem::take(&mut self.state.borrow_mut().composing) {
+                    if self.state.borrow_mut().ime.on_preedit(true) {
                         self.with_input_handler(cancel_composition);
                     }
                     return;
                 }
-                self.state.borrow_mut().composing = true;
+                self.state.borrow_mut().ime.on_preedit(false);
                 let selected = cursor.map(|(start, end)| utf16_range(&text, start..end));
                 let area = self.with_input_handler(|handler| {
                     handler.replace_and_mark_text_in_range(None, &text, selected);
@@ -312,12 +307,7 @@ impl WindowInner {
                 }
             }
             Ime::Commit(text) => {
-                let typed_by_key = {
-                    let mut state = self.state.borrow_mut();
-                    let was_composing = std::mem::take(&mut state.composing);
-                    state.commit_text = Some(text.clone());
-                    !was_composing && state.key_text.as_deref() == Some(text.as_str())
-                };
+                let typed_by_key = self.state.borrow_mut().ime.on_commit(&text);
                 // A plain key some systems also report as a commit was handled (or typed) as a key.
                 if !typed_by_key {
                     self.with_input_handler(|handler| handler.replace_text_in_range(None, &text));
@@ -325,10 +315,88 @@ impl WindowInner {
             }
             Ime::Disabled => {
                 // winit's contract: pending preedit is cleared, not kept as typed text.
-                if std::mem::take(&mut self.state.borrow_mut().composing) {
+                if self.state.borrow_mut().ime.on_disabled() {
                     self.with_input_handler(cancel_composition);
                 }
             }
+        }
+    }
+}
+
+/// Tracks active IME composition and deduplicates paired `KeyboardInput` / `Ime::Commit` events
+/// within one winit event batch.
+#[derive(Default)]
+pub(crate) struct ImeBatchState {
+    pub composing: bool,
+    /// `true` after `Ime::Preedit("")` ends an active composition until the following `Ime::Commit`,
+    /// a key event, `Ime::Disabled`, or the end of the event batch (winit clears preedit with an
+    /// empty `Ime::Preedit` immediately before `Ime::Commit`).
+    ended_composition: bool,
+    key_text: Option<String>,
+    commit_text: Option<String>,
+}
+
+impl ImeBatchState {
+    pub fn end_batch(&mut self) {
+        self.ended_composition = false;
+        self.key_text = None;
+        self.commit_text = None;
+    }
+
+    /// Updates composition state on `Ime::Preedit`. Returns `true` when an active preedit was just
+    /// cleared and the caller should cancel marked text.
+    pub fn on_preedit(&mut self, empty: bool) -> bool {
+        if empty {
+            let was = std::mem::take(&mut self.composing);
+            if was {
+                self.ended_composition = true;
+            }
+            was
+        } else {
+            self.composing = true;
+            self.ended_composition = false;
+            false
+        }
+    }
+
+    /// Clears composition state on `Ime::Disabled`. Returns `true` when an active preedit existed.
+    pub fn on_disabled(&mut self) -> bool {
+        self.ended_composition = false;
+        std::mem::take(&mut self.composing)
+    }
+
+    /// Records a `KeyboardInput` character and returns `true` if already inserted by a paired
+    /// `Ime::Commit` in the same event batch.
+    pub fn on_key_char(&mut self, text: Option<&str>) -> bool {
+        self.ended_composition = false;
+        if let Some(t) = text
+            && self.commit_text.as_deref() == Some(t)
+        {
+            self.commit_text = None;
+            self.key_text = None;
+            true
+        } else {
+            self.key_text = text.map(str::to_owned);
+            false
+        }
+    }
+
+    /// Records an `Ime::Commit` and returns `true` if already inserted by a paired `KeyboardInput`
+    /// in the same event batch.
+    pub fn on_commit(&mut self, text: &str) -> bool {
+        let was_composing = std::mem::take(&mut self.composing) | std::mem::take(&mut self.ended_composition);
+        if was_composing {
+            // A completed IME composition never duplicates a subsequent plain key press.
+            self.key_text = None;
+            self.commit_text = None;
+            false
+        } else if self.key_text.as_deref() == Some(text) {
+            self.key_text = None;
+            self.commit_text = None;
+            true
+        } else {
+            self.commit_text = Some(text.to_owned());
+            false
         }
     }
 }
@@ -516,5 +584,62 @@ mod tests {
         assert_eq!(take_cancelled_buttons(&mut pressed, &mut cancelled), vec![MouseButton::Right]);
         record_press(&mut pressed, &mut cancelled, MouseButton::Right);
         assert!(consume_release(&mut pressed, &mut cancelled, MouseButton::Right));
+    }
+
+    #[test]
+    fn consecutive_identical_chars_in_one_batch_are_not_dropped() {
+        // Key -> Commit -> Key -> Commit for typing "oo" in a single event batch.
+        let mut ime = ImeBatchState::default();
+        let mut typed = String::new();
+        for _ in 0..2 {
+            if !ime.on_key_char(Some("o")) {
+                typed.push('o');
+            }
+            if !ime.on_commit("o") {
+                typed.push('o');
+            }
+        }
+        assert_eq!(typed, "oo");
+
+        // Commit -> Key -> Commit -> Key ordering in a single event batch.
+        let mut ime = ImeBatchState::default();
+        let mut typed = String::new();
+        for _ in 0..2 {
+            if !ime.on_commit("o") {
+                typed.push('o');
+            }
+            if !ime.on_key_char(Some("o")) {
+                typed.push('o');
+            }
+        }
+        assert_eq!(typed, "oo");
+
+        // winit's real IME commit sequence: Preedit("o") -> Preedit("") -> Commit("o") -> KeyDown("o")
+        // in one batch must insert both "o"s even though the empty Preedit clears `composing`.
+        let mut ime = ImeBatchState::default();
+        let mut typed = String::new();
+        assert!(!ime.on_preedit(false));
+        assert!(ime.on_preedit(true));
+        if !ime.on_commit("o") {
+            typed.push('o');
+        }
+        if !ime.on_key_char(Some("o")) {
+            typed.push('o');
+        }
+        assert_eq!(typed, "oo");
+
+        // Cancelled composition (Preedit("o") -> Preedit("")) followed by a plain key whose OS
+        // duplicates it as Commit("o") still deduplicates the paired Commit.
+        let mut ime = ImeBatchState::default();
+        let mut typed = String::new();
+        assert!(!ime.on_preedit(false));
+        assert!(ime.on_preedit(true));
+        if !ime.on_key_char(Some("o")) {
+            typed.push('o');
+        }
+        if !ime.on_commit("o") {
+            typed.push('o');
+        }
+        assert_eq!(typed, "o");
     }
 }

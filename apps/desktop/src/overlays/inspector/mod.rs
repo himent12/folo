@@ -297,11 +297,43 @@ impl FoloApp {
                         .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                             this.inspector_key_down(ev, cx);
                         }))
+                        .child(self.inspector_focus_guard())
                         .child(header)
                         .child(div().flex_1().min_h_0().flex().child(stage).child(side)),
                 ),
             "inspector-in",
         ))
+    }
+
+    /// Paint-phase guard: when stepping, retrying, or waiting on an unloaded page unmounts a
+    /// per-image focus target (`insp-box-*`, `insp-pred-*`, `insp-file`, `insp-retry-image`,
+    /// `insp-page-retry`), return focus to `inspector_focus` so keyboard shortcuts keep working.
+    fn inspector_focus_guard(&self) -> AnyElement {
+        let insp_focus = self.inspector_focus.clone();
+        folo_ui::canvas(
+            |_, _, _| {},
+            move |_, _, window, cx| {
+                if window.focused(cx).is_none_or(|f| !window.is_focus_mounted(&f)) {
+                    window.focus(&insp_focus);
+                }
+            },
+        )
+        .absolute()
+        .into_any_element()
+    }
+
+    fn inspector_waiting_root(&self, cx: &mut Context<Self>) -> folo_ui::Stateful<folo_ui::Div> {
+        div()
+            .id("inspector")
+            .track_focus(&self.inspector_focus)
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                this.inspector_key_down(ev, cx);
+            }))
+            .child(self.inspector_focus_guard())
     }
 
     fn inspector_waiting(
@@ -361,11 +393,7 @@ impl FoloApp {
                 .child(text(ty::SM, t.text_secondary).whitespace_normal().child(msg))
                 .child(div().flex().justify_end().gap(px(8.)).child(close).child(retry));
             return Some(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
+                self.inspector_waiting_root(cx)
                     .child(self.scrim(
                         t,
                         "insp-scrim",
@@ -395,7 +423,14 @@ impl FoloApp {
         }
         // The page's scrim (it takes the clicks, and a click there closes, as Esc does).
         Some(
-            self.scrim(t, "insp-scrim", window, cx, act(|this, w, cx| this.close_inspector(w, cx)))
+            self.inspector_waiting_root(cx)
+                .child(self.scrim(
+                    t,
+                    "insp-scrim",
+                    window,
+                    cx,
+                    act(|this, w, cx| this.close_inspector(w, cx)),
+                ))
                 .into_any_element(),
         )
     }
@@ -410,9 +445,19 @@ impl FoloApp {
         let zoomed = self.inspector.as_ref().is_some_and(|i| i.zoom > 1.0);
         let d = if mods.shift { 128. } else { 32. };
         let pan = |this: &mut Self, dx: f32, dy: f32| {
+            let dims = this
+                .inspector
+                .as_ref()
+                .and_then(|i| this.filtered_image(&i.dataset, i.index))
+                .map(|m| (m.width as f32, m.height as f32));
+            let view = this.insp_view.get();
             let mut was_dragging = false;
             if let Some(i) = this.inspector.as_mut() {
-                i.pan = (i.pan.0 + dx, i.pan.1 + dy);
+                let next = (i.pan.0 + dx, i.pan.1 + dy);
+                i.pan = match (view, dims) {
+                    (Some(b), Some((w, h))) => crate::viz::clamp_pan(b, w, h, Fit::Contain, i.zoom, next),
+                    _ => next,
+                };
                 was_dragging = i.drag_from.take().is_some();
                 i.focused_box = None;
             }
@@ -508,13 +553,15 @@ impl FoloApp {
         let next_sample = self.inspector.as_ref().and_then(|i| {
             let (run, _) = i.sample.as_ref()?;
             let set = self.store.samples.get(run)?.ready()?;
-            let cur = self.filtered_image(&i.dataset, i.index).map(|m| m.id.clone());
+            let cur =
+                i.want.clone().or_else(|| self.filtered_image(&i.dataset, i.index).map(|m| m.id.clone()));
             let at = cur.and_then(|c| set.samples.iter().position(|x| x.image_id == c))?;
             let len = set.samples.len() as i32;
             Some(set.samples[(at as i32 + d).rem_euclid(len) as usize].image_id.clone())
         });
         if let (Some(id), Some(i)) = (next_sample, self.inspector.as_mut()) {
             i.want = Some(id);
+            i.shown = None;
             i.zoom = 1.0;
             i.pan = (0., 0.);
             let was_dragging = i.drag_from.take().is_some();
@@ -525,11 +572,26 @@ impl FoloApp {
             cx.notify();
             return;
         }
-        let n = self.inspector.as_ref().map_or(0, |i| self.filtered_indices(&i.dataset).len());
-        if let Some(i) = self.inspector.as_mut()
-            && n > 0
-        {
-            i.index = ((i.index as i32 + d).rem_euclid(n as i32)) as usize;
+        let next_step = self.inspector.as_ref().and_then(|i| {
+            let n = self.filtered_indices(&i.dataset).len();
+            if n == 0 {
+                return None;
+            }
+            let next_index = ((i.index as i32 + d).rem_euclid(n as i32)) as usize;
+            let next_id = self.filtered_image(&i.dataset, next_index).map(|m| m.id.clone());
+            Some((next_index, next_id))
+        });
+        if let (Some((next_index, next_id)), Some(i)) = (next_step, self.inspector.as_mut()) {
+            i.index = next_index;
+            // Keep `shown`'s anchor on the newly stepped image so a background page arriving before
+            // the next render never snaps back to the previous image.
+            if let Some(id) = next_id {
+                if let Some(shown) = i.shown.as_mut() {
+                    shown.0 = id;
+                }
+            } else {
+                i.shown = None;
+            }
             i.zoom = 1.0;
             i.pan = (0., 0.);
             let was_dragging = i.drag_from.take().is_some();

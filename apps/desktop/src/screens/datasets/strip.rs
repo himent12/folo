@@ -160,7 +160,7 @@ impl FoloApp {
                         cx,
                         act({
                             let id = ds.id.clone();
-                            move |this, _, cx| {
+                            move |this, w, cx| {
                                 this.ds_empty_of = (!this.empty_only(&id)).then(|| id.clone());
                                 // Empty images have no class: the two filters can't both apply to this
                                 // dataset (another's class filter stays with it).
@@ -170,8 +170,13 @@ impl FoloApp {
                                     this.ds_class = None;
                                 }
                                 this.ds_tab = DsTab::Images;
+                                this.ds_hover_tile = None;
                                 this.ds_scroll_anchor = None;
                                 this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
+                                let target =
+                                    if this.ds_empty_of.is_some() { "ds-empty-chip" } else { "ds-class" };
+                                let fh = this.fh(target, cx);
+                                w.focus(&fh);
                                 cx.notify();
                             }
                         }),

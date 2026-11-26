@@ -196,8 +196,7 @@ impl Render for FoloApp {
                 if this.confirm_close.is_some() {
                     return;
                 }
-                if this.menu_open.take().is_some() {
-                    this.menu_typeahead.clear();
+                if this.close_menus() {
                     cx.notify();
                 }
                 if this.cloud.connect.is_some() {
@@ -212,19 +211,13 @@ impl Render for FoloApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &FocusNext, w, cx| {
-                this.menu_open = None;
-                this.menu_trigger.set(None);
-                this.menu_typeahead.clear();
-                this.export_open = false;
+                this.close_menus();
                 this.kb = true;
                 this.cycle_focus(true, w, cx);
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &FocusPrev, w, cx| {
-                this.menu_open = None;
-                this.menu_trigger.set(None);
-                this.menu_typeahead.clear();
-                this.export_open = false;
+                this.close_menus();
                 this.kb = true;
                 this.cycle_focus(false, w, cx);
                 cx.notify();
@@ -262,8 +255,11 @@ impl Render for FoloApp {
                     && !this.export_open
                     && !(m.control || m.alt || m.platform || m.shift)
                 {
-                    let s = if this.modal_open() {
+                    let s = if this.new_run.is_some() || this.synth.is_some() || this.cloud.connect.is_some()
+                    {
                         &this.dialog_scroll
+                    } else if this.modal_open() {
+                        return;
                     } else if this.route == Route::Playground {
                         &this.play_side_scroll
                     } else {
@@ -412,6 +408,7 @@ fn lost_banner(t: &Theme, reached: bool) -> folo_ui::Stateful<folo_ui::Div> {
         .flex_none()
         .h(px(30.))
         .px(px(16.))
+        .overflow_hidden()
         .flex()
         .items_center()
         .justify_center()
@@ -420,7 +417,13 @@ fn lost_banner(t: &Theme, reached: bool) -> folo_ui::Stateful<folo_ui::Div> {
         .border_b_1()
         .border_color(crate::theme::alpha(t.warning_solid, 0.35))
         .child(crate::ui::icon("icons/refresh-cw.svg", 14., t.warning_solid))
-        .child(crate::ui::text(ty::SM, t.warning_text).whitespace_nowrap().child(lost_text(reached)))
+        .child(
+            crate::ui::text(ty::SM, t.warning_text)
+                .min_w_0()
+                .whitespace_nowrap()
+                .ellipsis()
+                .child(lost_text(reached)),
+        )
 }
 
 /// The pill's words: nothing was lost if the server never answered.
@@ -437,6 +440,7 @@ fn key_hint_strip(t: &Theme, keys: SharedString) -> folo_ui::Stateful<folo_ui::D
         .flex_none()
         .h(px(32.))
         .px(px(16.))
+        .overflow_hidden()
         .flex()
         .items_center()
         .gap(px(8.))
@@ -444,5 +448,5 @@ fn key_hint_strip(t: &Theme, keys: SharedString) -> folo_ui::Stateful<folo_ui::D
         .border_color(t.line_subtle)
         .bg(t.bg_panel)
         .child(crate::ui::icon("icons/keyboard.svg", 14., t.text_tertiary))
-        .child(crate::ui::text(ty::SM, t.text_secondary).whitespace_nowrap().child(keys))
+        .child(crate::ui::text(ty::SM, t.text_secondary).min_w_0().whitespace_nowrap().ellipsis().child(keys))
 }

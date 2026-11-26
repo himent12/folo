@@ -63,7 +63,7 @@ pub(super) fn paint_end_names(
             paint_text(window, cx, &s.name, point(x, px(y - SLOT / 2.)), ink, ty::SM.size, false);
         }
     }
-    if more > 0 {
+    if more > 0 && plot.size.height >= px(SLOT) {
         let y = f32::from(plot.bottom()) - SLOT;
         paint_text(
             window,

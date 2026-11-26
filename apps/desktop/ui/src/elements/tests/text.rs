@@ -215,3 +215,156 @@ fn steady_frame_reuses_glyph_bounds_and_empty_glyph_entries() {
         assert_eq!(a.mask.id, b.mask.id);
     }
 }
+
+#[test]
+fn line_clamp_with_truncate_keeps_multi_line_budget_in_flex_column() {
+    // Inside a stretched flex column, Taffy passes `known.width = Some(60.)` during PerformLayout;
+    // `line_clamp(2)` + `text_ellipsis()` must wrap onto two lines and truncate the final line
+    // within 60 px with an ellipsis.
+    let (mut app, window) = open(|_, _| {
+        div()
+            .flex()
+            .flex_col()
+            .w(px(60.))
+            .text_size(px(10.))
+            .line_height(px(20.))
+            .text_color(rgb(0xffffff))
+            .line_clamp(2)
+            .text_ellipsis()
+            .child("alpha beta gamma delta")
+            .into_any_element()
+    });
+    let scene = draw(&mut app, window);
+    let glyphs = sprites(&scene);
+    let ls = lines(&glyphs);
+    assert_eq!(ls.len(), 2, "two lines should fill before truncation");
+    let last_right = ls[1].last().unwrap().bounds.right().0;
+    assert!(last_right <= 60.0, "final clamped line must stay within 60 px, got {last_right}");
+}
+
+#[test]
+fn line_clamp_with_truncate_elides_final_line_from_actual_wrap_boundaries() {
+    // Regression: with 6 px glyph advances, a 36 px box, and a 2-line clamp, `aaa bbb ccc` fits an
+    // aggregate 72 px budget, but word wrapping puts `bbb ccc` (42 px) on line 2. Truncation must
+    // cut line 2 to fit <= 36 px and append the ellipsis.
+    let (mut app, window) = open(|_, _| {
+        div()
+            .flex()
+            .flex_col()
+            .child(text_box(36.).line_clamp(2).text_ellipsis().child("aaa bbb ccc"))
+            .child(text_box(36.).line_clamp(2).text_ellipsis().child("aa\nbbbbbb\ncc"))
+            .child(text_box(36.).child("…"))
+            .into_any_element()
+    });
+    let scene = draw(&mut app, window);
+    let glyphs = sprites(&scene);
+    let ls = lines(&glyphs);
+    // 2 lines for `aaa bbb ccc`, 2 lines for `aa\nbbbbbb\ncc`, 1 line for reference `…`.
+    assert_eq!(ls.len(), 5);
+    let ellipsis_id = ls[4][0].mask.id;
+
+    // `aaa bbb ccc` -> line 1: `aaa`, line 2: `bbb c…` (width 36 px <= 36 px, ends with `…`).
+    let line2 = &ls[1];
+    assert!(
+        line2.last().unwrap().bounds.right().0 <= 36.0,
+        "clamped line 2 must fit within 36 px, got {}",
+        line2.last().unwrap().bounds.right().0
+    );
+    assert_eq!(line2.last().unwrap().mask.id, ellipsis_id, "clamped line 2 must end with ellipsis");
+
+    // `aa\nbbbbbb\ncc` -> explicit 3rd paragraph forces ellipsis onto line 2 within 36 px.
+    let para_line2 = &ls[3];
+    assert!(
+        para_line2.last().unwrap().bounds.right().0 <= 36.0,
+        "newline-clamped line 2 must fit within 36 px, got {}",
+        para_line2.last().unwrap().bounds.right().0
+    );
+    assert_eq!(
+        para_line2.last().unwrap().mask.id,
+        ellipsis_id,
+        "newline-clamped line 2 must end with ellipsis"
+    );
+
+    // Leading spaces must not trigger hanging-indent over-counting: `"  abcdefghij"` fits in 2
+    // lines of 36 px (`"  abcd"` + `"efghij"`) with all 10 letters intact and no ellipsis.
+    let (mut app, window) = open(|_, _| {
+        div()
+            .flex()
+            .flex_col()
+            .child(text_box(36.).line_clamp(2).text_ellipsis().child("  abcdefghij"))
+            .child(text_box(36.).child("…"))
+            .into_any_element()
+    });
+    let scene = draw(&mut app, window);
+    let glyphs = sprites(&scene);
+    let ls = lines(&glyphs);
+    assert_eq!(ls.len(), 3, "2 lines of text + 1 reference ellipsis line");
+    let ref_ellipsis = ls[2][0].mask.id;
+    assert_eq!(ls[0].len() + ls[1].len(), 10, "all 10 letters must remain intact");
+    assert_ne!(ls[1].last().unwrap().mask.id, ref_ellipsis, "fitting leading-space text must not be elided");
+
+    // Exact-width word followed by space + overlong word (`"aaaaaa aaaaaaaaa"` in 36 px / 3 lines):
+    // truncator wrap boundaries must match paint wrapping so line 3 stays <= 36 px and ends with `…`.
+    let (mut app, window) = open(|_, _| {
+        div()
+            .flex()
+            .flex_col()
+            .child(text_box(36.).line_clamp(3).text_ellipsis().child("aaaaaa aaaaaaaaa"))
+            .child(text_box(36.).child("…"))
+            .into_any_element()
+    });
+    let scene = draw(&mut app, window);
+    let glyphs = sprites(&scene);
+    let ls = lines(&glyphs);
+    let ref_ellipsis = ls.last().unwrap()[0].mask.id;
+    let last_text_line = &ls[ls.len() - 2];
+    assert!(
+        last_text_line.last().unwrap().bounds.right().0 <= 36.0,
+        "clamped final line must stay within 36 px, got {}",
+        last_text_line.last().unwrap().bounds.right().0
+    );
+    assert_eq!(
+        last_text_line.last().unwrap().mask.id,
+        ref_ellipsis,
+        "clamped final line must end with ellipsis"
+    );
+}
+
+#[test]
+fn negative_glyph_origin_uses_euclidean_subpixel_variant() {
+    use crate::{canvas, point};
+    // Paint directly at fractional origins (bypassing Taffy layout rounding): at scale 1.0,
+    // origin.x = -1.2 floors to -2.0 with positive Euclidean fraction +0.8 (subpixel variant 3),
+    // which must match +0.8 (variant 3) and differ from 0.0 (variant 0).
+    let (mut app, window) = open(|_, _| {
+        canvas(
+            |_, _, _| (),
+            |_, _, window, cx| {
+                let run = [TextRun {
+                    len: 1,
+                    font: font("Fixed"),
+                    color: rgb(0xffffff).into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }];
+                let line = window.text_system().shape_line("A".into(), px(10.), &run, None);
+                line.paint(point(px(-1.2), px(0.)), px(20.), window, cx).unwrap();
+                line.paint(point(px(0.8), px(0.)), px(20.), window, cx).unwrap();
+                line.paint(point(px(0.0), px(0.)), px(20.), window, cx).unwrap();
+            },
+        )
+        .w(px(60.))
+        .h(px(30.))
+        .into_any_element()
+    });
+    let scene = draw(&mut app, window);
+    let glyphs = sprites(&scene);
+    assert_eq!(glyphs.len(), 3);
+    assert_eq!(glyphs[0].bounds.origin.x.0, -2.0, "-1.2 floors to -2.0");
+    assert_eq!(
+        glyphs[0].mask.id, glyphs[1].mask.id,
+        "-1.2 and +0.8 must select the same Euclidean subpixel variant (variant 3)"
+    );
+    assert_ne!(glyphs[0].mask.id, glyphs[2].mask.id, "-1.2 must not collapse to variant 0 as `.fract()` did");
+}

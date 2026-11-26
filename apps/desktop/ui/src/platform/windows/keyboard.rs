@@ -163,11 +163,13 @@ impl WindowInner {
         }
         if flags & GCS_COMPSTR.0 != 0 {
             let text = composition_string(ctx, GCS_COMPSTR)?;
-            let caret = (!text.is_empty() && flags & GCS_CURSORPOS.0 != 0).then(|| {
-                // SAFETY: querying the cursor position of a valid context.
-                let pos = unsafe { ImmGetCompositionStringW(ctx, GCS_CURSORPOS, None, 0) } as usize;
-                pos..pos
-            });
+            let caret = (!text.is_empty() && flags & GCS_CURSORPOS.0 != 0)
+                .then(|| {
+                    // SAFETY: querying the cursor position of a valid context.
+                    let pos = unsafe { ImmGetCompositionStringW(ctx, GCS_CURSORPOS, None, 0) };
+                    usize::try_from(pos).ok().map(|p| p..p)
+                })
+                .flatten();
             self.with_input_handler(|h| h.replace_and_mark_text_in_range(None, &text, caret))?;
         }
         if flags & GCS_RESULTSTR.0 != 0 {
@@ -238,7 +240,7 @@ fn key_event(
     f: impl FnOnce(Keystroke) -> PlatformInput,
 ) -> Option<PlatformInput> {
     let vkey = VIRTUAL_KEY(wparam.loword());
-    let modifiers = current_modifiers();
+    let (modifiers, altgr) = current_modifiers_with_altgr();
     match vkey {
         VK_SHIFT | VK_CONTROL | VK_MENU | VK_LMENU | VK_RMENU | VK_LWIN | VK_RWIN => {
             if state.last_reported_modifiers == Some(modifiers) {
@@ -269,7 +271,7 @@ fn key_event(
             } else {
                 vkey
             };
-            Some(f(parse_normal_key(vkey, lparam, modifiers)?))
+            Some(f(parse_normal_key(vkey, lparam, modifiers, altgr)?))
         }
     }
 }
@@ -306,13 +308,24 @@ pub(crate) fn immutable_key_name(vkey: VIRTUAL_KEY) -> Option<&'static str> {
     })
 }
 
-fn parse_normal_key(vkey: VIRTUAL_KEY, lparam: LPARAM, mut modifiers: Modifiers) -> Option<Keystroke> {
+fn parse_normal_key(
+    vkey: VIRTUAL_KEY,
+    lparam: LPARAM,
+    mut modifiers: Modifiers,
+    altgr: bool,
+) -> Option<Keystroke> {
     let mut key_char = None;
     let key = match immutable_key_name(vkey) {
         Some(name) => name.to_string(),
         None => {
             let scan_code = (lparam.hiword() & 0xFF) as u32;
-            key_char = generate_key_char(vkey, scan_code, modifiers.control, modifiers.shift, modifiers.alt);
+            key_char = generate_key_char(
+                vkey,
+                scan_code,
+                modifiers.control || altgr,
+                modifiers.shift,
+                modifiers.alt || altgr,
+            );
             keystroke_key(vkey, scan_code, &mut modifiers)?
         }
     };
@@ -423,17 +436,24 @@ fn keyboard_uses_altgr() -> bool {
 
 /// The modifiers held now (AltGr is neither Ctrl nor Alt on layouts that have it).
 pub(crate) fn current_modifiers() -> Modifiers {
+    current_modifiers_with_altgr().0
+}
+
+fn current_modifiers_with_altgr() -> (Modifiers, bool) {
     let lmenu = key_pressed(VK_LMENU);
     let rmenu = key_pressed(VK_RMENU);
     let lcontrol = key_pressed(VK_LCONTROL);
     let altgr = rmenu && lcontrol && keyboard_uses_altgr();
-    Modifiers {
-        control: key_pressed(VK_CONTROL) && !altgr,
-        alt: (lmenu || rmenu) && !altgr,
-        shift: key_pressed(VK_SHIFT),
-        platform: key_pressed(VK_LWIN) || key_pressed(VK_RWIN),
-        function: false,
-    }
+    (
+        Modifiers {
+            control: key_pressed(VK_CONTROL) && !altgr,
+            alt: (lmenu || rmenu) && !altgr,
+            shift: key_pressed(VK_SHIFT),
+            platform: key_pressed(VK_LWIN) || key_pressed(VK_RWIN),
+            function: false,
+        },
+        altgr,
+    )
 }
 
 /// The caps lock state now.

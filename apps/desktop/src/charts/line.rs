@@ -14,14 +14,14 @@ use super::axis::{
     even_ticks, format_step, int_ticks, label_pow, nice_step, pow2_stride, pow2_ticks_every, superscript,
     ticks,
 };
-use super::cursor::{chip_label, cursor_value, cursor_x, nearest};
+use super::cursor::{chip_label, cursor_value, cursor_x, nearest_in_range};
 use super::domain::unit_domain;
 use super::ease::ease;
 use super::end_labels::{end_gutter, paint_end_names};
 use super::marks::{End, end_ink, end_radius, is_ink, merged_end, one_live, paint_best, paint_end};
 use super::smooth::{cached_envelope, memo, smoothed};
 use super::spec::{LineChart, Marker};
-use super::text::{paint_text, text_width};
+use super::text::{elide_text, paint_text, text_width};
 use crate::theme::{Theme, alpha, ty};
 
 /// Height of one marker-label lane above a plot.
@@ -243,24 +243,30 @@ fn paint_line_chart(
     let sx0 = |x: f32| left + plot_w * ((x - x0) / (x1 - x0));
     // Marker labels live in a band above the plot, in lanes so they never overlap each other, and
     // the data never runs through them.
-    let mut marker_layout: Vec<(Pixels, Pixels, usize, &Marker)> = Vec::new();
+    let mut marker_layout: Vec<(Pixels, Pixels, usize, String, &Marker)> = Vec::new();
     let ms: Vec<&Marker> =
         spec.markers.iter().filter(|m| m.x.is_finite() && m.x >= x0 && m.x <= x1).collect();
+    let marker_min = (left - px(4.)).max(bounds.left());
+    let marker_max = (left + plot_w + px(4.)).min(bounds.right());
+    let max_marker_text = (marker_max - marker_min - px(8.)).max(px(0.));
     // Placed in the order given: the first marker takes the top lane.
-    for m in ms {
+    for m in &ms {
+        let Some(fitted) = elide_text(window, &m.label, annot_size, max_marker_text) else {
+            continue;
+        };
         let x = sx0(m.x);
-        let w = text_width(window, &m.label, annot_size) + px(8.);
+        let w = text_width(window, &fitted, annot_size) + px(8.);
         // Right of the line, or left of it near the right edge; on a collision try the other side
         // before opening a second lane.
         let right = x + px(2.);
         let left_side = x - px(2.) - w;
         let sides = if right + w > left + plot_w { [left_side, right] } else { [right, left_side] };
         let free = |lx: Pixels, lane: usize| {
-            lx >= left - px(4.)
-                && lx + w <= left + plot_w + px(4.)
+            lx >= marker_min
+                && lx + w <= marker_max
                 && !marker_layout
                     .iter()
-                    .any(|(ox, ow, ol, _)| *ol == lane && *ox < lx + w + px(6.) && lx < *ox + *ow + px(6.))
+                    .any(|(ox, ow, ol, _, _)| *ol == lane && *ox < lx + w + px(6.) && lx < *ox + *ow + px(6.))
         };
         // Labels stay on their line: the next lane down before drifting away from it.
         // A pinned lane first; on a collision the other lanes, so labels never overdraw.
@@ -270,12 +276,17 @@ fn paint_line_chart(
         };
         let spots: Vec<(Pixels, usize)> =
             order.iter().flat_map(|&lane| sides.into_iter().map(move |lx| (lx, lane))).collect();
-        let fallback = (sides[0], m.lane.unwrap_or(2));
+        let fallback = (clamp_in(sides[0], marker_min, marker_max - w), m.lane.unwrap_or(2));
         let (lx, lane) = spots.into_iter().find(|&(lx, lane)| free(lx, lane)).unwrap_or(fallback);
-        marker_layout.push((lx, w, lane, m));
+        marker_layout.push((lx, w, lane, fitted, m));
     }
     let band = marker_layout.iter().map(|l| l.2 + 1).max().unwrap_or(0).max(spec.min_lanes) as f32 * LANE;
-    let (top_pad, bottom_pad) = if spec.axis_titles.is_some() { (26. + band, 40.) } else { (6. + band, 22.) };
+    let pow_pad = if ypow.is_some() && spec.pow_caption { label_size + 10. } else { 0. };
+    let (top_pad, bottom_pad) = if spec.axis_titles.is_some() {
+        ((26. + band).max(pow_pad), 40.)
+    } else {
+        ((6. + band).max(pow_pad), 22.)
+    };
     let plot_h = (bounds.size.height - px(top_pad) - px(bottom_pad)).max(px(0.));
     let plot = Bounds::new(point(left, bounds.top() + px(top_pad)), size(plot_w, plot_h));
     if plot_w <= px(0.) || plot_h <= px(0.) {
@@ -283,17 +294,30 @@ fn paint_line_chart(
         return;
     }
     if let Some((xt, yt)) = spec.axis_titles {
-        paint_text(window, cx, yt, point(bounds.left(), bounds.top()), t.text_tertiary, ty::SM.size, false);
-        let w = text_width(window, xt, ty::SM.size);
-        paint_text(
-            window,
-            cx,
-            xt,
-            point(plot.left() + (plot.size.width - w) / 2., plot.bottom() + px(22.)),
-            t.text_tertiary,
-            ty::SM.size,
-            false,
-        );
+        if let Some(yt_fit) = elide_text(window, yt, ty::SM.size, bounds.size.width) {
+            paint_text(
+                window,
+                cx,
+                &yt_fit,
+                point(bounds.left(), bounds.top()),
+                t.text_tertiary,
+                ty::SM.size,
+                false,
+            );
+        }
+        if let Some(xt_fit) = elide_text(window, xt, ty::SM.size, bounds.size.width) {
+            let w = text_width(window, &xt_fit, ty::SM.size);
+            let x = clamp_in(plot.left() + (plot.size.width - w) / 2., bounds.left(), bounds.right() - w);
+            paint_text(
+                window,
+                cx,
+                &xt_fit,
+                point(x, plot.bottom() + px(22.)),
+                t.text_tertiary,
+                ty::SM.size,
+                false,
+            );
+        }
     }
     plot_cell.set(Some(plot));
     let sx = |x: f32| plot.left() + plot.size.width * ((x - x0) / (x1 - x0));
@@ -309,15 +333,9 @@ fn paint_line_chart(
         // The shared factor, once, above the axis labels.
         let f = format!("× 10{}", superscript(p));
         let w = text_width(window, &f, label_size);
-        paint_text(
-            window,
-            cx,
-            &f,
-            point(plot.left() - px(8.) - w, plot.top() - px(label_size + 10.)),
-            t.chart_label,
-            label_size,
-            false,
-        );
+        let px_x = (plot.left() - px(8.) - w).max(bounds.left());
+        let px_y = (plot.top() - px(label_size + 10.)).max(bounds.top());
+        paint_text(window, cx, &f, point(px_x, px_y), t.chart_label, label_size, false);
     }
     for (v, l) in yticks.iter().zip(&ylabels) {
         let y = sy(*v);
@@ -362,17 +380,17 @@ fn paint_line_chart(
             Bounds::new(point(fx, plot.top()), size(px(1.), plot.size.height)),
             t.line_default,
         ));
-        if !label.is_empty() {
-            let w = text_width(window, label, annot_size);
+        if let Some(fitted) = elide_text(window, label, annot_size, (plot.size.width - px(10.)).max(px(0.))) {
+            let w = text_width(window, &fitted, annot_size);
             // At the start of the span (where "now" is): in the marker band, like the other
             // annotations, when the chart has one and lane 0 is free there; else inside the plot.
-            let lx = (fx + px(6.)).min(plot.right() - w - px(6.));
+            let lx = clamp_in(fx + px(6.), plot.left() + px(4.), plot.right() - w - px(6.));
             let in_band = band > 0.
-                && !marker_layout
-                    .iter()
-                    .any(|(ox, ow, lane, _)| *lane == 0 && *ox < lx + w + px(6.) && lx < *ox + *ow + px(6.));
+                && !marker_layout.iter().any(|(ox, ow, lane, _, _)| {
+                    *lane == 0 && *ox < lx + w + px(6.) && lx < *ox + *ow + px(6.)
+                });
             let y = if in_band { plot.top() - px(band) } else { plot.top() + px(4.) };
-            paint_text(window, cx, label, point(lx, y), t.text_tertiary, annot_size, false);
+            paint_text(window, cx, &fitted, point(lx, y), t.text_tertiary, annot_size, false);
         }
     }
     // Linked charts pass one tick count, so every chart in a group shows the same x ticks.
@@ -380,15 +398,19 @@ fn paint_line_chart(
     let xt = if spec.x_int { int_ticks(x0, x1, max_x) } else { even_ticks(x0, x1, max_x) };
     // Where the cursor chip will sit (legend-driven charts), so tick labels give way to it.
     // The chip's real span (same label and clamping as where it's painted).
+    let chip_min = (plot.left() - px(4.)).max(bounds.left());
+    let chip_max = plot.right().min(bounds.right());
+    let max_chip_text = (chip_max - chip_min - px(10.)).max(px(0.));
     let chip_span = (!spec.readout && has_data)
         .then_some(spec.hover)
         .flatten()
         .filter(|f| f.is_finite())
-        .and_then(|f| cursor_x(&spec.series, x0 + (x1 - x0) * f, x1 - x0))
-        .map(|v| {
-            let w = text_width(window, &chip_label(spec, v), annot_size) + px(10.);
-            let left = clamp_in(sx(v) - w / 2., plot.left() - px(4.), plot.right() - w);
-            (left, left + w)
+        .and_then(|f| cursor_x(&spec.series, x0 + (x1 - x0) * f, x0, x1))
+        .and_then(|v| {
+            let fitted = elide_text(window, &chip_label(spec, v), annot_size, max_chip_text)?;
+            let w = text_width(window, &fitted, annot_size) + px(10.);
+            let left = clamp_in(sx(v) - w / 2., chip_min, chip_max - w);
+            Some((left, left + w))
         });
     for v in &xt {
         let x = sx(*v);
@@ -405,8 +427,7 @@ fn paint_line_chart(
     }
 
     // Markers: dashed lines under the data, labels in the band above the plot.
-    let mut labels: Vec<(Bounds<Pixels>, &Marker)> = Vec::new();
-    for (lx, w, lane, m) in &marker_layout {
+    for m in &ms {
         let x = sx(m.x);
         stroke_path(
             window,
@@ -415,11 +436,14 @@ fn paint_line_chart(
             alpha(m.color, 0.5),
             DASHED,
         );
+    }
+    let mut labels: Vec<(Bounds<Pixels>, &str, &Marker)> = Vec::new();
+    for (lx, w, lane, fitted, m) in &marker_layout {
         let r = Bounds::new(
             point(*lx, plot.top() - px(band) - px(1.) + px(*lane as f32 * LANE)),
             size(*w, px(15.)),
         );
-        labels.push((r, m));
+        labels.push((r, fitted.as_str(), m));
     }
     let columns = (plot.size.width / px(1.)).max(1.0) as usize;
     // Each line's last drawn point (the smoothed one for a smoothed line): its end mark and its name.
@@ -545,12 +569,12 @@ fn paint_line_chart(
             window.paint_quad(fill(Bounds::centered_at(p, size(px(7.), px(7.))), c).corner_radii(px(3.5)));
         }
     }
-    for (r, m) in &labels {
+    for (r, fitted, m) in &labels {
         window.paint_quad(fill(*r, t.bg_panel).corner_radii(px(3.)));
         paint_text(
             window,
             cx,
-            &m.label,
+            fitted,
             point(r.left() + px(4.), r.top() + px(1.)),
             m.color,
             annot_size,
@@ -569,9 +593,14 @@ fn paint_line_chart(
     let mut snap_x = None;
     for s in &spec.series {
         let data = if s.smooth > 0.0 { smoothed(&s.points, s.smooth) } else { s.points.clone() };
-        if let Some(i) = nearest(&data, hx) {
+        if let Some(i) = nearest_in_range(&data, hx, x0, x1) {
             let (x, y) = data[i];
-            if !x.is_finite() || !y.is_finite() || ((x - hx).abs() > (x1 - x0) * 0.06 && s.points.len() > 1) {
+            if !x.is_finite()
+                || !y.is_finite()
+                || x < x0
+                || x > x1
+                || ((x - hx).abs() > (x1 - x0) * 0.06 && s.points.len() > 1)
+            {
                 continue;
             }
             snap_x.get_or_insert(x);
@@ -597,22 +626,23 @@ fn paint_line_chart(
     ));
     if !spec.readout {
         // The values are in the header legend; the axis says where the cursor is.
-        let l = chip_label(spec, snap);
-        let w = text_width(window, &l, annot_size) + px(10.);
-        let chip = Bounds::new(
-            point(clamp_in(cx_px - w / 2., plot.left() - px(4.), plot.right() - w), plot.bottom() + px(3.)),
-            size(w, px(16.)),
-        );
-        window.paint_quad(fill(chip, t.text_primary).corner_radii(px(3.)));
-        paint_text(
-            window,
-            cx,
-            &l,
-            point(chip.left() + px(5.), chip.top() + px(1.)),
-            t.bg_panel,
-            annot_size,
-            false,
-        );
+        if let Some(l) = elide_text(window, &chip_label(spec, snap), annot_size, max_chip_text) {
+            let w = text_width(window, &l, annot_size) + px(10.);
+            let chip = Bounds::new(
+                point(clamp_in(cx_px - w / 2., chip_min, chip_max - w), plot.bottom() + px(3.)),
+                size(w, px(16.)),
+            );
+            window.paint_quad(fill(chip, t.text_primary).corner_radii(px(3.)));
+            paint_text(
+                window,
+                cx,
+                &l,
+                point(chip.left() + px(5.), chip.top() + px(1.)),
+                t.bg_panel,
+                annot_size,
+                false,
+            );
+        }
         return;
     }
     // Readout box.

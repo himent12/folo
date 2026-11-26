@@ -428,3 +428,292 @@ fn nested_scroll_containers_prevent_outer_scroll_until_inner_reaches_boundary() 
     assert_eq!(inner.offset().y, px(-60.));
     assert_eq!(outer.offset().y, px(-40.));
 }
+
+#[test]
+fn empty_padded_scroll_div_has_zero_max_offset_and_bordered_scroll_reaches_bottom() {
+    use crate::{
+        InteractiveElement, Modifiers, PlatformInput, ScrollDelta, ScrollHandle, ScrollWheelEvent,
+        StatefulInteractiveElement, TouchPhase, point,
+    };
+
+    let outer = ScrollHandle::new();
+    let empty_inner = ScrollHandle::new();
+    let bordered = ScrollHandle::new();
+
+    let (mut app, window) = open({
+        let (outer, empty_inner, bordered) = (outer.clone(), empty_inner.clone(), bordered.clone());
+        move |_, _| {
+            div()
+                .flex()
+                .flex_row()
+                .child(
+                    div()
+                        .id("outer-empty")
+                        .w(px(100.))
+                        .h(px(100.))
+                        .overflow_y_scroll()
+                        .track_scroll(&outer)
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .id("empty-padded")
+                                        .w_full()
+                                        .h(px(60.))
+                                        .p(px(16.))
+                                        .overflow_y_scroll()
+                                        .track_scroll(&empty_inner),
+                                )
+                                .child(div().h(px(200.)).w_full()),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("bordered-scroll")
+                        .w(px(100.))
+                        .h(px(100.))
+                        .border_4()
+                        .border_color(rgb(0x444444))
+                        .overflow_y_scroll()
+                        .track_scroll(&bordered)
+                        .child(div().h(px(200.)).w_full().bg(rgb(0x11aa22))),
+                )
+                .into_any_element()
+        }
+    });
+
+    draw(&mut app, window);
+    assert_eq!(empty_inner.max_offset().height, px(0.), "empty padded div must not scroll");
+    // 200px child inside 100px box with 4px top+bottom borders (inner 92px) => max_offset = 108px.
+    assert_eq!(bordered.max_offset().height, px(108.));
+
+    // Wheel over the empty padded inner container chains directly to outer without getting swallowed.
+    app.simulate_input(
+        window,
+        PlatformInput::ScrollWheel(ScrollWheelEvent {
+            position: point(px(20.), px(20.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-30.))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        }),
+    );
+    draw(&mut app, window);
+    assert_eq!(empty_inner.offset().y, px(0.));
+    assert_eq!(outer.offset().y, px(-30.));
+
+    // Non-finite wheel deltas are ignored and never poison scroll_offset.
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        app.simulate_input(
+            window,
+            PlatformInput::ScrollWheel(ScrollWheelEvent {
+                position: point(px(150.), px(50.)),
+                delta: ScrollDelta::Pixels(point(px(0.), px(bad))),
+                modifiers: Modifiers::none(),
+                touch_phase: TouchPhase::Moved,
+            }),
+        );
+        draw(&mut app, window);
+        assert_eq!(bordered.offset().y, px(0.), "non-finite delta {bad} must not move offset");
+    }
+}
+
+#[test]
+fn negative_scrolled_child_bounds_do_not_inflate_inner_scroll_or_anchored_size() {
+    use crate::{InteractiveElement, ScrollHandle, StatefulInteractiveElement, anchored, point};
+
+    let outer = ScrollHandle::new();
+    let inner = ScrollHandle::new();
+    let anchored_bounds: Rc<RefCell<Option<crate::Bounds<Pixels>>>> = Rc::new(RefCell::new(None));
+    let (mut app, window) = open({
+        let (outer, inner, anchored_bounds) = (outer.clone(), inner.clone(), anchored_bounds.clone());
+        move |_, _| {
+            let ab = anchored_bounds.clone();
+            div()
+                .id("outer-neg")
+                .w(px(200.))
+                .h(px(100.))
+                .overflow_y_scroll()
+                .track_scroll(&outer)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .id("inner-neg")
+                                .w_full()
+                                .h(px(100.))
+                                .overflow_y_scroll()
+                                .track_scroll(&inner)
+                                .child(div().h(px(150.)).w_full()),
+                        )
+                        .child(
+                            div().relative().h(px(40.)).w_full().child(
+                                anchored()
+                                    .position(point(px(10.), px(10.)))
+                                    .snap_to_window_with_margin(px(0.))
+                                    .child(
+                                        crate::canvas(
+                                            move |b, _, _| *ab.borrow_mut() = Some(b),
+                                            |_, _, _, _| {},
+                                        )
+                                        .w(px(60.))
+                                        .h(px(30.)),
+                                    ),
+                            ),
+                        )
+                        .child(div().h(px(400.)).w_full()),
+                )
+                .into_any_element()
+        }
+    });
+
+    draw(&mut app, window);
+    assert_eq!(inner.max_offset().height, px(50.));
+
+    // Scroll outer far down so inner's children sit entirely at negative y (< 0).
+    outer.set_offset(point(px(0.), px(-300.)));
+    app.update(|cx| cx.refresh_windows());
+    draw(&mut app, window);
+    assert_eq!(
+        inner.max_offset().height,
+        px(50.),
+        "negative child y coordinates must not inflate content height to 0 - child_min"
+    );
+    let b = anchored_bounds.borrow().expect("anchored child prepainted");
+    assert_eq!(b.origin, point(px(10.), px(10.)), "anchored size stays 30px instead of inflating");
+}
+
+#[test]
+fn uniform_list_clamps_inverted_visible_range_and_out_of_bounds_deferred_scroll() {
+    use std::cell::Cell;
+
+    let handle = UniformListScrollHandle::new();
+    let count = Rc::new(Cell::new(5usize));
+    let height = Rc::new(Cell::new(0.0f32));
+    let ranges = Rc::new(RefCell::new(Vec::<Range<usize>>::new()));
+
+    let (mut app, window) = open({
+        let (handle, count, height, ranges) = (handle.clone(), count.clone(), height.clone(), ranges.clone());
+        move |_, _| {
+            let ranges = ranges.clone();
+            let n = count.get();
+            div()
+                .h(px(height.get()))
+                .w(px(80.))
+                .child(
+                    uniform_list("edge", n, move |range, _, _| {
+                        assert!(
+                            range.start <= range.end && range.end <= n,
+                            "visible_range {range:?} must never invert or exceed item_count"
+                        );
+                        ranges.borrow_mut().push(range.clone());
+                        range.map(|ix| div().h(px(20.)).w_full().bg(rgb(ix as u32 + 1))).collect::<Vec<_>>()
+                    })
+                    .h_full()
+                    .pb(px(24.))
+                    .track_scroll(handle.clone()),
+                )
+                .into_any_element()
+        }
+    });
+
+    // Collapsed 0px viewport scrolled past the last item into bottom padding: must not invert range.
+    let base = handle.0.borrow().base_handle.clone();
+    base.set_offset(crate::point(px(0.), px(-124.)));
+    draw(&mut app, window);
+
+    // Shrink list to 1 item inside a 100px viewport with 50px bottom padding while requesting an
+    // out-of-bounds deferred scroll index: offset must stay clamped to 0.
+    height.set(100.);
+    count.set(1);
+    handle.scroll_to_item(5, ScrollStrategy::Top);
+    app.update(|cx| cx.refresh_windows());
+    draw(&mut app, window);
+    assert_eq!(base.offset().y, px(0.), "deferred scroll clamps to min_scroll_offset..=0");
+}
+
+#[test]
+fn tooltip_does_not_appear_while_mouse_button_held_or_file_drag_active() {
+    use std::cell::Cell;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use crate::{
+        AppContext, ExternalPaths, FileDropEvent, InteractiveElement, Modifiers, MouseButton, MouseDownEvent,
+        MouseMoveEvent, MouseUpEvent, PlatformInput, Render, StatefulInteractiveElement, point,
+    };
+
+    struct TipView;
+    impl Render for TipView {
+        fn render(&mut self, _: &mut crate::Window, _: &mut crate::Context<Self>) -> impl IntoElement {
+            div().w(px(40.)).h(px(16.)).bg(rgb(0xabcdef))
+        }
+    }
+
+    let built = Rc::new(Cell::new(0usize));
+    let (mut app, window) = open({
+        let built = built.clone();
+        move |_, _| {
+            let built = built.clone();
+            div()
+                .size_full()
+                .child(div().id("tip-target").w(px(80.)).h(px(40.)).bg(rgb(0x222222)).tooltip(
+                    move |_, cx| {
+                        built.set(built.get() + 1);
+                        cx.new(|_| TipView).into()
+                    },
+                ))
+                .into_any_element()
+        }
+    });
+    draw(&mut app, window);
+
+    // 1. Holding left mouse button from outside and dragging into the tooltipped element must not
+    // schedule or build a tooltip.
+    app.simulate_input(
+        window,
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(px(150.), px(150.)),
+            modifiers: Modifiers::none(),
+            click_count: 1,
+            first_mouse: false,
+        }),
+    );
+    app.simulate_input(
+        window,
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: point(px(20.), px(20.)),
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::none(),
+        }),
+    );
+    app.advance_clock(Duration::from_millis(700));
+    draw(&mut app, window);
+    assert_eq!(built.get(), 0, "dragging with a held mouse button must not show tooltips");
+    app.simulate_input(
+        window,
+        PlatformInput::MouseUp(MouseUpEvent {
+            button: MouseButton::Left,
+            position: point(px(150.), px(150.)),
+            modifiers: Modifiers::none(),
+            click_count: 1,
+        }),
+    );
+    draw(&mut app, window);
+
+    // 2. Hovering during an active file drag must not schedule or build a tooltip either.
+    app.simulate_input(
+        window,
+        PlatformInput::FileDrop(FileDropEvent::Entered {
+            position: point(px(20.), px(20.)),
+            paths: ExternalPaths::new(vec![PathBuf::from("test.png")]),
+        }),
+    );
+    app.advance_clock(Duration::from_millis(700));
+    draw(&mut app, window);
+    assert_eq!(built.get(), 0, "file drag hover must not schedule or build tooltips");
+}

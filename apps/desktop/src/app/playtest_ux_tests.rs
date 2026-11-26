@@ -919,3 +919,6 @@ fn select_paging_clamped_highlight_and_export_menu_exclusivity() {
 
 #[path = "playtest_r7_tests.rs"]
 mod playtest_r7_tests;
+
+#[path = "sprint8_tests.rs"]
+mod sprint8_tests;

@@ -76,6 +76,8 @@ pub struct DispatchTree {
     pub(crate) focusable_node_ids: HashMap<FocusId, DispatchNodeId>,
     /// Tracked focus handles in paint order.
     pub(crate) tab_stops: Vec<TabStop>,
+    /// Last insertion index in `tab_stops` for each `FocusId`, for O(1) deduplication and anchor lookup.
+    pub(crate) tab_stop_last_index: HashMap<FocusId, usize>,
     /// The keymap (shared with the app).
     pub(crate) keymap: Option<Rc<RefCell<Keymap>>>,
 }
@@ -89,6 +91,7 @@ impl DispatchTree {
             context_stack: Vec::new(),
             focusable_node_ids: HashMap::new(),
             tab_stops: Vec::new(),
+            tab_stop_last_index: HashMap::new(),
             keymap: None,
         }
     }
@@ -100,6 +103,7 @@ impl DispatchTree {
         self.context_stack.clear();
         self.focusable_node_ids.clear();
         self.tab_stops.clear();
+        self.tab_stop_last_index.clear();
     }
 
     /// How many nodes the tree has.
@@ -179,7 +183,9 @@ impl DispatchTree {
 
     /// Records a tracked focus handle for Tab order (GPUI's `TabStopMap::insert`, called at paint).
     pub(crate) fn insert_tab_stop(&mut self, focus_id: FocusId, tab_index: isize, tab_stop: bool) {
+        let ix = self.tab_stops.len();
         self.tab_stops.push(TabStop { focus_id, tab_index, tab_stop });
+        self.tab_stop_last_index.insert(focus_id, ix);
     }
 
     /// Adds a key listener to the current node.
@@ -267,8 +273,13 @@ impl DispatchTree {
     pub(crate) fn next_tab_stop(&self, focused: Option<FocusId>, reverse: bool) -> Option<FocusId> {
         let key = |ix: usize| (self.tab_stops[ix].tab_index, ix);
         // GPUI looks the focused handle up by id; a handle inserted twice resolves to its last insertion.
-        let anchor = focused.and_then(|id| self.tab_stops.iter().rposition(|stop| stop.focus_id == id));
-        let candidates = || (0..self.tab_stops.len()).filter(|ix| self.tab_stops[*ix].tab_stop);
+        let anchor = focused.and_then(|id| self.tab_stop_last_index.get(&id).copied());
+        let candidates = || {
+            (0..self.tab_stops.len()).filter(|&ix| {
+                let stop = &self.tab_stops[ix];
+                stop.tab_stop && self.tab_stop_last_index.get(&stop.focus_id) == Some(&ix)
+            })
+        };
         let found = match (anchor, reverse) {
             (Some(anchor), false) => {
                 candidates().filter(|ix| key(*ix) > key(anchor)).min_by_key(|ix| key(*ix))
@@ -332,6 +343,18 @@ mod tests {
         assert_eq!(tree.next_tab_stop(Some(FocusId(99)), false), Some(FocusId(1)));
         assert_eq!(tree.next_tab_stop(Some(FocusId(99)), true), Some(FocusId(7)));
         assert_eq!(tree_with(&[(1, 0, false)]).next_tab_stop(None, false), None);
+
+        // Duplicate insertions of the same FocusHandle resolve to the last occurrence and never
+        // trap focus forward or backward.
+        let dup_split = tree_with(&[(1, 0, true), (2, 0, true), (1, 0, true)]);
+        assert_eq!(dup_split.next_tab_stop(None, false), Some(FocusId(2)));
+        assert_eq!(dup_split.next_tab_stop(Some(FocusId(2)), false), Some(FocusId(1)));
+        assert_eq!(dup_split.next_tab_stop(Some(FocusId(1)), false), Some(FocusId(2)));
+        assert_eq!(dup_split.next_tab_stop(Some(FocusId(1)), true), Some(FocusId(2)));
+
+        let dup_adj = tree_with(&[(1, 0, true), (1, 0, true), (2, 0, true)]);
+        assert_eq!(dup_adj.next_tab_stop(Some(FocusId(1)), false), Some(FocusId(2)));
+        assert_eq!(dup_adj.next_tab_stop(Some(FocusId(1)), true), Some(FocusId(2)));
     }
 
     #[test]

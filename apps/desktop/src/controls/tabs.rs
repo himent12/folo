@@ -77,6 +77,10 @@ impl FoloApp {
                 let keys = on_select.clone();
                 let tab_key = key.to_string();
                 let el = el.on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
+                    let m = &ev.keystroke.modifiers;
+                    if m.control || m.alt || m.platform {
+                        return;
+                    }
                     let next = match ev.keystroke.key.as_str() {
                         "left" => (i + n - 1) % n,
                         "right" => (i + 1) % n,

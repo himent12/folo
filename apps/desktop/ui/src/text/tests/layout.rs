@@ -475,13 +475,43 @@ fn x_and_font_id_for_index_handle_visual_order_rtl_glyphs() {
             },
         ],
     };
-    assert_eq!(layout.x_for_index(0), px(20.));
-    assert_eq!(layout.x_for_index(1), px(10.));
-    assert_eq!(layout.x_for_index(2), px(10.));
-    assert_eq!(layout.x_for_index(4), px(0.));
-    assert_eq!(layout.x_for_index(6), px(30.));
+    // RTL logical caret positions walk right-to-left: logical start (0) is the visual right edge
+    // (30 px), intermediate boundaries sit between clusters (20 px, 10 px), and logical end (6) is
+    // the visual left edge (0 px).
+    assert_eq!(layout.x_for_index(0), px(30.));
+    assert_eq!(layout.x_for_index(1), px(20.));
+    assert_eq!(layout.x_for_index(2), px(20.));
+    assert_eq!(layout.x_for_index(4), px(10.));
+    assert_eq!(layout.x_for_index(6), px(0.));
     assert_eq!(layout.font_id_for_index(0), Some(crate::FontId(2)));
     assert_eq!(layout.font_id_for_index(2), Some(crate::FontId(1)));
     assert_eq!(layout.font_id_for_index(4), Some(crate::FontId(1)));
     assert_eq!(layout.font_id_for_index(6), None);
+}
+
+#[test]
+fn shape_text_enforces_line_clamp_across_explicit_newlines() {
+    let window = window_text_system();
+    let style = crate::TextStyle { font_family: "Fixed".into(), ..Default::default() };
+
+    // Three newline-separated lines with line_clamp(1): only 1 visual line may be produced.
+    let multi = "line1\nline2\nline3";
+    let runs = [style.to_run(multi.len())];
+    let clamped = window.shape_text(multi.into(), px(16.), &runs, Some(px(200.)), Some(1)).unwrap();
+    assert_eq!(clamped.len(), 1);
+    assert_eq!(clamped[0].text.as_ref(), "line1");
+    let fast = window.shape_text_with_style(multi.into(), px(16.), &style, Some(px(200.)), Some(1)).unwrap();
+    assert_eq!(fast.len(), 1);
+    assert_eq!(fast[0].text.as_ref(), "line1");
+
+    // Paragraph 1 wraps into 2 visual lines, exhausting line_clamp(2), so paragraph 2 is omitted.
+    let wrapped_multi = "aa bb cc dd\nee ff";
+    let runs2 = [style.to_run(wrapped_multi.len())];
+    let clamped2 = window.shape_text(wrapped_multi.into(), px(16.), &runs2, Some(px(60.)), Some(2)).unwrap();
+    let total_visual_lines: usize = clamped2.iter().map(|l| l.layout.wrap_boundaries.len() + 1).sum();
+    assert_eq!(total_visual_lines, 2);
+    let fast2 =
+        window.shape_text_with_style(wrapped_multi.into(), px(16.), &style, Some(px(60.)), Some(2)).unwrap();
+    let fast_visual_lines: usize = fast2.iter().map(|l| l.layout.wrap_boundaries.len() + 1).sum();
+    assert_eq!(fast_visual_lines, 2);
 }
