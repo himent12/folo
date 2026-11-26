@@ -1,8 +1,8 @@
 //! Matrix-NMS (Wang et al. 2020, SOLOv2): non-sequential parallel score decay.
 //!
-//! For candidates sorted by descending score `s_0 >= s_1 >= ... >= s_{m-1}` with upper-triangular pairwise
-//! IoU `M_{i,j} = IoU(b_i, b_j)` (`i < j`), let `M_max(i) = max_{k < i} M_{k, i}` be candidate `i`'s maximum
-//! overlap with any higher-scoring box (`M_max(0) = 0`). The decay factor applied to candidate `j` is:
+//! For finite-scored candidates sorted by descending score `s_0 >= s_1 >= ... >= s_{m-1}` with upper-triangular
+//! pairwise IoU `M_{i,j} = IoU(b_i, b_j)` (`i < j`), let `M_max(i) = max_{k < i} M_{k, i}` be candidate `i`'s
+//! maximum overlap with any higher-scoring box (`M_max(0) = 0`). The decay factor applied to candidate `j` is:
 //!
 //! ```text
 //! Linear kernel:    decay_j = min(1, min_{i < j} (1 - M_{i,j}) / (1 - M_max(i)))
@@ -11,10 +11,11 @@
 //! ```
 //!
 //! Because `M_max(i)` depends only on `k < i`, a single upper-triangular sweep computes exact Matrix-NMS in
-//! `O(m)` memory instead of allocating an `m x m` matrix, with zero division-by-zero when `M_max(i) == 1`
-//! (since `M_{i,j} <= M_max(i)` implies `decay >= 1` and cannot reduce `min_decay[j] <= 1`).
+//! `O(m)` memory instead of allocating an `m x m` matrix, with exact `f64` IoU (avoiding `f32` rounding to
+//! `1.0` on near-identical boxes) and zero division-by-zero when `M_max(i) == 1` (since `M_{i,j} <= M_max(i)`
+//! implies `decay >= 1` and cannot reduce `min_decay[j] <= 1`).
 
-use crate::boxes::{IouKind, Xyxy, iou};
+use crate::boxes::Xyxy;
 use rayon::prelude::*;
 
 use super::kernel::bucket_by_class;
@@ -22,8 +23,9 @@ use super::kernel::bucket_by_class;
 /// Total candidate count above which class buckets run in parallel.
 const PAR_BUCKETS: usize = 2048;
 
+/// Exact collapsed `f64` IoU of two boxes (`0.0` if either box has non-finite coordinates or zero union).
 #[inline]
-fn safe_iou_f64(a: &Xyxy, b: &Xyxy) -> f64 {
+pub(crate) fn exact_iou_f64(a: &Xyxy, b: &Xyxy) -> f64 {
     if !(a.x1.is_finite()
         && a.y1.is_finite()
         && a.x2.is_finite()
@@ -35,7 +37,15 @@ fn safe_iou_f64(a: &Xyxy, b: &Xyxy) -> f64 {
     {
         return 0.0;
     }
-    (iou(a, b, IouKind::Iou) as f64).clamp(0.0, 1.0)
+    let (ax1, ay1) = (a.x1 as f64, a.y1 as f64);
+    let (ax2, ay2) = (a.x2.max(a.x1) as f64, a.y2.max(a.y1) as f64);
+    let (bx1, by1) = (b.x1 as f64, b.y1 as f64);
+    let (bx2, by2) = (b.x2.max(b.x1) as f64, b.y2.max(b.y1) as f64);
+    let iw = (ax2.min(bx2) - ax1.max(bx1)).max(0.0);
+    let ih = (ay2.min(by2) - ay1.max(by1)).max(0.0);
+    let inter = iw * ih;
+    let union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter;
+    if union > 0.0 { (inter / union).clamp(0.0, 1.0) } else { 0.0 }
 }
 
 /// Matrix-NMS (Wang et al. 2020) over `boxes` and `scores` (not required to be pre-sorted).
@@ -43,7 +53,8 @@ fn safe_iou_f64(a: &Xyxy, b: &Xyxy) -> f64 {
 /// - `sigma == None`: Linear Matrix-NMS (`decay = min_{i < j} (1 - M_{i,j}) / (1 - M_max(i))`).
 /// - `sigma == Some(s)`: Gaussian Matrix-NMS (`decay = min_{i < j} exp(-(M_{i,j}² - M_max(i)²) / s)`).
 ///
-/// Non-positive scores are never multiplied (so decay can never increase a score). Returns
+/// Non-finite scores (`NaN`, `±Inf`) are dropped before sorting so malformed entries can never suppress valid
+/// detections. Non-positive scores are never multiplied (so decay can never increase a score). Returns
 /// `(input_index, decayed_score)` pairs sorted by descending decayed score (ties: lower input index),
 /// keeping only boxes whose final score is `> score_thr` and stopping at `limit`.
 ///
@@ -64,7 +75,7 @@ pub fn matrix_nms_sorted(
     if n == 0 || limit == 0 {
         return Vec::new();
     }
-    let mut order: Vec<usize> = (0..n).filter(|&i| scores[i] > score_thr).collect();
+    let mut order: Vec<usize> = (0..n).filter(|&i| scores[i].is_finite() && scores[i] > score_thr).collect();
     if order.is_empty() {
         return Vec::new();
     }
@@ -82,7 +93,7 @@ pub fn matrix_nms_sorted(
         let m_i_sq = m_i * m_i;
         let inv_one_minus_mi = if sigma64.is_none() && m_i < 1.0 { 1.0 / (1.0 - m_i) } else { 0.0 };
         for j in (i + 1)..m {
-            let ov = safe_iou_f64(bi, &sorted_boxes[j]);
+            let ov = exact_iou_f64(bi, &sorted_boxes[j]);
             if ov > max_iou_above[j] {
                 max_iou_above[j] = ov;
             }
@@ -162,25 +173,21 @@ mod tests {
     use crate::nms::{Detection, NmsConfig, NmsKind, batched_nms_with_kind, nms_detections};
 
     #[test]
-    fn matrix_nms_matches_exact_formula_and_prevents_false_suppression() {
-        // b0 (0.9) and b1 (0.8) overlap strongly (IoU = 1/3 -> let's make IoU = 0.8: [0,0,10,10] & [1,0,11,10] -> inter 90, union 110, IoU = 9/11).
-        // b2 (0.7) overlaps b1 moderately (IoU = 4/16 = 0.25) and is disjoint from b0 (IoU = 0).
-        // Because b1 already has M_max(1) = 9/11 > M_{1,2} = 0.25, Matrix-NMS does NOT suppress b2!
+    fn matrix_nms_matches_exact_formula_and_compensation_branches() {
+        // Case 1: b0 (0.9) and b1 (0.8) overlap strongly (IoU = 9/11); b2 (0.7) overlaps b1 moderately
+        // (IoU = 4/16 = 0.25) and b0 lightly (IoU = 3/17). Because M_max(1) = 9/11 > M_{1,2} = 0.25,
+        // b1 adds no extra decay to b2; only b0 decays b2.
         let b0 = Xyxy::new(0.0, 0.0, 10.0, 10.0);
         let b1 = Xyxy::new(1.0, 0.0, 11.0, 10.0);
         let b2 = Xyxy::new(7.0, 0.0, 17.0, 10.0);
         let boxes = [b0, b1, b2];
         let scores = [0.9f32, 0.8, 0.7];
 
-        let iou01 = iou(&b0, &b1, IouKind::Iou) as f64;
-        let iou02 = iou(&b0, &b2, IouKind::Iou) as f64;
-        let iou12 = iou(&b1, &b2, IouKind::Iou) as f64;
+        let iou01 = exact_iou_f64(&b0, &b1);
+        let iou02 = exact_iou_f64(&b0, &b2);
+        let iou12 = exact_iou_f64(&b1, &b2);
         assert!(iou01 > iou12 && iou02 > 0.0 && iou12 > 0.0);
 
-        // Linear Matrix-NMS:
-        // j=0: decay=1 -> 0.9
-        // j=1: M_max(0)=0, M_{0,1}=iou01 -> decay = 1 - iou01
-        // j=2: from i=0: decay = 1 - iou02; from i=1: M_{1,2} < M_max(1)=iou01 so decay = 1.0
         let lin = matrix_nms_sorted(&boxes, &scores, 0.0, None, 10);
         let want1 = (0.8 * (1.0 - iou01)) as f32;
         let want2 = (0.7 * (1.0 - iou02)) as f32;
@@ -192,7 +199,6 @@ mod tests {
         assert_eq!(lin[2].0, 1);
         assert!((lin[2].1 - want1).abs() < 1e-6);
 
-        // Gaussian Matrix-NMS with sigma = 0.5:
         let sigma = 0.5f32;
         let gau = matrix_nms_sorted(&boxes, &scores, 0.0, Some(sigma), 10);
         let g1 = (0.8 * (-(iou01 * iou01) / 0.5).exp()) as f32;
@@ -201,13 +207,30 @@ mod tests {
         assert!((map[&0] - 0.9).abs() < 1e-6);
         assert!((map[&1] - g1).abs() < 1e-6);
         assert!((map[&2] - g2).abs() < 1e-6);
+
+        // Case 2: Non-trivial compensation branch `0 < M_max(1) < M_{1,2}`:
+        // c0=[0,0,10,10], c1=[6,0,16,10] (IoU = 4/16 = 0.25), c2=[8,0,18,10] (IoU(c0,c2)=2/18=1/9, IoU(c1,c2)=8/12=2/3).
+        // For c2 from c1: M_max(1)=0.25 < M_{1,2}=2/3 => linear decay = (1 - 2/3) / (1 - 1/4) = 4/9.
+        let c0 = Xyxy::new(0.0, 0.0, 10.0, 10.0);
+        let c1 = Xyxy::new(6.0, 0.0, 16.0, 10.0);
+        let c2 = Xyxy::new(8.0, 0.0, 18.0, 10.0);
+        let lin_c = matrix_nms_sorted(&[c0, c1, c2], &[0.9, 0.8, 0.7], 0.0, None, 10);
+        let map_l: std::collections::HashMap<usize, f32> = lin_c.into_iter().collect();
+        let want_lin_c2 = (0.7 * ((1.0 - 2.0 / 3.0) / (1.0 - 0.25))) as f32;
+        assert!((map_l[&2] - want_lin_c2).abs() < 1e-6, "got {} vs {want_lin_c2}", map_l[&2]);
+
+        let gau_c = matrix_nms_sorted(&[c0, c1, c2], &[0.9, 0.8, 0.7], 0.0, Some(0.5), 10);
+        let map_g: std::collections::HashMap<usize, f32> = gau_c.into_iter().collect();
+        let m12 = 2.0f64 / 3.0;
+        let m_max1 = 0.25f64;
+        let want_gau_c2 = (0.7 * (-(m12 * m12 - m_max1 * m_max1) / 0.5).exp()) as f32;
+        assert!((map_g[&2] - want_gau_c2).abs() < 1e-6, "got {} vs {want_gau_c2}", map_g[&2]);
     }
 
     #[test]
-    fn matrix_nms_exact_duplicates_and_degenerate_inputs_are_stable() {
+    fn matrix_nms_duplicates_inf_scores_and_near_identical_f64_precision() {
         let b = Xyxy::new(10.0, 10.0, 30.0, 30.0);
         // Three identical boxes: M_max(1) == 1.0 must not divide by zero!
-        // Box 0 keeps full score; box 1 and box 2 both get IoU=1.0 against box 0 -> linear decay 0.0.
         let lin = matrix_nms_sorted(&[b, b, b], &[0.9, 0.8, 0.7], 0.0, None, 10);
         assert_eq!(lin, vec![(0, 0.9)]);
 
@@ -218,6 +241,30 @@ mod tests {
         assert!((gau[0].1 - 0.9).abs() < 1e-6);
         assert!((gau[1].1 - (0.8 * d) as f32).abs() < 1e-6);
         assert!((gau[2].1 - (0.7 * d) as f32).abs() < 1e-6);
+
+        // +Inf score must be dropped and never suppress valid detections or evict at max_candidates.
+        let inf_out = matrix_nms_sorted(&[b, b], &[f32::INFINITY, 0.8], 0.25, None, 10);
+        assert_eq!(inf_out, vec![(1, 0.8)]);
+        let dets_inf = vec![
+            Detection { bbox: b, score: f32::INFINITY, class: 0 },
+            Detection { bbox: b, score: 0.8, class: 0 },
+        ];
+        let cfg_cap = NmsConfig {
+            conf: 0.25,
+            max_candidates: 1,
+            nms_kind: NmsKind::MatrixLinear,
+            ..NmsConfig::default()
+        };
+        let kept_inf = nms_detections(&dets_inf, &cfg_cap);
+        assert_eq!(kept_inf.len(), 1);
+        assert_eq!(kept_inf[0].score, 0.8);
+
+        // Near-identical boxes `[0,0,1,1]` and `[1e-8,0,1,1]`: exact f64 IoU preserves `~8e-9` instead of rounding to 1.0.
+        let near_a = Xyxy::new(0.0, 0.0, 1.0, 1.0);
+        let near_b = Xyxy::new(1e-8, 0.0, 1.0, 1.0);
+        let near_out = matrix_nms_sorted(&[near_a, near_b], &[0.9, 0.8], 0.0, None, 10);
+        assert_eq!(near_out.len(), 2, "near-identical box must not round IoU to 1.0");
+        assert!((near_out[1].1 - 8e-9).abs() < 1e-9, "got {}", near_out[1].1);
 
         // NaN scores, non-finite boxes, inverted/zero-area boxes never produce NaN.
         let messy = [

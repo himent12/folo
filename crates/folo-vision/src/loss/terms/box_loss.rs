@@ -439,23 +439,30 @@ pub(super) fn dfl_box_from_logits(
     }
     let out_val = ((sum_w / tss as f64) * box_gain as f64) as f32;
     let out_t = Tensor::scalar(out_val).to_device(dev)?;
+    let has_nonfinite = !sum_w.is_finite() || base_d.iter().any(|v| !v.is_finite());
     Tensor::custom_op(op_name, &[logits], out_t, move |g| {
         let gv = g.item::<f32>()? as f64;
         let scale = gv * (box_gain as f64 / tss as f64);
         let mut grad = vec![0.0f32; n * 4 * r];
-        if scale != 0.0 {
+        if scale != 0.0 || has_nonfinite {
             let mut p_row = vec![0.0f64; r];
             for i in 0..n {
                 let gi = scale * weights[i];
-                if gi == 0.0 {
+                let row_nonfinite = !base_d[4 * i..4 * i + 4].iter().all(|v| v.is_finite());
+                if gi == 0.0 && !row_nonfinite {
                     continue;
                 }
                 for side in 0..4 {
-                    let gd = gi * base_d[4 * i + side];
-                    if gd == 0.0 {
+                    let bd = base_d[4 * i + side];
+                    let gd = gi * bd;
+                    if gd == 0.0 && bd.is_finite() {
                         continue;
                     }
                     let row = (4 * i + side) * r..(4 * i + side + 1) * r;
+                    if !gd.is_finite() {
+                        grad[row].fill(f32::NAN);
+                        continue;
+                    }
                     let lrow = &raw_logits[row.clone()];
                     let grow = &mut grad[row];
                     let (k_star, m_side) =

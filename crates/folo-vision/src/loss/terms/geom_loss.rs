@@ -13,8 +13,6 @@ use folo_core::{DType, Result, Tensor};
 use super::box_loss::{check_box_pair, dfl_box_from_logits};
 use crate::loss::invalid;
 
-const EPS: f64 = 1e-7;
-
 #[inline]
 fn w_min(x: f64, y: f64) -> f64 {
     if x < y {
@@ -38,7 +36,8 @@ fn w_max(x: f64, y: f64) -> f64 {
 }
 
 /// Scale-normalized `1 - IoU` and its analytical gradient `d(1 - IoU) / d(ax1, ay1, ax2, ay2)` in `f64`,
-/// together with the scaled side lengths and scale factors so geometric penalties reuse them cleanly.
+/// together with normalized side lengths so geometric penalties are exact and scale-invariant at every
+/// positive scale (from `1e-30` to `1e30`) with explicit zero-denominator guards.
 struct IouTerm {
     one_minus_iou: f64,
     grad: [f64; 4],
@@ -61,8 +60,8 @@ fn one_minus_iou_f64(a: [f64; 4], b: [f64; 4]) -> IouTerm {
     let h2 = (by2 - by1).max(0.0);
     let mx = w1.max(w2);
     let my = h1.max(h2);
-    let inv_sx = if mx > 1e6 { 1.0 / mx } else { 1.0 };
-    let inv_sy = if my > 1e6 { 1.0 / my } else { 1.0 };
+    let inv_sx = if mx > 0.0 { 1.0 / mx } else { 1.0 };
+    let inv_sy = if my > 0.0 { 1.0 / my } else { 1.0 };
     let (w1s, w2s) = (w1 * inv_sx, w2 * inv_sx);
     let (h1s, h2s) = (h1 * inv_sy, h2 * inv_sy);
     let ix = ax2.min(bx2) - ax1.max(bx1);
@@ -71,9 +70,11 @@ fn one_minus_iou_f64(a: [f64; 4], b: [f64; 4]) -> IouTerm {
     let area1 = w1s * h1s;
     let area2 = w2s * h2s;
     let inter = iws * ihs;
-    let eps_eff = (EPS * inv_sx * inv_sy).max(1e-30);
-    let uni = area1 + area2 - inter + eps_eff;
-    let deficit = (area1 - inter).max(0.0) + (area2 - inter).max(0.0) + eps_eff;
+    let uni = (area1 - inter).max(0.0) + area2;
+    if uni <= 0.0 {
+        return IouTerm { one_minus_iou: 1.0, grad: [0.0; 4], w1s, h1s, w2s, h2s, w2, h2, inv_sx, inv_sy };
+    }
+    let deficit = (area1 - inter).max(0.0) + (area2 - inter).max(0.0);
     let one_minus_iou = deficit / uni;
     let g_scale_x = -inv_sx / uni;
     let g_scale_y = -inv_sy / uni;
@@ -97,12 +98,12 @@ fn one_minus_iou_f64(a: [f64; 4], b: [f64; 4]) -> IouTerm {
 /// - When `scale_sq == None` (scale-invariant enclosing-diagonal form):
 ///   ```text
 ///   d1² = (ax1 - bx1)² + (ay1 - by1)²,   d2² = (ax2 - bx2)² + (ay2 - by2)²
-///   c²  = cw² + ch² + eps
-///   L   = (1 - IoU) + (d1² + d2²) / (2 * c²)
+///   c²  = cw² + ch²
+///   L   = (1 - IoU) + (d1² + d2²) / (2 * c²)      (0 penalty when cw == ch == 0)
 ///   ```
 ///   Note that `(d1² + d2²) / 2 = rho² + (dw² + dh²) / 4`, so this reduces identically to DIoU loss for
 ///   equal-sized boxes while adding an exact scale/aspect mismatch penalty for concentric boxes and staying
-///   in `[0, 2]` on valid boxes.
+///   strictly scale-invariant across all positive scales (from `1e-30` to `1e30`) and in `[0, 2]` on valid boxes.
 /// - When `scale_sq == Some(s2)` with `s2 = W² + H² > 0` (Ma & Xu 2023 Eq. 6-8 fixed-scale form):
 ///   ```text
 ///   L = (1 - IoU) + (d1² + d2²) / (W² + H²)
@@ -132,25 +133,28 @@ pub(crate) fn mpdiou_box_f64(a: [f64; 4], b: [f64; 4], scale_sq: Option<f64>) ->
         let ch_raw = ay2.max(by2) - ay1.min(by1);
         let cw = cw_raw.max(0.0);
         let ch = ch_raw.max(0.0);
-        let m_dist = cw.max(ch).max(dx1.abs()).max(dx2.abs()).max(dy1.abs()).max(dy2.abs());
-        let inv_d = if m_dist > 1e6 { 1.0 / m_dist } else { 1.0 };
-        let (dx1s, dy1s, dx2s, dy2s) = (dx1 * inv_d, dy1 * inv_d, dx2 * inv_d, dy2 * inv_d);
-        let (cws, chs) = (cw * inv_d, ch * inv_d);
-        let eps_d = (EPS * inv_d * inv_d).max(1e-30);
-        let num = dx1s * dx1s + dy1s * dy1s + dx2s * dx2s + dy2s * dy2s;
-        let c2 = cws * cws + chs * chs + eps_d;
-        let pen = num / (2.0 * c2);
-        let num_coeff = inv_d / c2;
-        let dc_coeff = 2.0 * pen * inv_d / c2;
-        let e_x1 = if cw_raw > 0.0 { w_min(ax1, bx1) } else { 0.0 };
-        let e_x2 = if cw_raw > 0.0 { w_max(ax2, bx2) } else { 0.0 };
-        let e_y1 = if ch_raw > 0.0 { w_min(ay1, by1) } else { 0.0 };
-        let e_y2 = if ch_raw > 0.0 { w_max(ay2, by2) } else { 0.0 };
-        g[0] += num_coeff * dx1s + dc_coeff * cws * e_x1;
-        g[1] += num_coeff * dy1s + dc_coeff * chs * e_y1;
-        g[2] += num_coeff * dx2s - dc_coeff * cws * e_x2;
-        g[3] += num_coeff * dy2s - dc_coeff * chs * e_y2;
-        pen
+        let m_c = cw.max(ch);
+        if m_c <= 0.0 {
+            0.0
+        } else {
+            let inv_c = 1.0 / m_c;
+            let (dx1s, dy1s, dx2s, dy2s) = (dx1 * inv_c, dy1 * inv_c, dx2 * inv_c, dy2 * inv_c);
+            let (cws, chs) = (cw * inv_c, ch * inv_c);
+            let num = dx1s * dx1s + dy1s * dy1s + dx2s * dx2s + dy2s * dy2s;
+            let c2 = cws * cws + chs * chs; // strictly in [1.0, 2.0]
+            let pen = num / (2.0 * c2);
+            let num_coeff = inv_c / c2;
+            let dc_coeff = 2.0 * pen * inv_c / c2;
+            let e_x1 = if cw_raw > 0.0 { w_min(ax1, bx1) } else { 0.0 };
+            let e_x2 = if cw_raw > 0.0 { w_max(ax2, bx2) } else { 0.0 };
+            let e_y1 = if ch_raw > 0.0 { w_min(ay1, by1) } else { 0.0 };
+            let e_y2 = if ch_raw > 0.0 { w_max(ay2, by2) } else { 0.0 };
+            g[0] += num_coeff * dx1s + dc_coeff * cws * e_x1;
+            g[1] += num_coeff * dy1s + dc_coeff * chs * e_y1;
+            g[2] += num_coeff * dx2s - dc_coeff * cws * e_x2;
+            g[3] += num_coeff * dy2s - dc_coeff * chs * e_y2;
+            pen
+        }
     };
 
     (iou.one_minus_iou + mpd_pen, g)
@@ -160,13 +164,14 @@ pub(crate) fn mpdiou_box_f64(a: [f64; 4], b: [f64; 4], scale_sq: Option<f64>) ->
 /// (ground truth), both `[N, 4]` `xyxy`, returning `[N]`:
 ///
 /// ```text
-/// L_MPDIoU = (1 - IoU) + (d1² + d2²) / (2 * (cw² + ch² + eps))
+/// L_MPDIoU = (1 - IoU) + (d1² + d2²) / (2 * (cw² + ch²))
 /// ```
 ///
 /// where `d1² = (ax1 - bx1)² + (ay1 - by1)²` and `d2² = (ax2 - bx2)² + (ay2 - by2)²` are the squared
 /// distances between corresponding top-left and bottom-right corners, and `cw² + ch²` is the squared
-/// enclosing-box diagonal. Evaluates in `f64` with closed-form analytical gradients w.r.t. `b1` (`b2` is
-/// treated as constant ground truth).
+/// enclosing-box diagonal (with explicit zero-denominator guards so tiny and huge boxes stay exact and
+/// scale-invariant). Evaluates in `f64` with closed-form analytical gradients w.r.t. `b1` (`b2` is treated
+/// as constant ground truth).
 pub fn mpdiou_loss(b1: &Tensor, b2: &Tensor) -> Result<Tensor> {
     mpdiou_loss_inner(b1, b2, None, "mpdiou_loss")
 }
@@ -255,16 +260,17 @@ pub(super) fn mpdiou_from_logits(
 /// r_w = w_gt / (w_gt + h_gt),   r_h = h_gt / (w_gt + h_gt)
 /// ww  = 2 * r_w^scale / (r_w^scale + r_h^scale)
 /// hh  = 2 * r_h^scale / (r_w^scale + r_h^scale)
-/// distance^shape = (hh * (cx_a - cx_b)² + ww * (cy_a - cy_b)²) / (cw² + ch² + eps)
-/// omega_w = hh * |w_a - w_b| / (max(w_a, w_b) + eps)
-/// omega_h = ww * |h_a - h_b| / (max(h_a, h_b) + eps)
+/// distance^shape = (hh * (cx_a - cx_b)² + ww * (cy_a - cy_b)²) / (cw² + ch²)
+/// omega_w = hh * |w_a - w_b| / max(w_a, w_b)
+/// omega_h = ww * |h_a - h_b| / max(h_a, h_b)
 /// Omega^shape = (1 - exp(-omega_w))^4 + (1 - exp(-omega_h))^4
 /// L_Shape-IoU = (1 - IoU) + distance^shape + 0.5 * Omega^shape
 /// ```
 ///
-/// Computing `(ww, hh)` via normalized ratios `(r_w, r_h)` avoids overflow/underflow for arbitrary box scales.
-/// Because the shape-value exponent is `theta = 4`, `(1 - exp(-omega))^4` is `C^3`-smooth across `w_a == w_b`
-/// and `h_a == h_b` with zero derivative at equality.
+/// Zero denominators are guarded explicitly (yielding 0 penalty and 0 gradient) rather than via fixed
+/// epsilons, so identical boxes at any positive scale have exact `0.0` loss and the entire formula is strictly
+/// scale-invariant. Because the shape-value exponent is `theta = 4`, `(1 - exp(-omega))^4` is `C^3`-smooth
+/// across `w_a == w_b` and `h_a == h_b` with zero derivative at equality.
 pub(crate) fn shape_iou_box_f64(a: [f64; 4], b: [f64; 4], scale: f64) -> (f64, [f64; 4]) {
     if !a.iter().chain(&b).all(|v| v.is_finite()) {
         return (f64::NAN, [f64::NAN; 4]);
@@ -287,37 +293,43 @@ pub(crate) fn shape_iou_box_f64(a: [f64; 4], b: [f64; 4], scale: f64) -> (f64, [
         (1.0, 1.0)
     };
 
-    // Shape-weighted center distance penalty.
+    // Shape-weighted center distance penalty (exact zero-denominator guard when cw == ch == 0).
     let dcx = 0.5 * ((ax1 - bx1) + (ax2 - bx2));
     let dcy = 0.5 * ((ay1 - by1) + (ay2 - by2));
     let cw_raw = ax2.max(bx2) - ax1.min(bx1);
     let ch_raw = ay2.max(by2) - ay1.min(by1);
     let cw = cw_raw.max(0.0);
     let ch = ch_raw.max(0.0);
-    let m_dist = cw.max(ch).max(dcx.abs()).max(dcy.abs());
-    let inv_d = if m_dist > 1e6 { 1.0 / m_dist } else { 1.0 };
-    let (dcxs, dcys) = (dcx * inv_d, dcy * inv_d);
-    let (cws, chs) = (cw * inv_d, ch * inv_d);
-    let eps_d = (EPS * inv_d * inv_d).max(1e-30);
-    let num = hh * dcxs * dcxs + ww * dcys * dcys;
-    let c2 = cws * cws + chs * chs + eps_d;
-    let dist_shape = num / c2;
-    let g_dcx = (hh * dcxs * inv_d) / c2;
-    let g_dcy = (ww * dcys * inv_d) / c2;
-    let dc_coeff = 2.0 * dist_shape * inv_d / c2;
-    let e_x1 = if cw_raw > 0.0 { w_min(ax1, bx1) } else { 0.0 };
-    let e_x2 = if cw_raw > 0.0 { w_max(ax2, bx2) } else { 0.0 };
-    let e_y1 = if ch_raw > 0.0 { w_min(ay1, by1) } else { 0.0 };
-    let e_y2 = if ch_raw > 0.0 { w_max(ay2, by2) } else { 0.0 };
-    g[0] += g_dcx + dc_coeff * cws * e_x1;
-    g[1] += g_dcy + dc_coeff * chs * e_y1;
-    g[2] += g_dcx - dc_coeff * cws * e_x2;
-    g[3] += g_dcy - dc_coeff * chs * e_y2;
+    let m_c = cw.max(ch);
+    let dist_shape = if m_c <= 0.0 {
+        0.0
+    } else {
+        let inv_c = 1.0 / m_c;
+        let (dcxs, dcys) = (dcx * inv_c, dcy * inv_c);
+        let (cws, chs) = (cw * inv_c, ch * inv_c);
+        let num = hh * dcxs * dcxs + ww * dcys * dcys;
+        let c2 = cws * cws + chs * chs; // strictly in [1.0, 2.0]
+        let dist = num / c2;
+        let g_dcx = (hh * dcxs * inv_c) / c2;
+        let g_dcy = (ww * dcys * inv_c) / c2;
+        let dc_coeff = 2.0 * dist * inv_c / c2;
+        let e_x1 = if cw_raw > 0.0 { w_min(ax1, bx1) } else { 0.0 };
+        let e_x2 = if cw_raw > 0.0 { w_max(ax2, bx2) } else { 0.0 };
+        let e_y1 = if ch_raw > 0.0 { w_min(ay1, by1) } else { 0.0 };
+        let e_y2 = if ch_raw > 0.0 { w_max(ay2, by2) } else { 0.0 };
+        g[0] += g_dcx + dc_coeff * cws * e_x1;
+        g[1] += g_dcy + dc_coeff * chs * e_y1;
+        g[2] += g_dcx - dc_coeff * cws * e_x2;
+        g[3] += g_dcy - dc_coeff * chs * e_y2;
+        dist
+    };
 
     // Shape-value penalty 0.5 * ((1 - exp(-omega_w))^4 + (1 - exp(-omega_h))^4).
     let shape_axis = |s1: f64, s2: f64, weight: f64, inv_s: f64, active: bool| -> (f64, f64) {
-        let eps_s = (EPS * inv_s).max(1e-30);
-        let m = s1.max(s2) + eps_s;
+        let m = s1.max(s2);
+        if m <= 0.0 {
+            return (0.0, 0.0);
+        }
         let omega = weight * (s1 - s2).abs() / m;
         let e = (-omega).exp();
         let om_e = -(-omega).exp_m1();
@@ -326,7 +338,7 @@ pub(crate) fn shape_iou_box_f64(a: [f64; 4], b: [f64; 4], scale: f64) -> (f64, [
         if !active || s1 == s2 {
             return (pen, 0.0);
         }
-        let d_omega_ds1 = if s1 > s2 { weight * (s2 + eps_s) / (m * m) } else { -weight / m };
+        let d_omega_ds1 = if s1 > s2 { weight * s2 / (m * m) } else { -weight / m };
         let df_ds1 = (2.0 * om_e2 * om_e * e) * d_omega_ds1 * inv_s;
         (pen, df_ds1)
     };
@@ -472,12 +484,13 @@ pub fn focaler_iou(iou: &Tensor, d: f32, u: f32) -> Result<Tensor> {
 /// Composable Focaler-IoU loss wrapper (Zhang & Zhang 2024 Eq. 11):
 ///
 /// ```text
-/// L_Focaler = L_base + IoU - IoU^focaler(IoU; d, u)
+/// L_Focaler = L_base + (IoU - IoU^focaler(IoU; d, u))
 /// ```
 ///
 /// For any base IoU loss `L_base = (1 - IoU) + R` (such as CIoU, MPDIoU, or Shape-IoU), replaces the linear
-/// `1 - IoU` term with `1 - IoU^focaler` while keeping the geometric penalty `R` intact. At `(d = 0, u = 1)`,
-/// reduces identically to `L_base` for all `IoU` in `[0, 1]`.
+/// `1 - IoU` term with `1 - IoU^focaler` while keeping the geometric penalty `R` intact. Grouping
+/// `(IoU - IoU^focaler)` first prevents catastrophic cancellation of small `L_base` values when `IoU ≈ 1`
+/// and reduces bit-identically to `L_base` at `(d = 0, u = 1)` for all `IoU` in `[0, 1]`.
 pub fn focaler_iou_loss(base_loss: &Tensor, iou: &Tensor, d: f32, u: f32) -> Result<Tensor> {
     if base_loss.dtype() != DType::F32 {
         return Err(folo_core::Error::DTypeMismatch {
@@ -508,5 +521,5 @@ pub fn focaler_iou_loss(base_loss: &Tensor, iou: &Tensor, d: f32, u: f32) -> Res
         )));
     }
     let remapped = focaler_iou(iou, d, u)?;
-    base_loss.add(iou)?.sub(&remapped)
+    base_loss.add(&iou.sub(&remapped)?)
 }

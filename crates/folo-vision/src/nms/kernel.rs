@@ -486,12 +486,15 @@ pub fn batched_nms(
     batched_nms_inner(boxes, scores, classes, iou_thr, max_det, agnostic, false, false).0
 }
 
-/// Class-aware NMS supporting [`NmsKind::Standard`], [`NmsKind::Diou`], [`NmsKind::SoftLinear`], and
-/// [`NmsKind::SoftGaussian`]. Returns `(input_index, final_score)` pairs sorted by descending score, at most
-/// `max_det` of them. `score_thr` is only used by Soft-NMS to drop boxes whose decayed score falls to or below it.
+/// Class-aware NMS supporting [`NmsKind::Standard`], [`NmsKind::Diou`], [`NmsKind::SoftLinear`],
+/// [`NmsKind::SoftGaussian`], [`NmsKind::MatrixLinear`], and [`NmsKind::MatrixGaussian`]. Returns
+/// `(input_index, final_score)` pairs sorted by descending score, at most `max_det` of them. `iou_thr` is
+/// ignored by `SoftGaussian`, `MatrixLinear`, and `MatrixGaussian`; `score_thr` is used by Soft-NMS and
+/// Matrix-NMS to drop boxes whose decayed score falls to or below it.
 ///
 /// # Panics
-/// If the three slices differ in length, or if `SoftGaussian` has `!sigma.is_finite() || sigma <= 0.0`.
+/// If the three slices differ in length, or if `SoftGaussian` / `MatrixGaussian` has
+/// `!sigma.is_finite() || sigma <= 0.0`.
 #[allow(clippy::too_many_arguments)]
 pub fn batched_nms_with_kind(
     boxes: &[Xyxy],

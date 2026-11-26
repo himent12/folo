@@ -37,6 +37,7 @@ pub use kernel::{
     batched_nms, batched_nms_with_kind, diou_nms_sorted, diou_nms_sorted_with_owner, nms_sorted,
     nms_sorted_with_owner, soft_nms_sorted,
 };
+pub(crate) use matrix::exact_iou_f64;
 pub use matrix::matrix_nms_sorted;
 pub use topk::{topk_candidates, topk_detections};
 
@@ -96,6 +97,12 @@ impl NmsKind {
                 | NmsKind::MatrixGaussian { .. }
         )
     }
+
+    /// True for Matrix-NMS variants (`MatrixLinear` / `MatrixGaussian`).
+    #[inline]
+    pub fn is_matrix(&self) -> bool {
+        matches!(self, NmsKind::MatrixLinear | NmsKind::MatrixGaussian { .. })
+    }
 }
 
 /// Pre-NMS extraction threshold for single-label calibrated scoring (`Elc` / `DflConsensus` / `DflRepulse` /
@@ -129,7 +136,8 @@ pub struct Detection {
 pub struct NmsConfig {
     /// Keep candidates with `score > conf`.
     pub conf: f32,
-    /// Suppress a box when its IoU with a kept box is `> iou`.
+    /// Suppress a box when its IoU with a kept box is `> iou` (used by `Standard`, `Diou`, and `SoftLinear`;
+    /// ignored by `SoftGaussian`, `MatrixLinear`, and `MatrixGaussian`).
     pub iou: f32,
     /// Maximum detections returned per image.
     pub max_det: usize,
@@ -152,7 +160,7 @@ pub struct NmsConfig {
     /// changes the score scale. Not used by the NMS-free `o2o` selection or Soft-NMS, which have no hard
     /// suppression clusters.
     pub score: ScoreRule,
-    /// Suppression rule ([`NmsKind::Standard`] by default; opt-in DIoU-NMS or Soft-NMS).
+    /// Suppression rule ([`NmsKind::Standard`] by default; opt-in DIoU-NMS, Soft-NMS, or Matrix-NMS).
     #[serde(default, skip_serializing_if = "NmsKind::is_standard")]
     pub nms_kind: NmsKind,
 }
@@ -312,6 +320,11 @@ fn finish(
         }
         valid.into_iter().unzip()
     } else {
+        if cfg.nms_kind.is_matrix() {
+            // Drop non-finite scores (+Inf / NaN) before `max_candidates` truncation so malformed entries
+            // cannot evict valid detections from Matrix-NMS.
+            cands.retain(|c| c.score.is_finite());
+        }
         if cands.len() > cfg.max_candidates {
             if cfg.max_candidates == 0 {
                 return Vec::new();

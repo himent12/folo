@@ -10,22 +10,26 @@
 //! B_k = (Σ_{i in C_k} s_i * b_i) / (Σ_{i in C_k} s_i)
 //! ```
 //!
-//! Cluster confidence is then computed by [`WbfConfType`]:
-//! - [`WbfConfType::Avg`] (default, Solovyev et al. Eq. 3 generalised to positive model weights):
+//! Cluster confidence is then computed by [`WbfConfType`] (FOLO conventions):
+//! - [`WbfConfType::Avg`] (default):
 //!   ```text
 //!   C_k = (Σ_{i in C_k} w_{m(i)} * c_i) / max(Σ_{m=1}^M w_m, Σ_{i in C_k} w_{m(i)})
 //!   ```
-//!   For equal weights `w_m = 1`, this equals `(1 / T) * (Σ c_i) * min(T, M) / M`, penalising boxes missed by
-//!   some models while never exceeding `max_{i in C_k} c_i` even if one model emits duplicates into the cluster.
-//! - [`WbfConfType::Max`]: `max_{i in C_k} c_i`.
+//!   For equal weights `w_m = 1`, this matches Solovyev et al. Eq. 3 `(1 / T) * (Σ c_i) * min(T, M) / M`.
+//!   Generalising the denominator to `max(Σ_all w_m, Σ_cluster w_m)` keeps unequal weights strictly
+//!   scale-invariant and guarantees `C_k <= max_{i in C_k} c_i` even when one model emits duplicate boxes into
+//!   a cluster (note: duplicate boxes from one model increase `Σ_cluster w_m`, which can offset the missing-model
+//!   penalty from another model while staying capped at the cluster's weighted mean).
+//! - [`WbfConfType::Max`]: maximum unweighted raw confidence `max_{i in C_k} c_i` in the cluster (FOLO
+//!   convention; unweighted so changing model weight scale never pushes confidence outside `[0, 1]`).
 //! - [`WbfConfType::BoxAvg`]: `(Σ_{i in C_k} w_{m(i)} * c_i) / (Σ_{i in C_k} w_{m(i)})` (no absent-model penalty).
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::boxes::{IouKind, Xyxy, iou};
-use crate::nms::Detection;
+use crate::boxes::Xyxy;
+use crate::nms::{Detection, exact_iou_f64};
 use crate::{Error, Result};
 
 /// How [`weighted_boxes_fusion`] combines member scores into the fused cluster's confidence.
@@ -217,12 +221,13 @@ pub fn weighted_boxes_fusion(
                 .then(a.box_idx.cmp(&b.box_idx))
         });
         let mut clusters: Vec<Cluster> = Vec::new();
+        let iou_thr64 = cfg.iou_thr as f64;
         for e in entries {
             let mut best_idx: Option<usize> = None;
-            let mut best_iou = -1.0f32;
+            let mut best_iou = -1.0f64;
             for (ci, c) in clusters.iter().enumerate() {
-                let ov = iou(&e.bbox, &c.fused_box, IouKind::Iou);
-                if ov >= cfg.iou_thr && ov > best_iou {
+                let ov = exact_iou_f64(&e.bbox, &c.fused_box);
+                if ov >= iou_thr64 && ov > best_iou {
                     best_iou = ov;
                     best_idx = Some(ci);
                 }
@@ -247,6 +252,8 @@ pub fn weighted_boxes_fusion(
             .then(a.class.cmp(&b.class))
             .then(a.bbox.x1.total_cmp(&b.bbox.x1))
             .then(a.bbox.y1.total_cmp(&b.bbox.y1))
+            .then(a.bbox.x2.total_cmp(&b.bbox.x2))
+            .then(a.bbox.y2.total_cmp(&b.bbox.y2))
     });
     Ok(out)
 }
@@ -331,5 +338,11 @@ mod tests {
         assert!(weighted_boxes_fusion(&[&dirty], Some(&[f32::NAN]), &cfg).is_err());
         assert!(weighted_boxes_fusion(&[&dirty], None, &WbfConfig { iou_thr: 1.5, ..cfg }).is_err());
         assert!(weighted_boxes_fusion(&[&dirty], None, &WbfConfig { skip_box_thr: -0.1, ..cfg }).is_err());
+
+        // Exact f64 IoU at iou_thr = 1.0 must not merge distinct boxes `[0,0,1,1]` and `[1e-8,0,1,1]`.
+        let near_m1 = [Detection { bbox: Xyxy::new(0.0, 0.0, 1.0, 1.0), score: 0.9, class: 0 }];
+        let near_m2 = [Detection { bbox: Xyxy::new(1e-8, 0.0, 1.0, 1.0), score: 0.8, class: 0 }];
+        let strict_cfg = WbfConfig { iou_thr: 1.0, skip_box_thr: 0.0, conf_type: WbfConfType::Max };
+        assert_eq!(weighted_boxes_fusion(&[&near_m1, &near_m2], None, &strict_cfg).unwrap().len(), 2);
     }
 }
