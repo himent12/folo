@@ -219,6 +219,7 @@ impl FoloApp {
     /// (metrics, samples or logs asked for before) must not bring it back.
     pub(super) fn forget_history(&mut self, id: &str) {
         self.history_tickets.retain(|(run, _), _| run != id);
+        self.store.samples_stale.remove(id);
     }
 
     /// A fresh ticket for one history request of a run; earlier tickets stop counting.
@@ -229,8 +230,16 @@ impl FoloApp {
     }
 
     pub fn ensure_samples(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.store.samples.get(id).is_none_or(|l| l.needs_fetch()) {
-            self.store.samples.insert(id.to_string(), Load::Loading);
+        let needs = self.store.samples.get(id).is_none_or(|l| l.needs_fetch());
+        let refresh_ready = !needs
+            && self.sample_epoch.is_none()
+            && matches!(self.store.samples.get(id), Some(Load::Ready(_)))
+            && self.store.samples_stale.remove(id);
+        if needs || refresh_ready {
+            if needs {
+                self.store.samples_stale.remove(id);
+                self.store.samples.insert(id.to_string(), Load::Loading);
+            }
             let ticket = self.history_ticket(id, "samples");
             let (rid, key, epoch) = (id.to_string(), id.to_string(), self.sample_epoch);
             self.fetch(
@@ -238,6 +247,11 @@ impl FoloApp {
                 move |api| api.samples(&rid, epoch),
                 move |this, r, _| {
                     if this.history_tickets.get(&(key.clone(), "samples")) != Some(&ticket) {
+                        return;
+                    }
+                    // Keep existing tiles on a failed background refresh so live training never
+                    // collapses the grid and shifts the Logs panel below it.
+                    if refresh_ready && r.is_err() {
                         return;
                     }
                     this.store.samples.insert(key, r.into());
@@ -249,6 +263,7 @@ impl FoloApp {
     /// Fetch a run's validation samples again after a failed load.
     pub fn retry_samples(&mut self, id: &str, cx: &mut Context<Self>) {
         self.store.samples.remove(id);
+        self.store.samples_stale.remove(id);
         self.ensure_samples(id, cx);
         cx.notify();
     }

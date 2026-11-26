@@ -503,9 +503,12 @@ fn a_silent_end_reads_the_log_and_latest_samples_again() {
         drop(stream_of(this, id));
         this.drain_streams(cx);
         assert!(
-            matches!(this.store.samples.get(id), Some(Load::Idle)),
-            "the latest samples are asked for again"
+            this.store.samples_stale.contains(id)
+                && matches!(this.store.samples.get(id), Some(Load::Ready(_))),
+            "the latest samples are marked stale for in-place refresh while keeping ready tiles"
         );
+        this.ensure_samples(id, cx);
+        assert!(!this.store.samples_stale.contains(id), "ensure_samples consumed the stale flag and fetched");
     });
     drive(&mut app, window, |this, _, _| {
         let Some(Load::Ready(hist)) = this.store.logs.get(id) else { panic!("the log reloaded") };

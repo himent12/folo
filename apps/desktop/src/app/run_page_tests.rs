@@ -587,3 +587,165 @@ fn switching_to_another_cached_runs_logs_scrolls_to_bottom() {
         assert!(max - y < px(8.), "run B logs scrolled to bottom (y={y:?}, max={max:?})");
     });
 }
+
+#[test]
+fn validation_samples_wait_for_first_evaluation_and_recover_from_failure_on_epoch() {
+    use crate::api::{ApiError, Epoch, Loss, RunEvent, RunStatus, ValMetrics};
+    use crate::app::Route;
+    use crate::store::Load;
+
+    let (mut app, window) = open();
+    // Pick a running run and reset it to mid-epoch 1 before any evaluation has finished.
+    let id = drive(&mut app, window, |this, _, _| {
+        let r = this
+            .store
+            .runs
+            .ready_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|r| r.status == RunStatus::Running)
+            .expect("demo has a running run");
+        r.epoch = 1;
+        r.best = None;
+        let id = r.id.clone();
+        this.store.run_data.insert(
+            id.clone(),
+            Load::Ready(crate::store::RunData::new(
+                crate::api::RunMetrics { steps: Vec::new(), epochs: Vec::new() },
+                r.steps_per_epoch,
+            )),
+        );
+        this.store.samples.remove(&id);
+        this.store.samples_stale.remove(&id);
+        id
+    });
+
+    // Opening the run mid-epoch 1 must show the waiting state and NOT fire an epoch-0 sample fetch.
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Run(id.clone()), w, cx));
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let r = this.store.run(&id).unwrap();
+        assert_eq!(this.evaluated_epoch(r), 0, "no epoch evaluated yet");
+        assert!(
+            !this.store.samples.contains_key(&id),
+            "must not request samples before the first evaluation completes"
+        );
+    });
+
+    // Even if a prior sample fetch failed, an arriving Epoch event clears the failure and loads samples.
+    drive(&mut app, window, |this, _, cx| {
+        this.store
+            .samples
+            .insert(id.clone(), Load::Failed(ApiError::new("not_found", "no samples for epoch 0")));
+        this.store.apply(
+            &id,
+            RunEvent::Epoch(Epoch {
+                epoch: 1,
+                train_loss: Loss { box_: 1.0, cls: 1.0, dfl: 1.0, total: 3.0 },
+                val: ValMetrics {
+                    map50: 0.5,
+                    map50_95: 0.3,
+                    precision: 0.6,
+                    recall: 0.5,
+                    best_f1_conf: Some(0.4),
+                    per_class: Vec::new(),
+                },
+                duration_s: 1.0,
+            }),
+        );
+        cx.notify();
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(
+            this.store.samples.get(&id).is_some_and(|l| l.ready().is_some()),
+            "Epoch event cleared failed samples and automatically loaded latest samples"
+        );
+    });
+}
+
+#[test]
+fn live_sample_refresh_keeps_ready_tiles_mounted_without_placeholder_jump() {
+    use crate::api::{Epoch, Loss, RunEvent, RunStatus, ValMetrics};
+    use crate::app::Route;
+
+    let api = Arc::new(MockBackend::new(4200, true));
+    let (mut app, window) = open_with(api.clone());
+    let id = drive(&mut app, window, |this, w, cx| {
+        let id = this
+            .store
+            .runs
+            .ready()
+            .unwrap()
+            .iter()
+            .find(|r| r.status == RunStatus::Running)
+            .expect("demo has a running run")
+            .id
+            .clone();
+        this.navigate(Route::Run(id.clone()), w, cx);
+        id
+    });
+    for _ in 0..3 {
+        app.frame(window.into());
+        app.run_until_idle();
+    }
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.samples.get(&id).is_some_and(|l| l.ready().is_some()), "initial samples loaded");
+    });
+
+    // Hold the next samples fetch and deliver a new live Epoch event.
+    let hold_key: &'static str = Box::leak(format!("samples {id}").into_boxed_str());
+    let held = api.hold(hold_key);
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                this.store.apply(
+                    &id,
+                    RunEvent::Epoch(Epoch {
+                        epoch: 99,
+                        train_loss: Loss { box_: 0.5, cls: 0.5, dfl: 0.5, total: 1.5 },
+                        val: ValMetrics {
+                            map50: 0.8,
+                            map50_95: 0.55,
+                            precision: 0.82,
+                            recall: 0.78,
+                            best_f1_conf: Some(0.45),
+                            per_class: Vec::new(),
+                        },
+                        duration_s: 1.0,
+                    }),
+                );
+                cx.notify();
+            })
+            .unwrap();
+    });
+    app.frame(window.into());
+    app.run_until_held(1);
+    held.wait_held();
+    app.frame(window.into());
+
+    // While the refresh is in flight, existing Ready samples must remain mounted (never Load::Loading).
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, _| {
+                assert!(
+                    this.store.samples.get(&id).is_some_and(|l| l.ready().is_some()),
+                    "live refresh keeps ready tiles visible instead of replacing with 8 skeletons"
+                );
+                assert!(this.focus.borrow().contains_key("smp-0"), "sample tiles stay mounted");
+            })
+            .unwrap();
+    });
+
+    drop(held);
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.samples.get(&id).is_some_and(|l| l.ready().is_some()));
+        assert!(!this.store.samples_stale.contains(&id));
+    });
+}

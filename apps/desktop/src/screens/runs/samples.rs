@@ -49,14 +49,8 @@ impl FoloApp {
             cx,
             Rc::new(move |this, i, _, _| this.sample_view = views[i]),
         );
-        // The epoch picker: the latest (followed while the run trains), or a past epoch held still.
-        let latest = self
-            .store
-            .run_data
-            .get(&r.id)
-            .and_then(|l| l.ready())
-            .and_then(|d| d.metrics.epochs.last().map(|e| e.epoch))
-            .unwrap_or(r.epoch);
+        // The epoch picker: the latest evaluated epoch (followed while the run trains), or a past epoch held still.
+        let latest = self.evaluated_epoch(r);
         let past = sample_epochs(latest);
         let picked = self.sample_epoch.filter(|e| *e < latest);
         let epoch_sel = picked.and_then(|e| past.iter().position(|p| *p == e)).map_or(0, |i| i + 1);
@@ -78,6 +72,7 @@ impl FoloApp {
                     if e != this.sample_epoch {
                         this.sample_epoch = e;
                         this.store.samples.remove(&rid);
+                        this.store.samples_stale.remove(&rid);
                         this.ensure_samples(&rid, cx);
                     }
                     cx.notify();
@@ -95,14 +90,13 @@ impl FoloApp {
             .map(|d| d.classes.clone())
             .or_else(|| self.store.dataset_summary(&r.config.dataset_id).map(|d| d.classes.clone()))
             .unwrap_or_default();
-        let samples_failed =
-            r.epoch > 0 && self.store.samples.get(&r.id).is_some_and(|l| l.error().is_some());
+        let samples_failed = latest > 0 && self.store.samples.get(&r.id).is_some_and(|l| l.error().is_some());
         let retry_anchor = match self.passing_stop("run-samples-retry", samples_failed, cx) {
             Some(fh) if !samples_failed => Some(div().track_focus(&fh)),
             _ => None,
         };
         let body = match self.store.samples.get(&r.id) {
-            _ if r.epoch == 0 => div()
+            _ if latest == 0 => div()
                 .child(empty_state(
                     &t,
                     "icons/image.svg",

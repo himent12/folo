@@ -216,7 +216,7 @@ try {
         $pre = Snap
         Click 66 $nav.playground; Away
         Pass "click sidebar playground: the page changes" (-not (Same $pre (Snap))) ""
-        Click 66 744.7; Away
+        Click 66 712.7; Away
         MatchStep "click sidebar settings" "settings" "nav-settings"
         Click 66 $nav.overview; Away
         MatchStep "click sidebar overview" "overview" "nav-overview"

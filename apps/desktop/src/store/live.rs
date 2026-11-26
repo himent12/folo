@@ -308,11 +308,17 @@ impl Store {
                 if let Some(Load::Ready(d)) = self.run_data.get_mut(run_id) {
                     d.push_epoch(e);
                 }
-                // New validation predictions exist; refetch samples lazily.
-                if let Some(s) = self.samples.get_mut(run_id)
-                    && matches!(s, Load::Ready(_))
-                {
-                    *s = Load::Idle;
+                // New validation predictions exist: keep ready tiles visible while refreshing in
+                // place, and clear any earlier failure (e.g. a premature epoch-0 error).
+                match self.samples.get_mut(run_id) {
+                    Some(Load::Ready(_)) | Some(Load::Loading) => {
+                        self.samples_stale.insert(run_id.to_string());
+                    }
+                    Some(s @ Load::Failed(_)) => {
+                        *s = Load::Idle;
+                        self.samples_stale.remove(run_id);
+                    }
+                    _ => {}
                 }
             }
             RunEvent::Queue(q) => {
@@ -391,6 +397,10 @@ impl Store {
                 // Finished: the server's history is complete again.
                 if !st.status.is_active() {
                     self.resumed.remove(run_id);
+                    if let Some(s @ Load::Failed(_)) = self.samples.get_mut(run_id) {
+                        *s = Load::Idle;
+                        self.samples_stale.remove(run_id);
+                    }
                 }
             }
         }

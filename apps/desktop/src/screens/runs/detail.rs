@@ -30,6 +30,16 @@ impl FoloApp {
         Some(d.metrics.epochs.last().map_or(0, |e| e.epoch))
     }
 
+    /// The last epoch with completed validation metrics (0 until the first evaluation finishes).
+    /// Active runs during epoch 1 report `r.epoch == 1` before evaluation has run; wait for the
+    /// first evaluated epoch instead of requesting epoch-0 samples prematurely.
+    pub(crate) fn evaluated_epoch(&self, r: &Run) -> u32 {
+        match self.store.run_data.get(&r.id).and_then(|l| l.ready()) {
+            Some(d) => d.metrics.epochs.last().map_or(0, |e| e.epoch),
+            None => r.best.as_ref().map_or(if r.status.is_active() { 0 } else { r.epoch }, |b| b.epoch),
+        }
+    }
+
     fn resume_button(&self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let rid = r.id.clone();
         // No checkpoint (no epoch finished): it starts again, as Studio says, never "Resume".
@@ -91,7 +101,7 @@ impl FoloApp {
         };
         self.ensure_run_data(id, cx);
         self.ensure_logs(id, cx);
-        if r.epoch > 0 {
+        if self.evaluated_epoch(&r) > 0 {
             self.ensure_samples(id, cx);
         }
         let now = self.store.api.now();

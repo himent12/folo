@@ -238,6 +238,7 @@ impl FoloApp {
         self.store.evals.remove(id);
         self.store.run_data.remove(id);
         self.store.samples.remove(id);
+        self.store.samples_stale.remove(id);
         self.store.logs.remove(id);
         self.forget_history(id);
         self.ds_recheck.remove(id);

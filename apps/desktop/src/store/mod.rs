@@ -94,6 +94,9 @@ pub struct Store {
     pub runs: Load<Vec<Run>>,
     pub run_data: HashMap<String, Load<RunData>>,
     pub samples: HashMap<String, Load<RunSamples>>,
+    /// Runs whose latest validation samples have a newer epoch available; refreshed in place so
+    /// existing tiles stay on screen instead of flashing placeholders and shifting the Logs panel.
+    pub samples_stale: std::collections::HashSet<String>,
     pub logs: HashMap<String, Load<LogHistory>>,
     /// Bumped on every log change; the length stops changing once the 2,000-line cap is hit.
     pub log_rev: u64,
@@ -133,6 +136,7 @@ impl Store {
             runs: Load::Idle,
             run_data: HashMap::new(),
             samples: HashMap::new(),
+            samples_stale: Default::default(),
             logs: HashMap::new(),
             log_rev: 0,
             pending: HashMap::new(),
