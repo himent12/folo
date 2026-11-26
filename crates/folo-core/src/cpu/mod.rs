@@ -35,6 +35,7 @@ mod index;
 mod norm;
 mod pool;
 mod pool_alloc;
+pub mod q4;
 pub mod q8;
 pub(crate) mod reduce;
 #[cfg(test)]
