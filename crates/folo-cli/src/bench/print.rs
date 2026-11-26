@@ -132,7 +132,14 @@ pub(super) fn state(s: &BenchEntryState, out: Out) {
     if !s.missing_classes.is_empty() {
         out.human(format!("classes the model does not know (AP 0): {}", s.missing_classes.join(", ")));
     }
-    let Some(r) = &s.result else { return };
+    let Some(r) = &s.result else {
+        if s.status == BenchEntryStatus::Done
+            && let Some(h) = &s.hint
+        {
+            out.human(format!("hint: {h}"));
+        }
+        return;
+    };
     out.human(format!("score {:.1}{}", r.score, if r.partial { " (partial)" } else { "" }));
     for a in &r.axes {
         let value = a.value.map_or("not measured".into(), |v| format!("{v:.3}"));

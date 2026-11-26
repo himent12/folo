@@ -294,17 +294,23 @@ fn an_entry_fits_the_result_limit() {
 }
 
 /// With `--confine` every benchmark tool is refused, in process and through a server, before it touches a file or
-/// the network (the address below has no server).
+/// the network (the address below has no server). In embedded mode, `build` does not even open `<data_dir>/bench/`.
 #[tokio::test]
 async fn a_confined_session_refuses_the_benchmark_tools() {
     let home = TestDir::new("mcp-bench-confined");
+    // Place an incomplete benchmark dir (no `bench.json`) that `Benches::open` would delete on startup.
+    let canary = home.join("bench").join("bn_unfinished");
+    std::fs::create_dir_all(&canary).unwrap();
     let confined = || Options { confine: true, ..options(home.path()) };
-    let here = FoloMcp::new(Arc::new(folo_server::MockStore::new()), None, confined());
+    let real_store = Arc::new(crate::open_real_store(&confined()));
+    assert!(canary.is_dir(), "`folo mcp --confine` must not read or clean up the `bench/` folder at startup");
+    assert_eq!(real_store.benches().err().unwrap().body.code, "not_supported");
+    let built = FoloMcp::new(real_store, None, confined());
     let http = Arc::new(HttpStore::new("http://127.0.0.1:9", None));
     let through = FoloMcp::new(http.clone(), Some(http), confined());
     let bench = json!({ "benchmark_id": "bn_1" });
     let entry = json!({ "benchmark_id": "bn_1", "entry_id": "be_1" });
-    for s in [&here, &through] {
+    for s in [&built, &through] {
         for (tool, args) in [
             ("bench_catalog", json!({})),
             ("list_benchmarks", json!({})),
@@ -321,6 +327,8 @@ async fn a_confined_session_refuses_the_benchmark_tools() {
             assert_eq!(err(s, tool, args).await.body.code, "not_supported", "{tool}");
         }
     }
+    assert!(canary.is_dir(), "refused benchmark calls must not touch `bench/` either");
+    built.shutdown_store().await;
     // With --read-only too, a mutating tool is refused as read-only first: neither reaches a file.
     let both = Options { read_only: true, ..confined() };
     let both = FoloMcp::new(Arc::new(folo_server::MockStore::new()), None, both);
@@ -329,18 +337,38 @@ async fn a_confined_session_refuses_the_benchmark_tools() {
     assert_eq!(err(&both, "get_benchmark", bench).await.body.code, "not_supported");
 }
 
+/// Runs `f` on drop so an unwind or timeout always releases a fake server or worker.
+struct Defer<F: FnOnce()>(Option<F>);
+
+impl<F: FnOnce()> Drop for Defer<F> {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
+
 /// Runs `call` on a thread and fails the test if it has not answered in a minute (a call that lost its deadline would
-/// hold far longer); `release` then ends the call, so no thread outlives the test.
+/// hold far longer); `release` then ends the call (also on panic), so no thread outlives the test.
 fn bounded<T: Send>(call: impl FnOnce() -> T + Send, release: impl FnOnce()) -> T {
+    let mut release = Defer(Some(release));
     std::thread::scope(|scope| {
         let (done, answer) = std::sync::mpsc::channel();
         scope.spawn(move || {
             let _ = done.send(call());
         });
         match answer.recv_timeout(std::time::Duration::from_secs(60)) {
-            Ok(r) => r,
-            Err(_) => {
-                release();
+            Ok(r) => {
+                release.0.take();
+                r
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the bounded call panicked");
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(f) = release.0.take() {
+                    f();
+                }
                 panic!("the call did not end by its deadline");
             }
         }
@@ -371,29 +399,34 @@ fn a_wait_ends_when_the_server_stops_answering() {
     }
 }
 
-/// Answers every request with `running` for the first `active` requests and then `ended`, counting in `after_end` the
-/// requests that came after the client was told the entry had ended.
+/// Answers every request with `running` for the first `active` requests and then `ended`, recording the total
+/// requests in `total_reads` and requests after the entry ended in `after_end`.
 fn serve_entry(
     listener: std::net::TcpListener,
     (running, active): (&str, usize),
     ended: &str,
+    total_reads: &std::sync::atomic::AtomicUsize,
     after_end: &std::sync::atomic::AtomicUsize,
     closing: &std::sync::atomic::AtomicBool,
 ) {
     use std::io::{BufRead, Write};
     use std::sync::atomic::Ordering::Relaxed;
+    use std::time::Duration;
     let mut reads = 0_usize;
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { return };
         if closing.load(Relaxed) {
             return;
         }
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
         let mut head = std::io::BufReader::new(stream.try_clone().unwrap());
         let mut line = String::new();
         while head.read_line(&mut line).is_ok_and(|n| n > 0) && line != "\r\n" {
             line.clear();
         }
         reads += 1;
+        total_reads.store(reads, Relaxed);
         after_end.store(reads.saturating_sub(active + 1), Relaxed);
         let body = if reads <= active { running } else { ended };
         let _ = write!(
@@ -404,9 +437,9 @@ fn serve_entry(
     }
 }
 
-/// `wait` on a real store. Through the tool: 0 answers at once, and a wait on an entry that stays open holds for its
-/// length (a lower bound, so a loaded machine cannot fail it). Through a server that reports the entry ended during a
-/// long wait, the wait returns that state without asking the server again.
+/// `wait` on a real store and through a fake server: `wait: 0` polls once and returns right away (distinct from
+/// `wait: 1`), `wait: 1` holds for its length, and an entry that ends early during a long wait returns promptly
+/// without asking the server again.
 #[test]
 fn a_wait_follows_an_entry_until_it_ends() {
     use folo_api::{BenchContestantSpec, BenchEntryStatus, BenchPrediction, CreateBench, StartBenchEntry};
@@ -414,6 +447,7 @@ fn a_wait_follows_an_entry_until_it_ends() {
     use std::time::{Duration, Instant};
     let home = TestDir::new("mcp-bench-wait");
     let (store, dataset) = store(home.path());
+    let _shutdown = Defer(Some(|| store.shutdown()));
     let b = crate::bench::Benchmarks::Store(store.clone());
     let req = CreateBench {
         name: "shapes".into(),
@@ -437,9 +471,12 @@ fn a_wait_follows_an_entry_until_it_ends() {
     let s = FoloMcp::new(store.clone(), None, options(home.path()));
     let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
     let args = |wait: u32| json!({ "benchmark_id": bench, "entry_id": entry, "wait": wait });
-    // Finishing the entry ends a call that lost its deadline.
+    // Finishing or stopping (and shutting down the store) guarantees an in-flight call terminates even if finish fails.
     let release = || {
-        let _ = b.finish(&bench, &entry);
+        if b.finish(&bench, &entry).is_err() {
+            let _ = b.stop_entry(&bench, &entry);
+        }
+        store.shutdown();
     };
     let now = bounded(|| rt.block_on(ok(&s, "bench_entry", args(0))), release);
     assert_eq!(now["status"], "running", "{now}");
@@ -454,29 +491,50 @@ fn a_wait_follows_an_entry_until_it_ends() {
     let stopped = b.stop_entry(&bench, &entry).unwrap();
     assert_eq!(stopped.status, BenchEntryStatus::Stopped);
     let stopped = serde_json::to_string(&stopped).unwrap();
-    store.shutdown();
+    drop(_shutdown);
 
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    let http = HttpStore::new(&format!("http://{addr}"), None)
-        .assume_features(vec![folo_api::FEATURE_VISION_BENCH.to_string()]);
-    let via = crate::bench::Benchmarks::Http(Arc::new(http));
-    let (poll, long, grace) = (Duration::from_millis(5), Duration::from_secs(30), Duration::from_secs(1));
-    let after_end = AtomicUsize::new(0);
-    let closing = AtomicBool::new(false);
-    // Ends a wait that never returned: the requests after this one are refused.
-    let close = || {
-        closing.store(true, Ordering::Relaxed);
-        let _ = std::net::TcpStream::connect(addr);
+    // Zero-wait through the fake server makes exactly one read (proving `wait: 0` does not poll like `wait: 1`).
+    let run_fake = |active: usize,
+                    wait: Duration|
+     -> (Result<crate::types::BenchEntryState, Error>, usize, usize, Duration) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let http = HttpStore::new(&format!("http://{addr}"), None)
+            .assume_features(vec![folo_api::FEATURE_VISION_BENCH.to_string()]);
+        let via = crate::bench::Benchmarks::Http(Arc::new(http));
+        let (poll, grace) = (Duration::from_millis(5), Duration::from_secs(1));
+        let total_reads = AtomicUsize::new(0);
+        let after_end = AtomicUsize::new(0);
+        let closing = AtomicBool::new(false);
+        let close = || {
+            closing.store(true, Ordering::Relaxed);
+            let _ = std::net::TcpStream::connect(addr);
+        };
+        let t0 = Instant::now();
+        let r = std::thread::scope(|scope| {
+            // Drop guard is created inside the scope so even if creating the worker thread or running `bounded`
+            // panics, the fake server's accept loop is always released before `scope` joins it.
+            scope.spawn(|| {
+                serve_entry(listener, (&running, active), &stopped, &total_reads, &after_end, &closing)
+            });
+            let _close = Defer(Some(close));
+            bounded(|| super::bench::wait_state(&via, &bench, &entry, poll, wait, grace), close)
+        });
+        (r, total_reads.load(Ordering::Relaxed), after_end.load(Ordering::Relaxed), t0.elapsed())
     };
-    let ended = std::thread::scope(|scope| {
-        scope.spawn(|| serve_entry(listener, (&running, 3), &stopped, &after_end, &closing));
-        let r = bounded(|| super::bench::wait_state(&via, &bench, &entry, poll, long, grace), close);
-        close();
-        r
-    });
+
+    let (zero_res, zero_reads, _, _) = run_fake(10, Duration::ZERO);
+    assert_eq!(zero_res.unwrap().status, BenchEntryStatus::Running);
+    assert_eq!(zero_reads, 1, "wait: 0 must read the entry exactly once");
+
+    let long = Duration::from_secs(30);
+    let (ended, _, after_end, elapsed) = run_fake(3, long);
     assert_eq!(ended.unwrap().status, BenchEntryStatus::Stopped);
-    assert_eq!(after_end.load(Ordering::Relaxed), 0, "the wait asked again after the entry ended");
+    assert_eq!(after_end, 0, "the wait asked again after the entry ended");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "early completion must return promptly instead of holding until the {long:?} deadline ({elapsed:?})"
+    );
 }
 
 /// `delete_benchmark` removes frozen files and entry results, so it is marked destructive (the full

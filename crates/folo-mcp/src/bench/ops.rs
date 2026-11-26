@@ -129,13 +129,7 @@ impl Benchmarks {
                     invalid_arguments("an entry of predictions needs a name for the leaderboard")
                 })?;
                 let entry = self.submit_in(id, name, scored, &path, PARTS, stop)?;
-                let who = named(&entry);
-                return self.state_of(entry).map_err(|e| {
-                    with_hint(
-                        e,
-                        format!("{who} was scored, but its result could not be read; {ENTRY_COMMANDS}"),
-                    )
-                });
+                return Ok(self.state_after_submit(entry));
             }
         };
         self.state_of(entry)
@@ -152,22 +146,39 @@ impl Benchmarks {
             folo_api::BenchEntryStatus::Done => Some(score(&e, self.result(&e.bench_id, &e.id)?)),
             _ => None,
         };
-        Ok(BenchEntryState {
-            benchmark_id: e.bench_id,
-            entry_id: e.id,
-            name: e.name,
-            status: e.status,
-            done: e.progress.done,
-            total: e.progress.total,
-            condition: e.progress.condition,
-            severity: e.progress.severity,
-            images: e.images,
-            conditions: e.conditions,
-            missing_classes: e.missing_classes,
-            error: e.error,
-            hint: e.hint,
-            result,
-        })
+        Ok(state_with_result(e, result))
+    }
+
+    /// Like [`Benchmarks::state_of`], for a predictions upload that already finished on the server: if the entry is
+    /// `done` and the separate `/result` request fails, keep the scored entry instead of failing the upload, with a
+    /// hint noting the score and why the detailed breakdown is missing.
+    fn state_after_submit(&self, mut e: BenchEntry) -> BenchEntryState {
+        if e.status != BenchEntryStatus::Done {
+            return state_with_result(e, None);
+        }
+        match self.result(&e.bench_id, &e.id) {
+            Ok(r) => {
+                let scored = score(&e, r);
+                state_with_result(e, Some(scored))
+            }
+            Err(err) => {
+                let who = named(&e);
+                let score_note = e
+                    .score
+                    .as_ref()
+                    .map(|s| format!(" (score {:.1}{})", s.total, if s.partial { ", partial" } else { "" }))
+                    .unwrap_or_default();
+                let note = format!(
+                    "{who} was scored{score_note}, but its detailed result could not be read ({})",
+                    err.body.message
+                );
+                e.hint = Some(match e.hint.take() {
+                    Some(h) => format!("{note}; {h}"),
+                    None => note,
+                });
+                state_with_result(e, None)
+            }
+        }
     }
 
     /// Stops an entry.
@@ -207,7 +218,7 @@ impl Benchmarks {
         stop: &AtomicBool,
     ) -> Result<BenchEntry, Error> {
         let shown = folo_api::json::path(path);
-        self.submit_records(id, name, scored, &shown, read_predictions(path)?, limits, stop)
+        self.submit_records(id, name, scored, &shown, read_predictions_unless(path, stop)?, limits, stop)
     }
 
     /// [`Benchmarks::submit_in`] of `records` (`shown` names where they come from).
@@ -298,19 +309,53 @@ impl Benchmarks {
     }
 }
 
-/// True when the server answered a finish and did not take the entry for scoring. A `409` is not that: it also answers
-/// a finish while another one scores the entry, which still reads `running`, so a stop would cancel that score.
+/// True when the FOLO server answered a finish with a refusal (did not take the entry for scoring).
+///
+/// Unparsed non-FOLO `4xx` responses (`bad_gateway`, e.g. from a proxy) are excluded because the finish may still have
+/// reached the server. `409 bench_entry_not_open` is excluded too: it also answers a finish while another one scores
+/// the entry, which still reads `running`, so a stop would cancel that score.
 fn refused(e: &Error) -> bool {
-    e.status.is_client_error() && e.status != StatusCode::CONFLICT
+    e.status.is_client_error()
+        && e.body.code != folo_client::NOT_FOLO
+        && !(e.status == StatusCode::CONFLICT && e.body.code == "bench_entry_not_open")
 }
 
-/// `e` with `what` before the hint it has.
+/// `e` with `what` before the hint it has, keeping any trailing [`ENTRY_COMMANDS`] placeholder at the very end so
+/// [`super::hints::decorate`] only replaces that suffix and never text inside an entry's name.
 fn with_hint(e: Error, what: String) -> Error {
-    let hint = match e.body.hint.as_deref() {
-        Some(h) => format!("{what}; {h}"),
-        None => what,
+    let (base, has_commands) = match what.strip_suffix(ENTRY_COMMANDS) {
+        Some(prefix) => (prefix.strip_suffix("; ").unwrap_or(prefix), true),
+        None => (what.as_str(), false),
     };
+    let mut hint = match e.body.hint.as_deref() {
+        Some(h) => format!("{base}; {h}"),
+        None => base.to_string(),
+    };
+    if has_commands {
+        hint.push_str("; ");
+        hint.push_str(ENTRY_COMMANDS);
+    }
     e.hint(hint)
+}
+
+/// Builds a [`BenchEntryState`] from `e` and an already-loaded (or omitted) score breakdown.
+fn state_with_result(e: BenchEntry, result: Option<BenchScoreResult>) -> BenchEntryState {
+    BenchEntryState {
+        benchmark_id: e.bench_id,
+        entry_id: e.id,
+        name: e.name,
+        status: e.status,
+        done: e.progress.done,
+        total: e.progress.total,
+        condition: e.progress.condition,
+        severity: e.progress.severity,
+        images: e.images,
+        conditions: e.conditions,
+        missing_classes: e.missing_classes,
+        error: e.error,
+        hint: e.hint,
+        result,
+    }
 }
 
 /// An entry as the hints name it: as the server lists it, and its id.
@@ -332,10 +377,13 @@ fn check_interrupt(stop: &AtomicBool) -> Result<(), Error> {
 
 /// What the hint says of an entry this upload leaves as it is.
 fn left(who: &str, e: &BenchEntry) -> String {
-    let state = if e.status.is_active() {
-        "open or being scored".to_string()
-    } else {
-        format!("{:?}", e.status).to_lowercase()
+    let state = match e.status {
+        BenchEntryStatus::Running => "open or being scored",
+        BenchEntryStatus::Queued => "queued",
+        BenchEntryStatus::Stopping => "stopping",
+        BenchEntryStatus::Done => "done",
+        BenchEntryStatus::Failed => "failed",
+        BenchEntryStatus::Stopped => "stopped",
     };
     format!("{who} was left: it is {state}; {ENTRY_COMMANDS}")
 }
@@ -365,6 +413,22 @@ fn lost_start(e: Error, name: &str) -> Error {
 pub fn read_predictions(
     path: &Path,
 ) -> Result<impl Iterator<Item = Result<BenchPrediction, Error>> + use<>, Error> {
+    let (file, shown) = open_predictions_file(path)?;
+    Ok(records_of(BufReader::new(file), shown))
+}
+
+/// Like [`read_predictions`], checking `stop` before every line read (including after skipping a blank line) so
+/// Ctrl+C during a blocked pipe read whose next line is blank never starts another read.
+fn read_predictions_unless<'a>(
+    path: &Path,
+    stop: &'a AtomicBool,
+) -> Result<impl Iterator<Item = Result<BenchPrediction, Error>> + 'a, Error> {
+    check_interrupt(stop)?;
+    let (file, shown) = open_predictions_file(path)?;
+    Ok(records_of_unless(BufReader::new(file), shown, Some(stop)))
+}
+
+fn open_predictions_file(path: &Path) -> Result<(std::fs::File, String), Error> {
     let shown = folo_api::json::path(path);
     let file = std::fs::File::open(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => {
@@ -372,24 +436,45 @@ pub fn read_predictions(
         }
         _ => Error::new(StatusCode::INTERNAL_SERVER_ERROR, "io_error", format!("reading {shown}: {e}")),
     })?;
-    Ok(records_of(BufReader::new(file), shown))
+    Ok((file, shown))
 }
 
 /// The records of `reader`, one per line. At most a record and its line ending are read of any line.
-fn records_of<R: BufRead>(
+fn records_of<'a, R: BufRead + 'a>(
+    reader: R,
+    shown: String,
+) -> impl Iterator<Item = Result<BenchPrediction, Error>> + 'a {
+    records_of_unless(reader, shown, None)
+}
+
+/// [`records_of`], checking `stop` before every line read (including after skipping a blank line).
+fn records_of_unless<'a, R: BufRead + 'a>(
     mut reader: R,
     shown: String,
-) -> impl Iterator<Item = Result<BenchPrediction, Error>> {
+    stop: Option<&'a AtomicBool>,
+) -> impl Iterator<Item = Result<BenchPrediction, Error>> + 'a {
     let mut n = 0usize;
     std::iter::from_fn(move || {
         let bad = |what: String| invalid_arguments(format!("{shown}: {what}"));
         loop {
+            if let Some(flag) = stop
+                && let Err(e) = check_interrupt(flag)
+            {
+                return Some(Err(e));
+            }
             n += 1;
             let mut line = Vec::new();
             match (&mut reader).take(MAX_RECORD_BYTES as u64 + 2).read_until(b'\n', &mut line) {
                 Ok(0) => return None,
                 Ok(_) => {}
-                Err(e) => return Some(Err(bad(format!("reading line {n}: {e}")))),
+                Err(e) => {
+                    if let Some(flag) = stop
+                        && let Err(ie) = check_interrupt(flag)
+                    {
+                        return Some(Err(ie));
+                    }
+                    return Some(Err(bad(format!("reading line {n}: {e}"))));
+                }
             }
             // A `\r` is a line ending only before a `\n`: at the end of the file it is one more byte of the line.
             let body = match line.strip_suffix(b"\n") {
