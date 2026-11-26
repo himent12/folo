@@ -88,10 +88,22 @@ export function fromUrl(q: URLSearchParams): FromUrl {
 }
 
 /** The Playground's URL for this state: the model, a dataset image, and the thresholds that differ from the defaults. */
-export function playgroundPath(s: { model: string | null; source: Source | null; conf: number; iou: number; maxDet: number }): string {
+export function playgroundPath(s: {
+  model: string | null;
+  source: Source | null;
+  imageRef?: ImageRef | null;
+  conf: number;
+  iou: number;
+  maxDet: number;
+}): string {
   const q = new URLSearchParams();
   if (s.model) q.set('model', s.model);
-  if (s.source?.kind === 'dataset') {
+  if (s.imageRef) {
+    q.set('dataset', s.imageRef.dataset);
+    q.set('image', s.imageRef.image);
+    q.set('split', s.imageRef.split);
+    if (s.imageRef.at !== null) q.set('at', String(s.imageRef.at));
+  } else if (s.source?.kind === 'dataset') {
     q.set('dataset', s.source.ds.id);
     q.set('image', s.source.img.id);
     q.set('split', s.source.img.split);

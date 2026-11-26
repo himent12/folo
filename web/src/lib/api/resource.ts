@@ -14,7 +14,7 @@
 // no data, and if it fails, its error. When the server answers
 // again after an outage (`hub.back`), a Resource that failed retries by itself and one holding data refreshes quietly.
 
-import { effect, signal, untrack } from 'fw';
+import { effect, onCleanup, signal, untrack } from 'fw';
 import { hub } from './index';
 import { abortError, copy, pollTogether, reuse, together } from './share';
 
@@ -114,6 +114,8 @@ export class Resource<T> {
   #following: AbortController | null = null;
   /** Set by `invalidate()` until a fresh fetch settles, so `#lend()` never hands out pre-mutation data. */
   #invalidated = false;
+  /** True once the owning reactive root cleans up, so post-unmount `refresh()` calls never leak live requests. */
+  #disposed = false;
 
   constructor(fetcher: (signal: AbortSignal) => Promise<T>, opts: ResourceOptions<T> = {}) {
     this.#fetcher = fetcher;
@@ -131,8 +133,9 @@ export class Resource<T> {
         });
       }
       const ctrl = new AbortController();
-      // Reactive reads inside the fetcher (before its first await) are tracked by this effect.
-      const ask = () => together(() => fetcher(ctrl.signal)).value;
+      // Reactive reads inside the fetcher (before its first await) are tracked by this effect; a synchronous throw
+      // settles as a regular fetch error instead of crashing the effect.
+      const ask = () => this.#ask(ctrl.signal);
       const from = first ? untrack(() => opts.startFrom?.()) : null;
       const start = from ? untrack(() => from.#lend()) : null;
       if (start && 'data' in start) {
@@ -174,17 +177,28 @@ export class Resource<T> {
         if (hub.mode !== 'connecting' && (this.error !== undefined || this.data !== undefined)) void this.refresh();
       });
     });
-    // Lifetime cleanup, independent of the fetch effect (which returns early while the hub reconnects).
-    effect(() => () => {
+    // Synchronous lifetime cleanup, so disposal before the first effect flush still marks `#disposed`.
+    onCleanup(() => {
+      this.#disposed = true;
       this.#seq++;
       this.#ctrl?.abort();
     });
   }
 
+  /** Runs the fetcher inside `together`, turning synchronous throws into rejected promises so effects stay healthy. */
+  #ask(signal: AbortSignal): Promise<T> {
+    try {
+      return together(() => this.#fetcher(signal)).value;
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  }
+
   /** Refetch, keeping the current data visible (with no data yet, a Retry: back to loading, then the outcome). */
   refresh(): Promise<void> {
+    if (this.#disposed) return Promise.resolve();
     const ctrl = new AbortController();
-    return untrack(() => this.#settle(together(() => this.#fetcher(ctrl.signal)).value, ctrl, true));
+    return untrack(() => this.#settle(this.#ask(ctrl.signal), ctrl, true));
   }
 
   /**
@@ -201,8 +215,9 @@ export class Resource<T> {
    * offline shows the error (and keeps its actions gated) the whole time, never a loading skeleton at every poll.
    */
   #poll(): Promise<void> {
+    if (this.#disposed) return Promise.resolve();
     const ctrl = new AbortController();
-    return untrack(() => this.#settle(together(() => this.#fetcher(ctrl.signal)).value, ctrl, true, true));
+    return untrack(() => this.#settle(this.#ask(ctrl.signal), ctrl, true, true));
   }
 
   /** Replace the data locally (optimistic updates). */
@@ -212,7 +227,7 @@ export class Resource<T> {
 
   /** What another Resource's first fetch can start from (`startFrom`), for the server in use; null when nothing. */
   #lend(): { read: Promise<T> } | { data: T; updated: number } | null {
-    if (this.#epoch !== hub.epoch || this.#invalidated) return null;
+    if (this.#disposed || this.#epoch !== hub.epoch || this.#invalidated) return null;
     if (this.#loadingRead) return { read: this.#loadingRead };
     const data = this.#data.peek();
     const updated = this.#updated.peek();
@@ -234,6 +249,11 @@ export class Resource<T> {
   }
 
   async #settle(promise: Promise<T>, ctrl: AbortController, quiet: boolean, poll = false): Promise<void> {
+    if (this.#disposed) {
+      void promise.catch(() => {});
+      ctrl.abort();
+      return;
+    }
     this.#ctrl?.abort();
     this.#ctrl = ctrl;
     this.#loadingRead = null;

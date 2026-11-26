@@ -50,7 +50,13 @@ export function Show<T>(props: ShowProps<T>): JSX.Element {
   let prevV: JSX.Element = undefined;
   return memo(() => {
     const c = cond.get();
-    if (prevT !== null) leaveBranch(prevT, prevV);
+    if (prevT !== null) {
+      const t0 = prevT;
+      const v0 = prevV;
+      prevT = null;
+      prevV = undefined;
+      leaveBranch(t0, v0);
+    }
     enterBranch(ran);
     let v: JSX.Element;
     let t: BranchTransitions = null;
@@ -606,7 +612,13 @@ export function Switch(props: { fallback?: JSX.Element; children: JSX.Element })
   let prevV: JSX.Element = undefined;
   return memo(() => {
     const i = which.get();
-    if (prevT !== null) leaveBranch(prevT, prevV);
+    if (prevT !== null) {
+      const t0 = prevT;
+      const v0 = prevV;
+      prevT = null;
+      prevV = undefined;
+      leaveBranch(t0, v0);
+    }
     enterBranch(ran);
     let v: JSX.Element;
     let t: BranchTransitions = null;
@@ -638,7 +650,13 @@ export function Key<T>(props: { when: T; children: JSX.Element }): JSX.Element {
   let prevV: JSX.Element = undefined;
   return memo(() => {
     key.get();
-    if (prevT !== null) leaveBranch(prevT, prevV);
+    if (prevT !== null) {
+      const t0 = prevT;
+      const v0 = prevV;
+      prevT = null;
+      prevV = undefined;
+      leaveBranch(t0, v0);
+    }
     enterBranch(ran);
     let v: JSX.Element;
     let t: BranchTransitions = null;

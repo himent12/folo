@@ -70,3 +70,27 @@ export function createRectCache(): RectCache {
     clear,
   };
 }
+
+/**
+ * Converts a pointer event on `el` into element-local CSS coordinates using `cache`.
+ * If an external layout shift moved `el` while its rect was cached, an in-element pointer event can appear outside
+ * `[0..width, 0..height]`: invalidate and re-measure once so hover/pick self-heals immediately.
+ */
+export function localPointer(
+  cache: RectCache,
+  el: Element,
+  e: PointerEvent,
+  width: number,
+  height: number,
+): { px: number; py: number } {
+  let r = cache.get(el);
+  let px = e.clientX - r.left;
+  let py = e.clientY - r.top;
+  if (px < 0 || px > width || py < 0 || py > height) {
+    cache.clear();
+    r = cache.get(el);
+    px = e.clientX - r.left;
+    py = e.clientY - r.top;
+  }
+  return { px, py };
+}

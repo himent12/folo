@@ -24,7 +24,7 @@ import Sparkles from '$icons/sparkles';
 import Trash from '$icons/trash-2';
 import Undo from '$icons/undo-2';
 import X from '$icons/x';
-import { computed, createUniqueId, css, effect, Index, MediaQuery, onWindow, signal, untrack } from 'fw';
+import { computed, createUniqueId, css, effect, Index, MediaQuery, onCleanup, onWindow, signal, untrack } from 'fw';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { LiveLabelJob } from '$lib/api/liveLabel';
@@ -132,6 +132,8 @@ export default function Editor(props: EditorProps) {
     return s === null ? undefined : draft.get()[s];
   });
   // This image's edits, for Undo and Redo; `rev` tells the buttons it changed.
+  let disposed = false;
+  onCleanup(() => (disposed = true));
   const history = new History<Box[]>();
   const rev = signal(0);
   const undoCount = computed(() => (rev.get(), history.past.length));
@@ -159,12 +161,18 @@ export default function Editor(props: EditorProps) {
         status.clear();
         elsewhere.set(false);
         leaving.set(null);
-        removing.set(false);
+        removing.set(null);
+        removeStatus.clear();
         untrack(forget);
       }
       return;
     }
     if (!cur) return void hovered.set(null);
+    const rem = removing.peek();
+    if (rem && (rem.id !== cur.id || rem.jobId !== props.job.id)) {
+      removing.set(null);
+      removeStatus.clear();
+    }
     if (cur.id !== shownId) {
       shownId = cur.id;
       base.set(cur.boxes);
@@ -291,6 +299,7 @@ export default function Editor(props: EditorProps) {
     return true;
   }
   function discard() {
+    if (locked.peek() || saving.peek()) return;
     edit(base.peek());
     selected.set(null);
   }
@@ -316,7 +325,7 @@ export default function Editor(props: EditorProps) {
     try {
       const saved = await hub.api.updateLabelImage(props.job.id, id, sent.map(tidy), expect);
       props.live.put([saved], mark);
-      if (shownId === id) {
+      if (!disposed && shownId === id) {
         base.set(saved.boxes);
         elsewhere.set(false);
         if (draft.peek() === sent) draft.set(saved.boxes);
@@ -325,9 +334,9 @@ export default function Editor(props: EditorProps) {
       return true;
     } catch (e) {
       // The edits stay; the stream brings the labels saved elsewhere, as the base Discard goes back to.
+      if (disposed || shownId !== id) return false;
       if (!changedElsewhere(e)) status.error(e, 'Could not save the boxes');
-      else if (shownId === id)
-        status.show('info', 'Changed elsewhere while you edited', 'Its labels were saved from another tab or window first, so yours were not. Save replaces them with yours; Discard shows them.');
+      else status.show('info', 'Changed elsewhere while you edited', 'Its labels were saved from another tab or window first, so yours were not. Save replaces them with yours; Discard shows them.');
       return false;
     } finally {
       saving.set(false);
@@ -365,12 +374,11 @@ export default function Editor(props: EditorProps) {
     try {
       const saved = await hub.api.reviewLabelImage(props.job.id, cur.id, reviewed, expect);
       props.live.put([saved], mark);
-      if (shownId !== cur.id || !reviewed) return;
-      if (next) props.onnavigate(next);
-      else status.success('Reviewed', 'Every labeled image here is reviewed.');
+      if (disposed || shownId !== cur.id || !reviewed) return;
+      if (next && router.route.name === 'label-job' && router.route.params.id === props.job.id && router.route.query.get('image') === cur.id) props.onnavigate(next);
+      else if (!next) status.success('Reviewed', 'Every labeled image here is reviewed.');
     } catch (e) {
-      if (!changedElsewhere(e)) status.error(e, 'Could not mark the image');
-      else await reload(cur.id);
+      if (!changedElsewhere(e)) { if (!disposed && shownId === cur.id) status.error(e, 'Could not mark the image'); } else if (!disposed) await reload(cur.id);
     } finally {
       reviewing.set(false);
     }
@@ -394,7 +402,7 @@ export default function Editor(props: EditorProps) {
     const cur = img.peek();
     if (!cur) return;
     const next = nextToReview(cur.id);
-    if ((await save()) && shownId === cur.id && next) props.onnavigate(next);
+    if ((await save()) && !disposed && shownId === cur.id && next && router.route.name === 'label-job' && router.route.params.id === props.job.id && router.route.query.get('image') === cur.id) props.onnavigate(next);
   }
 
   // ---------- leaving with changes ----------
@@ -538,25 +546,35 @@ export default function Editor(props: EditorProps) {
   }
 
   // ---------- removing ----------
-  const removing = signal(false);
+  const removing = signal<{ jobId: string; id: string; file: string } | null>(null);
   const removeBusy = signal(false);
   const removeStatus = new DialogStatus();
-  async function remove() {
+  function openRemove() {
     const cur = img.peek();
     if (!cur) return;
+    removeStatus.clear();
+    removing.set({ jobId: props.job.id, id: cur.id, file: cur.file });
+  }
+  async function remove() {
+    const target = removing.peek();
+    if (!target || removeBusy.peek()) return;
     removeBusy.set(true);
     const i = idx.peek();
     const next = props.images[i + 1] ?? props.images[i - 1];
     try {
-      await hub.api.deleteLabelImage(props.job.id, cur.id);
-      props.live.drop(cur.id);
-      draft.set(base.peek());
-      removing.set(false);
-      props.onnavigate(next && next.id !== cur.id ? next.id : null);
+      await hub.api.deleteLabelImage(target.jobId, target.id);
+      if (disposed) return;
+      if (props.job.id === target.jobId) props.live.drop(target.id);
+      const r = router.route;
+      if (shownId === target.id && props.job.id === target.jobId && open.peek() && r.name === 'label-job' && r.params.id === target.jobId && r.query.get('image') === target.id) {
+        draft.set(base.peek());
+        removing.set(null);
+        props.onnavigate(next && next.id !== target.id ? next.id : null);
+      }
     } catch (e) {
-      removeStatus.error(e, 'Could not remove the image');
+      if (!disposed && shownId === target.id && props.job.id === target.jobId && removing.peek()?.id === target.id) removeStatus.error(e, 'Could not remove the image');
     } finally {
-      removeBusy.set(false);
+      if (!disposed) removeBusy.set(false);
     }
   }
 
@@ -602,7 +620,7 @@ export default function Editor(props: EditorProps) {
                 No changes yet
               </p>
             ) : null}
-            <Button variant="ghost" disabled={!dirty.get()} onclick={discard}>
+            <Button variant="ghost" disabled={!dirty.get() || !!locked.get() || saving.get()} onclick={discard}>
               Discard
             </Button>
             {img.get()?.reviewed && !dirty.get() && !locked.get() ? (
@@ -685,9 +703,7 @@ export default function Editor(props: EditorProps) {
             <aside class="side">
               <section>
                 <div class="head">
-                  <h3>
-                    Boxes <span class="meta num">{draft.get().length}</span>
-                  </h3>
+                  <h3>Boxes <span class="meta num">{draft.get().length}</span></h3>
                   <span class="tools">
                     <span class:off={!canUndo.get() || !!locked.get()} use:tooltip={undoTip.get()}>
                       <Button variant="ghost" size="sm" icon={Undo} aria-label="Undo" disabled={!canUndo.get() || !!locked.get()} onclick={() => undo()} />
@@ -695,15 +711,11 @@ export default function Editor(props: EditorProps) {
                     <span class:off={!canRedo.get() || !!locked.get()} use:tooltip={redoTip.get()}>
                       <Button variant="ghost" size="sm" icon={Redo} aria-label="Redo" disabled={!canRedo.get() || !!locked.get()} onclick={() => undo(true)} />
                     </span>
-                    <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} data-add-box onclick={addBox}>
-                      Add box
-                    </Button>
+                    <Button variant="ghost" size="sm" icon={Plus} disabled={!!locked.get()} data-add-box onclick={addBox}>Add box</Button>
                   </span>
                 </div>
                 {undoCount.get() > 0 || redoCount.get() > 0 ? (
-                  <p class="hist-depth num">
-                    History: {undoCount.get()} undo · {redoCount.get()} redo
-                  </p>
+                  <p class="hist-depth num">History: {undoCount.get()} undo · {redoCount.get()} redo</p>
                 ) : null}
                 {draft.get().length ? (
                   <ul class="boxes scroll-shade" onpointerleave={() => hovered.set(null)}>
@@ -740,9 +752,7 @@ export default function Editor(props: EditorProps) {
                         onchange={(v) => setClass(Number(v))}
                       />
                     </Field>
-                    <Button size="sm" icon={X} disabled={!!locked.get()} onclick={removeBox}>
-                      Delete box
-                    </Button>
+                    <Button size="sm" icon={X} disabled={!!locked.get()} onclick={removeBox}>Delete box</Button>
                   </div>
                 ) : null}
               </section>
@@ -758,17 +768,11 @@ export default function Editor(props: EditorProps) {
                     </Button>
                   )}
                 </Gate>
-                {askWhy.get() ? (
-                  <p class="why" data-gate-why>
-                    {askWhy.get()}
-                  </p>
-                ) : null}
+                {askWhy.get() ? <p class="why" data-gate-why>{askWhy.get()}</p> : null}
               </section>
 
               <section class="foot">
-                <Button variant="danger" icon={Trash} disabled={!!locked.get()} onclick={() => removing.set(true)}>
-                  Remove image
-                </Button>
+                <Button variant="danger" icon={Trash} disabled={!!locked.get()} onclick={openRemove}>Remove image</Button>
               </section>
             </aside>
           </div>
@@ -786,25 +790,23 @@ export default function Editor(props: EditorProps) {
         footer={() => (
           <>
             <Button onclick={() => answer('discard')}>Discard changes</Button>
-            <Button variant="primary" loading={saving.get()} onclick={() => answer('save')}>
-              Save
-            </Button>
+            <Button variant="primary" loading={saving.get()} onclick={() => answer('save')}>Save</Button>
           </>
         )}
       />
 
       <Dialog
-        bind:open={removing}
-        title={`Remove ${img.get()?.file ?? 'this image'}?`}
+        open={!!removing.get()}
+        title={`Remove ${removing.get()?.file ?? 'this image'}?`}
         description="Its labels go with it. An uploaded file is deleted; an image added from a folder stays on disk."
         size="sm"
         status={removeStatus}
+        onbeforeclose={() => !removeBusy.peek()}
+        onclose={() => removing.set(null)}
         footer={() => (
           <>
-            <Button onclick={() => removing.set(false)}>Keep it</Button>
-            <Button variant="destructive" icon={Trash} loading={removeBusy.get()} onclick={remove}>
-              Remove image
-            </Button>
+            <Button disabled={removeBusy.get()} onclick={() => removing.set(null)}>Keep it</Button>
+            <Button variant="destructive" icon={Trash} loading={removeBusy.get()} onclick={remove}>Remove image</Button>
           </>
         )}
       />

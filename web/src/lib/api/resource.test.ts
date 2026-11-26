@@ -128,4 +128,92 @@ describe('Resource', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(r.data).toBeUndefined();
   });
+
+  it('ignores refresh() and invalidate() calls after cleanup without issuing leaked requests', async () => {
+    let calls = 0;
+    let r!: Resource<number>;
+    const stop = root(() => {
+      r = new Resource(() => {
+        calls++;
+        return Promise.resolve(calls);
+      });
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toBe(1);
+    expect(r.data).toBe(1);
+
+    stop();
+    await r.refresh();
+    await r.invalidate();
+    expect(calls).toBe(1);
+    expect(r.data).toBe(1);
+    expect(r.refreshing).toBe(false);
+  });
+
+  it('turns synchronous fetcher throws into error state without crashing reactive effects', async () => {
+    let fail = true;
+    let r!: Resource<string>;
+    const stop = root(() => {
+      r = new Resource(() => {
+        if (fail) throw new Error('sync boom');
+        return Promise.resolve('ok');
+      });
+    });
+    expect(() => flushSync()).not.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect((r.error as Error)?.message).toBe('sync boom');
+    expect(r.loading).toBe(false);
+
+    fail = false;
+    await r.refresh();
+    expect(r.error).toBeUndefined();
+    expect(r.data).toBe('ok');
+    stop();
+  });
+
+  it('marks disposed synchronously before first flush and consumes rejections if a refresh fetcher disposes and throws', async () => {
+    let calls = 0;
+    let r!: Resource<number>;
+    const stop = root(() => {
+      r = new Resource(() => {
+        calls++;
+        return Promise.resolve(1);
+      });
+    });
+    // Dispose BEFORE flushSync(): synchronous onCleanup must prevent later refresh()/invalidate() fetches.
+    stop();
+    await r.refresh();
+    await r.invalidate();
+    expect(calls).toBe(0);
+
+    // If a refresh fetcher synchronously disposes its owner and throws, no unhandled rejection escapes.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      let disposeNow!: () => void;
+      let throwOnSecond = false;
+      let r2!: Resource<number>;
+      disposeNow = root(() => {
+        r2 = new Resource(() => {
+          if (throwOnSecond) {
+            disposeNow();
+            throw new Error('disposed mid-refresh');
+          }
+          return Promise.resolve(7);
+        });
+      });
+      flushSync();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(r2.data).toBe(7);
+
+      throwOnSecond = true;
+      await r2.refresh();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
 });

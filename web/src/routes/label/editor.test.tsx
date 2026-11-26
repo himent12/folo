@@ -658,4 +658,100 @@ describe('the labeling editor: reviewing', () => {
     flushSync();
     expect(router.route.query.get('image')).toBe('1');
   });
+
+  it('does not leak a failed Save error onto another image, disables Discard while saving, and guards Remove against double submit/close', async () => {
+    await openEditor('1');
+    let rejectSave!: (e: unknown) => void;
+    const failSave = new Promise<LabelImage>((_, r) => (rejectSave = r));
+    vi.spyOn(hub.api, 'updateLabelImage').mockReturnValueOnce(failSave);
+
+    click(inEditor('Add box'));
+    const discardBtn = () => inEditor('Discard')!;
+    expect(discardBtn().disabled).toBe(false);
+    click(inEditor('Save'));
+    expect(discardBtn().disabled).toBe(true);
+
+    // Switch to image 2 while image 1's save is still pending, then fail image 1's save.
+    key('j');
+    // Leave dialog opens because image 1 is dirty; discard to switch to image 2.
+    expect(asking()).toBeDefined();
+    click([...asking()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Discard changes'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBe('2');
+    });
+    rejectSave(new Error('network blip'));
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(editor()!.querySelector('.dialog-status')?.textContent?.trim() ?? '').toBe('');
+
+    // Open Remove dialog and start delete: re-clicking Remove or trying to close while busy must be blocked.
+    const del = deferred<void>();
+    const delSpy = vi.spyOn(hub.api, 'deleteLabelImage').mockReturnValue(del.promise);
+    click(inEditor('Remove image'));
+    const removeDlg = () =>
+      [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].find((d) => d.querySelector('h2')?.textContent?.startsWith('Remove '));
+    expect(removeDlg()).toBeDefined();
+    const confirmRemove = () => [...removeDlg()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Remove image')!;
+    const keepBtn = () => [...removeDlg()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Keep it')!;
+    click(confirmRemove());
+    click(confirmRemove());
+    expect(delSpy).toHaveBeenCalledTimes(1);
+    expect(keepBtn().disabled).toBe(true);
+    click(removeDlg()!.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!);
+    expect(removeDlg()).toBeDefined();
+    del.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(removeDlg()).toBeUndefined();
+  });
+
+  it('dismisses the Remove dialog instead of retargeting when URL switches images during pending delete', async () => {
+    await openEditor('1');
+    const del = deferred<void>();
+    vi.spyOn(hub.api, 'deleteLabelImage').mockReturnValue(del.promise);
+    click(inEditor('Remove image'));
+    const removeDlg = () =>
+      [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].find((d) => d.querySelector('h2')?.textContent?.startsWith('Remove '));
+    expect(removeDlg()?.querySelector('h2')?.textContent).toContain('0901');
+    click([...removeDlg()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Remove image'));
+
+    // Navigate to image 3 via URL while image 1 deletion is still pending: dialog must dismiss and not retarget.
+    router.go('/datasets/label/lb_7c21?image=3', { replace: true });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBe('3');
+    });
+    expect(removeDlg()).toBeUndefined();
+
+    // Settling image 1's delete must not navigate away from image 3.
+    del.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(router.route.query.get('image')).toBe('3');
+    expect(removeDlg()).toBeUndefined();
+  });
+
+  it('does not redirect back to the labeling job when leaving the page while a delete is pending', async () => {
+    await openEditor('1');
+    const del = deferred<void>();
+    vi.spyOn(hub.api, 'deleteLabelImage').mockReturnValue(del.promise);
+    click(inEditor('Remove image'));
+    const removeDlg = [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].find((d) =>
+      d.querySelector('h2')?.textContent?.startsWith('Remove '),
+    );
+    click([...removeDlg!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Remove image'));
+
+    // Navigate away to /runs and unmount the labeling page before delete settles.
+    router.go('/runs', { replace: true });
+    unmount(c!);
+    c = undefined;
+    flushSync();
+    expect(router.route.path).toBe('/runs');
+
+    del.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(router.route.path).toBe('/runs');
+  });
 });

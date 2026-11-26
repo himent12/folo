@@ -151,14 +151,22 @@ export default function Playground() {
   /** The chosen model's score and what it is on, under the select: "mAP50-95 0.606 · shapes-hard, validation split". */
   const pickedMeta = computed(() => choices.get().find((c) => c.model.id === modelId.get())?.meta ?? null);
 
+  let syncModelUrl: ((id: string) => void) | null = null;
   function chooseModel(id: string) {
     pickedModel.set(id);
-    router.go(playgroundPath({ model: id, source: source.peek(), conf: conf.peek(), iou: iou.peek(), maxDet: maxDet.peek() }), { replace: true });
+    if (syncModelUrl) syncModelUrl(id);
+    else router.go(playgroundPath({ model: id, source: source.peek(), conf: conf.peek(), iou: iou.peek(), maxDet: maxDet.peek() }), { replace: true });
   }
   followVanished(() => model.get(), () => ranked.get(), () => wanted.get(), chooseModel);
 
+  const imageError = signal(false);
+  const imageRetry = signal(0);
+  const retryImage = () => imageRetry.set((n) => n + 1);
+
   effect(() => {
     const s = source.get();
+    const retry = imageRetry.get();
+    untrack(() => imageError.set(false));
     if (!s) {
       src.set(null);
       return;
@@ -171,9 +179,12 @@ export default function Playground() {
     src.set(null);
     hub.api.imageUrl(s.ds.id, s.img.id).then(
       (u) => {
-        if (live) src.set(u);
+        if (!live) return;
+        src.set(retry > 0 && !/^(blob|data):/.test(u) ? `${u}${u.includes('?') ? '&' : '?'}retry=${retry}` : u);
       },
-      () => {},
+      () => {
+        if (live) imageError.set(true);
+      },
     );
     return () => {
       live = false;
@@ -195,6 +206,7 @@ export default function Playground() {
     if (old?.kind === 'file') URL.revokeObjectURL(old.url);
     engine.clearImageCache();
     source.set(s);
+    imageRetry.set(0);
     seg.set(s.kind);
     pred.set(null);
     error.set(null);
@@ -223,6 +235,7 @@ export default function Playground() {
     if (old?.kind === 'file') URL.revokeObjectURL(old.url);
     engine.clearImageCache();
     source.set(null);
+    imageRetry.set(0);
     pred.set(null);
     error.set(null);
     weightsMissing.set(false);
@@ -391,6 +404,7 @@ export default function Playground() {
     choose,
     model: () => modelId.get() ?? queryModel.get() ?? null,
     pickModel: (id) => pickedModel.set(id),
+    onModelUrl: (write) => (syncModelUrl = write),
   });
 
   effect(() => {
@@ -791,6 +805,9 @@ export default function Playground() {
                 samples={samples.get()}
                 setSource={setSource}
                 src={src.get()}
+                imageError={imageError.get()}
+                onImageLoad={(ok) => imageError.set(!ok)}
+                onImageRetry={retryImage}
                 pred={pred.get()}
                 cut={cut()}
                 kept={kept.get()}

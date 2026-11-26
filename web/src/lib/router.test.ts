@@ -123,3 +123,13 @@ describe('router.holdWhile (the screen on display keeps its route while the next
     expect(router.route.name).toBe('overview');
   });
 });
+
+describe('router parse edge cases', () => {
+  it('preserves literal question marks inside query parameter values', () => {
+    const r = parse('#/runs?q=why?what=1&tag=a?b');
+    expect(r.name).toBe('runs');
+    expect(r.path).toBe('/runs');
+    expect(r.query.get('q')).toBe('why?what=1');
+    expect(r.query.get('tag')).toBe('a?b');
+  });
+});

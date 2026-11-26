@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
 import { For, Index, Key, Match, Portal, Show, Switch, deep, effect, flush, onCleanup, signal } from 'fw';
+import { transition } from 'fw/internal';
 import { render } from '../testing';
 
 const text = (el: Element) => el.textContent;
@@ -942,6 +943,54 @@ describe('Switch / Key', () => {
     k.set('b');
     flush();
     expect(made).toHaveBeenCalledTimes(2);
+    unmount();
+  });
+
+  it('Show clears prior branch transitions before throwing on the next branch so recovery does not double-run outros', () => {
+    const mode = signal<'a' | 'throw' | 'b'>('a');
+    let leaveCalls = 0;
+    const outFn = (_el: Element) => {
+      leaveCalls++;
+      return { duration: 0 };
+    };
+    const { container, unmount } = render(() => (
+      <div>
+        <Show when={mode.get()} keyed>
+          {(v) => {
+            if (v() === 'throw') throw new Error('branch-boom');
+            if (v() === 'b') return <em>b</em>;
+            const el = <b>a</b> as unknown as HTMLElement;
+            transition(el, outFn, undefined, 2);
+            return el;
+          }}
+        </Show>
+      </div>
+    ));
+    flush();
+    expect(text(container)).toBe('a');
+    const bEl = container.querySelector('b') as HTMLElement & { $$leave?: unknown };
+    let leaveWrites = 0;
+    let leaveVal: unknown;
+    Object.defineProperty(bEl, '$$leave', {
+      configurable: true,
+      get: () => leaveVal,
+      set: (fn) => {
+        if (typeof fn === 'function') leaveWrites++;
+        leaveVal = fn;
+      },
+    });
+
+    mode.set('throw');
+    expect(() => flush()).toThrow('branch-boom');
+    expect(leaveWrites).toBe(1);
+    expect(leaveCalls).toBe(0);
+
+    mode.set('b');
+    flush();
+    // Recovery must not re-invoke leaveBranch (which would overwrite $$leave a second time).
+    expect(leaveWrites).toBe(1);
+    expect(leaveCalls).toBe(1);
+    expect(text(container)).toBe('b');
     unmount();
   });
 });

@@ -341,7 +341,12 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
   let aEnd = a.length;
   let bEnd = b.length;
   let active: Focusable | null | undefined;
-  const after = a[aEnd - 1]!.nextSibling;
+  const tail = a[aEnd - 1]!;
+  const after = tail.parentNode === parent ? tail.nextSibling : marker?.parentNode === parent ? marker : null;
+  const anchor = (idx: number): Node | null => {
+    for (let j = idx; j < b.length; j++) if (b[j]!.parentNode === parent) return b[j]!;
+    return after;
+  };
   for (;;) {
     while (aStart < aEnd && bStart < bEnd && a[aStart] === b[bStart]) {
       aStart++;
@@ -352,9 +357,16 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
       bEnd--;
     }
     // Two rows swapped end for end (udomdiff's swap): 1 move for an adjacent pair, 2 moves otherwise, no map.
-    if (aEnd - aStart > 1 && bEnd - bStart > 1 && a[aStart] === b[bEnd - 1] && a[aEnd - 1] === b[bStart]) {
+    if (
+      aEnd - aStart > 1 &&
+      bEnd - bStart > 1 &&
+      a[aStart] === b[bEnd - 1] &&
+      a[aEnd - 1] === b[bStart] &&
+      a[aStart]!.parentNode === parent &&
+      a[aEnd - 1]!.parentNode === parent
+    ) {
       if (active === undefined) active = findFocused(parent);
-      if (aEnd - aStart === 2 && bEnd - bStart === 2 && a[aStart]!.parentNode === parent) {
+      if (aEnd - aStart === 2 && bEnd - bStart === 2) {
         move(parent, b[bStart]!, a[aStart]!, active);
         return;
       }
@@ -371,7 +383,7 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
   }
   if (aStart === aEnd) {
     // Only insertions.
-    const ref = bEnd < b.length ? b[bEnd]! : after;
+    const ref = anchor(bEnd);
     while (bStart < bEnd) parent.insertBefore(b[bStart++]!, ref);
     return;
   }
@@ -457,6 +469,11 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
   for (let i = aStart; i < aEnd; i++) {
     const j = index.get(a[i]!);
     if (j === undefined) continue;
+    // A reused node detached externally cannot stay in LIS; mark moved so it is re-attached in place.
+    if (a[i]!.parentNode !== parent) {
+      moved = true;
+      continue;
+    }
     sources[j - bStart] = i;
     reused++;
     if (j < last) moved = true;
@@ -477,7 +494,7 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
     let k = seq.length - 1;
     for (let i = n - 1; i >= 0; i--) {
       const node = b[bStart + i]!;
-      const ref = bStart + i + 1 < b.length ? b[bStart + i + 1]! : after;
+      const ref = anchor(bStart + i + 1);
       if (sources[i] === -1) {
         parent.insertBefore(node, ref);
         active = undefined;
@@ -489,7 +506,7 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
   } else if (reused !== n) {
     for (let i = n - 1; i >= 0; i--) {
       if (sources[i] !== -1) continue;
-      const ref = bStart + i + 1 < b.length ? b[bStart + i + 1]! : after;
+      const ref = anchor(bStart + i + 1);
       parent.insertBefore(b[bStart + i]!, ref);
     }
   }

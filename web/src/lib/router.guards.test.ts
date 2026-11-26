@@ -177,4 +177,20 @@ describe('router guards', () => {
     await tab.settle();
     expect(router.route.path).toBe('/runs');
   });
+
+  it('does not re-run guards when popstate and hashchange both fire for a non-canonical hash', async () => {
+    const seen: string[] = [];
+    remove = router.guard((to) => {
+      seen.push(`${to.path}?${String(to.query)}`);
+      return true;
+    });
+    tab.follow('#/runs?q=hello%20world');
+    await tab.settle();
+    // Simulate browsers that fire hashchange after popstate for the same entry with a non-canonical hash (%20 vs +).
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await tab.settle();
+    expect(router.route.name).toBe('runs');
+    expect(router.route.query.get('q')).toBe('hello world');
+    expect(seen).toEqual(['/runs?q=hello+world']);
+  });
 });

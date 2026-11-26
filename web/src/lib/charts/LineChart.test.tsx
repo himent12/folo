@@ -451,4 +451,34 @@ describe('LineChart end labels and marks', () => {
     expect(cssText).toContain('will-change: transform, opacity;');
     unmount(c);
   });
+
+  it('self-heals cached SVG rect on out-of-bounds pointermove after an external layout shift and guards empty yTickValues', () => {
+    const series = [{ id: 'a', label: 'Loss', color: 'ink', points: [{ x: 1, y: 1 }, { x: 2, y: 0.5 }, { x: 3, y: 0.2 }] }];
+    const { target, c, svg } = mountAt({ series, label: 'loss', yLabel: 'Loss', yTickValues: [], legendNote: 'Last' });
+    // Empty yTickValues must not produce Infinity/NaN y attribute on yLabel.
+    const yLab = target.querySelector('text.x-label');
+    expect(yLab?.getAttribute('y')).toBe('10');
+
+    let left = 0;
+    let top = 0;
+    svg.getBoundingClientRect = () =>
+      ({ left, top, width: 640, height: 180, right: left + 640, bottom: top + 180, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+    svg.dispatchEvent(new PointerEvent('pointerenter', { clientX: 60, clientY: 90, pointerType: 'mouse', bubbles: true }));
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 60, clientY: 90, pointerType: 'mouse', bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.legend .note')?.textContent).toBe('1');
+    // Second move while already hovering populates rectCache without flipping hasHover (so rectCache stays warm).
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 340, clientY: 90, pointerType: 'mouse', bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.legend .note')?.textContent).toBe('2');
+
+    // External banner shifts SVG right by 200px and down by 300px within the 200ms cache TTL:
+    // clientX=260 is x=60 (point 1) in the shifted rect, vs x=260 (point 2) if stale rect were used.
+    left = 200;
+    top = 300;
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 260, clientY: 390, pointerType: 'mouse', bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.legend .note')?.textContent).toBe('1');
+    unmount(c);
+  });
 });

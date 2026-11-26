@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
-import { createRoot, Dynamic, effect, flush, mergeProps, onCleanup, signal, splitProps, type Signal } from 'fw';
+import { createRoot, Dynamic, effect, flush, For, mergeProps, onCleanup, signal, splitProps, type Signal } from 'fw';
 import { bindStyle, className, spread } from 'fw/internal';
 import { render } from '../testing';
 
@@ -845,5 +845,32 @@ describe('Svelte attribute and prop semantics', () => {
     expect(el.classList.contains('base')).toBe(true);
     expect(el.classList.contains('a')).toBe(false);
     dispose();
+  });
+
+  it('reconcileArrays keeps insertions before the marker when the previous tail node was detached externally', () => {
+    const items = signal(['a', 'b']);
+    const { container, unmount } = render(() => (
+      <div>
+        <For each={items.get()} key={(x) => x}>
+          {(item) => <span>{item()}</span>}
+        </For>
+        <p class="after">tail</p>
+      </div>
+    ));
+    flush();
+    const div = container.querySelector('div')!;
+    // Externally detach the last list item so `a[aEnd - 1].parentNode !== parent`.
+    div.querySelectorAll('span')[1]!.remove();
+    items.set(['a', 'b', 'c']);
+    flush();
+    // Newly inserted `c` must stay before `<p class="after">`, not jump past it.
+    expect([...div.children].map((c) => c.textContent)).toEqual(['a', 'c', 'tail']);
+
+    // End-for-end swap when a boundary node was detached externally must not throw NotFoundError.
+    div.querySelectorAll('span')[0]!.remove();
+    items.set(['c', 'b', 'a']);
+    expect(() => flush()).not.toThrow();
+    expect(div.lastElementChild?.className).toBe('after');
+    unmount();
   });
 });
