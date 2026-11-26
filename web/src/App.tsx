@@ -90,18 +90,25 @@ export default function App(props: AppProps) {
   // and a custom theme's own colours as inline properties over it, the last theme's cleared first.
   effect(() => applyTheme(document.documentElement, prefs.activeTheme));
 
-  // Any navigation (path or query, e.g. browser back/forward reopening ?image= or ?add=) closes shell overlays.
-  let prevLoc = `${router.location.path}?${router.location.query.toString()}`;
-  effect(() => {
-    const nextLoc = `${router.location.path}?${router.location.query.toString()}`;
-    if (nextLoc === prevLoc) return;
-    prevLoc = nextLoc;
+  const closeShellOverlays = () => {
     if (shortcutsOpen.peek()) shortcutsOpen.set(false);
     if (paletteOpen.peek()) {
       pendingQuery = '';
       paletteOpen.set(false);
     }
+  };
+
+  // Close shell overlays on path changes (including replace redirects to another route) and on real history entry
+  // moves (Back/Forward restoring ?image= or ?add=, pushed routes, links) without closing on same-path `replace: true`
+  // background URL syncs (e.g. Playground's 300ms session sync).
+  let prevPath = router.location.path;
+  effect(() => {
+    const path = router.location.path;
+    if (path === prevPath) return;
+    prevPath = path;
+    closeShellOverlays();
   });
+  onCleanup(router.onEntry(closeShellOverlays));
 
   onMount(() => {
     void hub.connect();
@@ -158,6 +165,11 @@ export default function App(props: AppProps) {
         paletteLoad = null;
         if (!mounted) return;
         toast.clear('palette');
+        // If another modal opened while the palette chunk was loading, keep the palette closed instead of stacking.
+        if (paletteOpen.peek() && document.querySelector('dialog[open]:not(.palette):not(.shortcuts)')) {
+          pendingQuery = '';
+          paletteOpen.set(false);
+        }
         paletteComp.set(() => m.default);
       },
       (e: unknown) => {
@@ -223,6 +235,7 @@ export default function App(props: AppProps) {
         shortcutsLoad = null;
         if (!mounted) return;
         toast.clear('shortcuts');
+        if (shortcutsOpen.peek() && document.querySelector('dialog[open]:not(.shortcuts)')) shortcutsOpen.set(false);
         shortcutsComp.set(() => m.default);
       },
       (e: unknown) => {

@@ -777,35 +777,73 @@ describe('lazy CommandPalette', () => {
     await until(() => document.activeElement === main().querySelector('h1'), 'focus on Models heading');
   });
 
-  it('closes ShortcutsDialog and CommandPalette on independent path or query navigation', async () => {
+  it('closes ShortcutsDialog and CommandPalette on real history/path navigation, but keeps them open during same-path replace URL syncs', async () => {
     const realPalette = await import('$lib/shell/CommandPalette');
     const realShortcuts = await import('$lib/shell/ShortcutsDialog');
     const screens = new Screens((name) =>
-      name === 'dataset'
-        ? () => Promise.resolve(screen('the dataset'))
-        : name === 'models'
-          ? () => Promise.resolve(screen('the models'))
-          : undefined,
+      name === 'playground'
+        ? () => Promise.resolve(screen('the playground'))
+        : name === 'dataset'
+          ? () => Promise.resolve(screen('the dataset'))
+          : name === 'models'
+            ? () => Promise.resolve(screen('the models'))
+            : undefined,
     );
-    router.route = parse('#/datasets/ds_1');
-    c = render(
-      () => <App screens={screens} loadPalette={() => Promise.resolve(realPalette)} loadShortcuts={() => Promise.resolve(realShortcuts)} />,
-      target,
-    );
-    await until(() => main().querySelector('.fake'), 'dataset');
+    router.go('/playground', { replace: true });
+    try {
+      c = render(
+        () => <App screens={screens} loadPalette={() => Promise.resolve(realPalette)} loadShortcuts={() => Promise.resolve(realShortcuts)} />,
+        target,
+      );
+      await until(() => main().querySelector('.fake'), 'playground');
 
-    // Same-page query change (e.g. Forward restoring ?image=img_1) closes ShortcutsDialog.
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
-    await until(() => target.querySelector('dialog.shortcuts[open]'), 'ShortcutsDialog open');
-    router.route = parse('#/datasets/ds_1?image=img_1');
-    await until(() => !target.querySelector('dialog.shortcuts[open]'), 'ShortcutsDialog closed on query change');
+      // Same-path `replace: true` URL sync (e.g. Playground's 300ms keepSession) keeps CommandPalette and ShortcutsDialog open.
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.palette[open]'), 'CommandPalette open');
+      router.go('/playground?model=m_1&conf=0.35', { replace: true });
+      await settle();
+      expect(target.querySelector('dialog.palette[open]')).not.toBeNull();
 
-    // Independent route change (e.g. browser Back/Forward) also closes CommandPalette.
+      // Real history entry move on same path (e.g. pushing or traversing ?image=img_1) closes ShortcutsDialog.
+      router.go('/datasets/ds_1', { replace: true });
+      await until(() => main().textContent === 'the dataset', 'dataset');
+      expect(target.querySelector('dialog.palette[open]')).toBeNull();
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.shortcuts[open]'), 'ShortcutsDialog open');
+      router.go('/datasets/ds_1?image=img_1');
+      await until(() => !target.querySelector('dialog.shortcuts[open]'), 'ShortcutsDialog closed on history entry move');
+
+      // Independent path change also closes CommandPalette.
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.palette[open]'), 'CommandPalette open');
+      router.route = parse('#/models');
+      await until(() => main().textContent === 'the models', 'models');
+      expect(target.querySelector('dialog.palette[open]')).toBeNull();
+    } finally {
+      router.go('/', { replace: true });
+      await settle();
+    }
+  });
+
+  it('keeps CommandPalette closed if an unrelated modal dialog opens while its chunk is still loading', async () => {
+    const pending = deferred<typeof import('$lib/shell/CommandPalette')>();
+    const screens = new Screens((name) => (name === 'overview' ? () => Promise.resolve(screen('the overview')) : undefined));
+    router.route = parse('#/');
+    c = render(() => <App screens={screens} loadPalette={() => pending.promise} />, target);
+    await until(() => main().querySelector('.fake'), 'overview');
+
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
-    await until(() => target.querySelector('dialog.palette[open]'), 'CommandPalette open');
-    router.route = parse('#/models');
-    await until(() => main().textContent === 'the models', 'models');
+    flush();
+
+    // An unrelated modal dialog (e.g. Export) opens before the palette chunk finishes loading.
+    const modal = target.appendChild(document.createElement('dialog'));
+    modal.setAttribute('open', '');
+    const realPalette = await import('$lib/shell/CommandPalette');
+    pending.resolve(realPalette);
+    await settle();
     expect(target.querySelector('dialog.palette[open]')).toBeNull();
+    modal.remove();
   });
 
   it('ignores a stale queued native close event when ShortcutsDialog is reopened via CommandPalette', async () => {
