@@ -291,6 +291,7 @@ export default function Editor(props: EditorProps) {
     return true;
   }
   function discard() {
+    if (locked.peek() || saving.peek()) return;
     edit(base.peek());
     selected.set(null);
   }
@@ -325,9 +326,9 @@ export default function Editor(props: EditorProps) {
       return true;
     } catch (e) {
       // The edits stay; the stream brings the labels saved elsewhere, as the base Discard goes back to.
+      if (shownId !== id) return false;
       if (!changedElsewhere(e)) status.error(e, 'Could not save the boxes');
-      else if (shownId === id)
-        status.show('info', 'Changed elsewhere while you edited', 'Its labels were saved from another tab or window first, so yours were not. Save replaces them with yours; Discard shows them.');
+      else status.show('info', 'Changed elsewhere while you edited', 'Its labels were saved from another tab or window first, so yours were not. Save replaces them with yours; Discard shows them.');
       return false;
     } finally {
       saving.set(false);
@@ -369,8 +370,7 @@ export default function Editor(props: EditorProps) {
       if (next) props.onnavigate(next);
       else status.success('Reviewed', 'Every labeled image here is reviewed.');
     } catch (e) {
-      if (!changedElsewhere(e)) status.error(e, 'Could not mark the image');
-      else await reload(cur.id);
+      if (!changedElsewhere(e)) { if (shownId === cur.id) status.error(e, 'Could not mark the image'); } else await reload(cur.id);
     } finally {
       reviewing.set(false);
     }
@@ -543,18 +543,20 @@ export default function Editor(props: EditorProps) {
   const removeStatus = new DialogStatus();
   async function remove() {
     const cur = img.peek();
-    if (!cur) return;
+    if (!cur || removeBusy.peek()) return;
     removeBusy.set(true);
     const i = idx.peek();
     const next = props.images[i + 1] ?? props.images[i - 1];
     try {
       await hub.api.deleteLabelImage(props.job.id, cur.id);
       props.live.drop(cur.id);
-      draft.set(base.peek());
-      removing.set(false);
-      props.onnavigate(next && next.id !== cur.id ? next.id : null);
+      if (shownId === cur.id) {
+        draft.set(base.peek());
+        removing.set(false);
+        props.onnavigate(next && next.id !== cur.id ? next.id : null);
+      }
     } catch (e) {
-      removeStatus.error(e, 'Could not remove the image');
+      if (shownId === cur.id) removeStatus.error(e, 'Could not remove the image');
     } finally {
       removeBusy.set(false);
     }
@@ -602,7 +604,7 @@ export default function Editor(props: EditorProps) {
                 No changes yet
               </p>
             ) : null}
-            <Button variant="ghost" disabled={!dirty.get()} onclick={discard}>
+            <Button variant="ghost" disabled={!dirty.get() || !!locked.get() || saving.get()} onclick={discard}>
               Discard
             </Button>
             {img.get()?.reviewed && !dirty.get() && !locked.get() ? (
@@ -799,9 +801,10 @@ export default function Editor(props: EditorProps) {
         description="Its labels go with it. An uploaded file is deleted; an image added from a folder stays on disk."
         size="sm"
         status={removeStatus}
+        onbeforeclose={() => !removeBusy.peek()}
         footer={() => (
           <>
-            <Button onclick={() => removing.set(false)}>Keep it</Button>
+            <Button disabled={removeBusy.get()} onclick={() => removing.set(false)}>Keep it</Button>
             <Button variant="destructive" icon={Trash} loading={removeBusy.get()} onclick={remove}>
               Remove image
             </Button>

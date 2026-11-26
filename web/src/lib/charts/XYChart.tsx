@@ -13,7 +13,7 @@ import { media } from '$lib/design/tokens';
 import { seriesText } from './ink';
 import { canDismissChartOnEscape, TouchGesture, type PinAction } from './pin';
 import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
-import { createRectCache } from './rectCache';
+import { createRectCache, localPointer } from './rectCache';
 import { spokenAt, type XYMark, type XYPoint, type XYRef, type XYSeries, type XYStrip } from './xy';
 
 export interface XYChartProps {
@@ -165,20 +165,7 @@ export default function XYChart(props: XYChartProps) {
     void readoutH.get();
     rectCache.clear();
   });
-  const local = (e: PointerEvent) => {
-    const el = e.currentTarget as SVGElement;
-    let r = rectCache.get(el);
-    let px = e.clientX - r.left;
-    let py = e.clientY - r.top;
-    // If an external banner shifted the plot while hovered, an in-SVG pointer event can appear outside the stale rect.
-    if (py < 0 || py > p.height || px < 0 || px > width.peek()) {
-      rectCache.clear();
-      r = rectCache.get(el);
-      px = e.clientX - r.left;
-      py = e.clientY - r.top;
-    }
-    return { px, py };
-  };
+  const local = (e: PointerEvent) => localPointer(rectCache, e.currentTarget as SVGElement, e, width.peek(), p.height);
   const touchy = (e: PointerEvent) => e.pointerType === 'touch' || e.pointerType === 'pen';
   const inPlot = (px: number) => px >= m.peek().left - 8 && px <= width.peek() - m.peek().right + 8;
   function apply(a: PinAction) {

@@ -451,4 +451,29 @@ describe('LineChart end labels and marks', () => {
     expect(cssText).toContain('will-change: transform, opacity;');
     unmount(c);
   });
+
+  it('self-heals cached SVG rect on out-of-bounds pointermove after an external layout shift and guards empty yTickValues', () => {
+    const series = [{ id: 'a', label: 'Loss', color: 'ink', points: [{ x: 1, y: 1 }, { x: 2, y: 0.5 }, { x: 3, y: 0.2 }] }];
+    const { target, c, svg } = mountAt({ series, label: 'loss', yLabel: 'Loss', yTickValues: [], legendNote: 'Last' });
+    // Empty yTickValues must not produce Infinity/NaN y attribute on yLabel.
+    const yLab = target.querySelector('text.x-label');
+    expect(yLab?.getAttribute('y')).toBe('10');
+
+    let left = 0;
+    let top = 0;
+    svg.getBoundingClientRect = () =>
+      ({ left, top, width: 640, height: 180, right: left + 640, bottom: top + 180, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+    svg.dispatchEvent(new PointerEvent('pointerenter', { clientX: 60, clientY: 90, pointerType: 'mouse', bubbles: true }));
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 60, clientY: 90, pointerType: 'mouse', bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.legend .note')?.textContent).toBe('1');
+
+    // External banner shifts SVG down by 300px and right by 100px within the 200ms cache TTL: pointer at new position self-heals.
+    left = 100;
+    top = 300;
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 700, clientY: 390, pointerType: 'mouse', bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.legend .note')?.textContent).toBe('3');
+    unmount(c);
+  });
 });

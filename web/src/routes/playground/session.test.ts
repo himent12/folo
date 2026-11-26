@@ -41,4 +41,17 @@ describe('Playground URL', () => {
   it('ignores values out of range or not numbers', () => {
     expect(fromUrl(new URLSearchParams('conf=2&iou=x&max=0&dataset=ds_1&image=i&split=nope'))).toEqual({ model: null, image: null, conf: null, iou: null, maxDet: null });
   });
+
+  it('preserves an in-flight imageRef while source is still null', () => {
+    expect(
+      playgroundPath({
+        model: 'm_b',
+        source: null,
+        imageRef: { dataset: 'ds_1', image: 'im 7', split: 'val', at: 12 },
+        conf: 0.25,
+        iou: 0.7,
+        maxDet: 300,
+      }),
+    ).toBe('/playground?model=m_b&dataset=ds_1&image=im+7&split=val&at=12');
+  });
 });

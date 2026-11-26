@@ -57,7 +57,9 @@ const table: [RouteName, RegExp, string[]][] = [
 /** Parses `#/path?query` into a route. Exported for tests. */
 export function parse(hash: string): Route {
   const raw = hash.replace(/^#/, '') || '/';
-  const [pathPart = '/', queryPart = ''] = raw.split('?', 2);
+  const qIdx = raw.indexOf('?');
+  const pathPart = qIdx < 0 ? raw : raw.slice(0, qIdx) || '/';
+  const queryPart = qIdx < 0 ? '' : raw.slice(qIdx + 1);
   // `#//` is the Overview, not a page at "" ("There is no page at ."; s6-shell-5).
   const path = pathPart.length > 1 ? pathPart.replace(/\/+$/, '') || '/' : '/';
   const query = new URLSearchParams(queryPart);
@@ -297,15 +299,16 @@ class Router {
     // An entry without a place is taken for a new one, right after this one (it can also be one from before the
     // app kept places, anywhere in the history: `#travel` copes). Nothing moved: the second event of a move.
     const pos = known ?? this.#pos + 1;
-    if (pos === this.#pos && hash === hashOf(this.location)) return;
+    const next = parse(hash);
+    if (pos === this.#pos && hashOf(next) === hashOf(this.location)) return;
     const from = this.#pos;
     // A new entry is made again (the held one was left behind); an old one is travelled to.
     const proceed = () => this.#settled(() => (known === null ? this.#navigate(hash) : this.#travel(pos, true)));
-    if (this.#allowed(parse(hash), proceed)) {
+    if (this.#allowed(next, proceed)) {
       if (known === null) this.#stamp(pos);
       this.#pos = pos;
       if (pos !== from) this.#entered(from, pos, known !== null);
-      this.route = parse(hash);
+      this.route = next;
     } else {
       // The URL has already moved: back to the page that holds the navigation, its history as it was.
       this.#pos = pos;

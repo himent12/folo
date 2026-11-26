@@ -164,4 +164,23 @@ describe('Histogram', () => {
     expect(readout()).toBe('0 boxes');
     expect(outOfBoundsLabels).toEqual([]);
   });
+
+  it('self-heals cached SVG rect on pointermove after an external vertical layout shift', () => {
+    renderWide(400, { edges: [0, 0.25, 0.5, 0.75, 1], counts: [10, 20, 30, 40] });
+    const svg = target.querySelector<SVGElement>('svg[aria-roledescription=chart]')!;
+    let top = 0;
+    svg.getBoundingClientRect = () =>
+      ({ left: 0, top, width: 400, height: 160, right: 400, bottom: top + 160, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+
+    svg.dispatchEvent(new PointerEvent('pointerenter', { clientX: 80, clientY: 80, pointerType: 'mouse', bubbles: true }));
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 80, clientY: 80, pointerType: 'mouse', bubbles: true }));
+    flushSync();
+    expect(readout()).toContain('10 boxes');
+
+    // External banner shifts SVG down by 250px within the 200ms cache TTL; hover must still resolve the bar.
+    top = 250;
+    svg.dispatchEvent(new PointerEvent('pointermove', { clientX: 350, clientY: 330, pointerType: 'mouse', bubbles: true }));
+    flushSync();
+    expect(readout()).toContain('40 boxes');
+  });
 });

@@ -295,4 +295,73 @@ describe('Playground: confidence summary and quick JSON copy', () => {
       'filtered aria-live copy status',
     );
   });
+
+  it('shows Image unavailable with Retry when imageUrl fails or img errors, hides boxes, and recovers on Retry', async () => {
+    const api = new MockApi('normal', 0);
+    let urlAttempt = 0;
+    api.imageUrl = async (_ds, _img, thumb) => {
+      if (thumb !== undefined) return 'data:,';
+      urlAttempt++;
+      if (urlAttempt === 1) throw new Error('404 not found');
+      return 'https://example.test/img.jpg';
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_s');
+    mounted = render(() => <Playground />, target);
+
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'sample button')).click();
+    const errOverlay = await until(() => target.querySelector<HTMLElement>('.image-failed'), 'image unavailable overlay');
+    expect(errOverlay.textContent).toContain('Image unavailable');
+    expect(target.querySelectorAll('[data-box]').length).toBe(0);
+
+    // Retry succeeds and mounts the image with a cache-busting retry query param.
+    errOverlay.querySelector<HTMLButtonElement>('button')!.click();
+    const img = await until(() => target.querySelector<HTMLImageElement>('.stage img'), 'recovered img');
+    expect(img.getAttribute('src')).toBe('https://example.test/img.jpg?retry=1');
+    expect(target.querySelector('.image-failed')).toBeNull();
+
+    // If the browser later fails decoding/loading the image, Image unavailable reappears and Retry recovers again.
+    img.dispatchEvent(new Event('error'));
+    const errOverlay2 = await until(() => target.querySelector<HTMLElement>('.image-failed'), 'img error overlay');
+    errOverlay2.querySelector<HTMLButtonElement>('button')!.click();
+    const img2 = await until(() => target.querySelector<HTMLImageElement>('.stage img'), 'second retry img');
+    expect(img2.getAttribute('src')).toBe('https://example.test/img.jpg?retry=2');
+  });
+
+  it('preserves a deep-linked dataset image in the URL when a vanished model falls back before findImage settles', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    const dss = await api.datasets();
+    const firstDs = dss[0]!;
+    const page = await api.datasetImages(firstDs.id, { split: 'val', limit: 1 });
+    const firstImg = page.images[0]!;
+    let releaseDs!: () => void;
+    const gate = new Promise<void>((r) => (releaseDs = r));
+    const origDataset = api.dataset.bind(api);
+    api.dataset = async (id: string) => {
+      await gate;
+      return origDataset(id);
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse(`#/playground?model=m_vanished&dataset=${firstDs.id}&image=${firstImg.id}&split=val&at=0`);
+    mounted = render(() => <Playground />, target);
+
+    // Wait for followVanished to rewrite the vanished model to a real model while findImage is still blocked.
+    await until(() => {
+      const m = router.route.query.get('model');
+      return m && m !== 'm_vanished' ? m : null;
+    }, 'vanished model fallback');
+    expect(router.route.query.get('dataset')).toBe(firstDs.id);
+    expect(router.route.query.get('image')).toBe(firstImg.id);
+
+    releaseDs();
+    await until(() => target.querySelector('.stage img'), 'linked image loaded');
+  });
 });

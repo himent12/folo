@@ -17,7 +17,7 @@ import { mergesOf } from './linePaths';
 import { memoPathsOf } from './linePathsMemo';
 import { endRadius, endsOf, placedEndsOf } from './lineEndLabels';
 import { hoverOf, pickNearest, pillOf } from './lineHover';
-import { createRectCache } from './rectCache';
+import { createRectCache, localPointer } from './rectCache';
 import { textMeasurer } from './textWidth';
 import type { Future, Marker, Series, XMark } from './lineSeries';
 import ChartLegend from './ChartLegend';
@@ -230,10 +230,7 @@ export default function LineChart(props: LineChartProps) {
   const hover = computed(() => hoverOf(cursor.get(), hasData.get(), xExtent.get(), keyed.get(), p.xTitle, xFormat.get(), x.get()));
 
   const rectCache = createRectCache();
-  const local = (e: PointerEvent) => {
-    const rect = rectCache.get(e.currentTarget as SVGElement);
-    return { px: e.clientX - rect.left, py: e.clientY - rect.top };
-  };
+  const local = (e: PointerEvent) => localPointer(rectCache, e.currentTarget as SVGElement, e, width.peek(), p.height);
   const touchy = (e: PointerEvent) => e.pointerType === 'touch' || e.pointerType === 'pen';
   const inPlot = (px: number) => px >= margin.peek().left - 4 && px <= width.peek() - margin.peek().right + 4;
 
@@ -692,7 +689,7 @@ export default function LineChart(props: LineChartProps) {
                   </text>
                 ) : null}
                 {p.yLabel ? (
-                  <text class="x-label" x="0" y={capInPlot.get() ? y.get()(Math.max(...yTickValues.get())) - 14 : 10} dy="0.32em" text-anchor="start">
+                  <text class="x-label" x="0" y={capInPlot.get() && yTickValues.get().length > 0 ? y.get()(Math.max(...yTickValues.get())) - 14 : 10} dy="0.32em" text-anchor="start">
                     {p.yLabel}
                   </text>
                 ) : null}

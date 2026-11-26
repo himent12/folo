@@ -128,4 +128,47 @@ describe('Resource', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(r.data).toBeUndefined();
   });
+
+  it('ignores refresh() and invalidate() calls after cleanup without issuing leaked requests', async () => {
+    let calls = 0;
+    let r!: Resource<number>;
+    const stop = root(() => {
+      r = new Resource(() => {
+        calls++;
+        return Promise.resolve(calls);
+      });
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toBe(1);
+    expect(r.data).toBe(1);
+
+    stop();
+    await r.refresh();
+    await r.invalidate();
+    expect(calls).toBe(1);
+    expect(r.data).toBe(1);
+    expect(r.refreshing).toBe(false);
+  });
+
+  it('turns synchronous fetcher throws into error state without crashing reactive effects', async () => {
+    let fail = true;
+    let r!: Resource<string>;
+    const stop = root(() => {
+      r = new Resource(() => {
+        if (fail) throw new Error('sync boom');
+        return Promise.resolve('ok');
+      });
+    });
+    expect(() => flushSync()).not.toThrow();
+    await vi.advanceTimersByTimeAsync(0);
+    expect((r.error as Error)?.message).toBe('sync boom');
+    expect(r.loading).toBe(false);
+
+    fail = false;
+    await r.refresh();
+    expect(r.error).toBeUndefined();
+    expect(r.data).toBe('ok');
+    stop();
+  });
 });

@@ -10,7 +10,7 @@ import { computed, css, defaults, effect, Index, signal } from 'fw';
 import { ticks as niceTicks } from './downsample';
 import { binAt, categoryBars, edgeX } from './histogram';
 import { canDismissChartOnEscape, TouchGesture, type PinAction } from './pin';
-import { createRectCache } from './rectCache';
+import { createRectCache, localPointer } from './rectCache';
 
 export interface HistogramProps {
   edges: number[];
@@ -102,10 +102,7 @@ export default function Histogram(props: HistogramProps) {
     void p.height;
     rectCache.clear();
   });
-  const local = (e: PointerEvent) => {
-    const rect = rectCache.get(e.currentTarget as SVGElement);
-    return { px: e.clientX - rect.left, py: e.clientY - rect.top };
-  };
+  const local = (e: PointerEvent) => localPointer(rectCache, e.currentTarget as SVGElement, e, width.peek(), p.height);
   const touchy = (e: PointerEvent) => e.pointerType === 'touch' || e.pointerType === 'pen';
   function apply(a: PinAction) {
     if (a.kind === 'clear') {
