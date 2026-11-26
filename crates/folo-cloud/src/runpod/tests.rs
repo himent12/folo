@@ -483,11 +483,11 @@ fn find_follows_pages_and_skips_terminated_namesakes() {
     assert_eq!(paths, ["/v2/pods?limit=100", "/v2/pods?limit=100&cursor=c%202"]);
     assert_key_only_in_headers(&f);
 
-    // Duplicate pod IDs across pages and invalid pod IDs are filtered cleanly.
+    // Duplicate pod IDs across pages are deduplicated cleanly.
     let f = Fixture::serve(vec![
         Answer::json(
             200,
-            r#"{"pods":[{"id":"a1","name":"folo-x","status":"RUNNING"},{"id":"../bad","name":"folo-x","status":"RUNNING"}],"pagination":{"nextCursor":"c1"}}"#,
+            r#"{"pods":[{"id":"a1","name":"folo-x","status":"RUNNING"}],"pagination":{"nextCursor":"c1"}}"#,
         ),
         Answer::json(
             200,
@@ -495,6 +495,14 @@ fn find_follows_pages_and_skips_terminated_namesakes() {
         ),
     ]);
     assert_eq!(runpod(&f).find(&values(), "folo-x").unwrap(), ["a1", "b2"]);
+
+    // An unaddressable live match (invalid/missing pod ID) fails with `Unavailable` so the reaper keeps retrying
+    // instead of concluding no live pod exists.
+    let f = Fixture::serve(vec![Answer::json(
+        200,
+        r#"{"pods":[{"id":"../bad","name":"folo-x","status":"RUNNING"}],"pagination":{"nextCursor":null}}"#,
+    )]);
+    assert_error(&runpod(&f).find(&values(), "folo-x").unwrap_err(), ErrorKind::Unavailable, "invalid id");
 
     // A pagination cursor cycle fails with `Unavailable` so the reaper retries rather than treating a partial
     // listing as exhaustive.

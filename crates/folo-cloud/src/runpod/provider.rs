@@ -201,12 +201,16 @@ impl Provider for RunPod {
         for _ in 0..MAX_PAGES {
             let page = self.pods(key, cursor.as_deref())?;
             for p in page.pods {
-                if p.name == name
-                    && p.status != "TERMINATED"
-                    && check_pod_id(&p.id).is_ok()
-                    && seen_ids.insert(p.id.clone())
-                {
-                    ids.push(p.id);
+                if p.name == name && p.status != "TERMINATED" {
+                    if check_pod_id(&p.id).is_err() {
+                        return Err(Error::new(
+                            ErrorKind::Unavailable,
+                            "RunPod listed a live pod with an invalid id",
+                        ));
+                    }
+                    if seen_ids.insert(p.id.clone()) {
+                        ids.push(p.id);
+                    }
                 }
             }
             match page.pagination.next_cursor.filter(|c| !c.is_empty()) {
