@@ -254,9 +254,8 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     if (this._targets === undefined) return;
     unsubscribeLink(this, node);
     if (this._targets === undefined) {
-      // Nobody reads it any more (its branch went): a queued re-evaluation is dropped (see `_update`).
-      if (this._flags & OWNING) this._flags = (this._flags & ~NOTIFIED) | OUTDATED;
-      this._flags &= ~TRACKING;
+      // Nobody reads it any more (its branch went): drop any queued/stale notification and unsubscribe from sources.
+      this._flags = (this._flags & ~(NOTIFIED | TRACKING)) | OUTDATED;
       unsubscribeSources(this._sources, this._onEmpty);
     }
   }
@@ -676,17 +675,11 @@ class EffectNode extends Owner implements Target {
         cleanupSources(this);
       } finally {
         if (this._flags & DISPOSED) {
-          try {
-            cleanOwner(this);
-          } catch (e) {
-            if (!threw) throw e;
-          } finally {
-            try {
-              unsubscribeTarget(this);
-            } catch (e) {
-              if (!threw) throw e;
-            }
-          }
+          try { cleanOwner(this); } catch (e) { if (!threw) throw e; }
+          finally { try { unsubscribeTarget(this); } catch (e) { if (!threw) throw e; } }
+        } else if (threw) {
+          // Roll back partial child owners/cleanups while keeping this effect alive to recover on a later write.
+          try { cleanOwner(this); } catch { /* keep the effect's own error */ }
         }
       }
     }

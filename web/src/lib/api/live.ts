@@ -248,7 +248,34 @@ export class LiveRun {
     });
     effect(() => {
       const runId = id();
-      if (hub.mode === 'connecting' || !runId) return;
+      if (!runId) {
+        this.#viewSeq++;
+        this.#lastStatus = null;
+        this.#lastQueue = null;
+        this.#lastCloud = null;
+        this.#replay = null;
+        if (this.#raf) cancelAnimationFrame(this.#raf);
+        this.#raf = 0;
+        this.#pendingStep = null;
+        untrack(() => {
+          this.lost = null;
+          this.waiting = null;
+          this.#server.set(undefined);
+          this.#short.set(0);
+          this.loading = false;
+          this.error = undefined;
+          this.run = undefined;
+          this.steps = [];
+          this.epochs = [];
+          this.logs = [];
+          this.logsEarlier = 0;
+          this.#streamedTail = [];
+          this.connection = 'idle';
+          this.#publish();
+        });
+        return;
+      }
+      if (hub.mode === 'connecting') return;
       void hub.epoch;
       void this.#retry.get();
       this.#viewSeq++;

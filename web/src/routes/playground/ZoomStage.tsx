@@ -7,7 +7,7 @@
 import Maximize from '$icons/maximize';
 import Minus from '$icons/minus';
 import Plus from '$icons/plus';
-import { computed, css, effect, onCleanup, signal, untrack } from 'fw';
+import { computed, css, effect, onCleanup, onWindow, signal, untrack } from 'fw';
 import Button from '$lib/ui/Button';
 import { tooltip } from '$lib/ui/tooltip';
 
@@ -64,6 +64,7 @@ export function zoomToward(
 
 export default function ZoomStage(props: ZoomStageProps) {
   const viewport = signal<HTMLDivElement | undefined>(undefined);
+  const hud = signal<HTMLDivElement | undefined>(undefined);
   const vw = signal(0);
   const vh = signal(0);
   const z = signal(1);
@@ -127,13 +128,79 @@ export default function ZoomStage(props: ZoomStageProps) {
     }, CLIP_FALLBACK_MS);
   }
 
+  let canceledPointerId: number | null = null;
+  let cancelUpCleanup: (() => void) | null = null;
+
+  function clearCanceledPointer() {
+    canceledPointerId = null;
+    cancelUpCleanup?.();
+    cancelUpCleanup = null;
+  }
+
+  function armClickSuppress() {
+    clearSuppress();
+    suppressClick = true;
+    suppressTimer = setTimeout(clearSuppress, 0);
+  }
+
+  function cancelDrag(suppressNextUp = false) {
+    if (!drag) {
+      if (!suppressNextUp) clearCanceledPointer();
+      return;
+    }
+    const { captured, id, moved } = drag;
+    drag = null;
+    detachWindowDrag();
+    panning.set(false);
+    if (captured) releaseDragCapture(id);
+    clearCanceledPointer();
+    if (suppressNextUp && moved) {
+      canceledPointerId = id;
+      const onUp = (e: PointerEvent) => {
+        if (e.pointerId !== canceledPointerId) return;
+        clearCanceledPointer();
+        if (e.type === 'pointerup') armClickSuppress();
+      };
+      window.addEventListener('pointerup', onUp, { capture: true });
+      window.addEventListener('pointercancel', onUp, { capture: true });
+      cancelUpCleanup = () => {
+        window.removeEventListener('pointerup', onUp, { capture: true });
+        window.removeEventListener('pointercancel', onUp, { capture: true });
+      };
+    }
+  }
+
+  let alive = true;
   onCleanup(() => {
+    alive = false;
     clearSuppress();
     clearClipTimer();
-    detachWindowDrag();
-    if (drag?.captured) releaseDragCapture(drag.id);
-    drag = null;
+    cancelDrag(false);
   });
+  onWindow('blur', () => cancelDrag(false));
+  const onEscapeCapture = (e: KeyboardEvent) => {
+    if (e.key !== 'Escape' || !drag) return;
+    cancelDrag(true);
+    e.preventDefault();
+    e.stopPropagation();
+  };
+  window.addEventListener('keydown', onEscapeCapture, { capture: true });
+  onCleanup(() => window.removeEventListener('keydown', onEscapeCapture, { capture: true }));
+
+  /** Keeps keyboard focus inside the zoom HUD when the active zoom button disables at a zoom boundary. */
+  function keepHudFocus(fallback: 'in' | 'out') {
+    const box = hud.peek();
+    const active = document.activeElement as HTMLElement | null;
+    if (!box || !active || !box.contains(active)) return;
+    queueMicrotask(() => {
+      if (!alive || !box.isConnected) return;
+      const now = document.activeElement as HTMLElement | null;
+      const lost = !now || now === document.body || (now === active && (active as HTMLButtonElement).disabled);
+      if (!lost) return;
+      const next = box.querySelector<HTMLButtonElement>(`[data-zoom="${fallback}"]:not(:disabled)`);
+      next?.focus({ preventScroll: true });
+    });
+  }
 
   function stageSize(): { width: number; height: number; left: number; top: number } {
     const el = viewport.peek();
@@ -146,10 +213,7 @@ export default function ZoomStage(props: ZoomStageProps) {
   }
 
   function reset(eased = true) {
-    if (drag?.captured) releaseDragCapture(drag.id);
-    drag = null;
-    detachWindowDrag();
-    panning.set(false);
+    cancelDrag(true);
     const wasZoomed = z.peek() > 1.001;
     if (eased && wasZoomed) {
       armReturnClip();
@@ -161,9 +225,11 @@ export default function ZoomStage(props: ZoomStageProps) {
     z.set(1);
     tx.set(0);
     ty.set(0);
+    keepHudFocus('in');
   }
 
   function zoomAt(factor: number, px?: number, py?: number, eased = true) {
+    cancelDrag(true);
     const { width, height } = stageSize();
     const scale = z.peek();
     const ax = px ?? width / 2;
@@ -190,6 +256,8 @@ export default function ZoomStage(props: ZoomStageProps) {
     z.set(next.z);
     tx.set(next.tx);
     ty.set(next.ty);
+    if (next.z <= 1.001) keepHudFocus('in');
+    else if (next.z >= MAX_ZOOM - 0.001) keepHudFocus('out');
   }
 
   // Track viewport size so pan clamping adapts on window resize.
@@ -220,6 +288,7 @@ export default function ZoomStage(props: ZoomStageProps) {
     lastResetKey = next;
     untrack(() => {
       clearSuppress();
+      clearCanceledPointer();
       reset(false);
     });
   });
@@ -260,14 +329,11 @@ export default function ZoomStage(props: ZoomStageProps) {
     detachWindowDrag();
     panning.set(false);
     if (captured) releaseDragCapture(e.pointerId);
-    if (moved) {
-      clearSuppress();
-      suppressClick = true;
-      suppressTimer = setTimeout(clearSuppress, 0);
-    }
+    if (moved) armClickSuppress();
   }
 
   function onpointerdown(e: PointerEvent) {
+    clearCanceledPointer();
     if (drag || e.button !== 0 || z.peek() <= 1.001) return;
     if (e.target instanceof Element && e.target.closest('.zoom-hud, button, a')) return;
     const { width, height } = stageSize();
@@ -340,7 +406,7 @@ export default function ZoomStage(props: ZoomStageProps) {
       class:zoomed={zoomed.get()}
       class:clip={zoomed.get() || clipping.get()}
       class:panning={panning.get()}
-      ref={(el) => viewport.set(el)}
+      ref={viewport}
       onpointerdown={onpointerdown}
       onpointermove={onpointermove}
       onpointerup={finishDrag}
@@ -351,12 +417,13 @@ export default function ZoomStage(props: ZoomStageProps) {
       <div class="zoom-canvas" class:glide={glide.get()} style={canvasStyle.get()} ontransitionend={oncanvastransitionend}>
         {props.children}
       </div>
-      <div class="zoom-hud" role="group" aria-label="Image zoom">
+      <div class="zoom-hud" ref={hud} role="group" aria-label="Image zoom">
         <span use:tooltip={'Zoom out'}>
           <Button
             size="sm"
             variant="ghost"
             icon={Minus}
+            data-zoom="out"
             aria-label="Zoom out"
             disabled={!zoomed.get()}
             onclick={() => zoomAt(1 / ZOOM_STEP)}
@@ -378,6 +445,7 @@ export default function ZoomStage(props: ZoomStageProps) {
             size="sm"
             variant="ghost"
             icon={Plus}
+            data-zoom="in"
             aria-label="Zoom in"
             disabled={z.get() >= MAX_ZOOM - 0.001}
             onclick={() => zoomAt(ZOOM_STEP)}

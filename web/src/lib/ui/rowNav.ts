@@ -192,10 +192,19 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
     if (row && root.contains(row)) remember(row);
   };
 
+  const hasOpenPopover = (): boolean => {
+    if (document.querySelector('.info-pop.open')) return true;
+    try {
+      return !!document.querySelector('[popover]:popover-open');
+    } catch {
+      return false;
+    }
+  };
+
   // J / K with nothing focused enters the list (the page's other single keys live in shell/shortcuts.ts).
   const onwindowkey = (e: KeyboardEvent) => {
     if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || isTyping(e)) return;
-    if (!keyPrefs.singleKeys || document.querySelector('dialog[open]')) return;
+    if (!keyPrefs.singleKeys || document.querySelector('dialog[open], [role="menu"], .g-chord') || hasOpenPopover()) return;
     const k = e.key.toLowerCase();
     if (k !== 'j' && k !== 'k') return;
     const active = document.activeElement;

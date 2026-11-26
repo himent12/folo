@@ -45,6 +45,15 @@ export interface PaletteItemSources {
 /** Builds the complete list of rankable palette items from current shell & entity state. */
 export function buildPaletteItems(src: PaletteItemSources): Item[] {
   const go = (path: string) => () => router.go(path);
+  const goNew = (routeName: 'label-jobs' | 'benchmarks', basePath: string) => () => {
+    if (router.route.name === routeName && router.location.name === routeName) {
+      const q = new URLSearchParams(router.route.query);
+      q.set('new', '1');
+      router.go(`${basePath}?${q.toString()}`);
+      return;
+    }
+    router.go(`${basePath}?new=1`);
+  };
 
   // What the page on screen offers (shell/pageCommands): first, under This page.
   const page: Item[] = src.pageCommands.map((c) => ({
@@ -72,10 +81,10 @@ export function buildPaletteItems(src: PaletteItemSources): Item[] {
     // Agent labeling, under Datasets (no nav item of its own).
     { id: 'label', group: 'Actions', label: 'Label images', match: ['Labeling jobs', 'Claude Code', 'Codex', 'Antigravity'], icon: Tags, run: go('/datasets/label') },
     // Not on a server whose health said it cannot label (`folo serve --mock`): its form could only fail (#324).
-    ...(src.lacksLabel ? [] : [{ id: 'label-new', group: 'Actions', label: 'New labeling job', icon: Plus, run: go('/datasets/label?new=1') }]),
+    ...(src.lacksLabel ? [] : [{ id: 'label-new', group: 'Actions', label: 'New labeling job', icon: Plus, run: goNew('label-jobs', '/datasets/label') }]),
     // Vision benchmarks: offered where the server has them (its list answered).
     ...(src.benchesOk
-      ? [{ id: 'bench-new', group: 'Actions', label: 'New benchmark', match: ['Benchmark a model', 'Vision benchmark'], icon: Plus, run: go('/benchmarks?new=1') }]
+      ? [{ id: 'bench-new', group: 'Actions', label: 'New benchmark', match: ['Benchmark a model', 'Vision benchmark'], icon: Plus, run: goNew('benchmarks', '/benchmarks') }]
       : []),
     {
       id: 'theme',

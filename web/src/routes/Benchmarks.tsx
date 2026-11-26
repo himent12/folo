@@ -34,13 +34,13 @@ import StatusBadge from '$lib/ui/StatusBadge';
 import TableState from '$lib/ui/TableState';
 import { tooltip } from '$lib/ui/tooltip';
 import { benchmarksExport } from './bench/export';
+import { emptyFilterSummary, leftForBench, readState, returnQuery, writeState, type BenchFilter as Filter, type BenchSortKey as Key } from './bench/listState';
 import NewBenchDialog from './bench/NewBenchDialog';
 import { cannotBench } from './bench/support';
 import Unsupported from './bench/Unsupported';
 import { entriesText, entryStatus, imagesText, scoreText, sourceKind } from './bench/words';
 import { tickingNow } from './runs/when';
 
-type Key = 'name' | 'source' | 'images' | 'classes' | 'conditions' | 'entries' | 'leader' | 'created';
 interface Col {
   key: Key;
   label: string;
@@ -65,7 +65,6 @@ const cols: Col[] = [
 const COLS = cols.length;
 const hideCls = (c: Col) => (c.hide ? `hide-${c.hide}` : '');
 
-type Filter = 'all' | 'dataset' | 'label_job' | 'active';
 const keep = (b: Bench, f: Filter) => f === 'all' || (f === 'active' ? b.active : b.source.kind === f);
 
 export default function Benchmarks() {
@@ -100,9 +99,14 @@ export default function Benchmarks() {
     if (unavailable.get() && creating.peek()) creating.set(false);
   });
 
-  // Newest first, as the server sends them.
-  const sortKey = signal<Key>('created');
-  const sortDir = signal<'asc' | 'desc'>('desc');
+  // Filter, sort and search live in the URL query (./bench/listState), replaced as they change so typing never
+  // pollutes browser history while Back, reload and shared links restore the list as it was left.
+  const back = untrack(() => returnQuery(router.entry, router.route.query));
+  if (back !== null) router.go(`/benchmarks?${back}`, { replace: true });
+  const startQuery = back !== null ? new URLSearchParams(back) : untrack(() => router.route.query);
+  const start = readState(startQuery);
+  const sortKey = signal<Key>(start.sort);
+  const sortDir = signal<'asc' | 'desc'>(start.dir);
   function sortBy(c: Col) {
     if (sortKey.peek() === c.key) sortDir.set((d) => (d === 'asc' ? 'desc' : 'asc'));
     else {
@@ -111,9 +115,36 @@ export default function Benchmarks() {
     }
   }
 
-  const query = signal('');
+  const query = signal(start.q);
   // Where the images came from, or what runs now (`Bench.active`: an entry or a loop queued or running).
-  const filter = signal<Filter>('all');
+  const filter = signal<Filter>(start.filter);
+  const norm = (q: URLSearchParams) => writeState(readState(q));
+  let written = norm(startQuery);
+  onCleanup(() => {
+    if (router.location.name === 'benchmark') leftForBench(router.entry, written);
+  });
+  effect(() => {
+    const next = writeState({ filter: filter.get(), sort: sortKey.get(), dir: sortDir.get(), q: query.get() });
+    if (next === written || untrack(() => router.route.name) !== 'benchmarks' || untrack(() => router.location.name) !== 'benchmarks') return;
+    written = next;
+    const full = writeState({ filter: filter.peek(), sort: sortKey.peek(), dir: sortDir.peek(), q: query.peek() }, untrack(() => router.route.query));
+    router.go(`/benchmarks${full ? `?${full}` : ''}`, { replace: true });
+  });
+  effect(() => {
+    const r = router.route;
+    const loc = router.location;
+    if (r.name !== 'benchmarks' || loc.name !== 'benchmarks') return;
+    const urlState = norm(loc.query);
+    const cur = writeState({ filter: filter.peek(), sort: sortKey.peek(), dir: sortDir.peek(), q: query.peek() });
+    if (urlState === written && urlState === cur) return;
+    const st = readState(loc.query);
+    written = urlState;
+    filter.set(st.filter);
+    sortKey.set(st.sort);
+    sortDir.set(st.dir);
+    query.set(st.q);
+  });
+  const emptySummary = computed(() => emptyFilterSummary({ filter: filter.get(), q: query.get() }));
   const counts = computed(
     () => {
       let all = 0;
@@ -401,7 +432,7 @@ export default function Benchmarks() {
                         <EmptyState
                           icon={Search}
                           title="No benchmarks match"
-                          description="Try another source or search term."
+                          description={emptySummary.get()}
                           actions={() => (
                             <Button size="sm" onclick={clearFilters}>
                               Clear filters
