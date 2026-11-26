@@ -413,10 +413,8 @@ impl Backend for CpuBackend {
     fn where_cond(&self, cond: View<'_>, a: View<'_>, b: View<'_>) -> Result<Storage> {
         let (av, bv) = (f32s(&a, "where_cond")?, f32s(&b, "where_cond")?);
         let out = match cpu(&cond, "where_cond")? {
-            CpuStorage::F32(c) => {
-                elementwise::where3(c, cond.layout, av, a.layout, bv, b.layout, |c| c != 0.0)
-            }
-            CpuStorage::U8(c) => elementwise::where3(c, cond.layout, av, a.layout, bv, b.layout, |c| c != 0),
+            CpuStorage::F32(c) => elementwise::where3_f32(c, cond.layout, av, a.layout, bv, b.layout),
+            CpuStorage::U8(c) => elementwise::where3_u8(c, cond.layout, av, a.layout, bv, b.layout),
             s => return Err(Error::UnsupportedDType { op: "where_cond", dtype: s.dtype() }),
         };
         Ok(f32_storage(out))

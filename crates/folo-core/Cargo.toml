@@ -44,3 +44,7 @@ harness = false
 [[bench]]
 name = "conv_wgrad"
 harness = false
+
+[[bench]]
+name = "elementwise"
+harness = false

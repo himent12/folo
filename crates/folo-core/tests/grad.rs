@@ -304,3 +304,35 @@ fn composite_network_grad() {
     )
     .unwrap();
 }
+
+#[test]
+fn avx2_vector_width_elementwise_grads() {
+    // Shape [2, 29] = 58 elements (> 2*16 + 8 + 5 tail per row) exercises 16-wide, 8-wide, scalar tail,
+    // and broadcast backward paths for the AVX2 activations, math ops, binary ops, and where_cond.
+    let opts = GradCheck { max_checks: 24, ..GradCheck::default() };
+    let x = grid(&[2, 29], 95);
+    let pos = uniform(&[2, 29], 0.5, 3.0, 96);
+    let b = uniform(&[1, 29], -1.0, 1.0, 97);
+    let mask = uniform(&[2, 29], -1.0, 1.0, 98).gt_scalar(0.0).unwrap();
+    let check_wide = |f: fn(&[Tensor]) -> Result<Tensor>, xs: &[Tensor]| {
+        grad_check_with(f, xs, &opts).unwrap();
+    };
+    check_wide(|v| v[0].relu(), std::slice::from_ref(&x));
+    check_wide(|v| v[0].leaky_relu(0.1), std::slice::from_ref(&x));
+    check_wide(|v| v[0].hardswish(), &[uniform(&[2, 29], -2.5, 2.5, 99)]);
+    check_wide(|v| v[0].clamp(-0.5, 0.5), std::slice::from_ref(&x));
+    check_wide(|v| v[0].sqrt(), std::slice::from_ref(&pos));
+    check_wide(|v| v[0].rsqrt(), std::slice::from_ref(&pos));
+    check_wide(|v| v[0].recip(), std::slice::from_ref(&pos));
+    check_wide(|v| v[0].rdiv_scalar(2.0), std::slice::from_ref(&pos));
+    check_wide(|v| v[0].add(&v[1])?.mul(&v[0])?.div(&v[2]), &[x.clone(), b.clone(), pos.clone()]);
+    check_wide(
+        |v| v[0].maximum(&v[1]),
+        &[grid(&[2, 29], 100), grid(&[1, 29], 101).add_scalar(0.05).unwrap()],
+    );
+    check_wide(
+        |v| v[0].minimum(&v[1]),
+        &[grid(&[2, 29], 102), grid(&[1, 29], 103).add_scalar(0.05).unwrap()],
+    );
+    grad_check_with(|v| mask.where_cond(&v[0], &v[1]), &[x, b], &opts).unwrap();
+}

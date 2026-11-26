@@ -2,7 +2,13 @@
 
 mod cat;
 mod simd;
+#[cfg(target_arch = "x86_64")]
+mod simd_binary;
 mod simd_log_tanh;
+#[cfg(target_arch = "x86_64")]
+mod simd_ops;
+#[cfg(test)]
+mod simd_ops_tests;
 #[cfg(test)]
 mod tests;
 mod transpose;
@@ -642,6 +648,30 @@ pub(crate) fn where3<C: Copy + Send + Sync>(
     out
 }
 
+/// `cond != 0.0 ? a : b` for `F32` conditions, using AVX2 on `x86_64` when available.
+pub(crate) fn where3_f32(c: &[f32], lc: &Layout, a: &[f32], la: &Layout, b: &[f32], lb: &Layout) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        simd_binary::where3_f32_avx2(c, lc, a, la, b, lb)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        where3(c, lc, a, la, b, lb, |v| v != 0.0)
+    }
+}
+
+/// `cond != 0 ? a : b` for `U8` conditions, using AVX2 on `x86_64` when available.
+pub(crate) fn where3_u8(c: &[u8], lc: &Layout, a: &[f32], la: &Layout, b: &[f32], lb: &Layout) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        simd_binary::where3_u8_avx2(c, lc, a, la, b, lb)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        where3(c, lc, a, la, b, lb, |v| v != 0)
+    }
+}
+
 const LOG2E: f32 = std::f32::consts::LOG2_E;
 
 /// `e^x` to about 1 ulp over the whole finite range (including subnormal results), written so loops over it
@@ -705,8 +735,14 @@ pub(crate) fn bias_act_inplace(op: Option<UnaryOp>, bias: f32, v: &mut [f32]) {
             *x = f(*x + bias);
         }
     }
+    if op.is_none() && bias == 0.0 {
+        return;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if simd_ops::try_bias_act_inplace_avx2(op, bias, v) {
+        return;
+    }
     match op {
-        None if bias == 0.0 => {}
         None => go(v, bias, |x| x),
         Some(UnaryOp::Silu) => simd::silu_bias_inplace(v, bias),
         Some(UnaryOp::Relu) => go(v, bias, |x| x.max(0.0)),
@@ -755,6 +791,10 @@ pub(crate) fn erf(x: f32) -> f32 {
 
 /// Apply a unary op.
 pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(out) = simd_ops::try_unary_avx2(op, x, lx) {
+        return out;
+    }
     use UnaryOp::*;
     match op {
         Neg => map1(x, lx, |v| -v),
@@ -804,6 +844,10 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
 
 /// `grad * op'(x)`.
 pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg: &Layout) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(out) = simd_ops::try_unary_backward_avx2(op, x, lx, g, lg) {
+        return out;
+    }
     use UnaryOp::*;
     match op {
         Neg => map2(x, lx, g, lg, |_, g| -g),
@@ -904,6 +948,10 @@ fn mask(b: bool) -> f32 {
 
 /// Apply a binary op to two operands already broadcast to the output shape.
 pub(crate) fn binary(op: BinaryOp, a: &[f32], la: &Layout, b: &[f32], lb: &Layout) -> Vec<f32> {
+    #[cfg(target_arch = "x86_64")]
+    if let Some(out) = simd_binary::try_binary_avx2(op, a, la, b, lb) {
+        return out;
+    }
     use BinaryOp::*;
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     match op {
