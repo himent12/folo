@@ -55,7 +55,9 @@ same change. `README.md` is how to build, test and run it.
   dialogs). It also compiles on Windows (feature `winit`) so its shared code runs on a Windows development machine too.
 - **Commodity crates do commodity jobs:** taffy (flexbox maths), resvg/usvg (SVG icons, as GPUI), tiny-skia
   (comes with resvg), lyon `=1.0.19` (path tessellation and dashing, the versions GPUI 0.2.2 uses, so a path
-  covers the same samples), cosmic-text, winit, softbuffer, arboard, rfd, image, async-task, smallvec.
+  covers the same samples), cosmic-text, winit, softbuffer, arboard, rfd, image, async-task, smallvec,
+  unicode-segmentation (UAX #29 extended grapheme clusters so text wrapping and truncation never split a base
+  character from its combining marks).
   Everything else is ours. No new dependency without a line in this file saying why.
 
 ### What GPUI code may be reused
@@ -131,6 +133,10 @@ The API is GPUI's where the app uses it. Below it, these differ by design:
   prepaint, so a tooltip on an element without a hover style stayed up), and a tooltip's timer and
   visibility callback hold its state weakly (GPUI's cycle leaked the state and the tooltip view once the
   element went away).
+- Text wrapping and truncation (`LineLayout::compute_wrap_boundaries`, `LineWrapper::wrap_line`,
+  `LineWrapper::truncate_line`) respect Unicode extended grapheme cluster boundaries (and multi-glyph shaped
+  clusters), so a combining accent or modifier never wraps or truncates apart from its base character
+  (GPUI 0.2.2 broke per scalar value / per glyph).
 
 ## Units and colour
 
@@ -262,8 +268,9 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
 - `TextSystem` (app-wide: font ids, metrics, fallback stack) and `WindowTextSystem` (per window: the line
   layout cache that keeps what the previous frame used) expose what the app and the text element call:
   `shape_line`, `shape_text`, `layout_line`, `line_wrapper`, `ShapedLine::{paint, width, x_for_index,
-  index_for_x, closest_index_for_x, len}`, `WrappedLine`. Wrapping and truncation follow GPUI's rules exactly
-  (they decide where every line of the UI breaks).
+  index_for_x, closest_index_for_x, len}`, `WrappedLine`. Wrapping and truncation follow GPUI's rules with
+  grapheme-cluster-safe boundaries (never splitting a base character from its combining marks or multi-glyph
+  cluster, as noted under Differences from GPUI).
 - Painting a line goes through `trait GlyphPainter` (paint_glyph, paint_emoji, paint_underline,
   paint_strikethrough, paint_background); the window implements it, so `text/` does not depend on `window/`.
 - Fonts come from `add_fonts` (the app bundles Geist and Geist Mono). A glyph the bundled fonts lack falls

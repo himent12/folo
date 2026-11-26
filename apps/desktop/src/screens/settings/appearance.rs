@@ -163,9 +163,40 @@ impl FoloApp {
                 }))
         });
         let failed_list = (!failed.is_empty()).then(|| {
+            let (sans, mono) = (folo_ui::font(crate::theme::SANS), folo_ui::font(crate::theme::MONO));
             div().flex().flex_col().gap(px(4.)).children(failed.iter().map(|f| {
                 // A whole-file error's path is "(file)": the file's own name says that better.
-                let error = f.error.strip_prefix("(file): ").unwrap_or(&f.error).to_string();
+                let error = f.error.strip_prefix("(file): ").unwrap_or(&f.error);
+                // One flowing text with two styled runs (mono file name, then sans error): a short
+                // name stays beside a long reason as it wraps, and a long name wraps in full before
+                // the reason continues rather than clipping or stacking an awkward half-empty line.
+                let mut combined = String::with_capacity(f.file.len() + 1 + error.len());
+                let mut runs = Vec::with_capacity(2);
+                if !f.file.is_empty() {
+                    combined.push_str(&f.file);
+                    if !error.is_empty() {
+                        combined.push(' ');
+                    }
+                    runs.push(folo_ui::TextRun {
+                        len: combined.len(),
+                        font: mono.clone(),
+                        color: t.text_secondary,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    });
+                }
+                if !error.is_empty() {
+                    combined.push_str(error);
+                    runs.push(folo_ui::TextRun {
+                        len: error.len(),
+                        font: sans.clone(),
+                        color: t.danger_text,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    });
+                }
                 div()
                     .flex()
                     .items_start()
@@ -175,24 +206,14 @@ impl FoloApp {
                         14.,
                         t.danger_solid,
                     )))
-                    // The name, then the reason beside it while both fit; a name too long for that
-                    // puts the reason on its own line, and wraps itself rather than run past the edge.
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .flex()
-                            .flex_wrap()
-                            .gap_x(px(8.))
-                            .when(!f.file.is_empty(), |d| {
-                                d.child(
-                                    text(ty::SM, t.text_secondary)
-                                        .min_w_0()
-                                        .font_family(crate::theme::MONO)
-                                        .child(f.file.clone()),
-                                )
-                            })
-                            .child(text(ty::SM, t.danger_text).min_w_0().text_left().child(error)),
+                            .step(ty::SM)
+                            .text_color(t.danger_text)
+                            .text_left()
+                            .child(folo_ui::StyledText::new(combined).with_runs(runs)),
                     )
             }))
         });

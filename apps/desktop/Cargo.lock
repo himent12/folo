@@ -1090,6 +1090,7 @@ dependencies = [
  "softbuffer",
  "taffy",
  "tiny-skia",
+ "unicode-segmentation",
  "usvg",
  "uuid",
  "windows",

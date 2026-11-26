@@ -190,3 +190,298 @@ fn shape_text_with_style_matches_shape_text_and_handles_empty_runs() {
         lines.iter().map(|l| l.decoration_runs().iter().map(|r| r.len).collect()).collect();
     assert_eq!(decoration_lens, [vec![2], vec![1, 1], vec![], vec![2]]);
 }
+
+#[test]
+fn shape_text_never_wraps_between_base_letter_and_combining_accent() {
+    use unicode_segmentation::UnicodeSegmentation;
+    let window = window_text_system();
+
+    // Decomposed "café" ("cafe\u{0301}") after a space: must wrap before "cafe\u{0301}", never between
+    // 'e' and '\u{0301}', and never treat '\u{0301}' as a mid-word break candidate.
+    let text = "aa cafe\u{0301}s";
+    let lines = window.shape_text(text.into(), px(16.), &runs(&[text.len()]), Some(px(72.)), None).unwrap();
+    let layout = &lines[0].layout;
+    let starts: Vec<usize> = layout
+        .wrap_boundaries()
+        .iter()
+        .map(|b| layout.unwrapped_layout.runs[b.run_ix].glyphs[b.glyph_ix].index)
+        .collect();
+    assert_eq!(starts, [3], "word breaks at the space before cafe\\u{{0301}}s, not before the accent");
+
+    // Hard-wrap inside a single long word across widths: every wrap boundary must land on a grapheme
+    // cluster boundary, even when the width cuts right between 'e' and '\u{0301}' or is narrower than
+    // a single cluster.
+    for sample in ["aaaae\u{0301}bbbb", "aa o\u{0302}\u{0323}bb", "e\u{0301}ab", "aa 😀\u{FE0F}bb"] {
+        let grapheme_starts: Vec<usize> = sample.grapheme_indices(true).map(|(i, _)| i).collect();
+        for width in [10., 20., 35., 48., 50., 55., 60.] {
+            let lines = window
+                .shape_text(sample.into(), px(16.), &runs(&[sample.len()]), Some(px(width)), None)
+                .unwrap();
+            let layout = &lines[0].layout;
+            for b in layout.wrap_boundaries() {
+                let ix = layout.unwrapped_layout.runs[b.run_ix].glyphs[b.glyph_ix].index;
+                assert!(
+                    grapheme_starts.contains(&ix),
+                    "wrap inside grapheme cluster for {sample:?} at width {width}: byte {ix} not in {grapheme_starts:?}"
+                );
+            }
+        }
+    }
+
+    // Multi-glyph shaped clusters (DirectWrite / HarfBuzz emitting base + mark with the same cluster
+    // index, or font fallback splitting base and combining mark into separate runs) must stay atomic.
+    let cluster_text = "aaae\u{0301}b";
+    let same_index_layout = crate::LineLayout {
+        font_size: px(16.),
+        width: px(50.),
+        ascent: px(12.),
+        descent: px(4.),
+        len: cluster_text.len(),
+        runs: vec![crate::ShapedRun {
+            font_id: crate::FontId(0),
+            glyphs: vec![
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(0.), px(0.)),
+                    index: 0,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(10.), px(0.)),
+                    index: 1,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(20.), px(0.)),
+                    index: 2,
+                    is_emoji: false,
+                },
+                // 'e' at 30..38, combining acute mark at same index=3 positioned at 36 (extends to 40).
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(2),
+                    position: point(px(30.), px(0.)),
+                    index: 3,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(3),
+                    position: point(px(36.), px(0.)),
+                    index: 3,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(4),
+                    position: point(px(40.), px(0.)),
+                    index: 6,
+                    is_emoji: false,
+                },
+            ],
+        }],
+    };
+    let bounds = same_index_layout.compute_wrap_boundaries(cluster_text, px(38.), None);
+    assert_eq!(bounds.as_slice(), &[WrapBoundary { run_ix: 0, glyph_ix: 3 }]);
+
+    // Fallback-split runs: 'e' in run 0 (index 3), '\u{0301}' in run 1 (index 4).
+    let split_run_layout = crate::LineLayout {
+        font_size: px(16.),
+        width: px(56.),
+        ascent: px(12.),
+        descent: px(4.),
+        len: cluster_text.len(),
+        runs: vec![
+            crate::ShapedRun {
+                font_id: crate::FontId(0),
+                glyphs: vec![
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(1),
+                        position: point(px(0.), px(0.)),
+                        index: 0,
+                        is_emoji: false,
+                    },
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(1),
+                        position: point(px(10.), px(0.)),
+                        index: 1,
+                        is_emoji: false,
+                    },
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(1),
+                        position: point(px(20.), px(0.)),
+                        index: 2,
+                        is_emoji: false,
+                    },
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(2),
+                        position: point(px(30.), px(0.)),
+                        index: 3,
+                        is_emoji: false,
+                    },
+                ],
+            },
+            crate::ShapedRun {
+                font_id: crate::FontId(1),
+                glyphs: vec![
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(3),
+                        position: point(px(40.), px(0.)),
+                        index: 4,
+                        is_emoji: false,
+                    },
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(4),
+                        position: point(px(48.), px(0.)),
+                        index: 6,
+                        is_emoji: false,
+                    },
+                ],
+            },
+        ],
+    };
+    let bounds = split_run_layout.compute_wrap_boundaries(cluster_text, px(44.), None);
+    assert_eq!(bounds.as_slice(), &[WrapBoundary { run_ix: 0, glyph_ix: 3 }]);
+
+    // Non-monotonic intra-cluster mark x offset: a base glyph at x=20 with a mark positioned at x=31
+    // whose next cluster begins at x=28 has total advance 28 <= wrap_width (30), so it must NOT wrap.
+    let offset_text = "aae\u{0301}b";
+    let offset_layout = crate::LineLayout {
+        font_size: px(16.),
+        width: px(36.),
+        ascent: px(12.),
+        descent: px(4.),
+        len: offset_text.len(),
+        runs: vec![crate::ShapedRun {
+            font_id: crate::FontId(0),
+            glyphs: vec![
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(0.), px(0.)),
+                    index: 0,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(10.), px(0.)),
+                    index: 1,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(2),
+                    position: point(px(20.), px(0.)),
+                    index: 2,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(3),
+                    position: point(px(31.), px(0.)),
+                    index: 3,
+                    is_emoji: false,
+                },
+                crate::ShapedGlyph {
+                    id: crate::GlyphId(4),
+                    position: point(px(28.), px(0.)),
+                    index: 5,
+                    is_emoji: false,
+                },
+            ],
+        }],
+    };
+    let bounds = offset_layout.compute_wrap_boundaries(offset_text, px(30.), None);
+    assert_eq!(
+        bounds.as_slice(),
+        &[WrapBoundary { run_ix: 0, glyph_ix: 4 }],
+        "cluster ending at x=28 fits within 30 px; only the following 'b' wraps"
+    );
+
+    // max_lines clamping on a multi-glyph cluster stops at the limit without splitting the cluster.
+    let clamped = same_index_layout.compute_wrap_boundaries(cluster_text, px(25.), Some(2));
+    assert_eq!(clamped.as_slice(), &[WrapBoundary { run_ix: 0, glyph_ix: 2 }]);
+
+    // Descending / RTL glyph indices (as emitted for visual RTL runs): stays linear/fast and keeps
+    // combining marks attached to their RTL base character.
+    let rtl_text = format!("prefix {}", "א\u{05B8}".repeat(200));
+    let mut rtl_glyphs = Vec::new();
+    let mut x = 0.0f32;
+    for (i, ch) in rtl_text.char_indices().rev() {
+        rtl_glyphs.push(crate::ShapedGlyph {
+            id: crate::GlyphId(ch as u32),
+            position: point(px(x), px(0.)),
+            index: i,
+            is_emoji: false,
+        });
+        x += 8.0;
+    }
+    let rtl_layout = crate::LineLayout {
+        font_size: px(16.),
+        width: px(x),
+        ascent: px(12.),
+        descent: px(4.),
+        len: rtl_text.len(),
+        runs: vec![crate::ShapedRun { font_id: crate::FontId(0), glyphs: rtl_glyphs }],
+    };
+    let rtl_grapheme_starts: Vec<usize> = rtl_text.grapheme_indices(true).map(|(i, _)| i).collect();
+    let rtl_bounds = rtl_layout.compute_wrap_boundaries(&rtl_text, px(80.), None);
+    assert!(!rtl_bounds.is_empty());
+    for b in &rtl_bounds {
+        let g = &rtl_layout.runs[b.run_ix].glyphs[b.glyph_ix];
+        // The glyph at the wrap boundary must start a new cluster relative to the previous glyph.
+        if b.glyph_ix > 0 {
+            let prev = &rtl_layout.runs[b.run_ix].glyphs[b.glyph_ix - 1];
+            let cluster_of = |ix: usize| {
+                let pos = rtl_grapheme_starts.partition_point(|&s| s <= ix);
+                rtl_grapheme_starts[pos.saturating_sub(1)]
+            };
+            assert_ne!(cluster_of(g.index), cluster_of(prev.index), "RTL wrap split a grapheme cluster");
+        }
+    }
+}
+
+#[test]
+fn x_and_font_id_for_index_handle_visual_order_rtl_glyphs() {
+    // Visual left-to-right order for "אבג" (bytes 0..2, 2..4, 4..6): indices arrive 4, 2, 0.
+    let layout = crate::LineLayout {
+        font_size: px(16.),
+        width: px(30.),
+        ascent: px(12.),
+        descent: px(4.),
+        len: 6,
+        runs: vec![
+            crate::ShapedRun {
+                font_id: crate::FontId(1),
+                glyphs: vec![
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(3),
+                        position: point(px(0.), px(0.)),
+                        index: 4,
+                        is_emoji: false,
+                    },
+                    crate::ShapedGlyph {
+                        id: crate::GlyphId(2),
+                        position: point(px(10.), px(0.)),
+                        index: 2,
+                        is_emoji: false,
+                    },
+                ],
+            },
+            crate::ShapedRun {
+                font_id: crate::FontId(2),
+                glyphs: vec![crate::ShapedGlyph {
+                    id: crate::GlyphId(1),
+                    position: point(px(20.), px(0.)),
+                    index: 0,
+                    is_emoji: false,
+                }],
+            },
+        ],
+    };
+    assert_eq!(layout.x_for_index(0), px(20.));
+    assert_eq!(layout.x_for_index(1), px(10.));
+    assert_eq!(layout.x_for_index(2), px(10.));
+    assert_eq!(layout.x_for_index(4), px(0.));
+    assert_eq!(layout.x_for_index(6), px(30.));
+    assert_eq!(layout.font_id_for_index(0), Some(crate::FontId(2)));
+    assert_eq!(layout.font_id_for_index(2), Some(crate::FontId(1)));
+    assert_eq!(layout.font_id_for_index(4), Some(crate::FontId(1)));
+    assert_eq!(layout.font_id_for_index(6), None);
+}

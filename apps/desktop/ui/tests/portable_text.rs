@@ -284,3 +284,143 @@ fn startup_cost() {
         fallback.as_secs_f64() * 1e3
     );
 }
+
+#[test]
+fn rtl_filename_with_english_reason_wraps_and_keeps_both_inks() {
+    use folo_ui::text::GlyphPainter;
+    use folo_ui::{
+        Bounds, Hsla, Pixels, StrikethroughStyle, TextAlign, TextRun, TextSystem, UnderlineStyle,
+        WindowTextSystem, blue, red, size,
+    };
+
+    struct Recorder {
+        glyphs: Vec<(Point<Pixels>, Hsla)>,
+    }
+
+    impl GlyphPainter for Recorder {
+        fn paint_glyph(
+            &mut self,
+            origin: Point<Pixels>,
+            _font_id: FontId,
+            _glyph_id: GlyphId,
+            _font_size: Pixels,
+            color: Hsla,
+        ) -> anyhow::Result<()> {
+            self.glyphs.push((origin, color));
+            Ok(())
+        }
+        fn paint_emoji(&mut self, _: Point<Pixels>, _: FontId, _: GlyphId, _: Pixels) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn paint_underline(&mut self, _: Point<Pixels>, _: Pixels, _: &UnderlineStyle) {}
+        fn paint_strikethrough(&mut self, _: Point<Pixels>, _: Pixels, _: &StrikethroughStyle) {}
+        fn paint_background(&mut self, _: Bounds<Pixels>, _: Hsla) {}
+    }
+
+    let ts = Arc::new(TextSystem::new(Arc::new(text_system())));
+    let wts = WindowTextSystem::new(ts.clone());
+    let file = "אx.json ";
+    let reason = "invalid option with detailed reason text that wraps cleanly across multiple lines";
+    let combined = format!("{file}{reason}");
+    let name_color = blue();
+    let error_color = red();
+    let runs = [
+        TextRun {
+            len: file.len(),
+            font: font("Geist Mono"),
+            color: name_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        },
+        TextRun {
+            len: reason.len(),
+            font: geist(400.),
+            color: error_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        },
+    ];
+    let wrap_w = px(220.);
+    let wrapped = wts.shape_text(combined.clone().into(), px(12.), &runs, Some(wrap_w), None).unwrap();
+    assert_eq!(wrapped.len(), 1);
+    let line = &wrapped[0];
+
+    // Glyphs start cleanly at x=0 (never -epsilon) and are in ascending visual left-to-right order,
+    // so wrapping triggers and nothing clips past wrap_w.
+    let xs: Vec<Pixels> = line.runs().iter().flat_map(|r| r.glyphs.iter().map(|g| g.position.x)).collect();
+    assert_eq!(xs.first().copied(), Some(px(0.)), "line must start at exact x=0: {xs:?}");
+    assert!(xs.windows(2).all(|w| w[0] <= w[1]), "expected non-decreasing visual x positions: {xs:?}");
+    assert!(!line.wrap_boundaries().is_empty(), "long reason after RTL filename must wrap");
+
+    let mut rec = Recorder { glyphs: Vec::new() };
+    folo_ui::text::paint_line(
+        Point { x: px(0.), y: px(0.) },
+        &line.unwrapped_layout,
+        px(16.),
+        TextAlign::Left,
+        Some(wrap_w),
+        line.decoration_runs(),
+        line.wrap_boundaries(),
+        &ts,
+        Bounds::new(Point { x: px(0.), y: px(0.) }, size(px(1000.), px(1000.))),
+        &mut rec,
+    )
+    .unwrap();
+
+    // Every glyph from `file` (including 'א' at byte 0 and "x.json ") must paint in `name_color`,
+    // and every glyph from `reason` in `error_color`.
+    let expected_name =
+        line.runs().iter().flat_map(|r| r.glyphs.iter()).filter(|g| g.index < file.len()).count();
+    let expected_error =
+        line.runs().iter().flat_map(|r| r.glyphs.iter()).filter(|g| g.index >= file.len()).count();
+    let name_glyphs: Vec<_> = rec.glyphs.iter().filter(|(_, c)| *c == name_color).collect();
+    let error_glyphs: Vec<_> = rec.glyphs.iter().filter(|(_, c)| *c == error_color).collect();
+    assert_eq!(name_glyphs.len(), expected_name, "all filename glyphs (including א) must keep name_color");
+    assert_eq!(error_glyphs.len(), expected_error, "all reason glyphs must keep error_color");
+    // Row order: LTR paragraph base direction puts the entire filename and the start of the reason
+    // on row 0 (same baseline y), and wraps the continuation of the reason onto later rows.
+    let first_y = name_glyphs[0].0.y;
+    assert!(
+        name_glyphs.iter().all(|(p, _)| p.y == first_y),
+        "RTL filename must sit on the first visual row: {name_glyphs:?}"
+    );
+    assert!(
+        error_glyphs.iter().any(|(p, _)| p.y == first_y),
+        "reason must begin on row 0 beside the filename"
+    );
+    assert!(error_glyphs.iter().any(|(p, _)| p.y > first_y), "long reason must wrap onto subsequent rows");
+    let max_x = rec.glyphs.iter().map(|(p, _)| p.x).fold(px(0.), Pixels::max);
+    assert!(
+        max_x <= wrap_w + px(12.),
+        "wrapped glyphs must stay within wrap_w ({wrap_w:?}), max_x={max_x:?}"
+    );
+
+    // Pure RTL text keeps distinct caret positions for every character boundary and starts at x=0.
+    let rtl = wts.shape_line(
+        "אבג".into(),
+        px(14.),
+        &[TextRun {
+            len: "אבג".len(),
+            font: geist(400.),
+            color: name_color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+        None,
+    );
+    let rtl_xs: Vec<Pixels> = rtl.runs.iter().flat_map(|r| r.glyphs.iter().map(|g| g.position.x)).collect();
+    assert_eq!(rtl_xs.first().copied(), Some(px(0.)), "RTL line must start at exact x=0: {rtl_xs:?}");
+    let positions = [rtl.x_for_index(0), rtl.x_for_index(2), rtl.x_for_index(4), rtl.x_for_index(6)];
+    assert!(
+        positions[0] != positions[1] && positions[1] != positions[2] && positions[2] != positions[3],
+        "RTL caret positions must be distinct: {positions:?}"
+    );
+
+    // An RTL filename containing a Unicode paragraph separator must not panic cosmic-text's
+    // multi-paragraph direction assertion.
+    let para_sep = layout(&text_system(), &font("Geist Mono"), "א\u{2029}ב.json", 12.);
+    assert_eq!(para_sep.len, "א\u{2029}ב.json".len());
+}

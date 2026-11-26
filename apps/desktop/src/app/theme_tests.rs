@@ -348,3 +348,152 @@ fn a_failed_file_with_a_long_name_shows_the_whole_name_and_reason() {
         assert_eq!(with_names.0 - without_names.0, names.1, "every name's glyph shows at {width}");
     }
 }
+
+/// #382 (after #375): a failed theme file with a short name and a long reason must keep the start of
+/// the reason beside the name on the first line (not wrap the entire reason onto the next line under
+/// an otherwise empty row), while still wrapping and showing every glyph unclipped.
+#[test]
+fn a_failed_file_with_a_short_name_and_long_reason_starts_beside_the_name() {
+    let dir = TestDir::new("desktop-theme-short-name-long-reason");
+    let folder = dir.path().join("a").join("themes");
+    let empty = dir.path().join("b").join("themes");
+    std::fs::create_dir_all(&folder).unwrap();
+    // A multi-word unknown top-level key long enough to force multi-line wrapping at both 960 and
+    // 1280 px: the old `flex_wrap` layout dropped the entire reason onto the line below `bad.json`.
+    let long_key = format!("invalid option {}", "with detailed reason text ".repeat(6));
+    std::fs::write(
+        folder.join("bad.json"),
+        format!(
+            r#"{{"{long_key}": true, "folo_theme": 1, "id": "short-name", "name": "Short", "mode": "dark"}}"#
+        ),
+    )
+    .unwrap();
+    let failed = Catalog::load(&folder).failed;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    let rows: Vec<(String, String)> = failed
+        .iter()
+        .map(|f| (f.file.clone(), f.error.strip_prefix("(file): ").unwrap_or(&f.error).to_string()))
+        .collect();
+    let (mut ref_app, ref_bounds) = headless(8000.);
+    let ref_win = ref_app.update(|cx| {
+        use folo_ui::{AppContext, WindowBounds, WindowOptions};
+        let options =
+            WindowOptions { window_bounds: Some(WindowBounds::Windowed(ref_bounds)), ..Default::default() };
+        cx.open_window(options, |_, cx| cx.new(|_| Reference(rows))).expect("open window")
+    });
+    let [ref_reasons, ref_names] = glyphs(&mut ref_app, ref_win.into());
+    assert!(ref_reasons.1 > 0 && ref_names.1 > 0);
+
+    for width in [960., 1280.] {
+        let (mut app, window) = settings_at(width, &folder);
+        let [with_reasons, with_names] = glyphs(&mut app, window.into());
+        let t = app.update(|cx| theme(cx));
+        // Snapshot danger and secondary glyph (x, y) positions with and without the failed file.
+        let collect_pts = |app: &mut HeadlessApp, window: folo_ui::AnyWindowHandle| {
+            let mut d = Vec::new();
+            let mut s = Vec::new();
+            for p in &app.scene(window).primitives {
+                if let folo_ui::Primitive::MonoSprite(sp) = p
+                    && sp.kind == folo_ui::SpriteKind::Glyph
+                {
+                    let pt = (f64::from(sp.bounds.origin.x) as f32, f64::from(sp.bounds.origin.y) as f32);
+                    if sp.color == t.danger_text {
+                        d.push(pt);
+                    } else if sp.color == t.text_secondary {
+                        s.push(pt);
+                    }
+                }
+            }
+            (d, s)
+        };
+        let (danger_pts, with_secondary_pts) = collect_pts(&mut app, window.into());
+        // Remove the failed file to see what the rest of the page paints.
+        drive(&mut app, window, |this, _, cx| {
+            this.themes = Catalog::load(&empty);
+            cx.notify();
+        });
+        let [without_reasons, without_names] = glyphs(&mut app, window.into());
+        let (_, without_secondary_pts) = collect_pts(&mut app, window.into());
+        assert_eq!(with_reasons.0 - without_reasons.0, ref_reasons.1, "every reason glyph shows at {width}");
+        assert_eq!(with_names.0 - without_names.0, ref_names.1, "every name glyph shows at {width}");
+        // The wrapped reason's continuation lines begin at the text column's left edge (`col_left`),
+        // strictly inside the failed row (excluding the sidebar). On line 1, the reason starts to the
+        // right of `bad.json`, and every glyph of `bad.json` occupies `[col_left, first_line_danger_min_x)`.
+        assert_eq!(without_reasons.1, 0, "expected no other danger glyphs on Settings");
+        let line_h = crate::theme::ty::SM.line;
+        let col_left = danger_pts.iter().map(|&(x, _)| x).fold(f32::INFINITY, f32::min);
+        let reason_top = danger_pts.iter().map(|&(_, y)| y).fold(f32::INFINITY, f32::min);
+        let reason_bottom = danger_pts.iter().map(|&(_, y)| y).fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            reason_bottom - reason_top >= line_h * 0.75,
+            "long reason should wrap across multiple lines at {width}: top={reason_top}, bottom={reason_bottom}"
+        );
+        let on_first_line = |y: f32| y >= reason_top - 4. && y < reason_top + line_h * 0.85;
+        let first_line_danger_min_x = danger_pts
+            .iter()
+            .filter(|&&(_, y)| on_first_line(y))
+            .map(|&(x, _)| x)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            first_line_danger_min_x > col_left + 20.,
+            "reason must start beside bad.json on line 1 (indented past wrapped line 2's col_left) at {width}: col_left={col_left}, first_line_danger_min_x={first_line_danger_min_x}"
+        );
+        let in_name_slot =
+            |&(x, y): &(f32, f32)| x >= col_left - 2. && x < first_line_danger_min_x && on_first_line(y);
+        let baseline_in_slot = without_secondary_pts.iter().filter(|pt| in_name_slot(pt)).count();
+        assert_eq!(
+            baseline_in_slot, 0,
+            "empty baseline should have no secondary glyphs in the failed row slot"
+        );
+        let name_glyphs_beside_reason = with_secondary_pts.iter().filter(|pt| in_name_slot(pt)).count();
+        assert_eq!(
+            name_glyphs_beside_reason, ref_names.1,
+            "every glyph of bad.json should sit on line 1 in [{col_left}, {first_line_danger_min_x}) at {width}"
+        );
+    }
+}
+
+/// Bidi failed theme filename (`אx.json`) with a long English reason: both inks match the single-line
+/// reference and every glyph renders unclipped inside the Settings panel.
+#[test]
+fn a_failed_file_with_an_rtl_name_keeps_both_inks_and_shows_the_full_reason() {
+    let dir = TestDir::new("desktop-theme-rtl-name");
+    let folder = dir.path().join("a").join("themes");
+    let empty = dir.path().join("b").join("themes");
+    std::fs::create_dir_all(&folder).unwrap();
+    let long_key = format!("invalid option {}", "with detailed reason text ".repeat(6));
+    std::fs::write(
+        folder.join("אx.json"),
+        format!(
+            r#"{{"{long_key}": true, "folo_theme": 1, "id": "rtl-name", "name": "RTL", "mode": "dark"}}"#
+        ),
+    )
+    .unwrap();
+    let failed = Catalog::load(&folder).failed;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    let rows: Vec<(String, String)> = failed
+        .iter()
+        .map(|f| (f.file.clone(), f.error.strip_prefix("(file): ").unwrap_or(&f.error).to_string()))
+        .collect();
+    let (mut ref_app, ref_bounds) = headless(8000.);
+    let ref_win = ref_app.update(|cx| {
+        use folo_ui::{AppContext, WindowBounds, WindowOptions};
+        let options =
+            WindowOptions { window_bounds: Some(WindowBounds::Windowed(ref_bounds)), ..Default::default() };
+        cx.open_window(options, |_, cx| cx.new(|_| Reference(rows))).expect("open window")
+    });
+    let [ref_reasons, ref_names] = glyphs(&mut ref_app, ref_win.into());
+    assert!(ref_reasons.1 > 0 && ref_names.1 > 0);
+    assert_eq!(ref_reasons.0, ref_reasons.1);
+    assert_eq!(ref_names.0, ref_names.1);
+
+    let (mut app, window) = settings_at(960., &folder);
+    let [with_reasons, with_names] = glyphs(&mut app, window.into());
+    drive(&mut app, window, |this, _, cx| {
+        this.themes = Catalog::load(&empty);
+        cx.notify();
+    });
+    let [without_reasons, without_names] = glyphs(&mut app, window.into());
+    assert_eq!(with_reasons.0 - without_reasons.0, ref_reasons.1, "every reason glyph shows unclipped");
+    assert_eq!(with_names.0 - without_names.0, ref_names.1, "every RTL filename glyph keeps secondary ink");
+}
