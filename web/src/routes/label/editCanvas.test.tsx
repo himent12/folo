@@ -132,4 +132,43 @@ describe('the editor canvas', () => {
     expect(document.activeElement).toBe(dialog);
     dialog.remove();
   });
+
+  it('ignores secondary pointers during an active drag and cancels cleanly on lostpointercapture or mid-drag boxes change', async () => {
+    const boxes = signal<Box[]>(start);
+    const { onchange, canvas } = mount(1, boxes);
+    const on = await selectedBox(canvas);
+    on.dispatchEvent(new PointerEvent('pointerdown', { clientX: 300, clientY: 200, button: 0, pointerId: 1, bubbles: true, cancelable: true }));
+    on.dispatchEvent(new PointerEvent('pointermove', { clientX: 320, clientY: 210, pointerId: 1, bubbles: true }));
+    // A second pointer moving/lifting must neither hijack nor settle pointer 1's drag.
+    on.dispatchEvent(new PointerEvent('pointermove', { clientX: 50, clientY: 50, pointerId: 2, bubbles: true }));
+    on.dispatchEvent(new PointerEvent('pointerup', { clientX: 50, clientY: 50, pointerId: 2, bubbles: true }));
+    flushSync();
+    expect(onchange).not.toHaveBeenCalled();
+
+    // Pointer 1 finishing commits its own drag.
+    on.dispatchEvent(new PointerEvent('pointerup', { clientX: 320, clientY: 210, pointerId: 1, bubbles: true }));
+    flushSync();
+    expect(onchange).toHaveBeenCalledTimes(1);
+    expect(onchange.mock.calls[0]![0][1]).toMatchObject({ x1: 244, x2: 372 });
+
+    // Losing pointer capture aborts an in-flight draw without committing or wedging future gestures.
+    const hit = canvas.querySelector('.hit')!;
+    hit.dispatchEvent(new PointerEvent('pointerdown', { clientX: 360, clientY: 10, button: 0, pointerId: 3, bubbles: true, cancelable: true }));
+    hit.dispatchEvent(new PointerEvent('pointermove', { clientX: 390, clientY: 40, pointerId: 3, bubbles: true }));
+    flushSync();
+    expect(canvas.querySelectorAll('.box').length).toBe(3);
+    canvas.dispatchEvent(new PointerEvent('lostpointercapture', { pointerId: 3, bubbles: true }));
+    flushSync();
+    expect(canvas.querySelectorAll('.box').length).toBe(2);
+    expect(onchange).toHaveBeenCalledTimes(1);
+
+    // Changing boxes mid-drag drops the preview immediately, before pointerup.
+    hit.dispatchEvent(new PointerEvent('pointerdown', { clientX: 360, clientY: 10, button: 0, pointerId: 4, bubbles: true, cancelable: true }));
+    hit.dispatchEvent(new PointerEvent('pointermove', { clientX: 390, clientY: 40, pointerId: 4, bubbles: true }));
+    flushSync();
+    expect(canvas.querySelectorAll('.box').length).toBe(3);
+    boxes.set([start[0]!]);
+    flushSync();
+    expect(canvas.querySelectorAll('.box').length).toBe(1);
+  });
 });

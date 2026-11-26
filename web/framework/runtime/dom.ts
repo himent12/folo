@@ -687,6 +687,9 @@ export function className(el: Element, fn: () => unknown, scope?: string, dirs?:
     if (value !== prevValue) writeClass(el, toClass(value, scope, d));
     else if (d !== undefined) {
       for (const k in d) if (prevDirs === undefined || !d[k] !== !prevDirs[k]) el.classList.toggle(k, !!d[k]);
+      if (prevDirs !== undefined) for (const k in prevDirs) if (!(k in d) && prevDirs[k]) el.classList.remove(k);
+    } else if (prevDirs !== undefined) {
+      for (const k in prevDirs) if (prevDirs[k]) el.classList.remove(k);
     }
     prevValue = value;
     prevDirs = d;
@@ -793,16 +796,63 @@ export function toStyle(value: unknown, styles?: Styles, important?: Styles): st
   return out === '' ? null : out;
 }
 
-function updateStyles(el: HTMLElement, prev: Styles | undefined, next: Styles, priority?: string): void {
-  for (const key in next) {
-    const value = next[key];
-    if ((prev === undefined ? undefined : prev[key]) !== value) {
-      if (value == null) el.style.removeProperty(key);
-      else el.style.setProperty(key, value as string, priority);
+function hasStyleValue(v: unknown): boolean {
+  return v != null && v !== '';
+}
+
+function updateStyles(el: HTMLElement, prev: Styles | undefined, next: Styles | undefined, priority?: string): void {
+  if (next !== undefined) {
+    for (const key in next) {
+      const value = next[key];
+      if ((prev === undefined ? undefined : prev[key]) !== value) {
+        if (!hasStyleValue(value)) el.style.removeProperty(key);
+        else el.style.setProperty(key, String(value), priority);
+      }
     }
   }
-  // Keys a style object no longer has (directives always have the same keys).
-  if (prev !== undefined) for (const key in prev) if (!(key in next) && prev[key] != null) el.style.removeProperty(key);
+  // Keys a style object no longer has (or all keys when a style object transitions to `''`).
+  if (prev !== undefined) {
+    for (const key in prev) {
+      if ((next === undefined || !(key in next)) && hasStyleValue(prev[key])) el.style.removeProperty(key);
+    }
+  }
+}
+
+/** Reconciles overlapping normal and `!important` keys by effective value and priority in cascade order. */
+function updateStyleMap(
+  el: HTMLElement,
+  prev: Styles | undefined,
+  next: Styles | undefined,
+  prevImportant: Styles | undefined,
+  nextImportant: Styles | undefined,
+): void {
+  // 1. Remove keys no longer active in either normal or `!important` declarations.
+  const removeIfGone = (key: string) => {
+    if (!hasStyleValue(next?.[key]) && !hasStyleValue(nextImportant?.[key])) el.style.removeProperty(key);
+  };
+  if (prev !== undefined) for (const k in prev) if (hasStyleValue(prev[k])) removeIfGone(k);
+  if (prevImportant !== undefined) for (const k in prevImportant) if (hasStyleValue(prevImportant[k])) removeIfGone(k);
+
+  // 2. Apply normal declarations in `next` order (skipping keys overridden by `nextImportant`).
+  if (next !== undefined) {
+    for (const k in next) {
+      const nVal = next[k];
+      if (!hasStyleValue(nVal) || hasStyleValue(nextImportant?.[k])) continue;
+      const wasImp = hasStyleValue(prevImportant?.[k]);
+      const pVal = wasImp ? prevImportant![k] : prev?.[k];
+      if (wasImp || !hasStyleValue(pVal) || pVal !== nVal) el.style.setProperty(k, String(nVal));
+    }
+  }
+
+  // 3. Apply `!important` declarations in `nextImportant` order.
+  if (nextImportant !== undefined) {
+    for (const k in nextImportant) {
+      const nVal = nextImportant[k];
+      if (!hasStyleValue(nVal)) continue;
+      const wasImp = hasStyleValue(prevImportant?.[k]);
+      if (!wasImp || prevImportant![k] !== nVal) el.style.setProperty(k, String(nVal), 'important');
+    }
+  }
 }
 
 type StyleCached = HTMLElement & { $$style?: unknown };
@@ -821,8 +871,11 @@ export function setStyle(el: Element, value: unknown, prev: Styles | undefined, 
     e.$$style = value;
     return;
   }
-  if (next) updateStyles(e, prev, next);
-  if (nextImportant) updateStyles(e, prevImportant, nextImportant, 'important');
+  if (!prevImportant && !nextImportant) {
+    if (next || prev) updateStyles(e, prev, next);
+  } else {
+    updateStyleMap(e, prev, next, prevImportant, nextImportant);
+  }
 }
 
 /** Internal: sets one static `style:prop={value}` directive without an effect (ignores `null`/`undefined`/`''`). */

@@ -218,12 +218,18 @@ export default function Playground() {
 
   function clear() {
     decodeSeq++;
+    toast.clear('image');
     const old = source.peek();
     if (old?.kind === 'file') URL.revokeObjectURL(old.url);
     engine.clearImageCache();
     source.set(null);
     pred.set(null);
     error.set(null);
+    weightsMissing.set(false);
+    hover.set(null);
+    picked.set(null);
+    hidden.set(new Set());
+    moreOpen.set(false);
     seg.set('file');
   }
 
@@ -320,18 +326,23 @@ export default function Playground() {
   /** A picked file that was refused as weights (not a .folo), or that the runtime could not load; cleared on a new pick. */
   const badFile = signal<{ name: string; why: string | null } | null>(null);
 
+  const weightPickSeq = new Map<string, number>();
+
   async function pickWeights(e: Event & { currentTarget: HTMLInputElement }) {
     const input = e.currentTarget;
     const f = input.files?.[0];
     input.value = '';
     const id = modelId.peek();
     if (!f || !id) return;
+    const seq = (weightPickSeq.get(id) ?? 0) + 1;
+    weightPickSeq.set(id, seq);
     // Refused before it becomes this model's weights: the server's (or the request for a file) stay in place.
     if (!(await looksLikeFolo(f))) {
-      badFile.set({ name: f.name, why: null });
+      if (!destroyed && weightPickSeq.get(id) === seq && modelId.peek() === id) badFile.set({ name: f.name, why: null });
       return;
     }
-    badFile.set(null);
+    if (destroyed || weightPickSeq.get(id) !== seq) return;
+    if (modelId.peek() === id) badFile.set(null);
     localWeights.set(new Map(localWeights.peek()).set(id, f));
   }
 
@@ -388,7 +399,10 @@ export default function Playground() {
     const on = runOn.get();
     const file = localWeights.get().get(id ?? '');
     void retryTick.get();
-    if (!id || !s || untrack(() => restored(id, s, on))) return;
+    if (!id || !s || untrack(() => restored(id, s, on))) {
+      untrack(() => predicting.set(false));
+      return;
+    }
     const ctrl = new AbortController();
     untrack(() => {
       predicting.set(true);

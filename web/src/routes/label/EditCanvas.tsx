@@ -6,7 +6,7 @@
  * press on it (or on its handles) is still the editor's. A press also takes focus from a field of the editor (the note),
  * so the keys that follow act on the boxes.
  */
-import { bindable, computed, css, effect, Index, signal } from 'fw';
+import { bindable, computed, css, effect, Index, onCleanup, signal } from 'fw';
 import type { Box, LabelImage } from '$lib/api/types';
 import DatasetImage from '$lib/detect/DatasetImage';
 import { dragTo, fit, grab, HANDLE_REACH, HANDLE_REACH_TOUCH, HANDLES, handleAt, isClick, settle, toImage, toScreen, type Drag } from './boxEdit';
@@ -38,8 +38,32 @@ export default function EditCanvas(props: EditCanvasProps) {
   /** Where the gesture went down on screen, and whether the pointer has since left the click's slop. */
   let press: [number, number] = [0, 0];
   let dragged = false;
-  /** The boxes the gesture started on: if they change under it (an undo, the agent, another image), it is dropped. */
+  /** The boxes and image the gesture started on: if they change under it (an undo, the agent, another image), it is dropped. */
   let pressedOn: Box[] = [];
+  let pressedImgId: string | null = null;
+  let activePointerId: number | null = null;
+
+  function cancelDrag() {
+    if (activePointerId !== null) {
+      const id = activePointerId;
+      activePointerId = null;
+      try {
+        el?.releasePointerCapture?.(id);
+      } catch {
+        // Capture may already have been released.
+      }
+    }
+    drag.set(null);
+    shown.set(null);
+  }
+
+  effect(() => {
+    const boxes = props.boxes;
+    const imgId = props.img.id;
+    const off = props.disabled;
+    if (drag.peek() && (off || boxes !== pressedOn || imgId !== pressedImgId)) cancelDrag();
+  });
+  onCleanup(cancelDrag);
 
   const place = computed(() => (cw.get() && ch.get() ? fit(props.img.width, props.img.height, cw.get(), ch.get()) : null));
   effect(() => {
@@ -63,23 +87,33 @@ export default function EditCanvas(props: EditCanvasProps) {
     return HANDLES.map((h) => toScreen(p, ...handleAt(b, h)));
   });
 
-  function point(e: PointerEvent): [number, number] {
-    const r = el!.getBoundingClientRect();
-    return toImage(place.peek()!, e.clientX - r.left, e.clientY - r.top);
+  function point(e: PointerEvent): [number, number] | null {
+    const p = place.peek();
+    if (!p || !el) return null;
+    const r = el.getBoundingClientRect();
+    return toImage(p, e.clientX - r.left, e.clientY - r.top);
   }
 
   function onpointerdown(e: PointerEvent) {
     const p = place.peek();
-    if (props.disabled || !p || e.button !== 0) return;
+    if (props.disabled || !p || e.button !== 0 || activePointerId !== null) return;
+    const pt = point(e);
+    if (!pt) return;
     // No default (no text selection, no native drag), so no focus move either: a field that had focus gives it up here.
     e.preventDefault();
     const dialog = el!.closest('dialog');
     if (dialog && document.activeElement !== dialog && dialog.contains(document.activeElement)) dialog.focus();
-    el!.setPointerCapture?.(e.pointerId);
+    activePointerId = e.pointerId;
+    try {
+      el!.setPointerCapture?.(e.pointerId);
+    } catch {
+      // Synthetic pointer events in tests may not have an active pointerId.
+    }
     press = [e.clientX, e.clientY];
     dragged = false;
     pressedOn = props.boxes;
-    const [x, y] = point(e);
+    pressedImgId = props.img.id;
+    const [x, y] = pt;
     const reach = (e.pointerType === 'touch' ? HANDLE_REACH_TOUCH : HANDLE_REACH) / p.s;
     const boxes = props.boxes;
     const grip = grab(boxes, selected.peek() ?? null, x, y, reach);
@@ -91,28 +125,32 @@ export default function EditCanvas(props: EditCanvasProps) {
 
   function onpointermove(e: PointerEvent) {
     const d = drag.peek();
-    if (!d) return;
+    if (!d || activePointerId !== e.pointerId) return;
+    const pt = point(e);
+    if (!pt) return;
     dragged ||= !isClick(press, [e.clientX, e.clientY]);
-    const [x, y] = point(e);
+    const [x, y] = pt;
     shown.set(dragTo(d, x, y, props.img.width, props.img.height));
   }
 
-  function onpointerup() {
+  function onpointerup(e: PointerEvent) {
     const d = drag.peek();
     const s = shown.peek();
-    if (!d || !s) return;
+    if (!d || !s || activePointerId !== e.pointerId) return;
     const boxes = props.boxes;
-    if (boxes !== pressedOn) {
-      drag.set(null);
-      shown.set(null);
+    if (boxes !== pressedOn || props.img.id !== pressedImgId) {
+      cancelDrag();
       return;
     }
     const r = settle(boxes, d, s, !dragged);
     const moved = r.boxes.length !== boxes.length || r.boxes.some((b, i) => b !== boxes[i]);
     selected.set(r.selected);
-    drag.set(null);
-    shown.set(null);
+    cancelDrag();
     if (moved) props.onchange(r.boxes);
+  }
+
+  function onpointerabort(e: PointerEvent) {
+    if (activePointerId === e.pointerId) cancelDrag();
   }
 
   return (
@@ -125,7 +163,8 @@ export default function EditCanvas(props: EditCanvasProps) {
       onpointerdown={onpointerdown}
       onpointermove={onpointermove}
       onpointerup={onpointerup}
-      onpointercancel={() => (drag.set(null), shown.set(null))}
+      onpointercancel={onpointerabort}
+      onlostpointercapture={onpointerabort}
     >
       <DatasetImage
         jobId={props.jobId}

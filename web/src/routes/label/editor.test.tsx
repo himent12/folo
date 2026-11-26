@@ -609,4 +609,53 @@ describe('the labeling editor: reviewing', () => {
     });
     expect(description()).not.toMatch(/Last ask failed/);
   });
+
+  it('resets selection, undo history, note, and status when closed and reopened on the same image', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    expect(boxCount()).toBe(1);
+    const note = editor()!.querySelector<HTMLInputElement>('input[placeholder*="differently"]')!;
+    note.value = 'catch small bolts';
+    note.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    // Save so closing has no unsaved changes and a "Saved" status banner is shown.
+    click(inEditor('Save'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(editor()!.querySelector('.dialog-status')?.textContent ?? '').toMatch(/Saved/);
+    });
+    // Close the editor by clearing `?image=`, then reopen the exact same image.
+    router.go('/datasets/label/lb_7c21', { replace: true });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(editor()?.open).toBe(false);
+    });
+    router.go('/datasets/label/lb_7c21?image=1', { replace: true });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(editor()?.open && editor()?.querySelector('.ed')).toBeTruthy();
+    });
+    expect(selectedSize()).toBeUndefined();
+    expect(editor()!.querySelector<HTMLInputElement>('input[placeholder*="differently"]')!.value).toBe('');
+    expect(editor()!.querySelector('.dialog-status')?.textContent?.trim() ?? '').toBe('');
+    expect(editor()!.querySelector<HTMLButtonElement>('button[aria-label="Undo"]')!.disabled).toBe(true);
+  });
+
+  it('does not navigate away if the leave dialog is cancelled while Save is still in flight', async () => {
+    await openEditor('1');
+    const answer = deferred<LabelImage>();
+    vi.spyOn(hub.api, 'updateLabelImage').mockReturnValue(answer.promise);
+    click(inEditor('Add box'));
+    key('j');
+    expect(asking()).toBeDefined();
+    click([...asking()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Save'));
+    // User closes the leave dialog while save is still pending.
+    click(asking()!.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!);
+    expect(asking()).toBeUndefined();
+    const one = (await hub.api.labelImages('lb_7c21', { limit: 1 })).images[0]!;
+    answer.resolve({ ...one, status: 'labeled', source: 'manual', boxes: [{ class: 0, x1: 10, y1: 10, x2: 50, y2: 50 }] });
+    await new Promise((r) => setTimeout(r, 0));
+    flushSync();
+    expect(router.route.query.get('image')).toBe('1');
+  });
 });

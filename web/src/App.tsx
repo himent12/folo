@@ -328,6 +328,11 @@ export default function App(props: AppProps) {
   let shownPath = router.route.path;
   let shownComp: Screen['comp'] | null = null;
   let releaseFocus: (() => void) | null = null;
+  const dropFocusHold = () => {
+    releaseFocus?.();
+    releaseFocus = null;
+  };
+  onCleanup(dropFocusHold);
   effect(() => {
     const { path, comp } = screen.get();
     // The screen that replaces its own load error (Retry) takes focus too when the error had it: the button it was on
@@ -342,14 +347,24 @@ export default function App(props: AppProps) {
     shownComp = comp;
     if (path === null || (!newPage && !recovered)) return;
     shownPath = path;
-    releaseFocus?.();
-    releaseFocus = null;
-    void tick().then(() =>
-      requestAnimationFrame(() => {
+    dropFocusHold();
+    let cancelled = false;
+    let rafId = 0;
+    void tick().then(() => {
+      if (cancelled) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = 0;
         // `mainEl` is gone if the app was torn down before the frame.
-        if (mainEl?.isConnected && router.route.path === path && (newPage || focusFree())) releaseFocus = holdRouteFocus(mainEl);
-      }),
-    );
+        if (!cancelled && mainEl?.isConnected && router.route.path === path && (newPage || focusFree())) {
+          dropFocusHold();
+          releaseFocus = holdRouteFocus(mainEl);
+        }
+      });
+    });
+    return () => {
+      cancelled = true;
+      if (rafId) cancelAnimationFrame(rafId);
+    };
   });
 
   function skipToContent(e: MouseEvent) {

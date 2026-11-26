@@ -145,11 +145,26 @@ export default function Editor(props: EditorProps) {
     rev.set(rev.peek() + 1);
   }
   effect(() => {
+    const id = props.imageId;
     const cur = img.get();
-    if (!cur) {
+    if (id === null) {
       hovered.set(null);
+      if (shownId !== null) {
+        shownId = null;
+        base.set([]);
+        draft.set([]);
+        selected.set(null);
+        note.set('');
+        asked.set(null);
+        status.clear();
+        elsewhere.set(false);
+        leaving.set(null);
+        removing.set(false);
+        untrack(forget);
+      }
       return;
     }
+    if (!cur) return void hovered.set(null);
     if (cur.id !== shownId) {
       shownId = cur.id;
       base.set(cur.boxes);
@@ -395,14 +410,15 @@ export default function Editor(props: EditorProps) {
   }
   async function answer(keep: 'save' | 'discard') {
     const ask = leaving.peek();
-    if (keep === 'save' && !(await save())) {
-      leaving.set(null);
+    if (!ask) return;
+    if (keep === 'save' && (!(await save()) || leaving.peek() !== ask)) {
+      if (leaving.peek() === ask) leaving.set(null);
       return;
     }
     leaving.set(null);
     draft.set(base.peek());
-    if (ask?.proceed) ask.proceed();
-    else props.onnavigate(ask?.to ?? null);
+    if (ask.proceed) ask.proceed();
+    else props.onnavigate(ask.to ?? null);
   }
   // Any other way off this image (the route changes, or its `?image=` does) asks first too.
   effect(() =>

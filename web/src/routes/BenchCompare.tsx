@@ -15,7 +15,7 @@ import GitCompare from '$icons/git-compare-arrows';
 import Scale from '$icons/scale';
 import Plus from '$icons/plus';
 import X from '$icons/x';
-import { css, For, Index, MediaQuery, onDocument, signal } from 'fw';
+import { css, For, Index, MediaQuery, onCleanup, onDocument, signal } from 'fw';
 import { ApiError } from '$lib/api/index';
 import { TARGET_PRECISION } from '$lib/bench/rules';
 import XYChart from '$lib/charts/XYChart';
@@ -25,6 +25,7 @@ import { isTyping } from '$lib/keys';
 import { href } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { pageKeys } from '$lib/shell/pageCommands';
+import { gChord } from '$lib/shell/shortcuts';
 import { exportTableCsv, exportTableJson } from '$lib/tableExport';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
@@ -96,10 +97,19 @@ export default function BenchCompare() {
 
   const key = (eid: string) => <i class="key" style={{ '--c': fill(eid) }} data-pattern={SLOT_PATTERN[slotOf(eid)]} aria-hidden="true"></i>;
   const liveNote = signal('');
+  let alive = true;
+  let noteSeq = 0;
+  onCleanup(() => {
+    alive = false;
+    noteSeq++;
+  });
   function announce(message: string) {
+    const seq = ++noteSeq;
     if (liveNote.peek() === message) {
       liveNote.set('');
-      queueMicrotask(() => liveNote.set(message));
+      queueMicrotask(() => {
+        if (alive && seq === noteSeq) liveNote.set(message);
+      });
     } else {
       liveNote.set(message);
     }
@@ -126,8 +136,9 @@ export default function BenchCompare() {
     if (entry) announce(`Added ${entry.name} to comparison.`);
     // Adding the 4th entry (or last candidate) unmounts the adder <select>: move keyboard focus to the new chip.
     queueMicrotask(() => {
-      if (document.activeElement && document.activeElement !== document.body && chipsEl?.contains(document.activeElement)) return;
-      const buttons = [...(chipsEl?.querySelectorAll<HTMLButtonElement>('button.ck') ?? [])];
+      if (!alive || !chipsEl?.isConnected) return;
+      if (document.activeElement && document.activeElement !== document.body && chipsEl.contains(document.activeElement)) return;
+      const buttons = [...chipsEl.querySelectorAll<HTMLButtonElement>('button.ck')];
       const target = buttons.find((b) => b.dataset.entryId === eid) ?? buttons.at(-1);
       target?.focus();
     });
@@ -140,8 +151,9 @@ export default function BenchCompare() {
     if (label) announce(`Removed ${label} from comparison.`);
     // The Remove button unmounts with its chip: move keyboard focus to a neighbouring chip, the adder, or the heading.
     queueMicrotask(() => {
-      const buttons = [...(chipsEl?.querySelectorAll<HTMLButtonElement>('button.ck') ?? [])];
-      const next = buttons[Math.min(index, buttons.length - 1)] ?? chipsEl?.querySelector<HTMLSelectElement>('select') ?? document.querySelector<HTMLElement>('h1[data-route-focus]');
+      if (!alive || !chipsEl?.isConnected) return;
+      const buttons = [...chipsEl.querySelectorAll<HTMLButtonElement>('button.ck')];
+      const next = buttons[Math.min(index, buttons.length - 1)] ?? chipsEl.querySelector<HTMLSelectElement>('select') ?? document.querySelector<HTMLElement>('h1[data-route-focus]');
       next?.focus();
     });
   }
@@ -186,10 +198,17 @@ export default function BenchCompare() {
     return false;
   });
 
-  // Escape unpins an active chip before global Escape returns to the leaderboard.
+  // Escape unpins an active chip before global Escape returns to the leaderboard (never intercepting a G-chord cancel or popover).
+  const hasOpenPopover = () => {
+    try {
+      return !!document.querySelector('[popover]:popover-open');
+    } catch {
+      return false;
+    }
+  };
   onDocument('keydown', (e) => {
-    if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isTyping(e)) return;
-    if (!keyPrefs.singleKeys || document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"], #folo-tooltip[data-show], .info-pop.open')) return;
+    if (e.key !== 'Escape' || e.repeat || e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey || isTyping(e)) return;
+    if (!keyPrefs.singleKeys || gChord.peek() || hasOpenPopover() || document.querySelector('dialog[open], [aria-expanded="true"][aria-haspopup], [role="menu"], #folo-tooltip[data-show], .info-pop.open')) return;
     const p = pinned.peek();
     if (p !== null && shown.peek().some((x) => x.id === p)) {
       e.preventDefault();

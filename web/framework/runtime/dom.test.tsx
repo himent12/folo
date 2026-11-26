@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
 import { createRoot, Dynamic, effect, flush, mergeProps, onCleanup, signal, splitProps, type Signal } from 'fw';
-import { spread } from 'fw/internal';
+import { bindStyle, className, spread } from 'fw/internal';
 import { render } from '../testing';
 
 const html = (el: Element) => el.innerHTML.replace(/<!---->/g, '');
@@ -726,5 +726,124 @@ describe('Svelte attribute and prop semantics', () => {
     expect(reads).toBe(1);
     expect(container.firstElementChild!.textContent).toBe('once');
     unmount();
+  });
+
+  it('clears inline styles when a style object transitions to an empty string or empty property value', () => {
+    const active = signal(true);
+    const val = signal<string | undefined>('12px');
+    const { container, unmount } = render(() => (
+      <div
+        class="box"
+        style={active.get() ? { color: 'red', paddingLeft: val.get() } : ''}
+      />
+    ));
+    const el = container.querySelector<HTMLDivElement>('.box')!;
+    expect(el.style.color).toBe('red');
+    expect(el.style.paddingLeft).toBe('12px');
+
+    val.set('');
+    flush();
+    expect(el.style.paddingLeft).toBe('');
+    expect(el.style.color).toBe('red');
+
+    active.set(false);
+    flush();
+    expect(el.style.color).toBe('');
+
+    active.set(true);
+    val.set('8px');
+    flush();
+    expect(el.style.color).toBe('red');
+    expect(el.style.paddingLeft).toBe('8px');
+    unmount();
+  });
+
+  it('preserves unchanged !important style directives when a style object clears and restores normal styles when !important clears', () => {
+    const active = signal(true);
+    const imp = signal<string | null>('blue');
+    const el = document.createElement('div');
+    let dispose!: () => void;
+    createRoot((d) => {
+      dispose = d;
+      bindStyle(
+        el,
+        () => (active.get() ? { color: 'red', paddingLeft: '6px' } : ''),
+        undefined,
+        () => ({ color: imp.get() }),
+      );
+    });
+    expect(el.style.getPropertyValue('color')).toBe('blue');
+    expect(el.style.getPropertyPriority('color')).toBe('important');
+    expect(el.style.paddingLeft).toBe('6px');
+
+    // Clearing the style object must remove padding-left without wiping out the unchanged !important color.
+    active.set(false);
+    flush();
+    expect(el.style.paddingLeft).toBe('');
+    expect(el.style.getPropertyValue('color')).toBe('blue');
+    expect(el.style.getPropertyPriority('color')).toBe('important');
+
+    // Re-enabling the style object then clearing !important must restore the normal style value.
+    active.set(true);
+    flush();
+    expect(el.style.getPropertyValue('color')).toBe('blue');
+    expect(el.style.getPropertyPriority('color')).toBe('important');
+    imp.set(null);
+    flush();
+    expect(el.style.getPropertyValue('color')).toBe('red');
+    expect(el.style.getPropertyPriority('color')).toBe('');
+    dispose();
+  });
+
+  it('preserves shorthand-before-longhand cascade order when updating overlapping !important styles', () => {
+    const pad = signal('10px');
+    const left = signal('2px');
+    const el = document.createElement('div');
+    let dispose!: () => void;
+    createRoot((d) => {
+      dispose = d;
+      bindStyle(
+        el,
+        () => ({ paddingLeft: '4px' }),
+        undefined,
+        () => ({ padding: pad.get(), 'padding-left': left.get() }),
+      );
+    });
+    expect(el.style.getPropertyValue('padding-left')).toBe('2px');
+    expect(el.style.getPropertyPriority('padding-left')).toBe('important');
+
+    pad.set('20px');
+    left.set('8px');
+    flush();
+    expect(el.style.getPropertyValue('padding-top')).toBe('20px');
+    expect(el.style.getPropertyValue('padding-left')).toBe('8px');
+    expect(el.style.getPropertyPriority('padding-left')).toBe('important');
+    dispose();
+  });
+
+  it('removes stale directive classes when dirs drops keys or transitions to undefined', () => {
+    const dirs = signal<Record<string, unknown> | undefined>({ a: true, b: true });
+    const el = document.createElement('div');
+    let dispose!: () => void;
+    createRoot((d) => {
+      dispose = d;
+      className(el, () => 'base', undefined, () => dirs.get() as Record<string, unknown>);
+    });
+    expect(el.classList.contains('base')).toBe(true);
+    expect(el.classList.contains('a')).toBe(true);
+    expect(el.classList.contains('b')).toBe(true);
+
+    // Dropping a key from dirs must remove that class.
+    dirs.set({ a: true });
+    flush();
+    expect(el.classList.contains('a')).toBe(true);
+    expect(el.classList.contains('b')).toBe(false);
+
+    // Transitioning dirs to undefined must remove remaining directive classes while keeping base.
+    dirs.set(undefined);
+    flush();
+    expect(el.classList.contains('base')).toBe(true);
+    expect(el.classList.contains('a')).toBe(false);
+    dispose();
   });
 });
