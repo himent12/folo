@@ -291,9 +291,28 @@ fn back_to_the_window_on_overview_and_datasets_rechecks_loaded_cards() {
     }
 }
 
+/// Pumps frames and background work with a bounded retry limit until `is_held` becomes true,
+/// avoiding unbounded loops or deadlocks if an expected request never starts.
+fn pump_until_held(
+    app: &mut HeadlessApp,
+    window: WindowHandle<FoloApp>,
+    is_held: impl Fn() -> bool,
+    label: &str,
+) {
+    for _ in 0..64 {
+        if is_held() {
+            return;
+        }
+        app.frame(window.into());
+        app.run_until_held(1);
+    }
+    panic!("expected held request '{label}' to start");
+}
+
 /// #382: refreshing a large multi-page dataset after an external edit preserves the user's scroll
 /// place (anchored by `(file, split)`) across paged reloads, including while the later batch is
-/// delayed and when triggered right after closing an open inspector.
+/// delayed, when triggered right after closing an open inspector on a non-first-column tile, and
+/// when a non-default sort reorders rows as later pages arrive.
 #[test]
 fn large_dataset_grid_preserves_scroll_position_across_paged_revision_refresh() {
     let api = Arc::new(MockBackend::new(4200, true).with_paged_splits(ID, 10_000, 60));
@@ -338,14 +357,9 @@ fn large_dataset_grid_preserves_scroll_position_across_paged_revision_refresh() 
     let page0 = api.hold("images");
     let page1 = api.hold("images");
     away_and_back(&mut app);
-    frames_holding_one(&mut app, window);
-    page0.wait_held();
+    pump_until_held(&mut app, window, || page0.is_held(), "page 0");
     drop(page0);
-    // Let page 0 finish on the main thread and spawn page 1, which blocks on `page1`.
-    while !page1.is_held() {
-        app.run_until_held(1);
-    }
-    page1.wait_held();
+    pump_until_held(&mut app, window, || page1.is_held(), "page 1");
     app.frame(window.into());
 
     // Anchor must still be waiting while page 1 (containing Val images) is in flight.
@@ -376,10 +390,14 @@ fn large_dataset_grid_preserves_scroll_position_across_paged_revision_refresh() 
         );
     });
 
-    // Repeat the same flow through an open inspector on Val image 35: closing the inspector
-    // triggers the deferred revision refresh and still returns to the inspected row once page 1 lands.
-    let inspected_idx = 35usize;
-    drive(&mut app, window, |this, w, cx| this.open_inspector(ID.into(), inspected_idx, w, cx));
+    // Repeat through an open inspector on a non-first-column Val tile (index 37, column 2):
+    // closing the inspector anchors that exact file and focuses its refreshed tile once page 1 lands.
+    let inspected_idx = 37usize;
+    let (inspected_file, expected_tile_id) = drive(&mut app, window, |this, w, cx| {
+        this.open_inspector(ID.into(), inspected_idx, w, cx);
+        let meta = this.filtered_image(ID, inspected_idx).expect("inspected tile").clone();
+        (meta.file, meta.id)
+    });
     drive(&mut app, window, |this, _, _| {
         let mut old = this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("read");
         old.revision = Some("before-inspector".into());
@@ -387,12 +405,193 @@ fn large_dataset_grid_preserves_scroll_position_across_paged_revision_refresh() 
     });
     away_and_back(&mut app);
     frames(&mut app, window);
-    drive(&mut app, window, |this, w, cx| this.close_inspector(w, cx));
+    let p0 = api.hold("images");
+    let p1 = api.hold("images");
+    app.update(|cx| window.update(cx, |this, w, cx| this.close_inspector(w, cx)).unwrap());
+    pump_until_held(&mut app, window, || p0.is_held(), "inspector reload page 0");
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, _| {
+                let anchor = this.ds_scroll_anchor.as_ref().expect("exact inspected file anchored");
+                assert_eq!(anchor.file, inspected_file, "anchors exact inspected column, not col 0");
+                assert!(anchor.focus_tile, "marks refreshed tile for focus restoration");
+            })
+            .unwrap()
+    });
+    drop(p0);
+    pump_until_held(&mut app, window, || p1.is_held(), "inspector reload page 1");
+    drop(p1);
+    app.run_until_idle();
     frames(&mut app, window);
 
-    drive(&mut app, window, |this, _, _| {
+    drive(&mut app, window, |this, w, cx| {
         assert!(this.ds_scroll_anchor.is_none(), "inspector-close scroll anchor consumed");
         let got_y = f32::from(-this.grid_scroll.0.borrow().base_handle.offset().y);
         assert!(got_y > 100., "grid stayed scrolled near the inspected val image (got_y={got_y})");
+        let tile_fh = this.fh(format!("tile-{expected_tile_id}"), cx);
+        assert!(tile_fh.is_focused(w), "focus restored to refreshed inspected tile");
+    });
+}
+
+/// #382 review: typing a filename query while a later page is held cancels any pending scroll anchor
+/// so arriving pages do not yank the grid away from row 0.
+#[test]
+fn typing_filename_search_during_paged_reload_clears_scroll_anchor() {
+    let api = Arc::new(MockBackend::new(4200, true).with_paged_splits(ID, 10_000, 60));
+    let (mut app, window) = on_its_page(api.clone());
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_split = Some(crate::api::Split::Val);
+        cx.notify();
+    });
+    frames(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
+        let item_h = f32::from(this.grid_scroll.0.borrow().last_item_height.expect("row height"));
+        this.grid_scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(folo_ui::point(folo_ui::px(0.), -folo_ui::px(6. * item_h)));
+        let mut old = this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("read");
+        old.revision = Some("before".into());
+        this.store.dataset.insert(ID.into(), Load::Ready(old));
+        cx.notify();
+    });
+    app.frame(window.into());
+
+    let page0 = api.hold("images");
+    let page1 = api.hold("images");
+    away_and_back(&mut app);
+    pump_until_held(&mut app, window, || page0.is_held(), "search page 0");
+    drop(page0);
+    pump_until_held(&mut app, window, || page1.is_held(), "search page 1");
+    app.frame(window.into());
+
+    // Simulate user typing into `ds_img_search` (matching the old Val anchor) while page 1 is held.
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                assert!(this.ds_scroll_anchor.is_some(), "anchor armed before search edit");
+                this.ds_img_search.update(cx, |inp, cx| inp.set_text("val/", cx));
+            })
+            .unwrap()
+    });
+    app.run_until_held(1);
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, _| {
+                assert!(this.ds_scroll_anchor.is_none(), "typing a filename query cancels scroll anchor");
+            })
+            .unwrap()
+    });
+
+    drop(page1);
+    app.run_until_idle();
+    frames(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(f32::from(-this.grid_scroll.0.borrow().base_handle.offset().y), 0., "stays at row 0");
+    });
+}
+
+/// #382 review: under a non-default sort (NameDesc, where later pages sort ahead of page 0), the
+/// scroll anchor stays active through the final batch so the grid stays on the same file after the
+/// final re-sort; and a retryable later-page failure keeps the anchor until Retry succeeds.
+#[test]
+fn non_default_sort_and_retryable_later_page_preserve_scroll_anchor() {
+    let api = Arc::new(MockBackend::new(4200, true).with_paged_splits(ID, 10_000, 60));
+    let (mut app, window) = on_its_page(api.clone());
+    // Sort Z->A on All images: all 60 `images/val/*` files sort BEFORE `images/train/*`.
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_img_dataset = Some(ID.into());
+        this.ds_img_sort = crate::screens::datasets::ImageSort::NameDesc;
+        cx.notify();
+    });
+    frames(&mut app, window);
+
+    // Scroll to row 20 (which lands on a `train` image that ALSO appears in page 0, but shifts
+    // down by 12 rows once the 60 `val` images on page 1 arrive and sort ahead of it!).
+    let (anchor_file, expected_row) = drive(&mut app, window, |this, _, cx| {
+        let cols = this.grid_cols();
+        let item_h = f32::from(this.grid_scroll.0.borrow().last_item_height.expect("row height"));
+        let want_row = 20usize;
+        this.grid_scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(folo_ui::point(folo_ui::px(0.), -folo_ui::px(want_row as f32 * item_h)));
+        cx.notify();
+        let indices = this.filtered_indices(ID);
+        let all = this.store.images.get(ID).and_then(|l| l.ready()).unwrap();
+        let meta = &all[indices[want_row * cols]];
+        assert_eq!(meta.split, crate::api::Split::Train, "anchor is in page 0");
+        (meta.file.clone(), want_row)
+    });
+    app.frame(window.into());
+
+    // Trigger revision reload where page 1 fails permanently first (inline Retry), then succeeds.
+    api.fail_images_from_with(
+        super::data::IMAGE_PAGE,
+        crate::api::ApiError::new("permission_denied", "temporary lock"),
+        false,
+    );
+    drive(&mut app, window, |this, _, _| {
+        let mut old = this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("read");
+        old.revision = Some("before".into());
+        this.store.dataset.insert(ID.into(), Load::Ready(old));
+    });
+    away_and_back(&mut app);
+    frames(&mut app, window);
+
+    // Page 0 loaded 10_000 train images and page 1 failed: under NameDesc + failed_page, anchor
+    // must NOT be dropped yet.
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.failed_image_page(ID).is_some(), "page 1 recorded as failed");
+        let a = this.ds_scroll_anchor.as_ref().expect("anchor kept across failed later page");
+        assert_eq!(a.file, anchor_file);
+    });
+
+    // Clear the error and click Retry: page 1 lands, val images sort ahead of train, and the grid
+    // re-anchors back to `expected_row` (row 20) where `anchor_file` now lives.
+    api.clear_fail_images();
+    drive(&mut app, window, |this, _, cx| this.retry_failed_image_page(ID, cx));
+    frames(&mut app, window);
+
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.ds_scroll_anchor.is_none(), "anchor consumed once final sorted page landed");
+        let cols = this.grid_cols();
+        let item_h = f32::from(this.grid_scroll.0.borrow().last_item_height.expect("row height"));
+        let got_row =
+            (f32::from(-this.grid_scroll.0.borrow().base_handle.offset().y) / item_h).round() as usize;
+        assert_eq!(got_row, expected_row, "re-anchored to exact sorted row after page 1 arrived");
+        let indices = this.filtered_indices(ID);
+        let all = this.store.images.get(ID).and_then(|l| l.ready()).unwrap();
+        assert_eq!(all[indices[got_row * cols]].file, anchor_file);
+    });
+
+    // Completed reload with zero matching images must clear any stale anchor (no leak).
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
+            dataset: ID.into(),
+            file: "deleted.jpg".into(),
+            split: crate::api::Split::Val,
+            intra_row: 0.,
+            strategy: None,
+            focus_tile: false,
+        });
+        this.ds_img_query = "no-such-file-xyz".into();
+        this.ds_img_search.update(cx, |inp, cx| inp.set_text("no-such-file-xyz", cx));
+        // Re-arm after subscription to simulate a completed reload landing on 0 matches directly.
+        this.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
+            dataset: ID.into(),
+            file: "deleted.jpg".into(),
+            split: crate::api::Split::Val,
+            intra_row: 0.,
+            strategy: None,
+            focus_tile: false,
+        });
+        cx.notify();
+    });
+    frames(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.ds_scroll_anchor.is_none(), "empty completed grid clears stale scroll anchor");
     });
 }

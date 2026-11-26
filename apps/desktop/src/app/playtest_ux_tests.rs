@@ -19,10 +19,11 @@ use crate::theme::{Mode, Theme, theme};
 
 fn open_at(width: f32, height: f32) -> (HeadlessApp, WindowHandle<FoloApp>) {
     let api = Arc::new(MockBackend::new(4200, true));
-    let mut app = HeadlessApp::new(HeadlessOptions::default());
+    let window_size = size(px(width), px(height));
+    let mut app = HeadlessApp::new(HeadlessOptions { size: window_size, ..Default::default() });
     let window = app.update(|cx| {
         cx.set_global(Theme::new(Mode::Dark));
-        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(width), px(height)));
+        let bounds = Bounds::new(point(px(0.), px(0.)), window_size);
         let options =
             WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
         cx.open_window(options, |window, cx| cx.new(|cx| FoloApp::new(api, true, window, cx)))
@@ -103,6 +104,43 @@ fn detail_page_headings_paint_across_all_detail_routes() {
             );
         }
     }
+
+    // Long model/run titles truncate cleanly without pushing right-hand action buttons off-screen.
+    let (mut app, window) = open_at(960., 620.);
+    let model_id = drive(&mut app, window, |this, _, _| {
+        let m = &mut this.store.models.ready_mut().unwrap()[0];
+        m.name = "very-long-model-name-that-must-truncate-cleanly-on-a-960px-window-without-clipping-actions"
+            .into();
+        m.id.clone()
+    });
+    drive(&mut app, window, |this, win, cx| this.navigate(Route::Model(model_id), win, cx));
+    settle(&mut app, window);
+    // Find the leftmost header action button (`Export`, rendered with `bg_raised` in the header band).
+    let raised = drive(&mut app, window, |_, _, cx| theme(cx).bg_raised);
+    let action_left = app
+        .scene(window.into())
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            Primitive::Quad(q)
+                if q.background.solid == raised
+                    && sp(q.bounds.origin.y) >= 48.
+                    && sp(q.bounds.origin.y) <= 105.
+                    && sp(q.bounds.origin.x) >= 400.
+                    && sp(q.bounds.size.height) >= 24. =>
+            {
+                Some(sp(q.bounds.origin.x))
+            }
+            _ => None,
+        })
+        .fold(f32::INFINITY, f32::min);
+    assert!(action_left.is_finite() && action_left < 960., "header actions remain on-screen ({action_left})");
+    let (count, lo, hi) = title_band_glyphs(&mut app, window, 64., action_left);
+    assert!(
+        count >= 8 && hi - lo >= 80.,
+        "long model title renders visible glyphs ({count}, {lo:.1}..{hi:.1})"
+    );
+    assert!(hi < action_left, "long model title stops left of header actions ({hi:.1} < {action_left:.1})");
 }
 
 #[test]

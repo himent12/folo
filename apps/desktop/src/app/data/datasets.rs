@@ -41,6 +41,9 @@ pub struct DatasetScrollAnchor {
     /// Pending `scroll_to_item` strategy (for example from closing the inspector right before a
     /// deferred recheck invalidated the image list).
     pub strategy: Option<folo_ui::ScrollStrategy>,
+    /// When true (captured from closing the inspector), also move keyboard focus to the restored
+    /// tile once the final position is known.
+    pub focus_tile: bool,
 }
 
 /// Whether a failed image-list page is likely transient (worth bounded automatic backoff) rather
@@ -146,6 +149,10 @@ impl FoloApp {
                                     return;
                                 }
                                 this.forget_dataset_contents(&b, cx);
+                            } else if this.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == b) {
+                                // Record unchanged: no image reload will run, so drop any speculative
+                                // anchor captured on inspector close.
+                                this.ds_scroll_anchor = None;
                             }
                             this.store.dataset.insert(b, Load::Ready(d));
                         }
@@ -158,9 +165,18 @@ impl FoloApp {
                                 this.ds_recheck.insert(b);
                                 return;
                             }
+                            if this.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == b) {
+                                this.ds_scroll_anchor = None;
+                            }
                             this.store.dataset.insert(b, Load::Failed(e));
                         }
-                        Err(_) => {}
+                        Err(_) => {
+                            if this.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == b)
+                                && this.store.images.get(&b).is_some_and(|l| l.ready().is_some())
+                            {
+                                this.ds_scroll_anchor = None;
+                            }
+                        }
                     }
                 },
             );
@@ -249,6 +265,9 @@ impl FoloApp {
                     Err(e) if offset == 0 => {
                         this.images_more.remove(&id);
                         this.failed_pages.remove(&id);
+                        if this.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == id) {
+                            this.ds_scroll_anchor = None;
+                        }
                         this.store.images.insert(id, Load::Failed(e));
                         return;
                     }
@@ -503,34 +522,49 @@ impl FoloApp {
             split: meta.split,
             intra_row,
             strategy,
+            focus_tile: false,
         });
     }
 
     /// Restores a saved dataset grid scroll anchor once the image batch carrying `(file, split)`
-    /// has arrived. Keeps waiting across earlier batches while `more` is true, and clears once the
-    /// target row can sit at its saved position (or when loading finishes without the file).
+    /// has arrived. Keeps waiting across earlier batches while `more` is true or a retryable later
+    /// page failed, keeps re-anchoring through the final batch under non-default sorts that can
+    /// move rows as later pages arrive, and clears once the final position is applied (or when a
+    /// completed load no longer contains the file).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn try_restore_dataset_scroll_anchor(
         &mut self,
         id: &str,
         cols: usize,
         row_h: f32,
         more: bool,
+        has_failed_page: bool,
+        window: &mut folo_ui::Window,
+        cx: &mut Context<Self>,
     ) {
         let Some(anchor) = self.ds_scroll_anchor.as_ref().filter(|a| a.dataset == id).cloned() else {
             return;
         };
+        // Wait until an in-flight dataset record recheck finishes (and either invalidates
+        // `store.images` or drops this anchor as unchanged) so a frame rendered before the recheck
+        // answers cannot consume the anchor against the stale image list.
+        if self.ds_reads.contains_key(id) {
+            return;
+        }
+        let still_incomplete = more || has_failed_page;
         let indices = self.filtered_indices(id);
         let Some(all) = self.store.images.get(id).and_then(|l| l.ready()) else {
-            if !more {
+            if !still_incomplete {
                 self.ds_scroll_anchor = None;
             }
             return;
         };
-        let found = indices
-            .iter()
-            .position(|&raw| all.get(raw).is_some_and(|m| m.split == anchor.split && m.file == anchor.file));
-        let Some(pos) = found else {
-            if !more {
+        let found = indices.iter().enumerate().find_map(|(pos, &raw)| {
+            let meta = all.get(raw)?;
+            (meta.split == anchor.split && meta.file == anchor.file).then(|| (pos, meta.id.clone()))
+        });
+        let Some((pos, tile_id)) = found else {
+            if !still_incomplete {
                 self.ds_scroll_anchor = None;
             }
             return;
@@ -539,19 +573,28 @@ impl FoloApp {
         let rows = indices.len().div_ceil(cols);
         let content_h = row_h * rows as f32;
         let viewport_h = f32::from(self.grid_scroll.0.borrow().base_handle.bounds().size.height);
-        let enough_below = if let Some(strategy) = anchor.strategy {
+        let default_sort = self.img_sort(id) == crate::screens::datasets::ImageSort::Default;
+        // Under non-default sorts (name / box count), later pages can sort ahead of the anchor and
+        // shift its row index, so only finish early while `more` when using Default order.
+        let can_finish = if let Some(strategy) = anchor.strategy {
             self.grid_scroll.scroll_to_item(row, strategy);
-            !more || (viewport_h > 0. && (row + 1) as f32 * row_h + viewport_h <= content_h)
+            !still_incomplete
+                || (default_sort && viewport_h > 0. && (row + 1) as f32 * row_h + viewport_h <= content_h)
         } else {
-            let target_y = row as f32 * row_h + anchor.intra_row;
+            let clamped_intra = anchor.intra_row.min((row_h - 1.).max(0.));
+            let target_y = row as f32 * row_h + clamped_intra;
             self.grid_scroll
                 .0
                 .borrow()
                 .base_handle
                 .set_offset(folo_ui::point(folo_ui::px(0.), -folo_ui::px(target_y)));
-            !more || (viewport_h > 0. && target_y + viewport_h <= content_h)
+            !still_incomplete || (default_sort && viewport_h > 0. && target_y + viewport_h <= content_h)
         };
-        if enough_below {
+        if can_finish {
+            if anchor.focus_tile {
+                let fh = self.fh(format!("tile-{tile_id}"), cx);
+                window.focus(&fh);
+            }
             self.ds_scroll_anchor = None;
         }
     }

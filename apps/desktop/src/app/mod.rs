@@ -745,6 +745,7 @@ impl FoloApp {
             }
             this.ds_img_query = text.to_string();
             this.ds_hover_tile = None;
+            this.ds_scroll_anchor = None;
             this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
             cx.notify();
         });

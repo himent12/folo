@@ -13,7 +13,7 @@ impl FoloApp {
     pub fn scrollbar(&self, handle: folo_ui::ScrollHandle, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let paint = handle.clone();
-        let hot = self.scroll_drag.as_ref().is_some_and(|(h, _, _)| h.bounds() == handle.bounds());
+        let hot = self.scroll_drag.as_ref().is_some_and(|(h, _, _)| h.ptr_eq(&handle));
         div()
             .absolute()
             .top_0()
@@ -30,7 +30,7 @@ impl FoloApp {
                         let at = ((ev.position.y - g.top - g.thumb / 2.) / travel).clamp(0., 1.);
                         handle.set_offset(folo_ui::point(handle.offset().x, -(g.max * at)));
                     }
-                    if handle.bounds() == this.grid_scroll.0.borrow().base_handle.bounds() {
+                    if handle.ptr_eq(&this.grid_scroll.0.borrow().base_handle) {
                         this.ds_scroll_anchor = None;
                     }
                     this.scroll_drag = Some((handle.clone(), ev.position.y, -handle.offset().y));

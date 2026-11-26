@@ -219,6 +219,24 @@ impl FoloApp {
     }
 
     pub fn close_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // If closing the inspector will trigger (or join) a dataset reload on this page, anchor on
+        // the exact inspected file (not column 0 of its row) so re-sorts or external edits return
+        // both scroll position and keyboard focus to the refreshed tile.
+        if let Some(i) = self.inspector.as_ref()
+            && i.sample.is_none()
+            && self.route == super::Route::Dataset(i.dataset.clone())
+            && (self.ds_recheck.contains(&i.dataset) || self.ds_reads.contains_key(&i.dataset))
+            && let Some(meta) = self.filtered_image(&i.dataset, i.index)
+        {
+            self.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
+                dataset: i.dataset.clone(),
+                file: meta.file.clone(),
+                split: meta.split,
+                intra_row: 0.,
+                strategy: Some(folo_ui::ScrollStrategy::Center),
+                focus_tile: true,
+            });
+        }
         let closed = self.take_inspector(cx);
         let opener = self.inspector_return.take();
         // Opened from the dataset's grid: back on the image it showed last (scrolled into view and

@@ -47,6 +47,11 @@ impl ScrollHandle {
         Self::default()
     }
 
+    /// Whether `self` and `other` point to the same underlying scroll state.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
     /// The current offset.
     pub fn offset(&self) -> Point<Pixels> {
         *self.0.borrow().offset.borrow()

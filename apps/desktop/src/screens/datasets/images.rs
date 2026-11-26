@@ -376,6 +376,12 @@ impl FoloApp {
                 .into_any_element();
         }
         if count == 0 {
+            if !more
+                && failed_page.is_none()
+                && self.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == id)
+            {
+                self.ds_scroll_anchor = None;
+            }
             // A dataset with no image at all is not a filter that matched nothing.
             let (icon, title, body, show_reset) = if ds.splits.total() == 0 {
                 let broken = ds.stats.as_ref().is_some_and(|s| s.broken_labels > 0);
@@ -433,7 +439,7 @@ impl FoloApp {
         let rows = count.div_ceil(cols);
         let cell_w = (width - GAP * (cols as f32 - 1.)) / cols as f32;
         let row_h = cell_w * 0.75 + GAP + 1.;
-        self.try_restore_dataset_scroll_anchor(&id, cols, row_h, more);
+        self.try_restore_dataset_scroll_anchor(&id, cols, row_h, more, failed_page.is_some(), window, cx);
         let width_cell = self.grid_width.clone();
         let ds_id: SharedString = id.clone().into();
         // Pre-interned class names, shared across visible tiles and box chips without per-box allocs.
