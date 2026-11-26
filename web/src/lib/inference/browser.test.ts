@@ -324,6 +324,57 @@ describe('BrowserEngine', () => {
     expect(e.phase).toBe('ready');
     expect(e.info?.backend).toBe('cpu');
   });
+
+  it('republishes an in-flight cached detector phase on takeover so a failing compile never looks ready', async () => {
+    let failCompileA!: (err: Error) => void;
+    const mod: WasmModule = {
+      default: async () => {},
+      FoloDetector: {
+        load: async (_bytes, { backend, modelId }) => {
+          if (modelId === 'mA') {
+            return new Promise<Detector>((_resolve, reject) => {
+              failCompileA = reject;
+            });
+          }
+          return {
+            backend,
+            info: () => ({ backend, device: 'cpu', adapter: null, fallback: null, arch: 'folo-n', imgsz: 64, classes: [] }),
+            detect: async () =>
+              ({
+                model_id: modelId,
+                image: { width: 1, height: 1 },
+                boxes: [],
+                timing: { preprocess_ms: 0, inference_ms: 0, postprocess_ms: 0, total_ms: 0 },
+                device: 'cpu',
+                backend,
+              }) as Prediction,
+            free: () => {},
+          };
+        },
+      },
+    };
+    const e = new BrowserEngine(async () => mod, pixels);
+    const badFile = new File([new Uint8Array([1])], 'bad.folo', { lastModified: 1 });
+    const c1 = new AbortController();
+    const pA1 = e.predict({ ...req('mA', badFile, 'cpu', 1), signal: c1.signal });
+    // Wait until A enters compile phase.
+    await vi.waitFor(() => expect(e.phase).toBe('compile'));
+
+    // Switch to B and finish cleanly: engine phase is now `ready`.
+    c1.abort();
+    await e.predict(req('mB', null, 'cpu', 2));
+    expect(e.phase).toBe('ready');
+
+    // Switch back to A while A's compile is still in flight: cache hit must immediately restore phase `'compile'`.
+    const pA2 = e.predict(req('mA', badFile, 'cpu', 1));
+    expect(e.phase).toBe('compile');
+
+    // A fails to compile: phase remains `'compile'` (NOT `'ready'`), so Playground drops the bad local file.
+    failCompileA(new Error('invalid weights'));
+    await expect(pA1).rejects.toThrow('invalid weights');
+    await expect(pA2).rejects.toThrow('invalid weights');
+    expect(e.phase).toBe('compile');
+  });
 });
 
 describe('is the in-browser runtime in this build (DOGFOOD-3 S5)', () => {

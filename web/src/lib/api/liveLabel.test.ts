@@ -296,43 +296,29 @@ describe('LiveLabelJob ordering', () => {
     stop();
   });
 
-  it('ignores a stale act() answer after switching jobs or server epoch', async () => {
-    const currentId = { value: 'lb_1' };
-    let bumpId!: () => void;
-    let live!: LiveLabelJob;
-    const stop = root(() => {
-      const idSig = (() => {
-        // Use hub.epoch or reactive switch via getter by mounting with signal-like trigger.
-        return currentId;
-      })();
-      void idSig;
-      live = new LiveLabelJob(() => currentId.value);
-    });
-    bumpId = () => {
-      hub.epoch += 1;
-    };
-    flushSync();
+  it('ignores a stale act() answer for the same job id after a server epoch switch', async () => {
+    const { live, stop } = mount();
     page.resolve({ total: 0, images: [] });
     await vi.advanceTimersByTimeAsync(0);
     expect(live.job?.id).toBe('lb_1');
+    expect(live.job?.status).toBe('idle');
 
     const stale = deferred<LabelJob>();
     const acting = live.act(() => stale.promise);
 
-    // Switch to another server epoch and job lb_2 before the old action settles.
-    currentId.value = 'lb_2';
-    snapshot = { ...job('idle'), id: 'lb_2', name: 'job-2' };
+    // Switch server epoch where the new server also happens to have a job with id `lb_1` (idle).
+    snapshot = { ...job('idle'), id: 'lb_1', name: 'new-server-job' };
     page = deferred<LabelImagePage>();
-    bumpId();
+    hub.epoch += 1;
     flushSync();
     page.resolve({ total: 0, images: [] });
     await vi.advanceTimersByTimeAsync(0);
-    expect(live.job?.id).toBe('lb_2');
+    expect(live.job?.name).toBe('new-server-job');
 
-    // Old lb_1 action settles late: must not clobber lb_2.
-    stale.resolve({ ...job('running'), id: 'lb_1', name: 'job-1' });
+    // Old server's act() resolves late with the same id `lb_1`: `#viewSeq` / `epoch` guards must ignore it.
+    stale.resolve({ ...job('running'), id: 'lb_1', name: 'old-server-job' });
     await acting;
-    expect(live.job?.id).toBe('lb_2');
+    expect(live.job?.name).toBe('new-server-job');
     expect(live.job?.status).toBe('idle');
     stop();
   });

@@ -104,20 +104,38 @@ describe('fw Sprint 12 compiler & runtime hardening', () => {
       for (const fn of listeners) fn();
       flush();
       expect(seen2).toEqual(['desktop', 'phone']);
+
+      // Change synchronously right before last subscriber unsubscribes (before `change` fires):
+      // remounting must still observe the new value instead of caching stale `#last`.
+      matches = false;
       stop2();
+      expect(listeners.size).toBe(0);
+
+      const seen3: string[] = [];
+      const stop3 = createRoot((dispose) => {
+        effect(() => {
+          seen3.push(label.get());
+        });
+        return dispose;
+      });
+      flush();
+      expect(seen3).toEqual(['desktop']);
+      stop3();
     } finally {
       spy.mockRestore();
     }
   });
 
-  it('spread normalizes camelCase event handlers identically to lowercase handlers and cleans them up', () => {
+  it('spread normalizes camelCase DOM events without casing collisions and preserves custom event casing', () => {
     const host = document.createElement('div');
     document.body.appendChild(host);
     const clicks: string[] = [];
     const scrolls: number[] = [];
+    const custom: string[] = [];
     const props = signal<Record<string, unknown>>({
-      onClick: () => clicks.push('a'),
+      onclick: () => clicks.push('lower'),
       onScroll: () => scrolls.push(1),
+      onValueChanged: () => custom.push('changed'),
     });
 
     const c = render(() => <button {...props.get()}>go</button>, host);
@@ -126,20 +144,36 @@ describe('fw Sprint 12 compiler & runtime hardening', () => {
 
     el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     el.dispatchEvent(new Event('scroll'));
-    expect(clicks).toEqual(['a']);
+    el.dispatchEvent(new CustomEvent('ValueChanged'));
+    expect(clicks).toEqual(['lower']);
     expect(scrolls).toEqual([1]);
+    expect(custom).toEqual(['changed']);
 
-    // Replacing/removing camelCase handlers swaps and cleans up cleanly.
-    props.set({ onClick: () => clicks.push('b') });
+    // Switching `{ onclick }` -> `{ onClick }` must NOT wipe the delegated click handler.
+    props.set({ onClick: () => clicks.push('camel') });
     flush();
     el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     el.dispatchEvent(new Event('scroll'));
-    expect(clicks).toEqual(['a', 'b']);
+    el.dispatchEvent(new CustomEvent('ValueChanged'));
+    expect(clicks).toEqual(['lower', 'camel']);
     expect(scrolls).toEqual([1]);
+    expect(custom).toEqual(['changed']);
+
+    // Co-existing `{ onclick: local, onClick: ext }` then dropping `onClick` restores `local`.
+    const local = () => clicks.push('local');
+    props.set({ onclick: local, onClick: () => clicks.push('ext') });
+    flush();
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(clicks).toEqual(['lower', 'camel', 'ext']);
+
+    props.set({ onclick: local });
+    flush();
+    el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(clicks).toEqual(['lower', 'camel', 'ext', 'local']);
 
     c.unmount();
     el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    expect(clicks).toEqual(['a', 'b']);
+    expect(clicks).toEqual(['lower', 'camel', 'ext', 'local']);
     host.remove();
   });
 });

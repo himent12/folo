@@ -381,6 +381,8 @@ describe('Menu placed on the viewport (fixed)', () => {
       const desktopMenu = target.querySelector<HTMLElement>('.list.fixed[role="menu"]')!;
       expect(desktopMenu).not.toBeNull();
       expect(desktopMenu.style.top).toBe(`${120 + 36 + 6}px`);
+      expect(desktopMenu.contains(document.activeElement)).toBe(true);
+      expect((document.activeElement as HTMLElement | null)?.getAttribute('role')).toBe('menuitem');
       unmount(c);
     } finally {
       target.remove();

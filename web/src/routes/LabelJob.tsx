@@ -174,7 +174,15 @@ export default function LabelJob() {
     try {
       // After the saves asked before it, with the field's latest text: the run uses what the field says.
       if (!(await instructions.save())) return;
-      if (!mounted || job.peek()?.id !== jobId || hub.epoch !== epoch) return;
+      if (
+        !mounted ||
+        job.peek()?.id !== jobId ||
+        hub.epoch !== epoch ||
+        hub.mode === 'connecting' ||
+        router.location.name !== 'label-job' ||
+        router.location.params.id !== jobId
+      )
+        return;
       await live.act(() => hub.api.startLabeling(jobId, { ...req, scope }));
       if (mounted && job.peek()?.id === jobId && hub.epoch === epoch) againOpen.set(false);
     } catch (e) {
@@ -182,7 +190,7 @@ export default function LabelJob() {
       // In its dialog when asked from one, else in the panel under the button.
       if (sameJob && fromAgain && againOpen.peek()) againStatus.error(e, 'Could not start the agent');
       else if (sameJob) startError.set(e);
-      else toast.error(e, 'Could not start the agent');
+      else if (hub.epoch === epoch) toast.error(e, 'Could not start the agent');
     } finally {
       starting.set(false);
     }
@@ -202,7 +210,7 @@ export default function LabelJob() {
       if (mounted && job.peek()?.id === jobId && hub.epoch === epoch) stopOpen.set(false);
     } catch (e) {
       if (mounted && job.peek()?.id === jobId && hub.epoch === epoch && stopOpen.peek()) stopStatus.error(e, 'Could not stop the agent');
-      else toast.error(e, 'Could not stop the agent');
+      else if (hub.epoch === epoch) toast.error(e, 'Could not stop the agent');
     } finally {
       stopBusy.set(false);
     }
@@ -226,11 +234,11 @@ export default function LabelJob() {
     try {
       await hub.api.deleteLabelJob(jobId);
       if (mounted && job.peek()?.id === jobId && hub.epoch === epoch) deleteOpen.set(false);
-      toast.success(`Deleted ${cur.name}`, 'Images from folders and datasets made from it were not touched.');
+      if (hub.epoch === epoch) toast.success(`Deleted ${cur.name}`, 'Images from folders and datasets made from it were not touched.');
       if (mounted && router.location.path === startPath && hub.epoch === epoch) router.go('/datasets/label', { replace: true });
     } catch (e) {
       if (mounted && job.peek()?.id === jobId && hub.epoch === epoch && deleteOpen.peek()) deleteStatus.error(e, 'Could not delete the job');
-      else toast.error(e, 'Could not delete the job');
+      else if (hub.epoch === epoch) toast.error(e, 'Could not delete the job');
     } finally {
       deleteBusy.set(false);
     }

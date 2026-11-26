@@ -360,7 +360,6 @@ export class MediaQuery {
         const s = stop;
         stop = undefined;
         s?.();
-        this.#last = mql?.matches ?? false;
       }
     }));
   }

@@ -271,29 +271,36 @@ export class BrowserEngine {
     const key = `${req.modelId}|${req.file ? `file#${fileId(req.file)}` : `server:${req.tag ?? ''}`}|${req.backend}`;
     const hit = cacheable ? this.#detectors.get(key) : undefined;
     if (hit) {
-      // Most recently used last; track the latest waiting request so phase transitions stay accurate.
+      // Most recently used last; track the latest waiting request and publish the entry's current load phase.
       hit.latestSeq = reqSeq;
       hit.latestSignal = req.signal;
+      if (hit.phase !== 'idle') this.#setPhase(hit.phase, reqSeq, req.signal);
       this.#detectors.delete(key);
       this.#detectors.set(key, hit);
       return hit;
     }
     // Uncached: born evicted, so it is freed as soon as its request is done.
-    const entry: Entry = { detector: null!, users: 0, evicted: !cacheable, latestSeq: reqSeq, latestSignal: req.signal };
+    const entry: Entry = { detector: null!, users: 0, evicted: !cacheable, phase: 'idle', latestSeq: reqSeq, latestSignal: req.signal };
+    const setEntryPhase = (phase: Phase) => {
+      entry.phase = phase;
+      this.#setPhase(phase, entry.latestSeq, entry.latestSignal);
+    };
     const detector = (async () => {
-      if (!this.#runtimeReady) this.#setPhase('runtime', entry.latestSeq, entry.latestSignal);
+      if (!this.#runtimeReady) setEntryPhase('runtime');
       const m = await this.load();
       this.#runtimeReady = true;
-      this.#setPhase('weights', entry.latestSeq, entry.latestSignal);
+      setEntryPhase('weights');
       const dl = req.file ? null : this.#acquireDownload(req);
       let bytes: Uint8Array | null = null;
       try {
         bytes = new Uint8Array(await (req.file ? req.file.arrayBuffer() : dl!.bytes));
-        this.#setPhase('compile', entry.latestSeq, entry.latestSignal);
+        setEntryPhase('compile');
         const loading = m.FoloDetector.load(bytes, { backend: req.backend, modelId: req.modelId });
         // Drop this closure's reference so the temporary weights buffer can be collected as soon as wasm finishes loading.
         bytes = null;
-        return await loading;
+        const det = await loading;
+        entry.phase = 'ready';
+        return det;
       } finally {
         bytes = null;
         if (dl) this.#releaseDownload(dl);
@@ -355,6 +362,7 @@ interface Entry {
   /** Requests using it right now: an evicted detector is freed only when they are done. */
   users: number;
   evicted: boolean;
+  phase: Phase;
   latestSeq: number;
   latestSignal?: AbortSignal;
 }

@@ -165,11 +165,12 @@ export default function Menu(props: MenuProps) {
     if (p.disabled && open.peek()) open.set(false);
   });
 
-  // If items change dynamically while the menu is open (e.g., live updates removing an export item), keep focus inside
-  // the menu or close back to the trigger if no items remain.
+  // If items or layout mode (phone sheet ↔ desktop popover) change while the menu is open, keep focus inside
+  // the replacement menu or close back to the trigger if no items remain.
   effect(() => {
     const isOpen = open.get();
     const items = shown.get();
+    void phone.current;
     if (!isOpen) return;
     if (items.length === 0) {
       hide(true);
@@ -192,7 +193,7 @@ export default function Menu(props: MenuProps) {
     if (p.fixed) {
       place();
       void tick().then(() => {
-        if (alive && open.peek() && !phone.current) place();
+        if (alive && open.peek() && !phone.current && p.fixed) place();
       });
     }
     const away = (e: PointerEvent) => {

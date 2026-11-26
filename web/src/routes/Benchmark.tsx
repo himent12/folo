@@ -394,11 +394,11 @@ export default function Benchmark() {
     try {
       await hub.api.deleteBench(benchId);
       if (mounted && bench.peek()?.id === benchId && hub.epoch === epoch) deleteOpen.set(false);
-      toast.success(`Deleted ${b.name}`, 'Its images, entries and loops are gone. Models, runs and datasets were not touched.');
+      if (hub.epoch === epoch) toast.success(`Deleted ${b.name}`, 'Its images, entries and loops are gone. Models, runs and datasets were not touched.');
       if (mounted && router.location.path === startPath && hub.epoch === epoch) router.go('/benchmarks', { replace: true });
     } catch (e) {
       if (mounted && bench.peek()?.id === benchId && hub.epoch === epoch && deleteOpen.peek()) deleteStatus.error(e, 'Could not delete the benchmark');
-      else toast.error(e, 'Could not delete the benchmark');
+      else if (hub.epoch === epoch) toast.error(e, 'Could not delete the benchmark');
     } finally {
       deleteBusy.set(false);
     }
