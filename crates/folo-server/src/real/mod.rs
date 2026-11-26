@@ -125,15 +125,19 @@ struct Entry {
     /// returned to a second caller by deduplicated `register_dataset`. While `true`, `delete_dataset_if_unused`
     /// refuses to unregister it so concurrent callers never delete each other's source dataset.
     shared: AtomicBool,
+    /// Per-registration rollback token issued only for freshly created `register_dataset_tracked` entries.
+    /// Prevents a delayed rollback from deleting a replacement registration that reused a tombstoned dataset id.
+    rollback_token: Option<String>,
 }
 
 impl Entry {
     fn new(reg: Registration, state: State) -> Entry {
-        Self::with_shared(reg, state, true)
+        Self::with_rollback(reg, state, None)
     }
 
-    fn with_shared(reg: Registration, state: State, shared: bool) -> Entry {
+    fn with_rollback(reg: Registration, state: State, rollback_token: Option<String>) -> Entry {
         let id = reg.id.clone();
+        let shared = rollback_token.is_none();
         Entry {
             id,
             reg: Mutex::new(reg),
@@ -141,6 +145,7 @@ impl Entry {
             ready: Condvar::new(),
             deleted: Mutex::new(false),
             shared: AtomicBool::new(shared),
+            rollback_token,
         }
     }
 

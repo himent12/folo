@@ -661,26 +661,42 @@ fn delete_dataset_if_unused_protects_shared_and_referenced_datasets() {
     };
 
     let store = RealStore::open(home.clone());
-    // 1. Exclusive newly registered dataset with no users can be rolled back cleanly.
-    let (ds1, created1) = store.register_dataset_tracked(req()).unwrap();
-    assert!(created1);
-    store.delete_dataset_if_unused(&ds1.id).unwrap();
+    // 1. Exclusive newly registered dataset with no users can be rolled back cleanly with its token.
+    let (ds1, tok1) = store.register_dataset_tracked(req()).unwrap();
+    let tok1 = tok1.expect("new registration issues rollback token");
+    store.delete_dataset_if_unused(&ds1.id, &tok1).unwrap();
     assert!(store.list_datasets().unwrap().is_empty());
 
     // 2. A second registration marks the entry shared so `delete_dataset_if_unused` refuses with 409.
-    let (ds2, created2) = store.register_dataset_tracked(req()).unwrap();
-    assert!(created2);
-    let (ds2_again, created2_again) = store.register_dataset_tracked(req()).unwrap();
-    assert!(!created2_again);
+    let (ds2, tok2) = store.register_dataset_tracked(req()).unwrap();
+    let tok2 = tok2.expect("new registration issues rollback token");
+    let (ds2_again, tok2_again) = store.register_dataset_tracked(req()).unwrap();
+    assert!(tok2_again.is_none());
     assert_eq!(ds2_again.id, ds2.id);
-    let err = store.delete_dataset_if_unused(&ds2.id).unwrap_err();
+    let err = store.delete_dataset_if_unused(&ds2.id, &tok2).unwrap_err();
     assert_eq!(err.body.code, "dataset_in_use", "{err:?}");
     assert!(store.get_dataset(&ds2.id).is_ok());
     store.delete_dataset(&ds2.id).unwrap();
 
-    // 3. A newly registered dataset referenced by a benchmark is protected even without a second registration.
-    let (ds3, created3) = store.register_dataset_tracked(req()).unwrap();
-    assert!(created3);
+    // 3. Tombstone ID reuse (ABA): a delayed rollback from an earlier registration must not delete a replacement
+    // registration that recovered the same dataset id after a run kept its tombstone alive.
+    let (ds_aba, tok_old) = store.register_dataset_tracked(req()).unwrap();
+    let tok_old = tok_old.expect("new registration issues rollback token");
+    let run_id = run_on(&store, &ds_aba.id, "keep-tombstone");
+    store.delete_dataset(&ds_aba.id).unwrap();
+    let (ds_replacement, tok_new) = store.register_dataset_tracked(req()).unwrap();
+    let tok_new = tok_new.expect("replacement registration issues a fresh rollback token");
+    assert_eq!(ds_replacement.id, ds_aba.id, "tombstone reuses dataset id");
+    assert_ne!(tok_new, tok_old);
+    store.delete_run(&run_id).unwrap();
+    let err = store.delete_dataset_if_unused(&ds_aba.id, &tok_old).unwrap_err();
+    assert_eq!(err.body.code, "dataset_in_use", "stale rollback token must not delete replacement: {err:?}");
+    assert!(store.get_dataset(&ds_replacement.id).is_ok());
+    store.delete_dataset_if_unused(&ds_replacement.id, &tok_new).unwrap();
+
+    // 4. A newly registered dataset referenced by a benchmark is protected even without a second registration.
+    let (ds3, tok3) = store.register_dataset_tracked(req()).unwrap();
+    let tok3 = tok3.expect("new registration issues rollback token");
     let bench_req = folo_api::CreateBench {
         name: "b".into(),
         description: String::new(),
@@ -693,15 +709,15 @@ fn delete_dataset_if_unused_protects_shared_and_referenced_datasets() {
         plan: Some(folo_api::BenchPlan { conditions: vec![], rationale: None, designed_by: None }),
     };
     let _bench = store.benches().unwrap().create(&store, bench_req).unwrap();
-    let err = store.delete_dataset_if_unused(&ds3.id).unwrap_err();
+    let err = store.delete_dataset_if_unused(&ds3.id, &tok3).unwrap_err();
     assert_eq!(err.body.code, "dataset_in_use", "{err:?}");
     assert!(store.get_dataset(&ds3.id).is_ok());
 
-    // 4. Datasets persisted across a restart are treated as existing (shared) and never deleted by rollback.
+    // 5. Datasets persisted across a restart have no rollback token and are never deleted by rollback.
     store.shutdown();
     drop(store);
     let reopened = RealStore::open(home);
-    let err = reopened.delete_dataset_if_unused(&ds3.id).unwrap_err();
+    let err = reopened.delete_dataset_if_unused(&ds3.id, &tok3).unwrap_err();
     assert_eq!(err.body.code, "dataset_in_use", "{err:?}");
     reopened.shutdown();
 }

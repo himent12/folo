@@ -177,7 +177,7 @@ impl Store for RealStore {
         self.register(req.name.map_or(Naming::Default, Naming::Given), requested_path(&req.path)?, req.format)
     }
 
-    fn register_dataset_tracked(&self, req: RegisterDataset) -> Result<(Dataset, bool)> {
+    fn register_dataset_tracked(&self, req: RegisterDataset) -> Result<(Dataset, Option<String>)> {
         self.register_tracked(
             req.name.map_or(Naming::Default, Naming::Given),
             requested_path(&req.path)?,
@@ -305,8 +305,8 @@ impl Store for RealStore {
         self.unregister(id)
     }
 
-    fn delete_dataset_if_unused(&self, id: &str) -> Result<()> {
-        self.unregister_if_unused(id)
+    fn delete_dataset_if_unused(&self, id: &str, token: &str) -> Result<()> {
+        self.unregister_if_unused(id, token)
     }
 
     fn delete_dataset_files(&self, id: &str) -> Result<()> {

@@ -54,6 +54,20 @@ pub(super) enum Naming {
     Unique(String),
 }
 
+/// Generates a unique, unguessable per-registration rollback token (`<seq>-<random hex>`).
+fn new_rollback_token() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut rnd = [0u8; 12];
+    let _ = getrandom::fill(&mut rnd);
+    let mut out = format!("{seq:x}-");
+    for b in rnd {
+        use std::fmt::Write;
+        let _ = write!(&mut out, "{b:02x}");
+    }
+    out
+}
+
 impl RealStore {
     pub(super) fn entry(&self, id: &str) -> Result<Arc<Entry>> {
         self.entries.read().unwrap().get(id).ok_or_else(|| Error::not_found("dataset", id))
@@ -175,17 +189,16 @@ impl RealStore {
         self.register_tracked(name, path, format, false).map(|(ds, _)| ds)
     }
 
-    /// Indexes `path` and adds it to the registry, returning `(dataset, created)` where `created` is `true` iff this
-    /// call inserted a brand-new registration (rather than returning an existing one). When `exclusive` is `true` and
-    /// a new entry is inserted, it starts unshared so [`RealStore::unregister_if_unused`] can roll it back safely
-    /// until another caller shares or references it.
+    /// Indexes `path` and adds it to the registry, returning `(dataset, rollback_token)` where `rollback_token` is
+    /// `Some` iff `exclusive` is `true` and this call inserted a brand-new registration (rather than returning an
+    /// existing one).
     pub(super) fn register_tracked(
         &self,
         name: Naming,
         path: String,
         format: DatasetFormat,
         exclusive: bool,
-    ) -> Result<(Dataset, bool)> {
+    ) -> Result<(Dataset, Option<String>)> {
         self.registry_loaded()?;
         // Registered absolute, so the registry works whatever the working directory of the next start.
         let path = absolute(Path::new(&path)).to_string_lossy().into_owned();
@@ -214,7 +227,7 @@ impl RealStore {
             })
         };
         if let Some(id) = existing {
-            return self.get_dataset(&id).map(|ds| (ds, false));
+            return self.get_dataset(&id).map(|ds| (ds, None));
         }
         // A path that is not there or not a dataset is said before the lease (and without walking it), so it never
         // holds up a dataset deletion (x3-server-1).
@@ -227,7 +240,7 @@ impl RealStore {
             e.shared.store(true, std::sync::atomic::Ordering::SeqCst);
             let id = e.id().to_string();
             drop(table);
-            return self.get_dataset(&id).map(|ds| (ds, false));
+            return self.get_dataset(&id).map(|ds| (ds, None));
         }
         let mut file = self.read_registry_cached()?;
         let used = self.run_dataset_ids();
@@ -266,10 +279,11 @@ impl RealStore {
         file.datasets.push(reg.clone());
         self.save_registry(&mut file, Gains::Registration)?;
         let out = Self::meta(&reg, Some(&idx));
-        let entry = Arc::new(Entry::with_shared(reg, State::Ready(idx.clone()), !exclusive));
+        let rollback = exclusive.then(new_rollback_token);
+        let entry = Arc::new(Entry::with_rollback(reg, State::Ready(idx.clone()), rollback.clone()));
         save_index(&self.data_dir, &entry, &idx);
         table.insert(entry);
-        Ok((out, true))
+        Ok((out, rollback))
     }
 
     /// The dataset ids the runs reference.
@@ -293,16 +307,22 @@ impl RealStore {
         self.unregister_locked(id, table)
     }
 
-    /// Unregisters `id` only when it was freshly created via `register_dataset`, has not been shared with any second
+    /// Unregisters `id` only when its active registration matches `token`, has not been shared with any second
     /// registration, and is not referenced by any run or benchmark (persisted or in-flight). Atomically checks and
     /// unregisters under [`RealStore::files`] and [`RealStore::entries`] write locks.
-    pub(super) fn unregister_if_unused(&self, id: &str) -> Result<()> {
+    pub(super) fn unregister_if_unused(&self, id: &str, token: &str) -> Result<()> {
         let _files = self.files.write().unwrap_or_else(|p| p.into_inner());
         self.registry_loaded()?;
         let table = self.entries.write().unwrap();
         let Some(entry) = table.get(id) else {
             return Err(Error::not_found("dataset", id));
         };
+        if entry.rollback_token.as_deref() != Some(token) {
+            return Err(Error::conflict(
+                "dataset_in_use",
+                format!("dataset '{id}' registration does not match rollback token"),
+            ));
+        }
         if entry.shared.load(std::sync::atomic::Ordering::SeqCst) {
             return Err(Error::conflict(
                 "dataset_in_use",

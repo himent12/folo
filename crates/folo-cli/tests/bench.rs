@@ -363,22 +363,27 @@ fn concurrent_bench_create_keeps_successful_source_registered() {
 }
 
 /// Malformed `--server` URLs (including scheme-only `http://`) fail upfront with exit 2 (`usage`), not a
-/// `server_unreachable` network error, across `bench`, `label`, and `mcp`.
+/// `server_unreachable` network error, across `bench`, `label`, and `mcp`, and never echo rejected credentials.
 #[test]
 fn invalid_server_urls_fail_with_usage_error() {
-    for bad in [
-        "http://",
-        "https://",
-        "http:///",
-        "http://:7878",
-        "http://127.0.0.1:0",
-        "http://127.0.0.1:99999",
-        "http://[::1",
-        "http://user:pass@127.0.0.1:7878",
-        "http://127.0.0.1:7878?x=1",
+    for (bad, secret) in [
+        ("http://", None),
+        ("https://", None),
+        ("http:///", None),
+        ("http://:7878", None),
+        ("http://127.0.0.1:0", None),
+        ("http://127.0.0.1:99999", None),
+        ("http://[::1", None),
+        ("http://user:s3cretpass@127.0.0.1:7878", Some("s3cretpass")),
+        ("http://127.0.0.1:7878?token=s3crettok", Some("s3crettok")),
     ] {
-        let e = error(&["list"], &["--server", bad], 2);
+        let (b_code, b_rec, b_err) = bench(&["list"], &["--server", bad]);
+        assert_eq!(b_code, 2, "bench --server {bad:?}: {b_rec:?} {b_err}");
+        let e = &b_rec.last().unwrap()["error"];
         assert_eq!(s(&e["code"]), "usage", "bench --server {bad:?}: {e}");
+        if let Some(sec) = secret {
+            assert!(!e.to_string().contains(sec) && !b_err.contains(sec), "bench leaked secret: {e} {b_err}");
+        }
 
         let mut lbl = folo();
         lbl.args(["label", "jobs", "--server", bad, "--json"]);
@@ -386,6 +391,9 @@ fn invalid_server_urls_fail_with_usage_error() {
         assert_eq!(code, 2, "label --server {bad:?}: {stdout} {stderr}");
         let lbl_err: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
         assert_eq!(s(&lbl_err["error"]["code"]), "usage", "label --server {bad:?}: {lbl_err}");
+        if let Some(sec) = secret {
+            assert!(!stdout.contains(sec) && !stderr.contains(sec), "label leaked secret: {stdout} {stderr}");
+        }
 
         let mut mcp = folo();
         mcp.args(["mcp", "--server", bad]);
@@ -393,5 +401,8 @@ fn invalid_server_urls_fail_with_usage_error() {
         assert_eq!(code, 2, "mcp --server {bad:?}: stdout={stdout} stderr={stderr}");
         assert!(stdout.is_empty(), "mcp stdout must stay empty on error: {stdout}");
         assert!(stderr.contains("--server"), "mcp stderr: {stderr}");
+        if let Some(sec) = secret {
+            assert!(!stderr.contains(sec), "mcp leaked secret: {stderr}");
+        }
     }
 }

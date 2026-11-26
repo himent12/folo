@@ -101,7 +101,7 @@ fn open(conn: &BenchServerArgs, device: Option<&str>) -> Result<Session, CliErro
     if let Some(url) = &conn.server {
         if let Err(why) = folo_client::check_base_url(url) {
             return Err(usage(format!(
-                "--server (or FOLO_SERVER) must be the http:// or https:// URL of a `folo serve`, got `{url}` ({why})"
+                "--server (or FOLO_SERVER) must be a valid http:// or https:// URL of a `folo serve` ({why})"
             )));
         }
         return Ok(http(url));
@@ -151,9 +151,9 @@ fn create(a: BenchCreateArgs, out: Out) -> Result<(), CliError> {
             // Not a dataset registered for a benchmark that cannot be made.
             s.benchmarks.check().map_err(api_error)?;
             let req = RegisterDataset { name: None, path, format: DatasetFormat::Auto };
-            let (ds, newly_registered) = s.store.register_dataset_tracked(req).map_err(api_error)?;
+            let (ds, rollback) = s.store.register_dataset_tracked(req).map_err(api_error)?;
             let id = ds.id.clone();
-            registered_ds = Some((ds, newly_registered));
+            registered_ds = Some((ds, rollback));
             BenchSource::Dataset { dataset_id: id, split }
         }
         (_, _, Some(job_id)) => BenchSource::LabelJob { job_id },
@@ -171,12 +171,12 @@ fn create(a: BenchCreateArgs, out: Out) -> Result<(), CliError> {
         Ok(r) => r,
         Err(e) => {
             // If `--data` just registered a dataset and the server definitively refused to create the benchmark
-            // (e.g. an empty requested split), unregister it only if no concurrent caller has shared or
-            // referenced it (never deleting files).
+            // (e.g. an empty requested split), unregister it only if this exact registration is still exclusive
+            // and unreferenced (never deleting files).
             if e.status.is_client_error()
-                && let Some((ds, true)) = &registered_ds
+                && let Some((ds, Some(token))) = &registered_ds
             {
-                let _ = s.store.delete_dataset_if_unused(&ds.id);
+                let _ = s.store.delete_dataset_if_unused(&ds.id, token);
             }
             return Err(api_error(e));
         }

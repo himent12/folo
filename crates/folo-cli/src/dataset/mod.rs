@@ -410,21 +410,57 @@ fn stats_table(name: &str, ds: &LoadedDataset, s: &DatasetStats) -> Vec<String> 
 
 // ---- convert -----------------------------------------------------------------------------------------------------
 
-/// Whole COCO split annotation files that `folo-data` could not parse or read as COCO (`invalid JSON` or missing
-/// `images` array) and therefore dropped without incrementing `skipped_images`.
-fn unreadable_coco_splits(ds: &LoadedDataset) -> Vec<&folo_data::Issue> {
+/// Whether `path` is a confirmed COCO annotation location (explicitly passed input file, inside `annotations/` or
+/// a split folder `train|val|valid|test/`, a split/annotations directory itself, or a root `instances*.json` /
+/// `_annotations.coco.json`) as opposed to a root-level heuristic candidate like `coco_predictions.json` whose lack
+/// of an `images` array is benign.
+fn is_confirmed_coco_annotation(path: &Path, input: &Path, root: &Path) -> bool {
+    if input.is_file() {
+        return true;
+    }
+    if path == root.join("annotations")
+        || ["train", "val", "valid", "test"].iter().any(|s| path == root.join(s))
+    {
+        return true;
+    }
+    let parent = path.parent();
+    if parent.is_some_and(|p| p == root.join("annotations"))
+        || ["train", "val", "valid", "test"].iter().any(|s| parent.is_some_and(|p| p == root.join(s)))
+    {
+        return true;
+    }
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+    name.starts_with("instances") || name == "_annotations.coco.json"
+}
+
+/// Whole COCO split annotation files that `folo-data` could not parse or skipped because of a broken symlink
+/// (which `is_file()` filters out during COCO discovery), returning `(path, message)` pairs.
+fn unreadable_coco_splits(ds: &LoadedDataset, input: &Path) -> Vec<(PathBuf, String)> {
     if ds.format != Format::Coco {
         return Vec::new();
     }
-    ds.report
+    let mut bad: Vec<(PathBuf, String)> = ds
+        .report
         .issues
         .iter()
         .filter(|i| {
             i.kind == folo_data::IssueKind::BrokenLabel
                 && (i.message.starts_with("invalid JSON:")
-                    || i.message == "no `images` array: not a COCO file")
+                    || (i.message == "no `images` array: not a COCO file"
+                        && is_confirmed_coco_annotation(&i.path, input, &ds.root)))
         })
-        .collect()
+        .map(|i| (i.path.clone(), i.message.clone()))
+        .collect();
+    // When converting a directory, also detect broken annotation symlinks (`annotations/instances_val.json`,
+    // `val/_annotations.coco.json`, etc.) that `folo-data`'s `is_file()` discovery silently skips.
+    if !input.is_file() {
+        for (p, msg) in check::coco_dangling_annotation_links(&ds.root) {
+            if is_confirmed_coco_annotation(&p, input, &ds.root) {
+                bad.push((p, msg));
+            }
+        }
+    }
+    bad
 }
 
 fn convert(args: ConvertArgs, out: Out) -> Result<(), CliError> {
@@ -433,10 +469,10 @@ fn convert(args: ConvertArgs, out: Out) -> Result<(), CliError> {
         TargetFormatArg::Coco => Format::Coco,
     };
     let ds = open(&args.input, format_of(args.from))?;
-    let bad_splits = unreadable_coco_splits(&ds);
+    let bad_splits = unreadable_coco_splits(&ds, &args.input);
     if !bad_splits.is_empty() {
-        let first = bad_splits[0];
-        let mut msg = format!("{}: {}", rel(&first.path, &ds.root), first.message);
+        let (first_path, first_msg) = &bad_splits[0];
+        let mut msg = format!("{}: {first_msg}", rel(first_path, &ds.root));
         if bad_splits.len() > 1 {
             msg.push_str(&format!(" (+{} more unreadable annotation file(s))", bad_splits.len() - 1));
         }
@@ -541,5 +577,18 @@ mod tests {
         assert_eq!(err.code, "path_not_found");
         assert!(err.message.contains("ds/images/train/a.png"), "{}", err.message);
         assert!(err.hint.as_deref().unwrap_or("").contains("input"), "{:?}", err.hint);
+    }
+
+    #[test]
+    fn confirmed_coco_annotation_distinguishes_splits_from_root_predictions() {
+        let root = Path::new("/data/coco");
+        assert!(is_confirmed_coco_annotation(&root.join("annotations/instances_val.json"), root, root));
+        assert!(is_confirmed_coco_annotation(&root.join("val/_annotations.coco.json"), root, root));
+        assert!(is_confirmed_coco_annotation(&root.join("instances_val.json"), root, root));
+        assert!(is_confirmed_coco_annotation(&root.join("_annotations.coco.json"), root, root));
+        assert!(is_confirmed_coco_annotation(&root.join("annotations"), root, root));
+        assert!(is_confirmed_coco_annotation(&root.join("val"), root, root));
+        assert!(!is_confirmed_coco_annotation(&root.join("coco_predictions.json"), root, root));
+        assert!(!is_confirmed_coco_annotation(&root.join("extra_annotations.json"), root, root));
     }
 }

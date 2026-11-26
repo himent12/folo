@@ -423,11 +423,10 @@ fn matches_dangling_label(image: &Path, dangling_labels: &HashSet<PathBuf>) -> b
     dangling_labels.contains(&beside)
 }
 
-/// Scans COCO `annotations/` and root/split directories for dangling annotation `.json` or directory symlinks
-/// matching `folo-data`'s COCO discovery rules (`instances*.json`, ignoring `captions*` / `person_keypoints*` and
-/// unrelated root JSON files).
-fn enrich_coco_dangling_symlinks(report: &mut CheckReport, reported_files: &mut HashSet<PathBuf>) {
-    let root = &report.root;
+/// Returns every dangling symlink / junction for COCO annotation files or split/annotations directories under
+/// `root`, following `folo-data`'s COCO discovery rules (`annotations/instances*.json`, ignoring `captions*` /
+/// `person_keypoints*`, plus root and `{train,val,valid,test}` directories).
+pub(super) fn coco_dangling_annotation_links(root: &Path) -> Vec<(PathBuf, String)> {
     let ann_dir = root.join("annotations");
     let mut found: Vec<(PathBuf, String)> = Vec::new();
     if let Some(msg) = dangling_link_message(&ann_dir) {
@@ -477,7 +476,14 @@ fn enrich_coco_dangling_symlinks(report: &mut CheckReport, reported_files: &mut 
         }
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
-    for (p, msg) in found {
+    found
+}
+
+/// Scans COCO `annotations/` and root/split directories for dangling annotation `.json` or directory symlinks
+/// matching `folo-data`'s COCO discovery rules (`instances*.json`, ignoring `captions*` / `person_keypoints*` and
+/// unrelated root JSON files).
+fn enrich_coco_dangling_symlinks(report: &mut CheckReport, reported_files: &mut HashSet<PathBuf>) {
+    for (p, msg) in coco_dangling_annotation_links(&report.root) {
         if reported_files.insert(folo_data::paths::normalize(&p)) {
             report.issues.push(CheckIssue {
                 kind: CheckKind::BrokenLabel,
