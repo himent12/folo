@@ -429,10 +429,16 @@ impl Store for RealStore {
             )
             .hint("start a new run with `weights` set to this model to train further"));
         }
+        let best = ckpt.best.fitness.filter(|f| f.is_finite()).and_then(|f| {
+            u32::try_from(ckpt.best.epoch + 1)
+                .ok()
+                .map(|epoch| folo_api::BestEpoch { epoch, map50_95: f as f32 })
+        });
         let snapshot = CheckpointSnapshot {
             staged: staged.path(),
             origin: &m.path,
             epochs: u32::try_from(total).ok().filter(|&e| e > 0),
+            best,
         };
         self.start_run(config, Some(snapshot))
     }

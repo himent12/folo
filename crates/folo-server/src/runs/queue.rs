@@ -6,7 +6,9 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
-use folo_api::{CloudPhase, LogLevel, QueueEvent, Run, RunCloud, RunEvent, RunStatus, TrainConfig};
+use folo_api::{
+    BestEpoch, CloudPhase, LogLevel, QueueEvent, Run, RunCloud, RunEvent, RunStatus, TrainConfig,
+};
 
 use crate::error::{Error, Result};
 use crate::store::QueueMove;
@@ -25,6 +27,9 @@ pub struct CheckpointSnapshot<'a> {
     pub origin: &'a Path,
     /// Scheduled epoch count read from the checkpoint (overrides `Run.epochs` immediately while queued).
     pub epochs: Option<u32>,
+    /// Best epoch already recorded in the checkpoint (`Run.best` starts here so a tying later epoch does not
+    /// overwrite the checkpoint's best epoch).
+    pub best: Option<BestEpoch>,
 }
 
 impl Runs {
@@ -166,7 +171,7 @@ impl Runs {
             step: 0,
             steps_per_epoch: 0,
             eta_s: None,
-            best: None,
+            best: checkpoint.as_ref().and_then(|c| c.best),
             device,
             model_id: None,
             error: None,

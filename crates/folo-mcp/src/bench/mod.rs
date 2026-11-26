@@ -90,7 +90,7 @@ impl Benchmarks {
     /// `GET /api/bench/benchmarks/{id}`.
     pub fn get(&self, id: &str) -> Result<Bench, Error> {
         match self.via()? {
-            Via::Http(h) => get(h, &bench_path(id, "")),
+            Via::Http(h) => get(h, &bench_path(id, "")?),
             Via::Here(b, _) => b.get(id),
         }
     }
@@ -106,7 +106,7 @@ impl Benchmarks {
     /// `DELETE /api/bench/benchmarks/{id}`.
     pub fn delete(&self, id: &str) -> Result<(), Error> {
         match self.via()? {
-            Via::Http(h) => h.client().delete(&bench_path(id, "")).map_err(store_error),
+            Via::Http(h) => h.client().delete(&bench_path(id, "")?).map_err(store_error),
             Via::Here(b, _) => b.delete(id),
         }
     }
@@ -114,7 +114,7 @@ impl Benchmarks {
     /// `GET /api/bench/benchmarks/{id}/entries`: the leaderboard.
     pub fn entries(&self, id: &str) -> Result<Vec<BenchEntry>, Error> {
         match self.via()? {
-            Via::Http(h) => Ok(get::<BenchEntryList>(h, &bench_path(id, "/entries"))?.entries),
+            Via::Http(h) => Ok(get::<BenchEntryList>(h, &bench_path(id, "/entries")?)?.entries),
             Via::Here(b, _) => b.entries(id),
         }
     }
@@ -122,7 +122,7 @@ impl Benchmarks {
     /// `GET …/entries/{entry_id}`.
     pub fn entry(&self, id: &str, entry_id: &str) -> Result<BenchEntry, Error> {
         match self.via()? {
-            Via::Http(h) => get(h, &entry_path(id, entry_id, "")),
+            Via::Http(h) => get(h, &entry_path(id, entry_id, "")?),
             Via::Here(b, _) => b.entry(id, entry_id),
         }
     }
@@ -130,7 +130,7 @@ impl Benchmarks {
     /// `POST /api/bench/benchmarks/{id}/entries`.
     pub fn start_entry(&self, id: &str, req: StartBenchEntry) -> Result<BenchEntry, Error> {
         match self.via()? {
-            Via::Http(h) => h.client().post(&bench_path(id, "/entries"), &req).map_err(store_error),
+            Via::Http(h) => h.client().post(&bench_path(id, "/entries")?, &req).map_err(store_error),
             Via::Here(b, s) => b.start_entry(s, id, req),
         }
     }
@@ -145,7 +145,7 @@ impl Benchmarks {
         match self.via()? {
             Via::Http(h) => {
                 let body = BenchPredictions { predictions };
-                h.client().post(&entry_path(id, entry_id, "/predictions"), &body).map_err(store_error)
+                h.client().post(&entry_path(id, entry_id, "/predictions")?, &body).map_err(store_error)
             }
             Via::Here(b, _) => b.add_predictions(id, entry_id, predictions),
         }
@@ -154,7 +154,7 @@ impl Benchmarks {
     /// `POST …/entries/{entry_id}/finish`: scores an open external entry.
     pub fn finish(&self, id: &str, entry_id: &str) -> Result<BenchEntry, Error> {
         match self.via()? {
-            Via::Http(h) => h.client().post_empty(&entry_path(id, entry_id, "/finish")).map_err(store_error),
+            Via::Http(h) => h.client().post_empty(&entry_path(id, entry_id, "/finish")?).map_err(store_error),
             Via::Here(b, _) => b.finish_open(id, entry_id),
         }
     }
@@ -162,7 +162,7 @@ impl Benchmarks {
     /// `GET …/entries/{entry_id}/result`.
     pub fn result(&self, id: &str, entry_id: &str) -> Result<BenchResult, Error> {
         match self.via()? {
-            Via::Http(h) => get(h, &entry_path(id, entry_id, "/result")),
+            Via::Http(h) => get(h, &entry_path(id, entry_id, "/result")?),
             Via::Here(b, _) => b.result(id, entry_id),
         }
     }
@@ -170,7 +170,7 @@ impl Benchmarks {
     /// `POST …/entries/{entry_id}/stop`.
     pub fn stop_entry(&self, id: &str, entry_id: &str) -> Result<BenchEntry, Error> {
         match self.via()? {
-            Via::Http(h) => h.client().post_empty(&entry_path(id, entry_id, "/stop")).map_err(store_error),
+            Via::Http(h) => h.client().post_empty(&entry_path(id, entry_id, "/stop")?).map_err(store_error),
             Via::Here(b, _) => b.stop_entry(id, entry_id),
         }
     }
@@ -178,7 +178,7 @@ impl Benchmarks {
     /// `DELETE …/entries/{entry_id}`.
     pub fn delete_entry(&self, id: &str, entry_id: &str) -> Result<(), Error> {
         match self.via()? {
-            Via::Http(h) => h.client().delete(&entry_path(id, entry_id, "")).map_err(store_error),
+            Via::Http(h) => h.client().delete(&entry_path(id, entry_id, "")?).map_err(store_error),
             Via::Here(b, _) => b.delete_entry(id, entry_id),
         }
     }
@@ -189,11 +189,26 @@ fn get<T: serde::de::DeserializeOwned>(h: &HttpStore, path: &str) -> Result<T, E
 }
 
 /// `/bench/benchmarks/{id}{rest}`.
-fn bench_path(id: &str, rest: &str) -> String {
-    format!("/bench/benchmarks/{}{rest}", encode(id))
+fn bench_path(id: &str, rest: &str) -> Result<String, Error> {
+    if id.is_empty() || matches!(id, "." | "..") {
+        return Err(Error::new(
+            http::StatusCode::NOT_FOUND,
+            "bench_not_found",
+            format!("benchmark '{id}' does not exist"),
+        ));
+    }
+    Ok(format!("/bench/benchmarks/{}{rest}", encode(id)))
 }
 
 /// `/bench/benchmarks/{id}/entries/{entry_id}{rest}`.
-fn entry_path(id: &str, entry_id: &str, rest: &str) -> String {
-    format!("/bench/benchmarks/{}/entries/{}{rest}", encode(id), encode(entry_id))
+fn entry_path(id: &str, entry_id: &str, rest: &str) -> Result<String, Error> {
+    let base = bench_path(id, "")?;
+    if entry_id.is_empty() || matches!(entry_id, "." | "..") {
+        return Err(Error::new(
+            http::StatusCode::NOT_FOUND,
+            "bench_entry_not_found",
+            format!("benchmark '{id}' has no entry '{entry_id}'"),
+        ));
+    }
+    Ok(format!("{base}/entries/{}{rest}", encode(entry_id)))
 }

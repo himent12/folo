@@ -565,4 +565,114 @@ mod tests {
         let _ = stop_tx.send(());
         let _ = http_task.await;
     }
+
+    /// Blank or dot-only resource IDs (`""`, `"."`, `".."`) return the same `<resource>_not_found` error across
+    /// embedded and proxied MCP backends instead of hitting `404 route_not_found` or parent collection routes.
+    #[tokio::test]
+    async fn proxied_blank_and_dot_resource_ids_match_embedded_not_found() {
+        let home = folo_test_support::TestDir::new("mcp-blank-id-parity");
+        let mock_server =
+            folo_server::Server::new(Arc::new(folo_server::MockStore::new()), Default::default());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(mock_server.serve(listener, async move {
+            let _ = stop_rx.await;
+        }));
+        let embedded = FoloMcp::new(
+            Arc::new(folo_server::MockStore::new()),
+            None,
+            Options {
+                data_dir: home.to_path_buf(),
+                read_only: false,
+                confine: false,
+                device: "cpu".into(),
+                published_weights: None,
+            },
+        );
+        let http = Arc::new(HttpStore::new(&url, None));
+        let proxied = FoloMcp::new(
+            http.clone(),
+            Some(http),
+            Options {
+                data_dir: home.to_path_buf(),
+                read_only: false,
+                confine: false,
+                device: "cpu".into(),
+                published_weights: None,
+            },
+        );
+
+        let real_store = Arc::new(folo_server::RealStore::open(home.join("real")).device("cpu"));
+        let real_srv = folo_server::Server::new(real_store, Default::default());
+        let rl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let rurl = format!("http://{}", rl.local_addr().unwrap());
+        let (rtx, rrx) = tokio::sync::oneshot::channel::<()>();
+        let rtask = tokio::spawn(real_srv.serve(rl, async move {
+            let _ = rrx.await;
+        }));
+        let rhttp = Arc::new(HttpStore::new(&rurl, None));
+        let benches = crate::bench::Benchmarks::Http(rhttp.clone());
+        let labels = crate::label::Labels::Http(rhttp);
+
+        for bad in ["", ".", ".."] {
+            for backend in [&embedded, &proxied] {
+                assert_eq!(
+                    backend
+                        .inner
+                        .get_dataset(DatasetIdArgs { dataset_id: bad.into() })
+                        .await
+                        .err()
+                        .unwrap()
+                        .body
+                        .code,
+                    "dataset_not_found",
+                    "get_dataset({bad:?})"
+                );
+                assert_eq!(
+                    backend
+                        .inner
+                        .run_status(RunStatusArgs { run_id: bad.into(), log_lines: 0 })
+                        .await
+                        .err()
+                        .unwrap()
+                        .body
+                        .code,
+                    "run_not_found",
+                    "run_status({bad:?})"
+                );
+                assert_eq!(
+                    backend
+                        .inner
+                        .export(ExportArgs {
+                            model_id: bad.into(),
+                            format: folo_api::ExportFormat::Onnx,
+                            decode: false,
+                            dynamic: false,
+                            half: false,
+                        })
+                        .await
+                        .err()
+                        .unwrap()
+                        .body
+                        .code,
+                    "model_not_found",
+                    "export({bad:?})"
+                );
+            }
+            let b = benches.clone();
+            let bad_s = bad.to_string();
+            let b_err = tokio::task::spawn_blocking(move || b.get(&bad_s)).await.unwrap().unwrap_err();
+            assert_eq!(b_err.body.code, "bench_not_found", "bench.get({bad:?})");
+            let l = labels.clone();
+            let bad_s = bad.to_string();
+            let l_err = tokio::task::spawn_blocking(move || l.job(&bad_s)).await.unwrap().unwrap_err();
+            assert_eq!(l_err.body.code, "label_job_not_found", "labels.job({bad:?})");
+        }
+
+        let _ = rtx.send(());
+        let _ = rtask.await;
+        let _ = stop_tx.send(());
+        let _ = task.await;
+    }
 }
