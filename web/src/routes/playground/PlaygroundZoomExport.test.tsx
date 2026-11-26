@@ -471,5 +471,23 @@ describe('Playground: confidence summary and quick JSON copy', () => {
     flushSync();
     expect(router.location.query.get('dataset')).toBeNull();
     expect(router.location.query.get('image')).toBeNull();
+
+    // Returning to a plain Playground URL while a linked-image lookup is still pending must abort it so a late 503 cannot restore it.
+    toast.items = [];
+    let rejectLate!: (e: unknown) => void;
+    api.datasetImages = (id, params) => {
+      if (params?.limit === 1) return new Promise((_, rej) => (rejectLate = rej));
+      return origImages(id, params);
+    };
+    router.go(`/playground?model=m_hard_s&dataset=${firstDs.id}&image=${firstImg.id}&split=val&at=0`, { replace: true });
+    await until(() => !!rejectLate, 'pending linked-image lookup');
+    router.go('/playground?model=m_hard_s', { replace: true });
+    flushSync();
+    rejectLate(new ApiError(503, 'unavailable', 'late 503'));
+    await new Promise((r) => setTimeout(r, URL_DELAY_MS + 100));
+    flushSync();
+    expect(router.location.query.get('dataset')).toBeNull();
+    expect(router.location.query.get('image')).toBeNull();
+    expect(toast.items).toEqual([]);
   });
 });

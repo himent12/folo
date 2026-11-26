@@ -127,15 +127,21 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
     k.iou.set(u.iou ?? DEFAULTS.iou);
     k.maxDet.set(u.maxDet ?? DEFAULTS.maxDet);
     const ref = u.image;
-    if (!ref) {
+    const cancelLink = () => {
+      lookup?.abort();
+      lookup = null;
+      linking.set(null);
       failedLink.set(null);
+    };
+    if (!ref) {
+      cancelLink();
       return;
     }
     const s = k.source.peek();
     const l = linking.peek();
     const shown = s?.kind === 'dataset' && s.ds.id === ref.dataset && s.img.id === ref.image;
     const coming = l?.live() && l.ref.dataset === ref.dataset && l.ref.image === ref.image;
-    if (shown) failedLink.set(null);
+    if (shown) cancelLink();
     if (!shown && !coming) follow(ref);
   }
 
