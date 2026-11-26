@@ -108,7 +108,23 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
   /** The datasets there are, when the page did not give them: for names, and to tell a registered folder. */
   const fetched = signal<readonly { id: string; name: string }[] | null>(null);
   effect(() => {
-    if (open.get() && !props.known) void hub.api.datasets().then((l) => fetched.set(l), () => {});
+    const ep = hub.epoch;
+    if (!open.get() || props.known) {
+      fetched.set(null);
+      return;
+    }
+    let live = true;
+    const ctrl = new AbortController();
+    void hub.api.datasets(ctrl.signal).then(
+      (l) => {
+        if (live && hub.epoch === ep) fetched.set(l);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+      ctrl.abort();
+    };
   });
   /** Names in use (lower case): a default never repeats one, and a typed one that does is pointed out. */
   const taken = computed(() => new Set((props.known ?? fetched.get() ?? []).map((d) => d.name.toLowerCase())));
@@ -206,6 +222,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       return;
     }
     const m = mode.get();
+    const epoch = hub.epoch;
     const images = sImages.get() ?? 0;
     const what = m === 'folder' ? `Reading ${folderName.get()}` : `Generating ${count(images, 'image')}`;
     work.set({ what, since: Date.now() });
@@ -222,6 +239,11 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     try {
       // Registering a folder that is already registered answers with that dataset (docs/API.md), not a copy.
       const before = m === 'folder' ? (props.known ?? fetched.peek() ?? (await hub.api.datasets().catch(() => []))) : [];
+      if (hub.epoch !== epoch) {
+        work.set(null);
+        generationEnded(gen);
+        return;
+      }
       const ds =
         m === 'folder'
           ? await hub.api.createDataset({ name: folderName.get(), path: cleaned.get(), format: format.get() })
@@ -232,13 +254,14 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
               imgsz: Number(imgsz.get()),
               seed: parseSeed(seed.get())!, // checked (`errs`)
             });
+      work.set(null);
+      generationEnded(gen);
+      if (hub.epoch !== epoch) return;
       const known = before.some((d) => d.id === ds.id);
       const title = known ? `Already registered as ${ds.name}` : m === 'folder' ? 'Dataset registered' : 'Synthetic dataset ready';
       // Where the images went, when none can train (a COCO test file registered alone puts them all in test).
       const nt = noTraining(ds);
       const detail = nt ? `${ds.name} · ${nt.where}, none to train on` : `${ds.name} · ${count(ds.splits.train + ds.splits.val + ds.splits.test, 'image')}`;
-      work.set(null);
-      generationEnded(gen);
       if (!known) datasetsChanged();
       if (!here()) {
         // Dismissed while it ran (or gone, or opened anew): wherever the person is now, they stay there.
@@ -262,6 +285,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       const failed = () => {
         work.set(null);
         generationEnded(gen);
+        if (hub.epoch !== epoch) return;
         if (here()) error.set(err);
         else if (showing()) status.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
         // page-level: no opening of the dialog is on screen.

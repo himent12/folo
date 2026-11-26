@@ -403,6 +403,8 @@ describe('Settings › Cloud', () => {
     await Promise.resolve();
     flushSync();
     expect(d.querySelector('[role="alert"] [data-notice]')).toBeNull();
+    // The dismissed Server B failure is still surfaced via a page toast instead of being silently swallowed.
+    expect(toast.items.some((t) => t.tone === 'error' && t.title === 'Could not disconnect Server B')).toBe(true);
     button(d.querySelector('footer')!, 'Cancel')!.click();
     flushSync();
 

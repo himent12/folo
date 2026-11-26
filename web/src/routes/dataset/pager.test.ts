@@ -442,4 +442,44 @@ describe('ImagePager', () => {
       stop2();
     }
   });
+
+  it('retries find() cleanly when reload() interrupts the initial page-0 load and stops after dispose()', async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((r) => (releaseFirst = r));
+    let calls = 0;
+    const api: Partial<Api> = {
+      datasetImages: async (_id, q) => {
+        calls++;
+        const my = calls;
+        if (my === 1) await firstGate;
+        const off = q.offset ?? 0;
+        const lim = q.limit ?? PAGE;
+        return {
+          total: 300,
+          images: Array.from({ length: Math.min(lim, Math.max(0, 300 - off)) }, (_, k) => ({
+            id: `alpha_${off + k}`,
+            file: `alpha_${off + k}.jpg`,
+            split: 'train' as const,
+            width: 640,
+            height: 480,
+            boxes: [],
+          })),
+        };
+      },
+    };
+    hub.api = api as Api;
+    const pager = new ImagePager('ds_reload_find', undefined, 0);
+    // Start finding an image whose name doesn't match the numeric guess: enters initial #load(0).
+    const found = pager.find('alpha_3');
+    pager.reload();
+    releaseFirst();
+    expect(await found).toBe(3);
+
+    // Once disposed, further find() and uncached at() calls bail out without issuing new requests.
+    const beforeDispose = calls;
+    pager.dispose();
+    expect(await pager.find('alpha_missing')).toBe(-1);
+    expect(await pager.at(250)).toBeUndefined();
+    expect(calls).toBe(beforeDispose);
+  });
 });

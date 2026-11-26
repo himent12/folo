@@ -47,6 +47,7 @@ export class ImagePager {
   #stale = new Set<number>();
   /** Bumped by `reload()`: an answer to a read made before it is dropped, even one already on its way. */
   #gen = 0;
+  #disposed = false;
   #revision = signal(0);
   #ctrl = new AbortController();
 
@@ -95,6 +96,7 @@ export class ImagePager {
 
   /** Stops pending requests (call when the filter changes). */
   dispose() {
+    this.#disposed = true;
     this.#ctrl.abort();
   }
 
@@ -166,10 +168,12 @@ export class ImagePager {
 
   /** Finds an image id in this filter: loaded pages, then a guess from `img_<n>` ids, then a scan. -1 if absent. */
   async find(id: string): Promise<number> {
+    if (this.#disposed) return -1;
     const hit = this.#index.get(id);
     if (hit !== undefined) {
       // A place read before the dataset changed counts once its page is read again (the id may be gone since).
       if (!this.#fresh(Math.floor(hit / PAGE))) await this.#load(Math.floor(hit / PAGE));
+      if (this.#disposed) return -1;
       const now = this.#index.get(id);
       if (now !== undefined && this.#fresh(Math.floor(now / PAGE))) return now;
     }
@@ -178,19 +182,27 @@ export class ImagePager {
       const guess = Number(n[1]) - this.splitStart;
       if (guess >= 0) {
         await this.at(guess).catch(() => undefined);
+        if (this.#disposed) return -1;
         const g = this.#index.get(id);
         if (g !== undefined && this.#fresh(Math.floor(g / PAGE))) return g;
       }
     }
-    if (this.total === null) await this.#load(0);
+    if (this.total === null) {
+      const initGen = this.#gen;
+      await this.#load(0);
+      if (this.#disposed) return -1;
+      if (initGen !== this.#gen) return this.find(id);
+    }
     const total = this.total ?? 0;
     for (let off = 0; off < total; off += SCAN) {
+      if (this.#disposed) return -1;
       const pages = Array.from({ length: SCAN / PAGE }, (_, k) => off / PAGE + k).filter((p) => p * PAGE < total);
       if (pages.every((p) => this.#fresh(p))) continue;
       const gen = this.#gen;
       const res = await hub.api.datasetImages(this.datasetId, this.#query(off, SCAN), this.#ctrl.signal).catch((e: unknown) => {
         if (gen === this.#gen) throw e;
       });
+      if (this.#disposed) return -1;
       // A reload() meanwhile: look again in the dataset as it is now.
       if (!res || gen !== this.#gen) return this.find(id);
       const found = res.images.findIndex((im) => im.id === id);
@@ -308,6 +320,7 @@ export class ImagePager {
   }
 
   #load(p: number): Promise<DatasetImage[] | undefined> {
+    if (this.#disposed) return Promise.resolve(undefined);
     if (this.#fresh(p)) {
       const page = this.#pages.get(p)!;
       this.#touch(p, page);

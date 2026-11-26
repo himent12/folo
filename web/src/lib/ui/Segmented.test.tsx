@@ -52,6 +52,29 @@ describe('Segmented', () => {
     unmount();
   });
 
+  it('advances from the focused radio button on ArrowRight even when value matches no option', () => {
+    const val = signal('missing');
+    const { container: target, unmount } = render(() => (
+      <Segmented
+        label="Group"
+        bind:value={val}
+        options={[
+          { value: 'all', label: 'All' },
+          { value: 'a', label: 'A' },
+          { value: 'b', label: 'B' },
+        ]}
+      />
+    ));
+    flush();
+    const radios = [...target.querySelectorAll<HTMLButtonElement>('button[role="radio"]')];
+    radios[0]!.focus();
+    radios[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    flush();
+    expect(val.get()).toBe('a');
+    expect(document.activeElement).toBe(radios[1]);
+    unmount();
+  });
+
   it('ignores keyboard navigation and drops out of tab order when disabled', () => {
     const val = signal('a');
     let changes = 0;

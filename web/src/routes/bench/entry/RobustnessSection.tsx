@@ -51,7 +51,14 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
     return { condition: c?.condition ?? 'haze', severity: p?.severity ?? 3 };
   });
   const chosen = signal<{ condition: string; severity: number } | null>(null);
-  const sel = computed(() => chosen.get() ?? worst.get());
+  const sel = computed(() => {
+    const ch = chosen.get();
+    if (ch) {
+      const c = rows.get().find((x) => x.condition === ch.condition);
+      if (c?.points.some((p) => p.severity === ch.severity)) return ch;
+    }
+    return worst.get();
+  });
   // Preview's own pickers move the choice too.
   const previewCond = signal('');
   const previewSev = signal(3);
@@ -85,13 +92,16 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
   }
   function move(dr: number, dc: number) {
     const list = rows.peek();
+    if (!list.length) return;
     const at = sel.peek();
     let r = list.findIndex((c) => c.condition === at.condition);
+    if (r < 0) r = 0;
     let s = at.severity;
     for (let k = 0; k < 6; k++) {
       if (dr) r = Math.max(0, Math.min(list.length - 1, r + dr));
       if (dc) s = Math.max(1, Math.min(5, s + dc));
       const row = list[r]!;
+      if (!row.points.length) continue;
       if (row.points.some((p) => p.severity === s)) break;
       // Down or up into a row without that severity: its nearest one.
       if (dr && !dc) {
@@ -99,8 +109,8 @@ export default function RobustnessSection(props: RobustnessSectionProps) {
         break;
       }
     }
-    const row = list[r]!;
-    if (!row.points.some((p) => p.severity === s)) return;
+    const row = list[r];
+    if (!row || !row.points.some((p) => p.severity === s)) return;
     chosen.set({ condition: row.condition, severity: s });
     queueMicrotask(() => tableEl?.querySelector<HTMLElement>('button.cell[tabindex="0"]')?.focus());
   }

@@ -219,5 +219,7 @@ describe('Benchmark plan concurrent save and empty-weight leave guard', () => {
     expect(weight('Overexposure').value).toBe('');
     expect(document.body.textContent).not.toContain('Changed elsewhere');
     expect(btn('Discard')).toBeDefined();
+    // An unreadable weight also gates "Add entry" so the plan cannot be frozen with invalid unsaved input.
+    expect(btn('Add entry', document)!.disabled).toBe(true);
   });
 });

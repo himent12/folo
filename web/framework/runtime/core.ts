@@ -74,26 +74,44 @@ let nextId = 0;
 // ---------------------------------------------------------------------------------------------------------------------
 // Dependency links
 
+let splitTarget: Target | undefined;
+let splitReads: Link[] | undefined;
+
 function addDependency(source: Source): Link | undefined {
-  return listener === undefined ? undefined : linkDependency(source, listener);
+  if (listener === undefined) return undefined;
+  const node = linkDependency(source, listener);
+  if (listener === splitTarget && node === undefined && source._node !== undefined) splitReads!.push(source._node);
+  return node;
 }
 
-/**
- * Internal (text runs): a position in the running evaluation's reads: the last source read so far, to pass to
- * `dropSourcesThrough`.
- */
+/** Internal (text runs): runs `fn` while recording already-linked sources re-read on the active listener. */
+export function trackPartReads<T>(fn: () => T): [T, unknown[]] {
+  const prevTarget = splitTarget;
+  const prevReads = splitReads;
+  const reads: Link[] = [];
+  splitTarget = listener;
+  splitReads = reads;
+  try {
+    return [fn(), reads];
+  } finally {
+    splitTarget = prevTarget;
+    splitReads = prevReads;
+  }
+}
+
+/** Internal (text runs): the last source read so far, to pass to `dropSourcesThrough`. */
 export function sourceMark(): unknown {
   // Every read moves its link to the tail: an unread tail (left from the previous run) means nothing was read yet.
   const tail = listener?._sources;
   return tail !== undefined && tail._v !== -1 ? tail : undefined;
 }
 
-/**
- * Internal (text runs): the running evaluation stops depending on what it read up to `mark` (from `sourceMark`); only
- * the reads after it stay. A source read both before and after the mark is dropped too (its link is shared).
- */
-export function dropSourcesThrough(mark: unknown): void {
-  for (let node = mark as Link | undefined; node !== undefined; node = node._ps) node._v = -1;
+/** Internal (text runs): drops sources up to `mark` (from `sourceMark`), keeping any links also in `keep`. */
+export function dropSourcesThrough(mark: unknown, keep?: readonly unknown[]): void {
+  const hasKeep = keep !== undefined && keep.length > 0;
+  for (let node = mark as Link | undefined; node !== undefined; node = node._ps) {
+    if (!hasKeep || !keep.includes(node)) node._v = -1;
+  }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

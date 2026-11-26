@@ -2,6 +2,7 @@
 // Key ({#key}), Dynamic (<svelte:element> / a component chosen at runtime), Portal.
 
 import { computed, deferFlushError, dispose, getOwner, isReader, memo, onCleanup, ownedRoot, owning, reader, renderEffect, signal, swapOwner, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
+import { ref, type Ref } from './bind';
 import { createComponent, splitProps } from './component';
 import { clearLeaves, insert, type PortalMarker } from './dom';
 import { spread } from './spread';
@@ -761,8 +762,9 @@ export function Dynamic<P>(props: DynamicProps<P>): JSX.Element {
     if (typeof comp === 'function') return untrack(() => createComponent(comp, others as P));
     return untrack(() => {
       const el = SVG_TAGS.has(comp) ? document.createElementNS('http://www.w3.org/2000/svg', comp) : document.createElement(comp);
-      const [kids, attrs] = splitProps(others as Record<string, unknown>, ['children']);
+      const [kids, attrs] = splitProps(others as Record<string, unknown>, ['children', 'ref']);
       spread(el, attrs, local.$$scope);
+      if (kids.ref != null) ref(el, kids.ref as Ref<Element>);
       insert(el, () => kids.children);
       return el;
     });

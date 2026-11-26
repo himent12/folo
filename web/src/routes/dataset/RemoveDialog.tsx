@@ -82,16 +82,19 @@ export default function RemoveDialog(props: RemoveDialogProps) {
   async function remove() {
     if (deleting.peek()) return;
     const d = props.dataset;
+    const epoch = hub.epoch;
     const startPath = router.location.path;
     deleting.set(true);
     try {
       const gone = files();
       await hub.api.deleteDataset(d.id, { files: gone });
+      if (hub.epoch !== epoch) return;
       datasetsChanged();
       if (mounted) open.set(false);
       toast.success('Dataset removed', gone ? `${d.name} and its ${images()} were deleted.` : `${d.name} is no longer registered. Files on disk were not touched.`);
       if (mounted && router.location.path === startPath) router.go('/datasets', { replace: true });
     } catch (e) {
+      if (hub.epoch !== epoch) return;
       if (mounted && open.peek()) status.error(e, 'Could not remove the dataset');
       else toast.error(e, 'Could not remove the dataset');
     } finally {
