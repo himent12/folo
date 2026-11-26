@@ -321,3 +321,245 @@ fn norm_and_softmax_backward_backend_validation() {
     assert!(backend.softmax_backward(x, x_bad_shape, 1, false).is_err());
     assert!(backend.softmax_backward(x, x_u32, 1, false).is_err());
 }
+
+#[test]
+fn rms_and_layer_norm_f16_and_extreme_backward_match_cpu() {
+    use crate::kernels::FORCE_NO_SUBGROUPS;
+    use crate::kernels::layer_norm::{
+        layer_norm_backward_dtype, layer_norm_forward_dtype, rms_norm_backward_dtype, rms_norm_forward_dtype,
+    };
+    use crate::tests::{Rng, assert_close, f16_round, to_f16};
+    use crate::{DType as GpuDType, GpuTensor};
+
+    struct ForceGuard(bool);
+    impl ForceGuard {
+        fn set(v: bool) -> Self {
+            Self(FORCE_NO_SUBGROUPS.replace(v))
+        }
+    }
+    impl Drop for ForceGuard {
+        fn drop(&mut self) {
+            FORCE_NO_SUBGROUPS.set(self.0);
+        }
+    }
+
+    let Some(ctx) = crate::tests::ctx() else {
+        return;
+    };
+    let mut rng = Rng::new(0x58e0_0002);
+
+    // 1. Extreme-scale RMSNorm backward stability (`1e20`, `1e-23`, and `1e35` where `rstd < 1e-30`).
+    for portable in [false, true] {
+        let _fg = ForceGuard::set(portable);
+        for vals in
+            [[1e20f32, -1e20, 1e20, -1e20], [1e-23, -1e-23, 1e-23, -1e-23], [1e35, -1e35, 1e35, -1e35]]
+        {
+            let g_vals = [1.0f32, 2.0, -1.0, 0.5];
+            let gx = GpuTensor::from_slice(&ctx, &vals, &[4]).unwrap();
+            let gg = GpuTensor::from_slice(&ctx, &g_vals, &[4]).unwrap();
+            let gy = GpuTensor::empty(&ctx, &[4], GpuDType::F32).unwrap();
+            let grs = GpuTensor::empty(&ctx, &[1], GpuDType::F32).unwrap();
+            let gdx = GpuTensor::empty(&ctx, &[4], GpuDType::F32).unwrap();
+            let gdw = GpuTensor::empty(&ctx, &[4], GpuDType::F32).unwrap();
+            rms_norm_forward_dtype(&ctx, gx.raw(), None, gy.raw(), grs.raw(), 1, 4, 0.0, GpuDType::F32)
+                .unwrap();
+            rms_norm_backward_dtype(
+                &ctx,
+                gx.raw(),
+                gg.raw(),
+                None,
+                grs.raw(),
+                gdx.raw(),
+                Some(gdw.raw()),
+                1,
+                4,
+                GpuDType::F32,
+            )
+            .unwrap();
+            let got_dx = gdx.to_vec().unwrap();
+            let got_dw = gdw.to_vec().unwrap();
+            assert!(got_dx.iter().all(|v| v.is_finite()), "rms ext dx non-finite: {got_dx:?}");
+            assert!(got_dw.iter().all(|v| v.is_finite()), "rms ext dw non-finite: {got_dw:?}");
+            assert_close(&got_dw, &[1.0, -2.0, -1.0, -0.5], 1e-5, 1e-5, &format!("rms ext dw p={portable}"));
+        }
+    }
+
+    // 2. F16 RMSNorm and LayerNorm forward + backward parity (vec4 cached, odd scalar, split-K outer=300).
+    if ctx.caps().shader_f16 {
+        for &(outer, d, label) in
+            &[(6usize, 32usize, "f16 vec4"), (5, 17, "f16 scalar"), (300, 16, "f16 split-k")]
+        {
+            let total = outer * d;
+            let x = f16_round(&rng.vec(total, -1.5, 1.5));
+            let grad = f16_round(&rng.vec(total, -1.0, 1.0));
+            let w = rng.vec(d, 0.5, 1.5);
+            let b = rng.vec(d, -0.5, 0.5);
+            let eps = 1e-4f32;
+
+            let mut y_rms = vec![0.0f32; total];
+            let mut dx_rms = vec![0.0f32; total];
+            let mut dw_rms = vec![0.0f64; d];
+            let mut y_ln = vec![0.0f32; total];
+            let mut dx_ln = vec![0.0f32; total];
+            let mut dw_ln = vec![0.0f64; d];
+            let mut db_ln = vec![0.0f64; d];
+            for o in 0..outer {
+                let row = &x[o * d..(o + 1) * d];
+                let gr = &grad[o * d..(o + 1) * d];
+                let ms = row.iter().map(|&v| (v as f64).powi(2)).sum::<f64>() / d as f64;
+                let rstd_r = 1.0 / (ms + eps as f64).sqrt();
+                let mut c_r = 0.0f64;
+                for i in 0..d {
+                    let xh = row[i] as f64 * rstd_r;
+                    y_rms[o * d + i] = (xh * w[i] as f64) as f32;
+                    let gw = gr[i] as f64 * w[i] as f64;
+                    c_r += gw * xh;
+                    dw_rms[i] += gr[i] as f64 * xh;
+                }
+                c_r /= d as f64;
+                for i in 0..d {
+                    let xh = row[i] as f64 * rstd_r;
+                    let gw = gr[i] as f64 * w[i] as f64;
+                    dx_rms[o * d + i] = (rstd_r * (gw - xh * c_r)) as f32;
+                }
+
+                let mu = row.iter().map(|&v| v as f64).sum::<f64>() / d as f64;
+                let var = row.iter().map(|&v| (v as f64 - mu).powi(2)).sum::<f64>() / d as f64;
+                let rstd_l = 1.0 / (var + eps as f64).sqrt();
+                let (mut s1, mut s2) = (0.0f64, 0.0f64);
+                for i in 0..d {
+                    let xh = (row[i] as f64 - mu) * rstd_l;
+                    y_ln[o * d + i] = (xh * w[i] as f64 + b[i] as f64) as f32;
+                    let gw = gr[i] as f64 * w[i] as f64;
+                    s1 += gw;
+                    s2 += gw * xh;
+                    dw_ln[i] += gr[i] as f64 * xh;
+                    db_ln[i] += gr[i] as f64;
+                }
+                for i in 0..d {
+                    let xh = (row[i] as f64 - mu) * rstd_l;
+                    let gw = gr[i] as f64 * w[i] as f64;
+                    dx_ln[o * d + i] = (rstd_l * (gw - s1 / d as f64 - xh * (s2 / d as f64))) as f32;
+                }
+            }
+            let dw_rms: Vec<f32> = dw_rms.into_iter().map(|v| v as f32).collect();
+            let dw_ln: Vec<f32> = dw_ln.into_iter().map(|v| v as f32).collect();
+            let db_ln: Vec<f32> = db_ln.into_iter().map(|v| v as f32).collect();
+
+            let gx = GpuTensor::from_f16(&ctx, &to_f16(&x), &[total]).unwrap();
+            let gg = GpuTensor::from_f16(&ctx, &to_f16(&grad), &[total]).unwrap();
+            let gw = GpuTensor::from_slice(&ctx, &w, &[d]).unwrap();
+            let gb = GpuTensor::from_slice(&ctx, &b, &[d]).unwrap();
+            let gy = GpuTensor::empty(&ctx, &[total], GpuDType::F16).unwrap();
+            let gm = GpuTensor::empty(&ctx, &[outer], GpuDType::F32).unwrap();
+            let grs = GpuTensor::empty(&ctx, &[outer], GpuDType::F32).unwrap();
+            let gdx = GpuTensor::empty(&ctx, &[total], GpuDType::F16).unwrap();
+            let gdw = GpuTensor::empty(&ctx, &[d], GpuDType::F32).unwrap();
+            let gdb = GpuTensor::empty(&ctx, &[d], GpuDType::F32).unwrap();
+
+            for portable in [false, true] {
+                let _fg = ForceGuard::set(portable);
+                rms_norm_forward_dtype(
+                    &ctx,
+                    gx.raw(),
+                    Some(gw.raw()),
+                    gy.raw(),
+                    grs.raw(),
+                    outer,
+                    d,
+                    eps,
+                    GpuDType::F16,
+                )
+                .unwrap();
+                rms_norm_backward_dtype(
+                    &ctx,
+                    gx.raw(),
+                    gg.raw(),
+                    Some(gw.raw()),
+                    grs.raw(),
+                    gdx.raw(),
+                    Some(gdw.raw()),
+                    outer,
+                    d,
+                    GpuDType::F16,
+                )
+                .unwrap();
+                let dw_tol = if outer >= 256 { 3e-2 } else { 8e-3 };
+                assert_close(
+                    &gy.to_vec().unwrap(),
+                    &y_rms,
+                    6e-3,
+                    5e-3,
+                    &format!("rms {label} y p={portable}"),
+                );
+                assert_close(
+                    &gdx.to_vec().unwrap(),
+                    &dx_rms,
+                    8e-3,
+                    6e-3,
+                    &format!("rms {label} dx p={portable}"),
+                );
+                assert_close(
+                    &gdw.to_vec().unwrap(),
+                    &dw_rms,
+                    dw_tol,
+                    5e-3,
+                    &format!("rms {label} dw p={portable}"),
+                );
+
+                layer_norm_forward_dtype(
+                    &ctx,
+                    gx.raw(),
+                    Some(gw.raw()),
+                    Some(gb.raw()),
+                    gy.raw(),
+                    gm.raw(),
+                    grs.raw(),
+                    outer,
+                    d,
+                    eps,
+                    GpuDType::F16,
+                )
+                .unwrap();
+                layer_norm_backward_dtype(
+                    &ctx,
+                    gx.raw(),
+                    gg.raw(),
+                    Some(gw.raw()),
+                    gm.raw(),
+                    grs.raw(),
+                    gdx.raw(),
+                    Some(gdw.raw()),
+                    Some(gdb.raw()),
+                    outer,
+                    d,
+                    GpuDType::F16,
+                )
+                .unwrap();
+                assert_close(&gy.to_vec().unwrap(), &y_ln, 6e-3, 5e-3, &format!("ln {label} y p={portable}"));
+                assert_close(
+                    &gdx.to_vec().unwrap(),
+                    &dx_ln,
+                    8e-3,
+                    6e-3,
+                    &format!("ln {label} dx p={portable}"),
+                );
+                assert_close(
+                    &gdw.to_vec().unwrap(),
+                    &dw_ln,
+                    dw_tol,
+                    5e-3,
+                    &format!("ln {label} dw p={portable}"),
+                );
+                assert_close(
+                    &gdb.to_vec().unwrap(),
+                    &db_ln,
+                    dw_tol,
+                    5e-3,
+                    &format!("ln {label} db p={portable}"),
+                );
+            }
+        }
+    }
+    assert!(ctx.kernels_without_registry().is_empty(), "{:?}", ctx.kernels_without_registry());
+}

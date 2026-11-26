@@ -15,7 +15,6 @@ documents the JS API, how it works and its performance.
 | `src/lib.rs` | The JS API: `FoloDetector` (`load`, `detect`, `info`, `backend`), `hasWebGpu`, `version`, the panic hook, and the hand-written TypeScript declarations (`TS_TYPES`) |
 | `src/detector.rs` | `Detector`: the logic behind the bindings, free of wasm-bindgen types; `BackendChoice`, `LoadOptions`, `DetectOptions`, `DetectorInfo`; candidate-compacted async GPU readback and direct CPU path |
 | `src/simd.rs` | WASM SIMD128 (and portable fallback) RGBA→RGB stripping, box-prefilter downsampling, and 2×4-unrolled direct RGBA→planar-`f32` letterbox preprocessing |
-| `src/kernels/` | WASM SIMD128 (and portable fallback) inference/post-processing kernels: `pool.rs` (2D max/avg pooling), `upsample.rs` (2D nearest/bilinear upsample), `post.rs` (vectorized softmax and batched box-IoU) |
 | `tests/detector.rs` | The detector run natively: the CPU path against folo-vision's `Predictor`, the GPU path against the CPU path, the JSON shape, the options |
 | `demo/index.html` | A standalone page: pick a model and an image, pick the backend, detect, benchmark |
 | `demo/test.mjs` | End-to-end check in headless Chrome (Playwright): each backend, latency, boxes against `folo predict --json` |

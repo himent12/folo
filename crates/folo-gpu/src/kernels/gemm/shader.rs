@@ -52,8 +52,6 @@ struct GenCfg {
     phase_tap_mask: bool,
     sites: bool,
     bias: u32,
-    res_mode: u32,
-    vr: bool,
     cat: u32,
     c_f16: bool,
     as_vec: bool,
@@ -93,8 +91,6 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     let phase_tap_mask = phase && ptaps > 0 && ptaps <= 32;
     let sites = mode == 1 && spec.get_bool("SITES");
     let bias = spec.get_u32("BIAS_KIND", 0);
-    let res_mode = spec.get_u32("RES_MODE", 0);
-    let vr = res_mode != 0 && spec.get_bool("VEC_R");
     // `CAT` > 1: `B` is that many row blocks in separate buffers (`gemm_cat`; plain GEMM, `B` not transposed).
     let cat = spec.get_u32("CAT", 1);
     let f16 = spec.is_f16();
@@ -146,8 +142,6 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
         phase_tap_mask,
         sites,
         bias,
-        res_mode,
-        vr,
         cat,
         c_f16,
         as_vec,
@@ -171,8 +165,6 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     }
     if sites {
         s.push_str(conv::SITES_BINDING);
-    } else if res_mode != 0 {
-        let _ = writeln!(s, "@group(0) @binding(5) var<storage, read> RES: array<{}>;", wgsl_ty(c_f16, vr));
     }
     let (at, aw) = if as_vec { ("vec4<f32>", bm4) } else { ("f32", bm) };
     let (bt, bw) = if bs_vec { ("vec4<f32>", bn4) } else { ("f32", bn + 4 * u32::from(wg_pad)) };
@@ -252,12 +244,6 @@ fn emit_prologue(
          let offB = pu(11u) + b1 * pu(12u) + b2 * pu(13u);\n\
          let offBias = pu(18u) + b1 * pu(19u) + b2 * pu(20u);\n",
     );
-    if g.res_mode != 0 {
-        s.push_str(
-            "  let beta = pf(38u); let ldr = pu(39u);\n\
-             let offR = pu(40u) + b1 * pu(41u) + b2 * pu(42u);\n",
-        );
-    }
     let _ = writeln!(s, "  let m0 = wid.y * {}u; let n0 = wid.x * {}u;", g.bm, g.bn);
     if g.sites {
         s.push_str(conv::SITES_LIVE);
@@ -619,30 +605,7 @@ fn emit_epilogue(s: &mut String, g: &GenCfg) {
                     ),
                     _ => {}
                 }
-                if g.res_mode != 0 {
-                    if g.vr {
-                        s.push_str(
-                            "      var rv = vec4<f32>(0.0);\n\
-                             \x20     if (col < N) { rv = vec4<f32>(RES[(offR + row * ldr + col) / 4u]); }\n",
-                        );
-                    } else {
-                        s.push_str(
-                            "      var rv = vec4<f32>(0.0);\n\
-                             \x20     let rbase = offR + row * ldr + col;\n\
-                             \x20     if (col < N) { rv.x = f32(RES[rbase]); }\n\
-                             \x20     if (col + 1u < N) { rv.y = f32(RES[rbase + 1u]); }\n\
-                             \x20     if (col + 2u < N) { rv.z = f32(RES[rbase + 2u]); }\n\
-                             \x20     if (col + 3u < N) { rv.w = f32(RES[rbase + 3u]); }\n",
-                        );
-                    }
-                    if g.res_mode == 1 {
-                        s.push_str("      v = fma(rv, vec4<f32>(beta), v);\n");
-                    }
-                }
                 s.push_str("      v = unary4(ACT, v, act_alpha);\n");
-                if g.res_mode == 2 {
-                    s.push_str("      v = fma(rv, vec4<f32>(beta), v);\n");
-                }
                 if g.vc {
                     let cast = if g.c_f16 { "vec4<f16>(v)" } else { "v" };
                     let _ =

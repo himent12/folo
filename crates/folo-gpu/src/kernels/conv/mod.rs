@@ -37,8 +37,7 @@ pub(crate) mod split;
 mod weight_grad;
 
 pub use forward::{
-    ConvInput, ConvPart, ConvPlan, conv2d, conv2d_cat, conv2d_epilogue, conv2d_input, conv2d_with_config,
-    conv2d_with_plan,
+    ConvInput, ConvPart, ConvPlan, conv2d, conv2d_cat, conv2d_input, conv2d_with_config, conv2d_with_plan,
 };
 pub use input_grad::conv2d_backward_input;
 pub(crate) use input_grad::{
