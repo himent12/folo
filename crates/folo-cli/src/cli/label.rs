@@ -230,8 +230,9 @@ pub struct LabelSetArgs {
     pub job: String,
     /// The image's id.
     pub image: String,
-    /// A box as CLASS,X1,Y1,X2,Y2 (class index or name, corners in pixels of the view, see --size), repeatable:
-    /// the image's boxes become exactly these. A box given as `folo label view` lists it keeps its exact pixels.
+    /// A box as CLASS,X1,Y1,X2,Y2 (class index, name, `id:INDEX`, or `name:CLASS`, corners in pixels of the view,
+    /// see --size), repeatable: the image's boxes become exactly these. A box given as `folo label view` lists it
+    /// keeps its exact pixels.
     #[arg(long = "box", value_name = "C,X1,Y1,X2,Y2")]
     pub boxes: Vec<String>,
     /// Remove every box (a background image).
@@ -240,16 +241,16 @@ pub struct LabelSetArgs {
     /// Remove box N [>= 1] (as `folo label view` numbers them), repeatable.
     #[arg(long, value_name = "N")]
     pub remove: Vec<u32>,
-    /// Give box N another class, as N=CLASS, repeatable.
+    /// Give box N another class, as N=CLASS (index, name, `id:INDEX`, or `name:CLASS`), repeatable.
     #[arg(long, value_name = "N=CLASS")]
     pub relabel: Vec<String>,
-    /// Add a box, as CLASS,X1,Y1,X2,Y2, repeatable.
+    /// Add a box, as CLASS,X1,Y1,X2,Y2 (index, name, `id:INDEX`, or `name:CLASS`), repeatable.
     #[arg(long, value_name = "C,X1,Y1,X2,Y2")]
     pub add: Vec<String>,
     /// The revision of the boxes the edit was made on (`folo label view` prints it), required: box numbers are
     /// that revision's, and boxes the edit does not list are that revision's too. Another revision now: refused.
-    #[arg(long, value_name = "REVISION")]
-    pub expect: Option<String>,
+    #[arg(long, required = true, value_name = "REVISION", value_parser = NonEmptyStringValueParser::new())]
+    pub expect: String,
     /// The view the coordinates are in, as WxH (`folo label view` prints it); required with --box and --add.
     #[arg(long, value_name = "WxH")]
     pub size: Option<String>,

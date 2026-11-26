@@ -17,14 +17,18 @@ use crate::error::{Error, Result};
 use crate::store::{ImageData, ImageQuery, IssueQuery};
 use crate::util::fnv1a;
 
+pub mod links;
+
+pub use links::{coco_dangling_annotation_links, dangling_link_message, enrich_dangling_symlinks};
+
 /// Most classes a dataset may have.
 pub const MAX_CLASSES: usize = 4096;
 
 /// Bumped whenever the cached [`Index`] layout or its derivation changes, so old caches are rebuilt. 6: empty YOLO
 /// split paths are unset. 7: folo-data reads COCO splits, float category ids and crowd flags, and labels below a
 /// folder called `images`, differently. 8: symlink-preserving `..` normalization for dataset roots, image paths,
-/// and watched folders.
-pub const INDEX_VERSION: u32 = 8;
+/// and watched folders. 9: dangling symlink and Windows junction diagnostics included in issues and fingerprints.
+pub const INDEX_VERSION: u32 = 9;
 
 /// A cheap summary of every file under a dataset's folders: count, total size and a hash of each file's relative
 /// path, size and modification time (and of each folder's name). Adding, removing, renaming or editing a file, or
@@ -55,38 +59,79 @@ impl Fingerprint {
             }
         };
         for dir in dirs {
+            if !links::guard_allows_probe(dir) {
+                continue;
+            }
             feed(dir.to_string_lossy().as_bytes());
             // A missing path is part of the fingerprint too: creating it must count as a change.
             feed(&[u8::from(dir.exists())]);
-            let walk = walkdir::WalkDir::new(dir).follow_links(true).sort_by_file_name();
-            let walk = walk.into_iter().filter_entry(|e| !excluded(e.path(), exclude));
-            for e in walk.filter_map(|e| e.ok()) {
-                if e.file_type().is_dir() {
-                    // Folders count by name: creating an empty one can change the dataset (a `path:` or split
-                    // folder that did not exist yet).
-                    let rel = e.path().strip_prefix(dir).unwrap_or(e.path());
-                    feed(rel.to_string_lossy().as_bytes());
-                    feed(b"/");
-                    continue;
-                }
-                if !e.file_type().is_file() {
-                    continue;
-                }
-                let Ok(md) = e.metadata() else { continue };
-                let mtime = md
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_nanos());
-                let rel = e.path().strip_prefix(dir).unwrap_or(e.path());
-                feed(rel.to_string_lossy().as_bytes());
-                feed(&md.len().to_le_bytes());
-                feed(&mtime.to_le_bytes());
-                files += 1;
-                bytes += md.len();
-            }
+            let mut visited = std::collections::HashSet::new();
+            fingerprint_walk(dir, dir, exclude, &mut visited, &mut feed, &mut files, &mut bytes);
         }
         Fingerprint { files, bytes, hash: format!("{h:016x}") }
+    }
+}
+
+/// Recursively hashes `cur` under `root`, checking `excluded` and [`links::guard_allows_probe`] *before* opening
+/// or enumerating any directory so `folo mcp --confine` never calls `read_dir` on a refused descendant.
+fn fingerprint_walk(
+    root: &Path,
+    cur: &Path,
+    exclude: &[PathBuf],
+    visited: &mut std::collections::HashSet<PathBuf>,
+    feed: &mut impl FnMut(&[u8]),
+    files: &mut u64,
+    bytes: &mut u64,
+) {
+    if excluded(cur, exclude) || !links::guard_allows_probe(cur) {
+        return;
+    }
+    match std::fs::metadata(cur) {
+        Ok(md) if md.is_dir() => {
+            // Folders count by name: creating an empty one can change the dataset (a `path:` or split folder
+            // that did not exist yet).
+            let rel = cur.strip_prefix(root).unwrap_or(cur);
+            feed(rel.to_string_lossy().as_bytes());
+            feed(b"/");
+            if let Ok(canon) = std::fs::canonicalize(cur)
+                && !visited.insert(canon)
+            {
+                return;
+            }
+            let Ok(rd) = std::fs::read_dir(cur) else { return };
+            let mut children: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+            children.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+            for child in children {
+                fingerprint_walk(root, &child, exclude, visited, feed, files, bytes);
+            }
+        }
+        Ok(md) if md.is_file() => {
+            let mtime = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            let rel = cur.strip_prefix(root).unwrap_or(cur);
+            feed(rel.to_string_lossy().as_bytes());
+            feed(&md.len().to_le_bytes());
+            feed(&mtime.to_le_bytes());
+            *files += 1;
+            *bytes += md.len();
+        }
+        Ok(_) => {}
+        Err(_) => {
+            // A dangling symlink, broken Windows junction, symlink loop, or missing watched path: fold its path,
+            // link existence, and link target into the fingerprint so creating, removing, or retargeting it
+            // invalidates the cached index and its issues.
+            let rel = cur.strip_prefix(root).unwrap_or(cur);
+            feed(rel.to_string_lossy().as_bytes());
+            feed(b"!");
+            feed(&[u8::from(std::fs::symlink_metadata(cur).is_ok())]);
+            if let Ok(target) = std::fs::read_link(cur) {
+                feed(target.to_string_lossy().as_bytes());
+            }
+            feed(b"\0");
+        }
     }
 }
 
@@ -526,20 +571,33 @@ pub(crate) fn resolve_input_path(path: &str) -> PathBuf {
     resolve_dotdot(&std::path::absolute(raw).unwrap_or_else(|_| raw.to_path_buf()))
 }
 
-/// The paths whose files make up a dataset: `base`, the dataset root and everything folo-data read it from
+fn add_watch_dir(dirs: &mut Vec<PathBuf>, d: PathBuf) -> bool {
+    if dirs.iter().any(|w| d.starts_with(w)) {
+        return false;
+    }
+    dirs.retain(|w| !w.starts_with(&d));
+    dirs.push(d);
+    true
+}
+
+/// The paths whose files make up a dataset: `base`, the dataset root, everything folo-data read it from
 /// ([`folo_data::LoadedDataset::sources`]: split folders and lists outside `base`, folders of every candidate image
-/// and label, paths that do not exist yet), minimised so no path is inside another. Sorted.
-fn watch_dirs(base: &Path, ds: &folo_data::LoadedDataset) -> Vec<PathBuf> {
+/// and label, paths that do not exist yet), and guarded YOLO diagnostic split candidates, minimised so no path is
+/// inside another. Sorted.
+fn watch_dirs(input_path: &Path, base: &Path, ds: &folo_data::LoadedDataset) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = vec![base.to_path_buf()];
-    let mut add = |d: PathBuf| {
-        if !dirs.iter().any(|w| d.starts_with(w)) {
-            dirs.retain(|w| !w.starts_with(&d));
-            dirs.push(d);
-        }
-    };
-    add(resolve_dotdot(&ds.root));
+    add_watch_dir(&mut dirs, resolve_dotdot(&ds.root));
     for s in &ds.sources {
-        add(resolve_dotdot(s));
+        let abs = resolve_dotdot(s);
+        if links::guard_allows_probe(&abs) {
+            add_watch_dir(&mut dirs, abs);
+        }
+    }
+    for s in links::diagnostic_watch_paths(input_path, &ds.root, ds.format) {
+        let abs = resolve_dotdot(&std::path::absolute(&s).unwrap_or(s));
+        if links::guard_allows_probe(&abs) {
+            add_watch_dir(&mut dirs, abs);
+        }
     }
     dirs.sort();
     dirs
@@ -614,12 +672,13 @@ impl Index {
         let (ds, report, fingerprint) = loop {
             let fingerprint = Fingerprint::of(&watched, &excluded);
             let ds = folo_data::open_with(&p, &opts).map_err(|e| data_error(e, path))?;
-            let now = watch_dirs(&base, &ds);
+            let now = watch_dirs(&p, &base, &ds);
             attempt += 1;
             if now == watched || attempt == 3 {
                 // Only run the header-check pass once the watched set has stabilized so external-source datasets
                 // do not scan every image header twice.
-                let report = folo_data::check::check(&p, &check_opts).map_err(|e| data_error(e, path))?;
+                let mut report = folo_data::check::check(&p, &check_opts).map_err(|e| data_error(e, path))?;
+                links::enrich_dangling_symlinks(&p, &mut report);
                 watched = now;
                 break (ds, report, fingerprint);
             }

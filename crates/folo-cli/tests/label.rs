@@ -649,3 +649,109 @@ fn antigravity_labels_via_acp() {
         "usage"
     );
 }
+
+#[test]
+fn numeric_class_name_round_trips_and_rejects_ambiguous_bare_token() {
+    let t = TestDir::new("cli-label-numeric-class");
+    let home = t.join("home");
+    let dir = t.join("photos");
+    std::fs::create_dir_all(&dir).unwrap();
+    image::RgbImage::from_pixel(64, 48, image::Rgb([40, 80, 120])).save(dir.join("p0.png")).unwrap();
+    let env = Env::new(&t).after(&["--data-dir", home.to_str().unwrap()]);
+
+    let job = s(
+        &env.ok(&["create", "numeric", "--classes", "circle,0", "--path", dir.to_str().unwrap()])["job_id"],
+    )
+    .to_string();
+    let page = env.ok(&["images", &job, "--boxes"]);
+    let img = s(&page["items"][0]["id"]).to_string();
+    let rev = s(&page["items"][0]["revision"]).to_string();
+
+    // Saving both class 0 (`circle`) and class 1 (`"0"`) succeeds, and `view` prints unambiguous `id:N` tokens
+    // that round-trip directly back into `label set --box` for both classes.
+    let set = env.ok(&[
+        "set",
+        &job,
+        &img,
+        "--expect",
+        &rev,
+        "--size",
+        "64x48",
+        "--box",
+        "circle,1,1,10,10",
+        "--box",
+        "1,2,2,20,20",
+    ]);
+    assert_eq!(set["boxes"], json!([[0, 1, 1, 10, 10], [1, 2, 2, 20, 20]]));
+    let rev2 = s(&set["revision"]).to_string();
+
+    let mut view_cmd = env.cmd();
+    view_cmd
+        .args(["label", "view", &job, &img, "--data-dir", home.to_str().unwrap(), "-o"])
+        .arg(t.join("view.jpg"));
+    let (code, stdout, stderr) = run(view_cmd);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stdout.contains("Boxes (n class-id x1,y1,x2,y2):"), "{stdout}");
+    let mut displayed = Vec::new();
+    let mut in_boxes = false;
+    for line in stdout.lines() {
+        if line == "Boxes (n class-id x1,y1,x2,y2):" {
+            in_boxes = true;
+            continue;
+        }
+        if in_boxes {
+            if line.starts_with("Classes:") {
+                break;
+            }
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(parts.len(), 3, "unexpected box line: {line}");
+            displayed.push(format!("{},{}", parts[1], parts[2]));
+        }
+    }
+    assert_eq!(displayed, vec!["id:0,1,1,10,10", "id:1,2,2,20,20"]);
+
+    // Feeding the exact displayed tokens back into `label set --box` preserves both classes.
+    let rt = env.ok(&[
+        "set",
+        &job,
+        &img,
+        "--expect",
+        &rev2,
+        "--size",
+        "64x48",
+        "--box",
+        &displayed[0],
+        "--box",
+        &displayed[1],
+    ]);
+    assert_eq!(rt["boxes"], json!([[0, 1, 1, 10, 10], [1, 2, 2, 20, 20]]));
+    let rev3 = s(&rt["revision"]).to_string();
+
+    // Bare `0` is ambiguous (matches index 0 `circle` and class name `0` at index 1) and must fail cleanly.
+    let amb =
+        env.error(&["set", &job, &img, "--expect", &rev3, "--size", "64x48", "--box", "0,2,2,20,20"], 2);
+    assert_eq!(s(&amb["code"]), "usage");
+    assert!(s(&amb["message"]).contains("ambiguous"), "{amb}");
+
+    // Explicit `name:0` resolves to class 1 (`"0"`).
+    let by_name =
+        env.ok(&["set", &job, &img, "--expect", &rev3, "--size", "64x48", "--box", "name:0,2,2,20,20"]);
+    assert_eq!(by_name["boxes"], json!([[1, 2, 2, 20, 20]]));
+
+    // Existing jobs with `#`-prefixed class names (e.g. `"#0"`) keep matching literally without colliding with indices.
+    let hash_job = s(&env.ok(&[
+        "create",
+        "hash-names",
+        "--classes",
+        "circle,#0",
+        "--path",
+        dir.to_str().unwrap(),
+    ])["job_id"])
+    .to_string();
+    let hpage = env.ok(&["images", &hash_job, "--boxes"]);
+    let himg = s(&hpage["items"][0]["id"]).to_string();
+    let hrev = s(&hpage["items"][0]["revision"]).to_string();
+    let hset =
+        env.ok(&["set", &hash_job, &himg, "--expect", &hrev, "--size", "64x48", "--box", "#0,2,2,20,20"]);
+    assert_eq!(hset["boxes"], json!([[1, 2, 2, 20, 20]]));
+}

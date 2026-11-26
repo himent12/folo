@@ -173,8 +173,11 @@ pub fn view_text(
         text.push_str(&format!("\nLast agent call failed: {e}."));
     }
     let classes_line = class_line(classes, budget / 4);
-    // Box lines name the class when every name is short, else give its index (the line stays small).
-    let by_name = classes.iter().all(|c| c.len() <= SHORT_CLASS);
+    // Box lines name the class when every name is short and unambiguous, else give its index (the line stays
+    // small, and a numeric class name like `0` at index 1 cannot be mistaken for class index 0 on round-trip).
+    let numeric_collision =
+        classes.iter().enumerate().any(|(i, c)| c.trim().parse::<u32>().is_ok_and(|n| n as usize != i));
+    let by_name = !numeric_collision && classes.iter().all(|c| c.len() <= SHORT_CLASS);
     let mut lines = String::new();
     let mut listed = 0u64;
     // Paging past the end first: boxes cleared since paging started are no plain "No boxes."
@@ -309,5 +312,16 @@ mod tests {
         // All of them cleared since paging started.
         let t = view_text("lj_1", &view(0, 301), &["car".into()], 0, 16_000);
         assert!(t.contains("No boxes from number 301: the image has 0 now"), "{t}");
+    }
+
+    #[test]
+    fn view_text_uses_class_indices_when_a_numeric_class_name_collides() {
+        let mut v = view(1, 1);
+        v.boxes = vec![[1, 2, 2, 20, 20]];
+        let t = view_text("lj_1", &v, &["circle".into(), "0".into()], 1, 4000);
+        assert!(t.contains("\nBoxes (n class-index x1,y1,x2,y2):\n1 1 2,2,20,20\n"), "{t}");
+        // Numeric names that match their own indices stay unambiguous.
+        let ok = view_text("lj_1", &v, &["0".into(), "1".into()], 1, 4000);
+        assert!(ok.contains("\nBoxes (n class x1,y1,x2,y2):\n1 1 2,2,20,20\n"), "{ok}");
     }
 }

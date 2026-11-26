@@ -619,6 +619,15 @@ mod tests {
         let warning = sev_vals.iter().find(|v| v["value"] == "warning").unwrap();
         assert_eq!(warning["aliases"], json!(["warn"]));
 
+        // `label set`: `--expect` is required at the CLI layer, matching runtime enforcement.
+        let lset = describe::describe(&Cli::command(), &["label".into(), "set".into()], false).unwrap();
+        assert_eq!(arg(&lset, "expect")["required"], json!(true));
+
+        // `export`: symmetric `--batch` <-> `--dynamic` conflict.
+        let export = describe::describe(&Cli::command(), &["export".into()], false).unwrap();
+        assert_eq!(arg(&export, "batch")["conflicts_with"], json!(["--dynamic"]));
+        assert_eq!(arg(&export, "dynamic")["conflicts_with"], json!(["--batch"]));
+
         // Command alias lookup works cleanly on a synthetic command tree with a visible command alias.
         let synthetic =
             clap::Command::new("root").subcommand(clap::Command::new("check").visible_alias("verify").arg(
