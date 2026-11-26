@@ -650,10 +650,13 @@ pub(super) fn zero_state(groups: &[ParamGroup]) -> Result<Vec<Vec<ParamState>>> 
 
 fn update_hessian_gn_one(h: &Tensor, g: &Tensor, b2: f32, coeff: f32) -> Result<()> {
     if cpu_fast(&[h]) && g.device().is_cpu() && g.dtype() == DType::F32 && !h.same_storage(g) {
+        let b2_64 = b2 as f64;
+        let coeff_64 = coeff as f64;
         return g.with_f32_slice(|gs| -> Result<()> {
             h.update_f32(|hs| {
                 for (hi, &gi) in hs.iter_mut().zip(gs) {
-                    *hi = b2 * *hi + coeff * (gi * gi);
+                    let g64 = gi as f64;
+                    *hi = (b2_64 * (*hi as f64) + coeff_64 * (g64 * g64)) as f32;
                 }
             })?;
             Ok(())

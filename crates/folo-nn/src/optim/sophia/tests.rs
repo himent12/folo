@@ -311,4 +311,19 @@ fn sophia_aliasing_nan_propagation_and_validation() {
             "transposed={transposed}: valid entries corrupted: {pv:?}"
         );
     }
+
+    // 4. Regression: CPU fast path must not overflow `(1 - beta2) * g^2` to +inf when `g = 1e20` and
+    //    `beta2 = 0.999` (where the true update `1e37` is representable in `f32`), matching fallback.
+    let p_fast = Tensor::ones([2, 2]).requires_grad_();
+    let p_fall = Tensor::ones([2, 2]).transpose(0, 1).unwrap().requires_grad_();
+    let cfg_big = SophiaConfig { betas: [0.9, 0.999], ..Default::default() };
+    let mut opt_f = SophiaG::from_params(vec![("p".into(), p_fast.clone())], cfg_big).unwrap();
+    let mut opt_g = SophiaG::from_params(vec![("p".into(), p_fall.clone())], cfg_big).unwrap();
+    let big_g = Tensor::full([2, 2], 1e20f32);
+    opt_f.update_hessian_gauss_newton(&make_grads(&[(&p_fast, big_g.clone())])).unwrap();
+    opt_g.update_hessian_gauss_newton(&make_grads(&[(&p_fall, big_g)])).unwrap();
+    let hf = opt_f.state_for(0, 0).unwrap().1.to_vec::<f32>().unwrap();
+    let hg = opt_g.state_for(0, 0).unwrap().1.to_vec::<f32>().unwrap();
+    assert!(hf.iter().all(|v| v.is_finite() && *v > 0.0), "fast path overflowed Hessian: {hf:?}");
+    assert!(hg.iter().all(|v| v.is_finite() && *v > 0.0), "fallback overflowed Hessian: {hg:?}");
 }

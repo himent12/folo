@@ -412,12 +412,18 @@ impl Prodigy {
                 bias_correction: self.bias_correction,
             };
             for ((_, p), ps) in grp.params.iter().zip(st.iter_mut()) {
-                let Some(g) = grads.grad(p) else { continue };
-                let (delta_r, s_l1) = prodigy_step_one(p, g, ps, sp)?;
-                d_num_delta += delta_r;
-                d_denom += s_l1;
-                ps.param_step = ps.param_step.saturating_add(1);
-                ps.beta1_prod *= sp.b1;
+                if let Some(g) = grads.grad(p) {
+                    let (delta_r, s_l1) = prodigy_step_one(p, g, ps, sp)?;
+                    d_num_delta += delta_r;
+                    d_denom += s_l1;
+                    ps.param_step = ps.param_step.saturating_add(1);
+                    ps.beta1_prod *= sp.b1;
+                } else if ps.param_step > 0 {
+                    // Keep `s_k` decay and `d_denom` coverage aligned with `d_numerator` when the active
+                    // parameter subset changes across steps (leaving `p`, `exp_avg`, `exp_avg_sq`, and
+                    // `param_step` untouched).
+                    d_denom += decay_s_and_l1(&ps.s, shared_b3)?;
+                }
             }
         }
 
@@ -695,4 +701,21 @@ fn prodigy_step_one(p: &Tensor, g: &Tensor, ps: &ParamState, sp: StepParams) -> 
     v.copy_from(&v_new)?;
     s.copy_from(&s_new)?;
     Ok((r_scale * dot_r, l1_s))
+}
+
+fn decay_s_and_l1(s: &Tensor, b3: f64) -> Result<f64> {
+    if cpu_fast(&[s]) {
+        let mut l1 = 0.0f64;
+        s.update_f32(|ss| {
+            for si in ss.iter_mut() {
+                *si = (b3 * (*si as f64)) as f32;
+                l1 += (*si as f64).abs();
+            }
+        })?;
+        return Ok(l1);
+    }
+    let s_new = s.mul_scalar(b3 as f32)?;
+    let l1: f64 = s_new.to_vec::<f32>()?.iter().map(|&v| (v as f64).abs()).sum();
+    s.copy_from(&s_new)?;
+    Ok(l1)
 }

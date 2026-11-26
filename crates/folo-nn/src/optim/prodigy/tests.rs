@@ -168,6 +168,27 @@ fn prodigy_safeguard_order_invariance_and_fallback_overflow_safety() {
     for (a, b) in vc.iter().zip(&vt) {
         assert!((a - b).abs() < 1e-4, "contig vs transposed mismatch: {a} vs {b}");
     }
+
+    // Regression: changing active parameter subsets across steps must not drop inactive params' `s`
+    // history from `d_denom` while keeping their contribution in `d_numerator`.
+    let p0 = Tensor::zeros([1]).requires_grad_();
+    let p1 = Tensor::zeros([1]).requires_grad_();
+    let mut opt_sub = Prodigy::from_params(
+        vec![("p0".into(), p0.clone()), ("p1".into(), p1.clone())],
+        ProdigyConfig { d0: 1.0, ..Default::default() },
+    )
+    .unwrap();
+    opt_sub
+        .step(&make_grads(&[
+            (&p0, Tensor::from_slice(&[1.0f32], [1]).unwrap()),
+            (&p1, Tensor::from_slice(&[1e-3f32], [1]).unwrap()),
+        ]))
+        .unwrap();
+    opt_sub.step(&make_grads(&[(&p0, Tensor::from_slice(&[1.0f32], [1]).unwrap())])).unwrap();
+    let p0_before_skip = p0.to_vec::<f32>().unwrap();
+    opt_sub.step(&make_grads(&[(&p1, Tensor::from_slice(&[1e-6f32], [1]).unwrap())])).unwrap();
+    assert_eq!(p0.to_vec::<f32>().unwrap(), p0_before_skip, "skipped param must not move");
+    assert!(opt_sub.d() <= 2.0, "d inflated on active subset change: {}", opt_sub.d());
 }
 
 /// JSON config round-trip (including infinite `growth_rate`), contract resume, and `load_state(0)` reset.
