@@ -152,8 +152,11 @@ fn vblend_row(r0: &[f32], r1: &[f32], wy: f32, dst: &mut [f32]) {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     wasm_simd::vblend_row(r0, r1, wy, dst);
     #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
-    for ((d, &a), &b) in dst.iter_mut().zip(r0).zip(r1) {
-        *d = a + (b - a) * wy;
+    {
+        let w0 = 1.0 - wy;
+        for ((d, &a), &b) in dst.iter_mut().zip(r0).zip(r1) {
+            *d = if a == b { a } else { a * w0 + b * wy };
+        }
     }
 }
 
@@ -167,7 +170,8 @@ fn hinterp_row(v: &[f32], x0: &[usize], x1: &[usize], wx: &[f32], dst: &mut [f32
     for i in 0..dst.len() {
         let a = v[x0[i]];
         let b = v[x1[i]];
-        dst[i] = a + (b - a) * wx[i];
+        let w = wx[i];
+        dst[i] = if a == b { a } else { a * (1.0 - w) + b * w };
     }
 }
 
@@ -207,7 +211,8 @@ mod wasm_simd {
     }
 
     pub(super) fn vblend_row(r0: &[f32], r1: &[f32], wy: f32, dst: &mut [f32]) {
-        let vwy = f32x4_splat(wy);
+        let vw0 = f32x4_splat(1.0 - wy);
+        let vw1 = f32x4_splat(wy);
         let (c0, t0) = r0.as_chunks::<4>();
         let (c1, t1) = r1.as_chunks::<4>();
         let (cd, td) = dst.as_chunks_mut::<4>();
@@ -216,18 +221,21 @@ mod wasm_simd {
             unsafe {
                 let va = v128_load(a.as_ptr() as *const v128);
                 let vb = v128_load(b.as_ptr() as *const v128);
-                let out = f32x4_add(va, f32x4_mul(f32x4_sub(vb, va), vwy));
+                let interp = f32x4_add(f32x4_mul(va, vw0), f32x4_mul(vb, vw1));
+                let out = v128_bitselect(va, interp, f32x4_eq(va, vb));
                 v128_store(d.as_mut_ptr() as *mut v128, out);
             }
         }
+        let w0 = 1.0 - wy;
         for ((d, &a), &b) in td.iter_mut().zip(t0).zip(t1) {
-            *d = a + (b - a) * wy;
+            *d = if a == b { a } else { a * w0 + b * wy };
         }
     }
 
     pub(super) fn hinterp_row(v: &[f32], x0: &[usize], x1: &[usize], wx: &[f32], dst: &mut [f32]) {
         let n = dst.len();
         let chunks = n / 4;
+        let one = f32x4_splat(1.0);
         for c in 0..chunks {
             let k = c * 4;
             let va = f32x4(v[x0[k]], v[x0[k + 1]], v[x0[k + 2]], v[x0[k + 3]]);
@@ -235,14 +243,16 @@ mod wasm_simd {
             // SAFETY: `k + 4 <= n == wx.len() == dst.len()`.
             unsafe {
                 let vw = v128_load(wx.as_ptr().add(k) as *const v128);
-                let out = f32x4_add(va, f32x4_mul(f32x4_sub(vb, va), vw));
+                let interp = f32x4_add(f32x4_mul(va, f32x4_sub(one, vw)), f32x4_mul(vb, vw));
+                let out = v128_bitselect(va, interp, f32x4_eq(va, vb));
                 v128_store(dst.as_mut_ptr().add(k) as *mut v128, out);
             }
         }
         for i in chunks * 4..n {
             let a = v[x0[i]];
             let b = v[x1[i]];
-            dst[i] = a + (b - a) * wx[i];
+            let w = wx[i];
+            dst[i] = if a == b { a } else { a * (1.0 - w) + b * w };
         }
     }
 }
@@ -335,10 +345,12 @@ mod tests {
         upsample_bilinear2d_nchw(&[-1.25], [1, 1, 1, 1], [3, 3], true, &mut up1);
         assert!(up1.iter().all(|&v| v == -1.25));
         let extreme = [-f32::MAX, f32::MAX];
-        let mut ext_out = [0.0f32; 3];
-        upsample_bilinear2d_nchw(&extreme, [1, 1, 1, 2], [1, 3], true, &mut ext_out);
+        let mut ext_out = [0.0f32; 5];
+        upsample_bilinear2d_nchw(&extreme, [1, 1, 1, 2], [1, 5], true, &mut ext_out);
         assert_eq!(ext_out[0], -f32::MAX);
-        assert_eq!(ext_out[2], f32::MAX);
+        assert_eq!(ext_out[2], 0.0);
+        assert_eq!(ext_out[4], f32::MAX);
+        assert!(ext_out.iter().all(|v| v.is_finite()), "got {ext_out:?}");
         let mut empty = Vec::new();
         upsample_bilinear2d_nchw(&[], [0, 2, 4, 4], [8, 8], false, &mut empty);
     }

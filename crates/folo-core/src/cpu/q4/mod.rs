@@ -379,9 +379,9 @@ pub(crate) fn dot_q4_q8_scalar(w: &[Q4Block], x: &[Q8Block]) -> f32 {
             let q1 = (byte >> 4) as i32 - 8;
             isum += q0 * xb.qs[j] as i32 + q1 * xb.qs[j + PACKED_BLOCK_BYTES] as i32;
         }
-        // Multiply by `wb.scale` then `xb.scale` (rather than `wb.scale * xb.scale` first) so small
-        // non-zero blocks do not prematurely underflow to zero.
-        acc += ((isum as f32) * wb.scale) * xb.scale;
+        // Multiply scales in `f64` so neither extreme small (`1e-22`) nor large (`1e37`) blocks prematurely
+        // underflow or overflow before combining with `isum`.
+        acc += ((isum as f64) * (wb.scale as f64) * (xb.scale as f64)) as f32;
     }
     acc
 }

@@ -249,6 +249,7 @@ fn tile_interp_axis(len: usize, grid: usize) -> TileAxis {
     let mut t0 = Vec::with_capacity(len);
     let mut t1 = Vec::with_capacity(len);
     let mut frac = Vec::with_capacity(len);
+    let mut hi = 1usize;
     for p in 0..len {
         let pos = p as f64 + 0.5;
         if grid == 1 || pos <= centers[0] {
@@ -260,7 +261,6 @@ fn tile_interp_axis(len: usize, grid: usize) -> TileAxis {
             t1.push(grid - 1);
             frac.push(0.0);
         } else {
-            let mut hi = 1usize;
             while hi + 1 < grid && centers[hi] < pos {
                 hi += 1;
             }

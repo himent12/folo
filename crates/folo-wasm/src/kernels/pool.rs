@@ -187,13 +187,13 @@ fn avg_pool2d_plane_scalar(
     dst: &mut [f32],
 ) {
     let ([kh, kw], [sh, sw], [ph, pw]) = (spec.kernel, spec.stride, spec.padding);
-    let full_denom = (kh * kw) as f32;
+    let full_denom = (kh as f32) * (kw as f32);
     let (hi, wi) = (h as isize, w as isize);
     for oy in 0..oh {
         let y0 = (oy * sh) as isize - ph as isize;
         let iy0 = y0.clamp(0, hi) as usize;
         let iy1 = (y0 + kh as isize).clamp(0, hi) as usize;
-        let valid_h = iy1 - iy0;
+        let valid_h = (iy1 - iy0) as f32;
         let drow = &mut dst[oy * ow..(oy + 1) * ow];
         for (ox, slot) in drow.iter_mut().enumerate() {
             let x0 = (ox * sw) as isize - pw as isize;
@@ -206,7 +206,7 @@ fn avg_pool2d_plane_scalar(
                     sum += v;
                 }
             }
-            let denom = if spec.count_include_pad { full_denom } else { (valid_h * (ix1 - ix0)) as f32 };
+            let denom = if spec.count_include_pad { full_denom } else { valid_h * ((ix1 - ix0) as f32) };
             *slot = if denom > 0.0 { sum / denom } else { 0.0 };
         }
     }
@@ -371,7 +371,7 @@ mod wasm_simd {
         dst: &mut [f32],
     ) {
         let ([kh, kw], [sh, _], [ph, pw]) = (spec.kernel, spec.stride, spec.padding);
-        let full_denom = (kh * kw) as f32;
+        let full_denom = (kh as f32) * (kw as f32);
         let (hi, wi) = (h as isize, w as isize);
         let x_interior_lo = pw.min(ow);
         let x_interior_hi = w.saturating_add(pw).checked_sub(kw).map_or(0, |v| (v + 1).min(ow));
@@ -379,7 +379,7 @@ mod wasm_simd {
             let y0 = (oy * sh) as isize - ph as isize;
             let iy0 = y0.clamp(0, hi) as usize;
             let iy1 = (y0 + kh as isize).clamp(0, hi) as usize;
-            let valid_h = iy1 - iy0;
+            let valid_h = (iy1 - iy0) as f32;
             let drow = &mut dst[oy * ow..(oy + 1) * ow];
             let scalar_at = |ox: usize| -> f32 {
                 let x0 = ox as isize - pw as isize;
@@ -392,7 +392,7 @@ mod wasm_simd {
                         sum += v;
                     }
                 }
-                let denom = if spec.count_include_pad { full_denom } else { (valid_h * (ix1 - ix0)) as f32 };
+                let denom = if spec.count_include_pad { full_denom } else { valid_h * ((ix1 - ix0) as f32) };
                 if denom > 0.0 { sum / denom } else { 0.0 }
             };
             for (ox, slot) in drow.iter_mut().enumerate().take(x_interior_lo) {
@@ -400,7 +400,7 @@ mod wasm_simd {
             }
             let mut ox = x_interior_lo;
             if iy0 < iy1 {
-                let denom = if spec.count_include_pad { full_denom } else { (valid_h * kw) as f32 };
+                let denom = if spec.count_include_pad { full_denom } else { valid_h * (kw as f32) };
                 let vdenom = f32x4_splat(denom);
                 // SAFETY: `ox >= pw` and `(ox - pw) + kw - 1 + 4 <= w`.
                 unsafe {
@@ -535,5 +535,16 @@ mod tests {
         let mut cancel_out = [0.0f32; 4];
         avg_pool2d_nchw(&cancel, [1, 1, 2, 8], &Pool2dSpec::new([2, 2], [2, 2], [0, 0]), &mut cancel_out);
         assert_eq!(cancel_out, [0.25, 0.25, 0.25, 0.25]);
+
+        // Huge padded kernel (`65536 × 65536`) must not overflow 32-bit `kh * kw` denominator on wasm32.
+        let huge_spec = Pool2dSpec {
+            kernel: [65_536, 65_536],
+            stride: [2, 2],
+            padding: [32_768, 32_768],
+            count_include_pad: true,
+        };
+        let mut huge_out = [0.0f32; 1];
+        avg_pool2d_nchw(&[3.0], [1, 1, 1, 1], &huge_spec, &mut huge_out);
+        assert!((huge_out[0] - (3.0 / 4_294_967_296.0)).abs() < 1e-15, "got {}", huge_out[0]);
     }
 }

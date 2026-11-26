@@ -119,13 +119,19 @@ fn q8_blocks_and_dot_q4_q8_match_scalar_bit_exact() {
         dot_q4_q8_scalar(&extreme_w, &extreme_x).to_bits()
     );
 
-    // Tiny non-zero blocks (`1e-22`) must not prematurely underflow `wb.scale * xb.scale` to zero.
+    // Tiny (`1e-22`) and mixed huge/small (`1e37` × `1e-10`) blocks must neither underflow nor overflow.
     let tiny_v = [1e-22f32; BLOCK_SIZE];
     let tiny_w = quantize_q4(&tiny_v);
     let tiny_x = quantize_q8_blocks(&tiny_v);
     let tiny_dot = dot_q4_q8(&tiny_w, &tiny_x);
     assert!(tiny_dot > 0.0 && tiny_dot.is_finite(), "expected non-zero subnormal dot, got {tiny_dot}");
     assert_eq!(tiny_dot.to_bits(), dot_q4_q8_scalar(&tiny_w, &tiny_x).to_bits());
+
+    let huge_w = quantize_q4(&[1e37f32; BLOCK_SIZE]);
+    let small_x = quantize_q8_blocks(&[1e-10f32; BLOCK_SIZE]);
+    let mixed_dot = dot_q4_q8(&huge_w, &small_x);
+    assert!(mixed_dot.is_finite() && (mixed_dot - 3.2e28).abs() / 3.2e28 < 1e-4, "got {mixed_dot}");
+    assert_eq!(mixed_dot.to_bits(), dot_q4_q8_scalar(&huge_w, &small_x).to_bits());
 }
 
 #[test]
