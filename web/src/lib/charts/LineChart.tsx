@@ -1,7 +1,7 @@
 // The line chart behind the run, compare and model screens: series on a linear or log y scale, with ticks, markers,
 // a hover tooltip and legend, and series the pointer can pick out.
 import { scaleLinear, scaleLog } from 'd3-scale';
-import { bindable, computed, createUniqueId, css, cubicOut, defaults, effect, For, MediaQuery, signal, tick, Tween, untrack } from 'fw';
+import { bindable, computed, createUniqueId, css, cubicOut, defaults, effect, For, MediaQuery, onCleanup, signal, tick, Tween, untrack } from 'fw';
 import { prefs } from '$lib/prefs';
 import { media } from '$lib/design/tokens';
 import { motion } from '$lib/ui/motion';
@@ -10,7 +10,7 @@ import { logMinors, MAX_TICKS } from './domain';
 import { END_LABELS_MIN, memoPlaceEndLabels } from './endLabels';
 import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
 import { paintOrder } from './layers';
-import { TouchGesture, type PinAction } from './pin';
+import { canDismissChartOnEscape, TouchGesture, type PinAction } from './pin';
 import { patternOf, dashOf, inkOf, seriesSummary, strokeWidth } from './lineSeries';
 import { capInPlotOf, eventOf, futureOf, marginOf, markOf, xExtentOf, xTicksOf, yExtentOf, yFormatOf, yTicksOf, type Margin, type Scale } from './lineAxes';
 import { mergesOf } from './linePaths';
@@ -248,7 +248,7 @@ export default function LineChart(props: LineChartProps) {
       spoken.set('');
       cursor.set(null);
       pinned.set(false);
-    } else if (a.kind === 'set' && inPlot(a.px)) {
+    } else if (a.kind === 'set' && inPlot(a.px) && hasData.peek() && keyed.peek().length > 0) {
       const m = margin.peek();
       cursor.set(x.peek().invert(Math.min(width.peek() - m.right, Math.max(m.left, a.px))));
       pinned.set(true);
@@ -292,9 +292,11 @@ export default function LineChart(props: LineChartProps) {
       keyFocus.set(false);
     }
   }
-  // A cursor cleared elsewhere (a synced chart, blur) is no longer pinned here, and picks nothing.
+  // A cursor cleared elsewhere (a synced chart, blur) is no longer pinned here, picks nothing, and drops stale speech.
   effect(() => {
     if (cursor.get() === null) {
+      speakSeq++;
+      spoken.set('');
       pinned.set(false);
       picked.set(null);
     }
@@ -313,7 +315,7 @@ export default function LineChart(props: LineChartProps) {
       if (el && !el.contains(e.target as Node)) apply({ kind: 'clear' });
     };
     const esc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('dialog[open]')) {
+      if (canDismissChartOnEscape(e, true)) {
         e.preventDefault();
         apply({ kind: 'clear' });
       }
@@ -386,6 +388,7 @@ export default function LineChart(props: LineChartProps) {
   // pointer movement here or on a linked chart never produces announcements.
   const spoken = signal('');
   let speakSeq = 0;
+  onCleanup(() => speakSeq++);
 
   const summary = computed(() => seriesSummary(keyed.get()));
 
@@ -401,7 +404,7 @@ export default function LineChart(props: LineChartProps) {
     else if (e.key === 'Home') i = 0;
     else if (e.key === 'End') i = s.points.length - 1;
     else if (e.key === 'Escape') {
-      if (c === null && !pinned.peek()) return;
+      if ((c === null && !pinned.peek()) || !canDismissChartOnEscape(e)) return;
       e.preventDefault();
       speakSeq++;
       cursor.set(null);

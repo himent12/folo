@@ -18,11 +18,12 @@ import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
 import ChevronsLeft from '$icons/chevrons-left';
 import ChevronsRight from '$icons/chevrons-right';
-import { computed, createUniqueId, css, defaults, effect, Index, onCleanup, signal, tick, untrack } from 'fw';
+import { computed, createUniqueId, css, defaults, effect, Index, onCleanup, signal, tick } from 'fw';
 import { classColor } from '$lib/design/tokens';
 import { prefs } from '$lib/prefs';
 import { overviewGeometry, overviewHit, overviewWindow, pageFit, pageRange } from './cmOverview';
 import { FLOOR, labelHigh, rampShare, sharePct } from './confusionInk';
+import { canDismissChartOnEscape } from './pin';
 
 /** What a ConfusionMatrix offers its owner (port of the Svelte component's exported `reveal`), through `expose`. */
 export interface ConfusionMatrixApi {
@@ -101,17 +102,40 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
 
   const names = computed(() => [...p.classes, 'background']);
   const n = computed(() => names.get().length);
-  // Keep the roving tab stop and active readout inside the grid if the class list shrinks.
+  const activeHovered = computed(() => {
+    const h = hovered.get();
+    const limit = n.get();
+    return h && h.r >= 0 && h.r < limit && h.c >= 0 && h.c < limit ? h : null;
+  });
+  const activePinned = computed(() => {
+    const pin = pinned.get();
+    const limit = n.get();
+    return pin && pin.r >= 0 && pin.r < limit && pin.c >= 0 && pin.c < limit ? pin : null;
+  });
+  // Keep the roving tab stop inside the grid before render if the class list shrinks; if the removed cell
+  // held DOM focus, move focus onto the clamped surviving cell after the DOM updates.
+  let restoreFocus = false;
+  effect.pre(() => {
+    const max = Math.max(0, n.get() - 1);
+    const f = focus.peek();
+    if (f.r > max || f.c > max) {
+      const active = typeof document !== 'undefined' ? document.activeElement : null;
+      if (root && active && root.contains(active)) restoreFocus = true;
+      focus.set({ r: Math.min(f.r, max), c: Math.min(f.c, max) });
+    }
+  });
   effect(() => {
     const max = Math.max(0, n.get() - 1);
-    untrack(() => {
-      const f = focus.peek();
-      if (f.r > max || f.c > max) focus.set({ r: Math.min(f.r, max), c: Math.min(f.c, max) });
-      const h = hovered.peek();
-      if (h && (h.r > max || h.c > max)) hovered.set(null);
-      const pin = pinned.peek();
-      if (pin && (pin.r > max || pin.c > max)) pinned.set(null);
-    });
+    const h = hovered.peek();
+    if (h && (h.r > max || h.c > max)) hovered.set(null);
+    const pin = pinned.peek();
+    if (pin && (pin.r > max || pin.c > max)) pinned.set(null);
+    if (!restoreFocus) return;
+    restoreFocus = false;
+    const active = typeof document !== 'undefined' ? document.activeElement : null;
+    if (active && active !== document.body && !root?.contains(active)) return;
+    const f = focus.peek();
+    root?.querySelector<HTMLElement>(`[data-r="${f.r}"][data-c="${f.c}"]`)?.focus({ preventScroll: true });
   });
   const rowSums = computed(() => p.matrix.map((row) => row.reduce((a, b) => a + b, 0)));
   const norm = (r: number, c: number) => {
@@ -277,7 +301,7 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
     let { r, c } = focus.peek();
     const mod = e.ctrlKey || e.metaKey;
     if (e.key === 'Escape') {
-      if (mod || (pinned.peek() === null && hovered.peek() === null)) return;
+      if ((pinned.peek() === null && hovered.peek() === null) || !canDismissChartOnEscape(e)) return;
       e.preventDefault();
       pinned.set(null);
       hovered.set(null);
@@ -295,8 +319,17 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
       if (mod) r = max;
     } else return;
     e.preventDefault();
-    focus.set({ r, c });
-    root.querySelector<HTMLElement>(`[data-r="${r}"][data-c="${c}"]`)?.focus();
+    const at = { r, c };
+    focus.set(at);
+    const next = root.querySelector<HTMLElement>(`[data-r="${r}"][data-c="${c}"]`);
+    if (next) {
+      if (document.activeElement === next) {
+        hovered.set(at);
+        pinned.set(at);
+      } else {
+        next.focus();
+      }
+    }
   }
   /** Swatch colour of row/column `i`: the class palette hue, neutral for background and folded rows. */
   const dotColor = (i: number) => {
@@ -325,10 +358,10 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
   }
 
   const readout = () => (
-    <p class="readout" class:faint={!hovered.get()} class:below={!!range.get()} id={`${uid}-readout`}>
-      {hovered.get() ? (
+    <p class="readout" class:faint={!activeHovered.get()} class:below={!!range.get()} id={`${uid}-readout`}>
+      {activeHovered.get() ? (
         <>
-          <b>{names.get()[hovered.get()!.r]}</b> predicted as <b>{names.get()[hovered.get()!.c]}</b>: <span class="num">{(p.matrix[hovered.get()!.r]?.[hovered.get()!.c] ?? 0).toLocaleString('en-US')}</span> of <span class="num">{(rowSums.get()[hovered.get()!.r] ?? 0).toLocaleString('en-US')}</span> (<span class="num">{`${sharePct(norm(hovered.get()!.r, hovered.get()!.c)) || '0'}%`}</span>)
+          <b>{names.get()[activeHovered.get()!.r]}</b> predicted as <b>{names.get()[activeHovered.get()!.c]}</b>: <span class="num">{(p.matrix[activeHovered.get()!.r]?.[activeHovered.get()!.c] ?? 0).toLocaleString('en-US')}</span> of <span class="num">{(rowSums.get()[activeHovered.get()!.r] ?? 0).toLocaleString('en-US')}</span> (<span class="num">{`${sharePct(norm(activeHovered.get()!.r, activeHovered.get()!.c)) || '0'}%`}</span>)
         </>
       ) : range.get() ? (
         'Tap a cell for its counts.'
@@ -341,7 +374,7 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
   const cellAt = (r: number, c: number) => {
     const cell = () => cells.get()[r]?.[c];
     const on = () => {
-      const h = hovered.get();
+      const h = activeHovered.get();
       return !!h && (h.r === r || h.c === c);
     };
     return (
@@ -349,7 +382,7 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
         class="cell"
         class:zero={!!cell()?.zero}
         class:hl={on()}
-        class:pin={pinned.get() !== null && pinned.get()!.r === r && pinned.get()!.c === c}
+        class:pin={activePinned.get() !== null && activePinned.get()!.r === r && activePinned.get()!.c === c}
         role="gridcell"
         tabindex={focus.get().r === r && focus.get().c === c ? 0 : -1}
         data-r={r}
@@ -399,11 +432,11 @@ export default function ConfusionMatrix(props: ConfusionMatrixProps) {
               )}
             </Index>
             <rect class="ov-band" x={band.get()!.x - 1.5} y="-1.5" width={band.get()!.w + 3} height={geo.get().size + 3} rx="2" />
-            {pinned.get() ? (
+            {activePinned.get() ? (
               <rect
                 class="ov-pin"
-                x={pinned.get()!.c * (geo.get().cell + geo.get().gap) - 1}
-                y={pinned.get()!.r * (geo.get().cell + geo.get().gap) - 1}
+                x={activePinned.get()!.c * (geo.get().cell + geo.get().gap) - 1}
+                y={activePinned.get()!.r * (geo.get().cell + geo.get().gap) - 1}
                 width={geo.get().cell + 2}
                 height={geo.get().cell + 2}
                 rx="2"

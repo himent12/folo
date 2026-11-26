@@ -145,36 +145,69 @@ describe('ConfusionMatrix labels', () => {
       flushSync();
       expect(idleEsc.defaultPrevented).toBe(false);
 
-      // Ctrl+End jumps to the bottom-right corner cell (3, 3) and pins it on focus.
+      // Ctrl+End jumps to the bottom-right corner cell (3, 3) and focuses/pins it.
       grid.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', ctrlKey: true, bubbles: true, cancelable: true }));
       flushSync();
       const lastCell = target.querySelector<HTMLElement>('[data-r="3"][data-c="3"]')!;
       expect(lastCell.tabIndex).toBe(0);
-      lastCell.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
-      flushSync();
+      expect(document.activeElement).toBe(lastCell);
       expect(lastCell.classList.contains('pin')).toBe(true);
 
-      // Escape clears the active pin/readout and consumes the event.
+      // Open info popover takes Escape priority over dismissing the pinned cell.
+      const pop = document.createElement('div');
+      pop.className = 'info-pop open';
+      document.body.appendChild(pop);
+      const blockedEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      grid.dispatchEvent(blockedEsc);
+      flushSync();
+      expect(blockedEsc.defaultPrevented).toBe(false);
+      expect(lastCell.classList.contains('pin')).toBe(true);
+      pop.remove();
+
+      // Escape clears the active pin/readout and consumes the event; pressing End on the edge cell re-activates it.
       const activeEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
       grid.dispatchEvent(activeEsc);
       flushSync();
       expect(activeEsc.defaultPrevented).toBe(true);
       expect(target.querySelectorAll('.cell.pin')).toHaveLength(0);
-
-      // Shrinking the class list clamps roving focus back inside the new grid so a tabbable cell always exists.
-      lastCell.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+      grid.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
       flushSync();
+      expect(lastCell.classList.contains('pin')).toBe(true);
+
+      // Shrinking the class list while the removed cell holds real DOM focus moves DOM focus onto the clamped surviving cell.
       classes.set(['cat']);
       matrix.set([
         [5, 1],
         [0, 0],
       ]);
       flushSync();
-      expect(target.querySelector<HTMLElement>('[data-r="1"][data-c="1"]')!.tabIndex).toBe(0);
+      const clampedCell = target.querySelector<HTMLElement>('[data-r="1"][data-c="1"]')!;
+      expect(clampedCell.tabIndex).toBe(0);
+      expect(document.activeElement).toBe(clampedCell);
       expect(target.querySelectorAll('.cell[tabindex="0"]')).toHaveLength(1);
-      expect(target.querySelectorAll('.cell.pin')).toHaveLength(0);
+
+      // Shrinking while focus is outside the grid clamps tabindex without stealing focus.
+      const outside = document.createElement('button');
+      document.body.appendChild(outside);
+      outside.focus();
+      classes.set([]);
+      matrix.set([[0]]);
+      flushSync();
+      expect(document.activeElement).toBe(outside);
+      expect(target.querySelector<HTMLElement>('[data-r="0"][data-c="0"]')!.tabIndex).toBe(0);
+      outside.remove();
 
       // Ctrl+Home jumps back to (0, 0).
+      classes.set(['cat', 'dog']);
+      matrix.set([
+        [8, 1, 1],
+        [1, 7, 2],
+        [0, 0, 0],
+      ]);
+      flushSync();
+      grid.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', ctrlKey: true, bubbles: true, cancelable: true }));
+      flushSync();
+      expect(target.querySelector<HTMLElement>('[data-r="2"][data-c="2"]')!.tabIndex).toBe(0);
       grid.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', ctrlKey: true, bubbles: true, cancelable: true }));
       flushSync();
       expect(target.querySelector<HTMLElement>('[data-r="0"][data-c="0"]')!.tabIndex).toBe(0);

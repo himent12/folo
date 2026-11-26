@@ -11,7 +11,7 @@ import { scaleLinear } from 'd3-scale';
 import { bindable, computed, css, defaults, effect, For, Index, MediaQuery, signal } from 'fw';
 import { media } from '$lib/design/tokens';
 import { seriesText } from './ink';
-import { TouchGesture, type PinAction } from './pin';
+import { canDismissChartOnEscape, TouchGesture, type PinAction } from './pin';
 import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
 import { createRectCache } from './rectCache';
 import { spokenAt, type XYMark, type XYPoint, type XYRef, type XYSeries, type XYStrip } from './xy';
@@ -185,14 +185,20 @@ export default function XYChart(props: XYChartProps) {
       cursor.set(null);
       pinned.set(false);
     } else if (a.kind === 'set' && inPlot(a.px)) {
-      cursor.set(nearestStop(a.px));
-      pinned.set(true);
-      tapHint.set(false);
+      const next = nearestStop(a.px);
+      if (next !== null) {
+        cursor.set(next);
+        pinned.set(true);
+        tapHint.set(false);
+      }
     }
   }
-  // A cursor cleared elsewhere drops the pin state too.
+  // A cursor cleared elsewhere drops the pin state and stale speech too.
   effect(() => {
-    if (cursor.get() === null) pinned.set(false);
+    if (cursor.get() === null) {
+      spoken.set('');
+      pinned.set(false);
+    }
   });
   effect(() => {
     if (!pinned.get()) return;
@@ -201,7 +207,7 @@ export default function XYChart(props: XYChartProps) {
       if (svg && !svg.contains(e.target as Node)) apply({ kind: 'clear' });
     };
     const esc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('dialog[open]')) {
+      if (canDismissChartOnEscape(e, true)) {
         e.preventDefault();
         apply({ kind: 'clear' });
       }
@@ -260,7 +266,7 @@ export default function XYChart(props: XYChartProps) {
     else if (e.key === 'Home') j = 0;
     else if (e.key === 'End') j = st.length - 1;
     else if (e.key === 'Escape') {
-      if (c === null && !pinned.peek()) return;
+      if ((c === null && !pinned.peek()) || !canDismissChartOnEscape(e)) return;
       e.preventDefault();
       cursor.set(null);
       pinned.set(false);

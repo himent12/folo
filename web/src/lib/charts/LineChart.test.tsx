@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { deep, field, flush as flushSync, tick } from 'fw';
+import { deep, field, flush as flushSync, signal, tick } from 'fw';
 import { describe, expect, it } from 'vitest';
+import { gChord } from '$lib/shell/shortcuts';
 import { render } from '../../../framework/testing';
 import LineChart, { type LineChartProps } from './LineChart';
 
@@ -123,7 +124,7 @@ describe('LineChart keyboard', () => {
     await tick();
     expect(live.textContent).toContain('Epoch 3');
 
-    // Rapid ArrowRight followed immediately by Escape cancels the pending async announcement.
+    // Rapid ArrowLeft followed immediately by Escape cancels the pending async announcement.
     svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
     svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     flushSync();
@@ -131,6 +132,29 @@ describe('LineChart keyboard', () => {
     await tick();
     expect(live.textContent).toBe('');
     unmount(c);
+  });
+
+  it('clears spoken text when an external bound cursor resets to null', async () => {
+    const cursor = signal<number | null>(null);
+    const series = [{ id: 'a', label: 'mAP', color: 'red', points: [0, 1, 2].map((x) => ({ x, y: x / 10 })) }];
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = render(() => <LineChart series={series} label="synced" xTitle={(x) => `Epoch ${x}`} bind:cursor={cursor} />, target);
+    Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: 400 });
+    target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
+    flushSync();
+    const svg = target.querySelector<SVGSVGElement>('svg[aria-roledescription=chart]')!;
+    const live = target.querySelector('[aria-live]')!;
+    svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true, cancelable: true }));
+    flushSync();
+    await tick();
+    await tick();
+    expect(live.textContent).toContain('Epoch 2');
+    cursor.set(null);
+    flushSync();
+    expect(live.textContent).toBe('');
+    c.unmount();
+    target.remove();
   });
 });
 
@@ -153,7 +177,7 @@ describe('LineChart touch readout', () => {
     unmount(c);
   });
 
-  it('lets go when the pinned cursor is tapped again, or on Escape (ignoring Escape behind an open dialog)', () => {
+  it('lets go when the pinned cursor is tapped again, or on Escape (deferring to dialogs, popovers, tooltips, inputs, and gChord)', () => {
     const series = [{ id: 'a', label: 'a', color: 'red', points: [0, 1, 2, 3, 4].map((x) => ({ x, y: x / 10 })) }];
     const { target, c, svg } = mountAt({ series, label: 'touch' }, 600);
     const tap = (clientX: number) => {
@@ -167,20 +191,64 @@ describe('LineChart touch readout', () => {
     expect(target.querySelector('.cursor')).toBeNull();
     tap(300);
     expect(target.querySelector('.cursor.pinned')).toBeTruthy();
-    const dlg = document.createElement('dialog');
-    dlg.setAttribute('open', '');
-    document.body.appendChild(dlg);
-    const blockedEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
-    document.dispatchEvent(blockedEsc);
+
+    // Open dialog, info popover, tooltip, active G-chord, and focused input all take Escape priority.
+    const blockers = [
+      Object.assign(document.createElement('dialog'), { open: true }),
+      Object.assign(document.createElement('div'), { className: 'info-pop open' }),
+      (() => {
+        const tip = document.createElement('div');
+        tip.id = 'folo-tooltip';
+        tip.setAttribute('data-show', '');
+        return tip;
+      })(),
+    ];
+    for (const el of blockers) {
+      document.body.appendChild(el);
+      const blockedEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+      document.dispatchEvent(blockedEsc);
+      flushSync();
+      expect(blockedEsc.defaultPrevented).toBe(false);
+      expect(target.querySelector('.cursor.pinned')).toBeTruthy();
+      el.remove();
+    }
+    const input = document.createElement('input');
+    document.body.appendChild(input);
+    const inputEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    input.dispatchEvent(inputEsc);
     flushSync();
-    expect(blockedEsc.defaultPrevented).toBe(false);
+    expect(inputEsc.defaultPrevented).toBe(false);
     expect(target.querySelector('.cursor.pinned')).toBeTruthy();
-    dlg.remove();
+    input.remove();
+
+    gChord.set(true);
+    try {
+      const chordEsc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+      document.dispatchEvent(chordEsc);
+      flushSync();
+      expect(chordEsc.defaultPrevented).toBe(false);
+      expect(target.querySelector('.cursor.pinned')).toBeTruthy();
+    } finally {
+      gChord.set(false);
+    }
+
     const esc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
     document.dispatchEvent(esc);
     flushSync();
     expect(esc.defaultPrevented).toBe(true);
     expect(target.querySelector('.cursor')).toBeNull();
+    unmount(c);
+  });
+
+  it('does not arm a phantom touch pin on an empty chart', () => {
+    const { c, svg } = mountAt({ series: [], label: 'empty' }, 400);
+    svg.dispatchEvent(new PointerEvent('pointerdown', { pointerType: 'touch', clientX: 200, clientY: 50, bubbles: true }));
+    svg.dispatchEvent(new PointerEvent('pointerup', { pointerType: 'touch', clientX: 200, clientY: 50, bubbles: true }));
+    flushSync();
+    const esc = new KeyboardEvent('keydown', { key: 'Escape', cancelable: true });
+    document.dispatchEvent(esc);
+    flushSync();
+    expect(esc.defaultPrevented).toBe(false);
     unmount(c);
   });
 });

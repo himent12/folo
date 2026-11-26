@@ -70,15 +70,30 @@ describe('Histogram', () => {
     expect(readout()).toBe('100 boxes');
   });
 
-  it('consumes Escape only while active, re-enters cleanly on arrows after Escape, ignores modifier arrows, and clears out-of-bounds selection when bins shrink', () => {
-    const counts = signal([0, 30, 50, 20]);
-    const edges = signal([0, 0.02, 0.05, 0.1, 1]);
+  it('consumes Escape only while active, defers to open popovers, steps 5 bins on Shift+Arrow, and stays idle when shrunk to empty', () => {
+    const counts = signal([0, 30, 50, 20, 10, 5, 15]);
+    const edges = signal([0, 0.02, 0.05, 0.1, 0.2, 0.4, 0.7, 1]);
+    const outOfBoundsLabels: number[] = [];
     const proto = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
     Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 400 });
     try {
       target = document.createElement('div');
       document.body.appendChild(target);
-      c = mountFw(() => <Histogram edges={edges.get()} counts={counts.get()} label="Box sizes" unit="boxes" />, target);
+      c = mountFw(
+        () => (
+          <Histogram
+            edges={edges.get()}
+            counts={counts.get()}
+            binLabel={(lo, hi, i) => {
+              if (i >= counts.peek().length) outOfBoundsLabels.push(i);
+              return `${lo}–${hi}`;
+            }}
+            label="Box sizes"
+            unit="boxes"
+          />
+        ),
+        target,
+      );
       window.dispatchEvent(new Event('resize'));
       target.querySelector('.hist')?.dispatchEvent(new Event('resize'));
       flushSync();
@@ -99,29 +114,54 @@ describe('Histogram', () => {
     svg.dispatchEvent(altLeft);
     flushSync();
     expect(altLeft.defaultPrevented).toBe(false);
-    expect(readout()).toBe('100 boxes');
+    expect(readout()).toBe('130 boxes');
 
-    // ArrowRight from idle lands on the first non-empty bin (30 boxes) without skipping it.
+    // ArrowRight from idle lands on the first non-empty bin (30 boxes), then Shift+ArrowRight jumps 5 bins to bin 6 (15 boxes).
     svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
     flushSync();
     expect(readout()).toContain('30 boxes');
+    svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', shiftKey: true, bubbles: true, cancelable: true }));
+    flushSync();
+    expect(readout()).toContain('15 boxes');
+
+    // Open info popover takes Escape priority over dismissing the focused histogram readout.
+    const pop = document.createElement('div');
+    pop.className = 'info-pop open';
+    document.body.appendChild(pop);
+    const blockedEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+    svg.dispatchEvent(blockedEsc);
+    flushSync();
+    expect(blockedEsc.defaultPrevented).toBe(false);
+    expect(readout()).toContain('15 boxes');
+    pop.remove();
 
     // Escape while active consumes the event.
     const activeEsc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
     svg.dispatchEvent(activeEsc);
     flushSync();
     expect(activeEsc.defaultPrevented).toBe(true);
-    expect(readout()).toBe('100 boxes');
+    expect(readout()).toBe('130 boxes');
 
-    // ArrowLeft from idle lands on the last bin (20 boxes).
+    // ArrowLeft from idle lands on the last bin (15 boxes).
     svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
     flushSync();
-    expect(readout()).toContain('20 boxes');
+    expect(readout()).toContain('15 boxes');
 
-    // Shrinking the bin count below the hovered index clears the selection instead of reading out of bounds.
+    // Shrinking the bin count below the hovered index clears selection without ever calling binLabel out of bounds.
     edges.set([0, 0.5, 1]);
     counts.set([10, 15]);
     flushSync();
     expect(readout()).toBe('25 boxes');
+    expect(outOfBoundsLabels).toEqual([]);
+
+    // Shrinking to empty and focusing the SVG keeps selection idle and tabindex=-1.
+    edges.set([]);
+    counts.set([]);
+    flushSync();
+    expect(svg.getAttribute('tabindex')).toBe('-1');
+    svg.dispatchEvent(new FocusEvent('focus'));
+    flushSync();
+    expect(readout()).toBe('0 boxes');
+    expect(outOfBoundsLabels).toEqual([]);
   });
 });
