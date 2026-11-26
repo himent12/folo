@@ -452,43 +452,103 @@ fn group_norm_and_instance_norm_match_cpu() {
     }
 
     // Large-offset translation invariance: sum(dx) == 0.
-    let big = GpuTensor::from_slice(&ctx, &[100_000_000.0, 100_000_008.0], &[2]).unwrap();
-    let y_big = GpuTensor::empty(&ctx, &[2], DType::F32).unwrap();
-    let m_big = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
-    let r_big = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
-    group_norm_forward(
-        &ctx,
-        big.raw(),
-        None,
-        None,
-        y_big.raw(),
-        m_big.raw(),
-        r_big.raw(),
-        (1, 1, 2),
-        1,
-        0.0,
-        DType::F32,
-    )
-    .unwrap();
-    let g_ones = GpuTensor::from_slice(&ctx, &[1.0, 1.0], &[2]).unwrap();
-    let dx_big = GpuTensor::empty(&ctx, &[2], DType::F32).unwrap();
-    group_norm_backward(
-        &ctx,
-        big.raw(),
-        g_ones.raw(),
-        None,
-        m_big.raw(),
-        r_big.raw(),
-        dx_big.raw(),
-        None,
-        None,
-        (1, 1, 2),
-        1,
-        DType::F32,
-    )
-    .unwrap();
-    let dxv = dx_big.to_vec().unwrap();
-    assert!((dxv[0] + dxv[1]).abs() < 1e-6, "GN translation invariance broken: {dxv:?}");
+    // Large-offset centering exactness (`[100_000_000, 100_000_008]` with `eps = 0`) and centering overflow
+    // guard (`[3e38, -3e38, -3e38, -3e38]`): verify exact outputs and gradients on both subgroup and portable paths.
+    for portable in [false, true] {
+        let _fg = ForceGuard::set(portable);
+        let spread = GpuTensor::from_slice(&ctx, &[3e38f32, -3e38, -3e38, -3e38], &[4]).unwrap();
+        let ys = GpuTensor::empty(&ctx, &[4], DType::F32).unwrap();
+        let ms = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        let rs = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        group_norm_forward(
+            &ctx,
+            spread.raw(),
+            None,
+            None,
+            ys.raw(),
+            ms.raw(),
+            rs.raw(),
+            (1, 1, 4),
+            1,
+            0.0,
+            DType::F32,
+        )
+        .unwrap();
+        let s3 = 3.0f32.sqrt();
+        assert_close(
+            &ys.to_vec().unwrap(),
+            &[s3, -1.0 / s3, -1.0 / s3, -1.0 / s3],
+            1e-5,
+            1e-5,
+            &format!("gn 3e38 spread fb={portable}"),
+        );
+
+        let big = GpuTensor::from_slice(&ctx, &[100_000_000.0, 100_000_008.0], &[2]).unwrap();
+        let y_big = GpuTensor::empty(&ctx, &[2], DType::F32).unwrap();
+        let m_big = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        let r_big = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        group_norm_forward(
+            &ctx,
+            big.raw(),
+            None,
+            None,
+            y_big.raw(),
+            m_big.raw(),
+            r_big.raw(),
+            (1, 1, 2),
+            1,
+            0.0,
+            DType::F32,
+        )
+        .unwrap();
+        assert_close(&y_big.to_vec().unwrap(), &[-1.0, 1.0], 1e-6, 1e-6, &format!("gn big y fb={portable}"));
+        let g_ones = GpuTensor::from_slice(&ctx, &[1.0, 1.0], &[2]).unwrap();
+        let dx_big = GpuTensor::empty(&ctx, &[2], DType::F32).unwrap();
+        let dw_big = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        let db_big = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        group_norm_backward(
+            &ctx,
+            big.raw(),
+            g_ones.raw(),
+            None,
+            m_big.raw(),
+            r_big.raw(),
+            dx_big.raw(),
+            Some(dw_big.raw()),
+            Some(db_big.raw()),
+            (1, 1, 2),
+            1,
+            DType::F32,
+        )
+        .unwrap();
+        assert_close(&dx_big.to_vec().unwrap(), &[0.0, 0.0], 1e-6, 1e-6, &format!("gn big dx fb={portable}"));
+        assert_close(&dw_big.to_vec().unwrap(), &[0.0], 1e-6, 1e-6, &format!("gn big dw fb={portable}"));
+        assert_close(&db_big.to_vec().unwrap(), &[2.0], 1e-6, 1e-6, &format!("gn big db fb={portable}"));
+
+        // Uncached large-offset group (`m_u = 1026 > 1024`) verifies no driver fast-math reassociation there either.
+        let big_u: Vec<f32> =
+            (0..1026).map(|i| if i % 2 == 0 { 100_000_000.0 } else { 100_000_008.0 }).collect();
+        let big_ut = GpuTensor::from_slice(&ctx, &big_u, &[1026]).unwrap();
+        let yu = GpuTensor::empty(&ctx, &[1026], DType::F32).unwrap();
+        let mu = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        let ru = GpuTensor::empty(&ctx, &[1], DType::F32).unwrap();
+        group_norm_forward(
+            &ctx,
+            big_ut.raw(),
+            None,
+            None,
+            yu.raw(),
+            mu.raw(),
+            ru.raw(),
+            (1, 1, 1026),
+            1,
+            0.0,
+            DType::F32,
+        )
+        .unwrap();
+        let want_u: Vec<f32> = (0..1026).map(|i| if i % 2 == 0 { -1.0 } else { 1.0 }).collect();
+        assert_close(&yu.to_vec().unwrap(), &want_u, 1e-5, 1e-5, &format!("gn uncached big y fb={portable}"));
+    }
 
     // F16 forward + backward parity when supported.
     if ctx.caps().shader_f16 {
@@ -560,6 +620,7 @@ fn tiled_sdpa_forward_matches_cpu() {
     let shapes: &[SdpaCase] = &[
         ((2, 1, 1, 1), "tiny 1x1x1"),
         ((2, 7, 13, 17), "odd cache_q d=17"),
+        ((2, 37, 13, 32), "sk < sq d=32"),
         ((3, 16, 32, 32), "aligned cache_q d=32"),
         ((2, 35, 70, 48), "non-pow2 cache_q d=48"),
         ((2, 65, 65, 64), "attention-like d=64"),
@@ -647,6 +708,15 @@ fn tiled_sdpa_forward_matches_cpu() {
     sdpa_forward(&ctx, gqe.raw(), gke.raw(), gve.raw(), goe.raw(), (b, sq, sk, d), 1.0, false, DType::F32)
         .unwrap();
     assert_close(&goe.to_vec().unwrap(), &want_ext, 1e-4, 1e-4, "sdpa extreme logits");
+
+    // Large V values (`1e38`) with equal zero logits stay finite (`1e38`, no unnormalized sum overflow).
+    let q_z = GpuTensor::from_slice(&ctx, &[0.0f32; 16], &[16]).unwrap();
+    let k_z = GpuTensor::from_slice(&ctx, &[0.0f32; 16], &[16]).unwrap();
+    let v_big = GpuTensor::from_slice(&ctx, &[1e38f32; 16], &[16]).unwrap();
+    let o_big = GpuTensor::empty(&ctx, &[16], DType::F32).unwrap();
+    sdpa_forward(&ctx, q_z.raw(), k_z.raw(), v_big.raw(), o_big.raw(), (1, 4, 4, 4), 0.5, false, DType::F32)
+        .unwrap();
+    assert_close(&o_big.to_vec().unwrap(), &[1e38f32; 16], 1e33, 1e-5, "sdpa large V 1e38");
 
     // Zero-edge shapes (sq=0 / b=0 -> Ok; sk=0 with sq>0 -> Err).
     let tiny = GpuTensor::from_slice(&ctx, &[1.0], &[1]).unwrap();

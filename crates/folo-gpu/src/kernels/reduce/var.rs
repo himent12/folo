@@ -227,15 +227,21 @@ fn run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) {
         let start = k * chunk;
         let end = min(start + chunk, units);
         let base = o * units;
+        // Shift all splits of row `o` by a common row origin so large offsets keep full f32 precision across
+        // Chan partial merges (variance is translation-invariant).
+        let x0 = V4(X[base]).x;
+        let anchor = select(0.0, x0, abs(x0) <= 1e30);
         if (VEC) {
+            let av = vec4<f32>(anchor);
             var n4 = 0.0;
             var m4 = vec4<f32>(0.0);
             var q4 = vec4<f32>(0.0);
             for (var i = start + lid; i < end; i += 256u) {
-                let v = V4(X[base + i]);
-                if (is_nonfinite1(v.x) || is_nonfinite1(v.y) || is_nonfinite1(v.z) || is_nonfinite1(v.w)) {
+                let raw = V4(X[base + i]);
+                if (is_nonfinite1(raw.x) || is_nonfinite1(raw.y) || is_nonfinite1(raw.z) || is_nonfinite1(raw.w)) {
                     nf = true;
                 }
+                let v = raw - av;
                 n4 += 1.0;
                 let d = v - m4;
                 m4 += d / n4;
@@ -251,8 +257,9 @@ fn run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) {
             }
         } else {
             for (var i = start + lid; i < end; i += 256u) {
-                let v = V4(X[base + i]).x;
-                if (is_nonfinite1(v)) { nf = true; }
+                let raw = V4(X[base + i]).x;
+                if (is_nonfinite1(raw)) { nf = true; }
+                let v = raw - anchor;
                 nt += 1.0;
                 let d = v - mt;
                 mt += d / nt;

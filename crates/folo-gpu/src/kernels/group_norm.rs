@@ -181,6 +181,8 @@ const GN_FWD_BODY: &str = r#"
 @group(0) @binding(5) var<storage, read_write> MEAN: array<f32>;
 @group(0) @binding(6) var<storage, read_write> RSTD: array<f32>;
 
+var<workgroup> sh_anchor: f32;
+
 fn apply_affine(xh: vec4<f32>, c: u32) -> E {
     var v = xh;
     if (HAS_W) { v *= W[c]; }
@@ -202,6 +204,16 @@ fn gn_fwd_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) {
     let base = row * m_u;
     let g_base = (row % groups) * cpg;
 
+    if (lid == 0u) {
+        var a = 0.0;
+        if (valid) {
+            let x0 = V4(X[base]).x;
+            if (abs(x0) <= 1e30) { a = x0; }
+        }
+        sh_anchor = a;
+    }
+    let anchor = workgroupUniformLoad(&sh_anchor);
+
     if (CACHE_ROW) {
         var v0 = vec4<f32>(0.0);
         var v1 = vec4<f32>(0.0);
@@ -220,27 +232,53 @@ fn gn_fwd_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) {
         if (h2) { v2 = V4(X[base + i2]); }
         if (h3) { v3 = V4(X[base + i3]); }
 
+        let av = vec4<f32>(anchor);
         var s = 0.0;
         var am = 0.0;
-        if (h0) { s += lane_sum(v0); am = max(am, lane_amax(v0)); }
-        if (h1) { s += lane_sum(v1); am = max(am, lane_amax(v1)); }
-        if (h2) { s += lane_sum(v2); am = max(am, lane_amax(v2)); }
-        if (h3) { s += lane_sum(v3); am = max(am, lane_amax(v3)); }
+        if (h0) { am = max(am, lane_amax(v0)); v0 -= av; s += lane_sum(v0); }
+        if (h1) { am = max(am, lane_amax(v1)); v1 -= av; s += lane_sum(v1); }
+        if (h2) { am = max(am, lane_amax(v2)); v2 -= av; s += lane_sum(v2); }
+        if (h3) { am = max(am, lane_amax(v3)); v3 -= av; s += lane_sum(v3); }
         let sm = reduce_sum_max(lid, sgid, lane, s, am);
-        var mean = sm.x * inv_m;
-        let raw_nonfinite = !is_finite1(sm.x) && sm.y > 0.0 && is_finite1(sm.y);
-        if (raw_nonfinite) {
+        let sum_nan = sm.x != sm.x;
+        let huge_range = !sum_nan && (!is_finite1(sm.x) || sm.y > 1e30) && sm.y > 0.0 && is_finite1(sm.y);
+        if (huge_range) {
+            let sv = vec4<i32>(-96i);
+            if (h0) { v0 = ldexp(V4(X[base + i0]), sv); }
+            if (h1) { v1 = ldexp(V4(X[base + i1]), sv); }
+            if (h2) { v2 = ldexp(V4(X[base + i2]), sv); }
+            if (h3) { v3 = ldexp(V4(X[base + i3]), sv); }
             var ss = 0.0;
-            if (h0) { ss += lane_sum(ldexp(v0, vec4<i32>(-32))); }
-            if (h1) { ss += lane_sum(ldexp(v1, vec4<i32>(-32))); }
-            if (h2) { ss += lane_sum(ldexp(v2, vec4<i32>(-32))); }
-            if (h3) { ss += lane_sum(ldexp(v3, vec4<i32>(-32))); }
-            mean = ldexp(reduce_sum1(lid, sgid, lane, ss) * inv_m, 32i);
+            if (h0) { ss += lane_sum(v0); }
+            if (h1) { ss += lane_sum(v1); }
+            if (h2) { ss += lane_sum(v2); }
+            if (h3) { ss += lane_sum(v3); }
+            let mean_s = reduce_sum1(lid, sgid, lane, ss) * inv_m;
+            let mean = ldexp(mean_s, 96i);
+            let msv = vec4<f32>(mean_s);
+            var sq_s = 0.0;
+            if (h0) { v0 -= msv; sq_s += lane_sum(v0 * v0); }
+            if (h1) { v1 -= msv; sq_s += lane_sum(v1 * v1); }
+            if (h2) { v2 -= msv; sq_s += lane_sum(v2 * v2); }
+            if (h3) { v3 -= msv; sq_s += lane_sum(v3 * v3); }
+            let var_s = reduce_sum1(lid, sgid, lane, sq_s) * inv_m;
+            let zero_var = var_s == 0.0;
+            let inv_rms_s = select(inverseSqrt(var_s), inverseSqrt(eps), zero_var);
+            let rstd = select(ldexp(inv_rms_s, -96i), inv_rms_s, zero_var);
+            if (!valid) { return; }
+            if (lid == 0u) { MEAN[row] = mean; RSTD[row] = rstd; }
+            if (h0) { Y[base + i0] = apply_affine(v0 * inv_rms_s, g_base + i0 / hw_u); }
+            if (h1) { Y[base + i1] = apply_affine(v1 * inv_rms_s, g_base + i1 / hw_u); }
+            if (h2) { Y[base + i2] = apply_affine(v2 * inv_rms_s, g_base + i2 / hw_u); }
+            if (h3) { Y[base + i3] = apply_affine(v3 * inv_rms_s, g_base + i3 / hw_u); }
+            return;
         }
-        if (h0) { v0 -= vec4<f32>(mean); }
-        if (h1) { v1 -= vec4<f32>(mean); }
-        if (h2) { v2 -= vec4<f32>(mean); }
-        if (h3) { v3 -= vec4<f32>(mean); }
+        let mean_delta = sm.x * inv_m;
+        let mdv = vec4<f32>(mean_delta);
+        if (h0) { v0 -= mdv; }
+        if (h1) { v1 -= mdv; }
+        if (h2) { v2 -= mdv; }
+        if (h3) { v3 -= mdv; }
 
         var sq = 0.0;
         var dam = 0.0;
@@ -274,7 +312,7 @@ fn gn_fwd_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) {
         }
         if (!valid) { return; }
         if (lid == 0u) {
-            MEAN[row] = mean;
+            MEAN[row] = anchor + mean_delta;
             RSTD[row] = rstd;
         }
         if (need_scale) {
@@ -292,33 +330,58 @@ fn gn_fwd_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) {
         return;
     }
 
+    let av = vec4<f32>(anchor);
     var s = 0.0;
     var am = 0.0;
     if (valid) {
         for (var i = lid; i < m_u; i += 256u) {
             let v = V4(X[base + i]);
-            s += lane_sum(v);
+            s += lane_sum(v - av);
             am = max(am, lane_amax(v));
         }
     }
     let sm = reduce_sum_max(lid, sgid, lane, s, am);
-    var mean = sm.x * inv_m;
-    let raw_nonfinite = !is_finite1(sm.x) && sm.y > 0.0 && is_finite1(sm.y);
-    if (raw_nonfinite) {
+    let sum_nan = sm.x != sm.x;
+    let huge_range = !sum_nan && (!is_finite1(sm.x) || sm.y > 1e30) && sm.y > 0.0 && is_finite1(sm.y);
+    if (huge_range) {
+        let sv = vec4<i32>(-96i);
         var ss = 0.0;
         if (valid) {
+            for (var i = lid; i < m_u; i += 256u) { ss += lane_sum(ldexp(V4(X[base + i]), sv)); }
+        }
+        let mean_s = reduce_sum1(lid, sgid, lane, ss) * inv_m;
+        let mean = ldexp(mean_s, 96i);
+        let msv = vec4<f32>(mean_s);
+        var sq_s = 0.0;
+        if (valid) {
             for (var i = lid; i < m_u; i += 256u) {
-                ss += lane_sum(ldexp(V4(X[base + i]), vec4<i32>(-32)));
+                let c = ldexp(V4(X[base + i]), sv) - msv;
+                sq_s += lane_sum(c * c);
             }
         }
-        mean = ldexp(reduce_sum1(lid, sgid, lane, ss) * inv_m, 32i);
+        let var_s = reduce_sum1(lid, sgid, lane, sq_s) * inv_m;
+        let zero_var = var_s == 0.0;
+        let inv_rms_s = select(inverseSqrt(var_s), inverseSqrt(eps), zero_var);
+        let rstd = select(ldexp(inv_rms_s, -96i), inv_rms_s, zero_var);
+        if (!valid) { return; }
+        if (lid == 0u) { MEAN[row] = mean; RSTD[row] = rstd; }
+        for (var i = lid; i < m_u; i += 256u) {
+            let c = ldexp(V4(X[base + i]), sv) - msv;
+            Y[base + i] = apply_affine(c * inv_rms_s, g_base + i / hw_u);
+        }
+        return;
     }
+    let mean_delta = sm.x * inv_m;
+    let mdv = vec4<f32>(mean_delta);
+    // Runtime-opaque zero mask prevents GPU drivers from reassociating `(x - av) - mdv` into `x - (av + mdv)`
+    // across loop-invariant uniforms in the uncached multi-pass path.
+    let no_reassoc = vec4<u32>(select(0u, 1u, rows == 0xffffffffu));
 
     var sq = 0.0;
     var dam = 0.0;
     if (valid) {
         for (var i = lid; i < m_u; i += 256u) {
-            let v = V4(X[base + i]) - vec4<f32>(mean);
+            let v = bitcast<vec4<f32>>(bitcast<vec4<u32>>(V4(X[base + i]) - av) | no_reassoc) - mdv;
             sq += lane_sum(v * v);
             dam = max(dam, lane_amax(v));
         }
@@ -340,7 +403,7 @@ fn gn_fwd_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) {
         var usq = 0.0;
         if (valid) {
             for (var i = lid; i < m_u; i += 256u) {
-                let v = V4(X[base + i]) - vec4<f32>(mean);
+                let v = bitcast<vec4<f32>>(bitcast<vec4<u32>>(V4(X[base + i]) - av) | no_reassoc) - mdv;
                 let u = ldexp(v, sv) * inv_adj;
                 usq += lane_sum(u * u);
             }
@@ -352,12 +415,12 @@ fn gn_fwd_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) {
     }
     if (!valid) { return; }
     if (lid == 0u) {
-        MEAN[row] = mean;
+        MEAN[row] = anchor + mean_delta;
         RSTD[row] = rstd;
     }
     let sv = vec4<i32>(shift_s);
     for (var i = lid; i < m_u; i += 256u) {
-        let v = V4(X[base + i]) - vec4<f32>(mean);
+        let v = bitcast<vec4<f32>>(bitcast<vec4<u32>>(V4(X[base + i]) - av) | no_reassoc) - mdv;
         let xh = select(v * rstd, (ldexp(v, sv) * inv_adj) * inv_rms_s, need_scale);
         Y[base + i] = apply_affine(xh, g_base + i / hw_u);
     }
@@ -373,6 +436,7 @@ const GN_BWD_DX_BODY: &str = r#"
 @group(0) @binding(4) var<storage, read> MEAN: array<f32>;
 @group(0) @binding(5) var<storage, read> RSTD: array<f32>;
 @group(0) @binding(6) var<storage, read_write> DX: array<E>;
+@group(0) @binding(7) var<storage, read_write> MU_XH: array<f32>;
 
 fn gn_bwd_dx_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) {
     let row = wid.y * nwg.x + wid.x;
@@ -442,12 +506,18 @@ fn gn_bwd_dx_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32)
         }
         let sums = reduce_sum3(lid, sgid, lane, s1, s2, s3);
         if (!valid) { return; }
-        let c2_d = sums.y * inv_m;
-        let c1_adj = sums.x * inv_m - (sums.z * inv_m) * c2_d;
-        if (h0) { DX[base + i0] = OUT(rstd * (gw0 - (vec4<f32>(c1_adj) + xh0 * c2_d))); }
-        if (h1) { DX[base + i1] = OUT(rstd * (gw1 - (vec4<f32>(c1_adj) + xh1 * c2_d))); }
-        if (h2) { DX[base + i2] = OUT(rstd * (gw2 - (vec4<f32>(c1_adj) + xh2 * c2_d))); }
-        if (h3) { DX[base + i3] = OUT(rstd * (gw3 - (vec4<f32>(c1_adj) + xh3 * c2_d))); }
+        // Re-center x_hat using its residual mean (`mu_xh = avg(x_hat)`) so large offsets where f32 `MEAN`
+        // rounded recover exact centered `x_hat_exact = x_hat - mu_xh` and exact `dx` without extra passes.
+        let mu_xh = sums.z * inv_m;
+        if (lid == 0u) { MU_XH[row] = mu_xh; }
+        let c1 = sums.x * inv_m;
+        let c2 = (sums.y - mu_xh * sums.x) * inv_m;
+        let c1v = vec4<f32>(c1);
+        let muv = vec4<f32>(mu_xh);
+        if (h0) { DX[base + i0] = OUT(rstd * (gw0 - c1v - (xh0 - muv) * c2)); }
+        if (h1) { DX[base + i1] = OUT(rstd * (gw1 - c1v - (xh1 - muv) * c2)); }
+        if (h2) { DX[base + i2] = OUT(rstd * (gw2 - c1v - (xh2 - muv) * c2)); }
+        if (h3) { DX[base + i3] = OUT(rstd * (gw3 - c1v - (xh3 - muv) * c2)); }
         return;
     }
 
@@ -466,13 +536,17 @@ fn gn_bwd_dx_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32)
     }
     let sums = reduce_sum3(lid, sgid, lane, s1, s2, s3);
     if (!valid) { return; }
-    let c2_d = sums.y * inv_m;
-    let c1_adj = sums.x * inv_m - (sums.z * inv_m) * c2_d;
+    let mu_xh = sums.z * inv_m;
+    if (lid == 0u) { MU_XH[row] = mu_xh; }
+    let c1 = sums.x * inv_m;
+    let c2 = (sums.y - mu_xh * sums.x) * inv_m;
+    let c1v = vec4<f32>(c1);
+    let muv = vec4<f32>(mu_xh);
     for (var i = lid; i < m_u; i += 256u) {
         let xh = (V4(X[base + i]) - vec4<f32>(mean)) * rstd;
         var gw = V4(G[base + i]);
         if (HAS_W) { gw *= W[g_base + i / hw_u]; }
-        DX[base + i] = OUT(rstd * (gw - (vec4<f32>(c1_adj) + xh * c2_d)));
+        DX[base + i] = OUT(rstd * (gw - c1v - (xh - muv) * c2));
     }
 }
 "#;
@@ -487,6 +561,7 @@ const GN_BWD_DWB_BODY: &str = r#"
 @group(0) @binding(4) var<storage, read> RSTD: array<f32>;
 @group(0) @binding(5) var<storage, read_write> DW: array<f32>;
 @group(0) @binding(6) var<storage, read_write> DB: array<f32>;
+@group(0) @binding(7) var<storage, read> MU_XH: array<f32>;
 
 fn gn_bwd_dwb_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32) {
     let wg = wid.y * nwg.x + wid.x;
@@ -514,7 +589,7 @@ fn gn_bwd_dwb_run(wid: vec3<u32>, nwg: vec3<u32>, lid: u32, sgid: u32, lane: u32
             let gv = V4(G[idx]);
             if (NEED_W) {
                 let st = ni * groups + g_idx;
-                let xh = (V4(X[idx]) - vec4<f32>(MEAN[st])) * RSTD[st];
+                let xh = (V4(X[idx]) - vec4<f32>(MEAN[st])) * RSTD[st] - vec4<f32>(MU_XH[st]);
                 aw += lane_sum(gv * xh);
             }
             if (NEED_B) {
@@ -580,12 +655,12 @@ static GN_FWD: KernelDef =
     KernelDef { name: "group_norm_fwd", storage: &[R, R, R, RW, RW, RW], source: Source::Generated(gen_fwd) };
 static GN_BWD_DX: KernelDef = KernelDef {
     name: "group_norm_bwd_dx",
-    storage: &[R, R, R, R, R, RW],
+    storage: &[R, R, R, R, R, RW, RW],
     source: Source::Generated(gen_bwd_dx),
 };
 static GN_BWD_DWB: KernelDef = KernelDef {
     name: "group_norm_bwd_dwb",
-    storage: &[R, R, R, R, RW, RW],
+    storage: &[R, R, R, R, RW, RW, R],
     source: Source::Generated(gen_bwd_dwb),
 };
 
@@ -760,9 +835,10 @@ pub fn group_norm_backward(
     )?;
     let p_dx =
         Params::new().uz(rows)?.uz(m_u)?.uz(hw_u)?.uz(groups)?.uz(cpg)?.f((1.0 / m_elems as f64) as f32);
+    let mu_xh_buf = ctx.alloc(DType::F32.bytes(rows))?;
     ctx.dispatch(
         &k_dx,
-        &[x, grad, weight.unwrap_or(ctx.dummy()), mean, rstd, dx],
+        &[x, grad, weight.unwrap_or(ctx.dummy()), mean, rstd, dx, mu_xh_buf.raw()],
         &p_dx,
         ctx.grid_1d(rows as u64 * 256, 256)?,
     )?;
@@ -791,12 +867,12 @@ pub fn group_norm_backward(
         let scratch_b = dbias.is_none().then(|| ctx.alloc(4)).transpose()?;
         let dw_b = dweight.unwrap_or_else(|| scratch_w.as_ref().unwrap().raw());
         let db_b = dbias.unwrap_or_else(|| scratch_b.as_ref().unwrap().raw());
-        ctx.dispatch(&k_dwb, &[x, grad, mean, rstd, dw_b, db_b], &p_dwb, grid)?;
+        ctx.dispatch(&k_dwb, &[x, grad, mean, rstd, dw_b, db_b, mu_xh_buf.raw()], &p_dwb, grid)?;
     } else {
         let part_bytes = DType::F32.bytes(total_wgs);
         let pw = ctx.alloc(if dweight.is_some() { part_bytes } else { 4 })?;
         let pb = ctx.alloc(if dbias.is_some() { part_bytes } else { 4 })?;
-        ctx.dispatch(&k_dwb, &[x, grad, mean, rstd, pw.raw(), pb.raw()], &p_dwb, grid)?;
+        ctx.dispatch(&k_dwb, &[x, grad, mean, rstd, pw.raw(), pb.raw(), mu_xh_buf.raw()], &p_dwb, grid)?;
         if let Some(dw) = dweight {
             reduce::reduce_as(
                 ctx,

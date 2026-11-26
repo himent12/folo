@@ -589,6 +589,30 @@ fn reduce_var_fused_paths_and_edges_match_cpu() {
         );
     }
 
+    // Split-K large-offset precision: repeating `[a - 0.125, a, a, a + 0.125]` at `a = 1_572_864` (where pair
+    // means round to `a` without a common row origin) and `1e5 + randn` on 9,000-element rows.
+    let a = 1_572_864.0f32;
+    let pat = [a - 0.125, a, a, a + 0.125];
+    let shifted_pat = Tensor::from_vec(pat.into_iter().cycle().take(8192).collect(), [1, 8192]).unwrap();
+    let shifted_rand = randn(&[2, 9000], 799).add_scalar(1e5).unwrap();
+    for portable in [false, true] {
+        let _fg = ForceGuard::set(portable);
+        let got_pat =
+            shifted_pat.to_device(dev).unwrap().var(1, false, false).unwrap().to_vec::<f32>().unwrap();
+        assert!(
+            (got_pat[0] - 0.0078125).abs() < 1e-6,
+            "split-k anchored variance fb={portable}: got {}, want 0.0078125",
+            got_pat[0]
+        );
+        assert_close_t(
+            &shifted_rand.to_device(dev).unwrap().var(1, true, false).unwrap(),
+            &shifted_rand.var(1, true, false).unwrap(),
+            2e-3,
+            2e-3,
+            &format!("var split-k 1e5 offset fb={portable}"),
+        );
+    }
+
     // Dispatch trace check: fused single-dispatch row/col variance (and 2-dispatch split-K) instead of 5-op composite.
     let fresh = crate::GpuContext::new().unwrap();
     let backend = crate::GpuBackend::new(fresh.clone(), dev);

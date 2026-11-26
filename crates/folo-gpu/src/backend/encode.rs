@@ -4,7 +4,7 @@
 use folo_core::backend::{Conv2dParams, UnaryOp, View};
 use folo_core::{DType as CoreDType, Error, Result, Shape, Storage};
 
-use super::convert::{Core, bn_act, f32_only, kdt, nchw, split3, strided_of};
+use super::convert::{Core, bn_act, kdt, nchw, split3, strided_of};
 use super::{BACKEND_NAME, GpuBackend};
 use crate::error::GpuError;
 use crate::kernels::conv::{Conv2dDesc, ConvInput};
@@ -195,11 +195,29 @@ impl GpuBackend {
         input_shape: &Shape,
     ) -> Result<Storage> {
         let op = "index_select_backward";
-        f32_only(&grad, op)?;
+        if grad.storage.dtype() != CoreDType::F32 {
+            return Err(Error::UnsupportedDType { op, dtype: grad.storage.dtype() });
+        }
+        if !matches!(idx.storage.dtype(), CoreDType::I64 | CoreDType::U32) {
+            return Err(Error::UnsupportedDType { op, dtype: idx.storage.dtype() });
+        }
         self.check_fits(&grad, op)?;
         self.check_fits(&idx, op)?;
         if dim >= input_shape.rank() {
             return Err(Error::DimOutOfRange { op, dim: dim as isize, rank: input_shape.rank() });
+        }
+        if idx.shape().rank() != 1 {
+            return Err(Error::InvalidShape {
+                op,
+                shape: idx.shape().clone(),
+                msg: "index must be 1-D".into(),
+            });
+        }
+        let mut exp_dims = input_shape.dims().to_vec();
+        exp_dims[dim] = idx.layout.numel();
+        let expected_grad = Shape::from(exp_dims);
+        if grad.shape() != &expected_grad {
+            return Err(Error::ShapeMismatch { op, lhs: expected_grad, rhs: grad.shape().clone() });
         }
         let (outer, d, inner) = split3(input_shape.dims(), dim);
         let len = input_shape.numel();
@@ -223,11 +241,24 @@ impl GpuBackend {
         input_shape: &Shape,
     ) -> Result<Storage> {
         let op = "gather_backward";
-        f32_only(&grad, op)?;
+        if grad.storage.dtype() != CoreDType::F32 {
+            return Err(Error::UnsupportedDType { op, dtype: grad.storage.dtype() });
+        }
+        if !matches!(idx.storage.dtype(), CoreDType::I64 | CoreDType::U32) {
+            return Err(Error::UnsupportedDType { op, dtype: idx.storage.dtype() });
+        }
         self.check_fits(&grad, op)?;
         self.check_fits(&idx, op)?;
         if dim >= input_shape.rank() {
             return Err(Error::DimOutOfRange { op, dim: dim as isize, rank: input_shape.rank() });
+        }
+        if idx.shape().rank() != input_shape.rank()
+            || idx.shape().dims().iter().enumerate().any(|(i, &s)| i != dim && s != input_shape.dims()[i])
+        {
+            return Err(Error::ShapeMismatch { op, lhs: input_shape.clone(), rhs: idx.shape().clone() });
+        }
+        if grad.shape() != idx.shape() {
+            return Err(Error::ShapeMismatch { op, lhs: idx.shape().clone(), rhs: grad.shape().clone() });
         }
         let (outer, d, inner) = split3(input_shape.dims(), dim);
         let di = idx.shape().dims()[dim];

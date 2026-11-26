@@ -147,5 +147,97 @@ fn gather_index_add_vec4_and_direct_backwards_match_cpu() {
         )
         .unwrap();
     assert_eq!(fresh.trace_end().iter().map(|o| o.name).collect::<Vec<_>>(), vec!["clear", "scatter_add"]);
+
+    // Direct kernel test for out-of-range / negative I64 and out-of-range U32 indices on `gather_vec4` /
+    // `index_add_vec4` (`inner = 4`): bad lanes must produce 0 in `gather` and be skipped in `index_add`.
+    let src_data: Vec<f32> = (1..=32).map(|v| v as f32).collect();
+    let x_raw = fresh.upload(bytemuck::cast_slice(&src_data)).unwrap();
+    let bad_i64: Vec<i64> = vec![0, -1, i64::MIN, 1i64 << 33, 4, 3, 2, -5]; // [outer=1, di=2, inner=4]
+    let bad_i64_buf = fresh.upload(bytemuck::cast_slice(&bad_i64)).unwrap();
+    let g_out = fresh.alloc(8 * 4).unwrap();
+    crate::kernels::strided::gather(
+        &fresh,
+        crate::kernels::strided::Elem::F32,
+        x_raw.raw(),
+        (1, 4, 4),
+        crate::kernels::strided::Indices { buf: bad_i64_buf.raw(), i64: true, len: 8 },
+        2,
+        g_out.raw(),
+    )
+    .unwrap();
+    let got_g: Vec<f32> = bytemuck::pod_collect_to_vec(&fresh.read(g_out.raw(), 0, 8 * 4).unwrap());
+    // row 0: [x[0,0]=1, BAD=0, BAD=0, BAD=0]; row 1: [BAD=0, x[3,1]=14, x[2,2]=11, BAD=0].
+    assert_eq!(got_g, vec![1.0, 0.0, 0.0, 0.0, 0.0, 14.0, 11.0, 0.0]);
+
+    let bad_u32: Vec<u32> = vec![1, 4, u32::MAX, 2]; // [outer=1, di=1, inner=4]
+    let bad_u32_buf = fresh.upload(bytemuck::cast_slice(&bad_u32)).unwrap();
+    let g_out_u = fresh.alloc(4 * 4).unwrap();
+    crate::kernels::strided::gather(
+        &fresh,
+        crate::kernels::strided::Elem::F32,
+        x_raw.raw(),
+        (1, 4, 4),
+        crate::kernels::strided::Indices { buf: bad_u32_buf.raw(), i64: false, len: 4 },
+        1,
+        g_out_u.raw(),
+    )
+    .unwrap();
+    let got_gu: Vec<f32> = bytemuck::pod_collect_to_vec(&fresh.read(g_out_u.raw(), 0, 4 * 4).unwrap());
+    assert_eq!(got_gu, vec![5.0, 0.0, 0.0, 12.0]);
+
+    let ia_out = fresh.upload(bytemuck::cast_slice(&[0.0f32; 16])).unwrap();
+    let ia_src = fresh.upload(bytemuck::cast_slice(&[1.0f32; 16])).unwrap();
+    let ia_idx_i64 = fresh.upload(bytemuck::cast_slice(&[0i64, -1, 4, 1i64 << 33])).unwrap();
+    crate::kernels::strided::index_add(
+        &fresh,
+        ia_out.raw(),
+        (1, 4, 4),
+        crate::kernels::strided::Indices { buf: ia_idx_i64.raw(), i64: true, len: 4 },
+        ia_src.raw(),
+    )
+    .unwrap();
+    let got_ia: Vec<f32> = bytemuck::pod_collect_to_vec(&fresh.read(ia_out.raw(), 0, 16 * 4).unwrap());
+    assert_eq!(got_ia, vec![1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+
+    // Backend validation on direct backward hooks: invalid grad dtype (U32), wrong idx rank (no panic),
+    // mismatched grad shape, and invalid idx dtype even when output shape is empty.
+    let u32_s = backend.full(dev, DType::U32, 128, 1.0).unwrap();
+    let f32_s = backend.full(dev, DType::F32, 128, 1.0).unwrap();
+    let l_2416 = Layout::contiguous(Shape::new(&[2, 4, 16]));
+    let l_1d = Layout::contiguous(Shape::new(&[4]));
+    let l_bad_grad = Layout::contiguous(Shape::new(&[2, 3, 16]));
+    assert!(
+        backend.index_select_backward(View::new(&u32_s, &l_2416), 1, View::new(&u32_s, &l_1d), &xs).is_err()
+    );
+    assert!(
+        backend
+            .index_select_backward(View::new(&f32_s, &l_bad_grad), 1, View::new(&u32_s, &l_1d), &xs)
+            .is_err()
+    );
+    assert!(
+        backend
+            .index_select_backward(
+                View::new(&f32_s, &Layout::contiguous(Shape::new(&[0, 4, 16]))),
+                1,
+                View::new(&f32_s, &l_1d),
+                &Shape::new(&[0, 8, 16]),
+            )
+            .is_err()
+    );
+    assert!(backend.gather_backward(View::new(&f32_s, &l_2416), 1, View::new(&u32_s, &l_1d), &xs).is_err());
+    assert!(backend.gather_backward(View::new(&u32_s, &l_2416), 1, View::new(&u32_s, &l_2416), &xs).is_err());
+    assert!(
+        backend.gather_backward(View::new(&f32_s, &l_bad_grad), 1, View::new(&u32_s, &l_2416), &xs).is_err()
+    );
+    assert!(
+        backend
+            .gather_backward(
+                View::new(&f32_s, &Layout::contiguous(Shape::new(&[0, 4, 16]))),
+                1,
+                View::new(&f32_s, &Layout::contiguous(Shape::new(&[0, 4, 16]))),
+                &Shape::new(&[0, 8, 16]),
+            )
+            .is_err()
+    );
     assert!(fresh.kernels_without_registry().is_empty());
 }

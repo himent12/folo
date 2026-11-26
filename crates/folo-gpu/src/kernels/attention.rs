@@ -278,18 +278,23 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
              \x20       {m_var} = mn;\n\
              \x20     }}\n\
              \x20     let lb = row_sum32(ty, tx, pv);\n\
-             \x20     {l_var} = {l_var} * alpha + lb;\n\
-             \x20     sh_p[{r_var} * 32u + tx] = pv;"
+             \x20     let l_old = {l_var};\n\
+             \x20     let l_new = l_old * alpha + lb;\n\
+             \x20     let l_ok = l_new > 0.0 && (bitcast<u32>(l_new) & 0x7fffffffu) < 0x7f800000u;\n\
+             \x20     let inv_ln = select(1.0, 1.0 / l_new, l_ok);\n\
+             \x20     let o_scale = select(alpha, (l_old * alpha) * inv_ln, l_ok);\n\
+             \x20     {l_var} = l_new;\n\
+             \x20     sh_p[{r_var} * 32u + tx] = pv * inv_ln;"
         );
         for c in 0..d_chunks {
-            let _ = writeln!(s, "      o{r_idx}_{c} *= alpha;");
+            let _ = writeln!(s, "      o{r_idx}_{c} *= o_scale;");
         }
         s.push_str("    }\n");
     }
     s.push_str("    workgroupBarrier();\n");
     s.push_str("    let k_len = min(32u, sk - k0);\n");
 
-    // Accumulate O += P @ V for each active output head-dim chunk.
+    // Accumulate O += P_norm @ V for each active output head-dim chunk.
     for c in 0..d_chunks {
         let off = c * 32;
         let _ = write!(
@@ -327,8 +332,13 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
     }
     s.push_str("  }\n");
 
-    // Final normalization and writeback.
-    s.push_str("  let inv_l0 = 1.0 / l0;\n  let inv_l1 = 1.0 / l1;\n");
+    // `o` is already normalized for valid finite `l > 0`; propagate NaN when `l == 0` or non-finite.
+    s.push_str(
+        "  let ok0 = l0 > 0.0 && (bitcast<u32>(l0) & 0x7fffffffu) < 0x7f800000u;\n\
+         \x20 let ok1 = l1 > 0.0 && (bitcast<u32>(l1) & 0x7fffffffu) < 0x7f800000u;\n\
+         \x20 let fin0 = select(1.0 / l0, 1.0, ok0);\n\
+         \x20 let fin1 = select(1.0 / l1, 1.0, ok1);\n",
+    );
     for c in 0..d_chunks {
         let off = c * 32;
         let _ = write!(
@@ -336,8 +346,8 @@ fn gen_sdpa_fwd(spec: &Spec) -> String {
             "  {{\n\
              \x20   let d_col = d_out_base + {off}u + tx;\n\
              \x20   if (d_col < d) {{\n\
-             \x20     if (q_row0 < sq) {{ O[q_base + q_row0 * d + d_col] = T(o0_{c} * inv_l0); }}\n\
-             \x20     if (q_row1 < sq) {{ O[q_base + q_row1 * d + d_col] = T(o1_{c} * inv_l1); }}\n\
+             \x20     if (q_row0 < sq) {{ O[q_base + q_row0 * d + d_col] = T(o0_{c} * fin0); }}\n\
+             \x20     if (q_row1 < sq) {{ O[q_base + q_row1 * d + d_col] = T(o1_{c} * fin1); }}\n\
              \x20   }}\n\
              \x20 }}\n"
         );
