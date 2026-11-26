@@ -42,10 +42,12 @@ mod lion;
 mod lookahead;
 mod musgd;
 mod ortho;
+mod prodigy;
 mod radam;
 mod schedulefree;
 mod sgd;
 pub(crate) mod simd;
+mod sophia;
 
 use std::collections::HashMap;
 
@@ -74,6 +76,11 @@ pub use ortho::{
     POLAR5_COEFFS, muon_scale, muon_scale_geo, orthogonalize, orthogonalize_many, orthogonalize_many_with,
     orthogonalize_with,
 };
+pub use prodigy::{
+    PRODIGY_DEFAULT_BETA1, PRODIGY_DEFAULT_BETA2, PRODIGY_DEFAULT_D_COEF, PRODIGY_DEFAULT_D0,
+    PRODIGY_DEFAULT_EPS, PRODIGY_DEFAULT_LR, PRODIGY_DEFAULT_WEIGHT_DECAY, Prodigy, ProdigyConfig,
+    ProdigyContract, ProdigyGroupContract,
+};
 pub use radam::{
     RADAM_DEFAULT_BETA1, RADAM_DEFAULT_BETA2, RADAM_DEFAULT_EPS, RADAM_DEFAULT_LR,
     RADAM_DEFAULT_WEIGHT_DECAY, RAdam, RAdamConfig, RAdamContract, RAdamGroupContract, RAdamRectification,
@@ -85,6 +92,11 @@ pub use schedulefree::{
     ScheduleFreeGroupContract,
 };
 pub use sgd::Sgd;
+pub use sophia::{
+    HutchinsonDist, SOPHIA_DEFAULT_BETA1, SOPHIA_DEFAULT_BETA2, SOPHIA_DEFAULT_EPS, SOPHIA_DEFAULT_LR,
+    SOPHIA_DEFAULT_RHO, SOPHIA_DEFAULT_UPDATE_PERIOD, SOPHIA_DEFAULT_WEIGHT_DECAY, SophiaConfig,
+    SophiaContract, SophiaG, SophiaGroupContract,
+};
 
 use crate::module::Module;
 use crate::{BatchNorm2d, Error, Result};
@@ -694,6 +706,10 @@ impl StandardGroups {
                 bn_ids.insert(ls.gamma.id());
             } else if let Some(rn) = (m as &dyn std::any::Any).downcast_ref::<crate::RmsNorm>() {
                 if let Some(w) = &rn.weight {
+                    bn_ids.insert(w.id());
+                }
+            } else if let Some(ln) = (m as &dyn std::any::Any).downcast_ref::<crate::LayerNorm>() {
+                if let Some(w) = &ln.weight {
                     bn_ids.insert(w.id());
                 }
             } else if let Some(conv) = (m as &dyn std::any::Any).downcast_ref::<crate::Conv2d>() {
