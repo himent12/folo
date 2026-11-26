@@ -103,9 +103,16 @@ impl Render for FoloApp {
         let sidebar = self.sidebar(window, cx).into_any_element();
         *self.key_hint.borrow_mut() = None;
         if self.menu_open.is_some() || self.export_open {
-            let scroll_y = self.menu_scroll_offset();
-            if self.menu_typeahead.scroll_moved(scroll_y) {
+            if self.menu_trigger_clipped_out() {
                 self.close_menus();
+            } else if self.menu_trigger.get().is_some()
+                && self.reveal_pending == 0
+                && !super::focus::reveal_pending()
+            {
+                let scroll_y = self.menu_scroll_offset();
+                if self.menu_typeahead.scroll_moved(scroll_y) {
+                    self.close_menus();
+                }
             }
         } else {
             self.menu_typeahead.reset_scroll_anchor();

@@ -27,15 +27,14 @@ pub struct SelectTypeahead {
 const TYPEAHEAD_WINDOW: std::time::Duration = std::time::Duration::from_millis(800);
 
 impl SelectTypeahead {
-    /// Clears any buffered prefix (called when a menu closes, switches, or navigates away).
+    /// Clears any buffered typeahead prefix without resetting the popup's scroll anchor.
     pub fn clear(&mut self) {
         self.query.clear();
         self.last = None;
         self.menu = None;
-        self.scroll_anchor = None;
     }
 
-    /// Clears only the recorded scroll anchor (called on frames when no popup menu is open).
+    /// Clears the recorded scroll anchor (called on popup open/close and when no popup is open).
     pub(crate) fn reset_scroll_anchor(&mut self) {
         self.scroll_anchor = None;
     }
@@ -148,37 +147,43 @@ impl FoloApp {
             self.menu_open = None;
             self.menu_trigger.set(None);
             self.menu_typeahead.clear();
+            self.menu_typeahead.reset_scroll_anchor();
             self.export_open = false;
         }
         was_open
     }
 
+    /// The enclosing scroll container for the currently active popup, if any.
+    pub(crate) fn menu_scroll_handle(&self) -> Option<folo_ui::ScrollHandle> {
+        if self.new_run.is_some() || self.synth.is_some() || self.cloud.connect.is_some() {
+            Some(self.dialog_scroll.clone())
+        } else if self.modal_open() || matches!(self.route, crate::app::Route::Dataset(_)) {
+            None
+        } else if self.route == crate::app::Route::Playground {
+            Some(self.play_side_scroll.clone())
+        } else {
+            Some(self.page_scroll.clone())
+        }
+    }
+
     /// The viewport bounds clipping an open popup's trigger, when its enclosing scroll container
     /// is mounted and laid out.
     pub(crate) fn menu_clip_bounds(&self) -> Option<folo_ui::Bounds<folo_ui::Pixels>> {
-        let b = if self.new_run.is_some() || self.synth.is_some() || self.cloud.connect.is_some() {
-            self.dialog_scroll.bounds()
-        } else if self.modal_open() || matches!(self.route, crate::app::Route::Dataset(_)) {
-            return None;
-        } else if self.route == crate::app::Route::Playground {
-            self.play_side_scroll.bounds()
-        } else {
-            self.page_scroll.bounds()
-        };
+        let b = self.menu_scroll_handle()?.bounds();
         (b.size.height > px(0.)).then_some(b)
     }
 
     /// Vertical scroll offset of the active popup's enclosing scroll container, if any.
     pub(crate) fn menu_scroll_offset(&self) -> Option<folo_ui::Pixels> {
-        if self.new_run.is_some() || self.synth.is_some() || self.cloud.connect.is_some() {
-            Some(self.dialog_scroll.offset().y)
-        } else if self.modal_open() || matches!(self.route, crate::app::Route::Dataset(_)) {
-            None
-        } else if self.route == crate::app::Route::Playground {
-            Some(self.play_side_scroll.offset().y)
-        } else {
-            Some(self.page_scroll.offset().y)
-        }
+        self.menu_scroll_handle().map(|h| h.offset().y)
+    }
+
+    /// True once the active popup's trigger has been measured and lies completely outside its
+    /// enclosing scroll viewport.
+    pub(crate) fn menu_trigger_clipped_out(&self) -> bool {
+        let Some(b) = self.menu_trigger.get() else { return false };
+        let Some(clip) = self.menu_clip_bounds() else { return false };
+        b.bottom() <= clip.top() || b.top() >= clip.bottom()
     }
 
     /// Dropdown trigger that opens a listbox under itself.
@@ -316,10 +321,24 @@ impl FoloApp {
             .active(|s| s.bg(t.bg_active))
             .when(open, |d| {
                 let cell = self.menu_trigger.clone();
-                // Where the trigger is decides where the menu fits; a move redraws once.
+                let scroll_handle = self.menu_scroll_handle();
+                // Where the trigger is decides where the menu fits; if opened while clipped out of
+                // its scroll container (e.g. keyboard activation after scrolling away), reveal it
+                // before recording its anchor bounds and mounting the popup.
                 d.child(
                     folo_ui::canvas(
                         move |b, window, _| {
+                            if cell.get().is_none()
+                                && let Some(h) = &scroll_handle
+                            {
+                                let vp = h.bounds();
+                                if vp.size.height > px(0.)
+                                    && (b.top() < vp.top() || b.bottom() > vp.bottom())
+                                    && crate::app::reveal_bounds_in_scroll(b, h, window)
+                                {
+                                    return;
+                                }
+                            }
                             if cell.get() != Some(b) {
                                 cell.set(Some(b));
                                 // refresh() is ignored mid-draw; this schedules the next frame.
@@ -345,6 +364,7 @@ impl FoloApp {
                 let opening = this.menu_open != Some(key);
                 this.menu_open = if opening { Some(key) } else { None };
                 this.menu_trigger.set(None);
+                this.menu_typeahead.reset_scroll_anchor();
                 if opening {
                     this.export_open = false;
                 }
@@ -359,17 +379,20 @@ impl FoloApp {
                 match ev.keystroke.key.as_str() {
                     _ if n == 0 => return,
                     "enter" | "space" if is_open => {
+                        let visible = this.menu_trigger.get().is_some() && !this.menu_trigger_clipped_out();
                         let pick = this.menu_hl.min(n - 1);
                         this.menu_open = None;
                         this.menu_trigger.set(None);
                         this.menu_typeahead.clear();
-                        if pick != selected && !dead[pick] {
+                        this.menu_typeahead.reset_scroll_anchor();
+                        if visible && pick != selected && !dead[pick] {
                             keys(this, pick, window, cx);
                         }
                     }
                     "enter" | "space" | "down" | "up" if !is_open => {
                         this.menu_open = Some(key);
                         this.menu_trigger.set(None);
+                        this.menu_typeahead.reset_scroll_anchor();
                         this.export_open = false;
                         this.menu_hl = initial_hl;
                         this.menu_typeahead.clear();
@@ -455,11 +478,11 @@ impl FoloApp {
                 14.,
                 t.text_tertiary,
             ));
-        // Below the trigger when it fits, else above; never taller than the room there (8 px margin),
-        // and never extending over the title bar or enclosing dialog header.
+        // Below the trigger when it fits, else above; never taller than the room there (8 px margin
+        // plus 4 px gap on both sides), and never extending over the title bar or dialog header.
         let want = (n as f32 * 33. + 8.).min(288.);
         let top_edge =
-            self.menu_clip_bounds().map_or(tsize::TOPBAR, |c| (f32::from(c.top()) + 8.).max(tsize::TOPBAR));
+            self.menu_clip_bounds().map_or(tsize::TOPBAR, |c| f32::from(c.top()).max(tsize::TOPBAR)) + 12.;
         let (up, max_h) = match self.menu_trigger.get() {
             Some(b) if open => {
                 let vh = f32::from(window.viewport_size().height);
@@ -473,7 +496,8 @@ impl FoloApp {
             }
             _ => (false, 288.),
         };
-        let show_menu = open && !empty;
+        let show_menu =
+            open && !empty && self.menu_trigger.get().is_some() && !self.menu_trigger_clipped_out();
         // Measured on the first open frame: until then, the trigger's own width.
         let wide = self.menu_trigger.get().filter(|_| show_menu).map(|b| {
             menu_box((f32::from(b.left()), f32::from(b.right())), f32::from(window.viewport_size().width))

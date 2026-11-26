@@ -392,6 +392,7 @@ impl FoloApp {
                     let opening = !this.export_open;
                     this.export_open = opening;
                     this.menu_trigger.set(None);
+                    this.menu_typeahead.reset_scroll_anchor();
                     if opening {
                         this.menu_open = None;
                         this.menu_typeahead.clear();
@@ -403,9 +404,9 @@ impl FoloApp {
             // Captured before the button's own Enter/Space toggle.
             .capture_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, _, cx| {
                 if this.export_open && matches!(ev.keystroke.key.as_str(), "enter" | "space") {
-                    if key_usable.is_empty() {
-                        this.export_open = false;
-                        this.menu_trigger.set(None);
+                    let visible = this.menu_trigger.get().is_some() && !this.menu_trigger_clipped_out();
+                    if key_usable.is_empty() || !visible {
+                        this.close_menus();
                     } else {
                         let pick =
                             if key_usable.contains(&this.export_hl) { this.export_hl } else { first_usable };
@@ -421,9 +422,21 @@ impl FoloApp {
             }))
             .when(open, |d| {
                 let cell = self.menu_trigger.clone();
+                let scroll_handle = self.menu_scroll_handle();
                 d.child(
                     folo_ui::canvas(
                         move |b, window, _| {
+                            if cell.get().is_none()
+                                && let Some(h) = &scroll_handle
+                            {
+                                let vp = h.bounds();
+                                if vp.size.height > px(0.)
+                                    && (b.top() < vp.top() || b.bottom() > vp.bottom())
+                                    && crate::app::reveal_bounds_in_scroll(b, h, window)
+                                {
+                                    return;
+                                }
+                            }
                             if cell.get() != Some(b) {
                                 cell.set(Some(b));
                                 window.request_animation_frame();
@@ -443,6 +456,7 @@ impl FoloApp {
                     "down" | "up" if !open => {
                         this.export_open = true;
                         this.menu_trigger.set(None);
+                        this.menu_typeahead.reset_scroll_anchor();
                         this.menu_open = None;
                         this.menu_typeahead.clear();
                         this.export_hl = first_usable;
@@ -468,9 +482,10 @@ impl FoloApp {
             }));
         let export_w = (f32::from(window.viewport_size().width) - 16.).clamp(0., 300.);
         let export_want = options.len() as f32 * 52. + 10.;
-        let export_top_edge = self.menu_clip_bounds().map_or(crate::theme::size::TOPBAR, |c| {
-            (f32::from(c.top()) + 8.).max(crate::theme::size::TOPBAR)
-        });
+        let export_top_edge = self
+            .menu_clip_bounds()
+            .map_or(crate::theme::size::TOPBAR, |c| f32::from(c.top()).max(crate::theme::size::TOPBAR))
+            + 12.;
         let export_up = match self.menu_trigger.get() {
             Some(b) if open => {
                 let vh = f32::from(window.viewport_size().height);
@@ -480,77 +495,79 @@ impl FoloApp {
             }
             _ => false,
         };
-        let menu = open.then(|| {
-            let mid = m.id.clone();
-            folo_ui::deferred(
-                div()
-                    .absolute()
-                    .when(!export_up, |d| d.top(px(34.)))
-                    .when(export_up, |d| d.bottom(px(34.)))
-                    .right_0()
-                    .w(px(export_w))
-                    .occlude()
-                    .on_mouse_down_out(cx.listener(|this, ev: &folo_ui::MouseDownEvent, _, cx| {
-                        let on_trigger = this.menu_trigger.get().is_some_and(|b| b.contains(&ev.position));
-                        if this.export_open && !on_trigger {
-                            this.export_open = false;
-                            this.menu_trigger.set(None);
-                            cx.notify();
-                        }
-                    }))
-                    .p(px(4.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(1.))
-                    .rounded(px(radius::LG))
-                    .bg(t.bg_overlay)
-                    .border_1()
-                    .border_color(t.line_default)
-                    .shadow(t.shadow_lg())
-                    .children(options.into_iter().enumerate().map(|(i, (fmt, label, detail))| {
-                        let id = mid.clone();
-                        let busy = self.exporting.contains(&(id.clone(), fmt));
-                        div()
-                            .id(SharedString::from(format!("export-{fmt}")))
-                            .px(px(10.))
-                            .py(px(8.))
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.))
-                            .rounded(px(radius::MD))
-                            .when(busy, |d| d.cursor_not_allowed().opacity(0.65))
-                            .when(!busy, |d| {
-                                d.cursor_pointer()
-                                    .when(i == hl, |d| d.bg(t.bg_hover))
-                                    .hover(|s| s.bg(t.bg_hover))
-                                    .active(|s| s.bg(t.bg_active))
-                                    .on_mouse_move(cx.listener(
-                                        move |this, _: &folo_ui::MouseMoveEvent, _, cx| {
-                                            if this.export_hl != i {
-                                                this.export_hl = i;
-                                                cx.notify();
-                                            }
-                                        },
-                                    ))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.export_model(id.clone(), fmt, cx)
-                                    }))
-                            })
-                            .child(
-                                text(ty::BASE, if busy { t.text_tertiary } else { t.text_primary })
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(if busy {
-                                        format!("{label} · Exporting…")
-                                    } else {
-                                        label.into()
-                                    }),
-                            )
-                            .child(text(ty::SM, t.text_tertiary).tnum().child(detail))
-                            .into_any_element()
-                    })),
-            )
-            .with_priority(2)
-        });
+        let menu =
+            (open && self.menu_trigger.get().is_some() && !self.menu_trigger_clipped_out()).then(|| {
+                let mid = m.id.clone();
+                folo_ui::deferred(
+                    div()
+                        .absolute()
+                        .when(!export_up, |d| d.top(px(34.)))
+                        .when(export_up, |d| d.bottom(px(34.)))
+                        .right_0()
+                        .w(px(export_w))
+                        .occlude()
+                        .on_mouse_down_out(cx.listener(|this, ev: &folo_ui::MouseDownEvent, _, cx| {
+                            let on_trigger =
+                                this.menu_trigger.get().is_some_and(|b| b.contains(&ev.position));
+                            if this.export_open && !on_trigger {
+                                this.export_open = false;
+                                this.menu_trigger.set(None);
+                                cx.notify();
+                            }
+                        }))
+                        .p(px(4.))
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .rounded(px(radius::LG))
+                        .bg(t.bg_overlay)
+                        .border_1()
+                        .border_color(t.line_default)
+                        .shadow(t.shadow_lg())
+                        .children(options.into_iter().enumerate().map(|(i, (fmt, label, detail))| {
+                            let id = mid.clone();
+                            let busy = self.exporting.contains(&(id.clone(), fmt));
+                            div()
+                                .id(SharedString::from(format!("export-{fmt}")))
+                                .px(px(10.))
+                                .py(px(8.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .rounded(px(radius::MD))
+                                .when(busy, |d| d.cursor_not_allowed().opacity(0.65))
+                                .when(!busy, |d| {
+                                    d.cursor_pointer()
+                                        .when(i == hl, |d| d.bg(t.bg_hover))
+                                        .hover(|s| s.bg(t.bg_hover))
+                                        .active(|s| s.bg(t.bg_active))
+                                        .on_mouse_move(cx.listener(
+                                            move |this, _: &folo_ui::MouseMoveEvent, _, cx| {
+                                                if this.export_hl != i {
+                                                    this.export_hl = i;
+                                                    cx.notify();
+                                                }
+                                            },
+                                        ))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.export_model(id.clone(), fmt, cx)
+                                        }))
+                                })
+                                .child(
+                                    text(ty::BASE, if busy { t.text_tertiary } else { t.text_primary })
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(if busy {
+                                            format!("{label} · Exporting…")
+                                        } else {
+                                            label.into()
+                                        }),
+                                )
+                                .child(text(ty::SM, t.text_tertiary).tnum().child(detail))
+                                .into_any_element()
+                        })),
+                )
+                .with_priority(2)
+            });
         div().relative().child(trigger).children(menu).into_any_element()
     }
 }

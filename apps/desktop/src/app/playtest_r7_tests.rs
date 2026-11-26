@@ -1,24 +1,26 @@
 //! Regression tests for Sol Playtest Round 7 fixes:
-//! 1. Benchmarks surfaces `/api/system` failures (unreachable server, auth/address errors) via
-//!    the standard error panel (with Retry + Connection settings) instead of hanging on "Loading…"
-//!    or showing "not found", and recovers automatically once capability discovery succeeds.
+//! 1. Benchmarks surfaces `/api/system` failures (unreachable server, auth, `not_folo`, missing
+//!    `vision_bench` capability) via the standard error/unsupported panel instead of hanging on
+//!    "Loading…" or showing "not found", retains a ready list during transient outages, and
+//!    recovers on both explicit Retry and periodic `/api/system` reconnection.
 //! 2. Open `Select` dropdowns dismiss when their enclosing scroll container scrolls (wheel,
-//!    scrollbar, or programmatic scroll) while still allowing wheel scrolling inside the open
-//!    dropdown menu itself.
-//! 3. Model Export menu dismisses on page scroll / scrollbar interaction and never scrolls over the
-//!    title bar.
-//! 4. Failed-run `Validation mAP` header (`So far / All N` + zoomed-axis caption) stays strictly
-//!    inside the mAP card at narrow and high-DPI viewports (960×640 @1.5×, 1120×800 @2×) without
-//!    overlapping `Training loss`.
+//!    scrollbar, or programmatic scroll), still scroll their own overflowing list via wheel, and
+//!    reveal a scrolled-out focused trigger before mounting when reopened via keyboard.
+//! 3. Model Export menu dismisses on page scroll / scrollbar interaction, reveals a scrolled-out
+//!    focused trigger when reopened via keyboard, and never scrolls over the title bar.
+//! 4. Failed-run `Validation mAP` header (`So far / All N` + zoomed-axis footer caption) stays
+//!    strictly inside the mAP card at narrow and high-DPI viewports (960×640 @1.5×, 1120×800 @2×)
+//!    without overlapping `Training loss`.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use folo_ui::{
     AppContext, Bounds, HeadlessApp, HeadlessOptions, MouseButton, MouseDownEvent, PlatformInput, Primitive,
     ScrollDelta, ScrollWheelEvent, TouchPhase, WindowBounds, WindowHandle, WindowOptions, point, px, size,
 };
 
+use super::super::select_driving::press;
 use super::super::tests::drive;
 use super::super::{FoloApp, Route};
 use super::{settle, sp};
@@ -30,11 +32,17 @@ use crate::api::{
 };
 use crate::theme::{Mode, Theme, theme};
 
-/// Wrapper over [`MockBackend`] that can fail `/api/system` and `/api/health` on demand to
-/// reproduce an unreachable server before benchmark capabilities are discovered.
+const SYS_OK: u8 = 0;
+const SYS_UNREACHABLE: u8 = 1;
+const SYS_UNAUTHORIZED: u8 = 2;
+const SYS_NOT_FOLO: u8 = 3;
+const SYS_NO_BENCH_FEATURE: u8 = 4;
+
+/// Wrapper over [`MockBackend`] whose `/api/system` and `/api/health` responses can be switched
+/// between healthy, unreachable, unauthorized, non-FOLO, and missing-capability modes.
 struct ToggleSystemBackend {
     inner: MockBackend,
-    fail_system: Arc<AtomicBool>,
+    mode: Arc<AtomicU8>,
 }
 
 impl Backend for ToggleSystemBackend {
@@ -45,16 +53,24 @@ impl Backend for ToggleSystemBackend {
         self.inner.now()
     }
     fn health(&self) -> ApiResult<Health> {
-        if self.fail_system.load(Ordering::Relaxed) {
-            return Err(ApiError::new("server_unreachable", "Could not reach folo serve"));
+        match self.mode.load(Ordering::Relaxed) {
+            SYS_UNREACHABLE => Err(ApiError::new("server_unreachable", "Could not reach folo serve")),
+            SYS_NOT_FOLO => Err(ApiError::new("not_folo", "That address isn't folo serve")),
+            _ => self.inner.health(),
         }
-        self.inner.health()
     }
     fn system(&self) -> ApiResult<SystemResponse> {
-        if self.fail_system.load(Ordering::Relaxed) {
-            return Err(ApiError::new("server_unreachable", "Could not reach folo serve"));
+        match self.mode.load(Ordering::Relaxed) {
+            SYS_UNREACHABLE => Err(ApiError::new("server_unreachable", "Could not reach folo serve")),
+            SYS_UNAUTHORIZED => Err(ApiError::new("unauthorized", "Server requires an API token")),
+            SYS_NOT_FOLO => Err(ApiError::new("bad_response", "Unexpected response")),
+            SYS_NO_BENCH_FEATURE => {
+                let mut res = self.inner.system()?;
+                res.features.retain(|f| f != crate::api::FEATURE_VISION_BENCH);
+                Ok(res)
+            }
+            _ => self.inner.system(),
         }
-        self.inner.system()
     }
     fn datasets(&self) -> ApiResult<Vec<Dataset>> {
         self.inner.datasets()
@@ -161,9 +177,9 @@ fn wheel_at(app: &mut HeadlessApp, window: WindowHandle<FoloApp>, x: f32, y: f32
 
 #[test]
 fn benchmarks_unreachable_server_shows_error_panel_and_recovers() {
-    let fail = Arc::new(AtomicBool::new(true));
+    let mode = Arc::new(AtomicU8::new(SYS_UNREACHABLE));
     let api: Arc<dyn Backend> =
-        Arc::new(ToggleSystemBackend { inner: MockBackend::new(4200, true), fail_system: fail.clone() });
+        Arc::new(ToggleSystemBackend { inner: MockBackend::new(4200, true), mode: mode.clone() });
     let (mut app, window) = open_with_backend(api, 960., 640., 1.0);
 
     // 1. All three benchmark routes surface the unreachable `/api/system` error via `error_panel`
@@ -198,23 +214,74 @@ fn benchmarks_unreachable_server_shows_error_panel_and_recovers() {
         });
     }
 
-    // 2. Once the server responds again and Retry runs, Benchmarks automatically loads its list.
-    fail.store(false, Ordering::Relaxed);
+    // 2. Unauthorized and `not_folo` errors also surface `error_panel` on Benchmarks.
+    for (err_mode, expected_code) in [(SYS_UNAUTHORIZED, "unauthorized"), (SYS_NOT_FOLO, "bad_response")] {
+        mode.store(err_mode, Ordering::Relaxed);
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::Benches, w, cx);
+            this.retry_all(cx);
+        });
+        settle(&mut app, window);
+        drive(&mut app, window, |this, w, cx| {
+            assert_eq!(this.bench_blocked_error().map(|e| e.code.as_str()), Some(expected_code));
+            assert!(w.is_focus_mounted(&this.fh("benches-retry", cx)));
+        });
+    }
+
+    // 3. Missing `vision_bench` capability shows `bench_unsupported_panel` across list, detail,
+    //    and entry routes (mounting `bench-settings`, not `error_panel` or "not found").
+    mode.store(SYS_NO_BENCH_FEATURE, Ordering::Relaxed);
+    drive(&mut app, window, |this, _, cx| this.retry_all(cx));
+    settle(&mut app, window);
+    for route in [
+        Route::Benches,
+        Route::Bench("bn_3c90".into()),
+        Route::BenchEntry("bn_3c90".into(), "be_3c01".into()),
+    ] {
+        drive(&mut app, window, |this, w, cx| this.navigate(route.clone(), w, cx));
+        settle(&mut app, window);
+        drive(&mut app, window, |this, w, cx| {
+            assert!(this.bench_unsupported(), "{route:?}: should report bench_unsupported");
+            assert!(this.bench_blocked_error().is_none());
+            assert!(
+                w.is_focus_mounted(&this.fh("bench-settings", cx)),
+                "{route:?}: unsupported panel should mount Connection settings"
+            );
+        });
+    }
+
+    // 4. Periodic `/api/system` recovery (`refresh_system`, without clicking Retry) automatically
+    //    discovers `vision_bench` and populates `bench.list`.
+    mode.store(SYS_UNREACHABLE, Ordering::Relaxed);
     drive(&mut app, window, |this, w, cx| {
         this.navigate(Route::Benches, w, cx);
         this.retry_all(cx);
     });
     settle(&mut app, window);
+    mode.store(SYS_OK, Ordering::Relaxed);
+    drive(&mut app, window, |this, _, cx| this.refresh_system(cx));
+    settle(&mut app, window);
     drive(&mut app, window, |this, _, _| {
-        assert!(this.bench_on(), "vision_bench feature should be discovered after recovery");
+        assert!(this.bench_on(), "periodic system refresh should discover vision_bench");
         assert!(this.bench_blocked_error().is_none());
         assert!(
             this.bench.list.ready().is_some_and(|l| !l.is_empty()),
-            "benchmark list should populate after server recovery"
+            "benchmark list should load automatically after periodic recovery"
         );
     });
 
-    // 3. While capability discovery is still loading (`hold_loading`), detail/entry routes treat
+    // 5. A mid-session outage while on Benchmarks retains the ready list rather than replacing it
+    //    with an error panel, and marks it stale on reconnect.
+    mode.store(SYS_UNREACHABLE, Ordering::Relaxed);
+    drive(&mut app, window, |this, _, cx| this.refresh_system(cx));
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.bench.list.ready().is_some(), "ready benchmark list must survive transient outage");
+        assert!(this.bench_blocked_error().is_none());
+        assert!(!w.is_focus_mounted(&this.fh("benches-retry", cx)));
+    });
+
+    // 6. While capability discovery is still loading (`hold_loading`), detail/entry routes treat
     //    it as discovering (skeleton) rather than "not found" or error.
     drive(&mut app, window, |this, w, cx| {
         this.hold_loading = true;
@@ -230,37 +297,60 @@ fn benchmarks_unreachable_server_shows_error_panel_and_recovers() {
 }
 
 #[test]
-fn select_dropdown_dismisses_on_dialog_scroll_but_scrolls_inside_menu() {
+fn select_dropdown_dismisses_on_dialog_scroll_scrolls_inside_menu_and_reveals_on_keyboard_reopen() {
     let api: Arc<dyn Backend> = Arc::new(MockBackend::new(4200, true));
     let (mut app, window) = open_with_backend(api, 960., 640., 1.5);
 
-    // Open New training run dialog and open the Dataset select.
-    drive(&mut app, window, |this, w, cx| this.open_new_run(None, w, cx));
+    // Seed enough datasets so `nr-dataset-menu` itself overflows its 288 px max height.
+    drive(&mut app, window, |this, w, cx| {
+        if let crate::store::Load::Ready(list) = &mut this.store.datasets
+            && let Some(template) = list.first().cloned()
+        {
+            for i in 0..14 {
+                let mut extra = template.clone();
+                extra.id = format!("ds_extra_{i}");
+                extra.name = format!("Extra dataset {i:02}");
+                list.push(extra);
+            }
+        }
+        this.open_new_run(None, w, cx);
+    });
     settle(&mut app, window);
-    let dialog_bounds = drive(&mut app, window, |this, _, cx| {
+    let dialog_bounds = drive(&mut app, window, |this, w, cx| {
         assert!(
             this.dialog_scroll.max_offset().height > px(0.),
             "new-run dialog body should overflow at 960x640"
         );
+        w.focus(&this.fh("nr-dataset", cx));
         this.menu_open = Some("nr-dataset");
         this.menu_trigger.set(None);
+        this.menu_typeahead.reset_scroll_anchor();
         cx.notify();
         this.dialog_scroll.bounds()
     });
     settle(&mut app, window);
     let trigger = drive(&mut app, window, |this, _, _| {
+        assert!(
+            this.menu_scroll.max_offset().height > px(0.),
+            "dataset dropdown menu should overflow with 14+ options"
+        );
         this.menu_trigger.get().expect("dataset select trigger bounds measured")
     });
 
-    // 1. Scrolling INSIDE the open deferred dropdown menu must NOT scroll the dialog or close it.
+    // 1. Scrolling INSIDE the open deferred dropdown menu scrolls `menu_scroll` without scrolling
+    //    `dialog-body` or closing the menu.
     let menu_x = f32::from(trigger.left()) + 24.;
     let menu_y = f32::from(trigger.bottom()) + 24.;
-    wheel_at(&mut app, window, menu_x, menu_y, -60.);
+    wheel_at(&mut app, window, menu_x, menu_y, -80.);
     drive(&mut app, window, |this, _, _| {
         assert_eq!(
             this.menu_open,
             Some("nr-dataset"),
             "scrolling inside the open select menu should keep it open"
+        );
+        assert!(
+            this.menu_scroll.offset().y < px(0.),
+            "wheeling inside an overflowing select menu must scroll menu_scroll"
         );
         assert_eq!(
             this.dialog_scroll.offset().y,
@@ -272,24 +362,35 @@ fn select_dropdown_dismisses_on_dialog_scroll_but_scrolls_inside_menu() {
     // 2. Scrolling OUTSIDE the open menu over dialog-body scrolls the dialog and dismisses the menu.
     let outside_x = f32::from(dialog_bounds.left()) + 40.;
     let outside_y = f32::from(dialog_bounds.top()) + 40.;
-    wheel_at(&mut app, window, outside_x, outside_y, -120.);
+    for _ in 0..4 {
+        wheel_at(&mut app, window, outside_x, outside_y, -120.);
+    }
     drive(&mut app, window, |this, _, _| {
         assert!(
-            this.dialog_scroll.offset().y < px(0.),
-            "dialog-body should scroll when wheeled outside the menu"
+            this.dialog_scroll.offset().y < px(-100.),
+            "dialog-body should scroll past the trigger when wheeled outside the menu"
         );
         assert_eq!(this.menu_open, None, "scrolling dialog-body must dismiss the open select dropdown");
         assert!(this.menu_trigger.get().is_none());
     });
 
-    // 3. Defense-in-depth: programmatic scroll moving the trigger out of `dialog-body` also closes it.
-    drive(&mut app, window, |this, _, cx| {
-        this.dialog_scroll.set_offset(point(px(0.), px(0.)));
-        this.menu_open = Some("nr-dataset");
-        this.menu_trigger.set(None);
-        cx.notify();
-    });
+    // 3. Keyboard reopen while the focused trigger is scrolled out of view must reveal the trigger
+    //    back into `dialog-body` before mounting the popup (never mounting at clipped coordinates).
+    press(&mut app, window, "enter");
     settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.menu_open, Some("nr-dataset"), "Enter reopens focused select");
+        let b = this.menu_trigger.get().expect("trigger measured after reveal");
+        let clip = this.dialog_scroll.bounds();
+        assert!(
+            b.top() >= clip.top() && b.bottom() <= clip.bottom(),
+            "keyboard reopen must reveal clipped trigger into dialog-body: trigger={b:?} clip={clip:?}"
+        );
+    });
+
+    // 4. Arrow navigation inside the open menu does NOT drop the scroll anchor: a subsequent
+    //    programmatic scroll of `dialog_scroll` still dismisses the menu cleanly.
+    press(&mut app, window, "down");
     drive(&mut app, window, |this, _, cx| {
         let max = this.dialog_scroll.max_offset().height;
         this.dialog_scroll.set_offset(point(px(0.), -max));
@@ -299,13 +400,13 @@ fn select_dropdown_dismisses_on_dialog_scroll_but_scrolls_inside_menu() {
     drive(&mut app, window, |this, _, _| {
         assert_eq!(
             this.menu_open, None,
-            "programmatically scrolling trigger outside dialog-body must close menu_open"
+            "programmatic scroll after arrow navigation must still close menu_open"
         );
     });
 }
 
 #[test]
-fn model_export_menu_dismisses_on_page_scroll_and_scrollbar_click() {
+fn model_export_menu_dismisses_on_page_scroll_scrollbar_click_and_reveals_on_keyboard_reopen() {
     let api: Arc<dyn Backend> = Arc::new(MockBackend::new(4200, true));
     let (mut app, window) = open_with_backend(api, 960., 640., 1.5);
 
@@ -315,11 +416,13 @@ fn model_export_menu_dismisses_on_page_scroll_and_scrollbar_click() {
     });
     settle(&mut app, window);
 
-    // Open Export menu and measure its trigger.
-    let page_bounds = drive(&mut app, window, |this, _, cx| {
+    // Focus Export button, open its menu, and measure its trigger.
+    let page_bounds = drive(&mut app, window, |this, w, cx| {
         assert!(this.page_scroll.max_offset().height > px(0.), "model page should overflow at 960x640");
+        w.focus(&this.fh("model-export", cx));
         this.export_open = true;
         this.menu_trigger.set(None);
+        this.menu_typeahead.reset_scroll_anchor();
         cx.notify();
         this.page_scroll.bounds()
     });
@@ -329,23 +432,33 @@ fn model_export_menu_dismisses_on_page_scroll_and_scrollbar_click() {
         assert!(this.menu_trigger.get().is_some(), "export trigger bounds should be measured");
     });
 
-    // 1. Wheeling over the page body (outside Export menu) scrolls the page and closes Export.
+    // 1. Wheeling over the page body (outside Export menu) scrolls the page past the header and
+    //    closes Export.
     let scroll_x = f32::from(page_bounds.left()) + 120.;
     let scroll_y = f32::from(page_bounds.top()) + 300.;
-    wheel_at(&mut app, window, scroll_x, scroll_y, -120.);
+    for _ in 0..3 {
+        wheel_at(&mut app, window, scroll_x, scroll_y, -120.);
+    }
     drive(&mut app, window, |this, _, _| {
-        assert!(this.page_scroll.offset().y < px(0.), "model page should scroll on wheel");
+        assert!(this.page_scroll.offset().y < px(-100.), "model page should scroll past the Export trigger");
         assert!(!this.export_open, "page scroll must dismiss the open Export menu");
     });
 
-    // 2. Clicking the page scrollbar track also dismisses Export.
-    drive(&mut app, window, |this, _, cx| {
-        this.page_scroll.set_offset(point(px(0.), px(0.)));
-        this.export_open = true;
-        this.menu_trigger.set(None);
-        cx.notify();
-    });
+    // 2. Reopening the still-focused Export button with the keyboard while it is scrolled above the
+    //    title bar reveals it back into `#page` before mounting the Export menu.
+    press(&mut app, window, "enter");
     settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.export_open, "Enter reopens focused Export button");
+        let b = this.menu_trigger.get().expect("export trigger measured after reveal");
+        let clip = this.page_scroll.bounds();
+        assert!(
+            b.top() >= clip.top() && b.bottom() <= clip.bottom(),
+            "keyboard reopen must reveal clipped Export trigger below title bar: trigger={b:?} clip={clip:?}"
+        );
+    });
+
+    // 3. Clicking the page scrollbar track also dismisses Export.
     let track_x = f32::from(page_bounds.right()) - 4.;
     let track_y = f32::from(page_bounds.bottom()) - 40.;
     app.simulate_input(
@@ -420,9 +533,9 @@ fn failed_run_range_switch_stays_inside_map_card_at_narrow_and_hidpi_viewports()
             );
         });
 
-        let (bg_panel, bg_inset) = drive(&mut app, window, |_, _, cx| {
+        let (bg_panel, bg_inset, text_tertiary) = drive(&mut app, window, |_, _, cx| {
             let t = theme(cx);
-            (t.bg_panel, t.bg_inset)
+            (t.bg_panel, t.bg_inset, t.text_tertiary)
         });
         let s = scale;
         let scene = app.scene(window.into());
@@ -495,7 +608,10 @@ fn failed_run_range_switch_stays_inside_map_card_at_narrow_and_hidpi_viewports()
             loss_card.0
         );
 
-        // No header-band glyph may bleed across the gap between `map_card` and `loss_card`.
+        // No header-band glyph may bleed across the gap between `map_card` and `loss_card`, and the
+        // zoomed-axis caption renders in the footer band below the plot strictly inside `map_card`.
+        let footer_top = map_card.3 - 28.;
+        let mut footer_glyphs = 0usize;
         for p in &scene.primitives {
             if let Primitive::MonoSprite(g) = p
                 && g.kind == folo_ui::SpriteKind::Glyph
@@ -511,7 +627,19 @@ fn failed_run_range_switch_stays_inside_map_card_at_narrow_and_hidpi_viewports()
                         loss_card.0
                     );
                 }
+                if g.color == text_tertiary
+                    && gy >= footer_top
+                    && gy <= map_card.3
+                    && gx0 >= map_card.0
+                    && gx1 <= map_card.2
+                {
+                    footer_glyphs += 1;
+                }
             }
         }
+        assert!(
+            footer_glyphs >= 10,
+            "at {width}x{height}@{scale}x, expected zoomed-axis footer caption glyphs inside mAP card (got {footer_glyphs})"
+        );
     }
 }

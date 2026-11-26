@@ -300,6 +300,8 @@ impl FoloApp {
         }
         if unreachable(&b.list) {
             b.list = Load::Idle;
+        } else if b.list.ready().is_some() {
+            b.list_stale = true;
         }
         if unreachable(&b.catalog) {
             b.catalog = Load::Idle;
