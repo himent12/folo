@@ -50,6 +50,8 @@ mod terms;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_asl_poly;
+#[cfg(test)]
 mod tests_geom;
 #[cfg(test)]
 mod tests_math;
@@ -65,9 +67,10 @@ pub use distill::{
     gt_verify_weights_cpu,
 };
 pub use terms::{
-    ciou, eiou_loss, focaler_iou, focaler_iou_loss, inner_ciou_loss, loss_with_assignment, mpdiou_loss,
-    mpdiou_loss_with_scale, nwd_loss, nwd_loss_with_c, rpiou_loss, saeiou_loss, shape_iou_loss, siou_loss,
-    wiou_v1_loss, wiou_v3_loss,
+    asymmetric_loss, ciou, eiou_loss, focaler_iou, focaler_iou_loss, inner_ciou_loss, loss_with_assignment,
+    mpdiou_loss, mpdiou_loss_with_scale, nwd_loss, nwd_loss_with_c, poly1_bce_loss, poly1_focal_loss,
+    poly1_focal_loss_with_alpha, rpiou_loss, saeiou_loss, shape_iou_loss, siou_loss, wiou_v1_loss,
+    wiou_v3_loss,
 };
 
 use crate::assign::TalConfig;
@@ -86,7 +89,7 @@ fn invalid(msg: impl Into<String>) -> Error {
 
 /// Which classification loss [`detection_loss`] uses.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum ClsLossKind {
     /// Standard BCE-with-logits (or MAL when `mal_gamma > 0`, default).
     #[default]
@@ -96,6 +99,13 @@ pub enum ClsLossKind {
     Vfl,
     /// Quality Focal Loss (Li et al. 2020): `|t − p|^qfl_beta · BCE(x, t)` across both positives and negatives.
     Qfl,
+    /// Asymmetric Loss (Ridnik et al. ICCV 2021): decoupled positive/negative focusing (`asl_gamma_pos`,
+    /// `asl_gamma_neg`) with probability margin shift `p_m = max(p - asl_clip, 0)`.
+    Asl,
+    /// Poly-1 BCE Loss (Leng et al. ICLR 2022): `BCE(x, t) + poly1_epsilon · (t(1 - p) + (1 - t)p)`.
+    Poly1Bce,
+    /// Poly-1 Focal Loss (Leng et al. ICLR 2022): `t · (1 - p)^γ (-ln p + ε₁(1 - p)) + (1 - t) · p^γ (-ln(1 - p) + ε₁ p)`.
+    Poly1Focal,
 }
 
 /// Which box regression geometry loss [`detection_loss`] uses.
@@ -152,7 +162,7 @@ pub struct LossConfig {
     /// Matchability-Aware Loss (MAL) background focal exponent (`0.0` = plain BCE). When `> 0`, negatives use
     /// `p^γ · softplus(x)` while positives keep 100% unweighted BCE.
     pub mal_gamma: f32,
-    /// Classification loss family ([`ClsLossKind::Bce`] default; opt-in `Vfl` or `Qfl`).
+    /// Classification loss family ([`ClsLossKind::Bce`] default; opt-in `Vfl`, `Qfl`, `Asl`, `Poly1Bce`, or `Poly1Focal`).
     pub cls_loss: ClsLossKind,
     /// Negative weight `α > 0` for [`ClsLossKind::Vfl`] (`0.75` default).
     pub vfl_alpha: f32,
@@ -160,6 +170,16 @@ pub struct LossConfig {
     pub vfl_gamma: f32,
     /// Focal exponent `β` (`0` or `>= 1`) for [`ClsLossKind::Qfl`] (`2.0` default).
     pub qfl_beta: f32,
+    /// Positive focusing exponent `γ_+ >= 0` for [`ClsLossKind::Asl`] (`0.0` default).
+    pub asl_gamma_pos: f32,
+    /// Negative focusing exponent `γ_- >= 0` for [`ClsLossKind::Asl`] (`4.0` default).
+    pub asl_gamma_neg: f32,
+    /// Probability margin shift `m in [0, 1)` for [`ClsLossKind::Asl`] (`0.05` default).
+    pub asl_clip: f32,
+    /// First-order polynomial coefficient `ε₁ >= -1` for [`ClsLossKind::Poly1Bce`] and [`ClsLossKind::Poly1Focal`] (`1.0` default).
+    pub poly1_epsilon: f32,
+    /// Focusing exponent `γ >= 0` for [`ClsLossKind::Poly1Focal`] (`2.0` default).
+    pub poly1_focal_gamma: f32,
     /// Scale-adaptive NWD blending weight `λ₀` in `[0, 1]` for the box loss (`0.0` = no NWD blend).
     pub nwd_weight: f32,
     /// Normalization constant `C > 0` (in input pixels, divided by anchor stride) for [`BoxLossKind::Nwd`]
@@ -205,6 +225,11 @@ impl Default for LossConfig {
             vfl_alpha: 0.75,
             vfl_gamma: 2.0,
             qfl_beta: 2.0,
+            asl_gamma_pos: 0.0,
+            asl_gamma_neg: 4.0,
+            asl_clip: 0.05,
+            poly1_epsilon: 1.0,
+            poly1_focal_gamma: 2.0,
             nwd_weight: 0.0,
             nwd_c: 12.8,
             box_loss: BoxLossKind::Ciou,
@@ -275,6 +300,24 @@ impl LossConfig {
         }
         if !(self.qfl_beta.is_finite() && (self.qfl_beta == 0.0 || self.qfl_beta >= 1.0)) {
             return Err(format!("loss.qfl_beta must be finite and 0 or >= 1, got {}", self.qfl_beta));
+        }
+        if !(self.asl_gamma_pos.is_finite() && self.asl_gamma_pos >= 0.0) {
+            return Err(format!("loss.asl_gamma_pos must be finite and >= 0, got {}", self.asl_gamma_pos));
+        }
+        if !(self.asl_gamma_neg.is_finite() && self.asl_gamma_neg >= 0.0) {
+            return Err(format!("loss.asl_gamma_neg must be finite and >= 0, got {}", self.asl_gamma_neg));
+        }
+        if !(self.asl_clip.is_finite() && (0.0..1.0).contains(&self.asl_clip)) {
+            return Err(format!("loss.asl_clip must be finite and in [0, 1), got {}", self.asl_clip));
+        }
+        if !(self.poly1_epsilon.is_finite() && self.poly1_epsilon >= -1.0) {
+            return Err(format!("loss.poly1_epsilon must be finite and >= -1, got {}", self.poly1_epsilon));
+        }
+        if !(self.poly1_focal_gamma.is_finite() && self.poly1_focal_gamma >= 0.0) {
+            return Err(format!(
+                "loss.poly1_focal_gamma must be finite and >= 0, got {}",
+                self.poly1_focal_gamma
+            ));
         }
         if !(self.inner_ratio.is_finite() && (0.5..=1.5).contains(&self.inner_ratio)) {
             return Err(format!(

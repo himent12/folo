@@ -1,17 +1,23 @@
 //! The differentiable terms of §7.4 for a fixed assignment ([`loss_with_assignment`]):
 //! - [`cls`]: BCE, MAL, Varifocal Loss (VFL), Quality Focal Loss (QFL),
+//! - [`asl_poly`]: Asymmetric Loss (ASL), Poly-1 BCE, and Poly-1 Focal Loss,
 //! - [`box_loss`]: CIoU, Inner-CIoU, R-PIoU, S-AEIoU,
 //! - [`nwd_wiou`]: Normalized Wasserstein Distance (NWD) and Wise-IoU v1 / v3,
 //! - [`geom_loss`]: MPDIoU, Shape-IoU, and Focaler-IoU remapping,
 //! - [`siou_eiou`]: EIoU (Efficient-IoU) and SIoU (Scylla-IoU),
 //! - [`dfl`]: DFL cross-entropy, 1D Optimal-Transport tail barrier (`OT-DFL`), and `CRPS-DFL`.
 
+mod asl_poly;
 mod box_loss;
 mod cls;
 mod dfl;
 mod geom_loss;
 mod nwd_wiou;
 mod siou_eiou;
+
+#[cfg(test)]
+pub(crate) use asl_poly::{asl_elem_f64, poly1_bce_elem_f64, poly1_focal_elem_f64};
+pub use asl_poly::{asymmetric_loss, poly1_bce_loss, poly1_focal_loss, poly1_focal_loss_with_alpha};
 
 #[cfg(test)]
 pub(crate) use box_loss::saeiou_box_f64;
@@ -195,17 +201,7 @@ fn loss_impl_wiou(
     };
     let t = on_dev(Tensor::from_slice(&asg.score, [n])?)?;
 
-    let cls_sum = cls_loss_sum(
-        cls_raw,
-        idx_cls,
-        &asg.score,
-        cfg.cls_loss,
-        cfg.mal_gamma,
-        cfg.vfl_alpha,
-        cfg.vfl_gamma,
-        cfg.qfl_beta,
-        fused,
-    )?;
+    let cls_sum = cls_loss_sum(cls_raw, idx_cls, &asg.score, cfg, fused)?;
 
     let (wb, wd, mean_iou_loss) = if n == 0 {
         (Tensor::zeros_with([], DType::F32, dev)?, Tensor::zeros_with([], DType::F32, dev)?, None)

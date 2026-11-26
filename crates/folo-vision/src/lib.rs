@@ -47,7 +47,11 @@ pub mod val;
 
 pub use assign::{Assignment, TalConfig};
 pub use boxes::{Cxcywh, IouKind, Letterbox, Xyxy};
-pub use calibration::{CalibrationConfig, CalibrationMetrics, TemperatureFit, TemperatureScaler};
+pub use calibration::{
+    CalibrationConfig, CalibrationMetrics, ClassTemperatureFit, ClasswiseCalibrationConfig,
+    ClasswiseCalibrationMetrics, ClasswiseTemperatureFit, ClasswiseTemperatureScaler,
+    MulticlassCalibrationMetrics, TemperatureFit, TemperatureScaler,
+};
 pub use decode::Anchors;
 pub use error::{Error, Result};
 pub use loss::{DistillConfig, ImageTargets, LossConfig, LossItems, LossOutput, detection_loss};
