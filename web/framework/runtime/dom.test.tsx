@@ -795,6 +795,32 @@ describe('Svelte attribute and prop semantics', () => {
     dispose();
   });
 
+  it('preserves shorthand-before-longhand cascade order when updating overlapping !important styles', () => {
+    const pad = signal('10px');
+    const left = signal('2px');
+    const el = document.createElement('div');
+    let dispose!: () => void;
+    createRoot((d) => {
+      dispose = d;
+      bindStyle(
+        el,
+        () => ({ paddingLeft: '4px' }),
+        undefined,
+        () => ({ padding: pad.get(), 'padding-left': left.get() }),
+      );
+    });
+    expect(el.style.getPropertyValue('padding-left')).toBe('2px');
+    expect(el.style.getPropertyPriority('padding-left')).toBe('important');
+
+    pad.set('20px');
+    left.set('8px');
+    flush();
+    expect(el.style.getPropertyValue('padding-top')).toBe('20px');
+    expect(el.style.getPropertyValue('padding-left')).toBe('8px');
+    expect(el.style.getPropertyPriority('padding-left')).toBe('important');
+    dispose();
+  });
+
   it('removes stale directive classes when dirs drops keys or transitions to undefined', () => {
     const dirs = signal<Record<string, unknown> | undefined>({ a: true, b: true });
     const el = document.createElement('div');

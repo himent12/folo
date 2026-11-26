@@ -818,7 +818,7 @@ function updateStyles(el: HTMLElement, prev: Styles | undefined, next: Styles | 
   }
 }
 
-/** Reconciles overlapping normal and `!important` keys by effective value and priority. */
+/** Reconciles overlapping normal and `!important` keys by effective value and priority in cascade order. */
 function updateStyleMap(
   el: HTMLElement,
   prev: Styles | undefined,
@@ -826,28 +826,33 @@ function updateStyleMap(
   prevImportant: Styles | undefined,
   nextImportant: Styles | undefined,
 ): void {
-  const seen = new Set<string>();
-  const check = (key: string) => {
-    if (seen.has(key)) return;
-    seen.add(key);
-    const pImp = prevImportant?.[key];
-    const pVal = hasStyleValue(pImp) ? pImp : prev?.[key];
-    const pPri = hasStyleValue(pImp) ? 'important' : '';
-    const nImp = nextImportant?.[key];
-    const nVal = hasStyleValue(nImp) ? nImp : next?.[key];
-    const nPri = hasStyleValue(nImp) ? 'important' : '';
-    const had = hasStyleValue(pVal);
-    const has = hasStyleValue(nVal);
-    if (!has) {
-      if (had) el.style.removeProperty(key);
-    } else if (!had || pVal !== nVal || pPri !== nPri) {
-      el.style.setProperty(key, String(nVal), nPri || undefined);
-    }
+  // 1. Remove keys no longer active in either normal or `!important` declarations.
+  const removeIfGone = (key: string) => {
+    if (!hasStyleValue(next?.[key]) && !hasStyleValue(nextImportant?.[key])) el.style.removeProperty(key);
   };
-  if (next !== undefined) for (const k in next) check(k);
-  if (prev !== undefined) for (const k in prev) check(k);
-  if (nextImportant !== undefined) for (const k in nextImportant) check(k);
-  if (prevImportant !== undefined) for (const k in prevImportant) check(k);
+  if (prev !== undefined) for (const k in prev) if (hasStyleValue(prev[k])) removeIfGone(k);
+  if (prevImportant !== undefined) for (const k in prevImportant) if (hasStyleValue(prevImportant[k])) removeIfGone(k);
+
+  // 2. Apply normal declarations in `next` order (skipping keys overridden by `nextImportant`).
+  if (next !== undefined) {
+    for (const k in next) {
+      const nVal = next[k];
+      if (!hasStyleValue(nVal) || hasStyleValue(nextImportant?.[k])) continue;
+      const wasImp = hasStyleValue(prevImportant?.[k]);
+      const pVal = wasImp ? prevImportant![k] : prev?.[k];
+      if (wasImp || !hasStyleValue(pVal) || pVal !== nVal) el.style.setProperty(k, String(nVal));
+    }
+  }
+
+  // 3. Apply `!important` declarations in `nextImportant` order.
+  if (nextImportant !== undefined) {
+    for (const k in nextImportant) {
+      const nVal = nextImportant[k];
+      if (!hasStyleValue(nVal)) continue;
+      const wasImp = hasStyleValue(prevImportant?.[k]);
+      if (!wasImp || prevImportant![k] !== nVal) el.style.setProperty(k, String(nVal), 'important');
+    }
+  }
 }
 
 type StyleCached = HTMLElement & { $$style?: unknown };
