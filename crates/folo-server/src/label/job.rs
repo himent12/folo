@@ -352,14 +352,15 @@ impl Job {
 
     /// Writes `job.json` (atomically), unless the job was deleted.
     pub fn save(&self, state: &State) -> Result<()> {
+        self.save_file(state, &state.file)
+    }
+
+    /// Writes `file` to `job.json` atomically unless the job was deleted, without requiring in-memory `State`
+    /// to be mutated first.
+    pub fn save_file(&self, state: &State, file: &JobFile) -> Result<()> {
         if state.deleted {
             return Ok(());
         }
-        self.save_file(&state.file)
-    }
-
-    /// Writes `file` to `job.json` atomically without requiring in-memory `State` to be mutated first.
-    pub fn save_file(&self, file: &JobFile) -> Result<()> {
         let path = self.dir.join("job.json");
         let bytes = serde_json::to_vec(file).expect("jobs serialize");
         write_atomic(&path, &bytes).map_err(|e| Error::internal(format!("writing {}: {e}", path.display())))

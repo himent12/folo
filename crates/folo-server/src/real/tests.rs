@@ -640,6 +640,5 @@ fn delete_dataset_files_checks_registry_loaded_before_lookup() {
     let store = RealStore::open(home.clone());
     let err = store.delete_dataset_files("ds_any").unwrap_err();
     assert_eq!(err.body.code, "internal", "expected unread-registry error, not not_found: {err:?}");
-    assert_ne!(err.body.code, "dataset_not_found");
     store.shutdown();
 }

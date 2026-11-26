@@ -417,7 +417,7 @@ impl Labeler {
         if waiting && let Some(run) = next.run.as_mut() {
             run.total = run.total.saturating_sub(1);
         }
-        job.save_file(&next)?;
+        job.save_file(&state, &next)?;
         state.claim(image_id)?;
         state.file.images.remove(pos);
         if record.external.is_none() {
@@ -667,5 +667,96 @@ mod tests {
         assert_eq!(after.images[0].id, image_id);
         assert!(upload_path.is_file(), "failed save must not delete uploaded image file");
         std::fs::remove_dir(&job_json).unwrap();
+    }
+
+    #[test]
+    fn delete_queued_image_preserves_run_on_save_failure_and_succeeds_on_retry() {
+        let dir = TestDir::new("label-delete-queued-save-fail");
+        let labeler = Labeler::open(dir.path());
+        let job_info = labeler
+            .create(folo_api::CreateLabelJob {
+                name: "queued".into(),
+                classes: vec!["cat".into()],
+                instructions: String::new(),
+                path: None,
+            })
+            .unwrap();
+        let img = folo_data::Image { width: 8, height: 6, data: vec![128u8; 8 * 6 * 3] };
+        let jpeg_a = folo_data::encode(&img, folo_data::ImageFormat::Jpeg(85)).unwrap();
+        let img2 = folo_data::Image { width: 8, height: 6, data: vec![64u8; 8 * 6 * 3] };
+        let jpeg_b = folo_data::encode(&img2, folo_data::ImageFormat::Jpeg(85)).unwrap();
+        let added = labeler
+            .add_uploads(
+                &job_info.id,
+                vec![
+                    Upload { name: "a.jpg".into(), bytes: jpeg_a },
+                    Upload { name: "b.jpg".into(), bytes: jpeg_b },
+                ],
+            )
+            .unwrap();
+        assert_eq!(added.added.len(), 2);
+        let page = labeler.query(&job_info.id, &LabelImageQuery { limit: 10, ..Default::default() }).unwrap();
+        let id_a = page.images[0].id.clone();
+        let id_b = page.images[1].id.clone();
+        let upload_a = dir.join("label").join(&job_info.id).join("images").join(&page.images[0].file);
+        assert!(upload_a.is_file());
+
+        // Simulate an active run with both images still waiting in the queue.
+        let job = labeler.job(&job_info.id).unwrap();
+        {
+            let mut state = job.lock();
+            state.file.run = Some(folo_api::LabelRun {
+                id: "run_test".into(),
+                agent: folo_api::LabelAgentId::Claude,
+                model: None,
+                effort: folo_api::LabelEffort::Low,
+                fast: false,
+                started: "2026-01-01T00:00:00Z".into(),
+                finished: None,
+                total: 2,
+                done: 0,
+                failed: 0,
+                outcome: None,
+                error: None,
+                hint: None,
+                usage: folo_api::LabelUsage::default(),
+            });
+            state.active = Some(super::super::job::Active {
+                stopping: false,
+                cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                waiting: HashSet::from([id_a.clone(), id_b.clone()]),
+                in_call: HashSet::new(),
+                thread: None,
+            });
+        }
+
+        // Replace `job.json` with a directory so persisting the deletion fails.
+        let job_json = dir.join("label").join(&job_info.id).join("job.json");
+        std::fs::remove_file(&job_json).unwrap();
+        std::fs::create_dir(&job_json).unwrap();
+
+        let err = labeler.delete_image(&job_info.id, &id_a).unwrap_err();
+        assert_eq!(err.body.code, "internal", "{err:?}");
+        {
+            let state = job.lock();
+            assert_eq!(state.file.images.len(), 2);
+            assert!(state.active.as_ref().unwrap().waiting.contains(&id_a));
+            assert_eq!(state.file.run.as_ref().unwrap().total, 2);
+        }
+        assert!(upload_a.is_file(), "failed save must not delete uploaded image file");
+
+        // Remove the blocking directory and retry: image, waiting entry, run.total, and upload all update.
+        std::fs::remove_dir(&job_json).unwrap();
+        labeler.delete_image(&job_info.id, &id_a).unwrap();
+        {
+            let state = job.lock();
+            assert_eq!(state.file.images.len(), 1);
+            assert_eq!(state.file.images[0].id, id_b);
+            let active = state.active.as_ref().unwrap();
+            assert!(!active.waiting.contains(&id_a));
+            assert!(active.waiting.contains(&id_b));
+            assert_eq!(state.file.run.as_ref().unwrap().total, 1);
+        }
+        assert!(!upload_a.exists(), "retry must delete uploaded image file");
     }
 }
