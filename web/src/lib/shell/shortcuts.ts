@@ -128,6 +128,8 @@ export function installShortcuts(h: ShortcutHandlers): () => void {
 
   const onkeydown = (e: KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+      // Do not stack the command palette over another active modal dialog (only allow toggling palette or switching from shortcuts).
+      if (document.querySelector('dialog[open]:not(.palette):not(.shortcuts)')) return;
       clearChord();
       e.preventDefault();
       h.palette();

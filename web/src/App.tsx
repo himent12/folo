@@ -5,7 +5,7 @@
 // shortcut, the palette opening, idle time after startup), so that wait is rarely there at all. The screen kept on
 // display keeps its route too (`router.holdWhile`): it never reads the route of the screen to come. A chunk that fails
 // to load shows an error with Retry (ScreenError), and the screen once any later try brings it in.
-import { computed, createRoot, css, Dynamic, effect, getOwner, Key, onCleanup, onMount, signal, tick, untrack, type Component } from 'fw';
+import { computed, createRoot, css, Dynamic, effect, flush, getOwner, Key, onCleanup, onMount, signal, tick, untrack, type Component } from 'fw';
 import { hub } from '$lib/api/index';
 import { isChunkEvalError } from '$lib/chunkError';
 import { applyTheme } from '$lib/design/applyTheme';
@@ -65,14 +65,39 @@ export default function App(props: AppProps) {
     mounted = false;
   });
 
+  const closeShortcuts = () => {
+    if (!shortcutsOpen.peek()) return;
+    shortcutsOpen.set(false);
+    // Close an open ShortcutsDialog synchronously so the top layer and focus settle before another overlay opens.
+    flush();
+  };
+
   const openPalette = () => {
-    if (shortcutsOpen.peek() && !shortcutsComp.peek()) shortcutsOpen.set(false);
+    closeShortcuts();
     paletteOpen.set(true);
+  };
+
+  const openShortcuts = () => {
+    if (paletteOpen.peek()) {
+      pendingQuery = '';
+      paletteOpen.set(false);
+      flush();
+    }
+    shortcutsOpen.set(true);
   };
 
   // The theme (design/THEMES.md): `data-theme` the mode, `data-theme-id` the built-in palette's block in tokens.css,
   // and a custom theme's own colours as inline properties over it, the last theme's cleared first.
   effect(() => applyTheme(document.documentElement, prefs.activeTheme));
+
+  // A route change (e.g. browser back/forward) never leaves the shortcuts modal stranded over the new page.
+  let prevLocPath = router.location.path;
+  effect(() => {
+    const path = router.location.path;
+    if (path === prevLocPath) return;
+    prevLocPath = path;
+    if (shortcutsOpen.peek()) shortcutsOpen.set(false);
+  });
 
   onMount(() => {
     void hub.connect();
@@ -80,17 +105,11 @@ export default function App(props: AppProps) {
     const uninstall = installShortcuts({
       palette: () => {
         const opening = !paletteOpen.peek();
-        if (opening && shortcutsOpen.peek() && !shortcutsComp.peek()) shortcutsOpen.set(false);
-        if (!opening) pendingQuery = '';
+        if (opening) closeShortcuts();
+        else pendingQuery = '';
         paletteOpen.set(opening);
       },
-      shortcuts: () => {
-        if (paletteOpen.peek() && !paletteComp.peek()) {
-          pendingQuery = '';
-          paletteOpen.set(false);
-        }
-        shortcutsOpen.set(true);
-      },
+      shortcuts: openShortcuts,
       // Only preload on a real G-chord (guarded in installShortcuts against typing, modifiers, open dialogs, and singleKeys off).
       gChord: () => screens.preloadAll(),
       // Escape cancels a pending lazy dialog load instead of navigating back on a detail page.
@@ -331,7 +350,7 @@ export default function App(props: AppProps) {
         </div>
         <TabBar />
       </div>
-      {paletteComp.get() ? <Dynamic component={paletteComp.get()!} bind:open={paletteOpen} onshortcuts={() => shortcutsOpen.set(true)} takeInitialQuery={takePendingQuery} /> : null}
+      {paletteComp.get() ? <Dynamic component={paletteComp.get()!} bind:open={paletteOpen} onshortcuts={openShortcuts} takeInitialQuery={takePendingQuery} /> : null}
       {shortcutsComp.get() ? <Dynamic component={shortcutsComp.get()!} bind:open={shortcutsOpen} /> : null}
       <GChordIndicator />
       <Toaster />

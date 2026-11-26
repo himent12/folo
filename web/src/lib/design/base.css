@@ -53,6 +53,10 @@ html {
   /* Prose never ends on an orphan ("shapes.", "of 32."): every hint, help line, dialog, banner and description
      inherits it. One-line labels are unaffected. */
   text-wrap: pretty;
+  /* Keep keyboard-focused controls and anchor jumps clear of the sticky topbar and any fixed bottom chrome
+     (bottom dock, and on phones the fixed tab bar). */
+  scroll-padding-top: calc(var(--size-topbar) + var(--space-3));
+  scroll-padding-bottom: calc(var(--dock-h) + var(--space-4));
 }
 
 body {
@@ -516,6 +520,11 @@ select[aria-invalid='true'],
 }
 :root[data-dock] {
   --tabbar-h: 0px;
+}
+@media (max-width: 767px) {
+  html {
+    scroll-padding-bottom: calc(var(--tabbar-h) + var(--dock-h) + var(--space-4) + env(safe-area-inset-bottom));
+  }
 }
 
 /*

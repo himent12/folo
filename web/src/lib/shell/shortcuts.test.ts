@@ -206,6 +206,15 @@ describe('G-chord navigation state and guards', () => {
     key('g');
     expect(gChord.get()).toBe(false);
     expect(onGChord).not.toHaveBeenCalled();
+    // Ctrl+K is also suppressed over unrelated open modal dialogs, but works when Shortcuts or Palette is open.
+    key('k', { ctrlKey: true });
+    expect(palette).not.toHaveBeenCalled();
+    dlg.className = 'shortcuts';
+    key('k', { ctrlKey: true });
+    expect(palette).toHaveBeenCalledTimes(1);
+    dlg.className = 'palette';
+    key('k', { ctrlKey: true });
+    expect(palette).toHaveBeenCalledTimes(2);
     dlg.remove();
 
     keyPrefs.singleKeys = false;

@@ -3,6 +3,8 @@
 // runs (the icon rail and the tab bar mark a training run with a lime dot and name the counts), the top bar shows
 // crumbs on a nested page only and never a New run, the foot's line says the data source and the version, a detail
 // header puts its status badge on the title line, and an architecture is a name (sans) where an id stays mono.
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { flush } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
@@ -124,6 +126,13 @@ describe('the Runs badge', () => {
     const tab = shell.querySelector<HTMLAnchorElement>('a[href="#/runs"]')!;
     expect(tab.querySelector('.live-dot')).not.toBeNull();
     expect(tab.getAttribute('aria-label')).toBe('Runs, 1 training, 1 queued');
+  });
+
+  it('sets root scroll-padding so keyboard-focused controls stay clear of the sticky topbar and fixed phone tab bar', () => {
+    const baseCss = readFileSync(resolve(import.meta.dirname, '../design/base.css'), 'utf8');
+    expect(baseCss).toContain('scroll-padding-top: calc(var(--size-topbar) + var(--space-3));');
+    expect(baseCss).toContain('scroll-padding-bottom: calc(var(--dock-h) + var(--space-4));');
+    expect(baseCss).toMatch(/@media \(max-width: 767px\)\s*\{\s*html\s*\{[\s\S]*scroll-padding-bottom:\s*calc\(var\(--tabbar-h\) \+ var\(--dock-h\) \+ var\(--space-4\) \+ env\(safe-area-inset-bottom\)\);/);
   });
 });
 
