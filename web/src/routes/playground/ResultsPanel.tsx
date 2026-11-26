@@ -30,6 +30,7 @@ export interface ResultsPanelProps {
   classCount?: number;
   classList?: () => JSX.Element;
   showAllButton?: () => JSX.Element;
+  onShowAll?: () => void;
   rows: { b: Det; i: number }[];
   predicting: boolean;
   notice: 'file' | 'error' | null;
@@ -106,6 +107,53 @@ export default function ResultsPanel(props: ResultsPanelProps) {
     }
   }
 
+  const emptyDetections = () => {
+    const hiddenAtConf = props.result?.boxes.length ?? 0;
+    const hasVisibleCandidates = !props.hidden.size || !!props.pred?.boxes.some((b) => !props.hidden.has(b.class));
+    const canLower = conf.get() > 0.05 && hasVisibleCandidates;
+    if (hiddenAtConf > 0) {
+      return (
+        <p class="placeholder">
+          {hiddenAtConf === 1 ? '1 detection is' : `${hiddenAtConf} detections are`} hidden by the class filter.{' '}
+          {props.onShowAll ? (
+            <button type="button" class="inline" onclick={props.onShowAll}>
+              Show all classes
+            </button>
+          ) : null}
+          {props.onShowAll && canLower ? ' · ' : null}
+          {canLower ? (
+            <button type="button" class="inline" onclick={() => conf.set(Math.max(0.01, +(conf.get() / 2).toFixed(2)))}>
+              Lower the threshold
+            </button>
+          ) : null}
+        </p>
+      );
+    }
+    if (props.hidden.size > 0 && !hasVisibleCandidates) {
+      return (
+        <p class="placeholder">
+          No detections at conf ≥ {conf.get().toFixed(2)} — every detected class is hidden.{' '}
+          {props.onShowAll ? (
+            <button type="button" class="inline" onclick={props.onShowAll}>
+              Show all classes
+            </button>
+          ) : null}
+        </p>
+      );
+    }
+    return (
+      <p class="placeholder">
+        No detections at conf ≥ {conf.get().toFixed(2)}
+        {props.hidden.size ? ' in the visible classes' : ''}.{' '}
+        {canLower ? (
+          <button type="button" class="inline" onclick={() => conf.set(Math.max(0.01, +(conf.get() / 2).toFixed(2)))}>
+            Lower the threshold
+          </button>
+        ) : null}
+      </p>
+    );
+  };
+
   return (
     <div class="results" class:rail={!!props.rail}>
       <Dynamic component={props.rail ? Bare : Panel} pad="none">
@@ -163,15 +211,7 @@ export default function ResultsPanel(props: ResultsPanelProps) {
             /* Candidates are fetched down to the lowest threshold (FETCH): none means no threshold would show more. */
             <p class="placeholder">The model found nothing in this image, even at conf ≥ {FETCH.conf}.</p>
           ) : props.rows.length === 0 ? (
-            <p class="placeholder">
-              No detections at conf ≥ {conf.get().toFixed(2)}
-              {props.hidden.size ? ' in the visible classes' : ''}.{' '}
-              {conf.get() > 0.05 ? (
-                <button type="button" class="inline" onclick={() => conf.set(Math.max(0.01, +(conf.get() / 2).toFixed(2)))}>
-                  Lower the threshold
-                </button>
-              ) : null}
-            </p>
+            emptyDetections()
           ) : (
             <>
               {summary.get() ? (

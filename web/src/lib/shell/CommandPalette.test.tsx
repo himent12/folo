@@ -663,4 +663,41 @@ describe('CommandPalette: async hardening, deferred loops, clear button, and poi
     expect(open.get()).toBe(true);
     expect(secondSignal?.aborted).toBe(false);
   });
+
+  it('closes synchronously on native cancel (Escape) so reopening before queued close fires works', () => {
+    const queuedCloses: HTMLDialogElement[] = [];
+    const origClose = HTMLDialogElement.prototype.close;
+    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+      this.open = false;
+      queuedCloses.push(this);
+    };
+    try {
+      const open = signal(true);
+      c = render(() => <CommandPalette bind:open={open} onshortcuts={() => {}} />, target);
+      flushSync();
+      const dlg = document.querySelector<HTMLDialogElement>('dialog.palette')!;
+      expect(dlg.open).toBe(true);
+
+      // Simulate native Escape: browser dispatches cancel synchronously, then queues close asynchronously.
+      const cancelEv = new Event('cancel', { cancelable: true });
+      dlg.dispatchEvent(cancelEv);
+      expect(cancelEv.defaultPrevented).toBe(true);
+      expect(dlg.open).toBe(false);
+      expect(open.get()).toBe(false);
+
+      // Reopen immediately before the queued close event arrives.
+      open.set(true);
+      flushSync();
+      expect(dlg.open).toBe(true);
+      expect(open.get()).toBe(true);
+
+      // Late queued close event must NOT close the reopened palette.
+      for (const d of queuedCloses.splice(0)) d.dispatchEvent(new Event('close'));
+      flushSync();
+      expect(dlg.open).toBe(true);
+      expect(open.get()).toBe(true);
+    } finally {
+      HTMLDialogElement.prototype.close = origClose;
+    }
+  });
 });

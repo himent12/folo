@@ -948,4 +948,36 @@ describe('lazy CommandPalette', () => {
     c = undefined;
     expect(secondFrame.cancelled).toBe(true);
   });
+
+  it('reopens the command palette on immediate Ctrl+K after Escape before queued native close fires', async () => {
+    const queuedCloses: HTMLDialogElement[] = [];
+    const origClose = HTMLDialogElement.prototype.close;
+    HTMLDialogElement.prototype.close = function (this: HTMLDialogElement) {
+      this.open = false;
+      queuedCloses.push(this);
+    };
+    try {
+      const screens = new Screens((name) => (name === 'overview' ? () => Promise.resolve(screen('home')) : undefined));
+      router.route = parse('#/');
+      c = render(() => <App screens={screens} />, target);
+      await until(() => main().querySelector('.fake'), 'overview');
+
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+      await until(() => target.querySelector('dialog.palette[open]'), 'palette open');
+      const dlg = target.querySelector<HTMLDialogElement>('dialog.palette')!;
+
+      // Even if the browser closed the dialog (`dlg.open = false`) before its queued `close` event runs,
+      // an immediate Ctrl+K must reopen it rather than toggling `paletteOpen` to false.
+      dlg.open = false;
+      queuedCloses.push(dlg);
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }));
+      expect(dlg.open).toBe(true);
+
+      for (const d of queuedCloses.splice(0)) d.dispatchEvent(new Event('close'));
+      flush();
+      expect(target.querySelector('dialog.palette[open]')).not.toBeNull();
+    } finally {
+      HTMLDialogElement.prototype.close = origClose;
+    }
+  });
 });

@@ -801,4 +801,34 @@ describe('Playground: the rail (from 1024 px)', () => {
     expect(target.querySelector('.t-sk')).toBeNull();
     expect(text(target.querySelector('section[aria-labelledby="pg-timing"]'))).toContain('Timing appears after a run.');
   });
+
+  it('offers Show all classes instead of Lower the threshold when every detected class is hidden', async () => {
+    await run('normal', 'm_shapes_s');
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    const initialRows = target.querySelectorAll('#pg-panel tbody tr').length;
+    expect(initialRows).toBeGreaterThan(0);
+
+    // Hide every detected class in the Classes tab.
+    tab('Classes').click();
+    flushSync();
+    const toggles = [...target.querySelectorAll<HTMLButtonElement>('#pg-panel ul.counts button[aria-pressed]')];
+    expect(toggles.length).toBeGreaterThan(0);
+    for (const btn of toggles) btn.click();
+    flushSync();
+
+    // Detections tab must report the class filter and offer "Show all classes", NOT "Lower the threshold".
+    tab('Detections').click();
+    flushSync();
+    const placeholder = target.querySelector<HTMLElement>('#pg-panel p.placeholder')!;
+    expect(placeholder).not.toBeNull();
+    expect(text(placeholder)).toContain('hidden by the class filter');
+    expect(text(placeholder)).not.toContain('Lower the threshold');
+    const showAll = [...placeholder.querySelectorAll<HTMLButtonElement>('button')].find((b) => text(b) === 'Show all classes')!;
+    expect(showAll).toBeDefined();
+
+    // Clicking "Show all classes" restores every detection without lowering confidence.
+    showAll.click();
+    flushSync();
+    expect(target.querySelectorAll('#pg-panel tbody tr').length).toBe(initialRows);
+  });
 });

@@ -662,6 +662,7 @@ export default function Playground() {
       classCount={counts.get().length}
       classList={classList}
       showAllButton={showAllButton}
+      onShowAll={() => hidden.set(new Set())}
       result={result.get()}
       bind:tab={tab}
       rows={rows.get()}
