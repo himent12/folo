@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use folo_core::backend::OptimStep;
 use folo_core::{DType, Device, Tensor};
 
+use super::cautious::{
+    cautious_mask_and_scale_tensor, sgd_coupled_cautious_slice, sgd_decoupled_cautious_slice,
+};
 use super::simd::{sgd_coupled_slice, sgd_decoupled_slice};
 use super::{
     GradSource, OptimKind, Optimizer, ParamGroup, ParamPlan, cpu_fast, for_each_param_planned, step_many,
@@ -92,9 +95,13 @@ impl Sgd {
         let state = |gi: usize, pi: usize| -> Vec<&Tensor> {
             bufs[gi][pi].as_ref().filter(|_| groups[gi].momentum as f32 != 0.0).into_iter().collect()
         };
-        let done = step_many("sgd", groups, grads, sgd, state)?;
+        let done = if groups.iter().any(|g| g.cautious) {
+            None
+        } else {
+            step_many("sgd", groups, grads, sgd, state)?
+        };
         if done.as_ref().is_none_or(|d| d.iter().any(|&v| !v)) {
-            for_each_param_planned(plan, groups, |gi, pi| {
+            for_each_param_planned(plan, groups, grads, |gi, pi| {
                 if done.as_ref().is_some_and(|d| d[gi]) {
                     return Ok(());
                 }
@@ -120,9 +127,19 @@ impl Sgd {
                         (grp.lr * grp.weight_decay) as f32,
                         grp.nesterov,
                         grp.cautious_wd,
+                        grp.cautious,
                     )
                 } else {
-                    update(p, g, bufs[gi][pi].as_ref(), eff_lr, mu, grp.weight_decay as f32, grp.nesterov)
+                    update(
+                        p,
+                        g,
+                        bufs[gi][pi].as_ref(),
+                        eff_lr,
+                        mu,
+                        grp.weight_decay as f32,
+                        grp.nesterov,
+                        grp.cautious,
+                    )
                 }
             })?;
         }
@@ -140,7 +157,8 @@ fn update_decoupled(
     mu: f32,
     wd_step: f32,
     nesterov: bool,
-    cautious: bool,
+    cautious_wd: bool,
+    cautious_update: bool,
 ) -> Result<()> {
     if cpu_fast(&[p])
         && buf.is_none_or(|b| cpu_fast(&[b]) && !b.same_storage(p) && !b.same_storage(g))
@@ -149,21 +167,45 @@ fn update_decoupled(
         && !p.same_storage(g)
     {
         return g.with_f32_slice(|g| -> Result<()> {
-            match buf {
-                Some(b) => b.update_f32(|b| {
-                    p.update_f32(|p| sgd_decoupled_slice(p, g, Some(b), lr, mu, wd_step, nesterov, cautious))
-                })??,
-                None => {
-                    p.update_f32(|p| sgd_decoupled_slice(p, g, None, lr, mu, wd_step, nesterov, cautious))?
+            if cautious_update {
+                match buf {
+                    Some(b) => b.update_f32(|b| {
+                        p.update_f32(|p| {
+                            sgd_decoupled_cautious_slice(
+                                p,
+                                g,
+                                Some(b),
+                                lr,
+                                mu,
+                                wd_step,
+                                nesterov,
+                                cautious_wd,
+                            )
+                        })
+                    })??,
+                    None => p.update_f32(|p| {
+                        sgd_decoupled_cautious_slice(p, g, None, lr, mu, wd_step, nesterov, cautious_wd)
+                    })?,
+                }
+            } else {
+                match buf {
+                    Some(b) => b.update_f32(|b| {
+                        p.update_f32(|p| {
+                            sgd_decoupled_slice(p, g, Some(b), lr, mu, wd_step, nesterov, cautious_wd)
+                        })
+                    })??,
+                    None => p.update_f32(|p| {
+                        sgd_decoupled_slice(p, g, None, lr, mu, wd_step, nesterov, cautious_wd)
+                    })?,
                 }
             }
             Ok(())
         })?;
     }
     let g = g.to_dtype(DType::F32)?;
-    if !p.device().is_cpu() {
+    if !cautious_update && !p.device().is_cpu() {
         let state: Vec<&Tensor> = buf.filter(|_| mu != 0.0).into_iter().collect();
-        let step = OptimStep::SgdDecoupled { lr, momentum: mu, wd_step, nesterov, cautious };
+        let step = OptimStep::SgdDecoupled { lr, momentum: mu, wd_step, nesterov, cautious: cautious_wd };
         if p.optimizer_step_(&g, &state, &step)? {
             return Ok(());
         }
@@ -175,25 +217,38 @@ fn update_decoupled(
         b.add_assign(&g)?;
         if nesterov { g.add(&b.mul_scalar(mu)?)? } else { b.clone() }
     } else {
-        g
+        g.clone()
     };
-    if wd_step != 0.0 {
-        if cautious {
-            let mask = u.mul(p)?.gt(&Tensor::zeros_with([], DType::F32, p.device())?)?;
-            let decay = p.mul(&mask)?.mul_scalar(wd_step)?;
-            p.add_scaled_assign(&u, -lr)?;
-            p.add_scaled_assign(&decay, -1.0)?;
+    let (u_eff, scale_t) = if cautious_update {
+        let (mask, scale) = cautious_mask_and_scale_tensor(&u, &g)?;
+        (u.mul(&mask)?, Some(scale))
+    } else {
+        (u, None)
+    };
+    let decay = if wd_step != 0.0 {
+        if cautious_wd {
+            let cond = u_eff.mul(p)?.gt_scalar(0.0)?;
+            let zero = p.zeros_like()?;
+            Some(cond.where_cond(&p.mul_scalar(wd_step)?, &zero)?)
         } else {
-            let decay = p.mul_scalar(wd_step)?;
-            p.add_scaled_assign(&u, -lr)?;
-            p.add_scaled_assign(&decay, -1.0)?;
+            Some(p.mul_scalar(wd_step)?)
         }
     } else {
-        p.add_scaled_assign(&u, -lr)?;
+        None
+    };
+    if let Some(scale) = scale_t {
+        let neg_lr = scale.mul_scalar(-lr)?;
+        p.add_assign(&u_eff.mul(&neg_lr)?)?;
+    } else {
+        p.add_scaled_assign(&u_eff, -lr)?;
+    }
+    if let Some(decay) = decay {
+        p.add_scaled_assign(&decay, -1.0)?;
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update(
     p: &Tensor,
     g: &Tensor,
@@ -202,6 +257,7 @@ fn update(
     mu: f32,
     wd: f32,
     nesterov: bool,
+    cautious_update: bool,
 ) -> Result<()> {
     if cpu_fast(&[p])
         && buf.is_none_or(|b| cpu_fast(&[b]) && !b.same_storage(p) && !b.same_storage(g))
@@ -210,18 +266,27 @@ fn update(
         && !p.same_storage(g)
     {
         return g.with_f32_slice(|g| -> Result<()> {
-            match buf {
-                Some(b) => b.update_f32(|b| {
-                    p.update_f32(|p| sgd_coupled_slice(p, g, Some(b), lr, mu, wd, nesterov))
-                })??,
-                None => p.update_f32(|p| sgd_coupled_slice(p, g, None, lr, mu, wd, nesterov))?,
+            if cautious_update {
+                match buf {
+                    Some(b) => b.update_f32(|b| {
+                        p.update_f32(|p| sgd_coupled_cautious_slice(p, g, Some(b), lr, mu, wd, nesterov))
+                    })??,
+                    None => p.update_f32(|p| sgd_coupled_cautious_slice(p, g, None, lr, mu, wd, nesterov))?,
+                }
+            } else {
+                match buf {
+                    Some(b) => b.update_f32(|b| {
+                        p.update_f32(|p| sgd_coupled_slice(p, g, Some(b), lr, mu, wd, nesterov))
+                    })??,
+                    None => p.update_f32(|p| sgd_coupled_slice(p, g, None, lr, mu, wd, nesterov))?,
+                }
             }
             Ok(())
         })?;
     }
     let g = g.to_dtype(DType::F32)?;
     // A device with a fused kernel: one dispatch, same arithmetic.
-    if !p.device().is_cpu() {
+    if !cautious_update && !p.device().is_cpu() {
         let state: Vec<&Tensor> = buf.filter(|_| mu != 0.0).into_iter().collect();
         let step = OptimStep::Sgd { lr, momentum: mu, weight_decay: wd, nesterov };
         if p.optimizer_step_(&g, &state, &step)? {
@@ -229,15 +294,23 @@ fn update(
         }
     }
     // Any device: the same arithmetic, op by op.
-    let mut d = if wd != 0.0 { g.add(&p.mul_scalar(wd)?)? } else { g };
-    if let Some(b) = buf
+    let d_grad = if wd != 0.0 { g.add(&p.mul_scalar(wd)?)? } else { g };
+    let u = if let Some(b) = buf
         && mu != 0.0
     {
         b.mul_scalar_assign(mu)?;
-        b.add_assign(&d)?;
-        d = if nesterov { d.add(&b.mul_scalar(mu)?)? } else { b.clone() };
+        b.add_assign(&d_grad)?;
+        if nesterov { d_grad.add(&b.mul_scalar(mu)?)? } else { b.clone() }
+    } else {
+        d_grad.clone()
+    };
+    if cautious_update {
+        let (mask, scale) = cautious_mask_and_scale_tensor(&u, &d_grad)?;
+        let neg_lr = scale.mul_scalar(-lr)?;
+        p.add_assign(&u.mul(&mask)?.mul(&neg_lr)?)?;
+    } else {
+        p.add_scaled_assign(&u, -lr)?;
     }
-    p.add_scaled_assign(&d, -lr)?;
     Ok(())
 }
 

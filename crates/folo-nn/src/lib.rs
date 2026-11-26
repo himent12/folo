@@ -4,7 +4,7 @@
 //! - [`Module`] / [`Forward`]: stable dotted names, parameters vs buffers, train/eval propagation, visitors.
 //! - Layers: [`Conv2d`], [`BatchNorm2d`], [`Linear`], [`Activation`], [`MaxPool2d`], [`Upsample`],
 //!   [`Concat`], [`Identity`], [`Sequential`], [`ModuleList`], and [`ConvBnAct`] (docs/MODEL.md's `Conv`).
-//! - [`init`]: seeded Kaiming / Xavier and the head priors.
+//! - [`init`]: seeded Kaiming / Xavier / Orthogonal initialisation and the head priors.
 //! - [`optim`]: [`optim::Sgd`], [`optim::AdamW`], [`optim::MuSgd`], parameter groups, gradient accumulation and
 //!   clipping.
 //! - [`LrSchedule`] (warmup + linear / cosine / WSD / cosine-restarts) and [`ModelEma`].

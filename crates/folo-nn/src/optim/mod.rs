@@ -34,6 +34,7 @@
 
 mod adamw;
 mod agc;
+mod cautious;
 mod dispatch;
 mod grads;
 mod musgd;
@@ -126,6 +127,11 @@ pub struct ParamGroup {
     pub decoupled_wd: bool,
     /// Cautious decoupled weight decay: apply decoupled decay only where `u · p > 0`.
     pub cautious_wd: bool,
+    /// Opt-in Cautious update masking (Liang et al. 2024): mask updates where the update direction and reference
+    /// gradient disagree in sign (`g` for [`AdamW`] and decoupled [`Sgd`]; L2-regularized `g + wd · p` for
+    /// coupled [`Sgd`]) and rescale active entries by `n / max(active, 1)` (default `false`; supported by
+    /// [`AdamW`] and [`Sgd`], rejected by [`MuSgd`]).
+    pub cautious: bool,
     /// Per-parameter depthwise conv mask (`groups > 1 && groups == in_channels == out_channels`), aligned with
     /// `params` (empty means all false). Used by `MuSgd`'s `Conv-GeoMuon` depthwise Polar LMO.
     pub depthwise: Vec<bool>,
@@ -151,6 +157,7 @@ impl ParamGroup {
             momentum: 0.937,
             decoupled_wd: false,
             cautious_wd: false,
+            cautious: false,
             depthwise: Vec::new(),
         }
     }
@@ -208,6 +215,13 @@ impl ParamGroup {
     /// Enable or disable cautious decoupled weight decay (SGD / MuSGD).
     pub fn cautious_wd(mut self, on: bool) -> Self {
         self.cautious_wd = on;
+        self
+    }
+
+    /// Enable or disable Cautious update masking (`u · g > 0`, rescaled by `n / max(active, 1)`) for
+    /// [`AdamW`] and [`Sgd`].
+    pub fn cautious(mut self, on: bool) -> Self {
+        self.cautious = on;
         self
     }
 
@@ -378,6 +392,16 @@ fn apply_group_contract<O: Optimizer + ?Sized>(o: &mut O, c: &OptimContract) -> 
             }
         }
     }
+    if kind == OptimKind::MuSgd {
+        for gc in &c.groups {
+            if gc.cautious {
+                return Err(Error::Load(format!(
+                    "folo.optim group `{}`: `cautious` is only supported for `sgd` and `adamw`",
+                    gc.name
+                )));
+            }
+        }
+    }
     for (g, gc) in o.groups_mut().iter_mut().zip(&c.groups) {
         gc.apply_to(g, kind)?;
     }
@@ -444,6 +468,9 @@ pub struct GroupContract {
     /// Cautious decoupled weight decay (SGD / MuSGD; omitted when false).
     #[serde(default, skip_serializing_if = "is_false")]
     pub cautious_wd: bool,
+    /// Cautious update masking (AdamW / SGD; omitted when false so older files match byte for byte).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cautious: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -464,6 +491,7 @@ impl GroupContract {
             eps: (!sgd).then_some(g.eps),
             decoupled_wd: sgd && g.decoupled_wd,
             cautious_wd: sgd && g.cautious_wd,
+            cautious: kind != OptimKind::MuSgd && g.cautious,
         }
     }
 
@@ -473,6 +501,12 @@ impl GroupContract {
         g.weight_decay = self.weight_decay;
         match kind {
             OptimKind::Sgd | OptimKind::MuSgd => {
+                if kind == OptimKind::MuSgd && self.cautious {
+                    return Err(Error::Load(format!(
+                        "folo.optim group `{}`: `cautious` is only supported for `sgd` and `adamw`",
+                        self.name
+                    )));
+                }
                 g.base_momentum = self.momentum.ok_or_else(|| missing("momentum"))?;
                 g.nesterov = self.nesterov.ok_or_else(|| missing("nesterov"))?;
                 g.decoupled_wd = self.decoupled_wd;
@@ -485,6 +519,7 @@ impl GroupContract {
                 g.eps = self.eps.ok_or_else(|| missing("eps"))?;
             }
         }
+        g.cautious = self.cautious;
         g.lr = g.base_lr;
         g.momentum = g.base_momentum;
         g.validate().map_err(|e| Error::Load(e.to_string()))
