@@ -402,4 +402,75 @@ fn schedulefree_mode_switch_idempotence_edge_cases_and_resume() {
     opt_big_gen.step(&grads_of(&view_big, &[1e20, -1e20, 1e20, -1e20])).unwrap();
     assert!(view_big.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
     assert!(opt_big_gen.param_state(0, 0).unwrap().2.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+
+    // 9. Running maximum LR (`lr_max`) averaging rule (Defazio et al. 2024): lowering LR from 0.1 -> 0.01
+    //    with `r = 0, weight_lr_power = 2.0` keeps `lr_max = 0.1`, so `w_2 = w_1 = 0.01` and `c_2 = 0.5`.
+    let p_lr = Tensor::from_slice(&[2.0f32], [1]).unwrap().requires_grad_();
+    let mut opt_lr =
+        ScheduleFreeAdamW::from_params(vec![("w".into(), p_lr.clone())], 0.1, 0.9, 0.99, 1e-8, 0.0, def)
+            .unwrap();
+    opt_lr.step(&grads_of(&p_lr, &[1.0])).unwrap();
+    assert!((opt_lr.group_lr_max(0).unwrap() - 0.1).abs() < 1e-15);
+    assert!((opt_lr.weight_sum(0).unwrap() - 0.01).abs() < 1e-15);
+    opt_lr.groups_mut()[0].lr = 0.01;
+    let x_before = opt_lr.param_state(0, 0).unwrap().1.to_vec::<f32>().unwrap()[0];
+    opt_lr.step(&grads_of(&p_lr, &[1.0])).unwrap();
+    assert!((opt_lr.group_lr_max(0).unwrap() - 0.1).abs() < 1e-15);
+    assert!((opt_lr.weight_sum(0).unwrap() - 0.02).abs() < 1e-15);
+    let z_after = opt_lr.param_state(0, 0).unwrap().0.to_vec::<f32>().unwrap()[0];
+    let x_after = opt_lr.param_state(0, 0).unwrap().1.to_vec::<f32>().unwrap()[0];
+    // c_2 = 0.01 / 0.02 = 0.5 -> x_2 = 0.5 * x_1 + 0.5 * z_2.
+    assert!((x_after - 0.5 * (x_before + z_after)).abs() < 1e-6);
+    assert!((opt_lr.contract().groups[0].lr_max - 0.1).abs() < 1e-15);
+
+    // 10. Swapping or replacing same-shaped parameters via `groups_mut()` is rejected before touching state.
+    let p_s0 = Tensor::from_slice(&[1.0f32, 2.0], [2]).unwrap().requires_grad_();
+    let p_s1 = Tensor::from_slice(&[3.0f32, 4.0], [2]).unwrap().requires_grad_();
+    let mut opt_swap = ScheduleFreeAdamW::from_params(
+        vec![("a".into(), p_s0.clone()), ("b".into(), p_s1.clone())],
+        0.1,
+        0.9,
+        0.99,
+        1e-8,
+        0.0,
+        def,
+    )
+    .unwrap();
+    opt_swap.groups_mut()[0].params.swap(0, 1);
+    assert!(opt_swap.step(&grads_of(&p_s0, &[1.0, 1.0])).is_err());
+    assert!(opt_swap.eval_mode().is_err());
+    assert!(opt_swap.state_tensors().is_err());
+    assert_eq!(p_s0.to_vec::<f32>().unwrap(), [1.0, 2.0]);
+    assert_eq!(p_s1.to_vec::<f32>().unwrap(), [3.0, 4.0]);
+
+    // 11. Skipped-step checkpoint (`step == 1, group_step == 0`) round-trips cleanly via `apply_contract` +
+    //     `load_state`, while calling `load_state(step > 0)` on an already-stepped optimizer without
+    //     `apply_contract` is rejected, as is a contract with `group_step == 0 && weight_sum > 0`.
+    let p_sk1 = Tensor::from_slice(&[5.0f32], [1]).unwrap().requires_grad_();
+    let p_sk2 = Tensor::from_slice(&[5.0f32], [1]).unwrap().requires_grad_();
+    let mut opt_sk1 =
+        ScheduleFreeAdamW::from_params(vec![("w".into(), p_sk1.clone())], 0.1, 0.9, 0.99, 1e-8, 0.0, def)
+            .unwrap();
+    opt_sk1.step(&Grads::default()).unwrap(); // skipped step: step=1, group_step=0
+    let sk_contract = opt_sk1.contract();
+    let sk_state: HashMap<String, Tensor> = opt_sk1.state_tensors().unwrap().into_iter().collect();
+    let mut opt_sk2 =
+        ScheduleFreeAdamW::from_params(vec![("w".into(), p_sk2.clone())], 0.1, 0.9, 0.99, 1e-8, 0.0, def)
+            .unwrap();
+    opt_sk2.apply_contract(&sk_contract).unwrap();
+    opt_sk2.load_state(sk_contract.step, &sk_state).unwrap();
+    assert_eq!(opt_sk2.step_count(), 1);
+    assert_eq!(opt_sk2.group_step(0), Some(0));
+
+    // Already-stepped optimizer must reject `load_state(step > 0)` without a preceding `apply_contract`.
+    opt_sk2.step(&grads_of(&p_sk2, &[1.0])).unwrap();
+    assert!(opt_sk2.load_state(parsed.step, &saved).is_err());
+
+    // Invalid contract with `group_step == 0 && weight_sum > 0` or `lr_max > 0` is rejected.
+    let mut bad_contract = sk_contract.clone();
+    bad_contract.groups[0].weight_sum = 1.0;
+    assert!(opt_sk2.apply_contract(&bad_contract).is_err());
+    let mut bad_lr_max = sk_contract;
+    bad_lr_max.groups[0].lr_max = 0.1;
+    assert!(opt_sk2.apply_contract(&bad_lr_max).is_err());
 }

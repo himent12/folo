@@ -9,7 +9,8 @@
 //! v_{t+1} = beta2 * v_t + (1 - beta2) * g_t^2
 //! u_t = g_t / (sqrt(v_{t+1}) / sqrt(1 - beta2^{t+1}) + eps) + wd * y_t
 //! z_{t+1} = z_t - gamma_t * u_t
-//! w_{t+1} = (t + 1)^r * gamma_t^{weight_lr_power}
+//! lr_max_{t+1} = max(lr_max_t, gamma_t)
+//! w_{t+1} = (t + 1)^r * lr_max_{t+1}^{weight_lr_power}
 //! c_{t+1} = w_{t+1} / sum_{j=1}^{t+1} w_j
 //! x_{t+1} = lerp(x_t, z_{t+1}, c_{t+1})
 //! y_{t+1} = lerp(z_{t+1}, x_{t+1}, beta1)
@@ -53,9 +54,9 @@ pub const SF_DEFAULT_WEIGHT_LR_POWER: f64 = 2.0;
 pub struct ScheduleFreeConfig {
     /// Linear LR warmup length in optimizer steps (`0` = no internal warmup).
     pub warmup_steps: u64,
-    /// Polynomial step weighting exponent `r >= 0` in `w_t = t^r * gamma_t^{weight_lr_power}` (`0.0` default).
+    /// Polynomial step weighting exponent `r >= 0` in `w_t = t^r * lr_max_t^{weight_lr_power}` (`0.0` default).
     pub r: f64,
-    /// Step-size weighting exponent `p >= 0` in `w_t = t^r * gamma_t^p` (`2.0` default, down-weighting warmup).
+    /// Step-size weighting exponent `p >= 0` in `w_t = t^r * lr_max_t^p` (`2.0` default, down-weighting warmup).
     pub weight_lr_power: f64,
 }
 
@@ -107,6 +108,9 @@ pub struct ScheduleFreeGroupContract {
     pub group_step: u64,
     /// Accumulated averaging weight sum `W_t = sum_{j=1}^t w_j` in `f64`.
     pub weight_sum: f64,
+    /// Running maximum effective learning rate `max_{j <= t} gamma_j` (Defazio et al. 2024).
+    #[serde(default)]
+    pub lr_max: f64,
 }
 
 /// Serializable contract for [`ScheduleFreeAdamW`] checkpointing and bit-exact resume.
@@ -149,13 +153,16 @@ pub struct ScheduleFreeAdamW {
     groups: Vec<ParamGroup>,
     config: ScheduleFreeConfig,
     state: Vec<Vec<ParamState>>,
+    param_ids: Vec<Vec<(String, folo_core::TensorId)>>,
     group_steps: Vec<u64>,
     weight_sums: Vec<f64>,
+    lr_maxes: Vec<f64>,
     plan: ParamPlan,
     coefs: Vec<Coef>,
     state_keys: HashSet<usize>,
     step: u64,
     train_mode: bool,
+    pending_contract_step: Option<u64>,
 }
 
 impl ScheduleFreeAdamW {
@@ -167,6 +174,8 @@ impl ScheduleFreeAdamW {
         config.validate()?;
         validate_sf_groups(&groups)?;
         let state = init_state(&groups)?;
+        let param_ids =
+            groups.iter().map(|g| g.params.iter().map(|(n, p)| (n.clone(), p.id())).collect()).collect();
         let n_groups = groups.len();
         let plan = ParamPlan::from_groups(&groups);
         let coefs = Vec::with_capacity(n_groups);
@@ -175,13 +184,16 @@ impl ScheduleFreeAdamW {
             groups,
             config,
             state,
+            param_ids,
             group_steps: vec![0; n_groups],
             weight_sums: vec![0.0; n_groups],
+            lr_maxes: vec![0.0; n_groups],
             plan,
             coefs,
             state_keys,
             step: 0,
             train_mode: true,
+            pending_contract_step: None,
         })
     }
 
@@ -231,6 +243,11 @@ impl ScheduleFreeAdamW {
     /// Accumulated averaging weight sum `W_t` for parameter group `group`.
     pub fn weight_sum(&self, group: usize) -> Option<f64> {
         self.weight_sums.get(group).copied()
+    }
+
+    /// Running maximum effective learning rate `lr_max` for parameter group `group`.
+    pub fn group_lr_max(&self, group: usize) -> Option<f64> {
+        self.lr_maxes.get(group).copied()
     }
 
     /// Whether parameters currently hold training iterates `y` (`true`) or evaluation iterates `x` (`false`).
@@ -337,9 +354,10 @@ impl ScheduleFreeAdamW {
             .flat_map(|g| &g.params)
             .any(|(_, p)| grads.grad(p).is_some_and(|g| self.state_keys.contains(&storage_key(g))));
 
-        // Compute per-group effective LR, averaging weight c_{t+1}, and next group counters atomically.
+        // Compute per-group effective LR, running max LR, averaging weight c_{t+1}, and next counters atomically.
         let mut next_group_steps = self.group_steps.clone();
         let mut next_weight_sums = self.weight_sums.clone();
+        let mut next_lr_maxes = self.lr_maxes.clone();
         self.coefs.clear();
         for (gi, grp) in self.groups.iter().enumerate() {
             let has_grad = grp.params.iter().any(|(_, p)| grads.grad(p).is_some());
@@ -376,7 +394,8 @@ impl ScheduleFreeAdamW {
                     grp.name
                 )));
             }
-            let w_t = (k_next as f64).powf(self.config.r) * gamma.powf(self.config.weight_lr_power);
+            let lr_max = self.lr_maxes[gi].max(gamma);
+            let w_t = (k_next as f64).powf(self.config.r) * lr_max.powf(self.config.weight_lr_power);
             let w_sum = self.weight_sums[gi] + w_t;
             if !w_t.is_finite() || !w_sum.is_finite() {
                 return Err(Error::Invalid(format!(
@@ -402,6 +421,7 @@ impl ScheduleFreeAdamW {
             }
             next_group_steps[gi] = k_next;
             next_weight_sums[gi] = w_sum;
+            next_lr_maxes[gi] = lr_max;
             self.coefs.push(Coef {
                 gamma: gamma32,
                 wd: grp.weight_decay as f32,
@@ -438,7 +458,9 @@ impl ScheduleFreeAdamW {
 
         self.group_steps = next_group_steps;
         self.weight_sums = next_weight_sums;
+        self.lr_maxes = next_lr_maxes;
         self.step = next_step;
+        self.pending_contract_step = None;
         Ok(())
     }
 
@@ -457,8 +479,8 @@ impl ScheduleFreeAdamW {
     }
 
     /// Atomically validate and restore both a [`ScheduleFreeContract`] and its state tensors from a
-    /// checkpoint, keeping effective hyperparameters, active group counters, `weight_sum`, `train_mode`,
-    /// and `(z, x, exp_avg_sq)` consistent.
+    /// checkpoint, keeping effective hyperparameters, active group counters, `weight_sum`, `lr_max`,
+    /// `train_mode`, and `(z, x, exp_avg_sq)` consistent.
     pub fn restore_checkpoint(
         &mut self,
         contract: &ScheduleFreeContract,
@@ -471,15 +493,18 @@ impl ScheduleFreeAdamW {
             &mut self.groups,
             &mut self.group_steps,
             &mut self.weight_sums,
+            &mut self.lr_maxes,
             &mut self.config,
             &mut self.train_mode,
             contract,
         );
         self.state = fresh;
         self.step = contract.step;
+        self.pending_contract_step = None;
         if contract.step == 0 {
             self.group_steps.fill(0);
             self.weight_sums.fill(0.0);
+            self.lr_maxes.fill(0.0);
         }
         Ok(())
     }
@@ -487,30 +512,31 @@ impl ScheduleFreeAdamW {
     /// Restore optimizer state tensors and step count from a checkpoint map.
     ///
     /// When `step == 0`, missing state tensors initialize to `z = x = param`, `exp_avg_sq = 0` and group
-    /// counters reset to zero. When `step > 0`, requires all three tensors per parameter and refuses to load
-    /// onto an uninitialized optimizer whose group counters exceed `step` (or remain zero when groups exist —
-    /// call [`ScheduleFreeAdamW::apply_contract`] first or use [`ScheduleFreeAdamW::restore_checkpoint`]).
+    /// counters reset to zero. When `step > 0`, requires a preceding [`ScheduleFreeAdamW::apply_contract`]
+    /// with matching `contract.step == step` (or use [`ScheduleFreeAdamW::restore_checkpoint`]) and all three
+    /// tensors per parameter.
     pub fn load_state(&mut self, step: u64, state: &HashMap<String, Tensor>) -> Result<()> {
         self.validate_structure()?;
         if step > 0 {
+            if self.pending_contract_step != Some(step) {
+                return Err(Error::Load(format!(
+                    "ScheduleFreeAdamW state: apply_contract() with matching step {step} must precede load_state(step > 0)"
+                )));
+            }
             if self.group_steps.iter().any(|&k| k > step) {
                 return Err(Error::Load(format!(
                     "ScheduleFreeAdamW state: group_step exceeds checkpoint step {step}"
                 )));
             }
-            if !self.groups.is_empty() && self.group_steps.iter().all(|&k| k == 0) {
-                return Err(Error::Load(
-                    "ScheduleFreeAdamW state: apply_contract() must restore group counters before load_state(step > 0)"
-                        .into(),
-                ));
-            }
         }
         let fresh = load_state_tensors(&self.groups, step, state)?;
         self.state = fresh;
         self.step = step;
+        self.pending_contract_step = None;
         if step == 0 {
             self.group_steps.fill(0);
             self.weight_sums.fill(0.0);
+            self.lr_maxes.fill(0.0);
         }
         Ok(())
     }
@@ -530,7 +556,7 @@ impl ScheduleFreeAdamW {
     }
 
     /// Build a serializable [`ScheduleFreeContract`] capturing base & current hyperparameters, group counters,
-    /// `weight_sum`, `config`, `step`, and `train_mode`.
+    /// `weight_sum`, `lr_max`, `config`, `step`, and `train_mode`.
     pub fn contract(&self) -> ScheduleFreeContract {
         ScheduleFreeContract {
             groups: self
@@ -548,6 +574,7 @@ impl ScheduleFreeAdamW {
                     weight_decay: g.weight_decay,
                     group_step: self.group_steps.get(gi).copied().unwrap_or(0),
                     weight_sum: self.weight_sums.get(gi).copied().unwrap_or(0.0),
+                    lr_max: self.lr_maxes.get(gi).copied().unwrap_or(0.0),
                 })
                 .collect(),
             config: self.config,
@@ -557,22 +584,25 @@ impl ScheduleFreeAdamW {
     }
 
     /// Validate that `c` matches this optimizer's groups and parameter sets, then adopt its base & current
-    /// hyperparameters, group counters, `weight_sum`, `config`, and `train_mode`.
+    /// hyperparameters, group counters, `weight_sum`, `lr_max`, `config`, and `train_mode`.
     pub fn apply_contract(&mut self, c: &ScheduleFreeContract) -> Result<()> {
+        self.validate_structure()?;
         validate_contract_against(&self.groups, c)?;
         apply_validated_contract(
             &mut self.groups,
             &mut self.group_steps,
             &mut self.weight_sums,
+            &mut self.lr_maxes,
             &mut self.config,
             &mut self.train_mode,
             c,
         );
+        self.pending_contract_step = Some(c.step);
         Ok(())
     }
 
     fn validate_structure(&self) -> Result<()> {
-        if self.groups.len() != self.state.len() {
+        if self.groups.len() != self.state.len() || self.groups.len() != self.param_ids.len() {
             return Err(Error::Invalid(format!(
                 "schedulefree: group count {} does not match allocated state {}",
                 self.groups.len(),
@@ -581,8 +611,8 @@ impl ScheduleFreeAdamW {
         }
         let mut seen_ids = HashSet::new();
         let mut seen_storage = HashSet::new();
-        for (grp, st_grp) in self.groups.iter().zip(&self.state) {
-            if grp.params.len() != st_grp.len() {
+        for ((grp, st_grp), id_grp) in self.groups.iter().zip(&self.state).zip(&self.param_ids) {
+            if grp.params.len() != st_grp.len() || grp.params.len() != id_grp.len() {
                 return Err(Error::Invalid(format!(
                     "schedulefree: group `{}` parameter count {} does not match state {}",
                     grp.name,
@@ -590,7 +620,13 @@ impl ScheduleFreeAdamW {
                     st_grp.len()
                 )));
             }
-            for ((name, p), st) in grp.params.iter().zip(st_grp) {
+            for (((name, p), st), (exp_name, exp_id)) in grp.params.iter().zip(st_grp).zip(id_grp) {
+                if name != exp_name || p.id() != *exp_id {
+                    return Err(Error::Invalid(format!(
+                        "schedulefree: group `{}` parameter `{name}` does not match original parameter `{exp_name}` bound to this state slot",
+                        grp.name
+                    )));
+                }
                 validate_param_tensor(name, p, &mut seen_ids, &mut seen_storage)?;
                 for (label, buf) in [("z", &st.z), ("x", &st.x), ("exp_avg_sq", &st.exp_avg_sq)] {
                     if p.shape() != buf.shape() || p.device() != buf.device() || buf.dtype() != DType::F32 {
@@ -672,10 +708,12 @@ fn validate_contract_against(groups: &[ParamGroup], c: &ScheduleFreeContract) ->
         if !valid_sf_hparams(gc.lr, b1, b2, gc.eps, gc.weight_decay)
             || !valid_sf_hparams(cur_lr, cur_b1, b2, gc.eps, gc.weight_decay)
             || !(gc.weight_sum.is_finite() && gc.weight_sum >= 0.0)
+            || !(gc.lr_max.is_finite() && gc.lr_max >= 0.0)
+            || (gc.group_step == 0 && (gc.weight_sum != 0.0 || gc.lr_max != 0.0))
             || gc.group_step > c.step
         {
             return Err(Error::Load(format!(
-                "schedulefree contract group `{}`: invalid hyperparameters, group_step, or weight_sum",
+                "schedulefree contract group `{}`: invalid hyperparameters, group_step, weight_sum, or lr_max",
                 gc.name
             )));
         }
@@ -687,6 +725,7 @@ fn apply_validated_contract(
     groups: &mut [ParamGroup],
     group_steps: &mut [u64],
     weight_sums: &mut [f64],
+    lr_maxes: &mut [f64],
     config: &mut ScheduleFreeConfig,
     train_mode: &mut bool,
     c: &ScheduleFreeContract,
@@ -702,6 +741,7 @@ fn apply_validated_contract(
         g.weight_decay = gc.weight_decay;
         group_steps[gi] = gc.group_step;
         weight_sums[gi] = gc.weight_sum;
+        lr_maxes[gi] = gc.lr_max;
     }
     *config = c.config;
     *train_mode = c.train_mode;
@@ -752,8 +792,10 @@ fn valid_sf_hparams(lr: f64, beta1: f64, beta2: f64, eps: f64, weight_decay: f64
         && lr32.is_finite()
         && beta1.is_finite()
         && (0.0..1.0).contains(&beta1)
+        && (beta1 as f32) < 1.0
         && beta2.is_finite()
         && (0.0..1.0).contains(&beta2)
+        && (beta2 as f32) < 1.0
         && eps.is_finite()
         && eps > 0.0
         && eps32.is_normal()

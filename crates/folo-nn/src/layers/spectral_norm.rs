@@ -19,12 +19,17 @@
 //! `backward()` without triggering in-place version conflicts (`ModifiedInPlace`). In eval mode `(u, v)` are
 //! frozen so inference never mutates buffers.
 
+use std::sync::Mutex;
+
 use folo_core::rng::Rng;
 use folo_core::{DType, Tensor, no_grad};
 
 use crate::layers::{Conv2d, Linear};
 use crate::module::{Forward, Mode, Module, TensorKind};
 use crate::{Error, Result};
+
+/// Seed offset for the independent null-space restart vector so it is linearly independent of `u_0`.
+const FALLBACK_SEED_MIX: u64 = 0x9e37_79b9_7f4a_7c15;
 
 /// Default numerical stability epsilon for spectral normalization (`1e-12`, matching Miyato et al. 2018).
 pub const SPECTRAL_NORM_EPS: f32 = 1e-12;
@@ -103,22 +108,31 @@ fn l2_normalize_vec(x: &Tensor) -> Result<(Tensor, Tensor)> {
 }
 
 /// Deterministically initialize a unit vector `[len]` on `device` from `N(0, 1)` using `seed`.
+///
+/// Normalizes directly on the host in `f64` before uploading to `device`, avoiding GPU normalization
+/// dispatches and host readbacks.
 fn init_unit_vec(len: usize, device: folo_core::Device, seed: u64) -> Result<Tensor> {
     let mut rng = Rng::seed(seed);
     let vals: Vec<f32> = (0..len).map(|_| rng.normal()).collect();
-    let v = Tensor::from_vec(vals, [len])?.to_device(device)?;
-    let (normed, is_zero) = l2_normalize_vec(&v)?;
-    if is_zero.item::<f32>()? != 0.0 {
+    let max_abs = vals.iter().fold(0.0f64, |m, &v| m.max((v as f64).abs()));
+    let unit = if max_abs == 0.0 || !max_abs.is_finite() {
         let mut e0 = vec![0.0f32; len];
-        e0[0] = 1.0;
-        return Ok(Tensor::from_vec(e0, [len])?.to_device(device)?);
-    }
-    Ok(normed)
+        if len > 0 {
+            e0[0] = 1.0;
+        }
+        e0
+    } else {
+        let inv_m = 1.0 / max_abs;
+        let ss: f64 = vals.iter().map(|&v| ((v as f64) * inv_m).powi(2)).sum();
+        let inv = 1.0 / (max_abs * ss.sqrt());
+        vals.iter().map(|&v| ((v as f64) * inv) as f32).collect()
+    };
+    Ok(Tensor::from_vec(unit, [len])?.to_device(device)?)
 }
 
 /// Compute `M^T u` (`[cols]`) in `F32` (never downcast to `F16` under GPU `autocast`).
 fn mat_t_vec_f32(mat: &Tensor, mat_t: &Tensor, u: &Tensor, rows: usize, cols: usize) -> Result<Tensor> {
-    if mat.device().is_cpu() && folo_core::autocast_dtype().is_none() {
+    if folo_core::autocast_dtype().is_none() {
         Ok(mat_t.matmul(&u.reshape([rows, 1])?)?.reshape([cols])?)
     } else {
         Ok(mat.mul(&u.reshape([rows, 1])?)?.sum(0, false)?)
@@ -127,18 +141,54 @@ fn mat_t_vec_f32(mat: &Tensor, mat_t: &Tensor, u: &Tensor, rows: usize, cols: us
 
 /// Compute `M v` (`[rows]`) in `F32` (never downcast to `F16` under GPU `autocast`).
 fn mat_vec_f32(mat: &Tensor, v: &Tensor, rows: usize, cols: usize) -> Result<Tensor> {
-    if mat.device().is_cpu() && folo_core::autocast_dtype().is_none() {
+    if folo_core::autocast_dtype().is_none() {
         Ok(mat.matmul(&v.reshape([cols, 1])?)?.reshape([rows])?)
     } else {
         Ok(mat.mul(&v.reshape([1, cols])?)?.sum(1, false)?)
     }
 }
 
+/// CPU-only guaranteed non-zero right-vector fallback: extracts the row of `mat` (`[rows, cols]`) with
+/// maximum `|M[i, j]|` (i.e. `M^T e_{i*}`), which is guaranteed non-zero for every non-zero matrix `mat`
+/// even if `mat` is adversarially orthogonal to both `u` and `fallback_u`.
+fn cpu_max_row_unit_vec(mat: &Tensor, rows: usize, cols: usize) -> Result<Tensor> {
+    let row_vec = mat.with_f32_slice(|s| {
+        let mut best_row = 0usize;
+        let mut best_abs = 0.0f64;
+        for r in 0..rows {
+            let base = r * cols;
+            for c in 0..cols {
+                let v = s[base + c];
+                if !v.is_finite() {
+                    return vec![f32::NAN; cols];
+                }
+                let a = (v as f64).abs();
+                if a > best_abs {
+                    best_abs = a;
+                    best_row = r;
+                }
+            }
+        }
+        if best_abs == 0.0 {
+            return vec![0.0f32; cols];
+        }
+        let row = &s[best_row * cols..(best_row + 1) * cols];
+        let inv_m = 1.0 / best_abs;
+        let ss: f64 = row.iter().map(|&v| ((v as f64) * inv_m).powi(2)).sum();
+        let inv = 1.0 / (best_abs * ss.sqrt());
+        row.iter().map(|&v| ((v as f64) * inv) as f32).collect()
+    })?;
+    Ok(Tensor::from_vec(row_vec, [cols])?)
+}
+
 /// Internal power-iteration returning fresh detached `(u, v)` without forcing a host sync for `sigma`.
 ///
-/// If `M v == 0` (e.g., exact zero matrix or null-space vector), preserves the previous unit `u` instead of
-/// collapsing `u` to zero so subsequent non-zero weight updates recover immediately. If `u_init` itself is
-/// all-zero and `fallback_u` is provided, substitutes `fallback_u` before iterating.
+/// - If `u_init` is all-zero, substitutes a non-zero restart vector before iterating.
+/// - If `M^T u == 0` on the first iteration (e.g., after a weight update rotates the matrix orthogonal to the
+///   saved `u`, such as `diag(1, 0) -> diag(0, 1)`), restarts using `fallback_u` (and on CPU, the max-entry
+///   row of `M` if `fallback_u` is also orthogonal) so power iteration escapes the null space immediately.
+/// - If `M` is genuinely all-zero (`M v == 0`), preserves the previous unit `u` instead of collapsing `u` to
+///   zero so subsequent non-zero weight updates recover immediately.
 fn power_iteration_uv(
     weight: &Tensor,
     u_init: &Tensor,
@@ -167,16 +217,42 @@ fn power_iteration_uv(
     }
 
     let _g = no_grad();
+    let dev = weight.device();
     let mat_t = mat.t()?;
+    let owned_fb =
+        if fallback_u.is_none() { Some(init_unit_vec(rows, dev, FALLBACK_SEED_MIX)?) } else { None };
+    let fb = fallback_u.or(owned_fb.as_ref()).expect("fallback vector present");
+
     let (mut u, u_zero) = l2_normalize_vec(&u_init.detach())?;
-    if let Some(fb) = fallback_u {
-        u = u_zero.where_cond(fb, &u)?;
-    }
-    let mut v = Tensor::zeros_with([cols], DType::F32, weight.device())?;
-    for _ in 0..n_iters {
+    u = u_zero.where_cond(fb, &u)?;
+    let mut v = Tensor::zeros_with([cols], DType::F32, dev)?;
+    for iter in 0..n_iters {
         let mv_t = mat_t_vec_f32(&mat, &mat_t, &u, rows, cols)?;
-        let (v_next, _) = l2_normalize_vec(&mv_t)?;
-        v = v_next;
+        let (v_cand, v_zero) = l2_normalize_vec(&mv_t)?;
+        // Once iteration 0 escapes the null space (`v != 0` and `u = normalize(M v)`), `v^T (M^T u) = ||M v|| > 0`
+        // guarantees subsequent iterations cannot hit `M^T u == 0`, so restart logic runs only on `iter == 0`.
+        v = if iter == 0 {
+            if dev.is_cpu() {
+                if v_zero.item::<f32>()? != 0.0 {
+                    let mv_t_fb = mat_t_vec_f32(&mat, &mat_t, fb, rows, cols)?;
+                    let (v_fb, v_fb_zero) = l2_normalize_vec(&mv_t_fb)?;
+                    if v_fb_zero.item::<f32>()? != 0.0 {
+                        cpu_max_row_unit_vec(&mat, rows, cols)?
+                    } else {
+                        v_fb
+                    }
+                } else {
+                    v_cand
+                }
+            } else {
+                // Zero host sync on GPU: branchlessly blend the fallback projection when `M^T u == 0`.
+                let mv_t_fb = mat_t_vec_f32(&mat, &mat_t, fb, rows, cols)?;
+                let (v_fb, _) = l2_normalize_vec(&mv_t_fb)?;
+                v_zero.where_cond(&v_fb, &v_cand)?
+            }
+        } else {
+            v_cand
+        };
         let mv = mat_vec_f32(&mat, &v, rows, cols)?;
         let (u_cand, mv_zero) = l2_normalize_vec(&mv)?;
         // Keep the previous unit `u` when `M v == 0` so zero-initialized layers retain a valid restart vector.
@@ -240,7 +316,7 @@ pub fn spectral_normalize(weight: &Tensor, u: &Tensor, v: &Tensor, eps: f32) -> 
     }
     let u_d = u.detach();
     let v_d = v.detach();
-    let sigma = if weight.device().is_cpu() && folo_core::autocast_dtype().is_none() {
+    let sigma = if folo_core::autocast_dtype().is_none() {
         u_d.reshape([1, rows])?.matmul(&mat)?.matmul(&v_d.reshape([cols, 1])?)?.reshape([] as [usize; 0])?
     } else {
         // Elementwise `mul` + `sum` stays in `F32` under GPU `autocast` (unlike `matmul`, which casts to `F16`).
@@ -314,6 +390,10 @@ pub struct SpectralNorm<M: SpectralNormTarget> {
     pub u: Tensor,
     /// Detached right singular vector buffer `[in_flat]`.
     pub v: Tensor,
+    /// Cached deterministic on-device restart vector (independent seed from `u_0`), refreshed lazily only
+    /// if the wrapped weight changes device or row count so steady-state GPU forwards perform zero uploads
+    /// and zero host syncs.
+    fallback_u: Mutex<Tensor>,
     n_power_iterations: usize,
     eps: f32,
     seed: u64,
@@ -337,8 +417,18 @@ impl<M: SpectralNormTarget> SpectralNorm<M> {
         let w = inner.weight();
         let (_, rows, _) = weight_as_matrix(&w.detach(), "SpectralNorm")?;
         let u0 = init_unit_vec(rows, w.device(), seed)?;
-        let (u, v) = power_iteration_uv(w, &u0, n_power_iterations, Some(&u0))?;
-        Ok(Self { inner, u, v, n_power_iterations, eps, seed, mode: Mode::new() })
+        let fallback_u = init_unit_vec(rows, w.device(), seed.wrapping_add(FALLBACK_SEED_MIX))?;
+        let (u, v) = power_iteration_uv(w, &u0, n_power_iterations, Some(&fallback_u))?;
+        Ok(Self {
+            inner,
+            u,
+            v,
+            fallback_u: Mutex::new(fallback_u),
+            n_power_iterations,
+            eps,
+            seed,
+            mode: Mode::new(),
+        })
     }
 
     /// Borrow the wrapped layer.
@@ -363,6 +453,18 @@ impl<M: SpectralNormTarget> SpectralNorm<M> {
         Ok(sigma.item::<f32>()?)
     }
 
+    /// Return the cached deterministic restart vector on `device` with length `rows`, moving or regenerating
+    /// it only when device or shape changes.
+    fn cached_fallback_u(&self, rows: usize, device: folo_core::Device) -> Result<Tensor> {
+        let mut guard = self.fallback_u.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.dims() != [rows] {
+            *guard = init_unit_vec(rows, device, self.seed.wrapping_add(FALLBACK_SEED_MIX))?;
+        } else if guard.device() != device {
+            guard.to_device_(device)?;
+        }
+        Ok(guard.clone())
+    }
+
     /// Compute the spectrally normalized weight `W / (sigma + eps)`.
     ///
     /// In training mode, runs power iteration into fresh `(u_fresh, v_fresh)` tensors, copies them into the
@@ -373,7 +475,7 @@ impl<M: SpectralNormTarget> SpectralNorm<M> {
         let w = self.inner.weight();
         if self.mode.is_training() {
             let rows = w.dims().first().copied().unwrap_or(0);
-            let fallback_u = if rows > 0 { Some(init_unit_vec(rows, w.device(), self.seed)?) } else { None };
+            let fallback_u = if rows > 0 { Some(self.cached_fallback_u(rows, w.device())?) } else { None };
             let (u_fresh, v_fresh) =
                 power_iteration_uv(w, &self.u, self.n_power_iterations, fallback_u.as_ref())?;
             {
@@ -598,6 +700,42 @@ mod tests {
         let s2_after = spectral_norm(&w2_sn, 30, SPECTRAL_NORM_EPS, 5).unwrap();
         assert!((s2_after - 1.0).abs() < 1e-4, "zeroed-u recovery sigma={s2_after}");
 
+        // Regression: orthogonal weight transition `diag(1, 0) -> diag(0, 1)` with `n_power_iterations = 1`
+        // must immediately restart out of the null space instead of keeping `v = 0, sigma = 0` and blowing up
+        // `W_SN` by `1 / eps`.
+        let orth_lin = Linear::from_tensors(
+            Tensor::from_slice(&[1.0f32, 0.0, 0.0, 0.0], [2, 2]).unwrap().requires_grad_(),
+            None,
+        )
+        .unwrap();
+        let sn_orth = SpectralNorm::new(orth_lin, 1, SPECTRAL_NORM_EPS, 7).unwrap();
+        let _ = sn_orth.normalized_weight().unwrap(); // aligns u = [±1, 0]
+        {
+            let _g = no_grad();
+            sn_orth
+                .inner()
+                .weight
+                .copy_from(&Tensor::from_slice(&[0.0f32, 0.0, 0.0, 1.0], [2, 2]).unwrap())
+                .unwrap();
+        }
+        let w_orth_sn = sn_orth.normalized_weight().unwrap();
+        assert!(
+            (sn_orth.sigma().unwrap() - 1.0).abs() < 1e-5,
+            "orthogonal transition sigma={}",
+            sn_orth.sigma().unwrap()
+        );
+        let w_orth_vals = w_orth_sn.to_vec::<f32>().unwrap();
+        assert!((w_orth_vals[3] - 1.0).abs() < 1e-5, "orthogonal transition W_SN={w_orth_vals:?}");
+        // Direct `power_iteration` with an orthogonal `u_init` also escapes the null space.
+        let direct_orth = power_iteration(
+            &Tensor::from_slice(&[0.0f32, 0.0, 0.0, 3.0], [2, 2]).unwrap(),
+            &Tensor::from_slice(&[1.0f32, 0.0], [2]).unwrap(),
+            1,
+            SPECTRAL_NORM_EPS,
+        )
+        .unwrap();
+        assert!((direct_orth.sigma - 3.0).abs() < 1e-5, "direct orth sigma={}", direct_orth.sigma);
+
         // 2. Extreme scales (1e-18 and 1e18) avoid f32 squaring underflow/overflow.
         for scale in [1e-18f32, 1e18f32] {
             let big = Tensor::from_slice(&[scale, 0.0, 0.0, 0.5 * scale], [2, 2]).unwrap();
@@ -673,5 +811,32 @@ mod tests {
         let grads = loss.backward().unwrap();
         let gw = grads.get(&sn.inner().weight).unwrap().to_vec::<f32>().unwrap();
         assert!(gw.iter().all(|v| v.is_finite()), "GPU autocast SpectralNorm grad non-finite: {gw:?}");
+
+        // 5. GPU orthogonal weight transition `diag(1, 0) -> diag(0, 1)` escapes null space in 1 iteration.
+        let gpu_orth_lin = Linear::from_tensors(
+            Tensor::from_slice(&[1.0f32, 0.0, 0.0, 0.0], [2, 2])
+                .unwrap()
+                .to_device(dev)
+                .unwrap()
+                .requires_grad_(),
+            None,
+        )
+        .unwrap();
+        let sn_gpu_orth = SpectralNorm::new(gpu_orth_lin, 1, SPECTRAL_NORM_EPS, 13).unwrap();
+        let _ = sn_gpu_orth.normalized_weight().unwrap();
+        {
+            let _g = no_grad();
+            let next_w =
+                Tensor::from_slice(&[0.0f32, 0.0, 0.0, 2.5], [2, 2]).unwrap().to_device(dev).unwrap();
+            sn_gpu_orth.inner().weight.copy_from(&next_w).unwrap();
+        }
+        let w_gpu_sn = sn_gpu_orth.normalized_weight().unwrap();
+        assert!(
+            (sn_gpu_orth.sigma().unwrap() - 2.5).abs() < 1e-4,
+            "GPU orthogonal transition sigma={}",
+            sn_gpu_orth.sigma().unwrap()
+        );
+        let gpu_vals = w_gpu_sn.to_vec::<f32>().unwrap();
+        assert!((gpu_vals[3] - 1.0).abs() < 1e-4, "GPU orthogonal transition W_SN={gpu_vals:?}");
     }
 }

@@ -5,13 +5,14 @@
 //!    decay(step) = min(1 - (1 + step / t0)^(-gamma), max_decay)
 //!    ```
 //!    evaluated cancellation-free via `-(-gamma * (step / t0).ln_1p()).exp_m1()`.
-//! 2. [`Edm2PowerEmaSchedule`]: Karras et al. (CVPR 2024, EDM2 `phema.py`) exact power-function EMA
-//!    recurrence
+//! 2. [`Edm2PowerEmaSchedule`]: Karras et al. (CVPR 2024, EDM2 Appendix C / `phema.py`) exact
+//!    power-function EMA recurrence
 //!    ```text
 //!    decay(step) = (1 - 1 / (step + t0))^(gamma + 1)    for step + t0 > 1, else 0
 //!    ```
-//!    whose discrete impulse-response profile has asymptotic relative width
-//!    `sigma_rel = [(gamma + 1)(gamma + 3)]^(-1/2)` (inverted via `gamma = hypot(1, 1 / sigma_rel) - 2`).
+//!    whose discrete impulse-response profile on normalized training time `t / T in [0, 1]` has asymptotic
+//!    relative standard deviation `sigma_rel = Std[t / T] = sqrt(gamma + 1) / ((gamma + 2) * sqrt(gamma + 3))`
+//!    (Eq. 124), inverted overflow-safely for any `sigma_rel in (0, 1 / sqrt(12))`.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +22,7 @@ use crate::{Error, Result};
 pub const POWER_LAW_EMA_DEFAULT_GAMMA: f64 = 1.0;
 /// Default inverse-power EMA ramp scale `t0 = 10.0`.
 pub const POWER_LAW_EMA_DEFAULT_T0: f64 = 10.0;
-/// Default EDM2 power-function EMA exponent (`gamma = 6.94`, relative width `sigma_rel ≈ 0.113`).
+/// Default EDM2 power-function EMA exponent (`gamma = 6.94`, relative width `sigma_rel ≈ 0.10`, Karras et al. 2024).
 pub const EDM2_EMA_DEFAULT_GAMMA: f64 = 6.94;
 
 #[derive(Deserialize)]
@@ -135,14 +136,14 @@ struct Edm2PowerEmaScheduleRaw {
     t0: f64,
 }
 
-/// Karras et al. (CVPR 2024, EDM2 `phema.py`) power-function EMA decay schedule:
+/// Karras et al. (CVPR 2024, EDM2 Appendix C / `phema.py`) power-function EMA decay schedule:
 ///
 /// ```text
 /// decay(step) = (1 - 1 / (step + t0))^(gamma + 1)    for step + t0 > 1, else 0
 /// ```
 ///
-/// Its discrete impulse-response profile over `1..=T` (with `t0 = 0`) has asymptotic relative standard
-/// deviation `sigma_rel = [(gamma + 1)(gamma + 3)]^(-1/2)`.
+/// Its discrete impulse-response profile over `t in 1..=T` (with `t0 = 0`) has asymptotic relative standard
+/// deviation `sigma_rel = Std[t / T] = sqrt(gamma + 1) / ((gamma + 2) * sqrt(gamma + 3))` (Eq. 124).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "Edm2PowerEmaScheduleRaw")]
 pub struct Edm2PowerEmaSchedule {
@@ -180,18 +181,35 @@ impl Edm2PowerEmaSchedule {
         Ok(Self { gamma, t0 })
     }
 
-    /// Construct from Karras et al. (2024) relative profile width `sigma_rel in (0, 1 / sqrt(3))`,
-    /// solving `sigma_rel = [(gamma + 1)(gamma + 3)]^(-1/2)` via overflow-safe
-    /// `gamma = hypot(1, 1 / sigma_rel) - 2`.
+    /// Construct from Karras et al. (2024, Eq. 124) relative profile width
+    /// `sigma_rel = Std[t / T] in (0, 1 / sqrt(12))`, solving
+    /// `(gamma + 2) * sqrt((gamma + 3) / (gamma + 1)) = 1 / sigma_rel` overflow-safely without squaring
+    /// `1 / sigma_rel`.
     pub fn from_relative_width(sigma_rel: f64, t0: f64) -> Result<Self> {
-        let max_sigma = 1.0 / 3.0f64.sqrt();
+        let max_sigma = 1.0 / 12.0_f64.sqrt();
         if !(sigma_rel.is_finite() && sigma_rel > 0.0 && sigma_rel < max_sigma) {
             return Err(Error::Invalid(format!(
-                "Edm2PowerEmaSchedule: sigma_rel must be finite and in (0, 1/sqrt(3)), got {sigma_rel}"
+                "Edm2PowerEmaSchedule: sigma_rel must be finite and in (0, 1/sqrt(12)), got {sigma_rel}"
             )));
         }
         let inv_s = 1.0 / sigma_rel;
-        let gamma = 1.0_f64.hypot(inv_s) - 2.0;
+        // `F(g) = (g + 2) * sqrt(1 + 2 / (g + 1))` is strictly increasing and strictly convex on `[0, inf)`
+        // with `F(0) = sqrt(12) < inv_s` and `F(inv_s - 2) > inv_s`, so Newton's method from the upper
+        // bound `inv_s - 2` converges monotonically and quadratically without ever overflowing `inv_s^2`.
+        let mut gamma = (inv_s - 2.0).max(0.0);
+        for _ in 0..16 {
+            let u = 1.0 / (gamma + 1.0);
+            let root = (1.0 + 2.0 * u).sqrt();
+            let f = (gamma + 2.0) * root - inv_s;
+            let fp = (1.0 + u - u * u) / root;
+            let step = f / fp;
+            let next = (gamma - step).max(0.0);
+            let done = (next - gamma).abs() <= 1e-15 * next.abs().max(1.0);
+            gamma = next;
+            if done {
+                break;
+            }
+        }
         if !(gamma.is_finite() && gamma > 0.0) {
             return Err(Error::Invalid(format!(
                 "Edm2PowerEmaSchedule: sigma_rel {sigma_rel} yields non-positive/non-finite gamma {gamma}"
@@ -212,10 +230,12 @@ impl Edm2PowerEmaSchedule {
         self.t0
     }
 
-    /// Asymptotic relative profile width `sigma_rel = [(gamma + 1)(gamma + 3)]^(-1/2)` (overflow-safe).
+    /// Asymptotic relative profile width `sigma_rel = Std[t / T] = sqrt(gamma + 1) / ((gamma + 2) * sqrt(gamma + 3))`
+    /// (Karras et al. 2024, Eq. 124; overflow-safe).
     #[inline]
     pub fn relative_width(&self) -> f64 {
-        1.0 / ((self.gamma + 1.0).sqrt() * (self.gamma + 3.0).sqrt())
+        let u = 1.0 / (self.gamma + 1.0);
+        1.0 / ((self.gamma + 2.0) * (1.0 + 2.0 * u).sqrt())
     }
 
     /// Compute the EDM2 decay `(1 - 1 / (step + t0))^(gamma + 1)` for `step >= 1` (`0.0` if `step + t0 <= 1`).
@@ -309,11 +329,27 @@ mod tests {
     #[test]
     fn edm2_power_ema_impulse_response_matches_relative_width() {
         // Verify that the discrete impulse response of `Edm2PowerEmaSchedule` has empirical relative
-        // standard deviation `Std[t / T]` matching `sigma_rel` (Karras et al. CVPR 2024, EDM2 phema.py).
+        // standard deviation `Std[t / T]` matching `sigma_rel` (Karras et al. CVPR 2024, Appendix C Eq. 124).
+        // Verify exact Eq. 124 cubic `(gamma + 2)^2 (gamma + 3) / (gamma + 1) = 1 / sigma_rel^2` and known
+        // Karras et al. Table 1 values (`sigma_rel = 0.10 -> gamma ≈ 6.94`, `sigma_rel = 0.05 -> gamma ≈ 16.97`).
+        let s10 = Edm2PowerEmaSchedule::from_relative_width(0.10, 0.0).unwrap();
+        assert!((s10.gamma() - 6.937_203_937_6).abs() < 1e-8, "gamma(0.10)={}", s10.gamma());
+        let s05 = Edm2PowerEmaSchedule::from_relative_width(0.05, 0.0).unwrap();
+        assert!((s05.gamma() - 16.972_198_602_3).abs() < 1e-8, "gamma(0.05)={}", s05.gamma());
+        for &sigma_rel in &[0.05f64, 0.10, 0.15, 0.20, 0.28] {
+            let g = Edm2PowerEmaSchedule::from_relative_width(sigma_rel, 0.0).unwrap().gamma();
+            let lhs = (g + 2.0).powi(2) * (g + 3.0) / (g + 1.0);
+            let rhs = 1.0 / (sigma_rel * sigma_rel);
+            assert!(
+                (lhs - rhs).abs() <= 1e-12 * rhs,
+                "Eq. 124 mismatch at sigma_rel={sigma_rel}: {lhs} vs {rhs}"
+            );
+        }
+
         let steps = 2000usize;
-        for &sigma_rel in &[0.05f64, 0.10, 0.15] {
+        for &sigma_rel in &[0.05f64, 0.10, 0.15, 0.20] {
             let sched = Edm2PowerEmaSchedule::from_relative_width(sigma_rel, 0.0).unwrap();
-            assert!((sched.relative_width() - sigma_rel).abs() < 1e-12);
+            assert!((sched.relative_width() - sigma_rel).abs() < 1e-13);
             // Roll out exact impulse-response weights w[k] for samples at t = 1..=steps.
             let mut weights = vec![0.0f64; steps];
             for t in 1..=steps {
@@ -335,23 +371,24 @@ mod tests {
                     w * x * x
                 })
                 .sum();
-            let empirical_sigma_rel = var.sqrt() / mean;
+            let empirical_sigma_rel = var.sqrt();
             assert!(
                 (empirical_sigma_rel - sigma_rel).abs() < 1e-3,
-                "EDM2 impulse relative width (std/mean) for sigma_rel={sigma_rel}: empirical={empirical_sigma_rel}"
+                "EDM2 impulse relative width Std[t/T] for sigma_rel={sigma_rel}: empirical={empirical_sigma_rel}"
             );
         }
 
-        // Extreme sigma_rel = 1e-200 does not overflow `hypot` or `relative_width`.
+        // Extreme sigma_rel = 1e-200 does not overflow Newton inversion or `relative_width`.
         let ultra = Edm2PowerEmaSchedule::from_relative_width(1e-200, 0.0).unwrap();
         assert!(ultra.gamma().is_finite() && ultra.relative_width().is_finite());
+        assert!((ultra.relative_width() - 1e-200).abs() <= 1e-212);
 
-        // Serde round-trip & validation.
+        // Serde round-trip & validation (`max_sigma = 1 / sqrt(12) ≈ 0.288675`).
         let s = Edm2PowerEmaSchedule::new(6.94, 10.0).unwrap();
         let json = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<Edm2PowerEmaSchedule>(&json).unwrap(), s);
         assert!(Edm2PowerEmaSchedule::from_relative_width(0.0, 0.0).is_err());
-        assert!(Edm2PowerEmaSchedule::from_relative_width(0.6, 0.0).is_err());
+        assert!(Edm2PowerEmaSchedule::from_relative_width(0.29, 0.0).is_err());
         assert!(Edm2PowerEmaSchedule::new(0.0, 0.0).is_err());
         assert!(Edm2PowerEmaSchedule::new(5.0, -1.0).is_err());
     }
