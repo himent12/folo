@@ -240,40 +240,61 @@ export default function Run() {
   const stopOpen = signal(false);
   const deleteOpen = signal(false);
   const busy = signal(false);
+  const resuming = signal(false);
   let mounted = true;
+  let stopSeq = 0;
+  let resumeSeq = 0;
   onCleanup(() => (mounted = false));
   // A confirm that fails says so in its dialog, which stays open for Retry (the toaster sits behind the modal); one
   // that succeeds closes it and the page says what happened.
   const stopStatus = new DialogStatus();
+  let prevRunId = untrack(() => id.get());
+  effect(() => {
+    const curId = id.get();
+    if (curId === prevRunId) return;
+    prevRunId = curId;
+    stopSeq++;
+    resumeSeq++;
+    untrack(() => {
+      stopOpen.set(false);
+      deleteOpen.set(false);
+      stopStatus.clear();
+      picked.set(null);
+      busy.set(false);
+      resuming.set(false);
+    });
+  });
 
   async function stop() {
     const cur = run.peek();
     if (!cur || busy.peek()) return;
+    const seq = ++stopSeq;
     const wasRemoving = removing.peek();
+    const startDone = epochsDone.peek();
     const startPath = router.location.path;
     busy.set(true);
     try {
       if (wasRemoving) {
         // A run that never started is deleted (it leaves the list); a resumed one stops with what it trained.
         const r = await live.stop(() => removeQueued(cur));
-        if (mounted) stopOpen.set(false);
+        if (mounted && seq === stopSeq) stopOpen.set(false);
         removedToast(cur);
-        if (!r && mounted && router.location.path === startPath) router.go('/runs', { replace: true });
+        if (!r && mounted && seq === stopSeq && router.location.path === startPath) router.go('/runs', { replace: true });
         return;
       }
       // The run as the view now has it: the stream may have said it ended while the stop was on its way.
       const r = await live.stop(() => hub.api.stopRun(cur.id));
       runsChanged();
       if (!r) return;
-      if (mounted) stopOpen.set(false);
+      if (mounted && seq === stopSeq) stopOpen.set(false);
       // The checkpoint is the last finished epoch's: none before the first one ends.
-      stoppedToast(r, untrack(() => epochsDone.get()));
+      stoppedToast(r, untrack(() => (seq === stopSeq ? epochsDone.get() : startDone)));
     } catch (e) {
       const msg = wasRemoving ? 'Could not remove the run from the queue' : 'Could not stop the run';
-      if (mounted && stopOpen.peek()) stopStatus.error(e, msg);
+      if (mounted && seq === stopSeq && stopOpen.peek()) stopStatus.error(e, msg);
       else toast.error(e, msg);
     } finally {
-      busy.set(false);
+      if (seq === stopSeq) busy.set(false);
     }
   }
 
@@ -341,22 +362,22 @@ export default function Run() {
     return out;
   });
 
-  const resuming = signal(false);
-  // page-level: Resume is a header and palette action, never inside a dialog.
   async function resume() {
     const cur = run.peek();
     if (!cur || resuming.peek()) return;
+    const seq = ++resumeSeq;
     resuming.set(true);
     try {
       const id = cur.id;
       const r = await live.resume(() => hub.api.resumeRun(id));
+      // page-level: Resume is a header and palette action, never inside a dialog.
       toast.success(r.epoch > 0 ? `Resuming ${r.name}` : `Starting ${r.name} again`, r.epoch > 0 ? `From the checkpoint of epoch ${r.epoch}.` : 'No epoch had finished, so it starts over.');
       runsChanged();
     } catch (e) {
       // page-level: as above.
       toast.error(e, 'Could not resume the run');
     } finally {
-      resuming.set(false);
+      if (seq === resumeSeq) resuming.set(false);
     }
   }
 

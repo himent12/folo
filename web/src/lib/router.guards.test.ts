@@ -193,4 +193,37 @@ describe('router guards', () => {
     expect(router.route.query.get('q')).toBe('hello world');
     expect(seen).toEqual(['/runs?q=hello+world']);
   });
+
+  it('chains multiple simultaneous navigation guards sequentially when an earlier guard holds and proceeds', () => {
+    const log: string[] = [];
+    let proceed1!: () => void;
+    let proceed2!: () => void;
+    const off1 = router.guard((_to, proceed) => {
+      log.push('g1');
+      proceed1 = proceed;
+      return false;
+    });
+    const off2 = router.guard((_to, proceed) => {
+      log.push('g2');
+      proceed2 = proceed;
+      return false;
+    });
+    try {
+      router.go('/runs');
+      expect(log).toEqual(['g1']);
+      expect(router.route.path).toBe(JOB);
+
+      // Releasing guard 1 must ask guard 2 before navigating instead of bypassing it.
+      proceed1();
+      expect(log).toEqual(['g1', 'g2']);
+      expect(router.route.path).toBe(JOB);
+
+      // Releasing guard 2 finally completes the navigation.
+      proceed2();
+      expect(router.route.path).toBe('/runs');
+    } finally {
+      off1();
+      off2();
+    }
+  });
 });

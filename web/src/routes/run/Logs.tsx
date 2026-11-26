@@ -60,6 +60,7 @@ interface Kept {
  * added and dropped since the last, never the whole log. Exported for tests.
  */
 export class LevelIndex {
+  #log: AppendLog<LogLine> | null = null;
   #cursor: LogCursor | null = null;
   /** Lines at warn level or above, oldest first. */
   warnUp: Kept[] = [];
@@ -73,6 +74,10 @@ export class LevelIndex {
 
   /** Brings the lists up to `log` (what changed since the last call). */
   sync(log: AppendLog<LogLine>): void {
+    if (log !== this.#log) {
+      this.#log = log;
+      this.#cursor = null;
+    }
     const r = log.read(this.#cursor);
     this.#cursor = r.cursor;
     if (r.reset) {
@@ -173,6 +178,7 @@ export default function Logs(props: LogsProps) {
   // The lines shown: a new list only when the log or the filter changed (steps bump `version` too, several times a
   // second, and each new list would re-pin the box: a layout read).
   let shownKey = '';
+  let shownLog: AppendLog<LogLine> | null = null;
   let shownState: { lines: LogLine[]; matched: number } = { lines: [], matched: 0 };
   const filtered = computed(() => {
     void props.version;
@@ -182,8 +188,9 @@ export default function Logs(props: LogsProps) {
     const n = cap.get();
     const c = index.cursor;
     const key = c ? `${c.gen}|${c.start}|${c.end}|${lv}|${n}|${q}` : `${lv}|${n}|${q}`;
-    if (key !== shownKey) {
+    if (key !== shownKey || shownLog !== props.log) {
       shownKey = key;
+      shownLog = props.log;
       if (!q) {
         const lines = lv === 'all' ? props.log.items.slice(-n) : lastLines(lv === 'warn' ? index.warnUp : index.errors, n);
         const matched = lv === 'all' ? ct.held : lv === 'warn' ? ct.warn + ct.error : ct.error;
@@ -319,6 +326,10 @@ export default function Logs(props: LogsProps) {
   effect(() => {
     shown.get();
     if (follow.get()) pin();
+    else {
+      const el = box.peek();
+      if (el && el.clientHeight > 0 && el.scrollHeight - el.scrollTop - el.clientHeight < 24) follow.set(true);
+    }
   });
   // Re-pin when the box's height follows the page (Run stretches it to the rail) or the entries re-wrap (the mono
   // font arriving, a narrower column).

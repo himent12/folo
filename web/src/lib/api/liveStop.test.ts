@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // A late Stop answer (issue #382): the stream may say the run ended while the stop was on its way.
-import { createRoot, flush as flushSync } from 'fw';
+import { createRoot, flush as flushSync, signal } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { stopDescription, stoppedToast } from '../../routes/run/StopRun';
 import { toast } from '$lib/ui/toast';
@@ -134,6 +134,39 @@ describe('LiveRun.stop', () => {
     answer.resolve({ ...snapshot, status: 'stopping', step: 2 });
     expect((await pending)?.status).toBe('queued');
     expect(live.run?.status).toBe('queued');
+    dispose();
+  });
+
+  it('ignores late stop and resume answers after switching to another run id', async () => {
+    const runId = signal<string>('run_a');
+    let live!: LiveRun;
+    const fake = hub.api as Partial<Api>;
+    fake.run = (id) => Promise.resolve({ ...snapshot, id, name: id, status: id === 'run_a' ? 'running' : 'completed', step: 2 });
+    const dispose = root(() => {
+      live = new LiveRun(() => runId.get());
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.id).toBe('run_a');
+
+    const stopAnswer = deferred<Run>();
+    const resumeAnswer = deferred<Run>();
+    const pendingStop = live.stop(() => stopAnswer.promise);
+    const pendingResume = live.resume(() => resumeAnswer.promise);
+
+    // Navigate to run_b before either action resolves.
+    runId.set('run_b');
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.id).toBe('run_b');
+    expect(live.run?.status).toBe('completed');
+
+    stopAnswer.resolve({ ...snapshot, id: 'run_a', name: 'run_a', status: 'stopping', step: 2 });
+    resumeAnswer.resolve({ ...snapshot, id: 'run_a', name: 'run_a', status: 'queued', step: 1 });
+    await Promise.all([pendingStop, pendingResume]);
+    expect(live.run?.id).toBe('run_b');
+    expect(live.run?.status).toBe('completed');
+    expect(live.server?.id).toBe('run_b');
     dispose();
   });
 });

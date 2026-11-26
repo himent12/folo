@@ -466,4 +466,74 @@ describe('Logs: search, copy visible, static tokens, and single-reflow pin', () 
     expect(target.querySelector('.jump')).toBeNull();
     expect(document.activeElement).toBe(boxEl);
   });
+
+  it('re-syncs LevelIndex and visible lines when switching to a different AppendLog instance with equal cursor bounds', () => {
+    const logA = new AppendLog<LogLine>();
+    logA.push({ t: '2026-11-12T10:00:01Z', level: 'info', message: 'run A info' });
+    const logB = new AppendLog<LogLine>();
+    logB.push({ t: '2026-11-12T10:00:02Z', level: 'error', message: 'run B crash' });
+    const active = signal(logA);
+    c = render(() => <Logs log={active.get()} version={0} live={false} />, target);
+    flushSync();
+    expect(target.querySelector('.line .m')?.textContent).toBe('run A info');
+
+    active.set(logB);
+    flushSync();
+    expect(target.querySelector('.line .m')?.textContent).toBe('run B crash');
+    const errBtn = [...target.querySelectorAll<HTMLElement>('[aria-label="Log level"] [role="radio"]')].find((b) =>
+      b.textContent?.trim().startsWith('Error'),
+    )!;
+    expect(errBtn.textContent).toContain('1');
+  });
+
+  it('hides the Follow button when narrowing a search filter eliminates overflow', () => {
+    const log = new AppendLog<LogLine>();
+    for (let i = 0; i < 40; i++) log.push(line(i + 1));
+    log.push({ t: '2026-11-12T10:01:00Z', level: 'error', message: 'unique-needle' });
+    c = render(() => <Logs log={log} version={0} live={false} />, target);
+    flushSync();
+
+    const boxEl = target.querySelector<HTMLDivElement>('.log')!;
+    let scrollH = 800;
+    Object.defineProperty(boxEl, 'scrollHeight', { get: () => scrollH, configurable: true });
+    Object.defineProperty(boxEl, 'clientHeight', { value: 200, configurable: true });
+    boxEl.scrollTop = 0;
+    boxEl.dispatchEvent(new Event('scroll'));
+    flushSync();
+    expect(target.querySelector('.jump button')).not.toBeNull();
+
+    // Narrow to 1 matching line (no longer overflows): Follow resumes automatically and button disappears.
+    scrollH = 180;
+    const search = target.querySelector<HTMLInputElement>('input[aria-label="Search logs"]')!;
+    search.value = 'unique-needle';
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.jump')).toBeNull();
+  });
+
+  it('keeps follow paused when new lines stream while the log panel is hidden (clientHeight === 0)', () => {
+    const log = new AppendLog<LogLine>();
+    for (let i = 0; i < 40; i++) log.push(line(i + 1));
+    const version = signal(0);
+    c = render(() => <Logs log={log} version={version.get()} live />, target);
+    flushSync();
+
+    const boxEl = target.querySelector<HTMLDivElement>('.log')!;
+    let scrollH = 800;
+    let clientH = 200;
+    Object.defineProperty(boxEl, 'scrollHeight', { get: () => scrollH, configurable: true });
+    Object.defineProperty(boxEl, 'clientHeight', { get: () => clientH, configurable: true });
+    boxEl.scrollTop = 0;
+    boxEl.dispatchEvent(new Event('scroll'));
+    flushSync();
+    expect(target.querySelector('.jump button')).not.toBeNull();
+
+    // Simulate switching away on mobile (`display: none` -> clientHeight/scrollHeight become 0) while a live line arrives.
+    clientH = 0;
+    scrollH = 0;
+    log.push(line(41));
+    version.set(1);
+    flushSync();
+    expect(target.querySelector('.jump button')).not.toBeNull();
+  });
 });

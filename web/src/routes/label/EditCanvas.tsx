@@ -6,7 +6,7 @@
  * press on it (or on its handles) is still the editor's. A press also takes focus from a field of the editor (the note),
  * so the keys that follow act on the boxes.
  */
-import { bindable, computed, css, effect, Index, onCleanup, signal } from 'fw';
+import { bindable, computed, css, effect, Index, onCleanup, onWindow, signal } from 'fw';
 import type { Box, LabelImage } from '$lib/api/types';
 import DatasetImage from '$lib/detect/DatasetImage';
 import { dragTo, fit, grab, HANDLE_REACH, HANDLE_REACH_TOUCH, HANDLES, handleAt, isClick, settle, toImage, toScreen, type Drag } from './boxEdit';
@@ -64,6 +64,7 @@ export default function EditCanvas(props: EditCanvasProps) {
     if (drag.peek() && (off || boxes !== pressedOn || imgId !== pressedImgId)) cancelDrag();
   });
   onCleanup(cancelDrag);
+  onWindow('blur', cancelDrag);
 
   const place = computed(() => (cw.get() && ch.get() ? fit(props.img.width, props.img.height, cw.get(), ch.get()) : null));
   effect(() => {
@@ -126,6 +127,10 @@ export default function EditCanvas(props: EditCanvasProps) {
   function onpointermove(e: PointerEvent) {
     const d = drag.peek();
     if (!d || activePointerId !== e.pointerId) return;
+    if (e.pointerType === 'mouse' && (e.buttons & 1) === 0) {
+      cancelDrag();
+      return;
+    }
     const pt = point(e);
     if (!pt) return;
     dragged ||= !isClick(press, [e.clientX, e.clientY]);

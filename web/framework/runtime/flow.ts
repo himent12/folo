@@ -1,7 +1,7 @@
 // Control flow: Show ({#if}), For ({#each} with a key), Index ({#each} without one), Switch/Match ({#if}/{:else if}),
 // Key ({#key}), Dynamic (<svelte:element> / a component chosen at runtime), Portal.
 
-import { computed, dispose, getOwner, isReader, memo, onCleanup, ownedRoot, owning, reader, renderEffect, signal, swapOwner, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
+import { computed, deferFlushError, dispose, getOwner, isReader, memo, onCleanup, ownedRoot, owning, reader, renderEffect, signal, swapOwner, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
 import { createComponent, splitProps } from './component';
 import { clearLeaves, insert, type PortalMarker } from './dom';
 import { spread } from './spread';
@@ -189,6 +189,21 @@ export function For<T>(props: ForProps<T>): JSX.Element {
     if (row.t !== null) leaveBranch(row.t, row.value);
     dispose(row.root);
   };
+  const dropRange = (from: number, to: number): unknown => {
+    let err: unknown;
+    let hasErr = false;
+    for (let i = from; i < to; i++) {
+      try {
+        drop(rows[i]!);
+      } catch (e) {
+        if (!hasErr) {
+          hasErr = true;
+          err = e;
+        }
+      }
+    }
+    return hasErr ? { err } : null;
+  };
 
   const update = (row: Row<T>, item: T, i: number) => {
     if (row.item !== item) {
@@ -210,11 +225,20 @@ export function For<T>(props: ForProps<T>): JSX.Element {
       keys = ks;
     }
     return untrack(() => {
+      let dropErr: unknown;
+      let hasDropErr = false;
+      const noteDrop = (e: unknown) => {
+        if (!hasDropErr) {
+          hasDropErr = true;
+          dropErr = e;
+        }
+      };
       if (n === 0) {
         if (rows.length > 0) {
-          for (let i = 0; i < rows.length; i++) drop(rows[i]!);
+          const dropped = dropRange(0, rows.length) as { err: unknown } | null;
           rows = [];
           outDirty = true;
+          if (dropped !== null) noteDrop(dropped.err);
         }
         if (fallback === null && props.fallback !== undefined) {
           outDirty = true;
@@ -225,13 +249,18 @@ export function For<T>(props: ForProps<T>): JSX.Element {
           out = fallback !== null ? [fallback.value] : [];
           outDirty = false;
         }
+        if (hasDropErr) deferFlushError(dropErr);
         return out;
       }
       if (fallback !== null) {
         const prevFallback = fallback;
         fallback = null;
         outDirty = true;
-        dispose(prevFallback.root);
+        try {
+          dispose(prevFallback.root);
+        } catch (e) {
+          noteDrop(e);
+        }
       }
       const prevLen = rows.length;
       if (prevLen === 0) {
@@ -259,7 +288,9 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         rows = next;
         ran = true;
         outDirty = false;
-        return (out = nextOut);
+        out = nextOut;
+        if (hasDropErr) deferFlushError(dropErr);
+        return out;
       }
       // Scan common prefix before allocating `next` so identical-order updates, pure appends, and pure truncations
       // skip full array reconciliation.
@@ -277,6 +308,7 @@ export function For<T>(props: ForProps<T>): JSX.Element {
           out = nextOut;
           outDirty = false;
         }
+        if (hasDropErr) deferFlushError(dropErr);
         return out;
       }
       if (start === prevLen) {
@@ -302,17 +334,22 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         }
         ran = true;
         outDirty = false;
-        return (out = nextOut);
+        out = nextOut;
+        if (hasDropErr) deferFlushError(dropErr);
+        return out;
       }
       if (start === n) {
         outDirty = true;
-        for (let i = n; i < prevLen; i++) drop(rows[i]!);
+        const dropped = dropRange(n, prevLen) as { err: unknown } | null;
         rows.length = n;
+        if (dropped !== null) noteDrop(dropped.err);
         const nextOut = new Array<JSX.Element>(n);
         for (let j = 0; j < n; j++) nextOut[j] = rows[j]!.value;
         ran = true;
         outDirty = false;
-        return (out = nextOut);
+        out = nextOut;
+        if (hasDropErr) deferFlushError(dropErr);
+        return out;
       }
       const next = new Array<Row<T>>(n);
       for (let j = 0; j < start; j++) next[j] = rows[j]!;
@@ -359,13 +396,18 @@ export function For<T>(props: ForProps<T>): JSX.Element {
         }
       } else if (start > newEnd) {
         // Pure removals.
-        for (let i = start; i <= end; i++) drop(rows[i]!);
+        const dropped = dropRange(start, end + 1) as { err: unknown } | null;
+        if (dropped !== null) noteDrop(dropped.err);
       } else if (start === end && start === newEnd) {
         // Single-row slot: preserve SameValueZero parity before replacing.
         if (sameKey(rows[start]!.key, keys[start])) update((next[start] = rows[start]!), list[start]!, start);
         else {
           try {
             drop(rows[start]!);
+          } catch (e) {
+            noteDrop(e);
+          }
+          try {
             next[start] = make(list[start]!, start, keys[start]);
           } catch (e) {
             rows.splice(start, 1);
@@ -410,7 +452,11 @@ export function For<T>(props: ForProps<T>): JSX.Element {
               else first.set(row.key, c);
             } else {
               rows[i] = undefined!;
-              drop(row);
+              try {
+                drop(row);
+              } catch (e) {
+                noteDrop(e);
+              }
             }
           }
           for (let j = start; j <= newEnd; j++) {
@@ -440,7 +486,9 @@ export function For<T>(props: ForProps<T>): JSX.Element {
       const nextOut = new Array<JSX.Element>(n);
       for (let j = 0; j < n; j++) nextOut[j] = next[j]!.value;
       outDirty = false;
-      return (out = nextOut);
+      out = nextOut;
+      if (hasDropErr) deferFlushError(dropErr);
+      return out;
     });
   });
   owning(mapped);
@@ -474,6 +522,8 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
     const items = n > 0 ? new Array<T>(n) : (EMPTY_KEYS as unknown as T[]);
     for (let i = 0; i < n; i++) items[i] = list[i]!;
     return untrack(() => {
+      let dropErr: unknown;
+      let hasDropErr = false;
       const prevLen = rows.length;
       const common = Math.min(n, prevLen);
       for (let i = 0; i < common; i++) {
@@ -525,8 +575,15 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         outDirty = true;
         for (let i = n; i < prevLen; i++) {
           const row = rows[i]!;
-          if (row.t !== null) leaveBranch(row.t, row.value);
-          dispose(row.root);
+          try {
+            if (row.t !== null) leaveBranch(row.t, row.value);
+            dispose(row.root);
+          } catch (e) {
+            if (!hasDropErr) {
+              hasDropErr = true;
+              dropErr = e;
+            }
+          }
         }
         rows.length = n;
       }
@@ -559,7 +616,14 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         outDirty = true;
         const prevFallback = fallback;
         fallback = null;
-        dispose(prevFallback.root);
+        try {
+          dispose(prevFallback.root);
+        } catch (e) {
+          if (!hasDropErr) {
+            hasDropErr = true;
+            dropErr = e;
+          }
+        }
       }
       ran = true;
       if (outDirty) {
@@ -571,6 +635,7 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         }
         outDirty = false;
       }
+      if (hasDropErr) deferFlushError(dropErr);
       return out;
     });
   });

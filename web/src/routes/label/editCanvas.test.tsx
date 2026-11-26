@@ -171,4 +171,32 @@ describe('the editor canvas', () => {
     flushSync();
     expect(canvas.querySelectorAll('.box').length).toBe(1);
   });
+
+  it('cancels a stuck mouse drag on buttons=0 or window blur so subsequent gestures still work', async () => {
+    const { onchange, canvas } = mount(1);
+    await selectedBox(canvas);
+    const hit = canvas.querySelector('.hit')!;
+    hit.dispatchEvent(new PointerEvent('pointerdown', { clientX: 360, clientY: 10, button: 0, buttons: 1, pointerType: 'mouse', pointerId: 7, bubbles: true, cancelable: true }));
+    hit.dispatchEvent(new PointerEvent('pointermove', { clientX: 390, clientY: 40, buttons: 1, pointerType: 'mouse', pointerId: 7, bubbles: true }));
+    flushSync();
+    expect(canvas.querySelectorAll('.box').length).toBe(3);
+
+    // Mouse button released outside without pointerup: move with buttons=0 cancels cleanly.
+    hit.dispatchEvent(new PointerEvent('pointermove', { clientX: 395, clientY: 45, buttons: 0, pointerType: 'mouse', pointerId: 7, bubbles: true }));
+    flushSync();
+    expect(canvas.querySelectorAll('.box').length).toBe(2);
+    expect(onchange).not.toHaveBeenCalled();
+
+    // Window blur mid-drag also cancels cleanly and frees activePointerId for the next gesture.
+    hit.dispatchEvent(new PointerEvent('pointerdown', { clientX: 360, clientY: 10, button: 0, buttons: 1, pointerType: 'mouse', pointerId: 8, bubbles: true, cancelable: true }));
+    hit.dispatchEvent(new PointerEvent('pointermove', { clientX: 390, clientY: 40, buttons: 1, pointerType: 'mouse', pointerId: 8, bubbles: true }));
+    flushSync();
+    expect(canvas.querySelectorAll('.box').length).toBe(3);
+    window.dispatchEvent(new Event('blur'));
+    flushSync();
+    expect(canvas.querySelectorAll('.box').length).toBe(2);
+
+    gesture(hit, [360, 10], [390, 40]);
+    expect(onchange).toHaveBeenCalledTimes(1);
+  });
 });

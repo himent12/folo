@@ -20,6 +20,7 @@ import {
   linkDependency,
   needsToRecompute,
   prepareSources,
+  retainSources,
   subscribeLink,
   TRACKING,
   unsubscribeLink,
@@ -465,7 +466,16 @@ export function createRoot<T>(fn: (dispose: () => void) => T, parent?: Owner | n
     root._parent = owner;
     root._depth = owner === null ? 0 : owner._depth + 1;
   } else attach(parent, root);
-  return runWithOwner(root, () => fn(() => dispose(root)));
+  try {
+    return runWithOwner(root, () => fn(() => dispose(root)));
+  } catch (e) {
+    try {
+      dispose(root);
+    } catch {
+      // Keep the root initializer error.
+    }
+    throw e;
+  }
 }
 
 /** Registers `fn` to run when the current owner (component, effect run, root) is disposed or re-runs. */
@@ -492,6 +502,14 @@ export function isReader(fn: unknown): fn is Reader<unknown> {
   return typeof fn === 'function' && (fn as Reader<unknown>).$$r === 1;
 }
 
+/** Clears stale NOTIFIED flags on retained non-OWNING upstream computeds so later writes still propagate notifications. */
+function clearUpstreamNotified(s: Source): void {
+  if (!(s instanceof ComputedNode)) return;
+  if ((s._flags & (NOTIFIED | OWNING)) !== NOTIFIED) return;
+  s._flags &= ~NOTIFIED;
+  for (let node = s._sources; node !== undefined; node = node._ns) clearUpstreamNotified(node._s);
+}
+
 /**
  * Internal: an owning memo. Like `computed`, but what `fn` creates (DOM, effects, components) belongs to the memo:
  * it is disposed when `fn` re-runs and when the current owner goes away. Branches (`Show`, conditionals, `Key`) are
@@ -503,8 +521,17 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
   let root: Owner | null = null;
   const c = new ComputedNode<T>(() => {
     if (root !== null) {
-      dispose(root);
+      const prev = root;
       root = null;
+      try {
+        dispose(prev);
+      } catch (e) {
+        // `fn()` never ran, so `cleanupSources(c)` would otherwise unsubscribe every dependency and strand `c` in HAS_ERROR.
+        const stale = (c._flags & OUTDATED) !== 0 || c._globalVersion !== globalVersion;
+        retainSources(c, stale, clearUpstreamNotified);
+        if (stale && (c._flags & TRACKING) !== 0 && (c._flags & OUTDATED) === 0) c._notify();
+        throw e;
+      }
     }
     const r = new Owner();
     // The branch stands where the memo was written, not where it was (re)created.
@@ -670,20 +697,38 @@ function schedule(): void {
   }
 }
 
+let flushError: unknown;
+let hasFlushError = false;
+
+function recordFlushError(err: unknown): void {
+  if (!hasFlushError) {
+    hasFlushError = true;
+    flushError = err;
+  }
+}
+
 /**
  * Runs `q` in tree order, as Svelte walks its effect tree (parents before children, siblings in document order: a
- * branch created late runs at its memo's place); returns the first error.
+ * branch created late runs at its memo's place), recording the first error for the active flush.
  */
-function run(q: Job[], error: unknown): unknown {
+function run(q: Job[]): void {
   sortJobs(q);
   for (let i = 0; i < q.length; i++) {
     try {
       q[i]!._update();
     } catch (e) {
-      error ??= e;
+      recordFlushError(e);
     }
   }
-  return error;
+}
+
+/**
+ * Internal: records a cleanup error to throw after the current flush finishes reconciling the DOM.
+ * Outside an active flush, throws immediately so direct reads still observe the error.
+ */
+export function deferFlushError(err: unknown): void {
+  if (!flushing) throw err;
+  recordFlushError(err);
 }
 
 /**
@@ -698,7 +743,12 @@ export function flush(): void {
     return;
   }
   flushing = true;
-  let error: unknown;
+  const prevFlushError = flushError;
+  const prevHasFlushError = hasFlushError;
+  flushError = undefined;
+  hasFlushError = false;
+  let hasErr = false;
+  let err: unknown;
   let rounds = 0;
   try {
     while (renderQueue.length > 0 || userQueue.length > 0) {
@@ -720,7 +770,7 @@ export function flush(): void {
         const q = renderQueue;
         renderQueue = renderSpare;
         try {
-          error = run(q, error);
+          run(q);
         } finally {
           if (q.length <= MAX_SPARE_QUEUE) {
             q.length = 0;
@@ -734,7 +784,7 @@ export function flush(): void {
         const u = userQueue;
         userQueue = userSpare;
         try {
-          error = run(u, error);
+          run(u);
         } finally {
           if (u.length <= MAX_SPARE_QUEUE) {
             u.length = 0;
@@ -746,9 +796,13 @@ export function flush(): void {
       }
     }
   } finally {
+    hasErr = hasFlushError;
+    err = flushError;
+    flushError = prevFlushError;
+    hasFlushError = prevHasFlushError;
     flushing = false;
   }
-  if (error !== undefined) throw error;
+  if (hasErr) throw err;
 }
 
 /** Resolves after pending updates have been applied to the DOM (port of `tick`). */

@@ -762,4 +762,60 @@ describe('Compare: a run that detected nothing', () => {
     expect(cells[0]).not.toContain('conf 1.00');
     expect(cells[1]).toContain(`ep ${other!.best?.epoch}`);
   });
+
+  it('aligns By-progress chip readout tolerance with LineChart crosshair and resets cursor when switching X axis', async () => {
+    setWidth(1440);
+    const api = hub.api as MockApi;
+    const [a, b] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    const listRuns = api.runs.bind(api);
+    const realMetrics = api.runMetrics.bind(api);
+    const ep = (base: Awaited<ReturnType<MockApi['runMetrics']>>['epochs'][number], epoch: number, m: number) => ({
+      ...base,
+      epoch,
+      val: { ...base.val, map50: m, map50_95: m, precision: 0.5, recall: 0.5, per_class: [], best_f1_conf: 0.5 },
+    });
+    // Short plan (10 epochs -> progress points at 10%, 20%, ..., 100%, tol = 5%) vs long plan (50 epochs -> 2%, 4%, ...).
+    vi.spyOn(api, 'runs').mockImplementation(async (...args) =>
+      (await listRuns(...args)).map((r) =>
+        r.id === a!.id ? { ...r, epochs: 10, epoch: 10 } : r.id === b!.id ? { ...r, epochs: 50, epoch: 50 } : r,
+      ),
+    );
+    vi.spyOn(api, 'runMetrics').mockImplementation(async (id, ...rest) => {
+      const m = await realMetrics(id, ...rest);
+      const base = m.epochs[0]!;
+      if (id === a!.id) return { ...m, epochs: Array.from({ length: 10 }, (_, i) => ep(base, i + 1, 0.2 + i * 0.05)) };
+      if (id === b!.id) return { ...m, epochs: Array.from({ length: 50 }, (_, i) => ep(base, i + 1, 0.1 + i * 0.01)) };
+      return m;
+    });
+    const origWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 640 });
+    try {
+      router.route = parse(`#/runs/compare?ids=${a!.id},${b!.id}`);
+      c = mount(RunCompare, { target });
+      await until(() => target.querySelector('.swap'), 'the chart');
+
+      const svg = await until(() => target.querySelector<SVGSVGElement>('.plot svg'), 'chart svg');
+      // In By-progress mode, stepping to x = 8% (4th point of run B: 2, 4, 6, 8%) is within run A's 5% tolerance around 10%.
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+      flushSync();
+
+      const chipA = [...target.querySelectorAll('.chip')].find((el) => el.textContent?.includes(a!.name))?.textContent ?? '';
+      expect(chipA).toContain(metric(0.2));
+      expect(target.querySelector('.chips-head .at')?.textContent).toContain('% through');
+
+      // Switching X axis to Epoch must reset the cursor back to Latest rather than carrying 8% over as Epoch 8.
+      const epochBtn = [...target.querySelectorAll<HTMLButtonElement>('[aria-label="X axis"] [role="radio"]')].find((el) =>
+        el.textContent?.trim().includes('epoch'),
+      )!;
+      epochBtn.click();
+      flushSync();
+      expect(target.querySelector('.chips-head .at')?.textContent).toContain('Latest');
+    } finally {
+      if (origWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', origWidth);
+      else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
+    }
+  });
 });

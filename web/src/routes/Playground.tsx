@@ -106,6 +106,9 @@ export default function Playground() {
   effect(() => {
     if (sheetShown.get()) sheetEl.get()?.focus();
   });
+  effect(() => {
+    if (!narrow.current) untrack(() => moreOpen.set(false));
+  });
   // The tablet's popover is transient: a press outside it (and outside its button) closes it, focus staying put.
   effect(() => {
     if (!sheetShown.get() || !tablet.get()) return;
@@ -407,6 +410,13 @@ export default function Playground() {
     onModelUrl: (write) => (syncModelUrl = write),
   });
 
+  let lastModelId: string | null = null;
+  effect(() => {
+    const id = modelId.get();
+    if (id !== null && lastModelId !== null && id !== lastModelId) untrack(() => hidden.set(new Set()));
+    if (id !== null) lastModelId = id;
+  });
+
   effect(() => {
     const id = modelId.get();
     const s = source.get();
@@ -422,11 +432,11 @@ export default function Playground() {
       predicting.set(true);
       error.set(null);
       weightsMissing.set(false);
-      // Results belong to a model: never show another model's boxes while (or if) this one fails.
+      // Results belong to a model and backend: never show another model's or backend's boxes while (or if) this one fails.
       const p = pred.get();
-      if (p && p.model_id !== id) {
+      if (p && (p.model_id !== id || (p.backend ?? 'server') !== on)) {
         pred.set(null);
-        hidden.set(new Set());
+        if (p.model_id !== id) hidden.set(new Set());
         hover.set(null);
         picked.set(null);
       }
@@ -436,6 +446,8 @@ export default function Playground() {
       (p) => {
         if (ctrl.signal.aborted) return;
         pred.set(p);
+        hover.set(null);
+        picked.set(null);
         predicting.set(false);
       },
       (e: unknown) => {
@@ -443,17 +455,25 @@ export default function Playground() {
         predicting.set(false);
         // A picked file the runtime could not load is not kept as this model's weights.
         if (file && on !== 'server' && engine.phase !== 'ready') {
+          pred.set(null);
+          hover.set(null);
+          picked.set(null);
           dropLocal(id, file, e);
           return;
         }
         // A server without the weights route (or one that cannot read this model's file): ask for the file.
         if (on !== 'server' && !file && noServerWeights(e)) {
+          pred.set(null);
+          hover.set(null);
+          picked.set(null);
           weightsMissing.set(true);
           return;
         }
         // Said once, in place above the image (with its ways out): no toast repeats it, and no earlier result stays on
         // screen as if it were this run's.
         pred.set(null);
+        hover.set(null);
+        picked.set(null);
         error.set(e);
       },
     );
@@ -484,6 +504,7 @@ export default function Playground() {
   const notice = computed(() => (!source.get() || predicting.get() ? null : weightsMissing.get() ? 'file' : error.get() && !pred.get() ? 'error' : null));
   effect(() => {
     void modelId.get();
+    void runOn.get();
     badFile.set(null);
   });
   // Focus moves to the notice's heading as it appears, so it is announced and its actions are next in tab order. The

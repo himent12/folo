@@ -533,7 +533,8 @@ export function compareState() {
     if (!first || !last) return null;
     const c = cursor.get();
     if (c === null) return last.y;
-    if (c < first.x - 0.5 || c > last.x + 0.5) return null;
+    const tol = pts.length > 1 ? (last.x - first.x) / (pts.length - 1) / 2 : 0.5;
+    if (c < first.x - tol || c > last.x + tol) return null;
     return pts[nearest(pts, c)]?.y ?? null;
   }
 
@@ -563,6 +564,13 @@ export function compareState() {
   const startOf = (r: Run) => startFrom(r.config.weights, models.data);
   const setX = (v: Axis) => xChoice.set(v);
   const xBind = { get: () => x.get(), set: setX };
+  let prevAxis = untrack(() => x.get());
+  effect(() => {
+    const axis = x.get();
+    if (axis === prevAxis) return;
+    prevAxis = axis;
+    untrack(() => cursor.set(null));
+  });
 
   const showSame = signal(false);
   const managing = signal(false);
