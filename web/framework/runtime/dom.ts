@@ -30,9 +30,19 @@ export function template(html: string, svg?: 1): () => Node {
 
 type LeaveFn = (done: () => void) => (() => void) | void;
 type Leaving = Node & { $$leave?: LeaveFn; $$cancelLeave?: () => void };
+/** Internal: portal end marker carrying the set of nodes the portal owns (so teardown stays exact even if a marker is detached). */
+export type PortalMarker = Node & { $$owned?: Set<Node> };
 /** Nodes with a pending or in-flight outro: while any exist, clearing never takes the `textContent = ''` shortcut. */
 let leaving = 0;
 const activeLeaves = new Set<Leaving>();
+
+function ownedOf(marker: Node | null | undefined): Set<Node> | undefined {
+  return marker != null ? (marker as PortalMarker).$$owned : undefined;
+}
+
+function trackOwned(owned: Set<Node> | undefined, node: Node): void {
+  if (owned !== undefined) owned.add(node);
+}
 
 /** Internal: `node` will run `fn(done)` instead of being removed at once. Passing `undefined` cancels any pending or active outro. */
 export function setLeave(node: Node, fn: LeaveFn | undefined): void {
@@ -62,7 +72,7 @@ export function clearLeaves(root: Node): void {
   }
 }
 
-function removeNode(node: Node): void {
+function removeNode(node: Node, owned?: Set<Node>): void {
   const n = node as Leaving;
   const leave = n.$$leave;
   if (leave !== undefined) {
@@ -87,6 +97,7 @@ function removeNode(node: Node): void {
       if (done || cancelled) return;
       done = true;
       release();
+      owned?.delete(n);
       n.parentNode?.removeChild(n);
     };
     n.$$cancelLeave = cancel;
@@ -103,6 +114,7 @@ function removeNode(node: Node): void {
     }
   } else {
     n.$$cancelLeave?.();
+    owned?.delete(n);
     n.parentNode?.removeChild(n);
   }
 }
@@ -269,7 +281,12 @@ function normalize(out: Node[], value: unknown[], current: Node[] | null, unwrap
 
 function appendNodes(parent: Node, array: Node[], marker: Node | null | undefined): void {
   const m = marker ?? null;
-  for (let i = 0, len = array.length; i < len; i++) parent.insertBefore(array[i]!, m);
+  const owned = ownedOf(marker);
+  for (let i = 0, len = array.length; i < len; i++) {
+    const n = array[i]!;
+    parent.insertBefore(n, m);
+    trackOwned(owned, n);
+  }
 }
 
 /**
@@ -285,6 +302,7 @@ function cleanChildren(parent: Node, current: Current, marker: Node | null | und
     if (replacement !== undefined) parent.appendChild(replacement);
     return replacement === undefined ? [] : [replacement];
   }
+  const owned = ownedOf(marker);
   const node = replacement ?? document.createTextNode('');
   const cur = Array.isArray(current) ? (current as Node[]) : current instanceof Node ? [current] : [];
   if (cur.length > 0) {
@@ -297,13 +315,21 @@ function cleanChildren(parent: Node, current: Current, marker: Node | null | und
           if (isParent) {
             if ((el as Leaving).$$leave !== undefined) {
               parent.insertBefore(node, el);
-              removeNode(el);
-            } else parent.replaceChild(node, el);
+              removeNode(el, owned);
+            } else {
+              parent.replaceChild(node, el);
+              owned?.delete(el);
+            }
           } else parent.insertBefore(node, marker);
-        } else if (isParent) removeNode(el);
+          trackOwned(owned, node);
+        } else if (isParent) removeNode(el, owned);
+        else owned?.delete(el);
       } else inserted = true;
     }
-  } else parent.insertBefore(node, marker);
+  } else {
+    parent.insertBefore(node, marker);
+    trackOwned(owned, node);
+  }
   return [node];
 }
 
@@ -381,15 +407,20 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
     }
     break;
   }
+  const owned = ownedOf(marker);
   if (aStart === aEnd) {
     // Only insertions.
     const ref = anchor(bEnd);
-    while (bStart < bEnd) parent.insertBefore(b[bStart++]!, ref);
+    while (bStart < bEnd) {
+      const n = b[bStart++]!;
+      parent.insertBefore(n, ref);
+      trackOwned(owned, n);
+    }
     return;
   }
   if (bStart === bEnd) {
     // Only removals.
-    while (aStart < aEnd) removeNode(a[aStart++]!);
+    while (aStart < aEnd) removeNode(a[aStart++]!, owned);
     return;
   }
   const aLen = aEnd - aStart;
@@ -398,7 +429,10 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
     // Single-node replacement (only when `oldNode` is still attached to `parent` and has no outro): no map/typed array.
     const oldNode = a[aStart]!;
     if (oldNode.parentNode === parent && (oldNode as Leaving).$$leave === undefined) {
-      parent.replaceChild(b[bStart]!, oldNode);
+      const nextNode = b[bStart]!;
+      parent.replaceChild(nextNode, oldNode);
+      owned?.delete(oldNode);
+      trackOwned(owned, nextNode);
       return;
     }
   }
@@ -486,7 +520,7 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
     return;
   }
   if (reused < aEnd - aStart) {
-    for (let i = aStart; i < aEnd; i++) if (!index.has(a[i]!)) removeNode(a[i]!);
+    for (let i = aStart; i < aEnd; i++) if (!index.has(a[i]!)) removeNode(a[i]!, owned);
     active = undefined;
   }
   if (moved) {
@@ -497,6 +531,7 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
       const ref = anchor(bStart + i + 1);
       if (sources[i] === -1) {
         parent.insertBefore(node, ref);
+        trackOwned(owned, node);
         active = undefined;
       } else if (k < 0 || seq[k] !== i) {
         if (active === undefined) active = findFocused(parent);
@@ -507,7 +542,9 @@ function reconcileArrays(parent: Node, a: Node[], b: Node[], marker: Node | null
     for (let i = n - 1; i >= 0; i--) {
       if (sources[i] !== -1) continue;
       const ref = anchor(bStart + i + 1);
-      parent.insertBefore(b[bStart + i]!, ref);
+      const node = b[bStart + i]!;
+      parent.insertBefore(node, ref);
+      trackOwned(owned, node);
     }
   }
 }

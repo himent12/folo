@@ -171,6 +171,7 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
   /** What the forecast reads: the complete entry, else a finished one on part of the benchmark (an estimate). */
   const readEntry = computed(() => teacherEntry.get() ?? props.entries.find(ofTeacher));
   const found = signal<{ entry: string; images: number; self: BenchSelfLabeling; bestConf: number | null } | null>(null);
+  const entryReadFailed = signal(false);
   // By id: the page hands down a new benchmark and new entries on every `bench` event and every load of the lists, and
   // a finished entry's result never changes.
   const benchId = computed(() => props.bench.id);
@@ -179,11 +180,12 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     const id = readId.get();
     const isOpen = open.get();
     found.set(null);
+    entryReadFailed.set(false);
     if (!isOpen || !id) return;
     let gone = false;
     hub.api.benchResult(benchId.get(), id).then(
       (r) => !gone && found.set({ entry: id, images: r.entry.images, self: r.self_labeling, bestConf: bestF1Conf(r.accuracy) }),
-      () => {},
+      () => !gone && entryReadFailed.set(true),
     );
     return () => (gone = true);
   });
@@ -195,6 +197,12 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     const te = teacherEntry.get();
     const f = found.get();
     return !!te && f?.entry === te.id && f.self.threshold === null;
+  });
+  /** While the teacher's complete entry result is still being read and the user relies on its threshold, hold Start until we know whether it found one. */
+  const readingThreshold = computed(() => {
+    const te = teacherEntry.get();
+    const f = found.get();
+    return open.get() && !!te && ownThreshold.get() && f?.entry !== te.id && !entryReadFailed.get();
   });
   /** Whether the teacher's own threshold is used. */
   const useOwn = computed(() => ownThreshold.get() && !needConf.get());
@@ -316,7 +324,12 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
                     : 'Pick a labeling job'
                   : !j.counts.images
                     ? 'That job has no images'
-                    : null) ?? (needConf.get() && chosen.get() === null ? 'Choose a confidence: its entry found no threshold' : null)
+                    : null) ??
+      (readingThreshold.get()
+        ? 'Reading the teacher’s entry…'
+        : needConf.get() && chosen.get() === null
+          ? 'Choose a confidence: its entry found no threshold'
+          : null)
     );
   });
   const shownErr = computed(() => (touched.get() ? Object.values(errs.get()).find((e) => e) : (liveErr.get() ?? undefined)));

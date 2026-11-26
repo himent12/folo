@@ -135,15 +135,25 @@ export default function ExportDialog(props: ExportDialogProps) {
   const copied = signal(false);
   /** Results inside the open dialog (a blocked copy, the demo's missing file) show in its status region, not a toast. */
   const status = new DialogStatus();
-  let run = 0;
+  let uiRun = 0;
   let destroyed = false;
   let copiedTimer: ReturnType<typeof setTimeout> | undefined;
   let lastModelId = model().id;
+  let lastEpoch = hub.epoch;
+  effect(() => {
+    const ep = hub.epoch;
+    if (ep !== lastEpoch) {
+      lastEpoch = ep;
+      switchesOk.set(false);
+      onnxDirect.set(false);
+      reset();
+    }
+  });
   effect(() => {
     const mid = model().id;
     if (mid !== lastModelId) {
       lastModelId = mid;
-      if (phase.peek() !== 'running') reset();
+      reset();
     }
   });
   onCleanup(() => {
@@ -152,11 +162,11 @@ export default function ExportDialog(props: ExportDialogProps) {
     copiedTimer = undefined;
   });
 
-  /** An export that ended after the dialog closed: its toast is out, and the dialog starts afresh when opened again. */
-  function endedClosed(modelName: string, e?: unknown) {
-    // page-level: only called once the dialog is closed or the page has gone.
+  /** An export that ended after the dialog closed (or moved to another model): its toast is out, and if it still owns the dialog UI, reset it. */
+  function endedClosed(modelName: string, ownsUi: boolean, e?: unknown) {
+    // page-level: only called once the dialog is closed, moved to another model, or unmounted.
     if (e !== undefined) toast.error(e, `Could not export ${modelName}`);
-    if (!destroyed) reset();
+    if (ownsUi) reset();
   }
 
   /**
@@ -165,7 +175,7 @@ export default function ExportDialog(props: ExportDialogProps) {
    */
   async function downloadFile() {
     if (phase.peek() === 'running') return;
-    const id = ++run;
+    const id = ++uiRun;
     const m = model();
     const epoch = hub.epoch;
     phase.set('running');
@@ -173,8 +183,9 @@ export default function ExportDialog(props: ExportDialogProps) {
     try {
       const api = hub.api;
       const f = await (format.peek() === 'onnx' ? api.onnxFile(m.id, onnxSwitches.peek() ? { ...switches.peek() } : {}) : api.f16File(m.id));
-      if (id !== run || hub.epoch !== epoch) return;
-      if (!destroyed) {
+      if (hub.epoch !== epoch) return;
+      const ownsUi = !destroyed && id === uiRun && model().id === m.id;
+      if (ownsUi) {
         file.set(f);
         done.set('file');
         phase.set('done');
@@ -187,13 +198,14 @@ export default function ExportDialog(props: ExportDialogProps) {
       a.rel = 'noopener';
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
-      if (!open.peek() || destroyed) {
+      if (!ownsUi || !open.peek()) {
         toast.success(`Downloaded ${f.name}`, bytes(f.size, prefs.units));
-        endedClosed(m.name);
+        endedClosed(m.name, ownsUi);
       }
     } catch (e) {
-      if (id !== run || hub.epoch !== epoch) return;
-      if (!open.peek() || destroyed) return endedClosed(m.name, e);
+      if (hub.epoch !== epoch) return;
+      const ownsUi = !destroyed && id === uiRun && model().id === m.id;
+      if (!ownsUi || !open.peek()) return endedClosed(m.name, ownsUi, e);
       error.set(e);
       phase.set('error');
     }
@@ -202,7 +214,7 @@ export default function ExportDialog(props: ExportDialogProps) {
   async function start() {
     if (phase.peek() === 'running') return;
     if (direct.peek()) return downloadFile();
-    const id = ++run;
+    const id = ++uiRun;
     const m = model();
     const epoch = hub.epoch;
     const isDemo = demo.peek();
@@ -211,21 +223,23 @@ export default function ExportDialog(props: ExportDialogProps) {
     try {
       const fmt = format.peek();
       const r = await hub.api.exportModel(m.id, fmt, fmt === 'onnx' && onnxSwitches.peek() ? { ...switches.peek() } : undefined);
-      if (id !== run || hub.epoch !== epoch) return;
-      if (!destroyed) {
+      if (hub.epoch !== epoch) return;
+      const ownsUi = !destroyed && id === uiRun && model().id === m.id;
+      if (ownsUi) {
         result.set(r);
         done.set(fmt);
         phase.set('done');
       }
       // The open dialog already says "Export finished" with the path: a toast would say it twice at once.
-      if (!open.peek() || destroyed) {
+      if (!ownsUi || !open.peek()) {
         if (isDemo) toast.info('Demo preview', `Exporting ${m.name} created no file.`);
         else toast.success(`Exported ${m.name}`, `${r.path} · ${bytes(r.bytes, prefs.units)}`);
-        endedClosed(m.name);
+        endedClosed(m.name, ownsUi);
       }
     } catch (e) {
-      if (id !== run || hub.epoch !== epoch) return;
-      if (!open.peek() || destroyed) return endedClosed(m.name, e);
+      if (hub.epoch !== epoch) return;
+      const ownsUi = !destroyed && id === uiRun && model().id === m.id;
+      if (!ownsUi || !open.peek()) return endedClosed(m.name, ownsUi, e);
       error.set(e);
       phase.set('error');
     }
@@ -249,7 +263,7 @@ export default function ExportDialog(props: ExportDialogProps) {
   }
 
   function reset() {
-    run++;
+    uiRun++;
     clearTimeout(copiedTimer);
     copiedTimer = undefined;
     status.clear();

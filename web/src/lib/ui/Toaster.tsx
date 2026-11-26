@@ -20,16 +20,22 @@ export default function Toaster() {
   let from: HTMLElement | null = null;
   const hold = () => toast.hold(hovered || focused);
 
-  // A focused toast removed programmatically (toast.clear / key replacement) never fires focusout on DOM removal:
-  // release the hold and return focus to where the user came from instead of stranding focus on <body>.
+  // A focused toast removed programmatically (toast.clear / key replacement) never fires focusout on DOM removal, and
+  // while its fly outro runs the dying <li> still holds document.activeElement: release hold and return focus as soon
+  // as the focused toast leaves toast.items.
   effect(() => {
-    void toast.items;
+    const items = toast.items;
     if (!focused) return;
     const active = document.activeElement;
-    if (active && el?.contains(active)) return;
+    const host = active instanceof Element && el?.contains(active) ? active.closest<HTMLElement>('[data-toast]') : null;
+    const activeId = host ? Number(host.dataset.toast) : NaN;
+    if (host && items.some((t) => t.id === activeId)) return;
+    const inDyingToast = host !== null;
     focused = false;
     hold();
-    if (from?.isConnected && (!active || active === document.body)) from.focus({ preventScroll: true });
+    if (from?.isConnected && (inDyingToast || !active || active === document.body)) {
+      from.focus({ preventScroll: true });
+    }
     from = null;
   });
 

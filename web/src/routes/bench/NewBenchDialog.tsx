@@ -207,7 +207,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
       // The dialog closes first: what was made is said over the benchmark's page it opens.
       if (alive && seq === submitSeq) open.set(false);
       toast.success('Benchmark created', `${created.name} · ${imagesText(created.images)} · the default plan`);
-      if (alive && router.location.path === startPath) router.go(`/benchmarks/${created.id}`);
+      if (alive && seq === submitSeq && router.location.path === startPath) router.go(`/benchmarks/${created.id}`);
     } catch (err) {
       if (!alive || seq !== submitSeq || hub.epoch !== epoch) return;
       error.set(err);

@@ -38,7 +38,9 @@ export default function Tabs<T extends string>(props: TabsProps<T>) {
   function onkeydown(e: KeyboardEvent) {
     const tabs = p.tabs;
     if (tabs.length === 0) return;
-    const i = tabs.findIndex((t) => t.value === value.get());
+    const buttons = [...root.querySelectorAll<HTMLButtonElement>('[role=tab]')];
+    const focused = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    const i = focused >= 0 ? focused : tabs.findIndex((t) => t.value === value.get());
     let j = i;
     if (e.key === 'ArrowRight') j = i < 0 ? 0 : (i + 1) % tabs.length;
     else if (e.key === 'ArrowLeft') j = i < 0 ? tabs.length - 1 : (i - 1 + tabs.length) % tabs.length;
@@ -49,7 +51,7 @@ export default function Tabs<T extends string>(props: TabsProps<T>) {
     const next = tabs[j];
     if (!next) return;
     select(next.value);
-    root.querySelectorAll<HTMLButtonElement>('[role=tab]')[j]?.focus();
+    buttons[j]?.focus();
   }
 
   return (

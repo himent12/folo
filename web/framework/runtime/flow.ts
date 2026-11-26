@@ -3,7 +3,7 @@
 
 import { computed, dispose, getOwner, isReader, memo, onCleanup, ownedRoot, owning, reader, renderEffect, signal, swapOwner, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
 import { createComponent, splitProps } from './component';
-import { clearLeaves, insert } from './dom';
+import { clearLeaves, insert, type PortalMarker } from './dom';
 import { spread } from './spread';
 import { enterBranch, exitBranch, leaveBranch, type BranchTransitions } from './transition';
 
@@ -717,21 +717,30 @@ export function Portal(props: { mount?: Node; children: JSX.Element }): JSX.Elem
   renderEffect(() => {
     const mount = target.get();
     const start = mount.appendChild(document.createComment(''));
-    const end = mount.appendChild(document.createComment(''));
+    const end = mount.appendChild(document.createComment('')) as Comment & PortalMarker;
+    const owned = new Set<Node>();
+    end.$$owned = owned;
     let cleaned = false;
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
       const parent = start.parentNode;
-      if (parent !== null) {
+      if (parent !== null && end.parentNode === parent && (start.compareDocumentPosition(end) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0) {
         for (let n = start.nextSibling; n !== null && n !== end; ) {
           const next: ChildNode | null = n.nextSibling;
           clearLeaves(n);
           parent.removeChild(n);
+          owned.delete(n);
           n = next;
         }
-        start.remove();
       }
+      for (const n of owned) {
+        clearLeaves(n);
+        n.parentNode?.removeChild(n);
+      }
+      owned.clear();
+      end.$$owned = undefined;
+      start.remove();
       end.remove();
     };
     onCleanup(cleanup);
