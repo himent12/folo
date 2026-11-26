@@ -26,7 +26,7 @@ const CLIP_FALLBACK_MS = 220;
 
 /** Clamps a center-relative pan offset so the zoomed canvas never pulls away from the stage edge. */
 export function clampPan(offset: number, size: number, scale: number): number {
-  if (scale <= 1.001 || size <= 0) return 0;
+  if (!Number.isFinite(offset) || !Number.isFinite(size) || !Number.isFinite(scale) || scale <= 1.001 || size <= 0) return 0;
   const limit = (size * (scale - 1)) / 2;
   return Math.max(-limit, Math.min(limit, offset));
 }
@@ -40,15 +40,21 @@ export function zoomToward(
   width: number,
   height: number,
 ): { z: number; tx: number; ty: number } {
-  const nz = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current.z * factor));
+  const cz = Number.isFinite(current.z) && current.z > 0 ? Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, current.z)) : MIN_ZOOM;
+  if (!Number.isFinite(factor) || factor <= 0) {
+    return { z: cz, tx: clampPan(current.tx, width, cz), ty: clampPan(current.ty, height, cz) };
+  }
+  const nz = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, cz * factor));
   if (nz <= 1.001) return { z: 1, tx: 0, ty: 0 };
-  if (width <= 0 || height <= 0) return { z: nz, tx: 0, ty: 0 };
-  const curTx = clampPan(current.tx, width, current.z);
-  const curTy = clampPan(current.ty, height, current.z);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0 || !Number.isFinite(px) || !Number.isFinite(py)) {
+    return { z: nz, tx: 0, ty: 0 };
+  }
+  const curTx = clampPan(current.tx, width, cz);
+  const curTy = clampPan(current.ty, height, cz);
   const dx = px - width / 2;
   const dy = py - height / 2;
-  const ux = (dx - curTx) / current.z;
-  const uy = (dy - curTy) / current.z;
+  const ux = (dx - curTx) / cz;
+  const uy = (dy - curTy) / cz;
   return {
     z: nz,
     tx: clampPan(dx - ux * nz, width, nz),

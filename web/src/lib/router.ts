@@ -236,7 +236,8 @@ class Router {
   /** Navigate to an app path like `/runs/run_7d1e`. */
   go(path: string, opts: { replace?: boolean } = {}) {
     const hash = `#${path}`;
-    if (!this.#travelling && !opts.replace && location.hash === hash) return;
+    const curHash = opts.replace ? location.hash : location.hash || '#/';
+    if (!this.#travelling && curHash === hash && hashOf(parse(hash)) === hashOf(this.location)) return;
     const navigate = () => this.#settled(() => this.#navigate(hash, opts.replace));
     if (this.#allowed(parse(hash), navigate)) navigate();
   }
@@ -313,8 +314,18 @@ class Router {
     if (pos === this.#pos && hashOf(next) === hashOf(this.location)) return;
     const from = this.#pos;
     // A new entry is made again (the held one was left behind); an old one is travelled to.
-    const proceed = () => this.#settled(() => (known === null ? this.#navigate(hash) : this.#travel(pos, true)));
-    if (this.#allowed(next, proceed)) {
+    let syncing = true;
+    let proceeded = false;
+    const proceed = () => {
+      if (syncing) {
+        proceeded = true;
+        return;
+      }
+      this.#settled(() => (known === null ? this.#navigate(hash) : this.#travel(pos, true)));
+    };
+    const ok = this.#allowed(next, proceed);
+    syncing = false;
+    if (ok || proceeded) {
       if (known === null) this.#stamp(pos);
       this.#pos = pos;
       if (pos !== from) this.#entered(from, pos, known !== null);
@@ -338,7 +349,10 @@ class Router {
     const timer = setTimeout(() => {
       this.#travelling = null;
       if (on) {
-        this.#pos = posOf(history.state) ?? this.#pos;
+        const was = this.#pos;
+        const nextPos = posOf(history.state) ?? this.#pos;
+        this.#pos = nextPos;
+        if (nextPos !== was) this.#entered(was, nextPos, true);
         this.route = parse(location.hash);
       } else {
         this.#pos = pos;

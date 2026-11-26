@@ -57,15 +57,38 @@ export function pickNearest(
   for (const s of visible) {
     if (!pick(s)) continue;
     const pts = s.points;
-    for (let i = 1; i < pts.length; i++) {
-      const a = pts[i - 1]!;
+    let prevValid = false;
+    for (let i = 0; i < pts.length; i++) {
       const b = pts[i]!;
-      if (!Number.isFinite(a.y) || !Number.isFinite(b.y)) continue;
-      const ax = x(a.x);
+      const bValid = Number.isFinite(b.x) && Number.isFinite(b.y);
+      if (!bValid) {
+        prevValid = false;
+        continue;
+      }
       const bx = x(b.x);
-      if (Math.max(ax, bx) < px - bd || Math.min(ax, bx) > px + bd) continue;
-      const ay = y(a.y);
       const by = y(b.y);
+      if (!Number.isFinite(bx) || !Number.isFinite(by)) {
+        prevValid = false;
+        continue;
+      }
+      if (!prevValid) {
+        // Single-point series or isolated finite point: measure distance directly to the point.
+        const next = pts[i + 1];
+        const nextValid = !!next && Number.isFinite(next.x) && Number.isFinite(next.y) && Number.isFinite(x(next.x)) && Number.isFinite(y(next.y));
+        if (!nextValid) {
+          const d = Math.hypot(px - bx, py - by);
+          if (d < bd) {
+            bd = d;
+            best = s.id;
+          }
+        }
+        prevValid = true;
+        continue;
+      }
+      const a = pts[i - 1]!;
+      const ax = x(a.x);
+      const ay = y(a.y);
+      if (Math.max(ax, bx) < px - bd || Math.min(ax, bx) > px + bd) continue;
       // Distance from the point to the segment.
       const dx = bx - ax;
       const dy = by - ay;

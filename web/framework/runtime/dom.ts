@@ -31,7 +31,7 @@ export function template(html: string, svg?: 1): () => Node {
 type LeaveFn = (done: () => void) => (() => void) | void;
 type Leaving = Node & { $$leave?: LeaveFn; $$cancelLeave?: () => void };
 /** Internal: portal end marker carrying the set of nodes the portal owns (so teardown stays exact even if a marker is detached). */
-export type PortalMarker = Node & { $$owned?: Set<Node> };
+export type PortalMarker = Node & { $$owned?: Set<Node>; $$dead?: boolean };
 /** Nodes with a pending or in-flight outro: while any exist, clearing never takes the `textContent = ''` shortcut. */
 let leaving = 0;
 const activeLeaves = new Set<Leaving>();
@@ -149,6 +149,7 @@ export function insert(parent: Node, value: unknown, marker?: Node | null, initi
  * `value` is what an expression returned, so a reader it returned is read in an effect of its own.
  */
 export function insertExpression(parent: Node, value: unknown, current: Current, marker?: Node | null, unwrap?: boolean, expression?: boolean): Current {
+  if (marker != null && (marker as PortalMarker).$$dead) return [];
   while (typeof current === 'function') current = current();
   if (value === current) return current;
   const t = typeof value;

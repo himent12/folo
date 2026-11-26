@@ -64,7 +64,7 @@ export default function LineEnds(props: LineEndsProps) {
             const py = () => props.y(p()!.y);
             return (
               <>
-                {p() && Number.isFinite(p()!.y) && Number.isFinite(py()) ? (
+                {p() && Number.isFinite(p()!.x) && Number.isFinite(p()!.y) && Number.isFinite(px()) && Number.isFinite(py()) ? (
                   <>
                     {best() ? (
                       // The best is the line's end: its ink ring around the end mark, one mark (./endMarks).
@@ -149,12 +149,13 @@ export default function LineEnds(props: LineEndsProps) {
       <For each={props.markers} key={(m) => m.label + m.x}>
         {(m, i) => {
           const at = () => props.x(m().x);
+          const my = () => props.y(m().y);
           const right = () => at() > props.width - props.margin.right - 40;
           const left = () => at() < props.margin.left + 40;
           return (
             <>
-              {m().x >= props.xExtent[0] && m().x <= props.xExtent[1] && props.merges[i()] == null ? (
-                <g class="marker" transform={`translate(${at()},${props.y(m().y)})`}>
+              {m().x >= props.xExtent[0] && m().x <= props.xExtent[1] && Number.isFinite(at()) && Number.isFinite(my()) && props.merges[i()] == null ? (
+                <g class="marker" transform={`translate(${at()},${my()})`}>
                   {m().pulse && m().pulse! > props.pulseBase ? (
                     <Key when={m().pulse}>
                       <circle class="pulse" r="4.5" />

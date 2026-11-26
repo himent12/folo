@@ -285,17 +285,33 @@ export default function Cloud() {
           </>
         )}
       >
-        {/* Connect waits for the providers: when they fail, say so (with Retry) rather than leave it disabled unexplained. */}
-        {providers.error && !providers.data ? (
+        {/* Deduplicate stacked banners when both cloud endpoints fail together; keep specific titles when only one fails. */}
+        {providers.error && !providers.data && connections.error && !connections.data ? (
           <div class="state">
-            <ErrorState error={providers.error} title="Could not load the cloud providers" retry={() => providers.refresh()} compact />
+            <ErrorState
+              error={connections.error}
+              title="Could not load cloud settings"
+              retry={() => {
+                void providers.refresh();
+                void connections.refresh();
+                if (instances.error && !instances.data) void instances.refresh();
+              }}
+              compact
+            />
           </div>
-        ) : null}
-        {connections.error && !connections.data ? (
-          <div class="state">
-            <ErrorState error={connections.error} title="Could not load the connections" retry={() => connections.refresh()} compact />
-          </div>
-        ) : !connections.data ? (
+        ) : (
+          <>
+            {/* Connect waits for the providers: when they fail, say so (with Retry) rather than leave it disabled unexplained. */}
+            {providers.error && !providers.data ? (
+              <div class="state">
+                <ErrorState error={providers.error} title="Could not load the cloud providers" retry={() => providers.refresh()} compact />
+              </div>
+            ) : null}
+            {connections.error && !connections.data ? (
+              <div class="state">
+                <ErrorState error={connections.error} title="Could not load the connections" retry={() => connections.refresh()} compact />
+              </div>
+            ) : !connections.data ? (
           <ul class="cx" aria-hidden="true">
             <For each={TWO} key={(i) => i}>
               {() => (
@@ -379,8 +395,10 @@ export default function Cloud() {
                   </li>
                 );
               }}
-            </For>
-          </ul>
+              </For>
+            </ul>
+            )}
+          </>
         )}
       </Panel>
 

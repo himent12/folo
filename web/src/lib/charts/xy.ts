@@ -71,7 +71,7 @@ export function spokenAt(
   const row = o.table.rows.find((r) => r[0] === o.xFormat(c));
   if (row) return row.map((cell, k) => (k ? `${o.table.head[k]} ${cell}` : cell)).join(', ');
   const parts = o.series.flatMap((s) => {
-    const p = s.points.find((q) => Math.abs(q.x - c) < 1e-9 && q.y !== null);
+    const p = s.points.find((q) => Math.abs(q.x - c) < 1e-9 && q.y !== null && Number.isFinite(q.y));
     return p ? [`${s.label} ${o.yFormat(p.y!)}`] : [];
   });
   return `${o.xLabel ?? o.table.head[0] ?? 'At'} ${+c.toFixed(4)}${parts.length ? `: ${parts.join(', ')}` : ''}`;

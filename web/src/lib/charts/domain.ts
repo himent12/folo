@@ -258,8 +258,13 @@ export function fitFloor(fit: Fit | null | undefined, decimals = 2): string | nu
  */
 export function niceDomain(lo: number, hi: number): Fit {
   if (!Number.isFinite(lo) || !Number.isFinite(hi)) return { domain: [0, 1], ticks: [0, 0.25, 0.5, 0.75, 1], decimals: 2 };
-  if (hi <= lo) hi = lo + (Math.abs(lo) || 1);
-  return fitSteps(lo, hi, candidates(hi - lo));
+  if (hi <= lo) {
+    const bump = Math.abs(lo) || 1;
+    hi = Number.isFinite(lo + bump) ? lo + bump : lo;
+  }
+  const span = hi - lo;
+  if (!(span > 0) || !Number.isFinite(span)) return { domain: [lo, hi], ticks: lo === hi ? [lo] : [lo, hi], decimals: 0 };
+  return fitSteps(lo, hi, candidates(span));
 }
 
 /** Ticks inside a domain the caller fixed: the smallest nice step that leaves 3 to `max` (at most 5) of them. */
@@ -326,7 +331,8 @@ export function logMinors(lo: number, hi: number): number[] {
 
 /** A log domain from the 1-2-5 values just outside the data, so it moves in steps, not with every value. */
 export function logDomain(lo: number, hi: number): [number, number] {
-  if (!(lo > 0) || !(hi > 0)) return [0.1, 1];
+  if (!Number.isFinite(lo) || !Number.isFinite(hi) || !(lo > 0) || !(hi > 0)) return [0.1, 1];
+  const [min, max] = lo <= hi ? [lo, hi] : [hi, lo];
   const down = (v: number) => {
     const e = 10 ** Math.floor(Math.log10(v));
     return ([5, 2, 1].map((m) => m * e).find((c) => c <= v * (1 + 1e-9)) ?? e);
@@ -335,8 +341,8 @@ export function logDomain(lo: number, hi: number): [number, number] {
     const e = 10 ** Math.floor(Math.log10(v));
     return [1, 2, 5, 10].map((m) => m * e).find((c) => c >= v * (1 - 1e-9)) ?? 10 * e;
   };
-  const a = down(lo);
-  const b = up(hi);
+  const a = down(min);
+  const b = up(max);
   return b > a ? [a, b] : [a, a * 2];
 }
 

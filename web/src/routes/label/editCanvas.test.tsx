@@ -199,4 +199,35 @@ describe('the editor canvas', () => {
     gesture(hit, [360, 10], [390, 40]);
     expect(onchange).toHaveBeenCalledTimes(1);
   });
+
+  it('cancels an active draw drag on Escape and stops propagation before parent shortcuts run', async () => {
+    const { onchange, canvas } = mount(1);
+    await selectedBox(canvas);
+    const hit = canvas.querySelector('.hit')!;
+    let bubbled = 0;
+    const onBubble = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') bubbled++;
+    };
+    window.addEventListener('keydown', onBubble);
+    try {
+      hit.dispatchEvent(new PointerEvent('pointerdown', { clientX: 360, clientY: 10, button: 0, buttons: 1, pointerType: 'mouse', pointerId: 11, bubbles: true, cancelable: true }));
+      hit.dispatchEvent(new PointerEvent('pointermove', { clientX: 390, clientY: 40, buttons: 1, pointerType: 'mouse', pointerId: 11, bubbles: true }));
+      flushSync();
+      expect(canvas.querySelectorAll('.box').length).toBe(3);
+
+      const esc = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
+      window.dispatchEvent(esc);
+      flushSync();
+      expect(esc.defaultPrevented).toBe(true);
+      expect(bubbled).toBe(0);
+      expect(canvas.querySelectorAll('.box').length).toBe(2);
+      expect(onchange).not.toHaveBeenCalled();
+
+      // A second Escape with no active drag bubbles normally to parent shortcuts.
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      expect(bubbled).toBe(1);
+    } finally {
+      window.removeEventListener('keydown', onBubble);
+    }
+  });
 });

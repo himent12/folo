@@ -65,14 +65,19 @@ export default function XYChart(props: XYChartProps) {
   const xDom = computed(() => p.xDomain, { equals: samePair });
   const yDom = computed(() => p.yDomain, { equals: samePair });
   const stops = computed(
-    () => (p.stops ? p.stops.slice() : [...new Set(p.series.flatMap((s) => s.points.filter((q) => q.y !== null).map((q) => q.x)))]).sort((a, b) => a - b),
+    () =>
+      (p.stops
+        ? p.stops.filter(Number.isFinite)
+        : [...new Set(p.series.flatMap((s) => s.points.filter((q) => Number.isFinite(q.x) && q.y !== null && Number.isFinite(q.y)).map((q) => q.x)))]
+      ).sort((a, b) => a - b),
     { equals: sameNums },
   );
   const hasStops = computed(() => stops.get().length > 0);
   const m = computed(
     () => {
       const strip = p.strip;
-      const longest = Math.max(1, ...p.yTicks.map((t) => p.yFormat(t).length), strip ? String(Math.max(0, ...strip.items.map((i) => i.v))).length : 0);
+      const stripPeak = strip ? Math.max(0, ...strip.items.map((i) => (Number.isFinite(i.v) && i.v > 0 ? i.v : 0))) : 0;
+      const longest = Math.max(1, ...p.yTicks.map((t) => p.yFormat(t).length), strip ? String(stripPeak).length : 0);
       return {
         top: p.yLabel ? 24 : 10,
         right: 14,
@@ -123,7 +128,7 @@ export default function XYChart(props: XYChartProps) {
       let d = '';
       let pen = false;
       for (const q of s.points) {
-        if (q.y === null || !Number.isFinite(q.y)) {
+        if (!Number.isFinite(q.x) || q.y === null || !Number.isFinite(q.y)) {
           pen = false;
           continue;
         }
@@ -142,7 +147,7 @@ export default function XYChart(props: XYChartProps) {
     return [...p.series].sort((a, b) => Number(a.id === hl) - Number(b.id === hl) || Number(!!a.pattern) - Number(!!b.pattern));
   });
 
-  const stripMax = computed(() => (p.strip ? Math.max(1, ...p.strip.items.map((i) => i.v)) : 1));
+  const stripMax = computed(() => (p.strip ? Math.max(1, ...p.strip.items.map((i) => (Number.isFinite(i.v) && i.v > 0 ? i.v : 0))) : 1));
 
   // ---- reading: the mouse, a touch pin, the keyboard ----
   const nearestStop = (px: number) => {
@@ -291,7 +296,7 @@ export default function XYChart(props: XYChartProps) {
   }
 
   /** The point of `s` at stop `v`, if it has one there. */
-  const at = (s: XYSeries, v: number) => s.points.find((q) => q.x === v && q.y !== null);
+  const at = (s: XYSeries, v: number) => s.points.find((q) => q.x === v && Number.isFinite(q.x) && q.y !== null && Number.isFinite(q.y));
   const markPos = (k: XYMark) => {
     const px = x.get()(k.x);
     const py = y.get()(clampY(k.y));
@@ -341,19 +346,21 @@ export default function XYChart(props: XYChartProps) {
 
   /** A point's whiskers and dot (the data layer: never reads the cursor). */
   const point = (s: () => XYSeries, q: () => XYPoint) => {
+    const valid = () => Number.isFinite(q().x) && q().y !== null && Number.isFinite(q().y!);
+    const hasWhisker = () => valid() && (Number.isFinite(q().lo) || Number.isFinite(q().hi));
     const px = () => x.get()(q().x);
-    const lo = () => y.get()(clampY(q().lo ?? q().y!));
-    const hi = () => y.get()(clampY(q().hi ?? q().y!));
+    const lo = () => y.get()(clampY(Number.isFinite(q().lo) ? q().lo! : q().y!));
+    const hi = () => y.get()(clampY(Number.isFinite(q().hi) ? q().hi! : q().y!));
     return (
       <>
-        {q().y !== null && (q().lo !== undefined || q().hi !== undefined) ? (
+        {hasWhisker() ? (
           <g class="whisker" class:context={receded(s())} style:stroke={receded(s()) ? undefined : inkOf(s())}>
             <line x1={px()} x2={px()} y1={lo()} y2={hi()} />
             <line x1={px() - 4} x2={px() + 4} y1={lo()} y2={lo()} />
             <line x1={px() - 4} x2={px() + 4} y1={hi()} y2={hi()} />
           </g>
         ) : null}
-        {q().y !== null && (s().dots || q().lo !== undefined || q().r !== undefined || q().hollow) ? (
+        {valid() && (s().dots || q().lo !== undefined || q().r !== undefined || q().hollow) ? (
           <circle
             class="pt"
             class:hollow={q().hollow}
@@ -476,7 +483,8 @@ export default function XYChart(props: XYChartProps) {
                 </text>
                 <Index each={p.strip.items}>
                   {(it) => {
-                    const h = () => (it().v > 0 ? Math.max(1, (it().v / stripMax.get()) * STRIP_H) : 0);
+                    const v = () => (Number.isFinite(it().v) && it().v > 0 ? it().v : 0);
+                    const h = () => (v() > 0 ? Math.max(1, (v() / stripMax.get()) * STRIP_H) : 0);
                     const gap = 1;
                     return (
                       <rect
