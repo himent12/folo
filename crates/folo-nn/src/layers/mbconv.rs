@@ -213,6 +213,11 @@ impl InvertedResidual {
         self.hidden_channels
     }
 
+    /// Depthwise kernel size `k`.
+    pub fn kernel_size(&self) -> usize {
+        self.kernel_size
+    }
+
     /// True when the block adds the identity residual shortcut (`stride == 1 && in == out`).
     pub fn use_residual(&self) -> bool {
         self.use_residual
@@ -275,9 +280,8 @@ impl Forward for InvertedResidual {
             )));
         }
         if n == 0 {
-            let pad = self.kernel_size / 2;
-            let h_out = (h + 2 * pad - self.kernel_size) / self.stride + 1;
-            let w_out = (w + 2 * pad - self.kernel_size) / self.stride + 1;
+            let h_out = (h - 1) / self.stride + 1;
+            let w_out = (w - 1) / self.stride + 1;
             let dtype = x.dtype();
             let dev = x.device();
             let in_shape = x.shape().clone();

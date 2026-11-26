@@ -8,15 +8,21 @@
 //! p_t = p_{t-1} * (1 - lr * wd) - lr * clip(m_t / max(h_t, eps), -rho, rho)
 //! ```
 //!
-//! Supports both:
-//! - **Gauss-Newton diagonal estimator (`Sophia-G`)**: `h_est = g_hat^2` via
-//!   [`SophiaG::update_hessian_gauss_newton`] (or automatically every `update_period` steps inside
-//!   [`SophiaG::step`] when `auto_gauss_newton = true` and no explicit Hessian update was supplied for the
-//!   current step), and
-//! - **Seeded Hutchinson diagonal estimator (`Sophia-H`)**: `h_est = v ⊙ (H v)` with deterministic Rademacher
-//!   (`±1`) or Gaussian (`N(0, 1)`) probes via [`SophiaG::sample_hutchinson_probes`] +
+//! Supports both published diagonal curvature estimators:
+//! - **Gauss–Newton–Bartlett (`Sophia-G`, §2.2 Algorithm 2)**: `h_est = B * g_hat^2` from gradients `g_hat`
+//!   evaluated on model-sampled labels over a mini-batch of size `B`, via
+//!   [`SophiaG::update_hessian_gauss_newton_scaled`] (or [`SophiaG::update_hessian_gauss_newton`] for
+//!   already-scaled `B = 1` gradients), and
+//! - **Seeded Hutchinson (`Sophia-H`)**: `h_est = v ⊙ (H v)` with deterministic Rademacher (`±1`) or
+//!   Gaussian (`N(0, 1)`) probes via [`SophiaG::sample_hutchinson_probes`] +
 //!   [`SophiaG::update_hessian_hutchinson`] (or [`SophiaG::update_hessian_hutchinson_with`]).
+//!
+//! By default (`auto_gauss_newton = false`), Hessian updates are driven explicitly so the caller supplies a
+//! proper Gauss–Newton–Bartlett or Hutchinson estimate rather than squaring the ordinary training gradient.
+//! Setting `auto_gauss_newton = true` enables an opt-in empirical-Fisher convenience heuristic (`g_t^2`) on
+//! `step % update_period == 0` when no explicit Hessian update was supplied for the current step.
 
+mod contract;
 #[cfg(test)]
 mod tests;
 
@@ -26,10 +32,10 @@ use folo_core::rng::Rng;
 use folo_core::{DType, Device, Tensor, no_grad};
 use serde::{Deserialize, Serialize};
 
-use super::{
-    GradRef, GradSource, ParamGroup, check_param_sets, cpu_fast, storage_key, take_state, validate_groups,
-};
+use super::{GradRef, GradSource, ParamGroup, cpu_fast, storage_key, validate_groups};
 use crate::{Error, Result};
+use contract::PendingResume;
+pub use contract::{SophiaContract, SophiaGroupContract};
 
 /// Default Sophia-G learning rate (`1e-4`).
 pub const SOPHIA_DEFAULT_LR: f64 = 1e-4;
@@ -74,10 +80,11 @@ pub struct SophiaConfig {
     /// Hessian estimation cadence `k >= 1`: update diagonal Hessian every `k` steps (`step % k == 0`;
     /// default `10`).
     pub update_period: u64,
-    /// When `true` (default), [`SophiaG::step`] automatically performs a diagonal Gauss-Newton EMA update
-    /// (`h_est = g_t^2`) whenever `step % update_period == 0` and no explicit `update_hessian_*` call has
-    /// already been made for the current step. Set `false` when driving Hessian updates exclusively through
-    /// explicit [`SophiaG::update_hessian_gauss_newton`] or [`SophiaG::update_hessian_hutchinson`] calls.
+    /// Opt-in empirical-Fisher convenience heuristic (default `false`). When `true`, [`SophiaG::step`]
+    /// automatically updates `h_t` from the squared training gradient (`g_t^2`) whenever
+    /// `step % update_period == 0` and no explicit `update_hessian_*` call was made for the current step.
+    /// Keep `false` (default) to drive exact Gauss–Newton–Bartlett (`update_hessian_gauss_newton_scaled`)
+    /// or Hutchinson (`update_hessian_hutchinson`) updates explicitly.
     pub auto_gauss_newton: bool,
     /// Probe distribution for [`SophiaG::sample_hutchinson_probes`] (default `Rademacher`).
     pub hutchinson_dist: HutchinsonDist,
@@ -94,7 +101,7 @@ impl Default for SophiaConfig {
             eps: SOPHIA_DEFAULT_EPS,
             weight_decay: SOPHIA_DEFAULT_WEIGHT_DECAY,
             update_period: SOPHIA_DEFAULT_UPDATE_PERIOD,
-            auto_gauss_newton: true,
+            auto_gauss_newton: false,
             hutchinson_dist: HutchinsonDist::Rademacher,
             seed: 0,
         }
@@ -117,86 +124,10 @@ impl SophiaConfig {
     }
 }
 
-/// Serializable contract for one [`SophiaG`] parameter group.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SophiaGroupContract {
-    /// Group name.
-    pub name: String,
-    /// Parameter names, in canonical order.
-    pub params: Vec<String>,
-    /// Base learning rate `>= 0`.
-    pub lr: f64,
-    /// Current effective learning rate (defaults to `lr` when omitted).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_lr: Option<f64>,
-    /// Base `[beta1, beta2]`.
-    pub betas: [f64; 2],
-    /// Current effective `beta1` (defaults to `betas[0]` when omitted).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_beta1: Option<f64>,
-    /// Numerical stability floor `eps > 0`.
-    pub eps: f64,
-    /// Decoupled weight decay `>= 0`.
-    pub weight_decay: f64,
-    /// Active step counts per parameter (aligned with `params`).
-    pub param_steps: Vec<u64>,
-}
-
-/// Serializable contract for [`SophiaG`] checkpointing and bit-exact resume.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SophiaContract {
-    /// Parameter groups, in canonical order.
-    pub groups: Vec<SophiaGroupContract>,
-    /// Total completed [`SophiaG::step`] calls.
-    pub step: u64,
-    /// Total completed Hessian EMA updates.
-    pub hessian_updates: u64,
-    /// Step index on which the most recent Hessian update occurred, if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_hessian_step: Option<u64>,
-    /// Clipping bound `rho > 0`.
-    pub rho: f64,
-    /// Hessian update cadence `k >= 1`.
-    pub update_period: u64,
-    /// Whether `step()` automatically runs diagonal Gauss-Newton when due.
-    pub auto_gauss_newton: bool,
-    /// Hutchinson probe distribution.
-    pub hutchinson_dist: HutchinsonDist,
-    /// Internal xoshiro256++ RNG state words for bit-exact Hutchinson probe resume.
-    pub rng_state: [u64; 4],
-}
-
-struct ParamState {
-    exp_avg: Tensor,
-    hessian: Tensor,
-    param_step: u64,
-}
-
-struct StagedGroup {
-    base_lr: f64,
-    lr: f64,
-    base_momentum: f64,
-    momentum: f64,
-    beta2: f64,
-    eps: f64,
-    weight_decay: f64,
-}
-
-struct PendingResume {
-    step: u64,
-    hessian_updates: u64,
-    last_hessian_step: Option<u64>,
-    rho: f64,
-    update_period: u64,
-    auto_gauss_newton: bool,
-    hutchinson_dist: HutchinsonDist,
-    rng_state: [u64; 4],
-    group_names: Vec<String>,
-    param_names: Vec<Vec<String>>,
-    groups: Vec<StagedGroup>,
-    param_steps: Vec<Vec<u64>>,
+pub(super) struct ParamState {
+    pub(super) exp_avg: Tensor,
+    pub(super) hessian: Tensor,
+    pub(super) param_step: u64,
 }
 
 /// Sophia-G / Sophia-H second-order clipped stochastic optimizer (Liu et al., ICLR 2024).
@@ -288,7 +219,7 @@ impl SophiaG {
         self.step
     }
 
-    /// Total completed Hessian EMA updates (explicit or automatic).
+    /// Total completed Hessian EMA updates (explicit or opt-in automatic).
     pub fn hessian_updates(&self) -> u64 {
         self.hessian_updates
     }
@@ -353,23 +284,45 @@ impl SophiaG {
         Ok(probes)
     }
 
-    /// Update the diagonal Hessian EMA using empirical Gauss-Newton (`h_est = g_hat^2`, Liu et al. 2024
-    /// Algorithm 2) for every parameter present in `gn_grads`:
+    /// Update the diagonal Hessian EMA using the published Gauss–Newton–Bartlett estimator
+    /// (Liu et al., ICLR 2024 §2.2 Algorithm 2):
     ///
     /// ```text
-    /// h_t = beta2 * h_{t-1} + (1 - beta2) * g_hat^2
+    /// h_t = beta2 * h_{t-1} + (1 - beta2) * batch_size * g_hat^2
     /// ```
-    pub fn update_hessian_gauss_newton(&mut self, gn_grads: &dyn GradSource) -> Result<()> {
+    ///
+    /// where `gn_grads` holds the mean mini-batch gradient `g_hat` evaluated on labels sampled from the
+    /// model's predictive distribution, and `batch_size > 0` is the mini-batch size `B`.
+    pub fn update_hessian_gauss_newton_scaled(
+        &mut self,
+        gn_grads: &dyn GradSource,
+        batch_size: f64,
+    ) -> Result<()> {
+        if !(batch_size.is_finite()
+            && batch_size > 0.0
+            && (batch_size as f32).is_finite()
+            && (batch_size as f32) > 0.0)
+        {
+            return Err(Error::Invalid(format!(
+                "sophia: batch_size must be finite and > 0 in f32, got {batch_size}"
+            )));
+        }
         self.validate_alignment(Some(gn_grads))?;
         let _ng = no_grad();
         let mut any_updated = false;
         for (grp, st) in self.groups.iter().zip(&self.state) {
             let b2 = grp.beta2 as f32;
-            let one_m_b2 = (1.0 - grp.beta2) as f32;
+            let coeff = ((1.0 - grp.beta2) * batch_size) as f32;
+            if !coeff.is_finite() {
+                return Err(Error::Invalid(format!(
+                    "sophia: (1 - beta2) * batch_size overflows f32 for group `{}`",
+                    grp.name
+                )));
+            }
             for ((_, p), ps) in grp.params.iter().zip(st) {
                 let Some(g) = gn_grads.grad(p) else { continue };
                 any_updated = true;
-                update_hessian_gn_one(&ps.hessian, g, b2, one_m_b2)?;
+                update_hessian_gn_one(&ps.hessian, g, b2, coeff)?;
             }
         }
         if any_updated {
@@ -378,6 +331,12 @@ impl SophiaG {
         }
         self.pending_resume = None;
         Ok(())
+    }
+
+    /// Convenience alias for [`SophiaG::update_hessian_gauss_newton_scaled`] with `batch_size = 1.0`
+    /// (for per-example or pre-scaled Gauss–Newton–Bartlett gradients `g_hat`).
+    pub fn update_hessian_gauss_newton(&mut self, gn_grads: &dyn GradSource) -> Result<()> {
+        self.update_hessian_gauss_newton_scaled(gn_grads, 1.0)
     }
 
     /// Update the diagonal Hessian EMA using a Hutchinson Hessian-vector product (`h_est = v ⊙ (H v)`):
@@ -452,8 +411,9 @@ impl SophiaG {
 
     /// Perform one Sophia-G optimization step over every parameter with a gradient in `grads`.
     ///
-    /// When `auto_gauss_newton` is `true` and [`SophiaG::should_update_hessian`] is `true`, updates the
-    /// diagonal Hessian EMA from `grads` (`h_est = g_t^2`) before taking the clipped second-order step.
+    /// When `auto_gauss_newton` is explicitly enabled and [`SophiaG::should_update_hessian`] is `true`,
+    /// updates the diagonal Hessian EMA from the squared training gradient (`g_t^2`) before taking the
+    /// clipped second-order step (safely snapshotting `g` first if it aliases `ps.hessian`).
     pub fn step(&mut self, grads: &dyn GradSource) -> Result<()> {
         self.validate_alignment(Some(grads))?;
         let auto_gn_now = self.auto_gauss_newton && self.should_update_hessian();
@@ -473,9 +433,31 @@ impl SophiaG {
                 let Some(g) = grads.grad(p) else { continue };
                 any_active = true;
                 if auto_gn_now {
-                    update_hessian_gn_one(&ps.hessian, g, b2, one_m_b2)?;
+                    if ps.hessian.same_storage(g) {
+                        // Snapshot pre-step gradient before updating `ps.hessian` so momentum reads the
+                        // unmutated gradient even when `g` aliases `ps.hessian`.
+                        let g_snap = Tensor::zeros_with(g.shape(), g.dtype(), g.device())?;
+                        g_snap.copy_from(g)?;
+                        update_hessian_gn_one(&ps.hessian, &g_snap, b2, one_m_b2)?;
+                        sophia_step_one(
+                            p,
+                            &g_snap,
+                            &ps.exp_avg,
+                            &ps.hessian,
+                            lr,
+                            b1,
+                            one_m_b1,
+                            eps,
+                            rho,
+                            decay,
+                        )?;
+                    } else {
+                        update_hessian_gn_one(&ps.hessian, g, b2, one_m_b2)?;
+                        sophia_step_one(p, g, &ps.exp_avg, &ps.hessian, lr, b1, one_m_b1, eps, rho, decay)?;
+                    }
+                } else {
+                    sophia_step_one(p, g, &ps.exp_avg, &ps.hessian, lr, b1, one_m_b1, eps, rho, decay)?;
                 }
-                sophia_step_one(p, g, &ps.exp_avg, &ps.hessian, lr, b1, one_m_b1, eps, rho, decay)?;
                 ps.param_step = ps.param_step.saturating_add(1);
             }
         }
@@ -501,250 +483,6 @@ impl SophiaG {
                 ps.hessian.to_device_(device)?;
             }
         }
-        Ok(())
-    }
-
-    /// Export the serializable [`SophiaContract`].
-    pub fn contract(&self) -> SophiaContract {
-        let groups = self
-            .groups
-            .iter()
-            .zip(&self.state)
-            .map(|(g, st)| SophiaGroupContract {
-                name: g.name.clone(),
-                params: g.params.iter().map(|(n, _)| n.clone()).collect(),
-                lr: g.base_lr,
-                current_lr: (g.lr != g.base_lr).then_some(g.lr),
-                betas: [g.base_momentum, g.beta2],
-                current_beta1: (g.momentum != g.base_momentum).then_some(g.momentum),
-                eps: g.eps,
-                weight_decay: g.weight_decay,
-                param_steps: st.iter().map(|ps| ps.param_step).collect(),
-            })
-            .collect();
-        SophiaContract {
-            groups,
-            step: self.step,
-            hessian_updates: self.hessian_updates,
-            last_hessian_step: self.last_hessian_step,
-            rho: self.rho,
-            update_period: self.update_period,
-            auto_gauss_newton: self.auto_gauss_newton,
-            hutchinson_dist: self.hutchinson_dist,
-            rng_state: self.rng.state(),
-        }
-    }
-
-    /// Validate `c` and stage its hyperparameters, cadence, and RNG state for atomic commit in
-    /// [`SophiaG::load_state`].
-    pub fn apply_contract(&mut self, c: &SophiaContract) -> Result<()> {
-        if self.groups.len() != self.state.len() {
-            return Err(Error::Load(format!(
-                "sophia: group count {} does not match state {}",
-                self.groups.len(),
-                self.state.len()
-            )));
-        }
-        for (g, st) in self.groups.iter().zip(&self.state) {
-            if g.params.len() != st.len() {
-                return Err(Error::Load(format!(
-                    "sophia: group `{}` parameter count {} does not match state {}",
-                    g.name,
-                    g.params.len(),
-                    st.len()
-                )));
-            }
-        }
-        validate_sophia_global(c.rho, c.update_period).map_err(|e| Error::Load(e.to_string()))?;
-        if Rng::from_state(c.rng_state).is_none() {
-            return Err(Error::Load("sophia contract: all-zero rng_state is invalid".into()));
-        }
-        if let Some(last) = c.last_hessian_step
-            && last > c.step
-        {
-            return Err(Error::Load(format!("sophia contract: last_hessian_step {last} > step {}", c.step)));
-        }
-        let as_group_contracts: Vec<super::GroupContract> = c
-            .groups
-            .iter()
-            .map(|gc| super::GroupContract {
-                name: gc.name.clone(),
-                params: gc.params.clone(),
-                lr: gc.lr,
-                momentum: None,
-                nesterov: None,
-                weight_decay: gc.weight_decay,
-                betas: Some(gc.betas),
-                eps: Some(gc.eps),
-                decoupled_wd: true,
-                cautious_wd: false,
-                cautious: false,
-            })
-            .collect();
-        check_param_sets(&self.groups, &as_group_contracts)?;
-
-        let mut staged_steps = Vec::with_capacity(self.groups.len());
-        for (gc, grp) in c.groups.iter().zip(&self.groups) {
-            if gc.param_steps.len() != gc.params.len() {
-                return Err(Error::Load(format!(
-                    "sophia contract group `{}`: param_steps length {} != {} params",
-                    gc.name,
-                    gc.param_steps.len(),
-                    gc.params.len()
-                )));
-            }
-            let cur_lr = gc.current_lr.unwrap_or(gc.lr);
-            let cur_b1 = gc.current_beta1.unwrap_or(gc.betas[0]);
-            validate_sophia_group(&gc.name, gc.lr, gc.betas[0], gc.betas[1], gc.eps, gc.weight_decay, c.rho)
-                .map_err(|e| Error::Load(e.to_string()))?;
-            validate_sophia_group(&gc.name, cur_lr, cur_b1, gc.betas[1], gc.eps, gc.weight_decay, c.rho)
-                .map_err(|e| Error::Load(e.to_string()))?;
-            let mut by_name: HashMap<&str, u64> = HashMap::with_capacity(gc.params.len());
-            for (idx, pname) in gc.params.iter().enumerate() {
-                let k = gc.param_steps[idx];
-                if k > c.step {
-                    return Err(Error::Load(format!(
-                        "sophia contract group `{}` param `{pname}`: param_step {k} > step {}",
-                        gc.name, c.step
-                    )));
-                }
-                by_name.insert(pname.as_str(), k);
-            }
-            staged_steps.push(grp.params.iter().map(|(pname, _)| by_name[pname.as_str()]).collect());
-        }
-
-        let staged_groups = c
-            .groups
-            .iter()
-            .map(|gc| StagedGroup {
-                base_lr: gc.lr,
-                lr: gc.current_lr.unwrap_or(gc.lr),
-                base_momentum: gc.betas[0],
-                momentum: gc.current_beta1.unwrap_or(gc.betas[0]),
-                beta2: gc.betas[1],
-                eps: gc.eps,
-                weight_decay: gc.weight_decay,
-            })
-            .collect();
-        self.pending_resume = Some(PendingResume {
-            step: c.step,
-            hessian_updates: c.hessian_updates,
-            last_hessian_step: c.last_hessian_step,
-            rho: c.rho,
-            update_period: c.update_period,
-            auto_gauss_newton: c.auto_gauss_newton,
-            hutchinson_dist: c.hutchinson_dist,
-            rng_state: c.rng_state,
-            group_names: self.groups.iter().map(|g| g.name.clone()).collect(),
-            param_names: self
-                .groups
-                .iter()
-                .map(|g| g.params.iter().map(|(n, _)| n.clone()).collect())
-                .collect(),
-            groups: staged_groups,
-            param_steps: staged_steps,
-        });
-        Ok(())
-    }
-
-    /// Export all optimizer state tensors (`<param>.exp_avg`, `<param>.hessian`).
-    pub fn state_tensors(&self) -> Result<Vec<(String, Tensor)>> {
-        let mut out = Vec::with_capacity(self.groups.iter().map(|g| g.params.len() * 2).sum());
-        for (g, st) in self.groups.iter().zip(&self.state) {
-            for ((name, _), ps) in g.params.iter().zip(st) {
-                out.push((format!("{name}.exp_avg"), ps.exp_avg.clone()));
-                out.push((format!("{name}.hessian"), ps.hessian.clone()));
-            }
-        }
-        Ok(out)
-    }
-
-    /// Restore step counter and state tensors from a checkpoint map.
-    pub fn load_state(&mut self, step: u64, state: &HashMap<String, Tensor>) -> Result<()> {
-        if step > 0 && self.pending_resume.is_none() {
-            return Err(Error::Load(
-                "SophiaG state: non-zero step resume requires `apply_contract` before `load_state`".into(),
-            ));
-        }
-        if let Some(pending) = &self.pending_resume {
-            if pending.step != step {
-                return Err(Error::Load(format!(
-                    "SophiaG state: step {step} does not match staged contract step {}",
-                    pending.step
-                )));
-            }
-            let same_layout = self.groups.len() == pending.group_names.len()
-                && self.groups.iter().zip(&pending.group_names).zip(&pending.param_names).all(
-                    |((g, gname), pnames)| {
-                        g.name == *gname
-                            && g.params.len() == pnames.len()
-                            && g.params.iter().zip(pnames).all(|((n, _), pn)| n == pn)
-                    },
-                );
-            if !same_layout {
-                return Err(Error::Load(
-                    "SophiaG state: parameter groups changed after `apply_contract`".into(),
-                ));
-            }
-        }
-
-        let mut problems = Vec::new();
-        let mut loaded = Vec::new();
-        let h_updates = self.pending_resume.as_ref().map_or(0, |pr| pr.hessian_updates);
-        for (gi, g) in self.groups.iter().enumerate() {
-            for (pi, (name, p)) in g.params.iter().enumerate() {
-                let p_step = self.pending_resume.as_ref().map_or(step, |pr| pr.param_steps[gi][pi]);
-                if let Some(t) = take_state(state, name, p, "exp_avg", p_step > 0, &mut problems) {
-                    loaded.push((gi, pi, 0usize, t));
-                }
-                if let Some(t) =
-                    take_state(state, name, p, "hessian", p_step > 0 || h_updates > 0, &mut problems)
-                {
-                    let vals = t.to_vec::<f32>()?;
-                    if vals.iter().any(|v| v.is_nan()) {
-                        problems.push(format!("`optim.{name}.hessian` contains NaN values"));
-                    } else {
-                        loaded.push((gi, pi, 1usize, t));
-                    }
-                }
-            }
-        }
-        if !problems.is_empty() {
-            return Err(Error::Load(format!("SophiaG state: {}", problems.join("; "))));
-        }
-
-        let mut fresh = zero_state(&self.groups)?;
-        let _ng = no_grad();
-        for (gi, pi, k, t) in loaded {
-            let ps = &fresh[gi][pi];
-            let dst = if k == 0 { &ps.exp_avg } else { &ps.hessian };
-            dst.copy_from(&t.to_device(dst.device())?)?;
-        }
-        if let Some(pending) = self.pending_resume.take() {
-            for (g, sg) in self.groups.iter_mut().zip(pending.groups) {
-                g.base_lr = sg.base_lr;
-                g.lr = sg.lr;
-                g.base_momentum = sg.base_momentum;
-                g.momentum = sg.momentum;
-                g.beta2 = sg.beta2;
-                g.eps = sg.eps;
-                g.weight_decay = sg.weight_decay;
-            }
-            for (st, psteps) in fresh.iter_mut().zip(pending.param_steps) {
-                for (ps, k) in st.iter_mut().zip(psteps) {
-                    ps.param_step = k;
-                }
-            }
-            self.hessian_updates = pending.hessian_updates;
-            self.last_hessian_step = pending.last_hessian_step;
-            self.rho = pending.rho;
-            self.update_period = pending.update_period;
-            self.auto_gauss_newton = pending.auto_gauss_newton;
-            self.hutchinson_dist = pending.hutchinson_dist;
-            self.rng = Rng::from_state(pending.rng_state).expect("validated in apply_contract");
-        }
-        self.state = fresh;
-        self.step = step;
         Ok(())
     }
 
@@ -843,7 +581,7 @@ impl SophiaG {
     }
 }
 
-fn validate_sophia_global(rho: f64, update_period: u64) -> Result<()> {
+pub(super) fn validate_sophia_global(rho: f64, update_period: u64) -> Result<()> {
     if !(rho.is_finite() && rho > 0.0 && (rho as f32).is_finite() && (rho as f32) > 0.0) {
         return Err(Error::Invalid(format!("sophia: rho must be finite and > 0 in f32, got {rho}")));
     }
@@ -853,7 +591,15 @@ fn validate_sophia_global(rho: f64, update_period: u64) -> Result<()> {
     Ok(())
 }
 
-fn validate_sophia_group(group: &str, lr: f64, b1: f64, b2: f64, eps: f64, wd: f64, rho: f64) -> Result<()> {
+pub(super) fn validate_sophia_group(
+    group: &str,
+    lr: f64,
+    b1: f64,
+    b2: f64,
+    eps: f64,
+    wd: f64,
+    rho: f64,
+) -> Result<()> {
     if !(lr.is_finite() && lr >= 0.0 && (lr as f32).is_finite() && ((lr * rho) as f32).is_finite()) {
         return Err(Error::Invalid(format!(
             "sophia group `{group}`: lr must be finite in f32 and >= 0 with finite lr * rho, got {lr}"
@@ -882,7 +628,7 @@ fn validate_sophia_group(group: &str, lr: f64, b1: f64, b2: f64, eps: f64, wd: f
     Ok(())
 }
 
-fn zero_state(groups: &[ParamGroup]) -> Result<Vec<Vec<ParamState>>> {
+pub(super) fn zero_state(groups: &[ParamGroup]) -> Result<Vec<Vec<ParamState>>> {
     groups
         .iter()
         .map(|g| {
@@ -902,19 +648,19 @@ fn zero_state(groups: &[ParamGroup]) -> Result<Vec<Vec<ParamState>>> {
         .collect()
 }
 
-fn update_hessian_gn_one(h: &Tensor, g: &Tensor, b2: f32, one_m_b2: f32) -> Result<()> {
+fn update_hessian_gn_one(h: &Tensor, g: &Tensor, b2: f32, coeff: f32) -> Result<()> {
     if cpu_fast(&[h]) && g.device().is_cpu() && g.dtype() == DType::F32 && !h.same_storage(g) {
         return g.with_f32_slice(|gs| -> Result<()> {
             h.update_f32(|hs| {
                 for (hi, &gi) in hs.iter_mut().zip(gs) {
-                    *hi = b2 * *hi + one_m_b2 * (gi * gi);
+                    *hi = b2 * *hi + coeff * (gi * gi);
                 }
             })?;
             Ok(())
         })?;
     }
     let g_ref = GradRef::as_f32(g)?;
-    let h_new = h.mul_scalar(b2)?.add(&g_ref.as_tensor().square()?.mul_scalar(one_m_b2)?)?;
+    let h_new = h.mul_scalar(b2)?.add(&g_ref.as_tensor().mul_scalar(coeff.sqrt())?.square()?)?;
     h.copy_from(&h_new)?;
     Ok(())
 }
@@ -994,11 +740,16 @@ fn sophia_step_one(
         })?;
     }
 
+    // Device-generic / aliased fallback with explicit NaN propagation (`maximum_scalar` and `clamp` use
+    // NaN-ignoring IEEE `maxNum`/`minNum`, so preserve NaN entries via `ne(self)` + `where_cond`).
     let g_ref = GradRef::as_f32(g)?;
     let p_base = if let Some(d) = decay { p.mul_scalar(d)? } else { p.clone() };
     let m_new = m.mul_scalar(b1)?.add(&g_ref.as_tensor().mul_scalar(one_m_b1)?)?;
-    let denom = h.maximum_scalar(eps)?;
-    let u = m_new.div(&denom)?.clamp(-rho, rho)?;
+    let h_is_nan = h.ne(h)?;
+    let denom = h_is_nan.where_cond(h, &h.maximum_scalar(eps)?)?;
+    let ratio = m_new.div(&denom)?;
+    let ratio_is_nan = ratio.ne(&ratio)?;
+    let u = ratio_is_nan.where_cond(&ratio, &ratio.clamp(-rho, rho)?)?;
     let p_new = p_base.sub(&u.mul_scalar(lr)?)?;
     p.copy_from(&p_new)?;
     m.copy_from(&m_new)?;

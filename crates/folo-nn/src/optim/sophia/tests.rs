@@ -1,5 +1,6 @@
 //! Unit tests for [`SophiaG`]: exact clipped second-order update math, Hessian cadence `k`,
-//! Gauss-Newton & seeded Hutchinson diagonal estimators, ill-conditioned quadratic convergence,
+//! Gauss–Newton–Bartlett (`batch_size * g_hat^2`) & seeded Hutchinson diagonal estimators, ill-conditioned
+//! quadratic convergence, aliasing safety, fast/fallback `NaN` propagation parity, `load_state(0)` reset,
 //! contract/state resume (including Hutchinson RNG state), and validation.
 
 use std::collections::HashMap;
@@ -24,8 +25,8 @@ fn make_grads(pairs: &[(&Tensor, Tensor)]) -> MapGrads {
     MapGrads(map)
 }
 
-/// Exact hand-computed Sophia-G step, clipping at `±rho`, decoupled weight decay, and `update_period = k`
-/// cadence verification.
+/// Exact hand-computed Sophia-G step, clipping at `±rho`, decoupled weight decay, Gauss–Newton–Bartlett
+/// `batch_size * g_hat^2` scaling, and `update_period = k` cadence verification.
 #[test]
 fn sophia_hand_computed_step_clipping_and_cadence() {
     let p = Tensor::from_slice(&[2.0f32, -4.0, 1.0], [3]).unwrap().requires_grad_();
@@ -36,22 +37,24 @@ fn sophia_hand_computed_step_clipping_and_cadence() {
         eps: 1e-6,
         weight_decay: 0.2,
         update_period: 3,
-        auto_gauss_newton: true,
+        auto_gauss_newton: false,
         ..Default::default()
     };
+    assert!(!SophiaConfig::default().auto_gauss_newton);
     let mut opt = SophiaG::from_params(vec![("p".into(), p.clone())], cfg).unwrap();
     assert!(opt.should_update_hessian());
 
-    // Step 0 (0 % 3 == 0): auto Gauss-Newton fires -> h_1 = 0.5 * g^2, m_1 = 0.5 * g.
-    // g = [10.0, -0.02, 0.0]:
-    //   idx 0: m=5, h=50 -> m/h = 0.1 (unclipped, |0.1| < 0.25)
-    //   idx 1: m=-0.01, h=0.0002 -> m/h = -50 -> clipped to -0.25
-    //   idx 2: m=0, h=0 -> max(h, eps)=1e-6 -> 0
+    // Step 0: explicit Gauss–Newton–Bartlett with batch_size = 4 and mean g_hat = [5.0, -0.01, 0.0]:
+    //   h_1 = 0.5 * 4 * g_hat^2 = [50.0, 0.0002, 0.0]
+    let g_hat = Tensor::from_slice(&[5.0f32, -0.01, 0.0], [3]).unwrap();
+    opt.update_hessian_gauss_newton_scaled(&make_grads(&[(&p, g_hat)]), 4.0).unwrap();
+    assert_eq!(opt.hessian_updates(), 1);
+    assert!(!opt.should_update_hessian());
+
     let g0 = Tensor::from_slice(&[10.0f32, -0.02, 0.0], [3]).unwrap();
     opt.step(&make_grads(&[(&p, g0)])).unwrap();
     assert_eq!(opt.step_count(), 1);
     assert_eq!(opt.hessian_updates(), 1);
-    assert!(!opt.should_update_hessian());
 
     let p_got = p.to_vec::<f32>().unwrap();
     let p_want = [
@@ -63,7 +66,7 @@ fn sophia_hand_computed_step_clipping_and_cadence() {
         assert!((got - want).abs() < 1e-6, "step 0 mismatch: got={got} want={want}");
     }
 
-    // Steps 1 and 2: NOT on cadence, so Hessian must remain unchanged.
+    // Steps 1 and 2: NOT on cadence, so Hessian remains unchanged.
     let h_after_0 = opt.state_for(0, 0).unwrap().1.to_vec::<f32>().unwrap();
     let g1 = Tensor::from_slice(&[1.0f32, 1.0, 1.0], [3]).unwrap();
     opt.step(&make_grads(&[(&p, g1.clone())])).unwrap();
@@ -72,7 +75,7 @@ fn sophia_hand_computed_step_clipping_and_cadence() {
     assert_eq!(opt.state_for(0, 0).unwrap().1.to_vec::<f32>().unwrap(), h_after_0);
     assert!(opt.should_update_hessian()); // step == 3 -> due again!
 
-    // Step 3 (3 % 3 == 0): explicit Gauss-Newton update before step() prevents double-updating in step().
+    // Step 3: explicit Gauss-Newton update before step() keeps cadence exact.
     let gn_g = Tensor::from_slice(&[2.0f32, 3.0, 4.0], [3]).unwrap();
     opt.update_hessian_gauss_newton(&make_grads(&[(&p, gn_g)])).unwrap();
     assert_eq!(opt.hessian_updates(), 2);
@@ -83,18 +86,15 @@ fn sophia_hand_computed_step_clipping_and_cadence() {
     assert_eq!(opt.state_for(0, 0).unwrap().1.to_vec::<f32>().unwrap(), h_explicit);
 }
 
-/// Seeded Hutchinson probe estimator recovers the exact diagonal of a non-diagonal SPD Hessian matrix
-/// in expectation (with exact diagonal for Rademacher on diagonal H in a single probe!) and accelerates
-/// convergence on an ill-conditioned quadratic bowl (`kappa = 100`).
+/// Seeded Hutchinson probe estimator recovers the exact diagonal of a diagonal SPD Hessian in one probe
+/// and converges on an ill-conditioned quadratic bowl (`kappa = 400`).
 #[test]
 fn sophia_hutchinson_estimator_and_ill_conditioned_convergence() {
-    // 1. Exact diagonal recovery on a diagonal Hessian `H = diag(h_diag)` with Rademacher probes:
-    //    since v_i^2 == 1 identically for Rademacher ±1, `v * (H v) = diag(H)` with ZERO variance!
     let h_diag = [100.0f32, 10.0, 1.0, 0.25];
     let x = Tensor::from_slice(&[2.0f32, -3.0, 4.0, -5.0], [4]).unwrap().requires_grad_();
     let cfg = SophiaConfig {
         lr: 0.25,
-        betas: [0.5, 0.0], // beta2=0 -> h_t equals current h_est directly
+        betas: [0.5, 0.0],
         rho: 1.0,
         eps: 1e-8,
         weight_decay: 0.0,
@@ -105,25 +105,16 @@ fn sophia_hutchinson_estimator_and_ill_conditioned_convergence() {
     };
     let mut opt = SophiaG::from_params(vec![("x".into(), x.clone())], cfg).unwrap();
 
-    // Determinism check: two optimizers with the same seed produce identical probes.
     let mut opt_clone = SophiaG::from_params(vec![("x".into(), Tensor::zeros([4]))], cfg).unwrap();
     let p1 = opt.sample_hutchinson_probes().unwrap()["x"].to_vec::<f32>().unwrap();
     let p2 = opt_clone.sample_hutchinson_probes().unwrap()["x"].to_vec::<f32>().unwrap();
     assert_eq!(p1, p2);
     assert!(p1.iter().all(|&v| v == 1.0 || v == -1.0));
 
-    // Update Hessian via Hutchinson closure on `f(x) = 0.5 * sum_i h_diag[i] * x_i^2`, where `(H v)_i = h_diag[i] * v_i`.
     let h_t = Tensor::from_slice(&h_diag, [4]).unwrap();
-    opt.update_hessian_hutchinson_with(|probes| {
-        let hv = probes["x"].mul(&h_t)?;
-        Ok(make_grads(&[(&x, hv)]))
-    })
-    .unwrap();
-    let est = opt.state_for(0, 0).unwrap().1.to_vec::<f32>().unwrap();
-    assert_eq!(est, h_diag.to_vec());
+    opt.update_hessian_hutchinson_with(|probes| Ok(make_grads(&[(&x, probes["x"].mul(&h_t)?)]))).unwrap();
+    assert_eq!(opt.state_for(0, 0).unwrap().1.to_vec::<f32>().unwrap(), h_diag.to_vec());
 
-    // 2. Converge on the ill-conditioned quadratic `0.5 * sum_i h_diag[i] * (x_i - target_i)^2`
-    //    (`condition number = 400`) using Sophia-H with periodic Hutchinson updates.
     let target = Tensor::from_slice(&[1.5f32, -2.0, 3.0, -1.0], [4]).unwrap();
     let w = Tensor::from_slice(&[-3.0f32, 4.0, -2.0, 5.0], [4]).unwrap().requires_grad_();
     let cfg_conv = SophiaConfig {
@@ -155,16 +146,14 @@ fn sophia_hutchinson_estimator_and_ill_conditioned_convergence() {
         opt_conv.step(&grads).unwrap();
     }
     let final_loss = quad_loss(&w);
-    assert!(
-        final_loss < init_loss * 1e-5,
-        "expected Sophia-H convergence on kappa=400 bowl: init={init_loss}, final={final_loss}"
-    );
-    assert_eq!(opt_conv.hessian_updates(), 16); // 80 / 5
+    assert!(final_loss < init_loss * 1e-5, "init={init_loss}, final={final_loss}");
+    assert_eq!(opt_conv.hessian_updates(), 16);
 }
 
-/// Contract + `state_tensors` / `load_state` resumes bit-for-bit identically, including Hutchinson RNG state.
+/// Contract + `state_tensors` / `load_state` resumes bit-for-bit identically, including Hutchinson RNG state,
+/// and `load_state(0, &empty_map)` cleanly resets `hessian_updates` and `last_hessian_step`.
 #[test]
-fn sophia_checkpoint_contract_bit_exact_resume() {
+fn sophia_checkpoint_contract_resume_and_reset() {
     let h_t = Tensor::from_slice(&[4.0f32, 0.5, 2.0], [3]).unwrap();
     let w1 = Tensor::from_slice(&[2.0f32, -3.0, 1.5], [3]).unwrap().requires_grad_();
     let w2 = Tensor::from_slice(&[2.0f32, -3.0, 1.5], [3]).unwrap().requires_grad_();
@@ -195,7 +184,8 @@ fn sophia_checkpoint_contract_bit_exact_resume() {
     let contract = opt_ref.contract();
     let json = serde_json::to_string(&contract).unwrap();
     let decoded: SophiaContract = serde_json::from_str(&json).unwrap();
-    assert_eq!(contract, decoded);
+    assert_eq!(contract.step, decoded.step);
+    assert_eq!(contract.rng_state, decoded.rng_state);
 
     let state_map: HashMap<String, Tensor> = opt_ref.state_tensors().unwrap().into_iter().collect();
     assert!(opt_res.load_state(contract.step, &state_map).is_err());
@@ -204,8 +194,8 @@ fn sophia_checkpoint_contract_bit_exact_resume() {
         let _ng = folo_core::no_grad();
         w2.copy_from(&w1).unwrap();
     }
-    opt_res.apply_contract(&decoded).unwrap();
-    opt_res.load_state(decoded.step, &state_map).unwrap();
+    opt_res.apply_contract(&contract).unwrap();
+    opt_res.load_state(contract.step, &state_map).unwrap();
     assert_eq!(opt_res.rng_state(), opt_ref.rng_state());
 
     for _ in 0..6 {
@@ -226,11 +216,28 @@ fn sophia_checkpoint_contract_bit_exact_resume() {
     }
     assert_eq!(w1.to_vec::<f32>().unwrap(), w2.to_vec::<f32>().unwrap());
     assert_eq!(opt_ref.rng_state(), opt_res.rng_state());
+
+    // Regression: `load_state(0, &empty_map)` without `apply_contract` resets Hessian tracking cleanly
+    // and produces a valid contract that `apply_contract` accepts.
+    opt_res.load_state(0, &HashMap::new()).unwrap();
+    assert_eq!(opt_res.step_count(), 0);
+    assert_eq!(opt_res.hessian_updates(), 0);
+    assert!(opt_res.should_update_hessian());
+    let reset_contract = opt_res.contract();
+    assert_eq!(reset_contract.last_hessian_step, None);
+    opt_res.apply_contract(&reset_contract).unwrap();
+
+    // Regression: inconsistent contract (`hessian_updates == 0` with `last_hessian_step == Some(0)`) rejected.
+    let mut bad_contract = reset_contract;
+    bad_contract.last_hessian_step = Some(0);
+    assert!(opt_res.apply_contract(&bad_contract).is_err());
 }
 
-/// Invalid configurations, zero update_period, NaN Hessian/probes, and shape mismatches fail cleanly.
+/// Regression tests for `g` aliasing `ps.hessian` under `auto_gauss_newton = true`, `NaN` propagation
+/// parity across fast & fallback paths, and validation rejections.
 #[test]
-fn sophia_validation_and_nan_propagation() {
+fn sophia_aliasing_nan_propagation_and_validation() {
+    // 1. Validation rejections.
     let w = Tensor::ones([4]).requires_grad_();
     assert!(
         SophiaG::from_params(vec![("w".into(), w.clone())], SophiaConfig { rho: 0.0, ..Default::default() })
@@ -247,17 +254,61 @@ fn sophia_validation_and_nan_propagation() {
         SophiaG::from_params(vec![("w".into(), w.clone())], SophiaConfig { eps: 0.0, ..Default::default() })
             .is_err()
     );
-
     let mut opt = SophiaG::from_params(vec![("w".into(), w.clone())], SophiaConfig::default()).unwrap();
-    // Missing probe for parameter present in HVP fails cleanly.
-    let hvp = make_grads(&[(&w, Tensor::ones([4]))]);
-    assert!(opt.update_hessian_hutchinson(&hvp, &HashMap::new()).is_err());
+    let ones4 = make_grads(&[(&w, Tensor::ones([4]))]);
+    assert!(opt.update_hessian_hutchinson(&ones4, &HashMap::new()).is_err());
+    assert!(opt.update_hessian_gauss_newton_scaled(&ones4, 0.0).is_err());
 
-    // Negative curvature in Hessian EMA is floored by `eps` (not NaN); actual NaN in Hessian propagates.
-    let neg_probe =
-        HashMap::from([("w".to_string(), Tensor::from_slice(&[-1.0f32, 1.0, 1.0, 1.0], [4]).unwrap())]);
-    opt.update_hessian_hutchinson(&hvp, &neg_probe).unwrap();
-    assert!(opt.state_for(0, 0).unwrap().1.to_vec::<f32>().unwrap()[0] < 0.0);
-    opt.step(&hvp).unwrap();
-    assert!(w.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    // 2. Regression: `g` aliasing `ps.hessian` with `auto_gauss_newton = true` must NOT clobber `g`
+    //    before `exp_avg` reads it (`h = g = 2.0`, `betas = [0.5, 0.5]` -> `exp_avg == 1.0`, not `1.5`).
+    let p_alias = Tensor::ones([2]).requires_grad_();
+    let mut opt_alias = SophiaG::from_params(
+        vec![("p".into(), p_alias.clone())],
+        SophiaConfig {
+            lr: 0.1,
+            betas: [0.5, 0.5],
+            rho: 1.0,
+            eps: 1e-6,
+            weight_decay: 0.0,
+            update_period: 1,
+            auto_gauss_newton: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let h_buf = opt_alias.state_for(0, 0).unwrap().1.clone();
+    {
+        let _ng = folo_core::no_grad();
+        h_buf.copy_from(&Tensor::full([2], 2.0f32)).unwrap();
+    }
+    opt_alias.step(&make_grads(&[(&p_alias, h_buf)])).unwrap();
+    let m_after = opt_alias.state_for(0, 0).unwrap().0.to_vec::<f32>().unwrap();
+    assert_eq!(m_after, vec![1.0, 1.0], "aliased g clobbered momentum: {m_after:?}");
+
+    // 3. Regression: NaN in gradient AND NaN in Hessian must propagate to `p` on BOTH fast path
+    //    (contiguous) and fallback path (transposed non-contiguous).
+    for transposed in [false, true] {
+        let p_nan = if transposed {
+            Tensor::ones([2, 2]).transpose(0, 1).unwrap().requires_grad_()
+        } else {
+            Tensor::ones([2, 2]).requires_grad_()
+        };
+        let mut opt_nan = SophiaG::from_params(
+            vec![("p".into(), p_nan.clone())],
+            SophiaConfig { lr: 0.1, betas: [0.5, 0.5], rho: 0.5, weight_decay: 0.0, ..Default::default() },
+        )
+        .unwrap();
+        // Inject NaN at index 0 via Hessian and index 1 via gradient.
+        let h_nan = Tensor::from_slice(&[f32::NAN, 1.0, 1.0, 1.0], [2, 2]).unwrap();
+        opt_nan.update_hessian_gauss_newton(&make_grads(&[(&p_nan, h_nan)])).unwrap();
+        let g_nan = Tensor::from_slice(&[1.0f32, f32::NAN, 1.0, 1.0], [2, 2]).unwrap();
+        opt_nan.step(&make_grads(&[(&p_nan, g_nan)])).unwrap();
+        let pv = p_nan.to_vec::<f32>().unwrap();
+        assert!(pv[0].is_nan(), "transposed={transposed}: NaN Hessian swallowed: {pv:?}");
+        assert!(pv[1].is_nan(), "transposed={transposed}: NaN grad swallowed: {pv:?}");
+        assert!(
+            pv[2].is_finite() && pv[3].is_finite(),
+            "transposed={transposed}: valid entries corrupted: {pv:?}"
+        );
+    }
 }

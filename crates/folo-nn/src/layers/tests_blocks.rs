@@ -332,7 +332,70 @@ fn vision_blocks_folo_state_dict_round_trip() {
     assert!(report.missing.is_empty());
     assert_eq!(report.loaded.len(), src.named_tensors().len());
 
+    // Forward parity after `.folo` reload.
     let y_src = src.forward(&x).unwrap().to_vec::<f32>().unwrap();
     let y_dst = dst.forward(&x).unwrap().to_vec::<f32>().unwrap();
     assert_eq!(y_src, y_dst);
+}
+
+/// Regression tests for review findings across `ConvNeXtBlock` / `LayerNorm` / `DropBlock2d`:
+/// - `LayerNorm::from_tensors` rejects mismatched weight/bias dtypes,
+/// - `ConvNeXtNormLayer` routes `weight` into `StandardGroups::bn` both standalone and in `Sequential`,
+/// - `gelu_tanh_device` matches `gelu_tanh` and passes finite-difference `grad_check_with` without readback,
+/// - CPU `F16` works in `DropBlock2d` (train & eval) and `ConvNeXtBlock` zero-batch,
+/// - `DropBlock2d` zeros dropped `±Inf` cleanly instead of producing `NaN`.
+#[test]
+fn vision_blocks_f16_norm_wrapper_device_gelu_and_inf_drop_regressions() {
+    use super::convnext::gelu_tanh_device;
+    use super::gelu_tanh;
+    use folo_core::DType;
+
+    // 1. LayerNorm::from_tensors rejects F32 weight + F16 bias.
+    let w32 = Tensor::ones([4]);
+    let b16 = Tensor::zeros([4]).to_dtype(DType::F16).unwrap();
+    assert!(LayerNorm::from_tensors(Some(w32), Some(b16), 4, 1e-6).is_err());
+
+    // 2. ConvNeXtNormLayer standalone & inside Sequential routes weight to `bn` (no decay).
+    let ln_wrap = ConvNeXtNormLayer::Layer(LayerNorm::new(4, 1e-6).unwrap());
+    let sg_direct = StandardGroups::from_module(&ln_wrap);
+    assert_eq!(sg_direct.bn.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["weight"]);
+    assert!(sg_direct.decay.is_empty());
+    let seq =
+        Sequential::new().push_named("n", ConvNeXtNormLayer::Rms(crate::RmsNorm::new(4, 1e-6).unwrap()));
+    let sg_seq = StandardGroups::from_module(&seq);
+    assert_eq!(sg_seq.bn.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(), vec!["n.weight"]);
+    assert!(sg_seq.decay.is_empty());
+
+    // 3. Device-native `gelu_tanh_device` matches `gelu_tanh` across [-30, 30] and grad-checks cleanly.
+    let xs = Tensor::from_slice(&[-30.0f32, -10.0, -2.5, -0.5, 0.0, 0.5, 2.5, 10.0, 30.0], [9]).unwrap();
+    let y_ref = gelu_tanh(&xs).unwrap().to_vec::<f32>().unwrap();
+    let y_dev = gelu_tanh_device(&xs).unwrap().to_vec::<f32>().unwrap();
+    for (a, b) in y_ref.iter().zip(&y_dev) {
+        assert!((a - b).abs() < 1e-4, "gelu_tanh_device mismatch: ref={a} dev={b}");
+    }
+    let gc = GradCheck { eps: 2e-3, atol: 2e-3, rtol: 2e-2, max_checks: 9, seed: 88 };
+    let x_gc = Tensor::randn([2, 4], 0.0, 1.5, &mut Rng::seed(88));
+    grad_check_with(|t| gelu_tanh_device(&t[0]).unwrap().square()?.sum_all(), &[x_gc], &gc).unwrap();
+
+    // 4. CPU F16 DropBlock2d (train + eval) and ConvNeXtBlock zero-batch succeed cleanly.
+    let db = DropBlock2d::try_new(0.25, 3, 123).unwrap();
+    let x16 = Tensor::ones([2, 3, 6, 6]).to_dtype(DType::F16).unwrap();
+    let y16_train = db.forward(&x16).unwrap();
+    assert_eq!((y16_train.dtype(), y16_train.dims()), (DType::F16, &[2, 3, 6, 6][..]));
+    assert!(y16_train.to_dtype(DType::F32).unwrap().to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    db.eval();
+    assert_eq!(db.forward(&x16).unwrap().dtype(), DType::F16);
+
+    let blk =
+        ConvNeXtBlock::new(ConvNeXtConfig::new(4).kernel_size(3).expand_ratio(2), &mut Rng::seed(1)).unwrap();
+    let z16 = Tensor::zeros([0, 4, 3, 5]).to_dtype(DType::F16).unwrap().requires_grad_();
+    let yz16 = blk.forward(&z16).unwrap();
+    assert_eq!((yz16.dtype(), yz16.dims()), (DType::F16, &[0, 4, 3, 5][..]));
+
+    // 5. Dropped ±Inf entries in DropBlock2d become exact 0.0, never NaN.
+    let db_inf = DropBlock2d::try_new(0.5, 3, 7).unwrap();
+    let inf_x = Tensor::full([2, 4, 5, 5], f32::INFINITY);
+    let inf_y = db_inf.forward(&inf_x).unwrap().to_vec::<f32>().unwrap();
+    assert!(inf_y.contains(&0.0), "expected some dropped entries");
+    assert!(inf_y.iter().all(|v| !v.is_nan()), "dropped Inf turned into NaN: {inf_y:?}");
 }

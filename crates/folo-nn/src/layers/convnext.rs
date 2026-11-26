@@ -90,6 +90,22 @@ impl LayerNorm {
                 }
             }
         }
+        if let (Some(w), Some(b)) = (&weight, &bias) {
+            if w.dtype() != b.dtype() {
+                return Err(Error::Invalid(format!(
+                    "LayerNorm: weight dtype {} does not match bias dtype {}",
+                    w.dtype(),
+                    b.dtype()
+                )));
+            }
+            if w.device() != b.device() {
+                return Err(Error::Invalid(format!(
+                    "LayerNorm: weight device {:?} does not match bias device {:?}",
+                    w.device(),
+                    b.device()
+                )));
+            }
+        }
         Ok(Self { weight, bias, dim, eps })
     }
 
@@ -296,17 +312,10 @@ pub enum ConvNeXtNormLayer {
 }
 
 impl Module for ConvNeXtNormLayer {
-    fn visit_tensors(&self, f: &mut dyn FnMut(&str, &Tensor, TensorKind)) {
-        match self {
-            Self::Layer(l) => l.visit_tensors(f),
-            Self::Rms(r) => r.visit_tensors(f),
-        }
-    }
-
     fn visit_children(&self, f: &mut dyn FnMut(&str, &dyn Module)) {
         match self {
-            Self::Layer(l) => l.visit_children(f),
-            Self::Rms(r) => r.visit_children(f),
+            Self::Layer(l) => f("", l),
+            Self::Rms(r) => f("", r),
         }
     }
 }
@@ -424,14 +433,20 @@ impl Forward for ConvNeXtBlock {
             )));
         }
         if n == 0 {
-            return Ok(x.add(&x.mul_scalar(0.0)?)?);
+            let dtype = x.dtype();
+            let dev = x.device();
+            let shape = x.shape().clone();
+            let out_t = Tensor::zeros_with(&shape, dtype, dev)?;
+            return Ok(Tensor::custom_op("convnext_empty", &[x], out_t, move |_g| {
+                Ok(vec![Some(Tensor::zeros_with(&shape, dtype, dev)?)])
+            })?);
         }
 
         let out = self.dwconv.forward(x)?;
         let out = out.permute([0, 2, 3, 1])?.contiguous()?;
         let out = self.norm.forward(&out)?;
         let out = self.pwconv1.forward(&out)?;
-        let out = gelu_tanh(&out)?;
+        let out = if out.device().is_cpu() { gelu_tanh(&out)? } else { gelu_tanh_device(&out)? };
         let out = self.pwconv2.forward(&out)?;
         let out = match &self.layer_scale {
             Some(ls) => ls.forward(&out)?,
@@ -445,4 +460,22 @@ impl Forward for ConvNeXtBlock {
         let out = if out.dtype() != x.dtype() { out.to_dtype(x.dtype())? } else { out };
         Ok(x.add(&out)?)
     }
+}
+
+/// Device-native tanh-GELU (`x * sigmoid(2 * sqrt(2/pi) * (x + 0.044715 * x^3))`) using pure on-device
+/// tensor ops with zero host readback (safe on browser WebGPU as well as native GPU / CPU).
+pub(super) fn gelu_tanh_device(x: &Tensor) -> Result<Tensor> {
+    if x.dtype() == DType::F16 {
+        return Ok(gelu_tanh_device(&x.to_dtype(DType::F32)?)?.to_dtype(DType::F16)?);
+    }
+    // Clamp only inside sigmoid's argument so `x^3` never overflows for large |x| while keeping
+    // `sigmoid(2u) = 1.0` for `x > 12` and `0.0` for `x < -12` (since `sigmoid(-142.3) == 0.0f32`).
+    let xc = x.clamp(-12.0, 12.0)?;
+    let two_sqrt_2_over_pi = (2.0 * (2.0 / std::f64::consts::PI).sqrt()) as f32;
+    let two_u =
+        xc.mul(&xc.square()?.mul_scalar(0.044_715)?.add_scalar(1.0)?)?.mul_scalar(two_sqrt_2_over_pi)?;
+    let gate = two_u.sigmoid()?;
+    let y = x.mul(&gate)?;
+    let is_nan = x.ne(x)?;
+    Ok(is_nan.where_cond(x, &y)?)
 }

@@ -181,19 +181,18 @@ impl Forward for DropBlock2d {
         }
 
         let scale = if kept == 0 { 0.0f32 } else { (numel as f64 / kept as f64) as f32 };
-        if scale != 1.0 {
-            for v in &mut mask {
-                if *v != 0.0 {
-                    *v = scale;
-                }
-            }
-        }
-
-        let mask_t = Tensor::from_vec(mask, [n, c, h, w])?.to_device(x.device())?;
-        if x.dtype() == DType::F16 && scale > 65_504.0 {
-            return Ok(x.to_dtype(DType::F32)?.mul(&mask_t)?.to_dtype(DType::F16)?);
-        }
-        let mask_t = if mask_t.dtype() != x.dtype() { mask_t.to_dtype(x.dtype())? } else { mask_t };
-        Ok(x.mul(&mask_t)?)
+        let keep_mask = Tensor::from_vec(mask, [n, c, h, w])?.to_device(x.device())?.gt_scalar(0.0)?;
+        let x_f32 = if x.dtype() == DType::F16 { x.to_dtype(DType::F32)? } else { x.clone() };
+        let zeros = Tensor::zeros_with([n, c, h, w], DType::F32, x.device())?;
+        // Select `0.0` directly via `where_cond` instead of multiplying by `0.0` so dropped `±Inf` values
+        // become exact `0.0` rather than `NaN`. Widening `F16` to `F32` also supports CPU `F16` tensors
+        // and prevents `F16::MAX` overflow when `scale > 65_504.0`.
+        let out_f32 = if kept == 0 {
+            keep_mask.where_cond(&x_f32, &zeros)?
+        } else {
+            let scaled = if scale == 1.0 { x_f32 } else { x_f32.mul_scalar(scale)? };
+            keep_mask.where_cond(&scaled, &zeros)?
+        };
+        if x.dtype() == DType::F16 { Ok(out_f32.to_dtype(DType::F16)?) } else { Ok(out_f32) }
     }
 }
