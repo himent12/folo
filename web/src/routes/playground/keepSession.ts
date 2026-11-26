@@ -2,7 +2,8 @@
 // written into the URL (replacing the entry, a moment after the last change, so a slider drag is one write). The URL
 // is followed while the page is open, too: an edited URL, Back or Forward, a link from the Playground to itself.
 
-import { effect, signal, untrack, type Signal } from 'fw';
+import { effect, onCleanup, signal, untrack, type Signal } from 'fw';
+import { ApiError } from '$lib/api/client';
 import type { Prediction } from '$lib/api/types';
 import { router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
@@ -61,10 +62,20 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
 
   // A linked image being looked up is a choice like any other: it shows only if nothing was chosen after it. Until
   // then the URL goes on naming it, not the image still on screen. A newer link or leaving the page cancels it.
+  // A transient lookup error (not 404) keeps the image ref in the URL until the user picks another image, so a reload
+  // can retry after the outage.
   const linking = signal<{ ref: ImageRef; live: () => boolean } | null>(null);
+  const failedLink = signal<{ ref: ImageRef; live: () => boolean } | null>(null);
+  const activeImageRef = (peek: boolean): ImageRef | null => {
+    const l = peek ? linking.peek() : linking.get();
+    if (l?.live()) return l.ref;
+    const f = peek ? failedLink.peek() : failedLink.get();
+    return f?.live() ? f.ref : null;
+  };
   let lookup: AbortController | null = null;
   function follow(ref: ImageRef) {
     lookup?.abort();
+    failedLink.set(null);
     const ctrl = (lookup = new AbortController());
     const link = { ref, live: k.choose() };
     linking.set(link);
@@ -80,10 +91,18 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
           if (found) k.setSource({ kind: 'dataset', ...found });
           else toast.info('The linked image was not found', 'It is no longer in its dataset. Pick another image.');
         }),
-      () => settle(() => toast.info('The linked image could not be loaded', 'Its dataset may have been removed. Pick another image.')),
+      (e: unknown) =>
+        settle(() => {
+          const gone = e instanceof ApiError && e.status === 404;
+          if (!gone) failedLink.set(link);
+          toast.info(
+            'The linked image could not be loaded',
+            gone ? 'Its dataset may have been removed. Pick another image.' : 'Reload to try again, or pick another image.',
+          );
+        }),
     );
   }
-  effect(() => () => lookup?.abort());
+  onCleanup(() => lookup?.abort());
 
   let reuse: string | null = null;
   const kept = saved?.source ?? null;
@@ -108,11 +127,21 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
     k.iou.set(u.iou ?? DEFAULTS.iou);
     k.maxDet.set(u.maxDet ?? DEFAULTS.maxDet);
     const ref = u.image;
-    if (!ref) return;
+    const cancelLink = () => {
+      lookup?.abort();
+      lookup = null;
+      linking.set(null);
+      failedLink.set(null);
+    };
+    if (!ref) {
+      cancelLink();
+      return;
+    }
     const s = k.source.peek();
     const l = linking.peek();
     const shown = s?.kind === 'dataset' && s.ds.id === ref.dataset && s.img.id === ref.image;
     const coming = l?.live() && l.ref.dataset === ref.dataset && l.ref.image === ref.image;
+    if (shown) cancelLink();
     if (!shown && !coming) follow(ref);
   }
 
@@ -132,13 +161,12 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
   k.onModelUrl?.((id) => {
     // Apply any pending external route change first (followVanished can run before our route effect).
     syncFromRoute(true);
-    const r = router.route;
-    if (r.name !== 'playground') return;
-    const liveLink = linking.peek();
-    const imageRef = liveLink?.live() ? liveLink.ref : null;
-    const path = playgroundPath({ model: id, source: k.source.peek(), imageRef, conf: k.conf.peek(), iou: k.iou.peek(), maxDet: k.maxDet.peek() });
-    const qs = String(r.query);
-    if (`${r.path}${qs ? `?${qs}` : ''}` === path) return;
+    // Check router.location (not router.route) so a lazy destination chunk holding the displayed route is never cancelled.
+    const loc = router.location;
+    if (loc.name !== 'playground') return;
+    const path = playgroundPath({ model: id, source: k.source.peek(), imageRef: activeImageRef(true), conf: k.conf.peek(), iou: k.iou.peek(), maxDet: k.maxDet.peek() });
+    const qs = String(loc.query);
+    if (`${loc.path}${qs ? `?${qs}` : ''}` === path) return;
     wrote = path;
     router.go(path, { replace: true });
   });
@@ -163,14 +191,24 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string) 
     session.set(next);
   });
 
-  // Into the URL, once the changes stop for a moment; never after the page is left.
+  // Into the URL, once the changes stop for a moment; never after the page is left (including while a destination chunk loads).
   effect(() => {
-    const path = playgroundPath({ model: k.model(), source: k.source.get(), conf: k.conf.get(), iou: k.iou.get(), maxDet: k.maxDet.get() });
-    if (linking.get()?.live()) return;
+    const liveLink = linking.get();
+    const path = playgroundPath({
+      model: k.model(),
+      source: k.source.get(),
+      imageRef: activeImageRef(false),
+      conf: k.conf.get(),
+      iou: k.iou.get(),
+      maxDet: k.maxDet.get(),
+    });
+    if (liveLink?.live()) return;
     const timer = setTimeout(
       () =>
         untrack(() => {
-          if (router.route.name !== 'playground' || location.hash === `#${path}`) return;
+          const loc = router.location;
+          const qs = String(loc.query);
+          if (loc.name !== 'playground' || `${loc.path}${qs ? `?${qs}` : ''}` === path) return;
           wrote = path;
           router.go(path, { replace: true });
         }),

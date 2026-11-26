@@ -100,6 +100,7 @@ export default function LabelJob() {
 
   /** Changes query params (null removes one): `push` adds a history entry; `replaceOnly` forces in-place replace. */
   function setQuery(patch: Record<string, string | null>, push = false, replaceOnly = false) {
+    if (router.location.name !== 'label-job' || router.location.params.id !== id.peek()) return;
     const before = router.route.query.toString();
     const q = new URLSearchParams(router.route.query);
     for (const [k, v] of Object.entries(patch)) {
@@ -135,6 +136,7 @@ export default function LabelJob() {
   effect(() => {
     const want = imageParam.get();
     if (!want || backingEntry === router.entry || live.loading || live.error || live.images.some((i) => i.id === want)) return;
+    if (router.location.name !== 'label-job' || router.location.params.id !== id.peek()) return;
     untrack(() => {
       // page-level: the editor never opened for it.
       toast.info('Image not in this job', `${want} has been removed from it.`);

@@ -2,10 +2,13 @@
 import { flush as flushSync, signal } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
+import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
+import { toast } from '$lib/ui/toast';
 import Playground from '../Playground';
+import { URL_DELAY_MS } from './keepSession';
 import { session } from './session';
 import ZoomStage, { clampPan, zoomToward } from './ZoomStage';
 
@@ -386,5 +389,105 @@ describe('Playground: confidence summary and quick JSON copy', () => {
     expect(router.route.query.get('conf')).toBe('0.6');
     releaseSecond();
     await until(() => target.querySelector('.stage img')?.getAttribute('alt')?.includes(secondImg.file), 'second linked image shown');
+  });
+
+  it('does not cancel navigation to another route when a delayed threshold URL write fires during router.holdWhile', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_s');
+    mounted = render(() => <Playground />, target);
+    const slider = await until(() => target.querySelector<HTMLInputElement>('.slider input[type="range"]'), 'confidence slider');
+    slider.value = '0.30';
+    slider.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+
+    // Hold displayed route on playground (as App.tsx does while /settings chunk loads) and navigate to /settings within 300ms.
+    const release = router.holdWhile((to) => to.name === 'settings');
+    try {
+      router.go('/settings');
+      flushSync();
+      expect(router.location.path).toBe('/settings');
+      expect(router.route.name).toBe('playground');
+
+      await new Promise((r) => setTimeout(r, URL_DELAY_MS + 100));
+      flushSync();
+      expect(router.location.path).toBe('/settings');
+    } finally {
+      release();
+    }
+  });
+
+  it('retains a deep-linked image in the URL on transient 503 failure, drops it on Back without image, and clears it on 404', async () => {
+    toast.items = [];
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    const dss = await api.datasets();
+    const firstDs = dss[0]!;
+    const page = await api.datasetImages(firstDs.id, { split: 'val', limit: 1 });
+    const firstImg = page.images[0]!;
+    const origImages = api.datasetImages.bind(api);
+    let failKind: '503' | '404' | null = '503';
+    api.datasetImages = async (id, params) => {
+      if (params?.limit === 1 && failKind === '503') throw new ApiError(503, 'unavailable', 'server busy');
+      if (params?.limit === 1 && failKind === '404') throw new ApiError(404, 'not_found', 'missing dataset');
+      return origImages(id, params);
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    const deepLink = `#/playground?model=m_hard_s&dataset=${firstDs.id}&image=${firstImg.id}&split=val&at=0&conf=0.7`;
+    router.route = parse(deepLink);
+    mounted = render(() => <Playground />, target);
+
+    await until(() => toast.items.some((t) => t.title.includes('could not be loaded')), '503 toast');
+    await new Promise((r) => setTimeout(r, URL_DELAY_MS + 100));
+    flushSync();
+    // Transient 503 must keep dataset/image/split/at/conf in the URL so reload can retry.
+    expect(router.location.query.get('dataset')).toBe(firstDs.id);
+    expect(router.location.query.get('image')).toBe(firstImg.id);
+    expect(router.location.query.get('split')).toBe('val');
+    expect(router.location.query.get('at')).toBe('0');
+    expect(router.location.query.get('conf')).toBe('0.7');
+
+    // Navigating back to a plain Playground URL without an image must not re-inject the failed link.
+    router.go('/playground?model=m_hard_s', { replace: true });
+    await new Promise((r) => setTimeout(r, URL_DELAY_MS + 100));
+    flushSync();
+    expect(router.location.query.get('dataset')).toBeNull();
+    expect(router.location.query.get('image')).toBeNull();
+
+    // A confirmed 404 still cleans the vanished image params out of the URL.
+    toast.items = [];
+    failKind = '404';
+    router.go(`/playground?model=m_hard_s&dataset=${firstDs.id}&image=${firstImg.id}&split=val&at=0`, { replace: true });
+    await until(() => toast.items.some((t) => t.title.includes('could not be loaded')), '404 toast');
+    await new Promise((r) => setTimeout(r, URL_DELAY_MS + 100));
+    flushSync();
+    expect(router.location.query.get('dataset')).toBeNull();
+    expect(router.location.query.get('image')).toBeNull();
+
+    // Returning to a plain Playground URL while a linked-image lookup is still pending must abort it so a late 503 cannot restore it.
+    toast.items = [];
+    let rejectLate!: (e: unknown) => void;
+    api.datasetImages = (id, params) => {
+      if (params?.limit === 1) return new Promise((_, rej) => (rejectLate = rej));
+      return origImages(id, params);
+    };
+    router.go(`/playground?model=m_hard_s&dataset=${firstDs.id}&image=${firstImg.id}&split=val&at=0`, { replace: true });
+    await until(() => !!rejectLate, 'pending linked-image lookup');
+    router.go('/playground?model=m_hard_s', { replace: true });
+    flushSync();
+    rejectLate(new ApiError(503, 'unavailable', 'late 503'));
+    await new Promise((r) => setTimeout(r, URL_DELAY_MS + 100));
+    flushSync();
+    expect(router.location.query.get('dataset')).toBeNull();
+    expect(router.location.query.get('image')).toBeNull();
+    expect(toast.items).toEqual([]);
   });
 });

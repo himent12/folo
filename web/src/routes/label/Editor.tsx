@@ -134,6 +134,7 @@ export default function Editor(props: EditorProps) {
   // This image's edits, for Undo and Redo; `rev` tells the buttons it changed.
   let disposed = false;
   onCleanup(() => (disposed = true));
+  const atImage = (jobId: string, id: string) => { const r = router.location; return r.name === 'label-job' && r.params.id === jobId && r.query.get('image') === id; };
   const history = new History<Box[]>();
   const rev = signal(0);
   const undoCount = computed(() => (rev.get(), history.past.length));
@@ -363,6 +364,7 @@ export default function Editor(props: EditorProps) {
   async function review(reviewed: boolean) {
     const cur = img.peek();
     if (!cur || reviewing.peek()) return;
+    const jobId = props.job.id;
     // Read before the answer: under "To review" the image leaves the filter once it is reviewed.
     const next = reviewed ? nextToReview(cur.id) : null;
     // The mark is for the labels on screen (the newest image's, as in `save`): once the image has others, the server
@@ -372,10 +374,10 @@ export default function Editor(props: EditorProps) {
     reviewing.set(true);
     status.clear();
     try {
-      const saved = await hub.api.reviewLabelImage(props.job.id, cur.id, reviewed, expect);
+      const saved = await hub.api.reviewLabelImage(jobId, cur.id, reviewed, expect);
       props.live.put([saved], mark);
       if (disposed || shownId !== cur.id || !reviewed) return;
-      if (next && router.route.name === 'label-job' && router.route.params.id === props.job.id && router.route.query.get('image') === cur.id) props.onnavigate(next);
+      if (next && atImage(jobId, cur.id)) props.onnavigate(next);
       else if (!next) status.success('Reviewed', 'Every labeled image here is reviewed.');
     } catch (e) {
       if (!changedElsewhere(e)) { if (!disposed && shownId === cur.id) status.error(e, 'Could not mark the image'); } else if (!disposed) await reload(cur.id);
@@ -401,8 +403,9 @@ export default function Editor(props: EditorProps) {
   async function saveAndNext() {
     const cur = img.peek();
     if (!cur) return;
+    const jobId = props.job.id;
     const next = nextToReview(cur.id);
-    if ((await save()) && !disposed && shownId === cur.id && next && router.route.name === 'label-job' && router.route.params.id === props.job.id && router.route.query.get('image') === cur.id) props.onnavigate(next);
+    if ((await save()) && !disposed && shownId === cur.id && next && atImage(jobId, cur.id)) props.onnavigate(next);
   }
 
   // ---------- leaving with changes ----------
@@ -411,6 +414,7 @@ export default function Editor(props: EditorProps) {
    * (`proceed`: a link, Back, the palette, another `?image=`), which goes on after Save or Discard and is dropped on Cancel.
    */
   const leaving = signal<{ to: string | null; proceed?: () => void } | null>(null);
+  const leaveSaving = signal(false);
   const unsaved = () => !!img.peek() && dirty.peek() && !locked.peek();
   function go(to: string | null) {
     if (unsaved()) leaving.set({ to });
@@ -418,10 +422,19 @@ export default function Editor(props: EditorProps) {
   }
   async function answer(keep: 'save' | 'discard') {
     const ask = leaving.peek();
-    if (!ask) return;
-    if (keep === 'save' && (!(await save()) || leaving.peek() !== ask)) {
-      if (leaving.peek() === ask) leaving.set(null);
-      return;
+    if (!ask || leaveSaving.peek()) return;
+    if (keep === 'save') {
+      leaveSaving.set(true);
+      let ok = false;
+      try {
+        ok = await save();
+      } finally {
+        leaveSaving.set(false);
+      }
+      if (!ok || leaving.peek() !== ask) {
+        if (leaving.peek() === ask) leaving.set(null);
+        return;
+      }
     }
     leaving.set(null);
     draft.set(base.peek());
@@ -551,9 +564,7 @@ export default function Editor(props: EditorProps) {
   const removeStatus = new DialogStatus();
   function openRemove() {
     const cur = img.peek();
-    if (!cur) return;
-    removeStatus.clear();
-    removing.set({ jobId: props.job.id, id: cur.id, file: cur.file });
+    if (cur) { removeStatus.clear(); removing.set({ jobId: props.job.id, id: cur.id, file: cur.file }); }
   }
   async function remove() {
     const target = removing.peek();
@@ -565,8 +576,7 @@ export default function Editor(props: EditorProps) {
       await hub.api.deleteLabelImage(target.jobId, target.id);
       if (disposed) return;
       if (props.job.id === target.jobId) props.live.drop(target.id);
-      const r = router.route;
-      if (shownId === target.id && props.job.id === target.jobId && open.peek() && r.name === 'label-job' && r.params.id === target.jobId && r.query.get('image') === target.id) {
+      if (shownId === target.id && props.job.id === target.jobId && open.peek() && atImage(target.jobId, target.id)) {
         draft.set(base.peek());
         removing.set(null);
         props.onnavigate(next && next.id !== target.id ? next.id : null);
@@ -600,44 +610,27 @@ export default function Editor(props: EditorProps) {
           <>
             {dirty.get() ? (
               <p class="state" data-gate-why>
-                Unsaved changes
-                {touch.current ? null : (
-                  <>
-                    . <Kbd keys="Enter" subtle /> saves them and opens the next image to review.
-                  </>
-                )}
+                Unsaved changes{touch.current ? null : <>. <Kbd keys="Enter" subtle /> saves them and opens the next image to review.</>}
               </p>
             ) : savable.get() && !locked.get() ? (
               <p class="state">Save keeps it as labeled by hand, {draft.get().length ? 'with these boxes' : 'with no boxes: a background image'}.</p>
             ) : reviewable.get() ? (
-              <p class="state">
-                Labels right? {touch.current ? 'Looks right' : <Kbd keys="Enter" subtle />} marks them reviewed and opens the next image to review.
-              </p>
+              <p class="state">Labels right? {touch.current ? 'Looks right' : <Kbd keys="Enter" subtle />} marks them reviewed and opens the next image to review.</p>
             ) : img.get()?.reviewed && !locked.get() ? (
               <p class="state">Reviewed. Edit and save to change the labels.</p>
             ) : !locked.get() ? (
-              <p class="state" data-gate-why>
-                No changes yet
-              </p>
+              <p class="state" data-gate-why>No changes yet</p>
             ) : null}
-            <Button variant="ghost" disabled={!dirty.get() || !!locked.get() || saving.get()} onclick={discard}>
-              Discard
-            </Button>
+            <Button variant="ghost" disabled={!dirty.get() || !!locked.get() || saving.get()} onclick={discard}>Discard</Button>
             {img.get()?.reviewed && !dirty.get() && !locked.get() ? (
-              <Button variant="ghost" loading={reviewing.get()} onclick={() => review(false)}>
-                Mark not reviewed
-              </Button>
+              <Button variant="ghost" loading={reviewing.get()} onclick={() => review(false)}>Mark not reviewed</Button>
             ) : null}
             {reviewable.get() ? (
-              <Button variant="primary" icon={Check} loading={reviewing.get()} onclick={() => review(true)}>
-                Looks right
-              </Button>
+              <Button variant="primary" icon={Check} loading={reviewing.get()} onclick={() => review(true)}>Looks right</Button>
             ) : (
               <Gate reason={locked.get() ? 'The image is with the agent' : savable.get() ? null : 'No changes yet'}>
                 {(why) => (
-                  <Button variant="primary" loading={saving.get()} disabled={!!why()} aria-describedby={why()} onclick={save}>
-                    Save
-                  </Button>
+                  <Button variant="primary" loading={saving.get()} disabled={!!why()} aria-describedby={why()} onclick={save}>Save</Button>
                 )}
               </Gate>
             )}
@@ -789,7 +782,7 @@ export default function Editor(props: EditorProps) {
         onclose={() => leaving.set(null)}
         footer={() => (
           <>
-            <Button onclick={() => answer('discard')}>Discard changes</Button>
+            <Button disabled={leaveSaving.get()} onclick={() => answer('discard')}>Discard changes</Button>
             <Button variant="primary" loading={saving.get()} onclick={() => answer('save')}>Save</Button>
           </>
         )}
