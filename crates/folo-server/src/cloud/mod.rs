@@ -222,10 +222,15 @@ impl Core {
     }
 
     /// The `409 connection_in_use` of connection `id`, when one of its instances is alive or one of its runs active
-    /// (from the run folders, so a run of another process counts too).
+    /// (from the run folders, so a run of another process counts too). Called while `Connections::remove` holds
+    /// `cloud/.lock`, so the ledger is read without taking that lock again to prune.
     fn in_use(&self, id: &str) -> Result<()> {
-        let live =
-            self.ledger.list().into_iter().filter(|i| i.connection_id == id && i.status.is_alive()).count();
+        let live = self
+            .ledger
+            .list_without_pruning()
+            .into_iter()
+            .filter(|i| i.connection_id == id && i.status.is_alive())
+            .count();
         let runs = active_runs(&self.data_dir.join("runs"), id);
         if live == 0 && runs.is_empty() {
             return Ok(());
@@ -538,5 +543,78 @@ mod tests {
         assert!(hint(folo_cloud::ErrorKind::Unavailable, true).contains("provider's API"));
         let remote = hint(folo_cloud::ErrorKind::Unavailable, false);
         assert!(remote.contains("the server runs") && !remote.contains("provider"), "{remote}");
+    }
+
+    #[test]
+    fn disconnect_does_not_deadlock_when_expired_ended_instance_exists() {
+        use folo_api::{CloudAvailability, CloudField, CloudInstanceStatus, CloudOffer, CloudProvider};
+        use folo_cloud::{Account, Values};
+
+        struct StubProvider;
+        impl Provider for StubProvider {
+            fn info(&self) -> CloudProvider {
+                CloudProvider {
+                    id: "stub".into(),
+                    name: "Stub".into(),
+                    about: String::new(),
+                    docs_url: None,
+                    fields: vec![CloudField {
+                        key: "api_key".into(),
+                        label: "Key".into(),
+                        secret: true,
+                        required: true,
+                        placeholder: None,
+                        help: None,
+                    }],
+                    provisions: true,
+                    self_terminates: false,
+                }
+            }
+            fn check(&self, _: &Values) -> folo_cloud::Result<Account> {
+                Ok(Account::default())
+            }
+            fn offers(&self, _: &Values) -> folo_cloud::Result<Vec<CloudOffer>> {
+                Ok(Vec::new())
+            }
+        }
+
+        let dir = folo_test_support::TestDir::new("cloud-disconnect-expired");
+        let cloud = Arc::new(Cloud::with(&dir, vec![Arc::new(StubProvider)], Tuning::default()));
+        let values = [("api_key".to_string(), "key-0123456789".to_string())].into_iter().collect();
+        let conn =
+            cloud.connect(ConnectCloud { provider: "stub".into(), name: String::new(), values }).unwrap();
+        let offer = CloudOffer {
+            id: "o".into(),
+            gpu: "G".into(),
+            gpu_count: 1,
+            vram_bytes: 0,
+            price_per_hour: None,
+            region: None,
+            detail: None,
+            availability: CloudAvailability::High,
+        };
+        let inst = cloud.core.ledger.create(&conn.id, "stub", "run_old", &offer, None, None).unwrap();
+        let expired_at = rfc3339(unix_now() - KEEP_ENDED.as_secs_f64() - 60.0);
+        cloud
+            .core
+            .ledger
+            .update(&inst.id, |i| {
+                i.status = CloudInstanceStatus::Terminated;
+                i.ended = Some(expired_at.clone());
+            })
+            .unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c = cloud.clone();
+        let id = conn.id.clone();
+        let handle = std::thread::spawn(move || {
+            let _ = tx.send(c.disconnect(&id));
+        });
+        let res = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("disconnect deadlocked on cloud/.lock while pruning an expired ended instance");
+        handle.join().unwrap();
+        res.unwrap();
+        assert!(cloud.connections().unwrap().is_empty());
     }
 }

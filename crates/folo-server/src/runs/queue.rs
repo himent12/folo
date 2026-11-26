@@ -315,7 +315,6 @@ impl Runs {
         if st.deleted {
             return Err(Error::not_found("run", id));
         }
-        st.interrupted |= interrupted;
         let cloud = st.file.run.config.compute.is_some();
         if cloud && st.file.run.status.is_active() && !st.claimed {
             return Err(followed_elsewhere(id));
@@ -330,13 +329,26 @@ impl Runs {
                         Self::notify_queue(&q);
                     }
                 }
-                e.finish(&mut st, RunStatus::Stopped, None);
+                e.finish_with_code(
+                    &mut st,
+                    RunStatus::Stopped,
+                    None,
+                    interrupted.then(|| INTERRUPTED.to_string()),
+                );
                 let run = st.file.shown();
                 drop(st);
-                e.log(LogLevel::Info, "stopped before it started");
+                if interrupted {
+                    e.log(
+                        LogLevel::Warn,
+                        "the server stopped while the run waited in the queue; start it from its page in Studio",
+                    );
+                } else {
+                    e.log(LogLevel::Info, "stopped before it started");
+                }
                 Ok(run)
             }
             RunStatus::Queued | RunStatus::Running => {
+                st.interrupted |= interrupted;
                 e.stop.store(true, Ordering::Relaxed);
                 st.file.run.status = RunStatus::Stopping;
                 e.persist(&st);
@@ -414,4 +426,64 @@ pub(crate) fn followed_elsewhere(id: &str) -> Error {
 fn shutting_down() -> Error {
     Error::new(StatusCode::SERVICE_UNAVAILABLE, "shutting_down", "the server is shutting down")
         .hint("start the run again once the server has restarted")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::throughput::Throughput;
+
+    fn test_runs(name: &str) -> (folo_test_support::TestDir, Arc<Runs>) {
+        let dir = folo_test_support::TestDir::new(name);
+        let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+        (dir, runs)
+    }
+
+    fn register_run(runs: &Runs, name: &str) -> Arc<RunEntry> {
+        let config: TrainConfig =
+            serde_json::from_str(&format!(r#"{{"dataset_id":"ds_1","name":"{name}"}}"#)).unwrap();
+        let dataset = DatasetRef {
+            id: "ds_1".into(),
+            name: "d".into(),
+            path: "nowhere".into(),
+            format: folo_api::DatasetFormat::Yolo,
+            classes: vec![],
+        };
+        runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap()
+    }
+
+    #[test]
+    fn shutdown_preserves_client_stop_and_marks_unclaimed_active_run_interrupted() {
+        // 1. A run already stopped by a client (`Stopping`) must NOT become `interrupted` when shutdown arrives
+        //    before its current batch completes.
+        let (_dir1, runs1) = test_runs("runs-stop-client-vs-shutdown");
+        let e1 = register_run(&runs1, "client-stop");
+        {
+            let mut st = e1.state.lock().unwrap();
+            st.claimed = true;
+            st.file.run.status = RunStatus::Running;
+        }
+        *runs1.active.lock().unwrap() = Some(e1.clone());
+
+        let stopping = runs1.stop(e1.id()).unwrap();
+        assert_eq!(stopping.status, RunStatus::Stopping);
+        runs1.shutdown(None);
+        e1.execute(|| {
+            e1.set_outcome(RunStatus::Stopped, None, None);
+            Ended::Finished
+        });
+        let done1 = e1.run();
+        assert_eq!(done1.status, RunStatus::Stopped);
+        assert_eq!(done1.error_code, None, "client-stopped run must keep error_code=None across shutdown");
+
+        // 2. A run popped into `active` by the worker (waiting on `gate`, still `Queued` & unclaimed) must be
+        //    marked `interrupted` when shutdown stops it.
+        let (_dir2, runs2) = test_runs("runs-shutdown-unclaimed-active");
+        let e2 = register_run(&runs2, "popped-active");
+        *runs2.active.lock().unwrap() = Some(e2.clone());
+        runs2.shutdown(None);
+        let done2 = e2.run();
+        assert_eq!(done2.status, RunStatus::Stopped);
+        assert_eq!(done2.error_code.as_deref(), Some(INTERRUPTED));
+    }
 }

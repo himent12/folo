@@ -171,10 +171,16 @@ impl Engine {
         *self.device.lock().unwrap() = device;
     }
 
-    /// Queues a model entry.
-    pub fn push(&self, job: Job) {
-        self.queue.lock().unwrap().push_back(job);
+    /// Queues a model entry, or returns `Err(job)` if shutdown has started (synchronized under the queue lock
+    /// with [`Engine::wake`] and [`Engine::drain`] so a concurrent submission cannot be queued after shutdown).
+    pub fn push(&self, job: Job) -> std::result::Result<(), Job> {
+        let mut q = self.queue.lock().unwrap();
+        if self.closing.load(Ordering::SeqCst) {
+            return Err(job);
+        }
+        q.push_back(job);
         self.ready.notify_all();
+        Ok(())
     }
 
     /// Takes entry `entry` of benchmark `bench` out of the queue, when it still waits there, returning the job so

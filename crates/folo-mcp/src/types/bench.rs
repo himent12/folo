@@ -174,6 +174,10 @@ pub struct BenchEntryState {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
     pub result: Option<BenchScoreResult>,
+    /// Headline score returned directly on `BenchEntry` (used by [`BenchEntryBrief`] even if fetching the
+    /// detailed `/result` breakdown failed after `/finish`).
+    #[serde(skip)]
+    pub(crate) summary_score: Option<f32>,
 }
 
 /// A finished entry's score, the numbers behind each axis, and one row per condition.
@@ -287,7 +291,7 @@ impl From<BenchEntryState> for BenchEntryBrief {
             status: s.status,
             done: s.done,
             total: s.total,
-            score: s.result.map(|r| r.score),
+            score: s.result.map(|r| r.score).or(s.summary_score),
         }
     }
 }

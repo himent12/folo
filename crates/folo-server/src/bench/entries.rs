@@ -45,14 +45,21 @@ pub(super) fn enqueue_model(
     let cancel = Arc::new(AtomicBool::new(false));
     add_entry(slot, &mut state, entry.clone(), cancel.clone(), None, None)?;
     drop(state);
-    engine.push(Job {
+    if let Err(job) = engine.push(Job {
         slot: slot.clone(),
         entry: entry.id.clone(),
         model: resolved.spec,
         images,
         conditions,
         cancel,
-    });
+    }) {
+        model::finish_entry(&job.slot, &job.entry, true, Ok(None));
+        return Ok(slot
+            .live()
+            .ok()
+            .and_then(|s| s.entry(&entry.id).ok().map(|e| e.entry.clone()))
+            .unwrap_or(entry));
+    }
     Ok(entry)
 }
 
@@ -98,8 +105,11 @@ pub(super) fn stop_entry_in(engine: &Engine, slot: &Slot, id: &str) -> Result<Be
         entry.finished = Some(rfc3339(unix_now()));
     }
     if let Err(err) = slot.save_entry(&state, &entry, None) {
-        if let Some(job) = unqueued {
-            engine.push(job);
+        if let Some(job) = unqueued
+            && let Err(job) = engine.push(job)
+        {
+            drop(state);
+            model::finish_entry(&job.slot, &job.entry, true, Ok(None));
         }
         return Err(err);
     }

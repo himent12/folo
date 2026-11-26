@@ -369,6 +369,10 @@ impl Benches {
         for t in engine_threads.into_iter().filter(|t| t.thread().id() != me) {
             let _ = t.join();
         }
+        // Drain again in case a loop thread enqueued a model entry just before observing `closing`.
+        for job in self.engine.drain() {
+            model::finish_entry(&job.slot, &job.entry, true, Ok(None));
+        }
     }
 }
 
@@ -421,5 +425,68 @@ mod tests {
         benches.shutdown();
         assert!(t0.elapsed() < Duration::from_secs(2), "shutdown stalled: {:?}", t0.elapsed());
         assert!(benches.worker.lock().unwrap().is_empty());
+    }
+
+    /// A model submission that races `Benches::shutdown` (calling `enqueue_model` or `Engine::push` after shutdown
+    /// sets `closing` and drains the queue) never leaves a persisted `Queued` entry without a worker.
+    #[test]
+    fn enqueue_model_during_or_after_shutdown_finalizes_entry_instead_of_leaving_it_queued() {
+        let dir = TestDir::new("bench-enqueue-after-shutdown");
+        let benches = Benches::open(dir.path(), None);
+        let bench_dir = dir.join("bn_1");
+        std::fs::create_dir_all(bench_dir.join("entries")).unwrap();
+        let file = state::BenchFile {
+            version: state::VERSION,
+            id: "bn_1".into(),
+            name: "b".into(),
+            description: String::new(),
+            classes: vec!["cat".into()],
+            created: crate::util::rfc3339(crate::util::unix_now()),
+            source: folo_api::BenchSource::Dataset { dataset_id: "ds_1".into(), split: None },
+            source_name: "ds".into(),
+            seed: 0,
+            plan: folo_api::BenchPlan { conditions: vec![], rationale: None, designed_by: None },
+            images: vec![state::ImageRecord {
+                id: "1".into(),
+                file: "1.png".into(),
+                width: 32,
+                height: 32,
+                bytes: 1,
+                sha256: "00".into(),
+                boxes: vec![],
+            }],
+        };
+        let slot = Arc::new(state::Slot::new(
+            bench_dir.clone(),
+            state::State {
+                fingerprint: state::fingerprint(&file),
+                file,
+                entries: Vec::new(),
+                loops: Vec::new(),
+                deleted: false,
+            },
+        ));
+        benches.shutdown();
+
+        let resolved = model::Resolved {
+            spec: model::ModelSpec { path: dir.join("m.folo"), map: vec![Some(0)] },
+            contestant: folo_api::BenchContestant::Model {
+                model_id: "m_1".into(),
+                arch: "folo-n".into(),
+                params: 1,
+                imgsz: 32,
+            },
+            missing: Vec::new(),
+            name: "m".into(),
+        };
+        let entry = entries::enqueue_model(&benches.engine, &slot, resolved, None, None, false).unwrap();
+        assert_eq!(entry.status, folo_api::BenchEntryStatus::Failed);
+        assert!(benches.engine.drain().is_empty(), "rejected job must not stay in engine queue");
+        // Disk state matches memory state: not left `Queued`.
+        let on_disk: state::EntryFile = serde_json::from_slice(
+            &std::fs::read(bench_dir.join("entries").join(format!("{}.json", entry.id))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(on_disk.entry.status, folo_api::BenchEntryStatus::Failed);
     }
 }

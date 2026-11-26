@@ -23,6 +23,7 @@ as `412` / `416` on `/weights`), and a token is sent as
 |---|---|
 | `src/lib.rs` | `Client` (`get`, `post`, `put` (bytes), `put_json`, `delete`, raw bytes, `get_range`), `Error` (`is_unreachable`, `is_transient`, `code`), the codes `UNREACHABLE` and `NOT_FOLO`, `encode` for path segments |
 | `src/transfer.rs` | `upload` (a stream a caller produces, sent in parts, resumed after a lost answer), `download` (a file fetched with `Range` requests into a temporary file, renamed into place), `remove_partial`, `Control` (progress, stop, backoff) |
+| `src/tests.rs` | Unit tests for `Client` (segment encoding, transient classification, deadlines, streaming ranges, redirect blocking, token redaction, base URL validation) |
 
 ## Start here
 
