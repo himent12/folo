@@ -742,11 +742,8 @@ impl Backend for CpuBackend {
         let s3 = reduce::split3(x.shape().dims(), dim);
         let ix = indices(&idx, "index_select", s3.1)?;
         let s = cpu(&x, "index_select")?;
-        if let CpuStorage::F32(v) = s {
-            let xd = match x.layout.contiguous_range() {
-                Some(r) => Cow::Borrowed(&v[r]),
-                None => Cow::Owned(elementwise::copy_strided_f32(v, x.layout)),
-            };
+        if matches!(s, CpuStorage::F32(_)) {
+            let xd = contiguous_f32(&x, "index_select")?;
             let out = index::index_select_f32(&xd, s3, &ix);
             if let Cow::Owned(buf) = xd {
                 recycle(buf);
@@ -770,11 +767,8 @@ impl Backend for CpuBackend {
         let ix = indices(&idx, "gather", s3.1)?;
         let di = idx.shape().dims()[dim];
         let s = cpu(&x, "gather")?;
-        if let CpuStorage::F32(v) = s {
-            let xd = match x.layout.contiguous_range() {
-                Some(r) => Cow::Borrowed(&v[r]),
-                None => Cow::Owned(elementwise::copy_strided_f32(v, x.layout)),
-            };
+        if matches!(s, CpuStorage::F32(_)) {
+            let xd = contiguous_f32(&x, "gather")?;
             let out = index::gather_f32(&xd, s3, &ix, di);
             if let Cow::Owned(buf) = xd {
                 recycle(buf);

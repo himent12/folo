@@ -5,6 +5,7 @@
 //! so their results are bitwise identical to a serial loop: rows are partitioned between tasks by destination,
 //! never split between them.
 
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
@@ -14,7 +15,7 @@ use super::reduce::col_sum_slice;
 use super::{CHUNK, PAR_MIN, alloc_uninit, par_chunks, par_for};
 use crate::{Error, Result};
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 #[inline]
 fn has_avx2() -> bool {
     std::is_x86_feature_detected!("avx2")
@@ -546,16 +547,8 @@ pub(crate) fn gather_f32(
     }
 
     let block_len = d * inner;
-    let can_avx2_row = {
-        #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
-        {
-            inner >= 8 && block_len <= i32::MAX as usize && has_avx2()
-        }
-        #[cfg(not(all(target_arch = "x86_64", target_pointer_width = "64")))]
-        {
-            false
-        }
-    };
+    #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+    let can_avx2_row = inner >= 8 && block_len <= i32::MAX as usize && has_avx2();
     let run_rows = |r0: usize, chunk: &mut [f32]| {
         for (off, dst) in chunk.chunks_exact_mut(inner).enumerate() {
             let r = r0 + off;
@@ -914,5 +907,25 @@ mod tests {
         }
         let got = index_add(&vec![-0.0; 4 * 64], (1, 4, 64), &vec![1; 1000], &vec![-0.0; 1000 * 64]);
         assert!(got.iter().all(|v| v.to_bits() == (-0.0f32).to_bits()));
+    }
+
+    #[test]
+    fn empty_offset_f32_views_do_not_panic_in_index_select_or_gather() {
+        use crate::backend::{Backend, View};
+        use crate::{CpuStorage, Layout, Shape, Storage};
+
+        let backend = crate::cpu::CpuBackend;
+        let x_empty = Storage::Cpu(CpuStorage::F32(vec![]));
+        let l_empty = Layout::new(Shape::new(&[0, 4]), vec![4, 1].into(), 10);
+        let idx_s = Storage::Cpu(CpuStorage::I64(vec![0, 2]));
+        let l_idx = Layout::contiguous(Shape::new(&[2]));
+        let out_sel =
+            backend.index_select(View::new(&x_empty, &l_empty), 1, View::new(&idx_s, &l_idx)).unwrap();
+        assert_eq!(out_sel.len(), 0);
+
+        let idx_empty = Storage::Cpu(CpuStorage::I64(vec![]));
+        let l_gidx = Layout::new(Shape::new(&[0, 2]), vec![2, 1].into(), 7);
+        let out_g = backend.gather(View::new(&x_empty, &l_empty), 1, View::new(&idx_empty, &l_gidx)).unwrap();
+        assert_eq!(out_g.len(), 0);
     }
 }
