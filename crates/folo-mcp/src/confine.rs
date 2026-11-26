@@ -124,15 +124,17 @@ pub(crate) fn is_local_url(url: &str) -> bool {
     }
 }
 
-/// Local-proxy cache validator: binds a cached verdict to the dataset's path, server revision, and an on-disk
-/// [`folo_server::Fingerprint`] over its watched directories so ordinary manifest/file edits invalidate the
-/// verdict immediately even within `folo serve`'s 5-second recheck window.
+/// Local-proxy cache validator: binds a cached verdict to the dataset's path, format, an on-disk
+/// [`folo_server::Fingerprint`] over its minimized watched directories, AND a [`Confinement::canonical_signature`]
+/// over all directory/symlink targets so both ordinary manifest edits and directory-to-symlink replacements
+/// invalidate cached verdicts immediately (even within `folo serve`'s 5-second recheck window).
 #[derive(Clone)]
 struct ProxyTag {
     path: String,
-    revision: Option<String>,
+    format: folo_api::DatasetFormat,
     watched: Vec<PathBuf>,
     fingerprint: folo_server::Fingerprint,
+    canon_hash: u64,
 }
 
 /// Cached confinement verdict for one dataset id: optional [`ProxyTag`] (used in local proxy mode) and result.
@@ -219,6 +221,124 @@ impl Confinement {
         Ok(absent)
     }
 
+    /// Checks every directory entry that `folo-data`'s YOLO/COCO format discovery (or `folo-server`'s
+    /// `dataset_below` hint) could probe before opening `root`, so guard-skipped symlinks (such as custom
+    /// `*.yaml`/`*.yml`/`*.json`, symlinked `annotations`/`train`/`val`/`valid`/`test` folders, or symlinked
+    /// subdirs) are rejected before unguarded `folo serve` ever inspects them.
+    fn check_discovery_candidates(&self, root: &Path, id: &str) -> Result<(), Error> {
+        if !root.is_dir() {
+            return Ok(());
+        }
+        let wrap = |e: Error| if id.is_empty() { e } else { in_dataset(e, id) };
+        let read_err = |dir: &Path, e: std::io::Error| {
+            wrap(
+                Error::new(
+                    StatusCode::FORBIDDEN,
+                    "path_outside_data_dir",
+                    format!("cannot inspect dataset folder {}: {e}", dir.display()),
+                )
+                .hint("`folo mcp --confine` only reads inside --data-dir; copy the files there or restart without --confine"),
+            )
+        };
+        let entries = std::fs::read_dir(root).map_err(|e| read_err(root, e))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| read_err(root, e))?;
+            let p = entry.path();
+            self.policy.check_path_if_present(&p).map_err(&wrap)?;
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if matches!(name.as_str(), "annotations" | "train" | "val" | "valid" | "test") && p.is_dir() {
+                let sub_entries = std::fs::read_dir(&p).map_err(|e| read_err(&p, e))?;
+                for sub in sub_entries {
+                    let sub = sub.map_err(|e| read_err(&p, e))?;
+                    self.policy.check_path_if_present(&sub.path()).map_err(&wrap)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Computes an FNV-1a hash over the canonical targets of every watched root, directory, and symlink under
+    /// `watched`. Returns `None` if any target cannot be canonicalized or escapes `policy.data_dir` (failing closed
+    /// so replacing a split folder with a symlink outside `--data-dir` invalidates cached allows immediately).
+    fn canonical_signature(&self, watched: &[PathBuf]) -> Option<u64> {
+        let canon_root = self.policy.canonical_root().ok()?;
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut visited = std::collections::HashSet::new();
+        fn feed(h: &mut u64, data: &[u8]) {
+            for &b in data {
+                *h ^= b as u64;
+                *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        fn walk_dir(
+            dir: &Path,
+            canon_root: &Path,
+            depth: usize,
+            visited: &mut std::collections::HashSet<PathBuf>,
+            h: &mut u64,
+        ) -> Option<()> {
+            if depth > 64 {
+                return None;
+            }
+            let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+                .ok()?
+                .collect::<std::io::Result<Vec<_>>>()
+                .ok()?
+                .into_iter()
+                .map(|e| e.path())
+                .collect();
+            entries.sort();
+            for p in entries {
+                let md = std::fs::symlink_metadata(&p).ok()?;
+                if md.file_type().is_symlink() || md.is_dir() {
+                    let c = std::fs::canonicalize(&p).ok()?;
+                    if !c.starts_with(canon_root) {
+                        return None;
+                    }
+                    feed(h, p.to_string_lossy().as_bytes());
+                    feed(h, b"->");
+                    feed(h, c.to_string_lossy().as_bytes());
+                    if c.is_dir() && visited.insert(c.clone()) {
+                        walk_dir(&p, canon_root, depth + 1, visited, h)?;
+                    }
+                }
+            }
+            Some(())
+        }
+        for w in watched {
+            match std::fs::symlink_metadata(w) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    feed(&mut h, w.to_string_lossy().as_bytes());
+                    feed(&mut h, &[0]);
+                }
+                Err(_) => return None,
+                Ok(_) => {
+                    let c = std::fs::canonicalize(w).ok()?;
+                    if !c.starts_with(&canon_root) {
+                        return None;
+                    }
+                    feed(&mut h, w.to_string_lossy().as_bytes());
+                    feed(&mut h, b"->");
+                    feed(&mut h, c.to_string_lossy().as_bytes());
+                    if c.is_dir() && visited.insert(c.clone()) {
+                        walk_dir(w, &canon_root, 0, &mut visited, &mut h)?;
+                    }
+                }
+            }
+        }
+        Some(h)
+    }
+
+    /// Registry-only dataset lookup via `Store::list_datasets` so local proxy confinement never triggers
+    /// `RealStore::fresh_index` on `folo serve` before validating the on-disk manifest locally.
+    fn lookup_registry(&self, store: &dyn Store, id: &str) -> Result<folo_api::Dataset, Error> {
+        let datasets = store.list_datasets().map_err(map_denied)?;
+        datasets.into_iter().find(|d| d.id == id).ok_or_else(|| {
+            self.cache.lock().unwrap().remove(id);
+            Error::not_found("dataset", id)
+        })
+    }
+
     /// Validates a local dataset path BEFORE `POST /api/datasets` is sent to a local `folo serve` in confined
     /// proxy mode, so an unguarded server never opens files outside `--data-dir` while building an index.
     /// No-op outside confined local real proxy mode. Blocking.
@@ -239,11 +359,7 @@ impl Confinement {
             return Ok(());
         }
         self.policy.check_existing_inside(path)?;
-        if path.is_dir() {
-            for manifest in ["data.yaml", "data.yml", "dataset.yaml", "dataset.yml"] {
-                self.policy.check_path_if_present(&path.join(manifest))?;
-            }
-        }
+        self.check_discovery_candidates(path, "")?;
         let fmt = match format {
             folo_api::DatasetFormat::Auto => folo_data::Format::Auto,
             folo_api::DatasetFormat::Yolo => folo_data::Format::Yolo,
@@ -260,7 +376,9 @@ impl Confinement {
                 )
                 .hint("`folo mcp --confine` only reads inside --data-dir; copy the files there or restart without --confine"));
             }
-            Err(folo_data::DataError::Format(_) | folo_data::DataError::Unfinished(_)) => return Ok(()),
+            Err(e @ (folo_data::DataError::Format(_) | folo_data::DataError::Unfinished(_))) => {
+                return Err(folo_server::data_error(e, &path.to_string_lossy()));
+            }
             Err(e) => {
                 return Err(Error::new(
                     StatusCode::FORBIDDEN,
@@ -275,10 +393,9 @@ impl Confinement {
     }
 
     /// `Ok` when dataset `id` reads nothing outside the data dir (always without `--confine`, and for datasets
-    /// hosted on a verified separate remote server). In local proxy mode, cached verdicts are verified against an
-    /// on-disk [`folo_server::Fingerprint`] over the dataset's watched directories on every call so
-    /// manifest changes invalidate cached `Ok(())` immediately without waiting for `folo serve`'s recheck window.
-    /// Blocking.
+    /// hosted on a verified separate remote server). In local proxy mode, registry-only lookup obtains the
+    /// dataset's path without triggering `fresh_index` on `folo serve`, and cached verdicts are verified against
+    /// both an on-disk [`folo_server::Fingerprint`] and [`Self::canonical_signature`] on every call. Blocking.
     pub fn dataset(&self, store: &dyn Store, id: &str) -> Result<(), Error> {
         if !self.policy.confine {
             return Ok(());
@@ -287,16 +404,17 @@ impl Confinement {
             return Ok(());
         }
         if self.proxy.is_some() {
-            let d = store.get_dataset(id)?;
+            let d = self.lookup_registry(store, id)?;
             if d.path.starts_with("mock://") {
                 return Ok(());
             }
             let cached = self.cache.lock().unwrap().get(id).cloned();
             if let Some((Some(tag), verdict)) = cached
                 && tag.path == d.path
-                && tag.revision == d.revision
+                && tag.format == d.format
                 && !tag.watched.is_empty()
                 && folo_server::Fingerprint::of(&tag.watched, &[]) == tag.fingerprint
+                && self.canonical_signature(&tag.watched) == Some(tag.canon_hash)
             {
                 return verdict;
             }
@@ -317,6 +435,10 @@ impl Confinement {
         }
         if self.is_verified_remote_proxy()? {
             return Ok(());
+        }
+        if self.proxy.is_some() {
+            let d = self.lookup_registry(store, id)?;
+            return self.scan_and_cache(store, id, Some(d));
         }
         self.scan_and_cache(store, id, None)
     }
@@ -344,11 +466,15 @@ impl Confinement {
         // Unknown datasets and transient store/IO errors are never cached so recovery works without a restart.
         match &res {
             Ok(watched) => {
-                let tag = watched.as_ref().map(|w| ProxyTag {
-                    path: d.path.clone(),
-                    revision: d.revision.clone(),
-                    watched: w.clone(),
-                    fingerprint: folo_server::Fingerprint::of(w, &[]),
+                let tag = watched.as_ref().and_then(|w| {
+                    let canon_hash = self.canonical_signature(w)?;
+                    Some(ProxyTag {
+                        path: d.path.clone(),
+                        format: d.format,
+                        watched: w.clone(),
+                        fingerprint: folo_server::Fingerprint::of(w, &[]),
+                        canon_hash,
+                    })
                 });
                 self.cache.lock().unwrap().insert(id.to_string(), (tag, Ok(())));
                 Ok(())
@@ -357,7 +483,8 @@ impl Confinement {
                 let tag = self.proxy.is_some().then(|| {
                     let w = vec![PathBuf::from(&d.path)];
                     let fingerprint = folo_server::Fingerprint::of(&w, &[]);
-                    ProxyTag { path: d.path.clone(), revision: d.revision.clone(), watched: w, fingerprint }
+                    let canon_hash = self.canonical_signature(&w).unwrap_or(0);
+                    ProxyTag { path: d.path.clone(), format: d.format, watched: w, fingerprint, canon_hash }
                 });
                 self.cache.lock().unwrap().insert(id.to_string(), (tag, Err(e.clone())));
                 Err(e.clone())
@@ -459,8 +586,7 @@ impl Confinement {
                 }
             }
         }
-        watched.sort();
-        watched.dedup();
+        let watched = minimize_watched(watched);
         Ok((ds_root, watched))
     }
 
@@ -484,8 +610,10 @@ impl Confinement {
             }
             None => {
                 // In local proxy mode `HttpStore` does not expose `Index::root` or run `folo_data::guard` inside
-                // `folo serve`. Inspect the manifest locally (with our process read guard installed) and fail
-                // closed if it cannot be inspected or references anything outside `--data-dir`.
+                // `folo serve`. Inspect discovery candidates and the manifest locally (with our process read
+                // guard installed) BEFORE calling any endpoint that triggers `fresh_index`, and fail closed if it
+                // cannot be inspected or references anything outside `--data-dir`.
+                self.check_discovery_candidates(&root, id)?;
                 let format = match d.format {
                     folo_api::DatasetFormat::Auto => folo_data::Format::Auto,
                     folo_api::DatasetFormat::Yolo => folo_data::Format::Yolo,
@@ -648,6 +776,19 @@ impl LabelPaths {
     }
 }
 
+/// Minimizes a watched-path list so no watched directory is walked twice when it is already nested under another.
+fn minimize_watched(dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    for d in dirs {
+        if !out.iter().any(|w| d.starts_with(w)) {
+            out.retain(|w| !w.starts_with(&d));
+            out.push(d);
+        }
+    }
+    out.sort();
+    out
+}
+
 fn in_dataset(mut e: Error, id: &str) -> Error {
     if e.body.code == "path_outside_data_dir" {
         e.body.message = format!("dataset '{id}' reads files outside the data dir: {}", e.body.message);
@@ -656,224 +797,5 @@ fn in_dataset(mut e: Error, id: &str) -> Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn labels_follow_yolo_beside_images_and_mirror_rules() {
-        let dir = folo_test_support::TestDir::new("mcp-confine-label-paths");
-        // Dataset below an `images` ancestor with NO `labels` mirror: labels sit beside images.
-        let ds = dir.join("images").join("birds");
-        std::fs::create_dir_all(&ds).unwrap();
-        let lp = LabelPaths::new(&ds);
-        assert_eq!(lp.of(&ds.join("a.jpg")), ds.join("a.txt"));
-        // An `images/` subfolder inside the dataset still maps to `labels/` inside the dataset.
-        assert_eq!(
-            lp.of(&ds.join("images").join("train").join("a.jpg")),
-            ds.join("labels").join("train").join("a.txt")
-        );
-
-        // Once the mirror `<dir>/labels/birds` exists, labels resolve through the mirror instead of beside.
-        let mirror = dir.join("labels").join("birds");
-        std::fs::create_dir_all(&mirror).unwrap();
-        let lp_mirror = LabelPaths::new(&ds);
-        assert_eq!(lp_mirror.of(&ds.join("a.jpg")), mirror.join("a.txt"));
-
-        // A root spelled with `..` through a nested `images` segment (`images/images/../birds`, or
-        // `images\images\..\birds` on Windows) resolves both its mirror probe and label lookup consistently.
-        let nested_images = dir.join("images").join("images");
-        std::fs::create_dir_all(&nested_images).unwrap();
-        let dotdot_root = nested_images.join("..").join("birds");
-        let lp_dotdot = LabelPaths::new(&dotdot_root);
-        assert_eq!(lp_dotdot.of(&dotdot_root.join("a.jpg")), mirror.join("a.txt"));
-        std::fs::remove_dir(&mirror).unwrap();
-        let lp_dotdot_beside = LabelPaths::new(&dotdot_root);
-        assert_eq!(lp_dotdot_beside.of(&dotdot_root.join("a.jpg")), ds.join("a.txt"));
-
-        // On Unix, a `data.yaml` folder reached through a symlink (`work/current -> releases/v7/meta`) with
-        // `../images/birds` resolves its mirror in the link target's parent (`releases/v7/labels/birds`).
-        #[cfg(unix)]
-        {
-            let release = dir.join("releases/v7");
-            std::fs::create_dir_all(release.join("images/birds")).unwrap();
-            std::fs::create_dir_all(release.join("meta")).unwrap();
-            std::fs::create_dir_all(dir.join("work")).unwrap();
-            std::os::unix::fs::symlink(release.join("meta"), dir.join("work/current")).unwrap();
-            let linked_root = dir.join("work/current/../images/birds");
-            let linked_img = linked_root.join("a.jpg");
-            let canon_img = std::fs::canonicalize(release.join("images/birds")).unwrap().join("a.jpg");
-            let canon_mirror =
-                std::fs::canonicalize(&release).unwrap().join("labels").join("birds").join("a.txt");
-            assert_eq!(LabelPaths::new(&linked_root).of(&linked_img), canon_img.with_extension("txt"));
-            std::fs::create_dir_all(release.join("labels/birds")).unwrap();
-            assert_eq!(LabelPaths::new(&linked_root).of(&linked_img), canon_mirror);
-        }
-    }
-
-    #[test]
-    fn local_url_detection_covers_loopback_unspecified_and_remote_hosts() {
-        for local in [
-            "http://127.0.0.1:7878",
-            "HTTP://127.0.0.1:7878",
-            "http://localhost:7878/api",
-            "http://LOCALHOST.:7878",
-            "http://foo.localhost:7878",
-            "https://[::1]:7878",
-            "http://[::1%25lo]:7878",
-            "http://0.0.0.0:7878",
-            "http://[::]:7878",
-            "http://[::ffff:127.0.0.1]:7878",
-            // Empty hosts and non-canonical IPv4 loopback/unspecified literals fail closed as local.
-            "",
-            "http://:7878",
-            "http:///api",
-            "http://127.1:7878",
-            "http://0:7878",
-            "http://2130706433:7878",
-            "http://0x7f000001:7878",
-            "http://0177.0.0.1:7878",
-        ] {
-            assert!(is_local_url(local), "expected local: {local}");
-        }
-        for remote in [
-            "http://192.168.1.5:7878",
-            "https://gpu.example.com:7878",
-            "https://[2001:db8::1]:7878",
-            "http://notlocalhost.example.com:7878",
-            // Multi-byte UTF-8 hostname near the `.localhost` suffix length must never panic.
-            "http://éééééa:7878",
-        ] {
-            assert!(!is_local_url(remote), "expected remote: {remote}");
-        }
-    }
-
-    #[test]
-    fn push_parent_preserves_root_and_leading_relative_parents() {
-        let mut at_root = PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" });
-        push_parent(&mut at_root);
-        assert_eq!(at_root, PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" }));
-
-        let mut rel = PathBuf::from("..");
-        push_parent(&mut rel);
-        assert_eq!(rel, PathBuf::from("../.."));
-        rel.push("a");
-        assert_eq!(rel, PathBuf::from("../../a"));
-    }
-
-    #[test]
-    fn denied_reads_become_path_outside_data_dir() {
-        let e = Error::internal(format!("reading x: x {}", folo_data::guard::DENIED));
-        assert_eq!(map_denied(e).body.code, "path_outside_data_dir");
-        assert_eq!(map_denied(Error::internal("other")).body.code, "internal");
-    }
-
-    #[test]
-    fn dataset_does_not_cache_transient_store_errors() {
-        use folo_api::{
-            Dataset, ExportResult, ExportSpec, GpuInfo, ImagePage, IssuePage, Model, ModelEval,
-            PredictResponse, RegisterDataset, Run, RunLogs, RunMetrics, RunSamples, SyntheticDataset,
-            TrainConfig,
-        };
-        use folo_server::store::{ImageData, LogsQuery, MetricsQuery, PredictInput, Subscription};
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        struct FlakyStore {
-            inner: folo_server::MockStore,
-            calls: AtomicUsize,
-        }
-        impl Store for FlakyStore {
-            fn is_mock(&self) -> bool {
-                self.inner.is_mock()
-            }
-            fn gpus(&self) -> Vec<GpuInfo> {
-                self.inner.gpus()
-            }
-            fn list_datasets(&self) -> Result<Vec<Dataset>, Error> {
-                self.inner.list_datasets()
-            }
-            fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset, Error> {
-                self.inner.register_dataset(req)
-            }
-            fn create_synthetic(&self, req: SyntheticDataset) -> Result<Dataset, Error> {
-                self.inner.create_synthetic(req)
-            }
-            fn get_dataset(&self, id: &str) -> Result<Dataset, Error> {
-                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                    return Err(Error::new(
-                        StatusCode::BAD_GATEWAY,
-                        "server_unreachable",
-                        "temporary outage",
-                    ));
-                }
-                self.inner.get_dataset(id)
-            }
-            fn list_images(&self, id: &str, q: &ImageQuery) -> Result<ImagePage, Error> {
-                self.inner.list_images(id, q)
-            }
-            fn list_issues(&self, id: &str, q: &IssueQuery) -> Result<IssuePage, Error> {
-                self.inner.list_issues(id, q)
-            }
-            fn image(&self, id: &str, image_id: &str, thumb: Option<u32>) -> Result<ImageData, Error> {
-                self.inner.image(id, image_id, thumb)
-            }
-            fn delete_dataset(&self, id: &str) -> Result<(), Error> {
-                self.inner.delete_dataset(id)
-            }
-            fn list_models(&self) -> Result<Vec<Model>, Error> {
-                self.inner.list_models()
-            }
-            fn get_model(&self, id: &str) -> Result<Model, Error> {
-                self.inner.get_model(id)
-            }
-            fn model_eval(&self, id: &str) -> Result<ModelEval, Error> {
-                self.inner.model_eval(id)
-            }
-            fn export_model(&self, id: &str, spec: ExportSpec) -> Result<ExportResult, Error> {
-                self.inner.export_model(id, spec)
-            }
-            fn list_runs(&self) -> Result<Vec<Run>, Error> {
-                self.inner.list_runs()
-            }
-            fn create_run(&self, config: TrainConfig) -> Result<Run, Error> {
-                self.inner.create_run(config)
-            }
-            fn get_run(&self, id: &str) -> Result<Run, Error> {
-                self.inner.get_run(id)
-            }
-            fn stop_run(&self, id: &str) -> Result<Run, Error> {
-                self.inner.stop_run(id)
-            }
-            fn delete_run(&self, id: &str) -> Result<(), Error> {
-                self.inner.delete_run(id)
-            }
-            fn run_metrics(&self, id: &str, q: &MetricsQuery) -> Result<RunMetrics, Error> {
-                self.inner.run_metrics(id, q)
-            }
-            fn run_samples(&self, id: &str, epoch: Option<u32>) -> Result<RunSamples, Error> {
-                self.inner.run_samples(id, epoch)
-            }
-            fn run_logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs, Error> {
-                self.inner.run_logs(id, q)
-            }
-            fn subscribe(&self, id: &str) -> Result<Subscription, Error> {
-                self.inner.subscribe(id)
-            }
-            fn predict(&self, input: PredictInput) -> Result<PredictResponse, Error> {
-                self.inner.predict(input)
-            }
-        }
-
-        let dir = folo_test_support::TestDir::new("mcp-confine-transient");
-        let c = Confinement::new(PathPolicy { data_dir: dir.to_path_buf(), confine: true }, None);
-        let store = FlakyStore { inner: folo_server::MockStore::new(), calls: AtomicUsize::new(0) };
-        let id = store.list_datasets().unwrap().remove(0).id;
-
-        let first = c.dataset(&store, &id).unwrap_err();
-        assert_eq!(first.body.code, "server_unreachable");
-        assert!(c.dataset(&store, &id).is_ok(), "transient error must not be permanently cached");
-        assert_eq!(store.calls.load(Ordering::SeqCst), 2);
-        // Now that Ok(()) was cached, a third call uses the cache without hitting the store again.
-        assert!(c.dataset(&store, &id).is_ok());
-        assert_eq!(store.calls.load(Ordering::SeqCst), 2);
-    }
-}
+#[path = "confine_tests.rs"]
+mod tests;

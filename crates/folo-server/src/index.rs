@@ -521,7 +521,7 @@ fn resolve_dotdot(p: &Path) -> PathBuf {
 }
 
 /// Resolves `path` to an absolute path while preserving Unix symlink-before-`..` semantics.
-fn resolve_input_path(path: &str) -> PathBuf {
+pub(crate) fn resolve_input_path(path: &str) -> PathBuf {
     let raw = Path::new(path);
     resolve_dotdot(&std::path::absolute(raw).unwrap_or_else(|_| raw.to_path_buf()))
 }

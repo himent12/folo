@@ -763,3 +763,33 @@ fn stale_v7_index_cache_is_rebuilt_on_reopen() {
     assert!(!rebuilt["watched"].as_array().unwrap().is_empty());
     reopened.shutdown();
 }
+
+#[cfg(unix)]
+#[test]
+fn register_dataset_resolves_symlink_before_dotdot() {
+    let t = TestDir::new("real-register-symlink-dotdot");
+    let home = t.join("home");
+    let release = t.join("releases/v7");
+    std::fs::create_dir_all(release.join("images/birds/train")).unwrap();
+    std::fs::create_dir_all(release.join("meta")).unwrap();
+    std::fs::create_dir_all(t.join("work")).unwrap();
+    image::RgbImage::from_pixel(16, 16, image::Rgb([10, 20, 30]))
+        .save(release.join("images/birds/train/a.png"))
+        .unwrap();
+    std::fs::write(release.join("images/birds/train/a.txt"), "0 0.5 0.5 0.4 0.4\n").unwrap();
+    std::fs::write(release.join("meta/data.yaml"), "path: ../images/birds\ntrain: train\nnames: [bird]\n")
+        .unwrap();
+    std::os::unix::fs::symlink(release.join("meta"), t.join("work/current")).unwrap();
+
+    let via_parent = t.join("work/current").join("..").join("meta").join("data.yaml");
+    let store = RealStore::open(home);
+    let ds = store
+        .register_dataset(RegisterDataset {
+            name: None,
+            path: via_parent.to_string_lossy().into_owned(),
+            format: DatasetFormat::Auto,
+        })
+        .unwrap();
+    assert_eq!(ds.splits.train, 1);
+    store.shutdown();
+}

@@ -291,7 +291,7 @@ fn symlinked_yaml_folder_tracks_label_mirror_and_resolves_images() {
 
     // Passing a `symlink/../target` path directly to `preflight`, `reads`, and `Index::build` must also resolve
     // through the symlink before popping `..` instead of collapsing lexically into a missing sibling.
-    let via_parent = work.join("current").join("..").join("meta").join("data.yaml");
+    let via_parent = dir.join("work/current").join("..").join("meta").join("data.yaml");
     preflight(via_parent.to_str().unwrap(), DatasetFormat::Auto).unwrap();
     let r = reads(via_parent.to_str().unwrap(), DatasetFormat::Auto).unwrap();
     assert!(!r.is_empty());

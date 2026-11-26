@@ -69,7 +69,7 @@ use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
 
 pub use folo_api as api;
-pub use index::Fingerprint;
+pub use index::{Fingerprint, data_error};
 pub use mock::MockStore;
 pub use real::RealStore;
 pub use runs::STOP_REQUESTED;
