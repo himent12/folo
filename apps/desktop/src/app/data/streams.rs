@@ -164,6 +164,7 @@ impl FoloApp {
     fn invalidate_latest_samples(&mut self, id: &str) {
         let picked = matches!(&self.route, Route::Run(r) if r == id) && self.sample_epoch.is_some();
         if !picked {
+            self.store.samples_refreshing.remove(id);
             self.store.samples_refresh_error.remove(id);
             match self.store.samples.get(id) {
                 Some(Load::Ready(_)) => {

@@ -73,6 +73,7 @@ impl FoloApp {
                         this.sample_epoch = e;
                         this.store.samples.remove(&rid);
                         this.store.samples_stale.remove(&rid);
+                        this.store.samples_refreshing.remove(&rid);
                         this.store.samples_refresh_error.remove(&rid);
                         this.ensure_samples(&rid, cx);
                     }
@@ -223,6 +224,7 @@ impl FoloApp {
                         act(move |this, _, cx| this.retry_samples(&rid, cx)),
                     );
                     div()
+                        .flex_none()
                         .flex()
                         .items_center()
                         .gap(px(8.))
@@ -240,10 +242,11 @@ impl FoloApp {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .justify_between()
                             .gap(px(12.))
-                            .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
+                            .child(text(ty::SM, t.text_tertiary).min_w_0().tnum().child(format!(
                                 "Epoch {epoch} · {} · {}",
                                 shown_of(samples.len(), total, images),
                                 match view {

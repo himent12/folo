@@ -152,7 +152,10 @@ pub fn paint_image_with_boxes(
         match img {
             Some(img) => {
                 let r = if fit == Fit::Cover { corner } else { 0. };
-                let _ = window.paint_image(rect, Corners::all(px(r)), img.clone(), 0, false);
+                // Pass `raw_rect` so `paint_image` rounds to device pixels once (re-rounding
+                // `rect` at fractional DPI like 1.75× can drift 1 ULP below an integer and shift
+                // the photo 1 device pixel away from `clip`).
+                let _ = window.paint_image(raw_rect, Corners::all(px(r)), img.clone(), 0, false);
             }
             None => window.paint_quad(fill(rect, t.bg_raised)),
         }
@@ -166,7 +169,6 @@ pub fn paint_image_with_boxes(
             let sy = f32::from(rect.size.height) / h.max(1.);
             // Box corners land on whole device pixels: a fractional rect anti-aliases its halo and
             // stroke into each other and leaves see-through pixels where they should meet.
-            let scale = window.scale_factor();
             let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
             let to = |x: f32, y: f32| point(snap(rect.left() + px(x * sx)), snap(rect.top() + px(y * sy)));
             let halo = rgba(tokens::CLASS_HALO);
@@ -696,11 +698,15 @@ mod tests {
             image::RgbaImage::from_raw(100, 100, bgra).expect("valid photo buffer"),
         )]));
 
-        struct View(Arc<RenderImage>);
+        struct View {
+            img: Arc<RenderImage>,
+            pan: (f32, f32),
+        }
         impl Render for View {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 let t = crate::theme::theme(cx);
-                let img = self.0.clone();
+                let img = self.img.clone();
+                let pan = self.pan;
                 let boxes = vec![
                     // Partially outside left edge with `half_in == true`: its label chip + border paint.
                     DrawBox {
@@ -721,8 +727,6 @@ mod tests {
                     canvas(
                         |_, _, _| (),
                         move |b, _, window, cx| {
-                            // Fractional pan (0.75, 0.0) exercises device-pixel alignment between
-                            // `paint_image` (origin floored) and the overlay clip mask.
                             paint_image_with_boxes(
                                 &t,
                                 window,
@@ -733,7 +737,7 @@ mod tests {
                                 &boxes,
                                 Fit::Contain,
                                 1.0,
-                                (0.75, 0.0),
+                                pan,
                                 true,
                                 true,
                                 0.,
@@ -745,44 +749,58 @@ mod tests {
             }
         }
 
-        let window_size = size(px(400.), px(200.));
-        let mut app = HeadlessApp::new(HeadlessOptions {
-            size: window_size,
-            scale_factor: 1.0,
-            text: TextBackend::Native,
-        });
-        let window = app.update(|cx: &mut App| {
-            cx.text_system()
-                .add_fonts(crate::FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect())
-                .expect("bundled fonts load");
-            cx.set_global(Theme::new(crate::theme::Mode::Dark));
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(Bounds::new(point(px(0.), px(0.)), window_size))),
-                ..Default::default()
-            };
-            cx.open_window(options, |_, cx| cx.new(|_| View(img))).expect("open window")
-        });
-        let frame = app.frame(window.into());
-        // Square 100x100 image in 400x200 Fit::Contain occupies x=100..300; padding is x=0..100 and x=300..400.
-        for y in 0..200 {
-            for x in (0..100).chain(300..400) {
-                assert_eq!(
-                    frame.pixel(x, y),
-                    0x0010_1010,
-                    "unclipped box/chip leaked into letterbox padding at ({x}, {y})"
-                );
-            }
-        }
-        // Inside the photo area, both the blue photo (0x0020_40C0) AND distinct box/chip overlay pixels painted.
-        let mut overlay_pixels = 0usize;
-        for y in 0..200 {
-            for x in 100..300 {
-                let p = frame.pixel(x, y);
-                if p != 0x0010_1010 && p != 0x0020_40C0 {
-                    overlay_pixels += 1;
+        // Case 1: 100% DPI with fractional pan (0.75, 0.0) in 400×200 -> photo occupies x=100..300.
+        // Case 2: 175% DPI in 660×400 -> logical x=130 -> 227.5 -> floored device x=227, width=700 (x=227..927).
+        for (logical_w, logical_h, scale_factor, pan, dev_w, dev_h, photo_x0, photo_x1) in [
+            (400., 200., 1.0, (0.75, 0.0), 400, 200, 100, 300),
+            (660., 400., 1.75, (0.0, 0.0), 1155, 700, 227, 927),
+        ] {
+            let window_size = size(px(logical_w), px(logical_h));
+            let img_for_window = img.clone();
+            let mut app = HeadlessApp::new(HeadlessOptions {
+                size: window_size,
+                scale_factor,
+                text: TextBackend::Native,
+            });
+            let window = app.update(|cx: &mut App| {
+                cx.text_system()
+                    .add_fonts(crate::FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect())
+                    .expect("bundled fonts load");
+                cx.set_global(Theme::new(crate::theme::Mode::Dark));
+                let options = WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.), px(0.)),
+                        window_size,
+                    ))),
+                    ..Default::default()
+                };
+                cx.open_window(options, |_, cx| cx.new(|_| View { img: img_for_window, pan }))
+                    .expect("open window")
+            });
+            let frame = app.frame(window.into());
+            for y in 0..dev_h {
+                for x in (0..photo_x0).chain(photo_x1..dev_w) {
+                    assert_eq!(
+                        frame.pixel(x, y),
+                        0x0010_1010,
+                        "scale={scale_factor}: unclipped box/chip leaked into letterbox padding at ({x}, {y})"
+                    );
                 }
             }
+            // Inside the photo area, both the blue photo (0x0020_40C0) AND distinct box/chip overlay pixels painted.
+            let mut overlay_pixels = 0usize;
+            for y in 0..dev_h {
+                for x in photo_x0..photo_x1 {
+                    let p = frame.pixel(x, y);
+                    if p != 0x0010_1010 && p != 0x0020_40C0 {
+                        overlay_pixels += 1;
+                    }
+                }
+            }
+            assert!(
+                overlay_pixels > 200,
+                "scale={scale_factor}: box strokes and label chips painted inside photo: {overlay_pixels}"
+            );
         }
-        assert!(overlay_pixels > 200, "box strokes and label chips painted inside photo: {overlay_pixels}");
     }
 }

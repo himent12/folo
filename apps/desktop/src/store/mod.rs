@@ -97,6 +97,8 @@ pub struct Store {
     /// Runs whose latest validation samples have a newer epoch available; refreshed in place so
     /// existing tiles stay on screen instead of flashing placeholders and shifting the Logs panel.
     pub samples_stale: std::collections::HashSet<String>,
+    /// Runs with an in-place Latest sample refresh currently in flight while older tiles stay visible.
+    pub samples_refreshing: std::collections::HashSet<String>,
     /// Last error from an in-place Latest sample refresh while older tiles stay visible.
     pub samples_refresh_error: HashMap<String, ApiError>,
     pub logs: HashMap<String, Load<LogHistory>>,
@@ -139,6 +141,7 @@ impl Store {
             run_data: HashMap::new(),
             samples: HashMap::new(),
             samples_stale: Default::default(),
+            samples_refreshing: Default::default(),
             samples_refresh_error: HashMap::new(),
             logs: HashMap::new(),
             log_rev: 0,

@@ -179,6 +179,7 @@ impl FoloApp {
         if self.sample_epoch.take().is_some() {
             self.store.samples.clear();
             self.store.samples_stale.clear();
+            self.store.samples_refreshing.clear();
             self.store.samples_refresh_error.clear();
             self.history_tickets.retain(|(_, what), _| *what != "samples");
         }

@@ -220,6 +220,7 @@ impl FoloApp {
     pub(super) fn forget_history(&mut self, id: &str) {
         self.history_tickets.retain(|(run, _), _| run != id);
         self.store.samples_stale.remove(id);
+        self.store.samples_refreshing.remove(id);
         self.store.samples_refresh_error.remove(id);
     }
 
@@ -243,10 +244,12 @@ impl FoloApp {
         if needs || refresh_ready {
             if needs {
                 self.store.samples_stale.remove(id);
+                self.store.samples_refreshing.remove(id);
                 self.store.samples_refresh_error.remove(id);
                 self.store.samples.insert(id.to_string(), Load::Loading);
             } else {
                 self.store.samples_refresh_error.remove(id);
+                self.store.samples_refreshing.insert(id.to_string());
             }
             let ticket = self.history_ticket(id, "samples");
             let (rid, key, epoch) = (id.to_string(), id.to_string(), self.sample_epoch);
@@ -257,15 +260,20 @@ impl FoloApp {
                     if this.history_tickets.get(&(key.clone(), "samples")) != Some(&ticket) {
                         return;
                     }
+                    this.store.samples_refreshing.remove(&key);
                     match r {
                         Ok(v) => {
                             this.store.samples_refresh_error.remove(&key);
                             this.store.samples.insert(key, Load::Ready(v));
                         }
                         Err(e) if refresh_ready => {
-                            // Keep existing tiles mounted so Logs don't jump, and record the error
-                            // so the caption offers an explicit in-place Retry for the newer epoch.
-                            this.store.samples_refresh_error.insert(key, e);
+                            // If a newer Epoch or terminal Status arrived while this refresh was in
+                            // flight, `samples_stale` is already queued for an automatic retry.
+                            if !this.store.samples_stale.contains(&key) {
+                                // Keep existing tiles mounted so Logs don't jump, and record the error
+                                // so the caption offers an explicit in-place Retry for the newer epoch.
+                                this.store.samples_refresh_error.insert(key, e);
+                            }
                         }
                         Err(e) => {
                             this.store.samples_refresh_error.remove(&key);

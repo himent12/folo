@@ -248,6 +248,7 @@ impl FoloApp {
         s.run_data.clear();
         s.samples.clear();
         s.samples_stale.clear();
+        s.samples_refreshing.clear();
         s.samples_refresh_error.clear();
         s.logs.clear();
         self.log_cache.clear();

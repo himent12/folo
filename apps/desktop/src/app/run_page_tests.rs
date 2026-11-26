@@ -752,16 +752,44 @@ fn live_sample_refresh_keeps_ready_tiles_mounted_without_placeholder_jump() {
 
 #[test]
 fn evaluated_epoch_fallbacks_in_flight_failure_and_refresh_error_retry() {
-    use crate::api::{ApiError, BestEpoch, Epoch, Loss, RunEvent, RunStatus, ValMetrics};
+    use crate::api::{ApiError, BestEpoch, Epoch, Loss, RunEvent, RunStatus, StatusEvent, ValMetrics};
     use crate::app::Route;
     use crate::store::Load;
 
     let (mut app, window) = open();
-    // 1. Verify `evaluated_epoch` when `run_data` is absent/Loading across all run states.
+    // 1. Verify `evaluated_epoch` across `run_data` Ready and absent/Loading fallback states.
     drive(&mut app, window, |this, _, _| {
         let mut r = this.store.runs.ready().unwrap()[0].clone();
         this.store.run_data.remove(&r.id);
         this.store.samples.remove(&r.id);
+
+        // Loaded `run_data` takes precedence even if `r.epoch` is still 0 in a stale run snapshot.
+        r.status = RunStatus::Running;
+        r.epoch = 0;
+        this.store.run_data.insert(
+            r.id.clone(),
+            Load::Ready(crate::store::RunData::new(
+                crate::api::RunMetrics {
+                    steps: Vec::new(),
+                    epochs: vec![Epoch {
+                        epoch: 1,
+                        train_loss: Loss { box_: 1.0, cls: 1.0, dfl: 1.0, total: 3.0 },
+                        val: ValMetrics {
+                            map50: 0.5,
+                            map50_95: 0.3,
+                            precision: 0.6,
+                            recall: 0.5,
+                            best_f1_conf: Some(0.4),
+                            per_class: Vec::new(),
+                        },
+                        duration_s: 1.0,
+                    }],
+                },
+                10,
+            )),
+        );
+        assert_eq!(this.evaluated_epoch(&r), 1);
+        this.store.run_data.remove(&r.id);
 
         // Checkpoint-seeded queued/active run at epoch 0 with inherited `best`: must be 0.
         r.status = RunStatus::Queued;
@@ -769,11 +797,18 @@ fn evaluated_epoch_fallbacks_in_flight_failure_and_refresh_error_retry() {
         r.best = Some(BestEpoch { epoch: 5, map50_95: 0.4 });
         assert_eq!(this.evaluated_epoch(&r), 0);
 
-        // Stopped/Failed mid-epoch 1 without `run_data`: must be 0, never firing epoch-0 fetch.
-        r.status = RunStatus::Stopped;
+        // Failed mid-epoch 1 without `run_data`: must be 0 (`r.epoch` is the epoch it failed in).
+        r.status = RunStatus::Failed;
         r.epoch = 1;
         r.best = None;
         assert_eq!(this.evaluated_epoch(&r), 0);
+
+        // Stopped run without `run_data`: `r.epoch` is the last finished epoch (0 if stopped in epoch 1).
+        r.status = RunStatus::Stopped;
+        r.epoch = 0;
+        assert_eq!(this.evaluated_epoch(&r), 0);
+        r.epoch = 3;
+        assert_eq!(this.evaluated_epoch(&r), 3);
 
         // Completed run while `run_data` is loading: uses `r.epoch` (not lower `r.best.epoch`).
         r.status = RunStatus::Completed;
@@ -807,6 +842,7 @@ fn evaluated_epoch_fallbacks_in_flight_failure_and_refresh_error_retry() {
     app.frame(window.into());
     app.run_until_idle();
     drive(&mut app, window, |this, _, cx| {
+        this.store.runs.ready_mut().unwrap().iter_mut().find(|r| r.id == id).unwrap().epoch = 0;
         this.store.samples.insert(id.clone(), Load::Loading);
         this.store.apply(
             &id,
@@ -824,6 +860,7 @@ fn evaluated_epoch_fallbacks_in_flight_failure_and_refresh_error_retry() {
                 duration_s: 1.0,
             }),
         );
+        assert_eq!(this.store.run(&id).unwrap().epoch, 5, "Epoch event advances Run.epoch");
         assert!(this.store.samples_stale.contains(&id));
         // Simulate the older in-flight request failing after Epoch arrived.
         this.store.samples.insert(id.clone(), Load::Failed(ApiError::new("not_found", "stale epoch failed")));
@@ -839,7 +876,27 @@ fn evaluated_epoch_fallbacks_in_flight_failure_and_refresh_error_retry() {
         );
     });
 
-    // 3. A failed background Latest refresh keeps Ready tiles mounted AND surfaces Retry.
+    // 3. Terminal Status arriving while a background Latest refresh is in flight queues a retry.
+    drive(&mut app, window, |this, _, cx| {
+        this.store.samples_refreshing.insert(id.clone());
+        this.store.apply(&id, RunEvent::Status(StatusEvent::new(RunStatus::Completed, None)));
+        assert!(
+            this.store.samples_stale.contains(&id),
+            "terminal status during in-flight refresh marks samples stale for auto-retry"
+        );
+        cx.notify();
+    });
+    app.frame(window.into());
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.store.samples_stale.contains(&id));
+        assert!(!this.store.samples_refreshing.contains(&id));
+        assert!(!this.store.samples_refresh_error.contains_key(&id));
+        assert!(this.store.samples.get(&id).is_some_and(|l| l.ready().is_some()));
+    });
+
+    // 4. A failed background Latest refresh keeps Ready tiles mounted AND surfaces Retry.
     drive(&mut app, window, |this, _, cx| {
         this.store
             .samples_refresh_error
