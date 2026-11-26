@@ -128,8 +128,8 @@ impl Server {
     fn of(values: &Values) -> Result<Server> {
         let raw = values.require(URL_FIELD)?;
         let invalid = |why: &str| Error::new(ErrorKind::Invalid, format!("`url` {why}"));
-        if !raw.bytes().all(|b| b.is_ascii_graphic()) {
-            return Err(invalid("must not contain spaces or control characters"));
+        if let Err(why) = folo_client::check_base_url(raw) {
+            return Err(Error::new(ErrorKind::Invalid, format!("`url` is invalid: {why}")));
         }
         let uri: http::Uri = raw.parse().map_err(|_| invalid("is not a URL"))?;
         let https = match uri.scheme_str() {
@@ -138,13 +138,6 @@ impl Server {
             _ => return Err(invalid("must start with https:// or http://")),
         };
         let authority = uri.authority().ok_or_else(|| invalid("has no host"))?;
-        // Credentials belong in the token field, not in a URL that is shown and logged.
-        if authority.as_str().contains('@') {
-            return Err(invalid("must not contain a user name or password"));
-        }
-        if uri.query().is_some() || raw.contains('#') {
-            return Err(invalid("must not have a query or a fragment"));
-        }
         let host = authority.host().trim_start_matches('[').trim_end_matches(']').to_string();
         if host.is_empty() {
             return Err(invalid("has no host"));
@@ -533,9 +526,20 @@ mod tests {
             "https://gpu-box/?a=1",
             "https://gpu-box/#x",
             "https://gpu box",
+            "http://127.0.0.1:abc",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1:",
+            "http://127.0.0.1:7878:80",
+            "http://[::1]:abc",
+            "http://[::1]:65536",
+            "http://[not-ipv6]:7878",
         ] {
             let e = Server::of(&values(bad, "")).err().unwrap_or_else(|| panic!("{bad} was accepted"));
             assert_error(&e, ErrorKind::Invalid, "`url`");
+            // `Remote.check` must reject malformed URLs up front as `invalid_body` before any network call.
+            let check_err = Remote.check(&values(bad, "")).unwrap_err();
+            assert_eq!((check_err.kind, check_err.code()), (ErrorKind::Invalid, "invalid_body"), "{bad}");
         }
         assert_error(&Remote.check(&Values::default()).unwrap_err(), ErrorKind::Invalid, "url");
         for bad_tok in ["tok\n2", "tok\r\nX-Inject: 1", "tok\0nul", "tok\x7fdel", "tok\x1besc"] {

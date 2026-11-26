@@ -29,6 +29,8 @@ use crate::util::{rfc3339, unix_now};
 
 /// Most boxes one record carries.
 pub const MAX_BOXES: usize = 1000;
+/// Hint attached when a multipart external upload repeats an already-received record with different boxes.
+pub const RETRY_PART_HINT: &str = "send only the records not sent yet; this part was not taken";
 /// Most boxes an open entry holds in memory at once (the unchanged images' and those of variants still
 /// incomplete): a client that sends pass by pass never comes near it.
 pub const MAX_HELD_BOXES: u64 = 20_000_000;
@@ -237,7 +239,7 @@ impl Filling {
                         "{what} was received in an earlier part with other boxes: answer each image and \
                          condition once"
                     ))
-                    .hint("send only the records not sent yet; this part was not taken"));
+                    .hint(RETRY_PART_HINT));
                 }
                 None => {}
             }

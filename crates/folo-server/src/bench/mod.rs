@@ -39,7 +39,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
 pub use benchmarks::check_create;
-pub use external::MAX_BOXES;
+pub use external::{MAX_BOXES, RETRY_PART_HINT};
 pub use model::InferenceGuard;
 
 use crate::error::{Error, Result};
