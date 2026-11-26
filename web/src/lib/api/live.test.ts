@@ -236,6 +236,25 @@ describe('LiveRun ordering', () => {
     stop();
   });
 
+  it('skips runLogs requests and log buffering when created with { logs: false } (#309)', async () => {
+    const runLogs = vi.fn(() => Promise.resolve({ lines: [{ t: '2026-11-08T14:00:00Z', level: 'info' as const, message: 'hi' }] }));
+    hub.api = { ...hub.api, runLogs } as Api;
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e', { logs: false });
+    });
+    flushSync();
+    metrics.resolve({ steps: [], epochs: [] });
+    handlers.connection?.('open');
+    await vi.advanceTimersByTimeAsync(0);
+    handlers.log?.({ t: '2026-11-08T14:00:01Z', level: 'info', message: 'streamed' });
+    await vi.advanceTimersByTimeAsync(20);
+    expect(runLogs).not.toHaveBeenCalled();
+    expect(live.logs).toEqual([]);
+    expect(live.logsEarlier).toBe(0);
+    stop();
+  });
+
   it('keeps a learned steps per epoch when an older snapshot (0) is applied after it', async () => {
     let spe = 0;
     hub.api = { ...hub.api, run: () => Promise.resolve({ ...snapshot, status: 'running', step: 0, steps_per_epoch: spe }) } as Api;

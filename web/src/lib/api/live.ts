@@ -241,7 +241,8 @@ export class LiveRun {
   /** While a resumed run repeats steps it had already run: the old last step, and what the new attempt streamed. */
   #replay: { until: number; steps: Step[]; epochs: Epoch[] } | null = null;
 
-  constructor(id: () => string | null) {
+  constructor(id: () => string | null, opts?: { logs?: boolean }) {
+    const withLogs = opts?.logs ?? true;
     effect(() => {
       untrack(() => streams.add(this));
       return () => void streams.delete(this);
@@ -354,15 +355,17 @@ export class LiveRun {
           if (l.total !== undefined) this.logsEarlier = Math.max(0, l.total + newer - this.logs.length);
           else if (before > this.logs.length) this.logsEarlier += before - this.logs.length;
         };
-        api.runLogs(runId, MAX_LOGS, view.signal).then(
-          (l) => {
-            if (closed || my < logsApplied || gen !== this.#gen) return;
-            logsApplied = my;
-            held(l);
-            this.#bump();
-          },
-          () => {},
-        );
+        if (withLogs) {
+          api.runLogs(runId, MAX_LOGS, view.signal).then(
+            (l) => {
+              if (closed || my < logsApplied || gen !== this.#gen) return;
+              logsApplied = my;
+              held(l);
+              this.#bump();
+            },
+            () => {},
+          );
+        }
         let snap: { run: Run; claim: () => boolean }, metrics: RunMetrics;
         try {
           [snap, metrics] = await Promise.all([snapshot(), api.runMetrics(runId, view.signal)]);
@@ -630,6 +633,7 @@ export class LiveRun {
         log: (l) => {
           if (closed) return;
           this.#heard = Date.now();
+          if (!withLogs) return;
           this.#streamedLogs++;
           this.#streamedTail.push(l);
           if (this.#streamedTail.length >= MAX_LOGS + LOG_TRIM_BATCH) {

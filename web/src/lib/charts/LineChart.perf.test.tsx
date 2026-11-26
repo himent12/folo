@@ -67,12 +67,14 @@ describe('LineChart on a live page', () => {
     const data = target.querySelector('g[clip-path]')!;
     const lines = [...data.querySelectorAll('path')];
     const ends = [...svg.querySelectorAll('.end-dot')];
+    const beats = [...target.querySelectorAll('.end-beat-wrap')];
     expect(lines.length).toBeGreaterThan(2);
     expect(ends.length).toBe(2);
+    expect(beats.length).toBe(1);
     const seen: MutationRecord[] = [];
     const watch = new MutationObserver((m) => seen.push(...m));
     watch.observe(data, { subtree: true, childList: true, attributes: true, characterData: true });
-    for (const e of ends) watch.observe(e, { attributes: true });
+    for (const e of [...ends, ...beats]) watch.observe(e, { attributes: true });
     for (let px = 60; px < 600; px += 20) {
       svg.dispatchEvent(new PointerEvent('pointermove', { clientX: px, clientY: 50, bubbles: true }));
       flush();
@@ -84,6 +86,7 @@ describe('LineChart on a live page', () => {
     // The same nodes: nothing was re-created either.
     expect([...data.querySelectorAll('path')]).toEqual(lines);
     expect([...svg.querySelectorAll('.end-dot')]).toEqual(ends);
+    expect([...target.querySelectorAll('.end-beat-wrap')]).toEqual(beats);
     c.unmount();
   });
 

@@ -226,12 +226,12 @@ const running = new Set<PollGroup>();
 const hidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden';
 
 /** Starts the group's timer on its phase: the next tick where an interval started at `start` would have it. */
-function arm(g: PollGroup) {
+function arm(g: PollGroup, now = Date.now()) {
   if (hidden()) return;
   const fire = () => {
     for (const t of [...g.ticks]) t();
   };
-  const elapsed = Date.now() - g.start;
+  const elapsed = now - g.start;
   if (elapsed <= 0) {
     g.timer = setInterval(fire, g.every);
     return;
@@ -269,12 +269,13 @@ export function pollTogether(every: number, tick: () => void): () => void {
   const id = String(every);
   let g = groups.get(id);
   if (!g?.open) {
-    g = { every, start: Date.now(), ticks: new Set(), timer: undefined, open: true };
+    const start = Date.now();
+    g = { every, start, ticks: new Set(), timer: undefined, open: true };
     groups.set(id, g);
     endOfTurn();
     running.add(g);
     watchVisibility();
-    arm(g);
+    arm(g, start);
   }
   const group = g;
   // A function of its own per poller: the same callback given twice still ticks twice.
