@@ -19,6 +19,17 @@ pub fn axis_short(a: BenchAxis) -> &'static str {
     }
 }
 
+/// An axis's compact label for narrow leaderboard widths so all five axes and actions stay visible.
+pub fn axis_compact(a: BenchAxis) -> &'static str {
+    match a {
+        BenchAxis::Accuracy => "Acc.",
+        BenchAxis::Robustness => "Rob.",
+        BenchAxis::SelfLabeling => "Self",
+        BenchAxis::Calibration => "Cal.",
+        BenchAxis::Localization => "Loc.",
+    }
+}
+
 /// An axis's full name.
 pub fn axis_name(a: BenchAxis) -> &'static str {
     match a {

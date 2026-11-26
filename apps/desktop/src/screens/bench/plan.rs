@@ -151,26 +151,32 @@ impl FoloApp {
             ));
             return div().flex().flex_col().gap(px(16.)).children(design).child(plan).into_any_element();
         }
+        let compact = self.content_width(window) < 740.;
+        let (gap, pad_x, cond_min, group_w, sev_w, share_w, share_hdr) = if compact {
+            (10., 12., 140., 68., 130., 64., "Share")
+        } else {
+            (16., 16., 220., 84., 150., 110., "Share of robustness")
+        };
         let head = div()
             .flex()
             .items_center()
-            .gap(px(16.))
-            .px(px(16.))
+            .gap(px(gap))
+            .px(px(pad_x))
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
             .child(div().w(px(72.)).flex_none().child(th(&t, "Preview")))
-            .child(th(&t, "Condition").flex_1().min_w(px(220.)))
-            .child(th(&t, "Group").w(px(84.)).flex_none())
-            .child(th(&t, "Severities").w(px(150.)).flex_none())
-            .child(num_cell(110., th(&t, "Share of robustness")));
+            .child(th(&t, "Condition").flex_1().min_w(px(cond_min)))
+            .child(th(&t, "Group").w(px(group_w)).flex_none())
+            .child(th(&t, "Severities").w(px(sev_w)).flex_none())
+            .child(num_cell(share_w, th(&t, share_hdr)));
         let row =
             |thumb: AnyElement, name: String, what: String, group: &str, sev: folo_ui::Div, share: String| {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(16.))
-                    .px(px(16.))
+                    .gap(px(gap))
+                    .px(px(pad_x))
                     .py(px(8.))
                     .min_h(px(64.))
                     .border_b_1()
@@ -179,16 +185,21 @@ impl FoloApp {
                     .child(
                         div()
                             .flex_1()
-                            .min_w(px(220.))
+                            .min_w(px(cond_min))
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).child(name))
-                            .child(text(ty::SM, t.text_tertiary).child(what)),
+                            .child(
+                                text(ty::SM, t.text_primary)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .whitespace_normal()
+                                    .child(name),
+                            )
+                            .child(text(ty::SM, t.text_tertiary).whitespace_normal().child(what)),
                     )
-                    .child(text(ty::SM, t.text_secondary).w(px(84.)).flex_none().child(group.to_string()))
-                    .child(sev.w(px(150.)).flex_none())
-                    .child(num_cell(110., text(ty::SM, t.text_secondary).tnum().child(share)))
+                    .child(text(ty::SM, t.text_secondary).w(px(group_w)).flex_none().child(group.to_string()))
+                    .child(sev.w(px(sev_w)).flex_none())
+                    .child(num_cell(share_w, text(ty::SM, t.text_secondary).tnum().child(share)))
                     .into_any_element()
             };
         let mut rows = vec![{
