@@ -316,7 +316,7 @@ impl Inner {
     }
 }
 
-/// Reads an image file for inference (at most 64 MiB).
+/// Reads an image file for inference (non-empty, at most 64 MiB).
 fn read_image(path: &Path) -> Result<Vec<u8>, Error> {
     let meta = std::fs::metadata(path).map_err(|_| {
         Error::new(
@@ -331,7 +331,12 @@ fn read_image(path: &Path) -> Result<Vec<u8>, Error> {
     if meta.len() > MAX_IMAGE_BYTES {
         return Err(too_large(&folo_api::json::path(path)));
     }
-    std::fs::read(path).map_err(|e| Error::internal(format!("reading {}: {e}", folo_api::json::path(path))))
+    let bytes = std::fs::read(path)
+        .map_err(|e| Error::internal(format!("reading {}: {e}", folo_api::json::path(path))))?;
+    if bytes.is_empty() {
+        return Err(invalid_arguments("image must not be empty"));
+    }
+    Ok(bytes)
 }
 
 /// `payload_too_large` for an image over [`MAX_IMAGE_BYTES`], `what` being a file or the argument.
@@ -369,6 +374,7 @@ mod tests {
     use crate::Options;
     use crate::proxy::HttpStore;
     use crate::server::FoloMcp;
+    use folo_server::Store;
 
     /// `list_models`, `list_runs`, `list_label_jobs`, `list_benchmarks`, `val`, and `predict_batch` validate
     /// paging and argument ranges before hitting the store or proxy server, keeping embedded and `--server`
@@ -512,5 +518,51 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 0, "invalid arguments must never hit the proxy server");
         accept.abort();
         let _ = accept.await;
+
+        // `predict_batch` records the same `invalid_arguments` failure code for a zero-byte file across both
+        // embedded and proxied backends (never hitting the server with an empty multipart `image`).
+        let empty_img = home.join("empty.jpg");
+        std::fs::write(&empty_img, b"").unwrap();
+        let model_id = folo_server::MockStore::new().list_models().unwrap()[0].id.clone();
+        let mock_server =
+            folo_server::Server::new(Arc::new(folo_server::MockStore::new()), Default::default());
+        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http_url = format!("http://{}", http_listener.local_addr().unwrap());
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let http_task = tokio::spawn(mock_server.serve(http_listener, async move {
+            let _ = stop_rx.await;
+        }));
+        let proxied_live = FoloMcp::new(
+            Arc::new(HttpStore::new(&http_url, None)),
+            Some(Arc::new(HttpStore::new(&http_url, None))),
+            Options {
+                data_dir: home.to_path_buf(),
+                read_only: false,
+                confine: false,
+                device: "cpu".into(),
+                published_weights: None,
+            },
+        );
+        for backend in [&embedded, &proxied_live] {
+            let res = backend
+                .inner
+                .predict_batch(
+                    PredictBatchArgs {
+                        model_id: model_id.clone(),
+                        paths: Some(vec![empty_img.to_string_lossy().into_owned()]),
+                        glob: None,
+                        conf: 0.25,
+                        iou: 0.7,
+                    },
+                    &mut Progress::none(),
+                )
+                .await
+                .unwrap();
+            let failed = res.value["failed"].as_array().unwrap();
+            assert_eq!(failed.len(), 1);
+            assert_eq!(failed[0]["code"], "invalid_arguments");
+        }
+        let _ = stop_tx.send(());
+        let _ = http_task.await;
     }
 }

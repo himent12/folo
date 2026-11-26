@@ -234,9 +234,16 @@ pub(super) fn mark_resume(path: &Path) {
     }
 }
 
+/// A waiting queue entry tagged with the run's `attempt` counter when it was enqueued, so a worker woken
+/// after a stop + resume cannot claim a newer attempt (or a cloud-resumed attempt) of the same run.
+struct QueuedRun {
+    entry: Arc<RunEntry>,
+    attempt: u64,
+}
+
 struct Queue {
     /// Entries, not ids: the worker never looks the registry up while it holds the queue.
-    runs: VecDeque<Arc<RunEntry>>,
+    runs: VecDeque<QueuedRun>,
     shutdown: bool,
 }
 

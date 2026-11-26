@@ -265,7 +265,7 @@ fn a_stop_after_the_trainers_last_look_completes_the_run() {
         classes: vec![],
     };
     let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
-    assert!(e.claim());
+    assert!(e.claim(0));
     e.on_event(&RunEvent::Status(StatusEvent::new(RunStatus::Running, None)));
     e.execute(|| {
         e.on_event(&RunEvent::Status(StatusEvent::new(RunStatus::Completed, None)));
@@ -359,7 +359,7 @@ fn listed_queue_positions_are_one_snapshot() {
         let entry = Arc::new(RunEntry::new(id.clone(), dir.join(id), file));
         runs.list.write().unwrap().push(entry.clone());
         // Queued without a worker, so nothing leaves the queue.
-        runs.queue.lock().unwrap().runs.push_back(entry);
+        runs.queue.lock().unwrap().runs.push_back(QueuedRun { entry, attempt: 0 });
     }
     let stop = Arc::new(AtomicBool::new(false));
     let mover = {

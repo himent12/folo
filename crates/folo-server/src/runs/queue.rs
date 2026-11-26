@@ -14,7 +14,7 @@ use crate::util::{fnv1a, unique_id, unix_now};
 
 use super::entry::{Ended, INTERRUPTED, status_event};
 use super::train::execute;
-use super::{DatasetRef, Queue, RunEntry, RunFile, Runs, STOP_REQUESTED, now};
+use super::{DatasetRef, Queue, QueuedRun, RunEntry, RunFile, Runs, STOP_REQUESTED, now};
 
 /// A validated checkpoint snapshot staged for a new continued run ([`Runs::create`], [`Runs::create_cloud`]).
 pub struct CheckpointSnapshot<'a> {
@@ -33,8 +33,8 @@ impl Runs {
     /// of the worker taking it.
     pub(super) fn notify_queue(q: &Queue) {
         let waiting = q.runs.len() as u32;
-        for (i, e) in q.runs.iter().enumerate() {
-            e.send(RunEvent::Queue(QueueEvent { position: i as u32 + 1, waiting }));
+        for (i, item) in q.runs.iter().enumerate() {
+            item.entry.send(RunEvent::Queue(QueueEvent { position: i as u32 + 1, waiting }));
         }
     }
 
@@ -50,7 +50,7 @@ impl Runs {
             return Err(Error::not_found("run", id));
         }
         let mut q = self.queue.lock().unwrap();
-        let Some(from) = q.runs.iter().position(|x| x.id == id) else {
+        let Some(from) = q.runs.iter().position(|x| x.entry.id == id) else {
             return Err(not_queued(id, st.file.run.status));
         };
         let n = q.runs.len();
@@ -228,7 +228,7 @@ impl Runs {
                 entry.log(LogLevel::Warn, "the server is shutting down; the run was not queued");
                 return Err(shutting_down());
             }
-            q.runs.push_back(entry.clone());
+            q.runs.push_back(QueuedRun { entry: entry.clone(), attempt: st.attempt });
             Self::notify_queue(&q);
             q.runs.len() - 1 + usize::from(self.active.lock().unwrap().is_some())
         };
@@ -255,9 +255,9 @@ impl Runs {
 
     fn work(self: Arc<Self>) {
         loop {
-            let entry = {
+            let QueuedRun { entry, attempt } = {
                 let mut q = self.queue.lock().unwrap();
-                let entry = loop {
+                let item = loop {
                     if q.shutdown {
                         return;
                     }
@@ -268,15 +268,16 @@ impl Runs {
                     q = self.wake.wait(q).unwrap();
                 };
                 // Set before the queue lock is released, so `enqueue` counts the runs ahead exactly.
-                *self.active.lock().unwrap() = Some(entry.clone());
+                *self.active.lock().unwrap() = Some(item.entry.clone());
                 self.activity.fetch_add(1, Ordering::SeqCst);
-                entry
+                item
             };
             // A benchmark probe finishes first; the device is the run's until it ends.
             let _gate = self.gate.lock().unwrap_or_else(|p| p.into_inner());
             // Lock order: registry, then a run's state, then the queue (as `delete` and `stop` take them); the
-            // queue lock is released first. A run stopped or deleted in between is skipped.
-            if entry.claim() {
+            // queue lock is released first. A run stopped, deleted, or superseded by a newer attempt in between
+            // is skipped.
+            if entry.claim(attempt) {
                 entry.execute(|| {
                     execute(&entry, &self.throughput, &self.hold);
                     Ended::Finished
@@ -319,7 +320,7 @@ impl Runs {
                 {
                     let mut q = self.queue.lock().unwrap();
                     let before = q.runs.len();
-                    q.runs.retain(|q| q.id != id);
+                    q.runs.retain(|q| q.entry.id != id);
                     if q.runs.len() != before {
                         Self::notify_queue(&q);
                     }
@@ -359,7 +360,7 @@ impl Runs {
         let queued: Vec<Arc<RunEntry>> = {
             let mut q = self.queue.lock().unwrap();
             q.shutdown = true;
-            q.runs.drain(..).collect()
+            q.runs.drain(..).map(|item| item.entry).collect()
         };
         self.wake.notify_all();
         for e in queued {

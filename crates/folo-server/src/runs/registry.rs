@@ -182,7 +182,7 @@ impl Runs {
             .filter(|(_, st)| !st.deleted)
             .map(|(e, st)| {
                 let mut r = st.file.shown();
-                r.queue_position = q.runs.iter().position(|x| x.id == e.id).map(|i| i as u32 + 1);
+                r.queue_position = q.runs.iter().position(|x| x.entry.id == e.id).map(|i| i as u32 + 1);
                 r
             })
             .collect()
@@ -204,14 +204,14 @@ impl Runs {
         }
         let mut r = st.file.shown();
         let q = self.queue.lock().unwrap();
-        r.queue_position = q.runs.iter().position(|x| x.id == e.id).map(|i| i as u32 + 1);
+        r.queue_position = q.runs.iter().position(|x| x.entry.id == e.id).map(|i| i as u32 + 1);
         Ok(r)
     }
 
     /// The 1-based place of run `id` among the waiting runs.
     pub(super) fn position(&self, id: &str) -> Option<u32> {
         let q = self.queue.lock().unwrap();
-        q.runs.iter().position(|e| e.id == id).map(|i| i as u32 + 1)
+        q.runs.iter().position(|e| e.entry.id == id).map(|i| i as u32 + 1)
     }
 
     /// Deletes a finished run and its folder, or a local run waiting in this server's queue that never started (it
@@ -240,7 +240,7 @@ impl Runs {
                     .hint(format!("stop it first (POST /api/runs/{id}/stop)")));
             }
             let before = q.runs.len();
-            q.runs.retain(|x| x.id != id);
+            q.runs.retain(|x| x.entry.id != id);
             if q.runs.len() != before {
                 Self::notify_queue(&q);
             }
@@ -317,6 +317,58 @@ mod tests {
         assert_eq!(runs.metrics(&id, &MetricsQuery::default()).unwrap_err().status, StatusCode::NOT_FOUND);
         assert_eq!(runs.logs(&id, &LogsQuery::last(10)).unwrap_err().status, StatusCode::NOT_FOUND);
         assert!(runs.list().is_empty(), "list() must exclude concurrently deleted runs");
+        runs.shutdown(None);
+    }
+
+    /// A worker that popped attempt 0 before blocking on the device gate must not claim attempt 1 after
+    /// `stop` + `restart` (whether resumed locally or claimed by a cloud executor).
+    #[test]
+    fn stale_worker_cannot_claim_newer_or_cloud_resumed_attempt() {
+        let dir = TestDir::new("runs-stale-attempt-claim");
+        let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+        let e = sample_run(&runs, "race-attempt");
+        let attempt0 = e.state.lock().unwrap().attempt;
+
+        // Attempt 0 is stopped before the worker acquires the gate, then restarted into attempt 1.
+        runs.stop(e.id()).unwrap();
+        let cfg = e.run().config.clone();
+        runs.restart(&e, cfg.clone(), None).unwrap();
+        let attempt1 = e.state.lock().unwrap().attempt;
+        assert_eq!(attempt1, attempt0 + 1);
+
+        assert!(!e.claim(attempt0), "stale attempt 0 must not claim restarted attempt 1");
+        assert!(e.claim(attempt1), "matching attempt 1 should claim once");
+        assert!(!e.claim(attempt1), "already-claimed attempt must not be claimed twice");
+
+        // Also verify a cloud-claimed attempt cannot be claimed even with a matching attempt number.
+        e.state.lock().unwrap().claimed = false;
+        e.state.lock().unwrap().file.run.status = folo_api::RunStatus::Stopped;
+        let cloud = folo_api::RunCloud {
+            connection_id: "c_1".into(),
+            provider: "runpod".into(),
+            offer: folo_api::CloudOffer {
+                id: "a100".into(),
+                gpu: "A100".into(),
+                gpu_count: 1,
+                vram_bytes: 80 << 30,
+                price_per_hour: Some(1.0),
+                region: None,
+                detail: None,
+                availability: folo_api::CloudAvailability::High,
+            },
+            instance_id: None,
+            phase: folo_api::CloudPhase::Provisioning,
+            progress: None,
+            max_hours: 1.0,
+            deadline: None,
+            cost_usd: None,
+            synced: None,
+            ended_in: None,
+            unanswered_since: None,
+        };
+        runs.restart(&e, cfg, Some(cloud)).unwrap();
+        let attempt2 = e.state.lock().unwrap().attempt;
+        assert!(!e.claim(attempt2), "local worker must not claim a cloud-claimed attempt");
         runs.shutdown(None);
     }
 }

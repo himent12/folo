@@ -624,10 +624,11 @@ impl Store for RealStore {
     }
 
     fn create_upload(&self, req: CreateUpload) -> Result<UploadCreated> {
-        Uploads::check(&req)?;
+        Uploads::check_target(&req)?;
         if let Some(existing) = req.fingerprint.as_deref().and_then(|f| self.uploaded(req.kind, f)) {
             return Ok(UploadCreated { upload: None, existing: Some(existing) });
         }
+        Uploads::check(&req)?;
         Ok(UploadCreated { upload: Some(self.uploads.create(&req)?), existing: None })
     }
 

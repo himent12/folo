@@ -246,9 +246,10 @@ impl Uploads {
         Duration::from_millis(self.idle_ms.load(Ordering::Relaxed))
     }
 
-    /// `400 invalid_body` for a request no session can be made of: a blank or control-character name,
-    /// a dataset format for a model, or a blank, control-character, or overlong fingerprint.
-    pub fn check(req: &CreateUpload) -> Result<()> {
+    /// `400 invalid_body` for an invalid upload target (`name` or `kind`/`format`), checked before looking up an
+    /// existing persisted fingerprint so legacy keys in `uploads.json` remain reachable while malformed requests
+    /// are still refused.
+    pub fn check_target(req: &CreateUpload) -> Result<()> {
         let bad = |m: &str| Error::new(StatusCode::BAD_REQUEST, "invalid_body", m);
         let name = req.name.trim();
         if name.is_empty() {
@@ -260,6 +261,14 @@ impl Uploads {
         if req.kind == UploadKind::Model && req.format != DatasetFormat::Auto {
             return Err(bad("format only applies to kind dataset"));
         }
+        Ok(())
+    }
+
+    /// `400 invalid_body` for a request no session can be made of: a blank or control-character name,
+    /// a dataset format for a model, or a blank, control-character, or overlong fingerprint.
+    pub fn check(req: &CreateUpload) -> Result<()> {
+        Self::check_target(req)?;
+        let bad = |m: &str| Error::new(StatusCode::BAD_REQUEST, "invalid_body", m);
         if let Some(fp) = req.fingerprint.as_deref() {
             if fp.trim().is_empty() {
                 return Err(bad("fingerprint must not be empty"));

@@ -506,19 +506,20 @@ fn server_cli_commands_train_the_servers_config() {
 }
 
 /// `--name` rejects blank values, control characters, path separators, and `.`/`..` (plus Windows-forbidden
-/// characters and `NUL` on Windows) before creating any directory under `--project`, while keeping valid
-/// single-component names under the current OS's rules (including `baseline:aug2` on Unix, spaces, quotes,
-/// and leading dashes).
+/// characters, trailing dot/space, and `NUL` on Windows) before creating any directory under `--project`, while
+/// preserving exact spelling of valid single-component names under the current OS's rules (including
+/// `baseline:aug2` and `baseline ` on Unix, spaces, quotes, and leading dashes).
 #[test]
 fn check_run_name_blocks_traversal_and_blank_names() {
-    for ok in ["shapes-n", "  shapes-n  ", "my run 'two'", "--amp", "v1.0"] {
-        assert_eq!(super::check_run_name(ok).unwrap(), ok.trim(), "{ok}");
+    for ok in ["shapes-n", " shapes-n", "my run 'two'", "--amp", "v1.0"] {
+        assert_eq!(super::check_run_name(ok).unwrap(), ok, "{ok:?}");
     }
     #[cfg(unix)]
     {
         use clap::Parser;
-        // Names with `:` are valid single path components on Unix and are emitted verbatim by `folo-server`.
+        // Names with `:` or trailing spaces are valid single path components on Unix and preserve exact spelling.
         assert_eq!(super::check_run_name("baseline:aug2").unwrap(), "baseline:aug2");
+        assert_eq!(super::check_run_name("baseline ").unwrap(), "baseline ");
         let mut api: folo_api::TrainConfig = serde_json::from_value(json!({ "dataset_id": "ds_1" })).unwrap();
         api.name = "baseline:aug2".into();
         let cmd = folo_server::cli::train_command(&api, "/tmp/data", folo_api::DatasetFormat::Auto, None);
@@ -535,7 +536,7 @@ fn check_run_name_blocks_traversal_and_blank_names() {
         );
     }
     #[cfg(windows)]
-    for bad in [r"sub\run", "a:stream", "baseline:aug2", "bad<name>", "trailing.", "NUL"] {
+    for bad in [r"sub\run", "a:stream", "baseline:aug2", "baseline ", "bad<name>", "trailing.", "NUL"] {
         let err = super::check_run_name(bad).unwrap_err();
         assert_eq!(
             (err.exit, err.code.as_str()),

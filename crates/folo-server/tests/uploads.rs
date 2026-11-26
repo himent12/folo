@@ -639,3 +639,47 @@ async fn entries_with_windows_unsafe_names_are_refused() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert!(staging(&home).is_empty());
 }
+
+/// Legacy persisted fingerprints (including whitespace-only or control-character keys recorded by older versions)
+/// remain reachable on retry via `POST /api/uploads`, while new sessions still reject invalid fingerprints.
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_persisted_fingerprints_remain_reachable_on_create_upload() {
+    let t = TestDir::new("uploads-legacy-fp");
+    let home = t.join("home");
+    let bytes = model_bytes(&t);
+    std::fs::create_dir_all(home.join("models")).unwrap();
+    std::fs::write(home.join("models").join("legacy.folo"), &bytes).unwrap();
+    let first = app(open(&home));
+    let models: ModelList = ok(&first, bare("GET", "/api/models"), StatusCode::OK).await;
+    let model_id = models.models[0].id.clone();
+
+    // Persist legacy whitespace-only and control-char keys directly in `uploads.json`, then reopen.
+    std::fs::write(
+        home.join("uploads.json"),
+        json!([
+            { "kind": "model", "fingerprint": "   ", "id": model_id },
+            { "kind": "model", "fingerprint": "legacy\nfp", "id": model_id }
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    let reopened = app(open(&home));
+
+    for fp in ["   ", "legacy\nfp"] {
+        let res: UploadCreated = ok(
+            &reopened,
+            post_json("/api/uploads", json!({ "kind": "model", "name": "retry", "fingerprint": fp })),
+            StatusCode::OK,
+        )
+        .await;
+        assert_eq!(res.existing.unwrap().model.unwrap().id, model_id, "{fp:?}");
+    }
+    // An unknown invalid fingerprint still fails with 400 invalid_body instead of opening a new session.
+    err(
+        &reopened,
+        post_json("/api/uploads", json!({ "kind": "model", "name": "new", "fingerprint": "\t" })),
+        StatusCode::BAD_REQUEST,
+        "invalid_body",
+    )
+    .await;
+}
