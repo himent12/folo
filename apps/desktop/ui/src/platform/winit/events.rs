@@ -358,7 +358,12 @@ fn dedupe_ime_commit(
     was_composing: bool,
     text: &str,
 ) -> bool {
-    if !was_composing && key_text.as_deref() == Some(text) {
+    if was_composing {
+        // A completed IME composition never duplicates a subsequent plain key press.
+        *key_text = None;
+        *commit_text = None;
+        false
+    } else if key_text.as_deref() == Some(text) {
         *key_text = None;
         *commit_text = None;
         true
@@ -578,6 +583,18 @@ mod tests {
             if !dedupe_key_char(&mut key_text, &mut commit_text, Some("o")) {
                 typed.push('o');
             }
+        }
+        assert_eq!(typed, "oo");
+
+        // A completed IME composition (`was_composing == true`) must not suppress a subsequent
+        // plain key press of the same character in the same event batch.
+        let (mut key_text, mut commit_text) = (None, None);
+        let mut typed = String::new();
+        if !dedupe_ime_commit(&mut key_text, &mut commit_text, true, "o") {
+            typed.push('o');
+        }
+        if !dedupe_key_char(&mut key_text, &mut commit_text, Some("o")) {
+            typed.push('o');
         }
         assert_eq!(typed, "oo");
     }

@@ -297,3 +297,51 @@ fn an_unknown_family_falls_back_to_the_system_ui_font() {
     let ui = ts.font_id(&font(".SystemUIFont")).unwrap();
     assert_eq!(layout(&ts, id, "fallback", 13.).width, layout(&ts, ui, "fallback", 13.).width);
 }
+
+#[test]
+fn rtl_and_bidi_runs_preserve_all_glyphs_and_visual_positions() {
+    let ts = system();
+    let regular = ts.font_id(&geist(400.)).unwrap();
+
+    // Pure Hebrew ("שלום", 4 chars = 8 UTF-8 bytes at offsets 0, 2, 4, 6): all 4 glyphs present in
+    // visual left-to-right order (ascending x, descending logical byte indices).
+    let hebrew = "שלום";
+    let line = layout(&ts, regular, hebrew, 14.);
+    let glyphs: Vec<_> = line.runs.iter().flat_map(|r| r.glyphs.iter()).collect();
+    assert_eq!(glyphs.len(), 4, "all 4 Hebrew letters must be shaped: {glyphs:?}");
+    let indices: Vec<usize> = glyphs.iter().map(|g| g.index).collect();
+    assert_eq!(indices, vec![6, 4, 2, 0], "RTL glyphs map to descending logical UTF-8 byte offsets");
+    let xs: Vec<f32> = glyphs.iter().map(|g| f(g.position.x)).collect();
+    assert!(xs.windows(2).all(|w| w[0] < w[1]), "visual positions must strictly increase: {xs:?}");
+    assert!(line.width > px(0.));
+
+    // Pure Arabic ("مرحبا", 5 chars): must not collapse to a single glyph; every index is a valid
+    // char boundary and visual positions advance left-to-right.
+    let arabic = "مرحبا";
+    let line = layout(&ts, regular, arabic, 14.);
+    let glyphs: Vec<_> = line.runs.iter().flat_map(|r| r.glyphs.iter()).collect();
+    assert!(glyphs.len() >= 4, "Arabic word must retain its shaped glyphs, got {glyphs:?}");
+    assert!(
+        glyphs.iter().all(|g| g.index < arabic.len() && arabic.is_char_boundary(g.index)),
+        "Arabic glyph indices must be valid char boundaries"
+    );
+    let xs: Vec<f32> = glyphs.iter().map(|g| f(g.position.x)).collect();
+    assert!(xs.windows(2).all(|w| w[0] <= w[1]), "Arabic visual positions advance left-to-right: {xs:?}");
+    assert!(line.width > px(0.));
+
+    // Mixed LTR + RTL + LTR ("hello שלום world"): all 16 characters shaped, Hebrew middle run has
+    // all 4 logical offsets (6, 8, 10, 12) in visual order [12, 10, 8, 6], and x increases monotonically.
+    let mixed = "hello שלום world";
+    let line = layout(&ts, regular, mixed, 14.);
+    let glyphs: Vec<_> = line.runs.iter().flat_map(|r| r.glyphs.iter()).collect();
+    assert_eq!(glyphs.len(), mixed.chars().count(), "mixed bidi text must keep every character");
+    assert!(
+        glyphs.iter().all(|g| g.index < mixed.len() && mixed.is_char_boundary(g.index)),
+        "every mixed bidi glyph index must be a UTF-8 char boundary"
+    );
+    let hebrew_indices: Vec<usize> =
+        glyphs.iter().map(|g| g.index).filter(|&ix| (6..14).contains(&ix)).collect();
+    assert_eq!(hebrew_indices, vec![12, 10, 8, 6], "embedded Hebrew run is laid out visually RTL");
+    let xs: Vec<f32> = glyphs.iter().map(|g| f(g.position.x)).collect();
+    assert!(xs.windows(2).all(|w| w[0] < w[1]), "mixed bidi visual x must strictly increase: {xs:?}");
+}

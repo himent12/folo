@@ -36,18 +36,42 @@ pub fn value_at(points: &[(f32, f32)], hover: Option<f32>, x0: f32, x1: f32) -> 
     }
 }
 
-/// The x the cursor snaps to at `hx`: the first series point within 6 % of the range (the same
-/// rule the cursor painter uses), or None when the cursor is past the data.
-pub fn cursor_x(series: &[Series], hx: f32, span: f32) -> Option<f32> {
-    if !hx.is_finite() || !span.is_finite() || span < 0.0 {
+/// The x the cursor snaps to at `hx`: the first series point in `[x0, x1]` within 6 % of the
+/// range (the same rule the cursor painter uses), or None when the cursor is past the data.
+pub fn cursor_x(series: &[Series], hx: f32, x0: f32, x1: f32) -> Option<f32> {
+    let span = x1 - x0;
+    if !hx.is_finite() || !x0.is_finite() || !x1.is_finite() || !span.is_finite() || span < 0.0 {
         return None;
     }
     series.iter().find_map(|s| {
         let data = if s.smooth > 0.0 { smoothed(&s.points, s.smooth) } else { s.points.clone() };
-        let (x, y) = data[nearest(&data, hx)?];
+        let (x, y) = data[nearest_in_range(&data, hx, x0, x1)?];
         (x.is_finite() && y.is_finite() && ((x - hx).abs() <= span * 0.06 || s.points.len() <= 1))
             .then_some(x)
     })
+}
+
+/// Index of the finite point nearest to `x` whose x-coordinate lies within `[x0, x1]`.
+pub fn nearest_in_range(points: &[(f32, f32)], x: f32, x0: f32, x1: f32) -> Option<usize> {
+    if points.is_empty() || !x.is_finite() || !x0.is_finite() || !x1.is_finite() || x0 > x1 {
+        return None;
+    }
+    let lo = points.partition_point(|p| p.0 < x0);
+    let hi = points.partition_point(|p| p.0 <= x1);
+    if lo < hi
+        && let Some(rel) = nearest(&points[lo..hi], x)
+    {
+        let p = points[lo + rel];
+        if p.0.is_finite() && p.1.is_finite() && p.0 >= x0 && p.0 <= x1 {
+            return Some(lo + rel);
+        }
+    }
+    points
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.0.is_finite() && p.1.is_finite() && p.0 >= x0 && p.0 <= x1)
+        .min_by(|(_, a), (_, b)| (a.0 - x).abs().total_cmp(&(b.0 - x).abs()))
+        .map(|(idx, _)| idx)
 }
 
 pub fn nearest(points: &[(f32, f32)], x: f32) -> Option<usize> {
@@ -85,8 +109,22 @@ mod tests {
         let pts: Vec<(f32, f32)> = (0..=40).map(|i| (i as f32, 0.5)).collect();
         let s = vec![Series::new("a", folo_ui::hsla(0., 0., 0., 1.), Arc::new(pts))];
         // Epoch 100 of 120 with data through 40: no snap, so no tick is hidden.
-        assert_eq!(cursor_x(&s, 100., 120.), None);
-        assert_eq!(cursor_x(&s, 39.6, 120.), Some(40.));
+        assert_eq!(cursor_x(&s, 100., 0., 120.), None);
+        assert_eq!(cursor_x(&s, 39.6, 0., 120.), Some(40.));
+    }
+
+    #[test]
+    fn cursor_respects_visible_domain_and_ignores_closer_out_of_range_points() {
+        // Point at 9.9 is closer to 10.0 than 10.2, but outside [10.0, 20.0]: cursor must snap to
+        // the in-range point 10.2 rather than rejecting the series.
+        let pts = vec![(9.9, 1.0), (10.2, 2.0), (20.1, 3.0)];
+        assert_eq!(nearest_in_range(&pts, 10.0, 10.0, 20.0), Some(1));
+        assert_eq!(nearest_in_range(&pts, 20.0, 10.0, 20.0), Some(1));
+        let s = vec![Series::new("a", folo_ui::hsla(0., 0., 0., 1.), Arc::new(pts))];
+        assert_eq!(cursor_x(&s, 10.0, 10.0, 20.0), Some(10.2));
+        // A series with only out-of-range points must not produce a chip span.
+        let outside = vec![Series::new("b", folo_ui::hsla(0., 0., 0., 1.), Arc::new(vec![(5.0, 1.0)]))];
+        assert_eq!(cursor_x(&outside, 10.0, 10.0, 20.0), None);
     }
 
     #[test]
@@ -110,6 +148,6 @@ mod tests {
         assert_eq!(value_near(&with_nan, 1.0, 2.0), None);
         assert_eq!(value_at(&with_nan, None, 0.0, 2.0), Some(3.0));
         let s = vec![Series::new("a", folo_ui::hsla(0., 0., 0., 1.), Arc::new(pts))];
-        assert_eq!(cursor_x(&s, f32::NAN, 2.0), None);
+        assert_eq!(cursor_x(&s, f32::NAN, 0.0, 2.0), None);
     }
 }

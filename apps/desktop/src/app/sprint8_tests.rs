@@ -21,9 +21,11 @@ use folo_ui::{
 
 use super::super::select_driving::press;
 use super::super::tests::{drive, open};
-use super::super::{DsTab, LogFilter, Route};
+use super::super::{DsTab, LogFilter, Route, SampleView};
 use super::settle;
-use crate::api::{ApiError, BBox, ImageInfo, IssueCounts, Loss, RunMetrics, RunStatus, Step, Subscription};
+use crate::api::{
+    ApiError, BBox, ImageInfo, IssueCounts, Loss, RunMetrics, RunSamples, Sample, Step, Subscription,
+};
 use crate::store::{ImgKind, Load, RunData};
 use crate::theme::{Mode, Theme};
 
@@ -105,6 +107,81 @@ fn inspector_shortcuts_survive_unmounted_box_focus_and_background_page_arrival()
         shown_id, img1_id,
         "background page arrival must stay on stepped image {img1_id}, not snap back to {img0_id}"
     );
+}
+
+#[test]
+fn inspector_waiting_state_keeps_focus_and_steps_back_from_unloaded_sample() {
+    let (mut app, window) = open();
+    let (ds_id, run_id, img0_id) = drive(&mut app, window, |this, w, cx| {
+        let ds = this.store.datasets.ready().unwrap()[0].clone();
+        let run = this.store.runs.ready().unwrap()[0].clone();
+        this.navigate(Route::Dataset(ds.id.clone()), w, cx);
+        (ds.id, run.id, String::new())
+    });
+    let _ = img0_id;
+    settle(&mut app, window);
+
+    // Give image 0 boxes, attach a 2-sample set whose 2nd image is on an unloaded page, and hold
+    // that page pending via `images_more`.
+    let img0_id = drive(&mut app, window, |this, w, cx| {
+        let imgs = this.store.images.get_mut(&ds_id).and_then(|l| l.ready_mut()).unwrap();
+        let sample_box =
+            imgs[0].boxes.first().copied().unwrap_or(BBox { class: 0, x1: 10., y1: 10., x2: 50., y2: 50. });
+        while imgs[0].boxes.len() < 3 {
+            imgs[0].boxes.push(sample_box);
+        }
+        let img0_id = imgs[0].id.clone();
+        let make_sample = |id: String| Sample {
+            dataset_id: ds_id.clone(),
+            image_id: id,
+            width: 100,
+            height: 100,
+            truth: vec![],
+            pred: vec![],
+        };
+        this.store.samples.insert(
+            run_id.clone(),
+            Load::Ready(RunSamples {
+                epoch: 1,
+                samples: vec![make_sample(img0_id.clone()), make_sample("img_unloaded_page_2".into())],
+            }),
+        );
+        this.images_more.insert(ds_id.clone(), 999);
+        this.open_inspector(ds_id.clone(), 0, w, cx);
+        if let Some(i) = this.inspector.as_mut() {
+            i.sample = Some((run_id.clone(), SampleView::Both));
+        }
+        img0_id
+    });
+    settle(&mut app, window);
+
+    // Focus a per-image box row, step right onto the unloaded sample, and let the waiting frame
+    // render. Focus must recover to `inspector_focus`, and Left must step back immediately.
+    drive(&mut app, window, |this, w, cx| {
+        this.kb = true;
+        w.focus(&this.fh("insp-box-2", cx));
+        cx.notify();
+    });
+    settle(&mut app, window);
+
+    press(&mut app, window, "right");
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert_eq!(insp.want.as_deref(), Some("img_unloaded_page_2"));
+        assert!(
+            this.inspector_focus.is_focused(w),
+            "waiting state must recover focus to inspector_focus after box row unmounts"
+        );
+    });
+
+    press(&mut app, window, "left");
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        let insp = this.inspector.as_ref().unwrap();
+        assert_eq!(insp.want, None, "Left during waiting state stepped back to the loaded sample");
+        assert_eq!(this.filtered_image(&ds_id, insp.index).unwrap().id, img0_id);
+    });
 }
 
 #[test]
@@ -340,37 +417,91 @@ fn playground_open_button_respects_open_image_blocked_while_loading_or_failed() 
 #[test]
 fn modified_arrows_do_not_activate_segmented_tabs_or_charts_and_narrow_charts_render_cleanly() {
     let (mut app, window) = open();
+    let send = |app: &mut HeadlessApp, spec: &str| {
+        let ks = Keystroke::parse(spec).unwrap();
+        app.simulate_input(
+            window.into(),
+            PlatformInput::KeyDown(KeyDownEvent { keystroke: ks, is_held: false }),
+        );
+        settle(app, window);
+    };
+
+    // 1. Underline tabs: Ctrl+Right must not switch tabs.
     drive(&mut app, window, |this, w, cx| {
         this.navigate(Route::Bench("bn_3c90".into()), w, cx);
     });
     settle(&mut app, window);
-
-    // Focus tab 0 and send Ctrl+Right: must not switch tabs.
     drive(&mut app, window, |this, w, cx| w.focus(&this.fh("bench-tab-0", cx)));
     settle(&mut app, window);
-    let ctrl_right = Keystroke::parse("ctrl-right").unwrap();
-    app.simulate_input(
-        window.into(),
-        PlatformInput::KeyDown(KeyDownEvent { keystroke: ctrl_right, is_held: false }),
-    );
-    settle(&mut app, window);
+    send(&mut app, "ctrl-right");
     assert_eq!(
         drive(&mut app, window, |this, _, _| this.bench.tab),
         crate::bench::BenchTab::Leaderboard,
         "Ctrl+Right must not switch underline tabs"
     );
 
-    // Narrow chart rendering with future label, marker, pow_caption, axis_titles, and dense
-    // histogram bins must paint cleanly without panicking or overflowing bounds.
+    // 2. Segmented control & 3. Chart cursor on a Run page: Ctrl+arrows must not trigger either.
+    let run_id = drive(&mut app, window, |this, w, cx| {
+        let id = this.store.runs.ready().unwrap()[0].id.clone();
+        this.navigate(Route::Run(id.clone()), w, cx);
+        id
+    });
+    let _ = run_id;
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| this.focus_key("run-loss-smooth", w, cx));
+    settle(&mut app, window);
+    let smooth_before = drive(&mut app, window, |this, _, _| this.run_chart_opts.loss_smooth);
+    send(&mut app, "ctrl-right");
+    send(&mut app, "ctrl-end");
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| this.run_chart_opts.loss_smooth),
+        smooth_before,
+        "Ctrl+Right/End must not toggle segmented control"
+    );
+
+    drive(&mut app, window, |this, w, cx| w.focus(&this.fh("run-charts", cx)));
+    settle(&mut app, window);
+    send(&mut app, "ctrl-left");
+    send(&mut app, "ctrl-right");
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| this.chart_hover),
+        None,
+        "Ctrl+Left/Right must not activate chart cursor"
+    );
+
+    // 4. Select menu: Ctrl+Down/End must not move menu highlight.
+    let ds_id = drive(&mut app, window, |this, w, cx| {
+        let id = this.store.datasets.ready().unwrap()[0].id.clone();
+        this.navigate(Route::Dataset(id.clone()), w, cx);
+        id
+    });
+    let _ = ds_id;
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| this.focus_key("ds-class", w, cx));
+    settle(&mut app, window);
+    press(&mut app, window, "enter");
+    settle(&mut app, window);
+    let (open_before, hl_before) = drive(&mut app, window, |this, _, _| (this.menu_open, this.menu_hl));
+    assert_eq!(open_before, Some("ds-class"), "ds-class select opened");
+    send(&mut app, "ctrl-down");
+    send(&mut app, "ctrl-end");
+    assert_eq!(
+        drive(&mut app, window, |this, _, _| (this.menu_open, this.menu_hl)),
+        (open_before, hl_before),
+        "Ctrl+Down/End must not move select highlight"
+    );
+
+    // 5. Narrow chart rendering with positive plot height: marker, future, pow_caption,
+    // axis_titles, cursor chip, and histogram labels must all paint and stay inside [0..140].
     let mut narrow =
-        HeadlessApp::new(HeadlessOptions { size: size(px(140.), px(160.)), ..Default::default() });
+        HeadlessApp::new(HeadlessOptions { size: size(px(140.), px(280.)), ..Default::default() });
     let w = narrow.update(|cx| {
         cx.set_global(Theme::new(Mode::Dark));
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(folo_ui::Bounds::new(
                     point(px(0.), px(0.)),
-                    size(px(140.), px(160.)),
+                    size(px(140.), px(280.)),
                 ))),
                 ..Default::default()
             },
@@ -379,11 +510,24 @@ fn modified_arrows_do_not_activate_segmented_tabs_or_charts_and_narrow_charts_re
         .unwrap()
     });
     narrow.frame(w.into());
-
-    // Confirm a run with non-active status does not leave a lingering subscription after `forget_run`.
-    drive(&mut app, window, |this, _, _| {
-        assert!(this.store.runs.ready().unwrap().iter().any(|r| r.status != RunStatus::Queued));
-    });
+    let scene = narrow.scene(w.into());
+    let mono: Vec<_> = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            folo_ui::Primitive::MonoSprite(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let chart_sprites: Vec<_> = mono.iter().filter(|s| s.bounds.origin.y < px(160.0).scale(1.0)).collect();
+    assert!(!chart_sprites.is_empty(), "narrow line chart must have positive plot_h and paint labels");
+    for s in &mono {
+        assert!(
+            s.bounds.origin.x >= px(-1.0).scale(1.0) && s.bounds.right() <= px(141.0).scale(1.0),
+            "narrow chart glyph escaped 140 px width: {:?}",
+            s.bounds
+        );
+    }
 }
 
 struct ChartClampView;
@@ -404,7 +548,7 @@ impl folo_ui::Render for ChartClampView {
             )],
         );
         lc.x_range = Some((0.0, 10.0));
-        lc.height = 70.;
+        lc.height = 160.;
         lc.pow_caption = true;
         lc.axis_titles = Some(("Training epoch number", "Rate"));
         lc.future = Some((2.0, "ETA 2h 15m remaining".into()));
@@ -421,7 +565,7 @@ impl folo_ui::Render for ChartClampView {
             Arc::new(vec![10, 0, 25, 5, 18, 0, 12, 30]),
             Arc::new((0..8).map(|i| format!("bin-{i}")).collect()),
             t.chart_series[1],
-            70.,
+            90.,
             Some(0.3),
             None,
         );

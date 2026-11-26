@@ -259,18 +259,20 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             )
         };
 
-        let advance_offset = |i: usize| glyph_offsets.get(i).map_or(0.0, |o| o.advanceOffset);
         let is_rtl = (glyphrun.bidiLevel & 1) != 0;
+        let advance_offset = |i: usize| {
+            let offset = glyph_offsets.get(i).map_or(0.0, |o| o.advanceOffset);
+            if is_rtl { -offset } else { offset }
+        };
         let run_utf16_start = desc.textPosition as usize;
         let mut glyphs = Vec::with_capacity(glyph_count);
         for (cluster_utf16_offset, glyph_start, glyph_end) in
             visual_clusters(cluster_map, glyph_count, is_rtl)
         {
             context.index_converter.advance_to_utf16_ix(run_utf16_start + cluster_utf16_offset);
-            for (cluster_glyph_idx, glyph_id) in glyph_ids[glyph_start..glyph_end].iter().enumerate() {
-                let id = GlyphId(*glyph_id as u32);
+            let mut emit = |this_glyph_idx: usize| {
+                let id = GlyphId(glyph_ids[this_glyph_idx] as u32);
                 let is_emoji = color_font && is_color_glyph(&font_face, id, &context.state.factory);
-                let this_glyph_idx = glyph_start + cluster_glyph_idx;
                 glyphs.push(ShapedGlyph {
                     id,
                     position: point(px(context.width + advance_offset(this_glyph_idx)), px(0.0)),
@@ -278,6 +280,15 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                     is_emoji,
                 });
                 context.width += glyph_advances[this_glyph_idx];
+            };
+            if is_rtl {
+                for this_glyph_idx in (glyph_start..glyph_end).rev() {
+                    emit(this_glyph_idx);
+                }
+            } else {
+                for this_glyph_idx in glyph_start..glyph_end {
+                    emit(this_glyph_idx);
+                }
             }
         }
         context.runs.push(ShapedRun { font_id, glyphs });
@@ -320,46 +331,29 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
     }
 }
 
-/// Yields `(utf16_offset_in_run, glyph_start, glyph_end)` for each cluster in visual glyph order.
+/// Yields `(utf16_offset_in_run, glyph_start, glyph_end)` for each cluster in visual left-to-right
+/// order.
 ///
-/// For LTR runs, `cluster_map` is non-decreasing; for RTL runs (`bidiLevel & 1 != 0`), DirectWrite
-/// stores logical-to-visual glyph indices in non-increasing order, so scanning from the back visits
-/// visual glyphs `0..glyph_count` in order while keeping each cluster's logical UTF-16 start.
+/// DirectWrite supplies `glyphIndices`, `glyphAdvances`, and `clusterMap` in logical order (so
+/// `clusterMap` is non-decreasing for both LTR and RTL runs). For RTL runs (`bidiLevel & 1 != 0`),
+/// reversing the logical clusters places them in visual left-to-right order while preserving each
+/// cluster's logical UTF-16 offset and glyph slice.
 pub(super) fn visual_clusters(
     cluster_map: &[u16],
     glyph_count: usize,
     is_rtl: bool,
 ) -> Vec<(usize, usize, usize)> {
     let mut out = Vec::new();
-    if !is_rtl {
-        let mut utf16_idx = 0;
-        let mut glyph_idx = 0;
-        for (utf16_len, count) in ClusterAnalyzer::new(cluster_map, glyph_count) {
-            let end = (glyph_idx + count).min(glyph_count);
-            out.push((utf16_idx, glyph_idx, end));
-            utf16_idx += utf16_len;
-            glyph_idx = end;
-        }
-        return out;
+    let mut utf16_idx = 0;
+    let mut glyph_idx = 0;
+    for (utf16_len, count) in ClusterAnalyzer::new(cluster_map, glyph_count) {
+        let end = (glyph_idx + count).min(glyph_count);
+        out.push((utf16_idx, glyph_idx, end));
+        utf16_idx += utf16_len;
+        glyph_idx = end;
     }
-    let mut end_utf16 = cluster_map.len();
-    let mut prev_glyph = 0usize;
-    while end_utf16 > 0 {
-        let g = (cluster_map[end_utf16 - 1] as usize).min(glyph_count);
-        let mut start_utf16 = end_utf16 - 1;
-        while start_utf16 > 0 && cluster_map[start_utf16 - 1] as usize == g {
-            start_utf16 -= 1;
-        }
-        let next_g = if start_utf16 > 0 {
-            (cluster_map[start_utf16 - 1] as usize).min(glyph_count)
-        } else {
-            glyph_count
-        };
-        let glyph_start = g.max(prev_glyph);
-        let glyph_end = next_g.max(glyph_start).min(glyph_count);
-        out.push((start_utf16, glyph_start, glyph_end));
-        prev_glyph = glyph_end;
-        end_utf16 = start_utf16;
+    if is_rtl {
+        out.reverse();
     }
     out
 }
@@ -467,13 +461,13 @@ mod tests {
     }
 
     #[test]
-    fn visual_clusters_maps_rtl_descending_cluster_maps() {
+    fn visual_clusters_reverses_logical_rtl_clusters_into_visual_order() {
         use super::visual_clusters;
-        // Simple 3-char RTL run: logical [0, 1, 2] -> visual glyphs [2, 1, 0].
-        assert_eq!(visual_clusters(&[2, 1, 0], 3, true), vec![(2, 0, 1), (1, 1, 2), (0, 2, 3)]);
-        // Multi-glyph RTL cluster at logical 0..2 (2 glyphs at visual 1..3) + 1 char at logical 2.
-        assert_eq!(visual_clusters(&[1, 1, 0], 3, true), vec![(2, 0, 1), (0, 1, 3)]);
-        // RTL ligature: 2 logical UTF-16 chars share 1 visual glyph.
+        // DirectWrite supplies clusterMap in logical order even for RTL runs: [0, 1, 2].
+        assert_eq!(visual_clusters(&[0, 1, 2], 3, true), vec![(2, 2, 3), (1, 1, 2), (0, 0, 1)]);
+        // Multi-glyph logical cluster at UTF-16 0..2 (2 glyphs 0..2) + 1 char at UTF-16 2 (glyph 2..3).
+        assert_eq!(visual_clusters(&[0, 0, 2], 3, true), vec![(2, 2, 3), (0, 0, 2)]);
+        // RTL ligature: 2 logical UTF-16 chars share 1 glyph.
         assert_eq!(visual_clusters(&[0, 0], 1, true), vec![(0, 0, 1)]);
     }
 }

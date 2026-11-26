@@ -375,7 +375,7 @@ impl FoloApp {
                 }
             }
             // An open select may list them: its highlight is an index into the list.
-            self.menu_open = None;
+            self.close_menus();
         }
         // Reconcile any cached detail record predating `ticket` whose summary disagrees with the
         // installed list (including `Loading`/`Failed` -> `Ready` transitions and retries after a
@@ -413,7 +413,7 @@ impl FoloApp {
                 self.removed_elsewhere(&id, name, cx);
             }
             self.store.models = Load::Ready(models);
-            self.menu_open = None;
+            self.close_menus();
         }
         // The Playground's model is one of these, or replaced now.
         self.reconcile_play_model(cx);

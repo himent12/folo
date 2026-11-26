@@ -99,13 +99,7 @@ impl TextLayout {
                     None
                 };
                 let (truncate_width, suffix): (Option<Pixels>, &str) = match &text_style.text_overflow {
-                    Some(TextOverflow::Truncate(suffix)) => {
-                        let width = known.width.or(definite_width).map(|width| match text_style.line_clamp {
-                            Some(max_lines) => width * max_lines as f32,
-                            None => width,
-                        });
-                        (width, suffix.as_str())
-                    }
+                    Some(TextOverflow::Truncate(suffix)) => (known.width.or(definite_width), suffix.as_str()),
                     None => (None, ""),
                 };
 
@@ -119,14 +113,20 @@ impl TextLayout {
 
                 let shaped = match runs.as_deref() {
                     None => {
-                        let text = match truncate_width {
-                            Some(width) => {
+                        let text = match (truncate_width, wrap_width, text_style.line_clamp) {
+                            (Some(_), Some(width), Some(max_lines)) => {
+                                let mut wrapper = cx
+                                    .text_system()
+                                    .line_wrapper_for_key(text_style.font_key_ref(), font_size);
+                                wrapper.truncate_multiline_text(text.clone(), width, max_lines, suffix).0
+                            }
+                            (Some(width), _, _) => {
                                 let mut wrapper = cx
                                     .text_system()
                                     .line_wrapper_for_key(text_style.font_key_ref(), font_size);
                                 wrapper.truncate_line_text(text.clone(), width, suffix).0
                             }
-                            None => text.clone(),
+                            (None, _, _) => text.clone(),
                         };
                         window.text_system().shape_text_with_style(
                             text,
@@ -137,14 +137,26 @@ impl TextLayout {
                         )
                     }
                     Some(explicit_runs) => {
-                        let (text, run_slice) = match truncate_width {
-                            Some(width) => {
+                        let (text, run_slice) = match (truncate_width, wrap_width, text_style.line_clamp) {
+                            (Some(_), Some(width), Some(max_lines)) => {
+                                let mut wrapper = cx
+                                    .text_system()
+                                    .line_wrapper_for_key(text_style.font_key_ref(), font_size);
+                                wrapper.truncate_multiline_cow(
+                                    text.clone(),
+                                    width,
+                                    max_lines,
+                                    suffix,
+                                    explicit_runs,
+                                )
+                            }
+                            (Some(width), _, _) => {
                                 let mut wrapper = cx
                                     .text_system()
                                     .line_wrapper_for_key(text_style.font_key_ref(), font_size);
                                 wrapper.truncate_line_cow(text.clone(), width, suffix, explicit_runs)
                             }
-                            None => (text.clone(), std::borrow::Cow::Borrowed(explicit_runs)),
+                            (None, _, _) => (text.clone(), std::borrow::Cow::Borrowed(explicit_runs)),
                         };
                         window.text_system().shape_text(
                             text,

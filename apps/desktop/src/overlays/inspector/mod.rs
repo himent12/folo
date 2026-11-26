@@ -262,7 +262,6 @@ impl FoloApp {
             window,
             cx,
         );
-        let insp_focus = self.inspector_focus.clone();
         // Fades in like the dialogs and palette (160 ms; none under Reduce motion).
         Some(crate::ui::appear(
             div()
@@ -298,25 +297,43 @@ impl FoloApp {
                         .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
                             this.inspector_key_down(ev, cx);
                         }))
-                        // When stepping or retrying unmounts a per-image focus target (`insp-box-*`,
-                        // `insp-pred-*`, `insp-file`, `insp-retry-image`, `insp-page-retry`), bring
-                        // focus back to the inspector root so keyboard shortcuts keep working.
-                        .child(
-                            folo_ui::canvas(
-                                |_, _, _| {},
-                                move |_, _, window, cx| {
-                                    if window.focused(cx).is_none_or(|f| !window.is_focus_mounted(&f)) {
-                                        window.focus(&insp_focus);
-                                    }
-                                },
-                            )
-                            .absolute(),
-                        )
+                        .child(self.inspector_focus_guard())
                         .child(header)
                         .child(div().flex_1().min_h_0().flex().child(stage).child(side)),
                 ),
             "inspector-in",
         ))
+    }
+
+    /// Paint-phase guard: when stepping, retrying, or waiting on an unloaded page unmounts a
+    /// per-image focus target (`insp-box-*`, `insp-pred-*`, `insp-file`, `insp-retry-image`,
+    /// `insp-page-retry`), return focus to `inspector_focus` so keyboard shortcuts keep working.
+    fn inspector_focus_guard(&self) -> AnyElement {
+        let insp_focus = self.inspector_focus.clone();
+        folo_ui::canvas(
+            |_, _, _| {},
+            move |_, _, window, cx| {
+                if window.focused(cx).is_none_or(|f| !window.is_focus_mounted(&f)) {
+                    window.focus(&insp_focus);
+                }
+            },
+        )
+        .absolute()
+        .into_any_element()
+    }
+
+    fn inspector_waiting_root(&self, cx: &mut Context<Self>) -> folo_ui::Stateful<folo_ui::Div> {
+        div()
+            .id("inspector")
+            .track_focus(&self.inspector_focus)
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                this.inspector_key_down(ev, cx);
+            }))
+            .child(self.inspector_focus_guard())
     }
 
     fn inspector_waiting(
@@ -376,11 +393,7 @@ impl FoloApp {
                 .child(text(ty::SM, t.text_secondary).whitespace_normal().child(msg))
                 .child(div().flex().justify_end().gap(px(8.)).child(close).child(retry));
             return Some(
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .size_full()
+                self.inspector_waiting_root(cx)
                     .child(self.scrim(
                         t,
                         "insp-scrim",
@@ -410,7 +423,14 @@ impl FoloApp {
         }
         // The page's scrim (it takes the clicks, and a click there closes, as Esc does).
         Some(
-            self.scrim(t, "insp-scrim", window, cx, act(|this, w, cx| this.close_inspector(w, cx)))
+            self.inspector_waiting_root(cx)
+                .child(self.scrim(
+                    t,
+                    "insp-scrim",
+                    window,
+                    cx,
+                    act(|this, w, cx| this.close_inspector(w, cx)),
+                ))
                 .into_any_element(),
         )
     }

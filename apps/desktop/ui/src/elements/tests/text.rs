@@ -219,8 +219,8 @@ fn steady_frame_reuses_glyph_bounds_and_empty_glyph_entries() {
 #[test]
 fn line_clamp_with_truncate_keeps_multi_line_budget_in_flex_column() {
     // Inside a stretched flex column, Taffy passes `known.width = Some(60.)` during PerformLayout;
-    // `line_clamp(2)` + `text_ellipsis()` must still keep the 2-line width budget (`120px`) instead
-    // of truncating to 1 line.
+    // `line_clamp(2)` + `text_ellipsis()` must wrap onto two lines and truncate the final line
+    // within 60 px with an ellipsis.
     let (mut app, window) = open(|_, _| {
         div()
             .flex()
@@ -235,7 +235,55 @@ fn line_clamp_with_truncate_keeps_multi_line_budget_in_flex_column() {
             .into_any_element()
     });
     let scene = draw(&mut app, window);
-    assert_eq!(lines(&sprites(&scene)).len(), 2, "two lines should fill before truncation");
+    let glyphs = sprites(&scene);
+    let ls = lines(&glyphs);
+    assert_eq!(ls.len(), 2, "two lines should fill before truncation");
+    let last_right = ls[1].last().unwrap().bounds.right().0;
+    assert!(last_right <= 60.0, "final clamped line must stay within 60 px, got {last_right}");
+}
+
+#[test]
+fn line_clamp_with_truncate_elides_final_line_from_actual_wrap_boundaries() {
+    // Regression: with 6 px glyph advances, a 36 px box, and a 2-line clamp, `aaa bbb ccc` fits an
+    // aggregate 72 px budget, but word wrapping puts `bbb ccc` (42 px) on line 2. Truncation must
+    // cut line 2 to fit <= 36 px and append the ellipsis.
+    let (mut app, window) = open(|_, _| {
+        div()
+            .flex()
+            .flex_col()
+            .child(text_box(36.).line_clamp(2).text_ellipsis().child("aaa bbb ccc"))
+            .child(text_box(36.).line_clamp(2).text_ellipsis().child("aa\nbbbbbb\ncc"))
+            .child(text_box(36.).child("…"))
+            .into_any_element()
+    });
+    let scene = draw(&mut app, window);
+    let glyphs = sprites(&scene);
+    let ls = lines(&glyphs);
+    // 2 lines for `aaa bbb ccc`, 2 lines for `aa\nbbbbbb\ncc`, 1 line for reference `…`.
+    assert_eq!(ls.len(), 5);
+    let ellipsis_id = ls[4][0].mask.id;
+
+    // `aaa bbb ccc` -> line 1: `aaa`, line 2: `bbb c…` (width 36 px <= 36 px, ends with `…`).
+    let line2 = &ls[1];
+    assert!(
+        line2.last().unwrap().bounds.right().0 <= 36.0,
+        "clamped line 2 must fit within 36 px, got {}",
+        line2.last().unwrap().bounds.right().0
+    );
+    assert_eq!(line2.last().unwrap().mask.id, ellipsis_id, "clamped line 2 must end with ellipsis");
+
+    // `aa\nbbbbbb\ncc` -> explicit 3rd paragraph forces ellipsis onto line 2 within 36 px.
+    let para_line2 = &ls[3];
+    assert!(
+        para_line2.last().unwrap().bounds.right().0 <= 36.0,
+        "newline-clamped line 2 must fit within 36 px, got {}",
+        para_line2.last().unwrap().bounds.right().0
+    );
+    assert_eq!(
+        para_line2.last().unwrap().mask.id,
+        ellipsis_id,
+        "newline-clamped line 2 must end with ellipsis"
+    );
 }
 
 #[test]

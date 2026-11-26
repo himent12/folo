@@ -216,6 +216,81 @@ impl LineWrapper {
         }
     }
 
+    /// Truncates `text` so it wraps to at most `max_lines` visual lines at `wrap_width`, appending
+    /// `truncation_suffix` on the final visible line when content overflows. Borrows `runs` when no
+    /// truncation is needed.
+    pub(crate) fn truncate_multiline_cow<'a>(
+        &mut self,
+        text: SharedString,
+        wrap_width: Pixels,
+        max_lines: usize,
+        truncation_suffix: &str,
+        runs: &'a [TextRun],
+    ) -> (SharedString, Cow<'a, [TextRun]>) {
+        let (result, truncated) =
+            self.truncate_multiline_text(text, wrap_width, max_lines, truncation_suffix);
+        if truncated {
+            let runs = runs_after_truncation(&result, truncation_suffix, runs);
+            (result, Cow::Owned(runs))
+        } else {
+            (result, Cow::Borrowed(runs))
+        }
+    }
+
+    /// Truncates `text` to at most `max_lines` wrapped visual lines at `wrap_width`, fitting
+    /// `truncation_suffix` within `wrap_width` on the last visible line whenever wrapping or
+    /// explicit newlines exceed `max_lines`.
+    pub(crate) fn truncate_multiline_text(
+        &mut self,
+        text: SharedString,
+        wrap_width: Pixels,
+        max_lines: usize,
+        truncation_suffix: &str,
+    ) -> (SharedString, bool) {
+        if max_lines == 0 {
+            return (SharedString::from(""), !text.is_empty());
+        }
+        let suffix_width =
+            truncation_suffix.graphemes(true).map(|g| self.width_for_grapheme(g)).fold(px(0.0), |a, x| a + x);
+        let mut lines_used = 0usize;
+        let mut para_start = 0usize;
+        let mut paragraphs = text.split('\n').peekable();
+        while let Some(para) = paragraphs.next() {
+            let has_more = paragraphs.peek().is_some();
+            let remaining = max_lines - lines_used;
+            let fragments = [LineFragment::text(para)];
+            let boundaries: Vec<Boundary> = self.wrap_line(&fragments, wrap_width).take(remaining).collect();
+            let overflow_in_para = boundaries.len() >= remaining;
+            let overflow_after_para =
+                !overflow_in_para && lines_used + boundaries.len() + 1 == max_lines && has_more;
+            if overflow_in_para || overflow_after_para {
+                let last_line_in_para =
+                    if remaining >= 2 { boundaries.get(remaining - 2).map_or(0, |b| b.ix) } else { 0 };
+                let last_line_start = para_start + last_line_in_para;
+                let tail = &para[last_line_in_para..];
+                let mut width = px(0.);
+                let mut cut_in_tail = 0usize;
+                for (ix, grapheme) in tail.grapheme_indices(true) {
+                    let next_width = width + self.width_for_grapheme(grapheme);
+                    if next_width + suffix_width <= wrap_width {
+                        cut_in_tail = ix + grapheme.len();
+                        width = next_width;
+                    } else {
+                        break;
+                    }
+                }
+                let cut_at = last_line_start + cut_in_tail;
+                let mut result = String::with_capacity(cut_at + truncation_suffix.len());
+                result.push_str(&text[..cut_at]);
+                result.push_str(truncation_suffix);
+                return (SharedString::from(result), true);
+            }
+            lines_used += boundaries.len() + 1;
+            para_start += para.len() + 1;
+        }
+        (text, false)
+    }
+
     /// Truncates only the text string, returning `(text, was_truncated)` without touching runs.
     /// Cuts only on extended grapheme cluster boundaries so a combining mark is never separated from
     /// its base character.
