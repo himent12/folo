@@ -15,7 +15,7 @@ import GitCompare from '$icons/git-compare-arrows';
 import Scale from '$icons/scale';
 import Plus from '$icons/plus';
 import X from '$icons/x';
-import { css, For, Index, MediaQuery, onCleanup, onDocument, signal } from 'fw';
+import { css, effect, For, Index, MediaQuery, onCleanup, onDocument, signal, untrack } from 'fw';
 import { ApiError } from '$lib/api/index';
 import { TARGET_PRECISION } from '$lib/bench/rules';
 import XYChart from '$lib/charts/XYChart';
@@ -30,6 +30,7 @@ import { exportTableCsv, exportTableJson } from '$lib/tableExport';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
+import Ident from '$lib/ui/Ident';
 import { keyPrefs } from '$lib/ui/keyPrefs';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Panel from '$lib/ui/Panel';
@@ -41,7 +42,7 @@ import DotRows from './bench/compare/DotRows';
 import SideBySide from './bench/compare/SideBySide';
 import { CLS_SHOWN, compareState } from './bench/compare/state';
 import IntervalPlot from './bench/IntervalPlot';
-import { along, COMPARE_MAX, stale } from './bench/leaderboard';
+import { along, stale } from './bench/leaderboard';
 import { capTicks } from '$lib/charts/domain';
 import Unsupported from './bench/Unsupported';
 import { calibrationNone, intervalText, keptText, scoreText } from './bench/words';
@@ -56,10 +57,15 @@ export default function BenchCompare() {
     live,
     bench,
     unsupported,
-    picked,
     shown,
+    pending,
+    canAdd,
+    dropped,
+    missingCount,
     results,
-    setIds,
+    appendEntry,
+    dropShown,
+    rotateBaseline,
     candidates,
     slotOf,
     color,
@@ -115,6 +121,32 @@ export default function BenchCompare() {
   }
   let chipsEl: HTMLDivElement | undefined;
 
+  let lastAnnouncedDropped = '';
+  effect(() => {
+    const omitted = dropped.get();
+    const keyText = omitted.join(',');
+    if (!omitted.length || keyText === lastAnnouncedDropped) {
+      if (!omitted.length) lastAnnouncedDropped = '';
+      return;
+    }
+    lastAnnouncedDropped = keyText;
+    const bName = bench()?.name;
+    untrack(() =>
+      announce(
+        `${omitted.length === 1 ? 'Omitted unavailable entry' : `Omitted ${omitted.length} unavailable entries`}: ${omitted.join(', ')}${bName ? ` (not on ${bName} or not finished)` : ''}.`,
+      ),
+    );
+  });
+
+  function dismissMissing() {
+    dropped.set([]);
+    queueMicrotask(() => {
+      if (!alive || !chipsEl?.isConnected) return;
+      if (document.activeElement && document.activeElement !== document.body) return;
+      chipsEl.querySelector<HTMLElement>('button.ck, .add select')?.focus();
+    });
+  }
+
   function setBaseline(eid: string) {
     const entry = shown.peek().find((x) => x.id === eid);
     const label = entry ? labelOf(entry) : '';
@@ -131,9 +163,7 @@ export default function BenchCompare() {
 
   function addEntry(eid: string) {
     const entry = candidates.peek().find((x) => x.id === eid);
-    const current = shown.peek().map((x) => x.id);
-    if (current.length >= COMPARE_MAX || current.includes(eid)) return;
-    setIds([...current, eid]);
+    if (!appendEntry(eid)) return;
     if (entry) announce(`Added ${entry.name} to comparison.`);
     // Adding the 4th entry (or last candidate) unmounts the adder <select>: move keyboard focus to the new chip.
     queueMicrotask(() => {
@@ -148,7 +178,7 @@ export default function BenchCompare() {
   function removeEntry(eid: string, index: number) {
     const entry = shown.peek().find((x) => x.id === eid);
     const label = entry ? labelOf(entry) : '';
-    setIds(shown.peek().map((x) => x.id).filter((x) => x !== eid));
+    dropShown(eid);
     if (label) announce(`Removed ${label} from comparison.`);
     // The Remove button unmounts with its chip: move keyboard focus to a neighbouring chip, the adder, or the heading.
     queueMicrotask(() => {
@@ -189,8 +219,7 @@ export default function BenchCompare() {
       return true;
     }
     if (k.toLowerCase() === 'b') {
-      const shownIds = list.map((x) => x.id);
-      setIds([...shownIds.slice(1), shownIds[0]!]);
+      rotateBaseline();
       const nextBase = list[1];
       if (nextBase) announce(`Baseline set to ${labelOf(nextBase)}.`);
       return true;
@@ -563,19 +592,23 @@ export default function BenchCompare() {
             </span>
           )}
         </For>{' '}
-        {shown.get().length < COMPARE_MAX && candidates.get().length ? adder() : null}
+        {canAdd.get() && candidates.get().length ? adder() : null}
       </div>{' '}
-      <p class="sr-only" role="status" aria-live="polite">
-        {liveNote.get()}
-      </p>{' '}
+      {pending.get().length ? (
+        <p class="missing-note" data-pending-entries>
+          {pending.get().length === 1
+            ? `Waiting for ${pending.get()[0]!.name} to finish — it will join this comparison automatically.`
+            : `Waiting for ${pending.get().length} entries (${pending.get().map((e) => e.name).join(', ')}) to finish — they will join automatically.`}
+        </p>
+      ) : null}{' '}
       {shown.get().length < 2 ? (
         <section class="state">
           <EmptyState
             icon={GitCompare}
             title={shown.get().length ? 'Add one more entry to compare' : 'Pick two to four finished entries'}
             description={
-              picked.get().missing.length
-                ? `${picked.get().missing.length === 1 ? 'One entry in this link is' : `${picked.get().missing.length} entries in this link are`} not on ${bench()!.name} or not finished. Add finished entries here, or pick them on the leaderboard.`
+              missingCount.get()
+                ? `${missingCount.get() === 1 ? 'One entry in this link is' : `${missingCount.get()} entries in this link are`} not on ${bench()!.name} or not finished. Add finished entries here, or pick them on the leaderboard.`
                 : `Add finished entries of ${bench()!.name} here, or pick them on the leaderboard.`
             }
             actions={() => (
@@ -586,13 +619,37 @@ export default function BenchCompare() {
           />
         </section>
       ) : (
-        compared()
+        <>
+          {dropped.get().length ? (
+            <div class="missing-note" data-missing-entries>
+              <span>
+                {dropped.get().length === 1 ? 'Omitted unavailable entry from this comparison: ' : `Omitted ${dropped.get().length} unavailable entries from this comparison: `}
+                <For each={dropped.get()} key={(eid) => eid}>
+                  {(eid, i) => (
+                    <>
+                      {i() > 0 ? ', ' : null}
+                      <Ident value={eid()} />
+                    </>
+                  )}
+                </For>
+                {` (not on ${bench()!.name} or not finished).`}
+              </span>{' '}
+              <Button size="sm" variant="ghost" onclick={dismissMissing}>
+                Dismiss
+              </Button>
+            </div>
+          ) : null}
+          {compared()}
+        </>
       )}
     </Page>
   );
 
   return (
     <>
+      <p class="sr-only" role="status" aria-live="polite">
+        {liveNote.get()}
+      </p>
       {unsupported.get() ? (
         <Page title="Benchmarks">
           <Unsupported />
@@ -641,6 +698,16 @@ css`
     flex-wrap: wrap;
     gap: var(--space-2);
     margin-top: calc(-1 * var(--space-2));
+  }
+  .missing-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
   }
   .chips > :global(*) {
     flex: 0 1 auto;
