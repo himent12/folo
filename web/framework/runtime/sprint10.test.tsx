@@ -553,5 +553,74 @@ describe('fw Sprint 10 runtime hardening', () => {
     expect([mounts, destroys]).toEqual([2, 1]);
     v4.unmount();
     expect(destroys).toBe(2);
+
+    // 4. Downstream computed recovers cleanly after upstream propJsx cleanup throws inside needsToRecompute.
+    const chainOpen = signal(true);
+    let chainThrow = true;
+    function ChainFlaky() {
+      onCleanup(() => {
+        if (chainThrow) {
+          chainThrow = false;
+          throw new Error('chain cleanup boom');
+        }
+      });
+      return <em>chain</em>;
+    }
+    function ChainHost(props: { slot: JSX.Element }) {
+      const inner = computed(() => (chainOpen.get() ? props.slot : null));
+      const outerC = computed(() => inner.get());
+      return <div>{outerC.get()}</div>;
+    }
+    const v5 = render(() => <ChainHost slot={<ChainFlaky />} />);
+    flush();
+    expect(v5.container.querySelector('em')?.textContent).toBe('chain');
+    chainOpen.set(false);
+    expect(() => flush()).toThrow('chain cleanup boom');
+    chainOpen.set(true);
+    expect(() => flush()).not.toThrow();
+    expect(v5.container.querySelector('em')?.textContent).toBe('chain');
+    v5.unmount();
+
+    // 5. A throwing cleanup in one propJsx source does not prevent sibling propJsx sources from unsubscribing and cleaning up.
+    const pairOpen = signal(true);
+    let secondCleaned = 0;
+    function BadFirst() {
+      onCleanup(() => {
+        throw new Error('first boom');
+      });
+      return <b>first</b>;
+    }
+    function GoodSecond() {
+      onCleanup(() => secondCleaned++);
+      return <i>second</i>;
+    }
+    function PairHost(props: { first: JSX.Element; second: JSX.Element }) {
+      const both = computed(() => [props.first, props.second]);
+      return <section>{pairOpen.get() ? <div>{both.get()}</div> : null}</section>;
+    }
+    const v6 = render(() => <PairHost first={<BadFirst />} second={<GoodSecond />} />);
+    flush();
+    expect(v6.container.querySelector('b')?.textContent).toBe('first');
+    expect(v6.container.querySelector('i')?.textContent).toBe('second');
+    pairOpen.set(false);
+    expect(() => flush()).toThrow('first boom');
+    expect(secondCleaned).toBe(1);
+    v6.unmount();
+
+    // 6. Repeated reads of the same JSX prop inside a single computed produce distinct DOM nodes and clean both up.
+    let repDestroys = 0;
+    function RepLeaf() {
+      onCleanup(() => repDestroys++);
+      return <em>leaf</em>;
+    }
+    function RepComputed(props: { slot: JSX.Element }) {
+      const both = computed(() => [props.slot, props.slot]);
+      return <div>{both.get()}</div>;
+    }
+    const v7 = render(() => <RepComputed slot={<RepLeaf />} />);
+    flush();
+    expect(v7.container.querySelectorAll('em')).toHaveLength(2);
+    v7.unmount();
+    expect(repDestroys).toBe(2);
   });
 });

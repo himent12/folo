@@ -404,6 +404,9 @@ export default function AddEntryDialog(props: AddEntryDialogProps) {
         (p) => sending.set({ sent: p.sent, total: p.total }),
         abort.signal,
       );
+      sending.set(null);
+      confirmStop.set(false);
+      abort = null;
       pendingNav = null;
       open.set(false);
       props.onstarted(entry);

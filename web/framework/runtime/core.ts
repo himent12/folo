@@ -15,26 +15,13 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { sortJobs } from './flushOrder';
-import { cleanupSources, dropSourcesThrough, linkDependency, needsToRecompute, prepareSources, retainSources, subscribeLink, TRACKING, unsubscribeLink, type Link, type Source, type Target } from './links';
+import {
+  ATTACHED, cleanupSources, clearUpstreamNotified, DISPOSED, dropSourcesThrough, FRESH, HAS_ERROR,
+  linkDependency, needsToRecompute, NOTIFIED, OUTDATED, OWNING, prepareSources, retainSources, RUNNING,
+  subscribeLink, TRACKING, unsubscribeLink, unsubscribeSources, unsubscribeTarget, USER,
+  type Link, type Source, type Target,
+} from './links';
 export { dropSourcesThrough };
-
-const NOTIFIED = 1;
-const OUTDATED = 2;
-const RUNNING = 4;
-const DISPOSED = 8;
-const HAS_ERROR = 16;
-/** A user effect (`effect`, `onMount`): runs after the render effects of the same flush; a returned function is its cleanup. */
-const USER = 64;
-/** An effect that has not run yet. */
-const FRESH = 128;
-/** An owner linked into its parent's child list (disposed with it). */
-const ATTACHED = 256;
-/**
- * A computed that owns a subtree (a memo's branch, a list's rows). When what it reads changes it is re-evaluated in the
- * render phase at its own place (its creation order, which is document order), as Svelte runs a block before what
- * comes after it, not when the effect that reads it gets to it.
- */
-const OWNING = 512;
 
 export type Equals<T> = false | ((a: T, b: T) => boolean);
 export interface SignalOptions<T> {
@@ -218,39 +205,41 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     if (this._globalVersion === globalVersion) return true;
     this._globalVersion = globalVersion;
     this._flags |= RUNNING;
-    if (this._version > 0 && !needsToRecompute(this)) {
-      this._flags &= ~RUNNING;
-      return true;
-    }
-    const prevListener = listener;
-    const prevOwner = owner;
-    const prevRun = activeRun;
-    activeRun = ++runSeq;
     try {
-      prepareSources(this);
-      listener = this;
-      // A computed owns nothing: effects must not be created while deriving a value.
-      owner = null;
-      const value = this._fn();
-      if (this._flags & HAS_ERROR || this._version === 0 || this._equals === false || !this._equals(this._value, value)) {
-        this._value = value;
-        this._flags &= ~HAS_ERROR;
+      if (this._version > 0 && !needsToRecompute(this)) return true;
+      const prevListener = listener;
+      const prevOwner = owner;
+      const prevRun = activeRun;
+      activeRun = ++runSeq;
+      try {
+        prepareSources(this);
+        listener = this;
+        // A computed owns nothing: effects must not be created while deriving a value.
+        owner = null;
+        const value = this._fn();
+        if (this._flags & HAS_ERROR || this._version === 0 || this._equals === false || !this._equals(this._value, value)) {
+          this._value = value;
+          this._flags &= ~HAS_ERROR;
+          this._version++;
+        }
+      } catch (err) {
+        this._value = err as T;
+        this._flags |= HAS_ERROR;
         this._version++;
+      } finally {
+        listener = prevListener;
+        owner = prevOwner;
+        activeRun = prevRun;
       }
-    } catch (err) {
-      this._value = err as T;
-      this._flags |= HAS_ERROR;
-      this._version++;
-    }
-    listener = prevListener;
-    owner = prevOwner;
-    activeRun = prevRun;
-    try {
       cleanupSources(this);
+      return true;
+    } catch (err) {
+      this._flags |= OUTDATED;
+      this._globalVersion = -1;
+      throw err;
     } finally {
       this._flags &= ~RUNNING;
     }
-    return true;
   }
   _subscribe(node: Link): void {
     if (this._targets === undefined) {
@@ -268,8 +257,7 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
       // Nobody reads it any more (its branch went): a queued re-evaluation is dropped (see `_update`).
       if (this._flags & OWNING) this._flags = (this._flags & ~NOTIFIED) | OUTDATED;
       this._flags &= ~TRACKING;
-      for (let n = this._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
-      this._onEmpty?.();
+      unsubscribeSources(this._sources, this._onEmpty);
     }
   }
   _notify(): void {
@@ -425,16 +413,27 @@ function cleanOwner(node: Owner): void {
 function disposeTree(node: Owner): void {
   if (node._flags & DISPOSED) return;
   node._flags |= DISPOSED;
+  let err: unknown;
+  let hasErr = false;
   try {
     cleanOwner(node);
-  } finally {
-    // A currently running effect still has `_sources` pointing at its tail with active `_node`/`_rb` save slots;
-    // `EffectNode._run`'s `finally` will restore those links via `cleanupSources` and unsubscribe every source.
-    if (node instanceof EffectNode && !(node._flags & RUNNING)) {
-      for (let n = node._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
-      node._sources = undefined;
+  } catch (e) {
+    err = e;
+    hasErr = true;
+  }
+  // A currently running effect still has `_sources` pointing at its tail with active `_node`/`_rb` save slots;
+  // `EffectNode._run`'s `finally` will restore those links via `cleanupSources` and unsubscribe every source.
+  if (node instanceof EffectNode && !(node._flags & RUNNING)) {
+    try {
+      unsubscribeTarget(node);
+    } catch (e) {
+      if (!hasErr) {
+        err = e;
+        hasErr = true;
+      }
     }
   }
+  if (hasErr) throw err;
 }
 
 /** Disposes an owner and everything under it, and unlinks it from its parent. */
@@ -507,14 +506,6 @@ export function reader<T>(fn: () => T): Reader<T> {
 /** Whether `fn` is a reader (see `Reader`). */
 export function isReader(fn: unknown): fn is Reader<unknown> {
   return typeof fn === 'function' && (fn as Reader<unknown>).$$r === 1;
-}
-
-/** Clears stale NOTIFIED flags on retained non-OWNING upstream computeds so later writes still propagate notifications. */
-function clearUpstreamNotified(s: Source): void {
-  if (!(s instanceof ComputedNode)) return;
-  if ((s._flags & (NOTIFIED | OWNING)) !== NOTIFIED) return;
-  s._flags &= ~NOTIFIED;
-  for (let node = s._sources; node !== undefined; node = node._ns) clearUpstreamNotified(node._s);
 }
 
 /**
@@ -690,8 +681,11 @@ class EffectNode extends Owner implements Target {
           } catch (e) {
             if (!threw) throw e;
           } finally {
-            for (let n = this._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
-            this._sources = undefined;
+            try {
+              unsubscribeTarget(this);
+            } catch (e) {
+              if (!threw) throw e;
+            }
           }
         }
       }
@@ -925,16 +919,16 @@ export function deferEffects<T>(fn: () => T): T {
   return out;
 }
 
-/** Internal: `[stableOwner, siteKey, runId]` for `propJsx`. */
-export function propScope(): readonly [Owner | null, object | null, number] {
+/** Internal: `[stableOwner, siteKey, runId, computedKey]` for `propJsx`. */
+export function propScope(): readonly [Owner | null, object | null, number, object | null] {
   if (owner === null) {
     let p = listener instanceof ComputedNode ? listener._parent : null;
     while (p !== null && (p._flags & DISPOSED) !== 0) p = p._parent;
-    return [p, null, activeRun];
+    return [p, null, activeRun, listener ?? null];
   }
-  if ((owner as unknown) === listener) return [owner._parent, owner, activeRun];
-  if (listener instanceof ComputedNode && (listener._flags & OWNING) !== 0 && owner._parent === listener._parent && owner._id === listener._id) return [owner._parent, listener, activeRun];
-  return [owner, owner, activeRun];
+  if ((owner as unknown) === listener) return [owner._parent, owner, activeRun, null];
+  if (listener instanceof ComputedNode && (listener._flags & OWNING) !== 0 && owner._parent === listener._parent && owner._id === listener._id) return [owner._parent, listener, activeRun, null];
+  return [owner, owner, activeRun, null];
 }
 
 /** Internal: maps each component's props object to its component owner (used by `propJsx`). */

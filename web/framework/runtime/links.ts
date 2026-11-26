@@ -4,7 +4,24 @@
 // (`_pt`/`_nt`). Re-evaluating a target marks existing links unread (`_v = -1`), moves re-read links to the tail
 // without allocating, and unlinks anything left unread in `cleanupSources`.
 
+export const NOTIFIED = 1;
+export const OUTDATED = 2;
+export const RUNNING = 4;
+export const DISPOSED = 8;
+export const HAS_ERROR = 16;
 export const TRACKING = 32;
+/** A user effect (`effect`, `onMount`): runs after the render effects of the same flush; a returned function is its cleanup. */
+export const USER = 64;
+/** An effect that has not run yet. */
+export const FRESH = 128;
+/** An owner linked into its parent's child list (disposed with it). */
+export const ATTACHED = 256;
+/**
+ * A computed that owns a subtree (a memo's branch, a list's rows). When what it reads changes it is re-evaluated in the
+ * render phase at its own place (its creation order, which is document order), as Svelte runs a block before what
+ * comes after it, not when the effect that reads it gets to it.
+ */
+export const OWNING = 512;
 
 export interface Link {
   _s: Source;
@@ -101,6 +118,48 @@ export function cleanupSources(target: Target): void {
   }
   target._sources = head;
   if (hasErr) throw err;
+}
+
+/** Unsubscribes every link in `head` and runs optional `after`, finishing all before rethrowing the first error. */
+export function unsubscribeSources(head: Link | undefined, after?: () => void): void {
+  let err: unknown;
+  let hasErr = false;
+  for (let n = head; n !== undefined; n = n._ns) {
+    try {
+      n._s._unsubscribe(n);
+    } catch (e) {
+      if (!hasErr) {
+        hasErr = true;
+        err = e;
+      }
+    }
+  }
+  if (after !== undefined) {
+    try {
+      after();
+    } catch (e) {
+      if (!hasErr) {
+        hasErr = true;
+        err = e;
+      }
+    }
+  }
+  if (hasErr) throw err;
+}
+
+/** Clears `target._sources` and unsubscribes every link in it, finishing all before rethrowing the first error. */
+export function unsubscribeTarget(target: Target): void {
+  const sources = target._sources;
+  target._sources = undefined;
+  if (sources !== undefined) unsubscribeSources(sources);
+}
+
+/** Clears stale NOTIFIED flags on retained non-OWNING upstream computeds so later writes still propagate notifications. */
+export function clearUpstreamNotified(s: Source): void {
+  const t = s as unknown as Partial<Target>;
+  if (t._flags === undefined || (t._flags & (NOTIFIED | OWNING)) !== NOTIFIED) return;
+  t._flags &= ~NOTIFIED;
+  for (let node = t._sources; node !== undefined; node = node._ns) clearUpstreamNotified(node._s);
 }
 
 /** Internal (text runs): drops sources up to `mark` (from `sourceMark`), keeping any links also in `keep`. */

@@ -332,11 +332,41 @@ export function propJsx(holder: object, key: string, fn: () => unknown): unknown
   let slots = (holder as Record<symbol, Record<string, JsxSlot | undefined> | undefined>)[JSX_MEMOS];
   if (slots === undefined) Object.defineProperty(holder, JSX_MEMOS, { value: (slots = {}) });
   const slot = (slots[key] ??= { cond: new Map(), bySite: new WeakMap() });
-  const [target, site, runId] = propScope();
+  const [target, site, runId, computedKey] = propScope();
 
   // Read inside a non-owning computed / cond (`owner === null`): attach to the computed's creation owner or consuming component owner.
   if (site === null) {
     const compOwner = target ?? activePropOwner ?? propOwners.get(holder) ?? null;
+    let idx = 0;
+    let rec: { run: number; occ: number; list: (Reader<unknown> | undefined)[] } | undefined;
+    if (computedKey !== null) {
+      rec = slot.bySite.get(computedKey);
+      if (rec === undefined) {
+        rec = { run: runId, occ: 0, list: [] };
+        slot.bySite.set(computedKey, rec);
+      } else if (rec.run !== runId) {
+        rec.run = runId;
+        rec.occ = 0;
+      }
+      idx = rec.occ++;
+    }
+    if (idx > 0 && rec !== undefined) {
+      const existing = rec.list[idx];
+      if (existing !== undefined) return withoutPropOwner(() => existing());
+      const created = withoutPropOwner(() =>
+        runWithOwner(compOwner, () => {
+          const r = memo(fn, { raw: true });
+          rec!.list[idx] = r;
+          if (compOwner !== null) {
+            onCleanup(() => {
+              if (rec!.list[idx] === r) rec!.list[idx] = undefined;
+            });
+          }
+          return r;
+        }),
+      );
+      return withoutPropOwner(() => created());
+    }
     let entry = slot.cond.get(compOwner);
     if (entry === undefined) {
       entry = withoutPropOwner(() =>

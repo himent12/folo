@@ -361,4 +361,26 @@ describe('AddEntryDialog worker offloading', () => {
     expect(delSpy).toHaveBeenCalledOnce();
     expect(onstarted).not.toHaveBeenCalled();
   });
+
+  it('clears the upload navigation guard before invoking onstarted so switching back to Leaderboard succeeds', async () => {
+    router.go('/benchmarks/bn_9f03?tab=conditions&add=external', { replace: true });
+    const { isOpen, validJson, onstarted } = await mountDialog();
+    onstarted.mockImplementation(() => {
+      router.go('/benchmarks/bn_9f03', { replace: true });
+    });
+    selectFile(new File([validJson], 'conditions-tab.json', { type: 'application/json' }));
+    const worker = await until(() => spawned[0], 'worker spawned');
+    await worker.runAndDeliver();
+    await until(() => document.querySelector('.f-state.ok'), 'validated state');
+
+    worker.enableAutoAnswer();
+    const form = document.querySelector<HTMLFormElement>('dialog[open] form')!;
+    form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+
+    await until(() => !isOpen.get() && onstarted.mock.calls.length === 1, 'upload completed and dialog closed');
+    flushSync();
+    expect(router.route.path).toBe('/benchmarks/bn_9f03');
+    expect(router.route.query.get('tab')).toBeNull();
+    expect(document.querySelector('dialog[open]')).toBeNull();
+  });
 });
