@@ -304,6 +304,55 @@ fn conv_depthwise() {
     run(&desc(1, 4, 11, 11, 4, 4, Window2d::square(5, 1, 2)), false, None, 17);
     let dil = Window2d { kernel: (3, 3), stride: (1, 1), padding: (2, 2), dilation: (2, 2) };
     run(&desc(1, 3, 8, 8, 3, 3, dil), true, None, 18);
+
+    // Tiled shared-memory + vec4 depthwise forward coverage: 2x2, 3x3, 5x5, 7x7, asymmetric 3x5 / 5x3,
+    // exact & ragged tile boundaries (16x32 tiles), vec4-aligned and odd widths, prime channels, MULT=2,
+    // tiny non-tiled fallback (3x3 plane), stride-2 vec4 output, and f16 parity.
+    let tiled_cases = [
+        (desc(2, 7, 17, 36, 7, 7, Window2d::square(3, 1, 1)), true, UnaryOp::Silu),
+        (desc(2, 5, 17, 33, 5, 5, Window2d::square(3, 1, 1)), true, UnaryOp::Relu),
+        (desc(2, 4, 20, 32, 8, 4, Window2d::square(5, 1, 2)), true, UnaryOp::Silu),
+        (desc(2, 3, 18, 35, 3, 3, Window2d::square(7, 1, 3)), false, UnaryOp::Identity),
+        (desc(2, 6, 32, 64, 6, 6, Window2d::square(7, 1, 3)), true, UnaryOp::Silu),
+        (desc(1, 4, 9, 8, 4, 4, Window2d::square(2, 1, 0)), true, UnaryOp::Hardswish),
+        (
+            desc(
+                2,
+                5,
+                19,
+                36,
+                5,
+                5,
+                Window2d { kernel: (3, 5), stride: (1, 1), padding: (1, 2), dilation: (1, 1) },
+            ),
+            true,
+            UnaryOp::Silu,
+        ),
+        (
+            desc(
+                1,
+                4,
+                17,
+                33,
+                4,
+                4,
+                Window2d { kernel: (5, 3), stride: (1, 1), padding: (2, 1), dilation: (1, 1) },
+            ),
+            false,
+            UnaryOp::Identity,
+        ),
+        // Non-tiled fallback: tiny 3x3 plane, stride-2 with ow % 4 == 0 (vec4 store), and 9x9 kernel.
+        (desc(2, 4, 3, 3, 4, 4, Window2d::square(3, 1, 1)), true, UnaryOp::Silu),
+        (desc(2, 4, 16, 16, 4, 4, Window2d::square(3, 2, 1)), true, UnaryOp::Silu),
+        (desc(1, 3, 11, 12, 3, 3, Window2d::square(9, 1, 4)), false, UnaryOp::Identity),
+    ];
+    for (i, (mut c, bias, act)) in tiled_cases.into_iter().enumerate() {
+        c.act = act;
+        run(&c, bias, None, 110 + i as u64);
+        let mut cf16 = c;
+        cf16.dtype = DType::F16;
+        run(&cf16, bias, None, 130 + i as u64);
+    }
 }
 
 #[test]

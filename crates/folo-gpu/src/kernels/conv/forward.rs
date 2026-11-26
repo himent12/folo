@@ -2,7 +2,7 @@
 //! the implicit GEMM (`CONV_MODE` 1) for everything else, split along `K` when it has few output tiles
 //! ([`super::split`]).
 
-use super::depthwise::{DEPTHWISE, DW_VX};
+use super::depthwise::{DEPTHWISE, DW_TILE_H, DW_TILE_W, DW_TILED_MAX_K, DW_TILED_MIN_K, DW_VX};
 use super::{Conv2dDesc, conv_spec, split};
 use crate::context::GpuContext;
 use crate::error::Result;
@@ -127,16 +127,48 @@ fn conv2d_at(
         if !dense {
             return Err(shape_err("conv2d: a depthwise conv reads only dense inputs"));
         }
+        let (kh, kw) = d.win.kernel;
+        let vec4_out = ow.is_multiple_of(4);
+        let tiled = d.win.stride == (1, 1)
+            && d.win.dilation == (1, 1)
+            && (DW_TILED_MIN_K as usize..=DW_TILED_MAX_K as usize).contains(&kh)
+            && (DW_TILED_MIN_K as usize..=DW_TILED_MAX_K as usize).contains(&kw)
+            && oh >= 4
+            && ow >= 4;
         let spec = d
             .win
             .spec()
             .u32("MULT", (d.c_out / d.c_in) as u32)
             .bool("HAS_BIAS", bias.is_some())
             .u32("ACT", d.act.code())
+            .bool("TILED", tiled)
+            .bool("VEC4_OUT", vec4_out)
             .f16(d.dtype == DType::F16);
         let k = ctx.kernel(&DEPTHWISE, spec)?;
+        if tiled {
+            let tiles_x = ow.div_ceil(DW_TILE_W as usize);
+            let tiles_y = oh.div_ceil(DW_TILE_H as usize);
+            let total_tiles = prod(&[d.n, d.c_out, tiles_y, tiles_x])?;
+            let p = Params::new()
+                .uz(total_tiles)?
+                .uz(d.h)?
+                .uz(d.w)?
+                .uz(oh)?
+                .uz(ow)?
+                .uz(d.c_out)?
+                .f(d.act.alpha())
+                .uz(tiles_x)?
+                .uz(tiles_y)?;
+            ctx.dispatch(
+                &k,
+                &[x, weight, bias.unwrap_or(ctx.dummy()), y],
+                &p,
+                ctx.grid_1d(total_tiles as u64 * 64, 64)?,
+            )?;
+            return Ok((oh, ow));
+        }
         let qw = ow.div_ceil(DW_VX as usize);
-        let total = d.n * d.c_out * oh * qw;
+        let total = prod(&[d.n, d.c_out, oh, qw])?;
         let p = Params::new()
             .uz(total)?
             .uz(d.h)?

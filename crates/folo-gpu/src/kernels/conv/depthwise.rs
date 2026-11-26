@@ -8,10 +8,114 @@ use crate::pipeline::{Access, KernelDef, Source, Spec};
 
 /// Outputs per invocation of the depthwise kernel (adjacent along a row).
 pub(super) const DW_VX: u32 = 4;
+/// Tiled depthwise output tile height (`16` rows per workgroup).
+pub(super) const DW_TILE_H: u32 = 16;
+/// Tiled depthwise output tile width (`4` threads × `4` outputs = `16` columns per workgroup).
+pub(super) const DW_TILE_W: u32 = 16;
+/// Minimum and maximum kernel side eligible for the shared-memory tiled depthwise forward kernel.
+pub(super) const DW_TILED_MIN_K: u32 = 2;
+pub(super) const DW_TILED_MAX_K: u32 = 7;
+
+fn gen_depthwise_tiled(spec: &Spec) -> String {
+    let g = |name: &str| spec.get_u32(name, 1);
+    let (kh, kw) = (g("KH"), g("KW"));
+    let vec4_out = spec.get_bool("VEC4_OUT");
+    let sh_h = DW_TILE_H + kh - 1;
+    let sh_w = DW_TILE_W + kw - 1;
+    let sh_stride = if sh_w.is_multiple_of(4) { sh_w + 1 } else { sh_w };
+    let sh_elems = sh_h * sh_w;
+    let sh_total = sh_h * sh_stride;
+    let y_ty = if vec4_out { "vec4<T>" } else { "T" };
+    let span = DW_VX + kw - 1;
+    let mut s = UNARY_FN.to_string();
+    let _ = writeln!(
+        s,
+        "@group(0) @binding(1) var<storage, read> X: array<T>;\n\
+         @group(0) @binding(2) var<storage, read> Wt: array<T>;\n\
+         @group(0) @binding(3) var<storage, read> BIAS: array<T>;\n\
+         @group(0) @binding(4) var<storage, read_write> Y: array<{y_ty}>;\n\
+         var<workgroup> sh: array<f32, {sh_total}>;\n\
+         @compute @workgroup_size(4, 16)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_id) tid: vec3<u32>) {{\n\
+         \x20 let lid = tid.y * 4u + tid.x;\n\
+         \x20 let g = wid.y * nwg.x + wid.x;\n\
+         \x20 let total_tiles = pu(0u);\n\
+         \x20 let h = i32(pu(1u)); let w = i32(pu(2u)); let oh = pu(3u); let ow = pu(4u); let cout = pu(5u);\n\
+         \x20 let tiles_x = pu(7u); let tiles_y = pu(8u);\n\
+         \x20 let valid_tile = g < total_tiles;\n\
+         \x20 let tx_tile = g % tiles_x; let t = g / tiles_x; let ty_tile = t % tiles_y; let nc = t / tiles_y;\n\
+         \x20 let co = nc % cout; let n = nc / cout;\n\
+         \x20 let cin = cout / MULT;\n\
+         \x20 let base = (n * cin + co / MULT) * u32(h) * u32(w);\n\
+         \x20 let tile_x = tx_tile * {DW_TILE_W}u; let tile_y = ty_tile * {DW_TILE_H}u;\n\
+         \x20 let iy0 = i32(tile_y) - PH; let ix0 = i32(tile_x) - PW;\n\
+         \x20 for (var idx = lid; idx < {sh_elems}u; idx += 64u) {{\n\
+         \x20   let sy = idx / {sh_w}u;\n\
+         \x20   let sx = idx - sy * {sh_w}u;\n\
+         \x20   let iy = iy0 + i32(sy);\n\
+         \x20   let ix = ix0 + i32(sx);\n\
+         \x20   var v = 0.0;\n\
+         \x20   if (valid_tile && iy >= 0 && iy < h && ix >= 0 && ix < w) {{\n\
+         \x20     v = f32(X[base + u32(iy) * u32(w) + u32(ix)]);\n\
+         \x20   }}\n\
+         \x20   sh[sy * {sh_stride}u + sx] = v;\n\
+         \x20 }}\n\
+         \x20 workgroupBarrier();\n\
+         \x20 if (!valid_tile) {{ return; }}\n\
+         \x20 let oy = tile_y + tid.y;\n\
+         \x20 let ox0 = tile_x + tid.x * 4u;\n\
+         \x20 if (oy >= oh || ox0 >= ow) {{ return; }}\n\
+         \x20 let wbase = co * {kh}u * {kw}u;"
+    );
+    for t in 0..kh * kw {
+        let _ = writeln!(s, "  let w{t} = f32(Wt[wbase + {t}u]);");
+    }
+    s.push_str(
+        "  var acc0 = 0.0; var acc1 = 0.0; var acc2 = 0.0; var acc3 = 0.0;\n  let sx0 = tid.x * 4u;\n",
+    );
+    for ky in 0..kh {
+        let _ = writeln!(s, "  {{ let row_off = (tid.y + {ky}u) * {sh_stride}u + sx0;");
+        for j in 0..span {
+            let _ = writeln!(s, "    let x{j} = sh[row_off + {j}u];");
+        }
+        for v in 0..DW_VX {
+            for kx in 0..kw {
+                let _ = writeln!(s, "    acc{v} = fma(x{}, w{}, acc{v});", v + kx, ky * kw + kx);
+            }
+        }
+        s.push_str("  }\n");
+    }
+    s.push_str("  var b = 0.0;\n  if (HAS_BIAS) { b = f32(BIAS[co]); }\n  let alpha = pf(6u);\n");
+    if vec4_out {
+        s.push_str(
+            "  let v = vec4<f32>(\n\
+             \x20   unary1(ACT, acc0 + b, alpha),\n\
+             \x20   unary1(ACT, acc1 + b, alpha),\n\
+             \x20   unary1(ACT, acc2 + b, alpha),\n\
+             \x20   unary1(ACT, acc3 + b, alpha),\n\
+             \x20 );\n\
+             \x20 Y[(nc * oh + oy) * (ow / 4u) + (ox0 / 4u)] = vec4<T>(v);\n}\n",
+        );
+    } else {
+        s.push_str(
+            "  let out = (nc * oh + oy) * ow + ox0;\n\
+             \x20 Y[out] = T(unary1(ACT, acc0 + b, alpha));\n\
+             \x20 if (ox0 + 1u < ow) { Y[out + 1u] = T(unary1(ACT, acc1 + b, alpha)); }\n\
+             \x20 if (ox0 + 2u < ow) { Y[out + 2u] = T(unary1(ACT, acc2 + b, alpha)); }\n\
+             \x20 if (ox0 + 3u < ow) { Y[out + 3u] = T(unary1(ACT, acc3 + b, alpha)); }\n}\n",
+        );
+    }
+    s
+}
 
 fn gen_depthwise(spec: &Spec) -> String {
+    if spec.get_bool("TILED") {
+        return gen_depthwise_tiled(spec);
+    }
     let g = |name: &str| spec.get_u32(name, 1);
     let (kh, kw, sw, dh, dw) = (g("KH"), g("KW"), g("SW"), g("DH"), g("DW"));
+    let vec4_out = spec.get_bool("VEC4_OUT");
     // Input columns the DW_VX outputs of a row read: (DW_VX - 1) · SW + (KW - 1) · DW + 1.
     let span = (DW_VX - 1) * sw + (kw - 1) * dw + 1;
     let mut taps = String::from(
@@ -61,20 +165,37 @@ fn gen_depthwise(spec: &Spec) -> String {
         "fn store(acc: ptr<function, array<f32, DW_VX>>, out: u32, ox0: u32, ow: u32, b: f32) {
 ",
     );
-    for v in 0..DW_VX {
-        let _ = writeln!(
-            taps,
-            "    if (ox0 + {v}u < ow) {{ Y[out + {v}u] = T(unary1(ACT, (*acc)[{v}] + b, pf(6u))); }}"
+    if vec4_out {
+        taps.push_str(
+            "    let alpha = pf(6u);\n\
+             \x20   let v = vec4<f32>(\n\
+             \x20       unary1(ACT, (*acc)[0] + b, alpha),\n\
+             \x20       unary1(ACT, (*acc)[1] + b, alpha),\n\
+             \x20       unary1(ACT, (*acc)[2] + b, alpha),\n\
+             \x20       unary1(ACT, (*acc)[3] + b, alpha),\n\
+             \x20   );\n\
+             \x20   Y[out / 4u] = vec4<T>(v);\n",
         );
+    } else {
+        for v in 0..DW_VX {
+            let _ = writeln!(
+                taps,
+                "    if (ox0 + {v}u < ow) {{ Y[out + {v}u] = T(unary1(ACT, (*acc)[{v}] + b, pf(6u))); }}"
+            );
+        }
     }
     taps.push_str(
         "}
 ",
     );
+    let y_ty = if vec4_out { "vec4<T>" } else { "T" };
+    let body = include_str!("../../shaders/depthwise.wgsl").replace(
+        "var<storage, read_write> Y: array<T>;",
+        &format!("var<storage, read_write> Y: array<{y_ty}>;"),
+    );
     format!(
         "const DW_VX: u32 = {DW_VX}u;
-{UNARY_FN}{taps}{}",
-        include_str!("../../shaders/depthwise.wgsl")
+{UNARY_FN}{taps}{body}"
     )
 }
 
@@ -361,12 +482,17 @@ const MAX_LISTED_TAPS: u64 = 1024;
 const MAX_LISTED_LINES: u64 = 1 << 16;
 
 /// Whether a kernel list may ask for [`DEPTHWISE`] with `spec` (`kernels::bounds`): non-zero sizes, at most
-/// [`MAX_LISTED_TAPS`] taps and [`MAX_LISTED_LINES`] unrolled statements.
+/// [`MAX_LISTED_TAPS`] taps and [`MAX_LISTED_LINES`] unrolled statements; tiled kernels additionally require
+/// stride 1, dilation 1, and `2..=7` kernel sides.
 pub(super) fn forward_fits(spec: &Spec) -> bool {
     let g = |name: &str| u64::from(spec.get_u32(name, 1));
-    let (kh, kw, sw, dh, dw) = (g("KH"), g("KW"), g("SW"), g("DH"), g("DW"));
-    if [kh, kw, sw, dh, dw].contains(&0) {
+    let (kh, kw, sh, sw, dh, dw) = (g("KH"), g("KW"), g("SH"), g("SW"), g("DH"), g("DW"));
+    if [kh, kw, sh, sw, dh, dw].contains(&0) {
         return false;
+    }
+    if spec.get_bool("TILED") {
+        let ok_k = |k: u64| (u64::from(DW_TILED_MIN_K)..=u64::from(DW_TILED_MAX_K)).contains(&k);
+        return ok_k(kh) && ok_k(kw) && sh == 1 && sw == 1 && dh == 1 && dw == 1;
     }
     let span = (u64::from(DW_VX) - 1) * sw + (kw - 1) * dw + 1;
     kh * kw <= MAX_LISTED_TAPS && kh * (span + u64::from(DW_VX) * kw) <= MAX_LISTED_LINES

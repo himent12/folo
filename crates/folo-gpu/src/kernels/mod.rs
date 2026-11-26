@@ -44,6 +44,7 @@ pub mod elementwise;
 pub mod ew;
 pub mod gemm;
 pub mod gemm_cat;
+pub mod layer_norm;
 pub mod layout;
 pub mod muon;
 pub mod norm;
@@ -51,6 +52,7 @@ pub mod optim;
 pub mod pool_grad;
 pub mod pooling;
 pub mod reduce;
+pub mod softmax_bwd;
 pub mod strided;
 pub mod vision;
 
@@ -86,6 +88,7 @@ pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
         elementwise::DEFS,
         ew::DEFS,
         gemm::DEFS,
+        layer_norm::DEFS,
         layout::DEFS,
         muon::DEFS,
         norm::DEFS,
@@ -93,6 +96,7 @@ pub(crate) fn all_defs() -> impl Iterator<Item = &'static KernelDef> {
         pool_grad::DEFS,
         pooling::DEFS,
         reduce::DEFS,
+        softmax_bwd::DEFS,
         strided::DEFS,
         vision::DEFS,
     ]
