@@ -12,6 +12,31 @@ import { eventOf } from './names';
 
 const SKIP = new Set(['children', 'ref', '$$scope']);
 const XLINK_NS = 'http://www.w3.org/1999/xlink';
+/** Standard DOM events that may lack an IDL `on*` property on elements; camelCase aliases normalize to lowercase. */
+const STANDARD_EVENTS = new Set([
+  'compositionstart',
+  'compositionupdate',
+  'compositionend',
+  'touchcancel',
+  'transitionstart',
+  'transitionrun',
+  'transitioncancel',
+  'animationiteration',
+  'gotpointercapture',
+  'lostpointercapture',
+]);
+
+/** Normalizes camelCase DOM event aliases (`onClick`, `onScroll`, `onKeyDownCapture`) while preserving custom event case (`onValueChanged`). */
+function normalizePropKey(el: Element, key: string): string {
+  if (key.length > 2 && key[0] === 'o' && key[1] === 'n') {
+    const low = key.slice(2).toLowerCase();
+    const ev = eventOf(low);
+    if (DELEGATED.has(ev.type) || STANDARD_EVENTS.has(ev.type) || 'on' + ev.type in el) {
+      return 'on' + low;
+    }
+  }
+  return key;
+}
 
 /**
  * Internal: applies `props` (an object, or a function returning one) to `el`; `scope` is the file's CSS scope class,
@@ -48,7 +73,7 @@ export function spread(
   renderEffect(() => {
     const src = (typeof props === 'function' ? (props as () => object)() : props) as Record<string, unknown>;
     const next: Record<string, unknown> = {};
-    for (const key in src) if (!SKIP.has(key)) next[key] = src[key];
+    for (const rawKey in src) if (!SKIP.has(rawKey)) next[normalizePropKey(el, rawKey)] = src[rawKey];
     for (const key in prev) if (!(key in next)) next[key] = undefined;
     const d = dirs?.();
     if (!classSet || 'class' in next || d !== undefined || prevDirs !== undefined) {

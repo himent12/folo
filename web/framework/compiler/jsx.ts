@@ -114,10 +114,13 @@ export class Compiler {
     return m !== null && this.known.snippetProps.has(m);
   }
 
-  /** A conditional's branch: JSX compiled, a dynamic value as a function (its own memo), so the branch's memo tracks only the condition. */
+  /** A conditional's branch: JSX compiled, nested conditionals/&& delegated, a dynamic value as a function (its own memo), so the branch's memo tracks only the condition. */
   branchValue(n: Node, svg: boolean): Chunk[] {
     const b = bare(n);
     if (isJsx(b)) return this.jsx(b, svg);
+    if (b.type === 'ConditionalExpression' || (b.type === 'LogicalExpression' && b.operator === '&&')) {
+      return this.childValue(b, svg);
+    }
     return isDynamic(n) ? ['() => ', ...this.paren(n, svg)] : this.paren(n, svg);
   }
 
@@ -263,10 +266,15 @@ export class Compiler {
     if (e.type === 'ConditionalExpression' && this.isBlock(e)) {
       return ['(', ...this.paren(e.test, svg), ' ? ', ...this.childValue(e.consequent, svg), ' : ', ...this.childValue(e.alternate, svg), ')'];
     }
-    if (e.type === 'LogicalExpression' && e.operator === '&&' && isDynamic(e.left)) {
-      if (!this.isBlock(e.right)) return ['() => (', ...this.paren(e.left, svg), ' ? ', ...this.paren(e.right, svg), ' : null)'];
-      const c = `_c$${++this.uid}`;
-      return [`(() => { const ${c} = ${this.h('cond')}(() => `, ...this.paren(e.left, svg), `); return ${this.h('memo')}(() => ${c}() ? `, ...this.branchValue(e.right, svg), ` : null); })()`];
+    if (e.type === 'LogicalExpression' && e.operator === '&&') {
+      if (isDynamic(e.left)) {
+        if (!this.isBlock(e.right)) return ['() => (', ...this.paren(e.left, svg), ' ? ', ...this.paren(e.right, svg), ' : null)'];
+        const c = `_c$${++this.uid}`;
+        return [`(() => { const ${c} = ${this.h('cond')}(() => `, ...this.paren(e.left, svg), `); return ${this.h('memo')}(() => ${c}() ? `, ...this.branchValue(e.right, svg), ` : null); })()`];
+      }
+      if (this.isBlock(e.right)) return ['(', ...this.paren(e.left, svg), ' ? ', ...this.childValue(e.right, svg), ' : null)'];
+      if (isDynamic(e.right)) return ['() => (', ...this.paren(e.left, svg), ' ? ', ...this.paren(e.right, svg), ' : null)'];
+      return ['(', ...this.paren(e.left, svg), ' ? ', ...this.paren(e.right, svg), ' : null)'];
     }
     if (isDynamic(n)) return ['() => ', ...this.paren(n, svg)];
     return this.paren(n, svg);

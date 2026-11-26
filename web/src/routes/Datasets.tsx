@@ -295,10 +295,19 @@ export default function Datasets() {
 
   const searchEl = signal<HTMLInputElement | undefined>(undefined);
   const liveNote = signal('');
+  let alive = true;
+  let noteSeq = 0;
+  onCleanup(() => {
+    alive = false;
+    noteSeq++;
+  });
   function announce(message: string) {
+    const seq = ++noteSeq;
     if (liveNote.peek() === message) {
       liveNote.set('');
-      queueMicrotask(() => liveNote.set(message));
+      queueMicrotask(() => {
+        if (alive && seq === noteSeq) liveNote.set(message);
+      });
     } else {
       liveNote.set(message);
     }
@@ -313,6 +322,7 @@ export default function Datasets() {
     format.set('all');
     announce('Cleared dataset filters.');
     queueMicrotask(() => {
+      if (!alive) return;
       const input = searchEl.peek();
       if (input && input.isConnected && !input.disabled) input.focus();
     });

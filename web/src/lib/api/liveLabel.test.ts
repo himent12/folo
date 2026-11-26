@@ -296,6 +296,33 @@ describe('LiveLabelJob ordering', () => {
     stop();
   });
 
+  it('ignores a stale act() answer for the same job id after a server epoch switch', async () => {
+    const { live, stop } = mount();
+    page.resolve({ total: 0, images: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.job?.id).toBe('lb_1');
+    expect(live.job?.status).toBe('idle');
+
+    const stale = deferred<LabelJob>();
+    const acting = live.act(() => stale.promise);
+
+    // Switch server epoch where the new server also happens to have a job with id `lb_1` (idle).
+    snapshot = { ...job('idle'), id: 'lb_1', name: 'new-server-job' };
+    page = deferred<LabelImagePage>();
+    hub.epoch += 1;
+    flushSync();
+    page.resolve({ total: 0, images: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.job?.name).toBe('new-server-job');
+
+    // Old server's act() resolves late with the same id `lb_1`: `#viewSeq` / `epoch` guards must ignore it.
+    stale.resolve({ ...job('running'), id: 'lb_1', name: 'old-server-job' });
+    await acting;
+    expect(live.job?.name).toBe('new-server-job');
+    expect(live.job?.status).toBe('idle');
+    stop();
+  });
+
   // Stress s3-live: deleted in another tab, the job's page stayed on "Reconnecting" over the last known job for good.
   it('notices a job deleted elsewhere: a dropped stream whose job answers 404 shows it gone, and the stream closes', async () => {
     const closes = vi.fn();

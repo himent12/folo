@@ -33,6 +33,7 @@ export function compareState() {
   });
 
   function setIds(next: string[]) {
+    if (router.location.path !== '/runs/compare') return;
     router.go(`/runs/compare${next.length ? `?ids=${next.join(',')}` : ''}`, { replace: true });
   }
 
@@ -128,7 +129,7 @@ export function compareState() {
       return;
     }
     untrack(() => {
-      if (router.route.path !== '/runs/compare') return;
+      if (router.route.path !== '/runs/compare' || router.location.path !== '/runs/compare') return;
       const keep = cur.filter((id) => known.has(id));
       dropped.set([...new Set([...dropped.peek(), ...missing])]);
       setIds(keep);

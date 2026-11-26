@@ -548,17 +548,18 @@ export default function Editor(props: EditorProps) {
     const req = props.choice.request();
     const cur = img.peek();
     if (!cur || !req || asking.peek()) return;
+    const jobId = props.job.id, epoch = hub.epoch, agentName = props.choice.agent?.name ?? 'The agent';
     asking.set(true);
     status.clear();
     try {
-      const job = await props.live.act(() => hub.api.startLabeling(props.job.id, { ...req, image_ids: [cur.id], note: note.peek().trim() }));
+      const job = await props.live.act(() => hub.api.startLabeling(jobId, { ...req, image_ids: [cur.id], note: note.peek().trim() }));
       // The job's own update is applied (`live.act`) wherever the editor is; the line only on the image that asked.
-      if (disposed || shownId !== cur.id || !open.peek()) return;
-      status.info(`${props.choice.agent?.name ?? 'The agent'} is labeling this image again`, 'Its new boxes show here when it is done.');
+      if (disposed || props.job.id !== jobId || hub.epoch !== epoch || shownId !== cur.id || !open.peek()) return;
+      status.info(`${agentName} is labeling this image again`, 'Its new boxes show here when it is done.');
       // After the line above: a run that has already ended (an agent that fails at once) replaces it.
       if (job.run) asked.set({ image: cur.id, started: job.run.started });
     } catch (e) {
-      if (!disposed && shownId === cur.id && open.peek()) status.error(e, 'Could not ask the agent');
+      if (!disposed && props.job.id === jobId && hub.epoch === epoch && shownId === cur.id && open.peek()) status.error(e, 'Could not ask the agent');
     } finally {
       if (!disposed) asking.set(false);
     }
