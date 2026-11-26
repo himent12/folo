@@ -113,8 +113,9 @@ impl Forward for RmsNorm {
                 && x.dtype() == DType::F16
                 && folo_core::autocast_dtype() == Some(DType::F16)
             {
-                let w16 = w.to_dtype(DType::F16)?;
-                return Ok(x.rms_norm(Some(&w16), self.eps)?);
+                // Widen the activation instead of narrowing `w` to F16 so `w`'s accumulated gradient stays
+                // in F32 (avoiding F16 overflow at 65504 under AMP loss scaling).
+                return Ok(x.to_dtype(DType::F32)?.rms_norm(Some(w), self.eps)?.to_dtype(DType::F16)?);
             }
         }
         Ok(x.rms_norm(self.weight.as_ref(), self.eps)?)
@@ -197,5 +198,26 @@ mod tests {
         let tiny_g =
             tiny_y.sum_all().unwrap().backward().unwrap().get(&tiny_x).unwrap().to_vec::<f32>().unwrap();
         assert!(tiny_g[0].is_finite());
+
+        // F16 autocast keeps F32 weight gradients in F32 (two unit rows * 40_000 = 80_000 > F16::MAX).
+        let amp_norm = RmsNorm::new(1, RMSNORM_DEFAULT_EPS).unwrap();
+        let x_f16 = Tensor::from_slice(&[1.0f32, 1.0], [2, 1]).unwrap().to_dtype(DType::F16).unwrap();
+        let y_f16 = {
+            let _ac = folo_core::autocast();
+            amp_norm.forward(&x_f16).unwrap()
+        };
+        assert_eq!(y_f16.dtype(), DType::F16);
+        let loss_amp = y_f16.to_dtype(DType::F32).unwrap().mul_scalar(40_000.0).unwrap().sum_all().unwrap();
+        let gw = loss_amp
+            .backward()
+            .unwrap()
+            .get(amp_norm.weight.as_ref().unwrap())
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap()[0];
+        assert!(
+            gw.is_finite() && (gw - 80_000.0).abs() < 10.0,
+            "F16 autocast F32 weight grad overflowed: {gw}"
+        );
     }
 }

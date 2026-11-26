@@ -150,8 +150,21 @@ struct ParamState {
     beta1_prod: f64,
 }
 
+struct StagedGroupHyperparams {
+    base_lr: f64,
+    lr: f64,
+    base_momentum: f64,
+    momentum: f64,
+    beta2: f64,
+    beta3: f64,
+    eps: f64,
+    weight_decay: f64,
+    decoupled_wd: bool,
+}
+
 struct PendingResume {
     step: u64,
+    groups: Vec<StagedGroupHyperparams>,
     param_steps: Vec<Vec<u64>>,
     beta1_prods: Vec<Vec<f64>>,
 }
@@ -601,19 +614,27 @@ impl Adan {
             staged_prods.push(grp_prods);
         }
 
-        for ((g, b3), gc) in self.groups.iter_mut().zip(&mut self.beta3).zip(&c.groups) {
-            g.base_lr = gc.lr;
-            g.lr = gc.current_lr.unwrap_or(gc.lr);
-            g.base_momentum = gc.betas[0];
-            g.momentum = gc.current_beta1.unwrap_or(gc.betas[0]);
-            g.beta2 = gc.betas[1];
-            *b3 = gc.betas[2];
-            g.eps = gc.eps;
-            g.weight_decay = gc.weight_decay;
-            g.decoupled_wd = gc.decoupled_wd;
-        }
-        self.pending_resume =
-            Some(PendingResume { step: c.step, param_steps: staged_steps, beta1_prods: staged_prods });
+        let staged_groups: Vec<StagedGroupHyperparams> = c
+            .groups
+            .iter()
+            .map(|gc| StagedGroupHyperparams {
+                base_lr: gc.lr,
+                lr: gc.current_lr.unwrap_or(gc.lr),
+                base_momentum: gc.betas[0],
+                momentum: gc.current_beta1.unwrap_or(gc.betas[0]),
+                beta2: gc.betas[1],
+                beta3: gc.betas[2],
+                eps: gc.eps,
+                weight_decay: gc.weight_decay,
+                decoupled_wd: gc.decoupled_wd,
+            })
+            .collect();
+        self.pending_resume = Some(PendingResume {
+            step: c.step,
+            groups: staged_groups,
+            param_steps: staged_steps,
+            beta1_prods: staged_prods,
+        });
         Ok(())
     }
 
@@ -693,6 +714,17 @@ impl Adan {
             }
         }
         if let Some(pending) = self.pending_resume.take() {
+            for ((g, b3), sg) in self.groups.iter_mut().zip(&mut self.beta3).zip(pending.groups) {
+                g.base_lr = sg.base_lr;
+                g.lr = sg.lr;
+                g.base_momentum = sg.base_momentum;
+                g.momentum = sg.momentum;
+                g.beta2 = sg.beta2;
+                *b3 = sg.beta3;
+                g.eps = sg.eps;
+                g.weight_decay = sg.weight_decay;
+                g.decoupled_wd = sg.decoupled_wd;
+            }
             for ((st_new, steps), prods) in fresh.iter_mut().zip(pending.param_steps).zip(pending.beta1_prods)
             {
                 for ((ps_new, k), prod) in st_new.iter_mut().zip(steps).zip(prods) {

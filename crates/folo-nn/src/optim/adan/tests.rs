@@ -322,6 +322,16 @@ fn adan_reordered_resume_aliasing_composite_overflow_and_varying_beta1() {
     assert_eq!(resumed.param_step(0, 0), Some(0));
     assert_eq!(resumed.param_step(0, 1), Some(0));
 
+    // Failed load_state after apply_contract leaves existing optimizer hyperparameters and state untouched.
+    let mut partial_res =
+        Adan::from_params(vec![("b".into(), pb2.clone()), ("a".into(), pa2.clone())], AdanConfig::default())
+            .unwrap();
+    let orig_lr = partial_res.groups()[0].base_lr;
+    partial_res.apply_contract(&contract).unwrap();
+    assert!(partial_res.load_state(contract.step, &HashMap::new()).is_err());
+    assert_eq!(partial_res.groups()[0].base_lr, orig_lr);
+    assert_eq!(partial_res.step_count(), 0);
+
     // Contract rejecting param_step > step.
     let mut bad_contract = contract.clone();
     bad_contract.groups[0].param_steps[0] = bad_contract.step + 1;
