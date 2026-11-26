@@ -574,6 +574,9 @@ export function compareState() {
 
   const showSame = signal(false);
   const managing = signal(false);
+  effect(() => {
+    if (!narrow() || ids.get().length === 0) untrack(() => managing.set(false));
+  });
   // Phones compare two runs at a time: a baseline and one other, fully in view and paged with ‹ ›. The baseline is its
   // own choice (the first run until Swap in the table's header), never the legend's emphasis.
   const allRuns = signal(false);

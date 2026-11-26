@@ -824,4 +824,28 @@ describe('the labeling editor: reviewing', () => {
     await new Promise((r) => setTimeout(r, 0));
     flushSync();
   });
+
+  it('reopens the unsaved-changes confirmation when J is pressed immediately after Escape before the async close event', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    key('j');
+    flushSync();
+    const confirmDlg = asking();
+    expect(confirmDlg).toBeDefined();
+
+    // Simulate Chromium Escape on the confirmation dialog: `cancel` fires before the queued `close` event.
+    confirmDlg!.dispatchEvent(new Event('cancel', { cancelable: true }));
+    flushSync();
+    expect(asking()).toBeUndefined();
+
+    // Pressing J immediately (before the queued native `close` event fires) must reopen the confirmation.
+    key('j');
+    flushSync();
+    expect(asking()).toBeDefined();
+
+    // A stale queued `close` event arriving after reopen must not dismiss the newly reopened confirmation.
+    confirmDlg!.dispatchEvent(new Event('close'));
+    flushSync();
+    expect(asking()).toBeDefined();
+  });
 });

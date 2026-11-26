@@ -818,4 +818,33 @@ describe('Compare: a run that detected nothing', () => {
       else delete (HTMLElement.prototype as { clientWidth?: number }).clientWidth;
     }
   });
+
+  it('does not reopen the Compare runs sheet when resizing from phone to tablet and back to phone', async () => {
+    const api = hub.api as MockApi;
+    const [a, b] = (await api.runs()).filter((r) => r.status === 'completed').slice(0, 2);
+    // Start at tablet width (happy-dom MediaQuery tracks changes cleanly from non-matching -> matching -> non-matching).
+    setWidth(768);
+    router.route = parse(`#/runs/compare?ids=${a!.id},${b!.id}`);
+    c = mount(RunCompare, { target });
+    await until(() => target.querySelector('.c-head'), 'tablet layout');
+
+    // Narrow to phone width and open the Edit runs sheet.
+    setWidth(390);
+    const editBtn = await until(
+      () => [...target.querySelectorAll<HTMLButtonElement>('button')].find((el) => el.textContent?.trim() === 'Edit'),
+      'phone Edit button',
+    );
+    editBtn.click();
+    flushSync();
+    expect(document.querySelector('dialog[open]')).not.toBeNull();
+
+    // Widen to tablet width (dismisses sheet) and narrow back to phone width: sheet must stay closed.
+    setWidth(768);
+    await until(() => !!target.querySelector('.c-head'), 'tablet layout again');
+    expect(document.querySelector('dialog[open]')).toBeNull();
+
+    setWidth(390);
+    await until(() => !target.querySelector('.c-head'), 'phone layout again');
+    expect(document.querySelector('dialog[open]')).toBeNull();
+  });
 });
