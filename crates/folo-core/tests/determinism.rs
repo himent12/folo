@@ -336,3 +336,32 @@ fn elementwise_activations_binary_and_where_are_bitwise_reproducible() {
         ]
     });
 }
+
+#[test]
+fn max_pool_and_adaptive_avg_pool_are_bitwise_reproducible() {
+    use folo_core::no_grad;
+    let mut rng = Rng::seed(22);
+    // Above PAR_MIN with odd spatial dims (37x41) to exercise AVX2 8-wide + tail + parallel task batching.
+    let x = Tensor::randn([4, 32, 37, 41], 0.0, 1.0, &mut rng).requires_grad_();
+    let g_s1 = Tensor::randn([4, 32, 37, 41], 0.0, 1.0, &mut rng);
+    let g_s2 = Tensor::randn([4, 32, 18, 20], 0.0, 1.0, &mut rng);
+    let g_gap = Tensor::randn([4, 32, 1, 1], 0.0, 1.0, &mut rng);
+    let g_ad = Tensor::randn([4, 32, 5, 7], 0.0, 1.0, &mut rng);
+    assert_reproducible("max_pool_and_adaptive_avg", &|| {
+        let (mv5, mv2) = {
+            let _g = no_grad();
+            (x.max_pool2d(5, 1, 2).unwrap(), x.max_pool2d(2, 2, 0).unwrap())
+        };
+        let m5 = x.max_pool2d(5, 1, 2).unwrap();
+        let m2 = x.max_pool2d(2, 2, 0).unwrap();
+        let a3 = x.avg_pool2d(3, 1, 1).unwrap();
+        let gap = x.adaptive_avg_pool2d([1, 1]).unwrap();
+        let ad = x.adaptive_avg_pool2d([5, 7]).unwrap();
+        let gm5 = m5.backward_with(&g_s1).unwrap().get(&x).unwrap().clone();
+        let gm2 = m2.backward_with(&g_s2).unwrap().get(&x).unwrap().clone();
+        let ga3 = a3.backward_with(&g_s1).unwrap().get(&x).unwrap().clone();
+        let ggap = gap.backward_with(&g_gap).unwrap().get(&x).unwrap().clone();
+        let gad = ad.backward_with(&g_ad).unwrap().get(&x).unwrap().clone();
+        vec![mv5, mv2, m5, m2, gap, ad, gm5, gm2, ga3, ggap, gad]
+    });
+}

@@ -282,6 +282,14 @@ fn pooling_and_upsample_grads() {
     let asym = Pool2dParams { kernel: [2, 3], stride: [1, 2], padding: [1, 1] };
     check1(|x| x.max_pool2d_with(&asym), x.clone());
     check1(|x| x.avg_pool2d_with(&asym), x.clone());
+    // Wide plane (width 19 > 2*8 + 3 tail) exercises AVX2 8-wide + scalar tail forward & backward paths.
+    let wide = grid(&[1, 2, 9, 19], 81).mul_scalar(0.1).unwrap();
+    let opts = GradCheck { max_checks: 24, ..GradCheck::default() };
+    grad_check_with(|v| v[0].max_pool2d(5, 1, 2), std::slice::from_ref(&wide), &opts).unwrap();
+    grad_check_with(|v| v[0].max_pool2d(2, 2, 0), std::slice::from_ref(&wide), &opts).unwrap();
+    grad_check_with(|v| v[0].avg_pool2d(3, 1, 1), std::slice::from_ref(&wide), &opts).unwrap();
+    grad_check_with(|v| v[0].adaptive_avg_pool2d([1, 1]), std::slice::from_ref(&wide), &opts).unwrap();
+    grad_check_with(|v| v[0].adaptive_avg_pool2d([3, 5]), std::slice::from_ref(&wide), &opts).unwrap();
 }
 
 #[test]

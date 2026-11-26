@@ -200,3 +200,145 @@ fn upsample2x2_forward_and_backward_match_reference_bit_for_bit() {
         }
     }
 }
+
+#[test]
+fn avx2_max_pool_values_and_indexed_match_direct_across_widths_and_edge_cases() {
+    let special = [
+        0.0f32,
+        -0.0,
+        f32::NEG_INFINITY,
+        f32::INFINITY,
+        f32::from_bits(0x7fc0_0001),
+        f32::from_bits(0xffc0_0007),
+    ];
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    // Unaligned widths across 8-wide AVX2 boundary + scalar tails, plus a parallel batch (`>= PAR_MIN`).
+    for (np, h, w) in [(2, 5, 1), (2, 7, 7), (2, 8, 8), (2, 9, 9), (2, 11, 17), (3, 20, 20), (2, 13, 37)] {
+        let x: Vec<f32> = (0..np * h * w)
+            .map(|i| match (i * 2654435761) % 13 {
+                k @ 0..=5 => special[k],
+                k => (k as f32 - 8.0) * 0.25,
+            })
+            .collect();
+        for (k, s, pad) in [
+            ([5, 5], [1, 1], [2, 2]),
+            ([3, 3], [1, 1], [1, 1]),
+            ([2, 2], [2, 2], [0, 0]),
+            ([2, 2], [2, 2], [1, 1]),
+            ([7, 7], [1, 1], [3, 3]),
+            ([2, 3], [2, 1], [1, 1]),
+            // All-padding corner windows (`pad >= kernel`).
+            ([2, 2], [1, 1], [2, 2]),
+        ] {
+            let p = Pool2dParams { kernel: k, stride: s, padding: pad };
+            let Some(ohw) = p.output_hw(h, w) else { continue };
+            let (v, ix) = max_pool2d(&x, (np, h, w), &p, ohw);
+            let fast = max_pool2d_values(&x, (np, h, w), &p, ohw);
+            let (wv, wix) = direct(&x, (np, h, w), &p, ohw);
+            assert_eq!(ix, wix, "idx {np}x{h}x{w} {p:?}");
+            assert_eq!(bits(&v), bits(&wv), "val {np}x{h}x{w} {p:?}");
+            assert_eq!(bits(&fast), bits(&wv), "fast {np}x{h}x{w} {p:?}");
+        }
+    }
+    // Extreme stride where `ow == 1` and `pw > wp` (`w = 1, k = 1, s = 10, pad = 2` -> `ow = 1, wp = 1, pw = 2`).
+    let p_ext = Pool2dParams { kernel: [1, 1], stride: [10, 10], padding: [2, 2] };
+    let ohw = p_ext.output_hw(1, 1).unwrap();
+    let (v, ix) = max_pool2d(&[42.0], (1, 1, 1), &p_ext, ohw);
+    let fast = max_pool2d_values(&[42.0], (1, 1, 1), &p_ext, ohw);
+    let (wv, wix) = direct(&[42.0], (1, 1, 1), &p_ext, ohw);
+    assert_eq!(ix, wix);
+    assert_eq!(bits(&v), bits(&wv));
+    assert_eq!(bits(&fast), bits(&wv));
+
+    // All `-inf` plane: first valid real `-inf` wins (index 0 for unpadded), not padding.
+    let neg_inf = vec![f32::NEG_INFINITY; 2 * 10 * 19];
+    for p in [
+        Pool2dParams { kernel: [5, 5], stride: [1, 1], padding: [2, 2] },
+        Pool2dParams { kernel: [2, 2], stride: [2, 2], padding: [0, 0] },
+    ] {
+        let ohw = p.output_hw(10, 19).unwrap();
+        let (v, ix) = max_pool2d(&neg_inf, (2, 10, 19), &p, ohw);
+        let (wv, wix) = direct(&neg_inf, (2, 10, 19), &p, ohw);
+        assert_eq!(ix, wix, "all -inf {p:?}");
+        assert_eq!(bits(&v), bits(&wv), "all -inf {p:?}");
+    }
+
+    // Parallel path (`>= PAR_MIN`): `[128, 17, 19]` = 41,344 outputs.
+    let (np, h, w) = (128, 17, 19);
+    let x: Vec<f32> = (0..np * h * w).map(|i| ((i as f32 * 0.13).sin()) * 3.0).collect();
+    for p in [
+        Pool2dParams { kernel: [5, 5], stride: [1, 1], padding: [2, 2] },
+        Pool2dParams { kernel: [2, 2], stride: [2, 2], padding: [0, 0] },
+    ] {
+        let ohw = p.output_hw(h, w).unwrap();
+        let (v, ix) = max_pool2d(&x, (np, h, w), &p, ohw);
+        let fast = max_pool2d_values(&x, (np, h, w), &p, ohw);
+        let (wv, wix) = direct(&x, (np, h, w), &p, ohw);
+        assert_eq!(ix, wix, "par idx {p:?}");
+        assert_eq!(bits(&v), bits(&wv), "par val {p:?}");
+        assert_eq!(bits(&fast), bits(&wv), "par fast {p:?}");
+    }
+}
+
+#[test]
+fn adaptive_avg_pool_and_backward_match_direct_across_sizes() {
+    for ((np, h, w), out_hw) in [
+        ((3, 19, 23), [1, 1]),
+        ((3, 19, 23), [3, 5]),
+        ((2, 7, 17), [7, 17]),
+        ((128, 17, 19), [1, 1]),
+        ((64, 21, 29), [5, 7]),
+        ((2, 0, 5), [1, 1]),
+    ] {
+        let x: Vec<f32> = (0..np * h * w).map(|i| ((i as f32 * 0.31).sin()) * 2.5).collect();
+        let got = adaptive_avg_pool2d(&x, (np, h, w), out_hw);
+        let [oh, ow] = out_hw;
+        if h * w > 0 {
+            for pl in 0..np {
+                for oy in 0..oh {
+                    let ys = adaptive_range(oy, h, oh);
+                    for ox in 0..ow {
+                        let xs = adaptive_range(ox, w, ow);
+                        let mut s = 0.0f64;
+                        for yy in ys.clone() {
+                            for xx in xs.clone() {
+                                s += x[(pl * h + yy) * w + xx] as f64;
+                            }
+                        }
+                        let want = (s / (ys.len() * xs.len()) as f64) as f32;
+                        let g = got[(pl * oh + oy) * ow + ox];
+                        assert!(
+                            (g - want).abs() <= 1e-5 * (1.0 + want.abs()),
+                            "adap fwd {np}x{h}x{w} -> {out_hw:?}: {g} vs {want}"
+                        );
+                    }
+                }
+            }
+        }
+        let gy: Vec<f32> = (0..np * oh * ow).map(|i| ((i as f32 * 0.23).cos()) * 1.5).collect();
+        let gx = adaptive_avg_pool2d_backward(&gy, (np, h, w), out_hw);
+        let mut ref_gx = vec![0.0f64; np * h * w];
+        if h * w > 0 {
+            for pl in 0..np {
+                for oy in 0..oh {
+                    let ys = adaptive_range(oy, h, oh);
+                    for ox in 0..ow {
+                        let xs = adaptive_range(ox, w, ow);
+                        let v = gy[(pl * oh + oy) * ow + ox] as f64 / (ys.len() * xs.len()) as f64;
+                        for yy in ys.clone() {
+                            for xx in xs.clone() {
+                                ref_gx[(pl * h + yy) * w + xx] += v;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (i, (&a, &b)) in gx.iter().zip(&ref_gx).enumerate() {
+            assert!(
+                (a as f64 - b).abs() <= 1e-5 * (1.0 + b.abs()),
+                "adap bwd {np}x{h}x{w} -> {out_hw:?} [{i}]: {a} vs {b}"
+            );
+        }
+    }
+}

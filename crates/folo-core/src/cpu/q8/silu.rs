@@ -67,7 +67,7 @@ pub fn silu_q8(x: f32) -> f32 {
 }
 
 /// [`silu_q8`] on 8 lanes, bit-identical to scalar [`silu_q8`].
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", test))]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
 pub(crate) fn silu_q8_avx2(x: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
@@ -99,4 +99,113 @@ pub(crate) fn silu_q8_avx2(x: std::arch::x86_64::__m256) -> std::arch::x86_64::_
     let t2 = _mm256_fmadd_ps(e2, e2, e2);
     let r = _mm256_fmadd_ps(u2, t2, u2);
     _mm256_mul_ps(x, r)
+}
+
+/// [`silu_q8`] on 4 independent 8-lane vectors (32 floats, one full `MR = 4` C4 channel group), interleaved to
+/// hide FMA latency and share constant broadcasts; bit-identical to 4 calls of [`silu_q8_avx2`] / scalar [`silu_q8`].
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+#[inline]
+pub(crate) fn silu_q8_avx2_x4(x: [std::arch::x86_64::__m256; 4]) -> [std::arch::x86_64::__m256; 4] {
+    use std::arch::x86_64::*;
+    let min_x = _mm256_set1_ps(-88.0);
+    let x = [
+        _mm256_max_ps(min_x, x[0]),
+        _mm256_max_ps(min_x, x[1]),
+        _mm256_max_ps(min_x, x[2]),
+        _mm256_max_ps(min_x, x[3]),
+    ];
+    let nlog2e = _mm256_set1_ps(NEG_LOG2_E);
+    let u_lo = _mm256_set1_ps(-124.0);
+    let u_hi = _mm256_set1_ps(124.0);
+    let u = [
+        _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(x[0], nlog2e), u_lo), u_hi),
+        _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(x[1], nlog2e), u_lo), u_hi),
+        _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(x[2], nlog2e), u_lo), u_hi),
+        _mm256_min_ps(_mm256_max_ps(_mm256_mul_ps(x[3], nlog2e), u_lo), u_hi),
+    ];
+    let magic = _mm256_set1_ps(MAGIC_EXP);
+    let z = [
+        _mm256_add_ps(u[0], magic),
+        _mm256_add_ps(u[1], magic),
+        _mm256_add_ps(u[2], magic),
+        _mm256_add_ps(u[3], magic),
+    ];
+    let f = [
+        _mm256_sub_ps(u[0], _mm256_sub_ps(z[0], magic)),
+        _mm256_sub_ps(u[1], _mm256_sub_ps(z[1], magic)),
+        _mm256_sub_ps(u[2], _mm256_sub_ps(z[2], magic)),
+        _mm256_sub_ps(u[3], _mm256_sub_ps(z[3], magic)),
+    ];
+    let c5 = _mm256_set1_ps(C5);
+    let c4 = _mm256_set1_ps(C4);
+    let mut p = [
+        _mm256_fmadd_ps(c5, f[0], c4),
+        _mm256_fmadd_ps(c5, f[1], c4),
+        _mm256_fmadd_ps(c5, f[2], c4),
+        _mm256_fmadd_ps(c5, f[3], c4),
+    ];
+    for c in [C3, C2, C1, C0] {
+        let vc = _mm256_set1_ps(c);
+        p[0] = _mm256_fmadd_ps(p[0], f[0], vc);
+        p[1] = _mm256_fmadd_ps(p[1], f[1], vc);
+        p[2] = _mm256_fmadd_ps(p[2], f[2], vc);
+        p[3] = _mm256_fmadd_ps(p[3], f[3], vc);
+    }
+    let e = [
+        _mm256_mul_ps(p[0], _mm256_castsi256_ps(_mm256_slli_epi32::<23>(_mm256_castps_si256(z[0])))),
+        _mm256_mul_ps(p[1], _mm256_castsi256_ps(_mm256_slli_epi32::<23>(_mm256_castps_si256(z[1])))),
+        _mm256_mul_ps(p[2], _mm256_castsi256_ps(_mm256_slli_epi32::<23>(_mm256_castps_si256(z[2])))),
+        _mm256_mul_ps(p[3], _mm256_castsi256_ps(_mm256_slli_epi32::<23>(_mm256_castps_si256(z[3])))),
+    ];
+    let one = _mm256_set1_ps(1.0);
+    let d = [
+        _mm256_add_ps(one, e[0]),
+        _mm256_add_ps(one, e[1]),
+        _mm256_add_ps(one, e[2]),
+        _mm256_add_ps(one, e[3]),
+    ];
+    let rmagic = _mm256_set1_epi32(RECIP_MAGIC as i32);
+    let r0 = [
+        _mm256_castsi256_ps(_mm256_sub_epi32(rmagic, _mm256_castps_si256(d[0]))),
+        _mm256_castsi256_ps(_mm256_sub_epi32(rmagic, _mm256_castps_si256(d[1]))),
+        _mm256_castsi256_ps(_mm256_sub_epi32(rmagic, _mm256_castps_si256(d[2]))),
+        _mm256_castsi256_ps(_mm256_sub_epi32(rmagic, _mm256_castps_si256(d[3]))),
+    ];
+    let e0 = [
+        _mm256_fnmadd_ps(d[0], r0[0], one),
+        _mm256_fnmadd_ps(d[1], r0[1], one),
+        _mm256_fnmadd_ps(d[2], r0[2], one),
+        _mm256_fnmadd_ps(d[3], r0[3], one),
+    ];
+    let u2 = [
+        _mm256_fmadd_ps(r0[0], e0[0], r0[0]),
+        _mm256_fmadd_ps(r0[1], e0[1], r0[1]),
+        _mm256_fmadd_ps(r0[2], e0[2], r0[2]),
+        _mm256_fmadd_ps(r0[3], e0[3], r0[3]),
+    ];
+    let e2 = [
+        _mm256_mul_ps(e0[0], e0[0]),
+        _mm256_mul_ps(e0[1], e0[1]),
+        _mm256_mul_ps(e0[2], e0[2]),
+        _mm256_mul_ps(e0[3], e0[3]),
+    ];
+    let t2 = [
+        _mm256_fmadd_ps(e2[0], e2[0], e2[0]),
+        _mm256_fmadd_ps(e2[1], e2[1], e2[1]),
+        _mm256_fmadd_ps(e2[2], e2[2], e2[2]),
+        _mm256_fmadd_ps(e2[3], e2[3], e2[3]),
+    ];
+    let r = [
+        _mm256_fmadd_ps(u2[0], t2[0], u2[0]),
+        _mm256_fmadd_ps(u2[1], t2[1], u2[1]),
+        _mm256_fmadd_ps(u2[2], t2[2], u2[2]),
+        _mm256_fmadd_ps(u2[3], t2[3], u2[3]),
+    ];
+    [
+        _mm256_mul_ps(x[0], r[0]),
+        _mm256_mul_ps(x[1], r[1]),
+        _mm256_mul_ps(x[2], r[2]),
+        _mm256_mul_ps(x[3], r[3]),
+    ]
 }
