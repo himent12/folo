@@ -12,13 +12,13 @@ YOLO-style object detectors from one native binary — with custom tensors, auto
 and first-class agent tooling.
 
 - **One binary, zero Python or CUDA.** Custom Rust engine and `wgpu`/WGSL shaders run on any Vulkan, DX12, or Metal GPU
-  out of the box (`folo doctor` shows the picked adapter).
+  that meets wgpu's compute requirements (`folo doctor` shows the picked adapter).
 - **End-to-end computer vision.** Label raw images with coding agents, train locally or on rented cloud GPUs, validate
   with pycocotools-exact mAP, stress-test with vision benchmarks, and export to `.folo` or ONNX.
-- **Built for agents.** Every command supports `--json` with stable exit codes, `folo describe --json` exposes the full
+- **Built for agents.** CLI commands support `--json` with stable exit codes, `folo describe --json` exposes the full
   schema, and `folo mcp` gives Claude Code, Codex, Antigravity, or any MCP client 40 tools.
-- **Runs in the browser.** The same Rust detector compiles to WebAssembly on WebGPU or wasm CPU (~14 ms for `folo-n` at
-  640×640 in Chrome).
+- **Runs in the browser.** The same Rust detector compiles to WebAssembly on WebGPU or wasm CPU (~14 ms on WebGPU for
+  `folo-n` at 640×640 in Chrome).
 
 > **Status: early (v0.1).** Trains and runs on CPU and GPU with published COCO weights (`folo weights pull folo-s-coco`).
 > Faster than the incumbent on every benchmark row below; not yet as accurate on COCO, and interfaces may still change.
@@ -48,8 +48,8 @@ i7-14700KF) at 640×640. FOLO computes in strict f32 unless a row says f16/AMP a
   </picture>
 </p>
 
-`folo-s` beats `yolo26s` on every measured row as well ([summary by size](docs/BENCHMARKS.md#summary)); GPU batch-1
-latency uses a longer warm-up on FOLO ([method](docs/BENCHMARKS.md#method)).
+`folo-s` beats `yolo26s` on every measured row as well; GPU batch-1 latency uses a longer warm-up on FOLO
+([summary](docs/BENCHMARKS.md#summary), [method](docs/BENCHMARKS.md#method)).
 
 <details>
 <summary>Full benchmark table and measurement notes</summary>
@@ -68,8 +68,9 @@ latency uses a longer warm-up on FOLO ([method](docs/BENCHMARKS.md#method)).
 | Training step peak GPU memory allocated, batch 16 | **3467 MiB** (f32) / **2022 MiB** (AMP) | 4517 / 2646 MiB | FOLO allocates 23% / 24% less |
 
 FOLO's numbers were measured on `main`, alternated run by run with the prior build (2026-11-13 for GPU batch-1 and
-end-to-end rows on published COCO weights; 2026-11-12 for the rest); `yolo26n` was measured on 2026-11-07. Both sides
-warm up with 25 forward / 10 end-to-end calls, after which FOLO's bench continues warming until 1 s has elapsed.
+end-to-end rows, the latter on published COCO weights; 2026-11-12 for the rest); `yolo26n` was measured on 2026-11-07.
+For GPU batch-1 latency, both sides warm up with 25 forward / 10 end-to-end calls, after which FOLO's bench continues
+warming until 1 s has elapsed.
 
 </details>
 
@@ -126,13 +127,16 @@ folo train --data datasets/shapes --model folo-n --imgsz 320 --epochs 30 # ~1.5 
 folo predict --model runs/shapes-n/weights/best.folo datasets/shapes/images/val --save runs/shapes-n/pred
 ```
 
-On an RTX 4080 SUPER this reaches mAP50 0.955 / mAP50-95 0.823 in 83 s. Copy the weights into `~/.folo/models/`
-(default `$FOLO_HOME`) and open Studio at `http://127.0.0.1:7878`:
+On an RTX 4080 SUPER this reaches mAP50 0.955 / mAP50-95 0.823 in 83 s. Copy the weights into `<data dir>/models/`
+(default `$FOLO_DATA_DIR`, `$FOLO_HOME`, or `~/.folo`) and open Studio at `http://127.0.0.1:7878` — e.g. with the
+default config (POSIX shell):
 
 ```sh
 mkdir -p ~/.folo/models && cp runs/shapes-n/weights/best.folo ~/.folo/models/shapes-n.folo
 folo serve                                                               # or `folo serve --mock` for demo data
 ```
+
+On PowerShell: `New-Item -Force -ItemType Directory ~\.folo\models | Out-Null; Copy-Item runs\shapes-n\weights\best.folo ~\.folo\models\shapes-n.folo; folo serve`.
 
 See **[docs/QUICKSTART.md](docs/QUICKSTART.md)** for custom YOLO/COCO folders, fine-tuning from COCO weights, ONNX
 export, and in-browser inference.
@@ -142,9 +146,11 @@ export, and in-browser inference.
 Requires Rust stable (`cargo folo` is a workspace alias for `cargo run --release -p folo-cli --`):
 
 ```sh
-git clone https://github.com/himent12/folo && cd folo
+git clone https://github.com/himent12/folo
+cd folo
 cargo folo doctor
-(cd web && npm ci && npm run build)   # optional: build Studio once for `cargo folo serve`
+npm --prefix web ci                   # build Studio once for `cargo folo serve` (skip for CLI/API only)
+npm --prefix web run build
 cargo folo serve --mock
 ```
 
@@ -159,8 +165,8 @@ embed Studio).
 with five workspaces alongside Overview and Settings:
 - **Datasets** — register YOLO/COCO or synthetic folders, inspect class balance and label issues, or label raw images
   with Claude Code, Codex, or Antigravity ([docs/LABELING.md](docs/LABELING.md)).
-- **Runs** — launch, compare, stop, or resume bit-exactly with live SSE metrics and validation grids, locally or on
-  RunPod / remote FOLO servers ([docs/CLOUD.md](docs/CLOUD.md)).
+- **Runs** — launch, compare, stop, or resume runs (bit-exact on the same device) with live SSE metrics and validation
+  grids, locally or on RunPod / remote FOLO servers ([docs/CLOUD.md](docs/CLOUD.md)).
 - **Models** — inspect per-class precision/recall curves and export `.folo` or ONNX weights.
 - **Benchmarks** — freeze labeled images into five-axis vision benchmarks with stress conditions (haze, blur, low light,
   distance) and score any model or agent ([docs/BENCH.md](docs/BENCH.md)).
@@ -178,8 +184,8 @@ with five workspaces alongside Overview and Settings:
 A native Rust app on `folo-ui` sharing Studio's design system and core workspaces (Overview, Datasets, Runs, Models,
 Benchmarks, Playground, and Settings; agent labeling, compare views, and external prediction import stay in Studio).
 It renders on the CPU so your GPU stays free for training and inference, includes a command palette, keyboard
-navigation, and custom themes, and auto-starts a local `folo serve` when none is running (or connects via `--server` /
-`--mock`).
+navigation, and custom themes, and auto-starts a local `folo serve` when none is running (or pass `--server` to connect
+to one, or `--mock` for demo data).
 
 ```sh
 cd apps/desktop
@@ -204,9 +210,11 @@ Or add `{ "mcpServers": { "folo": { "command": "folo", "args": ["mcp"] } } }` to
 (share live state with Studio), `--device`, `--tensor-cores` (for AMP), `--mock`, `--read-only`, and `--confine` — see
 [docs/MCP.md](docs/MCP.md) for full schemas and running from a source checkout.
 
-**CLI with `--json`.** Every command accepts `--json`: stdout emits pure JSON Lines, stderr carries progress, errors
-return `{"error":{"code","message","hint"}}` with stable exit codes (`0` ok, `1` runtime, `2` usage, `3` not found,
-`4` unsupported), and `folo describe --json` dumps the entire CLI and MCP schema.
+**CLI with `--json`.** Every command except `folo mcp` (which reserves stdout for MCP and reports errors on stderr)
+accepts `--json`: stdout emits pure JSON Lines, stderr carries progress, errors return
+`{"error":{"code","message","hint"}}` with stable exit codes (`0` ok, `1` runtime, `2` usage, `3` not found,
+`4` unsupported; `--help` and `--version` stay plain text), and `folo describe --json` dumps the entire CLI and MCP
+schema.
 
 ```sh
 folo train --data datasets/shapes --model folo-n --epochs 30 --json            # {"event":"epoch",...}, {"event":"done",...}
@@ -259,9 +267,10 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (including the **"Where do I ch
 ## Project status
 
 **Works today (v0.1):**
-- `folo-n/s/m/l/x` training on CPU or GPU (bit-exact resume, EMA, mosaic, `--amp` mixed precision, and `--head o2o`
-  NMS-free head) plus GPU f16 inference (`--half`, `--tensor-cores`). The synthetic shapes convergence gate passes at
-  mAP50-95 0.934 vs a 0.75 bar ([examples/shapes](examples/shapes/README.md)).
+- `folo-n/s/m/l/x` training on CPU or GPU (bit-exact resume on the same device, EMA, mosaic, `--amp` mixed precision,
+  and `--head o2o` NMS-free head) plus GPU f16 inference (`--half`, `--tensor-cores`). The synthetic shapes convergence
+  gate ([examples/shapes](examples/shapes/README.md)) passes at mAP50-95 0.934 vs a 0.75 bar
+  ([docs/BENCHMARKS.md](docs/BENCHMARKS.md#learning-2026-11-12)).
 - Published COCO-pretrained weights via `folo weights pull` — including `folo-s-coco` (val2017 AP 0.416) and
   `folo-n-coco-v5` (AP 0.370). See [examples/coco](examples/coco/README.md) for all checkpoints and
   [docs/QUICKSTART.md](docs/QUICKSTART.md#fine-tune-from-pretrained-weights) for fine-tuning guidance.
