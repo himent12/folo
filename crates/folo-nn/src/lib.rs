@@ -60,6 +60,7 @@ mod module;
 pub mod optim;
 mod power_ema;
 mod sched;
+mod sgdr;
 mod swa;
 
 pub use amp::{AmpContract, GradScaler, ScaleUpdate, unscale_, usable_scale};
@@ -70,9 +71,10 @@ pub use ema::{
 pub use error::{Error, Result};
 pub use layers::{
     Activation, BN_EPS, BN_MOMENTUM, BatchNorm2d, ChannelLayout, Concat, Conv2d, Conv2dConfig, ConvBnAct,
-    DropPath, Identity, LAYERSCALE_DEFAULT_INIT, LayerScale, Linear, MaxPool2d, ModuleList,
-    PowerIterationResult, RunningStats, SPECTRAL_NORM_EPS, Sequential, SpectralNorm, SpectralNormTarget,
-    Upsample, fuse_conv_bn, power_iteration, spectral_norm, spectral_normalize,
+    DropPath, GatedFfn, GluKind, Identity, LAYERSCALE_DEFAULT_INIT, LayerScale, Linear, MaxPool2d,
+    ModuleList, PowerIterationResult, RMSNORM_DEFAULT_EPS, RmsNorm, RunningStats, SPECTRAL_NORM_EPS,
+    Sequential, SpectralNorm, SpectralNormTarget, Upsample, fuse_conv_bn, geglu, gelu_tanh, power_iteration,
+    spectral_norm, spectral_normalize, swiglu,
 };
 pub use module::{Forward, Layer, Mode, Module, NamedTensor, TensorKind};
 pub use power_ema::{
@@ -84,4 +86,5 @@ pub use sched::{
     DEFAULT_RESTART_MULT, DecayKind, LrSchedule, SchedContract, SchedUnit, WARMUP_FLOOR,
     WSD_DEFAULT_DECAY_FRACTION, WsdTail, warmup_iters, warmup_iters_floor,
 };
+pub use sgdr::{SgdrConfig, SgdrCycleInfo, SgdrSchedule};
 pub use swa::SwaModel;

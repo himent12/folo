@@ -33,6 +33,7 @@
 //! ```
 
 mod adamw;
+mod adan;
 mod agc;
 mod cautious;
 mod dispatch;
@@ -50,6 +51,10 @@ use folo_core::{Device, Grads, Tensor};
 use serde::{Deserialize, Serialize};
 
 pub use adamw::AdamW;
+pub use adan::{
+    ADAN_DEFAULT_BETA1, ADAN_DEFAULT_BETA2, ADAN_DEFAULT_BETA3, ADAN_DEFAULT_EPS, ADAN_DEFAULT_LR,
+    ADAN_DEFAULT_WEIGHT_DECAY, Adan, AdanConfig, AdanContract, AdanGroupContract,
+};
 pub use agc::{AGC_DEFAULT_CLIP_FACTOR, AGC_DEFAULT_EPS, AgcStats, clip_grad_agc_tensor};
 pub(crate) use dispatch::{
     GradRef, PAR_THRESHOLD, ParamPlan, cpu_fast, for_each_param_planned, step_many, storage_key,
@@ -665,6 +670,10 @@ impl StandardGroups {
                 bn_ids.insert(bn.weight.id());
             } else if let Some(ls) = (m as &dyn std::any::Any).downcast_ref::<crate::LayerScale>() {
                 bn_ids.insert(ls.gamma.id());
+            } else if let Some(rn) = (m as &dyn std::any::Any).downcast_ref::<crate::RmsNorm>() {
+                if let Some(w) = &rn.weight {
+                    bn_ids.insert(w.id());
+                }
             } else if let Some(conv) = (m as &dyn std::any::Any).downcast_ref::<crate::Conv2d>() {
                 let c = conv.config();
                 if c.groups > 1 && c.groups == c.in_channels && c.groups == c.out_channels {
