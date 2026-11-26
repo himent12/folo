@@ -744,6 +744,12 @@ export class MockTrainingApi extends MockServer {
   }
 }
 
+/** Whether four IPv4 octets are loopback, private (RFC 1918), or link-local (RFC 3927). */
+function isLocalIpv4(a: number, b: number, c: number, d: number): boolean {
+  if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+  return a === 127 || a === 10 || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31);
+}
+
 /** Validates a Remote FOLO server URL in demo mode, matching `crates/folo-cloud/src/remote.rs` (`Server::of`). */
 function parseRemoteUrl(raw: string): { host: string; local: boolean; https: boolean } {
   const invalid = (why: string) => new ApiError(400, 'invalid_body', `\`url\` ${why}`);
@@ -756,7 +762,7 @@ function parseRemoteUrl(raw: string): { host: string; local: boolean; https: boo
   const authority = slash === -1 ? afterScheme : afterScheme.slice(0, slash);
   if (!authority) throw invalid('has no host');
   if (authority.includes('@')) throw invalid('must not contain a user name or password');
-  if (authority.endsWith(':')) throw invalid('is not a valid URL');
+  if (authority.endsWith(':') || authority.includes('%')) throw invalid('is not a valid URL');
   let parsed: URL;
   try {
     parsed = new URL(raw);
@@ -768,14 +774,19 @@ function parseRemoteUrl(raw: string): { host: string; local: boolean; https: boo
   }
   if (parsed.username || parsed.password) throw invalid('must not contain a user name or password');
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(hostname);
+  const mapped6 = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(hostname);
   const local =
     hostname === 'localhost' ||
     hostname === '::1' ||
-    /^127\./.test(hostname) ||
-    /^10\./.test(hostname) ||
-    /^192\.168\./.test(hostname) ||
-    /^169\.254\./.test(hostname) ||
-    /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+    (ipv4 !== null && isLocalIpv4(+ipv4[1]!, +ipv4[2]!, +ipv4[3]!, +ipv4[4]!)) ||
+    (mapped6 !== null &&
+      isLocalIpv4(
+        parseInt(mapped6[1]!, 16) >> 8,
+        parseInt(mapped6[1]!, 16) & 0xff,
+        parseInt(mapped6[2]!, 16) >> 8,
+        parseInt(mapped6[2]!, 16) & 0xff,
+      )) ||
     /^f[cd][0-9a-f]{2}:|^fe[89ab][0-9a-f]:/.test(hostname);
   return { host: parsed.host, local, https: parsed.protocol === 'https:' };
 }

@@ -465,15 +465,22 @@ describe('Failed list tables clear aria-busy (playtest R4)', () => {
     it(`${name}: clears aria-busy on initial load error and after a failed Retry`, async () => {
       resize(390);
       await open(Page, path, new MockApi('error', 0));
-      const t = await table(sel, (el) => !!el.querySelector('button'), `${name} error retry button`);
-      expect(t.getAttribute('aria-busy')).toBe('false');
+      const initial = await table(sel, (el) => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Retry'), `${name} error retry button`);
+      expect(initial.isConnected).toBe(true);
+      expect(initial.getAttribute('aria-busy')).toBe('false');
 
-      // Click Retry and wait for the retry to settle back into ErrorState: table must not stay aria-busy="true".
-      const retry = [...t.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Retry')!;
+      // Click Retry (on phones this swaps to the skeleton and remounts the error table when retry rejects):
+      // verify the live post-retry table reports aria-busy="false".
+      const retry = [...initial.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Retry')!;
       retry.click();
       flushSync();
-      await table(sel, (el) => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Retry'), `${name} retry settled`);
-      expect(t.getAttribute('aria-busy')).toBe('false');
+      const after = await table(
+        sel,
+        (el) => el !== initial && [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Retry'),
+        `${name} post-retry error table`,
+      );
+      expect(after.isConnected).toBe(true);
+      expect(after.getAttribute('aria-busy')).toBe('false');
     });
   }
 
