@@ -58,6 +58,7 @@ pub mod io;
 mod layers;
 mod module;
 pub mod optim;
+mod power_ema;
 mod sched;
 mod swa;
 
@@ -69,10 +70,15 @@ pub use ema::{
 pub use error::{Error, Result};
 pub use layers::{
     Activation, BN_EPS, BN_MOMENTUM, BatchNorm2d, ChannelLayout, Concat, Conv2d, Conv2dConfig, ConvBnAct,
-    DropPath, Identity, LAYERSCALE_DEFAULT_INIT, LayerScale, Linear, MaxPool2d, ModuleList, RunningStats,
-    Sequential, Upsample, fuse_conv_bn,
+    DropPath, Identity, LAYERSCALE_DEFAULT_INIT, LayerScale, Linear, MaxPool2d, ModuleList,
+    PowerIterationResult, RunningStats, SPECTRAL_NORM_EPS, Sequential, SpectralNorm, SpectralNormTarget,
+    Upsample, fuse_conv_bn, power_iteration, spectral_norm, spectral_normalize,
 };
 pub use module::{Forward, Layer, Mode, Module, NamedTensor, TensorKind};
+pub use power_ema::{
+    EDM2_EMA_DEFAULT_GAMMA, Edm2PowerEmaSchedule, POWER_LAW_EMA_DEFAULT_GAMMA, POWER_LAW_EMA_DEFAULT_T0,
+    PowerLawEmaSchedule, power_law_ema_decay,
+};
 pub use sched::{
     DEFAULT_ONE_CYCLE_DIV_FACTOR, DEFAULT_ONE_CYCLE_PCT_START, DEFAULT_POLY_POWER, DEFAULT_RESTART_CYCLES,
     DEFAULT_RESTART_MULT, DecayKind, LrSchedule, SchedContract, SchedUnit, WARMUP_FLOOR,

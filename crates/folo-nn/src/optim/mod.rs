@@ -40,6 +40,7 @@ mod grads;
 mod lion;
 mod musgd;
 mod ortho;
+mod schedulefree;
 mod sgd;
 pub(crate) mod simd;
 
@@ -62,6 +63,11 @@ pub use ortho::{
     MuonGeoMode, MuonOrtho, NS_COEFFS, NS_EPS, NS_STEPS, NS5_SCHEDULE, POLAR3_CS9_COEFFS, POLAR4_COEFFS,
     POLAR5_COEFFS, muon_scale, muon_scale_geo, orthogonalize, orthogonalize_many, orthogonalize_many_with,
     orthogonalize_with,
+};
+pub use schedulefree::{
+    SF_DEFAULT_BETA1, SF_DEFAULT_BETA2, SF_DEFAULT_EPS, SF_DEFAULT_LR, SF_DEFAULT_R,
+    SF_DEFAULT_WEIGHT_LR_POWER, ScheduleFreeAdamW, ScheduleFreeConfig, ScheduleFreeContract,
+    ScheduleFreeGroupContract,
 };
 pub use sgd::Sgd;
 
