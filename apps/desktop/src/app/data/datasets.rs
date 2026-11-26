@@ -128,10 +128,103 @@ impl FoloApp {
         // card keeping what it shows until the answer. Only an answer about the dataset replaces it
         // (a connection blip leaves a healthy card healthy); back from a failure, its images reload.
         // Never under an open inspector: the read waits until it closes ([`FoloApp::take_inspector`]).
-        if !self.inspecting(id)
-            && self.ds_recheck.remove(id)
-            && self.store.dataset.get(id).is_some_and(|l| !l.is_loading())
+        if !self.inspecting(id) && self.ds_recheck.contains(id) {
+            if !self.store.dataset.contains_key(id) {
+                self.ds_recheck.remove(id);
+                self.forget_dataset_contents(id, cx);
+            } else if self.store.dataset.get(id).is_some_and(|l| !l.is_loading()) {
+                self.ds_recheck.remove(id);
+                let ticket = self.ds_read_ticket(id);
+                let order = self.list_tickets.start_detail(id);
+                let (a, b) = (id.to_string(), id.to_string());
+                self.fetch(
+                    cx,
+                    move |api| api.dataset(&a),
+                    move |this, r, cx| {
+                        this.list_tickets.finish_detail(&b, Some(order));
+                        // A newer read was asked for since (another Retry or visit): its answer stands.
+                        if !this.ds_read_done(&b, ticket) {
+                            return;
+                        }
+                        // Cleared since (another server): this answer is about what was there.
+                        if this.store.dataset.get(&b).is_none_or(|l| l.is_loading()) {
+                            return;
+                        }
+                        match r {
+                            Ok(d) => {
+                                // A newer per-dataset detail (e.g. from paging revalidation) already
+                                // installed: ignore this older recheck response.
+                                if order < this.list_tickets.detail_ticket(&b) {
+                                    return;
+                                }
+                                // A newer `GET /api/datasets` list already installed different summary
+                                // fields after this detail read started: discard this stale detail and
+                                // queue a fresh read instead of regressing the summary.
+                                if order
+                                    < this.list_tickets.list_installed(super::super::lists::List::Datasets)
+                                    && this
+                                        .store
+                                        .dataset_summary(&b)
+                                        .is_some_and(|s| super::super::lists::dataset_summary_changed(s, &d))
+                                {
+                                    this.ds_recheck.insert(b);
+                                    return;
+                                }
+                                // Back from a failure, or its contents changed: the images, their labels and
+                                // their pixels are read again (image ids are positions, docs/API.md).
+                                if this.store.dataset.get(&b).and_then(|l| l.ready()) != Some(&d) {
+                                    // An inspector opened on it since: all stays, read again when it closes.
+                                    if this.inspecting(&b) {
+                                        this.ds_recheck.insert(b);
+                                        return;
+                                    }
+                                    this.forget_dataset_contents(&b, cx);
+                                } else if this
+                                    .ds_scroll_anchor
+                                    .as_ref()
+                                    .is_some_and(|a| a.dataset == b && a.pending_recheck)
+                                {
+                                    // Record unchanged: no image reload will run, so drop only a
+                                    // speculative anchor captured on inspector close (never an anchor
+                                    // already committed to an in-progress paged reload).
+                                    this.ds_scroll_anchor = None;
+                                }
+                                this.list_tickets.note_detail(&b, order);
+                                this.sync_dataset_summary(&d);
+                                this.store.dataset.insert(b, Load::Ready(d));
+                            }
+                            Err(e)
+                                if e.code == "dataset_not_found"
+                                    || crate::screens::dataset_problem(&e).is_some() =>
+                            {
+                                // The same under an open inspector: its record and list stay until it closes.
+                                if this.inspecting(&b) {
+                                    this.ds_recheck.insert(b);
+                                    return;
+                                }
+                                if this.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == b) {
+                                    this.ds_scroll_anchor = None;
+                                }
+                                this.store.dataset.insert(b, Load::Failed(e));
+                            }
+                            Err(_) => {
+                                if this
+                                    .ds_scroll_anchor
+                                    .as_ref()
+                                    .is_some_and(|a| a.dataset == b && a.pending_recheck)
+                                {
+                                    this.ds_scroll_anchor = None;
+                                }
+                            }
+                        }
+                    },
+                );
+            }
+        }
+        if self.store.dataset.get(id).is_none_or(|l| l.needs_fetch())
+            && !(self.inspecting(id) && self.ds_recheck.contains(id))
         {
+            self.store.dataset.insert(id.to_string(), Load::Loading);
             let ticket = self.ds_read_ticket(id);
             let order = self.list_tickets.start_detail(id);
             let (a, b) = (id.to_string(), id.to_string());
@@ -140,90 +233,11 @@ impl FoloApp {
                 move |api| api.dataset(&a),
                 move |this, r, cx| {
                     this.list_tickets.finish_detail(&b, Some(order));
-                    // A newer read was asked for since (another Retry or visit): its answer stands.
-                    if !this.ds_read_done(&b, ticket) {
-                        return;
-                    }
-                    // Cleared since (another server): this answer is about what was there.
-                    if this.store.dataset.get(&b).is_none_or(|l| l.is_loading()) {
-                        return;
-                    }
-                    match r {
-                        Ok(d) => {
-                            // A newer `GET /api/datasets` list already installed different summary
-                            // fields after this detail read started: discard this stale detail and
-                            // queue a fresh read instead of regressing the summary.
-                            if order < this.list_tickets.list_installed(super::super::lists::List::Datasets)
-                                && this
-                                    .store
-                                    .dataset_summary(&b)
-                                    .is_some_and(|s| super::super::lists::dataset_summary_changed(s, &d))
-                            {
-                                this.ds_recheck.insert(b);
-                                return;
-                            }
-                            // Back from a failure, or its contents changed: the images, their labels and
-                            // their pixels are read again (image ids are positions, docs/API.md).
-                            if this.store.dataset.get(&b).and_then(|l| l.ready()) != Some(&d) {
-                                // An inspector opened on it since: all stays, read again when it closes.
-                                if this.inspecting(&b) {
-                                    this.ds_recheck.insert(b);
-                                    return;
-                                }
-                                this.forget_dataset_contents(&b, cx);
-                            } else if this
-                                .ds_scroll_anchor
-                                .as_ref()
-                                .is_some_and(|a| a.dataset == b && a.pending_recheck)
-                            {
-                                // Record unchanged: no image reload will run, so drop only a
-                                // speculative anchor captured on inspector close (never an anchor
-                                // already committed to an in-progress paged reload).
-                                this.ds_scroll_anchor = None;
-                            }
-                            this.list_tickets.note_detail(&b, order);
-                            this.sync_dataset_summary(&d);
-                            this.store.dataset.insert(b, Load::Ready(d));
-                        }
-                        Err(e)
-                            if e.code == "dataset_not_found"
-                                || crate::screens::dataset_problem(&e).is_some() =>
-                        {
-                            // The same under an open inspector: its record and list stay until it closes.
-                            if this.inspecting(&b) {
-                                this.ds_recheck.insert(b);
-                                return;
-                            }
-                            if this.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == b) {
-                                this.ds_scroll_anchor = None;
-                            }
-                            this.store.dataset.insert(b, Load::Failed(e));
-                        }
-                        Err(_) => {
-                            if this
-                                .ds_scroll_anchor
-                                .as_ref()
-                                .is_some_and(|a| a.dataset == b && a.pending_recheck)
-                            {
-                                this.ds_scroll_anchor = None;
-                            }
-                        }
-                    }
-                },
-            );
-        }
-        if self.store.dataset.get(id).is_none_or(|l| l.needs_fetch()) {
-            self.store.dataset.insert(id.to_string(), Load::Loading);
-            let ticket = self.ds_read_ticket(id);
-            let order = self.list_tickets.start_detail(id);
-            let (a, b) = (id.to_string(), id.to_string());
-            self.fetch(
-                cx,
-                move |api| api.dataset(&a),
-                move |this, r, _| {
-                    this.list_tickets.finish_detail(&b, Some(order));
                     if this.ds_read_done(&b, ticket) {
                         if let Ok(d) = &r {
+                            if order < this.list_tickets.detail_ticket(&b) {
+                                return;
+                            }
                             if order < this.list_tickets.list_installed(super::super::lists::List::Datasets)
                                 && this
                                     .store
@@ -231,7 +245,11 @@ impl FoloApp {
                                     .is_some_and(|s| super::super::lists::dataset_summary_changed(s, d))
                             {
                                 this.store.dataset.remove(&b);
-                                this.ds_recheck.insert(b);
+                                if this.inspecting(&b) {
+                                    this.ds_recheck.insert(b);
+                                } else {
+                                    this.forget_dataset_contents(&b, cx);
+                                }
                                 return;
                             }
                             this.list_tickets.note_detail(&b, order);
@@ -446,6 +464,9 @@ impl FoloApp {
                     .get(&id)
                     .and_then(|l| l.ready())
                     .is_some_and(|l| l.len() == offset as usize);
+                let waiting_sample =
+                    this.inspector.as_ref().is_some_and(|i| i.dataset == id && i.want.is_some());
+                let defer_for_inspector = this.inspecting(&id) && !waiting_sample;
                 match r {
                     Ok(fresh)
                         if still_aligned
@@ -453,14 +474,14 @@ impl FoloApp {
                             && fresh.revision == cached.revision
                             && fresh == cached =>
                     {
-                        let superseded = order
-                            < this.list_tickets.list_installed(super::super::lists::List::Datasets)
-                            && this
-                                .store
-                                .dataset_summary(&id)
-                                .is_some_and(|s| super::super::lists::dataset_summary_changed(s, &fresh));
+                        let superseded = order < this.list_tickets.detail_ticket(&id)
+                            || (order
+                                < this.list_tickets.list_installed(super::super::lists::List::Datasets)
+                                && this.store.dataset_summary(&id).is_some_and(|s| {
+                                    super::super::lists::dataset_summary_changed(s, &fresh)
+                                }));
                         if superseded {
-                            if this.inspecting(&id) {
+                            if defer_for_inspector {
                                 this.images_more.remove(&id);
                                 this.ds_recheck.insert(id);
                             } else {
@@ -476,15 +497,16 @@ impl FoloApp {
                         }
                     }
                     Ok(fresh) => {
-                        if this.inspecting(&id) {
+                        if defer_for_inspector {
                             this.images_more.remove(&id);
                             this.ds_recheck.insert(id);
                         } else {
-                            let superseded =
-                                order < this.list_tickets.list_installed(super::super::lists::List::Datasets)
+                            let superseded = order < this.list_tickets.detail_ticket(&id)
+                                || (order
+                                    < this.list_tickets.list_installed(super::super::lists::List::Datasets)
                                     && this.store.dataset_summary(&id).is_some_and(|s| {
                                         super::super::lists::dataset_summary_changed(s, &fresh)
-                                    });
+                                    }));
                             // Files changed on disk or the server dropped revision tracking:
                             // discard stale prefix + decoded images and reload from page zero.
                             this.forget_dataset_contents(&id, cx);

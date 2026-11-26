@@ -316,60 +316,68 @@ impl FoloApp {
                 d.splits = newer.splits;
             }
         }
-        if self.store.datasets.ready() == Some(&list) {
-            return;
-        }
-        let changed_ids: Vec<String> = self
-            .store
-            .datasets
-            .ready()
-            .into_iter()
-            .flat_map(|old| {
-                list.iter().filter_map(|d| {
-                    if self.list_tickets.detail_ticket(&d.id) > ticket {
-                        return None;
-                    }
-                    let prev = old.iter().find(|x| x.id == d.id)?;
-                    dataset_summary_changed(prev, d).then(|| d.id.clone())
+        let list_changed = self.store.datasets.ready() != Some(&list);
+        if list_changed {
+            let changed_ids: Vec<String> = self
+                .store
+                .datasets
+                .ready()
+                .into_iter()
+                .flat_map(|old| {
+                    list.iter().filter_map(|d| {
+                        if self.list_tickets.detail_ticket(&d.id) > ticket {
+                            return None;
+                        }
+                        let prev = old.iter().find(|x| x.id == d.id)?;
+                        dataset_summary_changed(prev, d).then(|| d.id.clone())
+                    })
                 })
-            })
-            .collect();
-        let gone = gone_from(self.store.datasets.ready(), &list, |d| (&d.id, &d.name));
-        for (id, name) in gone {
-            self.removed_elsewhere(&id, name, cx);
-        }
-        // Listed again (its folder registered again, after this answer's fetch was asked for): no
-        // longer deleted here.
-        for d in &list {
-            self.deleted.remove(&d.id);
-        }
-        self.store.datasets = Load::Ready(list);
-        for id in changed_ids {
-            // Drop any in-flight detail read that predates this newer list summary so its stale
-            // answer cannot overwrite `store.datasets` when it arrives.
-            if self.list_tickets.detail_in_flight_older_than(&id, ticket) {
-                self.ds_reads.remove(&id);
-                self.list_tickets.finish_detail(&id, None);
-                if self.store.dataset.get(&id).is_some_and(|l| l.is_loading()) {
-                    self.store.dataset.remove(&id);
+                .collect();
+            let gone = gone_from(self.store.datasets.ready(), &list, |d| (&d.id, &d.name));
+            for (id, name) in gone {
+                self.removed_elsewhere(&id, name, cx);
+            }
+            // Listed again (its folder registered again, after this answer's fetch was asked for): no
+            // longer deleted here.
+            for d in &list {
+                self.deleted.remove(&d.id);
+            }
+            self.store.datasets = Load::Ready(list);
+            for id in changed_ids {
+                // Drop any in-flight detail read that predates this newer list summary so its stale
+                // answer cannot overwrite `store.datasets` when it arrives.
+                if self.list_tickets.detail_in_flight_older_than(&id, ticket) {
+                    self.ds_reads.remove(&id);
+                    self.list_tickets.finish_detail(&id, None);
+                    if self.store.dataset.get(&id).is_some_and(|l| l.is_loading()) {
+                        self.store.dataset.remove(&id);
+                        if self.inspecting(&id) {
+                            self.ds_recheck.insert(id.clone());
+                        } else {
+                            self.forget_dataset_contents(&id, cx);
+                        }
+                    } else if self.store.dataset.contains_key(&id) {
+                        // Re-queue a canceled recheck on a failed/loaded record so retries aren't dropped.
+                        self.ds_recheck.insert(id.clone());
+                    }
+                } else if !self.store.dataset.contains_key(&id)
+                    && (self.store.images.contains_key(&id) || self.store.previews.contains_key(&id))
+                {
                     if self.inspecting(&id) {
                         self.ds_recheck.insert(id.clone());
                     } else {
                         self.forget_dataset_contents(&id, cx);
                     }
-                } else if self.store.dataset.contains_key(&id) {
-                    // Re-queue a canceled recheck on a failed/loaded record so retries aren't dropped.
+                } else if self.store.dataset.get(&id).is_some_and(|l| l.error().is_some()) {
                     self.ds_recheck.insert(id.clone());
                 }
-            } else if !self.inspecting(&id)
-                && !self.store.dataset.contains_key(&id)
-                && (self.store.images.contains_key(&id) || self.store.previews.contains_key(&id))
-            {
-                self.forget_dataset_contents(&id, cx);
             }
+            // An open select may list them: its highlight is an index into the list.
+            self.menu_open = None;
         }
-        // Check every installed dataset whose cached detail record predates `ticket` (including
-        // when `store.datasets` transitioned from Loading/Failed to Ready so `old` was None).
+        // Reconcile any cached detail record predating `ticket` whose summary disagrees with the
+        // installed list (including `Loading`/`Failed` -> `Ready` transitions and retries after a
+        // deferred inspector recheck timed out).
         let stale_cached: Vec<String> = self
             .store
             .datasets
@@ -391,8 +399,6 @@ impl FoloApp {
                 self.store.dataset.remove(&id);
             }
         }
-        // An open select may list them: its highlight is an index into the list.
-        self.menu_open = None;
     }
 
     fn install_models(&mut self, mut models: Vec<Model>, cx: &mut Context<Self>) {
