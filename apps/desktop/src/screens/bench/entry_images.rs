@@ -395,7 +395,6 @@ impl FoloApp {
                 };
                 let fh = this.fh(key, cx);
                 w.focus(&fh);
-                this.reveal_pending = 2;
                 cx.notify();
             }),
         );
@@ -859,6 +858,10 @@ mod tests {
         send_key(&mut app, window, "escape");
         drive(&mut app, window, |this, _, _| {
             assert!(!this.kb, "Esc in pointer mode keeps kb == false");
+            assert_eq!(
+                this.reveal_pending, 0,
+                "Esc tile reveal uses EntryImageReveal without reveal_pending"
+            );
             assert_eq!(this.bench.selected_entry_image, None, "Esc closes preview");
         });
         assert!(

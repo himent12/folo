@@ -94,7 +94,6 @@ impl FoloApp {
                 };
                 let fh = self.fh(key, cx);
                 window.focus(&fh);
-                self.reveal_pending = 2;
                 cx.notify();
                 return true;
             }
