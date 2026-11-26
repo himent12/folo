@@ -329,7 +329,13 @@ pub(crate) fn binary_nll_grad_hess(logits: &[f32], targets: &[f32], beta: f64) -
         let x = beta * z;
         let e_neg = (-x.abs()).exp();
         // Cancel linear term before adding ln(1 + exp(-|x|)) so tiny residuals are preserved.
-        let linear = if x >= 0.0 { (1.0 - y) * x } else { -y * x };
+        let linear = if x >= 0.0 {
+            if y == 1.0 { 0.0 } else { (1.0 - y) * x }
+        } else if y == 0.0 {
+            0.0
+        } else {
+            -y * x
+        };
         nll += linear + e_neg.ln_1p();
         let one_plus = 1.0 + e_neg;
         let p_minus_y =
@@ -473,7 +479,13 @@ fn solve_convex_1d(cfg: &CalibrationConfig, eval: impl Fn(f64) -> (f64, f64, f64
         }
     }
 
-    let temperature = (1.0 / beta).clamp(cfg.min_temp, cfg.max_temp);
+    let temperature = if beta <= beta_min {
+        cfg.max_temp
+    } else if beta >= beta_max {
+        cfg.min_temp
+    } else {
+        (1.0 / beta).clamp(cfg.min_temp, cfg.max_temp)
+    };
     let beta_ret = 1.0 / temperature;
     let (final_nll, final_g, _) = eval(beta_ret);
     let converged = final_g.is_finite()

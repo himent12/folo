@@ -204,6 +204,15 @@ fn boundary_extreme_and_serde_invariants() {
     assert!(fit_inv.converged);
     assert!((fit_inv.scaler.temperature() - cfg.max_temp).abs() < 1e-12);
 
+    // 2b. Non-self-inverse IEEE-754 bounds (1.0 / (1.0 / T) != T) preserve exact bound & converged=true.
+    let bound_cfg = CalibrationConfig { min_temp: 1.46, max_temp: 99.0, ..cfg };
+    let fit_lo_bound = TemperatureScaler::fit_binary(&[1.0], &[true], &bound_cfg).unwrap();
+    assert!(fit_lo_bound.converged, "min_temp=1.46 active bound must converge: {fit_lo_bound:?}");
+    assert_eq!(fit_lo_bound.scaler.temperature(), 1.46);
+    let fit_hi_bound = TemperatureScaler::fit_binary(&[1.0], &[false], &bound_cfg).unwrap();
+    assert!(fit_hi_bound.converged, "max_temp=99.0 active bound must converge: {fit_hi_bound:?}");
+    assert_eq!(fit_hi_bound.scaler.temperature(), 99.0);
+
     // 3. All-zero logits have flat objective -> stays at T = 1.0.
     let zero_logits = [0.0f32; 6];
     let zero_labels = [true, false, true, false, true, false];
