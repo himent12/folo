@@ -54,12 +54,26 @@ fn polynomial_schedule_identities_monotonicity_and_serde() {
         .unwrap();
     assert!(s_hi.lf(50) < 0.505 && s_lo.lf(50) > 0.505);
 
-    // T = 1 stays at 1.0.
+    // T = 1 stays at 1.0; T = 2 hits 1.0 then lrf; extreme lrf = 1e17 / f64::MAX preserves exact lf(0) = 1.0.
     let one = LrSchedule::with_warmup_iters(DecayKind::Polynomial, 1, 1, lrf, 0, 0.0, 0.8)
         .unwrap()
         .with_poly_power(2.0)
         .unwrap();
     assert_eq!(one.lf(0), 1.0);
+    let two = LrSchedule::with_warmup_iters(DecayKind::Polynomial, 2, 1, lrf, 0, 0.0, 0.8)
+        .unwrap()
+        .with_poly_power(2.0)
+        .unwrap();
+    assert_eq!(two.lf(0), 1.0);
+    assert_eq!(two.lf(1), lrf);
+    for extreme_lrf in [0.0f64, 1.0, 2.0, 1e17, f64::MAX] {
+        let ex = LrSchedule::with_warmup_iters(DecayKind::Polynomial, 10, 1, extreme_lrf, 0, 0.0, 0.8)
+            .unwrap()
+            .with_poly_power(2.0)
+            .unwrap();
+        assert_eq!(ex.lf(0), 1.0, "lrf={extreme_lrf} must give exact lf(0)=1.0");
+        assert_eq!(ex.lf(9), extreme_lrf, "lrf={extreme_lrf} must give exact lf(T-1)=lrf");
+    }
 
     // Contract JSON round-trip and validation errors.
     let json = serde_json::to_string(s_hi.contract()).unwrap();
@@ -133,7 +147,11 @@ fn one_cycle_schedule_phases_inverse_momentum_and_serde() {
     assert!((two.lf(0) - init_f).abs() < 1e-15);
     assert!((two.lf(1) - lrf).abs() < 1e-15);
 
-    // Validation rejects out-of-range parameters and cross-kind fields.
+    // Validation rejects out-of-range parameters, non-zero warmup, invalid lrf, and cross-kind fields.
+    assert!(LrSchedule::with_warmup_iters(DecayKind::OneCycle, 100, 1, lrf, 10, 0.0, 0.85).is_err());
+    assert!(LrSchedule::new(DecayKind::OneCycle, 10, 10, lrf, 1.0, 0.0, 0.85).is_err());
+    assert!(LrSchedule::with_warmup_iters(DecayKind::OneCycle, 100, 1, -0.01, 0, 0.0, 0.85).is_err());
+    assert!(LrSchedule::with_warmup_iters(DecayKind::OneCycle, 100, 1, 1.5, 0, 0.0, 0.85).is_err());
     assert!(s.clone().with_one_cycle(0.0, 10.0).is_err());
     assert!(s.clone().with_one_cycle(1.0, 10.0).is_err());
     assert!(s.clone().with_one_cycle(f64::NAN, 10.0).is_err());

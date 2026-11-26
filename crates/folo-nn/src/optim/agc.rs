@@ -279,6 +279,33 @@ mod tests {
         let av = aliased.to_vec::<f32>().unwrap();
         assert!((av[0] - 1.5).abs() < 1e-6 && (av[1] - 2.0).abs() < 1e-6);
 
+        // Zero weight with eps == 0: nonzero gradient clips to 0 with max_ratio == +Inf; zero gradient gives 0.0.
+        let wz = Tensor::zeros([2, 2]);
+        let gz = Tensor::from_slice(&[3.0f32, 4.0, 0.0, 0.0], [2, 2]).unwrap();
+        let st_z = clip_grad_agc_tensor(&wz, &gz, 0.01, 0.0).unwrap();
+        assert_eq!(st_z.clipped_units, 1);
+        assert!(st_z.max_ratio.is_infinite() && st_z.max_ratio.is_sign_positive());
+        assert_eq!(gz.to_vec::<f32>().unwrap(), vec![0.0; 4]);
+        let st_zz = clip_grad_agc_tensor(&wz, &gz, 0.01, 0.0).unwrap();
+        assert_eq!(st_zz.clipped_units, 0);
+        assert_eq!(st_zz.max_ratio, 0.0);
+
+        // NaN weight leaves unit untouched and propagates NaN to max_ratio.
+        let w_nan = Tensor::from_slice(&[f32::NAN, 1.0], [1, 2]).unwrap();
+        let g_ok = Tensor::from_slice(&[10.0f32, 0.0], [1, 2]).unwrap();
+        let st_wn = clip_grad_agc_tensor(&w_nan, &g_ok, 0.1, 1e-3).unwrap();
+        assert_eq!(st_wn.clipped_units, 0);
+        assert!(st_wn.max_ratio.is_nan());
+        assert_eq!(g_ok.to_vec::<f32>().unwrap(), vec![10.0, 0.0]);
+
+        // Non-contiguous (transposed) tensors match contiguous per-unit AGC.
+        let w_nc = Tensor::from_slice(&[3.0f32, 0.0, 4.0, 0.0], [2, 2]).unwrap().t().unwrap();
+        let g_nc = Tensor::from_slice(&[6.0f32, 0.0, 8.0, 0.0], [2, 2]).unwrap().t().unwrap();
+        let st_nc = clip_grad_agc_tensor(&w_nc, &g_nc, 0.1, 1e-3).unwrap();
+        assert_eq!(st_nc.clipped_units, 1);
+        let gv_nc = g_nc.to_vec::<f32>().unwrap();
+        assert!((gv_nc[0] - 0.3).abs() < 1e-6 && (gv_nc[1] - 0.4).abs() < 1e-6);
+
         // Zero-length tensor and invalid parameters.
         let empty = Tensor::zeros([0, 4]);
         assert_eq!(clip_grad_agc_tensor(&empty, &empty, 0.01, 1e-3).unwrap(), AgcStats::default());

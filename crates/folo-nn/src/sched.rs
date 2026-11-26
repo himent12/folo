@@ -39,8 +39,13 @@ pub enum DecayKind {
     /// (default [`DEFAULT_POLY_POWER`] = `1.0`, matching [`DecayKind::Linear`]).
     Polynomial,
     /// OneCycleLR (Smith & Topin 2019): cosine rise from `1 / div_factor` to peak `1.0` over the first
-    /// `pct_start` of the run, then cosine anneal down to `lrf`, paired with inverse cosine momentum cycling
-    /// between `base_momentum` (at endpoints) and `warmup_momentum` (at peak).
+    /// `pct_start` of the run, then cosine anneal down to `lrf` in `[0, 1]`, paired with inverse cosine
+    /// momentum cycling between `base_momentum` (at endpoints) and `warmup_momentum` (at peak).
+    ///
+    /// Manages its own warmup via `pct_start`/`div_factor`, so `warmup_iters` must be `0`. Note: when
+    /// cycling `momentum` with [`crate::optim::AdamW`], FOLO's `AdamW` (like PyTorch's) uses `1 − β1(t)^t`
+    /// bias correction rather than `1 − ∏ β1(i)`; set `warmup_momentum == base_momentum` to keep `β1` fixed
+    /// for exact AdamW bias correction, or pair momentum cycling with `Sgd` / `MuSgd`.
     OneCycle,
 }
 
@@ -245,8 +250,8 @@ impl LrSchedule {
     }
 
     /// A schedule from a `folo.sched` contract (resume). Rejects non-finite values, a length `T` that does not
-    /// fit a `u64`, a warmup longer than the run, a counter past the end, and invalid or mismatched optional
-    /// WSD / restart parameters.
+    /// fit a `u64`, a warmup longer than the run (or non-zero warmup on [`DecayKind::OneCycle`]), a counter
+    /// past the end, and invalid or mismatched optional WSD / restart / polynomial / OneCycle parameters.
     pub fn from_contract(c: SchedContract) -> Result<Self> {
         let finite = [c.lrf, c.warmup_bias_lr, c.warmup_momentum].iter().all(|v| v.is_finite());
         if !finite || c.steps_per_epoch == 0 || c.epochs == 0 {
@@ -302,6 +307,20 @@ impl LrSchedule {
         {
             return Err(Error::Invalid(format!("schedule: poly_power must be finite and > 0, got {p}")));
         }
+        if c.kind == DecayKind::OneCycle {
+            if c.warmup_iters > 0 {
+                return Err(Error::Invalid(format!(
+                    "schedule: one_cycle manages its own warmup via pct_start/div_factor; warmup_iters must be 0, got {}",
+                    c.warmup_iters
+                )));
+            }
+            if !(0.0..=1.0).contains(&c.lrf) {
+                return Err(Error::Invalid(format!(
+                    "schedule: one_cycle lrf must be in 0..=1, got {}",
+                    c.lrf
+                )));
+            }
+        }
         if (c.one_cycle_pct_start.is_some() || c.one_cycle_div_factor.is_some())
             && c.kind != DecayKind::OneCycle
         {
@@ -353,8 +372,8 @@ impl LrSchedule {
     }
 
     /// The decay multiplier `lf(t)`; from `t = T - 1` on it stays clamped at the final step (`lrf` for
-    /// `Linear` / `Cosine` / `Wsd`, and the `T - 1` phase for `CosineRestarts`; `from_contract` accepts a
-    /// finished run's `t = T`).
+    /// `Linear` / `Cosine` / `Wsd` / `Polynomial` / `OneCycle`, and the `T - 1` phase for `CosineRestarts`;
+    /// `from_contract` accepts a finished run's `t = T`).
     pub fn lf(&self, t: u64) -> f64 {
         let total = self.total_iters();
         let denom = total.saturating_sub(1).max(1) as f64;
@@ -418,7 +437,7 @@ impl LrSchedule {
             DecayKind::Polynomial => {
                 let p = self.c.poly_power.unwrap_or(DEFAULT_POLY_POWER);
                 let keep = (1.0 - x).powf(p);
-                lrf + (1.0 - lrf) * keep
+                keep + (1.0 - keep) * lrf
             }
             DecayKind::OneCycle => {
                 if total <= 1 {
@@ -430,11 +449,11 @@ impl LrSchedule {
                     let u = x / pct;
                     let init_f = 1.0 / div;
                     let rise = 0.5 * (1.0 - (std::f64::consts::PI * u).cos());
-                    init_f + (1.0 - init_f) * rise
+                    rise + (1.0 - rise) * init_f
                 } else {
                     let v = ((x - pct) / (1.0 - pct)).min(1.0);
                     let keep = 0.5 * (1.0 + (std::f64::consts::PI * v).cos());
-                    lrf + (1.0 - lrf) * keep
+                    keep + (1.0 - keep) * lrf
                 }
             }
         }
