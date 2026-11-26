@@ -14,6 +14,15 @@ pub fn open_dataset(
     open_dataset_splits(arg, format, &folo_data::Split::ALL)
 }
 
+/// Short display name for a dataset path: the folder name, or the parent folder's name for a file (`data.yaml`,
+/// COCO `.json`). Normalises `.` and `..` after resolving against the working directory so bare `data.yaml`,
+/// `./data.yaml`, `.`, and `../data.yaml` resolve to their folder's name instead of falling back to `"dataset"`.
+pub(crate) fn dataset_name(path: &Path) -> String {
+    let abs = folo_data::paths::normalize(path);
+    let dir = if path.is_dir() { abs.as_path() } else { abs.parent().unwrap_or(abs.as_path()) };
+    dir.file_name().map_or_else(|| "dataset".to_string(), |n| n.to_string_lossy().into_owned())
+}
+
 /// [`open_dataset`] building only `splits` (folo_data::open_splits); the others come back empty.
 pub fn open_dataset_splits(
     arg: &str,
@@ -34,10 +43,7 @@ pub fn open_dataset_splits(
         e => CliError::new(ExitCode::Runtime, "invalid_dataset", e.to_string())
             .hint("see docs/DATA.md for the supported layouts"),
     })?;
-    let named = if path.is_dir() { path } else { path.parent().unwrap_or(path) };
-    let abs = std::path::absolute(named).unwrap_or_else(|_| named.to_path_buf());
-    let name = abs.file_name().map_or_else(|| "dataset".to_string(), |n| n.to_string_lossy().into_owned());
-    Ok((ds, name))
+    Ok((ds, dataset_name(path)))
 }
 
 /// Map an engine error of `folo <command>` to a CLI error: the code of `folo_api::codes` with its exit code, the
@@ -75,5 +81,29 @@ pub fn init_device(device: &str) {
         && explicit
     {
         eprintln!("warning: no usable GPU: {e}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use folo_test_support::TestDir;
+
+    #[test]
+    fn dataset_name_resolves_bare_and_relative_yaml_to_parent_folder() {
+        let cwd = std::env::current_dir().unwrap();
+        let cwd_name = cwd.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(dataset_name(Path::new("data.yaml")), cwd_name);
+        assert_eq!(dataset_name(Path::new("./data.yaml")), cwd_name);
+        assert_eq!(dataset_name(Path::new(".")), cwd_name);
+
+        let dir = TestDir::new("cli-engine-name");
+        let ds = dir.join("my_widgets");
+        std::fs::create_dir_all(ds.join("sub")).unwrap();
+        let yaml = ds.join("data.yaml");
+        std::fs::write(&yaml, "names: [widget]\n").unwrap();
+        assert_eq!(dataset_name(&ds), "my_widgets");
+        assert_eq!(dataset_name(&yaml), "my_widgets");
+        assert_eq!(dataset_name(&ds.join("sub/../data.yaml")), "my_widgets");
     }
 }

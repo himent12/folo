@@ -38,15 +38,24 @@ pub fn resolve(arg: &Path) -> Result<PathBuf, CliError> {
         return Ok(arg.to_path_buf());
     }
     let Some(p) = arg.to_str().and_then(find) else {
+        let hint = format!(
+            "pass a .folo file, e.g. runs/<name>/weights/best.folo from `folo train`, or a published name ({})",
+            folo_api::weights::names()
+        );
+        if arg.is_dir() {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "usage",
+                format!("{} is a directory, not a .folo weights file", folo_api::json::path(arg)),
+            )
+            .hint(hint));
+        }
         return Err(CliError::new(
             ExitCode::NotFound,
             "model_not_found",
             format!("{} does not exist", folo_api::json::path(arg)),
         )
-        .hint(format!(
-            "pass a .folo file, e.g. runs/<name>/weights/best.folo from `folo train`, or a published name ({})",
-            folo_api::weights::names()
-        )));
+        .hint(hint));
     };
     let path = cache_dir().join(p.asset);
     if path.is_file() { Ok(path) } else { Err(not_downloaded(p, &path)) }
@@ -222,5 +231,21 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_reports_directory_instead_of_not_found() {
+        let dir = TestDir::new("weights-resolve-dir");
+        let err = resolve(dir.path()).unwrap_err();
+        assert_eq!(err.exit, ExitCode::Usage);
+        assert_eq!(err.code, "usage");
+        assert!(err.message.contains("directory"), "{}", err.message);
+        assert!(!err.message.contains("does not exist"), "{}", err.message);
+
+        let missing = dir.join("missing.folo");
+        let err = resolve(&missing).unwrap_err();
+        assert_eq!(err.exit, ExitCode::NotFound);
+        assert_eq!(err.code, "model_not_found");
+        assert!(err.message.contains("does not exist"), "{}", err.message);
     }
 }

@@ -247,9 +247,17 @@ pub struct Issue {
 pub struct LoadReport {
     /// All issues, in discovery order.
     pub issues: Vec<Issue>,
+    /// Candidate images skipped because their own label file (YOLO) or annotations (COCO) could not be read.
+    #[serde(default)]
+    skipped_label_images: usize,
 }
 
 impl LoadReport {
+    /// Builds a report from existing issues (with zero skipped label images recorded yet).
+    pub(crate) fn from_issues(issues: Vec<Issue>) -> Self {
+        Self { issues, skipped_label_images: 0 }
+    }
+
     /// Number of issues of `kind`.
     pub fn count(&self, kind: IssueKind) -> usize {
         self.issues.iter().filter(|i| i.kind == kind).count()
@@ -266,6 +274,13 @@ impl LoadReport {
     /// Images skipped because they are missing or cannot be decoded.
     pub fn skipped_images(&self) -> usize {
         self.count(IssueKind::CorruptImage) + self.count(IssueKind::MissingImage)
+    }
+
+    /// Candidate images skipped because their own label file (YOLO) or annotations (COCO) were broken. Unlike
+    /// [`Self::broken_labels`], this excludes non-image COCO entries (such as a malformed category or an annotation
+    /// without `image_id`).
+    pub fn skipped_label_images(&self) -> usize {
+        self.skipped_label_images
     }
 
     pub(crate) fn push(&mut self, kind: IssueKind, path: impl Into<PathBuf>, message: impl Into<String>) {
@@ -509,6 +524,9 @@ pub(crate) fn build_entries(
     let mut entries = Vec::with_capacity(results.len());
     let mut fresh = Vec::new();
     for (e, issues, learnt) in results {
+        if e.is_none() && issues.iter().any(|i| i.kind == IssueKind::BrokenLabel) {
+            report.skipped_label_images += 1;
+        }
         report.issues.extend(issues);
         entries.extend(e);
         fresh.extend(learnt);

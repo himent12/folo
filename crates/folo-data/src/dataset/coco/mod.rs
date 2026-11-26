@@ -145,7 +145,7 @@ pub(crate) fn open_jsons(
         read_annotations(root, &jsons, wanted)
     })?;
     let Annotations { issues, classes, other_files, splits } = ann;
-    let mut report = LoadReport { issues };
+    let mut report = LoadReport::from_issues(issues);
     let mut deps: std::collections::BTreeSet<PathBuf> = std::iter::once(root.to_path_buf()).collect();
     deps.extend(other_files);
     let mut by_split: BTreeMap<Split, Vec<Candidate>> = BTreeMap::new();
