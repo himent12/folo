@@ -228,7 +228,7 @@ impl FoloApp {
                             this.ensure_core(cx);
                         }
                         if tick.is_multiple_of(50) {
-                            this.refresh_lists(cx);
+                            this.poll_lists(cx);
                         }
                         // A rented instance costs money: its row stays current while it lives.
                         // So is one a cloud run has that the list hasn't got yet (a run started

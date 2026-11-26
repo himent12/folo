@@ -22,9 +22,11 @@ thread_local! {
     static STAGE_PANNED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Clears the active stage-pan flag (called on zoom reset, outside release, or wheel zoom).
-pub(super) fn clear_stage_panned() {
-    STAGE_PANNED.with(|p| p.set(false));
+/// Interrupts an in-progress stage drag (e.g. from wheel zoom or `0` reset): if a press is still
+/// held (`was_dragging`), keep `STAGE_PANNED` set so releasing near the press point does not turn
+/// an interrupted gesture into a box click; otherwise clear it.
+pub(super) fn interrupt_stage_drag(was_dragging: bool) {
+    STAGE_PANNED.with(|p| p.set(was_dragging));
 }
 
 impl FoloApp {
@@ -116,9 +118,9 @@ impl FoloApp {
                 // Zoom about the cursor: keep the image point under it fixed.
                 insp.pan = zoom_about(b, dims, insp.zoom, insp.pan, ev.position, new_zoom);
                 insp.zoom = new_zoom;
-                insp.drag_from = None;
+                let was_dragging = insp.drag_from.take().is_some();
                 insp.focused_box = None;
-                clear_stage_panned();
+                interrupt_stage_drag(was_dragging);
                 w.prevent_default();
                 cx.stop_propagation();
                 cx.notify();
@@ -157,7 +159,7 @@ impl FoloApp {
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    clear_stage_panned();
+                    STAGE_PANNED.with(|p| p.set(false));
                     if let Some(insp) = this.inspector.as_mut()
                         && insp.drag_from.take().is_some()
                     {

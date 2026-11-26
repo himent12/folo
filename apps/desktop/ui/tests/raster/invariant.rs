@@ -150,27 +150,32 @@ fn big_scenes_take_the_parallel_front_end_identically() {
 
 #[test]
 fn concurrent_multi_render_is_byte_identical_across_thread_counts_and_workers() {
-    use std::sync::Arc;
+    use std::sync::{Arc, Barrier};
 
-    // Dense scene covering all primitive kinds (quads, gradients, shadows, paths, sprites, images,
-    // underlines) across enough primitives to exercise both single- and multi-part parallel binning.
+    // Dense scene above `PARALLEL_FRONT` (6000) covering all primitive kinds so both multi-part
+    // parallel binning and multi-worker tile rasterization run concurrently.
     let mut rng = Rng(308_006);
     let assets = Assets::new(&mut rng);
-    let s = Arc::new(scene(&mut rng, &assets, 2400, W as f32, H as f32));
+    let s = Arc::new(scene(&mut rng, &assets, 6200, W as f32, H as f32));
     let reference = Arc::new(fresh(&s, 1).pixels);
 
+    let thread_counts = [1usize, 2, 4, 8, 2, 4];
+    let barrier = Arc::new(Barrier::new(thread_counts.len()));
+
     // Render concurrently from multiple OS threads with varied internal worker thread counts.
-    let handles: Vec<_> = [1usize, 2, 4, 8, 2, 4]
+    let handles: Vec<_> = thread_counts
         .into_iter()
         .map(|threads| {
             let s = Arc::clone(&s);
             let want = Arc::clone(&reference);
+            let barrier = Arc::clone(&barrier);
             std::thread::spawn(move || {
                 let mut r = Renderer::with_threads(threads);
                 let mut fb = Framebuffer::new(W, H);
-                for iter in 0..4 {
+                for iter in 0..3 {
                     fb.fill(0x0013_579b ^ (iter * 0x0101_0101));
                     r.invalidate();
+                    barrier.wait();
                     r.render(&s, blend(), &mut fb);
                     assert_eq!(
                         fb.pixels, *want,

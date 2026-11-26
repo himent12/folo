@@ -167,6 +167,7 @@ impl FoloApp {
                                 // already committed to an in-progress paged reload).
                                 this.ds_scroll_anchor = None;
                             }
+                            this.sync_dataset_summary(&d);
                             this.store.dataset.insert(b, Load::Ready(d));
                         }
                         Err(e)
@@ -205,6 +206,9 @@ impl FoloApp {
                 move |api| api.dataset(&a),
                 move |this, r, _| {
                     if this.ds_read_done(&b, ticket) {
+                        if let Ok(d) = &r {
+                            this.sync_dataset_summary(d);
+                        }
                         this.store.dataset.insert(b, r.into());
                     }
                 },
@@ -582,19 +586,38 @@ impl FoloApp {
         });
         let Some((pos, tile_id)) = found else {
             if !still_incomplete {
-                if !indices.is_empty() && (anchor.fallback_row > 0 || anchor.strategy.is_some()) {
+                let fallback_tile = if !indices.is_empty() {
                     let rows = indices.len().div_ceil(cols);
                     let row = anchor.fallback_row.min(rows - 1);
-                    if let Some(strategy) = anchor.strategy {
-                        self.grid_scroll.scroll_to_item(row, strategy);
+                    if anchor.fallback_row > 0 || anchor.strategy.is_some() {
+                        if let Some(strategy) = anchor.strategy {
+                            self.grid_scroll.scroll_to_item(row, strategy);
+                        } else {
+                            let clamped_intra = anchor.intra_row.min((row_h - 1.).max(0.));
+                            let target_y = row as f32 * row_h + clamped_intra;
+                            let mut scroll = self.grid_scroll.0.borrow_mut();
+                            scroll.deferred_scroll_to_item = None;
+                            scroll
+                                .base_handle
+                                .set_offset(folo_ui::point(folo_ui::px(0.), -folo_ui::px(target_y)));
+                        }
+                    }
+                    let slot = (row * cols).min(indices.len() - 1);
+                    all.get(indices[slot]).map(|m| m.id.clone())
+                } else {
+                    None
+                };
+                if let Some(prev) = anchor.focus_from.as_ref()
+                    && !self.any_overlay()
+                    && (prev.is_focused(window) || self.root_focus.is_focused(window))
+                {
+                    if let Some(rep_id) = fallback_tile {
+                        let fh = self.fh(format!("tile-{rep_id}"), cx);
+                        window.focus(&fh);
+                        self.verify_focus = Some(fh);
                     } else {
-                        let clamped_intra = anchor.intra_row.min((row_h - 1.).max(0.));
-                        let target_y = row as f32 * row_h + clamped_intra;
-                        let mut scroll = self.grid_scroll.0.borrow_mut();
-                        scroll.deferred_scroll_to_item = None;
-                        scroll
-                            .base_handle
-                            .set_offset(folo_ui::point(folo_ui::px(0.), -folo_ui::px(target_y)));
+                        self.verify_focus = None;
+                        window.focus(&self.root_focus);
                     }
                 }
                 self.ds_scroll_anchor = None;

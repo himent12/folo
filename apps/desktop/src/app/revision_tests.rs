@@ -651,10 +651,65 @@ fn deleted_anchor_file_falls_back_to_clamped_row_instead_of_row_zero() {
             "grid stayed near fallback row {expected_row} (got_y={got_y}, want_y={want_y}, max_y={max_y})"
         );
     });
+
+    // When the inspected tile is deleted externally while closing over a recheck, focus resolves to
+    // a surviving tile in the fallback row (never stranded on an unmounted tile handle).
+    let rep_id = drive(&mut app, window, |this, w, cx| {
+        let cols = this.grid_cols();
+        let fallback_row = 2usize;
+        let indices = this.filtered_indices(ID);
+        let all = this.store.images.get(ID).and_then(|l| l.ready()).unwrap();
+        let rep_id = all[indices[fallback_row * cols]].id.clone();
+        let stale_fh = this.fh("tile-deleted-last", cx);
+        w.focus(&stale_fh);
+        this.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
+            dataset: ID.into(),
+            file: "images/val/deleted_last.jpg".into(),
+            split: crate::api::Split::Val,
+            fallback_row,
+            intra_row: 0.,
+            strategy: Some(folo_ui::ScrollStrategy::Center),
+            pending_recheck: false,
+            focus_from: Some(stale_fh),
+        });
+        cx.notify();
+        rep_id
+    });
+    frames(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        assert!(
+            this.fh(format!("tile-{rep_id}"), cx).is_focused(w),
+            "deleted inspected tile focuses a surviving tile in the fallback row"
+        );
+    });
+
+    // If the user moved focus to another control before the reload finished, fallback preserves it.
+    drive(&mut app, window, |this, w, cx| {
+        let stale_fh = this.fh("tile-deleted-other", cx);
+        this.focus_key("ds-back", w, cx);
+        this.ds_scroll_anchor = Some(super::data::DatasetScrollAnchor {
+            dataset: ID.into(),
+            file: "images/val/deleted_other.jpg".into(),
+            split: crate::api::Split::Val,
+            fallback_row: 2,
+            intra_row: 0.,
+            strategy: Some(folo_ui::ScrollStrategy::Center),
+            pending_recheck: false,
+            focus_from: Some(stale_fh),
+        });
+        cx.notify();
+    });
+    frames(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        assert!(
+            this.fh("ds-back", cx).is_focused(w),
+            "fallback restore must not steal focus once user moved to another control"
+        );
+    });
 }
 
-/// #382: window activation on Overview / Datasets triggers a deduplicated dataset-list refresh and
-/// renders refreshed per-dataset records immediately on summary cards and subtitle counts.
+/// #382: window activation and periodic polls share in-flight deduplication, and fresher list
+/// summaries invalidate stale `store.dataset` entries instead of being shadowed by them.
 #[test]
 fn window_activation_on_datasets_refreshes_list_deduplicated_and_updates_summary() {
     let api = Arc::new(MockBackend::new(4200, true));
@@ -662,7 +717,8 @@ fn window_activation_on_datasets_refreshes_list_deduplicated_and_updates_summary
     drive(&mut app, window, |this, w, cx| this.navigate(Route::Datasets, w, cx));
     frames(&mut app, window);
 
-    // Hold the next `datasets` list fetch and bounce focus twice: only one list fetch goes out.
+    // Hold the activation `datasets` fetch and cross both a second focus bounce AND a periodic
+    // poll tick (`poll_lists`): neither may launch a duplicate concurrent `datasets` fetch.
     let list_first = api.hold("datasets");
     let list_second = api.hold("datasets");
     app.platform().set_active(false);
@@ -671,8 +727,12 @@ fn window_activation_on_datasets_refreshes_list_deduplicated_and_updates_summary
 
     app.platform().set_active(false);
     app.platform().set_active(true);
+    app.update(|cx| window.update(cx, |this, _, cx| this.poll_lists(cx)).unwrap());
     frames_holding_one(&mut app, window);
-    assert!(!list_second.is_held(), "second focus bounce must not launch a duplicate datasets fetch");
+    assert!(
+        !list_second.is_held(),
+        "focus bounce and periodic poll must not launch a duplicate datasets fetch while held"
+    );
     drop((list_first, list_second));
     app.run_until_idle();
     frames(&mut app, window);
@@ -689,23 +749,86 @@ fn window_activation_on_datasets_refreshes_list_deduplicated_and_updates_summary
         let after = this.datasets_subtitle(&list);
         assert_ne!(before, after, "datasets subtitle reflects fresher store.dataset counts");
     });
+
+    // Conversely, when a newer `GET /api/datasets` summary arrives with changed counts, stale
+    // `store.dataset` records are invalidated rather than shadowing the fresh list summary.
+    drive(&mut app, window, |this, _, cx| {
+        let mut stale = this.store.dataset.get(ID).and_then(|l| l.ready()).cloned().expect("dataset loaded");
+        stale.splits.train = 111;
+        this.store.dataset.insert(ID.into(), Load::Ready(stale));
+        let mut fresh_list = this.store.datasets.ready().expect("datasets list").clone();
+        let entry = fresh_list.iter_mut().find(|d| d.id == ID).expect("target dataset");
+        entry.splits.train = 777;
+        this.install_datasets(fresh_list, cx);
+        let current = this.store.datasets.ready().unwrap().iter().find(|d| d.id == ID).unwrap();
+        assert_eq!(
+            this.effective_dataset(current).splits.train,
+            777,
+            "stale store.dataset record must not shadow a newer datasets list summary"
+        );
+    });
 }
 
 /// #308 item 6: rendering the live-run screen into two independent headless apps at 1.5x DPI
-/// produces byte-for-byte identical framebuffers (no wall-clock or parallel raster drift).
+/// (including mid-transition chart easing on the executor clock) produces byte-for-byte identical
+/// framebuffers.
 #[test]
 fn headless_run_live_render_is_byte_identical_across_runs() {
+    use crate::api::{RunEvent, RunStatus};
+    use crate::theme::{Mode, Theme};
+    use folo_ui::{AppContext, Bounds, HeadlessOptions, WindowBounds, WindowOptions, point, px, size};
+    use std::time::Duration;
+
     let render_once = || {
         let api = Arc::new(MockBackend::new(4200, true));
-        let (mut app, window) = open_with(api);
-        drive(&mut app, window, |this, w, cx| {
-            this.navigate(Route::Run("run_7b1a".into()), w, cx);
+        let mut app = HeadlessApp::new(HeadlessOptions { scale_factor: 1.5, ..Default::default() });
+        let window = app.update(|cx| {
+            cx.set_global(Theme::new(Mode::Dark));
+            let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1280.), px(800.)));
+            let options =
+                WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() };
+            cx.open_window(options, |window, cx| cx.new(|cx| FoloApp::new(api.clone(), true, window, cx)))
+                .expect("open window")
+        });
+        let run_id = drive(&mut app, window, |this, _, cx| {
+            this.ensure_core(cx);
+            String::new()
+        });
+        let _ = run_id;
+        let run_id = drive(&mut app, window, |this, w, cx| {
+            let id = this
+                .store
+                .runs
+                .ready()
+                .expect("runs loaded")
+                .iter()
+                .find(|r| r.status == RunStatus::Running)
+                .expect("running fixture run")
+                .id
+                .clone();
+            this.navigate(Route::Run(id.clone()), w, cx);
+            id
         });
         frames(&mut app, window);
+        // Verify the actual running fixture and its chart history loaded, then append a live step
+        // and advance the executor clock mid-ease (80 ms < 240 ms) to exercise `charts/ease.rs`.
+        drive(&mut app, window, |this, _, cx| {
+            let run = this.store.run(&run_id).expect("live run fixture loaded");
+            assert_eq!(run.status, RunStatus::Running);
+            let hist = this.store.run_data.get(&run_id).and_then(|l| l.ready()).expect("history loaded");
+            assert!(!hist.metrics.steps.is_empty(), "live run chart history is populated");
+            let mut next = *hist.metrics.steps.last().unwrap();
+            next.step += 1;
+            next.loss.total *= 0.92;
+            this.store.apply(&run_id, RunEvent::Step(next));
+            cx.notify();
+        });
+        app.frame(window.into());
+        app.advance_clock(Duration::from_millis(80));
         app.frame(window.into()).pixels.clone()
     };
     let a = render_once();
     let b = render_once();
     assert!(!a.is_empty());
-    assert_eq!(a, b, "repeated headless run-live renders must be byte-for-byte identical");
+    assert_eq!(a, b, "repeated 1.5x headless run-live renders with easing must be byte-for-byte identical");
 }

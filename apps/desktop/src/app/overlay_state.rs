@@ -570,5 +570,28 @@ mod tests {
             drive(&mut app, window, |this, w, _| this.root_focus.is_focused(w)),
             "closing inspector with unmounted opener falls back to root_focus"
         );
+
+        // Auto-closing the inspector during render when its image list finishes empty must NOT
+        // mount a stale scrim: the underlying page must accept the very first click immediately.
+        drive(&mut app, window, |this, w, cx| {
+            this.server_mode = crate::app::ServerMode::Local;
+            this.navigate(Route::Datasets, w, cx);
+            this.store.images.insert("ds_empty_auto".into(), crate::store::Load::Ready(Vec::new()));
+            this.open_inspector("ds_empty_auto".into(), 0, w, cx);
+        });
+        // One single frame triggers `inspector_waiting` auto-close without extra redraws.
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, _| {
+            assert!(this.inspector.is_none(), "empty completed list auto-closed inspector");
+            assert!(!this.any_overlay(), "no overlay reported after auto-close");
+            assert!(this.root_focus.is_focused(w), "auto-close restored focus cleanly");
+        });
+        // Generate synthetic button in the Datasets header (1280x800) works on the very first click.
+        crate::app::select_driving::click_n_at(&mut app, window, 1050., 73., 1);
+        app.frame(window.into());
+        assert!(
+            drive(&mut app, window, |this, _, _| this.synth.is_some()),
+            "underlying page button accepts the very first click after inspector auto-close"
+        );
     }
 }

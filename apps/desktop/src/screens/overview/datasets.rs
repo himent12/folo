@@ -104,13 +104,10 @@ impl FoloApp {
         let row2: Vec<AnyElement> = it.collect();
         let id = d.id.clone();
         let key = format!("ds-card-{}", d.id);
-        // Prefer the freshly loaded per-dataset record over the cached list summary so window-
-        // activation rechecks update counts, classes, and class balance immediately.
-        let fresh = self.store.dataset.get(&d.id).and_then(|l| l.ready()).cloned();
-        let view = fresh.as_ref().unwrap_or(d);
+        let view = self.effective_dataset(d).clone();
         // Boxes per class, from the dataset's own record (the list has no stats).
         let counts = view.stats.as_ref().map(|s| s.class_counts.clone());
-        let (badge_label, badge_tone, problem) = self.dataset_card_badge(view);
+        let (badge_label, badge_tone, problem) = self.dataset_card_badge(&view);
         // The card in full: its name, size and every class with its boxes (the strip's breakdown), on
         // hover and on keyboard focus; what is wrong with it, when something is.
         let mut full = format!(
@@ -164,7 +161,7 @@ impl FoloApp {
                         view.name.clone(),
                         // Counts that never need cutting; the class names are the card's tip (hover
                         // and keyboard focus), in full.
-                        card_facts(view, self.dataset_unreadable(&d.id)),
+                        card_facts(&view, self.dataset_unreadable(&d.id)),
                     ))
                     .child(badge(&t, badge_label, badge_tone)),
             )

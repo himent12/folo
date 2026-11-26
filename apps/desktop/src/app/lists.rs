@@ -26,9 +26,9 @@ pub struct ListTickets {
     seq: u64,
     installed: [u64; 3],
     changed: [u64; 3],
-    /// Per list, the latest fetch ticket still out (0: none), used to deduplicate background
-    /// refreshes such as window-activation rechecks while a list request is already in flight.
-    in_flight: [u64; 3],
+    /// Per list, all fetch tickets still outstanding, so overlapping explicit/poll fetches never
+    /// lose track of an earlier in-flight request.
+    in_flight: [Vec<u64>; 3],
     /// Per list, the ticket of a failed list's retry still out (0: none): one at a time, so a server
     /// that never answers isn't asked again at every refresh.
     retrying: [u64; 3],
@@ -41,15 +41,21 @@ impl ListTickets {
         self.seq
     }
 
-    /// A ticket for an in-place refresh of `list`, unless a fetch or retry is already in flight.
+    /// A ticket for a fetch of `list`, recorded as in flight.
+    pub fn start(&mut self, list: List) -> u64 {
+        let ticket = self.ask();
+        self.in_flight[list as usize].push(ticket);
+        ticket
+    }
+
+    /// A ticket for a background in-place refresh of `list`, unless a still-current fetch or retry
+    /// is already in flight.
     pub fn refresh_if_idle(&mut self, list: List) -> Option<u64> {
         let i = list as usize;
-        if self.in_flight[i] != 0 || self.retrying[i] != 0 {
+        if self.retrying[i] != 0 || self.in_flight[i].iter().any(|&t| self.current(list, t)) {
             return None;
         }
-        let ticket = self.ask();
-        self.in_flight[i] = ticket;
-        Some(ticket)
+        Some(self.start(list))
     }
 
     /// Whether an answer to `ticket` is still news: no later fetch's answer is installed, and the list
@@ -72,9 +78,8 @@ impl ListTickets {
         if self.retrying[list as usize] != 0 {
             return None;
         }
-        let ticket = self.ask();
+        let ticket = self.start(list);
         self.retrying[list as usize] = ticket;
-        self.in_flight[list as usize] = ticket;
         Some(ticket)
     }
 
@@ -83,16 +88,13 @@ impl ListTickets {
         if self.retrying[list as usize] == ticket {
             self.retrying[list as usize] = 0;
         }
-        if self.in_flight[list as usize] == ticket {
-            self.in_flight[list as usize] = 0;
-        }
+        self.in_flight[list as usize].retain(|&t| t != ticket);
     }
 
     /// `list` is asked for again from scratch (Retry, a server switch): every answer still out is
     /// dropped, a retry among them too, so the new request goes out at once and only its answer counts.
     pub fn restart(&mut self, list: List) {
         self.changed(list);
-        self.in_flight[list as usize] = 0;
         self.retrying[list as usize] = 0;
     }
 }
@@ -101,14 +103,19 @@ impl FoloApp {
     /// Fetches `list`. Loading, its answer fills it (a failure shows); loaded, the answer replaces it in
     /// place (a failure leaves it as it is). Either way only while it is still news.
     pub(super) fn fetch_list(&mut self, list: List, cx: &mut Context<Self>) {
-        let ticket = self.list_tickets.ask();
-        self.list_tickets.in_flight[list as usize] = ticket;
+        if self.hold_loading {
+            return;
+        }
+        let ticket = self.list_tickets.start(list);
         self.fetch_list_as(list, ticket, cx);
     }
 
-    /// Refreshes an already-loaded `list` in place (e.g. on window activation) if no fetch for it is
-    /// currently in flight.
+    /// Refreshes an already-loaded `list` in place (e.g. on window activation or periodic poll) if
+    /// no current fetch for it is already in flight.
     pub(super) fn refresh_list_if_idle(&mut self, list: List, cx: &mut Context<Self>) {
+        if self.hold_loading {
+            return;
+        }
         let loaded = match list {
             List::Datasets => self.store.datasets.ready().is_some(),
             List::Models => self.store.models.ready().is_some(),
@@ -126,6 +133,9 @@ impl FoloApp {
     /// list, or a newer error), as Studio's polls do, not the loading state at every refresh while the
     /// server is down. Nothing is asked while the last retry is still out.
     pub(super) fn retry_list(&mut self, list: List, cx: &mut Context<Self>) {
+        if self.hold_loading {
+            return;
+        }
         if let Some(ticket) = self.list_tickets.retry(list) {
             self.fetch_list_as(list, ticket, cx);
         }
@@ -216,10 +226,47 @@ impl FoloApp {
         }
     }
 
-    fn install_datasets(&mut self, list: Vec<Dataset>, cx: &mut Context<Self>) {
+    /// Effective dataset record for cards, filters, sorting, and subtitle counts: uses the loaded
+    /// detail record (which carries `stats` and per-dataset refreshes) when cached and fresh.
+    pub(crate) fn effective_dataset<'a>(&'a self, d: &'a Dataset) -> &'a Dataset {
+        self.store.dataset.get(&d.id).and_then(|l| l.ready()).unwrap_or(d)
+    }
+
+    /// Keeps the cached list summary aligned when a per-dataset record (`GET /api/datasets/{id}`)
+    /// refreshes first so list filters, format counts, and cards agree on one record.
+    pub(super) fn sync_dataset_summary(&mut self, fresh: &Dataset) {
+        if let Some(list) = self.store.datasets.ready_mut()
+            && let Some(item) = list.iter_mut().find(|d| d.id == fresh.id)
+        {
+            item.name = fresh.name.clone();
+            item.path = fresh.path.clone();
+            item.format = fresh.format;
+            item.classes = fresh.classes.clone();
+            item.splits = fresh.splits;
+            item.revision = fresh.revision.clone();
+        }
+    }
+
+    pub(super) fn install_datasets(&mut self, list: Vec<Dataset>, cx: &mut Context<Self>) {
         if self.store.datasets.ready() == Some(&list) {
             return;
         }
+        let stale_cached: Vec<String> = self
+            .store
+            .datasets
+            .ready()
+            .into_iter()
+            .flat_map(|old| {
+                list.iter().filter_map(|d| {
+                    let prev = old.iter().find(|x| x.id == d.id)?;
+                    if !dataset_summary_changed(prev, d) {
+                        return None;
+                    }
+                    let cached = self.store.dataset.get(&d.id).and_then(|l| l.ready())?;
+                    dataset_summary_changed(cached, d).then(|| d.id.clone())
+                })
+            })
+            .collect();
         let gone = gone_from(self.store.datasets.ready(), &list, |d| (&d.id, &d.name));
         for (id, name) in gone {
             self.removed_elsewhere(&id, name, cx);
@@ -230,6 +277,13 @@ impl FoloApp {
             self.deleted.remove(&d.id);
         }
         self.store.datasets = Load::Ready(list);
+        for id in stale_cached {
+            self.ds_recheck.insert(id.clone());
+            if !self.inspecting(&id) {
+                self.forget_dataset_contents(&id, cx);
+                self.store.dataset.remove(&id);
+            }
+        }
         // An open select may list them: its highlight is an index into the list.
         self.menu_open = None;
     }
@@ -292,6 +346,16 @@ impl FoloApp {
             self.route_pending = Some(list);
         }
     }
+}
+
+/// Whether any summary field carried by `GET /api/datasets` changed between two dataset records.
+fn dataset_summary_changed(a: &Dataset, b: &Dataset) -> bool {
+    a.name != b.name
+        || a.path != b.path
+        || a.format != b.format
+        || a.classes != b.classes
+        || a.splits != b.splits
+        || a.revision != b.revision
 }
 
 /// What `old` listed that `new` doesn't, as (id, name).

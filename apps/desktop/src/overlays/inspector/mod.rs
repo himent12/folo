@@ -112,10 +112,14 @@ impl FoloApp {
         }
     }
 
-    pub(super) fn inspector_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn inspector_view(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let t = theme(cx);
         self.land_inspector(cx);
-        let insp = self.inspector.as_ref().unwrap();
+        let insp = self.inspector.as_ref()?;
         let ds_id = insp.dataset.clone();
         let n = self.filtered_indices(&ds_id).len();
         // Its image not in yet (the list still arriving, or a later page failed): never fall back
@@ -126,7 +130,7 @@ impl FoloApp {
         let index = insp.index.min(n - 1);
         let (zoom, pan, hover, focused_box, show_boxes, show_labels) =
             (insp.zoom, insp.pan, insp.hover_box, insp.focused_box, insp.boxes, insp.labels);
-        let Some(meta) = self.filtered_image(&ds_id, index).cloned() else { return div().into_any_element() };
+        let meta = self.filtered_image(&ds_id, index)?.clone();
         let (class, empty) = (self.class_filter(&ds_id), self.empty_only(&ds_id));
         let query = self.img_query(&ds_id).to_string();
         let sort = self.img_sort(&ds_id);
@@ -250,7 +254,7 @@ impl FoloApp {
             cx,
         );
         // Fades in like the dialogs and palette (160 ms; none under Reduce motion).
-        crate::ui::appear(
+        Some(crate::ui::appear(
             div()
                 .absolute()
                 .top_0()
@@ -288,7 +292,7 @@ impl FoloApp {
                         .child(div().flex_1().min_h_0().flex().child(stage).child(side)),
                 ),
             "inspector-in",
-        )
+        ))
     }
 
     fn inspector_waiting(
@@ -297,7 +301,7 @@ impl FoloApp {
         ds_id: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Option<AnyElement> {
         if let Some(failed) = self.failed_image_page(ds_id).cloned() {
             let retry_id = ds_id.to_string();
             let msg = format!(
@@ -347,38 +351,44 @@ impl FoloApp {
                 )
                 .child(text(ty::SM, t.text_secondary).whitespace_normal().child(msg))
                 .child(div().flex().justify_end().gap(px(8.)).child(close).child(retry));
-            return div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .child(self.scrim(
-                    t,
-                    "insp-scrim",
-                    window,
-                    cx,
-                    act(|this, w, cx| this.close_inspector(w, cx)),
-                ))
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(card),
-                )
-                .into_any_element();
+            return Some(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .child(self.scrim(
+                        t,
+                        "insp-scrim",
+                        window,
+                        cx,
+                        act(|this, w, cx| this.close_inspector(w, cx)),
+                    ))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(card),
+                    )
+                    .into_any_element(),
+            );
         }
-        // Still loading the image list (or the filter emptied it): keep the scrim up.
+        // Still loading the image list (or the filter emptied it): auto-close with no scrim when
+        // loading is done so the page underneath accepts clicks immediately.
         if self.store.images.get(ds_id).is_some_and(|l| !l.is_loading()) && !self.images_pending(ds_id) {
             self.close_inspector(window, cx);
+            return None;
         }
         // The page's scrim (it takes the clicks, and a click there closes, as Esc does).
-        self.scrim(t, "insp-scrim", window, cx, act(|this, w, cx| this.close_inspector(w, cx)))
-            .into_any_element()
+        Some(
+            self.scrim(t, "insp-scrim", window, cx, act(|this, w, cx| this.close_inspector(w, cx)))
+                .into_any_element(),
+        )
     }
 
     fn inspector_key_down(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -407,13 +417,14 @@ impl FoloApp {
             "+" | "=" => self.zoom_by(1.4, cx),
             "-" => self.zoom_by(1.0 / 1.4, cx),
             "0" => {
+                let mut was_dragging = false;
                 if let Some(i) = self.inspector.as_mut() {
                     i.zoom = 1.0;
                     i.pan = (0., 0.);
-                    i.drag_from = None;
+                    was_dragging = i.drag_from.take().is_some();
                     i.focused_box = None;
                 }
-                stage::clear_stage_panned();
+                stage::interrupt_stage_drag(was_dragging);
             }
             k if k.eq_ignore_ascii_case("b") => self.toggle_inspector_boxes(cx),
             k if k.eq_ignore_ascii_case("l") => self.toggle_inspector_labels(cx),

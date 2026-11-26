@@ -379,8 +379,12 @@ impl FoloApp {
             if !more
                 && failed_page.is_none()
                 && self.ds_scroll_anchor.as_ref().is_some_and(|a| a.dataset == id)
+                && let Some(prev) = self.ds_scroll_anchor.take().and_then(|a| a.focus_from)
+                && !self.any_overlay()
+                && prev.is_focused(window)
             {
-                self.ds_scroll_anchor = None;
+                self.verify_focus = None;
+                window.focus(&self.root_focus);
             }
             // A dataset with no image at all is not a filter that matched nothing.
             let (icon, title, body, show_reset) = if ds.splits.total() == 0 {
