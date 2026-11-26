@@ -54,8 +54,9 @@ import { boardOrder, comparePath, compareHint, compareReason, keepSelection } fr
 import LoopsTab from './bench/LoopsTab';
 import NewLoopDialog from './bench/NewLoopDialog';
 import PlanTab from './bench/PlanTab';
-import { cannotBench } from './bench/support';
+import { benchUnavailable } from './bench/support';
 import Unsupported from './bench/Unsupported';
+import { labelUnavailable } from './label/support';
 import { classesText, entriesText, FINGERPRINT_HELP, FROZEN, imagesText, shortFingerprint, sourceKind, sourcePath } from './bench/words';
 import { tickingNow } from './runs/when';
 
@@ -77,15 +78,16 @@ export default function Benchmark() {
   });
 
   const system = new Resource((s) => hub.api.system(s));
-  const catalog = new Resource((s) => hub.api.benchCatalog(s));
-  const agents = new Resource((s) => hub.api.labelAgents(s));
-  const models = new Resource((s) => hub.api.models(s));
-  const datasets = new Resource((s) => hub.api.datasets(s));
-  const jobs = new Resource((s) => hub.api.labelJobs(s));
-  const live = new LiveBench(() => id.get() || null);
+  const noBench = computed(() => benchUnavailable(system.data));
+  const catalog = new Resource((s) => (noBench.get() ? Promise.resolve(undefined) : hub.api.benchCatalog(s)));
+  const agents = new Resource((s) => (noBench.get() || labelUnavailable(system.data) ? Promise.resolve(undefined) : hub.api.labelAgents(s)));
+  const models = new Resource((s) => (noBench.get() ? Promise.resolve([]) : hub.api.models(s)));
+  const datasets = new Resource((s) => (noBench.get() ? Promise.resolve([]) : hub.api.datasets(s)));
+  const jobs = new Resource((s) => (noBench.get() || labelUnavailable(system.data) ? Promise.resolve([]) : hub.api.labelJobs(s)));
+  const live = new LiveBench(() => (noBench.get() ? null : id.get() || null));
   const choice = new AgentChoice(() => agents.data);
   const bench = computed(() => live.bench);
-  const unsupported = computed(() => cannotBench(system.data, live.error));
+  const unsupported = computed(() => benchUnavailable(system.data, live.error));
 
   // The header's Add entry is this page's create action: the top bar's New run steps aside.
   ownCreateAction();

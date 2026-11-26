@@ -7,7 +7,6 @@ import { computed, css, effect, For, MediaQuery, onCleanup, signal, untrack } fr
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { LabelJob } from '$lib/api/types';
-import { LABEL_FEATURE } from '$lib/label';
 import { media } from '$lib/design/tokens';
 import { ago, count as counted, num } from '$lib/format';
 import { href, router } from '$lib/router';
@@ -30,7 +29,7 @@ import StatusBadge from '$lib/ui/StatusBadge';
 import TableState from '$lib/ui/TableState';
 import JobDialog from './label/JobDialog';
 import { emptyFilterSummary, leftForLabelJob, readState, returnQuery, writeState, type LabelFilter as Filter } from './label/listState';
-import { cannotLabel } from './label/support';
+import { labelUnavailable } from './label/support';
 import Unsupported from './label/Unsupported';
 import { jobStatus, runAgent } from './label/words';
 
@@ -45,10 +44,12 @@ export default function LabelJobs() {
   ownCreateAction();
 
   const system = new Resource((s) => hub.api.system(s));
-  // Polled: a job an agent is labeling moves on its own.
-  const jobs = new Resource((s) => hub.api.labelJobs(s), { poll: 5000 });
-  const agents = new Resource((s) => hub.api.labelAgents(s));
-  const unsupported = computed(() => cannotLabel(system.data, jobs.error));
+  const noLabel = computed(() => labelUnavailable(system.data));
+  // Polled: a job an agent is labeling moves on its own. Skip fetching/polling once health or `/api/system` says
+  // the server cannot label (`folo serve --mock`).
+  const jobs = new Resource((s) => (noLabel.get() ? Promise.resolve<LabelJob[]>([]) : hub.api.labelJobs(s)), { poll: 5000 });
+  const agents = new Resource((s) => (noLabel.get() ? Promise.resolve(undefined) : hub.api.labelAgents(s)));
+  const unsupported = computed(() => labelUnavailable(system.data, jobs.error));
 
   // `#/datasets/label?new=1` opens the dialog (the palette's "New labeling job").
   // Followed, not read once: the palette can ask while this page is open (pages are keyed by path, not query). The ask
@@ -59,12 +60,15 @@ export default function LabelJobs() {
   effect(() => {
     if (!askedNew.get()) return;
     untrack(() => {
-      if (!hub.lacks(LABEL_FEATURE)) creating.set(true);
+      if (!unsupported.peek()) creating.set(true);
       const q = new URLSearchParams(router.route.query);
       q.delete('new');
       const s = q.toString();
       router.go(`/datasets/label${s ? `?${s}` : ''}`, { replace: true });
     });
+  });
+  effect(() => {
+    if (unsupported.get() && creating.peek()) creating.set(false);
   });
 
   // Status filter and search query live in the URL query (./label/listState) so Back, reload and shared links restore them.

@@ -539,8 +539,11 @@ export default function Leaderboard(props: LeaderboardProps) {
 css`
   .scroll {
     overflow-x: auto;
+    container-type: inline-size;
   }
-  /* Fixed columns on the header row; the entry's name takes what is left. */
+  /* Fixed columns on the header row; the entry's name takes what is left.
+     Compact desktop widths keep the Entry column >= 200 px at 1280 px (with sidebar open and Speed · cost shown);
+     when the table container itself is wide (>= 1120 px), the plot and metadata columns expand via container query. */
   .board .check {
     position: relative;
     width: 32px;
@@ -554,16 +557,16 @@ css`
     color: var(--text-tertiary);
   }
   .board th.score {
-    width: 104px;
+    width: 96px;
   }
   .board .axes-col {
     width: 80px;
   }
   .board th.map {
-    width: 240px;
+    width: 188px;
   }
   .board th.ran {
-    width: 224px;
+    width: 148px;
   }
   /* What it was graded on wraps whole facts onto a second line rather than widen the column. */
   .board td.ran {
@@ -578,7 +581,21 @@ css`
     padding-bottom: 0;
   }
   .board th.cost {
-    width: 112px;
+    width: 100px;
+  }
+  @container (min-width: 1120px) {
+    .board th.score {
+      width: 104px;
+    }
+    .board th.map {
+      width: 240px;
+    }
+    .board th.ran {
+      width: 224px;
+    }
+    .board th.cost {
+      width: 112px;
+    }
   }
   .board .act {
     width: 40px;

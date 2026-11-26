@@ -42,7 +42,7 @@ import DatasetDialog from './label/DatasetDialog';
 import Editor from './label/Editor';
 import ImagesArea, { inFilter, type Show } from './label/ImagesArea';
 import JobDialog from './label/JobDialog';
-import { cannotLabel } from './label/support';
+import { labelUnavailable } from './label/support';
 import Unsupported from './label/Unsupported';
 import { Uploads } from './label/uploads';
 import { Instructions } from './label/instructions';
@@ -60,15 +60,16 @@ export default function LabelJob() {
   const imageParam = computed(() => router.route.query.get('image'));
 
   const system = new Resource((s) => hub.api.system(s));
-  const agents = new Resource((s) => hub.api.labelAgents(s));
-  const live = new LiveLabelJob(() => id.get() || null);
+  const noLabel = computed(() => labelUnavailable(system.data));
+  const agents = new Resource((s) => (noLabel.get() ? Promise.resolve(undefined) : hub.api.labelAgents(s)));
+  const live = new LiveLabelJob(() => (noLabel.get() ? null : id.get() || null));
   const choice = new AgentChoice(() => agents.data);
   const uploads = new Uploads(() => id.get(), live);
   const job = computed(() => live.job);
   /** The job, where it is known to be there (the page's own branch). */
   const j = () => job.get()!;
   const running = computed(() => isActive(job.get()));
-  const unsupported = computed(() => cannotLabel(system.data, live.error));
+  const unsupported = computed(() => labelUnavailable(system.data, live.error));
 
   // The header's Create dataset is this page's create action: the top bar's New run steps aside.
   ownCreateAction();

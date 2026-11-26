@@ -11,9 +11,10 @@ import TriangleAlert from '$icons/triangle-alert';
 import { bindable, computed, createUniqueId, css, effect, onCleanup, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
-import type { Split } from '$lib/api/types';
+import type { Dataset, LabelJob, Split } from '$lib/api/types';
 import { benchNameError, descriptionError, IMAGES_DEFAULT, IMAGES_MAX } from '$lib/bench/rules';
 import { num } from '$lib/format';
+import { LABEL_FEATURE } from '$lib/label';
 import { router } from '$lib/router';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
@@ -50,8 +51,9 @@ export default function NewBenchDialog(props: { open?: boolean }) {
   const open = bindable(props, 'open', false);
 
   const uid = createUniqueId();
-  const datasets = new Resource((s) => hub.api.datasets(s));
-  const jobs = new Resource((s) => hub.api.labelJobs(s));
+  // Defer source lists until the dialog actually opens, and skip labeling jobs when the server lacks agent labeling.
+  const datasets = new Resource<Dataset[] | undefined>((s) => (open.get() ? hub.api.datasets(s) : Promise.resolve(undefined)));
+  const jobs = new Resource<LabelJob[] | undefined>((s) => (open.get() && !hub.lacks(LABEL_FEATURE) ? hub.api.labelJobs(s) : Promise.resolve(undefined)));
 
   const name = signal('');
   const description = signal('');
@@ -151,7 +153,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
           : sourceImages.get() === 0
             ? `Pick a split with images`
             : null
-      : jobs.error
+      : hub.lacks(LABEL_FEATURE) || jobs.error
         ? 'This server does not label images'
         : !jobs.data
           ? 'Loading labeling jobs'

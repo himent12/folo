@@ -8,7 +8,7 @@
 // entries are kept in the leaderboard's order ($lib/bench/rules `rankEntries`), the loops newest first.
 
 import { effect, signal, untrack } from 'fw';
-import { rankEntries } from '../bench/rules';
+import { BENCH_FEATURE, rankEntries } from '../bench/rules';
 import { ApiError } from './client';
 import { hub } from './index';
 import { STREAM_GRACE_MS } from './live';
@@ -121,7 +121,7 @@ export class LiveBench {
   constructor(id: () => string | null) {
     effect(() => {
       const benchId = id();
-      if (!benchId) {
+      const resetView = () => {
         this.#viewSeq++;
         this.#heard.clear();
         this.#loaded = ++this.#seq;
@@ -136,9 +136,16 @@ export class LiveBench {
           this.lost = null;
           this.connection = 'idle';
         });
+      };
+      if (!benchId) {
+        resetView();
         return;
       }
       if (hub.mode === 'connecting') return;
+      if (hub.lacks(BENCH_FEATURE)) {
+        resetView();
+        return;
+      }
       void hub.epoch;
       void this.#retry.get();
       this.#viewSeq++;
@@ -197,10 +204,11 @@ export class LiveBench {
           this.#inflight.delete(flight);
         }
       };
-      // The benchmark was deleted (elsewhere): the page shows it gone, not stale data that looks live; nothing retries.
+      // The benchmark was deleted (404) or this server does not implement benchmarks (501): stop retrying and close SSE.
       let unsub = (): void => {};
       const gone = (e: unknown): boolean => {
-        if (closed || !(e instanceof ApiError && e.status === 404)) return false;
+        const terminal = e instanceof ApiError && (e.status === 404 || (e.status === 501 && e.code === 'not_implemented'));
+        if (closed || !terminal) return false;
         closed = true;
         this.#viewSeq++;
         this.#heard.clear();

@@ -9,6 +9,7 @@
 // draws only the ones in view.
 
 import { batch, effect, signal, untrack } from 'fw';
+import { LABEL_FEATURE } from '../label';
 import { hub } from './index';
 import { AppendLog } from './appendLog';
 import { LOG_TRIM_BATCH, MAX_LOGS, mergeLogs, STREAM_GRACE_MS } from './live';
@@ -146,7 +147,7 @@ export class LiveLabelJob {
   constructor(id: () => string | null) {
     effect(() => {
       const jobId = id();
-      if (!jobId) {
+      const resetView = () => {
         this.#viewSeq++;
         this.#heard.clear();
         this.#loaded = ++this.#imageSeq;
@@ -161,9 +162,16 @@ export class LiveLabelJob {
           this.connection = 'idle';
           this.#version.set((v) => v + 1);
         });
+      };
+      if (!jobId) {
+        resetView();
         return;
       }
       if (hub.mode === 'connecting') return;
+      if (hub.lacks(LABEL_FEATURE)) {
+        resetView();
+        return;
+      }
       void hub.epoch;
       void this.#retry.get();
       this.#viewSeq++;
@@ -244,7 +252,8 @@ export class LiveLabelJob {
       // as LiveRun). Nothing retries after; the page's Retry starts over.
       let unsub = (): void => {};
       const gone = (e: unknown): boolean => {
-        if (closed || !(e instanceof ApiError && e.status === 404)) return false;
+        const terminal = e instanceof ApiError && (e.status === 404 || (e.status === 501 && e.code === 'not_implemented'));
+        if (closed || !terminal) return false;
         closed = true;
         this.#viewSeq++;
         this.#heard.clear();
