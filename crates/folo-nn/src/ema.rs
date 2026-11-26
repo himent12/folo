@@ -333,6 +333,22 @@ impl<M: Module> ModelEma<M> {
             return Err(Error::Invalid(format!("ModelEma: non-finite LR factor {lf}")));
         }
         let d = self.decay_at_with_lf(self.updates + 1, lf);
+        self.update_with_decay(source, d)
+    }
+
+    /// Fold the current `source` weights into the average using a Karras-style [`crate::PowerLawEmaSchedule`]
+    /// evaluated at `updates + 1`.
+    pub fn update_with_power_law(
+        &mut self,
+        source: &dyn Module,
+        schedule: &crate::PowerLawEmaSchedule,
+    ) -> Result<()> {
+        let d = schedule.decay_at(self.updates + 1);
+        self.update_with_decay(source, d)
+    }
+
+    /// Fold the current `source` weights into the average with an explicit decay `d in [0, 1]`.
+    pub fn update_with_decay(&mut self, source: &dyn Module, d: f64) -> Result<()> {
         if !d.is_finite() || !(0.0..=1.0).contains(&d) {
             return Err(Error::Invalid(format!("ModelEma: invalid decay {d}")));
         }
