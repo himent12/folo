@@ -58,7 +58,12 @@ impl State {
     fn shape(&mut self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> Option<LayoutLine> {
         let attrs_list = self.attrs_list(font_runs, 0);
         let shaped = ShapeLine::new(&mut self.font_system, text, &attrs_list, Shaping::Advanced, 4);
-        if !shaped.rtl {
+        // If `text` contains a Unicode paragraph separator (Bidi_Class=B), prepending one LRM would
+        // flip only the first paragraph and trip cosmic-text's matching-direction assertion across
+        // paragraphs, so leave multi-paragraph lines untouched.
+        let has_para_sep =
+            text.chars().any(|c| matches!(c, '\r' | '\u{001C}'..='\u{001E}' | '\u{0085}' | '\u{2029}'));
+        if !shaped.rtl || has_para_sep {
             let mut lines = Vec::with_capacity(1);
             shaped.layout_to_buffer(&mut self.scratch, font_size.0, None, Wrap::None, None, &mut lines, None);
             return lines.into_iter().next();

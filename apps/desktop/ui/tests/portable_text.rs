@@ -418,4 +418,9 @@ fn rtl_filename_with_english_reason_wraps_and_keeps_both_inks() {
         positions[0] != positions[1] && positions[1] != positions[2] && positions[2] != positions[3],
         "RTL caret positions must be distinct: {positions:?}"
     );
+
+    // An RTL filename containing a Unicode paragraph separator must not panic cosmic-text's
+    // multi-paragraph direction assertion.
+    let para_sep = layout(&text_system(), &font("Geist Mono"), "א\u{2029}ב.json", 12.);
+    assert_eq!(para_sep.len, "א\u{2029}ב.json".len());
 }
