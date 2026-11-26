@@ -23,12 +23,19 @@ pub fn nice_step(range: f32, n: usize) -> f32 {
 }
 
 pub fn ticks(lo: f32, hi: f32, n: usize) -> Vec<f32> {
+    if !lo.is_finite() || !hi.is_finite() || hi < lo {
+        return Vec::new();
+    }
     let step = nice_step(hi - lo, n);
     let mut v = (lo / step).ceil() * step;
     let mut out = Vec::new();
     while v <= hi + step * 1e-3 && out.len() < 20 {
         out.push(if v.abs() < step * 1e-6 { 0.0 } else { v });
-        v += step;
+        let next = v + step;
+        if next <= v {
+            break;
+        }
+        v = next;
     }
     out
 }
@@ -37,8 +44,9 @@ pub fn ticks(lo: f32, hi: f32, n: usize) -> Vec<f32> {
 /// X-axis ticks that end exactly on the range when a round step divides it (0–120 → every 20),
 /// otherwise the usual nice ticks.
 pub fn even_ticks(lo: f32, hi: f32, max_n: usize) -> Vec<f32> {
+    let max_n = max_n.max(1);
     let range = hi - lo;
-    if range > 0.0 && range.is_finite() {
+    if lo.is_finite() && hi.is_finite() && range > 0.0 && range.is_finite() {
         let mag = 10f32.powf((range / max_n as f32).log10().floor());
         for k in [1.0, 10.0, 100.0] {
             for m in [1.0, 2.0, 2.5, 5.0] {
@@ -60,14 +68,26 @@ pub fn even_ticks(lo: f32, hi: f32, max_n: usize) -> Vec<f32> {
 /// Whole-number ticks for count axes: a 1-2-5 step that fits `max_n` labels, always ending on `hi`
 /// (0–3 → 0 1 2 3; 0–120 → every 20; 0–7 → 0 5 7).
 pub fn int_ticks(lo: f32, hi: f32, max_n: usize) -> Vec<f32> {
+    if !lo.is_finite() || !hi.is_finite() {
+        return Vec::new();
+    }
+    let max_n = max_n.max(1);
     let (lo, hi) = (lo.round(), hi.round().max(lo.round() + 1.0));
+    let range = hi - lo;
+    if !range.is_finite() {
+        return Vec::new();
+    }
     let even = even_ticks(lo, hi, max_n);
     if even.iter().all(|v| v.fract() == 0.0) && even.last() == Some(&hi) {
         return even;
     }
-    let range = hi - lo;
     // A step that divides the range exactly keeps every gap equal (0–120 → 0 40 80 120).
-    for mag in [1.0f32, 10.0, 100.0, 1000.0, 10000.0] {
+    let base_exp = ((range / max_n.max(2) as f32).max(1.0)).log10().floor().max(0.0) as i32;
+    for exp in (base_exp.saturating_sub(1)).max(0)..=base_exp.saturating_add(1) {
+        let mag = 10f32.powi(exp);
+        if !mag.is_finite() {
+            break;
+        }
         for m in [1.0f32, 2.0, 3.0, 4.0, 5.0] {
             let step = m * mag;
             let n = range / step;
@@ -76,20 +96,33 @@ pub fn int_ticks(lo: f32, hi: f32, max_n: usize) -> Vec<f32> {
             }
         }
     }
-    let mut step = 1.0f32;
-    'find: for mag in [1.0f32, 10.0, 100.0, 1000.0, 10000.0] {
+    let mut step = nice_step(range, max_n).max(1.0).round();
+    if !step.is_finite() || step < 1.0 {
+        return vec![lo, hi];
+    }
+    'find: for exp in (base_exp.saturating_sub(1)).max(0)..=base_exp.saturating_add(2) {
+        let mag = 10f32.powi(exp);
+        if !mag.is_finite() {
+            break;
+        }
         for m in [1.0f32, 2.0, 5.0] {
-            step = m * mag;
-            if range / step <= max_n.max(1) as f32 {
+            let candidate = m * mag;
+            if range / candidate <= max_n as f32 {
+                step = candidate;
                 break 'find;
             }
         }
     }
     let mut out: Vec<f32> = Vec::new();
+    let cap = max_n.saturating_add(4).max(20);
     let mut v = (lo / step).ceil() * step;
-    while v < hi - 1e-3 {
+    while v < hi - 1e-3 && out.len() < cap {
         out.push(v);
-        v += step;
+        let next = v + step;
+        if next <= v {
+            break;
+        }
+        v = next;
     }
     // End on the range; drop the previous tick when the end would crowd it.
     if let Some(&last) = out.last()
@@ -103,6 +136,12 @@ pub fn int_ticks(lo: f32, hi: f32, max_n: usize) -> Vec<f32> {
 }
 
 pub fn format_step(v: f32, step: f32) -> String {
+    if !v.is_finite() {
+        return "–".into();
+    }
+    if !step.is_finite() || step == 0.0 {
+        return format_tick(v);
+    }
     if step.abs() >= 1000.0 && v.abs() >= 1000.0 {
         return format_tick(v);
     }
@@ -115,10 +154,23 @@ pub fn format_step(v: f32, step: f32) -> String {
     format!("{v:.d$}")
 }
 
+/// Clamped base-2 exponent bounds `(e0, e1)` for finite log-axis range `y0..=y1`.
+fn pow2_bounds(y0: f32, y1: f32) -> Option<(i32, i32)> {
+    if !y0.is_finite() || !y1.is_finite() {
+        return None;
+    }
+    let e0 = (f64::from(y0.max(1e-6))).log2().ceil() as i32;
+    let e1 = (f64::from(y1.max(1e-6)) * 1.0001).log2().floor() as i32;
+    let e0 = e0.clamp(-20, 127);
+    let e1 = e1.clamp(-20, 127);
+    (e1 >= e0).then_some((e0, e1))
+}
+
 /// The stride (in octaves) of a log axis over `y0..y1` with room for `max` labels.
 pub(super) fn pow2_stride(y0: f32, y1: f32, max: usize) -> i32 {
-    let e0 = y0.max(1e-6).log2().ceil() as i32;
-    let e1 = (y1.max(1e-6) * 1.0001).log2().floor() as i32;
+    let Some((e0, e1)) = pow2_bounds(y0, y1) else {
+        return 1;
+    };
     let n = (e1 - e0 + 1).max(1) as usize;
     n.div_ceil(max.max(1)) as i32
 }
@@ -131,11 +183,9 @@ pub fn pow2_ticks(y0: f32, y1: f32, max: usize) -> Vec<f32> {
 
 /// [`pow2_ticks`] at a given stride of `k` octaves.
 pub fn pow2_ticks_every(y0: f32, y1: f32, k: i32) -> Vec<f32> {
-    let e0 = y0.max(1e-6).log2().ceil() as i32;
-    let e1 = (y1.max(1e-6) * 1.0001).log2().floor() as i32;
-    if e1 < e0 {
+    let Some((e0, e1)) = pow2_bounds(y0, y1) else {
         return Vec::new();
-    }
+    };
     // More powers than fit: every k-th, counted down from the top (8 2 0.5), so the top power
     // keeps its label and every step is the same factor.
     let k = k.max(1);
@@ -164,7 +214,13 @@ pub fn label_pow(fitted: bool, formatted: bool, log_y: bool, y0: f32, y1: f32, t
 /// "0.67×10⁻³"), or two significant figures once it's below 0.1 ("0.011×10⁻³"), so a small
 /// value never rounds to "0.00".
 pub fn in_pow(x: f64, p: i32) -> String {
+    if !x.is_finite() {
+        return "–".into();
+    }
     let v = x * 10f64.powi(-p);
+    if !v.is_finite() {
+        return "–".into();
+    }
     let a = v.abs();
     let digits = if a == 0. || a >= 0.1 { 2 } else { (1 - a.log10().floor() as i32).max(2) as usize };
     format!("{v:.digits$}×10{}", superscript(p))
@@ -191,6 +247,9 @@ pub fn superscript(p: i32) -> String {
 }
 
 pub fn format_tick(v: f32) -> String {
+    if !v.is_finite() {
+        return "–".into();
+    }
     let a = v.abs();
     if a == 0.0 {
         "0".into()
@@ -248,6 +307,27 @@ mod tests {
         assert_eq!(pow2_ticks(0.25, 8., 3), vec![0.5, 2., 8.]);
         // 0.001..2 is 11 powers: every third, down from 2.
         assert_eq!(pow2_ticks(0.001, 2., 4), vec![2f32.powi(-8), 2f32.powi(-5), 0.25, 2.]);
+    }
+
+    #[test]
+    fn non_finite_and_extreme_ranges_terminate_cleanly() {
+        assert!(ticks(f32::NAN, 1.0, 4).is_empty());
+        assert!(ticks(0.0, f32::INFINITY, 4).is_empty());
+        assert!(even_ticks(0.0, 10.0, 0).iter().all(|v| v.is_finite()));
+        assert!(int_ticks(f32::NAN, 10.0, 4).is_empty());
+        assert!(int_ticks(0.0, f32::INFINITY, 4).is_empty());
+        let big = int_ticks(0.0, 1e12, 5);
+        assert!(!big.is_empty() && big.len() <= 10 && big.last() == Some(&1e12));
+        let huge = int_ticks(0.0, 1e25, 5);
+        assert!(!huge.is_empty() && huge.len() <= 25 && huge.iter().all(|v| v.is_finite()));
+        assert!(pow2_ticks(f32::NAN, 10.0, 4).is_empty());
+        assert!(pow2_ticks(0.1, f32::INFINITY, 4).is_empty());
+        let max_log = pow2_ticks(0.1, f32::MAX, 4);
+        assert!(!max_log.is_empty() && max_log.len() <= 6 && max_log.iter().all(|v| v.is_finite()));
+        assert_eq!(format_step(f32::NAN, 1.0), "–");
+        assert_eq!(format_step(1.5, f32::NAN), "1.5");
+        assert_eq!(format_tick(f32::INFINITY), "–");
+        assert_eq!(in_pow(f64::NAN, -3), "–");
     }
 
     #[test]

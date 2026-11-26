@@ -48,11 +48,13 @@ impl FoloApp {
         window.focus(&fh);
     }
 
-    /// Focuses `key` in keyboard mode and schedules a focus-ring scroll reveal on `page_scroll`.
+    /// Focuses `key` in keyboard mode and schedules a focus-ring scroll reveal on the active
+    /// scrollable container (`play_side_scroll` or `page_scroll`).
     pub fn focus_key_and_reveal(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.kb = true;
         self.focus_key(key, window, cx);
-        REVEAL.with(|r| *r.borrow_mut() = Some(vec![self.page_scroll.clone()]));
+        REVEAL
+            .with(|r| *r.borrow_mut() = Some(vec![self.play_side_scroll.clone(), self.page_scroll.clone()]));
         cx.notify();
     }
 
@@ -250,10 +252,14 @@ fn reveal(mut b: folo_ui::Bounds<Pixels>, window: &mut Window) {
         if dy != px(0.) {
             let off = h.offset();
             let y = (off.y - dy).clamp(-h.max_offset().height, px(0.));
-            h.set_offset(folo_ui::point(off.x, y));
-            window.refresh();
-            // Where the control is now, for the containers around this one.
-            b.origin.y -= off.y - y;
+            if (f32::from(y) - f32::from(off.y)).abs() > 0.5 {
+                h.set_offset(folo_ui::point(off.x, y));
+                // `reveal` runs during prepaint (`window.drawing == true`), where `window.refresh()`
+                // is ignored; request the next frame so the updated scroll offset paints immediately.
+                window.request_animation_frame();
+                // Where the control is now, for the containers around this one.
+                b.origin.y -= off.y - y;
+            }
         }
     }
 }

@@ -45,6 +45,7 @@ impl LineWrapper {
     ) -> impl Iterator<Item = Boundary> + 'a {
         let mut width = px(0.);
         let mut first_non_whitespace_ix = None;
+        let mut line_has_non_whitespace = false;
         let mut indent = None;
         let mut last_candidate_ix = 0;
         let mut last_candidate_width = px(0.);
@@ -102,13 +103,14 @@ impl LineWrapper {
                     if let Some((element_width, len_utf8)) = element {
                         let ix = index;
                         index += len_utf8;
-                        if prev_c == ' ' && first_non_whitespace_ix.is_some() {
+                        if prev_c == ' ' && line_has_non_whitespace {
                             last_candidate_ix = ix;
                             last_candidate_width = width;
                         }
                         if first_non_whitespace_ix.is_none() {
                             first_non_whitespace_ix = Some(ix);
                         }
+                        line_has_non_whitespace = true;
                         (ix, element_width)
                     } else {
                         let active = if using_merged { merged.as_str() } else { current_borrowed };
@@ -124,19 +126,22 @@ impl LineWrapper {
                         }
                         let c = grapheme.chars().next().unwrap_or('\0');
                         if Self::is_word_char(c) {
-                            if prev_c == ' ' && c != ' ' && first_non_whitespace_ix.is_some() {
+                            if prev_c == ' ' && c != ' ' && line_has_non_whitespace {
                                 last_candidate_ix = ix;
                                 last_candidate_width = width;
                             }
                         } else {
                             // CJK may not be space separated, e.g.: `Hello world你好世界`
-                            if c != ' ' && first_non_whitespace_ix.is_some() {
+                            if c != ' ' && line_has_non_whitespace {
                                 last_candidate_ix = ix;
                                 last_candidate_width = width;
                             }
                         }
-                        if c != ' ' && first_non_whitespace_ix.is_none() {
-                            first_non_whitespace_ix = Some(ix);
+                        if c != ' ' {
+                            if first_non_whitespace_ix.is_none() {
+                                first_non_whitespace_ix = Some(ix);
+                            }
+                            line_has_non_whitespace = true;
                         }
                         new_prev_c = c;
                         (ix, self.width_for_grapheme(grapheme))
@@ -144,6 +149,7 @@ impl LineWrapper {
                 };
 
                 width += item_width;
+                prev_c = new_prev_c;
                 if width > wrap_width && ix > last_wrap_ix {
                     if let (None, Some(first_non_whitespace_ix)) = (indent, first_non_whitespace_ix) {
                         indent = Some(Self::MAX_INDENT.min((first_non_whitespace_ix - last_wrap_ix) as u32));
@@ -153,9 +159,11 @@ impl LineWrapper {
                         last_wrap_ix = last_candidate_ix;
                         width -= last_candidate_width;
                         last_candidate_ix = 0;
+                        line_has_non_whitespace = true;
                     } else {
                         last_wrap_ix = ix;
                         width = item_width;
+                        line_has_non_whitespace = new_prev_c != ' ';
                     }
 
                     if let Some(indent) = indent {
@@ -164,8 +172,6 @@ impl LineWrapper {
 
                     return Some(Boundary::new(last_wrap_ix, indent.unwrap_or(0)));
                 }
-
-                prev_c = new_prev_c;
             }
         })
     }
@@ -316,15 +322,20 @@ impl LineWrapper {
 /// the suffix and the rest dropped), GPUI's `update_runs_after_truncation` on a copy.
 pub(crate) fn runs_after_truncation(result: &str, ellipsis: &str, runs: &[TextRun]) -> Vec<TextRun> {
     let mut runs = runs.to_vec();
-    let mut truncate_at = result.len() - ellipsis.len();
+    let mut truncate_at = result.len().saturating_sub(ellipsis.len());
+    let mut extended = false;
     for (run_index, run) in runs.iter_mut().enumerate() {
         if run.len <= truncate_at {
             truncate_at -= run.len;
         } else {
             run.len = truncate_at + ellipsis.len();
             runs.truncate(run_index + 1);
+            extended = true;
             break;
         }
+    }
+    if !extended && let Some(last) = runs.last_mut() {
+        last.len += truncate_at + ellipsis.len();
     }
     runs
 }

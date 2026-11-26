@@ -452,6 +452,7 @@ impl FoloApp {
                 div()
                     .id("palette-box")
                     .w(px(640.))
+                    .max_w(folo_ui::relative(0.94))
                     .occlude()
                     .capture_any_mouse_down(Self::guard_presses(cx))
                     // Empty-query Home/End propagate out of `TextInput::home`/`end` so they jump the list

@@ -42,7 +42,10 @@ fn base_domain(data: [f32; 4], x_range: Option<(f32, f32)>) -> [f32; 4] {
     if !y0.is_finite() {
         (x0, x1, y0, y1) = (0.0, 1.0, 0.0, 1.0);
     }
-    if let Some((a, b)) = x_range {
+    if let Some((a, b)) = x_range
+        && a.is_finite()
+        && b.is_finite()
+    {
         (x0, x1) = (a, b);
     }
     [x0, x1, y0, y1]
@@ -168,7 +171,10 @@ fn paint_line_chart(
     });
     if let Some(f) = &unit {
         (y0, y1) = f.domain;
-    } else if let Some((a, b)) = spec.y_range {
+    } else if let Some((a, b)) = spec.y_range
+        && a.is_finite()
+        && b.is_finite()
+    {
         y0 = a;
         y1 = b;
     } else {
@@ -194,7 +200,12 @@ fn paint_line_chart(
     // stepping down from the top power so the steps stay even and the domain stays the data's.
     let fit = ((f32::from(bounds.size.height) - 40.) / 22.).floor().max(2.) as usize;
     let stride = pow2_stride(y0, y1, fit);
-    let (ly0, ly1) = if spec.log_y { (y0.max(1e-6).ln(), y1.max(1e-6).ln()) } else { (y0, y1) };
+    let (mut ly0, mut ly1) = if spec.log_y { (y0.max(1e-6).ln(), y1.max(1e-6).ln()) } else { (y0, y1) };
+    if !ly0.is_finite() || !ly1.is_finite() {
+        (ly0, ly1) = (0.0, 1.0);
+    } else if ly1 <= ly0 {
+        ly1 = ly0 + 1.0;
+    }
     let yticks = if let Some(f) = &unit {
         f.ticks.clone()
     } else if let Some(v) = &spec.y_tick_values {
@@ -233,7 +244,8 @@ fn paint_line_chart(
     // Marker labels live in a band above the plot, in lanes so they never overlap each other, and
     // the data never runs through them.
     let mut marker_layout: Vec<(Pixels, Pixels, usize, &Marker)> = Vec::new();
-    let ms: Vec<&Marker> = spec.markers.iter().filter(|m| m.x >= x0 && m.x <= x1).collect();
+    let ms: Vec<&Marker> =
+        spec.markers.iter().filter(|m| m.x.is_finite() && m.x >= x0 && m.x <= x1).collect();
     // Placed in the order given: the first marker takes the top lane.
     for m in ms {
         let x = sx0(m.x);
@@ -371,9 +383,10 @@ fn paint_line_chart(
     let chip_span = (!spec.readout && has_data)
         .then_some(spec.hover)
         .flatten()
+        .filter(|f| f.is_finite())
         .and_then(|f| cursor_x(&spec.series, x0 + (x1 - x0) * f, x1 - x0))
         .map(|v| {
-            let w = text_width(window, &chip_label(spec, v), label_size) + px(10.);
+            let w = text_width(window, &chip_label(spec, v), annot_size) + px(10.);
             let left = clamp_in(sx(v) - w / 2., plot.left() - px(4.), plot.right() - w);
             (left, left + w)
         });
@@ -460,7 +473,7 @@ fn paint_line_chart(
                 };
                 stroke_path(window, &pts, s.width, s.color, dash);
                 if s.points.len() < 5 {
-                    for &(x, y) in s.points.iter() {
+                    for &(x, y) in s.points.iter().filter(|&&(x, y)| x.is_finite() && y.is_finite()) {
                         let c = point(sx(x), sy(y));
                         window.paint_quad(
                             fill(Bounds::centered_at(c, size(px(5.), px(5.))), s.color).corner_radii(px(2.5)),
@@ -468,6 +481,8 @@ fn paint_line_chart(
                     }
                 }
                 if let Some(&(x, y)) = main.last()
+                    && x.is_finite()
+                    && y.is_finite()
                     && x >= x0
                     && x <= x1
                 {
@@ -483,7 +498,8 @@ fn paint_line_chart(
     for ((c, s), &end) in ends.iter().zip(&shown) {
         paint_end(window, t, *c, end, end_ink(t, end, s.color, is_ink(t, s.color)));
     }
-    if let Some((bx, by)) = spec.best.filter(|b| b.0 >= x0 && b.0 <= x1) {
+    if let Some((bx, by)) = spec.best.filter(|b| b.0.is_finite() && b.1.is_finite() && b.0 >= x0 && b.0 <= x1)
+    {
         let at: Vec<(f32, f32, f32)> = ends
             .iter()
             .zip(&shown)
@@ -503,7 +519,7 @@ fn paint_line_chart(
     // Dots that would overlap are nudged apart (8 px between centres), so none hides another.
     let mut placed: Vec<Point<Pixels>> = Vec::new();
     for &(x, y, c) in &spec.dots {
-        if x >= x0 && x <= x1 {
+        if x.is_finite() && y.is_finite() && x >= x0 && x <= x1 {
             let at = point(sx(x), sy(y));
             // Its own spot if clear, else the first clear one on rings of 8, 12 and 16 px around
             // it (eight directions each, deterministic), else its own spot after all.
@@ -544,7 +560,7 @@ fn paint_line_chart(
 
     // Hover cursor + readout.
     let Some(frac) = spec.hover else { return };
-    if !has_data {
+    if !has_data || !frac.is_finite() {
         return;
     }
     let hx = x0 + (x1 - x0) * frac;
@@ -555,7 +571,7 @@ fn paint_line_chart(
         let data = if s.smooth > 0.0 { smoothed(&s.points, s.smooth) } else { s.points.clone() };
         if let Some(i) = nearest(&data, hx) {
             let (x, y) = data[i];
-            if (x - hx).abs() > (x1 - x0) * 0.06 && s.points.len() > 1 {
+            if !x.is_finite() || !y.is_finite() || ((x - hx).abs() > (x1 - x0) * 0.06 && s.points.len() > 1) {
                 continue;
             }
             snap_x.get_or_insert(x);

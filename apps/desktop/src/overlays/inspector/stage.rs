@@ -161,6 +161,9 @@ impl FoloApp {
                         return None;
                     }
                     let b = up_cell.get()?;
+                    if !b.contains(&m.up.position) {
+                        return None;
+                    }
                     let (x, y) = to_image(b, dims, Fit::Contain, insp.zoom, insp.pan, m.up.position);
                     let idx = hit_box(&up_boxes, x, y)?;
                     let bx = &up_boxes[idx];
@@ -209,8 +212,12 @@ impl FoloApp {
                     return;
                 }
                 let Some(b) = bounds_cell.get() else { return };
-                let (x, y) = to_image(b, dims, Fit::Contain, insp.zoom, insp.pan, ev.position);
-                let hit = hit_box(&hit_boxes, x, y);
+                let hit = if b.contains(&ev.position) {
+                    let (x, y) = to_image(b, dims, Fit::Contain, insp.zoom, insp.pan, ev.position);
+                    hit_box(&hit_boxes, x, y)
+                } else {
+                    None
+                };
                 if hit != insp.hover_box || insp.hover_from_stage != hit.is_some() {
                     insp.hover_box = hit;
                     insp.hover_from_stage = hit.is_some();

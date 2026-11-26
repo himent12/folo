@@ -344,6 +344,8 @@ impl FoloApp {
                         )
                         .into_any_element()
                 } else {
+                    let first_id = shown.first().map(|x| x.id.clone());
+                    let last_id = shown.last().map(|x| x.id.clone());
                     let rows: Vec<AnyElement> = (0..shown.len())
                         .map(|i| {
                             let b = shown[i];
@@ -351,6 +353,8 @@ impl FoloApp {
                             let id = b.id.clone();
                             let prev_id = i.checked_sub(1).map(|j| shown[j].id.clone());
                             let next_id = shown.get(i + 1).map(|x| x.id.clone());
+                            let home_id = (i > 0).then(|| first_id.clone()).flatten();
+                            let end_id = (i + 1 < shown.len()).then(|| last_id.clone()).flatten();
                             // The leader: its score (what the board ranks by), then its name.
                             let leader = match &b.best {
                                 Some(best) => div()
@@ -426,6 +430,8 @@ impl FoloApp {
                                     let target = match ev.keystroke.key.as_str() {
                                         "down" => next_id.as_deref(),
                                         "up" => prev_id.as_deref(),
+                                        "home" => home_id.as_deref(),
+                                        "end" => end_id.as_deref(),
                                         _ => return,
                                     };
                                     if let Some(id) = target {

@@ -168,3 +168,79 @@ fn character_index_for_point_stuck_drag_and_ime_selection_direction() {
         "Shift+Right after IME composition extends forward instead of reversing"
     );
 }
+
+#[test]
+#[allow(clippy::reversed_empty_ranges)]
+fn text_input_sanitizes_reversed_ranges_multiline_ime_noop_deletes_and_double_click_jitter() {
+    use folo_ui::{EntityInputHandler, MouseButton, MouseDownEvent, MouseMoveEvent, point, px};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    // 1. Reversed UTF-16 ranges never panic and multiline/control IME inserts are flattened.
+    let (mut app, window) = palette_with("abcdef");
+    drive(&mut app, window, |this, w, cx| {
+        let input = this.palette.as_ref().unwrap().input.clone();
+        let mut actual = None;
+        let text = input.update(cx, |i, cx| i.text_for_range(4..1, &mut actual, w, cx));
+        assert_eq!(text.as_deref(), Some("bcd"));
+        assert_eq!(actual, Some(1..4));
+
+        input.update(cx, |i, cx| i.replace_text_in_range(Some(4..1), "X\r\nY\u{0}", w, cx));
+        assert_eq!(input.read(cx).text().as_ref(), "aX Yef");
+
+        input.update(cx, |i, cx| i.replace_and_mark_text_in_range(Some(4..2), "PQ\n", Some(3..1), w, cx));
+        assert_eq!(input.read(cx).text().as_ref(), "aXPQ ef");
+        assert_eq!(input.read(cx).selection(), 3..5);
+
+        // CRLF collapsing in preedit maps UTF-16 caret offset 3 ("A\r\n|BC") to byte 2 ("A |BC").
+        input.update(cx, |i, cx| i.set_text("", cx));
+        input.update(cx, |i, cx| i.replace_and_mark_text_in_range(None, "A\r\nBC", Some(3..3), w, cx));
+        assert_eq!(input.read(cx).text().as_ref(), "A BC");
+        assert_eq!(input.read(cx).selection(), 2..2);
+    });
+
+    // 2. No-op Backspace at start / Delete at end must not emit InputEvent::Changed.
+    let (mut app, window) = palette_with("abc");
+    let changes = Rc::new(Cell::new(0usize));
+    let changes_sub = changes.clone();
+    drive(&mut app, window, move |this, _, cx| {
+        let input = this.palette.as_ref().unwrap().input.clone();
+        let sub = cx.subscribe(&input, move |_, _, _, _| {
+            changes_sub.set(changes_sub.get() + 1);
+        });
+        this._subs.push(sub);
+    });
+    press(&mut app, window, "home");
+    press(&mut app, window, "backspace");
+    assert_eq!(changes.get(), 0, "no-op Backspace at start emits no Changed event");
+    press(&mut app, window, "end");
+    press(&mut app, window, "delete");
+    assert_eq!(changes.get(), 0, "no-op Delete at end emits no Changed event");
+
+    // 3. Double-click selects all and slight pointer jitter before mouse-up preserves it.
+    let b = drive(&mut app, window, |this, _, cx| {
+        this.palette.as_ref().unwrap().input.read(cx).last_bounds().expect("input laid out")
+    });
+    let y = b.top() + b.size.height * 0.5;
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseDown(MouseDownEvent {
+            button: MouseButton::Left,
+            position: point(b.left() + px(16.), y),
+            click_count: 2,
+            ..Default::default()
+        }),
+    );
+    app.frame(window.into());
+    assert_eq!(field(&mut app, window).1, 0..3, "double-click selects all");
+    app.simulate_input(
+        window.into(),
+        PlatformInput::MouseMove(MouseMoveEvent {
+            position: point(b.left() + px(22.), y),
+            pressed_button: Some(MouseButton::Left),
+            ..Default::default()
+        }),
+    );
+    app.frame(window.into());
+    assert_eq!(field(&mut app, window).1, 0..3, "jitter after double-click keeps full selection");
+}

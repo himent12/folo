@@ -84,7 +84,8 @@ impl Window {
             }
             let (delta, done) =
                 progress(&animation.animation, now.saturating_duration_since(animation.start));
-            let factor = (animation.animator)(delta);
+            let raw = (animation.animator)(delta);
+            let factor = if raw.is_finite() { raw } else { 1.0 };
             let current = frame.scene.opacity_groups[animation.group as usize].factor;
             moved |= factor != current && (done || (factor - current).abs() >= MIN_STEP);
             animation.done = done;

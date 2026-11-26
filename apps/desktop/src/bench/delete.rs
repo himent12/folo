@@ -42,7 +42,23 @@ impl FoloApp {
                         }
                         this.bench.entries.remove(&bench);
                         this.bench.loops.remove(&bench);
+                        this.bench.previews.remove(&bench);
                         this.bench.results.retain(|(b, _), _| *b != bench);
+                        this.bench.entry_images.retain(|(b, _), _| *b != bench);
+                        this.bench.expanded_errors.retain(|(b, _)| *b != bench);
+                        this.bench.plan_preview_sev.retain(|(b, _), _| *b != bench);
+                        if this.bench.pinned_entry.as_ref().is_some_and(|(b, _)| *b == bench) {
+                            this.bench.pinned_entry = None;
+                        }
+                        if this.bench.selected_entry_image.as_ref().is_some_and(|(b, _, _)| *b == bench) {
+                            this.bench.selected_entry_image = None;
+                        }
+                        if this.bench.design.as_ref().is_some_and(|d| d.bench == bench) {
+                            this.bench.design = None;
+                        }
+                        if this.bench.new_loop.as_ref().is_some_and(|f| f.bench == bench) {
+                            this.bench.new_loop = None;
+                        }
                         if route_bench(&this.route) == Some(bench.as_str()) {
                             this.route_pending = Some(Route::Benches);
                         }
@@ -57,6 +73,19 @@ impl FoloApp {
                             list.retain(|x| &x.id != id);
                         }
                         this.bench.results.remove(&(bench.clone(), id.clone()));
+                        this.bench.entry_images.remove(&(bench.clone(), id.clone()));
+                        this.bench.expanded_errors.remove(&(bench.clone(), id.clone()));
+                        if this.bench.pinned_entry.as_ref().is_some_and(|(b, e)| *b == bench && e == id) {
+                            this.bench.pinned_entry = None;
+                        }
+                        if this
+                            .bench
+                            .selected_entry_image
+                            .as_ref()
+                            .is_some_and(|(b, e, _)| *b == bench && e == id)
+                        {
+                            this.bench.selected_entry_image = None;
+                        }
                         if matches!(&this.route, Route::BenchEntry(b, e) if *b == bench && e == id) {
                             this.route_pending = Some(Route::Bench(bench.clone()));
                         }

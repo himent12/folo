@@ -187,3 +187,74 @@ fn a_finished_opacity_animation_lands_on_its_last_value_and_stops() {
     });
     assert_eq!(quad, Some(0.5));
 }
+
+#[test]
+fn zero_duration_and_exact_completion_animations_stay_finite_and_stop() {
+    // 1. Zero-duration one-shot and repeating animations finish immediately without NaN or infinite ticks.
+    for anim in [Animation::new(Duration::ZERO), Animation::new(Duration::ZERO).repeat()] {
+        let (mut app, window) = open_sized(size(px(40.), px(40.)), 1.0, move |_, _| {
+            div()
+                .size_full()
+                .child(div().size(px(20.)).bg(hsla(0., 0., 0., 1.)).with_opacity_animation(
+                    "zero",
+                    anim.clone(),
+                    |p| p * 0.4,
+                ))
+                .into_any_element()
+        });
+        app.frame(window);
+        assert!(!app.wants_frame(window), "zero-duration animation must not keep requesting frames");
+        let alpha = app.scene(window).primitives.iter().find_map(|p| match p {
+            crate::Primitive::Quad(q) => Some(q.background.solid.a),
+            _ => None,
+        });
+        assert_eq!(alpha, Some(0.4));
+    }
+
+    // 2. Exact duration completion (`elapsed == duration`) finishes on that tick without a trailing frame.
+    let (mut app, window) = open_sized(size(px(40.), px(40.)), 1.0, |_, _| {
+        div()
+            .size_full()
+            .child(div().size(px(20.)).bg(hsla(0., 0., 0., 1.)).with_opacity_animation(
+                "exact",
+                Animation::new(Duration::from_millis(100)),
+                |p| p * 0.6,
+            ))
+            .into_any_element()
+    });
+    app.frame(window);
+    assert!(app.wants_frame(window));
+    app.advance_clock(Duration::from_millis(100));
+    app.frame(window);
+    assert!(!app.wants_frame(window), "exact completion at duration stops requesting frames");
+    let alpha = app.scene(window).primitives.iter().find_map(|p| match p {
+        crate::Primitive::Quad(q) => Some(q.background.solid.a),
+        _ => None,
+    });
+    assert_eq!(alpha, Some(0.6));
+
+    // 3. Non-finite animator output is sanitized on frame 0 AND subsequent ticks recover cleanly.
+    let (mut app, window) = open_sized(size(px(40.), px(40.)), 1.0, |_, _| {
+        div()
+            .size_full()
+            .child(div().size(px(20.)).bg(hsla(0., 0., 0., 1.)).with_opacity_animation(
+                "nan",
+                Animation::new(Duration::from_millis(100)).repeat(),
+                |p| if p < 0.25 { f32::NAN } else { 0.4 },
+            ))
+            .into_any_element()
+    });
+    app.frame(window);
+    let frame0 = app.scene(window).primitives.iter().find_map(|p| match p {
+        crate::Primitive::Quad(q) => Some(q.background.solid.a),
+        _ => None,
+    });
+    assert_eq!(frame0, Some(1.0), "frame 0 sanitizes NaN opacity to 1.0");
+    app.advance_clock(Duration::from_millis(50));
+    app.frame(window);
+    let frame1 = app.scene(window).primitives.iter().find_map(|p| match p {
+        crate::Primitive::Quad(q) => Some(q.background.solid.a),
+        _ => None,
+    });
+    assert_eq!(frame1, Some(0.4), "subsequent finite tick updates from sanitized initial factor");
+}
