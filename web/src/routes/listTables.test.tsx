@@ -491,4 +491,20 @@ describe('Failed list tables clear aria-busy (playtest R4)', () => {
     flushSync();
     expect(target.querySelector('table')?.getAttribute('aria-busy')).toBe('false');
   });
+
+  it('Overview RecentRuns reserves enough width for full formatted Created timestamps without clipping (playtest R13)', async () => {
+    const api = new MockApi('normal', 0);
+    const all = await api.runs();
+    const oldRun = { ...all[0]!, created: '2025-10-28T04:20:00Z' };
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = render(() => <RecentRuns all={[oldRun]} recent={[oldRun]} failed={false} error={null} retry={() => {}} dsLabel={() => 'shapes'} />, target);
+    flushSync();
+    const th = target.querySelector<HTMLTableCellElement>('thead th.c-created')!;
+    const td = target.querySelector<HTMLTableCellElement>('tbody td.c-created')!;
+    // Full date timestamps ("Oct 28, 04:20") + right-edge cell padding need >= 104px so table-layout: fixed never clips.
+    expect(Number.parseInt(th.style.width, 10)).toBeGreaterThanOrEqual(104);
+    expect(td.classList.contains('num')).toBe(true);
+    expect(td.getAttribute('title')).toBeTruthy();
+  });
 });
