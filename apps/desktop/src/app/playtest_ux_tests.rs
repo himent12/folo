@@ -348,37 +348,30 @@ fn palette_query_edit_resets_scroll_to_top() {
     assert_eq!(sel_after, 0, "query edit resets selection to the first match");
     assert_eq!(scroll_after, 0., "query edit scrolls the palette back to the top");
 
-    // Same-frame race: `End` queues `scroll_to_item` and a query edit arrives before the next
+    // Same-frame race: a paging key queues `scroll_to_item` and a query edit fires before the next
     // paint. `set_offset(0, 0)` must cancel the pending item scroll so prepaint stays at top.
-    press_key(&mut app, window, "backspace", None);
-    app.simulate_input(
-        window.into(),
-        PlatformInput::KeyDown(KeyDownEvent {
-            keystroke: Keystroke { modifiers: Modifiers::default(), key: "end".to_string(), key_char: None },
-            is_held: false,
-        }),
-    );
-    app.simulate_input(
-        window.into(),
-        PlatformInput::KeyDown(KeyDownEvent {
-            keystroke: Keystroke {
-                modifiers: Modifiers::default(),
-                key: "a".to_string(),
-                key_char: Some("a".to_string()),
-            },
-            is_held: false,
-        }),
-    );
-    app.run_until_idle();
-    app.frame(window.into());
-    let (sel_same_frame, scroll_same_frame) = drive(&mut app, window, |this, _, _| {
-        let p = this.palette.as_ref().expect("palette open");
-        (p.selected, f32::from(-p.scroll.offset().y))
+    app.update(|cx| {
+        window
+            .update(cx, |this, _, cx| {
+                let p = this.palette.as_mut().expect("palette open");
+                let last_child = p.scroll.children_count().saturating_sub(1);
+                assert!(last_child > 4, "palette list has multiple rows to scroll to");
+                p.scroll.scroll_to_item(last_child);
+                let input = p.input.clone();
+                input.update(cx, |i, cx| i.set_text("r", cx));
+            })
+            .unwrap();
     });
+    app.frame(window.into());
+    let (sel_same_frame, scroll_same_frame, q_same_frame) = drive(&mut app, window, |this, _, _| {
+        let p = this.palette.as_ref().expect("palette open");
+        (p.selected, f32::from(-p.scroll.offset().y), p.query.clone())
+    });
+    assert_eq!(q_same_frame, "r");
     assert_eq!(sel_same_frame, 0);
     assert_eq!(
         scroll_same_frame, 0.,
-        "pending scroll_to_item from End must not override same-frame query scroll reset"
+        "pending scroll_to_item must not override same-frame query scroll reset"
     );
 }
 

@@ -180,8 +180,10 @@ impl Render for FoloApp {
                 if this.confirm_close.is_some() {
                     return;
                 }
-                this.menu_open = None;
-                this.menu_typeahead.clear();
+                if this.menu_open.take().is_some() {
+                    this.menu_typeahead.clear();
+                    cx.notify();
+                }
                 if this.cloud.connect.is_some() {
                     this.submit_connect(w, cx);
                 } else if this.new_run.is_some() {
