@@ -89,11 +89,21 @@ fn confusion_matrix_matching_background_normalization_and_merge() {
     }
 
     // Serde round-trip succeeds on valid matrix and rejects malformed shapes/thresholds.
+    assert_eq!((cm.num_classes(), cm.iou_thresh(), cm.conf_thresh()), (2, 0.5, 0.25));
     let json = serde_json::to_string(&cm).unwrap();
     assert_eq!(serde_json::from_str::<DetectionConfusionMatrix>(&json).unwrap(), cm);
     let malformed = r#"{"num_classes":1,"conf_thresh":0.25,"iou_thresh":0.5,"counts":[]}"#;
     assert!(serde_json::from_str::<DetectionConfusionMatrix>(malformed).is_err());
     assert!(DetectionConfusionMatrix::new(usize::MAX, 0.5, 0.25).is_err());
+    // Large u64::MAX deserialized counts must normalize without overflow and reject overflowing merge.
+    let huge_json = format!(
+        r#"{{"num_classes":1,"conf_thresh":0.25,"iou_thresh":0.5,"counts":[[{},1],[0,0]]}}"#,
+        u64::MAX
+    );
+    let mut huge_cm: DetectionConfusionMatrix = serde_json::from_str(&huge_json).unwrap();
+    let huge_rn = huge_cm.row_normalized();
+    assert!((huge_rn[0][0] - 1.0).abs() < 1e-12);
+    assert!(huge_cm.merge(&huge_cm.clone()).is_err());
 
     // Validation checks.
     assert!(DetectionConfusionMatrix::new(2, -0.1, 0.25).is_err());

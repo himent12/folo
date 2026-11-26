@@ -80,9 +80,10 @@ impl Dd {
 ///
 /// **Numerical precision:** dual potentials and slacks are maintained in double-double (`~106`-bit)
 /// arithmetic (preserving ~31 decimal digits of dynamic range across augmenting paths). Costs whose
-/// magnitude exceeds `1e150` are divided by a positive normal divisor (`max_abs / 1e100`) to prevent
-/// overflow without subnormal underflow, and `total_cost` is always summed from the original unscaled
-/// entries.
+/// magnitude exceeds `2^500` (~`3.3e150`) are multiplied by an exact power of two (`2^-shift`) to keep
+/// `max_abs <= 2^500` with zero mantissa rounding on all normal entries (preserving exact `next_up`
+/// ordering and keeping entries down to `~2^-500` normal even alongside `f64::MAX`), and `total_cost`
+/// is always summed from the original unscaled entries.
 ///
 /// # Errors
 /// Returns [`Error::Config`] if `rows * cols` overflows, `costs.len() != rows * cols`, or any entry
@@ -119,9 +120,17 @@ pub fn hungarian_assign(costs: &[f64], rows: usize, cols: usize) -> Result<Hunga
     let transposed = rows > cols;
     let (n, m) = if transposed { (cols, rows) } else { (rows, cols) };
 
-    // Positive normal divisor when magnitudes exceed 1e150 prevents `cost - u[i] - v[j]` overflow in `f64`
-    // without subnormal underflow (even at `f64::MAX`) and without row-shift absorption of small entries.
-    let inv_div = if max_abs > 1e150 { Some(max_abs / 1e100) } else { None };
+    // Exact power-of-two downscaling when `max_abs > 2^500`: shifting only the IEEE-754 exponent leaves
+    // all 53 mantissa bits bit-exact on every normal entry (preserving 1-ULP ordering such as
+    // `next_up(x) > x`) while preventing `cost - u - v` overflow even up to `f64::MAX` (`~2^1024`).
+    const SCALE_LIMIT: f64 = 3.273_390_607_896_142e150; // 2^500
+    let pow2_scale: Option<f64> = if max_abs > SCALE_LIMIT {
+        let exp = ((max_abs.to_bits() >> 52) & 0x7ff) as i32 - 1023;
+        let shift = (exp - 500).max(1);
+        Some(f64::from_bits(((1023 - shift) as u64) << 52))
+    } else {
+        None
+    };
 
     let mut u = vec![Dd::ZERO; n + 1];
     let mut v = vec![Dd::ZERO; m + 1];
@@ -148,8 +157,8 @@ pub fn hungarian_assign(costs: &[f64], rows: usize, cols: usize) -> Result<Hunga
                 if !used[j] {
                     let c = j - 1;
                     let raw = if transposed { costs[c * cols + r] } else { costs[r * cols + c] };
-                    let scaled = match inv_div {
-                        Some(d) => raw / d,
+                    let scaled = match pow2_scale {
+                        Some(s) => raw * s,
                         None => raw,
                     };
                     let cur = Dd::from_f64(scaled).sub(u_i0).sub(v[j]);

@@ -82,11 +82,11 @@ impl TryFrom<RawDetectionConfusionMatrix> for DetectionConfusionMatrix {
 #[serde(try_from = "RawDetectionConfusionMatrix")]
 pub struct DetectionConfusionMatrix {
     /// Number of foreground object classes `C`; matrix dimension is `(C + 1) × (C + 1)`.
-    pub num_classes: usize,
+    num_classes: usize,
     /// Minimum prediction confidence (`score >= conf_thresh`).
-    pub conf_thresh: f32,
+    conf_thresh: f32,
     /// Minimum IoU for a prediction-truth match (`iou >= iou_thresh`).
-    pub iou_thresh: f32,
+    iou_thresh: f32,
     /// Row-major `(C + 1) × (C + 1)` count table indexed as `counts[pred][truth]`.
     counts: Vec<Vec<u64>>,
 }
@@ -109,6 +109,24 @@ impl DetectionConfusionMatrix {
             .checked_add(1)
             .ok_or_else(|| Error::Config("DetectionConfusionMatrix: num_classes + 1 overflows".into()))?;
         Ok(Self { num_classes, conf_thresh, iou_thresh, counts: vec![vec![0u64; dim]; dim] })
+    }
+
+    /// Number of foreground object classes `C` (matrix dimension is `(C + 1) × (C + 1)`).
+    #[inline]
+    pub fn num_classes(&self) -> usize {
+        self.num_classes
+    }
+
+    /// Confidence threshold (`score >= conf_thresh`).
+    #[inline]
+    pub fn conf_thresh(&self) -> f32 {
+        self.conf_thresh
+    }
+
+    /// IoU threshold (`iou >= iou_thresh`).
+    #[inline]
+    pub fn iou_thresh(&self) -> f32 {
+        self.iou_thresh
     }
 
     /// Read-only view of the `(num_classes + 1) × (num_classes + 1)` count matrix `counts[pred][truth]`.
@@ -173,61 +191,72 @@ impl DetectionConfusionMatrix {
             })
             .collect();
 
+        let mut updates: Vec<(usize, usize)> = Vec::new();
         if truths.is_empty() {
-            for pi in kept_preds {
-                self.counts[preds[pi].class as usize][nc] += 1;
+            updates.extend(kept_preds.iter().map(|&pi| (preds[pi].class as usize, nc)));
+        } else if kept_preds.is_empty() {
+            updates.extend(truths.iter().map(|t| (nc, t.class as usize)));
+        } else {
+            let iou_thr = self.iou_thresh as f64;
+            // Candidate matches: `(iou, pred_score, truth_idx, pred_idx)`.
+            let mut pairs: Vec<(f64, f32, usize, usize)> = Vec::new();
+            for &pi in &kept_preds {
+                let p = &preds[pi];
+                for (gi, g) in truths.iter().enumerate() {
+                    if !box_is_finite(&g.bbox) {
+                        continue;
+                    }
+                    let v = iou_f64(&p.bbox, &g.bbox);
+                    if v >= iou_thr {
+                        pairs.push((v, p.score, gi, pi));
+                    }
+                }
             }
-            return Ok(());
-        }
-        if kept_preds.is_empty() {
-            for t in truths {
-                self.counts[nc][t.class as usize] += 1;
-            }
-            return Ok(());
-        }
+            // Highest IoU first; ties broken by higher pred score, smaller truth index, smaller pred index.
+            pairs.sort_unstable_by(|a, b| {
+                b.0.total_cmp(&a.0)
+                    .then_with(|| b.1.total_cmp(&a.1))
+                    .then_with(|| a.2.cmp(&b.2))
+                    .then_with(|| a.3.cmp(&b.3))
+            });
 
-        let iou_thr = self.iou_thresh as f64;
-        // Candidate matches: `(iou, pred_score, truth_idx, pred_idx)`.
-        let mut pairs: Vec<(f64, f32, usize, usize)> = Vec::new();
-        for &pi in &kept_preds {
-            let p = &preds[pi];
-            for (gi, g) in truths.iter().enumerate() {
-                if !box_is_finite(&g.bbox) {
+            let mut gt_used = vec![false; truths.len()];
+            let mut pred_used = vec![false; preds.len()];
+            for &(_, _, gi, pi) in &pairs {
+                if gt_used[gi] || pred_used[pi] {
                     continue;
                 }
-                let v = iou_f64(&p.bbox, &g.bbox);
-                if v >= iou_thr {
-                    pairs.push((v, p.score, gi, pi));
+                gt_used[gi] = true;
+                pred_used[pi] = true;
+                updates.push((preds[pi].class as usize, truths[gi].class as usize));
+            }
+            for (gi, g) in truths.iter().enumerate() {
+                if !gt_used[gi] {
+                    updates.push((nc, g.class as usize));
+                }
+            }
+            for &pi in &kept_preds {
+                if !pred_used[pi] {
+                    updates.push((preds[pi].class as usize, nc));
                 }
             }
         }
-        // Highest IoU first; ties broken by higher pred score, smaller truth index, smaller pred index.
-        pairs.sort_unstable_by(|a, b| {
-            b.0.total_cmp(&a.0)
-                .then_with(|| b.1.total_cmp(&a.1))
-                .then_with(|| a.2.cmp(&b.2))
-                .then_with(|| a.3.cmp(&b.3))
-        });
-
-        let mut gt_used = vec![false; truths.len()];
-        let mut pred_used = vec![false; preds.len()];
-        for &(_, _, gi, pi) in &pairs {
-            if gt_used[gi] || pred_used[pi] {
-                continue;
-            }
-            gt_used[gi] = true;
-            pred_used[pi] = true;
-            self.counts[preds[pi].class as usize][truths[gi].class as usize] += 1;
+        // Validate no cell overflows `u64` before mutating `self.counts`.
+        let mut cell_deltas: std::collections::HashMap<(usize, usize), u64> =
+            std::collections::HashMap::new();
+        for &cell in &updates {
+            let entry = cell_deltas.entry(cell).or_insert(0);
+            *entry = entry
+                .checked_add(1)
+                .ok_or_else(|| Error::Config("DetectionConfusionMatrix::add_image: count overflow".into()))?;
         }
-        for (gi, g) in truths.iter().enumerate() {
-            if !gt_used[gi] {
-                self.counts[nc][g.class as usize] += 1;
+        for (&(r, c), &delta) in &cell_deltas {
+            if self.counts[r][c].checked_add(delta).is_none() {
+                return Err(Error::Config("DetectionConfusionMatrix::add_image: count overflow".into()));
             }
         }
-        for &pi in &kept_preds {
-            if !pred_used[pi] {
-                self.counts[preds[pi].class as usize][nc] += 1;
-            }
+        for ((r, c), delta) in cell_deltas {
+            self.counts[r][c] += delta;
         }
         Ok(())
     }
@@ -241,6 +270,14 @@ impl DetectionConfusionMatrix {
             return Err(Error::Config(
                 "DetectionConfusionMatrix::merge: class count or threshold mismatch".into(),
             ));
+        }
+        // Check all cells before mutating so a failed merge leaves `self` unchanged.
+        for (r_dst, r_src) in self.counts.iter().zip(&other.counts) {
+            for (&d, &s) in r_dst.iter().zip(r_src) {
+                if d.checked_add(s).is_none() {
+                    return Err(Error::Config("DetectionConfusionMatrix::merge: count overflow".into()));
+                }
+            }
         }
         for (r_dst, r_src) in self.counts.iter_mut().zip(&other.counts) {
             for (d, &s) in r_dst.iter_mut().zip(r_src) {
@@ -262,27 +299,29 @@ impl DetectionConfusionMatrix {
         self.counts[class][class]
     }
 
-    /// False positives predicted as class `c` (sum of row `c` excluding `counts[c][c]`).
+    /// False positives predicted as class `c` (sum of row `c` excluding `counts[c][c]`, saturating at `u64::MAX`).
     pub fn false_positives(&self, class: usize) -> u64 {
-        self.counts[class].iter().sum::<u64>() - self.counts[class][class]
+        let sum: u128 = self.counts[class].iter().map(|&v| v as u128).sum();
+        (sum - self.counts[class][class] as u128).min(u64::MAX as u128) as u64
     }
 
-    /// False negatives for ground-truth class `c` (sum of column `c` excluding `counts[c][c]`).
+    /// False negatives for ground-truth class `c` (sum of column `c` excluding `counts[c][c]`, saturating at `u64::MAX`).
     pub fn false_negatives(&self, class: usize) -> u64 {
-        self.counts.iter().map(|row| row[class]).sum::<u64>() - self.counts[class][class]
+        let sum: u128 = self.counts.iter().map(|row| row[class] as u128).sum();
+        (sum - self.counts[class][class] as u128).min(u64::MAX as u128) as u64
     }
 
     /// Per-class precision `TP / (TP + FP)` (`0.0` when `TP + FP == 0`).
     pub fn precision(&self, class: usize) -> f64 {
-        let tp = self.true_positives(class);
-        let denom = tp + self.false_positives(class);
+        let tp = self.counts[class][class] as u128;
+        let denom: u128 = self.counts[class].iter().map(|&v| v as u128).sum();
         if denom == 0 { 0.0 } else { tp as f64 / denom as f64 }
     }
 
     /// Per-class recall `TP / (TP + FN)` (`0.0` when `TP + FN == 0`).
     pub fn recall(&self, class: usize) -> f64 {
-        let tp = self.true_positives(class);
-        let denom = tp + self.false_negatives(class);
+        let tp = self.counts[class][class] as u128;
+        let denom: u128 = self.counts.iter().map(|row| row[class] as u128).sum();
         if denom == 0 { 0.0 } else { tp as f64 / denom as f64 }
     }
 
@@ -293,14 +332,18 @@ impl DetectionConfusionMatrix {
         if p + r == 0.0 { 0.0 } else { 2.0 * p * r / (p + r) }
     }
 
-    /// Total number of ground-truth instances accumulated across all object classes.
+    /// Total number of ground-truth instances accumulated across all object classes (saturating at `u64::MAX`).
     pub fn total_truths(&self) -> u64 {
-        (0..self.num_classes).map(|t| self.counts.iter().map(|row| row[t]).sum::<u64>()).sum()
+        let sum: u128 =
+            (0..self.num_classes).map(|t| self.counts.iter().map(|row| row[t] as u128).sum::<u128>()).sum();
+        sum.min(u64::MAX as u128) as u64
     }
 
-    /// Total number of above-threshold predictions accumulated across all object classes.
+    /// Total number of above-threshold predictions accumulated across all object classes (saturating at `u64::MAX`).
     pub fn total_predictions(&self) -> u64 {
-        (0..self.num_classes).map(|p| self.counts[p].iter().sum::<u64>()).sum()
+        let sum: u128 =
+            (0..self.num_classes).map(|p| self.counts[p].iter().map(|&v| v as u128).sum::<u128>()).sum();
+        sum.min(u64::MAX as u128) as u64
     }
 
     /// Row-normalized confusion matrix (each row sums to `1.0`, or all `0.0` if the row sum is `0`).
@@ -308,7 +351,7 @@ impl DetectionConfusionMatrix {
         self.counts
             .iter()
             .map(|row| {
-                let s = row.iter().sum::<u64>();
+                let s: u128 = row.iter().map(|&v| v as u128).sum();
                 if s == 0 { vec![0.0; row.len()] } else { row.iter().map(|&v| v as f64 / s as f64).collect() }
             })
             .collect()
@@ -317,7 +360,8 @@ impl DetectionConfusionMatrix {
     /// Column-normalized confusion matrix (each column sums to `1.0`, or all `0.0` if the column sum is `0`).
     pub fn col_normalized(&self) -> Vec<Vec<f64>> {
         let dim = self.num_classes + 1;
-        let col_sums: Vec<u64> = (0..dim).map(|c| self.counts.iter().map(|row| row[c]).sum()).collect();
+        let col_sums: Vec<u128> =
+            (0..dim).map(|c| self.counts.iter().map(|row| row[c] as u128).sum()).collect();
         self.counts
             .iter()
             .map(|row| {
