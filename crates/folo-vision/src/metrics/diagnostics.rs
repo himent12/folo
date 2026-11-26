@@ -443,11 +443,11 @@ pub struct PrCurveDiagnostics {
 
 /// Matched detection record `(score, image_idx, det_idx, is_tp)`.
 #[derive(Clone, Copy, Debug)]
-struct MatchedDet {
-    score: f32,
-    image_idx: usize,
-    det_idx: usize,
-    is_tp: bool,
+pub(super) struct MatchedDet {
+    pub(super) score: f32,
+    pub(super) image_idx: usize,
+    pub(super) det_idx: usize,
+    pub(super) is_tp: bool,
 }
 
 /// Per-image, per-class greedy IoU matching (descending score order, ties by input order) returning
@@ -455,7 +455,7 @@ struct MatchedDet {
 ///
 /// When `validate_unit_scores` is `true`, every finite detection score (even below `conf_thresh`) is
 /// validated to lie in `[0, 1]` before applying the confidence filter.
-fn match_images_by_class<P, T>(
+pub(super) fn match_images_by_class<P, T>(
     num_classes: usize,
     iou_thresh: f32,
     conf_thresh: Option<f32>,
@@ -753,7 +753,8 @@ where
     Ok(PrCurveDiagnostics { iou_thresh, mean_ap_continuous, mean_ap_101, per_class })
 }
 
-/// One equal-width reliability diagram bin over `[lower, upper)` (the final bin is closed `[lower, 1.0]`).
+/// One reliability diagram bin over `[lower, upper)` (closed `[lower, 1.0]` for the final equal-width bin,
+/// or empirical `[min_score, max_score]` bounds for equal-mass adaptive bins).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ReliabilityBin {
     /// Lower bin edge in `[0, 1]`.

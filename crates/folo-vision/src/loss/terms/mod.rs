@@ -1,11 +1,13 @@
 //! The differentiable terms of §7.4 for a fixed assignment ([`loss_with_assignment`]):
 //! - [`cls`]: BCE, MAL, Varifocal Loss (VFL), Quality Focal Loss (QFL),
 //! - [`vfl_qfl`]: Standalone cancellation-free Varifocal Loss (VFL) and Quality Focal Loss (QFL) with reductions,
+//! - [`seesaw`]: Seesaw Loss for long-tailed detection/classification with dynamic mitigation & compensation,
 //! - [`asl_poly`]: Asymmetric Loss (ASL), Poly-1 BCE, and Poly-1 Focal Loss,
 //! - [`box_loss`]: CIoU, Inner-CIoU, R-PIoU, S-AEIoU,
 //! - [`inner_iou`]: Generalized Inner-IoU auxiliary-box wrapper composing with IoU / GIoU / DIoU / CIoU / EIoU / SIoU / MPDIoU,
 //! - [`slide_loss`]: SlideLoss & EMA-SlideLoss adaptive hard-boundary re-weighting,
 //! - [`nwd_wiou`]: Normalized Wasserstein Distance (NWD) and Wise-IoU v1 / v3,
+//! - [`prob_iou`]: Gaussian-box regression losses (`ProbIoU` `L_1` / `L_2`, `GWD`, `KLD`),
 //! - [`geom_loss`]: MPDIoU, Shape-IoU, and Focaler-IoU remapping,
 //! - [`piou`]: Powerful-IoU v1 (`PIoU`) and v2 (`PIoU2`) with non-monotonic attention focusing,
 //! - [`siou_eiou`]: EIoU (Efficient-IoU) and SIoU (Scylla-IoU),
@@ -19,6 +21,8 @@ mod geom_loss;
 mod inner_iou;
 mod nwd_wiou;
 mod piou;
+mod prob_iou;
+mod seesaw;
 mod siou_eiou;
 mod slide_loss;
 mod vfl_qfl;
@@ -26,6 +30,12 @@ mod vfl_qfl;
 #[cfg(test)]
 pub(crate) use asl_poly::{asl_elem_f64, poly1_bce_elem_f64, poly1_focal_elem_f64};
 pub use asl_poly::{asymmetric_loss, poly1_bce_loss, poly1_focal_loss, poly1_focal_loss_with_alpha};
+pub use prob_iou::{GwdTransform, gwd_loss, kld_loss, prob_iou, prob_iou_l2_loss, prob_iou_loss};
+#[cfg(test)]
+pub(crate) use prob_iou::{gwd_box_f64, kld_box_f64, prob_iou_l1_box_f64, prob_iou_l2_box_f64};
+#[cfg(test)]
+pub(crate) use seesaw::seesaw_row_f64;
+pub use seesaw::{SeesawConfig, SeesawLoss, seesaw_loss};
 pub use vfl_qfl::{LossReduction, QflConfig, VflConfig, quality_focal_loss, varifocal_loss};
 #[cfg(test)]
 pub(crate) use vfl_qfl::{qfl_elem_f64, vfl_elem_f64};

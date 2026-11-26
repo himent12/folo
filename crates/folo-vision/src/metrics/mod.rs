@@ -15,15 +15,23 @@
 //! differs from Ultralytics' own AP.
 
 pub mod coco_scale;
+pub mod curve_sweep;
 pub mod diagnostics;
 #[cfg(test)]
 mod tests_coco_tide;
+#[cfg(test)]
+mod tests_curve_sweep;
 #[cfg(test)]
 mod tests_diagnostics;
 pub mod tide;
 
 pub use coco_scale::{
     CocoScaleClassMetrics, CocoScaleDiagnostics, ScaleAreaBounds, compute_coco_scale_metrics,
+};
+pub use curve_sweep::{
+    BinningStrategy, CalibrationReport, CalibrationReportConfig, ClassConfidenceSweep, ConfidenceSweepConfig,
+    ConfidenceSweepDiagnostics, ConfidenceSweepPoint, DetectionCalibrationReport, compute_calibration_report,
+    compute_confidence_sweep, reliability_diagnostics_from_scores,
 };
 pub use diagnostics::{
     CalibrationSummary, ClassPrCurve, DetectionCalibrationDiagnostics, DetectionConfusionMatrix,
