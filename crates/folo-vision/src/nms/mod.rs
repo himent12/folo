@@ -719,12 +719,26 @@ fn extract_candidates(
     cfg: &NmsConfig,
 ) -> Vec<Cand> {
     let conf = cfg.candidate_conf();
+    let finite_only = cfg.nms_kind.is_soft();
     let extract = |a: usize, row: &[f32], out: &mut Vec<Cand>| {
         if cfg.multi_label {
             for (c, &s) in row.iter().enumerate() {
-                if s > conf && class_allowed(cfg, c as u32) {
+                if (!finite_only || s.is_finite()) && s > conf && class_allowed(cfg, c as u32) {
                     out.push(Cand { score: s, idx: a as u32, class: c as u32 });
                 }
+            }
+        } else if finite_only {
+            let mut best: Option<(usize, f32)> = None;
+            for (c, &s) in row.iter().enumerate() {
+                if s.is_finite() && best.is_none_or(|(_, bs)| s > bs) {
+                    best = Some((c, s));
+                }
+            }
+            if let Some((best, bs)) = best
+                && bs > conf
+                && class_allowed(cfg, best as u32)
+            {
+                out.push(Cand { score: bs, idx: a as u32, class: best as u32 });
             }
         } else {
             let (mut best, mut bs) = (0usize, row[0]);

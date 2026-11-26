@@ -21,7 +21,9 @@ pub use geom_loss::{focaler_iou, focaler_iou_loss, mpdiou_loss, mpdiou_loss_with
 #[cfg(test)]
 pub(crate) use geom_loss::{mpdiou_box_f64, shape_iou_box_f64};
 #[cfg(test)]
-pub(crate) use nwd_wiou::{nwd_box_f64, wiou_v1_box_f64, wiou_v3_box_f64};
+pub(crate) use nwd_wiou::{
+    nwd_box_eps_f64, nwd_box_f64, wiou_v1_box_f64, wiou_v3_box_f64, wiou_v3_focus_gain,
+};
 pub use nwd_wiou::{nwd_loss, nwd_loss_with_c, wiou_v1_loss, wiou_v3_loss};
 #[cfg(test)]
 pub(crate) use siou_eiou::{eiou_box_f64, siou_box_f64};
@@ -37,7 +39,7 @@ use box_loss::{rpiou_from_logits, saeiou_from_logits};
 use cls::cls_loss_sum;
 use dfl::ot_dfl_tail;
 use geom_loss::{mpdiou_from_logits, shape_iou_from_logits};
-use nwd_wiou::{nwd_from_logits, wiou_v1_from_logits, wiou_v3_from_logits};
+use nwd_wiou::{nwd_blend_loss_eps, nwd_from_logits, wiou_v1_from_logits, wiou_v3_from_logits};
 use siou_eiou::{eiou_from_logits, siou_from_logits};
 
 /// Sum of every element as a rank-0 tensor, in an order that does not depend on thread scheduling: long inputs are
@@ -228,7 +230,7 @@ fn loss_impl_wiou(
                 let cs: Vec<f32> = (0..n).map(|k| 12.8 / anchors.strides[asg.anchor[k] as usize]).collect();
                 let lam_t = on_dev(Tensor::from_vec(lams, [n])?)?;
                 let c_t = on_dev(Tensor::from_vec(cs, [n])?)?;
-                let l_nwd = nwd_loss(&pd, &tb, &c_t)?;
+                let l_nwd = nwd_blend_loss_eps(&pd, &tb, &c_t)?;
                 lam_t.rsub_scalar(1.0)?.mul(&l_base)?.add(&lam_t.mul(&l_nwd)?)?
             } else {
                 l_base
@@ -334,7 +336,7 @@ fn loss_impl_wiou(
                         (0..n).map(|k| 12.8 / anchors.strides[asg.anchor[k] as usize]).collect();
                     let lam_t = on_dev(Tensor::from_vec(lams, [n])?)?;
                     let c_t = on_dev(Tensor::from_vec(cs, [n])?)?;
-                    let l_nwd = nwd_loss(&pd, &tb, &c_t)?;
+                    let l_nwd = nwd_blend_loss_eps(&pd, &tb, &c_t)?;
                     let wb_nwd = sum_fixed_order(&lam_t.mul(&l_nwd)?.mul(&t)?)?
                         .div_scalar(tss)?
                         .mul_scalar(cfg.box_gain)?;

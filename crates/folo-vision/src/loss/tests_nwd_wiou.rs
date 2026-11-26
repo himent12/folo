@@ -4,7 +4,7 @@
 //! 24 orders of magnitude, degenerate/inverted/zero-area/extreme edge cases, `NaN`/`±Inf` poison,
 //! frozen-assignment DFL-logit finite-difference checks, and end-to-end `detection_loss` / config validation.
 
-use super::terms::{nwd_box_f64, wiou_v1_box_f64, wiou_v3_box_f64};
+use super::terms::{nwd_box_eps_f64, nwd_box_f64, wiou_v1_box_f64, wiou_v3_box_f64, wiou_v3_focus_gain};
 use super::*;
 use crate::decode::make_anchors;
 
@@ -49,7 +49,7 @@ fn nwd_f64_central_fd_and_tensor_grad_check() {
         ([1.0, 2.0, 1.0, 8.0], [3.0, 2.0, 9.0, 8.0], 8.0),      // zero-width line vs box
     ];
     for (idx, &(a, b, c)) in cases.iter().enumerate() {
-        let (loss, grad) = nwd_box_f64(a, b, c);
+        let (loss, grad, grad_c) = nwd_box_f64(a, b, c);
         assert!(loss.is_finite() && (0.0..=1.0).contains(&loss), "nwd case {idx}: bad loss {loss}");
         // Every non-identical case with moderate W_2/c must have strictly non-vanishing gradient!
         assert!(
@@ -71,7 +71,27 @@ fn nwd_f64_central_fd_and_tensor_grad_check() {
                 grad[coord]
             );
         }
+        let eps_c = 1e-6 * c;
+        let fd_c = (nwd_box_f64(a, b, c + eps_c).0 - nwd_box_f64(a, b, c - eps_c).0) / (2.0 * eps_c);
+        let tol_c = 1e-9 + 1e-5 * fd_c.abs().max(grad_c.abs());
+        assert!((grad_c - fd_c).abs() <= tol_c, "nwd case {idx} dc: analytic {grad_c} vs fd {fd_c}");
     }
+
+    // Explicit signed-extent policy on inverted prediction [2, 0, 0, 2] vs ordered GT [0, 0, 2, 2]:
+    // dx1 = +2, dy1 = 0, dx2 = -2, dy2 = 0 -> W_2² = 4, W_2 = 2, loss = 1 - exp(-2 / c), and
+    // restoring gradients push x1 down (> 0) and x2 up (< 0) to un-invert the box.
+    let (inv_l, inv_g, _) = nwd_box_f64([2.0, 0.0, 0.0, 2.0], [0.0, 0.0, 2.0, 2.0], 12.8);
+    let want_inv_l = 1.0 - (-2.0f64 / 12.8).exp();
+    assert!((inv_l - want_inv_l).abs() < 1e-14, "inverted NWD loss: {inv_l} vs {want_inv_l}");
+    assert!(inv_g[0] > 0.0 && inv_g[2] < 0.0 && inv_g[1] == 0.0 && inv_g[3] == 0.0);
+
+    // Verify GPU-parity smoothed blend `nwd_box_eps_f64` matches `sqrt(W_2² + 1e-6)` even at tiny 1e-4 shift.
+    let (eps_l, eps_g) = nwd_box_eps_f64([1e-4, 0.0, 2.0 + 1e-4, 2.0], [0.0, 0.0, 2.0, 2.0], 1.6);
+    let dist_ref = (1e-8f64 + 1e-6).sqrt();
+    let want_eps_l = 1.0 - (-dist_ref / 1.6).exp();
+    let want_eps_g0 = (-dist_ref / 1.6).exp() * 1e-4 / (2.0 * 1.6 * dist_ref);
+    assert!((eps_l - want_eps_l).abs() < 1e-14, "nwd_box_eps_f64 loss: {eps_l} vs {want_eps_l}");
+    assert!((eps_g[0] - want_eps_g0).abs() < 1e-14, "nwd_box_eps_f64 grad: {} vs {want_eps_g0}", eps_g[0]);
 
     // Joint scale invariance across 24 orders of magnitude when (a, b, c) scale together.
     let l1 = nwd_box_f64([0.0, 0.0, 1.0, 2.0], [0.4, 0.7, 1.8, 3.1], 3.0).0;
@@ -88,25 +108,25 @@ fn nwd_f64_central_fd_and_tensor_grad_check() {
     let dh = (a[3] - a[1]) - (b[3] - b[1]);
     let w2 = (dcx * dcx + dcy * dcy + 0.25 * (dw * dw + dh * dh)).sqrt();
     let want = 1.0 - (-w2 / c).exp();
-    let (got, _) = nwd_box_f64(a, b, c);
+    let (got, _, _) = nwd_box_f64(a, b, c);
     assert!((got - want).abs() < 1e-14, "nwd formula mismatch: {got} vs {want}");
 
-    // Tensor-level grad_check_with wrt BOTH b1 and b2 (overlapping + disjoint + tiny rows).
+    // Tensor-level grad_check_with wrt ALL THREE inputs (b1, b2, and c) on overlapping + disjoint + tiny rows.
     let tb1 = Tensor::from_slice(&[2.0f32, 3.0, 10.0, 12.0, 0.0, 0.0, 1.0, 1.0, 5.0, 5.0, 5.5, 5.5], [3, 4])
         .unwrap();
     let tb2 = Tensor::from_slice(&[3.5f32, 2.5, 11.5, 13.0, 6.0, 7.0, 7.0, 8.0, 5.8, 5.9, 6.3, 6.4], [3, 4])
         .unwrap();
     let tc = Tensor::from_slice(&[12.8f32, 8.0, 2.0], [3]).unwrap();
     grad_check_with(
-        |inputs| nwd_loss(&inputs[0], &inputs[1], &tc)?.sum_all(),
-        &[tb1.clone(), tb2.clone()],
-        &GradCheck { eps: 2e-3, atol: 2e-3, rtol: 2e-2, max_checks: 24, seed: 17 },
+        |inputs| nwd_loss(&inputs[0], &inputs[1], &inputs[2])?.sum_all(),
+        &[tb1.clone(), tb2.clone(), tc],
+        &GradCheck { eps: 2e-3, atol: 2e-3, rtol: 2e-2, max_checks: 27, seed: 17 },
     )
     .unwrap();
     grad_check_with(
-        |inputs| nwd_loss_with_c(&inputs[0], &tb2, 12.8)?.sum_all(),
-        &[tb1],
-        &GradCheck { eps: 2e-3, atol: 2e-3, rtol: 2e-2, max_checks: 12, seed: 19 },
+        |inputs| nwd_loss_with_c(&inputs[0], &inputs[1], 12.8)?.sum_all(),
+        &[tb1, tb2],
+        &GradCheck { eps: 2e-3, atol: 2e-3, rtol: 2e-2, max_checks: 24, seed: 19 },
     )
     .unwrap();
 }
@@ -190,24 +210,53 @@ fn wiou_v1_and_v3_f64_central_fd_and_focusing() {
     // And on disjoint boxes, WIoU v1 still yields a negative gradient on ax1/ax2 pulling box `a` right toward `b`!
     assert!(g_det[0] < -0.01 && g_det[2] < -0.01, "disjoint WIoU v1 must pull toward target: {g_det:?}");
 
-    // Direct Tensor-level grad_check_with for wiou_v1_loss on strictly interior predicted boxes (where c2* is
-    // locally constant so undetached FD == detached analytical gradient!).
+    // Direct Tensor-level grad_check_with for wiou_v1_loss on strictly interior predicted boxes (both wrt b1
+    // when b1 is interior, and wrt b2 when b2 is interior — where c2* is locally constant!).
     let interior_a = Tensor::from_slice(&[2.5f32, 3.0, 7.0, 8.0, 3.0, 2.0, 8.5, 7.5], [2, 4]).unwrap();
     let outer_b = Tensor::from_slice(&[0.0f32, 0.0, 12.0, 12.0, 0.0, 0.0, 12.0, 12.0], [2, 4]).unwrap();
     grad_check_with(
         |inputs| wiou_v1_loss(&inputs[0], &outer_b)?.sum_all(),
-        &[interior_a],
+        std::slice::from_ref(&interior_a),
         &GradCheck { eps: 2e-3, atol: 2e-3, rtol: 2e-2, max_checks: 8, seed: 23 },
     )
     .unwrap();
+    grad_check_with(
+        |inputs| wiou_v1_loss(&outer_b, &inputs[0])?.sum_all(),
+        std::slice::from_ref(&interior_a),
+        &GradCheck { eps: 2e-3, atol: 2e-3, rtol: 2e-2, max_checks: 8, seed: 29 },
+    )
+    .unwrap();
+    // Verify wiou_v3_loss also flows exact analytical gradients into BOTH b1 and b2.
+    let w3_a = Tensor::from_slice(&[2.3f32, 3.1, 10.7, 12.4], [1, 4]).unwrap().requires_grad_();
+    let w3_b = Tensor::from_slice(&[3.0f32, 2.5, 11.2, 13.0], [1, 4]).unwrap().requires_grad_();
+    let g3_both = wiou_v3_loss(&w3_a, &w3_b, 1.9, 3.0, 0.5).unwrap().sum_all().unwrap().backward().unwrap();
+    let ga_got = g3_both.get(&w3_a).unwrap().to_vec::<f32>().unwrap();
+    let gb_got = g3_both.get(&w3_b).unwrap().to_vec::<f32>().unwrap();
+    let ga_ref = wiou_v3_box_f64([2.3, 3.1, 10.7, 12.4], [3.0, 2.5, 11.2, 13.0], 1.9, 3.0, 0.5).1;
+    let gb_ref = wiou_v3_box_f64([3.0, 2.5, 11.2, 13.0], [2.3, 3.1, 10.7, 12.4], 1.9, 3.0, 0.5).1;
+    for s in 0..4 {
+        assert!((ga_got[s] - ga_ref[s] as f32).abs() < 1e-6);
+        assert!((gb_got[s] - gb_ref[s] as f32).abs() < 1e-6);
+    }
 
     // Non-monotonic focusing property of WIoU v3: r(beta) peaks near beta = 1 / ln(alpha) ≈ 1.558 for alpha = 1.9,
-    // assigning lower gradient gain to both high-quality (small beta) and outlier (large beta) anchors.
+    // assigning lower gradient gain to both high-quality (small beta) and outlier (large beta) anchors, and
+    // decaying monotonically all the way to 0.0 for extreme outliers (never reversing past exponent 80).
     let (alpha, delta) = (1.9f64, 3.0f64);
-    let r_of = |beta: f64| beta / (delta * ((beta - delta) * alpha.ln()).exp());
+    let r_of = |beta: f64| wiou_v3_focus_gain(beta, alpha, delta, 1.0);
     let peak = 1.0 / alpha.ln();
     assert!(r_of(peak) > r_of(0.2) && r_of(peak) > r_of(6.0), "WIoU v3 focusing must be non-monotonic");
     assert!((r_of(delta) - 1.0).abs() < 1e-12, "r(delta) == 1");
+    // Extreme outlier (L_IoU = 1.0, iou_mean = 0.005 => beta = 200): exact ~8.1e-54, strictly decaying!
+    let r_200 = wiou_v3_focus_gain(1.0, 1.9, 3.0, 0.005);
+    let r_150 = wiou_v3_focus_gain(0.75, 1.9, 3.0, 0.005);
+    let r_2000 = wiou_v3_focus_gain(1.0, 1.9, 3.0, 0.0005);
+    let want_r_200 = (200.0f64.ln() - 3.0f64.ln() - 197.0 * 1.9f64.ln()).exp();
+    assert!(
+        (r_200 - want_r_200).abs() <= 1e-12 * want_r_200,
+        "outlier gain at beta=200: got {r_200:e} vs {want_r_200:e}"
+    );
+    assert!(r_200 < r_150 && r_2000 < r_200 && r_2000 >= 0.0, "outlier attenuation must stay monotonic");
 
     // Scale invariance across 24 orders of magnitude (`1e-12` vs `1.0` vs `1e12`).
     let (v1_1, _, _) = wiou_v1_box_f64([0.0, 0.0, 1.0, 2.0], [0.4, 0.7, 1.8, 3.1]);

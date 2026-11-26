@@ -427,11 +427,28 @@ fn soft_nms_crowded_monotonicity_boundaries_ties_and_degenerate() {
     assert_eq!(kept_inf.len(), 1);
     assert_eq!(kept_inf[0].score, 0.8);
 
-    // Near-identical boxes `[0,0,1,1]` and `[1e-8,0,1,1]`: f64 IoU preserves ~8e-9 instead of rounding to 0.
+    // Near-identical boxes `[0,0,1,1]` and `[1e-8,0,1,1]` as well as `[1e-20,0,1,1]`: direct non-overlap
+    // deficit calculation preserves exact representable `f32` decayed scores (~8e-9 and ~8e-21) instead of
+    // cancelling `1 - IoU` to 0.
     let near = [b(0.0, 0.0, 1.0, 1.0), b(1e-8, 0.0, 1.0, 1.0)];
     let near_lin = soft_nms_sorted(&near, &[0.9, 0.8], 0.5, 0.0, None, 10);
     assert_eq!(near_lin.len(), 2);
     assert!((near_lin[1].1 - 8e-9).abs() < 1e-9, "near-identical f64 decay: {}", near_lin[1].1);
+    let ultra_near = [b(0.0, 0.0, 1.0, 1.0), b(1e-20, 0.0, 1.0, 1.0)];
+    let ultra_lin = soft_nms_sorted(&ultra_near, &[0.9, 0.8], 0.5, 0.0, None, 10);
+    assert_eq!(ultra_lin.len(), 2, "1e-20 shift must not round decayed score to 0");
+    assert!((ultra_lin[1].1 - 8e-21).abs() < 1e-22, "ultra-near decay: {:e}", ultra_lin[1].1);
+
+    // Single-label non_max_suppression with [+Inf, 0.8] and [NaN, 0.8] under Soft/Matrix-NMS keeps valid class 1.
+    let single_boxes = [b(0.0, 0.0, 10.0, 10.0), b(50.0, 50.0, 60.0, 60.0)];
+    let bad_scores = [f32::INFINITY, 0.8, f32::NAN, 0.75];
+    for kind in [NmsKind::SoftLinear, NmsKind::SoftGaussian { sigma: 0.5 }, NmsKind::MatrixLinear] {
+        let cfg = NmsConfig { conf: 0.25, nms_kind: kind, ..NmsConfig::default() };
+        let out = non_max_suppression(&single_boxes, &bad_scores, 2, &cfg);
+        assert_eq!(out.len(), 2, "{kind:?} must keep valid finite classes on anchors with +Inf/NaN");
+        assert_eq!((out[0].class, out[0].score), (1, 0.8));
+        assert_eq!((out[1].class, out[1].score), (1, 0.75));
+    }
 
     // Huge 1e25 identical boxes must decay properly (not overflow f32 area to NaN / IoU=0).
     let huge = [b(0.0, 0.0, 1e25, 1e25), b(0.0, 0.0, 1e25, 1e25)];

@@ -104,7 +104,6 @@ pub fn soft_nms_sorted(
         }
         let (ax1, ay1) = (best_box.x1 as f64, best_box.y1 as f64);
         let (ax2, ay2) = (best_box.x2.max(best_box.x1) as f64, best_box.y2.max(best_box.y1) as f64);
-        let area_a = (ax2 - ax1) * (ay2 - ay1);
         let mut pos = active.len();
         while pos > 0 {
             pos -= 1;
@@ -119,24 +118,39 @@ pub fn soft_nms_sorted(
             }
             let (bx1, by1) = (b.x1 as f64, b.y1 as f64);
             let (bx2, by2) = (b.x2.max(b.x1) as f64, b.y2.max(b.y1) as f64);
-            let iw = (ax2.min(bx2) - ax1.max(bx1)).max(0.0);
-            let ih = (ay2.min(by2) - ay1.max(by1)).max(0.0);
-            let inter = iw * ih;
-            let union = area_a + (bx2 - bx1) * (by2 - by1) - inter;
-            let ov = if union > 0.0 { (inter / union).clamp(0.0, 1.0) } else { 0.0 };
-            let decayed = match sigma64 {
-                Some(s) => {
-                    if ov > 0.0 {
-                        (cur as f64 * (-(ov * ov) / s).exp()) as f32
-                    } else {
-                        cur
+            let ix1 = ax1.max(bx1);
+            let iy1 = ay1.max(by1);
+            let ix2 = ax2.min(bx2);
+            let iy2 = ay2.min(by2);
+            let iw = (ix2 - ix1).max(0.0);
+            let ih = (iy2 - iy1).max(0.0);
+            let decayed = if iw == 0.0 || ih == 0.0 {
+                cur
+            } else {
+                // Compute non-overlap deficit directly as a sum of non-negative products so near-identical
+                // boxes (e.g. shifted by 1e-20) preserve their exact `1 - IoU` fraction without cancellation.
+                let inter = iw * ih;
+                let dw_a = (ix1 - ax1) + (ax2 - ix2);
+                let dh_a = (iy1 - ay1) + (ay2 - iy2);
+                let dw_b = (ix1 - bx1) + (bx2 - ix2);
+                let dh_b = (iy1 - by1) + (by2 - iy2);
+                let deficit = (dw_a * ih + iw * dh_a + dw_a * dh_a) + (dw_b * ih + iw * dh_b + dw_b * dh_b);
+                let union = inter + deficit;
+                let ov = if union > 0.0 { (inter / union).clamp(0.0, 1.0) } else { 0.0 };
+                match sigma64 {
+                    Some(s) => {
+                        if ov > 0.0 {
+                            (cur as f64 * (-(ov * ov) / s).exp()) as f32
+                        } else {
+                            cur
+                        }
                     }
-                }
-                None => {
-                    if ov > iou_thr64 {
-                        (cur as f64 * (1.0 - ov)) as f32
-                    } else {
-                        cur
+                    None => {
+                        if ov > iou_thr64 {
+                            (cur as f64 * (deficit / union)) as f32
+                        } else {
+                            cur
+                        }
                     }
                 }
             };
