@@ -210,9 +210,108 @@ fn gen_rows(s: &Spec) -> String {
         ),
     )
 }
+const REDUCE_COLS_MAIN_VEC4: &str = r#"
+@group(0) @binding(1) var<storage, read> X: array<vec4<XT>>;
+@group(0) @binding(2) var<storage, read_write> Y: array<vec4<YT>>;
+
+var<workgroup> partial: array<vec4<f32>, 256>;
+
+@compute @workgroup_size(64, 4)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_id) lid: vec3<u32>) {
+    let g = wid.y * nwg.x + wid.x;
+    let outer_s = pu(0u);
+    let r = pu(1u);
+    let inner = pu(3u);
+    let chunks = pu(4u);
+    let os = g / chunks;
+    let col = (g % chunks) * 64u + lid.x;
+    var acc = vec4<f32>(identity());
+    if (os < outer_s && col < inner) {
+        if (SPLIT_K) {
+            let splits = pu(6u);
+            let chunk = pu(7u);
+            let o = os / splits;
+            let k = os % splits;
+            let start = k * chunk;
+            let len = min(chunk, r - start);
+            let base = (o * r + start) * inner + col;
+            for (var j = lid.y; j < len; j += 4u) {
+                acc = combine4(acc, vec4<f32>(X[base + j * inner]));
+            }
+        } else {
+            let base = os * r * inner + col;
+            for (var i = lid.y; i < r; i += 4u) {
+                acc = combine4(acc, vec4<f32>(X[base + i * inner]));
+            }
+        }
+    }
+    let slot = lid.y * 64u + lid.x;
+    partial[slot] = acc;
+    workgroupBarrier();
+    if (lid.y == 0u && os < outer_s && col < inner) {
+        let v = combine4(combine4(partial[lid.x], partial[64u + lid.x]),
+                         combine4(partial[128u + lid.x], partial[192u + lid.x]));
+        Y[os * inner + col] = vec4<YT>(v * pf(2u));
+    }
+}
+"#;
+
+const REDUCE_COLS_MAIN_SCALAR: &str = r#"
+@group(0) @binding(1) var<storage, read> X: array<XT>;
+@group(0) @binding(2) var<storage, read_write> Y: array<YT>;
+
+var<workgroup> partial: array<f32, 256>;
+
+@compute @workgroup_size(64, 4)
+fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,
+        @builtin(local_invocation_id) lid: vec3<u32>) {
+    let g = wid.y * nwg.x + wid.x;
+    let outer_s = pu(0u);
+    let r = pu(1u);
+    let inner = pu(3u);
+    let chunks = pu(4u);
+    let os = g / chunks;
+    let col = (g % chunks) * 64u + lid.x;
+    var acc = identity();
+    if (os < outer_s && col < inner) {
+        if (SPLIT_K) {
+            let splits = pu(6u);
+            let chunk = pu(7u);
+            let o = os / splits;
+            let k = os % splits;
+            let start = k * chunk;
+            let len = min(chunk, r - start);
+            let base = (o * r + start) * inner + col;
+            for (var j = lid.y; j < len; j += 4u) {
+                acc = combine(acc, f32(X[base + j * inner]));
+            }
+        } else {
+            let base = os * r * inner + col;
+            for (var i = lid.y; i < r; i += 4u) {
+                acc = combine(acc, f32(X[base + i * inner]));
+            }
+        }
+    }
+    let slot = lid.y * 64u + lid.x;
+    partial[slot] = acc;
+    workgroupBarrier();
+    if (lid.y == 0u && os < outer_s && col < inner) {
+        let v = combine(combine(partial[lid.x], partial[64u + lid.x]),
+                        combine(partial[128u + lid.x], partial[192u + lid.x]));
+        Y[os * inner + col] = YT(v * pf(2u));
+    }
+}
+"#;
+
 fn gen_cols(s: &Spec) -> String {
     let split = s.get_bool("SPLIT");
-    typed(s, &format!("const SPLIT_K: bool = {split};\n{}", include_str!("../shaders/reduce_cols.wgsl")))
+    let vec4 = s.get_bool("VEC4");
+    let main = if vec4 { REDUCE_COLS_MAIN_VEC4 } else { REDUCE_COLS_MAIN_SCALAR };
+    typed(
+        s,
+        &format!("const SPLIT_K: bool = {split};\n{}{main}", include_str!("../shaders/reduce_cols.wgsl")),
+    )
 }
 /// Maximum row length cached in per-thread registers (4 elements × 256 threads) for single-pass [`SOFTMAX`].
 const SOFTMAX_ROW_CACHE_MAX: usize = 1024;
@@ -330,9 +429,11 @@ fn reduce_scaled(
         let p = Params::new().uz(outer)?.uz(units_r)?.f(scale).f(op.identity());
         ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d(outer as u64 * 256, 256)?)
     } else {
-        let chunks = inner.div_ceil(64);
-        let k = ctx.kernel(&COLS, spec)?;
-        let p = Params::new().uz(outer)?.uz(r)?.f(scale).uz(inner)?.uz(chunks)?.f(op.identity());
+        let vec4 = inner.is_multiple_of(4);
+        let units_inner = if vec4 { inner / 4 } else { inner };
+        let chunks = units_inner.div_ceil(64);
+        let k = ctx.kernel(&COLS, spec.bool("VEC4", vec4))?;
+        let p = Params::new().uz(outer)?.uz(r)?.f(scale).uz(units_inner)?.uz(chunks)?.f(op.identity());
         ctx.dispatch(&k, &[x, y], &p, ctx.grid_1d((outer * chunks) as u64 * 256, 256)?)
     }
 }
@@ -603,7 +704,8 @@ fn split_plan(outer: usize, r: usize, inner: usize) -> (usize, usize) {
     if outer == 0 || inner == 0 || r < 8192 {
         return (1, r);
     }
-    let groups = if inner == 1 { outer } else { outer.saturating_mul(inner.div_ceil(64)) };
+    let cols = if inner > 1 && inner.is_multiple_of(4) { inner / 4 } else { inner };
+    let groups = if inner == 1 { outer } else { outer.saturating_mul(cols.div_ceil(64)) };
     if groups >= 256 {
         return (1, r);
     }
@@ -660,13 +762,15 @@ pub fn reduce_split(
             .uz(units_chunk)?;
         ctx.dispatch(&k, &[x, tmp.raw()], &p, ctx.grid_1d(outer_s as u64 * 256, 256)?)?;
     } else {
-        let chunks = inner.div_ceil(64);
-        let k = ctx.kernel(&COLS, spec)?;
+        let vec4 = inner.is_multiple_of(4);
+        let units_inner = if vec4 { inner / 4 } else { inner };
+        let chunks = units_inner.div_ceil(64);
+        let k = ctx.kernel(&COLS, spec.bool("VEC4", vec4))?;
         let p = Params::new()
             .uz(outer_s)?
             .uz(r)?
             .f(1.0)
-            .uz(inner)?
+            .uz(units_inner)?
             .uz(chunks)?
             .f(pass_op.identity())
             .uz(splits)?
@@ -776,7 +880,8 @@ mod tests {
         assert_eq!(split_plan(0, 16384, 1), (1, 16384));
         assert_eq!(split_plan(1, 8191, 1), (1, 8191));
         assert_eq!(split_plan(256, 16384, 1), (1, 16384));
-        assert_eq!(split_plan(4, 16384, 64 * 64), (1, 16384));
+        assert_eq!(split_plan(16, 16384, 64 * 64), (1, 16384));
+        assert_eq!(split_plan(4, 16384, 64 * 64 - 1), (1, 16384));
 
         for &(outer, r, inner) in &[
             (1usize, 8192usize, 1usize),
@@ -784,6 +889,7 @@ mod tests {
             (3, 10007, 1),
             (2, 16129, 5),
             (2, 100_003, 70),
+            (4, 16384, 64 * 64),
             (1, 1_000_000, 1),
             (7, 9973, 3),
         ] {

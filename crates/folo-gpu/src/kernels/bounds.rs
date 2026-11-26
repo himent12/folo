@@ -138,6 +138,12 @@ mod tests {
             ("det_bce_fwd", Spec::new().subgroups(true)),
             ("det_combine", Spec::new().subgroups(true)),
             ("reduce_rows", Spec::new().u32("OP", 0).bool("VEC4", true).subgroups(true)),
+            ("reduce_cols", Spec::new().u32("OP", 0).bool("SPLIT", true).bool("VEC4", true)),
+            (
+                "optim",
+                Spec::new().u32("MODE", 2).bool("FLAG", true).bool("NESTEROV", false).bool("VEC4", true),
+            ),
+            ("unscale_check", Spec::new().bool("VEC4", true).subgroups(true)),
             ("muon_s8", Spec::new()),
             (
                 "muon_gemm",

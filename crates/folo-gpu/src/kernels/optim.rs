@@ -11,43 +11,61 @@ use crate::context::GpuContext;
 use crate::error::Result;
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 
+fn gen_optim(spec: &Spec) -> String {
+    let ty = if spec.get_bool("VEC4") { "vec4<f32>" } else { "f32" };
+    format!("alias V = {ty};\n{}", include_str!("../shaders/optim.wgsl"))
+}
+
 static OPTIM: KernelDef = KernelDef {
     name: "optim",
     storage: &[Access::ReadWrite, Access::Read, Access::ReadWrite, Access::ReadWrite],
-    source: Source::Static(include_str!("../shaders/optim.wgsl")),
+    source: Source::Generated(gen_optim),
 };
 
-fn gen_unscale(spec: &Spec) -> String {
-    if spec.is_subgroups() {
-        "@group(0) @binding(1) var<storage, read_write> X: array<f32>;\n\
-         @group(0) @binding(2) var<storage, read_write> FLAG: array<atomic<u32>>;\n\
-         @compute @workgroup_size(256)\n\
-         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
-         \x20       @builtin(local_invocation_index) lid: u32, @builtin(subgroup_invocation_id) lane: u32) {\n\
-         \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
-         \x20 var bad = false;\n\
-         \x20 if (i < pu(0u)) {\n\
-         \x20   let v = X[i] * pf(1u);\n\
-         \x20   X[i] = v;\n\
-         \x20   bad = (bitcast<u32>(v) & 0x7f800000u) == 0x7f800000u;\n\
-         \x20 }\n\
-         \x20 if (subgroupAny(bad) && lane == 0u) { atomicOr(&FLAG[0], 1u); }\n\
-         }\n"
-            .into()
+fn nonfinite_expr(vec4: bool) -> &'static str {
+    if vec4 {
+        "any((bitcast<vec4<u32>>(v) & vec4<u32>(0x7f800000u)) == vec4<u32>(0x7f800000u))"
     } else {
-        "@group(0) @binding(1) var<storage, read_write> X: array<f32>;\n\
-         @group(0) @binding(2) var<storage, read_write> FLAG: array<atomic<u32>>;\n\
-         @compute @workgroup_size(256)\n\
-         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
-         \x20       @builtin(local_invocation_index) lid: u32) {\n\
-         \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
-         \x20 if (i >= pu(0u)) { return; }\n\
-         \x20 let v = X[i] * pf(1u);\n\
-         \x20 X[i] = v;\n\
-         \x20 // Not finite: all exponent bits set (inf or NaN).\n\
-         \x20 if ((bitcast<u32>(v) & 0x7f800000u) == 0x7f800000u) { atomicOr(&FLAG[0], 1u); }\n\
-         }\n"
-        .into()
+        "(bitcast<u32>(v) & 0x7f800000u) == 0x7f800000u"
+    }
+}
+
+fn gen_unscale(spec: &Spec) -> String {
+    let vec4 = spec.get_bool("VEC4");
+    let ty = if vec4 { "vec4<f32>" } else { "f32" };
+    let nonfinite = nonfinite_expr(vec4);
+    if spec.is_subgroups() {
+        format!(
+            "@group(0) @binding(1) var<storage, read_write> X: array<{ty}>;\n\
+             @group(0) @binding(2) var<storage, read_write> FLAG: array<atomic<u32>>;\n\
+             @compute @workgroup_size(256)\n\
+             fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+             \x20       @builtin(local_invocation_index) lid: u32, @builtin(subgroup_invocation_id) lane: u32) {{\n\
+             \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+             \x20 var bad = false;\n\
+             \x20 if (i < pu(0u)) {{\n\
+             \x20   let v = X[i] * pf(1u);\n\
+             \x20   X[i] = v;\n\
+             \x20   bad = {nonfinite};\n\
+             \x20 }}\n\
+             \x20 if (subgroupAny(bad) && lane == 0u) {{ atomicOr(&FLAG[0], 1u); }}\n\
+             }}\n"
+        )
+    } else {
+        format!(
+            "@group(0) @binding(1) var<storage, read_write> X: array<{ty}>;\n\
+             @group(0) @binding(2) var<storage, read_write> FLAG: array<atomic<u32>>;\n\
+             @compute @workgroup_size(256)\n\
+             fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+             \x20       @builtin(local_invocation_index) lid: u32) {{\n\
+             \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+             \x20 if (i >= pu(0u)) {{ return; }}\n\
+             \x20 let v = X[i] * pf(1u);\n\
+             \x20 X[i] = v;\n\
+             \x20 // Not finite: all exponent bits set (inf or NaN).\n\
+             \x20 if ({nonfinite}) {{ atomicOr(&FLAG[0], 1u); }}\n\
+             }}\n"
+        )
     }
 }
 
@@ -71,9 +89,11 @@ pub fn unscale_check(
     if n == 0 {
         return Ok(());
     }
-    let k = ctx.kernel(&UNSCALE, Spec::new().subgroups(use_subgroups(ctx)))?;
-    let p = Params::new().uz(n)?.f(factor);
-    ctx.dispatch(&k, &[x, flag], &p, ctx.grid_1d(n as u64, 256)?)
+    let vec4 = n.is_multiple_of(4);
+    let units = if vec4 { n / 4 } else { n };
+    let k = ctx.kernel(&UNSCALE, Spec::new().bool("VEC4", vec4).subgroups(use_subgroups(ctx)))?;
+    let p = Params::new().uz(units)?.f(factor);
+    ctx.dispatch(&k, &[x, flag], &p, ctx.grid_1d(units as u64, 256)?)
 }
 
 /// Tensors one multi-tensor dispatch updates ([`optimizer_step_many`], [`unscale_check_many`]).
@@ -136,15 +156,15 @@ pub(crate) fn many_def_for(name: &str, spec: &Spec) -> Option<&'static KernelDef
 }
 
 /// Params of the multi-tensor kernels: the update's own words from 0 (as `shaders/optim.wgsl`), then the first
-/// workgroup of tensor `j` at `16 + j` and its element count at `32 + j`.
-fn many_params(mut p: Params, ns: &[usize]) -> Result<(Params, u64)> {
+/// workgroup of tensor `j` at `16 + j` and its unit count at `32 + j` (`wg` units per workgroup).
+fn many_params_wg(mut p: Params, ns: &[usize], wg: u64) -> Result<(Params, u64)> {
     let mut start = 0u64;
     let mut starts = Vec::with_capacity(ns.len());
     for &n in ns {
         starts.push(
             u32::try_from(start).map_err(|_| crate::error::GpuError::Limit("too many elements".into()))?,
         );
-        start += (n as u64).div_ceil(256);
+        start += (n as u64).div_ceil(wg);
     }
     p = p.at(16);
     for s in starts {
@@ -157,15 +177,19 @@ fn many_params(mut p: Params, ns: &[usize]) -> Result<(Params, u64)> {
     Ok((p, start))
 }
 
+fn many_params(p: Params, ns: &[usize]) -> Result<(Params, u64)> {
+    many_params_wg(p, ns, 256)
+}
+
 /// The multi-tensor kernels' prologue: tensor `j` of this workgroup (the last whose first workgroup is at or
-/// before it) and the element `i` of it this invocation takes.
+/// before it) and the element (or vec4) `i` of it this invocation takes.
 fn many_prologue(s: &mut String, j: usize, with_lane: bool) {
     if with_lane {
         s.push_str(
             "@compute @workgroup_size(256)\n\
              fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
              \x20       @builtin(local_invocation_index) lid: u32, @builtin(subgroup_invocation_id) lane: u32) {\n\
-             \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
+             \x20 let w = wid.y * nwg.x + wid.x;\n\
              \x20 var j = 0u;\n",
         );
     } else {
@@ -173,7 +197,7 @@ fn many_prologue(s: &mut String, j: usize, with_lane: bool) {
             "@compute @workgroup_size(256)\n\
              fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
              \x20       @builtin(local_invocation_index) lid: u32) {\n\
-             \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
+             \x20 let w = wid.y * nwg.x + wid.x;\n\
              \x20 var j = 0u;\n",
         );
     }
@@ -189,14 +213,15 @@ fn many_prologue(s: &mut String, j: usize, with_lane: bool) {
 
 fn gen_optim_many(spec: &Spec) -> String {
     let (j, ns, mode) = (spec.get_u32("J", 1) as usize, spec.get_u32("NS", 0), spec.get_u32("MODE", 0));
-    let mut s = String::new();
+    let ty = if spec.get_bool("VEC4") { "vec4<f32>" } else { "f32" };
+    let mut s = format!("alias V = {ty};\n");
     let mut b = 1;
     for t in 0..j {
-        let _ = writeln!(s, "@group(0) @binding({b}) var<storage, read_write> P{t}: array<f32>;");
-        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> G{t}: array<f32>;", b + 1);
+        let _ = writeln!(s, "@group(0) @binding({b}) var<storage, read_write> P{t}: array<V>;");
+        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> G{t}: array<V>;", b + 1);
         b += 2;
         for k in 0..ns {
-            let _ = writeln!(s, "@group(0) @binding({b}) var<storage, read_write> S{k}_{t}: array<f32>;");
+            let _ = writeln!(s, "@group(0) @binding({b}) var<storage, read_write> S{k}_{t}: array<V>;");
             b += 1;
         }
     }
@@ -223,11 +248,11 @@ fn gen_optim_many(spec: &Spec) -> String {
              \x20     let v = pf(4u) * S1_T[i] + pf(5u) * (g * g);\n\
              \x20     S0_T[i] = m;\n\
              \x20     S1_T[i] = v;\n\
-             \x20     let denom = sqrt(v) / pf(7u) + pf(8u);\n\
+             \x20     let denom = sqrt(v) / pf(7u) + V(pf(8u));\n\
              \x20     p = p + (-pf(6u)) * (m / denom);\n"
         }
         4 => {
-            "      var decay = 0.0;\n\
+            "      var decay = V(0.0);\n\
              \x20     if (FLAG) { decay = pf(3u) * p; }\n\
              \x20     p = p - pf(1u) * g - decay;\n"
         }
@@ -237,13 +262,13 @@ fn gen_optim_many(spec: &Spec) -> String {
              \x20     S0_T[i] = b;\n\
              \x20     var u = b;\n\
              \x20     if (NESTEROV) { u = g + mu * b; }\n\
-             \x20     var decay = 0.0;\n\
+             \x20     var decay = V(0.0);\n\
              \x20     if (FLAG) { decay = pf(3u) * p; }\n\
              \x20     p = p - pf(1u) * u - decay;\n"
         }
         6 => {
-            "      var decay = 0.0;\n\
-             \x20     if (FLAG && g * p > 0.0) { decay = pf(3u) * p; }\n\
+            "      var decay = V(0.0);\n\
+             \x20     if (FLAG) { decay = select(V(0.0), pf(3u) * p, g * p > V(0.0)); }\n\
              \x20     p = p - pf(1u) * g - decay;\n"
         }
         7 => {
@@ -252,8 +277,8 @@ fn gen_optim_many(spec: &Spec) -> String {
              \x20     S0_T[i] = b;\n\
              \x20     var u = b;\n\
              \x20     if (NESTEROV) { u = g + mu * b; }\n\
-             \x20     var decay = 0.0;\n\
-             \x20     if (FLAG && u * p > 0.0) { decay = pf(3u) * p; }\n\
+             \x20     var decay = V(0.0);\n\
+             \x20     if (FLAG) { decay = select(V(0.0), pf(3u) * p, u * p > V(0.0)); }\n\
              \x20     p = p - pf(1u) * u - decay;\n"
         }
         _ => "      p = p * pf(1u) + g * pf(2u);\n",
@@ -273,9 +298,12 @@ fn gen_optim_many(spec: &Spec) -> String {
 fn gen_unscale_many(spec: &Spec) -> String {
     let j = spec.get_u32("J", 1) as usize;
     let sg = spec.is_subgroups();
+    let vec4 = spec.get_bool("VEC4");
+    let ty = if vec4 { "vec4<f32>" } else { "f32" };
+    let nonfinite = nonfinite_expr(vec4);
     let mut s = String::new();
     for t in 0..j {
-        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> X{t}: array<f32>;", t + 1);
+        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> X{t}: array<{ty}>;", t + 1);
     }
     let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> FLAG: array<atomic<u32>>;", j + 1);
     many_prologue(&mut s, j, sg);
@@ -284,14 +312,14 @@ fn gen_unscale_many(spec: &Spec) -> String {
             let _ = writeln!(
                 s,
                 "  case {t}u: {{\n    if (i < pu({}u)) {{\n      let v = X{t}[i] * pf(1u);\n      X{t}[i] = v;\n\
-                 \x20     bad = (bitcast<u32>(v) & 0x7f800000u) == 0x7f800000u;\n    }}\n  }}",
+                 \x20     bad = {nonfinite};\n    }}\n  }}",
                 32 + t
             );
         } else {
             let _ = writeln!(
                 s,
                 "  case {t}u: {{\n    if (i < pu({}u)) {{\n      let v = X{t}[i] * pf(1u);\n      X{t}[i] = v;\n\
-                 \x20     if ((bitcast<u32>(v) & 0x7f800000u) == 0x7f800000u) {{ atomicOr(&FLAG[0], 1u); }}\n    }}\n  }}",
+                 \x20     if ({nonfinite}) {{ atomicOr(&FLAG[0], 1u); }}\n    }}\n  }}",
                 32 + t
             );
         }
@@ -353,25 +381,29 @@ pub fn optimizer_step_many(ctx: &GpuContext, u: &OptimUpdate, items: &[ManyItem<
     if mode == 2 && ns != 2 {
         return Err(crate::error::shape_err("optimizer_step: AdamW needs exp_avg and exp_avg_sq"));
     }
-    let live: Vec<&ManyItem<'_>> = items.iter().filter(|it| it.n > 0).collect();
-    for chunk in live.chunks(j_max) {
-        let spec = Spec::new()
-            .u32("MODE", mode)
-            .bool("FLAG", flag)
-            .bool("NESTEROV", nesterov)
-            .u32("J", chunk.len() as u32)
-            .u32("NS", ns as u32);
-        let k = ctx.kernel(many_def(ns as u32, chunk.len()), spec)?;
-        let ns_: Vec<usize> = chunk.iter().map(|it| it.n).collect();
-        let (p, groups) = many_params(base.clone(), &ns_)?;
-        let mut bufs: Vec<&wgpu::Buffer> = Vec::with_capacity(chunk.len() * per);
-        for it in chunk {
-            bufs.push(it.p);
-            bufs.push(it.g);
-            bufs.extend(it.s0);
-            bufs.extend(it.s1);
+    let (vec4_items, scalar_items): (Vec<&ManyItem<'_>>, Vec<&ManyItem<'_>>) =
+        items.iter().filter(|it| it.n > 0).partition(|it| it.n.is_multiple_of(4));
+    for (vec4, group) in [(true, &vec4_items), (false, &scalar_items)] {
+        for chunk in group.chunks(j_max) {
+            let spec = Spec::new()
+                .u32("MODE", mode)
+                .bool("FLAG", flag)
+                .bool("NESTEROV", nesterov)
+                .bool("VEC4", vec4)
+                .u32("J", chunk.len() as u32)
+                .u32("NS", ns as u32);
+            let k = ctx.kernel(many_def(ns as u32, chunk.len()), spec)?;
+            let units: Vec<usize> = chunk.iter().map(|it| if vec4 { it.n / 4 } else { it.n }).collect();
+            let (p, groups) = many_params(base.clone(), &units)?;
+            let mut bufs: Vec<&wgpu::Buffer> = Vec::with_capacity(chunk.len() * per);
+            for it in chunk {
+                bufs.push(it.p);
+                bufs.push(it.g);
+                bufs.extend(it.s0);
+                bufs.extend(it.s1);
+            }
+            ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
         }
-        ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
     }
     Ok(())
 }
@@ -387,41 +419,51 @@ pub enum NormPartial {
 }
 
 /// The multi-tensor reductions' prologue: this workgroup's index `w` (none past the last), its tensor `j` and
-/// element `i` (as [`many_prologue`]). Params: 1 = the first partial of this dispatch, 2 = its workgroups.
-fn norm_prologue(s: &mut String, j: usize, sg: bool) {
+/// unit index `i` (`wg` = 64 vec4s or 256 scalars = 256 elements per workgroup). Params: 1 = first partial,
+/// 2 = workgroups in this dispatch.
+fn norm_prologue(s: &mut String, j: usize, sg: bool, vec4: bool) {
+    let wg = if vec4 { 64u32 } else { 256u32 };
+    let red_len = if sg { if vec4 { 2 } else { 8 } } else { wg };
+    let _ = writeln!(s, "var<workgroup> red: array<f32, {red_len}>;");
     if sg {
-        s.push_str(
-            "var<workgroup> red: array<f32, 8>;\n\
-             @compute @workgroup_size(256)\n\
+        let _ = write!(
+            s,
+            "@compute @workgroup_size({wg})\n\
              fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
              \x20       @builtin(local_invocation_index) lid: u32,\n\
-             \x20       @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {\n\
-             \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
-             \x20 if (w >= pu(2u)) { return; }\n\
-             \x20 var j = 0u;\n",
+             \x20       @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {{\n\
+             \x20 let w = wid.y * nwg.x + wid.x;\n\
+             \x20 if (w >= pu(2u)) {{ return; }}\n\
+             \x20 var j = 0u;\n"
         );
     } else {
-        s.push_str(
-            "var<workgroup> red: array<f32, 256>;\n\
-             @compute @workgroup_size(256)\n\
+        let _ = write!(
+            s,
+            "@compute @workgroup_size({wg})\n\
              fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
-             \x20       @builtin(local_invocation_index) lid: u32) {\n\
-             \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
-             \x20 if (w >= pu(2u)) { return; }\n\
-             \x20 var j = 0u;\n",
+             \x20       @builtin(local_invocation_index) lid: u32) {{\n\
+             \x20 let w = wid.y * nwg.x + wid.x;\n\
+             \x20 if (w >= pu(2u)) {{ return; }}\n\
+             \x20 var j = 0u;\n"
         );
     }
     for t in 1..j {
         let _ = writeln!(s, "  if (w >= pu({}u)) {{ j = {t}u; }}", 16 + t);
     }
-    s.push_str("  let i = (w - pu(16u + j)) * 256u + lid;\n  var v = 0.0;\n  switch j {\n");
+    let _ = writeln!(s, "  let i = (w - pu(16u + j)) * {wg}u + lid;\n  var v = 0.0;\n  switch j {{");
 }
 
 fn gen_norm_partials_many(spec: &Spec) -> String {
-    let (j, squares, sg) = (spec.get_u32("J", 1) as usize, spec.get_u32("OP", 0) == 1, spec.is_subgroups());
+    let (j, squares, sg, vec4) = (
+        spec.get_u32("J", 1) as usize,
+        spec.get_u32("OP", 0) == 1,
+        spec.is_subgroups(),
+        spec.get_bool("VEC4"),
+    );
+    let ty = if vec4 { "vec4<f32>" } else { "f32" };
     let mut s = String::new();
     for t in 0..j {
-        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> X{t}: array<f32>;", t + 1);
+        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> X{t}: array<{ty}>;", t + 1);
     }
     let mut b = j + 1;
     if squares {
@@ -436,47 +478,69 @@ fn gen_norm_partials_many(spec: &Spec) -> String {
          \x20 if ((bitcast<u32>(b) & 0x7fffffffu) > 0x7f800000u) { return b; }\n\
          \x20 return max(a, b);\n}\n",
     );
-    norm_prologue(&mut s, j, sg);
-    let term = if squares { "let t = (x * H[0]) * H[0]; v = t * t;" } else { "v = abs(x);" };
+    norm_prologue(&mut s, j, sg, vec4);
+    // `^ pu(0u)` (always 0) acts as an opaque bit-exact barrier so GPU compilers cannot reassociate
+    // `(x * h) * h` into `x * (h * h)`, which underflows `h * h` to 0 near `f32::MAX`.
+    let term = match (vec4, squares) {
+        (true, true) => {
+            "let h0 = H[0]; let s = bitcast<vec4<f32>>(bitcast<vec4<u32>>(x * h0) ^ vec4<u32>(pu(0u))); let t = s * h0; let q = t * t; v = (q.x + q.y) + (q.z + q.w);"
+        }
+        (true, false) => "let a = abs(x); v = nmax(nmax(a.x, a.y), nmax(a.z, a.w));",
+        (false, true) => {
+            "let h0 = H[0]; let s = bitcast<f32>(bitcast<u32>(x * h0) ^ pu(0u)); let t = s * h0; v = t * t;"
+        }
+        (false, false) => "v = abs(x);",
+    };
     for t in 0..j {
         let _ = writeln!(s, "  case {t}u: {{ if (i < pu({}u)) {{ let x = X{t}[i]; {term} }} }}", 32 + t);
     }
     if sg {
+        let sg_max = if vec4 { 1u32 } else { 7u32 };
         if squares {
-            s.push_str(
-                "  default: {}\n  }\n\
+            let merge = if vec4 {
+                "red[0] + red[1]"
+            } else {
+                "((red[0] + red[1]) + (red[2] + red[3])) + ((red[4] + red[5]) + (red[6] + red[7]))"
+            };
+            let _ = write!(
+                s,
+                "  default: {{}}\n  }}\n\
                  \x20 let r = subgroupAdd(v);\n\
-                 \x20 let sg = min(sgid, 7u);\n\
-                 \x20 if (lane == 0u) { red[sg] = r; }\n\
+                 \x20 let sg = min(sgid, {sg_max}u);\n\
+                 \x20 if (lane == 0u) {{ red[sg] = r; }}\n\
                  \x20 workgroupBarrier();\n\
-                 \x20 if (lid == 0u) {\n\
-                 \x20   PART[pu(1u) + w] = ((red[0] + red[1]) + (red[2] + red[3])) + ((red[4] + red[5]) + (red[6] + red[7]));\n\
-                 \x20 }\n}\n",
+                 \x20 if (lid == 0u) {{\n\
+                 \x20   PART[pu(1u) + w] = {merge};\n\
+                 \x20 }}\n}}\n"
             );
         } else {
-            s.push_str(
-                "  default: {}\n  }\n\
+            let merge = if vec4 {
+                "nmax(red[0], red[1])"
+            } else {
+                "nmax(nmax(nmax(red[0], red[1]), nmax(red[2], red[3])), nmax(nmax(red[4], red[5]), nmax(red[6], red[7])))"
+            };
+            let _ = write!(
+                s,
+                "  default: {{}}\n  }}\n\
                  \x20 let nan_v = (bitcast<u32>(v) & 0x7fffffffu) > 0x7f800000u;\n\
                  \x20 let mask = subgroupBallot(nan_v).x;\n\
                  \x20 let nan_lane = select(0u, firstTrailingBit(mask), mask != 0u);\n\
                  \x20 let r = select(subgroupMax(select(v, 0.0, nan_v)), subgroupShuffle(v, nan_lane), mask != 0u);\n\
-                 \x20 let sg = min(sgid, 7u);\n\
-                 \x20 if (lane == 0u) { red[sg] = r; }\n\
+                 \x20 let sg = min(sgid, {sg_max}u);\n\
+                 \x20 if (lane == 0u) {{ red[sg] = r; }}\n\
                  \x20 workgroupBarrier();\n\
-                 \x20 if (lid == 0u) {\n\
-                 \x20   PART[pu(1u) + w] = nmax(\n\
-                 \x20     nmax(nmax(red[0], red[1]), nmax(red[2], red[3])),\n\
-                 \x20     nmax(nmax(red[4], red[5]), nmax(red[6], red[7])),\n\
-                 \x20   );\n\
-                 \x20 }\n}\n",
+                 \x20 if (lid == 0u) {{\n\
+                 \x20   PART[pu(1u) + w] = {merge};\n\
+                 \x20 }}\n}}\n"
             );
         }
     } else {
+        let s_init = if vec4 { 32u32 } else { 128u32 };
         let op = if squares { "red[lid] + red[lid + s]" } else { "nmax(red[lid], red[lid + s])" };
         let _ = writeln!(
             s,
             "  default: {{}}\n  }}\n  red[lid] = v;\n  workgroupBarrier();\n\
-             \x20 for (var s = 128u; s > 0u; s >>= 1u) {{\n\
+             \x20 for (var s = {s_init}u; s > 0u; s >>= 1u) {{\n\
              \x20   if (lid < s) {{ red[lid] = {op}; }}\n\
              \x20   workgroupBarrier();\n  }}\n\
              \x20 if (lid == 0u) {{ PART[pu(1u) + w] = red[0]; }}\n}}"
@@ -487,19 +551,29 @@ fn gen_norm_partials_many(spec: &Spec) -> String {
 
 fn gen_scale_many(spec: &Spec) -> String {
     let j = spec.get_u32("J", 1) as usize;
+    let vec4 = spec.get_bool("VEC4");
+    let ty = if vec4 { "vec4<f32>" } else { "f32" };
     let mut s = String::new();
     for t in 0..j {
-        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> X{t}: array<f32>;", t + 1);
+        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> X{t}: array<{ty}>;", t + 1);
     }
     let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> F1: array<f32>;", j + 1);
     let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> F2: array<f32>;", j + 2);
     many_prologue(&mut s, j, false);
+    // `^ pu(0u)` (always 0) prevents GPU compilers from reassociating `(x * f1) * f2` into `x * (f1 * f2)`,
+    // preserving the exact two roundings (and avoiding `f1 * f2` underflow on extreme clip scales).
+    let mul = if vec4 {
+        "let y = bitcast<vec4<f32>>(bitcast<vec4<u32>>(X_T[i] * F1[0]) ^ vec4<u32>(pu(0u))); X_T[i] = y * F2[0];"
+    } else {
+        "let y = bitcast<f32>(bitcast<u32>(X_T[i] * F1[0]) ^ pu(0u)); X_T[i] = y * F2[0];"
+    };
     for t in 0..j {
         // Two roundings, as `x *= f1` then `x *= f2`.
         let _ = writeln!(
             s,
-            "  case {t}u: {{ if (i < pu({}u)) {{ let y = X{t}[i] * F1[0]; X{t}[i] = y * F2[0]; }} }}",
-            32 + t
+            "  case {t}u: {{ if (i < pu({}u)) {{ {} }} }}",
+            32 + t,
+            mul.replace("X_T", &format!("X{t}"))
         );
     }
     s.push_str("  default: {}\n  }\n}\n");
@@ -542,15 +616,21 @@ pub fn norm_partials_many(
     let mut first = 0usize;
     let sg = use_subgroups(ctx);
     for chunk in live.chunks(j_max) {
-        let spec = Spec::new().u32("J", chunk.len() as u32).u32("OP", u32::from(squares)).subgroups(sg);
+        let vec4 = chunk.iter().all(|x| x.1.is_multiple_of(4));
+        let spec = Spec::new()
+            .u32("J", chunk.len() as u32)
+            .u32("OP", u32::from(squares))
+            .bool("VEC4", vec4)
+            .subgroups(sg);
         let k = ctx.kernel(many_def(if squares { 5 } else { 4 }, chunk.len()), spec)?;
         let ns: Vec<usize> = chunk.iter().map(|x| x.1).collect();
         let groups = norm_partials_len(&ns);
-        let (p, _) = many_params(Params::new().u(0).uz(first)?.uz(groups)?, &ns)?;
+        let (units, wg) = if vec4 { (ns.iter().map(|&n| n / 4).collect(), 64u32) } else { (ns, 256u32) };
+        let (p, _) = many_params_wg(Params::new().u(0).uz(first)?.uz(groups)?, &units, wg as u64)?;
         let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|x| x.0).collect();
         bufs.extend(h);
         bufs.push(part);
-        ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups as u64 * 256, 256)?)?;
+        ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups as u64 * wg as u64, wg)?)?;
         first += groups;
     }
     Ok(())
@@ -570,15 +650,21 @@ pub fn scale_many(
         check_buf(x, n, DType::F32, "scale input")?;
     }
     let j_max = MANY.min((ctx.caps().max_storage_buffers as usize).saturating_sub(2)).max(1);
-    let live: Vec<&(&wgpu::Buffer, usize)> = xs.iter().filter(|x| x.1 > 0).collect();
-    for chunk in live.chunks(j_max) {
-        let k = ctx.kernel(many_def(6, chunk.len()), Spec::new().u32("J", chunk.len() as u32))?;
-        let ns: Vec<usize> = chunk.iter().map(|x| x.1).collect();
-        let (p, groups) = many_params(Params::new(), &ns)?;
-        let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|x| x.0).collect();
-        bufs.push(f1);
-        bufs.push(f2);
-        ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
+    let (vec4_xs, scalar_xs): (Vec<_>, Vec<_>) =
+        xs.iter().copied().filter(|x| x.1 > 0).partition(|x| x.1.is_multiple_of(4));
+    for (vec4, group) in [(true, &vec4_xs), (false, &scalar_xs)] {
+        for chunk in group.chunks(j_max) {
+            let k = ctx.kernel(
+                many_def(6, chunk.len()),
+                Spec::new().u32("J", chunk.len() as u32).bool("VEC4", vec4),
+            )?;
+            let units: Vec<usize> = chunk.iter().map(|x| if vec4 { x.1 / 4 } else { x.1 }).collect();
+            let (p, groups) = many_params(Params::new().u(0), &units)?;
+            let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|x| x.0).collect();
+            bufs.push(f1);
+            bufs.push(f2);
+            ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
+        }
     }
     Ok(())
 }
@@ -601,16 +687,21 @@ pub fn unscale_check_many(
     for &(x, n) in xs {
         check_buf(x, n, DType::F32, "unscale_check input")?;
     }
-    let live: Vec<&(&wgpu::Buffer, usize)> = xs.iter().filter(|x| x.1 > 0).collect();
+    let (vec4_xs, scalar_xs): (Vec<_>, Vec<_>) =
+        xs.iter().copied().filter(|x| x.1 > 0).partition(|x| x.1.is_multiple_of(4));
     let sg = use_subgroups(ctx);
-    for chunk in live.chunks(j_max) {
-        let k =
-            ctx.kernel(many_def(3, chunk.len()), Spec::new().u32("J", chunk.len() as u32).subgroups(sg))?;
-        let ns: Vec<usize> = chunk.iter().map(|x| x.1).collect();
-        let (p, groups) = many_params(Params::new().u(0).f(factor), &ns)?;
-        let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|x| x.0).collect();
-        bufs.push(flag);
-        ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
+    for (vec4, group) in [(true, &vec4_xs), (false, &scalar_xs)] {
+        for chunk in group.chunks(j_max) {
+            let k = ctx.kernel(
+                many_def(3, chunk.len()),
+                Spec::new().u32("J", chunk.len() as u32).bool("VEC4", vec4).subgroups(sg),
+            )?;
+            let units: Vec<usize> = chunk.iter().map(|x| if vec4 { x.1 / 4 } else { x.1 }).collect();
+            let (p, groups) = many_params(Params::new().u(0).f(factor), &units)?;
+            let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|x| x.0).collect();
+            bufs.push(flag);
+            ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
+        }
     }
     Ok(())
 }
@@ -731,15 +822,17 @@ pub fn optimizer_step(
     if n == 0 {
         return Ok(());
     }
+    let vec4 = n.is_multiple_of(4);
+    let units = if vec4 { n / 4 } else { n };
     let (mode, flag, nesterov, p_) = match *u {
         OptimUpdate::Sgd { lr, momentum, weight_decay, nesterov } => {
             let mode = if s0.is_some() { 1 } else { 0 };
-            (mode, weight_decay != 0.0, nesterov, Params::new().uz(n)?.f(lr).f(momentum).f(weight_decay))
+            (mode, weight_decay != 0.0, nesterov, Params::new().uz(units)?.f(lr).f(momentum).f(weight_decay))
         }
         OptimUpdate::SgdDecoupled { lr, momentum, wd_step, nesterov, cautious } => {
             let base = if cautious { 6 } else { 4 };
             let mode = base + u32::from(s0.is_some());
-            (mode, wd_step != 0.0, nesterov, Params::new().uz(n)?.f(lr).f(momentum).f(wd_step))
+            (mode, wd_step != 0.0, nesterov, Params::new().uz(units)?.f(lr).f(momentum).f(wd_step))
         }
         OptimUpdate::AdamW {
             decay,
@@ -755,7 +848,7 @@ pub fn optimizer_step(
                 return Err(crate::error::shape_err("optimizer_step: AdamW needs exp_avg and exp_avg_sq"));
             }
             let p = Params::new()
-                .uz(n)?
+                .uz(units)?
                 .f(decay.unwrap_or(1.0))
                 .f(beta1)
                 .f(one_minus_beta1)
@@ -766,12 +859,14 @@ pub fn optimizer_step(
                 .f(eps);
             (2, decay.is_some(), false, p)
         }
-        OptimUpdate::Axpby { a, b } => (3, false, false, Params::new().uz(n)?.f(a).f(b)),
+        OptimUpdate::Axpby { a, b } => (3, false, false, Params::new().uz(units)?.f(a).f(b)),
     };
-    let k =
-        ctx.kernel(&OPTIM, Spec::new().u32("MODE", mode).bool("FLAG", flag).bool("NESTEROV", nesterov))?;
+    let k = ctx.kernel(
+        &OPTIM,
+        Spec::new().u32("MODE", mode).bool("FLAG", flag).bool("NESTEROV", nesterov).bool("VEC4", vec4),
+    )?;
     let (d0, d1) = (s0.unwrap_or(ctx.dummy()), s1.unwrap_or(ctx.dummy()));
-    ctx.dispatch(&k, &[p, g, d0, d1], &p_, ctx.grid_1d(n as u64, 256)?)
+    ctx.dispatch(&k, &[p, g, d0, d1], &p_, ctx.grid_1d(units as u64, 256)?)
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).

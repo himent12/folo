@@ -4,7 +4,7 @@
 
 use std::time::Instant;
 
-use folo_gpu::kernels::{elementwise, layout, reduce};
+use folo_gpu::kernels::{elementwise, layout, optim, reduce};
 use folo_gpu::{BinaryOp, DType, GpuContext, UnaryOp};
 
 fn time(ctx: &GpuContext, mut f: impl FnMut()) -> f64 {
@@ -85,6 +85,14 @@ fn main() {
     let s =
         time(&ctx, || reduce::reduce(&ctx, reduce::ReduceOp::Sum, a.raw(), c.raw(), 64, 1024, 1024).unwrap());
     report("sum over middle dim (64 x 1024 x 1024)", s, bytes);
+    let s =
+        time(&ctx, || reduce::reduce(&ctx, reduce::ReduceOp::Max, a.raw(), c.raw(), 64, 1024, 1024).unwrap());
+    report("max over middle dim (64 x 1024 x 1024)", s, bytes);
+    let s = time(&ctx, || {
+        reduce::reduce_split(&ctx, reduce::ReduceOp::Sum, a.raw(), c.raw(), 4, 16384, 1024, DType::F32)
+            .unwrap()
+    });
+    report("sum over middle dim split (4x16384x1024)", s, bytes);
     let s = time(&ctx, || reduce::softmax(&ctx, a.raw(), c.raw(), 1 << 16, 1024, false).unwrap());
     report("softmax rows (65536 x 1024)", s, 2.0 * bytes);
     let s =
@@ -101,4 +109,63 @@ fn main() {
         layout::upsample_nearest2d(&ctx, a.raw(), c.raw(), 1024, 128, 128, 256, 256, DType::F32).unwrap()
     });
     report("upsample 2x (1024 planes 128 -> 256)", s, bytes / 4.0 + bytes);
+
+    // Optimizer & AMP kernels over 16 Mi f32 (single tensor and 16-tensor multi-tensor chunk).
+    let on = 1usize << 24;
+    let obytes = (on * 4) as f64;
+    let d = ctx.alloc(DType::F32.bytes(on)).unwrap();
+    ctx.clear(d.raw(), d.size());
+    let flag = ctx.alloc(4).unwrap();
+    ctx.clear(flag.raw(), flag.size());
+    let f1 = ctx.upload(bytemuck::cast_slice(&[0.5f32])).unwrap();
+    let f2 = ctx.upload(bytemuck::cast_slice(&[2.0f32])).unwrap();
+    let adamw = optim::OptimUpdate::AdamW {
+        decay: Some(0.9999),
+        beta1: 0.9,
+        one_minus_beta1: 0.1,
+        beta2: 0.999,
+        one_minus_beta2: 0.001,
+        step_size: 1e-3,
+        bc2_sqrt: 0.99,
+        eps: 1e-8,
+    };
+    let s = time(&ctx, || {
+        optim::optimizer_step(&ctx, &adamw, a.raw(), b.raw(), Some(c.raw()), Some(d.raw()), on).unwrap();
+    });
+    report("adamw step (16 Mi f32)", s, 7.0 * obytes);
+    let s = time(&ctx, || {
+        optim::unscale_check(&ctx, a.raw(), on, 0.5, flag.raw()).unwrap();
+    });
+    report("unscale_check (16 Mi f32)", s, 2.0 * obytes);
+
+    let chunk_n = on / 16;
+    let many_p: Vec<_> = (0..16).map(|_| ctx.alloc(DType::F32.bytes(chunk_n)).unwrap()).collect();
+    let many_g: Vec<_> = (0..16).map(|_| ctx.alloc(DType::F32.bytes(chunk_n)).unwrap()).collect();
+    let many_s0: Vec<_> = (0..16).map(|_| ctx.alloc(DType::F32.bytes(chunk_n)).unwrap()).collect();
+    let many_s1: Vec<_> = (0..16).map(|_| ctx.alloc(DType::F32.bytes(chunk_n)).unwrap()).collect();
+    for buf in many_p.iter().chain(&many_g).chain(&many_s0).chain(&many_s1) {
+        ctx.clear(buf.raw(), buf.size());
+    }
+    let items: Vec<_> = (0..16)
+        .map(|i| optim::ManyItem {
+            p: many_p[i].raw(),
+            g: many_g[i].raw(),
+            s0: Some(many_s0[i].raw()),
+            s1: Some(many_s1[i].raw()),
+            n: chunk_n,
+        })
+        .collect();
+    let xs: Vec<_> = many_p.iter().map(|b| (b.raw(), chunk_n)).collect();
+    let part = ctx.alloc(DType::F32.bytes(optim::norm_partials_len(&[chunk_n; 16]))).unwrap();
+    let s = time(&ctx, || optim::optimizer_step_many(&ctx, &adamw, &items).unwrap());
+    report("adamw step many (16 x 1 Mi f32)", s, 7.0 * obytes);
+    let s = time(&ctx, || optim::unscale_check_many(&ctx, &xs, 0.5, flag.raw()).unwrap());
+    report("unscale_check_many (16 x 1 Mi f32)", s, 2.0 * obytes);
+    let s = time(&ctx, || optim::scale_many(&ctx, &xs, f1.raw(), f2.raw()).unwrap());
+    report("scale_many (16 x 1 Mi f32)", s, 2.0 * obytes);
+    let s = time(&ctx, || {
+        optim::norm_partials_many(&ctx, optim::NormPartial::ScaledSquares, &xs, Some(f1.raw()), part.raw())
+            .unwrap();
+    });
+    report("norm_partials_many sq (16 x 1 Mi f32)", s, obytes);
 }
