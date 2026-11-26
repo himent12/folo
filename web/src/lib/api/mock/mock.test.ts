@@ -476,4 +476,34 @@ describe('mock: the final fields of server PR #140', () => {
     expect(caps.tensor_cores).toMatchObject({ available: true, enabled: false });
     await expect(api.createRun({ ...c, amp: false })).resolves.toMatchObject({ config: { amp: false } });
   });
+
+  it('rejects malformed remote cloud URLs in demo mode (invalid port, credentials, query/fragment, scheme)', async () => {
+    const api = new MockApi('cloud-none', 0);
+    for (const url of [
+      'http://127.0.0.1:99999',
+      'http://127.0.0.1:0',
+      'http://127.0.0.1:',
+      'http://user:pass@10.0.0.5:7878',
+      'http://10.0.0.5:7878?token=abc',
+      'http://10.0.0.5:7878#top',
+      'ftp://10.0.0.5:7878',
+      'http://bad host:7878',
+    ]) {
+      await expect(api.connectCloud({ provider: 'remote', name: '', values: { url, token: '' } })).rejects.toMatchObject({
+        status: 400,
+        code: 'invalid_body',
+      });
+    }
+    expect(await api.cloudConnections()).toEqual([]);
+
+    const local = await api.connectCloud({ provider: 'remote', name: '', values: { url: 'http://127.0.0.1:7878', token: '' } });
+    expect(local).toMatchObject({ provider: 'remote', account: '127.0.0.1:7878', note: null });
+
+    const ipv6 = await api.connectCloud({ provider: 'remote', name: 'IPv6 Box', values: { url: 'http://[::1]:7878/', token: '' } });
+    expect(ipv6).toMatchObject({ provider: 'remote', account: '[::1]:7878', note: null });
+
+    const remoteHttp = await api.connectCloud({ provider: 'remote', name: 'Public HTTP', values: { url: 'http://gpu.example.com:7878', token: '' } });
+    expect(remoteHttp.account).toBe('gpu.example.com:7878');
+    expect(remoteHttp.note).toContain('unencrypted');
+  });
 });

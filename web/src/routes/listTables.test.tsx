@@ -14,8 +14,11 @@ import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
 import { page as pageMeta } from '$lib/shell/crumbs';
 import Datasets from './Datasets';
+import LabelJobs from './LabelJobs';
 import Models from './Models';
 import Benchmarks from './Benchmarks';
+import Runs from './Runs';
+import RecentRuns from './overview/RecentRuns';
 
 // Each side of the .hide-lg (< 1280) and .hide-md (< 1024) boundaries, and a tablet (820).
 const WIDTHS = [1280, 1279, 1024, 1023, 820];
@@ -447,5 +450,38 @@ describe('Benchmarks sort missing values last', () => {
     // Second click: Leader asc -> missing/NaN STILL last.
     clickLeader();
     expect(rowNames()).toEqual(['charlie-zero', 'delta-high', 'alpha-no-leader', 'bravo-nan']);
+  });
+});
+
+describe('Failed list tables clear aria-busy (playtest R4)', () => {
+  const ERROR_PAGES: [string, Component<Record<string, never>>, string, string][] = [
+    ['Runs', Runs, '/runs', 'table.runs'],
+    ['Models', Models, '/models', 'table.models'],
+    ['Benchmarks', Benchmarks, '/benchmarks', 'table.benches'],
+    ['LabelJobs', LabelJobs, '/datasets/label', 'table.jobs'],
+  ];
+
+  for (const [name, Page, path, sel] of ERROR_PAGES) {
+    it(`${name}: clears aria-busy on initial load error and after a failed Retry`, async () => {
+      resize(390);
+      await open(Page, path, new MockApi('error', 0));
+      const t = await table(sel, (el) => !!el.querySelector('button'), `${name} error retry button`);
+      expect(t.getAttribute('aria-busy')).toBe('false');
+
+      // Click Retry and wait for the retry to settle back into ErrorState: table must not stay aria-busy="true".
+      const retry = [...t.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Retry')!;
+      retry.click();
+      flushSync();
+      await table(sel, (el) => [...el.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Retry'), `${name} retry settled`);
+      expect(t.getAttribute('aria-busy')).toBe('false');
+    });
+  }
+
+  it('Overview RecentRuns clears aria-busy when failed', () => {
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = render(() => <RecentRuns all={undefined} recent={[]} failed error={new Error('down')} retry={() => {}} dsLabel={() => null} />, target);
+    flushSync();
+    expect(target.querySelector('table')?.getAttribute('aria-busy')).toBe('false');
   });
 });

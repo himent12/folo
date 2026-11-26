@@ -490,7 +490,7 @@ export default function Datasets() {
           ) : (
             /* The cards (design/UNIFIED.md §4, Datasets), as many columns of at least 300 px as fit, as Desktop's: three
                at 1440 px, four on a wide content column; a short last row keeps the columns' width. */
-            <ul class="cards" aria-label="Datasets" aria-busy={!listed.data}>
+            <ul class="cards" aria-label="Datasets" aria-busy={!listed.data && !listed.error}>
               {listed.data ? (
                 <For each={shown.get()} key={(d) => d.id}>
                   {(d) => <DatasetCard dataset={d()} />}

@@ -52,7 +52,7 @@ export default function RecentRuns(props: RecentRunsProps) {
       )}
     >
       <div class="scroll">
-        <table class="table" aria-busy={!props.all} aria-label="Recent runs">
+        <table class="table" aria-busy={!props.all && !props.failed} aria-label="Recent runs">
           {(props.all ? props.recent.length > 0 : !props.failed) ? (
             <thead>
               {/* Fixed widths on the shared header row: one geometry loading and loaded; the two text columns share the

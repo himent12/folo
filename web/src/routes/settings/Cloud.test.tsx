@@ -449,4 +449,21 @@ describe('Settings › Cloud', () => {
     flushSync();
     expect(dialog()).toBeNull();
   });
+
+  it('rejects an invalid Remote FOLO server URL inline in ConnectDialog and keeps the connection list empty', async () => {
+    open(new MockApi('cloud-none', 0));
+    await until(() => button(target, 'Connect') && !button(target, 'Connect')!.disabled, 'Connect');
+    button(target, 'Connect')!.click();
+    const d = await until(() => dialog()?.querySelector('[role="radio"]') && dialog(), 'the dialog');
+    [...d.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((r) => text(r) === 'Remote FOLO server')!.click();
+    flushSync();
+    const urlInput = d.querySelector<HTMLInputElement>('input[type="text"]')!;
+    type(urlInput, 'http://127.0.0.1:99999');
+    d.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    const err = await until(() => d.querySelector(`#${urlInput.id}-error`), 'the URL field error');
+    expect(text(err)).toBe('The server URL is not a valid URL.');
+    expect(urlInput.getAttribute('aria-invalid')).toBe('true');
+    expect(dialog()).toBe(d);
+    expect(target.querySelectorAll('.cx-row .cx-name')).toHaveLength(0);
+  });
 });
