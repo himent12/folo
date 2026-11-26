@@ -37,6 +37,7 @@ export interface ResultsPanelProps {
   json: unknown;
   pred: Prediction | null;
   conf?: number;
+  maxDet?: number;
   hidden: Set<number>;
   tbody?: HTMLTableSectionElement | undefined;
   tabRow: number | null;
@@ -107,52 +108,17 @@ export default function ResultsPanel(props: ResultsPanelProps) {
     }
   }
 
-  const emptyDetections = () => {
-    const hiddenAtConf = props.result?.boxes.length ?? 0;
-    const hasVisibleCandidates = !props.hidden.size || !!props.pred?.boxes.some((b) => !props.hidden.has(b.class));
-    const canLower = conf.get() > 0.05 && hasVisibleCandidates;
-    if (hiddenAtConf > 0) {
-      return (
-        <p class="placeholder">
-          {hiddenAtConf === 1 ? '1 detection is' : `${hiddenAtConf} detections are`} hidden by the class filter.{' '}
-          {props.onShowAll ? (
-            <button type="button" class="inline" onclick={props.onShowAll}>
-              Show all classes
-            </button>
-          ) : null}
-          {props.onShowAll && canLower ? ' · ' : null}
-          {canLower ? (
-            <button type="button" class="inline" onclick={() => conf.set(Math.max(0.01, +(conf.get() / 2).toFixed(2)))}>
-              Lower the threshold
-            </button>
-          ) : null}
-        </p>
-      );
-    }
-    if (props.hidden.size > 0 && !hasVisibleCandidates) {
-      return (
-        <p class="placeholder">
-          No detections at conf ≥ {conf.get().toFixed(2)} — every detected class is hidden.{' '}
-          {props.onShowAll ? (
-            <button type="button" class="inline" onclick={props.onShowAll}>
-              Show all classes
-            </button>
-          ) : null}
-        </p>
-      );
-    }
-    return (
-      <p class="placeholder">
-        No detections at conf ≥ {conf.get().toFixed(2)}
-        {props.hidden.size ? ' in the visible classes' : ''}.{' '}
-        {canLower ? (
-          <button type="button" class="inline" onclick={() => conf.set(Math.max(0.01, +(conf.get() / 2).toFixed(2)))}>
-            Lower the threshold
-          </button>
-        ) : null}
-      </p>
-    );
-  };
+  const hiddenAtConf = computed(() => props.result?.boxes.length ?? 0);
+  const hasVisibleCandidates = computed(() => !props.hidden.size || !!props.pred?.boxes.some((b) => !props.hidden.has(b.class)));
+  const canLower = computed(
+    () =>
+      conf.get() > 0.05 &&
+      hasVisibleCandidates.get() &&
+      (props.maxDet === undefined || hiddenAtConf.get() < props.maxDet),
+  );
+  const emptyMode = computed<'hidden' | 'all-hidden' | 'none'>(() =>
+    hiddenAtConf.get() > 0 ? 'hidden' : props.hidden.size > 0 && !hasVisibleCandidates.get() ? 'all-hidden' : 'none',
+  );
 
   return (
     <div class="results" class:rail={!!props.rail}>
@@ -211,7 +177,41 @@ export default function ResultsPanel(props: ResultsPanelProps) {
             /* Candidates are fetched down to the lowest threshold (FETCH): none means no threshold would show more. */
             <p class="placeholder">The model found nothing in this image, even at conf ≥ {FETCH.conf}.</p>
           ) : props.rows.length === 0 ? (
-            emptyDetections()
+            emptyMode.get() === 'hidden' ? (
+              <p class="placeholder">
+                {hiddenAtConf.get() === 1 ? '1 detection is' : `${hiddenAtConf.get()} detections are`} hidden by the class filter.{' '}
+                {props.onShowAll ? (
+                  <button type="button" class="inline" onclick={props.onShowAll}>
+                    Show all classes
+                  </button>
+                ) : null}
+                {props.onShowAll && canLower.get() ? ' · ' : null}
+                {canLower.get() ? (
+                  <button type="button" class="inline" onclick={() => conf.set(Math.max(0.01, +(conf.get() / 2).toFixed(2)))}>
+                    Lower the threshold
+                  </button>
+                ) : null}
+              </p>
+            ) : emptyMode.get() === 'all-hidden' ? (
+              <p class="placeholder">
+                No detections at conf ≥ {conf.get().toFixed(2)} — every detected class is hidden.{' '}
+                {props.onShowAll ? (
+                  <button type="button" class="inline" onclick={props.onShowAll}>
+                    Show all classes
+                  </button>
+                ) : null}
+              </p>
+            ) : (
+              <p class="placeholder">
+                No detections at conf ≥ {conf.get().toFixed(2)}
+                {props.hidden.size ? ' in the visible classes' : ''}.{' '}
+                {canLower.get() ? (
+                  <button type="button" class="inline" onclick={() => conf.set(Math.max(0.01, +(conf.get() / 2).toFixed(2)))}>
+                    Lower the threshold
+                  </button>
+                ) : null}
+              </p>
+            )
           ) : (
             <>
               {summary.get() ? (

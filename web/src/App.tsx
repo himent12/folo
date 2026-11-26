@@ -72,9 +72,19 @@ export default function App(props: AppProps) {
     flush();
   };
 
+  const isStalePaletteOpen = () => {
+    const paletteEl = document.querySelector<HTMLDialogElement>('dialog.palette');
+    return paletteOpen.peek() && !!paletteEl && !paletteEl.open;
+  };
+
   const openPalette = () => {
     closeShortcuts();
+    if (isStalePaletteOpen()) {
+      paletteOpen.set(false);
+      flush();
+    }
     paletteOpen.set(true);
+    if (paletteComp.peek()) flush();
   };
 
   const openShortcuts = () => {
@@ -117,20 +127,12 @@ export default function App(props: AppProps) {
       palette: () => {
         // Native <dialog> sets `el.open = false` synchronously on Escape before firing its queued `close` event:
         // if Ctrl+K lands in that window while `paletteOpen` is still true, reopen instead of toggling closed.
-        const paletteEl = document.querySelector<HTMLDialogElement>('dialog.palette');
-        const staleOpen = paletteOpen.peek() && !!paletteEl && !paletteEl.open;
-        const opening = staleOpen || !paletteOpen.peek();
-        if (opening) {
-          closeShortcuts();
-          if (staleOpen) {
-            paletteOpen.set(false);
-            flush();
-          }
+        if (isStalePaletteOpen() || !paletteOpen.peek()) {
+          openPalette();
         } else {
           pendingQuery = '';
+          paletteOpen.set(false);
         }
-        paletteOpen.set(opening);
-        if (opening && paletteComp.peek()) flush();
       },
       shortcuts: openShortcuts,
       // Only preload on a real G-chord (guarded in installShortcuts against typing, modifiers, open dialogs, and singleKeys off).

@@ -831,4 +831,75 @@ describe('Playground: the rail (from 1024 px)', () => {
     flushSync();
     expect(target.querySelectorAll('#pg-panel tbody tr').length).toBe(initialRows);
   });
+
+  it('suppresses Lower the threshold when maxDet is saturated by hidden boxes and restores the row on Show all classes', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    vi.spyOn(hub.api, 'predict').mockResolvedValue({
+      model_id: 'm_shapes_s',
+      image: { width: 640, height: 640 },
+      boxes: [
+        { class: 0, name: 'circle', score: 0.9, x1: 10, y1: 10, x2: 100, y2: 100 },
+        { class: 1, name: 'square', score: 0.15, x1: 120, y1: 120, x2: 200, y2: 200 },
+      ],
+      timing: { preprocess_ms: 1, inference_ms: 2, postprocess_ms: 1, total_ms: 4 },
+      device: 'cpu',
+      cold: false,
+    });
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_s&conf=0.25&max=1');
+    c = mount(Playground, { target });
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => target.querySelectorAll('#pg-panel tbody tr').length === 1, '1 detection at maxDet=1');
+
+    // Hide circle (the 0.90 box filling maxDet=1): Lower the threshold cannot admit the 0.15 square box.
+    tab('Classes').click();
+    flushSync();
+    target.querySelector<HTMLButtonElement>('#pg-panel ul.counts button[aria-pressed]')!.click();
+    flushSync();
+    tab('Detections').click();
+    flushSync();
+
+    const placeholder = target.querySelector<HTMLElement>('#pg-panel p.placeholder')!;
+    expect(text(placeholder)).toContain('1 detection is hidden by the class filter');
+    expect(text(placeholder)).not.toContain('Lower the threshold');
+    const showAll = [...placeholder.querySelectorAll<HTMLButtonElement>('button')].find((b) => text(b) === 'Show all classes')!;
+    showAll.click();
+    flushSync();
+    expect(target.querySelectorAll('#pg-panel tbody tr').length).toBe(1);
+  });
+
+  it('keeps keyboard focus on Lower the threshold when stepping confidence down while still empty', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    vi.spyOn(hub.api, 'predict').mockResolvedValue({
+      model_id: 'm_shapes_s',
+      image: { width: 640, height: 640 },
+      boxes: [{ class: 1, name: 'square', score: 0.15, x1: 120, y1: 120, x2: 200, y2: 200 }],
+      timing: { preprocess_ms: 1, inference_ms: 2, postprocess_ms: 1, total_ms: 4 },
+      device: 'cpu',
+      cold: false,
+    });
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_s&conf=0.80');
+    c = mount(Playground, { target });
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => target.querySelector('#pg-panel p.placeholder button'), 'Lower the threshold button');
+
+    const btn = target.querySelector<HTMLButtonElement>('#pg-panel p.placeholder button')!;
+    expect(text(btn)).toBe('Lower the threshold');
+    btn.focus();
+    expect(document.activeElement).toBe(btn);
+    btn.click();
+    flushSync();
+    expect(text(target.querySelector('#pg-panel p.placeholder'))).toContain('0.40');
+    expect(target.querySelector('#pg-panel p.placeholder button')).toBe(btn);
+    expect(document.activeElement).toBe(btn);
+  });
 });

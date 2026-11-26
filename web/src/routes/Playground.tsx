@@ -671,6 +671,7 @@ export default function Playground() {
       json={json.get()}
       pred={pred.get()}
       bind:conf={conf}
+      maxDet={maxDet.get()}
       hidden={hidden.get()}
       bind:tbody={tbody}
       tabRow={tabRow.get()}

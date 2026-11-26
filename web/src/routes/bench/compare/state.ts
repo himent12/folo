@@ -215,7 +215,6 @@ export function compareState() {
 
   return {
     id,
-    ids,
     live,
     bench,
     unsupported,
