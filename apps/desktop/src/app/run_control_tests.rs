@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use folo_ui::{HeadlessApp, WindowHandle};
 
-use super::tests::{drive, open, open_with};
+use super::tests::{drive, open, open_with, wait_for_held};
 use super::{FoloApp, Route};
 use crate::api::mock::MockBackend;
 use crate::api::{Run, RunEvent, RunStatus, StatusEvent};
@@ -52,17 +52,8 @@ fn a_stop_answered_after_the_stream_said_the_run_completed_leaves_it_completed()
         this.drain_streams(cx);
     });
     stop.release();
-    // Until the answer is in: the run-list read it asks for is then held. Bounded only to fail clearly
-    // (as `Held::wait_held` is) if that read never comes.
-    let asked = std::time::Instant::now();
-    while !lists.1.is_held() {
-        assert!(
-            asked.elapsed() < std::time::Duration::from_secs(10),
-            "the stop's answer asked for no run list"
-        );
-        app.run_until_held(2);
-        std::thread::yield_now();
-    }
+    // Until the answer is in: the run-list read it asks for is then held.
+    wait_for_held(&mut app, window, &lists.1, false, "the stop's answer asked for no run list");
     let name = step(&mut app, window, 2, |this, _| {
         let r = this.store.run(LIVE).unwrap();
         assert_eq!(r.status, RunStatus::Completed, "the stream's state stays");
@@ -104,15 +95,7 @@ fn a_run_list_asked_before_the_end_does_not_undo_it() {
     before.release();
     app.run_until_held(2);
     stop.release();
-    let asked = std::time::Instant::now();
-    while !after.is_held() {
-        assert!(
-            asked.elapsed() < std::time::Duration::from_secs(10),
-            "the stop's answer asked for no run list"
-        );
-        app.run_until_held(2);
-        std::thread::yield_now();
-    }
+    wait_for_held(&mut app, window, &after, false, "the stop's answer asked for no run list");
     step(&mut app, window, 2, |this, _| {
         assert_eq!(this.store.run(LIVE).unwrap().status, RunStatus::Completed, "the end stays");
         let titles = titles(this);
@@ -153,15 +136,7 @@ fn a_stop_answered_while_the_run_is_shown_active_again_adds_no_toast() {
         });
         stop.release();
         // Until the answer is in: the run-list read it asks for is then held.
-        let asked = std::time::Instant::now();
-        while !list.is_held() {
-            assert!(
-                asked.elapsed() < std::time::Duration::from_secs(10),
-                "the stop's answer asked for no run list"
-            );
-            app.run_until_held(1);
-            std::thread::yield_now();
-        }
+        wait_for_held(&mut app, window, &list, false, "the stop's answer asked for no run list");
         step(&mut app, window, 1, |this, _| {
             assert_eq!(this.store.run(LIVE).unwrap().status, again, "what is shown stays");
             assert!(titles(this).is_empty(), "{again:?}: {:?}", titles(this));

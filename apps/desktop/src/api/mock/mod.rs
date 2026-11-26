@@ -10,6 +10,8 @@ mod datasets;
 mod events;
 mod fixtures;
 mod hold;
+#[cfg(test)]
+pub use hold::Held;
 mod predictions;
 mod throughput;
 mod training;

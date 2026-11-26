@@ -244,11 +244,9 @@ fn dropping_image_list_mid_paging_does_not_leak_failed_page() {
     api.fail_images_from_with(IMAGE_PAGE, crate::api::ApiError::new("dataset_not_found", "Gone"), false);
     let (first, second) = (api.hold("images"), api.hold("images"));
     app.update(|cx| window.update(cx, |this, _, cx| this.ensure_dataset("ds_8f2c", cx)).unwrap());
-    app.run_until_held(1);
+    super::tests::wait_for_held(&mut app, window, &first, false, "paging first page");
     drop(first);
-    while !second.is_held() {
-        app.run_until_held(1);
-    }
+    super::tests::wait_for_held(&mut app, window, &second, false, "paging second page");
     app.update(|cx| {
         window
             .update(cx, |this, _, _| {

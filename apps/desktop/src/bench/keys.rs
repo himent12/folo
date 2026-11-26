@@ -58,10 +58,44 @@ impl FoloApp {
         }
     }
 
-    /// Esc: a delete waiting for its second click stands down, else the form on screen closes.
-    /// False when there was none (Esc then goes back a page).
+    /// Esc: closes the inline entry image preview, stands down a delete waiting for its second
+    /// click, or closes the inline form on screen, restoring focus to the triggering control.
+    /// False when none is open on this screen (Esc then goes back a page).
     pub fn dismiss_bench_form(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.bench.confirm_delete.take().is_some() {
+        if let Route::BenchEntry(bid, eid) = &self.route
+            && let Some((_, _, img_id)) =
+                self.bench.selected_entry_image.as_ref().filter(|(sb, se, _)| sb == bid && se == eid).cloned()
+        {
+            let bid = bid.clone();
+            self.bench.selected_entry_image = None;
+            let key = if self.bench_image_failed(&bid, &img_id, None) {
+                format!("eimg-retry-{img_id}")
+            } else {
+                format!("eimg-open-{img_id}")
+            };
+            let fh = self.fh(key, cx);
+            window.focus(&fh);
+            self.reveal_pending = 2;
+            cx.notify();
+            return true;
+        }
+        if let Some((bench, item)) = self.bench.confirm_delete.take()
+            && matches!(&self.route, Route::Bench(cur) if cur == &bench)
+        {
+            let target = match item {
+                None => "bench-del".to_string(),
+                Some(id) => {
+                    let is_loop = self
+                        .bench
+                        .loops
+                        .get(&bench)
+                        .and_then(|l| l.ready())
+                        .is_some_and(|l| l.iter().any(|x| x.id == id));
+                    if is_loop { format!("bench-loop-{id}-del") } else { format!("bench-entry-{id}-del") }
+                }
+            };
+            let fh = self.fh(target, cx);
+            window.focus(&fh);
             cx.notify();
             return true;
         }

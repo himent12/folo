@@ -506,6 +506,7 @@ impl FoloApp {
         let actions: AnyElement = if busy {
             text(ty::SM, t.text_tertiary).child("…").into_any_element()
         } else if confirming {
+            let del_key = format!("{key}-del");
             div()
                 .flex()
                 .gap(px(4.))
@@ -516,8 +517,9 @@ impl FoloApp {
                     None,
                     window,
                     cx,
-                    act(|this, _, cx| {
+                    act(move |this, w, cx| {
                         this.bench.confirm_delete = None;
+                        this.focus_key(&del_key, w, cx);
                         cx.notify();
                     }),
                 ))
@@ -604,14 +606,16 @@ impl FoloApp {
                 )
             });
             let (bid, eid) = (b.id.clone(), e.id.clone());
+            let keep_key = format!("{key}-keep");
             let del_btn = self.icon_button(
                 &format!("{key}-del"),
                 "icons/trash-2.svg",
                 "Delete this entry",
                 window,
                 cx,
-                act(move |this, _, cx| {
+                act(move |this, w, cx| {
                     this.bench.confirm_delete = Some((bid.clone(), Some(eid.clone())));
+                    this.focus_key(&keep_key, w, cx);
                     cx.notify();
                 }),
             );

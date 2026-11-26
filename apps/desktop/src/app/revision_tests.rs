@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use folo_ui::{HeadlessApp, WindowHandle};
 
-use super::tests::{drive, open_with};
+use super::tests::{drive, open_with, wait_for_held};
 use super::{FoloApp, Route};
 use crate::api::mock::MockBackend;
 use crate::store::Load;
@@ -115,8 +115,7 @@ fn a_read_on_its_way_when_the_inspector_opens_leaves_its_list_alone() {
     let now = drive(&mut app, window, |this, _, _| held_from_before(this));
     let read = api.hold("dataset");
     away_and_back(&mut app);
-    app.frame(window.into());
-    app.run_until_held(1);
+    wait_for_held(&mut app, window, &read, true, "dataset read before inspector");
     // (Plain updates while it is held: `drive` waits for every call.)
     app.update(|cx| window.update(cx, |this, w, cx| this.open_inspector(ID.into(), 700, w, cx)).unwrap());
     drop(read);
@@ -140,8 +139,7 @@ fn an_error_answer_under_an_inspector_waits_for_it_to_close() {
     api.break_dataset(ID, "path_not_found", "moved away");
     let read = api.hold("dataset");
     away_and_back(&mut app);
-    app.frame(window.into());
-    app.run_until_held(1);
+    wait_for_held(&mut app, window, &read, true, "dataset read before inspector");
     // (Plain updates while it is held: `drive` waits for every call.)
     app.update(|cx| window.update(cx, |this, w, cx| this.open_inspector(ID.into(), 700, w, cx)).unwrap());
     drop(read);
@@ -291,31 +289,6 @@ fn back_to_the_window_on_overview_and_datasets_rechecks_loaded_cards() {
     }
 }
 
-/// Pumps frames until the expected `images` call count reaches `want_image_calls`, then blocks
-/// cleanly via `wait_held()` (which has its own bounded timeout and does not depend on worker
-/// thread scheduling speed).
-fn wait_for_image_page_hold(
-    app: &mut HeadlessApp,
-    window: WindowHandle<FoloApp>,
-    api: &MockBackend,
-    want_image_calls: usize,
-    wait_held: impl FnOnce(),
-    label: &str,
-) {
-    for _ in 0..64 {
-        if api.image_lists().len() >= want_image_calls {
-            wait_held();
-            return;
-        }
-        app.frame(window.into());
-        app.run_until_held(1);
-    }
-    panic!(
-        "expected held request '{label}' to be dispatched (image_lists len={}, wanted {want_image_calls})",
-        api.image_lists().len()
-    );
-}
-
 /// #382: refreshing a large multi-page dataset after an external edit preserves the user's scroll
 /// place (anchored by `(file, split)`) across paged reloads, including while the later batch is
 /// delayed, when triggered right after closing an open inspector on a non-first-column tile, and
@@ -361,13 +334,12 @@ fn large_dataset_grid_preserves_scroll_position_across_paged_revision_refresh() 
     });
     // Hold page 0 and page 1 in order so we can observe the intermediate state after page 0 lands
     // and before page 1 (containing all Val images) arrives.
-    let base_calls = api.image_lists().len();
     let page0 = api.hold("images");
     let page1 = api.hold("images");
     away_and_back(&mut app);
-    wait_for_image_page_hold(&mut app, window, &api, base_calls + 1, || page0.wait_held(), "page 0");
+    wait_for_held(&mut app, window, &page0, true, "page 0");
     drop(page0);
-    wait_for_image_page_hold(&mut app, window, &api, base_calls + 2, || page1.wait_held(), "page 1");
+    wait_for_held(&mut app, window, &page1, true, "page 1");
     app.frame(window.into());
 
     // A second window activation while page 1 is still pending returns an unchanged dataset record
@@ -422,11 +394,10 @@ fn large_dataset_grid_preserves_scroll_position_across_paged_revision_refresh() 
     });
     away_and_back(&mut app);
     frames(&mut app, window);
-    let insp_base = api.image_lists().len();
     let p0 = api.hold("images");
     let p1 = api.hold("images");
     app.update(|cx| window.update(cx, |this, w, cx| this.close_inspector(w, cx)).unwrap());
-    wait_for_image_page_hold(&mut app, window, &api, insp_base + 1, || p0.wait_held(), "inspector page 0");
+    wait_for_held(&mut app, window, &p0, true, "inspector page 0");
     app.update(|cx| {
         window
             .update(cx, |this, _, _| {
@@ -437,7 +408,7 @@ fn large_dataset_grid_preserves_scroll_position_across_paged_revision_refresh() 
             .unwrap()
     });
     drop(p0);
-    wait_for_image_page_hold(&mut app, window, &api, insp_base + 2, || p1.wait_held(), "inspector page 1");
+    wait_for_held(&mut app, window, &p1, true, "inspector page 1");
     drop(p1);
     app.run_until_idle();
     frames(&mut app, window);
@@ -460,13 +431,12 @@ fn large_dataset_grid_preserves_scroll_position_across_paged_revision_refresh() 
     });
     away_and_back(&mut app);
     frames(&mut app, window);
-    let pal_base = api.image_lists().len();
     let pal_p0 = api.hold("images");
     let pal_p1 = api.hold("images");
     app.update(|cx| window.update(cx, |this, w, cx| this.close_inspector(w, cx)).unwrap());
-    wait_for_image_page_hold(&mut app, window, &api, pal_base + 1, || pal_p0.wait_held(), "palette page 0");
+    wait_for_held(&mut app, window, &pal_p0, true, "palette page 0");
     drop(pal_p0);
-    wait_for_image_page_hold(&mut app, window, &api, pal_base + 2, || pal_p1.wait_held(), "palette page 1");
+    wait_for_held(&mut app, window, &pal_p1, true, "palette page 1");
     app.update(|cx| window.update(cx, |this, w, cx| this.open_palette(w, cx)).unwrap());
     drop(pal_p1);
     app.run_until_idle();
@@ -506,13 +476,12 @@ fn typing_filename_search_during_paged_reload_clears_scroll_anchor() {
     });
     app.frame(window.into());
 
-    let base_calls = api.image_lists().len();
     let page0 = api.hold("images");
     let page1 = api.hold("images");
     away_and_back(&mut app);
-    wait_for_image_page_hold(&mut app, window, &api, base_calls + 1, || page0.wait_held(), "search page 0");
+    wait_for_held(&mut app, window, &page0, true, "search page 0");
     drop(page0);
-    wait_for_image_page_hold(&mut app, window, &api, base_calls + 2, || page1.wait_held(), "search page 1");
+    wait_for_held(&mut app, window, &page1, true, "search page 1");
     app.frame(window.into());
 
     // Simulate user typing into `ds_img_search` (matching the old Val anchor) while page 1 is held.

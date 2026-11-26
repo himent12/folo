@@ -651,3 +651,259 @@ fn page_down_and_page_up_scroll_new_run_dialog_and_playground_side_rail() {
         assert!(run_y > 40., "Page Down still scrolls the run page after submitting New Run (got {run_y})");
     }
 }
+
+/// Sprint 3: `confirm_close` always stacks visually above `palette` and cloud dialogs, and Tab
+/// cycling stays strictly trapped inside the topmost overlay without leaking to `palette`, `synth`,
+/// or `inspector` underneath.
+#[test]
+fn confirm_close_stacks_above_palette_and_traps_tab_across_stacked_overlays() {
+    use folo_ui::Focusable;
+
+    let (mut app, window) = open_at(1280., 800.);
+    app.update(|cx| {
+        crate::app::bind_keys(cx);
+        crate::input::bind_keys(cx);
+    });
+    settle(&mut app, window);
+
+    // 1. `confirm_close` stacked over Command Palette: Tab must never leak to `palette.input`,
+    // and Esc dismisses `confirm_close` while keeping the palette open.
+    drive(&mut app, window, |this, w, cx| {
+        this.open_palette(w, cx);
+        this.confirm_close = Some(vec!["shapes-live".into()]);
+        this.focus_key("close-cancel", w, cx);
+        cx.notify();
+    });
+    app.frame(window.into());
+    for _ in 0..8 {
+        press_key(&mut app, window, "tab", None);
+        drive(&mut app, window, |this, w, cx| {
+            let pal_fh =
+                this.palette.as_ref().expect("palette stays underneath").input.read(cx).focus_handle(cx);
+            assert!(!pal_fh.is_focused(w), "Tab must not leak from confirm_close into palette input");
+            let in_close = ["close-cancel", "close-confirm", "dialog-close"]
+                .iter()
+                .any(|k| this.fh(*k, cx).is_focused(w));
+            assert!(in_close, "Tab stays trapped inside confirm_close");
+        });
+    }
+    press_key(&mut app, window, "escape", None);
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.confirm_close.is_none(), "Esc dismisses confirm_close first");
+        assert!(this.palette.is_some(), "palette stays open beneath confirm_close");
+    });
+    press_key(&mut app, window, "escape", None);
+
+    // 2. `confirm_close` stacked over `synth` dialog: Tab must never leak to `synth` inputs.
+    drive(&mut app, window, |this, w, cx| {
+        this.server_mode = crate::app::ServerMode::Local;
+        this.open_synth(w, cx);
+        this.confirm_close = Some(vec!["shapes-live".into()]);
+        this.focus_key("close-cancel", w, cx);
+        cx.notify();
+    });
+    app.frame(window.into());
+    for _ in 0..8 {
+        press_key(&mut app, window, "tab", None);
+        drive(&mut app, window, |this, w, cx| {
+            let syn = this.synth.as_ref().expect("synth stays underneath");
+            assert!(
+                !syn.name.read(cx).focus_handle(cx).is_focused(w)
+                    && !syn.images.read(cx).focus_handle(cx).is_focused(w),
+                "Tab must not leak from confirm_close into synth inputs"
+            );
+        });
+    }
+}
+
+/// Sprint 3: Benchmarks inline delete confirmations, New loop opener, and Entry image inline
+/// inspector keep keyboard focus intact and respond cleanly to Esc without jumping pages.
+#[test]
+fn bench_inline_delete_new_loop_and_entry_inspector_keyboard_focus_and_esc() {
+    use crate::api::BenchEntryStatus;
+    use crate::bench::BenchTab;
+
+    let (mut app, window) = open_at(1280., 800.);
+    app.update(|cx| {
+        crate::app::bind_keys(cx);
+        crate::input::bind_keys(cx);
+    });
+    let bid = "bn_5e12";
+    drive(&mut app, window, |this, w, cx| this.navigate(Route::Bench(bid.into()), w, cx));
+    settle(&mut app, window);
+
+    // Ensure benchmark isn't active so Delete is enabled.
+    drive(&mut app, window, |this, _, cx| {
+        if let Some(b) = this.bench.list.ready_mut().and_then(|l| l.iter_mut().find(|b| b.id == bid)) {
+            b.active = false;
+        }
+        cx.notify();
+    });
+    app.frame(window.into());
+
+    // 1. Benchmark header Delete -> focuses Keep it -> Esc restores focus to Delete.
+    drive(&mut app, window, |this, w, cx| this.focus_key("bench-del", w, cx));
+    app.frame(window.into());
+    press_key(&mut app, window, "enter", None);
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.bench.confirm_delete, Some((bid.into(), None)));
+        assert!(this.fh("bench-del-cancel", cx).is_focused(w), "Delete moves focus to Keep it");
+    });
+    press_key(&mut app, window, "escape", None);
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.bench.confirm_delete, None);
+        assert_eq!(this.route, Route::Bench(bid.into()), "Esc stands delete down without leaving page");
+        assert!(this.fh("bench-del", cx).is_focused(w), "Esc restores focus to bench-del");
+    });
+
+    // 2. Leaderboard entry Delete -> focuses Keep -> activating Keep restores focus to entry Delete.
+    let done_id = drive(&mut app, window, |this, _, _| {
+        this.bench
+            .entries
+            .get(bid)
+            .and_then(|l| l.ready())
+            .unwrap()
+            .iter()
+            .find(|e| e.status == BenchEntryStatus::Done)
+            .unwrap()
+            .id
+            .clone()
+    });
+    let del_key = format!("bench-entry-{done_id}-del");
+    let keep_key = format!("bench-entry-{done_id}-keep");
+    drive(&mut app, window, |this, w, cx| this.focus_key(&del_key, w, cx));
+    app.frame(window.into());
+    press_key(&mut app, window, "enter", None);
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.fh(&keep_key, cx).is_focused(w), "entry Delete moves focus to Keep");
+    });
+    press_key(&mut app, window, "enter", None);
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.bench.confirm_delete, None);
+        assert!(this.fh(&del_key, cx).is_focused(w), "Keep restores focus to entry Delete");
+    });
+
+    // 3. Loops tab: New loop focuses `bench-loop-teacher`, and Esc closes it returning to `bench-loop-new`.
+    drive(&mut app, window, |this, _, cx| {
+        this.bench.tab = BenchTab::Loops;
+        cx.notify();
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| this.focus_key("bench-loop-new", w, cx));
+    app.frame(window.into());
+    press_key(&mut app, window, "enter", None);
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.bench.new_loop.is_some());
+        assert!(this.fh("bench-loop-teacher", cx).is_focused(w), "New loop focuses teacher select");
+    });
+    press_key(&mut app, window, "escape", None);
+    drive(&mut app, window, |this, w, cx| {
+        assert!(this.bench.new_loop.is_none());
+        assert!(this.fh("bench-loop-new", cx).is_focused(w), "Esc returns focus to New loop button");
+    });
+
+    // 4. Entry image inline inspector: Esc closes the inline preview and returns focus to the tile
+    // instead of navigating away from `Route::BenchEntry`.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::BenchEntry(bid.into(), done_id.clone()), w, cx);
+    });
+    settle(&mut app, window);
+    let first_img = drive(&mut app, window, |this, _, _| {
+        this.bench
+            .entry_images
+            .get(&(bid.into(), done_id.clone()))
+            .and_then(|x| x.page.ready())
+            .expect("entry images loaded")
+            .images[0]
+            .image
+            .id
+            .clone()
+    });
+    let tile_key = format!("eimg-open-{first_img}");
+    drive(&mut app, window, |this, w, cx| this.focus_key(&tile_key, w, cx));
+    app.frame(window.into());
+    press_key(&mut app, window, "enter", None);
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.bench.selected_entry_image.is_some(), "inline entry inspector opened");
+    });
+    press_key(&mut app, window, "escape", None);
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(this.bench.selected_entry_image, None, "Esc closes inline entry inspector");
+        assert_eq!(
+            this.route,
+            Route::BenchEntry(bid.into(), done_id.clone()),
+            "Esc stays on BenchEntry while closing inline preview"
+        );
+        assert!(this.fh(&tile_key, cx).is_focused(w), "Esc returns focus to inspected tile");
+    });
+    press_key(&mut app, window, "escape", None);
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.route, Route::Bench(bid.into()), "second Esc navigates back to benchmark");
+    });
+}
+
+/// Sprint 3: select clamps out-of-bounds initial highlight, supports PageDown/PageUp on long lists,
+/// stays mutually exclusive with Model export menu, and Enter closes a fully-busy export menu.
+#[test]
+fn select_paging_clamped_highlight_and_export_menu_exclusivity() {
+    let (mut app, window) = open_at(1280., 800.);
+    app.update(|cx| {
+        crate::app::bind_keys(cx);
+        crate::input::bind_keys(cx);
+    });
+    settle(&mut app, window);
+
+    // 1. Long class select (20 classes): PageDown jumps 8 options, PageUp jumps back to 0.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Dataset("ds_8f2c".into()), w, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        let ds = this.store.dataset.get_mut("ds_8f2c").and_then(|l| l.ready_mut()).unwrap();
+        ds.classes = (0..20).map(|i| format!("cls_{i:02}")).collect();
+        // Out-of-bounds stored class filter: opening must clamp `menu_hl` to 0 instead of 99.
+        this.ds_class = Some(("ds_8f2c".into(), 99));
+        this.focus_key("ds-class", w, cx);
+        cx.notify();
+    });
+    app.frame(window.into());
+    press_key(&mut app, window, "enter", None);
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.menu_open, Some("ds-class"));
+        assert_eq!(this.menu_hl, 0, "out-of-bounds selected clamps initial highlight to first usable");
+    });
+    press_key(&mut app, window, "pagedown", None);
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.menu_hl, 8, "PageDown advances select highlight by 8");
+    });
+    press_key(&mut app, window, "pageup", None);
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.menu_hl, 0, "PageUp steps select highlight back by 8");
+    });
+    press_key(&mut app, window, "escape", None);
+
+    // 2. Model export menu: opening clears `menu_open`, and Enter closes when all formats are busy.
+    let mid = drive(&mut app, window, |this, w, cx| {
+        let id = this.store.models.ready().unwrap()[0].id.clone();
+        this.navigate(Route::Model(id.clone()), w, cx);
+        id
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        this.menu_open = Some("stale-select");
+        this.exporting.insert((mid.clone(), "folo-f16"));
+        this.exporting.insert((mid.clone(), "onnx"));
+        this.focus_key("model-export", w, cx);
+        cx.notify();
+    });
+    app.frame(window.into());
+    press_key(&mut app, window, "enter", None);
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.export_open, "Enter opens export menu");
+        assert_eq!(this.menu_open, None, "opening export menu clears any open select");
+    });
+    press_key(&mut app, window, "enter", None);
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.export_open, "Enter closes export menu cleanly when all formats are busy");
+    });
+}

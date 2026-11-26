@@ -70,60 +70,40 @@ impl FoloApp {
 
     /// Whether the focused element belongs to the topmost overlay (always true without one).
     fn focus_in_scope(&self, window: &Window, cx: &App) -> bool {
-        let prefixes: &[&str] = if self.confirm_close.is_some() {
-            &["close-", "dialog-close"]
-        } else if self.confirm_delete.is_some() {
-            &["del-", "dialog-close"]
-        } else if self.confirm_stop.is_some() {
-            &["stop-", "dialog-close"]
-        } else if self.cloud.disconnect.is_some() {
-            &["cd-", "dialog-close"]
-        } else if self.cloud.terminate.is_some() {
-            &["ct-", "dialog-close"]
-        } else if self.cloud.connect.is_some() {
-            &["cc-", "dialog-close"]
-        } else if self.new_run.is_some() {
-            &["nr-", "dialog-close"]
-        } else if self.synth.is_some() {
-            &["syn-", "dialog-close"]
-        } else if self.inspector.is_some() {
-            &["insp-"]
-        } else if self.palette.is_some() {
-            &[]
-        } else {
-            return true;
-        };
-        let focus = self.focus.borrow();
-        if focus.iter().any(|(k, fh)| prefixes.iter().any(|p| k.starts_with(p)) && fh.is_focused(window)) {
-            return true;
-        }
-        if let Some(f) = &self.new_run
-            && self.confirm_stop.is_none()
-            && self.confirm_delete.is_none()
-            && self.confirm_close.is_none()
-            && [&f.name, &f.epochs_input, &f.lr_input, &f.close_input, &f.hours_input]
+        let has_prefix = |prefixes: &[&str]| {
+            self.focus
+                .borrow()
                 .iter()
-                .any(|i| i.read(cx).focus_handle(cx).is_focused(window))
-        {
-            return true;
+                .any(|(k, fh)| prefixes.iter().any(|p| k.starts_with(p)) && fh.is_focused(window))
+        };
+        if self.confirm_close.is_some() {
+            has_prefix(&["close-", "dialog-close"])
+        } else if self.confirm_delete.is_some() {
+            has_prefix(&["del-", "dialog-close"])
+        } else if self.confirm_stop.is_some() {
+            has_prefix(&["stop-", "dialog-close"])
+        } else if self.cloud.disconnect.is_some() {
+            has_prefix(&["cd-", "dialog-close"])
+        } else if self.cloud.terminate.is_some() {
+            has_prefix(&["ct-", "dialog-close"])
+        } else if let Some(f) = &self.cloud.connect {
+            has_prefix(&["cc-", "dialog-close"])
+                || f.fields.iter().chain([&f.name]).any(|i| i.read(cx).focus_handle(cx).is_focused(window))
+        } else if let Some(f) = &self.new_run {
+            has_prefix(&["nr-", "dialog-close"])
+                || [&f.name, &f.epochs_input, &f.lr_input, &f.close_input, &f.hours_input]
+                    .iter()
+                    .any(|i| i.read(cx).focus_handle(cx).is_focused(window))
+        } else if let Some(f) = &self.synth {
+            has_prefix(&["syn-", "dialog-close"])
+                || [&f.name, &f.images].iter().any(|i| i.read(cx).focus_handle(cx).is_focused(window))
+        } else if self.inspector.is_some() {
+            has_prefix(&["insp-"]) || self.inspector_focus.is_focused(window)
+        } else if let Some(p) = &self.palette {
+            p.input.read(cx).focus_handle(cx).is_focused(window)
+        } else {
+            true
         }
-        if let Some(f) = &self.cloud.connect
-            && self.confirm_close.is_none()
-            && self.cloud.disconnect.is_none()
-            && self.cloud.terminate.is_none()
-            && f.fields.iter().chain([&f.name]).any(|i| i.read(cx).focus_handle(cx).is_focused(window))
-        {
-            return true;
-        }
-        if let Some(f) = &self.synth
-            && [&f.name, &f.images].iter().any(|i| i.read(cx).focus_handle(cx).is_focused(window))
-        {
-            return true;
-        }
-        if let Some(p) = &self.palette {
-            return p.input.read(cx).focus_handle(cx).is_focused(window);
-        }
-        self.inspector.is_some() && self.inspector_focus.is_focused(window)
     }
 
     /// Tab / Shift-Tab, trapped inside the topmost overlay.

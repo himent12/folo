@@ -77,8 +77,9 @@ impl FoloApp {
                     None,
                     window,
                     cx,
-                    act(|this, _, cx| {
+                    act(|this, w, cx| {
                         this.bench.confirm_delete = None;
+                        this.focus_key("bench-del", w, cx);
                         cx.notify();
                     }),
                 )
@@ -119,8 +120,9 @@ impl FoloApp {
                     Some("icons/trash-2.svg"),
                     window,
                     cx,
-                    act(move |this, _, cx| {
+                    act(move |this, w, cx| {
                         this.bench.confirm_delete = Some((bid.clone(), None));
+                        this.focus_key("bench-del-cancel", w, cx);
                         cx.notify();
                     }),
                 )

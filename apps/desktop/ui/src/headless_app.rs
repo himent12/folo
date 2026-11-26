@@ -113,6 +113,12 @@ impl HeadlessApp {
         self.dispatcher().run_until_held(held);
     }
 
+    /// Pumps queued foreground work and due timers, waiting up to `timeout` for dispatcher progress
+    /// when background jobs are still running. Returns `true` if any work ran or completed.
+    pub fn pump_progress(&mut self, timeout: Duration) -> bool {
+        self.dispatcher().pump_progress(timeout)
+    }
+
     /// Advances the fake clock (due timers run, in order, each followed by a pump), then `run_until_idle`.
     pub fn advance_clock(&mut self, duration: Duration) {
         self.dispatcher().advance_clock(duration);

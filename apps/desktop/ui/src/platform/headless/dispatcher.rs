@@ -43,6 +43,8 @@ pub(crate) struct DispatcherState {
     pub(crate) delayed: Vec<(Instant, Runnable)>,
     /// Background jobs queued or running.
     pub(crate) outstanding: usize,
+    /// Monotonic count of completed background jobs (used by `pump_progress` to detect worker progress).
+    pub(crate) completed: u64,
     /// Pool threads waiting for work.
     pub(crate) idle_workers: usize,
     /// The first panic message of a background job since the last `run_until_idle`.
@@ -89,6 +91,7 @@ impl HeadlessDispatcher {
                     background: VecDeque::new(),
                     delayed: Vec::new(),
                     outstanding: 0,
+                    completed: 0,
                     idle_workers: 0,
                     panic: None,
                     shut_down: false,
@@ -144,6 +147,47 @@ impl HeadlessDispatcher {
                 let outstanding = state.outstanding;
                 drop(state);
                 panic!("run_until_idle: {outstanding} background job(s) still running after {timeout:?}");
+            }
+        }
+    }
+
+    /// Runs queued main-thread runnables and due timers. If none were ready and at least one
+    /// background job is outstanding, waits up to `timeout` for dispatcher progress (a newly
+    /// queued foreground runnable, a due timer, or a completed background job) and drains what
+    /// arrived. Returns `true` if any runnable ran or any background job completed, `false` if
+    /// `timeout` elapsed with no dispatcher progress (for example, every outstanding job is parked
+    /// in a test hold) or when already idle. Panics if a background job panicked.
+    pub fn pump_progress(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut ran = false;
+        let mut state = self.shared.state.lock();
+        let start_completed = state.completed;
+        loop {
+            if let Some(message) = state.panic.take() {
+                drop(state);
+                panic!("a background job panicked: {message}");
+            }
+            let now = state.now;
+            let runnable = state.foreground.pop_front().or_else(|| take_next_due(&mut state.delayed, now));
+            if let Some(runnable) = runnable {
+                drop(state);
+                runnable.run();
+                ran = true;
+                state = self.shared.state.lock();
+                continue;
+            }
+            if ran || state.completed != start_completed {
+                return true;
+            }
+            if state.outstanding == 0 {
+                return false;
+            }
+            if self.shared.progress.wait_until(&mut state, deadline).timed_out()
+                && state.foreground.is_empty()
+                && !state.delayed.iter().any(|(due, _)| *due <= state.now)
+                && state.completed == start_completed
+            {
+                return false;
             }
         }
     }
@@ -290,6 +334,7 @@ fn worker(shared: Arc<Shared>) {
             let result = catch_unwind(AssertUnwindSafe(|| runnable.run()));
             state = shared.state.lock();
             state.outstanding -= 1;
+            state.completed = state.completed.wrapping_add(1);
             if let Err(payload) = result {
                 state.panic.get_or_insert_with(|| panic_message(payload.as_ref()));
             }
