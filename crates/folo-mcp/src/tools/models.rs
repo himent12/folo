@@ -14,7 +14,8 @@ use super::Progress;
 use super::arguments::check_unit;
 use super::dispatch::join;
 use super::results::{
-    MAX_NAME_CHARS, MAX_RESULT_BYTES, Output, json_len, out, page_of, short, summary_classes,
+    MAX_NAME_CHARS, MAX_RESULT_BYTES, Output, json_len, out, page_of_window, page_window, short,
+    summary_classes,
 };
 use crate::batch_cache::MAX_BATCH_BYTES;
 use crate::errors::{Error, invalid_arguments};
@@ -29,6 +30,7 @@ const MAX_FAILURES: usize = 50;
 
 impl Inner {
     pub(super) async fn list_models(&self, a: PageArgs) -> Result<Output, Error> {
+        let (offset, limit) = page_window(a.cursor.as_deref(), a.limit)?;
         let all = self.blocking(|s| s.list_models()).await?;
         let items: Vec<ModelSummary> = all
             .into_iter()
@@ -48,7 +50,7 @@ impl Inner {
                 about: m.about,
             })
             .collect();
-        let page = page_of(items, a.cursor.as_deref(), a.limit)?;
+        let page = page_of_window(items, offset, limit);
         let summary = format!("{} of {} models", page.items.len(), page.total);
         out(&page, summary)
     }
@@ -56,6 +58,11 @@ impl Inner {
     pub(super) async fn val(&self, a: ValArgs, progress: &mut Progress) -> Result<Output, Error> {
         check_unit("conf", a.conf)?;
         check_unit("iou", a.iou)?;
+        if let Some(s) = a.imgsz
+            && (!s.is_multiple_of(32) || !(32..=4096).contains(&s))
+        {
+            return Err(invalid_arguments(format!("imgsz must be a multiple of 32 in 32..=4096, got {s}")));
+        }
         self.ensure_dataset(&a.dataset_id).await?;
         progress.report(0.0, Some(1.0), false).await;
         let req = ValRequest {
@@ -152,9 +159,8 @@ impl Inner {
     ) -> Result<Output, Error> {
         check_unit("conf", a.conf)?;
         check_unit("iou", a.iou)?;
-        let model_id = a.model_id.clone();
-        let model = self.blocking(move |s| s.get_model(&model_id)).await?;
-        let paths: Vec<(String, BatchPath)> = match (a.paths, a.glob) {
+        // Validate input source shape and bounds before hitting the store or proxy server.
+        let batch_input = match (a.paths, a.glob) {
             (Some(paths), None) => {
                 if paths.len() > MAX_BATCH {
                     return Err(too_many_inputs(format!("{} paths given, at most {MAX_BATCH}", paths.len())));
@@ -162,6 +168,15 @@ impl Inner {
                 if paths.is_empty() {
                     return Err(invalid_arguments("paths must not be empty"));
                 }
+                Ok(paths)
+            }
+            (None, Some(g)) => Err(g),
+            _ => return Err(invalid_arguments("give exactly one of paths or glob")),
+        };
+        let model_id = a.model_id.clone();
+        let model = self.blocking(move |s| s.get_model(&model_id)).await?;
+        let paths: Vec<(String, BatchPath)> = match batch_input {
+            Ok(paths) => {
                 let policy = self.paths.clone();
                 let resolve = move || {
                     paths
@@ -171,7 +186,7 @@ impl Inner {
                 };
                 tokio::task::spawn_blocking(resolve).await.map_err(join)??
             }
-            (None, Some(g)) => {
+            Err(g) => {
                 let paths = self.paths.clone();
                 let found =
                     tokio::task::spawn_blocking(move || paths.expand_glob(&g)).await.map_err(join)??;
@@ -180,7 +195,6 @@ impl Inner {
                 }
                 found.into_iter().map(|p| (folo_api::json::path(&p), BatchPath::Ready(p))).collect()
             }
-            _ => return Err(invalid_arguments("give exactly one of paths or glob")),
         };
         let started = Instant::now();
         let total = paths.len() as f64;
@@ -330,4 +344,108 @@ pub(super) fn decode_image_base64(b64: &str, max: u64) -> Result<Vec<u8>, Error>
         return Err(too_large("image_base64"));
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+    use crate::Options;
+    use crate::proxy::HttpStore;
+    use crate::server::FoloMcp;
+
+    /// `list_models`, `list_runs`, `list_label_jobs`, `list_benchmarks`, `val`, and `predict_batch` validate
+    /// paging and argument ranges before hitting the store or proxy server, keeping embedded and `--server`
+    /// error codes identical even when the server is unreachable.
+    #[tokio::test]
+    async fn tools_validate_paging_and_args_before_proxy_access() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_bg = Arc::clone(&hits);
+        let accept = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                hits_bg.fetch_add(1, Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        let http = Arc::new(HttpStore::new(&url, None));
+        let home = folo_test_support::TestDir::new("mcp-upfront-validation");
+        let opts = Options {
+            data_dir: home.to_path_buf(),
+            read_only: false,
+            confine: false,
+            device: "cpu".into(),
+            published_weights: None,
+        };
+        let server = FoloMcp::new(http.clone(), Some(http), opts);
+
+        let bad_page = || PageArgs { limit: Some(0), cursor: None };
+        let bad_cursor = || PageArgs { limit: Some(10), cursor: Some("bogus".into()) };
+        assert_eq!(server.inner.list_models(bad_page()).await.err().unwrap().body.code, "invalid_arguments");
+        assert_eq!(
+            server.inner.list_models(bad_cursor()).await.err().unwrap().body.code,
+            "invalid_arguments"
+        );
+        assert_eq!(
+            server
+                .inner
+                .list_runs(ListRunsArgs { status: None, limit: Some(0), cursor: None })
+                .await
+                .err()
+                .unwrap()
+                .body
+                .code,
+            "invalid_arguments"
+        );
+        assert_eq!(
+            server.inner.list_label_jobs(bad_page()).await.err().unwrap().body.code,
+            "invalid_arguments"
+        );
+        assert_eq!(
+            server.inner.list_benchmarks(bad_page()).await.err().unwrap().body.code,
+            "invalid_arguments"
+        );
+
+        // `val` rejects bad `imgsz` before touching the proxy.
+        let val_err = server
+            .inner
+            .val(
+                ValArgs {
+                    model_id: "m_1".into(),
+                    dataset_id: "ds_1".into(),
+                    split: folo_api::Split::Val,
+                    imgsz: Some(33),
+                    conf: 0.001,
+                    iou: 0.7,
+                },
+                &mut Progress::none(),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(val_err.body.code, "invalid_arguments");
+
+        // `predict_batch` rejects empty paths, both paths+glob, or neither before looking up `model_id`.
+        for (paths, glob) in
+            [(Some(vec![]), None), (None, None), (Some(vec!["a.jpg".into()]), Some("*.jpg".into()))]
+        {
+            let err = server
+                .inner
+                .predict_batch(
+                    PredictBatchArgs { model_id: "m_missing".into(), paths, glob, conf: 0.25, iou: 0.7 },
+                    &mut Progress::none(),
+                )
+                .await
+                .err()
+                .unwrap();
+            assert_eq!(err.body.code, "invalid_arguments");
+        }
+
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "invalid arguments must never hit the proxy server");
+        accept.abort();
+        let _ = accept.await;
+    }
 }

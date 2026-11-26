@@ -83,7 +83,7 @@ impl Runs {
         }
         self.restart(e, wanted, None)?;
         self.enqueue(e)?;
-        Ok(self.record(e))
+        self.record(e)
     }
 
     /// Resumes run `e` on a cloud connection with `wanted` ([`Runs::resume_config`]; `compute` set): queued again
@@ -132,6 +132,8 @@ impl Runs {
         r.error_code = None;
         r.eta_s = None;
         st.tail.clear();
+        st.outcome = None;
+        st.interrupted = false;
         st.attempt += 1;
         e.stop.store(false, Ordering::Relaxed);
         mark_resume(&e.metrics_path());

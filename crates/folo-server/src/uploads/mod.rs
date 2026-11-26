@@ -246,18 +246,31 @@ impl Uploads {
         Duration::from_millis(self.idle_ms.load(Ordering::Relaxed))
     }
 
-    /// `400 invalid_body` for a request no session can be made of: a blank name, a dataset format for a model, a
-    /// fingerprint over [`MAX_FINGERPRINT_CHARS`].
+    /// `400 invalid_body` for a request no session can be made of: a blank or control-character name,
+    /// a dataset format for a model, or a blank, control-character, or overlong fingerprint.
     pub fn check(req: &CreateUpload) -> Result<()> {
         let bad = |m: &str| Error::new(StatusCode::BAD_REQUEST, "invalid_body", m);
-        if req.name.trim().is_empty() {
+        let name = req.name.trim();
+        if name.is_empty() {
             return Err(bad("name must not be empty"));
+        }
+        if name.chars().any(char::is_control) {
+            return Err(bad("name must not contain line breaks or other control characters"));
         }
         if req.kind == UploadKind::Model && req.format != DatasetFormat::Auto {
             return Err(bad("format only applies to kind dataset"));
         }
-        if req.fingerprint.as_ref().is_some_and(|f| f.chars().count() > MAX_FINGERPRINT_CHARS) {
-            return Err(bad(&format!("fingerprint is longer than {MAX_FINGERPRINT_CHARS} characters")));
+        if let Some(fp) = req.fingerprint.as_deref() {
+            let trimmed = fp.trim();
+            if trimmed.is_empty() {
+                return Err(bad("fingerprint must not be empty"));
+            }
+            if trimmed.chars().any(char::is_control) {
+                return Err(bad("fingerprint must not contain line breaks or other control characters"));
+            }
+            if trimmed.chars().count() > MAX_FINGERPRINT_CHARS {
+                return Err(bad(&format!("fingerprint is longer than {MAX_FINGERPRINT_CHARS} characters")));
+            }
         }
         Ok(())
     }
@@ -286,7 +299,7 @@ impl Uploads {
             kind: req.kind,
             name: req.name.trim().to_string(),
             format: req.format,
-            fingerprint: req.fingerprint.clone(),
+            fingerprint: req.fingerprint.as_deref().map(|f| f.trim().to_string()),
             dir: guard.disarm(),
             state: Mutex::new(progress),
         });

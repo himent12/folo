@@ -209,3 +209,32 @@ fn unpack_guard_prevents_pipe_deadlock_on_panic() {
         _ => panic!("expected Finish::Failed after unpacker panic"),
     }
 }
+
+/// `Uploads::check` rejects blank/control-char names and blank/control-char/overlong fingerprints,
+/// and `Uploads::create` stores trimmed fingerprints so padded strings match on lookup.
+#[test]
+fn check_rejects_bad_names_and_blank_or_control_fingerprints() {
+    let dir = TestDir::new("uploads-check-validation");
+    let uploads = Uploads::open(dir.path());
+
+    for bad_name in ["", "   ", "bad\nname", "bad\tname"] {
+        let err = Uploads::check(&create_req(UploadKind::Model, bad_name)).unwrap_err();
+        assert_eq!((err.status, err.body.code.as_str()), (StatusCode::BAD_REQUEST, "invalid_body"));
+    }
+
+    for bad_fp in ["", "   ", "fp\n1", "fp\r1", &"f".repeat(super::MAX_FINGERPRINT_CHARS + 1)] {
+        let mut req = create_req(UploadKind::Model, "ok");
+        req.fingerprint = Some(bad_fp.into());
+        let err = Uploads::check(&req).unwrap_err();
+        assert_eq!((err.status, err.body.code.as_str()), (StatusCode::BAD_REQUEST, "invalid_body"));
+    }
+
+    let mut req = create_req(UploadKind::Model, "  ok  ");
+    req.fingerprint = Some("  fp-trimmed  ".into());
+    let u = uploads.create(&req).unwrap();
+    let done = uploads.finish(&u.id).unwrap();
+    assert_eq!(done.name(), "ok");
+    assert_eq!(done.fingerprint(), Some("fp-trimmed"));
+    drop(done);
+    uploads.shutdown();
+}

@@ -582,6 +582,9 @@ impl Store for RealStore {
     }
 
     fn val(&self, req: ValRequest) -> Result<ValReport> {
+        // Validate numeric parameters upfront (matching MockStore::val) before looking up models,
+        // re-indexing datasets, or initialising a GPU context.
+        crate::models::check_val_params(req.imgsz, req.conf, req.iou)?;
         let _gpu = self.idle.using();
         let m = self.model(&req.model_id)?;
         let e = self.entry(&req.dataset_id)?;
@@ -622,7 +625,9 @@ impl Store for RealStore {
 
     fn create_upload(&self, req: CreateUpload) -> Result<UploadCreated> {
         Uploads::check(&req)?;
-        if let Some(existing) = req.fingerprint.as_deref().and_then(|f| self.uploaded(req.kind, f)) {
+        if let Some(existing) =
+            req.fingerprint.as_deref().map(str::trim).and_then(|f| self.uploaded(req.kind, f))
+        {
             return Ok(UploadCreated { upload: None, existing: Some(existing) });
         }
         Ok(UploadCreated { upload: Some(self.uploads.create(&req)?), existing: None })

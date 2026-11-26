@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 use folo_api::{BenchEntryStatus, BenchSource, CreateBench};
 use http::StatusCode;
 
-use super::results::{MAX_RESULT_BYTES, MAX_SUMMARY_CHARS, Output, json_len, out, page_of, short};
+use super::results::{
+    MAX_RESULT_BYTES, MAX_SUMMARY_CHARS, Output, json_len, out, page_of_window, page_window, short,
+};
 use crate::bench::hints::{self, Front};
 use crate::bench::{Benchmarks, Contestant};
 use crate::errors::{Error, invalid_arguments};
@@ -79,8 +81,9 @@ impl Inner {
     }
 
     pub(super) async fn list_benchmarks(&self, a: PageArgs) -> Result<Output, Error> {
+        let (offset, limit) = page_window(a.cursor.as_deref(), a.limit)?;
         let all = self.benchmarks(|b| b.summaries()).await?;
-        let page = page_of(all, a.cursor.as_deref(), a.limit)?;
+        let page = page_of_window(all, offset, limit);
         let names: Vec<String> =
             page.items.iter().take(5).map(|b| format!("{} {}", b.id, short(&b.name, 40))).collect();
         let summary = match page.total {

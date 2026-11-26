@@ -7,7 +7,7 @@ use folo_api::{LabelDatasetRequest, LabelJobStatus, LabelOutcome, StartLabeling}
 use http::StatusCode;
 use rmcp::model::ContentBlock;
 
-use super::results::{Output, fit_page, out, page_of, page_window, short};
+use super::results::{Output, fit_page, out, page_of_window, page_window, short};
 use crate::errors::{Error, invalid_arguments};
 use crate::label::hints::{self, Front};
 use crate::label::{BoxEdit, Labels, looks_absolute};
@@ -82,6 +82,7 @@ impl Inner {
     }
 
     pub(super) async fn list_label_jobs(&self, a: PageArgs) -> Result<Output, Error> {
+        let (offset, limit) = page_window(a.cursor.as_deref(), a.limit)?;
         let c = self.confinement.clone();
         // With --confine, jobs with images outside the data dir are not listed.
         let jobs = self
@@ -90,7 +91,7 @@ impl Inner {
                 Ok(jobs.into_iter().filter(|j| c.label_job(l, &j.id).is_ok()).collect::<Vec<_>>())
             })
             .await?;
-        let page = page_of(jobs, a.cursor.as_deref(), a.limit)?;
+        let page = page_of_window(jobs, offset, limit);
         let names: Vec<String> = page
             .items
             .iter()

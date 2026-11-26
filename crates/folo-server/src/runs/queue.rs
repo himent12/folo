@@ -318,8 +318,11 @@ impl Runs {
             RunStatus::Queued if !st.claimed => {
                 {
                     let mut q = self.queue.lock().unwrap();
+                    let before = q.runs.len();
                     q.runs.retain(|q| q.id != id);
-                    Self::notify_queue(&q);
+                    if q.runs.len() != before {
+                        Self::notify_queue(&q);
+                    }
                 }
                 e.finish(&mut st, RunStatus::Stopped, None);
                 let run = st.file.shown();

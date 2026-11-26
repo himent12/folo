@@ -93,12 +93,47 @@ fn discard_if_empty(run_dir: &Path, out: Out) {
     }
 }
 
+/// Validates an explicit `--name` before opening the dataset or creating any folder under `--project`.
+/// Must be a single safe folder name (no empty/blank value, control characters, path separators, `.` / `..`, or `:`).
+pub(super) fn check_run_name(raw: &str) -> Result<String, CliError> {
+    let bad = |msg: String| {
+        CliError::new(ExitCode::Usage, "invalid_config", msg)
+            .hint("pass a single folder name for --name (e.g. --name shapes-n); use --project for the parent folder")
+    };
+    if raw.chars().any(char::is_control) {
+        return Err(bad("--name must not contain line breaks or other control characters".into()));
+    }
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err(bad("--name must not be empty".into()));
+    }
+    if matches!(name, "." | "..") || name.contains(['/', '\\', ':']) {
+        return Err(bad(format!(
+            "--name `{name}` must be a single folder name (no `/`, `\\`, `:`, `.`, or `..`)"
+        )));
+    }
+    #[cfg(windows)]
+    {
+        if name.bytes().any(|b| matches!(b, b'<' | b'>' | b'"' | b'|' | b'?' | b'*')) {
+            return Err(bad(format!("--name `{name}` contains characters Windows forbids in folder names")));
+        }
+        if name.ends_with('.') {
+            return Err(bad(format!("--name `{name}` must not end with a dot on Windows")));
+        }
+        if name.trim_end_matches(['.', ' ']).eq_ignore_ascii_case("nul") {
+            return Err(bad(format!("--name `{name}` uses the reserved Windows device name NUL")));
+        }
+    }
+    Ok(name.to_string())
+}
+
 fn start(
     args: &TrainArgs,
     out: Out,
     stop: Arc<AtomicBool>,
     nb: Arc<AtomicU64>,
 ) -> Result<(Trainer, PathBuf, RunClaim), CliError> {
+    let explicit_name = args.name.as_deref().map(check_run_name).transpose()?;
     let data_arg = args.data.as_deref().expect("clap requires --data without --resume");
     let (ds, ds_name) = open_dataset(data_arg, crate::dataset::format_of(args.format))?;
     let mut weights = None;
@@ -123,7 +158,7 @@ fn start(
         args.model.clone()
     };
     let suffix = arch.strip_prefix("folo-").unwrap_or(&arch).to_string();
-    let name = args.name.clone().unwrap_or_else(|| format!("{ds_name}-{suffix}"));
+    let name = explicit_name.unwrap_or_else(|| format!("{ds_name}-{suffix}"));
     let mut base = config_of(args, name.clone(), absolute(data_arg), arch, weights_head);
     if let Some(t) = &args.teacher {
         // Resolved now for the error and its `folo weights pull` hint; the trainer resolves it again (and on resume).

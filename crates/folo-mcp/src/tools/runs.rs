@@ -8,7 +8,9 @@ use rmcp::model::JsonObject;
 use serde_json::Value;
 
 use super::arguments::{check_name_at, parse_args};
-use super::results::{MAX_NAME_CHARS, MAX_RESULT_BYTES, Output, json_len, out, page_of, short};
+use super::results::{
+    MAX_NAME_CHARS, MAX_RESULT_BYTES, Output, json_len, out, page_of_window, page_window, short,
+};
 use crate::errors::{Error, invalid_arguments};
 use crate::server::Inner;
 use crate::types::*;
@@ -174,12 +176,13 @@ impl Inner {
     }
 
     pub(super) async fn list_runs(&self, a: ListRunsArgs) -> Result<Output, Error> {
+        let (offset, limit) = page_window(a.cursor.as_deref(), a.limit)?;
         let mut all = self.blocking(|s| s.list_runs()).await?;
         if let Some(st) = a.status {
             all.retain(|r| r.status == st);
         }
         let all: Vec<Run> = all.into_iter().map(run_summary).collect();
-        let page = page_of(all, a.cursor.as_deref(), a.limit)?;
+        let page = page_of_window(all, offset, limit);
         let summary = format!("{} of {} runs", page.items.len(), page.total);
         out(&page, summary)
     }

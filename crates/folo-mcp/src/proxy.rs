@@ -239,12 +239,33 @@ fn static_content_type(ct: &str) -> &'static str {
     }
 }
 
+/// Picks a multipart boundary that does not appear anywhere in `fields` or `image`.
+fn choose_boundary(fields: &[(&str, String)], image: &[u8]) -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let nanos =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0u128, |d| d.as_nanos());
+    loop {
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let candidate = format!("folo-mcp-{nanos:x}-{seq:x}");
+        let needle = candidate.as_bytes();
+        let clashes = image.windows(needle.len()).any(|w| w == needle)
+            || fields.iter().any(|(_, v)| v.contains(&candidate));
+        if !clashes {
+            return candidate;
+        }
+    }
+}
+
 /// A `multipart/form-data` body for `POST /api/predict`.
-fn multipart(fields: &[(&str, String)], image: &[u8]) -> (String, Vec<u8>) {
-    let boundary = format!(
-        "folo-mcp-{:x}",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos())
-    );
+fn multipart(fields: &[(&str, String)], image: &[u8]) -> Result<(String, Vec<u8>), Error> {
+    for (name, value) in fields {
+        if value.contains(['\r', '\n', '\0']) {
+            return Err(crate::errors::invalid_arguments(format!(
+                "{name} must not contain line breaks or NUL bytes"
+            )));
+        }
+    }
+    let boundary = choose_boundary(fields, image);
     let mut body = Vec::with_capacity(image.len() + 512);
     for (name, value) in fields {
         body.extend_from_slice(
@@ -261,7 +282,7 @@ fn multipart(fields: &[(&str, String)], image: &[u8]) -> (String, Vec<u8>) {
     );
     body.extend_from_slice(image);
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    (format!("multipart/form-data; boundary={boundary}"), body)
+    Ok((format!("multipart/form-data; boundary={boundary}"), body))
 }
 
 impl Store for HttpStore {
@@ -474,7 +495,7 @@ impl Store for HttpStore {
                     ("iou", input.iou.to_string()),
                     ("max_det", input.max_det.to_string()),
                 ];
-                let (ct, body) = multipart(&fields, &bytes);
+                let (ct, body) = multipart(&fields, &bytes)?;
                 self.client.send("/predict", &ct, &body).map_err(store_error)
             }
         }
@@ -847,5 +868,18 @@ mod tests {
         assert!(store.has_feature(folo_api::FEATURE_VISION_BENCH).unwrap());
         assert!(store.is_mock());
         assert_eq!(server.requests(), vec!["GET /api/health", "GET /api/health"]);
+    }
+
+    #[test]
+    fn multipart_rejects_header_injection_and_avoids_boundary_collision() {
+        let bad = [("model_id", "m_1\r\n--fake".to_string())];
+        assert_eq!(multipart(&bad, b"img").unwrap_err().body.code, "invalid_arguments");
+        let bad_nul = [("model_id", "m_1\0x".to_string())];
+        assert_eq!(multipart(&bad_nul, b"img").unwrap_err().body.code, "invalid_arguments");
+
+        let fields = [("model_id", "m_1".to_string())];
+        let (ct, body) = multipart(&fields, b"hello--folo-mcp-world").unwrap();
+        let boundary = ct.strip_prefix("multipart/form-data; boundary=").unwrap();
+        assert!(body.windows(boundary.len()).filter(|w| *w == boundary.as_bytes()).count() == 3);
     }
 }

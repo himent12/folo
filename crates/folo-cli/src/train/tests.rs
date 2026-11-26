@@ -501,3 +501,29 @@ fn server_cli_commands_train_the_servers_config() {
         assert_eq!(got, want, "{}", cmd.cli);
     }
 }
+
+/// `--name` rejects blank values, control characters, path separators, `.`/`..`, and `:` before creating any
+/// directory under `--project`, while keeping ordinary names (including spaces, quotes, and leading dashes).
+#[test]
+fn check_run_name_blocks_traversal_and_blank_names() {
+    for ok in ["shapes-n", "  shapes-n  ", "my run 'two'", "--amp", "v1.0"] {
+        assert_eq!(super::check_run_name(ok).unwrap(), ok.trim(), "{ok}");
+    }
+    for bad in ["", "   ", ".", "..", "../escape", "sub/run", r"sub\run", "a:stream", "a\nb", "a\0b"] {
+        let err = super::check_run_name(bad).unwrap_err();
+        assert_eq!(
+            (err.exit, err.code.as_str()),
+            (crate::output::ExitCode::Usage, "invalid_config"),
+            "{bad:?}"
+        );
+    }
+    #[cfg(windows)]
+    for bad in ["bad<name>", "trailing.", "NUL"] {
+        let err = super::check_run_name(bad).unwrap_err();
+        assert_eq!(
+            (err.exit, err.code.as_str()),
+            (crate::output::ExitCode::Usage, "invalid_config"),
+            "{bad:?}"
+        );
+    }
+}

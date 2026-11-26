@@ -179,6 +179,7 @@ impl Runs {
         entries
             .iter()
             .zip(&states)
+            .filter(|(_, st)| !st.deleted)
             .map(|(e, st)| {
                 let mut r = st.file.shown();
                 r.queue_position = q.runs.iter().position(|x| x.id == e.id).map(|i| i as u32 + 1);
@@ -190,18 +191,21 @@ impl Runs {
     /// The API record of run `id` with its place in the queue ([`Run::queue_position`]).
     pub fn snapshot(&self, id: &str) -> Result<Run> {
         let e = self.get(id)?;
-        Ok(self.record(&e))
+        self.record(&e)
     }
 
     /// `e`'s record and its place in the queue, read together (its state, then the queue: the order `stop` and
     /// `move_queued` lock them in), so a run that has a place is `queued`: the worker takes a run off the queue
     /// before it can report `running`, and a stop removes it from the queue under its state lock.
-    pub(super) fn record(&self, e: &RunEntry) -> Run {
+    pub(super) fn record(&self, e: &RunEntry) -> Result<Run> {
         let st = e.state.lock().unwrap();
+        if st.deleted {
+            return Err(Error::not_found("run", &e.id));
+        }
         let mut r = st.file.shown();
         let q = self.queue.lock().unwrap();
         r.queue_position = q.runs.iter().position(|x| x.id == e.id).map(|i| i as u32 + 1);
-        r
+        Ok(r)
     }
 
     /// The 1-based place of run `id` among the waiting runs.
@@ -214,7 +218,8 @@ impl Runs {
     /// leaves the queue). A run that trains, stops, is being started or waits to resume is `409 run_active`, and so
     /// is every active cloud run: its instance may be starting, here or for another process on this data dir.
     pub fn delete(&self, id: &str) -> Result<PathBuf> {
-        // Lock order: registry, then the run's state, then the queue (as the worker and `stop` take them).
+        // Lock order: registry, then the run's state, then the queue, then `active` (matching the worker, `stop`,
+        // and `move_queued`).
         let mut list = self.list.write().unwrap();
         let e = list.iter().find(|e| e.id == id).cloned().ok_or_else(|| Error::not_found("run", id))?;
         let mut st = e.state.lock().unwrap();
@@ -230,8 +235,15 @@ impl Runs {
         }
         if never_started {
             let mut q = self.queue.lock().unwrap();
+            if self.active.lock().unwrap().as_ref().is_some_and(|a| a.id == id) {
+                return Err(Error::conflict("run_active", format!("run '{id}' is still active"))
+                    .hint(format!("stop it first (POST /api/runs/{id}/stop)")));
+            }
+            let before = q.runs.len();
             q.runs.retain(|x| x.id != id);
-            Self::notify_queue(&q);
+            if q.runs.len() != before {
+                Self::notify_queue(&q);
+            }
         }
         st.deleted = true;
         list.retain(|x| x.id != id);
@@ -241,5 +253,70 @@ impl Runs {
             tracing::warn!("removing {}: {err}", e.dir.display());
         }
         Ok(e.dir.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runs::DatasetRef;
+    use crate::store::{LogsQuery, MetricsQuery};
+    use axum::http::StatusCode;
+    use folo_api::{DatasetFormat, TrainConfig};
+    use folo_test_support::TestDir;
+
+    fn sample_run(runs: &Runs, name: &str) -> Arc<RunEntry> {
+        let config: TrainConfig =
+            serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1", "name": name })).unwrap();
+        let dataset = DatasetRef {
+            id: "ds_1".into(),
+            name: "d".into(),
+            path: "nowhere".into(),
+            format: DatasetFormat::Yolo,
+            classes: vec![],
+        };
+        runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap()
+    }
+
+    /// A queued run already popped into `active` by the worker (e.g. waiting on the device gate before `claim()`)
+    /// is being started and must refuse `delete` with `409 run_active` instead of removing its folder underneath
+    /// the worker.
+    #[test]
+    fn delete_refuses_queued_run_being_started_by_worker() {
+        let dir = TestDir::new("runs-delete-active-starting");
+        let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+        let e = sample_run(&runs, "starting");
+
+        *runs.active.lock().unwrap() = Some(e.clone());
+        let err = runs.delete(e.id()).unwrap_err();
+        assert_eq!((err.status, err.body.code.as_str()), (StatusCode::CONFLICT, "run_active"));
+        assert!(e.dir.is_dir(), "refused delete must leave run directory intact");
+
+        *runs.active.lock().unwrap() = None;
+        runs.delete(e.id()).unwrap();
+        assert!(!e.dir.exists());
+        runs.shutdown(None);
+    }
+
+    /// Once a run is marked `deleted`, concurrent readers (`record`, `subscribe`, `subscribe_sse`, `metrics`,
+    /// `logs`, and `list`) never return stale `200 OK` records or empty logs/metrics for it.
+    #[test]
+    fn deleted_run_returns_not_found_across_reads_and_subscriptions() {
+        let dir = TestDir::new("runs-deleted-reads");
+        let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+        let e = sample_run(&runs, "race");
+        let id = e.id().to_string();
+
+        // Simulate the race window where `self.get(id)` returned `e` just before `delete` marked `st.deleted`.
+        e.state.lock().unwrap().deleted = true;
+
+        assert_eq!(runs.record(&e).unwrap_err().status, StatusCode::NOT_FOUND);
+        assert_eq!(runs.snapshot(&id).unwrap_err().status, StatusCode::NOT_FOUND);
+        assert_eq!(runs.subscribe(&id).err().unwrap().status, StatusCode::NOT_FOUND);
+        assert_eq!(runs.subscribe_sse(&id).err().unwrap().status, StatusCode::NOT_FOUND);
+        assert_eq!(runs.metrics(&id, &MetricsQuery::default()).unwrap_err().status, StatusCode::NOT_FOUND);
+        assert_eq!(runs.logs(&id, &LogsQuery::last(10)).unwrap_err().status, StatusCode::NOT_FOUND);
+        assert!(runs.list().is_empty(), "list() must exclude concurrently deleted runs");
+        runs.shutdown(None);
     }
 }
