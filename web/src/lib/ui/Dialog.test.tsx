@@ -68,4 +68,52 @@ describe('Dialog focus return', () => {
     expect(onclose).not.toHaveBeenCalled();
     expect(document.activeElement).toBe(opener);
   });
+
+  it('closes and notifies onclose synchronously on cancel and Close click before an async native close event fires', () => {
+    const opener = document.createElement('button');
+    opener.textContent = 'Open';
+    document.body.appendChild(opener);
+    opener.focus();
+
+    const open = signal(true);
+    const onclose = vi.fn(() => open.set(false));
+    const view = render(() => <Dialog open={open.get()} title="Confirm" onclose={onclose} />, target);
+    flush();
+
+    const dialog = target.querySelector<HTMLDialogElement>('dialog')!;
+    expect(dialog.open).toBe(true);
+    // Stub `close()` to match Chromium's HTML spec behavior: clears `open` synchronously without firing `close` yet.
+    const closeSpy = vi.spyOn(dialog, 'close').mockImplementation(() => {
+      dialog.open = false;
+    });
+    try {
+      // Simulate Chromium Escape: `cancel` fires synchronously, while `close` is queued for a later task.
+      const cancel = new Event('cancel', { cancelable: true });
+      dialog.dispatchEvent(cancel);
+      expect(cancel.defaultPrevented).toBe(true);
+      expect(dialog.open).toBe(false);
+      expect(onclose).toHaveBeenCalledTimes(1);
+      expect(document.activeElement).toBe(opener);
+
+      // Late queued `close` event must not fire `onclose` a second time.
+      dialog.dispatchEvent(new Event('close'));
+      expect(onclose).toHaveBeenCalledTimes(1);
+
+      // Reopen immediately (same tick, without an intermediate flush) and dismiss via Close button.
+      open.set(true);
+      flush();
+      expect(dialog.open).toBe(true);
+      const closeBtn = dialog.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!;
+      closeBtn.click();
+      expect(dialog.open).toBe(false);
+      expect(onclose).toHaveBeenCalledTimes(2);
+      expect(document.activeElement).toBe(opener);
+
+      dialog.dispatchEvent(new Event('close'));
+      expect(onclose).toHaveBeenCalledTimes(2);
+    } finally {
+      closeSpy.mockRestore();
+      view.unmount();
+    }
+  });
 });

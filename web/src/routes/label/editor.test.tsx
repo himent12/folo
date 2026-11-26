@@ -824,4 +824,38 @@ describe('the labeling editor: reviewing', () => {
     await new Promise((r) => setTimeout(r, 0));
     flushSync();
   });
+
+  it('reopens the unsaved-changes confirmation when J is pressed immediately after Escape before the async close event', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    key('j');
+    flushSync();
+    const confirmDlg = asking()!;
+    expect(confirmDlg).toBeDefined();
+
+    // Match Chromium's HTML dialog close steps: `close()` clears `open` synchronously without dispatching `close` yet.
+    const closeSpy = vi.spyOn(confirmDlg, 'close').mockImplementation(() => {
+      confirmDlg.open = false;
+    });
+    try {
+      // Simulate Chromium Escape on the confirmation dialog: `cancel` fires before the queued `close` event.
+      confirmDlg.dispatchEvent(new Event('cancel', { cancelable: true }));
+      expect(confirmDlg.open).toBe(false);
+
+      // Press J immediately before either a framework flush or the queued native `close` event runs: exercises
+      // synchronous `onDialogClose()`, `closedTick`, and `open.peek()` advancing the unbound prop memo.
+      key('j');
+      flushSync();
+      expect(asking()).toBeDefined();
+      expect(confirmDlg.open).toBe(true);
+
+      // A stale queued `close` event arriving after reopen must not dismiss the newly reopened confirmation.
+      confirmDlg.dispatchEvent(new Event('close'));
+      flushSync();
+      expect(asking()).toBeDefined();
+      expect(confirmDlg.open).toBe(true);
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
 });

@@ -7,7 +7,7 @@
  * (`ui/sheetDrag`), and the labelled Close as ever.
  */
 import X from '$icons/x';
-import { bindable, createUniqueId, css, defaults, effect, MediaQuery, onCleanup } from 'fw';
+import { bindable, createUniqueId, css, defaults, effect, MediaQuery, onCleanup, signal, untrack } from 'fw';
 import { media } from '$lib/design/tokens';
 import { backdropClose } from './backdrop';
 import Button from './Button';
@@ -49,20 +49,30 @@ export default function Dialog(props: DialogProps) {
   // Focus returns to the opener on close (browsers that restore it themselves are left alone).
   let restore: (() => void) | null = null;
   let alive = true;
+  let shown = false;
+  // Bumped whenever the native element closes so a same-tick close -> reopen (open: true -> false -> true before
+  // flush) still re-runs the effect and calls `el.showModal()`.
+  const closedTick = signal(0);
   effect(() => {
+    void closedTick.get();
     if (open.get() && !el.open) {
       restore = rememberFocus();
+      shown = true;
       el.showModal();
       backdrop.opened();
       // The dialog itself takes focus (DESIGN_DIRECTION 9), not its first control: the close button would wear the
       // ring when opened from the keyboard. The first Tab reaches the controls; a component that wants a control
       // focused (a picker's checked option) focuses it after the dialog has opened.
       el.focus();
-    } else if (!open.get() && el.open) el.close();
+    } else if (!open.get() && el.open) {
+      el.close();
+      untrack(onDialogClose);
+    }
   });
 
   onCleanup(() => {
     alive = false;
+    shown = false;
     const r = restore;
     restore = null;
     if (el?.open) el.close();
@@ -70,10 +80,15 @@ export default function Dialog(props: DialogProps) {
   });
 
   function onDialogClose() {
-    if (!alive || el?.open) return;
+    if (!alive || el?.open || !shown) return;
+    shown = false;
+    closedTick.set((n) => n + 1);
     open.set(false);
     status.clear();
     p.onclose?.();
+    // Advance an unbound prop's memoized getter to the closed value before returning, so an immediate same-tick
+    // reopen (e.g. Escape -> J before flush) transitions false -> true instead of being shadowed by `open.set(false)`.
+    void open.peek();
     const r = restore;
     restore = null;
     r?.();
@@ -81,7 +96,10 @@ export default function Dialog(props: DialogProps) {
 
   /** Closes the dialog unless `onbeforeclose` keeps it open. */
   function dismiss() {
-    if (!p.onbeforeclose || p.onbeforeclose()) el.close();
+    if (!p.onbeforeclose || p.onbeforeclose()) {
+      el.close();
+      onDialogClose();
+    }
   }
 
   // A click whose target is the <dialog> itself landed on the backdrop: it closes the dialog when it also started there,
@@ -97,7 +115,15 @@ export default function Dialog(props: DialogProps) {
       aria-describedby={p.description ? `${uid}-desc` : undefined}
       onclose={onDialogClose}
       oncancel={(e) => {
-        if (p.onbeforeclose && !p.onbeforeclose()) e.preventDefault();
+        if (p.onbeforeclose && !p.onbeforeclose()) {
+          e.preventDefault();
+          return;
+        }
+        // Native Escape closes `<dialog>` synchronously but queues `close` asynchronously; finish closing now so
+        // callers never observe stale open state between Escape and the queued `close` event.
+        e.preventDefault();
+        el.close();
+        onDialogClose();
       }}
       onpointerdown={backdrop.onpointerdown}
       onmousedown={backdrop.onmousedown}
