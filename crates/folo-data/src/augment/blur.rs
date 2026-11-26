@@ -95,16 +95,25 @@ pub fn box_blur(img: &mut Image, radius: u32) {
     for_rows(&mut tmp, stride, |y, dst_row| {
         let src_row = &src_data[y * stride..(y + 1) * stride];
         let mut sum = [0u64; 3];
-        // Initialize window centered at x = 0: `r + 1` copies of pixel 0, plus pixels `1..=r` clamped.
+        // Initialize window centered at x = 0: `r + 1` copies of pixel 0, pixels `1..=min(r, w - 1)`,
+        // plus any clamped copies of pixel `w - 1` when `r >= w`.
         let r0 = r as u64 + 1;
         sum[0] = src_row[0] as u64 * r0;
         sum[1] = src_row[1] as u64 * r0;
         sum[2] = src_row[2] as u64 * r0;
-        for dx in 1..=r {
-            let ix = dx.min(w - 1) * 3;
+        let last_x = r.min(w - 1);
+        for dx in 1..=last_x {
+            let ix = dx * 3;
             sum[0] += src_row[ix] as u64;
             sum[1] += src_row[ix + 1] as u64;
             sum[2] += src_row[ix + 2] as u64;
+        }
+        let right_clamped = (r as u64).saturating_sub((w - 1) as u64);
+        if right_clamped > 0 {
+            let ix = (w - 1) * 3;
+            sum[0] += src_row[ix] as u64 * right_clamped;
+            sum[1] += src_row[ix + 1] as u64 * right_clamped;
+            sum[2] += src_row[ix + 2] as u64 * right_clamped;
         }
         for x in 0..w {
             let d = x * 3;
@@ -134,14 +143,14 @@ pub fn box_blur(img: &mut Image, radius: u32) {
             }
         }
         let first_in = y0.saturating_sub(r);
-        let last_in = y0.saturating_add(r).min(h - 1);
+        let last_in = (y0 as u64 + r as u64).min((h - 1) as u64) as usize;
         for sy in first_in..=last_in {
             let srow = &tmp_ref[sy * stride..(sy + 1) * stride];
             for (acc, &v) in col_sum.iter_mut().zip(srow) {
                 *acc += v as u64;
             }
         }
-        let bot_clamped = y0.saturating_add(r).saturating_sub(h - 1) as u64;
+        let bot_clamped = (y0 as u64 + r as u64).saturating_sub((h - 1) as u64);
         if bot_clamped > 0 {
             let row_last = &tmp_ref[(h - 1) * stride..h * stride];
             for (acc, &v) in col_sum.iter_mut().zip(row_last) {
@@ -260,8 +269,9 @@ pub fn random_blur(sample: &mut Sample, cfg: &BlurConfig, rng: &mut Rng) -> bool
     if sample.image.width == 0 || sample.image.height == 0 {
         return false;
     }
-    let span = (cfg.max_radius - cfg.min_radius) as usize + 1;
-    let radius = cfg.min_radius + rng.below(span) as u32;
+    let span = cfg.max_radius as u64 - cfg.min_radius as u64 + 1;
+    let offset = ((rng.next_u64() as u128 * span as u128) >> 64) as u32;
+    let radius = cfg.min_radius + offset;
     if radius == 0 {
         return false;
     }
@@ -386,6 +396,13 @@ mod tests {
         let mut tiny_box = Image::new(1, 1, [77, 133, 211]);
         box_blur(&mut tiny_box, 46_341);
         assert_eq!(tiny_box.pixel(0, 0), [77, 133, 211]);
+        // Multi-band (>= 64 KiB) image with radius = u32::MAX must run in O(1) per pixel and preserve uniform
+        // pixels exactly across every band (no 32-bit `y0 + r` saturation undercount).
+        let mut multi_band = Image::new(256, 256, [77, 133, 211]);
+        box_blur(&mut multi_band, u32::MAX);
+        assert_eq!(multi_band.pixel(0, 0), [77, 133, 211]);
+        assert_eq!(multi_band.pixel(128, 200), [77, 133, 211]);
+        assert_eq!(multi_band.pixel(255, 255), [77, 133, 211]);
     }
 
     #[test]
@@ -405,6 +422,17 @@ mod tests {
             assert_eq!(a.boxes, sample.boxes);
             assert_ne!(a.image.data, sample.image.data);
         }
+        // Full u32 radius span (`0..=u32::MAX`) must not overflow 32-bit `usize` or hang.
+        let mut full_span = Sample { image: pattern_image(3, 1), boxes: vec![] };
+        let full_cfg = BlurConfig {
+            prob: 1.0,
+            min_radius: 0,
+            max_radius: u32::MAX,
+            kind: BlurKind::Box,
+            ..Default::default()
+        };
+        assert!(full_cfg.validate().is_ok());
+        assert!(random_blur(&mut full_span, &full_cfg, &mut Rng::new(1)));
         // Invalid configs rejected cleanly.
         assert!(BlurConfig { prob: 1.5, ..Default::default() }.validate().is_err());
         assert!(BlurConfig { min_radius: 3, max_radius: 1, ..Default::default() }.validate().is_err());

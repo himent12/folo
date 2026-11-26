@@ -94,7 +94,14 @@ impl Homography {
         let hn = Homography(self.0.map(|v| v / scale));
         let [a, b, c, d, e, f, g, h, i] = hn.0;
         let det = hn.det();
-        if !det.is_finite() || det.abs() < 1e-12 {
+        let det_scale = (a * e * i)
+            .abs()
+            .max((a * f * h).abs())
+            .max((b * d * i).abs())
+            .max((b * f * g).abs())
+            .max((c * d * h).abs())
+            .max((c * e * g).abs());
+        if !det.is_finite() || det_scale == 0.0 || det.abs() <= 1e-12 * det_scale {
             return None;
         }
         let inv_det = 1.0 / det;
@@ -241,8 +248,9 @@ pub fn warp_perspective(src: &Image, h: &Homography, width: u32, height: u32, bo
     }
     let w = width as usize;
     let h_out = height as usize;
-    let stride = w * 3;
-    let mut out = buffers::scratch(h_out * stride);
+    let stride = w.checked_mul(3).expect("warp_perspective: image dimensions overflow");
+    let total = h_out.checked_mul(stride).expect("warp_perspective: image dimensions overflow");
+    let mut out = buffers::scratch(total);
     let Some(inv) = h.normalized().and_then(|hn| hn.inverse()).and_then(|im| im.normalized()) else {
         let mut img = Image { width, height, data: out };
         img.fill_rect(0, 0, width as i64, height as i64, border);
@@ -704,5 +712,29 @@ mod tests {
             assert_eq!(got_out.image.data, ref_out.image.data, "scale={scale} pixels diverged");
             assert_eq!(got_out.boxes, ref_out.boxes, "scale={scale} boxes diverged");
         }
+
+        // 7. Small-scale + large-translation homographies (where det(H / max|H|) < 1e-12 even though H is
+        // well-conditioned) must invert cleanly and match affine warping for both pixels and boxes.
+        let solid = Sample {
+            image: Image::new(256, 256, [220, 40, 80]),
+            boxes: vec![BBox::from_pixel_xyxy(0, [0.0, 0.0, 256.0, 256.0], 256, 256)],
+        };
+        let tile_aff = Affine::scale(1.0 / 32.0, 1.0 / 32.0).then(&Affine::translate(1024.0, 0.0));
+        let tile_h = Homography::from_affine(&tile_aff);
+        assert!(tile_h.inverse().is_some());
+        let tile_out = perspective_sample(&solid, &tile_h, 1056, 32, &filter);
+        assert_eq!(tile_out.image.pixel(1028, 4), [220, 40, 80]);
+        assert_eq!(tile_out.boxes.len(), 1);
+        let [tx1, ty1, tx2, ty2] = tile_out.boxes[0].pixel_xyxy(1056, 32);
+        assert!((tx1 - 1024.0).abs() < 1e-3 && (tx2 - 1032.0).abs() < 1e-3);
+        assert!(ty1.abs() < 1e-3 && (ty2 - 8.0).abs() < 1e-3);
+
+        // Additional well-conditioned large-translation / small-scale inverses and quad correspondences.
+        let aff_thumb = Affine::scale(0.05, 0.05).then(&Affine::translate(1500.0, 1500.0));
+        assert!(Homography::from_affine(&aff_thumb).inverse().is_some());
+        assert!(Homography::from_affine(&Affine::translate(10_001.0, 0.0)).inverse().is_some());
+        let quad_src = [(0.0, 0.0), (1920.0, 0.0), (1920.0, 1080.0), (0.0, 1080.0)];
+        let quad_dst = [(660.0, 660.0), (692.0, 660.0), (692.0, 678.0), (660.0, 678.0)];
+        assert!(Homography::from_quad_correspondence(quad_src, quad_dst).is_some());
     }
 }

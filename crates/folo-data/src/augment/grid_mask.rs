@@ -249,11 +249,11 @@ pub fn random_grid_mask(
     if sample.image.width == 0 || sample.image.height == 0 {
         return false;
     }
-    let span = (cfg.d_max - cfg.d_min) as usize + 1;
-    let d = cfg.d_min + rng.below(span) as u32;
+    let span = cfg.d_max as u64 - cfg.d_min as u64 + 1;
+    let d = cfg.d_min + ((rng.next_u64() as u128 * span as u128) >> 64) as u32;
     let hole = ((d as f64 * cfg.ratio as f64).round() as u32).clamp(1, d);
-    let offset_x = rng.below(d as usize) as u32;
-    let offset_y = rng.below(d as usize) as u32;
+    let offset_x = ((rng.next_u64() as u128 * d as u128) >> 64) as u32;
+    let offset_y = ((rng.next_u64() as u128 * d as u128) >> 64) as u32;
     grid_mask(sample, d, hole, offset_x, offset_y, cfg.fill, filter, rng) > 0
 }
 
