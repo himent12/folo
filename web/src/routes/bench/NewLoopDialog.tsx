@@ -16,7 +16,7 @@
 import Info from '$icons/info';
 import Repeat from '$icons/repeat';
 import TriangleAlert from '$icons/triangle-alert';
-import { bindable, computed, createUniqueId, css, effect, signal, tick, untrack } from 'fw';
+import { bindable, computed, createUniqueId, css, effect, onCleanup, signal, tick, untrack } from 'fw';
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { Arch, Bench, BenchEntry, BenchLoop, BenchSelfLabeling, Dataset, LabelJob, Model, Split, StartBenchLoop } from '$lib/api/types';
@@ -93,10 +93,18 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
   const teacherId = computed(() => teacherChoice.get() ?? props.teacher ?? ranked.get().find(eligible)?.id ?? '');
   const teacher = computed(() => props.models?.find((m) => m.id === teacherId.get()));
 
+  let alive = true;
+  let submitSeq = 0;
+  onCleanup(() => {
+    alive = false;
+    submitSeq++;
+  });
+
   // Every opening starts fresh: no choice made, every field at its default.
   effect(() => {
     if (!open.get()) return;
     untrack(() => {
+      submitSeq++;
       touched.set(false);
       busy.set(false);
       error.set(undefined);
@@ -169,8 +177,9 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
   const readId = computed(() => readEntry.get()?.id ?? null);
   effect(() => {
     const id = readId.get();
+    const isOpen = open.get();
     found.set(null);
-    if (!id) return;
+    if (!isOpen || !id) return;
     let gone = false;
     hub.api.benchResult(benchId.get(), id).then(
       (r) => !gone && found.set({ entry: id, images: r.entry.images, self: r.self_labeling, bestConf: bestF1Conf(r.accuracy) }),
@@ -224,6 +233,7 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
     if (f.bestConf !== null) minConf.set((from !== null ? lowerConfidence(from, f.bestConf) : Math.max(0.05, Math.round(f.bestConf * 100) / 100)).toFixed(2));
     ownThreshold.set(false);
     await tick();
+    if (!alive || !open.peek()) return;
     document.getElementById(`${uid}-conf`)?.focus();
   }
 
@@ -346,19 +356,23 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
       student: { arch: arch.peek() as Arch, epochs: Number(epochs.peek()), imgsz: Number(imgsz.peek()), ...(w !== 'none' ? { weights: w } : {}) },
       ...(n ? { name: n } : {}),
     };
+    const seq = ++submitSeq;
+    const epoch = hub.epoch;
     busy.set(true);
     try {
       const loop = await hub.api.startBenchLoop(props.bench.id, body);
-      open.set(false);
-      props.onstarted(loop);
+      if (hub.epoch !== epoch) return;
+      if (alive && seq === submitSeq) open.set(false);
+      if (alive) props.onstarted(loop);
     } catch (err) {
+      if (!alive || seq !== submitSeq || hub.epoch !== epoch) return;
       // At the field it belongs to when the server's error says which (the students' settings, checked as a run's),
       // else as the form's error.
       const f = err instanceof ApiError ? loopErrorField(err, weights.peek() !== 'none') : null;
       if (f) serverErr.set({ field: f, message: (err as ApiError).message });
       else error.set(err);
     } finally {
-      busy.set(false);
+      if (alive && seq === submitSeq) busy.set(false);
     }
   }
   effect(() => {
@@ -394,6 +408,7 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
   return (
     <Dialog
       bind:open={open}
+      onbeforeclose={() => !busy.peek()}
       size="lg"
       title="New loop"
       description={`Does a model’s own labeling train a better model? Each generation the model labels a pool of images by itself, a student trains on those labels alone, and ${props.bench.name} grades the student, the next generation’s teacher.`}
@@ -418,7 +433,7 @@ export default function NewLoopDialog(props: NewLoopDialogProps) {
               {summary.get()}
             </p>
           )}
-          <Button variant="ghost" onclick={() => open.set(false)}>
+          <Button variant="ghost" disabled={busy.get()} onclick={() => !busy.peek() && open.set(false)}>
             Cancel
           </Button>
           <Gate reason={reason.get()}>

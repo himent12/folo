@@ -74,6 +74,7 @@ export default function ExportDialog(props: ExportDialogProps) {
   /** Whether the server serves the ONNX graph for download (`weights_onnx`), so ONNX skips the server-side file. */
   const onnxDirect = signal(false);
   effect(() => {
+    void hub.epoch;
     if (!open.get()) return;
     let live = true;
     hub.api.system().then(
@@ -82,14 +83,18 @@ export default function ExportDialog(props: ExportDialogProps) {
         switchesOk.set(!!s.features?.includes('export_onnx_switches'));
         onnxDirect.set(!!s.features?.includes('weights_onnx'));
       },
-      () => {},
+      () => {
+        if (!live) return;
+        switchesOk.set(false);
+        onnxDirect.set(false);
+      },
     );
     return () => {
       live = false;
     };
   });
   /** The estimate follows the switches: an f16 ONNX file is about half the size. */
-  const perParam = (f: (typeof formats)[number]) => (f.value === 'onnx' && switchesOk.get() && switches.get().half ? 2.05 : f.bytesPerParam);
+  const perParam = (f: (typeof formats)[number]) => (f.value === 'onnx' && onnxSwitches.get() && switches.get().half ? 2.05 : f.bytesPerParam);
   /** The app's one size format (`bytes`: one decimal, "≈ 18.3 MiB", "≈ 37.0 MiB"). */
   const estimate = (b: number) => bytes(b, prefs.units);
   /** The format of the finished export (the radio may not be shown any more); `file` a direct download. */
@@ -132,15 +137,26 @@ export default function ExportDialog(props: ExportDialogProps) {
   const status = new DialogStatus();
   let run = 0;
   let destroyed = false;
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  let lastModelId = model().id;
+  effect(() => {
+    const mid = model().id;
+    if (mid !== lastModelId) {
+      lastModelId = mid;
+      if (phase.peek() !== 'running') reset();
+    }
+  });
   onCleanup(() => {
     destroyed = true;
+    clearTimeout(copiedTimer);
+    copiedTimer = undefined;
   });
 
   /** An export that ended after the dialog closed: its toast is out, and the dialog starts afresh when opened again. */
-  function endedClosed(e?: unknown) {
+  function endedClosed(modelName: string, e?: unknown) {
     // page-level: only called once the dialog is closed or the page has gone.
-    if (e !== undefined) toast.error(e, `Could not export ${model().name}`);
-    reset();
+    if (e !== undefined) toast.error(e, `Could not export ${modelName}`);
+    if (!destroyed) reset();
   }
 
   /**
@@ -148,16 +164,21 @@ export default function ExportDialog(props: ExportDialogProps) {
    * request, about as long as an export) and saves it through the browser under the server's name.
    */
   async function downloadFile() {
+    if (phase.peek() === 'running') return;
     const id = ++run;
+    const m = model();
+    const epoch = hub.epoch;
     phase.set('running');
     error.set(null);
     try {
       const api = hub.api;
-      const f = await (format.peek() === 'onnx' ? api.onnxFile(model().id, onnxSwitches.peek() ? { ...switches.peek() } : {}) : api.f16File(model().id));
-      if (id !== run) return;
-      file.set(f);
-      done.set('file');
-      phase.set('done');
+      const f = await (format.peek() === 'onnx' ? api.onnxFile(m.id, onnxSwitches.peek() ? { ...switches.peek() } : {}) : api.f16File(m.id));
+      if (id !== run || hub.epoch !== epoch) return;
+      if (!destroyed) {
+        file.set(f);
+        done.set('file');
+        phase.set('done');
+      }
       if (api.mock) return;
       const url = URL.createObjectURL(f);
       const a = document.createElement('a');
@@ -168,37 +189,43 @@ export default function ExportDialog(props: ExportDialogProps) {
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
       if (!open.peek() || destroyed) {
         toast.success(`Downloaded ${f.name}`, bytes(f.size, prefs.units));
-        endedClosed();
+        endedClosed(m.name);
       }
     } catch (e) {
-      if (id !== run) return;
-      if (!open.peek() || destroyed) return endedClosed(e);
+      if (id !== run || hub.epoch !== epoch) return;
+      if (!open.peek() || destroyed) return endedClosed(m.name, e);
       error.set(e);
       phase.set('error');
     }
   }
 
   async function start() {
+    if (phase.peek() === 'running') return;
     if (direct.peek()) return downloadFile();
     const id = ++run;
+    const m = model();
+    const epoch = hub.epoch;
+    const isDemo = demo.peek();
     phase.set('running');
     error.set(null);
     try {
       const fmt = format.peek();
-      const r = await hub.api.exportModel(model().id, fmt, fmt === 'onnx' && onnxSwitches.peek() ? { ...switches.peek() } : undefined);
-      if (id !== run) return;
-      result.set(r);
-      done.set(fmt);
-      phase.set('done');
+      const r = await hub.api.exportModel(m.id, fmt, fmt === 'onnx' && onnxSwitches.peek() ? { ...switches.peek() } : undefined);
+      if (id !== run || hub.epoch !== epoch) return;
+      if (!destroyed) {
+        result.set(r);
+        done.set(fmt);
+        phase.set('done');
+      }
       // The open dialog already says "Export finished" with the path: a toast would say it twice at once.
       if (!open.peek() || destroyed) {
-        if (demo.peek()) toast.info('Demo preview', `Exporting ${model().name} created no file.`);
-        else toast.success(`Exported ${model().name}`, `${r.path} · ${bytes(r.bytes, prefs.units)}`);
-        endedClosed();
+        if (isDemo) toast.info('Demo preview', `Exporting ${m.name} created no file.`);
+        else toast.success(`Exported ${m.name}`, `${r.path} · ${bytes(r.bytes, prefs.units)}`);
+        endedClosed(m.name);
       }
     } catch (e) {
-      if (id !== run) return;
-      if (!open.peek() || destroyed) return endedClosed(e);
+      if (id !== run || hub.epoch !== epoch) return;
+      if (!open.peek() || destroyed) return endedClosed(m.name, e);
       error.set(e);
       phase.set('error');
     }
@@ -209,15 +236,22 @@ export default function ExportDialog(props: ExportDialogProps) {
     if (!r) return;
     try {
       await navigator.clipboard.writeText(r.path);
+      if (destroyed) return;
       copied.set(true);
-      setTimeout(() => copied.set(false), 1600);
+      clearTimeout(copiedTimer);
+      copiedTimer = setTimeout(() => {
+        copiedTimer = undefined;
+        if (!destroyed) copied.set(false);
+      }, 1600);
     } catch {
-      status.error(new Error('Your browser blocked clipboard access; select the path and copy it by hand.'), 'Could not copy the path');
+      if (!destroyed) status.error(new Error('Your browser blocked clipboard access; select the path and copy it by hand.'), 'Could not copy the path');
     }
   }
 
   function reset() {
     run++;
+    clearTimeout(copiedTimer);
+    copiedTimer = undefined;
     status.clear();
     done.set(null);
     switches.set(OFF);

@@ -101,6 +101,40 @@ describe('Toaster and focus', () => {
     flushSync();
     expect(document.activeElement).toBe(closeA);
   });
+
+  it('releases hold and restores focus when a focused toast is dismissed programmatically', () => {
+    vi.useFakeTimers();
+    const field = setup();
+    const id = toast.show({ tone: 'info', title: 'Scoped', key: 'op', timeout: 50 });
+    const other = toast.show({ tone: 'info', title: 'Other', timeout: 50 });
+    flushSync();
+    const close = document.querySelector<HTMLButtonElement>(`[data-toast="${id}"] .close`)!;
+    close.focus();
+    close.dispatchEvent(new FocusEvent('focusin', { bubbles: true, relatedTarget: field }));
+    expect(document.activeElement).toBe(close);
+
+    // Programmatic clear removes the focused toast without firing focusout.
+    toast.clear('op');
+    flushSync();
+    expect(document.activeElement).toBe(field);
+    // Hold must be released so the remaining toast resumes auto-dismissing.
+    vi.advanceTimersByTime(3000);
+    expect(toast.items.some((t) => t.id === other)).toBe(false);
+  });
+
+  it('releases toast hold on unmount', () => {
+    vi.useFakeTimers();
+    setup();
+    const id = toast.show({ tone: 'info', title: 'Hold me', timeout: 50 });
+    flushSync();
+    const close = document.querySelector<HTMLButtonElement>('.toast .close')!;
+    close.focus();
+    close.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    c!.unmount();
+    c = undefined;
+    vi.advanceTimersByTime(3000);
+    expect(toast.items.some((t) => t.id === id)).toBe(false);
+  });
 });
 
 describe('Toast timing and announcement', () => {

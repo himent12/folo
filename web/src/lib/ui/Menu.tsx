@@ -9,7 +9,7 @@
  * Tab there moves between the sheet's Close and that item (the arrows move among the items).
  */
 import Ellipsis from '$icons/ellipsis';
-import { computed, createUniqueId, css, defaults, Dynamic, effect, For, MediaQuery, signal, tick } from 'fw';
+import { computed, createUniqueId, css, defaults, Dynamic, effect, For, MediaQuery, onCleanup, signal, tick } from 'fw';
 import { media } from '$lib/design/tokens';
 import Button from './Button';
 import Dialog from './Dialog';
@@ -76,6 +76,11 @@ export default function Menu(props: MenuProps) {
     at.set({ top, right: Math.max(8, window.innerWidth - r.right), max });
   }
 
+  let alive = true;
+  onCleanup(() => {
+    alive = false;
+  });
+
   const entries = () => [...(list.get()?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
 
   async function show(where: 'first' | 'last' = 'first') {
@@ -84,6 +89,7 @@ export default function Menu(props: MenuProps) {
     active.set(where === 'first' ? 0 : shown.get().length - 1);
     open.set(true);
     await tick();
+    if (!alive || !open.peek()) return;
     // Placed again now that the list has a height: above the button where it does not fit below.
     if (p.fixed) place();
     const all = entries();
@@ -112,11 +118,13 @@ export default function Menu(props: MenuProps) {
     if (refocus) root.get()?.querySelector<HTMLElement>('button')?.focus();
   }
   async function choose(it: MenuItem) {
+    if (!open.peek()) return;
     // Focus goes back to the trigger first, so a dialog opened by the action returns focus there on close. The phone
     // sheet is modal: it closes (and the page leaves inert) before the trigger can take focus.
     hide(true);
     if (phone.current) {
       await tick();
+      if (!alive) return;
       root.get()?.querySelector<HTMLElement>('button')?.focus();
     }
     it.onclick?.();
@@ -132,12 +140,16 @@ export default function Menu(props: MenuProps) {
     const i = all.indexOf(document.activeElement as HTMLElement);
     if (e.key === 'Escape') {
       e.preventDefault();
+      e.stopPropagation();
       hide();
     } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (all.length === 0) return;
       e.preventDefault();
       const d = e.key === 'ArrowDown' ? 1 : -1;
-      all[(i + d + all.length) % all.length]?.focus();
+      const next = i < 0 ? (d > 0 ? 0 : all.length - 1) : (i + d + all.length) % all.length;
+      all[next]?.focus();
     } else if (e.key === 'Home' || e.key === 'End') {
+      if (all.length === 0) return;
       e.preventDefault();
       (e.key === 'Home' ? all[0] : all.at(-1))?.focus();
     } else if (e.key === 'Tab') {

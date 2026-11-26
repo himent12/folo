@@ -213,6 +213,36 @@ describe('ExportDialog: ONNX download (weights_onnx)', () => {
     expect(target.ownerDocument.querySelector('dialog [role="status"]')?.textContent).toBe('Downloaded shapes-n-best-f16.onnx, 2.0 KiB.');
   });
 
+  it('halves the ONNX size estimate on weights_onnx-only servers when Half precision is checked', async () => {
+    const api = new HttpApi('http://folo.test');
+    vi.spyOn(api, 'system').mockResolvedValue({ ...SYS, features: ['weights_onnx'] });
+    hub.api = api;
+    c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+    const boxes = await pickOnnx();
+    const est = () => [...target.ownerDocument.querySelectorAll('dialog .opt')][1]!.querySelector('.est')!.textContent!.trim();
+    const before = est();
+    boxes[2]!.click(); // half
+    flushSync();
+    const after = est();
+    expect(after).not.toBe(before);
+    expect(before).toMatch(/10\.3 MiB/);
+    expect(after).toMatch(/5\.1 MiB/);
+  });
+
+  it('resets stale server capabilities if system() fails on a subsequent open', async () => {
+    const api = new HttpApi('http://folo.test');
+    const sysSpy = vi.spyOn(api, 'system').mockResolvedValueOnce({ ...SYS, features: ['weights_onnx'] }).mockRejectedValueOnce(new Error('offline'));
+    hub.api = api;
+    c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+    await pickOnnx();
+    expect(target.ownerDocument.querySelectorAll('dialog input[type="checkbox"]')).toHaveLength(3);
+    // Simulate a server switch where /api/system now fails: stale weights_onnx checkboxes must clear.
+    hub.epoch++;
+    flushSync();
+    await until(() => sysSpy.mock.calls.length === 2 && target.ownerDocument.querySelectorAll('dialog input[type="checkbox"]').length === 0, 'cleared switches');
+  });
 });
 
 describe('ExportDialog: closing while the file is on its way', () => {

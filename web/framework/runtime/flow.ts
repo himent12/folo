@@ -1,7 +1,7 @@
 // Control flow: Show ({#if}), For ({#each} with a key), Index ({#each} without one), Switch/Match ({#if}/{:else if}),
 // Key ({#key}), Dynamic (<svelte:element> / a component chosen at runtime), Portal.
 
-import { computed, createRoot, dispose, getOwner, isReader, memo, onCleanup, ownedRoot, owning, reader, signal, swapOwner, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
+import { computed, dispose, getOwner, isReader, memo, onCleanup, ownedRoot, owning, reader, renderEffect, signal, swapOwner, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
 import { createComponent, splitProps } from './component';
 import { clearLeaves, insert } from './dom';
 import { spread } from './spread';
@@ -713,25 +713,44 @@ export function Dynamic<P>(props: DynamicProps<P>): JSX.Element {
  * goes, nodes still playing an outro too, and what else the mount holds stays.
  */
 export function Portal(props: { mount?: Node; children: JSX.Element }): JSX.Element {
-  const mount = props.mount ?? document.body;
-  const owner: Owner | null = getOwner();
-  createRoot(() => {
+  const target = computed(() => props.mount ?? document.body);
+  renderEffect(() => {
+    const mount = target.get();
     const start = mount.appendChild(document.createComment(''));
     const end = mount.appendChild(document.createComment(''));
-    insert(mount, () => props.children, end);
-    onCleanup(() => {
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       const parent = start.parentNode;
-      if (parent === null) return;
-      for (let n = start.nextSibling; n !== null && n !== end; ) {
-        const next: ChildNode | null = n.nextSibling;
-        clearLeaves(n);
-        parent.removeChild(n);
-        n = next;
+      if (parent !== null) {
+        for (let n = start.nextSibling; n !== null && n !== end; ) {
+          const next: ChildNode | null = n.nextSibling;
+          clearLeaves(n);
+          parent.removeChild(n);
+          n = next;
+        }
+        start.remove();
       }
-      start.remove();
       end.remove();
-    });
-  }, owner);
+    };
+    onCleanup(cleanup);
+    const child = ownedRoot(getOwner());
+    const prev = swapOwner(child);
+    try {
+      untrack(() => insert(mount, () => props.children, end));
+    } catch (e) {
+      try {
+        dispose(child);
+      } catch {
+        // Keep the portal child error.
+      }
+      cleanup();
+      throw e;
+    } finally {
+      swapOwner(prev);
+    }
+  });
   return undefined;
 }
 

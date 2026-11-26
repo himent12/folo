@@ -177,6 +177,32 @@ describe('Menu keyboard', () => {
     unmount(c);
     target.remove();
   });
+
+  it('ArrowUp from unfocused menu lands on last item, and Escape stops propagation to document', async () => {
+    const { target, c, trigger, key, focused } = setup();
+    const docEsc = vi.fn();
+    const onDoc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') docEsc(e);
+    };
+    document.addEventListener('keydown', onDoc);
+    try {
+      trigger.click();
+      flushSync();
+      await tick();
+      // Simulate focus outside any menuitem (e.g. container) then ArrowUp -> last item ("Open model").
+      (document.activeElement as HTMLElement | null)?.blur();
+      key('ArrowUp');
+      expect(focused()).toBe('Open model');
+      key('Escape');
+      flushSync();
+      expect(docEsc).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(trigger);
+    } finally {
+      document.removeEventListener('keydown', onDoc);
+      unmount(c);
+      target.remove();
+    }
+  });
 });
 
 describe('Menu on a phone', () => {

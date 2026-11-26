@@ -3,7 +3,7 @@
  * track spans the whole column the tabs sit in, whatever holds them (a block, a grid cell or a flex row, as Run's
  * sticky phone picker is), never ending at the last tab.
  */
-import { bindable, css, defaults, For } from 'fw';
+import { bindable, computed, css, defaults, For } from 'fw';
 
 export interface Tab<T extends string> {
   value: T;
@@ -24,6 +24,12 @@ export default function Tabs<T extends string>(props: TabsProps<T>) {
   const value = bindable(props, 'value');
   let root!: HTMLDivElement;
 
+  // WAI-ARIA tabs roving tabindex: keep the first tab tabbable if `value` does not match any tab.
+  const tabTarget = computed(() => {
+    const cur = p.tabs.findIndex((t) => t.value === value.get());
+    return cur >= 0 ? cur : p.tabs.length > 0 ? 0 : -1;
+  });
+
   function select(v: T) {
     value.set(v);
     p.onchange?.(v);
@@ -31,10 +37,11 @@ export default function Tabs<T extends string>(props: TabsProps<T>) {
 
   function onkeydown(e: KeyboardEvent) {
     const tabs = p.tabs;
+    if (tabs.length === 0) return;
     const i = tabs.findIndex((t) => t.value === value.get());
     let j = i;
-    if (e.key === 'ArrowRight') j = (i + 1) % tabs.length;
-    else if (e.key === 'ArrowLeft') j = (i - 1 + tabs.length) % tabs.length;
+    if (e.key === 'ArrowRight') j = i < 0 ? 0 : (i + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') j = i < 0 ? tabs.length - 1 : (i - 1 + tabs.length) % tabs.length;
     else if (e.key === 'Home') j = 0;
     else if (e.key === 'End') j = tabs.length - 1;
     else return;
@@ -48,7 +55,7 @@ export default function Tabs<T extends string>(props: TabsProps<T>) {
   return (
     <div class="tabs" role="tablist" aria-label={p.label} ref={(el) => (root = el)} onkeydown={onkeydown} tabindex={-1}>
       <For each={p.tabs} key={(t) => t.value}>
-        {(t) => {
+        {(t, idx) => {
           const on = () => t().value === value.get();
           return (
             <button
@@ -57,7 +64,7 @@ export default function Tabs<T extends string>(props: TabsProps<T>) {
               id={`${p.idPrefix}-${t().value}`}
               aria-selected={on()}
               aria-controls={`${p.idPrefix}-panel`}
-              tabindex={on() ? 0 : -1}
+              tabindex={idx() === tabTarget.get() ? 0 : -1}
               class:on={on()}
               onclick={() => select(t().value)}
             >
