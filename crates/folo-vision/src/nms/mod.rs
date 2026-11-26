@@ -31,11 +31,13 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 mod kernel;
+mod matrix;
 mod topk;
 pub use kernel::{
     batched_nms, batched_nms_with_kind, diou_nms_sorted, diou_nms_sorted_with_owner, nms_sorted,
     nms_sorted_with_owner, soft_nms_sorted,
 };
+pub use matrix::matrix_nms_sorted;
 pub use topk::{topk_candidates, topk_detections};
 
 /// Default Gaussian bandwidth `sigma` for [`NmsKind::SoftGaussian`] (Bodla et al. 2017).
@@ -65,6 +67,16 @@ pub enum NmsKind {
         #[serde(default = "default_soft_nms_sigma")]
         sigma: f32,
     },
+    /// Linear Matrix-NMS (Wang et al. 2020, SOLOv2): non-sequential parallel score decay
+    /// `decay_j = min_{i < j} (1 - IoU_{i,j}) / (1 - max_{k < i} IoU_{k,i})`, dropping once `score <= conf`.
+    MatrixLinear,
+    /// Gaussian Matrix-NMS (Wang et al. 2020, SOLOv2): non-sequential parallel score decay
+    /// `decay_j = min_{i < j} exp(-(IoU_{i,j}² - max_{k < i} IoU_{k,i}²) / sigma)`, dropping once `score <= conf`.
+    MatrixGaussian {
+        /// Gaussian decay bandwidth `sigma > 0` (default [`DEFAULT_SOFT_NMS_SIGMA`]).
+        #[serde(default = "default_soft_nms_sigma")]
+        sigma: f32,
+    },
 }
 
 impl NmsKind {
@@ -72,10 +84,17 @@ impl NmsKind {
         matches!(self, NmsKind::Standard)
     }
 
-    /// True for Soft-NMS variants (`SoftLinear` / `SoftGaussian`), which decay scores instead of hard-dropping.
+    /// True for score-decaying NMS variants (`SoftLinear` / `SoftGaussian` / `MatrixLinear` / `MatrixGaussian`),
+    /// which decay scores instead of hard-dropping and therefore have no hard suppression clusters.
     #[inline]
     pub fn is_soft(&self) -> bool {
-        matches!(self, NmsKind::SoftLinear | NmsKind::SoftGaussian { .. })
+        matches!(
+            self,
+            NmsKind::SoftLinear
+                | NmsKind::SoftGaussian { .. }
+                | NmsKind::MatrixLinear
+                | NmsKind::MatrixGaussian { .. }
+        )
     }
 }
 
@@ -345,6 +364,30 @@ fn finish(
             let (kept, ks): (Vec<usize>, Vec<f32>) = pairs.into_iter().unzip();
             // Soft-NMS has no hard suppressor clusters; assign self-only owners when SEBF is requested so
             // `BoxFusion::Sebf` never reconstructs hard-IoU owners from `cfg.iou`.
+            let self_own = cfg.fusion.wants_owner().then(|| {
+                let mut own = vec![u32::MAX; boxes.len()];
+                for (kp, &k) in kept.iter().enumerate() {
+                    own[k] = kp as u32;
+                }
+                own
+            });
+            (kept, ks, self_own)
+        }
+        NmsKind::MatrixLinear | NmsKind::MatrixGaussian { .. } => {
+            let sigma = match cfg.nms_kind {
+                NmsKind::MatrixGaussian { sigma } => Some(sigma),
+                _ => None,
+            };
+            let pairs = matrix::batched_matrix_nms(
+                &boxes,
+                &scores,
+                &classes,
+                cfg.conf,
+                sigma,
+                cfg.max_det,
+                cfg.agnostic,
+            );
+            let (kept, ks): (Vec<usize>, Vec<f32>) = pairs.into_iter().unzip();
             let self_own = cfg.fusion.wants_owner().then(|| {
                 let mut own = vec![u32::MAX; boxes.len()];
                 for (kp, &k) in kept.iter().enumerate() {

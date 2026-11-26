@@ -26,6 +26,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::boxes::Xyxy;
 
+mod wbf;
+pub use wbf::{WbfConfType, WbfConfig, weighted_boxes_fusion};
+
 /// `ε` of [`crate::decode::side_precision`], in bins²: the floor of a side's excess variance.
 pub const DFL_FUSION_EPS: f32 = 0.1;
 

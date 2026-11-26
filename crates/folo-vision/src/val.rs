@@ -251,11 +251,12 @@ pub fn check_config(model: &FoloModel, classes: usize, cfg: &ValConfig) -> Resul
             n.conf, n.iou, n.fusion_iou, cfg.sample_conf, n.max_det, n.max_candidates
         )));
     }
-    if let crate::nms::NmsKind::SoftGaussian { sigma } = n.nms_kind
+    if let crate::nms::NmsKind::SoftGaussian { sigma } | crate::nms::NmsKind::MatrixGaussian { sigma } =
+        n.nms_kind
         && (!sigma.is_finite() || sigma <= 0.0)
     {
         return Err(Error::Config(format!(
-            "validation Soft-NMS Gaussian sigma must be finite and > 0; got {sigma}"
+            "validation Gaussian NMS sigma must be finite and > 0; got {sigma}"
         )));
     }
     if n.nms_kind.is_soft()

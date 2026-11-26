@@ -435,7 +435,7 @@ fn score_order(scores: &[f32], idx: &mut [u32]) {
 
 /// Group `order` (already sorted by descending score) into per-class buckets preserving score order inside each
 /// bucket. Uses counting sort for dense class ids and stable sort for sparse ids.
-fn bucket_by_class(order: &[u32], classes: &[u32]) -> (Vec<u32>, Vec<(usize, usize)>) {
+pub(super) fn bucket_by_class(order: &[u32], classes: &[u32]) -> (Vec<u32>, Vec<(usize, usize)>) {
     let n = order.len();
     let max_class = classes.iter().copied().max().unwrap_or(0) as usize;
     if max_class <= n.max(1024) {
@@ -522,6 +522,18 @@ pub fn batched_nms_with_kind(
         NmsKind::SoftGaussian { sigma } => {
             batched_soft_nms(boxes, scores, classes, iou_thr, score_thr, Some(sigma), max_det, agnostic)
         }
+        NmsKind::MatrixLinear => {
+            super::matrix::batched_matrix_nms(boxes, scores, classes, score_thr, None, max_det, agnostic)
+        }
+        NmsKind::MatrixGaussian { sigma } => super::matrix::batched_matrix_nms(
+            boxes,
+            scores,
+            classes,
+            score_thr,
+            Some(sigma),
+            max_det,
+            agnostic,
+        ),
     }
 }
 
