@@ -206,18 +206,18 @@ export default function PlanTab(props: PlanTabProps) {
           <Panel
             title="Plan"
             meta={`${plan.get().conditions.length} of ${props.catalog.conditions.length} conditions · ${planPasses(plan.get())} severities`}
-            class={props.editable && props.dirty ? 'unsaved-plan' : ''}
+            class={props.editable && (props.dirty || props.saving) ? 'unsaved-plan' : ''}
             pad="none"
             actions={() => (
               <>
                 {props.editable ? (
                   <>
-                    {props.dirty ? (
+                    {props.dirty || props.saving ? (
                       <>
                         <span class="unsaved" data-gate-why>
                           Unsaved changes
                         </span>
-                        <Button variant="ghost" size="sm" onclick={props.ondiscard}>
+                        <Button variant="ghost" size="sm" disabled={props.saving} onclick={props.ondiscard}>
                           Discard
                         </Button>
                         <Gate reason={error() ? 'Fix the plan first' : null}>

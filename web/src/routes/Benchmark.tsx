@@ -118,6 +118,8 @@ export default function Benchmark() {
   // server start afresh; a condition turned off drops its field, and one that holds no number stays so (with its error)
   // across edits of other conditions. A number that is no longer the draft's weight (changed from outside the field) goes.
   const typed = signal<Record<string, string>>({});
+  const hasUnreadable = computed(() => editable.get() && draft.get().conditions.some((c) => unreadableWeight(typed.get()[c.condition])));
+  const unsaved = computed(() => dirty.get() || hasUnreadable.get());
   const saving = signal(false);
   const elsewhere = signal(false);
   // The plan this page's Save plan has sent and not yet heard back on: an update holding it is the page's own, any other
@@ -129,7 +131,7 @@ export default function Benchmark() {
     if (!key || key === shownKey) return;
     untrack(() => {
       const b = bench.get()!;
-      if (!shownKey.startsWith(`${b.id}:`) || !dirty.get()) {
+      if (!shownKey.startsWith(`${b.id}:`) || !unsaved.get()) {
         draft.set(clonePlan(b.plan));
         // Replaced from the server: what was typed is for a plan no longer shown.
         typed.set({});
@@ -139,7 +141,7 @@ export default function Benchmark() {
     });
   });
   effect(() => {
-    if (!dirty.get()) untrack(() => elsewhere.set(false));
+    if (!unsaved.get()) untrack(() => elsewhere.set(false));
   });
   effect(() => {
     void id.get();
@@ -176,21 +178,37 @@ export default function Benchmark() {
       // The answer holds the plan as the server keeps it (a weight rounded to a 32-bit float, a reason trimmed).
       const saved = (await live.act(() => hub.api.updateBench(benchId, { plan }))).plan;
       const now = bench.peek();
-      if (now && now.id === benchId && !samePlan(now.plan, saved)) {
+      if (!mounted || !now || now.id !== benchId) {
+        // page-level: the benchmark page unmounted or switched benchmarks while the save was in flight.
+        toast.success('Plan saved', `${plan.conditions.length} conditions. It is fixed once the first entry runs.`);
+        return false;
+      }
+      if (!samePlan(now.plan, saved)) {
         // Another tab saved after this save landed (its event came before this answer): the server holds that plan, so
         // the edits stay edits and the page says so, here and at every Save plan.
-        if (dirty.peek()) elsewhere.set(true);
+        if (unsaved.peek()) elsewhere.set(true);
         // page-level: the save did land, then was replaced; Plan saved would say the wrong thing.
         toast.info('Plan saved, then changed elsewhere', 'Another tab or window saved its plan after yours. Save plan replaces it with yours; Discard shows it.');
         // Not saved as it stands: the leave dialog stays on the page rather than leave the edits behind.
         return false;
       }
+      // Mark this saved plan as already seen so the upcoming planKey effect flush does not mistake our own save for
+      // another tab's update after `sent` clears in `finally`.
+      shownKey = `${benchId}:${JSON.stringify(now.plan)}`;
+      if (!samePlan(draft.peek(), plan) || hasUnreadable.peek()) {
+        // Edits were made while this save was in flight: keep them in the draft and leave them marked unsaved.
+        // page-level: the plan's own Save, outside any dialog.
+        toast.info('Earlier plan saved', 'Edits made while saving are still unsaved.');
+        return false;
+      }
       // Shown as kept: a field rounded by the server shows the number it holds.
       draft.set(clonePlan(saved));
+      typed.set({});
       // page-level: the plan's own Save, outside any dialog.
       toast.success('Plan saved', `${plan.conditions.length} conditions. It is fixed once the first entry runs.`);
       return true;
     } catch (e) {
+      // page-level: the plan's own Save, or the leave dialog closes on a refused save in answer.
       toast.error(e, 'Could not save the plan');
       return false;
     } finally {
@@ -200,7 +218,7 @@ export default function Benchmark() {
   }
   const discard = () => {
     const b = bench.peek();
-    if (!b) return;
+    if (!b || saving.peek()) return;
     draft.set(clonePlan(b.plan));
     typed.set({});
   };
@@ -209,7 +227,7 @@ export default function Benchmark() {
   const leaving = signal<{ proceed: () => void } | null>(null);
   effect(() => {
     const off = router.guard((to, proceed) => {
-      if (!dirty.get() || to.path === router.route.path) return true;
+      if (!unsaved.get() || to.path === router.route.path) return true;
       leaving.set({ proceed });
       return false;
     });
@@ -233,7 +251,7 @@ export default function Benchmark() {
     }
   }
   onWindow('beforeunload', (e: BeforeUnloadEvent) => {
-    if (dirty.peek()) e.preventDefault();
+    if (unsaved.peek()) e.preventDefault();
   });
 
   // ---------- entries ----------
