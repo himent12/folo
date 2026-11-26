@@ -79,12 +79,20 @@ A shared graph walk (`walk.rs`) drives three executors:
   (`neck.out5.*`), and `Calibration::store` serializes `folo.quant` (used by `folo quantize`). Loading remains
   backward-compatible with `VERSION_V1` per-tensor files.
 - **Execution (`exec.rs`):** `Int8Plan` executes on `folo_core::cpu::q8` C4 buffers and `QConv` kernels (AVX-VNNI
-  when available, else portable scalar fallback; with per-part concat scale decoupling and packed weights cached on
-  each weight tensor via `Tensor::derived_f32`).
+  when available, else portable scalar fallback; with per-part concat scale decoupling, packed weights cached on
+  each weight tensor via `Tensor::derived_f32`, bias fingerprints cached on each bias tensor, and cached uniform
+  grids for `VERSION_V1` checkpoints).
+  Activations produced by `f32` convs (such as `neck.out5.*` in `f32_convs`), an `f32` stem, or deferred
+  `quantize` boundaries stay in unquantised `f32` until an int8 conv consumes them (avoiding redundant
+  `f32 → u8 → f32` ping-pong across consecutive `f32` convs and into the `f32` head), and the head-only P5 output
+  (`neck.out5.cv2`) writes `f32` directly (`QOut::F32` when int8).
+  In `Attention` (`blocks.rs`, shared with `walk.rs`), eval-mode CPU `F32` forwards fuse `q^T k`, in-place scaled
+  softmax, `v @ attn^T`, and depthwise 3×3 `pe(v)` accumulation without intermediate Q/K/V/transpose/PE allocations.
   When `u8_stem` is enabled, the stem is eligible (`stem_int8_able`), and it is not listed in `f32_convs`,
   `features_rgb0_u8` runs `q8::stem_u8` directly on packed `[R, G, B, 0]` bytes from `Letterbox::apply_rgb0_u8`
   without materialising an `f32` image (falling back to `f32` otherwise).
-- **Reference (`fake.rs`):** `FakeQuant` runs `f32` convolutions on the same quantisation grids for parity checks.
+- **Reference (`fake.rs`):** `FakeQuant` runs `f32` convolutions on the same quantisation grids and lazy `f32`
+  boundaries for parity checks.
 
 ## The loss
 - Task-aligned assigner (TAL: `score^alpha * max(CIoU, 0)^beta`, top-k), BCE classification on aligned targets,
