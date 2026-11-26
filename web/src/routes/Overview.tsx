@@ -15,7 +15,7 @@ import { runDatasetLabel } from '$lib/runDataset';
 import { href } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
-import { watched } from '$lib/shell/runList';
+import { effectiveRuns, noteRunEnded, watched } from '$lib/shell/runList';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
@@ -51,8 +51,10 @@ export default function Overview() {
   const system = new Resource((s) => hub.api.system(s));
   // The run list the sidebar's live card reads (the shell polls it every 2 s, shell/RunWatch) while it is current, so the
   // Training card and Recent runs never say something the sidebar contradicts; this page's own list when the shell's
-  // stopped refreshing.
-  const runList = computed(() => (watched.runs && (watched.since === null || !runs.data) ? watched.runs : runs.data));
+  // stopped refreshing. Reconciled with live SSE status transitions so the header summary, live slot, and Recent runs
+  // reflect a finished or stopped run in the same frame as the stream.
+  const baseRunList = computed(() => (watched.runs && (watched.since === null || !runs.data) ? watched.runs : runs.data));
+  const runList = computed(() => effectiveRuns(baseRunList.get()));
   const runsFailed = computed(() => !!runs.error && !runList.get());
 
   // The run training, or starting (./overview/slot): a run just started shows here at once, as it does in the sidebar.
@@ -291,6 +293,7 @@ export default function Overview() {
                   datasetName={dsLabel(live.get()!)}
                   system={system}
                   bind:lost={streamLost}
+                  onended={(r) => noteRunEnded(r, runs)}
                 />
               </Key>
             ) : (

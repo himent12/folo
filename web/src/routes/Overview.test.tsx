@@ -8,7 +8,7 @@ import { resolve } from 'node:path';
 import { flush } from 'fw';
 import { render } from '../../framework/testing';
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest';
-import { ApiError } from '$lib/api/client';
+import { ApiError, type RunEventHandlers } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { deviceName } from '$lib/format';
@@ -16,7 +16,7 @@ import type { Run, SystemInfo } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import RunWatch from '$lib/shell/RunWatch.tsx';
 import SidebarLive from '$lib/shell/SidebarLive';
-import { watched } from '$lib/shell/runList';
+import { activeRuns, watched } from '$lib/shell/runList';
 import Overview from './Overview';
 
 let target: HTMLElement;
@@ -566,6 +566,11 @@ describe('Overview', () => {
     const runs = await idleRuns();
     const [first, second] = runs;
     const api = new MockApi('normal', 0);
+    const getRun = api.run.bind(api);
+    api.run = (id: string) => {
+      const listed = watched.runs?.find((r) => r.id === id);
+      return listed ? Promise.resolve(listed) : getRun(id);
+    };
     watched.runs = runs.map((r) => (r.id === first!.id ? { ...r, status: 'running' as const } : r));
     open(api);
     await training((t) => t.includes(first!.name), 'first live run');
@@ -595,5 +600,164 @@ describe('Overview', () => {
       flush();
       expect(document.activeElement).toBe(target.querySelector('h1[data-route-focus]'));
     });
+  });
+
+  it('reconciles Overview summary, live slot, Recent runs, and sidebar immediately when SSE reports completion before the run list refreshes (playtest R15)', async () => {
+    const api = new MockApi('normal', 0);
+    const liveRun = (await api.runs()).find((r) => r.status === 'running')!;
+    const runs = await idleRuns();
+    const initialList = runs.map((r) => (r.id === liveRun.id ? liveRun : r));
+    let handlers: RunEventHandlers = {};
+    let eventOpens = 0;
+    api.runEvents = (_id, h) => {
+      eventOpens++;
+      handlers = h;
+      return () => {};
+    };
+    api.run = async () => liveRun;
+    let resolveNextList: ((v: Run[]) => void) | null = null;
+    let runsCalls = 0;
+    api.runs = () => {
+      runsCalls++;
+      if (runsCalls === 1) return Promise.resolve(initialList);
+      return new Promise<Run[]>((res) => (resolveNextList = res));
+    };
+
+    hub.api = api;
+    hub.mode = 'mock';
+    const shell = document.body.appendChild(document.createElement('div'));
+    const shellView = render(
+      () => (
+        <>
+          <RunWatch />
+          <SidebarLive collapsed={false} />
+        </>
+      ),
+      shell,
+    );
+    onTestFinished(() => {
+      shellView.unmount();
+      shell.remove();
+    });
+    open(api);
+
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.facts')?.textContent).toContain('1 run training');
+      expect(target.querySelector('.live .card h2')?.textContent).toBe(liveRun.name);
+      expect(shell.querySelector('a.live-run')).not.toBeNull();
+      expect(activeRuns().training).toBe(1);
+    });
+    // Ensure LiveRun finished initial loading before SSE completion arrives.
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.live .card .legend')).not.toBeNull();
+    });
+    expect(eventOpens).toBe(1);
+
+    // SSE delivers completion while the refreshed GET /api/runs is still in flight.
+    handlers.status?.({ status: 'completed', error: null });
+    flush();
+
+    expect(target.querySelector('.facts')?.textContent).toContain('nothing training');
+    expect(target.querySelector('.live')?.textContent).toContain('Nothing is training');
+    expect(target.querySelector('#recent-runs tbody')?.textContent).toContain(liveRun.name);
+    expect(target.querySelector('#recent-runs tbody')?.textContent).toContain('Completed');
+    expect(shell.querySelector('a.live-run')).toBeNull();
+    expect(activeRuns()).toMatchObject({ training: 0, live: false });
+    // No remount oscillation and immediate authoritative refresh triggered.
+    expect(eventOpens).toBe(1);
+    expect(runsCalls).toBe(2);
+    expect(resolveNextList).not.toBeNull();
+
+    // Authoritative list lands: UI stays consistent.
+    resolveNextList!(initialList.map((r) => (r.id === liveRun.id ? { ...r, status: 'completed' } : r)));
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.facts')?.textContent).toContain('nothing training');
+      expect(target.querySelector('#recent-runs tbody')?.textContent).toContain('Completed');
+    });
+    expect(eventOpens).toBe(1);
+  });
+
+  it('advances the live slot to a queued run and moves the stopped run to Recent runs on SSE stop (playtest R15)', async () => {
+    const api = new MockApi('normal', 0);
+    const first = (await api.runs()).find((r) => r.status === 'running')!;
+    const runs = await idleRuns();
+    const nextBase = runs.find((r) => r.id !== first.id)!;
+    const next = { ...nextBase, status: 'queued' as const, queue_position: 1, epoch: 0, step: 0, best: null, cloud: undefined };
+    const list = runs.map((r) => (r.id === first.id ? first : r.id === next.id ? next : r));
+    const byId = new Map<string, RunEventHandlers>();
+    api.runEvents = (id, h) => {
+      byId.set(id, h);
+      return () => {};
+    };
+    api.run = async (id) => list.find((r) => r.id === id)!;
+    api.runs = () => new Promise<Run[]>(() => {}); // hold poll so only SSE drives the transition
+    watched.runs = list;
+    open(api);
+
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.facts')?.textContent).toContain('1 run training');
+      expect(target.querySelector('.live .card .legend')).not.toBeNull();
+    });
+
+    // Stopped from Run detail in another tab -> SSE delivers `stopped`.
+    byId.get(first.id)?.status?.({ status: 'stopped', error: null });
+    flush();
+
+    expect(target.querySelector('.facts')?.textContent).toContain('nothing training');
+    expect(target.querySelector('.live .card h2')?.textContent).toBe(next.name);
+    expect(target.querySelector('.live .card')?.textContent).toContain('Starting');
+    expect(target.querySelector('#recent-runs tbody')?.textContent).toContain(first.name);
+    expect(target.querySelector('#recent-runs tbody')?.textContent).toContain('Stopped');
+    expect(activeRuns()).toMatchObject({ training: 0, queued: 1, live: false });
+  });
+
+  it('keeps the streamed terminal state if the post-end refresh fails, and clears it on server epoch switch (playtest R15)', async () => {
+    const api = new MockApi('normal', 0);
+    const liveRun = (await api.runs()).find((r) => r.status === 'running')!;
+    const runs = await idleRuns();
+    const initialList = runs.map((r) => (r.id === liveRun.id ? liveRun : r));
+    let handlers: RunEventHandlers = {};
+    api.runEvents = (_id, h) => {
+      handlers = h;
+      return () => {};
+    };
+    api.run = async () => liveRun;
+    let calls = 0;
+    api.runs = () => (++calls === 1 ? Promise.resolve(initialList) : Promise.reject(new ApiError(0, 'offline', 'down')));
+
+    hub.api = api;
+    hub.mode = 'mock';
+    const shell = document.body.appendChild(document.createElement('div'));
+    const shellView = render(() => <RunWatch />, shell);
+    onTestFinished(() => {
+      shellView.unmount();
+      shell.remove();
+    });
+    open(api);
+
+    await vi.waitFor(() => {
+      flush();
+      expect(target.querySelector('.live .card .legend')).not.toBeNull();
+    });
+
+    handlers.status?.({ status: 'completed', error: null });
+    flush();
+    // Wait for the failing refresh to settle: Overview must stay on `nothing training`, never snapping back to stale `running`.
+    await vi.waitFor(() => expect(calls).toBeGreaterThanOrEqual(2));
+    await Promise.resolve();
+    flush();
+    expect(target.querySelector('.facts')?.textContent).toContain('nothing training');
+    expect(target.querySelector('.live')?.textContent).toContain('Nothing is training');
+
+    // Switching servers clears the earlier server's terminal override.
+    hub.epoch++;
+    flush();
+    watched.runs = initialList;
+    flush();
+    expect(activeRuns().training).toBe(1);
   });
 });

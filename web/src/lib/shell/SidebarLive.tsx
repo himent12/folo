@@ -12,10 +12,10 @@ import type { Run } from '$lib/api/types';
 import { href } from '$lib/router';
 import Progress from '$lib/ui/Progress';
 import { tooltip } from '$lib/ui/tooltip';
-import { training, watched } from './runList';
+import { effectiveRuns, training, watched } from './runList';
 
 export default function SidebarLive(props: { collapsed: boolean }) {
-  const listed = computed(() => watched.runs?.find(training));
+  const listed = computed(() => effectiveRuns(watched.runs)?.find(training));
   // The page's own stream of this run, while it is up (Overview's hero, the run page): the row reads the same source
   // as the page, so the two never disagree and the row stays live when only the lists stopped refreshing. A stream
   // that reports the run finished hides the row before the list catches up.

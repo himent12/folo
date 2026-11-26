@@ -36,7 +36,7 @@ import { FROM_SCRATCH_META, origin } from '$lib/lineage';
 import { href, router } from '$lib/router';
 import { setCrumbs } from '$lib/shell/crumbs';
 import Page from '$lib/shell/Page';
-import { watched } from '$lib/shell/runList';
+import { noteRunEnded, watched } from '$lib/shell/runList';
 import Badge from '$lib/ui/Badge';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
@@ -96,6 +96,23 @@ export default function Run() {
   const resolved = computed(() => run.get()?.resolved);
   const cloud = computed(() => run.get()?.cloud);
   const status = computed(() => run.get()?.status);
+  // When an active run transitions to a terminal state over SSE, notify the shared run list so the sidebar badge and
+  // Overview stay consistent immediately (including if the user navigates back before the next 2 s poll).
+  let prevStreamId: string | undefined;
+  let prevStreamStatus: string | undefined;
+  effect(() => {
+    const r = run.get();
+    const curId = r?.id;
+    const curStatus = r?.status;
+    if (curId !== prevStreamId) {
+      prevStreamId = curId;
+      prevStreamStatus = curStatus;
+      return;
+    }
+    const wasActive = prevStreamStatus === 'queued' || prevStreamStatus === 'running' || prevStreamStatus === 'stopping';
+    prevStreamStatus = curStatus;
+    if (r && wasActive && curStatus && !ACTIVE.includes(curStatus)) untrack(() => noteRunEnded(r));
+  });
   const dataset = computed(() => {
     const c = config.get();
     return c ? datasets.data?.find((d) => d.id === c.dataset_id) : undefined;

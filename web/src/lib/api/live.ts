@@ -24,7 +24,7 @@ import { AppendLog } from './appendLog';
 import { ApiError } from './client';
 import { hub } from './index';
 import { heldResults, type HeldResults } from './progress';
-import type { Epoch, LogLine, Run, RunCloud, RunLogs, RunMetrics, Step } from './types';
+import type { Epoch, LogLine, Run, RunCloud, RunLogs, RunMetrics, RunStatus, Step } from './types';
 
 /** Log lines a live view keeps (the latest). */
 export const MAX_LOGS = 2000;
@@ -104,8 +104,21 @@ export function streamedRun(id: string | undefined): Run | undefined {
   return undefined;
 }
 
+/**
+ * The current status of `id` from a live mounted stream while it is up (loaded, not `lost`). Reads only the stream's
+ * id/status signals (never step-level progress fields), so callers that only need status consistency (Overview's header
+ * and slot, the sidebar's Runs badge) do not recompute on 10 Hz step ticks.
+ */
+export function streamedStatus(id: string | undefined): RunStatus | undefined {
+  if (!id) return undefined;
+  for (const s of streams) if (s.runId === id && s.lost === null && !s.loading) return s.status;
+  return undefined;
+}
+
 export class LiveRun {
   #run = signal<Run | undefined>(undefined);
+  #runId = signal<string | undefined>(undefined);
+  #status = signal<RunStatus | undefined>(undefined);
   #error = signal<unknown>(undefined);
   #loading = signal(true);
   #connection = signal<'idle' | 'open' | 'reconnecting'>('idle');
@@ -120,6 +133,15 @@ export class LiveRun {
   }
   set run(v: Run | undefined) {
     this.#run.set(v);
+    this.#runId.set(v?.id);
+    this.#status.set(v?.status);
+    this.#notifyEnded();
+  }
+  get runId(): string | undefined {
+    return this.#runId.get();
+  }
+  get status(): RunStatus | undefined {
+    return this.#status.get();
   }
   get error(): unknown {
     return this.#error.get();
@@ -132,6 +154,7 @@ export class LiveRun {
   }
   set loading(v: boolean) {
     this.#loading.set(v);
+    if (!v) this.#notifyEnded();
   }
   get connection(): 'idle' | 'open' | 'reconnecting' {
     return this.#connection.get();
@@ -149,6 +172,7 @@ export class LiveRun {
   }
   set lost(v: number | null) {
     this.#lost.set(v);
+    if (v === null) this.#notifyEnded();
   }
   /**
    * The run as the server's latest applied snapshot has it, uncorrected by events: once it says the run ended, how many
@@ -240,9 +264,25 @@ export class LiveRun {
   #viewSeq = 0;
   /** While a resumed run repeats steps it had already run: the old last step, and what the new attempt streamed. */
   #replay: { until: number; steps: Step[]; epochs: Epoch[] } | null = null;
+  #onEnded: ((run: Run) => void) | undefined;
+  #endedId: string | null = null;
 
-  constructor(id: () => string | null, opts?: { logs?: boolean }) {
+  #notifyEnded() {
+    if (!this.#onEnded) return;
+    const r = this.#run.peek();
+    if (!r || this.#loading.peek() || this.#lost.peek() !== null) return;
+    if (ACTIVE.includes(r.status)) {
+      if (this.#endedId === r.id) this.#endedId = null;
+      return;
+    }
+    if (this.#endedId === r.id) return;
+    this.#endedId = r.id;
+    untrack(() => this.#onEnded?.(r));
+  }
+
+  constructor(id: () => string | null, opts?: { logs?: boolean; onEnded?: (run: Run) => void }) {
     const withLogs = opts?.logs ?? true;
+    this.#onEnded = opts?.onEnded;
     effect(() => {
       untrack(() => streams.add(this));
       return () => void streams.delete(this);

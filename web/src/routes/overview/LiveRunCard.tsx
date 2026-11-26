@@ -33,6 +33,8 @@ export interface LiveRunCardProps {
   lost?: number | null;
   /** The page's system info, which the machine foot starts from (./MachineFoot). */
   system?: Resource<SystemInfo>;
+  /** Called once when this card's live stream reports a terminal status (`completed` / `stopped` / `failed`). */
+  onended?: (run: Run) => void;
 }
 
 /**
@@ -57,7 +59,9 @@ export default function LiveRunCard(props: LiveRunCardProps) {
 
   const runId = computed(() => props.run.id);
   // Overview's live card does not show run logs: skip the `/logs` requests and log buffering (#309).
-  const live = new LiveRun(() => runId.get(), { logs: false });
+  // Notify Overview synchronously when the stream reports a terminal state so its summary, live slot, Recent runs,
+  // and sidebar stay in lockstep before the card unmounts and before the polled run list catches up.
+  const live = new LiveRun(() => runId.get(), { logs: false, onEnded: (r) => props.onended?.(r) });
   const run = computed(() => live.run ?? props.run);
   // The stream went quiet: what the card shows is the last known state, as of then. The status says so, the estimate
   // is qualified and the live marks (the badge's heartbeat, the line's lime end, the lime rail) stop (DESIGN_DIRECTION
