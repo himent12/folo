@@ -388,9 +388,9 @@ impl Inner {
                         json!({ "path": shown, "image": r.image, "boxes": r.boxes, "timing": r.timing }),
                     );
                 }
-                // `not_implemented` (older server without `predict_options`) applies to the whole batch; per-image
-                // `invalid_config` (e.g. an oversized image exceeding the tile grid budget) is recorded in `failed`
-                // so valid images before and after it are preserved.
+                // `not_implemented` (older server without `predict_options` or `threshold_calibration`) applies to
+                // the whole batch; per-image `invalid_config` (e.g. an oversized image exceeding the tile grid
+                // budget) is recorded in `failed` so valid images before and after it are preserved.
                 Err(e) if e.body.code == "not_implemented" => {
                     return Err(e);
                 }
@@ -500,20 +500,36 @@ fn threshold_calibration_out(c: ThresholdCalibration) -> ThresholdCalibrationOut
     }
 }
 
-/// Fits `result` within [`MAX_RESULT_BYTES`] by trimming `diagnostics.worst_images` first, and if still too
-/// large, omitting `thresholds` whole (never returning a silently truncated partial calibration). Returns `true`
-/// when `thresholds` was omitted.
+/// Fits `result` within [`MAX_RESULT_BYTES`]: first tries trimming `diagnostics.worst_images` while keeping the
+/// full `thresholds` calibration; if even without `worst_images` the payload still exceeds the budget, omits
+/// `thresholds` whole (never returning a silently truncated partial calibration), restores `worst_images`, and
+/// trims only as many `worst_images` as needed for the remaining budget. Returns `true` when `thresholds` was
+/// omitted.
 fn fit_val_result(result: &mut ValToolResult) -> bool {
-    while json_len(result) > MAX_RESULT_BYTES {
-        if result.diagnostics.as_mut().and_then(|d| d.worst_images.pop()).is_some() {
-            continue;
-        }
-        if result.thresholds.take().is_some() {
-            return true;
-        }
-        break;
+    if json_len(result) <= MAX_RESULT_BYTES {
+        return false;
     }
-    false
+    let saved_worst = result.diagnostics.as_ref().map(|d| d.worst_images.clone());
+    while json_len(result) > MAX_RESULT_BYTES {
+        if result.diagnostics.as_mut().and_then(|d| d.worst_images.pop()).is_none() {
+            break;
+        }
+    }
+    if json_len(result) <= MAX_RESULT_BYTES {
+        return false;
+    }
+    let omitted = result.thresholds.take().is_some();
+    if omitted && let Some(worst) = saved_worst {
+        if let Some(d) = result.diagnostics.as_mut() {
+            d.worst_images = worst;
+        }
+        while json_len(result) > MAX_RESULT_BYTES {
+            if result.diagnostics.as_mut().and_then(|d| d.worst_images.pop()).is_none() {
+                break;
+            }
+        }
+    }
+    omitted
 }
 
 /// Reads and validates a `ThresholdCalibration` JSON file saved by `folo val --save-thresholds`.

@@ -183,8 +183,7 @@ impl Exec {
                     self.wait(self.core.tuning.poll)?;
                 }
                 Err(e) if e.is_transient() => {
-                    if let Ok(list) = self.named(client, &name)
-                        && let Some(r) = list.into_iter().find(|r| !earlier.contains(&r.id))
+                    if let Some(r) = self.named(client, &name)?.into_iter().find(|r| !earlier.contains(&r.id))
                     {
                         break r;
                     }

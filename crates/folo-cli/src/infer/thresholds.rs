@@ -13,23 +13,34 @@ use crate::output::{CliError, ExitCode};
 /// Maximum JSON file size accepted by `--thresholds` (prevents accidentally reading weights or images).
 const MAX_THRESHOLDS_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Normalizes a path for destination-collision checks (resolving symlinks on the longest existing ancestor and
-/// folding `.` / `..`, case-insensitively on Windows).
+/// Normalizes a path for destination-collision checks: canonicalizes existing paths (or existing parent folders
+/// plus filename) via the OS before any lexical `..` folding so symlinks with `..` resolve identically to the
+/// filesystem, comparing case-insensitively on Windows.
 fn path_identity(path: &Path) -> String {
-    let mut abs = PathBuf::new();
-    for c in std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).components() {
-        match c {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                abs.pop();
+    let resolved = if let Ok(canon) = std::fs::canonicalize(path) {
+        canon
+    } else if let Some(parent_canon) = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .and_then(|p| std::fs::canonicalize(p).ok())
+        .and_then(|p| path.file_name().map(|n| p.join(n)))
+    {
+        parent_canon
+    } else {
+        let mut abs = PathBuf::new();
+        for c in std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).components() {
+            match c {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    abs.pop();
+                }
+                c => abs.push(c),
             }
-            c => abs.push(c),
         }
-    }
-    let resolved = abs
-        .ancestors()
-        .find_map(|a| Some(std::fs::canonicalize(a).ok()?.join(abs.strip_prefix(a).ok()?)))
-        .unwrap_or(abs);
+        abs.ancestors()
+            .find_map(|a| Some(std::fs::canonicalize(a).ok()?.join(abs.strip_prefix(a).ok()?)))
+            .unwrap_or(abs)
+    };
     let s = resolved.to_string_lossy().into_owned();
     if cfg!(windows) { s.to_lowercase() } else { s }
 }
@@ -394,6 +405,22 @@ mod tests {
             check_save_thresholds_path(Some(&shared), &model_file, Some(&shared)).unwrap_err().code,
             "usage"
         );
+        // Symlink + `..` traversal resolving to the model file must still be detected before folding `..`.
+        #[cfg(unix)]
+        {
+            let nested = dir.join("weights").join("nested");
+            std::fs::create_dir_all(&nested).unwrap();
+            let real_model = dir.join("weights").join("model.folo");
+            std::fs::write(&real_model, b"weights").unwrap();
+            let link = dir.join("link");
+            std::os::unix::fs::symlink(&nested, &link).unwrap();
+            let via_link = link.join("..").join("model.folo");
+            assert_eq!(
+                check_save_thresholds_path(Some(&via_link), &real_model, None).unwrap_err().code,
+                "usage"
+            );
+            assert_eq!(std::fs::read(&real_model).unwrap(), b"weights");
+        }
 
         // Malformed JSON -> invalid_config
         let bad_json = dir.join("bad.json");

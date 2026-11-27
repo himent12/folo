@@ -451,7 +451,41 @@ fn oversized_val_result_omits_thresholds_whole_instead_of_partial() {
             },
             timing: ValTiming { total_s: 1.0, per_image_ms: 10.0 },
         },
-        diagnostics: None,
+        diagnostics: Some(ValDiagnosticsOut {
+            conf: 0.25,
+            tp_iou: 0.5,
+            bg_iou: 0.1,
+            images_diagnosed: 1,
+            failing_images: 1,
+            summary: ValDiagnosticsSummaryOut {
+                num_truths: 2,
+                num_preds: 2,
+                tp: 1,
+                fp: 1,
+                fn_count: 1,
+                localization_errors: 1,
+                class_confusions: 0,
+                duplicate_errors: 0,
+                background_fp: 0,
+                mean_f1: 0.5,
+                mean_tp_iou: 0.7,
+            },
+            worst_images: vec![ImageDiagnosticsOut {
+                image_index: 0,
+                image_id: Some("images/val/0.jpg".into()),
+                num_truths: 2,
+                num_preds: 2,
+                tp: 1,
+                fp: 1,
+                fn_count: 1,
+                localization_errors: 1,
+                class_confusions: 0,
+                duplicate_errors: 0,
+                background_fp: 0,
+                f1: 0.5,
+                mean_tp_iou: 0.7,
+            }],
+        }),
         thresholds: Some(ThresholdCalibrationOut {
             global: OperatingPointOut { best_conf: 0.35, best_f1: 0.75, precision: 0.8, recall: 0.7 },
             per_class: per_class_thr,
@@ -461,5 +495,10 @@ fn oversized_val_result_omits_thresholds_whole_instead_of_partial() {
     assert!(json_len(&result) > MAX_RESULT_BYTES);
     assert!(fit_val_result(&mut result), "must report that thresholds were omitted");
     assert!(result.thresholds.is_none(), "must omit whole calibration, never partial");
+    assert_eq!(
+        result.diagnostics.as_ref().unwrap().worst_images.len(),
+        1,
+        "diagnostics that fit after omitting oversized calibration must be preserved"
+    );
     assert!(json_len(&result) <= MAX_RESULT_BYTES);
 }
