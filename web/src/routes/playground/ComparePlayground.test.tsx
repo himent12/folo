@@ -400,7 +400,10 @@ describe('Playground: Compare A/B and Export', () => {
 
     // One-click Side-by-side PNG inside CompareSummary exports side-by-side even when Split view is active.
     const pngSpy = vi.spyOn(exportMod, 'exportComparePng').mockResolvedValue(true);
-    const pngBtn = target.querySelector<HTMLButtonElement>('[data-compare-export] button[aria-label="Export side-by-side annotated PNG"]')!;
+    const pngBtn = [...target.querySelectorAll<HTMLButtonElement>('[data-compare-export] button')].find((b) =>
+      b.textContent?.includes('Side-by-side PNG'),
+    )!;
+    expect(pngBtn.getAttribute('aria-label')).toBeNull();
     pngBtn.click();
     await vi.waitFor(() => expect(pngSpy).toHaveBeenCalledTimes(1));
     expect(pngSpy.mock.calls[0]![0].view).toBe('side-by-side');
@@ -415,7 +418,10 @@ describe('Playground: Compare A/B and Export', () => {
     vi.spyOn(URL, 'revokeObjectURL').mockImplementation((u) => revoked.push(u));
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
 
-    const jsonBtn = target.querySelector<HTMLButtonElement>('[data-compare-export] button[aria-label="Export A/B compare JSON"]')!;
+    const jsonBtn = [...target.querySelectorAll<HTMLButtonElement>('[data-compare-export] button')].find((b) =>
+      b.textContent?.includes('Compare JSON'),
+    )!;
+    expect(jsonBtn.getAttribute('aria-label')).toBeNull();
     jsonBtn.click();
     flushSync();
     expect(created).toHaveLength(1);
@@ -430,5 +436,84 @@ describe('Playground: Compare A/B and Export', () => {
     revokePendingBlobUrls();
     expect(pendingBlobRevokeCount()).toBe(0);
     expect(revoked).toEqual(['blob:cmp-summary/1']);
+
+    // Selecting Only A and then hiding its only class ('square') must automatically clear the filter instead of trapping it disabled.
+    pills[1]!.click();
+    flushSync();
+    expect(pills[1]!.getAttribute('aria-pressed')).toBe('true');
+    expect(clsNames()).toEqual(['square']);
+    const classesTab = [...target.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((t) => t.textContent?.includes('Classes'))!;
+    classesTab.click();
+    flushSync();
+    const sqToggle = await until(
+      () => [...target.querySelectorAll<HTMLButtonElement>('#pg-panel ul.counts button')].find((b) => b.textContent?.includes('square')),
+      'square class toggle',
+    );
+    sqToggle.click();
+    flushSync();
+    expect(pills[1]!.disabled).toBe(true);
+    expect(pills[1]!.getAttribute('aria-pressed')).toBe('false');
+    expect(clsNames().sort()).toEqual(['circle', 'triangle']);
+  });
+
+  it('never fabricates cross-frame classDiff or summary deltas when Model B still holds a stale prior frame', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    let holdSecondB: (() => void) | null = null;
+    let bCalls = 0;
+    api.predict = async (_input, opts) => {
+      if (opts.model_id === 'm_shapes_n') {
+        bCalls++;
+        if (bCalls === 2) {
+          await new Promise<void>((res) => {
+            holdSecondB = res;
+          });
+        }
+        return {
+          model_id: opts.model_id,
+          image: { width: 640, height: 480 },
+          boxes: [{ class: 0, name: 'triangle', score: 0.9, x1: 20, y1: 20, x2: 80, y2: 80 }],
+          timing: { preprocess_ms: 1, inference_ms: 5, postprocess_ms: 1, total_ms: 7 },
+          device: 'gpu:0',
+        };
+      }
+      return {
+        model_id: opts.model_id,
+        image: { width: 640, height: 480 },
+        boxes: [{ class: 0, name: 'circle', score: 0.92, x1: 10, y1: 10, x2: 50, y2: 50 }],
+        timing: { preprocess_ms: 1, inference_ms: 6, postprocess_ms: 1, total_ms: 8 },
+        device: 'gpu:0',
+      };
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    history.replaceState(history.state, '', '#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n');
+    router.route = parse('#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n');
+    handle = render(() => <Playground />, target);
+    const samples = await until(() => {
+      const list = [...target.querySelectorAll<HTMLButtonElement>('button.sample')];
+      return list.length >= 2 ? list : null;
+    }, 'two sample buttons');
+    samples[0]!.click();
+    await until(() => target.querySelector('[data-class-diff]'), 'frame 1 class diff');
+
+    // Switch to a second image while Model B's second prediction is held pending: Model A resolves, Model B is stale/pending.
+    target.querySelector<HTMLButtonElement>('button[aria-label="Clear image"]')!.click();
+    flushSync();
+    const samples2 = await until(() => {
+      const list = [...target.querySelectorAll<HTMLButtonElement>('button.sample')];
+      return list.length >= 2 ? list : null;
+    }, 'samples after clear');
+    samples2[1]!.click();
+    await until(() => holdSecondB !== null, 'Model B second request in flight');
+    await new Promise((r) => setTimeout(r, 20));
+    flushSync();
+
+    // While Model B has no fresh prediction for frame 2, classDiff must be absent (never mixed with frame 1).
+    expect(target.querySelector('[data-class-diff]')).toBeNull();
+    holdSecondB!();
+    await until(() => target.querySelector('[data-class-diff]'), 'frame 2 class diff once both fresh');
   });
 });

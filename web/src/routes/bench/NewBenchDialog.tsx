@@ -21,6 +21,7 @@ import {
   GENERATED_CLASSES_MAX,
   GENERATED_IMAGES_DEFAULT,
   GENERATED_IMGSZ_DEFAULT,
+  generatedShapeCollision,
   IMAGES_DEFAULT,
   IMAGES_MAX,
 } from '$lib/bench/rules';
@@ -29,7 +30,7 @@ import { LABEL_FEATURE } from '$lib/label';
 import { router } from '$lib/router';
 import { parseSeed, seedArrows, seedError } from '$lib/seed';
 import Button from '$lib/ui/Button';
-import ClassChips, { addClasses } from '$lib/ui/ClassChips';
+import ClassChips, { addClasses, classesLeftOut } from '$lib/ui/ClassChips';
 import Dialog from '$lib/ui/Dialog';
 import ErrorState from '$lib/ui/ErrorState';
 import Field from '$lib/ui/Field.tsx';
@@ -96,6 +97,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
   const genImagesText = signal(String(GENERATED_IMAGES_DEFAULT));
   const genClasses = signal<string[]>([...GENERATED_CLASSES_DEFAULT]);
   const genClassDraft = signal('');
+  const genLeftOut = signal<string[]>([]);
   const genImgsz = signal<GenSize>(String(GENERATED_IMGSZ_DEFAULT) as GenSize);
   const genSeed = signal('0');
   const varyAspect = signal(false);
@@ -123,6 +125,7 @@ export default function NewBenchDialog(props: { open?: boolean }) {
       genImagesText.set(String(GENERATED_IMAGES_DEFAULT));
       genClasses.set([...GENERATED_CLASSES_DEFAULT]);
       genClassDraft.set('');
+      genLeftOut.set([]);
       genImgsz.set(String(GENERATED_IMGSZ_DEFAULT) as GenSize);
       genSeed.set('0');
       varyAspect.set(false);
@@ -177,18 +180,40 @@ export default function NewBenchDialog(props: { open?: boolean }) {
     return Number.isInteger(m) && m >= 1 ? Math.min(m, sourceImages.get()) : sourceImages.get();
   });
 
+  const pendingLeftOut = computed(() => {
+    const draft = genClassDraft.get();
+    return draft.trim() ? classesLeftOut(genClasses.get(), draft, GENERATED_CLASSES_MAX) : [];
+  });
+  // Clear a previous left-out notice once the user removes a chip to make room or switches away from generated scenes.
+  effect(() => {
+    if (kind.get() !== 'generated' || genClasses.get().length < GENERATED_CLASSES_MAX) {
+      untrack(() => {
+        if (genLeftOut.peek().length) genLeftOut.set([]);
+      });
+    }
+  });
+
   const errs = computed(() => {
     const k = kind.get();
     if (k === 'generated') {
       const gi = genImages.get();
       const pending = genClassDraft.get().trim();
-      const totalClasses = pending ? addClasses(genClasses.get(), pending, GENERATED_CLASSES_MAX).length : genClasses.get().length;
+      const effectiveClasses = pending ? addClasses(genClasses.get(), pending, GENERATED_CLASSES_MAX) : genClasses.get();
+      const dropped = pendingLeftOut.get().length ? pendingLeftOut.get() : genLeftOut.get();
+      const shapeDup = generatedShapeCollision(effectiveClasses);
+      const genClassesErr = dropped.length
+        ? `At most ${GENERATED_CLASSES_MAX} classes: ${dropped.join(', ')} did not fit.`
+        : effectiveClasses.length === 0
+          ? 'Add at least one class.'
+          : shapeDup
+            ? `Two classes claim the built-in "${shapeDup}" shape.`
+            : null;
       return {
         name: benchNameError(name.get()),
         description: descriptionError(description.get()),
         max: null,
         genImages: !genImagesText.get().trim() || !Number.isInteger(gi) || gi < 1 || gi > IMAGES_MAX ? `A whole number from 1 to ${num(IMAGES_MAX)}.` : null,
-        genClasses: totalClasses === 0 ? 'Add at least one class.' : null,
+        genClasses: genClassesErr,
         genSeed: seedError(genSeed.get()),
       };
     }
@@ -207,6 +232,10 @@ export default function NewBenchDialog(props: { open?: boolean }) {
   const maxError = computed(() => (touched.get() || maxText.get().trim() ? errs.get().max : null));
   const genImagesError = computed(() => (touched.get() || genImagesText.get().trim() ? errs.get().genImages : null));
   const genSeedError = computed(() => (touched.get() || genSeed.get().trim() ? errs.get().genSeed : null));
+  /** Surface dropped classes (>8) or shape collisions immediately, not only after Submit. */
+  const genClassesError = computed(() =>
+    touched.get() || pendingLeftOut.get().length || genLeftOut.get().length || generatedShapeCollision(genClasses.get()) ? errs.get().genClasses : null,
+  );
   const sourceWhy = computed(() =>
     kind.get() === 'generated'
       ? generatedOff.get()
@@ -235,11 +264,13 @@ export default function NewBenchDialog(props: { open?: boolean }) {
     touched.get()
       ? Object.entries(errs.get()).find(([, e]) => e)?.[0]
       : kind.get() === 'generated'
-        ? genImagesError.get()
-          ? 'genImages'
-          : genSeedError.get()
-            ? 'genSeed'
-            : undefined
+        ? genClassesError.get()
+          ? 'genClasses'
+          : genImagesError.get()
+            ? 'genImages'
+            : genSeedError.get()
+              ? 'genSeed'
+              : undefined
         : maxError.get()
           ? 'max'
           : undefined,
@@ -273,8 +304,15 @@ export default function NewBenchDialog(props: { open?: boolean }) {
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     if (kind.peek() === 'generated' && genClassDraft.peek().trim()) {
+      const leftOut = classesLeftOut(genClasses.peek(), genClassDraft.peek(), GENERATED_CLASSES_MAX);
+      if (leftOut.length) {
+        genLeftOut.set(leftOut);
+        touched.set(true);
+        return;
+      }
       genClasses.set(addClasses(genClasses.peek(), genClassDraft.peek(), GENERATED_CLASSES_MAX));
       genClassDraft.set('');
+      genLeftOut.set([]);
     }
     touched.set(true);
     error.set(undefined);
@@ -421,14 +459,22 @@ export default function NewBenchDialog(props: { open?: boolean }) {
             <Field
               label="Classes"
               for={`${uid}-gcls`}
-              error={show(errs.get().genClasses)}
+              error={genClassesError.get()}
               hint={
                 genClasses.get().length >= GENERATED_CLASSES_MAX
                   ? `${GENERATED_CLASSES_MAX} of ${GENERATED_CLASSES_MAX}: one shape each.`
                   : `Press Enter or comma to add. Up to ${GENERATED_CLASSES_MAX} distinct classes.`
               }
             >
-              <ClassChips id={`${uid}-gcls`} bind:classes={genClasses} bind:draft={genClassDraft} max={GENERATED_CLASSES_MAX} placeholder="circle, square, …" />
+              <ClassChips
+                id={`${uid}-gcls`}
+                bind:classes={genClasses}
+                bind:draft={genClassDraft}
+                max={GENERATED_CLASSES_MAX}
+                placeholder="circle, square, …"
+                invalid={!!genClassesError.get()}
+                onleftout={(names) => genLeftOut.set(names)}
+              />
             </Field>
             <div class="gen-row">
               <Field label="Scenes" for={`${uid}-gimg`} error={genImagesError.get()} hint={`1 to ${num(IMAGES_MAX)} scenes.`}>

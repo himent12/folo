@@ -160,4 +160,50 @@ describe('Bench generated-scene source parity', () => {
     const names = [...document.querySelectorAll('table.benches tbody tr[data-row] td:first-child a.name')].map((a) => a.textContent?.trim());
     expect(names).toEqual(['Gen Smoke Bench']);
   });
+
+  it('surfaces omitted class names when more than 8 classes are entered instead of silently dropping them on submit', async () => {
+    const createSpy = vi.spyOn(hub.api, 'createBench');
+    open(NewBenchDialog, { open: true });
+    await settle();
+
+    [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Images from"] [role="radio"]')].find((r) =>
+      r.textContent?.includes('Generated scenes'),
+    )!.click();
+    flushSync();
+
+    type(document.querySelector('input[id$="-name"]')!, 'Too many classes');
+    // Already has 3 default classes; pasting 6 more brings total to 9 -> 9th ('extra') must be surfaced and block submit.
+    type(document.querySelector('input[id$="-gcls"]')!, 'star, ring, cross, hexagon, heart, extra');
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('extra');
+    expect(document.querySelector('.chips')?.classList.contains('invalid')).toBe(true);
+
+    document.querySelector<HTMLFormElement>('dialog[open] form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await settle();
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+
+  it('matches server HTTP validation in mock mode (distinct custom case allowed, built-in shape collision and unknown fields rejected)', async () => {
+    // Distinct custom names differing only in case are allowed by Rust `shapes_for`.
+    const custom = await hub.api.createBench({
+      name: 'Custom case bench',
+      source: { kind: 'generated', images: 4, classes: ['Bolt', 'bolt'], imgsz: 64, seed: 1 },
+    });
+    expect(custom.classes).toEqual(['Bolt', 'bolt']);
+
+    // Two classes claiming the same built-in shape (case-insensitive) are rejected.
+    await expect(
+      hub.api.createBench({
+        name: 'Shape collision',
+        source: { kind: 'generated', images: 4, classes: ['Circle', 'circle'], imgsz: 64, seed: 1 },
+      }),
+    ).rejects.toMatchObject({ status: 400, code: 'invalid_body' });
+
+    // Unknown fields inside generated source are rejected with 422 invalid_body (matching #[serde(deny_unknown_fields)]).
+    await expect(
+      hub.api.createBench({
+        name: 'Unknown field',
+        source: { kind: 'generated', images: 4, extra_field: true } as never,
+      }),
+    ).rejects.toMatchObject({ status: 422, code: 'invalid_body' });
+  });
 });

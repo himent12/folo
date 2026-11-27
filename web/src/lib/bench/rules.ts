@@ -16,6 +16,20 @@ export const GENERATED_IMGSZ_MIN = 32;
 export const GENERATED_IMGSZ_MAX = 4096;
 export const GENERATED_CLASSES_MAX = 8;
 export const GENERATED_CLASSES_DEFAULT = ['circle', 'square', 'triangle'] as const;
+/** Built-in shape names in `folo-data::synthetic::SHAPES`; colliding case variants (e.g. `Circle` & `circle`) are rejected. */
+export const GENERATED_SHAPES = ['circle', 'square', 'triangle', 'star', 'ring', 'cross', 'hexagon', 'heart'] as const;
+
+/** Returns the first duplicate built-in shape name if two classes claim the same shape (case-insensitive), else null. */
+export function generatedShapeCollision(classes: readonly string[]): string | null {
+  const seen = new Set<string>();
+  for (const raw of classes) {
+    const lower = raw.trim().toLowerCase();
+    if (!(GENERATED_SHAPES as readonly string[]).includes(lower)) continue;
+    if (seen.has(lower)) return lower;
+    seen.add(lower);
+  }
+  return null;
+}
 
 /** True when a persisted `Bench.source` came from deterministic generated scenes rather than a registered dataset. */
 export function isGeneratedBenchSource(s: BenchSource): boolean {

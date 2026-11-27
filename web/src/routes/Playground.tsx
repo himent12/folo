@@ -683,7 +683,7 @@ export default function Playground() {
       summary={cmp.summary.get()}
       modelAName={model.get()?.name ?? 'Model A'}
       modelBName={cmp.modelB.get()?.name ?? 'Model B'}
-      hasAnyResult={!!result.get() || !!cmp.resultB.get()}
+      hasAnyResult={predAMatches.get() || predBMatches.get()}
       predictingA={predicting.get()}
       predictingB={cmp.predictingB.get()}
       inspectSide={cmp.inspectSide.get()}
@@ -860,7 +860,7 @@ export default function Playground() {
                 resetButton={resetButton}
                 moreBody={moreBody}
                 compareFacts={
-                  cmp.compare.get() && (result.get() || cmp.resultB.get())
+                  cmp.compare.get() && (predAMatches.get() || predBMatches.get())
                     ? {
                         countA: cmp.summary.get().countA,
                         countB: cmp.summary.get().countB,

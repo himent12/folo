@@ -49,6 +49,7 @@ import {
   GENERATED_IMGSZ_MIN,
   GENERATED_SOURCE_ID,
   GENERATIONS_MAX,
+  generatedShapeCollision,
   generatedSourceName,
   IMAGES_DEFAULT,
   IMAGES_MAX,
@@ -148,7 +149,17 @@ export class MockBench extends MockBenchState {
     if (body.plan) this.#checkPlan(body.plan);
 
     if (body.source.kind === 'generated') {
+      const allowedTop = new Set(['name', 'description', 'source', 'max_images', 'seed', 'plan']);
+      const badTop = Object.keys(body).find((k) => !allowedTop.has(k));
+      if (badTop) {
+        throw new ApiError(422, 'invalid_body', `Failed to deserialize the JSON body into the target type: unknown field \`${badTop}\``);
+      }
       const gs = body.source;
+      const allowedSrc = new Set(['kind', 'images', 'classes', 'imgsz', 'seed', 'vary_aspect']);
+      const badSrc = Object.keys(gs).find((k) => !allowedSrc.has(k));
+      if (badSrc) {
+        throw new ApiError(422, 'invalid_body', `Failed to deserialize the JSON body into the target type: unknown field \`${badSrc}\``);
+      }
       if (gs.images != null && body.max_images != null && gs.images !== body.max_images) {
         throw new ApiError(400, 'invalid_body', `source.images (${gs.images}) and max_images (${body.max_images}) disagree: give one or the same count`);
       }
@@ -172,8 +183,14 @@ export class MockBench extends MockBenchState {
       if (!classes.length || classes.length > GENERATED_CLASSES_MAX || classes.some((c) => !c)) {
         throw new ApiError(400, 'invalid_body', `field \`source.classes\`: 1 to ${GENERATED_CLASSES_MAX} non-empty class names`);
       }
-      if (new Set(classes.map((c) => c.toLowerCase())).size !== classes.length) {
+      // Match `folo_data::synthetic::shapes_for`: exact-case duplicates and case-insensitive built-in shape collisions are rejected,
+      // while distinct custom names such as `Bolt` and `bolt` are accepted.
+      if (new Set(classes).size !== classes.length) {
         throw new ApiError(400, 'invalid_body', 'field `source.classes`: class names must be distinct');
+      }
+      const shapeDup = generatedShapeCollision(classes);
+      if (shapeDup) {
+        throw new ApiError(400, 'invalid_body', `two classes name the shape "${shapeDup}"`);
       }
       const varyAspect = !!gs.vary_aspect;
       const frames = varyAspect

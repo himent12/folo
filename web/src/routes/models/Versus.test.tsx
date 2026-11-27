@@ -110,6 +110,11 @@ describe('Engine speed table', () => {
     expect(csv.headers).toEqual(['source', 'device', 'metric', 'unit', 'folo_n', 'yolo26n', 'comparison', 'note']);
     expect(csv.rows).toHaveLength(versusYolo26n.length + 2);
     expect(versusCsv(null).rows).toHaveLength(versusYolo26n.length);
+    // Numeric cells in CSV stay raw numbers (no grouping commas or repeated units).
+    expect(csv.rows[0]![4]).toBe(2.99);
+    expect(csv.rows[1]![4]).toBe(1385);
+    expect(typeof csv.rows.at(-2)![4]).toBe('number');
+    expect(typeof csv.rows.at(-1)![4]).toBe('number');
 
     let copiedText = '';
     Object.defineProperty(navigator, 'clipboard', {
@@ -145,11 +150,40 @@ describe('Engine speed table', () => {
     flushSync();
     expect(click).toHaveBeenCalledTimes(1);
     expect(created).toHaveLength(1);
-    expect(await created[0]!.text()).toContain('folo_n,yolo26n');
+    const csvText = await created[0]!.text();
+    expect(csvText).toContain('folo_n,yolo26n');
+    expect(csvText).toContain('1385,1454');
     expect(pendingBlobRevokeCount()).toBe(1);
 
     revokePendingBlobUrls();
     expect(pendingBlobRevokeCount()).toBe(0);
     expect(revoked).toEqual(['blob:versus/1']);
+
+    // Hostile device_name starting with '=' is neutralized in CSV, and clipboard failure shows an error toast.
+    unmount(c);
+    const hostileTable = {
+      ...table,
+      device_name: '=CMD()|calc',
+      inference: table.inference.map((r) => ({ ...r, measured_on: '=CMD()|calc' })),
+      training: table.training.map((r) => ({ ...r, measured_on: '=CMD()|calc' })),
+    };
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(async () => Promise.reject(new Error('denied'))) },
+    });
+    c = mount(Versus, { target, props: { table: hostileTable } });
+    flushSync();
+    const copyBtn2 = [...target.querySelectorAll<HTMLButtonElement>('header button')].find((b) => b.textContent?.includes('Copy Markdown'))!;
+    copyBtn2.click();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(toast.items.some((t) => t.title === 'Could not copy Markdown' && t.tone === 'error')).toBe(true);
+    });
+    const csvBtn2 = [...target.querySelectorAll<HTMLButtonElement>('header button')].find((b) => b.textContent?.includes('Download CSV'))!;
+    csvBtn2.click();
+    flushSync();
+    expect(await created[1]!.text()).toContain("'=CMD()|calc");
+    revokePendingBlobUrls();
+    expect(pendingBlobRevokeCount()).toBe(0);
   });
 });

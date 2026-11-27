@@ -36,7 +36,16 @@ export default function CompareSummaryPanel(props: CompareSummaryPanelProps) {
   const diffFilter = signal<'all' | CompareClassPresence>('all');
 
   effect(() => {
-    if (!props.summary.classDiff) diffFilter.set('all');
+    const diff = props.summary.classDiff;
+    const f = diffFilter.peek();
+    if (
+      !diff ||
+      (f === 'both' && !diff.both.length) ||
+      (f === 'only-a' && !diff.onlyA.length) ||
+      (f === 'only-b' && !diff.onlyB.length)
+    ) {
+      diffFilter.set('all');
+    }
   });
 
   const filteredClasses = computed(() => {
@@ -189,7 +198,6 @@ export default function CompareSummaryPanel(props: CompareSummaryPanelProps) {
                   icon={Download}
                   disabled={!props.canExport || !!props.exportingPng}
                   loading={!!props.exportingPng}
-                  aria-label="Export side-by-side annotated PNG"
                   onclick={props.onExportSideBySidePng}
                 >
                   Side-by-side PNG
@@ -200,7 +208,6 @@ export default function CompareSummaryPanel(props: CompareSummaryPanelProps) {
                   size="sm"
                   icon={FileJson}
                   disabled={!props.canExport}
-                  aria-label="Export A/B compare JSON"
                   onclick={props.onExportCompareJson}
                 >
                   Compare JSON

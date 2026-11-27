@@ -12,8 +12,12 @@ export interface VersusReportRow {
   source: 'reference' | 'server';
   metric: string;
   unit: string;
+  /** Human-readable display values for Markdown tables. */
   folo: string;
   yolo: string;
+  /** Raw numeric values for CSV spreadsheet calculations (strings only where no measurement exists). */
+  foloCsv: number;
+  yoloCsv: number | string;
   comparison: string;
   note: string;
 }
@@ -37,6 +41,8 @@ export function buildVersusReport(table?: ThroughputTable | null): { rows: Versu
       unit: v.unit,
       folo: fmtVal(v, v.folo),
       yolo: fmtVal(v, v.yolo),
+      foloCsv: v.folo,
+      yoloCsv: v.yolo,
       comparison: diff ? `— (${unlikeCondition(diff)})` : leadText(v),
       note: v.note ?? '',
     };
@@ -53,6 +59,8 @@ export function buildVersusReport(table?: ThroughputTable | null): { rows: Versu
       unit: 'ms',
       folo: latencyMs(lat.latency_ms),
       yolo: 'not run here',
+      foloCsv: lat.latency_ms,
+      yoloCsv: 'not run here',
       comparison: 'Measured here',
       note: `${latencyRange(lat.latency_ms_low, lat.latency_ms_high)} · ${num(lat.samples)} predictions${lat.precision === 'f32' ? '' : ` · ${lat.precision}`}`,
     });
@@ -64,6 +72,8 @@ export function buildVersusReport(table?: ThroughputTable | null): { rows: Versu
       unit: 'img/s',
       folo: `${num(train.imgs_per_s)} img/s`,
       yolo: 'not run here',
+      foloCsv: train.imgs_per_s,
+      yoloCsv: 'not run here',
       comparison: 'Measured here',
       note: `${train.mosaic ? `${num(train.mosaic.low)}–${num(train.mosaic.high)} img/s · ` : ''}${num(train.samples)} samples · whole trainer`,
     });
@@ -111,8 +121,8 @@ export function versusCsv(table?: ThroughputTable | null): { filenameBase: strin
       r.source === 'server' ? (serverDevice ?? '') : 'RTX 4080 SUPER / i7-14700KF',
       r.metric,
       r.unit,
-      r.folo,
-      r.yolo,
+      r.foloCsv,
+      r.yoloCsv,
       r.comparison,
       r.note,
     ]),

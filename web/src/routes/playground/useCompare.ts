@@ -339,26 +339,43 @@ export function createCompareController(input: CompareControllerInput) {
   const selectedIdxB = computed(() => detectionIndex(pickedB.get(), keptB.get(), hiddenB.get()));
   const activeIdxB = computed(() => detectionIndex(hoverB.get(), keptB.get(), hiddenB.get()) ?? selectedIdxB.get());
 
-  const summary = computed(() =>
-    summarizeComparison({
-      boxesA: input.rowsA().map((r) => r.b),
-      boxesB: rowsB.get().map((r) => r.b),
-      predA: input.predA.get(),
-      predB: predB.get(),
-    }),
-  );
+  const curSourceKey = computed(() => {
+    const s = input.source.get();
+    return s ? sourceImageKey(s) : null;
+  });
+  const freshPredA = computed(() => {
+    const key = curSourceKey.get();
+    return key !== null && input.predSourceKeyA.get() === key ? input.predA.get() : null;
+  });
+  const freshPredB = computed(() => {
+    const key = curSourceKey.get();
+    return key !== null && predBSourceKey.get() === key ? predB.get() : null;
+  });
+
+  const summary = computed(() => {
+    const pA = freshPredA.get();
+    const pB = freshPredB.get();
+    return summarizeComparison({
+      boxesA: pA ? input.rowsA().map((r) => r.b) : [],
+      boxesB: pB ? rowsB.get().map((r) => r.b) : [],
+      predA: pA,
+      predB: pB,
+    });
+  });
 
   const compareJson = computed(() => {
+    const pA = freshPredA.get();
+    const pB = freshPredB.get();
     const names = allHiddenNames.get();
     const hiddenClasses = names.size ? [...names].sort() : undefined;
     return comparePredictionJson({
       view: compareView.get(),
-      predA: input.predA.get(),
-      predB: predB.get(),
-      hasResultA: !!input.resultA(),
-      hasResultB: !!resultB.get(),
-      boxesA: input.rowsA().map((r) => r.b),
-      boxesB: rowsB.get().map((r) => r.b),
+      predA: pA,
+      predB: pB,
+      hasResultA: !!pA && !!input.resultA(),
+      hasResultB: !!pB && !!resultB.get(),
+      boxesA: pA ? input.rowsA().map((r) => r.b) : [],
+      boxesB: pB ? rowsB.get().map((r) => r.b) : [],
       modelAName: input.modelA()?.name ?? input.modelAId() ?? 'Model A',
       modelBName: modelB.get()?.name ?? modelBId.get() ?? 'Model B',
       runOnA: input.runOnA.get(),
