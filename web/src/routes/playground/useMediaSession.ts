@@ -17,6 +17,16 @@ import {
   stopMediaStream,
   videoFrameName,
 } from './media';
+import { isValidFrameStep, probeVideoFrameStep, summarizeFrameDeltas } from './videoMeta';
+
+interface VideoFrameCallbackMeta {
+  mediaTime: number;
+  presentedFrames: number;
+}
+type VideoWithFrameCallback = HTMLVideoElement & {
+  requestVideoFrameCallback?: (cb: (now: DOMHighResTimeStamp, meta: VideoFrameCallbackMeta) => void) => number;
+  cancelVideoFrameCallback?: (id: number) => void;
+};
 
 export type MediaMode = 'none' | 'video' | 'webcam';
 
@@ -51,6 +61,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
   const videoName = signal('');
   const duration = signal(0);
   const currentTime = signal(0);
+  const frameStep = signal(DEFAULT_FRAME_STEP_SEC);
   const playing = signal(false);
   const videoReady = signal(false);
   const seeking = signal(false);
@@ -81,6 +92,12 @@ export function useMediaSession(input: UseMediaSessionInput) {
   let alive = true;
   let camSeq = 0;
   let captureSeq = 0;
+  let videoSeq = 0;
+  let containerStepKnown = false;
+  let lastFrameMediaTime: number | null = null;
+  let lastPresentedFrames = -1;
+  let rVfcId: number | null = null;
+  let rVfcDeltas: number[] = [];
   let stream: MediaStream | null = null;
   let streamTrackCleanups: (() => void)[] = [];
   let initialVideoCaptured = false;
@@ -95,6 +112,40 @@ export function useMediaSession(input: UseMediaSessionInput) {
       clearTimeout(liveTimer);
       liveTimer = null;
     }
+  }
+
+  function cancelFrameObserver() {
+    if (rVfcId !== null) {
+      const el = videoEl.peek() as VideoWithFrameCallback | undefined;
+      el?.cancelVideoFrameCallback?.(rVfcId);
+      rVfcId = null;
+    }
+  }
+
+  /** Observes playback frame cadence via rVFC as a fallback when container headers expose no frame duration. */
+  function ensureFrameObserver(el: HTMLVideoElement, seq: number) {
+    const v = el as VideoWithFrameCallback;
+    if (containerStepKnown || typeof v.requestVideoFrameCallback !== 'function' || rVfcId !== null) return;
+    const onVideoFrame = (_now: DOMHighResTimeStamp, meta: VideoFrameCallbackMeta) => {
+      rVfcId = null;
+      if (!alive || seq !== videoSeq || mode.peek() !== 'video' || containerStepKnown) return;
+      const mt = meta.mediaTime;
+      if (playing.peek() && lastFrameMediaTime !== null && meta.presentedFrames === lastPresentedFrames + 1) {
+        const dt = mt - lastFrameMediaTime;
+        if (isValidFrameStep(dt)) {
+          rVfcDeltas.push(dt);
+          if (rVfcDeltas.length > 16) rVfcDeltas.shift();
+          const est = summarizeFrameDeltas(rVfcDeltas);
+          if (est !== null && isValidFrameStep(est)) frameStep.set(est);
+        }
+      }
+      lastFrameMediaTime = mt;
+      lastPresentedFrames = meta.presentedFrames;
+      if (alive && seq === videoSeq && mode.peek() === 'video' && !containerStepKnown) {
+        rVfcId = v.requestVideoFrameCallback!(onVideoFrame);
+      }
+    };
+    rVfcId = v.requestVideoFrameCallback(onVideoFrame);
   }
 
   function clearTrackListeners() {
@@ -261,6 +312,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
         tracker.reset();
         fps.set(0);
         latencyMs.set(0);
+        if (playing.peek()) frameSynced.set(false);
       });
       return;
     }
@@ -291,6 +343,12 @@ export function useMediaSession(input: UseMediaSessionInput) {
   }
 
   function clearVideoState() {
+    videoSeq++;
+    cancelFrameObserver();
+    containerStepKnown = false;
+    lastFrameMediaTime = null;
+    lastPresentedFrames = -1;
+    rVfcDeltas = [];
     const el = videoEl.peek();
     if (el && mode.peek() === 'video') {
       el.pause();
@@ -303,6 +361,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     videoName.set('');
     duration.set(0);
     currentTime.set(0);
+    frameStep.set(DEFAULT_FRAME_STEP_SEC);
     playing.set(false);
     videoReady.set(false);
     seeking.set(false);
@@ -333,9 +392,18 @@ export function useMediaSession(input: UseMediaSessionInput) {
     stopCameraTracksOnly();
     clearVideoState();
     camErr.set(null);
+    const seq = ++videoSeq;
     videoName.set(file.name);
     videoUrl.set(URL.createObjectURL(file));
     mode.set('video');
+    void probeVideoFrameStep(file).then((step) => {
+      if (!alive || seq !== videoSeq || mode.peek() !== 'video') return;
+      if (step !== null && isValidFrameStep(step)) {
+        containerStepKnown = true;
+        cancelFrameObserver();
+        frameStep.set(step);
+      }
+    });
   }
 
   /** Starts live webcam streaming via navigator.mediaDevices.getUserMedia with graceful error fallback. */
@@ -449,6 +517,8 @@ export function useMediaSession(input: UseMediaSessionInput) {
 
   function seekTo(sec: number, immediate = false) {
     if (mode.peek() !== 'video') return;
+    lastFrameMediaTime = null;
+    lastPresentedFrames = -1;
     const clamped = clampMediaTime(sec, duration.peek());
     currentTime.set(clamped);
     const el = videoEl.peek();
@@ -469,7 +539,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     if (el && !el.paused) el.pause();
     playing.set(false);
     clearLiveTimer();
-    const next = stepFrameTime(currentTime.peek(), delta, duration.peek(), DEFAULT_FRAME_STEP_SEC);
+    const next = stepFrameTime(currentTime.peek(), delta, duration.peek(), frameStep.peek());
     seekTo(next, true);
   }
 
@@ -519,6 +589,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
       if (v.videoWidth > 0 && v.videoHeight > 0) videoDims.set({ width: v.videoWidth, height: v.videoHeight });
       const ready = v.videoWidth > 0 && v.readyState >= 2;
       videoReady.set(ready);
+      if (ready) ensureFrameObserver(v, videoSeq);
       previewTick.set((t) => t + 1);
       if (ready && !initialVideoCaptured) {
         initialVideoCaptured = true;
@@ -557,8 +628,9 @@ export function useMediaSession(input: UseMediaSessionInput) {
     ontimeupdate: (e: Event & { currentTarget: HTMLVideoElement }) => {
       if (mode.peek() === 'video') currentTime.set(e.currentTarget.currentTime);
     },
-    onplay: () => {
+    onplay: (e: Event & { currentTarget: HTMLVideoElement }) => {
       if (mode.peek() !== 'video') return;
+      ensureFrameObserver(e.currentTarget, videoSeq);
       playing.set(true);
       if (autoDetect.peek()) scheduleNextLiveTick();
       else frameSynced.set(false);
@@ -603,6 +675,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     videoName,
     duration,
     currentTime,
+    frameStep,
     playing,
     videoReady,
     seeking,
