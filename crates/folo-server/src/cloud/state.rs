@@ -67,9 +67,14 @@ pub(crate) struct Private {
     /// Automatic preemption recovery attempts already started for this run.
     #[serde(default)]
     pub preemptions: u32,
-    /// Cumulative estimated USD cost of earlier instances replaced after preemption.
+    /// Ledger ids of earlier instances replaced after preemption, so cumulative run cost reconciles dynamically
+    /// against the ledger even when the reaper confirms an old instance's termination later.
     #[serde(default)]
-    pub prior_cost_usd: f64,
+    pub prior_instance_ids: Vec<String>,
+    /// True while the run has already released a preempted worker and is waiting to provision its replacement, so
+    /// an ungraceful server crash during backoff resumes recovery on startup instead of abandoning the run.
+    #[serde(default)]
+    pub recovering_preemption: bool,
     /// How the run ended on the worker, once its weights were collected.
     #[serde(default)]
     pub outcome: Option<Outcome>,

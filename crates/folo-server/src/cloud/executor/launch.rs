@@ -29,7 +29,7 @@ impl Exec {
         self.train(&client)
     }
 
-    pub(super) fn recover(&mut self) -> std::result::Result<Outcome, Halt> {
+    pub(super) fn recover(&mut self, release: &mut Release) -> std::result::Result<Outcome, Halt> {
         // Repair any torn trailing line left by a crash before any recovery, interruption, or release path appends
         // logs/metrics (this thread already holds `self._lock`, so no other writer is active on these files).
         crate::runs::ensure_trailing_newline(&self.entry.metrics_path());
@@ -37,6 +37,40 @@ impl Exec {
         // Collected before the restart: what is left is the release.
         if let Some(o) = self.private.outcome.clone() {
             return Ok(o);
+        }
+        // Crashed during preemption recovery backoff (after releasing the old instance, before launching the
+        // replacement): honor stop/deadline and continue auto-resume from the synced checkpoint instead of
+        // abandoning the run.
+        if self.private.recovering_preemption && self.private.instance_id.is_none() {
+            if self.is_stopping() {
+                self.private.recovering_preemption = false;
+                self.save();
+                return Err(Halt::Stopped(
+                    "stopped during preemption recovery; synced checkpoint weights/last.folo kept".into(),
+                ));
+            }
+            if self.past_deadline() {
+                self.private.recovering_preemption = false;
+                self.save();
+                return Err(Halt::Stopped(format!(
+                    "the time limit of {} ended the run during preemption recovery",
+                    self.hours()
+                )));
+            }
+            if self.entry.resumable_checkpoint().is_none() {
+                self.private.recovering_preemption = false;
+                self.save();
+                return Err(failed(
+                    "cloud_instance_lost",
+                    "server restarted during preemption recovery, but no incomplete weights/last.folo is \
+                     available to resume from",
+                ));
+            }
+            self.entry.log(
+                LogLevel::Info,
+                "this server restarted during preemption recovery; continuing auto-resume from weights/last.folo",
+            );
+            return self.start(release);
         }
         let phase = self.phase_now();
         let (Some(url), Some(_)) = (self.private.worker_url.clone(), &self.private.run_id) else {
@@ -85,6 +119,9 @@ impl Exec {
         let len = folo_data::pack::packed_len(ds)
             .map_err(|e| failed("data_error", format!("measuring the dataset: {e}")))?;
         let disk_gb = compute.disk_gb.unwrap_or_else(|| disk_for(len));
+        // Recheck shutdown/stop/deadline after opening and measuring the dataset so an accepted cancellation never
+        // proceeds into a paid launch.
+        self.interrupted()?;
         self.entry
             .log(LogLevel::Info, format!("launching {} at {} ({disk_gb} GB disk)", offer.gpu, info.name));
         let internal = |e: std::io::Error| failed("internal", e.to_string());
@@ -103,6 +140,7 @@ impl Exec {
             return Err(failed(&e.body.code, e.body.message));
         }
         release.arm(&record.id);
+        self.private.recovering_preemption = false;
         self.private.instance_id = Some(record.id.clone());
         self.private.token = Some(token.clone());
         self.save();

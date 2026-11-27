@@ -251,6 +251,23 @@ impl Ledger {
         self.change(id, |r| change(&mut r.instance))
     }
 
+    /// Atomically transitions instance `id` to `terminating` for automatic preemption recovery only if it has not
+    /// already been marked `terminating`, `terminated`, or `lost` (e.g. by manual `DELETE /api/cloud/instances/{id}`
+    /// or `folo cloud terminate`). Returns `Ok(true)` when preemption recovery claimed the release, or `Ok(false)`
+    /// when manual termination won the race.
+    pub fn begin_preemption_release(&self, id: &str) -> Result<bool> {
+        let _lock = self.lock()?;
+        let mut r = self.read(id)?;
+        if !r.instance.status.is_alive() || r.instance.status == CloudInstanceStatus::Terminating {
+            return Ok(false);
+        }
+        r.instance.status = CloudInstanceStatus::Terminating;
+        let now = unix_now();
+        r.instance.cost_usd = cost(&r.instance, now, self.last(&r));
+        self.write(&r)?;
+        Ok(true)
+    }
+
     /// The provider confirmed that instance `id` is gone: `terminated`, without an error. `was_gone` says the
     /// provider no longer had it when it was asked, so nobody saw it end: its end is then put at when it should
     /// have terminated itself ([`Ledger::last`]) when that is known and was earlier. An instance that was still

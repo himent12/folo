@@ -12,8 +12,8 @@ use folo_server::store::MetricsQuery;
 use folo_test_support::TestDir;
 
 use super::harness::{
-    Call, TestCloud, cloud_run, connect, dataset, epochs, fast, finished, log_of, logged, no_gpu, phase,
-    plane, record, run_of, steps, until,
+    Call, Fault, TestCloud, cloud_run, connect, dataset, epochs, fast, finished, log_of, logged, no_gpu,
+    phase, plane, record, run_of, steps, until,
 };
 
 #[test]
@@ -51,15 +51,23 @@ fn a_preempted_worker_auto_reprovisions_and_resumes_from_synced_checkpoint() {
     assert!(logged(&store, &run.id, "attempt 1/3"), "{:?}", log_of(&store, &run.id));
     assert!(logged(&store, &run.id, "uploading the checkpoint weights/last.folo"));
 
-    // Cloud phase stream went through Provisioning twice (initial + auto-resume) and cleared silence.
-    let provisioning_transitions = events
-        .windows(2)
-        .filter(|w| {
-            matches!(&w[0], RunEvent::Cloud(a) if a.phase != CloudPhase::Provisioning)
-                && matches!(&w[1], RunEvent::Cloud(b) if b.phase == CloudPhase::Provisioning)
+    // Cloud phase stream returned to Provisioning once for auto-resume (filter to Cloud events so interleaved
+    // log lines do not affect transition counting) and cleared silence.
+    let cloud_phases: Vec<CloudPhase> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Cloud(c) => Some(c.phase),
+            _ => None,
         })
+        .collect();
+    let provisioning_transitions = cloud_phases
+        .windows(2)
+        .filter(|w| w[0] != CloudPhase::Provisioning && w[1] == CloudPhase::Provisioning)
         .count();
-    assert_eq!(provisioning_transitions, 1, "expected return to provisioning on preemption");
+    assert_eq!(
+        provisioning_transitions, 1,
+        "expected return to provisioning on preemption: {cloud_phases:?}"
+    );
     let final_cloud = done.cloud.as_ref().unwrap();
     assert_ne!(final_cloud.instance_id.as_deref(), Some(first_instance.as_str()));
     assert_eq!(final_cloud.unanswered_since, None);
@@ -88,8 +96,10 @@ fn preemption_auto_resume_exhausts_bounded_retry_budget() {
     let ds = dataset(&store);
     let conn = connect(&store);
 
+    // Use 5 epochs (> 1 + max_preemption_retries) so worker 3 is guaranteed to pause at EpochHold even if both
+    // worker 1 and worker 2 complete and sync an epoch before being killed.
     cloud.hold_epochs(true);
-    let run = store.create_run(cloud_run(&ds, &conn.id, 3)).unwrap();
+    let run = store.create_run(cloud_run(&ds, &conn.id, 5)).unwrap();
 
     // 1st preemption (after epoch 1 checkpoint syncs) -> retry 1/2.
     until("first checkpoint synced", || run_of(&store, &run.id).cloud.and_then(|c| c.synced));
@@ -203,5 +213,54 @@ fn manual_termination_and_preemption_without_checkpoint_do_not_auto_resume() {
     );
     assert!(done2.error.as_deref().unwrap().contains("no synced checkpoint"));
     assert_eq!(cloud.calls(Call::Launch), 2, "no replacement without a synced checkpoint");
+    assert_eq!(cloud.live(), 0);
+}
+
+#[test]
+fn reaper_terminates_superseded_preempted_instance_while_replacement_trains() {
+    no_gpu();
+    let t = TestDir::new("cloud-spot-reaper");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(
+        &t.join("home"),
+        &cloud,
+        Tuning { release_wait: Duration::from_millis(80), reaper_every: Duration::from_millis(50), ..fast() },
+    );
+    let ds = dataset(&store);
+    let conn = connect(&store);
+
+    cloud.hold_epochs(true);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 3)).unwrap();
+    until("first checkpoint synced", || run_of(&store, &run.id).cloud.and_then(|c| c.synced));
+    let first_id = run_of(&store, &run.id).cloud.and_then(|c| c.instance_id).unwrap();
+
+    // Refuse Terminate while pod-1 is preempted so pod-1 stays `Terminating` after `release_for_retry` times out.
+    cloud.fail(Call::Terminate, Fault::Fail(folo_cloud::ErrorKind::Unavailable), usize::MAX);
+    cloud.kill(0);
+
+    // Wait until the replacement worker (pod-2) is actively training (run still holds `cloud.lock`!).
+    until("replacement worker training", || {
+        (cloud.calls(Call::Launch) >= 2 && phase(&run_of(&store, &run.id)) == CloudPhase::Training)
+            .then_some(())
+    });
+    let first_now = store.cloud_instances().unwrap().into_iter().find(|i| i.id == first_id).unwrap();
+    assert_eq!(first_now.status, CloudInstanceStatus::Terminating, "pod-1 still awaiting confirmation");
+
+    // Re-enable Terminate while pod-2 is STILL held mid-training: the reaper must confirm pod-1's termination
+    // without waiting for pod-2 to finish!
+    cloud.clear(Call::Terminate);
+    until("reaper confirms superseded pod-1 terminated while pod-2 runs", || {
+        store
+            .cloud_instances()
+            .unwrap()
+            .into_iter()
+            .find(|i| i.id == first_id && i.status == CloudInstanceStatus::Terminated)
+    });
+    assert!(run_of(&store, &run.id).status.is_active(), "replacement worker still training");
+
+    // Let pod-2 finish and verify clean completion.
+    cloud.hold_epochs(false);
+    let done = finished(&store, &run.id);
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&store, &run.id));
     assert_eq!(cloud.live(), 0);
 }

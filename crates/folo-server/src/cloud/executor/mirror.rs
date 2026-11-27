@@ -286,7 +286,7 @@ impl Exec {
                             return Err(self.lost_by_hand());
                         }
                         if self.c.provider.info().provisions
-                            && !self.entry.stop_requested()
+                            && !self.is_stopping()
                             && !time_up
                             && !self.past_deadline()
                             && end.as_ref().is_some_and(|r| r.status == RunStatus::Completed)

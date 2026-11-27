@@ -124,7 +124,7 @@ impl Exec {
                     let msg = "the worker no longer has the run (its server restarted or was replaced)";
                     if self.c.provider.info().provisions
                         && stop_requested_at.is_none()
-                        && !self.entry.stop_requested()
+                        && !self.is_stopping()
                         && !self.past_deadline()
                     {
                         return Err(Halt::Preempted(msg.into()));
@@ -165,7 +165,7 @@ impl Exec {
                         }
                         if self.c.provider.info().provisions
                             && stop_requested_at.is_none()
-                            && !self.entry.stop_requested()
+                            && !self.is_stopping()
                             && !self.past_deadline()
                         {
                             return Err(Halt::Preempted(format!(
