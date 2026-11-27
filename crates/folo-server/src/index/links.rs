@@ -135,7 +135,7 @@ pub fn enrich_dangling_symlinks(input_path: &Path, report: &mut CheckReport) {
     match report.format {
         Format::Yolo => enrich_yolo_dangling_symlinks(input_path, report, &mut reported_files),
         Format::Coco => enrich_coco_dangling_symlinks(report, &mut reported_files),
-        Format::Auto => {}
+        Format::Auto | Format::Voc => {}
     }
 }
 

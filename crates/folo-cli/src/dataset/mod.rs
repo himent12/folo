@@ -41,6 +41,7 @@ pub(super) fn format_name(f: Format) -> &'static str {
         Format::Auto => "auto",
         Format::Yolo => "yolo",
         Format::Coco => "coco",
+        Format::Voc => "voc",
     }
 }
 

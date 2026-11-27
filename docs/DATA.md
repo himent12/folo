@@ -11,8 +11,10 @@ produces plain buffers that the trainer wraps in tensors.
 |---|---|
 | `*.yaml` / `*.yml` file | YOLO `data.yaml` |
 | `*.json` file | COCO instances JSON (one split, guessed from the name) |
+| `*.xml` file | Pascal VOC `<annotation>` XML (one split, guessed from the parent folder) |
 | directory with `data.yaml` / `dataset.yaml` (or any YAML with a `train` key; `.yaml` / `.yml` in any case) | YOLO (a YAML without split keys, e.g. only `names`, reads the `images/` + `labels/` layout next to it) |
 | directory with `annotations/instances_*.json`, COCO JSON at the root, or `train|val|valid|test/*.json` (Roboflow) | COCO |
+| directory with `Annotations/*.xml`, `train|val|valid|test/*.xml`, or colocated `<annotation>` XML files | Pascal VOC (`Format::Voc`) |
 | directory with `images/` + `labels/` (or `train/images`, `valid/images`, ...) and no YAML | YOLO, names from `classes.txt` or `class0..` |
 
 ### YOLO
@@ -66,6 +68,26 @@ produces plain buffers that the trainer wraps in tensors.
   split's file and resolves every image's path exactly as the loader does, so dataset entries match COCO images by
   path. `coco_annotation_files(path)` lists a COCO dataset's annotation files per split. Entries and the top level
   are read as structs only when they are JSON objects (a positional array would otherwise fill one). `folo val --coco` uses them for pycocotools-exact evaluation (docs/METRICS.md).
+
+### Pascal VOC
+- Auto-detected (`Format::Voc`) from classic VOC directories (`Annotations/*.xml`, `JPEGImages/` or `images/`,
+  optional `ImageSets/Main/{train,val,trainval,test}.txt`), split subdirectories (`train/`, `val|valid/`, `test/`
+  holding `.xml` annotations), flat colocated folders, or a single `.xml` file.
+- When `ImageSets/Main/` has `train.txt` or `val.txt`, those explicit split files are used (`trainval.txt` is used as
+  `train` only when neither `train.txt` nor `val.txt` exists, avoiding duplicating train + val).
+- XML is parsed by a strict, zero-dependency parser (`dataset/voc/xml.rs`) supporting UTF-8 BOM, comments, CDATA,
+  self-closing tags, and standard + numeric XML entities (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`, `&#NNN;`,
+  `&#xHHH;`) with line-numbered diagnostics on malformed markup.
+- `<size>` (`<width>`, `<height>`) is validated against the actual image dimensions when `verify_images` is on (and
+  probed from the image when absent or zero). `<object>` requires `<name>` and `<bndbox>` (`xmin`, `ymin`, `xmax`,
+  `ymax`). By default (`VocCoordMode::OneBased`, the VOC2007/VOC2012 devkit convention), 1-based inclusive pixel
+  coordinates `[1..=width]` map to 0-based edges `[(xmin - 1).max(0), (ymin - 1).max(0), xmax, ymax]` so a
+  full-image box `(1, 1, width, height)` covers the whole image and a 1-pixel box `(x, y, x, y)` is preserved;
+  `open_voc_with` also supports `VocCoordMode::ZeroBased` for zero-based exporters. Boxes are clipped to the image and
+  zero-area boxes are dropped with a warning. `<difficult>` is parsed cleanly and kept by default in `open` /
+  `open_with`; `open_voc_with(path, &VocOptions { include_difficult: false, .. })` excludes difficult objects.
+- Class names follow `classes.txt` when present at the root, with any additional `<name>` values appended in sorted
+  order across all splits (so `open_splits` produces the same class ids as `open`).
 
 `open_splits(path, &opts, &[Split::Val])` opens some splits only: those come out exactly as `open_with` builds
 them (same classes, entries and order) and the others empty, without reading or probing their images and labels.
@@ -133,22 +155,34 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
 `[0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1]`) and `boxes_per_image_hist` (edges `[0, 1, 2, 4, 8, 16, 32]`). Bins are
 `[lo, hi)`; values past the last edge count in the last bin.
 
-## Validation and conversion
-- `check::check(path, &CheckOptions { format, decode })` reads every label line and every image (fully decoded
-  unless `decode: false`) and returns a `CheckReport` with one `CheckIssue { kind, file, line, message, fix }` per
-  problem: `broken_label`, `class_overflow`, `out_of_range_box`, `corrupt_image`, `missing_image` (errors: the loader
-  skips the image), `clipped_box`, `zero_size_box`, `duplicate_label`, `duplicate_image` (exact byte duplicates,
-  128-bit content hash), `other` (warnings) and `empty_image` (info). A YOLO label file no image reads is a
-  `missing_image` too when its folder is a label folder inside the dataset root that the loader pairs with a separate
-  folder still holding at least one image the dataset reads (`labels/train` with `images/train`), and no file of its
-  stem (any extension or case) is in those image folders; links to one folder count as one, `classes.txt` is not a
-  label. Other folders are not visited, so a label folder whose last image is gone, or a label whose image is a
-  dangling link, is not reported. It never
-  modifies files; `fix` says what a cleanup would do. The YOLO line rules are the loader's
+## Validation, auditing, splitting and conversion
+- `check::check(path, &CheckOptions { format, decode })` reads every label line (or COCO/VOC annotation) and every
+  image (fully decoded unless `decode: false`) and returns a `CheckReport` with one `CheckIssue { kind, file, line,
+  message, fix }` per problem: `broken_label`, `class_overflow`, `out_of_range_box`, `corrupt_image`, `missing_image`
+  (errors: the loader skips the image), `clipped_box`, `zero_size_box`, `duplicate_label`, `duplicate_image` (exact
+  byte duplicates via 128-bit content hash over each file's bytes; cross-split duplicates are flagged explicitly as
+  `split leakage` between splits), `other` (warnings) and `empty_image` (info). A YOLO label file no image reads is a `missing_image`
+  too when its folder is a label folder inside the dataset root that the loader pairs with a separate folder still
+  holding at least one image the dataset reads (`labels/train` with `images/train`), and no file of its stem (any
+  extension or case) is in those image folders; links to one folder count as one, `classes.txt` is not a label. Other
+  folders are not visited, so a label folder whose last image is gone, or a label whose image is a dangling link, is
+  not reported. It never modifies files; `fix` says what a cleanup would do. The YOLO line rules are the loader's
   (`dataset::labels::parse_line`), so the checker and the loader cannot disagree. `folo dataset check` prints it
   (docs/CLI.md).
-- `convert::convert(&loaded, out, Format::Yolo | Format::Coco)` writes an opened dataset in the other format
-  (images copied unchanged, stems made unique per split, COCO category ids 1-based).
+- `LoadedDataset::audit()` / `audit::audit_dataset(&loaded)` hashes every readable image in parallel with constant
+  per-thread memory and returns an `AuditReport` with `duplicate_groups`, `split_leakage` (images whose exact bytes
+  appear in two or more splits, with `has_train_val_leakage()`), `unreadable`, `stats`, and `empty_classes`.
+- `LoadedDataset::split_stratified(&cfg)` / `split::split_dataset(&loaded, &cfg)` (plus `split_indices` for any
+  `Dataset` and `write_split` to materialise on disk) performs seeded iterative multi-label stratification across
+  `train` / `val` / optional `test`, processing rarest classes first with relative-deficit scoring so rare classes and
+  background images keep balanced representation across splits.
+- `convert::convert(&loaded, out, Format::Yolo | Format::Coco | Format::Voc)` writes an opened dataset in the target
+  format (images copied unchanged, stems made unique per split for YOLO/COCO and whitespace-free/unique across all
+  splits for VOC, COCO category ids 1-based; VOC export writes classic 1-based inclusive integer `<bndbox>`
+  coordinates by rounding widths `>= 1` px to `[round(x1) + 1, round(x2)]` and collapsing sub-pixel boxes to a
+  1-pixel box at `floor(midpoint) + 1`, and requires single-line trimmed non-empty class names; note `folo dataset
+  convert --to` in the CLI currently targets `yolo | coco`, while `Format::Voc` export is exposed through the
+  `folo-data` library API).
 - `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
   a `DataError::Format` whose message starts with `UNDETECTED`. A folder a writer has not finished (below) is refused
   as unfinished first, whatever it holds.
