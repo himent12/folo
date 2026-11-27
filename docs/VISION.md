@@ -281,4 +281,4 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
 The integration tests in `crates/folo-vision/tests/` are named for what they protect: `model.rs`, `model_v2.rs`,
 `loss_cases.rs`, `assign_cases.rs`, `distill.rs`, `wave7_train_algos.rs`, `nms_reference.rs`, `fusion_reference.rs`,
 `elc_postproc.rs`, `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs`, `train/` (`main.rs`, `ema.rs`), `o2o.rs`, `lazy_head.rs`,
-`int8.rs`, and the GPU ones (`gpu*.rs`).
+`int8.rs`, `harden_pipelines.rs`, `tiled_predict.rs`, and the GPU ones (`gpu*.rs`).

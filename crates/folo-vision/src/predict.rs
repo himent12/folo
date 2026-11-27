@@ -402,16 +402,30 @@ impl Predictor {
             let t_crop = Instant::now();
             let crops: Vec<Image> = chunk.par_iter().map(|&r| crop_tile(img, r)).collect::<Result<_>>()?;
             pre_ms += ms(t_crop);
+            let t_batch = Instant::now();
             let preds = self.predict_batch(&crops)?;
+            let batch_wall = ms(t_batch);
+            let (mut b_pre, mut b_inf, mut b_post) = (0.0f64, 0.0f64, 0.0f64);
             for (pred, tile) in preds.into_iter().zip(chunk) {
-                pre_ms += pred.timing.preprocess_ms;
-                inf_ms += pred.timing.inference_ms;
-                post_ms += pred.timing.postprocess_ms;
+                b_pre += pred.timing.preprocess_ms;
+                b_inf += pred.timing.inference_ms;
+                b_post += pred.timing.postprocess_ms;
                 let (ox, oy) = (tile.x as f32, tile.y as f32);
                 all_dets.extend(pred.detections.into_iter().map(|d| Detection {
                     bbox: Xyxy::new(d.bbox.x1 + ox, d.bbox.y1 + oy, d.bbox.x2 + ox, d.bbox.y2 + oy),
                     ..d
                 }));
+            }
+            // Scale the chunk's per-stage sum to actual wall time so parallel CPU sub-batches never
+            // double-count overlapping wall intervals while keeping the pre/inf/post breakdown faithful.
+            let b_sum = b_pre + b_inf + b_post;
+            if b_sum > 0.0 {
+                let scale = batch_wall / b_sum;
+                pre_ms += b_pre * scale;
+                inf_ms += b_inf * scale;
+                post_ms += b_post * scale;
+            } else {
+                inf_ms += batch_wall;
             }
         }
 

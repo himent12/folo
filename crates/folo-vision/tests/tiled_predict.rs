@@ -131,9 +131,19 @@ fn tiled_prediction_is_batch_invariant_across_f32_int8_o2o_and_merge_modes() {
     let pred_o2o =
         Predictor::new(m_o2o, PredictConfig { imgsz: 64, conf: 0.0, max_det: 20, ..Default::default() })
             .unwrap();
-    let o2o_out = pred_o2o.predict_tiled(&img, &base_cfg).unwrap();
-    assert!(!o2o_out.detections.is_empty());
-    for d in &o2o_out.detections {
+    let o2o_a = pred_o2o.predict_tiled(&img, &TileConfig { tile_batch: 1, ..base_cfg.clone() }).unwrap();
+    let t_wall = std::time::Instant::now();
+    let o2o_b = pred_o2o.predict_tiled(&img, &TileConfig { tile_batch: 8, ..base_cfg.clone() }).unwrap();
+    let wall_ms = t_wall.elapsed().as_secs_f64() * 1e3;
+    assert!(!o2o_a.detections.is_empty());
+    assert_eq!(o2o_a.detections, o2o_b.detections, "o2o tiled predictions must be tile_batch-invariant");
+    assert!(
+        o2o_b.timing.total_ms <= wall_ms + 1.0,
+        "tiled total_ms ({:.2}) must not double-count parallel CPU wall time ({:.2})",
+        o2o_b.timing.total_ms,
+        wall_ms
+    );
+    for d in &o2o_a.detections {
         assert!(d.class < 3);
         assert!(d.bbox.x1 >= 0.0 && d.bbox.y1 >= 0.0 && d.bbox.x2 <= 192.0 && d.bbox.y2 <= 128.0);
     }

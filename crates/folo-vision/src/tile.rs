@@ -168,7 +168,11 @@ pub fn compute_tiles(img_w: u32, img_h: u32, cfg: &TileConfig) -> Result<Vec<Til
     }
     let (tw, xs) = axis_starts(img_w, cfg.tile_width, cfg.overlap_x);
     let (th, ys) = axis_starts(img_h, cfg.tile_height, cfg.overlap_y);
-    let mut out = Vec::with_capacity(xs.len() * ys.len());
+    let count = xs
+        .len()
+        .checked_mul(ys.len())
+        .ok_or_else(|| Error::Config(format!("tile grid overflows capacity for {img_w}x{img_h}")))?;
+    let mut out = Vec::with_capacity(count);
     for &y in &ys {
         for &x in &xs {
             out.push(TileRect { x, y, width: tw, height: th });
@@ -229,14 +233,16 @@ fn box_overlap(a: &Xyxy, b: &Xyxy, metric: TileMergeMetric) -> f32 {
     match metric {
         TileMergeMetric::Iou => box_iou(a, b, IouKind::Iou),
         TileMergeMetric::Ios => {
-            let iw = (a.x2.min(b.x2) - a.x1.max(b.x1)).max(0.0);
-            let ih = (a.y2.min(b.y2) - a.y1.max(b.y1)).max(0.0);
+            let iw = (a.x2.min(b.x2) as f64 - a.x1.max(b.x1) as f64).max(0.0);
+            let ih = (a.y2.min(b.y2) as f64 - a.y1.max(b.y1) as f64).max(0.0);
             let inter = iw * ih;
             if inter <= 0.0 {
                 return 0.0;
             }
-            let min_area = a.area().min(b.area());
-            if min_area <= 0.0 { 0.0 } else { (inter / min_area).min(1.0) }
+            let area_a = (a.x2 as f64 - a.x1 as f64).max(0.0) * (a.y2 as f64 - a.y1 as f64).max(0.0);
+            let area_b = (b.x2 as f64 - b.x1 as f64).max(0.0) * (b.y2 as f64 - b.y1 as f64).max(0.0);
+            let min_area = area_a.min(area_b);
+            if min_area <= 0.0 { 0.0 } else { (inter / min_area).min(1.0) as f32 }
         }
     }
 }
@@ -294,27 +300,27 @@ pub fn merge_tiled_detections(
             .then_with(|| a.bbox.y2.total_cmp(&b.bbox.y2))
     });
 
-    // Greedy suppression with exclusive ownership: `owners[i]` records the index in `clean` of the survivor
-    // that kept or absorbed candidate `i`.
+    // Greedy suppression with exclusive ownership: `owners[i]` records the position in `kept` (`0..kept.len()`)
+    // of the survivor that kept or absorbed candidate `i`, matching `fuse_boxes_sebf`'s owner convention.
     let n = clean.len();
     let mut kept: Vec<usize> = Vec::new();
     let mut owners: Vec<u32> = vec![u32::MAX; n];
     for i in 0..n {
         let cand = &clean[i];
         let mut matched: Option<usize> = None;
-        for &k in &kept {
+        for (slot, &k) in kept.iter().enumerate() {
             if !cfg.class_agnostic && clean[k].class != cand.class {
                 continue;
             }
             if box_overlap(&clean[k].bbox, &cand.bbox, cfg.merge_metric) > cfg.merge_threshold {
-                matched = Some(k);
+                matched = Some(slot);
                 break;
             }
         }
-        if let Some(k) = matched {
-            owners[i] = k as u32;
+        if let Some(slot) = matched {
+            owners[i] = slot as u32;
         } else {
-            owners[i] = i as u32;
+            owners[i] = kept.len() as u32;
             kept.push(i);
         }
     }
@@ -322,22 +328,18 @@ pub fn merge_tiled_detections(
     let fused_boxes: Vec<Xyxy> = match cfg.merge_fusion {
         BoxFusion::None => kept.iter().map(|&k| clean[k].bbox).collect(),
         BoxFusion::Vote | BoxFusion::Dfl => {
-            // Group owned members per survivor; fuse only members whose IoU also exceeds `merge_threshold`
+            // Group owned members per survivor; fuse only members whose IoU also meets `merge_threshold`
             // (plus the survivor itself) so IoS-suppressed truncated tile fragments never shrink a full box.
-            let mut pos_of = vec![usize::MAX; n];
-            for (slot, &k) in kept.iter().enumerate() {
-                pos_of[k] = slot;
-            }
             let mut acc = vec![[0.0f64; 4]; kept.len()];
             let mut sum = vec![0.0f64; kept.len()];
             for (i, d) in clean.iter().enumerate() {
-                let owner = owners[i] as usize;
-                let slot = pos_of[owner];
-                if slot == usize::MAX {
-                    continue;
-                }
-                if i != owner && box_iou(&clean[owner].bbox, &d.bbox, IouKind::Iou) <= cfg.merge_threshold {
-                    continue;
+                let slot = owners[i] as usize;
+                let owner = kept[slot];
+                if i != owner {
+                    let iou = box_iou(&clean[owner].bbox, &d.bbox, IouKind::Iou);
+                    if iou <= 0.0 || iou < cfg.merge_threshold {
+                        continue;
+                    }
                 }
                 let wt = d.score as f64;
                 if wt.is_finite() && wt > 0.0 {
@@ -492,6 +494,35 @@ mod tests {
         let res = merge_tiled_detections(vec![d0, other_cls], 200, 200, &agnostic).unwrap();
         assert_eq!(res.len(), 1);
         assert_eq!(res[0].class, 1);
+    }
+
+    #[test]
+    fn sebf_fuses_later_clusters_after_suppressed_candidates_without_contamination() {
+        // Cluster 0: indices 0 (survivor, kept[0]=0) and 1 (suppressed).
+        // Cluster 1: indices 2 (survivor, kept[1]=2 != 1) and 3 (suppressed).
+        // Cluster 2: indices 4 (survivor, kept[2]=4) and 5 (suppressed); slot 2 collides numerically with
+        // cluster 1's candidate index 2, verifying zero cross-cluster contamination.
+        let dets = vec![
+            Detection { bbox: Xyxy::new(10.0, 10.0, 50.0, 50.0), score: 0.95, class: 0 },
+            Detection { bbox: Xyxy::new(14.0, 12.0, 54.0, 52.0), score: 0.85, class: 0 },
+            Detection { bbox: Xyxy::new(100.0, 10.0, 140.0, 50.0), score: 0.80, class: 0 },
+            Detection { bbox: Xyxy::new(104.0, 12.0, 144.0, 52.0), score: 0.70, class: 0 },
+            Detection { bbox: Xyxy::new(100.0, 12.0, 140.0, 52.0), score: 0.65, class: 1 },
+            Detection { bbox: Xyxy::new(104.0, 14.0, 144.0, 54.0), score: 0.60, class: 1 },
+        ];
+        let cfg = TileConfig {
+            merge_metric: TileMergeMetric::Iou,
+            merge_threshold: 0.5,
+            merge_fusion: BoxFusion::Sebf,
+            class_agnostic: false,
+            ..Default::default()
+        };
+        let merged = merge_tiled_detections(dets, 200, 200, &cfg).unwrap();
+        assert_eq!(merged.len(), 3);
+        assert!(merged[0].bbox.x1 > 10.0 && merged[0].bbox.x1 < 14.0, "cluster 0: {:?}", merged[0].bbox);
+        assert!(merged[1].bbox.x1 > 100.0 && merged[1].bbox.x1 < 104.0, "cluster 1: {:?}", merged[1].bbox);
+        assert!(merged[2].bbox.x1 > 100.0 && merged[2].bbox.x1 < 104.0, "cluster 2: {:?}", merged[2].bbox);
+        assert!(merged[2].bbox.y1 > 12.0 && merged[2].bbox.y1 < 14.0, "cluster 2 y1: {:?}", merged[2].bbox);
     }
 
     #[test]
