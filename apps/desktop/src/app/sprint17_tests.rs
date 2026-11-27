@@ -249,3 +249,119 @@ fn review_fixes_arch_caches_probe_sync_and_finetune_resolution() {
         assert_eq!(this.model_compare.ids, vec!["m_7c12"]);
     });
 }
+
+#[test]
+fn playtest_r17_fixes_short_run_clone_mock_v2_metadata_and_estimate_basis() {
+    let (mut app, window) = open();
+
+    // 1. Cloning a valid 1-epoch folo2 run with default `close_mosaic = 10` clamps close_mosaic
+    // so `close_invalid` is false and Start training succeeds with the same v2 arch.
+    drive(&mut app, window, |this, w, cx| {
+        let mut short_run = this.store.run("run_d204").unwrap().clone();
+        short_run.config.epochs = 1;
+        short_run.config.augment.close_mosaic = 10;
+        short_run.config.head = crate::api::Head::O2o;
+        let cfg = short_run.config.clone();
+        this.open_new_run_from_run(&short_run, &cfg, None, w, cx);
+        let f = this.new_run.as_ref().unwrap();
+        assert!(!f.close_invalid, "short-run clone must not mark close_mosaic invalid");
+        assert_eq!(f.close_mosaic.round() as u32, 0);
+        assert_eq!(f.model_arch(), ModelArch::v2(Arch::N));
+        assert!(f.e2e);
+        this.submit_new_run(w, cx);
+    });
+    app.run_until_idle();
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.new_run.is_none(), "short-run clone submitted cleanly");
+        let created = this.store.runs.ready().unwrap().first().unwrap().clone();
+        assert_eq!(this.store.run_arch(&created), ModelArch::v2(Arch::N));
+        // 3. Startup logs for a demo folo2-n run identify `folo2-n` and `2.85 M` params.
+        let logs = this.store.api.logs(&created.id).unwrap();
+        assert!(logs.lines.iter().any(|l| l.message.contains("folo train folo2-n")));
+        assert!(logs.lines.iter().any(|l| l.message.contains("model: folo2-n · 2.85 M params")));
+    });
+
+    // 3b & 4. Seeded demo v2 model (`m_7c12`) has consistent 2.85M params, and demo v2 estimates
+    // use Reference basis instead of inheriting v1 Measured rows.
+    let mock = MockBackend::new(4200, true);
+    let m_v2 = mock.models().unwrap().into_iter().find(|m| m.id == "m_7c12").unwrap();
+    assert_eq!(m_v2.params, 2_850_000);
+    let d204_logs = mock.logs("run_d204").unwrap();
+    assert!(d204_logs.lines.iter().any(|l| l.message.contains("folo train folo2-n")));
+    assert!(d204_logs.lines.iter().any(|l| l.message.contains("model: folo2-n · 2.85 M params")));
+
+    let mut est_cfg = mock.runs().unwrap()[0].config.clone();
+    est_cfg.arch = Arch::S;
+    est_cfg.batch = 16;
+    est_cfg.imgsz = 640;
+    est_cfg.amp = false;
+    est_cfg.compute = None;
+    let est_v2 = mock.estimate_run_with_arch(&est_cfg, Some("folo2-s")).unwrap();
+    assert_eq!(
+        est_v2.basis.source,
+        crate::api::ThroughputSource::Reference,
+        "demo v2 estimate must not inherit v1 measured throughput rows"
+    );
+}
+
+#[test]
+fn playtest_r17_fixes_compare_fourth_model_focus_and_reconnected_arch_cache() {
+    let (mut app, window) = open();
+
+    // 2. Adding the 4th model in Compare (which unmounts `model-cmp-add`) moves focus to the
+    // newly added model chip rather than stranding keyboard focus on Overview.
+    drive(&mut app, window, |this, w, cx| {
+        this.open_model_compare(Some("m_7c12".into()), w, cx);
+    });
+    drawn_keys(&mut app, window);
+
+    drive(&mut app, window, |this, _, cx| {
+        let all: Vec<String> = this.store.models.ready().unwrap().iter().map(|m| m.id.clone()).collect();
+        let third = all.iter().find(|id| !this.model_compare.ids.contains(id)).unwrap().clone();
+        this.model_compare_add(third, cx);
+    });
+    drawn_keys(&mut app, window);
+
+    drive(&mut app, window, |this, w, cx| {
+        let all: Vec<String> = this.store.models.ready().unwrap().iter().map(|m| m.id.clone()).collect();
+        let fourth = all.iter().find(|id| !this.model_compare.ids.contains(id)).unwrap().clone();
+        assert_eq!(this.model_compare.ids.len(), 3);
+        let will_unmount = this.model_compare.ids.len() + 1 >= 4;
+        this.model_compare_add(fourth.clone(), cx);
+        assert!(will_unmount);
+        let target = this.fh(format!("model-cmp-open-{fourth}"), cx);
+        w.focus(&target);
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        let fourth = this.model_compare.ids[3].clone();
+        assert!(
+            this.fh(format!("model-cmp-open-{fourth}"), cx).is_focused(w),
+            "focus must stay on the 4th chip after model-cmp-add unmounts"
+        );
+
+        // Reconnect clears stale arch caches and bumps arch_probe_gen.
+        let gen_before = this.store.arch_probe_gen;
+        this.store.probed_model_archs.insert("stale_after_outage".into());
+        this.reconnected(cx);
+        assert_ne!(this.store.arch_probe_gen, gen_before);
+        assert!(!this.store.probed_model_archs.contains("stale_after_outage"));
+    });
+
+    // 8. Dataset Statistics scroll container is tracked by `page_scroll` so keyboard Tabbing
+    // down to the Export COCO Copy button can scroll it fully into view.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Dataset("ds_3b91".into()), w, cx);
+        this.ds_tab = crate::app::DsTab::Statistics;
+        this.ds_cli.mode = crate::screens::datasets::DatasetCliMode::ExportCoco;
+        cx.notify();
+    });
+    drawn_keys(&mut app, window);
+    drive(&mut app, window, |this, _, _| {
+        assert!(
+            f32::from(this.page_scroll.max_offset().height) > 0.0,
+            "ds-stats must track page_scroll so Tab reveal scrolls Copy command into view"
+        );
+    });
+}

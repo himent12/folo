@@ -265,6 +265,8 @@ impl FoloApp {
         // Images that failed while it was away are asked for again (they would stay blank for good).
         self.store.images_px.forget_failed();
         // Back: read the lists now (the server may have restarted on another data dir).
+        self.store.clear_arch_caches();
+        self.store.sync_known_archs();
         self.refresh_lists(cx);
         cx.notify();
     }

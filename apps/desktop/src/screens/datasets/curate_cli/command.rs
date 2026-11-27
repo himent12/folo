@@ -461,7 +461,7 @@ pub fn build_dataset_cli(ds: &Dataset, state: &DatasetCliState) -> BuiltDatasetC
             }
             let hint = match state.export_coco_images {
                 CocoImageMode::Copy => {
-                    "Exports COCO `annotations/instances_<split>.json` and copies images into the output folder (output must be new or empty)."
+                    "Exports COCO `annotations/instances_<split>.json` and copies images into a new or empty output folder."
                 }
                 CocoImageMode::Link => {
                     "Exports COCO `annotations/instances_<split>.json` and hardlinks images (falls back to copy across filesystems)."

@@ -155,16 +155,20 @@ impl MockBackend {
         // The basis (docs/API.md): the measured row of this device with the run's arch, image
         // size, batch and precision; else the nearest measured row on it by compute (the same
         // precision preferred), carried over by the reference's ratio between the two settings
-        // (the reference has no batch dependence); else the reference itself.
-        let rows: Vec<TrainThroughput> = self
-            .measured
-            .lock()
-            .unwrap()
-            .0
-            .iter()
-            .filter(|t| t.device == device && t.measured_on == here)
-            .cloned()
-            .collect();
+        // (the reference has no batch dependence); else the reference itself. FOLO v2 runs do not
+        // reuse v1 measured rows (matching real `folo-server`), so they report the reference basis.
+        let rows: Vec<TrainThroughput> = if model_arch.is_v2() {
+            Vec::new()
+        } else {
+            self.measured
+                .lock()
+                .unwrap()
+                .0
+                .iter()
+                .filter(|t| t.device == device && t.measured_on == here)
+                .cloned()
+                .collect()
+        };
         // Model compute: the architecture's GFLOPs at 640 px, scaled by image area.
         let compute = |arch: Arch, imgsz: u32| gflops(arch) * (imgsz as f64 / 640.).powi(2);
         let want = compute(config.arch, config.imgsz);

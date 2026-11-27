@@ -73,7 +73,6 @@ impl ModelArch {
         Self { family: ArchFamily::Folo, scale }
     }
 
-    #[cfg(test)]
     pub const fn v2(scale: Arch) -> Self {
         Self { family: ArchFamily::Folo2, scale }
     }
@@ -140,8 +139,7 @@ impl ModelArch {
         }
     }
 
-    /// Approximate parameter count (for tests & VRAM estimation).
-    #[cfg(test)]
+    /// Approximate parameter count (for logs, tests & VRAM estimation).
     pub const fn params_f64(self) -> f64 {
         match (self.family, self.scale) {
             (ArchFamily::Folo, Arch::N) => 2.62e6,
