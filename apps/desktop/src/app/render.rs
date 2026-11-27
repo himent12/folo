@@ -339,11 +339,18 @@ impl Render for FoloApp {
                     && this.label.new_job.is_none()
                     && this.label.add_folder.is_none()
                     && this.label.export_ds.is_none()
-                    && !(m.control || m.alt || m.platform)
-                    && this.handle_label_review_key(&job_id, ev.keystroke.key.as_str(), cx)
                 {
-                    cx.stop_propagation();
-                    cx.notify();
+                    let handled = if m.control && !m.alt && !m.platform {
+                        this.handle_label_review_shortcut(&job_id, ev.keystroke.key.as_str(), m.shift, cx)
+                    } else if !(m.control || m.alt || m.platform) {
+                        this.handle_label_review_key(&job_id, ev.keystroke.key.as_str(), cx)
+                    } else {
+                        false
+                    };
+                    if handled {
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
                 }
             }))
             .capture_any_mouse_down(self.leave_kb(cx))

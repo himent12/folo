@@ -284,8 +284,26 @@ impl FoloApp {
                 act(move |this, w, cx| this.ask_delete(target.clone(), w, cx)),
             ))
         };
+        let has_delete = delete.is_some();
         if let Some(delete) = delete {
             actions.insert(0, delete.into_any_element());
+        }
+        if self.store.runs.ready().is_some_and(|l| l.len() >= 2) {
+            let rid = r.id.clone();
+            actions.insert(
+                usize::from(has_delete),
+                self.button(
+                    "run-compare",
+                    "Compare",
+                    Btn::Secondary,
+                    Some("icons/git-compare-arrows.svg"),
+                    window,
+                    cx,
+                    act(move |this, w, cx| this.open_run_compare(Some(&rid), w, cx)),
+                )
+                .tooltip(crate::controls::tip("Compare this run against other runs side by side", None))
+                .into_any_element(),
+            );
         }
         let title = div()
             .w_full()

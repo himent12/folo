@@ -10,6 +10,8 @@ use crate::api::*;
 use crate::input::TextInput;
 use crate::store::Load;
 
+use super::editor::LabelEditor;
+
 /// Status filter on the Labeling jobs list.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum LabelJobFilter {
@@ -124,6 +126,8 @@ pub struct LabelState {
     pub pending_advance: Option<(String, String, String)>,
     /// Inline error banner inside the review workspace (e.g. `409 label_boxes_changed`).
     pub review_error: Option<ApiError>,
+    /// Interactive bounding-box draft, undo/redo stacks, active draw tool/class, and drag preview.
+    pub editor: LabelEditor,
 
     // Agent runner controls
     pub agent_id: Option<LabelAgentId>,
@@ -193,6 +197,7 @@ impl Default for LabelState {
             mutating_seq: 0,
             pending_advance: None,
             review_error: None,
+            editor: LabelEditor::default(),
             agent_id: None,
             model_idx: 0,
             effort: LabelEffort::Low,

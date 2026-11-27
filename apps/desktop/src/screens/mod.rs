@@ -263,6 +263,7 @@ impl FoloApp {
         self.clear_cloud();
         self.clear_bench();
         self.clear_label();
+        self.run_compare.clear();
         cx.notify();
     }
 }

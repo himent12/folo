@@ -1,23 +1,23 @@
-//! Image review workspace for Agent Labeling: status & class filters, bounding-box canvas stage,
-//! box inspection/relabel/delete controls, quick keyboard review actions, and image filmstrip.
+//! Image review workspace for Agent Labeling: status & class filters, interactive bounding-box
+//! toolbar (Select/Draw, Undo/Redo, Save/Discard), conflict/unsaved-edit notices, stage + box
+//! rail, and image filmstrip.
 
 use std::rc::Rc;
 
-use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
-    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, canvas, div, px,
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use crate::api::{LabelImage, LabelImageStatus, LabelJob, LabelSource, label_box_revision};
+use crate::api::{LabelImage, LabelImageStatus, LabelJob, LabelSource};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
-use crate::label::{LabelImageFilter, SelectedBox, filter_label_images};
+use crate::label::{EditTool, LabelImageFilter, filter_label_images};
 use crate::screens::loading_rows;
 use crate::store::ImgKind;
 use crate::theme::{Theme, alpha, radius, ty};
 use crate::ui::*;
-use crate::viz::{DrawBox, Fit, hit_box, paint_image_with_boxes, to_image, zoom_step};
+use crate::viz::{DrawBox, Fit, zoom_step};
 
 /// Computes how many 72 px thumbnails (with 6 px gaps) fit inside `review_w` without clipping.
 pub(crate) fn filmstrip_max_tiles(review_w: f32) -> usize {
@@ -129,9 +129,7 @@ impl FoloApp {
             window,
             cx,
             Rc::new(move |this, idx, _, cx| {
-                this.label.img_filter = buckets[idx.min(buckets.len() - 1)];
-                this.reconcile_selected_label_image(&jid_filter);
-                cx.notify();
+                this.request_label_img_filter(&jid_filter, buckets[idx.min(buckets.len() - 1)], cx);
             }),
         );
 
@@ -148,11 +146,7 @@ impl FoloApp {
                 Some(all_images.len() as u64),
                 window,
                 cx,
-                act(move |this, _, cx| {
-                    this.label.class_filter = None;
-                    this.reconcile_selected_label_image(&jid_all_cls);
-                    cx.notify();
-                }),
+                act(move |this, _, cx| this.request_label_class_filter(&jid_all_cls, None, cx)),
             )
             .into_any_element(),
         );
@@ -170,10 +164,9 @@ impl FoloApp {
                     window,
                     cx,
                     act(move |this, _, cx| {
-                        this.label.class_filter =
+                        let next =
                             if this.label.class_filter == Some(cls_idx) { None } else { Some(cls_idx) };
-                        this.reconcile_selected_label_image(&jid_cls);
-                        cx.notify();
+                        this.request_label_class_filter(&jid_cls, next, cx);
                     }),
                 )
                 .into_any_element(),
@@ -199,9 +192,9 @@ impl FoloApp {
                     .gap(px(8.))
                     .child(status_seg)
                     .child(
-                        text(ty::XS, t.text_tertiary)
-                            .whitespace_normal()
-                            .child("Keys: ←/→ step · A approve · S skip · Del box · B/L toggles"),
+                        text(ty::XS, t.text_tertiary).whitespace_normal().child(
+                            "Keys: ←/→ step · D draw · 1–9 class · Del box · Ctrl+Z/⇧Z undo/redo · Ctrl+S save · A approve",
+                        ),
                     ),
             )
             .child(div().flex().flex_wrap().items_center().gap(px(6.)).children(class_chips));
@@ -218,6 +211,7 @@ impl FoloApp {
                 act(move |this, _, cx| {
                     this.label.img_filter = LabelImageFilter::All;
                     this.label.class_filter = None;
+                    this.label.editor.pending_switch = None;
                     this.reconcile_selected_label_image(&jid_reset);
                     cx.notify();
                 }),
@@ -242,7 +236,7 @@ impl FoloApp {
                 .into_any_element();
         }
 
-        // Resolve the active image inside `shown`.
+        // Resolve the active image inside `shown` and sync the interactive editor.
         let cur_pos = self
             .label
             .selected_image
@@ -254,12 +248,20 @@ impl FoloApp {
             self.label.selected_image = Some(active.id.clone());
             self.label.selected_box = None;
         }
-        let active_rev = label_box_revision(&active.boxes);
+        self.label.editor.sync_image(&jid, &active, job.classes.len(), self.label.mutating);
+        let draft_boxes = self.label.editor.draft.clone();
+        let draft_rev = self.label.editor.draft_revision();
+        let dirty = self.label.editor.is_dirty();
+        let can_undo = self.label.editor.can_undo();
+        let can_redo = self.label.editor.can_redo();
+        let changed_elsewhere = self.label.editor.changed_elsewhere;
+        let has_pending_switch = self.label.editor.pending_switch.is_some();
+
         let sel_box = self
             .label
             .selected_box
             .as_ref()
-            .filter(|s| s.image_id == active.id && s.index < active.boxes.len() && s.revision == active_rev)
+            .filter(|s| s.image_id == active.id && s.index < draft_boxes.len() && s.revision == draft_rev)
             .map(|s| s.index);
         if sel_box.is_none() && self.label.selected_box.is_some() {
             self.label.selected_box = None;
@@ -273,7 +275,7 @@ impl FoloApp {
             "Previous image (←)",
             window,
             cx,
-            act(move |this, _, cx| this.step_label_image(&jid_prev, -1, cx)),
+            act(move |this, _, cx| this.request_step_label_image(&jid_prev, -1, cx)),
         );
         let jid_next = jid.clone();
         let next_btn = self.icon_button(
@@ -282,13 +284,136 @@ impl FoloApp {
             "Next image (→)",
             window,
             cx,
-            act(move |this, _, cx| this.step_label_image(&jid_next, 1, cx)),
+            act(move |this, _, cx| this.request_step_label_image(&jid_next, 1, cx)),
         );
         let counter = format!("{} of {}", int(cur_pos as u64 + 1), int(shown.len() as u64));
 
         let locked = active.status == LabelImageStatus::Labeling;
         let busy = self.label.mutating;
-        let approve_label = if active.status == LabelImageStatus::Labeled && active.reviewed {
+
+        // Tool switch: Select (click box / drag empty to draw) vs Draw (drag anywhere to draw).
+        let tool_idx = if self.label.editor.tool == EditTool::Draw { 1 } else { 0 };
+        let tool_seg = self
+            .segmented(
+                "label-edit-tool",
+                &["Select", "Draw"],
+                tool_idx,
+                window,
+                cx,
+                Rc::new(|this, idx, _, cx| {
+                    this.label.editor.cancel_draw();
+                    this.label.editor.tool = if idx == 1 { EditTool::Draw } else { EditTool::Select };
+                    cx.notify();
+                }),
+            )
+            .tooltip(crate::controls::tip(
+                "Select boxes or drag on empty space to draw; Draw mode lets you drag overlapping boxes (D)",
+                None,
+            ));
+
+        let undo_btn = if !can_undo || locked || busy {
+            self.button_disabled(
+                "label-undo",
+                "Undo",
+                Btn::Secondary,
+                None,
+                if locked { "Agent is labeling this image" } else { "Nothing to undo (Ctrl+Z)" },
+                window,
+                cx,
+            )
+        } else {
+            let (j, im_id) = (jid.clone(), active.id.clone());
+            self.button(
+                "label-undo",
+                "Undo",
+                Btn::Secondary,
+                None,
+                window,
+                cx,
+                act(move |this, _, cx| this.undo_label_edit(&j, &im_id, cx)),
+            )
+            .tooltip(crate::controls::tip("Undo last box edit", Some("Ctrl Z")))
+        };
+
+        let redo_btn = if !can_redo || locked || busy {
+            self.button_disabled(
+                "label-redo",
+                "Redo",
+                Btn::Secondary,
+                None,
+                if locked { "Agent is labeling this image" } else { "Nothing to redo (Ctrl+Shift+Z)" },
+                window,
+                cx,
+            )
+        } else {
+            let (j, im_id) = (jid.clone(), active.id.clone());
+            self.button(
+                "label-redo",
+                "Redo",
+                Btn::Secondary,
+                None,
+                window,
+                cx,
+                act(move |this, _, cx| this.redo_label_edit(&j, &im_id, cx)),
+            )
+            .tooltip(crate::controls::tip("Redo box edit", Some("Ctrl Shift Z")))
+        };
+
+        let discard_btn = dirty.then(|| {
+            if locked || busy {
+                self.button_disabled(
+                    "label-discard",
+                    "Discard",
+                    Btn::Secondary,
+                    Some("icons/x.svg"),
+                    "Saving…",
+                    window,
+                    cx,
+                )
+            } else {
+                let (j, im_id) = (jid.clone(), active.id.clone());
+                self.button(
+                    "label-discard",
+                    "Discard",
+                    Btn::Secondary,
+                    Some("icons/x.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.discard_label_edits(&j, &im_id, cx)),
+                )
+                .tooltip(crate::controls::tip("Revert unsaved edits (undoable with Ctrl+Z)", None))
+            }
+        });
+
+        let save_btn = dirty.then(|| {
+            if locked || busy {
+                self.button_disabled(
+                    "label-save",
+                    if busy { "Saving…" } else { "Save" },
+                    Btn::Primary,
+                    Some("icons/check.svg"),
+                    if locked { "Agent is labeling this image" } else { "Saving…" },
+                    window,
+                    cx,
+                )
+            } else {
+                let (j, im_id) = (jid.clone(), active.id.clone());
+                self.button(
+                    "label-save",
+                    "Save",
+                    Btn::Primary,
+                    Some("icons/check.svg"),
+                    window,
+                    cx,
+                    act(move |this, _, cx| this.save_label_edits(&j, &im_id, false, cx)),
+                )
+                .tooltip(crate::controls::tip("Save box edits and stay on this image", Some("Ctrl S")))
+            }
+        });
+
+        let approve_label = if dirty {
+            "Save & next"
+        } else if active.status == LabelImageStatus::Labeled && active.reviewed {
             "Reviewed"
         } else {
             "Approve"
@@ -297,7 +422,7 @@ impl FoloApp {
             self.button_disabled(
                 "label-approve",
                 approve_label,
-                Btn::Primary,
+                if dirty || !active.reviewed { Btn::Primary } else { Btn::Secondary },
                 Some("icons/check.svg"),
                 if locked { "Agent is labeling this image" } else { "Saving…" },
                 window,
@@ -308,13 +433,22 @@ impl FoloApp {
             self.button(
                 "label-approve",
                 approve_label,
-                if active.reviewed { Btn::Secondary } else { Btn::Primary },
+                if !dirty && !active.reviewed { Btn::Primary } else { Btn::Secondary },
                 Some("icons/check.svg"),
                 window,
                 cx,
                 act(move |this, _, cx| this.approve_label_image(&j, &im_id, true, cx)),
             )
+            .tooltip(crate::controls::tip(
+                if dirty {
+                    "Save edits, mark reviewed, and open next image"
+                } else {
+                    "Mark reviewed and open next image"
+                },
+                Some("A"),
+            ))
         };
+
         let jid_skip = jid.clone();
         let skip_btn = self.button(
             "label-skip",
@@ -323,7 +457,7 @@ impl FoloApp {
             Some("icons/arrow-right.svg"),
             window,
             cx,
-            act(move |this, _, cx| this.step_label_image(&jid_skip, 1, cx)),
+            act(move |this, _, cx| this.request_step_label_image(&jid_skip, 1, cx)),
         );
         let boxes_btn = self.icon_button(
             "label-toggle-boxes",
@@ -393,6 +527,7 @@ impl FoloApp {
             (LabelImageStatus::Pending, _, _) => badge(t, "Pending", Tone::Neutral),
             (LabelImageStatus::Failed, _, _) => badge(t, "Failed", Tone::Danger),
         };
+        let dirty_badge = dirty.then(|| badge(t, "Unsaved", Tone::Warning));
 
         let review_header = div()
             .flex()
@@ -421,10 +556,11 @@ impl FoloApp {
                             .min_w_0()
                             .flex_shrink()
                             .ellipsis()
-                            .max_w(px(220.))
+                            .max_w(px(200.))
                             .child(active.file.clone()),
                     )
-                    .child(div().flex_none().child(img_status_badge)),
+                    .child(div().flex_none().child(img_status_badge))
+                    .children(dirty_badge.map(|b| div().flex_none().child(b))),
             )
             .child(
                 div()
@@ -432,15 +568,20 @@ impl FoloApp {
                     .flex_wrap()
                     .items_center()
                     .gap(px(6.))
+                    .child(tool_seg)
+                    .child(undo_btn)
+                    .child(redo_btn)
                     .child(boxes_btn)
                     .child(zoom_out)
                     .child(zoom_in)
                     .child(del_box_btn)
+                    .children(discard_btn)
+                    .children(save_btn)
                     .child(skip_btn)
                     .child(approve_btn),
             );
 
-        // Error banners (image-level agent error or mutation conflict error).
+        // Error, conflict, and unsaved-switch banners.
         let mut notices = Vec::new();
         if let Some(err) = &active.error {
             notices.push(
@@ -472,10 +613,110 @@ impl FoloApp {
                     .child(text(ty::SM, t.warning_text).whitespace_normal().child(err.message.clone())),
             );
         }
+        if changed_elsewhere {
+            notices.push(
+                div()
+                    .mx(px(14.))
+                    .mt(px(10.))
+                    .p(px(10.))
+                    .rounded(px(radius::MD))
+                    .bg(t.warning_muted)
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(icon("icons/info.svg", 14., t.warning_solid))
+                    .child(
+                        text(ty::SM, t.warning_text)
+                            .whitespace_normal()
+                            .child("Boxes changed on the server while you edited. Save overwrites with yours; Discard loads the latest."),
+                    ),
+            );
+        }
+        if has_pending_switch {
+            let j_save = jid.clone();
+            let j_disc = jid.clone();
+            let save_cont = self.button(
+                "label-sw-save",
+                "Save & continue",
+                Btn::Primary,
+                Some("icons/check.svg"),
+                window,
+                cx,
+                act(move |this, _, cx| this.resolve_pending_label_switch(&j_save, true, cx)),
+            );
+            let disc_cont = self.button(
+                "label-sw-discard",
+                "Discard",
+                Btn::Danger,
+                None,
+                window,
+                cx,
+                act(move |this, _, cx| this.resolve_pending_label_switch(&j_disc, false, cx)),
+            );
+            let stay_btn = self.button(
+                "label-sw-stay",
+                "Stay",
+                Btn::Secondary,
+                None,
+                window,
+                cx,
+                act(|this, _, cx| {
+                    this.label.editor.pending_switch = None;
+                    cx.notify();
+                }),
+            );
+            notices.push(
+                div()
+                    .mx(px(14.))
+                    .mt(px(10.))
+                    .p(px(10.))
+                    .rounded(px(radius::MD))
+                    .bg(t.warning_muted)
+                    .border_1()
+                    .border_color(t.warning_solid)
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(icon("icons/triangle-alert.svg", 14., t.warning_solid))
+                            .child(
+                                text(ty::SM, t.warning_text)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(format!("Unsaved box edits on {}.", active.file)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(stay_btn)
+                            .child(disc_cont)
+                            .child(save_cont),
+                    ),
+            );
+        }
 
-        // Bounding-box stage canvas.
-        let stage = self.label_stage(t, job, &active, &active_rev, sel_box, cx);
-        let box_rail = self.label_box_list(t, job, &active, &active_rev, sel_box, locked || busy, window, cx);
+        // Bounding-box stage canvas and right-hand box rail.
+        let stage = self.label_stage(t, job, &active, &draft_boxes, &draft_rev, sel_box, cx);
+        let box_rail = self.label_box_list(
+            t,
+            job,
+            &active,
+            &draft_boxes,
+            &draft_rev,
+            sel_box,
+            dirty,
+            locked || busy,
+            window,
+            cx,
+        );
         let filmstrip = self.label_filmstrip(t, &jid, &shown, &active.id, review_w, window, cx);
 
         let stage_area = div()
@@ -503,286 +744,6 @@ impl FoloApp {
             .child(stage_area);
 
         div().flex().flex_col().gap(px(12.)).child(filter_bar).child(stage_panel).into_any_element()
-    }
-
-    fn label_stage(
-        &mut self,
-        t: &Theme,
-        job: &LabelJob,
-        active: &LabelImage,
-        active_rev: &str,
-        sel_box: Option<usize>,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let img = self
-            .label_image_px(&job.id, &active.id, ImgKind::Full, cx)
-            .or_else(|| self.label_image_px(&job.id, &active.id, ImgKind::Thumb, cx));
-        let failed = img.is_none() && self.label_image_failed(&job.id, &active.id, ImgKind::Full);
-        let dims = (active.width.max(1) as f32, active.height.max(1) as f32);
-        let class_filter = self.label.class_filter;
-        let hover = self.label.hover_box.or(sel_box);
-        let draw: Vec<DrawBox> = if self.label.show_boxes {
-            active
-                .boxes
-                .iter()
-                .enumerate()
-                .map(|(i, b)| {
-                    let dim_by_filter = class_filter.is_some_and(|c| c != b.class);
-                    let dim_by_hover = hover.is_some_and(|h| h != i);
-                    DrawBox {
-                        label: job.classes.get(b.class as usize).cloned().map(Into::into),
-                        highlight: sel_box == Some(i) || self.label.hover_box == Some(i),
-                        dim: dim_by_filter || dim_by_hover,
-                        ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
-                    }
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let draw_for_hit = draw.clone();
-        let t_copy = *t;
-        let zoom = self.label.zoom;
-        let pan = self.label.pan;
-        let show_labels = self.label.show_labels;
-        let view_cell = self.label.stage_view.clone();
-        let view_for_click = self.label.stage_view.clone();
-        let canvas_el = canvas(
-            move |b, _, _| {
-                view_cell.set(Some(b));
-            },
-            move |b, _, window, cx| {
-                paint_image_with_boxes(
-                    &t_copy,
-                    window,
-                    cx,
-                    b,
-                    img.as_ref(),
-                    dims,
-                    &draw,
-                    Fit::Contain,
-                    zoom,
-                    pan,
-                    show_labels,
-                    true,
-                    0.,
-                );
-            },
-        )
-        .size_full();
-
-        let active_id_click = active.id.clone();
-        let active_rev_click = active_rev.to_string();
-        div()
-            .id("label-stage")
-            .relative()
-            .size_full()
-            .rounded(px(radius::MD))
-            .bg(t.bg_app)
-            .border_1()
-            .border_color(t.line_subtle)
-            .overflow_hidden()
-            .cursor_pointer()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                    if let Some(b) = view_for_click.get() {
-                        let (ix, iy) =
-                            to_image(b, dims, Fit::Contain, this.label.zoom, this.label.pan, ev.position);
-                        this.label.selected_box = hit_box(&draw_for_hit, ix, iy).map(|index| SelectedBox {
-                            image_id: active_id_click.clone(),
-                            index,
-                            revision: active_rev_click.clone(),
-                        });
-                        cx.notify();
-                    }
-                }),
-            )
-            .child(canvas_el)
-            .when(failed, |d| d.child(crate::screens::unavailable_mark(t, true)))
-            .into_any_element()
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn label_box_list(
-        &self,
-        t: &Theme,
-        job: &LabelJob,
-        active: &LabelImage,
-        active_rev: &str,
-        sel_box: Option<usize>,
-        disabled: bool,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let jid = job.id.clone();
-        let img_id = active.id.clone();
-        let confirming_img = self.label.confirm_delete_image.as_ref() == Some(&(jid.clone(), img_id.clone()));
-        let remove_img_btn = if disabled {
-            self.button_disabled("label-rm-img", "Remove image", Btn::Secondary, None, "Busy", window, cx)
-        } else if confirming_img {
-            let (j, i) = (jid.clone(), img_id.clone());
-            self.button(
-                "label-rm-img",
-                "Confirm remove",
-                Btn::Danger,
-                Some("icons/trash-2.svg"),
-                window,
-                cx,
-                act(move |this, _, cx| this.delete_label_image(&j, &i, cx)),
-            )
-        } else {
-            let (j, i) = (jid.clone(), img_id.clone());
-            self.button(
-                "label-rm-img",
-                "Remove image",
-                Btn::Secondary,
-                Some("icons/trash-2.svg"),
-                window,
-                cx,
-                act(move |this, _, cx| {
-                    this.label.confirm_delete_image = Some((j.clone(), i.clone()));
-                    cx.notify();
-                }),
-            )
-        };
-
-        let rows: Vec<AnyElement> = active
-            .boxes
-            .iter()
-            .enumerate()
-            .map(|(i, b)| {
-                let cls_name = job
-                    .classes
-                    .get(b.class as usize)
-                    .cloned()
-                    .unwrap_or_else(|| format!("class {}", b.class));
-                let is_sel = sel_box == Some(i);
-                let coords = format!("{:.0}×{:.0}", (b.x2 - b.x1).max(0.0), (b.y2 - b.y1).max(0.0));
-                let row = div()
-                    .id(("label-box", i))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(8.))
-                    .h(px(30.))
-                    .rounded(px(radius::SM))
-                    .cursor_pointer()
-                    .when(is_sel, |d| d.bg(t.bg_active))
-                    .when(!is_sel, |d| d.hover(|s| s.bg(t.bg_hover)))
-                    .child(div().size(px(8.)).rounded(px(2.)).flex_none().bg(t.class(b.class)))
-                    .child(
-                        text(ty::SM, if is_sel { t.text_primary } else { t.text_secondary })
-                            .font_weight(if is_sel { FontWeight::MEDIUM } else { FontWeight::NORMAL })
-                            .flex_1()
-                            .min_w_0()
-                            .ellipsis()
-                            .child(cls_name),
-                    )
-                    .child(text(ty::XS, t.text_tertiary).tnum().child(coords));
-                let img_for_row = img_id.clone();
-                let rev_for_row = active_rev.to_string();
-                self.bind(
-                    row,
-                    &format!("label-box-{i}"),
-                    radius::SM,
-                    window,
-                    cx,
-                    act(move |this, _, cx| {
-                        this.toggle_label_box(img_for_row.clone(), i, rev_for_row.clone());
-                        cx.notify();
-                    }),
-                )
-                .into_any_element()
-            })
-            .collect();
-
-        // Quick relabel chips when a box is selected.
-        let relabel = sel_box.filter(|_| !disabled).map(|_| {
-            let chips = job.classes.iter().enumerate().take(9).map(|(ci, name)| {
-                let (j, i) = (jid.clone(), img_id.clone());
-                let cls_u32 = ci as u32;
-                let cur = sel_box.and_then(|s| active.boxes.get(s)).is_some_and(|b| b.class == cls_u32);
-                self.chip(
-                    &format!("label-recls-{ci}"),
-                    format!("{} {name}", ci + 1),
-                    cur,
-                    Some(cls_u32),
-                    None,
-                    window,
-                    cx,
-                    act(move |this, _, cx| this.reclassify_selected_label_box(&j, &i, cls_u32, cx)),
-                )
-                .into_any_element()
-            });
-            div()
-                .p(px(8.))
-                .border_t_1()
-                .border_color(t.line_subtle)
-                .flex()
-                .flex_col()
-                .gap(px(6.))
-                .child(overline(t, "Reclassify (1–9)"))
-                .child(div().flex().flex_wrap().gap(px(4.)).children(chips))
-        });
-
-        div()
-            .size_full()
-            .rounded(px(radius::MD))
-            .bg(t.bg_raised)
-            .border_1()
-            .border_color(t.line_subtle)
-            .flex()
-            .flex_col()
-            .overflow_hidden()
-            .child(
-                div()
-                    .px(px(10.))
-                    .h(px(32.))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(t.line_subtle)
-                    .child(overline(t, "Boxes"))
-                    .child(text(ty::XS, t.text_tertiary).tnum().child(active.boxes.len().to_string())),
-            )
-            .child(
-                div()
-                    .id("label-boxes-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.label.boxes_scroll)
-                    .p(px(6.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .when(rows.is_empty(), |d| {
-                        d.child(div().p(px(12.)).child(
-                            text(ty::XS, t.text_tertiary).whitespace_normal().child(
-                                if active.status == LabelImageStatus::Labeled {
-                                    "No boxes (background image)."
-                                } else {
-                                    "Not labeled yet."
-                                },
-                            ),
-                        ))
-                    })
-                    .children(rows),
-            )
-            .children(relabel)
-            .child(
-                div()
-                    .p(px(6.))
-                    .border_t_1()
-                    .border_color(t.line_subtle)
-                    .flex()
-                    .justify_end()
-                    .child(remove_img_btn),
-            )
-            .into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -838,7 +799,7 @@ impl FoloApp {
                     radius::SM,
                     window,
                     cx,
-                    act(move |this, _, cx| this.select_label_image(target_id.clone(), cx)),
+                    act(move |this, _, cx| this.request_select_label_image(target_id.clone(), cx)),
                 )
                 .into_any_element()
             })

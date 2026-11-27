@@ -64,6 +64,14 @@ impl FoloApp {
             }
             return;
         }
+        if self.label.editor.drawing.is_some() {
+            if ev.pressed_button != Some(MouseButton::Left) {
+                self.finish_label_box_draw(cx);
+            } else {
+                self.update_label_box_draw(ev.position, cx);
+            }
+            return;
+        }
         let Some(drag) = self.drag.as_ref() else { return };
         if ev.pressed_button != Some(MouseButton::Left) {
             if let Some(d) = self.drag.take() {
@@ -95,6 +103,9 @@ impl FoloApp {
             && i.drag_from.take().is_some()
         {
             cx.notify();
+        }
+        if self.label.editor.drawing.is_some() {
+            self.finish_label_box_draw(cx);
         }
         if let Some(d) = self.drag.take() {
             if d.id == "play-iou" {

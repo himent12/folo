@@ -43,6 +43,8 @@ pub const ALL: &[&str] = &[
     "inspector+light",
     "inspector+sample",
     "runs",
+    "runs-compare",
+    "runs-compare+light",
     "run-live",
     "run-live+light",
     "run-live+hover",
@@ -323,6 +325,12 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
             }
         }
         "runs" => app.route = Route::Runs,
+        "runs-compare" => {
+            app.route = Route::RunCompare;
+            if !s.fail && !app.hold_loading {
+                preload_run_compare(app);
+            }
+        }
         "run-live" | "stop-confirm" => {
             app.route = Route::Run("run_a19f".into());
             if s.has("hover") {
@@ -672,6 +680,23 @@ fn preload_label(app: &mut FoloApp, route: &Route) {
         app.label.images.insert(id.clone(), api.label_images(id, 0, 500).map(|p| p.images).into());
         app.label.logs.insert(id.clone(), api.label_logs(id).map(|r| r.lines).into());
     }
+}
+
+/// Preloads runs, models, and metric histories for the `runs-compare` scenario.
+fn preload_run_compare(app: &mut FoloApp) {
+    let api = app.store.api.clone();
+    let runs_res = api.runs();
+    if let Ok(runs) = &runs_res {
+        let ids = crate::screens::runs::compare_data::default_compare_runs(runs, None);
+        for id in &ids {
+            let spe = runs.iter().find(|r| &r.id == id).map_or(100, |r| r.steps_per_epoch);
+            let data = api.metrics(id).map(|m| crate::store::RunData::new(m, spe));
+            app.store.run_data.insert(id.clone(), data.into());
+        }
+        app.run_compare.ids = ids;
+    }
+    app.store.runs = runs_res.into();
+    app.store.models = api.models().into();
 }
 
 /// The system answer (its `cloud` feature), the runs and the server's cloud lists, read at once.

@@ -2,9 +2,9 @@
 
 The native FOLO app, built in Rust on [folo-ui](ui/README.md), its own UI framework (GPUI's API, rendered on the
 CPU; the UI uses no GPU). Same design language and main screens as FOLO Studio ([web/](../../web/README.md)):
-Overview, Datasets, Runs (with a live training dashboard), Models, Benchmarks (including Benchmark Compare and external
-predictions import), Playground, Agent Labeling and Settings (run compare stays in Studio), plus a command
-palette,
+Overview, Datasets, Runs (with a live training dashboard and side-by-side Run Compare), Models, Benchmarks (including
+Benchmark Compare and external predictions import), Playground, Agent Labeling (with interactive bounding-box editing)
+and Settings, plus a command palette,
 keyboard navigation, toasts, and the theme system of [design/THEMES.md](../../design/THEMES.md) (Dark, Light or
 System, a theme per mode, custom themes).
 
@@ -23,7 +23,7 @@ Two folders are called `ui`: `src/ui/` is a module of this app (its stateless bu
 | `src/lib.rs` | `run`, the app: arguments (`USAGE` is `--help`), the bundled fonts (`design/fonts`), the data source, the window, key bindings |
 | `src/main.rs` | the `folo-desktop` binary: `fn main` calls `folo_desktop::run`, and the `bench-alloc` allocator |
 | `src/app/` | `FoloApp`, the root view: `Route` and navigation, title bar, sidebar, routing a route to its page (`page.rs`), fetching and the live event pump (`data/`: core fetches, dataset paging, image queue, run streams), a dataset card's first images (`previews.rs`: one small page per card, those with boxes first; a dataset's whole image list is read only when it is opened), finding or starting a server (`connection.rs`), actions and key bindings (`mod.rs`, `render.rs`), the forms' state; most of the app's behaviour tests (`tests.rs`, `*_tests.rs`) |
-| `src/screens/` | one folder per page, each `impl FoloApp` methods that return it: `overview/`, `datasets/` (the index, a dataset's images and statistics), `runs/` (the list, the live training dashboard), `models/` (the list, a model's evaluation and export), `bench/` (Benchmarks: the list, a benchmark's leaderboard, external predictions import, side-by-side compare, plan and loops, an entry), `playground/`, `label/` (Agent Labeling: job list, creation/import/export forms, image review workspace and agent panel), `settings/` (connection, throughput, cloud, appearance, shortcuts); `first_step.rs` is what an empty Runs or Models page asks for |
+| `src/screens/` | one folder per page, each `impl FoloApp` methods that return it: `overview/`, `datasets/` (the index, a dataset's images and statistics), `runs/` (the list, the live training dashboard, and side-by-side Run Compare in `compare.rs` / `compare_data.rs`), `models/` (the list, a model's evaluation and export), `bench/` (Benchmarks: the list, a benchmark's leaderboard, external predictions import, side-by-side compare, plan and loops, an entry), `playground/`, `label/` (Agent Labeling: job list, creation/import/export forms, interactive bounding-box review stage `stage.rs` / `box_rail.rs` / `review.rs` and agent panel), `settings/` (connection, throughput, cloud, appearance, shortcuts); `first_step.rs` is what an empty Runs or Models page asks for |
 | `src/overlays/` | what sits above the page: the command palette, the New run and Generate synthetic dialogs, the confirmations, the cloud dialogs, the image inspector (`inspector/`), toasts |
 | `src/controls/` | focusable controls, each an `impl FoloApp` method taking a stable key: buttons, segmented, tabs, chips and switches, slider, select, search, tooltip, scroll |
 | `src/ui/` | the app's stateless pieces: type, surfaces, badges and status, metrics, legends, number and text formatting, motion |
@@ -32,7 +32,7 @@ Two folders are called `ui`: `src/ui/` is a module of this app (its stateless bu
 | `src/store/` | client state: fetched values (`Load<T>`), live run data from the SSE events, the decoded-image cache, the "best model" rule |
 | `src/api/` | the `Backend` trait (`mod.rs`) and the wire types (`types.rs`, from `crates/folo-api`); `http/`, the client of `folo serve` (transport, SSE streams, images, inference, `server.rs`, which starts a local `folo serve`, and `refused.rs`, which tells a closed port on this machine at once); `mock/` and `mock_bench/`, the built-in demo |
 | `src/bench/` | the state and actions behind the Benchmarks screens, and the open benchmark's event stream |
-| `src/label/` | the state, loading, live SSE stream, and review/form actions behind the Agent Labeling screens |
+| `src/label/` | the state, loading, live SSE stream, interactive box editor (`editor.rs`, `editor_actions.rs`), and review/form actions behind the Agent Labeling screens |
 | `src/cloud.rs` | cloud compute: the state and rules Settings › Cloud, New run and a cloud run's page share |
 | `src/local.rs` | Playground's local inference: folo-vision's predictor in this process, on folo-gpu or the CPU |
 | `src/input.rs` | the single-line text input (IME, selection, clipboard) and its key bindings |

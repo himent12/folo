@@ -93,9 +93,10 @@ with --scenario, --width or --height.
 Options:
   --server URL          Connect to the folo serve at URL
   --mock                Use the built-in demo data
-  --open SCREEN         Start on a screen: overview, datasets, dataset:ID, runs, run:ID, models,
-                        model:ID, benchmarks, bench:ID, bench-entry:ID/ENTRY, bench-compare:ID,
-                        playground, labeling, label:ID, settings, or new-run (the dialog)
+  --open SCREEN         Start on a screen: overview, datasets, dataset:ID, runs, run:ID,
+                        runs-compare, models, model:ID, benchmarks, bench:ID,
+                        bench-entry:ID/ENTRY, bench-compare:ID, playground, labeling, label:ID,
+                        settings, or new-run (the dialog)
   --theme MODE|THEME    The mode (dark, light or system), or a theme: dark, midnight, dim,
                         contrast-dark, light, paper, contrast-light, or a custom theme's id
                         (midnight: mode dark with Midnight) [default: the last one, else dark]
@@ -552,6 +553,7 @@ mod tests {
             "dataset:ID",
             "runs",
             "run:ID",
+            "runs-compare",
             "models",
             "model:ID",
             "benchmarks",

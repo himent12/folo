@@ -347,6 +347,10 @@ impl FoloApp {
         if let Some(runs) = self.store.runs.ready_mut() {
             runs.retain(|r| r.id != id);
         }
+        self.run_compare.ids.retain(|r| r != id);
+        if self.run_compare.pinned_run.as_deref() == Some(id) {
+            self.run_compare.pinned_run = None;
+        }
         self.changed_here(List::Runs, cx);
         self.subscriptions.remove(id);
         *self.sub_attempt.entry(id.to_string()).or_default() += 1;

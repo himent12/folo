@@ -1,11 +1,14 @@
 //! Agent labeling screens: job list (`list.rs`), job detail (`page.rs`), image review workspace
-//! (`review.rs`), agent runner rail (`agent_panel.rs`), and inline forms (`forms.rs`).
+//! (`review.rs`, `stage.rs`, `box_rail.rs`), agent runner rail (`agent_panel.rs`), and inline forms
+//! (`forms.rs`).
 
 mod agent_panel;
+mod box_rail;
 mod forms;
 mod list;
 mod page;
 mod review;
+mod stage;
 
 #[cfg(test)]
 pub(crate) use review::filmstrip_max_tiles;

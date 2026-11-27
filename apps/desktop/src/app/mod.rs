@@ -22,6 +22,8 @@ mod forms;
 #[cfg(test)]
 mod image_tests;
 #[cfg(test)]
+mod label_editor_tests;
+#[cfg(test)]
 mod label_tests;
 #[cfg(test)]
 mod list_filter_tests;
@@ -46,6 +48,8 @@ mod render;
 mod revision_tests;
 #[cfg(test)]
 mod run_charts_tests;
+#[cfg(test)]
+mod run_compare_tests;
 #[cfg(test)]
 mod run_control_tests;
 #[cfg(test)]
@@ -400,6 +404,8 @@ pub struct FoloApp {
     pub(crate) log_cache: crate::screens::runs::LogFilterCache,
     pub loss_parts: [bool; 4],
     pub run_chart_opts: crate::screens::runs::RunChartOpts,
+    /// Multi-run comparison state (pinned runs, chart toggles, hyperparameter diff).
+    pub run_compare: crate::screens::runs::RunCompareState,
     pub log_scroll: ScrollHandle,
     /// The run page's Per class list, scrolled inside its panel.
     pub per_class_scroll: ScrollHandle,
@@ -787,6 +793,7 @@ impl FoloApp {
             log_cache: crate::screens::runs::LogFilterCache::default(),
             loss_parts: [true, true, true, true],
             run_chart_opts: crate::screens::runs::RunChartOpts::default(),
+            run_compare: crate::screens::runs::RunCompareState::default(),
             log_scroll: ScrollHandle::new(),
             per_class_scroll: ScrollHandle::new(),
             pc_scroll: ScrollHandle::new(),
