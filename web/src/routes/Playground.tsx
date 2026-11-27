@@ -666,7 +666,7 @@ export default function Playground() {
     );
   };
   const mediaBar = () => <MediaBar media={mediaSession} predicting={predicting.get() || (cmp.compare.get() && cmp.predictingB.get())} />;
-  const batchBar = () => <BatchFilmstrip batch={batch} hasModel={!!modelId.get()} />;
+  const batchBar = () => <BatchFilmstrip batch={batch} hasModel={!!modelId.get()} compare={cmp.compare.get()} />;
 
   const intro = () => <span>Run a model on any image, video, or live camera. Thresholds re-filter instantly in the browser.</span>;
 

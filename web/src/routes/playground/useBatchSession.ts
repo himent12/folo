@@ -503,6 +503,8 @@ export function useBatchSession(o: UseBatchSessionInput) {
 
   /** Completes any cut batch predictions before exporting; runs synchronously when no item is cut at current conf. */
   function runExport(kind: 'json' | 'csv') {
+    exportCtrl?.abort();
+    exportCtrl = null;
     const confNow = o.conf.peek();
     const list = items.peek();
     const cutIndices = list
@@ -524,7 +526,6 @@ export function useBatchSession(o: UseBatchSessionInput) {
       return;
     }
 
-    exportCtrl?.abort();
     const ctrl = (exportCtrl = new AbortController());
     void (async () => {
       for (const idx of cutIndices) {

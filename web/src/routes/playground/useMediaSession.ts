@@ -560,10 +560,10 @@ export function useMediaSession(input: UseMediaSessionInput) {
     }
   }
 
-  function detectCurrentFrame() {
-    if (mode.peek() === 'none') return;
+  function detectCurrentFrame(): Promise<boolean> {
+    if (mode.peek() === 'none') return Promise.resolve(false);
     scrubThrottle.cancel();
-    void captureAndEmit(false);
+    return captureAndEmit(false);
   }
 
   // Video element event handlers bound by the hidden/offstage decoder <video> element.

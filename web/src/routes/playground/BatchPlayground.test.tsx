@@ -469,7 +469,7 @@ describe('Playground multi-image batch filmstrip', () => {
     const runAll2 = [...target.querySelectorAll<HTMLButtonElement>('[data-batch-bar] button')].find((b) => b.textContent?.includes('Run all'))!;
     runAll2.click();
     await until(() => target.querySelector('[data-batch-idx="1"] [data-batch-badge]')?.textContent?.includes('+'), 'item 1 finished with capped + badge');
-    await new Promise((r) => setTimeout(r, 30));
+    await until(() => !target.querySelector('button[data-batch-run]')?.textContent?.includes('Stop'), 'Run All exited');
     flushSync();
     expect(allCalls).toBe(allCallsBefore + 1);
   });
@@ -552,5 +552,171 @@ describe('Playground multi-image batch filmstrip', () => {
     runAllBtn.click();
     await until(() => target.querySelector('[data-batch-summary]')?.textContent?.includes('2/2 run'), 'both dense images completed');
     expect(predictSpy.mock.calls.filter((c) => c[1].max_det === 30_000).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('preserves page scroll on filmstrip mount, keeps focus across Run all -> Stop -> Batch JSON, and labels Model A scope in Compare mode (Playtest R20)', async () => {
+    const origScrollIntoView = Element.prototype.scrollIntoView;
+    const scrollIntoViewSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoViewSpy;
+
+    const resolvers: ((p: Prediction) => void)[] = [];
+    const predictSpy = vi.fn<Api['predict']>((_input, _opts, signal) => {
+      return new Promise<Prediction>((resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+        resolvers.push(resolve);
+      });
+    });
+
+    try {
+      setupPlayground(predictSpy);
+      await until(() => target.querySelector('.model-pick'), 'model picker');
+      selectBatchFiles([makeImageFile('f1.png'), makeImageFile('f22.png')]);
+      await until(() => target.querySelectorAll('[data-batch-filmstrip] [role="option"]').length === 2, '2 thumbnails');
+
+      // Playtest R20 P3-1: mounting the filmstrip must NOT call scrollIntoView, and stepping to a clipped thumbnail adjusts strip.scrollLeft horizontally
+      expect(scrollIntoViewSpy).not.toHaveBeenCalled();
+      const strip = target.querySelector<HTMLDivElement>('[data-batch-filmstrip]')!;
+      const thumb1 = strip.querySelector<HTMLButtonElement>('button[data-batch-idx="1"]')!;
+      vi.spyOn(strip, 'getBoundingClientRect').mockReturnValue({ left: 0, right: 100, width: 100, top: 0, bottom: 60, height: 60, x: 0, y: 0, toJSON: () => ({}) } as DOMRect);
+      vi.spyOn(thumb1, 'getBoundingClientRect').mockReturnValue({ left: 120, right: 204, width: 84, top: 0, bottom: 60, height: 60, x: 120, y: 0, toJSON: () => ({}) } as DOMRect);
+      strip.scrollLeft = 0;
+
+      // Resolve initial image 0
+      await until(() => resolvers.length === 1, 'item 0 predict');
+      resolvers[0]!(fakePrediction('m_hard_s', 2));
+      await until(() => target.querySelector('[data-batch-idx="0"] [data-batch-badge]')?.textContent === '2', 'item 0 done');
+
+      // Playtest R20 P3-4 (pre-completion): Compare A/B labels Run all A, A JSON, A CSV with matching accessible names
+      const cmpBtn = [...target.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.includes('Compare A/B'))!;
+      cmpBtn.click();
+      flushSync();
+      const runBtn = target.querySelector<HTMLButtonElement>('button[data-batch-run]')!;
+      const jsonBtn = target.querySelector<HTMLButtonElement>('button[data-batch-export="json"]')!;
+      const csvBtn = target.querySelector<HTMLButtonElement>('button[data-batch-export="csv"]')!;
+      expect(target.querySelector('[data-batch-summary]')?.textContent).toContain('Model A ·');
+      expect(runBtn.textContent?.trim()).toBe('Run all A');
+      expect(runBtn.getAttribute('aria-label')).toContain('Run all A');
+      expect(jsonBtn.textContent?.trim()).toBe('A JSON');
+      expect(jsonBtn.getAttribute('aria-label')).toContain('A JSON');
+      expect(csvBtn.textContent?.trim()).toBe('A CSV');
+      expect(csvBtn.getAttribute('aria-label')).toContain('A CSV');
+      // Toggle Compare back off for single-model Run all test
+      cmpBtn.click();
+      flushSync();
+
+      // Playtest R20 P3-2: focus Run all -> clicking turns the SAME <button> into Stop without dropping focus
+      runBtn.focus();
+      expect(document.activeElement).toBe(runBtn);
+      runBtn.click();
+      flushSync();
+      expect(runBtn.textContent?.trim()).toBe('Stop');
+      expect(document.activeElement).toBe(runBtn);
+
+      // Finish item 1 -> Run all completes and disables runBtn -> focus moves cleanly to Batch JSON (never body),
+      // and background item status updates do NOT yank a user-scrolled filmstrip back to activeIndex (0).
+      const thumb0 = strip.querySelector<HTMLButtonElement>('button[data-batch-idx="0"]')!;
+      vi.spyOn(thumb0, 'getBoundingClientRect').mockReturnValue({ left: -80, right: 4, width: 84, top: 0, bottom: 60, height: 60, x: -80, y: 0, toJSON: () => ({}) } as DOMRect);
+      strip.scrollLeft = 60;
+      const batchItem1Resolver = resolvers.at(-1)!;
+      batchItem1Resolver(fakePrediction('m_hard_s', 1));
+      await until(() => runBtn.disabled, 'run button disabled at completion');
+      await until(() => document.activeElement === jsonBtn, 'focus moved to Batch JSON');
+      expect(strip.scrollLeft).toBe(60);
+
+      // Step to clipped thumbnail 1 -> scrollLeft adjusts horizontally without calling scrollIntoView
+      strip.scrollLeft = 0;
+      target.querySelector<HTMLButtonElement>('button[aria-label="Next image"]')!.click();
+      flushSync();
+      expect(strip.scrollLeft).toBeGreaterThan(0);
+      expect(scrollIntoViewSpy).not.toHaveBeenCalled();
+
+      // Playtest R20 P3-4 (post-completion): Compare A/B labels All A run with matching accessible name
+      cmpBtn.click();
+      flushSync();
+      expect(runBtn.textContent?.trim()).toBe('All A run');
+      expect(runBtn.getAttribute('aria-label')).toContain('All A run');
+
+      // Intentional blur during Run all: if user blurs Stop to body while running, completion must NOT steal focus to Batch JSON
+      cmpBtn.click();
+      flushSync();
+      const beforeSecondBatch = resolvers.length;
+      selectBatchFiles([makeImageFile('b1.png'), makeImageFile('b22.png')]);
+      await until(() => resolvers.length > beforeSecondBatch, 'second batch item 0 predict');
+      resolvers.at(-1)!(fakePrediction('m_hard_s', 1));
+      await until(() => target.querySelector('[data-batch-idx="0"] [data-batch-badge]')?.textContent === '1', 'second batch item 0 done');
+      const runBtn2 = target.querySelector<HTMLButtonElement>('button[data-batch-run]')!;
+      runBtn2.focus();
+      const beforeSecondRunAll = resolvers.length;
+      runBtn2.click();
+      flushSync();
+      expect(runBtn2.textContent?.trim()).toBe('Stop');
+      runBtn2.blur();
+      expect(document.activeElement).toBe(document.body);
+      await until(() => resolvers.length > beforeSecondRunAll, 'second batch item 1 predict');
+      resolvers.at(-1)!(fakePrediction('m_hard_s', 1));
+      await until(() => runBtn2.disabled, 'second batch completed');
+      await Promise.resolve();
+      expect(document.activeElement).toBe(document.body);
+    } finally {
+      Element.prototype.scrollIntoView = origScrollIntoView;
+    }
+  });
+
+  it('aborts a pending async full-candidate export when a newer synchronous export runs after raising confidence', async () => {
+    const dense1000: Prediction['boxes'] = Array.from({ length: 1000 }, (_, i) => ({
+      class: 0,
+      name: 'circle',
+      score: Number((0.99 - i * 0.0005).toFixed(4)),
+      x1: (i % 20) * 15,
+      y1: Math.floor(i / 20) * 10,
+      x2: (i % 20) * 15 + 10,
+      y2: Math.floor(i / 20) * 10 + 8,
+    }));
+    let allExportSignal: AbortSignal | undefined;
+    let resolveAllExport: ((p: Prediction) => void) | undefined;
+    let allCount = 0;
+    const predictSpy = vi.fn<Api['predict']>((_input, opts, signal) => {
+      if (opts.max_det === 30_000) {
+        allCount++;
+        if (allCount === 1) return Promise.reject(new Error('initial ALL failed'));
+        allExportSignal = signal;
+        return new Promise<Prediction>((resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+          resolveAllExport = resolve;
+        });
+      }
+      return Promise.resolve({
+        model_id: opts.model_id,
+        image: { width: 320, height: 240 },
+        boxes: dense1000,
+        timing: { preprocess_ms: 1, inference_ms: 5, postprocess_ms: 1, total_ms: 7 },
+        device: 'cpu',
+      });
+    });
+
+    setupPlayground(predictSpy);
+    await until(() => target.querySelector('.model-pick'), 'model picker');
+    selectBatchFiles([makeImageFile('ex1.png'), makeImageFile('ex22.png')]);
+    await until(() => target.querySelector('[data-batch-idx="0"] [data-batch-badge]')?.textContent?.includes('+'), 'item 0 capped');
+
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const jsonBtn = target.querySelector<HTMLButtonElement>('button[data-batch-export="json"]')!;
+    // First export starts async ALL completion because conf=0.25 <= floor(~0.49)
+    jsonBtn.click();
+    await until(() => !!resolveAllExport, 'async export ALL started');
+    expect(clickSpy).toHaveBeenCalledTimes(0);
+
+    // Raise confidence above candidate floor (0.80 > 0.49) and click Export again -> runs synchronously AND aborts old exportCtrl
+    const confInput = target.querySelector<HTMLInputElement>('input[type="range"]')!;
+    confInput.value = '0.8';
+    confInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    jsonBtn.click();
+    expect(allExportSignal?.aborted).toBe(true);
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+
+    // Even after microtasks settle, the aborted async export must NOT trigger a second download
+    await Promise.resolve();
+    expect(clickSpy).toHaveBeenCalledTimes(1);
   });
 });
