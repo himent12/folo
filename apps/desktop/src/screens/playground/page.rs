@@ -59,6 +59,23 @@ impl FoloApp {
             && self.play_batch_filtered_indices().is_empty()
     }
 
+    /// True when batch mode has a non-`All` QA filter active and either zero images match OR the
+    /// currently loaded `play_image` belongs to a batch item outside the filtered set (for example,
+    /// while its matching replacement image is still loading asynchronously or failed to load).
+    pub(crate) fn play_stage_excluded_by_qa(&self) -> bool {
+        if !self.play_batch.is_active() || self.play_batch.qa_filter == super::batch_qa::BatchQaFilter::All {
+            return false;
+        }
+        let filtered = self.play_batch_filtered_indices();
+        if filtered.is_empty() {
+            return true;
+        }
+        match self.play_image.as_ref().and_then(|img| img.batch_ref) {
+            Some((bid, idx)) if bid == self.play_batch.batch_id => !filtered.contains(&idx),
+            _ => false,
+        }
+    }
+
     /// Resolves the display name of Model A class `cid` from Model A's class list, the current
     /// prediction, or any fresh batch result (used for Compare A/B cross-model name matching).
     pub(crate) fn play_class_name(&self, cid: u32) -> Option<String> {

@@ -229,6 +229,10 @@ impl FoloApp {
                 } else if !busy && self.fh("label-next-unlabeled-disabled", cx).is_focused(window) {
                     window.focus(&self.fh("label-next-unlabeled", cx));
                 }
+            } else if self.fh("label-next-unlabeled", cx).is_focused(window)
+                || self.fh("label-next-unlabeled-disabled", cx).is_focused(window)
+            {
+                window.focus(&self.fh("label-imgs-reset", cx));
             }
             let jump_unlabeled = (pending_n + failed_n > 0).then(|| {
                 if busy {

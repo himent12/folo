@@ -402,6 +402,11 @@ impl FoloApp {
         self.play_hover_from_stage = false;
     }
 
+    /// True while a Playground image (single file, dataset sample, or batch item) is decoding/loading.
+    pub(crate) fn is_play_image_loading(&self) -> bool {
+        self.play_loading.is_some()
+    }
+
     /// Sets the Playground threshold, cancelling in-flight batch runs, reconciling the staged batch
     /// frame against any active QA filter, and refetching when it drops below what was fetched
     /// (filtering is local only above that floor).
@@ -488,7 +493,10 @@ impl FoloApp {
                 Some(t) => crate::local::predict(api, &req, t, generation, &ticket),
                 None => api.predict(&req),
             },
-            move |this, r, _| this.play_pred_answered_with_meta(seq, key, Some(meta), r),
+            move |this, r, cx| {
+                this.play_pred_answered_with_meta(seq, key, Some(meta), r);
+                this.reconcile_play_batch_active(cx);
+            },
         );
     }
 

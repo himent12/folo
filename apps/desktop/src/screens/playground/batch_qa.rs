@@ -311,15 +311,56 @@ impl FoloApp {
         div().flex().flex_wrap().items_center().gap(px(4.)).children(chips).into_any_element()
     }
 
-    /// Side-rail body shown when an active batch QA filter currently matches zero images, keeping
-    /// batch exports reachable without displaying detections from an excluded frame.
-    pub(super) fn play_batch_qa_zero_match_rail(
+    /// Side-rail body shown when an active batch QA filter excludes the staged frame (either zero
+    /// images match or a matching replacement is loading/unavailable), keeping batch exports
+    /// reachable and transferring focus away from unmounting detection-rail controls.
+    pub(super) fn play_batch_qa_excluded_rail(
         &self,
         t: &Theme,
         title: &'static str,
+        zero_match: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let focused_unmounting_rail = {
+            let focus = self.focus.borrow();
+            focus.iter().any(|(k, fh)| {
+                let s = k.as_ref();
+                fh.is_focused(window)
+                    && (matches!(
+                        s,
+                        "play-boxes"
+                            | "play-labels"
+                            | "play-class-all"
+                            | "play-class-clear"
+                            | "play-cmp-class-clear"
+                            | "play-export-png"
+                            | "play-export-png-disabled"
+                            | "play-export-json"
+                            | "play-export-json-disabled"
+                            | "play-copy-json"
+                            | "play-copy-json-disabled"
+                    ) || s.starts_with("play-class-")
+                        || s.starts_with("det-"))
+            })
+        };
+        if focused_unmounting_rail {
+            window.focus(&self.fh("play-batch-qa-all", cx));
+        }
+
+        let (badge_text, body_text) = if zero_match {
+            (
+                "0 matching",
+                "No batch images match the active QA filter. Lower confidence or choose Show all in the filmstrip.",
+            )
+        } else if self.is_play_image_loading() {
+            ("Loading…", "Loading the next batch image that matches the active QA filter…")
+        } else {
+            (
+                "Unavailable",
+                "The matching batch image could not be loaded. Use Retry or Next image on the stage.",
+            )
+        };
         div()
             .flex()
             .flex_col()
@@ -327,7 +368,7 @@ impl FoloApp {
             .child(
                 crate::ui::panel_header(t, title)
                     .h(px(32.))
-                    .child(crate::ui::text(crate::theme::ty::SM, t.text_tertiary).child("0 matching")),
+                    .child(crate::ui::text(crate::theme::ty::SM, t.text_tertiary).child(badge_text)),
             )
             .child(
                 div()
@@ -337,13 +378,9 @@ impl FoloApp {
                     .border_color(t.line_subtle)
                     .child(self.play_batch_export_row(window, cx)),
             )
-            .child(
-                div().p(px(12.)).child(
-                    crate::ui::text(crate::theme::ty::SM, t.text_tertiary)
-                        .whitespace_normal()
-                        .child("No batch images match the active QA filter. Lower confidence or choose Show all in the filmstrip."),
-                ),
-            )
+            .child(div().p(px(12.)).child(
+                crate::ui::text(crate::theme::ty::SM, t.text_tertiary).whitespace_normal().child(body_text),
+            ))
             .into_any_element()
     }
 }

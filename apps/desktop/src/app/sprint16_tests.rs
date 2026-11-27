@@ -508,8 +508,12 @@ fn playtest_r16_playground_byclass_syncs_stage_rail_compare_confidence_and_focus
 
     // 2. Compare A/B mode with ByClass(circle) filters Model A by class ID and Model B by name
     //    (even when Model B uses a different numeric class index for "circle").
+    //    Let Compare's initial Model B fetch settle first before injecting the reordered fixture.
     drive(&mut app, window, |this, _, cx| {
         this.set_play_compare(true, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
         this.play_compare.pred_b = crate::store::Load::Ready(mk_pred(
             this.play_compare.model_b.as_deref().unwrap_or("m_b"),
             vec![
@@ -535,17 +539,19 @@ fn playtest_r16_playground_byclass_syncs_stage_rail_compare_confidence_and_focus
         ));
         cx.notify();
     });
-    settle(&mut app, window);
+    app.frame(window.into());
     drive(&mut app, window, |this, _, _| {
         let pb = this.play_compare.pred_b.ready().expect("pred_b ready");
         let vis_b = this.visible_boxes_b(pb, None);
         assert_eq!(vis_b.len(), 1, "Model B must filter by matched class name");
+        assert_eq!(vis_b[0].class, 7, "reordered Model B fixture must be preserved and matched by name");
         assert_eq!(vis_b[0].label.as_deref(), Some("circle"));
         let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
         assert!(keys.iter().any(|k| k == "play-cmp-class-clear"), "Compare scope bar mounts Clear action");
     });
 
-    // 3. Raising confidence when staged img_0 drops out of ByClass(circle) reconciles to img_1;
+    // 3. Raising confidence when staged img_0 drops out of ByClass(circle) immediately flags the
+    //    old staged image as excluded while img_1 loads asynchronously, then reconciles to img_1;
     //    raising past all matches (0.95) enters zero-match state cleanly without staging excluded boxes.
     drive(&mut app, window, |this, _, cx| {
         this.set_play_compare(false, cx);
@@ -555,18 +561,64 @@ fn playtest_r16_playground_byclass_syncs_stage_rail_compare_confidence_and_focus
     drive(&mut app, window, |this, _, cx| {
         assert_eq!(this.play_batch.active, 0);
         this.set_play_conf(0.82, cx);
+        assert_eq!(this.play_batch.active, 1, "raising conf must reconcile off excluded img_0 onto img_1");
+        assert!(
+            this.play_stage_excluded_by_qa(),
+            "old excluded img_0 must be blocked from stage/export while img_1 loads asynchronously"
+        );
+        assert!(!this.has_play_export_json(), "excluded img_0 cannot export while replacement loads");
     });
     settle(&mut app, window);
     drive(&mut app, window, |this, _, cx| {
-        assert_eq!(this.play_batch.active, 1, "raising conf must reconcile off excluded img_0 onto img_1");
+        assert_eq!(this.play_batch.active, 1);
+        assert!(!this.play_stage_excluded_by_qa(), "replacement img_1 is now staged and matching");
         assert!(!this.play_batch_qa_zero_match());
         this.set_play_conf(0.95, cx);
     });
     settle(&mut app, window);
-    drive(&mut app, window, |this, _, _| {
+    drive(&mut app, window, |this, _, cx| {
         assert!(this.play_batch_qa_zero_match(), "0 matches at 0.95 enters zero-match state");
         assert!(!this.has_play_export_json(), "excluded stage frame is not exported during zero-match");
+        // Zero-match while play_pred is Loading must render without duplicating batch export focus handles.
+        this.play_pred = crate::store::Load::Loading;
+        cx.notify();
     });
+    app.frame(window.into());
+
+    // 3b. Selecting ByClass(cid) when play_class already equals Some(cid) clears play_class so
+    //     toggling ByClass back to All does not leave a lingering single-mode class filter;
+    //     entering Compare clears play_class and reconciles Empty QA filter onto the truly empty frame.
+    drive(&mut app, window, |this, _, cx| {
+        this.set_play_conf(0.35, cx);
+        this.play_class = Some(0);
+        this.set_play_batch_qa_filter(BatchQaFilter::ByClass(0), cx);
+        assert_eq!(this.play_class, None, "ByClass unconditionally clears play_class");
+        this.set_play_batch_qa_filter(BatchQaFilter::All, cx);
+        assert_eq!(this.play_effective_class(), None, "clearing ByClass leaves no lingering class filter");
+
+        // Under play_class=Some(0) (circle), img_0 with only square matches Empty; img_1 is truly empty.
+        this.play_batch.items[0].status = mk_res(vec![ScoredBox {
+            class: 1,
+            name: "square".into(),
+            score: 0.9,
+            x1: 10.,
+            y1: 10.,
+            x2: 50.,
+            y2: 50.,
+        }]);
+        this.play_batch.items[1].status = mk_res(vec![]);
+        this.play_class = Some(0);
+        this.select_play_batch_item(0, cx);
+        this.set_play_batch_qa_filter(BatchQaFilter::Empty, cx);
+        assert_eq!(this.play_batch.active, 0);
+        this.set_play_compare(true, cx);
+        assert_eq!(
+            this.play_batch.active, 1,
+            "entering Compare clears play_class and must reconcile Empty filter onto truly empty img_1"
+        );
+        this.set_play_compare(false, cx);
+    });
+    settle(&mut app, window);
 
     // 4. Focus continuity when a focused inactive class chip drops out of the top-8 during live Run All.
     drive(&mut app, window, |this, _, cx| {
@@ -692,5 +744,28 @@ fn playtest_r16_labeling_next_unlabeled_disabled_and_guarded_during_save() {
     press(&mut app, window, "u");
     drive(&mut app, window, |this, _, _| {
         assert_eq!(this.label.selected_image.as_deref(), Some(id2.as_str()));
+    });
+
+    // Saving the last pending image under the Pending filter empties the filter and drops
+    // pending_n + failed_n to 0: focus must transfer from disabled Next unlabeled to Clear filters.
+    drive(&mut app, window, |this, w, cx| {
+        this.label.img_filter = LabelImageFilter::Pending;
+        this.label.mutating = true;
+        this.focus_key("label-next-unlabeled-disabled", w, cx);
+        if let Some(list) = this.label.images.get_mut("lb_4f10").and_then(|l| l.ready_mut()) {
+            for im in list.iter_mut() {
+                im.status = LabelImageStatus::Labeled;
+            }
+        }
+        this.reconcile_selected_label_image("lb_4f10");
+        this.label.mutating = false;
+        cx.notify();
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, w, cx| {
+        assert!(
+            this.fh("label-imgs-reset", cx).is_focused(w),
+            "focus must move to Clear filters when Next unlabeled unmounts on empty Pending filter"
+        );
     });
 }

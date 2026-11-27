@@ -448,9 +448,7 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) {
         self.play_batch.qa_filter = filter;
-        if let crate::screens::playground::BatchQaFilter::ByClass(cid) = filter
-            && self.play_class.is_some_and(|p| p != cid)
-        {
+        if matches!(filter, crate::screens::playground::BatchQaFilter::ByClass(_)) {
             self.play_class = None;
         }
         self.clear_play_hover();

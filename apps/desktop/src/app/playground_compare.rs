@@ -65,7 +65,7 @@ impl FoloApp {
 
     /// Cheap predicate for render frames: true when at least one fresh prediction can be exported as JSON.
     pub(crate) fn has_play_export_json(&self) -> bool {
-        if self.play_image.is_none() || self.play_batch_qa_zero_match() {
+        if self.play_image.is_none() || self.play_stage_excluded_by_qa() {
             return false;
         }
         if !self.play_compare.enabled {
@@ -86,10 +86,11 @@ impl FoloApp {
         self.play_compare.clear_hover();
         if enabled {
             // Compare rail doesn't expose Single-mode class filter chips; clear so detections are never hidden.
-            self.play_class = None;
+            let cleared_class = self.play_class.take().is_some();
             self.clear_play_hover();
             self.ensure_play_model_b();
-            if self.play_image.is_some() && !self.pred_b_is_fresh() {
+            let switched = cleared_class && self.reconcile_play_batch_active(cx);
+            if !switched && self.play_image.is_some() && !self.pred_b_is_fresh() {
                 self.run_predict_b(cx);
             }
         } else {
@@ -362,7 +363,7 @@ impl FoloApp {
     /// Builds the current Playground JSON export payload (Single or Compare mode) using only fresh
     /// predictions whose completed parameters match the active image/model/device/IoU/floor.
     pub(crate) fn build_play_export_json(&self) -> Option<anyhow::Result<(String, String, String)>> {
-        if self.play_batch_qa_zero_match() {
+        if self.play_stage_excluded_by_qa() {
             return None;
         }
         let img = self.play_image.as_ref()?;
@@ -522,13 +523,13 @@ impl FoloApp {
     /// Prompts for a save path and renders + writes an annotated PNG (Single or Compare A/B) off
     /// the UI thread using only fresh predictions.
     pub fn export_play_png(&mut self, cx: &mut Context<Self>) {
-        if self.play_batch_qa_zero_match() {
-            self.toast(
-                Tone::Neutral,
-                "Nothing to export",
-                Some("No batch images match the active QA filter.".into()),
-                cx,
-            );
+        if self.play_stage_excluded_by_qa() {
+            let body = if self.play_batch_qa_zero_match() {
+                "No batch images match the active QA filter."
+            } else {
+                "Wait for the matching batch image to finish loading first."
+            };
+            self.toast(Tone::Neutral, "Nothing to export", Some(body.into()), cx);
             return;
         }
         let Some(img) = self.play_image.as_ref() else {

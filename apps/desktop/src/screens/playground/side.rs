@@ -265,9 +265,11 @@ impl FoloApp {
 
         let active = self.play_active(window, cx);
         let mut timing: Option<AnyElement> = None;
-        let detections = if self.play_batch_qa_zero_match() {
+        let qa_zero_match = self.play_batch_qa_zero_match();
+        let stage_excluded = qa_zero_match || self.play_stage_excluded_by_qa();
+        let detections = if stage_excluded {
             let title = if compare_on { "Compare A/B" } else { "Detections" };
-            self.play_batch_qa_zero_match_rail(&t, title, window, cx)
+            self.play_batch_qa_excluded_rail(&t, title, qa_zero_match, window, cx)
         } else if compare_on {
             self.play_compare_results(&t, window, cx)
         } else {
@@ -357,7 +359,9 @@ impl FoloApp {
                                 cx,
                                 act(move |this, w, cx| {
                                     this.set_play_single_class(None, cx);
-                                    if distinct_above < 2 {
+                                    if this.play_stage_excluded_by_qa() {
+                                        this.focus_key("play-batch-qa-all", w, cx);
+                                    } else if distinct_above < 2 {
                                         this.focus_key("play-boxes", w, cx);
                                     }
                                 }),
@@ -378,7 +382,9 @@ impl FoloApp {
                                     act(move |this, w, cx| {
                                         let clearing = this.play_effective_class() == Some(cid);
                                         this.set_play_single_class((!clearing).then_some(cid), cx);
-                                        if clearing && distinct_above < 2 {
+                                        if this.play_stage_excluded_by_qa() {
+                                            this.focus_key("play-batch-qa-all", w, cx);
+                                        } else if clearing && distinct_above < 2 {
                                             this.focus_key("play-boxes", w, cx);
                                         } else if clearing && cnt == 0 {
                                             this.focus_key("play-class-all", w, cx);
@@ -409,8 +415,13 @@ impl FoloApp {
                             cx,
                             act(move |this, w, cx| {
                                 this.set_play_single_class(None, cx);
-                                let target =
-                                    if distinct_above >= 2 { "play-class-all" } else { "play-boxes" };
+                                let target = if this.play_stage_excluded_by_qa() {
+                                    "play-batch-qa-all"
+                                } else if distinct_above >= 2 {
+                                    "play-class-all"
+                                } else {
+                                    "play-boxes"
+                                };
                                 this.focus_key(target, w, cx);
                             }),
                         )
@@ -906,6 +917,7 @@ impl FoloApp {
                 .when(picker_open, |d| d.child(div().flex().gap(px(6.)).children(thumbs)))
         });
         let standalone_batch_exports = (!compare_on
+            && !stage_excluded
             && self.play_batch.is_active()
             && !matches!(self.play_pred, Load::Ready(_)))
         .then(|| {
