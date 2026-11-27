@@ -17,13 +17,14 @@ loss/              the detection loss: assignment.rs (host assigner), terms/ (BC
                    distill/ (dense/BCKD/GT-verified distillation, §8.9)
 assign.rs          the task-aligned assigner (including eps-free TAL & NWD-IoU) and DFL target encoding
 boxes.rs, decode.rs, nms/{mod.rs, kernel.rs, topk.rs}, fusion/{mod.rs, tests.rs}   boxes and IoU, anchors and DFL decode, NMS (standard/AVX2, DIoU-NMS, Soft-NMS) / o2o top-k, cluster fusion (vote/DFL/SEBF) & ELC/DFL-consensus/DFL-repulse/DFL-CGR
-metrics.rs, cocoeval.rs                  Evaluator (mAP, PR curves, confusion matrix), the full COCOeval
+metrics.rs, eval/, cocoeval.rs           Evaluator (mAP, PR curves, confusion matrix, opt-in per-image ImageDiagnostics), the full COCOeval
 train/             Trainer: config/, setup (new / resume), run (epochs), epoch, feed (GPU staging), device,
                    teacher (distillation), gauge (Floor Conv+BN Gauge Normalization), checkpoint, events, writer/
 val.rs             validate: a model on a dataset split
 predict.rs         Predictor
 tile.rs            SAHI tiled inference (TileConfig, compute_tiles, crop_tile, merge_tiled_detections)
 tta.rs             Test-Time Augmentation (TtaConfig, PredictOptions, unflip_xyxy_h, merge_tta_detections)
+track/             ByteTrack multi-object tracking (mod.rs: ByteTracker, TrackConfig, TrackedDetection, Predictor::predict_sequence; kalman.rs; assign.rs)
 export/onnx/       ONNX export: graph.rs, blocks.rs (mirrors forward), decode.rs, proto.rs
 precompile.rs      GPU pipeline precompile for a run's kernels
 ```
@@ -155,6 +156,11 @@ back to scalar on non-finite logits; `folo-vision --bench post` `decode_head` me
 mAP@0.5:0.95 (101-point interpolation), precision / recall / F1 curves, confusion matrix.
 `Evaluator` (`metrics.rs`) and `CocoEval` (`cocoeval.rs`) reuse scratch buffers across images (packing sort keys into
 register-sized `(u64, u32)` tuples sorted in place without indirection) and accumulate AP in a single pass.
+When `EvalConfig::record_diagnostics` is enabled (opt-in via `EvalConfig::with_diagnostics()`, zero overhead when off),
+`Evaluator` also records per-image error breakdowns (`eval::ImageDiagnostics`: TP, FP, FN, localization errors, class
+confusions, duplicate predictions, background FPs, per-image F1, and mean TP IoU) across both sequential
+`add_image` / `add_image_with_id` calls and parallel `Evaluator::merge`, and exposes `worst_images(top_k)` on both
+`Evaluator` and `EvalReport` to surface failing images worst-first.
 [METRICS.md](METRICS.md) defines exactly how mAP is computed.
 
 ### Cluster box fusion and calibrated scoring (`fusion/`, `nms/mod.rs`)
@@ -285,6 +291,21 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
 - `PredictOptions` explicitly rejects combining `tta` and `tile` in one call (`Error::Config`) so callers choose
   one inference strategy without compounding double-merge distortion.
 
+### Multi-object tracking (ByteTrack)
+`folo_vision::track` wires a deterministic, zero-external-dependency ByteTrack tracker (`ByteTracker`, `TrackConfig`,
+`TrackedDetection`) into `Predictor::predict_sequence` (`SequenceFrame`):
+- Each track runs a decoupled 8-state constant-velocity Kalman filter `[cx, cy, a, h, vx, vy, va, vh]` as four closed-form
+  2×2 updates with coasting height-velocity damping.
+- Every `ByteTracker::update` step canonically sorts valid detections and runs optimal IoU assignment (exact rectangular
+  Hungarian solver, class-aware by default) in two stages: stage 1 matches active + coasting lost tracks against
+  high-confidence detections (`score >= high_thresh`), and stage 2 recovers occluded active tracks from low-confidence
+  detections (`low_thresh <= score < high_thresh`) without spawning new tracks from low-score noise. Unmatched
+  high-confidence detections above `new_track_thresh` spawn new tracks (`min_hits` confirmation), and lost tracks coast
+  up to `track_buffer` missed frames before retiring.
+- `Predictor::predict_sequence` runs frames in bounded batches (with GPU OOM half-batch fallback) at
+  `conf.min(track_cfg.low_thresh)` without mutating `Predictor::config()`, so stage-2 occlusion recovery works out of
+  the box across CPU, int8 (`u8_stem`), GPU, `f16`, and `o2o` models.
+
 ## ONNX export
 - `folo_vision::export::onnx`: `FoloModel::to_onnx` turns a fused model into an opset-17 graph that mirrors `forward`
   op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph, which for an `o2o` model ends in the §6.6
@@ -301,4 +322,4 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
 The integration tests in `crates/folo-vision/tests/` are named for what they protect: `model.rs`, `model_v2.rs`,
 `loss_cases.rs`, `assign_cases.rs`, `distill.rs`, `wave7_train_algos.rs`, `nms_reference.rs`, `fusion_reference.rs`,
 `elc_postproc.rs`, `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs`, `train/` (`main.rs`, `ema.rs`), `o2o.rs`, `lazy_head.rs`,
-`int8.rs`, `harden_pipelines.rs`, `tiled_predict.rs`, `tta_predict.rs`, and the GPU ones (`gpu*.rs`).
+`int8.rs`, `harden_pipelines.rs`, `tiled_predict.rs`, `tta_predict.rs`, `track_and_eval.rs`, and the GPU ones (`gpu*.rs`).

@@ -469,6 +469,16 @@ impl Predictor {
     }
 
     pub(crate) fn run_with_imgsz(&self, imgs: &[&Image], rect: bool, imgsz: u32) -> Result<Vec<Prediction>> {
+        self.run_with_imgsz_conf(imgs, rect, imgsz, None)
+    }
+
+    pub(crate) fn run_with_imgsz_conf(
+        &self,
+        imgs: &[&Image],
+        rect: bool,
+        imgsz: u32,
+        conf_override: Option<f32>,
+    ) -> Result<Vec<Prediction>> {
         /// Images per forward when the CPU predicts a batch (see below). One, two and four measured within
         /// 5% of each other at batch 16 on 28 threads, and all about 20% faster than one batched forward.
         const CPU_BATCH_CHUNK: usize = 2;
@@ -483,26 +493,35 @@ impl Predictor {
                 return folo_core::cpu::in_pool(|| {
                     let parts: Vec<Vec<Prediction>> = imgs
                         .par_chunks(chunk)
-                        .map(|c| self.run_here_with_imgsz(c, rect, imgsz))
+                        .map(|c| self.run_here_with_imgsz(c, rect, imgsz, conf_override))
                         .collect::<Result<_>>()?;
                     Ok(parts.into_iter().flatten().collect())
                 });
             }
-            folo_core::cpu::in_pool(|| self.run_here_with_imgsz(imgs, rect, imgsz))
+            folo_core::cpu::in_pool(|| self.run_here_with_imgsz(imgs, rect, imgsz, conf_override))
         } else {
-            self.run_here_with_imgsz(imgs, rect, imgsz)
+            self.run_here_with_imgsz(imgs, rect, imgsz, conf_override)
         }
     }
 
-    fn run_here_with_imgsz(&self, imgs: &[&Image], rect: bool, imgsz: u32) -> Result<Vec<Prediction>> {
+    fn run_here_with_imgsz(
+        &self,
+        imgs: &[&Image],
+        rect: bool,
+        imgsz: u32,
+        conf_override: Option<f32>,
+    ) -> Result<Vec<Prediction>> {
         if self.model.int8_u8_stem_active() {
-            return self.run_here_rgb0_u8_with_imgsz(imgs, rect, imgsz);
+            return self.run_here_rgb0_u8_with_imgsz(imgs, rect, imgsz, conf_override);
         }
         let t0 = Instant::now();
         let batch = self.prepare_with_imgsz(imgs, rect, imgsz)?;
         self.wait_for_device()?;
         let pre = ms(t0);
-        let nms = self.cfg.nms();
+        let mut nms = self.cfg.nms();
+        if let Some(c) = conf_override {
+            nms.conf = c;
+        }
 
         let (dets, inf, post) = if self.model.candidates_first_applies(batch.input.device(), &nms) {
             // Candidate-first (MODEL.md §9.5): the box branch runs once the candidates are known, so the
@@ -529,7 +548,13 @@ impl Predictor {
 
     /// Direct `u8` RGB0 path for CPU int8 models: letterboxes directly into packed `[R, G, B, 0]` `u32` words
     /// (zero `f32` canvas materialisation, bit-exact with `apply_planar_f32` + `pack_f32_to_rgb0_u8`).
-    fn run_here_rgb0_u8_with_imgsz(&self, imgs: &[&Image], rect: bool, s: u32) -> Result<Vec<Prediction>> {
+    fn run_here_rgb0_u8_with_imgsz(
+        &self,
+        imgs: &[&Image],
+        rect: bool,
+        s: u32,
+        conf_override: Option<f32>,
+    ) -> Result<Vec<Prediction>> {
         if imgs.is_empty() {
             return Err(Error::Config("cannot predict an empty batch".into()));
         }
@@ -545,7 +570,10 @@ impl Predictor {
             imgs.iter().map(|i| Letterbox::compute(i.width, i.height, s, s, &opts)).collect();
         let (rgb0, h, w) = letterbox_on_host_rgb0(imgs, &letterboxes)?;
         let pre = ms(t0);
-        let nms = self.cfg.nms();
+        let mut nms = self.cfg.nms();
+        if let Some(c) = conf_override {
+            nms.conf = c;
+        }
         let b = imgs.len();
         let (dets, inf, post) = if self.model.candidates_first_applies(Device::Cpu, &nms) {
             let t1 = Instant::now();

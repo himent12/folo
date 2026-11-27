@@ -219,9 +219,9 @@ pub fn merge_tta_detections(
     )
 }
 
-/// Execute `views`, recursively splitting in half on GPU out-of-memory / buffer-limit errors so flip-TTA
-/// batch doubling never fails on tight device limits while preserving the exact canvas chosen for the scale.
-fn run_views_with_oom_fallback<T>(
+/// Execute `views`, recursively splitting in half on GPU out-of-memory / buffer-limit errors so batch doubling
+/// never fails on tight device limits while preserving the exact canvas chosen for the scale.
+pub(crate) fn run_views_with_oom_fallback<T>(
     views: &[&Image],
     run_chunk: &mut impl FnMut(&[&Image]) -> Result<Vec<T>>,
 ) -> Result<Vec<T>> {

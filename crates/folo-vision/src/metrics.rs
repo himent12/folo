@@ -15,6 +15,9 @@
 //! differs from Ultralytics' own AP.
 
 use crate::boxes::Xyxy;
+use crate::eval::{
+    ImageDiagnostics, diagnose_image, normalize_diag_thresholds, worst_images as rank_worst_images,
+};
 use crate::nms::Detection;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -72,6 +75,16 @@ pub struct EvalConfig {
     /// coordinates can be in any unit; for boxes with area in `[0, 1e10]` (any pixel box on an image under 100,000
     /// px) both settings give identical results. On, AP equals pycocotools' for every input (`docs/METRICS.md`).
     pub coco_compatible: bool,
+    /// Record per-image error breakdowns ([`ImageDiagnostics`]) inside [`Evaluator`] and [`EvalReport`].
+    /// Off by default so hot-path validation and benchmark loops incur zero extra work.
+    pub record_diagnostics: bool,
+    /// Minimum confidence score for predictions included in per-image error diagnosis (default `0.25`).
+    pub diag_conf: f32,
+    /// IoU threshold for true-positive matching in per-image error diagnosis (default `0.50`).
+    pub diag_tp_iou: f32,
+    /// Background IoU threshold in per-image error diagnosis (default `0.10`): FPs overlapping no ground truth at
+    /// `>= diag_bg_iou` are classified as `background_fp`.
+    pub diag_bg_iou: f32,
 }
 
 impl Default for EvalConfig {
@@ -81,6 +94,10 @@ impl Default for EvalConfig {
             confusion_conf: 0.25,
             confusion_iou: 0.45,
             coco_compatible: false,
+            record_diagnostics: false,
+            diag_conf: 0.25,
+            diag_tp_iou: 0.50,
+            diag_bg_iou: 0.10,
         }
     }
 }
@@ -90,6 +107,11 @@ impl EvalConfig {
     /// range "all", `maxDets = 100`, no crowd boxes) computes it.
     pub fn coco() -> Self {
         Self { coco_compatible: true, ..Self::default() }
+    }
+
+    /// The defaults with [`EvalConfig::record_diagnostics`] enabled for per-image TP/FP/FN error diagnosis.
+    pub fn with_diagnostics() -> Self {
+        Self { record_diagnostics: true, ..Self::default() }
     }
 }
 
@@ -127,6 +149,8 @@ pub struct Evaluator {
     gt_counts: Vec<u64>,
     /// `(num_classes + 1)²`, row-major `[pred][truth]`, index `num_classes` = background.
     confusion: Vec<u64>,
+    /// Per-image error breakdowns recorded when `cfg.record_diagnostics` is true.
+    diagnostics: Vec<ImageDiagnostics>,
     // Scratch buffers reused across images.
     // `pred_order`: `( (class << 32) | desc_f32_key(score), input_idx )` — sorts in place with no indirection.
     pred_order: Vec<(u64, u32)>,
@@ -146,8 +170,14 @@ impl Evaluator {
         Self::with_config(num_classes, EvalConfig::default())
     }
 
-    /// An evaluator with explicit settings.
-    pub fn with_config(num_classes: usize, cfg: EvalConfig) -> Self {
+    /// An evaluator with explicit settings. Diagnostic thresholds (`diag_conf`, `diag_tp_iou`, `diag_bg_iou`)
+    /// are normalized once (non-finite values fall back to defaults and `diag_bg_iou` is clamped to
+    /// `<= diag_tp_iou`) so [`Evaluator::merge`] remains consistent across evaluators built from identical configs.
+    pub fn with_config(num_classes: usize, mut cfg: EvalConfig) -> Self {
+        let (dc, dt, db) = normalize_diag_thresholds(cfg.diag_conf, cfg.diag_tp_iou, cfg.diag_bg_iou);
+        cfg.diag_conf = dc;
+        cfg.diag_tp_iou = dt;
+        cfg.diag_bg_iou = db;
         Self {
             num_classes,
             cfg,
@@ -157,6 +187,7 @@ impl Evaluator {
             dets: vec![Vec::new(); num_classes],
             gt_counts: vec![0; num_classes],
             confusion: vec![0; (num_classes + 1) * (num_classes + 1)],
+            diagnostics: Vec::new(),
             pred_order: Vec::new(),
             gt_order: Vec::new(),
             ious: Vec::new(),
@@ -178,12 +209,36 @@ impl Evaluator {
         self.num_images
     }
 
+    /// Recorded per-image error breakdowns in insertion order (empty unless [`EvalConfig::record_diagnostics`]
+    /// is enabled).
+    pub fn image_diagnostics(&self) -> &[ImageDiagnostics] {
+        &self.diagnostics
+    }
+
+    /// Return up to `top_k` failing images (`fp + fn_count > 0`) ranked worst-first ([`crate::eval::worst_images`]).
+    pub fn worst_images(&self, top_k: usize) -> Vec<&ImageDiagnostics> {
+        rank_worst_images(&self.diagnostics, top_k)
+    }
+
     /// Add one image's predictions and ground truths (same coordinate system, any order). Predictions with a NaN
     /// score are ignored.
     ///
     /// # Panics
     /// If a class index is `>= num_classes`.
     pub fn add_image(&mut self, preds: &[Detection], truths: &[Truth]) {
+        self.add_image_inner(None, preds, truths);
+    }
+
+    /// Same as [`Evaluator::add_image`], attaching a caller-chosen identifier (such as an image path or dataset
+    /// ID) to the recorded [`ImageDiagnostics`] entry when [`EvalConfig::record_diagnostics`] is enabled.
+    ///
+    /// # Panics
+    /// If a class index is `>= num_classes`.
+    pub fn add_image_with_id(&mut self, image_id: impl Into<String>, preds: &[Detection], truths: &[Truth]) {
+        self.add_image_inner(Some(image_id.into()), preds, truths);
+    }
+
+    fn add_image_inner(&mut self, image_id: Option<String>, preds: &[Detection], truths: &[Truth]) {
         let nc = self.num_classes;
         for p in preds {
             assert!((p.class as usize) < nc, "Evaluator: prediction class {} >= num_classes {nc}", p.class);
@@ -191,7 +246,20 @@ impl Evaluator {
         for t in truths {
             assert!((t.class as usize) < nc, "Evaluator: truth class {} >= num_classes {nc}", t.class);
         }
+        let image_index = self.num_images;
         self.num_images += 1;
+        if self.cfg.record_diagnostics {
+            self.diagnostics.push(diagnose_image(
+                image_index,
+                image_id,
+                preds,
+                truths,
+                self.cfg.diag_conf,
+                self.cfg.diag_tp_iou,
+                self.cfg.diag_bg_iou,
+                self.cfg.coco_compatible,
+            ));
+        }
         self.update_confusion(preds, truths);
 
         // One in-place sort per image over packed register keys (zero indirection, zero allocation;
@@ -404,6 +472,7 @@ impl Evaluator {
     pub fn merge(&mut self, other: Evaluator) {
         assert_eq!(self.num_classes, other.num_classes, "Evaluator::merge: class count mismatch");
         assert_eq!(self.cfg, other.cfg, "Evaluator::merge: config mismatch");
+        let base_index = self.num_images;
         self.num_images += other.num_images;
         self.num_preds += other.num_preds;
         for (a, b) in self.dets.iter_mut().zip(other.dets) {
@@ -414,6 +483,12 @@ impl Evaluator {
         }
         for (a, b) in self.confusion.iter_mut().zip(other.confusion) {
             *a += b;
+        }
+        if !other.diagnostics.is_empty() {
+            self.diagnostics.extend(other.diagnostics.into_iter().map(|mut d| {
+                d.image_index += base_index;
+                d
+            }));
         }
     }
 
@@ -525,6 +600,7 @@ impl Evaluator {
                 iou: self.cfg.confusion_iou,
                 matrix: self.confusion.chunks(stride).map(<[u64]>::to_vec).collect(),
             },
+            image_diagnostics: self.diagnostics.clone(),
         }
     }
 }
@@ -758,6 +834,17 @@ pub struct EvalReport {
     pub curves: Curves,
     /// Confusion matrix.
     pub confusion: ConfusionMatrix,
+    /// Per-image error breakdowns recorded when [`EvalConfig::record_diagnostics`] is enabled (empty otherwise).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_diagnostics: Vec<ImageDiagnostics>,
+}
+
+impl EvalReport {
+    /// Return up to `top_k` failing images (`fp + fn_count > 0`) from [`EvalReport::image_diagnostics`] ranked
+    /// worst-first ([`crate::eval::worst_images`]).
+    pub fn worst_images(&self, top_k: usize) -> Vec<&ImageDiagnostics> {
+        rank_worst_images(&self.image_diagnostics, top_k)
+    }
 }
 
 #[cfg(test)]
