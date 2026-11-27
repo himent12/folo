@@ -1,17 +1,20 @@
-// Pure measured operating-point threshold builder for Model Detail (`#/models/<id>`): exports the evaluator's
-// measured `best_f1_conf` and per-class precision/recall/F1 at that operating point in `folo_vision::ThresholdCalibration`
-// JSON format (compatible with both `folo predict --thresholds` and Playground's `parseThresholdsJson`), without
-// fabricating unmeasured per-class thresholds from the COCO PR-curve envelope.
+// Operating point and server-calibrated threshold helpers for Model Detail (`#/models/<id>`):
+// - `buildModelOperatingPoint(ev)` reads ONLY `/eval`'s own measured `best_f1_conf` (never substituting
+//   unrelated checkpoint `model.metrics.best_f1_conf` or fabricating per-class cutoffs from PR curves).
+// - `formatServerCalibration(cal, classes)` formats the exact `folo_vision::ThresholdCalibration` returned by
+//   `POST /api/val` (0.001-grid per-class sweep with evaluator-provided `truths` and `preds`) for both
+//   `thresholds.json` download (`folo predict --thresholds` / Playground import) and Playground handoff.
 import type { Evaluation } from '$lib/api/evaluation';
-import type { Model } from '$lib/api/types';
+import type { ThresholdCalibration } from '$lib/api/types';
 import { downloadText, safeFilename, toJson } from '$lib/tableExport';
 import { roundConf, type PerClassConfMap } from '../playground/perClassConf';
 
-export interface ModelOperatingPoint {
-  best_conf: number;
-  best_f1: number;
-  precision: number;
-  recall: number;
+export const THRESHOLD_CALIBRATION_FEATURE = 'threshold_calibration';
+
+export interface ModelOperatingSummary {
+  globalConf: number;
+  macroF1: number;
+  classCount: number;
 }
 
 export interface ModelClassThreshold {
@@ -30,18 +33,21 @@ export interface ModelClassThreshold {
  * `folo val --save-thresholds`), ready for `folo predict --thresholds` and Playground JSON import.
  */
 export interface ModelThresholdCalibration {
-  global: ModelOperatingPoint;
+  global: {
+    best_conf: number;
+    best_f1: number;
+    precision: number;
+    recall: number;
+  };
   macro_f1: number;
   per_class: ModelClassThreshold[];
 }
 
-export interface ComputedModelCalibration {
-  /** JSON payload matching `folo_vision::ThresholdCalibration` at the evaluator's measured operating point. */
+export interface ServerModelCalibration {
+  /** Exact server-computed `ThresholdCalibration` payload (with class `name` added per entry). */
   payload: ModelThresholdCalibration;
-  /** Per-class overrides for Playground handoff (empty unless distinct per-class thresholds were measured). */
+  /** Per-class confidence map (`classId -> best_conf`) ready for Playground handoff. */
   perClassConf: PerClassConfMap;
-  /** True when per-class thresholds came from an actual per-class sweep rather than the global operating point. */
-  hasMeasuredPerClass: boolean;
 }
 
 function isUnitFinite(v: number | null | undefined): v is number {
@@ -64,90 +70,80 @@ function f1Of(p: number, r: number): number {
 }
 
 /**
- * Builds a `ThresholdCalibration` payload from the evaluator's measured global operating point (`best_f1_conf`)
- * and per-class precision/recall measured at that exact confidence (`GET /api/models/{id}/eval`).
- *
- * Returns `null` when no classes with ground-truth instances were evaluated or when the server did not report
- * a measured `best_f1_conf` (never fabricates confidence thresholds from PR curves or confusion-matrix cutoffs).
+ * Summarizes the evaluator's measured global operating point from `GET /api/models/{id}/eval`.
+ * Requires a valid finite `ev.bestF1Conf` reported for this exact evaluation (returns `null` when
+ * `ev.bestF1Conf` is absent/null or no classes with ground truth were evaluated).
  */
-export function buildModelThresholds(
-  model: Pick<Model, 'classes' | 'metrics'>,
-  ev: Evaluation,
-): ComputedModelCalibration | null {
-  const measuredConf = isUnitFinite(ev.bestF1Conf)
-    ? ev.bestF1Conf
-    : isUnitFinite(model.metrics?.best_f1_conf)
-      ? model.metrics.best_f1_conf
-      : null;
-  if (measuredConf === null) return null;
-
-  // Deduplicate by canonical non-negative integer class ID, sorted ascending (required by `ThresholdCalibration::validate`).
+export function buildModelOperatingPoint(ev: Evaluation): ModelOperatingSummary | null {
+  if (!isUnitFinite(ev.bestF1Conf)) return null;
   const byClass = new Map<number, (typeof ev.perClass)[number]>();
   for (const c of ev.perClass) {
     if (!Number.isInteger(c.class) || c.class < 0 || !Number.isFinite(c.instances) || c.instances <= 0) continue;
     if (!byClass.has(c.class)) byClass.set(c.class, c);
   }
-  const evaluated = [...byClass.values()].sort((a, b) => a.class - b.class);
+  const evaluated = [...byClass.values()];
   if (evaluated.length === 0) return null;
 
-  const globalConf = roundConf(roundGrid(measuredConf));
-  const nEval = evaluated.length;
   const clamp01 = (v: number) => (Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0);
+  const f1Sum = evaluated.reduce((s, c) => s + f1Of(clamp01(c.precision), clamp01(c.recall)), 0);
+  return {
+    globalConf: roundConf(roundGrid(ev.bestF1Conf)),
+    macroF1: roundMetric(f1Sum / evaluated.length),
+    classCount: evaluated.length,
+  };
+}
 
-  const perClass: ModelClassThreshold[] = [];
-  let pSum = 0;
-  let rSum = 0;
-  let f1Sum = 0;
-
-  for (const c of evaluated) {
-    const p = clamp01(c.precision);
-    const r = clamp01(c.recall);
-    const f1 = f1Of(p, r);
-    const truths = Math.max(0, Math.round(c.instances));
-    // `/eval` reports precision and recall at `best_f1_conf` (not the full 0.001-floor prediction count);
-    // derive the prediction count at `best_f1_conf` from `tp / precision` instead of mixing in the separate
-    // confusion-matrix cutoff (`confusion_conf = 0.25`).
-    const tp = r * truths;
-    const preds = p > 0 && tp > 0 ? Math.max(Math.round(tp), Math.round(tp / p)) : 0;
-
-    pSum += p;
-    rSum += r;
-    f1Sum += f1;
-
-    perClass.push({
-      class: c.class,
-      name: model.classes[c.class] ?? `class ${c.class}`,
-      best_conf: globalConf,
-      best_f1: roundMetric(f1),
-      precision: roundMetric(p),
-      recall: roundMetric(r),
-      truths,
-      preds,
-    });
+/**
+ * Formats a server-computed `ThresholdCalibration` from `POST /api/val` for `thresholds.json` download
+ * (adding human-readable `name` per class as `folo val --save-thresholds` does) and Playground handoff.
+ * Returns `null` if the server calibration has no calibrated classes or fails finite `[0, 1]` checks.
+ */
+export function formatServerCalibration(
+  cal: ThresholdCalibration | undefined | null,
+  classes: readonly string[],
+): ServerModelCalibration | null {
+  if (!cal || !isUnitFinite(cal.global?.best_conf)) return null;
+  const byClass = new Map<number, (typeof cal.per_class)[number]>();
+  for (const c of cal.per_class ?? []) {
+    if (!Number.isInteger(c.class) || c.class < 0 || !isUnitFinite(c.best_conf)) continue;
+    if (!byClass.has(c.class)) byClass.set(c.class, c);
   }
+  const sorted = [...byClass.values()].sort((a, b) => a.class - b.class);
+  if (sorted.length === 0) return null;
 
-  const globalPrecision = roundMetric(pSum / nEval);
-  const globalRecall = roundMetric(rSum / nEval);
-  const globalF1 = roundMetric(f1Sum / nEval);
+  const perClassConf: PerClassConfMap = {};
+  const perClass: ModelClassThreshold[] = sorted.map((c) => {
+    const conf = roundConf(c.best_conf);
+    perClassConf[c.class] = conf;
+    return {
+      class: c.class,
+      name: c.name ?? classes[c.class] ?? `class ${c.class}`,
+      best_conf: conf,
+      best_f1: roundMetric(c.best_f1),
+      precision: roundMetric(c.precision),
+      recall: roundMetric(c.recall),
+      truths: Math.max(0, Math.round(Number.isFinite(c.truths) ? c.truths : 0)),
+      preds: Math.max(0, Math.round(Number.isFinite(c.preds) ? c.preds : 0)),
+    };
+  });
 
   return {
     payload: {
       global: {
-        best_conf: globalConf,
-        best_f1: globalF1,
-        precision: globalPrecision,
-        recall: globalRecall,
+        best_conf: roundConf(cal.global.best_conf),
+        best_f1: roundMetric(cal.global.best_f1),
+        precision: roundMetric(cal.global.precision),
+        recall: roundMetric(cal.global.recall),
       },
-      macro_f1: globalF1,
+      macro_f1: roundMetric(cal.macro_f1),
       per_class: perClass,
     },
-    perClassConf: {},
-    hasMeasuredPerClass: false,
+    perClassConf,
   };
 }
 
 /** Downloads `calibration.payload` as `<model-name>-thresholds.json` ready for `folo predict --thresholds` or Playground. */
-export function downloadModelThresholds(modelName: string, calibration: ComputedModelCalibration): boolean {
+export function downloadModelThresholds(modelName: string, calibration: ServerModelCalibration): boolean {
   const filename = safeFilename(`${modelName || 'model'}-thresholds`, 'json');
   return downloadText(toJson(calibration.payload), filename, 'application/json;charset=utf-8', 'model-thresholds');
 }

@@ -1,14 +1,15 @@
 // @vitest-environment happy-dom
-// Tests for measured operating-point thresholds on Model Detail, ThresholdCalibration JSON export &
-// Playground handoff (`Apply in Playground`, Back/Forward/reload history semantics, handoff TTL/scope,
-// session origin attribution), plus `folo val --save-thresholds` & `folo predict --thresholds` CLI builders.
+// Tests for Model Detail operating point + server `POST /api/val` per-class threshold calibration,
+// ThresholdCalibration JSON export & Playground handoff (`Apply in Playground`, Back/Forward/reload,
+// oversized >1200-char perClassConf preservation, handoff TTL/scope, session origin attribution),
+// plus `folo val --save-thresholds` & `folo predict --thresholds` CLI builders.
 import { flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, type Rendered } from '../../../framework/testing';
-import { fromModelEval, type Evaluation } from '$lib/api/evaluation';
+import type { Evaluation } from '$lib/api/evaluation';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
-import type { Model } from '$lib/api/types';
+import type { Model, ThresholdCalibration } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
 import ModelPage from '../Model';
@@ -27,7 +28,7 @@ import CheckpointCli from '../run/CheckpointCli';
 import { buildCheckpointCli } from '../run/runExport';
 import ExportDialog from './ExportDialog';
 import { buildPredictCli, buildValCli } from './modelCli';
-import { buildModelThresholds } from './thresholds';
+import { buildModelOperatingPoint, formatServerCalibration } from './thresholds';
 
 let target: HTMLElement;
 let view: Rendered | undefined;
@@ -84,39 +85,21 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('buildModelThresholds', () => {
-  it('exports only the evaluator-measured best_f1_conf operating point and measured per-class metrics without fabricating PR-curve confidences', () => {
-    const model: Pick<Model, 'classes' | 'metrics'> = {
-      classes: ['bolt', 'nut', 'washer'],
-      metrics: { map50: 0.85, map50_95: 0.62, precision: 0.84, recall: 0.80, best_f1_conf: 0.40 },
-    };
+describe('buildModelOperatingPoint & formatServerCalibration', () => {
+  it('requires a valid /eval bestF1Conf and never substitutes checkpoint metrics', () => {
     const ev: Evaluation = {
       perClass: [
-        // Out-of-order + duplicate class 0 + zero-instance class 2 to verify dedup/sort/filter.
-        { class: 1, ap50: 0.82, ap50_95: 0.58, precision: 0.90, recall: 0.50, instances: 10 },
         { class: 0, ap50: 0.90, ap50_95: 0.70, precision: 0.75, recall: 0.90, instances: 20 },
-        { class: 0, ap50: 0.10, ap50_95: 0.10, precision: 0.10, recall: 0.10, instances: 20 },
+        { class: 1, ap50: 0.82, ap50_95: 0.58, precision: 0.90, recall: 0.50, instances: 10 },
         { class: 2, ap50: 0, ap50_95: 0, precision: 0, recall: 0, instances: 0 },
       ],
-      curves: [
-        [
-          { x: 0.5, y: 0.99 },
-          { x: 0.7, y: 0.98 },
-          { x: 0.9, y: 0.75 },
-        ],
-        [
-          { x: 0.5, y: 0.90 },
-          { x: 0.85, y: 0.86 },
-        ],
-        [],
-      ],
+      curves: [[], [], []],
       mean: [],
-      // Separate confusion-matrix cutoff (0.25) with inflated counts that MUST NOT leak into `preds`.
       confusion: [
         [19, 0, 0, 1],
         [0, 9, 0, 1],
         [0, 0, 0, 0],
-        [50, 40, 0, 0],
+        [3, 1, 0, 0],
       ],
       images: 16,
       bestF1Conf: 0.40,
@@ -124,66 +107,39 @@ describe('buildModelThresholds', () => {
       matrixAt: { conf: 0.25, iou: 0.45 },
     };
 
-    const cal = buildModelThresholds(model, ev)!;
-    expect(cal).not.toBeNull();
-    expect(cal.hasMeasuredPerClass).toBe(false);
-    expect(cal.perClassConf).toEqual({});
-    expect(cal.payload.global.best_conf).toBe(0.4);
-    expect(cal.payload.per_class.map((c) => c.class)).toEqual([0, 1]);
-    expect(cal.payload.per_class.map((c) => c.name)).toEqual(['bolt', 'nut']);
-    // Every class carries the exact measured global operating point and exact measured precision/recall at 0.40.
-    expect(cal.payload.per_class[0]!.best_conf).toBe(0.4);
-    expect(cal.payload.per_class[0]!.precision).toBe(0.75);
-    expect(cal.payload.per_class[0]!.recall).toBe(0.9);
-    expect(cal.payload.per_class[0]!.truths).toBe(20);
-    // tp = 18, precision = 0.75 -> preds at best_f1_conf = 24 (NOT confusion column sum 69).
-    expect(cal.payload.per_class[0]!.preds).toBe(24);
-    expect(cal.payload.per_class[1]!.best_conf).toBe(0.4);
-    expect(cal.payload.per_class[1]!.precision).toBe(0.9);
-    expect(cal.payload.per_class[1]!.recall).toBe(0.5);
-    expect(cal.payload.macro_f1).toBe(cal.payload.global.best_f1);
-
-    // Every field required by Rust ThresholdCalibration::validate() is finite and in range.
-    for (const c of cal.payload.per_class) {
-      expect(c.best_conf).toBeGreaterThanOrEqual(0);
-      expect(c.best_conf).toBeLessThanOrEqual(1);
-      expect(Number.isInteger(c.truths)).toBe(true);
-      expect(Number.isInteger(c.preds)).toBe(true);
-    }
-
-    // Round-trips cleanly through Playground's JSON parser.
-    const parsed = parseThresholdsJson(JSON.stringify(cal.payload), model.classes);
-    expect(parsed.ok).toBe(true);
-    if (parsed.ok) {
-      expect(parsed.globalConf).toBe(0.4);
-      expect(parsed.perClassConf[0]).toBe(0.4);
-      expect(parsed.perClassConf[1]).toBe(0.4);
-    }
+    const op = buildModelOperatingPoint(ev)!;
+    expect(op).toEqual({ globalConf: 0.4, macroF1: expect.any(Number), classCount: 2 });
+    expect(buildModelOperatingPoint({ ...ev, bestF1Conf: null })).toBeNull();
+    expect(buildModelOperatingPoint({ ...ev, perClass: [{ class: 0, ap50: 0, ap50_95: 0, precision: 0, recall: 0, instances: 0 }] })).toBeNull();
   });
 
-  it('returns null when no evaluated classes have ground truth or when best_f1_conf was not measured', () => {
-    const evNoGt: Evaluation = {
-      perClass: [{ class: 0, ap50: 0, ap50_95: 0, precision: 0, recall: 0, instances: 0 }],
-      curves: [[]],
-      mean: [],
-      confusion: [
-        [0, 0],
-        [0, 0],
+  it('formats server POST /api/val ThresholdCalibration with evaluator-provided per-class thresholds and preds', () => {
+    const raw: ThresholdCalibration = {
+      global: { best_conf: 0.38, best_f1: 0.84, precision: 0.86, recall: 0.82 },
+      macro_f1: 0.87,
+      per_class: [
+        // Out of order + zero-TP class with real false-positive preds count (142) preserved verbatim.
+        { class: 1, best_conf: 0.52, best_f1: 0, precision: 0, recall: 0, truths: 10, preds: 142 },
+        { class: 0, best_conf: 0.28, best_f1: 0.91, precision: 0.92, recall: 0.90, truths: 20, preds: 35 },
       ],
-      images: 0,
-      bestF1Conf: 0.4,
-      source: { datasetId: null, datasetName: null, split: null, fallback: null },
-      matrixAt: null,
     };
-    expect(buildModelThresholds({ classes: ['a'], metrics: null }, evNoGt)).toBeNull();
 
-    const evNoConf: Evaluation = {
-      ...evNoGt,
-      perClass: [{ class: 0, ap50: 0.8, ap50_95: 0.6, precision: 0.8, recall: 0.8, instances: 5 }],
-      bestF1Conf: null,
-      matrixAt: { conf: 0.25, iou: 0.45 },
-    };
-    expect(buildModelThresholds({ classes: ['a'], metrics: null }, evNoConf)).toBeNull();
+    const cal = formatServerCalibration(raw, ['bolt', 'nut'])!;
+    expect(cal).not.toBeNull();
+    expect(cal.payload.global.best_conf).toBe(0.38);
+    expect(cal.payload.macro_f1).toBe(0.87);
+    expect(cal.payload.per_class.map((c) => c.class)).toEqual([0, 1]);
+    expect(cal.payload.per_class.map((c) => c.name)).toEqual(['bolt', 'nut']);
+    expect(cal.payload.per_class[0]!.best_conf).toBe(0.28);
+    expect(cal.payload.per_class[1]!.preds).toBe(142);
+    expect(cal.perClassConf).toEqual({ 0: 0.28, 1: 0.52 });
+
+    const parsed = parseThresholdsJson(JSON.stringify(cal.payload), ['bolt', 'nut']);
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.globalConf).toBe(0.38);
+      expect(parsed.perClassConf).toEqual({ 0: 0.28, 1: 0.52 });
+    }
   });
 });
 
@@ -252,16 +208,13 @@ describe('Calibrated thresholds CLI builders (--save-thresholds / --thresholds)'
 
     const checks = [...target.ownerDocument.querySelectorAll<HTMLInputElement>('[data-export-cli] input[type="checkbox"]')];
     expect(checks).toHaveLength(2);
-    // Uncheck Save thresholds
     checks[0]!.click();
     flushSync();
     expect(valPre.textContent).not.toContain('--save-thresholds');
-    // Check Use calibrated thresholds on Predict
     checks[1]!.click();
     flushSync();
     expect(predPre.textContent).toContain('--thresholds fasteners-n-best-thresholds.json');
 
-    // CheckpointCli toggle for both Validate and Predict modes (plus `--split test`)
     view.unmount();
     const api = new MockApi('normal', 0);
     const run = (await api.runs()).find((r) => r.status === 'completed' && r.model_id)!;
@@ -286,106 +239,83 @@ describe('Calibrated thresholds CLI builders (--save-thresholds / --thresholds)'
   });
 });
 
-describe('Model Detail -> Playground handoff, TTL/scope, and Back/Forward/reload semantics', () => {
+describe('Model Detail -> Playground calibration, handoff, history, and oversized map preservation', () => {
   it('enforces handoff TTL, clears on server switch, and refuses plain /playground without a matching modelId', () => {
     const now = vi.spyOn(Date, 'now');
     now.mockReturnValue(1_000_000);
     stageThresholdHandoff({ modelId: 'm_a', globalConf: 0.42, perClassConf: { 0: 0.5 }, classes: ['bolt'] });
-    // Plain /playground (modelId === null) must NOT consume or hijack, and clears the stale handoff.
     expect(consumeThresholdHandoff(null)).toBeNull();
     expect(consumeThresholdHandoff('m_a')).toBeNull();
 
-    // Server switch clears the handoff so returning to the original server never resurrects it.
     stageThresholdHandoff({ modelId: 'm_a', globalConf: 0.42, perClassConf: { 0: 0.5 }, classes: ['bolt'] });
     hub.mode = 'live';
     expect(consumeThresholdHandoff('m_a')).toBeNull();
     hub.mode = 'mock';
     expect(consumeThresholdHandoff('m_a')).toBeNull();
 
-    // Expired handoff past HANDOFF_TTL_MS returns null.
     stageThresholdHandoff({ modelId: 'm_a', globalConf: 0.42, perClassConf: { 0: 0.5 }, classes: ['bolt'] });
     now.mockReturnValue(1_000_000 + HANDOFF_TTL_MS + 1);
     expect(consumeThresholdHandoff('m_a')).toBeNull();
   });
 
-  it('downloads measured ThresholdCalibration JSON, hands off cleanly into Playground, and handles Back/Forward and reload with default conf', async () => {
+  it('calibrates per-class thresholds via POST /api/val, downloads ThresholdCalibration JSON, hands off to Playground, and handles Back/Forward and reload', async () => {
     const navCalls: string[] = [];
     vi.spyOn(router, 'go').mockImplementation((path) => {
       navCalls.push(path);
       router.route = parse(`#${path}`);
     });
 
-    // Seed an unrelated prior session with different conf & per-class overrides to verify handoff & reload override them.
-    session.set({
-      source: null,
-      pred: null,
-      runOn: 'server',
-      conf: 0.72,
-      iou: 0.7,
-      maxDet: 300,
-      perClassConf: { 0: 0.85 },
-      perClassModelId: 'm_other',
-      perClassClasses: ['cat', 'dog'],
-      labels: true,
-      scores: true,
-      truth: false,
-      hidden: [],
-    });
-
     router.route = parse('#/models/m_fast_n');
     view = render(() => <ModelPage />, target);
-    const bar = await until(() => target.querySelector('[data-model-thresholds]'), 'thresholds bar');
+    const bar = await until(() => target.querySelector('[data-model-thresholds="operating-point"]'), 'operating point bar');
     expect(bar.textContent).toContain('Operating point');
-    expect(bar.textContent).toContain('macro-F1');
 
-    // Download thresholds.json and verify payload structure
-    bar.querySelector<HTMLButtonElement>('[data-download-thresholds]')!.click();
+    // Download triggers POST /api/val calibration on demand, caches exact server ThresholdCalibration, and saves JSON.
+    const dlBtn = await until(() => target.querySelector<HTMLButtonElement>('[data-download-thresholds]'), 'download button');
+    dlBtn.click();
     await until(() => downloads.length === 1, 'thresholds download');
+    await until(() => target.querySelector('[data-model-thresholds="calibrated"]'), 'calibrated bar state');
     expect(downloads[0]!.filename).toMatch(/-thresholds\.json$/);
+
     const model = await hub.api.model('m_fast_n');
-    const ev = fromModelEval(await hub.api.modelEval('m_fast_n'));
-    const expected = buildModelThresholds(model, ev)!;
     const parsedFile = JSON.parse(downloads[0]!.text);
-    expect(parsedFile.global.best_conf).toBe(expected.payload.global.best_conf);
-    expect(parsedFile.per_class).toHaveLength(expected.payload.per_class.length);
+    expect(parsedFile.per_class.length).toBeGreaterThan(0);
+    expect(parsedFile.per_class.every((c: { preds: number }) => Number.isInteger(c.preds) && c.preds > 0)).toBe(true);
     const pccParsed = parseThresholdsJson(downloads[0]!.text, model.classes);
     expect(pccParsed.ok).toBe(true);
 
-    // Click "Apply in Playground" -> URL explicitly carries conf & pcc=
-    bar.querySelector<HTMLButtonElement>('[data-apply-playground]')!.click();
+    // Click "Apply in Playground" -> URL carries calibrated conf & server per-class pcc overrides.
+    target.querySelector<HTMLButtonElement>('[data-apply-playground]')!.click();
     flushSync();
     expect(navCalls).toHaveLength(1);
     expect(navCalls[0]).toContain('/playground?model=m_fast_n');
-    expect(navCalls[0]).toContain(`conf=${expected.payload.global.best_conf}`);
+    expect(navCalls[0]).toContain(`conf=${parsedFile.global.best_conf}`);
     expect(navCalls[0]).toContain('pcc=');
 
     const qs = new URLSearchParams(navCalls[0]!.split('?')[1]);
-    expect(perClassFromUrl(qs)).toEqual({});
+    expect(Object.keys(perClassFromUrl(qs) ?? {})).toHaveLength(parsedFile.per_class.length);
     expect(serializePerClassParam({ 0: 0.45 })).toBe('0:0.45');
     // Threshold-bearing link with default conf 0.25 still explicitly serializes conf=0.25.
     const defLink = playgroundPath({ model: 'm_fast_n', source: null, conf: 0.25, iou: 0.7, maxDet: 300, perClassConf: { 0: 0.45 } });
     expect(defLink).toContain('conf=0.25');
     expect(defLink).toContain('pcc=0%3A0.45');
 
-    // Mount Playground -> handoff applies measured conf, clears stale m_other overrides, and tags session origin as m_fast_n (not m_other).
+    // Mount Playground -> handoff applies server calibrated per-class thresholds.
     view.unmount();
     view = render(() => <Playground />, target);
-    await until(() => toast.items.some((t) => t.title === 'Calibrated thresholds applied'), 'handoff toast');
-    expect(target.querySelector('[data-per-class-badge]')?.textContent?.trim()).toBe('Default');
-    expect(session.get()?.conf).toBe(expected.payload.global.best_conf);
-    expect(session.get()?.perClassModelId).toBe('m_fast_n');
+    const badge = await until(
+      () => target.querySelector('[data-per-class-badge]')?.textContent?.trim() === `${parsedFile.per_class.length} overrides`,
+      'per-class badge',
+    );
+    expect(badge).toBe(true);
+    expect(toast.items.some((t) => t.title === 'Calibrated thresholds applied')).toBe(true);
 
-    // Navigate Forward to a URL with per-class overrides (`?pcc=0:0.45`), then Back to a URL without `pcc`:
-    // Back MUST clear per-class overrides rather than retaining them!
-    router.route = parse('#/playground?model=m_fast_n&conf=0.25&pcc=0:0.45');
-    await until(() => target.querySelector('[data-per-class-badge]')?.textContent?.trim() === '1 override', 'forward pcc badge');
-
+    // Navigate Back to a URL omitting `pcc` -> clears per-class overrides.
     router.route = parse('#/playground?model=m_fast_n');
-    await until(() => target.querySelector('[data-per-class-badge]')?.textContent?.trim() === 'Default', 'back clears pcc badge');
+    await until(() => target.querySelector('[data-per-class-badge]')?.textContent?.trim() === 'Default', 'back clears pcc');
     expect(session.get()?.perClassConf).toEqual({});
 
-    // Fresh mount ("reload" / revisit after one-shot handoff was consumed) on an explicit default-conf link (`conf=0.25&pcc=`):
-    // must NOT inherit unrelated saved conf (0.80) or saved perClassConf ({ 0: 0.90 }).
+    // Fresh mount on explicit default-conf link (`conf=0.25&pcc=`) ignores unrelated saved conf & perClassConf.
     view.unmount();
     session.set({
       source: null,
@@ -407,6 +337,56 @@ describe('Model Detail -> Playground handoff, TTL/scope, and Back/Forward/reload
     await until(() => session.get()?.perClassModelId === 'm_fast_n', 'explicit default link reload');
     expect(session.get()?.conf).toBe(0.25);
     expect(session.get()?.perClassConf).toEqual({});
-    expect(target.querySelector('[data-per-class-badge]')?.textContent?.trim()).toBe('Default');
+  });
+
+  it('preserves oversized (>1200 char) per-class threshold imports across navigate away and back instead of writing pcc=', async () => {
+    vi.spyOn(router, 'go').mockImplementation((path) => {
+      router.route = parse(`#${path}`);
+    });
+
+    // Build a 160-class override map that exceeds MAX_PCC_URL_LEN (1200 chars).
+    const bigMap: Record<number, number> = {};
+    for (let i = 0; i < 160; i++) bigMap[i] = Math.round((0.1 + (i % 80) * 0.01) * 100) / 100;
+    expect(serializePerClassParam(bigMap)).toBeNull();
+    // Even with explicitPerClass: true, playgroundPath MUST NOT emit `pcc=` for a non-empty oversized map.
+    const bigPath = playgroundPath({
+      model: 'm_fast_n',
+      source: null,
+      conf: 0.25,
+      iou: 0.7,
+      maxDet: 300,
+      perClassConf: bigMap,
+      explicitConf: true,
+      explicitPerClass: true,
+    });
+    expect(bigPath).not.toContain('pcc=');
+    expect(bigPath).toContain('conf=0.25');
+
+    // Start from an explicit empty handoff URL (`pcc=`), import the 160-override map, let debounced URL sync run,
+    // unmount (navigate away), and reopen Playground -> all 160 overrides MUST survive via tab session!
+    router.route = parse('#/playground?model=m_fast_n&conf=0.25&pcc=');
+    view = render(() => <Playground />, target);
+    await until(() => target.querySelector('button.pc-toggle'), 'per-class toggle');
+    target.querySelector<HTMLButtonElement>('button.pc-toggle')!.click();
+    flushSync();
+    target.querySelector<HTMLButtonElement>('[data-per-class-import-btn]')!.click();
+    flushSync();
+    const ta = target.querySelector<HTMLTextAreaElement>('textarea.pc-textarea')!;
+    ta.value = JSON.stringify(bigMap);
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    target.querySelector<HTMLButtonElement>('[data-per-class-apply]')!.click();
+    await until(() => Object.keys(session.get()?.perClassConf ?? {}).length === 160, '160 overrides applied');
+
+    // Wait past URL_DELAY_MS (300ms) so keepSession writes the URL.
+    await new Promise((r) => setTimeout(r, 360));
+    flushSync();
+    expect(router.route.query.has('pcc')).toBe(false);
+
+    // Navigate away (unmount) and reopen that exact route -> 160 overrides MUST still be restored!
+    view.unmount();
+    view = render(() => <Playground />, target);
+    await until(() => target.querySelector('[data-per-class-badge]')?.textContent?.trim() === '160 overrides', '160 overrides restored');
+    expect(Object.keys(session.get()?.perClassConf ?? {})).toHaveLength(160);
   });
 });

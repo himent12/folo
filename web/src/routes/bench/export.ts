@@ -158,8 +158,8 @@ export function leaderboardExport(bench: Bench, entries: readonly BenchEntry[], 
 }
 
 // Escapes dynamic text as literal GitHub-Flavored Markdown table/inline text: collapses newlines and
-// escapes backslashes first alongside pipes, code spans, emphasis, strikethrough, link brackets, and HTML delimiters.
-const escMd = (s: string) => s.replace(/[\r\n]+/g, ' ').replace(/[\\|`*_~[\]<>]/g, '\\$&');
+// escapes backslashes alongside pipes, code spans, emphasis, strikethrough, link brackets, HTML delimiters, and entities.
+const escMd = (s: string) => s.replace(/[\r\n]+/g, ' ').replace(/[\\|`*_~[\]<>&]/g, '\\$&');
 
 function conditionDelta(v: number | null, base: number | null, comparable: boolean): { delta: number | null; printed: string | null } {
   if (!comparable || v === null || base === null || !Number.isFinite(v) || !Number.isFinite(base)) {

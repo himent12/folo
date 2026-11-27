@@ -27,6 +27,8 @@ import type {
   Split,
   SystemInfo,
   ThroughputTable,
+  ValReport,
+  ValRequest,
 } from '../types';
 import { round } from './boxes';
 import { image, imageIndex, indices, issues, specs, stats, toDataset, total, type MockDatasetSpec } from './datasets';
@@ -214,7 +216,7 @@ export class MockServer {
         features: [
           ...(this.scenario === 'no-throughput'
             ? ['export_onnx_switches', 'queue_control', 'weights_onnx']
-            : ['export_onnx_switches', 'export_dynamic_axes', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark', 'run_cli', FOLO2_FEATURE]),
+            : ['export_onnx_switches', 'export_dynamic_axes', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark', 'run_cli', 'threshold_calibration', FOLO2_FEATURE]),
           // The in-browser runtime in this build (the name requested of the server; lib/inference `wasmFromSystem`).
           ...(this.scenario === 'no-wasm' ? [] : ['web_wasm']),
           ...(this.labeling() ? [LABEL_FEATURE] : []),
@@ -568,6 +570,70 @@ export class MockServer {
         // folo-vision's EvalConfig defaults (docs/METRICS.md §7), not the NMS settings or best_f1_conf.
         confusion_conf: 0.25,
         confusion_iou: 0.45,
+      };
+    }, 180);
+  }
+
+  /** `POST /api/val`: deterministic mock validation returning exact server-shaped `ThresholdCalibration`. */
+  valModel(body: ValRequest): Promise<ValReport> {
+    return this.call(() => {
+      const m = this.allModels().find((x) => x.id === body.model_id);
+      if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${body.model_id}.`);
+      const ds = this.spec(body.dataset_id);
+      const split: Split = body.split ?? 'val';
+      const images = ds.splits[split];
+      if (images === 0) {
+        throw new ApiError(400, 'invalid_dataset', `dataset '${ds.name}' has no ${split} images`);
+      }
+      const p = m.run_id ? this.state.runs.find((r) => r.id === m.run_id) : undefined;
+      const best = p ? bestOf(p, Math.floor(progressAt(p, Date.now()).done)) : null;
+      const perClassMetrics = best ? epochAt(p!, best.epoch - 1).val.per_class : null;
+      const share = images / Math.max(1, total(ds));
+      const instances = stats(ds).class_counts.map((c) => c * share);
+      const evaluation = toModelEval(synthEvaluation({ seed: m.id, classes: m.classes, metrics: m.metrics, perClass: perClassMetrics, instances }), images);
+
+      const globalConf = round(m.metrics?.best_f1_conf ?? 0.35, 3);
+      const evaluated = evaluation.per_class
+        .map((c) => ({ ...c, truths: Math.round((evaluation.confusion[c.class] ?? []).reduce((a, b) => a + b, 0)) }))
+        .filter((c) => c.truths > 0)
+        .sort((a, b) => a.class - b.class);
+
+      const perClassCal = evaluated.map((c) => {
+        const h = hash(`${m.id}:${ds.id}:${split}:${c.class}`);
+        const offset = ((h % 31) - 15) * 0.01;
+        const best_conf = round(Math.max(0.05, Math.min(0.95, globalConf + offset)), 3);
+        const precision = round(Math.max(0, Math.min(1, c.precision + (offset > 0 ? 0.015 : -0.005))), 4);
+        const recall = round(Math.max(0, Math.min(1, c.recall + (offset < 0 ? 0.015 : -0.005))), 4);
+        const best_f1 = precision + recall > 0 ? round((2 * precision * recall) / (precision + recall), 4) : 0;
+        const preds = Math.max(c.truths, Math.round(c.truths * (1.1 + (h % 7) * 0.08)));
+        return { class: c.class, best_conf, best_f1, precision, recall, truths: c.truths, preds };
+      });
+      const n = Math.max(1, evaluated.length);
+      const gP = round(evaluated.reduce((s, c) => s + c.precision, 0) / n, 4);
+      const gR = round(evaluated.reduce((s, c) => s + c.recall, 0) / n, 4);
+      const gF1 = round(evaluated.reduce((s, c) => s + (c.precision + c.recall > 0 ? (2 * c.precision * c.recall) / (c.precision + c.recall) : 0), 0) / n, 4);
+      const macroF1 = round(Math.max(gF1, perClassCal.reduce((s, c) => s + c.best_f1, 0) / n), 4);
+      const map50 = round(evaluated.reduce((s, c) => s + c.map50, 0) / n, 4);
+      const map50_95 = round(evaluated.reduce((s, c) => s + c.map50_95, 0) / n, 4);
+
+      return {
+        model_id: m.id,
+        dataset_id: ds.id,
+        dataset_name: ds.name,
+        split,
+        imgsz: body.imgsz ?? m.imgsz,
+        images,
+        val: { map50, map50_95, precision: gP, recall: gR, best_f1_conf: globalConf, per_class: evaluation.per_class },
+        timing: { total_s: round(images * 0.012, 3), per_image_ms: 12 },
+        ...(this.scenario === 'no-throughput'
+          ? {}
+          : {
+              thresholds: {
+                global: { best_conf: globalConf, best_f1: gF1, precision: gP, recall: gR },
+                macro_f1: macroF1,
+                per_class: perClassCal,
+              },
+            }),
       };
     }, 180);
   }

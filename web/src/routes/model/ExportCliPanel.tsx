@@ -35,7 +35,7 @@ export interface ExportCliPanelProps {
   showAxesPicker: boolean;
   /** Optional local dataset path for `folo val --data`. */
   datasetPath?: string | null;
-  /** Evaluated split (`train` adds `--split train` to `folo val`). */
+  /** Evaluated split (non-`val` splits add `--split <split>` to `folo val`). */
   evalSplit?: string | null;
 }
 

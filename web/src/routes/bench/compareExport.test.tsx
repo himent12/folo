@@ -80,9 +80,9 @@ describe('compareExport & compareMarkdown with stress conditions', () => {
   it('builds Markdown and CSV with overall score, axis deltas, per-stress-condition rows, stale delta suppression, and strict GFM escaping', async () => {
     const bench = (await hub.api.bench('bn_3c90')) as Bench;
     const done = (await hub.api.benchEntries('bn_3c90')).filter((e) => e.status === 'done' && e.score);
-    // Include adversarial GFM characters: backslash before pipe, trailing backslash, backticks, link syntax, emphasis.
+    // Include adversarial GFM characters: backslash before pipe, trailing backslash, backticks, link syntax, emphasis, HTML entities.
     const e0: BenchEntry = { ...done[0]!, name: 'foo\\|bar \\' };
-    const e1: BenchEntry = { ...done[1]!, name: '`cand` [v2](https://x) *b*' };
+    const e1: BenchEntry = { ...done[1]!, name: '`cand` A &amp; B [v2](https://x) *b*' };
 
     const rows = [
       { key: 'score', label: 'Score', values: [72.4, 78.9], fmt: (v: number) => v.toFixed(1), d: 1 },
@@ -133,10 +133,10 @@ describe('compareExport & compareMarkdown with stress conditions', () => {
     }
     const headerCells = splitGfmCells(tableLines[0]!);
     expect(headerCells[1]).toBe('foo\\|bar \\ (baseline)');
-    expect(headerCells[2]).toBe('`cand` [v2](https://x) *b*');
-    // Raw escaped form neutralizes backticks, brackets, asterisks, and backslash-before-pipe.
+    expect(headerCells[2]).toBe('`cand` A &amp; B [v2](https://x) *b*');
+    // Raw escaped form neutralizes backticks, entities, brackets, asterisks, and backslash-before-pipe.
     expect(tableLines[0]).toContain('foo\\\\\\|bar \\\\ (baseline)');
-    expect(tableLines[0]).toContain('\\`cand\\` \\[v2\\](https://x) \\*b\\*');
+    expect(tableLines[0]).toContain('\\`cand\\` A \\&amp; B \\[v2\\](https://x) \\*b\\*');
     expect(md).toContain('| Score | 72.4 | **78.9** | +6.5 |');
     // Non-finite value renders em-dash rather than NaN.
     expect(md).toContain('| Robustness | 0.80 | — | — |');

@@ -114,6 +114,20 @@ describe('parseSpotRecovery & SpotRecoveryTracker', () => {
     expect(resumed.kind).toBe('resumed');
     expect(resumed.badge).toBe('Auto-resumed (1×)');
     expect(resumed.summary).toContain('1 spot preemption');
+
+    // If attempt 1 vanishes during sync and attempt 2 takes the run, only 1 worker handoff succeeded (`1×`, not `2×`).
+    const multiTryOneHandoff = parseSpotRecovery(
+      baseCloud({ phase: 'training', instance_id: 'ci_3' }),
+      { status: 'running', error: null },
+      [
+        ...lines,
+        log('worker preempted or lost (sync lost); auto-resuming from synced checkpoint weights/last.folo (epoch 12, attempt 2/3)'),
+        log('the worker took the run as r_worker_3', 'info'),
+      ],
+    )!;
+    expect(multiTryOneHandoff.kind).toBe('resumed');
+    expect(multiTryOneHandoff.attempts).toBe(1);
+    expect(multiTryOneHandoff.badge).toBe('Auto-resumed (1×)');
   });
 
   it('surfaces a failed replacement worker as Spot recovery failed rather than Auto-resumed, preserving earlier recovery counts', () => {

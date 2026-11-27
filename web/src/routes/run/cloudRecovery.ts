@@ -103,7 +103,7 @@ function scanMessage(acc: ScanAcc, message: string): void {
   if (WORKER_TOOK_RUN_RE.test(message)) {
     if (acc.pendingAttempt) {
       acc.pendingAttempt = false;
-      acc.completedRecoveries = Math.max(acc.completedRecoveries + 1, acc.attempts);
+      acc.completedRecoveries += 1;
     }
     return;
   }

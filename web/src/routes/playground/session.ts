@@ -230,12 +230,14 @@ export function playgroundPath(s: {
     q.set('split', s.source.img.split);
     if (s.source.at !== undefined) q.set('at', String(s.source.at));
   }
-  const pcc = serializePerClassParam(s.perClassConf);
-  if (s.conf !== DEFAULTS.conf || s.explicitConf || pcc !== null) q.set('conf', String(s.conf));
+  const normPcc = normalizePerClassConf(s.perClassConf);
+  const pccCount = Object.keys(normPcc).length;
+  const pcc = serializePerClassParam(normPcc);
+  if (s.conf !== DEFAULTS.conf || s.explicitConf || pccCount > 0) q.set('conf', String(s.conf));
   if (s.iou !== DEFAULTS.iou) q.set('iou', String(s.iou));
   if (s.maxDet !== DEFAULTS.maxDet) q.set('max', String(s.maxDet));
   if (pcc !== null) q.set('pcc', pcc);
-  else if (s.explicitPerClass) q.set('pcc', '');
+  else if (s.explicitPerClass && pccCount === 0) q.set('pcc', '');
   const qs = String(q);
   return `/playground${qs ? `?${qs}` : ''}`;
 }

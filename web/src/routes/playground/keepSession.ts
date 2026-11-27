@@ -301,6 +301,8 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
       maxDet: k.maxDet.get(),
       ...(k.perClassConf
         ? (() => {
+            const normPcc = normalizePerClassConf(k.perClassConf.get());
+            if (Object.keys(normPcc).length > 0) keepExplicitEmptyPcc = false;
             const cls = k.classes ? [...k.classes()] : [];
             const curModel = k.model();
             if (cls.length > 0) {
@@ -309,7 +311,7 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
             const keepOrigin =
               cls.length === 0 && perClassOrigin !== null && (curModel === null || perClassOrigin.modelId === curModel);
             return {
-              perClassConf: normalizePerClassConf(k.perClassConf.get()),
+              perClassConf: normPcc,
               perClassModelId: keepOrigin ? perClassOrigin!.modelId : curModel,
               perClassClasses: keepOrigin ? [...perClassOrigin!.classes] : cls,
             };

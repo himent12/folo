@@ -68,6 +68,8 @@ import type {
   ThroughputTable,
   TrainConfig,
   UpdateLabelJob,
+  ValReport,
+  ValRequest,
 } from './types';
 import { isArch } from '$lib/arch';
 import { ArchHydrator } from './archHydrate';
@@ -121,6 +123,8 @@ export interface Api {
   model(id: string, signal?: AbortSignal): Promise<Model>;
   /** PR curves, confusion matrix and per-class metrics on the model's validation split. */
   modelEval(id: string, signal?: AbortSignal): Promise<ModelEval>;
+  /** `POST /api/val`: runs validation and returns exact server-computed `thresholds` when `threshold_calibration` is supported. */
+  valModel?(body: ValRequest, signal?: AbortSignal): Promise<ValReport>;
   /** `switches` apply to `onnx` only (and only on servers whose `system().features` has `export_onnx_switches`). */
   exportModel(id: string, format: ExportFormat, switches?: OnnxSwitches): Promise<ExportResult>;
   /**
@@ -462,6 +466,9 @@ export class HttpApi implements Api {
   }
   modelEval(id: string, signal?: AbortSignal) {
     return this.#req<ModelEval>('GET', `/models/${encodeURIComponent(id)}/eval`, undefined, signal);
+  }
+  valModel(body: ValRequest, signal?: AbortSignal) {
+    return this.#req<ValReport>('POST', '/val', body, signal);
   }
   exportModel(id: string, format: ExportFormat, switches?: OnnxSwitches) {
     // With `folo-f16` any switch is a 400: send them for ONNX only.

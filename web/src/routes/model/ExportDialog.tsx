@@ -38,7 +38,7 @@ export interface ExportDialogProps {
   open?: boolean;
   /** Optional local dataset path (for `folo val --data` in CLI commands). */
   datasetPath?: string | null;
-  /** Evaluated split (`train` emits `--split train` in `folo val`). */
+  /** Evaluated split (non-`val` splits emit `--split <split>` in `folo val`). */
   evalSplit?: string | null;
 }
 
