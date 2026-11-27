@@ -1,195 +1,7 @@
-//! Tests of the benchmark operations: reading a file of predictions, its parts, and an upload against a real
-//! store and a loopback server (with a forwarder that can lose an answer).
+//! Multipart upload, cleanup, error-line reporting, and lost-answer recovery tests against a real store and
+//! loopback server.
 
 use super::*;
-use folo_test_support::TestFile;
-
-fn records(text: &str) -> Result<Vec<BenchPrediction>, Error> {
-    let f = TestFile::new("bench-predictions", "p.jsonl");
-    std::fs::write(&f, text).unwrap();
-    read_predictions(&f)?.collect()
-}
-
-#[test]
-fn a_file_of_predictions_is_json_lines_of_records() {
-    let r =
-        |image: &str| format!(r#"{{"image":"{image}","boxes":[{{"class":0,"x1":1,"y1":2,"x2":3,"y2":4}}]}}"#);
-    let lines = format!("{}\n{}\n", r("1"), r("2"));
-    let got: Vec<String> = records(&lines).unwrap().into_iter().map(|p| p.image).collect();
-    assert_eq!(got, ["1", "2"]);
-    assert_eq!(records(&r("9")).unwrap()[0].boxes[0].score, 1.0);
-    assert!(records("").unwrap().is_empty());
-    // Blank lines are skipped, and line numbers still count them.
-    let e = records(&format!("{}\n\n{{\"image\":\"3\"}}\n", r("1"))).unwrap_err();
-    assert!(e.body.message.contains("line 3") && e.body.message.contains("boxes"), "{e:?}");
-    // Arrays and API bodies are not records.
-    for doc in [format!("[{}]", r("1")), format!("{{\"predictions\": [{}]}}", r("1"))] {
-        let e = records(&format!("{}\n{doc}\n", r("1"))).unwrap_err();
-        assert!(e.body.message.contains("line 2 is not a record"), "{e:?}");
-    }
-    // Bad JSON says where; a bad record says which.
-    let e = records(&format!("{}\n{{\"image\": ", r("1"))).unwrap_err();
-    assert!(e.body.code == "invalid_arguments" && e.body.message.contains("line 2"), "{e:?}");
-    let e = records(&format!("{}\n{{\"image\":\"2\"}}\n", r("1"))).unwrap_err();
-    assert!(e.body.message.contains("line 2") && e.body.message.contains("boxes"), "{e:?}");
-    let missing = read_predictions(Path::new("no/such/predictions.jsonl")).err().unwrap();
-    assert_eq!(missing.body.code, "path_not_found");
-    // UTF-8 BOM on line 1 (common from Windows editors/PowerShell) is accepted cleanly.
-    let bom = format!("\u{FEFF}{}\n{}\n", r("1"), r("2"));
-    assert_eq!(records(&bom).unwrap().len(), 2);
-    // Misspelled keys in records or boxes fail loudly instead of silently falling back to defaults.
-    let typo_box = r#"{"image":"1","boxes":[{"class":0,"confidence":0.4,"x1":1,"y1":2,"x2":3,"y2":4}]}"#;
-    let e = records(typo_box).unwrap_err();
-    assert!(e.body.message.contains("line 1") && e.body.message.contains("confidence"), "{e:?}");
-    let typo_rec = r#"{"image":"1","cond":"haze","boxes":[]}"#;
-    let e = records(typo_rec).unwrap_err();
-    assert!(e.body.message.contains("line 1") && e.body.message.contains("cond"), "{e:?}");
-}
-
-/// A line is judged after at most [`MAX_RECORD_BYTES`] and its line ending: no more of it is read, what is left of
-/// it does not pass as a line of its own, and a record of exactly the limit is one with either line ending.
-#[test]
-fn a_long_line_is_refused_before_it_is_read_whole() {
-    let first = |text: &str| {
-        let mut reader = std::io::Cursor::new(text.as_bytes());
-        let r = records_of(&mut reader, "f".into()).next().unwrap();
-        (r, reader.position() as usize)
-    };
-    let array = format!("[{}]", "0,".repeat(MAX_RECORD_BYTES));
-    let (r, read) = first(&array);
-    assert!(r.unwrap_err().body.message.contains("line 1 is not a record"));
-    assert!(read <= MAX_RECORD_BYTES + 2, "{read} bytes read");
-    let object = format!("{{\"image\":\"{}\",\"boxes\":[]}}", "x".repeat(2 * MAX_RECORD_BYTES));
-    let (r, read) = first(&object);
-    assert!(r.unwrap_err().body.message.contains("line 1 is longer"));
-    assert!(read <= MAX_RECORD_BYTES + 2, "{read} bytes read");
-    // Blanks past the limit, then a record: one line, too long, not a blank line and a record.
-    let padded = format!("{}{{\"image\":\"1\",\"boxes\":[]}}\n", " ".repeat(MAX_RECORD_BYTES + 2));
-    assert!(records(&padded).is_err());
-    let head = "{\"image\":\"";
-    let tail = "\",\"boxes\":[]}";
-    let exact = format!("{head}{}{tail}", "x".repeat(MAX_RECORD_BYTES - head.len() - tail.len()));
-    assert_eq!(exact.len(), MAX_RECORD_BYTES);
-    for ending in ["", "\n", "\r\n"] {
-        assert_eq!(records(&format!("{exact}{ending}")).unwrap().len(), 1, "{ending:?}");
-    }
-    let over = format!("{head}x{}{tail}", "x".repeat(MAX_RECORD_BYTES - head.len() - tail.len()));
-    assert!(records(&format!("{over}\r\n")).unwrap_err().body.message.contains("longer"));
-    // A `\r` with no `\n` after it is a byte of the line: a record of the limit plus one at the end of the file is over.
-    assert!(records(&format!("{exact}\r")).unwrap_err().body.message.contains("longer"));
-    assert_eq!(records(&format!("{}\r", r#"{"image":"1","boxes":[]}"#)).unwrap().len(), 1);
-    // BOM-prefixed line 1 obeys the exact same `MAX_RECORD_BYTES` boundary for EOF, LF, CRLF, and overlong lines.
-    for ending in ["", "\n", "\r\n"] {
-        assert_eq!(records(&format!("\u{FEFF}{exact}{ending}")).unwrap().len(), 1, "bom {ending:?}");
-    }
-    for ending in ["", "\n", "\r\n"] {
-        assert!(
-            records(&format!("\u{FEFF}{over}{ending}")).unwrap_err().body.message.contains("longer"),
-            "bom over {ending:?}"
-        );
-    }
-    assert!(records(&format!("\u{FEFF}{exact}\r")).unwrap_err().body.message.contains("longer"));
-    let bom_padded = format!("\u{FEFF}{}{{\"image\":\"1\",\"boxes\":[]}}\n", " ".repeat(MAX_RECORD_BYTES));
-    assert!(records(&bom_padded).is_err(), "overlong BOM-prefixed whitespace line must not split");
-}
-
-/// A record over the server's limit per record is refused where it is read, so no part can pass a part's limit.
-#[test]
-fn a_record_over_the_box_limit_is_refused() {
-    let boxes = |n: usize| vec![r#"{"class":0,"x1":1,"y1":2,"x2":3,"y2":4}"#; n].join(",");
-    let line = |n: usize| format!("{{\"image\":\"1\",\"boxes\":[{}]}}\n", boxes(n));
-    assert_eq!(records(&line(MAX_BOXES)).unwrap()[0].boxes.len(), MAX_BOXES);
-    let e = records(&line(MAX_BOXES + 1)).unwrap_err();
-    assert!(e.body.message.contains("has 1001 boxes"), "{e:?}");
-}
-
-fn record(image: &str, boxes: usize) -> BenchPrediction {
-    BenchPrediction {
-        image: image.into(),
-        condition: None,
-        severity: None,
-        boxes: vec![
-            folo_api::BenchDetection { class: 0, score: 1.0, x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0 };
-            boxes
-        ],
-    }
-}
-
-#[test]
-fn parts_hold_whole_records_within_the_limits() {
-    let sizes = |p: Vec<BenchPrediction>| p.iter().map(|r| r.boxes.len()).collect::<Vec<_>>();
-    // Boxes: a record that would cross the limit starts the next part.
-    let limits = PartLimits { records: 100, boxes: 10, bytes: usize::MAX };
-    let mut it = [4, 5, 2, 10, 0].map(|b| Ok(record("1", b))).into_iter().peekable();
-    assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [4, 5]);
-    assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [2]);
-    assert_eq!(sizes(next_part(&mut it, limits).unwrap()), [10, 0]);
-    assert!(next_part(&mut it, limits).unwrap().is_empty());
-    // A record that fits no part is an error, not an empty part (which would end the file there).
-    let mut it = [11].map(|b| Ok(record("1", b))).into_iter().peekable();
-    assert!(next_part(&mut it, limits).unwrap_err().body.message.contains("11 boxes"));
-    // Bytes, at the exact boundary: the limit counts the records' JSON, so two records take exactly twice one; the
-    // commas and brackets of the array that is sent are on top. A byte less holds one record.
-    let one = serde_json::to_vec(&record("1", 1)).unwrap().len();
-    let limits = PartLimits { records: 100, boxes: 100, bytes: 2 * one };
-    let mut it = [1, 1, 1].map(|b| Ok(record("1", b))).into_iter().peekable();
-    let two = next_part(&mut it, limits).unwrap();
-    assert_eq!(two.len(), 2);
-    assert_eq!(serde_json::to_vec(&two).unwrap().len(), 2 * one + 3, "the records, a comma and two brackets");
-    assert_eq!(next_part(&mut it, limits).unwrap().len(), 1);
-    let tight = PartLimits { bytes: 2 * one - 1, ..limits };
-    let mut it = [1, 1].map(|b| Ok(record("1", b))).into_iter().peekable();
-    assert_eq!(next_part(&mut it, tight).unwrap().len(), 1);
-    let alone = PartLimits { bytes: one, ..limits };
-    let mut it = [1].map(|b| Ok(record("1", b))).into_iter().peekable();
-    assert_eq!(next_part(&mut it, alone).unwrap().len(), 1);
-    let mut it = [3].map(|b| Ok(record("1", b))).into_iter().peekable();
-    assert!(next_part(&mut it, limits).unwrap_err().body.message.contains("bytes"));
-    // Records, empty ones too.
-    let limits = PartLimits { records: 2, boxes: 10, bytes: usize::MAX };
-    let mut it = [0, 0, 0].map(|b| Ok(record("1", b))).into_iter().peekable();
-    assert_eq!(next_part(&mut it, limits).unwrap().len(), 2);
-    assert_eq!(next_part(&mut it, limits).unwrap().len(), 1);
-    // The real limits: 199,999 boxes and then 1,000 make two parts.
-    let mut it = [MAX_PART_BOXES - 1, 1000].map(|b| Ok(record("1", b))).into_iter().peekable();
-    assert_eq!(sizes(next_part(&mut it, PARTS).unwrap()), [MAX_PART_BOXES - 1]);
-    assert_eq!(sizes(next_part(&mut it, PARTS).unwrap()), [1000]);
-}
-
-/// A store with a benchmark of 4 synthetic images and haze 2 in its plan; its id.
-fn bench_store(home: &Path) -> (std::sync::Arc<folo_server::RealStore>, String) {
-    use folo_server::Store;
-    let store = std::sync::Arc::new(folo_server::RealStore::open(home.to_path_buf()).device("cpu"));
-    let req = folo_api::SyntheticDataset {
-        name: "shapes".into(),
-        images: 20,
-        classes: vec!["circle".into(), "square".into()],
-        imgsz: 64,
-        seed: 3,
-    };
-    let ds = store.create_synthetic(req).unwrap();
-    let plan = BenchPlan {
-        conditions: vec![folo_api::BenchPlanCondition {
-            condition: "haze".into(),
-            severities: vec![2],
-            weight: 1.0,
-            why: None,
-        }],
-        rationale: None,
-        designed_by: None,
-    };
-    let req = CreateBench {
-        name: "shapes".into(),
-        description: String::new(),
-        source: folo_api::BenchSource::Dataset { dataset_id: ds.id, split: None },
-        max_images: None,
-        seed: 0,
-        plan: Some(plan),
-    };
-    let bench = Benchmarks::Store(store.clone()).create_bench(req).unwrap();
-    assert_eq!(bench.images, 4);
-    (store, bench.id)
-}
 
 /// A file of predictions in several parts: the parts after the first (the condition's records here) are sent
 /// and scored; a later part refused removes the entry.
@@ -212,12 +24,15 @@ fn parts(b: &Benchmarks, id: &str, dir: &Path) {
     assert_eq!((state.status, state.done), (folo_api::BenchEntryStatus::Done, 8), "{state:?}");
     let r = state.result.unwrap();
     assert_eq!((r.conditions.len(), r.conditions[0].points.len()), (1, 1), "{:?}", r.conditions);
-    // The third part names an image the benchmark does not have: refused, and the entry is gone.
+    // The third part names an image the benchmark does not have: refused with exact file line 8, and entry removed.
     write("99");
     let e = b.submit_in(id, "refused".into(), true, &file, three, &go).unwrap_err();
     let hint = e.body.hint.clone().unwrap_or_default();
     assert!(
-        e.body.message.contains("99") && hint.contains("'refused'") && hint.contains("was removed"),
+        e.body.message.contains("line 8")
+            && e.body.message.contains("99")
+            && hint.contains("'refused'")
+            && hint.contains("was removed"),
         "{e:?}"
     );
     assert_eq!(b.entries(id).unwrap().len(), 1);
@@ -265,222 +80,6 @@ fn predictions_go_in_parts_in_process() {
     let (store, id) = bench_store(home.path());
     parts(&Benchmarks::Store(store.clone()), &id, home.path());
     folo_server::Store::shutdown(&*store);
-}
-
-/// A real server on a loopback port, for the time of `f(url, benchmark id, folder)`. Server and store shutdown
-/// always run on drop even if `f` panics.
-fn with_server(name: &str, f: impl FnOnce(&str, &str, &Path)) {
-    struct Guard(Option<Box<dyn FnOnce()>>);
-    impl Drop for Guard {
-        fn drop(&mut self) {
-            if let Some(d) = self.0.take() {
-                d();
-            }
-        }
-    }
-    let home = folo_test_support::TestDir::new(name);
-    let (store, id) = bench_store(&home.join("server"));
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let server = folo_server::Server::new(store.clone(), folo_server::Options::default());
-    let serving = rt.spawn(server.serve(listener, async move {
-        let _ = stopped.await;
-    }));
-    let _guard = Guard(Some(Box::new(move || {
-        let _ = stop.send(());
-        let _ = rt.block_on(serving);
-        folo_server::Store::shutdown(&*store);
-    })));
-    f(&url, &id, home.path());
-}
-
-fn http(url: &str) -> Benchmarks {
-    Benchmarks::Http(std::sync::Arc::new(crate::proxy::HttpStore::new(url, None)))
-}
-
-/// What becomes of a request through a [`Forwarder`].
-#[derive(Clone, Copy, PartialEq)]
-enum Fate {
-    /// It reaches the server and its answer comes back.
-    Pass,
-    /// It reaches the server; its answer is dropped.
-    LoseAnswer,
-    /// It never reaches the server.
-    Never,
-    /// It never reaches the server, and this status and FOLO error code come back.
-    Answer(u16, &'static str),
-    /// It never reaches the server, and this status with a non-FOLO plain-text body comes back.
-    Raw(u16, &'static str),
-}
-
-impl From<bool> for Fate {
-    fn from(lose: bool) -> Fate {
-        if lose { Fate::LoseAnswer } else { Fate::Pass }
-    }
-}
-
-/// True for a request that stops or deletes something.
-fn removes(line: &str) -> bool {
-    line.starts_with("DELETE") || (line.starts_with("POST") && line.contains("/stop "))
-}
-
-/// A request that reads one entry.
-fn reads_entry(line: &str) -> bool {
-    line.starts_with("GET") && line.contains("/entries/")
-}
-
-/// Forwards requests to a server, one per connection. `hook` sees each request line and says its [`Fate`] (`true`:
-/// the answer is lost).
-struct Forwarder {
-    url: String,
-    done: std::sync::Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Forwarder {
-    fn new<R: Into<Fate>>(upstream: &str, hook: impl Fn(&str) -> R + Send + 'static) -> Forwarder {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let upstream = upstream.trim_start_matches("http://").to_string();
-        let done = std::sync::Arc::new(AtomicBool::new(false));
-        let ended = done.clone();
-        let thread = std::thread::spawn(move || {
-            for client in listener.incoming() {
-                if ended.load(Ordering::Relaxed) {
-                    break;
-                }
-                if let Ok(client) = client {
-                    forward(client, &upstream, &|line| hook(line).into());
-                }
-            }
-        });
-        Forwarder { url, done, thread: Some(thread) }
-    }
-}
-
-impl Drop for Forwarder {
-    fn drop(&mut self) {
-        self.done.store(true, Ordering::Relaxed);
-        let _ = std::net::TcpStream::connect(self.url.trim_start_matches("http://"));
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
-    }
-}
-
-/// One request through: its head and body to `upstream` with `Connection: close` and the whole answer back, as its
-/// [`Fate`] says (the client sees its connection closed with no answer otherwise). Every socket gets a read/write
-/// deadline so a stalled peer cannot hang the forwarder or its drop join.
-fn forward(mut client: std::net::TcpStream, upstream: &str, hook: &dyn Fn(&str) -> Fate) {
-    use std::io::Write;
-    let io_timeout = Some(Duration::from_secs(10));
-    let _ = client.set_read_timeout(io_timeout);
-    let _ = client.set_write_timeout(io_timeout);
-    let mut reader = BufReader::new(client.try_clone().unwrap());
-    let (mut head, mut length) = (Vec::new(), 0usize);
-    let mut first = String::new();
-    loop {
-        let mut line = String::new();
-        if reader.read_line(&mut line).unwrap_or(0) == 0 {
-            return;
-        }
-        if first.is_empty() {
-            first = line.clone();
-        }
-        if line == "\r\n" {
-            break;
-        }
-        let lower = line.to_ascii_lowercase();
-        if let Some(v) = lower.strip_prefix("content-length:") {
-            length = v.trim().parse().unwrap();
-        }
-        if !lower.starts_with("connection:") {
-            head.extend_from_slice(line.as_bytes());
-        }
-    }
-    head.extend_from_slice(b"Connection: close\r\n\r\n");
-    let mut body = vec![0; length];
-    if reader.read_exact(&mut body).is_err() {
-        return;
-    }
-    let fate = hook(first.trim());
-    if let Fate::Answer(status, code) = fate {
-        let json = format!(r#"{{"error":{{"code":"{code}","message":"answered by the test","hint":null}}}}"#);
-        let _ = write!(
-            client,
-            "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
-            json.len()
-        );
-        let _ = client.shutdown(std::net::Shutdown::Both);
-        return;
-    }
-    if let Fate::Raw(status, text) = fate {
-        let _ = write!(
-            client,
-            "HTTP/1.1 {status} Test\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
-            text.len()
-        );
-        let _ = client.shutdown(std::net::Shutdown::Both);
-        return;
-    }
-    if fate == Fate::Never {
-        let _ = client.shutdown(std::net::Shutdown::Both);
-        return;
-    }
-    let Ok(mut server) = std::net::TcpStream::connect(upstream) else {
-        let _ = client.shutdown(std::net::Shutdown::Both);
-        return;
-    };
-    let _ = server.set_read_timeout(io_timeout);
-    let _ = server.set_write_timeout(io_timeout);
-    if server.write_all(&head).is_err() || server.write_all(&body).is_err() {
-        let _ = client.shutdown(std::net::Shutdown::Both);
-        return;
-    }
-    let mut answer = Vec::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    let mut chunk = [0u8; 4096];
-    let ok = loop {
-        let Some(rem) = deadline.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero())
-        else {
-            break false;
-        };
-        let _ = server.set_read_timeout(Some(rem));
-        match server.read(&mut chunk) {
-            Ok(0) => break true,
-            Ok(n) => answer.extend_from_slice(&chunk[..n]),
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break false,
-        }
-    };
-    if ok && fate == Fate::Pass {
-        let _ = client.write_all(&answer);
-    }
-    let _ = client.shutdown(std::net::Shutdown::Both);
-}
-
-/// Four records of the unchanged images and four of haze 2, nothing found: a whole entry of the test benchmark.
-fn whole_file(dir: &Path) -> PathBuf {
-    let file = dir.join("whole.jsonl");
-    let mut lines: Vec<String> = (1..=4).map(|i| format!(r#"{{"image":"{i}","boxes":[]}}"#)).collect();
-    lines.extend((1..=4).map(|i| format!(r#"{{"image":"{i}","condition":"haze","severity":2,"boxes":[]}}"#)));
-    std::fs::write(&file, lines.join("\n")).unwrap();
-    file
-}
-
-const THREE: PartLimits = PartLimits { records: 3, boxes: 10, bytes: usize::MAX };
-
-/// How many requests that stop or delete went through `via`, for a hook that counts them with `count`.
-fn counter() -> (std::sync::Arc<std::sync::atomic::AtomicUsize>, impl Fn(&str) + Send + 'static) {
-    let n = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let seen = n.clone();
-    (n, move |line: &str| {
-        if removes(line) {
-            seen.fetch_add(1, Ordering::Relaxed);
-        }
-    })
 }
 
 /// The server scores the entry and its answer to the finish never arrives: the upload reports the score, the entry
@@ -805,7 +404,12 @@ fn a_lost_answer_to_the_stop_still_removes_the_entry() {
             .submit_in(id, "bad".into(), true, &file, THREE, &AtomicBool::new(false))
             .unwrap_err();
         let hint = e.body.hint.clone().unwrap_or_default();
-        assert!(e.body.message.contains("99") && hint.contains("was removed"), "{e:?}");
+        assert!(
+            e.body.message.contains("line 4")
+                && e.body.message.contains("99")
+                && hint.contains("was removed"),
+            "{e:?}"
+        );
         assert!(http(url).entries(id).unwrap().is_empty());
     });
 }
@@ -886,76 +490,6 @@ fn lost_finish_recovered_done_survives_failed_result_fetch() {
     });
 }
 
-/// Ctrl+C set while a blocked reader returns a blank line stops before starting another read.
-#[test]
-fn interrupt_during_blank_line_stops_before_next_read() {
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
-
-    struct BlankPipe {
-        reads: Arc<AtomicUsize>,
-        stop: Arc<AtomicBool>,
-    }
-
-    impl Read for BlankPipe {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let n = self.reads.fetch_add(1, Ordering::Relaxed);
-            assert_eq!(n, 0, "must not start a second read after Ctrl+C on a blank line");
-            self.stop.store(true, Ordering::Relaxed);
-            buf[0] = b'\n';
-            Ok(1)
-        }
-    }
-
-    let reads = Arc::new(AtomicUsize::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
-    let reader = BufReader::new(BlankPipe { reads: reads.clone(), stop: stop.clone() });
-    let mut it = records_of_unless(reader, "pipe".into(), true, Some(&stop));
-    let err = it.next().unwrap().unwrap_err();
-    assert_eq!(err.body.code, "interrupted", "{err:?}");
-    assert_eq!(reads.load(Ordering::Relaxed), 1);
-}
-
-/// `left()` names `queued` and `stopping` accurately instead of calling them "open or being scored".
-#[test]
-fn left_hint_names_each_status_accurately() {
-    let mut entry = BenchEntry {
-        id: "be_1".into(),
-        bench_id: "bn_1".into(),
-        name: "m".into(),
-        contestant: BenchContestant::External,
-        status: BenchEntryStatus::Running,
-        created: String::new(),
-        finished: None,
-        images: 4,
-        conditions: false,
-        scored: true,
-        fingerprint: String::new(),
-        progress: folo_api::BenchProgress { done: 0, total: 4, condition: None, severity: None },
-        score: None,
-        map50_95: None,
-        ci95: None,
-        conditions_run: 0,
-        speed: None,
-        usage: None,
-        missing_classes: vec![],
-        error: None,
-        hint: None,
-    };
-    for (status, expected) in [
-        (BenchEntryStatus::Running, "it is open or being scored"),
-        (BenchEntryStatus::Queued, "it is queued"),
-        (BenchEntryStatus::Stopping, "it is stopping"),
-        (BenchEntryStatus::Done, "it is done"),
-        (BenchEntryStatus::Failed, "it is failed"),
-        (BenchEntryStatus::Stopped, "it is stopped"),
-    ] {
-        entry.status = status;
-        let text = left(&named(&entry), &entry);
-        assert!(text.contains(expected), "{status:?} -> {text}");
-    }
-}
-
 /// Non-finite box coordinates (such as `1e100` overflowing `f32`) are caught before HTTP serialization so direct
 /// and proxied runs report the same actionable error naming the line, image and box (never `invalid type: null`).
 #[test]
@@ -993,5 +527,120 @@ fn non_finite_coordinates_report_same_actionable_error_in_direct_and_proxy_modes
             .submit_in(id, "unscored".into(), false, &unscored, THREE, &AtomicBool::new(false))
             .unwrap();
         assert_eq!(entry.status, BenchEntryStatus::Done);
+    });
+}
+
+/// A multipart conflict on a later part reports the exact 1-based file line number (including blank lines)
+/// and replaces the server's open-entry HTTP retry hint once the entry is removed.
+#[test]
+fn multipart_conflict_reports_exact_file_line_and_non_contradictory_cleanup_hint() {
+    with_server("mcp-bench-multipart-line", |url, id, dir| {
+        let file = dir.join("conflict.jsonl");
+        // Lines 1..=3 fill part 1 (THREE.records == 3); line 4 is blank; line 5 is part 2 record 1 and conflicts
+        // with line 1's empty boxes for image 1.
+        std::fs::write(
+            &file,
+            "{\"image\":\"1\",\"boxes\":[]}\n\
+             {\"image\":\"2\",\"boxes\":[]}\n\
+             {\"image\":\"3\",\"boxes\":[]}\n\
+             \n\
+             {\"image\":\"1\",\"boxes\":[{\"class\":0,\"score\":0.5,\"x1\":5,\"y1\":5,\"x2\":15,\"y2\":15}]}\n",
+        )
+        .unwrap();
+        let err = http(url)
+            .submit_in(id, "wrong-row".into(), true, &file, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        assert_eq!(err.body.code, "invalid_body", "{err:?}");
+        assert!(
+            err.body.message.contains("line 5 (image '1', unchanged)")
+                && !err.body.message.contains("prediction 1"),
+            "expected exact file line 5: {}",
+            err.body.message
+        );
+        let hint = err.body.hint.as_deref().unwrap_or_default();
+        assert!(
+            hint.contains("'wrong-row'")
+                && hint.contains("was removed")
+                && hint.contains("fix the predictions file and run again")
+                && !hint.contains(RETRY_PART_HINT),
+            "stale open-entry retry hint must be replaced after removal: {hint}"
+        );
+        assert!(http(url).entries(id).unwrap().is_empty(), "removed entry must not remain on server");
+
+        // Intra-part conflict in part 1 (with a blank line between lines 1 and 3) maps both indices to file lines.
+        let intra = dir.join("intra.jsonl");
+        std::fs::write(
+            &intra,
+            "{\"image\":\"1\",\"boxes\":[]}\n\
+             \n\
+             {\"image\":\"1\",\"boxes\":[{\"class\":0,\"score\":0.5,\"x1\":5,\"y1\":5,\"x2\":15,\"y2\":15}]}\n",
+        )
+        .unwrap();
+        let err = http(url)
+            .submit_in(id, "intra".into(), true, &intra, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        assert!(
+            err.body.message.contains("line 3 (image '1', unchanged) repeats line 1 with other boxes"),
+            "{}",
+            err.body.message
+        );
+    });
+}
+
+/// When cleanup reads `404 bench_entry_not_found` (another client already removed the entry), cleanup classifies
+/// it as closed and replaces `RETRY_PART_HINT`; a transport failure leaves the state unknown and keeps the hint.
+#[test]
+fn cleanup_replaces_retry_hint_when_entry_already_deleted_but_keeps_it_when_unread() {
+    with_server("mcp-bench-cleanup-gone", |url, id, dir| {
+        let file = dir.join("conflict.jsonl");
+        std::fs::write(
+            &file,
+            "{\"image\":\"1\",\"boxes\":[]}\n\
+             {\"image\":\"2\",\"boxes\":[]}\n\
+             {\"image\":\"3\",\"boxes\":[]}\n\
+             \n\
+             {\"image\":\"1\",\"boxes\":[{\"class\":0,\"score\":0.5,\"x1\":5,\"y1\":5,\"x2\":15,\"y2\":15}]}\n",
+        )
+        .unwrap();
+
+        // 1. Another client stops and deletes the entry right before cleanup's GET -> `404 bench_entry_not_found`.
+        let (other, bench) = (http(url), id.to_string());
+        let via = Forwarder::new(url, move |line| {
+            if line.starts_with("GET") && line.contains("/entries/") {
+                let path = line.split(' ').nth(1).unwrap();
+                let entry_id = path.rsplit('/').next().unwrap();
+                let _ = other.stop_entry(&bench, entry_id);
+                let _ = other.delete_entry(&bench, entry_id);
+            }
+            Fate::Pass
+        });
+        let err = http(&via.url)
+            .submit_in(id, "already-gone".into(), true, &file, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = err.body.hint.as_deref().unwrap_or_default();
+        assert!(
+            hint.contains("was already removed")
+                && hint.contains("fix the predictions file and run again")
+                && !hint.contains(RETRY_PART_HINT),
+            "expected replacement hint when entry is 404 bench_entry_not_found: {hint}"
+        );
+
+        // 2. Cleanup's GET fails with a transport error -> state is unknown, so `RETRY_PART_HINT` stays.
+        let via_unread = Forwarder::new(url, |line| {
+            if line.starts_with("GET") && line.contains("/entries/") { Fate::Never } else { Fate::Pass }
+        });
+        let err = http(&via_unread.url)
+            .submit_in(id, "unread".into(), true, &file, THREE, &AtomicBool::new(false))
+            .unwrap_err();
+        let hint = err.body.hint.as_deref().unwrap_or_default();
+        assert!(
+            hint.contains("its state could not be read") && hint.contains(RETRY_PART_HINT),
+            "expected retry hint preserved when cleanup cannot read entry state: {hint}"
+        );
+        // Clean up the left-open entry.
+        for e in http(url).entries(id).unwrap() {
+            let _ = http(url).stop_entry(id, &e.id);
+            let _ = http(url).delete_entry(id, &e.id);
+        }
     });
 }

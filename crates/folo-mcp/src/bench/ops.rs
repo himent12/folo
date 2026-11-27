@@ -12,7 +12,7 @@ use folo_api::{
     Bench, BenchCatalog, BenchContestant, BenchContestantSpec, BenchEntry, BenchEntryStatus, BenchPlan,
     BenchPrediction, BenchResult, CreateBench, StartBenchEntry,
 };
-use folo_server::bench::MAX_BOXES;
+use folo_server::bench::{MAX_BOXES, RETRY_PART_HINT};
 use http::StatusCode;
 use serde_json::Value;
 
@@ -223,18 +223,19 @@ impl Benchmarks {
         stop: &AtomicBool,
     ) -> Result<BenchEntry, Error> {
         let shown = folo_api::json::path(path);
-        self.submit_records(
+        self.submit_numbered_records(
             id,
             name,
             scored,
             &shown,
-            read_predictions_unless(path, scored, stop)?,
+            read_numbered_predictions_unless(path, scored, stop)?,
             limits,
             stop,
         )
     }
 
     /// [`Benchmarks::submit_in`] of `records` (`shown` names where they come from).
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     fn submit_records(
         &self,
@@ -243,6 +244,22 @@ impl Benchmarks {
         scored: bool,
         shown: &str,
         records: impl Iterator<Item = Result<BenchPrediction, Error>>,
+        limits: PartLimits,
+        stop: &AtomicBool,
+    ) -> Result<BenchEntry, Error> {
+        let numbered = records.enumerate().map(|(i, r)| r.map(|p| (i + 1, p)));
+        self.submit_numbered_records(id, name, scored, shown, numbered, limits, stop)
+    }
+
+    /// [`Benchmarks::submit_in`] of `(line_number, record)` pairs (`shown` names where they come from).
+    #[allow(clippy::too_many_arguments)]
+    fn submit_numbered_records(
+        &self,
+        id: &str,
+        name: String,
+        scored: bool,
+        shown: &str,
+        records: impl Iterator<Item = Result<(usize, BenchPrediction), Error>>,
         limits: PartLimits,
         stop: &AtomicBool,
     ) -> Result<BenchEntry, Error> {
@@ -255,11 +272,11 @@ impl Benchmarks {
         .peekable();
         // And after a part is read: a request or the finish comes next.
         let mut read = || {
-            let part = next_part(&mut records, limits)?;
+            let part = next_numbered_part(&mut records, limits)?;
             check_interrupt(stop)?;
             Ok::<_, Error>(part)
         };
-        let first = read()?;
+        let (first, first_lines) = read()?;
         if first.is_empty() {
             return Err(invalid_arguments(format!("{shown} holds no predictions")));
         }
@@ -267,19 +284,29 @@ impl Benchmarks {
         let listed = name.trim().to_string();
         let contestant = BenchContestantSpec::External { scored, open: true, predictions: first };
         let req = StartBenchEntry { contestant, name: Some(name), max_images: None, conditions: None };
-        let entry = self.start_entry(id, req).map_err(|e| lost_start(e, &listed))?;
+        let entry = self
+            .start_entry(id, req)
+            .map_err(|e| lost_start(rewrite_part_error(e, shown, &first_lines), &listed))?;
         let sent: Result<(), Error> = (|| {
             loop {
-                let part = read()?;
+                let (part, part_lines) = read()?;
                 if part.is_empty() {
                     return Ok(());
                 }
-                self.add_predictions(id, &entry.id, part)?;
+                self.add_predictions(id, &entry.id, part)
+                    .map_err(|e| rewrite_part_error(e, shown, &part_lines))?;
             }
         })();
-        let failed = |e: Error| {
-            let what = self.clean_up(id, &entry);
-            with_hint(e, what)
+        let failed = |mut e: Error| match self.clean_up_outcome(id, &entry) {
+            CleanUp::Closed(what) => {
+                // Once the open entry is closed or removed, the server's HTTP open-entry retry hint ("send only the
+                // records not sent yet") is stale; tell the user to fix the file and re-run instead.
+                if e.body.hint.as_deref() == Some(RETRY_PART_HINT) {
+                    e.body.hint = Some("fix the predictions file and run again".into());
+                }
+                with_hint(e, what)
+            }
+            CleanUp::OpenOrUnknown(what) => with_hint(e, what),
         };
         if let Err(e) = sent {
             return Err(failed(e));
@@ -290,23 +317,43 @@ impl Benchmarks {
 
     /// A failure while the server has not taken the entry for scoring. The entry is read: one still open is stopped
     /// and removed; one in any other state, or that cannot be read, is left and named. Returns what to tell the user.
+    #[cfg(test)]
     fn clean_up(&self, id: &str, opened: &BenchEntry) -> String {
+        match self.clean_up_outcome(id, opened) {
+            CleanUp::Closed(s) | CleanUp::OpenOrUnknown(s) => s,
+        }
+    }
+
+    fn clean_up_outcome(&self, id: &str, opened: &BenchEntry) -> CleanUp {
         let who = named(opened);
+        let classify = |e: &BenchEntry| {
+            let msg = left(&who, e);
+            if e.status.is_active() { CleanUp::OpenOrUnknown(msg) } else { CleanUp::Closed(msg) }
+        };
+        let is_gone =
+            |err: &Error| err.status == StatusCode::NOT_FOUND && err.body.code == "bench_entry_not_found";
+        let gone = || CleanUp::Closed(format!("{who} was already removed"));
         let stopped = match self.entry(id, &opened.id) {
             // A stop whose answer was lost may have worked: the entry's state says.
             Ok(e) if e.status == BenchEntryStatus::Running => {
                 self.stop_entry(id, &opened.id).or_else(|_| self.entry(id, &opened.id))
             }
-            Ok(e) => return left(&who, &e),
-            Err(_) => return unread(&who),
+            Ok(e) => return classify(&e),
+            Err(ref err) if is_gone(err) => return gone(),
+            Err(_) => return CleanUp::OpenOrUnknown(unread(&who)),
         };
         match stopped {
             Ok(e) if e.status == BenchEntryStatus::Stopped => match self.delete_entry(id, &opened.id) {
-                Ok(()) => format!("{who} was removed"),
-                Err(u) => format!("{who} is stopped; removing it did not succeed ({})", u.body.message),
+                Ok(()) => CleanUp::Closed(format!("{who} was removed")),
+                Err(ref u) if is_gone(u) => gone(),
+                Err(u) => CleanUp::Closed(format!(
+                    "{who} is stopped; removing it did not succeed ({})",
+                    u.body.message
+                )),
             },
-            Ok(e) => left(&who, &e),
-            Err(_) => unread(&who),
+            Ok(e) => classify(&e),
+            Err(ref err) if is_gone(err) => gone(),
+            Err(_) => CleanUp::OpenOrUnknown(unread(&who)),
         }
     }
 
@@ -320,6 +367,54 @@ impl Benchmarks {
             Err(_) => Err(with_hint(e, unread(&who))),
         }
     }
+}
+
+enum CleanUp {
+    /// Entry was removed or is in a terminal (closed) state and can no longer receive parts.
+    Closed(String),
+    /// Entry may still be open/active or its state could not be read.
+    OpenOrUnknown(String),
+}
+
+const REPEATS_PREDICTION: &str = " repeats prediction ";
+const REPEATS_SUFFIX: &str = " with other boxes: answer each image and condition once";
+
+/// Translates a server per-part record diagnostic (`prediction <k> ...`, and any trailing intra-part
+/// `repeats prediction <j> with other boxes: answer each image and condition once`) into the exact 1-based file line
+/// numbers of the predictions file (`shown`).
+fn rewrite_part_error(mut e: Error, shown: &str, part_lines: &[usize]) -> Error {
+    let Some(rest) = e.body.message.strip_prefix("prediction ") else {
+        return e;
+    };
+    let digits_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let Some(k) = rest[..digits_len].parse::<usize>().ok().filter(|&k| k >= 1) else {
+        return e;
+    };
+    let Some(&line) = part_lines.get(k - 1) else {
+        return e;
+    };
+    let tail = &rest[digits_len..];
+    if !tail.starts_with([' ', ':']) {
+        return e;
+    }
+    let rewritten_tail = tail.strip_suffix(REPEATS_SUFFIX).and_then(|before_suffix| {
+        let pos = before_suffix.rfind(REPEATS_PREDICTION)?;
+        if !before_suffix[..pos].ends_with(')') {
+            return None;
+        }
+        let digits = &before_suffix[pos + REPEATS_PREDICTION.len()..];
+        let j = (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| digits.parse::<usize>().ok())
+            .flatten()
+            .filter(|&j| j >= 1)?;
+        let &first_line = part_lines.get(j - 1)?;
+        Some(format!("{} repeats line {first_line}{REPEATS_SUFFIX}", &before_suffix[..pos]))
+    });
+    e.body.message = match rewritten_tail {
+        Some(t) => format!("{shown}: line {line}{t}"),
+        None => format!("{shown}: line {line}{tail}"),
+    };
+    e
 }
 
 /// True when the FOLO server answered a finish with a refusal (did not take the entry for scoring).
@@ -432,16 +527,17 @@ pub fn read_predictions(
     Ok(records_of(BufReader::new(file), shown))
 }
 
-/// Like [`read_predictions`], checking `stop` before every line read (including after skipping a blank line) so
-/// Ctrl+C during a blocked pipe read whose next line is blank never starts another read.
-fn read_predictions_unless<'a>(
+/// Like [`read_predictions`], yielding `(1-based file line number, record)` and checking `stop` before every line
+/// read (including after skipping a blank line) so Ctrl+C during a blocked pipe read whose next line is blank never
+/// starts another read.
+fn read_numbered_predictions_unless<'a>(
     path: &Path,
     scored: bool,
     stop: &'a AtomicBool,
-) -> Result<impl Iterator<Item = Result<BenchPrediction, Error>> + 'a, Error> {
+) -> Result<impl Iterator<Item = Result<(usize, BenchPrediction), Error>> + 'a, Error> {
     check_interrupt(stop)?;
     let (file, shown) = open_predictions_file(path)?;
-    Ok(records_of_unless(BufReader::new(file), shown, scored, Some(stop)))
+    Ok(records_numbered_unless(BufReader::new(file), shown, scored, Some(stop)))
 }
 
 fn open_predictions_file(path: &Path) -> Result<(std::fs::File, String), Error> {
@@ -465,11 +561,21 @@ fn records_of<'a, R: BufRead + 'a>(
 
 /// [`records_of`], checking `stop` before every line read (including after skipping a blank line).
 fn records_of_unless<'a, R: BufRead + 'a>(
-    mut reader: R,
+    reader: R,
     shown: String,
     scored: bool,
     stop: Option<&'a AtomicBool>,
 ) -> impl Iterator<Item = Result<BenchPrediction, Error>> + 'a {
+    records_numbered_unless(reader, shown, scored, stop).map(|r| r.map(|(_, p)| p))
+}
+
+/// Like [`records_of_unless`], keeping each record's 1-based line number in the input file.
+fn records_numbered_unless<'a, R: BufRead + 'a>(
+    mut reader: R,
+    shown: String,
+    scored: bool,
+    stop: Option<&'a AtomicBool>,
+) -> impl Iterator<Item = Result<(usize, BenchPrediction), Error>> + 'a {
     let mut n = 0usize;
     std::iter::from_fn(move || {
         let bad = |what: String| invalid_arguments(format!("{shown}: {what}"));
@@ -524,7 +630,7 @@ fn records_of_unless<'a, R: BufRead + 'a>(
             if text.is_empty() && !long {
                 continue;
             }
-            return Some(parse_record(text, long, n, scored, &bad));
+            return Some(parse_record(text, long, n, scored, &bad).map(|p| (n, p)));
         }
     })
 }
@@ -642,6 +748,7 @@ fn parse_record(
 /// The next part of `records`: whole records, at most `limits.records` of them, `limits.boxes` boxes and
 /// `limits.bytes` of record JSON; empty at the end. A record that could never fit is an error (an empty part would read as
 /// the end of the file).
+#[cfg(test)]
 fn next_part(
     records: &mut Peekable<impl Iterator<Item = Result<BenchPrediction, Error>>>,
     limits: PartLimits,
@@ -650,21 +757,10 @@ fn next_part(
     while part.len() < limits.records {
         let size = match records.peek() {
             None => break,
-            Some(Ok(r)) => {
-                let size = serde_json::to_vec(r).map_or(0, |b| b.len());
-                if r.boxes.len() > limits.boxes || size > limits.bytes {
-                    return Err(invalid_arguments(format!(
-                        "a record of {} boxes and {size} bytes is over a part's {} boxes and {} bytes",
-                        r.boxes.len(),
-                        limits.boxes,
-                        limits.bytes
-                    )));
-                }
-                if boxes + r.boxes.len() > limits.boxes || bytes + size > limits.bytes {
-                    break;
-                }
-                size
-            }
+            Some(Ok(r)) => match fit_record(r, boxes, bytes, limits)? {
+                Some(size) => size,
+                None => break,
+            },
             Some(Err(_)) => 0,
         };
         let r = records.next().expect("peeked")?;
@@ -673,6 +769,51 @@ fn next_part(
         part.push(r);
     }
     Ok(part)
+}
+
+/// Like [`next_part`], keeping each record's 1-based file line number alongside the part.
+fn next_numbered_part(
+    records: &mut Peekable<impl Iterator<Item = Result<(usize, BenchPrediction), Error>>>,
+    limits: PartLimits,
+) -> Result<(Vec<BenchPrediction>, Vec<usize>), Error> {
+    let (mut part, mut lines, mut boxes, mut bytes) = (Vec::new(), Vec::new(), 0usize, 0usize);
+    while part.len() < limits.records {
+        let size = match records.peek() {
+            None => break,
+            Some(Ok((_, r))) => match fit_record(r, boxes, bytes, limits)? {
+                Some(size) => size,
+                None => break,
+            },
+            Some(Err(_)) => 0,
+        };
+        let (line, r) = records.next().expect("peeked")?;
+        boxes += r.boxes.len();
+        bytes += size;
+        part.push(r);
+        lines.push(line);
+    }
+    Ok((part, lines))
+}
+
+fn fit_record(
+    r: &BenchPrediction,
+    boxes: usize,
+    bytes: usize,
+    limits: PartLimits,
+) -> Result<Option<usize>, Error> {
+    let size = serde_json::to_vec(r).map_or(0, |b| b.len());
+    if r.boxes.len() > limits.boxes || size > limits.bytes {
+        return Err(invalid_arguments(format!(
+            "a record of {} boxes and {size} bytes is over a part's {} boxes and {} bytes",
+            r.boxes.len(),
+            limits.boxes,
+            limits.bytes
+        )));
+    }
+    if boxes + r.boxes.len() > limits.boxes || bytes + size > limits.bytes {
+        return Ok(None);
+    }
+    Ok(Some(size))
 }
 
 fn plan_rows(plan: &BenchPlan) -> Vec<BenchPlanRow> {
@@ -790,5 +931,5 @@ fn score(e: &BenchEntry, r: BenchResult) -> BenchScoreResult {
 }
 
 #[cfg(test)]
-#[path = "ops_tests.rs"]
+#[path = "ops_tests/mod.rs"]
 mod tests;

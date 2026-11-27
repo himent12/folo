@@ -7,6 +7,28 @@ fn encodes_segments() {
 }
 
 #[test]
+fn check_base_url_accepts_mixed_case_schemes_and_rejects_bad_ports() {
+    for good in [
+        "http://127.0.0.1:7878",
+        "HTTP://127.0.0.1:7878/Folo/",
+        "HtTpS://gpu-box.example.com:7878/SubPath",
+        "HTTPS://[::1]:7878",
+    ] {
+        assert!(check_base_url(good).is_ok(), "{good} should be accepted");
+    }
+    for bad in [
+        "ftp://127.0.0.1:7878",
+        "http://127.0.0.1:abc",
+        "http://127.0.0.1:65536",
+        "http://127.0.0.1:0",
+        "http://127.0.0.1:",
+        "http://[::1]:abc",
+    ] {
+        assert!(check_base_url(bad).is_err(), "{bad} should be rejected");
+    }
+}
+
+#[test]
 fn an_unreachable_server_is_transient_and_keeps_the_token_out_of_debug() {
     // Port 9 (discard) is essentially never served on loopback. Windows retries a refused loopback connection
     // for about 2 s, so the connection times out first: refused and timed out are both unreachable.
