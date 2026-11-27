@@ -202,7 +202,7 @@ export default function Menu(props: MenuProps) {
     };
     // Escape closes the desktop popover even when focus sits on the trigger or outside the menu list.
     const onEsc = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
+      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
       const r = root.get();
       const dialogs = document.querySelectorAll('dialog[open]');
       const top = dialogs[dialogs.length - 1];

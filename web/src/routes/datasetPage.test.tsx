@@ -356,6 +356,7 @@ describe('Dataset page history', () => {
       await gate;
       return { total: 0, images: [] };
     });
+    const info = vi.spyOn(toast, 'info');
     const hold = router.holdWhile((to) => to.name === 'runs');
     try {
       open('/datasets/ds_shapes?image=img_missing');
@@ -367,6 +368,7 @@ describe('Dataset page history', () => {
       await new Promise((r) => setTimeout(r, 20));
       flushSync();
       expect(router.location.path).toBe('/runs');
+      expect(info).not.toHaveBeenCalled();
     } finally {
       hold();
     }

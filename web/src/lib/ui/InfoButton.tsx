@@ -144,7 +144,7 @@ export default function InfoButton(props: InfoButtonProps) {
       return !!top && !top.contains(btn);
     };
     const onkey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || occluded()) return;
+      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing || occluded()) return;
       const r = region();
       const inside = btn.contains(document.activeElement) || !!r?.contains(document.activeElement);
       hide();

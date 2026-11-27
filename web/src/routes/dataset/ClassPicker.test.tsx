@@ -80,6 +80,12 @@ describe('ClassPicker', () => {
       await tick();
       expect(target.querySelector('[role="listbox"]')).not.toBeNull();
 
+      // ArrowDown from the trigger while already open moves focus into the listbox.
+      trigger.focus();
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+      flushSync();
+      expect(document.activeElement?.getAttribute('role')).toBe('option');
+
       // Escape while focus is back on trigger closes listbox, refocuses trigger, and stops propagation.
       trigger.focus();
       trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));

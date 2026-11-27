@@ -89,15 +89,67 @@ describe('BenchEntry / BenchLoop stale async stop and delete guards', () => {
     confirmBtn.click();
     flushSync();
 
-    // Server switches while DELETE is in flight.
+    // Server switches while staying on the same route (same ID could exist on the new server): dialog must close & reset.
     hub.epoch++;
-    router.go('/runs');
+    flushSync();
+    expect(document.querySelector('dialog[open]')).toBeNull();
     resolveDel();
     await new Promise((r) => setTimeout(r, 10));
     flushSync();
 
     expect(toast.items).toEqual([]);
-    expect(router.location.path).toBe('/runs');
+    expect(document.querySelector('dialog[open]')).toBeNull();
+  });
+
+  it('refuses deleteBenchEntry when submitted while lazy navigation is already heading elsewhere', async () => {
+    const api = hub.api as MockApi;
+    const benches = await api.benches();
+    let benchId = '';
+    let doneEntryId = '';
+    for (const b of benches) {
+      const entries = await api.benchEntries(b.id);
+      const found = entries.find((e) => e.status === 'done' || e.status === 'stopped' || e.status === 'failed');
+      if (found) {
+        benchId = b.id;
+        doneEntryId = found.id;
+        break;
+      }
+    }
+    const delSpy = vi.spyOn(api, 'deleteBenchEntry').mockResolvedValue(undefined);
+
+    const path = `/benchmarks/${benchId}/entries/${doneEntryId}`;
+    history.replaceState(history.state, '', `#${path}`);
+    router.route = parse(`#${path}`);
+    view = render(() => <BenchEntryPage />, target);
+    flushSync();
+
+    const trigger = await until(() => target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]'), 'entry menu');
+    trigger.click();
+    flushSync();
+    const delItem = await until(
+      () => [...target.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent?.includes('Delete entry')),
+      'Delete entry item',
+    );
+    delItem.click();
+    flushSync();
+    const confirmBtn = await until(
+      () => [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find((b) => b.textContent?.trim() === 'Delete entry'),
+      'confirm delete button',
+    );
+
+    const hold = router.holdWhile((to) => to.name === 'runs');
+    try {
+      router.go('/runs');
+      expect(router.location.path).toBe('/runs');
+      expect(router.route.path).toBe(path);
+      confirmBtn.click();
+      await new Promise((r) => setTimeout(r, 10));
+      flushSync();
+      expect(delSpy).not.toHaveBeenCalled();
+      expect(router.location.path).toBe('/runs');
+    } finally {
+      hold();
+    }
   });
 
   it('ignores a deleteBenchLoop completion after a server switch (hub.epoch change)', async () => {
@@ -146,14 +198,66 @@ describe('BenchEntry / BenchLoop stale async stop and delete guards', () => {
     confirmBtn.click();
     flushSync();
 
-    // Server switches while DELETE is in flight.
+    // Server switches while staying on the same route (same ID could exist on the new server): dialog must close & reset.
     hub.epoch++;
-    router.go('/runs');
+    flushSync();
+    expect(document.querySelector('dialog[open]')).toBeNull();
     resolveDel();
     await new Promise((r) => setTimeout(r, 10));
     flushSync();
 
     expect(toast.items).toEqual([]);
-    expect(router.location.path).toBe('/runs');
+    expect(document.querySelector('dialog[open]')).toBeNull();
+  });
+
+  it('refuses deleteBenchLoop when submitted while lazy navigation is already heading elsewhere', async () => {
+    const api = hub.api as MockApi;
+    const benches = await api.benches();
+    let benchId = '';
+    let doneLoopId = '';
+    for (const b of benches) {
+      const loops = await api.benchLoops(b.id);
+      const found = loops.find((l) => l.status === 'done' || l.status === 'stopped' || l.status === 'failed');
+      if (found) {
+        benchId = b.id;
+        doneLoopId = found.id;
+        break;
+      }
+    }
+    const delSpy = vi.spyOn(api, 'deleteBenchLoop').mockResolvedValue(undefined);
+
+    const path = `/benchmarks/${benchId}/loops/${doneLoopId}`;
+    history.replaceState(history.state, '', `#${path}`);
+    router.route = parse(`#${path}`);
+    view = render(() => <BenchLoopPage />, target);
+    flushSync();
+
+    const trigger = await until(() => target.querySelector<HTMLButtonElement>('button[aria-haspopup="menu"]'), 'loop menu');
+    trigger.click();
+    flushSync();
+    const delItem = await until(
+      () => [...target.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find((b) => b.textContent?.includes('Delete loop')),
+      'Delete loop item',
+    );
+    delItem.click();
+    flushSync();
+    const confirmBtn = await until(
+      () => [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find((b) => b.textContent?.trim() === 'Delete loop'),
+      'confirm delete loop button',
+    );
+
+    const hold = router.holdWhile((to) => to.name === 'runs');
+    try {
+      router.go('/runs');
+      expect(router.location.path).toBe('/runs');
+      expect(router.route.path).toBe(path);
+      confirmBtn.click();
+      await new Promise((r) => setTimeout(r, 10));
+      flushSync();
+      expect(delSpy).not.toHaveBeenCalled();
+      expect(router.location.path).toBe('/runs');
+    } finally {
+      hold();
+    }
   });
 });

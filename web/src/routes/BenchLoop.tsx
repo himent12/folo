@@ -152,13 +152,30 @@ export default function BenchLoop() {
   const stopping = signal(false);
   const stopBusy = signal(false);
   const stopStatus = new DialogStatus();
+  const removing = signal(false);
+  const removeBusy = signal(false);
+  const removeStatus = new DialogStatus();
   let mounted = true;
   let stopSeq = 0;
   let removeSeq = 0;
   onCleanup(() => (mounted = false));
+  // Reset confirmation dialogs and in-flight busy guards when switching server, benchmark, or loop.
+  effect(() => {
+    void id.get();
+    void loopId.get();
+    void hub.epoch;
+    stopSeq++;
+    removeSeq++;
+    stopping.set(false);
+    removing.set(false);
+    stopBusy.set(false);
+    removeBusy.set(false);
+    stopStatus.clear();
+    removeStatus.clear();
+  });
   async function stop() {
     const l = loop.peek();
-    if (!l || stopBusy.peek()) return;
+    if (!l || stopBusy.peek() || router.location.path !== router.route.path) return;
     const bid = id.peek(), targetId = l.id, epoch = hub.epoch, mark = live.mark(), seq = ++stopSeq;
     stopBusy.set(true);
     try {
@@ -177,14 +194,11 @@ export default function BenchLoop() {
       if (seq === stopSeq) stopBusy.set(false);
     }
   }
-  const removing = signal(false);
-  const removeBusy = signal(false);
-  const removeStatus = new DialogStatus();
   async function remove() {
     const l = loop.peek();
-    if (!l || removeBusy.peek()) return;
+    if (!l || removeBusy.peek() || router.location.path !== router.route.path) return;
     const bid = id.peek(), targetId = l.id, epoch = hub.epoch, seq = ++removeSeq;
-    const startPath = router.location.path;
+    const startPath = router.route.path;
     removeBusy.set(true);
     try {
       await hub.api.deleteBenchLoop(bid, targetId);

@@ -645,4 +645,34 @@ describe('LiveRun ordering', () => {
       stop();
     }
   });
+
+  it('keeps the live stream open when only /metrics returns a generic 404 while the run snapshot succeeds', async () => {
+    const closes = vi.fn();
+    const metrics404 = new ApiError(404, 'http_404', 'Not Found');
+    hub.api = {
+      ...hub.api,
+      run: vi.fn(async () => ({ ...snapshot, status: 'running', step: 2 })),
+      runMetrics: vi.fn(() => Promise.reject(metrics404)),
+      runLogs: vi.fn(async () => ({ lines: [] })),
+      runEvents: (_id, h) => {
+        handlers = h;
+        return closes;
+      },
+    } as Api;
+    let live!: LiveRun;
+    const stop = root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    try {
+      flushSync();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(live.error).toBeInstanceOf(ApiError);
+      expect(live.loading).toBe(false);
+      expect(closes).not.toHaveBeenCalled();
+      handlers.connection?.('open');
+      expect(live.connection).toBe('open');
+    } finally {
+      stop();
+    }
+  });
 });

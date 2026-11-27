@@ -577,6 +577,7 @@ export default function Dataset() {
               onnavigate={(im) => setQuery({ image: im })}
               onclose={() => setQuery({ image: null })}
               onmissing={(im) => {
+                if (router.location.name !== 'dataset' || router.location.params.id !== id.peek()) return;
                 // page-level: a linked image that is not in this view; the inspector closes on the next line.
                 toast.info('Image not in this view', `${im} does not match the current filters, or is no longer in the folder.`);
                 setQuery({ image: null });

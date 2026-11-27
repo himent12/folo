@@ -43,9 +43,14 @@ export default function ClassPicker(props: ClassPickerProps) {
     (list.get()?.querySelector<HTMLElement>('[aria-selected="true"]') ?? options()[0])?.focus();
   }
   function ontrigger(e: KeyboardEvent) {
-    if (open.peek() || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
     e.preventDefault();
-    void show();
+    if (!open.peek()) {
+      void show();
+      return;
+    }
+    const all = options();
+    (e.key === 'ArrowDown' ? all[0] : all.at(-1))?.focus();
   }
   function hide(refocus = true) {
     open.set(false);
@@ -106,7 +111,7 @@ export default function ClassPicker(props: ClassPickerProps) {
       if (r && !r.contains(e.target as Node)) hide(false);
     };
     const onEsc = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
+      if (e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
       const r = root.get();
       const dialogs = document.querySelectorAll('dialog[open]');
       const top = dialogs[dialogs.length - 1];
