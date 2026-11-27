@@ -42,10 +42,11 @@ pub const TLS_CA_ENV: &str = "FOLO_TLS_CA";
 
 /// Reads and validates the custom PEM CA bundle from [`TLS_CA_ENV`], if set and non-empty.
 pub fn tls_ca_from_env() -> Result<Option<folo_client::TlsCa>> {
-    load_tls_ca_var(std::env::var_os(TLS_CA_ENV).as_deref())
+    tls_ca_from_os(std::env::var_os(TLS_CA_ENV).as_deref())
 }
 
-fn load_tls_ca_var(raw: Option<&std::ffi::OsStr>) -> Result<Option<folo_client::TlsCa>> {
+/// Reads and validates the custom PEM CA bundle from an environment value (`None` or empty means unset).
+pub fn tls_ca_from_os(raw: Option<&std::ffi::OsStr>) -> Result<Option<folo_client::TlsCa>> {
     let Some(raw) = raw else { return Ok(None) };
     if raw.is_empty() {
         return Ok(None);
@@ -570,17 +571,17 @@ mod tests {
     #[test]
     fn tls_ca_var_handles_unset_empty_missing_and_malformed_paths() {
         use std::ffi::OsStr;
-        assert!(load_tls_ca_var(None).unwrap().is_none());
-        assert!(load_tls_ca_var(Some(OsStr::new(""))).unwrap().is_none());
+        assert!(tls_ca_from_os(None).unwrap().is_none());
+        assert!(tls_ca_from_os(Some(OsStr::new(""))).unwrap().is_none());
         let dir = folo_test_support::TestDir::new("cloud-tls-ca-var");
         let missing = dir.join("missing.pem");
-        let err = load_tls_ca_var(Some(missing.as_os_str())).unwrap_err();
+        let err = tls_ca_from_os(Some(missing.as_os_str())).unwrap_err();
         assert_eq!((err.kind, err.code()), (ErrorKind::Invalid, "invalid_body"));
         assert!(err.message.contains(TLS_CA_ENV), "{}", err.message);
 
         let bad = dir.join("bad.pem");
         std::fs::write(&bad, "not pem").unwrap();
-        let err = load_tls_ca_var(Some(bad.as_os_str())).unwrap_err();
+        let err = tls_ca_from_os(Some(bad.as_os_str())).unwrap_err();
         assert_eq!((err.kind, err.code()), (ErrorKind::Invalid, "invalid_body"));
         assert!(err.message.contains(TLS_CA_ENV), "{}", err.message);
     }

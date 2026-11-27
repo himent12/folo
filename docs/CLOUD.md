@@ -250,7 +250,10 @@ serve HTTPS natively).
   or `#fragment`, and no spaces or control characters. Use `https://` across networks you do not control (serve TLS
   natively with `--tls-cert` / `--tls-key`, or put the server behind a TLS proxy or a tunnel); for self-signed or
   private-CA `https://` workers, set `FOLO_TLS_CA=<ca.pem>` in the control plane's environment (honored by `folo cloud`
-  and by `folo serve` when running jobs on `remote` workers; RunPod workers continue to use the bundled public roots).
+  and by `folo serve` when running jobs on `remote` workers). When `FOLO_TLS_CA` is set, it replaces the bundled web
+  PKI roots for every `https://` `remote` connection in that process, so if you connect to both private-CA and publicly
+  signed `remote` workers from the same control plane, include all required CA roots in that PEM bundle (provisioned
+  RunPod workers continue to use the bundled public roots).
   `http://` is accepted, with a warning in the connection's `note` unless the host is `localhost`, loopback
   (`127.0.0.0/8`, `::1`), RFC 1918 private IPv4, IPv4 link-local, or IPv6 unique-local (`fc00::/7`) / link-local
   (`fe80::/10`). Scheme and certificate mismatches fail with actionable hints: `https://` against a plain-HTTP

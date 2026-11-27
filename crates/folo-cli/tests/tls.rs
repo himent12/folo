@@ -424,6 +424,38 @@ fn serve_tls_preserves_dns_host_for_dns_only_cert_and_mcp_auto_proxy() {
         .unwrap();
     assert_eq!(bad_mcp.status.code(), Some(2), "stderr={}", String::from_utf8_lossy(&bad_mcp.stderr));
     assert!(bad_mcp.stdout.is_empty());
+
+    // Connecting `folo cloud connect remote` to the bound IP address (outside the `DNS:localhost` SAN) while
+    // trusting the cert via `FOLO_TLS_CA` triggers a real rustls `certificate not valid for name` error and
+    // reports the hostname/IP mismatch hint.
+    let bind_url = format!("https://{}", listening["bind"].as_str().unwrap());
+    let control = dir.join("control-dns-mismatch");
+    let mismatch = folo_cmd()
+        .args([
+            "cloud",
+            "connect",
+            "remote",
+            "--data-dir",
+            control.to_str().unwrap(),
+            "--set",
+            &format!("url={bind_url}"),
+            "--json",
+        ])
+        .env("FOLO_TLS_CA", &cert_path)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(mismatch.status.code(), Some(1), "stderr={}", String::from_utf8_lossy(&mismatch.stderr));
+    let mismatch_json: Value =
+        serde_json::from_str(String::from_utf8(mismatch.stdout).unwrap().lines().last().unwrap()).unwrap();
+    assert_eq!(mismatch_json["error"]["code"], "cloud_unavailable", "{mismatch_json}");
+    assert!(
+        mismatch_json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not match the hostname or IP in the URL"),
+        "{mismatch_json}"
+    );
 }
 
 #[test]

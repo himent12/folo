@@ -32,6 +32,34 @@ impl Remote {
     pub fn new() -> Remote {
         Remote
     }
+
+    fn check_with_ca(&self, values: &Values, tls_ca: Option<&folo_client::TlsCa>) -> Result<Account> {
+        let server = Server::of(values)?;
+        let (client, custom_ca) = server.client_with_ca(tls_ca);
+        let health: Health = client.get("/health").map_err(|e| {
+            if e.is_unreachable() { server.unreachable(e, custom_ca) } else { server.not_folo(e) }
+        })?;
+        if health.status != "ok" {
+            return Err(server.not_folo(format!("its health is `{}`", health.status)));
+        }
+        let system = server.system(&client, custom_ca)?;
+        let missing: Vec<&str> =
+            REQUIRED_FEATURES.into_iter().filter(|f| !system.features.iter().any(|g| g == f)).collect();
+        if !missing.is_empty() {
+            return Err(Error::new(
+                ErrorKind::Refused,
+                format!(
+                    "the FOLO server at {} runs version {}, which cannot train cloud runs (it lacks {}); update it \
+                     to FOLO {} or later",
+                    server.host,
+                    server.scrub(&health.version),
+                    missing.join(", "),
+                    env!("CARGO_PKG_VERSION")
+                ),
+            ));
+        }
+        Ok(Account { note: server.note(), label: Some(server.host), balance_usd: None })
+    }
 }
 
 impl Provider for Remote {
@@ -72,30 +100,8 @@ impl Provider for Remote {
 
     fn check(&self, values: &Values) -> Result<Account> {
         let server = Server::of(values)?;
-        let (client, custom_ca) = server.client()?;
-        let health: Health = client.get("/health").map_err(|e| {
-            if e.is_unreachable() { server.unreachable(e, custom_ca) } else { server.not_folo(e) }
-        })?;
-        if health.status != "ok" {
-            return Err(server.not_folo(format!("its health is `{}`", health.status)));
-        }
-        let system = server.system(&client, custom_ca)?;
-        let missing: Vec<&str> =
-            REQUIRED_FEATURES.into_iter().filter(|f| !system.features.iter().any(|g| g == f)).collect();
-        if !missing.is_empty() {
-            return Err(Error::new(
-                ErrorKind::Refused,
-                format!(
-                    "the FOLO server at {} runs version {}, which cannot train cloud runs (it lacks {}); update it \
-                     to FOLO {} or later",
-                    server.host,
-                    server.scrub(&health.version),
-                    missing.join(", "),
-                    env!("CARGO_PKG_VERSION")
-                ),
-            ));
-        }
-        Ok(Account { note: server.note(), label: Some(server.host), balance_usd: None })
+        let tls_ca = if server.https { crate::tls_ca_from_env()? } else { None };
+        self.check_with_ca(values, tls_ca.as_ref())
     }
 
     fn offers(&self, values: &Values) -> Result<Vec<CloudOffer>> {
@@ -169,11 +175,17 @@ impl Server {
 
     fn client(&self) -> Result<(folo_client::Client, bool)> {
         let tls_ca = if self.https { crate::tls_ca_from_env()? } else { None };
-        let client = match tls_ca.as_ref() {
-            Some(ca) => folo_client::Client::with_tls_ca(&self.url, CONNECT_TIMEOUT, REQUEST_TIMEOUT, ca),
-            None => folo_client::Client::with_timeouts(&self.url, CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+        Ok(self.client_with_ca(tls_ca.as_ref()))
+    }
+
+    fn client_with_ca(&self, tls_ca: Option<&folo_client::TlsCa>) -> (folo_client::Client, bool) {
+        let client = match tls_ca {
+            Some(ca) if self.https => {
+                folo_client::Client::with_tls_ca(&self.url, CONNECT_TIMEOUT, REQUEST_TIMEOUT, ca)
+            }
+            _ => folo_client::Client::with_timeouts(&self.url, CONNECT_TIMEOUT, REQUEST_TIMEOUT),
         };
-        Ok((client.token(self.token.clone()), tls_ca.is_some()))
+        (client.token(self.token.clone()), self.https && tls_ca.is_some())
     }
 
     /// `GET /api/system` with the token.
@@ -224,7 +236,7 @@ impl Server {
                 "its TLS certificate is not trusted by the default roots: if it uses a self-signed or private CA, set \
                  FOLO_TLS_CA=<ca.pem>"
             }
-        } else if self.https && why.contains("NotValidForName") {
+        } else if self.https && (why.contains("NotValidForName") || why.contains("not valid for name")) {
             "its TLS certificate does not match the hostname or IP in the URL"
         } else {
             "is `folo serve --host 0.0.0.0` running there?"
@@ -458,8 +470,12 @@ mod tests {
         let custom_ca_hint =
             https_server.unreachable_cause("rustls: invalid peer certificate: UnknownIssuer", true);
         assert!(custom_ca_hint.contains("not trusted by FOLO_TLS_CA"), "{custom_ca_hint}");
-        let name_hint =
-            https_server.unreachable_cause("rustls: invalid peer certificate: NotValidForName", false);
+        let bad_sig_hint = https_server.unreachable_cause("io: invalid peer certificate: BadSignature", true);
+        assert!(bad_sig_hint.contains("not trusted by FOLO_TLS_CA"), "{bad_sig_hint}");
+        let name_hint = https_server.unreachable_cause(
+            "rustls: invalid peer certificate: certificate not valid for name \"127.0.0.1\"; certificate is only valid for DnsName(\"localhost\")",
+            true,
+        );
         assert!(name_hint.contains("does not match the hostname or IP"), "{name_hint}");
     }
 
@@ -468,8 +484,9 @@ mod tests {
         check_over_scheme("https", answer)
     }
 
-    /// `Remote.check` of `{scheme}://` a listener that answers the first bytes it reads with `answer` and closes.
-    /// The listener waits at most 10 s for the connection, so a check that never reaches it cannot hang the test.
+    /// `Remote.check_with_ca(..., None)` of `{scheme}://` a listener that answers the first bytes it reads with
+    /// `answer` and closes, isolated from any ambient `FOLO_TLS_CA` in the caller's environment. The listener waits
+    /// at most 10 s for the connection, so a check that never reaches it cannot hang the test.
     fn check_over_scheme(scheme: &str, answer: &'static [u8]) -> Error {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -490,7 +507,7 @@ mod tests {
                 }
             }
         });
-        let e = Remote.check(&values(&format!("{scheme}://{addr}"), TOKEN)).unwrap_err();
+        let e = Remote.check_with_ca(&values(&format!("{scheme}://{addr}"), TOKEN), None).unwrap_err();
         server.join().unwrap();
         e
     }
