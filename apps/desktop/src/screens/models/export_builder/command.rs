@@ -209,9 +209,10 @@ pub fn predict_uses_iou(m: &Model, state: &ModelCliState) -> bool {
 /// Derives the default `folo quantize` output path (`<stem>-int8.folo`) when targeting
 /// `--precision int8` so users never accidentally pass an uncalibrated checkpoint.
 fn derive_int8_model_path(path: &str) -> String {
-    if path.len() >= 10 && path[path.len() - 10..].eq_ignore_ascii_case("-int8.folo") {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 10 && bytes[bytes.len() - 10..].eq_ignore_ascii_case(b"-int8.folo") {
         path.to_string()
-    } else if path.len() >= 5 && path[path.len() - 5..].eq_ignore_ascii_case(".folo") {
+    } else if bytes.len() >= 5 && bytes[bytes.len() - 5..].eq_ignore_ascii_case(b".folo") {
         format!("{}-int8.folo", &path[..path.len() - 5])
     } else {
         format!("{path}-int8.folo")
@@ -647,5 +648,12 @@ mod tests {
         no_path.source = Some(ModelSource::Published);
         let b_int8_ph = build_model_cli(&no_path, None, &st);
         assert!(b_int8_ph.command.contains("--model <model-int8.folo>"), "{}", b_int8_ph.command);
+
+        // Multi-byte UTF-8 paths whose byte length straddles len-5 / len-10 must never panic.
+        assert_eq!(derive_int8_model_path("cafébest.folo"), "cafébest-int8.folo");
+        assert_eq!(derive_int8_model_path("模型.folo"), "模型-int8.folo");
+        assert_eq!(derive_int8_model_path("日本語"), "日本語-int8.folo");
+        assert_eq!(derive_int8_model_path("D:/模型-INT8.FOLO"), "D:/模型-INT8.FOLO");
+        assert_eq!(derive_int8_model_path("best.FOLO"), "best-int8.folo");
     }
 }
