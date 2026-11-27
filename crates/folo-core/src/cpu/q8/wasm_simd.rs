@@ -6,7 +6,8 @@
 use std::arch::wasm32::*;
 
 use super::Grid;
-use super::kernel::{MR, Tile};
+use super::kernel::{Epi, MR, NR, Out, Tile, TileF32};
+use super::silu::{C0, C1, C2, C3, C4, C5, MAGIC_EXP, NEG_LOG2_E, RECIP_MAGIC};
 
 /// Exact Wasm SIMD128 int8 micro-kernel: splits each 4-byte word into even (`[b0, b2]`) and odd (`[b1, b3]`)
 /// 16-bit lanes and accumulates via `i32x4_dot_i16x8`. Zero `i16` saturation (`max |u8 * i8 + u8 * i8| =
@@ -46,19 +47,23 @@ pub(super) unsafe fn kernel_wasm_simd128(
                 let (w1e, w1o) = split_w(*ap.add(1));
                 let (w2e, w2o) = split_w(*ap.add(2));
                 let (w3e, w3o) = split_w(*ap.add(3));
+                let (vw0e, vw0o) = (i32x4_splat(w0e), i32x4_splat(w0o));
+                let (vw1e, vw1o) = (i32x4_splat(w1e), i32x4_splat(w1o));
+                let (vw2e, vw2o) = (i32x4_splat(w2e), i32x4_splat(w2o));
+                let (vw3e, vw3o) = (i32x4_splat(w3e), i32x4_splat(w3o));
                 let bp = (*rows.add(p)).add(col + half) as *const v128;
                 macro_rules! col_step {
                     ($b:expr, $c0:ident, $c1:ident, $c2:ident, $c3:ident) => {
                         let b_ev = v128_and($b, m_ff);
                         let b_od = u16x8_shr($b, 8);
-                        $c0 = i32x4_add($c0, i32x4_dot_i16x8(b_ev, i32x4_splat(w0e)));
-                        $c0 = i32x4_add($c0, i32x4_dot_i16x8(b_od, i32x4_splat(w0o)));
-                        $c1 = i32x4_add($c1, i32x4_dot_i16x8(b_ev, i32x4_splat(w1e)));
-                        $c1 = i32x4_add($c1, i32x4_dot_i16x8(b_od, i32x4_splat(w1o)));
-                        $c2 = i32x4_add($c2, i32x4_dot_i16x8(b_ev, i32x4_splat(w2e)));
-                        $c2 = i32x4_add($c2, i32x4_dot_i16x8(b_od, i32x4_splat(w2o)));
-                        $c3 = i32x4_add($c3, i32x4_dot_i16x8(b_ev, i32x4_splat(w3e)));
-                        $c3 = i32x4_add($c3, i32x4_dot_i16x8(b_od, i32x4_splat(w3o)));
+                        $c0 = i32x4_add($c0, i32x4_dot_i16x8(b_ev, vw0e));
+                        $c0 = i32x4_add($c0, i32x4_dot_i16x8(b_od, vw0o));
+                        $c1 = i32x4_add($c1, i32x4_dot_i16x8(b_ev, vw1e));
+                        $c1 = i32x4_add($c1, i32x4_dot_i16x8(b_od, vw1o));
+                        $c2 = i32x4_add($c2, i32x4_dot_i16x8(b_ev, vw2e));
+                        $c2 = i32x4_add($c2, i32x4_dot_i16x8(b_od, vw2o));
+                        $c3 = i32x4_add($c3, i32x4_dot_i16x8(b_ev, vw3e));
+                        $c3 = i32x4_add($c3, i32x4_dot_i16x8(b_od, vw3o));
                     };
                 }
                 let b0 = v128_load(bp);
@@ -437,6 +442,230 @@ pub(super) fn quantize_row_wasm(row: &[f32], dst: &mut [i8]) -> f32 {
     s
 }
 
+/// Division-free 4-lane Wasm SIMD128 [`super::silu::silu_q8`], bit-exact with scalar `silu_q8` on `wasm32`.
+///
+/// Note `f32x4_pmax(lhs, rhs)` evaluates `lhs < rhs ? rhs : lhs`, so `f32x4_pmax(b, a)` matches `maxps(a, b)`
+/// on every IEEE-754 value including `NaN` and `±0.0`.
+#[inline(always)]
+pub(super) fn silu_q8_wasm4(x: v128) -> v128 {
+    let x = f32x4_pmax(x, f32x4_splat(-85.0));
+    let u = f32x4_pmax(f32x4_splat(-124.0), f32x4_mul(x, f32x4_splat(NEG_LOG2_E)));
+    let magic = f32x4_splat(MAGIC_EXP);
+    let z = f32x4_add(u, magic);
+    let n = f32x4_sub(z, magic);
+    let f = f32x4_sub(u, n);
+    let f2 = f32x4_mul(f, f);
+    let p01 = f32x4_add(f32x4_mul(f32x4_splat(C1), f), f32x4_splat(C0));
+    let p23 = f32x4_add(f32x4_mul(f32x4_splat(C3), f), f32x4_splat(C2));
+    let p45 = f32x4_add(f32x4_mul(f32x4_splat(C5), f), f32x4_splat(C4));
+    let p2345 = f32x4_add(f32x4_mul(p45, f2), p23);
+    let p = f32x4_add(f32x4_mul(p2345, f2), p01);
+    let e = f32x4_mul(p, i32x4_shl(z, 23));
+    let one = f32x4_splat(1.0);
+    let d = f32x4_add(one, e);
+    let r0 = i32x4_sub(i32x4_splat(RECIP_MAGIC as i32), d);
+    let e0 = f32x4_add(f32x4_mul(f32x4_neg(d), r0), one);
+    let u2 = f32x4_add(f32x4_mul(r0, e0), r0);
+    let e2 = f32x4_mul(e0, e0);
+    let t2 = f32x4_add(f32x4_mul(e2, e2), e2);
+    let r = f32x4_add(f32x4_mul(u2, t2), u2);
+    f32x4_mul(x, r)
+}
+
+/// Wasm SIMD128 [`super::kernel::accumulate_part_f32`], 4 columns per `f32x4`, bit-exact with scalar on `wasm32`.
+pub(super) fn accumulate_part_f32_wasm(acc: &Tile, corr: &[i32; MR], scale: &[f32; MR], dst: &mut TileF32) {
+    // SAFETY: fixed-size `[MR][NR]` arrays with `NR = 24 = 6 * 4`.
+    unsafe {
+        for r in 0..MR {
+            let vc = i32x4_splat(corr[r]);
+            let vs = f32x4_splat(scale[r]);
+            let ap = acc[r].as_ptr();
+            let dp = dst[r].as_mut_ptr();
+            for k in 0..NR / 4 {
+                let a = v128_load(ap.add(4 * k) as *const v128);
+                let t = f32x4_convert_i32x4(i32x4_sub(a, vc));
+                let cur = v128_load(dp.add(4 * k) as *const v128);
+                let next = f32x4_add(f32x4_mul(t, vs), cur);
+                v128_store(dp.add(4 * k) as *mut v128, next);
+            }
+        }
+    }
+}
+
+/// Shared 4-column (`MR = 4` channels) Wasm SIMD128 epilogue tail: optional SiLU, optional residual FMA, and
+/// either C4 byte-packed `u8` requantisation or `f32` tile store.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn finish_epi_chunk_wasm(
+    epi: &Epi<'_>,
+    mut y0: v128,
+    mut y1: v128,
+    mut y2: v128,
+    mut y3: v128,
+    res_ptr: *const u32,
+    q_ptr: *mut u32,
+    f: &mut [[f32; NR]; MR],
+    col: usize,
+) {
+    if epi.silu {
+        y0 = silu_q8_wasm4(y0);
+        y1 = silu_q8_wasm4(y1);
+        y2 = silu_q8_wasm4(y2);
+        y3 = silu_q8_wasm4(y3);
+    }
+    // SAFETY: caller guarantees `col + 4 <= NR` for `res_ptr`, `q_ptr`, and `f[0..4]`.
+    unsafe {
+        if let Some((rs, rz)) = epi.res {
+            let mask = i32x4_splat(0xFF);
+            let rw = v128_load(res_ptr.add(col) as *const v128);
+            let r0 = f32x4_convert_i32x4(i32x4_sub(v128_and(rw, mask), i32x4_splat(rz[0])));
+            let r1 = f32x4_convert_i32x4(i32x4_sub(v128_and(u32x4_shr(rw, 8), mask), i32x4_splat(rz[1])));
+            let r2 = f32x4_convert_i32x4(i32x4_sub(v128_and(u32x4_shr(rw, 16), mask), i32x4_splat(rz[2])));
+            let r3 = f32x4_convert_i32x4(i32x4_sub(u32x4_shr(rw, 24), i32x4_splat(rz[3])));
+            y0 = f32x4_add(f32x4_mul(f32x4_splat(rs[0]), r0), y0);
+            y1 = f32x4_add(f32x4_mul(f32x4_splat(rs[1]), r1), y1);
+            y2 = f32x4_add(f32x4_mul(f32x4_splat(rs[2]), r2), y2);
+            y3 = f32x4_add(f32x4_mul(f32x4_splat(rs[3]), r3), y3);
+        }
+        match epi.out {
+            Out::F32 => {
+                v128_store(f[0].as_mut_ptr().add(col) as *mut v128, y0);
+                v128_store(f[1].as_mut_ptr().add(col) as *mut v128, y1);
+                v128_store(f[2].as_mut_ptr().add(col) as *mut v128, y2);
+                v128_store(f[3].as_mut_ptr().add(col) as *mut v128, y3);
+            }
+            Out::U8 { inv, zero } => {
+                let lo = f32x4_splat(-512.0);
+                let hi = f32x4_splat(512.0);
+                let q0 = i32x4_add(
+                    i32x4_trunc_sat_f32x4(f32x4_nearest(f32x4_pmin(
+                        hi,
+                        f32x4_pmax(lo, f32x4_mul(y0, f32x4_splat(inv[0]))),
+                    ))),
+                    i32x4_splat(zero[0]),
+                );
+                let q1 = i32x4_add(
+                    i32x4_trunc_sat_f32x4(f32x4_nearest(f32x4_pmin(
+                        hi,
+                        f32x4_pmax(lo, f32x4_mul(y1, f32x4_splat(inv[1]))),
+                    ))),
+                    i32x4_splat(zero[1]),
+                );
+                let q2 = i32x4_add(
+                    i32x4_trunc_sat_f32x4(f32x4_nearest(f32x4_pmin(
+                        hi,
+                        f32x4_pmax(lo, f32x4_mul(y2, f32x4_splat(inv[2]))),
+                    ))),
+                    i32x4_splat(zero[2]),
+                );
+                let q3 = i32x4_add(
+                    i32x4_trunc_sat_f32x4(f32x4_nearest(f32x4_pmin(
+                        hi,
+                        f32x4_pmax(lo, f32x4_mul(y3, f32x4_splat(inv[3]))),
+                    ))),
+                    i32x4_splat(zero[3]),
+                );
+                let p01 = i16x8_narrow_i32x4(q0, q1);
+                let p23 = i16x8_narrow_i32x4(q2, q3);
+                let bytes = u8x16_narrow_i16x8(p01, p23);
+                let c4 = u8x16_shuffle::<0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15>(bytes, bytes);
+                v128_store(q_ptr.add(col) as *mut v128, c4);
+            }
+        }
+    }
+}
+
+/// Wasm SIMD128 [`Epi::apply_full`] over all `NR = 24` columns (`6 × 4` lanes), bit-exact with scalar `Epi::apply`.
+pub(super) fn apply_epi_wasm(
+    epi: &Epi<'_>,
+    acc: &Tile,
+    res: &[u32; NR],
+    q: &mut [u32; NR],
+    f: &mut [[f32; NR]; MR],
+) {
+    let (vc0, vc1, vc2, vc3) = (
+        i32x4_splat(epi.corr[0]),
+        i32x4_splat(epi.corr[1]),
+        i32x4_splat(epi.corr[2]),
+        i32x4_splat(epi.corr[3]),
+    );
+    let (vs0, vs1, vs2, vs3) = (
+        f32x4_splat(epi.scale[0]),
+        f32x4_splat(epi.scale[1]),
+        f32x4_splat(epi.scale[2]),
+        f32x4_splat(epi.scale[3]),
+    );
+    let (vb0, vb1, vb2, vb3) = (
+        f32x4_splat(epi.bias[0]),
+        f32x4_splat(epi.bias[1]),
+        f32x4_splat(epi.bias[2]),
+        f32x4_splat(epi.bias[3]),
+    );
+    // SAFETY: fixed-size `[MR][NR]` and `[NR]` arrays with `NR = 24 = 6 * 4`.
+    unsafe {
+        for k in 0..NR / 4 {
+            let col = 4 * k;
+            let y0 = f32x4_add(
+                f32x4_mul(
+                    f32x4_convert_i32x4(i32x4_sub(v128_load(acc[0].as_ptr().add(col) as *const v128), vc0)),
+                    vs0,
+                ),
+                vb0,
+            );
+            let y1 = f32x4_add(
+                f32x4_mul(
+                    f32x4_convert_i32x4(i32x4_sub(v128_load(acc[1].as_ptr().add(col) as *const v128), vc1)),
+                    vs1,
+                ),
+                vb1,
+            );
+            let y2 = f32x4_add(
+                f32x4_mul(
+                    f32x4_convert_i32x4(i32x4_sub(v128_load(acc[2].as_ptr().add(col) as *const v128), vc2)),
+                    vs2,
+                ),
+                vb2,
+            );
+            let y3 = f32x4_add(
+                f32x4_mul(
+                    f32x4_convert_i32x4(i32x4_sub(v128_load(acc[3].as_ptr().add(col) as *const v128), vc3)),
+                    vs3,
+                ),
+                vb3,
+            );
+            finish_epi_chunk_wasm(epi, y0, y1, y2, y3, res.as_ptr(), q.as_mut_ptr(), f, col);
+        }
+    }
+}
+
+/// Wasm SIMD128 [`Epi::apply_f32_full`] over all `NR = 24` columns (`6 × 4` lanes), bit-exact with scalar
+/// `Epi::apply_f32`.
+pub(super) fn apply_epi_f32_wasm(
+    epi: &Epi<'_>,
+    tile: &TileF32,
+    res: &[u32; NR],
+    q: &mut [u32; NR],
+    f: &mut [[f32; NR]; MR],
+) {
+    let (vb0, vb1, vb2, vb3) = (
+        f32x4_splat(epi.bias[0]),
+        f32x4_splat(epi.bias[1]),
+        f32x4_splat(epi.bias[2]),
+        f32x4_splat(epi.bias[3]),
+    );
+    // SAFETY: fixed-size `[MR][NR]` and `[NR]` arrays with `NR = 24 = 6 * 4`.
+    unsafe {
+        for k in 0..NR / 4 {
+            let col = 4 * k;
+            let y0 = f32x4_add(v128_load(tile[0].as_ptr().add(col) as *const v128), vb0);
+            let y1 = f32x4_add(v128_load(tile[1].as_ptr().add(col) as *const v128), vb1);
+            let y2 = f32x4_add(v128_load(tile[2].as_ptr().add(col) as *const v128), vb2);
+            let y3 = f32x4_add(v128_load(tile[3].as_ptr().add(col) as *const v128), vb3);
+            finish_epi_chunk_wasm(epi, y0, y1, y2, y3, res.as_ptr(), q.as_mut_ptr(), f, col);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,5 +747,120 @@ mod tests {
         let mut out_f = vec![0f32; o * oh * ow];
         stem_u8(&rgb0, 1, h, w, &qs, crate::cpu::q8::QOut::F32 { data: &mut out_f });
         assert!(out_f.iter().all(|v| v.is_finite()));
+
+        // Verify `silu_q8_wasm4`, `accumulate_part_f32_wasm`, `apply_epi_wasm`, and `apply_epi_f32_wasm`
+        // match scalar bit-for-bit across normal, extreme, signed-zero, and NaN inputs.
+        let special = [
+            -200.0f32,
+            -85.0,
+            -1.5,
+            -0.0,
+            0.0,
+            0.5,
+            3.25,
+            85.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            -0.125,
+        ];
+        for chunk in special.as_chunks::<4>().0 {
+            // SAFETY: `chunk` has 4 `f32` lanes.
+            let got = unsafe {
+                let mut out = [0f32; 4];
+                v128_store(
+                    out.as_mut_ptr() as *mut v128,
+                    silu_q8_wasm4(v128_load(chunk.as_ptr() as *const v128)),
+                );
+                out
+            };
+            for (g, &x) in got.iter().zip(chunk) {
+                let w = crate::cpu::q8::silu_q8(x);
+                if x.is_nan() {
+                    assert!(g.is_nan(), "silu_q8_wasm4(NaN) must stay NaN");
+                } else {
+                    assert_eq!(g.to_bits(), w.to_bits(), "silu_q8_wasm4({x}) mismatch: {g} vs {w}");
+                }
+            }
+        }
+
+        // Verify non-FMA `silu_q8` / `silu_q8_wasm4` accuracy over `[-86, 86]` on `wasm32`.
+        let mut max_rel = 0.0f64;
+        for _ in 0..4_000 {
+            let x = rng.uniform(-86.0, 86.0);
+            let want = x as f64 / (1.0 + (-(x as f64)).exp());
+            let got = crate::cpu::q8::silu_q8(x) as f64;
+            max_rel = max_rel.max((got - want).abs() / want.abs().max(1.0));
+        }
+        assert!(max_rel <= 3e-7, "wasm32 silu_q8 max_rel {max_rel:e} exceeded 3e-7");
+
+        let mut acc: Tile = [[0; NR]; MR];
+        let mut init_tile: TileF32 = [[0.0; NR]; MR];
+        for r in 0..MR {
+            for j in 0..NR {
+                acc[r][j] = (rng.next_u64() as i32) >> 12;
+                init_tile[r][j] = rng.uniform(-3.0, 3.0);
+            }
+        }
+        let corr = [17i32, -31, 0, 128];
+        let scale = [0.004f32, 0.012, 0.007, 0.019];
+        let bias = [-0.25f32, 0.0, 0.75, -1.1];
+        let rs = [0.02f32, 0.03, 0.015, 0.025];
+        let rz = [10i32, 128, 0, 200];
+        let inv = [12.5f32, 8.0, 15.0, 6.25];
+        let zero = [32i32, 120, 0, 210];
+        let mut res = [0u32; NR];
+        for w in &mut res {
+            *w = rng.next_u64() as u32;
+        }
+        let mut dst_w = init_tile;
+        let mut dst_s = init_tile;
+        accumulate_part_f32_wasm(&acc, &corr, &scale, &mut dst_w);
+        for r in 0..MR {
+            for j in 0..NR {
+                dst_s[r][j] += (acc[r][j].wrapping_sub(corr[r]) as f32) * scale[r];
+                assert_eq!(dst_w[r][j].to_bits(), dst_s[r][j].to_bits());
+            }
+        }
+        for silu in [false, true] {
+            for has_res in [false, true] {
+                for is_u8 in [false, true] {
+                    let epi = Epi {
+                        corr: &corr,
+                        scale: &scale,
+                        bias: &bias,
+                        silu,
+                        res: has_res.then_some((&rs, &rz)),
+                        out: if is_u8 { Out::U8 { inv: &inv, zero: &zero } } else { Out::F32 },
+                    };
+                    let (mut qw, mut qs) = ([0u32; NR], [0u32; NR]);
+                    let (mut fw, mut fs) = ([[0f32; NR]; MR], [[0f32; NR]; MR]);
+                    apply_epi_wasm(&epi, &acc, &res, &mut qw, &mut fw);
+                    epi.apply(&acc, NR, &res, &mut qs, &mut fs);
+                    if is_u8 {
+                        assert_eq!(qw, qs, "apply_epi_wasm u8 mismatch silu={silu} res={has_res}");
+                    } else {
+                        for r in 0..MR {
+                            for j in 0..NR {
+                                assert_eq!(fw[r][j].to_bits(), fs[r][j].to_bits());
+                            }
+                        }
+                    }
+                    let (mut qfw, mut qfs) = ([0u32; NR], [0u32; NR]);
+                    let (mut ffw, mut ffs) = ([[0f32; NR]; MR], [[0f32; NR]; MR]);
+                    apply_epi_f32_wasm(&epi, &dst_w, &res, &mut qfw, &mut ffw);
+                    epi.apply_f32(&dst_s, NR, &res, &mut qfs, &mut ffs);
+                    if is_u8 {
+                        assert_eq!(qfw, qfs, "apply_epi_f32_wasm u8 mismatch silu={silu} res={has_res}");
+                    } else {
+                        for r in 0..MR {
+                            for j in 0..NR {
+                                assert_eq!(ffw[r][j].to_bits(), ffs[r][j].to_bits());
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }

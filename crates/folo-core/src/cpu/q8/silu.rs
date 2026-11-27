@@ -42,9 +42,24 @@ pub(super) const MAGIC_EXP: f32 = 12_583_039.0;
 /// Bit-hack reciprocal seed constant (`max |1 - d·r0| ≈ 0.05051`, exact `r(1.0) == 1.0` & `r(2.0) == 0.5`).
 pub(super) const RECIP_MAGIC: u32 = 0x7EF3_11C3;
 
-/// The epilogue's SiLU, `x / (1 + e^{−x})`, division-free and bit-exact between scalar and AVX2 on all non-NaN
-/// inputs (`|err| / max(1, |ref|) < 2.5e-7` on `[-86, 86]`, finite at extremes, `silu_q8(0.0) == 0.0`,
-/// `silu_q8(-0.0) == -0.0`, `silu_q8(+∞) == +∞`, NaN stays NaN).
+/// `a * b + c` using hardware FMA on native targets (`x86_64`, `aarch64`, ...) and separate mul + add on
+/// `wasm32` (baseline Wasm SIMD128 has no FMA instruction, so `f32::mul_add` lowers to a slow `libm::fmaf`
+/// call and would diverge from `f32x4_add(f32x4_mul(a, b), c)`).
+#[inline(always)]
+pub(super) fn fmadd(a: f32, b: f32, c: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        a * b + c
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        a.mul_add(b, c)
+    }
+}
+
+/// The epilogue's SiLU, `x / (1 + e^{−x})`, division-free and bit-exact between scalar, AVX2/AVX-512 (FMA),
+/// and Wasm SIMD128 (non-FMA) on all non-NaN inputs (`|err| / max(1, |ref|) < 3e-7` on `[-86, 86]`, finite at
+/// extremes, `silu_q8(0.0) == 0.0`, `silu_q8(-0.0) == -0.0`, `silu_q8(+∞) == +∞`, NaN stays NaN).
 #[inline]
 pub fn silu_q8(x: f32) -> f32 {
     // Clamping `x >= -85.0` bounds `x * (-log2(e)) <= 122.63 < 124.0` automatically, eliminating an upper clamp
@@ -55,19 +70,19 @@ pub fn silu_q8(x: f32) -> f32 {
     let n = z - MAGIC_EXP;
     let f = u - n;
     let f2 = f * f;
-    let p01 = C1.mul_add(f, C0);
-    let p23 = C3.mul_add(f, C2);
-    let p45 = C5.mul_add(f, C4);
-    let p2345 = p45.mul_add(f2, p23);
-    let p = p2345.mul_add(f2, p01);
+    let p01 = fmadd(C1, f, C0);
+    let p23 = fmadd(C3, f, C2);
+    let p45 = fmadd(C5, f, C4);
+    let p2345 = fmadd(p45, f2, p23);
+    let p = fmadd(p2345, f2, p01);
     let e = p * f32::from_bits(z.to_bits() << 23);
     let d = 1.0 + e;
     let r0 = f32::from_bits(RECIP_MAGIC.wrapping_sub(d.to_bits()));
-    let e0 = (-d).mul_add(r0, 1.0);
-    let u2 = r0.mul_add(e0, r0);
+    let e0 = fmadd(-d, r0, 1.0);
+    let u2 = fmadd(r0, e0, r0);
     let e2 = e0 * e0;
-    let t2 = e2.mul_add(e2, e2);
-    let r = u2.mul_add(t2, u2);
+    let t2 = fmadd(e2, e2, e2);
+    let r = fmadd(u2, t2, u2);
     x * r
 }
 

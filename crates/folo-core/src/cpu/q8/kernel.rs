@@ -424,17 +424,22 @@ pub(crate) unsafe fn kernel_avx2(
 }
 
 /// Fold one part's finished `i32` tile into `dst`: `dst[r][j] = (acc[r][j] - corr[r]) * scale[r] + dst[r][j]`.
-/// Scalar and AVX2 execute the exact same FMA operations in the same order.
+/// Scalar, AVX2, and Wasm SIMD128 execute the exact same operations in the same order.
 pub(crate) fn accumulate_part_f32(acc: &Tile, corr: &[i32; MR], scale: &[f32; MR], dst: &mut TileF32) {
     #[cfg(target_arch = "x86_64")]
     if uses_avx2() {
         // SAFETY: AVX2 and FMA were detected.
         return unsafe { accumulate_part_f32_avx2(acc, corr, scale, dst) };
     }
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    if uses_wasm_simd() {
+        super::wasm_simd::accumulate_part_f32_wasm(acc, corr, scale, dst);
+        return;
+    }
     for r in 0..MR {
         let (cr, sr) = (corr[r], scale[r]);
         for j in 0..NR {
-            dst[r][j] = (acc[r][j].wrapping_sub(cr) as f32).mul_add(sr, dst[r][j]);
+            dst[r][j] = super::silu::fmadd(acc[r][j].wrapping_sub(cr) as f32, sr, dst[r][j]);
         }
     }
 }
@@ -495,14 +500,14 @@ impl Epi<'_> {
             y = silu_q8(y);
         }
         if let Some((rs, rz)) = self.res {
-            y = rs[r].mul_add((byte(res, r) - rz[r]) as f32, y);
+            y = super::silu::fmadd(rs[r], (byte(res, r) - rz[r]) as f32, y);
         }
         y
     }
 
     #[inline(always)]
     fn value(&self, r: usize, acc: i32, res: u32) -> f32 {
-        let y = (acc.wrapping_sub(self.corr[r]) as f32).mul_add(self.scale[r], self.bias[r]);
+        let y = super::silu::fmadd(acc.wrapping_sub(self.corr[r]) as f32, self.scale[r], self.bias[r]);
         self.finish_value(r, y, res)
     }
 
@@ -557,17 +562,23 @@ impl Epi<'_> {
         }
     }
 
-    /// [`Epi::apply`] for all `NR` columns, vectorised when the CPU has AVX2 and FMA; the same bits.
+    /// [`Epi::apply`] for all `NR` columns, vectorised when the CPU has AVX2+FMA or Wasm SIMD128; the same bits.
     pub(crate) fn apply_full(&self, acc: &Tile, res: &[u32; NR], q: &mut [u32; NR], f: &mut [[f32; NR]; MR]) {
         #[cfg(target_arch = "x86_64")]
         if uses_avx2() {
             // SAFETY: AVX2 and FMA were detected.
             return unsafe { self.apply_avx2(acc, res, q, f) };
         }
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        if uses_wasm_simd() {
+            super::wasm_simd::apply_epi_wasm(self, acc, res, q, f);
+            return;
+        }
         self.apply(acc, NR, res, q, f)
     }
 
-    /// [`Epi::apply_f32`] for all `NR` columns, vectorised when the CPU has AVX2 and FMA; the same bits.
+    /// [`Epi::apply_f32`] for all `NR` columns, vectorised when the CPU has AVX2+FMA or Wasm SIMD128; the same
+    /// bits.
     pub(crate) fn apply_f32_full(
         &self,
         tile: &TileF32,
@@ -579,6 +590,11 @@ impl Epi<'_> {
         if uses_avx2() {
             // SAFETY: AVX2 and FMA were detected.
             return unsafe { self.apply_f32_avx2(tile, res, q, f) };
+        }
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        if uses_wasm_simd() {
+            super::wasm_simd::apply_epi_f32_wasm(self, tile, res, q, f);
+            return;
         }
         self.apply_f32(tile, NR, res, q, f)
     }

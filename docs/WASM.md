@@ -214,7 +214,9 @@ and reuse it per image: loading parses and fuses the model and, on WebGPU, compi
     (`letterbox_rgba_planar_f32_with_scratch`, zero intermediate RGB allocation, reusable `RgbaScratch` buffers,
     bit-exact with `folo_data::Letterbox::apply_planar_f32`), paired with candidate-first / sparse CPU decode.
   - `folo-core` adds explicit Wasm SIMD128 kernels for 4-lane non-FMA elementwise transcendentals and binary ops
-    (`cpu/elementwise/wasm_simd.rs`), stride-1 depthwise convs with register-fused bias/SiLU/ReLU (`cpu/conv/depthwise.rs`),
+    (`cpu/elementwise/wasm_simd.rs`), int8 `i32x4_dot_i16x8` micro-kernels with hoisted weight splats plus
+    vectorized non-FMA `silu_q8_wasm4` / `apply_epi_wasm` / `accumulate_part_f32_wasm` epilogues (`cpu/q8/wasm_simd.rs`),
+    stride-1 depthwise convs with register-fused bias/SiLU/ReLU (`cpu/conv/depthwise.rs`),
     and 4-tile Winograd F(2×2, 3×3) (`cpu/conv/winograd_wasm.rs`) and F(4×4, 3×3) (`cpu/conv/winograd4/wasm.rs`)
     input/output transforms — all bit-exact with their scalar paths.
   - LLVM also vectorises the portable GEMM micro-kernel to SIMD128 (which originally took folo-n from 1758 ms scalar to

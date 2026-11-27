@@ -94,8 +94,10 @@ pub use convert::{
     VocImageMode, VocSplitReport, export_coco, export_voc,
 };
 pub use curate::{
-    ClassNormalize, CollisionPolicy, FilterConfig, MergeConfig, MergeReport, MergeSplitPolicy, RemapConfig,
-    filter_dataset, merge_datasets, merge_paths, remap_classes, write_filtered, write_merged,
+    ClassNormalize, CollisionPolicy, CrossSplitPolicy, DedupGroup, DedupItem, DedupKeepPolicy,
+    DedupMatchKind, DedupOptions, DedupReport, FilterConfig, MergeConfig, MergeReport, MergeSplitPolicy,
+    RemapConfig, deduplicate_dataset, deduplicate_path, filter_dataset, merge_datasets, merge_paths,
+    remap_classes, write_deduplicated, write_filtered, write_merged,
 };
 pub use dataset::cache::{MIN_FILES as SCAN_CACHE_MIN_FILES, scan_cache_dir, set_scan_cache_dir};
 pub use dataset::{

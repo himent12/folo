@@ -1,4 +1,5 @@
-//! Dataset curation: class remapping, subset filtering, and multi-dataset merging into clean YOLO datasets.
+//! Dataset curation: class remapping, subset filtering, multi-dataset merging, and exact / perceptual (`dHash`)
+//! near-duplicate deduplication into clean YOLO datasets.
 //!
 //! All operations work on opened [`LoadedDataset`]s (YOLO, COCO, or Pascal VOC) without re-encoding images:
 //! - [`remap_classes`]: rename, unify, or drop classes with exact or case/whitespace-normalised matching.
@@ -7,9 +8,17 @@
 //! - [`merge_datasets`] / [`write_merged`] / [`merge_paths`] (in `merge.rs`): combine one or more datasets (any
 //!   mix of YOLO, COCO, VOC) with unified class names, explicit remapping/dropping, split preservation or
 //!   re-splitting, and deterministic filename collision resolution.
+//! - [`deduplicate_dataset`] / [`write_deduplicated`] / [`deduplicate_path`] (in `dedup.rs`): prune exact and
+//!   perceptual (`dHash`) near-duplicate images (reusing [`crate::audit`]) with `dry_run` preview, configurable
+//!   keep & cross-split policies, and safe materialisation into a new YOLO directory.
 
+mod dedup;
 mod merge;
 
+pub use dedup::{
+    CrossSplitPolicy, DedupGroup, DedupItem, DedupKeepPolicy, DedupMatchKind, DedupOptions, DedupReport,
+    deduplicate_dataset, deduplicate_path, write_deduplicated,
+};
 pub use merge::{
     CollisionPolicy, MergeConfig, MergeReport, MergeSplitPolicy, merge_datasets, merge_paths, write_merged,
 };

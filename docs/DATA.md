@@ -189,6 +189,14 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   automatic class-name unification, explicit class remap/drop mapping, split preservation / pooling / stratified
   re-splitting (`MergeSplitPolicy`), and deterministic case-insensitive filename collision resolution with exclusive
   file creation (`CollisionPolicy::PrefixOnCollision` or `AlwaysPrefix`).
+- `curate::deduplicate_dataset(&loaded, &DedupOptions)` / `LoadedDataset::deduplicate`, `write_deduplicated`, and
+  `deduplicate_path` prune exact byte duplicates and/or 64-bit `dHash` perceptual near-duplicates (reusing `audit.rs`'s
+  hashing and exact pigeonhole multi-index clustering with no duplicate hash logic), returning a structured
+  `DedupReport` (`dry_run` preview mode reports exact groups, kept item, and dropped items without creating or touching
+  the output directory). Keep selection supports `DedupKeepPolicy::{KeepFirst, KeepLargestResolution, KeepMostBoxes}`
+  and cross-split leakage resolution supports `CrossSplitPolicy::{PreferTrain, PreferVal, PreferTest, IgnoreSplit,
+  WithinSplitOnly}`. When `dry_run` is `false`, `write_deduplicated` materialises a clean YOLO dataset into a new/empty
+  output directory via `unfinished::claim` and collision-safe exclusive file creation without mutating source images.
 - `LoadedDataset::split_stratified(&cfg)` / `split::split_dataset(&loaded, &cfg)` (plus `split_indices` for any
   `Dataset` and `write_split` to materialise on disk) performs seeded iterative multi-label stratification across
   `train` / `val` / optional `test`, processing rarest classes first with relative-deficit scoring so rare classes and
