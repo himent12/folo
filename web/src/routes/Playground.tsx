@@ -296,7 +296,12 @@ export default function Playground() {
   let lastModelId: string | null = null;
   effect(() => {
     const id = modelId.get();
-    if (id !== null && lastModelId !== null && id !== lastModelId) untrack(() => hidden.set(new Set()));
+    if (id !== null && lastModelId !== null && id !== lastModelId) {
+      untrack(() => {
+        hidden.set(new Set());
+        cmp.hiddenBNames.set(new Set());
+      });
+    }
     if (id !== null) lastModelId = id;
   });
 
@@ -545,6 +550,10 @@ export default function Playground() {
 
   function toggleClassB(cB: number) {
     const nameB = cmp.classesB.peek()[cB] ?? `class ${cB}`;
+    if (cmp.hiddenBNames.peek().has(nameB)) {
+      cmp.toggleHiddenBName(nameB);
+      return;
+    }
     const idxA = classes.peek().indexOf(nameB);
     if (idxA >= 0) toggleClass(idxA);
     else cmp.toggleHiddenBName(nameB);
@@ -893,7 +902,7 @@ export default function Playground() {
                 result={showingB.get() ? cmp.resultB.get() : result.get()}
                 counts={showingB.get() ? cmp.countsB.get() : counts.get()}
                 pred={showingB.get() ? cmp.predB.get() : pred.get()}
-                where={cmp.compare.get() ? whereLabel(showingB.get() ? cmp.predB.get() : pred.get()) : where.get()}
+                where={cmp.compare.get() ? '' : where.get()}
                 bind:conf={conf}
                 resetButton={resetButton}
                 secondarySliders={secondarySliders}

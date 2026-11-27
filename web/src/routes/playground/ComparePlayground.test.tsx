@@ -309,5 +309,14 @@ describe('Playground: Compare A/B and Export', () => {
     const detKpi = target.querySelector('.ab-sum .k-vals')!;
     const parts = [...detKpi.querySelectorAll(':scope > span')].map((s) => s.textContent?.replace(/\s+/g, ' ').trim());
     expect(parts).toEqual(['A 1', 'vs', 'B 0', 'Δ -1']);
+
+    // Switching Model A to a model that includes 'car' clears stale B-only hidden names so 'car' is never stuck hidden.
+    const selectA = target.querySelectorAll<HTMLSelectElement>('aside.rail select')[0]!;
+    selectA.value = 'm_shapes_n';
+    selectA.dispatchEvent(new Event('change', { bubbles: true }));
+    await until(() => {
+      const vals = [...target.querySelector('.ab-sum .k-vals')!.querySelectorAll(':scope > span')].map((s) => s.textContent?.replace(/\s+/g, ' ').trim());
+      return vals[2] === 'B 1';
+    }, 'B car unhidden after Model A switch');
   });
 });

@@ -172,7 +172,15 @@ export default function MediaCaptureDialog(props: MediaCaptureDialogProps) {
       const targetEl = camEl;
       if (targetEl) {
         targetEl.srcObject = next;
-        await targetEl.play().catch(() => {});
+        try {
+          await targetEl.play();
+        } catch (playErr) {
+          stopTracks(next);
+          if (stream === next) stream = null;
+          if (targetEl.srcObject === next) targetEl.srcObject = null;
+          if (!alive || seq !== camSeq) return;
+          throw playErr;
+        }
       }
       if (!alive || seq !== camSeq || !open.peek() || mode.peek() !== 'camera') {
         stopTracks(next);
