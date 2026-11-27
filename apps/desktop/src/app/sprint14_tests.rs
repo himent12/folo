@@ -127,9 +127,22 @@ fn model_export_cli_builder_toggles_copies_and_triggers_server_export() {
         );
     });
 
-    // 5. Switch to INT8 quantize format and verify clipboard command.
+    // 5. Switch to INT8 quantize format and verify clipboard command, plus Unsupported disabled
+    // button keeps `tab_stop == true` across multiple rerenders.
     drive(&mut app, window, |this, _, cx| {
         this.model_cli.mode = ModelCliMode::Export;
+        this.model_cli.export_format = CliExportFormat::Onnx;
+        this.model_cli.onnx_decode = true;
+        this.store.features.retain(|f| f != folo_api::FEATURE_EXPORT_ONNX_SWITCHES);
+        cx.notify();
+    });
+    for _ in 0..3 {
+        app.frame(window.into());
+    }
+    drive(&mut app, window, |this, w, cx| {
+        let fh = this.fh("model-cli-server-export-disabled", cx);
+        assert!(fh.tab_stop, "Unsupported disabled export button stays in Tab order across rerenders");
+        assert!(w.is_focus_mounted(&fh), "disabled export button handle is mounted");
         this.model_cli.export_format = CliExportFormat::Int8Quantize;
         this.model_cli.quant_method = QuantMethod::MinMax;
         cx.notify();
@@ -192,7 +205,22 @@ fn dataset_balance_strip_jumps_to_rarest_class_and_empty_images() {
         assert!(this.img_query(&ds_id).is_empty(), "dataset-wide jump clears filename query");
     });
 
-    // 2. Activate "Empty" quick pill on the tab row -> clears hidden split/query and shows empty images.
+    // 2. Narrow the gallery by split while already on class 2, then click the Rarest quick pill:
+    // because the gallery is narrowed, it widens to all splits rather than clearing class 2.
+    drive(&mut app, window, |this, _, cx| {
+        this.ds_split = Some(crate::api::Split::Val);
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| this.focus_key("ds-balance-rarest-pill", w, cx));
+    app.frame(window.into());
+    send_key(&mut app, window, "enter");
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.class_filter(&ds_id), Some(2), "widens narrowed gallery instead of clearing");
+        assert_eq!(this.ds_split, None, "widening clears split restriction");
+    });
+
+    // 3. Activate "Empty" quick pill on the tab row -> clears hidden split/query and shows empty images.
     drive(&mut app, window, |this, _, cx| {
         this.ds_split = Some(crate::api::Split::Train);
         this.ds_img_query = "only-train".into();

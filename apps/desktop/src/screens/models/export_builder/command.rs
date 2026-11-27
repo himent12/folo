@@ -173,6 +173,11 @@ pub fn check_server_export_support(
             "This server doesn't advertise ONNX export switches (--dynamic/--decode/--half); copy the CLI command instead.",
         );
     }
+    if is_remote && !has(folo_api::FEATURE_WEIGHTS_ONNX) {
+        return ServerExportSupport::Unsupported(
+            "This remote server doesn't advertise ONNX weight downloads; copy the CLI command instead.",
+        );
+    }
     if is_remote && split_axes {
         return ServerExportSupport::Unsupported(
             "Remote servers can't download single-axis dynamic ONNX via /weights; enable both Dynamic batch and Dynamic H×W (--dynamic), or run the CLI command on the server.",
@@ -204,10 +209,10 @@ pub fn predict_uses_iou(m: &Model, state: &ModelCliState) -> bool {
 /// Derives the default `folo quantize` output path (`<stem>-int8.folo`) when targeting
 /// `--precision int8` so users never accidentally pass an uncalibrated checkpoint.
 fn derive_int8_model_path(path: &str) -> String {
-    if path.ends_with("-int8.folo") {
+    if path.len() >= 10 && path[path.len() - 10..].eq_ignore_ascii_case("-int8.folo") {
         path.to_string()
-    } else if let Some(stem) = path.strip_suffix(".folo") {
-        format!("{stem}-int8.folo")
+    } else if path.len() >= 5 && path[path.len() - 5..].eq_ignore_ascii_case(".folo") {
+        format!("{}-int8.folo", &path[..path.len() - 5])
     } else {
         format!("{path}-int8.folo")
     }
@@ -517,8 +522,13 @@ mod tests {
 
         let no_features: Vec<String> = Vec::new();
         let switches_only = vec![folo_api::FEATURE_EXPORT_ONNX_SWITCHES.to_string()];
-        let all_features =
+        let switches_and_axes =
             vec![folo_api::FEATURE_EXPORT_ONNX_SWITCHES.to_string(), FEATURE_EXPORT_DYNAMIC_AXES.to_string()];
+        let all_features = vec![
+            folo_api::FEATURE_EXPORT_ONNX_SWITCHES.to_string(),
+            FEATURE_EXPORT_DYNAMIC_AXES.to_string(),
+            folo_api::FEATURE_WEIGHTS_ONNX.to_string(),
+        ];
 
         assert!(matches!(
             check_server_export_support(plain, &no_features, false),
@@ -537,10 +547,14 @@ mod tests {
             ServerExportSupport::Unsupported(_)
         ));
         assert!(matches!(
-            check_server_export_support(split, &all_features, false),
+            check_server_export_support(split, &switches_and_axes, false),
             ServerExportSupport::Supported(_)
         ));
-        // Remote server rejects split axes (cannot download via /weights), accepts uniform --dynamic.
+        // Remote server requires `weights_onnx` for ONNX downloads and rejects split axes.
+        assert!(matches!(
+            check_server_export_support(switched, &switches_only, true),
+            ServerExportSupport::Unsupported(_)
+        ));
         assert!(matches!(
             check_server_export_support(split, &all_features, true),
             ServerExportSupport::Unsupported(_)
@@ -549,6 +563,8 @@ mod tests {
             check_server_export_support(full_dyn, &all_features, true),
             ServerExportSupport::Supported(_)
         ));
+        assert_eq!(derive_int8_model_path("D:/models/best.FOLO"), "D:/models/best-int8.folo");
+        assert_eq!(derive_int8_model_path("D:/models/best-INT8.FOLO"), "D:/models/best-INT8.FOLO");
     }
 
     #[test]

@@ -236,11 +236,14 @@ impl FoloApp {
         let t = theme(cx);
         let ratio = summary.ratio_badge();
         let unlabeled = summary.unlabeled_classes_badge();
+        let unfiltered_scope = self.ds_split.is_none() && self.img_query(&ds.id).trim().is_empty();
         let rarest_pill =
             (ds.classes.len() >= 2).then_some(summary.rarest_present.as_ref()).flatten().map(|r| {
                 let did = ds.id.clone();
                 let idx = r.index;
-                let active = self.ds_tab == DsTab::Images && self.class_filter(&ds.id) == Some(idx);
+                let active = self.ds_tab == DsTab::Images
+                    && unfiltered_scope
+                    && self.class_filter(&ds.id) == Some(idx);
                 let short_name = trunc_name(&r.name, 16);
                 self.chip(
                     "ds-balance-rarest-pill",
@@ -251,7 +254,11 @@ impl FoloApp {
                     window,
                     cx,
                     act(move |this, w, cx| {
-                        if this.ds_tab == DsTab::Images && this.class_filter(&did) == Some(idx) {
+                        let already_all = this.ds_tab == DsTab::Images
+                            && this.ds_split.is_none()
+                            && this.img_query(&did).trim().is_empty()
+                            && this.class_filter(&did) == Some(idx);
+                        if already_all {
                             this.ds_class = None;
                             this.ds_hover_tile = None;
                             this.ds_scroll_anchor = None;
@@ -274,7 +281,7 @@ impl FoloApp {
             });
         let empty_pill = (summary.empty_images > 0).then(|| {
             let did = ds.id.clone();
-            let active = self.ds_tab == DsTab::Images && self.empty_only(&ds.id);
+            let active = self.ds_tab == DsTab::Images && unfiltered_scope && self.empty_only(&ds.id);
             self.chip(
                 "ds-balance-empty-pill",
                 "Empty",
@@ -284,7 +291,11 @@ impl FoloApp {
                 window,
                 cx,
                 act(move |this, w, cx| {
-                    if this.ds_tab == DsTab::Images && this.empty_only(&did) {
+                    let already_all = this.ds_tab == DsTab::Images
+                        && this.ds_split.is_none()
+                        && this.img_query(&did).trim().is_empty()
+                        && this.empty_only(&did);
+                    if already_all {
                         this.ds_empty_of = None;
                         this.ds_hover_tile = None;
                         this.ds_scroll_anchor = None;

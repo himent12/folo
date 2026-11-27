@@ -92,14 +92,15 @@ impl FoloApp {
             }
             _ => false,
         };
-        let disabled_anchor = (!is_busy_export)
-            .then(|| self.passing_stop("model-cli-server-export-disabled", false, cx))
-            .flatten();
+        let disabled_shown =
+            is_busy_export || matches!(server_support, Some(ServerExportSupport::Unsupported(_)));
+        let disabled_anchor = self
+            .passing_stop("model-cli-server-export-disabled", disabled_shown, cx)
+            .filter(|_| !disabled_shown);
         let server_btn = match server_support {
             Some(ServerExportSupport::Supported(opts)) => {
                 let mid = m.id.clone();
                 if is_busy_export {
-                    self.passing_stop("model-cli-server-export-disabled", true, cx);
                     Some(
                         self.button_disabled(
                             "model-cli-server-export",
@@ -223,8 +224,15 @@ impl FoloApp {
                                     .flex()
                                     .items_center()
                                     .gap(px(8.))
-                                    .child(copy_btn)
-                                    .children(disabled_anchor.map(|fh| div().track_focus(&fh)))
+                                    .child(
+                                        // Zero-gap wrapper keeps Tab order intact when the disabled
+                                        // trigger unmounts without inserting a phantom gap.
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .child(copy_btn)
+                                            .children(disabled_anchor.map(|fh| div().track_focus(&fh))),
+                                    )
                                     .children(server_btn),
                             ),
                     ),
