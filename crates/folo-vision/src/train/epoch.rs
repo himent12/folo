@@ -4,14 +4,15 @@
 use std::time::Instant;
 
 use folo_api::{LogLevel, RunEvent};
-use folo_nn::{BatchNorm2d, GradScaler, Module, RunningStats, ScaleUpdate};
+use folo_nn::{BatchNorm2d, GradScaler, LiveFiniteCheck, Module, RunningStats, ScaleUpdate};
 
 use super::feed;
 use super::{BatchSource, MAX_AMP_SKIPS, MAX_NONFINITE_BATCHES, Trainer};
 use crate::error::{Error, Result};
 use crate::loss::{
-    BoxLossKind, LossConfig, LossItems, detection_loss_for_distill_with_wiou_mean,
-    detection_loss_with_wiou_mean, o2m_weight, step_loss, targets_from_normalized,
+    BoxLossKind, LossConfig, LossItems, decode_device_loss_values, detection_loss_for_distill_with_wiou_mean,
+    detection_loss_with_wiou_mean, device_loss_supported, encode_detection_loss_device, o2m_weight,
+    step_loss, targets_from_normalized,
 };
 use crate::val::batch_tensor;
 
@@ -121,101 +122,235 @@ impl Trainer {
             // Mixed precision: the loss (assigner, BCE, CIoU + DFL) runs in f32 on f32 copies of the f16 head.
             let f32_head = |t: &folo_core::Tensor| t.to_dtype(folo_core::DType::F32);
             let (box_raw, cls_raw) = (f32_head(&out.box_raw)?, f32_head(&out.cls_raw)?);
-            let need_asg = need_kd_asg || iou_raw.is_some();
-            let (mut loss, mut kd_asg) = detection_loss_for_distill_with_wiou_mean(
-                &box_raw,
-                &cls_raw,
-                &out.anchors,
-                &targets,
-                &epoch_loss_cfg,
-                need_asg,
-                self.wiou_iou_mean,
-            )?;
-            let kd_needs_host_asg = need_kd_asg
-                && teacher_batch.as_ref().is_some_and(super::teacher::TeacherBatch::is_host_targets);
-            let mut cached_host_asg = None;
-            let iou_loss = match (&iou_raw, &kd_asg) {
-                (Some(iou_t), Some(asg)) if loss.is_finite() => {
-                    let host_asg = asg.as_host(n, out.num_anchors(), out.num_classes, &targets)?;
-                    let l = crate::model::v2::iou_quality_loss(
-                        &f32_head(iou_t)?,
-                        &box_raw,
-                        &out.anchors,
-                        host_asg.as_ref(),
-                        out.reg_max,
-                        1.0,
-                    )?;
-                    if kd_needs_host_asg && matches!(asg, crate::loss::DistillAssignment::Device(_)) {
-                        cached_host_asg = Some(host_asg.into_owned());
+            let o2o_cfg = epoch_loss_cfg.o2o_branch(self.cfg.o2o_keeps_tal);
+            let can_pipeline = ctx.is_some()
+                && teacher_batch.is_none()
+                && iou_raw.is_none()
+                && box_raw.device() == self.device
+                && device_loss_supported(&box_raw, &epoch_loss_cfg)
+                && out
+                    .o2o
+                    .as_ref()
+                    .is_none_or(|(b, _)| b.device() == self.device && device_loss_supported(b, &o2o_cfg));
+
+            let (finite, items, kd, wiou_batch_mean, grads_ready) = if can_pipeline {
+                let c = ctx.as_ref().expect("checked");
+                let (o2m_dev, _) = encode_detection_loss_device(
+                    &box_raw,
+                    &cls_raw,
+                    &out.anchors,
+                    &targets,
+                    &epoch_loss_cfg,
+                )?;
+                drop((box_raw, cls_raw));
+                let has_o2o = out.o2o.is_some();
+                let o2o_dev = match &out.o2o {
+                    Some((b, cl)) => {
+                        let (ob, oc) = (f32_head(b)?, f32_head(cl)?);
+                        Some(encode_detection_loss_device(&ob, &oc, &out.anchors, &targets, &o2o_cfg)?.0)
                     }
-                    Some(l)
+                    None => None,
+                };
+                let w_m = o2m_weight(e, self.cfg.epochs);
+                let total = match &o2o_dev {
+                    Some(o) => o2m_dev.total.mul_scalar(w_m)?.add(&o.total.mul_scalar(1.0 - w_m)?)?,
+                    None => o2m_dev.total.clone(),
+                };
+                let bn_probe = snapshot.prepare_live_finite_check()?;
+                let bn_batched =
+                    matches!(&bn_probe, LiveFiniteCheck::DeviceScalar(s) if s.device() == self.device);
+                let mut dl_tensors: Vec<&folo_core::Tensor> = Vec::with_capacity(3);
+                dl_tensors.push(&o2m_dev.stats);
+                if let Some(o) = &o2o_dev {
+                    dl_tensors.push(&o.stats);
                 }
-                _ => None,
-            };
-            // On the one-to-many outputs, over the supervised loss's normaliser; part of the one-to-many loss below.
-            // Skip distillation when the supervised loss is already non-finite (e.g. early AMP forward overflow,
-            // where `kd_asg` is `None`) so the bad-batch BN rollback & skip handler below runs cleanly.
-            let kd = match (&teacher_batch, &self.cfg.distill) {
-                (Some(t), Some(d)) if loss.is_finite() => {
-                    let asg_for_kd = if need_kd_asg {
-                        if t.is_host_targets()
-                            && matches!(kd_asg, Some(crate::loss::DistillAssignment::Device(_)))
-                        {
-                            let host = match cached_host_asg.take() {
-                                Some(h) => h,
-                                None => kd_asg
-                                    .as_ref()
-                                    .expect("device assignment")
-                                    .as_host(n, out.num_anchors(), out.num_classes, &targets)?
-                                    .into_owned(),
-                            };
-                            kd_asg = Some(crate::loss::DistillAssignment::Host(host));
-                        }
-                        kd_asg.as_ref()
-                    } else {
-                        None
+                if bn_batched && let LiveFiniteCheck::DeviceScalar(ref s) = bn_probe {
+                    dl_tensors.push(s);
+                }
+                // Submit forward + loss + BN finiteness + staging copies in one batch without blocking, then
+                // speculatively encode and flush backward so the GPU never idles waiting on host stat readbacks.
+                // Hold the backward result until the probes resolve so a confirmed non-finite batch always runs
+                // the bad-batch BN restore & skip handler instead of failing early on a speculative backward error.
+                let pending = folo_gpu::download_many_deferred(c, &dl_tensors)?;
+                let grads_res = match &self.scaler {
+                    // The scale is a power of two, so the scaled loss (and every gradient before f16 rounding) is
+                    // exact.
+                    Some(sc) => total.mul_scalar(sc.scale() as f32).and_then(|t| t.backward()),
+                    None => total.backward(),
+                };
+                drop(total);
+                drop(o2m_dev);
+                drop(o2o_dev);
+                drop(out);
+                c.flush();
+
+                let mut dls = pending.into_iter();
+                let o2m_st = dls.next().expect("o2m stats").finish()?.to_vec::<f32>()?;
+                let (mut total_value, mut items, _, _, _) = decode_device_loss_values(&o2m_st);
+                if has_o2o {
+                    let o2o_st = dls.next().expect("o2o stats").finish()?.to_vec::<f32>()?;
+                    let (o_val, o_items, _, _, _) = decode_device_loss_values(&o2o_st);
+                    let w_o = 1.0 - w_m;
+                    let mix = |a: f32, b: f32| w_m * a + w_o * b;
+                    total_value = mix(total_value, o_val);
+                    items = LossItems {
+                        box_: mix(items.box_, o_items.box_),
+                        cls: mix(items.cls, o_items.cls),
+                        dfl: mix(items.dfl, o_items.dfl),
                     };
-                    Some(t.loss(&box_raw, &cls_raw, &out.anchors, loss.target_score_sum, d, asg_for_kd)?)
                 }
-                _ => None,
+                let bn_finite = match bn_probe {
+                    LiveFiniteCheck::Ready(ok) => ok,
+                    LiveFiniteCheck::DeviceScalar(_) if bn_batched => {
+                        dls.next().expect("bn scalar").finish()?.item::<f32>()?.is_finite()
+                    }
+                    LiveFiniteCheck::DeviceScalar(s) => s.item::<f32>()?.is_finite(),
+                };
+                let finite = items.is_finite() && total_value.is_finite() && bn_finite;
+                let grads = if finite { Some(grads_res?) } else { None };
+                (finite, items, None, None, grads)
+            } else {
+                let need_asg = need_kd_asg || iou_raw.is_some();
+                let (mut loss, mut kd_asg) = detection_loss_for_distill_with_wiou_mean(
+                    &box_raw,
+                    &cls_raw,
+                    &out.anchors,
+                    &targets,
+                    &epoch_loss_cfg,
+                    need_asg,
+                    self.wiou_iou_mean,
+                )?;
+                let kd_needs_host_asg = need_kd_asg
+                    && teacher_batch.as_ref().is_some_and(super::teacher::TeacherBatch::is_host_targets);
+                let mut cached_host_asg = None;
+                let iou_loss = match (&iou_raw, &kd_asg) {
+                    (Some(iou_t), Some(asg)) if loss.is_finite() => {
+                        let host_asg = asg.as_host(n, out.num_anchors(), out.num_classes, &targets)?;
+                        let l = crate::model::v2::iou_quality_loss(
+                            &f32_head(iou_t)?,
+                            &box_raw,
+                            &out.anchors,
+                            host_asg.as_ref(),
+                            out.reg_max,
+                            1.0,
+                        )?;
+                        if kd_needs_host_asg && matches!(asg, crate::loss::DistillAssignment::Device(_)) {
+                            cached_host_asg = Some(host_asg.into_owned());
+                        }
+                        Some(l)
+                    }
+                    _ => None,
+                };
+                // On the one-to-many outputs, over the supervised loss's normaliser; part of the one-to-many
+                // loss below. Skip distillation when the supervised loss is already non-finite (e.g. early AMP
+                // forward overflow, where `kd_asg` is `None`) so the bad-batch BN rollback & skip handler below
+                // runs cleanly.
+                let kd = match (&teacher_batch, &self.cfg.distill) {
+                    (Some(t), Some(d)) if loss.is_finite() => {
+                        let asg_for_kd = if need_kd_asg {
+                            if t.is_host_targets()
+                                && matches!(kd_asg, Some(crate::loss::DistillAssignment::Device(_)))
+                            {
+                                let host = match cached_host_asg.take() {
+                                    Some(h) => h,
+                                    None => kd_asg
+                                        .as_ref()
+                                        .expect("device assignment")
+                                        .as_host(n, out.num_anchors(), out.num_classes, &targets)?
+                                        .into_owned(),
+                                };
+                                kd_asg = Some(crate::loss::DistillAssignment::Host(host));
+                            }
+                            kd_asg.as_ref()
+                        } else {
+                            None
+                        };
+                        Some(t.loss(
+                            &box_raw,
+                            &cls_raw,
+                            &out.anchors,
+                            loss.target_score_sum,
+                            d,
+                            asg_for_kd,
+                        )?)
+                    }
+                    _ => None,
+                };
+                drop(kd_asg);
+                drop(teacher_batch);
+                drop(iou_raw);
+                drop((box_raw, cls_raw));
+                // Dual assignment (MODEL.md §6.6): the one-to-one branch's own loss, weighted in by epoch.
+                let o2o = match &out.o2o {
+                    Some((b, c)) => {
+                        let (box_raw, cls_raw) = (f32_head(b)?, f32_head(c)?);
+                        Some(detection_loss_with_wiou_mean(
+                            &box_raw,
+                            &cls_raw,
+                            &out.anchors,
+                            &targets,
+                            &o2o_cfg,
+                            self.wiou_iou_mean,
+                        )?)
+                    }
+                    None => None,
+                };
+                let w_m = o2m_weight(e, self.cfg.epochs);
+                // `w_m · (L_o2m + L_distill) + (1 − w_m) · L_o2o`; the reported terms stay unweighted by `w_m` (§8.9).
+                loss = step_loss(loss, kd.as_ref(), o2o.as_ref().map(|o| (o, w_m)), n)?;
+                let bn_probe = snapshot.prepare_live_finite_check()?;
+                let (iou_finite, bn_finite) = match (iou_loss, bn_probe, &ctx) {
+                    (Some(l_iou), LiveFiniteCheck::DeviceScalar(bn_s), Some(c))
+                        if l_iou.device() == self.device && bn_s.device() == self.device =>
+                    {
+                        let mut host = folo_gpu::download_many(c, &[&l_iou, &bn_s])?;
+                        let bn_ok = host.pop().expect("bn scalar").item::<f32>()?.is_finite();
+                        let v = host.pop().expect("iou scalar").item::<f32>()?;
+                        let iou_ok = v.is_finite();
+                        if iou_ok {
+                            loss.total = loss.total.add(&l_iou)?;
+                            loss.total_value += v;
+                        }
+                        (iou_ok, bn_ok)
+                    }
+                    (iou_loss, bn_probe, _) => {
+                        let mut iou_ok = true;
+                        if let Some(l_iou) = iou_loss {
+                            let v = l_iou.item::<f32>()?;
+                            iou_ok = v.is_finite();
+                            if iou_ok {
+                                loss.total = loss.total.add(&l_iou)?;
+                                loss.total_value += v;
+                            }
+                        }
+                        let bn_ok = match bn_probe {
+                            LiveFiniteCheck::Ready(ok) => ok,
+                            LiveFiniteCheck::DeviceScalar(s) => s.item::<f32>()?.is_finite(),
+                        };
+                        (iou_ok, bn_ok)
+                    }
+                };
+                let kd = kd.map(|kd| [kd.cls, kd.dfl]);
+                let kd_finite = kd.is_none_or(|v| v.iter().all(|x| x.is_finite()));
+                let finite = loss.is_finite() && kd_finite && iou_finite && bn_finite;
+                let items = loss.items;
+                let wiou_batch_mean = loss.mean_iou_loss;
+                let grads = if finite {
+                    let g = match &self.scaler {
+                        // The scale is a power of two, so the scaled loss (and every gradient before f16 rounding) is
+                        // exact.
+                        Some(s) => loss.total.mul_scalar(s.scale() as f32)?.backward()?,
+                        None => loss.total.backward()?,
+                    };
+                    Some(g)
+                } else {
+                    None
+                };
+                drop(loss);
+                drop(out);
+                (finite, items, kd, wiou_batch_mean, grads)
             };
-            drop(kd_asg);
-            drop(teacher_batch);
-            drop(iou_raw);
-            drop((box_raw, cls_raw));
-            // Dual assignment (MODEL.md §6.6): the one-to-one branch's own loss, weighted in by epoch.
-            let o2o = match &out.o2o {
-                Some((b, c)) => {
-                    let (box_raw, cls_raw) = (f32_head(b)?, f32_head(c)?);
-                    let cfg = epoch_loss_cfg.o2o_branch(self.cfg.o2o_keeps_tal);
-                    Some(detection_loss_with_wiou_mean(
-                        &box_raw,
-                        &cls_raw,
-                        &out.anchors,
-                        &targets,
-                        &cfg,
-                        self.wiou_iou_mean,
-                    )?)
-                }
-                None => None,
-            };
-            let w_m = o2m_weight(e, self.cfg.epochs);
-            // `w_m · (L_o2m + L_distill) + (1 − w_m) · L_o2o`; the reported terms stay unweighted by `w_m` (§8.9).
-            loss = step_loss(loss, kd.as_ref(), o2o.as_ref().map(|o| (o, w_m)), n)?;
-            let mut iou_finite = true;
-            if let Some(l_iou) = iou_loss {
-                let v = l_iou.item::<f32>()?;
-                iou_finite = v.is_finite();
-                if iou_finite {
-                    loss.total = loss.total.add(&l_iou)?;
-                    loss.total_value += v;
-                }
-            }
-            let kd = kd.map(|kd| [kd.cls, kd.dfl]);
-            let kd_finite = kd.is_none_or(|v| v.iter().all(|x| x.is_finite()));
-            let finite = loss.is_finite() && kd_finite && iou_finite && snapshot.all_finite_live()?;
-            let items = loss.items;
-            let wiou_batch_mean = loss.mean_iou_loss;
+
             if finite {
                 snapshot_dirty = !snapshot.is_empty();
                 if epoch_loss_cfg.box_loss == BoxLossKind::WiouV3
@@ -228,15 +363,7 @@ impl Trainer {
                 if let Some(v) = kd {
                     kd_items.push(v);
                 }
-                let grads = match &self.scaler {
-                    // The scale is a power of two, so the scaled loss (and every gradient before f16 rounding) is
-                    // exact.
-                    Some(s) => loss.total.mul_scalar(s.scale() as f32)?.backward()?,
-                    None => loss.total.backward()?,
-                };
-                drop(loss);
-                drop(out);
-                self.acc.add_owned(grads)?;
+                self.acc.add_owned(grads_ready.expect("finite batch produced gradients"))?;
                 window_finite = true;
                 self.consecutive_bad = 0;
                 finite_batches += 1;
@@ -244,8 +371,7 @@ impl Trainer {
                 sum[1] += items.cls as f64;
                 sum[2] += items.dfl as f64;
             } else {
-                drop(loss);
-                drop(out);
+                drop(grads_ready);
                 snapshot.restore()?;
                 self.consecutive_bad += 1;
                 let consecutive_bad = self.consecutive_bad;
@@ -376,7 +502,7 @@ impl Trainer {
         c
     }
 
-    pub(super) fn optimizer_step(&mut self, e: u32, k: usize) -> Result<()> {
+    fn apply_schedule(&mut self, e: u32) {
         self.sched.apply(self.opt.as_mut());
         // Scale `bias.backbone`'s warmup start by `backbone_lr_scale` so backbone biases do not start at the
         // unscaled `warmup_bias_lr` while `decay.backbone` and `bn.backbone` are scaled.
@@ -400,8 +526,40 @@ impl Trainer {
                 }
             }
         }
-        if let Some(scaler) = &mut self.scaler {
-            let finite = self.acc.unscale_clip(scaler.inv_scale(), self.cfg.clip_grad_norm)?;
+    }
+
+    pub(super) fn optimizer_step(&mut self, e: u32, k: usize) -> Result<()> {
+        if let Some(scaler) = self.scaler.as_ref() {
+            let inv_scale = scaler.inv_scale();
+            let finite = if let Some(ctx) = folo_gpu::context_for(self.device) {
+                if self.cfg.clip_grad_norm > 0.0 {
+                    if let Some(plan) =
+                        self.acc.unscale_clip_device_prepare(inv_scale, self.cfg.clip_grad_norm)?
+                    {
+                        // Submit the norm reduction and finiteness readback before in-place scaling so the
+                        // scaling pass and schedule update overlap with the GPU wait.
+                        let dl = folo_gpu::download_deferred(&ctx, plan.finite_scalar())?;
+                        plan.apply()?;
+                        ctx.flush();
+                        self.apply_schedule(e);
+                        dl.finish()?.item::<f32>()?.is_finite()
+                    } else {
+                        self.apply_schedule(e);
+                        self.acc.unscale_clip(inv_scale, self.cfg.clip_grad_norm)?
+                    }
+                } else if let Some(flag) = self.acc.unscale_prepare_device(inv_scale)? {
+                    let dl = folo_gpu::download_deferred(&ctx, &flag)?;
+                    self.apply_schedule(e);
+                    dl.finish()?.to_vec::<u32>()?[0] == 0
+                } else {
+                    self.apply_schedule(e);
+                    self.acc.unscale_clip(inv_scale, self.cfg.clip_grad_norm)?
+                }
+            } else {
+                self.apply_schedule(e);
+                self.acc.unscale_clip(inv_scale, self.cfg.clip_grad_norm)?
+            };
+            let scaler = self.scaler.as_mut().expect("checked");
             let scale = scaler.scale();
             if scaler.update(!finite) == ScaleUpdate::BackedOff {
                 let (streak, now) = (scaler.skip_streak() as usize, scaler.scale());
@@ -425,20 +583,23 @@ impl Trainer {
                 }
                 return Ok(());
             }
-        } else if self.cfg.clip_grad_norm > 0.0 {
-            let norm = self.acc.clip_grad_norm(self.cfg.clip_grad_norm)?;
-            // On GPU `clip_grad_norm` clips on-device without reading back and returns `NaN`; on CPU it returns
-            // the exact global L2 norm, so a non-finite norm skips the step before corrupting weights or state.
-            if self.device.is_cpu() && !norm.is_finite() {
-                self.emitter.log(
-                    LogLevel::Warn,
-                    format!(
-                        "epoch {} batch {}: non-finite gradient norm ({norm}); optimizer step skipped",
-                        e + 1,
-                        k + 1
-                    ),
-                );
-                return Ok(());
+        } else {
+            self.apply_schedule(e);
+            if self.cfg.clip_grad_norm > 0.0 {
+                let norm = self.acc.clip_grad_norm(self.cfg.clip_grad_norm)?;
+                // On GPU `clip_grad_norm` clips on-device without reading back and returns `NaN`; on CPU it returns
+                // the exact global L2 norm, so a non-finite norm skips the step before corrupting weights or state.
+                if self.device.is_cpu() && !norm.is_finite() {
+                    self.emitter.log(
+                        LogLevel::Warn,
+                        format!(
+                            "epoch {} batch {}: non-finite gradient norm ({norm}); optimizer step skipped",
+                            e + 1,
+                            k + 1
+                        ),
+                    );
+                    return Ok(());
+                }
             }
         }
         self.opt.step(&self.acc)?;

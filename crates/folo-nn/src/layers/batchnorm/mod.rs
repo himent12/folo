@@ -9,7 +9,7 @@ mod stats;
 #[cfg(test)]
 mod tests;
 
-pub use stats::RunningStats;
+pub use stats::{LiveFiniteCheck, RunningStats};
 
 use folo_core::{DType, Tensor, UnaryOp, no_grad};
 

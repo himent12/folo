@@ -52,7 +52,7 @@ pub use agc::{AGC_DEFAULT_CLIP_FACTOR, AGC_DEFAULT_EPS, AgcStats, clip_grad_agc_
 pub(crate) use dispatch::{
     GradRef, PAR_THRESHOLD, ParamPlan, cpu_fast, for_each_param_planned, step_many, storage_key,
 };
-pub use grads::{GradAccumulator, global_grad_norm};
+pub use grads::{DeviceUnscaleClip, GradAccumulator, global_grad_norm};
 pub use musgd::{MUON_SCALE, MuSgd, MuSgdWeights, is_muon_group};
 pub use ortho::{
     MuonGeoMode, MuonOrtho, NS_COEFFS, NS_EPS, NS_STEPS, NS5_SCHEDULE, POLAR3_CS9_COEFFS, POLAR4_COEFFS,

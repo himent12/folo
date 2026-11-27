@@ -6,6 +6,16 @@ use folo_core::{DType, Tensor, no_grad};
 use crate::Result;
 use crate::module::{Mode, Module, TensorKind};
 
+/// Result of preparing a live BatchNorm running-statistics finiteness check without blocking on a GPU device.
+#[derive(Debug)]
+pub enum LiveFiniteCheck {
+    /// Already decided on the host (no buffers, CPU-only buffers, a non-finite CPU buffer, or a multi-device
+    /// fallback).
+    Ready(bool),
+    /// A single device `F32` scalar tensor whose value is finite iff every live tracked device buffer is finite.
+    DeviceScalar(Tensor),
+}
+
 /// A copy of every floating buffer of a model (the BatchNorm running statistics), taken before a train-mode
 /// forward so a non-finite batch can be undone (docs/MODEL.md §8.3, "Non-finite batches").
 ///
@@ -106,12 +116,16 @@ impl RunningStats {
         Ok(())
     }
 
-    /// True if every live `F32` buffer tracked by this snapshot is finite, without re-walking the module tree.
-    /// When [`RunningStats::is_empty`] is true, returns `Ok(true)` immediately with zero device dispatches or
-    /// host-sync stalls.
-    pub fn all_finite_live(&self) -> Result<bool> {
+    /// Prepare the finiteness check for every live `F32` buffer tracked by this snapshot without blocking on a
+    /// single-device GPU readback.
+    ///
+    /// When all non-empty tracked buffers live on one non-CPU device, encodes the reduction into a single device
+    /// `F32` scalar (`LiveFiniteCheck::DeviceScalar`) whose value is finite iff every tracked buffer is finite, so
+    /// callers can batch or overlap its readback with subsequent GPU work (for example via
+    /// `folo_gpu::download_many_deferred`). Otherwise evaluates on the host and returns `LiveFiniteCheck::Ready`.
+    pub fn prepare_live_finite_check(&self) -> Result<LiveFiniteCheck> {
         if self.saved.is_empty() {
-            return Ok(true);
+            return Ok(LiveFiniteCheck::Ready(true));
         }
         let mut device: Vec<&Tensor> = Vec::new();
         for (live, _) in &self.saved {
@@ -120,13 +134,36 @@ impl RunningStats {
             }
             if live.device().is_cpu() {
                 if !cpu_f32_all_finite(live)? {
-                    return Ok(false);
+                    return Ok(LiveFiniteCheck::Ready(false));
                 }
             } else if live.numel() > 0 {
                 device.push(live);
             }
         }
-        device_f32_all_finite(&device)
+        if device.is_empty() {
+            return Ok(LiveFiniteCheck::Ready(true));
+        }
+        let dev = device[0].device();
+        if device.iter().all(|t| t.device() == dev) {
+            let _g = no_grad();
+            if let Some(partials) = Tensor::norm_partials_many(&device, NormReduce::AbsMax, None)? {
+                return Ok(LiveFiniteCheck::DeviceScalar(partials.max_all()?));
+            }
+            let flat: Vec<Tensor> = device.iter().map(|b| Ok(b.flatten_all()?)).collect::<Result<_>>()?;
+            let refs: Vec<&Tensor> = flat.iter().collect();
+            return Ok(LiveFiniteCheck::DeviceScalar(Tensor::cat(&refs, 0)?.mul_scalar(0.0)?.sum_all()?));
+        }
+        Ok(LiveFiniteCheck::Ready(device_f32_all_finite(&device)?))
+    }
+
+    /// True if every live `F32` buffer tracked by this snapshot is finite, without re-walking the module tree.
+    /// When [`RunningStats::is_empty`] is true, returns `Ok(true)` immediately with zero device dispatches or
+    /// host-sync stalls.
+    pub fn all_finite_live(&self) -> Result<bool> {
+        match self.prepare_live_finite_check()? {
+            LiveFiniteCheck::Ready(ok) => Ok(ok),
+            LiveFiniteCheck::DeviceScalar(s) => Ok(s.item::<f32>()?.is_finite()),
+        }
     }
 
     /// True if every floating (`F32`) buffer of `model` is finite. Buffers on a device are checked there with

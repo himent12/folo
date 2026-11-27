@@ -129,6 +129,7 @@ and `train_step`.
 | Bench | Measures | Needs |
 |---|---|---|
 | `gpu` | The detector on the GPU: forward, predict and training step per scale and precision | GPU |
+| `gpu_trainer` | End-to-end GPU `Trainer` throughput (`img/s`) and per-window cycle ms for `folo-n` / `folo2-n` (`f32`, `amp`, `o2o-amp`) | GPU |
 | `cpu_e2e` | The CPU predictor end to end at batch 1 | |
 | `int8_e2e` | int8 against `f32` CPU prediction end to end (rows 7 and 8), in-process alternation | `FOLO_BENCH_WEIGHTS` (a `folo quantize` output), `FOLO_BENCH_IMAGES` |
 | `train_step` | One CPU training step: folo-n, 4 classes, 320 px, batch 16 (MODEL.md §10.6's configuration) | |

@@ -665,3 +665,167 @@ fn amp_o2o_branch_trains_under_autocast() {
         assert!(grad(n).is_none_or(|v| v.iter().all(|x| *x == 0.0)), "{n} got a gradient from the o2o loss");
     }
 }
+
+/// Pipelined GPU AMP training with a partial final accumulation window (`nb = 3`, `accumulate = 2`: one full
+/// 2-batch window + one 1-batch final partial window per epoch), covering both clipped (`clip_grad_norm = 10`)
+/// and unclipped (`clip_grad_norm = 0`) AMP, `folo2-n`, bit-exact epoch resume, and intentional overflow backoff.
+#[test]
+fn amp_pipelined_partial_window_flush_and_unclipped_overflow() {
+    let (_, _g) = gpu_tc!();
+    let root = TestDir::new("amp-partial-win");
+    // 16 total images with 4 val -> 12 train images -> batch 4 gives nb = 3 batches, accumulate = 2 (full + partial).
+    let cfg_ds = SyntheticConfig {
+        images: 16,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 128,
+        seed: 9,
+        min_objects: 1,
+        max_objects: 3,
+        empty_fraction: 0.0,
+        small_fraction: 0.0,
+        vary_aspect: false,
+        val_fraction: 4.0 / 16.0,
+        ..SyntheticConfig::default()
+    };
+    let td = TrainData {
+        train: Arc::new(SyntheticDataset::new(cfg_ds.clone(), Split::Train).unwrap()),
+        val: Arc::new(SyntheticDataset::new(cfg_ds.clone(), Split::Val).unwrap()),
+        classes: cfg_ds.classes,
+    };
+    assert_eq!(td.train.len(), 12);
+
+    // 1. Clipped AMP (`clip_grad_norm = 10.0`) with partial-window final flush: uninterrupted vs resumed bit-exact.
+    let base_cfg = TrainConfig {
+        epochs: 2,
+        batch: 4,
+        nbs: 8,
+        imgsz: 128,
+        optimizer: OptimizerChoice::Adamw,
+        lr0: 0.002,
+        momentum: 0.9,
+        warmup_epochs: 0.0,
+        workers: 2,
+        augment: AugmentConfig::none(),
+        device: "gpu:0".into(),
+        amp: true,
+        ..TrainConfig::default()
+    };
+    let mut a = Trainer::new(base_cfg.clone(), td.clone(), stopping_opts(None, None)).unwrap();
+    assert_eq!((a.batches_per_epoch(), a.accumulate()), (3, 2));
+    let sa = a.run().unwrap();
+    assert_eq!(sa.epochs_completed, 2);
+    assert!(sa.epochs.iter().all(|e| e.train_loss.total.is_finite()));
+    // 2 optimizer windows per epoch (1 full + 1 partial) = 4 total window steps across 2 epochs.
+    let taken_a = a.schedule().step();
+    let skipped_a = a.loss_scaler().unwrap().skipped_steps();
+    assert_eq!(taken_a + skipped_a, 4, "taken={taken_a} skipped={skipped_a}");
+    let pa = root.join("partial-a.folo");
+    a.save_checkpoint(&pa).unwrap();
+
+    let mut b = Trainer::new(base_cfg.clone(), td.clone(), stopping_opts(Some(1), None)).unwrap();
+    assert_eq!(b.run().unwrap().epochs_completed, 1);
+    let ckpt = root.join("partial-b1.folo");
+    b.save_checkpoint(&ckpt).unwrap();
+    let over = ResumeOverrides { device: Some("gpu:0".into()), ..Default::default() };
+    let mut r = Trainer::resume(&ckpt, td.clone(), stopping_opts(None, None), over.clone()).unwrap();
+    assert_eq!(r.run().unwrap().epochs_completed, 2);
+    let pb = root.join("partial-b2.folo");
+    r.save_checkpoint(&pb).unwrap();
+    assert_eq!(tensors(&pa), tensors(&pb), "partial-window AMP resume must be bit-exact");
+
+    // 2. Unclipped AMP (`clip_grad_norm = 0.0`) exercises `unscale_prepare_device` + deferred flag readback,
+    // including intentional overflow backoff on both windows (full + partial) of epoch 2.
+    let unclipped_cfg = TrainConfig { clip_grad_norm: 0.0, ..base_cfg.clone() };
+    let mut u = Trainer::new(unclipped_cfg, td.clone(), stopping_opts(Some(1), None)).unwrap();
+    assert_eq!(u.run().unwrap().epochs_completed, 1);
+    let u_ckpt = root.join("unclipped-ovf.folo");
+    u.save_checkpoint(&u_ckpt).unwrap();
+    let mut prev_streak = 0;
+    edit_amp(&u_ckpt, |c| {
+        c.scale = 2f64.powi(120);
+        prev_streak = c.skip_streak;
+    });
+    let before_u = tensors(&u_ckpt);
+    let mut ru = Trainer::resume(&u_ckpt, td.clone(), stopping_opts(None, None), over).unwrap();
+    assert_eq!(ru.run().unwrap().epochs_completed, 2);
+    let u_after = root.join("unclipped-after.folo");
+    ru.save_checkpoint(&u_after).unwrap();
+    let after_u = tensors(&u_after);
+    for ((na, va), (nb, vb)) in before_u.iter().zip(&after_u) {
+        assert_eq!(na, nb);
+        if na.contains("running_") && !na.starts_with("ema.") {
+            continue;
+        }
+        assert!(va == vb, "unclipped overflow modified {na}");
+    }
+    let c = ru.loss_scaler().unwrap().contract();
+    assert_eq!((c.scale, c.skip_streak), (2f64.powi(118), prev_streak + 2), "{c:?}");
+
+    // 3. `folo2-n` AMP training with partial-window flush stays finite and completes cleanly.
+    let v2_cfg = TrainConfig { arch: "folo2-n".into(), epochs: 1, ..base_cfg.clone() };
+    let mut v2 = Trainer::new(v2_cfg, td.clone(), stopping_opts(None, None)).unwrap();
+    let sv2 = v2.run().unwrap();
+    assert_eq!(sv2.epochs_completed, 1);
+    assert!(sv2.epochs[0].train_loss.total.is_finite());
+    assert_eq!(v2.schedule().step() + v2.loss_scaler().unwrap().skipped_steps(), 2);
+
+    // 4. Mid-window non-finite forward under AMP (`can_pipeline == true`, `acc = 2`):
+    // Start from a warmed-down loss scale (`1024.0`) so batch 1's gradients are finite, then poison batch 2's
+    // forward and restore in the warn callback. The window must step once with batch 1's clean gradients and
+    // record zero AMP overflow backoffs for the rejected forward.
+    let clean_ckpt = root.join("amp-midwin.folo");
+    edit_amp(&ckpt, |c| {
+        c.scale = 1024.0;
+        c.skipped_steps = 0;
+        c.skip_streak = 0;
+    });
+    std::fs::copy(&ckpt, &clean_ckpt).unwrap();
+    let stem_slot: Arc<Mutex<Option<(Tensor, Tensor)>>> = Arc::default();
+    let warns = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let scb = stem_slot.clone();
+    let wcb = warns.clone();
+    let mid_opts = TrainOptions {
+        step_interval: std::time::Duration::ZERO,
+        events: Some(Box::new(move |ev| match ev {
+            RunEvent::Step(s) if s.epoch == 2 && s.step == 4 => {
+                // First batch of epoch 2 (nb = 3 -> step 4 is batch 0 of epoch 2): poison batch 1.
+                if let Some((w, _)) = scb.lock().unwrap().as_ref() {
+                    let _g = no_grad();
+                    w.fill_assign(f32::NAN).unwrap();
+                }
+            }
+            RunEvent::Log(l) if l.message.contains("non-finite loss") => {
+                wcb.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if let Some((w, saved)) = scb.lock().unwrap().as_ref() {
+                    let _g = no_grad();
+                    w.copy_from(saved).unwrap();
+                }
+            }
+            _ => {}
+        })),
+        ..TrainOptions::default()
+    };
+    let over2 = ResumeOverrides { device: Some("gpu:0".into()), ..Default::default() };
+    let mut rm = Trainer::resume(&clean_ckpt, td, mid_opts, over2).unwrap();
+    let step_before = rm.schedule().step();
+    {
+        let _g = no_grad();
+        let w = rm.model().backbone.stem.conv.weight.clone();
+        let saved = w.mul_scalar(1.0).unwrap();
+        *stem_slot.lock().unwrap() = Some((w, saved));
+    }
+    assert_eq!(rm.run().unwrap().epochs_completed, 2);
+    assert_eq!(warns.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        rm.loss_scaler().unwrap().skipped_steps(),
+        0,
+        "rejected non-finite forward must not trigger AMP overflow backoff"
+    );
+    assert_eq!(rm.loss_scaler().unwrap().scale(), 1024.0);
+    assert_eq!(
+        rm.schedule().step(),
+        step_before + 2,
+        "window 1 (batch 0 clean, batch 1 rejected) and partial window 2 (batch 2 clean) must both step"
+    );
+    assert!(folo_nn::RunningStats::all_finite(rm.model()).unwrap());
+}

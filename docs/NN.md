@@ -38,7 +38,8 @@ are normative, this one is the map.
 `layers/batchnorm/` module) implements the non-finite batch guard of MODEL.md §8.3: `RunningStats::capture(model)`
 snapshots every floating buffer, while `RunningStats::capture_training(model)` captures only active train-mode
 `BatchNorm2d` buffers once per epoch, refreshes them in place via `recapture()` without reallocating snapshot tensors,
-checks live finiteness via `all_finite_live()` without re-walking the module tree, and pairs with
+checks live finiteness via `all_finite_live()` without re-walking the module tree (or `prepare_live_finite_check()` to
+encode the single-device `AbsMax` scalar `LiveFiniteCheck::DeviceScalar` for batched/deferred GPU readbacks), and pairs with
 `RunningStats::all_finite_eval(model)` to validate frozen eval-mode BN buffers at epoch entry (`restore()` undoes a
 non-finite batch). Buffers on a device are checked with one readback per device via multi-tensor
 `Tensor::norm_partials_many(bufs, NormReduce::AbsMax, None)` + `max_all()` (falling back to `Σ 0 · x == 0` when
@@ -79,7 +80,11 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
 - Mixed precision: `GradAccumulator::unscale_clip(inv_scale, max_norm)` unscales the accumulated gradients, clips
   them and returns whether all are finite, with one readback on the GPU: with clipping the unscale is folded into the
   clip factors and the finiteness check is the clipping norm itself (the overflow-safe sum makes it non-finite
-  exactly when a gradient is); without, it is `amp::unscale_` (below).
+  exactly when a gradient is); without, it is `amp::unscale_` (below). For non-blocking GPU readbacks,
+  `GradAccumulator::unscale_clip_device_prepare` / `DeviceUnscaleClip::apply` (returning a `DeviceUnscaleClip` with
+  `finite_scalar()`) and `GradAccumulator::unscale_prepare_device` (wrapping `amp::unscale_prepare_device_`) split
+  the finiteness scalar from the in-place scaling pass so callers can overlap the host readback wait with scaling and
+  schedule preparation.
 - Recipe helpers: `accumulate_steps(nbs, batch)`, `effective_weight_decay`, `auto_optimizer` (§8.2 `auto`).
 - `Optimizer::contract()` / `apply_contract()` / `state_tensors()` / `load_state()` are the `folo.optim` contract
   and `optim.*` tensors of FORMAT.md. `MuSgd::with_weights(groups, MuSgdWeights { muon, sgd })` sets MuSGD's step

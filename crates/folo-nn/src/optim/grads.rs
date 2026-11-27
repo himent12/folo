@@ -13,6 +13,57 @@ use super::simd::{
 use super::{GradSource, PAR_THRESHOLD, cpu_fast, storage_key};
 use crate::Result;
 
+/// Prepared device-side norm reduction for two-phase mixed-precision unscale+clip
+/// ([`GradAccumulator::unscale_clip_device_prepare`] / [`DeviceUnscaleClip::apply`]).
+///
+/// Borrows its originating [`GradAccumulator`] mutably until [`DeviceUnscaleClip::apply`] consumes it, so
+/// callers cannot mutate or swap the accumulator between phase 1 and phase 2. Callers on a GPU backend can
+/// start a non-blocking readback of [`DeviceUnscaleClip::finite_scalar`] before calling
+/// [`DeviceUnscaleClip::apply`], overlapping the finiteness readback wait with the in-place gradient scaling
+/// pass.
+pub struct DeviceUnscaleClip<'a> {
+    acc: &'a mut GradAccumulator,
+    r: Tensor,
+    root: Tensor,
+    h: Tensor,
+    one: Tensor,
+    max_norm: f64,
+    pre: f32,
+}
+
+impl std::fmt::Debug for DeviceUnscaleClip<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceUnscaleClip")
+            .field("max_norm", &self.max_norm)
+            .field("pre", &self.pre)
+            .field("r_shape", self.r.shape())
+            .finish()
+    }
+}
+
+impl DeviceUnscaleClip<'_> {
+    /// Device `F32` scalar whose single value is finite iff every accumulated gradient was finite.
+    pub fn finite_scalar(&self) -> &Tensor {
+        &self.r
+    }
+
+    /// Phase 2 of device unscale+clip: derives the two-factor clip multipliers and scales every valid
+    /// accumulated gradient buffer in place.
+    pub fn apply(self) -> Result<()> {
+        let Self { acc, r, root, h, one, max_norm, pre } = self;
+        acc.apply_clip_device(&ClipPlan { r, root, h, one, max_norm, pre })
+    }
+}
+
+struct ClipPlan {
+    r: Tensor,
+    root: Tensor,
+    h: Tensor,
+    one: Tensor,
+    max_norm: f64,
+    pre: f32,
+}
+
 struct Slot {
     param: Tensor,
     buf: Option<Tensor>,
@@ -582,8 +633,57 @@ impl GradAccumulator {
         Ok(true)
     }
 
+    /// Two-phase GPU mixed-precision unscale+clip, phase 1: when all valid accumulated gradients live on a
+    /// single non-CPU device and `max_norm > 0.0`, encodes the overflow-safe norm reduction and returns a
+    /// [`DeviceUnscaleClip`] borrowing `self` without reading anything back to the host.
+    ///
+    /// Callers can start a non-blocking download of [`DeviceUnscaleClip::finite_scalar`] (which is finite iff
+    /// every accumulated gradient is finite), then call [`DeviceUnscaleClip::apply`] so the in-place gradient
+    /// scaling overlaps with the readback wait. Returns `Ok(None)` when there are no valid gradients,
+    /// `!(max_norm > 0.0)`, or gradients are on the CPU / span multiple devices.
+    pub fn unscale_clip_device_prepare(
+        &mut self,
+        inv_scale: f32,
+        max_norm: f64,
+    ) -> Result<Option<DeviceUnscaleClip<'_>>> {
+        if max_norm.is_nan() || max_norm <= 0.0 || !self.all_valid_on_single_device() {
+            return Ok(None);
+        }
+        let ClipPlan { r, root, h, one, max_norm, pre } = self.prepare_clip_device(max_norm, inv_scale)?;
+        Ok(Some(DeviceUnscaleClip { acc: self, r, root, h, one, max_norm, pre }))
+    }
+
+    /// Non-blocking GPU unscale+check when clipping is disabled (`max_norm <= 0.0`): delegates to
+    /// [`crate::amp::unscale_prepare_device_`] over all valid accumulated gradient buffers, returning
+    /// `Ok(Some(flag))` (a 1-element `U32` device tensor holding `0` iff all gradients are finite) without a
+    /// host sync, or `Ok(None)` without mutating buffers when the multi-tensor GPU path does not apply.
+    pub fn unscale_prepare_device(&mut self, inv_scale: f32) -> Result<Option<Tensor>> {
+        if !self.all_valid_on_single_device() {
+            return Ok(None);
+        }
+        let bufs: Vec<&Tensor> =
+            self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid")).collect();
+        crate::amp::unscale_prepare_device_(&bufs, inv_scale)
+    }
+
     fn on_device(&self) -> bool {
         self.slots.iter().any(|s| s.valid && !s.param.device().is_cpu())
+    }
+
+    fn all_valid_on_single_device(&self) -> bool {
+        let mut dev: Option<Device> = None;
+        for s in self.slots.iter().filter(|s| s.valid) {
+            let d = s.buf.as_ref().expect("valid").device();
+            if d.is_cpu() {
+                return false;
+            }
+            match dev {
+                None => dev = Some(d),
+                Some(prev) if prev != d => return false,
+                Some(_) => {}
+            }
+        }
+        dev.is_some()
     }
 
     /// [`GradAccumulator::clip_grad_norm`] for gradients on a device, without a host round trip: the norm (in
@@ -595,6 +695,14 @@ impl GradAccumulator {
     /// `pre · g`, and every buffer ends up as `pre · g · min(1, max_norm / (n + 1e-6))`. Returns `n / s`, a device
     /// scalar that is finite exactly when every gradient is (a non-finite peak makes the units 0 or NaN).
     fn clip_grad_norm_device(&mut self, max_norm: f64, pre: f32) -> Result<Tensor> {
+        let plan = self.prepare_clip_device(max_norm, pre)?;
+        self.apply_clip_device(&plan)?;
+        Ok(plan.r)
+    }
+
+    /// Phase 1 of device gradient norm + clipping: computes the overflow-safe scaled norm scalar `r = n_b / s`
+    /// without scaling the buffers yet.
+    fn prepare_clip_device(&self, max_norm: f64, pre: f32) -> Result<ClipPlan> {
         let _g = no_grad();
         let bufs: Vec<&Tensor> =
             self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid")).collect();
@@ -612,7 +720,8 @@ impl GradAccumulator {
                 cat(peaks)?.max_all()?
             }
         };
-        let scale = peak.gt_scalar(0.0)?.where_cond(&peak, &peak.ones_like()?)?;
+        let one = peak.ones_like()?;
+        let scale = peak.gt_scalar(0.0)?.where_cond(&peak, &one)?;
         // Work in units of s = the largest magnitude, through h = 1 / sqrt(s): every intermediate (g·h, g·h², max·h,
         // r·sqrt(s)) stays a normal f32 for any finite s, where 1 / s or max / s could be subnormal (and flushed to
         // zero by the GPU's division) and n = s·r could overflow.
@@ -630,25 +739,34 @@ impl GradAccumulator {
             }
         };
         let r = sum.sqrt()?; // n_b / s, the norm of the buffers as they are
+        Ok(ClipPlan { r, root, h, one, max_norm, pre })
+    }
+
+    /// Phase 2 of device gradient norm + clipping: derives the two-factor clip multipliers from `plan` and scales
+    /// every valid gradient buffer in place.
+    fn apply_clip_device(&mut self, plan: &ClipPlan) -> Result<()> {
+        let _g = no_grad();
+        let bufs: Vec<&Tensor> =
+            self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid")).collect();
+        let (r, root, h, one) = (&plan.r, &plan.root, &plan.h, &plan.one);
         // The norm of `pre · g` is n = pre · n_b, so with max' = max / pre and eps' = 1e-6 / pre:
         // n > max ⇔ r·sqrt(s) > max'·h, and pre · max / (n + 1e-6) = max / (n_b + eps') = h · (max·h / (r + eps'·h²)),
         // applied as two factors (or `pre` alone below the threshold). If `(max / pre) as f32` rounds to infinity (a
         // loss scale near `MAX_SCALE`, or a very large `clip_grad_norm`), the comparison is false for finite buffers,
         // so the factors are `pre` and 1 and no NaN comes from it. The step is then not clipped, even if the buffers'
         // norm is above `max · S`, a known limit: such buffers hold values within a few orders of `f32::MAX`.
-        let (max, pre_f) = (max_norm as f32, pre as f64);
-        let clip = r.mul(&root)?.gt(&h.mul_scalar((max_norm / pre_f) as f32)?)?;
-        let one = r.ones_like()?;
-        let k = h.mul_scalar(max)?.div(&r.add(&h.mul(&h)?.mul_scalar((1e-6 / pre_f) as f32)?)?)?;
-        let keep = if pre == 1.0 { one.clone() } else { one.mul_scalar(pre)? };
-        let (f1, f2) = (clip.where_cond(&h, &keep)?, clip.where_cond(&k, &one)?);
+        let (max, pre_f) = (plan.max_norm as f32, plan.pre as f64);
+        let clip = r.mul(root)?.gt(&h.mul_scalar((plan.max_norm / pre_f) as f32)?)?;
+        let k = h.mul_scalar(max)?.div(&r.add(&h.mul(h)?.mul_scalar((1e-6 / pre_f) as f32)?)?)?;
+        let keep = if plan.pre == 1.0 { one.clone() } else { one.mul_scalar(plan.pre)? };
+        let (f1, f2) = (clip.where_cond(h, &keep)?, clip.where_cond(&k, one)?);
         if !Tensor::scale_many_(&bufs, &f1, &f2)? {
             for b in &bufs {
                 b.mul_assign(&f1)?;
                 b.mul_assign(&f2)?;
             }
         }
-        Ok(r)
+        Ok(())
     }
 }
 

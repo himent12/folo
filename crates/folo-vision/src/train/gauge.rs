@@ -106,9 +106,18 @@ fn rescale_conv_bn(
     let fan = weight.numel() / c_out;
     let dev = weight.device();
 
-    let mut w = weight.to_vec::<f32>()?;
-    let mut mu = running_mean.to_vec::<f32>()?;
-    let mut var = running_var.to_vec::<f32>()?;
+    let (mut w, mut mu, mut var) = if running_mean.device() == dev
+        && running_var.device() == dev
+        && let Some(ctx) = folo_gpu::context_for(dev)
+    {
+        let mut host = folo_gpu::download_many(&ctx, &[weight, running_mean, running_var])?;
+        let var = host.pop().expect("running_var").to_vec::<f32>()?;
+        let mu = host.pop().expect("running_mean").to_vec::<f32>()?;
+        let w = host.pop().expect("weight").to_vec::<f32>()?;
+        (w, mu, var)
+    } else {
+        (weight.to_vec::<f32>()?, running_mean.to_vec::<f32>()?, running_var.to_vec::<f32>()?)
+    };
     if mu.len() != c_out || var.len() != c_out {
         return Ok((0, c_out));
     }

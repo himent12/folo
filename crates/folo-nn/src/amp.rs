@@ -38,6 +38,25 @@ pub fn usable_scale(s: f64) -> bool {
     f > 0.0 && f.is_normal() && (1.0 / f).is_normal()
 }
 
+/// Device-only non-blocking half of [`unscale_`]: when all `grads` live on the same non-CPU device and the
+/// backend's multi-tensor fused unscale-and-check kernel applies, multiplies every tensor by `inv_scale` in place
+/// and returns `Ok(Some(flag))` (a 1-element `U32` tensor on that device holding `0` iff every result is finite)
+/// without reading the flag back to the host.
+///
+/// Returns `Ok(None)` without mutating `grads` when the batch is empty, on the CPU, spans multiple devices, or
+/// the multi-tensor kernel declines the batch; callers then fall back to [`unscale_`].
+pub fn unscale_prepare_device_(grads: &[&Tensor], inv_scale: f32) -> Result<Option<Tensor>> {
+    let Some(dev) = grads.first().map(|g| g.device()) else {
+        return Ok(None);
+    };
+    if dev.is_cpu() || !grads.iter().all(|g| g.device() == dev) {
+        return Ok(None);
+    }
+    let _g = no_grad();
+    let flag = Tensor::zeros_with([1], DType::U32, dev)?;
+    if Tensor::unscale_check_many_(grads, inv_scale, &flag)? { Ok(Some(flag)) } else { Ok(None) }
+}
+
 /// Multiply every tensor of `grads` by `inv_scale` in place and return whether every result is finite: the loss
 /// scaler's unscale and overflow check. On a device each tensor takes one fused kernel
 /// ([`Tensor::unscale_check_`]) that also raises a shared device flag, and the flag is read back once; tensors the
@@ -77,14 +96,8 @@ pub fn unscale_(grads: &[&Tensor], inv_scale: f32) -> Result<bool> {
     }
     // All on one device: one multi-tensor kernel (16 tensors per dispatch on the GPU).
     let mut rest = grads;
-    if let Some(dev) = grads.first().map(|g| g.device())
-        && !dev.is_cpu()
-        && grads.iter().all(|g| g.device() == dev)
-    {
-        let flag = Tensor::zeros_with([1], DType::U32, dev)?;
-        if Tensor::unscale_check_many_(grads, inv_scale, &flag)? {
-            rest = &[];
-        }
+    if let Some(flag) = unscale_prepare_device_(grads, inv_scale)? {
+        rest = &[];
         flags.push(flag);
     }
     for g in rest {

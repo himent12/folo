@@ -233,7 +233,11 @@ Opt-in post-processing on `o2m` NMS clusters (MODEL.md §9.4, configured via `Nm
   callback and to the run's `metrics.jsonl`; the CLI's progress view, `--json` and the server consume them.
 - **Devices:** the device is a parameter. On a GPU (`place_model` moves the model; optimizer, EMA and gradient
   buffers follow) a feeder thread stages each `u8` batch for upload while the previous step runs, accumulation and
-  clipping stay on the device, and the step waits only for the loss items and one BatchNorm finiteness check.
+  clipping stay on the device, and the standard GPU batch path encodes forward, `o2m` (and `o2o`) loss stats, and
+  `RunningStats::prepare_live_finite_check` into one non-blocking `folo_gpu::download_many_deferred` submission,
+  immediately encodes and flushes `backward()` so the GPU never idles before backward, and collects the earlier
+  submission while backward executes (dropping the freshly computed gradients and restoring `RunningStats` on a
+  non-finite batch without touching `GradAccumulator`).
 - **GPU Auto-Batch Prober (`train/auto_batch/`):** opt-in (`TrainConfig.auto_batch = true`,
   `auto_batch_target = 0.80` in `0.25..=0.95`), wired into `Trainer::new` before `place_model` (skipped on CPU and on
   checkpoint resume so resumed schedules stay bit-exact). Queries `folo-gpu`'s `MemoryBudget` (`memory_budget()`,
@@ -249,9 +253,11 @@ Opt-in post-processing on `o2m` NMS clusters (MODEL.md §9.4, configured via `Nm
   exposed via `Trainer::auto_batch_plan()` and `config.json`'s `auto_batch`).
 - **Mixed precision** (`amp`, MODEL.md §8.8; GPU tensor cores only, else `not_supported`): the forward under
   `autocast` (f16 convs and products on tensor cores), the loss in f32 on f32 copies of the head, backward of the loss
-  times folo-nn's `GradScaler` scale, and at the end of a window the unscale, clip and overflow check with one flag
-  readback (an overflowing window skips its step and backs the scale off). Master weights, optimizer state, EMA and
-  BatchNorm statistics stay f32, and the scaler is the checkpoint's `folo.amp`.
+  times folo-nn's `GradScaler` scale, and at the end of a window two-phase unscale, clip and overflow checking
+  (`GradAccumulator::unscale_clip_device_prepare` + `folo_gpu::download_deferred` + `DeviceUnscaleClip::apply` +
+  `ctx.flush()`, or `unscale_prepare_device` when clipping is off) so in-place gradient scaling and schedule
+  application overlap with the finiteness readback while preserving exact skip / loss-scale backoff semantics.
+  Master weights, optimizer state, EMA and BatchNorm statistics stay f32, and the scaler is the checkpoint's `folo.amp`.
 - `folo_vision::val::{validate, validate_v2, validate_detector}` is the same validation for `folo val` (and forwards
   `ValConfig::eval` to `Evaluator::with_config` so opt-in per-image error diagnosis works directly through validation).
 
