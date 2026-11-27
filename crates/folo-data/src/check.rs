@@ -451,32 +451,51 @@ fn merge<'a>(
     results: Vec<ImageCheck>,
     root: &Path,
 ) {
-    let mut seen: HashMap<(u128, u64), (Split, &Path)> = HashMap::new();
-    for ((split, path), r) in paths.zip(results) {
+    let entries: Vec<(Split, &'a Path)> = paths.collect();
+    // Track how many dataset entries reference each normalised file path across all splits so cleanup advice never
+    // tells the user to delete a file that another split or entry still points to.
+    let mut path_counts: HashMap<PathBuf, usize> = HashMap::with_capacity(entries.len());
+    for &(_, p) in &entries {
+        *path_counts.entry(crate::paths::normalize(p)).or_insert(0) += 1;
+    }
+    let mut seen: HashMap<(u128, u64), (Split, &'a Path)> = HashMap::new();
+    for ((split, path), r) in entries.into_iter().zip(results) {
         issues.extend(r.issues);
         if let Some(key) = r.hash {
             match seen.get(&key) {
                 Some(&(first_split, first)) => {
-                    let rel = crate::paths::relative_to(first, root);
-                    let same_file = crate::paths::normalize(first) == crate::paths::normalize(path);
-                    let (message, fix) = if first_split != split && same_file {
+                    let rel_first = crate::paths::relative_to(first, root);
+                    let rel_this = crate::paths::relative_to(path, root);
+                    let shared = path_counts.get(&crate::paths::normalize(path)).copied().unwrap_or(0) > 1;
+                    let (message, fix) = if first_split != split && shared {
                         (
-                            format!("split leakage ({split} shares the same file as {first_split}): {rel}"),
                             format!(
-                                "remove {rel} from the {split} split list so it belongs to only one split"
+                                "split leakage ({split} shares a file with another entry; same bytes as {rel_first})"
+                            ),
+                            format!(
+                                "remove {rel_this} from the {split} split list so it belongs to only one split"
                             ),
                         )
                     } else if first_split != split {
                         (
-                            format!("split leakage ({split} duplicates {first_split}): same bytes as {rel}"),
                             format!(
-                                "remove this {split} copy (and its label file) to prevent {first_split}/{split} leakage; keep {rel}"
+                                "split leakage ({split} duplicates {first_split}): same bytes as {rel_first}"
                             ),
+                            format!(
+                                "remove this {split} copy (and its label file) to prevent {first_split}/{split} leakage; keep {rel_first}"
+                            ),
+                        )
+                    } else if shared {
+                        (
+                            format!(
+                                "duplicate entry in {split}: shares the same file as an earlier entry ({rel_this})"
+                            ),
+                            format!("remove the duplicate {rel_this} entry from the {split} split list"),
                         )
                     } else {
                         (
-                            format!("same bytes as {rel}"),
-                            format!("remove this copy (and its label file); keep {rel}"),
+                            format!("same bytes as {rel_first}"),
+                            format!("remove this copy (and its label file); keep {rel_first}"),
                         )
                     };
                     issues.push(CheckIssue::new(CheckKind::DuplicateImage, path, None, message, Some(fix)));

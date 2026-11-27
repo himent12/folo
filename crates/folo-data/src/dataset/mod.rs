@@ -542,7 +542,7 @@ fn locate(path: &Path, format: Format) -> Result<Source> {
             return Ok(Source::Coco { root: path.to_path_buf(), jsons });
         }
     }
-    if want_voc && voc::looks_like_voc_dir(path) {
+    if want_voc && voc::looks_like_voc_dir(path, format == Format::Auto) {
         return Ok(Source::Voc { root: path.to_path_buf(), single_xml: None });
     }
     if want_yolo && yolo::looks_like_yolo_dir(path) {

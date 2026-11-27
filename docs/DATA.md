@@ -178,8 +178,11 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
   background images keep balanced representation across splits.
 - `convert::convert(&loaded, out, Format::Yolo | Format::Coco | Format::Voc)` writes an opened dataset in the target
   format (images copied unchanged, stems made unique per split for YOLO/COCO and whitespace-free/unique across all
-  splits for VOC, COCO category ids 1-based; note `folo dataset convert --to` in the CLI currently targets `yolo | coco`,
-  while `Format::Voc` export is exposed through the `folo-data` library API).
+  splits for VOC, COCO category ids 1-based; VOC export writes classic 1-based inclusive integer `<bndbox>`
+  coordinates by rounding widths `>= 1` px to `[round(x1) + 1, round(x2)]` and collapsing sub-pixel boxes to a
+  1-pixel box at `floor(midpoint) + 1`, and requires single-line trimmed non-empty class names; note `folo dataset
+  convert --to` in the CLI currently targets `yolo | coco`, while `Format::Voc` export is exposed through the
+  `folo-data` library API).
 - `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
   a `DataError::Format` whose message starts with `UNDETECTED`. A folder a writer has not finished (below) is refused
   as unfinished first, whatever it holds.

@@ -140,6 +140,12 @@ fn voc_classic_layout_with_imagesets_entities_difficult_one_based_and_roundtrip(
     let conv_voc = convert(&from_yolo, &voc2_dir, Format::Voc).unwrap();
     assert_eq!(conv_voc.splits, ds.split_sizes());
     assert_eq!(detect_format(&voc2_dir, Format::Auto).unwrap(), Format::Voc);
+    // Exported VOC XML emits clean integer coordinates (Detectron2 `int()` compatible).
+    let raw_xml = std::fs::read_to_string(voc2_dir.join("Annotations/000001.xml")).unwrap();
+    assert!(raw_xml.contains("<xmin>1</xmin>"), "{raw_xml}");
+    assert!(raw_xml.contains("<xmax>100</xmax>"), "{raw_xml}");
+    assert!(raw_xml.contains("<xmax>1</xmax>"), "{raw_xml}");
+    assert!(!raw_xml.contains(".0000"), "{raw_xml}");
     let from_voc2 = open(&voc2_dir).unwrap();
     assert_eq!(from_voc2.classes, ds.classes);
     assert_eq!(from_voc2.split_sizes(), ds.split_sizes());
@@ -236,12 +242,26 @@ fn voc_trainval_fallback_colocated_split_dirs_stem_only_and_unfinished_marker() 
         .to_string();
     assert!(err.contains("is a Pascal VOC .xml file, not YOLO"), "{err}");
 
-    // 5. Random non-VOC XML in a folder is NOT falsely detected as a VOC dataset.
+    // 5. Random non-VOC XML in a folder (or inside Annotations/ of a YOLO dir) is NOT detected as VOC under Auto.
     let other = t.join("not-voc");
     write(&other.join("pom.xml"), "<project><modelVersion>4.0.0</modelVersion></project>");
     assert!(detect_format(&other, Format::Auto).is_err());
 
-    // 6. Unfinished marker refuses VOC root, `Annotations/` dir, and single `.xml` file.
+    let yolo_with_meta = t.join("yolo-meta");
+    write_png(&yolo_with_meta.join("images/train/a.png"), 16, 16, [1, 2, 3]);
+    write(&yolo_with_meta.join("labels/train/a.txt"), "0 0.5 0.5 0.5 0.5\n");
+    write(&yolo_with_meta.join("Annotations/metadata.xml"), "<metadata><version>1</version></metadata>");
+    assert_eq!(detect_format(&yolo_with_meta, Format::Auto).unwrap(), Format::Yolo);
+    assert_eq!(detect_format(&yolo_with_meta, Format::Voc).unwrap(), Format::Voc);
+
+    // 6. VOC conversion rejects multiline/untrimmed class names cleanly before creating the output folder.
+    let mut bad_cls = ds.clone();
+    bad_cls.classes = vec!["line1\nline2".into()];
+    let bad_out = t.join("bad-classes");
+    assert!(convert(&bad_cls, &bad_out, Format::Voc).is_err());
+    assert!(!bad_out.exists());
+
+    // 7. Unfinished marker refuses VOC root, `Annotations/` dir, and single `.xml` file.
     write(&tv.join(folo_data::unfinished::MARKER), "wip");
     for p in [tv.clone(), tv.join("Annotations"), tv.join("Annotations/a.xml")] {
         assert!(matches!(detect_format(&p, Format::Auto), Err(DataError::Unfinished(_))), "{}", p.display());
@@ -260,7 +280,7 @@ fn voc_rejects_path_traversal_and_drive_prefix_escape() {
         &r.join("Annotations/legit.xml"),
         voc_xml("legit.png", Some((16, 16)), &[("ok", [1.0, 1.0, 10.0, 10.0], false)]),
     );
-    // XML attempting path traversal or Windows drive-relative path.
+    // XML attempting path traversal or Windows drive-relative paths (including after `./` or a subdir).
     write(
         &r.join("Annotations/evil_rel.xml"),
         "<annotation><folder>..</folder><filename>../outside.png</filename>\
@@ -272,14 +292,26 @@ fn voc_rejects_path_traversal_and_drive_prefix_escape() {
          <object><name>bad</name><bndbox><xmin>1</xmin><ymin>1</ymin><xmax>5</xmax><ymax>5</ymax></bndbox></object></annotation>",
     );
     write(
+        &r.join("Annotations/evil_dot_drive.xml"),
+        "<annotation><folder>./C:</folder><filename>./C:outside.png</filename>\
+         <object><name>bad</name><bndbox><xmin>1</xmin><ymin>1</ymin><xmax>5</xmax><ymax>5</ymax></bndbox></object></annotation>",
+    );
+    // Relative subdirectory background image AND exact-stem precedence (`frame.jpg.png` over `frame.jpg`).
+    write_png(&r.join("JPEGImages/sub/bg.png"), 16, 16, [12, 34, 56]);
+    write_png(&r.join("JPEGImages/frame.jpg.png"), 24, 12, [77, 88, 99]);
+    write_png(&r.join("JPEGImages/frame.jpg"), 16, 16, [11, 22, 33]);
+    write(
         &r.join("ImageSets/Main/train.txt"),
-        "legit\n../../outside\n/abs/outside\nC:outside\nevil_rel\nevil_drive\n",
+        "legit\n../../outside\n../../legit.jpg\n/abs/outside\nC:outside\n./C:outside\nsub/C:outside\n\
+         evil_rel\nevil_drive\nevil_dot_drive\nsub/bg.png\nframe.jpg\n",
     );
     let ds = open(&r).unwrap();
-    // Only legit.png loads; none of the traversal/drive-prefix entries escape to t/outside.png.
-    assert_eq!(ds.train.len(), 1);
+    // legit.png, sub/bg.png, and frame.jpg.png load; none of the traversal/drive-prefix entries escape.
+    assert_eq!(ds.train.len(), 3, "{:#?}", ds.train.entries());
     assert!(ds.train.entries()[0].image.ends_with("legit.png"));
-    assert!(ds.report.issues.iter().any(|i| i.message.contains("unsafe image ID")));
+    assert!(ds.train.entries()[1].image.ends_with("bg.png"));
+    assert!(ds.train.entries()[2].image.ends_with("frame.jpg.png"));
+    assert!(ds.report.issues.iter().filter(|i| i.message.contains("unsafe image ID")).count() >= 5);
 }
 
 #[test]
@@ -348,14 +380,37 @@ fn voc_malformed_xml_errors_check_reconciliation_and_shared_file_leakage() {
         rep.issues
     );
     // Shared-file leakage advises removing split membership, NOT deleting the file!
-    let leak = rep.issues.iter().find(|i| i.kind == CheckKind::DuplicateImage).unwrap();
-    assert!(leak.message.contains("shares the same file as train"), "{}", leak.message);
-    assert!(
-        leak.fix.as_deref().unwrap().contains("from the val split list")
-            && !leak.fix.as_deref().unwrap().contains("remove this val copy"),
-        "{:?}",
-        leak.fix
+    // Also verify when train has an earlier byte-identical copy (`copy.png`) BEFORE `good.png`,
+    // and `val` also references `good.png`, `val` STILL advises removing the split reference (never deleting good.png).
+    write_png(&r.join("JPEGImages/copy_of_good.png"), 32, 32, [200, 0, 0]);
+    write(
+        &r.join("Annotations/copy_of_good.xml"),
+        voc_xml("copy_of_good.png", Some((32, 32)), &[("cat", [2.0, 2.0, 12.0, 12.0], false)]),
     );
+    write(&r.join("ImageSets/Main/train.txt"), "copy_of_good\ngood\nmismatch\nbad\n");
+    write(&r.join("ImageSets/Main/val.txt"), "good\n");
+    let rep2 = check(r, &CheckOptions::default()).unwrap();
+    let val_leak = rep2
+        .issues
+        .iter()
+        .find(|i| i.kind == CheckKind::DuplicateImage && i.message.contains("split leakage"))
+        .unwrap();
+    assert!(
+        val_leak.fix.as_deref().unwrap().contains("from the val split list")
+            && !val_leak.fix.as_deref().unwrap().contains("remove this val copy"),
+        "{:?}",
+        val_leak.fix
+    );
+
+    // Intra-split duplicate referencing the exact same file twice advises removing the duplicate split entry.
+    let intra = TempDir::new("intra-same-file");
+    write(&intra.join("data.yaml"), "train: train.txt\nnames: [a]\n");
+    write_png(&intra.join("images/a.png"), 16, 16, [1, 2, 3]);
+    write(&intra.join("labels/a.txt"), "0 0.5 0.5 0.4 0.4\n");
+    write(&intra.join("train.txt"), "images/a.png\nimages/a.png\n");
+    let intra_rep = check(intra.path(), &CheckOptions::default()).unwrap();
+    let intra_dup = intra_rep.issues.iter().find(|i| i.kind == CheckKind::DuplicateImage).unwrap();
+    assert!(intra_dup.fix.as_deref().unwrap().contains("from the train split list"), "{:?}", intra_dup.fix);
 }
 
 #[test]

@@ -12,7 +12,14 @@ pub(crate) enum VocItem {
     /// An XML annotation file on disk.
     Xml(PathBuf),
     /// A validated relative image ID from `ImageSets/Main/*.txt` whose XML file does not exist.
-    StemOnly { stem: PathBuf, raw: String, split_file: PathBuf },
+    StemOnly {
+        /// Exact validated relative stem (tried first so `frame.jpg.png` wins over `frame.jpg`).
+        exact_stem: PathBuf,
+        /// Optional stem after stripping a known image/XML extension, as fallback.
+        stripped_stem: Option<PathBuf>,
+        raw: String,
+        split_file: PathBuf,
+    },
 }
 
 /// Result of scanning a VOC dataset's layout and split assignments.
@@ -32,9 +39,16 @@ pub(crate) fn guarded_is_dir(p: &Path) -> bool {
 }
 
 /// Whether `dir` looks like a Pascal VOC dataset directory without reading every annotation.
-pub(crate) fn looks_like_voc_dir(dir: &Path) -> bool {
+///
+/// When `require_voc_root` is `true` (`Format::Auto`), `Annotations/` must contain at least one `<annotation` XML
+/// file so an unrelated `Annotations/metadata.xml` never hijacks a YOLO directory; when `false` (`Format::Voc`),
+/// any `.xml` inside `Annotations/` is accepted so malformed-XML diagnostics still run.
+pub(crate) fn looks_like_voc_dir(dir: &Path, require_voc_root: bool) -> bool {
+    let check_ann = |ann: &Path| {
+        if require_voc_root { has_voc_xml_files(ann) } else { has_xml_files(ann) }
+    };
     if let Some(ann_dir) = find_annotations_dir(dir)
-        && has_xml_files(&ann_dir)
+        && check_ann(&ann_dir)
     {
         return true;
     }
@@ -42,7 +56,7 @@ pub(crate) fn looks_like_voc_dir(dir: &Path) -> bool {
         let sub_dir = dir.join(sub);
         if guarded_is_dir(&sub_dir) {
             if let Some(ann) = find_annotations_dir(&sub_dir)
-                && has_xml_files(&ann)
+                && check_ann(&ann)
             {
                 return true;
             }
@@ -266,15 +280,9 @@ fn read_imageset_file(
             }
             continue;
         }
-        let stripped = strip_known_ext(candidate);
-        if let Some(xml_path) = xml_index.get(stripped) {
-            if seen.insert(stripped.to_string()) {
-                out.push(VocItem::Xml(xml_path.clone()));
-            }
-            continue;
-        }
-        // Validate stem before allowing any filesystem lookup (blocks `..`, `/abs`, and Windows drive prefixes).
-        let Some(safe_stem) = safe_relative_subpath(stripped) else {
+        // Validate the candidate ID BEFORE extension stripping so unsafe entries like `../../legit.jpg` or
+        // `C:outside.png` are always rejected instead of having their prefix discarded.
+        let Some(exact_stem) = safe_relative_subpath(candidate) else {
             report.push(
                 IssueKind::Other,
                 txt,
@@ -282,10 +290,21 @@ fn read_imageset_file(
             );
             continue;
         };
-        if seen.insert(stripped.to_string()) {
+        let stripped = strip_known_ext(candidate);
+        if stripped != candidate
+            && let Some(xml_path) = xml_index.get(stripped)
+        {
+            if seen.insert(stripped.to_string()) {
+                out.push(VocItem::Xml(xml_path.clone()));
+            }
+            continue;
+        }
+        let stripped_stem = (stripped != candidate).then(|| safe_relative_subpath(stripped)).flatten();
+        if seen.insert(candidate.to_string()) {
             out.push(VocItem::StemOnly {
-                stem: safe_stem,
-                raw: stripped.to_string(),
+                exact_stem,
+                stripped_stem,
+                raw: candidate.to_string(),
                 split_file: txt.to_path_buf(),
             });
         }
@@ -305,12 +324,16 @@ fn strip_trailing_voc_flag(line: &str) -> &str {
     line
 }
 
+/// Strips a trailing known `.xml` or image extension while preserving any leading relative directory components.
 fn strip_known_ext(token: &str) -> &str {
     let p = Path::new(token);
     if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
         let lower = ext.to_ascii_lowercase();
         if lower == "xml" || IMAGE_EXTENSIONS.contains(&lower.as_str()) {
-            return p.file_stem().and_then(|s| s.to_str()).unwrap_or(token);
+            let cut = token.len().saturating_sub(ext.len() + 1);
+            if cut > 0 && token.as_bytes().get(cut) == Some(&b'.') {
+                return &token[..cut];
+            }
         }
     }
     token
@@ -370,7 +393,7 @@ fn dirs_for_xml(root: &Path, split_dirs: &[PathBuf], xml_path: &Path, folder: Op
 }
 
 /// Validates that `raw` is a safe relative subpath made exclusively of normal path components (rejects `..`,
-/// absolute roots, and Windows drive prefixes such as `C:foo.jpg`).
+/// absolute roots, and Windows drive prefixes such as `C:foo.jpg` or `./C:foo.jpg` in any component).
 fn safe_relative_subpath(raw: &str) -> Option<PathBuf> {
     let normalized = raw.replace('\\', "/");
     let p = Path::new(&normalized);
@@ -380,12 +403,23 @@ fn safe_relative_subpath(raw: &str) -> Option<PathBuf> {
     let mut out = PathBuf::new();
     for c in p.components() {
         match c {
-            Component::Normal(s) => out.push(s),
+            Component::Normal(s) => {
+                if s.to_str().is_some_and(has_windows_drive_prefix) {
+                    return None;
+                }
+                out.push(s);
+            }
             Component::CurDir => {}
             _ => return None,
         }
     }
-    (!out.as_os_str().is_empty()).then_some(out)
+    if out.as_os_str().is_empty()
+        || out.is_absolute()
+        || !out.components().all(|c| matches!(c, Component::Normal(_)))
+    {
+        return None;
+    }
+    Some(out)
 }
 
 /// Rejects Windows drive-letter prefixes (`C:...`) on every OS so untrusted paths are rejected portably.
@@ -480,10 +514,30 @@ pub(crate) fn resolve_voc_image(
     fallback_dir.join(fallback_name)
 }
 
-pub(crate) fn resolve_stem_image(split_dirs: &[PathBuf], stem: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve_stem_image(
+    split_dirs: &[PathBuf],
+    exact_stem: &Path,
+    stripped_stem: Option<&Path>,
+) -> Option<PathBuf> {
+    // Try literal stem + image extension first (e.g. `frame.jpg` -> `frame.jpg.png`).
     for dir in split_dirs {
-        if let Some(found) = find_image_with_stem(dir, stem) {
+        if let Some(found) = find_image_with_stem(dir, exact_stem) {
             return Some(found);
+        }
+    }
+    // Next try exact filename match if the split list included an image extension (`frame.jpg`).
+    for dir in split_dirs {
+        let cand = dir.join(exact_stem);
+        if crate::is_image_path(&cand) && guarded_is_file(&cand) {
+            return Some(cand);
+        }
+    }
+    // Finally fall back to extension-stripped stem (`frame.xml` -> `frame.png`).
+    if let Some(stripped) = stripped_stem {
+        for dir in split_dirs {
+            if let Some(found) = find_image_with_stem(dir, stripped) {
+                return Some(found);
+            }
         }
     }
     None

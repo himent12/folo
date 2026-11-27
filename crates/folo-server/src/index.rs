@@ -735,6 +735,7 @@ impl Index {
         }
         let format = match ds.format {
             folo_data::Format::Coco => DatasetFormat::Coco,
+            folo_data::Format::Voc => DatasetFormat::Auto,
             _ => DatasetFormat::Yolo,
         };
         let splits = Splits { train: train as u64, val: val as u64, test: test as u64 };

@@ -50,6 +50,15 @@ pub fn convert(ds: &LoadedDataset, out: &Path, to: Format) -> Result<Converted> 
                 .into(),
         ));
     }
+    if to == Format::Voc {
+        for (i, c) in ds.classes.iter().enumerate() {
+            if c.trim().is_empty() || c.trim() != c || c.contains(['\n', '\r']) {
+                return Err(DataError::Config(format!(
+                    "cannot convert class #{i} ({c:?}) to Pascal VOC: class names must be non-empty, trimmed, and single-line"
+                )));
+            }
+        }
+    }
     let claim = crate::unfinished::claim(out)?;
     let mut splits = [0usize; 3];
     let mut boxes = 0;
@@ -237,7 +246,7 @@ fn unique_voc_names<'a>(taken: &mut HashSet<String>, paths: impl Iterator<Item =
                 p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into());
             let mut stem: String = raw_stem
                 .chars()
-                .map(|c| if c.is_whitespace() || c == '.' || c == '/' || c == '\\' { '_' } else { c })
+                .map(|c| if c.is_whitespace() || matches!(c, '.' | '/' | '\\' | ':') { '_' } else { c })
                 .collect();
             while stem.starts_with('#') {
                 stem.replace_range(..1, "_");

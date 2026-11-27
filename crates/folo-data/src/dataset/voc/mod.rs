@@ -224,7 +224,7 @@ struct ResolvedItem {
 enum ParsedItem {
     Valid { xml_path: PathBuf, ann: VocAnnotation },
     Broken { xml_path: PathBuf, message: String },
-    StemOnly { stem: PathBuf, raw: String, split_file: PathBuf },
+    StemOnly { exact_stem: PathBuf, stripped_stem: Option<PathBuf>, raw: String, split_file: PathBuf },
 }
 
 fn open_voc_inner(
@@ -259,9 +259,9 @@ fn open_voc_inner(
                         }
                     }
                 },
-                VocItem::StemOnly { stem, raw, split_file } => {
+                VocItem::StemOnly { exact_stem, stripped_stem, raw, split_file } => {
                     if is_wanted {
-                        Some(ParsedItem::StemOnly { stem, raw, split_file })
+                        Some(ParsedItem::StemOnly { exact_stem, stripped_stem, raw, split_file })
                     } else {
                         None
                     }
@@ -361,8 +361,10 @@ fn open_voc_inner(
                         }
                     }
                 }
-                ParsedItem::StemOnly { stem, raw, split_file } => {
-                    if let Some(image) = resolve_stem_image(&split_dirs, &stem) {
+                ParsedItem::StemOnly { exact_stem, stripped_stem, raw, split_file } => {
+                    if let Some(image) =
+                        resolve_stem_image(&split_dirs, &exact_stem, stripped_stem.as_deref())
+                    {
                         let item_sources = vec![crate::paths::parent_dir(&image).to_path_buf()];
                         ResolvedItem {
                             candidate: Some(Candidate {
@@ -449,7 +451,12 @@ pub(crate) fn read_and_parse_xml(path: &Path) -> std::result::Result<VocAnnotati
 }
 
 /// Formats a [`LoadedDataset`] image's boxes as a Pascal VOC `<annotation>` XML document using classic 1-based
-/// inclusive coordinates (matching [`VocCoordMode::OneBased`]).
+/// inclusive **integer** pixel coordinates (matching [`VocCoordMode::OneBased`], VOC2007/VOC2012 devkit, and
+/// Detectron2's `int()` XML parser).
+///
+/// Continuous 0-based edges `[x1, x2]` with width `>= 1` px round to `xmin = round(x1) + 1`, `xmax = round(x2)`
+/// clamped to `[1, width]` with `xmax >= xmin`. Sub-pixel boxes (`x2 - x1 < 1` px) map to the 1-pixel inclusive box
+/// `xmin = xmax = floor(midpoint) + 1` clamped to `[1, width]`.
 pub(crate) fn format_voc_xml(
     filename: &str,
     folder: &str,
@@ -469,37 +476,36 @@ pub(crate) fn format_voc_xml(
     out.push_str("    <depth>3</depth>\n");
     out.push_str("  </size>\n");
     out.push_str("  <segmented>0</segmented>\n");
-    let (fw, fh) = (width as f32, height as f32);
+    let (max_w, max_h) = (i64::from(width.max(1)), i64::from(height.max(1)));
     for b in boxes {
         let class_name = classes.get(b.class as usize).map(String::as_str).unwrap_or("unknown");
         let [x1, y1, x2, y2] = b.pixel_xyxy(width, height);
-        // Classic 1-based inclusive VOC mapping: 0-based [x1, x2] -> xmin = x1 + 1, xmax = x2 when width >= 1px;
-        // sub-pixel boxes collapse to a valid 1-pixel inclusive box centered at their midpoint so xmin <= xmax.
-        let (xmin, xmax) = if x2 - x1 >= 1.0 {
-            ((x1 + 1.0).clamp(1.0, fw), x2.clamp(1.0, fw))
-        } else {
-            let p = (0.5 * (x1 + x2) + 1.0).clamp(1.0, fw.max(1.0));
-            (p, p)
-        };
-        let (ymin, ymax) = if y2 - y1 >= 1.0 {
-            ((y1 + 1.0).clamp(1.0, fh), y2.clamp(1.0, fh))
-        } else {
-            let p = (0.5 * (y1 + y2) + 1.0).clamp(1.0, fh.max(1.0));
-            (p, p)
-        };
+        let (xmin, xmax) = to_one_based_int_span(x1, x2, max_w);
+        let (ymin, ymax) = to_one_based_int_span(y1, y2, max_h);
         out.push_str("  <object>\n");
         let _ = writeln!(out, "    <name>{}</name>", xml::escape_text(class_name));
         out.push_str("    <pose>Unspecified</pose>\n");
         out.push_str("    <truncated>0</truncated>\n");
         out.push_str("    <difficult>0</difficult>\n");
         out.push_str("    <bndbox>\n");
-        let _ = writeln!(out, "      <xmin>{xmin:.4}</xmin>");
-        let _ = writeln!(out, "      <ymin>{ymin:.4}</ymin>");
-        let _ = writeln!(out, "      <xmax>{xmax:.4}</xmax>");
-        let _ = writeln!(out, "      <ymax>{ymax:.4}</ymax>");
+        let _ = writeln!(out, "      <xmin>{xmin}</xmin>");
+        let _ = writeln!(out, "      <ymin>{ymin}</ymin>");
+        let _ = writeln!(out, "      <xmax>{xmax}</xmax>");
+        let _ = writeln!(out, "      <ymax>{ymax}</ymax>");
         out.push_str("    </bndbox>\n");
         out.push_str("  </object>\n");
     }
     out.push_str("</annotation>\n");
     out
+}
+
+fn to_one_based_int_span(lo: f32, hi: f32, max_dim: i64) -> (i64, i64) {
+    if hi - lo >= 1.0 {
+        let min_i = (lo.round() as i64 + 1).clamp(1, max_dim);
+        let max_i = (hi.round() as i64).clamp(min_i, max_dim);
+        (min_i, max_i)
+    } else {
+        let p = ((0.5 * (lo + hi)).floor() as i64 + 1).clamp(1, max_dim);
+        (p, p)
+    }
 }
