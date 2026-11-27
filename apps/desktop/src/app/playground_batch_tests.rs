@@ -487,3 +487,125 @@ fn playground_batch_same_basename_corrupt_first_iou_and_dataset_refresh_guards()
         );
     });
 }
+
+#[test]
+fn playtest_r13_compare_failed_banner_model_a_labels_inline_completion_and_mid_load_close() {
+    use crate::screens::playground::batch_action_labels;
+
+    // 1. Compare A/B mode explicitly labels Run All & Batch JSON/CSV as Model A.
+    assert_eq!(batch_action_labels(false, false), ("Run all", "Batch JSON", "Batch CSV"));
+    assert_eq!(batch_action_labels(false, true), ("Re-run all", "Batch JSON", "Batch CSV"));
+    assert_eq!(batch_action_labels(true, false), ("Run all (A)", "Batch JSON (A)", "Batch CSV (A)"));
+    assert_eq!(batch_action_labels(true, true), ("Re-run all (A)", "Batch JSON (A)", "Batch CSV (A)"));
+
+    let (mut app, window) = open();
+    app.update(|cx| {
+        super::bind_keys(cx);
+        crate::input::bind_keys(cx);
+    });
+    settle(&mut app, window);
+
+    // 2. Compare A/B renders persistent failure banner when stepping to a corrupt batch image.
+    let dir = folo_test_support::TestDir::new("desktop-playtest-r13-batch");
+    let good_a = dir.path().join("01-good.png");
+    let broken = dir.path().join("02-broken.png");
+    let good_b = dir.path().join("03-good.png");
+    write_test_png(&good_a, 200, 40, 40);
+    std::fs::write(&broken, b"\x89PNG\r\n\x1a\ncorrupt-payload").unwrap();
+    write_test_png(&good_b, 40, 200, 40);
+
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Playground, w, cx);
+        this.set_play_compare(true, cx);
+    });
+    settle(&mut app, window);
+
+    app.platform().answer_prompts(Some(vec![dir.path().to_path_buf()]));
+    drive(&mut app, window, |this, w, cx| this.pick_play_folder(w, cx));
+    settle(&mut app, window);
+
+    // Step from valid item 0 to corrupt item 1 in Compare A/B mode -> stage keeps rendering cleanly
+    // and exposes the persistent retry/skip controls in Compare mode.
+    drive(&mut app, window, |this, _, cx| {
+        assert!(this.play_compare.enabled);
+        assert_eq!(this.play_batch.active, 0);
+        assert!(this.play_image.is_some());
+        this.select_play_batch_item(1, cx);
+    });
+    settle(&mut app, window);
+
+    drive(&mut app, window, |this, _, _| {
+        assert_eq!(this.play_batch.active, 1);
+        assert!(matches!(this.play_batch.items[1].status, BatchItemStatus::Failed(_)));
+        assert!(
+            this.focus.borrow().contains_key("play-batch-retry-active"),
+            "Compare A/B stage must render the persistent failure banner with Retry action"
+        );
+        assert!(
+            this.focus.borrow().contains_key("play-batch-skip-next"),
+            "Compare A/B stage must render Next image action on failed batch item"
+        );
+    });
+
+    // 3. Clean Run All completion does NOT emit a toast over the bottom-right export row at 1024x680;
+    //    partial failure DOES emit a Warning toast.
+    drive(&mut app, window, |this, w, cx| {
+        this.set_play_compare(false, cx);
+        this.load_play_demo_batch(w, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
+        this.toasts.clear();
+        this.start_play_batch(true, cx);
+    });
+    settle(&mut app, window);
+    drive(&mut app, window, |this, _, cx| {
+        assert!(!this.play_batch.running);
+        assert!(
+            this.toasts.is_empty(),
+            "clean batch completion stays inline in the filmstrip instead of blocking export buttons: {:?}",
+            this.toasts.iter().map(|t| t.title.as_ref()).collect::<Vec<_>>()
+        );
+        // Simulate a partial-failure completion -> warning toast is still shown.
+        let model_id = this.play_model.clone().unwrap();
+        let last = this.play_batch.items.len() - 1;
+        this.play_batch.running = true;
+        this.play_batch.run_gen += 1;
+        let rgen = this.play_batch.run_gen;
+        this.play_batch_step_answered(
+            rgen,
+            last,
+            &model_id,
+            Err(crate::api::ApiError::new("decode_failed", "corrupt")),
+            cx,
+        );
+        assert!(
+            this.toasts.iter().any(|t| t.tone == crate::ui::Tone::Warning),
+            "partial batch failure still surfaces a Warning toast"
+        );
+    });
+
+    // 4. Closing the batch strip while a batch item load is in flight clears play_loading cleanly.
+    drive(&mut app, window, |this, _, cx| {
+        this.select_play_batch_item(2, cx);
+        assert!(this.play_loading.is_some());
+        this.clear_play_batch();
+    });
+    settle(&mut app, window);
+    assert!(
+        drive(&mut app, window, |this, _, _| this.play_loading.is_none()),
+        "closing batch strip mid-load must clear play_loading once the in-flight read settles"
+    );
+
+    // 5. Blocked multi-file intake checks open_image_blocked() BEFORE emitting skipped-file info toasts.
+    let txt = dir.path().join("notes.txt");
+    std::fs::write(&txt, b"hello").unwrap();
+    drive(&mut app, window, |this, w, cx| {
+        this.toasts.clear();
+        this.store.models = crate::store::Load::Ready(Vec::new());
+        let req = super::playground::OpenRequest { ticket: this.play_open_seq, model: None };
+        this.open_play_paths(vec![good_a, good_b, txt], req, w, cx);
+        assert_eq!(this.toasts.len(), 1, "blocked open must emit only the blocked toast");
+        assert_eq!(this.toasts[0].title.as_ref(), "Can't open images yet");
+    });
+}

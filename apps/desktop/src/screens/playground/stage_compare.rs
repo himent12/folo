@@ -233,6 +233,7 @@ impl FoloApp {
                     .child(div().w(px(1.)).h_full().bg(t.line_default).flex_none())
                     .child(pane_b),
             )
+            .children(self.play_batch_failed_banner(&t, window, cx))
             .children(batch_strip)
             .into_any_element()
     }

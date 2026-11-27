@@ -319,6 +319,19 @@ pub fn batch_tile_label(name: &str) -> &str {
     name.rsplit_once(" / ").map_or(name, |(_, f)| f)
 }
 
+/// Labels for the Playground batch run and export buttons; in Compare A/B mode they explicitly
+/// name Model A so users never expect Model B to be included in Model A's batch outputs.
+pub(crate) fn batch_action_labels(
+    compare_on: bool,
+    all_fresh: bool,
+) -> (&'static str, &'static str, &'static str) {
+    if compare_on {
+        (if all_fresh { "Re-run all (A)" } else { "Run all (A)" }, "Batch JSON (A)", "Batch CSV (A)")
+    } else {
+        (if all_fresh { "Re-run all" } else { "Run all" }, "Batch JSON", "Batch CSV")
+    }
+}
+
 impl FoloApp {
     /// Persistent failure banner shown whenever the active batch item failed to load or decode,
     /// regardless of whether Playground's stage is empty or still showing a prior image.
@@ -340,7 +353,13 @@ impl FoloApp {
             return None;
         }
         let fname = item.name.clone();
-        let msg = msg.clone();
+        let detail = match self.play_image.as_ref() {
+            Some(prev) => format!(
+                "{msg} · Showing previous image ({}) until you retry or switch.",
+                batch_tile_label(prev.name.as_ref())
+            ),
+            None => msg.clone(),
+        };
         let retry = self.button(
             "play-batch-retry-active",
             "Retry",
@@ -379,7 +398,7 @@ impl FoloApp {
                         .flex_col()
                         .gap(px(2.))
                         .child(text(ty::SM, t.danger_text).child(format!("Could not load {fname}")))
-                        .child(text(ty::XS, t.text_secondary).whitespace_normal().child(msg)),
+                        .child(text(ty::XS, t.text_secondary).whitespace_normal().child(detail)),
                 )
                 .child(div().flex().items_center().gap(px(6.)).flex_none().child(retry).child(next))
                 .into_any_element(),
@@ -450,6 +469,7 @@ impl FoloApp {
             window.focus(&self.fh("play-batch-run-all", cx));
         }
 
+        let compare_on = self.play_compare.enabled;
         let run_action: AnyElement = if running {
             self.button(
                 "play-batch-cancel",
@@ -467,9 +487,10 @@ impl FoloApp {
             .tooltip(crate::controls::tip("Cancel remaining batch inference", Some("Esc")))
             .into_any_element()
         } else if model_id.is_none() {
+            let (run_label, _, _) = batch_action_labels(compare_on, false);
             self.button_disabled(
                 "play-batch-run-all",
-                "Run all",
+                run_label,
                 Btn::Secondary,
                 Some("icons/play.svg"),
                 "Select a model first",
@@ -479,7 +500,12 @@ impl FoloApp {
             .into_any_element()
         } else {
             let all_fresh = summary.done == total && summary.failed == 0;
-            let label = if all_fresh { "Re-run all" } else { "Run all" };
+            let (label, _, _) = batch_action_labels(compare_on, all_fresh);
+            let tip = if compare_on {
+                "Run Model A sequentially across every batch image"
+            } else {
+                "Run the active model sequentially across every batch image"
+            };
             self.button(
                 "play-batch-run-all",
                 label,
@@ -489,10 +515,11 @@ impl FoloApp {
                 cx,
                 act(move |this, _, cx| this.start_play_batch(all_fresh, cx)),
             )
-            .tooltip(crate::controls::tip("Run the active model sequentially across every batch image", None))
+            .tooltip(crate::controls::tip(tip, None))
             .into_any_element()
         };
 
+        let model_prefix = if compare_on { "Model A · " } else { "" };
         let status_label = if running {
             let active_run = self
                 .play_batch
@@ -500,11 +527,15 @@ impl FoloApp {
                 .iter()
                 .position(|it| matches!(it.status, BatchItemStatus::Running))
                 .map_or(summary.done + 1, |i| i + 1);
-            format!("Running {active_run} / {total}…")
+            format!("{model_prefix}Running {active_run} / {total}…")
         } else if summary.failed > 0 {
-            format!("{} / {total} run · {} failed", summary.done, summary.failed)
+            format!("{model_prefix}{} / {total} run · {} failed", summary.done, summary.failed)
         } else if summary.done > 0 {
-            format!("{} / {total} run · {}", summary.done, plural(summary.total_detections, "det"))
+            format!(
+                "{model_prefix}{} / {total} run · {}",
+                summary.done,
+                plural(summary.total_detections, "det")
+            )
         } else {
             format!("{total} images ready")
         };
