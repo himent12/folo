@@ -26,6 +26,14 @@ export interface ViewBox {
   x2: number;
   y2: number;
   score?: number;
+  /** Persistent ByteTrack ID rendered as `#<track_id>` when live multi-object tracking is active. */
+  track_id?: number;
+}
+
+export interface ViewTrail {
+  track_id: number;
+  class: number;
+  points: readonly { x: number; y: number }[];
 }
 
 export interface DetectionViewProps {
@@ -34,6 +42,8 @@ export interface DetectionViewProps {
   height: number;
   boxes?: ViewBox[];
   truth?: ViewBox[];
+  /** Optional short per-track motion trails rendered underneath boxes when live tracking is paused/inspected. */
+  trails?: readonly ViewTrail[];
   classes: readonly string[];
   labels?: boolean;
   scores?: boolean;
@@ -113,6 +123,7 @@ export default function DetectionView(props: DetectionViewProps) {
     return !!g && Math.min(b.x2 - b.x1, b.y2 - b.y1) * g.s < 32;
   };
   const name = (c: number) => p.classes[c] ?? `class ${c}`;
+  const chipLabel = (b: ViewBox) => (b.track_id !== undefined ? `#${b.track_id} ${name(b.class)}` : name(b.class));
 
   /** Label chips placed in screen pixels (see ./chips). Widths are estimated from the text (11 px Geist). */
   const chips = computed(() => {
@@ -130,7 +141,7 @@ export default function DetectionView(props: DetectionViewProps) {
           ? {
               x: g.ox + b.x1 * g.s,
               y: g.oy + b.y1 * g.s,
-              w: Math.ceil(name(b.class).length * (sm ? 5.8 : 6.4) + (sm ? 10 : 12) + (scores && b.score !== undefined ? (sm ? 28 : 32) : 0)),
+              w: Math.ceil(chipLabel(b).length * (sm ? 5.8 : 6.4) + (sm ? 10 : 12) + (scores && b.score !== undefined ? (sm ? 28 : 32) : 0)),
               bw: (b.x2 - b.x1) * g.s,
               bh: (b.y2 - b.y1) * g.s,
               // A tiny box's label shows only on hover / selection: placed and clamped, but it reserves no slot.
@@ -247,6 +258,28 @@ export default function DetectionView(props: DetectionViewProps) {
           onpointerout={p.onhover ? onLayerPointerOut : undefined}
           onclick={p.onselect ? onLayerClick : undefined}
         >
+          {p.trails?.length ? (
+            <svg class="trails" aria-hidden="true">
+              <Index each={p.trails}>
+                {(t) => {
+                  const g = () => geo.get()!;
+                  const pts = () => t().points.map((pt) => `${(g().ox + pt.x * g().s).toFixed(1)},${(g().oy + pt.y * g().s).toFixed(1)}`).join(' ');
+                  const head = () => t().points[t().points.length - 1]!;
+                  return (
+                    <>
+                      {shown({ class: t().class, x1: 0, y1: 0, x2: 0, y2: 0 }) && t().points.length >= 2 ? (
+                        <g style={{ '--c': classColor(t().class) }}>
+                          <polyline class="trail-halo" points={pts()} />
+                          <polyline class="trail-line" points={pts()} />
+                          <circle class="trail-head" cx={g().ox + head().x * g().s} cy={g().oy + head().y * g().s} r={3} />
+                        </g>
+                      ) : null}
+                    </>
+                  );
+                }}
+              </Index>
+            </svg>
+          ) : null}
           <Index each={p.truth}>
             {(b) => (
               <>
@@ -313,7 +346,7 @@ export default function DetectionView(props: DetectionViewProps) {
                             style:left={`${(c()?.dx ?? 0) - 2 + clearX()}px`}
                             style:top={`${(c()?.dy ?? -17) - 2 + clear()}px`}
                           >
-                            {name(b().class)}
+                            {chipLabel(b())}
                             {p.scores && b().score !== undefined ? <span class="score">{b().score!.toFixed(2)}</span> : null}
                           </span>
                         </>
@@ -358,6 +391,35 @@ css`
     position: absolute;
     inset: 0;
     pointer-events: none;
+  }
+  .trails {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+  .trail-halo {
+    fill: none;
+    stroke: var(--class-halo);
+    stroke-width: 4;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.7;
+  }
+  .trail-line {
+    fill: none;
+    stroke: var(--c);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0.85;
+  }
+  .trail-head {
+    fill: var(--c);
+    stroke: var(--class-halo);
+    stroke-width: 1;
   }
   /* Strokes sit outside the box (content-box plus a negative margin of the border width), so the object inside stays
      fully visible: a small circle no longer reads as a filled square under a 2 px border. The halo wraps the stroke on

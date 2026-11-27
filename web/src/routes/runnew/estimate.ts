@@ -3,20 +3,42 @@
 // to, carried over to the run's settings the same way (lib/reference.ts). Shown as a range, labelled as reference.
 
 import { closeMosaicEpochs } from '$lib/api/progress';
-import type { Arch } from '$lib/api/types';
+import type { Arch, ArchFamily } from '$lib/api/types';
 import { e2eMs } from '$lib/benchmarks';
 import { archSpec, REF_STARTUP_S, referenceRates, referenceSpread, referenceVram } from '$lib/reference';
 
+export interface ArchRow {
+  arch: Arch;
+  family: ArchFamily;
+  size: string;
+  params: number;
+  flops: number;
+  ms?: number;
+  note: string;
+}
+
 // `size` is the letter shown in the model list, uppercase (a lowercase l reads as I or | in Geist).
 // Sizes and latency are measured where docs/BENCHMARKS.md has them (n, s); `ms` is absent otherwise. The other sizes'
-// params and GFLOPs are docs/MODEL.md's table (few classes, 640 px).
-export const arches: { arch: Arch; size: string; params: number; flops: number; ms?: number; note: string }[] = [
-  { arch: 'folo-n', size: 'N', params: archSpec['folo-n'].params, flops: archSpec['folo-n'].gflops, ms: e2eMs['folo-n'], note: 'Fastest; edge devices, quick tries.' },
-  { arch: 'folo-s', size: 'S', params: archSpec['folo-s'].params, flops: archSpec['folo-s'].gflops, ms: e2eMs['folo-s'], note: 'The default: fast and accurate.' },
-  { arch: 'folo-m', size: 'M', params: archSpec['folo-m'].params, flops: archSpec['folo-m'].gflops, note: 'More accuracy on busy scenes.' },
-  { arch: 'folo-l', size: 'L', params: archSpec['folo-l'].params, flops: archSpec['folo-l'].gflops, note: 'High accuracy; a strong GPU.' },
-  { arch: 'folo-x', size: 'X', params: archSpec['folo-x'].params, flops: archSpec['folo-x'].gflops, note: 'Best accuracy; the most memory.' },
+// params and GFLOPs follow docs/MODEL.md's scaling tables (few classes, 640 px).
+export const v1Arches: ArchRow[] = [
+  { arch: 'folo-n', family: 'folo', size: 'N', params: archSpec['folo-n'].params, flops: archSpec['folo-n'].gflops, ms: e2eMs['folo-n'], note: 'Fastest; edge devices, quick tries.' },
+  { arch: 'folo-s', family: 'folo', size: 'S', params: archSpec['folo-s'].params, flops: archSpec['folo-s'].gflops, ms: e2eMs['folo-s'], note: 'The default: fast and accurate.' },
+  { arch: 'folo-m', family: 'folo', size: 'M', params: archSpec['folo-m'].params, flops: archSpec['folo-m'].gflops, note: 'More accuracy on busy scenes.' },
+  { arch: 'folo-l', family: 'folo', size: 'L', params: archSpec['folo-l'].params, flops: archSpec['folo-l'].gflops, note: 'High accuracy; a strong GPU.' },
+  { arch: 'folo-x', family: 'folo', size: 'X', params: archSpec['folo-x'].params, flops: archSpec['folo-x'].gflops, note: 'Best accuracy; the most memory.' },
 ];
+
+export const v2Arches: ArchRow[] = [
+  { arch: 'folo2-n', family: 'folo2', size: 'N', params: archSpec['folo2-n'].params, flops: archSpec['folo2-n'].gflops, note: 'v2 nano; SPD stem, fast edge detector.' },
+  { arch: 'folo2-s', family: 'folo2', size: 'S', params: archSpec['folo2-s'].params, flops: archSpec['folo2-s'].gflops, note: 'v2 small; stronger small-object recall.' },
+  { arch: 'folo2-m', family: 'folo2', size: 'M', params: archSpec['folo2-m'].params, flops: archSpec['folo2-m'].gflops, note: 'v2 medium; high accuracy on busy scenes.' },
+  { arch: 'folo2-l', family: 'folo2', size: 'L', params: archSpec['folo2-l'].params, flops: archSpec['folo2-l'].gflops, note: 'v2 large; strong GPU, top precision.' },
+  { arch: 'folo2-x', family: 'folo2', size: 'X', params: archSpec['folo2-x'].params, flops: archSpec['folo2-x'].gflops, note: 'v2 extra-large; maximum accuracy.' },
+];
+
+export const arches: ArchRow[] = [...v1Arches, ...v2Arches];
+
+export const archesForFamily = (family: ArchFamily): ArchRow[] => (family === 'folo2' ? v2Arches : v1Arches);
 
 /**
  * Mixed precision (`amp`) against f32, measured on the training step (docs/BENCHMARKS.md, Mixed-precision training:

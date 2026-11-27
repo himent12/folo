@@ -6,8 +6,10 @@ import type { Epoch } from './runs';
 
 // ---------- Inference ----------
 
-/** Prediction boxes always carry the class name. */
-export type PredictBox = ScoredBox;
+/** Prediction boxes always carry the class name (and optional ByteTrack `track_id` in live tracking mode). */
+export interface PredictBox extends ScoredBox {
+  track_id?: number;
+}
 
 export interface Timing {
   preprocess_ms: number;

@@ -31,7 +31,18 @@ const REF_INFER_NOTE = 'docs/BENCHMARKS.md: end to end, batch 1, on an RTX 4080 
 const REF_INFER_NOTE_CPU = 'docs/BENCHMARKS.md: end to end, batch 1, on an i7-14700KF, scaled by compute; not measured on this device';
 
 /** Reference end-to-end latency at 640 px, f32, batch 1 (row 5 for n and s; the others by compute to the 0.35). */
-const REF_E2E_640: Record<Arch, number> = { 'folo-n': 5.18, 'folo-s': 7.87, 'folo-m': 11.4, 'folo-l': 12.4, 'folo-x': 16.0 };
+const REF_E2E_640: Record<Arch, number> = {
+  'folo-n': 5.18,
+  'folo-s': 7.87,
+  'folo-m': 11.4,
+  'folo-l': 12.4,
+  'folo-x': 16.0,
+  'folo2-n': 5.28,
+  'folo2-s': 7.97,
+  'folo2-m': 11.55,
+  'folo2-l': 12.55,
+  'folo2-x': 16.2,
+};
 
 const area = (imgsz: number) => (imgsz / 640) ** 2;
 const cost = compute;

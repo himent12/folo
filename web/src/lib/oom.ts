@@ -4,6 +4,7 @@
 
 import { ApiError, type Api } from '$lib/api/client';
 import type { Arch, SystemInfo, TrainConfig } from '$lib/api/types';
+import { smallerArchInFamily } from '$lib/arch';
 import { hasFeature } from '$lib/api/queue';
 import { referenceVram } from '$lib/reference';
 import { withoutInexactSeed } from '$lib/seed';
@@ -15,7 +16,6 @@ export const OOM_LABEL = 'Out of GPU memory';
 export const SMALL_BATCH = 4;
 /** The image sizes New run offers, smallest first. */
 export const IMGSZ_STEPS = [320, 480, 640, 960, 1280];
-const ARCHES: Arch[] = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'];
 
 const PREFIX = /^the GPU ran out of memory\s*/i;
 /**
@@ -65,7 +65,7 @@ export function oomFixes(c: Pick<TrainConfig, 'batch' | 'imgsz' | 'arch' | 'devi
   const batch: OomFix[] = c.batch > 1 ? [{ kind: 'batch', label: `Retry with batch ${halfBatch(c.batch)}`, query: { batch: String(halfBatch(c.batch)) } }] : [];
   const size = [...IMGSZ_STEPS].reverse().find((s) => s < c.imgsz);
   const imgsz: OomFix[] = size ? [{ kind: 'imgsz', label: `Retry at ${size} px`, query: { imgsz: String(size) } }] : [];
-  const smaller = ARCHES[ARCHES.indexOf(c.arch) - 1];
+  const smaller = smallerArchInFamily(c.arch);
   const arch: OomFix[] = smaller ? [{ kind: 'arch', label: `Retry with ${smaller}`, query: { arch: smaller } }] : [];
   const out = c.batch > SMALL_BATCH ? [...batch, ...imgsz, ...arch] : [...imgsz, ...arch, ...batch];
   if (!out.length && c.device !== 'cpu') out.push({ kind: 'cpu', label: 'Retry on the CPU', query: { device: 'cpu' } });

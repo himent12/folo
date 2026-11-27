@@ -18,13 +18,14 @@ export * from './options';
 
 export type Backend = 'webgpu' | 'cpu';
 
-/** Whether the loaded folo-wasm build exposes SAHI (`detectTiled`) and TTA (`detectTta`). `null` until loaded. */
+/** Whether the loaded folo-wasm build exposes SAHI (`detectTiled`), TTA (`detectTta`), and ByteTrack (`FoloTracker`). `null` until loaded. */
 export interface BrowserCapabilities {
   tiled: boolean | null;
   tta: boolean | null;
+  tracker: boolean | null;
 }
 
-/** `detector.info()` (docs/WASM.md). */
+/** `detector.info()` (crates/folo-wasm/src/lib.rs, docs/WASM.md). */
 export interface DetectorInfo {
   backend: Backend;
   device: string;
@@ -35,6 +36,112 @@ export interface DetectorInfo {
   arch: string;
   imgsz: number;
   classes: string[];
+  /** Detector architecture family (`folo` v1 or `folo2` v2), emitted by newer folo-wasm builds. */
+  family?: 'folo' | 'folo2';
+  /** Active detection head (`o2m` NMS or `o2o` end-to-end). */
+  headMode?: 'o2m' | 'o2o';
+  /** Whether the loaded weights include an end-to-end one-to-one head. */
+  hasO2o?: boolean;
+  /** Whether the loaded model includes an IoU-aware prediction head (`folo2`). */
+  hasIouHead?: boolean;
+  /** Active compute precision (`f32` or `f16` on WebGPU). */
+  precision?: 'f32' | 'f16';
+  /** Why requested f16 fell back to f32, if applicable. */
+  precisionFallback?: string | null;
+  /** True when compiled with WASM SIMD128. */
+  simd128?: boolean;
+  /** Worker thread count on CPU backend. */
+  threads?: number;
+  /** Model identifier stamped by the loader. */
+  modelId?: string;
+}
+
+/** Options accepted by `new FoloTracker(options)` (crates/folo-wasm/src/tracker/mod.rs). */
+export interface FoloTrackOptions {
+  highThresh?: number;
+  lowThresh?: number;
+  newTrackThresh?: number;
+  matchIou?: number;
+  secondMatchIou?: number;
+  tentativeMatchIou?: number;
+  trackBuffer?: number;
+  minHits?: number;
+  classAware?: boolean;
+  classes?: string[];
+}
+
+/** Resolved ByteTrack configuration returned by `tracker.config()`. */
+export interface FoloTrackConfig {
+  highThresh: number;
+  lowThresh: number;
+  newTrackThresh: number;
+  matchIou: number;
+  secondMatchIou: number;
+  tentativeMatchIou: number;
+  trackBuffer: number;
+  minHits: number;
+  classAware: boolean;
+}
+
+/** Detection input shape accepted by `tracker.update(boxes)`. */
+export interface FoloTrackInputBox {
+  class: number;
+  name?: string;
+  score: number;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/** Confirmed active tracked detection returned by `tracker.update(boxes)`. */
+export interface FoloTrackedBox {
+  track_id: number;
+  age: number;
+  hits: number;
+  state: 'tracked';
+  class: number;
+  name: string;
+  score: number;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+/** Live counters and config returned by `tracker.info()`. */
+export interface FoloTrackerInfo {
+  frameId: number;
+  activeTracks: number;
+  lostTracks: number;
+  config: FoloTrackConfig;
+}
+
+/** Stateful ByteTrack multi-object tracker exposed by `folo-wasm`. */
+export interface Tracker {
+  update(boxes: readonly FoloTrackInputBox[]): FoloTrackedBox[];
+  reset(): void;
+  config(): FoloTrackConfig;
+  info(): FoloTrackerInfo;
+  free(): void;
+}
+
+export interface FoloTrackerConstructor {
+  new (options?: FoloTrackOptions): Tracker;
+}
+
+/** Concise status badge text summarizing a loaded browser detector (including `folo2` family & head metadata). */
+export function detectorInfoBadge(info: DetectorInfo | null | undefined): string | null {
+  if (!info) return null;
+  const parts: string[] = [];
+  if (info.arch) parts.push(info.arch);
+  const isV2 = info.family === 'folo2' || info.arch.startsWith('folo2-');
+  if (isV2) parts.push('FOLO v2');
+  if (info.headMode === 'o2o') parts.push('o2o');
+  else if (info.headMode === 'o2m') parts.push('o2m');
+  if (info.hasIouHead) parts.push('IoU head');
+  if (info.precision === 'f16') parts.push('f16');
+  return parts.length ? parts.join(' · ') : null;
 }
 
 export interface Detector {
@@ -52,6 +159,7 @@ export interface WasmModule {
     load(bytes: Uint8Array, options: { backend: Backend; modelId: string }): Promise<Detector>;
     prototype?: Partial<Pick<Detector, 'detectTiled' | 'detectTta'>>;
   };
+  FoloTracker?: FoloTrackerConstructor;
 }
 
 let wasm: Promise<WasmModule> | null = null;
@@ -180,7 +288,7 @@ export function isDetectorLoadError(e: unknown): boolean {
 export class BrowserEngine {
   #phase = signal<Phase>('idle');
   #info = signal<DetectorInfo | null>(null);
-  #capabilities = signal<BrowserCapabilities>({ tiled: null, tta: null });
+  #capabilities = signal<BrowserCapabilities>({ tiled: null, tta: null, tracker: null });
   /** What the engine is doing for the latest request. */
   get phase(): Phase {
     return this.#phase.get();
@@ -314,15 +422,43 @@ export class BrowserEngine {
     }
   }
 
-  #setCapabilities(tiled: boolean, tta: boolean) {
+  /**
+   * Instantiates a fresh `folo-wasm` `FoloTracker` (ByteTrack) on demand.
+   * Returns `null` when the loaded WASM build predates `FoloTracker` (updates `capabilities.tracker` to `false`).
+   */
+  async createTracker(options?: FoloTrackOptions): Promise<Tracker | null> {
+    const m = await this.load();
+    this.#runtimeReady = true;
+    this.#recordModuleCaps(m);
+    if (typeof m.FoloTracker !== 'function') return null;
+    return new m.FoloTracker(options);
+  }
+
+  #setCapabilities(patch: Partial<BrowserCapabilities>) {
     const cur = this.#capabilities.peek();
-    if (cur.tiled !== tiled || cur.tta !== tta) {
-      this.#capabilities.set({ tiled, tta });
+    const next: BrowserCapabilities = {
+      tiled: patch.tiled !== undefined ? patch.tiled : cur.tiled,
+      tta: patch.tta !== undefined ? patch.tta : cur.tta,
+      tracker: patch.tracker !== undefined ? patch.tracker : cur.tracker,
+    };
+    if (cur.tiled !== next.tiled || cur.tta !== next.tta || cur.tracker !== next.tracker) {
+      this.#capabilities.set(next);
     }
   }
 
+  #recordModuleCaps(m: WasmModule) {
+    const proto = m.FoloDetector?.prototype;
+    this.#setCapabilities({
+      ...(proto ? { tiled: typeof proto.detectTiled === 'function', tta: typeof proto.detectTta === 'function' } : {}),
+      tracker: typeof m.FoloTracker === 'function',
+    });
+  }
+
   #recordDetectorCaps(det: Detector) {
-    this.#setCapabilities(typeof det.detectTiled === 'function', typeof det.detectTta === 'function');
+    this.#setCapabilities({
+      tiled: typeof det.detectTiled === 'function',
+      tta: typeof det.detectTta === 'function',
+    });
   }
 
   async #pixels(req: { image: () => Promise<Blob>; imageKey?: string }, superseded: () => void): Promise<ImageData> {
@@ -373,10 +509,7 @@ export class BrowserEngine {
       if (!this.#runtimeReady) setEntryPhase('runtime');
       const m = await this.load();
       this.#runtimeReady = true;
-      const proto = m.FoloDetector.prototype;
-      if (proto) {
-        this.#setCapabilities(typeof proto.detectTiled === 'function', typeof proto.detectTta === 'function');
-      }
+      this.#recordModuleCaps(m);
       setEntryPhase('weights');
       const dl = req.file ? null : this.#acquireDownload(req);
       let bytes: Uint8Array | null = null;

@@ -10,22 +10,60 @@ import CircleStop from '$icons/circle-stop';
 import Play from '$icons/play';
 import Scan from '$icons/scan';
 import Square from '$icons/square';
-import { css, effect, onCleanup, signal } from 'fw';
+import { createUniqueId, css, effect, onCleanup, signal } from 'fw';
 import Button from '$lib/ui/Button';
 import Slider from '$lib/ui/Slider';
 import Switch from '$lib/ui/Switch';
+import { tooltip } from '$lib/ui/tooltip';
 import { formatMediaTime, frameIndexAt, totalFramesFor } from './media';
 import type { MediaSession } from './useMediaSession';
+import type { TrackingController } from './useTracking';
 
 export interface MediaBarProps {
   media: MediaSession;
   predicting: boolean;
+  tracking?: TrackingController;
 }
 
 type VideoAction = 'step-back' | 'step-fwd' | 'detect';
 
+/** Dedicated component so Switch DOM identity stays stable (no keyboard focus loss when toggled or track count updates). */
+function TrackControl(props: { tracking: TrackingController; uid: string }) {
+  const tr = props.tracking;
+  const whyId = `${props.uid}-track-why`;
+  return (
+    <>
+      {tr.enabled.get() ? (
+        <span class="live-stat num" data-track-count>
+          {tr.activeCount.get()} {tr.activeCount.get() === 1 ? 'track' : 'tracks'}
+        </span>
+      ) : null}
+      <span
+        class="auto-wrap track-wrap"
+        class:disabled={!tr.supported.get()}
+        use:tooltip={tr.disabledReason.get() ?? undefined}
+        data-track-toggle
+      >
+        <Switch
+          label="Track IDs"
+          checked={tr.enabled.get()}
+          disabled={!tr.supported.get()}
+          describedby={!tr.supported.get() && tr.disabledReason.get() ? whyId : undefined}
+          onchange={(v) => tr.setEnabled(v)}
+        />
+      </span>
+      {!tr.supported.get() && tr.disabledReason.get() ? (
+        <span class="sr-only" id={whyId}>
+          {tr.disabledReason.get()}
+        </span>
+      ) : null}
+    </>
+  );
+}
+
 export default function MediaBar(props: MediaBarProps) {
   const m = props.media;
+  const uid = createUniqueId();
   const barEl = signal<HTMLDivElement | undefined>(undefined);
   let pendingFocus: { action: VideoAction; url: string | null; sawDisabled: boolean } | null = null;
   let focusSeq = 0;
@@ -178,6 +216,7 @@ export default function MediaBar(props: MediaBarProps) {
               <div class="auto-wrap">
                 <Switch label="Auto" bind:checked={m.autoDetect} />
               </div>
+              {props.tracking ? <TrackControl tracking={props.tracking} uid={uid} /> : null}
               <Button
                 size="sm"
                 variant="ghost"
@@ -246,6 +285,7 @@ export default function MediaBar(props: MediaBarProps) {
               </span>
             ) : null}
             <div class="media-right">
+              {props.tracking ? <TrackControl tracking={props.tracking} uid={uid} /> : null}
               {m.camActive.get() ? (
                 <Button
                   size="sm"
@@ -326,6 +366,9 @@ css`
     color: var(--text-secondary);
     cursor: pointer;
     user-select: none;
+  }
+  .track-wrap.disabled {
+    cursor: not-allowed;
   }
   .scrubber :global(.slider.inline) {
     grid-template-columns: 64px minmax(0, 1fr) 48px;

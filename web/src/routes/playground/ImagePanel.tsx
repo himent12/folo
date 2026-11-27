@@ -17,7 +17,7 @@ import { bindable, css, Show, type Signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img, Model, Prediction } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
-import DetectionView from '$lib/detect/DetectionView';
+import DetectionView, { type ViewTrail } from '$lib/detect/DetectionView';
 import { inferenceShortTag, PHASE_TEXT, type Backend, type BrowserEngine } from '$lib/inference/browser';
 import { ms, num } from '$lib/format';
 import SheetHandle from '$lib/ui/SheetHandle';
@@ -76,6 +76,7 @@ export interface ImagePanelProps {
   /** The answer holds the highest-scoring candidates, not all of them (./allCandidates): its count reads "1,000+". */
   cut?: boolean;
   kept: Det[];
+  trails?: readonly ViewTrail[];
   truthBoxes: Img['boxes'];
   truthOnly?: Set<number> | null;
   classes: string[];
@@ -320,6 +321,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                     width={props.dims.width}
                     height={props.dims.height}
                     boxes={props.pred ? props.kept : []}
+                    trails={props.pred ? props.trails : undefined}
                     truth={props.truthBoxes}
                     truthOnly={props.truthOnly}
                     classes={props.classes}

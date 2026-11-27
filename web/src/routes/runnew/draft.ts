@@ -8,10 +8,11 @@
 // datasets, weights and cloud offers mean nothing, so it is dropped.
 
 import type { Arch, Augment, Optimizer } from '$lib/api/types';
+import { ALL_ARCHES } from '$lib/arch';
 
 export const DRAFT_KEY = 'folo.runNew.draft';
 const KEY = DRAFT_KEY;
-const ARCHS: readonly string[] = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'] satisfies Arch[];
+const ARCHS: readonly string[] = ALL_ARCHES;
 const OPTIMIZERS: readonly string[] = ['auto', 'sgd', 'adamw', 'musgd'] satisfies Optimizer[];
 
 /** Run on's choice, as `CloudPick` holds it. */

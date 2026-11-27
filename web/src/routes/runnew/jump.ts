@@ -1,6 +1,7 @@
 // The New run form's errors, one per field, and the way from a review row or an error back to its control.
 import { effect, signal, type Signal } from 'fw';
 import type { Arch, Augment, Dataset, Model } from '$lib/api/types';
+import { isFolo2Arch } from '$lib/arch';
 import type { ListedDataset } from '../datasets/problem';
 import type { CloudPick } from './cloudPick';
 import { devWord } from './device';
@@ -128,7 +129,12 @@ export function formErrors(
     // The field says what to pick; the line beside Start only names the problem and leads there.
     device: deviceErr && !onCloud ? `${devWord(device)} is not available.` : null,
     amp: ampErr && ampOn && !onCloud ? 'Not available on this server now.' : null,
-    runon: cloudOn ? cloudPick.errors.runon : null,
+    runon:
+      onCloud && isFolo2Arch(arch)
+        ? 'FOLO v2 trains locally only: pick This machine or switch to FOLO v1.'
+        : cloudOn
+          ? cloudPick.errors.runon
+          : null,
     offer: onCloud ? cloudPick.errors.offer : null,
     hours: onCloud ? cloudPick.errors.hours : null,
   };

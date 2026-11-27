@@ -10,6 +10,7 @@ import { css, effect, signal } from 'fw';
 import type { ViewBox } from '$lib/detect/DetectionView';
 import Button from '$lib/ui/Button';
 import { drawAnnotations } from './export';
+import type { TrackTrail } from './tracking';
 
 export interface LiveMediaCanvasProps {
   /** Backing <video> element playing the webcam MediaStream or local video file. */
@@ -30,6 +31,8 @@ export interface LiveMediaCanvasProps {
   error?: string | null;
   /** Filtered visible detection boxes in native video pixel coordinates. */
   boxes: readonly ViewBox[];
+  /** Optional per-track motion trails rendered beneath tracked boxes. */
+  trails?: readonly TrackTrail[];
   classes: readonly string[];
   labels: boolean;
   scores: boolean;
@@ -61,6 +64,7 @@ export default function LiveMediaCanvas(props: LiveMediaCanvasProps) {
       ctx,
       {
         boxes: props.boxes,
+        trails: props.trails,
         classes: props.classes,
         labels: props.labels,
         scores: props.scores,
@@ -69,11 +73,12 @@ export default function LiveMediaCanvas(props: LiveMediaCanvasProps) {
     );
   }
 
-  // Repaint whenever canvas, boxes, labels, scores, renderTick, or active state change; animate smoothly at rAF while streaming.
+  // Repaint whenever canvas, boxes, trails, labels, scores, renderTick, or active state change; animate smoothly at rAF while streaming.
   effect(() => {
     void canvasEl.get();
     void props.video;
     void props.boxes;
+    void props.trails;
     void props.classes;
     void props.labels;
     void props.scores;

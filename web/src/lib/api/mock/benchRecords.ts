@@ -24,11 +24,44 @@ import { hash, rng } from './rng';
 const SEC = 1000;
 
 /** A model entry's time per image pass, by architecture (the demo's pace, not the GPU's). */
-export const MS_PER_PASS: Record<string, number> = { 'folo-n': 3, 'folo-s': 4.2, 'folo-m': 6.5, 'folo-l': 9, 'folo-x': 13 };
+export const MS_PER_PASS: Record<string, number> = {
+  'folo-n': 3,
+  'folo-s': 4.2,
+  'folo-m': 6.5,
+  'folo-l': 9,
+  'folo-x': 13,
+  'folo2-n': 3.2,
+  'folo2-s': 4.4,
+  'folo2-m': 6.8,
+  'folo2-l': 9.4,
+  'folo2-x': 13.5,
+};
 /** The speed a model entry reports: milliseconds per image on the server's GPU, by architecture. */
-export const MS_PER_IMAGE: Record<string, number> = { 'folo-n': 2.35, 'folo-s': 4.1, 'folo-m': 7.8, 'folo-l': 11.9, 'folo-x': 18.6 };
+export const MS_PER_IMAGE: Record<string, number> = {
+  'folo-n': 2.35,
+  'folo-s': 4.1,
+  'folo-m': 7.8,
+  'folo-l': 11.9,
+  'folo-x': 18.6,
+  'folo2-n': 2.5,
+  'folo2-s': 4.3,
+  'folo2-m': 8.1,
+  'folo2-l': 12.3,
+  'folo2-x': 19.2,
+};
 /** Parameters by architecture, as a model reports them. */
-export const PARAMS: Record<string, number> = { 'folo-n': 2_630_000, 'folo-s': 9_100_000, 'folo-m': 20_100_000, 'folo-l': 25_400_000, 'folo-x': 57_000_000 };
+export const PARAMS: Record<string, number> = {
+  'folo-n': 2_630_000,
+  'folo-s': 9_100_000,
+  'folo-m': 20_100_000,
+  'folo-l': 25_400_000,
+  'folo-x': 57_000_000,
+  'folo2-n': 2_850_000,
+  'folo2-s': 9_850_000,
+  'folo2-m': 20_800_000,
+  'folo2-l': 26_200_000,
+  'folo2-x': 58_800_000,
+};
 /** An agent answers this many images per call (as agent labeling batches them), a call every 1.5 s. */
 export const PER_CALL: Record<LabelAgentId, number> = { claude: 4, codex: 8, antigravity: 8 };
 export const CALL_MS = 1500;

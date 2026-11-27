@@ -3,6 +3,7 @@ import { deep, effect, signal, untrack, type ReadSignal, type Signal } from 'fw'
 import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Arch, Augment, Model, Optimizer, Run } from '$lib/api/types';
+import { archFromCli, isArch, isFolo2Arch } from '$lib/arch';
 import { IMGSZ_STEPS } from '$lib/oom';
 import { errorDetail, toast } from '$lib/ui/toast';
 import type { CloudPick } from './cloudPick';
@@ -40,6 +41,8 @@ export function parseQueryInt(q: URLSearchParams, key: string, lo: number, hi: n
 export function parseInitialQuery(q: URLSearchParams, own: Draft | null, draft: Draft | null) {
   const fromId = q.get('from');
   const datasetId = (own ? own.datasetId : q.get('dataset')) ?? draft?.datasetId ?? '';
+  const rawArch = !own ? q.get('arch')?.trim() : null;
+  const arch: Arch = isArch(rawArch) ? rawArch : (draft?.arch ?? 'folo-s');
   const queryImgsz = !own && IMGSZ_OPTIONS.includes(q.get('imgsz') ?? '');
   const imgsz = queryImgsz ? q.get('imgsz')! : (draft?.imgsz ?? '640');
   const imgszChosen = queryImgsz || !!draft?.imgszChosen;
@@ -48,7 +51,7 @@ export function parseInitialQuery(q: URLSearchParams, own: Draft | null, draft: 
   // Keep `weights` at 'none' while `queryWeights` awaits the model catalog (or when `?weights=none` is explicit)
   // so validation does not flash an arch-mismatch error before the target model's architecture is known.
   const weights = rawWeights === 'none' || queryWeights ? 'none' : (draft?.weights ?? 'none');
-  return { fromId, datasetId, queryImgsz, imgsz, imgszChosen, queryWeights, weights };
+  return { fromId, datasetId, arch, queryImgsz, imgsz, imgszChosen, queryWeights, weights };
 }
 
 export interface RunPrefillOptions {
@@ -85,7 +88,13 @@ export interface RunPrefillOptions {
  * the linked weights' architecture when found. Cleans up link-scoped toasts on unmount.
  */
 export function useRunPrefill(o: RunPrefillOptions) {
-  const source = new Resource((s) => (o.fromId ? hub.api.run(o.fromId, s) : Promise.resolve(null)));
+  const source = new Resource(async (s) => {
+    if (!o.fromId) return null;
+    const [run, cli] = await Promise.all([hub.api.run(o.fromId, s), hub.api.runCli(o.fromId, s).catch(() => null)]);
+    // Preserve canonical `folo2-*` arch from `GET /api/runs/{id}/cli` when the server normalized wire `config.arch`.
+    const cliArch = archFromCli(cli);
+    return cliArch && isFolo2Arch(cliArch) && cliArch !== run.config.arch ? { ...run, config: { ...run.config, arch: cliArch } } : run;
+  });
   const prefilled = signal(!o.fromId || !!o.own);
   const pendingWeights = signal<string | null>(o.queryWeights);
 

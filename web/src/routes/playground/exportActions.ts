@@ -5,6 +5,7 @@ import { toast } from '$lib/ui/toast';
 import type { CompareViewMode } from './compare';
 import { compareBadgeText, exportComparePng, exportDetectionsJson, exportSinglePng } from './export';
 import type { Source } from './source';
+import type { TrackTrail } from './tracking';
 import type { Det } from './viewState';
 import { viewportSplitToImagePct } from './zoomState';
 
@@ -26,6 +27,7 @@ export interface RunPngExportInput {
   predB: Prediction | null;
   boxesA: readonly Det[];
   boxesB: readonly Det[];
+  trailsA?: readonly TrackTrail[];
   classesA: readonly string[];
   classesB: readonly string[];
   /** Visibility filter in dataset class-index space (`source.ds.classes`), matching the viewer. */
@@ -75,6 +77,7 @@ export async function runPngExport(input: RunPngExportInput): Promise<boolean> {
           splitPct: imageSplitPct,
           layerA: {
             boxes: input.predA ? input.boxesA : [],
+            trails: input.predA ? input.trailsA : undefined,
             truth: filteredTruth,
             classes: input.classesA,
             labels: input.labels,
@@ -98,6 +101,7 @@ export async function runPngExport(input: RunPngExportInput): Promise<boolean> {
           height: input.dims.height,
           layer: {
             boxes: input.boxesA,
+            trails: input.trailsA,
             truth: filteredTruth,
             classes: input.classesA,
             labels: input.labels,

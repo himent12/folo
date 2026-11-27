@@ -1,6 +1,7 @@
 // View-state and DOM helpers extracted from Playground.tsx: detection filtering/grouping, source metadata,
 // smaller-model fallback lookup, keyboard row navigation, row scrolling, and JSON export formatting.
 import type { Model, Prediction } from '$lib/api/types';
+import { archFamily, archScaleRank } from '$lib/arch';
 import { inferenceShortTag } from '$lib/inference/browser';
 import { BACKEND_NAME, DEFAULTS } from './predict';
 import type { Source } from './source';
@@ -10,17 +11,18 @@ export type Det = Prediction['boxes'][number];
 /** Model sizes, smallest first: a smaller model of the same classes may fit where this one does not. */
 export const ARCH_ORDER = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'];
 
-/** Finds a smaller model with the same class list when the current model runs out of GPU memory. */
+/** Finds a smaller model with the same class list when the current model runs out of GPU memory (preferring the same architecture family). */
 export function smallerModelOf(model: Model | null, ranked: readonly Model[]): Model | null {
   if (!model) return null;
-  const rank = (x: Model) => ARCH_ORDER.indexOf(x.arch);
-  const wantRank = rank(model);
+  const wantRank = archScaleRank(model.arch);
   if (wantRank <= 0) return null;
+  const wantFamily = archFamily(model.arch);
   const classesKey = model.classes.join('|');
-  return ranked.find((x) => {
-    const r = rank(x);
+  const candidates = ranked.filter((x) => {
+    const r = archScaleRank(x.arch);
     return x.id !== model.id && r >= 0 && r < wantRank && x.classes.join('|') === classesKey;
-  }) ?? null;
+  });
+  return candidates.find((x) => archFamily(x.arch) === wantFamily) ?? candidates[0] ?? null;
 }
 
 /** Label for where the latest prediction ran ("server", "browser · WebGPU", or with active SAHI/TTA tag). */
@@ -162,7 +164,16 @@ export function predictionJson(
   return {
     model_id: pred.model_id,
     image: pred.image,
-    boxes: kept.map((b) => ({ class: b.class, name: b.name, score: b.score, x1: b.x1, y1: b.y1, x2: b.x2, y2: b.y2 })),
+    boxes: kept.map((b) => ({
+      ...(b.track_id !== undefined ? { track_id: b.track_id } : {}),
+      class: b.class,
+      name: b.name,
+      score: b.score,
+      x1: b.x1,
+      y1: b.y1,
+      x2: b.x2,
+      y2: b.y2,
+    })),
     timing: pred.timing,
     device: pred.device,
     ...(pred.inference ? { inference: pred.inference } : {}),

@@ -6,7 +6,8 @@ import Check from '$icons/check';
 import ChevronRight from '$icons/chevron-right';
 import { bindable, computed, css, For, MediaQuery, signal } from 'fw';
 import type { Resource } from '$lib/api/resource';
-import type { Arch, Model, Run, ThroughputTable } from '$lib/api/types';
+import type { Arch, ArchFamily, Model, Run, ThroughputTable } from '$lib/api/types';
+import { archFamily, archWithFamily } from '$lib/arch';
 import { scoreText, type ModelChoice, type ScoreContext } from '$lib/scoreSummary';
 import { FROM_SCRATCH } from '$lib/lineage';
 import { compact, num } from '$lib/format';
@@ -18,13 +19,15 @@ import Select from '$lib/ui/Select';
 import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
 import InfoButton from '$lib/ui/InfoButton';
-import { arches } from './estimate';
+import { arches, archesForFamily } from './estimate';
 import type { FormErrors } from './jump';
 import { media } from '$lib/design/tokens';
 
 export interface ModelSectionProps {
   arch?: Arch;
   weights?: string;
+  /** Whether the connected server advertises `folo2_arch` (defaults true while loading). */
+  folo2Supported?: boolean;
   tp: Resource<ThroughputTable | null>;
   oomRun: Run | null;
   was: (key: string) => string | undefined;
@@ -53,6 +56,15 @@ export default function ModelSection(props: ModelSectionProps) {
   // Phones pick the model size from a segmented control; the full specification table folds behind "Compare sizes".
   const phone = new MediaQuery(media.phone, false);
   const aboutOpen = signal(false);
+  const folo2Ok = () => props.folo2Supported !== false;
+  const family = computed<ArchFamily>(() => archFamily(arch.get()));
+  const familyArches = computed(() => archesForFamily(family.get()));
+
+  function switchFamily(next: ArchFamily) {
+    if (next === 'folo2' && !folo2Ok()) return;
+    const mapped = archWithFamily(arch.peek(), next);
+    if (mapped !== arch.peek()) arch.set(mapped);
+  }
 
   // The model sizes, one specification row each (a table on wide screens; behind "Compare sizes" on phones).
   // One specification row per size, the column header on the same grid (subgrid), so every value sits under its
@@ -67,7 +79,7 @@ export default function ModelSection(props: ModelSectionProps) {
           <span class="a-head-lat">Latency</span>
           <span></span>
         </div>
-        <For each={arches} key={(a) => a.arch}>
+        <For each={familyArches.get()} key={(a) => a.arch}>
           {(a) => {
             const on = () => a().arch === arch.get();
             const here = computed(() => measuredLatency(props.tp.data, a().arch));
@@ -125,6 +137,32 @@ export default function ModelSection(props: ModelSectionProps) {
 
   return (
     <Panel title="2 · Model" id="sec-model" meta={props.was('model') ? `was ${props.oomRun?.config.arch}` : undefined}>
+      <div class="family-bar">
+        <Segmented
+          id="arch-family"
+          label="Architecture family"
+          size="sm"
+          value={family.get()}
+          onchange={switchFamily}
+          describedby="arch-family-note"
+          options={[
+            { value: 'folo' as const, label: 'FOLO v1' },
+            {
+              value: 'folo2' as const,
+              label: 'FOLO v2',
+              disabled: !folo2Ok(),
+              tip: folo2Ok() ? undefined : 'This server does not advertise folo2_arch support yet.',
+            },
+          ]}
+        />
+        <p class="family-note" id="arch-family-note">
+          {!folo2Ok()
+            ? 'FOLO v2 requires a server with folo2_arch support.'
+            : family.get() === 'folo2'
+              ? 'SPD stem · Rep-block backbone · HyperACE-Lite · IoU-aware head.'
+              : 'Classic C3k2 + C2PSA detector family.'}
+        </p>
+      </div>
       {props.pickedPublished ? (
         // Published weights set the size (a fine-tune trains the weights' own): said where the size is picked.
         <p class="a-from" role="status">
@@ -140,7 +178,7 @@ export default function ModelSection(props: ModelSectionProps) {
               the selector, and the compact pick and its sentence step aside until it closes. */}
           {!sizesOpen.get() ? (
             <div class="a-pick">
-              <Segmented id="arch-pick" label="Model size" bind:value={arch} options={arches.map((a) => ({ value: a.arch, label: a.size }))} />
+              <Segmented id="arch-pick" label="Model size" bind:value={arch} options={familyArches.get().map((a) => ({ value: a.arch, label: a.size }))} />
               {props.selArch ? (
                 <p class="a-sel">
                   <Ident value={props.selArch.arch} /> {props.selArch.note}
@@ -214,6 +252,19 @@ export default function ModelSection(props: ModelSectionProps) {
 }
 
 css`
+  .family-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    margin-bottom: var(--space-3);
+  }
+  .family-note {
+    min-width: 0;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
   .arch {
     position: relative;
     border-radius: var(--radius-md);

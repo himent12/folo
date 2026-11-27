@@ -4,7 +4,7 @@
  */
 import { css } from 'fw';
 import type { Model, Prediction } from '$lib/api/types';
-import { inferenceMetaLabel } from '$lib/inference/browser';
+import { detectorInfoBadge, inferenceMetaLabel, type DetectorInfo } from '$lib/inference/browser';
 import Skeleton from '$lib/ui/Skeleton';
 import TimingBar from './TimingBar';
 import { deviceLabel } from './viewState';
@@ -20,6 +20,20 @@ export interface PlaygroundTimingProps {
   predictingB: boolean;
   resultMsA: number | null;
   adapter?: string | null;
+  /** Loaded browser detector metadata (`folo-wasm` `detector.info()`), surfaced for browser predictions. */
+  engineInfo?: DetectorInfo | null;
+}
+
+function browserBadgeFor(pred: Prediction | null, info: DetectorInfo | null | undefined, model: Model | null): string | null {
+  if (!pred?.backend) return null;
+  if (info && info.backend === pred.backend && (!info.modelId || info.modelId === pred.model_id)) return detectorInfoBadge(info);
+  if (model) {
+    const parts: string[] = [model.arch];
+    if (model.arch.startsWith('folo2-')) parts.push('FOLO v2');
+    if (model.head) parts.push(model.head);
+    return parts.join(' · ');
+  }
+  return null;
 }
 
 export default function PlaygroundTiming(props: PlaygroundTimingProps) {
@@ -34,6 +48,7 @@ export default function PlaygroundTiming(props: PlaygroundTimingProps) {
                 timing={props.predA.timing}
                 device={deviceLabel(props.predA, props.adapter)}
                 cold={props.predA.cold}
+                engineBadge={browserBadgeFor(props.predA, props.engineInfo, props.modelA)}
                 mode={inferenceMetaLabel(props.predA.inference)}
               />
             ) : props.predictingA ? (
@@ -52,6 +67,7 @@ export default function PlaygroundTiming(props: PlaygroundTimingProps) {
                 timing={props.predB.timing}
                 device={deviceLabel(props.predB, props.adapter)}
                 cold={props.predB.cold}
+                engineBadge={browserBadgeFor(props.predB, props.engineInfo, props.modelB)}
                 mode={inferenceMetaLabel(props.predB.inference)}
               />
             ) : props.predictingB ? (
@@ -70,6 +86,7 @@ export default function PlaygroundTiming(props: PlaygroundTimingProps) {
             timing={props.predA.timing}
             device={deviceLabel(props.predA, props.adapter)}
             cold={props.predA.cold}
+            engineBadge={browserBadgeFor(props.predA, props.engineInfo, props.modelA)}
             mode={inferenceMetaLabel(props.predA.inference)}
           />
           {!props.narrow && props.resultMsA !== null ? (

@@ -6,7 +6,9 @@ import type { Time } from './time';
 
 // ---------- Models ----------
 
-export type Arch = 'folo-n' | 'folo-s' | 'folo-m' | 'folo-l' | 'folo-x';
+export type ArchFamily = 'folo' | 'folo2';
+export type ArchScale = 'n' | 's' | 'm' | 'l' | 'x';
+export type Arch = 'folo-n' | 'folo-s' | 'folo-m' | 'folo-l' | 'folo-x' | 'folo2-n' | 'folo2-s' | 'folo2-m' | 'folo2-l' | 'folo2-x';
 
 export interface ModelMetrics {
   map50: number;
