@@ -6,7 +6,7 @@ import { Resource } from '$lib/api/resource';
 import { hasWebGpu, NO_WASM, probeWasm, servedBy, wasmFromFeatures, wasmFromSystem } from '$lib/inference/browser';
 import type { RunOn } from './predict';
 
-export function useWasmAvailability(runOn: Signal<RunOn>) {
+export function useWasmAvailability(runOn: Signal<RunOn>, needRealWasm?: () => boolean) {
   const webgpu = hasWebGpu();
   const system = new Resource((s) => hub.api.system(s));
   const probed = signal<boolean | null>(null);
@@ -18,8 +18,13 @@ export function useWasmAvailability(runOn: Signal<RunOn>) {
   );
 
   effect(() => {
-    if (hub.mode === 'connecting' || hub.api.mock || fromServer.get() !== null) return;
-    if (servedHere.get() && system.loading) return;
+    if (hub.mode === 'connecting') return;
+    if (hub.api.mock) {
+      if (!needRealWasm?.()) return;
+    } else {
+      if (fromServer.get() !== null) return;
+      if (servedHere.get() && system.loading) return;
+    }
     let live = true;
     const ask = () => void probeWasm().then((v) => live && probed.set(v));
     ask();
@@ -32,6 +37,13 @@ export function useWasmAvailability(runOn: Signal<RunOn>) {
 
   const wasm = computed(() => fromServer.get() ?? (hub.api.mock ? (system.data ? false : null) : probed.get()));
   const browserOff = computed(() => (wasm.get() === false ? NO_WASM : null));
+  // Demo mode simulates browser CPU/WebGPU inference, but ByteTrack Track IDs requires the real folo-wasm asset.
+  const trackerBrowserOff = computed(() => {
+    const base = browserOff.get();
+    if (base) return base;
+    if (hub.api.mock && needRealWasm?.() && probed.get() !== true) return NO_WASM;
+    return null;
+  });
 
   effect(() => {
     if (browserOff.get() && untrack(() => runOn.get()) !== 'server') runOn.set('server');
@@ -46,5 +58,5 @@ export function useWasmAvailability(runOn: Signal<RunOn>) {
     if (healthFeatures !== null) return healthFeatures.includes('predict_options');
     return !!system.data?.features?.includes('predict_options');
   });
-  return { webgpu, browserOff, runOnNote, serverPredictOptions };
+  return { webgpu, browserOff, trackerBrowserOff, runOnNote, serverPredictOptions };
 }

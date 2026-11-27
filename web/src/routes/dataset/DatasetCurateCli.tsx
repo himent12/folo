@@ -100,7 +100,10 @@ export default function DatasetCurateCli(props: DatasetCurateCliProps) {
 css`
   .curate {
     flex-basis: 100%;
+    width: 100%;
+    max-width: 100%;
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--space-2);
     margin-top: var(--space-1);
     padding-top: var(--space-2);
@@ -113,18 +116,24 @@ css`
     align-items: center;
     justify-content: space-between;
     gap: var(--space-2);
+    min-width: 0;
+    max-width: 100%;
   }
   .curate-controls {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
+    min-width: 0;
+    max-width: 100%;
   }
   .curate-export-opts {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: var(--space-3);
+    min-width: 0;
+    max-width: 100%;
   }
   .curate-label {
     font-size: var(--type-sm-size);

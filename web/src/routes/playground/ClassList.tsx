@@ -4,6 +4,7 @@ import EyeOff from '$icons/eye-off';
 import { css, For } from 'fw';
 import type { Prediction } from '$lib/api/types';
 import { classColor } from '$lib/design/tokens';
+import { formatConfThreshold } from './perClassConf';
 import Swatch from './Swatch';
 
 export interface ClassListProps {
@@ -46,8 +47,12 @@ export default function ClassList(props: ClassListProps) {
                     <Swatch color={classColor(c())} />
                     <span class="c-name truncate">{name()}</span>
                     {customConf() !== undefined ? (
-                      <span class="c-conf num" title={`Custom confidence threshold ${customConf()!.toFixed(2)}`} data-class-conf-override={c()}>
-                        ≥{customConf()!.toFixed(2)}
+                      <span
+                        class="c-conf num"
+                        title={`Custom confidence threshold ${formatConfThreshold(customConf()!)}`}
+                        data-class-conf-override={c()}
+                      >
+                        ≥{formatConfThreshold(customConf()!)}
                       </span>
                     ) : null}
                     <span class="c-bar" aria-hidden="true">

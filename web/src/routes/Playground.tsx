@@ -86,7 +86,8 @@ export default function Playground() {
   const runOn = signal<RunOn>('server');
   const engine = new BrowserEngine();
   onCleanup(() => engine.dispose());
-  const { webgpu, browserOff, runOnNote, serverPredictOptions } = useWasmAvailability(runOn);
+  const mediaActive = signal(false);
+  const { webgpu, browserOff, trackerBrowserOff, runOnNote, serverPredictOptions } = useWasmAvailability(runOn, () => mediaActive.get());
   let getCompareRunOn: () => RunOn | null = () => null;
   let getComparePredB: () => Prediction | null = () => null;
   const inf = useInferenceOptions({
@@ -253,7 +254,7 @@ export default function Playground() {
     onTrackReset: () => { cancelSinglePredict(); trackingRef?.reset(); },
   });
   const tracking = (trackingRef = useTracking({
-    engine, browserOff: () => browserOff.get(), mediaMode: () => mediaSession.mode.get(),
+    engine, browserOff: () => trackerBrowserOff.get(), mediaMode: () => mediaSession.mode.get(),
     mediaKey: () => `${mediaSession.mode.get()}:${mediaSession.sessionSeq.get()}`,
     frameKey: () => (mediaSession.mode.get() === 'none' ? null : `${mediaSession.mode.get()}:${mediaSession.sessionSeq.get()}:${mediaSession.frameSeq.get()}`),
     modelId: () => modelId.get(), classes: () => classes.get(), pred: () => pred.get(),
@@ -275,6 +276,9 @@ export default function Playground() {
   };
   isLiveStreamFn = () => mediaSession.liveStreaming.get();
   isUnsyncedVideoFn = () => mediaSession.mode.get() === 'video' && !mediaSession.frameSynced.get();
+  effect(() => {
+    mediaActive.set(mediaSession.mode.get() !== 'none');
+  });
 
   let predMatchesSourceFn: () => boolean = () => true;
 
@@ -505,6 +509,7 @@ export default function Playground() {
       classes={classes.get()}
       globalConf={conf.get()}
       perClassConf={perClassConf.get()}
+      modelId={modelId.get()}
       modelName={model.get()?.name ?? null}
       inline={inline}
       onSetClassConf={setClassConf}
