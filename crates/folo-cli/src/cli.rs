@@ -1,6 +1,6 @@
 //! The clap command tree. `folo describe` serialises it, so help strings and defaults here are the documented
 //! surface: keep them accurate. `folo label`'s arguments are in `cli/label.rs`, `folo bench`'s in
-//! `cli/bench.rs`.
+//! `cli/bench.rs`, `folo dataset`'s in `cli/dataset.rs`.
 
 use std::path::PathBuf;
 
@@ -9,8 +9,10 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 
 mod bench;
 pub mod bounds;
+mod dataset;
 mod label;
 pub use bench::*;
+pub use dataset::*;
 pub use label::*;
 
 /// FOLO: a from-scratch, very fast vision framework (YOLO-style detector, training, export, Studio).
@@ -201,10 +203,10 @@ pub enum OptimizerArg {
 #[derive(Debug, Args)]
 #[command(group(clap::ArgGroup::new("input").required(true).multiple(true).args(["data", "resume"])))]
 pub struct TrainArgs {
-    /// Dataset: a folder (YOLO or COCO) or a data.yaml.
+    /// Dataset: a folder (YOLO, COCO or Pascal VOC), data.yaml, COCO .json or VOC .xml.
     #[arg(long)]
     pub data: Option<String>,
-    /// Format of --data: auto (detect from the files), or yolo / coco for a folder that has both.
+    /// Format of --data: auto (detect from the files), or yolo / coco / voc for a folder that has multiple.
     #[arg(long, value_enum, default_value_t = FormatArg::Auto)]
     pub format: FormatArg,
     /// Architecture (folo-n, folo-s, folo-m, folo-l, folo-x), or .folo weights / a published name to fine-tune.
@@ -599,9 +601,81 @@ pub struct PredictArgs {
     /// where they are not available.
     #[arg(long)]
     pub tensor_cores: bool,
+    /// SAHI tiled inference: square tile size in pixels [>= 1] (clamped to the image size). Slices large images
+    /// into overlapping windows and merges detections across tiles. Mutually exclusive with --tta.
+    #[arg(long, value_name = "PX", conflicts_with_all = ["tta", "tta_scales", "no_tta_hflip"])]
+    pub tile: Option<u32>,
+    /// With --tile: overlap ratio between adjacent tiles in [0, 1) [default: 0.2].
+    #[arg(
+        long,
+        value_name = "RATIO",
+        requires = "tile",
+        conflicts_with_all = ["tta", "tta_scales", "no_tta_hflip"]
+    )]
+    pub tile_overlap: Option<f32>,
+    /// With --tile: skip the full-image pass alongside the cropped tiles (tiles only).
+    #[arg(long, requires = "tile", conflicts_with_all = ["tta", "tta_scales", "no_tta_hflip"])]
+    pub no_tile_full_image: bool,
+    /// With --tile: maximum cropped tiles predicted per batch [>= 1] [default: 8].
+    #[arg(
+        long,
+        value_name = "N",
+        requires = "tile",
+        conflicts_with_all = ["tta", "tta_scales", "no_tta_hflip"]
+    )]
+    pub tile_batch: Option<usize>,
+    /// With --tile: cross-tile overlap metric (`ios` or `iou`) [default: ios].
+    #[arg(
+        long,
+        value_enum,
+        requires = "tile",
+        conflicts_with_all = ["tta", "tta_scales", "no_tta_hflip"]
+    )]
+    pub tile_merge: Option<TileMergeArg>,
+    /// Test-Time Augmentation: multi-scale + horizontal-flip ensembling (`0.83,1.0,1.17` with horizontal flip by
+    /// default). Mutually exclusive with --tile.
+    #[arg(
+        long,
+        conflicts_with_all = ["tile", "tile_overlap", "no_tile_full_image", "tile_batch", "tile_merge"]
+    )]
+    pub tta: bool,
+    /// With --tta: comma-separated scale multipliers (> 0) applied to --imgsz [default: 0.83,1.0,1.17].
+    #[arg(
+        long,
+        value_name = "SCALES",
+        value_delimiter = ',',
+        requires = "tta",
+        conflicts_with_all = ["tile", "tile_overlap", "no_tile_full_image", "tile_batch", "tile_merge"]
+    )]
+    pub tta_scales: Option<Vec<f32>>,
+    /// With --tta: disable the horizontally flipped view at each scale.
+    #[arg(
+        long,
+        requires = "tta",
+        conflicts_with_all = ["tile", "tile_overlap", "no_tile_full_image", "tile_batch", "tile_merge"]
+    )]
+    pub no_tta_hflip: bool,
     /// Write annotated images (boxes coloured by class, with class id and score) to this folder.
     #[arg(long)]
     pub save: Option<PathBuf>,
+}
+
+/// Cross-tile overlap metric for SAHI tiled inference (`folo predict --tile`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum TileMergeArg {
+    /// Intersection-over-Smaller: suppresses both cross-tile duplicates and truncated seam fragments.
+    Ios,
+    /// Standard Intersection-over-Union.
+    Iou,
+}
+
+impl From<TileMergeArg> for folo_vision::TileMergeMetric {
+    fn from(m: TileMergeArg) -> Self {
+        match m {
+            TileMergeArg::Ios => folo_vision::TileMergeMetric::Ios,
+            TileMergeArg::Iou => folo_vision::TileMergeMetric::Iou,
+        }
+    }
 }
 
 /// Export format.
@@ -752,135 +826,6 @@ pub struct CloudConnectArgs {
     pub secret: Vec<String>,
     #[command(flatten)]
     pub dir: CloudDirArgs,
-}
-
-/// `folo dataset`.
-#[derive(Debug, Subcommand)]
-pub enum DatasetCommand {
-    /// Validate a dataset: broken labels, class-id overflow, out-of-range boxes, corrupt or missing images,
-    /// duplicate images and empty images. Exits 1 when there are errors or warnings.
-    Check(CheckArgs),
-    /// Print dataset statistics (class counts, box sizes, boxes per image).
-    Stats(StatsArgs),
-    /// Generate a synthetic shapes dataset (YOLO layout).
-    Synth(SynthArgs),
-    /// Convert a dataset between YOLO and COCO (images are copied unchanged).
-    Convert(ConvertArgs),
-}
-
-/// Dataset format on disk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum FormatArg {
-    /// Detect from the files present.
-    Auto,
-    /// YOLO txt labels (data.yaml, images/ + labels/).
-    Yolo,
-    /// COCO instances JSON.
-    Coco,
-}
-
-/// Target format of `folo dataset convert`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum TargetFormatArg {
-    /// YOLO: images/<split>/, labels/<split>/*.txt and data.yaml.
-    Yolo,
-    /// COCO: images/<split>/ and annotations/instances_<split>.json.
-    Coco,
-}
-
-/// `folo dataset check`.
-#[derive(Debug, Args)]
-pub struct CheckArgs {
-    /// Dataset folder, data.yaml or COCO .json.
-    pub path: PathBuf,
-    /// Format to read.
-    #[arg(long, value_enum, default_value_t = FormatArg::Auto)]
-    pub format: FormatArg,
-    /// Also show, for every issue, what a cleanup would change (nothing is modified).
-    #[arg(long)]
-    pub fix_dry_run: bool,
-    /// Read only image headers instead of decoding every image (faster; misses truncated image data).
-    #[arg(long)]
-    pub headers_only: bool,
-    /// List only issues at least this serious (`counts` always covers every issue) [default: warning in human
-    /// output, info in --json].
-    #[arg(long, value_enum)]
-    pub min_severity: Option<SeverityArg>,
-}
-
-/// Issue severity, most serious first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-pub enum SeverityArg {
-    /// The loader skips the image.
-    Error,
-    /// Fixed up on load, or suspicious.
-    #[value(alias = "warn")]
-    Warning,
-    /// Background images.
-    Info,
-}
-
-/// `folo dataset stats`.
-#[derive(Debug, Args)]
-pub struct StatsArgs {
-    /// Dataset folder, data.yaml or COCO .json.
-    pub path: PathBuf,
-    /// Format to read.
-    #[arg(long, value_enum, default_value_t = FormatArg::Auto)]
-    pub format: FormatArg,
-}
-
-/// Image encoding of `folo dataset synth`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum SynthImageFormat {
-    /// JPEG, quality 90.
-    Jpeg,
-    /// Lossless PNG.
-    Png,
-}
-
-/// `folo dataset synth`.
-#[derive(Debug, Args)]
-pub struct SynthArgs {
-    /// Output folder (created; must be empty if it exists).
-    pub out_dir: PathBuf,
-    /// Number of images (train + val) [1..=1000000].
-    #[arg(long, default_value_t = 1000)]
-    pub images: u64,
-    /// Class names (at most 8). circle, square, triangle, star, ring, cross, hexagon and heart get those shapes;
-    /// other names take the next unused shape.
-    #[arg(long, value_delimiter = ',', default_values_t = ["circle".to_string(), "square".to_string(), "triangle".to_string()])]
-    pub classes: Vec<String>,
-    /// Image side in pixels [32..=8192] (the long side with --vary-aspect).
-    #[arg(long, default_value_t = 640)]
-    pub imgsz: u32,
-    /// RNG seed; the same seed gives the same dataset.
-    #[arg(long, default_value_t = 0)]
-    pub seed: u64,
-    /// Fraction of images in the validation split [0..=1].
-    #[arg(long, default_value_t = 0.2)]
-    pub val_frac: f32,
-    /// Image encoding.
-    #[arg(long, value_enum, default_value_t = SynthImageFormat::Jpeg)]
-    pub image_format: SynthImageFormat,
-    /// Mix aspect ratios (1:1, 4:3, 3:4, 16:9, 3:2) instead of square images.
-    #[arg(long)]
-    pub vary_aspect: bool,
-}
-
-/// `folo dataset convert`.
-#[derive(Debug, Args)]
-pub struct ConvertArgs {
-    /// Dataset to read: a folder, data.yaml or COCO .json.
-    pub input: PathBuf,
-    /// Output folder (created; must be empty if it exists).
-    pub output: PathBuf,
-    /// Target format.
-    #[arg(long, value_enum)]
-    pub to: TargetFormatArg,
-    /// Format of the input.
-    #[arg(long, value_enum, default_value_t = FormatArg::Auto)]
-    pub from: FormatArg,
 }
 
 /// `folo mcp`.

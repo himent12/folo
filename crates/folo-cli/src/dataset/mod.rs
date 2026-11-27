@@ -1,12 +1,14 @@
-//! `folo dataset check | stats | synth | convert`, on top of folo-data.
+//! `folo dataset check | stats | synth | convert | split`, on top of folo-data.
 //!
 //! - `mod.rs`: command dispatch, `stats`, `convert`, and shared error / path helpers.
 //! - `check.rs`: `folo dataset check` (dangling symlink diagnostics, COCO declared-vs-actual dimension
-//!   reconciliation, severity filtering and human/JSON formatting).
+//!   reconciliation, split-leakage reporting, severity filtering and human/JSON formatting).
 //! - `synth.rs`: `folo dataset synth` (atomic sibling-staging for new folders and clean-on-failure rollback for
 //!   pre-existing empty folders).
+//! - `split.rs`: `folo dataset split` (deterministic multi-label stratified train/val/test splitting).
 
 mod check;
+mod split;
 mod synth;
 
 use std::path::{Path, PathBuf};
@@ -25,6 +27,7 @@ pub fn run(cmd: DatasetCommand, out: Out) -> Result<(), CliError> {
         DatasetCommand::Stats(a) => stats(a, out),
         DatasetCommand::Synth(a) => synth::synth(a, out),
         DatasetCommand::Convert(a) => convert(a, out),
+        DatasetCommand::Split(a) => split::split(a, out),
     }
 }
 
@@ -33,6 +36,15 @@ pub(crate) fn format_of(f: FormatArg) -> Format {
         FormatArg::Auto => Format::Auto,
         FormatArg::Yolo => Format::Yolo,
         FormatArg::Coco => Format::Coco,
+        FormatArg::Voc => Format::Voc,
+    }
+}
+
+pub(super) fn target_format_of(f: TargetFormatArg) -> Format {
+    match f {
+        TargetFormatArg::Yolo => Format::Yolo,
+        TargetFormatArg::Coco => Format::Coco,
+        TargetFormatArg::Voc => Format::Voc,
     }
 }
 
@@ -62,7 +74,7 @@ pub(super) fn data_error(e: DataError, path: &Path) -> CliError {
                 "path_not_found",
                 format!("{} does not exist", folo_api::json::path(path)),
             )
-            .hint("pass a dataset folder, a data.yaml or a COCO instances .json")
+            .hint("pass a dataset folder, a data.yaml, a COCO instances .json or a Pascal VOC .xml")
         }
         // An output folder that `folo_data::unfinished::claim` refused: another writer's, or not empty.
         DataError::Io { source, .. } if source.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -75,7 +87,7 @@ pub(super) fn data_error(e: DataError, path: &Path) -> CliError {
             .hint(folo_data::unfinished::HINT),
         DataError::Format(m) if m.starts_with(folo_data::UNDETECTED) => {
             CliError::new(ExitCode::Runtime, "unknown_format", m).hint(
-                "expected data.yaml or images/ + labels/ (YOLO), or annotations/instances_*.json (COCO)",
+                "expected data.yaml or images/ + labels/ (YOLO), annotations/instances_*.json (COCO), or Annotations/*.xml + JPEGImages/ (Pascal VOC)",
             )
         }
         DataError::Format(m) => CliError::new(ExitCode::Runtime, "invalid_dataset", m),
@@ -172,9 +184,13 @@ fn canonical_target(p: &Path) -> Option<PathBuf> {
     Some(cur)
 }
 
-/// Refuses a `convert` output inside (or containing) the input dataset, its supplied folder, or any of its source
-/// folders, so converted images are never written into the input and picked up on its next open.
-fn check_convert_output_outside(output: &Path, input: &Path, ds: &LoadedDataset) -> Result<(), CliError> {
+/// Refuses a `convert` or `split` output inside (or containing) the input dataset, its supplied folder, or any of
+/// its source folders, so output images are never written into the input and picked up on its next open.
+pub(super) fn check_convert_output_outside(
+    output: &Path,
+    input: &Path,
+    ds: &LoadedDataset,
+) -> Result<(), CliError> {
     let Some(dir) = canonical_target(output) else {
         return Ok(());
     };
@@ -200,7 +216,7 @@ fn check_convert_output_outside(output: &Path, input: &Path, ds: &LoadedDataset)
         let message = if dir.starts_with(&src) {
             let rel = if dir == src { "is" } else { "is inside" };
             format!(
-                "output {out_shown} {rel} the input dataset folder {src_shown}: converting into the input would \
+                "output {out_shown} {rel} the input dataset folder {src_shown}: writing into the input would \
                  mix output files into it"
             )
         } else if src.starts_with(&dir) {
@@ -256,7 +272,7 @@ pub(super) fn splits_json(s: [usize; 3]) -> Value {
 
 // ---- stats -------------------------------------------------------------------------------------------------------
 
-fn open(path: &Path, format: Format) -> Result<LoadedDataset, CliError> {
+pub(super) fn open(path: &Path, format: Format) -> Result<LoadedDataset, CliError> {
     folo_data::open_with(path, &OpenOptions { format, verify_images: true }).map_err(|e| data_error(e, path))
 }
 
@@ -434,52 +450,76 @@ fn is_confirmed_coco_annotation(path: &Path, input: &Path, root: &Path) -> bool 
     name.starts_with("instances") || name == "_annotations.coco.json"
 }
 
-/// Whole COCO split annotation files that `folo-data` could not parse or skipped because of a broken symlink
-/// (which `is_file()` filters out during COCO discovery), returning `(path, message)` pairs.
-fn unreadable_coco_splits(ds: &LoadedDataset, input: &Path) -> Vec<(PathBuf, String)> {
-    if ds.format != Format::Coco {
-        return Vec::new();
-    }
-    let mut bad: Vec<(PathBuf, String)> = ds
-        .report
-        .issues
-        .iter()
-        .filter(|i| {
-            i.kind == folo_data::IssueKind::BrokenLabel
-                && (i.message.starts_with("invalid JSON:")
-                    || (i.message == "no `images` array: not a COCO file"
-                        && is_confirmed_coco_annotation(&i.path, input, &ds.root)))
-        })
-        .map(|i| (i.path.clone(), i.message.clone()))
-        .collect();
-    // When converting a directory, also detect broken annotation symlinks (`annotations/instances_val.json`,
-    // `val/_annotations.coco.json`, etc.) that `folo-data`'s `is_file()` discovery silently skips.
-    if !input.is_file() {
-        for (p, msg) in check::coco_dangling_annotation_links(&ds.root) {
-            if is_confirmed_coco_annotation(&p, input, &ds.root) {
-                bad.push((p, msg));
+/// Whole COCO annotation files or Pascal VOC `ImageSets/Main/*.txt` split manifests that `folo-data` could not
+/// read or skipped because of a broken symlink, returning `(path, message)` pairs so `convert` and `split` never
+/// silently drop an entire split.
+pub(super) fn unreadable_split_manifests(ds: &LoadedDataset, input: &Path) -> Vec<(PathBuf, String)> {
+    match ds.format {
+        Format::Coco => {
+            let mut bad: Vec<(PathBuf, String)> = ds
+                .report
+                .issues
+                .iter()
+                .filter(|i| {
+                    i.kind == folo_data::IssueKind::BrokenLabel
+                        && (i.message.starts_with("invalid JSON:")
+                            || (i.message == "no `images` array: not a COCO file"
+                                && is_confirmed_coco_annotation(&i.path, input, &ds.root)))
+                })
+                .map(|i| (i.path.clone(), i.message.clone()))
+                .collect();
+            if !input.is_file() {
+                for (p, msg) in check::coco_dangling_annotation_links(&ds.root) {
+                    if is_confirmed_coco_annotation(&p, input, &ds.root) {
+                        bad.push((p, msg));
+                    }
+                }
             }
+            bad
         }
+        Format::Voc => {
+            let mut bad: Vec<(PathBuf, String)> = ds
+                .report
+                .issues
+                .iter()
+                .filter(|i| {
+                    i.kind == folo_data::IssueKind::Other
+                        && i.message.starts_with("cannot read ImageSets split file:")
+                })
+                .map(|i| (i.path.clone(), i.message.clone()))
+                .collect();
+            for rel in ["ImageSets/Main", "imagesets/main", "ImageSets/main", "imagesets/Main"] {
+                let dir = ds.root.join(rel);
+                if !dir.is_dir() {
+                    continue;
+                }
+                for name in ["train.txt", "val.txt", "trainval.txt", "test.txt"] {
+                    let p = dir.join(name);
+                    if let Some(msg) = check::dangling_link_message(&p) {
+                        bad.push((p, msg));
+                    }
+                }
+                break;
+            }
+            bad
+        }
+        _ => Vec::new(),
     }
-    bad
 }
 
 fn convert(args: ConvertArgs, out: Out) -> Result<(), CliError> {
-    let to = match args.to {
-        TargetFormatArg::Yolo => Format::Yolo,
-        TargetFormatArg::Coco => Format::Coco,
-    };
+    let to = target_format_of(args.to);
     let ds = open(&args.input, format_of(args.from))?;
-    let bad_splits = unreadable_coco_splits(&ds, &args.input);
+    let bad_splits = unreadable_split_manifests(&ds, &args.input);
     if !bad_splits.is_empty() {
         let (first_path, first_msg) = &bad_splits[0];
         let mut msg = format!("{}: {first_msg}", rel(first_path, &ds.root));
         if bad_splits.len() > 1 {
-            msg.push_str(&format!(" (+{} more unreadable annotation file(s))", bad_splits.len() - 1));
+            msg.push_str(&format!(" (+{} more unreadable split file(s))", bad_splits.len() - 1));
         }
         return Err(CliError::new(ExitCode::Runtime, "invalid_dataset", msg).hint(
             folo_api::json::cli_command(
-                "fix the corrupt annotation file; run `folo dataset check {dataset}` to inspect all issues",
+                "fix the corrupt annotation or split file; run `folo dataset check {dataset}` to inspect all issues",
                 &[("dataset", &args.input)],
             ),
         ));

@@ -38,6 +38,7 @@ fn features(st: &AppState) -> Vec<String> {
         folo_api::FEATURE_RUN_ESTIMATE,
         folo_api::FEATURE_BENCHMARK,
         folo_api::FEATURE_RUN_CLI,
+        crate::store::FEATURE_PREDICT_OPTIONS,
     ];
     let labeling = st.store.labeler().is_ok();
     let optional = [

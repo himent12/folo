@@ -8,11 +8,35 @@ use folo_api::PredictRequest;
 
 use crate::AppState;
 use crate::error::{ApiJson, Error, Result};
-use crate::store::{PredictInput, PredictSource};
+use crate::store::{
+    PredictInput, PredictOptions, PredictSource, TileConfig, TtaConfig, check_predict_options,
+};
 
 use super::blocking;
 
 // ---- inference ---------------------------------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize)]
+struct PredictJsonBody {
+    #[serde(flatten)]
+    base: PredictRequest,
+    #[serde(default)]
+    tile: Option<serde_json::Value>,
+    #[serde(default)]
+    tta: Option<TtaConfig>,
+}
+
+/// Deserializes an optional `tile` JSON value into [`TileConfig`], inheriting `default_max_det` when the payload
+/// omits `"max_det"` so top-level `max_det` applies consistently across tiled and standard predictions.
+fn parse_tile_value(raw: Option<serde_json::Value>, default_max_det: u32) -> Result<Option<TileConfig>> {
+    let Some(v) = raw else { return Ok(None) };
+    let explicit_max_det = v.as_object().is_some_and(|m| m.contains_key("max_det"));
+    let mut cfg: TileConfig = serde_json::from_value(v).map_err(|e| field_err("tile", e))?;
+    if !explicit_max_det {
+        cfg.max_det = default_max_det as usize;
+    }
+    Ok(Some(cfg))
+}
 
 pub(super) fn field_err(name: &str, e: impl std::fmt::Display) -> Error {
     Error::new(StatusCode::BAD_REQUEST, "invalid_body", format!("field `{name}`: {e}"))
@@ -23,6 +47,7 @@ async fn parse_multipart(mut mp: Multipart) -> Result<PredictInput> {
     let (mut model_id, mut dataset_id, mut image_id) = (None, None, None);
     let (mut conf, mut iou, mut max_det) =
         (folo_api::default_conf(), folo_api::default_iou(), folo_api::default_max_det());
+    let (mut tile_raw, mut tta): (Option<serde_json::Value>, Option<TtaConfig>) = (None, None);
     while let Some(field) = mp.next_field().await.map_err(|e| Error::multipart("multipart", e))? {
         let name = field.name().unwrap_or("").to_string();
         if name == "image" {
@@ -38,13 +63,20 @@ async fn parse_multipart(mut mp: Multipart) -> Result<PredictInput> {
             "conf" => conf = text.parse().map_err(|e| field_err("conf", e))?,
             "iou" => iou = text.parse().map_err(|e| field_err("iou", e))?,
             "max_det" => max_det = text.parse().map_err(|e| field_err("max_det", e))?,
+            "tile" if !text.is_empty() => {
+                tile_raw = Some(serde_json::from_str(&text).map_err(|e| field_err("tile", e))?);
+            }
+            "tta" if !text.is_empty() => {
+                tta = Some(serde_json::from_str(&text).map_err(|e| field_err("tta", e))?);
+            }
             _ => {}
         }
     }
     let model_id =
         model_id.filter(|m| !m.is_empty()).ok_or_else(|| field_err("model_id", "missing or empty"))?;
     let source = resolve_predict_source(image, dataset_id, image_id)?;
-    Ok(PredictInput { model_id, source, conf, iou, max_det })
+    let tile = parse_tile_value(tile_raw, max_det)?;
+    Ok(PredictInput { model_id, source, conf, iou, max_det, options: PredictOptions { tta, tile } })
 }
 
 /// Validates and selects the single image source of a `POST /api/predict` request (multipart or JSON).
@@ -73,7 +105,8 @@ fn resolve_predict_source(
     }
 }
 
-fn parse_json_predict(r: PredictRequest) -> Result<PredictInput> {
+fn parse_json_predict(body: PredictJsonBody) -> Result<PredictInput> {
+    let r = body.base;
     if r.model_id.trim().is_empty() {
         return Err(field_err("model_id", "missing or empty"));
     }
@@ -83,12 +116,14 @@ fn parse_json_predict(r: PredictRequest) -> Result<PredictInput> {
             "dataset_id and image_id must both be non-empty when predicting on a dataset image",
         ));
     }
+    let tile = parse_tile_value(body.tile, r.max_det)?;
     Ok(PredictInput {
         model_id: r.model_id,
         source: PredictSource::Dataset { dataset_id: r.dataset_id, image_id: r.image_id },
         conf: r.conf,
         iou: r.iou,
         max_det: r.max_det,
+        options: PredictOptions { tta: body.tta, tile },
     })
 }
 
@@ -102,6 +137,7 @@ fn check_thresholds(p: &PredictInput) -> Result<()> {
     if p.max_det == 0 {
         return Err(field_err("max_det", "must be at least 1"));
     }
+    check_predict_options(&p.options)?;
     Ok(())
 }
 
@@ -116,7 +152,7 @@ pub(super) async fn predict(State(st): State<AppState>, req: Request) -> Result<
         let mp = Multipart::from_request(req, &st).await?;
         parse_multipart(mp).await?
     } else {
-        let ApiJson(r) = ApiJson::<PredictRequest>::from_request(req, &st).await?;
+        let ApiJson(r) = ApiJson::<PredictJsonBody>::from_request(req, &st).await?;
         parse_json_predict(r)?
     };
     check_thresholds(&input)?;
@@ -169,13 +205,17 @@ mod tests {
             ("m_1", "ds_1", ""),
             ("m_1", "ds_1", "   "),
         ] {
-            let req = PredictRequest {
-                model_id: model_id.into(),
-                dataset_id: dataset_id.into(),
-                image_id: image_id.into(),
-                conf: 0.25,
-                iou: 0.7,
-                max_det: 100,
+            let req = PredictJsonBody {
+                base: PredictRequest {
+                    model_id: model_id.into(),
+                    dataset_id: dataset_id.into(),
+                    image_id: image_id.into(),
+                    conf: 0.25,
+                    iou: 0.7,
+                    max_det: 100,
+                },
+                tile: None,
+                tta: None,
             };
             let err = parse_json_predict(req).unwrap_err();
             assert_eq!(
@@ -186,13 +226,17 @@ mod tests {
         }
 
         // Non-blank padded IDs keep their exact spelling so JSON HTTP matches embedded MCP lookup semantics.
-        let padded = parse_json_predict(PredictRequest {
-            model_id: " m_1 ".into(),
-            dataset_id: " ds_1 ".into(),
-            image_id: " 0 ".into(),
-            conf: 0.25,
-            iou: 0.7,
-            max_det: 100,
+        let padded = parse_json_predict(PredictJsonBody {
+            base: PredictRequest {
+                model_id: " m_1 ".into(),
+                dataset_id: " ds_1 ".into(),
+                image_id: " 0 ".into(),
+                conf: 0.25,
+                iou: 0.7,
+                max_det: 100,
+            },
+            tile: None,
+            tta: None,
         })
         .unwrap();
         assert_eq!(padded.model_id, " m_1 ");
@@ -200,5 +244,28 @@ mod tests {
             padded.source,
             PredictSource::Dataset { dataset_id, image_id } if dataset_id == " ds_1 " && image_id == " 0 "
         ));
+
+        // Omitting `tile.max_det` inherits top-level `max_det`; workload check caps excessive tile grids.
+        let inherited = parse_tile_value(Some(serde_json::json!({ "tile_width": 64, "tile_height": 64 })), 5)
+            .unwrap()
+            .unwrap();
+        assert_eq!(inherited.max_det, 5);
+        let explicit = parse_tile_value(
+            Some(serde_json::json!({ "tile_width": 64, "tile_height": 64, "max_det": 12 })),
+            5,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(explicit.max_det, 12);
+        let workload_err = crate::store::check_predict_workload(
+            &PredictOptions { tile: Some(TileConfig::new(8)), tta: None },
+            640,
+            Some((1024, 1024)),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (workload_err.status, workload_err.body.code.as_str()),
+            (StatusCode::BAD_REQUEST, "invalid_config")
+        );
     }
 }

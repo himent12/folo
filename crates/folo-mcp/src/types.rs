@@ -287,6 +287,25 @@ pub struct PredictArgs {
     #[serde(default = "folo_api::default_max_det")]
     #[schemars(range(min = 1, max = 300))]
     pub max_det: u32,
+    /// SAHI square tile size in pixels (`>= 1`). Mutually exclusive with `tta`.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub tile: Option<u32>,
+    /// Tile overlap ratio in `[0, 1)` (requires `tile`; default 0.2).
+    #[serde(default)]
+    pub tile_overlap: Option<f32>,
+    /// Run a full-image pass alongside tiles (requires `tile`; default true).
+    #[serde(default)]
+    pub tile_full_image: Option<bool>,
+    /// Enable Test-Time Augmentation (multi-scale + horizontal flip). Mutually exclusive with `tile`.
+    #[serde(default)]
+    pub tta: bool,
+    /// TTA scale multipliers (`> 0`; requires `tta: true`; default `[0.83, 1.0, 1.17]`).
+    #[serde(default)]
+    pub tta_scales: Option<Vec<f32>>,
+    /// Include horizontally flipped views with TTA (requires `tta: true`; default true).
+    #[serde(default)]
+    pub tta_hflip: Option<bool>,
 }
 
 /// `predict_batch`. Give `paths` or `glob`; at most 256 images after glob expansion.
@@ -308,6 +327,25 @@ pub struct PredictBatchArgs {
     #[serde(default = "folo_api::default_iou")]
     #[schemars(range(min = 0.0, max = 1.0))]
     pub iou: f32,
+    /// SAHI square tile size in pixels (`>= 1`). Mutually exclusive with `tta`.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub tile: Option<u32>,
+    /// Tile overlap ratio in `[0, 1)` (requires `tile`; default 0.2).
+    #[serde(default)]
+    pub tile_overlap: Option<f32>,
+    /// Run a full-image pass alongside tiles (requires `tile`; default true).
+    #[serde(default)]
+    pub tile_full_image: Option<bool>,
+    /// Enable Test-Time Augmentation (multi-scale + horizontal flip). Mutually exclusive with `tile`.
+    #[serde(default)]
+    pub tta: bool,
+    /// TTA scale multipliers (`> 0`; requires `tta: true`; default `[0.83, 1.0, 1.17]`).
+    #[serde(default)]
+    pub tta_scales: Option<Vec<f32>>,
+    /// Include horizontally flipped views with TTA (requires `tta: true`; default true).
+    #[serde(default)]
+    pub tta_hflip: Option<bool>,
 }
 
 /// One image `predict_batch` could not process.

@@ -21,6 +21,127 @@ use tokio::sync::broadcast;
 
 use crate::error::Result;
 
+pub use folo_vision::tta::DEFAULT_TTA_SCALES;
+pub use folo_vision::{PredictOptions, TileConfig, TileMergeMetric, TtaConfig};
+
+/// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/predict` honours optional
+/// `tile` (SAHI) and `tta` (Test-Time Augmentation) fields.
+pub const FEATURE_PREDICT_OPTIONS: &str = "predict_options";
+
+/// Maximum SAHI tiles permitted in a single server/MCP `predict` call (prevents resource exhaustion on tiny tiles).
+pub const MAX_PREDICT_TILES: usize = 256;
+/// Maximum cropped tiles predicted in a single batch in server/MCP `predict`.
+pub const MAX_PREDICT_TILE_BATCH: usize = 32;
+/// Maximum peak RGB crop bytes allocated per tiled batch chunk in server/MCP `predict` (256 MiB).
+pub const MAX_PREDICT_CROP_BYTES: u64 = 256 * 1024 * 1024;
+/// Maximum TTA views permitted in a single server/MCP `predict` call (`unique_scales * (hflip ? 2 : 1)`).
+pub const MAX_PREDICT_TTA_VIEWS: usize = 16;
+
+/// Validates `options` independent of a specific model `imgsz` or image dimensions (`400 invalid_body` on invalid
+/// ranges, exceeding per-request batch/scale caps, or combining `tile` with `tta`).
+pub fn check_predict_options(options: &PredictOptions) -> Result<()> {
+    fn bad(field: &str, msg: impl std::fmt::Display) -> crate::error::Error {
+        crate::error::Error::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_body",
+            format!("field `{field}`: {msg}"),
+        )
+    }
+    if options.tile.is_some() && options.tta.is_some() {
+        return Err(bad("tile", "cannot be combined with tta"));
+    }
+    if let Some(tile) = &options.tile {
+        tile.validate().map_err(|e| bad("tile", e))?;
+        if tile.tile_batch > MAX_PREDICT_TILE_BATCH {
+            return Err(bad(
+                "tile",
+                format!("tile_batch must be at most {MAX_PREDICT_TILE_BATCH}, got {}", tile.tile_batch),
+            ));
+        }
+    }
+    if let Some(tta) = &options.tta {
+        tta.validate().map_err(|e| bad("tta", e))?;
+        if tta.scales.len() > MAX_PREDICT_TTA_VIEWS {
+            return Err(bad(
+                "tta",
+                format!("at most {MAX_PREDICT_TTA_VIEWS} scales are allowed, got {}", tta.scales.len()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Tile count along one image axis matching `folo_vision::tile::compute_tiles` without allocating tile rects.
+fn axis_tile_count(img_len: u32, tile_len: u32, overlap: f32) -> usize {
+    let tw = tile_len.min(img_len);
+    if tw == img_len || tw == 0 {
+        return 1;
+    }
+    let overlap_px = ((tw as f64) * (overlap as f64)).round() as u32;
+    let stride = tw.saturating_sub(overlap_px.min(tw - 1)).max(1);
+    let span = img_len - tw;
+    (span as usize).div_ceil(stride as usize) + 1
+}
+
+/// Validates `options` against `model_imgsz` and (when known) image `(width, height)`, enforcing server-side SAHI
+/// tile-count and TTA view-count budgets before locking the predictor or allocating tile grids.
+pub fn check_predict_workload(
+    options: &PredictOptions,
+    model_imgsz: u32,
+    image_size: Option<(u32, u32)>,
+) -> Result<()> {
+    let bad = |msg: String, hint: &'static str| {
+        crate::error::Error::new(axum::http::StatusCode::BAD_REQUEST, "invalid_config", msg).hint(hint)
+    };
+    options.validate(model_imgsz).map_err(|e| {
+        bad(e.to_string(), "check `tile` / `tta` settings against the model's input size (32..=8192)")
+    })?;
+    if let (Some(tile), Some((w, h))) = (&options.tile, image_size) {
+        let nx = axis_tile_count(w, tile.tile_width, tile.overlap_x);
+        let ny = axis_tile_count(h, tile.tile_height, tile.overlap_y);
+        let tiles = nx.saturating_mul(ny);
+        if tiles > MAX_PREDICT_TILES {
+            return Err(bad(
+                format!(
+                    "tiled prediction on {w}x{h} with {}x{} tiles produces {tiles} tiles, exceeding the server limit of {MAX_PREDICT_TILES}",
+                    tile.tile_width, tile.tile_height
+                ),
+                "use a larger tile size or lower overlap",
+            ));
+        }
+        let crop_w = tile.tile_width.min(w) as u64;
+        let crop_h = tile.tile_height.min(h) as u64;
+        let chunk = tiles.min(tile.tile_batch) as u64;
+        let crop_bytes = chunk.saturating_mul(crop_w).saturating_mul(crop_h).saturating_mul(3);
+        if crop_bytes > MAX_PREDICT_CROP_BYTES {
+            return Err(bad(
+                format!(
+                    "tiled prediction on {w}x{h} with {}x{} tiles and tile_batch {} needs {:.1} MiB of crop buffers per batch chunk, exceeding the server limit of {} MiB",
+                    tile.tile_width,
+                    tile.tile_height,
+                    tile.tile_batch,
+                    crop_bytes as f64 / (1024.0 * 1024.0),
+                    MAX_PREDICT_CROP_BYTES / (1024 * 1024),
+                ),
+                "reduce `tile_batch` or use a smaller tile size",
+            ));
+        }
+    }
+    if let Some(tta) = &options.tta {
+        let sizes = tta.resolve_imgszs(model_imgsz).map_err(|e| {
+            bad(e.to_string(), "check `tta.scales` against the model's input size (32..=8192)")
+        })?;
+        let views = sizes.len().saturating_mul(if tta.hflip { 2 } else { 1 });
+        if views > MAX_PREDICT_TTA_VIEWS {
+            return Err(bad(
+                format!("TTA produces {views} views, exceeding the server limit of {MAX_PREDICT_TTA_VIEWS}"),
+                "pass fewer scales or set `hflip: false`",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Filter and page of `GET /api/datasets/{id}/images`.
 #[derive(Clone, Debug, Default)]
 pub struct ImageQuery {
@@ -307,6 +428,8 @@ pub struct PredictInput {
     pub iou: f32,
     /// Maximum detections.
     pub max_det: u32,
+    /// Optional SAHI tiled inference or Test-Time Augmentation settings.
+    pub options: PredictOptions,
 }
 
 /// Where the image of a prediction comes from.
@@ -795,5 +918,55 @@ mod tests {
         assert_eq!(page.counts.by_kind.get("broken_label"), Some(&1));
         assert_eq!(page.counts.by_kind.get("clipped_box"), Some(&3));
         assert_eq!(page.counts.by_kind.get("empty_image"), Some(&1));
+    }
+
+    #[test]
+    fn check_predict_workload_caps_tile_count_and_crop_bytes() {
+        // High tile count rejected.
+        let many = PredictOptions {
+            tile: Some(TileConfig {
+                tile_width: 32,
+                tile_height: 32,
+                overlap_x: 0.0,
+                overlap_y: 0.0,
+                ..Default::default()
+            }),
+            tta: None,
+        };
+        assert_eq!(
+            check_predict_workload(&many, 640, Some((640, 640))).unwrap_err().body.code,
+            "invalid_config"
+        );
+
+        // Large overlapping crops with high tile_batch exceed MAX_PREDICT_CROP_BYTES (256 MiB):
+        // 8192x8192 with 4096x4096 tiles at 0.5 overlap -> 3x3 = 9 tiles; 9 * 4096 * 4096 * 3 = 432 MiB.
+        let heavy = PredictOptions {
+            tile: Some(TileConfig {
+                tile_width: 4096,
+                tile_height: 4096,
+                overlap_x: 0.5,
+                overlap_y: 0.5,
+                tile_batch: 9,
+                ..Default::default()
+            }),
+            tta: None,
+        };
+        let err = check_predict_workload(&heavy, 640, Some((8192, 8192))).unwrap_err();
+        assert_eq!(err.body.code, "invalid_config");
+        assert!(err.body.message.contains("MiB"), "{}", err.body.message);
+
+        // Reducing tile_batch to 4 keeps peak chunk bytes at 192 MiB <= 256 MiB.
+        let bounded = PredictOptions {
+            tile: Some(TileConfig {
+                tile_width: 4096,
+                tile_height: 4096,
+                overlap_x: 0.5,
+                overlap_y: 0.5,
+                tile_batch: 4,
+                ..Default::default()
+            }),
+            tta: None,
+        };
+        check_predict_workload(&bounded, 640, Some((8192, 8192))).unwrap();
     }
 }

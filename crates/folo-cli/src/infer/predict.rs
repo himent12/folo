@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use folo_data::ImageFormat;
-use folo_vision::{PredictConfig, Predictor};
+use folo_vision::tta::DEFAULT_TTA_SCALES;
+use folo_vision::{PredictConfig, PredictOptions, Predictor, TileConfig, TileMergeMetric, TtaConfig};
 use serde_json::json;
 
 use crate::cli::{PredictArgs, bounds};
@@ -220,12 +221,64 @@ fn check_save_outside(save: Option<&Path>, sources: &[PathBuf]) -> Result<(), Cl
     Ok(())
 }
 
+/// Builds and validates SAHI tiled inference or Test-Time Augmentation options before the model is opened.
+fn build_predict_options(args: &PredictArgs) -> Result<PredictOptions, CliError> {
+    let invalid = |msg: String| {
+        CliError::new(ExitCode::Usage, "invalid_config", msg)
+            .hint("see `folo describe predict --json` for the accepted ranges")
+    };
+    if args.tile.is_some() && args.tta {
+        return Err(invalid("--tile and --tta cannot be combined in the same prediction call".into()));
+    }
+    let tile = if let Some(tile_size) = args.tile {
+        if !bounds::POSITIVE_INT.contains_u64(u64::from(tile_size)) {
+            return Err(invalid("--tile must be at least 1".into()));
+        }
+        let overlap = args.tile_overlap.unwrap_or(0.2);
+        if !bounds::TILE_OVERLAP.contains_f64(f64::from(overlap)) {
+            return Err(invalid(format!("--tile-overlap must be in [0, 1), got {overlap}")));
+        }
+        let tile_batch = args.tile_batch.unwrap_or(8);
+        if !bounds::POSITIVE_INT.contains_u64(tile_batch as u64) {
+            return Err(invalid("--tile-batch must be at least 1".into()));
+        }
+        let cfg = TileConfig {
+            tile_width: tile_size,
+            tile_height: tile_size,
+            overlap_x: overlap,
+            overlap_y: overlap,
+            full_image: !args.no_tile_full_image,
+            tile_batch,
+            merge_metric: args.tile_merge.map_or(TileMergeMetric::Ios, Into::into),
+            max_det: args.max_det as usize,
+            ..TileConfig::default()
+        };
+        cfg.validate().map_err(|e| engine_error("predict", e))?;
+        Some(cfg)
+    } else {
+        None
+    };
+    let tta = if args.tta {
+        let scales = args.tta_scales.clone().unwrap_or_else(|| DEFAULT_TTA_SCALES.to_vec());
+        let cfg = TtaConfig { hflip: !args.no_tta_hflip, scales, ..TtaConfig::default() };
+        cfg.validate().map_err(|e| engine_error("predict", e))?;
+        if let Some(imgsz) = args.imgsz {
+            cfg.resolve_imgszs(imgsz).map_err(|e| engine_error("predict", e))?;
+        }
+        Some(cfg)
+    } else {
+        None
+    };
+    Ok(PredictOptions { tta, tile })
+}
+
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     check_fusion_iou(args.fusion_iou)?;
     check_infer_args("predict", args.conf, args.iou, args.max_det, args.imgsz, bounds::INFER_IMGSZ, None)?;
+    let predict_opts = build_predict_options(&args)?;
     check_save_dir(args.save.as_deref())?;
     check_save_outside(args.save.as_deref(), &args.sources)?;
-    let shape = format!("imgsz {:?} head {:?}", args.imgsz, args.head);
+    let shape = format!("imgsz {:?} head {:?} tile {:?} tta {}", args.imgsz, args.head, args.tile, args.tta);
     let model = open_model(
         "predict",
         &args.model,
@@ -234,9 +287,11 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         args.tensor_cores,
         &shape,
     )?;
+    let effective_imgsz = args.imgsz.unwrap_or(model.imgsz());
+    predict_opts.validate(effective_imgsz).map_err(|e| engine_error("predict", e))?;
     let images = collect_images(&args.sources)?;
     let cfg = PredictConfig {
-        imgsz: args.imgsz.unwrap_or(model.imgsz()),
+        imgsz: effective_imgsz,
         conf: args.conf,
         iou: args.iou,
         max_det: args.max_det as usize,
@@ -272,7 +327,8 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
             }
         };
         let decode_ms = t.elapsed().as_secs_f64() * 1e3;
-        let mut p = predictor.predict(&img).map_err(|e| engine_error("predict", e))?;
+        let mut p =
+            predictor.predict_with_options(&img, &predict_opts).map_err(|e| engine_error("predict", e))?;
         p.timing.preprocess_ms += decode_ms;
         p.timing.total_ms += decode_ms;
         let ti = p.timing;

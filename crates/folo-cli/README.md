@@ -14,7 +14,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 |---|---|
 | `src/main.rs` | `main`: parses the command line, dispatches each subcommand (`run`), turns on the caches, resolves `--data-dir` |
 | `src/lib.rs` | `VERSION` (`folo --version`), `WEIGHTS_REPO` (default of `weights pull --repo`), `pub mod cli` |
-| `src/cli.rs` | The clap tree: `Cli`, `Command` and every `*Args` struct (`src/cli/label.rs`: `folo label`'s; `src/cli/bench.rs`: `folo bench`'s; `src/cli/bounds.rs`: shared numeric validation bounds). Help strings, bounds and defaults here are what `folo describe` prints |
+| `src/cli.rs` | The clap tree: `Cli`, `Command` and every `*Args` struct (`src/cli/dataset.rs`: `folo dataset`'s; `src/cli/label.rs`: `folo label`'s; `src/cli/bench.rs`: `folo bench`'s; `src/cli/bounds.rs`: shared numeric validation bounds). Help strings, bounds and defaults here are what `folo describe` prints |
 | `src/output.rs` | `Out` (human text vs `--json` records), `CliError` and its JSON envelope, `ExitCode` |
 | `src/describe.rs` | `folo describe`: the clap tree as JSON, plus the MCP tool schemas from folo-mcp. Each argument carries `"bounds"` (`null` when unbounded, or an object with any active subset of `minimum`, `exclusive_minimum`, `maximum`, `exclusive_maximum`, and `multiple_of`) and `"requires"` (peer flags required whenever the argument is supplied), backed by `src/cli/bounds.rs` |
 | `src/engine.rs` | Opening datasets, registering the GPU backend for `--device`, engine errors as `CliError` |
@@ -28,7 +28,7 @@ and two constants, so tests can parse commands with the real parser; every comma
 | `src/output_file.rs` | The file `export` and `quantize` write: a temporary name, then one move to a free name (`folo_nn::io::publish_new`) |
 | `src/coco.rs` | `val --coco` / `--save-json`: upfront category validation (including strict subset splits), pycocotools-exact evaluation and COCO results files |
 | `src/draw.rs` | Annotated images for `predict --save` (class colours, a built-in digit font) |
-| `src/dataset/` | `folo dataset check \| stats \| synth \| convert`, on folo-data: `mod.rs` (`stats`, `convert`, shared helpers), `check.rs` (`check`, COCO size-mismatch reconciliation, delegating dangling symlink diagnostics to `folo_server::index::links`), `synth.rs` (`synth`, atomic sibling-staging and rollback) |
+| `src/dataset/` | `folo dataset check \| stats \| synth \| convert \| split`, on folo-data: `mod.rs` (`stats`, `convert`, shared helpers), `check.rs` (`check`, COCO size-mismatch reconciliation, cross-split duplicate leakage reporting, delegating dangling symlink diagnostics to `folo_server::index::links`), `synth.rs` (`synth`, atomic sibling-staging and rollback), `split.rs` (`split`, deterministic multi-label stratified splitting) |
 | `src/weights/` | `folo weights list \| pull` and published-name resolution (`mod.rs`); `download.rs` fetches a release over HTTPS, else with `gh` |
 | `src/cloud.rs` | `folo cloud ...` on the data dir, through `folo_server::cloud` |
 | `src/label/` | `folo label ...`: `mod.rs` opens the data dir's `folo serve` (or `--server`, else the data dir's labeler in this process, holding its lock; the store only for `export`) and runs folo-mcp's labeling operations (`folo_mcp::label::Labels`) with CLI hints; `print.rs` is the human output |
@@ -50,7 +50,7 @@ From the `Command` enum in `src/cli.rs` and the `run` match in `src/main.rs`.
 | `val`, `predict`, `export` | `src/infer/` (`mod.rs`, `predict.rs`) |
 | `quantize` | `src/quantize.rs` |
 | `bench catalog \| list \| create \| show \| delete \| run \| status \| stop` | `src/bench/`, on folo-mcp's `bench` module |
-| `dataset check \| stats \| synth \| convert` | `src/dataset/` (`mod.rs`, `check.rs`, `synth.rs`) |
+| `dataset check \| stats \| synth \| convert \| split` | `src/dataset/` (`mod.rs`, `check.rs`, `synth.rs`, `split.rs`) |
 | `weights list \| pull` | `src/weights/mod.rs`, `src/weights/download.rs` |
 | `cloud providers \| connect \| connections \| check \| disconnect \| offers \| instances \| terminate` | `src/cloud.rs` |
 | `label agents \| jobs \| create \| add \| start \| stop \| status \| images \| view \| set \| review \| export` | `src/label/`, on folo-mcp's `label` module |
@@ -108,7 +108,7 @@ bash tools/test-tmp.sh cargo test -p folo-cli   # as CI runs them: fails if a te
 | `tests/cli_values.rs` | Multi-value flags in every documented form |
 | `tests/studio_cli.rs` | Studio's "CLI command" strings (`web/src/lib/trainCli.fixtures.json`) parse with the real tree |
 | `tests/engine.rs` (+ `engine/infer.rs`, `engine/score.rs`) | `train`, `val`, `predict`, `export`, `quantize`, `--score consensus`, and the weights plumbing end to end on a tiny synthetic dataset |
-| `tests/dataset.rs` | `dataset synth \| stats \| check \| convert` end to end |
+| `tests/dataset.rs`, `tests/dataset_split_voc.rs` | `dataset synth \| stats \| check \| convert \| split`, Pascal VOC round-trip, and duplicate/split-leakage detection end to end |
 | `tests/weights.rs` | `weights pull` against a release server on loopback, and the `gh` fallback |
 | `tests/cloud.rs` | `folo cloud` against a `folo serve --token` child as a `remote` connection |
 | `tests/label.rs` | `folo label`'s flags, JSON records and exit codes with a fake `claude` script, in process and through a `folo serve` child (found by its data dir, and with `--server`); every child has a deadline |

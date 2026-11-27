@@ -6,7 +6,10 @@ use std::time::Instant;
 
 use base64::Engine as _;
 use folo_api::{ExportSpec, Model, OnnxSwitches, ValRequest};
-use folo_server::store::{PredictInput, PredictSource};
+use folo_server::store::{
+    DEFAULT_TTA_SCALES, PredictInput, PredictOptions, PredictSource, TileConfig, TtaConfig,
+    check_predict_options, check_predict_workload,
+};
 use rmcp::model::{ContentBlock, Resource};
 use serde_json::json;
 
@@ -103,6 +106,15 @@ impl Inner {
         if !(1..=300).contains(&a.max_det) {
             return Err(invalid_arguments(format!("max_det must be in 1..=300, got {}", a.max_det)));
         }
+        let options = build_predict_options(
+            a.tile,
+            a.tile_overlap,
+            a.tile_full_image,
+            a.tta,
+            a.tta_scales,
+            a.tta_hflip,
+            a.max_det as usize,
+        )?;
         // The file an `image_path` names, for a decode error (the server only sees the uploaded bytes).
         let mut file = None;
         let source = match (a.image_path, a.image_base64, a.dataset_id, a.image_id) {
@@ -137,8 +149,14 @@ impl Inner {
                 ));
             }
         };
-        let input =
-            PredictInput { model_id: a.model_id, source, conf: a.conf, iou: a.iou, max_det: a.max_det };
+        let input = PredictInput {
+            model_id: a.model_id,
+            source,
+            conf: a.conf,
+            iou: a.iou,
+            max_det: a.max_det,
+            options,
+        };
         let mut r = self.blocking(move |s| s.predict(input)).await.map_err(|mut e| {
             if let Some(f) = &file
                 && e.body.code == "image_decode_failed"
@@ -173,6 +191,15 @@ impl Inner {
     ) -> Result<Output, Error> {
         check_unit("conf", a.conf)?;
         check_unit("iou", a.iou)?;
+        let options = build_predict_options(
+            a.tile,
+            a.tile_overlap,
+            a.tile_full_image,
+            a.tta,
+            a.tta_scales,
+            a.tta_hflip,
+            folo_api::default_max_det() as usize,
+        )?;
         // Validate input source shape and bounds before hitting the store or proxy server.
         let batch_input = match (a.paths, a.glob) {
             (Some(paths), None) => {
@@ -189,6 +216,13 @@ impl Inner {
         };
         let model_id = a.model_id.clone();
         let model = self.blocking(move |s| s.get_model(&model_id)).await?;
+        check_predict_workload(&options, model.imgsz, None).map_err(|e| {
+            let mut err = invalid_arguments(e.body.message);
+            if let Some(h) = e.body.hint {
+                err = err.hint(h);
+            }
+            err
+        })?;
         let paths: Vec<(String, BatchPath)> = match batch_input {
             Ok(paths) => {
                 let policy = self.paths.clone();
@@ -222,6 +256,7 @@ impl Inner {
                 BatchPath::Ready(path) => {
                     let model_id = a.model_id.clone();
                     let (conf, iou) = (a.conf, a.iou);
+                    let options = options.clone();
                     self.blocking(move |s| {
                         let bytes = read_image(&path)?;
                         s.predict(PredictInput {
@@ -230,6 +265,7 @@ impl Inner {
                             conf,
                             iou,
                             max_det: folo_api::default_max_det(),
+                            options,
                         })
                     })
                     .await
@@ -247,7 +283,12 @@ impl Inner {
                         json!({ "path": shown, "image": r.image, "boxes": r.boxes, "timing": r.timing }),
                     );
                 }
-                Err(e) if e.body.code == "not_implemented" => return Err(e),
+                // `not_implemented` (older server without `predict_options`) applies to the whole batch; per-image
+                // `invalid_config` (e.g. an oversized image exceeding the tile grid budget) is recorded in `failed`
+                // so valid images before and after it are preserved.
+                Err(e) if e.body.code == "not_implemented" => {
+                    return Err(e);
+                }
                 Err(e) => {
                     images.push(json!({ "path": shown, "error": e.body }));
                     failed.push(BatchFailure { path: shown, code: e.body.code, message: e.body.message });
@@ -316,6 +357,54 @@ impl Inner {
     }
 }
 
+/// Builds and validates optional SAHI tiling or TTA settings upfront before touching the store or proxy.
+fn build_predict_options(
+    tile: Option<u32>,
+    tile_overlap: Option<f32>,
+    tile_full_image: Option<bool>,
+    tta: bool,
+    tta_scales: Option<Vec<f32>>,
+    tta_hflip: Option<bool>,
+    max_det: usize,
+) -> Result<PredictOptions, Error> {
+    if tile.is_none() && (tile_overlap.is_some() || tile_full_image.is_some()) {
+        return Err(invalid_arguments("tile_overlap and tile_full_image require `tile` to be set"));
+    }
+    if !tta && (tta_scales.is_some() || tta_hflip.is_some()) {
+        return Err(invalid_arguments("tta_scales and tta_hflip require `tta: true`"));
+    }
+    if tile.is_some() && tta {
+        return Err(invalid_arguments("`tile` and `tta` cannot be combined in the same prediction call"));
+    }
+    let tile_cfg = if let Some(size) = tile {
+        let overlap = tile_overlap.unwrap_or(0.2);
+        let cfg = TileConfig {
+            tile_width: size,
+            tile_height: size,
+            overlap_x: overlap,
+            overlap_y: overlap,
+            full_image: tile_full_image.unwrap_or(true),
+            max_det,
+            ..TileConfig::default()
+        };
+        cfg.validate().map_err(|e| invalid_arguments(e.to_string()))?;
+        Some(cfg)
+    } else {
+        None
+    };
+    let tta_cfg = if tta {
+        let scales = tta_scales.unwrap_or_else(|| DEFAULT_TTA_SCALES.to_vec());
+        let cfg = TtaConfig { hflip: tta_hflip.unwrap_or(true), scales, ..TtaConfig::default() };
+        cfg.validate().map_err(|e| invalid_arguments(e.to_string()))?;
+        Some(cfg)
+    } else {
+        None
+    };
+    let opts = PredictOptions { tta: tta_cfg, tile: tile_cfg };
+    check_predict_options(&opts).map_err(|e| invalid_arguments(e.body.message))?;
+    Ok(opts)
+}
+
 /// Reads an image file for inference (non-empty, at most 64 MiB).
 fn read_image(path: &Path) -> Result<Vec<u8>, Error> {
     let meta = std::fs::metadata(path).map_err(|_| {
@@ -366,313 +455,5 @@ pub(super) fn decode_image_base64(b64: &str, max: u64) -> Result<Vec<u8>, Error>
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use super::*;
-    use crate::Options;
-    use crate::proxy::HttpStore;
-    use crate::server::FoloMcp;
-    use folo_server::Store;
-
-    /// `list_models`, `list_runs`, `list_label_jobs`, `list_benchmarks`, `val`, and `predict_batch` validate
-    /// paging and argument ranges before hitting the store or proxy server, keeping embedded and `--server`
-    /// error codes identical even when the server is unreachable.
-    #[tokio::test]
-    async fn tools_validate_paging_and_args_before_proxy_access() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let hits = Arc::new(AtomicUsize::new(0));
-        let hits_bg = Arc::clone(&hits);
-        let accept = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                hits_bg.fetch_add(1, Ordering::SeqCst);
-                drop(stream);
-            }
-        });
-        let http = Arc::new(HttpStore::new(&url, None));
-        let home = folo_test_support::TestDir::new("mcp-upfront-validation");
-        let opts = Options {
-            data_dir: home.to_path_buf(),
-            read_only: false,
-            confine: false,
-            device: "cpu".into(),
-            published_weights: None,
-        };
-        let server = FoloMcp::new(http.clone(), Some(http), opts);
-
-        let bad_page = || PageArgs { limit: Some(0), cursor: None };
-        let bad_cursor = || PageArgs { limit: Some(10), cursor: Some("bogus".into()) };
-        assert_eq!(server.inner.list_models(bad_page()).await.err().unwrap().body.code, "invalid_arguments");
-        assert_eq!(
-            server.inner.list_models(bad_cursor()).await.err().unwrap().body.code,
-            "invalid_arguments"
-        );
-        assert_eq!(
-            server
-                .inner
-                .list_runs(ListRunsArgs { status: None, limit: Some(0), cursor: None })
-                .await
-                .err()
-                .unwrap()
-                .body
-                .code,
-            "invalid_arguments"
-        );
-        assert_eq!(
-            server.inner.list_label_jobs(bad_page()).await.err().unwrap().body.code,
-            "invalid_arguments"
-        );
-        assert_eq!(
-            server.inner.list_benchmarks(bad_page()).await.err().unwrap().body.code,
-            "invalid_arguments"
-        );
-
-        // `val` rejects bad `imgsz` before touching the proxy.
-        let val_err = server
-            .inner
-            .val(
-                ValArgs {
-                    model_id: "m_1".into(),
-                    dataset_id: "ds_1".into(),
-                    split: folo_api::Split::Val,
-                    imgsz: Some(33),
-                    conf: 0.001,
-                    iou: 0.7,
-                },
-                &mut Progress::none(),
-            )
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(val_err.body.code, "invalid_arguments");
-
-        // `predict_batch` rejects empty paths, both paths+glob, or neither before looking up `model_id`.
-        for (paths, glob) in
-            [(Some(vec![]), None), (None, None), (Some(vec!["a.jpg".into()]), Some("*.jpg".into()))]
-        {
-            let err = server
-                .inner
-                .predict_batch(
-                    PredictBatchArgs { model_id: "m_missing".into(), paths, glob, conf: 0.25, iou: 0.7 },
-                    &mut Progress::none(),
-                )
-                .await
-                .err()
-                .unwrap();
-            assert_eq!(err.body.code, "invalid_arguments");
-        }
-
-        // `predict` rejects blank `model_id`, empty `image_base64`, and blank `dataset_id`/`image_id`
-        // identically on both embedded and proxied backends before reading files or hitting the store.
-        let embedded = FoloMcp::new(
-            Arc::new(folo_server::MockStore::new()),
-            None,
-            Options {
-                data_dir: home.to_path_buf(),
-                read_only: false,
-                confine: false,
-                device: "cpu".into(),
-                published_weights: None,
-            },
-        );
-        for backend in [&server, &embedded] {
-            for args in [
-                PredictArgs {
-                    model_id: "   ".into(),
-                    image_path: None,
-                    image_base64: Some("AAAA".into()),
-                    dataset_id: None,
-                    image_id: None,
-                    conf: 0.25,
-                    iou: 0.7,
-                    max_det: 10,
-                },
-                PredictArgs {
-                    model_id: "m_1".into(),
-                    image_path: None,
-                    image_base64: Some("".into()),
-                    dataset_id: None,
-                    image_id: None,
-                    conf: 0.25,
-                    iou: 0.7,
-                    max_det: 10,
-                },
-                PredictArgs {
-                    model_id: "m_1".into(),
-                    image_path: None,
-                    image_base64: None,
-                    dataset_id: Some("  ".into()),
-                    image_id: Some("img_1".into()),
-                    conf: 0.25,
-                    iou: 0.7,
-                    max_det: 10,
-                },
-            ] {
-                let err = backend.inner.predict(args).await.err().unwrap();
-                assert_eq!(err.body.code, "invalid_arguments");
-            }
-        }
-
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "invalid arguments must never hit the proxy server");
-        accept.abort();
-        let _ = accept.await;
-
-        // `predict_batch` records the same `invalid_arguments` failure code for a zero-byte file across both
-        // embedded and proxied backends (never hitting the server with an empty multipart `image`).
-        let empty_img = home.join("empty.jpg");
-        std::fs::write(&empty_img, b"").unwrap();
-        let model_id = folo_server::MockStore::new().list_models().unwrap()[0].id.clone();
-        let mock_server =
-            folo_server::Server::new(Arc::new(folo_server::MockStore::new()), Default::default());
-        let http_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let http_url = format!("http://{}", http_listener.local_addr().unwrap());
-        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-        let http_task = tokio::spawn(mock_server.serve(http_listener, async move {
-            let _ = stop_rx.await;
-        }));
-        let proxied_live = FoloMcp::new(
-            Arc::new(HttpStore::new(&http_url, None)),
-            Some(Arc::new(HttpStore::new(&http_url, None))),
-            Options {
-                data_dir: home.to_path_buf(),
-                read_only: false,
-                confine: false,
-                device: "cpu".into(),
-                published_weights: None,
-            },
-        );
-        for backend in [&embedded, &proxied_live] {
-            let res = backend
-                .inner
-                .predict_batch(
-                    PredictBatchArgs {
-                        model_id: model_id.clone(),
-                        paths: Some(vec![empty_img.to_string_lossy().into_owned()]),
-                        glob: None,
-                        conf: 0.25,
-                        iou: 0.7,
-                    },
-                    &mut Progress::none(),
-                )
-                .await
-                .unwrap();
-            let failed = res.value["failed"].as_array().unwrap();
-            assert_eq!(failed.len(), 1);
-            assert_eq!(failed[0]["code"], "invalid_arguments");
-        }
-        let _ = stop_tx.send(());
-        let _ = http_task.await;
-    }
-
-    /// Blank or dot-only resource IDs (`""`, `"."`, `".."`) return the same `<resource>_not_found` error across
-    /// embedded and proxied MCP backends instead of hitting `404 route_not_found` or parent collection routes.
-    #[tokio::test]
-    async fn proxied_blank_and_dot_resource_ids_match_embedded_not_found() {
-        let home = folo_test_support::TestDir::new("mcp-blank-id-parity");
-        let mock_server =
-            folo_server::Server::new(Arc::new(folo_server::MockStore::new()), Default::default());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-        let task = tokio::spawn(mock_server.serve(listener, async move {
-            let _ = stop_rx.await;
-        }));
-        let embedded = FoloMcp::new(
-            Arc::new(folo_server::MockStore::new()),
-            None,
-            Options {
-                data_dir: home.to_path_buf(),
-                read_only: false,
-                confine: false,
-                device: "cpu".into(),
-                published_weights: None,
-            },
-        );
-        let http = Arc::new(HttpStore::new(&url, None));
-        let proxied = FoloMcp::new(
-            http.clone(),
-            Some(http),
-            Options {
-                data_dir: home.to_path_buf(),
-                read_only: false,
-                confine: false,
-                device: "cpu".into(),
-                published_weights: None,
-            },
-        );
-
-        let real_store = Arc::new(folo_server::RealStore::open(home.join("real")).device("cpu"));
-        let real_srv = folo_server::Server::new(real_store, Default::default());
-        let rl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let rurl = format!("http://{}", rl.local_addr().unwrap());
-        let (rtx, rrx) = tokio::sync::oneshot::channel::<()>();
-        let rtask = tokio::spawn(real_srv.serve(rl, async move {
-            let _ = rrx.await;
-        }));
-        let rhttp = Arc::new(HttpStore::new(&rurl, None));
-        let benches = crate::bench::Benchmarks::Http(rhttp.clone());
-        let labels = crate::label::Labels::Http(rhttp);
-
-        for bad in ["", ".", ".."] {
-            for backend in [&embedded, &proxied] {
-                assert_eq!(
-                    backend
-                        .inner
-                        .get_dataset(DatasetIdArgs { dataset_id: bad.into() })
-                        .await
-                        .err()
-                        .unwrap()
-                        .body
-                        .code,
-                    "dataset_not_found",
-                    "get_dataset({bad:?})"
-                );
-                assert_eq!(
-                    backend
-                        .inner
-                        .run_status(RunStatusArgs { run_id: bad.into(), log_lines: 0 })
-                        .await
-                        .err()
-                        .unwrap()
-                        .body
-                        .code,
-                    "run_not_found",
-                    "run_status({bad:?})"
-                );
-                assert_eq!(
-                    backend
-                        .inner
-                        .export(ExportArgs {
-                            model_id: bad.into(),
-                            format: folo_api::ExportFormat::Onnx,
-                            decode: false,
-                            dynamic: false,
-                            half: false,
-                        })
-                        .await
-                        .err()
-                        .unwrap()
-                        .body
-                        .code,
-                    "model_not_found",
-                    "export({bad:?})"
-                );
-            }
-            let b = benches.clone();
-            let bad_s = bad.to_string();
-            let b_err = tokio::task::spawn_blocking(move || b.get(&bad_s)).await.unwrap().unwrap_err();
-            assert_eq!(b_err.body.code, "bench_not_found", "bench.get({bad:?})");
-            let l = labels.clone();
-            let bad_s = bad.to_string();
-            let l_err = tokio::task::spawn_blocking(move || l.job(&bad_s)).await.unwrap().unwrap_err();
-            assert_eq!(l_err.body.code, "label_job_not_found", "labels.job({bad:?})");
-        }
-
-        let _ = rtx.send(());
-        let _ = rtask.await;
-        let _ = stop_tx.send(());
-        let _ = task.await;
-    }
-}
+#[path = "models_tests.rs"]
+mod tests;

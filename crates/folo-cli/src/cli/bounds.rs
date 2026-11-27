@@ -239,6 +239,10 @@ pub const UNIT_INTERVAL: NumericBounds = NumericBounds::float_range(0.0, true, 1
 pub const POSITIVE_INT: NumericBounds = NumericBounds::int_min(1);
 /// Non-negative finite float `[>= 0]`.
 pub const NON_NEGATIVE_FLOAT: NumericBounds = NumericBounds::float_min(0.0, true);
+/// Strictly positive finite float `(> 0)` (e.g. TTA scale multipliers).
+pub const POSITIVE_FLOAT: NumericBounds = NumericBounds::float_min(0.0, false);
+/// Half-open unit interval `[0, 1)` (SAHI tile overlap ratio).
+pub const TILE_OVERLAP: NumericBounds = NumericBounds::float_range(0.0, true, 1.0, false);
 
 /// Network stride divisor for square input sizes.
 pub const IMGSZ_STRIDE: u64 = 32;
@@ -323,6 +327,10 @@ pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
     ("folo predict", "max_det", POSITIVE_INT),
     ("folo predict", "fusion_iou", UNIT_INTERVAL),
     ("folo predict", "imgsz", INFER_IMGSZ),
+    ("folo predict", "tile", POSITIVE_INT),
+    ("folo predict", "tile_overlap", TILE_OVERLAP),
+    ("folo predict", "tile_batch", POSITIVE_INT),
+    ("folo predict", "tta_scales", POSITIVE_FLOAT),
     // `folo export`
     ("folo export", "imgsz", INFER_IMGSZ),
     ("folo export", "batch", POSITIVE_INT),
@@ -336,6 +344,9 @@ pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
     ("folo dataset synth", "images", SYNTH_IMAGES),
     ("folo dataset synth", "imgsz", SYNTH_IMGSZ),
     ("folo dataset synth", "val_frac", UNIT_INTERVAL),
+    // `folo dataset split`
+    ("folo dataset split", "val", UNIT_INTERVAL),
+    ("folo dataset split", "test", UNIT_INTERVAL),
     // `folo label`
     ("folo label start", "batch", LABEL_BATCH),
     ("folo label start", "parallel", LABEL_PARALLEL),
@@ -361,8 +372,16 @@ pub fn for_arg(cmd_path: &str, arg_id: &str) -> Option<NumericBounds> {
 /// `clap` enforces these via `#[arg(requires = ...)]`, but `clap_builder` does not expose a public `requires`
 /// getter for reflection, so `folo describe` reads this table and unit tests verify every entry against the real
 /// clap parser.
-pub const ARG_REQUIRES: &[(&str, &str, &[&str])] =
-    &[("folo serve", "tls_cert", &["tls_key"]), ("folo serve", "tls_key", &["tls_cert"])];
+pub const ARG_REQUIRES: &[(&str, &str, &[&str])] = &[
+    ("folo serve", "tls_cert", &["tls_key"]),
+    ("folo serve", "tls_key", &["tls_cert"]),
+    ("folo predict", "tile_overlap", &["tile"]),
+    ("folo predict", "no_tile_full_image", &["tile"]),
+    ("folo predict", "tile_batch", &["tile"]),
+    ("folo predict", "tile_merge", &["tile"]),
+    ("folo predict", "tta_scales", &["tta"]),
+    ("folo predict", "no_tta_hflip", &["tta"]),
+];
 
 /// Looks up the peer argument ids required whenever `(cmd_path, arg_id)` is supplied.
 pub fn required_args(cmd_path: &str, arg_id: &str) -> &'static [&'static str] {
