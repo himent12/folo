@@ -70,26 +70,41 @@ fn aend(o: u32, inp: u32, outp: u32) -> u32 { return ((o + 1u) * inp + outp - 1u
 /// Vectorized 2×2 stride-2 reduction shared by `upsample_nearest2d_backward(2, 2)` (`scale = 1.0`) and
 /// `avg_pool2d(2, 2, 0)` (`scale = 0.25`) for even output widths and exact 2× input heights (`h == 2 * oh`):
 /// each thread reads two `vec4<T>`s (8 elements across consecutive rows) and writes one `vec2<T>`.
-/// Params: 0 = output `vec2<T>` units (`planes * oh * (ow / 2)`), 1 = `ow / 2`, 2 = `scale` (f32).
-const POOL_2X2_S2_VEC4_SRC: &str = "\
-@group(0) @binding(1) var<storage, read> X: array<vec4<T>>;\n\
-@group(0) @binding(2) var<storage, read_write> Y: array<vec2<T>>;\n\
-@compute @workgroup_size(256)\n\
-fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
-        @builtin(local_invocation_index) lid: u32) {\n\
-    let i = linear_id(wid, nwg, lid, 256u);\n\
-    if (i >= pu(0u)) { return; }\n\
-    let w2 = pu(1u);\n\
-    let x2 = i % w2;\n\
-    let t = i / w2;\n\
-    let in0 = t * (2u * w2) + x2;\n\
-    let r0 = vec4<f32>(X[in0]);\n\
-    let r1 = vec4<f32>(X[in0 + w2]);\n\
-    let s = pf(2u);\n\
-    let a = ((((0.0 + r0.x) + r0.y) + r1.x) + r1.y) * s;\n\
-    let b = ((((0.0 + r0.z) + r0.w) + r1.z) + r1.w) * s;\n\
-    Y[i] = vec2<T>(T(a), T(b));\n\
-}\n";
+/// Spec: `STRIDED` (bool; when true, reads channel-slice NCHW `X` at `x_off4`, batch stride `x_n_stride4`,
+/// with `ch_rows = C * oh` rows per batch image).
+/// Params: 0 = output `vec2<T>` units (`planes * oh * (ow / 2)`), 1 = `ow / 2`, 2 = `scale` (f32),
+/// and when `STRIDED`: 3 = `x_off / 4`, 4 = `x_n_stride / 4`, 5 = `C * oh`.
+fn gen_pool_2x2_s2_vec4(spec: &Spec) -> String {
+    let strided = spec.get_bool("STRIDED");
+    let addr = if strided {
+        "    let ch_rows = pu(5u);\n\
+         \x20   let n = t / ch_rows;\n\
+         \x20   let r_in = t - n * ch_rows;\n\
+         \x20   let in0 = pu(3u) + n * pu(4u) + r_in * (2u * w2) + x2;\n"
+    } else {
+        "    let in0 = t * (2u * w2) + x2;\n"
+    };
+    format!(
+        "@group(0) @binding(1) var<storage, read> X: array<vec4<T>>;\n\
+         @group(0) @binding(2) var<storage, read_write> Y: array<vec2<T>>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {{\n\
+         \x20   let i = linear_id(wid, nwg, lid, 256u);\n\
+         \x20   if (i >= pu(0u)) {{ return; }}\n\
+         \x20   let w2 = pu(1u);\n\
+         \x20   let x2 = i % w2;\n\
+         \x20   let t = i / w2;\n\
+         {addr}\
+         \x20   let r0 = vec4<f32>(X[in0]);\n\
+         \x20   let r1 = vec4<f32>(X[in0 + w2]);\n\
+         \x20   let s = pf(2u);\n\
+         \x20   let a = ((((0.0 + r0.x) + r0.y) + r1.x) + r1.y) * s;\n\
+         \x20   let b = ((((0.0 + r0.z) + r0.w) + r1.z) + r1.w) * s;\n\
+         \x20   Y[i] = vec2<T>(T(a), T(b));\n\
+         }}\n"
+    )
+}
 
 /// Vectorized 2×2 stride-2 `avg_pool2d_backward` for exact 2× input dims (`h == 2 * oh`, `w == 2 * ow`) and
 /// even `ow`: reads one `vec2<T>` of upstream gradients and writes two `vec4<T>`s scaled by `0.25`.
@@ -328,7 +343,7 @@ static POOL: KernelDef = KernelDef {
 static POOL_2X2_S2_VEC4: KernelDef = KernelDef {
     name: "pool_2x2_s2_vec4",
     storage: &[Access::Read, Access::ReadWrite],
-    source: Source::Static(POOL_2X2_S2_VEC4_SRC),
+    source: Source::Generated(gen_pool_2x2_s2_vec4),
 };
 static AVG_2X2_S2_BWD_VEC4: KernelDef = KernelDef {
     name: "avg_2x2_s2_bwd_vec4",
@@ -795,6 +810,61 @@ pub fn upsample_nearest2d_backward(
         return ctx.dispatch(&k, &[g, gx], &p, ctx.grid_1d(units as u64, 256)?);
     }
     launch(ctx, &POOL, 6, &[g, gx], total, (h, w, oh, ow), (sh, sw), (1, 1), (0, 0), half)
+}
+
+/// Fast 2×2 nearest-upsampling backward reading `g` directly from a 4-aligned NCHW channel-slice view
+/// `(g_offset, g_n_stride)` (e.g. a `narrow` along dim 1 from `Tensor::cat` backward) with zero pre-copy.
+/// Returns `Ok(true)` if dispatched, or `Ok(false)` when alignment/limits require the dense fallback.
+#[allow(clippy::too_many_arguments)]
+pub fn try_upsample_2x2_backward_strided(
+    ctx: &GpuContext,
+    g: &wgpu::Buffer,
+    (g_offset, g_n_stride): (usize, usize),
+    gx: &wgpu::Buffer,
+    (n, c, h, w): (usize, usize, usize, usize),
+    dtype: DType,
+) -> Result<bool> {
+    check_dtype(ctx, dtype, "upsample_nearest2d_backward")?;
+    let total = prod(&[n, c, h, w])?;
+    check_buf(gx, total, dtype, "upsample_backward output")?;
+    if total == 0 {
+        return Ok(true);
+    }
+    let (oh, ow) = (prod(&[h, 2])?, prod(&[w, 2])?);
+    let image = prod(&[c, oh, ow])?;
+    if !w.is_multiple_of(2)
+        || g_n_stride < image
+        || !g_offset.is_multiple_of(4)
+        || !g_n_stride.is_multiple_of(4)
+    {
+        return Ok(false);
+    }
+    let Some(span) = (n - 1)
+        .checked_mul(g_n_stride)
+        .and_then(|s| s.checked_add(image))
+        .and_then(|s| s.checked_add(g_offset))
+    else {
+        return Ok(false);
+    };
+    if span > u32::MAX as usize {
+        return Ok(false);
+    }
+    check_buf(g, span, dtype, "upsample_backward grad")?;
+    let half = dtype == DType::F16;
+    let w2 = w / 2;
+    let units = n * c * h * w2;
+    let strided = g_offset != 0 || g_n_stride != image;
+    let mut spec = Spec::new().f16(half);
+    if strided {
+        spec = spec.bool("STRIDED", true);
+    }
+    let k = ctx.kernel(&POOL_2X2_S2_VEC4, spec)?;
+    let mut p = Params::new().uz(units)?.uz(w2)?.f(1.0);
+    if strided {
+        p = p.uz(g_offset / 4)?.uz(g_n_stride / 4)?.uz(c * h)?;
+    }
+    ctx.dispatch(&k, &[g, gx], &p, ctx.grid_1d(units as u64, 256)?)?;
+    Ok(true)
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).

@@ -171,10 +171,18 @@ mod tests {
                     .bool("S2", true)
                     .bool("VEC2_OUT", true),
             ),
-            ("bn_fused_fwd", Spec::new().u32("REGS", 0).bool("VEC4", true).subgroups(true)),
-            ("bn_fused_fwd", Spec::new().u32("REGS", 4).bool("VEC4", true).subgroups(true)),
-            ("bn_fused_bwd", Spec::new().u32("REGS", 0).bool("VEC4", true).subgroups(false)),
-            ("bn_fused_bwd", Spec::new().u32("REGS", 8).bool("VEC4", true).subgroups(false)),
+            ("bn_fused_fwd", Spec::new().u32("REGS", 0).u32("WG", 512).bool("VEC4", true).subgroups(true)),
+            ("bn_fused_fwd", Spec::new().u32("REGS", 4).u32("WG", 512).bool("VEC4", true).subgroups(true)),
+            (
+                "bn_fused_bwd",
+                Spec::new()
+                    .u32("REGS", 0)
+                    .u32("WG", 512)
+                    .bool("VEC4", true)
+                    .bool("STRIDED", true)
+                    .subgroups(false),
+            ),
+            ("bn_fused_bwd", Spec::new().u32("REGS", 8).u32("WG", 256).bool("VEC4", true).subgroups(false)),
             (
                 "arg_reduce_rows",
                 Spec::new().bool("MAX", true).u32("MODE", 1).bool("VEC4", true).subgroups(true),
@@ -456,6 +464,8 @@ mod tests {
             ),
             ("bn_fused_fwd", Spec::new().u32("REGS", 16)),
             ("bn_fused_bwd", Spec::new().u32("REGS", 2)),
+            ("bn_fused_bwd", Spec::new().u32("REGS", 8).u32("WG", 512)),
+            ("bn_fused_fwd", Spec::new().u32("REGS", 4).u32("WG", 128)),
             ("arg_reduce_rows", Spec::new().u32("MODE", 3)),
             ("reduce_var_rows", Spec::new().u32("MODE", 3)),
             ("gemm", Spec::new().u32("BM", 65536)),

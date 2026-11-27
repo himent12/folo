@@ -2,19 +2,24 @@
 //! (`x`, `y`, the gradients `g` and `dx`) is f32 or f16 ([`BnDesc::dtype`], mixed-precision training); the
 //! parameters, the statistics and every sum are f32.
 //!
-//! Dispatch tiers (both forward and backward, `vec4` when `H·W` is a multiple of 4):
+//! Dispatch tiers (both forward and backward, `vec4` when `H·W` and view offsets/strides are multiples of 4):
 //! - **Single-dispatch register-cached** (`fused.rs`, `bn_fused_fwd`/`bn_fused_bwd` with `REGS = 4 | 8`, up to
-//!   2,048 units = 8,192 elements/channel under `VEC4`): one 256-thread workgroup per channel holds its channel
-//!   slice in registers and reads `X` (and `G`) once.
-//! - **Single-dispatch streaming two-pass** (`fused.rs`, `REGS = 0`, above 2,048 up to 6,400 units = 25,600
-//!   elements/channel when `C >= 64` and `max_storage_buffers >= 9` for backward): one workgroup per channel runs
-//!   anchor-centered Welford/Chan statistics (or `dw`/`db` reduction) in Pass 1 and normalizes / computes `dx`
-//!   from L2-warm tensors in Pass 2 with zero intermediate buffers.
-//! - **Three-dispatch split-K** (larger planes or narrower `C < 64`):
-//!   - Forward: `bn_stats` (per-chunk Welford/Chan partials) -> `bn_finalize` (merge, `mean`/`invstd`, optional
-//!     running stats) -> `bn_apply` (`y = act(((x − mean) · invstd) · w + b)`).
-//!   - Backward: `bn_bwd_reduce` (per-chunk `dz` and `dz · x̂` sums) -> `bn_bwd_finalize` (`db`, `dw`) ->
-//!     `bn_bwd_dx` (`dx = w · invstd · (dz − db / n − x̂ · dw / n)`).
+//!   2,048 units = 8,192 elements/channel under `VEC4`): one workgroup per channel holds its channel slice in
+//!   registers and reads `X` (and `G`) once (`WG = 512, REGS = 4` in backward for `1024 < m_u <= 2048, C <= 256`
+//!   to halve per-thread register pressure; `WG = 256` otherwise).
+//! - **Single-dispatch streaming two-pass** (`fused.rs`, `REGS = 0`, `WG = 512` when supported else `256`, up to
+//!   6,400 units with `C >= 32` and 25,600 units = 102,400 elements/channel with `C >= 64`; backward requires
+//!   `max_storage_buffers >= 9`): one workgroup per channel runs anchor-centered Welford/Chan statistics (or
+//!   2×-unrolled `dw`/`db` reduction) in Pass 1 and normalizes / computes `dx` from L2-warm tensors in Pass 2
+//!   with zero intermediate buffers.
+//! - **Three-dispatch split-K** (larger planes or narrower `C`):
+//!   - Forward: `bn_stats` (grid `(C, chunks)`, per-chunk Welford/Chan partials) -> `bn_finalize` (merge,
+//!     `mean`/`invstd`, optional running stats) -> `bn_apply` (division-free 2-units/thread 3D grid `(ceil(hw/512), C, N)`).
+//!   - Backward: `bn_bwd_reduce` (grid `(C, chunks)`, 2×-unrolled `dz` and `dz · x̂` sums) -> `bn_bwd_finalize`
+//!     (`db`, `dw`) -> `bn_bwd_dx` (division-free 2-units/thread 3D grid `(ceil(hw/512), C, N)`).
+//!
+//! All three tiers support zero-copy channel-slice views (`STRIDED` specialization via [`BnView`]) so `narrow` /
+//! `chunk` gradients from `cat` backprop skip materializing contiguous copies.
 //!
 //! Reductions use 32-wide subgroup operations (`subgroupShuffleDown` / `subgroupAdd`, 1-barrier in `bn_fused_bwd`
 //! and the 3-dispatch reduction kernels) when the native device supports fixed 32-wide subgroups, or a portable
@@ -31,8 +36,8 @@ use crate::error::{GpuError, Result, shape_err};
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 pub(crate) use fused::fused_fits;
 use fused::{
-    FUSED_BWD, FUSED_BWD_BUFFERS, FUSED_FWD, FUSED_MAX_UNITS, FUSED_STREAM_MAX_UNITS,
-    FUSED_STREAM_MIN_CHANNELS,
+    FUSED_BWD, FUSED_BWD_BUFFERS, FUSED_FWD, FUSED_MAX_UNITS, FUSED_STREAM_MAX_UNITS, FUSED_STREAM_MED_UNITS,
+    FUSED_STREAM_MIN_CHANNELS_LARGE, FUSED_STREAM_MIN_CHANNELS_MED,
 };
 
 pub(super) const COMMON: &str = include_str!("../../shaders/bn_common.wgsl");
@@ -46,8 +51,8 @@ var<workgroup> wq: array<f32, 8>;
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32,
         @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {
-    let c = wid.y;
-    let chunk = wid.x;
+    let c = wid.x;
+    let chunk = wid.y;
     let t = bn_stats_thread(c, chunk, lid);
     var na = t.x;
     var ma = t.y;
@@ -110,8 +115,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
 const STATS_MAIN_PORTABLE: &str = r#"
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
-    let c = wid.y;
-    let chunk = wid.x;
+    let c = wid.x;
+    let chunk = wid.y;
     let t = bn_stats_thread(c, chunk, lid);
     wn[lid] = t.x;
     wm[lid] = t.y;
@@ -134,8 +139,8 @@ var<workgroup> s2: array<f32, 8>;
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32,
         @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {
-    let c = wid.y;
-    let chunk = wid.x;
+    let c = wid.x;
+    let chunk = wid.y;
     let a = bn_bwd_reduce_thread(c, chunk, lid);
     let r1 = subgroupAdd(a.x);
     let r2 = subgroupAdd(a.y);
@@ -159,8 +164,8 @@ var<workgroup> s2: array<f32, 256>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lid: u32) {
-    let c = wid.y;
-    let chunk = wid.x;
+    let c = wid.x;
+    let chunk = wid.y;
     let a = bn_bwd_reduce_thread(c, chunk, lid);
     s1[lid] = a.x;
     s2[lid] = a.y;
@@ -236,6 +241,46 @@ pub struct BnRunning<'a> {
     pub momentum: f32,
 }
 
+/// An NCHW input buffer view for [`batch_norm_forward_strided`] / [`batch_norm_backward_strided`]: dense
+/// channel planes (`stride[1] == H·W`, `stride[2] == W`, `stride[3] == 1`) with an element `offset` and
+/// inter-image `n_stride >= C·H·W` (covering both dense tensors and `narrow`/`chunk` channel slices).
+#[derive(Clone, Copy, Debug)]
+pub struct BnView<'a> {
+    /// Underlying storage buffer.
+    pub buf: &'a wgpu::Buffer,
+    /// Element offset of `[0, 0, 0, 0]`.
+    pub offset: usize,
+    /// Element stride between consecutive batch images (`>= c · hw`).
+    pub n_stride: usize,
+}
+
+impl<'a> BnView<'a> {
+    /// Dense NCHW view starting at element 0 with `n_stride = d.c * d.hw`.
+    pub fn dense(buf: &'a wgpu::Buffer, d: &BnDesc) -> Self {
+        Self { buf, offset: 0, n_stride: d.c.saturating_mul(d.hw) }
+    }
+
+    fn is_dense(&self, d: &BnDesc) -> bool {
+        self.offset == 0 && self.n_stride == d.c * d.hw
+    }
+
+    fn validate(&self, d: &BnDesc, what: &'static str) -> Result<()> {
+        let image = prod(&[d.c, d.hw])?;
+        if self.n_stride < image {
+            return Err(shape_err(format!("{what}: batch stride {} < image size {image}", self.n_stride)));
+        }
+        let span = (d.n - 1)
+            .checked_mul(self.n_stride)
+            .and_then(|s| s.checked_add(image))
+            .and_then(|s| s.checked_add(self.offset))
+            .ok_or_else(|| GpuError::Limit(format!("{what}: strided span overflows usize")))?;
+        if span >= (1usize << 31) {
+            return Err(GpuError::Limit(format!("{what}: strided span {span} exceeds 31-bit indexing")));
+        }
+        check_buf(self.buf, span, d.dtype, what)
+    }
+}
+
 /// The element prelude of the passes: f32 or f16 storage (`spec.is_f16()`), scalar or vec4.
 pub(super) fn prelude(spec: &Spec) -> &'static str {
     let vec = spec.get_bool("VEC4");
@@ -243,11 +288,15 @@ pub(super) fn prelude(spec: &Spec) -> &'static str {
 }
 
 fn gen_stats(spec: &Spec) -> String {
+    let strided = spec.get_bool("STRIDED");
     let body = include_str!("../../shaders/bn_stats.wgsl");
     if spec.get_bool("SUBGROUPS") {
-        format!("{}{COMMON}{body}{STATS_MAIN_SUBGROUPS}", prelude(spec))
+        format!("{}const IS_STRIDED: bool = {strided};\n{COMMON}{body}{STATS_MAIN_SUBGROUPS}", prelude(spec))
     } else {
-        format!("{}{COMMON}{WELFORD}{body}{STATS_MAIN_PORTABLE}", prelude(spec))
+        format!(
+            "{}const IS_STRIDED: bool = {strided};\n{COMMON}{WELFORD}{body}{STATS_MAIN_PORTABLE}",
+            prelude(spec)
+        )
     }
 }
 
@@ -389,13 +438,20 @@ fn gen_finalize(spec: &Spec) -> String {
 }
 
 fn gen_apply(spec: &Spec) -> String {
-    format!("{}{COMMON}{}", prelude(spec), include_str!("../../shaders/bn_apply.wgsl"))
+    let grid3d = spec.get_bool("GRID3D");
+    let strided = spec.get_bool("STRIDED");
+    format!(
+        "{}const USE_GRID3D: bool = {grid3d};\nconst IS_STRIDED: bool = {strided};\n{COMMON}{}",
+        prelude(spec),
+        include_str!("../../shaders/bn_apply.wgsl")
+    )
 }
 
 fn gen_bwd_reduce(spec: &Spec) -> String {
+    let strided = spec.get_bool("STRIDED");
     let body = include_str!("../../shaders/bn_bwd_reduce.wgsl");
     let main = if spec.get_bool("SUBGROUPS") { BWD_REDUCE_MAIN_SUBGROUPS } else { BWD_REDUCE_MAIN_PORTABLE };
-    format!("{}{COMMON}{body}{main}", prelude(spec))
+    format!("{}const IS_STRIDED: bool = {strided};\n{COMMON}{body}{main}", prelude(spec))
 }
 
 fn gen_bwd_finalize(spec: &Spec) -> String {
@@ -405,7 +461,13 @@ fn gen_bwd_finalize(spec: &Spec) -> String {
 }
 
 fn gen_bwd_dx(spec: &Spec) -> String {
-    format!("{}{COMMON}{}", prelude(spec), include_str!("../../shaders/bn_bwd_dx.wgsl"))
+    let grid3d = spec.get_bool("GRID3D");
+    let strided = spec.get_bool("STRIDED");
+    format!(
+        "{}const USE_GRID3D: bool = {grid3d};\nconst IS_STRIDED: bool = {strided};\n{COMMON}{}",
+        prelude(spec),
+        include_str!("../../shaders/bn_bwd_dx.wgsl")
+    )
 }
 
 use Access::{Read as R, ReadWrite as RW};
@@ -466,11 +528,38 @@ impl BnDesc {
             .uz(256 / hw_units)?
             .uz(256 % hw_units)
     }
+}
 
-    fn elementwise(&self, total: usize) -> (bool, usize) {
-        let vec = self.hw.is_multiple_of(4);
-        (vec, if vec { total / 4 } else { total })
+/// Selects `(workgroup_size, regs)` for the single-dispatch fused BatchNorm kernels, or `None` for the
+/// three-dispatch split-K path.
+fn pick_fused(ctx: &GpuContext, m_u: usize, c: usize, chunks: usize, is_bwd: bool) -> Option<(u32, u32)> {
+    if is_bwd && ctx.caps().max_storage_buffers < FUSED_BWD_BUFFERS {
+        return None;
     }
+    let caps = ctx.caps();
+    let wg512 = caps.max_workgroup_invocations >= 512 && caps.max_workgroup_size_x >= 512;
+    if m_u <= FUSED_MAX_UNITS && (chunks == 1 || c >= 32) {
+        if m_u <= 256 * 4 {
+            Some((256, 4))
+        } else if is_bwd && wg512 && c <= 256 {
+            Some((512, 4))
+        } else {
+            Some((256, 8))
+        }
+    } else if (m_u <= FUSED_STREAM_MED_UNITS && c >= FUSED_STREAM_MIN_CHANNELS_MED)
+        || (m_u <= FUSED_STREAM_MAX_UNITS && c >= FUSED_STREAM_MIN_CHANNELS_LARGE)
+    {
+        Some((if wg512 { 512 } else { 256 }, 0))
+    } else {
+        None
+    }
+}
+
+/// Whether `[ceil(hw_u / 512), c, n]` fits the device's per-dimension workgroup limit for division-free 3D apply/dx.
+fn fits_grid3d(ctx: &GpuContext, hw_u: usize, c: usize, n: usize) -> Option<[u32; 3]> {
+    let lim = ctx.caps().max_workgroups_per_dim as usize;
+    let gx = hw_u.div_ceil(512);
+    (gx <= lim && c <= lim && n <= lim).then_some([gx as u32, c as u32, n as u32])
 }
 
 /// Train-mode forward: `y = act((x − mean) · invstd · w + b)`, writing `mean` and `invstd` (`[c]` each) and
@@ -488,8 +577,25 @@ pub fn batch_norm_forward(
     mean: &wgpu::Buffer,
     invstd: &wgpu::Buffer,
 ) -> Result<()> {
+    batch_norm_forward_strided(ctx, d, BnView::dense(x, d), w, b, eps, running, y, mean, invstd)
+}
+
+/// Train-mode forward reading `x` from a dense or channel-slice [`BnView`] without copying it first.
+#[allow(clippy::too_many_arguments)]
+pub fn batch_norm_forward_strided(
+    ctx: &GpuContext,
+    d: &BnDesc,
+    x: BnView<'_>,
+    w: &wgpu::Buffer,
+    b: &wgpu::Buffer,
+    eps: f32,
+    running: Option<BnRunning<'_>>,
+    y: &wgpu::Buffer,
+    mean: &wgpu::Buffer,
+    invstd: &wgpu::Buffer,
+) -> Result<()> {
     let (total, m) = d.check(ctx)?;
-    check_buf(x, total, d.dtype, "batch_norm input")?;
+    x.validate(d, "batch_norm input")?;
     check_buf(y, total, d.dtype, "batch_norm output")?;
     for (buf, what) in [(w, "weight"), (b, "bias"), (mean, "mean"), (invstd, "invstd")] {
         check_buf(buf, d.c, DType::F32, what)?;
@@ -498,8 +604,11 @@ pub fn batch_norm_forward(
         check_buf(r.mean, d.c, DType::F32, "running_mean")?;
         check_buf(r.var, d.c, DType::F32, "running_var")?;
     }
-    let (vec, units) = d.elementwise(total);
-    let (hw_u, m_u) = if vec { (d.hw / 4, m / 4) } else { (d.hw, m) };
+    let strided = !x.is_dense(d);
+    let vec = d.hw.is_multiple_of(4) && x.offset.is_multiple_of(4) && x.n_stride.is_multiple_of(4);
+    let q = if vec { 4 } else { 1 };
+    let (units, hw_u, m_u) = (total / q, d.hw / q, m / q);
+    let (x_off_u, x_ns_u) = (x.offset / q, x.n_stride / q);
     let (chunks, len) = plan(m_u, d.c, vec);
     let half = d.dtype == DType::F16;
     let sg = use_subgroups(ctx);
@@ -507,60 +616,73 @@ pub fn batch_norm_forward(
     let unbias = if m > 1 { m as f64 / (m as f64 - 1.0) } else { 1.0 };
     let (rm, rv) = running.as_ref().map_or((ctx.dummy(), ctx.dummy()), |r| (r.mean, r.var));
 
-    let fused_regs = if m_u <= FUSED_MAX_UNITS && (chunks == 1 || d.c >= 32) {
-        Some(if m_u <= 256 * 4 { 4u32 } else { 8u32 })
-    } else if m_u <= FUSED_STREAM_MAX_UNITS && d.c >= FUSED_STREAM_MIN_CHANNELS {
-        Some(0u32)
-    } else {
-        None
-    };
-    if let Some(regs) = fused_regs {
-        let k = ctx.kernel(
-            &FUSED_FWD,
-            Spec::new()
-                .u32("ACT", d.act.code())
-                .bool("VEC4", vec)
-                .bool("RUNNING", running.is_some())
-                .u32("REGS", regs)
-                .f16(half)
-                .subgroups(sg),
-        )?;
+    if let Some((wg, regs)) = pick_fused(ctx, m_u, d.c, chunks, false) {
+        let mut spec = Spec::new()
+            .u32("ACT", d.act.code())
+            .bool("VEC4", vec)
+            .bool("RUNNING", running.is_some())
+            .u32("REGS", regs)
+            .u32("WG", wg)
+            .f16(half)
+            .subgroups(sg);
+        if strided {
+            spec = spec.bool("STRIDED", true);
+        }
+        let k = ctx.kernel(&FUSED_FWD, spec)?;
+        let wgz = wg as usize;
         let p = Params::new()
             .uz(d.c)?
             .uz(hw_u)?
             .uz(m_u)?
-            .at(5)
-            .uz(256 / hw_u)?
-            .uz(256 % hw_u)?
+            .uz(x_off_u)?
+            .uz(x_ns_u)?
+            .uz(wgz / hw_u)?
+            .uz(wgz % hw_u)?
             .f(eps)
             .f(1.0 - mom)
             .f(mom)
             .f(mom * unbias as f32);
-        return ctx.dispatch(&k, &[x, w, b, y, mean, invstd, rm, rv], &p, [d.c as u32, 1, 1]);
+        return ctx.dispatch(&k, &[x.buf, w, b, y, mean, invstd, rm, rv], &p, [d.c as u32, 1, 1]);
     }
 
     let part = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 3])?))?;
     let coef = ctx.alloc(DType::F32.bytes(4 * d.c))?;
 
-    let k = ctx.kernel(
-        &STATS,
-        Spec::new().u32("ACT", 0).bool("VEC4", vec).bool("SUBGROUPS", sg).f16(half).subgroups(sg),
-    )?;
-    ctx.dispatch(
-        &k,
-        &[x, part.raw()],
-        &d.walk_params(hw_u, m_u, chunks, len)?,
-        [chunks as u32, d.c as u32, 1],
-    )?;
+    let mut stats_spec =
+        Spec::new().u32("ACT", 0).bool("VEC4", vec).bool("SUBGROUPS", sg).f16(half).subgroups(sg);
+    if strided {
+        stats_spec = stats_spec.bool("STRIDED", true);
+    }
+    let k = ctx.kernel(&STATS, stats_spec)?;
+    let mut p = d.walk_params(hw_u, m_u, chunks, len)?;
+    if strided {
+        p = p.uz(x_off_u)?.uz(x_ns_u)?;
+    }
+    ctx.dispatch(&k, &[x.buf, part.raw()], &p, [d.c as u32, chunks as u32, 1])?;
 
     let k =
         ctx.kernel(&FINALIZE, Spec::new().u32("ACT", 0).bool("RUNNING", running.is_some()).subgroups(sg))?;
     let p = Params::new().uz(d.c)?.uz(chunks)?.f(eps).f(1.0 - mom).f(mom).f(mom * unbias as f32);
     ctx.dispatch(&k, &[part.raw(), w, b, mean, invstd, coef.raw(), rm, rv], &p, [d.c as u32, 1, 1])?;
 
-    let k = ctx.kernel(&APPLY, Spec::new().u32("ACT", d.act.code()).bool("VEC4", vec).f16(half))?;
-    let p = Params::new().uz(units)?.uz(d.c)?.uz(hw_u)?;
-    ctx.dispatch(&k, &[x, coef.raw(), y], &p, ctx.grid_1d(units as u64, 256)?)
+    let grid3d = fits_grid3d(ctx, hw_u, d.c, d.n);
+    let mut apply_spec = Spec::new().u32("ACT", d.act.code()).bool("VEC4", vec).f16(half);
+    if grid3d.is_some() {
+        apply_spec = apply_spec.bool("GRID3D", true);
+    }
+    if strided {
+        apply_spec = apply_spec.bool("STRIDED", true);
+    }
+    let k = ctx.kernel(&APPLY, apply_spec)?;
+    let mut p = Params::new().uz(units)?.uz(d.c)?.uz(hw_u)?;
+    if strided {
+        p = p.uz(x_off_u)?.uz(x_ns_u)?;
+    }
+    let grid = match grid3d {
+        Some(g) => g,
+        None => ctx.grid_1d(units as u64, 256)?,
+    };
+    ctx.dispatch(&k, &[x.buf, coef.raw(), y], &p, grid)
 }
 
 /// Backward of [`batch_norm_forward`]: `dx` (like `x`), `dw` and `db` (`[c]`) from the output gradient `g`
@@ -579,58 +701,118 @@ pub fn batch_norm_backward(
     dw: &wgpu::Buffer,
     db: &wgpu::Buffer,
 ) -> Result<()> {
+    batch_norm_backward_strided(
+        ctx,
+        d,
+        BnView::dense(x, d),
+        BnView::dense(g, d),
+        w,
+        b,
+        mean,
+        invstd,
+        dx,
+        dw,
+        db,
+    )
+}
+
+/// Backward of [`batch_norm_forward`] reading `x` and `g` from dense or channel-slice [`BnView`]s without
+/// pre-copying non-contiguous slices.
+#[allow(clippy::too_many_arguments)]
+pub fn batch_norm_backward_strided(
+    ctx: &GpuContext,
+    d: &BnDesc,
+    x: BnView<'_>,
+    g: BnView<'_>,
+    w: &wgpu::Buffer,
+    b: &wgpu::Buffer,
+    mean: &wgpu::Buffer,
+    invstd: &wgpu::Buffer,
+    dx: &wgpu::Buffer,
+    dw: &wgpu::Buffer,
+    db: &wgpu::Buffer,
+) -> Result<()> {
     let (total, m) = d.check(ctx)?;
-    for (buf, what) in [(x, "input"), (g, "output gradient"), (dx, "input gradient")] {
-        check_buf(buf, total, d.dtype, what)?;
-    }
+    x.validate(d, "batch_norm input")?;
+    g.validate(d, "batch_norm output gradient")?;
+    check_buf(dx, total, d.dtype, "batch_norm input gradient")?;
     for (buf, what) in
         [(w, "weight"), (b, "bias"), (mean, "mean"), (invstd, "invstd"), (dw, "dw"), (db, "db")]
     {
         check_buf(buf, d.c, DType::F32, what)?;
     }
-    let (vec, units) = d.elementwise(total);
-    let (hw_u, m_u) = if vec { (d.hw / 4, m / 4) } else { (d.hw, m) };
+    let strided = !x.is_dense(d) || !g.is_dense(d);
+    let vec = d.hw.is_multiple_of(4)
+        && x.offset.is_multiple_of(4)
+        && x.n_stride.is_multiple_of(4)
+        && g.offset.is_multiple_of(4)
+        && g.n_stride.is_multiple_of(4);
+    let q = if vec { 4 } else { 1 };
+    let (units, hw_u, m_u) = (total / q, d.hw / q, m / q);
+    let (x_off_u, x_ns_u, g_off_u, g_ns_u) = (x.offset / q, x.n_stride / q, g.offset / q, g.n_stride / q);
     let (chunks, len) = plan(m_u, d.c, vec);
     let act = d.act.code();
     let half = d.dtype == DType::F16;
     let sg = use_subgroups(ctx);
     let inv_m = (1.0 / m as f64) as f32;
 
-    let fused_regs = if ctx.caps().max_storage_buffers < FUSED_BWD_BUFFERS {
-        None
-    } else if m_u <= FUSED_MAX_UNITS && (chunks == 1 || d.c >= 32) {
-        Some(if m_u <= 256 * 4 { 4u32 } else { 8u32 })
-    } else if m_u <= FUSED_STREAM_MAX_UNITS && d.c >= FUSED_STREAM_MIN_CHANNELS {
-        Some(0u32)
-    } else {
-        None
-    };
-    if let Some(regs) = fused_regs {
-        let k = ctx.kernel(
-            &FUSED_BWD,
-            Spec::new().u32("ACT", act).bool("VEC4", vec).u32("REGS", regs).f16(half).subgroups(sg),
-        )?;
-        let p = Params::new().uz(d.c)?.uz(hw_u)?.uz(m_u)?.f(inv_m).at(5).uz(256 / hw_u)?.uz(256 % hw_u)?;
-        return ctx.dispatch(&k, &[x, g, mean, invstd, w, b, dx, dw, db], &p, [d.c as u32, 1, 1]);
+    if let Some((wg, regs)) = pick_fused(ctx, m_u, d.c, chunks, true) {
+        let mut spec = Spec::new()
+            .u32("ACT", act)
+            .bool("VEC4", vec)
+            .u32("REGS", regs)
+            .u32("WG", wg)
+            .f16(half)
+            .subgroups(sg);
+        if strided {
+            spec = spec.bool("STRIDED", true);
+        }
+        let k = ctx.kernel(&FUSED_BWD, spec)?;
+        let wgz = wg as usize;
+        let mut p = Params::new().uz(d.c)?.uz(hw_u)?.uz(m_u)?.f(inv_m).at(5).uz(wgz / hw_u)?.uz(wgz % hw_u)?;
+        if strided {
+            p = p.uz(x_off_u)?.uz(x_ns_u)?.uz(g_off_u)?.uz(g_ns_u)?;
+        }
+        return ctx.dispatch(&k, &[x.buf, g.buf, mean, invstd, w, b, dx, dw, db], &p, [d.c as u32, 1, 1]);
     }
 
     let part = ctx.alloc(DType::F32.bytes(prod(&[d.c, chunks, 2])?))?;
     let coef = ctx.alloc(DType::F32.bytes(6 * d.c))?;
 
-    let k = ctx.kernel(
-        &BWD_REDUCE,
-        Spec::new().u32("ACT", act).bool("VEC4", vec).bool("SUBGROUPS", sg).f16(half).subgroups(sg),
-    )?;
-    let p = d.walk_params(hw_u, m_u, chunks, len)?;
-    ctx.dispatch(&k, &[x, g, mean, invstd, w, b, part.raw()], &p, [chunks as u32, d.c as u32, 1])?;
+    let mut red_spec =
+        Spec::new().u32("ACT", act).bool("VEC4", vec).bool("SUBGROUPS", sg).f16(half).subgroups(sg);
+    if strided {
+        red_spec = red_spec.bool("STRIDED", true);
+    }
+    let k = ctx.kernel(&BWD_REDUCE, red_spec)?;
+    let mut p = d.walk_params(hw_u, m_u, chunks, len)?;
+    if strided {
+        p = p.uz(x_off_u)?.uz(x_ns_u)?.uz(g_off_u)?.uz(g_ns_u)?;
+    }
+    ctx.dispatch(&k, &[x.buf, g.buf, mean, invstd, w, b, part.raw()], &p, [d.c as u32, chunks as u32, 1])?;
 
     let k = ctx.kernel(&BWD_FINALIZE, Spec::new().u32("ACT", 0).subgroups(sg))?;
     let p = Params::new().uz(d.c)?.uz(chunks)?.f(inv_m);
     ctx.dispatch(&k, &[part.raw(), mean, invstd, w, b, dw, db, coef.raw()], &p, [d.c as u32, 1, 1])?;
 
-    let k = ctx.kernel(&BWD_DX, Spec::new().u32("ACT", act).bool("VEC4", vec).f16(half))?;
-    let p = Params::new().uz(units)?.uz(d.c)?.uz(hw_u)?;
-    ctx.dispatch(&k, &[x, g, coef.raw(), dx], &p, ctx.grid_1d(units as u64, 256)?)
+    let grid3d = fits_grid3d(ctx, hw_u, d.c, d.n);
+    let mut dx_spec = Spec::new().u32("ACT", act).bool("VEC4", vec).f16(half);
+    if grid3d.is_some() {
+        dx_spec = dx_spec.bool("GRID3D", true);
+    }
+    if strided {
+        dx_spec = dx_spec.bool("STRIDED", true);
+    }
+    let k = ctx.kernel(&BWD_DX, dx_spec)?;
+    let mut p = Params::new().uz(units)?.uz(d.c)?.uz(hw_u)?;
+    if strided {
+        p = p.uz(x_off_u)?.uz(x_ns_u)?.uz(g_off_u)?.uz(g_ns_u)?;
+    }
+    let grid = match grid3d {
+        Some(g) => g,
+        None => ctx.grid_1d(units as u64, 256)?,
+    };
+    ctx.dispatch(&k, &[x.buf, g.buf, coef.raw(), dx], &p, grid)
 }
 
 /// This module's kernels, for the precompile registry (`kernels::find_def`).

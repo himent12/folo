@@ -3,8 +3,8 @@
 // elements while avoiding both `sum2` overflow on extreme values (`1e19`) and first-element outlier cancellation;
 // `norm.rs` appends either the 1-barrier 32-wide subgroup Chan merge (when `SUBGROUPS` is true) or the portable
 // 8-barrier shared-memory `bn_tree_merge` fallback.
-// Grid: (chunks, C). Params: 0 = C, 1 = hw_units, 2 = N·hw_units, 3 = chunk length, 4 = chunks,
-// 5 = 256 / hw_units, 6 = 256 % hw_units. PART is [C, chunks, 3].
+// Grid: (C, chunks). Params: 0 = C, 1 = hw_units, 2 = N·hw_units, 3 = chunk length, 4 = chunks,
+// 5 = 256 / hw_units, 6 = 256 % hw_units; when STRIDED: 7 = x_off, 8 = x_n_stride (E units). PART is [C, chunks, 3].
 @group(0) @binding(1) var<storage, read> X: array<E>;
 @group(0) @binding(2) var<storage, read_write> PART: array<f32>;
 
@@ -13,13 +13,20 @@ fn bn_stats_thread(c: u32, chunk: u32, lid: u32) -> vec3<f32> {
     let hw = pu(1u);
     let start = chunk * pu(3u);
     let end = min(start + pu(3u), pu(2u));
+    let step_n = pu(5u);
+    let step_i = pu(6u);
+    let x_ns = select(channels * hw, pu(8u), IS_STRIDED);
+    let x_step = step_n * x_ns + step_i;
+    let x_gap = x_ns - hw;
     var k = 0.0;
     var m4 = vec4<f32>(0.0);
     var q4 = vec4<f32>(0.0);
-    var w = bn_walk_start(start, lid, hw);
+    var e = start + lid;
+    let n0 = e / hw;
+    var wi = e - n0 * hw;
+    var idx = select(0u, pu(7u), IS_STRIDED) + n0 * x_ns + c * hw + wi;
     loop {
-        if (w.e >= end) { break; }
-        let idx = (w.n * channels + c) * hw + w.i;
+        if (e >= end) { break; }
         let x = V4(X[idx]);
         k += 1.0;
         let inv_k = 1.0 / k;
@@ -32,7 +39,13 @@ fn bn_stats_thread(c: u32, chunk: u32, lid: u32) -> vec3<f32> {
             m4.x += d * inv_k;
             q4.x += d * (x.x - m4.x);
         }
-        bn_walk_next(&w, hw);
+        e += 256u;
+        wi += step_i;
+        idx += x_step;
+        if (wi >= hw) {
+            wi -= hw;
+            idx += x_gap;
+        }
     }
     if (k == 0.0) {
         return vec3<f32>(0.0, 0.0, 0.0);

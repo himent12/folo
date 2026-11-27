@@ -380,6 +380,8 @@ impl GpuContext {
             max_buffer_size: dl.max_buffer_size,
             max_storage_buffer_binding_size: dl.max_storage_buffer_binding_size,
             max_workgroup_storage: dl.max_compute_workgroup_storage_size,
+            max_workgroup_size_x: dl.max_compute_workgroup_size_x,
+            max_workgroup_invocations: dl.max_compute_invocations_per_workgroup,
             max_workgroups_per_dim: dl.max_compute_workgroups_per_dimension,
             uniform_align: dl.min_uniform_buffer_offset_alignment,
             max_storage_buffers: dl.max_storage_buffers_per_shader_stage,
