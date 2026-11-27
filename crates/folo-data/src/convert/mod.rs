@@ -1,8 +1,15 @@
-//! Format conversion (`folo dataset convert`): writes an opened dataset as YOLO, COCO, or Pascal VOC.
+//! Format conversion (`folo dataset convert`) and COCO export ([`export_coco`]): writes an opened dataset as
+//! YOLO, COCO, or Pascal VOC.
 //!
-//! Images are copied byte for byte (no re-encoding) to `images/<split>/` (YOLO / COCO) or `JPEGImages/` (VOC);
-//! images the loader skipped (corrupt, missing, broken labels) are left out. File names keep their stem, made unique
-//! within a split (or across all splits for Pascal VOC, where `JPEGImages/` and `Annotations/` are shared).
+//! Under [`convert`], images are copied byte for byte (no re-encoding) to `images/<split>/` (YOLO / COCO) or
+//! `JPEGImages/` (VOC); images the loader skipped (corrupt, missing, broken labels) are left out. File names keep
+//! their stem, made unique within a split (or across all splits for Pascal VOC, where `JPEGImages/` and
+//! `Annotations/` are shared). For finer-grained COCO export (split selection, hard-linking or referencing images
+//! in place, pretty-printed atomic JSON), use [`export_coco`].
+
+mod coco;
+
+pub use coco::{CocoExportOptions, CocoExportReport, CocoImageMode, CocoSplitReport, export_coco};
 
 use crate::dataset::{Dataset, LoadedDataset};
 use crate::error::{DataError, Result};
@@ -10,7 +17,6 @@ use crate::image::probe_size;
 use crate::{Format, Split};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -42,6 +48,22 @@ pub fn convert(ds: &LoadedDataset, out: &Path, to: Format) -> Result<Converted> 
             "nothing to convert: {} has no readable images",
             crate::paths::shown(&ds.root)
         )));
+    }
+    if to == Format::Coco {
+        let report = export_coco(
+            ds,
+            out,
+            &CocoExportOptions {
+                description: Some(format!("converted by FOLO from {}", ds.root.display())),
+                ..CocoExportOptions::default()
+            },
+        )?;
+        return Ok(Converted {
+            root: report.root,
+            format: Format::Coco,
+            splits: report.splits,
+            boxes: report.boxes,
+        });
     }
     if to == Format::Yolo && train + val == 0 {
         // The YOLO reader needs a train or val split; writing test-only YOLO would produce an unreadable dataset.
@@ -108,57 +130,17 @@ pub fn convert(ds: &LoadedDataset, out: &Path, to: Format) -> Result<Converted> 
         mkdir(&img_dir)?;
         let names = unique_names(d.entries().iter().map(|e| e.image.as_path()));
         d.entries().par_iter().zip(&names).try_for_each(|(e, name)| copy(&e.image, &img_dir.join(name)))?;
-        match to {
-            Format::Yolo => {
-                let lbl_dir = out.join("labels").join(split.as_str());
-                mkdir(&lbl_dir)?;
-                d.entries().par_iter().zip(&names).try_for_each(|(e, name)| {
-                    let mut text = String::with_capacity(e.boxes.len() * 48);
-                    for b in &e.boxes {
-                        let _ = writeln!(text, "{} {} {} {} {}", b.class, b.cx, b.cy, b.w, b.h);
-                    }
-                    let p = lbl_dir.join(Path::new(name).with_extension("txt"));
-                    std::fs::write(&p, text).map_err(|e| DataError::io(&p, e))
-                })?;
-                let _ = writeln!(yaml_splits, "{split}: images/{split}");
+        let lbl_dir = out.join("labels").join(split.as_str());
+        mkdir(&lbl_dir)?;
+        d.entries().par_iter().zip(&names).try_for_each(|(e, name)| {
+            let mut text = String::with_capacity(e.boxes.len() * 48);
+            for b in &e.boxes {
+                let _ = writeln!(text, "{} {} {} {} {}", b.class, b.cx, b.cy, b.w, b.h);
             }
-            Format::Coco => {
-                let sizes: Vec<(u32, u32)> = d
-                    .entries()
-                    .par_iter()
-                    .map(|e| e.size.map_or_else(|| probe_size(&e.image), Ok))
-                    .collect::<Result<_>>()?;
-                let mut images = Vec::with_capacity(names.len());
-                let mut anns = Vec::new();
-                for (i, ((e, name), &(w, h))) in d.entries().iter().zip(&names).zip(&sizes).enumerate() {
-                    images.push(json!({ "id": i + 1, "file_name": name, "width": w, "height": h }));
-                    for b in &e.boxes {
-                        let [x1, y1, x2, y2] = b.pixel_xyxy(w, h);
-                        let (bw, bh) = (x2 - x1, y2 - y1);
-                        anns.push(json!({
-                            "id": anns.len() + 1, "image_id": i + 1, "category_id": b.class + 1,
-                            "bbox": [x1, y1, bw, bh], "area": bw * bh, "iscrowd": 0,
-                        }));
-                    }
-                }
-                let categories: Vec<_> = ds
-                    .classes
-                    .iter()
-                    .enumerate()
-                    .map(|(i, n)| json!({ "id": i + 1, "name": n, "supercategory": "" }))
-                    .collect();
-                let doc = json!({
-                    "info": { "description": format!("converted by FOLO from {}", ds.root.display()) },
-                    "images": images, "annotations": anns, "categories": categories,
-                });
-                let ann_dir = out.join("annotations");
-                mkdir(&ann_dir)?;
-                let p = ann_dir.join(format!("instances_{split}.json"));
-                let bytes = serde_json::to_vec(&doc).expect("JSON values serialize");
-                std::fs::write(&p, bytes).map_err(|e| DataError::io(&p, e))?;
-            }
-            Format::Auto | Format::Voc => unreachable!("handled above"),
-        }
+            let p = lbl_dir.join(Path::new(name).with_extension("txt"));
+            std::fs::write(&p, text).map_err(|e| DataError::io(&p, e))
+        })?;
+        let _ = writeln!(yaml_splits, "{split}: images/{split}");
         splits[split as usize] = d.len();
         boxes += d.entries().iter().map(|e| e.boxes.len()).sum::<usize>();
     }
@@ -188,7 +170,7 @@ pub(crate) fn mkdir(p: &Path) -> Result<()> {
     std::fs::create_dir_all(p).map_err(|e| DataError::io(p, e))
 }
 
-fn copy(from: &Path, to: &Path) -> Result<()> {
+pub(super) fn copy(from: &Path, to: &Path) -> Result<()> {
     crate::guard::check(from).map_err(|e| DataError::io(from, e))?;
     std::fs::copy(from, to).map(|_| ()).map_err(|e| DataError::io(from, e))
 }

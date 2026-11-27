@@ -370,9 +370,7 @@ fn decode_png(bytes: &[u8]) -> Option<image::ImageResult<Image>> {
 
 /// Reads and decodes an image file.
 pub fn read_image(path: &Path) -> Result<Image> {
-    let bytes =
-        crate::guard::check(path).and_then(|_| std::fs::read(path)).map_err(|e| DataError::io(path, e))?;
-    decode_with_path(&bytes, path)
+    crate::buffers::read_file_bytes(path, |bytes| decode_with_path(bytes, path))
 }
 
 /// Size `(width, height)` of an image file after EXIF orientation, read from its header only.
