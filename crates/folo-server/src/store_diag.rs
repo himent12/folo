@@ -21,6 +21,75 @@ pub const FEATURE_TRAIN_AUTO_BATCH: &str = "train_auto_batch";
 /// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/bench/benchmarks`
 /// honours deterministic generated-image sources (`source: { kind: "generated", ... }`).
 pub const FEATURE_BENCH_GENERATED_SOURCE: &str = "bench_generated_source";
+/// Server capability flag advertised on `/api/health` and `/api/system` when `POST /api/runs` and
+/// `POST /api/runs/estimate` accept FOLO v2-Iso architectures (`folo2-n`, `folo2-s`, `folo2-m`, `folo2-l`, `folo2-x`).
+pub const FEATURE_FOLO2_ARCH: &str = "folo2_arch";
+
+/// Extra run options carried alongside [`folo_api::TrainConfig`] on `POST /api/runs`, `POST /api/runs/estimate`,
+/// and the MCP `train` tool without altering `folo-api` wire types.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RunOptions {
+    /// Opt-in GPU VRAM-budget auto-batch settings.
+    pub auto_batch: AutoBatchOptions,
+    /// Optional architecture override when training a FOLO v2-Iso model (`"folo2-n"`..`"folo2-x"`).
+    pub arch: Option<String>,
+}
+
+impl RunOptions {
+    /// True when neither auto-batch nor a `folo2-*` architecture override is set.
+    pub fn is_default(&self) -> bool {
+        self.auto_batch.is_default() && self.arch.is_none()
+    }
+}
+
+/// Parses an architecture name accepted by `POST /api/runs`, `POST /api/runs/estimate`, and MCP `train`:
+/// `folo-n..x` maps to `(Arch, None)`, `folo2-n..x` maps to `(Arch, Some("folo2-<scale>"))`, and any other string
+/// returns `422 invalid_body`.
+pub fn parse_arch_override(raw: &str) -> Result<(folo_api::Arch, Option<String>)> {
+    if let Some(arch) = folo_api::Arch::parse(raw) {
+        return Ok((arch, None));
+    }
+    if let Some(scale) = raw.strip_prefix("folo2-")
+        && let Some(arch) = folo_api::Arch::parse(&format!("folo-{scale}"))
+    {
+        return Ok((arch, Some(raw.to_string())));
+    }
+    Err(Error::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "invalid_body",
+        format!(
+            "arch: expected one of folo-n, folo-s, folo-m, folo-l, folo-x, folo2-n, folo2-s, folo2-m, folo2-l, \
+             folo2-x, got {raw:?}"
+        ),
+    ))
+}
+
+/// Validates an optional architecture override (`400 invalid_config` on unknown names) and returns the matching
+/// scale [`folo_api::Arch`].
+pub fn check_arch_override(arch: Option<&str>) -> Result<Option<folo_api::Arch>> {
+    let Some(raw) = arch else { return Ok(None) };
+    parse_arch_override(raw).map(|(a, _)| Some(a)).map_err(|_| {
+        Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_config",
+            format!("arch: unknown architecture {raw:?} (expected folo-n..folo-x or folo2-n..folo2-x)"),
+        )
+    })
+}
+
+/// The effective architecture string of a run: `arch_override` when set (e.g. `"folo2-n"`), else `arch.as_str()`.
+pub fn effective_arch(arch: folo_api::Arch, arch_override: Option<&str>) -> &str {
+    arch_override.unwrap_or_else(|| arch.as_str())
+}
+
+/// Default run name for an explicit architecture string (`shapes-n` for `folo-n`, `shapes-folo2-n` for `folo2-n`,
+/// matching `folo train`), truncated to [`crate::store::MAX_RUN_NAME_CHARS`].
+pub fn default_run_name_for_arch(dataset: &str, arch: &str) -> String {
+    let size = arch.strip_prefix("folo-").unwrap_or(arch);
+    let room = crate::store::MAX_RUN_NAME_CHARS.saturating_sub(size.chars().count() + 1);
+    let base: String = dataset.chars().take(room).collect();
+    format!("{}-{size}", base.trim_end())
+}
 
 /// Opt-in GPU VRAM-budget auto-batch settings carried alongside [`folo_api::TrainConfig`] on `POST /api/runs` and
 /// the MCP `train` tool.

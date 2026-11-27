@@ -166,6 +166,24 @@ fn extract_auto_batch(
     Ok(opts)
 }
 
+/// Extracts an optional `folo2-*` architecture string from `fields["arch"]`, normalizing the wire field to its
+/// scale `folo-n..x` so `folo_api::TrainConfig` deserializes cleanly while the full `"folo2-*"` override is
+/// carried alongside in [`crate::store::RunOptions`].
+fn extract_arch_override(fields: &mut serde_json::Map<String, serde_json::Value>) -> Result<Option<String>> {
+    let Some(val) = fields.get("arch") else { return Ok(None) };
+    if val.is_null() {
+        return Ok(None);
+    }
+    let Some(s) = val.as_str() else {
+        return Err(body_error("arch: expected a string"));
+    };
+    let (api_arch, arch_override) = crate::store::parse_arch_override(s)?;
+    if arch_override.is_some() {
+        fields.insert("arch".into(), serde_json::json!(api_arch.as_str()));
+    }
+    Ok(arch_override)
+}
+
 /// `POST /api/runs`: a `TrainConfig` starts a new run (`201`); with `resume_run_id` it resumes that run instead
 /// (`200`, same id); with `checkpoint` the new run continues that model's training state.
 pub(super) async fn create_run(
@@ -198,6 +216,7 @@ pub(super) async fn create_run(
         return Ok(Json(run).into_response());
     }
     let auto_batch = extract_auto_batch(&mut fields)?;
+    let arch_override = extract_arch_override(&mut fields)?;
     if checkpoint.is_some() && auto_batch.enabled {
         return Err(Error::new(
             StatusCode::BAD_REQUEST,
@@ -207,10 +226,11 @@ pub(super) async fn create_run(
     }
     let config: TrainConfig =
         serde_json::from_value(serde_json::Value::Object(fields)).map_err(body_error)?;
+    let options = crate::store::RunOptions { auto_batch, arch: arch_override };
     let run = match checkpoint {
         Some(model) => blocking(&st, move |s| s.continue_run(&model, config)).await?,
-        None if auto_batch.enabled => {
-            blocking(&st, move |s| s.create_run_with_auto_batch(config, auto_batch)).await?
+        None if !options.is_default() => {
+            blocking(&st, move |s| s.create_run_with_options(config, options)).await?
         }
         None => blocking(&st, move |s| s.create_run(config)).await?,
     };
@@ -223,9 +243,11 @@ pub(super) async fn estimate_run(
 ) -> Result<Json<RunEstimate>> {
     let mut fields = run_fields(body, false)?;
     let auto_batch = extract_auto_batch(&mut fields)?;
+    let arch_override = extract_arch_override(&mut fields)?;
     let config: TrainConfig =
         serde_json::from_value(serde_json::Value::Object(fields)).map_err(body_error)?;
-    Ok(Json(blocking(&st, move |s| s.estimate_run_with_auto_batch(config, auto_batch)).await?))
+    let options = crate::store::RunOptions { auto_batch, arch: arch_override };
+    Ok(Json(blocking(&st, move |s| s.estimate_run_with_options(config, options)).await?))
 }
 
 pub(super) async fn get_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {

@@ -237,7 +237,7 @@ impl Models {
                 let mut model = model_of(p.name.to_string(), p.name.to_string(), &meta, None, meta.metrics);
                 model.source = Some(ModelSource::Published);
                 model.about = Some(p.about.to_string());
-                Some(ModelRef::new(model, path, None))
+                Some(ModelRef::new(model, path, None).with_arch_name(meta.arch_name.clone()))
             }
             Err(e) => {
                 self.warn_skipped(&path, &e);
@@ -297,7 +297,7 @@ impl Models {
                 if insert_by_id {
                     self.by_id.lock().unwrap_or_else(|p| p.into_inner()).insert(id, path.clone());
                 }
-                Some(ModelRef::new(model, path, None))
+                Some(ModelRef::new(model, path, None).with_arch_name(meta.arch_name.clone()))
             }
             Err(e) => {
                 self.warn_skipped(&path, &e);

@@ -19,8 +19,8 @@ use folo_data::{Dataset, Split};
 use folo_nn::io::ModelFile;
 use folo_vision::predict::f16_unavailable;
 use folo_vision::train::{can_place, resolve_device};
-use folo_vision::val::{ValConfig, check_config, val_metrics, validate};
-use folo_vision::{FoloModel, NmsConfig, Precision};
+use folo_vision::val::{ValConfig, check_config_detector, val_metrics, validate_detector};
+use folo_vision::{Detector, FoloModel, NmsConfig, Precision};
 use serde_json::json;
 
 use crate::cli::{PrecisionArg, SplitArg, ValArgs, bounds};
@@ -60,7 +60,7 @@ pub(super) fn open_model(
     precision: (bool, Option<PrecisionArg>),
     tensor_cores: bool,
     shape: &str,
-) -> Result<FoloModel, CliError> {
+) -> Result<Detector, CliError> {
     let path = &crate::weights::resolve(path)?;
     let half = match precision {
         (_, Some(PrecisionArg::Int8)) => return open_int8(command, path, device, tensor_cores),
@@ -90,12 +90,12 @@ pub(super) fn open_model(
     }
     let file = ModelFile::open(path).map_err(|e| weights_error(command, path, e))?;
     folo_vision::precompile::precompile_inference(&file, device, precision.dtype(), command, shape);
-    FoloModel::from_file_for_inference(&file, device, precision.dtype()).map_err(|e| nn_error(command, e))
+    Detector::from_file_for_inference(&file, device, precision.dtype()).map_err(|e| nn_error(command, e))
 }
 
 /// [`open_model`] with `--precision int8`: on the CPU (`auto` picks it; a GPU is a usage error), in f32 with the
 /// int8 plan of the calibration `folo quantize` stored in the file.
-fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Result<FoloModel, CliError> {
+fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Result<Detector, CliError> {
     if !matches!(device.trim().to_ascii_lowercase().as_str(), "auto" | "" | "cpu") {
         return Err(CliError::new(
             ExitCode::Usage,
@@ -114,6 +114,18 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
         eprintln!("note: --tensor-cores only affects f16 inference (--half on a GPU); running without them");
     }
     let file = ModelFile::open(path).map_err(|e| weights_error(command, path, e))?;
+    if file.metadata().config.is_v2() {
+        return Err(CliError::new(
+            ExitCode::NotImplemented,
+            "not_supported",
+            format!(
+                "{} ({}) does not support --precision int8 yet",
+                folo_api::json::path(path),
+                file.metadata().arch
+            ),
+        )
+        .hint("use --precision f32, or --precision f16 on a GPU"));
+    }
     // A missing, unreadable or mismatched calibration: the weights are fine, the int8 calibration is not.
     let calibration_error = |why: String| {
         CliError::new(ExitCode::Runtime, "invalid_weights", format!("{}: {why}", folo_api::json::path(path)))
@@ -131,12 +143,12 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
     )
     .map_err(|e| nn_error(command, e))?;
     model.set_int8(Some(cal)).map_err(|e| calibration_error(e.to_string()))?;
-    Ok(model)
+    Ok(Detector::from(model))
 }
 
 /// The precision a model runs in: `f32`, `f16` or `int8`.
-pub(super) fn precision_of(model: &FoloModel) -> &'static str {
-    if model.int8().is_some() {
+pub(super) fn precision_of(model: &Detector) -> &'static str {
+    if model.as_v1().is_some_and(|m| m.int8().is_some()) {
         "int8"
     } else if model.dtype() == Precision::F16.dtype() {
         Precision::F16.as_str()
@@ -253,7 +265,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     };
     // Validate model/dataset config and COCO category mappings *before* creating `--save-json` folders or running
     // expensive model inference.
-    check_config(&model, part.class_names().len(), &cfg).map_err(|e| engine_error("val", e))?;
+    check_config_detector(&model, part.class_names().len(), &cfg).map_err(|e| engine_error("val", e))?;
     let coco_ctx = if args.coco || args.save_json.is_some() {
         let gt = crate::coco::ground_truth(&args.data, split)?;
         let cats = crate::coco::validate_categories(
@@ -280,7 +292,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     if let Some(path) = &args.save_json {
         crate::coco::prepare_results(path)?;
     }
-    let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(|e| engine_error("val", e))?;
+    let r = validate_detector(&model, Arc::new(part.clone()), &cfg).map_err(|e| engine_error("val", e))?;
     let m = val_metrics(&r.report);
     let names = model.classes();
     let name = |c: u32| names.get(c as usize).cloned().unwrap_or_else(|| c.to_string());

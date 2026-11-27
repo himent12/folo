@@ -230,6 +230,37 @@ pub fn describe(root: &Command, path: &[String], mcp_tools: bool) -> Result<Valu
     Ok(describe_command(cmd, &names))
 }
 
+/// Built-in detector architectures supported by `folo train --model`, `val`, `predict`, and `export`.
+fn architectures() -> Vec<Value> {
+    const SCALES: [&str; 5] = ["n", "s", "m", "l", "x"];
+    let mut out = Vec::with_capacity(10);
+    for scale in SCALES {
+        if let Some((depth, width, max_channels)) = folo_nn::io::scale_row(scale) {
+            out.push(json!({
+                "arch": format!("folo-{scale}"),
+                "family": "folo",
+                "scale": scale,
+                "depth": depth,
+                "width": width,
+                "max_channels": max_channels,
+            }));
+        }
+    }
+    for scale in SCALES {
+        if let Some((depth, width, max_channels)) = folo_nn::io::scale_row_v2(scale) {
+            out.push(json!({
+                "arch": format!("folo2-{scale}"),
+                "family": "folo2",
+                "scale": scale,
+                "depth": depth,
+                "width": width,
+                "max_channels": max_channels,
+            }));
+        }
+    }
+    out
+}
+
 /// The whole CLI surface, without the MCP tools.
 fn describe_all(root: &Command) -> Value {
     let globals: Vec<Value> = root
@@ -242,10 +273,11 @@ fn describe_all(root: &Command) -> Value {
         .filter(|c| !c.is_hide_set())
         .map(|c| describe_command(c, &[root.get_name()]))
         .collect();
-    json!({
+    let mut out = json!({
         "name": root.get_name(),
         "version": env!("CARGO_PKG_VERSION"),
         "about": styled(root.get_about()),
+        "architectures": architectures(),
         "global_args": globals,
         "conventions": {
             "json": "with --json, stdout carries one JSON object per line and human text goes to stderr",
@@ -254,5 +286,7 @@ fn describe_all(root: &Command) -> Value {
             "docs": "docs/CLI.md",
         },
         "commands": commands,
-    })
+    });
+    folo_api::json::clean_floats(&mut out);
+    out
 }

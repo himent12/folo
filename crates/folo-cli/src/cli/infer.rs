@@ -201,7 +201,7 @@ pub struct QuantizeArgs {
 /// `folo val`.
 #[derive(Debug, Args)]
 pub struct ValArgs {
-    /// Weights (.folo, or a published name such as folo-n-coco) to evaluate (EMA weights when the file has them).
+    /// Weights (.folo for `folo-*` or `folo2-*`, or a published name such as folo-n-coco) to evaluate (EMA weights when the file has them).
     #[arg(long)]
     pub model: PathBuf,
     /// Dataset: a folder (YOLO or COCO) or a data.yaml.
@@ -293,7 +293,7 @@ pub struct ValArgs {
 /// `folo predict`.
 #[derive(Debug, Args)]
 pub struct PredictArgs {
-    /// Weights (.folo, or a published name such as folo-n-coco; EMA weights when the file has them).
+    /// Weights (.folo for `folo-*` or `folo2-*`, or a published name such as folo-n-coco; EMA weights when the file has them).
     #[arg(long)]
     pub model: PathBuf,
     /// Images or folders of images (searched recursively).
@@ -469,7 +469,7 @@ pub enum ExportFormatArg {
 /// `folo export`.
 #[derive(Debug, Args)]
 pub struct ExportArgs {
-    /// Weights (.folo, or a published name) to export (supports v1 `folo-*` and v2-Iso `folo2-*` for ONNX).
+    /// Weights (.folo, or a published name) to export (supports v1 `folo-*` and v2-Iso `folo2-*`).
     #[arg(long)]
     pub model: PathBuf,
     /// Target format.

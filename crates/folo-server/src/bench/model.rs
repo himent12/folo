@@ -119,14 +119,14 @@ pub fn resolve(m: &Model, classes: &[String]) -> Result<Resolved> {
     let Some(path) = m.path.clone() else {
         return Err(Error::internal(format!("model '{}' has no weights file", m.id)));
     };
+    let path_buf = PathBuf::from(&path);
+    let arch = folo_nn::io::safetensors::Container::read_header(&path_buf)
+        .ok()
+        .and_then(|h| h.metadata.and_then(|meta| meta.get("folo.arch").cloned()))
+        .unwrap_or_else(|| m.arch.as_str().to_string());
     Ok(Resolved {
-        spec: ModelSpec { path: PathBuf::from(path), map },
-        contestant: BenchContestant::Model {
-            model_id: m.id.clone(),
-            arch: m.arch.as_str().to_string(),
-            params: m.params,
-            imgsz: m.imgsz,
-        },
+        spec: ModelSpec { path: path_buf, map },
+        contestant: BenchContestant::Model { model_id: m.id.clone(), arch, params: m.params, imgsz: m.imgsz },
         missing,
         name: m.name.clone(),
     })
@@ -236,7 +236,7 @@ impl Engine {
             head: None,
             ..PredictConfig::default()
         };
-        Predictor::new(model, cfg).map_err(engine_error)
+        Predictor::from_detector(model, cfg).map_err(engine_error)
     }
 
     fn guard(&self, device: Device) -> Option<Box<dyn Send>> {
@@ -299,8 +299,8 @@ fn prepare(item: &Item, variant: Option<(Condition, u8)>, seed: u64) -> Result<P
 fn predict(p: &Predictor, images: &[folo_data::Image]) -> Result<Vec<Vec<folo_vision::Detection>>> {
     let run = || -> folo_vision::Result<Vec<Vec<folo_vision::Detection>>> {
         let batch = p.prepare(images, false)?;
-        let out = p.forward(&batch)?;
-        Ok(out.detections(&NmsConfig::val())?)
+        let out = p.forward_detector(&batch)?;
+        Ok(out.detections(&NmsConfig::val(), folo_vision::DetectorOutput::default_iou_alpha())?)
     };
     let dets =
         if p.device().is_cpu() { folo_core::cpu::in_pool(run) } else { run() }.map_err(engine_error)?;

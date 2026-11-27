@@ -31,6 +31,8 @@ impl Runs {
         resumable(&st, id)?;
         let stored = st.file.run.config.clone();
         let stored_auto = st.file.auto_batch;
+        let stored_arch =
+            crate::store::effective_arch(stored.arch, st.file.arch_override.as_deref()).to_string();
         let mut merged = serde_json::to_value(&stored).expect("configs serialize");
         let mut extra_differ: Vec<&str> = Vec::new();
         let auto_batch_flag = match fields.get("auto_batch").filter(|v| !v.is_null()) {
@@ -46,6 +48,24 @@ impl Runs {
         }
         for (k, v) in fields {
             if k == "resume_run_id" || k == "auto_batch" || (k == "name" && v.as_str() == Some("")) {
+                continue;
+            }
+            if k == "arch" {
+                if v.is_null() {
+                    continue;
+                }
+                let Some(s) = v.as_str() else {
+                    return Err(Error::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "invalid_body",
+                        "arch: expected a string",
+                    ));
+                };
+                crate::store::parse_arch_override(s)?;
+                if s != stored_arch {
+                    extra_differ.push("arch");
+                }
+                merged["arch"] = serde_json::to_value(stored.arch).expect("arch serializes");
                 continue;
             }
             if k == "batch"
@@ -437,8 +457,9 @@ mod tests {
         let cfg: TrainConfig =
             serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1", "batch": 24 })).unwrap();
         let ab = AutoBatchOptions { enabled: true, target_utilization: Some(0.75) };
+        let opts = crate::store::RunOptions { auto_batch: ab, arch: None };
         let entry =
-            runs.register_with_auto_batch(cfg, dataset, None, None, 0, "cpu".into(), None, ab).unwrap();
+            runs.register_with_options(cfg, dataset, None, None, 0, "cpu".into(), None, opts).unwrap();
         {
             let mut st = entry.state.lock().unwrap();
             st.file.run.status = RunStatus::Stopped;
@@ -519,9 +540,10 @@ mod tests {
             format: ds.format,
             classes: ds.classes.clone(),
         };
+        let opts = crate::store::RunOptions { auto_batch: ab, arch: None };
         let unqueued = store
             .runs_for_test()
-            .register_with_auto_batch(cfg.clone(), dataset, None, None, 0, "cpu".into(), None, ab)
+            .register_with_options(cfg.clone(), dataset, None, None, 0, "cpu".into(), None, opts)
             .unwrap();
         assert!(!unqueued.dir().join("config.json").exists(), "fixture must lack config.json");
         let cli = store.run_cli(unqueued.id()).unwrap();

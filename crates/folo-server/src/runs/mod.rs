@@ -110,6 +110,9 @@ struct RunFile {
     /// Opt-in GPU VRAM-budget auto-batch settings requested when the run was created.
     #[serde(default, skip_serializing_if = "crate::store::AutoBatchOptions::is_default")]
     auto_batch: crate::store::AutoBatchOptions,
+    /// Optional FOLO v2-Iso architecture override (`"folo2-n"`..`"folo2-x"`) requested when the run was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    arch_override: Option<String>,
 }
 
 impl RunFile {

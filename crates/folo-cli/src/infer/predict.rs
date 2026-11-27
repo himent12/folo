@@ -400,7 +400,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         fusion_iou: args.fusion_iou,
         score: score_rule,
     };
-    let predictor = Predictor::new(model, cfg).map_err(|e| engine_error("predict", e))?;
+    let predictor = Predictor::from_detector(model, cfg).map_err(|e| engine_error("predict", e))?;
     let mut tracker = match &track_cfg {
         Some(tc) => Some(ByteTracker::new(tc.clone()).map_err(|e| engine_error("predict", e))?),
         None => None,
@@ -411,7 +411,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     };
     let classes = predictor.classes().to_vec();
     let device = predictor.device().to_string();
-    let precision = precision_of(predictor.model());
+    let precision = precision_of(predictor.detector());
     let (mut boxes, mut failed) = (0usize, 0usize);
     let mut frame_index = 0usize;
     let mut unique_tracks: BTreeSet<u64> = BTreeSet::new();

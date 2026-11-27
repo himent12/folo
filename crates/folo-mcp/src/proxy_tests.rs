@@ -362,3 +362,57 @@ fn multipart_rejects_header_injection_and_avoids_boundary_collision() {
     let boundary = ct.strip_prefix("multipart/form-data; boundary=").unwrap();
     assert!(body.windows(boundary.len()).filter(|w| *w == boundary.as_bytes()).count() == 3);
 }
+
+#[test]
+fn older_server_rejects_folo2_arch_and_proxy_reads_arch_header() {
+    use folo_server::store::{FEATURE_FOLO2_ARCH, RunOptions};
+
+    let older = HttpStore::new("http://127.0.0.1:1", None).assume_features(vec![]);
+    let cfg: folo_api::TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1"}"#).unwrap();
+    let v2_opts = RunOptions { auto_batch: Default::default(), arch: Some("folo2-n".into()) };
+
+    let e = older.create_run_with_options(cfg.clone(), v2_opts.clone()).unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
+
+    let e = older.estimate_run_with_options(cfg, v2_opts).unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
+
+    let resume_fields = serde_json::json!({ "arch": "folo2-n" }).as_object().unwrap().clone();
+    let e = older.resume_run("run_1", &resume_fields).unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
+    assert_eq!(FEATURE_FOLO2_ARCH, "folo2_arch");
+
+    // A server exposing `x-folo-arch: folo2-n` on `GET /api/models/{id}` surfaces the exact arch to the proxy.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut s, _)) = listener.accept() {
+            let _ = read_request(&mut s);
+            let body = serde_json::json!({
+                "id": "m_v2",
+                "name": "v2-best",
+                "arch": "folo-n",
+                "imgsz": 64,
+                "classes": ["circle", "square"],
+                "params": 1000,
+                "flops_g": 1.0,
+                "bytes": 1024,
+                "created": "2026-11-27T00:00:00Z",
+                "run_id": null,
+                "metrics": null,
+                "head": "o2m"
+            })
+            .to_string();
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nx-folo-arch: folo2-n\r\nContent-Length: \
+                 {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = s.flush();
+        }
+    });
+    let proxy = HttpStore::new(&format!("http://{addr}"), None);
+    assert_eq!(proxy.model_arch("m_v2").unwrap(), "folo2-n");
+    handle.join().unwrap();
+}

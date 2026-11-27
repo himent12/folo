@@ -75,7 +75,7 @@ pub async fn get(inner: &Inner, req: GetPromptRequestParams) -> Result<GetPrompt
                  and `issues`; if there are broken labels or a class has very few boxes, tell the user before \
                  training.\n\
                  3. Call `folo_info` to see the devices and the model scales (params, GFLOPs).\n\
-                 4. Choose `arch` (folo-n ... folo-x) and `imgsz` (a multiple of 32): small boxes (box_size_hist \
+                 4. Choose `arch` (folo-n ... folo-x, or folo2-n ... folo2-x) and `imgsz` (a multiple of 32): small boxes (box_size_hist \
                  mass below 0.05) need a larger imgsz; a CPU-only machine or a small dataset favours folo-n or \
                  folo-s; a GPU with plenty of memory allows larger scales and batches.\n\
                  5. Call `train` with `dataset_id`, `arch`, `imgsz`, `epochs` and `batch`, then follow the run with \

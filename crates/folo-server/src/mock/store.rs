@@ -67,26 +67,48 @@ impl Store for MockStore {
     }
 
     fn estimate_run(&self, config: TrainConfig) -> Result<RunEstimate> {
-        self.estimate_run_with_auto_batch(config, crate::store::AutoBatchOptions::default())
+        self.estimate_run_with_options(config, crate::store::RunOptions::default())
     }
 
     fn estimate_run_with_auto_batch(
         &self,
-        mut config: TrainConfig,
+        config: TrainConfig,
         auto_batch: crate::store::AutoBatchOptions,
     ) -> Result<RunEstimate> {
-        crate::store::check_auto_batch_options(&auto_batch)?;
-        if auto_batch.enabled && config.compute.is_some() {
+        self.estimate_run_with_options(config, crate::store::RunOptions { auto_batch, arch: None })
+    }
+
+    fn estimate_run_with_options(
+        &self,
+        mut config: TrainConfig,
+        mut options: crate::store::RunOptions,
+    ) -> Result<RunEstimate> {
+        crate::store::check_auto_batch_options(&options.auto_batch)?;
+        if let Some(parsed) = crate::store::check_arch_override(options.arch.as_deref())? {
+            config.arch = parsed;
+            if !options.arch.as_deref().is_some_and(|a| a.starts_with("folo2-")) {
+                options.arch = None;
+            }
+        }
+        if options.auto_batch.enabled && config.compute.is_some() {
             return Err(Error::new(
                 StatusCode::BAD_REQUEST,
                 "invalid_config",
                 "auto_batch is not supported for cloud runs yet (pass an explicit integer `batch` for cloud compute)",
             ));
         }
+        if options.arch.is_some() && config.compute.is_some() {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_config",
+                "folo2 architectures are not supported for cloud runs yet (train locally, or use folo-n..folo-x for cloud compute)",
+            ));
+        }
         let ds = self.dataset(&config.dataset_id)?;
         self.validate(&config)?;
         if let Some(w) = &config.weights {
             config.arch = self.get_model(w)?.arch;
+            options.arch = None;
         }
         let splits = ds.meta().splits;
         if ds.meta().classes.is_empty() || splits.train == 0 {
@@ -117,7 +139,12 @@ impl Store for MockStore {
             ds.meta().format,
             config.weights.as_deref().map(mock_weights).as_deref(),
         );
-        let cli = crate::cli::with_auto_batch(cli, &config, auto_batch.enabled.then_some(auto_batch));
+        let cli = crate::cli::with_arch(cli, options.arch.as_deref());
+        let cli = crate::cli::with_auto_batch(
+            cli,
+            &config,
+            options.auto_batch.enabled.then_some(options.auto_batch),
+        );
         let mut estimate = self.throughput.estimate(&crate::throughput::EstimateInput {
             device,
             arch: config.arch,
@@ -421,19 +448,40 @@ impl Store for MockStore {
         config: TrainConfig,
         auto_batch: crate::store::AutoBatchOptions,
     ) -> Result<Run> {
-        crate::store::check_auto_batch_options(&auto_batch)?;
-        if auto_batch.enabled && config.compute.is_some() {
+        self.create_run_with_options(config, crate::store::RunOptions { auto_batch, arch: None })
+    }
+
+    fn create_run_with_options(
+        &self,
+        mut config: TrainConfig,
+        mut options: crate::store::RunOptions,
+    ) -> Result<Run> {
+        crate::store::check_auto_batch_options(&options.auto_batch)?;
+        if let Some(parsed) = crate::store::check_arch_override(options.arch.as_deref())? {
+            config.arch = parsed;
+            if !options.arch.as_deref().is_some_and(|a| a.starts_with("folo2-")) {
+                options.arch = None;
+            }
+        }
+        if options.auto_batch.enabled && config.compute.is_some() {
             return Err(Error::new(
                 StatusCode::BAD_REQUEST,
                 "invalid_config",
                 "auto_batch is not supported for cloud runs yet (pass an explicit integer `batch` for cloud compute)",
             ));
         }
-        self.create_run_inner(config, auto_batch)
+        if options.arch.is_some() && config.compute.is_some() {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_config",
+                "folo2 architectures are not supported for cloud runs yet (train locally, or use folo-n..folo-x for cloud compute)",
+            ));
+        }
+        self.create_run_inner(config, options)
     }
 
     fn create_run(&self, config: TrainConfig) -> Result<Run> {
-        self.create_run_inner(config, crate::store::AutoBatchOptions::default())
+        self.create_run_inner(config, crate::store::RunOptions::default())
     }
 
     fn get_run(&self, id: &str) -> Result<Run> {
@@ -446,6 +494,7 @@ impl Store for MockStore {
         let weights = run.config.weights.as_deref().map(mock_weights);
         let cmd =
             crate::cli::train_command(&run.config, &ds.meta().path, ds.meta().format, weights.as_deref());
+        let cmd = crate::cli::with_arch(cmd, run.arch_override.as_deref());
         let ab = run.auto_batch.enabled.then_some(run.auto_batch);
         Ok(crate::cli::with_auto_batch(cmd, &run.config, ab))
     }
@@ -725,7 +774,7 @@ impl MockStore {
     fn create_run_inner(
         &self,
         mut config: TrainConfig,
-        auto_batch: crate::store::AutoBatchOptions,
+        mut options: crate::store::RunOptions,
     ) -> Result<Run> {
         let ds = self.dataset(&config.dataset_id)?;
         crate::store::check_run_name(&config.name)?;
@@ -738,6 +787,7 @@ impl MockStore {
         // As the real store: a fine-tune takes the weights' architecture.
         if let Some(w) = &config.weights {
             config.arch = self.get_model(w)?.arch;
+            options.arch = None;
         }
         self.check_amp(&config)?;
         let meta = ds.meta();
@@ -749,7 +799,10 @@ impl MockStore {
             ));
         }
         if config.name.trim().is_empty() {
-            config.name = crate::store::default_run_name(&meta.name, config.arch);
+            config.name = crate::store::default_run_name_for_arch(
+                &meta.name,
+                crate::store::effective_arch(config.arch, options.arch.as_deref()),
+            );
         }
         // Ids are allocated under the runs write lock so concurrent creates cannot pick the same one, and model
         // ids are checked against every model that exists or will exist when a run completes.
@@ -792,7 +845,8 @@ impl MockStore {
             true,
             Timeline::Live(std::sync::Mutex::new(clock)),
         )
-        .with_auto_batch(auto_batch)
+        .with_auto_batch(options.auto_batch)
+        .with_arch_override(options.arch)
         .resolved_for(meta.splits.train);
         if let Some(c) = cloud {
             sim = sim.with_cloud(c);

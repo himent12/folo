@@ -483,6 +483,13 @@ impl Client {
         self.parse(&b)
     }
 
+    /// `GET /api{path}`, returning response headers and the parsed body.
+    pub fn get_with_headers<T: DeserializeOwned>(&self, path: &str) -> Result<(HeaderMap, T)> {
+        self.check_deadline()?;
+        let (headers, b) = self.finish(self.auth(self.agent.get(self.url(path))).call())?;
+        Ok((headers, self.parse(&b)?))
+    }
+
     /// `GET /api{path}` as bytes with the answer's headers (images).
     pub fn get_bytes(&self, path: &str) -> Result<(HeaderMap, Vec<u8>)> {
         self.check_deadline()?;

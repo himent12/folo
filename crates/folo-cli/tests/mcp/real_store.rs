@@ -600,3 +600,108 @@ fn s12_val_diagnostics_dynamic_export_and_dataset_curate() {
 
     c.finish();
 }
+
+/// Embedded MCP end-to-end `folo2-n` flow: train -> val -> predict (plain & tiled) -> export (`folo-f16` & `onnx`)
+/// -> fine-tune arch validation against `folo2-n` weights.
+#[test]
+fn folo2_end_to_end_embedded() {
+    let dir = tmp_dir("real-folo2");
+    let mut c = spawn(&["--data-dir", dir.to_str().unwrap(), "--device", "cpu"], None);
+    init_old(&mut c);
+    let schemas = check_tools(&mut c, &ALL_TOOLS);
+
+    let ds = checked(
+        &mut c,
+        &schemas,
+        "create_synthetic_dataset",
+        json!({ "name": "v2tiny", "images": 8, "imgsz": 64, "classes": ["circle", "square"], "seed": 14 }),
+    );
+    let ds_id = ds["id"].as_str().unwrap().to_string();
+
+    let started = checked(
+        &mut c,
+        &schemas,
+        "train",
+        json!({
+            "dataset_id": ds_id,
+            "name": "mcp-v2",
+            "arch": "folo2-n",
+            "epochs": 1,
+            "batch": 4,
+            "imgsz": 64,
+            "device": "cpu",
+            "augment": { "close_mosaic": 1 }
+        }),
+    );
+    let run_id = started["run_id"].as_str().unwrap().to_string();
+    let done =
+        wait_run(&mut c, &run_id, 120, |s| !matches!(s["status"].as_str(), Some("queued" | "running")));
+    assert_eq!(done["status"], "completed", "{done}");
+    let model_id = done["model_id"].as_str().unwrap().to_string();
+
+    // Fine-tune with a mismatched arch is rejected citing `folo2-n`.
+    let e = c.tool_error(
+        "train",
+        json!({
+            "dataset_id": ds_id,
+            "weights": model_id,
+            "arch": "folo-s",
+            "epochs": 1,
+            "batch": 4,
+            "imgsz": 64,
+            "device": "cpu"
+        }),
+        "invalid_config",
+    );
+    assert!(e["message"].as_str().unwrap().contains("folo2-n"), "{e}");
+
+    let val = checked(
+        &mut c,
+        &schemas,
+        "val",
+        json!({ "model_id": model_id, "dataset_id": ds_id, "diagnostics": true, "worst": 2 }),
+    );
+    assert_eq!(val["imgsz"], 64);
+
+    let imgs = checked(
+        &mut c,
+        &schemas,
+        "list_dataset_images",
+        json!({ "dataset_id": ds_id, "split": "val", "limit": 1 }),
+    );
+    let image_id = imgs["items"][0]["image_id"].as_str().unwrap().to_string();
+    let pred = checked(
+        &mut c,
+        &schemas,
+        "predict",
+        json!({ "model_id": model_id, "dataset_id": ds_id, "image_id": image_id, "conf": 0.01 }),
+    );
+    assert_eq!(pred["image"]["width"], 64);
+    let pred_tile = checked(
+        &mut c,
+        &schemas,
+        "predict",
+        json!({
+            "model_id": model_id,
+            "dataset_id": ds_id,
+            "image_id": image_id,
+            "conf": 0.01,
+            "tile": 32,
+            "tile_overlap": 0.2
+        }),
+    );
+    assert_eq!(pred_tile["image"]["width"], 64);
+
+    let f16 = checked(&mut c, &schemas, "export", json!({ "model_id": model_id, "format": "folo-f16" }));
+    assert!(std::path::Path::new(f16["path"].as_str().unwrap()).is_file(), "{f16}");
+    let onnx = checked(
+        &mut c,
+        &schemas,
+        "export",
+        json!({ "model_id": model_id, "format": "onnx", "dynamic_batch": true }),
+    );
+    assert!(onnx["path"].as_str().unwrap().ends_with(".onnx"), "{onnx}");
+    assert!(std::path::Path::new(onnx["path"].as_str().unwrap()).is_file(), "{onnx}");
+
+    c.finish();
+}

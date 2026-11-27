@@ -155,7 +155,7 @@ fn run_model(models: &Models, e: &RunEntry, last: bool) -> Option<ModelRef> {
                 Some(run.id.clone()),
                 metrics,
             );
-            Some(ModelRef::new(model, path, Some(e.dataset())))
+            Some(ModelRef::new(model, path, Some(e.dataset())).with_arch_name(meta.arch_name.clone()))
         }
         Err(err) => {
             models.warn_skipped(&path, &err);

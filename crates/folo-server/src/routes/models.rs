@@ -82,8 +82,12 @@ pub(super) async fn get_model(
     ApiPath(id): ApiPath<String>,
     headers: HeaderMap,
 ) -> Result<Response> {
-    let model = blocking(&st, move |s| s.get_model(&id)).await?;
-    cached_json_response(&model, &headers)
+    let (model, arch) = blocking(&st, move |s| Ok((s.get_model(&id)?, s.model_arch(&id)?))).await?;
+    let mut res = cached_json_response(&model, &headers)?;
+    if let Ok(val) = HeaderValue::from_str(&arch) {
+        res.headers_mut().insert(axum::http::HeaderName::from_static("x-folo-arch"), val);
+    }
+    Ok(res)
 }
 
 pub(super) async fn model_eval(

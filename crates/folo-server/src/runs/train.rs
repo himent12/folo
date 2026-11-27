@@ -52,11 +52,17 @@ impl Measure {
 
 /// Trains one run on the worker thread.
 pub(super) fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>, hold: &Arc<EpochHold>) {
-    let (config, dataset, weights, auto_batch) = {
+    let (config, dataset, weights, auto_batch, arch_override) = {
         let st = e.state.lock().unwrap();
-        (st.file.run.config.clone(), st.file.dataset.clone(), st.file.weights.clone(), st.file.auto_batch)
+        (
+            st.file.run.config.clone(),
+            st.file.dataset.clone(),
+            st.file.weights.clone(),
+            st.file.auto_batch,
+            st.file.arch_override.clone(),
+        )
     };
-    let trainer = build(e, &config, &dataset, weights, auto_batch, hold);
+    let trainer = build(e, &config, &dataset, weights, auto_batch, arch_override, hold);
     let mut trainer = match trainer {
         Ok(t) => t,
         Err((code, msg)) => {
@@ -121,6 +127,7 @@ fn build(
     dataset: &DatasetRef,
     weights: Option<PathBuf>,
     auto_batch: crate::store::AutoBatchOptions,
+    arch_override: Option<String>,
     hold: &Arc<EpochHold>,
 ) -> std::result::Result<Trainer, (String, String)> {
     let device =
@@ -159,6 +166,9 @@ fn build(
     } else {
         let mut cfg = folo_vision::TrainConfig::from_api(config)
             .map_err(|err| (err.code().to_string(), err.summary()))?;
+        if let Some(arch) = arch_override {
+            cfg.arch = arch;
+        }
         cfg.device = device.to_string();
         cfg.dataset = dataset.id.clone();
         cfg.data_format = format;
