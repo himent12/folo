@@ -113,6 +113,61 @@ impl FoloV2Config {
         self.head == HeadMode::O2o
     }
 
+    /// Convert this v2 config into a serialisable `.folo` [`folo_nn::io::ModelConfig`] (`family: "folo2"`,
+    /// `spec: 2`).
+    pub fn to_model_config(&self) -> Result<folo_nn::io::ModelConfig> {
+        self.validate()?;
+        let mut mc = folo_nn::io::ModelConfig::new_v2(&self.scale, self.num_classes)?;
+        mc.in_channels = self.in_channels;
+        mc.strides = self.strides.to_vec();
+        mc.reg_max = self.reg_max as u32;
+        mc.head = self.head.as_str().into();
+        mc.bn_eps = self.bn_eps;
+        mc.bn_momentum = self.bn_momentum;
+        mc.iou_head = Some(self.iou_head);
+        mc.spd_stem = Some(self.spd_stem);
+        mc.plus = Some(self.plus);
+        mc.fullpad = Some(self.fullpad);
+        mc.mal_bias_prior = Some(self.mal_bias_prior);
+        mc.validate()?;
+        Ok(mc)
+    }
+
+    /// Recover a [`FoloV2Config`] from a `.folo` [`folo_nn::io::ModelConfig`] (`family: "folo2"`).
+    pub fn from_model_config(mc: &folo_nn::io::ModelConfig) -> Result<Self> {
+        mc.validate()?;
+        if !mc.is_v2() {
+            return Err(Error::Metadata(format!("expected folo2 model config, got family `{}`", mc.family)));
+        }
+        let head = match mc.head.as_str() {
+            "o2m" => HeadMode::O2m,
+            "o2o" => HeadMode::O2o,
+            other => return Err(Error::Metadata(format!("unknown head `{other}`"))),
+        };
+        let strides: [u32; 3] = mc
+            .strides
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Metadata(format!("expected 3 strides, got {:?}", mc.strides)))?;
+        let cfg = FoloV2Config {
+            scale: mc.scale.clone(),
+            num_classes: mc.num_classes,
+            in_channels: mc.in_channels,
+            reg_max: mc.reg_max as usize,
+            strides,
+            head,
+            iou_head: mc.iou_head.unwrap_or(false),
+            spd_stem: mc.spd_stem.unwrap_or(true),
+            plus: mc.plus.unwrap_or(false),
+            fullpad: mc.fullpad.unwrap_or(true),
+            mal_bias_prior: mc.mal_bias_prior.unwrap_or(false),
+            bn_eps: mc.bn_eps,
+            bn_momentum: mc.bn_momentum,
+        };
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
     /// Validate all fields before constructing a model.
     pub fn validate(&self) -> Result<()> {
         if !matches!(self.scale.as_str(), "n" | "s" | "m" | "l" | "x") {

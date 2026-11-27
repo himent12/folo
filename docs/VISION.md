@@ -9,9 +9,10 @@ crate's README has its file map, its common changes and a table [from each MODEL
 code](../crates/folo-vision/README.md#from-modelmd-to-the-code).
 
 ```text
-model/             FoloModel: blocks.rs (MODEL.md §2), head.rs (§6), io.rs (.folo through folo-nn),
-                   predict.rs (decode and the raw prediction path), lazy.rs / lazy_gpu.rs (candidate-first head),
-                   quant/ (int8 inference, §9.6), v2/ (FOLO v2-Iso clean-sheet model family)
+model/             FoloModel & Detector: detector.rs (unified v1/v2 dispatch), blocks.rs (MODEL.md §2),
+                   head.rs (§6), io.rs (.folo through folo-nn), predict.rs (decode and the raw prediction path),
+                   lazy.rs / lazy_gpu.rs (candidate-first head), quant/ (int8 inference, §9.6),
+                   v2/ (FOLO v2-Iso model family + io.rs `.folo` weights/export/transfer)
 loss/              the detection loss: assignment.rs (host assigner), terms/ (BCE/MAL/VFL/QFL,
                    CIoU/R-PIoU/S-AEIoU/Inner-CIoU/WIoU v3/NWD, DFL/OT-DFL/CRPS-DFL), device.rs (GPU),
                    distill/ (dense/BCKD/GT-verified distillation, §8.9)
@@ -21,8 +22,8 @@ metrics.rs, eval/, cocoeval.rs           Evaluator (mAP, PR curves, confusion ma
 train/             Trainer: config/, setup (new / resume), auto_batch (GPU VRAM-budget prober), run (epochs), epoch,
                    feed (GPU staging), device, teacher (distillation), gauge (Floor Conv+BN Gauge Normalization),
                    checkpoint, events, writer/
-val.rs             validate: a model on a dataset split
-predict.rs         Predictor
+val/               mod.rs (`validate`, `validate_v2`, `validate_detector`, `ValConfig::eval`), tests.rs
+predict/           mod.rs (`Predictor` for `folo-*` and `folo2-*`), letterbox.rs (host/device letterbox batching)
 tile.rs            SAHI tiled inference (TileConfig, compute_tiles, crop_tile, merge_tiled_detections)
 tta.rs             Test-Time Augmentation (TtaConfig, PredictOptions, unflip_xyxy_h, merge_tta_detections)
 track/             ByteTrack multi-object tracking (mod.rs: ByteTracker, TrackConfig, TrackedDetection, Predictor::predict_sequence; kalman.rs; assign.rs)
@@ -73,6 +74,15 @@ targets v1 `FoloModel`):
   `decode_images` with an explicit `alpha`, e.g. `DEFAULT_IOU_FUSION_ALPHA = 0.5`), plus optional `o2o`
   (`O2oClsLevel` with `PeakSuppress` 3×3 local-peak-preserving lateral inhibition sharing `BoxBranchV2`).
   `HeadOutputV2::into_head_output()` converts directly to v1's `HeadOutput` (dropping `iou_raw`).
+- **End-to-end runtime parity (`detector.rs`, `v2/io.rs`, `train/`, `val/`, `predict/`):** `FoloV2Model` implements
+  the full `.folo` IO lifecycle (`save`, `export` folding `WS-QARepConv3x3` + BatchNorms in `F32` before writing,
+  `from_file`, `open`, `open_on`, `from_file_for_inference`, `transfer_from` with cross-class `o2o` class-output
+  skipping and `o2m → o2o` head copy). Unified `Detector` (`V1(Box<FoloModel>)` | `V2(Box<FoloV2Model>)`) wires
+  `folo2-n/s/m/l/x` through `Trainer` (including EMA, MuSGD `.cls` LR boost, MAL bias prior, bit-exact checkpoint
+  save/resume preserving v2 flags, and `iou_quality_loss` supervision when `iou_head = true`), `auto_batch` VRAM
+  probing (`analyze_folo_v2_model` matching exact parameter counts across all 5 scales), `validate_v2` /
+  `validate_detector` (including `ValConfig::eval` per-image error diagnosis and `iou_raw` score fusion), and
+  `Predictor` (`open` auto-dispatch, `new_v2`, `predict`, `predict_batch`, SAHI `predict_tiled`, and TTA).
 
 ### int8 inference (`model/quant/`)
 Post-training CPU int8 quantisation of the v1 backbone and neck (layers 0–22; the head stays `f32`, MODEL.md §9.6).
@@ -240,7 +250,8 @@ Opt-in post-processing on `o2m` NMS clusters (MODEL.md §9.4, configured via `Nm
   times folo-nn's `GradScaler` scale, and at the end of a window the unscale, clip and overflow check with one flag
   readback (an overflowing window skips its step and backs the scale off). Master weights, optimizer state, EMA and
   BatchNorm statistics stay f32, and the scaler is the checkpoint's `folo.amp`.
-- `folo_vision::val::validate` is the same validation for `folo val`.
+- `folo_vision::val::{validate, validate_v2, validate_detector}` is the same validation for `folo val` (and forwards
+  `ValConfig::eval` to `Evaluator::with_config` so opt-in per-image error diagnosis works directly through validation).
 
 ## The Predictor
 `folo_vision::predict::Predictor` loads `.folo` (EMA when present), fuses BN, letterboxes (rect for one image and for a
@@ -346,7 +357,7 @@ and `HeadOutput::detections`, which reads the head outputs in place and extracts
 
 ## Tests
 The integration tests in `crates/folo-vision/tests/` are named for what they protect: `model.rs`, `model_v2.rs`,
-`onnx_export.rs`, `loss_cases.rs`, `assign_cases.rs`, `distill.rs`, `wave7_train_algos.rs`, `nms_reference.rs`,
+`folo2_e2e.rs`, `onnx_export.rs`, `loss_cases.rs`, `assign_cases.rs`, `distill.rs`, `wave7_train_algos.rs`, `nms_reference.rs`,
 `fusion_reference.rs`, `elc_postproc.rs`, `metrics_known.rs`, `coco_parity.rs`, `coco_full.rs`, `train/` (`main.rs`,
 `ema.rs`), `auto_batch.rs`, `o2o.rs`, `lazy_head.rs`, `int8.rs`, `harden_pipelines.rs`, `tiled_predict.rs`, `tta_predict.rs`,
 `track_and_eval.rs`, and the GPU ones (`gpu*.rs`).

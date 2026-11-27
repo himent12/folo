@@ -11,7 +11,7 @@ use super::device::{device_loss_message, device_lost, failure_report};
 use super::epoch::Clock;
 use super::{OptimizerChoice, TrainSummary, Trainer};
 use crate::error::{Error, Result};
-use crate::val::{ValConfig, ValResult, val_metrics, validate};
+use crate::val::{ValConfig, ValResult, val_metrics, validate_detector};
 
 /// Early stopping (§8.7): record `fitness` of 0-based epoch `e` in `best`. Returns `(improved, stop)`: whether it
 /// is a new best, and whether the run stops after this epoch (`e − best.epoch >= patience`). Non-finite `fitness`
@@ -285,7 +285,7 @@ impl Trainer {
         };
         let fused = source.fused_eval_clone()?;
         fused.set_forward_plans(true);
-        validate(&fused, ds, &vc)
+        validate_detector(&fused, ds, &vc)
     }
 }
 

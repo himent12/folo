@@ -20,6 +20,8 @@
 //! reading the f16 head. Where f16 is not available (the CPU, an adapter without `shader-f16`,
 //! `FOLO_GPU_NO_F16=1`) the predictor runs in f32 and [`Predictor::fallback`] says why.
 
+mod letterbox;
+
 use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -27,17 +29,20 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use folo_core::{DType, Device, LetterboxImage, Tensor, no_grad};
+use folo_core::{DType, Device, Tensor, no_grad};
 use folo_data::{Image, Letterbox, LetterboxOptions};
-use folo_nn::Module;
 use folo_nn::io::ModelFile;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
+pub use letterbox::{letterbox_on_device, letterbox_on_device_as, letterbox_on_host};
+use letterbox::{letterbox_on_device_as_refs, letterbox_on_host_refs, letterbox_on_host_rgb0};
+
 use crate::boxes::Xyxy;
 use crate::error::{Error, Result};
 use crate::fusion::{BoxFusion, FUSION_IOU, ScoreRule};
-use crate::model::{FoloModel, HeadMode, HeadOutput};
+use crate::model::v2::{DEFAULT_IOU_FUSION_ALPHA, FoloV2Model};
+use crate::model::{Detector, DetectorOutput, FoloModel, HeadMode, HeadOutput};
 use crate::nms::{Detection, NmsConfig, postprocess};
 use crate::tile::{TileConfig, check_image, compute_tiles, crop_tile, merge_tiled_detections};
 
@@ -244,22 +249,24 @@ pub fn f16_unavailable(device: Device) -> Option<String> {
     })
 }
 
-/// A fused, eval-mode detector ready for inference. See the module docs.
+/// A fused, eval-mode detector ready for inference (`folo-*` or `folo2-*`). See the module docs.
 pub struct Predictor {
-    model: FoloModel,
+    model: Detector,
     cfg: PredictConfig,
     fallback: Option<String>,
 }
 
 impl Predictor {
-    /// Load `.folo` weights (EMA when present; weights, exports and checkpoints all work) and fuse them.
+    /// Load `.folo` weights (`folo-*` or `folo2-*`; EMA when present; weights, exports and checkpoints all work)
+    /// and fuse them.
     pub fn open(path: impl AsRef<Path>, cfg: PredictConfig) -> Result<Self> {
-        Self::new(FoloModel::open(path)?, cfg)
+        Self::from_detector(Detector::open(path)?, cfg)
     }
 
-    /// Load `.folo` weights onto `device` at `precision` ([`FoloModel::from_file_for_inference`]: an f16 export
-    /// goes to the GPU as f16, other files are fused in f32 and converted). When f16 cannot run on `device`
-    /// the model is loaded in f32 and [`Predictor::fallback`] says why.
+    /// Load `.folo` weights (`folo-*` or `folo2-*`) onto `device` at `precision`
+    /// ([`Detector::from_file_for_inference`]: an f16 export goes to the GPU as f16, other files are fused in f32
+    /// and converted). When f16 cannot run on `device` the model is loaded in f32 and [`Predictor::fallback`] says
+    /// why.
     pub fn open_on(
         path: impl AsRef<Path>,
         cfg: PredictConfig,
@@ -269,17 +276,28 @@ impl Predictor {
         cfg.validate()?;
         let fallback = if precision == Precision::F16 { f16_unavailable(device) } else { None };
         let dtype = if fallback.is_some() { DType::F32 } else { precision.dtype() };
-        let model = FoloModel::from_file_for_inference(&ModelFile::open(path)?, device, dtype)?;
-        let mut p = Self::new(model, cfg)?;
+        let model = Detector::from_file_for_inference(&ModelFile::open(path)?, device, dtype)?;
+        let mut p = Self::from_detector(model, cfg)?;
         p.fallback = fallback;
         Ok(p)
     }
 
-    /// Wrap a model: it is fused (a no-op if it already is) and stays in eval mode. The model keeps its dtype
-    /// (an f16 model, from [`Module::to_dtype`], predicts in f16). Its GPU forwards are recorded and replayed
-    /// ([`FoloModel::set_forward_plans`]): the predictor never lends the model out mutably, so no layer setting can
-    /// change under a plan.
-    pub fn new(mut model: FoloModel, cfg: PredictConfig) -> Result<Self> {
+    /// Wrap a FOLO v1 model: it is fused (a no-op if it already is) and stays in eval mode.
+    pub fn new(model: FoloModel, cfg: PredictConfig) -> Result<Self> {
+        Self::from_detector(Detector::from(model), cfg)
+    }
+
+    /// Wrap a FOLO v2-Iso model ([`FoloV2Model`]): folds all `WS-QARepConv3x3` branches and BatchNorms and stays
+    /// in eval mode. Supports `predict`, `predict_batch`, SAHI (`predict_tiled`), TTA (`predict_tta`), `o2m`/`o2o`,
+    /// and `iou_head` score fusion.
+    pub fn new_v2(model: FoloV2Model, cfg: PredictConfig) -> Result<Self> {
+        Self::from_detector(Detector::from(model), cfg)
+    }
+
+    /// Wrap any [`Detector`] (`folo-*` or `folo2-*`): it is fused (a no-op if it already is) and stays in eval
+    /// mode. The model keeps its dtype (an f16 model predicts in f16). On v1 models, GPU forwards are recorded and
+    /// replayed ([`FoloModel::set_forward_plans`]).
+    pub fn from_detector(mut model: Detector, cfg: PredictConfig) -> Result<Self> {
         cfg.validate()?;
         if let Some(h) = cfg.head {
             model.set_head_mode(h)?;
@@ -298,7 +316,17 @@ impl Predictor {
     /// [`Predictor::new`] at `precision` (see [`Predictor::new_f16`]). The whole model runs at `precision`: an
     /// int8 plan ([`FoloModel::set_int8`]) is turned off; [`Predictor::new`] keeps it.
     pub fn with_precision(model: FoloModel, cfg: PredictConfig, precision: Precision) -> Result<Self> {
-        let mut p = Self::new(model, cfg)?;
+        Self::from_detector_with_precision(Detector::from(model), cfg, precision)
+    }
+
+    /// [`Predictor::from_detector`] at `precision` (`F32` or `F16` with automatic fallback on devices without
+    /// `shader-f16`).
+    pub fn from_detector_with_precision(
+        model: Detector,
+        cfg: PredictConfig,
+        precision: Precision,
+    ) -> Result<Self> {
+        let mut p = Self::from_detector(model, cfg)?;
         p.model.set_int8(None)?;
         let fallback = if precision == Precision::F16 { f16_unavailable(p.device()) } else { None };
         let dtype = if fallback.is_some() { DType::F32 } else { precision.dtype() };
@@ -317,9 +345,32 @@ impl Predictor {
         self.fallback.as_deref()
     }
 
-    /// The (fused) model.
+    /// The (fused) v1 model (panics on a `folo2-*` predictor — use [`Predictor::detector`] or
+    /// [`Predictor::model_v2`] for architecture-agnostic / v2 access).
     pub fn model(&self) -> &FoloModel {
+        self.model
+            .as_v1()
+            .expect("Predictor::model() requires a FOLO v1 model; use Predictor::detector() or Predictor::model_v2() for folo2-*")
+    }
+
+    /// The (fused) detector (`folo-*` or `folo2-*`).
+    pub fn detector(&self) -> &Detector {
         &self.model
+    }
+
+    /// The (fused) FOLO v2 model, if predicting with `folo2-*`.
+    pub fn model_v2(&self) -> Option<&FoloV2Model> {
+        self.model.as_v2()
+    }
+
+    /// Model architecture identifier (`"folo-n"`, `"folo2-n"`, ...).
+    pub fn arch(&self) -> String {
+        self.model.arch()
+    }
+
+    /// Model default image size (`folo.imgsz`).
+    pub fn imgsz(&self) -> u32 {
+        self.model.imgsz()
     }
 
     /// Class names.
@@ -511,8 +562,10 @@ impl Predictor {
         imgsz: u32,
         conf_override: Option<f32>,
     ) -> Result<Vec<Prediction>> {
-        if self.model.int8_u8_stem_active() {
-            return self.run_here_rgb0_u8_with_imgsz(imgs, rect, imgsz, conf_override);
+        if let Some(m) = self.model.as_v1()
+            && m.int8_u8_stem_active()
+        {
+            return self.run_here_rgb0_u8_with_imgsz(m, imgs, rect, imgsz, conf_override);
         }
         let t0 = Instant::now();
         let batch = self.prepare_with_imgsz(imgs, rect, imgsz)?;
@@ -523,23 +576,25 @@ impl Predictor {
             nms.conf = c;
         }
 
-        let (dets, inf, post) = if self.model.candidates_first_applies(batch.input.device(), &nms) {
+        let (dets, inf, post) = if let Some(m) = self.model.as_v1()
+            && m.candidates_first_applies(batch.input.device(), &nms)
+        {
             // Candidate-first (MODEL.md §9.5): the box branch runs once the candidates are known, so the
             // candidate extraction and the candidates' box decode count as inference (docs/API.md, `timing`).
             let t1 = Instant::now();
-            let cands = self.model.predict_candidates(&batch.input, &nms)?;
+            let cands = m.predict_candidates(&batch.input, &nms)?;
             let inf = ms(t1);
             let t2 = Instant::now();
-            let dets = cands.into_par_iter().map(|c| self.model.finish_candidates(&c, &nms)).collect();
+            let dets = cands.into_par_iter().map(|c| m.finish_candidates(&c, &nms)).collect();
             (self.finish_detections(&batch, dets), inf, ms(t2))
         } else {
             let t1 = Instant::now();
-            let out = self.forward(&batch)?;
+            let out = self.forward_detector(&batch)?;
             self.wait_for_device()?;
             let inf = ms(t1);
             // docs/API.md counts the decode as post-processing.
             let t2 = Instant::now();
-            let dets = self.finish_detections(&batch, out.detections(&nms)?);
+            let dets = self.finish_detections(&batch, out.detections(&nms, DEFAULT_IOU_FUSION_ALPHA)?);
             (dets, inf, ms(t2))
         };
         let n = imgs.len() as f64;
@@ -550,6 +605,7 @@ impl Predictor {
     /// (zero `f32` canvas materialisation, bit-exact with `apply_planar_f32` + `pack_f32_to_rgb0_u8`).
     fn run_here_rgb0_u8_with_imgsz(
         &self,
+        model: &FoloModel,
         imgs: &[&Image],
         rect: bool,
         s: u32,
@@ -575,18 +631,18 @@ impl Predictor {
             nms.conf = c;
         }
         let b = imgs.len();
-        let (dets, inf, post) = if self.model.candidates_first_applies(Device::Cpu, &nms) {
+        let (dets, inf, post) = if model.candidates_first_applies(Device::Cpu, &nms) {
             let t1 = Instant::now();
-            let cands = self.model.predict_candidates_rgb0_u8(&rgb0, b, h, w, &nms)?;
+            let cands = model.predict_candidates_rgb0_u8(&rgb0, b, h, w, &nms)?;
             let inf = ms(t1);
             let t2 = Instant::now();
-            let dets = cands.into_par_iter().map(|c| self.model.finish_candidates(&c, &nms)).collect();
+            let dets = cands.into_par_iter().map(|c| model.finish_candidates(&c, &nms)).collect();
             (dets, inf, ms(t2))
         } else {
             let t1 = Instant::now();
             let out = {
                 let _g = no_grad();
-                self.model.forward_rgb0_u8(&rgb0, b, h, w)?
+                model.forward_rgb0_u8(&rgb0, b, h, w)?
             };
             let inf = ms(t1);
             let t2 = Instant::now();
@@ -674,6 +730,11 @@ impl Predictor {
     /// The forward pass of a [`PreparedBatch`] under `no_grad`. On a GPU the result is queued work: nothing
     /// waits until its outputs are read back.
     pub fn forward(&self, batch: &PreparedBatch) -> Result<HeadOutput> {
+        Ok(self.forward_detector(batch)?.head)
+    }
+
+    /// Like [`Predictor::forward`], preserving optional FOLO v2 `iou_raw` logits in [`DetectorOutput`].
+    pub fn forward_detector(&self, batch: &PreparedBatch) -> Result<DetectorOutput> {
         let _g = no_grad();
         Ok(self.model.forward(&batch.input)?)
     }
@@ -763,187 +824,6 @@ fn one_canvas_refs(imgs: &[&Image], s: u32) -> bool {
     let Some((&first, rest)) = imgs.split_first() else { return false };
     let first = canvas(first);
     first.is_some() && rest.iter().all(|&i| canvas(i) == first)
-}
-
-/// `u8` pixel → network input. A product (not `/ 255`), so the device letterbox can match it bit for bit.
-const INV_255: f32 = 1.0 / 255.0;
-
-/// The `[B, 3, H, W]` network input (`0..1`) of `imgs` letterboxed with `boxes`, built on the host. Every
-/// geometry must have the same output size (the predictor uses `rect` only for images that share their canvas).
-///
-/// One fused pass per image ([`Letterbox::apply_planar_f32`]: resize, padding and the `u8` → `f32` scaling,
-/// rows in parallel) writes straight into the tensor's buffer, which comes from folo-core's buffer cache
-/// ([`folo_core::cpu::take_buffer`]), so a steady stream of predictions reuses the same input memory instead
-/// of faulting in fresh pages every call. Bit for bit the planes of [`Letterbox::apply`] times `1 / 255`.
-pub fn letterbox_on_host(imgs: &[Image], boxes: &[Letterbox]) -> Result<Tensor> {
-    let refs: Vec<&Image> = imgs.iter().collect();
-    letterbox_on_host_refs(&refs, boxes)
-}
-
-fn letterbox_on_host_refs(imgs: &[&Image], boxes: &[Letterbox]) -> Result<Tensor> {
-    let [w, h] = check_letterbox(imgs, boxes)?;
-    let plane = (w * h) as usize;
-    let mut input = folo_core::cpu::take_buffer(imgs.len() * 3 * plane);
-    input.par_chunks_mut(3 * plane).zip(imgs.par_iter().zip(boxes)).for_each(|(dst, (&img, lb))| {
-        lb.apply_planar_f32(img, folo_data::PAD_VALUE, INV_255, dst);
-    });
-    Ok(Tensor::from_vec(input, [imgs.len(), 3, h as usize, w as usize])?)
-}
-
-/// Packed `[B, H, W]` `u32` `[R, G, B, 0]` letterbox canvases for the direct `u8` CPU int8 stem.
-fn letterbox_on_host_rgb0(imgs: &[&Image], boxes: &[Letterbox]) -> Result<(Vec<u32>, usize, usize)> {
-    let [w, h] = check_letterbox(imgs, boxes)?;
-    let plane = (w * h) as usize;
-    let mut out = folo_core::cpu::q8::alloc(imgs.len(), 4, plane);
-    out[..imgs.len() * plane].par_chunks_mut(plane).zip(imgs.par_iter().zip(boxes)).for_each(
-        |(dst, (&img, lb))| {
-            lb.apply_rgb0_u8(img, folo_data::PAD_VALUE, dst);
-        },
-    );
-    Ok((out, h as usize, w as usize))
-}
-
-/// [`letterbox_on_host`] on `device` from the raw `u8` images, bit-exact with it (`None` when the device has
-/// no letterbox kernel): the images go up as they are, with folo-data's resize taps, and the canvas is
-/// built there.
-pub fn letterbox_on_device(imgs: &[Image], boxes: &[Letterbox], device: Device) -> Result<Option<Tensor>> {
-    letterbox_on_device_as(imgs, boxes, device, DType::F32)
-}
-
-/// [`letterbox_on_device`] writing a canvas of `dtype` (`F16` for half-precision inference: the f32 value
-/// rounded once).
-pub fn letterbox_on_device_as(
-    imgs: &[Image],
-    boxes: &[Letterbox],
-    device: Device,
-    dtype: DType,
-) -> Result<Option<Tensor>> {
-    let refs: Vec<&Image> = imgs.iter().collect();
-    letterbox_on_device_as_refs(&refs, boxes, device, dtype)
-}
-
-fn letterbox_on_device_as_refs(
-    imgs: &[&Image],
-    boxes: &[Letterbox],
-    device: Device,
-    dtype: DType,
-) -> Result<Option<Tensor>> {
-    let [w, h] = check_letterbox(imgs, boxes)?;
-    let mut taps: Vec<u32> = Vec::new();
-    let mut geoms = Vec::with_capacity(imgs.len());
-    for (&img, lb) in imgs.iter().zip(boxes) {
-        let [rw, rh] = lb.resized;
-        let plan = folo_data::resize::resize_plan(img.width, img.height, rw, rh);
-        geoms.push(LetterboxImage {
-            src: [img.width as usize, img.height as usize],
-            resized: [rw as usize, rh as usize],
-            pad: [lb.pad[0] as usize, lb.pad[1] as usize],
-            prefilter: [plan.prefilter[0] as usize, plan.prefilter[1] as usize],
-            taps: taps.len(),
-        });
-        for t in [&plan.x0, &plan.x1, &plan.wx, &plan.y0, &plan.y1, &plan.wy] {
-            taps.extend_from_slice(t);
-        }
-    }
-    let n = taps.len();
-    let taps = Tensor::from_vec(taps, [n])?.to_device(device)?;
-    let dev_imgs = upload_images(imgs, device)?;
-    let refs: Vec<&Tensor> = dev_imgs.iter().collect();
-    let out = [h as usize, w as usize];
-    Ok(Tensor::letterbox_rgb8(&refs, &taps, &geoms, out, folo_data::PAD_VALUE, INV_255, dtype)?)
-}
-
-/// The `u8` images as `[H, W, 3]` tensors on `device`. On a folo-gpu device all of them share one upload: the
-/// pixels are copied in parallel straight into reused, mapped staging memory ([`folo_gpu::GpuContext::upload_with`])
-/// and each image is a view of the one device buffer (at a 4-byte aligned offset, which the letterbox kernel
-/// reads in place). A batch larger than the device's largest storage buffer is uploaded in several such runs,
-/// each as many images as fit. Elsewhere each image is uploaded on its own.
-fn upload_images(imgs: &[&Image], device: Device) -> Result<Vec<Tensor>> {
-    let Some(ctx) = folo_gpu::context_for(device) else {
-        let host: Vec<Tensor> = imgs
-            .par_iter()
-            .map(|&im| Tensor::from_vec(im.data.clone(), [im.height as usize, im.width as usize, 3]))
-            .collect::<folo_core::Result<_>>()?;
-        return Ok(host.iter().map(|t| t.to_device(device)).collect::<folo_core::Result<_>>()?);
-    };
-    let caps = ctx.caps();
-    let limit = caps.max_buffer_size.min(caps.max_storage_buffer_binding_size) as usize;
-    let mut out = Vec::with_capacity(imgs.len());
-    let mut rest = imgs;
-    while !rest.is_empty() {
-        // At least one image per run (one over the limit fails in the upload, as on its own).
-        let mut total = rest[0].data.len().next_multiple_of(4);
-        let mut n = 1;
-        while n < rest.len() && total + rest[n].data.len().next_multiple_of(4) <= limit {
-            total += rest[n].data.len().next_multiple_of(4);
-            n += 1;
-        }
-        out.extend(upload_run(&ctx, &rest[..n], device)?);
-        rest = &rest[n..];
-    }
-    Ok(out)
-}
-
-/// [`upload_images`]' one shared upload of `imgs` on a folo-gpu device.
-fn upload_run(ctx: &folo_gpu::GpuContext, imgs: &[&Image], device: Device) -> Result<Vec<Tensor>> {
-    let mut offsets = Vec::with_capacity(imgs.len());
-    let mut total = 0usize;
-    for &im in imgs {
-        offsets.push(total);
-        total += im.data.len().next_multiple_of(4);
-    }
-    // `WriteOnly<[u8]>` is not `Send`, its fixed-size chunks are: the mapping is filled in 64 KiB chunks in
-    // parallel, each from the image bytes it covers (the padding between images stays unwritten).
-    const CHUNK: usize = 64 * 1024;
-    let fill = |start: usize, mut dst: folo_gpu::WriteOnly<'_, [u8]>| {
-        let end = start + dst.len();
-        for (&im, &off) in imgs.iter().zip(&offsets) {
-            let (a, b) = (start.max(off), end.min(off + im.data.len()));
-            if a < b {
-                dst.slice(a - start..b - start).copy_from_slice(&im.data[a - off..b - off]);
-            }
-        }
-    };
-    let (buf, ()) = ctx
-        .upload_with(total as u64, |dst| {
-            let body = dst.len() / CHUNK * CHUNK;
-            let (chunks, tail) = dst.split_at(body);
-            let (chunks, _) = chunks.into_chunks::<CHUNK>();
-            let chunks: Vec<_> = chunks.into_iter().enumerate().collect();
-            chunks.into_par_iter().for_each(|(i, c)| fill(i * CHUNK, c.into()));
-            fill(body, tail);
-        })
-        .map_err(folo_core::Error::from)?;
-    let all = folo_gpu::tensor_from_buffer(device, DType::U8, [total], buf)?;
-    Ok(imgs
-        .iter()
-        .zip(offsets)
-        .map(|(&im, off)| {
-            all.narrow(0, off, im.data.len())?.reshape([im.height as usize, im.width as usize, 3])
-        })
-        .collect::<folo_core::Result<_>>()?)
-}
-
-/// The common canvas `[width, height]` of a letterbox batch: one geometry per image, computed for its size,
-/// all with the same output size.
-fn check_letterbox(imgs: &[&Image], boxes: &[Letterbox]) -> Result<[u32; 2]> {
-    let first = boxes.first().ok_or_else(|| Error::Config("letterbox: no images".into()))?;
-    if imgs.len() != boxes.len() {
-        return Err(Error::Config(format!(
-            "letterbox: {} images but {} geometries",
-            imgs.len(),
-            boxes.len()
-        )));
-    }
-    for (&img, lb) in imgs.iter().zip(boxes) {
-        if lb.orig != [img.width, img.height] || lb.out != first.out {
-            return Err(Error::Config(format!(
-                "letterbox: geometry {lb:?} does not fit a {}x{} image on a {:?} canvas",
-                img.width, img.height, first.out
-            )));
-        }
-    }
-    Ok(first.out)
 }
 
 /// Scale accumulated per-view `(pre, inf, post)` timings to actual `wall_ms` so parallel CPU sub-batches never

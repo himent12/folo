@@ -35,6 +35,7 @@
 //! ```
 
 pub mod blocks;
+pub mod detector;
 pub mod head;
 mod io;
 mod lazy;
@@ -42,6 +43,8 @@ mod lazy_gpu;
 mod predict;
 pub mod quant;
 pub mod v2;
+
+pub use detector::{Detector, DetectorOutput};
 
 use folo_core::rng::Rng;
 use std::sync::Arc;

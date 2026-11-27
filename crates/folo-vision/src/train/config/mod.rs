@@ -359,15 +359,21 @@ impl TrainConfig {
         })
     }
 
-    /// The scale letter of `arch` (`folo-n` → `n`).
+    /// Whether `arch` selects a FOLO v2-Iso model (`folo2-n` … `folo2-x`).
+    pub fn is_v2(&self) -> bool {
+        self.arch.starts_with("folo2-")
+    }
+
+    /// The scale letter of `arch` (`folo-n` or `folo2-n` → `n`).
     pub fn scale(&self) -> Result<&str> {
-        let s = self.arch.strip_prefix("folo-").unwrap_or(&self.arch);
+        let s = self
+            .arch
+            .strip_prefix("folo2-")
+            .or_else(|| self.arch.strip_prefix("folo-"))
+            .unwrap_or(&self.arch);
         match s {
             "n" | "s" | "m" | "l" | "x" => Ok(s),
-            _ => Err(Error::Config(format!(
-                "arch `{}` is not one of folo-n, folo-s, folo-m, folo-l, folo-x",
-                self.arch
-            ))),
+            _ => Err(Error::Config(format!("arch `{}` is not one of folo-n..x or folo2-n..x", self.arch))),
         }
     }
 

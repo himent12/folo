@@ -6,7 +6,7 @@ use std::path::Path;
 use folo_core::Device;
 
 use crate::error::{Error, Result};
-use crate::model::FoloModel;
+use crate::model::{Detector, FoloModel};
 
 /// Whether a run on `device` can use mixed precision (`amp`): a GPU whose folo-gpu context has tensor cores (on
 /// the RTX 4080 SUPER, Vulkan with `FOLO_GPU_TENSOR_CORES=1`, which `folo train --amp` requests itself and
@@ -51,6 +51,15 @@ pub fn amp_not_supported(why: &str) -> Error {
 /// Put a freshly built (CPU) model on `device` (`Module::to_device`: parameters, buffers and, through them, the
 /// optimizer state and EMA built from it). [`can_place`] says whether that device can be used.
 pub fn place_model(mut model: FoloModel, device: Device) -> Result<FoloModel> {
+    can_place(device)?;
+    if !device.is_cpu() {
+        model.to_device(device)?;
+    }
+    Ok(model)
+}
+
+/// Put a freshly built (CPU) [`Detector`] (`folo-*` or `folo2-*`) on `device`.
+pub(super) fn place_detector(mut model: Detector, device: Device) -> Result<Detector> {
     can_place(device)?;
     if !device.is_cpu() {
         model.to_device(device)?;

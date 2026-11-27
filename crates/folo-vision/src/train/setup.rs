@@ -16,12 +16,12 @@ use super::events::Emitter;
 use super::teacher::Teacher;
 use super::{
     AMP_KEY, CLOSE_MOSAIC_KEY, NONFINITE_STREAK_KEY, ResumeOverrides, SHORT_RUN_STEPS, TRAIN_IMAGES_KEY,
-    TrainConfig, TrainData, TrainOptions, Trainer, WIOU_IOU_MEAN_KEY, amp_support, can_place, place_model,
+    TrainConfig, TrainData, TrainOptions, Trainer, WIOU_IOU_MEAN_KEY, amp_support, can_place, place_detector,
     resolve_device,
 };
 use crate::error::{Error, Result};
 use crate::loss::LossConfig;
-use crate::model::FoloModel;
+use crate::model::Detector;
 
 /// The closing epochs a resumed run keeps: [`CLOSE_MOSAIC_KEY`] of its `folo.train`, or for a checkpoint from
 /// before the cap, the old rule `min(close_mosaic, epochs)`.
@@ -77,7 +77,7 @@ impl Trainer {
         let weights = opts.weights.clone();
         // Stored with the run (`folo.train`), so a resume resolves `auto` as this run started (§8.2, rule 5).
         let cfg = TrainConfig { transfer: weights.is_some(), ..cfg };
-        let mut t = Self::build(cfg, data, opts, false)?;
+        let mut t = Self::build(cfg, data, opts, false, None)?;
         t.warnings = schedule_warnings(&t.cfg, &t.sched, t.data.train.len(), weights.is_none());
         if let Some(w) = weights {
             let file = ModelFile::open(&w)?;
@@ -167,7 +167,7 @@ impl Trainer {
                 data.classes
             )));
         }
-        let mut t = Self::build(cfg, data, opts, true)?;
+        let mut t = Self::build(cfg, data, opts, true, Some(&file.metadata().config))?;
         let ema = t.ema.as_mut().map(|e| e as &mut dyn EmaState);
         let r = file.resume(&t.model, t.opt.as_mut(), ema, Some(t.data.classes.clone()))?;
         let (want, got) = (t.sched.contract(), r.schedule.contract());
@@ -235,7 +235,13 @@ impl Trainer {
         Ok(t)
     }
 
-    fn build(mut cfg: TrainConfig, data: TrainData, opts: TrainOptions, is_resume: bool) -> Result<Self> {
+    fn build(
+        mut cfg: TrainConfig,
+        data: TrainData,
+        opts: TrainOptions,
+        is_resume: bool,
+        resume_mconf: Option<&ModelConfig>,
+    ) -> Result<Self> {
         cfg.validate()?;
         let n_train = data.train.len();
         let nc = data.classes.len();
@@ -289,7 +295,8 @@ impl Trainer {
                         } else {
                             crate::model::HeadMode::O2m
                         };
-                        (Some(mconf.scale.clone()), Some(head))
+                        let t_arch = format!("{}-{}", mconf.family, mconf.scale);
+                        (Some(t_arch), Some(head))
                     }
                     None => (None, None),
                 };
@@ -350,10 +357,23 @@ impl Trainer {
             ),
             &format!("imgsz {} batch {}", cfg.imgsz, cfg.batch),
         );
-        let mut mconf = ModelConfig::new(cfg.scale()?, nc)?;
-        mconf.head = cfg.head.as_str().into();
+        let mconf = match resume_mconf {
+            Some(mc) => mc.clone(),
+            None => {
+                let mut mc = if cfg.is_v2() {
+                    ModelConfig::new_v2(cfg.scale()?, nc)?
+                } else {
+                    ModelConfig::new(cfg.scale()?, nc)?
+                };
+                mc.head = cfg.head.as_str().into();
+                if cfg.is_v2() && cfg.loss.mal_gamma > 0.0 {
+                    mc.mal_bias_prior = Some(true);
+                }
+                mc
+            }
+        };
         let mut init = Rng::seed(cfg.seed);
-        let mut model = FoloModel::with_rng(mconf.clone(), &mut init)?;
+        let mut model = Detector::from_model_config(&mconf, &mut init)?;
         // Safeguard #38: MAL requires focal bias prior b_0 = ln(0.01 / 0.99) = -4.59512 (not -11.54, which would
         // collapse epoch-1 negative gradients via p_0^gamma ~ 3e-8). Always apply to freshly initialized heads so
         // cross-class transfers (whose class bias is skipped by `transfer_from`) also start at -4.59512; same-class
@@ -361,19 +381,17 @@ impl Trainer {
         if cfg.loss.mal_gamma > 0.0 {
             const MAL_BIAS_PRIOR: f32 = -4.595_12;
             for (name, p) in model.named_parameters() {
-                if (name.starts_with("head.cls.") || name.starts_with("head.o2o.cls."))
-                    && name.ends_with(".out.bias")
-                {
+                if is_cls_head_param(&name) && name.ends_with(".out.bias") {
                     folo_nn::init::constant_(&p, MAL_BIAS_PRIOR)?;
                 }
             }
         }
         model.set_classes(data.classes.clone())?;
         model.set_imgsz(cfg.imgsz);
-        let model = place_model(model, device)?;
+        let model = place_detector(model, device)?;
         model.train();
         let ema = if cfg.ema {
-            let mut shadow = FoloModel::new(mconf)?;
+            let mut shadow = Detector::new(&mconf)?;
             shadow.set_classes(data.classes.clone())?;
             shadow.set_imgsz(cfg.imgsz);
             let spe = n_train.div_ceil(cfg.batch).div_ceil(cfg.accumulate()) as u64;
@@ -382,7 +400,7 @@ impl Trainer {
                 EmaMode::Legacy => {
                     // §8.5: a fine-tune averages over a share of its optimizer steps (a resume restores the stored values).
                     let (decay, tau) = cfg.ema_params(total);
-                    Some(ModelEma::with_params(place_model(shadow, device)?, &model, decay, tau)?)
+                    Some(ModelEma::with_params(place_detector(shadow, device)?, &model, decay, tau)?)
                 }
                 EmaMode::Power => {
                     let warmup = cfg.warmup_iters(spe);
@@ -394,7 +412,7 @@ impl Trainer {
                         (0.03 * total as f64).round().max(1.0)
                     };
                     Some(ModelEma::with_power(
-                        place_model(shadow, device)?,
+                        place_detector(shadow, device)?,
                         &model,
                         EmaPowerConfig::new(t_0),
                     )?)
@@ -453,7 +471,7 @@ impl Trainer {
                         resolved.lr0,
                         resolved.momentum,
                         wd,
-                        |n| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls."),
+                        is_cls_head_param,
                         cfg.musgd.cls_lr,
                     ))),
                     resolved.musgd,
@@ -489,7 +507,7 @@ impl Trainer {
             },
         )?;
         let acc = GradAccumulator::new(&model.parameters());
-        let loss_cfg = LossConfig { reg_max: model.head.reg_max, ..cfg.loss };
+        let loss_cfg = LossConfig { reg_max: model.reg_max(), ..cfg.loss };
 
         let file = match &opts.run_dir {
             Some(dir) => {
@@ -542,6 +560,14 @@ impl Trainer {
             auto_batch_plan,
         })
     }
+}
+
+/// Whether parameter `name` belongs to a classification head branch (v1 `head.cls.*` / `head.o2o.cls.*` or v2
+/// `head.o2o.{p3,p4,p5}.cls.*`).
+fn is_cls_head_param(name: &str) -> bool {
+    name.starts_with("head.cls.")
+        || name.starts_with("head.o2o.cls.")
+        || (name.starts_with("head.o2o.") && name.contains(".cls."))
 }
 
 /// Split `backbone.*` parameters out of each optimizer group into `<group>.backbone` with

@@ -91,7 +91,7 @@ The running processes. `┄` lines are not cargo dependencies: they are HTTP, SS
 | folo-gpu | wgpu device, buffer pool, WGSL kernels; implements `Backend` | core | `GpuContext`, `GpuBackend`, `init`, `GpuTensor`, `ForwardPlans`, `kernels` | [GPU.md](GPU.md), [README](../crates/folo-gpu/README.md) |
 | folo-nn | modules, layers, init, optimizers, schedules, EMA, loss scaling, `.folo` files | core | `Module`, `Forward`, `ConvBnAct`, `optim`, `LrSchedule`, `ModelEma`, `GradScaler`, `io::ModelFile` | [NN.md](NN.md), [FORMAT.md](FORMAT.md), [README](../crates/folo-nn/README.md) |
 | folo-data | image IO, YOLO / COCO datasets, augmentation, the data loader, synthetic data | none | `open`, `open_with`, `Dataset`, `DataLoader`, `AugmentConfig`, `synthetic`, `pack` | [DATA.md](DATA.md), [README](../crates/folo-data/README.md) |
-| folo-vision | the detector, loss, assigner, box ops, NMS, metrics, trainer, predictor, ONNX export | api, core, data, gpu, nn | `FoloModel`, `detection_loss`, `Evaluator`, `Trainer`, `Predictor`, `export::onnx` | [VISION.md](VISION.md), [MODEL.md](MODEL.md), [README](../crates/folo-vision/README.md) |
+| folo-vision | the detector, loss, assigner, box ops, NMS, metrics, trainer, predictor, ONNX export | api, core, data, gpu, nn | `FoloModel`, `FoloV2Model`, `Detector`, `detection_loss`, `Evaluator`, `Trainer`, `Predictor`, `export::onnx` | [VISION.md](VISION.md), [MODEL.md](MODEL.md), [README](../crates/folo-vision/README.md) |
 | folo-bench | stress conditions, plans and scores of vision benchmarks | api, core, data, vision | `Condition`, `plan`, `score`, `ENGINE_VERSION` | [BENCH.md](BENCH.md), [README](../crates/folo-bench/README.md) |
 | folo-wasm | detectors in the browser (wasm-bindgen) | api, core, data, gpu, nn, vision | `FoloDetector` (JS), `detector::Detector` | [WASM.md](WASM.md), [README](../crates/folo-wasm/README.md) |
 | folo-api | the serde types of API.md and the error codes, shared by every service and Desktop | none | `TrainConfig`, `Run`, `RunEvent`, `codes::CODES` | [API.md](API.md), [README](../crates/folo-api/README.md) |
@@ -125,7 +125,7 @@ Each step names the file and the function or type that does it. Paths are under 
 1. `main.rs` `run` → `infer::predict` (`folo-cli/src/infer/predict.rs`).
 2. `open_model`: resolves the weights (`weights::resolve`), the device (`resolve_device`, `can_place`) and the
    precision, starts the GPU precompile (`folo_vision::precompile`), then `FoloModel::from_file_for_inference`.
-3. `Predictor::new(model, PredictConfig { .. })` (`folo-vision/src/predict.rs`).
+3. `Predictor::new(model, PredictConfig { .. })` (`folo-vision/src/predict/mod.rs`).
 4. Per image: `folo_data::read_image` → `Predictor::predict` → optional `annotate` and `write_new` → a `prediction`
    record; a `done` record at the end.
 

@@ -33,11 +33,10 @@ impl Trainer {
     pub(super) fn train_epoch(&mut self, e: u32, clock: &mut Clock) -> Result<Option<folo_api::Loss>> {
         self.model.train();
         let _backbone_grad_guard = if e < self.cfg.freeze_backbone_epochs {
-            self.model.backbone.eval();
+            self.model.eval_backbone();
             let saved = self
                 .model
-                .backbone
-                .parameters()
+                .backbone_parameters()
                 .into_iter()
                 .map(|p| {
                     let prev = p.requires_grad();
@@ -72,7 +71,7 @@ impl Trainer {
         let (epoch_start, mut epoch_images) = (Instant::now(), 0usize);
         let skipped_before = self.scaler.as_ref().map_or(0, GradScaler::skipped_steps);
         let ctx = folo_gpu::context_for(self.device);
-        self.model.head.o2o_detach = e >= self.cfg.o2o_attached_epochs;
+        self.model.set_o2o_detach(e >= self.cfg.o2o_attached_epochs);
         let mut source = match self.prefetched.take() {
             Some((pe, source)) if pe == e => source,
             _ => self.start_epoch(e)?,
@@ -112,23 +111,40 @@ impl Trainer {
                 Some(t) => Some(t.batch(&x)?),
                 None => None,
             };
-            let out = {
+            let det_out = {
                 let _amp = self.scaler.is_some().then(folo_core::autocast);
                 self.model.forward(&x)?
             };
             drop(x);
+            let iou_raw = det_out.iou_raw;
+            let out = det_out.head;
             // Mixed precision: the loss (assigner, BCE, CIoU + DFL) runs in f32 on f32 copies of the f16 head.
             let f32_head = |t: &folo_core::Tensor| t.to_dtype(folo_core::DType::F32);
             let (box_raw, cls_raw) = (f32_head(&out.box_raw)?, f32_head(&out.cls_raw)?);
+            let need_asg = need_kd_asg || iou_raw.is_some();
             let (mut loss, kd_asg) = detection_loss_for_distill_with_wiou_mean(
                 &box_raw,
                 &cls_raw,
                 &out.anchors,
                 &targets,
                 &epoch_loss_cfg,
-                need_kd_asg,
+                need_asg,
                 self.wiou_iou_mean,
             )?;
+            let iou_loss = match (&iou_raw, &kd_asg) {
+                (Some(iou_t), Some(asg)) if loss.is_finite() => {
+                    let host_asg = asg.as_host(n, out.num_anchors(), out.num_classes, &targets)?;
+                    Some(crate::model::v2::iou_quality_loss(
+                        &f32_head(iou_t)?,
+                        &box_raw,
+                        &out.anchors,
+                        host_asg.as_ref(),
+                        out.reg_max,
+                        1.0,
+                    )?)
+                }
+                _ => None,
+            };
             // On the one-to-many outputs, over the supervised loss's normaliser; part of the one-to-many loss below.
             // Skip distillation when the supervised loss is already non-finite (e.g. early AMP forward overflow,
             // where `kd_asg` is `None`) so the bad-batch BN rollback & skip handler below runs cleanly.
@@ -145,6 +161,7 @@ impl Trainer {
             };
             drop(kd_asg);
             drop(teacher_batch);
+            drop(iou_raw);
             drop((box_raw, cls_raw));
             // Dual assignment (MODEL.md §6.6): the one-to-one branch's own loss, weighted in by epoch.
             let o2o = match &out.o2o {
@@ -165,9 +182,17 @@ impl Trainer {
             let w_m = o2m_weight(e, self.cfg.epochs);
             // `w_m · (L_o2m + L_distill) + (1 − w_m) · L_o2o`; the reported terms stay unweighted by `w_m` (§8.9).
             loss = step_loss(loss, kd.as_ref(), o2o.as_ref().map(|o| (o, w_m)), n)?;
+            let mut iou_finite = true;
+            if let Some(l_iou) = iou_loss {
+                let v = l_iou.item::<f32>()?;
+                iou_finite = v.is_finite();
+                if iou_finite {
+                    loss.total = loss.total.add(&l_iou)?;
+                }
+            }
             let kd = kd.map(|kd| [kd.cls, kd.dfl]);
             let kd_finite = kd.is_none_or(|v| v.iter().all(|x| x.is_finite()));
-            let finite = loss.is_finite() && kd_finite && snapshot.all_finite_live()?;
+            let finite = loss.is_finite() && kd_finite && iou_finite && snapshot.all_finite_live()?;
             let items = loss.items;
             let wiou_batch_mean = loss.mean_iou_loss;
             if finite {
