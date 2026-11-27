@@ -192,9 +192,9 @@ export function contestantFacts(e: Pick<BenchEntry, 'contestant' | 'scored' | 'n
 }
 
 /**
- * An entry graded without confidences, in a few words: an agent gives none; an external entry was added as a model
- * that gives none ("The model gives confidences" off), so it was scored without them whatever its predictions carry
- * (issue #382: it read "no confidences" beside a file full of scores).
+ * An entry graded without confidences, in a few words: an entry that reported no confidences, or an external entry
+ * added as a model that gives none ("The model gives confidences" off), so it was scored without them whatever its
+ * predictions carry (issue #382: it read "no confidences" beside a file full of scores).
  */
 export const noConfidences = (e: Pick<BenchEntry, 'contestant'>) => (e.contestant?.kind === 'external' ? 'scored without confidences' : 'no confidences');
 /** The same as a sentence's verb: "it gives no confidences", "it was scored without confidences". */
