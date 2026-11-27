@@ -100,4 +100,44 @@ describe('deviceSummary', () => {
     expect(rows[2]!.note).toContain('self-test failed');
     expect(rows[2]!.note).toContain('See the command under Tensor cores.');
   });
+
+  it('adds CPU int8 SIMD capability row when cpu_simd is reported by /api/system', () => {
+    const vnni512 = capabilityRows(on, [gpu], {
+      avx2: true,
+      avx_vnni: true,
+      avx512_vnni: true,
+      neon: false,
+      int8_fast: true,
+      int8_kernel: 'AVX-512 VNNI (512-bit)',
+    });
+    expect(vnni512[3]).toMatchObject({
+      id: 'cpu_simd',
+      label: 'CPU int8 SIMD',
+      state: 'on',
+      word: 'AVX-512 VNNI (512-bit)',
+    });
+    expect(vnni512[3]!.note).toContain('AVX-512 VNNI, AVX-VNNI, AVX2');
+
+    const avx2Only = capabilityRows(on, [gpu], {
+      avx2: true,
+      avx_vnni: false,
+      avx512_vnni: false,
+      neon: false,
+      int8_fast: false,
+      int8_kernel: 'AVX2',
+    });
+    expect(avx2Only[3]).toMatchObject({ id: 'cpu_simd', state: 'on', word: 'AVX2' });
+    expect(avx2Only[3]!.note).toContain('without hardware VNNI (AVX2)');
+
+    const portable = capabilityRows(on, [gpu], {
+      avx2: false,
+      avx_vnni: false,
+      avx512_vnni: false,
+      neon: false,
+      int8_fast: false,
+      int8_kernel: 'portable',
+    });
+    expect(portable[3]).toMatchObject({ id: 'cpu_simd', state: 'none', word: 'portable' });
+    expect(portable[3]!.note).toContain('portable scalar kernel');
+  });
 });

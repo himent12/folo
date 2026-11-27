@@ -9,7 +9,18 @@ import { computed, effect, signal } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { CloudConnection, CloudProvider, Compute, SystemInfo } from '$lib/api/types';
-import { DEFAULT_HOURS, defaultMaxHours, hasCloud, MAX_HOURS, MIN_HOURS, pickOffer, providerName } from '$lib/cloud';
+import {
+  DEFAULT_HOURS,
+  DEFAULT_MAX_PREEMPT_RETRIES,
+  defaultMaxHours,
+  hasCloud,
+  MAX_HOURS,
+  MAX_PREEMPT_RETRIES,
+  MIN_HOURS,
+  pickOffer,
+  providerName,
+  validPreemptRetries,
+} from '$lib/cloud';
 import { sentence } from '$lib/format';
 import type { CloudDraft } from './draft';
 
@@ -17,7 +28,7 @@ import type { CloudDraft } from './draft';
 export const LOCAL = 'local';
 
 /** A control of Run on that Start's answer can be about. */
-export type CloudField = 'runon' | 'offer' | 'hours';
+export type CloudField = 'runon' | 'offer' | 'hours' | 'preempt';
 
 export class CloudPick {
   #target = signal<string>(LOCAL);
@@ -57,6 +68,14 @@ export class CloudPick {
   }
   set hoursEdited(v: boolean) {
     this.#hoursEdited.set(v);
+  }
+  #preemptRetries = signal<number | null>(DEFAULT_MAX_PREEMPT_RETRIES);
+  /** Per-run automatic spot preemption recovery budget (`0..=20`; `0` disables auto-resume). */
+  get preemptRetries(): number | null {
+    return this.#preemptRetries.get();
+  }
+  set preemptRetries(v: number | null) {
+    this.#preemptRetries.set(v);
   }
   #refused = signal<{ field: CloudField; value: string; message: string } | null>(null);
   /** Start's refusal at the control it is about, while that control still holds the value it refused. */
@@ -173,10 +192,17 @@ export class CloudPick {
     const r = this.refused;
     const at = (f: CloudField, value: string) => (r && r.field === f && r.value === value ? r.message : null);
     const h = this.hours;
+    const p = this.preemptRetries;
     return {
       runon: at('runon', this.target),
       offer: this.cloud && this.offerList && !this.offer ? 'Pick a GPU.' : at('offer', this.offerId ?? ''),
       hours: !this.cloud ? null : h === null || !(h >= MIN_HOURS && h <= MAX_HOURS) ? `From ${MIN_HOURS} to ${MAX_HOURS} hours.` : at('hours', String(h)),
+      preempt:
+        !this.cloud || !this.provisions
+          ? null
+          : !validPreemptRetries(p)
+            ? `A whole number from 0 to ${MAX_PREEMPT_RETRIES}.`
+            : at('preempt', String(p)),
     };
   });
 
@@ -208,8 +234,8 @@ export class CloudPick {
     this.hours = v;
   }
 
-  /** "New run from this config" of a cloud run: its connection, GPU and limit, if they still exist. */
-  prefill(compute: Compute | null | undefined, gpu: string) {
+  /** "New run from this config" of a cloud run: its connection, GPU, limit, and spot-retry budget, if they still exist. */
+  prefill(compute: Compute | null | undefined, gpu: string, maxPreemptRetries?: number) {
     if (!compute) return;
     this.choose(compute.connection_id);
     this.#wanted.set({ compute, gpu });
@@ -217,17 +243,28 @@ export class CloudPick {
       this.hours = compute.max_hours;
       this.hoursEdited = true;
     }
+    if (validPreemptRetries(maxPreemptRetries)) {
+      this.preemptRetries = maxPreemptRetries;
+    }
   }
 
   /** What a draft holds (runnew/draft). */
   get draft(): CloudDraft {
-    return { target: this.target, offerId: this.offerId, offerChosen: this.offerChosen, hours: this.hours, hoursEdited: this.hoursEdited };
+    return {
+      target: this.target,
+      offerId: this.offerId,
+      offerChosen: this.offerChosen,
+      hours: this.hours,
+      hoursEdited: this.hoursEdited,
+      preemptRetries: this.preemptRetries,
+    };
   }
 
   /** A draft's choice: its connection and the GPU picked by hand, if they still exist, and its time limit. */
   restore(d: CloudDraft) {
     this.hours = d.hours;
     this.hoursEdited = d.hoursEdited;
+    if (d.preemptRetries !== undefined) this.preemptRetries = d.preemptRetries;
     if (d.target === LOCAL) return;
     this.choose(d.target);
     const offer = d.offerChosen && d.offerId ? d.offerId : '';
@@ -251,8 +288,16 @@ export class CloudPick {
     if (err.code === 'offer_not_found' || err.code === 'cloud_refused') field = 'offer';
     else if (err.code === 'connection_not_found' || err.code === 'cloud_auth_failed') field = 'runon';
     else if (err.code === 'invalid_config' && /max_hours/.test(err.message)) field = 'hours';
+    else if (err.code === 'invalid_config' && /max_preempt_retries/.test(err.message)) field = 'preempt';
     if (!field) return null;
-    const value = field === 'offer' ? (this.offerId ?? '') : field === 'runon' ? this.target : String(this.hours);
+    const value =
+      field === 'offer'
+        ? (this.offerId ?? '')
+        : field === 'runon'
+          ? this.target
+          : field === 'preempt'
+            ? String(this.preemptRetries)
+            : String(this.hours);
     this.refused = { field, value, message };
     if (field === 'offer') {
       this.#fresh = true;

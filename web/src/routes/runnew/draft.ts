@@ -22,6 +22,8 @@ export interface CloudDraft {
   offerChosen: boolean;
   hours: number | null;
   hoursEdited: boolean;
+  /** Optional spot-preemption retry budget (`0..=20`); absent in older drafts (= default 3). */
+  preemptRetries?: number | null;
 }
 
 export interface Draft {
@@ -75,7 +77,13 @@ function isAugment(a: unknown): a is Augment {
 
 function isCloud(c: unknown): c is CloudDraft {
   if (!isObject(c)) return false;
-  return typeof c.target === 'string' && (c.offerId === null || typeof c.offerId === 'string') && typed(c.hours) && flags(c, ['offerChosen', 'hoursEdited']);
+  return (
+    typeof c.target === 'string' &&
+    (c.offerId === null || typeof c.offerId === 'string') &&
+    typed(c.hours) &&
+    flags(c, ['offerChosen', 'hoursEdited']) &&
+    (c.preemptRetries === undefined || typed(c.preemptRetries))
+  );
 }
 
 /** Every field of a draft, of its type and in its range: what the form can restore without a check of its own. */

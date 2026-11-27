@@ -4,6 +4,7 @@
 // parsed by the real clap parser in crates/folo-cli/tests/studio_cli.rs (fixture: routes/runnew/cli-fixtures.json).
 
 import type { Model, TrainConfig } from '$lib/api/types';
+import { DEFAULT_MAX_PREEMPT_RETRIES } from '$lib/cloud';
 
 /** Where the run's weights come from in the command: a file (or published name) the CLI opens, or a placeholder. */
 export type WeightsRef = { kind: 'path'; value: string } | { kind: 'placeholder'; value: string; file: string };
@@ -51,7 +52,8 @@ export const FLAGS: readonly Flag[] = [
   { flag: '--epochs', get: (c) => c.epochs, default: '100', always: true },
   { flag: '--batch', get: (c) => c.batch, default: '16', always: true },
   { flag: '--imgsz', get: (c) => c.imgsz, default: '640', always: true },
-  { flag: '--device', get: (c) => c.device, default: 'auto' },
+  // `--device` conflicts with `--cloud` in `folo train` (the cloud worker picks its own GPU).
+  { flag: '--device', get: (c) => (c.compute ? null : c.device), default: 'auto' },
   { flag: '--optimizer', get: (c) => c.optimizer, default: 'auto' },
   { flag: '--lr0', get: (c) => c.lr0, default: '0.01' },
   { flag: '--amp', get: (c) => !!c.amp },
@@ -67,6 +69,12 @@ export const FLAGS: readonly Flag[] = [
   { flag: '--close-mosaic', get: (c) => c.augment.close_mosaic, default: '10' },
   { flag: '--seed', get: (c) => c.seed, default: '0' },
   { flag: '--name', get: (c) => c.name.trim() || null },
+  // Cloud compute flags (`crates/folo-cli/src/cli.rs`, TrainArgs): `--offer`, `--max-hours`, `--disk-gb`,
+  // and `--max-preempt-retries` all require `--cloud`.
+  { flag: '--cloud', get: (c) => c.compute?.connection_id ?? null },
+  { flag: '--offer', get: (c) => (c.compute?.connection_id ? (c.compute.offer_id || null) : null) },
+  { flag: '--max-hours', get: (c) => (c.compute?.connection_id ? (c.compute.max_hours ?? null) : null), default: '12' },
+  { flag: '--disk-gb', get: (c) => (c.compute?.connection_id ? (c.compute.disk_gb ?? null) : null) },
 ];
 
 /**
@@ -142,9 +150,15 @@ export function withAutoBatch(parts: readonly string[], line: string): { parts: 
 /**
  * `folo train` for `config`. `data` is the dataset's path on the server; `model` the model `config.weights` names,
  * where known (its `path` is the file to fine-tune from). Pass `{ autoBatch: true }` to preview CLI-only GPU
- * VRAM-budget auto-batching (`--set auto_batch=true`) without changing `TrainConfig`.
+ * VRAM-budget auto-batching (`--set auto_batch=true`, local runs only) without changing `TrainConfig`, or
+ * `{ maxPreemptRetries }` for cloud spot-preemption retry overrides (`--max-preempt-retries N`, omitted at default 3).
  */
-export function trainCommand(config: TrainConfig, data: string, model?: Model, opts?: { autoBatch?: boolean }): TrainCommand {
+export function trainCommand(
+  config: TrainConfig,
+  data: string,
+  model?: Model,
+  opts?: { autoBatch?: boolean; maxPreemptRetries?: number | null },
+): TrainCommand {
   const weights = config.weights ? weightsRef(config.weights, model) : null;
   const ctx: Context = { data, weights };
   const argv = ['train'];
@@ -172,7 +186,20 @@ export function trainCommand(config: TrainConfig, data: string, model?: Model, o
     const shown = f.flag === '--weights' && weights?.kind === 'placeholder' ? words : words.map(quote);
     parts.push(`${f.flag} ${shown.join(' ')}`);
   }
-  if (opts?.autoBatch) {
+  const retries = opts?.maxPreemptRetries;
+  if (
+    config.compute?.connection_id &&
+    typeof retries === 'number' &&
+    Number.isInteger(retries) &&
+    retries >= 0 &&
+    retries !== DEFAULT_MAX_PREEMPT_RETRIES
+  ) {
+    const val = String(retries);
+    argv.push('--max-preempt-retries', val);
+    parts.push(`--max-preempt-retries ${val}`);
+  }
+  // `--set` conflicts with `--cloud` in `folo train`, so auto-batch preview applies only to local runs.
+  if (opts?.autoBatch && !config.compute) {
     argv.push('--set', 'auto_batch=true');
     parts.push(AUTO_BATCH_FLAG);
   }

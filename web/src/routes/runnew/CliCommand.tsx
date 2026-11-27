@@ -13,8 +13,16 @@ import { toast } from '$lib/ui/toast';
  * Studio's, from the CLI's own mapping ($lib/trainCli). A fine-tune names the weights file by path; where the server
  * does not report it, a placeholder and a note say what to fill in.
  */
-export function cliOf(config: () => TrainConfig, data: () => string, model: () => Model | undefined, served: () => string | null) {
-  const own = computed(() => trainCommand(config(), data(), model()));
+export function cliOf(
+  config: () => TrainConfig,
+  data: () => string,
+  model: () => Model | undefined,
+  served: () => string | null,
+  maxPreemptRetries?: () => number | null,
+) {
+  const own = computed(() =>
+    trainCommand(config(), data(), model(), { maxPreemptRetries: maxPreemptRetries?.() ?? null }),
+  );
   return {
     parts: computed(() => {
       const s = served();
@@ -31,6 +39,8 @@ export interface CliCommandProps {
   cliPlaceholder: string | null;
   /** True when the selected target is CPU (GPU VRAM auto-batch probing is skipped on CPU). */
   onCpu?: boolean;
+  /** True when training on cloud compute (`--set auto_batch=true` conflicts with `--cloud`). */
+  onCloud?: boolean;
   /** Prefill or linked weights still loading: hold the command until the run's real settings are resolved. */
   pending?: string | null;
   /** The Seed field holds no seed: held as Start is (lib/seed), never a command that would run with another seed. */
@@ -40,7 +50,8 @@ export interface CliCommandProps {
 export default function CliCommand(props: CliCommandProps) {
   /** CLI-preview-only toggle for `--set auto_batch=true` (never mutates `POST /api/runs` payload). */
   const autoBatch = signal(false);
-  const autoBatchActive = computed(() => autoBatch.get() && !props.onCpu);
+  const autoBatchDisabled = computed(() => !!props.onCpu || !!props.onCloud);
+  const autoBatchActive = computed(() => autoBatch.get() && !autoBatchDisabled.get());
   const shown = computed(() =>
     autoBatchActive.get() ? withAutoBatch(props.cliParts, props.cli) : { parts: props.cliParts, line: props.cli },
   );
@@ -73,12 +84,12 @@ export default function CliCommand(props: CliCommandProps) {
         <>
           <div class="cli-top">
             <p class="cli-shell">In {SHELL}:</p>
-            <label class="cli-auto" class:off={!!props.onCpu}>
+            <label class="cli-auto" class:off={autoBatchDisabled.get()} title={props.onCloud ? 'Auto-batch VRAM applies to local GPU runs only.' : undefined}>
               <input
                 type="checkbox"
                 data-auto-batch-toggle
                 checked={autoBatchActive.get()}
-                disabled={!!props.onCpu}
+                disabled={autoBatchDisabled.get()}
                 onchange={(e) => autoBatch.set((e.currentTarget as HTMLInputElement).checked)}
               />
               <span>Auto-batch VRAM</span>

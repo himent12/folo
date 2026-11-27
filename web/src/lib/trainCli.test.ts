@@ -125,6 +125,32 @@ describe('trainCommand (DOGFOOD-3 S1)', () => {
     expect(c.parts.at(-1)).toBe('--set auto_batch=true');
     expect(split(c.line).slice(1)).toEqual(c.argv);
   });
+
+  it('emits cloud flags and --max-preempt-retries while omitting conflicting --device and --set auto_batch=true', () => {
+    const cloudCfg: TrainConfig = {
+      ...base,
+      device: 'gpu:0',
+      compute: { connection_id: 'cc_4d2a', offer_id: 'NVIDIA GeForce RTX 4090@secure', max_hours: 8, disk_gb: 60 },
+    };
+    const custom = trainCommand(cloudCfg, 'D:/fasteners', undefined, { autoBatch: true, maxPreemptRetries: 5 });
+    expect(custom.argv).not.toContain('--device');
+    expect(custom.argv).not.toContain('--set');
+    expect(custom.line).toBe(
+      "folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --name fasteners-s --cloud cc_4d2a --offer 'NVIDIA GeForce RTX 4090@secure' --max-hours 8 --disk-gb 60 --max-preempt-retries 5",
+    );
+    expect(split(custom.line).slice(1)).toEqual(custom.argv);
+
+    // Default max_hours (12) and default max_preempt_retries (3) are omitted; 0 is emitted to disable auto-resume.
+    const defaultCfg: TrainConfig = {
+      ...base,
+      compute: { connection_id: 'cc_4d2a', offer_id: 'gpu:0', max_hours: 12 },
+    };
+    const def = trainCommand(defaultCfg, 'D:/fasteners', undefined, { maxPreemptRetries: 3 });
+    expect(def.line).toBe('folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --name fasteners-s --cloud cc_4d2a --offer gpu:0');
+    const disabled = trainCommand(defaultCfg, 'D:/fasteners', undefined, { maxPreemptRetries: 0 });
+    expect(disabled.line).toContain('--max-preempt-retries 0');
+    expect(split(disabled.line).slice(1)).toEqual(disabled.argv);
+  });
 });
 
 // The commands crates/folo-cli/tests/studio_cli.rs parses with the real clap parser (the CLI's `Cli`): representative

@@ -118,7 +118,7 @@ export function useRunPrefill(o: RunPrefillOptions) {
     // When `?weights=` is also present (including explicit `?weights=none`), keep weights at 'none'
     // instead of restoring the source run's checkpoint.
     o.weights.set(o.queryWeights || o.q.get('weights')?.trim() === 'none' ? 'none' : (c.weights ?? 'none'));
-    o.cloudPick.prefill(c.compute, r.cloud?.offer.gpu ?? 'GPU');
+    o.cloudPick.prefill(c.compute, r.cloud?.offer.gpu ?? 'GPU', r.cloud_preemption?.max_retries);
     o.augment.set(deep(structuredClone(c.augment)));
     o.closeEdited.set(true);
     o.name.set(uniqueName(`${runName(c.name)}-retry`, o.taken.get()));

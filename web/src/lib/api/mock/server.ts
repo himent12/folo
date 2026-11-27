@@ -37,6 +37,7 @@ import { MockLabeling, mockAgents } from './label';
 import { MockBench } from './bench';
 import { BENCH_FEATURE, BENCH_GENERATED_FEATURE } from '../../bench/rules';
 import { FOLO2_FEATURE } from '../../arch';
+import { CLOUD_SPOT_RESUME_FEATURE } from '../../cloud';
 import { renderImage } from './render';
 import { hash, smoothNoise } from './rng';
 import { GPU_NAME, archInfo, bestOf, epochAt, progressAt, toRun, type RunProfile } from './runs';
@@ -221,10 +222,22 @@ export class MockServer {
           ...(this.scenario === 'no-wasm' ? [] : ['web_wasm']),
           ...(this.labeling() ? [LABEL_FEATURE] : []),
           ...(this.benching() ? [BENCH_FEATURE, BENCH_GENERATED_FEATURE] : []),
-          ...(this.state.cloudOn ? ['cloud'] : []),
+          ...(this.state.cloudOn ? ['cloud', CLOUD_SPOT_RESUME_FEATURE] : []),
         ],
         capabilities: this.capabilities(),
         ...(pool ? { gpu_pool: pool } : {}),
+        ...(this.scenario !== 'no-throughput'
+          ? {
+              cpu_simd: {
+                avx2: true,
+                avx_vnni: true,
+                avx512_vnni: false,
+                neon: false,
+                int8_fast: true,
+                int8_kernel: 'AVX-VNNI',
+              },
+            }
+          : {}),
       };
     }, 60);
   }

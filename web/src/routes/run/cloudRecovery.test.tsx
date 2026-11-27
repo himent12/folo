@@ -250,6 +250,44 @@ describe('parseSpotRecovery & SpotRecoveryTracker', () => {
     appendLog.replace([log('launching RTX 4090 at RunPod (30 GB disk)', 'info')]);
     expect(tracker.sync(appendLog, cloud, { id: 'r_spot_2', status: 'running', error: null })).toBeNull();
   });
+
+  it('derives recovering, resumed, and exhausted states from structured run.cloud_preemption even without log lines', () => {
+    const recovering = parseSpotRecovery(
+      baseCloud({ phase: 'provisioning' }),
+      { status: 'running', error: null, cloud_preemption: { retries: 2, max_retries: 5, recovering: true } },
+      [],
+    )!;
+    expect(recovering.kind).toBe('recovering');
+    expect(recovering.badge).toBe('Spot auto-resume 2/5');
+    expect(recovering.attempts).toBe(2);
+    expect(recovering.maxAttempts).toBe(5);
+
+    const resumed = parseSpotRecovery(
+      baseCloud({ phase: 'training' }),
+      { status: 'running', error: null, cloud_preemption: { retries: 2, max_retries: 5, recovering: false, preempted_instances: ['ci_1', 'ci_2'] } },
+      [],
+    )!;
+    expect(resumed.kind).toBe('resumed');
+    expect(resumed.badge).toBe('Auto-resumed (2×)');
+
+    const exhausted = parseSpotRecovery(
+      baseCloud({ phase: 'released', ended_in: 'training' }),
+      { status: 'failed', error_code: 'cloud_instance_lost', error: 'lost', cloud_preemption: { retries: 5, max_retries: 5, recovering: false } },
+      [],
+    )!;
+    expect(exhausted.kind).toBe('exhausted');
+    expect(exhausted.badge).toBe('Auto-resume exhausted');
+    expect(exhausted.maxAttempts).toBe(5);
+
+    // Configured with retries=0 and not recovering: no active recovery banner.
+    expect(
+      parseSpotRecovery(
+        baseCloud({ phase: 'training' }),
+        { status: 'running', error: null, cloud_preemption: { retries: 0, max_retries: 0, recovering: false } },
+        [],
+      ),
+    ).toBeNull();
+  });
 });
 
 describe('CloudPanel & Run spot preemption recovery UI', () => {
@@ -343,5 +381,36 @@ describe('CloudPanel & Run spot preemption recovery UI', () => {
     });
     expect([...target.querySelectorAll('.status-row .badge')].map(text)).not.toContain('Spot auto-resume 1/3');
     expect(text(target.querySelector('[data-spot-recovery-badge="resumed"]'))).toBe('Auto-resumed (1×)');
+  });
+
+  it('displays configured Spot auto-resume policy in CloudPanel when preemption metadata is reported', () => {
+    view = render(
+      () => (
+        <CloudPanel
+          cloud={baseCloud({ phase: 'training' })}
+          provider="RunPod"
+          run={{ status: 'running' }}
+          preemption={{ retries: 0, max_retries: 0, recovering: false }}
+        />
+      ),
+      target,
+    );
+    flushSync();
+    expect(fact('Spot auto-resume')).toBe('Disabled');
+    view.unmount();
+
+    view = render(
+      () => (
+        <CloudPanel
+          cloud={baseCloud({ phase: 'training' })}
+          provider="RunPod"
+          run={{ status: 'running' }}
+          preemption={{ retries: 0, max_retries: 5, recovering: false }}
+        />
+      ),
+      target,
+    );
+    flushSync();
+    expect(fact('Spot auto-resume')).toBe('Up to 5 retries');
   });
 });

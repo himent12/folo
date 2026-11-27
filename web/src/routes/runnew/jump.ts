@@ -10,10 +10,10 @@ import { num } from '$lib/format';
 import { COPIED_SEED_ERROR, exactSeed, seedError } from '$lib/seed';
 
 /** A review row's or a form error's way back to its control (RunNew's `jump`). */
-export type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'amp' | 'weights' | 'opt' | 'lr0' | 'seed' | 'head' | 'close' | 'runon' | 'offer' | 'hours';
+export type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'amp' | 'weights' | 'opt' | 'lr0' | 'seed' | 'head' | 'close' | 'runon' | 'offer' | 'hours' | 'preempt';
 
 /** The form's errors, one per field; null where the field is fine. */
-export type FormErrors = Record<'name' | 'epochs' | 'lr0' | 'seed' | 'close' | 'dataset' | 'weights' | 'device' | 'amp' | 'runon' | 'offer' | 'hours', string | null>;
+export type FormErrors = Record<'name' | 'epochs' | 'lr0' | 'seed' | 'close' | 'dataset' | 'weights' | 'device' | 'amp' | 'runon' | 'offer' | 'hours' | 'preempt', string | null>;
 
 export const FIELD: Record<keyof FormErrors, string> = {
   name: 'Run name',
@@ -28,6 +28,7 @@ export const FIELD: Record<keyof FormErrors, string> = {
   runon: 'Run on',
   offer: 'GPU',
   hours: 'Stop after',
+  preempt: 'Spot auto-resume',
 };
 export const JUMP: Record<keyof FormErrors, Jump> = {
   name: 'name',
@@ -42,6 +43,7 @@ export const JUMP: Record<keyof FormErrors, Jump> = {
   runon: 'runon',
   offer: 'offer',
   hours: 'hours',
+  preempt: 'preempt',
 };
 
 /** The control a review row returns to; the picker that is on screen (cards or the phone select). */
@@ -108,6 +110,7 @@ export function formErrors(
   ampOn: boolean,
   cloudOn: boolean,
   cloudPick: CloudPick,
+  spotResumeOn = false,
 ): FormErrors {
   const n = runName(name);
   return {
@@ -137,6 +140,7 @@ export function formErrors(
           : null,
     offer: onCloud ? cloudPick.errors.offer : null,
     hours: onCloud ? cloudPick.errors.hours : null,
+    preempt: onCloud && spotResumeOn ? cloudPick.errors.preempt : null,
   };
 }
 

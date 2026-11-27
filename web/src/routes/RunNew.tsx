@@ -117,6 +117,7 @@ function RunNewForm() {
               IMGSZ={IMGSZ_OPTIONS}
               cloudOn={s.cloudOn.get()}
               onCloud={s.onCloud.get()}
+              spotResumeOn={s.spotResumeOn.get()}
               cloudPick={s.cloudPick}
               system={s.system}
               gpu={s.gpu.get()}

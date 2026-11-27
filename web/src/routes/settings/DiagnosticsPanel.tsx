@@ -20,6 +20,7 @@ import {
   formatPing,
   isSystemInfo,
   mergeFeatures,
+  resolveCpuSimd,
   resolveDeviceLabel,
   safePingError,
   sanitizeServerUrl,
@@ -142,6 +143,7 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
   });
 
   const device = computed(() => resolveDeviceLabel(activeSystem.get()));
+  const cpuSimd = computed(() => resolveCpuSimd(activeSystem.get()?.cpu_simd));
   const features = computed(() => mergeFeatures(activeSystem.get()?.features, hub.features));
   const origin = typeof location === 'undefined' ? '' : location.origin;
   const endpoint = computed(() => sanitizeServerUrl(prefs.serverUrl, origin));
@@ -170,6 +172,7 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
       origin,
       deviceId: d.id,
       deviceSummary: d.summary,
+      cpuSimd: cpuSimd.peek() ? { kernel: cpuSimd.peek()!.kernel, extensions: cpuSimd.peek()!.extensions } : null,
       features: features.peek(),
       pingMs: pingMs.peek(),
       pingErrorSafe: pingErrorSafe.peek(),
@@ -274,6 +277,15 @@ export default function DiagnosticsPanel(props: DiagnosticsPanelProps) {
         desc={<span class="diag-wrap">{device.get().summary}</span>}
         control={<span class="mono diag-val">{device.get().id}</span>}
       />
+
+      {cpuSimd.get() ? (
+        <Row
+          fact
+          name="CPU int8 SIMD"
+          desc={<span class="diag-wrap">{cpuSimd.get()!.detail}</span>}
+          control={<span class="mono diag-val">{cpuSimd.get()!.kernel}</span>}
+        />
+      ) : null}
 
       <Row
         fact

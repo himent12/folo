@@ -120,4 +120,59 @@ describe('CliCommand auto-batch preview', () => {
     expect(payload.batch).toBe(16);
     expect('auto_batch' in payload).toBe(false);
   });
+
+  it('syncs cloud --cloud/--offer/--max-preempt-retries CLI preview, disables Auto-batch VRAM, and sends max_preempt_retries only to createRun', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    hub.api = api;
+    hub.mode = 'mock';
+    router.route = parse('#/runs/new');
+
+    const estimateSpy = vi.spyOn(api, 'estimateRun');
+    const createSpy = vi.spyOn(api, 'createRun');
+
+    mounted = render(() => <RunNew />, target);
+    await vi.waitFor(() => {
+      flushSync();
+      const runon = target.querySelector<HTMLSelectElement>('select#runon');
+      const hasCloudOpt = !!runon?.querySelector('option[value="cc_4d2a"]');
+      const hasDataset = !!target.querySelector('input[name="dataset"]:checked');
+      if (!hasCloudOpt || !hasDataset) throw new Error('waiting for RunNew cloud connection');
+    });
+
+    const runon = target.querySelector<HTMLSelectElement>('select#runon')!;
+    runon.value = 'cc_4d2a';
+    runon.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+
+    await vi.waitFor(() => {
+      flushSync();
+      const preempt = target.querySelector<HTMLInputElement>('input#preempt');
+      const code = target.querySelector('.cli code')?.textContent ?? '';
+      if (!preempt || !code.includes('--cloud cc_4d2a')) throw new Error('waiting for cloud offer & spot auto-resume field');
+    });
+
+    // Auto-batch VRAM is disabled on cloud runs (`--set` conflicts with `--cloud`).
+    const autoBatchToggle = target.querySelector<HTMLInputElement>('[data-auto-batch-toggle]')!;
+    expect(autoBatchToggle.disabled).toBe(true);
+    expect(target.querySelector('.cli code')?.textContent).not.toContain('--set auto_batch=true');
+    expect(target.querySelector('.cli code')?.textContent).not.toContain('--max-preempt-retries');
+
+    // Change Spot auto-resume to 0 (disable automatic preemption recovery).
+    const preemptInput = target.querySelector<HTMLInputElement>('input#preempt')!;
+    preemptInput.value = '0';
+    preemptInput.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.cli code')?.textContent).toContain('--max-preempt-retries 0');
+
+    // Submit: createRun receives max_preempt_retries: 0, while estimateRun never receives it.
+    target.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await tick();
+    expect(createSpy).toHaveBeenCalledOnce();
+    expect(createSpy.mock.calls[0]![0].compute?.connection_id).toBe('cc_4d2a');
+    expect(createSpy.mock.calls[0]![1]).toEqual({ max_preempt_retries: 0 });
+    for (const call of estimateSpy.mock.calls) {
+      expect('max_preempt_retries' in (call[0] as unknown as Record<string, unknown>)).toBe(false);
+    }
+  });
 });

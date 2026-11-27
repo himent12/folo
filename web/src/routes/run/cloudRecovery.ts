@@ -24,7 +24,7 @@ export interface SpotRecovery {
   summary: string;
 }
 
-export type SpotRecoveryRun = Pick<Run, 'status' | 'error' | 'error_code'> & { id?: string };
+export type SpotRecoveryRun = Pick<Run, 'status' | 'error' | 'error_code' | 'cloud_preemption'> & { id?: string };
 
 interface ScanAcc {
   sawRecovery: boolean;
@@ -163,23 +163,28 @@ function resolveRecovery(
     if (STOPPED_RECOVERY_RE.test(run.error)) stoppedDuringRecovery = true;
   }
 
-  const attempts = exhaustedMax !== null ? Math.max(acc.attempts, exhaustedMax) : acc.attempts;
-  const maxAttempts = exhaustedMax ?? acc.maxAttempts;
+  const cp = run?.cloud_preemption ?? null;
+  const attempts = Math.max(exhaustedMax ?? 0, acc.attempts, cp?.retries ?? 0);
+  const maxAttempts = exhaustedMax ?? acc.maxAttempts ?? (cp ? cp.max_retries : null);
   const resumeEpoch = acc.resumeEpoch;
   const backoffSeconds = acc.backoffSeconds;
+  const structuredRecovering = !!cp?.recovering;
+  const structuredRetries = cp?.retries ?? 0;
 
   if (run?.status === 'failed') {
     const isLostErr = run.error_code === 'cloud_instance_lost' || run.error_code == null;
-    if (isLostErr && exhaustedMax !== null) {
-      const unit = exhaustedMax === 1 ? 'attempt' : 'attempts';
+    const exhaustedBudget =
+      exhaustedMax ?? (isLostErr && !noCheckpoint && cp && cp.max_retries > 0 && cp.retries >= cp.max_retries ? cp.max_retries : null);
+    if (isLostErr && exhaustedBudget !== null) {
+      const unit = exhaustedBudget === 1 ? 'attempt' : 'attempts';
       return {
         kind: 'exhausted',
-        attempts,
-        maxAttempts,
+        attempts: Math.max(attempts, exhaustedBudget),
+        maxAttempts: exhaustedBudget,
         resumeEpoch,
         backoffSeconds,
         badge: 'Auto-resume exhausted',
-        summary: `Spot worker preempted; automatic checkpoint resume exhausted all ${exhaustedMax} ${unit}. Permanent failure — resume manually to continue from the last synced checkpoint.`,
+        summary: `Spot worker preempted; automatic checkpoint resume exhausted all ${exhaustedBudget} ${unit}. Permanent failure — resume manually to continue from the last synced checkpoint.`,
       };
     }
     if (isLostErr && noCheckpoint) {
@@ -194,15 +199,16 @@ function resolveRecovery(
           'Spot worker was preempted with no resumable synced checkpoint (weights/last.folo), so automatic recovery could not run. Permanent failure — start the run again to retry.',
       };
     }
-    if (acc.pendingAttempt) {
-      const attText = maxAttempts !== null ? `${attempts} of ${maxAttempts}` : `${attempts}`;
+    if (acc.pendingAttempt || structuredRecovering) {
+      const attNum = Math.max(attempts, 1);
+      const attText = maxAttempts !== null ? `${attNum} of ${maxAttempts}` : `${attNum}`;
       const priorNote =
         acc.completedRecoveries > 0
           ? ` (after ${acc.completedRecoveries} earlier ${acc.completedRecoveries === 1 ? 'recovery' : 'recoveries'})`
           : '';
       return {
         kind: 'failed',
-        attempts,
+        attempts: attNum,
         maxAttempts,
         resumeEpoch,
         backoffSeconds,
@@ -210,8 +216,9 @@ function resolveRecovery(
         summary: `Spot recovery attempt ${attText} failed before a replacement worker resumed training${priorNote}. Permanent failure — resume manually to continue from the last synced checkpoint.`,
       };
     }
-    if (acc.completedRecoveries > 0) {
-      const n = acc.completedRecoveries;
+    const priorDone = Math.max(acc.completedRecoveries, structuredRetries);
+    if (priorDone > 0) {
+      const n = priorDone;
       const count = n === 1 ? '1 spot preemption' : `${n} spot preemptions`;
       return {
         kind: 'resumed',
@@ -227,7 +234,7 @@ function resolveRecovery(
   }
 
   if (run?.status === 'stopped') {
-    if (stoppedDuringRecovery || acc.pendingAttempt) {
+    if (stoppedDuringRecovery || acc.pendingAttempt || structuredRecovering) {
       const attText =
         attempts > 0 ? ` (attempt ${attempts}${maxAttempts !== null ? ` of ${maxAttempts}` : ''})` : '';
       return {
@@ -240,8 +247,9 @@ function resolveRecovery(
         summary: `Stopped while auto-resuming from spot preemption${attText}. Synced checkpoint weights/last.folo was kept.`,
       };
     }
-    if (acc.completedRecoveries > 0) {
-      const n = acc.completedRecoveries;
+    const priorDone = Math.max(acc.completedRecoveries, structuredRetries);
+    if (priorDone > 0) {
+      const n = priorDone;
       const count = n === 1 ? '1 spot preemption' : `${n} spot preemptions`;
       return {
         kind: 'resumed',
@@ -256,22 +264,24 @@ function resolveRecovery(
     return null;
   }
 
-  if (!acc.sawRecovery) return null;
+  const sawStructured = structuredRecovering || structuredRetries > 0;
+  if (!acc.sawRecovery && !sawStructured) return null;
 
   const active =
     run?.status === undefined ||
     run.status === 'queued' ||
     run.status === 'running' ||
     run.status === 'stopping';
-  if (active && acc.pendingAttempt) {
+  if (active && (acc.pendingAttempt || structuredRecovering)) {
+    const curAttempt = Math.max(attempts, 1);
     const attemptBadge =
-      maxAttempts !== null ? `Spot auto-resume ${attempts}/${maxAttempts}` : `Spot auto-resume #${attempts}`;
+      maxAttempts !== null ? `Spot auto-resume ${curAttempt}/${maxAttempts}` : `Spot auto-resume #${curAttempt}`;
     const attemptDetail =
-      maxAttempts !== null ? `attempt ${attempts} of ${maxAttempts}` : `attempt ${attempts}`;
+      maxAttempts !== null ? `attempt ${curAttempt} of ${maxAttempts}` : `attempt ${curAttempt}`;
     const epochNote = resumeEpoch !== null ? ` from epoch ${resumeEpoch}` : '';
     return {
       kind: 'recovering',
-      attempts,
+      attempts: curAttempt,
       maxAttempts,
       resumeEpoch,
       backoffSeconds,
@@ -280,7 +290,7 @@ function resolveRecovery(
     };
   }
 
-  const completed = acc.completedRecoveries > 0 ? acc.completedRecoveries : attempts;
+  const completed = Math.max(acc.completedRecoveries > 0 ? acc.completedRecoveries : attempts, structuredRetries);
   if (completed <= 0) return null;
   const count = completed === 1 ? '1 spot preemption' : `${completed} spot preemptions`;
   return {

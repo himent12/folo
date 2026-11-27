@@ -1,6 +1,6 @@
 // Training runs: their config, metrics, samples, logs, queue and events (docs/API.md, Training runs).
 
-import type { Compute, RunCloud } from './cloud';
+import type { CloudPreemptionStatus, Compute, RunCloud } from './cloud';
 import type { Box, ScoredBox } from './datasets';
 import type { Arch, ModelMetrics } from './models';
 import type { Time } from './time';
@@ -77,11 +77,19 @@ export interface Run {
   queue_position?: number | null;
   /** Where a cloud run (`config.compute`) executes and how far it is; missing for every other run. */
   cloud?: RunCloud;
+  /** Structured spot preemption auto-resume status on `GET /api/runs/{id}` (servers with `cloud_spot_resume`). */
+  cloud_preemption?: CloudPreemptionStatus;
   /**
    * The dataset as it was when the run was created, so the run still names it (and its classes) once the dataset is
    * removed; `classes` is empty for runs from before they were recorded. Missing from older servers.
    */
   dataset?: { name: string; classes: string[] };
+}
+
+/** Optional run-creation controls sent alongside `TrainConfig` on `POST /api/runs` (never on `/api/runs/estimate`). */
+export interface CreateRunOptions {
+  /** Per-run override for automatic spot preemption retries (`0..=20`, cloud runs only; feature `cloud_spot_resume`). */
+  max_preempt_retries?: number;
 }
 
 /** `Run.resolved` (docs/API.md): the settings a run actually trains with. */

@@ -631,7 +631,7 @@ export default function Run() {
                   <ConfigPanel config={config.get()!} resolved={resolved.get()} datasetName={datasetName.get()} weights={lineage.get()} essential={phone.current} cli={runCli.get()} runId={R().id} />
                 </div>
                 <div class="w-side">
-                  {cloud.get() ? <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} recovery={spotRecovery.get()} /> : null}
+                  {cloud.get() ? <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} recovery={spotRecovery.get()} preemption={R().cloud_preemption} /> : null}
                   <WaitingPanels
                     queue={place.get() !== null ? queue.get() : []}
                     ahead={ahead.get()}
@@ -741,7 +741,7 @@ export default function Run() {
                   </div>
                   {cloud.get() ? (
                     <div class="part" data-part="cloud">
-                      <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} recovery={spotRecovery.get()} />
+                      <CloudPanel cloud={cloud.get()!} provider={provider.get()} run={R()} provisions={provisions.get()} recovery={spotRecovery.get()} preemption={R().cloud_preemption} />
                     </div>
                   ) : null}
                   {/* One column beside the log (laptops up) and on phones; on a tablet it is stacked at the panel's full

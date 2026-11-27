@@ -7,7 +7,7 @@ import { Resource } from '$lib/api/resource';
 import { runsChanged } from '$lib/api/runs';
 import type { Arch, Augment, DatasetImage, Model, Optimizer, TrainConfig } from '$lib/api/types';
 import { archFromCli, archNameSuffix, archScale, archWithFamily, isFolo2Arch, supportsFolo2 } from '$lib/arch';
-import { hasCloud } from '$lib/cloud';
+import { hasCloud, hasCloudSpotResume, validPreemptRetries } from '$lib/cloud';
 import { sentence } from '$lib/format';
 import { fitFix, isOom, oomCalibration, vramForecaster, type OomFix } from '$lib/oom';
 import { REF_CPU, REF_GPU } from '$lib/reference';
@@ -110,6 +110,7 @@ export function runNewState() {
   const cloudPick = new CloudPick(() => system.data);
   if (draft) cloudPick.restore(draft.cloud);
   const cloudOn = computed(() => hasCloud(system.data));
+  const spotResumeOn = computed(() => hasCloudSpotResume(system.data));
   /** A connection is chosen: the run trains on its GPU, not this machine's. */
   const onCloud = computed(() => cloudOn.get() && cloudPick.cloud);
   const models = new Resource((s) => hub.api.models(s));
@@ -475,6 +476,7 @@ export function runNewState() {
         ampOn.get(),
         cloudOn.get(),
         cloudPick,
+        spotResumeOn.get(),
       ),
     ),
   );
@@ -610,17 +612,25 @@ export function runNewState() {
     }
   }
 
-  // The same run from a terminal (runnew/CliCommand): the server's command for these settings, where it built one.
+  // The same run from a terminal (runnew/CliCommand): the server's command for local runs (where it built one);
+  // cloud runs use Studio's cloud-aware builder so `--cloud`, `--offer`, `--max-hours`, and `--max-preempt-retries` match `folo train`.
+  const activePreemptRetries = computed(() =>
+    onCloud.get() && cloudPick.provisions && spotResumeOn.get() && validPreemptRetries(cloudPick.preemptRetries)
+      ? cloudPick.preemptRetries
+      : null,
+  );
   const cli = cliOf(
     () => config.get(),
     () => dataset.get()?.path ?? datasetId.get(),
     () => models.data?.find((m) => m.id === weights.get()),
     () => {
+      if (onCloud.get()) return null;
       const s = served.get();
       if (!s || s.key !== estKey.get()) return null;
       const cmd = serverCommand(s.est);
       return cmd ? withServerCliName(cmd, s.name, config.get().name) : null;
     },
+    () => activePreemptRetries.get(),
   );
 
   async function jump(key: Jump) {
@@ -647,7 +657,11 @@ export function runNewState() {
       return mounted && now.path === here.path && now.query.toString() === here.query.toString();
     };
     try {
-      const run = await hub.api.createRun(config.get());
+      const retries = activePreemptRetries.get();
+      const run = await hub.api.createRun(
+        config.get(),
+        retries !== null ? { max_preempt_retries: retries } : undefined,
+      );
       runsChanged();
       draftStore.markStarted();
       const where = run.cloud ? `, at ${cloudPick.provider} on ${run.cloud.offer.gpu}` : '';
@@ -708,6 +722,7 @@ export function runNewState() {
       picked.get(),
       optimizer.get(),
       e2e.get(),
+      spotResumeOn.get(),
     ),
   );
 
@@ -742,6 +757,7 @@ export function runNewState() {
     folo2Supported,
     cloudPick,
     cloudOn,
+    spotResumeOn,
     onCloud,
     ahead,
     startLabel,

@@ -54,6 +54,8 @@ export interface RunProfile {
    * training; the run's status waits after its last epoch while the weights are collected and the instance released.
    */
   cloud?: CloudTimeline;
+  /** Per-run spot preemption retry budget (`0..=20`, default 3) for cloud runs. */
+  maxPreemptRetries?: number;
 }
 
 export const GPU_NAME = 'NVIDIA GeForce RTX 4080 SUPER';

@@ -4,9 +4,9 @@
  */
 import { ApiError } from '$lib/api/client';
 import type { Mode } from '$lib/api/index';
-import type { SystemInfo } from '$lib/api/types';
+import type { CpuSimd, SystemInfo } from '$lib/api/types';
 import type { ThemePref, Units } from '$lib/prefs';
-import { deviceSummary } from './capabilities';
+import { deviceSummary, simdExtensions } from './capabilities';
 
 export type GridDensity = 's' | 'm' | 'l';
 
@@ -20,6 +20,8 @@ export interface DiagnosticsSnapshot {
   origin: string;
   deviceId: string;
   deviceSummary: string;
+  /** Optional CPU int8 SIMD kernel tier & detected ISA flags from `/api/system`'s `cpu_simd`. */
+  cpuSimd?: { kernel: string; extensions: string[] } | null;
   features: readonly string[];
   pingMs: number | null;
   /** Safe, validated failure classification (never raw server prose) for the copied report. */
@@ -69,6 +71,20 @@ export function isSystemInfo(raw: unknown): raw is SystemInfo {
     if (typeof c.amp.available !== 'boolean' || (c.amp.reason !== null && typeof c.amp.reason !== 'string')) return false;
   }
   if (raw.features !== undefined && (!Array.isArray(raw.features) || !raw.features.every((f) => typeof f === 'string'))) return false;
+  if (raw.cpu_simd !== undefined) {
+    if (!isRecord(raw.cpu_simd)) return false;
+    const s = raw.cpu_simd;
+    if (
+      typeof s.avx2 !== 'boolean' ||
+      typeof s.avx_vnni !== 'boolean' ||
+      typeof s.avx512_vnni !== 'boolean' ||
+      typeof s.neon !== 'boolean' ||
+      typeof s.int8_fast !== 'boolean' ||
+      typeof s.int8_kernel !== 'string'
+    ) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -180,6 +196,15 @@ export function resolveDeviceLabel(system?: SystemInfo): { id: string; summary: 
   return { id: 'cpu', summary: system.cpu.name || 'CPU' };
 }
 
+/** Formats `/api/system`'s optional `cpu_simd` into a clean display + report summary. */
+export function resolveCpuSimd(simd?: CpuSimd): { kernel: string; extensions: string[]; detail: string } | null {
+  if (!simd) return null;
+  const kernel = simd.int8_kernel.trim() || 'portable';
+  const extensions = simdExtensions(simd);
+  const detail = extensions.length > 0 ? `ISA: ${extensions.join(', ')}` : 'Portable scalar fallback (no SIMD ISA detected)';
+  return { kernel, extensions, detail };
+}
+
 /** Human-readable ping round-trip duration or failure note. */
 export function formatPing(ms: number | null, error?: string | null): string {
   if (error) return `Failed (${error})`;
@@ -226,11 +251,18 @@ export function formatDiagnosticsReport(snap: DiagnosticsSnapshot): string {
     `- Endpoint: ${endpoint}`,
     `- Ping (/api/system): ${formatPing(snap.pingMs, snap.pingErrorSafe)}`,
     `- Device: ${device}`,
+  ];
+  if (snap.cpuSimd) {
+    const kernel = scrubInline(snap.cpuSimd.kernel, 48);
+    const exts = snap.cpuSimd.extensions.map((e) => scrubInline(e, 24)).filter(Boolean);
+    lines.push(`- CPU int8 SIMD: ${exts.length ? `${kernel} (${exts.join(', ')})` : kernel}`);
+  }
+  lines.push(
     `- Features: ${features}`,
     `- Theme: ${theme}`,
     `- Units: ${snap.units}`,
     `- Grid: ${densityLabel(snap.gridDensity)}, boxes ${snap.gridBoxes ? 'on' : 'off'}`,
-  ];
+  );
   if (snap.viewport) lines.push(`- Viewport: ${scrubInline(snap.viewport, 32)}`);
   return lines.join('\n');
 }

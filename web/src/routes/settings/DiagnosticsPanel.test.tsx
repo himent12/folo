@@ -75,9 +75,17 @@ describe('diagnostics helpers', () => {
     expect(sanitizeServerUrl('javascript:alert(1)')).toBe('(invalid URL)');
   });
 
-  it('validates SystemInfo shapes (including nested capabilities) and classifies errors safely without leaking prose', () => {
+  it('validates SystemInfo shapes (including nested capabilities and cpu_simd) and classifies errors safely without leaking prose', () => {
     expect(isSystemInfo({ status: 'ok' })).toBe(false);
     expect(isSystemInfo({ cpu: { name: 'CPU' }, gpus: [], capabilities: { device: 'cpu' } })).toBe(false);
+    expect(isSystemInfo({ cpu: { name: 'CPU' }, gpus: [], cpu_simd: { avx2: 'yes' } })).toBe(false);
+    expect(
+      isSystemInfo({
+        cpu: { name: 'CPU' },
+        gpus: [],
+        cpu_simd: { avx2: true, avx_vnni: true, avx512_vnni: false, neon: false, int8_fast: true, int8_kernel: 'AVX-VNNI' },
+      }),
+    ).toBe(true);
     expect(isSystemInfo(null)).toBe(false);
     expect(resolveDeviceLabel({ status: 'ok' } as never)).toEqual({ id: '—', summary: 'Not loaded' });
     expect(safePingError(new ApiError(0, 'network', 'Failed to fetch', null, 'GET /api/system'))).toBe('Unreachable');
@@ -115,6 +123,7 @@ describe('diagnostics helpers', () => {
       origin: 'http://localhost:5173',
       deviceId: 'gpu:0',
       deviceSummary: 'RTX 4080 SUPER · Vulkan /home/alice/private-folo token=example-secret',
+      cpuSimd: { kernel: 'AVX-512 VNNI (512-bit)', extensions: ['AVX-512 VNNI', 'AVX-VNNI', 'AVX2'] },
       features: ['cloud', 'throughput', 'bad feature/secret'],
       pingMs: null,
       pingErrorSafe: 'HTTP 503',
@@ -133,6 +142,7 @@ describe('diagnostics helpers', () => {
     expect(report).toContain('- Endpoint: https://gpu.internal:7878');
     expect(report).toContain('- Ping (/api/system): Failed (HTTP 503)');
     expect(report).toContain('- Device: RTX 4080 SUPER · Vulkan [redacted] [redacted] (gpu:0)');
+    expect(report).toContain('- CPU int8 SIMD: AVX-512 VNNI (512-bit) (AVX-512 VNNI, AVX-VNNI, AVX2)');
     expect(report).toContain('- Features: cloud, throughput');
     expect(report).toContain('- Theme: Midnight (midnight, system → dark)');
     expect(report).toContain('- Units: binary');
@@ -176,6 +186,8 @@ describe('DiagnosticsPanel', () => {
     const panel = target.querySelector<HTMLElement>('#diagnostics')!;
     expect(panel.textContent).toContain('Built-in demo 0.4.2 (mock)');
     expect(panel.textContent).toContain('Medium (M)');
+    expect(panel.textContent).toContain('CPU int8 SIMD');
+    expect(panel.textContent).toContain('AVX-VNNI');
     expect(target.querySelector('nav.jump a.on')?.getAttribute('href')).toBe('#/settings?section=diagnostics');
 
     const pingBtn = [...panel.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Ping')!;
