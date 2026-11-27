@@ -309,6 +309,7 @@ impl FoloApp {
                 .into_any_element(),
             );
         }
+        let spot_header_badge = r.cloud.as_ref().and_then(|c| self.run_spot_recovery(&r, c).header_badge());
         let title = div()
             .w_full()
             .flex()
@@ -317,6 +318,9 @@ impl FoloApp {
             .gap(px(12.))
             .child(text(ty::XL, t.text_primary).min_w_0().ellipsis().child(r.name.clone()))
             .child(div().flex_none().child(status_badge(&t, &r, &format!("hdr-{}", r.id))))
+            .when_some(spot_header_badge, |d, (ic, label, tone)| {
+                d.child(div().flex_none().child(badge_icon(&t, ic, label, tone)))
+            })
             // The worker is silent: the numbers stand still for that, not because training does
             // (the Cloud panel says more).
             .when(r.cloud.as_ref().is_some_and(|c| c.unanswered_since.is_some()), |d| {
@@ -457,8 +461,11 @@ impl FoloApp {
     fn failure_banner(&self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let msg = r.error.clone().unwrap_or_else(|| "The run failed.".into());
+        let spot_hint = r.cloud.as_ref().and_then(|c| self.run_spot_recovery(r, c).failure_hint());
         let hint = if r.error_code.as_deref() == Some("not_supported") && r.config.amp {
             "Mixed precision needs a GPU with tensor cores (and folo serve --tensor-cores); this run's device had none. New run from this config trains without it.".to_string()
+        } else if let Some(h) = spot_hint {
+            h
         } else if is_gpu_oom(&msg) {
             match crate::app::retry_batch(r.config.batch) {
                 Some(to) => format!(

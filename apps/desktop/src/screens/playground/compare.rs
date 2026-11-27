@@ -443,6 +443,7 @@ pub struct CompareSideExport<'a> {
     pub model: &'a str,
     pub model_id: &'a str,
     pub iou: Option<f32>,
+    pub per_class_conf: Option<&'a BTreeMap<u32, f32>>,
     pub pred: &'a PredictResponse,
     pub boxes: &'a [&'a ScoredBox],
 }
@@ -455,6 +456,7 @@ pub fn compare_detections_json(
     image: &str,
     image_size: (u32, u32),
     conf: f32,
+    per_class_conf: Option<&BTreeMap<u32, f32>>,
     iou: Option<f32>,
     class_filter: Option<u32>,
     summary: &CompareSummary,
@@ -509,6 +511,8 @@ pub fn compare_detections_json(
         model_id: &'a str,
         #[serde(skip_serializing_if = "Option::is_none")]
         iou: Option<f32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        per_class_conf: Option<&'a BTreeMap<u32, f32>>,
         device: &'a str,
         cold: bool,
         timing: &'a Timing,
@@ -520,6 +524,8 @@ pub fn compare_detections_json(
         image: &'a str,
         image_size: ImageDims,
         conf: f32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        per_class_conf: Option<&'a BTreeMap<u32, f32>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         iou: Option<f32>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -534,6 +540,7 @@ pub fn compare_detections_json(
             model: s.model,
             model_id: s.model_id,
             iou: s.iou,
+            per_class_conf: s.per_class_conf.filter(|m| !m.is_empty()),
             device: &s.pred.device,
             cold: s.pred.cold,
             timing: &s.pred.timing,
@@ -546,6 +553,7 @@ pub fn compare_detections_json(
         image,
         image_size: ImageDims { width: image_size.0, height: image_size.1 },
         conf,
+        per_class_conf: per_class_conf.filter(|m| !m.is_empty()),
         iou,
         class_filter,
         comparison: SummaryExport {
@@ -671,6 +679,7 @@ mod tests {
             "shapes / val_001.png",
             (640, 480),
             0.25,
+            None,
             Some(0.7),
             None,
             &summary,
@@ -678,10 +687,18 @@ mod tests {
                 model: "shapes-n",
                 model_id: "m_a",
                 iou: Some(0.7),
+                per_class_conf: None,
                 pred: &pa,
                 boxes: &ra,
             }),
-            Some(&CompareSideExport { model: "shapes-s", model_id: "m_b", iou: None, pred: &pb, boxes: &rb }),
+            Some(&CompareSideExport {
+                model: "shapes-s",
+                model_id: "m_b",
+                iou: None,
+                per_class_conf: None,
+                pred: &pb,
+                boxes: &rb,
+            }),
         )
         .expect("serialize compare JSON");
         let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
@@ -735,9 +752,24 @@ mod tests {
             0.25,
             None,
             None,
+            None,
             &s_a,
-            Some(&CompareSideExport { model: "shapes-n", model_id: "m_a", iou: None, pred: &pa, boxes: &ra }),
-            Some(&CompareSideExport { model: "shapes-s", model_id: "m_b", iou: None, pred: &pb, boxes: &rb }),
+            Some(&CompareSideExport {
+                model: "shapes-n",
+                model_id: "m_a",
+                iou: None,
+                per_class_conf: None,
+                pred: &pa,
+                boxes: &ra,
+            }),
+            Some(&CompareSideExport {
+                model: "shapes-s",
+                model_id: "m_b",
+                iou: None,
+                per_class_conf: None,
+                pred: &pb,
+                boxes: &rb,
+            }),
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -781,6 +813,7 @@ mod tests {
             "val_001.png",
             (640, 480),
             0.25,
+            None,
             Some(0.7),
             None,
             &summary,
@@ -788,6 +821,7 @@ mod tests {
                 model: "shapes-n",
                 model_id: "m_a",
                 iou: Some(0.7),
+                per_class_conf: None,
                 pred: &pa,
                 boxes: &ra,
             }),
@@ -795,6 +829,7 @@ mod tests {
                 model: "shapes-s",
                 model_id: "m_b",
                 iou: Some(0.7),
+                per_class_conf: None,
                 pred: &pb,
                 boxes: &rb,
             }),

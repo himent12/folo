@@ -6,7 +6,7 @@ use super::command::{
     PredictPrecision, QuantF32MacBudget, QuantF32Policy, QuantMethod, ServerExportSupport, build_model_cli,
     check_server_export_support, derive_quant_output_path, is_int8_model_path,
 };
-use crate::api::{Backend, Head, Model, ModelExportOptions, ModelSource, mock::MockBackend};
+use crate::api::{Backend, Head, Model, ModelExportOptions, ModelSource, Split, mock::MockBackend};
 
 fn sample_model() -> Model {
     let api = MockBackend::new(4200, true);
@@ -440,5 +440,74 @@ fn predict_int8_recalibration_targets_current_or_quantized_output_explicitly() {
     assert_eq!(
         p_custom_current.command,
         "folo predict --model D:/models/custom-calibrated.folo <images> --precision int8"
+    );
+}
+
+#[test]
+fn validate_save_thresholds_and_predict_thresholds_share_path_and_exclude_conf() {
+    let mut m = sample_model();
+    m.path = Some("D:/my models/best.folo".into());
+
+    // Validate mode emits `folo val --model ... --data ... --save-thresholds <stem>-thresholds.json`.
+    let mut st = ModelCliState {
+        mode: ModelCliMode::Validate,
+        val_split: Split::Val,
+        val_save_thresholds: true,
+        ..Default::default()
+    };
+    let v = build_model_cli(&m, Some("D:/my data/shapes"), &st);
+    assert_eq!(
+        v.command,
+        "folo val --model \"D:/my models/best.folo\" --data \"D:/my data/shapes\" --save-thresholds \"D:/my models/best-thresholds.json\""
+    );
+    assert!(v.server_export.is_none());
+    assert!(v.quote_note.is_none());
+
+    // Non-default split & precision flags are included; disabling save_thresholds omits `--save-thresholds`.
+    st.val_split = Split::Test;
+    st.predict_precision = PredictPrecision::F16;
+    st.val_save_thresholds = false;
+    let v2 = build_model_cli(&m, Some("D:/my data/shapes"), &st);
+    assert_eq!(
+        v2.command,
+        "folo val --model \"D:/my models/best.folo\" --data \"D:/my data/shapes\" --split test --precision f16"
+    );
+
+    // Predict mode with `--thresholds` uses the exact same derived thresholds path and omits `--conf`
+    // even when `predict_conf` is non-default (`--thresholds` and `--conf` conflict in `folo-cli`).
+    st.mode = ModelCliMode::Predict;
+    st.predict_precision = PredictPrecision::F32;
+    st.predict_conf = 0.55;
+    st.predict_use_thresholds = true;
+    let p = build_model_cli(&m, None, &st);
+    assert_eq!(
+        p.command,
+        "folo predict --model \"D:/my models/best.folo\" <images> --thresholds \"D:/my models/best-thresholds.json\""
+    );
+    assert!(!p.command.contains("--conf"), "{}", p.command);
+
+    // Shell-unsafe `$` path falls back to `<thresholds.json>` placeholder with a quote note.
+    m.path = Some("D:/bad$dir/best.folo".into());
+    st.mode = ModelCliMode::Validate;
+    st.val_split = Split::Val;
+    st.val_save_thresholds = true;
+    let v_unsafe = build_model_cli(&m, Some("D:/ok/shapes"), &st);
+    assert_eq!(
+        v_unsafe.command,
+        "folo val --model <model> --data D:/ok/shapes --save-thresholds <thresholds.json>"
+    );
+    assert!(v_unsafe.quote_note.as_deref().is_some_and(|n| n.contains("best-thresholds.json")));
+
+    // Published model without local path uses `<id>-thresholds.json`.
+    let mut pub_m = sample_model();
+    pub_m.path = None;
+    pub_m.source = Some(ModelSource::Published);
+    pub_m.id = "folo-n-coco-v5".into();
+    st.mode = ModelCliMode::Predict;
+    st.predict_use_thresholds = true;
+    let p_pub = build_model_cli(&pub_m, None, &st);
+    assert_eq!(
+        p_pub.command,
+        "folo predict --model folo-n-coco-v5 <images> --thresholds folo-n-coco-v5-thresholds.json"
     );
 }

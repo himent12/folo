@@ -196,6 +196,9 @@ impl FoloApp {
         self.play_boxes = true;
         self.play_labels = true;
         self.play_class = None;
+        self.play_thresholds.reset_for_backend();
+        self.play_thresh_json.update(cx, |i, cx| i.set_text("", cx));
+        self.play_thresh_filter.update(cx, |i, cx| i.set_text("", cx));
         self.play_compare.reset_for_backend();
         self.clear_play_batch();
         self.retry_all(cx);
@@ -282,6 +285,7 @@ impl FoloApp {
         forget_unreachable(&mut s.previews);
         forget_unreachable(&mut s.issues);
         forget_unreachable(&mut s.evals);
+        forget_unreachable(&mut s.calibrations);
         forget_unreachable(&mut s.run_data);
         forget_unreachable(&mut s.samples);
         s.samples_refresh_error.retain(|id, e| {

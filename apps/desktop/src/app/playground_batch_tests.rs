@@ -584,6 +584,7 @@ fn playtest_r13_compare_failed_banner_model_a_labels_inline_completion_and_mid_l
             this.play_iou,
             this.play_target,
             this.play_conf,
+            &this.play_thresholds.per_class,
             this.play_class,
             e2e,
         );

@@ -148,6 +148,27 @@ impl Backend for HttpBackend {
         self.get(&format!("/models/{}/eval", seg(id)))
     }
 
+    fn val_thresholds(
+        &self,
+        model_id: &str,
+        dataset_id: &str,
+        split: Split,
+    ) -> ApiResult<Option<folo_vision::ThresholdCalibration>> {
+        #[derive(Serialize)]
+        struct ValBody<'a> {
+            model_id: &'a str,
+            dataset_id: &'a str,
+            split: Split,
+        }
+        #[derive(serde::Deserialize)]
+        struct ValThresholdsResp {
+            #[serde(default)]
+            thresholds: Option<folo_vision::ThresholdCalibration>,
+        }
+        let resp: ValThresholdsResp = self.post_slow("/val", &ValBody { model_id, dataset_id, split })?;
+        Ok(resp.thresholds)
+    }
+
     fn export_model(&self, id: &str, format: &str) -> ApiResult<ExportResult> {
         let format =
             if format == "onnx" { folo_api::ExportFormat::Onnx } else { folo_api::ExportFormat::FoloF16 };

@@ -1,5 +1,6 @@
 //! Playground multi-image / folder batch state, folder scanner, and compact filmstrip UI.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -9,7 +10,7 @@ use folo_ui::{
     StatefulInteractiveElement, Styled, Window, div, px,
 };
 
-use super::page::filter_detections;
+use super::thresholds::{filter_detections_with_per_class, min_active_conf};
 use crate::api::{ApiError, ApiResult, PredictResponse};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
@@ -285,25 +286,30 @@ impl PlayBatchState {
         }
     }
 
-    /// Computes live done/failed/running/detection counts filtered at `(conf, class_filter)`.
+    /// Computes live done/failed/running/detection counts filtered at `(conf, per_class, class_filter)`.
+    #[allow(clippy::too_many_arguments)]
     pub fn summary(
         &self,
         model_id: Option<&str>,
         iou: f32,
         target: Option<crate::local::Target>,
         conf: f32,
+        per_class: &BTreeMap<u32, f32>,
         class_filter: Option<u32>,
         e2e: bool,
     ) -> BatchSummary {
+        let min_conf = min_active_conf(conf, per_class);
         let mut s = BatchSummary { total: self.items.len(), ..Default::default() };
         for item in &self.items {
             match &item.status {
                 BatchItemStatus::Running => s.running += 1,
                 BatchItemStatus::Failed(_) => s.failed += 1,
                 BatchItemStatus::Done(res) => {
-                    if model_id.is_some_and(|m| res.matches_current(m, iou, target, conf, e2e)) {
+                    if model_id.is_some_and(|m| res.matches_current(m, iou, target, min_conf, e2e)) {
                         s.done += 1;
-                        s.total_detections += filter_detections(&res.pred.boxes, conf, class_filter).len();
+                        s.total_detections +=
+                            filter_detections_with_per_class(&res.pred.boxes, conf, per_class, class_filter)
+                                .len();
                     }
                 }
                 BatchItemStatus::Pending => {}
@@ -430,6 +436,7 @@ impl FoloApp {
             self.play_iou,
             self.play_target,
             self.play_conf,
+            &self.play_thresholds.per_class,
             eff_class,
             e2e,
         );
@@ -553,6 +560,7 @@ impl FoloApp {
             self.play_iou,
             self.play_target,
             self.play_conf,
+            &self.play_thresholds.per_class,
             self.play_class,
             e2e,
             &model_classes,
@@ -562,6 +570,7 @@ impl FoloApp {
             self.play_iou,
             self.play_target,
             self.play_conf,
+            &self.play_thresholds.per_class,
             self.play_class,
             e2e,
         );
@@ -635,11 +644,18 @@ impl FoloApp {
                             (t.danger_solid, "!".to_string(), format!("Failed: {err}"))
                         }
                         BatchItemStatus::Done(res) => {
+                            let min_conf = self.play_min_conf();
                             let fresh = model_id.as_deref().is_some_and(|m| {
-                                res.matches_current(m, self.play_iou, self.play_target, self.play_conf, e2e)
+                                res.matches_current(m, self.play_iou, self.play_target, min_conf, e2e)
                             });
                             if fresh {
-                                let n = filter_detections(&res.pred.boxes, self.play_conf, eff_class).len();
+                                let n = filter_detections_with_per_class(
+                                    &res.pred.boxes,
+                                    self.play_conf,
+                                    &self.play_thresholds.per_class,
+                                    eff_class,
+                                )
+                                .len();
                                 (t.success_solid, n.to_string(), plural(n, "detection"))
                             } else {
                                 (
@@ -885,7 +901,7 @@ mod tests {
         assert!(st.is_active());
         assert_eq!(batch_tile_label("shapes / a.png"), "a.png");
 
-        let s = st.summary(Some("m_1"), 0.7, None, 0.25, None, false);
+        let s = st.summary(Some("m_1"), 0.7, None, 0.25, &BTreeMap::new(), None, false);
         assert_eq!((s.total, s.done, s.running, s.total_detections), (2, 1, 1, 1));
 
         assert!(st.cancel());

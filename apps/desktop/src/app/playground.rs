@@ -312,7 +312,9 @@ impl FoloApp {
     pub fn pick_play_model(&mut self, id: String, cx: &mut Context<Self>) {
         self.play_open_seq += 1;
         if self.play_model.as_deref() != Some(id.as_str()) {
+            let prev_classes = self.play_shown_model().map(|m| m.classes.clone());
             self.play_class = None;
+            self.remap_play_thresholds_for_model(prev_classes, Some(id.as_str()));
             self.clear_play_hover();
             self.invalidate_play_batch();
             self.play_batch.load_gen += 1;
@@ -385,6 +387,8 @@ impl FoloApp {
         self.play_pred_dim = false;
         self.clear_play_hover();
         self.play_class = None;
+        self.play_thresholds.per_class.clear();
+        self.play_thresholds.clear_feedback();
     }
 
     /// Predict again from scratch, showing "Detecting…" meanwhile (Retry, or another device). A plain
@@ -414,17 +418,19 @@ impl FoloApp {
         let changed = (self.play_conf - conf).abs() > f32::EPSILON;
         self.play_conf = conf;
         if changed {
+            self.play_thresholds.clear_feedback();
             self.cancel_play_batch();
-            self.play_batch.invalidate_below_conf(conf);
+            self.play_batch.invalidate_below_conf(self.play_min_conf());
         }
         self.clear_play_hover();
         self.play_compare.clear_hover();
         let switched = changed && self.reconcile_play_batch_active(cx);
         if !switched {
-            if conf < self.play_fetched_floor - 1e-6 {
+            if self.play_min_conf() < self.play_fetched_floor - 1e-6 {
                 self.run_predict(cx);
             }
-            if self.play_compare.enabled && conf < self.play_compare.fetched_floor_b - 1e-6 {
+            if self.play_compare.enabled && self.play_min_conf_b() < self.play_compare.fetched_floor_b - 1e-6
+            {
                 self.run_predict_b(cx);
             }
         }
@@ -455,7 +461,7 @@ impl FoloApp {
         // Fetch everything above the lowest threshold once; the conf slider filters locally. The
         // floor is 0.05, or lower when the threshold is (a model's best-F1 confidence can be), so
         // local filtering never claims a threshold the fetch cut off.
-        let floor = self.play_conf.min(PLAY_CONF_FLOOR);
+        let floor = self.play_min_conf().min(PLAY_CONF_FLOOR);
         let req = PredictRequest {
             model_id: model.clone(),
             input: img.predict_input(self.play_target.is_some()),
@@ -685,7 +691,9 @@ impl FoloApp {
         self.navigate(Route::Playground, window, cx);
         if let Some((id, _)) = req.model {
             if self.play_model.as_deref() != Some(id.as_str()) {
+                let prev_classes = self.play_shown_model().map(|m| m.classes.clone());
                 self.play_class = None;
+                self.remap_play_thresholds_for_model(prev_classes, Some(id.as_str()));
             }
             self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
             self.play_model = Some(id);

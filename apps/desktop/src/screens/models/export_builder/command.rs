@@ -1,7 +1,7 @@
 //! Pure CLI command builder and server-export capability checks for the Model Detail
 //! Export & Inference Command Builder (`docs/CLI.md`).
 
-use crate::api::{Head, Model, ModelExportOptions, ModelSource};
+use crate::api::{Head, Model, ModelExportOptions, ModelSource, Split};
 
 /// Server feature flag advertising split dynamic ONNX axes (`dynamic_batch`, `dynamic_hw`).
 pub const FEATURE_EXPORT_DYNAMIC_AXES: &str = "export_dynamic_axes";
@@ -11,6 +11,7 @@ pub const FEATURE_EXPORT_DYNAMIC_AXES: &str = "export_dynamic_axes";
 pub enum ModelCliMode {
     #[default]
     Export,
+    Validate,
     Predict,
 }
 
@@ -196,12 +197,19 @@ pub struct ModelCliState {
     pub quant_f32_policy: QuantF32Policy,
     /// Selective-`f32` MAC budget preset when `quant_f32_policy == Auto` (`--max-f32-macs`).
     pub quant_f32_macs: QuantF32MacBudget,
+    /// Validation split for `folo val --split`.
+    pub val_split: Split,
+    /// Save calibrated per-class thresholds JSON (`folo val --save-thresholds <path>`).
+    pub val_save_thresholds: bool,
     /// SAHI tiled inference (`--tile 640`, mutually exclusive with `predict_tta`).
     pub predict_sahi: bool,
     /// Test-Time Augmentation (`--tta`, mutually exclusive with `predict_sahi`).
     pub predict_tta: bool,
     /// ByteTrack multi-object tracking (`--track`).
     pub predict_track: bool,
+    /// Use calibrated per-class thresholds file (`folo predict --thresholds <path>`, mutually
+    /// exclusive with `--conf`).
+    pub predict_use_thresholds: bool,
     /// Inference precision (`f32`, `f16`, `int8`).
     pub predict_precision: PredictPrecision,
     /// Explicit override for which checkpoint Predict `int8` targets (`None` picks `Current` when
@@ -226,9 +234,12 @@ impl Default for ModelCliState {
             quant_method: QuantMethod::Percentile,
             quant_f32_policy: QuantF32Policy::Auto,
             quant_f32_macs: QuantF32MacBudget::Pct5,
+            val_split: Split::Val,
+            val_save_thresholds: true,
             predict_sahi: false,
             predict_tta: false,
             predict_track: false,
+            predict_use_thresholds: false,
             predict_precision: PredictPrecision::F32,
             predict_int8_target: None,
             predict_conf: 0.25,
@@ -472,6 +483,28 @@ fn resolve_quant_output_arg(
     (Some(format!("<model-{suffix}.folo>")), None)
 }
 
+/// Derives a consistent thresholds JSON path (`<stem>-thresholds.json` or `<id>-thresholds.json`
+/// or `thresholds.json`) shared by `folo val --save-thresholds` and `folo predict --thresholds`.
+/// Returns `(arg_token, unquotable_raw_path)`.
+pub(super) fn derive_thresholds_path(m: &Model) -> (String, Option<String>) {
+    if let Some(path) = m.path.as_deref().filter(|p| !p.trim().is_empty()) {
+        let stem = strip_ascii_suffix_ignore_case(path, b".folo").unwrap_or(path);
+        let candidate =
+            if stem.is_empty() { "thresholds.json".to_string() } else { format!("{stem}-thresholds.json") };
+        return match folo_api::json::quote_path(&candidate) {
+            Some(quoted) => (quoted, None),
+            None => ("<thresholds.json>".to_string(), Some(candidate)),
+        };
+    }
+    if m.source == Some(ModelSource::Published) {
+        let candidate = format!("{}-thresholds.json", m.id);
+        if let Some(quoted) = folo_api::json::quote_path(&candidate) {
+            return (quoted, None);
+        }
+    }
+    ("thresholds.json".to_string(), None)
+}
+
 /// Formats a threshold rounded to 2 decimal places (`0.25`, `0.70`).
 pub(super) fn fmt_thresh(v: f32) -> String {
     format!("{:.2}", v.clamp(0.0, 1.0))
@@ -491,8 +524,8 @@ pub fn build_model_cli_with_arch(
     run_dataset_path: Option<&str>,
     state: &ModelCliState,
 ) -> BuiltCliCommand {
-    let int8_predict =
-        state.mode == ModelCliMode::Predict && state.predict_precision == PredictPrecision::Int8;
+    let int8_predict = matches!(state.mode, ModelCliMode::Validate | ModelCliMode::Predict)
+        && state.predict_precision == PredictPrecision::Int8;
     let effective_target = effective_predict_int8_target(m, state);
     let use_quantized_output = effective_target == PredictInt8Target::QuantizedOutput;
     let (model_arg, unquoted_model) = resolve_model_arg(
@@ -662,12 +695,68 @@ pub fn build_model_cli_with_arch(
                 server_export,
             }
         }
+        ModelCliMode::Validate => {
+            let data_arg = match run_dataset_path.filter(|p| !p.trim().is_empty()) {
+                Some(p) => match folo_api::json::quote_path(p) {
+                    Some(q) => q,
+                    None => {
+                        unquoted_notes
+                            .push(format!("Replace <dataset> with this path, quoted for your shell: {p}"));
+                        "<dataset>".to_string()
+                    }
+                },
+                None => "<dataset>".to_string(),
+            };
+            let mut parts: Vec<String> =
+                vec!["folo val".into(), "--model".into(), model_arg, "--data".into(), data_arg];
+            if state.val_split != Split::Val {
+                parts.push(format!("--split {}", state.val_split.as_str()));
+            }
+            match state.predict_precision {
+                PredictPrecision::F32 => {}
+                PredictPrecision::F16 => parts.push("--precision f16".into()),
+                PredictPrecision::Int8 => parts.push("--precision int8".into()),
+            }
+            if state.val_save_thresholds {
+                let (thresh_arg, unquoted_thresh) = derive_thresholds_path(m);
+                if let Some(raw) = unquoted_thresh {
+                    unquoted_notes.push(format!(
+                        "Replace <thresholds.json> with this path, quoted for your shell: {raw}"
+                    ));
+                }
+                parts.push("--save-thresholds".into());
+                parts.push(thresh_arg);
+            }
+            let hint = Some(if state.val_save_thresholds {
+                "Sweeps per-class optimal F1 confidence thresholds and saves JSON compatible with `folo predict --thresholds` and Playground Import."
+                    .into()
+            } else {
+                "Evaluates mAP50-95, mAP50, precision, and recall on the chosen dataset split.".into()
+            });
+            BuiltCliCommand {
+                command: parts.join(" "),
+                quote_note: (!unquoted_notes.is_empty()).then(|| unquoted_notes.join(" ")),
+                hint,
+                server_export: None,
+            }
+        }
         ModelCliMode::Predict => {
             let mut parts: Vec<String> = vec!["folo predict".into(), "--model".into(), model_arg];
             parts.push("<images>".into());
-            let conf = state.predict_conf.clamp(MODEL_CLI_CONF.0, MODEL_CLI_CONF.1);
-            if (conf - 0.25).abs() > 0.004 {
-                parts.push(format!("--conf {}", fmt_thresh(conf)));
+            if state.predict_use_thresholds {
+                let (thresh_arg, unquoted_thresh) = derive_thresholds_path(m);
+                if let Some(raw) = unquoted_thresh {
+                    unquoted_notes.push(format!(
+                        "Replace <thresholds.json> with this path, quoted for your shell: {raw}"
+                    ));
+                }
+                parts.push("--thresholds".into());
+                parts.push(thresh_arg);
+            } else {
+                let conf = state.predict_conf.clamp(MODEL_CLI_CONF.0, MODEL_CLI_CONF.1);
+                if (conf - 0.25).abs() > 0.004 {
+                    parts.push(format!("--conf {}", fmt_thresh(conf)));
+                }
             }
             let iou = state.predict_iou.clamp(MODEL_CLI_IOU.0, MODEL_CLI_IOU.1);
             if predict_uses_iou(m, state) && (iou - 0.70).abs() > 0.004 {
@@ -686,7 +775,12 @@ pub fn build_model_cli_with_arch(
             if state.predict_track {
                 parts.push("--track".into());
             }
-            let hint = if state.predict_precision == PredictPrecision::Int8 {
+            let hint = if state.predict_use_thresholds {
+                Some(
+                    "Applies calibrated per-class thresholds from `folo val --save-thresholds` or Playground Export (--thresholds replaces --conf)."
+                        .into(),
+                )
+            } else if state.predict_precision == PredictPrecision::Int8 {
                 Some(if effective_target == PredictInt8Target::Current {
                     "Runs CPU int8 inference with this checkpoint as-is (requires an int8-calibrated .folo file).".into()
                 } else {

@@ -272,7 +272,9 @@ impl FoloApp {
         self.navigate(Route::Playground, window, cx);
         if let Some((id, _)) = req.model {
             if self.play_model.as_deref() != Some(id.as_str()) {
+                let prev_classes = self.play_shown_model().map(|m| m.classes.clone());
                 self.play_class = None;
+                self.remap_play_thresholds_for_model(prev_classes, Some(id.as_str()));
             }
             self.play_model_run = self.store.model(&id).and_then(|m| m.run_id.clone());
             self.play_model = Some(id);
@@ -615,7 +617,7 @@ impl FoloApp {
         let e2e = self.play_shown_model().is_some_and(|m| self.model_e2e(m));
         let cached = self.play_model.as_deref().and_then(|m| {
             self.play_batch
-                .fresh_result(idx, m, self.play_iou, self.play_target, self.play_conf, e2e)
+                .fresh_result(idx, m, self.play_iou, self.play_target, self.play_min_conf(), e2e)
                 .filter(|res| res.content_hash == img_hash)
                 .cloned()
         });
@@ -696,9 +698,10 @@ impl FoloApp {
     }
 
     fn next_pending_batch_index(&self, from: usize, model_id: &str, e2e: bool) -> Option<usize> {
+        let min_conf = self.play_min_conf();
         (from..self.play_batch.items.len()).find(|&i| {
             self.play_batch
-                .fresh_result(i, model_id, self.play_iou, self.play_target, self.play_conf, e2e)
+                .fresh_result(i, model_id, self.play_iou, self.play_target, min_conf, e2e)
                 .is_none()
         })
     }
@@ -718,7 +721,7 @@ impl FoloApp {
         item.status = BatchItemStatus::Running;
         let source = item.source.clone();
         let name = item.name.to_string();
-        let floor = self.play_conf.min(PLAY_CONF_FLOOR);
+        let floor = self.play_min_conf().min(PLAY_CONF_FLOOR);
         let iou = self.play_iou;
         let iou_bits = iou.to_bits();
         let target = self.play_target;
@@ -856,6 +859,7 @@ impl FoloApp {
                 self.play_iou,
                 self.play_target,
                 self.play_conf,
+                &self.play_thresholds.per_class,
                 self.play_class,
                 e2e,
             );

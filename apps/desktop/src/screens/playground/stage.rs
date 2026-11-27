@@ -312,7 +312,13 @@ impl FoloApp {
             _ => (Vec::new(), None, false),
         };
         let count_label = count.map(|n| {
-            format!("{n} {} ≥ {}", if n == 1 { "detection" } else { "detections" }, fmt_conf(self.play_conf))
+            let noun = if n == 1 { "detection" } else { "detections" };
+            let ov = self.play_thresholds.override_count();
+            if ov > 0 {
+                format!("{n} {noun} · {} {}", ov, if ov == 1 { "override" } else { "overrides" })
+            } else {
+                format!("{n} {noun} ≥ {}", fmt_conf(self.play_conf))
+            }
         });
         let mut measure = |s: &str| f32::from(crate::charts::text_width(window, s, ty::SM.size));
         // Always-present chrome: px(12) padding (24), 4 gaps between [icon, file, spacer, rule,

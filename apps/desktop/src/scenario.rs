@@ -121,6 +121,7 @@ pub const ALL: &[&str] = &[
     "run-cloud+training+light",
     "run-cloud+released",
     "run-cloud+silent",
+    "run-cloud+preempted",
     "run-cloud+trouble",
     "toast",
     "kb-focus",
@@ -130,7 +131,7 @@ pub const ALL: &[&str] = &[
 const GLOBAL_MODIFIERS: &[&str] = &["light", "dark", "loading", "error", "empty", "cloud", "lost"];
 
 /// Modifiers that alter the active cloud-runs fixture (`+cloud`, `run-cloud`, `cloud-*`).
-const CLOUD_MODIFIERS: &[&str] = &["trouble", "silent"];
+const CLOUD_MODIFIERS: &[&str] = &["trouble", "silent", "preempted"];
 
 /// Modifiers supported for a specific scenario screen.
 fn screen_modifiers(screen: &str) -> &'static [&'static str] {
@@ -717,6 +718,9 @@ fn preload_cloud(app: &mut FoloApp) {
     app.cloud.providers = api.cloud_providers().into();
     app.cloud.connections = api.cloud_connections().into();
     app.cloud.instances = api.cloud_instances().into();
+    if let Route::Run(id) = &app.route {
+        app.store.install_logs(id, api.logs(id));
+    }
 }
 
 #[cfg(test)]

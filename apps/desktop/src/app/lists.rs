@@ -654,6 +654,7 @@ impl FoloApp {
             });
         }
         self.store.evals.remove(id);
+        self.store.calibrations.remove(id);
         self.store.run_data.remove(id);
         self.store.samples.remove(id);
         self.store.samples_stale.remove(id);

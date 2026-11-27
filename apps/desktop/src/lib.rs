@@ -358,6 +358,9 @@ pub fn run() {
             if spec.as_ref().is_some_and(|s| s.has("silent")) {
                 mock = mock.cloud_silent();
             }
+            if spec.as_ref().is_some_and(|s| s.has("preempted")) {
+                mock = mock.cloud_preempted();
+            }
             Arc::new(mock)
         } else {
             Arc::new(api::http::HttpBackend::new(&connect_url))

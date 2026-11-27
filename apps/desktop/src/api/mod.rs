@@ -98,6 +98,10 @@ pub struct PredictRequest {
 /// `source.kind == "generated"` (`docs/API.md`).
 pub const FEATURE_BENCH_GENERATED_SOURCE: &str = "bench_generated_source";
 
+/// Feature flag advertised on `/api/system` when `POST /api/val` returns calibrated per-class
+/// confidence thresholds (`thresholds: ThresholdCalibration`, `docs/API.md`).
+pub const FEATURE_THRESHOLD_CALIBRATION: &str = "threshold_calibration";
+
 /// Synthetic `dataset_id` persisted in `BenchSource::Dataset` for benchmarks created from
 /// deterministic generated scenes (`docs/API.md`).
 pub const GENERATED_BENCH_SOURCE_ID: &str = "generated";
@@ -157,6 +161,16 @@ pub trait Backend: Send + Sync + 'static {
 
     fn models(&self) -> ApiResult<Vec<Model>>;
     fn model_eval(&self, id: &str) -> ApiResult<ModelEval>;
+    /// Runs `POST /api/val` to compute calibrated per-class F1 confidence thresholds (servers
+    /// advertising [`FEATURE_THRESHOLD_CALIBRATION`]).
+    fn val_thresholds(
+        &self,
+        _model_id: &str,
+        _dataset_id: &str,
+        _split: Split,
+    ) -> ApiResult<Option<folo_vision::ThresholdCalibration>> {
+        Err(ApiError::new("not_supported", "This server doesn't calibrate thresholds"))
+    }
     /// Probe the canonical architecture string (e.g. `"folo2-s"`) for a model from `GET /api/models/{id}`'s
     /// `x-folo-arch` header (or backend metadata). Returns `Ok(None)` when unknown or v1-only.
     fn model_arch(&self, _id: &str) -> ApiResult<Option<String>> {

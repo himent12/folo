@@ -8,9 +8,9 @@ use folo_ui::Context;
 use crate::api::*;
 use crate::screens::playground::{
     ComparePaneCaption, CompareSideExport, ExportPalette, PlayPredMeta, compare_detections_json,
-    compare_pane_caption_parts, export_filename, filter_detections, pick_default_model_b,
-    render_annotated_compare_png, render_annotated_single_png, render_image_to_rgba, summarize_comparison,
-    write_export_bytes,
+    compare_pane_caption_parts, effective_conf, export_filename, filter_detections_with_per_class,
+    pick_default_model_b, render_annotated_compare_png, render_annotated_single_png, render_image_to_rgba,
+    summarize_comparison, write_export_bytes,
 };
 use crate::store::Load;
 use crate::theme::theme;
@@ -33,7 +33,7 @@ impl FoloApp {
                 model_id,
                 self.play_iou,
                 self.play_target,
-                self.play_conf,
+                self.play_min_conf(),
                 e2e,
             ),
             // Legacy/test direct `Load::Ready` injection without meta: still check `play_pred_for` if set.
@@ -57,7 +57,7 @@ impl FoloApp {
                 model_id,
                 self.play_iou,
                 self.play_target,
-                self.play_conf,
+                self.play_min_conf_b(),
                 e2e,
             )
         })
@@ -158,6 +158,8 @@ impl FoloApp {
         let a_pending = std::mem::replace(&mut self.play_pred_pending, false);
         let b_pending = std::mem::replace(&mut self.play_compare.pred_b_pending, false);
 
+        let prev_a_classes = self.play_shown_model().map(|m| m.classes.clone());
+        let next_a_id = self.play_compare.model_b.clone();
         std::mem::swap(&mut self.play_model, &mut self.play_compare.model_b);
         std::mem::swap(&mut self.play_model_run, &mut self.play_compare.model_b_run);
         std::mem::swap(&mut self.play_pred, &mut self.play_compare.pred_b);
@@ -165,6 +167,7 @@ impl FoloApp {
         std::mem::swap(&mut self.play_compare.pred_a_meta, &mut self.play_compare.pred_b_meta);
         std::mem::swap(&mut self.play_pred_dim, &mut self.play_compare.pred_b_dim);
         std::mem::swap(&mut self.play_fetched_floor, &mut self.play_compare.fetched_floor_b);
+        self.remap_play_thresholds_for_model(prev_a_classes, next_a_id.as_deref());
         self.play_compare.class_filter = match self.play_compare.class_filter {
             crate::screens::playground::CompareClassFilter::OnlyA => {
                 crate::screens::playground::CompareClassFilter::OnlyB
@@ -279,7 +282,7 @@ impl FoloApp {
         let (Some(model), Some(img)) = (self.play_compare.model_b.clone(), self.play_image.as_ref()) else {
             return;
         };
-        let floor = self.play_conf.min(PLAY_CONF_FLOOR);
+        let floor = self.play_min_conf_b().min(PLAY_CONF_FLOOR);
         let req = PredictRequest {
             model_id: model.clone(),
             input: img.predict_input(self.play_target.is_some()),
@@ -379,12 +382,18 @@ impl FoloApp {
                 return None;
             }
             let pred_a = self.play_pred.ready()?;
-            let vis = filter_detections(&pred_a.boxes, self.play_conf, eff_class);
+            let vis = filter_detections_with_per_class(
+                &pred_a.boxes,
+                self.play_conf,
+                &self.play_thresholds.per_class,
+                eff_class,
+            );
             let iou = (!e2e_a).then_some(self.play_iou);
             let json = crate::screens::playground::detections_json(
                 model_a_name,
                 image_name,
                 self.play_conf,
+                Some(&self.play_thresholds.per_class),
                 iou,
                 eff_class,
                 &vis,
@@ -403,13 +412,23 @@ impl FoloApp {
         let model_b_name =
             shown_b.map(|m| m.name.as_str()).or(self.play_compare.model_b.as_deref()).unwrap_or("model-b");
         let e2e_b = shown_b.is_some_and(|m| self.model_e2e(m));
-        let vis_a = pred_a.map(|p| filter_detections(&p.boxes, self.play_conf, eff_class));
+        let vis_a = pred_a.map(|p| {
+            filter_detections_with_per_class(
+                &p.boxes,
+                self.play_conf,
+                &self.play_thresholds.per_class,
+                eff_class,
+            )
+        });
         let vis_b = pred_b.map(|p| self.filter_detections_b(&p.boxes));
+        let per_class_b = self.play_per_class_b();
         let cmp = summarize_comparison(vis_a.as_deref(), vis_b.as_deref(), pred_a, pred_b);
         let side_a = pred_a.zip(vis_a.as_ref()).map(|(p, v)| CompareSideExport {
             model: model_a_name,
             model_id: self.play_model.as_deref().unwrap_or(""),
             iou: (!e2e_a).then_some(self.play_iou),
+            per_class_conf: (!self.play_thresholds.per_class.is_empty())
+                .then_some(&self.play_thresholds.per_class),
             pred: p,
             boxes: v,
         });
@@ -417,6 +436,7 @@ impl FoloApp {
             model: model_b_name,
             model_id: self.play_compare.model_b.as_deref().unwrap_or(""),
             iou: (!e2e_b).then_some(self.play_iou),
+            per_class_conf: (!per_class_b.is_empty()).then_some(&per_class_b),
             pred: p,
             boxes: v,
         });
@@ -425,6 +445,7 @@ impl FoloApp {
             image_name,
             (img.width, img.height),
             self.play_conf,
+            Some(&self.play_thresholds.per_class),
             top_iou,
             eff_class,
             &cmp,
@@ -451,17 +472,21 @@ impl FoloApp {
         Some(json.map(|s| (s, fname, summary)))
     }
 
-    /// Filters Model B detections by confidence and active effective class filter (matching by
-    /// class name when Model A and Model B have different class index mappings).
+    /// Filters Model B detections by effective per-class confidence (mapped by class name from
+    /// Model A) and active effective class filter.
     pub(crate) fn filter_detections_b<'a>(&self, boxes: &'a [ScoredBox]) -> Vec<&'a ScoredBox> {
+        let per_b = self.play_per_class_b();
         let Some(cid) = self.play_effective_class() else {
-            return boxes.iter().filter(|b| b.score >= self.play_conf).collect();
+            return boxes
+                .iter()
+                .filter(|b| b.score >= effective_conf(self.play_conf, &per_b, b.class))
+                .collect();
         };
         let target_name = self.play_class_name(cid);
         boxes
             .iter()
             .filter(|b| {
-                b.score >= self.play_conf
+                b.score >= effective_conf(self.play_conf, &per_b, b.class)
                     && match target_name.as_deref() {
                         Some(name) => b.name == name,
                         None => b.class == cid,
@@ -556,7 +581,15 @@ impl FoloApp {
         let (suggested, job): (String, PngExportJob) = if !compare {
             let boxes_a: Vec<ScoredBox> = fresh_a
                 .map(|p| {
-                    filter_detections(&p.boxes, self.play_conf, eff_class).into_iter().cloned().collect()
+                    filter_detections_with_per_class(
+                        &p.boxes,
+                        self.play_conf,
+                        &self.play_thresholds.per_class,
+                        eff_class,
+                    )
+                    .into_iter()
+                    .cloned()
+                    .collect()
                 })
                 .unwrap_or_default();
             let fname = export_filename(&image_name, &model_a_name, None, "png");
@@ -580,7 +613,15 @@ impl FoloApp {
                 .unwrap_or_else(|| "model-b".to_string());
             let boxes_a: Vec<ScoredBox> = fresh_a
                 .map(|p| {
-                    filter_detections(&p.boxes, self.play_conf, eff_class).into_iter().cloned().collect()
+                    filter_detections_with_per_class(
+                        &p.boxes,
+                        self.play_conf,
+                        &self.play_thresholds.per_class,
+                        eff_class,
+                    )
+                    .into_iter()
+                    .cloned()
+                    .collect()
                 })
                 .unwrap_or_default();
             let boxes_b: Vec<ScoredBox> = fresh_b

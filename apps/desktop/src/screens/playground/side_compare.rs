@@ -300,7 +300,15 @@ impl FoloApp {
         let pred_b = self.play_compare.pred_b.ready().cloned();
         let eff_class = self.play_effective_class();
         let vis_a: Option<Vec<crate::api::ScoredBox>> = pred_a.as_ref().map(|p| {
-            super::page::filter_detections(&p.boxes, self.play_conf, eff_class).into_iter().cloned().collect()
+            super::thresholds::filter_detections_with_per_class(
+                &p.boxes,
+                self.play_conf,
+                &self.play_thresholds.per_class,
+                eff_class,
+            )
+            .into_iter()
+            .cloned()
+            .collect()
         });
         let vis_b: Option<Vec<crate::api::ScoredBox>> =
             pred_b.as_ref().map(|p| self.filter_detections_b(&p.boxes).into_iter().cloned().collect());

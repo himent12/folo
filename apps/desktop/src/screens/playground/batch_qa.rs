@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
 
 use super::batch::{BatchItemStatus, PlayBatchState};
-use super::page::filter_detections;
+use super::thresholds::{effective_conf, filter_detections_with_per_class, min_active_conf};
 use crate::app::{FoloApp, act};
 use crate::theme::Theme;
 
@@ -58,6 +58,7 @@ impl PlayBatchState {
         iou: f32,
         target: Option<crate::local::Target>,
         conf: f32,
+        per_class: &BTreeMap<u32, f32>,
         play_class: Option<u32>,
         e2e: bool,
     ) -> bool {
@@ -65,60 +66,82 @@ impl PlayBatchState {
             return idx < self.items.len();
         }
         let Some(mid) = model_id else { return false };
-        let Some(res) = self.fresh_result(idx, mid, iou, target, conf, e2e) else {
+        let min_conf = min_active_conf(conf, per_class);
+        let Some(res) = self.fresh_result(idx, mid, iou, target, min_conf, e2e) else {
             return false;
         };
         match filter {
             BatchQaFilter::All => true,
-            BatchQaFilter::WithDetections => !filter_detections(&res.pred.boxes, conf, play_class).is_empty(),
-            BatchQaFilter::Empty => filter_detections(&res.pred.boxes, conf, play_class).is_empty(),
-            BatchQaFilter::ByClass(cid) => !filter_detections(&res.pred.boxes, conf, Some(cid)).is_empty(),
+            BatchQaFilter::WithDetections => {
+                !filter_detections_with_per_class(&res.pred.boxes, conf, per_class, play_class).is_empty()
+            }
+            BatchQaFilter::Empty => {
+                filter_detections_with_per_class(&res.pred.boxes, conf, per_class, play_class).is_empty()
+            }
+            BatchQaFilter::ByClass(cid) => {
+                !filter_detections_with_per_class(&res.pred.boxes, conf, per_class, Some(cid)).is_empty()
+            }
         }
     }
 
     /// Indices into `self.items` matching `self.qa_filter` under the current Playground settings.
+    #[allow(clippy::too_many_arguments)]
     pub fn filtered_indices(
         &self,
         model_id: Option<&str>,
         iou: f32,
         target: Option<crate::local::Target>,
         conf: f32,
+        per_class: &BTreeMap<u32, f32>,
         play_class: Option<u32>,
         e2e: bool,
     ) -> Vec<usize> {
         (0..self.items.len())
             .filter(|&i| {
-                self.item_matches_qa(i, self.qa_filter, model_id, iou, target, conf, play_class, e2e)
+                self.item_matches_qa(
+                    i,
+                    self.qa_filter,
+                    model_id,
+                    iou,
+                    target,
+                    conf,
+                    per_class,
+                    play_class,
+                    e2e,
+                )
             })
             .collect()
     }
 
     /// Computes live match counts for `All`, `With detections`, `Empty`, and each detected class
     /// across fresh completed batch items.
+    #[allow(clippy::too_many_arguments)]
     pub fn qa_counts(
         &self,
         model_id: Option<&str>,
         iou: f32,
         target: Option<crate::local::Target>,
         conf: f32,
+        per_class: &BTreeMap<u32, f32>,
         play_class: Option<u32>,
         e2e: bool,
         model_classes: &[String],
     ) -> BatchQaCounts {
+        let min_conf = min_active_conf(conf, per_class);
         let mut counts = BatchQaCounts { all: self.items.len(), ..Default::default() };
         let mut class_imgs: BTreeMap<u32, (String, usize)> = BTreeMap::new();
         for item in &self.items {
             let BatchItemStatus::Done(res) = &item.status else { continue };
-            if !model_id.is_some_and(|m| res.matches_current(m, iou, target, conf, e2e)) {
+            if !model_id.is_some_and(|m| res.matches_current(m, iou, target, min_conf, e2e)) {
                 continue;
             }
-            if filter_detections(&res.pred.boxes, conf, play_class).is_empty() {
+            if filter_detections_with_per_class(&res.pred.boxes, conf, per_class, play_class).is_empty() {
                 counts.empty += 1;
             } else {
                 counts.with_detections += 1;
             }
             let mut seen_in_image: BTreeSet<u32> = BTreeSet::new();
-            for b in res.pred.boxes.iter().filter(|b| b.score >= conf) {
+            for b in res.pred.boxes.iter().filter(|b| b.score >= effective_conf(conf, per_class, b.class)) {
                 if seen_in_image.insert(b.class) {
                     let fallback = || {
                         model_classes
@@ -186,6 +209,7 @@ impl FoloApp {
             self.play_iou,
             self.play_target,
             self.play_conf,
+            &self.play_thresholds.per_class,
             self.play_class,
             e2e,
         )
@@ -471,14 +495,15 @@ mod tests {
         };
 
         let classes = vec!["circle".into(), "square".into()];
-        let counts = st.qa_counts(Some("m_1"), 0.7, None, 0.25, None, false, &classes);
+        let empty_pc = BTreeMap::new();
+        let counts = st.qa_counts(Some("m_1"), 0.7, None, 0.25, &empty_pc, None, false, &classes);
         assert_eq!(counts.all, 4);
         assert_eq!(counts.with_detections, 2);
         assert_eq!(counts.empty, 1);
         assert_eq!(counts.by_class, vec![(0, "circle".into(), 2), (1, "square".into(), 1)]);
 
         st.qa_filter = BatchQaFilter::WithDetections;
-        let dets = st.filtered_indices(Some("m_1"), 0.7, None, 0.25, None, false);
+        let dets = st.filtered_indices(Some("m_1"), 0.7, None, 0.25, &empty_pc, None, false);
         assert_eq!(dets, vec![0, 2]);
         assert_eq!(st.next_filtered_index(&dets, 1), Some(2));
         assert_eq!(st.next_filtered_index(&dets, -1), Some(2));
@@ -489,9 +514,9 @@ mod tests {
         assert_eq!(st.next_filtered_index(&dets, -1), Some(0));
 
         st.qa_filter = BatchQaFilter::Empty;
-        assert_eq!(st.filtered_indices(Some("m_1"), 0.7, None, 0.25, None, false), vec![1]);
+        assert_eq!(st.filtered_indices(Some("m_1"), 0.7, None, 0.25, &empty_pc, None, false), vec![1]);
 
         st.qa_filter = BatchQaFilter::ByClass(1);
-        assert_eq!(st.filtered_indices(Some("m_1"), 0.7, None, 0.25, None, false), vec![2]);
+        assert_eq!(st.filtered_indices(Some("m_1"), 0.7, None, 0.25, &empty_pc, None, false), vec![2]);
     }
 }

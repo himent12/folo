@@ -45,6 +45,7 @@ mod playground_batch_tests;
 mod playground_compare;
 #[cfg(test)]
 mod playground_tests;
+mod playground_thresholds;
 #[cfg(test)]
 mod playtest_ux_tests;
 mod preferences;
@@ -71,6 +72,8 @@ mod sprint14_tests;
 mod sprint16_tests;
 #[cfg(test)]
 mod sprint17_tests;
+#[cfg(test)]
+mod sprint18_tests;
 mod start_from;
 #[cfg(test)]
 pub(crate) mod tests;
@@ -435,6 +438,13 @@ pub struct FoloApp {
     pub play_compare: crate::screens::playground::PlayCompareState,
     /// Playground multi-image / folder batch queue, filmstrip navigation, and Run All state.
     pub play_batch: crate::screens::playground::PlayBatchState,
+    /// Playground per-class confidence threshold overrides and JSON import/export UI state.
+    pub play_thresholds: crate::screens::playground::PlayThresholdsState,
+    /// Inline JSON input for importing per-class thresholds in Playground.
+    pub play_thresh_json: Entity<TextInput>,
+    /// Optional class search filter inside Playground's per-class thresholds list (> 8 classes).
+    pub play_thresh_filter: Entity<TextInput>,
+    pub play_thresh_scroll: ScrollHandle,
 
     // Settings
     pub server_mode: ServerMode,
@@ -643,6 +653,17 @@ impl FoloApp {
             this.log_scroll.scroll_to_bottom();
             cx.notify();
         });
+        let play_thresh_json = cx.new(|cx| {
+            TextInput::new(r#"{"global":{"best_conf":0.35},"per_class":[{"class":0,"best_conf":0.5}]}"#, cx)
+        });
+        let play_thresh_json_sub =
+            cx.subscribe(&play_thresh_json, |this, _, _: &crate::input::InputEvent, cx| {
+                this.play_thresholds.import_error = None;
+                cx.notify();
+            });
+        let play_thresh_filter = cx.new(|cx| TextInput::new("Filter classes…", cx));
+        let play_thresh_filter_sub =
+            cx.subscribe(&play_thresh_filter, |_, _, _: &crate::input::InputEvent, cx| cx.notify());
         let mut this = Self {
             store: Store::new(api),
             route: Route::Overview,
@@ -785,6 +806,10 @@ impl FoloApp {
             play_pred_for: None,
             play_compare: Default::default(),
             play_batch: Default::default(),
+            play_thresholds: Default::default(),
+            play_thresh_json,
+            play_thresh_filter,
+            play_thresh_scroll: ScrollHandle::new(),
             server_mode: ServerMode::Mock,
             server_url,
             saved_server_url: None,
@@ -875,6 +900,8 @@ impl FoloApp {
                 bench_search_sub,
                 label_search_sub,
                 log_search_sub,
+                play_thresh_json_sub,
+                play_thresh_filter_sub,
             ],
         };
         if !frozen {

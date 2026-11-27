@@ -13,6 +13,7 @@ mod logs;
 mod per_class;
 pub(crate) mod sample_errors;
 mod samples;
+pub(crate) mod spot;
 
 pub(crate) use charts::RunChartOpts;
 #[cfg(test)]
@@ -26,6 +27,8 @@ pub(crate) use list::filter_runs;
 pub(crate) use logs::LogFilterCache;
 pub(crate) use sample_errors::{SampleErrorFilter, SampleSort};
 pub(crate) use samples::SAMPLE_CONF;
+#[cfg(test)]
+pub(crate) use spot::{SpotRecoveryState, spot_recovery_status};
 
 use crate::api::{Run, time};
 
