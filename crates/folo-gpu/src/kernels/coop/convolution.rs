@@ -330,9 +330,9 @@ pub(crate) fn encode_conv_backward_input_subpixel(
 const MAX_WG: usize = 65_535;
 
 /// Tile configuration for a windowed weight gradient (`M = C_out/groups` rows, `N = C_in/groups·KH·KW` columns):
-/// narrow `C16X32` / `C16X64` / `C32X32` / `C32X64` tiles match small stems and shallow channels without padding
-/// waste or unhoisted `C16X256` column divides, otherwise capped at `C64X128`/`C64X64` (falling back to `C128X128`
-/// only when `M` would exceed `MAX_WG` on 64-row tiles).
+/// narrow `C16X32` / `C16X64` / `C32X32` / `C32X64` tiles match small stems and shallow channels without `C16X256`
+/// column padding waste, otherwise capped at `C64X128`/`C64X64` (falling back to `C128X128` only when `M` would
+/// exceed `MAX_WG` on 64-row tiles).
 fn pick_config_weight_grad(m: usize, n: usize) -> CoopConfig {
     if m <= 16 && n <= 32 && m.div_ceil(16) <= MAX_WG && n.div_ceil(32) <= MAX_WG {
         return CoopConfig::C16X32;

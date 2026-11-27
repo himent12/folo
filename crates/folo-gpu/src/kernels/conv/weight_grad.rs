@@ -16,9 +16,10 @@ use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 /// f32 or f16).
 /// - `FLAT = true`: `@workgroup_size(64)`, one thread per `vec4` column, 4× unrolled loop over `splits`, zero
 ///   shared memory and zero barriers (used when `(wn / 4 >= 4096 && splits <= 256) || (wn / 4 >= 2048 && splits <= 64)`).
-/// - `FLAT = false`: `@workgroup_size(8, 32)`, 8 contiguous `vec4` columns (128 B coalesced sector) × 32 lanes
-///   streaming along `splits`, using a 1-barrier 32-wide subgroup reduction when available (1 KiB shared memory)
-///   and a portable 5-barrier shared-memory tree otherwise.
+/// - `FLAT = false`: 8 contiguous `vec4` columns (128 B coalesced sector) × 32 lanes streaming along `splits`:
+///   - `subgroups`: `@workgroup_size(256)` deriving `(lx, ly)` directly from `@builtin(subgroup_id)` and
+///     `@builtin(subgroup_invocation_id)` (1-barrier 32-wide `subgroupShuffleDown` reduction, 1 KiB shared memory).
+///   - portable: `@workgroup_size(8, 32)` with a 5-barrier 4 KiB shared-memory tree.
 ///
 /// Params: 0 = `wn / 4`, 1 = `splits`.
 fn gen_wgrad_reduce(spec: &Spec) -> String {
@@ -51,23 +52,26 @@ fn gen_wgrad_reduce(spec: &Spec) -> String {
         return "@group(0) @binding(1) var<storage, read> PART: array<vec4<f32>>;\n\
                 @group(0) @binding(2) var<storage, read_write> GW: array<vec4<T>>;\n\
                 var<workgroup> smem: array<vec4<f32>, 64>;\n\
-                @compute @workgroup_size(8, 32)\n\
+                @compute @workgroup_size(256)\n\
                 fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
-                \x20       @builtin(local_invocation_id) lid: vec3<u32>) {\n\
+                \x20       @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {\n\
                 \x20 let wn4 = pu(0u); let splits = pu(1u);\n\
-                \x20 let col = (wid.y * nwg.x + wid.x) * 8u + lid.x;\n\
+                \x20 let sg = min(sgid, 7u); let l = lane & 31u;\n\
+                \x20 let lx = l & 7u; let ly = sg * 4u + (l >> 3u);\n\
+                \x20 let col = (wid.y * nwg.x + wid.x) * 8u + lx;\n\
                 \x20 var acc = vec4<f32>(0.0);\n\
                 \x20 if (col < wn4) {\n\
-                \x20   for (var s = lid.y; s < splits; s += 32u) { acc += PART[s * wn4 + col]; }\n\
+                \x20   for (var s = ly; s < splits; s += 32u) { acc += PART[s * wn4 + col]; }\n\
                 \x20 }\n\
                 \x20 acc += subgroupShuffleDown(acc, 16u);\n\
                 \x20 acc += subgroupShuffleDown(acc, 8u);\n\
-                \x20 if ((lid.y & 3u) == 0u) { smem[(lid.y >> 2u) * 8u + lid.x] = acc; }\n\
+                \x20 if (l < 8u) { smem[sg * 8u + l] = acc; }\n\
                 \x20 workgroupBarrier();\n\
-                \x20 var v = select(vec4<f32>(0.0), smem[lid.y * 8u + lid.x] + smem[(lid.y + 4u) * 8u + lid.x], lid.y < 4u);\n\
+                \x20 var v = vec4<f32>(0.0);\n\
+                \x20 if (sg == 0u) { v = smem[l] + smem[l + 32u]; }\n\
                 \x20 v += subgroupShuffleDown(v, 16u);\n\
                 \x20 v += subgroupShuffleDown(v, 8u);\n\
-                \x20 if (lid.y == 0u && col < wn4) { GW[col] = vec4<T>(v); }\n}\n"
+                \x20 if (sg == 0u && l < 8u && col < wn4) { GW[col] = vec4<T>(v); }\n}\n"
             .into();
     }
     "@group(0) @binding(1) var<storage, read> PART: array<vec4<f32>>;\n\
@@ -789,9 +793,12 @@ mod tests {
         assert!(!flat.contains("var<workgroup>"));
 
         let sg = gen_wgrad_reduce(&Spec::new().bool("FLAT", false).subgroups(true));
-        assert!(sg.contains("@workgroup_size(8, 32)"));
+        assert!(sg.contains("@workgroup_size(256)"));
+        assert!(sg.contains("@builtin(subgroup_id)"));
+        assert!(sg.contains("@builtin(subgroup_invocation_id)"));
         assert_eq!(sg.matches("workgroupBarrier()").count(), 1);
         assert!(sg.contains("subgroupShuffleDown"));
+        assert!(!sg.contains("select("));
 
         let portable = gen_wgrad_reduce(&Spec::new().bool("FLAT", false).subgroups(false));
         assert!(portable.contains("@workgroup_size(8, 32)"));

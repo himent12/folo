@@ -82,7 +82,7 @@ pub(crate) const FEATURES: wgpu::Features = wgpu::Features::EXPERIMENTAL_COOPERA
 ///    ordinary WGSL loads and stores, which wgpu bounds-checks (robust buffer access on Vulkan).
 /// 3. Every `coopLoad`, `coopLoadT`, `coopMultiplyAdd` and `coopStoreT` runs in workgroup-uniform control flow: the trip
 ///    counts and conditions around them depend only on uniform parameters, never on the invocation, as
-///    subgroup-scope operations require. Workgroups are 64 (`C16X32`), 128 (`C16X64`/`C32X32`/`C32X64`), or 256 invocations, a multiple of the subgroup size, and
+///    subgroup-scope operations require. Workgroups are 64 (`C16X32`), 128 (`C16X64`/`C32X32`/`C32X64`/`C32X128`/`C64X64`), or 256 invocations, a multiple of the subgroup size, and
 ///    which fragments a subgroup owns comes from `@builtin(subgroup_id)`, so it is uniform within the subgroup.
 /// 4. A device must pass [`self_test`] (the generated kernels against a CPU reference, plus a probe) before the
 ///    kernels are used, so a driver that mis-compiles them is caught at start-up; on failure the experimental

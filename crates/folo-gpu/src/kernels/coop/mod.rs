@@ -57,7 +57,7 @@ const PAD: u32 = 8;
 const FRAG: u32 = 256;
 
 /// Tile configuration of the tensor-core kernels: a `bm × bn` tile of `C` per workgroup, `wgm · wgn` subgroups
-/// (4 or 8), each owning `(bm / 16 / wgm) × (bn / 16 / wgn)` accumulator fragments, `bk` deep `K` tiles.
+/// (2, 4 or 8), each owning `(bm / 16 / wgm) × (bn / 16 / wgn)` accumulator fragments, `bk` deep `K` tiles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CoopConfig {
     /// Tile rows.
@@ -68,7 +68,7 @@ pub struct CoopConfig {
     pub bk: u32,
     /// Subgroup rows.
     pub wgm: u32,
-    /// Subgroup columns (`wgm · wgn ∈ {4, 8}`).
+    /// Subgroup columns (`wgm · wgn ∈ {2, 4, 8}`).
     pub wgn: u32,
 }
 
