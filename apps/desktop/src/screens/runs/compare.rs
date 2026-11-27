@@ -10,7 +10,7 @@ use folo_ui::{
 };
 
 use super::compare_data::{
-    CompareMapMetric, CompareXAxis, RUN_COMPARE_MAX, build_loss_points, build_map_points,
+    CompareMapMetric, CompareXAxis, LossSeriesCacheKey, RUN_COMPARE_MAX, build_loss_points, build_map_points,
     default_compare_runs, reconcile_compare_runs, same_dataset, shared_x_max,
 };
 use crate::api::{Run, RunStatus};
@@ -455,19 +455,45 @@ impl FoloApp {
                     .unwrap_or_default()
             })
             .collect();
-        let loss_pts: Vec<Vec<(f32, f32)>> = chosen
-            .iter()
-            .map(|r| {
-                self.store
-                    .run_data
-                    .get(&r.id)
-                    .and_then(|l| l.ready())
-                    .map(|d| build_loss_points(r, d, loss_part, x_axis))
-                    .unwrap_or_default()
-            })
-            .collect();
+        let loss_key = LossSeriesCacheKey {
+            runs: chosen
+                .iter()
+                .map(|r| {
+                    let (n, last_step, spe) = self
+                        .store
+                        .run_data
+                        .get(&r.id)
+                        .and_then(|l| l.ready())
+                        .map(|d| (d.metrics.steps.len(), d.metrics.steps.last().map_or(0, |s| s.step), d.spe))
+                        .unwrap_or((0, 0, r.steps_per_epoch));
+                    (r.id.clone(), n, last_step, r.epochs, spe)
+                })
+                .collect(),
+            loss_part,
+            x_axis,
+        };
+        let loss_arcs: Vec<Arc<Vec<(f32, f32)>>> = match &self.run_compare.loss_cache {
+            Some((k, cached)) if *k == loss_key => cached.clone(),
+            _ => {
+                let built: Vec<Arc<Vec<(f32, f32)>>> = chosen
+                    .iter()
+                    .map(|r| {
+                        let pts = self
+                            .store
+                            .run_data
+                            .get(&r.id)
+                            .and_then(|l| l.ready())
+                            .map(|d| build_loss_points(r, d, loss_part, x_axis))
+                            .unwrap_or_default();
+                        Arc::new(pts)
+                    })
+                    .collect();
+                self.run_compare.loss_cache = Some((loss_key, built.clone()));
+                built
+            }
+        };
 
-        let x_max = shared_x_max(chosen, &map_pts, x_axis).max(shared_x_max(chosen, &loss_pts, x_axis));
+        let x_max = shared_x_max(chosen, &map_pts, x_axis).max(shared_x_max(chosen, &loss_arcs, x_axis));
         let hover_on = self.run_compare.hover_on;
         let hover_val = self.run_compare.hover;
         let hover_of = |id: &str| hover_val.filter(|_| hover_on == Some(id));
@@ -540,8 +566,7 @@ impl FoloApp {
         map_chart.readout = false;
         map_chart.x_ticks = Some(6);
 
-        // 2. Training loss overlaid chart (share Arc<Vec> between chart series and legend EMA cache).
-        let loss_arcs: Vec<Arc<Vec<(f32, f32)>>> = loss_pts.into_iter().map(Arc::new).collect();
+        // 2. Training loss overlaid chart (reuses memoized Arc<Vec> so chart EMA cache hits on hover).
         let loss_series: Vec<Series> = chosen
             .iter()
             .enumerate()

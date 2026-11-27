@@ -51,6 +51,7 @@ pub enum PendingImageSwitch {
     Navigate(Route),
     Back,
     Forward,
+    CloseWindow,
 }
 
 /// Deferred route navigation executed on the next render frame (when `&mut Window` is available).
@@ -59,6 +60,7 @@ pub enum PendingRouteNav {
     Navigate(Route),
     Back,
     Forward,
+    CloseWindow,
 }
 
 /// Exact structural equality for bounding-box lists (using bit patterns for floats so NaN or
@@ -326,14 +328,28 @@ impl LabelEditor {
         true
     }
 
-    /// Reverts `draft` back to `base` as an undoable step (matching Studio's Discard).
+    /// Reverts `draft` back to `base`.
+    ///
+    /// For normal local edits, pushes onto the undo stack so Discard itself is undoable (`Ctrl+Z`).
+    /// When `changed_elsewhere` is true ("Load server boxes" after a concurrent remote edit), clears
+    /// pre-conflict undo/redo snapshots so `Ctrl+Z` cannot restore stale boxes under the new server
+    /// revision and bypass the conflict safeguard.
     pub fn discard(&mut self) -> bool {
         self.drawing = None;
         self.pending_switch = None;
+        let was_conflict = self.changed_elsewhere;
         self.changed_elsewhere = false;
         self.expect_rev = label_box_revision(&self.base);
         let base = self.base.clone();
-        self.push_edit(base)
+        if was_conflict {
+            let changed = !same_boxes(&self.draft, &base);
+            self.draft = base;
+            self.undo.clear();
+            self.redo.clear();
+            changed
+        } else {
+            self.push_edit(base)
+        }
     }
 
     /// Marks the current draft as saved after the server confirms `PUT /api/label/jobs/{id}/images/{img}`.

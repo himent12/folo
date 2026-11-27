@@ -1,9 +1,23 @@
 //! Pure state, curve extraction, and hyperparameter diff logic for Multi-Run Compare (`Route::RunCompare`).
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::api::{Head, Label, Optimizer, ResolvedOptimizer, Run, RunStatus};
 use crate::store::RunData;
+
+/// Cache key identifying a set of transformed loss curves on `Route::RunCompare` so hover-only
+/// repaints reuse the exact `Arc<Vec<(f32, f32)>>` instances and hit the chart EMA memo cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LossSeriesCacheKey {
+    /// Per compared run: `(run_id, steps_len, last_step_num, planned_epochs, steps_per_epoch)`.
+    pub runs: Vec<(String, usize, u64, u32, u64)>,
+    pub loss_part: usize,
+    pub x_axis: CompareXAxis,
+}
+
+/// Memoized loss curve points shared across hover repaints on `Route::RunCompare`.
+pub type CachedLossSeries = (LossSeriesCacheKey, Vec<Arc<Vec<(f32, f32)>>>);
 
 /// Maximum number of runs compared side by side.
 pub const RUN_COMPARE_MAX: usize = 4;
@@ -50,6 +64,8 @@ pub struct RunCompareState {
     pub hover: Option<f32>,
     /// Which comparison chart owns the active hover cursor (`"cmp-map"` or `"cmp-loss"`).
     pub hover_on: Option<&'static str>,
+    /// Memoized transformed loss series so pointer hover repaints keep stable `Arc` identities.
+    pub loss_cache: Option<CachedLossSeries>,
 }
 
 impl Default for RunCompareState {
@@ -67,6 +83,7 @@ impl Default for RunCompareState {
             show_identical: false,
             hover: None,
             hover_on: None,
+            loss_cache: None,
         }
     }
 }
@@ -193,13 +210,13 @@ pub fn build_loss_points(run: &Run, data: &RunData, part: usize, x_axis: Compare
 }
 
 /// Computes the shared x-axis ceiling across `runs` and their loaded series.
-pub fn shared_x_max(runs: &[Run], series: &[Vec<(f32, f32)>], x_axis: CompareXAxis) -> f32 {
+pub fn shared_x_max<S: AsRef<Vec<(f32, f32)>>>(runs: &[Run], series: &[S], x_axis: CompareXAxis) -> f32 {
     match x_axis {
         CompareXAxis::Progress => 100.0,
         CompareXAxis::Epochs => {
             let from_series = series
                 .iter()
-                .flat_map(|pts| pts.iter())
+                .flat_map(|pts| pts.as_ref().iter())
                 .map(|p| p.0)
                 .filter(|v| v.is_finite())
                 .fold(0.0f32, f32::max);
@@ -299,11 +316,22 @@ pub fn hyperparam_rows(
         make("Image size", &|r| (r.config.imgsz.to_string(), format!("{} px", r.config.imgsz))),
         make("Batch", &|r| (r.config.batch.to_string(), fmt_batch(r))),
         make("Learning rate", &|r| {
+            // Normalize to 7 significant digits (matching `fmt_lr`) so a queued run's `f32` lr0
+            // and a started run's `f64` resolved lr0 don't falsely diff on float widening.
             let lr0 = r.resolved.as_ref().map_or(r.config.lr0 as f64, |s| s.lr0);
-            (lr0.to_bits().to_string(), fmt_lr_value(r))
+            (format!("{lr0:.6e}"), fmt_lr_value(r))
         }),
         make("Optimizer", &|r| {
-            let key = format!("{:?}:{:?}", r.config.optimizer, r.resolved.as_ref().map(|s| s.optimizer));
+            // Map explicit optimizers to their canonical name whether resolved or queued; keep
+            // unresolved Auto distinct from a resolved Auto choice.
+            let key = match (r.config.optimizer, r.resolved.as_ref().map(|s| s.optimizer)) {
+                (Optimizer::Auto, None) => "Auto:pending".to_string(),
+                (Optimizer::Auto, Some(opt)) => format!("Auto:{opt:?}"),
+                (Optimizer::Sgd, _) => "Sgd".to_string(),
+                (Optimizer::Adamw, _) => "Adamw".to_string(),
+                (Optimizer::Musgd, _) => "Musgd".to_string(),
+                (other, resolved) => format!("{other:?}:{resolved:?}"),
+            };
             (key, fmt_optimizer(r))
         }),
         make("Precision", &|r| {

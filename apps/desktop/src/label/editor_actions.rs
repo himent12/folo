@@ -8,6 +8,29 @@ use crate::api::*;
 use crate::app::FoloApp;
 
 impl FoloApp {
+    /// True when the currently open `Route::LabelJob` has an unsaved box draft that is actually
+    /// active and renderable (the feature is enabled, the job still exists, and the edited image is
+    /// still in the loaded image list so the Save / Discard / Stay banner can be shown).
+    pub(crate) fn label_route_has_renderable_dirty_draft(&self) -> bool {
+        let crate::app::Route::LabelJob(job_id) = &self.route else {
+            return false;
+        };
+        if !self.label_on() || self.label.removed.contains(job_id) || self.label_job_by_id(job_id).is_none() {
+            return false;
+        }
+        if !self.label.editor.is_dirty() || self.label.editor.job_id.as_deref() != Some(job_id.as_str()) {
+            return false;
+        }
+        let Some(img_id) = self.label.editor.image_id.as_deref() else {
+            return false;
+        };
+        self.label
+            .images
+            .get(job_id)
+            .and_then(|l| l.ready())
+            .is_some_and(|list| list.iter().any(|im| im.id == img_id))
+    }
+
     /// Ensures `self.label.editor` is bound to `(job_id, image_id)` and returns the server snapshot.
     pub(crate) fn ensure_label_editor_synced(&mut self, job_id: &str, image_id: &str) -> Option<LabelImage> {
         let im = self
@@ -256,6 +279,10 @@ impl FoloApp {
             }
             PendingImageSwitch::Forward => {
                 self.label.pending_nav = Some(PendingRouteNav::Forward);
+                cx.notify();
+            }
+            PendingImageSwitch::CloseWindow => {
+                self.label.pending_nav = Some(PendingRouteNav::CloseWindow);
                 cx.notify();
             }
         }

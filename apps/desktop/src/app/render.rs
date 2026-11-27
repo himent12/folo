@@ -38,6 +38,11 @@ impl Render for FoloApp {
                 crate::label::PendingRouteNav::Navigate(r) => self.navigate(r, window, cx),
                 crate::label::PendingRouteNav::Back => self.back(window, cx),
                 crate::label::PendingRouteNav::Forward => self.forward(window, cx),
+                crate::label::PendingRouteNav::CloseWindow => {
+                    if self.should_close(window, cx) {
+                        window.remove_window();
+                    }
+                }
             }
         }
         self.sync_frame_appearance(window);

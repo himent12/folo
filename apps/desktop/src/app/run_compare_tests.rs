@@ -177,15 +177,29 @@ fn chart_controls_hyperparam_diff_partial_failure_and_viewports() {
     let _ = same_dataset(&selected);
 
     // Canonical diff check: two runs with different dataset_ids that share the same display name
-    // must still be marked `differs == true`.
+    // must still be marked `differs == true`, while a queued run (`resolved: None`, `f32` lr0)
+    // and a started run (`resolved: Some`, `f64` lr0) with matching settings must NOT falsely diff.
     let mut r_a = selected[0].clone();
     let mut r_b = selected[0].clone();
     r_a.config.dataset_id = "ds_one".into();
     r_b.config.dataset_id = "ds_two".into();
+    r_a.config.lr0 = 0.01_f32;
+    r_a.config.optimizer = crate::api::Optimizer::Sgd;
+    r_a.resolved = None;
+    r_b.config.lr0 = 0.01_f32;
+    r_b.config.optimizer = crate::api::Optimizer::Sgd;
+    if let Some(res) = r_b.resolved.as_mut() {
+        res.lr0 = 0.01_f64;
+        res.optimizer = crate::api::ResolvedOptimizer::Sgd;
+    }
     let canon_rows = hyperparam_rows(&[r_a, r_b], |_| "same-name".into(), |m| m.to_string());
     let ds_row = canon_rows.iter().find(|r| r.label == "Dataset").unwrap();
     assert!(ds_row.differs, "distinct dataset IDs with same display name must still diff");
     assert_eq!(ds_row.off_base, vec![false, true]);
+    let lr_row = canon_rows.iter().find(|r| r.label == "Learning rate").unwrap();
+    assert!(!lr_row.differs, "queued f32 lr0 and started f64 lr0 of 0.01 must not falsely diff");
+    let opt_row = canon_rows.iter().find(|r| r.label == "Optimizer").unwrap();
+    assert!(!opt_row.differs, "queued explicit SGD and started resolved SGD must not falsely diff");
 
     // Render RunCompare across toggles, removing all chips to empty state, external-delete cap
     // reconciliation, partial metric failure + Retry, and 960/1120/1280 viewports.
@@ -195,6 +209,20 @@ fn chart_controls_hyperparam_diff_partial_failure_and_viewports() {
         let (mut app, win) = open_with(Arc::new(MockBackend::new(4200, true)), w, h, mode);
         drive(&mut app, win, |this, w, cx| this.open_run_compare(None, w, cx));
         settle(&mut app, win);
+
+        // Hover updates reuse the exact same memoized loss Arcs (no per-hover rebuild).
+        let ptr_before = drive(&mut app, win, |this, _, cx| {
+            let p = this.run_compare.loss_cache.as_ref().map(|(_, v)| Arc::as_ptr(&v[0]) as usize);
+            this.run_compare.hover = Some(0.45);
+            this.run_compare.hover_on = Some("cmp-loss");
+            cx.notify();
+            p
+        });
+        settle(&mut app, win);
+        let ptr_after = drive(&mut app, win, |this, _, _| {
+            this.run_compare.loss_cache.as_ref().map(|(_, v)| Arc::as_ptr(&v[0]) as usize)
+        });
+        assert!(ptr_before.is_some() && ptr_before == ptr_after, "hover preserves memoized loss Arc");
 
         // Toggle all chart modes, diff filter, and isolate pin.
         drive(&mut app, win, |this, _, cx| {

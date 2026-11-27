@@ -192,6 +192,9 @@ impl FoloApp {
                         }
                         this.label.images.remove(&id);
                         this.label.logs.remove(&id);
+                        if this.label.editor.job_id.as_deref() == Some(id.as_str()) {
+                            this.label.editor.reset();
+                        }
                         this.refresh_label_jobs(cx);
                     }
                     _ => {}

@@ -135,11 +135,8 @@ impl FoloApp {
         if route == self.route {
             return;
         }
-        // Guard unsaved bounding-box edits before leaving an active labeling job.
-        if matches!(&self.route, Route::LabelJob(_))
-            && !self.route_gone(&self.route)
-            && self.label.editor.is_dirty()
-        {
+        // Guard unsaved bounding-box edits before leaving an active, renderable labeling job.
+        if self.label_route_has_renderable_dirty_draft() {
             self.label.editor.pending_switch = Some(crate::label::PendingImageSwitch::Navigate(route));
             cx.notify();
             return;
@@ -176,10 +173,7 @@ impl FoloApp {
     }
 
     pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(&self.route, Route::LabelJob(_))
-            && !self.route_gone(&self.route)
-            && self.label.editor.is_dirty()
-        {
+        if self.label_route_has_renderable_dirty_draft() {
             self.label.editor.pending_switch = Some(crate::label::PendingImageSwitch::Back);
             cx.notify();
             return;
@@ -210,9 +204,7 @@ impl FoloApp {
     /// Re-opens the page most recently left with [`Self::back`] (`Alt+→`), skipping any route that
     /// was deleted since or matches the current page.
     pub fn forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if matches!(&self.route, Route::LabelJob(_))
-            && !self.route_gone(&self.route)
-            && self.label.editor.is_dirty()
+        if self.label_route_has_renderable_dirty_draft()
             && self.forward_history.iter().any(|r| r != &self.route && !self.route_gone(r))
         {
             self.label.editor.pending_switch = Some(crate::label::PendingImageSwitch::Forward);

@@ -382,7 +382,7 @@ impl FoloApp {
         };
 
         let discard_btn = dirty.then(|| {
-            if locked || busy {
+            if busy {
                 self.button_disabled(
                     "label-discard",
                     "Discard",
@@ -783,10 +783,12 @@ impl FoloApp {
                             .flex()
                             .items_center()
                             .gap(px(8.))
+                            .min_w_0()
                             .child(icon("icons/triangle-alert.svg", 14., t.warning_solid))
                             .child(
                                 text(ty::SM, t.warning_text)
                                     .font_weight(FontWeight::MEDIUM)
+                                    .whitespace_normal()
                                     .child(format!("Unsaved box edits on {}.", active.file)),
                             ),
                     )

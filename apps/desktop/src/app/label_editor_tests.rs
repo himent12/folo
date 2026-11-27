@@ -425,4 +425,39 @@ fn route_exit_guard_sse_filter_eviction_dirty_delete_and_many_classes() {
         assert!(keys.iter().any(|k| k == "label-class-picker"), "Select picker rendered for >9 classes");
         assert!(keys.iter().any(|k| k == "label-rm-img"), "Remove image footer remains mounted");
     });
+
+    // 5. Conflict Load server boxes clears pre-conflict undo history, export blocks while dirty,
+    //    should_close guards dirty draft, and externally deleted job never traps navigation.
+    drive(&mut app, window, |this, w, cx| {
+        let img_id = this.label.selected_image.clone().unwrap();
+        let _ = this.ensure_label_editor_synced("lb_4f10", &img_id);
+        this.label.editor.add_box(BBox { class: 0, x1: 6., y1: 6., x2: 40., y2: 40. });
+        // Simulate remote edit -> changed_elsewhere = true, then Load server boxes clears undo.
+        this.label.editor.changed_elsewhere = true;
+        this.discard_label_edits("lb_4f10", &img_id, cx);
+        assert!(!this.label.editor.can_undo(), "conflict discard clears incompatible undo history");
+
+        // Re-dirty to check export guard, should_close guard, and external job deletion escape.
+        this.label.editor.add_box(BBox { class: 0, x1: 6., y1: 6., x2: 40., y2: 40. });
+        assert!(!this.should_close(w, cx), "should_close guards renderable dirty draft");
+        assert_eq!(this.label.editor.pending_switch, Some(PendingImageSwitch::CloseWindow));
+        this.label.editor.pending_switch = None;
+
+        let job = this.label_job_by_id("lb_4f10").unwrap().clone();
+        this.open_export_label_dataset(&job, w, cx);
+        this.submit_export_label_dataset(cx);
+        assert_eq!(
+            this.label.export_ds.as_ref().and_then(|f| f.error.as_ref()).map(|e| e.code.as_str()),
+            Some("unsaved_edits"),
+            "Create dataset blocks while unsaved box edits exist"
+        );
+        this.close_export_label_dataset(w, cx);
+
+        // Externally deleted job (removed from label.jobs without touching removed/editor) must not trap navigate.
+        if let Some(jobs) = this.label.jobs.ready_mut() {
+            jobs.retain(|j| j.id != "lb_4f10");
+        }
+        this.navigate(Route::LabelJobs, w, cx);
+        assert_eq!(this.route, Route::LabelJobs, "missing job never traps user on Not found screen");
+    });
 }

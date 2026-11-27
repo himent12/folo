@@ -238,12 +238,28 @@ impl FoloApp {
             .child(row_frame("Duration", false, dur_cells));
 
         for hp in &diff_rows {
+            let is_sci = hp.label == "Learning rate";
             let cells: Vec<AnyElement> = hp
                 .values
                 .iter()
                 .enumerate()
                 .map(|(i, val)| {
                     let off = hp.off_base[i];
+                    let color = if i == 0 || off { t.text_primary } else { t.text_tertiary };
+                    let value_el: AnyElement = if is_sci {
+                        crate::ui::sci(ty::SM, color, val.clone())
+                            .when(off, |d| d.font_weight(FontWeight::MEDIUM))
+                            .min_w_0()
+                            .into_any_element()
+                    } else {
+                        text(ty::SM, color)
+                            .when(off, |d| d.font_weight(FontWeight::MEDIUM))
+                            .min_w_0()
+                            .tnum()
+                            .ellipsis()
+                            .child(val.clone())
+                            .into_any_element()
+                    };
                     div()
                         .flex()
                         .items_center()
@@ -253,14 +269,7 @@ impl FoloApp {
                         .when(off, |d| {
                             d.child(div().size(px(6.)).flex_none().rounded_full().bg(t.accent_solid))
                         })
-                        .child(
-                            text(ty::SM, if i == 0 || off { t.text_primary } else { t.text_tertiary })
-                                .when(off, |d| d.font_weight(FontWeight::MEDIUM))
-                                .min_w_0()
-                                .tnum()
-                                .ellipsis()
-                                .child(val.clone()),
-                        )
+                        .child(value_el)
                         .into_any_element()
                 })
                 .collect();
@@ -290,16 +299,23 @@ impl FoloApp {
                 .child(div().px(px(16.)).py(px(6.)).border_b_1().border_color(t.line_subtle).child(toggle));
             if show_same {
                 for hp in &same_rows {
+                    let is_sci = hp.label == "Learning rate";
                     let cells: Vec<AnyElement> = hp
                         .values
                         .iter()
                         .map(|val| {
-                            text(ty::SM, t.text_tertiary)
-                                .min_w_0()
-                                .tnum()
-                                .ellipsis()
-                                .child(val.clone())
-                                .into_any_element()
+                            if is_sci {
+                                crate::ui::sci(ty::SM, t.text_tertiary, val.clone())
+                                    .min_w_0()
+                                    .into_any_element()
+                            } else {
+                                text(ty::SM, t.text_tertiary)
+                                    .min_w_0()
+                                    .tnum()
+                                    .ellipsis()
+                                    .child(val.clone())
+                                    .into_any_element()
+                            }
                         })
                         .collect();
                     rows = rows.child(row_frame(hp.label, false, cells));
