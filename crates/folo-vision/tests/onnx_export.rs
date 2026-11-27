@@ -180,6 +180,50 @@ fn v2_export_covers_all_scales_and_variants() {
     assert_eq!(dec.outputs[0].shape, [Dim::Value(1), Dim::Param("anchors".into()), Dim::Value(8)]);
     assert!(!dec.ops.iter().any(|op| op == "Softplus"));
     assert_eq!(dec.metadata["folo.onnx.head"], "o2m");
+
+    // Reusing metadata from a decoded o2o+iou export on a raw o2m model without iou_head must clear stale
+    // conditional exporter-owned keys on both v1 and v2.
+    let stale_meta = e2e.metadata.clone();
+    assert!(stale_meta.contains_key("folo.onnx.max_det"));
+    assert!(stale_meta.contains_key("folo.onnx.iou_head"));
+    assert!(stale_meta.contains_key("folo.onnx.iou_fusion_alpha"));
+    let mut plain_v2 = FoloV2Model::new(FoloV2Config::new("n", 4).unwrap()).unwrap();
+    plain_v2.fuse().unwrap();
+    let reused_v2 =
+        plain_v2.to_onnx(&OnnxOptions { metadata: stale_meta.clone(), ..OnnxOptions::new(64) }).unwrap();
+    assert!(!reused_v2.metadata.contains_key("folo.onnx.max_det"));
+    assert!(!reused_v2.metadata.contains_key("folo.onnx.iou_head"));
+    assert!(!reused_v2.metadata.contains_key("folo.onnx.iou_fusion_alpha"));
+    let mut plain_v1 = FoloModel::new(ModelConfig::new("n", 4).unwrap()).unwrap();
+    plain_v1.fuse().unwrap();
+    let reused_v1 = plain_v1.to_onnx(&OnnxOptions { metadata: stale_meta, ..OnnxOptions::new(64) }).unwrap();
+    assert!(!reused_v1.metadata.contains_key("folo.onnx.max_det"));
+    assert!(!reused_v1.metadata.contains_key("folo.onnx.iou_head"));
+    assert!(!reused_v1.metadata.contains_key("folo.onnx.iou_fusion_alpha"));
+
+    // Custom `in_channels = 1` (grayscale) + non-default `reg_max = 8` + `o2o` `K` capped by `A = 84 < max_det`.
+    let mut custom_cfg = FoloV2Config::new("n", 3).unwrap().with_head(HeadMode::O2o).with_iou_head(true);
+    custom_cfg.in_channels = 1;
+    custom_cfg.reg_max = 8;
+    let mut custom = FoloV2Model::new(custom_cfg).unwrap();
+    custom.fuse().unwrap();
+    let custom_raw = custom.to_onnx(&OnnxOptions::new(64)).unwrap();
+    assert_eq!(custom_raw.inputs[0].shape, [1, 1, 64, 64].map(Dim::Value));
+    assert_eq!(custom_raw.outputs[0].shape, [1, 32, 84].map(Dim::Value));
+    assert_eq!(custom_raw.metadata["folo.onnx.reg_max"], "8");
+    let custom_e2e = custom
+        .to_onnx(&OnnxOptions { decode: true, half: true, max_det: 300, ..OnnxOptions::new(64) })
+        .unwrap();
+    assert_eq!(custom_e2e.outputs[0].shape, [1, 84, 6].map(Dim::Value));
+    assert_eq!(custom_e2e.outputs[0].dtype, "float");
+    // In F16 e2e with iou_head, logits are cast to F32 before Sigmoid and stay F32 straight into TopK (no Cast
+    // between Sqrt and TopK).
+    let sqrt_pos = custom_e2e.ops.iter().position(|op| op == "Sqrt").expect("Sqrt op");
+    let topk_pos = custom_e2e.ops.iter().position(|op| op == "TopK").expect("TopK op");
+    assert!(sqrt_pos < topk_pos);
+    // Only `boxes_f32` is cast after Sqrt (1 Cast between Sqrt and TopK, not a narrow+widen pair).
+    let casts_between = custom_e2e.ops[sqrt_pos..topk_pos].iter().filter(|op| *op == "Cast").count();
+    assert_eq!(casts_between, 1, "only boxes should be widened between Sqrt and TopK, no F16 narrowing");
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -208,7 +252,8 @@ fn calibrated_v1(scale: &str, nc: usize, seed: u64, head: &str) -> FoloModel {
     }
     {
         let _g = no_grad();
-        cal.forward(&Tensor::rand_uniform([4, 3, 128, 128], 0.0, 1.0, &mut rng)).unwrap();
+        cal.forward(&Tensor::rand_uniform([4, cal.config().in_channels, 128, 128], 0.0, 1.0, &mut rng))
+            .unwrap();
     }
     let m = FoloModel::new(base).unwrap();
     let src: HashMap<String, Tensor> = cal.named_tensors().into_iter().map(|t| (t.name, t.tensor)).collect();
@@ -243,7 +288,8 @@ fn calibrated_v2(cfg: FoloV2Config, seed: u64) -> FoloV2Model {
     }
     {
         let _g = no_grad();
-        cal.forward(&Tensor::rand_uniform([4, 3, 128, 128], 0.0, 1.0, &mut rng)).unwrap();
+        cal.forward(&Tensor::rand_uniform([4, cal.config().in_channels, 128, 128], 0.0, 1.0, &mut rng))
+            .unwrap();
     }
     let m = FoloV2Model::with_rng(cfg, &mut Rng::seed(seed)).unwrap();
     let src: HashMap<String, Tensor> = cal.named_tensors().into_iter().map(|t| (t.name, t.tensor)).collect();
@@ -584,6 +630,44 @@ fn dynamic_axes_and_v2_match_folo_in_onnxruntime() {
         "inputs": inputs,
         "expected": expected,
     }));
+
+    // Custom `in_channels = 1` + non-default `reg_max = 8` + `o2o` `iou_head` + dynamic `HW` where runtime
+    // anchor count `A = 84 < max_det = 300` caps `K` dynamically, tested in both `F32` and `F16`.
+    let mut custom_cfg = FoloV2Config::new("n", 4).unwrap().with_head(HeadMode::O2o).with_iou_head(true);
+    custom_cfg.in_channels = 1;
+    custom_cfg.reg_max = 8;
+    let mut v2_custom = calibrated_v2(custom_cfg, 51);
+    v2_custom.fuse().unwrap();
+    let custom_xs = [
+        Tensor::rand_uniform([1, 1, 64, 64], 0.0, 1.0, &mut rng),
+        Tensor::rand_uniform([2, 1, 64, 96], 0.0, 1.0, &mut rng),
+    ];
+    for (name, half) in [("v2-custom-c1-r8-f32-e2e-cap", false), ("v2-custom-c1-r8-f16-e2e-cap", true)] {
+        let opts = OnnxOptions { decode: true, half, max_det: 300, ..OnnxOptions::new(96) };
+        let exp = v2_custom.to_onnx_with_axes(&opts, DynamicAxes::ALL).unwrap();
+        exp.write_to(dir.join(format!("{name}.onnx"))).unwrap();
+        let inputs: Vec<Value> =
+            custom_xs.iter().enumerate().map(|(i, x)| dump(&dir, &format!("{name}-in{i}.f32"), x)).collect();
+        let expected: Vec<Value> = custom_xs
+            .iter()
+            .enumerate()
+            .map(|(i, x)| {
+                let _g = no_grad();
+                let out = v2_custom.forward(x).unwrap();
+                ref_v2(&out, true, opts.max_det, &dir, &format!("{name}-{i}"))
+            })
+            .collect();
+        let tol = if half { TOL_F16_RAW } else { TOL_F32_DEC };
+        cases.push(json!({
+            "name": name,
+            "model": format!("{name}.onnx"),
+            "dtype": if half { "float16" } else { "float32" },
+            "tolerance": tol.0,
+            "mean_tolerance": tol.1,
+            "inputs": inputs,
+            "expected": expected,
+        }));
+    }
 
     let manifest = dir.join("manifest.json");
     std::fs::write(&manifest, serde_json::to_vec_pretty(&json!({ "cases": cases })).unwrap()).unwrap();

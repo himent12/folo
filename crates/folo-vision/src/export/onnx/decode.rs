@@ -76,6 +76,12 @@ impl Graph {
     /// MODEL.md §6.4 in the graph: the decoded `[B, 4 + nc, A]` (boxes in input pixels, then class scores).
     /// When `iou_raw` (`[B, 1, A]`) is supplied (FOLO v2 with `iou_head = true`), class probabilities are fused
     /// via geometric mean `sqrt(sigmoid(cls_raw) * sigmoid(iou_raw))` (`DEFAULT_IOU_FUSION_ALPHA = 0.5`).
+    ///
+    /// When `f32_output` is true (used by end-to-end `o2o` selection), an `F16` graph widens boxes and logits to
+    /// `F32` before `Sigmoid` / IoU fusion and returns `F32` directly so `TopK` never loses precision through `F16`
+    /// rounding. For dense `F16` output with `iou_raw`, logits are still widened to `F32` before `Sigmoid` so
+    /// subnormal `F16` probabilities do not flush to zero before the square root, and only the fused scores are
+    /// narrowed back to `F16`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn decode(
         &mut self,
@@ -87,7 +93,9 @@ impl Graph {
         box_raw: &str,
         cls_raw: &str,
         iou_raw: Option<&str>,
+        f32_output: bool,
     ) -> Result<String> {
+        let half = self.elem == DataType::Float16;
         let r = reg_max;
         let logits = self.reshape("decode.dfl_logits", box_raw, &[0, 4, r as i64, -1]); // [B, 4, R, A]
         let prob =
@@ -109,20 +117,28 @@ impl Graph {
         let x2y2 = self.node("Add", "decode.x2y2_cells", &[&points, &rb], vec![]);
         let x1y1 = self.node("Mul", "decode.x1y1", &[&x1y1, &strides], vec![]);
         let x2y2 = self.node("Mul", "decode.x2y2", &[&x2y2, &strides], vec![]);
-        let boxes = self.concat("decode.boxes", &[&x1y1, &x2y2], 1); // [B, 4, A]
-        let mut scores = self.node("Sigmoid", "decode.scores", &[cls_raw], vec![]);
+        let mut boxes = self.concat("decode.boxes", &[&x1y1, &x2y2], 1); // [B, 4, A]
+        let widen_scores = half && (iou_raw.is_some() || f32_output);
+        let cls_in = if widen_scores {
+            self.cast("decode.cls_f32", cls_raw, DataType::Float)
+        } else {
+            cls_raw.to_string()
+        };
+        let mut scores = self.node("Sigmoid", "decode.scores", &[&cls_in], vec![]);
         if let Some(iou_logits) = iou_raw {
-            let p_iou = self.node("Sigmoid", "decode.iou_scores", &[iou_logits], vec![]);
-            if self.elem == DataType::Float16 {
-                let s32 = self.cast("decode.scores_f32", &scores, DataType::Float);
-                let i32 = self.cast("decode.iou_f32", &p_iou, DataType::Float);
-                let prod = self.mul("decode.iou_prod", &s32, &i32);
-                let fused = self.node("Sqrt", "decode.iou_fused_f32", &[&prod], vec![]);
-                scores = self.cast("decode.iou_fused", &fused, DataType::Float16);
+            let iou_in = if widen_scores {
+                self.cast("decode.iou_logits_f32", iou_logits, DataType::Float)
             } else {
-                let prod = self.mul("decode.iou_prod", &scores, &p_iou);
-                scores = self.node("Sqrt", "decode.iou_fused", &[&prod], vec![]);
-            }
+                iou_logits.to_string()
+            };
+            let p_iou = self.node("Sigmoid", "decode.iou_scores", &[&iou_in], vec![]);
+            let prod = self.mul("decode.iou_prod", &scores, &p_iou);
+            scores = self.node("Sqrt", "decode.iou_fused", &[&prod], vec![]);
+        }
+        if half && f32_output {
+            boxes = self.cast("decode.boxes_f32", &boxes, DataType::Float);
+        } else if widen_scores {
+            scores = self.cast("decode.scores_f16", &scores, DataType::Float16);
         }
         Ok(self.concat("decode.channels", &[&boxes, &scores], 1)) // [B, 4 + nc, A]
     }
@@ -131,12 +147,12 @@ impl Graph {
     /// `detections: [B, K, 6]` output (`x1, y1, x2, y2, score, class`, by descending score). `TopK` puts equal
     /// values in index order, the tie rule of [`crate::nms::topk_detections`]. An `F16` graph selects in `F32`
     /// (the CPU `TopK` and `ReduceMax` of onnxruntime take no `float16`) and its rows stay `F32`, so class ids above
-    /// 2048 stay exact.
-    pub(super) fn topk(&mut self, all: &str, nc: usize, opts: &OnnxOptions) {
+    /// 2048 stay exact. `already_f32` avoids a redundant cast when `all` was already produced in `F32`.
+    pub(super) fn topk(&mut self, all: &str, nc: usize, opts: &OnnxOptions, already_f32: bool) {
         let half = self.elem == DataType::Float16;
         let to_f32 = || vec![("to".to_string(), AttrValue::Int(DataType::Float.code()))];
         let dets = self.transpose("e2e.anchor_major", all, &[0, 2, 1]); // [B, A, 4 + nc]
-        let dets = if half { self.node("Cast", "e2e.f32", &[&dets], to_f32()) } else { dets };
+        let dets = if half && !already_f32 { self.node("Cast", "e2e.f32", &[&dets], to_f32()) } else { dets };
         let [_, scores]: [String; 2] =
             self.split("e2e.split_anchors", &dets, &[4, nc as i64], 2).try_into().expect("two parts");
         let best = self.node(

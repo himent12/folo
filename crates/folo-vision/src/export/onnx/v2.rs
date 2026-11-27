@@ -86,13 +86,15 @@ pub fn export_v2_with_axes(model: &FoloV2Model, opts: &OnnxOptions, axes: Dynami
             Dim::Value(a) => Dim::Value(opts.max_det.min(*a)),
             Dim::Param(_) => Dim::Param("max_det".into()),
         };
-        let all = g.decode(&strides, reg_max, opts, axes, &feats, &box_raw, &cls_raw, iou_raw.as_deref())?;
-        g.topk(&all, nc, opts);
+        let all =
+            g.decode(&strides, reg_max, opts, axes, &feats, &box_raw, &cls_raw, iou_raw.as_deref(), true)?;
+        g.topk(&all, nc, opts, true);
         // Always f32: an f16 class id is exact only up to 2048.
         let dtype = DataType::Float.name();
         vec![OnnxValue { name: "detections".into(), dtype, shape: vec![bdim, k, Dim::Value(6)] }]
     } else if opts.decode {
-        let all = g.decode(&strides, reg_max, opts, axes, &feats, &box_raw, &cls_raw, iou_raw.as_deref())?;
+        let all =
+            g.decode(&strides, reg_max, opts, axes, &feats, &box_raw, &cls_raw, iou_raw.as_deref(), false)?;
         g.transpose("detections", &all, &[0, 2, 1]);
         vec![OnnxValue {
             name: "detections".into(),
@@ -423,10 +425,13 @@ fn metadata_v2(
     m.insert("folo.fused".into(), "true".into());
     m.insert("folo.head".into(), model.head_mode().as_str().into());
     m.insert("folo.imgsz".into(), opts.height.max(opts.width).to_string());
+    m.remove("folo.onnx.max_det");
+    m.remove("folo.onnx.iou_head");
+    m.remove("folo.onnx.iou_fusion_alpha");
     m.insert("folo.v2.plus".into(), cfg.plus.to_string());
     m.insert("folo.v2.spd_stem".into(), cfg.spd_stem.to_string());
     m.insert("folo.v2.fullpad".into(), cfg.fullpad.to_string());
-    m.insert("folo.v2.iou_head".into(), cfg.iou_head.to_string());
+    m.insert("folo.v2.iou_head".into(), model.head.has_iou_head.to_string());
     m.insert("folo.onnx.outputs".into(), kind.into());
     m.insert("folo.onnx.head".into(), model.head_mode().as_str().into());
     if opts.decode && e2e {
@@ -441,7 +446,7 @@ fn metadata_v2(
     m.insert("folo.onnx.opset".into(), OPSET.to_string());
     m.insert("folo.onnx.strides".into(), s(serde_json::json!(model.strides())));
     m.insert("folo.onnx.reg_max".into(), model.head.reg_max.to_string());
-    if cfg.iou_head {
+    if model.head.has_iou_head {
         m.insert("folo.onnx.iou_head".into(), "true".into());
         if opts.decode {
             m.insert("folo.onnx.iou_fusion_alpha".into(), DEFAULT_IOU_FUSION_ALPHA.to_string());

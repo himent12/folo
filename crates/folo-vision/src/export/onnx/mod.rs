@@ -146,7 +146,9 @@ pub struct OnnxOptions {
     /// [`export_file`]: the head branch to export, `None` for the file's ([`FoloModel::head_mode`]).
     /// [`export`] and [`export_v2`] export the model's own mode.
     pub head: Option<HeadMode>,
-    /// Extra `metadata_props` (for example the source file's `folo.metrics`); the exporter's own keys win.
+    /// Extra `metadata_props` (for example the source file's `folo.metrics`); exporter-owned keys always win
+    /// (conditional keys that do not apply to the exported graph are cleared; [`export_v2`] preserves caller-supplied
+    /// `names` / `folo.classes` when present because [`crate::model::v2::FoloV2Model`] does not store class names).
     pub metadata: BTreeMap<String, String>,
 }
 
@@ -322,13 +324,13 @@ pub fn export_with_axes(model: &FoloModel, opts: &OnnxOptions, axes: DynamicAxes
             Dim::Value(a) => Dim::Value(opts.max_det.min(*a)),
             Dim::Param(_) => Dim::Param("max_det".into()),
         };
-        let all = g.decode(&strides, reg_max, opts, axes, &feats, &box_raw, &cls_raw, None)?;
-        g.topk(&all, nc, opts);
+        let all = g.decode(&strides, reg_max, opts, axes, &feats, &box_raw, &cls_raw, None, true)?;
+        g.topk(&all, nc, opts, true);
         // Always f32: an f16 class id is exact only up to 2048.
         let dtype = DataType::Float.name();
         vec![OnnxValue { name: "detections".into(), dtype, shape: vec![bdim, k, Dim::Value(6)] }]
     } else if opts.decode {
-        let all = g.decode(&strides, reg_max, opts, axes, &feats, &box_raw, &cls_raw, None)?;
+        let all = g.decode(&strides, reg_max, opts, axes, &feats, &box_raw, &cls_raw, None, false)?;
         g.transpose("detections", &all, &[0, 2, 1]);
         vec![OnnxValue {
             name: "detections".into(),
@@ -394,6 +396,9 @@ fn metadata(
         (true, false) => "decoded",
         (true, true) => "end2end",
     };
+    m.remove("folo.onnx.max_det");
+    m.remove("folo.onnx.iou_head");
+    m.remove("folo.onnx.iou_fusion_alpha");
     m.insert("folo.onnx.outputs".into(), kind.into());
     m.insert("folo.onnx.head".into(), model.head_mode().as_str().into());
     if opts.decode && e2e {
