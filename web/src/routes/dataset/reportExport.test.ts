@@ -81,6 +81,8 @@ describe('dataset health report export', () => {
     expect(json.health_findings.some((f) => f.id === 'broken')).toBe(true);
     expect(json.health_findings.some((f) => f.id === 'missing')).toBe(true);
     expect(json.health_findings.some((f) => f.id === 'imbalance')).toBe(true);
+    expect(json.check_issues?.duplicate_images).toBe(1);
+    expect(json.check_issues?.duplicate_labels).toBe(0);
     expect(json.check_issues?.by_kind).toEqual([
       { kind: 'broken_label', label: 'Broken label', severity: 'error', count: 2 },
       { kind: 'clipped_box', label: 'Clipped box', severity: 'warning', count: 3 },

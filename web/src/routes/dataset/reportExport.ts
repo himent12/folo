@@ -3,12 +3,12 @@
  * Uses Studio's shared `$lib/tableExport` helpers (RFC-4180 quoting, spreadsheet formula neutralization, and
  * object-URL cleanup) and derives every figure strictly from `Dataset`, `DatasetStats`, and optional `IssueCounts`.
  */
-import type { Dataset, DatasetStats, IssueCounts, IssueKind, IssueSeverity } from '$lib/api/types';
+import type { Dataset, DatasetStats, IssueCounts, IssueSeverity } from '$lib/api/types';
 import { exportTableCsv, exportTableJson, type CsvCell } from '$lib/tableExport';
 import { toast } from '$lib/ui/toast';
 import { FEW_BOXES, healthChecks, TINY_SIZE } from './health';
 import { computeDatasetInsights, type DatasetInsightsData } from './insights';
-import { KIND_LABEL, KINDS } from './issues';
+import { KIND_LABEL, kindLabel, KINDS } from './issues';
 
 export const DATASET_REPORT_CSV_HEADERS = [
   'section',
@@ -51,15 +51,21 @@ function classListFromInsights(insights: DatasetInsightsData) {
   ].sort((a, b) => b.boxes - a.boxes || a.class_id - b.class_id);
 }
 
-/** Iterates nonzero `counts.by_kind` entries ordered by `KINDS` severity without duplicating the severity mapping. */
-function checkIssueEntries(counts?: IssueCounts): { kind: IssueKind; label: string; severity: IssueSeverity; count: number }[] {
+/** Iterates nonzero `counts.by_kind` entries ordered by `KINDS` severity, preserving any additional server kinds cleanly. */
+function checkIssueEntries(counts?: IssueCounts): { kind: string; label: string; severity: IssueSeverity; count: number }[] {
   if (!counts) return [];
-  const out: { kind: IssueKind; label: string; severity: IssueSeverity; count: number }[] = [];
+  const out: { kind: string; label: string; severity: IssueSeverity; count: number }[] = [];
+  const seen = new Set<string>();
   for (const severity of SEVERITY_ORDER) {
     for (const kind of KINDS[severity]) {
+      seen.add(kind);
       const n = counts.by_kind[kind] ?? 0;
       if (n > 0) out.push({ kind, label: KIND_LABEL[kind], severity, count: n });
     }
+  }
+  for (const [kind, n] of Object.entries(counts.by_kind)) {
+    if (seen.has(kind) || !n || n <= 0) continue;
+    out.push({ kind, label: kindLabel(kind), severity: 'warning', count: n });
   }
   return out;
 }
@@ -129,6 +135,8 @@ export function buildDatasetHealthReportJson(
           error: counts.error,
           warning: counts.warning,
           info: counts.info,
+          duplicate_images: counts.by_kind.duplicate_image ?? 0,
+          duplicate_labels: counts.by_kind.duplicate_label ?? 0,
           by_kind: byKindEntries,
         }
       : null,

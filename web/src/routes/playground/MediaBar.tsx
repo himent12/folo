@@ -7,10 +7,13 @@
 import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
 import CircleStop from '$icons/circle-stop';
+import Download from '$icons/download';
+import FileJson from '$icons/file-json';
 import Play from '$icons/play';
+import RotateCcw from '$icons/rotate-ccw';
 import Scan from '$icons/scan';
 import Square from '$icons/square';
-import { createUniqueId, css, effect, onCleanup, signal } from 'fw';
+import { createUniqueId, css, effect, For, onCleanup, signal } from 'fw';
 import Button from '$lib/ui/Button';
 import Slider from '$lib/ui/Slider';
 import Switch from '$lib/ui/Switch';
@@ -58,6 +61,84 @@ function TrackControl(props: { tracking: TrackingController; uid: string }) {
         </span>
       ) : null}
     </>
+  );
+}
+
+/** Live ByteTrack session summary & trajectory export controls rendered below transport controls while tracking is on. */
+function TrackSummaryBar(props: { tracking: TrackingController }) {
+  const tr = props.tracking;
+  const s = () => tr.summary.get();
+  const topClasses = () => s().by_class.slice(0, 4);
+  const extraClasses = () => Math.max(0, s().by_class.length - 4);
+  const allClassTitle = () =>
+    s()
+      .by_class.map((c) => `${c.class_name}: ${c.unique_tracks} unique (${c.observations} obs)`)
+      .join(' · ');
+  const hasObs = () => s().observations_recorded > 0;
+  const canClear = () => hasObs() || s().active_tracks > 0 || s().frames_recorded > 0;
+
+  return (
+    <div class="track-strip" data-track-summary>
+      <div class="track-stats num">
+        <span class="track-metric" data-track-unique>
+          {s().active_tracks} active · {s().unique_tracks} unique {s().unique_tracks === 1 ? 'ID' : 'IDs'}
+          {hasObs() ? (
+            <span class="faint">
+              {' '}
+              · {s().observations_recorded} {s().observations_recorded === 1 ? 'obs' : 'obs'}
+              {s().truncated ? ' (recent cap)' : ''}
+            </span>
+          ) : null}
+        </span>
+        {topClasses().length > 0 ? (
+          <span class="track-classes" title={allClassTitle()} data-track-classes>
+            <For each={topClasses()} key={(c) => c.class_id}>
+              {(c) => (
+                <span class="track-pill">
+                  <span class="truncate">{c().class_name}</span> <b>{c().unique_tracks}</b>
+                </span>
+              )}
+            </For>
+            {extraClasses() > 0 ? <span class="track-pill faint">+{extraClasses()} more</span> : null}
+          </span>
+        ) : null}
+      </div>
+      <div class="track-actions">
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={Download}
+          disabled={!hasObs()}
+          data-export-tracks="csv"
+          aria-label="Export tracks CSV"
+          onclick={() => tr.exportTracksCsv()}
+        >
+          Export tracks CSV
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={FileJson}
+          disabled={!hasObs()}
+          data-export-tracks="json"
+          aria-label="Export tracks JSON"
+          onclick={() => tr.exportTracksJson()}
+        >
+          Export tracks JSON
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={RotateCcw}
+          disabled={!canClear()}
+          data-clear-tracks
+          aria-label="Clear tracks"
+          onclick={() => tr.clearTracks()}
+        >
+          Clear tracks
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -251,6 +332,7 @@ export default function MediaBar(props: MediaBarProps) {
               </Button>
             </div>
           </div>
+          {props.tracking && props.tracking.enabled.get() ? <TrackSummaryBar tracking={props.tracking} /> : null}
           {m.duration.get() > 0 ? (
             <div class="scrubber">
               <Slider
@@ -301,6 +383,7 @@ export default function MediaBar(props: MediaBarProps) {
               </Button>
             </div>
           </div>
+          {props.tracking && props.tracking.enabled.get() ? <TrackSummaryBar tracking={props.tracking} /> : null}
         </div>
       ) : null}
     </>
@@ -370,6 +453,60 @@ css`
   .track-wrap.disabled {
     cursor: not-allowed;
   }
+  .track-strip {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-3);
+    padding-top: var(--space-2);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .track-stats {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    min-width: 0;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .track-metric {
+    white-space: nowrap;
+  }
+  .track-classes {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
+  }
+  .track-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 140px;
+    padding: 0 6px;
+    border-radius: var(--radius-xs);
+    border: 1px solid var(--line-subtle);
+    background: var(--bg-app);
+    color: var(--text-secondary);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    white-space: nowrap;
+  }
+  .track-pill b {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
+  .track-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin-left: auto;
+  }
   .scrubber :global(.slider.inline) {
     grid-template-columns: 64px minmax(0, 1fr) 48px;
   }
@@ -381,7 +518,8 @@ css`
     .media-bar {
       padding: var(--space-2) var(--space-4);
     }
-    .media-right {
+    .media-right,
+    .track-actions {
       margin-left: 0;
     }
   }

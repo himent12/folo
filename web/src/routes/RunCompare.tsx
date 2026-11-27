@@ -1,7 +1,9 @@
 // Compare runs (`#/runs/compare?ids=a,b`): up to four runs' curves on one plot, and a table of the runs side by side.
 // The parts are in ./compare/.
+import Copy from '$icons/copy';
+import Download from '$icons/download';
 import GitCompare from '$icons/git-compare-arrows';
-import { css, onDocument } from 'fw';
+import { css, onCleanup, onDocument, signal } from 'fw';
 import { isTyping } from '$lib/keys';
 import { href } from '$lib/router';
 import { setCrumbs } from '$lib/shell/crumbs';
@@ -15,12 +17,14 @@ import InfoButton from '$lib/ui/InfoButton';
 import InfoRegion from '$lib/ui/InfoRegion';
 import { provideInfoSlot } from '$lib/ui/infoSlot';
 import { keyPrefs } from '$lib/ui/keyPrefs';
+import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import AddRun from './compare/AddRun';
 import ComparePlot, { MissingRunsNotice, PhoneAbout } from './compare/ComparePlot';
 import CompareTable from './compare/CompareTable';
 import { DATA_CAVEAT, MAX, METRIC_OPTIONS, PROGRESS_HOW, SLOT_PATTERN, X_OPTIONS, X_PHONE, Y_OPTIONS } from './compare/config';
+import { copyRunCompareMarkdown, exportRunCompareCsv } from './compare/export';
 import ManageSheet from './compare/ManageSheet';
 import RunChips from './compare/RunChips';
 import { compareState } from './compare/state';
@@ -33,6 +37,56 @@ export default function RunCompare() {
   const s = compareState();
   // Phones: the axis ⓘ opens in place under the control row (ui/infoSlot).
   const axisInfo = provideInfoSlot('cmp-axis-info');
+
+  const copiedMd = signal(false);
+  const liveNote = signal('');
+  let alive = true;
+  let noteSeq = 0;
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  onCleanup(() => {
+    alive = false;
+    noteSeq++;
+    clearTimeout(copiedTimer);
+    copiedTimer = undefined;
+  });
+  function announce(message: string) {
+    const seq = ++noteSeq;
+    if (liveNote.peek() === message) {
+      liveNote.set('');
+      queueMicrotask(() => {
+        if (alive && seq === noteSeq) liveNote.set(message);
+      });
+    } else {
+      liveNote.set(message);
+    }
+  }
+  const exportInput = () => ({
+    chosen: s.chosen.peek(),
+    baselineId: s.baselineId.peek(),
+    datasets: s.datasets.data,
+    metrics: s.metrics.data,
+    sameData: s.sameData.peek(),
+    startOf: s.startOf,
+  });
+  function onDownloadCsv() {
+    const msg = exportRunCompareCsv(exportInput());
+    if (msg) announce(msg);
+  }
+  async function onCopyMarkdown() {
+    const msg = await copyRunCompareMarkdown(exportInput());
+    if (!msg || !alive) return;
+    copiedMd.set(true);
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => {
+      copiedTimer = undefined;
+      if (alive) copiedMd.set(false);
+    }, 1600);
+    announce(msg);
+  }
+  const exportItems: MenuItem[] = [
+    { label: 'Copy Markdown', icon: Copy, onclick: () => void onCopyMarkdown() },
+    { label: 'Download CSV', icon: Download, onclick: () => onDownloadCsv() },
+  ];
 
   // 1–4 pin or unpin a run chip across the plot (matching BenchCompare); B rotates baseline in CompareTable.
   pageKeys((k) => {
@@ -120,7 +174,19 @@ export default function RunCompare() {
 
   // Phones lead with the plot: the explanation sits in the disclosure under the legend.
   return (
-    <Page title="Compare runs" sub={s.narrow() ? undefined : lede}>
+    <Page
+      title="Compare runs"
+      inlineActions
+      sub={s.narrow() ? undefined : lede}
+      actions={() =>
+        s.chosen.get().length >= 2 ? (
+          <Menu icon={Download} text={s.narrow() ? undefined : 'Export'} label="Export run comparison" items={exportItems} />
+        ) : null
+      }
+    >
+      <p class="sr-only" role="status" aria-live="polite">
+        {liveNote.get()}
+      </p>
       {s.runs.error && !s.runs.data ? (
         // The page's states sit in the chart's frame at the chart's height (DESIGN_DIRECTION 8), the shape the page
         // will have, never a frameless block in the corner of an empty canvas.
@@ -216,6 +282,9 @@ export default function RunCompare() {
               bind:allRuns={s.allRuns}
               bind:otherAt={s.otherAt}
               bind:baselineId={s.baselineId}
+              onCopyMarkdown={() => void onCopyMarkdown()}
+              onDownloadCsv={onDownloadCsv}
+              copiedMd={copiedMd.get()}
             />
           ) : null}
         </>

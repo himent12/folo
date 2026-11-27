@@ -25,6 +25,28 @@ export const KIND_LABEL: Record<IssueKind, string> = {
   empty_image: 'Empty image',
 };
 
+/** Formats any server issue kind (known or future) into a concise display label. */
+export function kindLabel(kind: string): string {
+  if (kind in KIND_LABEL) return KIND_LABEL[kind as IssueKind];
+  const cleaned = kind.replace(/[_-]+/g, ' ').trim();
+  return cleaned ? cleaned[0]!.toUpperCase() + cleaned.slice(1) : 'Other';
+}
+
+/**
+ * Derives a concise audit sub-tag strictly from real `folo-data` / `folo dataset check` issue kinds & messages
+ * (e.g. exact split leakage, perceptual dHash near-duplicate, or perceptual split leakage), or null when none applies.
+ */
+export function issueAuditTag(issue: Pick<DatasetIssue, 'kind' | 'message'>): string | null {
+  if (issue.kind !== 'duplicate_image') return null;
+  const msg = issue.message;
+  const isPerceptual = /perceptual|dhash|near-duplicate/i.test(msg);
+  const isLeakage = /split leakage/i.test(msg);
+  if (isPerceptual && isLeakage) return 'Perceptual leakage';
+  if (isLeakage) return 'Split leakage';
+  if (isPerceptual) return 'Near-duplicate';
+  return null;
+}
+
 export interface LoadedIssues {
   /** The server's count of matches, so a caller can say when the list is incomplete. */
   total: number;

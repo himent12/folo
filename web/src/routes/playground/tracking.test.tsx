@@ -17,11 +17,21 @@ import {
   type Tracker,
   type WasmModule,
 } from '$lib/inference/browser';
+import { pendingBlobRevokeCount, revokePendingBlobUrls, toCsv } from '$lib/tableExport';
+import { toast } from '$lib/ui/toast';
 import { drawAnnotations } from './export';
 import MediaBar from './MediaBar';
 import PlaygroundTiming from './PlaygroundTiming';
 import ResultsPanel from './ResultsPanel';
-import { formatBoxChipText, TrackTrailHistory, trackerOptionsForConf } from './tracking';
+import {
+  buildTrackExportCsvRows,
+  buildTrackExportJson,
+  formatBoxChipText,
+  TRACK_CSV_HEADERS,
+  TrackHistoryRecorder,
+  TrackTrailHistory,
+  trackerOptionsForConf,
+} from './tracking';
 import type { MediaMode, MediaSession } from './useMediaSession';
 import { useTracking } from './useTracking';
 import { predictionJson } from './viewState';
@@ -125,6 +135,8 @@ function predFrame(x: number, score = 0.9, modelId = 'm1'): Prediction {
 }
 
 afterEach(() => {
+  revokePendingBlobUrls();
+  for (const t of toast.items) toast.dismiss(t.id);
   vi.restoreAllMocks();
 });
 
@@ -586,6 +598,202 @@ describe('ResultsPanel, predictionJson, DetectionView trails, and PlaygroundTimi
     predSig.set(pCpu);
     flushSync();
     expect(host.querySelector('[data-browser-engine-info]')).toBeNull();
+
+    view.unmount();
+    host.remove();
+  });
+});
+
+describe('TrackHistoryRecorder, trajectory CSV/JSON export, and MediaBar track summary strip', () => {
+  it('records bounded frame-indexed observations, computes per-class unique IDs, drops oldest on cap, and formats formula-safe CSV/JSON', () => {
+    const rec = new TrackHistoryRecorder(3, 100);
+    const s1 = rec.record(
+      1,
+      33,
+      [
+        { track_id: 1, class: 0, name: '=person', score: 0.91234, x1: 10.126, y1: 20, x2: 50, y2: 80 },
+        { track_id: 2, class: 1, name: 'car', score: 0.85, x1: 100, y1: 40, x2: 200, y2: 120 },
+      ],
+      ['=person', 'car'],
+    );
+    expect(s1.active_tracks).toBe(2);
+    expect(s1.unique_tracks).toBe(2);
+    expect(s1.frames_recorded).toBe(1);
+    expect(s1.observations_recorded).toBe(2);
+    expect(s1.truncated).toBe(false);
+    expect(s1.by_class).toEqual([
+      { class_id: 0, class_name: '=person', unique_tracks: 1, observations: 1 },
+      { class_id: 1, class_name: 'car', unique_tracks: 1, observations: 1 },
+    ]);
+
+    // Frame 2 adds 2 more observations -> total 4 exceeds cap=3 -> drops oldest 1 observation FIFO.
+    const s2 = rec.record(
+      2,
+      67,
+      [
+        { track_id: 1, class: 0, name: '=person', score: 0.93, x1: 14, y1: 22, x2: 54, y2: 82 },
+        { track_id: 3, class: 0, name: '=person', score: 0.77, x1: 60, y1: 30, x2: 90, y2: 70 },
+      ],
+      ['=person', 'car'],
+    );
+    expect(s2.active_tracks).toBe(2);
+    expect(s2.unique_tracks).toBe(3);
+    expect(s2.observations_recorded).toBe(3);
+    expect(s2.observations_dropped).toBe(1);
+    expect(s2.truncated).toBe(true);
+    expect(s2.by_class[0]).toEqual({ class_id: 0, class_name: '=person', unique_tracks: 2, observations: 3 });
+
+    const obs = rec.observations();
+    expect(obs).toHaveLength(3);
+    expect(obs.map((o) => [o.frame, o.track_id])).toEqual([
+      [1, 2],
+      [2, 1],
+      [2, 3],
+    ]);
+
+    const csv = toCsv(TRACK_CSV_HEADERS, buildTrackExportCsvRows(obs));
+    expect(csv).toContain('frame,timestamp_ms,track_id,class_id,class_name,confidence,x1,y1,x2,y2\r\n');
+    expect(csv).toContain("2,67,1,0,'=person,0.93,14,22,54,82\r\n");
+
+    const json = buildTrackExportJson({
+      sourceName: 'traffic.mp4',
+      mode: 'video',
+      modelId: 'm_1',
+      modelName: 'folo-s',
+      summary: s2,
+      observations: obs,
+    });
+    expect(json.source).toBe('traffic.mp4');
+    expect(json.summary.unique_tracks).toBe(3);
+    expect(json.observations).toHaveLength(3);
+
+    rec.clear();
+    expect(rec.observations()).toEqual([]);
+    expect(rec.summary().unique_tracks).toBe(0);
+  });
+
+  it('shows live track stats & per-class summary in MediaBar, exports tracks CSV/JSON, and clears on Clear tracks', async () => {
+    const { mod, spy } = makeFakeWasm(true);
+    const engine = new BrowserEngine(async () => mod);
+    const mediaMode = signal<MediaMode>('video');
+    const frameKey = signal<string | null>('video:1:1');
+    const frameMeta = signal<{ frame: number; timestampMs: number } | null>({ frame: 1, timestampMs: 33 });
+    const pred = signal<Prediction | null>(null);
+    const host = document.body.appendChild(document.createElement('div'));
+    let ctrl!: ReturnType<typeof useTracking>;
+
+    const fakeMedia = {
+      mode: mediaMode,
+      videoUrl: signal<string | null>('blob:v'),
+      videoReady: signal(true),
+      seeking: signal(false),
+      playing: signal(false),
+      currentTime: signal(0.033),
+      duration: signal(5),
+      frameStep: signal(1 / 30),
+      autoDetect: signal(true),
+      fps: signal(0),
+      latencyMs: signal(0),
+      togglePlay: vi.fn(),
+      stepFrame: vi.fn(),
+      seekTo: vi.fn(),
+      detectCurrentFrame: vi.fn(async () => true),
+    } as unknown as MediaSession;
+
+    function Harness() {
+      ctrl = useTracking({
+        engine,
+        browserOff: () => null,
+        mediaMode: () => mediaMode.get(),
+        mediaKey: () => 'video:1',
+        frameKey: () => frameKey.get(),
+        frameMeta: () => frameMeta.get(),
+        sourceName: () => 'clip.mp4',
+        modelId: () => 'm1',
+        modelName: () => 'shapes-s',
+        classes: () => ['circle', 'square'],
+        pred: () => pred.get(),
+        conf: () => 0.25,
+        iou: () => 0.45,
+        maxDet: () => 300,
+        o2o: () => false,
+      });
+      return <MediaBar media={fakeMedia} predicting={false} tracking={ctrl} />;
+    }
+
+    const view = render(() => <Harness />, host);
+    flushSync();
+
+    // Summary strip is hidden while Track IDs is off.
+    expect(host.querySelector('[data-track-summary]')).toBeNull();
+
+    ctrl.setEnabled(true);
+    flushSync();
+    expect(host.querySelector('[data-track-summary]')).not.toBeNull();
+    expect(host.querySelector<HTMLButtonElement>('[data-export-tracks="csv"]')?.disabled).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>('[data-export-tracks="json"]')?.disabled).toBe(true);
+
+    // Feed frame 1 (circle) and frame 2 (circle + square).
+    const f1 = predFrame(10);
+    pred.set(f1);
+    flushSync();
+    await vi.waitFor(() => expect(ctrl.summary.get().observations_recorded).toBe(1));
+
+    frameKey.set('video:1:2');
+    frameMeta.set({ frame: 2, timestampMs: 67 });
+    const f2: Prediction = {
+      ...predFrame(20),
+      boxes: [
+        { class: 0, name: 'circle', score: 0.9, x1: 20, y1: 20, x2: 60, y2: 60 },
+        { class: 1, name: 'square', score: 0.88, x1: 90, y1: 30, x2: 140, y2: 80 },
+      ],
+    };
+    pred.set(f2);
+    flushSync();
+
+    expect(ctrl.summary.get().active_tracks).toBe(2);
+    expect(ctrl.summary.get().unique_tracks).toBe(2);
+    expect(ctrl.summary.get().observations_recorded).toBe(3);
+    expect(host.querySelector('[data-track-unique]')?.textContent).toContain('2 active · 2 unique IDs');
+    expect(host.querySelector('[data-track-classes]')?.textContent).toContain('circle 1');
+    expect(host.querySelector('[data-track-classes]')?.textContent).toContain('square 1');
+
+    // Export CSV & JSON trigger downloads with Blob cleanup and toast feedback.
+    const blobs: Blob[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => {
+      blobs.push(b as Blob);
+      return `blob:track-${blobs.length}`;
+    });
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    const csvBtn = host.querySelector<HTMLButtonElement>('[data-export-tracks="csv"]')!;
+    const jsonBtn = host.querySelector<HTMLButtonElement>('[data-export-tracks="json"]')!;
+    expect(csvBtn.disabled).toBe(false);
+    expect(jsonBtn.disabled).toBe(false);
+    csvBtn.click();
+    jsonBtn.click();
+    expect(click).toHaveBeenCalledTimes(2);
+    expect(blobs).toHaveLength(2);
+    const csvText = await blobs[0]!.text();
+    expect(csvText).toContain('frame,timestamp_ms,track_id,class_id,class_name,confidence,x1,y1,x2,y2\r\n');
+    expect(csvText).toContain('2,67,2,1,square,0.88,90,30,140,80\r\n');
+    const jsonParsed = JSON.parse(await blobs[1]!.text());
+    expect(jsonParsed.source).toBe('clip.mp4');
+    expect(jsonParsed.model_name).toBe('shapes-s');
+    expect(jsonParsed.observations).toHaveLength(3);
+    expect(pendingBlobRevokeCount()).toBe(2);
+    revokePendingBlobUrls();
+
+    // Clicking Clear tracks resets tracker, clears observations, and re-disables export buttons.
+    const clearBtn = host.querySelector<HTMLButtonElement>('[data-clear-tracks]')!;
+    clearBtn.click();
+    flushSync();
+    expect(spy.resets).toBe(1);
+    expect(ctrl.summary.get().observations_recorded).toBe(0);
+    expect(ctrl.summary.get().unique_tracks).toBe(0);
+    expect(csvBtn.disabled).toBe(true);
+    expect(jsonBtn.disabled).toBe(true);
 
     view.unmount();
     host.remove();

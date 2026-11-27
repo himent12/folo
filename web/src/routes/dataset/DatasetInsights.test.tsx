@@ -187,4 +187,43 @@ describe('DatasetInsights', () => {
     flushSync();
     expect(target.querySelector('.split-bar')).toBeNull();
   });
+
+  it('surfaces duplicate_image and duplicate_label audit counts alongside remaining warnings', () => {
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    mounted = render(
+      () => (
+        <DatasetInsights
+          dataset={DATASET}
+          stats={{
+            boxes: 1600,
+            empty_images: 0,
+            broken_labels: 0,
+            class_counts: [420, 410, 390, 380],
+            box_size_hist: { edges: [0, 0.05, 1], counts: [20, 1580] },
+            boxes_per_image_hist: { edges: [0, 1, 2, 4], counts: [0, 400, 600] },
+          }}
+          counts={{
+            error: 0,
+            warning: 6,
+            info: 0,
+            by_kind: { duplicate_image: 3, duplicate_label: 1, clipped_box: 2 },
+          }}
+          activeClass={undefined}
+          activeSplit="all"
+          onSelectClass={() => {}}
+          onSelectSplit={() => {}}
+          onOpenStats={() => {}}
+        />
+      ),
+      target,
+    );
+    flushSync();
+
+    const root = target.querySelector('[data-dataset-insights]')!;
+    expect(root.querySelector('[data-duplicate-images]')?.textContent).toContain('3 duplicate images');
+    expect(root.querySelector('[data-duplicate-labels]')?.textContent).toContain('1 duplicate label');
+    expect(root.textContent).toContain('2 other warnings');
+    expect(root.textContent).not.toContain('Labels clean');
+  });
 });

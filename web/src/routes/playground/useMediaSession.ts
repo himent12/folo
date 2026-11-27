@@ -10,11 +10,13 @@ import {
   createFrameThrottle,
   DEFAULT_FRAME_STEP_SEC,
   describeCameraError,
+  frameIndexAt,
   LIVE_LOOP_FLOOR_MS,
   resetCaptureCanvas,
   SCRUB_THROTTLE_MS,
   stepFrameTime,
   stopMediaStream,
+  totalFramesFor,
   videoFrameName,
 } from './media';
 import { isValidFrameStep, probeVideoFrameStep, summarizeFrameDeltas } from './videoMeta';
@@ -89,6 +91,8 @@ export function useMediaSession(input: UseMediaSessionInput) {
   const sessionSeq = signal(0);
   /** Incremented only when a genuinely new video timestamp or webcam frame is captured (dedupes repeat Detect-frame clicks). */
   const frameSeq = signal(0);
+  /** Frame index and media/session timestamp (ms) of the latest captured video or webcam frame. */
+  const lastFrameMeta = signal<{ frame: number; timestampMs: number } | null>(null);
 
   const canCamera = computed(() => typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia);
   const liveStreaming = computed(
@@ -99,6 +103,8 @@ export function useMediaSession(input: UseMediaSessionInput) {
   let camSeq = 0;
   let captureSeq = 0;
   let videoSeq = 0;
+  let camStartMs = 0;
+  let camFrameCount = 0;
   let pendingForwardStep = false;
   let lastEmittedVideoTime: number | null = null;
   let containerStepKnown = false;
@@ -216,11 +222,21 @@ export function useMediaSession(input: UseMediaSessionInput) {
         frameSynced.set(true);
         if (lastEmittedVideoTime === null || Math.abs(capturedTime - lastEmittedVideoTime) > 0.0005) {
           lastEmittedVideoTime = capturedTime;
-          frameSeq.set((n) => n + 1);
+          const nextSeq = frameSeq.peek() + 1;
+          frameSeq.set(nextSeq);
+          const step = frameStep.peek();
+          const total = totalFramesFor(duration.peek(), step);
+          const frameIdx = total > 0 ? frameIndexAt(capturedTime, step, total) : nextSeq;
+          lastFrameMeta.set({ frame: frameIdx, timestampMs: Math.max(0, Math.round(capturedTime * 1000)) });
         }
       } else {
         camDims.set({ width: frame.width, height: frame.height });
         frameSeq.set((n) => n + 1);
+        camFrameCount++;
+        lastFrameMeta.set({
+          frame: camFrameCount,
+          timestampMs: camStartMs > 0 ? Math.max(0, Math.round(performance.now() - camStartMs)) : 0,
+        });
       }
       const name = m === 'video' ? videoFrameName(videoName.peek(), capturedTime) : 'webcam-live.jpg';
       frameSentAt = performance.now();
@@ -396,6 +412,9 @@ export function useMediaSession(input: UseMediaSessionInput) {
     camErr.set(null);
     const wasActive = mode.peek() !== 'none';
     mode.set('none');
+    lastFrameMeta.set(null);
+    camStartMs = 0;
+    camFrameCount = 0;
     sessionSeq.set((n) => n + 1);
     input.onTrackReset?.();
     if (notify && wasActive) input.onStopped?.();
@@ -414,6 +433,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     videoName.set(file.name);
     videoUrl.set(URL.createObjectURL(file));
     mode.set('video');
+    lastFrameMeta.set(null);
     sessionSeq.set((n) => n + 1);
     input.onTrackReset?.();
     void probeVideoFrameStep(file).then((step) => {
@@ -436,6 +456,9 @@ export function useMediaSession(input: UseMediaSessionInput) {
     stopCameraTracksOnly();
     camErr.set(null);
     mode.set('webcam');
+    lastFrameMeta.set(null);
+    camStartMs = performance.now();
+    camFrameCount = 0;
     sessionSeq.set((n) => n + 1);
     input.onTrackReset?.();
 
@@ -732,6 +755,7 @@ export function useMediaSession(input: UseMediaSessionInput) {
     latencyMs,
     sessionSeq,
     frameSeq,
+    lastFrameMeta,
     videoEvents,
     loadVideo,
     startWebcam,

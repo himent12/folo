@@ -181,4 +181,53 @@ describe('ImagesSection: Per-Image Error-Analysis Explorer', () => {
     expect(dlg.querySelectorAll('.box.plain-pred').length).toBe(2);
     expect(dlg.querySelectorAll('.box.plain-truth').length).toBe(1);
   });
+
+  it('exports filtered FP/FN error-analysis CSV and JSON from ImagesSection and disables export when no errors exist', async () => {
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(240);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(240);
+    const blobs: Blob[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => {
+      blobs.push(b as Blob);
+      return `blob:bench-err-${blobs.length}`;
+    });
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    mounted = render(() => <ImagesSection bench={BENCH} entry={ENTRY} accuracy={ACCURACY} />, target);
+    await until(() => target.querySelectorAll('#images .tile:not(.sk)').length === 3, 'all 3 tiles loaded');
+
+    const csvBtn = target.querySelector<HTMLButtonElement>('[data-bench-error-export="csv"]')!;
+    const jsonBtn = target.querySelector<HTMLButtonElement>('[data-bench-error-export="json"]')!;
+    expect(csvBtn.disabled).toBe(false);
+    expect(jsonBtn.disabled).toBe(false);
+
+    // Filter to False pos (FP) and export both CSV and JSON -> only FP rows from mismatch_fp.jpg are exported.
+    const fpRadio = [...target.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Filter images by error"] [role="radio"]')].find((b) =>
+      b.textContent?.includes('False pos (FP)'),
+    )!;
+    fpRadio.click();
+    flushSync();
+    csvBtn.click();
+    jsonBtn.click();
+    expect(click).toHaveBeenCalledTimes(2);
+    const csvText = await blobs[0]!.text();
+    expect(csvText).toContain('mismatch_fp.jpg');
+    expect(csvText).toContain(',FP,class-mismatch,');
+    expect(csvText).toContain(',FP,background,');
+    expect(csvText).not.toContain(',FN,');
+
+    const jsonData = JSON.parse(await blobs[1]!.text());
+    expect(jsonData.filter).toBe('fp');
+    expect(jsonData.summary.fp).toBe(2);
+    expect(jsonData.summary.fn).toBe(0);
+
+    // Clean-only entry disables both export buttons.
+    mounted.unmount();
+    const api = hub.api as MockApi;
+    api.benchEntryImages = vi.fn(async () => ({ total: 1, conf: 0.5, images: [SAMPLE_IMAGES[2]!] }));
+    mounted = render(() => <ImagesSection bench={BENCH} entry={ENTRY} accuracy={ACCURACY} />, target);
+    await until(() => target.querySelectorAll('#images .tile:not(.sk)').length === 1, 'clean tile loaded');
+    expect(target.querySelector<HTMLButtonElement>('[data-bench-error-export="csv"]')?.disabled).toBe(true);
+    expect(target.querySelector<HTMLButtonElement>('[data-bench-error-export="json"]')?.disabled).toBe(true);
+  });
 });

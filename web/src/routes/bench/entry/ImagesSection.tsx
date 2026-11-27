@@ -7,8 +7,10 @@
  */
 import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
+import Download from '$icons/download';
 import Eye from '$icons/eye';
 import EyeOff from '$icons/eye-off';
+import FileJson from '$icons/file-json';
 import { computed, css, effect, For, MediaQuery, onWindow, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import type { Bench, BenchAccuracy, BenchEntry, BenchEntryImage } from '$lib/api/types';
@@ -22,7 +24,9 @@ import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import Skeleton from '$lib/ui/Skeleton';
 import { dominantAspect } from '$lib/ui/TileGrid';
+import { tooltip } from '$lib/ui/tooltip';
 import { filterAndSortImages, summarizeGalleryErrors, type ErrorFilter, type ErrorSort, type ImageDiagnostics } from './errorAnalysis';
+import { collectBenchErrorRows, exportBenchErrorsCsv, exportBenchErrorsJson } from './errorExport';
 import MatchView from './MatchView';
 import { bestF1Conf, imagesShownText, imagesText } from '../words';
 
@@ -122,6 +126,19 @@ export default function ImagesSection(props: ImagesSectionProps) {
 
   const summary = computed(() => summarizeGalleryErrors(images.get()));
   const visible = computed(() => filterAndSortImages(images.get(), errorFilter.get(), errorSort.get(), props.bench.classes));
+  const exportErrorCount = computed(
+    () => collectBenchErrorRows(visible.get(), errorFilter.get(), props.bench.classes, props.entry.scored).length,
+  );
+  const exportInput = () => ({
+    bench: props.bench,
+    entry: props.entry,
+    analyzed: visible.peek(),
+    filter: errorFilter.peek(),
+    sort: errorSort.peek(),
+    conf: takenAt.peek(),
+    loadedImages: images.peek().length,
+    totalImages: total.peek(),
+  });
   const filterOptions = computed(() => {
     const s = summary.get();
     const compact = phone.current;
@@ -326,7 +343,37 @@ export default function ImagesSection(props: ImagesSectionProps) {
           </p>
           <div class="explorer-bar">
             <Segmented size="sm" label="Filter images by error" bind:value={errorFilter} options={filterOptions.get()} />
-            {layerToggles()}
+            <div class="explorer-right">
+              {layerToggles()}
+              <div class="export-acts" role="group" aria-label="Export error analysis">
+                <span use:tooltip={exportErrorCount.get() === 0 ? 'No failure cases in the current filter' : undefined}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={Download}
+                    disabled={exportErrorCount.get() === 0}
+                    data-bench-error-export="csv"
+                    aria-label="Export errors CSV"
+                    onclick={() => exportBenchErrorsCsv(exportInput())}
+                  >
+                    Export errors CSV
+                  </Button>
+                </span>
+                <span use:tooltip={exportErrorCount.get() === 0 ? 'No failure cases in the current filter' : undefined}>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    icon={FileJson}
+                    disabled={exportErrorCount.get() === 0}
+                    data-bench-error-export="json"
+                    aria-label="Export errors JSON"
+                    onclick={() => exportBenchErrorsJson(exportInput())}
+                  >
+                    Export errors JSON
+                  </Button>
+                </span>
+              </div>
+            </div>
           </div>
           <p class="legend">{legend()}</p>
         </div>
@@ -531,11 +578,16 @@ css`
   .explorer-bar :global(.seg button) {
     flex-shrink: 0;
   }
-  .layers {
+  .explorer-right,
+  .layers,
+  .export-acts {
     display: inline-flex;
     align-items: center;
     flex-wrap: wrap;
     gap: var(--space-1);
+  }
+  .explorer-right {
+    gap: var(--space-2);
   }
   .legend {
     display: flex;

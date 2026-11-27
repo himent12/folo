@@ -42,6 +42,12 @@ export interface DatasetInsightsData {
   tinyWarn: boolean;
   checkErrors: number;
   checkWarnings: number;
+  /** Exact/perceptual duplicate image warnings (`counts.by_kind.duplicate_image`). */
+  duplicateImages: number;
+  /** Duplicate label line warnings (`counts.by_kind.duplicate_label`). */
+  duplicateLabels: number;
+  /** Remaining check warnings excluding duplicate image and duplicate label warnings. */
+  otherCheckWarnings: number;
   qualityTone: InsightTone;
   splits: SplitShare[];
   noVal: boolean;
@@ -112,11 +118,14 @@ export function computeDatasetInsights(
 
   const checkErrors = Math.max(0, counts?.error ?? 0);
   const checkWarnings = Math.max(0, counts?.warning ?? 0);
+  const duplicateImages = Math.max(0, counts?.by_kind.duplicate_image ?? 0);
+  const duplicateLabels = Math.max(0, counts?.by_kind.duplicate_label ?? 0);
+  const otherCheckWarnings = Math.max(0, checkWarnings - duplicateImages - duplicateLabels);
 
   const qualityTone: InsightTone =
     brokenLabels > 0 || imageErrors > 0 || checkErrors > 0
       ? 'danger'
-      : emptyWarn || tinyWarn || checkWarnings > 0
+      : emptyWarn || tinyWarn || checkWarnings > 0 || duplicateImages > 0 || duplicateLabels > 0
         ? 'warning'
         : 'ok';
 
@@ -150,6 +159,9 @@ export function computeDatasetInsights(
     tinyWarn,
     checkErrors,
     checkWarnings,
+    duplicateImages,
+    duplicateLabels,
+    otherCheckWarnings,
     qualityTone,
     splits,
     noVal: (dataset.splits.val ?? 0) === 0,
