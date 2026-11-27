@@ -25,13 +25,19 @@ export default function ThresholdsBar(props: ThresholdsBarProps) {
   return (
     <div class="thr-bar" data-model-thresholds>
       <div class="thr-info">
-        <span class="thr-title">Calibrated thresholds</span>
+        <span class="thr-title">Operating point</span>
         <span class="thr-meta num">
-          global conf {formatConfThreshold(g().best_conf)} · macro-F1 {metric(cal().payload.macro_f1)} ·{' '}
+          best-F1 conf {formatConfThreshold(g().best_conf)} · macro-F1 {metric(cal().payload.macro_f1)} ·{' '}
           {count()} {count() === 1 ? 'class' : 'classes'}
         </span>
         <span class="thr-hint">
-          Estimated from PR curves; run <span class="mono">folo val --save-thresholds</span> for exact 0.001-grid sweep.
+          {cal().hasMeasuredPerClass
+            ? 'Measured per-class F1 thresholds from evaluation.'
+            : (
+                <>
+                  Measured global best-F1 threshold across classes; run <span class="mono">folo val --save-thresholds</span> for per-class 0.001-grid calibration.
+                </>
+              )}
         </span>
       </div>
       <div class="thr-actions">

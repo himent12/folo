@@ -195,7 +195,7 @@ export default function BenchCompare() {
 
   const exportConditions = () => condRows.peek().map((r) => ({ key: r.key, name: nameOf(r.key), values: r.values }));
   function exportComparison(format: 'csv' | 'json') {
-    const msg = runCompareDownload(format, bench(), shown.peek(), rows.peek(), old.peek(), best, caveats.peek(), res.peek(), exportConditions());
+    const msg = runCompareDownload(format, bench(), shown.peek(), rows.peek(), old.peek(), best, caveats.peek(), res.peek(), exportConditions(), labelOf);
     if (msg) announce(msg);
   }
   async function copyComparisonMarkdown() {

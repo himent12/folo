@@ -54,12 +54,16 @@ export interface ThresholdHandoff {
   classes: string[];
 }
 
-let stagedHandoff: { server: string; handoff: ThresholdHandoff } | null = null;
+/** How long a staged Model Detail handoff stays valid before expiring. */
+export const HANDOFF_TTL_MS = 30_000;
+
+let stagedHandoff: { server: string; stagedAt: number; handoff: ThresholdHandoff } | null = null;
 
 /** Stages calibrated thresholds for the next Playground mount/navigation on this server. */
 export function stageThresholdHandoff(h: ThresholdHandoff): void {
   stagedHandoff = {
     server: hub.server,
+    stagedAt: Date.now(),
     handoff: {
       ...h,
       globalConf: roundConf(h.globalConf),
@@ -69,13 +73,19 @@ export function stageThresholdHandoff(h: ThresholdHandoff): void {
   };
 }
 
-/** Consumes a staged calibrated threshold handoff matching `modelId` (or clears it if for another model). */
+/**
+ * Consumes a staged calibrated threshold handoff matching `modelId`. Always clears any pending handoff
+ * (even on server mismatch, TTL expiry, or mismatched/absent modelId) so an abandoned handoff can never
+ * hijack a later unrelated Playground visit.
+ */
 export function consumeThresholdHandoff(modelId: string | null): ThresholdHandoff | null {
-  if (!stagedHandoff || stagedHandoff.server !== hub.server) return null;
-  const h = stagedHandoff.handoff;
+  const pending = stagedHandoff;
   stagedHandoff = null;
-  if (modelId && h.modelId !== modelId) return null;
-  return h;
+  if (!pending) return null;
+  if (pending.server !== hub.server) return null;
+  if (Date.now() - pending.stagedAt > HANDOFF_TTL_MS) return null;
+  if (!modelId || pending.handoff.modelId !== modelId) return null;
+  return pending.handoff;
 }
 
 const MAX_PCC_URL_LEN = 1200;
@@ -92,10 +102,16 @@ export function serializePerClassParam(map: Readonly<Record<number, number>> | n
   return encoded.length <= MAX_PCC_URL_LEN ? encoded : null;
 }
 
-/** Parses `pcc=0:0.42,1:0.35` from URL query parameters, returning null when absent or invalid. */
+/**
+ * Parses `pcc` from URL query parameters:
+ * - `null` when `pcc` is absent or contains only malformed tokens;
+ * - `{}` when `pcc=` is explicitly present and empty (clears any saved per-class overrides on mount);
+ * - `{ [id]: conf }` when one or more valid `id:conf` entries are present.
+ */
 export function perClassFromUrl(q: URLSearchParams): PerClassConfMap | null {
-  const raw = q.get('pcc');
-  if (!raw || !raw.trim()) return null;
+  if (!q.has('pcc')) return null;
+  const raw = q.get('pcc') ?? '';
+  if (!raw.trim()) return {};
   const out: PerClassConfMap = {};
   for (const token of raw.split(',')) {
     const trimmed = token.trim();
@@ -188,6 +204,10 @@ export function playgroundPath(s: {
   iou: number;
   maxDet: number;
   perClassConf?: Readonly<Record<number, number>> | null;
+  /** Keep `conf` in the URL even when equal to `DEFAULTS.conf` (so threshold links never inherit unrelated saved conf). */
+  explicitConf?: boolean;
+  /** Keep `pcc=` in the URL even when `perClassConf` is empty (so threshold links explicitly clear saved overrides). */
+  explicitPerClass?: boolean;
   compare?: boolean;
   modelB?: string | null;
   view?: CompareViewMode;
@@ -210,11 +230,12 @@ export function playgroundPath(s: {
     q.set('split', s.source.img.split);
     if (s.source.at !== undefined) q.set('at', String(s.source.at));
   }
-  if (s.conf !== DEFAULTS.conf) q.set('conf', String(s.conf));
+  const pcc = serializePerClassParam(s.perClassConf);
+  if (s.conf !== DEFAULTS.conf || s.explicitConf || pcc !== null) q.set('conf', String(s.conf));
   if (s.iou !== DEFAULTS.iou) q.set('iou', String(s.iou));
   if (s.maxDet !== DEFAULTS.maxDet) q.set('max', String(s.maxDet));
-  const pcc = serializePerClassParam(s.perClassConf);
-  if (pcc) q.set('pcc', pcc);
+  if (pcc !== null) q.set('pcc', pcc);
+  else if (s.explicitPerClass) q.set('pcc', '');
   const qs = String(q);
   return `/playground${qs ? `?${qs}` : ''}`;
 }

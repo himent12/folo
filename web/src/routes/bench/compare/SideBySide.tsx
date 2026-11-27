@@ -91,13 +91,15 @@ export default function SideBySide(props: SideBySideProps) {
     );
   };
 
+  const showExport = computed(() => props.shown.length >= 2 && !!(props.onCopyMarkdown || props.onDownloadCsv));
+
   return (
     <Panel
       title="Side by side"
       meta="against the first, the baseline"
       pad="none"
       actions={
-        props.shown.length >= 2 && (props.onCopyMarkdown || props.onDownloadCsv) ? (
+        showExport.get() ? (
           <>
             {props.onCopyMarkdown ? (
               <Button size="sm" variant="ghost" icon={props.copiedMd ? Check : Copy} data-compare-copy-md onclick={props.onCopyMarkdown}>

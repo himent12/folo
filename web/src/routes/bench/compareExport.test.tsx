@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 // Tests for BenchCompare side-by-side CSV & Markdown export (overall score + axis deltas +
-// per-stress-condition comparison rows) and SideBySide panel action buttons.
+// per-stress-condition comparison rows, strict GFM table/label escaping, disambiguated colliding headers,
+// and SideBySide panel action buttons).
 import { flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, type Rendered } from '../../../framework/testing';
@@ -10,11 +11,32 @@ import type { Bench, BenchEntry } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import { toast } from '$lib/ui/toast';
 import BenchCompare from '../BenchCompare';
+import { entryLabels } from './compare/state';
 import { compareExport, compareMarkdown } from './export';
 
 let target: HTMLElement;
 let view: Rendered | undefined;
 let downloads: Array<{ filename: string; text: string }> = [];
+
+/** Splits a GFM table row into unescaped cell strings respecting backslash escapes. */
+function splitGfmCells(line: string): string[] {
+  const inner = line.trim().replace(/^\|/, '').replace(/\|$/, '');
+  const cells: string[] = [];
+  let cur = '';
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i]!;
+    if (ch === '\\' && i + 1 < inner.length) {
+      cur += inner[++i]!;
+    } else if (ch === '|') {
+      cells.push(cur.trim());
+      cur = '';
+    } else {
+      cur += ch;
+    }
+  }
+  cells.push(cur.trim());
+  return cells;
+}
 
 beforeEach(() => {
   hub.api = new MockApi('normal', 0);
@@ -55,16 +77,17 @@ async function settle(rounds = 16) {
 }
 
 describe('compareExport & compareMarkdown with stress conditions', () => {
-  it('builds Markdown and CSV with overall score, axis deltas, per-stress-condition rows, and stale delta suppression', async () => {
+  it('builds Markdown and CSV with overall score, axis deltas, per-stress-condition rows, stale delta suppression, and strict GFM escaping', async () => {
     const bench = (await hub.api.bench('bn_3c90')) as Bench;
     const done = (await hub.api.benchEntries('bn_3c90')).filter((e) => e.status === 'done' && e.score);
-    const e0: BenchEntry = { ...done[0]!, name: 'base | v1' };
-    const e1: BenchEntry = { ...done[1]!, name: 'cand-v2' };
+    // Include adversarial GFM characters: backslash before pipe, trailing backslash, backticks, link syntax, emphasis.
+    const e0: BenchEntry = { ...done[0]!, name: 'foo\\|bar \\' };
+    const e1: BenchEntry = { ...done[1]!, name: '`cand` [v2](https://x) *b*' };
 
     const rows = [
       { key: 'score', label: 'Score', values: [72.4, 78.9], fmt: (v: number) => v.toFixed(1), d: 1 },
       { key: 'accuracy', label: 'Accuracy · mAP50-95', values: [0.612, 0.654], fmt: (v: number) => v.toFixed(3), d: 3 },
-      { key: 'robustness', label: 'Robustness', values: [0.80, 0.85], fmt: (v: number) => v.toFixed(2), d: 2 },
+      { key: 'robustness', label: 'Robustness', values: [0.80, Number.NaN], fmt: (v: number) => v.toFixed(2), d: 2 },
     ];
     const conditions = [
       { key: 'blur', name: 'Motion blur', values: [0.78, 0.86] },
@@ -77,7 +100,7 @@ describe('compareExport & compareMarkdown with stress conditions', () => {
       rows,
       [false, false],
       (_k, vals) => (vals[1]! > vals[0]! ? new Set([1]) : new Set()),
-      [{ text: 'cand-v2 ran 1 of 2 conditions.' }],
+      [{ text: 'cand ran 1 of 2 conditions.' }],
       [undefined, undefined],
       conditions,
     );
@@ -92,24 +115,34 @@ describe('compareExport & compareMarkdown with stress conditions', () => {
     expect(json.conditions[0]!.values[1]!.delta_printed).toBe('+8 pp');
     expect(json.conditions[1]!.values[1]!.delta_printed).toBeNull();
 
-    // Markdown includes escaped headers, bold winners, axis deltas, stress conditions table, and notes.
+    // Markdown escapes GFM metacharacters so every table row preserves exact column count (4) and literal text.
     const md = compareMarkdown(
       bench,
       [e0, e1],
       rows,
       [false, false],
       (_k, vals) => (vals[1]! > vals[0]! ? new Set([1]) : new Set()),
-      [{ text: 'cand-v2 ran 1 of 2 conditions.' }],
+      [{ text: 'cand ran 1 of 2 conditions.' }],
       conditions,
     );
     expect(md).toContain(`# Benchmark comparison: ${bench.name}`);
-    expect(md).toContain('base \\| v1 (baseline)');
+    const tableLines = md.split('\n').filter((l) => l.startsWith('|'));
+    expect(tableLines.length).toBeGreaterThanOrEqual(8);
+    for (const line of tableLines) {
+      expect(splitGfmCells(line)).toHaveLength(4);
+    }
+    const headerCells = splitGfmCells(tableLines[0]!);
+    expect(headerCells[1]).toBe('foo\\|bar \\ (baseline)');
+    expect(headerCells[2]).toBe('`cand` [v2](https://x) *b*');
+    // Raw escaped form neutralizes backticks, brackets, asterisks, and backslash-before-pipe.
+    expect(tableLines[0]).toContain('foo\\\\\\|bar \\\\ (baseline)');
+    expect(tableLines[0]).toContain('\\`cand\\` \\[v2\\](https://x) \\*b\\*');
     expect(md).toContain('| Score | 72.4 | **78.9** | +6.5 |');
-    expect(md).toContain('| Accuracy · mAP50-95 | 0.612 | **0.654** | +0.042 |');
+    // Non-finite value renders em-dash rather than NaN.
+    expect(md).toContain('| Robustness | 0.80 | — | — |');
     expect(md).toContain('## Stress conditions (accuracy kept)');
     expect(md).toContain('| Motion blur | 78% | 86% | +8 pp |');
     expect(md).toContain('| Low light | 82% | — | — |');
-    expect(md).toContain('- cand-v2 ran 1 of 2 conditions.');
 
     // Earlier-version entry suppresses condition and axis deltas in Markdown.
     const staleMd = compareMarkdown(bench, [e0, e1], rows, [false, true], () => new Set(), [], conditions);
@@ -117,10 +150,12 @@ describe('compareExport & compareMarkdown with stress conditions', () => {
     expect(staleMd).toContain('| Motion blur | 78% | 86% | — |');
   });
 
-  it('wires Copy Markdown and Download CSV buttons in SideBySide panel header on BenchCompare', async () => {
+  it('wires Copy Markdown and Download CSV buttons in SideBySide panel header on BenchCompare with disambiguated colliding headers', async () => {
+    const bench = await hub.api.bench('bn_3c90');
     const entries = (await hub.api.benchEntries('bn_3c90')).filter((e) => e.status === 'done' && e.score);
-    const [e0, e1] = entries;
-    router.route = parse(`#/benchmarks/bn_3c90/compare?entries=${e0!.id},${e1!.id}`);
+    // Include all 3 done entries (bn_3c90 has colliding entry names to verify CSV disambiguation).
+    const [e0, e1, e2] = entries;
+    router.route = parse(`#/benchmarks/bn_3c90/compare?entries=${e0!.id},${e1!.id},${e2!.id}`);
     view = render(() => <BenchCompare />, target);
     await settle(20);
 
@@ -152,5 +187,11 @@ describe('compareExport & compareMarkdown with stress conditions', () => {
     expect(downloads[0]!.filename).toBe('benchmark-fasteners-val-compare.csv');
     expect(downloads[0]!.text).toContain('Score,');
     expect(downloads[0]!.text).toContain('Condition · ');
+    const labels = entryLabels(
+      [e0!, e1!, e2!],
+      [e0!, e1!, e2!].map((e) => e.fingerprint !== bench.fingerprint),
+    );
+    expect(downloads[0]!.text).toContain(`${labels.get(e0!.id)!} (baseline)`);
+    expect(downloads[0]!.text).toContain(labels.get(e1!.id)!);
   });
 });

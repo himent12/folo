@@ -84,10 +84,11 @@ export default function CloudPanel(props: CloudPanelProps) {
     return !released.get() && c.deadline ? `${hoursText(c.max_hours)} · stops by ${timeOfDay(c.deadline)}` : hoursText(c.max_hours);
   });
   const recovery = () => props.recovery ?? null;
+  const isFailureRecovery = (kind: SpotRecovery['kind']) => kind === 'exhausted' || kind === 'no_checkpoint' || kind === 'failed';
   const recoveryTone = computed(() => {
     const rec = recovery();
     if (!rec) return null;
-    if (rec.kind === 'exhausted' || rec.kind === 'no_checkpoint') return 'danger' as const;
+    if (isFailureRecovery(rec.kind)) return 'danger' as const;
     if (rec.kind === 'recovering' || rec.kind === 'stopped') return 'warning' as const;
     return 'neutral' as const;
   });
@@ -96,6 +97,7 @@ export default function CloudPanel(props: CloudPanelProps) {
     if (!rec || rec.attempts <= 0) return null;
     const count = rec.maxAttempts !== null ? `${rec.attempts} of ${rec.maxAttempts}` : `${rec.attempts}`;
     if (rec.kind === 'exhausted') return `${count} · exhausted`;
+    if (rec.kind === 'failed') return `${count} · failed`;
     if (rec.resumeEpoch !== null) return `${count} · epoch ${rec.resumeEpoch}`;
     return count;
   });
@@ -109,7 +111,7 @@ export default function CloudPanel(props: CloudPanelProps) {
         recovery() ? (
           <span data-spot-recovery-badge={recovery()!.kind}>
             <Badge tone={recoveryTone.get() ?? 'neutral'}>
-              {recovery()!.kind === 'exhausted' || recovery()!.kind === 'no_checkpoint' ? (
+              {isFailureRecovery(recovery()!.kind) ? (
                 <TriangleAlert size={12} aria-hidden="true" />
               ) : (
                 <RotateCcw size={12} aria-hidden="true" />
@@ -162,12 +164,12 @@ export default function CloudPanel(props: CloudPanelProps) {
             {recovery() ? (
               <p
                 class="recovery-line"
-                class:danger={recovery()!.kind === 'exhausted' || recovery()!.kind === 'no_checkpoint'}
+                class:danger={isFailureRecovery(recovery()!.kind)}
                 class:recovering={recovery()!.kind === 'recovering'}
-                role={recovery()!.kind === 'exhausted' || recovery()!.kind === 'no_checkpoint' ? 'alert' : 'status'}
+                role={isFailureRecovery(recovery()!.kind) ? 'alert' : 'status'}
                 data-spot-recovery={recovery()!.kind}
               >
-                {recovery()!.kind === 'exhausted' || recovery()!.kind === 'no_checkpoint' ? (
+                {isFailureRecovery(recovery()!.kind) ? (
                   <TriangleAlert size={14} strokeWidth={2} aria-hidden="true" />
                 ) : (
                   <RotateCcw size={14} strokeWidth={2} aria-hidden="true" />

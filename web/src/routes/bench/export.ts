@@ -157,7 +157,9 @@ export function leaderboardExport(bench: Bench, entries: readonly BenchEntry[], 
   };
 }
 
-const escMd = (s: string) => s.replaceAll('|', '\\|').replace(/[\r\n]+/g, ' ');
+// Escapes dynamic text as literal GitHub-Flavored Markdown table/inline text: collapses newlines and
+// escapes backslashes first alongside pipes, code spans, emphasis, strikethrough, link brackets, and HTML delimiters.
+const escMd = (s: string) => s.replace(/[\r\n]+/g, ' ').replace(/[\\|`*_~[\]<>]/g, '\\$&');
 
 function conditionDelta(v: number | null, base: number | null, comparable: boolean): { delta: number | null; printed: string | null } {
   if (!comparable || v === null || base === null || !Number.isFinite(v) || !Number.isFinite(base)) {
@@ -313,14 +315,16 @@ export function compareMarkdown(
     const cells: string[] = [escMd(row.label)];
     for (let i = 0; i < shown.length; i++) {
       const v = row.values[i] ?? null;
-      if (v === null) {
+      const finiteV = v !== null && Number.isFinite(v);
+      if (!finiteV) {
         cells.push('—');
       } else {
         const printed = escMd(row.fmt(v));
         cells.push(winners.has(i) ? `**${printed}**` : printed);
       }
       if (i > 0) {
-        const d = !old[i] && !old[0] ? diffAsPrinted(v, baseVal, row.d) : null;
+        const finiteBase = baseVal !== null && Number.isFinite(baseVal);
+        const d = !old[i] && !old[0] && finiteV && finiteBase ? diffAsPrinted(v, baseVal, row.d) : null;
         cells.push(d ? escMd(d) : '—');
       }
     }
@@ -366,9 +370,10 @@ export function runCompareDownload(
   caveats: readonly { text: string }[],
   results: readonly (BenchResult | undefined)[],
   conditions: readonly CompareConditionRow[],
+  labelOf?: (e: BenchEntry) => string,
 ): string | null {
   if (!bench || shown.length < 2) return null;
-  const payload = compareExport(bench, shown, rows, old, best, caveats, results, conditions);
+  const payload = compareExport(bench, shown, rows, old, best, caveats, results, conditions, labelOf);
   const ok =
     format === 'csv'
       ? exportTableCsv(payload.filenameBase, payload.headers, payload.rows)

@@ -94,25 +94,36 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
     k.runOn.set(saved.runOn);
     if (saved.inference && k.inference) k.inference.restore(saved.inference);
   }
+  // Track the active per-class origin (so handoff / URL overrides are never misattributed to a prior saved model
+  // while the models list is still loading) and preserve explicit default threshold links across debounced URL writes.
+  let perClassOrigin: { modelId: string | null; classes: string[] } | null = null;
+  let keepExplicitConf = handoff !== null || url.conf === DEFAULTS.conf;
+  let keepExplicitEmptyPcc =
+    (handoff !== null && Object.keys(handoff.perClassConf).length === 0) ||
+    (urlPcc !== null && Object.keys(urlPcc).length === 0);
+
   if (handoff && k.perClassConf) {
-    k.perClassConf.set(normalizePerClassConf(handoff.perClassConf));
-    k.onRestorePerClassOrigin?.({ modelId: handoff.modelId, classes: handoff.classes });
-    const n = Object.keys(handoff.perClassConf).length;
-    toast.success(
-      'Calibrated thresholds applied',
-      `Global ${formatConfThreshold(handoff.globalConf)} and ${n} ${n === 1 ? 'class threshold' : 'class thresholds'}${handoff.modelName ? ` from ${handoff.modelName}` : ''}.`,
-      undefined,
-      { key: 'playground-thresholds' },
-    );
-  } else if (urlPcc && k.perClassConf) {
+    const norm = normalizePerClassConf(handoff.perClassConf);
+    perClassOrigin = { modelId: handoff.modelId, classes: [...handoff.classes] };
+    k.perClassConf.set(norm);
+    k.onRestorePerClassOrigin?.(perClassOrigin);
+    const n = Object.keys(norm).length;
+    const detail =
+      n > 0
+        ? `Global ${formatConfThreshold(handoff.globalConf)} and ${n} ${n === 1 ? 'class threshold' : 'class thresholds'}${handoff.modelName ? ` from ${handoff.modelName}` : ''}.`
+        : `Global confidence ${formatConfThreshold(handoff.globalConf)}${handoff.modelName ? ` from ${handoff.modelName}` : ''}.`;
+    toast.success('Calibrated thresholds applied', detail, undefined, { key: 'playground-thresholds' });
+  } else if (urlPcc !== null && k.perClassConf) {
+    perClassOrigin = url.model ? { modelId: url.model, classes: [] } : null;
     k.perClassConf.set(normalizePerClassConf(urlPcc));
-    if (url.model) k.onRestorePerClassOrigin?.({ modelId: url.model, classes: [] });
+    if (perClassOrigin) k.onRestorePerClassOrigin?.(perClassOrigin);
   } else if (saved?.perClassConf && k.perClassConf) {
-    k.perClassConf.set(normalizePerClassConf(saved.perClassConf));
-    k.onRestorePerClassOrigin?.({
+    perClassOrigin = {
       modelId: saved.perClassModelId ?? saved.pred?.model_id ?? null,
-      classes: saved.perClassClasses ?? [],
-    });
+      classes: [...(saved.perClassClasses ?? [])],
+    };
+    k.perClassConf.set(normalizePerClassConf(saved.perClassConf));
+    k.onRestorePerClassOrigin?.(perClassOrigin);
   }
   k.conf.set(handoff?.globalConf ?? url.conf ?? saved?.conf ?? DEFAULTS.conf);
   k.iou.set(url.iou ?? saved?.iou ?? DEFAULTS.iou);
@@ -190,13 +201,27 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
       if (k.compareView) k.compareView.set(c.view ?? 'side-by-side');
     }
     if (extHandoff && k.perClassConf) {
-      k.onRestorePerClassOrigin?.({ modelId: extHandoff.modelId, classes: extHandoff.classes });
-      k.perClassConf.set(normalizePerClassConf(extHandoff.perClassConf));
+      const norm = normalizePerClassConf(extHandoff.perClassConf);
+      perClassOrigin = { modelId: extHandoff.modelId, classes: [...extHandoff.classes] };
+      keepExplicitConf = true;
+      keepExplicitEmptyPcc = Object.keys(norm).length === 0;
+      k.onRestorePerClassOrigin?.(perClassOrigin);
+      k.perClassConf.set(norm);
       k.conf.set(extHandoff.globalConf);
     } else {
-      if (extPcc && k.perClassConf) {
-        if (u.model) k.onRestorePerClassOrigin?.({ modelId: u.model, classes: [] });
-        k.perClassConf.set(normalizePerClassConf(extPcc));
+      keepExplicitConf = u.conf === DEFAULTS.conf;
+      keepExplicitEmptyPcc = extPcc !== null && Object.keys(extPcc).length === 0;
+      if (k.perClassConf) {
+        if (extPcc !== null) {
+          perClassOrigin = u.model ? { modelId: u.model, classes: [] } : null;
+          if (perClassOrigin) k.onRestorePerClassOrigin?.(perClassOrigin);
+          k.perClassConf.set(normalizePerClassConf(extPcc));
+        } else {
+          // Omitting `pcc` on a live history/URL navigation clears overrides, matching omitted `conf`/`iou`/`max`.
+          perClassOrigin = u.model ? { modelId: u.model, classes: [] } : null;
+          k.onRestorePerClassOrigin?.(perClassOrigin ?? { modelId: null, classes: [] });
+          k.perClassConf.set({});
+        }
       }
       k.conf.set(u.conf ?? DEFAULTS.conf);
     }
@@ -248,6 +273,8 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
       iou: k.iou.peek(),
       maxDet: k.maxDet.peek(),
       perClassConf: k.perClassConf?.peek(),
+      explicitConf: keepExplicitConf,
+      explicitPerClass: keepExplicitEmptyPcc,
       compare: k.compare?.peek(),
       modelB: k.modelB ? untrack(() => k.modelB!()) : null,
       view: k.compareView?.peek(),
@@ -275,11 +302,16 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
       ...(k.perClassConf
         ? (() => {
             const cls = k.classes ? [...k.classes()] : [];
-            const keepOrigin = cls.length === 0 && !!(saved?.perClassModelId ?? saved?.pred?.model_id);
+            const curModel = k.model();
+            if (cls.length > 0) {
+              perClassOrigin = { modelId: curModel, classes: cls };
+            }
+            const keepOrigin =
+              cls.length === 0 && perClassOrigin !== null && (curModel === null || perClassOrigin.modelId === curModel);
             return {
               perClassConf: normalizePerClassConf(k.perClassConf.get()),
-              perClassModelId: keepOrigin ? (saved?.perClassModelId ?? saved?.pred?.model_id ?? null) : k.model(),
-              perClassClasses: keepOrigin ? (saved?.perClassClasses ?? []) : cls,
+              perClassModelId: keepOrigin ? perClassOrigin!.modelId : curModel,
+              perClassClasses: keepOrigin ? [...perClassOrigin!.classes] : cls,
             };
           })()
         : {}),
@@ -303,6 +335,8 @@ export function keepSession(k: Kept): (model: string, s: Source, runOn: string, 
       iou: k.iou.get(),
       maxDet: k.maxDet.get(),
       perClassConf: k.perClassConf?.get(),
+      explicitConf: keepExplicitConf,
+      explicitPerClass: keepExplicitEmptyPcc,
       compare: cmpOn,
       modelB: cmpOn && k.modelB ? k.modelB() : null,
       view: cmpOn && k.compareView ? k.compareView.get() : undefined,

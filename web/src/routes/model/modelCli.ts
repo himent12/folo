@@ -126,7 +126,7 @@ export function buildValCli(
   const { part, placeholder } = modelFlag(model);
   const dataPart = opts?.datasetPath ? flagPart('--data', opts.datasetPath) : '--data <dataset>';
   const parts = ['folo val', part, dataPart];
-  if (opts?.split === 'train') parts.push('--split', 'train');
+  if (opts?.split && opts.split !== 'val') parts.push('--split', opts.split);
   if (opts?.saveThresholds !== false) {
     const file = opts?.thresholdsPath?.trim() || 'thresholds.json';
     parts.push(flagPart('--save-thresholds', file));

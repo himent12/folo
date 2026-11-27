@@ -197,7 +197,7 @@ export default function Model() {
       const n = cal.payload.per_class.length;
       toast.success(
         'Thresholds downloaded',
-        `Saved global ${formatConfThreshold(cal.payload.global.best_conf)} and ${n} ${n === 1 ? 'class threshold' : 'class thresholds'} (ready for folo predict --thresholds or Playground).`,
+        `Saved measured best-F1 threshold ${formatConfThreshold(cal.payload.global.best_conf)} across ${n} ${n === 1 ? 'class' : 'classes'} (ready for folo predict --thresholds or Playground).`,
         undefined,
         { key: 'model-thresholds' },
       );
@@ -223,6 +223,8 @@ export default function Model() {
         iou: PLAYGROUND_DEFAULTS.iou,
         maxDet: PLAYGROUND_DEFAULTS.maxDet,
         perClassConf: cal.perClassConf,
+        explicitConf: true,
+        explicitPerClass: true,
       }),
     );
   }

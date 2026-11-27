@@ -268,7 +268,7 @@ export function buildCheckpointCli(
   const dataPart = dataset?.path ? flagArg('--data', dataset.path) : `--data <path to ${dataPlaceholder}>`;
 
   const valParts = ['folo val', modelPart, dataPart];
-  if (evalOn?.split === 'train') valParts.push('--split train');
+  if (evalOn?.split && evalOn.split !== 'val') valParts.push(`--split ${evalOn.split}`);
 
   const predictParts = ['folo predict', modelPart, '<images>'];
 
