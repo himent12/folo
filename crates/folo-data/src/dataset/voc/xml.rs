@@ -126,7 +126,7 @@ pub(crate) fn decode_entities(raw: &str, line: usize) -> Result<String, String> 
 }
 
 /// Validates a Unicode scalar value against XML 1.0 `Char` (forbids NUL and invalid control chars).
-fn valid_xml_char(code: u32) -> Option<char> {
+pub(crate) fn valid_xml_char(code: u32) -> Option<char> {
     let ok = matches!(code, 0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF);
     if ok { char::from_u32(code) } else { None }
 }

@@ -85,11 +85,14 @@ pub mod warp;
 pub use audit::{
     AuditImageRef, AuditOptions, AuditReport, DEFAULT_DHASH_THRESHOLD, DuplicateGroup, NearDuplicateGroup,
     NearDuplicateLeakage, PerceptualImageRef, SplitLeakage, UnreadableImage, audit_dataset,
-    audit_dataset_with, dhash_file, dhash_image, hamming_distance,
+    audit_dataset_with, dhash_bytes, dhash_file, dhash_image, hamming_distance,
 };
 pub use augment::{AugmentConfig, Fetched, TrainTransform, Transformed};
 pub use bbox::BBox;
-pub use convert::{CocoExportOptions, CocoExportReport, CocoImageMode, CocoSplitReport, export_coco};
+pub use convert::{
+    CocoExportOptions, CocoExportReport, CocoImageMode, CocoSplitReport, VocExportOptions, VocExportReport,
+    VocImageMode, VocSplitReport, export_coco, export_voc,
+};
 pub use curate::{
     ClassNormalize, CollisionPolicy, FilterConfig, MergeConfig, MergeReport, MergeSplitPolicy, RemapConfig,
     filter_dataset, merge_datasets, merge_paths, remap_classes, write_filtered, write_merged,

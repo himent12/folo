@@ -169,6 +169,11 @@ impl AuditReport {
         self.duplicate_groups.iter().map(|g| g.images.len().saturating_sub(1)).sum()
     }
 
+    /// Total redundant images across all perceptual near-duplicate groups (`sum(group.images.len() - 1)`).
+    pub fn near_duplicate_image_count(&self) -> usize {
+        self.near_duplicate_groups.iter().map(|g| g.images.len().saturating_sub(1)).sum()
+    }
+
     /// True if any exact duplicate images were found (within or across splits).
     pub fn has_duplicates(&self) -> bool {
         !self.duplicate_groups.is_empty()
@@ -280,6 +285,13 @@ pub fn dhash_image(image: &Image) -> u64 {
     hash
 }
 
+/// Decodes an encoded image byte slice (JPEG, PNG, BMP, WebP, honouring JPEG EXIF orientation) and computes its
+/// 64-bit perceptual difference hash ([`dhash_image`]).
+pub fn dhash_bytes(bytes: &[u8]) -> Result<u64> {
+    let img = crate::par::serial(|| crate::image::decode(bytes))?;
+    Ok(dhash_image(&img))
+}
+
 /// Reads and decodes the image at `path` (honouring EXIF orientation and [`crate::guard`]) and computes its
 /// 64-bit perceptual difference hash ([`dhash_image`]).
 pub fn dhash_file(path: &Path) -> Result<u64> {
@@ -324,6 +336,11 @@ pub fn audit_dataset_with(dataset: &LoadedDataset, opts: &AuditOptions) -> Audit
             len: u64,
             dhash: std::result::Result<u64, String>,
         }
+        // Cache successful dHashes by exact `(digest, len)` so byte-identical copies reuse a previously decoded
+        // dHash without re-decoding (simultaneous first misses may decode independently; decode errors are never
+        // cached so every unreadable file keeps its own path in the error message).
+        let decoded_cache: std::sync::Mutex<HashMap<(u128, u64), u64>> =
+            std::sync::Mutex::new(HashMap::new());
         let scanned: Vec<std::result::Result<ScannedFile, String>> = entries
             .par_iter()
             .map(|(_, _, path)| {
@@ -331,11 +348,23 @@ pub fn audit_dataset_with(dataset: &LoadedDataset, opts: &AuditOptions) -> Audit
                 let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
                 let digest = hash128(&bytes);
                 let len = bytes.len() as u64;
-                let dhash = crate::par::serial(|| {
-                    crate::image::decode_with_path(&bytes, path)
-                        .map(|img| dhash_image(&img))
-                        .map_err(|e| e.to_string())
-                });
+                let cached = decoded_cache.lock().ok().and_then(|m| m.get(&(digest, len)).copied());
+                let dhash = match cached {
+                    Some(h) => Ok(h),
+                    None => {
+                        let res = crate::par::serial(|| {
+                            crate::image::decode_with_path(&bytes, path)
+                                .map(|img| dhash_image(&img))
+                                .map_err(|e| e.to_string())
+                        });
+                        if let Ok(h) = res
+                            && let Ok(mut m) = decoded_cache.lock()
+                        {
+                            m.insert((digest, len), h);
+                        }
+                        res
+                    }
+                };
                 Ok(ScannedFile { digest, len, dhash })
             })
             .collect();
