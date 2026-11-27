@@ -709,21 +709,38 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
 
       const callsBefore = predictSpy.mock.calls.length;
       const stepFwd = bar.querySelector<HTMLButtonElement>('button[aria-label="Step forward 1 frame"]')!;
+      const detectBtn = bar.querySelector<HTMLButtonElement>('button[data-video-action="detect"]')!;
       stepFwd.click();
       flushSync();
+      // While seek is still in flight, Detect frame is disabled so Results must NOT instruct the user to click it.
+      expect(detectBtn.disabled).toBe(true);
+      expect(target.querySelector('#pg-panel .placeholder')?.textContent).toBe('Preview frame not yet detected.');
+      expect(target.querySelector('.vb-facts, .vfoot')?.textContent).toContain('Preview frame — not yet detected');
+
       decoder.dispatchEvent(new Event('seeked'));
       flushSync();
 
       expect(predictSpy.mock.calls.length).toBe(callsBefore);
-      // Stale Compare classDiff summary, viewer header/footer facts, Detections rows, Classes counts, and Copy JSON all clear until Detect frame runs.
+      expect(detectBtn.disabled).toBe(false);
+      // Stale Compare classDiff summary, viewer facts, Timing bar, Detections rows, Classes counts, and Copy JSON all clear until Detect frame runs.
       expect(target.querySelector('[data-class-diff]')).toBeNull();
       expect(target.querySelector('.copy-json')).toBeNull();
       expect(target.querySelectorAll('#pg-panel tbody tr')).toHaveLength(0);
-      expect(target.querySelector('#pg-panel .placeholder')?.textContent).toContain('Detect frame');
+      expect(target.querySelector('#pg-panel .placeholder')?.textContent).toContain('click Detect frame');
       const viewerFacts = target.querySelector('.vb-facts, .vfoot')?.textContent ?? '';
       expect(viewerFacts).toContain('Preview frame — not yet detected');
       expect(viewerFacts).not.toContain('shown');
-      expect(target.querySelector('.cls-list')).toBeNull();
+      expect(target.querySelector('.tbar')).toBeNull();
+
+      // Classes tab shows no stale count badge and no stale class rows (`ul.counts`).
+      const classesTab = [...target.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent?.includes('Classes'));
+      if (classesTab) {
+        expect(classesTab.textContent?.trim()).toBe('Classes');
+        classesTab.click();
+        flushSync();
+        expect(target.querySelector('ul.counts')).toBeNull();
+        expect(target.querySelector('#pg-panel .placeholder')?.textContent).toContain('click Detect frame');
+      }
 
       // Switching to the JSON tab while unsynced never falls through to stale detection rows.
       const jsonTab = [...target.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((b) => b.textContent?.trim() === 'JSON');
@@ -731,12 +748,15 @@ describe('Playground: Local Video Frame Scrubber & Live Webcam', () => {
       jsonTab!.click();
       flushSync();
       expect(target.querySelectorAll('#pg-panel tbody tr')).toHaveLength(0);
-      expect(target.querySelector('#pg-panel .placeholder')?.textContent).toContain('Detect frame');
+      expect(target.querySelector('#pg-panel .placeholder')?.textContent).toContain('click Detect frame');
 
-      // When a video decode error occurs (`videoErr`), do not instruct the user to click a disabled Detect frame button.
+      // When a video decode error occurs (`videoErr`), neither Results nor ImagePanel says Detect frame or Waiting for a model.
       decoder.dispatchEvent(new Event('error'));
       flushSync();
       expect(target.querySelector('#pg-panel .placeholder')?.textContent ?? '').not.toContain('Detect frame');
+      const errFacts = target.querySelector('.vb-facts, .vfoot')?.textContent ?? '';
+      expect(errFacts).toContain('Video unavailable');
+      expect(errFacts).not.toContain('Waiting for a model');
     } finally {
       URL.createObjectURL = origCreateUrl;
       URL.revokeObjectURL = origRevokeUrl;

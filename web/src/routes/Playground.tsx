@@ -561,7 +561,8 @@ export default function Playground() {
     else cmp.toggleHiddenBName(nameB);
   }
 
-  const unsyncedPreviewReady = () => isUnsyncedVideoFn() && mediaSession.videoReady.get() && !mediaSession.videoErr.get();
+  const unsyncedPreviewState = (): 'ready' | 'loading' | 'error' | null =>
+    !isUnsyncedVideoFn() ? null : mediaSession.videoErr.get() ? 'error' : mediaSession.videoReady.get() && !mediaSession.seeking.get() ? 'ready' : 'loading';
   const classList = () => {
     const u = isUnsyncedVideoFn();
     return (
@@ -611,11 +612,11 @@ export default function Playground() {
       narrow={narrow.current}
       modelA={model.get()}
       modelB={cmp.modelB.get()}
-      predA={pred.get()}
-      predB={cmp.predB.get()}
+      predA={isUnsyncedVideoFn() ? null : pred.get()}
+      predB={isUnsyncedVideoFn() ? null : cmp.predB.get()}
       predictingA={predicting.get()}
       predictingB={cmp.predictingB.get()}
-      resultMsA={result.get()?.ms ?? null}
+      resultMsA={isUnsyncedVideoFn() ? null : (result.get()?.ms ?? null)}
       adapter={engine.info?.adapter}
     />
   );
@@ -709,7 +710,7 @@ export default function Playground() {
     return (
       <ResultsPanel
         rail={rail}
-        unsyncedPreview={unsyncedPreviewReady()}
+        unsyncedPreview={unsyncedPreviewState()}
         classCount={unsynced ? 0 : showingB.get() ? cmp.countsB.get().length : counts.get().length}
         classList={classList}
         showAllButton={showAllButton}
@@ -852,7 +853,7 @@ export default function Playground() {
                 bind:hover={hover}
                 pickFromImage={pickFromImage}
                 predicting={predicting.get()}
-                unsyncedPreview={unsyncedPreviewReady()}
+                unsyncedPreview={unsyncedPreviewState()}
                 engine={engine}
                 sheetShown={sheetShown.get()}
                 tablet={tablet.get()}
@@ -929,7 +930,7 @@ export default function Playground() {
                 compareSummary={cmp.compare.get() ? () => compareSummary(true) : null}
                 detections={() => results(true)}
                 timing={timingBody}
-                where={cmp.compare.get() ? null : pred.get() ? where.get() : null}
+                where={cmp.compare.get() || isUnsyncedVideoFn() ? null : pred.get() ? where.get() : null}
               />
             )}
           </div>

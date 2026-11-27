@@ -87,7 +87,7 @@ export interface ImagePanelProps {
   hover?: Det | null;
   pickFromImage: (i: number) => void;
   predicting: boolean;
-  unsyncedPreview?: boolean;
+  unsyncedPreview?: 'ready' | 'loading' | 'error' | null;
   engine: BrowserEngine;
   sheetShown: boolean;
   tablet: boolean;
@@ -249,7 +249,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                     </span>
                   ) : (
                     <span class="fi">
-                      {props.predicting ? 'Running inference…' : props.unsyncedPreview ? 'Preview frame — not yet detected' : props.weightsMissing ? 'Waiting for the model file' : 'Waiting for a model'}
+                      {props.predicting ? 'Running inference…' : props.unsyncedPreview === 'error' ? 'Video unavailable' : props.unsyncedPreview ? 'Preview frame — not yet detected' : props.weightsMissing ? 'Waiting for the model file' : 'Waiting for a model'}
                     </span>
                   )}
                 </span>
@@ -428,7 +428,7 @@ export default function ImagePanel(props: ImagePanelProps) {
                 </>
               ) : (
                 <>
-                  <span class="faint">{props.predicting ? 'Running inference…' : props.unsyncedPreview ? 'Preview frame — not yet detected' : props.weightsMissing ? 'Waiting for the model file' : 'Waiting for a model'}</span>
+                  <span class="faint">{props.predicting ? 'Running inference…' : props.unsyncedPreview === 'error' ? 'Video unavailable' : props.unsyncedPreview ? 'Preview frame — not yet detected' : props.weightsMissing ? 'Waiting for the model file' : 'Waiting for a model'}</span>
                   <span class="grow"></span>
                 </>
               )}
