@@ -222,7 +222,8 @@ pub(super) unsafe fn softmax_row_scaled_avx2(row: &mut [f32], scale: f32) {
     let mut non_fin = _mm256_setzero_si256();
     let mut i = 0;
 
-    // SAFETY: `i + 8 <= len` inside the loop; scalar tail handles `i..len`.
+    // SAFETY: `i + 8 <= len` inside the loop; scalar tail accesses `i..len` via `ptr` so `row` is never
+    // reborrowed while `ptr` is live (except on the early-return `softmax_row_non_finite` path).
     unsafe {
         while i + 8 <= len {
             let v = _mm256_mul_ps(_mm256_loadu_ps(ptr.add(i)), v_scale);
@@ -234,9 +235,10 @@ pub(super) unsafe fn softmax_row_scaled_avx2(row: &mut [f32], scale: f32) {
         }
         let mut max = hmax_avx2(vmax);
         let mut nf = _mm256_movemask_epi8(non_fin) != 0;
-        for x in &mut row[i..] {
-            let v = *x * scale;
-            *x = v;
+        for idx in i..len {
+            let p = ptr.add(idx);
+            let v = *p * scale;
+            *p = v;
             if !v.is_finite() {
                 nf = true;
             }
@@ -260,9 +262,10 @@ pub(super) unsafe fn softmax_row_scaled_avx2(row: &mut [f32], scale: f32) {
             j += 8;
         }
         let mut sum = hsum_avx2(vsum);
-        for x in &mut row[j..] {
-            let e = fast_exp_neg_scalar(*x - max);
-            *x = e;
+        for idx in j..len {
+            let p = ptr.add(idx);
+            let e = fast_exp_neg_scalar(*p - max);
+            *p = e;
             sum += e;
         }
 
@@ -274,8 +277,8 @@ pub(super) unsafe fn softmax_row_scaled_avx2(row: &mut [f32], scale: f32) {
             _mm256_storeu_ps(ptr.add(k), v);
             k += 8;
         }
-        for x in &mut row[k..] {
-            *x *= inv;
+        for idx in k..len {
+            *ptr.add(idx) *= inv;
         }
     }
 }
@@ -398,6 +401,8 @@ unsafe fn softmax_cols_row_major_avx2(
     let mut tail_nf = false;
 
     // SAFETY: `j + 8 <= n` in all SIMD loops; `src`/`dst` have length `>= m * n`; `mx`/`sum` have `>= n`.
+    // Every tail access goes through the same raw pointers (`mp`, `sp_sum`, `dp`) with no interleaved
+    // slice reborrows so Stacked Borrows provenance stays valid across all passes.
     unsafe {
         // Pass 1: column maxima + non-finite check (row-major contiguous).
         let mp = mx.as_mut_ptr();
@@ -412,8 +417,8 @@ unsafe fn softmax_cols_row_major_avx2(
                 j += 8;
             }
             for jj in j..n {
-                let v = src[jj];
-                mx[jj] = v;
+                let v = *sp0.add(jj);
+                *mp.add(jj) = v;
                 if !v.is_finite() {
                     tail_nf = true;
                 }
@@ -431,12 +436,13 @@ unsafe fn softmax_cols_row_major_avx2(
                 j += 8;
             }
             for jj in j..n {
-                let v = src[r * n + jj];
+                let v = *sp.add(jj);
                 if !v.is_finite() {
                     tail_nf = true;
                 }
-                if v > mx[jj] {
-                    mx[jj] = v;
+                let mptr = mp.add(jj);
+                if v > *mptr {
+                    *mptr = v;
                 }
             }
         }
@@ -448,9 +454,10 @@ unsafe fn softmax_cols_row_major_avx2(
         // Pass 2: exp(src - mx) and column sums (row-major contiguous).
         sum[..n].fill(0.0);
         let sp_sum = sum.as_mut_ptr();
+        let dst_base = dst.as_mut_ptr();
         for r in 0..m {
             let sp = src.as_ptr().add(r * n);
-            let dp = dst.as_mut_ptr().add(r * n);
+            let dp = dst_base.add(r * n);
             let mut j = 0;
             while j + 8 <= n {
                 let v = _mm256_loadu_ps(sp.add(j));
@@ -462,9 +469,9 @@ unsafe fn softmax_cols_row_major_avx2(
                 j += 8;
             }
             for jj in j..n {
-                let e = fast_exp_neg_scalar(src[r * n + jj] - mx[jj]);
-                dst[r * n + jj] = e;
-                sum[jj] += e;
+                let e = fast_exp_neg_scalar(*sp.add(jj) - *mp.add(jj));
+                *dp.add(jj) = e;
+                *sp_sum.add(jj) += e;
             }
         }
 
@@ -476,11 +483,12 @@ unsafe fn softmax_cols_row_major_avx2(
             _mm256_storeu_ps(sp_sum.add(j), inv);
             j += 8;
         }
-        for s in &mut sum[j..n] {
-            *s = 1.0 / *s;
+        for jj in j..n {
+            let p = sp_sum.add(jj);
+            *p = 1.0 / *p;
         }
         for r in 0..m {
-            let dp = dst.as_mut_ptr().add(r * n);
+            let dp = dst_base.add(r * n);
             let mut j = 0;
             while j + 8 <= n {
                 let v = _mm256_mul_ps(_mm256_loadu_ps(dp.add(j)), _mm256_loadu_ps(sp_sum.add(j)));
@@ -488,7 +496,7 @@ unsafe fn softmax_cols_row_major_avx2(
                 j += 8;
             }
             for jj in j..n {
-                dst[r * n + jj] *= sum[jj];
+                *dp.add(jj) *= *sp_sum.add(jj);
             }
         }
     }
