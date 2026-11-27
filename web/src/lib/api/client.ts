@@ -69,7 +69,7 @@ import type {
   TrainConfig,
   UpdateLabelJob,
 } from './types';
-import { archFromCli, isArch, isFolo2Arch } from '$lib/arch';
+import { archFromCli, isArch, isFolo2Arch, supportsFolo2 } from '$lib/arch';
 import type { AccessWatch } from './access';
 import type { Reachability } from './reach';
 import { BENCH_EVENTS, LABEL_EVENTS, openEventStream, RUN_EVENTS, type EventHandlers } from './sse';
@@ -330,11 +330,20 @@ export function qs(params: Record<string, string | number | undefined | null>): 
   return s ? `?${s}` : '';
 }
 
+const MAX_ARCH_HYDRATE = 24;
+const ARCH_HYDRATE_CONCURRENCY = 6;
+
 export class HttpApi implements Api {
   readonly mock = false;
+  /** Whether the server advertises `folo2_arch` (`null` until `system()` resolves). */
+  #folo2Supported: boolean | null = null;
   /** Session-known canonical `folo2-*` architectures keyed by run id and model id (bridging wire `folo_api::Arch`). */
   #runArchs = new Map<string, Arch>();
   #modelArchs = new Map<string, Arch>();
+  #checkedRuns = new Set<string>();
+  #checkedModels = new Set<string>();
+  #pendingRuns = new Map<string, Promise<void>>();
+  #pendingModels = new Map<string, Promise<void>>();
 
   #promoteRun(r: Run): Run {
     if (!r?.config) return r;
@@ -350,6 +359,67 @@ export class HttpApi implements Api {
     if (known && known !== m.arch) return { ...m, arch: known };
     if (isFolo2Arch(m.arch)) this.#modelArchs.set(m.id, m.arch);
     return m;
+  }
+
+  async #hydrateList<T>(items: readonly T[], task: (item: T) => Promise<void>, signal?: AbortSignal) {
+    if (this.#folo2Supported === false || !items.length || signal?.aborted) return;
+    const slice = items.slice(0, MAX_ARCH_HYDRATE);
+    let idx = 0;
+    const workers = Array.from({ length: Math.min(ARCH_HYDRATE_CONCURRENCY, slice.length) }, async () => {
+      while (idx < slice.length && !signal?.aborted) {
+        const item = slice[idx++]!;
+        await task(item);
+      }
+    });
+    await Promise.all(workers);
+  }
+
+  #hydrateModel(m: Model, signal?: AbortSignal): Promise<void> {
+    if (!m?.id || isFolo2Arch(m.arch) || this.#modelArchs.has(m.id) || (m.run_id && this.#runArchs.has(m.run_id)) || this.#checkedModels.has(m.id)) {
+      return Promise.resolve();
+    }
+    const existing = this.#pendingModels.get(m.id);
+    if (existing) return existing;
+    const p = (async () => {
+      try {
+        const detail = await this.model(m.id, signal);
+        if (!isFolo2Arch(detail.arch) && m.run_id && !this.#runArchs.has(m.run_id) && !this.#checkedRuns.has(m.run_id)) {
+          await this.runCli(m.run_id, signal).catch(() => null);
+        }
+      } catch {
+        // Best-effort hydration: never fail list/detail reads if an individual probe fails or aborts.
+      }
+    })().finally(() => {
+      this.#pendingModels.delete(m.id);
+    });
+    this.#pendingModels.set(m.id, p);
+    return p;
+  }
+
+  #hydrateRun(r: Run, signal?: AbortSignal): Promise<void> {
+    if (!r?.id || !r?.config || isFolo2Arch(r.config.arch) || this.#runArchs.has(r.id)) return Promise.resolve();
+    const needModel = !!r.model_id && !this.#checkedModels.has(r.model_id);
+    const needCli = !this.#checkedRuns.has(r.id);
+    if (!needModel && !needCli) return Promise.resolve();
+    const existing = this.#pendingRuns.get(r.id);
+    if (existing) return existing;
+    const p = (async () => {
+      try {
+        if (needModel && r.model_id) {
+          const detail = await this.model(r.model_id, signal).catch(() => null);
+          if (detail && isFolo2Arch(detail.arch)) this.#runArchs.set(r.id, detail.arch);
+        }
+        if (!this.#runArchs.has(r.id) && needCli && !signal?.aborted) {
+          await this.runCli(r.id, signal).catch(() => null);
+        }
+      } catch {
+        // Best-effort hydration: never fail list/detail reads if an individual probe fails or aborts.
+      }
+    })().finally(() => {
+      this.#pendingRuns.delete(r.id);
+    });
+    this.#pendingRuns.set(r.id, p);
+    return p;
   }
 
   /**
@@ -414,8 +484,10 @@ export class HttpApi implements Api {
   health(signal?: AbortSignal) {
     return this.#req<Health>('GET', '/health', undefined, signal);
   }
-  system(signal?: AbortSignal) {
-    return this.#req<SystemInfo>('GET', '/system', undefined, signal);
+  async system(signal?: AbortSignal) {
+    const sys = await this.#req<SystemInfo>('GET', '/system', undefined, signal);
+    this.#folo2Supported = supportsFolo2(sys);
+    return sys;
   }
   throughput(signal?: AbortSignal) {
     return this.#req<ThroughputTable>('GET', '/system/throughput', undefined, signal);
@@ -461,6 +533,10 @@ export class HttpApi implements Api {
 
   async models(signal?: AbortSignal) {
     const list = await this.#list<Model>('/models', 'models', signal);
+    const unchecked = list.filter(
+      (m) => m?.id && !isFolo2Arch(m.arch) && !this.#modelArchs.has(m.id) && !(m.run_id && this.#runArchs.has(m.run_id)) && !this.#checkedModels.has(m.id),
+    );
+    await this.#hydrateList(unchecked, (m) => this.#hydrateModel(m, signal), signal);
     return list.map((m) => this.#promoteModel(m));
   }
   async model(id: string, signal?: AbortSignal) {
@@ -468,6 +544,7 @@ export class HttpApi implements Api {
     const m = await this.#req<Model>('GET', `/models/${encodeURIComponent(id)}`, undefined, signal, (res) => {
       headerArch = res.headers.get('x-folo-arch')?.trim() ?? null;
     });
+    if (m?.id) this.#checkedModels.add(m.id);
     // folo-server emits the exact `folo2-*` architecture in `x-folo-arch` alongside the wire `folo_api::Arch` field.
     if (isArch(headerArch) && isFolo2Arch(headerArch)) {
       this.#modelArchs.set(m.id, headerArch);
@@ -487,10 +564,21 @@ export class HttpApi implements Api {
 
   async runs(signal?: AbortSignal) {
     const list = await this.#list<Run>('/runs', 'runs', signal);
+    const unchecked = list.filter(
+      (r) =>
+        r?.id &&
+        r?.config &&
+        !isFolo2Arch(r.config.arch) &&
+        !this.#runArchs.has(r.id) &&
+        (!this.#checkedRuns.has(r.id) || (!!r.model_id && !this.#checkedModels.has(r.model_id))),
+    );
+    await this.#hydrateList(unchecked, (r) => this.#hydrateRun(r, signal), signal);
     return list.map((r) => this.#promoteRun(r));
   }
   async run(id: string, signal?: AbortSignal) {
-    return this.#promoteRun(await this.#req<Run>('GET', `/runs/${encodeURIComponent(id)}`, undefined, signal));
+    const r = await this.#req<Run>('GET', `/runs/${encodeURIComponent(id)}`, undefined, signal);
+    if (this.#folo2Supported !== false) await this.#hydrateRun(r, signal);
+    return this.#promoteRun(r);
   }
   async createRun(config: TrainConfig) {
     const run = await this.#req<Run>('POST', '/runs', config);
@@ -514,6 +602,7 @@ export class HttpApi implements Api {
   }
   async runCli(id: string, signal?: AbortSignal) {
     const cmd = await this.#req<CliCommand>('GET', `/runs/${encodeURIComponent(id)}/cli`, undefined, signal);
+    this.#checkedRuns.add(id);
     const cliArch = archFromCli(cmd);
     if (cliArch && isFolo2Arch(cliArch)) this.#runArchs.set(id, cliArch);
     return cmd;

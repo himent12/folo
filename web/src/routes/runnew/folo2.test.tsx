@@ -348,4 +348,102 @@ describe('MockApi & HttpApi folo2 contracts', () => {
     // models() also promotes any checkpoint linked via run_id to run_v2!
     expect((await api.models())[0]!.arch).toBe('folo2-m');
   });
+
+  it('HttpApi cold-load runs() and models() hydrate canonical folo2-* once per id and skip probes when folo2_arch is absent', async () => {
+    const wireRun: Run = {
+      id: 'run_cold',
+      name: 'shapes-folo2-n',
+      status: 'completed',
+      config: {
+        name: 'shapes-folo2-n',
+        dataset_id: 'ds_shapes',
+        arch: 'folo-n',
+        epochs: 1,
+        batch: 4,
+        imgsz: 128,
+        device: 'cpu',
+        optimizer: 'auto',
+        lr0: 0.01,
+        seed: 0,
+        weights: null,
+        augment: DEFAULT_AUGMENT,
+      },
+      device: 'cpu',
+      epoch: 1,
+      epochs: 1,
+      step: 3,
+      steps_per_epoch: 3,
+      eta_s: 0,
+      model_id: 'm_cold',
+      created: '2026-11-27T00:00:00Z',
+      started: '2026-11-27T00:00:01Z',
+      finished: '2026-11-27T00:00:02Z',
+      error: null,
+      best: null,
+    };
+    const wireModel: Model = {
+      id: 'm_cold',
+      name: 'shapes-folo2-n-best',
+      arch: 'folo-n',
+      imgsz: 128,
+      classes: ['circle'],
+      params: 3_000_000,
+      flops_g: 8.0,
+      bytes: 6_000_000,
+      created: '2026-11-27T00:00:02Z',
+      run_id: 'run_cold',
+      metrics: null,
+    };
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.endsWith('/api/system')) {
+          return new Response(JSON.stringify({ features: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (url.endsWith('/api/runs')) {
+          return new Response(JSON.stringify({ runs: [wireRun] }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (url.endsWith('/api/models')) {
+          return new Response(JSON.stringify({ models: [wireModel] }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        if (url.endsWith('/api/models/m_cold')) {
+          return new Response(JSON.stringify(wireModel), {
+            status: 200,
+            headers: { 'content-type': 'application/json', 'x-folo-arch': 'folo2-n' },
+          });
+        }
+        return new Response(JSON.stringify({ argv: ['folo', 'train', '--model', 'folo2-n'], cli: 'folo train --model folo2-n' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }),
+    );
+
+    // Cold session: runs() hydrates via model(m_cold) x-folo-arch and promotes BOTH runs() and models().
+    const api = new HttpApi('http://127.0.0.1:7895');
+    const runs1 = await api.runs();
+    expect(runs1[0]!.config.arch).toBe('folo2-n');
+    const models1 = await api.models();
+    expect(models1[0]!.arch).toBe('folo2-n');
+    const probesAfterFirst = urls.filter((u) => u.includes('/models/m_cold') || u.includes('/cli')).length;
+    expect(probesAfterFirst).toBe(1);
+
+    // Second poll makes ZERO extra per-item probe requests.
+    await api.runs();
+    await api.models();
+    expect(urls.filter((u) => u.includes('/models/m_cold') || u.includes('/cli')).length).toBe(probesAfterFirst);
+
+    // Older server without folo2_arch makes ZERO probe requests on list calls.
+    urls.length = 0;
+    const oldApi = new HttpApi('http://127.0.0.1:7895');
+    await oldApi.system();
+    const oldRuns = await oldApi.runs();
+    const oldModels = await oldApi.models();
+    expect(oldRuns[0]!.config.arch).toBe('folo-n');
+    expect(oldModels[0]!.arch).toBe('folo-n');
+    expect(urls.filter((u) => u.includes('/models/m_cold') || u.includes('/cli'))).toEqual([]);
+  });
 });

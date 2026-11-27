@@ -6,7 +6,7 @@ import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import { runsChanged } from '$lib/api/runs';
 import type { Arch, Augment, DatasetImage, Model, Optimizer, TrainConfig } from '$lib/api/types';
-import { archFromCli, archNameSuffix, archWithFamily, isFolo2Arch, supportsFolo2 } from '$lib/arch';
+import { archFromCli, archNameSuffix, archScale, archWithFamily, isFolo2Arch, supportsFolo2 } from '$lib/arch';
 import { hasCloud } from '$lib/cloud';
 import { sentence } from '$lib/format';
 import { fitFix, isOom, oomCalibration, vramForecaster, type OomFix } from '$lib/oom';
@@ -243,7 +243,7 @@ export function runNewState() {
   const checkedModels = new Set<string>();
   const inFlightModels = new Set<string>();
   let resolveSeq = 0;
-  async function resolveModelArch(m: Model) {
+  async function resolveModelArch(m: Model, applyResolvedArch = false) {
     if (hub.api.mock || isFolo2Arch(m.arch) || checkedModels.has(m.id) || inFlightModels.has(m.id)) return;
     inFlightModels.add(m.id);
     const seq = ++resolveSeq;
@@ -251,20 +251,21 @@ export function runNewState() {
     try {
       const detail = await hub.api.model(m.id).catch(() => null);
       let resolved: Arch = detail && isFolo2Arch(detail.arch) ? detail.arch : m.arch;
-      let cliOk = false;
       if (!isFolo2Arch(resolved) && m.run_id) {
         const cli = await hub.api.runCli(m.run_id).catch(() => null);
-        cliOk = cli !== null;
         const cliArch = archFromCli(cli);
         if (cliArch && isFolo2Arch(cliArch)) resolved = cliArch;
       }
-      void cliOk;
       checkedModels.add(m.id);
-      if (mounted && resolved !== m.arch) {
-        resolvedModelArchs.set({ ...resolvedModelArchs.peek(), [m.id]: resolved });
-        if (weights.peek() === m.id && arch.peek() !== resolved) arch.set(resolved);
+      if (mounted) {
+        if (resolved !== m.arch) {
+          resolvedModelArchs.set({ ...resolvedModelArchs.peek(), [m.id]: resolved });
+        }
+        if ((applyResolvedArch || resolved !== m.arch) && weights.peek() === m.id && arch.peek() !== resolved) {
+          arch.set(resolved);
+        }
+        checkedModelsTick.set((t) => t + 1);
       }
-      if (mounted) checkedModelsTick.set((t) => t + 1);
     } finally {
       inFlightModels.delete(m.id);
       if (mounted && seq === resolveSeq) resolvingModelId.set(null);
@@ -283,9 +284,14 @@ export function runNewState() {
       return;
     }
     if (m.arch !== a) {
-      // On a real server, a restored `folo2-*` draft may pair with a checkpoint listed as wire `folo-*`:
-      // resolve its canonical arch once before clearing `weights` as a mismatch.
-      if (!hub.api.mock && isFolo2Arch(a) && !isFolo2Arch(m.arch) && !checkedModels.has(m.id)) {
+      // On a real server, a picked or draft-restored checkpoint listed as wire `folo-*` may actually be `folo2-*`:
+      // defer clearing `weights` until its canonical arch lookup finishes once.
+      if (
+        !hub.api.mock &&
+        !isFolo2Arch(m.arch) &&
+        !checkedModels.has(m.id) &&
+        (inFlightModels.has(m.id) || (isFolo2Arch(a) && archScale(a) === archScale(m.arch)))
+      ) {
         untrack(() => void resolveModelArch(m));
         return;
       }
@@ -301,8 +307,13 @@ export function runNewState() {
   /** Start from picked: weights of another size (trained or published) bring their size (the size picker follows). */
   function pickWeights(id: string) {
     const m = startable.get().find((x) => x.id === id);
-    if (m && m.arch !== arch.get()) arch.set(m.arch);
-    if (m) void resolveModelArch(m);
+    if (!m) return;
+    // Wait for canonical arch resolution on unchecked real-server wire `folo-*` checkpoints before switching family/name.
+    if (!hub.api.mock && !isFolo2Arch(m.arch) && !checkedModels.has(m.id)) {
+      void resolveModelArch(m, true);
+      return;
+    }
+    if (m.arch !== arch.get()) arch.set(m.arch);
   }
   const gpu = computed(() => system.data?.gpus[0]);
 
