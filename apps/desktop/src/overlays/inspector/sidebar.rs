@@ -1,6 +1,8 @@
 //! Right-hand sidebar of the image inspector: file metadata, clickable label/prediction rows
 //! (click to zoom to a box), and keyboard shortcut legend.
 
+use std::rc::Rc;
+
 use folo_ui::prelude::FluentBuilder;
 use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
@@ -8,7 +10,7 @@ use folo_ui::{
 };
 
 use crate::api::{ImageInfo, Label, ScoredBox};
-use crate::app::{FoloApp, act};
+use crate::app::{FoloApp, SampleView, act};
 use crate::theme::{Theme, radius, ty};
 use crate::ui::*;
 
@@ -20,15 +22,19 @@ impl FoloApp {
         meta: &ImageInfo,
         dims: (f32, f32),
         classes: &[String],
+        show_truth: bool,
         preds: Option<&[ScoredBox]>,
+        sample_view: Option<SampleView>,
+        conf: f32,
         sample_line: Option<(String, String)>,
         hover: Option<usize>,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let n_labels = meta.boxes.len();
+        let n_labels = if show_truth { meta.boxes.len() } else { 0 };
         // By class, then largest first, like the PR legend; indices stay the image's.
-        let mut box_order: Vec<(usize, &crate::api::BBox)> = meta.boxes.iter().enumerate().collect();
+        let mut box_order: Vec<(usize, &crate::api::BBox)> =
+            if show_truth { meta.boxes.iter().enumerate().collect() } else { Vec::new() };
         box_order.sort_by(|(_, a), (_, b)| {
             let area = |x: &crate::api::BBox| (x.x2 - x.x1) * (x.y2 - x.y1);
             a.class.cmp(&b.class).then(area(b).total_cmp(&area(a)))
@@ -111,20 +117,38 @@ impl FoloApp {
                 .into_any_element()
             })
             .collect();
-        // The epoch's predictions, after the labels: score and box, each a Tab stop that
-        // highlights and zooms to its box (as a label row does).
+        // The epoch's predictions, after the labels (or alone in Predicted-only view): score and
+        // box, each a Tab stop that highlights and zooms to its box (as a label row does).
         if let Some(ps) = preds {
-            box_rows.push(
-                div()
-                    .px(px(8.))
-                    .pt(px(12.))
-                    .pb(px(4.))
-                    .flex()
-                    .justify_between()
-                    .child(overline(t, "Predictions"))
-                    .child(text(ty::SM, t.text_tertiary).child("score · x, y · w×h"))
-                    .into_any_element(),
-            );
+            if show_truth {
+                if meta.boxes.is_empty() {
+                    box_rows.push(
+                        div()
+                            .p(px(8.))
+                            .child(text(ty::SM, t.text_tertiary).child("No labels: a background image."))
+                            .into_any_element(),
+                    );
+                }
+                box_rows.push(
+                    div()
+                        .px(px(8.))
+                        .pt(px(12.))
+                        .pb(px(4.))
+                        .flex()
+                        .justify_between()
+                        .child(overline(t, "Predictions"))
+                        .child(text(ty::SM, t.text_tertiary).child("score · x, y · w×h"))
+                        .into_any_element(),
+                );
+            }
+            if ps.is_empty() {
+                box_rows.push(
+                    div()
+                        .p(px(8.))
+                        .child(text(ty::SM, t.text_tertiary).child(format!("No predictions ≥ {conf:.2}.")))
+                        .into_any_element(),
+                );
+            }
             for (j, p) in ps.iter().enumerate() {
                 let idx = n_labels + j;
                 let hot = hover == Some(idx);
@@ -201,6 +225,28 @@ impl FoloApp {
                 );
             }
         }
+        let sample_view_seg = sample_view.map(|view| {
+            let views = [SampleView::Both, SampleView::Predictions, SampleView::Truth];
+            let sel = views.iter().position(|v| *v == view).unwrap_or(0);
+            self.segmented_fill(
+                "insp-sample-view",
+                &["Both", "Predicted", "Truth"],
+                sel,
+                window,
+                cx,
+                Rc::new(move |this, i, _, cx| {
+                    if let Some(insp) = this.inspector.as_mut()
+                        && let Some((run, _)) = insp.sample.clone()
+                    {
+                        insp.sample = Some((run, views[i.min(views.len() - 1)]));
+                        insp.hover_box = None;
+                        insp.hover_from_stage = false;
+                        insp.focused_box = None;
+                        cx.notify();
+                    }
+                }),
+            )
+        });
         div()
             .w(px(300.))
             .flex_none()
@@ -232,17 +278,20 @@ impl FoloApp {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .gap(px(6.))
                             .child(badge(t, meta.split.label(), Tone::Neutral))
                             .child(badge(t, format!("{} × {}", meta.width, meta.height), Tone::Neutral))
-                            .child(badge(
-                                t,
-                                match preds {
-                                    Some(_) => counted(meta.boxes.len() as u64, "label", "labels"),
-                                    None => counted(meta.boxes.len() as u64, "box", "boxes"),
-                                },
-                                Tone::Neutral,
-                            ))
+                            .when(show_truth, |d| {
+                                d.child(badge(
+                                    t,
+                                    match preds {
+                                        Some(_) => counted(meta.boxes.len() as u64, "label", "labels"),
+                                        None => counted(meta.boxes.len() as u64, "box", "boxes"),
+                                    },
+                                    Tone::Neutral,
+                                ))
+                            })
                             .when_some(preds.map(<[ScoredBox]>::len), |d, m| {
                                 d.child(badge(
                                     t,
@@ -256,9 +305,10 @@ impl FoloApp {
                             div()
                                 .flex()
                                 .flex_col()
-                                .gap(px(2.))
+                                .gap(px(6.))
                                 .child(text(ty::SM, t.text_secondary).ellipsis().child(run))
-                                .child(text(ty::SM, t.text_tertiary).child(how)),
+                                .children(sample_view_seg)
+                                .child(text(ty::SM, t.text_tertiary).whitespace_normal().child(how)),
                         )
                     }),
             )
@@ -269,8 +319,12 @@ impl FoloApp {
                     .pb(px(4.))
                     .flex()
                     .justify_between()
-                    .child(overline(t, "Labels"))
-                    .child(text(ty::SM, t.text_tertiary).child("top-left x, y · w×h (px)")),
+                    .child(overline(t, if show_truth { "Labels" } else { "Predictions" }))
+                    .child(text(ty::SM, t.text_tertiary).child(if show_truth {
+                        "top-left x, y · w×h (px)"
+                    } else {
+                        "score · x, y · w×h"
+                    })),
             )
             .child(
                 div()
@@ -290,7 +344,7 @@ impl FoloApp {
                             .track_scroll(&self.insp_list_scroll)
                             .px(px(8.))
                             .children(box_rows)
-                            .when(meta.boxes.is_empty(), |d| {
+                            .when(show_truth && preds.is_none() && meta.boxes.is_empty(), |d| {
                                 d.child(div().p(px(8.)).child(
                                     text(ty::SM, t.text_tertiary).child("No labels: a background image."),
                                 ))

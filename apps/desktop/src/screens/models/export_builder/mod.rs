@@ -498,6 +498,29 @@ impl FoloApp {
                 cx.notify();
             }),
         );
+        let int8_cal_control = (self.model_cli.predict_precision == PredictPrecision::Int8
+            && !command::model_is_int8_file(m))
+        .then(|| {
+            let q_labels: Vec<&str> = QuantMethod::ALL.iter().map(|q| q.label()).collect();
+            let q_idx = QuantMethod::ALL.iter().position(|&q| q == self.model_cli.quant_method).unwrap_or(0);
+            let q_seg = self.segmented(
+                "model-cli-predict-quant-method",
+                &q_labels,
+                q_idx,
+                window,
+                cx,
+                Rc::new(|this, i, _, cx| {
+                    this.model_cli.quant_method = QuantMethod::ALL[i.min(QuantMethod::ALL.len() - 1)];
+                    cx.notify();
+                }),
+            );
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(text(ty::SM, t.text_tertiary).child("Calibration"))
+                .child(q_seg)
+        });
 
         let conf = self.model_cli.predict_conf;
         let conf_slider = self.slider(
@@ -555,10 +578,18 @@ impl FoloApp {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .items_center()
-                            .gap(px(8.))
-                            .child(text(ty::SM, t.text_tertiary).child("Precision"))
-                            .child(prec_seg),
+                            .gap(px(12.))
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(text(ty::SM, t.text_tertiary).child("Precision"))
+                                    .child(prec_seg),
+                            )
+                            .children(int8_cal_control),
                     ),
             )
             .child(

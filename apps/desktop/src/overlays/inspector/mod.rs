@@ -153,7 +153,10 @@ impl FoloApp {
             let smp = samples.iter().find(|x| x.image_id == meta.id)?;
             Some((*epoch, smp.pred.clone(), smp.truth.clone()))
         });
-        let show_preds = sample_ctx.as_ref().is_some_and(|(_, v)| *v != crate::app::SampleView::Truth);
+        let sample_view = sample_ctx.as_ref().map(|(_, v)| *v);
+        let has_sample = sample_preds.is_some();
+        let show_truth = !has_sample || sample_view != Some(crate::app::SampleView::Predictions);
+        let show_preds = has_sample && sample_view != Some(crate::app::SampleView::Truth);
         // Shown predictions (at the snapshot's minimum confidence, as the run page drew them). Box
         // indices: the labels first (0..n), then these (n..), for hover, focus and list rows alike.
         let conf = sample_set.as_ref().map_or(self.sample_conf, |(_, c, _)| *c);
@@ -161,10 +164,14 @@ impl FoloApp {
             .as_ref()
             .filter(|_| show_preds)
             .map(|(_, ps, _)| ps.iter().filter(|p| p.score >= conf).cloned().collect());
-        // When opened from a run sample snapshot, prefer its truth boxes so GT matches the sample's
-        // evaluated epoch even if the dataset on disk changed later.
-        let truth_boxes: &[crate::api::BBox] =
-            sample_preds.as_ref().map_or(meta.boxes.as_slice(), |(_, _, truth)| truth.as_slice());
+        // When opened from a run sample snapshot, respect the selected sample view (Both /
+        // Predicted / Truth) and prefer the snapshot's truth boxes so GT matches the evaluated
+        // epoch even if the dataset on disk changed later.
+        let truth_boxes: &[crate::api::BBox] = if !show_truth {
+            &[]
+        } else {
+            sample_preds.as_ref().map_or(meta.boxes.as_slice(), |(_, _, truth)| truth.as_slice())
+        };
         let n_labels = truth_boxes.len();
         // A keyboard-focused label row highlights its box like the pointer does; while the keyboard
         // is in use it wins over a pointer hover left behind on the image.
@@ -213,15 +220,18 @@ impl FoloApp {
             }));
         }
         // What the image shows, said beside it: the run, the epoch, and how each kind is drawn.
-        let sample_line: Option<(String, String)> = sample_ctx.as_ref().map(|(run, _)| {
+        let sample_line: Option<(String, String)> = sample_ctx.as_ref().map(|(run, view)| {
             let name = self.store.run(run).map_or(run.clone(), |r| r.name.clone());
-            match (&sample_preds, show_preds) {
-                (Some((epoch, _, _)), true) => (
+            match (&sample_preds, view) {
+                (Some((epoch, _, _)), crate::app::SampleView::Both) => (
                     format!("{name} · epoch {epoch}"),
                     format!("Predictions ≥ {conf:.2} solid · labels dashed"),
                 ),
-                (Some((epoch, _, _)), false) => {
-                    (format!("{name} · epoch {epoch}"), "Labels (the run page's view)".to_string())
+                (Some((epoch, _, _)), crate::app::SampleView::Predictions) => {
+                    (format!("{name} · epoch {epoch}"), format!("Predictions ≥ {conf:.2} only"))
+                }
+                (Some((epoch, _, _)), crate::app::SampleView::Truth) => {
+                    (format!("{name} · epoch {epoch}"), "Ground-truth labels only".to_string())
                 }
                 (None, _) => (name, "Not one of this run's samples: labels only".to_string()),
             }
@@ -240,7 +250,7 @@ impl FoloApp {
             window,
             cx,
         );
-        let side_meta = if sample_preds.is_some() {
+        let side_meta = if has_sample {
             crate::api::ImageInfo { boxes: truth_boxes.to_vec(), ..meta.clone() }
         } else {
             meta.clone()
@@ -250,7 +260,10 @@ impl FoloApp {
             &side_meta,
             dims,
             &classes,
+            show_truth,
             preds.as_deref(),
+            sample_view.filter(|_| has_sample),
+            conf,
             sample_line,
             hover,
             window,

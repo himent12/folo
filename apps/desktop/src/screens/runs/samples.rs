@@ -391,7 +391,9 @@ impl FoloApp {
                                 "Epoch {epoch} · {scope_note} · {}",
                                 match view {
                                     SampleView::Predictions => format!("predictions with score ≥ {conf:.2}"),
-                                    SampleView::Truth => "ground-truth labels".to_string(),
+                                    SampleView::Truth => {
+                                        format!("ground-truth labels · error badges at score ≥ {conf:.2}")
+                                    }
                                     SampleView::Both =>
                                         format!("ground truth and predictions with score ≥ {conf:.2}"),
                                 }
@@ -441,14 +443,18 @@ impl FoloApp {
                 }))
                 .into_any_element(),
         };
-        // The class key and the minimum confidence share the row under the header.
+        // The class key and the minimum confidence share the row under the header. Keep the slider
+        // mounted in Truth mode too because error counts, filtering, sorting, and badges still use
+        // this confidence threshold.
         let tools = div()
             .flex()
+            .flex_wrap()
             .items_center()
-            .gap(px(16.))
+            .justify_between()
+            .gap(px(12.))
             .px(px(16.))
             .pt(px(10.))
-            .child(div().flex_1().min_w_0().flex().flex_wrap().gap(px(12.)).children(
+            .child(div().flex_1().min_w(px(180.)).flex().flex_wrap().gap(px(12.)).children(
                 classes.into_iter().enumerate().map(|(i, name)| {
                     div()
                         .flex()
@@ -458,24 +464,22 @@ impl FoloApp {
                         .child(text(ty::SM, t.text_secondary).child(name))
                 }),
             ))
-            .when(self.sample_view != SampleView::Truth, |d| {
-                d.child(
-                    div()
-                        .id("sample-conf-field")
-                        .relative()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .tooltip(crate::controls::tip(conf_tip.clone(), Some("← →")))
-                        .when(conf_ring, |d| {
-                            d.child(crate::controls::focus_tip(&t, format!("{conf_tip} · ← → adjust"), 20.))
-                        })
-                        .child(text(ty::SM, t.text_tertiary).child("Min confidence"))
-                        .child(div().w(px(120.)).child(slider))
-                        .child(text(ty::SM, t.text_primary).tnum().w(px(28.)).child(format!("{conf:.2}"))),
-                )
-            });
+            .child(
+                div()
+                    .id("sample-conf-field")
+                    .relative()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .tooltip(crate::controls::tip(conf_tip.clone(), Some("← →")))
+                    .when(conf_ring, |d| {
+                        d.child(crate::controls::focus_tip(&t, format!("{conf_tip} · ← → adjust"), 20.))
+                    })
+                    .child(text(ty::SM, t.text_tertiary).child("Min confidence"))
+                    .child(div().w(px(120.)).child(slider))
+                    .child(text(ty::SM, t.text_primary).tnum().w(px(28.)).child(format!("{conf:.2}"))),
+            );
         panel(&t)
             .flex_1()
             .min_w_0()

@@ -155,8 +155,40 @@ fn model_export_cli_builder_toggles_copies_and_triggers_server_export() {
         assert_eq!(this.toasts.last().unwrap().title.as_ref(), "Copied quantize command");
         let clip = cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
         assert!(clip.starts_with("folo quantize --model D:/folo/runs/demo/weights/best.folo --data "));
-        assert!(clip.ends_with("--method minmax"), "clip={clip}");
+        assert!(
+            clip.ends_with("--method minmax --output D:/folo/runs/demo/weights/best-int8-minmax.folo"),
+            "clip={clip}"
+        );
         assert_eq!(this.route, Route::Model(mid));
+    });
+
+    // 6. Switching to Predict -> INT8 shares the exact per-method output path and offers the
+    // calibration switcher (`model-cli-predict-quant-method`) so requantizing never silently runs
+    // an older calibration file.
+    drive(&mut app, window, |this, _, cx| {
+        this.model_cli.mode = ModelCliMode::Predict;
+        this.model_cli.predict_precision = PredictPrecision::Int8;
+        this.model_cli.predict_tta = false;
+        this.model_cli.predict_sahi = false;
+        this.model_cli.predict_track = false;
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        assert!(
+            w.is_focus_mounted(&this.fh("model-cli-predict-quant-method", cx)),
+            "INT8 Predict mounts calibration method switcher"
+        );
+        this.focus_key("model-cli-copy", w, cx);
+    });
+    app.frame(window.into());
+    send_key(&mut app, window, "enter");
+    drive(&mut app, window, |_this, _, cx| {
+        let clip = cx.read_from_clipboard().and_then(|c| c.text()).unwrap_or_default();
+        assert_eq!(
+            clip,
+            "folo predict --model D:/folo/runs/demo/weights/best-int8-minmax.folo <images> --precision int8"
+        );
     });
 }
 
@@ -405,5 +437,104 @@ fn run_samples_error_explorer_filters_sorts_and_resets_on_navigation() {
         this.navigate(Route::Runs, w, cx);
         assert_eq!(this.sample_error_filter, SampleErrorFilter::All);
         assert_eq!(this.sample_sort, SampleSort::Default);
+    });
+}
+
+#[test]
+fn playtest_r14_truth_mode_keeps_conf_slider_and_inspector_respects_predicted_view() {
+    let (mut app, window) = open();
+    let run_id = drive(&mut app, window, |this, w, cx| {
+        let rid = this
+            .store
+            .runs
+            .ready()
+            .unwrap()
+            .iter()
+            .find(|r| r.status == crate::api::RunStatus::Completed)
+            .unwrap()
+            .id
+            .clone();
+        this.navigate(Route::Run(rid.clone()), w, cx);
+        rid
+    });
+    for _ in 0..4 {
+        app.frame(window.into());
+        app.run_until_idle();
+    }
+
+    // 1. In Truth mode, the `sample-conf` slider remains mounted so users can still see and adjust
+    // the threshold driving the FP/FN/TP filter pills, badges, and sort order.
+    drive(&mut app, window, |this, _, cx| {
+        this.sample_view = crate::app::SampleView::Truth;
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, w, cx| {
+        assert!(
+            w.is_focus_mounted(&this.fh("sample-conf", cx)),
+            "Min confidence slider stays mounted in Truth mode while error badges/filters use it"
+        );
+    });
+
+    // 2. Opening a sample in Predicted mode must NOT render ground-truth label rows (`insp-box-*`),
+    // must render prediction rows (`insp-pred-*`), and must expose `insp-sample-view` to switch
+    // to Both or Truth inside the inspector.
+    let sample_img = drive(&mut app, window, |this, _, _| {
+        this.store
+            .samples
+            .get(&run_id)
+            .and_then(|l| l.ready())
+            .and_then(|s| s.samples.iter().find(|smp| !smp.truth.is_empty() && !smp.pred.is_empty()))
+            .map(|smp| (smp.dataset_id.clone(), smp.image_id.clone()))
+            .expect("completed mock run has a sample with both truth and predictions")
+    });
+    drive(&mut app, window, |this, w, cx| {
+        this.sample_view = crate::app::SampleView::Predictions;
+        this.sample_conf = 0.25;
+        this.open_sample(sample_img.0.clone(), sample_img.1.clone(), run_id.clone(), w, cx);
+    });
+    for _ in 0..6 {
+        app.frame(window.into());
+        app.run_until_idle();
+    }
+    drive(&mut app, window, |this, w, cx| {
+        assert!(
+            !w.is_focus_mounted(&this.fh("insp-box-0", cx)),
+            "Predicted-only inspector must hide ground-truth label rows"
+        );
+        assert!(
+            w.is_focus_mounted(&this.fh("insp-pred-0", cx)),
+            "Predicted-only inspector must mount prediction rows"
+        );
+        assert!(
+            w.is_focus_mounted(&this.fh("insp-sample-view", cx)),
+            "Sample inspector exposes inline Both / Predicted / Truth view switcher"
+        );
+        // Focus the inline view switcher and press Left (Predicted -> Both); must not step image.
+        this.focus_key("insp-sample-view", w, cx);
+    });
+    app.frame(window.into());
+    send_key(&mut app, window, "left");
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(
+            this.inspector.as_ref().and_then(|i| i.sample.as_ref()).map(|(_, v)| *v),
+            Some(crate::app::SampleView::Both),
+            "Left on insp-sample-view switches Predicted -> Both"
+        );
+        assert!(w.is_focus_mounted(&this.fh("insp-box-0", cx)), "Both view mounts truth label rows");
+        assert!(w.is_focus_mounted(&this.fh("insp-pred-0", cx)), "Both view mounts prediction rows");
+    });
+    // Press Right twice (Both -> Predicted -> Truth).
+    send_key(&mut app, window, "right");
+    send_key(&mut app, window, "right");
+    drive(&mut app, window, |this, w, cx| {
+        assert_eq!(
+            this.inspector.as_ref().and_then(|i| i.sample.as_ref()).map(|(_, v)| *v),
+            Some(crate::app::SampleView::Truth),
+            "Right x2 on insp-sample-view switches Both -> Truth"
+        );
+        assert!(w.is_focus_mounted(&this.fh("insp-box-0", cx)), "Truth view mounts truth label rows");
+        assert!(!w.is_focus_mounted(&this.fh("insp-pred-0", cx)), "Truth view hides prediction rows");
+        this.close_inspector(w, cx);
     });
 }
