@@ -46,7 +46,8 @@ subgroup built-ins are enabled via `wgpu::Features::SUBGROUP` alone, while `Spec
 WGSL variant and tags the pipeline cache key. When `kernels::use_subgroups(ctx)` is true (native adapters with
 `SUBGROUP` and subgroup width `(32, 32)`; always `false` on `wasm32` / browser WebGPU), reductions (`reduce_rows`,
 `softmax`), BatchNorm (`bn_stats`, `bn_finalize`, `bn_bwd_reduce`, `bn_bwd_finalize`), depthwise weight gradients
-(`conv2d_depthwise_grad`), detection loss reductions (`det_bce_fwd`, `det_combine`), and gradient-norm partials
+(`conv2d_depthwise_grad`), partial weight-gradient slab reductions (`conv2d_wgrad_reduce`, 2-D small-weight path;
+large weights use a zero-barrier flat 1-D `vec4` path), detection loss reductions (`det_bce_fwd`, `det_combine`), and gradient-norm partials
 (`norm_partials_many`) dispatch 1-barrier 32-wide subgroup variants (and `topk` selection passes for `d > 512`
 dispatch a 2-barrier 32-wide subgroup reduction per pass, skipping the second barrier on the final pass) with a
 portable shared-memory tree fallback otherwise, and `unscale_check*` coalesces overflow flags via `subgroupAny` with

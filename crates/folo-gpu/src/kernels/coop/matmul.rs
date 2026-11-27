@@ -150,16 +150,18 @@ pub(crate) fn encode_gemm(
         && aligned4(&d.b)
         && if d.trans_b { d.k.is_multiple_of(4) } else { d.n.is_multiple_of(4) };
     let vec_c = d.ldc.is_multiple_of(4) && aligned4(&d.c) && d.n.is_multiple_of(4);
-    let check = !d.m.is_multiple_of(cfg.bm as usize)
-        || !d.n.is_multiple_of(cfg.bn as usize)
-        || !d.k.is_multiple_of(cfg.bk as usize);
+    let (a_col, b_col) = super::col_major_tiles(ctx, cfg, d.trans_a, d.trans_b);
     let spec = base_spec(d, out, cfg)
         .bool("VEC_A", vec_a)
         .bool("VEC_B", vec_b)
         .bool("VEC_C", vec_c)
         .bool("TRANS_A", d.trans_a)
         .bool("TRANS_B", d.trans_b)
-        .bool("CHECK", check)
+        .bool("A_COL", a_col)
+        .bool("B_COL", b_col)
+        .bool("CHECK_M", !d.m.is_multiple_of(cfg.bm as usize))
+        .bool("CHECK_N", !d.n.is_multiple_of(cfg.bn as usize))
+        .bool("CHECK_K", !d.k.is_multiple_of(cfg.bk as usize) || d.k == 0)
         .u32("CONV_MODE", 0);
     let Some(k) = build(ctx, spec) else { return Ok(false) };
     let groups = [
@@ -194,16 +196,15 @@ pub(crate) fn encode_gemm_cat(
     };
     let vec_a = d.lda.is_multiple_of(4) && aligned4(&d.a) && d.k.is_multiple_of(4);
     let vec_c = d.ldc.is_multiple_of(4) && aligned4(&d.c) && d.n.is_multiple_of(4);
-    let check = !d.m.is_multiple_of(cfg.bm as usize)
-        || !d.n.is_multiple_of(cfg.bn as usize)
-        || !d.k.is_multiple_of(cfg.bk as usize);
     let spec = base_spec(d, DType::F16, cfg)
         .bool("VEC_A", vec_a)
         .bool("VEC_B", vec_b)
         .bool("VEC_C", vec_c)
         .bool("TRANS_A", false)
         .bool("TRANS_B", false)
-        .bool("CHECK", check)
+        .bool("CHECK_M", !d.m.is_multiple_of(cfg.bm as usize))
+        .bool("CHECK_N", !d.n.is_multiple_of(cfg.bn as usize))
+        .bool("CHECK_K", !d.k.is_multiple_of(cfg.bk as usize) || d.k == 0)
         .u32("CONV_MODE", 0)
         .u32("CAT", parts);
     let k = match ctx.kernel(&super::shader::COOP_CAT, spec) {

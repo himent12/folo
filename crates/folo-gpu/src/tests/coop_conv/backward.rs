@@ -182,14 +182,19 @@ fn coop_conv_gradients() {
     ctx.set_tensor_cores(true);
 }
 
-/// The stem's weight gradient (3 → 16, 3×3 s2) on the regular kernels' 16×32 tile, with tensor cores on too:
-/// `N·OH·OW = 4·80·80 = 25600`, dozens of split-K chunks, exact sums so a dropped chunk fails.
+/// The stem's weight gradient (3 → 16, 3×3 s2): `C16X32` on tensor cores and the regular kernels' 16×32 `STEM`
+/// tile when tensor cores are off; `N·OH·OW = 4·80·80 = 25600`, dozens of split-K chunks, exact sums so a dropped
+/// chunk fails.
 #[test]
 fn coop_conv_weight_gradient_stem_split_k() {
     let (ctx, _g) = coop!();
     let d = cdesc(4, 3, 160, 160, 16, 1, Window2d::square(3, 2, 1));
-    for route in conv_grads(&ctx, &d, 200, true) {
-        assert!(matches!(route, Some((false, (16, 32), s)) if s >= 40), "stem route {route:?}");
+    let routes = conv_grads(&ctx, &d, 200, true);
+    for route in &routes[..2] {
+        assert!(matches!(route, Some((true, (16, 32), s)) if *s >= 40), "tensor-core stem route {route:?}");
+    }
+    for route in &routes[2..] {
+        assert!(matches!(route, Some((false, (16, 32), s)) if *s >= 40), "regular stem route {route:?}");
     }
     ctx.set_tensor_cores(true);
 }
@@ -345,16 +350,22 @@ fn coop_conv_pointwise_split_k_weight_grad() {
         // Single image (direct write, zero reduction) and single image with spatial splits.
         cdesc(1, 32, 16, 16, 32, 1, p1),
         cdesc(1, 64, 40, 40, 64, 1, p1),
-        // Multi-image YOLO 1×1 shapes: C32X32, C64X64, C64X128, C128X64, C128X128, plus 3-mode WGRAD_REDUCE.
+        // Multi-image YOLO 1×1 shapes: C16X32, C16X64, C32X32, C32X64, C64X64, C64X128, plus both WGRAD_REDUCE paths.
+        cdesc(4, 16, 20, 20, 16, 1, p1),
+        cdesc(4, 48, 20, 20, 16, 1, p1),
         cdesc(4, 16, 20, 20, 32, 1, p1),
         cdesc(4, 32, 20, 20, 32, 1, p1),
         cdesc(4, 32, 20, 20, 64, 1, p1),
         cdesc(4, 64, 20, 20, 32, 1, p1),
+        cdesc(4, 96, 20, 20, 32, 1, p1),
         cdesc(4, 48, 40, 40, 64, 1, p1),
         cdesc(4, 64, 16, 16, 128, 1, p1),
         cdesc(4, 96, 16, 16, 128, 1, p1),
         cdesc(4, 128, 20, 20, 128, 1, p1),
         cdesc(2, 256, 8, 8, 256, 1, p1),
+        // Large weight (`wn4 = 9216`, `splits = 17` odd tail) exercising `conv2d_wgrad_reduce` FLAT=true 4x-unrolled path.
+        cdesc(5, 64, 16, 16, 128, 1, p1),
+        cdesc(3, 64, 16, 16, 64, 1, Window2d::square(3, 1, 1)),
         // folo-s stem (3→32 3×3 s2: C32X32 + PER_IMG) and grouped/odd 1×1 (reduce_cols fallback).
         cdesc(4, 3, 32, 32, 32, 1, Window2d::square(3, 2, 1)),
         cdesc(4, 32, 32, 32, 64, 2, p1),

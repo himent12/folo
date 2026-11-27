@@ -13,9 +13,63 @@ use crate::kernels::{check_buf, coop, prod};
 use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 
 /// Sums `splits` f32 partial weight-gradient slabs (`[splits, wn / 4]` of `vec4<f32>`) into `GW` (`vec4<T>`,
-/// f32 or f16): `@workgroup_size(8, 32)` reduces 8 contiguous `vec4` columns (32 f32s = 128 B coalesced
-/// sector) per workgroup with 32 lanes streaming along `splits`. Params: 0 = `wn / 4`, 1 = `splits`.
-fn gen_wgrad_reduce(_: &Spec) -> String {
+/// f32 or f16).
+/// - `FLAT = true`: `@workgroup_size(64)`, one thread per `vec4` column, 4× unrolled loop over `splits`, zero
+///   shared memory and zero barriers (used when `(wn / 4 >= 4096 && splits <= 256) || (wn / 4 >= 2048 && splits <= 64)`).
+/// - `FLAT = false`: `@workgroup_size(8, 32)`, 8 contiguous `vec4` columns (128 B coalesced sector) × 32 lanes
+///   streaming along `splits`, using a 1-barrier 32-wide subgroup reduction when available (1 KiB shared memory)
+///   and a portable 5-barrier shared-memory tree otherwise.
+///
+/// Params: 0 = `wn / 4`, 1 = `splits`.
+fn gen_wgrad_reduce(spec: &Spec) -> String {
+    if spec.get_bool("FLAT") {
+        return "@group(0) @binding(1) var<storage, read> PART: array<vec4<f32>>;\n\
+                @group(0) @binding(2) var<storage, read_write> GW: array<vec4<T>>;\n\
+                @compute @workgroup_size(64)\n\
+                fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+                \x20       @builtin(local_invocation_index) lid: u32) {\n\
+                \x20 let wn4 = pu(0u); let splits = pu(1u);\n\
+                \x20 let col = linear_id(wid, nwg, lid, 64u);\n\
+                \x20 if (col >= wn4) { return; }\n\
+                \x20 var a0 = vec4<f32>(0.0); var a1 = vec4<f32>(0.0);\n\
+                \x20 var a2 = vec4<f32>(0.0); var a3 = vec4<f32>(0.0);\n\
+                \x20 var s = 0u; var off = col;\n\
+                \x20 let step4 = wn4 * 4u;\n\
+                \x20 while (s + 4u <= splits) {\n\
+                \x20   a0 += PART[off];\n\
+                \x20   a1 += PART[off + wn4];\n\
+                \x20   a2 += PART[off + wn4 * 2u];\n\
+                \x20   a3 += PART[off + wn4 * 3u];\n\
+                \x20   s += 4u; off += step4;\n\
+                \x20 }\n\
+                \x20 var acc = (a0 + a1) + (a2 + a3);\n\
+                \x20 while (s < splits) { acc += PART[off]; s += 1u; off += wn4; }\n\
+                \x20 GW[col] = vec4<T>(acc);\n}\n"
+            .into();
+    }
+    if spec.is_subgroups() {
+        return "@group(0) @binding(1) var<storage, read> PART: array<vec4<f32>>;\n\
+                @group(0) @binding(2) var<storage, read_write> GW: array<vec4<T>>;\n\
+                var<workgroup> smem: array<vec4<f32>, 64>;\n\
+                @compute @workgroup_size(8, 32)\n\
+                fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+                \x20       @builtin(local_invocation_id) lid: vec3<u32>) {\n\
+                \x20 let wn4 = pu(0u); let splits = pu(1u);\n\
+                \x20 let col = (wid.y * nwg.x + wid.x) * 8u + lid.x;\n\
+                \x20 var acc = vec4<f32>(0.0);\n\
+                \x20 if (col < wn4) {\n\
+                \x20   for (var s = lid.y; s < splits; s += 32u) { acc += PART[s * wn4 + col]; }\n\
+                \x20 }\n\
+                \x20 acc += subgroupShuffleDown(acc, 16u);\n\
+                \x20 acc += subgroupShuffleDown(acc, 8u);\n\
+                \x20 if ((lid.y & 3u) == 0u) { smem[(lid.y >> 2u) * 8u + lid.x] = acc; }\n\
+                \x20 workgroupBarrier();\n\
+                \x20 var v = select(vec4<f32>(0.0), smem[lid.y * 8u + lid.x] + smem[(lid.y + 4u) * 8u + lid.x], lid.y < 4u);\n\
+                \x20 v += subgroupShuffleDown(v, 16u);\n\
+                \x20 v += subgroupShuffleDown(v, 8u);\n\
+                \x20 if (lid.y == 0u && col < wn4) { GW[col] = vec4<T>(v); }\n}\n"
+            .into();
+    }
     "@group(0) @binding(1) var<storage, read> PART: array<vec4<f32>>;\n\
      @group(0) @binding(2) var<storage, read_write> GW: array<vec4<T>>;\n\
      var<workgroup> smem: array<vec4<f32>, 256>;\n\
@@ -63,9 +117,16 @@ pub(crate) fn finish_wgrad(
     if splits > 1 {
         if wn.is_multiple_of(4) {
             let wn4 = wn / 4;
-            let k = ctx.kernel(&WGRAD_REDUCE, Spec::new().f16(out == DType::F16))?;
+            let flat = (wn4 >= 4096 && splits <= 256) || (wn4 >= 2048 && splits <= 64);
+            let sg = !flat && crate::kernels::use_subgroups(ctx);
+            let k = ctx
+                .kernel(&WGRAD_REDUCE, Spec::new().bool("FLAT", flat).f16(out == DType::F16).subgroups(sg))?;
             let p = Params::new().uz(wn4)?.uz(splits)?;
-            let groups = ctx.grid_1d(wn4.div_ceil(8) as u64 * 256, 256)?;
+            let groups = if flat {
+                ctx.grid_1d(wn4 as u64, 64)?
+            } else {
+                ctx.grid_1d(wn4.div_ceil(8) as u64 * 256, 256)?
+            };
             ctx.dispatch(&k, &[tmp, gw], &p, groups)
         } else {
             let op = crate::kernels::reduce::ReduceOp::Sum;
@@ -160,16 +221,9 @@ pub(crate) fn pick_config_weight_grad(ctx: &GpuContext, m: usize, n: usize) -> T
     if cfg.workgroup_bytes() <= ctx.caps().max_workgroup_storage { cfg } else { TileConfig::SMALL }
 }
 
-/// 16×32 tiles, depth 32, 4×4 per thread, 32 threads (13.3 KiB padded): the stem (3→16, `N = 27`), whose
-/// 1.6 M-deep reduction split-K spreads over a thousand workgroups.
+/// 16×32 tiles, depth 32, 4×4 per thread, 32 threads (13.3 KiB padded): the regular (non-tensor-core) stem
+/// (3→16, `N = 27`), whose 1.6 M-deep reduction split-K spreads over a thousand workgroups.
 const STEM: TileConfig = TileConfig { bm: 16, bn: 32, bk: 32, tm: 4, tn: 4 };
-
-/// Whether the weight gradient of an `m × n` weight takes the regular kernels' [`STEM`] tile even on tensor
-/// cores (their 16-row tile is 16×256 and `C32X32` leaves half its rows idle at `M <= 16`; wider narrow weights
-/// such as `3→32` take `C32X32` on tensor cores).
-pub(crate) fn stem_shaped(m: usize, n: usize) -> bool {
-    m <= 16 && n <= 32
-}
 
 /// Whether the regular weight-gradient kernel with tile `cfg` pads its `B` tile rows by one vec4 (`WG_PAD`, against
 /// bank conflicts in its stores): only when the padded tile still fits `limit` bytes of workgroup memory. The
@@ -270,13 +324,13 @@ fn wgrad_cols(plan: &WgradPlan) -> Vec<&str> {
     cols
 }
 
-/// Loop-invariant column setup hoisted before the K loop of `CONV_MODE` 3 when a thread owns at most 4 distinct
-/// columns (`C64X128`, `C64X64`, `C32X128`, `C32X32`, `LARGE`, `SMALL`): decodes `j = (ci, kh, kw)` once instead
-/// of repeating `/ (KH * KW)` and `% (KH * KW)` on every K tile.
+/// Loop-invariant column setup hoisted before the K loop of `CONV_MODE` 3 when a thread owns at most 8 distinct
+/// columns (`C64X128`, `C64X64`, `C32X128`, `C32X64`, `C32X32`, `C16X64`, `C16X32`, `LARGE`, `SMALL`): decodes
+/// `j = (ci, kh, kw)` once instead of repeating `/ (KH * KW)` and `% (KH * KW)` on every K tile.
 pub(crate) fn wgrad_b_setup(plan: &WgradPlan, per_img: bool) -> String {
     use std::fmt::Write as _;
     let cols = wgrad_cols(plan);
-    if cols.len() > 4 {
+    if cols.len() > 8 {
         return String::new();
     }
     let prefix = if per_img { "offB + " } else { "" };
@@ -303,13 +357,13 @@ pub(crate) fn wgrad_b_load(
     cast: &str,
     zero: &str,
     per_img: bool,
-    check: bool,
+    (check_k, check_n): (bool, bool),
 ) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
     let mut runs: Vec<&str> = Vec::new();
     let cols = wgrad_cols(plan);
-    let hoisted = cols.len() <= 4;
+    let hoisted = cols.len() <= 8;
     let run = plan.run;
     for (u, w) in plan.units.iter().enumerate() {
         let q = match runs.iter().position(|k| *k == w.kq) {
@@ -317,7 +371,7 @@ pub(crate) fn wgrad_b_load(
             None => {
                 runs.push(&w.kq);
                 let q = runs.len() - 1;
-                let kok = if check { format!(" let wkok{q} = wk{q} < K;") } else { String::new() };
+                let kok = if check_k { format!(" let wkok{q} = wk{q} < K;") } else { String::new() };
                 if per_img {
                     let _ = writeln!(
                         s,
@@ -337,10 +391,10 @@ pub(crate) fn wgrad_b_load(
                 q
             }
         };
-        let k_cond = if check { format!("wkok{q} && ") } else { String::new() };
+        let k_cond = if check_k { format!("wkok{q} && ") } else { String::new() };
         if hoisted {
             let c = cols.iter().position(|jj| *jj == w.jj).unwrap();
-            let j_cond = if check { format!("wjok{c} && ") } else { String::new() };
+            let j_cond = if check_n { format!("wjok{c} && ") } else { String::new() };
             let wb_pre = if per_img { String::new() } else { format!("wb{q} + ") };
             let _ = writeln!(
                 s,
@@ -352,7 +406,7 @@ pub(crate) fn wgrad_b_load(
                 reg(u)
             );
         } else {
-            let j_cond = if check { "j < N && " } else { "" };
+            let j_cond = if check_n { "j < N && " } else { "" };
             let wb_var = if per_img { "offB".to_string() } else { format!("wb{q}") };
             let _ = writeln!(
                 s,
@@ -465,10 +519,7 @@ pub fn conv2d_backward_weight_as(
     g.b = BatchStrides { offset: 0, outer: 0, inner: cin_g * d.h * d.w };
     g.c = BatchStrides { offset: 0, outer: 0, inner: cout_g * ncols };
     g.dtype = dt;
-    if coop_grad(ctx, d)
-        && !stem_shaped(cout_g, ncols)
-        && coop::encode_conv_backward_weight(ctx, d, &g, out, grad, x, gw)?
-    {
+    if coop_grad(ctx, d) && coop::encode_conv_backward_weight(ctx, d, &g, out, grad, x, gw)? {
         return Ok(());
     }
     // Formula 2: division-free contiguous `vec4` batched/split-K `A · Bᵀ` GEMM for 1×1 s1 p0 weight gradients.
@@ -728,5 +779,23 @@ mod tests {
                 "mode={mode} ta={ta} tb={tb} va={va} vb={vb} subpixel={subpixel} phase={phase}"
             );
         }
+    }
+
+    #[test]
+    fn wgrad_reduce_generates_flat_subgroup_and_portable_variants() {
+        let flat = gen_wgrad_reduce(&Spec::new().bool("FLAT", true));
+        assert!(flat.contains("@workgroup_size(64)"));
+        assert!(!flat.contains("workgroupBarrier()"));
+        assert!(!flat.contains("var<workgroup>"));
+
+        let sg = gen_wgrad_reduce(&Spec::new().bool("FLAT", false).subgroups(true));
+        assert!(sg.contains("@workgroup_size(8, 32)"));
+        assert_eq!(sg.matches("workgroupBarrier()").count(), 1);
+        assert!(sg.contains("subgroupShuffleDown"));
+
+        let portable = gen_wgrad_reduce(&Spec::new().bool("FLAT", false).subgroups(false));
+        assert!(portable.contains("@workgroup_size(8, 32)"));
+        assert_eq!(portable.matches("workgroupBarrier()").count(), 5);
+        assert!(!portable.contains("subgroupShuffleDown"));
     }
 }

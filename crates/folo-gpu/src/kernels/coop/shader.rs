@@ -50,13 +50,21 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let CoopConfig { bm, bn, bk, wgm: _, wgn } = cfg;
     let (threads, subgroups) = (cfg.threads(), cfg.subgroups());
     let (fm, fnn) = (cfg.fm(), cfg.fnn());
-    let (sa, sb) = (bk + PAD, bn + PAD);
     let (va, vb, vc) = (spec.get_bool("VEC_A"), spec.get_bool("VEC_B"), spec.get_bool("VEC_C"));
     let (ta, tb) = (spec.get_bool("TRANS_A"), spec.get_bool("TRANS_B"));
     let check = spec.get_bool("CHECK");
+    let check_m = check || spec.get_bool("CHECK_M");
+    let check_n = check || spec.get_bool("CHECK_N");
+    let check_k = check || spec.get_bool("CHECK_K");
     // 0 = plain GEMM, 1 = conv forward, 2 = conv input gradient, 3 = conv weight gradient (as `crate::kernels::gemm`).
     let mode = spec.get_u32("CONV_MODE", 0);
     let conv = mode != 0;
+    // Column-major shared tiles (`As[k][m]`, `Bs[n][k]`), loaded via `coopLoad`: lets transposed GEMM operands
+    // (`TRANS_A` / `TRANS_B`) and `CONV_MODE = 3` weight-gradient gathers write contiguously into workgroup memory.
+    let a_col = ta && spec.get_bool("A_COL");
+    let b_col = ((tb && !conv) || mode == 3) && spec.get_bool("B_COL");
+    let sa = if a_col { bm + PAD } else { bk + PAD };
+    let sb = if b_col { bk + PAD } else { bn + PAD };
     // Input gradient of one stride phase (`crate::kernels::conv`'s stride-phase decomposition).
     let phase = mode == 2 && spec.get_bool("PHASE");
     // Fused 2×2 sub-pixel stride-2 input gradient (`CONV_MODE` 1 with 2×2 pixel-shuffle epilogue).
@@ -80,13 +88,22 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     // `CAT` > 1: `B` is that many row blocks in separate buffers (`crate::kernels::gemm_cat`).
     let cat = spec.get_u32("CAT", 1);
     let ct = if spec.get_bool("OUT_F16") { "f16" } else { "f32" };
-    let (a_len, b_len) = (bm * sa, bk * sb);
+    let a_len = if a_col { bk * sa } else { bm * sa };
+    let b_len = if b_col { bn * sb } else { bk * sb };
 
     // Condition 2 of `experimental_opt_in`: every fragment lies inside its workgroup array. The largest
     // subgroup index is `subgroups - 1` (clamped in the shader), so these are the furthest fragments.
-    let a_last = ((cfg.wgm - 1) * fm * 16 + (fm - 1) * 16) * sa + (bk - 16);
+    let a_last = if a_col {
+        (bk - 16) * sa + (cfg.wgm - 1) * fm * 16 + (fm - 1) * 16
+    } else {
+        ((cfg.wgm - 1) * fm * 16 + (fm - 1) * 16) * sa + (bk - 16)
+    };
     assert!(a_last + 15 * sa + 16 <= a_len, "A fragment out of bounds");
-    let b_last = (bk - 16) * sb + (wgn - 1) * fnn * 16 + (fnn - 1) * 16;
+    let b_last = if b_col {
+        ((wgn - 1) * fnn * 16 + (fnn - 1) * 16) * sb + (bk - 16)
+    } else {
+        (bk - 16) * sb + (wgn - 1) * fnn * 16 + (fnn - 1) * 16
+    };
     assert!(b_last + 15 * sb + 16 <= b_len, "B fragment out of bounds");
     assert!((subgroups - 1) * FRAG + 15 * 16 + 16 <= subgroups * FRAG, "scratch fragment out of bounds");
 
@@ -236,36 +253,53 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let mut load = String::new();
     for u in 0..pa.count {
         let (o, i) = (pa.outer(u), pa.inner_expr());
-        let (idx, cond) = match (va, ta) {
+        let (idx, m_cond, k_cond) = match (va, ta) {
             (true, false) if mode == 3 && !per_img => (
                 format!(
                     "(offA + ((k0 + {i} * 4u) / OHOW) * SAN + (m0 + {o}) * OHOW + (k0 + {i} * 4u) % OHOW) / 4u"
                 ),
-                format!("m0 + {o} < M && k0 + {i} * 4u < K"),
+                format!("m0 + {o} < M"),
+                format!("k0 + {i} * 4u < K"),
             ),
             (false, false) if mode == 3 && !per_img => (
                 format!("offA + ((k0 + {i}) / OHOW) * SAN + (m0 + {o}) * OHOW + (k0 + {i}) % OHOW"),
-                format!("m0 + {o} < M && k0 + {i} < K"),
+                format!("m0 + {o} < M"),
+                format!("k0 + {i} < K"),
             ),
             (true, false) => (
                 format!("offA / 4u + (m0 + {o}) * (lda / 4u) + k0 / 4u + {i}"),
-                format!("m0 + {o} < M && k0 + {i} * 4u < K"),
+                format!("m0 + {o} < M"),
+                format!("k0 + {i} * 4u < K"),
             ),
-            (false, false) => {
-                (format!("offA + (m0 + {o}) * lda + k0 + {i}"), format!("m0 + {o} < M && k0 + {i} < K"))
-            }
+            (false, false) => (
+                format!("offA + (m0 + {o}) * lda + k0 + {i}"),
+                format!("m0 + {o} < M"),
+                format!("k0 + {i} < K"),
+            ),
             (true, true) => (
                 format!("offA / 4u + (k0 + {o}) * (lda / 4u) + m0 / 4u + {i}"),
-                format!("k0 + {o} < K && m0 + {i} * 4u < M"),
+                format!("m0 + {i} * 4u < M"),
+                format!("k0 + {o} < K"),
             ),
-            (false, true) => {
-                (format!("offA + (k0 + {o}) * lda + m0 + {i}"), format!("k0 + {o} < K && m0 + {i} < M"))
-            }
+            (false, true) => (
+                format!("offA + (k0 + {o}) * lda + m0 + {i}"),
+                format!("m0 + {i} < M"),
+                format!("k0 + {o} < K"),
+            ),
         };
-        let body = if check {
-            format!("    if ({cond}) {{ ra{u} = MA[{idx}]; }} else {{ ra{u} = {a_reg}(0.0); }}\n")
-        } else {
-            format!("    ra{u} = MA[{idx}];\n")
+        let body = match (check_m, check_k) {
+            (true, true) => {
+                format!(
+                    "    if ({m_cond} && {k_cond}) {{ ra{u} = MA[{idx}]; }} else {{ ra{u} = {a_reg}(0.0); }}\n"
+                )
+            }
+            (true, false) => {
+                format!("    if ({m_cond}) {{ ra{u} = MA[{idx}]; }} else {{ ra{u} = {a_reg}(0.0); }}\n")
+            }
+            (false, true) => {
+                format!("    if ({k_cond}) {{ ra{u} = MA[{idx}]; }} else {{ ra{u} = {a_reg}(0.0); }}\n")
+            }
+            (false, false) => format!("    ra{u} = MA[{idx}];\n"),
         };
         load.push_str(&pa.guarded(body));
     }
@@ -277,7 +311,7 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             "",
             "f16(0.0)",
             per_img,
-            check,
+            (check_k, check_n),
         ));
     }
     for u in (0..pb.count).filter(|_| mode != 3) {
@@ -291,7 +325,7 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                 "",
                 "f16(0.0)",
                 &o,
-                check,
+                check_k,
             )
         } else if mode == 1 {
             let _ = i;
@@ -311,7 +345,7 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                 "",
                 "f16(0.0)",
                 &o,
-                check,
+                check_k,
             )
         } else if phase {
             format!(
@@ -332,7 +366,7 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                 "",
                 "f16(0.0)",
                 &o,
-                check,
+                check_k,
             )
         } else if mode == 2 {
             format!(
@@ -348,57 +382,72 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                  \x20     rb{u} = v; }}\n"
             )
         } else {
-            let (idx, cond) = match (vb, tb) {
+            let (idx, k_cond, n_cond) = match (vb, tb) {
                 (true, false) => (
                     format!("offB / 4u + (k0 + {o}) * (ldb / 4u) + n0 / 4u + {i}"),
-                    format!("k0 + {o} < K && n0 + {i} * 4u < N"),
+                    format!("k0 + {o} < K"),
+                    format!("n0 + {i} * 4u < N"),
                 ),
-                (false, false) => {
-                    (format!("offB + (k0 + {o}) * ldb + n0 + {i}"), format!("k0 + {o} < K && n0 + {i} < N"))
-                }
+                (false, false) => (
+                    format!("offB + (k0 + {o}) * ldb + n0 + {i}"),
+                    format!("k0 + {o} < K"),
+                    format!("n0 + {i} < N"),
+                ),
                 (true, true) => (
                     format!("offB / 4u + (n0 + {o}) * (ldb / 4u) + k0 / 4u + {i}"),
-                    format!("n0 + {o} < N && k0 + {i} * 4u < K"),
+                    format!("k0 + {i} * 4u < K"),
+                    format!("n0 + {o} < N"),
                 ),
-                (false, true) => {
-                    (format!("offB + (n0 + {o}) * ldb + k0 + {i}"), format!("n0 + {o} < N && k0 + {i} < K"))
-                }
+                (false, true) => (
+                    format!("offB + (n0 + {o}) * ldb + k0 + {i}"),
+                    format!("k0 + {i} < K"),
+                    format!("n0 + {o} < N"),
+                ),
             };
             let fetch = match (cat > 1, vb) {
                 (true, true) => format!("cat_b(k0 + {o}, n0 / 4u + {i}, b1)"),
                 (true, false) => format!("cat_b(k0 + {o}, n0 + {i}, b1)"),
                 (false, _) => format!("MB[{idx}]"),
             };
-            if check {
-                format!("    if ({cond}) {{ rb{u} = {fetch}; }} else {{ rb{u} = {b_reg}(0.0); }}\n")
-            } else {
-                format!("    rb{u} = {fetch};\n")
+            match (check_k, check_n) {
+                (true, true) => {
+                    format!(
+                        "    if ({k_cond} && {n_cond}) {{ rb{u} = {fetch}; }} else {{ rb{u} = {b_reg}(0.0); }}\n"
+                    )
+                }
+                (true, false) => {
+                    format!("    if ({k_cond}) {{ rb{u} = {fetch}; }} else {{ rb{u} = {b_reg}(0.0); }}\n")
+                }
+                (false, true) => {
+                    format!("    if ({n_cond}) {{ rb{u} = {fetch}; }} else {{ rb{u} = {b_reg}(0.0); }}\n")
+                }
+                (false, false) => format!("    rb{u} = {fetch};\n"),
             }
         };
         load.push_str(&pb.guarded(body));
     }
 
-    // --- registers → workgroup tiles (row-major `As[m][k]`, `Bs[k][n]`) --------------------------------------
+    // --- registers → workgroup tiles (row-major `As[m][k]`, `Bs[k][n]`, or column-major `As[k][m]`, `Bs[n][k]`) --
     let store = |buf: u32| -> String {
         let mut st = String::new();
         for u in 0..pa.count {
             let (o, i) = (pa.outer(u), pa.inner_expr());
             let mut body = String::new();
-            match (va, ta) {
-                (true, false) => {
+            match (va, ta, a_col) {
+                (true, false, _) | (true, true, true) => {
                     for c in 0..4 {
                         let _ = writeln!(body, "    As{buf}[{o} * {sa}u + {i} * 4u + {c}u] = ra{u}[{c}];");
                     }
                 }
-                (false, false) => {
+                (false, false, _) | (false, true, true) => {
                     let _ = writeln!(body, "    As{buf}[{o} * {sa}u + {i}] = ra{u};");
                 }
-                (true, true) => {
+                (true, true, false) => {
                     for c in 0..4 {
                         let _ = writeln!(body, "    As{buf}[({i} * 4u + {c}u) * {sa}u + {o}] = ra{u}[{c}];");
                     }
                 }
-                (false, true) => {
+                (false, true, false) => {
                     let _ = writeln!(body, "    As{buf}[{i} * {sa}u + {o}] = ra{u};");
                 }
             }
@@ -407,26 +456,30 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
         for (u, w) in wb.iter().flat_map(|wb| wb.units.iter().map(move |w| (wb.run, w))).enumerate() {
             let (run, w) = w;
             let row = format!("({} * {run}u + wl)", w.kq);
-            let _ = writeln!(st, "    Bs{buf}[{row} * {sb}u + {}] = rb{u};", w.jj);
+            if b_col {
+                let _ = writeln!(st, "    Bs{buf}[{} * {sb}u + {row}] = rb{u};", w.jj);
+            } else {
+                let _ = writeln!(st, "    Bs{buf}[{row} * {sb}u + {}] = rb{u};", w.jj);
+            }
         }
         for u in (0..pb.count).filter(|_| mode != 3) {
             let (o, i) = (pb.outer(u), pb.inner_expr());
             let mut body = String::new();
-            match (vb && !conv, tb && !conv) {
-                (true, false) => {
+            match (vb && !conv, tb && !conv, b_col) {
+                (true, false, _) | (true, true, true) => {
                     for c in 0..4 {
                         let _ = writeln!(body, "    Bs{buf}[{o} * {sb}u + {i} * 4u + {c}u] = rb{u}[{c}];");
                     }
                 }
-                (false, false) => {
+                (false, false, _) | (false, true, true) => {
                     let _ = writeln!(body, "    Bs{buf}[{o} * {sb}u + {i}] = rb{u};");
                 }
-                (true, true) => {
+                (true, true, false) => {
                     for c in 0..4 {
                         let _ = writeln!(body, "    Bs{buf}[({i} * 4u + {c}u) * {sb}u + {o}] = rb{u}[{c}];");
                     }
                 }
-                (false, true) => {
+                (false, true, false) => {
                     let _ = writeln!(body, "    Bs{buf}[{i} * {sb}u + {o}] = rb{u};");
                 }
             }
@@ -441,22 +494,42 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
         for kk in 0..bk / 16 {
             c.push_str("    {\n");
             for i in 0..fm {
-                let _ = writeln!(
-                    c,
-                    "      let fa{i} = coopLoadT<coop_mat16x16<f16, A>>(&As{buf}[(wm * {}u + {}u) * {sa}u + {}u], {sa}u);",
-                    fm * 16,
-                    i * 16,
-                    kk * 16
-                );
+                if a_col {
+                    let _ = writeln!(
+                        c,
+                        "      let fa{i} = coopLoad<coop_mat16x16<f16, A>>(&As{buf}[{}u + wm * {}u + {}u], {sa}u);",
+                        kk * 16 * sa,
+                        fm * 16,
+                        i * 16
+                    );
+                } else {
+                    let _ = writeln!(
+                        c,
+                        "      let fa{i} = coopLoadT<coop_mat16x16<f16, A>>(&As{buf}[(wm * {}u + {}u) * {sa}u + {}u], {sa}u);",
+                        fm * 16,
+                        i * 16,
+                        kk * 16
+                    );
+                }
             }
             for j in 0..fnn {
-                let _ = writeln!(
-                    c,
-                    "      let fb{j} = coopLoadT<coop_mat16x16<f16, B>>(&Bs{buf}[{}u + wn * {}u + {}u], {sb}u);",
-                    kk * 16 * sb,
-                    fnn * 16,
-                    j * 16
-                );
+                if b_col {
+                    let _ = writeln!(
+                        c,
+                        "      let fb{j} = coopLoad<coop_mat16x16<f16, B>>(&Bs{buf}[(wn * {}u + {}u) * {sb}u + {}u], {sb}u);",
+                        fnn * 16,
+                        j * 16,
+                        kk * 16
+                    );
+                } else {
+                    let _ = writeln!(
+                        c,
+                        "      let fb{j} = coopLoadT<coop_mat16x16<f16, B>>(&Bs{buf}[{}u + wn * {}u + {}u], {sb}u);",
+                        kk * 16 * sb,
+                        fnn * 16,
+                        j * 16
+                    );
+                }
             }
             for i in 0..fm {
                 for j in 0..fnn {
@@ -476,7 +549,7 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
         let _ = writeln!(
             s,
             "   if (t >= nt) {{ break; }}\n   {{\n    let more = t + 1u < nt;\n    if (more) {{\n    let k0 = kbeg + (t + 1u) * {bk}u;\n{load}    }}\n{}\
-             \x20   if (more) {{\n{}    }}\n    workgroupBarrier();\n   }}\n   t += 1u;",
+             \x20   if (more) {{\n{}      workgroupBarrier();\n    }}\n   }}\n   t += 1u;",
             compute(cur),
             store(next)
         );
@@ -512,7 +585,7 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                  \x20   var v0 = vec4<f32>(Cs[e], Cs[e + 1u], Cs[e + 2u], Cs[e + 3u]) * alpha;\n\
                  \x20   var v1 = vec4<f32>(Cs[e + 4u], Cs[e + 5u], Cs[e + 6u], Cs[e + 7u]) * alpha;\n",
             );
-            if check {
+            if check_m {
                 s.push_str("    if (row < M) {\n");
             } else {
                 s.push_str("    {\n");
@@ -534,7 +607,7 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             s.push_str("      v0 = unary4(ACT, v0, act_alpha); v1 = unary4(ACT, v1, act_alpha);\n");
             let at = "offC + row * ldc + col";
             if vc {
-                if check {
+                if check_n {
                     let _ = writeln!(s, "      if (col < N) {{ MC[({at}) / 4u] = vec4<CT>(v0); }}");
                     let _ = writeln!(s, "      if (col + 4u < N) {{ MC[({at}) / 4u + 1u] = vec4<CT>(v1); }}");
                 } else {
@@ -552,7 +625,7 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                     } else {
                         format!("{at} + {c}u")
                     };
-                    if check {
+                    if check_n {
                         let _ = writeln!(s, "      if (col + {c}u < N) {{ MC[{at}] = CT({v}[{x}]); }}");
                     } else {
                         let _ = writeln!(s, "      MC[{at}] = CT({v}[{x}]);");
@@ -608,7 +681,10 @@ mod tests {
     #[test]
     fn epilogue_uses_subgroup_barriers_without_trailing_barrier() {
         for cfg in [
+            CoopConfig::C16X32,
+            CoopConfig::C16X64,
             CoopConfig::C32X32,
+            CoopConfig::C32X64,
             CoopConfig::C64X64,
             CoopConfig::C64X128,
             CoopConfig::C128X128,
@@ -642,5 +718,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn col_major_tiles_emit_coop_load_and_skip_unused_axis_checks() {
+        let cfg = CoopConfig::C64X64;
+        let spec = Spec::new()
+            .u32("BM", cfg.bm)
+            .u32("BN", cfg.bn)
+            .u32("BK", cfg.bk)
+            .u32("WGM", cfg.wgm)
+            .u32("WGN", cfg.wgn)
+            .bool("VEC_A", true)
+            .bool("VEC_B", true)
+            .bool("VEC_C", true)
+            .bool("TRANS_A", true)
+            .bool("TRANS_B", true)
+            .bool("A_COL", true)
+            .bool("B_COL", true)
+            .bool("CHECK_M", false)
+            .bool("CHECK_N", true)
+            .bool("CHECK_K", false)
+            .u32("CONV_MODE", 0);
+        let src = gen_coop(&spec);
+        assert!(src.contains("coopLoad<coop_mat16x16<f16, A>>"));
+        assert!(src.contains("coopLoad<coop_mat16x16<f16, B>>"));
+        assert!(!src.contains("coopLoadT<"));
+        assert!(!src.contains("if (row < M)"));
+        assert!(src.contains("if (col < N)"));
+        assert!(!src.contains(" < K)"));
     }
 }
