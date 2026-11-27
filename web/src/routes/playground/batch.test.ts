@@ -5,12 +5,18 @@ import { toCsv } from '$lib/tableExport';
 import { toast } from '$lib/ui/toast';
 import {
   BATCH_CSV_HEADERS,
+  BATCH_SUMMARY_CSV_HEADERS,
   batchPredKey,
+  batchQaCounts,
   buildBatchCsvRows,
   buildBatchJson,
+  buildBatchSummaryCsvRows,
   exportBatchCsv,
   exportBatchJson,
+  exportBatchSummaryCsv,
   filterBatchBoxes,
+  filterBatchItems,
+  matchesBatchQaFilter,
   summarizeBatch,
   type BatchFilter,
   type BatchItem,
@@ -217,5 +223,98 @@ describe('playground batch helpers', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('computes live QA filter counts, filters batch items by detections/empty/class, and builds per-image summary CSV + filtered JSON', () => {
+    const key = batchPredKey('m_shapes_s', 'server');
+    const items: BatchItem[] = [
+      makeItem({
+        id: 'b1',
+        name: 'both.png',
+        status: 'done',
+        predKey: key,
+        pred: makePred([
+          { class: 0, name: 'circle', score: 0.91, x1: 0, y1: 0, x2: 30, y2: 30 },
+          { class: 1, name: 'square', score: 0.65, x1: 40, y1: 10, x2: 80, y2: 50 },
+          { class: 0, name: 'circle', score: 0.52, x1: 90, y1: 10, x2: 120, y2: 40 },
+        ]),
+      }),
+      makeItem({
+        id: 'b2',
+        name: 'empty.png',
+        status: 'done',
+        predKey: key,
+        pred: makePred([]),
+      }),
+      makeItem({
+        id: 'b3',
+        name: 'only-square.png',
+        status: 'done',
+        predKey: key,
+        pred: makePred([{ class: 1, name: 'square', score: 0.84, x1: 10, y1: 10, x2: 50, y2: 50 }]),
+      }),
+      makeItem({
+        id: 'b4',
+        name: '=failed.png',
+        status: 'error',
+        error: 'HTTP 500',
+      }),
+    ];
+
+    const counts = batchQaCounts(items, DEFAULT_FILTER, new Set(), ['circle', 'square']);
+    expect(counts.all).toBe(4);
+    expect(counts.withDetections).toBe(2);
+    expect(counts.empty).toBe(1);
+    expect(counts.byClass).toEqual([
+      { classId: 1, name: 'square', imageCount: 2, boxCount: 2 },
+      { classId: 0, name: 'circle', imageCount: 1, boxCount: 2 },
+    ]);
+
+    expect(filterBatchItems(items, { kind: 'with-detections' }, DEFAULT_FILTER, new Set()).map((e) => e.index)).toEqual([0, 2]);
+    expect(filterBatchItems(items, { kind: 'empty' }, DEFAULT_FILTER, new Set()).map((e) => e.index)).toEqual([1]);
+    expect(filterBatchItems(items, { kind: 'class', classId: 0 }, DEFAULT_FILTER, new Set()).map((e) => e.index)).toEqual([0]);
+    expect(matchesBatchQaFilter(items[3]!, { kind: 'empty' }, DEFAULT_FILTER, new Set())).toBe(false);
+
+    // Per-image summary CSV includes empty and failed rows with timing and formula neutralization.
+    const summaryRows = buildBatchSummaryCsvRows({ items, filter: DEFAULT_FILTER, hidden: new Set() });
+    expect(summaryRows).toEqual([
+      ['both.png', 'done', 3, 'circle:2; square:1', 0.91, 10, 640, 480, ''],
+      ['empty.png', 'done', 0, '', '', 10, 640, 480, ''],
+      ['only-square.png', 'done', 1, 'square:1', 0.84, 10, 640, 480, ''],
+      ['=failed.png', 'error', 0, '', '', '', 640, 480, 'HTTP 500'],
+    ]);
+    const csv = toCsv(BATCH_SUMMARY_CSV_HEADERS, summaryRows);
+    expect(csv).toContain('filename,status,detections,classes,top_confidence,total_ms,image_width,image_height,error\r\n');
+    expect(csv).toContain("'=failed.png,error,0,,,,640,480,HTTP 500\r\n");
+
+    // Filtered JSON includes qa_filter metadata.
+    const json = buildBatchJson({
+      items: [items[0]!],
+      modelId: 'm_shapes_s',
+      modelName: 'shapes-s',
+      runOn: 'server',
+      filter: DEFAULT_FILTER,
+      hidden: new Set(),
+      classes: ['circle', 'square'],
+      qaFilter: { kind: 'class', classId: 0 },
+    });
+    expect(json.qa_filter).toEqual({ kind: 'class', class: 0, name: 'circle' });
+
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:summary');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    expect(
+      exportBatchSummaryCsv({
+        items,
+        modelId: 'm_shapes_s',
+        modelName: 'shapes-s',
+        runOn: 'server',
+        filter: DEFAULT_FILTER,
+        hidden: new Set(),
+        classes: ['circle', 'square'],
+      }),
+    ).toBe(true);
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(toast.items[0]?.title).toBe('Batch summary CSV exported');
   });
 });

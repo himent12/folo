@@ -181,12 +181,66 @@ export function stretch(b: Box, dw: number, dh: number, width: number, height: n
   return { class: b.class, x1, y1, x2, y2 };
 }
 
+/** Whether two single boxes have identical class and coordinates. */
+export function sameBox(a: Box, b: Box): boolean {
+  return a.class === b.class && a.x1 === b.x1 && a.y1 === b.y1 && a.x2 === b.x2 && a.y2 === b.y2;
+}
+
 /** Whether two box lists are the same labels (order included), to tell an edited image from a saved one. */
 export function sameBoxes(a: readonly Box[], b: readonly Box[]): boolean {
-  return a.length === b.length && a.every((x, i) => {
-    const y = b[i] as Box;
-    return x.class === y.class && x.x1 === y.x1 && x.y1 === y.y1 && x.x2 === y.x2 && x.y2 === y.y2;
-  });
+  return a.length === b.length && a.every((x, i) => sameBox(x, b[i] as Box));
+}
+
+/**
+ * Duplicates `b` with a small visible offset inside `width × height`. When the box sits against the right or bottom
+ * edge, shifts left/up instead so the copy never lands invisibly on top of the original.
+ */
+export function duplicateBox(b: Box, width: number, height: number): Box {
+  const c = clampBox(b, width, height);
+  const w = c.x2 - c.x1;
+  const h = c.y2 - c.y1;
+  const step = Math.max(8, Math.round(Math.min(width, height) * 0.02));
+  const dx = c.x2 + step <= width ? step : c.x1 - step >= 0 ? -step : Math.max(0, width - c.x2);
+  const dy = c.y2 + step <= height ? step : c.y1 - step >= 0 ? -step : Math.max(0, height - c.y2);
+  const x1 = Math.max(0, Math.min(width - w, c.x1 + dx));
+  const y1 = Math.max(0, Math.min(height - h, c.y1 + dy));
+  return tidy({ class: b.class, x1, y1, x2: x1 + w, y2: y1 + h });
+}
+
+/**
+ * Copies boxes from a previous image (`fromWidth × fromHeight`) onto a target image (`toWidth × toHeight`),
+ * scaling proportionally when frame dimensions differ, clamping inside bounds, and dropping tiny or out-of-range boxes.
+ */
+export function adaptBoxesToImage(
+  boxes: readonly Box[],
+  fromWidth: number,
+  fromHeight: number,
+  toWidth: number,
+  toHeight: number,
+  classCount: number,
+): Box[] {
+  if (toWidth <= 0 || toHeight <= 0 || classCount <= 0) return [];
+  const sx = fromWidth > 0 && fromWidth !== toWidth ? toWidth / fromWidth : 1;
+  const sy = fromHeight > 0 && fromHeight !== toHeight ? toHeight / fromHeight : 1;
+  const out: Box[] = [];
+  for (const b of boxes) {
+    if (!Number.isInteger(b.class) || b.class < 0 || b.class >= classCount) continue;
+    const scaled = tidy(
+      clampBox(
+        {
+          class: b.class,
+          x1: b.x1 * sx,
+          y1: b.y1 * sy,
+          x2: b.x2 * sx,
+          y2: b.y2 * sy,
+        },
+        toWidth,
+        toHeight,
+      ),
+    );
+    if (!tooSmall(scaled)) out.push(scaled);
+  }
+  return out;
 }
 
 /** Coordinates to a tenth of a pixel, as the server keeps them: no float noise from the screen mapping is saved. */

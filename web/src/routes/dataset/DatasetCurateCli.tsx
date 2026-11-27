@@ -1,27 +1,47 @@
 /**
- * Concise, shell-safe CLI Curation Helper paired with DatasetInsights: lets users copy real `folo dataset`
- * commands (`check --perceptual --fix-dry-run`, `split`, `filter`, `merge`) tailored to the loaded dataset.
+ * Concise, shell-safe CLI Curation & Export Helper paired with DatasetInsights and StatsTab: lets users copy real
+ * `folo dataset` commands (`check --perceptual --fix-dry-run`, `split`, `filter`, `merge`, `convert`) tailored to the
+ * loaded dataset.
  */
 import TriangleAlert from '$icons/triangle-alert';
-import { computed, css, signal } from 'fw';
-import type { Dataset, DatasetStats } from '$lib/api/types';
+import { computed, css, effect, signal } from 'fw';
+import type { Dataset, DatasetStats, Split } from '$lib/api/types';
 import { SHELL } from '$lib/trainCli';
 import CommandLine from '$lib/ui/CommandLine';
 import Segmented from '$lib/ui/Segmented';
-import { buildDatasetCurateCli, CURATE_CLI_MODES, type CurateCliMode } from './curateCli';
+import {
+  buildDatasetCurateCli,
+  CONVERT_TARGET_FORMATS,
+  CURATE_CLI_MODES,
+  defaultConvertTarget,
+  type ConvertTargetFormat,
+  type CurateCliMode,
+} from './curateCli';
 
 export interface DatasetCurateCliProps {
   dataset: Dataset;
   stats: DatasetStats;
   activeClass?: number;
+  activeSplit?: 'all' | Split;
 }
 
 export default function DatasetCurateCli(props: DatasetCurateCliProps) {
   const mode = signal<CurateCliMode>(props.dataset.splits.val === 0 ? 'split' : 'check');
+  const targetFormat = signal<ConvertTargetFormat>(defaultConvertTarget(props.dataset.format));
+  let prevDatasetId = props.dataset.id;
+  effect(() => {
+    const id = props.dataset.id;
+    if (id !== prevDatasetId) {
+      prevDatasetId = id;
+      targetFormat.set(defaultConvertTarget(props.dataset.format));
+    }
+  });
   const snippet = computed(() =>
     buildDatasetCurateCli(props.dataset, mode.get(), {
       stats: props.stats,
       activeClass: props.activeClass,
+      activeSplit: props.activeSplit,
+      targetFormat: targetFormat.get(),
     }),
   );
 
@@ -29,7 +49,17 @@ export default function DatasetCurateCli(props: DatasetCurateCliProps) {
     <div class="curate" data-dataset-curate-cli>
       <div class="curate-head">
         <span class="curate-label">CLI curation · {SHELL}</span>
-        <Segmented label="Dataset curation command" size="sm" bind:value={mode} options={[...CURATE_CLI_MODES]} />
+        <div class="curate-controls">
+          <Segmented label="Dataset curation command" size="sm" bind:value={mode} options={[...CURATE_CLI_MODES]} />
+          {mode.get() === 'convert' ? (
+            <Segmented
+              label="Target format"
+              size="sm"
+              bind:value={targetFormat}
+              options={[...CONVERT_TARGET_FORMATS]}
+            />
+          ) : null}
+        </div>
       </div>
       <CommandLine
         command={snippet.get().command}
@@ -62,6 +92,12 @@ css`
     flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
+    gap: var(--space-2);
+  }
+  .curate-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
     gap: var(--space-2);
   }
   .curate-label {

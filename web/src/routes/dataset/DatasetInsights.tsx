@@ -204,7 +204,14 @@ export default function DatasetInsights(props: DatasetInsightsProps) {
         </div>
       ) : null}
 
-      {curateOpen.get() ? <DatasetCurateCli dataset={props.dataset} stats={props.stats} activeClass={props.activeClass} /> : null}
+      {curateOpen.get() ? (
+        <DatasetCurateCli
+          dataset={props.dataset}
+          stats={props.stats}
+          activeClass={props.activeClass}
+          activeSplit={props.activeSplit}
+        />
+      ) : null}
     </section>
   );
 }

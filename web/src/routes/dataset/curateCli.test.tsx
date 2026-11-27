@@ -37,7 +37,7 @@ afterEach(() => {
 });
 
 describe('buildDatasetCurateCli', () => {
-  it('generates exact docs/CLI.md commands for check, split, filter, and merge', () => {
+  it('generates exact docs/CLI.md commands for check, split, filter (with split), merge, and convert', () => {
     expect(buildDatasetCurateCli(BASE_DATASET, 'check').command).toBe(
       'folo dataset check D:/datasets/fasteners --perceptual --fix-dry-run',
     );
@@ -47,8 +47,23 @@ describe('buildDatasetCurateCli', () => {
     expect(buildDatasetCurateCli(BASE_DATASET, 'filter', { stats: BASE_STATS }).command).toBe(
       'folo dataset filter D:/datasets/fasteners --out <out_dir>/fasteners-filtered --drop-empty-images',
     );
+    expect(buildDatasetCurateCli(BASE_DATASET, 'filter', { stats: { ...BASE_STATS, empty_images: 0 }, activeSplit: 'val' }).command).toBe(
+      'folo dataset filter D:/datasets/fasteners --out <out_dir>/fasteners-filtered --split val',
+    );
     expect(buildDatasetCurateCli(BASE_DATASET, 'merge').command).toBe(
       'folo dataset merge D:/datasets/fasteners <other_dataset> --out <out_dir>/fasteners-merged --splits stratified --val 0.2',
+    );
+    expect(buildDatasetCurateCli(BASE_DATASET, 'convert').command).toBe(
+      'folo dataset convert D:/datasets/fasteners <out_dir>/fasteners-coco --to coco',
+    );
+    expect(buildDatasetCurateCli({ ...BASE_DATASET, format: 'coco' }, 'convert').command).toBe(
+      'folo dataset convert D:/datasets/fasteners <out_dir>/fasteners-yolo --to yolo',
+    );
+    expect(buildDatasetCurateCli(BASE_DATASET, 'convert', { targetFormat: 'voc' }).command).toBe(
+      'folo dataset convert D:/datasets/fasteners <out_dir>/fasteners-voc --to voc',
+    );
+    expect(buildDatasetCurateCli({ ...BASE_DATASET, path: '-leading-dash' }, 'convert', { targetFormat: 'coco' }).command).toBe(
+      'folo dataset convert --to coco -- -leading-dash <out_dir>/fasteners-coco',
     );
   });
 

@@ -37,8 +37,9 @@ images you may not share with them.
 3. **Pick the agent and press Label.** Images turn from pending to labeled as the calls come back; the panel
    shows progress, the tokens the agent reported, and the log. Stop ends the run at once and keeps what is done.
 4. **Review.** Open an image to move, resize, relabel, delete or draw boxes: press `1`–`9` (or click the quick class
-   bar) to switch the active drawing class or reclassify the selected box, `Delete`/`Backspace` to remove it, arrow
-   keys to nudge or `Alt`+arrows to resize (`Shift` for 10× steps), and `Ctrl+Z`/`⌘Z` to undo or
+   bar) to switch the active drawing class or reclassify the selected box, `D` to duplicate the selected box, `P` (or
+   **Copy prev**) to copy boxes from the previous labeled image onto the current frame, `Delete`/`Backspace` to remove
+   it, arrow keys to nudge or `Alt`+arrows to resize (`Shift` for 10× steps), and `Ctrl+Z`/`⌘Z` to undo or
    `Ctrl+Shift+Z`/`Ctrl+Y` (`⌘Shift+Z`/`⌘Y`) to redo across up to 200 states per image (held-arrow nudges or resizes
    group into one step until released; desktop viewports also show a compact keyboard hint strip). Saving marks it as labeled by hand
    and reviewed (Enter saves and opens the next image to review, Ctrl+S or ⌘S saves and stays; its tile then says

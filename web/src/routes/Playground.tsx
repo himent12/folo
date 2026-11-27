@@ -335,7 +335,7 @@ export default function Playground() {
     iou,
     maxDet,
     hidden,
-    classes: () => classes.peek(),
+    classes: () => classes.get(),
     source,
     pred,
     predSourceKey,
