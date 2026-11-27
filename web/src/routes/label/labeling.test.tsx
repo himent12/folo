@@ -15,6 +15,7 @@ import LabelJobPage from '../LabelJob';
 import LabelJobs from '../LabelJobs';
 import AddImagesDialog from './AddImagesDialog';
 import DatasetDialog, { type DatasetDialogProps } from './DatasetDialog';
+import { emptyFilterDescription } from './ImagesArea';
 import JobDialog, { type JobDialogProps } from './JobDialog';
 import { whyNothingAdded, type Uploads } from './uploads';
 
@@ -467,6 +468,68 @@ describe('the job page', () => {
     await page('/datasets/label/lb_none');
     expect(text()).toMatch(/Labeling job not found/);
     expect(document.querySelector('a[href="#/datasets/label"]')).toBeTruthy();
+  });
+  it('keeps filter empty-state copy truthful on an idle unlabeled job, during active labeling, and when failed images remain (R16)', async () => {
+    const api = new MockApi('normal', 0);
+    const job = (await api.labelJobs())[0]!;
+    const imgs = (await api.labelImages(job.id, { limit: 10 })).images.slice(0, 4).map((im) => ({
+      ...im,
+      status: 'pending' as const,
+      boxes: [],
+      reviewed: false,
+      error: null,
+    }));
+    const idleJob: LabelJob = {
+      ...job,
+      run: null,
+      counts: { ...job.counts, images: imgs.length, pending: imgs.length, labeled: 0, failed: 0, boxes: 0 },
+    };
+    let handlers: Parameters<MockApi['labelEvents']>[1] = {};
+    vi.spyOn(api, 'labelJob').mockResolvedValue(idleJob);
+    vi.spyOn(api, 'labelImages').mockResolvedValue({ images: imgs, total: imgs.length });
+    vi.spyOn(api, 'labelEvents').mockImplementation((_id, h) => {
+      handlers = h;
+      return () => {};
+    });
+
+    hub.api = api;
+    router.route = parse(`#/datasets/label/${job.id}`);
+    open(LabelJobPage, {});
+    const tab = (label: string) =>
+      [...document.querySelectorAll<HTMLButtonElement>('[aria-label="Filter images by status"] [role="radio"]')].find((b) =>
+        b.textContent?.startsWith(label),
+      );
+    await vi.waitFor(() => {
+      flushSync();
+      expect(tab('Failed')?.disabled).toBe(false);
+    });
+
+    tab('Failed')!.click();
+    flushSync();
+    expect(document.querySelector('.empty .desc')?.textContent).toBe('No images are currently marked Failed.');
+    expect(text()).not.toMatch(/The agent labeled every image it was given/i);
+
+    tab('To review')!.click();
+    flushSync();
+    expect(document.querySelector('.empty .desc')?.textContent).toMatch(/No labeled images yet/);
+    expect(text()).not.toMatch(/Every labeled image is reviewed/i);
+
+    // While staying on the empty "To review" filter, an active labeling event updates the empty copy reactively.
+    handlers.image?.({ ...imgs[0]!, status: 'labeling' });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector('.empty .desc')?.textContent).toBe('No images ready to review. The agent is still labeling images.');
+    });
+
+    expect(emptyFilterDescription('all', { pending: 0, labeling: 0, review: 0, reviewed: 0, failed: 0 })).toBe('No images in this job yet.');
+    expect(emptyFilterDescription('failed', { pending: 0, labeling: 0, review: 2, reviewed: 0, failed: 0 })).toBe('No images are currently marked Failed.');
+    expect(emptyFilterDescription('review', { pending: 1, labeling: 1, review: 0, reviewed: 2, failed: 0 })).toBe(
+      'No images ready to review. The agent is still labeling images.',
+    );
+    expect(emptyFilterDescription('review', { pending: 0, labeling: 0, review: 0, reviewed: 3, failed: 0 })).toBe('Every labeled image is reviewed.');
+    expect(emptyFilterDescription('reviewed', { pending: 0, labeling: 0, review: 2, reviewed: 0, failed: 0 })).toMatch(/Enter or Looks right/);
+    expect(emptyFilterDescription('pending', { pending: 0, labeling: 0, review: 2, reviewed: 0, failed: 1 })).toMatch(/Check Failed/);
+    expect(emptyFilterDescription('pending', { pending: 0, labeling: 0, review: 2, reviewed: 2, failed: 0 })).toBe('Every image has labels.');
   });
 });
 

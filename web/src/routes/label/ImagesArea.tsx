@@ -41,6 +41,23 @@ export const inFilter = (img: LabelImage, show: Show) =>
       ? img.status === 'labeled' && !!img.reviewed === (show === 'reviewed')
       : img.status === show);
 
+/** Truthful empty-state copy for a status filter that matches zero images in a non-empty job. */
+export function emptyFilterDescription(
+  show: Show,
+  c: { pending: number; labeling: number; review: number; reviewed: number; failed: number },
+): string {
+  if (show === 'all') return 'No images in this job yet.';
+  if (show === 'failed') return 'No images are currently marked Failed.';
+  if (show === 'review') {
+    if (c.labeling > 0) return 'No images ready to review. The agent is still labeling images.';
+    return c.reviewed > 0 ? 'Every labeled image is reviewed.' : 'No labeled images yet: run an agent or open an image to label it.';
+  }
+  if (show === 'reviewed') {
+    return 'No image is reviewed yet: open one and press Enter or Looks right when its labels look right.';
+  }
+  return c.failed > 0 ? 'No images waiting to be labeled. Check Failed to retry the rest.' : 'Every image has labels.';
+}
+
 export interface ImagesAreaProps {
   jobId: string;
   classes: readonly string[];
@@ -71,9 +88,12 @@ export default function ImagesArea(props: ImagesAreaProps) {
 
   // One pass over the images (up to 10,000, re-counted on every image event of a run) instead of one per filter.
   const counts = computed(() => {
-    const c = { all: props.images.length, pending: 0, review: 0, reviewed: 0, failed: 0 };
+    const c = { all: props.images.length, pending: 0, labeling: 0, review: 0, reviewed: 0, failed: 0 };
     for (const i of props.images) {
-      if (i.status === 'pending' || i.status === 'labeling') c.pending++;
+      if (i.status === 'labeling') {
+        c.pending++;
+        c.labeling++;
+      } else if (i.status === 'pending') c.pending++;
       else if (i.status === 'labeled') c[i.reviewed ? 'reviewed' : 'review']++;
       else if (i.status === 'failed') c.failed++;
     }
@@ -292,15 +312,7 @@ export default function ImagesArea(props: ImagesAreaProps) {
           <EmptyState
             icon={ImageOff}
             title="No images here"
-            description={
-              props.show === 'failed'
-                ? 'The agent labeled every image it was given.'
-                : props.show === 'review'
-                  ? 'Every labeled image is reviewed.'
-                  : props.show === 'reviewed'
-                    ? 'No image is reviewed yet: open one and press Enter when its labels look right.'
-                    : 'Every image has labels.'
-            }
+            description={emptyFilterDescription(props.show, counts.get())}
             actions={() => <Button onclick={() => props.onshow('all')}>Show all</Button>}
           />
         </Panel>
