@@ -83,6 +83,24 @@ export interface BenchPlan {
  */
 export type BenchSource = { kind: 'dataset'; dataset_id: string; split?: Split | null } | { kind: 'label_job'; job_id: string };
 
+/** Deterministic procedural shape scenes (`POST /api/bench/benchmarks`, feature `bench_generated_source`, docs/API.md). */
+export interface GeneratedBenchSource {
+  kind: 'generated';
+  /** Number of scenes to generate (`1..=5000`, default `64`). */
+  images?: number;
+  /** Class names (`1..=8` distinct non-empty names, default `['circle', 'square', 'triangle']`). */
+  classes?: string[];
+  /** Long side of each image in pixels (`32..=4096`, default `640`). */
+  imgsz?: number;
+  /** Deterministic RNG seed (`0..=2^53 - 1`, default `0`). */
+  seed?: number;
+  /** Mix aspect ratios (`1:1`, `4:3`, `3:4`, `16:9`, `3:2`) instead of square images (default `false`). */
+  vary_aspect?: boolean;
+}
+
+/** Source accepted by `POST /api/bench/benchmarks` (`CreateBench.source`). */
+export type CreateBenchSource = BenchSource | GeneratedBenchSource;
+
 /** The leading entry of a `Bench`. */
 export interface BenchBest {
   entry_id: string;
@@ -132,7 +150,7 @@ export interface CreateBench {
   name: string;
   /** At most 4000 characters. */
   description?: string;
-  source: BenchSource;
+  source: CreateBenchSource;
   /** At most this many images (1 to 5000, default 500), sampled with `seed` when the source has more. */
   max_images?: number | null;
   /** The sample's seed (default 0): a whole number from 0 to 2^53 − 1 (JSON's exact integers; larger is a `400`). */

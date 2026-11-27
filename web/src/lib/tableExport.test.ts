@@ -1,10 +1,22 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { toast } from '$lib/ui/toast';
-import { downloadText, escapeCsvCell, exportTableCsv, exportTableJson, safeFilename, toCsv, toJson } from './tableExport';
+import {
+  downloadBlob,
+  downloadText,
+  escapeCsvCell,
+  exportTableCsv,
+  exportTableJson,
+  pendingBlobRevokeCount,
+  revokePendingBlobUrls,
+  safeFilename,
+  toCsv,
+  toJson,
+} from './tableExport';
 
 describe('tableExport', () => {
   afterEach(() => {
+    revokePendingBlobUrls();
     vi.useRealTimers();
     vi.restoreAllMocks();
     toast.items = [];
@@ -101,5 +113,25 @@ describe('tableExport', () => {
     expect(downloadText('x', 'x.csv', 'text/csv')).toBe(false);
     expect(revoked).toContain('blob:test/2');
     expect(toast.items.some((t) => t.title === 'Download failed' && t.tone === 'error')).toBe(true);
+    expect(pendingBlobRevokeCount()).toBe(0);
+  });
+
+  it('tracks pending blob revoke timers and clears all of them via revokePendingBlobUrls', () => {
+    vi.useFakeTimers();
+    const revoked: string[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockReturnValueOnce('blob:tracked/1').mockReturnValueOnce('blob:tracked/2');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation((u) => revoked.push(u));
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    expect(downloadBlob(new Blob(['a']), 'a.png')).toBe(true);
+    expect(downloadBlob(new Blob(['b']), 'b.png')).toBe(true);
+    expect(pendingBlobRevokeCount()).toBe(2);
+
+    revokePendingBlobUrls();
+    expect(pendingBlobRevokeCount()).toBe(0);
+    expect(revoked).toEqual(['blob:tracked/1', 'blob:tracked/2']);
+    // Advancing timers afterward must not revoke a second time.
+    vi.advanceTimersByTime(5000);
+    expect(revoked).toHaveLength(2);
   });
 });

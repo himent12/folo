@@ -1,5 +1,6 @@
 // Pure CLI command builders for Model Detail ExportDialog: `folo export` (with dynamic ONNX axes,
-// decode, and half precision) and `folo predict` (standard, SAHI tiled `--tile`, `--tta`, and ByteTrack `--track`).
+// decode, and half precision), `folo predict` (standard, SAHI tiled `--tile`, `--tta`, and ByteTrack `--track`),
+// and `folo quantize` (int8 calibration with selective-f32 sensitivity policy).
 // Every flag matches crates/folo-cli/src/cli/infer.rs and docs/CLI.md verbatim.
 import type { ExportFormat, Model, OnnxSwitches } from '$lib/api/types';
 import { quote, weightsRef } from '$lib/trainCli';
@@ -9,6 +10,9 @@ export type OnnxDynamicAxes = 'static' | 'batch' | 'hw' | 'full';
 
 /** Quick `folo predict` CLI snippets shown alongside export commands. */
 export type PredictSnippetMode = 'standard' | 'sahi' | 'tta' | 'track';
+
+/** Selective-f32 calibration presets matching `folo quantize` (`--f32-policy`, `--max-f32-macs`, `--sqnr-threshold`). */
+export type QuantizePreset = 'auto' | 'accurate' | 'p5-tail' | 'none';
 
 export interface ModelCliResult {
   line: string;
@@ -28,6 +32,29 @@ export const PREDICT_SNIPPET_OPTIONS: readonly { value: PredictSnippetMode; labe
   { value: 'sahi', label: 'SAHI tiled', desc: 'Overlapping 640 px crops (`--tile 640 --tile-overlap 0.2`) for small objects.' },
   { value: 'tta', label: 'TTA', desc: 'Multi-scale + horizontal flip ensembling (`--tta`).' },
   { value: 'track', label: 'ByteTrack', desc: 'Multi-object tracking across ordered frames (`--track`).' },
+];
+
+export const QUANTIZE_PRESET_OPTIONS: readonly { value: QuantizePreset; label: string; desc: string }[] = [
+  {
+    value: 'auto',
+    label: 'Auto 5%',
+    desc: 'Sensitivity-ranked selective f32 (`--f32-policy auto --max-f32-macs 0.05 --sqnr-threshold 35`). Run with `folo predict --precision int8`.',
+  },
+  {
+    value: 'accurate',
+    label: '10% f32',
+    desc: 'Higher-sensitivity selective f32 budget (`--max-f32-macs 0.10 --sqnr-threshold 40`) to protect accuracy on hard layers.',
+  },
+  {
+    value: 'p5-tail',
+    label: 'P5 tail',
+    desc: 'Keep `neck.out5.*` in f32 (`--f32-policy p5-tail`) and quantize all other eligible convs to int8.',
+  },
+  {
+    value: 'none',
+    label: 'Full int8',
+    desc: 'Quantize every eligible backbone and neck conv to int8 (`--f32-policy none`).',
+  },
 ];
 
 function modelFlag(model: Model): { part: string; placeholder: string | null } {
@@ -92,6 +119,25 @@ export function buildPredictCli(model: Model, mode: PredictSnippetMode): ModelCl
     parts.push('--tta');
   } else if (mode === 'track') {
     parts.push('--track');
+  }
+  return { line: parts.join(' '), placeholder };
+}
+
+/**
+ * Builds a copy-ready `folo quantize` int8 calibration command matching `crates/folo-cli/src/cli/infer.rs`.
+ * Auto-only sensitivity flags (`--max-f32-macs`, `--sqnr-threshold`) are emitted strictly with `--f32-policy auto`.
+ */
+export function buildQuantizeCli(model: Model, preset: QuantizePreset): ModelCliResult {
+  const { part, placeholder } = modelFlag(model);
+  const parts = ['folo quantize', part, '--data', '<dataset>'];
+  if (preset === 'auto') {
+    parts.push('--f32-policy', 'auto', '--max-f32-macs', '0.05', '--sqnr-threshold', '35');
+  } else if (preset === 'accurate') {
+    parts.push('--f32-policy', 'auto', '--max-f32-macs', '0.10', '--sqnr-threshold', '40');
+  } else if (preset === 'p5-tail') {
+    parts.push('--f32-policy', 'p5-tail');
+  } else {
+    parts.push('--f32-policy', 'none');
   }
   return { line: parts.join(' '), placeholder };
 }

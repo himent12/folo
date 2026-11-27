@@ -33,7 +33,7 @@ import { image, imageIndex, indices, issues, specs, stats, toDataset, total, typ
 import { synthEvaluation, toModelEval } from './evaluation';
 import { MockLabeling, mockAgents } from './label';
 import { MockBench } from './bench';
-import { BENCH_FEATURE } from '../../bench/rules';
+import { BENCH_FEATURE, BENCH_GENERATED_FEATURE } from '../../bench/rules';
 import { renderImage } from './render';
 import { hash, smoothNoise } from './rng';
 import { GPU_NAME, archInfo, bestOf, epochAt, progressAt, toRun, type RunProfile } from './runs';
@@ -217,7 +217,7 @@ export class MockServer {
           // The in-browser runtime in this build (the name requested of the server; lib/inference `wasmFromSystem`).
           ...(this.scenario === 'no-wasm' ? [] : ['web_wasm']),
           ...(this.labeling() ? [LABEL_FEATURE] : []),
-          ...(this.benching() ? [BENCH_FEATURE] : []),
+          ...(this.benching() ? [BENCH_FEATURE, BENCH_GENERATED_FEATURE] : []),
           ...(this.state.cloudOn ? ['cloud'] : []),
         ],
         capabilities: this.capabilities(),

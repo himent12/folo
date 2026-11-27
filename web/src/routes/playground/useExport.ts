@@ -74,7 +74,7 @@ export function usePlaygroundExport(o: UsePlaygroundExportInput) {
     return predAMatches.get();
   });
 
-  async function onExportPng() {
+  async function exportPngWithView(compareViewOverride?: CompareViewMode) {
     const s = o.source.peek();
     const d = o.dims();
     if (!s || !d || exportingPng.peek() || !canExport.peek()) return;
@@ -85,7 +85,7 @@ export function usePlaygroundExport(o: UsePlaygroundExportInput) {
     try {
       await runPngExport({
         compare: o.compare.peek(),
-        compareView: o.compareView.peek(),
+        compareView: compareViewOverride ?? o.compareView.peek(),
         splitPct: o.splitPct.peek(),
         viewportW: o.zoom.viewportW.peek(),
         viewportH: o.zoom.viewportH.peek(),
@@ -113,6 +113,14 @@ export function usePlaygroundExport(o: UsePlaygroundExportInput) {
     }
   }
 
+  function onExportPng() {
+    return exportPngWithView();
+  }
+
+  function onExportCompareSideBySidePng() {
+    return exportPngWithView('side-by-side');
+  }
+
   function onExportJson() {
     if (!canExport.peek()) return;
     runJsonExport({
@@ -130,6 +138,7 @@ export function usePlaygroundExport(o: UsePlaygroundExportInput) {
     predBMatches,
     canExport,
     onExportPng,
+    onExportCompareSideBySidePng,
     onExportJson,
   };
 }

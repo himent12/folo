@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Bench, BenchCatalog, BenchEntry } from '$lib/api/types';
 import { catalog } from '$lib/api/mock/benchCatalog';
-import { axisWhyNot, calibrationNone, compareCaveats, contestantFacts, costFacts, coverageFacts, entryStatus, hintText, progressFacts, selfLabelReading, shortFingerprint, sourceKind, unreviewedText } from './words';
+import { axisWhyNot, calibrationNone, compareCaveats, contestantFacts, costFacts, coverageFacts, entryStatus, hintText, noModelHelp, progressFacts, selfLabelReading, shortFingerprint, sourceKind, unreviewedText } from './words';
 
 const bench = { images: 360, classes: ['a', 'b', 'c', 'd'], plan: catalog().default_plan } as unknown as Pick<Bench, 'images' | 'classes' | 'plan'>;
 const entry = (o: Partial<BenchEntry>) =>
@@ -21,9 +21,16 @@ describe('coverageFacts', () => {
 });
 
 describe('words', () => {
-  it('writes a fingerprint short, and a dataset source without a split as its validation split', () => {
+  it('writes a fingerprint short, and distinguishes generated scenes from dataset splits', () => {
     expect(shortFingerprint('9c41aa00bb11e2a0')).toBe('9c41…e2a0');
     expect(sourceKind({ kind: 'dataset', dataset_id: 'd' })).toBe(sourceKind({ kind: 'dataset', dataset_id: 'd', split: 'val' }));
+    expect(sourceKind({ kind: 'dataset', dataset_id: 'generated', split: null })).toBe('generated scenes');
+    const help = noModelHelp({
+      classes: ['circle', 'square'],
+      source: { kind: 'dataset', dataset_id: 'generated', split: null },
+      source_name: 'generated (64×640px, seed 0)',
+    });
+    expect(help.action).toEqual({ label: 'Start a training run', path: '/runs/new' });
   });
 
   it('says who an entry is without repeating its name', () => {

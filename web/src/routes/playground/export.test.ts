@@ -1,9 +1,11 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { compareBadgeText, drawAnnotations, exportDetectionsJson, exportFilename } from './export';
+import { pendingBlobRevokeCount, revokePendingBlobUrls } from '$lib/tableExport';
+import { compareBadgeText, drawAnnotations, exportComparePng, exportDetectionsJson, exportFilename } from './export';
 import { visibleTruthBoxes } from './exportActions';
 
 afterEach(() => {
+  revokePendingBlobUrls();
   vi.restoreAllMocks();
 });
 
@@ -85,6 +87,107 @@ describe('playground/export', () => {
     expect(ok).toBe(true);
     expect(createUrl).toHaveBeenCalledTimes(1);
     expect(click).toHaveBeenCalledTimes(1);
-    expect(revokeUrl).not.toThrow();
+    expect(pendingBlobRevokeCount()).toBe(1);
+    revokePendingBlobUrls();
+    expect(pendingBlobRevokeCount()).toBe(0);
+    expect(revokeUrl).toHaveBeenCalledWith('blob:mock-json');
+  });
+
+  it('renders a side-by-side compare canvas with both panes, captions, and clean blob download', async () => {
+    const drawImageCalls: Array<[number, number, number, number]> = [];
+    const captions: string[] = [];
+    let canvasW = 0;
+    let canvasH = 0;
+    const fakeCtx = {
+      save: () => {},
+      restore: () => {},
+      beginPath: () => {},
+      rect: () => {},
+      clip: () => {},
+      setLineDash: () => {},
+      strokeRect: () => {},
+      fillRect: () => {},
+      drawImage: (_img: unknown, dx: number, dy: number, dw: number, dh: number) => drawImageCalls.push([dx, dy, dw, dh]),
+      fillText: (text: string) => captions.push(text),
+      measureText: (text: string) => ({ width: text.length * 7 }),
+      lineWidth: 1,
+      strokeStyle: '',
+      fillStyle: '',
+      font: '',
+      textBaseline: 'alphabetic',
+    } as unknown as CanvasRenderingContext2D;
+
+    const origCreate = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation(((tag: string) => {
+      const el = origCreate(tag);
+      if (tag === 'canvas') {
+        const c = el as HTMLCanvasElement;
+        vi.spyOn(c, 'getContext').mockReturnValue(fakeCtx);
+        vi.spyOn(c, 'toBlob').mockImplementation((cb) => {
+          canvasW = c.width;
+          canvasH = c.height;
+          cb(new Blob(['png-bytes'], { type: 'image/png' }));
+        });
+      }
+      return el;
+    }) as typeof document.createElement);
+
+    const origCreateBitmap = globalThis.createImageBitmap;
+    (globalThis as unknown as { createImageBitmap: unknown }).createImageBitmap = vi.fn(async () => ({
+      width: 320,
+      height: 240,
+      close: vi.fn(),
+    }));
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:side-by-side-png');
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    try {
+      const ok = await exportComparePng({
+        source: {
+          kind: 'file',
+          file: new File(['x'], 'frame.png', { type: 'image/png' }),
+          name: 'frame.png',
+          url: 'blob:frame',
+          width: 320,
+          height: 240,
+        },
+        src: null,
+        width: 320,
+        height: 240,
+        view: 'side-by-side',
+        splitPct: 50,
+        layerA: {
+          boxes: [{ class: 0, x1: 10, y1: 10, x2: 50, y2: 50, score: 0.9 }],
+          classes: ['circle'],
+          labels: true,
+          scores: true,
+          caption: compareBadgeText('A', 'shapes-s', 1, 12),
+        },
+        layerB: {
+          boxes: [],
+          classes: ['circle'],
+          labels: true,
+          scores: true,
+          caption: compareBadgeText('B', 'shapes-n', null, null),
+        },
+        filenameBase: 'frame-shapes-s-vs-shapes-n',
+      });
+      expect(ok).toBe(true);
+      expect(canvasW).toBe(644); // 320 * 2 + 4px gap
+      expect(canvasH).toBe(272); // 240 + 32px header
+      expect(drawImageCalls).toEqual([
+        [0, 32, 320, 240],
+        [324, 32, 320, 240],
+      ]);
+      expect(captions).toContain('A · shapes-s · 1 det · 12.0 ms');
+      expect(captions).toContain('B · shapes-n · unavailable');
+      expect(click).toHaveBeenCalledTimes(1);
+      expect(pendingBlobRevokeCount()).toBe(1);
+      revokePendingBlobUrls();
+      expect(pendingBlobRevokeCount()).toBe(0);
+    } finally {
+      (globalThis as unknown as { createImageBitmap: unknown }).createImageBitmap = origCreateBitmap;
+    }
   });
 });

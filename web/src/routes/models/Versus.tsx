@@ -16,13 +16,20 @@
  * (`table`, GET /api/system/throughput), those figures follow the table under their own heading, never mixed into
  * it: YOLO26n was not run here, so they compare with nothing.
  */
+import Check from '$icons/check';
 import ChevronDown from '$icons/chevron-down';
-import { computed, css, For, tick } from 'fw';
+import Copy from '$icons/copy';
+import Download from '$icons/download';
+import { computed, css, For, onCleanup, signal, tick } from 'fw';
 import { advantage, BENCH_SOURCE, comparable, unlike, unlikeCondition, versusYolo26n, type Versus as VersusRow } from '$lib/benchmarks';
 import type { ThroughputTable } from '$lib/api/types';
 import { deviceName, num } from '$lib/format';
+import { exportTableCsv } from '$lib/tableExport';
 import { latencyMs, latencyRange, measuredLatency, measuredTraining } from '$lib/throughput';
+import Button from '$lib/ui/Button';
 import Panel from '$lib/ui/Panel';
+import { toast } from '$lib/ui/toast';
+import { latencyMetricLabel, versusCsv, versusMarkdown } from './versusExport';
 
 const fmt = (v: VersusRow, x: number) => num(x, v.unit === 'ms' ? (x < 10 ? 2 : 1) : 0);
 /** One format per kind: speed as a ratio ("1.66× faster", "1.09× slower"), memory as a share ("17% less memory"). */
@@ -55,7 +62,7 @@ export default function Versus(props: VersusProps) {
         ? [
             {
               id: 'lat',
-              metric: 'GPU end to end, batch 1',
+              metric: latencyMetricLabel(lat.device),
               value: latencyMs(lat.latency_ms),
               note: `${latencyRange(lat.latency_ms_low, lat.latency_ms_high)} · ${num(lat.samples)} predictions${lat.precision === 'f32' ? '' : ` · ${lat.precision}`}`,
             },
@@ -75,6 +82,15 @@ export default function Versus(props: VersusProps) {
   });
 
   let how: HTMLDetailsElement | undefined;
+  let alive = true;
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  const copiedMd = signal(false);
+  onCleanup(() => {
+    alive = false;
+    clearTimeout(copiedTimer);
+    copiedTimer = undefined;
+  });
+
   /** "See how this was measured": opens the fold and takes the reader there. */
   async function showHow() {
     if (!how) return;
@@ -85,8 +101,45 @@ export default function Versus(props: VersusProps) {
     s?.scrollIntoView({ block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   }
 
+  async function copyMarkdown() {
+    try {
+      await navigator.clipboard.writeText(versusMarkdown(table()));
+      if (!alive) return;
+      copiedMd.set(true);
+      clearTimeout(copiedTimer);
+      copiedTimer = setTimeout(() => {
+        copiedTimer = undefined;
+        if (alive) copiedMd.set(false);
+      }, 1600);
+      toast.success('Markdown copied', 'Engine speed comparison table copied to clipboard.', undefined, { key: 'versus-export' });
+    } catch {
+      if (alive) toast.error(new Error('Your browser blocked clipboard access.'), 'Could not copy Markdown', { key: 'versus-export' });
+    }
+  }
+
+  function downloadCsv() {
+    const csv = versusCsv(table());
+    if (exportTableCsv(csv.filenameBase, csv.headers, csv.rows, 'versus-export')) {
+      toast.success('CSV downloaded', `${csv.rows.length} benchmark rows saved.`, undefined, { key: 'versus-export' });
+    }
+  }
+
   return (
-    <Panel title="Engine speed" pad="none" id="engine-speed">
+    <Panel
+      title="Engine speed"
+      pad="none"
+      id="engine-speed"
+      actions={
+        <>
+          <Button size="sm" variant="ghost" icon={copiedMd.get() ? Check : Copy} onclick={() => void copyMarkdown()}>
+            {copiedMd.get() ? 'Copied' : 'Copy Markdown'}
+          </Button>
+          <Button size="sm" variant="ghost" icon={Download} onclick={downloadCsv}>
+            Download CSV
+          </Button>
+        </>
+      }
+    >
       <p class="lede">
         folo-n vs YOLO26n on the same RTX 4080 SUPER, 640 px
         {hereLat.get() || hereTrain.get() ? <>: the reference figures, with this server's own folo-n figures last</> : null}. Both in f32 unless a row

@@ -1,10 +1,46 @@
 // Vision benchmarks' rules (docs/API.md, Vision benchmarks), shared by the forms that check what a person typed, the
 // screens that order and word entries, and the in-browser mock that answers as the server would.
 
-import type { BenchAxis, BenchConditionGroup, BenchEntry, BenchEntryStatus, BenchLoop, BenchLoopStatus } from '../api/types';
+import type { BenchAxis, BenchConditionGroup, BenchEntry, BenchEntryStatus, BenchLoop, BenchLoopStatus, BenchSource } from '../api/types';
 
 /** The feature a server lists in `/api/system` when it has the `/api/bench` endpoints. */
 export const BENCH_FEATURE = 'vision_bench';
+/** Feature advertised when `POST /api/bench/benchmarks` accepts `source: { kind: "generated", ... }` (docs/API.md). */
+export const BENCH_GENERATED_FEATURE = 'bench_generated_source';
+/** Synthetic `dataset_id` persisted in `Bench.source` for generated-scene benchmarks (crates/folo-server/src/bench/benchmarks.rs). */
+export const GENERATED_SOURCE_ID = 'generated';
+/** Defaults and bounds for generated-scene benchmarks (crates/folo-bench/src/source.rs). */
+export const GENERATED_IMAGES_DEFAULT = 64;
+export const GENERATED_IMGSZ_DEFAULT = 640;
+export const GENERATED_IMGSZ_MIN = 32;
+export const GENERATED_IMGSZ_MAX = 4096;
+export const GENERATED_CLASSES_MAX = 8;
+export const GENERATED_CLASSES_DEFAULT = ['circle', 'square', 'triangle'] as const;
+/** Built-in shape names in `folo-data::synthetic::SHAPES`; colliding case variants (e.g. `Circle` & `circle`) are rejected. */
+export const GENERATED_SHAPES = ['circle', 'square', 'triangle', 'star', 'ring', 'cross', 'hexagon', 'heart'] as const;
+
+/** Returns the first duplicate built-in shape name if two classes claim the same shape (case-insensitive), else null. */
+export function generatedShapeCollision(classes: readonly string[]): string | null {
+  const seen = new Set<string>();
+  for (const raw of classes) {
+    const lower = raw.trim().toLowerCase();
+    if (!(GENERATED_SHAPES as readonly string[]).includes(lower)) continue;
+    if (seen.has(lower)) return lower;
+    seen.add(lower);
+  }
+  return null;
+}
+
+/** True when a persisted `Bench.source` came from deterministic generated scenes rather than a registered dataset. */
+export function isGeneratedBenchSource(s: BenchSource): boolean {
+  return s.kind === 'dataset' && s.dataset_id === GENERATED_SOURCE_ID && (s.split === null || s.split === undefined);
+}
+
+/** Human-readable `source_name` matching `folo_bench::GeneratedSourceSpec::display_name`. */
+export function generatedSourceName(spec: { images: number; imgsz: number; seed: number; vary_aspect?: boolean }): string {
+  const aspect = spec.vary_aspect ? ', varied aspect' : '';
+  return `generated (${spec.images}×${spec.imgsz}px${aspect}, seed ${spec.seed})`;
+}
 
 /** Severities run from 1 (barely visible) to 5 (severe, still solvable by a person). */
 export const MAX_SEVERITY = 5;

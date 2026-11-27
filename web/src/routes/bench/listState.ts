@@ -3,7 +3,7 @@
 // `?source=active&sort=leader&dir=desc&q=haze`. Defaults are omitted so the default view keeps a bare `#/benchmarks`,
 // and transient `?new=1` params are preserved.
 
-export type BenchFilter = 'all' | 'dataset' | 'label_job' | 'active';
+export type BenchFilter = 'all' | 'dataset' | 'label_job' | 'generated' | 'active';
 export type BenchSortKey = 'name' | 'source' | 'images' | 'classes' | 'conditions' | 'entries' | 'leader' | 'created';
 export type Dir = 'asc' | 'desc';
 
@@ -14,12 +14,13 @@ export interface BenchListState {
   q: string;
 }
 
-const FILTERS: readonly BenchFilter[] = ['all', 'dataset', 'label_job', 'active'];
+const FILTERS: readonly BenchFilter[] = ['all', 'dataset', 'label_job', 'generated', 'active'];
 const SORTS: readonly BenchSortKey[] = ['name', 'source', 'images', 'classes', 'conditions', 'entries', 'leader', 'created'];
 const TEXT_SORTS: ReadonlySet<BenchSortKey> = new Set(['name', 'source']);
 const FILTER_LABELS: Record<Exclude<BenchFilter, 'all'>, string> = {
   dataset: 'dataset',
   label_job: 'labeling-job',
+  generated: 'generated',
   active: 'running',
 };
 

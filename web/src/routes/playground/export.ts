@@ -3,7 +3,7 @@
 // then triggers a clean browser download with object-URL revocation and toast feedback.
 import { classChipText, classColor, classHalo } from '$lib/design/tokens';
 import { ms } from '$lib/format';
-import { downloadText, safeFilename, toJson } from '$lib/tableExport';
+import { downloadBlob as downloadBlobShared, downloadText, safeFilename, toJson } from '$lib/tableExport';
 import { toast } from '$lib/ui/toast';
 import type { ViewBox } from '$lib/detect/DetectionView';
 import type { CompareViewMode } from './compare';
@@ -53,28 +53,9 @@ export function exportFilename(base: string, ext: 'png' | 'json'): string {
   return ext === 'json' ? jsonName : `${jsonName.slice(0, -5)}.png`;
 }
 
-/** Triggers a browser download for a binary Blob and revokes its object URL cleanly. */
+/** Triggers a browser download for a binary Blob and schedules safe object-URL revocation. */
 export function downloadBlob(blob: Blob, filename: string): boolean {
-  let url: string | undefined;
-  let a: HTMLAnchorElement | undefined;
-  try {
-    url = URL.createObjectURL(blob);
-    a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    const revoke = url;
-    setTimeout(() => URL.revokeObjectURL(revoke), 1000);
-    return true;
-  } catch (err) {
-    if (url) URL.revokeObjectURL(url);
-    toast.error(err instanceof Error ? err : new Error('Your browser blocked the file download.'), 'Export failed', { key: 'playground-export' });
-    return false;
-  } finally {
-    a?.remove();
-  }
+  return downloadBlobShared(blob, filename, 'playground-export', 'Export failed');
 }
 
 /** Downloads a structured detections or A/B comparison JSON file. */

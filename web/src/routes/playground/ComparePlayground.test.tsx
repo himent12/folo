@@ -1,11 +1,17 @@
 // @vitest-environment happy-dom
-import { flush as flushSync } from 'fw';
+import { createRoot, flush as flushSync, signal } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
 import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
+import { BrowserEngine } from '$lib/inference/browser';
+import { pendingBlobRevokeCount, revokePendingBlobUrls } from '$lib/tableExport';
 import Playground from '../Playground';
+import * as exportMod from './export';
+import { sourceImageKey, type Source } from './source';
+import type { Det } from './viewState';
+import { createCompareController } from './useCompare';
 import { session } from './session';
 
 let target: HTMLElement;
@@ -45,6 +51,7 @@ afterEach(() => {
   handle = undefined;
   target?.remove();
   session.set(null);
+  revokePendingBlobUrls();
   vi.restoreAllMocks();
 });
 
@@ -352,5 +359,242 @@ describe('Playground: Compare A/B and Export', () => {
     selectB!.dispatchEvent(new Event('change', { bubbles: true }));
     flushSync();
     expect(document.activeElement).toBe(selectB);
+  });
+
+  it('shows Both / Only A / Only B class-diff breakdown and one-click Compare JSON & side-by-side PNG exports without timer leaks', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    api.predict = async (_input, opts) => ({
+      model_id: opts.model_id,
+      image: { width: 640, height: 480 },
+      boxes:
+        opts.model_id === 'm_hard_s'
+          ? [
+              { class: 0, name: 'circle', score: 0.92, x1: 10, y1: 10, x2: 60, y2: 60 },
+              { class: 1, name: 'square', score: 0.86, x1: 70, y1: 10, x2: 120, y2: 60 },
+            ]
+          : [
+              { class: 0, name: 'circle', score: 0.95, x1: 12, y1: 12, x2: 62, y2: 62 },
+              { class: 2, name: 'triangle', score: 0.88, x1: 140, y1: 20, x2: 190, y2: 70 },
+            ],
+      timing: { preprocess_ms: 1, inference_ms: 6, postprocess_ms: 1, total_ms: 8 },
+      device: 'gpu:0',
+    });
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    history.replaceState(history.state, '', '#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n&view=split');
+    router.route = parse('#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n&view=split');
+    handle = render(() => <Playground />, target);
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'sample image')).click();
+    const diffStrip = await until(() => target.querySelector<HTMLElement>('[data-class-diff]'), 'class diff strip');
+
+    const pills = [...diffStrip.querySelectorAll<HTMLButtonElement>('button.diff-pill')];
+    expect(pills.map((p) => p.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['Both 1', 'Only A 1', 'Only B 1']);
+
+    // Filtering by Only A shows only 'square'; clicking again resets to all 3 classes.
+    pills[1]!.click();
+    flushSync();
+    const clsNames = () => [...target.querySelectorAll('.cls-table tbody td.lead .truncate')].map((el) => el.textContent?.trim());
+    expect(clsNames()).toEqual(['square']);
+    pills[1]!.click();
+    flushSync();
+    expect(clsNames().sort()).toEqual(['circle', 'square', 'triangle']);
+
+    // One-click Side-by-side PNG inside CompareSummary exports side-by-side even when Split view is active.
+    const pngSpy = vi.spyOn(exportMod, 'exportComparePng').mockResolvedValue(true);
+    const pngBtn = [...target.querySelectorAll<HTMLButtonElement>('[data-compare-export] button')].find((b) =>
+      b.textContent?.includes('Side-by-side PNG'),
+    )!;
+    expect(pngBtn.getAttribute('aria-label')).toBeNull();
+    pngBtn.click();
+    await vi.waitFor(() => expect(pngSpy).toHaveBeenCalledTimes(1));
+    expect(pngSpy.mock.calls[0]![0].view).toBe('side-by-side');
+
+    // One-click Compare JSON exports structured payload with class_diff and revokes cleanly.
+    const created: Blob[] = [];
+    const revoked: string[] = [];
+    vi.spyOn(URL, 'createObjectURL').mockImplementation((b) => {
+      created.push(b as Blob);
+      return `blob:cmp-summary/${created.length}`;
+    });
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation((u) => revoked.push(u));
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+
+    const jsonBtn = [...target.querySelectorAll<HTMLButtonElement>('[data-compare-export] button')].find((b) =>
+      b.textContent?.includes('Compare JSON'),
+    )!;
+    expect(jsonBtn.getAttribute('aria-label')).toBeNull();
+    jsonBtn.click();
+    flushSync();
+    expect(created).toHaveLength(1);
+    const parsed = JSON.parse(await created[0]!.text());
+    expect(parsed.mode).toBe('compare');
+    expect(parsed.comparison.class_diff).toEqual({
+      both: ['circle'],
+      only_a: ['square'],
+      only_b: ['triangle'],
+    });
+    expect(pendingBlobRevokeCount()).toBe(1);
+    revokePendingBlobUrls();
+    expect(pendingBlobRevokeCount()).toBe(0);
+    expect(revoked).toEqual(['blob:cmp-summary/1']);
+
+    // Selecting Only A and then hiding its only class ('square') must automatically clear the filter instead of trapping it disabled.
+    pills[1]!.click();
+    flushSync();
+    expect(pills[1]!.getAttribute('aria-pressed')).toBe('true');
+    expect(clsNames()).toEqual(['square']);
+    const classesTab = [...target.querySelectorAll<HTMLButtonElement>('[role="tab"]')].find((t) => t.textContent?.includes('Classes'))!;
+    classesTab.click();
+    flushSync();
+    const sqToggle = await until(
+      () => [...target.querySelectorAll<HTMLButtonElement>('#pg-panel ul.counts button')].find((b) => b.textContent?.includes('square')),
+      'square class toggle',
+    );
+    sqToggle.click();
+    flushSync();
+    expect(pills[1]!.disabled).toBe(true);
+    expect(pills[1]!.getAttribute('aria-pressed')).toBe('false');
+    expect(clsNames().sort()).toEqual(['circle', 'triangle']);
+  });
+
+  it('never fabricates cross-frame classDiff or summary deltas when Model B still holds a stale prior frame', async () => {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    let holdSecondB: (() => void) | null = null;
+    let bCalls = 0;
+    api.predict = async (_input, opts) => {
+      if (opts.model_id === 'm_shapes_n') {
+        bCalls++;
+        if (bCalls === 2) {
+          await new Promise<void>((res) => {
+            holdSecondB = res;
+          });
+        }
+        return {
+          model_id: opts.model_id,
+          image: { width: 640, height: 480 },
+          boxes: [{ class: 0, name: 'triangle', score: 0.9, x1: 20, y1: 20, x2: 80, y2: 80 }],
+          timing: { preprocess_ms: 1, inference_ms: 5, postprocess_ms: 1, total_ms: 7 },
+          device: 'gpu:0',
+        };
+      }
+      return {
+        model_id: opts.model_id,
+        image: { width: 640, height: 480 },
+        boxes: [{ class: 0, name: 'circle', score: 0.92, x1: 10, y1: 10, x2: 50, y2: 50 }],
+        timing: { preprocess_ms: 1, inference_ms: 6, postprocess_ms: 1, total_ms: 8 },
+        device: 'gpu:0',
+      };
+    };
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    history.replaceState(history.state, '', '#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n');
+    router.route = parse('#/playground?model=m_hard_s&compare=1&modelB=m_shapes_n');
+    handle = render(() => <Playground />, target);
+    const samples = await until(() => {
+      const list = [...target.querySelectorAll<HTMLButtonElement>('button.sample')];
+      return list.length >= 2 ? list : null;
+    }, 'two sample buttons');
+    samples[0]!.click();
+    await until(() => target.querySelector('[data-class-diff]'), 'frame 1 class diff');
+
+    // Switch to a second image while Model B's second prediction is held pending: Model A resolves, Model B is stale/pending.
+    target.querySelector<HTMLButtonElement>('button[aria-label="Clear image"]')!.click();
+    flushSync();
+    const samples2 = await until(() => {
+      const list = [...target.querySelectorAll<HTMLButtonElement>('button.sample')];
+      return list.length >= 2 ? list : null;
+    }, 'samples after clear');
+    samples2[1]!.click();
+    await until(() => holdSecondB !== null, 'Model B second request in flight');
+    await new Promise((r) => setTimeout(r, 20));
+    flushSync();
+
+    // While Model B has no fresh prediction for frame 2, classDiff must be absent (never mixed with frame 1).
+    expect(target.querySelector('[data-class-diff]')).toBeNull();
+    holdSecondB!();
+    await until(() => target.querySelector('[data-class-diff]'), 'frame 2 class diff once both fresh');
+  });
+
+  it('clears Compare summary classDiff and compareJson whenever a manual video seek desyncs the preview frame', () => {
+    const unsynced = signal(false);
+    const predA = signal({
+      model_id: 'm_a',
+      image: { width: 640, height: 480 },
+      boxes: [{ class: 0, name: 'circle', score: 0.9, x1: 10, y1: 10, x2: 50, y2: 50 }],
+      timing: { preprocess_ms: 1, inference_ms: 5, postprocess_ms: 1, total_ms: 7 },
+      device: 'gpu:0',
+    } as const);
+    const src = signal<Source | null>({
+      kind: 'file',
+      file: new Blob(['v']),
+      name: 'frame.jpg',
+      url: 'blob:video-frame-1',
+      width: 640,
+      height: 480,
+    });
+    const engine = new BrowserEngine();
+    const srcKey = sourceImageKey(src.get()!);
+    let dispose!: () => void;
+    try {
+      const ctrl = createRoot((d) => {
+        dispose = d;
+        const c = createCompareController({
+          ranked: () => [],
+          choices: () => [],
+          modelA: () => null,
+          modelAId: () => 'm_a',
+          chooseModelA: () => {},
+          runOnA: signal<'server' | 'webgpu' | 'cpu'>('server'),
+          predA: predA as never,
+          predSourceKeyA: signal<string | null>(srcKey),
+          hoverA: signal<Det | null>(null),
+          pickedA: signal<Det | null>(null),
+          resultA: () => ({ boxes: [...predA.get().boxes], ms: 1 }),
+          rowsA: () => predA.get().boxes.map((b, i) => ({ b, i })),
+          o2oA: () => false,
+          source: src,
+          conf: signal(0.25),
+          iou: signal(0.7),
+          maxDet: signal(300),
+          hidden: signal(new Set<number>()),
+          classesA: () => ['circle'],
+          browserOff: () => null,
+          localWeights: signal(new Map<string, File>()),
+          dropLocalB: () => {},
+          badFileB: signal<{ name: string; why: string | null } | null>(null),
+          engine,
+          isUnsyncedVideoPreview: () => unsynced.get(),
+        });
+        c.predB.set({
+          model_id: 'm_b',
+          image: { width: 640, height: 480 },
+          boxes: [{ class: 0, name: 'circle', score: 0.85, x1: 12, y1: 12, x2: 52, y2: 52 }],
+          timing: { preprocess_ms: 1, inference_ms: 4, postprocess_ms: 1, total_ms: 6 },
+          device: 'gpu:0',
+        });
+        c.predBSourceKey.set(srcKey);
+        return c;
+      });
+
+      expect(ctrl.summary.get().classDiff).toEqual({ both: ['circle'], onlyA: [], onlyB: [] });
+      expect(ctrl.compareJson.get()).not.toBeNull();
+
+      // Manual video seek advances preview ahead of captured frame -> both summary.classDiff and compareJson clear to null.
+      unsynced.set(true);
+      flushSync();
+      expect(ctrl.summary.get().classDiff).toBeNull();
+      expect(ctrl.summary.get().countA).toBeNull();
+      expect(ctrl.summary.get().countB).toBeNull();
+      expect(ctrl.compareJson.get()).toBeNull();
+    } finally {
+      dispose?.();
+      engine.dispose();
+    }
   });
 });

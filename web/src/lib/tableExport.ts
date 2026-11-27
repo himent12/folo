@@ -50,12 +50,44 @@ export function safeFilename(base: string, ext: 'csv' | 'json'): string {
   return `${slug || 'export'}.${ext}`;
 }
 
-/** Triggers a browser download for a text payload and revokes its object URL cleanly. */
-export function downloadText(content: string, filename: string, mimeType: string, toastKey?: string): boolean {
+/** Pending object-URL revocation timers, tracked so page unload or tests can revoke immediately without leaks. */
+const pendingRevokes = new Set<{ timer: ReturnType<typeof setTimeout>; url: string }>();
+
+if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+  window.addEventListener('pagehide', () => revokePendingBlobUrls());
+}
+
+/** Schedules `URL.revokeObjectURL(url)` after `delayMs` and tracks the timer for clean teardown. */
+export function scheduleBlobRevoke(url: string, delayMs = 1000): void {
+  const entry: { timer: ReturnType<typeof setTimeout>; url: string } = {
+    url,
+    timer: setTimeout(() => {
+      pendingRevokes.delete(entry);
+      URL.revokeObjectURL(url);
+    }, delayMs),
+  };
+  pendingRevokes.add(entry);
+}
+
+/** Immediately revokes all pending download object URLs and clears their timers. */
+export function revokePendingBlobUrls(): void {
+  for (const entry of pendingRevokes) {
+    clearTimeout(entry.timer);
+    URL.revokeObjectURL(entry.url);
+  }
+  pendingRevokes.clear();
+}
+
+/** Count of currently pending blob-URL revoke timers (used by tests to assert zero timer leaks). */
+export function pendingBlobRevokeCount(): number {
+  return pendingRevokes.size;
+}
+
+/** Triggers a browser download for a Blob and schedules safe object-URL revocation. */
+export function downloadBlob(blob: Blob, filename: string, toastKey?: string, errorTitle = 'Download failed'): boolean {
   let url: string | undefined;
   let a: HTMLAnchorElement | undefined;
   try {
-    const blob = new Blob([content], { type: mimeType });
     url = URL.createObjectURL(blob);
     a = document.createElement('a');
     a.href = url;
@@ -63,20 +95,24 @@ export function downloadText(content: string, filename: string, mimeType: string
     a.style.display = 'none';
     document.body.appendChild(a);
     a.click();
-    const revoke = url;
-    setTimeout(() => URL.revokeObjectURL(revoke), 1000);
+    scheduleBlobRevoke(url);
     return true;
   } catch (err) {
     if (url) URL.revokeObjectURL(url);
     toast.error(
       err instanceof Error ? err : new Error('Your browser blocked the file download.'),
-      'Download failed',
+      errorTitle,
       toastKey ? { key: toastKey } : undefined,
     );
     return false;
   } finally {
     a?.remove();
   }
+}
+
+/** Triggers a browser download for a text payload and revokes its object URL cleanly. */
+export function downloadText(content: string, filename: string, mimeType: string, toastKey?: string): boolean {
+  return downloadBlob(new Blob([content], { type: mimeType }), filename, toastKey, 'Download failed');
 }
 
 export function exportTableCsv(

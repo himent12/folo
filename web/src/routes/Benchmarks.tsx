@@ -8,7 +8,7 @@ import { computed, css, effect, For, MediaQuery, onCleanup, signal, untrack } fr
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Bench } from '$lib/api/types';
-import { BENCH_FEATURE } from '$lib/bench/rules';
+import { BENCH_FEATURE, isGeneratedBenchSource } from '$lib/bench/rules';
 import { media } from '$lib/design/tokens';
 import { ago, date, num } from '$lib/format';
 import { href, router } from '$lib/router';
@@ -65,7 +65,15 @@ const cols: Col[] = [
 const COLS = cols.length;
 const hideCls = (c: Col) => (c.hide ? `hide-${c.hide}` : '');
 
-const keep = (b: Bench, f: Filter) => f === 'all' || (f === 'active' ? b.active : b.source.kind === f);
+const keep = (b: Bench, f: Filter) =>
+  f === 'all' ||
+  (f === 'active'
+    ? b.active
+    : f === 'generated'
+      ? isGeneratedBenchSource(b.source)
+      : f === 'dataset'
+        ? b.source.kind === 'dataset' && !isGeneratedBenchSource(b.source)
+        : b.source.kind === f);
 
 export default function Benchmarks() {
   // Relative times ("made 3m ago") tick while the page is open (runs/when).
@@ -151,16 +159,18 @@ export default function Benchmarks() {
       let all = 0;
       let dataset = 0;
       let label_job = 0;
+      let generated = 0;
       let active = 0;
       for (const b of benches.data ?? []) {
         all++;
-        if (b.source.kind === 'dataset') dataset++;
+        if (isGeneratedBenchSource(b.source)) generated++;
+        else if (b.source.kind === 'dataset') dataset++;
         else if (b.source.kind === 'label_job') label_job++;
         if (b.active) active++;
       }
-      return { all, dataset, label_job, active };
+      return { all, dataset, label_job, generated, active };
     },
-    { equals: (a, b) => a.all === b.all && a.dataset === b.dataset && a.label_job === b.label_job && a.active === b.active },
+    { equals: (a, b) => a.all === b.all && a.dataset === b.dataset && a.label_job === b.label_job && a.generated === b.generated && a.active === b.active },
   );
   const count = (f: Filter) => counts.get()[f];
   const filtered = computed(() => {
@@ -314,6 +324,9 @@ export default function Benchmarks() {
                     { value: 'all', label: 'All', meta: benches.data?.length ? String(count('all')) : undefined },
                     { value: 'dataset', label: 'Datasets', meta: benches.data?.length ? String(count('dataset')) : undefined },
                     { value: 'label_job', label: 'Labeling jobs', meta: benches.data?.length ? String(count('label_job')) : undefined },
+                    ...(count('generated') > 0 || filter.get() === 'generated'
+                      ? [{ value: 'generated' as const, label: 'Generated', meta: benches.data?.length ? String(count('generated')) : undefined }]
+                      : []),
                     { value: 'active', label: 'Running', meta: benches.data?.length ? String(count('active')) : undefined },
                   ]}
                 />

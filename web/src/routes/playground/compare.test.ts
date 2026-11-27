@@ -65,10 +65,15 @@ describe('playground/compare', () => {
     expect(sum.speedupRatio).toBeCloseTo(2.1);
 
     expect(sum.classes).toEqual([
-      { name: 'circle', colorClass: 0, countA: 1, countB: 2, delta: 1 },
-      { name: 'square', colorClass: 1, countA: 1, countB: 0, delta: -1 },
-      { name: 'triangle', colorClass: 2, countA: 0, countB: 1, delta: 1 },
+      { name: 'circle', colorClass: 0, countA: 1, countB: 2, delta: 1, presence: 'both' },
+      { name: 'square', colorClass: 1, countA: 1, countB: 0, delta: -1, presence: 'only-a' },
+      { name: 'triangle', colorClass: 2, countA: 0, countB: 1, delta: 1, presence: 'only-b' },
     ]);
+    expect(sum.classDiff).toEqual({
+      both: ['circle'],
+      onlyA: ['square'],
+      onlyB: ['triangle'],
+    });
   });
 
   it('formats signed deltas and latency comparisons clearly', () => {
@@ -107,6 +112,11 @@ describe('playground/compare', () => {
     expect(payload?.view).toBe('split');
     expect(payload?.filter).toEqual({ conf: 0.3, iou: 0.65, max_det: 100 });
     expect(payload?.comparison.count_delta).toBe(1);
+    expect(payload?.comparison.class_diff).toEqual({
+      both: ['circle'],
+      only_a: ['square'],
+      only_b: ['triangle'],
+    });
     expect(payload?.a?.model_name).toBe('shapes-s');
     expect(payload?.a?.run_on).toBe('server');
     expect('iou' in (payload?.a?.filter ?? {})).toBe(false);
@@ -127,9 +137,10 @@ describe('playground/compare', () => {
     expect(sum.countDelta).toBeNull();
     expect(formatSignedDelta(sum.countDelta)).toBe('—');
     expect(sum.classes).toEqual([
-      { name: 'circle', colorClass: 0, countA: 1, countB: null, delta: null },
-      { name: 'square', colorClass: 1, countA: 1, countB: null, delta: null },
+      { name: 'circle', colorClass: 0, countA: 1, countB: null, delta: null, presence: null },
+      { name: 'square', colorClass: 1, countA: 1, countB: null, delta: null, presence: null },
     ]);
+    expect(sum.classDiff).toBeNull();
 
     const payload = comparePredictionJson({
       view: 'side-by-side',
@@ -153,6 +164,7 @@ describe('playground/compare', () => {
     expect(payload?.comparison.count_a).toBe(2);
     expect(payload?.comparison.count_b).toBeNull();
     expect(payload?.comparison.count_delta).toBeNull();
+    expect(payload?.comparison.class_diff).toBeNull();
   });
 
   it('converts live split-overlay divider through letterbox, zoom, and pan into exact image space', () => {
