@@ -1,31 +1,33 @@
 //! `folo val`, `folo predict` and `folo export`.
 //!
-//! - `mod.rs`: shared model loading / arg checks, `val`, and `export`.
-//! - `predict.rs`: `predict`, recursive image walking, `--save` path checks and atomic image saving.
+//! - `mod.rs`: shared model loading / arg checks and `val`.
+//! - `diag.rs`: `folo val --diagnostics` / `--worst` per-image error diagnosis.
+//! - `export.rs`: `folo export` (`.folo` and ONNX with independent dynamic axes and `folo2-*` support).
+//! - `predict.rs`: `predict`, ByteTrack `--track`, recursive image walking, `--save` path checks and atomic saving.
 
+mod diag;
+mod export;
 mod predict;
 
+pub use export::export;
 pub use predict::predict;
 
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 
 use folo_data::{Dataset, Split};
-use folo_nn::io::{FloatDType, ModelFile};
-use folo_vision::export::onnx::{self, OnnxOptions, OnnxValue, proto::Dim};
+use folo_nn::io::ModelFile;
 use folo_vision::predict::f16_unavailable;
 use folo_vision::train::{can_place, resolve_device};
 use folo_vision::val::{ValConfig, check_config, val_metrics, validate};
 use folo_vision::{FoloModel, NmsConfig, Precision};
 use serde_json::json;
 
-use crate::cli::{ExportArgs, ExportFormatArg, PrecisionArg, SplitArg, ValArgs, bounds};
+use crate::cli::{PrecisionArg, SplitArg, ValArgs, bounds};
 use crate::engine::{engine_error, open_dataset_splits};
 use crate::output::{CliError, ExitCode, Out};
-use crate::output_file::OutputFile;
 
-fn nn_error(command: &str, e: folo_nn::Error) -> CliError {
+pub(super) fn nn_error(command: &str, e: folo_nn::Error) -> CliError {
     engine_error(command, e.into())
 }
 
@@ -204,6 +206,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         bounds::VAL_IMGSZ,
         Some(args.batch),
     )?;
+    let diag_settings = diag::check_diag_args(&args)?;
     let shape = format!("imgsz {:?} batch {} head {:?}", args.imgsz, args.batch, args.head);
     let model =
         open_model("val", &args.model, &args.device, (args.half, args.precision), args.tensor_cores, &shape)?;
@@ -244,7 +247,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         },
         samples: 0,
         workers: args.workers.unwrap_or_else(folo_vision::train::default_workers),
-        keep_detections: args.coco || args.save_json.is_some(),
+        keep_detections: args.coco || args.save_json.is_some() || diag_settings.is_some(),
         head: args.head.map(Into::into),
         ..ValConfig::new(imgsz, args.batch as usize)
     };
@@ -305,7 +308,8 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
             coco_text = Some(c.stats.summary());
         }
     }
-    out.record(&json!({
+    let diag_out = diag_settings.map(|s| diag::compute(part, &ds.root, &r.detections, s));
+    let mut record = json!({
         "model": folo_api::json::path(&args.model),
         "data": folo_api::json::path(&args.data),
         "split": split.as_str(),
@@ -328,7 +332,11 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         "score": cfg.nms.score.as_str(),
         "seconds": r.seconds,
         "coco": coco,
-    }));
+    });
+    if let Some(d) = &diag_out {
+        record["diagnostics"] = d.json.clone();
+    }
+    out.record(&record);
     out.human(format!(
         "{} on {} ({} images, {} boxes) at {imgsz}px on {device} ({precision}, head {head}) in {:.1}s",
         folo_api::json::path(&args.model),
@@ -357,185 +365,11 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         out.human("COCOeval (pycocotools-exact, original-image boxes):");
         out.human(text.trim_end());
     }
-    Ok(())
-}
-
-pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
-    let onnx = args.format == ExportFormatArg::Onnx;
-    if !onnx {
-        let given = [
-            ("--imgsz", args.imgsz.is_some()),
-            ("--batch", args.batch.is_some()),
-            ("--dynamic", args.dynamic),
-            ("--half", args.half),
-            ("--decode", args.decode),
-            ("--head", args.head.is_some()),
-        ];
-        if let Some((flag, _)) = given.iter().find(|(_, on)| *on) {
-            return Err(CliError::new(
-                ExitCode::Usage,
-                "usage",
-                format!("{flag} only applies to --format onnx"),
-            )
-            .hint("`.folo` exports are size-independent; --format folo-f16 is the f16 one"));
+    if let Some(d) = diag_out {
+        for line in d.lines {
+            out.human(line);
         }
     }
-    if args.dynamic && args.batch.is_some() {
-        return Err(CliError::new(ExitCode::Usage, "usage", "--batch and --dynamic exclude each other")
-            .hint("--dynamic makes the batch symbolic; leave out --batch"));
-    }
-    if args.batch.is_some_and(|b| !bounds::POSITIVE_INT.contains_u64(b as u64)) {
-        return Err(CliError::new(ExitCode::Usage, "usage", "--batch must be at least 1"));
-    }
-    if !bounds::POSITIVE_INT.contains_u64(args.max_det as u64) {
-        return Err(CliError::new(ExitCode::Usage, "usage", "--max-det must be at least 1"));
-    }
-    if let Some(imgsz) = args.imgsz
-        && onnx
-        && !bounds::INFER_IMGSZ.contains_u64(u64::from(imgsz))
-    {
-        return Err(CliError::new(
-            ExitCode::Usage,
-            "usage",
-            format!("--imgsz {imgsz} must be a multiple of 32 in 32..={}", bounds::INFER_IMGSZ_MAX),
-        ));
-    }
-    args.model = crate::weights::resolve(&args.model)?;
-    // A decoded graph is named apart from the raw one: `<name>-decoded.onnx` (`-decoded-f16` with --half).
-    let (dtype, suffix, ext) = match args.format {
-        ExportFormatArg::FoloF16 => (FloatDType::F16, "-f16", "folo"),
-        ExportFormatArg::Folo => (FloatDType::F32, "-fused", "folo"),
-        ExportFormatArg::Weights => (FloatDType::F32, "-weights", "folo"),
-        ExportFormatArg::Onnx if args.half && args.decode => (FloatDType::F16, "-decoded-f16", "onnx"),
-        ExportFormatArg::Onnx if args.half => (FloatDType::F16, "-f16", "onnx"),
-        ExportFormatArg::Onnx if args.decode => (FloatDType::F32, "-decoded", "onnx"),
-        ExportFormatArg::Onnx => (FloatDType::F32, "", "onnx"),
-    };
-    // The record's dtype is lowercase, as `val` and `predict` write it.
-    let dtype_name = dtype.as_str().to_ascii_lowercase();
-    let file = ModelFile::open(&args.model).map_err(|e| weights_error("export", &args.model, e))?;
-    if args.format == ExportFormatArg::Weights && file.metadata().fused {
-        return Err(CliError::new(
-            ExitCode::Usage,
-            "usage",
-            format!(
-                "{} is fused (Conv+BN folded): it cannot become unfused weights",
-                folo_api::json::path(&args.model)
-            ),
-        )
-        .hint(
-            "export --format weights from the training checkpoint (best.folo) or an unfused weights file",
-        ));
-    }
-    let imgsz = args.imgsz.unwrap_or(file.metadata().imgsz);
-    if onnx && !bounds::INFER_IMGSZ.contains_u64(u64::from(imgsz)) {
-        return Err(CliError::new(
-            ExitCode::Usage,
-            "usage",
-            format!("--imgsz {imgsz} must be a multiple of 32 in 32..={}", bounds::INFER_IMGSZ_MAX),
-        ));
-    }
-    let mut output = OutputFile::new("export", &args.model, args.output.clone(), suffix, ext)?;
-    let t = Instant::now();
-    let source = if file.has_ema() { "ema" } else { "model" };
-    let meta = file.metadata();
-    if onnx {
-        let opts = OnnxOptions {
-            height: imgsz,
-            width: imgsz,
-            batch: args.batch.unwrap_or(1),
-            dynamic: args.dynamic,
-            half: args.half,
-            decode: args.decode,
-            max_det: args.max_det,
-            head: args.head.map(Into::into),
-            // The source's other keys (folo.metrics, folo.created, unknown folo.* keys) travel along.
-            metadata: meta.for_weights().to_map(),
-        };
-        let x = onnx::export_file(&file, &opts).map_err(|e| engine_error("export", e))?;
-        output.write_bytes(&x.bytes)?;
-        let output = output.publish()?;
-        let value = |v: &OnnxValue| {
-            let shape: Vec<serde_json::Value> = v
-                .shape
-                .iter()
-                .map(|d| match d {
-                    Dim::Value(n) => json!(n),
-                    Dim::Param(p) => json!(p),
-                })
-                .collect();
-            json!({ "name": v.name, "dtype": v.dtype, "shape": shape })
-        };
-        out.record(&json!({
-            "path": folo_api::json::path(&output),
-            "bytes": x.bytes.len(),
-            "format": "onnx",
-            "dtype": dtype_name,
-            "fused": true,
-            "source": source,
-            "arch": meta.arch,
-            "classes": meta.classes,
-            "opset": onnx::OPSET,
-            "imgsz": imgsz,
-            "batch": if args.dynamic { json!("dynamic") } else { json!(opts.batch) },
-            "dynamic": args.dynamic,
-            "decode": args.decode,
-            "head": x.metadata.get("folo.onnx.head"),
-            "inputs": x.inputs.iter().map(value).collect::<Vec<_>>(),
-            "outputs": x.outputs.iter().map(value).collect::<Vec<_>>(),
-            "seconds": t.elapsed().as_secs_f64(),
-        }));
-        let shape = |v: &OnnxValue| v.shape.iter().map(ToString::to_string).collect::<Vec<_>>().join("x");
-        out.human(format!(
-            "Exported the {source} weights of {} to {} (ONNX opset {}, {}, {:.1} MB): {} {} -> {}",
-            folo_api::json::path(&args.model),
-            folo_api::json::path(&output),
-            onnx::OPSET,
-            dtype_name,
-            x.bytes.len() as f64 / 1e6,
-            onnx::INPUT,
-            shape(&x.inputs[0]),
-            x.outputs.iter().map(|o| format!("{} {}", o.name, shape(o))).collect::<Vec<_>>().join(", "),
-        ));
-        return Ok(());
-    }
-    let fused = args.format != ExportFormatArg::Weights;
-    if fused {
-        output.write_with(|w| file.export_to(w, dtype).map_err(|e| nn_error("export", e)))?;
-    } else {
-        // The inference tensor set (EMA when present), unfused, written as a plain weights file
-        // preserving the source file's non-checkpoint metadata (folo.metrics, folo.created, unknown folo.* keys).
-        let (model, _) = FoloModel::from_file(&file, folo_nn::io::Purpose::Inference)
-            .map_err(|e| nn_error("export", e))?;
-        output.write_with(|w| {
-            folo_nn::io::write_weights(w, file.metadata(), &model).map_err(|e| nn_error("export", e))
-        })?;
-    }
-    let output = output.publish()?;
-    let bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
-    out.record(&json!({
-        "path": folo_api::json::path(&output),
-        "bytes": bytes,
-        "format": match args.format {
-            ExportFormatArg::FoloF16 => "folo-f16",
-            ExportFormatArg::Weights => "weights",
-            _ => "folo",
-        },
-        "dtype": dtype_name,
-        "fused": fused,
-        "source": source,
-        "arch": meta.arch,
-        "classes": meta.classes,
-        "seconds": t.elapsed().as_secs_f64(),
-    }));
-    out.human(format!(
-        "Exported the {source} weights of {} ({}, {}) to {} ({:.1} MB)",
-        folo_api::json::path(&args.model),
-        if fused { "fused" } else { "unfused" },
-        dtype_name,
-        folo_api::json::path(&output),
-        bytes as f64 / 1e6
-    ));
     Ok(())
 }
 

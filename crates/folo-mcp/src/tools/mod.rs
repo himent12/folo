@@ -17,6 +17,7 @@
 mod arguments;
 mod bench;
 mod cloud;
+mod curate;
 mod datasets;
 mod dispatch;
 mod info;
@@ -30,7 +31,7 @@ use std::sync::{Arc, OnceLock};
 
 use folo_api::{
     CloudConnectionList, CloudInstance, CloudInstanceList, CloudOfferList, Dataset, ExportResult,
-    PredictResponse, Run, ValReport,
+    PredictResponse, Run,
 };
 use rmcp::model::{JsonObject, Tool, ToolAnnotations};
 use serde_json::{Value, json};
@@ -70,7 +71,7 @@ impl SchemaCache {
 /// Every tool, in the order of docs/MCP.md.
 pub static TOOLS: &[ToolDef] = &TOOL_TABLE;
 
-static TOOL_TABLE: [ToolDef; 40] = [
+static TOOL_TABLE: [ToolDef; 43] = [
     ToolDef {
         name: "folo_info",
         description: "FOLO version, compute devices (CPU, GPUs), data dir, read-only flag and the model scales \
@@ -134,6 +135,33 @@ static TOOL_TABLE: [ToolDef; 40] = [
         schemas: SchemaCache::new(),
     },
     ToolDef {
+        name: "audit_dataset",
+        description: "Audits a dataset on disk for exact 128-bit content-hash duplicates, 64-bit dHash perceptual \
+                      near-duplicates, and cross-split train/val/test leakage.",
+        mutating: false,
+        input: terse_input::<AuditDatasetArgs>,
+        output: terse_output::<AuditDatasetResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "merge_datasets",
+        description: "Merges 2 to 32 registered datasets into a new YOLO dataset with class reconciliation, \
+                      optional re-splitting and collision handling, then registers it.",
+        mutating: true,
+        input: terse_input::<MergeDatasetsArgs>,
+        output: terse_output::<MergeDatasetsResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
+        name: "filter_dataset",
+        description: "Filters a registered dataset by class, split, box area/size and image dimensions into a \
+                      new YOLO or COCO dataset, then registers it.",
+        mutating: true,
+        input: terse_input::<FilterDatasetArgs>,
+        output: terse_output::<FilterDatasetResult>,
+        schemas: SchemaCache::new(),
+    },
+    ToolDef {
         name: "list_models",
         description: "Lists trained models (summaries: id, name, arch, imgsz, classes, metrics). Paged.",
         mutating: false,
@@ -186,11 +214,11 @@ static TOOL_TABLE: [ToolDef; 40] = [
     },
     ToolDef {
         name: "val",
-        description: "Evaluates a model on a dataset split: mAP@0.5, mAP@0.5:0.95, precision, recall, per class. \
-                      Reports progress.",
+        description: "Evaluates a model on a dataset split: mAP@0.5, mAP@0.5:0.95, precision, recall, per class, \
+                      and optional per-image error diagnostics (`diagnostics` / `worst`). Reports progress.",
         mutating: false,
         input: input::<ValArgs>,
-        output: api_output::<ValReport>,
+        output: terse_output::<ValToolResult>,
         schemas: SchemaCache::new(),
     },
     ToolDef {

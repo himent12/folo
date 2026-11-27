@@ -370,7 +370,16 @@ impl Store for MockStore {
     }
 
     fn export_model(&self, id: &str, spec: ExportSpec) -> Result<ExportResult> {
-        crate::store::check_export(&spec)?;
+        self.export_model_with_axes(id, spec, crate::store::DynamicAxes::from_dynamic(spec.onnx.dynamic))
+    }
+
+    fn export_model_with_axes(
+        &self,
+        id: &str,
+        spec: ExportSpec,
+        axes: crate::store::DynamicAxes,
+    ) -> Result<ExportResult> {
+        crate::store::check_export_axes(&spec, axes)?;
         let m = self.get_model(id)?;
         let (ext, bytes) = match spec.format {
             ExportFormat::FoloF16 => ("f16.folo", model_bytes(m.params, true)),
@@ -735,6 +744,14 @@ impl Store for MockStore {
 
     fn val(&self, req: folo_api::ValRequest) -> Result<folo_api::ValReport> {
         val::val(self, req)
+    }
+
+    fn val_with_diagnostics(
+        &self,
+        req: folo_api::ValRequest,
+        diag: Option<crate::store::ValDiagConfig>,
+    ) -> Result<(folo_api::ValReport, Option<crate::store::ValDiagnostics>)> {
+        val::val_with_diagnostics(self, req, diag)
     }
 
     fn dataset_root(&self, id: &str) -> Result<Option<std::path::PathBuf>> {

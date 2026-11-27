@@ -2,7 +2,7 @@
 //! tiny built-in digit font (no font files).
 
 use folo_data::Image;
-use folo_vision::Detection;
+use folo_vision::{Detection, TrackedDetection};
 
 /// Distinct, saturated colours (cycled by class id).
 const PALETTE: [[u8; 3]; 10] = [
@@ -18,8 +18,8 @@ const PALETTE: [[u8; 3]; 10] = [
     [61, 219, 134],
 ];
 
-/// 3×5 glyphs for `0-9` and `.`, one row per entry, bit 2 = left column.
-const GLYPHS: [[u8; 5]; 11] = [
+/// 3×5 glyphs for `0-9`, `.`, and `#`, one row per entry, bit 2 = left column.
+const GLYPHS: [[u8; 5]; 12] = [
     [0b111, 0b101, 0b101, 0b101, 0b111],
     [0b010, 0b110, 0b010, 0b010, 0b111],
     [0b111, 0b001, 0b111, 0b100, 0b111],
@@ -31,6 +31,7 @@ const GLYPHS: [[u8; 5]; 11] = [
     [0b111, 0b101, 0b111, 0b101, 0b111],
     [0b111, 0b101, 0b111, 0b001, 0b111],
     [0b000, 0b000, 0b000, 0b000, 0b010],
+    [0b101, 0b111, 0b101, 0b111, 0b101],
 ];
 
 /// The colour of class `c`.
@@ -38,47 +39,57 @@ pub fn class_color(c: u32) -> [u8; 3] {
     PALETTE[c as usize % PALETTE.len()]
 }
 
-/// Draw `dets` onto `img`.
-pub fn annotate(img: &mut Image, dets: &[Detection]) {
+fn draw_box(img: &mut Image, bbox: folo_vision::Xyxy, color_key: u32, label: &str) {
     let short = img.width.min(img.height) as i64;
     let t = (short / 320).clamp(1, 6) + 1;
     let scale = (short / 400).clamp(1, 4);
-    // Lowest score first, so the best boxes end up on top.
-    for d in dets.iter().rev() {
-        let c = class_color(d.class);
-        let (x1, y1) = (d.bbox.x1.round() as i64, d.bbox.y1.round() as i64);
-        let (x2, y2) = (d.bbox.x2.round() as i64, d.bbox.y2.round() as i64);
-        img.fill_rect(x1, y1, x2, y1 + t, c);
-        img.fill_rect(x1, y2 - t, x2, y2, c);
-        img.fill_rect(x1, y1, x1 + t, y2, c);
-        img.fill_rect(x2 - t, y1, x2, y2, c);
-        let label = format!("{} {:.2}", d.class, d.score);
-        let (gw, gh) = (4 * scale, 6 * scale);
-        let tag_w = label.len() as i64 * gw + 2 * scale;
-        let tag_h = gh + 2 * scale;
-        let ty = if y1 - tag_h >= 0 { y1 - tag_h } else { y1 };
-        img.fill_rect(x1, ty, x1 + tag_w, ty + tag_h, c);
-        let ink = if c[0] as u32 * 299 + c[1] as u32 * 587 + c[2] as u32 * 114 > 140_000 {
-            [0; 3]
-        } else {
-            [255; 3]
+    let c = class_color(color_key);
+    let (x1, y1) = (bbox.x1.round() as i64, bbox.y1.round() as i64);
+    let (x2, y2) = (bbox.x2.round() as i64, bbox.y2.round() as i64);
+    img.fill_rect(x1, y1, x2, y1 + t, c);
+    img.fill_rect(x1, y2 - t, x2, y2, c);
+    img.fill_rect(x1, y1, x1 + t, y2, c);
+    img.fill_rect(x2 - t, y1, x2, y2, c);
+    let (gw, gh) = (4 * scale, 6 * scale);
+    let tag_w = label.len() as i64 * gw + 2 * scale;
+    let tag_h = gh + 2 * scale;
+    let ty = if y1 - tag_h >= 0 { y1 - tag_h } else { y1 };
+    img.fill_rect(x1, ty, x1 + tag_w, ty + tag_h, c);
+    let ink =
+        if c[0] as u32 * 299 + c[1] as u32 * 587 + c[2] as u32 * 114 > 140_000 { [0; 3] } else { [255; 3] };
+    for (i, ch) in label.chars().enumerate() {
+        let g = match ch {
+            '0'..='9' => GLYPHS[ch as usize - '0' as usize],
+            '.' => GLYPHS[10],
+            '#' => GLYPHS[11],
+            _ => continue,
         };
-        for (i, ch) in label.chars().enumerate() {
-            let g = match ch {
-                '0'..='9' => GLYPHS[ch as usize - '0' as usize],
-                '.' => GLYPHS[10],
-                _ => continue,
-            };
-            let gx = x1 + scale + i as i64 * gw;
-            for (row, bits) in g.iter().enumerate() {
-                for col in 0..3 {
-                    if bits & (0b100 >> col) != 0 {
-                        let px = gx + col * scale;
-                        let py = ty + scale + row as i64 * scale;
-                        img.fill_rect(px, py, px + scale, py + scale, ink);
-                    }
+        let gx = x1 + scale + i as i64 * gw;
+        for (row, bits) in g.iter().enumerate() {
+            for col in 0..3 {
+                if bits & (0b100 >> col) != 0 {
+                    let px = gx + col * scale;
+                    let py = ty + scale + row as i64 * scale;
+                    img.fill_rect(px, py, px + scale, py + scale, ink);
                 }
             }
         }
+    }
+}
+
+/// Draw `dets` onto `img`.
+pub fn annotate(img: &mut Image, dets: &[Detection]) {
+    // Lowest score first, so the best boxes end up on top.
+    for d in dets.iter().rev() {
+        let label = format!("{} {:.2}", d.class, d.score);
+        draw_box(img, d.bbox, d.class, &label);
+    }
+}
+
+/// Draw tracked detections onto `img` with `#<track_id> <class> <score>` tags.
+pub fn annotate_tracked(img: &mut Image, tracks: &[TrackedDetection]) {
+    for tr in tracks.iter().rev() {
+        let label = format!("#{} {} {:.2}", tr.track_id, tr.class_id, tr.score);
+        draw_box(img, tr.bbox, tr.class_id, &label);
     }
 }

@@ -401,3 +401,179 @@ fn predict_sahi_tta_and_voc_leakage() {
     );
     c.finish();
 }
+
+/// MCP Sprint 12 end-to-end: `val` with `diagnostics` / `worst`, `export` with independent `dynamic_batch` /
+/// `dynamic_hw`, `audit_dataset` with perceptual dHash leakage detection, `merge_datasets`, and `filter_dataset`.
+#[test]
+fn s12_val_diagnostics_dynamic_export_and_dataset_curate() {
+    let dir = tmp_dir("s12-mcp");
+    let weights = dir.join("weights");
+    std::fs::create_dir_all(&weights).unwrap();
+    let home = dir.join("home");
+
+    let mut m = folo_vision::FoloModel::with_rng(
+        folo_vision::ModelConfig::new("n", 2).unwrap(),
+        &mut folo_core::rng::Rng::seed(19),
+    )
+    .unwrap();
+    m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    m.save(weights.join("folo-n-coco.folo")).unwrap();
+
+    let mut c =
+        spawn_with_weights(&["--data-dir", home.to_str().unwrap(), "--device", "cpu"], None, &weights);
+    init_old(&mut c);
+    let schemas = check_tools(&mut c, &ALL_TOOLS);
+
+    let ds_a = checked(
+        &mut c,
+        &schemas,
+        "create_synthetic_dataset",
+        json!({ "name": "s12_a", "images": 6, "imgsz": 64, "classes": ["circle", "square"], "seed": 11 }),
+    );
+    let ds_b = checked(
+        &mut c,
+        &schemas,
+        "create_synthetic_dataset",
+        json!({ "name": "s12_b", "images": 6, "imgsz": 64, "classes": ["Circle", "star"], "seed": 12 }),
+    );
+    let ds_a_id = ds_a["id"].as_str().unwrap().to_string();
+    let ds_b_id = ds_b["id"].as_str().unwrap().to_string();
+
+    // 1. `val` with `diagnostics` and `worst`.
+    let val = checked(
+        &mut c,
+        &schemas,
+        "val",
+        json!({
+            "model_id": "folo-n-coco",
+            "dataset_id": ds_a_id,
+            "split": "val",
+            "imgsz": 64,
+            "diagnostics": true,
+            "worst": 2,
+            "diag_conf": 0.05
+        }),
+    );
+    let diag = &val["diagnostics"];
+    assert!(diag.is_object(), "{val}");
+    assert_eq!(diag["images_diagnosed"].as_u64(), Some(1));
+    let sum = &diag["summary"];
+    assert_eq!(
+        sum["tp"].as_u64().unwrap() + sum["fn_count"].as_u64().unwrap(),
+        sum["num_truths"].as_u64().unwrap(),
+        "{sum}"
+    );
+    assert_eq!(
+        sum["tp"].as_u64().unwrap() + sum["fp"].as_u64().unwrap(),
+        sum["num_preds"].as_u64().unwrap(),
+        "{sum}"
+    );
+
+    // 2. `export` with independent `dynamic_batch` and `dynamic_hw`.
+    let exp_b = checked(
+        &mut c,
+        &schemas,
+        "export",
+        json!({ "model_id": "folo-n-coco", "format": "onnx", "dynamic_batch": true }),
+    );
+    assert!(std::path::Path::new(exp_b["path"].as_str().unwrap()).is_file(), "{exp_b}");
+    let exp_hw = checked(
+        &mut c,
+        &schemas,
+        "export",
+        json!({ "model_id": "folo-n-coco", "format": "onnx", "dynamic_hw": true }),
+    );
+    assert!(std::path::Path::new(exp_hw["path"].as_str().unwrap()).is_file(), "{exp_hw}");
+    c.tool_error(
+        "export",
+        json!({ "model_id": "folo-n-coco", "format": "folo-f16", "dynamic_batch": true }),
+        "invalid_arguments",
+    );
+
+    // 3. `merge_datasets` with class normalization, remap, and stratified split.
+    let merged = checked(
+        &mut c,
+        &schemas,
+        "merge_datasets",
+        json!({
+            "dataset_ids": [ds_a_id, ds_b_id],
+            "name": "s12_merged",
+            "normalize": "case-and-whitespace",
+            "class_map": { "star": "triangle" },
+            "splits": "stratified",
+            "val": 0.25,
+            "seed": 5
+        }),
+    );
+    assert_eq!(merged["classes"], json!(["circle", "square", "triangle"]));
+    assert!(merged["renamed_collisions"].as_u64().unwrap() > 0, "{merged}");
+    let merged_id = merged["dataset_id"].as_str().unwrap().to_string();
+
+    // 4. `filter_dataset` keeping only `circle` and converting to COCO.
+    let filtered = checked(
+        &mut c,
+        &schemas,
+        "filter_dataset",
+        json!({
+            "dataset_id": merged_id,
+            "name": "s12_circles",
+            "format": "coco",
+            "include_classes": ["circle"],
+            "drop_empty_images": true
+        }),
+    );
+    assert_eq!(filtered["classes"], json!(["circle"]));
+    assert!(filtered["dataset_id"].as_str().is_some(), "{filtered}");
+    assert!(filtered["kept_boxes"].as_u64().unwrap() > 0, "{filtered}");
+
+    // 5. `audit_dataset` detects perceptual dHash cross-split leakage on recompressed copy.
+    let leak_dir = home.join("leak_ds");
+    for sub in ["images/train", "images/val", "labels/train", "labels/val"] {
+        std::fs::create_dir_all(leak_dir.join(sub)).unwrap();
+    }
+    std::fs::write(leak_dir.join("data.yaml"), "names:\n  0: obj\ntrain: images/train\nval: images/val\n")
+        .unwrap();
+    let img = image::RgbImage::from_fn(64, 64, |x, y| {
+        image::Rgb([((x * 4) as u8), ((y * 4) as u8), (((x ^ y) * 3) as u8)])
+    });
+    img.save(leak_dir.join("images/train/a.png")).unwrap();
+    let mut jpeg = std::io::Cursor::new(Vec::new());
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 75).encode_image(&img).unwrap();
+    std::fs::write(leak_dir.join("images/val/a_recomp.jpg"), jpeg.into_inner()).unwrap();
+    std::fs::write(leak_dir.join("labels/train/a.txt"), "0 0.5 0.5 0.3 0.3\n").unwrap();
+    std::fs::write(leak_dir.join("labels/val/a_recomp.txt"), "0 0.5 0.5 0.3 0.3\n").unwrap();
+
+    let reg = checked(
+        &mut c,
+        &schemas,
+        "register_dataset",
+        json!({ "name": "leak_ds", "path": leak_dir.to_str().unwrap() }),
+    );
+    let leak_id = reg["id"].as_str().unwrap().to_string();
+    let audit = checked(
+        &mut c,
+        &schemas,
+        "audit_dataset",
+        json!({ "dataset_id": leak_id, "perceptual": true, "dhash_threshold": 6 }),
+    );
+    assert_eq!(audit["exact_leakage_groups"], 0, "{audit}");
+    assert!(audit["near_leakage_groups"].as_u64().unwrap() >= 1, "{audit}");
+    assert_eq!(audit["has_split_leakage"], true, "{audit}");
+
+    // 6. Embedded `--mock` refuses `merge_datasets` and `filter_dataset` with `not_supported` without writing files.
+    let mock_home = dir.join("mock_home");
+    let mut mock_c = spawn(&["--data-dir", mock_home.to_str().unwrap(), "--mock"], None);
+    init_old(&mut mock_c);
+    let mock_reg =
+        mock_c.ok("register_dataset", json!({ "name": "mock_disk", "path": leak_dir.to_str().unwrap() }));
+    let mock_id = mock_reg["id"].as_str().unwrap().to_string();
+    mock_c.tool_error(
+        "filter_dataset",
+        json!({ "dataset_id": mock_id, "name": "should_not_write" }),
+        "not_supported",
+    );
+    assert!(!mock_home.join("datasets").exists(), "mock mode must not write datasets to disk");
+    mock_c.finish();
+
+    c.finish();
+}

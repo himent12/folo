@@ -2,7 +2,7 @@
 
 use folo_api::{ExportFormat, ExportResult, ExportSpec};
 use folo_nn::io::FloatDType;
-use folo_vision::export::onnx::{self, OnnxOptions};
+use folo_vision::export::onnx::{self, DynamicAxes, OnnxOptions};
 
 use crate::engine::{self, engine_error, nn_error};
 use crate::error::{Error, Result};
@@ -18,6 +18,16 @@ impl Models {
     /// `decode`, `-f16` with `half`, as the CLI names them). `-2`, `-3`, ... when the name is taken; never
     /// overwriting.
     pub fn export(&self, m: &ModelRef, spec: ExportSpec) -> Result<ExportResult> {
+        self.export_with_axes(m, spec, DynamicAxes::from_dynamic(spec.onnx.dynamic))
+    }
+
+    /// [`Models::export`] with independent ONNX dynamic batch / spatial axes (`dynamic_batch`, `dynamic_hw`).
+    pub fn export_with_axes(
+        &self,
+        m: &ModelRef,
+        spec: ExportSpec,
+        axes: DynamicAxes,
+    ) -> Result<ExportResult> {
         let format = spec.format;
         let file = engine::read_model_file(&m.path)?;
         let dir = self.data_dir.join("exports");
@@ -39,9 +49,8 @@ impl Models {
         let tmp = folo_nn::io::temp_path(&dir).map_err(creating)?;
         let written = match format {
             ExportFormat::FoloF16 => file.export(&tmp, FloatDType::F16).map_err(nn_error),
-            ExportFormat::Onnx => {
-                onnx_export(&file, spec.onnx).and_then(|x| x.write_to(&tmp).map_err(engine_error))
-            }
+            ExportFormat::Onnx => onnx_export_with_axes(&file, spec.onnx, axes)
+                .and_then(|x| x.write_to(&tmp).map_err(engine_error)),
         }
         .and_then(|()| folo_nn::io::publish_free(&tmp, name).map_err(creating));
         let out = match written {
@@ -81,8 +90,17 @@ pub fn onnx_export(
     file: &folo_nn::io::ModelFile,
     switches: folo_api::OnnxSwitches,
 ) -> Result<onnx::OnnxExport> {
+    onnx_export_with_axes(file, switches, DynamicAxes::from_dynamic(switches.dynamic))
+}
+
+/// [`onnx_export`] with independent dynamic batch and spatial height/width axes.
+pub fn onnx_export_with_axes(
+    file: &folo_nn::io::ModelFile,
+    switches: folo_api::OnnxSwitches,
+    axes: DynamicAxes,
+) -> Result<onnx::OnnxExport> {
     let mut opts = OnnxOptions::new(file.metadata().imgsz);
-    (opts.decode, opts.dynamic, opts.half) = (switches.decode, switches.dynamic, switches.half);
+    (opts.decode, opts.dynamic, opts.half) = (switches.decode, axes.batch && axes.hw, switches.half);
     opts.metadata = file.metadata().for_weights().to_map();
-    onnx::export_file(file, &opts).map_err(engine_error)
+    onnx::export_file_with_axes(file, &opts, axes).map_err(engine_error)
 }

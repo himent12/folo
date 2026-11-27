@@ -62,6 +62,11 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
                 imgsz: Some(33),
                 conf: 0.001,
                 iou: 0.7,
+                diagnostics: false,
+                worst: None,
+                diag_conf: None,
+                diag_tp_iou: None,
+                diag_bg_iou: None,
             },
             &mut Progress::none(),
         )
@@ -69,6 +74,57 @@ async fn tools_validate_paging_and_args_before_proxy_access() {
         .err()
         .unwrap();
     assert_eq!(val_err.body.code, "invalid_arguments");
+
+    // `export` rejects conflicting `dynamic` / `dynamic_batch` and non-ONNX axis flags before hitting proxy.
+    for (format, dynamic, dynamic_batch) in [
+        (folo_api::ExportFormat::Onnx, true, Some(false)),
+        (folo_api::ExportFormat::FoloF16, false, Some(false)),
+    ] {
+        let exp_err = server
+            .inner
+            .export(ExportArgs {
+                model_id: "m_1".into(),
+                format,
+                decode: false,
+                dynamic,
+                dynamic_batch,
+                dynamic_hw: None,
+                half: false,
+            })
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(exp_err.body.code, "invalid_arguments");
+    }
+
+    // `filter_dataset` rejects zero image dimension bounds upfront before hitting proxy.
+    let filter_err = server
+        .inner
+        .filter_dataset(FilterDatasetArgs {
+            dataset_id: "ds_1".into(),
+            name: "filtered".into(),
+            format: None,
+            include_classes: None,
+            exclude_classes: None,
+            normalize: ClassNormalizeMode::Exact,
+            compact_classes: false,
+            splits: None,
+            min_box_area: None,
+            max_box_area: None,
+            min_box_width_px: None,
+            min_box_height_px: None,
+            max_box_width_px: None,
+            max_box_height_px: None,
+            min_width: Some(0),
+            min_height: None,
+            max_width: None,
+            max_height: None,
+            drop_empty_images: false,
+        })
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(filter_err.body.code, "invalid_arguments");
 
     // `predict_batch` rejects empty paths, both paths+glob, or neither before looking up `model_id`.
     for (paths, glob) in
@@ -353,6 +409,8 @@ async fn proxied_blank_and_dot_resource_ids_match_embedded_not_found() {
                         format: folo_api::ExportFormat::Onnx,
                         decode: false,
                         dynamic: false,
+                        dynamic_batch: None,
+                        dynamic_hw: None,
                         half: false,
                     })
                     .await

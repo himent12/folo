@@ -13,8 +13,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub mod bench;
+pub mod curate;
 pub mod label;
 pub use bench::*;
+pub use curate::*;
 pub use label::*;
 
 /// Default page size of list tools.
@@ -252,6 +254,25 @@ pub struct ValArgs {
     #[serde(default = "folo_api::default_iou")]
     #[schemars(range(min = 0.0, max = 1.0))]
     pub iou: f32,
+    /// Include per-image error diagnosis summary and worst failing images.
+    #[serde(default)]
+    pub diagnostics: bool,
+    /// Return the worst N failing images (1..=50; implies `diagnostics: true`).
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 50))]
+    pub worst: Option<usize>,
+    /// Confidence threshold for error diagnosis (default 0.25; requires `diagnostics` or `worst`).
+    #[serde(default)]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub diag_conf: Option<f32>,
+    /// TP IoU threshold for error diagnosis (default 0.50; requires `diagnostics` or `worst`).
+    #[serde(default)]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub diag_tp_iou: Option<f32>,
+    /// Background IoU threshold for error diagnosis (default 0.10; requires `diagnostics` or `worst`).
+    #[serde(default)]
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub diag_bg_iou: Option<f32>,
 }
 
 fn default_val_split() -> Split {
@@ -402,6 +423,12 @@ pub struct ExportArgs {
     /// ONNX only: symbolic batch, height and width.
     #[serde(default)]
     pub dynamic: bool,
+    /// ONNX only: symbolic batch axis only (`"batch"`, static H/W unless `dynamic_hw` is also true).
+    #[serde(default)]
+    pub dynamic_batch: Option<bool>,
+    /// ONNX only: symbolic spatial axes only (`"height"`, `"width"`, static batch unless `dynamic_batch` is also true).
+    #[serde(default)]
+    pub dynamic_hw: Option<bool>,
     /// ONNX only: f16 weights, input and outputs (the file name gets `-f16`).
     #[serde(default)]
     pub half: bool,

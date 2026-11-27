@@ -7,11 +7,25 @@ use folo_api::{ClassMetrics, Split, ValMetrics, ValReport, ValRequest, ValTiming
 use super::runs::{arch_spec, r3, r4};
 use super::{MockStore, quality_of};
 use crate::error::{Error, Result};
-use crate::store::Store;
+use crate::store::{
+    ImageDiagnostics, Store, ValDiagConfig, ValDiagnostics, ValDiagnosticsSummary, check_val_diag_config,
+};
 use crate::util::{fnv1a, noise};
 
 /// See the module docs.
 pub(super) fn val(store: &MockStore, req: ValRequest) -> Result<ValReport> {
+    val_with_diagnostics(store, req, None).map(|(r, _)| r)
+}
+
+/// [`val`] with deterministic synthetic per-image error diagnostics when `diag` is `Some`.
+pub(super) fn val_with_diagnostics(
+    store: &MockStore,
+    req: ValRequest,
+    diag: Option<ValDiagConfig>,
+) -> Result<(ValReport, Option<ValDiagnostics>)> {
+    if let Some(d) = &diag {
+        check_val_diag_config(d)?;
+    }
     let bad = |m: String| Err(Error::new(StatusCode::BAD_REQUEST, "invalid_body", m));
     if !(0.0..=1.0).contains(&req.conf) || !(0.0..=1.0).contains(&req.iou) {
         return bad("conf and iou must be in 0..=1".into());
@@ -80,7 +94,7 @@ pub(super) fn val(store: &MockStore, req: ValRequest) -> Result<ValReport> {
     let (.., inf_ms) = arch_spec(model.arch);
     let per_image_ms = ((inf_ms * (imgsz as f64 / 640.0).powi(2) + 1.1) * 100.0).round() / 100.0;
     let total_s = ((per_image_ms * images as f64 / 1000.0) * 100.0).round() / 100.0;
-    Ok(ValReport {
+    let report = ValReport {
         model_id: model.id,
         dataset_id: meta.id.clone(),
         dataset_name: Some(meta.name.clone()),
@@ -89,5 +103,91 @@ pub(super) fn val(store: &MockStore, req: ValRequest) -> Result<ValReport> {
         images,
         val,
         timing: ValTiming { total_s, per_image_ms },
-    })
+    };
+    let diagnostics = diag.map(|cfg| mock_diagnostics(&report, seed, cfg));
+    Ok((report, diagnostics))
+}
+
+fn mock_diagnostics(report: &ValReport, seed: u64, cfg: ValDiagConfig) -> ValDiagnostics {
+    let n = report.images.min(32) as usize;
+    let split = report.split.as_str();
+    let mut diags = Vec::with_capacity(n);
+    let (mut num_truths, mut num_preds, mut tp_all, mut fp_all, mut fn_all) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut loc_all, mut cls_all, mut dup_all, mut bg_all, mut failing) = (0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut f1_sum, mut iou_weighted) = (0.0f64, 0.0f64);
+    for i in 0..n {
+        let h = fnv1a(format!("{seed}:{split}:{i}").as_bytes());
+        let tp = ((h & 3) + 1) as u32;
+        let fn_count = ((h >> 2) % 3) as u32;
+        let loc = ((h >> 5) % 2) as u32;
+        let cls = ((h >> 7) % 2) as u32;
+        let dup = ((h >> 9) % 2) as u32;
+        let bg = ((h >> 11) % 2) as u32;
+        let fp = loc + cls + dup + bg;
+        let truths = tp + fn_count;
+        let preds = tp + fp;
+        let f1 = if 2 * tp + fp + fn_count == 0 {
+            1.0
+        } else {
+            (2.0 * tp as f32) / (2.0 * tp as f32 + fp as f32 + fn_count as f32)
+        };
+        let mean_tp_iou = if tp > 0 {
+            (cfg.tp_iou + (1.0 - cfg.tp_iou) * (0.4 + 0.4 * ((h >> 13) % 100) as f32 / 100.0)).min(0.99)
+        } else {
+            0.0
+        };
+        let d = ImageDiagnostics {
+            image_index: i as u64,
+            image_id: Some(format!("images/{split}/{split}_{i:04}.jpg")),
+            num_truths: truths,
+            num_preds: preds,
+            tp,
+            fp,
+            fn_count,
+            localization_errors: loc,
+            class_confusions: cls,
+            duplicate_errors: dup,
+            background_fp: bg,
+            f1,
+            mean_tp_iou,
+        };
+        num_truths += u64::from(d.num_truths);
+        num_preds += u64::from(d.num_preds);
+        tp_all += u64::from(d.tp);
+        fp_all += u64::from(d.fp);
+        fn_all += u64::from(d.fn_count);
+        loc_all += u64::from(d.localization_errors);
+        cls_all += u64::from(d.class_confusions);
+        dup_all += u64::from(d.duplicate_errors);
+        bg_all += u64::from(d.background_fp);
+        if d.total_errors() > 0 {
+            failing += 1;
+        }
+        f1_sum += f64::from(d.f1);
+        iou_weighted += f64::from(d.mean_tp_iou) * f64::from(d.tp);
+        diags.push(d);
+    }
+    let mean_f1 = if diags.is_empty() { 1.0 } else { (f1_sum / diags.len() as f64) as f32 };
+    let mean_tp_iou = if tp_all > 0 { (iou_weighted / tp_all as f64) as f32 } else { 0.0 };
+    ValDiagnostics {
+        conf: cfg.conf,
+        tp_iou: cfg.tp_iou,
+        bg_iou: cfg.bg_iou,
+        images_diagnosed: diags.len() as u64,
+        failing_images: failing,
+        summary: ValDiagnosticsSummary {
+            num_truths,
+            num_preds,
+            tp: tp_all,
+            fp: fp_all,
+            fn_count: fn_all,
+            localization_errors: loc_all,
+            class_confusions: cls_all,
+            duplicate_errors: dup_all,
+            background_fp: bg_all,
+            mean_f1,
+            mean_tp_iou,
+        },
+        worst_images: folo_vision::eval::worst_images(&diags, cfg.worst).into_iter().cloned().collect(),
+    }
 }

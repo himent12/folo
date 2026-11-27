@@ -39,6 +39,8 @@ fn features(st: &AppState) -> Vec<String> {
         folo_api::FEATURE_BENCHMARK,
         folo_api::FEATURE_RUN_CLI,
         crate::store::FEATURE_PREDICT_OPTIONS,
+        crate::store::FEATURE_VAL_DIAGNOSTICS,
+        crate::store::FEATURE_EXPORT_DYNAMIC_AXES,
     ];
     let labeling = st.store.labeler().is_ok();
     let optional = [

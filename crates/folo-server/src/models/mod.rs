@@ -30,7 +30,7 @@ use folo_api::ModelSource;
 use crate::engine::FileKey;
 use crate::error::{Error, Result};
 
-pub use eval::{EVAL_BATCH, check_val_params, val};
+pub use eval::{EVAL_BATCH, check_val_params, val_with_diagnostics};
 pub use export::onnx_export;
 pub use meta::{FileMeta, ModelRef, file_model_id, model_of};
 pub(crate) use meta::{gflops_640, read_meta};

@@ -8,14 +8,16 @@ use axum::http::StatusCode;
 use folo_api::{ModelEval, PrCurve, SplitFallback, ValReport, ValTiming};
 use folo_core::Device;
 use folo_data::{Dataset as _, Split};
-use folo_vision::NmsConfig;
+use folo_vision::eval::{ImageDiagnostics, diagnose_image, worst_images};
 use folo_vision::val::{ValConfig, val_metrics, validate};
+use folo_vision::{NmsConfig, Truth, Xyxy};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::{self, FileKey, engine_error};
 use crate::error::{Error, Result};
 use crate::index::write_atomic;
 use crate::runs::{DatasetRef, data_format};
+use crate::store::{ValDiagConfig, ValDiagnostics, ValDiagnosticsSummary, check_val_diag_config};
 use crate::util::Flight;
 
 use super::{BoundedCache, ModelRef, Models};
@@ -252,9 +254,10 @@ pub fn check_val_params(imgsz: Option<u32>, conf: f32, iou: f32) -> Result<()> {
 
 /// `POST /api/val`: validates the weights of `m` on `split` of `dataset` at `imgsz` (the model's own size when
 /// `None`) with NMS thresholds `conf` / `iou` (the rest of MODEL.md §8.7's validation settings), at `precision`
-/// (f16 only where the device computes in it).
+/// (f16 only where the device computes in it), with optional per-image detection error diagnostics
+/// (`folo_vision::eval::{diagnose_image, worst_images}`).
 #[allow(clippy::too_many_arguments)]
-pub fn val(
+pub fn val_with_diagnostics(
     m: &ModelRef,
     dataset: &DatasetRef,
     split: folo_api::Split,
@@ -263,8 +266,12 @@ pub fn val(
     iou: f32,
     device: Device,
     precision: folo_vision::Precision,
-) -> Result<ValReport> {
+    diag: Option<ValDiagConfig>,
+) -> Result<(ValReport, Option<ValDiagnostics>)> {
     check_val_params(imgsz, conf, iou)?;
+    if let Some(d) = &diag {
+        check_val_diag_config(d)?;
+    }
     let t0 = std::time::Instant::now();
     let model = engine::open_model(&m.path, device, precision)?;
     let ds = open_for(&model, dataset)?;
@@ -284,14 +291,16 @@ pub fn val(
     let imgsz = imgsz.unwrap_or(model.imgsz());
     let cfg = ValConfig {
         samples: 0,
+        keep_detections: diag.is_some(),
         nms: NmsConfig { conf, iou, ..NmsConfig::val() },
         ..ValConfig::new(imgsz, EVAL_BATCH)
     };
     let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
+    let diagnostics = diag.map(|d| compute_diagnostics(part, &ds.root, &r.detections, d));
     let images = r.report.num_images;
     let total_s = t0.elapsed().as_secs_f64();
     let per_image_ms = if images == 0 { 0.0 } else { r.seconds * 1e3 / images as f64 };
-    Ok(ValReport {
+    let report = ValReport {
         model_id: m.model.id.clone(),
         dataset_id: dataset.id.clone(),
         dataset_name: Some(dataset.name.clone()),
@@ -303,7 +312,95 @@ pub fn val(
             total_s: (total_s * 1000.0).round() / 1000.0,
             per_image_ms: (per_image_ms * 100.0).round() / 100.0,
         },
-    })
+    };
+    Ok((report, diagnostics))
+}
+
+fn compute_diagnostics(
+    part: &folo_data::FileDataset,
+    root: &Path,
+    detections: &[(usize, Vec<folo_vision::Detection>)],
+    cfg: ValDiagConfig,
+) -> ValDiagnostics {
+    let entries = part.entries();
+    let mut diags: Vec<ImageDiagnostics> = Vec::with_capacity(detections.len());
+    for (img_idx, preds) in detections {
+        let Some(entry) = entries.get(*img_idx) else {
+            continue;
+        };
+        let (w, h) = entry.size.or_else(|| folo_data::probe_size(&entry.image).ok()).unwrap_or((1, 1));
+        let (fw, fh) = (w as f32, h as f32);
+        let truths: Vec<Truth> = entry
+            .boxes
+            .iter()
+            .map(|b| {
+                let (cx, cy, hw, hh) = (b.cx * fw, b.cy * fh, b.w * fw * 0.5, b.h * fh * 0.5);
+                Truth { bbox: Xyxy::new(cx - hw, cy - hh, cx + hw, cy + hh), class: b.class }
+            })
+            .collect();
+        let id = folo_data::paths::relative_to(&entry.image, root);
+        diags.push(diagnose_image(
+            *img_idx as u64,
+            Some(id),
+            preds,
+            &truths,
+            cfg.conf,
+            cfg.tp_iou,
+            cfg.bg_iou,
+            false,
+        ));
+    }
+    let mut num_truths = 0u64;
+    let mut num_preds = 0u64;
+    let mut tp = 0u64;
+    let mut fp = 0u64;
+    let mut fn_count = 0u64;
+    let mut localization_errors = 0u64;
+    let mut class_confusions = 0u64;
+    let mut duplicate_errors = 0u64;
+    let mut background_fp = 0u64;
+    let mut failing_images = 0u64;
+    let mut f1_sum = 0.0f64;
+    let mut tp_iou_weighted = 0.0f64;
+    for d in &diags {
+        num_truths += u64::from(d.num_truths);
+        num_preds += u64::from(d.num_preds);
+        tp += u64::from(d.tp);
+        fp += u64::from(d.fp);
+        fn_count += u64::from(d.fn_count);
+        localization_errors += u64::from(d.localization_errors);
+        class_confusions += u64::from(d.class_confusions);
+        duplicate_errors += u64::from(d.duplicate_errors);
+        background_fp += u64::from(d.background_fp);
+        if d.total_errors() > 0 {
+            failing_images += 1;
+        }
+        f1_sum += f64::from(d.f1);
+        tp_iou_weighted += f64::from(d.mean_tp_iou) * f64::from(d.tp);
+    }
+    let mean_f1 = if diags.is_empty() { 1.0 } else { (f1_sum / diags.len() as f64) as f32 };
+    let mean_tp_iou = if tp > 0 { (tp_iou_weighted / tp as f64) as f32 } else { 0.0 };
+    ValDiagnostics {
+        conf: cfg.conf,
+        tp_iou: cfg.tp_iou,
+        bg_iou: cfg.bg_iou,
+        images_diagnosed: diags.len() as u64,
+        failing_images,
+        summary: ValDiagnosticsSummary {
+            num_truths,
+            num_preds,
+            tp,
+            fp,
+            fn_count,
+            localization_errors,
+            class_confusions,
+            duplicate_errors,
+            background_fp,
+            mean_f1,
+            mean_tp_iou,
+        },
+        worst_images: worst_images(&diags, cfg.worst).into_iter().cloned().collect(),
+    }
 }
 
 /// docs/API.md's `/eval` shape of an evaluation report: PR curves (class order, 101 recall points), the

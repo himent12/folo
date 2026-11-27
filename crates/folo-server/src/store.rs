@@ -21,6 +21,13 @@ use tokio::sync::broadcast;
 
 use crate::error::Result;
 
+#[path = "store_diag.rs"]
+mod diag;
+pub use diag::{
+    DEFAULT_VAL_DIAG_BG_IOU, DEFAULT_VAL_DIAG_CONF, DEFAULT_VAL_DIAG_TP_IOU, DEFAULT_VAL_DIAG_WORST,
+    DynamicAxes, FEATURE_EXPORT_DYNAMIC_AXES, FEATURE_VAL_DIAGNOSTICS, ImageDiagnostics, MAX_VAL_DIAG_WORST,
+    ValDiagConfig, ValDiagnostics, ValDiagnosticsSummary, check_export_axes, check_val_diag_config,
+};
 pub use folo_vision::tta::DEFAULT_TTA_SCALES;
 pub use folo_vision::{PredictOptions, TileConfig, TileMergeMetric, TtaConfig};
 
@@ -740,11 +747,42 @@ pub trait Store: Send + Sync + 'static {
     /// Runs inference on one image.
     fn predict(&self, input: PredictInput) -> Result<PredictResponse>;
 
+    /// Exports a model (`POST /api/models/{id}/export`), optionally with independent ONNX dynamic axes
+    /// (`dynamic_batch`, `dynamic_hw`). Uniform axes (`NONE` or `ALL`) delegate to [`Store::export_model`]; split
+    /// axes return `501 not_implemented` unless overridden.
+    fn export_model_with_axes(
+        &self,
+        id: &str,
+        mut spec: ExportSpec,
+        axes: DynamicAxes,
+    ) -> Result<ExportResult> {
+        check_export_axes(&spec, axes)?;
+        if axes.batch == axes.hw {
+            spec.onnx.dynamic = axes.batch;
+            return self.export_model(id, spec);
+        }
+        Err(crate::error::Error::not_implemented("split ONNX dynamic axes"))
+    }
+
     /// Evaluates a model on a dataset split (`POST /api/val`, the MCP `val` tool). Stores without an evaluator
     /// answer `501 not_implemented` (the default).
     fn val(&self, req: ValRequest) -> Result<ValReport> {
         let _ = req;
         Err(crate::error::Error::not_implemented("validation"))
+    }
+
+    /// Evaluates a model on a dataset split, optionally computing per-image error diagnostics. When `diag` is
+    /// `None`, delegates to [`Store::val`].
+    fn val_with_diagnostics(
+        &self,
+        req: ValRequest,
+        diag: Option<ValDiagConfig>,
+    ) -> Result<(ValReport, Option<ValDiagnostics>)> {
+        let Some(cfg) = diag else {
+            return self.val(req).map(|r| (r, None));
+        };
+        check_val_diag_config(&cfg)?;
+        Err(crate::error::Error::not_implemented("validation diagnostics"))
     }
 
     /// Starts an upload session (`POST /api/uploads`), or answers with what an earlier upload with the same
@@ -875,98 +913,5 @@ fn not_cloud() -> crate::error::Error {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use folo_api::{DatasetIssue, IssueSeverity};
-
-    #[test]
-    fn issue_query_page_counts_and_pages_in_one_pass() {
-        let make = |kind: &str, severity: IssueSeverity, file: &str| DatasetIssue {
-            kind: kind.into(),
-            severity,
-            file: file.into(),
-            line: None,
-            message: String::new(),
-            fix: None,
-        };
-        let all = [
-            make("broken_label", IssueSeverity::Error, "a.txt"),
-            make("clipped_box", IssueSeverity::Warning, "b.txt"),
-            make("clipped_box", IssueSeverity::Warning, "c.txt"),
-            make("clipped_box", IssueSeverity::Warning, "d.txt"),
-            make("empty_image", IssueSeverity::Info, "e.jpg"),
-        ];
-        // Wrap in a non-`Clone` iterator to prove single-pass consumption.
-        let mut idx = 0usize;
-        let iter = std::iter::from_fn(|| {
-            let item = all.get(idx)?;
-            idx += 1;
-            Some(item)
-        });
-        let q = IssueQuery {
-            kind: Some("clipped_box".into()),
-            severity: Some(IssueSeverity::Warning),
-            offset: 1,
-            limit: 1,
-        };
-        let page = q.page(iter);
-        assert_eq!(idx, all.len(), "consumed every issue once");
-        assert_eq!(page.total, 3);
-        assert_eq!(page.issues.len(), 1);
-        assert_eq!(page.issues[0].file, "c.txt");
-        assert_eq!((page.counts.error, page.counts.warning, page.counts.info), (1, 3, 1));
-        assert_eq!(page.counts.by_kind.get("broken_label"), Some(&1));
-        assert_eq!(page.counts.by_kind.get("clipped_box"), Some(&3));
-        assert_eq!(page.counts.by_kind.get("empty_image"), Some(&1));
-    }
-
-    #[test]
-    fn check_predict_workload_caps_tile_count_and_crop_bytes() {
-        // High tile count rejected.
-        let many = PredictOptions {
-            tile: Some(TileConfig {
-                tile_width: 32,
-                tile_height: 32,
-                overlap_x: 0.0,
-                overlap_y: 0.0,
-                ..Default::default()
-            }),
-            tta: None,
-        };
-        assert_eq!(
-            check_predict_workload(&many, 640, Some((640, 640))).unwrap_err().body.code,
-            "invalid_config"
-        );
-
-        // Large overlapping crops with high tile_batch exceed MAX_PREDICT_CROP_BYTES (256 MiB):
-        // 8192x8192 with 4096x4096 tiles at 0.5 overlap -> 3x3 = 9 tiles; 9 * 4096 * 4096 * 3 = 432 MiB.
-        let heavy = PredictOptions {
-            tile: Some(TileConfig {
-                tile_width: 4096,
-                tile_height: 4096,
-                overlap_x: 0.5,
-                overlap_y: 0.5,
-                tile_batch: 9,
-                ..Default::default()
-            }),
-            tta: None,
-        };
-        let err = check_predict_workload(&heavy, 640, Some((8192, 8192))).unwrap_err();
-        assert_eq!(err.body.code, "invalid_config");
-        assert!(err.body.message.contains("MiB"), "{}", err.body.message);
-
-        // Reducing tile_batch to 4 keeps peak chunk bytes at 192 MiB <= 256 MiB.
-        let bounded = PredictOptions {
-            tile: Some(TileConfig {
-                tile_width: 4096,
-                tile_height: 4096,
-                overlap_x: 0.5,
-                overlap_y: 0.5,
-                tile_batch: 4,
-                ..Default::default()
-            }),
-            tta: None,
-        };
-        check_predict_workload(&bounded, 640, Some((8192, 8192))).unwrap();
-    }
-}
+#[path = "store_tests.rs"]
+mod tests;
