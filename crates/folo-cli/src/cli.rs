@@ -84,7 +84,7 @@ pub struct ServeArgs {
     /// Address to bind.
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
-    /// Port to bind (0 picks a free one).
+    /// Port to bind [0..=65535] (0 picks a free one).
     #[arg(long, default_value_t = 7878)]
     pub port: u16,
     /// Built web app folder to serve (with SPA fallback to index.html) [default: the Studio embedded in this binary

@@ -13,9 +13,29 @@ use serde_json::{Value, json};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
-/// A client of the worker at `url` with its `token`.
-pub(crate) fn client(url: &str, token: &str) -> Client {
-    Client::with_timeouts(url, CONNECT_TIMEOUT, REQUEST_TIMEOUT).token(token)
+/// A client of the worker at `url` with its `token`. When `use_tls_ca` is true (a user-managed `remote` worker)
+/// and `url` uses `https://`, honors `FOLO_TLS_CA` if set.
+pub(crate) fn client(url: &str, token: &str, use_tls_ca: bool) -> Result<Client, String> {
+    client_with_ca_var(url, token, use_tls_ca, std::env::var_os(folo_cloud::TLS_CA_ENV).as_deref())
+}
+
+fn client_with_ca_var(
+    url: &str,
+    token: &str,
+    use_tls_ca: bool,
+    raw_ca: Option<&std::ffi::OsStr>,
+) -> Result<Client, String> {
+    let is_https = url.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://"));
+    let tls_ca = if use_tls_ca && is_https {
+        folo_cloud::tls_ca_from_os(raw_ca).map_err(|e| e.message)?
+    } else {
+        None
+    };
+    let client = match tls_ca.as_ref() {
+        Some(ca) => Client::with_tls_ca(url, CONNECT_TIMEOUT, REQUEST_TIMEOUT, ca),
+        None => Client::with_timeouts(url, CONNECT_TIMEOUT, REQUEST_TIMEOUT),
+    };
+    Ok(client.token(token))
 }
 
 /// Why the worker described by `system` (running FOLO `version`) cannot train the run, if it cannot: it lacks a
@@ -141,5 +161,37 @@ mod tests {
         );
         let amp = check(&system(&all, "gpu:0", false), "0.1.0", true, true).unwrap_err();
         assert!(amp.contains("mixed precision") && amp.contains("no tensor cores"), "{amp}");
+    }
+
+    #[test]
+    fn worker_client_applies_tls_ca_only_to_https_remote_workers() {
+        use std::ffi::OsStr;
+        let dir = folo_test_support::TestDir::new("worker-client-tls-ca");
+        let missing = dir.join("missing-ca.pem");
+        let bad = dir.join("bad-ca.pem");
+        std::fs::write(&bad, "not valid pem").unwrap();
+
+        // Provisioned workers (`use_tls_ca = false`, e.g. RunPod) ignore `FOLO_TLS_CA` even on `https://`.
+        assert!(
+            client_with_ca_var("https://pod-7878.proxy.runpod.net", "tok", false, Some(missing.as_os_str()))
+                .is_ok()
+        );
+        assert!(
+            client_with_ca_var("https://pod-7878.proxy.runpod.net", "tok", false, Some(bad.as_os_str()))
+                .is_ok()
+        );
+
+        // Plain `http://` remote workers ignore `FOLO_TLS_CA`.
+        assert!(client_with_ca_var("http://127.0.0.1:7878", "tok", true, Some(missing.as_os_str())).is_ok());
+
+        // `https://` / `HTTPS://` remote workers accept unset/empty and reject missing/malformed `FOLO_TLS_CA`.
+        assert!(client_with_ca_var("https://127.0.0.1:7878", "tok", true, None).is_ok());
+        assert!(client_with_ca_var("https://127.0.0.1:7878", "tok", true, Some(OsStr::new(""))).is_ok());
+        let err =
+            client_with_ca_var("HTTPS://127.0.0.1:7878", "tok", true, Some(missing.as_os_str())).unwrap_err();
+        assert!(err.contains(folo_cloud::TLS_CA_ENV), "{err}");
+        let err =
+            client_with_ca_var("https://127.0.0.1:7878", "tok", true, Some(bad.as_os_str())).unwrap_err();
+        assert!(err.contains(folo_cloud::TLS_CA_ENV), "{err}");
     }
 }

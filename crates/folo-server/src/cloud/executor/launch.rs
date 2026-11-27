@@ -45,15 +45,16 @@ impl Exec {
         if phase < CloudPhase::Training {
             return Err(Halt::Interrupted(phase));
         }
-        let token = match self.c.provider.fixed_endpoint(&self.c.connection.values()) {
-            Some(e) => e.token,
-            None => self.private.token.clone().unwrap_or_default(),
+        let (token, use_tls_ca) = match self.c.provider.fixed_endpoint(&self.c.connection.values()) {
+            Some(e) => (e.token, true),
+            None => (self.private.token.clone().unwrap_or_default(), false),
         };
         self.entry.log(
             LogLevel::Info,
             "this server restarted: following the run on its worker again and fetching what it missed",
         );
-        self.train(&worker::client(&url, &token))
+        let client = worker::client(&url, &token, use_tls_ca).map_err(|e| failed("cloud_boot_failed", e))?;
+        self.train(&client)
     }
 
     /// The local dataset, opened as the local trainer opens it, before anything is rented.
@@ -220,7 +221,7 @@ impl Exec {
                 ),
             );
         }
-        let client = worker::client(&url, &token);
+        let client = worker::client(&url, &token, !provisioned).map_err(boot_failed)?;
         let mut asked = Instant::now();
         let (health, system) = loop {
             self.interrupted()?;

@@ -285,6 +285,9 @@ pub const LABEL_VIEW_SIZE: NumericBounds = NumericBounds::int_range(256, 1568);
 /// `folo label export --val-fraction`.
 pub const LABEL_VAL_FRACTION: NumericBounds = NumericBounds::float_range(0.0, true, 0.5, true);
 
+/// `folo serve --port` (`0..=65535`; `0` picks a free port).
+pub const SERVE_PORT: NumericBounds = NumericBounds::int_range(0, u16::MAX as u64);
+
 /// `folo bench create --max-images`.
 pub const BENCH_MAX_IMAGES: NumericBounds = NumericBounds::int_range(1, 5000);
 /// `folo bench create --seed` (exact JS safe integer limit `2^53 - 1`, matching `folo_server::bench::MAX_SEED`).
@@ -292,6 +295,8 @@ pub const BENCH_SEED: NumericBounds = NumericBounds::int_range(0, (1u64 << 53) -
 
 /// Validated numeric bounds for CLI arguments, keyed by `(command_path, arg_id)`.
 pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
+    // `folo serve`
+    ("folo serve", "port", SERVE_PORT),
     // `folo train`
     ("folo train", "epochs", TRAIN_EPOCHS),
     ("folo train", "batch", TRAIN_BATCH),
@@ -349,6 +354,19 @@ pub const ARG_BOUNDS: &[(&str, &str, NumericBounds)] = &[
 /// Looks up the validated numeric bounds for `(cmd_path, arg_id)`, if any.
 pub fn for_arg(cmd_path: &str, arg_id: &str) -> Option<NumericBounds> {
     ARG_BOUNDS.iter().find(|&&(p, a, _)| p == cmd_path && a == arg_id).map(|&(_, _, b)| b)
+}
+
+/// Peer arguments unconditionally required whenever an argument is supplied, keyed by `(command_path, arg_id)`.
+///
+/// `clap` enforces these via `#[arg(requires = ...)]`, but `clap_builder` does not expose a public `requires`
+/// getter for reflection, so `folo describe` reads this table and unit tests verify every entry against the real
+/// clap parser.
+pub const ARG_REQUIRES: &[(&str, &str, &[&str])] =
+    &[("folo serve", "tls_cert", &["tls_key"]), ("folo serve", "tls_key", &["tls_cert"])];
+
+/// Looks up the peer argument ids required whenever `(cmd_path, arg_id)` is supplied.
+pub fn required_args(cmd_path: &str, arg_id: &str) -> &'static [&'static str] {
+    ARG_REQUIRES.iter().find(|&&(p, a, _)| p == cmd_path && a == arg_id).map_or(&[], |&(_, _, reqs)| reqs)
 }
 
 #[cfg(test)]

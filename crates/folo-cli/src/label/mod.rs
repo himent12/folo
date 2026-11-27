@@ -197,7 +197,10 @@ pub(crate) fn paths(paths: &[String], remote: bool) -> Result<Vec<String>, CliEr
 /// The jobs of `conn`; `store`: in this process, open the whole store (for its dataset registry), not only the
 /// labeler.
 fn open(conn: &LabelServerArgs, store: bool) -> Result<Session, CliError> {
-    let http = |url: &str| Labels::Http(Arc::new(HttpStore::new(url, conn.token.as_deref())));
+    let tls_ca = serve_lock::load_tls_ca(conn.tls_ca.as_deref())?;
+    let http = |url: &str| {
+        Labels::Http(Arc::new(HttpStore::with_tls_ca(url, conn.token.as_deref(), tls_ca.as_ref())))
+    };
     if let Some(url) = &conn.server {
         if let Err(why) = folo_client::check_base_url(url) {
             return Err(usage(format!(
@@ -218,7 +221,7 @@ fn open(conn: &LabelServerArgs, store: bool) -> Result<Session, CliError> {
             Ok(Session { labels, local: Some(lock), data_dir })
         }
         Ok(Acquire::InUse { url: Some(url) })
-            if serve_lock::serves(&url, &data_dir, conn.token.as_deref(), None) =>
+            if serve_lock::serves(&url, &data_dir, conn.token.as_deref(), tls_ca.as_ref()) =>
         {
             Ok(Session { labels: http(&url), local: None, data_dir })
         }
@@ -669,8 +672,12 @@ mod tests {
 
     #[test]
     fn export_and_start_validate_bounds_upfront_without_network_io() {
-        let unreachable =
-            || LabelServerArgs { data_dir: None, server: Some("http://127.0.0.1:9".into()), token: None };
+        let unreachable = || LabelServerArgs {
+            data_dir: None,
+            server: Some("http://127.0.0.1:9".into()),
+            token: None,
+            tls_ca: None,
+        };
         let out = Out { json: true };
 
         for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.1, 0.51] {

@@ -96,6 +96,20 @@ fn arg_conflicts(cmd: &Command, arg: &Arg) -> Vec<String> {
     out.into_iter().collect()
 }
 
+/// Peer arguments that must be supplied whenever `arg` is given on `cmd`.
+fn arg_requires(cmd: &Command, cmd_path: &str, arg: &Arg) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    let self_id = arg.get_id();
+    for &req_id in crate::cli::bounds::required_args(cmd_path, self_id.as_str()) {
+        if let Some(other) =
+            cmd.get_arguments().find(|a| a.get_id() == req_id && !a.is_hide_set() && a.get_id() != self_id)
+        {
+            out.insert(arg_label(other));
+        }
+    }
+    out.into_iter().collect()
+}
+
 fn describe_group(cmd: &Command, group: &ArgGroup) -> Value {
     let args: Vec<String> = group
         .get_args()
@@ -152,6 +166,7 @@ fn describe_arg(cmd: &Command, cmd_path: &str, arg: &Arg) -> Value {
         "bounds": bounds,
         "env": arg.get_env().map(|e| e.to_string_lossy().into_owned()),
         "conflicts_with": arg_conflicts(cmd, arg),
+        "requires": arg_requires(cmd, cmd_path, arg),
         "help": styled(arg.get_help()),
     })
 }

@@ -37,6 +37,25 @@ pub const WORKER_BASE_URL_ENV: &str = "FOLO_CLOUD_WORKER_BASE_URL";
 /// The connection field with the same job as [`WORKER_BASE_URL_ENV`], for one connection.
 pub const WORKER_BASE_URL_FIELD: &str = "worker_base_url";
 
+/// Custom PEM CA certificate file for `https://` `remote` workers (self-signed or private CA).
+pub const TLS_CA_ENV: &str = "FOLO_TLS_CA";
+
+/// Reads and validates the custom PEM CA bundle from [`TLS_CA_ENV`], if set and non-empty.
+pub fn tls_ca_from_env() -> Result<Option<folo_client::TlsCa>> {
+    tls_ca_from_os(std::env::var_os(TLS_CA_ENV).as_deref())
+}
+
+/// Reads and validates the custom PEM CA bundle from an environment value (`None` or empty means unset).
+pub fn tls_ca_from_os(raw: Option<&std::ffi::OsStr>) -> Result<Option<folo_client::TlsCa>> {
+    let Some(raw) = raw else { return Ok(None) };
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    folo_client::TlsCa::from_file(std::path::Path::new(raw))
+        .map(Some)
+        .map_err(|e| Error::new(ErrorKind::Invalid, format!("{TLS_CA_ENV}: {e}")))
+}
+
 /// Where a worker of this FOLO version downloads `install.sh` and `folo-<target>.tar.gz` from: the connection's
 /// `worker_base_url`, else `$FOLO_CLOUD_WORKER_BASE_URL`, else the GitHub release of `version` (the version of the
 /// control plane, so both ends speak the same API). Without a trailing slash.
@@ -547,5 +566,23 @@ mod tests {
                 "raw=[redacted] upper=[redacted] lower=[redacted] mixed=[redacted] other={wrong_case_cred} short=1234567"
             )
         );
+    }
+
+    #[test]
+    fn tls_ca_var_handles_unset_empty_missing_and_malformed_paths() {
+        use std::ffi::OsStr;
+        assert!(tls_ca_from_os(None).unwrap().is_none());
+        assert!(tls_ca_from_os(Some(OsStr::new(""))).unwrap().is_none());
+        let dir = folo_test_support::TestDir::new("cloud-tls-ca-var");
+        let missing = dir.join("missing.pem");
+        let err = tls_ca_from_os(Some(missing.as_os_str())).unwrap_err();
+        assert_eq!((err.kind, err.code()), (ErrorKind::Invalid, "invalid_body"));
+        assert!(err.message.contains(TLS_CA_ENV), "{}", err.message);
+
+        let bad = dir.join("bad.pem");
+        std::fs::write(&bad, "not pem").unwrap();
+        let err = tls_ca_from_os(Some(bad.as_os_str())).unwrap_err();
+        assert_eq!((err.kind, err.code()), (ErrorKind::Invalid, "invalid_body"));
+        assert!(err.message.contains(TLS_CA_ENV), "{}", err.message);
     }
 }

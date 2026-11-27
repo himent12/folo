@@ -248,11 +248,17 @@ serve HTTPS natively).
 - **Credentials**: its `url` (required) and `token` (optional; required when the remote server runs with `--token` /
   `FOLO_TOKEN`). `url` must start with `https://` or `http://`, contain no embedded `user:password@`, no query string
   or `#fragment`, and no spaces or control characters. Use `https://` across networks you do not control (serve TLS
-  natively with `--tls-cert` / `--tls-key`, or put the server behind a TLS proxy or a tunnel); `http://` is accepted,
-  with a warning in the connection's `note` unless the host is `localhost`, loopback (`127.0.0.0/8`, `::1`), RFC 1918
-  private IPv4, IPv4 link-local, or IPv6 unique-local (`fc00::/7`) / link-local (`fe80::/10`). Pointing an `https://`
-  URL at a plain-HTTP `folo serve` fails the TLS handshake with a clear hint to use `http://`, enable `--tls-cert` /
-  `--tls-key`, or add a TLS proxy.
+  natively with `--tls-cert` / `--tls-key`, or put the server behind a TLS proxy or a tunnel); for self-signed or
+  private-CA `https://` workers, set `FOLO_TLS_CA=<ca.pem>` in the control plane's environment (honored by `folo cloud`
+  and by `folo serve` when running jobs on `remote` workers). When `FOLO_TLS_CA` is set, it replaces the bundled web
+  PKI roots for every `https://` `remote` connection in that process, so if you connect to both private-CA and publicly
+  signed `remote` workers from the same control plane, include all required CA roots in that PEM bundle (provisioned
+  RunPod workers continue to use the bundled public roots).
+  `http://` is accepted, with a warning in the connection's `note` unless the host is `localhost`, loopback
+  (`127.0.0.0/8`, `::1`), RFC 1918 private IPv4, IPv4 link-local, or IPv6 unique-local (`fc00::/7`) / link-local
+  (`fe80::/10`). Scheme and certificate mismatches fail with actionable hints: `https://` against a plain-HTTP
+  `folo serve` recommends `http://` or enabling TLS, `http://` against a TLS `folo serve` recommends `https://`, and
+  untrusted certificates point to `FOLO_TLS_CA`.
 - **Offers**: one offer — id `"gpu"` for the GPU `device: auto` selects, or `"cpu"` when the remote server has no
   usable GPU — with no price.
 - No instance is launched or terminated; runs wait in that server's own queue. What a run leaves there stays
@@ -347,7 +353,7 @@ folo cloud check cc_9b1c               # re-verify reachability, token and worke
 |---|---|---|
 | `cloud_auth_failed` (`422`) | Invalid/revoked RunPod API key, key missing pod read+write permissions, or wrong/missing `--token` on a `remote` server. | For RunPod, verify key permissions in RunPod Console → Settings → API Keys; for `remote`, verify `--token` / `FOLO_TOKEN`. Re-test with `folo cloud check <id>`. |
 | `cloud_refused` (`409`) | RunPod out of stock (`low` stock often means none), low account balance (`402`), account pool restriction (`403`), or a `remote` server too old (missing `uploads`, `run_cursors` or `run_checkpoint`). | Pick another offer (`folo cloud offers <id>`), top up balance, or upgrade the `remote` `folo` binary. |
-| `cloud_unavailable` (`502`) | Provider API unreachable, or `remote` server down / wrong scheme (`https://` against a plain-HTTP `folo serve`). | Check network / server status. If the message notes plain HTTP on `https://`, switch to `http://` (on a private network) or add a TLS proxy. |
+| `cloud_unavailable` (`502`) | Provider API unreachable, or `remote` server down, scheme mismatch (`https://` against plain HTTP or `http://` against TLS), or untrusted self-signed / private-CA certificate. | Check network / server status. Follow the scheme hint (`http://` vs `https://`), or set `FOLO_TLS_CA=<ca.pem>` for a self-signed or private-CA `remote` server. |
 | `cloud_boot_failed` (`502`) | Worker download URL answered `404` (unpublished dev version or private repo, checked before renting), pod failed setup and self-terminated, worker lacked a usable Vulkan GPU (`llvmpipe` / no adapter), or `amp: true` requested without tensor cores. | For dev builds, set `worker_base_url` or `FOLO_CLOUD_WORKER_BASE_URL` to a hosted `install.sh` + archive; check the pod log in RunPod's console; for `amp` on a `remote` server, start it with `--tensor-cores`. |
 | `cloud_sync_failed` (`502`) | Dataset/weights upload or final weight download failed after retries while the instance was still alive (e.g. prolonged network outage or worker disk full). | Check `compute.disk_gb` and link stability, then resume (`resume_run_id`) or start again; `remote` servers reuse already-uploaded fingerprinted datasets. |
 | `cloud_instance_lost` (`502`) | Instance was terminated by hand, stopped/disappeared for 10 min (`lost_grace`), `remote` worker was unreachable for 10 min, or worker restarted and lost the run (`run_not_found`). | Checkpoints already synced to `runs/<id>/weights/last.folo` stay on disk. Resume the run (`resume_run_id`) on a new instance or locally (`"compute": null`). |

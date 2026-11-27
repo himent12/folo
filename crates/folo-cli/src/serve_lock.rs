@@ -8,6 +8,30 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
+use crate::output::{CliError, ExitCode};
+
+/// Validates `--tls-ca` / `FOLO_TLS_CA` upfront (before touching the data dir or acquiring `serve.lock`), returning
+/// `usage` (exit 2) for an empty path or unreadable/malformed PEM and `path_not_found` (exit 3) when the file does
+/// not exist.
+pub(crate) fn load_tls_ca(path: Option<&Path>) -> Result<Option<folo_client::TlsCa>, CliError> {
+    match path {
+        Some(ca) if ca.as_os_str().is_empty() => {
+            Err(CliError::new(ExitCode::Usage, "usage", "--tls-ca must not be empty")
+                .hint("pass the path to a PEM CA certificate file to --tls-ca (or FOLO_TLS_CA)"))
+        }
+        Some(ca) => folo_client::TlsCa::from_file(ca).map(Some).map_err(|e| {
+            let (exit, code) = if e.is_not_found() {
+                (ExitCode::NotFound, "path_not_found")
+            } else {
+                (ExitCode::Usage, "usage")
+            };
+            CliError::new(exit, code, e.to_string())
+                .hint("pass a readable PEM X.509 CA certificate file to --tls-ca (or FOLO_TLS_CA)")
+        }),
+        None => Ok(None),
+    }
+}
+
 /// The local URL another process on this machine can connect to for a listener bound to `addr`: unspecified
 /// wildcard hosts (`0.0.0.0`, `::`) become loopback (`127.0.0.1`, `[::1]`) because connecting to a wildcard
 /// address fails on Windows (`WSAEADDRNOTAVAIL`). Specific binds, including scoped IPv6 addresses, are
