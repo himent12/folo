@@ -502,6 +502,7 @@ describe('Settings › Throughput', () => {
   it('clears the previous server’s System, GPU memory, and Throughput panels after switching to a refused server (playtest R17)', async () => {
     vi.useFakeTimers();
     const prevUrl = prefs.serverUrl;
+    const prevApi = hub.api;
     const mockA = new MockApi('normal', 0);
     const sysA = await mockA.system();
     const tpA = await mockA.throughput();
@@ -552,6 +553,7 @@ describe('Settings › Throughput', () => {
       expect(target.querySelector('#diagnostics')?.textContent).toContain('Not loaded');
     } finally {
       prefs.serverUrl = prevUrl;
+      hub.api = prevApi;
       vi.unstubAllGlobals();
       vi.useRealTimers();
       hub.mode = 'mock';

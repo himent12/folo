@@ -24,7 +24,7 @@ import Input from '$lib/ui/Input';
 import Menu, { type MenuItem } from '$lib/ui/Menu';
 import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
-import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
+import { isDisconnected, OFFLINE_REASON } from '$lib/ui/offline';
 import Panel from '$lib/ui/Panel';
 import { rowNav } from '$lib/ui/rowNav';
 import Segmented from '$lib/ui/Segmented';
@@ -203,7 +203,7 @@ export default function Benchmarks() {
       .filter(Boolean);
   });
 
-  const offline = computed(() => !benches.data && isOffline(benches.error));
+  const offline = computed(() => !benches.data && isDisconnected(benches.error));
   const hasData = computed(() => (benches.data ? benches.data.length > 0 : !benches.error));
   const hasRows = computed(() => (benches.data ? shown.get().length > 0 : !benches.error));
   const canExport = computed(() => !unavailable.get() && !!benches.data && shown.get().length > 0);

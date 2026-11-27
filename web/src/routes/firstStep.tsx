@@ -2,6 +2,7 @@
 // at all, Add dataset (a run trains on one, and New run would only land on "Add a dataset first"); else New run.
 import Plus from '$icons/plus';
 import { effect, untrack } from 'fw';
+import { hub } from '$lib/api/index';
 import type { Dataset } from '$lib/api/types';
 import { href } from '$lib/router';
 import Button from '$lib/ui/Button';
@@ -29,7 +30,7 @@ export function refreshOnDatasetChange(datasets: { refresh(): Promise<void> }): 
     const back = () => {
       // Also while the first read is still out: this read supersedes it (an answer from before the tab was hidden
       // would otherwise land last, and nothing would read the list again).
-      if (document.visibilityState === 'visible') void datasets.refresh();
+      if (document.visibilityState === 'visible' && hub.mode !== 'connecting') void datasets.refresh();
     };
     document.addEventListener('visibilitychange', back);
     return () => document.removeEventListener('visibilitychange', back);

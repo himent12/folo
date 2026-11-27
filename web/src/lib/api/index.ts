@@ -177,6 +177,7 @@ class Hub {
     return this.#shared.get();
   }
   set api(v: Api) {
+    this.#target = null;
     this.#api.set(unshare(v));
   }
   /**
@@ -217,7 +218,7 @@ class Hub {
    * in its initial grace window or once connected.
    */
   #connectError = computed<ApiError | null>(() => {
-    if (this.#mode.get() !== 'connecting' || !this.#unreachable.get()) return null;
+    if (forcedMock || this.#mode.get() !== 'connecting' || !this.#unreachable.get()) return null;
     const refused = this.#refused.get();
     if (refused) return new ApiError(0, 'connect_refused', refused);
     return new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');

@@ -19,7 +19,7 @@ import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
 import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
-import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
+import { isDisconnected, OFFLINE_REASON } from '$lib/ui/offline';
 import Panel from '$lib/ui/Panel';
 import Progress from '$lib/ui/Progress';
 import { rowNav } from '$lib/ui/rowNav';
@@ -148,7 +148,7 @@ export default function LabelJobs() {
     labeled: shown.get().reduce((a, j) => a + j.counts.labeled, 0),
   }));
 
-  const offline = computed(() => !jobs.data && isOffline(jobs.error));
+  const offline = computed(() => !jobs.data && isDisconnected(jobs.error));
   const hasData = computed(() => (jobs.data ? jobs.data.length > 0 : !jobs.error));
   const hasRows = computed(() => (jobs.data ? shown.get().length > 0 : !jobs.error));
   const phone = new MediaQuery(media.phone, false);

@@ -238,7 +238,7 @@ export default function Overview() {
         // Nothing loaded and every request failed: one recovery block (Retry, Connection settings) in the frame the live
         // card would fill, the page's focal slot, never four panels each saying the server has not answered and never a
         // frameless block in the corner of an empty canvas (DESIGN_DIRECTION §2.8).
-        <div class="live">
+        <div class="live" ref={(e) => (liveEl = e)} onfocusin={onLiveFocusIn} onfocusout={onLiveFocusOut}>
           <Panel title="Training">
             <ErrorState error={runs.error} retry={retryAll} title="Could not load the overview" compact />
           </Panel>

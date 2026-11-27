@@ -638,14 +638,18 @@ describe('Overview', () => {
     const actions = [...target.querySelectorAll('.live .err .acts button, .live .err .acts a')].map((el) => el.textContent?.trim());
     expect(actions).toEqual(['Retry', 'Connection settings']);
 
-    // Once the server drops --token, clicking Retry reconnects and loads Overview.
+    // Once the server drops --token, focusing and clicking Retry hands focus cleanly off the unmounting button and loads Overview.
     needsToken = false;
-    target.querySelector<HTMLButtonElement>('.live .err .acts button')!.click();
+    const retryBtn = target.querySelector<HTMLButtonElement>('.live .err .acts button')!;
+    retryBtn.focus();
+    retryBtn.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    retryBtn.click();
     await vi.advanceTimersByTimeAsync(0);
     await vi.waitFor(() => {
       flush();
       expect(hub.mode).toBe('live');
       expect(target.querySelector('.live .err')).toBeNull();
     });
+    expect(document.activeElement).not.toBe(document.body);
   });
 });

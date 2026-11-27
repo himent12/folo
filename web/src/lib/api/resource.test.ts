@@ -248,4 +248,80 @@ describe('Resource', () => {
       stop();
     }
   });
+
+  it('does not restart hub.connect() from background refresh() while holding same-server data or probing', async () => {
+    let r!: Resource<string>;
+    const stop = root(() => {
+      r = new Resource(() => Promise.resolve('server A'));
+    });
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.data).toBe('server A');
+
+    const connectSpy = vi.spyOn(hub, 'connect').mockResolvedValue(undefined);
+    const errSpy = vi.spyOn(hub, 'connectError', 'get').mockReturnValue(new Error('offline') as never);
+    try {
+      // Same-server reconnect: data is still shown, so background polls/visibility refreshes must NOT abort hub.connect().
+      hub.mode = 'connecting';
+      flushSync();
+      expect(r.data).toBe('server A');
+      await r.refresh();
+      expect(connectSpy).not.toHaveBeenCalled();
+
+      // New-server switch while actively probing (connectError === null): refresh() must NOT abort the in-flight handshake.
+      errSpy.mockReturnValue(null);
+      hub.epoch++;
+      flushSync();
+      expect([r.data, r.loading, r.refreshing]).toEqual([undefined, true, false]);
+      await r.refresh();
+      expect(connectSpy).not.toHaveBeenCalled();
+    } finally {
+      errSpy.mockRestore();
+      connectSpy.mockRestore();
+      hub.mode = 'mock';
+      stop();
+    }
+  });
+
+  it('clears stale connectError when startFrom lends data after reconnecting, and resets refreshing on epoch switch', async () => {
+    const refused = new Error('token required');
+    let err: Error | null = refused;
+    const errSpy = vi.spyOn(hub, 'connectError', 'get').mockImplementation(() => err as never);
+    let source!: Resource<string>;
+    let follower!: Resource<string>;
+    const pending = deferred<string>();
+    let firstCall = true;
+    const stop = root(() => {
+      source = new Resource(() => (firstCall ? ((firstCall = false), Promise.resolve('live data')) : pending.promise));
+      follower = new Resource(() => Promise.resolve('fallback'), { startFrom: () => source });
+    });
+    try {
+      hub.mode = 'connecting';
+      flushSync();
+      expect(follower.error).toBe(refused);
+      expect(follower.loading).toBe(false);
+
+      // Reconnect succeeds: source commits fresh data, follower lends it via startFrom and must clear stale connectError.
+      err = null;
+      hub.mode = 'mock';
+      flushSync();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(source.data).toBe('live data');
+      expect(follower.data).toBe('live data');
+      expect(follower.error).toBeUndefined();
+      expect(follower.loading).toBe(false);
+
+      // Start a quiet background refresh on source, then switch server (epoch++ while connecting): refreshing must reset.
+      void source.refresh();
+      expect(source.refreshing).toBe(true);
+      hub.mode = 'connecting';
+      hub.epoch++;
+      flushSync();
+      expect([source.data, source.refreshing]).toEqual([undefined, false]);
+    } finally {
+      errSpy.mockRestore();
+      hub.mode = 'mock';
+      stop();
+    }
+  });
 });

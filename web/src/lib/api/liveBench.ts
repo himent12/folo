@@ -143,7 +143,16 @@ export class LiveBench {
         resetView();
         return;
       }
-      if (hub.mode === 'connecting') return;
+      if (hub.mode === 'connecting') {
+        const err = hub.connectError;
+        untrack(() => {
+          if (this.bench === undefined) {
+            this.error = err ?? undefined;
+            this.loading = err === null;
+          }
+        });
+        return;
+      }
       if (lacksBench.get()) {
         resetView();
         return;
@@ -342,6 +351,10 @@ export class LiveBench {
 
   /** Loads again from scratch (after a load error). */
   retry() {
+    if (hub.mode === 'connecting') {
+      if (hub.connectError !== null) void hub.connect();
+      return;
+    }
     this.#retry.set((n) => n + 1);
   }
 

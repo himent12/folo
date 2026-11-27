@@ -12,7 +12,7 @@ import { isOom, oomDetail } from '$lib/oom';
 import { href } from '$lib/router';
 import Button from './Button';
 import CodeText from './CodeText';
-import { isOffline } from './offline';
+import { isConnectRefused, isOffline } from './offline';
 import { forAgents, userHint } from './toast';
 
 /**
@@ -98,7 +98,7 @@ export interface ErrorStateProps {
 export default function ErrorState(props: ErrorStateProps) {
   // Connection failures look the same everywhere: what was tried, and both ways out (retry, settings).
   const offline = computed(() => isOffline(props.error));
-  const connectRefused = computed(() => props.error instanceof ApiError && props.error.code === 'connect_refused');
+  const connectRefused = computed(() => isConnectRefused(props.error));
   const gone = computed(() => goneOf(props.error));
   const heading = computed(() => {
     const g = gone.get();

@@ -27,7 +27,7 @@ import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import Skeleton from '$lib/ui/Skeleton';
 import Gate from '$lib/ui/Gate';
-import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
+import { isDisconnected, OFFLINE_REASON } from '$lib/ui/offline';
 import Meta from '$lib/ui/Meta';
 import AddDatasetDialog from './datasets/AddDatasetDialog';
 import DatasetCard, { cardFacts, DatasetCardSkeleton } from './datasets/DatasetCard';
@@ -212,7 +212,7 @@ export default function Datasets() {
       if (!live || !pendingGeneration(server)) return void waiting.set(null);
       // Its "started …" moves on with each read, even one that finds nothing new.
       waiting.set((w) => w && { ...w });
-      if (document.visibilityState !== 'visible' || listed.loading || listed.refreshing) return later();
+      if (document.visibilityState !== 'visible' || hub.mode === 'connecting' || listed.loading || listed.refreshing) return later();
       void listed.refresh().finally(later);
     };
     later();
@@ -222,7 +222,7 @@ export default function Datasets() {
     };
   });
   effect(() => {
-    const back = () => document.visibilityState === 'visible' && !listed.loading && reread();
+    const back = () => document.visibilityState === 'visible' && hub.mode !== 'connecting' && !listed.loading && reread();
     document.addEventListener('visibilitychange', back);
     return () => document.removeEventListener('visibilitychange', back);
   });
@@ -381,7 +381,7 @@ export default function Datasets() {
   });
 
   // Nothing answers: adding a dataset needs the server, so the action is disabled and says why (as on Runs).
-  const offline = computed(() => !listed.data && isOffline(listed.error));
+  const offline = computed(() => !listed.data && isDisconnected(listed.error));
   /** Datasets to filter, or on their way: the toolbar is live (else it stays in place, disabled). */
   const hasData = computed(() => (listed.data ? listed.data.length > 0 : !listed.error));
   /** Cards to show (or their skeleton); with none a panel holds the state alone, where the grid would be. */
