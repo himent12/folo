@@ -104,15 +104,6 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
         )
         .hint("pass --device cpu (or auto)"));
     }
-    if !folo_vision::model::quant::uses_vnni() {
-        eprintln!(
-            "note: --precision int8: the int8 kernels take their portable path, several times slower than f32 \
-             (they need AVX-VNNI, which this CPU lacks, AVX-512 VNNI not being used; or FOLO_Q8_SCALAR is set)"
-        );
-    }
-    if tensor_cores {
-        eprintln!("note: --tensor-cores only affects f16 inference (--half on a GPU); running without them");
-    }
     let file = ModelFile::open(path).map_err(|e| weights_error(command, path, e))?;
     if file.metadata().config.is_v2() {
         return Err(CliError::new(
@@ -125,6 +116,15 @@ fn open_int8(command: &str, path: &Path, device: &str, tensor_cores: bool) -> Re
             ),
         )
         .hint("use --precision f32, or --precision f16 on a GPU"));
+    }
+    if !folo_vision::model::quant::uses_vnni() {
+        eprintln!(
+            "note: --precision int8: the int8 kernels take their portable path, several times slower than f32 \
+             (they need AVX-VNNI, which this CPU lacks, AVX-512 VNNI not being used; or FOLO_Q8_SCALAR is set)"
+        );
+    }
+    if tensor_cores {
+        eprintln!("note: --tensor-cores only affects f16 inference (--half on a GPU); running without them");
     }
     // A missing, unreadable or mismatched calibration: the weights are fine, the int8 calibration is not.
     let calibration_error = |why: String| {

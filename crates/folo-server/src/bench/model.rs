@@ -122,7 +122,14 @@ pub fn resolve(m: &Model, classes: &[String]) -> Result<Resolved> {
     let path_buf = PathBuf::from(&path);
     let arch = folo_nn::io::safetensors::Container::read_header(&path_buf)
         .ok()
-        .and_then(|h| h.metadata.and_then(|meta| meta.get("folo.arch").cloned()))
+        .and_then(|h| h.metadata.and_then(|meta| folo_nn::io::Metadata::from_map(&meta).ok()))
+        .map(|meta| {
+            if meta.config.is_v2() {
+                format!("folo2-{}", meta.config.scale)
+            } else {
+                format!("folo-{}", meta.config.scale)
+            }
+        })
         .unwrap_or_else(|| m.arch.as_str().to_string());
     Ok(Resolved {
         spec: ModelSpec { path: path_buf, map },

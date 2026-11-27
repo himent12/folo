@@ -111,14 +111,6 @@ impl Store for RealStore {
         // typed, says a long one at its field, and keeps showing the estimate meanwhile.
         check_trainable(&idx)?;
         let (weights, target) = self.run_settings(&mut config, &mut options.arch)?;
-        if options.arch.is_some() && config.compute.is_some() {
-            return Err(Error::new(
-                StatusCode::BAD_REQUEST,
-                "invalid_config",
-                "folo2 architectures are not supported for cloud runs yet (train locally, or use folo-n..folo-x for cloud compute)",
-            )
-            .hint("omit `compute` to train folo2 locally, or select a folo-n..folo-x architecture for cloud runs"));
-        }
         let check = folo_vision::TrainConfig::from_api(&config).map_err(engine_error)?;
         // A cloud run's time is the reference's: nothing measured here says how fast the offer's GPU is.
         let (device, cloud) = match target {
@@ -373,6 +365,11 @@ impl Store for RealStore {
         Ok(self.model(id)?.arch_name)
     }
 
+    fn get_model_with_arch(&self, id: &str) -> Result<(Model, String)> {
+        let m = self.model(id)?;
+        Ok((m.model, m.arch_name))
+    }
+
     fn model_eval(&self, id: &str) -> Result<ModelEval> {
         let _gpu = self.idle.using();
         let m = self.model(id)?;
@@ -523,7 +520,8 @@ impl Store for RealStore {
                 target_utilization: Some(c.auto_batch_target),
             })
             .unwrap_or_default();
-        let ckpt_arch = file.metadata().arch.starts_with("folo2-").then(|| file.metadata().arch.clone());
+        let ckpt_meta_cfg = &file.metadata().config;
+        let ckpt_arch = ckpt_meta_cfg.is_v2().then(|| format!("folo2-{}", ckpt_meta_cfg.scale));
         self.start_run_with_options(
             config,
             Some(snapshot),
@@ -682,7 +680,13 @@ impl Store for RealStore {
         timing.preprocess_ms += decode_ms;
         timing.total_ms += decode_ms;
         let single_pass = options.tile.is_none() && options.tta.is_none();
-        if single_pass && warm && idle && !self.runs.busy() && self.runs.activity() == activity {
+        if single_pass
+            && warm
+            && idle
+            && !self.runs.busy()
+            && self.runs.activity() == activity
+            && !m.arch_name.starts_with("folo2-")
+        {
             let precision = match p.precision() {
                 folo_vision::Precision::F16 => InferPrecision::F16,
                 _ => InferPrecision::F32,

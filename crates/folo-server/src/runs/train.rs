@@ -91,25 +91,28 @@ pub(super) fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>, hold: &Ar
     let rc = trainer.run_config();
     let count = |k: &str| rc[k].as_u64().unwrap_or(0);
     let (train_images, val_images) = (count("train_images"), count("val_images"));
-    *e.measure.lock().unwrap() = Some(Measure {
-        throughput: throughput.clone(),
-        key: TrainKey {
-            device: engine::device_id(device),
-            arch: config.arch,
-            imgsz: config.imgsz,
-            batch: actual_batch,
-            amp: config.amp,
-        },
-        train_images,
-        // An empty val split validates the training split.
-        val_images: if val_images == 0 { train_images } else { val_images },
-        epochs: config.epochs,
-        mosaic: config.augment.mosaic > 0.0,
-        close_mosaic_epochs: count("close_mosaic_epochs") as u32,
-        device,
-        first: None,
-        last_step: None,
-    });
+    // Keep `folo2-*` timing/VRAM samples out of the v1 scale-keyed throughput table so v1 estimates stay pure.
+    if e.arch_override().is_none() {
+        *e.measure.lock().unwrap() = Some(Measure {
+            throughput: throughput.clone(),
+            key: TrainKey {
+                device: engine::device_id(device),
+                arch: config.arch,
+                imgsz: config.imgsz,
+                batch: actual_batch,
+                amp: config.amp,
+            },
+            train_images,
+            // An empty val split validates the training split.
+            val_images: if val_images == 0 { train_images } else { val_images },
+            epochs: config.epochs,
+            mosaic: config.augment.mosaic > 0.0,
+            close_mosaic_epochs: count("close_mosaic_epochs") as u32,
+            device,
+            first: None,
+            last_step: None,
+        });
+    }
     // The trainer reports the outcome itself (the final `status` event, the error as a log line); the worker
     // publishes it after dropping the trainer (and with it the run's open files).
     if let Err(err) = trainer.run() {

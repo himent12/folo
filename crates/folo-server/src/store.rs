@@ -645,9 +645,18 @@ pub trait Store: Send + Sync + 'static {
         self.estimate_run(config)
     }
     /// Like [`Store::estimate_run_with_auto_batch`], with optional `folo2-*` architecture override (`options.arch`).
-    fn estimate_run_with_options(&self, config: TrainConfig, options: RunOptions) -> Result<RunEstimate> {
+    fn estimate_run_with_options(
+        &self,
+        mut config: TrainConfig,
+        mut options: RunOptions,
+    ) -> Result<RunEstimate> {
         check_auto_batch_options(&options.auto_batch)?;
-        check_arch_override(options.arch.as_deref())?;
+        if let Some(parsed) = check_arch_override(options.arch.as_deref())? {
+            config.arch = parsed;
+            if !options.arch.as_deref().is_some_and(|a| a.starts_with("folo2-")) {
+                options.arch = None;
+            }
+        }
         if options.arch.is_none() {
             return self.estimate_run_with_auto_batch(config, options.auto_batch);
         }
@@ -711,6 +720,10 @@ pub trait Store: Send + Sync + 'static {
     fn model_arch(&self, id: &str) -> Result<String> {
         Ok(self.get_model(id)?.arch.as_str().to_string())
     }
+    /// One model together with its canonical architecture name (avoids double lookup in `GET /api/models/{id}`).
+    fn get_model_with_arch(&self, id: &str) -> Result<(Model, String)> {
+        Ok((self.get_model(id)?, self.model_arch(id)?))
+    }
     /// Validation results of a model.
     fn model_eval(&self, id: &str) -> Result<ModelEval>;
     /// Exports a model.
@@ -737,10 +750,15 @@ pub trait Store: Send + Sync + 'static {
         Err(crate::error::Error::not_implemented("auto-batch training"))
     }
     /// Starts a run with optional auto-batch and `folo2-*` architecture override (`options`).
-    /// When `options.arch` is `None`, delegates to [`Store::create_run_with_auto_batch`].
-    fn create_run_with_options(&self, config: TrainConfig, options: RunOptions) -> Result<Run> {
+    /// When `options.arch` is `None` (or a v1 `folo-*` scale), delegates to [`Store::create_run_with_auto_batch`].
+    fn create_run_with_options(&self, mut config: TrainConfig, mut options: RunOptions) -> Result<Run> {
         check_auto_batch_options(&options.auto_batch)?;
-        check_arch_override(options.arch.as_deref())?;
+        if let Some(parsed) = check_arch_override(options.arch.as_deref())? {
+            config.arch = parsed;
+            if !options.arch.as_deref().is_some_and(|a| a.starts_with("folo2-")) {
+                options.arch = None;
+            }
+        }
         if options.arch.is_none() {
             return self.create_run_with_auto_batch(config, options.auto_batch);
         }

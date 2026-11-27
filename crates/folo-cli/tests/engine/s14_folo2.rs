@@ -288,7 +288,13 @@ fn folo2_train_val_predict_export_and_resume_end_to_end() {
     assert_eq!(lines[0]["arch"], "folo2-n");
     assert_eq!(lines[0]["decode"], true);
     assert_eq!(lines[0]["dynamic_batch"], true);
-    assert!(onnx_out.is_file() && std::fs::metadata(&onnx_out).unwrap().len() > 0);
+    let onnx_bytes = std::fs::read(&onnx_out).unwrap();
+    assert!(!onnx_bytes.is_empty());
+    let onnx_lossy = String::from_utf8_lossy(&onnx_bytes);
+    assert!(
+        onnx_lossy.contains("\"0\":\"circle\"") && onnx_lossy.contains("\"1\":\"square\""),
+        "exported folo2 ONNX must preserve real class names in `names` metadata"
+    );
 
     // 5. `folo quantize` and `--precision int8` on `folo2-n` fail cleanly with `not_supported` (exit 4).
     let (code, lines, _) = folo(&["quantize", "--json", "--model", s(&best), "--data", s(&data)]);

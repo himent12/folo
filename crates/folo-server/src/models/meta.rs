@@ -136,10 +136,14 @@ pub(crate) fn read_meta(path: &Path) -> Result<FileMeta> {
         .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0.0, |d| d.as_secs_f64());
+    let canonical_arch = if m.config.is_v2() {
+        format!("folo2-{}", m.config.scale)
+    } else {
+        format!("folo-{}", m.config.scale)
+    };
     Ok(FileMeta {
-        arch: Arch::parse(&m.arch)
-            .unwrap_or_else(|| Arch::parse(&format!("folo-{}", m.config.scale)).unwrap_or_default()),
-        arch_name: m.arch.clone(),
+        arch: Arch::parse(&format!("folo-{}", m.config.scale)).unwrap_or_default(),
+        arch_name: canonical_arch,
         imgsz: m.imgsz,
         classes: m.classes.clone(),
         params,

@@ -380,7 +380,48 @@ fn older_server_rejects_folo2_arch_and_proxy_reads_arch_header() {
     let resume_fields = serde_json::json!({ "arch": "folo2-n" }).as_object().unwrap().clone();
     let e = older.resume_run("run_1", &resume_fields).unwrap_err();
     assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
+    // Invalid arch on resume fails with `400 invalid_config`, not `501 not_implemented`.
+    let bad_resume = serde_json::json!({ "arch": "folo2-q" }).as_object().unwrap().clone();
+    let e = older.resume_run("run_1", &bad_resume).unwrap_err();
+    assert_eq!((e.status, e.body.code.as_str()), (StatusCode::BAD_REQUEST, "invalid_config"));
     assert_eq!(FEATURE_FOLO2_ARCH, "folo2_arch");
+
+    // Passing a v1 `RunOptions.arch` (e.g. `Some("folo-s")`) to an older server without `folo2_arch` normalizes
+    // to `config.arch = Arch::S` and delegates to `POST /api/runs` instead of returning `501`.
+    let v1_server = MockApi::start(|req, _| match req {
+        "POST /api/runs" => (
+            "201 Created",
+            serde_json::json!({
+                "id": "run_v1",
+                "name": "v1-run",
+                "status": "queued",
+                "config": { "dataset_id": "ds_1", "arch": "folo-s" },
+                "created": "2026-11-27T00:00:00Z",
+                "started": null,
+                "finished": null,
+                "epoch": 0,
+                "epochs": 100,
+                "step": 0,
+                "steps_per_epoch": 0,
+                "eta_s": null,
+                "best": null,
+                "device": "cpu",
+                "model_id": null,
+                "error": null
+            })
+            .to_string(),
+        ),
+        other => panic!("unexpected request: {other}"),
+    });
+    let v1_proxy = HttpStore::new(&v1_server.base, None).assume_features(vec![]);
+    let v1_cfg: folo_api::TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1"}"#).unwrap();
+    let v1_run = v1_proxy
+        .create_run_with_options(
+            v1_cfg,
+            RunOptions { auto_batch: Default::default(), arch: Some("folo-s".into()) },
+        )
+        .unwrap();
+    assert_eq!(v1_run.config.arch, folo_api::Arch::S);
 
     // A server exposing `x-folo-arch: folo2-n` on `GET /api/models/{id}` surfaces the exact arch to the proxy.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -415,4 +456,140 @@ fn older_server_rejects_folo2_arch_and_proxy_reads_arch_header() {
     let proxy = HttpStore::new(&format!("http://{addr}"), None);
     assert_eq!(proxy.model_arch("m_v2").unwrap(), "folo2-n");
     handle.join().unwrap();
+
+    // Older real server (no `folo2_arch`, no `x-folo-arch` header): probing `/models/{id}/weights` detects a
+    // `folo2-n` safetensors header so a weights-only MCP `train` call is rejected with `501 not_implemented`
+    // rather than silently fine-tuning as v1.
+    let old_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let old_addr = old_listener.local_addr().unwrap();
+    let old_stop = Arc::new(AtomicBool::new(false));
+    let old_done = Arc::clone(&old_stop);
+    let old_handle = std::thread::spawn(move || {
+        let mut st_hdr = serde_json::json!({
+            "__metadata__": {
+                "folo.arch": "folo-n",
+                "folo.config": serde_json::json!({ "family": "folo2", "scale": "n" }).to_string()
+            }
+        })
+        .to_string()
+        .into_bytes();
+        while !st_hdr.len().is_multiple_of(8) {
+            st_hdr.push(b' ');
+        }
+        let mut weights_bytes = (st_hdr.len() as u64).to_le_bytes().to_vec();
+        weights_bytes.extend_from_slice(&st_hdr);
+        for stream in old_listener.incoming() {
+            if old_done.load(Ordering::SeqCst) {
+                break;
+            }
+            let Ok(mut s) = stream else { continue };
+            let Some(req) = read_request(&mut s) else { continue };
+            match req.as_str() {
+                "GET /api/health" => {
+                    let body = serde_json::json!({
+                        "status": "ok",
+                        "version": "0.1.0",
+                        "mock": false,
+                        "features": []
+                    })
+                    .to_string();
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+                "GET /api/system" => {
+                    let body = system_json(&[]);
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+                "GET /api/datasets/ds_1" => {
+                    let body = serde_json::json!({
+                        "id": "ds_1",
+                        "name": "tiny",
+                        "path": "/tmp/tiny",
+                        "format": "yolo",
+                        "classes": ["circle"],
+                        "splits": { "train": 4, "val": 2, "test": 0 },
+                        "total_images": 6,
+                        "total_boxes": 6,
+                        "size_bytes": 100,
+                        "created": "2026-11-27T00:00:00Z"
+                    })
+                    .to_string();
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+                "GET /api/models/m_old_v2" => {
+                    let body = serde_json::json!({
+                        "id": "m_old_v2",
+                        "name": "old-v2",
+                        "arch": "folo-n",
+                        "imgsz": 64,
+                        "classes": ["circle"],
+                        "params": 1000,
+                        "flops_g": 1.0,
+                        "bytes": weights_bytes.len(),
+                        "created": "2026-11-27T00:00:00Z",
+                        "run_id": null,
+                        "metrics": null,
+                        "head": "o2m"
+                    })
+                    .to_string();
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \
+                         {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+                "GET /api/models/m_old_v2/weights" => {
+                    let len = weights_bytes.len();
+                    let _ = write!(
+                        s,
+                        "HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Range: \
+                         bytes 0-{}/{len}\r\nETag: \"v2etag\"\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
+                        len - 1
+                    );
+                    let _ = s.write_all(&weights_bytes);
+                }
+                other => panic!(
+                    "unexpected request to older server (weights-only folo2 must be refused before POST /api/runs): {other}"
+                ),
+            }
+            let _ = s.flush();
+        }
+    });
+    let old_proxy = Arc::new(HttpStore::new(&format!("http://{old_addr}"), None));
+    assert_eq!(old_proxy.model_arch("m_old_v2").unwrap(), "folo2-n");
+    let home = folo_test_support::TestDir::new("mcp-old-proxy-v2");
+    let opts = crate::Options {
+        data_dir: home.to_path_buf(),
+        read_only: false,
+        confine: false,
+        device: "cpu".into(),
+        published_weights: None,
+    };
+    let mcp = crate::server::FoloMcp::new(old_proxy.clone(), Some(old_proxy), opts);
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let args = serde_json::json!({ "dataset_id": "ds_1", "weights": "m_old_v2", "epochs": 1 })
+        .as_object()
+        .unwrap()
+        .clone();
+    let res = rt.block_on(mcp.inner.train(args));
+    let err = res.err().expect("weights-only folo2 fine-tune against older server must fail");
+    assert_eq!((err.status, err.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_implemented"));
+    old_stop.store(true, Ordering::SeqCst);
+    let _ = TcpStream::connect(old_addr);
+    old_handle.join().unwrap();
 }

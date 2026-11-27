@@ -166,7 +166,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
     let source = if file.has_ema() { "ema" } else { "model" };
     let meta = file.metadata();
     if onnx {
-        let opts = OnnxOptions {
+        let mut opts = OnnxOptions {
             height: imgsz,
             width: imgsz,
             batch: args.batch.unwrap_or(1),
@@ -179,6 +179,11 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             metadata: meta.for_weights().to_map(),
         };
         let x = if meta.config.is_v2() {
+            let names: std::collections::BTreeMap<String, &str> =
+                meta.classes.iter().enumerate().map(|(i, c)| (i.to_string(), c.as_str())).collect();
+            if let Ok(json_names) = serde_json::to_string(&names) {
+                opts.metadata.insert("names".into(), json_names);
+            }
             let (mut model, _) =
                 FoloV2Model::from_file(&file, Purpose::Inference).map_err(|e| nn_error("export", e))?;
             if let Some(h) = args.head {

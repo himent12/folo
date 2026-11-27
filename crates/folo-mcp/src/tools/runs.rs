@@ -27,7 +27,7 @@ fn run_summary(mut r: Run) -> Run {
 }
 
 impl Inner {
-    pub(super) async fn train(&self, mut args: JsonObject) -> Result<Output, Error> {
+    pub(crate) async fn train(&self, mut args: JsonObject) -> Result<Output, Error> {
         // Resuming takes the arguments as given: the other fields must match the run's config or be omitted, so
         // they are not filled with TrainConfig's defaults (and `dataset_id` may be left out).
         if let Some(id) = args.get("resume_run_id").filter(|v| !v.is_null()) {
@@ -110,7 +110,8 @@ impl Inner {
                 .hint("leave `arch` out when `weights` is set (or set it to the weights' arch)"));
             }
             if model_arch.starts_with("folo2-") {
-                summary_arch = Some(model_arch);
+                summary_arch = Some(model_arch.clone());
+                arch_override = Some(model_arch);
             }
         }
         let auto_note = if auto_batch.enabled { " (auto-batch)" } else { "" };

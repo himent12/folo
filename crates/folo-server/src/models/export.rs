@@ -118,6 +118,11 @@ pub fn onnx_export_with_axes(
     (opts.decode, opts.dynamic, opts.half) = (switches.decode, axes.batch && axes.hw, switches.half);
     opts.metadata = file.metadata().for_weights().to_map();
     if file.metadata().config.is_v2() {
+        let names: std::collections::BTreeMap<String, &str> =
+            file.metadata().classes.iter().enumerate().map(|(i, c)| (i.to_string(), c.as_str())).collect();
+        if let Ok(json_names) = serde_json::to_string(&names) {
+            opts.metadata.insert("names".into(), json_names);
+        }
         let (mut model, _) = FoloV2Model::from_file(file, Purpose::Inference).map_err(nn_error)?;
         model.fuse().map_err(nn_error)?;
         onnx::export_v2_with_axes(&model, &opts, axes).map_err(engine_error)
