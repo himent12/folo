@@ -4,7 +4,7 @@
 use super::command::{
     CliExportFormat, FEATURE_EXPORT_DYNAMIC_AXES, ModelCliMode, ModelCliState, PredictInt8Target,
     PredictPrecision, QuantF32MacBudget, QuantF32Policy, QuantMethod, ServerExportSupport, build_model_cli,
-    check_server_export_support, derive_int8_model_path, derive_quant_output_path, is_int8_model_path,
+    check_server_export_support, derive_quant_output_path, is_int8_model_path,
 };
 use crate::api::{Backend, Head, Model, ModelExportOptions, ModelSource, mock::MockBackend};
 
@@ -135,7 +135,7 @@ fn server_export_support_gates_older_servers_and_remote_split_axes() {
         ServerExportSupport::Supported(_)
     ));
     assert_eq!(
-        derive_int8_model_path(
+        derive_quant_output_path(
             "D:/models/best.FOLO",
             QuantMethod::Percentile,
             QuantF32Policy::Auto,
@@ -143,15 +143,7 @@ fn server_export_support_gates_older_servers_and_remote_split_axes() {
         ),
         "D:/models/best-int8-percentile.folo"
     );
-    assert_eq!(
-        derive_int8_model_path(
-            "D:/models/best-INT8.FOLO",
-            QuantMethod::MinMax,
-            QuantF32Policy::Auto,
-            QuantF32MacBudget::Pct5,
-        ),
-        "D:/models/best-INT8.FOLO"
-    );
+    assert!(is_int8_model_path("D:/models/best-INT8.FOLO"));
 }
 
 #[test]
@@ -289,10 +281,6 @@ fn predict_flags_reflect_sahi_tta_track_int8_target_and_utf8_paths() {
     assert!(is_int8_model_path("D:/models/best-int8-2.folo"));
     assert!(is_int8_model_path("D:/models/best-int8-percentile-recal.folo"));
     assert_eq!(
-        derive_int8_model_path("D:/models/best-int8-2.folo", QuantMethod::Percentile, def_p, def_m),
-        "D:/models/best-int8-2.folo"
-    );
-    assert_eq!(
         derive_quant_output_path("D:/models/best-int8-2.folo", QuantMethod::MinMax, def_p, def_m),
         "D:/models/best-int8-minmax.folo"
     );
@@ -306,14 +294,14 @@ fn predict_flags_reflect_sahi_tta_track_int8_target_and_utf8_paths() {
         "D:/models/best-int8-percentile-recal.folo"
     );
     assert_eq!(
-        derive_int8_model_path("cafébest.folo", QuantMethod::Percentile, def_p, def_m),
+        derive_quant_output_path("cafébest.folo", QuantMethod::Percentile, def_p, def_m),
         "cafébest-int8-percentile.folo"
     );
     assert_eq!(
-        derive_int8_model_path("模型.folo", QuantMethod::MinMax, def_p, def_m),
+        derive_quant_output_path("模型.folo", QuantMethod::MinMax, def_p, def_m),
         "模型-int8-minmax.folo"
     );
-    assert_eq!(derive_int8_model_path("日本語", QuantMethod::Mse, def_p, def_m), "日本語-int8-mse.folo");
+    assert_eq!(derive_quant_output_path("日本語", QuantMethod::Mse, def_p, def_m), "日本語-int8-mse.folo");
 }
 
 #[test]
@@ -351,7 +339,7 @@ fn model_detail_renders_selective_f32_quantize_controls() {
         assert!(!keys.iter().any(|k| k == "model-cli-quant-f32-macs"));
     });
 
-    // Predict --precision int8 renders F32 MAC budget when Auto is selected and hides it on P5Tail.
+    // Predict --precision int8 renders Checkpoint target, Calibration, Selective f32, and F32 MAC budget.
     drive(&mut app, window, |this, _, cx| {
         this.model_cli.mode = ModelCliMode::Predict;
         this.model_cli.predict_precision = PredictPrecision::Int8;
@@ -364,6 +352,7 @@ fn model_detail_renders_selective_f32_quantize_controls() {
     drive(&mut app, window, |this, _, _| {
         let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
         for expected in [
+            "model-cli-predict-int8-target",
             "model-cli-predict-quant-method",
             "model-cli-predict-quant-f32-policy",
             "model-cli-predict-quant-f32-macs",
@@ -382,6 +371,15 @@ fn model_detail_renders_selective_f32_quantize_controls() {
         assert!(keys.iter().any(|k| k == "model-cli-predict-quant-f32-policy"));
         assert!(!keys.iter().any(|k| k == "model-cli-predict-quant-f32-macs"));
     });
+
+    // Navigating to another model resets explicit predict_int8_target so it does not leak across models.
+    drive(&mut app, window, |this, w, cx| {
+        let models = this.store.models.ready().unwrap();
+        let next_mid = models.get(1).unwrap_or(&models[0]).id.clone();
+        this.model_cli.predict_int8_target = Some(PredictInt8Target::QuantizedOutput);
+        this.navigate(Route::Model(next_mid), w, cx);
+        assert_eq!(this.model_cli.predict_int8_target, None);
+    });
 }
 
 #[test]
@@ -395,22 +393,24 @@ fn predict_int8_recalibration_targets_current_or_quantized_output_explicitly() {
         quant_f32_policy: QuantF32Policy::None,
         quant_f32_macs: QuantF32MacBudget::Pct5,
         predict_precision: PredictPrecision::Int8,
-        predict_int8_target: PredictInt8Target::Current,
+        predict_int8_target: None,
         ..Default::default()
     };
     let q = build_model_cli(&m, Some("D:/data/shapes"), &st);
     assert!(q.command.ends_with("--output D:/models/best-int8-mse-full.folo"), "{}", q.command);
 
-    // Current checkpoint preserves the already-calibrated file.
+    // Default (`None`) for an `-int8*.folo` file selects Current checkpoint verbatim and notes
+    // that it requires an int8-calibrated file rather than asserting it unconditionally.
     st.mode = ModelCliMode::Predict;
     let p_cur = build_model_cli(&m, None, &st);
     assert_eq!(
         p_cur.command,
         "folo predict --model D:/models/best-int8-mse-p5-tail.folo <images> --precision int8"
     );
+    assert!(p_cur.hint.as_deref().is_some_and(|h| h.contains("requires an int8-calibrated")));
 
     // QuantizedOutput matches the recalibrated `--output` file verbatim.
-    st.predict_int8_target = PredictInt8Target::QuantizedOutput;
+    st.predict_int8_target = Some(PredictInt8Target::QuantizedOutput);
     let p_out = build_model_cli(&m, None, &st);
     assert_eq!(
         p_out.command,
@@ -424,5 +424,21 @@ fn predict_int8_recalibration_targets_current_or_quantized_output_explicitly() {
     assert_eq!(
         p_macs.command,
         "folo predict --model D:/models/best-int8-mse-f32-10.folo <images> --precision int8"
+    );
+
+    // Custom-named calibrated checkpoint without `-int8` in filename can explicitly target Current.
+    let mut custom = sample_model();
+    custom.path = Some("D:/models/custom-calibrated.folo".into());
+    st.predict_int8_target = None;
+    let p_custom_default = build_model_cli(&custom, None, &st);
+    assert_eq!(
+        p_custom_default.command,
+        "folo predict --model D:/models/custom-calibrated-int8-mse-f32-10.folo <images> --precision int8"
+    );
+    st.predict_int8_target = Some(PredictInt8Target::Current);
+    let p_custom_current = build_model_cli(&custom, None, &st);
+    assert_eq!(
+        p_custom_current.command,
+        "folo predict --model D:/models/custom-calibrated.folo <images> --precision int8"
     );
 }

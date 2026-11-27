@@ -486,12 +486,11 @@ impl FoloApp {
                     f.gen_vary_aspect,
                 ) {
                     Ok(s) => s,
-                    Err(e) => {
-                        let msg =
-                            e.images.or(e.seed).map(str::to_string).or(e.classes).unwrap_or_else(|| {
-                                "Fix the highlighted generated-source fields first".into()
-                            });
-                        f.error = Some(ApiError::new("invalid_body", msg));
+                    Err(_) => {
+                        // Local field errors are already shown inline beside the invalid controls;
+                        // keep the form banner reserved for server/request failures so fixing the
+                        // field never leaves a stale banner behind.
+                        f.error = None;
                         cx.notify();
                         return;
                     }

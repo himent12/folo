@@ -205,3 +205,66 @@ impl FoloApp {
         if self.kb { focused.or(hover) } else { hover.or(focused) }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::app::Route;
+    use crate::app::tests::{drive, open};
+    use crate::store::Load;
+
+    #[test]
+    fn play_compare_class_filter_keeps_keyboard_focus_during_pending_batch_reload() {
+        use folo_ui::{KeyDownEvent, Keystroke, PlatformInput};
+
+        let (mut app, window) = open();
+        app.update(crate::app::bind_keys);
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::Playground, w, cx);
+            this.set_play_compare(true, cx);
+        });
+        for _ in 0..4 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        drive(&mut app, window, |this, _, cx| {
+            let ds = this.play_sample_dataset().expect("sample dataset");
+            this.play_dataset_image(&ds, "img_00801", cx);
+        });
+        for _ in 0..4 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        // Focus the "Only A" chip in Compare Delta, then simulate an in-flight batch/rerun reload.
+        drive(&mut app, window, |this, w, cx| {
+            this.focus_key("play-cmp-cls-a", w, cx);
+            this.kb = true;
+            this.play_pred = Load::Loading;
+            this.play_pred_pending = true;
+            this.play_compare.pred_b = Load::Loading;
+            this.play_compare.pred_b_pending = true;
+            cx.notify();
+        });
+        app.frame(window.into());
+        // Pressing Tab while responses are delayed must stay inside Compare controls (Only B),
+        // not drop focus back to Overview in the sidebar.
+        app.simulate_input(
+            window.into(),
+            PlatformInput::KeyDown(KeyDownEvent {
+                keystroke: Keystroke::parse("tab").unwrap(),
+                is_held: false,
+            }),
+        );
+        app.run_until_idle();
+        app.frame(window.into());
+        drive(&mut app, window, |this, w, cx| {
+            assert!(
+                this.fh("play-cmp-cls-b", cx).is_focused(w),
+                "expected Tab to advance to Only B chip inside Compare rail"
+            );
+            assert!(
+                !this.fh("nav-Overview", cx).is_focused(w),
+                "focus must not jump back to sidebar Overview during pending A/B reload"
+            );
+        });
+    }
+}

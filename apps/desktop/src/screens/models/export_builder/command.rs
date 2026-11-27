@@ -204,9 +204,9 @@ pub struct ModelCliState {
     pub predict_track: bool,
     /// Inference precision (`f32`, `f16`, `int8`).
     pub predict_precision: PredictPrecision,
-    /// For already-INT8 models in Predict `int8`, whether `--model` uses the current checkpoint or
-    /// the recalibrated `folo quantize --output` path.
-    pub predict_int8_target: PredictInt8Target,
+    /// Explicit override for which checkpoint Predict `int8` targets (`None` picks `Current` when
+    /// the path matches `-int8*.folo`, else `QuantizedOutput`).
+    pub predict_int8_target: Option<PredictInt8Target>,
     /// Confidence threshold (`--conf`, default 0.25).
     pub predict_conf: f32,
     /// NMS / TTA merge IoU threshold (`--iou`, default 0.70).
@@ -230,7 +230,7 @@ impl Default for ModelCliState {
             predict_tta: false,
             predict_track: false,
             predict_precision: PredictPrecision::F32,
-            predict_int8_target: PredictInt8Target::Current,
+            predict_int8_target: None,
             predict_conf: 0.25,
             predict_iou: 0.70,
         }
@@ -395,19 +395,13 @@ pub(super) fn derive_quant_output_path(
     if derived.eq_ignore_ascii_case(path) { format!("{base}-{suffix}-recal.folo") } else { derived }
 }
 
-/// Derives the INT8 checkpoint path for `folo predict --precision int8`: preserves an already
-/// quantized `-int8*.folo` file as-is, otherwise matches `derive_quant_output_path`.
-pub(super) fn derive_int8_model_path(
-    path: &str,
-    method: QuantMethod,
-    policy: QuantF32Policy,
-    macs: QuantF32MacBudget,
-) -> String {
-    if is_int8_model_path(path) {
-        path.to_string()
-    } else {
-        derive_quant_output_path(path, method, policy, macs)
-    }
+/// Resolves which INT8 checkpoint `folo predict --precision int8` targets: respects an explicit
+/// user selection, otherwise defaults to `Current` for `-int8*.folo` filenames and `QuantizedOutput`
+/// for all other checkpoints.
+pub fn effective_predict_int8_target(m: &Model, state: &ModelCliState) -> PredictInt8Target {
+    state.predict_int8_target.unwrap_or_else(|| {
+        if model_is_int8_file(m) { PredictInt8Target::Current } else { PredictInt8Target::QuantizedOutput }
+    })
 }
 
 /// Resolves the `--model` argument safely for pasting into PowerShell, cmd, or POSIX shells.
@@ -422,24 +416,21 @@ fn resolve_model_arg(
 ) -> (String, Option<String>) {
     let suffix = format_int8_suffix(method, policy, macs);
     if let Some(path) = m.path.as_deref().filter(|p| !p.trim().is_empty()) {
-        let candidate = if int8_target {
-            if use_quantized_output {
-                derive_quant_output_path(path, method, policy, macs)
-            } else {
-                derive_int8_model_path(path, method, policy, macs)
-            }
+        let candidate = if int8_target && use_quantized_output {
+            derive_quant_output_path(path, method, policy, macs)
         } else {
             path.to_string()
         };
         return match folo_api::json::quote_path(&candidate) {
             Some(quoted) => (quoted, None),
             None => {
-                let placeholder = if int8_target { "<model-int8>" } else { "<model>" };
+                let placeholder =
+                    if int8_target && use_quantized_output { "<model-int8>" } else { "<model>" };
                 (placeholder.to_string(), Some(candidate))
             }
         };
     }
-    if int8_target {
+    if int8_target && use_quantized_output {
         if m.source == Some(ModelSource::Published) {
             let candidate = format!("{}-{suffix}.folo", m.id);
             if let Some(quoted) = folo_api::json::quote_path(&candidate) {
@@ -490,8 +481,8 @@ pub(super) fn fmt_thresh(v: f32) -> String {
 pub fn build_model_cli(m: &Model, run_dataset_path: Option<&str>, state: &ModelCliState) -> BuiltCliCommand {
     let int8_predict =
         state.mode == ModelCliMode::Predict && state.predict_precision == PredictPrecision::Int8;
-    let use_quantized_output =
-        !model_is_int8_file(m) || state.predict_int8_target == PredictInt8Target::QuantizedOutput;
+    let effective_target = effective_predict_int8_target(m, state);
+    let use_quantized_output = effective_target == PredictInt8Target::QuantizedOutput;
     let (model_arg, unquoted_model) = resolve_model_arg(
         m,
         int8_predict,
@@ -502,7 +493,7 @@ pub fn build_model_cli(m: &Model, run_dataset_path: Option<&str>, state: &ModelC
     );
     let mut unquoted_notes: Vec<String> = Vec::new();
     if let Some(raw) = unquoted_model {
-        let placeholder = if int8_predict { "<model-int8>" } else { "<model>" };
+        let placeholder = if int8_predict && use_quantized_output { "<model-int8>" } else { "<model>" };
         unquoted_notes.push(format!("Replace {placeholder} with this path, quoted for your shell: {raw}"));
     }
 
@@ -676,8 +667,8 @@ pub fn build_model_cli(m: &Model, run_dataset_path: Option<&str>, state: &ModelC
                 parts.push("--track".into());
             }
             let hint = if state.predict_precision == PredictPrecision::Int8 {
-                Some(if model_is_int8_file(m) && state.predict_int8_target == PredictInt8Target::Current {
-                    "Runs CPU int8 inference with this calibrated checkpoint.".into()
+                Some(if effective_target == PredictInt8Target::Current {
+                    "Runs CPU int8 inference with this checkpoint as-is (requires an int8-calibrated .folo file).".into()
                 } else {
                     "Matches the `--output` file written by `folo quantize` for the selected calibration method and selective-f32 policy (CPU only).".into()
                 })
