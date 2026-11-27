@@ -13,8 +13,8 @@
 //! - `fused.rs` + `fused_epi.rs` + `fused_pack.rs`: fused x86-64 L1-blocked tile-block drivers, L1-resident
 //!   B-panel packing with 4× K-unrolled aligned 256-bit `1×1` microkernels, and zero-spill split-pair epilogues
 //!   with direct `f32` writes for `conv`, `conv_per_channel`, and `stem_u8`.
-//! - `fused_3x3.rs`: single-barrier L1-hot rotating row-strip x86-64 driver for single-part `3×3, pad = 1` convs
-//!   at stride 1 and stride 2, with multi-row weight reuse (`RB ∈ {1, 2, 4}`) and shared-strip small-spatial `s=1`.
+//! - `fused_3x3/` (`mod.rs`, `kernels.rs`): single-barrier L1-hot rotating row-strip x86-64 driver for single-part `3×3, pad = 1` convs
+//!   at stride 1 and stride 2, with multi-row weight reuse (`RB ∈ {1..=4}`) and shared-strip small-spatial `s=1`.
 //! - `vnni512/`: 512-bit ZMM AVX-512 VNNI (`4 × 48` / hybrid `4 × 24`) microkernels, bit-exact 16-lane SiLU,
 //!   and fused drivers (`avx512f + avx512bw + avx512vl + avx512vnni`).
 //! - `rows.rs`: input row-pointer preparation and row-band parallelised padded phase copies (`image_rows`).

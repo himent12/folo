@@ -318,6 +318,7 @@ pub(super) fn plan(
     og: usize,
     unit: usize,
     input: usize,
+    min_og_blk: usize,
     (threads, min_macs): (usize, usize),
 ) -> (usize, usize) {
     let macs = n.saturating_mul(chunks).saturating_mul(og).saturating_mul(unit);
@@ -336,7 +337,10 @@ pub(super) fn plan(
         if cb < chunks && !cb.is_multiple_of(2) { (cb + 1).min(chunks) } else { cb }
     };
     if input <= SPLIT_CHANNELS_MAX {
-        let og_blk = og.div_ceil(per_img.min(og));
+        // Keep at least `min_og_blk` output groups per task (when `chunks >= 2` can supply parallelism) so
+        // `1×1` tasks amortize L1 B-panel packing across multiple output groups instead of splitting to `og_blk = 1`.
+        let cap_obs = if min_og_blk > 1 && chunks >= 2 && og >= min_og_blk { og / min_og_blk } else { og };
+        let og_blk = og.div_ceil(per_img.min(cap_obs).max(1));
         let obs = og.div_ceil(og_blk);
         let max_cbs = (max_tasks / (n * obs)).max(1);
         let want_c = ((per_img + obs / 2) / obs).clamp(1, max_cbs);
@@ -577,12 +581,15 @@ fn conv_inner(
         if skip_image_rows { Vec::new() } else { (0..n).map(|i| image_rows(xs, i, h, w, cv)).collect() };
     let r_n_total = if skip_image_rows { h * w } else { rows_storage[0].n };
     let chunks = r_n_total.div_ceil(NR);
+    let min_og_blk =
+        if cv.pointwise() && r_n_total >= 1024 && (32..=256).contains(&cv.ks) && og >= 16 { 4 } else { 1 };
     let (ch_blk, og_blk) = plan(
         n,
         chunks,
         og,
         MR * NR * cv.ks * 4,
         cv.c * r_n_total,
+        min_og_blk,
         (rayon::current_num_threads(), task_macs()),
     );
     let (cbs, obs) = (chunks.div_ceil(ch_blk), og.div_ceil(og_blk));

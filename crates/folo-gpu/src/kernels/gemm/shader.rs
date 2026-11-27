@@ -208,7 +208,13 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     );
     s.push_str("    }\n  }\n\n");
 
+    if g.sites {
+        s.push_str("  if (n0 < live) {\n");
+    }
     emit_epilogue(&mut s, &g);
+    if g.sites {
+        s.push_str("  }\n");
+    }
     s.push_str("}\n");
     s
 }
@@ -247,7 +253,6 @@ fn emit_prologue(
     let _ = writeln!(s, "  let m0 = wid.y * {}u; let n0 = wid.x * {}u;", g.bm, g.bn);
     if g.sites {
         s.push_str(conv::SITES_LIVE);
-        s.push_str(conv::SITES_RETIRE);
     }
     match g.mode {
         // Forward gather: B[k][j] = X[ci][oh*SH - PH + kh*DH][ow*SW - PW + kw*DW].
@@ -326,7 +331,11 @@ fn emit_prologue(
     for j in (0..g.tn / 4).filter(|_| !g.bs_vec) {
         let _ = writeln!(s, "  let bc{j} = (tx + {}u) * 4u;", j * g.wgx);
     }
-    s.push_str("  let nt = select(0u, (K - kbeg + BK - 1u) / BK, kbeg < K);\n");
+    if g.sites {
+        s.push_str("  let nt = select(0u, (K - kbeg + BK - 1u) / BK, kbeg < K && n0 < live);\n");
+    } else {
+        s.push_str("  let nt = select(0u, (K - kbeg + BK - 1u) / BK, kbeg < K);\n");
+    }
 }
 
 /// Emits the global → register loads for one `K` tile at `k0`.

@@ -13,7 +13,10 @@
 
 use std::arch::x86_64::*;
 
-use super::fused_epi::{AlignedTile, BMode, SinglePartTask, apply_epi_aligned_fstride, zero_pairs};
+use super::fused_epi::{
+    AlignedTile, AlignedTileF32, BMode, MultiPartTask, PartSlice, SinglePartTask, apply_epi_aligned_fstride,
+    apply_epi_f32_aligned, zero_pairs,
+};
 use super::kernel::{MR, NR};
 
 /// Stack-allocated packed B buffer capacity in `u32` words (`24 KiB`, exact multiple of `NR = 24`).
@@ -46,7 +49,7 @@ impl PackedB {
 }
 
 /// Returns true when `t` benefits from L1-resident B-panel packing on 256-bit x86-64 ISAs:
-/// requires enough output channel groups (`>= PACK_MIN_OG`), `ks` in `12..=PACK_MAX_KS`, and either large
+/// requires enough output channel groups (`>= PACK_MIN_OG`), `ks` in `8..=PACK_MAX_KS`, and either large
 /// planes (`hw >= 1024`, where strided reads hit 4K L1D set conflicts / dTLB misses) or deep reductions
 /// (`ks >= 48`, spanning > 48 planes/pages).
 #[inline]
@@ -56,10 +59,24 @@ pub(super) fn should_pack_1x1(t: &SinglePartTask<'_>) -> bool {
         BMode::Rows => return false,
     };
     t.wq == t.ow
-        && t.ks >= 12
+        && t.ks >= 8
         && t.ks <= PACK_MAX_KS
         && t.ob_end.saturating_sub(t.ob_start) >= PACK_MIN_OG
         && (hw >= 1024 || t.ks >= 48)
+}
+
+/// Returns true when a decoupled multi-part `1×1` conv benefits from packing all parts' B panels once per
+/// chunk block into L1D (`PackedB`), eliminating 4K aliasing and strided dTLB misses across output groups.
+#[inline]
+pub(super) fn should_pack_1x1_multi(t: &MultiPartTask<'_>) -> bool {
+    if t.pointwise_hw == 0 || t.wq != t.ow || t.parts.is_empty() {
+        return false;
+    }
+    if t.ob_end.saturating_sub(t.ob_start) < PACK_MIN_OG {
+        return false;
+    }
+    let total_ks: usize = t.parts.iter().map(|p| p.ks).sum();
+    (8..=PACK_MAX_KS).contains(&total_ks) && (t.pointwise_hw >= 1024 || total_ks >= 48)
 }
 
 /// Pack `count` full `NR`-word chunks starting at `col0` from `b_mode` into `dst[0..count * ks * NR]`
@@ -178,6 +195,91 @@ unsafe fn pack_tail_vecs<const VECS: usize>(b_mode: BMode<'_>, ks: usize, col: u
                 }
             }
             BMode::Rows => unreachable!("pack_tail_vecs only called on pointwise BMode"),
+        }
+    }
+}
+
+/// Pack `count` full `NR`-word chunks from decoupled multi-part `1×1` inputs into `dst[0..count * total_ks * NR]`
+/// with layout `dst[(i * total_ks + p_global) * NR .. +NR]` (every row 32-byte aligned).
+///
+/// # Safety
+/// Caller guarantees AVX2, `dst` is 32-byte aligned with at least `count * total_ks * NR` writable words, and
+/// each `part` has `part.ks` planes of stride `hw` with `col0 + count * NR` readable words.
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn pack_multi_chunks_24(
+    parts: &[PartSlice<'_>],
+    total_ks: usize,
+    hw: usize,
+    col0: usize,
+    count: usize,
+    dst: *mut u32,
+) {
+    let stride = total_ks * NR;
+    let mut p_global = 0usize;
+    // SAFETY: pointer bounds and alignment guaranteed by caller.
+    unsafe {
+        for part in parts {
+            if part.ks == 0 {
+                continue;
+            }
+            let mut src_p = part.b_base.add(col0);
+            for _ in 0..part.ks {
+                let mut sp = src_p;
+                let mut dp = dst.add(p_global * NR);
+                for _ in 0..count {
+                    let v0 = _mm256_loadu_si256(sp as *const __m256i);
+                    let v1 = _mm256_loadu_si256(sp.add(8) as *const __m256i);
+                    let v2 = _mm256_loadu_si256(sp.add(16) as *const __m256i);
+                    _mm256_store_si256(dp as *mut __m256i, v0);
+                    _mm256_store_si256(dp.add(8) as *mut __m256i, v1);
+                    _mm256_store_si256(dp.add(16) as *mut __m256i, v2);
+                    sp = sp.add(NR);
+                    dp = dp.wrapping_add(stride);
+                }
+                src_p = src_p.wrapping_add(hw);
+                p_global += 1;
+            }
+        }
+    }
+}
+
+/// Pack one tail chunk (`VECS * 8` readable words at `col`) from decoupled multi-part `1×1` inputs into
+/// `dst[0..total_ks * NR]` with row stride `NR` (32-byte aligned per K-step).
+///
+/// # Safety
+/// Caller guarantees AVX2, `dst` is 32-byte aligned with at least `total_ks * NR` writable words, and each
+/// `part` has `part.ks` planes of stride `hw` with `col + VECS * 8` readable words (`SLACK`).
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn pack_multi_tail_vecs<const VECS: usize>(
+    parts: &[PartSlice<'_>],
+    hw: usize,
+    col: usize,
+    dst: *mut u32,
+) {
+    let mut dp = dst;
+    // SAFETY: pointer bounds and alignment guaranteed by caller.
+    unsafe {
+        for part in parts {
+            if part.ks == 0 {
+                continue;
+            }
+            let mut sp = part.b_base.add(col);
+            for _ in 0..part.ks {
+                let v0 = _mm256_loadu_si256(sp as *const __m256i);
+                _mm256_store_si256(dp as *mut __m256i, v0);
+                if VECS >= 2 {
+                    let v1 = _mm256_loadu_si256(sp.add(8) as *const __m256i);
+                    _mm256_store_si256(dp.add(8) as *mut __m256i, v1);
+                }
+                if VECS >= 3 {
+                    let v2 = _mm256_loadu_si256(sp.add(16) as *const __m256i);
+                    _mm256_store_si256(dp.add(16) as *mut __m256i, v2);
+                }
+                sp = sp.wrapping_add(hw);
+                dp = dp.wrapping_add(NR);
+            }
         }
     }
 }
@@ -447,6 +549,260 @@ macro_rules! define_packed_1x1_isa {
                         apply_epi_aligned_fstride::<SILU, HAS_RES, OUT_U8, VECS>(
                             acc, &corr, &scale, &bias, res_ptr, &rs, &rz, &inv, &z01_arr, &z23_arr, q_dst,
                             f_dst, f_stride,
+                        );
+                        if OUT_U8 {
+                            if !direct {
+                                std::ptr::copy_nonoverlapping(qw.as_ptr(), q_plane.add(col), cols);
+                            }
+                        } else if !direct {
+                            for (rr, row) in fv.iter().enumerate() {
+                                std::ptr::copy_nonoverlapping(
+                                    row.as_ptr(),
+                                    f_base.add(rr * ohw + col),
+                                    cols,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            #[target_feature(enable = $feat)]
+            pub(in super::super) unsafe fn run_packed_1x1_multi_spec<
+                const SILU: bool,
+                const HAS_RES: bool,
+                const OUT_U8: bool,
+            >(
+                t: &MultiPartTask<'_>,
+            ) {
+                let ohw = t.oh * t.ow;
+                let total_ks: usize = t.parts.iter().map(|p| p.ks).sum();
+                let cb_pack = (PACK_WORDS / (total_ks * NR)).clamp(1, 16);
+                let mut packed = PackedB::uninit();
+                let mut acc = AlignedTile([[0; NR]; MR]);
+                let mut tile_f32 = AlignedTileF32([[0.0; NR]; MR]);
+                let mut qw = [0u32; NR];
+                let mut fv = [[0f32; NR]; MR];
+                let full_end = (t.r_n / NR).min(t.cb_end);
+                let mut c0 = t.cb_start;
+                let zf = _mm256_setzero_ps();
+                // SAFETY: caller validated all buffer bounds, disjoint task ranges, and `should_pack_1x1_multi(t)`.
+                unsafe {
+                    while c0 < full_end {
+                        let c1 = (c0 + cb_pack).min(full_end);
+                        let count = c1 - c0;
+                        pack_multi_chunks_24(
+                            t.parts,
+                            total_ks,
+                            t.pointwise_hw,
+                            c0 * NR,
+                            count,
+                            packed.as_mut_ptr(),
+                        );
+                        for g in t.ob_start..t.ob_end {
+                            let bias: [f32; MR] = t.bias[4 * g..4 * g + 4].try_into().unwrap();
+                            let (inv, z01_arr, z23_arr) = if OUT_U8 {
+                                let (inv, zero) = &t.group_out[g];
+                                let (z01, z23) = zero_pairs(zero);
+                                (*inv, z01, z23)
+                            } else {
+                                ([0.0; MR], [0i16; 16], [0i16; 16])
+                            };
+                            let (rs, rz) = if HAS_RES { t.group_res[g] } else { ([0.0; MR], [0; MR]) };
+                            let res_plane =
+                                if HAS_RES { t.res_img_ptr.add(g * ohw) } else { std::ptr::null() };
+                            let q_plane =
+                                if OUT_U8 { t.q_img_ptr.add(g * ohw) } else { std::ptr::null_mut() };
+                            let f_base =
+                                if !OUT_U8 { t.f_img_ptr.add(4 * g * ohw) } else { std::ptr::null_mut() };
+                            for i in 0..count {
+                                let col = (c0 + i) * NR;
+                                let chunk_b = packed.as_ptr().add(i * total_ks * NR);
+                                let mut p_off = 0usize;
+                                for (pi, part) in t.parts.iter().enumerate() {
+                                    k_loop_packed::<3>(
+                                        part.ks,
+                                        part.a.as_ptr().add(g * part.ks * MR),
+                                        chunk_b.add(p_off * NR),
+                                        &mut acc,
+                                    );
+                                    p_off += part.ks;
+                                    for r in 0..MR {
+                                        let vc = _mm256_set1_epi32(part.corr[4 * g + r]);
+                                        let vs = _mm256_set1_ps(part.scale[4 * g + r]);
+                                        for k in 0..3 {
+                                            let a_v = _mm256_load_si256(
+                                                acc.0[r].as_ptr().add(8 * k) as *const __m256i,
+                                            );
+                                            let cur = if pi == 0 {
+                                                zf
+                                            } else {
+                                                _mm256_load_ps(tile_f32.0[r].as_ptr().add(8 * k))
+                                            };
+                                            let next = _mm256_fmadd_ps(
+                                                _mm256_cvtepi32_ps(_mm256_sub_epi32(a_v, vc)),
+                                                vs,
+                                                cur,
+                                            );
+                                            _mm256_store_ps(tile_f32.0[r].as_mut_ptr().add(8 * k), next);
+                                        }
+                                    }
+                                }
+                                let res_ptr = if HAS_RES { res_plane.add(col) } else { std::ptr::null() };
+                                apply_epi_f32_aligned::<SILU, HAS_RES, OUT_U8, 3>(
+                                    &tile_f32,
+                                    &bias,
+                                    res_ptr,
+                                    &rs,
+                                    &rz,
+                                    &inv,
+                                    &z01_arr,
+                                    &z23_arr,
+                                    if OUT_U8 { q_plane.add(col) } else { std::ptr::null_mut() },
+                                    if !OUT_U8 { f_base.add(col) } else { std::ptr::null_mut() },
+                                    ohw,
+                                );
+                            }
+                        }
+                        c0 = c1;
+                    }
+                    for chunk in full_end.max(t.cb_start)..t.cb_end {
+                        let col = chunk * NR;
+                        let cols = NR.min(t.r_n - col);
+                        if cols <= 8 {
+                            run_packed_multi_tail::<SILU, HAS_RES, OUT_U8, 1>(
+                                t,
+                                col,
+                                cols,
+                                &mut packed,
+                                &mut acc,
+                                &mut tile_f32,
+                                &mut qw,
+                                &mut fv,
+                            );
+                        } else if cols <= 16 {
+                            run_packed_multi_tail::<SILU, HAS_RES, OUT_U8, 2>(
+                                t,
+                                col,
+                                cols,
+                                &mut packed,
+                                &mut acc,
+                                &mut tile_f32,
+                                &mut qw,
+                                &mut fv,
+                            );
+                        } else {
+                            run_packed_multi_tail::<SILU, HAS_RES, OUT_U8, 3>(
+                                t,
+                                col,
+                                cols,
+                                &mut packed,
+                                &mut acc,
+                                &mut tile_f32,
+                                &mut qw,
+                                &mut fv,
+                            );
+                        }
+                    }
+                }
+            }
+
+            #[target_feature(enable = $feat)]
+            #[inline]
+            #[allow(clippy::too_many_arguments)]
+            unsafe fn run_packed_multi_tail<
+                const SILU: bool,
+                const HAS_RES: bool,
+                const OUT_U8: bool,
+                const VECS: usize,
+            >(
+                t: &MultiPartTask<'_>,
+                col: usize,
+                cols: usize,
+                packed: &mut PackedB,
+                acc: &mut AlignedTile,
+                tile_f32: &mut AlignedTileF32,
+                qw: &mut [u32; NR],
+                fv: &mut [[f32; NR]; MR],
+            ) {
+                let ohw = t.oh * t.ow;
+                let direct = cols == VECS * 8;
+                let mut resw: [u32; NR];
+                let zf = _mm256_setzero_ps();
+                // SAFETY: caller validated all buffer bounds and ISA.
+                unsafe {
+                    pack_multi_tail_vecs::<VECS>(t.parts, t.pointwise_hw, col, packed.as_mut_ptr());
+                    for g in t.ob_start..t.ob_end {
+                        let bias: [f32; MR] = t.bias[4 * g..4 * g + 4].try_into().unwrap();
+                        let (inv, z01_arr, z23_arr) = if OUT_U8 {
+                            let (inv, zero) = &t.group_out[g];
+                            let (z01, z23) = zero_pairs(zero);
+                            (*inv, z01, z23)
+                        } else {
+                            ([0.0; MR], [0i16; 16], [0i16; 16])
+                        };
+                        let (rs, rz) = if HAS_RES { t.group_res[g] } else { ([0.0; MR], [0; MR]) };
+                        let res_plane = if HAS_RES { t.res_img_ptr.add(g * ohw) } else { std::ptr::null() };
+                        let q_plane = if OUT_U8 { t.q_img_ptr.add(g * ohw) } else { std::ptr::null_mut() };
+                        let f_base = if !OUT_U8 { t.f_img_ptr.add(4 * g * ohw) } else { std::ptr::null_mut() };
+                        let mut p_off = 0usize;
+                        for (pi, part) in t.parts.iter().enumerate() {
+                            k_loop_packed::<VECS>(
+                                part.ks,
+                                part.a.as_ptr().add(g * part.ks * MR),
+                                packed.as_ptr().add(p_off * NR),
+                                acc,
+                            );
+                            p_off += part.ks;
+                            for r in 0..MR {
+                                let vc = _mm256_set1_epi32(part.corr[4 * g + r]);
+                                let vs = _mm256_set1_ps(part.scale[4 * g + r]);
+                                for k in 0..VECS {
+                                    let a_v = _mm256_load_si256(
+                                        acc.0[r].as_ptr().add(8 * k) as *const __m256i,
+                                    );
+                                    let cur = if pi == 0 {
+                                        zf
+                                    } else {
+                                        _mm256_load_ps(tile_f32.0[r].as_ptr().add(8 * k))
+                                    };
+                                    let next = _mm256_fmadd_ps(
+                                        _mm256_cvtepi32_ps(_mm256_sub_epi32(a_v, vc)),
+                                        vs,
+                                        cur,
+                                    );
+                                    _mm256_store_ps(tile_f32.0[r].as_mut_ptr().add(8 * k), next);
+                                }
+                            }
+                        }
+                        let res_ptr = if HAS_RES {
+                            if direct {
+                                res_plane.add(col)
+                            } else {
+                                resw = [0u32; NR];
+                                std::ptr::copy_nonoverlapping(res_plane.add(col), resw.as_mut_ptr(), cols);
+                                resw.as_ptr()
+                            }
+                        } else {
+                            std::ptr::null()
+                        };
+                        let q_dst = if OUT_U8 {
+                            if direct { q_plane.add(col) } else { qw.as_mut_ptr() }
+                        } else {
+                            std::ptr::null_mut()
+                        };
+                        let (f_dst, f_stride) = if !OUT_U8 {
+                            if direct {
+                                (f_base.add(col), ohw)
+                            } else {
+                                (fv.as_mut_ptr() as *mut f32, NR)
+                            }
+                        } else {
+                            (std::ptr::null_mut(), 0)
+                        };
+                        apply_epi_f32_aligned::<SILU, HAS_RES, OUT_U8, VECS>(
+                            tile_f32, &bias, res_ptr, &rs, &rz, &inv, &z01_arr, &z23_arr, q_dst, f_dst,
+                            f_stride,
                         );
                         if OUT_U8 {
                             if !direct {

@@ -19,13 +19,13 @@ use crate::{DType, UnaryOp};
 pub(crate) const SITES_BINDING: &str = "@group(0) @binding(5) var<storage, read> SITE_LIST: array<u32>;\n";
 
 /// A `SITES` kernel's live columns: image `b1`'s count, at most `N`.
+///
+/// Both the regular and tensor-core generators skip workgroups with `n0 >= live` by setting `nt = 0u` (skipping
+/// the K loop and its `workgroupBarrier()`s) and guarding the epilogue with `if (n0 < live)`, rather than
+/// returning early before `workgroupBarrier()`: DX12 WARP (`d3d10warp.dll`) hits `STATUS_ACCESS_VIOLATION` on a
+/// buffer-dependent early `return` before `GroupMemoryBarrierWithGroupSync()`, and naga rejects cooperative-matrix
+/// operations after one.
 pub(crate) const SITES_LIVE: &str = "  let soff = b1 * (N + 1u); let live = min(SITE_LIST[soff], N);\n";
-
-/// Retires a workgroup of the regular generator whose columns all lie past the live ones (`b1` and `n0` derive
-/// from the workgroup id and uniforms, and `SITE_LIST` is read-only, so the branch is workgroup-uniform). The
-/// tensor-core generator runs no `K` tile there instead: naga rejects cooperative-matrix operations after a
-/// `return` that depends on a buffer.
-pub(crate) const SITES_RETIRE: &str = "  if (n0 >= live) { return; }\n";
 
 /// The forward conv's per-column setup for column `n0 + inner`: `cjok` (a live column), the output pixel
 /// `(coh, cow)` (the listed one with `sites`) and its window's top-left input pixel `(cih0, ciw0)`.

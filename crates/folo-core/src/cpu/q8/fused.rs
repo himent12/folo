@@ -20,7 +20,7 @@ pub(super) use super::fused_epi::{
     SinglePartTask, active_isa, apply_epi_aligned_fstride, apply_epi_f32_aligned, read_u8_noncontiguous,
     write_f32_noncontiguous, write_u8_noncontiguous, zero_pairs,
 };
-use super::fused_pack::{avx2_pack, avx512vnni_pack, should_pack_1x1, vnni_pack};
+use super::fused_pack::{avx2_pack, avx512vnni_pack, should_pack_1x1, should_pack_1x1_multi, vnni_pack};
 use super::kernel::{MR, NR};
 
 /// Generates one ISA-specific 256-bit fused suite (K-loop helpers + single-part + multi-part + stem row).
@@ -500,6 +500,10 @@ macro_rules! define_fused_isa {
             unsafe fn run_multi_spec<const SILU: bool, const HAS_RES: bool, const OUT_U8: bool>(
                 t: &MultiPartTask<'_>,
             ) {
+                if should_pack_1x1_multi(t) {
+                    // SAFETY: ISA and buffer bounds forwarded from caller; `should_pack_1x1_multi(t)` holds.
+                    return unsafe { $pack_mod::run_packed_1x1_multi_spec::<SILU, HAS_RES, OUT_U8>(t) };
+                }
                 let ohw = t.oh * t.ow;
                 let total_ks: usize = t.parts.iter().map(|p| p.ks).sum();
                 let cb_tile = (24 * 1024 / (total_ks.max(1) * NR * 4)).clamp(1, 16);
@@ -535,12 +539,14 @@ macro_rules! define_fused_isa {
                                 macro_rules! multi_vecs {
                                     ($vecs:literal) => {{
                                         let zf = _mm256_setzero_ps();
-                                        for r in 0..MR {
-                                            for k in 0..$vecs {
-                                                _mm256_store_ps(tile_f32.0[r].as_mut_ptr().add(8 * k), zf);
+                                        if t.parts.is_empty() {
+                                            for r in 0..MR {
+                                                for k in 0..$vecs {
+                                                    _mm256_store_ps(tile_f32.0[r].as_mut_ptr().add(8 * k), zf);
+                                                }
                                             }
                                         }
-                                        for part in t.parts {
+                                        for (pi, part) in t.parts.iter().enumerate() {
                                             if t.pointwise_hw > 0 {
                                                 k_loop_1x1::<$vecs>(
                                                     part.ks,
@@ -566,7 +572,11 @@ macro_rules! define_fused_isa {
                                                     let a_v = _mm256_load_si256(
                                                         acc.0[r].as_ptr().add(8 * k) as *const __m256i,
                                                     );
-                                                    let cur = _mm256_load_ps(tile_f32.0[r].as_ptr().add(8 * k));
+                                                    let cur = if pi == 0 {
+                                                        zf
+                                                    } else {
+                                                        _mm256_load_ps(tile_f32.0[r].as_ptr().add(8 * k))
+                                                    };
                                                     let next = _mm256_fmadd_ps(
                                                         _mm256_cvtepi32_ps(_mm256_sub_epi32(a_v, vc)),
                                                         vs,
