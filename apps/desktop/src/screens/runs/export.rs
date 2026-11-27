@@ -30,12 +30,29 @@ pub enum CheckpointCliMode {
 pub struct CheckpointCliBundle {
     pub val: String,
     pub predict: String,
-    /// Non-empty when the checkpoint path is unknown and a `<path to ...>` placeholder is used.
+    /// Display label when the checkpoint path is unknown and `<model>` is used in the command.
     pub model_placeholder: Option<String>,
-    /// Non-empty when the dataset path is unknown and a `<path to ...>` placeholder is used.
+    /// Display label when the dataset path is unknown and `<dataset>` is used in `folo val`.
     pub data_placeholder: Option<String>,
-    /// Extra shell-quoting note when a real path contains shell-unsafe characters.
-    pub quote_note: Option<String>,
+    /// Shell-quoting note when `model.path` contains shell-unsafe characters.
+    pub model_quote_note: Option<String>,
+    /// Shell-quoting note when `dataset.path` contains shell-unsafe characters (Val mode only).
+    pub data_quote_note: Option<String>,
+}
+
+impl CheckpointCliBundle {
+    /// Returns the shell-quoting note applicable to `mode` (`Predict` never surfaces `<dataset>` notes).
+    pub fn quote_note(&self, mode: CheckpointCliMode) -> Option<String> {
+        match mode {
+            CheckpointCliMode::Predict => self.model_quote_note.clone(),
+            CheckpointCliMode::Val => match (&self.model_quote_note, &self.data_quote_note) {
+                (Some(m), Some(d)) => Some(format!("{m} {d}")),
+                (Some(m), None) => Some(m.clone()),
+                (None, Some(d)) => Some(d.clone()),
+                (None, None) => None,
+            },
+        }
+    }
 }
 
 /// One row of the latest epoch's per-class AP export, sorted best AP50-95 first.
@@ -82,6 +99,21 @@ pub fn build_latest_per_class(epochs: &[Epoch], classes: &[String]) -> Vec<RunPe
         .collect();
     rows.sort_by(|a, b| b.map50_95.total_cmp(&a.map50_95).then(a.class.cmp(&b.class)));
     rows
+}
+
+/// Neutralizes leading characters that spreadsheet apps can interpret as formulas (`=`, `+`, `-`,
+/// `@`, `\t`, `\r`, or whitespace followed by a formula trigger) before CSV serialization.
+fn push_csv_safe_text(out: &mut String, field: &str) {
+    let needs_prefix = field.starts_with(['=', '+', '-', '@', '\t', '\r'])
+        || field.trim_start().starts_with(['=', '+', '-', '@']);
+    if needs_prefix {
+        let mut safe = String::with_capacity(field.len() + 1);
+        safe.push('\'');
+        safe.push_str(field);
+        push_csv_field(out, &safe);
+    } else {
+        push_csv_field(out, field);
+    }
 }
 
 fn push_csv_field(out: &mut String, field: &str) {
@@ -138,7 +170,7 @@ pub fn build_run_per_class_csv(epochs: &[Epoch], classes: &[String]) -> String {
     for r in build_latest_per_class(epochs, classes) {
         out.push_str(&r.class.to_string());
         out.push(',');
-        push_csv_field(&mut out, &r.name);
+        push_csv_safe_text(&mut out, &r.name);
         out.push_str(&format!(
             ",{},{},{},{},{}\n",
             fmt_csv_f32(r.map50_95),
@@ -296,7 +328,8 @@ pub fn build_checkpoint_cli(
     eval_split: &str,
 ) -> Option<CheckpointCliBundle> {
     let _mid = r.model_id.as_deref()?;
-    let mut notes: Vec<String> = Vec::new();
+    let mut model_quote_note: Option<String> = None;
+    let mut data_quote_note: Option<String> = None;
     let mut model_placeholder: Option<String> = None;
 
     let model_arg = if let Some(path) = model.and_then(|m| m.path.as_deref()).filter(|p| !p.trim().is_empty())
@@ -304,7 +337,8 @@ pub fn build_checkpoint_cli(
         match folo_api::json::quote_path(path) {
             Some(q) => q,
             None => {
-                notes.push(format!("Replace <model> with this path, quoted for your shell: {path}"));
+                model_quote_note =
+                    Some(format!("Replace <model> with this path, quoted for your shell: {path}"));
                 "<model>".to_string()
             }
         }
@@ -318,9 +352,9 @@ pub fn build_checkpoint_cli(
             .map(|m| m.name.as_str())
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| if r.name.trim().is_empty() { r.id.as_str() } else { r.name.as_str() });
-        let ph = format!("{fallback}.folo");
-        model_placeholder = Some(ph.clone());
-        format!("<path to {ph}>")
+        model_placeholder = Some(format!("{fallback}.folo"));
+        // Keep clipboard commands free of unescaped display names; show the label only in hints.
+        "<model>".to_string()
     };
 
     let mut data_placeholder: Option<String> = None;
@@ -328,7 +362,8 @@ pub fn build_checkpoint_cli(
         match folo_api::json::quote_path(path) {
             Some(q) => q,
             None => {
-                notes.push(format!("Replace <dataset> with this path, quoted for your shell: {path}"));
+                data_quote_note =
+                    Some(format!("Replace <dataset> with this path, quoted for your shell: {path}"));
                 "<dataset>".to_string()
             }
         }
@@ -340,7 +375,7 @@ pub fn build_checkpoint_cli(
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(r.config.dataset_id.as_str());
         data_placeholder = Some(ds_label.to_string());
-        format!("<path to {ds_label}>")
+        "<dataset>".to_string()
     };
 
     let mut val_parts = vec![
@@ -361,7 +396,8 @@ pub fn build_checkpoint_cli(
         predict: predict_parts.join(" "),
         model_placeholder,
         data_placeholder,
-        quote_note: (!notes.is_empty()).then(|| notes.join(" ")),
+        model_quote_note,
+        data_quote_note,
     })
 }
 
@@ -518,12 +554,13 @@ impl FoloApp {
             );
             return;
         };
+        let quote_note = bundle.quote_note(mode);
         let (cmd, title) = match mode {
             CheckpointCliMode::Val => (bundle.val, "Copied val CLI command"),
             CheckpointCliMode::Predict => (bundle.predict, "Copied predict CLI command"),
         };
         cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(cmd));
-        let body = bundle.quote_note.or_else(|| {
+        let body = quote_note.or_else(|| {
             Some(match mode {
                 CheckpointCliMode::Val => "Run in a terminal to evaluate this checkpoint.".into(),
                 CheckpointCliMode::Predict => "Replace <images> with an image file or folder path.".into(),
@@ -651,18 +688,19 @@ impl FoloApp {
         };
         let mut placeholders = Vec::new();
         if let Some(m) = &bundle.model_placeholder {
-            placeholders.push(format!("<path to {m}>"));
+            placeholders.push(format!("<model> (path to {m})"));
         }
         if mode == CheckpointCliMode::Val
             && let Some(d) = &bundle.data_placeholder
         {
-            placeholders.push(format!("<path to {d}>"));
+            placeholders.push(format!("<dataset> (path to {d})"));
         }
         if mode == CheckpointCliMode::Predict {
             placeholders.push("<images>".to_string());
         }
         let hint = (!placeholders.is_empty())
             .then(|| format!("Replace {} with local paths.", placeholders.join(" and ")));
+        let quote_note = bundle.quote_note(mode);
 
         Some(
             panel(&t)
@@ -694,7 +732,7 @@ impl FoloApp {
                         .when_some(hint, |d, h| {
                             d.child(text(ty::XS, t.text_tertiary).whitespace_normal().child(h))
                         })
-                        .when_some(bundle.quote_note.clone(), |d, n| {
+                        .when_some(quote_note, |d, n| {
                             d.child(text(ty::XS, t.warning_text).whitespace_normal().child(n))
                         })
                         .child(div().flex().justify_end().child(copy_btn)),
@@ -736,6 +774,29 @@ mod tests {
         assert_eq!(v["epochs"].as_array().unwrap().len(), metrics.epochs.len());
         assert!(!v["latest_per_class"].as_array().unwrap().is_empty());
         assert_eq!(v["config"]["epochs"], run.config.epochs);
+
+        // Formula-like class labels are neutralized in CSV while preserved verbatim in JSON.
+        let formula_classes = vec![
+            "=HYPERLINK(\"http://example.com\")".into(),
+            "+1+2".into(),
+            " -3".into(),
+            "@SUM(A1:A2)".into(),
+        ];
+        let safe_csv = build_run_per_class_csv(&metrics.epochs, &formula_classes);
+        assert!(safe_csv.contains("\"'=HYPERLINK(\"\"http://example.com\"\")\""), "{safe_csv}");
+        assert!(safe_csv.contains(",'+1+2,"), "{safe_csv}");
+        assert!(safe_csv.contains(",' -3,"), "{safe_csv}");
+        let raw_json: serde_json::Value = serde_json::from_str(
+            &build_run_metrics_json(&run, &metrics.epochs, &formula_classes, Some(&ds.name)).unwrap(),
+        )
+        .unwrap();
+        let names: Vec<&str> = raw_json["latest_per_class"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["name"].as_str())
+            .collect();
+        assert!(names.contains(&"=HYPERLINK(\"http://example.com\")"), "{names:?}");
     }
 
     #[test]
@@ -751,16 +812,46 @@ mod tests {
         let bundle = build_checkpoint_cli(&run, Some(&model), Some(&ds), "val").unwrap();
         assert_eq!(bundle.val, "folo val --model \"D:/my models/best.folo\" --data \"D:/my data/shapes\"");
         assert_eq!(bundle.predict, "folo predict --model \"D:/my models/best.folo\" <images>");
-        assert!(bundle.quote_note.is_none());
+        assert!(bundle.quote_note(CheckpointCliMode::Val).is_none());
+        assert!(bundle.quote_note(CheckpointCliMode::Predict).is_none());
 
         let train_split = build_checkpoint_cli(&run, Some(&model), Some(&ds), "train").unwrap();
         assert!(train_split.val.ends_with(" --split train"), "{}", train_split.val);
 
-        // Shell-unsafe `$` path falls back to placeholder + warning note.
+        // Dataset-only shell-unsafe `$` path warns in Val mode but never leaks into Predict mode.
+        ds.path = "D:/bad$ds/shapes".into();
+        let ds_unsafe = build_checkpoint_cli(&run, Some(&model), Some(&ds), "val").unwrap();
+        assert!(ds_unsafe.val.contains("--data <dataset>"));
+        assert!(
+            ds_unsafe.quote_note(CheckpointCliMode::Val).as_deref().is_some_and(|n| n.contains("bad$ds"))
+        );
+        assert!(ds_unsafe.quote_note(CheckpointCliMode::Predict).is_none());
+
+        // Shell-unsafe `$` model path falls back to `<model>` and warns in both modes.
         model.path = Some("D:/bad$dir/best.folo".into());
         let unsafe_b = build_checkpoint_cli(&run, Some(&model), Some(&ds), "val").unwrap();
         assert!(unsafe_b.val.contains("--model <model>"));
-        assert!(unsafe_b.quote_note.as_deref().is_some_and(|n| n.contains("D:/bad$dir/best.folo")));
+        assert!(unsafe_b.predict.contains("--model <model>"));
+        assert!(
+            unsafe_b.quote_note(CheckpointCliMode::Val).as_deref().is_some_and(|n| n.contains("bad$dir"))
+        );
+        assert!(
+            unsafe_b.quote_note(CheckpointCliMode::Predict).as_deref().is_some_and(|n| n.contains("bad$dir"))
+        );
+
+        // Missing paths with shell metacharacters in display names never interpolate into commands.
+        model.path = None;
+        model.source = None;
+        model.name = "run $(whoami); `id`".into();
+        ds.path = String::new();
+        if let Some(snap) = run.dataset.as_mut() {
+            snap.name = "ds $(rm -rf /)".into();
+        }
+        let missing = build_checkpoint_cli(&run, Some(&model), Some(&ds), "val").unwrap();
+        assert_eq!(missing.val, "folo val --model <model> --data <dataset>");
+        assert_eq!(missing.predict, "folo predict --model <model> <images>");
+        assert!(missing.model_placeholder.as_deref().is_some_and(|s| s.contains("whoami")));
+        assert!(missing.data_placeholder.as_deref().is_some_and(|s| s.contains("rm -rf")));
 
         // Run without a saved checkpoint returns None.
         run.model_id = None;

@@ -103,6 +103,7 @@ impl FoloApp {
             // lowered-confidence rerun cannot mask a later refetch.
             self.play_compare.fetched_floor_b =
                 self.play_compare.pred_b_meta.as_ref().map_or(PLAY_CONF_FLOOR, |m| m.floor);
+            self.play_compare.class_filter = crate::screens::playground::CompareClassFilter::All;
         }
         cx.notify();
     }
@@ -163,6 +164,15 @@ impl FoloApp {
         std::mem::swap(&mut self.play_compare.pred_a_meta, &mut self.play_compare.pred_b_meta);
         std::mem::swap(&mut self.play_pred_dim, &mut self.play_compare.pred_b_dim);
         std::mem::swap(&mut self.play_fetched_floor, &mut self.play_compare.fetched_floor_b);
+        self.play_compare.class_filter = match self.play_compare.class_filter {
+            crate::screens::playground::CompareClassFilter::OnlyA => {
+                crate::screens::playground::CompareClassFilter::OnlyB
+            }
+            crate::screens::playground::CompareClassFilter::OnlyB => {
+                crate::screens::playground::CompareClassFilter::OnlyA
+            }
+            other => other,
+        };
         self.clear_play_hover();
         self.play_compare.clear_hover();
         self.play_class = None;

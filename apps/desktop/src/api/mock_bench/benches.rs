@@ -33,10 +33,13 @@ impl MockBench {
         models: &[Model],
     ) -> ApiResult<Bench> {
         let name = req.name.trim();
-        if name.is_empty() || name.len() > 100 {
-            return Err(ApiError::new("invalid_body", "Benchmark name must be 1 to 100 characters."));
+        if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
+            return Err(ApiError::new(
+                "invalid_body",
+                "Benchmark name must be 1 to 100 printable characters.",
+            ));
         }
-        if req.description.len() > 4000 {
+        if req.description.chars().count() > 4000 {
             return Err(ApiError::new("invalid_body", "Description must be at most 4,000 characters."));
         }
         let max_images = req.max_images.unwrap_or(500);
@@ -99,10 +102,13 @@ impl MockBench {
         models: &[Model],
     ) -> ApiResult<Bench> {
         let name = req.name.trim();
-        if name.is_empty() || name.len() > 100 {
-            return Err(ApiError::new("invalid_body", "Benchmark name must be 1 to 100 characters."));
+        if name.is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control) {
+            return Err(ApiError::new(
+                "invalid_body",
+                "Benchmark name must be 1 to 100 printable characters.",
+            ));
         }
-        if req.description.len() > 4000 {
+        if req.description.chars().count() > 4000 {
             return Err(ApiError::new("invalid_body", "Description must be at most 4,000 characters."));
         }
         let spec = folo_bench::GeneratedSourceSpec {
@@ -153,7 +159,7 @@ impl MockBench {
             let id = format!("bn_{:012x}", hash(&format!("bn-gen-{}-{name}", d.seq)) & 0xFFFF_FFFF_FFFF);
             let class_boxes = count_class_boxes(&imgs, classes.len());
             let total_boxes = class_boxes.iter().sum();
-            let fp = fingerprint_of(spec.seed, &classes, imgs.len(), &plan);
+            let fp = fingerprint_of_source(spec.seed, &classes, imgs.len(), Some(&source_name), &plan);
             let bench = Bench {
                 id,
                 name: name.to_string(),
@@ -229,8 +235,19 @@ impl MockBench {
                 b.bench.description = desc.trim().to_string();
             }
             if let Some(checked) = plan {
-                b.bench.fingerprint =
-                    fingerprint_of(b.bench.seed, &b.bench.classes, b.images.len(), &checked);
+                let source_tag = matches!(
+                    &b.bench.source,
+                    BenchSource::Dataset { dataset_id, split: None }
+                        if dataset_id == GENERATED_BENCH_SOURCE_ID
+                )
+                .then_some(b.bench.source_name.as_str());
+                b.bench.fingerprint = fingerprint_of_source(
+                    b.bench.seed,
+                    &b.bench.classes,
+                    b.images.len(),
+                    source_tag,
+                    &checked,
+                );
                 b.bench.plan = checked;
             }
             Ok(snapshot_bench(b))
@@ -281,7 +298,21 @@ pub(super) fn plan_passes(plan: &BenchPlan) -> usize {
 }
 
 pub(super) fn fingerprint_of(seed: u64, classes: &[String], images: usize, plan: &BenchPlan) -> String {
+    fingerprint_of_source(seed, classes, images, None, plan)
+}
+
+fn fingerprint_of_source(
+    seed: u64,
+    classes: &[String],
+    images: usize,
+    source_tag: Option<&str>,
+    plan: &BenchPlan,
+) -> String {
     let mut h1 = hash(&format!("v{}:{seed}:{images}:{}", folo_bench::ENGINE_VERSION, classes.join(",")));
+    if let Some(tag) = source_tag {
+        h1 ^= hash(&format!("src:{tag}"));
+        h1 = h1.rotate_left(7).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
     for c in &plan.conditions {
         h1 ^= hash(&format!("{}:{:?}:{:.3}", c.condition, c.severities, c.weight));
         h1 = h1.rotate_left(13).wrapping_mul(0x9E37_79B9_7F4A_7C15);

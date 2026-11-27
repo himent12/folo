@@ -888,4 +888,74 @@ mod tests {
             assert!(this.toasts.iter().any(|t| t.title == "Exported A/B compare JSON"));
         });
     }
+
+    #[test]
+    fn playground_compare_delta_ignores_stale_side_during_rerun_interval() {
+        use crate::app::Route;
+        use crate::app::tests::{drive, open};
+        use crate::store::Load;
+
+        let (mut app, window) = open();
+        drive(&mut app, window, |this, w, cx| {
+            this.navigate(Route::Playground, w, cx);
+            this.set_play_compare(true, cx);
+        });
+        for _ in 0..4 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        drive(&mut app, window, |this, _, cx| {
+            let ds = this.play_sample_dataset().expect("sample dataset");
+            this.play_dataset_image(&ds, "img_00801", cx);
+        });
+        for _ in 0..4 {
+            app.frame(window.into());
+            app.run_until_idle();
+        }
+        // Simulate an in-flight setting change (device switch): Model A already answered fresh for
+        // the new target while Model B still holds an older Load::Ready prediction from the old target.
+        drive(&mut app, window, |this, _, cx| {
+            let mid_a = this.play_model.clone().unwrap();
+            let mid_b = this.play_compare.model_b.clone().unwrap();
+            let img_gen =
+                this.play_compare.pred_a_meta.as_ref().expect("loaded image populates pred_a_meta").image_gen;
+            let iou_bits = this.play_iou.to_bits();
+            let floor = this.play_conf.min(crate::app::PLAY_CONF_FLOOR);
+            this.play_pred_pending = false;
+            this.play_compare.pred_b_pending = false;
+            this.play_pred = Load::Ready(fake_pred(&mid_a, 9.0, vec![fake_box(0, "circle", 0.91)]));
+            this.play_compare.pred_a_meta = Some(PlayPredMeta {
+                image_gen: img_gen,
+                model_id: mid_a,
+                iou_bits,
+                target: this.play_target,
+                floor,
+            });
+            // Model B still has a Ready prediction, but from a different device target (stale!).
+            let stale_target = Some(crate::local::Target::Cpu);
+            assert_ne!(stale_target, this.play_target);
+            this.play_compare.pred_b =
+                Load::Ready(fake_pred(&mid_b, 12.0, vec![fake_box(1, "square", 0.88)]));
+            this.play_compare.pred_b_meta = Some(PlayPredMeta {
+                image_gen: img_gen,
+                model_id: mid_b,
+                iou_bits,
+                target: stale_target,
+                floor,
+            });
+            this.focus.borrow_mut().clear();
+            cx.notify();
+        });
+        app.frame(window.into());
+
+        drive(&mut app, window, |this, _, _| {
+            assert!(this.pred_a_is_fresh());
+            assert!(!this.pred_b_is_fresh(), "stale Model B must not be treated as fresh");
+            let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+            assert!(
+                !keys.iter().any(|k| k == "play-cmp-cls-both"),
+                "Both/Only A/Only B filter chips must not mix fresh A with stale B: {keys:?}"
+            );
+        });
+    }
 }

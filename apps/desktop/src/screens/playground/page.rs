@@ -77,7 +77,12 @@ impl FoloApp {
         match built {
             Ok((json, _, summary)) => {
                 cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(json));
-                self.toast(Tone::Success, "Copied detection JSON", Some(summary.into()), cx);
+                let title = if self.play_compare.enabled {
+                    "Copied A/B compare JSON"
+                } else {
+                    "Copied detection JSON"
+                };
+                self.toast(Tone::Success, title, Some(summary.into()), cx);
             }
             Err(e) => {
                 self.toast(Tone::Danger, "JSON export failed", Some(e.to_string().into()), cx);

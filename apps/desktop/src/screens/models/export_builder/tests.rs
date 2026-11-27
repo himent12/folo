@@ -2,8 +2,8 @@
 //! including selective-`f32` INT8 quantization presets (`docs/CLI.md`).
 
 use super::command::{
-    CliExportFormat, FEATURE_EXPORT_DYNAMIC_AXES, ModelCliMode, ModelCliState, PredictPrecision,
-    QuantF32MacBudget, QuantF32Policy, QuantMethod, ServerExportSupport, build_model_cli,
+    CliExportFormat, FEATURE_EXPORT_DYNAMIC_AXES, ModelCliMode, ModelCliState, PredictInt8Target,
+    PredictPrecision, QuantF32MacBudget, QuantF32Policy, QuantMethod, ServerExportSupport, build_model_cli,
     check_server_export_support, derive_int8_model_path, derive_quant_output_path, is_int8_model_path,
 };
 use crate::api::{Backend, Head, Model, ModelExportOptions, ModelSource, mock::MockBackend};
@@ -350,4 +350,79 @@ fn model_detail_renders_selective_f32_quantize_controls() {
         assert!(keys.iter().any(|k| k == "model-cli-quant-f32-policy"));
         assert!(!keys.iter().any(|k| k == "model-cli-quant-f32-macs"));
     });
+
+    // Predict --precision int8 renders F32 MAC budget when Auto is selected and hides it on P5Tail.
+    drive(&mut app, window, |this, _, cx| {
+        this.model_cli.mode = ModelCliMode::Predict;
+        this.model_cli.predict_precision = PredictPrecision::Int8;
+        this.model_cli.quant_f32_policy = QuantF32Policy::Auto;
+        this.model_cli.quant_f32_macs = QuantF32MacBudget::Pct15;
+        this.focus.borrow_mut().clear();
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+        for expected in [
+            "model-cli-predict-quant-method",
+            "model-cli-predict-quant-f32-policy",
+            "model-cli-predict-quant-f32-macs",
+        ] {
+            assert!(keys.iter().any(|k| k == expected), "missing {expected} in {keys:?}");
+        }
+    });
+    drive(&mut app, window, |this, _, cx| {
+        this.model_cli.quant_f32_policy = QuantF32Policy::None;
+        this.focus.borrow_mut().clear();
+        cx.notify();
+    });
+    app.frame(window.into());
+    drive(&mut app, window, |this, _, _| {
+        let keys: Vec<String> = this.focus.borrow().keys().map(|k| k.to_string()).collect();
+        assert!(keys.iter().any(|k| k == "model-cli-predict-quant-f32-policy"));
+        assert!(!keys.iter().any(|k| k == "model-cli-predict-quant-f32-macs"));
+    });
+}
+
+#[test]
+fn predict_int8_recalibration_targets_current_or_quantized_output_explicitly() {
+    let mut m = sample_model();
+    m.path = Some("D:/models/best-int8-mse-p5-tail.folo".into());
+    let mut st = ModelCliState {
+        mode: ModelCliMode::Export,
+        export_format: CliExportFormat::Int8Quantize,
+        quant_method: QuantMethod::Mse,
+        quant_f32_policy: QuantF32Policy::None,
+        quant_f32_macs: QuantF32MacBudget::Pct5,
+        predict_precision: PredictPrecision::Int8,
+        predict_int8_target: PredictInt8Target::Current,
+        ..Default::default()
+    };
+    let q = build_model_cli(&m, Some("D:/data/shapes"), &st);
+    assert!(q.command.ends_with("--output D:/models/best-int8-mse-full.folo"), "{}", q.command);
+
+    // Current checkpoint preserves the already-calibrated file.
+    st.mode = ModelCliMode::Predict;
+    let p_cur = build_model_cli(&m, None, &st);
+    assert_eq!(
+        p_cur.command,
+        "folo predict --model D:/models/best-int8-mse-p5-tail.folo <images> --precision int8"
+    );
+
+    // QuantizedOutput matches the recalibrated `--output` file verbatim.
+    st.predict_int8_target = PredictInt8Target::QuantizedOutput;
+    let p_out = build_model_cli(&m, None, &st);
+    assert_eq!(
+        p_out.command,
+        "folo predict --model D:/models/best-int8-mse-full.folo <images> --precision int8"
+    );
+
+    // Auto + 10% MAC budget in Predict int8 stays in lockstep with quantize --output.
+    st.quant_f32_policy = QuantF32Policy::Auto;
+    st.quant_f32_macs = QuantF32MacBudget::Pct10;
+    let p_macs = build_model_cli(&m, None, &st);
+    assert_eq!(
+        p_macs.command,
+        "folo predict --model D:/models/best-int8-mse-f32-10.folo <images> --precision int8"
+    );
 }

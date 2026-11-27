@@ -119,7 +119,11 @@ impl FoloApp {
         {
             return true;
         }
-        if self.bench.new_bench.as_ref().is_some_and(|f| check(&f.name))
+        if self
+            .bench
+            .new_bench
+            .as_ref()
+            .is_some_and(|f| [&f.name, &f.gen_images, &f.gen_classes, &f.gen_seed].into_iter().any(check))
             || self.bench.design.as_ref().is_some_and(|f| check(&f.note))
             || self.bench.external.as_ref().is_some_and(|f| check(&f.name) || check(&f.file_path))
         {

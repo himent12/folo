@@ -121,7 +121,7 @@ impl FoloApp {
 
         let name_text = name_input.read(cx).text().to_string();
         let name_bad = name_text.trim().is_empty() || name_text.trim().chars().count() > 100;
-        let name = text_field(self, name_input, 260., false, cx);
+        let name = text_field(self, name_input, 260., name_bad, cx);
 
         let kind_idx = usize::from(source_kind == BenchSourceKind::Generated);
         let kind_ctl = generated_on.then(|| {

@@ -393,10 +393,15 @@ impl FoloApp {
         });
         let vis_b: Option<Vec<crate::api::ScoredBox>> =
             pred_b.as_ref().map(|p| self.filter_detections_b(&p.boxes).into_iter().cloned().collect());
-        let refs_a: Option<Vec<&crate::api::ScoredBox>> = vis_a.as_ref().map(|v| v.iter().collect());
-        let refs_b: Option<Vec<&crate::api::ScoredBox>> = vis_b.as_ref().map(|v| v.iter().collect());
-        let summary =
-            summarize_comparison(refs_a.as_deref(), refs_b.as_deref(), pred_a.as_ref(), pred_b.as_ref());
+        // Delta & class-diff summary uses only fresh predictions matching the active image, model,
+        // device, IoU, and confidence floor so an in-flight rerun never mixes old + new results.
+        let fresh_a = self.pred_a_is_fresh().then_some(pred_a.as_ref()).flatten();
+        let fresh_b = self.pred_b_is_fresh().then_some(pred_b.as_ref()).flatten();
+        let refs_a: Option<Vec<&crate::api::ScoredBox>> =
+            fresh_a.and(vis_a.as_ref()).map(|v| v.iter().collect());
+        let refs_b: Option<Vec<&crate::api::ScoredBox>> =
+            fresh_b.and(vis_b.as_ref()).map(|v| v.iter().collect());
+        let summary = summarize_comparison(refs_a.as_deref(), refs_b.as_deref(), fresh_a, fresh_b);
 
         let tab_idx = match self.play_compare.side_tab {
             CompareSideTab::Summary => 0,
