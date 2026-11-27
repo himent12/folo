@@ -20,13 +20,24 @@ fn invalid_merge(message: impl Into<String>) -> CliError {
         .hint("see `folo describe dataset merge --json` for the accepted flags and ranges")
 }
 
+fn normalize_key(name: &str, mode: folo_data::ClassNormalize) -> String {
+    match mode {
+        folo_data::ClassNormalize::Exact => name.to_string(),
+        folo_data::ClassNormalize::CaseAndWhitespace => {
+            name.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+        }
+    }
+}
+
 /// Parses `--remap SRC=DST` and `--drop-class NAME` flags into `MergeConfig::class_map`, rejecting malformed
-/// pairs and conflicting mappings upfront.
+/// pairs and conflicting mappings (including conflicts under `normalize`) upfront.
 fn parse_class_map(
     remap: &[String],
     drop_class: &[String],
+    normalize: folo_data::ClassNormalize,
 ) -> Result<HashMap<String, Option<String>>, CliError> {
     let mut map: HashMap<String, Option<String>> = HashMap::new();
+    let mut seen: HashMap<String, Option<String>> = HashMap::new();
     for spec in remap {
         let Some((src, dst)) = spec.split_once('=') else {
             return Err(invalid_merge(format!(
@@ -38,21 +49,26 @@ fn parse_class_map(
                 "--remap `{spec}` must have non-empty SOURCE and TARGET class names"
             )));
         }
-        if let Some(prev) = map.insert(src.to_string(), Some(dst.to_string()))
-            && prev.as_deref() != Some(dst)
+        let norm_src = normalize_key(src, normalize);
+        let norm_dst = Some(normalize_key(dst, normalize));
+        if let Some(prev) = seen.insert(norm_src, norm_dst.clone())
+            && prev != norm_dst
         {
             return Err(invalid_merge(format!("--remap specifies conflicting targets for class `{src}`")));
         }
+        map.insert(src.to_string(), Some(dst.to_string()));
     }
     for name in drop_class {
         if name.trim().is_empty() {
             return Err(invalid_merge("--drop-class name must not be empty"));
         }
-        if let Some(Some(dst)) = map.insert(name.clone(), None) {
+        let norm_src = normalize_key(name, normalize);
+        if let Some(Some(dst)) = seen.insert(norm_src, None) {
             return Err(invalid_merge(format!(
                 "class `{name}` cannot be both remapped to `{dst}` and dropped with --drop-class"
             )));
         }
+        map.insert(name.clone(), None);
     }
     Ok(map)
 }
@@ -90,9 +106,10 @@ fn build_merge_config(args: &MergeArgs) -> Result<MergeConfig, CliError> {
             MergeSplitPolicy::Stratified(split_config(val, test, args.seed)?)
         }
     };
-    let class_map = parse_class_map(&args.remap, &args.drop_class)?;
+    let normalize: folo_data::ClassNormalize = args.normalize.into();
+    let class_map = parse_class_map(&args.remap, &args.drop_class, normalize)?;
     Ok(MergeConfig {
-        normalize: args.normalize.into(),
+        normalize,
         class_map,
         drop_unmapped: args.drop_unmapped,
         drop_empty_images: args.drop_empty_images,

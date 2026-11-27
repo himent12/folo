@@ -95,6 +95,16 @@ fn load_v2_for_onnx(path: &Path) -> Result<LoadedV2, CliError> {
         Some("true") => true,
         Some(v) => return Err(bad(format!("folo.fused must be \"true\" or \"false\", got `{v}`"))),
     };
+    if let Some(kind) = meta.get("folo.kind").map(String::as_str)
+        && !matches!(kind, "weights" | "checkpoint")
+    {
+        return Err(bad(format!("folo.kind must be \"weights\" or \"checkpoint\", got `{kind}`")));
+    }
+    if let Some(dt) = meta.get("folo.dtype").map(String::as_str)
+        && !matches!(dt, "F32" | "F16")
+    {
+        return Err(bad(format!("folo.dtype must be \"F32\" or \"F16\", got `{dt}`")));
+    }
 
     let has_ema =
         container.tensors.iter().any(|t| t.name.starts_with("ema.") && !t.name.starts_with("ema.__"));
@@ -176,13 +186,16 @@ fn load_v2_for_onnx(path: &Path) -> Result<LoadedV2, CliError> {
         model.fuse().map_err(|e| nn_error("export", e))?;
     }
 
-    // Carry non-checkpoint metadata (including class names for `export_v2_with_axes`).
+    // Carry non-checkpoint metadata normalized as exported weights (matching v1 `Metadata::for_weights()`).
     let mut out_meta = BTreeMap::new();
     for (k, v) in meta {
         if !CHECKPOINT_KEYS.contains(&k.as_str()) {
             out_meta.insert(k.clone(), v.clone());
         }
     }
+    out_meta.insert("folo.kind".into(), "weights".into());
+    out_meta.insert("folo.fused".into(), "true".into());
+    out_meta.insert("folo.version".into(), folo_cli::VERSION.into());
     let names_obj: serde_json::Map<String, serde_json::Value> =
         classes.iter().enumerate().map(|(i, c)| (i.to_string(), c.clone().into())).collect();
     out_meta.insert("names".into(), serde_json::Value::Object(names_obj).to_string());

@@ -116,9 +116,27 @@ fn dataset_merge_unifies_classes_remaps_resolves_collisions_and_splits() {
     assert_eq!(code, 0, "{stderr}: {chk}");
     assert_eq!(chk["clean"], true);
 
-    // Upfront validation: `--val` without `--splits stratified` fails with exit 2 (`invalid_config`).
+    // Upfront validation: `--val` without `--splits stratified` and normalized remap conflicts fail with
+    // exit 2 (`invalid_config`) before opening any input dataset.
     let (code, err, _) =
         folo_one(&["dataset", "merge", s(&ds_a), "--out", s(&dir.join("bad_out")), "--val", "0.2", "--json"]);
+    assert_eq!(code, 2);
+    assert_eq!(err["error"]["code"], "invalid_config");
+
+    let (code, err, _) = folo_one(&[
+        "dataset",
+        "merge",
+        "nonexistent_ds",
+        "--out",
+        s(&dir.join("bad_out")),
+        "--normalize",
+        "case-and-whitespace",
+        "--remap",
+        "car=auto",
+        "--remap",
+        "Car=truck",
+        "--json",
+    ]);
     assert_eq!(code, 2);
     assert_eq!(err["error"]["code"], "invalid_config");
 }

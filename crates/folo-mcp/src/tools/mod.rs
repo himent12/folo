@@ -136,7 +136,7 @@ static TOOL_TABLE: [ToolDef; 43] = [
     },
     ToolDef {
         name: "audit_dataset",
-        description: "Audits a dataset on disk for exact SHA-256 duplicates, 64-bit dHash perceptual \
+        description: "Audits a dataset on disk for exact 128-bit content-hash duplicates, 64-bit dHash perceptual \
                       near-duplicates, and cross-split train/val/test leakage.",
         mutating: false,
         input: terse_input::<AuditDatasetArgs>,

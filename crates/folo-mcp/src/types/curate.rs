@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use folo_api::{Dataset, DatasetFormat, Split, ValReport};
+use folo_api::{DatasetFormat, Split, Splits, ValReport};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -171,11 +171,17 @@ pub struct MergeDatasetsArgs {
     pub source_prefixes: Option<Vec<String>>,
 }
 
-/// `merge_datasets` result.
+/// `merge_datasets` result (bounded summary; call `get_dataset` for full statistics).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct MergeDatasetsResult {
-    #[serde(flatten)]
-    pub dataset: Dataset,
+    pub dataset_id: String,
+    pub name: String,
+    pub path: String,
+    pub format: DatasetFormat,
+    pub num_classes: usize,
+    pub classes: Vec<String>,
+    pub splits: Splits,
+    pub boxes: usize,
     pub renamed_collisions: usize,
 }
 
@@ -243,11 +249,16 @@ pub struct FilterDatasetArgs {
     pub drop_empty_images: bool,
 }
 
-/// `filter_dataset` result.
+/// `filter_dataset` result (bounded summary; call `get_dataset` for full statistics).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct FilterDatasetResult {
-    #[serde(flatten)]
-    pub dataset: Dataset,
+    pub dataset_id: String,
+    pub name: String,
+    pub path: String,
+    pub format: DatasetFormat,
+    pub num_classes: usize,
+    pub classes: Vec<String>,
+    pub splits: Splits,
     pub source_images: usize,
     pub source_boxes: usize,
     pub kept_images: usize,

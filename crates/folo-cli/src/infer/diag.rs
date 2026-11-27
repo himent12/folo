@@ -38,6 +38,11 @@ pub(super) fn check_diag_args(args: &ValArgs) -> Result<Option<DiagSettings>, Cl
     };
     let enabled = args.diagnostics || args.worst.is_some();
     if !enabled {
+        if args.diag_conf.is_some() || args.diag_tp_iou.is_some() || args.diag_bg_iou.is_some() {
+            return Err(invalid(
+                "--diag-conf, --diag-tp-iou and --diag-bg-iou require --diagnostics or --worst".into(),
+            ));
+        }
         return Ok(None);
     }
     let worst = args.worst.unwrap_or(DEFAULT_WORST);

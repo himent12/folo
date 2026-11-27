@@ -403,9 +403,6 @@ pub fn for_arg(cmd_path: &str, arg_id: &str) -> Option<NumericBounds> {
 pub const ARG_REQUIRES: &[(&str, &str, &[&str])] = &[
     ("folo serve", "tls_cert", &["tls_key"]),
     ("folo serve", "tls_key", &["tls_cert"]),
-    ("folo val", "diag_conf", &["diagnostics"]),
-    ("folo val", "diag_tp_iou", &["diagnostics"]),
-    ("folo val", "diag_bg_iou", &["diagnostics"]),
     ("folo predict", "tile_overlap", &["tile"]),
     ("folo predict", "no_tile_full_image", &["tile"]),
     ("folo predict", "tile_batch", &["tile"]),

@@ -245,14 +245,14 @@ pub struct ValArgs {
     /// Number of worst failing images to report [>= 1] (implies `--diagnostics`; default 10 with `--diagnostics`).
     #[arg(long, value_name = "N")]
     pub worst: Option<usize>,
-    /// With --diagnostics: minimum prediction confidence score included in error diagnosis [0..=1] [default: 0.25].
-    #[arg(long, value_name = "SCORE", requires = "diagnostics")]
+    /// With --diagnostics / --worst: minimum prediction confidence score included in error diagnosis [0..=1] [default: 0.25].
+    #[arg(long, value_name = "SCORE")]
     pub diag_conf: Option<f32>,
-    /// With --diagnostics: IoU threshold for true-positive matching in error diagnosis [0..=1] [default: 0.5].
-    #[arg(long, value_name = "IOU", requires = "diagnostics")]
+    /// With --diagnostics / --worst: IoU threshold for true-positive matching in error diagnosis [0..=1] [default: 0.5].
+    #[arg(long, value_name = "IOU")]
     pub diag_tp_iou: Option<f32>,
-    /// With --diagnostics: background IoU threshold in error diagnosis [0..=1] (`<= --diag-tp-iou`) [default: 0.1].
-    #[arg(long, value_name = "IOU", requires = "diagnostics")]
+    /// With --diagnostics / --worst: background IoU threshold in error diagnosis [0..=1] (`<= --diag-tp-iou`) [default: 0.1].
+    #[arg(long, value_name = "IOU")]
     pub diag_bg_iou: Option<f32>,
 }
 

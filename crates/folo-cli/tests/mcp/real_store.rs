@@ -507,7 +507,7 @@ fn s12_val_diagnostics_dynamic_export_and_dataset_curate() {
     );
     assert_eq!(merged["classes"], json!(["circle", "square", "triangle"]));
     assert!(merged["renamed_collisions"].as_u64().unwrap() > 0, "{merged}");
-    let merged_id = merged["id"].as_str().unwrap().to_string();
+    let merged_id = merged["dataset_id"].as_str().unwrap().to_string();
 
     // 4. `filter_dataset` keeping only `circle` and converting to COCO.
     let filtered = checked(
@@ -523,6 +523,7 @@ fn s12_val_diagnostics_dynamic_export_and_dataset_curate() {
         }),
     );
     assert_eq!(filtered["classes"], json!(["circle"]));
+    assert!(filtered["dataset_id"].as_str().is_some(), "{filtered}");
     assert!(filtered["kept_boxes"].as_u64().unwrap() > 0, "{filtered}");
 
     // 5. `audit_dataset` detects perceptual dHash cross-split leakage on recompressed copy.
@@ -558,6 +559,21 @@ fn s12_val_diagnostics_dynamic_export_and_dataset_curate() {
     assert_eq!(audit["exact_leakage_groups"], 0, "{audit}");
     assert!(audit["near_leakage_groups"].as_u64().unwrap() >= 1, "{audit}");
     assert_eq!(audit["has_split_leakage"], true, "{audit}");
+
+    // 6. Embedded `--mock` refuses `merge_datasets` and `filter_dataset` with `not_supported` without writing files.
+    let mock_home = dir.join("mock_home");
+    let mut mock_c = spawn(&["--data-dir", mock_home.to_str().unwrap(), "--mock"], None);
+    init_old(&mut mock_c);
+    let mock_reg =
+        mock_c.ok("register_dataset", json!({ "name": "mock_disk", "path": leak_dir.to_str().unwrap() }));
+    let mock_id = mock_reg["id"].as_str().unwrap().to_string();
+    mock_c.tool_error(
+        "filter_dataset",
+        json!({ "dataset_id": mock_id, "name": "should_not_write" }),
+        "not_supported",
+    );
+    assert!(!mock_home.join("datasets").exists(), "mock mode must not write datasets to disk");
+    mock_c.finish();
 
     c.finish();
 }

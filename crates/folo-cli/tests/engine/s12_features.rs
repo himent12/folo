@@ -110,6 +110,7 @@ fn val_diagnostics_emits_error_breakdown_and_worst_images() {
     let tiny = tiny_run();
     let best = tiny.run.join("weights/best.folo");
 
+    // `--worst` implies `--diagnostics`, so `--worst 2 --diag-conf 0.05` works without `--diagnostics`.
     let (code, lines, stderr) = folo(&[
         "val",
         "--json",
@@ -119,7 +120,6 @@ fn val_diagnostics_emits_error_breakdown_and_worst_images() {
         s(&tiny.data),
         "--split",
         "val",
-        "--diagnostics",
         "--worst",
         "2",
         "--diag-conf",
@@ -251,7 +251,8 @@ fn export_independent_dynamic_axes_and_folo2_v2_onnx() {
     meta.insert("folo.config".into(), serde_json::to_string(&v2_cfg).unwrap());
     meta.insert("folo.classes".into(), serde_json::to_string(&["circle", "square"]).unwrap());
     meta.insert("folo.imgsz".into(), "64".into());
-    meta.insert("folo.dtype".into(), "f32".into());
+    meta.insert("folo.kind".into(), "checkpoint".into());
+    meta.insert("folo.dtype".into(), "F32".into());
     meta.insert("folo.fused".into(), "false".into());
     let named: Vec<(String, folo_core::Tensor)> =
         v2_model.named_tensors().into_iter().map(|nt| (nt.name, nt.tensor)).collect();

@@ -122,9 +122,16 @@ pub(super) async fn export_model(
             "dynamic_batch and dynamic_hw only apply to format `onnx`",
         ));
     }
+    if spec.onnx.dynamic && (body.dynamic_batch == Some(false) || body.dynamic_hw == Some(false)) {
+        return Err(Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+            "`dynamic: true` cannot be combined with `dynamic_batch: false` or `dynamic_hw: false`",
+        ));
+    }
     let axes = DynamicAxes {
-        batch: body.dynamic_batch.unwrap_or(spec.onnx.dynamic),
-        hw: body.dynamic_hw.unwrap_or(spec.onnx.dynamic),
+        batch: spec.onnx.dynamic || body.dynamic_batch.unwrap_or(false),
+        hw: spec.onnx.dynamic || body.dynamic_hw.unwrap_or(false),
     };
     Ok(Json(blocking(&st, move |s| s.export_model_with_axes(&id, spec, axes)).await?).into_response())
 }

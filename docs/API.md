@@ -94,8 +94,8 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
   (`path` on `GET /api/label/jobs/{id}/images`; older servers ignore it), `uploads` (`/api/uploads`),
   `run_cursors` (`after_step` / `after_epoch` on `/metrics`, `after` and `total` on `/logs`, `Range` on `/weights`),
   `run_checkpoint` (`checkpoint` on `POST /api/runs`; these three are what a cloud worker needs, docs/CLOUD.md),
-  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below). `folo mcp --server` refuses the
-  export switches without `export_onnx_switches`.) In real mode `gpus` comes from folo-gpu
+  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below), `predict_options` (optional `tile` / `tta` fields on `POST /api/predict`), `val_diagnostics` (optional `diagnostics` / `worst` / `diag_*` fields on `POST /api/val`), and `export_dynamic_axes` (optional independent `dynamic_batch` / `dynamic_hw` fields on `POST /api/models/{id}/export`). `folo mcp --server` refuses the
+  export switches without `export_onnx_switches` (and split dynamic axes without `export_dynamic_axes`, validation diagnostics without `val_diagnostics`, and `tile`/`tta` without `predict_options`).) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. `memory_bytes` is the adapter's largest device-local
   memory heap on Vulkan (an RTX 4080 SUPER reports 15.7 GiB), and `0` through DX12 or Metal, where wgpu cannot say; wgpu
@@ -370,8 +370,10 @@ CLI's exit code; a test keeps the sources in line with it). Messages that wrap a
   training epoch's in the last digits (more if the dataset changed since). The mock follows the same rules: its
   `/eval` per-class numbers are within 0.01 of the epoch's, with the same `best_f1_conf`.
 - `POST /api/models/{id}/export` body `{ "format": "folo-f16|onnx", "decode"?: false, "dynamic"?: false,
-  "half"?: false }` → `{ "path", "bytes" }`. The three switches are `folo export`'s `--decode`, `--dynamic` and
-  `--half` and only apply to `onnx` (with `folo-f16` any of them is `400 invalid_body`). Real mode writes
+  "dynamic_batch"?: false, "dynamic_hw"?: false, "half"?: false }` → `{ "path", "bytes" }`. The switches are
+  `folo export`'s `--decode`, `--dynamic`, `--dynamic-batch`, `--dynamic-hw` and `--half` and only apply to `onnx`
+  (with `folo-f16` any of them is `400 invalid_body`; combining `dynamic: true` with `dynamic_batch: false` or
+  `dynamic_hw: false` is `400 invalid_body`; independent axes require `export_dynamic_axes` in `features`). Real mode writes
   the fused EMA weights to `<data dir>/exports/`: `folo-f16` as f16 `.folo` (as `folo export` does, docs/FORMAT.md)
   to `<model name>-f16.folo`; `onnx` as an ONNX graph (opset 17) to `<model name>.onnx`, with the defaults of
   `folo export --format onnx` (docs/CLI.md, ONNX export): f32, a fixed batch of 1, the model's training imgsz
@@ -1594,10 +1596,14 @@ mostly shown) for the others.
   and cached in memory thereafter), so the same content is not sent twice.
 
 ## Validation
-- `POST /api/val` body `{ "model_id", "dataset_id", "split": "val", "imgsz": null, "conf": 0.001, "iou": 0.7 }` →
-  `{ "model_id", "dataset_id", "dataset_name", "split", "imgsz", "images", "val": Epoch.val, "timing": { "total_s", "per_image_ms" } }`.
+- `POST /api/val` body `{ "model_id", "dataset_id", "split": "val", "imgsz": null, "conf": 0.001, "iou": 0.7,
+  "diagnostics"?: false, "worst"?: 10, "diag_conf"?: 0.25, "diag_tp_iou"?: 0.50, "diag_bg_iou"?: 0.10 }` →
+  `{ "model_id", "dataset_id", "dataset_name", "split", "imgsz", "images", "val": Epoch.val, "timing": { "total_s", "per_image_ms" }, "diagnostics"?: ValDiagnostics }`.
   `split` is the requested one (no fallback); `dataset_name` is the dataset's name (`null`, or missing, from older
-  servers).
+  servers). Passing `diagnostics: true` or `worst` (`1..=50`, implies `diagnostics: true`; requires `val_diagnostics`
+  in `features`) includes per-image detection error diagnostics (`conf`, `tp_iou`, `bg_iou`, `images_diagnosed`,
+  `failing_images`, `summary`, and `worst_images` ranked by total errors descending); passing `diag_*` without
+  `diagnostics: true` or `worst`, or `diag_bg_iou > diag_tp_iou`, is `400 invalid_body`.
   Only `model_id` and `dataset_id` are required; `imgsz: null` uses the model's size. Errors: `model_not_found`,
   `dataset_not_found`, `invalid_body` (`conf` / `iou` outside `0..=1`, an `imgsz` that is not a multiple of 32
   in `32..=4096`), `invalid_dataset` (an empty split, as `folo val` reports it; real mode: the dataset's classes
