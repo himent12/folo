@@ -4,12 +4,15 @@
 import { flush as flushSync, signal } from 'fw';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '../../../framework/testing';
+import { ARCH_HYDRATE_DEADLINE_MS } from '$lib/api/archHydrate';
 import { HttpApi } from '$lib/api/client';
+import { hub } from '$lib/api/index';
 import { MockApi } from '$lib/api/mock';
 import type { Resource } from '$lib/api/resource';
-import type { Arch, Model, Run, ThroughputTable, TrainConfig } from '$lib/api/types';
+import type { Arch, Dataset, Model, Run, SystemInfo, ThroughputTable, TrainConfig } from '$lib/api/types';
 import { archFamily, archFromCli, archNameSuffix, archWithFamily, FOLO2_FEATURE, isArch, isFolo2Arch, smallerArchInFamily, V2_ARCHES } from '$lib/arch';
 import { oomFixes } from '$lib/oom';
+import { parse, router } from '$lib/router';
 import { trainCommand } from '$lib/trainCli';
 import type { CloudPick } from './cloudPick';
 import { isDraft } from './draft';
@@ -17,6 +20,7 @@ import { arches, archesForFamily, estimate } from './estimate';
 import { formErrors, type FormErrors } from './jump';
 import ModelSection from './ModelSection';
 import { DEFAULT_AUGMENT, parseInitialQuery } from './newPrefill';
+import { runNewState } from './state';
 
 const cleanErrors = (): FormErrors => ({
   name: null,
@@ -436,14 +440,255 @@ describe('MockApi & HttpApi folo2 contracts', () => {
     await api.models();
     expect(urls.filter((u) => u.includes('/models/m_cold') || u.includes('/cli')).length).toBe(probesAfterFirst);
 
-    // Older server without folo2_arch makes ZERO probe requests on list calls.
+    // Older server without folo2_arch learned from health() makes ZERO probe requests even before system() runs.
     urls.length = 0;
     const oldApi = new HttpApi('http://127.0.0.1:7895');
-    await oldApi.system();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL) => {
+        const url = String(input);
+        urls.push(url);
+        if (url.endsWith('/api/health')) {
+          return new Response(JSON.stringify({ status: 'ok', version: '0.1.0', api: 'v1', mock: false, features: [] }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+        if (url.endsWith('/api/runs')) {
+          return new Response(JSON.stringify({ runs: [wireRun] }), { status: 200, headers: { 'content-type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({ models: [wireModel] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }),
+    );
+    await oldApi.health();
     const oldRuns = await oldApi.runs();
     const oldModels = await oldApi.models();
     expect(oldRuns[0]!.config.arch).toBe('folo-n');
     expect(oldModels[0]!.arch).toBe('folo-n');
     expect(urls.filter((u) => u.includes('/models/m_cold') || u.includes('/cli'))).toEqual([]);
+  });
+
+  it('HttpApi hydration handles concurrent CLI fallback, terminal 404/501 caching, abort isolation, and stalled probe deadlines', async () => {
+    const wireModel: Model = {
+      id: 'm_cli',
+      name: 'shapes-folo2-s-best',
+      arch: 'folo-s',
+      imgsz: 640,
+      classes: ['circle'],
+      params: 9_850_000,
+      flops_g: 22.4,
+      bytes: 20_000_000,
+      created: '2026-11-27T00:00:00Z',
+      run_id: 'run_cli',
+      metrics: null,
+    };
+    const wireRun: Run = {
+      id: 'run_cli',
+      name: 'shapes-folo2-s',
+      status: 'completed',
+      config: {
+        name: 'shapes-folo2-s',
+        dataset_id: 'ds_shapes',
+        arch: 'folo-s',
+        epochs: 1,
+        batch: 4,
+        imgsz: 640,
+        device: 'cpu',
+        optimizer: 'auto',
+        lr0: 0.01,
+        seed: 0,
+        weights: null,
+        augment: DEFAULT_AUGMENT,
+      },
+      device: 'cpu',
+      epoch: 1,
+      epochs: 1,
+      step: 1,
+      steps_per_epoch: 1,
+      eta_s: 0,
+      model_id: null,
+      created: '2026-11-27T00:00:00Z',
+      started: '2026-11-27T00:00:01Z',
+      finished: '2026-11-27T00:00:02Z',
+      error: null,
+      best: null,
+    };
+
+    // 1. Concurrent models() joins pending CLI fallback & caller A aborting does NOT poison caller B.
+    let resolveCli!: () => void;
+    const cliReady = new Promise<void>((r) => (resolveCli = r));
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL) => {
+        const url = String(input);
+        if (url.endsWith('/api/models')) return new Response(JSON.stringify({ models: [wireModel] }), { status: 200 });
+        if (url.endsWith('/api/models/m_cli')) return new Response(JSON.stringify(wireModel), { status: 200 }); // no x-folo-arch header
+        if (url.endsWith('/api/runs/run_cli/cli')) {
+          await cliReady;
+          return new Response(JSON.stringify({ argv: ['folo', 'train', '--model', 'folo2-s'], cli: 'folo train --model folo2-s' }), { status: 200 });
+        }
+        return new Response(JSON.stringify(wireRun), { status: 200 });
+      }),
+    );
+    const api = new HttpApi('http://127.0.0.1:7895');
+    const ctrlA = new AbortController();
+    const pA = api.models(ctrlA.signal);
+    const pB = api.models();
+    await new Promise((r) => setTimeout(r, 5));
+    ctrlA.abort();
+    await expect(pA).rejects.toMatchObject({ name: 'AbortError' });
+    resolveCli();
+    expect((await pB)[0]!.arch).toBe('folo2-s');
+
+    // 2. Terminal 501 / 404 probe errors mark checked so subsequent 2 s polls do not re-probe.
+    const probeUrls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: string | URL) => {
+        const url = String(input);
+        probeUrls.push(url);
+        if (url.endsWith('/api/runs')) return new Response(JSON.stringify({ runs: [wireRun] }), { status: 200 });
+        return new Response(JSON.stringify({ error: { code: 'not_implemented', message: 'no cli' } }), { status: 501 });
+      }),
+    );
+    const api501 = new HttpApi('http://127.0.0.1:7895');
+    await api501.runs();
+    await api501.runs();
+    expect(probeUrls.filter((u) => u.endsWith('/cli'))).toHaveLength(1);
+
+    // 3. Stalled hydration probe releases primary runs() response at ARCH_HYDRATE_DEADLINE_MS.
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL) => {
+          const url = String(input);
+          if (url.endsWith('/api/runs')) return new Response(JSON.stringify({ runs: [wireRun] }), { status: 200 });
+          return new Promise<Response>(() => {});
+        }),
+      );
+      const apiStall = new HttpApi('http://127.0.0.1:7895');
+      const runsPromise = apiStall.runs();
+      await vi.advanceTimersByTimeAsync(ARCH_HYDRATE_DEADLINE_MS + 20);
+      expect((await runsPromise)[0]!.id).toBe('run_cli');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('runNewState pickWeights canonical resolution & race guards', () => {
+  it('avoids v1 arch/error flash while resolving a wire folo-n v2 checkpoint and honors newer explicit arch changes', async () => {
+    const prevApi = hub.api;
+    const prevMode = hub.mode;
+    const wireV2: Model = {
+      id: 'm_v2_pick',
+      name: 'shapes-folo2-n-best',
+      arch: 'folo-n',
+      imgsz: 640,
+      classes: ['circle'],
+      params: 3_000_000,
+      flops_g: 8,
+      bytes: 6_000_000,
+      created: '2026-11-27T00:00:00Z',
+      run_id: null,
+      metrics: null,
+    };
+    const wireV1: Model = {
+      id: 'm_v1_pick',
+      name: 'shapes-v1-n-best',
+      arch: 'folo-n',
+      imgsz: 640,
+      classes: ['circle'],
+      params: 2_800_000,
+      flops_g: 7,
+      bytes: 5_500_000,
+      created: '2026-11-27T00:00:00Z',
+      run_id: null,
+      metrics: null,
+    };
+    const ds: Dataset = {
+      id: 'ds_shapes',
+      name: 'playtest-shapes',
+      path: '/tmp/shapes',
+      format: 'yolo',
+      classes: ['circle'],
+      splits: { train: 12, val: 4, test: 0 },
+      created: '2026-11-27T00:00:00Z',
+    };
+    const sys: SystemInfo = {
+      cpu: { name: 'test-cpu', threads: 8, util: 0 },
+      memory: { total_bytes: 16e9, used_bytes: 4e9 },
+      gpus: [],
+      features: [FOLO2_FEATURE],
+    };
+
+    let resolveV2!: (m: Model) => void;
+    let resolveV1!: (m: Model) => void;
+    const fakeRealApi = Object.assign(new MockApi('normal', 0), {
+      mock: false as const,
+      datasets: async () => [ds],
+      dataset: async () => ds,
+      runs: async () => [],
+      models: async () => [wireV2, wireV1],
+      system: async () => sys,
+      model: (id: string) =>
+        new Promise<Model>((r) => {
+          if (id === 'm_v2_pick') resolveV2 = r;
+          else resolveV1 = r;
+        }),
+    });
+
+    hub.api = fakeRealApi;
+    hub.mode = 'live';
+    router.route = parse('#/runs/new?arch=folo2-x');
+    const host = document.body.appendChild(document.createElement('div'));
+    let s!: ReturnType<typeof runNewState>;
+    function Harness() {
+      s = runNewState();
+      return <div />;
+    }
+    const view = render(() => <Harness />, host);
+    try {
+      await vi.waitFor(() => {
+        flushSync();
+        expect(s.otherChoices.get().length).toBeGreaterThan(0);
+      });
+      expect(s.arch.get()).toBe('folo2-x');
+
+      // 1. Pick wire `folo-n` checkpoint that is actually `folo2-n`: NO flash to `folo-n`, NO weights mismatch error!
+      s.weights.set('m_v2_pick');
+      s.pickWeights('m_v2_pick');
+      flushSync();
+      expect(s.arch.get()).toBe('folo2-x');
+      expect(s.errors.get().weights).toBeNull();
+      expect(s.valid.get()).toBe(false);
+
+      resolveV2({ ...wireV2, arch: 'folo2-n' });
+      await vi.waitFor(() => {
+        flushSync();
+        expect(s.arch.get()).toBe('folo2-n');
+      });
+      expect(s.weights.get()).toBe('m_v2_pick');
+      expect(s.errors.get().weights).toBeNull();
+
+      // 2. Pick unchecked wire `folo-n` checkpoint, then user changes arch to `folo2-m` BEFORE lookup finishes -> newer arch wins!
+      s.weights.set('m_v1_pick');
+      s.pickWeights('m_v1_pick');
+      flushSync();
+      s.arch.set('folo2-m');
+      flushSync();
+      expect(s.weights.get()).toBe('none');
+      resolveV1(wireV1);
+      await new Promise((r) => setTimeout(r, 10));
+      flushSync();
+      expect(s.arch.get()).toBe('folo2-m');
+      expect(s.weights.get()).toBe('none');
+    } finally {
+      view.unmount();
+      host.remove();
+      hub.api = prevApi;
+      hub.mode = prevMode;
+    }
   });
 });
